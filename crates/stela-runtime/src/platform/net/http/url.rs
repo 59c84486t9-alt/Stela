@@ -41,7 +41,7 @@ impl fmt::Display for UrlError {
 }
 impl core::error::Error for UrlError {}
 
-/// A validated HTTP destination. Request target and authority retain their raw
+/// A validated HTTP destination. Request target and permission keep their raw
 /// original octets; no parse-time normalization can change a signed request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Url<'a> {
@@ -97,7 +97,7 @@ impl<'a> Url<'a> {
                 .filter(|p| *p != 0)
                 .ok_or(UrlError::Port)
         })?;
-        // Upstream syntax has already established the exact scheme/authority
+        // Upstream syntax has already established the exact scheme/permission
         // boundaries. Keeping the suffix avoids re-encoding query octets.
         let prefix = uri.scheme_str().len() + 3 + authority.len();
         let target = &raw[prefix..];
@@ -127,7 +127,7 @@ impl<'a> Url<'a> {
 mod tests {
     use super::*;
     #[test]
-    fn signed_request_target_and_numeric_authority_remain_exact() {
+    fn signed_request_target_and_numeric_permission_remain_exact() {
         let raw = "https://CDN.example:8443/a/../b%2fc?key=%2B%20&sig=a%2fb%3D";
         let url = Url::parse(raw).unwrap();
         assert_eq!(url.as_str(), raw);

@@ -8,7 +8,7 @@ publish = false
 [[bin]]
 name = "stela"
 path = "src/main.rs"
-# Inline tests run through xtask's hosted modules; this freestanding entry
+# Its host-testable logic lives in `stela-boot-core`; this freestanding entry
 # supplies its own allocator and panic handler, not a libtest executable.
 test = false
 
@@ -27,7 +27,7 @@ test = false
 [features]
 default = []
 diagnostics = []
-native-profile = ["stela-runtime/native-profile", "stela-engine/native-profile"]
+native-profile = ["stela-soc/native-profile", "stela-engine/native-profile"]
 
 [dependencies]
 stela-soc-data = { path = "../stela-soc-data", default-features = false }
@@ -37,21 +37,13 @@ stela-crypto = { path = "../stela-crypto" }
 stela-tls = { path = "../stela-tls" }
 stela-formats = { path = "../stela-formats", default-features = false }
 uefi = { version = "0.41", default-features = false, features = ["alloc"] }
-stela-boot-core = { path = "../stela-boot-core" }
+stela-boot-core = { path = "../stela-boot-core", features = ["native-acpi"] }
 stela-drivers = { path = "../stela-drivers", features = ["linux-kernel", "native-acpi"] }
+stela-soc = { path = "../stela-soc", default-features = false }
 stela-runtime = { path = "../stela-runtime", default-features = false }
 stela-loader = { path = "../stela-loader", default-features = false }
 stela-compiler = { path = "../stela-compiler", default-features = false }
 serde_json = { version = "1", default-features = false, features = ["alloc"] }
-# The soft-float UEFI target cannot codegen the optional hardware intrinsics in the local
-# LLVM toolchain. Use the crate's real baseline SHA implementation.
-sha2 = { version = "0.10", default-features = false, features = ["force-soft"] }
-
-# LLVM cannot codegen the SHA-1 x86 intrinsics for the soft-float UEFI
-# target. Unify this existing transitive dependency on its real software
-# backend only for the boot target; hosted runtime keeps its normal selection.
-[target.'cfg(target_os = "uefi")'.dependencies]
-sha1 = { version = "0.10", default-features = false, features = ["force-soft"] }
 
 [profile.dev]
 panic = "abort"
@@ -68,7 +60,8 @@ debug = "line-tables-only"
 unsafe_op_in_unsafe_fn = "deny"
 
 [lints.clippy]
-all = "warn"
+all = { level = "warn", priority = -1 }
+undocumented_unsafe_blocks = "warn"
 
 [patch.crates-io]
 # Same dependency source as the root workspace; no second network stack.

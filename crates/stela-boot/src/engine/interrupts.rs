@@ -8,6 +8,9 @@
 use super::host;
 use crate::output;
 use core::arch::{asm, global_asm};
+mod saved_state;
+pub(crate) use saved_state::SavedState;
+pub(crate) type Handler = for<'image> extern "sysv64" fn(&mut Frame, &SavedState<'image>);
 
 pub const TIMER_VECTOR: u8 = 0x40;
 /// Native worker doorbell; host-device IRQs own 0x50..=0x5f.
@@ -19,37 +22,12 @@ const CODE_SELECTOR: u16 = 0x08;
 const DATA_SELECTOR: u16 = 0x10;
 const TSS_SELECTOR: u16 = 0x18;
 const IST_BYTES: usize = 64 * 1024;
-// Explicit space retained below the largest entry image for the baseline Rust
+// Explicit space kept below the largest entry image for the baseline Rust
 // handler. Runtime/disassembly stack-budget validation remains a required gate.
 const HANDLER_STACK_BYTES: usize = 32 * 1024;
 
-/// The registers an interrupt stub saves, then the CPU's frame.
-#[repr(C)]
-#[derive(Debug)]
-pub struct Frame {
-    pub r15: u64,
-    pub r14: u64,
-    pub r13: u64,
-    pub r12: u64,
-    pub r11: u64,
-    pub r10: u64,
-    pub r9: u64,
-    pub r8: u64,
-    pub rdi: u64,
-    pub rsi: u64,
-    pub rbp: u64,
-    pub rbx: u64,
-    pub rdx: u64,
-    pub rcx: u64,
-    pub rax: u64,
-    pub vector: u64,
-    pub error: u64,
-    pub rip: u64,
-    pub cs: u64,
-    pub rflags: u64,
-    pub rsp: u64,
-    pub ss: u64,
-}
+use stela_boot_core::interrupt_image::Backing;
+pub use stela_boot_core::interrupt_image::Frame;
 
 #[repr(C, packed)]
 struct TaskState {
@@ -62,8 +40,7 @@ struct TaskState {
     io_map: u16,
 }
 
-#[repr(C, align(64))]
-struct Stack([u8; IST_BYTES]);
+type Stack = Backing<IST_BYTES>;
 
 /// Private descriptors, interrupt stacks and GS-local record for one physical
 /// host processor. These addresses stay pinned even after its executor parks.
@@ -93,13 +70,17 @@ impl Tables {
             },
             gdt: [0, 0x00af_9a00_0000_ffff, 0x00cf_9200_0000_ffff, 0, 0],
             idt: [[0; 2]; 256],
-            fault_stack: Stack([0; IST_BYTES]),
-            fatal_stack: Stack([0; IST_BYTES]),
+            fault_stack: Stack::new(),
+            fatal_stack: Stack::new(),
         }
     }
 }
 
 impl Tables {
+    pub(crate) fn owns_local(&self, local: *const host::local::Local) -> bool {
+        core::ptr::eq(&self.local, local)
+    }
+
     pub(crate) fn matches(&self, observed: Observation) -> bool {
         observed.gdt == &raw const self.gdt as u64
             && observed.idt == &raw const self.idt as u64
@@ -119,7 +100,7 @@ struct Pointer {
 }
 
 // The real GPR/CPU Frame remains unchanged. Each entry image lives below it
-// on that actual retained IST; ordinary and terminal vectors use distinct
+// on that IST; ordinary and terminal vectors use distinct
 // allocations. Returning nested ordinary entries are explicitly refused.
 global_asm!(
     r#"
@@ -165,7 +146,7 @@ stela_xstate_slot:
     and rsp, -64
 
     // No Rust or FP/SIMD instruction precedes this save. The controls are
-    // those configuration qualified (`EntryAbi::extended`).
+    // those configuration checked (`EntryAbi::extended`).
     cmp qword ptr gs:[{extended}], 0
     jne stela_xstate_save_extended
     mov qword ptr [rsp + r11 + {format}], {fxsave}
@@ -194,7 +175,7 @@ stela_xstate_save_extended:
     test r9, 2
     jnz stela_xstate_header
     // XCR0.SSE does not gate legacy SSE execution. XSAVE(mask1) leaves
-    // XMM/MXCSR untouched in this compatible legacy area; retain them first.
+    // XMM/MXCSR untouched in this compatible legacy area; keep them first.
     fxsave64 [rsp]
     mov qword ptr [rsp + r11 + {format}], {xsave_legacy}
 stela_xstate_header:
@@ -216,6 +197,7 @@ stela_xstate_saved:
     fninit
     ldmxcsr [rip + stela_interrupt_mxcsr]
     mov rdi, rbx
+    mov rsi, rsp
     mov rax, [rbx + {vector}]
     cmp rax, 2
     je stela_xstate_terminal
@@ -223,7 +205,7 @@ stela_xstate_saved:
     je stela_xstate_terminal
     cmp rax, 18
     je stela_xstate_terminal
-    call qword ptr gs:[{handler}]
+    call {dispatch_handler}
 
     // The handler may not change the state contract underneath an
     // outstanding image. Refuse before partial restoration if XCR0 changed.
@@ -312,14 +294,14 @@ stela_interrupt_mxcsr:
     available = const host::local::XSTATE_AVAILABLE_OFFSET,
     extended = const host::local::XSTATE_EXTENDED_OFFSET,
     active = const host::local::XSTATE_ACTIVE_OFFSET,
-    handler = const host::local::HANDLER_OFFSET,
+    dispatch_handler = sym saved_state::dispatch,
     terminal_handler = sym terminal_interrupt,
 );
 
-// Separate terminal IST resources are retained for NMI/DF/MCE. They cannot
+// Separate terminal IST resources are held for NMI/DF/MCE. They cannot
 // return through an interrupted transition or overwrite a normal entry image.
-extern "sysv64" fn terminal_interrupt(frame: &Frame) -> ! {
-    fatal(frame)
+extern "sysv64" fn terminal_interrupt(frame: *mut Frame, image: *const u8) -> ! {
+    saved_state::terminal(frame, image)
 }
 
 // One stub per vector: push a zero error code when the CPU pushes none,
@@ -381,7 +363,7 @@ fn gate(handler: usize, ist: u8) -> [u64; 2] {
 ///
 /// # Safety
 /// Interrupts are disabled and nothing else uses the descriptor tables.
-pub unsafe fn install(handler: extern "sysv64" fn(&mut Frame)) {
+pub(crate) unsafe fn install(handler: Handler) {
     let tables = &raw mut BSP_TABLES;
     // SAFETY: only the BSP installs its permanent static tables, once.
     unsafe { install_on(&mut *tables, handler) };
@@ -393,21 +375,18 @@ pub unsafe fn install(handler: extern "sysv64" fn(&mut Frame)) {
 /// `tables` belongs exclusively to this processor and stays pinned and mapped
 /// for its whole lifetime, including its parked state. Interrupts are disabled;
 /// no native execution/handler can still refer to preceding tables or GS state.
-pub(crate) unsafe fn install_on(
-    tables: &'static mut Tables,
-    handler: extern "sysv64" fn(&mut Frame),
-) {
+pub(crate) unsafe fn install_on(tables: &'static mut Tables, handler: Handler) {
     if tables.xstate.is_some() {
         output::fatal("native xstate descriptor owner cannot be reinstalled");
     }
-    // SAFETY: install_on owns this actual CPU and permanently pinned Tables,
+    // SAFETY: install_on owns this CPU and permanently pinned Tables,
     // including both distinct IST arrays, before HostOwner or AP READY.
     let owner = unsafe { super::xstate::XstateOwner::capture() }.unwrap_or_else(|error| {
         output::arguments(format_args!("native xstate entry refused: {error:?}\n"));
         output::fatal("native IRQ state contract unavailable")
     });
     for stack in [&tables.fault_stack, &tables.fatal_stack] {
-        let bottom = &raw const stack.0 as usize;
+        let bottom = stack.as_mut_ptr().addr();
         let top = bottom + IST_BYTES;
         let frame = top - size_of::<Frame>();
         if owner
@@ -417,7 +396,7 @@ pub(crate) unsafe fn install_on(
             output::fatal("native IST cannot retain full xstate image and handler budget");
         }
     }
-    // SAFETY: the configured ABI is inseparable from this actual retained
+    // SAFETY: the configured ABI is inseparable from this kept
     // owner and the real private stacks. No controls or feature flags change.
     unsafe { host::local::configure_xstate(&mut tables.local, &owner) }
         .unwrap_or_else(|_| output::fatal("native xstate local configuration refused"));
@@ -425,8 +404,8 @@ pub(crate) unsafe fn install_on(
     // SAFETY: all data here is private to this physical processor.
     unsafe {
         let tss = &raw mut tables.tss;
-        (*tss).ist[0] = (&raw mut tables.fault_stack as u64) + IST_BYTES as u64;
-        (*tss).ist[1] = (&raw mut tables.fatal_stack as u64) + IST_BYTES as u64;
+        (*tss).ist[0] = (tables.fault_stack.as_mut_ptr() as u64) + IST_BYTES as u64;
+        (*tss).ist[1] = (tables.fatal_stack.as_mut_ptr() as u64) + IST_BYTES as u64;
         let base = tss as u64;
         let limit = (size_of::<TaskState>() - 1) as u64;
         let gdt = &raw mut tables.gdt;
@@ -460,7 +439,8 @@ pub(crate) unsafe fn install_on(
         );
         // Loading a GS selector above resets its base; establish the private
         // CPL0 record after GDT/segment setup, before making our IDT active.
-        host::local::activate(&mut tables.local, handler);
+        let retained_tables = tables as *const Tables;
+        host::local::activate(&mut tables.local, handler, retained_tables);
         let idt = &raw mut tables.idt;
         let table = &stela_vector_table;
         for (&vector, &handler) in VECTOR_NUMBERS.iter().zip(table) {
@@ -483,13 +463,13 @@ fn cr2() -> u64 {
     value
 }
 
-pub extern "sysv64" fn interrupt(frame: &mut Frame) {
+pub(crate) extern "sysv64" fn interrupt(frame: &mut Frame, saved: &SavedState<'_>) {
     if crate::native_irq::dispatch(frame.vector as u8) {
         return;
     }
     match frame.vector as u8 {
-        14 => host::page_fault(frame, cr2()),
-        13 | 6 => host::native_exception(frame),
+        14 => host::page_fault(frame, cr2(), saved),
+        13 | 6 => host::native_exception(frame, saved),
         TIMER_VECTOR => host::timer_interrupt(),
         NATIVE_WAKE_VECTOR => host::wake_interrupt(),
         SHOOTDOWN_VECTOR => host::shootdown_interrupt(),
@@ -499,7 +479,7 @@ pub extern "sysv64" fn interrupt(frame: &mut Frame) {
     }
 }
 
-/// Actual processor-local descriptor/control observations, for validating the
+/// Processor-local descriptor/control observations, for validating the
 /// owned AP startup path. These numbers do not grant a native frame lease.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Observation {

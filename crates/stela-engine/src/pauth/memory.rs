@@ -90,6 +90,7 @@ pub fn complete<A, E>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Result;
     use std::cell::Cell;
 
     fn load(base: u8, destination: u8, writeback: bool) -> Load {
@@ -229,7 +230,7 @@ mod tests {
     }
 
     #[test]
-    fn read_failure_preserves_destination_and_base_including_sp_and_xzr() {
+    fn read_failure_keeps_destination_and_base() {
         for base in [0, ZERO_REGISTER_INDEX] {
             for destination in [1, ZERO_REGISTER_INDEX] {
                 let mut state = GuestState::default();
@@ -342,8 +343,12 @@ mod tests {
                 instruction,
                 Controls::default(),
                 &mut state,
-                |_, _| -> Result<u64, ()> { panic!("invalid descriptor authenticated") },
-                |_| -> Result<u64, ()> { panic!("invalid descriptor read memory") },
+                |_, _| -> Result<u64, core::convert::Infallible> {
+                    panic!("invalid descriptor authenticated")
+                },
+                |_| -> Result<u64, core::convert::Infallible> {
+                    panic!("invalid descriptor read memory")
+                },
             );
             assert_eq!(result, Err(Fault::InvalidOperands));
             assert_eq!(state, initial);

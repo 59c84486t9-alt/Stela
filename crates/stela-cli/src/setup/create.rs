@@ -498,6 +498,7 @@ pub(super) fn plan(
             ssid,
             country: command.wifi_country.clone(),
         }),
+        addresses: super::addresses::Addresses::requested(command)?,
     };
     // The restore bundles are prepared above: the install plan adds the
     // install medium.
@@ -629,6 +630,9 @@ pub(super) fn describe(plan: &Plan) -> Result<String> {
     describe_install(record, &plan.install, &mut text)?;
     if let Some(network) = &record.wifi {
         writeln!(text, "  {}", wifi::describe(network, &record.esp))?;
+    }
+    for line in record.addresses.describe() {
+        writeln!(text, "  {line}")?;
     }
     match disk.is_chosen() {
         true => writeln!(

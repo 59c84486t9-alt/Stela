@@ -7,6 +7,7 @@
 //! four-level), leaves boot services, loads them, through the LA57
 //! trampoline when five-level, and calls the engine phase in the window. See
 //! `docs/design/system.md#host-placement`.
+use crate::Result;
 use crate::{
     console::Framebuffer,
     firmware,
@@ -23,6 +24,7 @@ use core::{
     ops::{Range, RangeInclusive},
 };
 use stela_boot_core::options::{DEFAULT_WIFI_KEY, System};
+use stela_contracts::refuse;
 use stela_engine::machine::mmu::placement::Placement;
 use stela_runtime::pc;
 use stela_runtime::pc::gpt::Guid;
@@ -102,15 +104,15 @@ pub fn take_snapshot() {
     }
 }
 
-fn low_page(kind: MemoryType) -> Result<u64, &'static str> {
+fn low_page(kind: MemoryType) -> Result<u64> {
     let page = boot::allocate_pages(AllocateType::MaxAddress(BELOW_4G), kind, 1)
-        .map_err(|_| "no page below 4 GiB for the page-table root")?;
+        .map_err(|_| refuse!("no page below 4 GiB for the page-table root"))?;
     // SAFETY: a fresh page owned by Stela.
     unsafe { page.as_ptr().write_bytes(0, PAGE as usize) };
     Ok(page.as_ptr() as u64)
 }
 
-fn allocate(bytes: u64) -> Result<Region, &'static str> {
+fn allocate(bytes: u64) -> Result<Region> {
     Ok(Region {
         physical: firmware::pages(bytes.div_ceil(PAGE) as usize)? as u64,
         bytes,
@@ -132,23 +134,31 @@ impl Sizes {
     /// the guest gets everything left. The pool scales with the guest DRAM
     /// each of the `cores` executors maps, of which `free` is the bound, and
     /// the code arena with the executors that run PEs: every one with
-    /// `parallel`, else the BSP alone. Each other executor that runs PEs
-    /// adds an eighth of the heap's share, for its machine's translation
-    /// metadata.
+    /// `parallel`, else the BSP alone, which the idle workers' serialized
+    /// reserves are added to. Each other executor that runs PEs adds an
+    /// eighth of the heap's share, for its machine's translation metadata.
     fn for_host(free: u64, cores: usize, parallel: bool) -> Self {
         let running = if parallel { cores as u64 } else { 1 };
         let heap = free / HEAP_SHARE + (running - 1) * (free / HEAP_SHARE / 8);
         let clamp = |bytes: u64, bounds: RangeInclusive<u64>, alignment: u64| {
             (bytes / alignment * alignment).clamp(*bounds.start(), *bounds.end())
         };
+        // Serialized, the BSP keeps a whole share and each idle worker its
+        // reserve besides.
+        let (code_reserve, pool_reserve) = if parallel {
+            (0, 0)
+        } else {
+            crate::native_smp::resources::serialized_reserve(cores)
+        };
         Self {
             heap: clamp(heap, HEAP_BYTES, LARGE),
-            code: clamp(free / CODE_SHARE, CODE_BYTES, CODE_ALIGNMENT) * running,
+            code: clamp(free / CODE_SHARE, CODE_BYTES, CODE_ALIGNMENT) * running
+                + code_reserve.next_multiple_of(CODE_ALIGNMENT),
             pool: clamp(
                 (free / POOL_SHARE).saturating_mul(cores as u64),
                 POOL_BYTES,
                 LARGE,
-            ),
+            ) + pool_reserve,
         }
     }
 }
@@ -156,8 +166,8 @@ impl Sizes {
 /// The host RAM the guest and Stela's parts may take: the free and boot
 /// services ranges in whole 2 MiB pages, as the guest's ranges are found
 /// after boot services end.
-fn free_ram() -> Result<u64, &'static str> {
-    let map = boot::memory_map(MemoryType::LOADER_DATA).map_err(|_| "no memory map")?;
+fn free_ram() -> Result<u64> {
+    let map = boot::memory_map(MemoryType::LOADER_DATA).map_err(|_| refuse!("no memory map"))?;
     Ok(map
         .entries()
         .filter(|entry| {
@@ -195,10 +205,10 @@ fn read32(base: usize, offset: usize) -> usize {
 }
 
 /// Apply the image's DIR64 base relocations for a move by `delta`.
-fn relocate(copy: usize, bytes: usize, delta: u64) -> Result<(), &'static str> {
+fn relocate(copy: usize, bytes: usize, delta: u64) -> Result<()> {
     let header = read32(copy, 0x3c);
     if read32(copy, header) != 0x4550 {
-        return Err("image copy is not PE");
+        return Err(refuse!("image copy is not PE"));
     }
     let optional = header + 24;
     let directory = optional + 112 + RELOCATION_DIRECTORY * 8;
@@ -207,13 +217,13 @@ fn relocate(copy: usize, bytes: usize, delta: u64) -> Result<(), &'static str> {
         read32(copy, directory) + read32(copy, directory + 4),
     );
     if end > bytes {
-        return Err("relocation directory outside the image");
+        return Err(refuse!("relocation directory outside the image"));
     }
     while block < end {
         let page = read32(copy, block);
         let size = read32(copy, block + 4);
         if size < 8 || block + size > end {
-            return Err("malformed relocation block");
+            return Err(refuse!("malformed relocation block"));
         }
         for entry in (block + 8..block + size).step_by(2) {
             // SAFETY: inside the relocation directory checked above.
@@ -226,7 +236,7 @@ fn relocate(copy: usize, bytes: usize, delta: u64) -> Result<(), &'static str> {
                     // SAFETY: a relocated pointer inside the copy.
                     unsafe { slot.write_unaligned(slot.read_unaligned().wrapping_add(delta)) };
                 }
-                _ => return Err("unsupported base relocation"),
+                _ => return Err(refuse!("unsupported base relocation")),
             }
         }
         block += size;
@@ -248,7 +258,7 @@ fn identity(
     root: u64,
     ram: &[(usize, usize)],
     special: &[(u64, u64, u64)],
-) -> Result<(), &'static str> {
+) -> Result<()> {
     let covered =
         |start: u64, end: u64| ram.iter().any(|r| r.0 as u64 <= start && end <= r.1 as u64);
     let top = ram.iter().map(|r| r.1 as u64).max().unwrap_or(0);
@@ -292,12 +302,12 @@ pub const INSTALL_PIECES_FILE: &str = "install-pieces.bin";
 /// engine builds the bundle from that disk with the host storage drivers,
 /// whose ranges are found here, as they are for every other option that
 /// opens a host controller: disks, the NOR store, input and the networks.
-fn inputs(options: &[u8], mut volume: FileSystem) -> Result<Inputs, &'static str> {
-    let text = core::str::from_utf8(options).map_err(|_| "stela.cfg is not UTF-8")?;
+fn inputs(options: &[u8], mut volume: FileSystem) -> Result<Inputs> {
+    let text = core::str::from_utf8(options).map_err(|_| refuse!("stela.cfg is not UTF-8"))?;
     let system = System::parse(text).map_err(stela_boot_core::options::Error::message)?;
     #[cfg(not(feature = "diagnostics"))]
     if system.diagnostic_option().is_some() {
-        return Err("diagnostic options require a diagnostics build");
+        return Err(refuse!("diagnostic options require a diagnostics build"));
     }
     // Read while the firmware's FAT driver runs; the engine reports a file
     // it cannot use.
@@ -344,7 +354,11 @@ fn inputs(options: &[u8], mut volume: FileSystem) -> Result<Inputs, &'static str
         system.restore_manifest_path.as_deref(),
         system.install.as_deref(),
     ) {
-        (Some(_), Some(_)) => return Err("--install and --restore-manifest name one inventory"),
+        (Some(_), Some(_)) => {
+            return Err(refuse!(
+                "--install and --restore-manifest name one inventory"
+            ));
+        }
         (Some(path), None) => Some(crate::engine::bundle::restore_inventory(path)?),
         // The install medium's pieces are checked through the firmware's
         // FAT driver now, while it is there; the engine reads them through
@@ -369,7 +383,9 @@ fn inputs(options: &[u8], mut volume: FileSystem) -> Result<Inputs, &'static str
             .iter()
             .any(|(name, _)| reserved.contains(&name.as_str()))
         {
-            return Err("a bundle file takes a name the restore inventory reserves");
+            return Err(refuse!(
+                "a bundle file takes a name the restore inventory reserves"
+            ));
         }
         files.push((String::from(RESTORE_INVENTORY_FILE), inventory.manifest));
         if let Some(diagnostic) = inventory.fdr_diagnostic {
@@ -383,7 +399,7 @@ fn inputs(options: &[u8], mut volume: FileSystem) -> Result<Inputs, &'static str
         }
     }
     if files.len() > MAX_FILES {
-        return Err("bundle lists too many files");
+        return Err(refuse!("bundle lists too many files"));
     }
     // The translation store, when a volume has one and a file slot is
     // left; rewriting its pack needs the storage drivers.
@@ -433,8 +449,9 @@ struct Runtime {
 impl Runtime {
     /// Read before boot services end. Without SetVirtualAddressMap the
     /// firmware's runtime services run at their physical addresses.
-    fn capture() -> Result<Self, &'static str> {
-        let map = boot::memory_map(MemoryType::LOADER_DATA).map_err(|_| "no memory map")?;
+    fn capture() -> Result<Self> {
+        let map =
+            boot::memory_map(MemoryType::LOADER_DATA).map_err(|_| refuse!("no memory map"))?;
         let regions = map
             .entries()
             .filter(|entry| entry.att.bits() & RUNTIME_ATTRIBUTE != 0)
@@ -475,7 +492,7 @@ impl Runtime {
         root: u64,
         ram: &[(usize, usize)],
         devices: &[Range<u64>],
-    ) -> Result<(), &'static str> {
+    ) -> Result<()> {
         for &(start, end, kind) in &self.regions {
             let overlaps = ram.iter().any(|r| (r.0 as u64) < end && start < r.1 as u64)
                 || devices
@@ -511,12 +528,12 @@ fn map_devices(
     root: u64,
     ram: &[(usize, usize)],
     ranges: &[Range<u64>],
-) -> Result<(), &'static str> {
+) -> Result<()> {
     for range in ranges {
         let start = range.start & !(PAGE - 1);
         let end = range.end.next_multiple_of(PAGE);
         if ram.iter().any(|r| (r.0 as u64) < end && start < r.1 as u64) {
-            return Err("storage registers overlap RAM");
+            return Err(refuse!("storage registers overlap RAM"));
         }
         tables::map_range(
             frames,
@@ -626,10 +643,10 @@ fn load(
     wifi_key: Vec<u8>,
     log: Option<Guid>,
     host_firmware: crate::host_firmware::Resources,
-) -> Result<core::convert::Infallible, &'static str> {
+) -> Result<core::convert::Infallible> {
     crate::status::begin("Setting up Stela's memory");
     let image = memory::prepare_image()?;
-    let text = core::str::from_utf8(&options).map_err(|_| "stela.cfg is not UTF-8")?;
+    let text = core::str::from_utf8(&options).map_err(|_| refuse!("stela.cfg is not UTF-8"))?;
     let system = System::parse(text).map_err(stela_boot_core::options::Error::message)?;
     let (native_processors, cores) =
         crate::native_smp::firmware::capture_assignment(system.native_cores)
@@ -641,10 +658,7 @@ fn load(
             "UNSUPPORTED host TSC is not invariant: guest time and every timeout follow the cores' clock changes\n"
         ));
     }
-    let wall_tsc = rdtsc();
-    let wall_seconds = uefi::runtime::get_time()
-        .ok()
-        .and_then(|time| unix_seconds(&time));
+    let wall = read_rtc();
     let power = host_power();
     let random_seed = match crate::entropy::retain_seed() {
         Ok((region, source)) => {
@@ -697,7 +711,7 @@ fn load(
     } = memory;
     let loader_tables = loader_tables
         .retain()
-        .map_err(|_| "loader table ownership validation failed")?;
+        .map_err(|_| refuse!("loader table ownership validation failed"))?;
     let bounce = native_resources.bounce[0];
     let handoff_phase::RetainedFiles {
         options: options_region,
@@ -710,7 +724,7 @@ fn load(
         layout::image() + (crate::engine::entry as *const () as u64 - image.start as u64);
 
     crate::status::done("");
-    // SAFETY: the fresh immutable MP observation is retained LOADER_DATA. Identity
+    // SAFETY: the fresh immutable MP observation is held LOADER_DATA. Identity
     // mappings and the calibrated local APIC remain valid across EBS.
     let capture = unsafe {
         crate::native_smp::firmware::Capture::read(native_processors.physical as *const u8)
@@ -734,10 +748,12 @@ fn load(
         },
         None => Region::default(),
     };
-    // Stop every enabled firmware AP before offering its former code/data to
+    // SAFETY: Stop every enabled firmware AP before offering its former code/data to
     // guest RAM, including workers that will later receive their owned SIPI.
     // The BSP alone sends ICR commands, with firmware IRQ handlers excluded.
     unsafe { asm!("cli", options(nomem, nostack)) };
+    // SAFETY: interrupts are masked, the BSP alone sends ICR commands, and `capture` lists the
+    // enabled firmware APs.
     let deliveries = match unsafe {
         crate::native_smp::executor::quiesce_firmware_aps(capture, &sender, tsc_hz)
     } {
@@ -781,12 +797,12 @@ fn load(
             history_bytes,
             log_partition: log.map(|guid| guid.0),
             tsc_hz,
+            tsc_source: crate::firmware::tsc_source(),
             apic_base,
             native_processors,
             native_resources,
             native_mmio: native_mmio_region,
-            wall_seconds,
-            wall_tsc,
+            wall,
             guest,
             guest_count: count,
             installed,
@@ -839,32 +855,40 @@ pub(crate) fn host_power() -> Option<pc::power::HostPower> {
     }
 }
 
-/// UEFI `Time` as Unix seconds. A specified `TimeZone` is the local time's
-/// offset from UTC in minutes (UEFI 2.7 and later: UTC = local − zone); an
-/// unspecified zone is taken as UTC, as QEMU and Macs keep their RTC.
-fn unix_seconds(time: &uefi::runtime::Time) -> Option<u64> {
-    let (year, month, day) = (
-        i64::from(time.year()),
-        i64::from(time.month()),
-        i64::from(time.day()),
-    );
-    if !(1970..=9999).contains(&year) || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
-        return None;
-    }
-    // Days from the civil date (Howard Hinnant's days_from_civil).
-    let y = if month <= 2 { year - 1 } else { year };
-    let era = y.div_euclid(400);
-    let yoe = y - era * 400;
-    let mp = (month + 9) % 12;
-    let doy = (153 * mp + 2) / 5 + day - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days = era * 146_097 + doe - 719_468;
-    let mut seconds = days * 86_400
-        + i64::from(time.hour()) * 3600
-        + i64::from(time.minute()) * 60
-        + i64::from(time.second());
-    if let Some(zone) = time.time_zone() {
-        seconds -= i64::from(zone) * 60;
-    }
-    u64::try_from(seconds).ok()
+/// The firmware's real-time clock, read between two TSC values. An
+/// unspecified time zone is read as UTC, as Linux reads the RTC and as QEMU
+/// and Macs keep it; a time the firmware cannot give is reported.
+fn read_rtc() -> Option<crate::handoff::RtcReading> {
+    use stela_boot_core::firmware_time::{self, UnspecifiedZone};
+    let tsc_before = rdtsc();
+    let read = uefi::runtime::get_time_and_caps();
+    let tsc_after = rdtsc();
+    let (time, capabilities) = read
+        .inspect_err(|error| {
+            output::arguments(format_args!(
+                "HOST RTC unavailable: GetTime failed: {:?}\n",
+                error.status()
+            ))
+        })
+        .ok()?;
+    let fields = firmware_time::Time {
+        year: time.year(),
+        month: time.month(),
+        day: time.day(),
+        hour: time.hour(),
+        minute: time.minute(),
+        second: time.second(),
+        nanosecond: time.nanosecond(),
+        timezone_minutes: time.time_zone().unwrap_or(firmware_time::UNSPECIFIED_ZONE),
+        daylight: time.daylight().bits(),
+    };
+    let utc = firmware_time::utc(fields, UnspecifiedZone::RtcIsUtc)
+        .inspect_err(|error| output::arguments(format_args!("HOST RTC unusable: {error}\n")))
+        .ok()?;
+    Some(crate::handoff::RtcReading {
+        utc,
+        resolution: capabilities.resolution,
+        tsc_before,
+        tsc_after,
+    })
 }

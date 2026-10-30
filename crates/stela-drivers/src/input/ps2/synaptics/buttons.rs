@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Original Synaptics source notices: ../synaptics.rs and input/THIRD_PARTY.md.
-//! Source-qualified extended button data, including its target and validity.
+//! Source-checked extended button data, including its target and validity.
 use super::Capabilities;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Target {
@@ -24,7 +24,7 @@ pub(super) fn decode(c: &Capabilities, p: [u8; 6]) -> Option<Extended> {
     }
     let ext_bit = (p[0] ^ p[3]) & 2 != 0;
     let version = ((c.identity & 15) << 8) | (c.identity >> 16);
-    // These actual firmware versions do not report a release when ExtBit is
+    // These firmware versions do not report a release when ExtBit is
     // clear. None preserves that absence of an update; it is not bitmap zero.
     if matches!(version, 0x801 | 0x802) && !ext_bit {
         return None;

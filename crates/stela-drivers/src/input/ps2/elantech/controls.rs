@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// Original notices are retained in ../elantech.rs and input/THIRD_PARTY.md.
-//! Actual protected hardware-register mutation for the source exposed controls.
+// Original notices are held in ../elantech.rs and input/THIRD_PARTY.md.
+//! Protected hardware-register mutation for the source exposed controls.
 use super::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RegisterControl {
     pub address: u8,
     pub requested: u8,
-    /// Source v1 forces absolute/4-byte mode bits in the actual written value.
+    /// Source v1 forces absolute/4-byte mode bits in the written value.
     pub effective: u8,
     pub quiesced: bool,
     /// Every byte service and final write acknowledgement completed on time.
@@ -26,13 +26,13 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     }
     /// Write one hardware register exposed by the source driver. The source v1
     /// absolute and four-byte bits remain forced. This writes a real device;
-    /// ACKs do not fabricate readback or imply that arbitrary firmware values
+    /// ACKs do not invent readback or imply that arbitrary firmware values
     /// preserve the selected report mode. Mode-register changes invalidate the
     /// initialization criterion until a fresh stop/initialize operation.
     ///
-    /// An uncertain write/resume retains its request/progress and quarantines
+    /// An uncertain write/resume keeps its request/progress and quarantines
     /// the owner without replay. The source sysfs leaf's masked error byte count
-    /// is not an acknowledgement from this actual native operation.
+    /// is not an acknowledgement from this native operation.
     pub fn write_elantech_register(
         &mut self,
         address: u8,

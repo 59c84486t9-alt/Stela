@@ -13,7 +13,7 @@ pub(super) fn registers(node: &Node<'_>) -> Option<Vec<(u64, u64)>> {
     node.pairs("reg")
 }
 
-/// Visit in ADT order while retaining every intervening bus's actual ranges.
+/// Visit in ADT order while keeping every intervening bus's ranges.
 /// The supplied root extent capability belongs to `io` itself. A node's own
 /// `reg` uses its parent's domain; its `ranges` affects only its descendants.
 /// No range decoder or identity fallback is added: each nested translation
@@ -45,7 +45,7 @@ pub(super) fn visit(
         if domain {
             nested.push(node.clone());
         }
-        // An endpoint's slave coordinates need their own qualified mapping.
+        // An endpoint's slave coordinates need their own checked mapping.
         // A registerless structural node can remain in its ancestor domain;
         // an explicit child bus/endpoint cannot silently inherit root MMIO.
         let unqualified_children = node.property("ranges").is_none()

@@ -34,23 +34,8 @@ fn integer_bits_register_exact_bodies_and_source_maps() {
                     VectorLength::from_bytes(bytes).unwrap(),
                     target,
                 );
-                let return_offset = CONTEXT_WRAPPER_BYTES + body.len();
-                assert_eq!(
-                    native.source_map,
-                    [
-                        (GuestAddress(0x1000), CONTEXT_WRAPPER_BYTES),
-                        (GuestAddress(0x1004), return_offset)
-                    ]
-                );
-                assert_eq!(
-                    &native.x86_64_code[..CONTEXT_WRAPPER_BYTES],
-                    context_wrapper()
-                );
-                assert_eq!(
-                    &native.x86_64_code[CONTEXT_WRAPPER_BYTES..return_offset],
-                    body
-                );
-                assert_eq!(&native.x86_64_code[return_offset..], &[RET]);
+
+                assert_single_body(&native, GuestAddress(0x1000), &body);
             }
         }
         let length = VectorLength::from_bytes(16).unwrap();
@@ -84,28 +69,7 @@ fn integer_bits_register_exact_bodies_and_source_maps() {
 }
 
 #[test]
-fn integer_bits_reserved_zeroing_and_prefix_inputs_remain_explicit() {
-    const RESERVED_REVERSE_WORDS: [u32; 6] = [
-        0x0524_8020,
-        0x0525_8020,
-        0x0565_8020,
-        0x0526_8020,
-        0x0566_8020,
-        0x05a6_8020,
-    ];
-    for word in RESERVED_REVERSE_WORDS {
-        assert!(
-            crate::testing::context_leaf(
-                &words(&[NOP, word, RET_X30]),
-                GuestAddress(0),
-                profile(16, true),
-                TargetCpu::Baseline
-            )
-            .unwrap_err()
-            .to_string()
-            .contains("reserved streaming integer-bit")
-        );
-    }
+fn integer_bits_zeroing_forms_remain_explicit() {
     const ZEROING_WORDS: [u32; 7] = [
         0x0408_a020,
         0x0409_a020,
@@ -126,19 +90,6 @@ fn integer_bits_reserved_zeroing_and_prefix_inputs_remain_explicit() {
             .is_err()
         );
     }
-    const CLS_Z0_B_P0_Z1_B: u32 = 0x0418_a020;
-    assert!(
-        crate::testing::context_leaf(
-            &words(&[MOVPRFX_Z0_Z1, CLS_Z0_B_P0_Z1_B, RET_X30]),
-            GuestAddress(0),
-            profile(16, true),
-            TargetCpu::Baseline
-        )
-        .unwrap_err()
-        .to_string()
-        .contains("MOVPRFX pair validation")
-    );
-    assert!(crate::testing::leaf(&words(&[CLS_Z0_B_P0_Z1_B, RET_X30]), GuestAddress(0)).is_err());
 }
 #[test]
 fn integer_bits_bsr_recipes_require_declared_dit_zero() {

@@ -355,13 +355,13 @@ mod native {
     }
 
     /// Exact-width test transport with byte-level faults inside a request.
-    /// Failed loads deliberately leave poisoned/partial staging; destinations
-    /// must still retain the preceding successful architectural assignments.
+    /// Failed loads leave poisoned/partial staging; destinations
+    /// must still keep the preceding successful architectural assignments.
     unsafe extern "sysv64" fn callback(
         view: *mut MemoryContextView,
         request: *const MemoryRequest,
     ) -> u32 {
-        // SAFETY: run retains disjoint State, view, harness and private stack
+        // SAFETY: run keeps disjoint State, view, harness and private stack
         // staging until native return. No reference spans this callback.
         let (view, request) = unsafe { (&mut *view, &*request) };
         // SAFETY: NativeCode::run stores its unique Harness borrow in opaque until return.
@@ -859,7 +859,7 @@ mod native {
                 AddressAddChecks::Disabled,
             );
             // Success reaches the real RET terminator, returning a block
-            // exit rather than a MemoryStatus. The retained view is decisive.
+            // exit rather than a MemoryStatus. The kept view is decisive.
             let (_, view) = code.run(&mut actual, &mut harness);
             assert_eq!((actual, harness.ram), expected);
             assert_eq!(view.fault_kind, MemoryStatus::Success as u32);

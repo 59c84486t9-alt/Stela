@@ -38,7 +38,7 @@ impl<C: Control> Chip<C> {
         if power_cut {
             self.phy_modify(MII_BMCR, BMCR_PDOWN, 0)?;
         }
-        // Linux init selects GREEN_ETHERNET for 08/09; these are its actual
+        // Linux init selects GREEN_ETHERNET for 08/09; these are its
         // per-speed analogue settings, not the older A impedance sequence.
         self.sram_write(0x8045, 0)?;
         self.sram_write(0x804d, 0x1222)?;
@@ -48,7 +48,7 @@ impl<C: Control> Chip<C> {
         let green = self.sram_read(SRAM_GREEN_CFG as u16)?;
         self.sram_write(SRAM_GREEN_CFG as u16, green | R_TUNE_EN as u16)?;
         self.phy_modify(OCP_NCTL_CFG, 0, PGA_RETURN_EN)?;
-        // Preserve the adapter's actual efuse calibration. Bit3 in the 17-bit
+        // Preserve the adapter's efuse calibration. Bit3 in the 17-bit
         // efuse word is dummy; all-one calibration means no programmed value.
         self.write(PLA, PLA_EFUSE_CMD, 2, EFUSE_READ_CMD | 0x7d)?;
         let high = (self.read(PLA, PLA_EFUSE_CMD, 2)? & EFUSE_DATA_BIT16) << 9;
@@ -110,7 +110,7 @@ impl<C: Control> Chip<C> {
         self.phy_state(Some(PHY_STAT_LAN_ON))?;
         self.u2p3(false)?;
         self.write(USB, USB_MSC_TIMER, 2, 0x0fff)?;
-        // B retains PHASE2_EN when disabling power-cut (A clears it).
+        // B keeps PHASE2_EN when disabling power-cut (A clears it).
         self.modify(USB, USB_POWER_CUT, 2, PWR_EN, 0)?;
         self.modify(USB, USB_MISC_0, 2, PCUT_STATUS, 0)?;
         self.modify(USB, USB_POWER_CUT, 1, UPS_EN | USP_PREWAKE, 0)?;

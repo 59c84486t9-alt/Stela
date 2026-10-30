@@ -66,7 +66,7 @@ impl<P: DataPolicy> MemoryThread<P> {
                     return Err(fail(MemoryStatus::InvalidRequest));
                 }
                 // Scope strengthens to coherent host WB memory. x86 already
-                // orders LD/ST subsets; Rust fences retain compiler ordering.
+                // orders LD/ST subsets; Rust fences keep compiler ordering.
                 // Reserved xx00 options have the architectural SY fallback.
                 fence(match data.barrier & 3 {
                     1 => Ordering::Acquire,
@@ -208,6 +208,8 @@ impl<P: DataPolicy> MemoryThread<P> {
                 // Scalar arithmetic uses a gate-stable read followed by SCA
                 // XCHG; pair16 CASP uses its source comparison in one CX16.
                 let old =
+                    // SAFETY: The checked write keeps current read/write spans and target
+                    // requirements. This physical writer gate serializes every registered alias.
                     unsafe { native_update(pointer, bytes, operation, operand, compare, target) }
                         .map_err(|_| MemoryStatus::Unsupported)?;
                 let _receipt = mutation.complete();
@@ -239,7 +241,7 @@ unsafe fn native_update(
 ) -> Result<u128, access::AccessError> {
     // SAFETY: caller holds all physical gates and exact read/write rights for
     // pinned WB RAM; publication remains one SCA writer event. Scalar recipes
-    // deliberately use the measured compact generic path. Pair16 can directly
+    // use the measured compact generic path. Pair16 can directly
     // supply the source comparison to one CX16, without a separate load/retry.
     unsafe {
         if operation == AtomicOperation::CompareExchangePair && bytes == SCA_BYTES {
@@ -318,6 +320,7 @@ mod tests {
     // SAFETY: raw bytes are used only under the same monitor writer gate; no
     // reference to a shared RAM element is created by either candidate.
     unsafe impl Send for Storage {}
+    // SAFETY: shared references rely on the same argument as `Send` above.
     unsafe impl Sync for Storage {}
     #[inline(never)]
     unsafe fn generic_candidate(
@@ -426,6 +429,8 @@ mod tests {
                                                 &range,
                                                 monitor::Invalidation::BeforeAttempt,
                                                 || {
+                                                    // SAFETY: the writer scope owns this slot, and
+                                                    // `pointer` addresses it inside the storage.
                                                     Ok::<_, ()>(unsafe {
                                                         if direct {
                                                             direct_candidate(

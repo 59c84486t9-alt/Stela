@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //! USB Audio Class 1/2/3 PCM and UAC3 BADD, on native isochronous transport.
-//! Mixer adaptation retains Copyright (c) 2002 Takashi Iwai; original audio.c
-//! contributions by Alan Cox and Thomas Sailer. UAC2 layout reference retains
+//! Mixer adaptation keeps Copyright (c) 2002 Takashi Iwai; original audio.c
+//! contributions by Alan Cox and Thomas Sailer. UAC2 layout reference keeps
 //! Copyright (c) 2010 Daniel Mack. See audio/THIRD_PARTY.md.
 //! Control/rate/feedback sequencing adapts Linux sound/usb/{clock,format,
 //! endpoint,pcm,mixer}.c at a804c5742bff224d4cb4d25dd383554d598be32b.
 //! Like snd-usb-audio, standard UAC1/UAC2 control interfaces bind by class; their
 //! descriptors alone decide clocks, alternates, channels and sample rates. UAC3
-//! BADD uses its owning standardized profile and actual endpoint/power controls.
-//! Full UAC3 resolves actual high-capability cluster replies before publication.
-use super::xhci::{Endpoint, Interface};
+//! BADD uses its owning standardized profile and endpoint/power controls.
+//! Full UAC3 resolves high-capability cluster replies before publication.
+use super::descriptor::{Endpoint, Interface};
 use crate::{audio::Direction, block::BlockError};
 
 mod badd;
@@ -91,12 +91,12 @@ pub struct Completion {
     pub status: PacketStatus,
 }
 
-/// Actual control/isochronous ownership boundary, also used by stateful tests.
+/// Control/isochronous ownership boundary, also used by stateful tests.
 /// `deconfigure` must acknowledge endpoint stop, drain and context removal
-/// before returning success. Implementations retain all DMA on any uncertainty.
+/// before returning success. Implementations keep all DMA on any uncertainty.
 pub trait Transport: Control {
     type Ticket;
-    /// Validate retained device identity without MMIO or DMA mutation. Native
+    /// Validate kept device identity without MMIO or DMA mutation. Native
     /// transports must reject retired generations before caller-owned PCM writes.
     fn validate(&self) -> Result<(), BlockError>;
     /// Observe that every proposed DCI is unowned, before SET_INTERFACE or any
@@ -128,4 +128,4 @@ pub use stream::{AudioDevice, MixerState, Progress};
 pub(crate) use stream::tests::configuration as test_configuration;
 
 #[cfg(test)]
-pub(crate) use native::generation_tests;
+pub(crate) use native::tests::generation as generation_tests;

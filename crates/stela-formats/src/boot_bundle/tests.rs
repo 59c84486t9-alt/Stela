@@ -1,5 +1,6 @@
 use super::*;
 use alloc::collections::BTreeMap;
+use stela_contracts::refuse;
 
 const BASE: u64 = 0x8_0000_0000;
 
@@ -115,7 +116,7 @@ fn selected_source_metadata_is_typed_and_duplicate_fields_refuse() {
         "decoded retained verbatim"
     );
     // Typed parsing preserves metadata; the Apple Entry intake separately
-    // validates digests, selected IDs and actual original file contents.
+    // validates digests, selected IDs and original file contents.
     for repeated in [
         format!(r#""target":{target},"#),
         format!(r#""sources":[{source}],"#),
@@ -285,7 +286,7 @@ fn verifies_loads_and_patches_into_guest_ram() -> Result<(), BundleError> {
 }
 
 #[test]
-fn external_pipe_geometry_uses_the_same_actual_framebuffer() -> Result<(), BundleError> {
+fn external_pipe_geometry_uses_the_same_framebuffer() -> Result<(), BundleError> {
     let kernel = [0xaa; 100];
     let tree = [0x11; 28];
     let patches = format!(
@@ -302,7 +303,7 @@ fn external_pipe_geometry_uses_the_same_actual_framebuffer() -> Result<(), Bundl
         bytes.fill(0x42);
         Ok(())
     };
-    // A visible display cannot retain physical-board geometry without a
+    // A visible display cannot keep physical-board geometry without a
     // real backing resource when the native GOP is unavailable.
     assert!(
         verified
@@ -390,7 +391,7 @@ fn a_persistent_nor_hands_off_its_current_bank() -> Result<(), BundleError> {
         BTreeMap::from([("kernel.img", &kernel[..]), ("devicetree.adt", &tree[..])]);
     let verified = manifest.verify(&|name| files.get(name).copied())?;
     let mut ram = vec![0u8; FRAME_BYTES as usize];
-    let mut entropy = |_: &mut [u8]| Err("unused");
+    let mut entropy = |_: &mut [u8]| Err(refuse!("unused"));
     // Without a persistent NOR the prepared bank stands.
     let image = verified.load(&machine(), &mut entropy, &mut |pa, bytes| {
         write_into(&mut ram, pa, bytes)
@@ -461,10 +462,10 @@ fn refuses_tampered_files_small_ram_and_missing_entropy() -> Result<(), BundleEr
         BTreeMap::from([("kernel.img", &kernel[..]), ("devicetree.adt", &tree[..])]);
     let verified = manifest.verify(&|name| files.get(name).copied())?;
     let mut write = |_: u64, _: &[u8]| true;
-    let mut no_entropy = |_: &mut [u8]| Err("no RDSEED or RDRAND");
+    let mut no_entropy = |_: &mut [u8]| Err(refuse!("no RDSEED or RDRAND"));
     assert_eq!(
         verified.load(&machine(), &mut no_entropy, &mut write).err(),
-        Some(BundleError::Entropy("no RDSEED or RDRAND"))
+        Some(BundleError::Entropy(refuse!("no RDSEED or RDRAND")))
     );
     let small = Machine {
         ram_bytes: 0x4000,

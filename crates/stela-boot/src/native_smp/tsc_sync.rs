@@ -13,6 +13,7 @@
 //! sync mechanism's own overhead leaves at most a third round needed; an AP
 //! whose counter still differs after [`ROUNDS`], or which has no
 //! `IA32_TSC_ADJUST` to correct it with, is refused.
+use crate::Result;
 use crate::cpu::msr::TSC_ADJUST;
 use core::{
     arch::{
@@ -21,6 +22,7 @@ use core::{
     },
     sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering},
 };
+use stela_contracts::refuse;
 
 /// `IA32_TSC_ADJUST`.
 /// Linux's `loop_timeout` for cores of different packages or modules.
@@ -121,7 +123,7 @@ impl Sync {
 
     /// The AP's part, on the AP: rounds until its counter agrees with the
     /// BSP's, correcting it between them.
-    pub(super) fn target(&self) -> Result<(), &'static str> {
+    pub(super) fn target(&self) -> Result<()> {
         // CPUID.(EAX=7,ECX=0):EBX[1] enumerates IA32_TSC_ADJUST.
         let adjustable = __cpuid_count(0, 0).eax >= 7 && __cpuid_count(7, 0).ebx & 1 << 1 != 0;
         // SAFETY: enumerated above, and read only then.
@@ -142,12 +144,12 @@ impl Sync {
             let seen_here = self.warps[AP].load(Ordering::Relaxed);
             let outcome = match base {
                 _ if seen_by_bsp == 0 && seen_here == 0 => Some(Ok(())),
-                None => Some(Err(
-                    "AP TSC differs from the BSP's and has no IA32_TSC_ADJUST",
-                )),
-                Some(_) if round == ROUNDS => {
-                    Some(Err("AP TSC still differs from the BSP's after adjustment"))
-                }
+                None => Some(Err(refuse!(
+                    "AP TSC differs from the BSP's and has no IA32_TSC_ADJUST"
+                ))),
+                Some(_) if round == ROUNDS => Some(Err(refuse!(
+                    "AP TSC still differs from the BSP's after adjustment"
+                ))),
                 Some(base) => {
                     // Behind when this core saw the counter go back, else
                     // ahead.

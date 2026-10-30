@@ -1,14 +1,15 @@
 //! Lazy resolution of registered leaf entry points. Handles must be revalidated
 //! before each execution; invalidation does not interrupt running code.
 
+use crate::Result;
 use crate::{Identity, Prepared, prepare_leaf};
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 #[cfg(not(feature = "std"))]
 use alloc::{string::String, vec::Vec};
-use anyhow::{Result, ensure};
 use std::path::PathBuf;
 use stela_compiler::GuestAddress;
+use stela_contracts::{refuse, require};
 use stela_formats::sha256;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,17 +85,17 @@ impl LeafDispatcher {
     /// fresh generation, including replacement with byte-identical source.
     /// Unsupported semantics fail later during resolve, without creating code.
     pub fn register(&mut self, entry: GuestAddress, source: Vec<u8>) -> Result<u64> {
-        ensure!(
+        require!(
             !source.is_empty() && source.len().is_multiple_of(4) && entry.0.is_multiple_of(4),
             "leaf source and entry must be nonempty and 4-byte aligned"
         );
-        let length = u64::try_from(source.len())?;
+        let length = source.len() as u64;
         let end = entry
             .0
             .checked_add(length)
-            .ok_or_else(|| anyhow::anyhow!("leaf range overflow"))?;
+            .ok_or(refuse!("leaf range overflow"))?;
         for (&base, leaf) in &self.leaves {
-            ensure!(
+            require!(
                 base == entry.0 || end <= base || entry.0 >= leaf.end,
                 "leaf registration overlaps another registered region"
             );
@@ -102,7 +103,7 @@ impl LeafDispatcher {
         let generation = self
             .next_generation
             .checked_add(1)
-            .ok_or_else(|| anyhow::anyhow!("mapping generation exhausted"))?;
+            .ok_or(refuse!("mapping generation exhausted"))?;
         let source_sha256 = sha256(&source);
         self.leaves.insert(
             entry.0,
@@ -128,9 +129,9 @@ impl LeafDispatcher {
         let leaf = self
             .leaves
             .get(&entry.0)
-            .ok_or_else(|| anyhow::anyhow!("unregistered guest entry {:#x}", entry.0))?;
+            .ok_or_else(|| refuse!("unregistered guest entry", entry = entry.0))?;
         let prepared = prepare_leaf(&leaf.source, entry, &self.cache_root)?;
-        ensure!(
+        require!(
             prepared.manifest.identity.source_sha256 == leaf.source_sha256,
             "registered source identity mismatch"
         );
@@ -169,12 +170,12 @@ fn validate_source_map(
     source_bytes: usize,
 ) -> Result<()> {
     let manifest = &prepared.manifest;
-    ensure!(
+    require!(
         !manifest.verified,
         "generated cache is not verification evidence"
     );
-    ensure!(manifest.native_bytes > 0, "empty generated code");
-    ensure!(
+    require!(manifest.native_bytes > 0, "empty generated code");
+    require!(
         manifest.source_map.len() == source_bytes / 4,
         "source map must cover every registered guest instruction"
     );
@@ -183,17 +184,17 @@ fn validate_source_map(
         let expected = entry
             .0
             .checked_add((index as u64) * 4)
-            .ok_or_else(|| anyhow::anyhow!("source map guest address overflow"))?;
-        ensure!(guest.0 == expected, "source map guest instruction mismatch");
-        ensure!(
+            .ok_or(refuse!("source map guest address overflow"))?;
+        require!(guest.0 == expected, "source map guest instruction mismatch");
+        require!(
             native < manifest.native_bytes,
             "source map offset outside generated code"
         );
-        ensure!(
+        require!(
             previous.is_none_or(|p| native > p),
             "source map offsets must increase strictly"
         );
-        ensure!(
+        require!(
             index != 0 || native == 0,
             "source map must start at native offset zero"
         );
@@ -205,6 +206,7 @@ fn validate_source_map(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Result;
 
     fn source(value: u32) -> Vec<u8> {
         [0xd2800000u32 | (value << 5), 0xd65f03c0]
@@ -214,7 +216,7 @@ mod tests {
     }
 
     #[test]
-    fn cold_and_warm_resolution_preserve_identity_and_instruction_map() -> Result<()> {
+    fn resolution_keeps_identity_and_instruction_map() -> Result<()> {
         let root = tempfile::tempdir()?;
         let mut registry = LeafDispatcher::new(9, root.path().into());
         let entry = GuestAddress(0x1000);

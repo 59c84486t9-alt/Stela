@@ -18,7 +18,6 @@
 //! the loader hands to the system engine so its screen carries on from them
 //! ([`replay`]). Each step's start and end store the boot logs, so a log
 //! read after a hang ends at the step that hung.
-mod fraction;
 
 use crate::{
     console::{self, Color},
@@ -309,7 +308,7 @@ pub fn progress_fraction(detail: &str, completed: u64, total: u64) {
         if let Some(running) = state.running.as_mut() {
             running.detail.clear();
             running.detail.push_str(detail);
-            running.percentage = fraction::percentage(completed, total);
+            running.percentage = stela_boot_core::screen::percentage(completed, total);
             state.draw_running();
         }
     });

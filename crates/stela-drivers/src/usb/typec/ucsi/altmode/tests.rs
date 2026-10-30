@@ -470,7 +470,7 @@ fn detach_reattach_and_ucsi_reset_never_reuse_discovered_caps_or_program_new_own
     assert_eq!(hardware.borrow().events.len(), count);
 }
 #[test]
-fn every_native_and_route_failure_quiesces_and_retains_original_and_cleanup_errors() {
+fn route_failures_quiesce_and_keep_errors() {
     let (mut controller, mut native, mut mux, _) = setup();
     let mut first = self::session(&mut controller, &mut native);
     native.calls = 0;
@@ -512,7 +512,7 @@ fn every_native_and_route_failure_quiesces_and_retains_original_and_cleanup_erro
     assert!(!session.cleanup_errors().is_empty());
 }
 #[test]
-fn uncertain_ucsi_publication_cannot_enable_or_replay_and_keeps_actual_cam_distinct() {
+fn uncertain_ucsi_publication_cannot_enable_or_replay_and_keeps_cam_distinct() {
     for after in [false, true] {
         let (mut controller, mut native, mut mux, hardware) = setup();
         let mut session = self::session(&mut controller, &mut native);
@@ -606,7 +606,7 @@ fn current_cam_change_and_partner_exit_quiesce_configured_route_before_any_more_
     }
 }
 #[test]
-fn actual_status_sequences_deliver_each_hpd_irq_once_and_reject_stale_or_changed_events() {
+fn status_sequences_deliver_each_hpd_irq_once_and_reject_stale_or_changed_events() {
     let (mut controller, mut native, mut mux, hardware) = setup();
     let mut session = self::session(&mut controller, &mut native);
     session

@@ -13,14 +13,16 @@
 #![no_std]
 #![no_main]
 extern crate alloc;
+pub use stela_contracts::Refusal;
+pub type Result<T, E = Refusal> = core::result::Result<T, E>;
 use alloc::format;
 use core::{arch::asm, panic::PanicInfo};
+use stela_boot_core::apic;
 use uefi::{
     Status,
     boot::{AllocateType, MemoryType},
     mem::memory_map::MemoryMap,
 };
-mod apic;
 #[cfg(feature = "diagnostics")]
 mod audio_check;
 mod choice;
@@ -30,7 +32,7 @@ mod engine;
 mod entropy;
 mod firmware;
 mod handoff;
-mod heap;
+use stela_boot_core::heap;
 #[cfg(feature = "diagnostics")]
 mod host_check;
 mod host_firmware;
@@ -38,18 +40,24 @@ mod installer;
 mod la57;
 mod layout;
 mod log_file;
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "the native clock, IRQ root and MMIO platform services have no production consumer until the native counter and deadline work (R9, D6) wires them"
+)]
 pub(crate) mod native_clock;
 pub mod native_dma;
+mod native_idle;
 pub mod native_irq;
 pub mod native_memory;
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "the native clock, IRQ root and MMIO platform services have no production consumer until the native counter and deadline work (R9, D6) wires them"
+)]
 pub(crate) mod native_mmio;
 mod native_smp;
-#[allow(dead_code)]
 #[cfg(feature = "diagnostics")]
 mod native_stack_check;
-#[allow(dead_code)]
+#[cfg(feature = "diagnostics")]
 mod native_stacks;
 #[cfg(feature = "diagnostics")]
 mod native_work_check;
@@ -66,9 +74,14 @@ mod system;
 mod tables;
 mod ui;
 #[global_allocator]
-pub(crate) static ALLOCATOR: heap::Heap = heap::Heap::new();
+pub(crate) static ALLOCATOR: heap::Heap = heap::Heap::new().reporting_failures(|report| {
+    use core::fmt::Write;
+    // Serial is bounded, lock-free port I/O: no allocation or queue.
+    let _ = serial::Serial.write_fmt(report);
+});
 /// The live firmware keeps its boot-service pages. Budget the first heap from
 /// the conventional pages still available after the pristine image copy.
+/// Before the heap exists, so its refusals are static.
 fn initial_heap_bytes() -> Result<usize, &'static str> {
     let map = uefi::boot::memory_map(MemoryType::LOADER_DATA)
         .map_err(|_| "firmware memory map unavailable for the boot heap")?;
@@ -115,7 +128,7 @@ fn main() -> Status {
     // SAFETY: fresh LOADER_DATA pages that Stela owns for the whole boot,
     // initialized before any allocation.
     unsafe { ALLOCATOR.initialize(heap.as_ptr(), heap_bytes) };
-    // SAFETY: the registered heap is the exact reserved WB identity extent.
+    // SAFETY: the registered heap is the reserved WB identity extent.
     unsafe {
         native_memory::initialize(heap.as_ptr() as usize, heap.as_ptr() as u64, heap_bytes, 0)
     };

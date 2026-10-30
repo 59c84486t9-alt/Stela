@@ -67,7 +67,7 @@ fn square_root(code: &mut Code, format: Format, shape: Shape, source: u8) {
 }
 
 /// Select positive-result narrowing bias once for both four-lane H groups.
-/// Nearest-even adds half-minus-one plus retained parity. Positive rounding
+/// Nearest-even adds half-minus-one plus parity. Positive rounding
 /// adds the entire discarded mask; negative/zero rounding simply truncates.
 fn half_constants(code: &mut Code) {
     packed(code, Host::Xor, ZERO, ZERO);
@@ -117,7 +117,7 @@ fn half_fields(code: &mut Code) {
 }
 
 /// The scalar integer recipe avoids vector constant preparation and packing.
-/// BT captures retained parity before ADC adds half-minus-one plus that bit.
+/// BT captures kept parity before ADC adds half-minus-one plus that bit.
 fn scalar_half_root(code: &mut Code) {
     let mut asm = code.asm();
     asm.movd_from_xmm(Rax, SOURCE);

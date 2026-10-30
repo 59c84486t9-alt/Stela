@@ -3,7 +3,9 @@
 //! `asahi-nvram/apple-nvram/src/v1v2.rs` (`Partition::parse`).
 //! The outer CHRP partition is only the 32-byte Apple header; common and
 //! system partitions follow it. Adler-32 covers generation through bank end.
+use crate::Result;
 use alloc::{vec, vec::Vec};
+use stela_contracts::refuse;
 
 pub mod variables;
 pub use variables::{Partition, Variables};
@@ -108,24 +110,24 @@ pub(super) fn has_apple_header(bank: &[u8]) -> bool {
 
 /// Validate the bounded CHRP image before accepting boot firmware's proxy.
 /// XNU accepts both v1 and v2 names; Stela creates v1 and preserves either.
-pub fn validate(bank: &[u8]) -> Result<(), &'static str> {
+pub fn validate(bank: &[u8]) -> Result<()> {
     if bank.len() != BANK_SIZE {
-        return Err("NVRAM bank is not 64 KiB");
+        return Err(refuse!("NVRAM bank is not 64 KiB"));
     }
     if !has_apple_header(bank)
         || u32::from_le_bytes(bank[16..20].try_into().expect("4 bytes")) != adler(&bank[20..])
     {
-        return Err("invalid Apple CHRP bank header or Adler-32");
+        return Err(refuse!("invalid Apple CHRP bank header or Adler-32"));
     }
     let mut offset = 0;
     let (mut common, mut system) = (false, false);
     while offset < BANK_SIZE {
         let h = bank
             .get(offset..offset + HEADER_SIZE)
-            .ok_or("truncated CHRP header")?;
+            .ok_or(refuse!("truncated CHRP header"))?;
         let length = usize::from(u16::from_le_bytes([h[2], h[3]])) * HEADER_SIZE;
         if length < HEADER_SIZE || offset + length > BANK_SIZE || h[1] != checksum(h) {
-            return Err("invalid CHRP partition length or checksum");
+            return Err(refuse!("invalid CHRP partition length or checksum"));
         }
         let name = partition_name(h);
         common |= matches!(name, b"common" | b"2common");
@@ -133,7 +135,7 @@ pub fn validate(bank: &[u8]) -> Result<(), &'static str> {
         offset += length;
     }
     if !common || !system {
-        return Err("CHRP bank lacks common or system partition");
+        return Err(refuse!("CHRP bank lacks common or system partition"));
     }
     Ok(())
 }

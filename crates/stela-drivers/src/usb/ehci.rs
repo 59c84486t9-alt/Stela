@@ -1,9 +1,9 @@
 //! Polled native EHCI 1.0 high-speed control, bulk and interrupt backend.
 //!
 //! This library owns its PCI, uncached BAR and requester-domain DMA resources.
-//! It deliberately has no xHCI identities or native class-driver adapter. One
+//! It has no xHCI identities or native class-driver adapter. One
 //! transfer runs at a time. Every inspection/cancellation stops the complete
-//! active schedule, observes ASS=PSS=0 and drains actual posted DMA writes
+//! active schedule, observes ASS=PSS=0 and drains posted DMA writes
 //! before touching its reusable QH/qTD/bounce arena. Uncertain transitions
 //! permanently quarantine the complete attachment, not just the failed TD.
 //!
@@ -12,6 +12,7 @@
 //! boundaries make this an incomplete EHCI-family implementation.
 mod descriptor;
 mod detach;
+pub mod host;
 mod native;
 mod periodic;
 mod recovery;
@@ -79,6 +80,12 @@ pub enum Error {
     Exhausted,
     Clock,
 }
+impl Error {
+    /// A pure STALL: the endpoint halted with no other transaction error.
+    pub fn stalled(&self) -> bool {
+        matches!(self, Self::Device(token) if token & schedule::ERRORS == schedule::HALTED)
+    }
+}
 impl From<DmaError> for Error {
     fn from(value: DmaError) -> Self {
         Self::Dma(value)
@@ -90,7 +97,7 @@ impl From<MemoryError> for Error {
     }
 }
 
-/// An unforgeable identity minted only after this owner's actual HS root reset.
+/// An unforgeable identity minted only after this owner's HS root reset.
 /// Copies remain tombstones after disconnect, another reset or controller stop.
 #[derive(Clone)]
 pub struct DeviceId {
@@ -98,14 +105,14 @@ pub struct DeviceId {
     generation: u64,
     port: u8,
 }
-/// A bulk endpoint from a configuration actually fetched and selected over USB.
+/// A bulk endpoint from a configuration fetched and selected over USB.
 #[derive(Clone)]
 pub struct BulkPipe {
     device: DeviceId,
     configuration: u64,
     endpoint: u8,
 }
-/// A high-speed interrupt endpoint from an actually acknowledged configuration.
+/// A high-speed interrupt endpoint from an acknowledged configuration.
 /// Configuration/root generations permanently invalidate old copies.
 #[derive(Clone)]
 pub struct InterruptPipe {
@@ -137,7 +144,7 @@ pub struct TransferId {
     device: DeviceId,
     serial: u64,
 }
-/// Private ownership of one actually suspended root. Dropping it retains the
+/// Private ownership of one suspended root. Dropping it keeps the
 /// suspended device, USB address and all native resources. It never reenables
 /// the old public device/pipe identities or authorizes platform sleep/reset.
 pub struct SuspendedPort {
@@ -236,7 +243,7 @@ impl Controller {
         self.operational + PORT + 4 * index
     }
     fn live(&mut self, id: &DeviceId) -> Result<usize, Error> {
-        let index = self.identity(id)?; // No hardware access before identity validation.
+        let index = self.identity(id)?; //
         let result = self.read(self.port_at(index));
         let value = self.guard(result)?;
         if value
@@ -334,7 +341,7 @@ impl Controller {
         // ASS0/PSS0 is engine quiescence, not a remapper payload-write drain.
         self.hw().drain()?;
         let arena = self.arena.as_ref().ok_or(Error::Invalid)?;
-        // SAFETY: actual ASS0/PSS0 + actual requester path drain.
+        // SAFETY: ASS0/PSS0 + requester path drain.
         unsafe {
             arena.dma.sync_for_cpu(0..arena.bytes())?;
         }
@@ -356,6 +363,25 @@ impl Controller {
         let expected = if periodic { PSS } else { ASS };
         self.wait(self.operational + STS, ASS | PSS, expected, TRANSITION_US)?;
         self.health()
+    }
+
+    /// The controller's root ports, numbered from one.
+    pub fn ports(&self) -> u8 {
+        self.ports.len() as u8
+    }
+    /// The lowest USB address no device here holds.
+    pub fn unused_address(&self) -> Option<u8> {
+        (1..=127).find(|address| {
+            !self
+                .ports
+                .iter()
+                .flatten()
+                .any(|device| device.address == *address)
+        })
+    }
+    /// Whether `id` still names a live device on a running controller.
+    pub fn validate(&self, id: &DeviceId) -> Result<(), Error> {
+        self.identity(id).map(drop)
     }
 
     /// Reset a powered root with no active TD. Another default-address owner
@@ -388,7 +414,7 @@ impl Controller {
         // A failed reset can leave that exact device reachable at address0.
         let result = self.reset_root(index);
         if let Err(error) = result {
-            // Only these paths observed actual OWNER handoff or a disabled
+            // Only these paths observed OWNER handoff or a disabled
             // FS/LS port after completed reset. Every ambiguous failure closes
             // the whole controller, including old assigned address aliases.
             if matches!(
@@ -436,7 +462,7 @@ impl Controller {
         if value & CONNECT == 0 || value & OVERCURRENT != 0 {
             return Err(Error::Stale);
         }
-        // Debounce actual connectivity, acknowledging only observed changes.
+        // Debounce connectivity, acknowledging only observed changes.
         self.write(at, (value & !PORT_CHANGES) | (value & PORT_CHANGES))?;
         self.hw().delay_us(100_000)?;
         value = self.read(at)?;
@@ -467,7 +493,7 @@ impl Controller {
         self.health()
     }
 
-    /// Observe actual retained roots. Disconnect/change invalidates old IDs
+    /// Observe kept roots. Disconnect/change invalidates old IDs
     /// before any arena access. An active affected TD permanently quarantines
     /// the controller; an idle disconnect releases only its address0 owner.
     pub fn refresh_roots(&mut self) -> Result<Vec<u8>, Error> {
@@ -557,7 +583,7 @@ impl Controller {
     fn public_control(setup: [u8; 8]) -> Result<(), Error> {
         let kind = setup[0] & 0x60;
         // This backend owns roots only. Hub-port class requests can reset or
-        // power an untracked downstream address0 owner, bypassing the actual
+        // power an untracked downstream address0 owner, bypassing the
         // bus-address exclusion. They require a real topology owner first.
         if kind == 0x60 || setup[0] & 0x1f > 2 {
             return Err(Error::Unsupported(

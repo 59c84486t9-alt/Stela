@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! Native RMI F30 GPIO button controls and active-low data records.
-//! Pinned source and retained copyright are in input/THIRD_PARTY.md.
+//! Pinned source and kept copyright are in input/THIRD_PARTY.md.
 use super::{
     Error, Function,
     transport::{Transport, buffer},
@@ -31,7 +31,7 @@ pub struct Button {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Frame {
     pub function: Function,
-    /// Complete actual data registers, including outputs and unused high bits.
+    /// Complete data registers, including outputs and unused high bits.
     pub levels: Vec<u8>,
     pub buttons: Vec<Button>,
 }
@@ -123,7 +123,7 @@ impl Engine {
                 input_buttons |= 1 << index;
             }
         }
-        // Reapply the complete actual hardware control image as the donor does.
+        // Reapply the complete hardware control image as the donor does.
         // No LED, haptic, output-direction or pin remapping policy is invented.
         transport.write(function.control, &raw)?;
         let mut actual = buffer(length)?;

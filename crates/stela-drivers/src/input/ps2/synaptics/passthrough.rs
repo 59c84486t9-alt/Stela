@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Original Synaptics notices: ../synaptics.rs and input/THIRD_PARTY.md.
 //! Physical source passthrough fields. Parent command acknowledgement never
-//! fabricates child acknowledgement, identity, activation or input ownership.
+//! invents child acknowledgement, identity, activation or input ownership.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Format {
     Three,

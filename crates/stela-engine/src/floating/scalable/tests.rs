@@ -496,7 +496,7 @@ mod sme_vector {
         }
     }
     #[test]
-    fn retained_full_a64_trap_enables_fail_transactionally() {
+    fn kept_full_a64_trap_enables_fail_transactionally() {
         let features = ScalableFeatures::of(Feature::Sme)
             .with(Feature::Sme2)
             .with(Feature::SmeFa64);
@@ -520,7 +520,7 @@ mod sme_vector {
 }
 
 #[test]
-fn controls_preserve_raw_storage_and_select_actual_feature_availability() {
+fn controls_preserve_raw_storage_and_select_feature_availability() {
     let state = GuestState {
         fpcr: u32::MAX,
         ..GuestState::default()

@@ -1,5 +1,5 @@
 //! Linux-only native execution for bounded hardware-reference tests.
-//! No guest OS services are supplied. Only faults in the retained executable
+//! No guest OS services are supplied. Only faults in the executable
 //! ranges of the active test invocation can be converted to a native exit.
 use crate::machine::{FaultCause, NativeFault};
 use core::{arch::global_asm, cell::Cell};
@@ -155,7 +155,7 @@ extern "C" fn fault_handler(signal: i32, _info: *mut libc::siginfo_t, context: *
                 stela_reference_recover as *const () as libc::greg_t;
             return;
         }
-        // An unrelated host fault retains its normal terminal behavior.
+        // An unrelated host fault keeps its normal terminal behavior.
         libc::signal(signal, libc::SIG_DFL);
     }
 }
@@ -286,14 +286,14 @@ mod tests {
         let original = state.clone();
         for _ in 0..3 {
             // SAFETY: both owned mappings contain bounded test block-ABI code;
-            // only UD2 faults, and its full executable extent is retained.
+            // only UD2 faults, and its full executable extent is held.
             let fault = unsafe { runner.run(invalid.entry(), &mut state) }.unwrap_err();
             assert_eq!(fault.trap, TRAP_INVALID_OPCODE);
             assert_eq!(fault.rip, start + 5);
             assert_eq!(fault.registers[7], 0x123);
             assert_eq!(fault.check_cause(), Some(FaultCause::InvalidOpcode));
             assert_eq!(state, original);
-            // SAFETY: this retained block writes only its return registers.
+            // SAFETY: this block writes only its return registers.
             let returned = unsafe { runner.run(normal.entry(), &mut state) }.unwrap();
             assert_eq!((returned.next_pc, returned.kind), (42, 3));
             assert_eq!(state, original);
@@ -308,7 +308,7 @@ mod tests {
         let mut runner = NativeRunner::new(vec![(start, start + 8)]).unwrap();
         let mut state = GuestState::default();
         // SAFETY: the only memory operand is the intentional null read in this
-        // retained mapping; Linux delivers its fault to the bounded runner.
+        // mapping; Linux delivers its fault to the bounded runner.
         let fault = unsafe { runner.run(code.entry(), &mut state) }.unwrap_err();
         assert_eq!(
             (fault.trap, fault.rip, fault.address, fault.write),

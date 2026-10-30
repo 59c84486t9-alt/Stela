@@ -7,10 +7,10 @@ pub(super) const MAX_RETAINED_COMPLETIONS: usize = 256;
 pub(super) static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
 
 impl Device {
-    /// Queue one actual control-independent transfer. `out` must be exactly
+    /// Queue one control-independent transfer. `out` must be exactly
     /// `length` for OUT and empty for IN. ISO is one native ASAP service interval;
     /// use submit_isochronous for a queued packet list. Native admission checks
-    /// actual speed, route and service payload before publication.
+    /// speed, route and service payload before publication.
     /// Stream zero selects an ordinary ring; nonzero selects allocated streams.
     pub fn submit(
         &mut self,
@@ -113,7 +113,7 @@ impl Device {
 
     /// None means still DMA-owned. A transport failure is terminal only after
     /// acknowledged cancellation; failed cancellation fences the whole owner,
-    /// retains the pending identity and never reads its buffer.
+    /// keeps the pending identity and never reads its buffer.
     pub fn poll(&mut self, request: Request) -> Result<Option<Completion>, BlockError> {
         // A current owner may consume acknowledged shutdown receipts even when
         // fenced. Identity admission must still precede cache lookup/removal.
@@ -194,8 +194,8 @@ impl Device {
     /// Cancellation is endpoint-wide in xHCI. All requests and packet buffers
     /// remain owned until Stop/Set Dequeue acknowledges that complete endpoint.
     /// Observed terminal results survive cancellation. Ordinary stopped receive
-    /// prefixes carry Cancelled with an actual count; unknown extents carry None.
-    /// Failed acknowledgement retains the pending request and exposes no data.
+    /// prefixes carry Cancelled with a count; unknown extents carry None.
+    /// Failed acknowledgement keeps the pending request and exposes no data.
     pub fn cancel(&mut self, address: u8) -> Result<(), BlockError> {
         self.validate_identity()?;
         if let Err(error) = self.ready() {
@@ -229,10 +229,10 @@ impl Device {
             .into_iter()
             .map(|request| (request, self.collect_isochronous(request).err()))
             .collect();
-        // Observe terminal events before Stop, but retain every buffer and
+        // Observe terminal events before Stop, but keep every buffer and
         // pending identity until the whole endpoint acknowledges retirement.
         // The exact ordinary ticket also preserves a completion/receive prefix
-        // racing Stop; a ring address alone cannot carry that authority.
+        // racing Stop; a ring address alone cannot carry that permission.
         let outcome = {
             let mut native = self.controller.borrow_mut();
             let mut controller = native.device(self.physical.id)?;
@@ -312,7 +312,7 @@ impl Device {
 
     /// Drain acknowledged cancellation completions, including those generated
     /// by configuration, alternate-setting or shutdown operations. A stale
-    /// physical generation returns an error and retains every receipt. A still
+    /// physical generation returns an error and keeps every receipt. A still
     /// current shutdown-fenced owner may drain its acknowledged receipts.
     pub fn take_completions(&mut self) -> Result<Vec<Completion>, BlockError> {
         self.validate_identity()?;

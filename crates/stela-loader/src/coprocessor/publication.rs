@@ -1,4 +1,4 @@
-//! Exact original segment publication ABI, as an uninstalled parent proposal.
+//! Original segment publication ABI, as an uninstalled parent proposal.
 //!
 //! AppleA7IOP and RTBuddy consume PA/linked-VA/remap separately. An encoded
 //! proposal and ownership identifiers do not establish live allocation/mapping
@@ -9,12 +9,13 @@ use super::{
     label,
     macho::end,
 };
+use crate::Result;
 use alloc::{collections::BTreeSet, string::String, vec::Vec};
-use anyhow::{Context, Result, ensure};
 use serde::Serialize;
+use stela_contracts::{refuse, require};
 use stela_formats::sha256;
 
-/// Actual selected native policy inputs, before packing the wire flag word.
+/// Selected native policy inputs, before packing the wire flag word.
 /// These internal flags are not Mach-O protections. Their other allocation,
 /// isolation and lifecycle effects remain with the corresponding parent owners.
 pub struct NativeFlagsInput {
@@ -28,7 +29,7 @@ pub struct NativeFlagsInput {
     pub telemetry_provenance: Provenance,
 }
 
-/// A retained derivation, not certification of the caller's selected policy.
+/// A kept derivation, not certification of the caller's selected policy.
 #[derive(Debug, Clone, Serialize)]
 pub struct NativeFlags {
     raw_flags: u32,
@@ -83,7 +84,7 @@ impl NativeFlags {
 
 #[derive(Clone)]
 pub enum Action {
-    /// Deliberate policy decision retained in the proposal, never an implicit
+    /// Deliberate policy decision kept in the proposal, never an implicit
     /// effect of a zero VM size or an unfamiliar segment name.
     Omit,
     Publish {
@@ -152,7 +153,7 @@ pub struct Proposal {
     pub records: Vec<SegmentRecord>,
     pub omitted: Vec<Omitted>,
     pub entry: MappedEntryPlan,
-    /// Actual OSData wire bytes, for both the ASC and nub provider views.
+    /// OSData wire bytes, for both the ASC and nub provider views.
     pub segment_ranges: Vec<u8>,
     /// RTBuddy's semicolon-delimited buffer. No unused trailing name remains.
     pub segment_names: Vec<u8>,
@@ -175,13 +176,13 @@ impl Configured {
     pub(in crate::coprocessor) fn publication_preview(&self, policy: Policy) -> Result<Proposal> {
         self.validate_tuning()?;
         let plan = self.plan();
-        ensure!(
+        require!(
             label(&policy.allocation_owner)
                 && label(&policy.mapping_owner)
                 && policy.configured_sha256 == self.receipt().configured_sha256,
             "coprocessor publication lacks source-bound allocation/mapping identity"
         );
-        ensure!(
+        require!(
             policy.segments.len() == plan.segments.len(),
             "publication policy does not cover every original segment"
         );
@@ -191,7 +192,7 @@ impl Configured {
         let mut entry = None;
         for decision in policy.segments {
             decision.provenance.validate()?;
-            ensure!(
+            require!(
                 seen.insert(decision.name.clone()),
                 "repeated coprocessor publication decision"
             );
@@ -200,11 +201,11 @@ impl Configured {
                 .iter()
                 .enumerate()
                 .find(|(_, s)| s.segment.name == decision.name)
-                .context("publication policy names an absent segment")?;
+                .ok_or(refuse!("publication policy names an absent segment"))?;
             let segment = &map.segment;
             match decision.action {
                 Action::Omit => {
-                    ensure!(
+                    require!(
                         !same_entry_segment(plan, index),
                         "cannot omit the coprocessor entry segment"
                     );
@@ -219,24 +220,24 @@ impl Configured {
                     iop_remap,
                     raw_flags,
                 } => {
-                    ensure!(
+                    require!(
                         segment.vm_size != 0,
                         "empty-segment publication semantics are not qualified"
                     );
-                    ensure!(
+                    require!(
                         raw_flags & !0x1f == 0,
                         "unknown original segment publication flags"
                     );
-                    ensure!(
+                    require!(
                         !decision.name.is_empty()
                             && !decision.name.bytes().any(|b| b == 0 || b == b';'),
                         "segment name cannot be encoded in original publication ABI"
                     );
                     let bytes = u32::try_from(segment.vm_size)
-                        .context("segment size exceeds publication ABI")?;
+                        .map_err(|_| refuse!("segment size exceeds publication ABI"))?;
                     let remap_end = end(iop_remap, segment.vm_size)?;
                     for r in &records {
-                        ensure!(
+                        require!(
                             iop_remap >= end(r.iop_remap, u64::from(r.bytes))?
                                 || r.iop_remap >= remap_end,
                             "overlapping coprocessor publication remap ranges"
@@ -274,7 +275,7 @@ impl Configured {
         }
         records.sort_by_key(|r| r.original_index);
         omitted.sort_by_key(|r| r.original_index);
-        let entry = entry.context("publication has no mapped entry instruction")?;
+        let entry = entry.ok_or(refuse!("publication has no mapped entry instruction"))?;
         let mut segment_ranges = Vec::new();
         let mut segment_names = Vec::new();
         for r in &records {
@@ -313,6 +314,7 @@ pub(super) mod tests {
         self as publication_root,
         tests::{fixture, name, prepare, w32, w64},
     };
+    use anyhow::Result;
     use configuration::tests::{config_policy, configured, provenance};
     use publication_root::{configuration, publication};
 

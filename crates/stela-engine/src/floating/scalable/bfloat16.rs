@@ -1,6 +1,5 @@
 //! Completion of SVE BF16 instructions.
 
-use anyhow::anyhow;
 use stela_compiler::{
     GuestState,
     aarch64::{
@@ -19,6 +18,7 @@ use stela_compiler::{
         },
     },
 };
+use stela_contracts::require;
 
 use super::{CompletionError, NumericalControls};
 use crate::scalable::ScalableState;
@@ -27,14 +27,6 @@ const BFLOAT_BYTES: usize = size_of::<u16>();
 const SINGLE_BYTES: usize = size_of::<u32>();
 const DOT_COMPONENTS: usize = 2;
 const MAX_PREDICATE_BYTES: usize = MAX_VECTOR_BYTES / BITS_PER_BYTE;
-
-fn require(condition: bool, message: &'static str) -> Result<(), CompletionError> {
-    if condition {
-        Ok(())
-    } else {
-        Err(anyhow!(message).into())
-    }
-}
 
 struct Sources {
     destination: [u8; MAX_VECTOR_BYTES],
@@ -47,7 +39,7 @@ impl Sources {
         state: &GuestState,
         scalable: &ScalableState,
         operand: &Operand,
-    ) -> anyhow::Result<Self> {
+    ) -> crate::Result<Self> {
         let mut result = Self {
             destination: [0; MAX_VECTOR_BYTES],
             left: [0; MAX_VECTOR_BYTES],
@@ -223,18 +215,18 @@ pub(super) fn complete(
     operand: &Operand,
     controls: NumericalControls,
 ) -> Result<(), CompletionError> {
-    require(
+    require!(
         scalable.mode().streaming(),
         "scalable BF arithmetic requires streaming state",
-    )?;
+    );
     if operand.predicate.is_some() {
-        require(
+        require!(
             matches!(operand.kind, Kind::Binary(_) | Kind::MultiplyAdd { .. }),
             "BF operation has no predicated form",
-        )?;
+        );
     }
     if let RightOperand::Indexed { index, .. } = operand.right {
-        require(
+        require!(
             matches!(
                 operand.kind,
                 Kind::Binary(BinaryOperation::Multiply)
@@ -243,16 +235,16 @@ pub(super) fn complete(
                     | Kind::MultiplyLong { .. }
             ),
             "BF operation has no indexed form",
-        )?;
+        );
         let indexed_bytes = if operand.kind == Kind::Dot {
             SINGLE_BYTES
         } else {
             BFLOAT_BYTES
         };
-        require(
+        require!(
             usize::from(index) < VECTOR_CHUNK_BYTES / indexed_bytes,
             "BF source index outside its segment",
-        )?;
+        );
     }
     let sources = Sources::snapshot(state, scalable, operand)?;
     let mut predicate_storage = [0; MAX_PREDICATE_BYTES];

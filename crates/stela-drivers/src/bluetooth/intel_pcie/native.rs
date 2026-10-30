@@ -2,8 +2,9 @@
 // Copyright (C) 2024 Intel Corporation
 //! Native PCI/UC-MMIO/MSI-X/IRQ attachment for the Intel Bluetooth transport.
 //! The real source stops before IRQ retirement. A hard-IRQ callback only masks
-//! this source and requests serialized service; it never fabricates completion.
+//! this source and requests serialized service; it never invents completion.
 use super::{Identity, Platform, Result as DriverResult, registers::*};
+use crate::bus::pci::regs;
 use crate::{
     Clock,
     bus::{
@@ -25,6 +26,7 @@ use core::{
 };
 
 const REGISTER_BYTES: usize = IVAR + 0x26;
+const MEMORY_AND_MASTER: u16 = regs::COMMAND_MEMORY | regs::COMMAND_MASTER;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
     Requirement(&'static str),
@@ -40,12 +42,12 @@ impl From<Error> for super::Error {
     }
 }
 
-/// Actual exclusive BAR0 registers, or an explicit independent device model.
+/// Exclusive BAR0 registers, or an explicit independent device model.
 /// # Safety
-/// The full span names this same Function/reset epoch's actual reserved BAR0.
+/// The full span names this same Function/reset epoch's reserved BAR0.
 /// All accesses are bounded native UC byte/DWORD effects, hard-IRQ-safe with no
 /// allocation, blocking, final-owner release or wider W1C read/modify/write.
-/// The retained owner keeps its mapping and resource valid through callback
+/// The kept owner keeps its mapping and resource valid through callback
 /// drain. Dropping uncertain storage must quarantine it, never unmap/reuse it.
 pub unsafe trait Registers: Send + Sync + 'static {
     fn full_bar(&self) -> PhysicalSpan;
@@ -59,7 +61,7 @@ pub struct MappedRegisters {
 }
 impl MappedRegisters {
     /// # Safety
-    /// The full BAR reservation and mapping belong to the same actual Function
+    /// The full BAR reservation and mapping belong to the same Function
     /// and authorized shared-reset epoch. No competing firmware/driver remains.
     /// Mapping Drop preserves the boot-lifetime reservation; no unmap is implied.
     pub unsafe fn new(
@@ -86,8 +88,8 @@ impl MappedRegisters {
         }
     }
 }
-// SAFETY: unsafe construction binds the actual exclusive UC mapping. Every
-// address is checked against that retained live mapping; stores use exact widths.
+// SAFETY: unsafe construction binds the exclusive UC mapping. Every
+// address is checked against that live mapping; stores use exact widths.
 unsafe impl Registers for MappedRegisters {
     fn full_bar(&self) -> PhysicalSpan {
         self.full_bar
@@ -97,7 +99,7 @@ unsafe impl Registers for MappedRegisters {
         if !(p.as_ptr() as usize).is_multiple_of(4) {
             return Err(Error::Requirement("aligned native register DWORD"));
         }
-        // SAFETY: checked live retained aligned UC register address.
+        // SAFETY: checked live aligned UC register address.
         Ok(unsafe { p.as_ptr().cast::<u32>().read_volatile() })
     }
     fn write32(&self, offset: usize, value: u32) -> core::result::Result<(), Error> {
@@ -105,7 +107,7 @@ unsafe impl Registers for MappedRegisters {
         if !(p.as_ptr() as usize).is_multiple_of(4) {
             return Err(Error::Requirement("aligned native register DWORD"));
         }
-        // SAFETY: same checked UC owner; exact native DWORD effect, no RMW.
+        // SAFETY: same checked UC owner; native DWORD effect, no RMW.
         unsafe { p.as_ptr().cast::<u32>().write_volatile(value) };
         Ok(())
     }
@@ -183,7 +185,7 @@ struct Callback<R: Registers>(Arc<Signals<R>>);
 impl<R: Registers> Handler for Callback<R> {
     fn handle(&self) -> Disposition {
         // No allocation, waits, W1C or DMA completion handling in hard IRQ.
-        // Actual mask/readback contains the source until serialized service.
+        // Mask/readback contains the source until serialized service.
         if let Err((offset, _)) = self.0.mask()
             && !self.0.handler_fault.load(Ordering::Acquire)
         {
@@ -216,9 +218,9 @@ impl<C: MsiConfigSpace, B: BarAccess, R: Registers> NativeSource<C, B, R> {
         Ok(())
     }
 }
-// SAFETY: the consumed native grant binds actual PCI/reset/UC/DMA ownership.
+// SAFETY: the consumed native grant binds PCI/reset/UC/DMA ownership.
 // Source quiescence independently observes stop/reset/cause acknowledgments;
-// registry retirement drains actual CPU/callbacks before pending work is canceled.
+// registry retirement drains CPU/callbacks before pending work is canceled.
 unsafe impl<C: MsiConfigSpace, B: BarAccess, R: Registers> Source for NativeSource<C, B, R> {
     fn mask(&mut self) -> core::result::Result<(), irq::IrqError> {
         let result = self
@@ -239,20 +241,20 @@ unsafe impl<C: MsiConfigSpace, B: BarAccess, R: Registers> Source for NativeSour
         let Route::Msi(message) = route else {
             return Err(irq::IrqError::Route);
         };
-        // SAFETY: the actual registry retains its qualified route and callback;
+        // SAFETY: the registry keeps its checked route and callback;
         // mask and independently observed source stop precede programming.
         let result =
             unsafe { self.configuration.borrow_mut().msix.program(message) }.map_err(Error::Msix);
         self.checked(result, irq::IrqError::Route)
     }
     unsafe fn unmask(&mut self) -> core::result::Result<(), irq::IrqError> {
-        // SAFETY: registry has published this source's LIVE retained callback.
+        // SAFETY: registry has published this source's LIVE callback.
         let result = unsafe { self.configuration.borrow_mut().msix.unmask() }.map_err(Error::Msix);
         self.checked(result, irq::IrqError::Mask)
     }
     unsafe fn synchronize(&mut self) -> core::result::Result<(), irq::IrqError> {
         self.checked(self.signals.stopped(), irq::IrqError::Drain)?;
-        // There is exactly one deferred work item: this retained flag. The
+        // There is exactly one deferred work item: this flag. The
         // exclusive process owner cannot run service during its own retirement.
         self.signals.pending.store(false, Ordering::Release);
         Ok(())
@@ -272,15 +274,15 @@ pub struct NativePlatform<C: MsiConfigSpace, B: BarAccess, R: Registers> {
 }
 impl<C: MsiConfigSpace + 'static, B: BarAccess + 'static, R: Registers> NativePlatform<C, B, R> {
     /// # Safety
-    /// Inputs own the actual unique Function/root, BIR-indexed complete BAR
+    /// Inputs own the unique Function/root, BIR-indexed complete BAR
     /// resources, BAR0 UC mapping and reset epoch; PCI D0, memory decoding and
     /// bus mastering are already acknowledged. All former firmware/driver/CPU
     /// interrupt and DMA owners are drained. Shared combo reset is authorized by
-    /// its actual coordinator. Supplied DMA is coherent, identity-addressed and
-    /// boot-lifetime reserved for this requester. IRQ routing is real/qualified.
+    /// its coordinator. Supplied DMA is coherent, identity-addressed and
+    /// boot-lifetime reserved for this requester. IRQ routing is real/checked.
     /// Only one serialized process/deferred owner may service this transport;
-    /// the callback's retained pending flag is its entire work queue. No source,
-    /// mapping, DMA or reset owner may be revoked while retained. Native mappings
+    /// the callback's pending flag is its entire work queue. No source,
+    /// mapping, DMA or reset owner may be revoked while kept. Native mappings
     /// stay reserved for the boot even after successful controller close.
     /// Constructor errors perform no writes and return every exact input owner.
     pub unsafe fn new(
@@ -298,13 +300,16 @@ impl<C: MsiConfigSpace + 'static, B: BarAccess + 'static, R: Registers> NativePl
             let f = &mut inputs.function;
             if f.vendor != 0x8086
                 || !super::DEVICE_IDS.contains(&f.device)
-                || f.config().read32(0) != u32::from(f.vendor) | (u32::from(f.device) << 16)
+                || f.config().read32(regs::VENDOR_ID)
+                    != u32::from(f.vendor) | (u32::from(f.device) << 16)
             {
                 return Err(Error::Requirement(
                     "actual source Intel PCIe Function identity",
                 ));
             }
-            if inputs.clock.ticks_per_microsecond == 0 || f.config().read16(4) & 6 != 6 {
+            if inputs.clock.ticks_per_microsecond == 0
+                || f.config().read16(regs::COMMAND) & MEMORY_AND_MASTER != MEMORY_AND_MASTER
+            {
                 return Err(Error::Requirement(
                     "qualified clock and acknowledged PCI memory/bus mastering",
                 ));
@@ -340,7 +345,7 @@ impl<C: MsiConfigSpace + 'static, B: BarAccess + 'static, R: Registers> NativePl
             clock,
             interrupts,
         } = inputs;
-        // SAFETY: same consumed actual Function/reset/resources grant. Old real
+        // SAFETY: same consumed Function/reset/resources grant. Old real
         // routes/CPU callbacks are independently drained; no numeric substitute.
         let msix = match unsafe { MsixConfig::new(function, retained, bars) } {
             Ok(msix) => msix,
@@ -402,7 +407,7 @@ impl<C: MsiConfigSpace + 'static, B: BarAccess + 'static, R: Registers> NativePl
             .into()
     }
 }
-// SAFETY: native constructor's consumed actual grants and concrete owned PCI,
+// SAFETY: native constructor's consumed grants and concrete owned PCI,
 // MSI-X, UC mappings and IRQ registry implement the full Platform contract.
 unsafe impl<C: MsiConfigSpace + 'static, B: BarAccess + 'static, R: Registers> Platform
     for NativePlatform<C, B, R>
@@ -417,7 +422,7 @@ unsafe impl<C: MsiConfigSpace + 'static, B: BarAccess + 'static, R: Registers> P
             && value & (MASTER_DISCONNECT | MASTER_STOPPED) == MASTER_DISCONNECT | MASTER_STOPPED
             && value & (ENABLE | MAC_INIT | FUNC_INIT) == 0
         {
-            // Actual pre-reset bus-master-stop acknowledgment. SW_RESET need
+            // Pre-reset bus-master-stop acknowledgment. SW_RESET need
             // not preserve this read-only status bit in the post-reset CSR.
             self.signals().disconnect_ack.store(true, Ordering::Release);
         }
@@ -529,12 +534,12 @@ unsafe impl<C: MsiConfigSpace + 'static, B: BarAccess + 'static, R: Registers> P
         {
             return Err(self.irq_error(error));
         }
-        // The actual registry masks MSI-X before its source quiescence checks.
+        // The registry masks MSI-X before its source quiescence checks.
         // A failed DMA stop still gets that real mask/quarantine attempt.
         self.signals().stopped()?;
         self.registration = None;
         let mut configuration = self.configuration.as_ref().unwrap().borrow_mut();
-        // SAFETY: actual bus-master stop/reset/cause acknowledgments and real
+        // SAFETY: bus-master stop/reset/cause acknowledgments and real
         // registry CPU/callback/work drain all completed. DMA pages remain pinned.
         let owners = unsafe { configuration.msix.release() }.map_err(Error::Msix)?;
         configuration.released = Some(owners);
@@ -557,7 +562,7 @@ impl<C: MsiConfigSpace, B: BarAccess, R: Registers> Drop for NativePlatform<C, B
             }
         }
         // Successful physical retirement permits owner Drop. Owned mappings
-        // deliberately retain/quarantine their boot-lifetime native reservations.
+        // keep/quarantine their boot-lifetime native reservations.
     }
 }
 impl<C: MsiConfigSpace + 'static, B: BarAccess + 'static, R: Registers>

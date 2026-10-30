@@ -119,7 +119,7 @@ fn prepare_sources(code: &mut Code, operand: &Operand) {
 }
 
 /// Toggle only the architectural rotated M signs after normal-input guards.
-/// XMM2 is scratch; staged XMM0/1 and the accumulator retain their source roles.
+/// XMM2 is scratch; staged XMM0/1 and the accumulator keep their source roles.
 pub(super) fn rotate_right_sign(code: &mut Code, format: Format, rotation: Rotation) {
     if rotation == Rotation::Degrees0 {
         return;

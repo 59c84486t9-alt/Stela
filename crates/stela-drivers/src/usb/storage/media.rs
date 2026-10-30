@@ -1,4 +1,4 @@
-//! Retained class lifetime and permanent per-publication media validity.
+//! Class lifetime and permanent per-publication media validity.
 // SPDX-License-Identifier: GPL-2.0-only
 // Linux sd.c::sd_check_events/media_not_present/sd_revalidate_disk and
 // scsi_lib.c::scsi_io_completion_action. See THIRD_PARTY.md.
@@ -284,7 +284,7 @@ pub(super) fn scan_uas<T: Scsi<Lun = uas::Lun>>(
     })
 }
 
-/// A configured storage interface retained independently of inserted media.
+/// A configured storage interface kept independently of inserted media.
 /// Clones share the same serialized transport and permanent disk validity.
 #[derive(Clone)]
 pub struct UsbStorage {
@@ -293,6 +293,7 @@ pub struct UsbStorage {
 #[derive(Clone)]
 pub(super) enum TransportOwner {
     Bot(Rc<RefCell<Owner<Bot<Native>>>>),
+    EhciBot(Rc<RefCell<Owner<Bot<EhciBulk>>>>),
     Uas(Rc<RefCell<Owner<uas::Host>>>),
 }
 impl UsbStorage {
@@ -300,10 +301,11 @@ impl UsbStorage {
     pub fn location(&self) -> String {
         match &self.owner {
             TransportOwner::Bot(owner) => owner.borrow().prefix.clone(),
+            TransportOwner::EhciBot(owner) => owner.borrow().prefix.clone(),
             TransportOwner::Uas(owner) => owner.borrow().prefix.clone(),
         }
     }
-    /// Poll actual LUN inventory/readiness and revalidate current media. The
+    /// Poll LUN inventory/readiness and revalidate current media. The
     /// caller replaces its disk inventory with this result. Existing aliases
     /// remain valid only for unchanged media without an observed change event.
     /// This synchronous operation does not install a polling/hotplug scheduler.
@@ -317,6 +319,14 @@ impl UsbStorage {
                     .into_iter()
                     .map(|disk| UsbDisk {
                         disk: UsbTransport::Bot(disk),
+                    })
+                    .collect()
+            }),
+            TransportOwner::EhciBot(owner) => scan_bot(owner.clone(), failures).map(|units| {
+                units
+                    .into_iter()
+                    .map(|disk| UsbDisk {
+                        disk: UsbTransport::EhciBot(disk),
                     })
                     .collect()
             }),
@@ -352,11 +362,12 @@ impl UsbStorage {
     fn requires_rebind(&self) -> bool {
         match &self.owner {
             TransportOwner::Bot(owner) => owner.borrow().transport.poisoned(),
+            TransportOwner::EhciBot(owner) => owner.borrow().transport.poisoned(),
             TransportOwner::Uas(owner) => owner.borrow().transport.requires_rebind(),
         }
     }
-    /// Actual device reset followed by fresh transport, descriptors and media
-    /// probes. This owner retains the new interface even when no LUN is ready.
+    /// Device reset followed by fresh transport, descriptors and media
+    /// probes. This owner keeps the new interface even when no LUN is ready.
     /// Other copies of the old owner and all its disks remain quarantined.
     pub fn reset_and_rebind(
         &mut self,
@@ -383,6 +394,19 @@ impl UsbStorage {
                 );
                 TransportOwner::Bot(Rc::new(RefCell::new(Owner::new(host, prefix, serial))))
             }
+            TransportOwner::EhciBot(old) => {
+                let mut old = old.borrow_mut();
+                old.invalidate();
+                let host =
+                    old.transport
+                        .reset_and_rebind_ehci()
+                        .map_err(|(operation, error)| {
+                            failures.push((operation, error.clone()));
+                            error
+                        })?;
+                let (prefix, serial) = (old.prefix.clone(), old.serial.clone());
+                TransportOwner::EhciBot(Rc::new(RefCell::new(Owner::new(host, prefix, serial))))
+            }
             TransportOwner::Uas(old) => {
                 let host = {
                     let mut old = old.borrow_mut();
@@ -407,6 +431,7 @@ impl UsbStorage {
         if result.is_err() {
             match &self.owner {
                 TransportOwner::Bot(owner) => owner.borrow_mut().transport.quarantine(),
+                TransportOwner::EhciBot(owner) => owner.borrow_mut().transport.quarantine(),
                 TransportOwner::Uas(owner) => owner.borrow_mut().transport.quarantine(),
             }
         }
@@ -414,12 +439,13 @@ impl UsbStorage {
     }
 }
 impl UsbDisk {
-    /// Retain the configured interface for later rescan, even after removing
+    /// Keep the configured interface for later rescan, even after removing
     /// every published disk from the caller's inventory.
     pub fn storage(&self) -> UsbStorage {
         UsbStorage {
             owner: match &self.disk {
                 UsbTransport::Bot(disk) => TransportOwner::Bot(disk.bot.clone()),
+                UsbTransport::EhciBot(disk) => TransportOwner::EhciBot(disk.bot.clone()),
                 UsbTransport::Uas(disk) => TransportOwner::Uas(disk.bot.clone()),
             },
         }
@@ -475,15 +501,18 @@ mod tests {
         }
     }
     #[test]
-    fn service_recovers_native_uas_without_replaying_data_and_retains_empty_media() {
+    fn service_recovers_native_uas_without_replaying_data_and_keeps_empty_media() {
         use crate::block::BlockDevice;
         use crate::usb::xhci;
         for speed in [xhci::HIGH_SPEED, xhci::SUPER_SPEED] {
             let mut memory = vec![0u64; 512 * 1024];
             let (controller, device, hardware, mut dma) =
                 xhci::model::reset_fixture(&mut memory, speed, 32, 3);
-            let binding =
-                uas::Binding::new(&device, &xhci::interfaces(&device.configuration)[0]).unwrap();
+            let binding = uas::Binding::new(
+                &device,
+                &crate::usb::descriptor::interfaces(&device.configuration)[0],
+            )
+            .unwrap();
             let mut failures = Vec::new();
             // SAFETY: the fixture grants this owner its one unconfigured interface.
             let (mut storage, mut disks) = unsafe {
@@ -535,8 +564,11 @@ mod tests {
         let mut memory = vec![0u64; 512 * 1024];
         let (controller, device, hardware, mut dma) =
             xhci::model::reset_fixture(&mut memory, xhci::HIGH_SPEED, 32, 3);
-        let binding =
-            uas::Binding::new(&device, &xhci::interfaces(&device.configuration)[0]).unwrap();
+        let binding = uas::Binding::new(
+            &device,
+            &crate::usb::descriptor::interfaces(&device.configuration)[0],
+        )
+        .unwrap();
         let mut failures = Vec::new();
         // SAFETY: exclusive fresh fixture interface; no endpoints configured.
         let (mut storage, mut disks) = unsafe {

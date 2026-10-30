@@ -1,13 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (c) 2002 Takashi Iwai
-//! UAC2 terminal connector status from actual descriptor access and GET_CUR.
+//! UAC2 terminal connector status from descriptor access and GET_CUR.
 //! Linux sound/usb/mixer.c::get_connector_value and audio-v2.h at
 //! cc9de5d4b5ab6459f5774946aa3195ad51236fa8. See THIRD_PARTY.md.
 use super::{Binding, Control, Entity, Error, UAC2, control};
-use crate::usb::xhci;
 use alloc::vec::Vec;
 
-/// An actual terminal connector observation. Notifications invalidate this
+/// A terminal connector observation. Notifications invalidate this
 /// historical value; they never replace it with an inferred plug or route.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ConnectorStatus {
@@ -40,7 +39,7 @@ impl ConnectorPlan {
         if plan.protocol != UAC2 {
             return Ok(plan);
         }
-        let interfaces = xhci::interfaces(configuration);
+        let interfaces = crate::usb::descriptor::interfaces(configuration);
         let interface = interfaces
             .iter()
             .find(|i| i.number == plan.interface && i.alternate == 0)

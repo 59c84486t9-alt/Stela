@@ -1,4 +1,4 @@
-//! Refusals before lending an actual native frame. Diagnostics are allocated
+//! Refusals before lending a native frame. Diagnostics are allocated
 //! only on failure; successful preparation carries no additional provenance.
 use super::*;
 use crate::machine::engine::{Requirement, RequirementKind, Stop};

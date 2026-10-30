@@ -8,4 +8,8 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+stela-crypto = { path = "../stela-crypto" }
+
+[dev-dependencies]
+# Independent SHA-256 the firmware catalog tests check digests against.
 sha2 = { version = "0.10", default-features = false }

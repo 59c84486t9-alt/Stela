@@ -8,14 +8,14 @@ use stela_drivers::{
     probe::ServiceError,
 };
 
-// This strong reference is retained for the boot. Consumers receive their
+// This strong reference is held for the boot. Consumers receive their
 // own Arc, so a probe's temporary service object need not outlive them.
 static SOURCE: AtomicPtr<Source> = AtomicPtr::new(core::ptr::null_mut());
 
 /// Initialize once from the loader's private seed, then erase that copy.
 ///
 /// # Safety
-/// `seed` names exactly 32 exclusive bytes retained by the loader, reached
+/// `seed` names exactly 32 exclusive bytes kept by the loader, reached
 /// through the shared physmap. No other reader borrows those bytes.
 pub unsafe fn initialize(seed: Region) -> Result<(), EntropyError> {
     if seed.bytes != 32 || seed.physical == 0 {
@@ -23,7 +23,7 @@ pub unsafe fn initialize(seed: Region) -> Result<(), EntropyError> {
     }
     let address = layout::physical(seed.physical) as *mut u8;
     let mut bytes = [0; 32];
-    // SAFETY: the caller retains the complete seed range and gives this
+    // SAFETY: the caller keeps the complete seed range and gives this
     // function its exclusive consumption and erasure.
     unsafe {
         core::ptr::copy_nonoverlapping(address, bytes.as_mut_ptr(), bytes.len());
@@ -60,7 +60,7 @@ pub fn source() -> Result<Arc<dyn Entropy>, ServiceError> {
     if raw.is_null() {
         return Err(ServiceError::Unavailable);
     }
-    // SAFETY: the global strong reference is retained permanently, and an
+    // SAFETY: the global strong reference is held permanently, and an
     // acquired publication observes the initialized generator. This extra
     // strong reference belongs to the returned capability.
     unsafe {

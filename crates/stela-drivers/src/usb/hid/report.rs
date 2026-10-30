@@ -2,7 +2,7 @@
 // Linux HID reference: Copyright (c) 1999 Andreas Gal;
 // 2000-2005 Vojtech Pavlik; 2005 Michael Haboustak for Concept2, Inc;
 // 2006-2012 Jiri Kosina; 2007-2008 Oliver Neukum.
-// Retained source identities and adaptation scope: ../THIRD_PARTY.md.
+// Source identities and adaptation scope: ../THIRD_PARTY.md.
 //! HID report descriptors (HID 1.11 6.2.2) as the input fields they
 //! describe, and the pointer and keyboard reports read from those fields.
 //!
@@ -28,9 +28,6 @@ use super::{
     usages::Local,
 };
 use alloc::{sync::Arc, vec::Vec};
-
-#[cfg(test)]
-mod sparse_tests;
 
 const GENERIC_DESKTOP_X: u32 = 0x0001_0030;
 const GENERIC_DESKTOP_Y: u32 = 0x0001_0031;
@@ -125,8 +122,8 @@ enum Usage {
     Array(Array),
 }
 
-/// Selector bounds stay private and wide; public pointer Field retains its API.
-/// Every field of one Array Main item shares one immutable qualified table.
+/// Selector bounds stay private and wide; public pointer Field keeps its API.
+/// Every field of one Array Main item shares one immutable checked table.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Array {
     usages: Arc<[u32]>,
@@ -203,7 +200,7 @@ pub struct Keys {
     pub report: Option<u8>,
     /// Bitmap fields and the usage each one reports.
     variables: Vec<(Field, u32)>,
-    /// Array fields and shared exact qualified usage tables.
+    /// Array fields and shared exact checked usage tables.
     arrays: Vec<(Field, Array)>,
 }
 
@@ -682,6 +679,7 @@ pub fn parse(descriptor: &[u8]) -> Result<Reports, ParseError> {
 
 #[cfg(test)]
 mod tests {
+    mod sparse;
     use super::*;
 
     #[test]

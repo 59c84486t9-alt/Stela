@@ -3,11 +3,11 @@
 //! WMT headers/status interpretation adapted from btmtk_usb_hci_wmt_sync.
 use super::{Error, Result};
 use alloc::vec::Vec;
-use sha2::{Digest, Sha256};
+use stela_crypto::{Sha256, digest::Digest};
 pub(super) const OPCODE: u16 = 0xfc6f;
 pub(super) const PATCH: u8 = 1;
 pub(super) const FUNCTION: u8 = 6;
-/// Pending command metadata retains exact wire identity without retaining any
+/// Pending command metadata keeps exact wire identity without keeping any
 /// executable firmware fragment in the historical error.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WmtCommandReceipt {

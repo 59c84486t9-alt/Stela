@@ -1,7 +1,7 @@
 //! The setup record, `EFI/stela/setup.json`: what setup wrote, read by every
 //! later command and written before each change.
 use super::{
-    CHOICES_PATH, CHOOSER_SECONDS, Environment, InstallImage, LOADER_PATH, RECORD,
+    CHOICES_PATH, CHOOSER_SECONDS, Environment, InstallImage, LOADER_PATH, RECORD, addresses,
     bundle::{self, Kind},
     ecid::Ecid,
     image_is_remote, installed, locate_esp, machines, medium, restore_choice_name, translations,
@@ -107,6 +107,9 @@ pub(super) struct Record {
     /// The Wi-Fi network every choice joins (`--wifi`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) wifi: Option<wifi::Network>,
+    /// The network addresses every choice sets by hand (`--ipv4`, `--dns`).
+    #[serde(default, skip_serializing_if = "addresses::Addresses::is_automatic")]
+    pub(super) addresses: addresses::Addresses,
 }
 
 pub(super) fn first_schema() -> u32 {
@@ -191,6 +194,7 @@ impl Record {
             .wifi
             .as_ref()
             .and_then(|network| network.country.clone());
+        self.addresses.apply(&mut system);
         format!("{system}\n")
     }
 

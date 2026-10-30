@@ -1,17 +1,19 @@
 //! Original T6000 normal-mode membership. Kernel discovery, PMGR constructor
 //! order and native worker order are separate coordinates. This adapter keeps
-//! the first two in original source order; the caller binds the actual BSP to
+//! the first two in original source order; the caller binds the BSP to
 //! its real worker independently. No PS state or interrupt delivery is granted.
 use super::*;
+use crate::Result;
 use stela_contracts::processor::ProcessorTarget;
+use stela_contracts::refuse;
 
 const EVIDENCE: &str = "26A434 mac13j mode1 source-prefix membership; complex file2b16e08/core2b190e4/skip2b19918; no lifecycle, AIC delivery or native execution admission";
 
 impl<'a> BspSource<'a> {
-    /// Selects an original-order prefix of actual source PEs. Every original
+    /// Selects an original-order prefix of source PEs. Every original
     /// complex must remain represented and the selected boot PE must be the
     /// sole prepared running CPU. Later records in the last complex are
-    /// retained in the full graph, but acquire no assigned owner here.
+    /// in the full graph, but acquire no assigned owner here.
     pub fn t6000_assigned(
         original: &'a [u8],
         prepared: &[u8],
@@ -19,35 +21,39 @@ impl<'a> BspSource<'a> {
         boot_reg: u32,
         effective_acc_harvesting: u32,
         count: usize,
-    ) -> Result<Self, String> {
+    ) -> Result<Self> {
         if effective_acc_harvesting != 1 {
-            return Err("assigned T6000 requires effective normal harvesting1".into());
+            return Err(refuse!(
+                "assigned T6000 requires effective normal harvesting1"
+            ));
         }
-        // Reuse only the established identity, retained-schema and complete
+        // Reuse only the established identity, kept-schema and complete
         // original graph checks. That constructor examines original E0 and
         // does not require prepared E0 to be running. Its single-PE metadata
         // is replaced below; no input bytes are changed to pass preflight.
         let mut result = Self::t6000(original, prepared, identity, 0)?;
-        let root = Node::root(original).ok_or("assigned original tree is malformed")?;
-        let current = Node::root(prepared).ok_or("assigned prepared tree is malformed")?;
+        let root = Node::root(original).ok_or(refuse!("assigned original tree is malformed"))?;
+        let current = Node::root(prepared).ok_or(refuse!("assigned prepared tree is malformed"))?;
         let product = root
             .child("product")
-            .ok_or("assigned source lacks product")?;
-        let cpus = root.child("cpus").ok_or("assigned source lacks CPUs")?;
+            .ok_or(refuse!("assigned source lacks product"))?;
+        let cpus = root
+            .child("cpus")
+            .ok_or(refuse!("assigned source lacks CPUs"))?;
         let all = cpus
             .children()
-            .ok_or("assigned source CPUs are malformed")?;
+            .ok_or(refuse!("assigned source CPUs are malformed"))?;
         let prepared_cpus = current
             .child("cpus")
-            .ok_or("assigned prepared tree lacks CPUs")?;
+            .ok_or(refuse!("assigned prepared tree lacks CPUs"))?;
         let prepared_all = prepared_cpus
             .children()
-            .ok_or("assigned prepared CPUs are malformed")?;
+            .ok_or(refuse!("assigned prepared CPUs are malformed"))?;
         let mut processors = Vec::new();
         for node in &all {
             let kind = match property(node, "cluster-type")? {
                 [kind @ (b'E' | b'P'), 0] => *kind,
-                _ => return Err("assigned T6000 core kind is unqualified".into()),
+                _ => return Err(refuse!("assigned T6000 core kind is unqualified")),
             };
             processors.push(board::Processor {
                 cluster_type: kind,
@@ -69,9 +75,11 @@ impl<'a> BspSource<'a> {
         let boot = processors
             .iter()
             .position(|cpu| cpu.reg == boot_reg)
-            .ok_or("assigned T6000 source lacks the selected boot PE")?;
+            .ok_or(refuse!("assigned T6000 source lacks the selected boot PE"))?;
         if count == 0 || count > all.len() || boot >= count {
-            return Err("assigned T6000 prefix must retain the selected boot PE".into());
+            return Err(refuse!(
+                "assigned T6000 prefix must retain the selected boot PE"
+            ));
         }
         let full_clusters = processors
             .iter()
@@ -82,7 +90,9 @@ impl<'a> BspSource<'a> {
             .map(|cpu| cpu.reg >> CLUSTER_SHIFT)
             .collect::<BTreeSet<_>>();
         if full_clusters != selected_clusters {
-            return Err("assigned T6000 prefix must retain every original complex".into());
+            return Err(refuse!(
+                "assigned T6000 prefix must retain every original complex"
+            ));
         }
         if prepared_all
             .iter()
@@ -97,13 +107,19 @@ impl<'a> BspSource<'a> {
                     .contains(&cpu.property("state"))
             })
         {
-            return Err("assigned T6000 boot PE is not the sole prepared running CPU".into());
+            return Err(refuse!(
+                "assigned T6000 boot PE is not the sole prepared running CPU"
+            ));
         }
-        let io = root.child("arm-io").ok_or("assigned source lacks arm-io")?;
-        let aic = io.child("aic").ok_or("assigned source lacks AIC")?;
+        let io = root
+            .child("arm-io")
+            .ok_or(refuse!("assigned source lacks arm-io"))?;
+        let aic = io
+            .child("aic")
+            .ok_or(refuse!("assigned source lacks AIC"))?;
         let aic_provider = word(&aic, "AAPL,phandle")?;
         if aic_provider == 0 {
-            return Err("assigned T6000 AIC provider is absent".into());
+            return Err(refuse!("assigned T6000 AIC provider is absent"));
         }
 
         // Validate the full original complex geometry, including unassigned
@@ -113,27 +129,24 @@ impl<'a> BspSource<'a> {
             if word(node, "interrupt-parent")? != aic_provider
                 || property(node, "interrupts")?.len() != 4
             {
-                return Err("assigned T6000 original CPU error source is unqualified".into());
+                return Err(refuse!(
+                    "assigned T6000 original CPU error source is unqualified"
+                ));
             }
             let acc = region(node, "acc-impl-reg")?;
             let cpm = region(node, "cpm-impl-reg")?;
             let cpu_impl = region(node, "cpu-impl-reg")?;
-            let encoded = identities.processors[pe]
+            let cache = identities.processors[pe]
                 .caches
-                .ok_or("assigned T6000 cache identity is incomplete")?
-                .ccsidr(2);
-            let cache = Cache {
-                line: 16 << (encoded & 7),
-                ways: ((encoded >> 3) & 0x3ff) as u32 + 1,
-                bytes: word(node, "l2-cache-size")?,
-            };
+                .ok_or(refuse!("assigned T6000 cache identity is incomplete"))?
+                .cache(CacheSelection::L2Unified);
             let cluster = (cpu.reg >> CLUSTER_SHIFT) as usize;
             if geometry.len() == cluster {
                 geometry.push((pe, acc, cpm, cpu_impl.bytes, cache));
             } else {
                 let &(first, first_acc, first_cpm, cpu_bytes, first_cache) = geometry
                     .get(cluster)
-                    .ok_or("assigned T6000 cluster discovery hole")?;
+                    .ok_or(refuse!("assigned T6000 cluster discovery hole"))?;
                 if acc != first_acc
                     || cpm != first_cpm
                     || cpu_impl.bytes != cpu_bytes
@@ -142,9 +155,9 @@ impl<'a> BspSource<'a> {
                     || identities.processors[pe].clock != identities.processors[first].clock
                     || identities.processors[pe].caches != identities.processors[first].caches
                 {
-                    return Err(
-                        "assigned T6000 complex implementation/cache geometry differs".into(),
-                    );
+                    return Err(refuse!(
+                        "assigned T6000 complex implementation/cache geometry differs"
+                    ));
                 }
             }
         }
@@ -158,7 +171,9 @@ impl<'a> BspSource<'a> {
         for (cluster, &(first, acc, cpm, _, cache)) in geometry.iter().enumerate() {
             let owners = associations.iter().filter(|owner| matches!(&owner.target, ProcessorTarget::Cluster { members } if members.contains(&first))).collect::<Vec<_>>();
             let [owner] = owners.as_slice() else {
-                return Err("assigned T6000 complex lacks a unique physical CPM owner".into());
+                return Err(refuse!(
+                    "assigned T6000 complex lacks a unique physical CPM owner"
+                ));
             };
             let id = ClusterId(cluster as u32);
             let cache_id = CacheId(cluster as u32);
@@ -194,18 +209,20 @@ impl<'a> BspSource<'a> {
                 .filter(|owner| owner.target == ProcessorTarget::Core { pe })
                 .collect::<Vec<_>>();
             let [owner] = owners.as_slice() else {
-                return Err("assigned T6000 PE lacks a unique physical core owner".into());
+                return Err(refuse!(
+                    "assigned T6000 PE lacks a unique physical core owner"
+                ));
             };
             let id = GuestSlotId(pe as u32);
             let kind_id = KindId(pe as u32);
             let identity = identities.processors[pe];
             let (instruction, data) = board::level1_caches(result.profile.soc, cpu.cluster_type)
-                .ok_or("assigned T6000 L1 geometry is unqualified")?;
+                .ok_or(refuse!("assigned T6000 L1 geometry is unqualified"))?;
             result.kinds.push(CoreKind {
                 id: kind_id,
                 cluster_type: cpu.cluster_type,
                 midr: identity.midr,
-                aff2: (identity.mpidr >> CORETYPE_SHIFT & u64::from(CORETYPE_MASK)) as u8,
+                aff2: crate::board::mpidr::coretype(identity.mpidr),
                 clock: identity.clock,
                 instruction,
                 data,
@@ -238,14 +255,14 @@ impl<'a> BspSource<'a> {
                 result.core_address = owner.address;
             }
         }
-        // Capacities bound the retained inventory, not a larger fabricated SKU.
+        // Capacities bound the inventory, not a larger invented SKU.
         // board::cpus has also checked the reviewed kernel20PE/6complex/physical10
         // envelope; the shared resolver checked source-order contiguous Aff0.
         let physical_span = full_clusters
             .iter()
             .next_back()
             .copied()
-            .ok_or("assigned T6000 lacks a complex")? as usize
+            .ok_or(refuse!("assigned T6000 lacks a complex"))? as usize
             + 1;
         result.capacities = CAPACITIES.into_iter().map(|kind| Capacity {
             kind,

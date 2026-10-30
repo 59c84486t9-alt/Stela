@@ -34,7 +34,7 @@ pub(in crate::x86_64) fn broadcast_integer_rounding(
     shuffle(code, vector, vector, REPLICATE_FIRST_DWORD);
 }
 
-/// Prepare integer quantization bias, sign direction and retained-bit parity.
+/// Prepare integer quantization bias, sign direction and kept-bit parity.
 /// R10D starts fresh exception accumulation; ordinary arithmetic keeps guest RC,
 /// while BF16 conversion selects nearest-even when alternative handling is set.
 pub(in crate::x86_64) fn integer_rounding_policy(

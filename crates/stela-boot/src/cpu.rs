@@ -2,7 +2,7 @@
 //! appendix E): its identity and features for the host check's report, and
 //! the floor Stela needs, x86-64-v2 (SSE3, SSSE3, SSE4.1, SSE4.2, POPCNT,
 //! CMPXCHG16B, LAHF/SAHF in 64-bit mode) and NX for its page tables.
-pub mod msr;
+pub use stela_boot_core::msr;
 
 #[cfg(feature = "diagnostics")]
 use Register::{Eax, Ebx};

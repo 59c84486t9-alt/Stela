@@ -1,7 +1,6 @@
 //! Completion of SVE half-precision dot and widening multiply-add. The result and
 //! FPSR commit once, after every lane is computed.
 
-use anyhow::anyhow;
 use stela_compiler::{
     GuestState,
     aarch64::{
@@ -10,6 +9,7 @@ use stela_compiler::{
         sve::dot::{Kind, Operand, RightOperand, VectorPart},
     },
 };
+use stela_contracts::refuse;
 
 use super::{CompletionError, NumericalControls};
 use crate::scalable::ScalableState;
@@ -35,15 +35,15 @@ pub(super) fn complete(
     controls: NumericalControls,
 ) -> Result<(), CompletionError> {
     if !scalable.mode().streaming() {
-        return Err(anyhow!("scalable Half dot requires streaming state").into());
+        return Err(refuse!("scalable Half dot requires streaming state").into());
     }
     let index_limit = match operand.kind {
         Kind::HalfDot => VECTOR_CHUNK_BYTES / SINGLE_BYTES,
         Kind::HalfMultiplyLong { .. } => VECTOR_CHUNK_BYTES / HALF_BYTES,
-        _ => return Err(anyhow!("integer dot has no Half numerical completion").into()),
+        _ => return Err(refuse!("integer dot has no Half numerical completion").into()),
     };
     if operand.element_size != ElementSize::Word {
-        return Err(anyhow!("Half dot output elements must be Single").into());
+        return Err(refuse!("Half dot output elements must be Single").into());
     }
     let (right_register, index) = match operand.right {
         RightOperand::Vector(register) => (register, None),
@@ -53,7 +53,7 @@ pub(super) fn complete(
             (register, Some(usize::from(index)))
         }
         RightOperand::Indexed { .. } => {
-            return Err(anyhow!("Half dot indexed source exceeds its encoded field").into());
+            return Err(refuse!("Half dot indexed source exceeds its encoded field").into());
         }
     };
     let length = scalable.vector_length().bytes();
@@ -235,7 +235,7 @@ mod tests {
     }
 
     #[test]
-    fn retained_full_a64_enables_refuse_before_any_destination_or_status_commit() {
+    fn kept_full_a64_enables_refuse_before_any_destination_or_status_commit() {
         let (mut state, mut scalable) = setup(32);
         state.fpcr = FPCR_EXCEPTION_ENABLE_MASK;
         let original = state.clone();

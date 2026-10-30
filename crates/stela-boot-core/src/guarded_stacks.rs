@@ -1,7 +1,7 @@
 //! Geometry for distinct page-backed stacks with an unmapped page on each side.
 //!
 //! These records describe layout only. They confer no allocation, CPU, mapping,
-//! initialization, or invocation authority; the native owner proves those.
+//! initialization, or invocation permission; the native owner proves those.
 pub mod mappings;
 mod mixed;
 use core::ops::Range;

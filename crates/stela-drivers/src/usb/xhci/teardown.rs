@@ -7,15 +7,15 @@ use super::*;
 impl Controller {
     /// Quiesce and remove the exclusively owned endpoint DCIs before changing
     /// a USB interface. This does not issue SET_INTERFACE: the class owner must
-    /// perform that actual request, then configure fresh endpoints. All selected
+    /// perform that request, then configure fresh endpoints. All selected
     /// DCIs are validated before any mutation. Every old TD requires successful
     /// Stop/Reset/Set Dequeue + drain, followed by Configure Endpoint Drop ACK.
-    /// Any uncertain step retains and poisons every selected endpoint. Success
+    /// Any uncertain step keeps and poisons every selected endpoint. Success
     /// permits DMA reuse. After the primary event ring has been drained and old
-    /// endpoint events removed, retain the actual nonstream ring for this DCI.
+    /// endpoint events removed, keep the nonstream ring for this DCI.
     /// A replacement starts at its acknowledged producer pointer/cycle, without
     /// resetting the allocator, zeroing a live ring or replaying a ticket.
-    /// Streams retain their separate allocation/retirement policy.
+    /// Streams keep their separate allocation/retirement policy.
     pub fn deconfigure(
         &mut self,
         id: impl DeviceRef,

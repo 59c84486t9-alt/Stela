@@ -151,7 +151,7 @@ mod tests {
             assert_eq!(state, before);
         }
         // Baseline code has an authoritative frame and needs no dirty bindings,
-        // but its exact guest operations still require qualified semantics.
+        // but its exact guest operations still require checked semantics.
         let baseline = bind(&code, &[(pc, 0)], &source, Vec::new());
         assert_eq!(baseline.capacity(), baseline.len());
         assert_eq!(

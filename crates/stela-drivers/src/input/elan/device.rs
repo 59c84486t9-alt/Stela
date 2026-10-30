@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Actual little-endian ELAN command, report and device lifecycle transactions.
+//! Little-endian ELAN command, report and device lifecycle transactions.
 use super::*;
 use crate::bus::i2c::Operation;
 const STAND: u16 = 0x0005;
@@ -107,7 +107,7 @@ impl<B: Bus, I: Interrupt, T: Timer> I2cDevice<B, I, T> {
             (descriptor, report_descriptor)
         } else {
             // The exact quick-wakeup profile skips the reset/descriptor phase.
-            // These remain the actual bytes from the last completed reset.
+            // These remain the bytes from the last completed reset.
             let previous = self.capabilities.as_ref().ok_or(ErrorKind::NotReady)?;
             (previous.descriptor, previous.report_descriptor)
         };
@@ -275,7 +275,7 @@ impl<B: Bus, I: Interrupt, T: Timer> I2cDevice<B, I, T> {
         self.state = State::Sleeping;
         Ok(())
     }
-    /// Disable device power through its actual register. The platform still
+    /// Disable device power through its register. The platform still
     /// owns supply rails; this does not claim an external regulator transition.
     pub fn power_down(&mut self) -> Result<(), Error> {
         self.ready()?;

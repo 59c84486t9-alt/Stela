@@ -49,7 +49,7 @@ impl Io for Model {
         Ok(()) // This in-memory model has no physical device-generation owner.
     }
     fn control(&mut self, s: [u8; 8], b: &[u8]) -> core::result::Result<(), BlockError> {
-        assert_eq!(s, xhci::setup(0x20, 0, 0, 0, 3));
+        assert_eq!(s, crate::usb::descriptor::setup(0x20, 0, 0, 0, 3));
         assert_eq!(b.len(), 3);
         assert_eq!(b[2], 0);
         assert_ne!(self.credits, 0, "HCI command without actual credits");
@@ -73,7 +73,7 @@ impl Io for Model {
         };
         assert_eq!(
             s,
-            xhci::setup(0xc0, req, 0, 0, if req == 9 { 20 } else { 1 })
+            crate::usb::descriptor::setup(0xc0, req, 0, 0, if req == 9 { 20 } else { 1 })
         );
         Ok(b)
     }
@@ -166,7 +166,8 @@ fn version(rom: u32) -> qca::Version {
 }
 fn model(rom: u32) -> (Hci<Model>, NoFirmware, Rc<RefCell<Trace>>) {
     let d = device(0x0489, 0xe04d, 2);
-    let binding = Binding::new(&d, &xhci::interfaces(&d.configuration)[0]).unwrap();
+    let binding =
+        Binding::new(&d, &crate::usb::descriptor::interfaces(&d.configuration)[0]).unwrap();
     let steps = VecDeque::from([
         Step::Vendor(9, version(rom).raw.to_vec()),
         Step::Command(0x0c03, vec![complete(0x0c03, &[0], 1)]),
@@ -203,14 +204,15 @@ fn attempt(error: &Error) -> (&Error, &Attempt) {
     }
 }
 #[test]
-fn all_52_actual_runtime_aliases_initialize_genuine_hci_and_cache_unknown_image_evidence() {
+fn all_52_runtime_aliases_initialize_hci_and_cache_unknown_image_evidence() {
     for &(v, p, k) in super::super::SOURCE_USB_IDS {
         if k != super::super::Kind::Ar3012 {
             continue;
         }
         let (mut hci, provider, trace) = model(0x01020201);
         let d = device(v, p, 0x1234);
-        hci.binding = Binding::new(&d, &xhci::interfaces(&d.configuration)[0]).unwrap();
+        hci.binding =
+            Binding::new(&d, &crate::usb::descriptor::interfaces(&d.configuration)[0]).unwrap();
         let report = hci
             .initialize_with_provider(
                 &provider,
@@ -250,7 +252,8 @@ fn raw_old_revision_unlisted_ids_and_unknown_low_rom_do_not_become_runtime() {
     ] {
         let (mut hci, provider, trace) = model(0x01020201);
         let d = device(v, p, revision);
-        hci.binding = Binding::new(&d, &xhci::interfaces(&d.configuration)[0]).unwrap();
+        hci.binding =
+            Binding::new(&d, &crate::usb::descriptor::interfaces(&d.configuration)[0]).unwrap();
         assert!(matches!(
             initialize(&mut hci, &provider),
             Err(Error::Unsupported(_))
@@ -322,7 +325,7 @@ fn every_real_io_failure_keeps_first_command_and_transport_cleanup_fault() {
     }
 }
 #[test]
-fn actual_statusless_credit_grants_gate_commands_and_asynchronous_frames_are_retained() {
+fn statusless_credit_grants_gate_commands_and_asynchronous_frames_are_kept() {
     let (mut hci, provider, _) = model(0x01020201);
     hci.io.steps[1] = Step::Command(
         0x0c03,
@@ -390,7 +393,7 @@ fn malformed_mismatched_missing_and_status_only_responses_never_count_as_complet
 }
 
 #[test]
-fn known_rom_missing_image_retains_dfu_failure_without_hci_or_fake_cache_success() {
+fn known_rom_missing_image_keeps_dfu_failure_without_hci_or_fake_cache_success() {
     let (mut hci, _, trace) = model(0x302);
     hci.io.steps.insert(1, Step::Quiesce);
     hci.io

@@ -7,17 +7,49 @@
 //! pointer that arrives joins the host input; another new device is
 //! reported and its owners kept.
 //!
+//! USB4 hosts whose firmware runs the connection manager are looked at on
+//! the same timer: each firmware event is reported, as Linux's
+//! `icm_handle_notification` receives it.
+//!
 //! The controllers' registers and DMA pages are reached through the
 //! loader's identity root, so each poll runs in it (`storage::RestoreRoot`).
 use super::storage::RestoreRoot;
 use crate::output;
 use alloc::{sync::Arc, vec::Vec};
 use stela_drivers::{
-    bus::dma::RegionAllocator,
+    bus::{dma::RegionAllocator, thunderbolt::icm},
     firmware::{Catalog, HandoffProvider},
     input::InputDevice,
+    probe::native::usb4,
     usb::xhci::{self, Found},
 };
+
+/// Firmware events serviced per USB4 host per poll.
+const USB4_EVENTS: usize = 16;
+
+/// Report one firmware event of `host`.
+pub fn report_usb4(host: &usb4::Host, event: &icm::Event) {
+    let location = &host.location;
+    match event {
+        icm::Event::Notification(message) => {
+            match icm::Notification::decode(host.icm.family(), message) {
+                Ok(notification) => {
+                    output::arguments(format_args!("HOST USB4 {location}: {notification}\n"))
+                }
+                Err(error) => output::arguments(format_args!(
+                    "HOST USB4 {location}: undecodable firmware event {:#x}: {error:?}\n",
+                    message.code
+                )),
+            }
+        }
+        icm::Event::Discarded(error) => output::arguments(format_args!(
+            "HOST USB4 {location}: firmware message discarded: {error:?}\n"
+        )),
+        icm::Event::DriverReady { request, .. } => output::arguments(format_args!(
+            "HOST USB4 {location}: unrequested DRIVER_READY answer {request}\n"
+        )),
+    }
+}
 
 /// How often controllers without a signal are polled: Linux's root hub
 /// status timer runs every 250 ms; a hub's status endpoint interval is at
@@ -26,6 +58,9 @@ const POLL_HZ: u64 = 16;
 
 pub struct HostUsb {
     hosts: Vec<xhci::Host>,
+    /// USB4 hosts, and whether each one's connection manager still runs.
+    usb4: Vec<(usb4::Host, bool)>,
+    tsc_per_ms: u64,
     /// The probe's DMA pages, which enumeration of a new device draws on.
     dma: RegionAllocator,
     firmware: Option<Arc<Catalog>>,
@@ -39,6 +74,7 @@ pub struct HostUsb {
 impl HostUsb {
     pub fn new(
         hosts: Vec<xhci::Host>,
+        usb4: Vec<usb4::Host>,
         dma: RegionAllocator,
         firmware: Option<Arc<Catalog>>,
         root: u64,
@@ -46,6 +82,8 @@ impl HostUsb {
     ) -> Self {
         Self {
             hosts,
+            usb4: usb4.into_iter().map(|host| (host, true)).collect(),
+            tsc_per_ms: (tsc_hz / 1000).max(1),
             dma,
             firmware,
             root,
@@ -63,6 +101,9 @@ impl HostUsb {
         let timed = now.wrapping_sub(self.last) >= self.interval;
         if timed {
             self.last = now;
+        }
+        if timed {
+            self.poll_usb4(now);
         }
         let firmware = HandoffProvider::new(self.firmware.as_deref());
         for host in &mut self.hosts {
@@ -88,7 +129,12 @@ impl HostUsb {
             for (location, why) in &added.unused {
                 output::arguments(format_args!("USB UNUSED {location}: {why}\n"));
             }
-            inputs.extend(added.inputs.drain(..).map(InputDevice::Usb));
+            inputs.extend(
+                added
+                    .inputs
+                    .drain(..)
+                    .map(|input| InputDevice::Usb(alloc::boxed::Box::new(input))),
+            );
             for device in &added.devices {
                 output::arguments(format_args!("USB added {}\n", device.location));
             }
@@ -102,5 +148,35 @@ impl HostUsb {
             }
         }
         inputs
+    }
+
+    /// Service each running USB4 host's firmware events. A host whose
+    /// transport faults is reported once and left stopped.
+    fn poll_usb4(&mut self, now: u64) {
+        let now_ms = now / self.tsc_per_ms;
+        for (host, running) in &mut self.usb4 {
+            if !*running {
+                continue;
+            }
+            for _ in 0..USB4_EVENTS {
+                let event = {
+                    // SAFETY: as for the xHCI controllers below.
+                    let _root = unsafe { RestoreRoot::enter(self.root) };
+                    host.icm.poll(now_ms)
+                };
+                match event {
+                    Ok(Some(event)) => report_usb4(host, &event),
+                    Ok(None) => break,
+                    Err(error) => {
+                        output::arguments(format_args!(
+                            "HOST USB4 {}: connection manager transport stopped: {error:?}\n",
+                            host.location
+                        ));
+                        *running = false;
+                        break;
+                    }
+                }
+            }
+        }
     }
 }

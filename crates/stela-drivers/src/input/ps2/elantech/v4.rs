@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// Original notices are retained in ../elantech.rs and input/THIRD_PARTY.md.
+// Original notices are held in ../elantech.rs and input/THIRD_PARTY.md.
 // Input Multitouch Library: Copyright (c) 2008-2010 Henrik Rydberg.
 //! V4 contact state and the source input-MT flags=0 pointer policy.
 use super::*;
@@ -12,7 +12,7 @@ pub struct V4Info {
     pub product_id: u16,
     pub resolution: [u8; 3],
     pub counts_per_mm: (u16, u16),
-    /// Actual reported bus metadata; this does not grant access to another bus.
+    /// Reported bus metadata; this does not grant access to another bus.
     pub bus: u8,
     pub traces: (u8, u8),
     pub trace_width: u16,
@@ -27,7 +27,7 @@ pub struct V4Slot {
     pub position: (u32, u32),
     pub pressure: u8,
     pub touch_major: u16,
-    /// Most recent actual absolute head for this slot, absent before any head.
+    /// Most recent absolute head for this slot, absent before any head.
     pub head_sequence: Option<u64>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -39,7 +39,7 @@ pub struct V4State {
     /// Source advertised one/two/three/four-finger keys; five has no tool key.
     pub tools: u8,
     pub buttons: u8,
-    /// Source compatibility axes, retained when no slot is active.
+    /// Source compatibility axes, kept when no slot is active.
     pub pointer: (i32, i32),
     pub pressure: u8,
     pub width: u8,

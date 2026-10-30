@@ -73,6 +73,8 @@ struct State {
 #[derive(Clone)]
 struct Model(Rc<RefCell<State>>);
 impl Io for Model {
+    /// The model has no device to isolate.
+    fn quarantine(&mut self) {}
     fn ready(&mut self) -> Result<(), BlockError> {
         if self.0.borrow().poisoned {
             Err(BlockError::Unsupported("model unacknowledged cancellation"))
@@ -133,9 +135,10 @@ impl Io for Model {
     fn bulk(
         &mut self,
         endpoint: Endpoint,
-        address: u64,
+        buffer: &mut DmaBuffer,
         length: usize,
     ) -> Result<usize, BlockError> {
+        let address = buffer.physical();
         let mut s = self.0.borrow_mut();
         s.transfers += 1;
         assert!(
@@ -455,7 +458,7 @@ fn native_fixture(
         quirks::Flags::from_device(&device).unwrap().write_cache(),
         write_cache
     );
-    let interface = crate::usb::xhci::interfaces(&device.configuration).remove(0);
+    let interface = crate::usb::descriptor::interfaces(&device.configuration).remove(0);
     let endpoints = [true, false].map(|input| {
         *interface
             .endpoints
@@ -496,7 +499,7 @@ fn native_fixture(
 fn native_root_bot_reuses_original_transport_buffers_across_96_resets_and_real_io() {
     use crate::block::BlockDevice;
     use crate::usb::xhci::{HIGH_SPEED, SUPER_SPEED};
-    // The unquirked profile intentionally has no flush command. The pinned
+    // The unquirked profile has no flush command. The pinned
     // WRITE_CACHE identity requires a real acknowledged 0x35 every epoch.
     for write_cache in [false, true] {
         for speed in [HIGH_SPEED, SUPER_SPEED] {
@@ -733,7 +736,7 @@ fn all_sixteen_luns_have_independent_media_sense_and_shared_tags() {
     }
     let state = state.borrow();
     assert!(state.history.windows(2).all(|w| w[1].1 == w[0].1 + 1));
-    // Probe reads block zero before MODE SENSE. Check every actual CDB,
+    // Probe reads block zero before MODE SENSE. Check every CDB,
     // rather than only a total that could hide a missing read or a command
     // sent to the wrong LUN after the shared transport's tags advance.
     let expected: [&[u8]; 8] = [
@@ -1014,7 +1017,7 @@ fn native_poison_preflight_preserves_all_buffers() {
     }
 }
 #[test]
-fn retained_reader_discovers_inserted_media_and_never_revives_removed_aliases() {
+fn kept_reader_discovers_inserted_media_and_never_revives_removed_aliases() {
     use super::super::media::{Owner, scan_bot};
     use crate::block::BlockDevice;
     let mut memory = vec![0u64; 32 * 1024];
@@ -1235,7 +1238,7 @@ fn unchanged_linux_cbw_builder_matches_all_luns_and_transfer_profiles() {
     }
 }
 #[test]
-fn discovery_reports_empty_slots_and_publishes_only_actual_ready_units() {
+fn discovery_reports_empty_slots_and_publishes_only_ready_units() {
     let mut memory = vec![0u64; 32 * 1024];
     let start = memory.as_mut_ptr() as u64;
     let mut dma = dma(&mut memory);
@@ -1303,7 +1306,7 @@ fn invalid_identification_capacity_and_mode_never_publish_a_block_device() {
     }
 }
 #[test]
-fn malformed_sense_never_fabricates_a_ready_unit() {
+fn malformed_sense_never_invents_a_ready_unit() {
     for bytes in [
         vec![],
         vec![0x70; 13],
@@ -1348,7 +1351,11 @@ fn late_discovery_transport_poison_discards_already_probed_units() {
         fn now_us(&self) -> u64 {
             self.0.now_us()
         }
-        fn bulk(&mut self, e: Endpoint, p: u64, n: usize) -> Result<usize, BlockError> {
+        fn quarantine(&mut self) {
+            self.0.quarantine();
+        }
+        fn bulk(&mut self, e: Endpoint, b: &mut DmaBuffer, n: usize) -> Result<usize, BlockError> {
+            let p = b.physical();
             if !e.is_in() && n == 31 {
                 let range = self.0.0.borrow().range.clone();
                 assert!(p >= range.start && p + 31 <= range.end);
@@ -1357,7 +1364,7 @@ fn late_discovery_transport_poison_discards_already_probed_units() {
                     self.0.0.borrow_mut().fault = Fault::Timeout;
                 }
             }
-            self.0.bulk(e, p, n)
+            self.0.bulk(e, b, n)
         }
     }
     let mut memory = vec![0u64; 32 * 1024];
@@ -1444,8 +1451,8 @@ fn recovery_waits_for_real_reset_settle_before_clears_and_next_lun() {
     );
 }
 #[test]
-fn source_bridge_profiles_change_actual_wire_transfers_and_probes() {
-    // Two retained 64-KiB-aligned owners plus wrappers can require
+fn source_bridge_profiles_change_wire_transfers_and_probes() {
+    // Two kept 64-KiB-aligned owners plus wrappers can require
     // 262207 bytes from an arbitrary base, exceeding a 256-KiB fixture.
     let mut memory = vec![0u64; 33 * 1024];
     let start = memory.as_mut_ptr() as u64;
@@ -1456,7 +1463,7 @@ fn source_bridge_profiles_change_actual_wire_transfers_and_probes() {
         vec![unit(3), unit(7)],
     );
     let state = io.0.clone();
-    // Kobian Mercury Binocam uses an actual 32-byte wrapper.
+    // Kobian Mercury Binocam uses a 32-byte wrapper.
     let flags = quirks::Flags::from_id(0x04fc, 0x80c2, 0x0100, true).unwrap();
     let mut bot = Bot::with_flags(io, 3, endpoints(), &mut dma, flags).unwrap();
     bot.command(0, &scsi::inquiry(), Data::In(36)).unwrap();
@@ -1514,7 +1521,7 @@ fn source_residue_learning_skipped_data_and_chained_csw_retry_use_real_status() 
 }
 
 #[test]
-fn metadata_warmup_limits_and_last_sector_split_reach_actual_block_commands() {
+fn metadata_warmup_limits_and_last_sector_split_reach_block_commands() {
     use crate::block::BlockDevice;
     let mut memory = vec![0u64; 32 * 1024];
     let start = memory.as_mut_ptr() as u64;

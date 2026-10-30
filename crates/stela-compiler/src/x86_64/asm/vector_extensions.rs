@@ -44,7 +44,7 @@ pub(crate) fn population_supported(lane_bytes: u8, target: TargetCpu) -> bool {
         && !target.data_independent_timing()
 }
 
-/// EVEX.128 ternary logic needs F and VL. The DIT profile retains its recipe.
+/// EVEX.128 ternary logic needs F and VL. The DIT profile keeps its recipe.
 pub(crate) fn merge_supported(target: TargetCpu) -> bool {
     target.supports(TargetCpu::Avx512f)
         && target.supports(TargetCpu::Avx512vl)

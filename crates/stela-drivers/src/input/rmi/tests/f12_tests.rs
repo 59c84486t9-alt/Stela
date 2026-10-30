@@ -100,7 +100,7 @@ fn f12_invalid_descriptor_or_tuning_never_enables_function_interrupt() {
 }
 
 #[test]
-fn f12_late_second_function_failure_retains_first_complete_frame_and_irq_status() {
+fn f12_late_second_function_failure_keeps_first_complete_frame_and_irq_status() {
     let h = hardware();
     install_f12(&h, 1);
     install_f12(&h, 2);
@@ -203,7 +203,7 @@ fn f12_sleep_reinitialization_and_irq_enable_effect_errors_preserve_readiness_bo
     assert_eq!(h.borrow().memory[0x41], 1);
     h.borrow_mut().fail_after_write = true;
     assert!(matches!(d.initialize_f12(None), Err(Error::I2c(_))));
-    assert_eq!(h.borrow().memory[0x41], 5); // actual effect preceded error
+    assert_eq!(h.borrow().memory[0x41], 5); // effect preceded error
     assert_eq!(d.f12_capabilities().count(), 0);
     assert_eq!(d.control_state(), ControlState::Uncertain);
     assert_eq!(d.poll_f12().error, Some(Error::NeedsReset));

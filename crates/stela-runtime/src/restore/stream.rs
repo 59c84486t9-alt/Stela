@@ -1,11 +1,12 @@
 //! Restored uses big-endian u32 length prefixes; reverse proxy uses little
-//! endian. Each poll attempts one bounded read/write and retains partial I/O.
+//! endian. Each poll attempts one bounded read/write and keeps partial I/O.
 use super::{
     Error, Result,
     plist::{self, Limits, Value},
 };
-use alloc::{string::String, vec::Vec};
+use alloc::vec::Vec;
 use core::task::Poll;
+use stela_contracts::refuse;
 
 /// Integration boundary for the native mux API. Pending means no progress;
 /// Ready(Ok(0)) means EOF on read, an error on a nonempty write.
@@ -73,7 +74,7 @@ impl Output {
             Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
             Poll::Ready(Ok(n)) => {
                 if n == 0 || n > self.bytes.len() - self.at {
-                    return Poll::Ready(Err(Error::Transport(String::from("invalid/zero write"))));
+                    return Poll::Ready(Err(Error::Transport(refuse!("invalid/zero write"))));
                 }
                 self.at += n;
                 self.written += n as u64;
@@ -312,7 +313,7 @@ pub(crate) mod tests {
         panic!("receive did not terminate")
     }
     #[test]
-    fn fragmented_and_coalesced_frames_and_short_writes() {
+    fn stream_framing_survives_fragmentation_and_short_writes() {
         for endian in [Endian::Big, Endian::Little] {
             for binary in [false, true] {
                 let value = Value::dict([("Request", Value::from("QueryType"))]);

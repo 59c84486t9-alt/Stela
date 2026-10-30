@@ -5,16 +5,10 @@
 //! identity of the old generation then fails.
 use super::*;
 
-#[cfg(test)]
-mod downstream_tests;
-#[cfg(test)]
-mod generation_tests;
-#[cfg(test)]
-mod queued_tests;
 mod recovery;
 mod suspend;
 
-/// Private proof retained only after complete subtree transfer quiescence.
+/// Private proof kept only after complete subtree transfer quiescence.
 /// This never restores public access to the old hardware slot.
 pub(super) struct Recovery {
     slot: u8,
@@ -30,7 +24,7 @@ impl Recovery {
     }
 }
 
-/// One poll's actual topology changes. Removed descriptors name permanently
+/// One poll's topology changes. Removed descriptors name permanently
 /// invalidated old owners; they do not assert that failed hardware DMA stopped.
 /// Added class owners come from fresh physical enumeration and normal binding.
 #[derive(Default)]
@@ -51,12 +45,12 @@ struct Hub {
     recovery: Option<Recovery>,
 }
 
-/// Retains the controller even when no leaf class currently owns it. Call
+/// Keeps the controller even when no leaf class currently owns it. Call
 /// `poll` from the native service loop, and deliver its changes to consumers.
 /// Automatic reconnection uses fresh generations, reusing a retired slot once
 /// its port's current grant has retired. The separate exclusive root-leaf
 /// class reset service can reuse storage only after its typed retirement and
-/// physical-reset proof; this Host path does not mint that authority. A class
+/// physical-reset proof; this Host path does not mint that permission. A class
 /// owner's `queue_reset` is serviced here instead, without storage reuse.
 /// The explicit topology suspend/resume service does not enter platform sleep
 /// or authorize a guest-directed controller reset.
@@ -68,7 +62,7 @@ pub struct Host {
     sleep: suspend::Sleep,
 }
 impl Host {
-    /// Transfer this inventory's actual unbound Address-state device to the
+    /// Transfer this inventory's unbound Address-state device to the
     /// forwarding adapter. A failed constructor keeps the exclusive claim:
     /// neither dropping a handle nor a copied descriptor authorizes rebinding.
     pub(in crate::usb) fn take_forwarding(
@@ -134,7 +128,7 @@ impl Host {
                         "USB hub has no acknowledged power contract",
                     ))?;
                 // Configure Endpoint committed MTT only after SET_INTERFACE1
-                // ACK. Select that actual setting, whose endpoint may differ.
+                // ACK. Select that setting, whose endpoint may differ.
                 const SLOT_MULTI_TT: u32 = 1 << 25;
                 let alternate = if c.slot(device.slot)?.context[0] & SLOT_MULTI_TT != 0 {
                     MULTI_TT_ALTERNATE
@@ -223,7 +217,7 @@ impl Host {
         }
     }
 
-    /// Poll actual root notifications/PORTSC and queued hub interrupt bitmaps.
+    /// Poll root notifications/PORTSC and queued hub interrupt bitmaps.
     /// No completion or new identity is inferred from elapsed time. Topology
     /// mutation is serialized through this controller's native Rc owner.
     pub fn poll(
@@ -321,7 +315,7 @@ impl Host {
     }
 
     /// A class-owned exclusive reset may replace a leaf between topology
-    /// polls. Follow the controller's actual fresh descriptor inventory without
+    /// polls. Follow the controller's fresh descriptor inventory without
     /// attempting a second native bind of that already-owned replacement.
     /// The enabled devices the controller's slots hold now.
     fn current(&self) -> Vec<Device> {
@@ -452,8 +446,8 @@ impl Host {
         }
         let mut c = self.controller.borrow_mut();
         // A disabled USB2 port has not completed its speed handshake yet.
-        // Its actual Supported Protocol permits reset; reserve_current still
-        // requires the enabled port's actual speed before Address Device.
+        // Its Supported Protocol permits reset; reserve_current still
+        // requires the enabled port's speed before Address Device.
         if c.port_major[usize::from(port - 1)] != 2 || status & PED != 0 {
             c.root_current(
                 port,
@@ -475,7 +469,7 @@ impl Host {
                 parent: None,
             };
             // USB3 training alone does not retire the old physical address or
-            // current owner. A retained grant requires actual reset ACK.
+            // current owner. A kept grant requires reset ACK.
             if c.power.port_owner(None, port).is_some() {
                 c.reset_root_device(attachment)?;
             }
@@ -492,7 +486,7 @@ impl Host {
         );
         if let Some(speed) = acknowledged_speed {
             // Baseline only effects proved by our reset/training ACK. Preserve
-            // prior connection/power authority so a late physical change is
+            // prior connection/power permission so a late physical change is
             // observed on the next poll; late CSC is never consumed here.
             let controlled = PED | (PORT_SPEED_FIELD << PORT_SPEED_SHIFT) | PLS;
             self.roots[usize::from(port - 1)] =
@@ -542,7 +536,7 @@ impl Host {
                 return Ok(());
             }
         };
-        // A notification schedules actual status reads; it never authorizes
+        // A notification schedules status reads; it never authorizes
         // recovering or acknowledging a condition that was not observed.
         {
             let id = self.hubs[index].device.id;
@@ -564,7 +558,7 @@ impl Host {
                 return self.recover_hub(index, dma, changes);
             }
         }
-        // Bitmap is notification only: actual status and power authority decide.
+        // Bitmap is notification only: status and power permission decide.
         {
             let mut c = self.controller.borrow_mut();
             c.observe_current_ancestors_for(self.hubs[index].device.id, true)?;
@@ -732,7 +726,7 @@ impl Host {
             .map(|slot| slot as u8)
             .collect();
         // Validate the complete original graph before changing any consumer,
-        // hub, DMA or current-owner state. No retained raw number is upgraded.
+        // hub, DMA or current-owner state. No kept raw number is upgraded.
         for &slot in &slots {
             let state = c.slots[usize::from(slot)]
                 .as_ref()
@@ -745,7 +739,7 @@ impl Host {
             if state.retiring && c.slot_ownership[usize::from(slot)] == reset::Ownership::Retired {
                 // Disable Slot already acknowledged this exact descendant. Its
                 // original parent may also be disabled while physical current
-                // remains reserved until port reset. Check the retained seals,
+                // remains reserved until port reset. Check the seals,
                 // rather than demanding live parent hardware for an idle owner.
                 if inventory.id.hardware_slot() != slot || !c.known_id(inventory.id) {
                     return Err(BlockError::Unsupported(
@@ -827,3 +821,6 @@ impl Host {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests;

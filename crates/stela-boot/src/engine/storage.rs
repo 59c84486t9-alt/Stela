@@ -1,7 +1,7 @@
 //! Persistent storage service across the engine's shadow-page-table roots.
 //!
 //! PC drivers currently use identity addresses for their ECAM/MMIO and DMA
-//! buffers. Keep their accesses in the loader's retained root, which also
+//! buffers. Keep their accesses in the loader's root, which also
 //! maps the engine window, and restore the current engine root afterwards.
 //! This boundary never maps host identity addresses into a guest root. All
 //! buffers passed here belong to the engine window, not guest virtual RAM.
@@ -15,14 +15,16 @@
 //!
 //! While the engine runs ([`TaggedRoots`]), the loader's root has a TLB
 //! context of its own, so a driver call keeps the engine's translations.
+use crate::Result;
 use crate::output;
 use alloc::{boxed::Box, format, string::String, vec::Vec};
 use core::{
     arch::asm,
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
+use stela_contracts::refuse;
 use stela_drivers::{
-    Handoff,
+    Handoff, PlatformCaptures,
     block::{
         BlockDevice, BlockError, CallbackStats, Command, Direction, Finished, Identity, Shared,
         Window,
@@ -51,7 +53,7 @@ const KEEP_ENTRIES: u64 = 1 << 63;
 /// into the host drivers. Every engine root keeps context 0, whose CR3
 /// writes still flush, so INVLPG and root reloads keep their meaning; no
 /// engine mapping changes inside a driver call. Dropped, CR4 is restored
-/// for the native qualifications, which require PCIDE clear.
+/// for the native validations, which require PCIDE clear.
 pub(super) struct TaggedRoots {
     cr4: u64,
 }
@@ -86,6 +88,27 @@ impl Drop for TaggedRoots {
 
 /// Held while a core is inside the host drivers ([`RestoreRoot`]).
 static HOST_DRIVERS: AtomicBool = AtomicBool::new(false);
+static HOST_DRIVERS_GS: AtomicU64 = AtomicU64::new(0);
+
+/// Validate the existing manager's same-CPU entered loader context.
+/// Allocation and CPU permission remain with the caller's owner.
+pub(super) fn entered_loader_root(owner: &crate::paging::loader::LoaderTables) -> bool {
+    if !HOST_DRIVERS.load(Ordering::Acquire) {
+        return false;
+    }
+    let (root, cr4, gs): (u64, u64, u64);
+    // SAFETY: this internal query follows RootIdentity's CPL0/CPU admission.
+    unsafe {
+        asm!("mov {}, cr3", "mov {}, cr4", out(reg) root, out(reg) cr4, options(nomem, nostack, preserves_flags));
+        gs = crate::cpu::msr::GS_BASE.read();
+    }
+    let expected = if cr4 & PCIDE != 0 {
+        owner.root() | LOADER_CONTEXT
+    } else {
+        owner.root()
+    };
+    gs != 0 && HOST_DRIVERS_GS.load(Ordering::Acquire) == gs && root == expected
+}
 /// Counter ticks cores waited for [`HOST_DRIVERS`] since the last report,
 /// and the longest wait.
 static HOST_DRIVERS_WAITED: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
@@ -128,13 +151,14 @@ pub(super) struct RestoreRoot {
     root: u64,
     flags: u64,
     tagged: bool,
+    _local: core::marker::PhantomData<*mut ()>,
 }
 impl RestoreRoot {
     /// Wait for the host drivers' lock, which no holder takes again: a
     /// driver never calls back into the engine's host interfaces.
     ///
     /// # Safety
-    /// `root` is the live loader root, retaining the engine window.
+    /// `root` is the live loader root, keeping the engine window.
     pub(super) unsafe fn enter(root: u64) -> Self {
         lock_host_drivers();
         let (previous, flags, cr4): (u64, u64, u64);
@@ -143,6 +167,10 @@ impl RestoreRoot {
         unsafe {
             asm!("pushfq","pop {flags}","cli","mov {previous}, cr3","mov {cr4}, cr4",flags=out(reg)flags,previous=out(reg)previous,cr4=out(reg)cr4);
         }
+        // SAFETY: native CPU; this records the same concrete manager
+        // owner while IF0 excludes its own IRQ/reentrant root transition.
+        let gs = unsafe { crate::cpu::msr::GS_BASE.read() };
+        HOST_DRIVERS_GS.store(gs, Ordering::Release);
         let tagged = cr4 & PCIDE != 0;
         // Tagged, entering flushes the loader's context alone.
         let root = if tagged {
@@ -156,6 +184,7 @@ impl RestoreRoot {
             root: previous,
             flags,
             tagged,
+            _local: core::marker::PhantomData,
         }
     }
 }
@@ -173,6 +202,7 @@ impl Drop for RestoreRoot {
         unsafe {
             asm!("mov cr3, {}",in(reg)root,options(nostack,preserves_flags));
         }
+        HOST_DRIVERS_GS.store(0, Ordering::Release);
         HOST_DRIVERS.store(false, Ordering::Release);
         // SAFETY: only IF was changed by enter().
         unsafe {
@@ -367,9 +397,9 @@ impl HostDisks {
     }
 }
 
-/// The partitions [`open`] opens, each named explicitly.
+/// What [`open`] opens and brings up, each named explicitly.
 #[derive(Clone, Copy)]
-pub struct Partitions<'a> {
+pub struct Selection<'a> {
     /// The guest's disks, in order: one service each.
     pub targets: &'a [&'a Target],
     /// The install medium, by its GUID.
@@ -382,6 +412,13 @@ pub struct Partitions<'a> {
     pub log: Option<Guid>,
     /// Required host-owned durable FDR file volume, when explicitly staged.
     pub fdr: Option<Guid>,
+    /// Whole USB disks for the guest, by serial number.
+    pub usb_disks: &'a [String],
+    /// The Wi-Fi network to join; without one a Wi-Fi adapter stays down.
+    pub wifi: Option<&'a stela_drivers::net::wifi::network::Network>,
+    /// With `--external-disks`, the guest hub's free ports, which every disk
+    /// left over fills in probe order.
+    pub external: Option<usize>,
 }
 
 /// Open the explicitly selected partitions in the loader's identity root
@@ -393,42 +430,92 @@ pub struct Partitions<'a> {
 /// # Safety
 /// The handoff describes this running machine, only this service uses its
 /// reserved DMA pages, `root` is the loader's root, and it and the window
-/// remain live for the boot. The actual owned work dispatcher already holds
+/// remain live for the boot. The owned work dispatcher already holds
 /// its RestoreRoot/host-driver guard and this is a real admitted continuation;
 /// acquiring that non-reentrant guard again is forbidden.
 pub unsafe fn open(
     handoff: &Handoff,
+    captures: PlatformCaptures,
     root: u64,
     services: Option<&dyn NativeServices>,
-    partitions: &Partitions<'_>,
-    usb_disks: &[String],
-    wifi: Option<&stela_drivers::probe::WifiConfig>,
-    external: Option<usize>,
-) -> Result<Opened, String> {
-    let Partitions {
+    selection: &Selection<'_>,
+) -> Result<Opened> {
+    let Selection {
         targets,
         medium,
         preboot,
         store,
         log,
         fdr,
-    } = *partitions;
+        usb_disks,
+        wifi,
+        external,
+    } = *selection;
     if let Some(serial) = usb_disks
         .iter()
         .find(|serial| targets.iter().any(|target| &target.serial == *serial))
     {
-        return Err(format!(
-            "host disk {serial} is both a USB storage disk and a partition target"
+        return Err(refuse!(
+            "host disk {serial} is both a USB storage disk and a partition target",
+            serial
         ));
     }
     // SAFETY: the caller owns the handoff's DMA pages and controllers.
     let mut dma = unsafe { RegionAllocator::new(handoff.dma.clone()) };
     let firmware = stela_drivers::probe::handoff_provider(handoff);
     // SAFETY: the loader mapped these ranges uncached and identity-mapped.
-    let mut devices = unsafe { probe_with_provider(handoff, &mut dma, firmware, services, wifi) };
+    let mut devices =
+        unsafe { probe_with_provider(handoff, captures, &mut dma, firmware, services, wifi) };
     // The owners native attachments keep, and those of failed ones, stay
     // for the boot: their mappings and DMA domains outlive the devices.
     Vec::leak(core::mem::take(&mut devices.owners));
+    // EHCI controllers run for the boot; their roots' storage shares them.
+    Vec::leak(core::mem::take(&mut devices.ehci_hosts));
+    for host in &devices.hda_hosts {
+        let location = &host.location;
+        for codec in &host.codecs {
+            let graph = &codec.graph;
+            match &codec.setup {
+                Ok(setup) => output::arguments(format_args!(
+                    "HOST HD AUDIO {location} codec {}: {:08x} revision {:08x}, {setup}\n",
+                    graph.address, graph.vendor_id, graph.revision_id
+                )),
+                Err(error) => output::arguments(format_args!(
+                    "HOST HD AUDIO {location} codec {}: {:08x} setup failed: {error:?}\n",
+                    graph.address, graph.vendor_id
+                )),
+            }
+        }
+        for failure in &host.codec_failures {
+            output::arguments(format_args!(
+                "HOST HD AUDIO {location} codec {} failed discovery attempt {}: {:?}\n",
+                failure.address, failure.attempt, failure.error
+            ));
+        }
+        if let Some(error) = &host.discovery_error {
+            output::arguments(format_args!(
+                "HOST HD AUDIO {location}: no usable codec ({error:?})\n"
+            ));
+        }
+    }
+    // HD Audio controllers stay attached for the boot; no guest audio device
+    // consumes them yet.
+    Vec::leak(core::mem::take(&mut devices.hda_hosts));
+    for host in &devices.usb4_hosts {
+        let ready = &host.ready;
+        output::arguments(format_args!(
+            "HOST USB4 {}: firmware connection manager ready ({:?}), security level {}\n",
+            host.location,
+            ready.family,
+            ready.security.map_or(
+                alloc::string::String::from("unreported"),
+                |level| alloc::format!("{level:?}")
+            )
+        ));
+        for event in &host.early {
+            super::usb::report_usb4(host, event);
+        }
+    }
     for (address, error) in &devices.failures {
         output::arguments(format_args!("STORAGE FAILED pci={address} error={error}\n"));
     }
@@ -483,6 +570,7 @@ pub unsafe fn open(
     };
     let usb = super::usb::HostUsb::new(
         core::mem::take(&mut devices.usb_hosts),
+        core::mem::take(&mut devices.usb4_hosts),
         dma,
         handoff.firmware.clone(),
         root,
@@ -507,8 +595,15 @@ pub unsafe fn open(
         .chain(log.map(|guid| (Named::Host(guid), Optional::Log)))
         .collect();
     let describe = |named: &Named, error: storage::StorageError| match named {
-        Named::Disk(target) => format!("{}:{}: {error}", target.serial, target.partition),
-        Named::Unique(guid) | Named::Host(guid) => format!("partition {guid}: {error}"),
+        Named::Disk(target) => refuse!(
+            "{serial}:{partition}: {error}",
+            serial = target.serial.as_str(),
+            partition = %target.partition,
+            %error
+        ),
+        Named::Unique(guid) | Named::Host(guid) => {
+            refuse!("partition {guid}: {error}", %guid, %error)
+        }
     };
     let mut opened = loop {
         named.truncate(required);
@@ -571,9 +666,9 @@ pub unsafe fn open(
         .iter()
         .map(|serial| {
             storage::take(&mut devices.disks, serial)
-                .map_err(|error| format!("USB storage {serial}: {error}"))
+                .map_err(|error| refuse!("USB storage {serial}: {error}", serial, %error))
         })
-        .collect::<Result<Vec<_>, String>>()?;
+        .collect::<Result<Vec<_>>>()?;
     // With `--external-disks`, every disk left, in probe order, up to the
     // hub's free ports; the rest are reported.
     if let Some(ports) = external {

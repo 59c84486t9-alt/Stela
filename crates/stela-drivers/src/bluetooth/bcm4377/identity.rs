@@ -4,7 +4,7 @@
 use super::{Error, Result};
 use crate::{bus::pci::Address, firmware::Target};
 use alloc::{format, string::String};
-use sha2::{Digest, Sha256};
+use stela_crypto::{Sha256, digest::Digest};
 
 pub const OTP_BYTES: usize = 0xe0;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -32,12 +32,17 @@ impl Chip {
                 "source Broadcom PCI network-other Function",
             ));
         }
-        match identity.device {
-            0x5fa0 => Ok(Self::Bcm4377),
-            0x5f69 => Ok(Self::Bcm4378),
-            0x5f71 => Ok(Self::Bcm4387),
-            0x5f72 => Ok(Self::Bcm4388),
-            _ => Err(Error::Unsupported("source Broadcom PCIe device ID")),
+        Self::of_device(identity.device).ok_or(Error::Unsupported("source Broadcom PCIe device ID"))
+    }
+    /// The chip a Broadcom device ID names, as `bcm4377_devid_table` lists
+    /// them.
+    pub fn of_device(device: u16) -> Option<Self> {
+        match device {
+            0x5fa0 => Some(Self::Bcm4377),
+            0x5f69 => Some(Self::Bcm4378),
+            0x5f71 => Some(Self::Bcm4387),
+            0x5f72 => Some(Self::Bcm4388),
+            _ => None,
         }
     }
     pub fn number(self) -> u16 {
@@ -81,8 +86,8 @@ pub struct Board {
     source: BoardSource,
 }
 impl Board {
-    /// Parse actual captured DMI observations. Only the source's three exact
-    /// qualified products select its formosa board; no generic Apple fallback.
+    /// Parse captured DMI observations. Only the source's three exact
+    /// checked products select its formosa board; no generic Apple fallback.
     pub fn from_dmi(vendor: &str, product: &str) -> Result<Self> {
         if vendor != "Apple Inc."
             || !matches!(
@@ -100,7 +105,7 @@ impl Board {
             },
         })
     }
-    /// Parse the actual board property. Platform construction must bind this
+    /// Parse the board property. Platform construction must bind this
     /// observation to the same physical Function, rather than inventing a board.
     pub fn from_property(bytes: &[u8]) -> Result<Self> {
         let end = bytes.iter().position(|b| *b == 0).unwrap_or(bytes.len());
@@ -127,7 +132,7 @@ pub struct Identity {
     pub board: Board,
     pub stepping: String,
     pub antenna_vendor: String,
-    /// Complete actual OTP, including unknown TLVs and padding.
+    /// Complete OTP, including unknown TLVs and padding.
     pub otp: [u8; OTP_BYTES],
 }
 impl Identity {

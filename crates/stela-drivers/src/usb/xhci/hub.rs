@@ -9,8 +9,6 @@ pub(super) mod descriptor;
 #[cfg(test)]
 pub(super) mod model;
 mod power;
-#[cfg(test)]
-mod runtime_tests;
 mod superspeed;
 #[cfg(test)]
 pub(super) mod tests;
@@ -36,7 +34,7 @@ pub(super) fn status_endpoint(device: &Device, interface: &Interface) -> Option<
     .then_some(endpoint)
 }
 
-/// Check the original bytes of the setting actually selected by interface-zero
+/// Check the original bytes of the setting selected by interface-zero
 /// SET_INTERFACE. Sanitization must not hide duplicate interfaces/endpoints or
 /// manufacture a usable status endpoint for the acknowledged setting.
 pub(super) fn usb2_status_endpoint(
@@ -103,7 +101,7 @@ pub(super) fn usb2_status_endpoint(
     Ok(endpoint)
 }
 
-/// One shared validator for cold and retained external hub status reads.
+/// One shared validator for cold and kept external hub status reads.
 /// A lifecycle bitmap never authorizes accepting reserved port-state fields.
 pub(super) fn validate_port_status(bytes: &[u8], speed: u8) -> Result<(), BlockError> {
     if matches!(speed, SUPER_SPEED | SUPER_SPEED_PLUS) {

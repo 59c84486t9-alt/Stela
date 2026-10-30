@@ -1,7 +1,7 @@
 //! Exact archive extent within read-only host storage. Partition padding is
 //! excluded from ZIP end-record searches; no read can escape the extent.
 use super::{Error, Result};
-use alloc::{format, string::String};
+use stela_contracts::{Refusal, refuse};
 use stela_formats::payload::ReadAt;
 pub struct Extent<R> {
     reader: R,
@@ -16,20 +16,20 @@ impl<R: ReadAt> Extent<R> {
     }
 }
 impl<R: ReadAt> ReadAt for Extent<R> {
-    type Error = String;
+    type Error = Refusal;
     fn len(&self) -> u64 {
         self.bytes
     }
-    fn read_at(&mut self, offset: u64, buffer: &mut [u8]) -> core::result::Result<(), String> {
+    fn read_at(&mut self, offset: u64, buffer: &mut [u8]) -> core::result::Result<(), Refusal> {
         if offset
             .checked_add(buffer.len() as u64)
             .is_none_or(|end| end > self.bytes)
         {
-            return Err("read outside archive extent".into());
+            return Err(refuse!("read outside archive extent"));
         }
         self.reader
             .read_at(offset, buffer)
-            .map_err(|e| format!("{e:?}"))
+            .map_err(|error| refuse!("archive read at {offset:#x}: {error}", offset, ?error))
     }
 }
 #[cfg(test)]
@@ -37,11 +37,11 @@ mod tests {
     use super::*;
     struct Source;
     impl ReadAt for Source {
-        type Error = ();
+        type Error = core::convert::Infallible;
         fn len(&self) -> u64 {
             1024
         }
-        fn read_at(&mut self, _: u64, b: &mut [u8]) -> core::result::Result<(), ()> {
+        fn read_at(&mut self, _: u64, b: &mut [u8]) -> core::result::Result<(), Self::Error> {
             b.fill(42);
             Ok(())
         }

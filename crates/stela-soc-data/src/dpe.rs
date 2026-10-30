@@ -1,7 +1,9 @@
 //! Validated SOC DPE register geometry and sample aliases.
 //! This describes controls and sample widths without allocating counter
-//! state, sampling activity, completion or lifecycle authority.
+//! state, sampling activity, completion or lifecycle permission.
+use crate::Result;
 use alloc::{collections::BTreeMap, vec::Vec};
+use stela_contracts::refuse;
 
 pub const ENGINES: [u64; 6] = [0x2400, 0x2800, 0x2c00, 0x3000, 0x3400, 0x3800];
 pub const CONTROLS: [u64; 3] = [0, 0x200, 0x300];
@@ -12,7 +14,7 @@ pub struct Layout {
     samples: BTreeMap<u64, bool>,
 }
 impl Layout {
-    pub fn new(samples: &[(u64, bool)]) -> Result<Self, &'static str> {
+    pub fn new(samples: &[(u64, bool)]) -> Result<Self> {
         let mut described = BTreeMap::new();
         for &(offset, restore) in samples {
             if !offset.is_multiple_of(8)
@@ -20,11 +22,11 @@ impl Layout {
                 || Self::controls().any(|c| (offset..offset + 8).contains(&c))
                 || described.insert(offset, restore).is_some()
             {
-                return Err("invalid or duplicate SOC DPE sample offset");
+                return Err(refuse!("invalid or duplicate SOC DPE sample offset"));
             }
         }
         // Reporting records and RegGroup save slots are separate sources.
-        // Restore slots exist independently and retain their full-width alias.
+        // Restore slots exist independently and keep their full-width alias.
         for offset in RESTORE {
             described.insert(offset, true);
         }

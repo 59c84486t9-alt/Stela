@@ -31,7 +31,7 @@ fn main() {
         .include(upstream.join("include"))
         .include(upstream.join("library"))
         .include(config)
-        // Exact standard C declarations for this deliberately freestanding
+        // Exact standard C declarations for this freestanding
         // backend, not a platform SDK or OS service implementation.
         .include(Path::new("include"))
         .flag("-ffreestanding")
@@ -49,14 +49,14 @@ fn main() {
         .flag("-ffunction-sections")
         .flag("-fdata-sections");
     if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
-        // Actual LLVM COFF librarian; cross compilation needs no lib.exe SDK.
+        // LLVM COFF librarian; cross compilation needs no lib.exe SDK.
         build.archiver("llvm-lib");
     }
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap();
     if target_os == "uefi" || target_os == "windows" {
         build
             // cc selects Windows COFF for the UEFI target's x64 Microsoft ABI.
-            // UEFI supplies no Win32/MinGW OS or CRT; retain that object ABI,
+            // UEFI supplies no Win32/MinGW OS or CRT; keep that object ABI,
             // but select Mbed's freestanding platform path, not Windows APIs.
             .flag("-U_WIN32")
             .flag("-U_WIN64")

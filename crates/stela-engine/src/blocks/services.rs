@@ -1,7 +1,7 @@
 //! Services borrowed for one run and the completion of the instructions that use them.
 use super::{REGISTER_COUNT, ZERO_REGISTER_INDEX};
+use crate::Result;
 use crate::{memory, pauth, system};
-use anyhow::{Result, ensure};
 use stela_compiler::{
     GuestAddress, GuestState,
     block::{
@@ -78,7 +78,7 @@ pub(super) fn serialize_instruction_execution() -> Result<()> {
         Ok(())
     }
     #[cfg(not(target_arch = "x86_64"))]
-    anyhow::bail!("instruction synchronization requires the x86-64 runtime")
+    return Err(refuse!("instruction synchronization requires the x86-64 runtime").into());
 }
 
 pub(super) fn runtime_pauth_key(key: PointerAuthenticationKey) -> stela_contracts::pauth::Key {
@@ -93,39 +93,79 @@ pub(super) fn runtime_pauth_key(key: PointerAuthenticationKey) -> stela_contract
 pub(super) fn pauth_modifier(
     registers: &GuestState,
     modifier: PointerAuthenticationModifier,
-) -> Result<u64> {
+) -> Result<u64, PauthFault> {
     match modifier {
         PointerAuthenticationModifier::StackPointer => Ok(registers.sp),
         PointerAuthenticationModifier::Zero => Ok(0),
         PointerAuthenticationModifier::Register(index) => {
-            ensure!(index < ZERO_REGISTER_INDEX, "invalid PAC modifier register");
+            operand(index < ZERO_REGISTER_INDEX, "PAC modifier register")?;
             Ok(registers.x[usize::from(index)])
         }
     }
 }
 
-#[derive(Debug)]
-pub(super) enum AuthenticatedLoadError {
+/// Why the run's services did not complete a pointer-authentication
+/// instruction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PauthFault {
+    /// The architectural check failed, or the key it needs is unavailable.
+    Authentication(pauth::AuthenticationError),
+    /// An LDRA whose writeback base overlaps its destination.
     UndefinedOverlap,
-    StackAlignment { stack_pointer: u64 },
+    StackAlignment {
+        stack_pointer: u64,
+    },
+    /// An LDRA in a run with no guest memory service.
     MemoryRequired,
     Read(memory::domain::MemoryFault),
+    /// LR authentication outside a run that retains the LR owners.
+    LinkRegisterUnowned,
+    /// An operand outside the encoding the decoder admits.
+    InvalidOperand(&'static str),
 }
 
-impl core::fmt::Display for AuthenticatedLoadError {
-    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(formatter, "authenticated load failed: {self:?}")
+impl From<pauth::AuthenticationError> for PauthFault {
+    fn from(error: pauth::AuthenticationError) -> Self {
+        Self::Authentication(error)
     }
 }
 
-impl core::error::Error for AuthenticatedLoadError {}
+impl core::fmt::Display for PauthFault {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Authentication(error) => write!(formatter, "{error}"),
+            Self::UndefinedOverlap => {
+                formatter.write_str("LDRA writeback base overlaps its destination")
+            }
+            Self::StackAlignment { stack_pointer } => {
+                write!(formatter, "LDRA through a misaligned SP {stack_pointer:#x}")
+            }
+            Self::MemoryRequired => formatter.write_str("LDRA without a guest memory service"),
+            Self::Read(fault) => write!(formatter, "LDRA read faulted: {fault:?}"),
+            Self::LinkRegisterUnowned => {
+                formatter.write_str("link-register authentication requires retained LR owners")
+            }
+            Self::InvalidOperand(operand) => write!(formatter, "invalid {operand}"),
+        }
+    }
+}
+
+impl core::error::Error for PauthFault {}
+
+fn operand(valid: bool, operand: &'static str) -> Result<(), PauthFault> {
+    if valid {
+        Ok(())
+    } else {
+        Err(PauthFault::InvalidOperand(operand))
+    }
+}
 
 #[cfg(test)]
 pub(super) fn complete_pauth(
     context: &pauth::Context,
     instruction: &PointerAuthentication,
     registers: &mut GuestState,
-) -> Result<(GuestAddress, Option<bool>)> {
+) -> Result<(GuestAddress, Option<bool>), PauthFault> {
     complete_pauth_with_memory(context, instruction, registers, None)
 }
 
@@ -134,14 +174,12 @@ pub(crate) fn complete_pauth_with_memory(
     instruction: &PointerAuthentication,
     registers: &mut GuestState,
     memory: Option<&mut AuthenticatedMemory<'_>>,
-) -> Result<(GuestAddress, Option<bool>)> {
+) -> Result<(GuestAddress, Option<bool>), PauthFault> {
     use PointerAuthenticationOperation::{Authenticate, Sign, Strip};
     const HINT_POINTER_REGISTER: usize = 17;
     const HINT_MODIFIER_REGISTER: usize = 16;
     match instruction.operation {
-        PointerAuthenticationOperation::LinkRegister(_) => {
-            anyhow::bail!("link-register authentication requires retained LR owners")
-        }
+        PointerAuthenticationOperation::LinkRegister(_) => Err(PauthFault::LinkRegisterUnowned),
         PointerAuthenticationOperation::Sign1716 { key } => {
             let value = context.sign(
                 runtime_pauth_key(key),
@@ -193,10 +231,10 @@ pub(crate) fn complete_pauth_with_memory(
             modifier,
             link,
         } => {
-            ensure!(
+            operand(
                 target < REGISTER_COUNT,
-                "invalid authenticated branch target register"
-            );
+                "authenticated branch target register",
+            )?;
             let pointer = if target == ZERO_REGISTER_INDEX {
                 0
             } else {
@@ -224,10 +262,7 @@ pub(crate) fn complete_pauth_with_memory(
             destination,
             modifier,
         } => {
-            ensure!(
-                destination < REGISTER_COUNT,
-                "invalid PAC destination register"
-            );
+            operand(destination < REGISTER_COUNT, "PAC destination register")?;
             let pointer = if destination == ZERO_REGISTER_INDEX {
                 0
             } else {
@@ -256,7 +291,7 @@ pub(crate) fn complete_pauth_with_memory(
             Ok((instruction.next_pc, authenticated))
         }
         PointerAuthenticationOperation::Load(load) => {
-            let memory = memory.ok_or(AuthenticatedLoadError::MemoryRequired)?;
+            let memory = memory.ok_or(PauthFault::MemoryRequired)?;
             let mut authenticated = false;
             let read_flags = if load.writeback || load.base != ZERO_REGISTER_INDEX {
                 stela_compiler::context::memory::flags::TAG_CHECKED
@@ -290,19 +325,19 @@ pub(crate) fn complete_pauth_with_memory(
                             instruction.instruction_pc.0,
                         )
                         .map(|value| value as u64)
-                        .map_err(AuthenticatedLoadError::Read)
+                        .map_err(PauthFault::Read)
                 },
             )
             .map_err(|fault| match fault {
-                pauth::memory::Fault::InvalidOperands => anyhow::anyhow!("invalid LDRA operands"),
-                pauth::memory::Fault::UndefinedOverlap => {
-                    AuthenticatedLoadError::UndefinedOverlap.into()
+                pauth::memory::Fault::InvalidOperands => {
+                    PauthFault::InvalidOperand("LDRA operands")
                 }
-                pauth::memory::Fault::Authentication(error) => anyhow::Error::new(error),
+                pauth::memory::Fault::UndefinedOverlap => PauthFault::UndefinedOverlap,
+                pauth::memory::Fault::Authentication(error) => error.into(),
                 pauth::memory::Fault::StackAlignment { stack_pointer } => {
-                    AuthenticatedLoadError::StackAlignment { stack_pointer }.into()
+                    PauthFault::StackAlignment { stack_pointer }
                 }
-                pauth::memory::Fault::Read { error, .. } => error.into(),
+                pauth::memory::Fault::Read { error, .. } => error,
             })?;
             Ok((instruction.next_pc, Some(authenticated)))
         }
@@ -311,16 +346,15 @@ pub(crate) fn complete_pauth_with_memory(
                 context.generic_code(data, modifier)
             })
             .map_err(|fault| match fault {
-                pauth::generic::Fault::InvalidOperands => anyhow::anyhow!("invalid PACGA operands"),
-                pauth::generic::Fault::Compute(error) => error,
+                pauth::generic::Fault::InvalidOperands => {
+                    PauthFault::InvalidOperand("PACGA operands")
+                }
+                pauth::generic::Fault::Compute(error) => error.into(),
             })?;
             Ok((instruction.next_pc, None))
         }
         Strip { data, destination } => {
-            ensure!(
-                destination < REGISTER_COUNT,
-                "invalid XPAC destination register"
-            );
+            operand(destination < REGISTER_COUNT, "XPAC destination register")?;
             let pointer = if destination == ZERO_REGISTER_INDEX {
                 0
             } else {
@@ -335,7 +369,7 @@ pub(crate) fn complete_pauth_with_memory(
                     stela_contracts::pauth::Key::Ia
                 },
                 pointer,
-            )?;
+            );
             if destination != ZERO_REGISTER_INDEX {
                 registers.x[usize::from(destination)] = value;
             }

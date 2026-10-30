@@ -420,7 +420,7 @@ fn high_product_words(code: &mut Code, operand: &Operand, target: TargetCpu) {
         packed(code, Host::MultiplyHighSignedWord, 0, 1);
         packed(code, Host::AddWord, 0, 0);
         if rounding {
-            // ((L>>14)+1)>>1 retains the carry2 for L>=0xc000. A wrapping
+            // ((L>>14)+1)>>1 keeps the carry2 for L>=0xc000. A wrapping
             // word addition of 0x4000 to L would silently discard that carry.
             Shift::RightWord.emit(code, 2, 14);
             packed(code, Host::EqualDword, 3, 3);

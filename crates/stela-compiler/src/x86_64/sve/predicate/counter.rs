@@ -15,7 +15,7 @@ const DOUBLEWORD_LEADING_BITS: u64 = 0x0101_0101_0101_0101;
 /// Input RAX is the compressed low16 counter. Output RAX is one64-bit chunk of
 /// its PL*4-bit expansion, where PL is the vector length in bytes. Other high
 /// input bits are ignored. Clobbers RCX/RDX/R8..R11; preserves RDI/R15 and XMM.
-/// The instruction's own element size is deliberately absent: a consumer samples
+/// The instruction's own element size is absent: a consumer samples
 /// this mask using its independent stride, including mismatched counter sizes.
 /// This baseline mapping uses no optional host capability or guest RAM access.
 pub(crate) fn emit_counter_chunk(code: &mut Code, chunk: usize, length: VectorLength) {

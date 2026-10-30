@@ -153,7 +153,7 @@ fn declared_profile_identity_includes_features_and_controls() {
 }
 
 #[test]
-fn original_profile_retains_fixed_identity_and_manifest_shape() {
+fn original_profile_keeps_fixed_identity_and_manifest_shape() {
     let length = VectorLength::from_bytes(64).unwrap();
     let mode = ScalableMode::new(false, true);
     let original = ScalableProfile::new(length, mode);

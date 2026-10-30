@@ -15,6 +15,7 @@ use alloc::{
     vec::Vec,
 };
 use core::fmt;
+use stela_contracts::Refusal;
 
 pub mod schema;
 pub use schema::{
@@ -49,7 +50,7 @@ pub enum BundleError {
     /// The running machine cannot host the bundle.
     Machine(String),
     /// No entropy source; the bundle requires fresh random bytes.
-    Entropy(&'static str),
+    Entropy(Refusal),
 }
 
 impl fmt::Display for BundleError {
@@ -83,7 +84,7 @@ pub struct Framebuffer {
 #[derive(Debug, Clone)]
 pub struct Machine {
     pub dram_base: u64,
-    /// Guest DRAM bytes actually backed from `dram_base`.
+    /// Guest DRAM bytes backed from `dram_base`.
     pub ram_bytes: u64,
     /// The DRAM the Mac reports (`/chosen dram-size`, `memSizeActual`):
     /// the backed bytes and, above them, the host memory Stela and the
@@ -340,7 +341,7 @@ impl<'a> Verified<'a> {
         &self,
         patch: &Patch,
         machine: &Machine,
-        entropy: &mut dyn FnMut(&mut [u8]) -> Result<(), &'static str>,
+        entropy: &mut dyn FnMut(&mut [u8]) -> Result<(), Refusal>,
     ) -> Result<Option<Vec<u8>>, BundleError> {
         let error = |reason: &str| BundleError::Patch {
             field: patch.field.clone(),
@@ -448,7 +449,7 @@ impl<'a> Verified<'a> {
     pub fn load(
         &self,
         machine: &Machine,
-        entropy: &mut dyn FnMut(&mut [u8]) -> Result<(), &'static str>,
+        entropy: &mut dyn FnMut(&mut [u8]) -> Result<(), Refusal>,
         write: &mut dyn FnMut(u64, &[u8]) -> bool,
     ) -> Result<GuestImage, BundleError> {
         let options = &self.manifest.options;

@@ -2,7 +2,7 @@
 //! ECAM window goes to the driver of its class, and what each driver found
 //! or refused is collected in [`Devices`].
 use crate::{
-    Handoff,
+    Clock, Handoff, PlatformCaptures,
     block::{BlockDevice, BlockError},
     bus::{
         dma::DmaAllocator,
@@ -25,6 +25,8 @@ use alloc::{boxed::Box, string::String, sync::Arc, vec::Vec};
 use core::fmt;
 
 #[cfg(feature = "native-acpi")]
+mod companion;
+#[cfg(feature = "native-acpi")]
 mod i2c;
 #[cfg(feature = "native-acpi")]
 mod power;
@@ -34,14 +36,17 @@ pub mod native;
 #[cfg(any(test, feature = "native-acpi"))]
 mod platform;
 pub mod services;
-pub mod wifi;
+#[cfg(feature = "native-acpi")]
+pub mod smbus;
+#[cfg(feature = "native-acpi")]
+pub mod typec;
+use crate::net::wifi::network::Network;
 pub use services::{NativeServices, ServiceError};
-pub use wifi::{WifiConfig, WifiSecret, WifiSecretError};
 
-/// A controller refusal retains its original typed details for boot diagnostics.
+/// A controller refusal keeps its original typed details for boot diagnostics.
 /// In particular, firmware names and integrity/target errors are never replaced
 /// by a generic unsupported-device message.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum Error {
     Device(BlockError),
     Realtek(realtek::Error),
@@ -53,6 +58,13 @@ pub enum Error {
     Sfh(input::sfh::Error),
     Ish(input::ish::Error),
     IntelWifi(net::wifi::intel::attach::AttachError),
+    MediatekWifi(net::wifi::mediatek::attach::AttachError),
+    IntelBluetooth(crate::bluetooth::intel_pcie::Error),
+    Bcm4377(crate::bluetooth::bcm4377::Error),
+    Ehci(usb::ehci::Error),
+    HdaPci(crate::audio::hda::pci::AttachError),
+    Hda(crate::audio::Error),
+    Usb4(native::usb4::Refusal),
 }
 
 impl fmt::Display for Error {
@@ -67,6 +79,13 @@ impl fmt::Display for Error {
             Self::Sfh(error) => write!(f, "AMD SFH: {error:?}"),
             Self::Ish(error) => write!(f, "Intel ISH: {error:?}"),
             Self::IntelWifi(error) => write!(f, "iwlwifi: {error}"),
+            Self::MediatekWifi(error) => write!(f, "mt76: {error}"),
+            Self::IntelBluetooth(error) => write!(f, "btintel_pcie: {error}"),
+            Self::Bcm4377(error) => write!(f, "hci_bcm4377: {error}"),
+            Self::Ehci(error) => write!(f, "EHCI: {error:?}"),
+            Self::HdaPci(error) => write!(f, "HD Audio PCI: {error:?}"),
+            Self::Hda(error) => write!(f, "HD Audio: {error:?}"),
+            Self::Usb4(refusal) => write!(f, "USB4 host: {refusal}"),
         }
     }
 }
@@ -113,6 +132,9 @@ pub enum PlatformError {
     EcDiscovery(crate::platform::ec::discovery::native::DiscoveryError),
     #[cfg(feature = "native-acpi")]
     Battery(crate::platform::battery::Error),
+    Smbus(crate::bus::smbus::Error),
+    #[cfg(feature = "native-acpi")]
+    Ucsi(crate::usb::typec::ucsi::acpi::attachment::Error),
     /// Finding a device or evaluating its method failed.
     #[cfg(feature = "native-acpi")]
     AcpiMethod(crate::platform::acpi::Error),
@@ -141,13 +163,16 @@ impl fmt::Display for PlatformError {
             Self::EcDiscovery(error) => write!(f, "embedded controller description: {error:?}"),
             #[cfg(feature = "native-acpi")]
             Self::Battery(error) => write!(f, "battery: {error:?}"),
+            Self::Smbus(error) => error.fmt(f),
+            #[cfg(feature = "native-acpi")]
+            Self::Ucsi(error) => write!(f, "UCSI: {error:?}"),
             #[cfg(feature = "native-acpi")]
             Self::AcpiMethod(error) => write!(f, "ACPI method: {error:?}"),
         }
     }
 }
 
-/// Nonfatal diagnostics retain controller-specific values through discovery.
+/// Nonfatal diagnostics keep controller-specific values through discovery.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Warning {
     Message(&'static str),
@@ -176,6 +201,7 @@ pub enum Adapter {
     Aqtion(Box<native::Located<net::aqtion::Aqtion>>),
     #[cfg(feature = "native-acpi")]
     IntelWifi(Box<native::Located<native::IntelWifi>>),
+    MediatekWifi(Box<native::Located<native::MediatekWifi>>),
 }
 
 impl Adapter {
@@ -192,6 +218,7 @@ impl Adapter {
             Self::Aqtion(_) => "atlantic",
             #[cfg(feature = "native-acpi")]
             Self::IntelWifi(_) => "iwlwifi",
+            Self::MediatekWifi(_) => "mt7925e",
             Self::UsbVendor(device) => device.driver(),
         }
     }
@@ -210,6 +237,7 @@ impl Adapter {
             Self::Aqtion(device) => &device.location,
             #[cfg(feature = "native-acpi")]
             Self::IntelWifi(device) => &device.location,
+            Self::MediatekWifi(device) => &device.location,
         }
     }
 }
@@ -228,6 +256,7 @@ impl Link for Adapter {
             Self::Aqtion(device) => device.mac(),
             #[cfg(feature = "native-acpi")]
             Self::IntelWifi(device) => device.mac(),
+            Self::MediatekWifi(device) => device.mac(),
         }
     }
     fn carrier(&mut self) -> bool {
@@ -243,6 +272,7 @@ impl Link for Adapter {
             Self::Aqtion(device) => device.carrier(),
             #[cfg(feature = "native-acpi")]
             Self::IntelWifi(device) => device.carrier(),
+            Self::MediatekWifi(device) => device.carrier(),
         }
     }
     fn signals(&self) -> bool {
@@ -258,6 +288,7 @@ impl Link for Adapter {
             Self::Aqtion(device) => device.signals(),
             #[cfg(feature = "native-acpi")]
             Self::IntelWifi(device) => device.signals(),
+            Self::MediatekWifi(device) => device.signals(),
         }
     }
     fn transmit(&mut self, frame: &[u8]) -> Result<(), LinkError> {
@@ -273,6 +304,7 @@ impl Link for Adapter {
             Self::Aqtion(device) => device.transmit(frame),
             #[cfg(feature = "native-acpi")]
             Self::IntelWifi(device) => device.transmit(frame),
+            Self::MediatekWifi(device) => device.transmit(frame),
         }
     }
     fn receive(&mut self) -> Result<Option<Vec<u8>>, LinkError> {
@@ -288,6 +320,7 @@ impl Link for Adapter {
             Self::Aqtion(device) => device.receive(),
             #[cfg(feature = "native-acpi")]
             Self::IntelWifi(device) => device.receive(),
+            Self::MediatekWifi(device) => device.receive(),
         }
     }
 }
@@ -328,15 +361,22 @@ fn unsupported(class: [u8; 3]) -> Option<&'static str> {
         [0x01, 0x08, _] => Some("non-NVMe non-volatile memory controller"),
         [0x01, ..] => Some("storage controller"),
         [0x02, 0x00, _] => Some("Ethernet controller"),
-        [0x02, 0x80, _] => Some("network controller (Wi-Fi is not attached yet)"),
+        [0x02, 0x80, _] => Some("Wi-Fi controller other than Intel's or MediaTek's"),
         [0x02, ..] => Some("network controller"),
-        [0x04, 0x03, _] => Some("HD Audio controller (audio is not attached yet)"),
+        // Admitted identities attach through the mount's native services.
+        [0x04, 0x03, _] => Some("HD Audio controller outside the supported identities"),
+        // EHCI attaches through the mount's native services.
+        [0x0c, 0x03, 0x20] => None,
         [0x0c, 0x03, _] => {
-            Some("USB host controller other than xHCI (taken from firmware, not driven)")
+            Some("UHCI or OHCI USB host controller (taken from firmware, not driven)")
         }
-        [0x0c, 0x0a, _] => Some("USB4/Thunderbolt host (not attached yet)"),
+        // Listed NHIs attach through the mount's native services.
+        [0x0c, 0x0a, _] => Some("USB4/Thunderbolt host outside the supported NHI identities"),
+        [0x0c, 0x05, _] => Some(
+            "SMBus host other than an Intel i801 under native ACPI (no Host Notify for touchpad companions)",
+        ),
         [0x08, 0x05, _] => Some("SD host controller without standard SDHCI interface"),
-        [0x0d, 0x11, _] => Some("PCIe Bluetooth controller"),
+        [0x0d, 0x11, _] => Some("PCIe Bluetooth controller other than Intel's"),
         _ => None,
     }
 }
@@ -360,16 +400,24 @@ pub struct Devices {
     pub usb_devices: Vec<xhci::Device>,
     /// Explicitly polled USB topology owners, including empty controllers.
     pub usb_hosts: Vec<xhci::Host>,
+    /// Attached EHCI controllers, which their roots' storage transports share.
+    pub ehci_hosts: Vec<usb::ehci::host::Shared>,
+    /// HD Audio controllers and their bound codecs.
+    pub hda_hosts: Vec<native::hda::Host>,
+    /// USB4/Thunderbolt hosts whose firmware connection manager answered.
+    pub usb4_hosts: Vec<native::usb4::Host>,
     /// Native SDHCI socket owners, including empty/removable card sockets.
     pub sd_hosts: Vec<sdhci::Host>,
-    /// Native Realtek socket owners, retained for empty/removable SD/MMC cards.
+    /// Native Realtek socket owners, kept for empty/removable SD/MMC cards.
     pub rtsx_hosts: Vec<rtsx::Host>,
     /// Storage class owners remain available for explicit media rescan.
     pub usb_storage: Vec<crate::usb::storage::UsbStorage>,
-    /// USB HCI transports with retained device-specific initialization results.
+    /// USB HCI transports with kept device-specific initialization results.
     /// Historical evidence does not establish radio or guest readiness.
     pub bluetooth: Vec<UsbHci>,
-    /// Raw firmware uploaders awaiting actual USB removal/fresh enumeration.
+    /// PCIe HCI transports with their kept firmware initialization result.
+    pub pcie_bluetooth: Vec<native::PcieHci>,
+    /// Raw firmware uploaders awaiting USB removal/fresh enumeration.
     pub bluetooth_bootloaders: Vec<crate::usb::bluetooth::ath3k::UsbBootloader>,
     /// Exact pre-EBS board-variable observation, including unavailable diagnostics.
     pub bluetooth_platform: crate::usb::bluetooth::intel::DsbrCapture,
@@ -410,6 +458,9 @@ pub struct Devices {
     /// The batteries, AC adapter and lid the ACPI namespace lists.
     #[cfg(feature = "native-acpi")]
     pub power: Power,
+    /// Intel i801 SMBus hosts, shared with the touchpad companions on them.
+    #[cfg(feature = "native-acpi")]
+    pub smbus_hosts: Vec<smbus::Host>,
     /// ECAM windows that were not mapped, and so not scanned.
     pub unmapped: Vec<EcamWindow>,
     /// Whether the mount supplied [`NativeServices`]. Drivers that attach
@@ -422,13 +473,11 @@ pub struct Devices {
 }
 
 impl Devices {
-    /// Retained failures from attempted native vendor initialization. Unknown
-    /// vendors remain raw, unverified transports; they are not failed attempts
-    /// of a backend implemented here.
-    pub fn bluetooth_failures(
-        &self,
-    ) -> impl Iterator<Item = (&str, &crate::usb::bluetooth::InitializationError)> {
-        self.bluetooth.iter().filter_map(|device| {
+    /// Failures from attempted native vendor initialization, USB and PCIe.
+    /// Unknown USB vendors remain raw, unverified transports; they are not
+    /// failed attempts of a backend implemented here.
+    pub fn bluetooth_failures(&self) -> impl Iterator<Item = (&str, &dyn fmt::Display)> {
+        let usb = self.bluetooth.iter().filter_map(|device| {
             let Err(error) = device.initialization()? else {
                 return None;
             };
@@ -438,8 +487,23 @@ impl Devices {
             ) {
                 return None;
             }
-            Some((device.binding().device().location.as_str(), error))
-        })
+            Some((
+                device.binding().device().location.as_str(),
+                error as &dyn fmt::Display,
+            ))
+        });
+        let pcie = self.pcie_bluetooth.iter().filter_map(|hci| {
+            let error: &dyn fmt::Display = match &hci.controller {
+                native::PcieController::Intel { initialization, .. } => {
+                    initialization.as_ref().err()?
+                }
+                native::PcieController::Broadcom { initialization, .. } => {
+                    initialization.as_ref().err()?
+                }
+            };
+            Some((hci.location.as_str(), error))
+        });
+        usb.chain(pcie)
     }
 }
 
@@ -454,9 +518,14 @@ impl Devices {
 /// `handoff` must describe the running machine after ExitBootServices,
 /// with its ranges mapped as it says, and nothing else may drive these
 /// controllers afterwards.
-pub unsafe fn probe(handoff: &Handoff, dma: &mut dyn DmaAllocator) -> Devices {
+pub unsafe fn probe(
+    handoff: &Handoff,
+    captures: PlatformCaptures,
+    dma: &mut dyn DmaAllocator,
+) -> Devices {
+    let firmware = handoff_provider(handoff);
     // SAFETY: the caller granted the complete machine/controller contract.
-    unsafe { probe_with_provider(handoff, dma, handoff_provider(handoff), None, None) }
+    unsafe { probe_with_provider(handoff, captures, dma, firmware, None, None) }
 }
 
 /// The handoff's firmware catalog as the provider [`probe_with_provider`]
@@ -472,8 +541,16 @@ pub fn handoff_provider(handoff: &Handoff) -> &'static crate::firmware::HandoffP
     Box::leak(Box::new(crate::firmware::HandoffProvider::new(catalog)))
 }
 
-/// Attach the Intel Wi-Fi function at `address` for `network`, reading its
-/// ACPI companion, once the regulatory database loaded.
+/// What every Intel Wi-Fi attach in one probe shares.
+struct WifiInputs<'a> {
+    clock: Clock,
+    observations: net::wifi::intel::platform::Observations,
+    firmware: &'static dyn crate::firmware::Provider,
+    network: &'a Network,
+}
+
+/// Attach the Intel Wi-Fi function at `address` for `wifi.network`, reading
+/// its ACPI companion, once the regulatory database loaded.
 ///
 /// # Safety
 /// [`NativeServices`]' contract holds for `services`, and nothing else
@@ -485,21 +562,25 @@ pub fn handoff_provider(handoff: &Handoff) -> &'static crate::firmware::HandoffP
 unsafe fn intel_wifi(
     services: &dyn NativeServices,
     address: Address,
-    handoff: &Handoff,
-    firmware: &'static dyn crate::firmware::Provider,
-    network: &WifiConfig,
+    wifi: &WifiInputs<'_>,
     regulatory: &Option<
         Result<
             crate::net::wifi::regulatory::database::Database,
             crate::net::wifi::regulatory::database::LoadError,
         >,
     >,
-    bridges: &[(Address, u8)],
+    bridges: &[native::Bridge],
 ) -> Result<Adapter, native::Failure> {
     use net::wifi::intel::attach::AttachError;
     let Some(Ok(database)) = regulatory else {
         return Err((Error::IntelWifi(AttachError::NoRegulatoryDatabase), None));
     };
+    let WifiInputs {
+        clock,
+        observations,
+        firmware,
+        network,
+    } = *wifi;
     #[cfg(feature = "native-acpi")]
     {
         let session = services.acpi();
@@ -511,14 +592,14 @@ unsafe fn intel_wifi(
                 session,
                 companion,
                 firmware,
-                handoff.wifi_platform,
+                observations,
             )
         };
         let inputs = net::wifi::intel::link::Inputs {
             firmware,
-            observations: handoff.wifi_platform,
+            observations,
             pages: services.pages(),
-            clock: handoff.clock,
+            clock,
             bios,
             database: database.clone(),
             network: network.clone(),
@@ -530,10 +611,138 @@ unsafe fn intel_wifi(
     #[cfg(not(feature = "native-acpi"))]
     {
         let _ = (
-            services, address, handoff, firmware, network, database, bridges,
+            services,
+            address,
+            clock,
+            observations,
+            firmware,
+            network,
+            database,
+            bridges,
         );
         Err((Error::IntelWifi(AttachError::NoNamespace), None))
     }
+}
+
+/// Attach the MediaTek Wi-Fi function at `address` for `wifi.network`, its
+/// SAR tables read from its ACPI companion, once the regulatory database
+/// loaded. `aspm` is whether firmware enabled ASPM on its link.
+///
+/// # Safety
+/// As for [`intel_wifi`].
+#[allow(
+    clippy::result_large_err,
+    reason = "a failed attach hands back the owners that must outlive the device"
+)]
+unsafe fn mediatek_wifi(
+    services: &dyn NativeServices,
+    address: Address,
+    wifi: &WifiInputs<'_>,
+    regulatory: &Option<
+        Result<
+            crate::net::wifi::regulatory::database::Database,
+            crate::net::wifi::regulatory::database::LoadError,
+        >,
+    >,
+    bridges: &[native::Bridge],
+    aspm: bool,
+) -> Result<
+    native::Located<net::wifi::mediatek::attach::Attached<native::MediatekOwner>>,
+    native::Failure,
+> {
+    use net::wifi::mediatek::attach::AttachError;
+    let Some(Ok(database)) = regulatory else {
+        return Err((Error::MediatekWifi(AttachError::NoRegulatoryDatabase), None));
+    };
+    let entropy = services
+        .entropy()
+        .map_err(|error| (Error::Native(error), None))?;
+    #[cfg(feature = "native-acpi")]
+    let sar = net::wifi::mediatek::acpi::read(
+        services
+            .acpi()
+            .and_then(|session| native::companion(session, address, bridges)),
+    );
+    #[cfg(not(feature = "native-acpi"))]
+    let sar = {
+        let _ = bridges;
+        net::wifi::mediatek::acpi::Sar::default()
+    };
+    let inputs = net::wifi::mediatek::attach::Inputs {
+        firmware: wifi.firmware,
+        pages: services.pages(),
+        clock: wifi.clock,
+        aspm,
+        database: database.clone(),
+        network: wifi.network.clone(),
+        sar,
+        entropy,
+    };
+    // SAFETY: forwarded from the caller.
+    unsafe { native::mediatek_wifi(services, address, inputs) }
+}
+
+/// Attach the Broadcom PCIe Bluetooth function at `address` with its
+/// segment's bridges, for the board SMBIOS names, as `bcm4377_probe_dmi`
+/// selects it.
+///
+/// # Safety
+/// As for [`intel_wifi`]; `bridges` lists every bridge of the segment.
+#[allow(
+    clippy::result_large_err,
+    reason = "a failed attach hands back the owners that must outlive the device"
+)]
+unsafe fn bcm4377(
+    services: &dyn NativeServices,
+    address: Address,
+    bridges: &[native::Bridge],
+    firmware: &'static dyn crate::firmware::Provider,
+    clock: Clock,
+) -> Result<native::Bcm4377, native::Failure> {
+    use crate::bluetooth::bcm4377::{Board, Error as Bcm4377Error};
+    use crate::firmware::smbios::Observation;
+    let refused = |error: ServiceError| (Error::Native(error), None);
+    let text = |observation| match observation {
+        Observation::Value(bytes) => core::str::from_utf8(bytes).ok(),
+        _ => None,
+    };
+    let board = crate::firmware::smbios::load(firmware)
+        .ok()
+        .and_then(|snapshot| {
+            let identity = snapshot.identity;
+            Board::from_dmi(text(identity.system_vendor)?, text(identity.product_name)?).ok()
+        })
+        .ok_or((
+            Error::Bcm4377(Bcm4377Error::Unsupported(
+                "an SMBIOS system the source's DMI board table lists",
+            )),
+            None,
+        ))?;
+    #[cfg(feature = "native-acpi")]
+    let roots = services
+        .acpi()
+        .map(|session| native::root_buses(session, address.segment))
+        .unwrap_or_default();
+    #[cfg(not(feature = "native-acpi"))]
+    let roots = Vec::new();
+    if roots.is_empty() {
+        return Err(refused(ServiceError::Refused(
+            "no ACPI host bridge declares the segment's root buses",
+        )));
+    }
+    let mut owned = Vec::new();
+    for bridge in bridges
+        .iter()
+        .filter(|bridge| bridge.address.segment == address.segment)
+    {
+        owned.push(services.bridge(bridge.address).map_err(refused)?);
+    }
+    // SAFETY: these are the mount's owners of every bridge the scan found
+    // in the segment and the root buses its ACPI host bridges declare; no
+    // other driver sets their link policy.
+    let topology = unsafe { crate::bus::pci::native_aspm::Topology::new(owned, roots) };
+    // SAFETY: forwarded from the caller.
+    unsafe { native::bcm4377(services, address, topology, board, clock) }
 }
 
 /// Enumerate and attach devices using an explicit exact firmware provider.
@@ -554,21 +763,36 @@ unsafe fn intel_wifi(
 /// the firmware it returned.
 pub unsafe fn probe_with_provider(
     handoff: &Handoff,
+    captures: PlatformCaptures,
     dma: &mut dyn DmaAllocator,
     firmware: &'static dyn crate::firmware::Provider,
     services: Option<&dyn NativeServices>,
-    wifi: Option<&WifiConfig>,
+    wifi: Option<&Network>,
 ) -> Devices {
     let mut devices = Devices {
-        bluetooth_platform: handoff.bluetooth_platform,
+        bluetooth_platform: captures.bluetooth,
         native_services: services.is_some(),
         ..Devices::default()
     };
+    let wifi_inputs = wifi.map(|network| WifiInputs {
+        clock: handoff.clock,
+        observations: captures.wifi,
+        firmware,
+        network,
+    });
     // Intel ISHs, attached once the scan has looked for a Mehlow host bridge.
     let mut sensor_hubs = Vec::new();
+    // Broadcom PCIe Bluetooth functions, attached once the scan has found
+    // every bridge of their segment.
+    let mut broadcom_bluetooth = Vec::new();
+    let mut usb4_hosts = Vec::new();
     let mut mehlow = false;
     // Each PCI bridge and its secondary bus, for ACPI companion lookups.
     let mut bridges = Vec::new();
+    // i801 SMBus hosts, attached under ACPI arbitration once the embedded
+    // controller is.
+    #[cfg(feature = "native-acpi")]
+    let mut smbus_functions = Vec::new();
     for window in &handoff.ecam {
         if !handoff.is_mapped(&window.range()) {
             devices.unmapped.push(*window);
@@ -580,7 +804,11 @@ pub unsafe fn probe_with_provider(
             mehlow |= function.vendor == 0x8086 && native::MEHLOW.contains(&function.device);
             if function.class[..2] == [6, 4] {
                 use crate::bus::pci::ConfigSpace;
-                bridges.push((address, function.config().read8(0x19)));
+                bridges.push(native::Bridge {
+                    address,
+                    secondary: function.config().read8(0x19),
+                    aspm: crate::bus::pci::aspm_control(&function),
+                });
             }
             if function.class[..2] == [2, 0x80] {
                 if wifi.is_none() {
@@ -598,6 +826,11 @@ pub unsafe fn probe_with_provider(
                 continue;
             }
             crate::working(&alloc::format!("PCI {address}"));
+            #[cfg(feature = "native-acpi")]
+            if smbus::matches(&function) {
+                smbus_functions.push(address);
+                continue;
+            }
             if let Some(kind) = usb::handoff::Kind::of(function.class) {
                 // SAFETY: the caller owns the machine and no driver has bound
                 // this controller yet, as Linux's early PCI fixup runs.
@@ -638,24 +871,141 @@ pub unsafe fn probe_with_provider(
                         sensor_hubs.push(address);
                         continue;
                     }
+                    native::Kind::IntelBluetooth => {
+                        // SAFETY: as for tg3 below.
+                        match unsafe { native::intel_bluetooth(services, address, handoff.clock) } {
+                            Ok(mut transport) => {
+                                let initialization =
+                                    crate::bluetooth::intel_pcie::firmware::initialize(
+                                        &mut transport,
+                                        firmware,
+                                        devices.bluetooth_platform.platform_inputs(),
+                                    );
+                                devices.pcie_bluetooth.push(native::PcieHci {
+                                    location: alloc::format!("{address}"),
+                                    controller: native::PcieController::Intel {
+                                        transport,
+                                        initialization,
+                                    },
+                                });
+                            }
+                            Err((error, kept)) => {
+                                devices.failures.push((address, error));
+                                devices.owners.extend(kept);
+                            }
+                        }
+                        continue;
+                    }
+                    native::Kind::Bcm4377 => {
+                        broadcom_bluetooth.push(address);
+                        continue;
+                    }
+                    native::Kind::Usb4 => {
+                        usb4_hosts.push(address);
+                        continue;
+                    }
+                    native::Kind::Ehci => {
+                        // SAFETY: as for tg3 below; the handoff above took
+                        // this controller and reset its companions, which
+                        // the scan reaches first as lower functions.
+                        match unsafe { native::ehci(services, address, handoff.clock) } {
+                            Ok((controller, domain)) => {
+                                // SAFETY: `domain` is the claimed controller's;
+                                // the CPU alone touches these storage buffers,
+                                // copying through the controller's own arena.
+                                let mut dma = unsafe {
+                                    crate::bus::dma::DomainAllocator::new(
+                                        services.pages(),
+                                        domain,
+                                        u64::from(u32::MAX),
+                                    )
+                                };
+                                let found = usb::ehci::host::enumerate(
+                                    &controller,
+                                    &alloc::format!("{address} EHCI"),
+                                    handoff.clock,
+                                    &mut dma,
+                                );
+                                devices.disks.extend(
+                                    found
+                                        .disks
+                                        .into_iter()
+                                        .map(|disk| Box::new(disk) as Box<dyn BlockDevice>),
+                                );
+                                devices.usb_storage.extend(found.storage);
+                                devices.usb_failures.extend(found.failures);
+                                devices.usb_unused.extend(found.unused);
+                                devices.ehci_hosts.push(controller);
+                            }
+                            Err((error, kept)) => {
+                                devices.failures.push((address, error));
+                                devices.owners.extend(kept);
+                            }
+                        }
+                        continue;
+                    }
+                    native::Kind::Hda => {
+                        // SAFETY: as for tg3 below; only conventional
+                        // controllers, which no firmware agent drives, match.
+                        match unsafe { native::hda::attach(services, address, handoff.clock) } {
+                            Ok(host) => devices.hda_hosts.push(host),
+                            Err((error, kept)) => {
+                                devices.failures.push((address, error));
+                                devices.owners.extend(kept);
+                            }
+                        }
+                        continue;
+                    }
                     native::Kind::IntelWifi => {
-                        let Some(network) = wifi else {
+                        let Some(wifi) = &wifi_inputs else {
                             continue;
                         };
                         // SAFETY: as for tg3 below; the companion is this
                         // function's own.
                         match unsafe {
-                            intel_wifi(
-                                services,
-                                address,
-                                handoff,
-                                firmware,
-                                network,
-                                &devices.regulatory,
-                                &bridges,
-                            )
+                            intel_wifi(services, address, wifi, &devices.regulatory, &bridges)
                         } {
                             Ok(link) => devices.nics.push(link),
+                            Err((error, kept)) => {
+                                devices.failures.push((address, error));
+                                devices.owners.extend(kept);
+                            }
+                        }
+                        continue;
+                    }
+                    native::Kind::MediatekWifi => {
+                        let Some(wifi) = &wifi_inputs else {
+                            continue;
+                        };
+                        let aspm = native::aspm_supported(&function, &bridges);
+                        // SAFETY: as for tg3 below; the companion is this
+                        // function's own.
+                        match unsafe {
+                            mediatek_wifi(
+                                services,
+                                address,
+                                wifi,
+                                &devices.regulatory,
+                                &bridges,
+                                aspm,
+                            )
+                        } {
+                            Ok(native::Located { location, link }) => {
+                                if link.firmware_domain_unused {
+                                    devices.warnings.push((
+                                        address,
+                                        Warning::Message(
+                                            "MT7925 firmware regulatory domain left unused; regulatory.db's country is programmed",
+                                        ),
+                                    ));
+                                }
+                                devices.nics.push(Adapter::MediatekWifi(Box::new(
+                                    native::Located {
+                                        location,
+                                        link: link.station,
+                                    },
+                                )));
+                            }
                             Err((error, kept)) => {
                                 devices.failures.push((address, error));
                                 devices.owners.extend(kept);
@@ -754,16 +1104,19 @@ pub unsafe fn probe_with_provider(
                                 .into_iter()
                                 .map(|d| Box::new(d) as Box<dyn BlockDevice>),
                         );
-                        devices
-                            .inputs
-                            .extend(found.inputs.into_iter().map(InputDevice::Usb));
+                        devices.inputs.extend(
+                            found
+                                .inputs
+                                .into_iter()
+                                .map(|input| InputDevice::Usb(Box::new(input))),
+                        );
                         devices.usb_devices.extend(found.devices);
                         devices.usb_hosts.extend(found.hosts);
                         devices.usb_storage.extend(found.storage);
                         devices.audio.extend(found.audio);
                         devices.bluetooth_bootloaders.extend(found.bootloaders);
                         for mut device in found.bluetooth {
-                            // The retained result owns its evidence/errors;
+                            // The kept result owns its evidence/errors;
                             // no catalog borrow or firmware bytes escape.
                             let _ = device.initialize_with_provider(
                                 firmware,
@@ -908,6 +1261,47 @@ pub unsafe fn probe_with_provider(
             }
         }
     }
+    for address in usb4_hosts {
+        let Some(services) = services else {
+            devices
+                .failures
+                .push((address, Error::Native(ServiceError::Unavailable)));
+            continue;
+        };
+        // SAFETY: as for tg3; the scan found every bridge of the segment.
+        match unsafe { native::usb4::attach(services, address, &bridges, handoff.clock) } {
+            Ok(host) => devices.usb4_hosts.push(host),
+            Err((error, kept)) => {
+                devices.failures.push((address, error));
+                devices.owners.extend(kept);
+            }
+        }
+    }
+    for address in broadcom_bluetooth {
+        let Some(services) = services else {
+            devices
+                .failures
+                .push((address, Error::Native(ServiceError::Unavailable)));
+            continue;
+        };
+        // SAFETY: as for tg3; the scan found every bridge of the segment.
+        match unsafe { bcm4377(services, address, &bridges, firmware, handoff.clock) } {
+            Ok(mut transport) => {
+                let initialization = transport.initialize(firmware);
+                devices.pcie_bluetooth.push(native::PcieHci {
+                    location: alloc::format!("{address}"),
+                    controller: native::PcieController::Broadcom {
+                        transport,
+                        initialization,
+                    },
+                });
+            }
+            Err((error, kept)) => {
+                devices.failures.push((address, error));
+                devices.owners.extend(kept);
+            }
+        }
+    }
     for address in sensor_hubs {
         let Some(services) = services else {
             devices
@@ -945,21 +1339,51 @@ pub unsafe fn probe_with_provider(
         services.and_then(|services| services.acpi().map(|session| (services, session)))
     {
         // Before any other device's methods, which may read EC fields.
-        match services.embedded_controller() {
-            Ok(Some(installed)) => devices.owners.push(Box::new(installed)),
+        let ec = match services.embedded_controller() {
+            Ok(Some(installed)) => {
+                devices.owners.push(Box::new(installed.clone()));
+                Some(installed)
+            }
             Ok(None) => power::attach_ec(session, &mut devices),
-            Err(error) => devices.platform_failures.push((
-                String::from("embedded controller"),
-                PlatformError::Native(error),
-            )),
+            Err(error) => {
+                devices.platform_failures.push((
+                    String::from("embedded controller"),
+                    PlatformError::Native(error),
+                ));
+                None
+            }
+        };
+        for address in core::mem::take(&mut smbus_functions) {
+            // SAFETY: the mount grants each i801's I/O window to probe.
+            match unsafe { smbus::attach(services, session, address, &bridges, handoff.clock) } {
+                Ok(host) => devices.smbus_hosts.push(host),
+                Err(error) => devices
+                    .platform_failures
+                    .push((alloc::format!("{address} SMBus"), error)),
+            }
         }
         let usb_released = !devices
             .platform_failures
             .iter()
             .any(|(_, error)| matches!(error, PlatformError::Handoff(_)));
-        platform::attach_i8042(session, handoff.clock, usb_released, &mut devices);
+        let smbus_hosts = devices.smbus_hosts.clone();
+        platform::attach_i8042(
+            session,
+            handoff.clock,
+            usb_released,
+            &smbus_hosts,
+            &mut devices,
+        );
         i2c::attach(services, session, handoff.clock, &mut devices);
         power::attach_power(session, &mut devices);
+        typec::attach(services, session, ec.as_ref(), handoff.clock, &mut devices);
+    }
+    #[cfg(feature = "native-acpi")]
+    for address in smbus_functions {
+        devices.platform_failures.push((
+            alloc::format!("{address} SMBus"),
+            PlatformError::Native(ServiceError::Unavailable),
+        ));
     }
     devices
 }
@@ -977,20 +1401,22 @@ mod tests {
     fn unclaimed_host_classes_are_reported_and_others_ignored() {
         assert_eq!(
             unsupported([0x02, 0x80, 0x00]),
-            Some("network controller (Wi-Fi is not attached yet)")
+            Some("Wi-Fi controller other than Intel's or MediaTek's")
         );
         assert_eq!(
             unsupported([0x01, 0x04, 0x00]),
             Some("RAID storage controller (Intel RST/VMD mode)")
         );
         assert_eq!(
-            unsupported([0x0c, 0x03, 0x20]),
-            Some("USB host controller other than xHCI (taken from firmware, not driven)")
+            unsupported([0x0c, 0x03, 0x10]),
+            Some("UHCI or OHCI USB host controller (taken from firmware, not driven)")
         );
+        assert_eq!(unsupported([0x0c, 0x03, 0x20]), None); // EHCI: native
         assert_eq!(
             unsupported([0x08, 0x05, 0x02]),
             Some("SD host controller without standard SDHCI interface")
         );
+        assert!(unsupported([0x0c, 0x05, 0x00]).is_some_and(|why| why.contains("i801")));
         assert_eq!(unsupported([0x06, 0x04, 0x00]), None); // PCI bridge
         assert_eq!(unsupported([0x03, 0x00, 0x00]), None); // display: GPU inventory
     }
@@ -1006,14 +1432,12 @@ mod tests {
                 ticks_per_microsecond: 1,
             },
             firmware: None,
-            bluetooth_platform: Default::default(),
-            wifi_platform: Default::default(),
             completion: None,
         };
         let firmware = handoff_provider(&handoff);
-        let network = WifiConfig {
+        let network = Network {
             ssid: b"test".to_vec(),
-            secret: WifiSecret::parse(b"test passphrase").unwrap(),
+            secret: crate::net::wifi::network::Secret::parse(b"test passphrase").unwrap(),
             country: None,
         };
         let address = Address {
@@ -1023,12 +1447,86 @@ mod tests {
             function: 0,
         };
         // SAFETY: the refusing services cannot grant hardware access.
-        let result =
-            unsafe { intel_wifi(&services, address, &handoff, firmware, &network, &None, &[]) };
+        let result = unsafe {
+            intel_wifi(
+                &services,
+                address,
+                &WifiInputs {
+                    clock: handoff.clock,
+                    observations: Default::default(),
+                    firmware,
+                    network: &network,
+                },
+                &None,
+                &[],
+            )
+        };
         assert!(matches!(
             result,
             Err((
                 Error::IntelWifi(net::wifi::intel::attach::AttachError::NoRegulatoryDatabase),
+                None
+            ))
+        ));
+        // SAFETY: as above.
+        let result = unsafe {
+            mediatek_wifi(
+                &services,
+                address,
+                &WifiInputs {
+                    clock: handoff.clock,
+                    observations: Default::default(),
+                    firmware,
+                    network: &network,
+                },
+                &None,
+                &[],
+                false,
+            )
+        };
+        assert!(matches!(
+            result,
+            Err((
+                Error::MediatekWifi(net::wifi::mediatek::attach::AttachError::NoRegulatoryDatabase),
+                None
+            ))
+        ));
+        assert!(services.requests.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_board_smbios_does_not_name_attaches_no_broadcom_bluetooth() {
+        let services = services::tests::Refusing::default();
+        let handoff = Handoff {
+            ecam: Vec::new(),
+            mapped: Vec::new(),
+            dma: 0..0,
+            clock: crate::Clock {
+                ticks_per_microsecond: 1,
+            },
+            firmware: None,
+            completion: None,
+        };
+        let address = Address {
+            segment: 0,
+            bus: 2,
+            device: 0,
+            function: 0,
+        };
+        // SAFETY: the refusing services cannot grant hardware access.
+        let result = unsafe {
+            bcm4377(
+                &services,
+                address,
+                &[],
+                handoff_provider(&handoff),
+                handoff.clock,
+            )
+        };
+        assert!(matches!(
+            result,
+            Err((
+                Error::Bcm4377(crate::bluetooth::bcm4377::Error::Unsupported(_)),
                 None
             ))
         ));
@@ -1081,9 +1579,8 @@ mod tests {
             devices.failures.push((address, error.into()));
             let (location, error) = devices.failures.last().unwrap();
             assert_eq!(*location, address);
-            assert_eq!(
-                *error,
-                Error::Realtek(realtek::Error::Firmware(original.clone()))
+            assert!(
+                matches!(error, Error::Realtek(realtek::Error::Firmware(kept)) if *kept == original)
             );
             assert_eq!(format!("{error}"), format!("{original}"));
             assert!(format!("{error}").contains(requirement.name));

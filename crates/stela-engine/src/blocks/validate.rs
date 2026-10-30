@@ -1,6 +1,6 @@
 //! Checks that a native exit names an instruction in the registered source.
 use super::INSTRUCTION_BYTES;
-use anyhow::{Context, Result, ensure};
+use crate::Result;
 use stela_compiler::{
     GuestAddress,
     block::{
@@ -9,6 +9,7 @@ use stela_compiler::{
         decode_system_instruction, decode_thread_register_instruction, decode_trap,
     },
 };
+use stela_contracts::{refuse, require};
 
 pub(super) fn validate_clock_exit(
     entry: GuestAddress,
@@ -18,8 +19,12 @@ pub(super) fn validate_clock_exit(
     source: &[u8],
 ) -> Result<ClockInstruction> {
     let word = validate_terminal_word(entry, exit, source_bytes, region_base, source)?;
-    decode_clock_instruction(exit, word)?
-        .context("clock exit does not identify a reviewed instruction")
+    Ok(decode_clock_instruction(exit, word)?.ok_or_else(|| {
+        refuse!(
+            "clock exit does not identify a reviewed instruction",
+            exit = exit.0
+        )
+    })?)
 }
 
 pub(super) fn validate_pauth_exit(
@@ -30,8 +35,12 @@ pub(super) fn validate_pauth_exit(
     source: &[u8],
 ) -> Result<PointerAuthentication> {
     let word = validate_terminal_word(entry, exit, source_bytes, region_base, source)?;
-    decode_pointer_authentication(exit, word)?
-        .context("PAuth exit does not identify a reviewed instruction")
+    Ok(decode_pointer_authentication(exit, word)?.ok_or_else(|| {
+        refuse!(
+            "PAuth exit does not identify a reviewed instruction",
+            exit = exit.0
+        )
+    })?)
 }
 
 /// Every consumed aligned word is a source-map boundary, checked at preparation.
@@ -49,14 +58,14 @@ pub(super) fn validate_numerical_exit(
 )> {
     let word = validate_interior_word(entry, exit, source_bytes, region_base, source)?;
     let operand = stela_compiler::aarch64::FloatingPointOperation::decode(word)
-        .context("numerical exit does not identify arithmetic")?
+        .ok_or(refuse!("numerical exit does not identify arithmetic"))?
         .map_err(|stela_compiler::aarch64::Unsupported| {
-            anyhow::anyhow!("numerical exit identifies reserved arithmetic")
+            refuse!("numerical exit identifies reserved arithmetic")
         })?;
     let next = GuestAddress(
         exit.0
             .checked_add(INSTRUCTION_BYTES as u64)
-            .context("numerical continuation address overflow")?,
+            .ok_or(refuse!("numerical continuation address overflow"))?,
     );
     Ok((operand, next))
 }
@@ -68,45 +77,45 @@ pub(super) fn validate_interior_word(
     region_base: u64,
     source: &[u8],
 ) -> Result<u32> {
-    ensure!(
+    require!(
         entry.0.is_multiple_of(INSTRUCTION_BYTES as u64)
             && exit.0.is_multiple_of(INSTRUCTION_BYTES as u64)
             && source_bytes >= INSTRUCTION_BYTES
             && source_bytes.is_multiple_of(INSTRUCTION_BYTES),
-        "invalid numerical helper block extent/alignment"
+        "invalid numerical helper block extent or alignment",
+        entry = entry.0,
+        source_bytes
     );
     entry
         .0
-        .checked_add(u64::try_from(source_bytes)?)
-        .context("numerical consumed guest extent overflow")?;
-    let prefix = usize::try_from(
-        entry
-            .0
-            .checked_sub(region_base)
-            .context("numerical block precedes immutable source")?,
-    )?;
+        .checked_add(source_bytes as u64)
+        .ok_or_else(|| refuse!("numerical consumed guest extent overflow", entry = entry.0))?;
+    let prefix = entry
+        .0
+        .checked_sub(region_base)
+        .ok_or_else(|| refuse!("numerical block precedes immutable source", entry = entry.0))?
+        as usize;
     let end = prefix
         .checked_add(source_bytes)
-        .context("numerical block extent overflow")?;
-    ensure!(
+        .ok_or_else(|| refuse!("numerical block extent overflow", entry = entry.0))?;
+    require!(
         end <= source.len(),
-        "numerical block exceeds immutable source"
+        "numerical block exceeds immutable source",
+        entry = entry.0,
+        source_bytes
     );
-    let relative = usize::try_from(
-        exit.0
-            .checked_sub(entry.0)
-            .context("numerical exit precedes consumed block")?,
-    )?;
-    ensure!(
+    let relative = exit
+        .0
+        .checked_sub(entry.0)
+        .ok_or_else(|| refuse!("numerical exit precedes consumed block", exit = exit.0))?
+        as usize;
+    require!(
         relative < source_bytes,
-        "numerical exit exceeds consumed block"
+        "numerical exit exceeds consumed block",
+        exit = exit.0
     );
-    let offset = prefix
-        .checked_add(relative)
-        .context("numerical source offset overflow")?;
-    Ok(u32::from_le_bytes(
-        source[offset..offset + INSTRUCTION_BYTES].try_into()?,
-    ))
+    word(source, prefix + relative)
+        .ok_or_else(|| refuse!("numerical exit exceeds immutable source", exit = exit.0).into())
 }
 
 /// Native exit metadata must identify the final immutable source instruction;
@@ -118,32 +127,32 @@ pub(super) fn validate_terminal_word(
     region_base: u64,
     source: &[u8],
 ) -> Result<u32> {
-    ensure!(
+    require!(
         source_bytes >= INSTRUCTION_BYTES && source_bytes.is_multiple_of(INSTRUCTION_BYTES),
-        "invalid native helper block extent"
+        "invalid native helper block extent",
+        source_bytes
     );
     let terminal = entry
         .0
-        .checked_add(u64::try_from(source_bytes - INSTRUCTION_BYTES)?)
-        .context("native helper terminal address overflow")?;
-    ensure!(
+        .checked_add((source_bytes - INSTRUCTION_BYTES) as u64)
+        .ok_or_else(|| refuse!("native helper terminal address overflow", entry = entry.0))?;
+    require!(
         exit.0 == terminal,
-        "native helper exit differs from consumed terminal instruction"
-    );
-    let offset = usize::try_from(
+        "native helper exit differs from consumed terminal instruction",
+        exit = exit.0,
         terminal
-            .checked_sub(region_base)
-            .context("native helper precedes source region")?,
-    )?;
-    let end = offset
-        .checked_add(INSTRUCTION_BYTES)
-        .context("native helper source extent overflow")?;
-    Ok(u32::from_le_bytes(
-        source
-            .get(offset..end)
-            .context("native helper exceeds immutable source")?
-            .try_into()?,
-    ))
+    );
+    let offset = terminal
+        .checked_sub(region_base)
+        .ok_or_else(|| refuse!("native helper precedes source region", terminal))?;
+    word(source, offset as usize)
+        .ok_or_else(|| refuse!("native helper exceeds immutable source", terminal).into())
+}
+
+/// The instruction word at `offset` in `source`.
+fn word(source: &[u8], offset: usize) -> Option<u32> {
+    let bytes = source.get(offset..offset.checked_add(INSTRUCTION_BYTES)?)?;
+    Some(u32::from_le_bytes(bytes.try_into().ok()?))
 }
 
 pub(super) fn validate_system_exit(
@@ -154,8 +163,12 @@ pub(super) fn validate_system_exit(
     source: &[u8],
 ) -> Result<SystemInstruction> {
     let word = validate_terminal_word(entry, exit, source_bytes, region_base, source)?;
-    decode_system_instruction(exit, word)?
-        .context("native System exit is not an immutable System instruction")
+    Ok(decode_system_instruction(exit, word)?.ok_or_else(|| {
+        refuse!(
+            "native System exit is not an immutable System instruction",
+            exit = exit.0
+        )
+    })?)
 }
 
 pub(super) fn validate_thread_register_exit(
@@ -167,7 +180,13 @@ pub(super) fn validate_thread_register_exit(
 ) -> Result<ThreadRegisterInstruction> {
     let word = validate_terminal_word(entry, exit, source_bytes, region_base, source)?;
     decode_thread_register_instruction(exit, word)?
-        .context("thread-register exit does not identify a reviewed instruction")
+        .ok_or_else(|| {
+            refuse!(
+                "thread-register exit does not identify a reviewed instruction",
+                exit = exit.0
+            )
+        })
+        .map_err(Into::into)
 }
 
 pub(super) fn validate_amx_exit(
@@ -179,7 +198,13 @@ pub(super) fn validate_amx_exit(
 ) -> Result<stela_compiler::amx::AmxInstruction> {
     let word = validate_terminal_word(entry, exit, source_bytes, region_base, source)?;
     stela_compiler::amx::decode(exit, word)?
-        .context("AMX exit does not identify an AMX instruction")
+        .ok_or_else(|| {
+            refuse!(
+                "AMX exit does not identify an AMX instruction",
+                exit = exit.0
+            )
+        })
+        .map_err(Into::into)
 }
 
 pub(super) fn validate_trap_exit(
@@ -190,7 +215,12 @@ pub(super) fn validate_trap_exit(
     source: &[u8],
 ) -> Result<SynchronousTrap> {
     let word = validate_terminal_word(entry, exit, source_bytes, region_base, source)?;
-    decode_trap(exit, word)?.context("trap exit does not identify a reviewed instruction")
+    Ok(decode_trap(exit, word)?.ok_or_else(|| {
+        refuse!(
+            "trap exit does not identify a reviewed instruction",
+            exit = exit.0
+        )
+    })?)
 }
 
 pub(super) fn validate_source_map(

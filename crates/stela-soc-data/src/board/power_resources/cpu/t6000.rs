@@ -12,7 +12,6 @@ const T6000_KERNEL_MAX_CLUSTERS: usize = 6;
 const T6000_KERNEL_MAX_PHYSICAL_CLUSTER: u32 = 10;
 const AFFINITY_PART_MASK: u32 = 0xff;
 const CLUSTER_SHIFT: u32 = 8;
-const MPIDR_RES1: u64 = 1 << 31;
 const ENABLE_CORE_SELECTOR: u32 = 0x436f_7265;
 
 pub(super) const EVIDENCE: &str = "26A434 mac13j SHA256 5109fca5209bdbb89cec29e3241cc42a90418cb737d65e31962b059b9879af90; mode1 complex2b16e08/core2b190e4/skip2b19918, enable2b2dcb0; cpu/t6000-core-membership-r1 source receipt";
@@ -59,7 +58,7 @@ pub(super) fn resolve(
     for (pe, (node, identity)) in nodes.iter().zip(processors).enumerate() {
         let reg = word(required(node, "reg")?)?;
         let aff1 = (reg >> CLUSTER_SHIFT) as usize;
-        if u64::from(reg) & !PHYSICAL_AFFINITY != 0
+        if reg & !crate::board::mpidr::CLUSTER_CORE != 0
             || reg >> CLUSTER_SHIFT > T6000_KERNEL_MAX_PHYSICAL_CLUSTER
         {
             return Err(Error::Topology("T6000 physical affinity"));
@@ -96,7 +95,7 @@ pub(super) fn resolve(
             || word(required(node, "die-id")?)? != 0
             || word(required(node, "die-cluster-id")?)? as usize != aff1
             || word(required(node, "cluster-core-id")?)? != reg & AFFINITY_PART_MASK
-            || identity.mpidr != (MPIDR_RES1 | (aff2 << CORETYPE_SHIFT) | u64::from(reg))
+            || crate::board::mpidr::compose(aff2, reg) != Some(identity.mpidr)
         {
             return Err(Error::Topology("T6000 source/profile coordinate mismatch"));
         }
@@ -148,7 +147,8 @@ pub(super) fn resolve(
         .zip(records)
         .enumerate()
     {
-        let parsed = Record::parse(Layout::V1, row).map_err(Error::Malformed)?;
+        let parsed =
+            Record::parse(Layout::V1, row).map_err(|record| Error::Malformed(record.what()))?;
         if view.id.die != 0 {
             return Err(Error::UnsupportedDie(view.id.die));
         }
@@ -277,9 +277,9 @@ mod tests {
         row[32..32 + name.len()].copy_from_slice(name.as_bytes());
         row
     }
-    // Authored geometry deliberately differs from the original J314s SKU.
+    // Authored geometry differs from the original J314s SKU.
     // IDs, names and PS indices are independent; only reviewed counter order
-    // and the source's actual fields join these records.
+    // and the source's fields join these records.
     fn authored(mutation: u8) -> (Vec<u8>, Vec<Identity>) {
         let mut cpus = Vec::new();
         let mut profiles = Vec::new();
@@ -430,7 +430,7 @@ mod tests {
         resolve_cpu_power(Chip::AppleM1, &root, &views, identities, harvesting)
     }
     #[test]
-    fn t6000_mode1_uses_actual_order_ids_and_non_dense_ps_locations() {
+    fn t6000_mode1_uses_order_ids_and_non_dense_ps_locations() {
         let (bytes, identities) = authored(0);
         let owners = resolve_authored(&bytes, &identities, 1).unwrap();
         assert_eq!(owners.len(), 9);

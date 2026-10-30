@@ -4,6 +4,8 @@ use super::{
     ATC_PHY, Device, GpioBank, HPM, HPM_MANAGER, Iommu, Node, String, Vec, apertures, atc_phy,
     format, i2c,
 };
+use crate::Result;
+use stela_contracts::{refusal::Within, refuse};
 
 /// The ATC PHY register layouts, selected by the primary compatible.
 /// `AppleT8103TypeCPhy` binds all of them. The T8103 (J274AP) and
@@ -21,17 +23,17 @@ pub(super) const ATC_PHY_LAYOUTS: [(&str, usize); 4] = [
 /// The ADT views every [`ATC_PHY_LAYOUTS`] layout starts with.
 const ATC_PHY_BASE_VIEWS: usize = 28;
 
-/// Qualified Apple I2C register families. The original 26A434 ADTs use
+/// Checked Apple I2C register families. The original 26A434 ADTs use
 /// these first compatibles ahead of `i2c,s5l8940x` and `iic,soft`; the latter
 /// fallback strings alone do not establish a modelled Apple register file.
-/// T6000 and T6020 retain the same one-bank byte-FIFO interface (`i2c`).
+/// T6000 and T6020 keep the same one-bank byte-FIFO interface (`i2c`).
 const I2C_COMPATIBLES: &[&str] = &["i2c,t8101", "i2c,t6000", "i2c,t6020"];
 
-/// USB DRD families whose nine-view layout is qualified. The original
+/// USB DRD families whose nine-view layout is checked. The original
 /// 26A434 ADTs give M1/T6000
-/// a 0x1800-byte reg[2], versus 0x5800 on M2/T6020 and M3/T8122. In each,
-/// reg[2] begins at reg[0]+0xc000 and reg[8] at reg[0]+0xd000.
-/// Later families move reg[8] or add a tenth view and are not aliases.
+/// a 0x1800-byte `reg[2]`, versus 0x5800 on M2/T6020 and M3/T8122. In each,
+/// `reg[2]` begins at `reg[0]`+0xc000 and `reg[8]` at `reg[0]`+0xd000.
+/// Later families move `reg[8]` or add a tenth view and are not aliases.
 const USB_DRD_LAYOUTS: &[(&str, u64)] = &[
     ("usb-drd,t8103", 0x1800),
     ("usb-drd,t6000", 0x1800),
@@ -59,7 +61,7 @@ pub fn i2c_compatible(name: &str, compatibles: Option<&[u8]>) -> bool {
         })
 }
 
-/// Whether the full property selects a qualified nine-view USB DRD family.
+/// Whether the full property selects a checked nine-view USB DRD family.
 pub fn usb_controller_compatible(name: &str, compatibles: Option<&[u8]>) -> bool {
     USB_DRD_LAYOUTS.iter().any(|&(family, _)| family == name)
         && compatibles.is_none_or(|raw| {
@@ -69,7 +71,7 @@ pub fn usb_controller_compatible(name: &str, compatibles: Option<&[u8]>) -> bool
         })
 }
 
-/// Whether the full property selects a qualified ATC PHY register layout.
+/// Whether the full property selects a checked ATC PHY register layout.
 pub fn atc_phy_compatible(name: &str, compatibles: Option<&[u8]>) -> bool {
     ATC_PHY_LAYOUTS.iter().any(|&(family, _)| family == name)
         && compatibles.is_none_or(|raw| {
@@ -116,7 +118,7 @@ pub(super) fn is_typec_phy(node: &Node<'_>) -> bool {
         .is_some_and(|raw| atc_layout(raw).is_some())
 }
 
-/// Recognize candidates independently of qualification so unsupported families
+/// Recognize candidates independently of validation so unsupported families
 /// produce a named refusal, including malformed lists with a known fallback.
 fn family_candidate(node: &Node<'_>, prefix: &[u8]) -> bool {
     node.property("compatible").is_some_and(|raw| {
@@ -130,13 +132,13 @@ fn usb_alias_bytes(node: &Node<'_>) -> Option<u64> {
 }
 
 /// Nine ADT windows, five interrupt inputs and the mapper-selected DMA
-/// stream. Apple reg[2]/reg[8] overlap reg[0]; preserve their physical alias.
+/// stream. Apple `reg[2]`/`reg[8]` overlap `reg[0]`; preserve their physical alias.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UsbController {
     pub ranges: [(u64, u64); 9],
     pub irqs: [u32; 5],
     pub iommu: usize,
-    /// Actual owner identities; context survives native incoming assignment.
+    /// Owner identities; context survives native incoming assignment.
     pub phandle: Option<u32>,
     pub mapper: u32,
     pub mapper_context: u32,
@@ -145,7 +147,7 @@ pub struct UsbController {
     pub port: u32,
     /// Ordinary controller state survives supply gating only when declared.
     pub retention: bool,
-    /// Actual digital PHY provider (`atc-phy-parent`), never inferred from
+    /// Digital PHY provider (`atc-phy-parent`), never inferred from
     /// the connector's display name or ordinal.
     pub phy: u32,
 }
@@ -211,45 +213,46 @@ pub(super) fn typec_devices(
     translate: &dyn Fn(u64, u64) -> Option<u64>,
     aic: u32,
     gpio: Option<&GpioBank>,
-) -> Result<(Vec<I2cController>, Vec<TypecPhy>), String> {
+) -> Result<(Vec<I2cController>, Vec<TypecPhy>)> {
     let mut i2cs = Vec::new();
     let mut phys = Vec::new();
     let mut failure = None;
     let root_translate = translate;
     apertures::visit(io, root_translate, &mut |node, translate| {
-        let place = |(offset, bytes): (u64, u64)| -> Result<_, String> {
-            let first =
-                translate(offset, bytes).ok_or("Type-C range starts outside arm-io ranges")?;
+        let place = |(offset, bytes): (u64, u64)| -> Result<_> {
+            let first = translate(offset, bytes)
+                .ok_or(refuse!("Type-C range starts outside arm-io ranges"))?;
             Ok((first, bytes))
         };
 
         if failure.is_some() {
             return;
         }
-        let result = (|| -> Result<(), String> {
+        let result = (|| -> Result<()> {
             if family_candidate(node, b"i2c,") || family_candidate(node, b"iic,") {
                 let raw = node.property("compatible").unwrap();
                 if !I2C_COMPATIBLES
                     .iter()
                     .any(|name| i2c_compatible(name, Some(raw)))
                 {
-                    return Err("I2C controller has no qualified compatible list".into());
+                    return Err(refuse!("I2C controller has no qualified compatible list"));
                 }
-                let regs = apertures::registers(node).ok_or("I2C controller has no reg pairs")?;
+                let regs =
+                    apertures::registers(node).ok_or(refuse!("I2C controller has no reg pairs"))?;
                 let &[range] = regs.as_slice() else {
-                    return Err("I2C controller requires one reg range".into());
+                    return Err(refuse!("I2C controller requires one reg range"));
                 };
                 let (physical, bytes) = place(range)?;
                 if bytes != i2c::BYTES
                     || !physical.is_multiple_of(i2c::BYTES)
                     || node.first_u32("interrupt-parent") != Some(aic)
                 {
-                    return Err("unsupported I2C aperture or interrupt parent".into());
+                    return Err(refuse!("unsupported I2C aperture or interrupt parent"));
                 }
                 let irq = node
                     .first_u32("interrupts")
                     .filter(|&i| u16::try_from(i).is_ok())
-                    .ok_or("I2C interrupt is absent or too large")?;
+                    .ok_or(refuse!("I2C interrupt is absent or too large"))?;
                 let mut targets = Vec::new();
                 // Each target's phandle and, for an HPM, its provider and rid.
                 let mut links: Vec<(Option<u32>, Option<u32>, Option<u32>)> = Vec::new();
@@ -333,7 +336,7 @@ pub(super) fn typec_devices(
                         }
                     }
                 })
-                .ok_or("I2C target walk failed")?;
+                .ok_or(refuse!("I2C target walk failed"))?;
                 if let Some(error) = bad {
                     return Err(error.into());
                 }
@@ -348,15 +351,17 @@ pub(super) fn typec_devices(
                         .1
                         .and_then(|p| links.iter().position(|&(phandle, ..)| phandle == Some(p)))
                         .filter(|&p| targets[p].compatible == HPM_MANAGER)
-                        .ok_or("HPM has no visible usbc,manager iicProvider")?;
+                        .ok_or(refuse!("HPM has no visible usbc,manager iicProvider"))?;
                     if targets[index].interrupt.is_some() || targets[index].port.is_none() {
-                        return Err("HPM lacks a port number or names its own interrupt".into());
+                        return Err(refuse!(
+                            "HPM lacks a port number or names its own interrupt"
+                        ));
                     }
                     targets[index].interrupt = targets[provider].interrupt;
                     if named[index].is_some() {
                         continue;
                     }
-                    let rid = links[index].2.ok_or("HPM has no rid")?;
+                    let rid = links[index].2.ok_or(refuse!("HPM has no rid"))?;
                     targets[index].firmware = (0..targets.len())
                         .filter(|&t| links[t].1 == links[index].1 && named[t].is_some())
                         .filter_map(|t| Some((links[t].2.filter(|&owner| owner < rid)?, t)))
@@ -376,11 +381,13 @@ pub(super) fn typec_devices(
                 let (layout, count) = node
                     .property("compatible")
                     .and_then(atc_layout)
-                    .ok_or("ATC PHY has no qualified compatible list")?;
-                let reg = apertures::registers(node).ok_or("ATC PHY has no reg pairs")?;
+                    .ok_or(refuse!("ATC PHY has no qualified compatible list"))?;
+                let reg = apertures::registers(node).ok_or(refuse!("ATC PHY has no reg pairs"))?;
                 if reg.len() != count {
-                    return Err(format!(
-                        "{layout} ATC PHY requires its {count} register views"
+                    return Err(refuse!(
+                        "{layout} ATC PHY requires its {count} register views",
+                        layout,
+                        count
                     ));
                 }
                 let views = reg.into_iter().map(place).collect::<Result<Vec<_>, _>>()?;
@@ -391,18 +398,19 @@ pub(super) fn typec_devices(
                         != core
                             .0
                             .checked_add(0x20000)
-                            .ok_or("ATC core address overflows")?
+                            .ok_or(refuse!("ATC core address overflows"))?
                 {
-                    return Err(format!(
-                        "ATC USB2/core views disagree with the {layout} layout"
+                    return Err(refuse!(
+                        "ATC USB2/core views disagree with the {layout} layout",
+                        layout
                     ));
                 }
-                let phandle =
-                    native_dma_phandle(node, "AAPL,phandle")?.ok_or("ATC PHY has no phandle")?;
+                let phandle = native_dma_phandle(node, "AAPL,phandle")?
+                    .ok_or(refuse!("ATC PHY has no phandle"))?;
                 let port = node
                     .first_u32("port-number")
                     .filter(|&p| p != 0)
-                    .ok_or("ATC PHY has no port number")?;
+                    .ok_or(refuse!("ATC PHY has no port number"))?;
                 let mut controller_views = None;
                 let mut duplicate = false;
                 let mut invalid_controller = false;
@@ -422,21 +430,21 @@ pub(super) fn typec_devices(
                         invalid_controller |= controller_views.is_none();
                     }
                 })
-                .ok_or("ATC controller walk failed")?;
+                .ok_or(refuse!("ATC controller walk failed"))?;
                 let events = views[1];
                 let pipe = match controller_views {
                     Some((pipe, controller_events)) => {
                         if pipe.1 != atc_phy::WINDOW_BYTES || controller_events != events {
-                            return Err(
-                                "ATC controller's pipehandler or event view disagrees".into()
-                            );
+                            return Err(refuse!(
+                                "ATC controller's pipehandler or event view disagrees"
+                            ));
                         }
                         Some(pipe)
                     }
                     None => None,
                 };
                 if invalid_controller || duplicate || events.1 != atc_phy::WINDOW_BYTES {
-                    return Err("ambiguous ATC controller or incomplete event view".into());
+                    return Err(refuse!("ambiguous ATC controller or incomplete event view"));
                 }
                 phys.push(TypecPhy {
                     phandle,
@@ -455,20 +463,20 @@ pub(super) fn typec_devices(
             failure = Some(error);
         }
     })
-    .ok_or("Type-C DeviceTree walk failed")?;
+    .ok_or(refuse!("Type-C DeviceTree walk failed"))?;
     if let Some(error) = failure {
         return Err(error);
     }
     Ok((i2cs, phys))
 }
 
-/// Every qualified early-family USB DRD, in DeviceTree order, with its
+/// Every checked early-family USB DRD, in DeviceTree order, with its
 /// original reg/interrupts/iommu-parent (research transport section 1).
 pub(super) fn usb_controllers(
     io: &Node<'_>,
     translate: &dyn Fn(u64, u64) -> Option<u64>,
     darts: &[Iommu],
-) -> Result<Vec<UsbController>, String> {
+) -> Result<Vec<UsbController>> {
     let mut controllers = Vec::new();
     let mut failure = None;
     apertures::visit(io, translate, &mut |node, translate| {
@@ -479,7 +487,7 @@ pub(super) fn usb_controllers(
             }
         }
     })
-    .ok_or("USB controller walk failed")?;
+    .ok_or(refuse!("USB controller walk failed"))?;
     failure.map_or(Ok(controllers), Err)
 }
 
@@ -490,12 +498,12 @@ fn usb_controller(
     node: &Node<'_>,
     translate: &dyn Fn(u64, u64) -> Option<u64>,
     darts: &[Iommu],
-) -> Result<UsbController, String> {
+) -> Result<UsbController> {
     let name = node
         .property("name")
         .and_then(|name| core::str::from_utf8(name.split(|&b| b == 0).next()?).ok())
         .unwrap_or("usb-drd");
-    let err = |why: &str| format!("{name} {why}");
+    let err = |why: &'static str| refuse!("{name} {why}", name, why);
     let alias_bytes =
         usb_alias_bytes(node).ok_or_else(|| err("has no consistent qualified USB DRD layout"))?;
     let raw: [(u64, u64); 9] = apertures::registers(node)
@@ -527,9 +535,9 @@ fn usb_controller(
     if irqs.iter().any(|&irq| u16::try_from(irq).is_err()) {
         return Err(err("interrupt exceeds AIC input encoding"));
     }
-    let phandle = native_dma_phandle(node, "AAPL,phandle").map_err(|why| err(&why))?;
+    let phandle = native_dma_phandle(node, "AAPL,phandle").within(|| refuse!("{name}", name))?;
     let parent = native_dma_phandle(node, "iommu-parent")
-        .map_err(|why| err(&why))?
+        .within(|| refuse!("{name}", name))?
         .ok_or_else(|| err("has no iommu-parent"))?;
     let mut matching = darts.iter().enumerate().flat_map(|(index, dart)| {
         dart.mappers
@@ -543,7 +551,8 @@ fn usb_controller(
     if matching.next().is_some() {
         return Err(err("iommu-parent is ambiguous"));
     }
-    let stream = native_mapper_input(&darts[iommu], mapper_context).map_err(|why| err(&why))?;
+    let stream =
+        native_mapper_input(&darts[iommu], mapper_context).within(|| refuse!("{name}", name))?;
     let port = node
         .first_u32("port-number")
         .filter(|&port| port != 0)
@@ -559,7 +568,7 @@ fn usb_controller(
         port,
         retention: node.property("retention").is_some(),
         phy: native_dma_phandle(node, "atc-phy-parent")
-            .map_err(|why| err(&why))?
+            .within(|| refuse!("{name}", name))?
             .ok_or_else(|| err("has no atc-phy-parent"))?,
     })
 }

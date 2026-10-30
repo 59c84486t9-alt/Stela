@@ -3,12 +3,12 @@ use super::ASC;
 use super::Node;
 use super::PMU;
 use super::SPMI;
-use super::String;
 use super::Vec;
 use super::apertures;
-use super::format;
 use super::rtbuddy_nub;
 use super::smc;
+use crate::Result;
+use stela_contracts::refuse;
 
 /// A Dialog PMU's slave ID and the register windows its `info-*`
 /// properties name.
@@ -23,7 +23,7 @@ pub struct SpmiPmu {
     pub alarm_monitor: u8,
     pub rtc_helper: Option<smc::RtcKeyProfile>,
     pub identity: Option<crate::pmu::Window>,
-    /// Outside-scratch log, requiring explicit cold/retained history at placement.
+    /// Outside-scratch log, requiring explicit cold/kept history at placement.
     pub fault_log: Option<crate::pmu::Window>,
     /// Outside-scratch off-to-wake source, likewise.
     pub wake_source: Option<crate::pmu::Window>,
@@ -33,7 +33,7 @@ pub struct SpmiPmu {
 
 /// A PMIC firmware mailbox (`fw-mcom-address`, `fw-host-irq-address` and, on
 /// M4 and later, `fw-mcom-int-index`), served by PMIC firmware that does not
-/// execute: its registers are unqualified and its vector is never driven,
+/// execute: its registers are unchecked and its vector is never driven,
 /// so it stays unrouted (`crate::pmu::Configuration::with_unqualified_firmware_mailbox`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FirmwareMailbox {
@@ -44,11 +44,11 @@ pub struct FirmwareMailbox {
 
 impl SpmiPmu {
     /// This PMU's register owners, with `history`'s initial bytes for each
-    /// retained-history owner.
+    /// kept-history owner.
     pub fn configuration(
         &self,
-        mut history: impl FnMut(crate::pmu::Retained, crate::pmu::Window) -> Result<Vec<u8>, String>,
-    ) -> Result<crate::pmu::Configuration, String> {
+        mut history: impl FnMut(crate::pmu::Retained, crate::pmu::Window) -> Result<Vec<u8>>,
+    ) -> Result<crate::pmu::Configuration> {
         let mut configuration =
             crate::pmu::Configuration::new(self.windows.clone(), self.rtc, self.alarm_monitor)?;
         for (kind, window) in self.retained() {
@@ -64,7 +64,7 @@ impl SpmiPmu {
         Ok(configuration)
     }
 
-    /// The retained-history owners whose initial bytes placement supplies.
+    /// The kept-history owners whose initial bytes placement supplies.
     pub fn retained(
         &self,
     ) -> impl Iterator<Item = (crate::pmu::Retained, crate::pmu::Window)> + use<> {
@@ -80,7 +80,7 @@ impl SpmiPmu {
 
 use crate::spmi::Configuration;
 
-/// A source-qualified SPMI controller with independent FIFO/vector geometry.
+/// A source-checked SPMI controller with independent FIFO/vector geometry.
 /// `bank_c` is `reg[2]`: Gen1's optional fault-counter view or the Gen3 and
 /// Gen4 arbiter bank.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,54 +100,60 @@ pub(super) fn spmi_controllers(
     io: &Node<'_>,
     translate: &dyn Fn(u64, u64) -> Option<u64>,
     aic: u32,
-) -> Result<Vec<SpmiController>, String> {
+) -> Result<Vec<SpmiController>> {
     let mut controllers = Vec::new();
-    for node in io.children().ok_or("/arm-io children are malformed")? {
+    for node in io
+        .children()
+        .ok_or(refuse!("/arm-io children are malformed"))?
+    {
         if !node.compatible(SPMI) {
             continue;
         }
         if node.property("gen").is_none_or(|bytes| bytes.len() != 4) {
-            return Err("SPMI generation is not one full32 word".into());
+            return Err(refuse!("SPMI generation is not one full32 word"));
         }
         let profile = match node.first_u32("gen") {
             Some(1) => crate::spmi::Profile::Gen1,
             Some(2) => crate::spmi::Profile::Gen2,
             Some(3) => crate::spmi::Profile::Gen3,
             Some(4) => crate::spmi::Profile::Gen4,
-            _ => return Err("SPMI controller generation is unqualified".into()),
+            _ => return Err(refuse!("SPMI controller generation is unqualified")),
         };
-        let regs = apertures::registers(&node).ok_or("SPMI controller has no reg")?;
+        let regs = apertures::registers(&node).ok_or(refuse!("SPMI controller has no reg"))?;
         if node
             .property("reg")
             .is_none_or(|bytes| bytes.len() != regs.len() * 16)
         {
-            return Err("SPMI controller has partial reg pairs".into());
+            return Err(refuse!("SPMI controller has partial reg pairs"));
         }
-        let bank = |index: usize| -> Result<(u64, u64), String> {
+        let bank = |index: usize| -> Result<(u64, u64)> {
             let &(offset, bytes) = regs
                 .get(index)
                 .filter(|(_, bytes)| *bytes == profile.bank_bytes())
-                .ok_or("SPMI controller banks do not match the qualified handler geometry")?;
-            let physical = translate(offset, bytes).ok_or("SPMI bank outside arm-io ranges")?;
+                .ok_or(refuse!(
+                    "SPMI controller banks do not match the qualified handler geometry"
+                ))?;
+            let physical =
+                translate(offset, bytes).ok_or(refuse!("SPMI bank outside arm-io ranges"))?;
             if !physical.is_multiple_of(4) {
-                return Err("SPMI bank is unaligned or crosses arm-io ranges".into());
+                return Err(refuse!("SPMI bank is unaligned or crosses arm-io ranges"));
             }
             Ok((physical, bytes))
         };
         let parents = node
             .cells32("interrupt-parent")
-            .ok_or("SPMI controller has no interrupt-parent")?;
+            .ok_or(refuse!("SPMI controller has no interrupt-parent"))?;
         let cells = node
             .cells32("interrupts")
-            .ok_or("SPMI controller has no interrupts")?;
+            .ok_or(refuse!("SPMI controller has no interrupts"))?;
         let irq = parents
             .iter()
             .position(|&parent| parent == aic)
             .and_then(|index| cells.get(index).copied())
-            .ok_or("SPMI controller has no AIC line")?;
+            .ok_or(refuse!("SPMI controller has no AIC line"))?;
         let local = node
             .first_u32("AAPL,phandle")
-            .ok_or("SPMI has no phandle")?;
+            .ok_or(refuse!("SPMI has no phandle"))?;
         if node
             .property("AAPL,phandle")
             .is_none_or(|bytes| bytes.len() != 4)
@@ -164,7 +170,9 @@ pub(super) fn spmi_controllers(
                 .enumerate()
                 .any(|(index, &vector)| index != 1 && vector >= 288)
         {
-            return Err("SPMI interrupt-parent/vector routing is unqualified".into());
+            return Err(refuse!(
+                "SPMI interrupt-parent/vector routing is unqualified"
+            ));
         }
         let queue_bytes: [u32; 2] = node
             .cells32("queue-depth")
@@ -173,17 +181,16 @@ pub(super) fn spmi_controllers(
                     .is_some_and(|bytes| bytes.len() == 8)
             })
             .and_then(|cells| cells.try_into().ok())
-            .ok_or("SPMI has no two FIFO byte depths")?;
-        let configuration = crate::spmi::Configuration::new(profile, cells[0], queue_bytes)
-            .map_err(String::from)?;
+            .ok_or(refuse!("SPMI has no two FIFO byte depths"))?;
+        let configuration = crate::spmi::Configuration::new(profile, cells[0], queue_bytes)?;
         let counters = match node.property("fault-counters-enabled") {
             None => false,
             Some(bytes) if bytes.len() == 4 => match node.first_u32("fault-counters-enabled") {
                 Some(0) => false,
                 Some(1) => true,
-                _ => return Err("SPMI fault-counter enable encoding is unqualified".into()),
+                _ => return Err(refuse!("SPMI fault-counter enable encoding is unqualified")),
             },
-            _ => return Err("SPMI fault-counter enable is not one full32 word".into()),
+            _ => return Err(refuse!("SPMI fault-counter enable is not one full32 word")),
         };
         let bank_c = if profile.arbiter_bank() {
             Some(bank(2)?)
@@ -191,11 +198,13 @@ pub(super) fn spmi_controllers(
             let &(offset, bytes) = regs
                 .get(2)
                 .filter(|(_, bytes)| Some(*bytes) == profile.counter_bytes())
-                .ok_or("SPMI Gen1 needs its separate fault-counter bank")?;
-            let physical =
-                translate(offset, bytes).ok_or("SPMI fault counters outside arm-io ranges")?;
+                .ok_or(refuse!("SPMI Gen1 needs its separate fault-counter bank"))?;
+            let physical = translate(offset, bytes)
+                .ok_or(refuse!("SPMI fault counters outside arm-io ranges"))?;
             if !physical.is_multiple_of(4) {
-                return Err("SPMI fault counters are unaligned or cross arm-io ranges".into());
+                return Err(refuse!(
+                    "SPMI fault counters are unaligned or cross arm-io ranges"
+                ));
             }
             Some((physical, bytes))
         } else {
@@ -203,10 +212,13 @@ pub(super) fn spmi_controllers(
         };
         let expected = if bank_c.is_some() { 3 } else { 2 };
         if regs.len() != expected {
-            return Err("SPMI has an unqualified extra register view".into());
+            return Err(refuse!("SPMI has an unqualified extra register view"));
         }
         let mut pmus = Vec::new();
-        for child in node.children().ok_or("SPMI children are malformed")? {
+        for child in node
+            .children()
+            .ok_or(refuse!("SPMI children are malformed"))?
+        {
             if child.compatible(PMU) {
                 let pmu = spmi_pmu(&child, io)?;
                 if (pmu.interrupt.is_some()
@@ -216,7 +228,9 @@ pub(super) fn spmi_controllers(
                         .is_none_or(|bytes| bytes.len() != 4)
                         || child.first_u32("interrupt-parent") != Some(local))
                 {
-                    return Err("PMU output is not parented by its own SPMI controller".into());
+                    return Err(refuse!(
+                        "PMU output is not parented by its own SPMI controller"
+                    ));
                 }
                 pmus.push(pmu);
             }
@@ -237,7 +251,9 @@ pub(super) fn spmi_controllers(
                 .iter()
                 .any(|&vector| u32::from(vector) == configuration.response_vector())
         {
-            return Err("PMU interrupt vectors alias each other or the response".into());
+            return Err(refuse!(
+                "PMU interrupt vectors alias each other or the response"
+            ));
         }
         controllers.push(SpmiController {
             configuration,
@@ -254,27 +270,27 @@ pub(super) fn spmi_controllers(
         .count()
         > 1
     {
-        return Err("multiple primary PMU system-service owners".into());
+        return Err(refuse!("multiple primary PMU system-service owners"));
     }
     Ok(controllers)
 }
 
 /// A PMU's slave ID (`reg` cell 0) and its `info-*` windows: pairs are
 /// `<base bytes>`, single cells one byte, except the legacy scratchpad.
-fn spmi_pmu(node: &Node<'_>, io: &Node<'_>) -> Result<SpmiPmu, String> {
+fn spmi_pmu(node: &Node<'_>, io: &Node<'_>) -> Result<SpmiPmu> {
     let sid = node
         .first_u32("reg")
         .and_then(|sid| u8::try_from(sid).ok())
         .filter(|&sid| sid <= 0xf)
-        .ok_or("PMU has no four-bit SPMI slave ID")?;
+        .ok_or(refuse!("PMU has no four-bit SPMI slave ID"))?;
     let primary = match node.property("is-primary") {
         None => false,
         Some(bytes) if bytes.len() == 4 => match node.first_u32("is-primary") {
             Some(0) => false,
             Some(1) => true,
-            _ => return Err("PMU primary-service encoding is unqualified".into()),
+            _ => return Err(refuse!("PMU primary-service encoding is unqualified")),
         },
-        _ => return Err("PMU is-primary is not one full32 word".into()),
+        _ => return Err(refuse!("PMU is-primary is not one full32 word")),
     };
     // `interrupts` lists the PMU output and, at `fw-mcom-int-index` where
     // given, the PMIC firmware mailbox's vector (`pmu::Pmu`).
@@ -288,24 +304,26 @@ fn spmi_pmu(node: &Node<'_>, io: &Node<'_>) -> Result<SpmiPmu, String> {
                 u16::try_from(vector)
                     .ok()
                     .filter(|&vector| vector < 288)
-                    .ok_or("PMU local interrupt vector exceeds the SPMI input bank")
+                    .ok_or(refuse!(
+                        "PMU local interrupt vector exceeds the SPMI input bank"
+                    ))
             })
             .collect::<Result<Vec<_>, _>>()?,
-        _ => return Err("PMU interrupts are not one or two full32 vectors".into()),
+        _ => return Err(refuse!("PMU interrupts are not one or two full32 vectors")),
     };
     let mailbox_index = match node.property("fw-mcom-int-index") {
         None => None,
         Some(bytes) if bytes.len() == 4 => node
             .first_u32("fw-mcom-int-index")
             .and_then(|index| usize::try_from(index).ok()),
-        _ => return Err("PMU fw-mcom-int-index is not one full32 word".into()),
+        _ => return Err(refuse!("PMU fw-mcom-int-index is not one full32 word")),
     };
     let mailbox_vector = mailbox_index
         .map(|index| {
             vectors
                 .get(index)
                 .copied()
-                .ok_or("PMU firmware mailbox index names no interrupt")
+                .ok_or(refuse!("PMU firmware mailbox index names no interrupt"))
         })
         .transpose()?;
     let mut outputs = (0..vectors.len())
@@ -313,10 +331,13 @@ fn spmi_pmu(node: &Node<'_>, io: &Node<'_>) -> Result<SpmiPmu, String> {
         .map(|index| vectors[index]);
     let interrupt = outputs.next();
     if outputs.next().is_some() || (vectors.len() == 2 && vectors[0] == vectors[1]) {
-        return Err("PMU interrupts are not one output and one firmware mailbox".into());
+        return Err(refuse!(
+            "PMU interrupts are not one output and one firmware mailbox"
+        ));
     }
-    let address = |value: u32| u16::try_from(value).map_err(|_| "PMU address above 16 bits");
-    let pair = |name: &str| -> Result<Option<crate::pmu::Window>, String> {
+    let address =
+        |value: u32| u16::try_from(value).map_err(|_| refuse!("PMU address above 16 bits"));
+    let pair = |name: &str| -> Result<Option<crate::pmu::Window>> {
         match node.cells32(name).as_deref() {
             None => Ok(None),
             Some(&[base, bytes]) if node.property(name).is_some_and(|value| value.len() == 8) => {
@@ -325,32 +346,30 @@ fn spmi_pmu(node: &Node<'_>, io: &Node<'_>) -> Result<SpmiPmu, String> {
                     bytes: address(bytes)?,
                 }))
             }
-            Some(_) => Err(format!("PMU {name} is not <base bytes>")),
+            Some(_) => Err(refuse!("PMU {name} is not <base bytes>", name)),
         }
     };
-    let single = |name: &str| -> Result<Option<u16>, String> {
+    let single = |name: &str| -> Result<Option<u16>> {
         if node.property(name).is_some_and(|bytes| bytes.len() != 4) {
-            return Err(format!("PMU {name} is not one full32 word"));
+            return Err(refuse!("PMU {name} is not one full32 word", name));
         }
-        node.first_u32(name)
-            .map(address)
-            .transpose()
-            .map_err(String::from)
+        node.first_u32(name).map(address).transpose()
     };
     let scratch = pair("info-scrpad")?;
     let mut windows = Vec::new();
     windows.extend(scratch);
     windows.extend(pair("info-fault_shadow")?);
     // A byte-counted history (`_readFaultLog`, `_readOff2WakeSource`) is its
-    // own retained owner outside scratch, and scratch storage inside it.
-    let retained = |name: &str| -> Result<Option<crate::pmu::Window>, String> {
+    // own owner outside scratch, and scratch storage inside it.
+    let retained = |name: &str| -> Result<Option<crate::pmu::Window>> {
         let Some(log) = pair(name)? else {
             return Ok(None);
         };
         let end = u32::from(log.base) + u32::from(log.bytes);
         if log.bytes == 0 || log.bytes > u16::from(u8::MAX) || end > 0x10000 {
-            return Err(format!(
-                "PMU {name} count or extent exceeds the qualified byte-count resource"
+            return Err(refuse!(
+                "PMU {name} count or extent exceeds the qualified byte-count resource",
+                name
             ));
         }
         let Some(scratch) = scratch else {
@@ -359,7 +378,10 @@ fn spmi_pmu(node: &Node<'_>, io: &Node<'_>) -> Result<SpmiPmu, String> {
         let scratch_end = u32::from(scratch.base) + u32::from(scratch.bytes);
         if u32::from(log.base) < scratch_end && u32::from(scratch.base) < end {
             if log.base < scratch.base || end > scratch_end {
-                return Err(format!("PMU {name} partially aliases scratch storage"));
+                return Err(refuse!(
+                    "PMU {name} partially aliases scratch storage",
+                    name
+                ));
             }
             return Ok(None); // Same canonical scratch owner; original zero-clear form.
         }
@@ -386,48 +408,47 @@ fn spmi_pmu(node: &Node<'_>, io: &Node<'_>) -> Result<SpmiPmu, String> {
     if let Some(socd) = pair("info-scrpad_socd")?
         && !inside(socd.base, socd.bytes)
     {
-        return Err("PMU SOCD scratchpad outside its scratchpad".into());
+        return Err(refuse!("PMU SOCD scratchpad outside its scratchpad"));
     }
     for name in ["info-scrpad_lpm_log", "info-scrpad_lpm_ctrl"] {
         if let Some(base) = single(name)?
             && !inside(base, 1)
         {
-            return Err(format!("PMU {name} outside its scratchpad"));
+            return Err(refuse!("PMU {name} outside its scratchpad", name));
         }
     }
     let rtc = match single("info-rtc")? {
         None => None,
         Some(upcount) => {
-            let need = |name: &str| -> Result<u16, String> {
-                single(name)?.ok_or_else(|| format!("PMU RTC has no {name}"))
+            let need = |name: &str| -> Result<u16> {
+                single(name)?.ok_or_else(|| refuse!("PMU RTC has no {name}", name))
             };
             // Without `info-clock_offset` the driver keeps the offset in the
             // legacy scratchpad (`crate::pmu::ClockOffset::LegacyScratch`).
             let clock_offset = match pair("info-clock_offset")? {
                 Some(window) if window.bytes == 6 => crate::pmu::ClockOffset::Register(window.base),
-                Some(_) => return Err("PMU RTC clock offset is not six bytes".into()),
-                None => crate::pmu::ClockOffset::LegacyScratch(
-                    single("info-leg_scrpad")?
-                        .ok_or("PMU RTC has neither a clock offset nor a legacy scratchpad")?,
-                ),
+                Some(_) => return Err(refuse!("PMU RTC clock offset is not six bytes")),
+                None => crate::pmu::ClockOffset::LegacyScratch(single("info-leg_scrpad")?.ok_or(
+                    refuse!("PMU RTC has neither a clock offset nor a legacy scratchpad"),
+                )?),
             };
             if node
                 .property("info-rtc_alarm_ctrl_en_mask")
                 .is_none_or(|bytes| bytes.len() != 4)
             {
-                return Err("PMU alarm enable mask is not one full32 word".into());
+                return Err(refuse!("PMU alarm enable mask is not one full32 word"));
             }
             let alarm_enable = node
                 .first_u32("info-rtc_alarm_ctrl_en_mask")
                 .and_then(|mask| u8::try_from(mask).ok())
-                .ok_or("PMU RTC has no alarm enable mask")?;
-            let bits = |name: &str| -> Result<Option<u8>, String> {
+                .ok_or(refuse!("PMU RTC has no alarm enable mask"))?;
+            let bits = |name: &str| -> Result<Option<u8>> {
                 if node.property(name).is_some_and(|bytes| bytes.len() != 4) {
-                    return Err(format!("PMU {name} is not one full32 word"));
+                    return Err(refuse!("PMU {name} is not one full32 word", name));
                 }
                 node.first_u32(name)
                     .map(|mask| {
-                        u8::try_from(mask).map_err(|_| format!("PMU {name} exceeds a byte"))
+                        u8::try_from(mask).map_err(|_| refuse!("PMU {name} exceeds a byte", name))
                     })
                     .transpose()
             };
@@ -442,53 +463,55 @@ fn spmi_pmu(node: &Node<'_>, io: &Node<'_>) -> Result<SpmiPmu, String> {
                 event_mask: bits("info-rtc_alarm_event_mask")?
                     .unwrap_or(crate::pmu::DEFAULT_EVENT_MASK),
                 interrupt_mask: bits("info-rtc_alarm_mask")?
-                    .ok_or("PMU RTC has no info-rtc_alarm_mask")?,
+                    .ok_or(refuse!("PMU RTC has no info-rtc_alarm_mask"))?,
             })
         }
     };
     let alarm_monitor = if rtc.is_some() {
         single("info-rtc_alarm_monitor_mask")?
             .and_then(|mask| u8::try_from(mask).ok())
-            .ok_or("PMU RTC has no byte monitor mask")?
+            .ok_or(refuse!("PMU RTC has no byte monitor mask"))?
     } else {
         0
     };
     // The primary's alarm is the board's RTC wake source. An output alone
     // needs no RTC: without one it stays deasserted (`pmu::Pmu`).
     if primary && rtc.is_none() {
-        return Err("PMU primary system service requires a qualified RTC owner".into());
+        return Err(refuse!(
+            "PMU primary system service requires a qualified RTC owner"
+        ));
     }
     let rtc_helper = match node.property("function-rtc_read_helper") {
         None => None,
         Some(bytes) => {
             if !primary || rtc.is_none() || bytes.len() != 12 {
-                return Err(
-                    "RTC helper requires a primary RTC and complete three-cell descriptor".into(),
-                );
+                return Err(refuse!(
+                    "RTC helper requires a primary RTC and complete three-cell descriptor"
+                ));
             }
             let source = io
                 .child("smc")
                 .filter(|node| {
                     node.compatible(ASC) && node.property("role") == Some(b"SMC\0".as_slice())
                 })
-                .ok_or("RTC helper has no qualified visible SMC provider")?;
+                .ok_or(refuse!("RTC helper has no qualified visible SMC provider"))?;
             let nub = rtbuddy_nub(&source, "SMC")?;
             let provider = nub
                 .child("smc-pmu")
-                .ok_or("RTC helper has no SMC PMU provider")?;
+                .ok_or(refuse!("RTC helper has no SMC PMU provider"))?;
             if provider
                 .property("AAPL,phandle")
                 .is_none_or(|bytes| bytes.len() != 4)
             {
-                return Err("SMC PMU provider phandle is not one full32 word".into());
+                return Err(refuse!("SMC PMU provider phandle is not one full32 word"));
             }
             let provider = provider
                 .first_u32("AAPL,phandle")
-                .ok_or("SMC PMU has no phandle")?;
+                .ok_or(refuse!("SMC PMU has no phandle"))?;
             let cells = node
                 .cells32("function-rtc_read_helper")
-                .ok_or("RTC helper has no cells")?;
-            Some(smc::RtcKeyProfile::from_function(&cells, provider).map_err(String::from)?)
+                .ok_or(refuse!("RTC helper has no cells"))?;
+            Some(smc::RtcKeyProfile::from_function(&cells, provider)?)
         }
     };
     let identity = pair("info-id")?;
@@ -499,7 +522,7 @@ fn spmi_pmu(node: &Node<'_>, io: &Node<'_>) -> Result<SpmiPmu, String> {
             doorbell,
             vector: mailbox_vector,
         }),
-        _ => return Err("PMU firmware mailbox is incomplete".into()),
+        _ => return Err(refuse!("PMU firmware mailbox is incomplete")),
     };
     let pmu = SpmiPmu {
         sid,
@@ -515,7 +538,7 @@ fn spmi_pmu(node: &Node<'_>, io: &Node<'_>) -> Result<SpmiPmu, String> {
         rtc,
     };
     // Validate geometry only. This temporary value never becomes a PMU;
-    // actual placement separately requires explicit resource history.
+    // placement separately requires explicit resource history.
     pmu.configuration(|_, window| Ok(alloc::vec![0; usize::from(window.bytes)]))?;
     Ok(pmu)
 }

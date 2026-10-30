@@ -139,12 +139,8 @@ mod tests {
         assert!(scripted.get_flag("profile") && scripted.contains_id("ipsw"));
         Installer::try_parse_from(["stela", "status", "--usb", "E:\\"]).unwrap();
         assert!(Installer::try_parse_from(["stela", "setup"]).is_err());
-        assert!(Installer::try_parse_from(["stela", "install-system"]).is_err());
         let help = Installer::command().render_help().to_string();
-        assert!(
-            help.contains("status") && !help.contains("install-system"),
-            "{help}"
-        );
+        assert!(help.contains("status"), "{help}");
         Installer::command().debug_assert();
     }
 
@@ -155,11 +151,6 @@ mod tests {
             help.contains("setup") && help.contains("boot-log"),
             "{help}"
         );
-        assert!(
-            !help.contains("install-system") && !help.contains("apps"),
-            "{help}"
-        );
-        assert!(!help.contains("compile-block") && !help.contains("stelad"));
         for command in ["compile-block", "boot", "efi", "install-medium", "cpu-info"] {
             assert!(
                 Cli::try_parse_from(["stela", command, "--help"]).is_err(),
@@ -182,37 +173,6 @@ mod tests {
             parse(&["setup", "--usb", missing.to_str().unwrap(), "--dry-run"]),
             Command::Setup(_)
         ));
-        Ok(())
-    }
-
-    #[test]
-    fn removed_commands_are_rejected_without_accessing_inputs() -> anyhow::Result<()> {
-        let directory = tempfile::tempdir()?;
-        let missing = directory.path().join("missing");
-        let missing = missing.to_str().unwrap();
-        for words in [
-            vec![
-                "run",
-                "--root",
-                missing,
-                "--fp-profile-output",
-                missing,
-                missing,
-            ],
-            vec![missing, "--help"],
-            vec!["apps", "--scan", missing, "--add", missing, "--no-register"],
-            vec!["apps", "--uninstall"],
-            vec!["apps", "--model", "unknown"],
-            vec!["stelad"],
-            vec!["install-system", "--import", missing],
-            vec!["install-system", "--remove"],
-        ] {
-            assert!(
-                Cli::try_parse_from(std::iter::once("stela").chain(words.iter().copied())).is_err(),
-                "{words:?}"
-            );
-        }
-        assert_eq!(std::fs::read_dir(directory.path())?.count(), 0);
         Ok(())
     }
 

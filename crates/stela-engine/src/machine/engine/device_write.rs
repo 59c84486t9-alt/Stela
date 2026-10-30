@@ -1,12 +1,13 @@
-//! Consuming canonical stores from actual recovered native frames.
+//! Consuming canonical stores from recovered native frames.
 mod owners;
 use super::*;
 use owners::WriteOwners;
 pub use owners::{CanonicalDeviceWrite, CanonicalWriteMemory};
 use shared_memory::RecoveredWrite;
+use stela_contracts::refuse;
 
 pub type DeviceWriteShape = DeviceReadShape;
-/// Diagnostics omit stored values; they grant no execution or replay authority.
+/// Diagnostics omit stored values; they grant no execution or replay permission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DeviceWriteRequest {
     pub pe: usize,
@@ -17,7 +18,7 @@ pub struct DeviceWriteRequest {
     pub shape: DeviceWriteShape,
 }
 /// Outer backend Err means no effects. An incomplete/unknown effect is instead
-/// retained explicitly, with no invented byte prefix or source retirement.
+/// explicitly, with no invented byte prefix or source retirement.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConsumedWrite {
     Complete { settlement: Result<(), DeviceError> },
@@ -136,7 +137,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
 impl<H: Host, D: Devices> Machine<H, D> {
     /// A device write by a serialized PE, consumed through the same canonical
     /// RAM and processor owners as a recovered native write. The held
-    /// workers stay held; a retained prefix or unknown effect is an error.
+    /// workers stay held; a prefix or unknown effect is an error.
     pub(super) fn serial_write_canonical(
         &mut self,
         physical: u64,
@@ -158,9 +159,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
         now: u64,
     ) -> Result<(), DeviceError> {
         let Some(held) = self.serial_hold.take() else {
-            return Err(DeviceError::TransferRefused(
-                "canonical device write requires the serialized worker hold".into(),
-            ));
+            return Err(DeviceError::TransferRefused(refuse!(
+                "canonical device write requires the serialized worker hold"
+            )));
         };
         let consumed = self.serial_write_held(&held, cpu, physical, bytes, value, now);
         self.serial_hold = Some(held);
@@ -185,7 +186,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 .canonical_memory
                 .as_ref()
                 .ok_or_else(|| {
-                    DeviceError::TransferRefused("serialized PE has no canonical RAM owner".into())
+                    DeviceError::TransferRefused(refuse!(
+                        "serialized PE has no canonical RAM owner"
+                    ))
                 })?
                 .ram_owner(),
         );
@@ -255,7 +258,7 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
         Stop::DeviceWrite(request)
     }
 
-    /// Consume one original write, retaining its real worker hold and exact
+    /// Consume one original write, keeping its real worker hold and exact
     /// source prefix through controller effects, native CPU settlement and ACK.
     ///
     /// # Safety
@@ -369,7 +372,7 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
         let settlement = match consumed {
             Ok(ConsumedWrite::Complete { settlement }) => settlement,
             result => {
-                // Retain any peripheral prefix in its actual owner; neither a
+                // Keep any peripheral prefix in its owner; neither a
                 // backend error nor a numeric byte count permits source replay.
                 if let Ok(Some(memory)) = ram.try_service() {
                     memory.fail();
@@ -403,7 +406,7 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
         self.cpu.retired = retired.wrapping_add(1);
         self.cpu.pstate.btype = 0;
         self.device_lines = None;
-        self.statistics.device_accesses += 1;
+        self.count_device_access(write.request.physical);
         if let Err(error) = settlement {
             if let Ok(Some(memory)) = ram.try_service() {
                 memory.fail();

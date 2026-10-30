@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Actual HID and forwarded wire peers for retained-consumer reuse controls.
+//! HID and forwarded wire peers for kept-consumer reuse controls.
 use super::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,7 +78,7 @@ impl Hardware {
                 .is_none()
         );
     }
-    /// Complete only an actual queued TD from this original hardware peer.
+    /// Complete only a queued TD from this original hardware peer.
     pub(crate) fn complete_forwarded(&mut self, slot: u8, dci: u8, payload: &[u8]) {
         assert!(matches!(self.class_peer, Some(Kind::Forwarding { .. })));
         self.complete_class(slot, dci, payload);

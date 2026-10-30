@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Software qualification controls, never physical/native-platform evidence.
+//! Software validation controls, never physical/native-platform evidence.
 //! Original owned config + BAR Mapping + real IRQ Registry surround a separate
 //! firmware/register peer. Production MappedRegisters performs every BAR access.
 extern crate std;
@@ -16,7 +16,7 @@ use crate::bus::{
         msi::MsiConfigSpace,
         owned::{
             OwnedConfig,
-            tests::{Counters, fixture},
+            test_support::{Counters, fixture},
         },
     },
 };
@@ -350,10 +350,14 @@ struct Peer {
 impl Peer {
     fn raw_read(&self, at: u32) -> u32 {
         let p = self.view.address(at as usize, 4).unwrap();
+        // SAFETY: the pointer addresses live memory this test's model owns, in bounds, and nothing
+        // accesses it concurrently.
         unsafe { p.as_ptr().cast::<u32>().read_volatile() }
     }
     fn raw_write(&self, at: u32, v: u32) {
         let p = self.view.address(at as usize, 4).unwrap();
+        // SAFETY: the pointer addresses live memory this test's model owns, in bounds, and nothing
+        // accesses it concurrently.
         unsafe { p.as_ptr().cast::<u32>().write_volatile(v) }
     }
     fn deliver(&self) {
@@ -370,6 +374,8 @@ impl Peer {
             return;
         }
         self.callbacks.fetch_add(1, Ordering::Relaxed);
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         assert!(unsafe { &*r }.dispatch(self.vector.load(Ordering::Acquire)));
         self.in_callback.store(false, Ordering::Release);
         if !self.state.lock().unwrap().ignore_pimr {
@@ -417,7 +423,7 @@ struct ModelRegisters {
     native: MappedRegisters,
     peer: Arc<Peer>,
 }
-// SAFETY: explicit software register peer owns the actual isolated mapped CPU
+// SAFETY: explicit software register peer owns the isolated mapped CPU
 // storage; production native accesses use that same Mapping. Firmware effects
 // below are independent bounded device semantics, not native platform grants.
 unsafe impl Registers for ModelRegisters {
@@ -464,7 +470,7 @@ unsafe impl Registers for ModelRegisters {
                     s.outgoing.push_front(wire(3, 3, vec![0x34, 0x12, 0, 0]));
                 }
             }
-            // Model-only busy-clear status bit; no production PISRbit8 claim.
+            // Model-only busy-clear status bit.
             PISR => self.peer.raw_write(PISR, old & !(value & 0x100)),
             I2H if value == 0 => self.peer.raw_write(PISR, self.peer.raw_read(PISR) & !1),
             H2I => {
@@ -540,9 +546,9 @@ impl ConfigSpace for Config {
         }
     }
 }
-// SAFETY: forwards actual exact-width native stores through the owned fixture.
+// SAFETY: forwards exact-width native stores through the owned fixture.
 unsafe impl MsiConfigSpace for Config {}
-// SAFETY: same actual original fixture config owner, no duplicated access path.
+// SAFETY: same original fixture config owner, no duplicated access path.
 unsafe impl Configuration for Config {
     fn owned_address(&self) -> Address {
         self.native.address()
@@ -608,7 +614,7 @@ impl Drop for Domain {
     }
 }
 // SAFETY: explicit requester domain peer never advertises/makes any host DMA
-// mapping; it observes native stop ordering and actual retained fixture owners.
+// mapping; it observes native stop ordering and kept fixture owners.
 unsafe impl DmaDomain for Domain {
     unsafe fn map(
         &self,
@@ -743,6 +749,8 @@ fn inputs() -> Parts {
         peer: peer.clone(),
     };
     let function = Function::new(address, config).unwrap();
+    // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+    // driver, worker or DMA touches them.
     let registers = unsafe { MappedRegisters::new(mapping) }
         .map_err(|(e, _)| e)
         .unwrap();
@@ -767,6 +775,8 @@ fn inputs() -> Parts {
 }
 fn prepared() -> Fixture {
     let (i, peer, config_counts, bar_counts) = inputs();
+    // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+    // driver, worker or DMA touches them.
     let driver = unsafe { Native::new(i) }.map_err(|(e, _)| e).unwrap();
     Fixture {
         driver,
@@ -788,7 +798,7 @@ fn retained(f: &Fixture) {
 }
 
 #[test]
-fn actual_owned_native_irq_firmware_discovery_fragmented_descriptors_tx_controls_and_input() {
+fn owned_native_irq_firmware_discovery_fragmented_descriptors_tx_controls_and_input() {
     let mut f = running();
     assert!(f.driver.irq_handled().unwrap() > 0);
     assert!(f.peer.callbacks.load(Ordering::Relaxed) > 0);
@@ -850,8 +860,7 @@ fn native_mixed_unsolicited_input_before_feature_response_keeps_receive_credit_a
     retained(&f);
 }
 #[test]
-fn native_actual_aggregate_byte_cursor_accepts_publish_response_bits_and_preserves_total_metadata()
-{
+fn native_aggregate_byte_cursor_accepts_publish_response_bits_and_preserves_total_metadata() {
     let mut f = running();
     let mut b = vec![0x34, 0x12, 2, 0x55];
     for command in [5, 0x85] {
@@ -878,7 +887,7 @@ fn native_first_irq_enable_handles_pending_firmware_reset_without_false_readback
     retained(&f);
 }
 #[test]
-fn native_every_actual_rearm_register_boundary_preserves_pending_input_and_masks_callback() {
+fn native_every_rearm_register_boundary_preserves_pending_input_and_masks_callback() {
     let mut baseline = running();
     let start = baseline.peer.state.lock().unwrap().events.len();
     baseline.driver.service().unwrap();
@@ -904,7 +913,7 @@ fn native_every_actual_rearm_register_boundary_preserves_pending_input_and_masks
     }
 }
 #[test]
-fn native_missing_irq_delivery_is_not_qualified_by_successful_mailbox_polling() {
+fn native_missing_irq_delivery_is_not_checked_by_successful_mailbox_polling() {
     let mut f = prepared();
     f.peer.state.lock().unwrap().no_delivery = true;
     assert_eq!(
@@ -917,7 +926,7 @@ fn native_missing_irq_delivery_is_not_qualified_by_successful_mailbox_polling() 
     retained(&f);
 }
 #[test]
-fn actual_profile_admission_rejects_mem_off_wrong_identity_mapping_and_active_dma_before_writes() {
+fn profile_admission_rejects_mem_off_wrong_identity_mapping_and_active_dma_before_writes() {
     for variant in 0..5 {
         let (mut i, peer, _, _) = inputs();
         match variant {
@@ -928,6 +937,8 @@ fn actual_profile_admission_rejects_mem_off_wrong_identity_mapping_and_active_dm
             _ => peer.raw_write(FWSTS, 0x4000 | IN_DMA),
         }
         let before = peer.state.lock().unwrap().events.len();
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         let (error, mut original) = match unsafe { Native::new(i) } {
             Err(v) => v,
             Ok(_) => panic!("invalid profile admitted"),
@@ -952,7 +963,7 @@ fn actual_profile_admission_rejects_mem_off_wrong_identity_mapping_and_active_dm
     }
 }
 #[test]
-fn native_wrong_guid_properties_stale_reset_duplicate_credit_and_unaddressable_ids_retain_epoch() {
+fn native_wrong_guid_properties_stale_reset_duplicate_credit_and_unaddressable_ids_keep_epoch() {
     for fault in 0..6 {
         let mut f = prepared();
         {
@@ -1025,8 +1036,7 @@ fn native_late_same_client_firmware_reset_invalidates_old_descriptors_and_credit
     retained(&f);
 }
 #[test]
-fn native_corrupt_aggregate_nested_length_and_unsolicited_dma_are_terminal_without_host_memory_access()
- {
+fn corrupt_or_unsolicited_messages_are_terminal() {
     for dma in [false, true] {
         let mut f = running();
         if dma {
@@ -1054,7 +1064,7 @@ fn native_corrupt_aggregate_nested_length_and_unsolicited_dma_are_terminal_witho
     }
 }
 #[test]
-fn native_acknowledged_stop_and_domain_failure_keep_original_armed_msi_epoch_retained() {
+fn native_acknowledged_stop_and_domain_failure_keep_original_armed_msi_epoch_kept() {
     for failure in 0..3 {
         let mut f = running();
         {
@@ -1186,8 +1196,7 @@ fn large_feature_transfer() {
 }
 
 #[test]
-fn native_large_descriptor_declared_feature_fragments_once_per_credit_without_busy_mailbox_overwrite()
- {
+fn large_feature_fragments_once_per_credit() {
     large_feature_transfer();
 }
 

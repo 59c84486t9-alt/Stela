@@ -1,5 +1,6 @@
 use super::super::*;
 use super::*;
+use stela_contracts::refuse;
 
 fn optional_fixture(performance: &[u8], extra: &[(&str, &[u8])]) -> Vec<u8> {
     use stela_contracts::adt::encode;
@@ -478,12 +479,16 @@ fn cpu_start_registers_follow_the_pmgr_node_with_registers() {
     assert_eq!(place(&m6, 0x8152, &[0, 1]), Ok(Some((0x3_0073_4000, 2))));
     assert_eq!(
         place(&io("pmgr2,arch", None, None), 0x8152, &[0, 1]),
-        Err("/arm-io/pmgr is pmgr2,arch without /arm-io/pmgr-child".into())
+        Err(refuse!(
+            "/arm-io/pmgr is pmgr2,arch without /arm-io/pmgr-child"
+        ))
     );
     let short = io("pmgr2,arch", None, Some((0x1_0070_0000, 0x34008)));
     assert_eq!(
         place(&short, 0x8152, &[0, 1]),
-        Err("/arm-io/pmgr-child reg[0] does not hold the CPU start registers".into())
+        Err(refuse!(
+            "/arm-io/pmgr-child reg[0] does not hold the CPU start registers"
+        ))
     );
     // An M3 (J613AP `reg[0]` 0xc070_0000 for 0xcc000 bytes) without a
     // modeled PMGR still has its CPU start registers.

@@ -10,7 +10,7 @@ impl<X: Transport, A: Attention, T: Timer> Device<X, A, T> {
     pub fn f30_capabilities(&self) -> impl Iterator<Item = &f30::Capabilities> {
         self.f30.iter().map(|engine| &engine.capabilities)
     }
-    /// Read actual F30 query/control banks and reapply their complete image
+    /// Read F30 query/control banks and reapply their complete image
     /// before enabling GPIO attention. Logical key/trackstick wiring stays with
     /// the platform/frontend owner.
     pub fn initialize_f30(&mut self) -> Result<(), Error> {

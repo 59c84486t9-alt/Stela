@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) 2015 Intel Corporation
-//! Intel GfP2/GaP HCI ISO multiplexed on the genuine legacy bulk endpoints.
+//! Intel GfP2/GaP HCI ISO multiplexed on the legacy bulk endpoints.
 //! Original btintel.c classifies received ACL frames by their real connection
-//! handle. This owner requires actual initialized identity, LE features and
+//! handle. This owner requires initialized identity, LE features and
 //! buffer-size responses; USB submission never substitutes for those responses.
 use super::super::{
     Error as HciError, ErrorKind, Hci, InitializationReport, Io, Packet, State, command,
@@ -24,7 +24,7 @@ pub struct Report {
     pub iso_mtu: u16,
     pub iso_packets: u8,
     pub command_credits: u8,
-    /// Every original complete observation, including actual command responses.
+    /// Every original complete observation, including command responses.
     pub received: Vec<Packet>,
 }
 #[derive(Clone, Debug, Default)]
@@ -41,7 +41,7 @@ pub struct ShutdownReport {
     pub usb: (u16, u16, u16),
     pub hardware_variant: u8,
     pub command_credits: u8,
-    /// Genuine complete observations, including the matching successful Reset.
+    /// Complete observations, including the matching successful Reset.
     pub received: Vec<Packet>,
     pub transport_retired: bool,
 }
@@ -55,8 +55,8 @@ pub enum Error {
     },
     Timeout,
     Transport(HciError),
-    /// Actual attempted packet and conservative consumed allowance survive
-    /// uncertain delivery. Only a genuine stack completion can restore credit.
+    /// Attempted packet and conservative consumed allowance survive
+    /// uncertain delivery. Only a stack completion can restore credit.
     Output {
         cause: HciError,
         packet: Vec<u8>,
@@ -79,7 +79,7 @@ impl From<HciError> for Error {
     }
 }
 
-/// Exact original HCI bytes. ISO timestamp, sequence, SDU-length/status and
+/// Original HCI bytes. ISO timestamp, sequence, SDU-length/status and
 /// fragmentation fields remain for the host stack; this transport edits none.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Received {
@@ -90,7 +90,7 @@ pub enum Received {
 }
 
 /// Exclusive pre-stack setup resets existing radio connections. The caller
-/// supplies genuine command allowance with no command already in flight. HCI
+/// supplies command allowance with no command already in flight. HCI
 /// data credits and connection/codec policy belong to the eventual host stack.
 pub struct Session<B: Io> {
     hci: Hci<B>,
@@ -117,7 +117,7 @@ impl<B: Io> Session<B> {
         self.shutdown.as_ref()
     }
     /// Source btintel_shutdown_combined's mandatory real Reset phase followed
-    /// by acknowledged native retirement. Caller owns actual command allowance
+    /// by acknowledged native retirement. Caller owns command allowance
     /// and retires stack connections. The source LED-workaround USB aliases
     /// 8087:07dc/0a2a/0aa7 are excluded by current Intel initialization admission.
     pub fn shutdown(&mut self, credits: u8) -> Result<&ShutdownReport, Error> {
@@ -146,7 +146,7 @@ impl<B: Io> Session<B> {
             _ => unreachable!(),
         }
     }
-    /// Reset and re-read actual LE capabilities/buffers. The caller retires its
+    /// Reset and re-read LE capabilities/buffers. The caller retires its
     /// host-stack connections/credits; no successful previous report is current
     /// after a failed attempt, as the native owner is terminal then.
     pub fn reset(&mut self, command_credits: u8) -> Result<&Report, Error> {
@@ -175,7 +175,7 @@ impl<B: Io> Session<B> {
         self.hci.submit_acl(packet).map_err(Into::into)
     }
     /// One complete ISO header+data load in one real bulk OUT transfer. Credits
-    /// are the stack's actual remaining ISO packet allowance. Validation is
+    /// are the stack's remaining ISO packet allowance. Validation is
     /// effect-free; an attempted USB delivery consumes one credit even on error.
     pub fn submit_iso(&mut self, packet: &[u8], credits: &mut u8) -> Result<(), Error> {
         self.hci.open()?;

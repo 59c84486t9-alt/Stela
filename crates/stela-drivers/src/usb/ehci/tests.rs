@@ -1,6 +1,6 @@
 //! A native-layout EHCI/DMA/USB peer. CPU and device caches are separate:
-//! publication and completed cache ownership must pass actual domain methods.
-//! This models contracts and fault paths, never physical EHCI qualification.
+//! publication and completed cache ownership must pass domain methods.
+//! This models contracts and fault paths, never physical EHCI validation.
 use super::*;
 use crate::bus::dma::{
     mapping::{DmaDomain, DomainMapping},
@@ -11,17 +11,12 @@ use alloc::{sync::Arc, vec};
 use core::{alloc::Layout, ops::Range, ptr::NonNull};
 use std::sync::Mutex;
 extern crate std;
-#[path = "admission_tests.rs"]
 mod admission_tests;
-#[path = "configuration_tests.rs"]
 mod configuration_tests;
-#[path = "detach_tests.rs"]
 mod detach_tests;
-#[path = "periodic_tests.rs"]
+mod host_tests;
 mod periodic_tests;
-#[path = "recovery_tests.rs"]
 mod recovery_tests;
-#[path = "suspend_tests.rs"]
 mod suspend_tests;
 
 const OP: usize = 0x20;
@@ -31,6 +26,10 @@ const TOGGLE: u32 = 1 << 31;
 const DESCRIPTION: [u8; 32] = [
     9, 2, 32, 0, 1, 1, 0, 0x80, 50, 9, 4, 0, 0, 2, 8, 6, 0x50, 0, 7, 5, 0x81, 2, 0, 2, 0, 7, 5, 2,
     2, 0, 2, 0,
+];
+/// A USB 2.0 device descriptor with one configuration and no strings.
+const DEVICE: [u8; 18] = [
+    18, 1, 0, 2, 0, 0, 0, 64, 0x34, 0x12, 0x78, 0x56, 0, 1, 0, 0, 0, 1,
 ];
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum Mode {
@@ -339,6 +338,8 @@ impl Shared {
                         .unwrap_or_else(|| vec![self.configurations[root]])
                 } else if setup[1] == 6 && setup[3] == 2 {
                     self.description.clone()
+                } else if setup[1] == 6 && setup[3] == 1 {
+                    DEVICE.to_vec()
                 } else {
                     vec![0x5a; usize::from(u16::from_le_bytes([setup[6], setup[7]]))]
                 };
@@ -413,8 +414,8 @@ impl Shared {
             }
             self.put(24, token);
             if token & ACTIVE != 0 {
-                // Keep the original qTD writeback ACTIVE/stale; actual partial
-                // progress lives solely in the retained current QH overlay.
+                // Keep the original qTD writeback ACTIVE/stale; partial
+                // progress lives solely in the current QH overlay.
                 let pointer = self.iova + pointer as u64 + actual as u64;
                 self.put(28, pointer as u32);
                 self.put(48, (pointer >> 32) as u32);
@@ -467,9 +468,12 @@ struct Backing {
     physical: Vec<u64>,
 }
 // SAFETY: test allocation is exclusively pinned, bytewise synchronized through
-// the modeled domain. It never purports to reserve actual physical hardware.
+// the modeled domain. It never purports to reserve physical hardware.
 unsafe impl Send for Backing {}
+// SAFETY: shared references rely on the same argument as `Send` above.
 unsafe impl Sync for Backing {}
+// SAFETY: `cpu_base` and `physical` describe the one kept, aligned test allocation for its
+// whole life.
 unsafe impl PageBacking for Backing {
     fn cpu_base(&self) -> NonNull<u8> {
         self.cpu
@@ -509,7 +513,7 @@ impl PageSource for Source {
         }
         let bytes = bytes.next_multiple_of(4096);
         let layout = Layout::from_size_align(bytes, alignment).unwrap();
-        // SAFETY: initialized private aligned test RAM, retained by Backing.
+        // SAFETY: initialized private aligned test RAM, kept by Backing.
         let cpu = NonNull::new(unsafe { alloc::alloc::alloc_zeroed(layout) })
             .ok_or(MemoryError::OutOfMemory)?;
         self.0.lock().unwrap().allocations += 1;
@@ -527,8 +531,8 @@ impl PageSource for Source {
     }
 }
 struct Domain(Arc<Mutex<Shared>>);
-// SAFETY: this test-only domain maps the exact retained pins to a disjoint
-// modeled IOVA/cache, never native requester authority. Syncs assert ASS0/PSS0 and
+// SAFETY: this test-only domain maps the exact pins to a disjoint
+// modeled IOVA/cache, never native requester permission. Syncs assert ASS0/PSS0 and
 // drainage; the peer alone writes the simulated device image.
 unsafe impl DmaDomain for Domain {
     unsafe fn map(
@@ -591,7 +595,7 @@ unsafe impl DmaDomain for Domain {
             .unwrap()
             .address(range.start, range.len())
             .unwrap();
-        // SAFETY: actual model engine stopped; exact mapped CPU pins/bounds.
+        // SAFETY: model engine stopped; exact mapped CPU pins/bounds.
         let bytes = unsafe { core::slice::from_raw_parts(pointer.as_ptr(), range.len()) };
         m.device[range].copy_from_slice(bytes);
         m.device_syncs += 1;
@@ -707,7 +711,7 @@ impl Hardware for Access {
                 if m.start_ack {
                     m.words[(OP + STS) / 4] |= PSS;
                     if m.periodic_auto {
-                        // Search a whole retained list, honoring its actual
+                        // Search a whole list, honoring its
                         // frame links/S-mask rather than calling a fake IRQ.
                         let before = m.periodic_services.len();
                         for _ in 0..8192 {
@@ -733,7 +737,7 @@ impl Hardware for Access {
                 next &= !ENABLE;
             }
             // Suspend is hardware-cleared only after acknowledged resume,
-            // not by writing zero to PORTSC. Actual source timeout is 40ms,
+            // not by writing zero to PORTSC. Source timeout is 40ms,
             // despite ehci-hub.c's stale "20 msec" comment.
             next = next & !PORT_SUSPEND | old & PORT_SUSPEND;
             if value & PORT_SUSPEND != 0 && old & PORT_SUSPEND == 0 {
@@ -869,7 +873,7 @@ fn output(pipes: &[BulkPipe]) -> &BulkPipe {
 }
 
 #[test]
-fn actual_native_hs_control_status_descriptor_configuration_and_bulk_dma_chain() {
+fn native_hs_control_status_descriptor_configuration_and_bulk_dma_chain() {
     let (mut c, m, id, pipes) = attached();
     let setup = [0x80, 0x55, 0, 0, 0, 0, 0, 0];
     assert_eq!(c.control_in(&id, setup).unwrap(), Vec::<u8>::new());
@@ -901,7 +905,7 @@ fn actual_native_hs_control_status_descriptor_configuration_and_bulk_dma_chain()
     assert!(m.drains > 0 && m.cpu_syncs > 0 && m.device_syncs > 0);
 }
 #[test]
-fn actual_hs_short_bulk_skips_active_successors_and_keeps_overlay_toggle_with_zlp() {
+fn hs_short_bulk_skips_active_successors_and_keeps_overlay_toggle_with_zlp() {
     let (mut c, m, _, pipes) = attached();
     m.lock().unwrap().short_limit = Some(16_384 + 23);
     let ticket = c
@@ -919,7 +923,7 @@ fn actual_hs_short_bulk_skips_active_successors_and_keeps_overlay_toggle_with_zl
     assert_eq!(toggles, &[false, true, false]);
 }
 #[test]
-fn actual_control_short_data_follows_status_and_qh_overlay_supersedes_stale_qtd() {
+fn control_short_data_follows_status_and_qh_overlay_supersedes_stale_qtd() {
     let (mut c, m, id, _) = attached();
     m.lock().unwrap().suppress_writeback = true;
     // Descriptor32bytes requested as20000: first DATAshort must jump directly
@@ -931,7 +935,7 @@ fn actual_control_short_data_follows_status_and_qh_overlay_supersedes_stale_qtd(
     // remain mandatory; untouched later DATA is ACTIVE and is skipped.
 }
 #[test]
-fn stale_device_pipe_and_transfer_refuse_before_io_and_preserve_current_completion() {
+fn stale_handles_refuse_before_io() {
     let (mut c, m, old, pipes) = attached();
     let first = c.submit_bulk_in(input(&pipes), 33, 1_000_000).unwrap();
     c.poll(&first).unwrap().unwrap();
@@ -965,7 +969,7 @@ fn stale_device_pipe_and_transfer_refuse_before_io_and_preserve_current_completi
     assert_eq!(c.poll(&ticket).unwrap().unwrap().actual, 9);
 }
 #[test]
-fn foreign_controller_and_reconfigured_pipes_have_no_authority() {
+fn foreign_controller_and_reconfigured_pipes_have_no_permission() {
     let (mut c, m, id, pipes) = attached();
     let (mut other, other_model, _, other_pipes) = attached();
     let current = other
@@ -996,7 +1000,7 @@ fn foreign_controller_and_reconfigured_pipes_have_no_authority() {
     assert_eq!(m.lock().unwrap().io, before);
 }
 #[test]
-fn actual_stall_requires_successful_clear_feature_before_toggle_reset() {
+fn stall_requires_successful_clear_feature_before_toggle_reset() {
     let (mut c, m, _, pipes) = attached();
     m.lock().unwrap().mode = Mode::Stall;
     let ticket = c
@@ -1153,12 +1157,12 @@ fn real_disconnect_change_invalidates_attachment_before_pending_dma_is_touched()
 }
 
 #[test]
-fn actual_partial_current_overlay_resumes_without_replaying_acked_packet() {
+fn partial_current_overlay_resumes_without_replaying_acked_packet() {
     let (mut c, m, _, pipes) = attached();
     m.lock().unwrap().mode = Mode::Partial;
     let ticket = c.submit_bulk_in(input(&pipes), 4096, 1_000_000).unwrap();
     // Partial current qTD remains ACTIVE only in QH; its memory token still
-    // requests4096. Poll must preserve actual residual/buffer/toggle overlay.
+    // requests4096. Poll must preserve residual/buffer/toggle overlay.
     m.lock().unwrap().mode = Mode::Hold;
     assert_eq!(c.poll(&ticket).unwrap(), None);
     m.lock().unwrap().mode = Mode::Complete;
@@ -1269,7 +1273,7 @@ fn failed_set_configuration_status_revokes_old_pipe_before_ambiguous_bus_effect(
 }
 
 #[test]
-fn actual_descriptor_dma_rejects_ambiguous_endpoint_and_invalid_hs_packet_metadata() {
+fn descriptor_dma_rejects_ambiguous_endpoint_and_invalid_hs_packet_metadata() {
     for fault in 0..4 {
         let m = Arc::new(Mutex::new(Shared::new()));
         let mut c = controller(m.clone());
@@ -1321,9 +1325,9 @@ fn impossible_residual_is_never_copied_as_completed_dma() {
 
 #[test]
 #[ignore = "oracle: STELA_EHCI_QTD_ORACLE"]
-fn actual_production_qtd_encoder_matches_unchanged_linux_qtd_fill_trace() {
+fn production_qtd_encoder_matches_unchanged_linux_qtd_fill_trace() {
     // This compares pure descriptor arithmetic, including54 cases whose
-    // payload arithmetic crosses4GiB. It manufactures no DMA authority:
+    // payload arithmetic crosses4GiB. It manufactures no DMA permission:
     // Arena::new separately refuses a native arena crossing its segment.
     let path = std::env::var("STELA_EHCI_QTD_ORACLE").expect("fresh C trace required");
     let trace = std::fs::read_to_string(path).unwrap();
@@ -1588,7 +1592,7 @@ fn ambiguous_owned_reset_failures_cannot_release_old_default_or_assigned_bus_own
 }
 
 #[test]
-fn actual_disconnect_releases_assigned_address_and_preserves_other_root_completion() {
+fn disconnect_releases_assigned_address_and_preserves_other_root_completion() {
     let (mut c, m) = two_roots();
     let old = c.reset_port(1).unwrap();
     c.set_address(&old, 7).unwrap();
@@ -1643,7 +1647,7 @@ fn inherited_enabled_roots_are_physically_disabled_before_first_default_owner() 
 }
 
 #[test]
-fn inherited_root_disable_requires_actual_ack_and_retains_uncertain_native_owner() {
+fn inherited_root_disable_requires_ack_and_keeps_uncertain_native_owner() {
     let m = Arc::new(Mutex::new(Shared::new()));
     {
         let mut m = m.lock().unwrap();

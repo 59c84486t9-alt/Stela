@@ -38,6 +38,12 @@ impl Asm<'_> {
     pub(crate) fn mfence(&mut self) {
         self.fixed(&[0x0f, 0xae, 0xf0]);
     }
+    /// `lfence` (0F AE E8): no later instruction starts until every earlier
+    /// one has completed locally, which orders `rdtsc` against the loads
+    /// around it (Intel SDM Vol. 2B, RDTSC).
+    pub(crate) fn lfence(&mut self) {
+        self.fixed(&[0x0f, 0xae, 0xe8]);
+    }
     /// `op al, imm8`, the byte accumulator short form (04 + 8 * op, ib).
     pub(crate) fn alu_accumulator_imm8(&mut self, op: Alu, value: u8) {
         self.fixed(&[(op as u8) << 3 | 4]);
@@ -108,6 +114,7 @@ mod tests {
                 one(|a| a.prefetch(Prefetch::T1, Mem::base(Rax, 0x100))),
             ),
             (&[0x0f, 0xae, 0xf0], one(|a| a.mfence())),
+            (&[0x0f, 0xae, 0xe8], one(|a| a.lfence())),
             (&[0x3c, 12], one(|a| a.alu_accumulator_imm8(Alu::Cmp, 12))),
             (
                 &[0x4c, 0x0f, 0xad, 0xc0],

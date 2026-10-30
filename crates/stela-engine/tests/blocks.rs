@@ -99,6 +99,8 @@ mod numerical {
                     prefix.x[0] += 1;
                     publish(&mut prefix, 0, 1, 0x40400000, 32);
                     publish(&mut prefix, 3, 4, 0x3c00, 16);
+                    // SAFETY: the test program reads and writes only its own registered guest data,
+                    // and nothing else mutates it.
                     let first = unsafe { runtime.run(&mut thread, Some(GuestAddress(STOP)), 1)? };
                     assert_eq!(first.reason, StopReason::BudgetExhausted);
                     assert_eq!(first.floating_point_helpers, 1);
@@ -106,6 +108,8 @@ mod numerical {
                     assert_eq!(thread.registers, prefix);
                     let mut expected = prefix;
                     publish(&mut expected, 6, 7, 0x4018000000000000, 64);
+                    // SAFETY: the test program reads and writes only its own registered guest data,
+                    // and nothing else mutates it.
                     let rest = unsafe { runtime.run(&mut thread, Some(GuestAddress(STOP)), 8)? };
                     assert_eq!(rest.reason, StopReason::StopAddress);
                     assert_eq!(rest.blocks_executed, 1);
@@ -140,6 +144,8 @@ mod numerical {
                     publish(&mut expected, 0, 1, 0x40400000, 32);
                     publish(&mut expected, 3, 4, 0x4200, 16);
                     publish(&mut expected, 6, 7, 0x4018000000000000, 64);
+                    // SAFETY: the test program reads and writes only its own registered guest data,
+                    // and nothing else mutates it.
                     let report = unsafe { runtime.run(&mut thread, Some(GuestAddress(STOP)), 1)? };
                     assert_eq!(report.reason, StopReason::StopAddress);
                     assert_eq!(report.blocks_executed, 1);
@@ -172,6 +178,8 @@ mod numerical {
         thread.registers.fpcr |= INVALID << EXCEPTION_ENABLE_SHIFT;
         let mut prefix = thread.registers.clone();
         prefix.x[0] += 1;
+        // SAFETY: the test program reads and writes only its own registered guest data, and nothing
+        // else mutates it.
         let stop = unsafe { runtime.run(&mut thread, Some(GuestAddress(STOP)), 8)? };
         assert_eq!(
             stop.reason,
@@ -184,6 +192,8 @@ mod numerical {
         assert_eq!(stop.floating_point_helpers, 0);
         assert_eq!(thread.registers, prefix);
         assert_eq!(thread.pc, GuestAddress(BASE + 4));
+        // SAFETY: the test program reads and writes only its own registered guest data, and nothing
+        // else mutates it.
         let zero = unsafe { runtime.run(&mut thread, Some(GuestAddress(STOP)), 0)? };
         assert_eq!(zero.blocks_executed, 0);
         assert_eq!(thread.registers, prefix);
@@ -191,6 +201,8 @@ mod numerical {
         let mut expected = thread.registers.clone();
         expected.x[0] += 1;
         publish(&mut expected, 0, 1, 0x40400000, 32);
+        // SAFETY: the test program reads and writes only its own registered guest data, and nothing
+        // else mutates it.
         let done = unsafe { runtime.run(&mut thread, Some(GuestAddress(STOP)), 8)? };
         assert_eq!(done.reason, StopReason::StopAddress);
         assert_eq!(done.floating_point_helpers, 0);
@@ -225,6 +237,8 @@ mod numerical {
                 32,
             );
             expected.fpsr |= INEXACT;
+            // SAFETY: the test program reads and writes only its own registered guest data, and
+            // nothing else mutates it.
             let done = unsafe { runtime.run(&mut thread, Some(GuestAddress(STOP)), 8)? };
             assert_eq!(done.reason, StopReason::StopAddress);
             assert_eq!(done.blocks_executed, 1);
@@ -256,7 +270,7 @@ fn simd_family_chain_uses_shared_block_lowering_and_cpu_bound_disk_cache() -> Re
         0x4eedbdae, // ADDP V14.2D,V13.2D,V13.2D
         0x4e604a0f, // CLS V15.8H,V16.8H
         0x5e207a30, // SQABS B16,B17: active MIN sets QC, clears upper bits
-        0x6e320e52, // UQADD V18.16B,V18.16B,V18.16B: zero sum retains QC
+        0x6e320e52, // UQADD V18.16B,V18.16B,V18.16B: zero sum keeps QC
         0x6ea12a93, // SQXTUN2 V19.4S,V20.2D: signed wide bounds, preserve low half
         0x4eb7c2d5, // SMULL2 V21.2D,V22.4S,V23.4S
         0x4eb612b5, // SADDW2 V21.2D,V21.2D,V22.4S: full wide left alias
@@ -371,7 +385,7 @@ fn simd_family_chain_uses_shared_block_lowering_and_cpu_bound_disk_cache() -> Re
 }
 
 #[test]
-fn simd_register_shifts_and_doubled_products_share_dispatch_and_persistent_code() -> Result<()> {
+fn simd_shifts_and_doubled_products_share_code() -> Result<()> {
     use stela_compiler::aarch64::simd::saturating::FPSR_QC;
     use stela_compiler::{TargetCpu, block::BlockProfile};
     let cache = tempfile::tempdir()?;
@@ -386,7 +400,7 @@ fn simd_register_shifts_and_doubled_products_share_dispatch_and_persistent_code(
         0x5f5f72b4, // SQDMLSL S20,H21,V15.H[1]: selected MIN*MIN, upper clearing
         0x6e399f17, // PMUL V23.16B,V24.16B,V25.16B: low polynomial products
         0x4efce37a, // PMULL2 V26.1Q,V27.2D,V28.2D: full high-half polynomial
-        0x6e3f4fdd, // UQSHL V29.16B,V30.16B,V31.16B: zero retains earlier QC
+        0x6e3f4fdd, // UQSHL V29.16B,V30.16B,V31.16B: zero keeps earlier QC
         RET,
     ]);
     let limbs = |bytes: [u8; 16]| {
@@ -706,7 +720,7 @@ fn rejects_overlapping_regions_and_never_pads_partial_final_instruction() -> Res
     let cache = tempfile::tempdir()?;
     let mut runtime = BlockRuntime::new(25, cache.path().to_path_buf());
     let mut program = words(&[ADD_ONE]);
-    program.extend([0xc0, 0x03, 0x5f]); // Three bytes of RET, deliberately incomplete.
+    program.extend([0xc0, 0x03, 0x5f]); // Three bytes of RET, incomplete.
     runtime.register_code(GuestAddress(BASE), program)?;
     assert!(
         runtime
@@ -767,8 +781,7 @@ fn direct_ram_effects_survive_call_and_return_dispatch_boundaries() -> Result<()
 }
 
 #[test]
-fn discovery_follows_both_conditional_edges_calls_continuations_and_loops_without_linear_scanning()
--> Result<()> {
+fn discovery_follows_control_flow_edges() -> Result<()> {
     use stela_compiler::block::{DynamicEdgeKind, SuccessorKind};
     let cache = tempfile::tempdir()?;
     let mut runtime = BlockRuntime::new(91, cache.path().into());

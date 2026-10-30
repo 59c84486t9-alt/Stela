@@ -1,4 +1,4 @@
-//! Exclusive stopped PCI requester retained by its VT-d context. A numeric RID
+//! Exclusive stopped PCI requester kept by its VT-d context. A numeric RID
 //! or a cache-policy bit never grants this ownership or DMA coherency.
 use crate::vtd::VtdError;
 use stela_drivers::bus::pci::{
@@ -26,19 +26,19 @@ impl Drop for ModelOwner {
     }
 }
 impl RequesterClaim {
-    /// Consume the actual configuration owner, never a supplied numeric RID.
+    /// Consume the configuration owner, never a supplied numeric RID.
     ///
     /// # Safety
-    /// `function` is the actual uniquely enumerated ECAM function, including
+    /// `function` is the uniquely enumerated ECAM function, including
     /// unmodified address/identity metadata validated against the complete
-    /// platform route inventory; no reconstructed/forged Function qualifies.
-    /// Actual vendor engines/DMA/posted requests and IRQ/work/reset paths are
-    /// stopped and drained. This exact requester has coherent WB RAM DMA,
+    /// platform route inventory; no reconstructed/forged Function checks.
+    /// Vendor engines/DMA/posted requests and IRQ/work/reset paths are
+    /// stopped and drained. This requester has coherent WB RAM DMA,
     /// independently of its CPU cache attributes and VT-d table coherency.
     /// No aliases, firmware/SMM/reset/config owner can change its identity or
-    /// DMA policy. The actual UC config/root resource owner remains permanently
-    /// retained through every domain or quarantine; the current opt-in fixture
-    /// uses its permanently retained host-check root. Native production attach
+    /// DMA policy. The UC config/root resource owner remains permanently
+    /// through every domain or quarantine; the current opt-in fixture
+    /// uses its permanently host-check root. Native production attach
     /// needs the canonical owned MMIO/root-epoch adapter, not this contract
     /// inferred from an ECAM address. No operation/final release runs in IRQ.
     pub unsafe fn from_stopped_pci(function: Function<OwnedConfig>) -> Result<Self, VtdError> {
@@ -56,7 +56,7 @@ impl RequesterClaim {
         claim.check_stopped()?;
         Ok(claim)
     }
-    /// Retain a driver's binding of its stopped function.
+    /// Keep a driver's binding of its stopped function.
     ///
     /// # Safety
     /// The function is stopped as [`StoppedRequester::from_stopped_pci`]
@@ -97,7 +97,7 @@ impl RequesterClaim {
             return Err(VtdError::Busy);
         }
         // Walk the complete list strictly here: Function::capabilities stops
-        // quietly at a malformed entry and cannot qualify ownership.
+        // quietly at a malformed entry and cannot check ownership.
         let status = function.config().read16(6);
         if status == u16::MAX {
             return Err(VtdError::RegisterRead);
@@ -222,7 +222,7 @@ mod tests {
         .unwrap()
     }
     #[test]
-    fn actual_config_identity_mastering_and_interrupt_policy_are_checked() {
+    fn config_identity_mastering_and_interrupt_policy_are_checked() {
         let mut f = function();
         assert_eq!(RequesterClaim::validate_stopped(&mut f), Ok(()));
         for bad in [4, 0, u16::MAX] {
@@ -250,7 +250,7 @@ mod tests {
         }
     }
     #[test]
-    fn malformed_or_failed_capability_reads_do_not_qualify_a_claim() {
+    fn malformed_or_failed_capability_reads_do_not_check_a_claim() {
         for pointer in [0x41, 0x3c, 0xff] {
             let mut f = function();
             f.config().write16(6, 16);

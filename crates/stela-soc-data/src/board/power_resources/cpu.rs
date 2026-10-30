@@ -1,4 +1,4 @@
-//! Source-qualified CPU ownership, independent of lifecycle state or admission.
+//! Source-checked CPU ownership, independent of lifecycle state or admission.
 //!
 //! Original 26A434 T8112 normal-mode MPIDR/idle callbacks and T6000 mode1
 //! constructor counters establish separate membership rules. See apple-socs.md's
@@ -34,7 +34,7 @@ pub struct PmgrCpuLocation {
 }
 
 /// A positive implicit CPU participant, with the graph's canonical identity.
-/// The caller must separately qualify and supply its initial LifecycleState.
+/// The caller must separately check and supply its initial LifecycleState.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessorAssociation {
     pub domain: DomainId,
@@ -80,8 +80,6 @@ const PERF_DOMAIN_BYTES: usize = 28;
 const DEVICE_BYTES: usize = 48;
 const DOMAIN_LIMIT: usize = 48;
 const VIRTUAL: u8 = 1 << 4;
-const PHYSICAL_AFFINITY: u64 = 0xffff;
-const CORETYPE_SHIFT: u32 = 16;
 
 type Error = CpuAssociationError;
 
@@ -193,7 +191,7 @@ fn ps_address(io: &Node<'_>, pmgr: &Node<'_>, group: usize, index: u32) -> Resul
     )
 }
 
-/// Returns [complex][local core] -> scheduler PE after matching the actual
+/// Returns [complex][local core] -> scheduler PE after matching the
 /// original MPIDR consumer against both the ADT and the admitted CPU profile.
 fn topology(
     root: &Node<'_>,
@@ -223,10 +221,8 @@ fn topology(
         }
         let kind = required(node, "cluster-type")?;
         let expected_kind = if complex == 0 { b"E\0" } else { b"P\0" };
-        let expected_aff2 = complex as u64;
         if kind != expected_kind
-            || identity.mpidr & PHYSICAL_AFFINITY != u64::from(reg)
-            || identity.mpidr != (0x8000_0000 | expected_aff2 << CORETYPE_SHIFT | u64::from(reg))
+            || crate::board::mpidr::compose(complex as u8, reg) != Some(identity.mpidr)
         {
             return Err(Error::Topology(
                 "CPU profile differs from original affinity",
@@ -240,9 +236,9 @@ fn topology(
     Ok(result)
 }
 
-/// Resolve all ten positively qualified normal-mode CPU owners or refuse the
+/// Resolve all ten positively checked normal-mode CPU owners or refuse the
 /// whole inventory. This neither binds participants nor chooses initial state.
-/// `acc_harvesting` must be the separately qualified effective configuration,
+/// `acc_harvesting` must be the separately checked effective configuration,
 /// including any start-time overrides. An absent ADT property alone only
 /// establishes the original constructor default, not the effective setting.
 pub fn resolve_cpu_power(
@@ -315,7 +311,8 @@ pub fn resolve_cpu_power(
         .zip(records)
         .enumerate()
     {
-        let parsed = Record::parse(Layout::V1, raw).map_err(Error::Malformed)?;
+        let parsed =
+            Record::parse(Layout::V1, raw).map_err(|record| Error::Malformed(record.what()))?;
         if view.id.die != 0 {
             return Err(Error::UnsupportedDie(view.id.die));
         }
@@ -338,7 +335,7 @@ pub fn resolve_cpu_power(
         let Some(complex) = complexes.get(id).copied().flatten() else {
             continue;
         };
-        // Only the original die-0, non-replicated CPU records are qualified.
+        // Only the original die-0, non-replicated CPU records are checked.
         // In particular byte 25 is not converted into an Aff1 cluster number.
         // Other flags/replication/cluster selectors need their own source
         // contract, even when the normalized caller ID says die 0.
@@ -363,7 +360,7 @@ pub fn resolve_cpu_power(
                 return Err(Error::UnqualifiedGeometry("extra or reordered CPU core"));
             }
             let pe = pes[complex][core];
-            // This explicit placement coupling is qualified for T8112;
+            // This explicit placement coupling is checked for T8112;
             // a different table/PS relationship must not inherit it.
             if pe != output.len() {
                 return Err(Error::Topology("core table order differs from PE IDs"));

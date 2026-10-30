@@ -15,15 +15,17 @@ pub(crate) use native_image::ReachedCall as ObservedNativeCall;
 #[cfg(feature = "std")]
 use crate::dispatch::{LeafDispatcher, ResolvedLeaf};
 #[cfg(feature = "std")]
-use alloc::rc::Rc;
+use crate::{Result, error::Io};
 #[cfg(feature = "std")]
-use anyhow::{Context, Result, ensure};
+use alloc::rc::Rc;
 #[cfg(feature = "std")]
 use core::marker::PhantomData;
 #[cfg(feature = "std")]
 use std::io::Read;
 #[cfg(feature = "std")]
 use stela_compiler::GuestState;
+#[cfg(feature = "std")]
+use stela_contracts::require;
 #[cfg(feature = "std")]
 use stela_formats::sha256;
 
@@ -49,44 +51,39 @@ impl ExecutableLeaf {
     /// the identity or expected hash held by the resolved handle. An already
     /// loaded mapping remains independent of later disk changes.
     pub fn load(dispatcher: &LeafDispatcher, resolved: &ResolvedLeaf) -> Result<Self> {
-        ensure!(
+        require!(
             dispatcher.is_current(resolved),
             "stale or foreign registered leaf"
         );
         let manifest = &resolved.prepared().manifest;
         let identity = &manifest.identity;
-        ensure!(
+        require!(
             *identity == resolved.identity().translation,
             "resolved translation identity mismatch"
         );
-        ensure!(
+        require!(
             identity.schema_version == 1,
             "unsupported translation schema"
         );
-        ensure!(
+        require!(
             identity.compiler_source_sha256 == crate::compiler_source_sha256(),
             "generated code uses a different compiler"
         );
-        ensure!(
+        require!(
             identity.abi
                 == stela_compiler::block::BlockProfile::new(stela_compiler::block::Features::LEAF)
                     .abi(),
             "unsupported generated-code ABI"
         );
-        let target = identity
-            .target_cpu
-            .parse::<stela_compiler::TargetCpu>()
-            .map_err(anyhow::Error::msg)?;
-        ensure!(
-            crate::platform::cpu::admitted(target),
-            "host CPU lacks generated-code requirements {}",
-            target.id()
-        );
-        ensure!(
+        let target = identity.target_cpu.parse::<stela_compiler::TargetCpu>()?;
+        if !crate::platform::cpu::admitted(target) {
+            return Err(crate::Error::HostLacks(target));
+        }
+        require!(
             !manifest.verified,
             "cache metadata is not verification evidence"
         );
-        ensure!(
+        require!(
             manifest.native_bytes > 0 && manifest.native_bytes <= MAX_NATIVE_BYTES,
             "generated-code size exceeds execution bound"
         );
@@ -94,16 +91,17 @@ impl ExecutableLeaf {
         let path = resolved.prepared().directory.join("native.bin");
         let mut bytes = Vec::new();
         std::fs::File::open(&path)
-            .with_context(|| format!("open generated artifact {}", path.display()))?
+            .io("open a generated artifact")?
             .take((MAX_NATIVE_BYTES + 1) as u64)
-            .read_to_end(&mut bytes)?;
-        ensure!(
+            .read_to_end(&mut bytes)
+            .io("read a generated artifact")?;
+        require!(
             bytes.len() == manifest.native_bytes && sha256(&bytes) == manifest.native_sha256,
             "generated artifact differs from resolved immutable manifest"
         );
         let mapping = platform::Mapping::new(&bytes)?;
         // The immutable dispatcher borrow spans validation and publication.
-        ensure!(
+        require!(
             dispatcher.is_current(resolved),
             "registered leaf became stale"
         );
@@ -145,7 +143,7 @@ impl ExecutableLeaf {
         dispatcher: &LeafDispatcher,
         state: &mut GuestState,
     ) -> Result<()> {
-        ensure!(
+        require!(
             dispatcher.is_current(&self.resolved),
             "refusing stale or foreign native execution"
         );
@@ -164,6 +162,7 @@ pub mod platform;
 ))]
 mod tests {
     use super::*;
+    use anyhow::Result;
     use stela_compiler::GuestAddress;
 
     fn source(value: u32) -> Vec<u8> {
@@ -193,18 +192,23 @@ mod tests {
         dispatcher.register(entry, source(43))?;
         assert!(ExecutableLeaf::load(&dispatcher, &first).is_err());
         state.x[0] = 777;
+        // SAFETY: the test leaf touches only `state`, a live local, and returns.
         assert!(unsafe { executable.execute(&dispatcher, &mut state) }.is_err());
         assert_eq!(state.x[0], 777);
         let replacement = ExecutableLeaf::load(&dispatcher, &dispatcher.resolve(entry)?)?;
+        // SAFETY: the test leaf touches only `state`, a live local, and returns.
         unsafe { replacement.execute(&dispatcher, &mut state)? };
         assert_eq!(state.x[0], 43);
         assert!(dispatcher.unregister(entry));
         state.x[0] = 888;
+        // SAFETY: the test leaf touches only `state`, a live local, and returns.
         assert!(unsafe { replacement.execute(&dispatcher, &mut state) }.is_err());
         assert_eq!(state.x[0], 888);
         dispatcher.register(entry, source(42))?;
+        // SAFETY: the test leaf touches only `state`, a live local, and returns.
         assert!(unsafe { executable.execute(&dispatcher, &mut state) }.is_err());
         let reloaded = ExecutableLeaf::load(&dispatcher, &dispatcher.resolve(entry)?)?;
+        // SAFETY: the test leaf touches only `state`, a live local, and returns.
         unsafe { reloaded.execute(&dispatcher, &mut state)? };
         assert_eq!(state.x[0], 42);
         Ok(())
@@ -222,10 +226,12 @@ mod tests {
         let executable = ExecutableLeaf::load(&dispatcher, &resolved)?;
         assert!(ExecutableLeaf::load(&other, &resolved).is_err());
         let mut state = GuestState::default();
+        // SAFETY: the test leaf touches only `state`, a live local, and returns.
         assert!(unsafe { executable.execute(&other, &mut state) }.is_err());
         std::fs::write(resolved.prepared().directory.join("native.bin"), b"corrupt")?;
         assert!(ExecutableLeaf::load(&dispatcher, &resolved).is_err());
         // Own RX bytes are independent of the now-corrupt disk artifact.
+        // SAFETY: the test leaf touches only `state`, a live local, and returns.
         unsafe { executable.execute(&dispatcher, &mut state)? };
         assert_eq!(state.x[0], 42);
         Ok(())
@@ -334,6 +340,7 @@ mod tests {
             )
         };
         if object != 0 {
+            // SAFETY: `object` is a send right this function obtained above and releases once.
             unsafe { mach_port_deallocate(mach_task_self_, object) };
         }
         assert_eq!(result, libc::KERN_SUCCESS);

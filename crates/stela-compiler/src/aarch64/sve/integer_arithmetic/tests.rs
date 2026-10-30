@@ -142,7 +142,7 @@ mod prefix_requirement {
     }
 
     #[test]
-    fn all_predicates_sizes_and_aliases_use_actual_shared_validator() {
+    fn all_predicates_sizes_and_aliases_use_shared_validator() {
         for opcode in [
             ABS_Z_P_Z_M,
             NEG_Z_P_Z_M,

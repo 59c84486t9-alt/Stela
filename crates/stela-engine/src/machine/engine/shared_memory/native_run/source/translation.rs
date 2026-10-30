@@ -1,10 +1,10 @@
-//! One lexical executable mapping, never retained across a guest body.
+//! One lexical executable mapping, never kept across a guest body.
 #[cfg(feature = "native-profile")]
 use super::super::super::source_profile::{Fetch, Profile};
 use super::*;
 use crate::memory::{RegisteredSystemRam, domain::MemoryExecutionLoan};
 
-/// Non-Copy same-PC source witness. The borrowed controls, RAM and actual pin
+/// Non-Copy same-PC source witness. The borrowed controls, RAM and pin
 /// cannot be substituted by a later read. Full source bytes are always reread.
 pub(in crate::machine::engine::shared_memory::native_run) struct ExecuteTranslation<'a> {
     ram: &'a RegisteredSystemRam,
@@ -22,7 +22,7 @@ impl<'a> ExecuteTranslation<'a> {
     /// # Safety
     /// Until this witness is dropped, the caller must exclude guest execution,
     /// code/MMU/control publication and unjoined DMA/host writers using the
-    /// actual held-cohort or single-online-PE native-round producer contract.
+    /// held-cohort or single-online-PE native-round producer contract.
     /// The execution loan alone does not exclude descriptor or ordinary writes.
     /// No Host/device service may intervene before a read through this witness.
     pub(in crate::machine::engine::shared_memory::native_run) unsafe fn first(
@@ -52,7 +52,7 @@ impl<'a> ExecuteTranslation<'a> {
                 &mut resolutions,
             )?;
             let mut bytes = [0; 4];
-            // SAFETY: private staging under the caller's actual no-writer scope.
+            // SAFETY: private staging under the caller's no-writer scope.
             unsafe { ram.read_physical(mapped.physical, &mut bytes) }
                 .map_err(FetchFailure::Refused)?;
             Self::check_owner(ram, execution).map_err(FetchFailure::Refused)?;
@@ -127,6 +127,7 @@ impl<'a> ExecuteTranslation<'a> {
 mod tests {
     use super::*;
     use alloc::sync::Arc;
+    use anyhow::Result;
 
     fn fixture(test: impl FnOnce(&mut SharedMemory, &Controls, &Arc<RegisteredSystemRam>)) {
         let (mut machine, ram, events) = crate::machine::engine::shared_memory::tests::machine();
@@ -149,7 +150,7 @@ mod tests {
         loan: &'a MemoryExecutionLoan,
         pc: u64,
     ) -> Result<ExecuteTranslation<'a>, FetchFailure> {
-        // SAFETY: each test retains a lexical no-writer scope until drop.
+        // SAFETY: each test keeps a lexical no-writer scope until drop.
         unsafe {
             ExecuteTranslation::first(
                 &memory.ram,
@@ -163,14 +164,18 @@ mod tests {
     }
 
     #[test]
-    fn same_pc_prefix_rereads_canonical_bytes_with_one_actual_resolution() {
+    fn same_pc_prefix_rereads_canonical_bytes_with_one_resolution() {
         fixture(|memory, controls, ram| {
             let expected = [0xd503201fu32.to_le_bytes(), 0x14000001u32.to_le_bytes()].concat();
+            // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+            // registered.
             unsafe { ram.publish_physical(0x14000, &expected) }.unwrap();
             #[cfg(feature = "native-profile")]
             let before = memory.source.statistics();
             let loan = memory.memory.execution_loan().unwrap();
             {
+                // SAFETY: the test holds the execution loan and runs no guest, publisher or DMA
+                // writer while this witness lives.
                 let source = unsafe { first(memory, controls, &loan, 0x4000) }.unwrap();
                 assert_eq!(source.first_word(), 0xd503201f);
                 let mut output = [0; 8];
@@ -190,9 +195,13 @@ mod tests {
             drop(loan);
             assert!(ram.try_service().unwrap().is_some());
             // A new scope must observe changed permissions, never old rights.
+            // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+            // registered.
             unsafe { ram.publish_physical(0x13020, &0u64.to_le_bytes()) }.unwrap();
             let loan = memory.memory.execution_loan().unwrap();
             assert!(matches!(
+                // SAFETY: the test holds the execution loan and runs no guest, publisher or DMA
+                // writer while this witness lives.
                 unsafe { first(memory, controls, &loan, 0x4000) },
                 Err(FetchFailure::Fault(_))
             ));
@@ -202,8 +211,12 @@ mod tests {
     #[test]
     fn page_extent_and_instruction_size_refuse_before_staging() {
         fixture(|memory, controls, ram| {
+            // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+            // registered.
             unsafe { ram.publish_physical(0x14ffc, &0xd503201fu32.to_le_bytes()) }.unwrap();
             let loan = memory.memory.execution_loan().unwrap();
+            // SAFETY: the test holds the execution loan and runs no guest, publisher or DMA writer
+            // while this witness lives.
             let source = unsafe { first(memory, controls, &loan, 0x4ffc) }.unwrap();
             let mut good = [0; 4];
             source.read_into(&mut good).unwrap();
@@ -227,6 +240,8 @@ mod tests {
                 #[cfg(feature = "native-profile")]
                 let before = memory.source.statistics();
                 assert!(matches!(
+                    // SAFETY: the test holds the execution loan and runs no guest, publisher or DMA
+                    // writer while this witness lives.
                     unsafe { first(memory, controls, &loan, 0x4000) },
                     Err(FetchFailure::Refused(MemoryStatus::Domain))
                 ));
@@ -246,10 +261,14 @@ mod tests {
         fixture(|memory, controls, ram| {
             let mut controls = controls.clone();
             controls.translation.sctlr &= !1;
+            // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+            // registered.
             unsafe { ram.publish_physical(0x14000, &0xd503201fu32.to_le_bytes()) }.unwrap();
             let loan = memory.memory.execution_loan().unwrap();
             #[cfg(feature = "native-profile")]
             let before = memory.source.statistics();
+            // SAFETY: the test holds the execution loan and runs no guest, publisher or DMA writer
+            // while this witness lives.
             let source = unsafe { first(memory, &controls, &loan, 0x14000) }.unwrap();
             let mut bytes = [0; 4];
             source.read_into(&mut bytes).unwrap();
@@ -268,10 +287,13 @@ mod tests {
         fixture(|memory, controls, _| {
             let loan = memory.memory.execution_loan().unwrap();
             assert_eq!(
+                // SAFETY: the callback runs once on this thread and touches only the checked view.
                 unsafe { memory.memory.with_checked_view(|view| view.version ^= 1) },
                 Err(MemoryStatus::Domain)
             );
             assert!(matches!(
+                // SAFETY: the test holds the execution loan and runs no guest, publisher or DMA
+                // writer while this witness lives.
                 unsafe { first(memory, controls, &loan, 0x4000) },
                 Err(FetchFailure::Refused(MemoryStatus::Domain))
             ));

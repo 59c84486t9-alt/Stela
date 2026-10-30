@@ -138,7 +138,7 @@ mod tests {
     }
 
     #[test]
-    fn signed_historical_versions_keep_their_actual_physical_models() -> Result<()> {
+    fn signed_historical_versions_keep_their_physical_models() -> Result<()> {
         let images = parse(&fixture("https://updates.cdn-apple.com/old.ipsw"))?.images;
         assert_eq!(images.len(), 1);
         assert_eq!(images[0].version, "11.0.1");

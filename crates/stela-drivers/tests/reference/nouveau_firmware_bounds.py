@@ -108,8 +108,8 @@ def main():
                     "static const u8 nouveau_real_bootloader[] = {\n\t" +
                     ",\n\t".join(rows) + "\n};\n")
     tests = {
-        "nouveau_firmware_authored": "crates/stela-drivers/src/gpu/nouveau/tests/firmware.c",
-        "nouveau_firmware_retained": "crates/stela-drivers/src/gpu/nouveau/tests/firmware_retained.c",
+        "nouveau_firmware_authored": "crates/stela-drivers/tests/reference/nouveau/firmware.c",
+        "nouveau_firmware_retained": "crates/stela-drivers/tests/reference/nouveau/firmware_retained.c",
     }
     retained_status = ("source_identity_checked_execution_unrun"
                        if boot is not None else "not_requested")

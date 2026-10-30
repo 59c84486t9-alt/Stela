@@ -139,7 +139,7 @@ mod tests {
     }
 
     #[test]
-    fn corrupt_authentication_retains_exact_standalone_and_combined_faults() {
+    fn corrupt_authentication_keeps_exact_standalone_and_combined_faults() {
         let context = context(Version::FaultingCombined);
         for key in [Key::Ia, Key::Ib] {
             let signed = context

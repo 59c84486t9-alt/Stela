@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //! Native xHCI adapter. Each direction reserves a monotonic private ring arena.
-//! Controller retains and reactivates the same owned rings only after acknowledged
+//! Controller keeps and reactivates the same owned rings only after acknowledged
 //! stop/dequeue/drop and event retirement. The class never resets its allocator.
 use super::{AudioDevice, Completion, Control, PacketStatus, Plan, Transport};
 use crate::{
     audio::Direction,
     block::BlockError,
     bus::dma::{DmaAllocator, DmaBuffer, RegionAllocator},
-    usb::xhci::{Device, Endpoint, IsoStatus, IsoTransfer, Shared, SlotId},
+    usb::descriptor::Endpoint,
+    usb::xhci::{Device, IsoStatus, IsoTransfer, Shared, SlotId},
 };
 use alloc::vec::Vec;
 
@@ -62,7 +63,7 @@ struct Arena {
 impl Arena {
     fn new(dma: &mut dyn DmaAllocator) -> Result<Self, BlockError> {
         let memory = dma.allocate(65536, 65536)?;
-        // SAFETY: reserved exclusively for this adapter, retained for the boot.
+        // SAFETY: reserved exclusively for this adapter, kept for the boot.
         let allocator = unsafe {
             RegionAllocator::new(memory.physical()..memory.physical() + memory.len() as u64)
         };
@@ -74,11 +75,11 @@ impl Arena {
     }
     fn released(&mut self) {
         self.endpoints.clear();
-        // The controller retains old ring addresses for the boot. Keep this
+        // The controller keeps old ring addresses for the boot. Keep this
         // allocator monotonic even after Drop Context ACK; only PCM can recycle.
     }
 }
-/// Owns a retained native controller reference and the audio endpoint arenas.
+/// Owns a native controller reference and the audio endpoint arenas.
 pub struct Native {
     shared: Shared,
     id: SlotId,
@@ -209,7 +210,7 @@ impl Transport for Native {
         })
     }
 }
-/// Native playback/capture owner published by xHCI and retained in probe::Devices.
+/// Native playback/capture owner published by xHCI and kept in probe::Devices.
 pub type UsbAudio = AudioDevice<Native>;
 impl UsbAudio {
     pub(crate) fn attach(
@@ -231,7 +232,7 @@ impl UsbAudio {
                 _ => BlockError::Unsupported("USB audio high-capability discovery failed"),
             })?;
         // Optional status admission never changes the existing PCM binding.
-        // Retain an explicit refusal until the caller requests that service.
+        // Keep an explicit refusal until the caller requests that service.
         let status_plan = super::status::StatusPlan::discover(&binding, &device.configuration);
         let connector_plan =
             super::connector::ConnectorPlan::discover(&binding, &device.configuration);
@@ -252,7 +253,8 @@ impl UsbAudio {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
+    pub(crate) mod generation;
     use super::*;
     use crate::usb::xhci;
     use alloc::rc::Rc;
@@ -289,7 +291,7 @@ mod tests {
                 vendor_ethernet_tcr: None,
                 vendor_ethernet_revision: None,
             };
-            let all = xhci::interfaces(&raw);
+            let all = crate::usb::descriptor::interfaces(&raw);
             let plan = Plan::parse(&all[0], &all, &raw, xhci::HIGH_SPEED).unwrap();
             controller.clock.ticks_per_microsecond = rate;
             controller.forbid_mmio();
@@ -312,7 +314,7 @@ mod tests {
     }
 
     #[test]
-    fn native_audio_retains_raw_origin_for_wrapping_elapsed_clock() {
+    fn native_audio_keeps_raw_origin_for_wrapping_elapsed_clock() {
         let time = NativeTime {
             clock: crate::Clock {
                 ticks_per_microsecond: 3,
@@ -376,6 +378,3 @@ mod tests {
         }
     }
 }
-
-#[cfg(test)]
-pub(crate) mod generation_tests;

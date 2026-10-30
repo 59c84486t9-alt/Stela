@@ -123,7 +123,7 @@ mod tests {
     use super::*;
     use crate::{
         audio::Direction,
-        usb::{audio::Sync, xhci::Endpoint},
+        usb::{audio::Sync, descriptor::Endpoint},
     };
     fn format() -> Format {
         Format {

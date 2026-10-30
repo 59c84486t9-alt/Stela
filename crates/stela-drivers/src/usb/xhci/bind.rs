@@ -59,7 +59,7 @@ pub(crate) fn bind_with_provider(
     if plans.is_empty() {
         return;
     }
-    // Revalidate the actual plans immediately before SET_CONFIGURATION. A
+    // Revalidate the plans immediately before SET_CONFIGURATION. A
     // controller error since inventory selection may now force UAS to BOT.
     if let Err(reason) = configuration::active_settings(&all, &selected_settings) {
         found

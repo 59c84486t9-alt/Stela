@@ -104,7 +104,7 @@ struct LocalImage {
 }
 
 fn local_image(path: &Path) -> Result<LocalImage> {
-    // Read only metadata into the wizard, rather than retaining every board's
+    // Read only metadata into the wizard, rather than keeping every board's
     // component map. Preparation validates the selected identity before erase.
     let bytes = restore::archive::read_member(path, "BuildManifest.plist", 64 * 1024 * 1024)?;
     Ok(plist::from_reader(std::io::Cursor::new(bytes))?)
@@ -287,8 +287,10 @@ fn configure_inner(command: &mut Request, host: &dyn Host) -> Result<bool> {
         command.model = Some(choices::model(&models, &names, command.model.as_deref())?);
         if command.install_image == Some(InstallImage::Online) {
             choose_wifi(command)?;
+            super::addresses::choose(command)?;
         } else {
             (command.wifi, command.wifi_passphrase) = (None, None);
+            (command.ipv4, command.ipv4_gateway, command.dns) = (None, None, None);
         }
         // Every setup installs macOS, which needs TSS personalization, so the
         // wizard does not offer it as a choice; `configure --no-tss` withdraws the
@@ -320,7 +322,7 @@ fn configure_inner(command: &mut Request, host: &dyn Host) -> Result<bool> {
         cliclack::note(
             "6 / 6  Review",
             format!(
-                "USB        {}\nInstaller  {installer}\nmacOS      {version} ({})\nMac        {}\n{}Profiling  {}\nSigning    Apple personalizes the boot files during setup",
+                "USB        {}\nInstaller  {installer}\nmacOS      {version} ({})\nMac        {}\n{}{}Profiling  {}\nSigning    Apple personalizes the boot files during setup",
                 usb.serial.as_ref().map_or_else(
                     || usb.description(),
                     |serial| format!("{} · serial {serial}", usb.description())
@@ -333,6 +335,10 @@ fn configure_inner(command: &mut Request, host: &dyn Host) -> Result<bool> {
                     (Some(ssid), _) => format!("Wi-Fi      {ssid}\n"),
                     (None, Some(InstallImage::Online)) => "Wi-Fi      None (Ethernet)\n".into(),
                     (None, _) => String::new(),
+                },
+                match command.install_image {
+                    Some(InstallImage::Online) => super::addresses::review(command),
+                    _ => String::new(),
                 },
                 if command.profile { "On" } else { "Off" },
             ),

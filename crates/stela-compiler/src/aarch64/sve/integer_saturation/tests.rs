@@ -381,7 +381,7 @@ mod prefix_requirement {
     }
 
     #[test]
-    fn actual_prefix_validator_observes_aliasing_predicates_elements_and_forbidden_forms() {
+    fn prefix_validator_observes_aliasing_predicates_elements_and_forbidden_forms() {
         for fact in FACTS {
             for size in fact.minimum_size..4 {
                 for predicate in 0..if fact.predicated { 8 } else { 1 } {
@@ -561,7 +561,7 @@ mod prefix_requirement {
     }
 
     #[test]
-    fn malformed_prefix_metadata_is_rejected_by_the_actual_frozen_validator() {
+    fn malformed_prefix_metadata_is_rejected_by_the_frozen_validator() {
         let word = 0x44188000 | (7 << 10) | (5 << 5) | 3;
         let requirement = decode(word)
             .unwrap()

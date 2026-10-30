@@ -73,7 +73,7 @@ impl Prepared {
 
     /// # Safety
     /// Called once by this boot's ACPICA activation, with the same permanent
-    /// provider/handler argument retained until acknowledged removal.
+    /// provider/handler argument kept until acknowledged removal.
     pub(super) unsafe fn install(
         self,
         handler: Interrupt,
@@ -163,7 +163,7 @@ impl Enable {
         }
     }
 }
-// SAFETY: Sources retains every qualified fixed/GPE register. Masking disables
+// SAFETY: Sources keeps every checked fixed/GPE register. Masking disables
 // and reads back all contributors before controller drain; only enable restores
 // the saved mask after callback publication, on the same boot processor.
 unsafe impl ioapic::Devices for Sources {
@@ -229,7 +229,7 @@ impl Armed {
         if !self.pending.swap(false, Ordering::AcqRel) {
             return Ok(false);
         }
-        // SAFETY: activation retains this exact ACPICA SCI callback/context;
+        // SAFETY: activation keeps this exact ACPICA SCI callback/context;
         // BSP process context serializes calls until route retirement.
         let _handled = unsafe { (self.handler)(self.argument as *mut c_void) };
         // A level may deassert between hardware entry and deferred sampling.
@@ -245,7 +245,7 @@ impl Armed {
             return Err(IrqError::Drain);
         }
         // SAFETY: the caller completed the ISR; epoch, hardware drain and
-        // local pending state are checked again by the retained endpoint.
+        // local pending state are checked again by the endpoint.
         unsafe { self.parent.rearm() }
     }
     pub(super) fn retire(&mut self) -> Result<(), IrqError> {

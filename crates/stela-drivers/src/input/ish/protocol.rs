@@ -14,7 +14,7 @@ pub(super) const HID_GUID: [u8; 16] = [
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TimestampSupport {
     /// Firmware timestamps remain opaque firmware-domain data. No UTC/host
-    /// synchronization message is sent without an actual native UTC service.
+    /// synchronization message is sent without a native UTC service.
     FirmwareClockSynchronizationUnsupported,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -32,7 +32,7 @@ pub struct ClientProperties {
 pub struct FirmwareIdentity {
     pub pci_revision: u8,
     pub observed_status: u32,
-    /// Actual response's firmware maximum HBM minor/major bytes.
+    /// Response's firmware maximum HBM minor/major bytes.
     pub hbm_firmware_max: [u8; 2],
     pub hid_client: ClientProperties,
     pub timestamps: TimestampSupport,
@@ -53,8 +53,8 @@ pub struct InputReport {
     pub device_id: u8,
     pub bytes: Vec<u8>,
     pub flags: u8,
-    /// Source does not define total_size inclusion semantics. Retain the
-    /// observed value; actual outer/count/entry bounds control every access.
+    /// Source does not define total_size inclusion semantics. Keep the
+    /// observed value; outer/count/entry bounds control every access.
     pub aggregate_total_size: Option<u16>,
     pub aggregate_flags: Option<u8>,
     pub timestamps: TimestampSupport,
@@ -65,7 +65,7 @@ pub(super) struct Frame {
     pub management: u8,
     pub bytes: Vec<u8>,
 }
-/// Shared production client-message fragment encoder (no hardware authority).
+/// Shared production client-message fragment encoder (no hardware permission).
 pub(super) fn fragment_message(fw: u8, host: u8, bytes: &[u8]) -> Result<Vec<Frame>> {
     if bytes.is_empty() || bytes.len() > MAX_MESSAGE {
         return Err(Error::Protocol("bounded nonempty client message"));
@@ -574,7 +574,7 @@ impl Engine {
         }
         Ok(())
     }
-    /// Called only after the actual native doorbell store and posted read.
+    /// Called only after the native doorbell store and posted read.
     pub fn published(&mut self, frame: &Frame) -> Result<()> {
         if frame.protocol == 1 && frame.bytes.len() >= 4 {
             let h = u32::from_le_bytes(frame.bytes[..4].try_into().unwrap());

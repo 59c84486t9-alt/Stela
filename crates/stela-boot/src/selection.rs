@@ -21,11 +21,15 @@
 //! `--storage` partition, the NOR is the start of that partition's tail
 //! (`pc::machine_state`), and the Preboot disk is the rest, as the engine
 //! splits it.
+use crate::Result;
 use crate::{
     output,
     payload::{Aligned, device_path, disk_serial},
 };
+use alloc::string::ToString;
 use alloc::{format, string::String, vec, vec::Vec};
+use stela_contracts::refusal::Within;
+use stela_contracts::refuse;
 use stela_loader::{
     boot_selection::{self, BootVolume, Selection},
     mount_interface::ChoiceKind,
@@ -68,14 +72,16 @@ enum Part {
 
 impl Partition {
     /// Confine the partition to `part`, as the engine splits it.
-    fn confine(&mut self, part: Part) -> Result<(), &'static str> {
+    fn confine(&mut self, part: Part) -> Result<()> {
         if part == Part::Whole {
             return Ok(());
         }
         let layout = machine_state::split(self.bytes)
-            .map_err(|_| "the partition is too small to also hold the machine state")?;
+            .map_err(|_| refuse!("the partition is too small to also hold the machine state"))?;
         if !machine_state::ALIGNMENT.is_multiple_of(self.block_bytes) {
-            return Err("the partition's blocks do not divide the machine state's alignment");
+            return Err(refuse!(
+                "the partition's blocks do not divide the machine state's alignment"
+            ));
         }
         if part == Part::State {
             self.first_lba += layout.namespace_bytes / self.block_bytes;
@@ -86,22 +92,22 @@ impl Partition {
         Ok(())
     }
 
-    fn read_blocks(&mut self, lba: u64, buffer: &mut [u8]) -> Result<(), &'static str> {
+    fn read_blocks(&mut self, lba: u64, buffer: &mut [u8]) -> Result<()> {
         let mut aligned = Aligned::new(buffer.len());
         self.io
             .read_blocks(self.media, self.first_lba + lba, aligned.bytes())
-            .map_err(|_| "cannot read the partition")?;
+            .map_err(|_| refuse!("cannot read the partition"))?;
         buffer.copy_from_slice(aligned.bytes());
         Ok(())
     }
 
-    fn write_sector(&mut self, offset: usize, sector: &[u8]) -> Result<(), &'static str> {
+    fn write_sector(&mut self, offset: usize, sector: &[u8]) -> Result<()> {
         let mut buffer = Aligned::new(SECTOR_SIZE);
         buffer.bytes().copy_from_slice(sector);
         let lba = self.first_lba + offset as u64 / self.block_bytes;
         self.io
             .write_blocks(self.media, lba, buffer.bytes())
-            .map_err(|_| "cannot write the NOR partition")
+            .map_err(|_| refuse!("cannot write the NOR partition"))
     }
 }
 
@@ -109,17 +115,17 @@ impl Partition {
 const TRANSFER_BYTES: u64 = 1 << 20;
 
 impl ReadAt for Partition {
-    type Error = &'static str;
+    type Error = stela_contracts::Refusal;
 
     fn len(&self) -> u64 {
         self.bytes
     }
 
-    fn read_at(&mut self, offset: u64, buffer: &mut [u8]) -> Result<(), &'static str> {
+    fn read_at(&mut self, offset: u64, buffer: &mut [u8]) -> Result<()> {
         let end = offset
             .checked_add(buffer.len() as u64)
             .filter(|&end| end <= self.bytes)
-            .ok_or("read past the partition")?;
+            .ok_or(refuse!("read past the partition"))?;
         let mut at = offset;
         while at < end {
             let first = at / self.block_bytes;
@@ -159,8 +165,8 @@ fn block_io(handle: Handle) -> Option<ScopedProtocol<BlockIO>> {
 type WholeDisk = (Option<String>, ScopedProtocol<BlockIO>);
 
 /// Every whole disk with media.
-fn whole_disks() -> Result<Vec<WholeDisk>, &'static str> {
-    let handles = boot::find_handles::<BlockIO>().map_err(|_| "no block devices")?;
+fn whole_disks() -> Result<Vec<WholeDisk>> {
+    let handles = boot::find_handles::<BlockIO>().map_err(|_| refuse!("no block devices"))?;
     let mut disks = Vec::new();
     for handle in handles {
         let Some(io) = block_io(handle) else {
@@ -177,7 +183,7 @@ fn whole_disks() -> Result<Vec<WholeDisk>, &'static str> {
 }
 
 /// The whole disk behind `io` and its GPT.
-fn table(io: ScopedProtocol<BlockIO>) -> Result<(Partition, gpt::Table), &'static str> {
+fn table(io: ScopedProtocol<BlockIO>) -> Result<(Partition, gpt::Table)> {
     let media = io.media();
     let disk = Disk {
         block_bytes: media.block_size() as u64,
@@ -198,22 +204,23 @@ fn table(io: ScopedProtocol<BlockIO>) -> Result<(Partition, gpt::Table), &'stati
         let mut bytes = vec![0u8; (blocks * disk.block_bytes) as usize];
         whole
             .read_blocks(lba, &mut bytes)
-            .map_err(PayloadError::Disk)?;
+            .map_err(|error| PayloadError::Io(error.to_string()))?;
         Ok(bytes)
     })
-    .map_err(|_| "the disk's GPT is invalid")?;
+    .map_err(|_| refuse!("the disk's GPT is invalid"))?;
     let gpt::Found::Table { table, .. } = found else {
-        return Err("the disk has no valid GPT");
+        return Err(refuse!("the disk has no valid GPT"));
     };
     Ok((whole, table))
 }
 
-fn find(target: &Target) -> Result<Partition, &'static str> {
+fn find(target: &Target) -> Result<Partition> {
     let disks: Vec<_> = whole_disks()?
         .into_iter()
         .filter(|(serial, _)| serial.as_deref() == Some(target.serial.as_str()))
         .collect();
-    let [(_, io)] = <[_; 1]>::try_from(disks).map_err(|_| "not exactly one disk has the serial")?;
+    let [(_, io)] =
+        <[_; 1]>::try_from(disks).map_err(|_| refuse!("not exactly one disk has the serial"))?;
     let (mut whole, table) = table(io)?;
     let matching: Vec<_> = table
         .partitions
@@ -221,10 +228,10 @@ fn find(target: &Target) -> Result<Partition, &'static str> {
         .filter(|p| p.unique_guid.0 == target.partition.0)
         .collect();
     let [partition] = matching[..] else {
-        return Err("not exactly one partition has the GUID");
+        return Err(refuse!("not exactly one partition has the GUID"));
     };
     if partition.role() == Some(Role::Esp) {
-        return Err("the partition is an EFI system partition");
+        return Err(refuse!("the partition is an EFI system partition"));
     }
     whole.first_lba = partition.first_lba;
     whole.bytes = partition.blocks() * whole.block_bytes;
@@ -236,7 +243,7 @@ fn find(target: &Target) -> Result<Partition, &'static str> {
 /// recoveryOS installs macOS on a Mac's external drive. `None` when no
 /// disk's table holds it, as for the internal SSD's containers, which lie in
 /// the Apple region's own table.
-fn external(volume: &BootVolume) -> Result<Option<Target>, String> {
+fn external(volume: &BootVolume) -> Result<Option<Target>> {
     let mut found = None;
     for (serial, io) in whole_disks()? {
         let Ok((_, table)) = table(io) else {
@@ -249,10 +256,11 @@ fn external(volume: &BootVolume) -> Result<Option<Target>, String> {
         {
             continue;
         }
-        let serial = serial
-            .ok_or("the boot volume's disk reports no serial number to find it by after boot")?;
+        let serial = serial.ok_or(refuse!(
+            "the boot volume's disk reports no serial number to find it by after boot"
+        ))?;
         if found.is_some() {
-            return Err("several disks hold the boot volume's partition".into());
+            return Err(refuse!("several disks hold the boot volume's partition"));
         }
         found = Some(Target {
             serial,
@@ -264,41 +272,37 @@ fn external(volume: &BootVolume) -> Result<Option<Target>, String> {
 
 /// The boot NVRAM chooses, with its one-shot variables consumed and saved
 /// when `consume` holds.
-fn select(target: &Target, part: Part, consume: bool) -> Result<Selection, String> {
-    let mut nor = find(target).map_err(|e| format!("NOR partition: {e}"))?;
-    nor.confine(part)
-        .map_err(|e| format!("NOR partition: {e}"))?;
+fn select(target: &Target, part: Part, consume: bool) -> Result<Selection> {
+    let mut nor = find(target).within(|| refuse!("NOR partition"))?;
+    nor.confine(part).within(|| refuse!("NOR partition"))?;
     if nor.io.media().is_read_only()
         || !SECTOR_SIZE.is_multiple_of(nor.block_bytes as usize)
         || nor.bytes < CAPACITY as u64
     {
-        return Err(
-            "the NOR partition is read-only, smaller than the image or has odd blocks".into(),
-        );
+        return Err(refuse!(
+            "the NOR partition is read-only, smaller than the image or has odd blocks"
+        ));
     }
     let mut bytes = vec![0u8; CAPACITY];
     nor.read_blocks(0, &mut bytes)?;
-    let select =
-        |variables: &Variables| boot_selection::select(variables).map_err(|e| format!("{e:#}"));
+    let select = |variables: &Variables| Ok(boot_selection::select(variables)?);
     if bytes.iter().all(|&b| b == 0) {
-        return select(&Variables::parse(&empty_bank()).map_err(String::from)?);
+        return select(&Variables::parse(&empty_bank())?);
     }
-    let mut image = Image::from_bytes(bytes).map_err(String::from)?;
-    let (_, proxy) = image.boot_bank().map_err(String::from)?;
-    let mut variables = Variables::parse(&proxy).map_err(String::from)?;
+    let mut image = Image::from_bytes(bytes)?;
+    let (_, proxy) = image.boot_bank()?;
+    let mut variables = Variables::parse(&proxy)?;
     let selection = select(&variables)?;
-    if consume
-        && boot_selection::consume(&mut variables, &selection).map_err(|e| format!("{e:#}"))?
-    {
-        let bank = variables.encode().map_err(String::from)?;
-        let (written, sectors) = image.save_bank(&bank).map_err(String::from)?;
+    if consume && boot_selection::consume(&mut variables, &selection)? {
+        let bank = variables.encode()?;
+        let (written, sectors) = image.save_bank(&bank)?;
         for offset in sectors {
             let sector = image.bytes()[offset..offset + SECTOR_SIZE].to_vec();
             nor.write_sector(offset, &sector)?;
         }
         nor.io
             .flush_blocks()
-            .map_err(|_| String::from("cannot flush the NOR partition"))?;
+            .map_err(|_| refuse!("cannot flush the NOR partition"))?;
         output::arguments(format_args!(
             "NVRAM consumed {} into bank {written}\n",
             selection
@@ -316,14 +320,13 @@ fn select(target: &Target, part: Part, consume: bool) -> Result<Selection, Strin
 /// (the boot volume's, when NVRAM names one) whose Preboot volume has a
 /// boot directory. Only a missing container, Preboot volume or boot
 /// directory counts as absent; any other failure is reported.
-fn installed(target: &Target, part: Part, volume: Option<&BootVolume>) -> Result<bool, String> {
-    let mut disk = find(target).map_err(|e| format!("Preboot disk: {e}"))?;
-    disk.confine(part)
-        .map_err(|e| format!("Preboot disk: {e}"))?;
+fn installed(target: &Target, part: Part, volume: Option<&BootVolume>) -> Result<bool> {
+    let mut disk = find(target).within(|| refuse!("Preboot disk"))?;
+    disk.confine(part).within(|| refuse!("Preboot disk"))?;
     let partitions = match apfs::container_partitions(&mut disk) {
         Ok(partitions) => partitions,
         Err(ApfsError::NotFound(_)) => return Ok(false),
-        Err(error) => return Err(format!("Preboot disk: {error}")),
+        Err(error) => return Err(refuse!("Preboot disk: {error}", %error)),
     };
     for (offset, guid) in partitions {
         if volume.is_some_and(|v| guid.is_some_and(|g| g.0 != v.partition)) {
@@ -332,12 +335,12 @@ fn installed(target: &Target, part: Part, volume: Option<&BootVolume>) -> Result
         let mut container = match Container::open(&mut disk, offset) {
             Ok(container) => container,
             Err(ApfsError::Malformed(_)) => continue,
-            Err(error) => return Err(format!("container at {offset:#x}: {error}")),
+            Err(error) => return Err(refuse!("container at {offset:#x}: {error}", offset, %error)),
         };
         match preboot::candidates(&mut container) {
             Ok(_) => return Ok(true),
             Err(PrebootError::NoBootDirectory | PrebootError::Apfs(ApfsError::NotFound(_))) => {}
-            Err(error) => return Err(format!("container at {offset:#x}: {error}")),
+            Err(error) => return Err(refuse!("container at {offset:#x}: {error}", offset, %error)),
         }
     }
     Ok(false)
@@ -353,13 +356,12 @@ fn holds_recovery(
     kind: recovery::Kind,
     volume: Option<&BootVolume>,
 ) -> bool {
-    let probe = || -> Result<bool, String> {
-        let mut disk = find(target).map_err(|e| format!("Preboot disk: {e}"))?;
-        disk.confine(part)
-            .map_err(|e| format!("Preboot disk: {e}"))?;
+    let probe = || -> Result<bool> {
+        let mut disk = find(target).within(|| refuse!("Preboot disk"))?;
+        disk.confine(part).within(|| refuse!("Preboot disk"))?;
         recovery::find(&mut disk, kind, volume)
             .map(|found| !found.is_empty())
-            .map_err(|e| format!("{e:#}"))
+            .map_err(|error| refuse!("recovery volume: {error}", %error))
     };
     match probe() {
         Ok(found) => found,
@@ -375,14 +377,13 @@ fn holds_recovery(
 
 /// Whether the internal SSD lacks the iBootSystemContainer every boot of a
 /// Mac reads (`apfs::require_system_container`), as a blank one does.
-fn blank(target: &Target, part: Part) -> Result<bool, String> {
-    let mut disk = find(target).map_err(|e| format!("internal SSD: {e}"))?;
-    disk.confine(part)
-        .map_err(|e| format!("internal SSD: {e}"))?;
+fn blank(target: &Target, part: Part) -> Result<bool> {
+    let mut disk = find(target).within(|| refuse!("internal SSD"))?;
+    disk.confine(part).within(|| refuse!("internal SSD"))?;
     match apfs::require_system_container(&mut disk) {
         Ok(()) => Ok(false),
         Err(ApfsError::NotFound(_)) => Ok(true),
-        Err(error) => Err(format!("internal SSD: {error}")),
+        Err(error) => Err(refuse!("internal SSD: {error}", %error)),
     }
 }
 
@@ -482,7 +483,7 @@ fn route_checked(options: Vec<u8>, consume: bool) -> Result<(Vec<u8>, bool), Ref
     let mut installed_system = true;
     let text =
         core::str::from_utf8(&options).map_err(|_| Refusal::Other("stela.cfg is not UTF-8"))?;
-    let refuse = |error: String| {
+    let refuse = |error: stela_contracts::Refusal| {
         output::arguments(format_args!("NVRAM boot refusal: {error}\n"));
         Refusal::Other("NVRAM's boot choice could not be read or is not modeled")
     };
@@ -507,10 +508,8 @@ fn route_checked(options: Vec<u8>, consume: bool) -> Result<(Vec<u8>, bool), Ref
                     };
                     select(&parse(nor)?, part, consume).map_err(refuse)?
                 }
-                None => boot_selection::select(
-                    &Variables::parse(&empty_bank()).map_err(|e| refuse(e.into()))?,
-                )
-                .map_err(|e| refuse(format!("{e:#}")))?,
+                None => boot_selection::select(&Variables::parse(&empty_bank()).map_err(refuse)?)
+                    .map_err(|error| refuse(error.into()))?,
             };
             // A boot volume on an external disk boots from that disk.
             let outside = match &selection.volume {

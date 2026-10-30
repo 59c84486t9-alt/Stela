@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Isochronous scheduling/completion follows pinned Linux xhci-ring.c and xhci-mem.c.
 // Copyright (C) 2008 Intel Corp. Author: Sarah Sharp.
-//! Queued USB2 and SuperSpeed service intervals on retained native transfer rings.
+//! Queued USB2 and SuperSpeed service intervals on kept native transfer rings.
 use super::*;
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -29,7 +29,7 @@ static NEXT_TICKET: AtomicU64 = AtomicU64::new(1);
 pub enum IsoSchedule {
     /// Preserve the native scheduler's existing aligned-start/continuation policy.
     Asap,
-    /// Request the next occurrence of this 14-bit MFINDEX value. The actual
+    /// Request the next occurrence of this 14-bit MFINDEX value. The
     /// controller's IST, bounded future window, endpoint interval and queued
     /// continuation must permit it. A new stream must begin on a frame boundary:
     /// an Isoch TRB encodes Frame ID, not an arbitrary microframe phase.
@@ -54,7 +54,7 @@ pub struct IsoCompletion {
     pub status: IsoStatus,
 }
 /// An exact addressed-device generation and endpoint service interval.
-/// Dropping this ticket does not cancel DMA; the endpoint retains it until
+/// Dropping this ticket does not cancel DMA; the endpoint keeps it until
 /// completion or acknowledged cancel.
 #[derive(Debug)]
 pub struct IsoTransfer {
@@ -170,7 +170,7 @@ impl Recipe {
                     || payload == 0
                     || payload > packet * (burst + 1) * (mult + 1)
                 {
-                    // SSP extended companion/large payload needs its actual
+                    // SSP extended companion/large payload needs its
                     // descriptor and ETE layout, never an inferred byte count.
                     return Err(invalid());
                 }
@@ -337,7 +337,7 @@ fn schedule(mfindex: u32, caps: Capabilities, interval: u32, next: Option<u32>) 
 }
 
 /// Explicit requests use Linux's valid Frame-ID window plus its conservative
-/// IST+10 microframe submission margin. Linux merely diagnoses late mid-stream
+/// IST+10 microframe submission margin. Linux diagnoses late mid-stream
 /// requests; this optional API refuses those before publishing anything. ASAP
 /// keeps the original late-TD/MissedService behavior in `schedule` above.
 fn requested_schedule(
@@ -450,8 +450,8 @@ impl Controller {
     /// This neither reserves ring space nor publishes DMA: the returned values
     /// are requests, and every `submit_iso_scheduled` must revalidate them. Time
     /// may advance or the queue may change between preflight and submission.
-    /// Explicit lists use the retained speed-specific interval, not a caller's
-    /// descriptor or a previous ticket's diagnostic schedule. ASAP retains the
+    /// Explicit lists use the speed-specific interval, not a caller's
+    /// descriptor or a previous ticket's diagnostic schedule. ASAP keeps the
     /// native late-TD/MissedService policy independently for every submission.
     pub fn iso_schedule_list(
         &mut self,
@@ -514,7 +514,7 @@ impl Controller {
             }
         }
         // No allocation, ticket identity, ring write or doorbell precedes full
-        // validation. This allocation is bounded by actual native ring space.
+        // validation. This allocation is bounded by native ring space.
         let mut requests = Vec::new();
         requests
             .try_reserve_exact(packet_count)
@@ -535,7 +535,7 @@ impl Controller {
 
     /// Queue one USB2 or SuperSpeed isochronous service interval. The entire DMA extent must
     /// stay live and unmodified until terminal completion or successful endpoint
-    /// cancellation. Buffers must not cross 64 KiB; maximum payload is the actual
+    /// cancellation. Buffers must not cross 64 KiB; maximum payload is the
     /// endpoint's advertised bytes per service interval (up to 49,152 bytes).
     /// A full queue is refused before publication; hardware reports missed service for late TDs.
     pub fn submit_iso(
@@ -560,7 +560,7 @@ impl Controller {
     }
 
     /// Queue with an optional caller-selected service interval. An explicit
-    /// request is validated against the actual controller and retained queue
+    /// request is validated against the controller and kept queue
     /// before allocating a ticket, publishing a TRB or ringing a doorbell.
     /// It cannot create a gap, reorder outstanding TDs or select an ambiguous
     /// counter epoch. DMA ownership and terminal completion follow `submit_iso`.
@@ -686,7 +686,7 @@ impl Controller {
 
     /// Poll an exact service interval. Ok (including packet-error statuses) is
     /// terminal and releases that TD's buffer. Err is a transport/identity error;
-    /// retain all outstanding DMA until successful endpoint-wide cancel. None
+    /// keep all outstanding DMA until successful endpoint-wide cancel. None
     /// means no terminal event. Dropped/retired tickets never name a new TD.
     pub fn completed_iso(
         &mut self,
@@ -728,7 +728,7 @@ impl Controller {
                 .unwrap();
             if event.code() == INCOMPATIBLE_DEVICE {
                 // Incompatible Device requires Disable Slot (Linux handle_tx_event),
-                // not merely Stop/Reset/Set Dequeue. Keep permanent poison until a
+                // not Stop/Reset/Set Dequeue. Keep permanent poison until a
                 // separate exclusive slot-retirement service establishes ownership.
                 endpoint.poisoned = true;
                 return Some(Err(BlockError::Device {

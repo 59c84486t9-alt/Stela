@@ -1,6 +1,7 @@
 //! Time-free native root admission. Intended child of engine::host::local.
 //! No timer, work::Cpu implementation, interrupt delivery or device access.
 use super::{MmioRoots, Owner, current, irq_active, native_frames_idle, state};
+use crate::Result;
 use crate::{
     engine::interrupts,
     native_smp::{firmware, topology::Snapshot},
@@ -11,6 +12,7 @@ use core::{
     marker::PhantomData,
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
+use stela_contracts::refuse;
 use stela_drivers::{bus::mmio::owned::PhysicalSpan, platform::work::WorkError};
 
 const IF: u64 = 1 << 9;
@@ -42,14 +44,14 @@ fn processor_id() -> u32 {
 }
 fn disable() -> u64 {
     let saved;
-    // SAFETY: actual native CPL0 dispatcher. Memory clobber encloses the save.
+    // SAFETY: native CPL0 dispatcher. Memory clobber encloses the save.
     unsafe {
         asm!("pushfq", "pop {}", "cli", out(reg) saved);
     }
     saved
 }
 unsafe fn restore(saved: u64) {
-    // SAFETY: caller retains the same actual CPU and exact enclosing IRQ save.
+    // SAFETY: caller keeps the same CPU and enclosing IRQ save.
     unsafe {
         asm!("push {}", "popfq", in(reg) saved);
     }
@@ -58,12 +60,13 @@ fn unavailable<T>(_: T) -> WorkError {
     WorkError::Unavailable
 }
 
-/// Actual immutable CPU/descriptor/fixed-root identity, pinned by HostOwner.
+/// Immutable CPU/descriptor/fixed-root identity, pinned by HostOwner.
 /// This survives only checked RAM ownership joins. It grants no RAM-absence,
-/// mutable mapping-publication, task switching, or cross-CPU execution authority.
+/// mutable mapping-publication, task switching, or cross-CPU execution permission.
 /// Descriptor/local storage is static or permanently pinned through terminal IRQs.
 pub(crate) struct RootIdentity {
     roots: Arc<MmioRoots>,
+    loader_tables: &'static crate::paging::loader::LoaderTables,
     snapshot: Snapshot,
     id: u32,
     gs: u64,
@@ -72,7 +75,107 @@ pub(crate) struct RootIdentity {
     task: u16,
     ram_generation: AtomicU64,
 }
+/// Borrowed immutable root-read scope. It is neither an execution/stack loan
+/// nor a firmware/controller capability. Every observation checks its live CPU,
+/// entered root, IF and LA57 again; the original allocation owners stay pinned.
+pub(crate) struct ProcessRootScope<'a> {
+    identity: &'a RootIdentity,
+    root: u64,
+    _local: PhantomData<*mut ()>,
+}
+impl ProcessRootScope<'_> {
+    /// Require the manager's entered original owner, not a Host
+    /// root with equivalent shared mappings. This remains no stack/service grant.
+    pub(crate) fn entered_original(
+        &self,
+        owner: &crate::paging::loader::LoaderTables,
+    ) -> Result<(), WorkError> {
+        self.identity.validate_process_root()?;
+        if root() != self.root
+            || !core::ptr::eq(self.identity.loader_tables, owner)
+            || !crate::engine::storage::entered_loader_root(owner)
+        {
+            return Err(WorkError::CorruptContext);
+        }
+        Ok(())
+    }
+    pub(crate) fn observe_original(
+        &self,
+        address: u64,
+    ) -> Result<Option<stela_boot_core::guarded_stacks::mappings::Observation>, WorkError> {
+        self.identity.validate_process_root()?;
+        if root() != self.root {
+            return Err(WorkError::CorruptContext);
+        }
+        // SAFETY: same HostOwner/original loader owner, kept shared
+        // aliases and IF0 scope were checked immediately above. No callbacks.
+        let result =
+            unsafe { self.identity.loader_tables.observe_shared(address) }.map_err(unavailable)?;
+        self.identity.validate_process_root()?;
+        if root() != self.root {
+            return Err(WorkError::CorruptContext);
+        }
+        Ok(result)
+    }
+}
 impl RootIdentity {
+    fn validate_process_root(&self) -> Result<(), WorkError> {
+        self.affinity()?;
+        let (flags, cr4): (u64, u64);
+        // SAFETY: native CPU, after affinity before table access.
+        unsafe {
+            asm!("pushfq", "pop {}", "mov {}, cr4", out(reg) flags, out(reg) cr4, options(nomem, preserves_flags));
+        }
+        if flags & IF != 0 {
+            return Err(WorkError::Busy);
+        }
+        if self.loader_tables.levels() != if cr4 & (1 << 12) != 0 { 5 } else { 4 } {
+            return Err(WorkError::CorruptContext);
+        }
+        if root() != self.snapshot.cr3
+            && !crate::engine::storage::entered_loader_root(self.loader_tables)
+        {
+            return Err(WorkError::CorruptContext);
+        }
+        // SAFETY: fixed Host root is held by roots._lease, and the
+        // entered original loader root is held by loader_tables. Both shared
+        // their window at the real Host installation; no copied root grants it.
+        unsafe { self.loader_tables.check_shared_root(root() & ADDRESS) }.map_err(unavailable)
+    }
+    pub(crate) fn process_root(&self) -> Result<ProcessRootScope<'_>, WorkError> {
+        self.validate_process_root()?;
+        Ok(ProcessRootScope {
+            identity: self,
+            root: root(),
+            _local: PhantomData,
+        })
+    }
+    /// Read-only clock admission for ONLY the Host root or its manager's
+    /// entered original loader root. No arbitrary guest/root or task permission.
+    pub(crate) fn check_clock_root(&self) -> Result<(), WorkError> {
+        self.affinity()?;
+        let saved = disable();
+        let result = (|| {
+            let scope = self.process_root()?;
+            // Revalidate the original catalog's shared-window metadata
+            // and page ownership; returned leaf data is not memory permission.
+            let address = crate::layout::physical(self.loader_tables.root());
+            let observed = scope
+                .observe_original(address)?
+                .ok_or(WorkError::CorruptContext)?;
+            if observed.physical != self.loader_tables.root() || observed.user || !observed.writable
+            {
+                return Err(WorkError::CorruptContext);
+            }
+            Ok(())
+        })();
+        // SAFETY: read-only validation never switches/calls/migrates; restore
+        // the exact saved flags even on a typed refusal before any table access.
+        unsafe {
+            restore(saved);
+        }
+        result
+    }
     fn affinity(&self) -> Result<(), WorkError> {
         // BEFORE any GS-local dereference: colliding legacy CPUID IDs on a
         // different CPU cannot borrow this processor's removable scope.
@@ -82,7 +185,7 @@ impl RootIdentity {
         {
             return Err(WorkError::WrongCpu);
         }
-        // SAFETY: immutable architectural observation; original owner retained.
+        // SAFETY: immutable architectural observation; original owner kept.
         let observed = unsafe { interrupts::observe() };
         if observed.gs != self.gs
             || observed.gdt != self.gdt
@@ -104,7 +207,19 @@ impl RootIdentity {
         self.affinity()?;
         let current = root();
         if current & !ADDRESS != 0 || !self.roots.roots().contains(&current) {
-            return Err(WorkError::CorruptContext);
+            // Preserve the existing pinned guest IRQ roots above. The only
+            // additional tagged root is this manager's entered loader
+            // root, backed by its original allocation owner and same CPU guard.
+            if !crate::engine::storage::entered_loader_root(self.loader_tables) {
+                return Err(WorkError::CorruptContext);
+            }
+            let saved = disable();
+            let result = self.validate_process_root();
+            // SAFETY: read-only validation cannot switch/call/migrate.
+            unsafe {
+                restore(saved);
+            }
+            return result;
         }
         Ok(())
     }
@@ -117,7 +232,7 @@ impl RootIdentity {
     pub(crate) fn check_dispatch(&self) -> Result<(), WorkError> {
         self.check_irq_cpu()?;
         let flags: u64;
-        // SAFETY: read the actual CPL0 caller's flags without changing IF.
+        // SAFETY: read the CPL0 caller's flags without changing IF.
         // Reject an interruptible boundary before reading affine frame slots.
         unsafe { asm!("pushfq", "pop {}", out(reg) flags) };
         if flags & IF != 0 || irq_active() || !native_frames_idle() {
@@ -131,12 +246,12 @@ impl RootIdentity {
         Ok(disable())
     }
     /// # Safety
-    /// Exact enclosing save from this same context; no switch or migration.
+    /// Enclosing save from this same context; no switch or migration.
     pub(crate) unsafe fn restore(&self, saved: u64) {
         if self.check_current().is_err() {
             self.fatal(WorkError::WrongCpu);
         }
-        // SAFETY: caller supplies this actual CPU's exact enclosing save.
+        // SAFETY: caller supplies this CPU's enclosing save.
         unsafe {
             restore(saved);
         }
@@ -148,8 +263,8 @@ impl RootIdentity {
     pub(crate) fn root_pages(&self) -> &[u64] {
         self.roots.roots()
     }
-    /// Immutable processor observations only, under the actual captured root
-    /// catalog. This does not qualify a fixed-root memory access or epoch.
+    /// Immutable processor observations only, under the captured root
+    /// catalog. This does not check a fixed-root memory access or epoch.
     pub(crate) fn processor_snapshot(&self) -> Result<Snapshot, WorkError> {
         self.check_dispatch()?;
         Ok(self.snapshot)
@@ -161,14 +276,14 @@ impl RootIdentity {
 }
 
 /// One generation's RAM-absence/publication view. Retaining this still prevents
-/// RAM adoption; keeping only immutable RootIdentity does not retain this grant.
+/// RAM adoption; keeping only immutable RootIdentity does not keep this grant.
 pub(crate) struct RootContext {
     identity: Arc<RootIdentity>,
     ram_generation: u64,
     executing: AtomicBool,
 }
 impl RootContext {
-    /// Immutable identity only; this reference carries no generation authority.
+    /// Immutable identity only; this reference carries no generation permission.
     pub(crate) fn identity(&self) -> &Arc<RootIdentity> {
         &self.identity
     }
@@ -194,12 +309,12 @@ impl RootContext {
         self.identity.save_disable()
     }
     /// # Safety
-    /// Exact enclosing same-CPU save; no switch/migration or active task-frame change.
+    /// Enclosing same-CPU save; no switch/migration or active task-frame change.
     pub(crate) unsafe fn restore(&self, saved: u64) {
         if self.check_current().is_err() {
             self.fatal(WorkError::Closed);
         }
-        // SAFETY: same retained identity and caller's exact enclosing save.
+        // SAFETY: same identity and caller's enclosing save.
         unsafe { self.identity.restore(saved) };
     }
     pub(crate) fn fatal(&self, error: WorkError) -> ! {
@@ -279,13 +394,13 @@ impl Drop for RootExecution {
         let context = self.context();
         let _saved = disable();
         // Fail BEFORE invalidating scope or restoring flags. An outstanding
-        // mapping/IRQ source must retain its exact epoch, including quarantine.
+        // mapping/IRQ source must keep its exact epoch, including quarantine.
         if Arc::strong_count(&self.epoch) != 1 {
             context.fatal(WorkError::Busy);
         }
         self.epoch.active.store(false, Ordering::Release);
         context.executing.store(false, Ordering::Release);
-        // SAFETY: actual same-CPU entry, no remaining epoch views or callbacks.
+        // SAFETY: same-CPU entry, no remaining epoch views or callbacks.
         unsafe {
             restore(self.saved);
         }
@@ -293,7 +408,7 @@ impl Drop for RootExecution {
 }
 
 impl Owner {
-    /// Retain actual CPU/root identity without extending a RAM-absence epoch.
+    /// Keep CPU/root identity without extending a RAM-absence epoch.
     /// Only pristine same-CPU process dispatch, IF0, may create/borrow it.
     pub(crate) fn root_identity(&mut self) -> Result<Arc<RootIdentity>, WorkError> {
         if gs_base() != self.local.as_ptr() as u64 {
@@ -315,7 +430,7 @@ impl Owner {
         // SAFETY: original physical Owner, IF0, no native frame or ISR.
         let snapshot = unsafe { firmware::observe() }.map_err(unavailable)?;
         let id = snapshot.apic_id().ok_or(WorkError::Unavailable)?;
-        // SAFETY: retained actual processor's installed descriptor set.
+        // SAFETY: processor's installed descriptor set.
         let observed = unsafe { interrupts::observe() };
         if observed.gs != self.local.as_ptr() as u64 || snapshot.cr3 & !ADDRESS != 0 {
             return Err(WorkError::CorruptContext);
@@ -348,6 +463,7 @@ impl Owner {
                 ram,
                 _lease: lease,
             }),
+            loader_tables: state._loader_tables,
             snapshot,
             id,
             gs: observed.gs,
@@ -364,21 +480,18 @@ impl Owner {
     /// Join the new canonical RAM owner without granting it additional host bytes.
     /// Old publication/absence views must already be closed; no ISR/native/helper
     /// frame can overlap. CPU/root identity survives, but its old generation ends.
-    pub(super) fn join_ram_identity(
-        &mut self,
-        incoming: &[super::super::RamRange],
-    ) -> Result<(), &'static str> {
+    pub(super) fn join_ram_identity(&mut self, incoming: &[super::super::RamRange]) -> Result<()> {
         if self.root_context.strong_count() != 0 {
-            return Err("RAM absence/publication views are still retained");
+            return Err(refuse!("RAM absence/publication views are still retained"));
         }
         let Some(identity) = &self.root_identity else {
             return Ok(());
         };
         identity
             .check_current()
-            .map_err(|_| "retained CPU/root identity changed before RAM adoption")?;
+            .map_err(|_| refuse!("retained CPU/root identity changed before RAM adoption"))?;
         if irq_active() || !native_frames_idle() {
-            return Err("active native/IRQ frame prevents RAM adoption");
+            return Err(refuse!("active native/IRQ frame prevents RAM adoption"));
         }
         let flags: u64;
         // SAFETY: current physical Owner, read-only IRQ observation.
@@ -386,37 +499,41 @@ impl Owner {
             asm!("pushfq", "pop {}", out(reg) flags, options(preserves_flags));
         }
         if flags & IF != 0 {
-            return Err("RAM adoption requires excluded local interrupts");
+            return Err(refuse!("RAM adoption requires excluded local interrupts"));
         }
         let state = state();
         let mut roots = alloc::vec::Vec::new();
         roots
             .try_reserve_exact(2 + super::super::ROOTS * (1 + super::super::BANKS))
-            .map_err(|_| "RAM transition root catalog allocation failed")?;
+            .map_err(|_| refuse!("RAM transition root catalog allocation failed"))?;
         roots.extend([state.window_root, state.host_root]);
         roots.extend(state.all_roots());
         roots.sort_unstable();
         roots.dedup();
         if roots != identity.root_pages() {
-            return Err("retained native root catalog changed before RAM adoption");
+            return Err(refuse!(
+                "retained native root catalog changed before RAM adoption"
+            ));
         }
         let backing = identity.roots.ram().iter().map(|r| (r.start(), r.bytes()));
         let existing = state.ram.iter().map(|r| (r.host, r.bytes));
         let incoming = incoming.iter().map(|r| (r.host, r.bytes));
         let existing_matches =
             stela_boot_core::root_transition::same_backing_iter(backing.clone(), existing)
-                .map_err(|_| "malformed old physical backing before RAM adoption")?;
+                .map_err(|_| refuse!("malformed old physical backing before RAM adoption"))?;
         let incoming_matches =
             stela_boot_core::root_transition::same_backing_iter(backing, incoming)
-                .map_err(|_| "malformed canonical physical backing before RAM adoption")?;
+                .map_err(|_| refuse!("malformed canonical physical backing before RAM adoption"))?;
         if !existing_matches || !incoming_matches {
-            return Err("canonical RAM adoption changes retained physical placements");
+            return Err(refuse!(
+                "canonical RAM adoption changes retained physical placements"
+            ));
         }
         let next = identity
             .ram_generation
             .load(Ordering::Acquire)
             .checked_add(1)
-            .ok_or("native RAM ownership generation exhausted")?;
+            .ok_or(refuse!("native RAM ownership generation exhausted"))?;
         // Every old absence view is gone, proven above. There is no callback,
         // root mutation or IRQ between this invalidation and the caller's join.
         identity.ram_generation.store(next, Ordering::Release);
@@ -424,7 +541,7 @@ impl Owner {
         Ok(())
     }
 
-    /// Admit this exact original Owner/context pair before Clock effects.
+    /// Admit this original Owner/context pair before Clock effects.
     /// The numbers inside an unrelated snapshot cannot satisfy this check.
     pub(crate) fn check_root(&self, execution: &RootExecution) -> Result<(), WorkError> {
         if gs_base() != self.local.as_ptr() as u64 {
@@ -438,9 +555,9 @@ impl Owner {
         Ok(())
     }
 
-    /// Called only by the actual post-EBS native dispatcher on its owner CPU.
+    /// Called only by the post-EBS native dispatcher on its owner CPU.
     /// The initial supported profile enters with IF0; timed Clock installation
-    /// later supplies its own independently qualified interrupt-delivery scope.
+    /// later supplies its own checked interrupt-delivery scope.
     pub(crate) fn enter_root(&mut self) -> Result<RootExecution, WorkError> {
         // Architectural preguard BEFORE current()/state()/local slot access.
         if gs_base() != self.local.as_ptr() as u64 {
@@ -485,7 +602,7 @@ impl Owner {
             })
         })();
         if result.is_err() {
-            // SAFETY: exact same-CPU save above, no scope was published.
+            // SAFETY: same-CPU save above, no scope was published.
             unsafe {
                 restore(saved);
             }

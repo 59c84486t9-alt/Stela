@@ -14,7 +14,7 @@ use crate::{
 };
 
 /// Only complete unsigned per-element counts map directly. Wide counts,
-/// signed bidirectional/rounded shifts and narrower lanes retain their own
+/// signed bidirectional/rounded shifts and narrower lanes keep their own
 /// recipes. The target-independent DIT profile gate remains conservative.
 pub(super) fn avx2_opcode(
     kind: Kind,

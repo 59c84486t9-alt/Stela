@@ -33,7 +33,7 @@ pub enum Recipe {
 }
 
 /// Both recipes use the x86-64 integer/SSE2 baseline. The comparison recipe is
-/// retained for measured selection; choosing it changes no guest requirements.
+/// for measured selection; choosing it changes no guest requirements.
 pub struct PreparedDebugMovement {
     word: u32,
     operand: Operand,

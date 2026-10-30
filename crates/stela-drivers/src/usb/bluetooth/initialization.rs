@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 //! Explicit native consumer initialization, separate from raw USB attachment.
-//! The retained result owns metadata only and never extends a provider borrow.
+//! The kept result owns metadata only and never extends a provider borrow.
 use super::{Error, Hci, Io, ath3k, broadcom, intel, mediatek, qca, realtek};
 use crate::firmware::Provider;
 use alloc::boxed::Box;
@@ -17,7 +17,7 @@ pub enum InitializationReport {
     Realtek(realtek::OwnedReport),
     MediaTek(mediatek::OwnedReport),
 }
-/// Retained typed failure. Each initializer preserves exact resource/target errors,
+/// Typed failure. Each initializer preserves exact resource/target errors,
 /// HCI controller status, transport/cleanup errors and partial receipts.
 #[derive(Debug)]
 pub enum InitializationError {
@@ -46,12 +46,12 @@ impl<B: Io> Hci<B> {
     /// resources. A provider/catalog is borrowed only for this call; the stored
     /// result owns identities and receipt metadata, never firmware bytes.
     ///
-    /// Exactly one attempt is retained per attachment. Repeated calls return
+    /// Exactly one attempt is held per attachment. Repeated calls return
     /// that historical result without issuing commands or recording new resource
     /// requests, even with another provider/platform input. Failed candidates
     /// require a fresh generic rebind to retry. Unknown devices remain raw and
     /// unverified and return UnsupportedDevice without initializer commands.
-    /// A retained success does not supersede subsequent transport lifecycle or
+    /// A kept success does not supersede subsequent transport lifecycle or
     /// establish image authenticity for RunningUnknown, radio or guest services.
     pub fn initialize_with_provider(
         &mut self,

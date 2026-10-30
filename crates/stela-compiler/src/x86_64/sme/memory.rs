@@ -126,7 +126,7 @@ fn vector_flags(operand: &VectorTransfer) -> u32 {
 }
 
 /// Bind the complete body's immutable platform and policy requirements to entry.
-/// The containing compiled manifest retains these even for inactive lanes.
+/// The containing compiled manifest keeps these even for inactive lanes.
 pub(crate) fn requirements(operand: &Operand) -> MemoryRequirements {
     let (required_flags, base) = match operand {
         Operand::Vectors(transfer) => (vector_flags(transfer), transfer.address.base),

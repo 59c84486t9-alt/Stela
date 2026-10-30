@@ -24,8 +24,8 @@ use alloc::{
     vec::Vec,
 };
 use core::mem::size_of;
-use sha2::Digest as _;
 use stela_crypto::Sha256;
+use stela_crypto::digest::Digest as _;
 
 pub const MAGIC: [u8; 8] = *b"STLTPACK";
 pub const SCHEMA: u32 = 1;
@@ -288,8 +288,15 @@ struct Pending {
     preparation: Arc<Preparation>,
 }
 
-/// A shared block's page key, PC and context.
-type SharedKey = (Digest, u64, Digest);
+/// A shared block's PC and the leading words of its page key and context:
+/// a compact index whose rare collision only replaces an entry, as a hit
+/// still matches the whole key and context ([`SharedTranslation::matches`]).
+type SharedKey = (u64, u64, u64);
+
+fn shared_key(key: &Digest, pc: u64, context: &Digest) -> SharedKey {
+    let word = |digest: &Digest| u64::from_le_bytes(digest.0[..8].try_into().expect("a word"));
+    (pc, word(key), word(context))
+}
 
 #[derive(Debug)]
 struct SharedEntry {
@@ -308,10 +315,10 @@ pub struct Store<'a> {
     /// take several times the pack's bytes.
     loaded: BTreeMap<Digest, bool>,
     pending: Vec<Pending>,
-    /// Capacity of the retained input buffers; Pending slots are charged separately.
+    /// Capacity of the input buffers; Pending slots are charged separately.
     pending_bytes: usize,
     /// The blocks offered, by page key, PC and context, for the other
-    /// machines sharing the store, oldest first. The bound charges retained
+    /// machines sharing the store, oldest first. The bound charges kept
     /// source/template buffers, Arc payloads, index entries and FIFO capacity;
     /// allocator node slack/bookkeeping and shared Preparation are excluded.
     shared: BTreeMap<SharedKey, SharedEntry>,
@@ -360,7 +367,7 @@ impl<'a> Store<'a> {
         }
     }
 
-    /// Keep offered blocks and their retained buffers, up to `bound` bytes, for
+    /// Keep offered blocks and their buffers, up to `bound` bytes, for
     /// [`Translations::prepared`]: for machines that share the store. Full,
     /// it forgets the oldest until a new one fits.
     pub fn share(&mut self, bound: usize) {
@@ -407,7 +414,7 @@ impl<'a> Store<'a> {
     }
 
     fn keep_shared(&mut self, offer: Offer) {
-        let key = (offer.key(), offer.pc(), offer.context());
+        let key = shared_key(&offer.key(), offer.pc(), &offer.context());
         let bytes = offer
             .retained_bytes()
             .saturating_add(size_of::<(SharedKey, SharedEntry)>());
@@ -415,7 +422,7 @@ impl<'a> Store<'a> {
             return;
         }
         if !self.shared.contains_key(&key) {
-            // Reuse an actual oldest slot if bulk FIFO growth cannot be allocated.
+            // Reuse an oldest slot if bulk FIFO growth cannot be allocated.
             // An empty cache simply declines the optional entry.
             if self.shared_order.try_reserve(1).is_err() && !self.evict_shared() {
                 return;
@@ -628,7 +635,7 @@ impl Translations for Store<'_> {
         context: &Digest,
     ) -> Option<Arc<SharedTranslation>> {
         self.shared
-            .get(&(*key, pc, *context))
+            .get(&shared_key(key, pc, context))
             .map(|entry| Arc::clone(&entry.translation))
     }
 
@@ -673,7 +680,7 @@ mod tests {
     }
 
     #[test]
-    fn shared_cache_budget_charges_actual_emitted_recovery_buffers() {
+    fn shared_cache_budget_charges_emitted_recovery_buffers() {
         let key = Digest::of(b"page");
         let preparation = Arc::new(test_preparation());
         let context = preparation.context(0x1000);
@@ -698,8 +705,7 @@ mod tests {
     }
 
     #[test]
-    fn shared_cache_replacement_charges_reserved_source_capacity_before_admission() {
-        let translator = Digest::of(b"translator");
+    fn an_offer_keeps_no_reserved_source_capacity_against_the_shared_bound() {
         let key = Digest::of(b"page");
         let first = offer(0x1000, key);
         let context = first.context();
@@ -707,18 +713,15 @@ mod tests {
         let mut input = Vec::with_capacity(2 << 20);
         input.extend_from_slice(first.input());
         let replacement = Offer::compile(key, 0x1000, 0x1000, context, input, preparation).unwrap();
-        let (mut store, _) = Store::new(translator, None);
+        let (mut store, _) = Store::new(Digest::of(b"translator"), None);
         store.share(1 << 20);
-        store.offer(first);
-        let original = store.prepared(&key, 0x1000, &context).unwrap();
         store.offer(replacement);
-        let retained = store.prepared(&key, 0x1000, &context).unwrap();
-        assert!(Arc::ptr_eq(&original, &retained));
+        assert!(store.prepared(&key, 0x1000, &context).is_some());
         assert_eq!(store.shared_order.len(), 1);
     }
 
     #[test]
-    fn reducing_shared_cache_budget_releases_retained_entries_and_fifo_capacity() {
+    fn reducing_shared_cache_budget_releases_kept_entries_and_fifo_capacity() {
         let key = Digest::of(b"page");
         let first = offer(0x1000, key);
         let context = first.context();

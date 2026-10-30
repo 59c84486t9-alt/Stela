@@ -2,7 +2,7 @@
 //!
 //! The original T6000 LLB writes all five pairs at 0x22858..0x228b8;
 //! 0xfa398 initializes pair A before enabling SCTLR.EnIA and using PAC.
-//! These are actual PAC inputs, not opaque implementation-defined storage.
+//! These are PAC inputs, not opaque implementation-defined storage.
 //! Original T8112 SPTM writes the standard EL1 names at EL2 before PACGA
 //! (file 0xab7b0..0xab8c4). Stela joins those accesses to this canonical
 //! EL2 state; equivalence to C13/C14 is an inference, not a physical alias
@@ -42,7 +42,7 @@ impl Register {
     }
 
     /// All ten source-proven C13/C14 words. No adjacent unknown encoding
-    /// acquires storage merely because it resembles a key register.
+    /// acquires storage because it resembles a key register.
     pub(crate) fn decode(encoding: Encoding) -> Option<Self> {
         if (encoding.op0(), encoding.op1(), encoding.crn()) != (3, 6, 15) {
             return None;

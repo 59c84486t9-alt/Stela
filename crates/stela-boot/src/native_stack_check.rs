@@ -1,7 +1,7 @@
-//! Finite actual WB stack/PTE/root/continuation diagnostic. Preparation only.
+//! Finite WB stack/PTE/root/continuation diagnostic. Preparation only.
 //! This consumes real RootPublication and Cpu capabilities; no time or Linux
 //! owner/Task/NativeDomain substitutes are installed by this caller. Cpu is a
-//! genuinely installed timing-capable Clock Cpu, never a time-free fake Cpu.
+//! installed timing-capable Clock Cpu, never a time-free fake Cpu.
 use crate::{native_mmio::RootPublication, native_stacks::Source};
 use alloc::{sync::Arc, vec::Vec};
 use core::{
@@ -15,7 +15,6 @@ use stela_drivers::platform::work::{Cpu, Executor, Kind, Queue, Runtime, WorkErr
 
 const JOBS: usize = 8;
 pub(crate) struct Observation {
-    pub(crate) stacks: [Range<usize>; 4],
     pub(crate) rsp: [usize; 2],
 }
 struct Probe {
@@ -33,14 +32,14 @@ impl Probe {
         if pointer.is_null() {
             self.cpu.fatal(WorkError::CorruptContext);
         }
-        // SAFETY: the pinned real Executor allocation is retained until both
-        // actual jobs complete, then this pointer is cleared before final Drop.
+        // SAFETY: the pinned real Executor allocation is held until both
+        // jobs complete, then this pointer is cleared before final Drop.
         let runtime = unsafe { Pin::new_unchecked(&*pointer) };
         let mut local = [0_u64; 16];
         let mut first = 0;
         for turn in 0..3 {
             let rsp: usize;
-            // SAFETY: bounded architectural read on actual owned callback stack.
+            // SAFETY: bounded architectural read on owned callback stack.
             unsafe {
                 core::arch::asm!("mov {}, rsp",out(reg) rsp,options(nomem,nostack,preserves_flags));
             }
@@ -54,14 +53,16 @@ impl Probe {
             if range.start != first {
                 self.cpu.fatal(WorkError::CorruptContext);
             }
-            // Real volatile frame storage survives TWO genuine stack switches.
-            // Guard/root authority comes from Source, not these observations.
+            // Real volatile frame storage survives TWO stack switches.
+            // Guard/root permission comes from Source, not these observations.
             for (at, value) in local.iter_mut().enumerate() {
                 if turn != 0
+                        // SAFETY: `value` is an element of this frame's own local array.
                     && unsafe { ptr::read_volatile(value) } != (index * 100 + at + turn - 1) as u64
                 {
                     self.cpu.fatal(WorkError::CorruptContext);
                 }
+                // SAFETY: `value` is an element of this frame's own local array.
                 unsafe { ptr::write_volatile(value, (index * 100 + at + turn) as u64) };
             }
             if turn != 2 {
@@ -72,22 +73,24 @@ impl Probe {
     }
 }
 unsafe extern "C" fn first(opaque: *mut c_void) {
+    // SAFETY: `opaque` is the `Probe` queued with this job, which outlives every job.
     unsafe { &*opaque.cast::<Probe>() }.exercise(0);
 }
 unsafe extern "C" fn second(opaque: *mut c_void) {
+    // SAFETY: `opaque` is the `Probe` queued with this job, which outlives every job.
     unsafe { &*opaque.cast::<Probe>() }.exercise(1);
 }
 
-/// Exercise finite actual stack lifecycle through the existing generic Runtime.
+/// Exercise finite stack lifecycle through the existing generic Runtime.
 /// # Safety
-/// Publication comes from genuine RootContext/RootExecution. Cpu comes from
-/// an actually installed and qualified Clock bound to that SAME root; retain
+/// Publication comes from RootContext/RootExecution. Cpu comes from
+/// an installed and checked Clock bound to that SAME root; keep
 /// Installed/DriverExecution, native memory/heap generation and image/code
 /// through ALL queue/runtime/frame/source/publication final Drops. Time-free
 /// RootContext supplies no fake work::Cpu::ticks implementation.
 /// No NativeMemory retarget/reset or root/cache change may occur while any
-/// frame/pin/alias exists. Call on that actual process CPU, outside interrupts.
-/// On uncertain failure, retained publication/pins block root retirement; caller
+/// frame/pin/alias exists. Call on that process CPU, outside interrupts.
+/// On uncertain failure, kept publication/pins block root retirement; caller
 /// must preserve that real root/HostOwner and stop/report, never force closure.
 /// Every CPU-checking final Drop below precedes external RootContext or any
 /// installed Clock retirement. This diagnostic does not call Clock/Idle or
@@ -102,9 +105,9 @@ pub(crate) unsafe fn run(
     }
     let source = Source::new(publication, 4)?;
     let result = run_stacks(source.clone(), cpu);
-    // run_stacks returns only after actual successful retirement, or after its
+    // run_stacks returns only after successful retirement, or after its
     // uncertain Executor quarantines full storage. Live slots then make source
-    // retirement refuse, preserving actual tables/pins/root scope.
+    // retirement refuse, preserving tables/pins/root scope.
     source.retire()?;
     drop(source); // Complete parent clear/CR3 acknowledgement BEFORE root ends.
     result
@@ -124,6 +127,7 @@ fn run_stacks(source: Arc<Source>, cpu: Arc<dyn Cpu>) -> Result<Observation, Wor
         rsp: core::array::from_fn(|_| AtomicUsize::new(0)),
         resumed: core::array::from_fn(|_| AtomicUsize::new(0)),
     });
+    // SAFETY: `probe` is the queue's owner, and only this CPU produces work.
     let queue = unsafe { Queue::<JOBS>::new(cpu, probe.clone()) }?;
     let executor = Executor::new(queue.clone(), stacks)?;
     let runtime = executor.runtime();
@@ -133,6 +137,8 @@ fn run_stacks(source: Arc<Source>, cpu: Arc<dyn Cpu>) -> Result<Observation, Wor
     );
     let opaque = Arc::as_ptr(&probe).cast_mut().cast();
     let jobs =
+        // SAFETY: the callbacks are static, take the `Probe` that `probe` keeps through
+        // completion, and never unwind.
         [first, second].map(|callback| unsafe { queue.execute(Kind::General, callback, opaque) });
     let [a, b] = jobs;
     let tickets = [a?, b?];
@@ -153,19 +159,16 @@ fn run_stacks(source: Arc<Source>, cpu: Arc<dyn Cpu>) -> Result<Observation, Wor
     {
         return Err(WorkError::CorruptContext);
     }
-    let observed = Observation {
-        stacks: probe.stacks.clone(),
-        rsp,
-    };
+    let observed = Observation { rsp };
     queue.close()?;
-    // SAFETY: both actual jobs returned; there are no external handles/bindings,
+    // SAFETY: both jobs returned; there are no external handles/bindings,
     // callbacks, services or IRQ producers in this finite generic diagnostic.
     unsafe {
         runtime.retire()?;
     }
     probe.runtime.store(ptr::null_mut(), Ordering::Release);
-    drop(executor); // Actual frames gone, all four Backings clear leaf PTE/TLB.
+    drop(executor); // Frames gone, all four Backings clear leaf PTE/TLB.
     drop(queue); // Final Queue CPU validation while root still live.
-    drop(probe); // Last retained Source clone; no callback data can outlive it.
+    drop(probe); // Last kept Source clone; no callback data can outlive it.
     Ok(observed)
 }

@@ -64,8 +64,7 @@ fn repeated_display_names_preserve_distinct_consumers_and_sink_obligations() {
 }
 
 #[test]
-fn unavailable_resources_preserve_requirements_without_claiming_sinks_or_waiving_admitted_clients()
-{
+fn unavailable_consumers_do_not_waive_required_lifecycle_sinks() {
     let domains = [
         domain(1, Some(0x100), &[]),
         domain(2, Some(0x200), &[1]),
@@ -95,7 +94,7 @@ fn unavailable_resources_preserve_requirements_without_claiming_sinks_or_waiving
 }
 
 #[test]
-fn physical_and_virtual_parents_include_all_consumers_and_separate_gate_kinds() {
+fn parents_include_all_consumers() {
     let domains = [
         domain(1, Some(0x100), &[]),
         domain(2, Some(0x200), &[1]),
@@ -173,7 +172,7 @@ fn aliases_merge_parent_dependencies_and_partial_sinks_never_enable_controls() {
     }
 }
 #[test]
-fn die_qualified_ids_never_merge_without_a_shared_physical_address() {
+fn die_checked_ids_never_merge_without_a_shared_physical_address() {
     let mut second = domain(1, Some(0x200), &[]);
     second.id.die = 1;
     let requirements = [second.id];
@@ -188,7 +187,7 @@ fn die_qualified_ids_never_merge_without_a_shared_physical_address() {
 }
 
 #[test]
-fn third_and_fourth_parent_supplies_participate_in_full_coverage_and_cycle_checks() {
+fn every_parent_supply_is_checked() {
     let mut domains = (1..=4)
         .map(|id| domain(id, Some(u64::from(id) * 0x100), &[]))
         .collect::<Vec<_>>();

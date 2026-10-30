@@ -73,6 +73,12 @@ impl core::fmt::Display for Error {
 
 impl core::error::Error for Error {}
 
+impl From<Error> for stela_contracts::Refusal {
+    fn from(error: Error) -> Self {
+        stela_contracts::refuse!("{error}", %error)
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Element<'a> {
     pub tag: u32,

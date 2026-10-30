@@ -157,7 +157,7 @@ mod tests {
     }
 
     #[test]
-    fn interleaving_and_repetitions_follow_source_order_and_wrap_vectors() {
+    fn structure_accesses_follow_source_order() {
         let interleaved = operand(Layout::Multiple {
             repetitions: 1,
             structures: 3,

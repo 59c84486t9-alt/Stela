@@ -27,7 +27,7 @@ pub struct Attempt {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FirmwareEvidence {
     /// Donor treats unknown ROMs with nonzero upper bits as not requiring DFU.
-    /// Actual vendor version and later HCI responses are retained, but the
+    /// Vendor version and later HCI responses are held, but the
     /// running image/provenance/authentication are unknown.
     RunningUnknown,
     Dfu(Box<qca::OwnedReport>),
@@ -93,7 +93,7 @@ impl core::fmt::Display for Error {
     }
 }
 impl core::error::Error for Error {}
-/// Initialize only an actual source-listed bcdDevice>1 standard HCI attachment.
+/// Initialize only a source-listed bcdDevice>1 standard HCI attachment.
 /// Raw upload evidence does not authorize this entry point or infer readiness.
 pub fn initialize<B: Io>(hci: &mut Hci<B>, provider: &dyn Provider) -> Result<OwnedReport> {
     if !super::is_runtime_candidate(hci.binding.device()) {
@@ -224,7 +224,7 @@ impl<B: Io> Engine<'_, B> {
         let raw = self
             .hci
             .io
-            .control_read(crate::usb::xhci::setup(0xc0, 9, 0, 0, 20))
+            .control_read(crate::usb::descriptor::setup(0xc0, 9, 0, 0, 20))
             .map_err(Error::Usb)?;
         let version = qca::Version::parse(&raw)
             .map_err(|_| Error::protocol("ATH3012 vendor version exact length", &raw))?;

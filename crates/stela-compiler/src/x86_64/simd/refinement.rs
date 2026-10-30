@@ -123,7 +123,7 @@ fn prehalve(code: &mut Code, operand: &Operand) {
 }
 
 /// The first pair's target PE must not contaminate the second pair's exact
-/// Double-affine status. R9D/R10D retain wide/target flags across the reset.
+/// Double-affine status. R9D/R10D keep wide/target flags across the reset.
 fn widen_single_pairs(code: &mut Code) {
     packed(code, Host::MoveAligned, SPLIT_SINGLE_LEFT, LEFT);
     packed(code, Host::MoveAligned, SAVED_SINGLE_RIGHT, RIGHT);
@@ -301,7 +301,7 @@ fn emit_single_double(code: &mut Code, operand: &Operand, pc: GuestAddress, targ
     helper.push(reject_other_status(code));
     // A finite Single/Double refinement's nonzero exact result is normal.
     // Exact cancellation follows the installed Arm rounding mode's zero sign.
-    // The retained status guards reject overflow and other exceptional results.
+    // The kept status guards reject overflow and other exceptional results.
     let success = jump(code);
     let helper_start = code.len();
     super::super::block::direct_exit(code, pc, ExitKind::FloatingPoint);

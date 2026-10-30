@@ -81,13 +81,15 @@ struct FixedVisibility {
 }
 impl FixedVisibility {
     /// # Safety
-    /// Actual CPL0 AMD64 with observed MSR/MTRR/PAT controls, no concurrent writer on
+    /// CPL0 AMD64 with observed MSR/MTRR/PAT controls, no concurrent writer on
     /// this processor. No SNP/encryption owner may lock the visibility control.
     unsafe fn open(fixed: bool) -> Result<Self, Error> {
         let flags: u64;
+        // SAFETY: saves RFLAGS and masks interrupts on this CPU; the guard's drop restores IF.
         unsafe {
             asm!("pushfq", "pop {}", "cli", out(reg) flags);
         }
+        // SAFETY: the caller guarantees CPL0 on AMD64, where SYSCFG exists.
         let original = unsafe { msr::AMD_SYSCFG.read() };
         let mut guard = Self {
             syscfg: original,
@@ -99,10 +101,13 @@ impl FixedVisibility {
         }
         if fixed && original & amd::FIXED_MODIFY == 0 {
             guard.changed = true;
+            // SAFETY: the caller guarantees CPL0 on AMD64; only the fixed-MTRR modify enable
+            // changes, and the guard restores it.
             unsafe {
                 msr::AMD_SYSCFG.write(original | amd::FIXED_MODIFY);
             }
             core::sync::atomic::compiler_fence(Ordering::SeqCst);
+            // SAFETY: the caller guarantees CPL0 on AMD64, where SYSCFG exists.
             if unsafe { msr::AMD_SYSCFG.read() } != original | amd::FIXED_MODIFY {
                 // With MtrrFixDramEn clear the fixed MTRRs' RdMem and WrMem
                 // bits have no effect (AMD APM Vol. 2 7.7.4), so the type
@@ -111,6 +116,8 @@ impl FixedVisibility {
                     return Err(Error::AmdMemoryControls);
                 }
                 guard.changed = false;
+                // SAFETY: the caller guarantees CPL0 on AMD64; only the fixed-MTRR modify enable
+                // changes, and the guard restores it.
                 unsafe {
                     msr::AMD_SYSCFG.write(original);
                 }
@@ -168,7 +175,7 @@ fn push_msr(snapshot: &mut Snapshot, index: u32, value: u64) -> Result<(), Error
 }
 
 /// # Safety
-/// Runs at CPL0 on this actual processor, either in a joined firmware
+/// Runs at CPL0 on this processor, either in a joined firmware
 /// callback or under its owned native executor. No CPU feature is cached from
 /// another processor, and unsupported leaves/MSRs are not probed.
 pub(crate) unsafe fn observe() -> Result<Snapshot, Error> {
@@ -305,7 +312,7 @@ pub(crate) unsafe fn observe() -> Result<Snapshot, Error> {
                 .get(5, 0)
                 .is_some_and(|record| record.ecx & 3 == 3 && record.edx & (0xf << 28) != 0)
         {
-            // SAFETY: actual Intel CPU's PC10 MWAIT enumeration is the pinned
+            // SAFETY: Intel CPU's PC10 MWAIT enumeration is the pinned
             // Linux gate for MSR_PKG_CST_CONFIG_CONTROL, on this same CPL0 CPU.
             push_msr(&mut snapshot, 0xe2, msr::rdmsr(0xe2))?;
         }
@@ -333,7 +340,7 @@ struct Callback {
 }
 
 extern "efiapi" fn observe_ap(argument: *mut c_void) {
-    // SAFETY: blocking StartupThisAP retains this one callback record until
+    // SAFETY: blocking StartupThisAP keeps this one callback record until
     // it returns or the firmware terminates the timed-out callback.
     unsafe {
         let callback = &*argument.cast::<Callback>();
@@ -347,7 +354,7 @@ extern "efiapi" fn observe_ap(argument: *mut c_void) {
 /// --native-cores narrows ownership explicitly, never supplies invented PEs.
 pub(crate) fn capture_assignment(requested: Option<usize>) -> Result<(Region, usize), Error> {
     let region = capture(requested.unwrap_or(1))?;
-    // SAFETY: capture just allocated and initialized this exact retained UEFI
+    // SAFETY: capture just allocated and initialized this exact UEFI
     // allocation; before EBS its physical address is directly accessible.
     let physical = unsafe { Capture::from_raw(region.physical as *const u8, 0).physical_count };
     let assigned =
@@ -508,7 +515,7 @@ pub(crate) unsafe fn captured(region: Region) -> Result<&'static Capture, Error>
         return Err(Error::Memory);
     }
     let base = crate::layout::physical(region.physical) as *const u8;
-    // SAFETY: caller retains the exact loader allocation and its physmap; the
+    // SAFETY: caller keeps the exact loader allocation and its physmap; the
     // header-only view lies within the checked region.
     let count = unsafe { Capture::from_raw(base, 0) }.processor_count as usize;
     if record_pages(count).map(|pages| pages as u64 * PAGE) != Some(region.bytes) {

@@ -5,10 +5,7 @@ use super::*;
 use crate::{
     block::BlockError,
     bus::dma::DmaBuffer,
-    usb::{
-        bluetooth::{Binding, Io, Packet, Pipe},
-        xhci,
-    },
+    usb::bluetooth::{Binding, Io, Packet, Pipe},
 };
 use alloc::{boxed::Box, collections::VecDeque, rc::Rc, vec, vec::Vec};
 use core::cell::{Cell, RefCell};
@@ -205,7 +202,11 @@ fn hci(project: super::super::Project, model: Model) -> Hci<Model> {
     device.descriptor[8..10].copy_from_slice(&report.before.usb.vendor.to_le_bytes());
     device.descriptor[10..12].copy_from_slice(&report.before.usb.product.to_le_bytes());
     device.descriptor[12..14].copy_from_slice(&report.before.usb.revision.to_le_bytes());
-    let binding = Binding::new(&device, &xhci::interfaces(&device.configuration)[0]).unwrap();
+    let binding = Binding::new(
+        &device,
+        &crate::usb::descriptor::interfaces(&device.configuration)[0],
+    )
+    .unwrap();
     let mut hci = Hci::from_io(binding, model);
     hci.initialization = Some(Box::new(Ok(InitializationReport::Realtek(report))));
     hci
@@ -248,7 +249,7 @@ fn wideband_hci(project: super::super::Project, model: Model, mask: u8) -> Hci<M
     h
 }
 #[test]
-fn realtek_wideband_uses_observed_mtu_source_alternates_and_actual_capability() {
+fn realtek_wideband_uses_observed_mtu_source_alternates_and_capability() {
     for project in [
         super::super::Project::Rtl8761Bu,
         super::super::Project::Rtl8852Bu,
@@ -287,7 +288,7 @@ fn realtek_wideband_uses_observed_mtu_source_alternates_and_actual_capability() 
     }
     let mut s = Session::start(h).unwrap();
     assert!(s.set_wideband_voice(1, 72, &mut NoDma).is_err());
-    // The same actual descriptor profile previously used only by CVSD models
+    // The same descriptor profile previously used only by CVSD models
     // advertises alt6 at 125us with 102 bytes; it cannot encode source 7/8ms WBS.
     let mut s = session(Model::default());
     assert!(s.set_wideband_voice(1, 60, &mut NoDma).is_err());
@@ -475,7 +476,7 @@ fn realtek_all_initialized_profiles_select_source_cvsd_alternates_without_vendor
     }
 }
 #[test]
-fn realtek_split_coalesced_sco_and_loss_retain_hci_and_retire_partials() {
+fn realtek_sco_reassembly_retires_partials() {
     let mut s = session(Model::default());
     s.set_voice(voice(1, 0), &mut NoDma).unwrap();
     s.0.hci.io.events.push_back(vec![0xff, 1, 0x55]);
@@ -613,7 +614,7 @@ fn realtek_uninitialized_wrong_report_retired_and_aliased_descriptors_refuse() {
     assert!(s.close().is_err());
     assert_eq!(s.0.hci.io.trace.borrow().actions, before);
     let mut h = hci(super::super::Project::Rtl8761Bu, Model::default());
-    // Mutate actual retained configuration: SCO endpoint 0x83 aliases the
+    // Mutate kept configuration: SCO endpoint 0x83 aliases the
     // unclaimed third interface, which must remain outside this driver's owner.
     let cfg = &mut h.binding.device.configuration;
     let i = cfg

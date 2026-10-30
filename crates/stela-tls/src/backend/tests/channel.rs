@@ -223,7 +223,7 @@ fn exchange(case: Case<'_>) -> Result<Vec<u8>, ChannelError> {
 }
 #[cfg(feature = "native-reference-peer")]
 #[test]
-fn tls12_and_tls13_interoperate_with_independent_ring_for_all_suites_groups_and_signatures() {
+fn tls_interoperates_with_ring_for_every_suite() {
     let _serial = SERIAL.lock().unwrap();
     initialize();
     for suite in owner().provider().cipher_suites {
@@ -393,7 +393,7 @@ fn independent_openssl_protocol_peer_accepts_every_suite_and_key_exchange() {
             tcp.set_nonblocking(true).unwrap();
             let mut provider = owner().provider();
             provider.cipher_suites = vec![suite];
-            // OpenSSL's single-group server policy selects the actual exchange.
+            // OpenSSL's single-group server policy selects the exchange.
             // Keep the client's production supported-groups list: TLS1.2 also
             // applies that extension to ECDSA certificate-curve admission, so
             // advertising only X25519 would incorrectly exclude P256 signing.

@@ -9,7 +9,7 @@ default = ["std"]
 # Without `std` only the kernel boot-bundle builder (`boot_bundle` and the
 # formats it reads) is built, for `stela.efi`.
 std = ["stela-soc-data/std",
-    "anyhow/std", "stela-contracts/std", "stela-formats/std",
+    "stela-contracts/std", "stela-formats/std",
     "hex/std",
     "object/std",
     "dep:plist",
@@ -22,15 +22,17 @@ stela-soc-data = { path = "../stela-soc-data", default-features = false }
 stela-contracts = { path = "../stela-contracts", default-features = false }
 stela-formats = { path = "../stela-formats", default-features = false }
 stela-driver-core = { path = "../stela-driver-core" }
-anyhow = { version = "1", default-features = false }
 hex = { version = "0.4", default-features = false, features = ["alloc"] }
 object = { version = "0.37", default-features = false, features = ["read"] }
 plist = { version = "1", optional = true }
 serde.workspace = true
 serde_json = { version = "1", default-features = false, features = ["alloc"] }
+stela-crypto = { path = "../stela-crypto" }
+# SHA-384 for Image4 manifests; SHA-256 is stela-crypto's.
 sha2 = { version = "0.10", default-features = false }
 
 [dev-dependencies]
+anyhow.workspace = true
 stela-engine = { path = "../stela-engine" }
 miniz_oxide = { version = "0.9", default-features = false, features = ["with-alloc"] }
 tempfile.workspace = true

@@ -1,6 +1,6 @@
-//! Immutable construction from retained roster/resource views. This is a plan,
-//! never native execution, CPU-start, PMGR-settlement or backing authority.
-//! Root owners must separately admit the same plan against actual executors and
+//! Immutable construction from kept roster/resource views. This is a plan,
+//! never native execution, CPU-start, PMGR-settlement or backing permission.
+//! Root owners must separately admit the same plan against executors and
 //! devices. No source addresses, chip counts or limits are inferred here.
 mod source;
 pub use source::{BspSource, SourceIdentity};
@@ -8,16 +8,13 @@ pub use source::{BspSource, SourceIdentity};
 use crate::pmgr::coverage::DomainId;
 use alloc::{collections::BTreeSet, sync::Arc, vec::Vec};
 use {
-    stela_contracts::Chip, stela_contracts::caches::Cache, stela_contracts::caches::Caches,
-    stela_contracts::identity::Identity,
+    stela_contracts::Chip, stela_contracts::caches::Cache, stela_contracts::caches::CacheSelection,
+    stela_contracts::caches::Caches, stela_contracts::identity::Identity,
 };
 
 const AFFINITY_MASK: u32 = 0xffff;
 const AFFINITY_PART_MASK: u32 = 0xff;
 const CLUSTER_SHIFT: u32 = 8;
-const CORETYPE_SHIFT: u32 = 16;
-const CORETYPE_MASK: u8 = 7;
-const MPIDR_RES1: u64 = 1 << 31;
 
 macro_rules! ids {
     ($($id:ident),* $(,)?) => {$(
@@ -35,7 +32,7 @@ ids!(
 );
 
 /// Host coordinates remain distinct from guest logical IDs and affinities.
-/// These observations alone grant no executor authority.
+/// These observations alone grant no executor permission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AssignedCore {
     pub worker: usize,
@@ -45,11 +42,11 @@ pub struct AssignedCore {
     pub started: bool,
 }
 
-/// Implemented by the retained real roster owner. Its borrow must retain the
+/// Implemented by the real roster owner. Its borrow must keep the
 /// observations and source identity; revisions must advance monotonically
 /// without reuse after any change. Revision changes invalidate a plan. This
 /// metadata interface cannot create WorkerOwner/NativeLoan or prove native
-/// state recovery. Consumers must still use those actual authority boundaries.
+/// state recovery. Consumers must still use those permission boundaries.
 pub trait RetainedRoster {
     fn revision(&self) -> u64;
     fn cores(&self) -> &[AssignedCore];
@@ -77,9 +74,9 @@ const CAPACITIES: [CapacityKind; 8] = [
     CapacityKind::PlatformClusters,
 ];
 
-/// A caller-qualified whole-consumer capacity, not merely one observed literal.
-/// `None` retains an unknown requirement. Provenance is review metadata, not
-/// a cryptographic admission or a substitute for the retained source owner.
+/// A caller-checked whole-consumer capacity, not one observed literal.
+/// `None` keeps an unknown requirement. Provenance is review metadata, not
+/// a cryptographic admission or a substitute for the source owner.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Capacity {
     pub kind: CapacityKind,
@@ -102,7 +99,7 @@ impl RegisterRange {
     }
 }
 
-/// Every identity/cache field comes from supplied qualified semantics. Missing
+/// Every identity/cache field comes from supplied checked semantics. Missing
 /// future core kinds have no inherited MIDR, affinity, clock or cache fallback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CoreKind {
@@ -124,7 +121,7 @@ pub struct SharedCache {
 pub struct ClusterSlot {
     pub id: ClusterId,
     pub aff1: u8,
-    /// Firmware coordinates are die-qualified; they are not the kernel's
+    /// Firmware coordinates are die-checked; they are not the kernel's
     /// dense logical cluster ID or the global physical Aff1 index.
     pub firmware_id: u32,
     pub die: u32,
@@ -156,7 +153,7 @@ pub struct StartResource {
     pub id: StartId,
     pub reg: u32,
 }
-/// Explicit physical power-domain membership permits qualified shared/aliased
+/// Explicit physical power-domain membership permits checked shared/aliased
 /// owners, but never discovers membership from names or numeric ID formulas.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PowerResource {
@@ -164,7 +161,7 @@ pub struct PowerResource {
     pub cores: Vec<GuestSlotId>,
     pub clusters: Vec<ClusterId>,
 }
-/// Source identity is retained as metadata; it never selects behavior or
+/// Source identity is held as metadata; it never selects behavior or
 /// substitutes for validating the source/resource owner at adoption.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResourceProfile {
@@ -188,7 +185,7 @@ pub struct Resources<'a> {
     pub starts: &'a [StartResource],
     pub powers: &'a [PowerResource],
 }
-/// Actual resource-owner adapter. A plan retains this borrow through use;
+/// Resource-owner adapter. A plan keeps this borrow through use;
 /// adopting resources and owning their lifecycle remains the adapter's job.
 /// All effective changes must monotonically advance its revision, without
 /// reuse, before adoption can resume.
@@ -276,7 +273,7 @@ pub enum Requirement {
 
 #[derive(Debug)]
 struct PlanMarker;
-/// Identity for joining views of one plan, not executor or device authority.
+/// Identity for joining views of one plan, not executor or device permission.
 #[derive(Debug, Clone)]
 pub struct PlanIdentity(Arc<PlanMarker>);
 impl PartialEq for PlanIdentity {
@@ -314,7 +311,7 @@ pub struct PlannedCluster {
     pub resource: ClusterSlot,
     pub cache: SharedCache,
 }
-/// All views share this identity and retain the actual caller-owned roster and
+/// All views share this identity and keep the caller-owned roster and
 /// resource borrows. No public mutation, truncation or hardware activation API.
 pub struct Plan<'a> {
     identity: PlanIdentity,
@@ -355,7 +352,7 @@ impl Plan<'_> {
         &self.clusters
     }
     /// Validate freshness immediately before adoption. This checks the
-    /// retained views; it is not a numeric substitute for actual AP returns.
+    /// views; it is not a numeric substitute for AP returns.
     pub fn revalidate(&self) -> Result<(), Requirement> {
         if self.roster.revision() != self.roster_revision
             || self.roster.cores().len() != self.pes.len()
@@ -540,7 +537,7 @@ impl<'a> Plan<'a> {
             if kind.cluster_type == 0
                 || kind.midr == 0
                 || kind.midr > u64::from(u32::MAX)
-                || kind.aff2 > CORETYPE_MASK
+                || kind.aff2 > crate::board::mpidr::CORETYPE_MASK
                 || kind.clock == Some(0)
             {
                 return Err(conflict(id, ResourceKind::CoreKind));
@@ -603,9 +600,8 @@ impl<'a> Plan<'a> {
                 cluster_type: kind.cluster_type,
                 identity: Identity {
                     midr: kind.midr,
-                    mpidr: MPIDR_RES1
-                        | u64::from(kind.aff2) << CORETYPE_SHIFT
-                        | u64::from(slot.reg),
+                    mpidr: crate::board::mpidr::compose(kind.aff2, slot.reg)
+                        .ok_or_else(|| conflict(id, ResourceKind::CoreKind))?,
                     clock: kind.clock,
                     caches: Some(caches),
                 },

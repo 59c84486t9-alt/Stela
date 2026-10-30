@@ -544,7 +544,7 @@ mod tests {
     }
 
     #[test]
-    fn prefetch_preserves_all_hints_and_scales_and_declines_reserved_index() {
+    fn prefetch_decoding_keeps_hint_and_scale() {
         for size in 0..=SIZE_MASK {
             for hint in 0..=HINT_MASK {
                 for immediate in 0..(1 << PREFETCH_OFFSET_BITS) {
@@ -626,7 +626,7 @@ mod tests {
     }
 
     #[test]
-    fn whole_bytes_and_ignored_hints_retain_source_access_checks() {
+    fn whole_bytes_and_ignored_hints_keep_source_access_checks() {
         for (word, quantity) in [
             (
                 WHOLE_VECTOR_CLASS,

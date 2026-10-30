@@ -117,7 +117,7 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, pc: GuestAddress, target:
     if checked_widening {
         code.asm().vzeroupper();
     }
-    // Ordinary binary keeps retained enables and fresh status under every AH.
+    // Ordinary binary keeps kept enables and fresh status under every AH.
     test_control(code, FPCR_EXCEPTION_ENABLE_MASK);
     helper.push(branch(code, Condition::NotZero));
     prepare_inputs(code, operand);

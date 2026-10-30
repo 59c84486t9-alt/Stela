@@ -15,9 +15,9 @@ const DEVINFO_BULK: u16 = 2 << 11;
 const DEVINFO_IN: u16 = 1 << 15;
 
 impl Controller {
-    /// The transfer owner selects actual split errors, excluding EP0 protocol
+    /// The transfer owner selects split errors, excluding EP0 protocol
     /// STALL, then calls this after Stop/Reset/Set Dequeue and before unpoison.
-    /// A failed clear preserves that owner's poison and retained DMA.
+    /// A failed clear preserves that owner's poison and kept DMA.
     #[cfg(test)]
     pub(in super::super) fn clear_hub_tt(&mut self, slot: u8, dci: u8) -> Result<(), BlockError> {
         let Some((hub, requests)) = self.hub_tt_requests(slot, dci)? else {
@@ -45,7 +45,7 @@ impl Controller {
         }
         // Private cancellation may already have quarantined this child. No
         // child transfer is published here, so its retiring bit is allowed;
-        // the TT hub itself must still be live for its actual EP0 request.
+        // the TT hub itself must still be live for its EP0 request.
         let attachment = self.slot(slot)?.attachment;
         let Some((hub, port)) = attachment.translator else {
             return Ok(None);
@@ -144,7 +144,7 @@ mod tests {
     use alloc::collections::BTreeMap;
 
     #[test]
-    fn tt_clear_uses_actual_device_address_endpoint_direction_and_committed_multi_tt_port() {
+    fn tt_clear_uses_device_address_endpoint_direction_and_committed_multi_tt_port() {
         for multi in [false, true] {
             for context in [32, 64] {
                 let mut hub = Node::hub(HIGH_SPEED, 3);
@@ -157,7 +157,7 @@ mod tests {
                 let nodes = BTreeMap::from([(0, hub), (3, Node::leaf(FULL_SPEED))]);
                 let mut backing = vec![0u64; 256 * 1024];
                 let start = backing.as_mut_ptr() as u64;
-                // SAFETY: actual child/TT context and EP0 TRBs retain this RAM.
+                // SAFETY: child/TT context and EP0 TRBs keep this RAM.
                 let mut dma =
                     unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
                 let (mut c, model) = controller(&mut dma, context, nodes);
@@ -228,13 +228,13 @@ mod tests {
     }
 
     #[test]
-    fn tt_clear_refuses_missing_address_and_propagates_actual_hub_control_failure() {
+    fn tt_clear_refuses_missing_address_and_propagates_hub_control_failure() {
         let mut hub = Node::hub(HIGH_SPEED, 1);
         hub.ports.as_mut().unwrap()[0].child_speed = FULL_SPEED;
         let nodes = BTreeMap::from([(0, hub), (1, Node::leaf(FULL_SPEED))]);
         let mut backing = vec![0u64; 256 * 1024];
         let start = backing.as_mut_ptr() as u64;
-        // SAFETY: fault injection retains the actual child/parent DMA allocations.
+        // SAFETY: fault injection keeps the child/parent DMA allocations.
         let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
         let (mut c, model) = controller(&mut dma, 32, nodes);
         let mut failures = Vec::new();

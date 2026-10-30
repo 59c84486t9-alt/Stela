@@ -2,7 +2,7 @@
 // Copyright (C) 2005-2008 Marcel Holtmann <marcel@holtmann.org>
 //! Qualcomm Rome/WCN USB DFU controller initialization, adapted from btusb.c.
 //! Uses real USB control OTP/status and fixed-EP2 firmware transfers before HCI
-//! setup. Exact source ROM layouts and actual board/GF selectors bind resources.
+//! setup. Source ROM layouts and board/GF selectors bind resources.
 //! A completed upload is not vendor authentication or radio/guest readiness.
 mod identity;
 mod initialize;
@@ -47,7 +47,7 @@ pub struct Attempt {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FirmwareEvidence {
     /// The controller said this component was already present. Its image and
-    /// provenance remain unknown; no fabricated provider receipt is generated.
+    /// provenance remain unknown; no invented provider receipt is generated.
     AlreadyPresent,
     Uploaded(Box<FirmwareReceipt>),
 }
@@ -115,8 +115,8 @@ pub(super) fn is_candidate(device: &crate::usb::xhci::Device) -> bool {
     UsbIdentity::read(device).kind().is_some()
 }
 /// Initialize a fresh exclusively owned source-listed standard HCI binding.
-/// The native consumer retains exactly one attempt, and every failed candidate
-/// closes/quarantines its actual transport. No reset/recovery epoch is invented.
+/// The native consumer keeps exactly one attempt, and every failed candidate
+/// closes/quarantines its transport. No reset/recovery epoch is invented.
 pub fn initialize<B: Io>(
     hci: &mut Hci<B>,
     provider: &dyn crate::firmware::Provider,

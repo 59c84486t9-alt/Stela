@@ -66,7 +66,7 @@ impl From<BlockError> for Error {
 }
 
 #[cfg(test)]
-pub(in crate::usb::bluetooth) use session::generation_tests;
+pub(in crate::usb::bluetooth) use session::tests::generation as generation_tests;
 
 #[cfg(test)]
 pub(in crate::usb::bluetooth) mod tests {
@@ -74,7 +74,7 @@ pub(in crate::usb::bluetooth) mod tests {
     use crate::bus::dma::{DmaAllocator, DmaBuffer};
     use crate::usb::{
         bluetooth::{Binding, Hci, InitializationReport, Io, Pipe},
-        xhci::{self, Device, HIGH_SPEED},
+        xhci::{Device, HIGH_SPEED},
     };
     use alloc::{boxed::Box, collections::VecDeque, vec::Vec};
     pub(in crate::usb::bluetooth) fn binding() -> Binding {
@@ -134,7 +134,7 @@ pub(in crate::usb::bluetooth) mod tests {
             vendor_ethernet_tcr: None,
             vendor_ethernet_revision: None,
         };
-        Binding::new(&d, &xhci::interfaces(&d.configuration)[0]).unwrap()
+        Binding::new(&d, &crate::usb::descriptor::interfaces(&d.configuration)[0]).unwrap()
     }
     struct NoDma;
     impl DmaAllocator for NoDma {
@@ -611,7 +611,7 @@ pub(in crate::usb::bluetooth) mod tests {
             )
             .is_err()
         );
-        // Complete CC with additional return bytes is retained verbatim; source
+        // Complete CC with additional return bytes is held verbatim; source
         // does not define an exact proprietary return-parameter structure.
         let m = Model {
             no_complete: true,
@@ -663,7 +663,7 @@ pub(in crate::usb::bluetooth) mod tests {
         assert!(s.resume().is_err());
     }
     #[test]
-    fn output_loss_preserves_exact_status_and_counts_and_cannot_credit_delivery() {
+    fn output_loss_never_credits_delivery() {
         use crate::usb::xhci::IsoStatus;
         let mut s = Session::start(hci(Model::default()), &mut NoDma, 1).unwrap();
         s.set_voice(
@@ -700,8 +700,7 @@ pub(in crate::usb::bluetooth) mod tests {
         assert_eq!(s.hci.io.writes.len(), 1);
     }
     #[test]
-    fn ordinary_reset_after_vendor_setup_forwards_actual_completion_and_credits_without_fd98_reapply()
-     {
+    fn ordinary_reset_after_vendor_setup_forwards_completion_and_credits_without_fd98_reapply() {
         let mut s = Session::start(
             hci(Model {
                 reset_credits: 3,
@@ -740,7 +739,7 @@ pub(in crate::usb::bluetooth) mod tests {
         assert_eq!(s.lifecycle(), Lifecycle::Running);
     }
     #[test]
-    fn ordinary_reset_retires_active_voice_and_partial_media_until_new_actual_voice_selection() {
+    fn ordinary_reset_retires_active_voice_and_partial_media_until_new_voice_selection() {
         let mut s = Session::start(hci(Model::default()), &mut NoDma, 1).unwrap();
         s.poll().unwrap();
         s.set_voice(
@@ -756,7 +755,7 @@ pub(in crate::usb::bluetooth) mod tests {
         s.hci.io.iso.push_back(Read::Data(vec![1, 0, 2, 0, 8]));
         assert!(s.poll().unwrap().is_empty());
         s.submit_command(&[3, 0x0c, 0]).unwrap();
-        assert_eq!(s.last_reset().unwrap().command_credits, 0); // Preserve actual zero, never invent credit.
+        assert_eq!(s.last_reset().unwrap().command_credits, 0); // Preserve zero, never invent credit.
         assert!(s.submit(Kind::Sco, &[1, 0, 0]).is_err());
         assert!(
             s.poll()

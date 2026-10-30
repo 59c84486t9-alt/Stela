@@ -15,8 +15,7 @@ pub mod helpers;
 
 pub use file::File;
 pub use generated::{ACCESSORS, Register};
-use stela_contracts::Chip;
-use stela_contracts::Feature;
+use stela_contracts::{Chip, Feature};
 
 /// How an access ends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,7 +125,6 @@ impl Lookup {
 }
 
 /// PSTATE fields an accessor reads or writes.
-#[allow(non_camel_case_types, clippy::upper_case_acronyms)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pstate {
     N,
@@ -146,7 +144,6 @@ pub enum Pstate {
     TCO,
 }
 
-#[allow(clippy::upper_case_acronyms)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Regime {
     EL10,
@@ -154,7 +151,6 @@ pub enum Regime {
     EL2,
 }
 
-#[allow(clippy::upper_case_acronyms)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Broadcast {
     NSH,
@@ -174,7 +170,6 @@ pub enum TlbiAttr {
     ExcludeXS,
 }
 
-#[allow(clippy::upper_case_acronyms)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TlbiKind {
     ALL,
@@ -218,7 +213,6 @@ pub enum CacheOp {
     Invalidate,
 }
 
-#[allow(clippy::upper_case_acronyms)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CacheScope {
     PoU,

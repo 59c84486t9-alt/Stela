@@ -1,5 +1,5 @@
-//! Existing AP mailboxes carrying actual native loans and closed Host effects.
-//! The BSP retains the Machine; each physical owner retains its own Host.
+//! Existing AP mailboxes carrying native loans and closed Host effects.
+//! The BSP keeps the Machine; each physical owner keeps its own Host.
 use super::executor::Executors;
 use crate::apic::Apic;
 use alloc::{sync::Arc, vec::Vec};
@@ -18,8 +18,8 @@ use stela_engine::machine::engine::publication::WorkerOwner;
 use stela_engine::machine::engine::publication::WorkerPublications;
 use stela_engine::memory::RegisteredSystemRam;
 
-/// Bounded recent identities suppress loop diagnostics without retaining code,
-/// frames or execution authority. Eviction only permits a diagnostic to repeat.
+/// Bounded recent identities suppress loop diagnostics without keeping code,
+/// frames or execution permission. Eviction only permits a diagnostic to repeat.
 const RECENT_ARTIFACT_DIAGNOSTICS: usize = 256;
 
 pub(crate) struct FixedWorkers<'a> {
@@ -28,7 +28,7 @@ pub(crate) struct FixedWorkers<'a> {
     sender: &'a Apic,
     tsc_hz: u64,
     ram: Arc<RegisteredSystemRam>,
-    // Diagnostics retain identities, never execution authority or live loans.
+    // Diagnostics keep identities, never execution permission or live loans.
     trace_artifacts: bool,
     recent_artifacts: Vec<NativeRunIdentity>,
     next_artifact_slot: usize,
@@ -133,7 +133,7 @@ fn fail(reason: &'static str) -> ! {
     ));
     loop {
         // SAFETY: fail stopped; no potentially live native loan is unwound or
-        // released merely because a mailbox/effect did not complete.
+        // released because a mailbox/effect did not complete.
         unsafe {
             core::arch::asm!("cli", "hlt", options(nomem, nostack));
         }
@@ -157,7 +157,7 @@ impl ServiceTransport for FixedWorkers<'_> {
                 .host_effect(command, self.sender, self.tsc_hz)
         };
         if result.is_ok() && !self.reported_services.contains(&(binding, effect)) {
-            // Every real effect still executes and returns its actual receipt.
+            // Every real effect still executes and returns its receipt.
             // Repeating the same fence diagnostic for every block can flood the
             // serial device during an ordinary guest RAM-initialization loop.
             self.reported_services.push((binding, effect));
@@ -172,9 +172,9 @@ impl ServiceTransport for FixedWorkers<'_> {
         fail(reason)
     }
 }
-// SAFETY: all actual non-'static AP loans below are synchronously joined and
+// SAFETY: all non-'static AP loans below are synchronously joined and
 // recovered. Error paths stop without dropping their reachable resources.
-// Stop/release use the retained owner token on each fixed physical executor.
+// Stop/release use the owner token on each fixed physical executor.
 unsafe impl NativeTransport for FixedWorkers<'_> {
     fn initialize(
         &mut self,

@@ -5,9 +5,10 @@
 //! unauthenticated VM offsets and authenticated runtime offsets. Bind records
 //! and other pointer formats remain explicit unsupported requirements.
 use super::macho::{Layout, end, file_bytes};
+use crate::{Error, Result};
 use alloc::{collections::BTreeMap, vec, vec::Vec};
-use anyhow::{Context, Result, ensure};
 use serde::Serialize;
+use stela_contracts::{refuse, require};
 #[cfg(test)]
 use stela_engine::pauth;
 use stela_formats::sha256;
@@ -46,8 +47,9 @@ pub struct FixupChains {
 fn word(b: &[u8], at: usize) -> Result<u32> {
     Ok(u32::from_le_bytes(
         b.get(at..at + 4)
-            .context("truncated coprocessor chain-start metadata")?
-            .try_into()?,
+            .ok_or(refuse!("truncated coprocessor chain-start metadata"))?
+            .try_into()
+            .unwrap(),
     ))
 }
 fn source(layout: &Layout, address: u64) -> Result<(usize, u64)> {
@@ -60,7 +62,9 @@ fn source(layout: &Layout, address: u64) -> Result<(usize, u64)> {
                 && end(address, POINTER_BYTES)
                     .is_ok_and(|e| e <= s.segment.vm_address + s.segment.file_size)
         })
-        .context("coprocessor chain pointer is not wholly file-backed")?;
+        .ok_or(refuse!(
+            "coprocessor chain pointer is not wholly file-backed"
+        ))?;
     Ok((
         index,
         s.segment.file_offset + address - s.segment.vm_address,
@@ -72,31 +76,32 @@ pub(super) fn parse(data: &[u8], layout: &Layout, maximum: usize) -> Result<Fixu
         .sections
         .iter()
         .filter(|s| s.name == "__chain_starts");
-    let section = matches
-        .next()
-        .context("coprocessor requires a qualified __chain_starts section")?;
-    ensure!(
+    let section = matches.next().ok_or(refuse!(
+        "coprocessor requires a qualified __chain_starts section"
+    ))?;
+    require!(
         matches.next().is_none(),
         "duplicate coprocessor __chain_starts"
     );
-    ensure!(
+    require!(
         layout.segments[section.segment_index].segment.name == "__TEXT"
             && section.reserved == [STARTS_USE_VM_OFFSET, 0, 0],
         "coprocessor chain-start coordinates are not qualified VM offsets"
     );
     let raw = file_bytes(data, section.file_offset, section.bytes)?;
     let format = word(raw, 0)?;
-    ensure!(
+    require!(
         format == FORMAT_ARM64E_KERNEL,
-        "unsupported coprocessor chained pointer format {format}"
+        "unsupported coprocessor chained pointer format {format}",
+        format
     );
     let count = word(raw, 4)? as usize;
-    ensure!(
+    require!(
         count <= maximum && count <= raw.len().saturating_sub(8) / 4,
         "coprocessor chain-root count exceeds section/limit"
     );
     let used = 8 + count * 4;
-    ensure!(
+    require!(
         raw[used..].iter().all(|&b| b == 0),
         "nonzero trailing coprocessor chain metadata"
     );
@@ -109,16 +114,16 @@ pub(super) fn parse(data: &[u8], layout: &Layout, maximum: usize) -> Result<Fixu
         let mut offset = u64::from(root);
         let mut owner = None;
         loop {
-            ensure!(
+            require!(
                 pointers.len() < maximum,
                 "coprocessor chained-fixup limit exceeded"
             );
-            ensure!(
+            require!(
                 offset.is_multiple_of(STRIDE),
                 "unaligned coprocessor chain pointer"
             );
             let pointer_end = end(offset, POINTER_BYTES)?;
-            ensure!(
+            require!(
                 !visited
                     .range(..pointer_end)
                     .next_back()
@@ -128,14 +133,17 @@ pub(super) fn parse(data: &[u8], layout: &Layout, maximum: usize) -> Result<Fixu
             visited.insert(offset, pointer_end);
             let address = end(layout.vm_base, offset)?;
             let (segment, file_offset) = source(layout, address)?;
-            ensure!(
+            require!(
                 owner.is_none_or(|prior| prior == segment),
                 "coprocessor pointer chain crosses segments"
             );
             owner = Some(segment);
-            let value =
-                u64::from_le_bytes(file_bytes(data, file_offset, POINTER_BYTES)?.try_into()?);
-            ensure!(
+            let value = u64::from_le_bytes(
+                file_bytes(data, file_offset, POINTER_BYTES)?
+                    .try_into()
+                    .unwrap(),
+            );
+            require!(
                 value & (1 << 62) == 0,
                 "coprocessor chained imports require a real resolver"
             );
@@ -155,7 +163,7 @@ pub(super) fn parse(data: &[u8], layout: &Layout, maximum: usize) -> Result<Fixu
                 (value & ((1 << 43) - 1), ((value >> 43) & 0xff) as u8)
             };
             let target = end(layout.vm_base, target_offset)?;
-            ensure!(
+            require!(
                 layout
                     .segments
                     .iter()
@@ -194,19 +202,19 @@ pub(super) fn resolve<S: stela_contracts::pauth::Signer>(
     context: &S,
 ) -> Result<Vec<(u64, u64)>>
 where
-    S::Error: Into<anyhow::Error>,
+    S::Error: core::error::Error + Send + Sync + 'static,
 {
     let mut output = Vec::with_capacity(chains.pointers.len());
     for p in &chains.pointers {
         let target = end(iop_base, p.target_offset)?;
-        ensure!(
+        require!(
             target < (1 << 48),
             "coprocessor rebase target exceeds qualified lower virtual map"
         );
         let value = match p.authentication {
             Some(a) => {
                 let slot = end(iop_base, p.image_offset)?;
-                ensure!(
+                require!(
                     slot < (1 << 48),
                     "coprocessor PAC slot exceeds blend-address range"
                 );
@@ -217,7 +225,9 @@ where
                 };
                 // Format7 runtimeOffset zero denotes the image base, not an
                 // inferred null. Architectural PAC signs the resolved value.
-                context.sign(a.key, target, modifier).map_err(Into::into)?
+                context
+                    .sign(a.key, target, modifier)
+                    .map_err(Error::signing)?
             }
             None => target | (u64::from(p.high8) << 56),
         };
@@ -230,6 +240,7 @@ where
 mod tests {
     use super::*;
     use crate::coprocessor::tests::{context, fixture, prepare};
+    use anyhow::Result;
 
     #[test]
     fn full_chains_rebase_and_sign_under_explicit_context() -> Result<()> {
@@ -238,10 +249,10 @@ mod tests {
         let ctx = context();
         let expected = ctx.sign(stela_contracts::pauth::Key::Da, 8, 0x1234_0000_0000_2000)?;
         let r = s.relocate(0, ctx, 16)?;
-        let signed = u64::from_le_bytes(r.bytes()[0x2000..0x2008].try_into()?);
+        let signed = u64::from_le_bytes(r.bytes()[0x2000..0x2008].try_into().unwrap());
         assert_eq!(signed, expected);
         assert_eq!(
-            u64::from_le_bytes(r.bytes()[0x2008..0x2010].try_into()?),
+            u64::from_le_bytes(r.bytes()[0x2008..0x2010].try_into().unwrap()),
             0xab00_0000_0000_0000
         );
         assert_eq!(r.receipt().authenticated_pointer_count, 1);

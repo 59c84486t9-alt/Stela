@@ -9,8 +9,9 @@
 //! so Stela publishes the event offset of the SoC's row in `machine::soc`,
 //! the value each board's iBoot writes there (and Linux's DeviceTrees place
 //! as the AIC's second `reg`).
+use crate::Result;
 use crate::apple_device_tree::DeviceTree;
-use anyhow::{Result, ensure};
+use stela_contracts::require;
 use stela_soc_data::board;
 
 const AIC: &str = "/arm-io/aic";
@@ -32,9 +33,12 @@ pub fn publish(tree: &mut DeviceTree, chip_id: u32) -> Result<bool> {
     let Some(node) = tree.property(AIC, COMPATIBLE) else {
         return Ok(false);
     };
-    ensure!(
+    require!(
         node.value.split(|&byte| byte == 0).next() == Some(compatible.as_bytes()),
-        "{AIC} is not the {compatible} of SoC {chip_id:#x}"
+        "{AIC} is not the {compatible} of SoC {chip_id:#x}",
+        AIC,
+        compatible,
+        chip_id
     );
     tree.set_property(AIC, IACK_OFFSET, event.to_le_bytes().to_vec())?;
     Ok(true)

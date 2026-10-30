@@ -18,13 +18,13 @@ impl CanonicalRamService<'_> {
     pub fn generation(&self) -> u64 {
         self.service.generation()
     }
-    /// Identity comparison of the actual retained owner, not matching geometry.
+    /// Identity comparison of the owner, not matching geometry.
     pub fn belongs_to(&self, ram: &RegisteredSystemRam) -> bool {
         core::ptr::eq(self.ram, ram)
     }
-    /// Permanently fail this exact retained RAM domain and its physical-writer
-    /// gate after an unqualified native fault. Future entry/service acquisition
-    /// refuses; this cannot restore authority or manufacture completion.
+    /// Permanently fail this exact RAM domain and its physical-writer
+    /// gate after an unchecked native fault. Future entry/service acquisition
+    /// refuses; this cannot restore permission or manufacture completion.
     pub fn fail(&self) {
         self.service.fail();
     }
@@ -38,5 +38,18 @@ impl RegisteredSystemRam {
         self.domain
             .try_all_writer_service()
             .map(|service| service.map(|service| CanonicalRamService { ram: self, service }))
+    }
+
+    /// [`Self::try_service`] for an owner that has stopped every PE: it
+    /// waits out the holders left, which finish without it (another PE's
+    /// monitor or writer gate while it applies its mail, or the native
+    /// slice of one that woke from a wait before it parks).
+    pub fn service(&self) -> Result<CanonicalRamService<'_>, MemoryStatus> {
+        loop {
+            if let Some(service) = self.try_service()? {
+                return Ok(service);
+            }
+            core::hint::spin_loop();
+        }
     }
 }

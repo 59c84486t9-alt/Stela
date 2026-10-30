@@ -20,8 +20,8 @@ use alloc::{
 };
 use core::fmt;
 use serde::{Deserialize, Serialize};
-use sha2::Digest;
 use stela_crypto::Sha256;
+use stela_crypto::digest::Digest;
 
 pub mod gpt;
 pub mod pieces;

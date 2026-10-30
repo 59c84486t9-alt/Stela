@@ -14,7 +14,7 @@ pub(super) struct DomainState {
     pub(super) servicing: bool,
 }
 
-/// Retained across native execution, finalization and source PC settlement.
+/// Across native execution, finalization and source PC settlement.
 /// It owns the domain, without borrowing a policy or exposing guest storage.
 pub struct MemoryExecutionLoan {
     domain: Arc<MemoryDomain>,
@@ -309,7 +309,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn retained_execution_membership_requires_same_domain_system_and_health() {
+    fn kept_execution_membership_requires_same_domain_system_and_health() {
         use crate::memory::policy::{LowerAddressProfile, MemoryControls, TagCheckFaultMode};
         let system = MemorySystem::new(16, 8).unwrap();
         let domain = MemoryDomain::new_for_address_space(
@@ -352,7 +352,7 @@ mod tests {
         );
         assert_eq!(domain.state.lock().unwrap().native_loans, 1);
         assert!(thread.observation_loan().is_err());
-        // A retained identity does not bypass a published failure, and checking
+        // A kept identity does not bypass a published failure, and checking
         // does not change the invocation count.
         system.failed.store(true, Ordering::Release);
         assert_eq!(
@@ -443,7 +443,7 @@ mod tests {
     }
 
     #[test]
-    fn actual_thread_observation_pins_views_and_preserves_reservation_without_writers() {
+    fn thread_observation_pins_views_and_preserves_reservation_without_writers() {
         use crate::memory::binding::tests::{config, native, owned, published};
         use crate::memory::policy::{LowerAddressProfile, MemoryControls, TagCheckFaultMode};
         let (mut owner, base) = owned();

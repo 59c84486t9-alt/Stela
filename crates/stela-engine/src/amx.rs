@@ -1,10 +1,10 @@
 //! Direct-RAM AMX reference execution and reusable native kernel mappings.
 //! The native system engine separately owns architectural AMX state and
 //! enablement under the guest kernel's AMX_CTL_EL1 controls.
+use crate::Result;
 use crate::{execution::platform::Mapping, memory::DIRECT_RAM_USER_END};
 #[cfg(not(feature = "std"))]
 use alloc::boxed::Box;
-use anyhow::{Context as _, Result};
 use serde::Serialize;
 use stela_compiler::{
     GuestState, TargetCpu,
@@ -29,7 +29,7 @@ pub enum Failure {
     Unsupported { detail: &'static str },
     /// The transfer touches memory outside the direct-RAM user range.
     Memory { address: u64, write: bool },
-    /// A qualified transfer alignment fault. The M2 model
+    /// A checked transfer alignment fault. The M2 model
     /// does not produce this M1-specific diagnostic.
     Alignment {
         address: u64,
@@ -161,7 +161,7 @@ impl Kernels {
             return Ok(None);
         };
         let library = Library::new(tier);
-        let mapping = Mapping::new(&library.code).context("map AMX kernels")?;
+        let mapping = Mapping::new(&library.code)?;
         Ok(Some(Self { library, mapping }))
     }
 
@@ -254,6 +254,8 @@ mod tests {
     fn enablement_transitions_are_explicit() {
         let mut thread = Thread::new();
         let none = GuestState::default();
+        // SAFETY: the guest operands address this test's own live buffers, which are host memory of
+        // this process.
         unsafe {
             assert_eq!(
                 thread.complete(&instruction(Fma32, 0), &none, None),
@@ -291,6 +293,8 @@ mod tests {
         let mut thread = Thread::new();
         let source: [u8; 64] = core::array::from_fn(|index| index as u8);
         let mut destination = [0u8; 64];
+        // SAFETY: the guest operands address this test's own live buffers, which are host memory of
+        // this process.
         unsafe {
             thread
                 .complete(&instruction(Set, 0), &GuestState::default(), None)
@@ -339,6 +343,8 @@ mod tests {
         for kernel in Kernel::ALL {
             let mut native = Thread::new();
             let mut model = Thread::new();
+            // SAFETY: the guest operands address this test's own live buffers, which are host
+            // memory of this process.
             unsafe {
                 native
                     .complete(&instruction(Set, 0), &GuestState::default(), None)
@@ -360,6 +366,8 @@ mod tests {
                     | u64::from(kernel.product_only) << 27
                     | u64::from(kernel.shape == stela_compiler::x86_64::amx::Shape::Vector) << 63;
                 let operation = instruction(kernel.operation(), 0);
+                // SAFETY: the guest operands address this test's own live buffers, which are host
+                // memory of this process.
                 unsafe {
                     assert_eq!(
                         native.complete(&operation, &state(operand), Some(&kernels)),

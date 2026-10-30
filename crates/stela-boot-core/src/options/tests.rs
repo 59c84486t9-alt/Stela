@@ -131,6 +131,42 @@ fn wifi_names_escape_spaces_and_the_key_path_defaults() {
 }
 
 #[test]
+fn static_ipv4_and_dns_round_trip_and_stay_in_their_subnet() {
+    let text = "--system --ipv4 192.168.1.20/24 --ipv4-gateway 192.168.1.1 --dns 1.1.1.1,2606:4700:4700::1111";
+    let options = round_trip(text);
+    assert_eq!(
+        options.ipv4,
+        Some(StaticIpv4 {
+            address: core::net::Ipv4Addr::new(192, 168, 1, 20),
+            prefix: 24
+        })
+    );
+    assert_eq!(options.dns.len(), 2);
+    assert_eq!(options.to_string(), text);
+    assert_eq!(
+        round_trip("--system --ipv4 10.0.0.1/31").to_string(),
+        "--system --ipv4 10.0.0.1/31"
+    );
+    for text in [
+        "--system --ipv4 192.168.1.20",
+        "--system --ipv4 192.168.1.20/33",
+        "--system --ipv4 192.168.1.0/24",
+        "--system --ipv4 192.168.1.255/24",
+        "--system --ipv4 224.0.0.1/4",
+        "--system --ipv4 10.0.0.2/8 --ipv4 10.0.0.3/8",
+        "--system --ipv4-gateway 192.168.1.1",
+        "--system --ipv4 192.168.1.20/24 --ipv4-gateway 192.168.2.1",
+        "--system --ipv4 192.168.1.20/24 --ipv4-gateway 192.168.1.20",
+        "--system --dns 1.1.1.1,1.1.1.1",
+        "--system --dns 1.1.1.1,1.0.0.1,9.9.9.9,8.8.8.8",
+        "--system --dns 0.0.0.0",
+        "--system --dns 1.1.1.1 --dns 9.9.9.9",
+    ] {
+        assert!(System::parse(text).is_err(), "{text}");
+    }
+}
+
+#[test]
 fn native_checks_imply_serialized_execution_without_writing_it() {
     let options = round_trip("--system --native-cores 2 --native-rounds");
     assert!(!options.parallel);

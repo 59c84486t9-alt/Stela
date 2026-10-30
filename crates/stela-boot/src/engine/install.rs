@@ -9,8 +9,10 @@
 //! into one IPSW whose every block is checked against the piece hashes the
 //! manifest names.
 use super::bundle::{self, Bytes};
+use crate::Result;
 use crate::output;
-use alloc::{boxed::Box, format, string::String, vec::Vec};
+use alloc::{boxed::Box, format, vec::Vec};
+use stela_contracts::refuse;
 use stela_drivers::block::BlockDevice;
 use uefi::proto::media::file::Directory;
 use {
@@ -29,12 +31,16 @@ pub fn check_pieces(
     root: &mut Directory,
     directory: &str,
     manifest: &PayloadManifest,
-) -> Result<(), &'static str> {
+) -> Result<()> {
     let pieces = match &manifest.layout {
         Layout::Pieces { pieces, .. } => pieces,
         // Streamed after boot services end, over the mount's own network.
         Layout::Remote { .. } => return Ok(()),
-        _ => return Err("--install names a payload that is not an install medium"),
+        _ => {
+            return Err(refuse!(
+                "--install names a payload that is not an install medium"
+            ));
+        }
     };
     let mut complete = true;
     for (index, piece) in pieces.iter().enumerate() {
@@ -55,7 +61,9 @@ pub fn check_pieces(
         }
     }
     if !complete {
-        return Err("the install medium is incomplete; run stela setup again to finish it");
+        return Err(refuse!(
+            "the install medium is incomplete; run stela setup again to finish it"
+        ));
     }
     output::arguments(format_args!(
         "INSTALL MEDIUM {directory}: {} pieces, {} bytes, build {}\n",
@@ -74,20 +82,22 @@ pub(super) fn open(
     manifest: &PayloadManifest,
     directory: &str,
     hashes: &[u8],
-) -> Result<Medium, String> {
+) -> Result<Medium> {
     let Layout::Pieces { pieces, .. } = &manifest.layout else {
-        return Err("--install names a payload that is not an install medium".into());
+        return Err(refuse!(
+            "--install names a payload that is not an install medium"
+        ));
     };
-    let mut volume =
-        Fat32::open(Bytes::new(partition)).map_err(|e| format!("install medium: {e}"))?;
+    let mut volume = Fat32::open(Bytes::new(partition))
+        .map_err(|error| refuse!("install medium: {error}", %error))?;
     let directory = directory.replace('\\', "/");
     let mut extents = Vec::with_capacity(pieces.len());
     for index in 0..pieces.len() {
         let file = volume
             .file(&format!("{directory}/{}", piece_name(index)))
-            .map_err(|e| format!("install medium: {e}"))?;
+            .map_err(|error| refuse!("install medium: {error}", %error))?;
         extents.push(file.extents);
     }
     Joined::new(volume.into_inner(), manifest, extents, hashes)
-        .map_err(|e| format!("install medium: {e}"))
+        .map_err(|error| refuse!("install medium: {error}", %error))
 }

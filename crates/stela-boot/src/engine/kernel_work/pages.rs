@@ -1,4 +1,4 @@
-//! Actual retained task-slot coverage in the one Linux page descriptor owner.
+//! Task-slot coverage in the one Linux page descriptor owner.
 use super::*;
 use crate::native_memory::LinuxPages as HeapPages;
 use core::ptr::NonNull;
@@ -15,8 +15,8 @@ struct Coverage {
     physical: u64,
     pages: usize,
 }
-/// Immutable coverage holds the original allocation claim and qualified roots.
-/// It contains neither Runtime nor a worker/frame execution authority.
+/// Immutable coverage holds the original allocation claim and checked roots.
+/// It contains neither Runtime nor a worker/frame execution permission.
 pub(super) struct TaskPageInventory {
     owner: Arc<Reservation>,
     rows: Vec<Coverage>,
@@ -79,14 +79,14 @@ impl TaskPageInventory {
     /// # Safety
     /// Serialized native process/deferred context excludes C reentry, migration,
     /// root/cache mutation and source retargeting through catalog retirement.
-    /// This is taskless metadata entry; a taskful C caller must use its actual
+    /// This is taskless metadata entry; a taskful C caller must use its
     /// entered-owner boundary rather than reentering this leaf constructor.
     pub(super) unsafe fn register(self) -> Result<Catalog<KernelPages>, Error> {
         self.check().map_err(Error::Work)?;
         if self.rows.is_empty() {
             return Err(Error::NoKernelStacks);
         }
-        // SAFETY: actual native heap generation is initialized and remains
+        // SAFETY: native heap generation is initialized and remains
         // excluded from retargeting through its returned provider guard.
         let (heap, ordinary) =
             unsafe { crate::native_memory::linux_page_source() }.map_err(Error::Pages)?;
@@ -100,23 +100,23 @@ impl TaskPageInventory {
             let cpu = NonNull::new(row.cpu as *mut u8).ok_or(Error::Inventory)?;
             // SAFETY: these exact bounds/PA pairs came from prepare_plan's
             // all-root/WB/guard checks. The same original allocation claim and
-            // RootIdentity stay retained in this inventory through quarantine.
+            // RootIdentity stay held in this inventory through quarantine.
             let reservation = unsafe { PageReservation::new(row.physical, cpu, row.pages) }
                 .map_err(Error::Pages)?;
             extents.push(Extent::runtime_stack(reservation));
         }
         let provider = KernelPages { heap, stacks: self };
-        // SAFETY: provider owns both actual heap-generation and task allocation/
+        // SAFETY: provider owns both heap-generation and task allocation/
         // mapping lifetimes. Ordinary allocation delegates only to heap pages;
         // RuntimeStack coverage stays reserved and supplies no payload loan.
         unsafe { Catalog::register_annotated(provider, extents) }.map_err(Error::Pages)
     }
 }
-// SAFETY: actual NativeMemory heap pins retain its generation and WB mappings.
-// Stack coverage independently retains the original firmware allocation claim
-// and all qualified roots. Only the heap provides ordinary allocations, with
+// SAFETY: NativeMemory heap pins keep its generation and WB mappings.
+// Stack coverage independently keeps the original firmware allocation claim
+// and all checked roots. Only the heap provides ordinary allocations, with
 // its original flag/context checks. Final release remains serialized; unknown
-// CPU/IRQ/root context retains pins instead of acknowledging their release.
+// CPU/IRQ/root context keeps pins instead of acknowledging their release.
 unsafe impl Provider for KernelPages {
     fn validate(&self, request: Request) -> Result<(), MemoryError> {
         self.stacks.check().map_err(|_| MemoryError::Unavailable)?;
@@ -135,7 +135,7 @@ unsafe impl Provider for KernelPages {
     }
 }
 impl KernelWork {
-    /// Retain only actual C-compatible slot coverage. Uniform128K-only pools
+    /// Keep only C-compatible slot coverage. Uniform128K-only pools
     /// report NoKernelStacks. This supplies descriptors, not cold-worker access;
     /// the work owner's entered history still rejects hot-frame preparation.
     pub(super) fn task_pages(&self) -> Result<TaskPageInventory, Error> {

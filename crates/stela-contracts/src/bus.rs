@@ -6,6 +6,7 @@
 //! and an interrupt sink. Any refusal is returned unchanged; the engine must
 //! stop or fault rather than invent a value.
 use super::interrupt::{CpuIndex, InterruptSink};
+use crate::Refusal;
 #[cfg(not(feature = "std"))]
 use alloc::{boxed::Box, vec::Vec};
 use core::any::Any;
@@ -50,9 +51,9 @@ pub enum Direction {
 }
 
 /// A refused device access. Earlier device, wire or transition effects may
-/// already be retained by their owners; this error alone proves no byte prefix
-/// and grants no replay or source-retirement authority.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// already be held by their owners; this error alone proves no byte prefix
+/// and grants no replay or source-retirement permission.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MmioError {
     /// No device is mapped at this guest PA.
     Unmapped { address: u64, width: Width },
@@ -64,7 +65,7 @@ pub enum MmioError {
         offset: u64,
         width: Width,
         direction: Direction,
-        reason: &'static str,
+        reason: Refusal,
     },
 }
 
@@ -136,7 +137,7 @@ impl<'a> Access<'a> {
     }
 }
 
-/// Effective supply, clock, DMA-quiesce and reset inputs of one actual native
+/// Effective supply, clock, DMA-quiesce and reset inputs of one native
 /// device. Retention describes that device's declared ordinary-state contract,
 /// not a request to reconstruct software configuration after a destructive edge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -148,13 +149,13 @@ pub struct LifecycleState {
     pub retention: bool,
 }
 
-/// An actual native device's complete lifecycle boundary. Capability does not
-/// imply every proposed state is qualified. The machine checks every affected
+/// A native device's complete lifecycle boundary. Capability does not
+/// imply every proposed state is checked. The machine checks every affected
 /// device without side effects before acknowledging the controller request,
 /// then commits the checked state before any subsequent client activity.
 /// A commit must not fail or generate synthetic completion of canceled work.
 pub trait Lifecycle {
-    fn check_lifecycle(&self, proposed: LifecycleState) -> Result<(), &'static str>;
+    fn check_lifecycle(&self, proposed: LifecycleState) -> Result<(), Refusal>;
     fn set_lifecycle(&mut self, proposed: LifecycleState, access: &mut Access<'_>);
 }
 
@@ -208,14 +209,14 @@ pub fn refuse(
     offset: u64,
     width: Width,
     direction: Direction,
-    reason: &'static str,
+    reason: impl Into<Refusal>,
 ) -> MmioError {
     MmioError::Unsupported {
         device,
         offset,
         width,
         direction,
-        reason,
+        reason: reason.into(),
     }
 }
 
@@ -261,7 +262,7 @@ pub struct Bus {
     advance_statistics: AdvanceStatistics,
 }
 
-/// Actual owner inventory and time-advance work; aliases are not owners.
+/// Owner inventory and time-advance work; aliases are not owners.
 #[cfg(feature = "native-profile")]
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct AdvanceStatistics {
@@ -292,7 +293,7 @@ impl Bus {
         self.devices.push(device);
         id
     }
-    /// Install one actual device and all its ranges atomically. Validate both
+    /// Install one device and all its ranges atomically. Validate both
     /// existing and proposed ownership before publishing any route or device.
     /// Each binding is (guest PA, length, device offset).
     pub fn install(
@@ -400,7 +401,7 @@ impl Bus {
         Ok(())
     }
     /// Pure whole-range preflight for a new explicitly owned resource. It
-    /// reserves nothing and publishes no model or aperture. Callers retain
+    /// reserves nothing and publishes no model or aperture. Callers keep
     /// exclusive Bus access through their complete batch publication.
     pub fn check_free(&self, start: u64, len: u64) -> Result<(), MapError> {
         if len == 0 {

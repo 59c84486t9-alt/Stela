@@ -223,7 +223,7 @@ pub(super) fn test_bit(code: &mut Code, bit: u8, nonzero: bool) -> asm::Cond {
 }
 
 /// Backend policy shared by block parsing and emission. Terminal numerical
-/// mappings consume only their own word; conditional mappings retain a suffix.
+/// mappings consume only their own word; conditional mappings keep a suffix.
 pub(crate) fn numerical_always_exits(operation: &crate::aarch64::FloatingPointOperation) -> bool {
     simd::numerical_always_exits(operation)
 }

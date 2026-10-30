@@ -6,7 +6,7 @@ use super::{Error, Project, Result};
 use crate::{firmware::Target, usb::xhci::Device};
 use alloc::{format, string::String};
 
-/// All bytes of a genuine standard Read Local Version return, including status.
+/// All bytes of a standard Read Local Version return, including status.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LocalVersion {
     pub raw: [u8; 9],
@@ -82,7 +82,7 @@ pub struct Identity {
     pub register_subversion: u16,
     pub register_revision: Option<u16>,
     pub rom_version: u8,
-    /// Both register response bytes retained; byte0 selects the security key.
+    /// Both register response bytes kept; byte0 selects the security key.
     pub security: [u8; 2],
     pub project: Project,
 }

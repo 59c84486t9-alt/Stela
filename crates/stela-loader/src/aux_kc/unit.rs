@@ -4,10 +4,12 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Range;
 
-use anyhow::{Context, Result, bail, ensure};
+use super::fit;
+use crate::{Result, Within};
 use object::macho;
 use plist::Dictionary;
 use sha2::{Digest, Sha256};
+use stela_contracts::{refuse, require};
 
 use super::{
     Kext,
@@ -61,7 +63,11 @@ impl Region {
                 ("__DATA", "__const" | "__mod_init_func" | "__mod_term_func")
                 | ("__DATA_CONST", _) => Self::DataConst,
                 ("__DATA", _) => Self::Data,
-                (segment, name) => bail!("{segment},{name} has no place in a kext"),
+                (segment, name) => {
+                    return Err(
+                        refuse!("{segment},{name} has no place in a kext", segment, name).into(),
+                    );
+                }
             },
         ))
     }
@@ -148,30 +154,30 @@ pub struct Unit<'a> {
 impl<'a> Unit<'a> {
     pub fn new(kext: &'a Kext<'a>, boot: &BootCollection<'_>) -> Result<Self> {
         let info = plist::Value::from_reader_xml(kext.info)
-            .context("reading Info.plist")?
+            .map_err(|error| refuse!("cannot read Info.plist", %error))?
             .into_dictionary()
-            .context("Info.plist is not a dictionary")?;
+            .ok_or(refuse!("Info.plist is not a dictionary"))?;
         for (key, value) in &info {
             prelink::check(key, value)?;
         }
         let identifier = info
             .get("CFBundleIdentifier")
             .and_then(plist::Value::as_string)
-            .context("Info.plist has no CFBundleIdentifier")?
+            .ok_or(refuse!("Info.plist has no CFBundleIdentifier"))?
             .to_owned();
-        let context = || format!("linking {identifier}");
+        let context = || refuse!("linking {identifier}", identifier);
         let objects = kext
             .objects
             .iter()
             .enumerate()
             .map(|(index, data)| {
-                relocatable::parse(data).with_context(|| format!("reading object {index}"))
+                relocatable::parse(data).within(|| refuse!("reading object {index}", index))
             })
             .collect::<Result<Vec<_>>>()
-            .with_context(context)?;
+            .within(context)?;
         let parts = [kext.info, kext.bundle_path.as_bytes()];
         let mut unit = Self {
-            imports: imports(&info, boot).with_context(context)?,
+            imports: imports(&info, boot).within(context)?,
             identifier: identifier.clone(),
             info,
             bundle_path: &kext.bundle_path,
@@ -187,10 +193,10 @@ impl<'a> Unit<'a> {
             inherited: HashMap::new(),
             ranges: Default::default(),
         };
-        unit.place().with_context(context)?;
-        unit.bind().with_context(context)?;
-        unit.inherit(boot).with_context(context)?;
-        unit.synthesize().with_context(context)?;
+        unit.place().within(context)?;
+        unit.bind().within(context)?;
+        unit.inherit(boot).within(context)?;
+        unit.synthesize().within(context)?;
         Ok(unit)
     }
 
@@ -227,14 +233,18 @@ impl<'a> Unit<'a> {
                     }
                 };
                 let output = &mut self.sections[index];
-                ensure!(input.align <= 14, "{} aligns past a page", input.name);
+                require!(
+                    input.align <= 14,
+                    "{section} aligns past a page",
+                    section = input.name
+                );
                 output.align = output.align.max(input.align);
                 let offset = output.bytes.len().next_multiple_of(1 << input.align);
                 output.bytes.resize(offset, 0);
                 if input.zerofill {
                     output
                         .bytes
-                        .resize(offset + usize::try_from(input.size)?, 0);
+                        .resize(offset + fit::<usize, _>(input.size, "a section's size")?, 0);
                 } else {
                     output.bytes.extend_from_slice(input.data);
                 }
@@ -261,10 +271,10 @@ impl<'a> Unit<'a> {
                     None => {}
                     Some(&(other, index)) => {
                         let existing = &self.objects[other].symbols[index];
-                        ensure!(
+                        require!(
                             existing.weak || symbol.weak,
-                            "{} is defined twice",
-                            symbol.name
+                            "{symbol} is defined twice",
+                            symbol = symbol.name
                         );
                         if symbol.weak || !existing.weak {
                             continue;
@@ -275,7 +285,7 @@ impl<'a> Unit<'a> {
                     .insert(symbol.name.clone(), (object_index, symbol_index));
             }
         }
-        ensure!(
+        require!(
             self.globals.contains_key("_kmod_info"),
             "the kext defines no kmod_info"
         );
@@ -354,7 +364,9 @@ impl<'a> Unit<'a> {
 
     fn resolve(&self, object: usize, target: Target) -> Result<Value> {
         let Target::Symbol(index) = target else {
-            bail!("a section-relative reference where only pointers have them");
+            return Err(
+                refuse!("a section-relative reference where only pointers have them").into(),
+            );
         };
         let symbol = &self.objects[object].symbols[index];
         if !symbol.external {
@@ -368,10 +380,11 @@ impl<'a> Unit<'a> {
         }
         match symbol.definition {
             Definition::Undefined { weak: true } => Ok(Value::Absolute(0)),
-            _ => bail!(
-                "{} is undefined: neither the kext nor the libraries it lists define it",
-                symbol.name
-            ),
+            _ => Err(refuse!(
+                "{symbol} is undefined: neither the kext nor the libraries it lists define it",
+                symbol = symbol.name
+            )
+            .into()),
         }
     }
 
@@ -380,10 +393,10 @@ impl<'a> Unit<'a> {
         match symbol.definition {
             Definition::Section { section, address } => self
                 .locate(object, section, address)
-                .with_context(|| format!("defining {}", symbol.name)),
+                .within(|| refuse!("defining {symbol}", symbol = symbol.name)),
             Definition::Absolute(value) => Ok(Value::Absolute(value)),
             Definition::Undefined { .. } | Definition::Debug => {
-                bail!("{} is not a definition", symbol.name)
+                Err(refuse!("{symbol} is not a definition", symbol = symbol.name).into())
             }
         }
     }
@@ -391,16 +404,23 @@ impl<'a> Unit<'a> {
     /// The output location of `address` in an object's section.
     fn locate(&self, object: usize, section: usize, address: u64) -> Result<Value> {
         let input = &self.objects[object].sections[section];
-        let (output, offset) = self.placements[object][section].with_context(|| {
-            format!(
-                "a reference into {},{}, which kexts drop",
-                input.segment, input.name
+        let (output, offset) = self.placements[object][section].ok_or_else(|| {
+            refuse!(
+                "a reference into {segment},{section}, which kexts drop",
+                segment = input.segment,
+                section = input.name
             )
         })?;
         let within = address
             .checked_sub(input.address)
             .filter(|&within| within <= input.size)
-            .with_context(|| format!("{address:#x} lies outside {}", input.name))?;
+            .ok_or_else(|| {
+                refuse!(
+                    "{address:#x} lies outside {section}",
+                    address,
+                    section = input.name
+                )
+            })?;
         Ok(Value::Local {
             section: output,
             offset: offset + within,
@@ -410,7 +430,9 @@ impl<'a> Unit<'a> {
     fn address(&self, value: Value) -> Result<u64> {
         match value {
             Value::Local { section, offset } => Ok(self.sections[section].address + offset),
-            Value::Boot(_) | Value::Absolute(_) => bail!("{value:?} is not in the kext"),
+            Value::Boot(_) | Value::Absolute(_) => {
+                Err(refuse!("{value} is not in the kext", ?value).into())
+            }
         }
     }
 
@@ -426,16 +448,17 @@ impl<'a> Unit<'a> {
             Value::Boot(address) => (Level::Boot, address - boot),
             Value::Absolute(address) => {
                 let raw = address.wrapping_add_signed(addend);
-                ensure!(
+                require!(
                     signature.is_none() || raw == 0,
-                    "a signed pointer to the absolute address {raw:#x}"
+                    "a signed pointer to the absolute address {raw:#x}",
+                    raw
                 );
                 return Ok(Slot::Raw(raw));
             }
         };
         let target = target
             .checked_add_signed(addend)
-            .context("a pointer before its collection")?;
+            .ok_or(refuse!("a pointer before its collection"))?;
         Ok(Slot::Fixup(Pointer {
             level,
             target,
@@ -444,12 +467,12 @@ impl<'a> Unit<'a> {
     }
 
     fn stub(&self, address: u64) -> Result<u64> {
-        let (stubs, _) = self.stub_sections.context("no stubs")?;
+        let (stubs, _) = self.stub_sections.ok_or(refuse!("no stubs"))?;
         let index = self
             .stubs
             .iter()
             .position(|&stub| stub == address)
-            .context("no stub")?;
+            .ok_or(refuse!("no stub"))?;
         Ok(self.sections[stubs].address + (AUTH_STUB_BYTES * index) as u64)
     }
 
@@ -457,7 +480,7 @@ impl<'a> Unit<'a> {
     /// recording the pointers XNU fixes up by their addresses.
     pub fn relocate(&mut self, boot: u64, pointers: &mut BTreeMap<u64, Pointer>) -> Result<()> {
         self.fill_tables(boot, pointers)
-            .with_context(|| format!("linking {}", self.identifier))?;
+            .within(|| refuse!("linking {kext}", kext = self.identifier))?;
         for object in 0..self.objects.len() {
             for section in 0..self.objects[object].sections.len() {
                 if self.placements[object][section].is_none() {
@@ -467,10 +490,12 @@ impl<'a> Unit<'a> {
                 let name = format!("{},{}", input.segment, input.name);
                 for relocation in input.relocations.clone() {
                     self.apply(object, section, relocation, boot, pointers)
-                        .with_context(|| {
-                            format!(
-                                "relocating {name}+{:#x} in {}",
-                                relocation.offset, self.identifier
+                        .within(|| {
+                            refuse!(
+                                "relocating {name}+{offset:#x} in {kext}",
+                                name,
+                                offset = relocation.offset,
+                                kext = self.identifier
                             )
                         })?;
                 }
@@ -523,18 +548,19 @@ impl<'a> Unit<'a> {
         pointers: &mut BTreeMap<u64, Pointer>,
     ) -> Result<()> {
         let address = self.sections[section].address + offset;
-        let at = usize::try_from(offset)?;
+        let at: usize = fit(offset, "a relocation offset")?;
         let field = self.sections[section]
             .bytes
             .get_mut(at..at + 8)
-            .context("a pointer past its section")?;
+            .ok_or(refuse!("a pointer past its section"))?;
         match slot {
             Slot::Raw(raw) => field.copy_from_slice(&raw.to_le_bytes()),
             Slot::Fixup(pointer) => {
                 field.fill(0);
-                ensure!(
+                require!(
                     pointers.insert(address, pointer).is_none(),
-                    "two pointers at {address:#x}"
+                    "two pointers at {address:#x}",
+                    address
                 );
             }
         }
@@ -549,16 +575,21 @@ impl<'a> Unit<'a> {
         boot: u64,
         pointers: &mut BTreeMap<u64, Pointer>,
     ) -> Result<()> {
-        let (section, start) = self.placements[object][input].context("a dropped section")?;
+        let (section, start) =
+            self.placements[object][input].ok_or(refuse!("a dropped section"))?;
         let offset = start + relocation.offset;
         let place = self.sections[section].address + offset;
         let instruction = |unit: &Self| -> Result<u32> {
-            let at = usize::try_from(offset)?;
+            let at: usize = fit(offset, "a relocation offset")?;
             let bytes = unit.sections[section]
                 .bytes
                 .get(at..at + 4)
-                .context("an instruction past its section")?;
-            Ok(u32::from_le_bytes(bytes.try_into()?))
+                .ok_or(refuse!("an instruction past its section"))?;
+            Ok(u32::from_le_bytes(
+                bytes
+                    .try_into()
+                    .map_err(|_| refuse!("an instruction past its section"))?,
+            ))
         };
         let patched = match relocation.kind {
             Kind::Pointer | Kind::Authenticated { .. } => {
@@ -597,10 +628,10 @@ impl<'a> Unit<'a> {
                 let difference = (plus as i64)
                     .wrapping_sub(minus as i64)
                     .wrapping_add(relocation.addend);
-                let at = usize::try_from(offset)?;
+                let at: usize = fit(offset, "a relocation offset")?;
                 let field = &mut self.sections[section].bytes[at..at + usize::from(bytes)];
                 if bytes == 4 {
-                    let narrow = i32::try_from(difference).context("a difference past 32 bits")?;
+                    let narrow: i32 = fit(difference, "a 32-bit difference")?;
                     field.copy_from_slice(&narrow.to_le_bytes());
                 } else {
                     field.copy_from_slice(&difference.to_le_bytes());
@@ -621,7 +652,7 @@ impl<'a> Unit<'a> {
             Kind::Page21 | Kind::PageOffset12 => {
                 let target = self
                     .address(self.resolve(object, relocation.target)?)
-                    .context("a page reference out of the kext")?
+                    .within(|| refuse!("a page reference out of the kext"))?
                     .wrapping_add_signed(relocation.addend);
                 if relocation.kind == Kind::Page21 {
                     page(instruction(self)?, place, target)?
@@ -630,14 +661,14 @@ impl<'a> Unit<'a> {
                 }
             }
             Kind::GotPage21 | Kind::GotPageOffset12 => {
-                ensure!(relocation.addend == 0, "a GOT reference with an addend");
+                require!(relocation.addend == 0, "a GOT reference with an addend");
                 let value = self.resolve(object, relocation.target)?;
-                let got = self.got_section.context("no GOT")?;
+                let got = self.got_section.ok_or(refuse!("no GOT"))?;
                 let index = self
                     .got
                     .iter()
                     .position(|&slot| slot == value)
-                    .context("no GOT slot")?;
+                    .ok_or(refuse!("no GOT slot"))?;
                 let target = self.sections[got].address + 8 * index as u64;
                 if relocation.kind == Kind::GotPage21 {
                     page(instruction(self)?, place, target)?
@@ -646,7 +677,7 @@ impl<'a> Unit<'a> {
                 }
             }
         };
-        let at = usize::try_from(offset)?;
+        let at: usize = fit(offset, "a relocation offset")?;
         self.sections[section].bytes[at..at + 4].copy_from_slice(&patched.to_le_bytes());
         Ok(())
     }
@@ -730,8 +761,12 @@ impl<'a> Unit<'a> {
             self.inherit_vtable(&parent, vtables, boot, done)?;
             None
         } else {
-            Some(*self.imports.get(&parent).with_context(|| {
-                format!("{name} derives from {parent}, which no library the kext lists exports")
+            Some(*self.imports.get(&parent).ok_or_else(|| {
+                refuse!(
+                    "{name} derives from {parent}, which no library the kext lists exports",
+                    name,
+                    parent
+                )
             })?)
         };
         let vtable = &vtables[name];
@@ -761,8 +796,13 @@ impl<'a> Unit<'a> {
                 Some(address) => boot.pointer(address + offset)?.map(Value::Boot),
                 None => self.slot_value(&vtables[&parent], offset)?,
             }
-            .with_context(|| {
-                format!("{name} inherits slot {slot} from {parent}, which has none")
+            .ok_or_else(|| {
+                refuse!(
+                    "{name} inherits slot {slot} from {parent}, which has none",
+                    name,
+                    slot,
+                    parent
+                )
             })?;
             if inherited == child {
                 continue;
@@ -774,10 +814,15 @@ impl<'a> Unit<'a> {
                     .iter()
                     .any(|(other, &at)| at == address && other.contains("_RESERVED"))
             {
-                bail!(
+                return Err(refuse!(
                     "{name} puts {symbol} in slot {slot}, which {parent} reserves in this kernel: \
-                     the kext was built for a newer one"
-                );
+                     the kext was built for a newer one",
+                    name,
+                    symbol,
+                    slot,
+                    parent
+                )
+                .into());
             }
             self.inherited.insert(
                 (vtable.object, vtable.section, relocation.offset),
@@ -804,7 +849,7 @@ impl<'a> Unit<'a> {
         let Definition::Section { section, address } =
             self.objects[object].symbols[index].definition
         else {
-            bail!("{member} is not in a section");
+            return Err(refuse!("{member} is not in a section", member).into());
         };
         let input = &self.objects[object].sections[section];
         let target = input
@@ -812,15 +857,21 @@ impl<'a> Unit<'a> {
             .iter()
             .find(|relocation| input.address + relocation.offset == address)
             .map(|relocation| relocation.target)
-            .with_context(|| format!("{member} points nowhere"))?;
+            .ok_or_else(|| refuse!("{member} points nowhere", member))?;
         let Target::Symbol(target) = target else {
-            bail!("{member} points into a section");
+            return Err(refuse!("{member} points into a section", member).into());
         };
         let target = &self.objects[object].symbols[target].name;
         let parent = target
             .strip_prefix("__ZN")
             .and_then(|rest| rest.strip_suffix("10gMetaClassE"))
-            .with_context(|| format!("{member} points at {target}, which is no gMetaClass"))?;
+            .ok_or_else(|| {
+                refuse!(
+                    "{member} points at {target}, which is no gMetaClass",
+                    member,
+                    target
+                )
+            })?;
         Ok(Some(vtable_name(parent)))
     }
 
@@ -894,7 +945,7 @@ fn imports(info: &Dictionary, boot: &BootCollection<'_>) -> Result<HashMap<Strin
     let libraries = info
         .get("OSBundleLibraries")
         .and_then(plist::Value::as_dictionary)
-        .context("Info.plist has no OSBundleLibraries")?;
+        .ok_or(refuse!("Info.plist has no OSBundleLibraries"))?;
     let mut entries = Vec::new();
     for library in libraries.keys() {
         if boot.contains(library) {
@@ -902,7 +953,11 @@ fn imports(info: &Dictionary, boot: &BootCollection<'_>) -> Result<HashMap<Strin
         } else if library.starts_with("com.apple.kpi.") {
             entries.push(KERNEL);
         } else {
-            bail!("it links against {library}, which the boot collection does not contain");
+            return Err(refuse!(
+                "it links against {library}, which the boot collection does not contain",
+                library
+            )
+            .into());
         }
     }
     // The kernel's definitions come first, then each library's in name order.
@@ -959,9 +1014,11 @@ pub fn uuid<'b>(parts: impl IntoIterator<Item = &'b [u8]>) -> [u8; 16] {
 /// `B`/`BL` to `target`.
 fn branch(instruction: u32, place: u64, target: u64) -> Result<u32> {
     let delta = target.wrapping_sub(place) as i64;
-    ensure!(
+    require!(
         delta % 4 == 0 && (-(1 << 27)..1 << 27).contains(&delta),
-        "a branch from {place:#x} cannot reach {target:#x}"
+        "a branch from {place:#x} cannot reach {target:#x}",
+        place,
+        target
     );
     Ok(instruction & 0xfc00_0000 | ((delta >> 2) as u32 & 0x03ff_ffff))
 }
@@ -969,9 +1026,11 @@ fn branch(instruction: u32, place: u64, target: u64) -> Result<u32> {
 /// `ADRP` of `target`'s 4 KiB page.
 fn page(instruction: u32, place: u64, target: u64) -> Result<u32> {
     let delta = ((target >> 12) as i64).wrapping_sub((place >> 12) as i64);
-    ensure!(
+    require!(
         (-(1 << 20)..1 << 20).contains(&delta),
-        "{target:#x} is out of ADRP's reach from {place:#x}"
+        "{target:#x} is out of ADRP's reach from {place:#x}",
+        target,
+        place
     );
     let delta = delta as u32;
     Ok(instruction & 0x9f00_001f | (delta & 3) << 29 | (delta >> 2 & 0x7_ffff) << 5)
@@ -990,13 +1049,18 @@ fn page_offset(instruction: u32, target: u64) -> Result<u32> {
             instruction >> 30
         }
     } else {
-        bail!("a page offset in {instruction:#010x}, which is neither an ADD nor a load or store");
+        return Err(refuse!(
+            "a page offset in {instruction:#010x}, which is neither an ADD nor a load or store",
+            instruction
+        )
+        .into());
     };
     let offset = (target & 0xfff) as u32;
-    ensure!(
+    require!(
         offset.trailing_zeros() >= scale,
-        "{target:#x} is misaligned for its {}-byte access",
-        1 << scale
+        "{target:#x} is misaligned for its {bytes}-byte access",
+        target,
+        bytes = 1 << scale
     );
     Ok(instruction & !(0xfff << 10) | (offset >> scale) << 10)
 }

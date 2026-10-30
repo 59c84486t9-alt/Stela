@@ -23,6 +23,7 @@ use crate::{
 };
 use alloc::{format, string::String, vec::Vec};
 use core::time::Duration;
+use stela_contracts::refuse;
 use stela_loader::mount_interface::{
     CHOICES_FILE, CHOSEN_DISK, ChoiceKind, Choices, DISK_FILE, with_disk,
 };
@@ -124,9 +125,9 @@ fn read(volume: &mut FileSystem) -> Option<Choices> {
     }
     let choices = volume
         .read(&path)
-        .map_err(|_| "cannot read choices.cfg")
-        .and_then(|bytes| String::from_utf8(bytes).map_err(|_| "choices.cfg is not UTF-8"))
-        .and_then(|text| Choices::parse(&text));
+        .map_err(|_| refuse!("cannot read choices.cfg"))
+        .and_then(|bytes| String::from_utf8(bytes).map_err(|_| refuse!("choices.cfg is not UTF-8")))
+        .and_then(|text| Ok(Choices::parse(&text)?));
     match choices {
         Ok(choices) => Some(choices),
         Err(error) => {
@@ -300,7 +301,7 @@ impl<'a> Menu<'a> {
         let column = width.saturating_sub(32).min(440);
         let left = (width - column) / 2;
         let fits = (height.saturating_sub(top + 120) / ROW).max(1);
-        let first = window(self.selected, self.items.len(), fits);
+        let first = stela_boot_core::screen::window(self.selected, self.items.len(), fits);
         let mut y = top;
         let mut firmware = false;
         for index in (first..self.items.len()).take(fits) {
@@ -435,24 +436,4 @@ pub fn hold(volume: &mut FileSystem, reason: &str) -> Option<Vec<u8>> {
     let choices = read(volume)?;
     output::arguments(format_args!("HOLD {reason}\n"));
     menu(volume, &choices, Some(reason))
-}
-
-/// The first of `count` rows to show so that `selected` is among `fits`.
-pub(crate) fn window(selected: usize, count: usize, fits: usize) -> usize {
-    selected
-        .saturating_sub(fits - 1)
-        .min(count.saturating_sub(fits))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_window_keeps_the_selection_in_view() {
-        assert_eq!(window(0, 10, 4), 0);
-        assert_eq!(window(5, 10, 4), 2);
-        assert_eq!(window(9, 10, 4), 6);
-        assert_eq!(window(1, 2, 4), 0);
-    }
 }

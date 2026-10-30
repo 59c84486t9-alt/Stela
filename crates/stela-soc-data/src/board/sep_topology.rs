@@ -1,6 +1,9 @@
 //! DeviceTree placement and validation for sep topology.
 use super::dma_routes::native_mapper_input;
-use super::{Iommu, Node, SEP, SEP_NUB, String, apertures, format};
+use super::{Iommu, Node, SEP, SEP_NUB, apertures};
+use crate::Result;
+use stela_contracts::refusal::Within;
+use stela_contracts::refuse;
 
 /// SEP's DT-placed register banks, four mailbox IRQs, DART stream and optional
 /// iBoot SEPFW source extent. The extent is not proof of firmware acceptance.
@@ -11,7 +14,7 @@ pub struct SepDevice {
     pub iommu: usize,
     /// Explicit selection of the sole original TRAD, independent of SID count.
     pub instance: usize,
-    /// Actual iommu-parent owner and OS context, before native incoming remap.
+    /// Iommu-parent owner and OS context, before native incoming remap.
     pub mapper: u32,
     pub mapper_context: u32,
     pub stream: u32,
@@ -33,53 +36,58 @@ pub(super) fn sep_device(
     io: &Node<'_>,
     translate: &dyn Fn(u64, u64) -> Option<u64>,
     darts: &[Iommu],
-) -> Result<Option<SepDevice>, String> {
+) -> Result<Option<SepDevice>> {
     let Some(node) = io.child("sep").filter(|node| node.compatible(SEP)) else {
         return Ok(None);
     };
     const PATH: &str = "/arm-io/sep";
     if node.property("aarch64").is_none() || node.first_u32("iop-version") != Some(1) {
-        return Err(format!("{PATH} requires the modeled AArch64 IOP version 1"));
+        return Err(refuse!(
+            "{PATH} requires the modeled AArch64 IOP version 1",
+            PATH
+        ));
     }
     if !node
         .child("iop-sep-nub")
         .is_some_and(|nub| nub.compatible(SEP_NUB))
     {
-        return Err(format!(
-            "{PATH} requires an iop-nub,sep; RTBuddy is not the SEP protocol"
+        return Err(refuse!(
+            "{PATH} requires an iop-nub,sep; RTBuddy is not the SEP protocol",
+            PATH
         ));
     }
     let reg = apertures::registers(&node).unwrap_or_default();
     let &[first, second] = reg.as_slice() else {
-        return Err(format!("{PATH} requires two register ranges"));
+        return Err(refuse!("{PATH} requires two register ranges", PATH));
     };
     if first.1 < crate::asc::WRAPPER_BYTES || second.1 == 0 {
-        return Err(format!("{PATH} has an incomplete register aperture"));
+        return Err(refuse!("{PATH} has an incomplete register aperture", PATH));
     }
-    let place = |(offset, bytes): (u64, u64)| -> Result<_, String> {
+    let place = |(offset, bytes): (u64, u64)| -> Result<_> {
         let physical = translate(offset, bytes)
-            .ok_or_else(|| format!("{PATH} lies outside /arm-io ranges"))?;
+            .ok_or_else(|| refuse!("{PATH} lies outside /arm-io ranges", PATH))?;
         Ok((physical, bytes))
     };
     let irqs: [u32; 4] = node
         .cells32("interrupts")
         .unwrap_or_default()
         .try_into()
-        .map_err(|_| format!("{PATH} requires four mailbox interrupts"))?;
+        .map_err(|_| refuse!("{PATH} requires four mailbox interrupts", PATH))?;
     if irqs.iter().any(|&irq| u16::try_from(irq).is_err()) {
-        return Err(format!(
-            "{PATH} mailbox interrupt is outside the AIC input encoding"
+        return Err(refuse!(
+            "{PATH} mailbox interrupt is outside the AIC input encoding",
+            PATH
         ));
     }
     let parent = node
         .property("iommu-parent")
-        .ok_or_else(|| format!("{PATH} has no iommu-parent"))?;
+        .ok_or_else(|| refuse!("{PATH} has no iommu-parent", PATH))?;
     let parent: [u8; 4] = parent
         .try_into()
-        .map_err(|_| format!("{PATH} iommu-parent is not one phandle"))?;
+        .map_err(|_| refuse!("{PATH} iommu-parent is not one phandle", PATH))?;
     let parent = u32::from_le_bytes(parent);
     if parent == 0 {
-        return Err(format!("{PATH} iommu-parent is zero"));
+        return Err(refuse!("{PATH} iommu-parent is zero", PATH));
     }
     let mut matches = darts.iter().enumerate().flat_map(|(index, dart)| {
         dart.mappers
@@ -89,22 +97,23 @@ pub(super) fn sep_device(
     });
     let (iommu, dart, mapper_context) = matches
         .next()
-        .ok_or_else(|| format!("{PATH} iommu-parent is no modeled DART's mapper"))?;
+        .ok_or_else(|| refuse!("{PATH} iommu-parent is no modeled DART's mapper", PATH))?;
     if matches.next().is_some() {
-        return Err(format!("{PATH} mapper ownership is ambiguous"));
+        return Err(refuse!("{PATH} mapper ownership is ambiguous", PATH));
     }
     if dart.instances.len() != 1 {
-        return Err(format!(
-            "{PATH} DMA owner requires explicit multiple-TRAD selection"
+        return Err(refuse!(
+            "{PATH} DMA owner requires explicit multiple-TRAD selection",
+            PATH
         ));
     }
     if !dart.sids.is_empty() && !dart.sids.contains(&mapper_context) {
-        return Err(format!(
-            "{PATH} mapper context is absent from the original SID set"
+        return Err(refuse!(
+            "{PATH} mapper context is absent from the original SID set",
+            PATH
         ));
     }
-    let stream =
-        native_mapper_input(dart, mapper_context).map_err(|why| format!("{PATH} {why}"))?;
+    let stream = native_mapper_input(dart, mapper_context).within(|| refuse!("{PATH}", PATH))?;
     let firmware = root
         .child("chosen")
         .and_then(|n| n.child("memory-map"))
@@ -112,11 +121,11 @@ pub(super) fn sep_device(
         .map(|bytes| {
             let cells: &[u8; 16] = bytes
                 .try_into()
-                .map_err(|_| String::from("SEPFW is not a base/length pair"))?;
+                .map_err(|_| refuse!("SEPFW is not a base/length pair"))?;
             let base = u64::from_le_bytes(cells[..8].try_into().expect("base"));
             let length = u64::from_le_bytes(cells[8..].try_into().expect("length"));
             if length == 0 || base.checked_add(length).is_none() {
-                return Err(String::from("SEPFW has an empty or overflowing extent"));
+                return Err(refuse!("SEPFW has an empty or overflowing extent"));
             }
             Ok((base, length))
         })
@@ -267,25 +276,46 @@ mod tests {
         );
         routed[0] = good.clone();
         routed[0].mappers.push((0x84, 0));
-        assert!(place(&routed).unwrap_err().contains("ambiguous"));
+        assert!(
+            place(&routed)
+                .unwrap_err()
+                .to_string()
+                .contains("ambiguous")
+        );
         routed[0] = good.clone();
         routed.push(good.clone());
-        assert!(place(&routed).unwrap_err().contains("ambiguous"));
+        assert!(
+            place(&routed)
+                .unwrap_err()
+                .to_string()
+                .contains("ambiguous")
+        );
         routed.pop();
         routed[0] = good.clone();
         routed[0].instances.push(good.instances[0].clone());
-        assert!(place(&routed).unwrap_err().contains("multiple-TRAD"));
+        assert!(
+            place(&routed)
+                .unwrap_err()
+                .to_string()
+                .contains("multiple-TRAD")
+        );
         routed[0].instances.clear();
-        assert!(place(&routed).unwrap_err().contains("multiple-TRAD"));
+        assert!(
+            place(&routed)
+                .unwrap_err()
+                .to_string()
+                .contains("multiple-TRAD")
+        );
         routed[0] = good.clone();
         routed[0].sids = alloc::vec![0, 15];
-        assert!(place(&routed).unwrap_err().contains("SID set"));
+        assert!(place(&routed).unwrap_err().to_string().contains("SID set"));
         routed[0] = good.clone();
         routed[0].mappers[0].1 = 16;
         routed[0].sids.push(16);
         assert!(
             place(&routed)
                 .unwrap_err()
+                .to_string()
                 .contains("outside the native profile")
         );
         routed[0] = good.clone();
@@ -294,6 +324,7 @@ mod tests {
         assert!(
             place(&routed)
                 .unwrap_err()
+                .to_string()
                 .contains("incoming remapped source")
         );
         routed[0] = good;
@@ -318,6 +349,7 @@ mod tests {
         assert!(
             board(&tree(SEP_NUB, &irqs, 0, 0))
                 .unwrap_err()
+                .to_string()
                 .contains("iommu-parent is zero")
         );
         assert!(board(&tree(SEP_NUB, &irqs, 0x84, 1)).is_err());

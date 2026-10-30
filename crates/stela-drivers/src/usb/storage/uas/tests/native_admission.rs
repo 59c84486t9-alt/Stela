@@ -16,13 +16,13 @@ fn native_uas_admission_rejects_foreign_generation_before_configuration_or_dma()
         assert_ne!(first_device.id, second_device.id);
         let binding = Binding::new(
             &second_device,
-            &xhci::interfaces(&second_device.configuration)[0],
+            &crate::usb::descriptor::interfaces(&second_device.configuration)[0],
         )
         .unwrap();
         let first_accesses = first_hardware.borrow().accesses;
         let second_accesses = second_hardware.borrow().accesses;
         let remaining = first_dma.remaining();
-        // Deliberately mismatch two independently valid enumerated owners.
+        // Mismatch two independently valid enumerated owners.
         // The checked setup boundary rejects this before class configuration
         // or DMA; the unsafe Host::new grant requires a matched attachment.
         assert!(

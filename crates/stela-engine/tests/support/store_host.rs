@@ -22,7 +22,7 @@ struct Region {
 impl Drop for Region {
     fn drop(&mut self) {
         // SAFETY: this owner allocated the complete OS mapping and all clones
-        // retaining its address have dropped before this final Rc owner.
+        // keeping its address have dropped before this final Rc owner.
         assert_eq!(unsafe { libc::munmap(self.address as *mut _, BYTES) }, 0);
     }
 }
@@ -42,7 +42,7 @@ impl Region {
         if self.offset(address, out.len()).is_none() {
             return false;
         }
-        // SAFETY: the retained OS mapping and every touched page are readable;
+        // SAFETY: the OS mapping and every touched page are readable;
         // this distinct Rust output does not alias the externally mapped RAM.
         unsafe {
             core::ptr::copy_nonoverlapping(address as *const u8, out.as_mut_ptr(), out.len())
@@ -112,9 +112,9 @@ impl Mapping {
         } else {
             libc::PROT_NONE
         };
-        // SAFETY: a page-aligned extent of this retained mapping; tests call
-        // only after native return and restore rights before reading RAM.
         ensure!(
+            // SAFETY: a page-aligned extent of this mapping; tests call only after native
+            // return and restore rights before reading RAM.
             unsafe { libc::mprotect((self.0 + offset as u64) as *mut _, bytes, flags) } == 0,
             "protect test RAM: {}",
             std::io::Error::last_os_error()
@@ -183,7 +183,7 @@ impl Tables {
         if offset.checked_add(out.len()).is_none_or(|end| end > PAGE) {
             return false;
         }
-        // SAFETY: initialized immutable table bytes, retained through the run,
+        // SAFETY: initialized immutable table bytes, kept through the run,
         // copied to a disjoint caller buffer within this one page.
         unsafe {
             core::ptr::copy_nonoverlapping(
@@ -202,8 +202,8 @@ struct Executable {
 }
 impl Drop for Executable {
     fn drop(&mut self) {
-        // SAFETY: uniquely owns this complete page-rounded executable mapping.
         assert_eq!(
+            // SAFETY: uniquely owns this complete page-rounded executable mapping.
             unsafe { libc::munmap(self.address as *mut _, self.bytes) },
             0
         );
@@ -257,7 +257,7 @@ impl Host for NativeHost {
         // SAFETY: fresh RW mapping is disjoint from compiler output; no entry
         // escapes before its initialized bytes become RX.
         unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), pointer.cast(), bytes.len()) };
-        // SAFETY: complete retained OS extent, idle and fully initialized.
+        // SAFETY: complete kept OS extent, idle and fully initialized.
         if unsafe { libc::mprotect(pointer, length, libc::PROT_READ | libc::PROT_EXEC) } != 0 {
             return Err(InstallError::Full);
         }
@@ -279,7 +279,7 @@ impl Host for NativeHost {
         }) {
             return false;
         }
-        // SAFETY: this owner retains the idle readable executable mmap through
+        // SAFETY: this owner keeps the idle readable executable mmap through
         // fault settlement; no address/reference escapes and discard owns munmap.
         unsafe {
             core::ptr::copy_nonoverlapping(native.0 as *const u8, bytes.as_mut_ptr(), bytes.len());
@@ -298,7 +298,7 @@ impl Host for NativeHost {
                         .is_some_and(|end| end <= code.address + code.bytes as u64)
             })
             .unwrap();
-        // SAFETY: the retained mapping is idle; Machine patches only outside
+        // SAFETY: the mapping is idle; Machine patches only outside
         // invocation. No executable or byte reference escapes this owner.
         unsafe {
             assert_eq!(
@@ -325,7 +325,7 @@ impl Host for NativeHost {
         self.code.clear();
     }
     unsafe fn execute(&mut self, native: NativeCode, state: &mut GuestState) -> NativeExit {
-        // SAFETY: Machine retains this installed block and its block ABI, all
+        // SAFETY: Machine keeps this installed block and its block ABI, all
         // reachable mappings and the distinct GuestState for the whole call.
         match unsafe { self.runner.run(native.0, state) } {
             Ok(exit) => NativeExit::Exit {

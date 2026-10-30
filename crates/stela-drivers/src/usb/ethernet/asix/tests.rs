@@ -2,6 +2,7 @@ use super::{
     model::{Hardware, Io},
     *,
 };
+use crate::usb::descriptor::*;
 use crate::usb::ethernet;
 use crate::usb::xhci::{model, model::*, *};
 use alloc::rc::Rc;
@@ -497,8 +498,8 @@ fn ax88772_native_all_candidates_revisions_split_rx_and_quarantine() {
                     assert_eq!(link.receive().unwrap(), Some(vec![0x73; 1514]));
                     assert_eq!(link.receive().unwrap(), None);
                     if scenario == 0 {
-                        // Three distinct actual bulk-IN DMA completions: a
-                        // retained low header half must survive a second
+                        // Three distinct bulk-IN DMA completions: a
+                        // low header half must survive a second
                         // two-byte transfer before the payload arrives.
                         let header = (60u32 | (0xffc3 << 16)).to_le_bytes();
                         for chunk in [&header[..2], &header[2..], &[0x53; 60][..]] {
@@ -561,12 +562,14 @@ fn ax88772_native_all_candidates_revisions_split_rx_and_quarantine() {
                                 )
                             };
                             drop(hw);
-                            // SAFETY: model performs no DMA; failed cancellation retains ownership.
+                            // SAFETY: model performs no DMA; failed cancellation keeps ownership.
                             let before = unsafe {
                                 core::slice::from_raw_parts(buffer as *const u8, n).to_vec()
                             };
                             assert!(link.transmit(&[0x88; 60]).is_err());
                             assert_eq!(
+                                // SAFETY: the pointer addresses this test's own live pages, and the
+                                // stopped model writes nothing concurrently.
                                 unsafe { core::slice::from_raw_parts(buffer as *const u8, n) },
                                 before
                             );
@@ -580,7 +583,7 @@ fn ax88772_native_all_candidates_revisions_split_rx_and_quarantine() {
 }
 
 #[test]
-fn ax179_native_all_aliases_and_speeds_use_shared_dma_and_quarantine() {
+fn ax179_aliases_use_shared_dma_and_quarantine() {
     use crate::net::Link;
     for (vid, pid) in ethernet::asix_ids() {
         for (speed, packet) in [
@@ -805,6 +808,8 @@ fn ax179_native_all_aliases_and_speeds_use_shared_dma_and_quarantine() {
                         };
                         assert!(link.transmit(&[0x88; 60]).is_err());
                         assert_eq!(
+                            // SAFETY: the pointer addresses this test's own live pages, and the
+                            // stopped model writes nothing concurrently.
                             unsafe { core::slice::from_raw_parts(buffer as *const u8, length) },
                             before
                         );

@@ -11,8 +11,10 @@ use stela_compiler::{
 use stela_engine::write_json;
 
 mod profile;
+mod throughput;
 pub(crate) use profile::block_profile;
 use profile::*;
+pub(crate) use throughput::CompileThroughput;
 
 #[derive(Args)]
 pub(crate) struct CompileBlock {

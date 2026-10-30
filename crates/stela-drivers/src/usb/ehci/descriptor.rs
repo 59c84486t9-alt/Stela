@@ -1,4 +1,4 @@
-//! USB2 standard configuration observed through the actual EP0 transport.
+//! USB2 standard configuration observed through the EP0 transport.
 use super::*;
 use schedule::endpoint_index;
 const MAX_CONFIGURATION: usize = 4096;
@@ -113,7 +113,7 @@ fn endpoints(bytes: &[u8]) -> Result<Configured, Error> {
     })
 }
 impl Controller {
-    /// Return an addressed root to the unconfigured state through actual EP0.
+    /// Return an addressed root to the unconfigured state through EP0.
     /// No active transfer is cancelled or replayed. Every old endpoint handle
     /// retires before SET_CONFIGURATION(0) can have an ambiguous bus effect;
     /// successful status and GET_CONFIGURATION(0) precede success. The USB
@@ -146,8 +146,8 @@ impl Controller {
         Ok(())
     }
     /// Reopen exact bulk handles from the current acknowledged configuration,
-    /// including after an actual root resume minted a fresh device generation.
-    /// This sends no SET_CONFIGURATION and preserves the retained USB toggle.
+    /// including after a root resume minted a fresh device generation.
+    /// This sends no SET_CONFIGURATION and preserves the USB toggle.
     pub fn bulk_pipes(&self, id: &DeviceId) -> Result<Vec<BulkPipe>, Error> {
         let index = self.identity(id)?;
         let device = self.ports[index].as_ref().expect("validated");
@@ -174,7 +174,7 @@ impl Controller {
         Ok(pipes)
     }
     /// Fetch one real configuration by descriptor index, validate its default
-    /// alternate interfaces and HS bulk endpoints, then select its actual value
+    /// alternate interfaces and HS bulk endpoints, then select its value
     /// over USB. Successful configuration invalidates every previous BulkPipe.
     pub fn configure(
         &mut self,

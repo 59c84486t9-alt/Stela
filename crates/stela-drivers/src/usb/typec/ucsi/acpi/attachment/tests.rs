@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Actual ACPICA namespace/Notify ownership around an independent RAM PPM peer.
+//! ACPICA namespace/Notify ownership around an independent RAM PPM peer.
 //! The private DSM seam models firmware protocol effects, not ACPI activation.
 extern crate std;
 
 use super::*;
-use crate::platform::acpi::{Argument, Mode, ObjectType, Reference, tests::TEST_SERIAL};
+use crate::platform::acpi::{Argument, Mode, ObjectType, Reference, test_support::TEST_SERIAL};
 use alloc::{collections::VecDeque, rc::Rc};
 use core::{
     cell::{Cell, RefCell, UnsafeCell},
@@ -87,7 +87,7 @@ impl Peer {
             5 => self.notifications = control >> 16,
             6 => {
                 payload.resize(16, 0);
-                payload[4] = 1; // actual capability: exactly one connector
+                payload[4] = 1; // capability: exactly one connector
             }
             7 => {
                 assert_eq!((control >> 16) & 0x7f, 1);
@@ -129,7 +129,7 @@ impl Dsm for Firmware {
                 peer.command(control)
             }
             2 => {
-                // Refresh publishes actual peer CCI into shared RAM. An ACK is
+                // Refresh publishes peer CCI into shared RAM. An ACK is
                 // observed once, then firmware returns to its idle event latch.
                 let cci = peer.cci;
                 peer.write(4, &cci.to_le_bytes());
@@ -143,7 +143,7 @@ impl Dsm for Firmware {
     }
 }
 struct OwnedMapping(Rc<RefCell<Peer>>, MemoryResource);
-// SAFETY: the test mapping retains the stable, aligned and serialized RAM peer;
+// SAFETY: the test mapping keeps the stable, aligned and serialized RAM peer;
 // only raw volatile accesses share bytes with the independently acting firmware.
 unsafe impl Mapping for OwnedMapping {
     fn resource(&self) -> MemoryResource {
@@ -175,7 +175,7 @@ unsafe extern "C" fn region(
     if address != 0 || width != 8 || value.is_null() {
         return acpi::BAD_PARAMETER.0;
     }
-    // SAFETY: OwnedDependency keeps this exact region context until actual
+    // SAFETY: OwnedDependency keeps this exact region context until
     // ACPICA handler removal and deferred-work drain have completed.
     let context = unsafe { &*context.cast::<RegionContext>() };
     match function {
@@ -198,7 +198,7 @@ unsafe extern "C" fn region_setup(
     context: *mut c_void,
     out: *mut *mut c_void,
 ) -> acpi::Status {
-    // SAFETY: ACPICA supplies a writable region-context output. The actual
+    // SAFETY: ACPICA supplies a writable region-context output. The
     // handler owner keeps context alive throughout activation/deactivation.
     unsafe {
         out.write(if action == 0 {
@@ -219,7 +219,7 @@ impl<'a> OwnedDependency<'a> {
             peer,
             value: Cell::new(0x5a),
         });
-        // SAFETY: this owner retains the actual installed stateful native EC
+        // SAFETY: this owner keeps the installed stateful native EC
         // region handler through removal/draining; all test access is serialized.
         unsafe {
             handle.install_region(
@@ -240,8 +240,8 @@ impl<'a> OwnedDependency<'a> {
         }
     }
 }
-// SAFETY: retains the real ACPICA-installed stateful EC service on the exact
-// _DEP node. Its actual callback is exercised through AML, not a caller flag.
+// SAFETY: keeps the real ACPICA-installed stateful EC service on the exact
+// _DEP node. Its callback is exercised through AML, not a caller flag.
 unsafe impl<'a> Dependency<'a> for OwnedDependency<'a> {
     fn handle(&self) -> Handle<'a> {
         self.handle
@@ -250,7 +250,7 @@ unsafe impl<'a> Dependency<'a> for OwnedDependency<'a> {
 impl Drop for OwnedDependency<'_> {
     fn drop(&mut self) {
         let context = self.context.take().unwrap();
-        // SAFETY: matches the actual retained registration; context stays live
+        // SAFETY: matches the registration; context stays live
         // through the synchronous handler removal and callback drain.
         if unsafe { self.handle.remove_region(3, region) }.is_ok() {
             context.peer.borrow_mut().dependency_drops += 1;
@@ -286,7 +286,7 @@ fn bind<'a>(session: &'a Session, peer: Rc<RefCell<Peer>>) -> Bound<'a> {
     Attachment::bind_with_aml(device, mapping, dependencies, Time::default(), aml).unwrap()
 }
 
-// Encode ordinary AML methods which mutate the actual _STA/_CRS/_DEP namespace
+// Encode ordinary AML methods which mutate the _STA/_CRS/_DEP namespace
 // objects; no test-side Device fields are overwritten to simulate revalidation.
 fn namespace_mutators() -> Vec<u8> {
     let mut body = b"\\._SB_UCSI".to_vec(); // RootChar, DualNamePrefix, two NameSegs
@@ -304,7 +304,7 @@ fn namespace_mutators() -> Vec<u8> {
     // _DEP requires namespace-name references, as in Package () { EC00 }.
     // An external Argument::Reference is imported by ACPICA as RefOf; storing
     // that argument into _DEP cannot turn it into the required name reference.
-    // Keep these packages in AML so CDEP/RDEP change/restore genuine nodes:
+    // Keep these packages in AML so CDEP/RDEP change/restore nodes:
     // Method (CDEP, 0) { Store (Package () { \_SB.HIDE }, _DEP) }
     // Method (RDEP, 0) { Store (Package () { \_SB.EC00 }, _DEP) }
     let mut named_dependencies = b"\\._SB_UCSI".to_vec();
@@ -320,7 +320,7 @@ fn namespace_mutators() -> Vec<u8> {
     assert!(named_dependencies.len() + 1 < 64);
     result.extend_from_slice(&[0x10, (named_dependencies.len() + 1) as u8]);
     result.extend_from_slice(&named_dependencies);
-    // Scope (\_SB.EC00): an actual EmbeddedControl region and READ method.
+    // Scope (\_SB.EC00): an EmbeddedControl region and READ method.
     // OperationRegion (ECMD, EmbeddedControl, 0, 16)
     let mut ec = b"\\._SB_EC00".to_vec();
     ec.extend_from_slice(&[0x5b, 0x80]);
@@ -343,7 +343,7 @@ fn namespace_mutators() -> Vec<u8> {
     result
 }
 fn provider() -> acpi::Services {
-    acpi::tests::reduced_hardware_fixture(&namespace_mutators())
+    acpi::test_support::reduced_hardware_fixture(&namespace_mutators())
 }
 fn fire(session: &Session) {
     session
@@ -369,9 +369,9 @@ fn set_resource(session: &Session, physical: u32) {
 }
 
 #[test]
-fn genuine_activation_bind_start_notify_suspend_resume_and_retire() {
+fn activation_bind_start_notify_suspend_resume_and_retire() {
     let _serial = TEST_SERIAL.lock().unwrap();
-    // SAFETY: actual fixture owns all ACPICA services; test holds singleton lock.
+    // SAFETY: fixture owns all ACPICA services; test holds singleton lock.
     let session = unsafe { Session::start(provider(), Mode::InterpreterOnly) }.unwrap();
     assert!(!session.hardware_enabled());
     assert!(matches!(discover(&session), Err(Error::HardwareInactive)));
@@ -422,9 +422,9 @@ fn genuine_activation_bind_start_notify_suspend_resume_and_retire() {
 }
 
 #[test]
-fn actual_resource_and_dependency_changes_refuse_commands_and_retirement() {
+fn resource_changes_refuse_commands_and_retirement() {
     let _serial = TEST_SERIAL.lock().unwrap();
-    // SAFETY: actual fixture owns all ACPICA services; serialized singleton.
+    // SAFETY: fixture owns all ACPICA services; serialized singleton.
     let session = unsafe { Session::start(provider(), Mode::Hardware) }.unwrap();
     assert!(session.hardware_enabled());
     let peer = Peer::new();
@@ -496,7 +496,7 @@ fn actual_resource_and_dependency_changes_refuse_commands_and_retirement() {
 #[test]
 fn acknowledged_first_event_survives_later_service_failure() {
     let _serial = TEST_SERIAL.lock().unwrap();
-    // SAFETY: actual fixture owns all ACPICA services; serialized singleton.
+    // SAFETY: fixture owns all ACPICA services; serialized singleton.
     let session = unsafe { Session::start(provider(), Mode::Hardware) }.unwrap();
     let peer = Peer::new();
     let mut attachment = bind(&session, peer.clone());
@@ -528,11 +528,11 @@ fn acknowledged_first_event_survives_later_service_failure() {
 }
 
 #[test]
-fn failed_actual_notify_removal_permanently_quarantines_detach_and_drop() {
+fn failed_notify_removal_permanently_quarantines_detach_and_drop() {
     let _serial = TEST_SERIAL.lock().unwrap();
-    // SAFETY: actual fixture owns all ACPICA services; serialized singleton.
+    // SAFETY: fixture owns all ACPICA services; serialized singleton.
     for running in [false, true] {
-        // SAFETY: independent fixture/actual C core for each quarantined owner.
+        // SAFETY: independent fixture/C core for each quarantined owner.
         let session = unsafe { Session::start(provider(), Mode::Hardware) }.unwrap();
         let peer = Peer::new();
         let mut attachment = bind(&session, peer.clone());
@@ -558,10 +558,10 @@ fn failed_actual_notify_removal_permanently_quarantines_detach_and_drop() {
         assert_eq!(peer.borrow().dependency_drops, 0);
         session.shutdown().unwrap();
     }
-    // A failed removal first encountered by Drop must also retain owners when
+    // A failed removal first encountered by Drop must also keep owners when
     // Bound or Suspended, which otherwise permit ordinary resource release.
     for suspended in [false, true] {
-        // SAFETY: independent fixture/actual C core for each quarantined owner.
+        // SAFETY: independent fixture/C core for each quarantined owner.
         let session = unsafe { Session::start(provider(), Mode::Hardware) }.unwrap();
         let peer = Peer::new();
         let mut attachment = bind(&session, peer.clone());

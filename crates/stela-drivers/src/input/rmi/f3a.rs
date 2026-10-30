@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! Native RMI F3A GPIO existence, direction and active-low input bitmaps.
-//! Pinned source and retained copyright are in input/THIRD_PARTY.md.
+//! Pinned source and kept copyright are in input/THIRD_PARTY.md.
 use super::{
     Error, Function,
     transport::{Transport, buffer},
@@ -22,7 +22,7 @@ pub struct Button {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Frame {
     pub function: Function,
-    /// Complete actual data bitmap, including outputs and unused high bits.
+    /// Complete data bitmap, including outputs and unused high bits.
     pub levels: Vec<u8>,
     pub buttons: Vec<Button>,
 }

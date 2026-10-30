@@ -4,9 +4,11 @@
 //! configurations and reads 76-byte device dependency rows. T8112 KC file
 //! 0x2b71bd8..0x2b71fd8/0x2b73c80 and T6000 0x2b3a674 establish the same
 //! table geometry. Register layout, optional-bank tuning and initial contents
-//! remain separate, chip-qualified inputs.
+//! remain separate, chip-checked inputs.
 use super::super::Node;
-use alloc::{string::String, vec::Vec};
+use crate::Result;
+use alloc::vec::Vec;
+use stela_contracts::refuse;
 
 pub(in crate::board) struct Records<'a> {
     headers: &'a [[u8; 4]],
@@ -25,10 +27,10 @@ pub(in crate::board) struct Record {
 impl<'a> Records<'a> {
     /// Validate the entire known source table before selecting any bank.
     /// Borrowed lengths bound all indexing; no count-sized allocation occurs.
-    pub fn new(node: &Node<'a>, count: usize) -> Result<Self, String> {
+    pub fn new(node: &Node<'a>, count: usize) -> Result<Self> {
         let headers = node
             .property("bridge-counters")
-            .ok_or("PMGR has no bridge counter headers")?;
+            .ok_or(refuse!("PMGR has no bridge counter headers"))?;
         let configs = node.property("bridge-counter-configs").unwrap_or_default();
         let dependencies = node.property("device-bridges").unwrap_or_default();
         let axi = node.property("axi2af-axi-config");
@@ -38,7 +40,9 @@ impl<'a> Records<'a> {
             || !dependencies.len().is_multiple_of(76)
             || axi.is_some_and(|bytes| !bytes.len().is_multiple_of(4) || bytes.len() / 4 != count)
         {
-            return Err("PMGR bridge properties have partial records or wrong counts".into());
+            return Err(refuse!(
+                "PMGR bridge properties have partial records or wrong counts"
+            ));
         }
         let headers = headers.as_chunks::<4>().0;
         let configs = configs.as_chunks::<36>().0;
@@ -47,13 +51,15 @@ impl<'a> Records<'a> {
             let first = usize::from(header[2]);
             let end = first + usize::from(header[3]);
             if configs.get(first..end).is_none() {
-                return Err("bridge counter header exceeds configuration records".into());
+                return Err(refuse!(
+                    "bridge counter header exceeds configuration records"
+                ));
             }
         }
         for row in dependencies {
             for bridge in dependency_ids(row) {
                 if usize::from(bridge) >= count {
-                    return Err("device-bridges names an absent bridge".into());
+                    return Err(refuse!("device-bridges names an absent bridge"));
                 }
             }
         }

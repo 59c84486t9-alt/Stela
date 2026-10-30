@@ -1,13 +1,9 @@
-//! Actual Elantech sliced/custom commands, register effects and i8042 reports.
+//! Elantech sliced/custom commands, register effects and i8042 reports.
 use super::*;
 use alloc::collections::BTreeMap;
-#[path = "elantech_tests/controls_tests.rs"]
 mod controls_tests;
-#[path = "elantech_tests/trackpoint_tests.rs"]
 mod trackpoint_tests;
-#[path = "elantech_tests/v3_tests.rs"]
 mod v3_tests;
-#[path = "elantech_tests/v4_tests.rs"]
 mod v4_tests;
 pub(super) struct Action {
     pub(super) reply: Vec<u8>,
@@ -246,7 +242,7 @@ fn target_profile(
     (c, h)
 }
 #[test]
-fn actual_elantech_identity_register_programming_and_readback_precede_reporting() {
+fn elantech_identity_register_programming_and_readback_precede_reporting() {
     for firmware in [
         0x010000, 0x020022, 0x020600, 0x020030, 0x020800, 0x020b00, 0x020801, 0x040216, 0x040219,
         0x140900,
@@ -273,6 +269,26 @@ fn actual_elantech_identity_register_programming_and_readback_precede_reporting(
         assert_eq!(c.mouse_protocol(), None);
         assert!(!c.has_wheel());
     }
+}
+#[test]
+fn the_protocol_probe_selects_elantech_by_its_knock_and_firmware_signature() {
+    let (explicit, h) = target(0x040216);
+    let mut c = Controller::new_probing(
+        Model(h.clone()),
+        Time(h.borrow().time.clone()),
+        explicit.config,
+        None,
+    )
+    .unwrap();
+    c.initialize().unwrap();
+    assert_eq!(c.elantech_capabilities().unwrap().firmware, 0x040216);
+}
+#[test]
+fn new_ics_take_host_notify_by_their_firmware_version() {
+    assert!(elantech::host_notify(0x0f2001));
+    assert!(!elantech::host_notify(0x0f2000), "revision zero");
+    assert!(!elantech::host_notify(0x0f0001), "no PS2_SMBUS_NOTIFY bit");
+    assert!(!elantech::host_notify(0x040216));
 }
 fn v1_packet(firmware: u32, x: u16, y: u16, fingers: u8, buttons: u8) -> [u8; 4] {
     let old = firmware < 0x020000;
@@ -339,7 +355,7 @@ fn v2_two(pressure: bool, x1: u16, y1: u16, x2: u16, y2: u16, buttons: u8) -> [u
     ]
 }
 #[test]
-fn real_v1_parity_rocker_and_startup_quirk_reports_retain_suppressed_packets() {
+fn real_v1_parity_rocker_and_startup_quirk_reports_keep_suppressed_packets() {
     let (mut c, h) = target(0x010000);
     c.initialize().unwrap();
     let raw = v1_packet(0x010000, 300, 200, 2, 17);
@@ -446,7 +462,7 @@ fn real_v2_packets_preserve_two_coordinates_count_pressure_origin_and_debounce()
     }
 }
 #[test]
-fn every_initial_query_byte_is_required_and_late_actual_data_survives_failure() {
+fn every_initial_query_byte_is_required_and_late_data_survives_failure() {
     for firmware in [0x010000, 0x020800] {
         let count = if firmware == 0x010000 { 5 } else { 6 };
         for number in 1..=count {
@@ -549,7 +565,7 @@ fn late_register_ack_keeps_effects_and_source_readback_admission_remains_version
 }
 #[test]
 #[ignore = "oracle: STELA_ELANTECH_REJECTED_ORACLE"]
-fn unchanged_linux_known_rejection_service_budget_and_delay_match_actual_native_retry() {
+fn unchanged_linux_known_rejection_service_budget_and_delay_match_native_retry() {
     extern crate std;
     let records =
         std::fs::read_to_string(std::env::var("STELA_ELANTECH_REJECTED_ORACLE").unwrap()).unwrap();
@@ -596,7 +612,7 @@ fn unchanged_linux_known_rejection_service_budget_and_delay_match_actual_native_
 
 #[test]
 #[ignore = "oracle: STELA_ELANTECH_CONTROLS_ORACLE"]
-fn unchanged_linux_elantech_configuration_matches_actual_i8042_transactions() {
+fn unchanged_linux_elantech_configuration_matches_i8042_transactions() {
     extern crate std;
     let records =
         std::fs::read_to_string(std::env::var("STELA_ELANTECH_CONTROLS_ORACLE").unwrap()).unwrap();
@@ -673,7 +689,7 @@ fn compare_control_records(records: &str, expected: usize) {
 
 #[test]
 #[ignore = "oracle: STELA_ELANTECH_REPORTS_ORACLE"]
-fn unchanged_linux_elantech_reports_match_actual_configured_i8042_device() {
+fn unchanged_linux_elantech_reports_match_configured_i8042_device() {
     extern crate std;
     let records =
         std::fs::read_to_string(std::env::var("STELA_ELANTECH_REPORTS_ORACLE").unwrap()).unwrap();
@@ -758,7 +774,7 @@ fn unchanged_linux_elantech_reports_match_actual_configured_i8042_device() {
                     }
                     // Original semi-MT software publishes zero for an unencoded
                     // secondary point in3/4-finger reports. Native keeps None;
-                    // this projection does not fabricate a hardware coordinate.
+                    // this projection does not invent a hardware coordinate.
                     if contact.fingers >= 2 {
                         slots[1] = contact.secondary.unwrap_or((0, 0));
                     }
@@ -1012,7 +1028,7 @@ fn source_v2_retries_only_explicit_rejection_with_original_service_budget_and_de
     assert_eq!(h.borrow().writes.len(), writes);
 }
 #[test]
-fn known_rejection_retry_delay_retains_sibling_input_and_v1_keeps_its_source_budget() {
+fn known_rejection_retry_delay_keeps_sibling_input_and_v1_keeps_its_source_budget() {
     let (mut c, h) = target(0x020800);
     c.initialize().unwrap();
     {
@@ -1043,7 +1059,7 @@ fn known_rejection_retry_delay_retains_sibling_input_and_v1_keeps_its_source_bud
 }
 
 #[test]
-fn runtime_register_reply_and_resume_failures_retain_data_without_rearming() {
+fn runtime_register_reply_and_resume_failures_keep_data_without_rearming() {
     for firmware in [0x010000, 0x020800] {
         for byte in 0..3 {
             let (mut c, h) = target(firmware);

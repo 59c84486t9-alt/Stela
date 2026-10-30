@@ -36,7 +36,7 @@ fn original_physical_ps() -> std::collections::BTreeSet<u64> {
         "a99fa2260f292236fbad210fcee380fc69f101e591125bce347819e84e68034c"
     );
     // The restore DT's /chosen chip-id is unprovisioned (zero), so do not
-    // patch it or mount a fabricated board to inspect its original records.
+    // patch it or mount an invented board to inspect its original records.
     // Replay the pinned v1 placement fields only, using the public ADT reader.
     let root = stela_contracts::adt::Node::root(&adt).unwrap();
     let io = root.child("arm-io").unwrap();
@@ -216,7 +216,7 @@ fn original_active_masks_choose_writes_without_defining_clear_bits_as_off() {
         (0x110c4, 0x12037929), // clear auto enable
         (0x110d0, 0x121c6d29), // preserve all fields outside target
         (0x110d4, 0x2a130129),
-        (0x110d8, 0xb9000109), // actual physical write
+        (0x110d8, 0xb9000109), // physical write
     ] {
         assert_eq!(
             word(&bytes, offset),
@@ -243,7 +243,7 @@ fn original_active_masks_choose_writes_without_defining_clear_bits_as_off() {
 fn original_policy_filters_physical_addresses_by_chip_revision() {
     let bytes = iboot();
     // The row is not an initial PS value: the predicate masks its PA,
-    // extracts revision minimum/span, and compares the actual chip revision.
+    // extracts revision minimum/span, and compares the chip revision.
     for (offset, opcode) in [
         (0x115e0, 0xeb13011f), // compare decoded PA against requested PA
         (0x11634, 0xd373e309), // minimum revision [56:51]
@@ -274,13 +274,13 @@ fn original_policy_filters_physical_addresses_by_chip_revision() {
 fn original_power_writer_samples_current_state_and_terminal_calls_are_separate() {
     let bytes = iboot();
     for (offset, opcode) in [
-        (0x11480, 0xb94002a8), // load actual physical register
+        (0x11480, 0xb94002a8), // load physical register
         (0x11490, 0x12037908), // clear auto enable bit 28
         (0x11494, 0xb90002a8),
         (0x1149c, 0x32000d09), // active target 0xf
         (0x114a0, 0x121c6d08), // off target zero
         (0x114c4, 0xb90002a8), // commit selected target
-        (0x114d4, 0x4a481128), // compare actual target/current nibbles
+        (0x114d4, 0x4a481128), // compare target/current nibbles
         (0x114d8, 0x72000d1f),
         (0x445c, 0x9400d3b9),  // timeout/recovery caller -> 0x39340
         (0x393cc, 0x94008fa8), // -> serial-domain shutdown
@@ -310,7 +310,7 @@ fn llb() -> Vec<u8> {
 
 #[test]
 #[ignore = "oracle: STELA_TEST_PMGR_ADT, STELA_TEST_PMGR_LLB"]
-fn original_llb_reconfiguration_programs_retain_the_complete_physical_inventory() {
+fn original_llb_reconfiguration_programs_keep_the_complete_physical_inventory() {
     use std::collections::BTreeSet;
     let bytes = llb();
     let physical = original_physical_ps();
@@ -403,7 +403,7 @@ fn original_llb_isp_sequence_emission_is_distinct_from_a_physical_write() {
     }
     for (offset, opcode) in [
         (0x120bc, 0x52800003), // emitter passes full32 width to the compiler
-        (0x120e0, 0xb9000022), // distinct fetch-write performs actual STR w2,[x1]
+        (0x120e0, 0xb9000022), // distinct fetch-write performs STR w2,[x1]
         (0x13904, 0x79400260), // low16 sequence operand passed as callback arg0
         (0x13908, 0xf9400661), // full address operand
         (0x1390c, 0xb9401262), // value operand
@@ -443,7 +443,7 @@ fn original_llb_isp_sequence_emission_is_distinct_from_a_physical_write() {
     assert_eq!(branch_target(&bytes, 0x4ed10), 0x140ec);
 }
 
-// These fixture views preserve original construction data. They deliberately
+// These fixture views preserve original construction data. They
 // expose neither a hardware executor nor a default physical handoff state.
 #[derive(Debug, PartialEq, Eq)]
 struct LlbSequence {
@@ -562,7 +562,7 @@ fn original_llb_selection_binds_all_thirty_sequences_without_a_revision_default(
     assert_eq!(branch_target(&bytes, 0x4d828), 0x22fc4);
     assert_eq!(word(&bytes, 0x14344), 0xb9002115); // caller kind -> context+20
     // Every source descriptor currently admits all four recognized revisions;
-    // that does not resolve construction flags or actual hardware inputs.
+    // that does not resolve construction flags or hardware inputs.
     assert_eq!(word(&bytes, 0x14c18), 0xb9401508); // A4: raw revision
     assert_eq!(word(&bytes, 0x13ab8), 0xb9401108); // A5: chip ID
     assert_eq!(word(&bytes, 0x13b50), 0xb9402908); // B8: revision mask
@@ -579,7 +579,7 @@ fn original_llb_counts_allocates_emits_and_publishes_before_enable_readback() {
         (0x4ecf4, 0x140ec),
         (0x4ecf8, 0x1413c),
         (0x4ecfc, 0x4ebdc),
-        (0x4ed04, 0x4dcd8), // reserve actual SRAM after the count pass
+        (0x4ed04, 0x4dcd8), // reserve SRAM after the count pass
         (0x4ed08, 0x14078),
         (0x4ed10, 0x140ec), // reset count, mode 0
         (0x4eedc, 0x1413c),
@@ -612,7 +612,7 @@ fn original_llb_counts_allocates_emits_and_publishes_before_enable_readback() {
         (0x4ddcc, 0x11000529), // one extra native word reserved for termination
         (0x4ddd4, 0xb900f2a9), // expected final native-word count
         (0x4ddd8, 0x531e7529), // allocated bytes = native words * 4
-        (0x4d664, 0xd344a6c1), // code pointer is bits 41:4 of actual SRAM PA
+        (0x4d664, 0xd344a6c1), // code pointer is bits 41:4 of SRAM PA
         (0x4d668, 0x531d7288), // pointer slot * 8, not a 32-bit slot
         (0x4d66c, 0x8b0802a0),
         (0x4ef8c, 0x5280818a), // stages 2,3,10 only enter value-3 command path
@@ -625,7 +625,7 @@ fn original_llb_counts_allocates_emits_and_publishes_before_enable_readback() {
     ] {
         assert_eq!(word(&bytes, offset), opcode, "pipeline at {offset:#x}");
     }
-    assert_eq!(branch_target(&bytes, 0x4d690), 0x103a0); // actual 64-bit store
+    assert_eq!(branch_target(&bytes, 0x4d690), 0x103a0); // 64-bit store
     // Runtime-dependent group1/2 allocation needs physical input metadata.
     assert_eq!(branch_target(&bytes, 0x4dd84), 0x4f304);
     assert_eq!(word(&bytes, 0x4f1e8), 0xb9400109);
@@ -644,7 +644,7 @@ fn original_llb_complete_feature_filter_omits_the_isp_block_without_implying_off
         hex::encode(Sha256::digest(&bytes[0x4db74..0x4dcd8])),
         "af5277a9d18d2756a6ca17b6561182496a796b6f1fcbcf3e66acae5861f16c25"
     );
-    // Seven 48-byte stack descriptors, in original order. Names qualify the
+    // Seven 48-byte stack descriptors, in original order. Names check the
     // predicate inputs, never functional hardware ownership or initial state.
     for (offset, name) in [
         (0x1e5987, "ANE"),
@@ -667,7 +667,7 @@ fn original_llb_complete_feature_filter_omits_the_isp_block_without_implying_off
         (0x4db10, 0x394082e8), // load descriptor enable byte at +20
         (0x4db14, 0x7100051f), // require exact enable value 1
         (0x4db18, 0x540000a1), // otherwise skip predicate and clear mask
-        (0x4db28, 0x37000060), // true predicate retains mask
+        (0x4db28, 0x37000060), // true predicate keeps mask
         (0x4db2c, 0xf94016e8), // descriptor mask at +28
         (0x4db30, 0x8a280273), // BIC flags,flags,mask
         (0x4dc58, 0xf9000d00), // filtered flags replace context+38
@@ -693,7 +693,7 @@ fn original_llb_complete_feature_filter_omits_the_isp_block_without_implying_off
 
 #[test]
 #[ignore = "oracle: STELA_TEST_PMGR_LLB"]
-fn original_llb_native_emission_retains_packing_fetches_and_termination_limits() {
+fn original_llb_native_emission_keeps_packing_fetches_and_termination_limits() {
     let bytes = llb();
     for (start, end, digest) in [
         (
@@ -723,11 +723,11 @@ fn original_llb_native_emission_retains_packing_fetches_and_termination_limits()
         (0x124ec, 0xb9400022), // source opcode B fetches live peripheral data
         (0x12180, 0xf94006c8), // opcode 1 consumes the next row's constant
         (0x10c00, 0xd344ff8a), // native write header uses PA >> 4
-        (0x10c14, 0xb8286b29), // actual header written into allocated SRAM
+        (0x10c14, 0xb8286b29), // header written into allocated SRAM
         (0x10c5c, 0xd364a689), // format 0 additionally emits PA bits 41:36
-        (0x10d20, 0xb8286b29), // wide-value alignment padding is retained
+        (0x10d20, 0xb8286b29), // wide-value alignment padding is held
         (0x10fac, 0xb8286b69), // poll header emitted; no physical poll here
-        (0x11d6c, 0xb8286abf), // native zero terminator is actually stored
+        (0x11d6c, 0xb8286abf), // native zero terminator is stored
         (0x11db0, 0x6b0802bf), // final emitted word count must equal reservation
     ] {
         assert_eq!(
@@ -938,7 +938,7 @@ fn original_kernel_isp_stop_is_a_restore_write_not_an_initial_state_or_admission
         assert_eq!(word(&bytes, offset), opcode, "restore at {offset:#x}");
     }
     // This explains the captured write from the model's active fallback;
-    // neither this calculation nor the setter establishes actual handoff.
+    // neither this calculation nor the setter establishes handoff.
     let supplied_old = 0xff_u32;
     let requested = 0_u32;
     assert_eq!((supplied_old & !0x30f) | requested | 0x300, 0x3f0);
@@ -995,7 +995,7 @@ fn original_kernel_cio_trigger_and_wait_preserve_the_unqualified_sram_boundary()
         (0x2fa5ad0, 0x32000003), // preserve original control, set bit0
         (0x2fa5b10, 0x52800042), // wait mask2
         (0x2fa5b38, 0xd65f03c0), // no invented disable command
-        (0x2ba704c, 0x6a15001f), // test actual physical read against mask
+        (0x2ba704c, 0x6a15001f), // test physical read against mask
         (0x2fa35ac, 0x52800c61), // initRegMaps63 -> original reg41
         (0x2fa35b0, 0x52800522),
     ] {
@@ -1003,7 +1003,7 @@ fn original_kernel_cio_trigger_and_wait_preserve_the_unqualified_sram_boundary()
     }
     assert_eq!(branch_target(&bytes, 0x2fa5b34), 0x2fb2380);
     assert_eq!(branch_target(&bytes, 0x2ba7048), 0x2bcd7ec);
-    // Mask clearance, timeout and workloop wake behavior are actual driver
+    // Mask clearance, timeout and workloop wake behavior are driver
     // requirements. None identifies a completed native sequence or its final
     // PS values without physical trigger-to-sequence and retirement evidence.
 }
@@ -1071,7 +1071,7 @@ fn original_llb_gpce_producers_and_live_bindings_exclude_a_low_four_only_retirem
         assert_eq!(writes, [0x51, 0x53, 0x5b, 0x1b, 0x1a]);
     }
     // The apparent source-row B constants are not a reset snapshot. Callback
-    // B overwrites its w2 argument with the actual AP read before emission.
+    // B overwrites its w2 argument with the AP read before emission.
     assert_eq!(word(&bytes, 0x124ec), 0xb9400022);
     assert_eq!(word(&bytes, 0x124f0), 0x52800003);
     assert_eq!(branch_target(&bytes, 0x124f4), 0x10810);
@@ -1150,11 +1150,11 @@ fn original_llb_gpce_finalization_is_two_real_masked_writes_under_original_calle
         assert_eq!(base + word(&bytes, table + 3 * 4) as usize, target); // original width4 branches
     }
     for (offset, opcode) in [
-        (0x4f9d8, 0xb9400100), // actual old physical word
+        (0x4f9d8, 0xb9400100), // old physical word
         (0x4fcb0, 0x8a2002f7), // old & ~mask
         (0x4fcc0, 0x8a180008), // set & mask
-        (0x4fcc8, 0xaa170104), // actual combined store value
-        (0x4fd5c, 0xb9000044), // actual STR w4,[x2]
+        (0x4fcc8, 0xaa170104), // combined store value
+        (0x4fd5c, 0xb9000044), // STR w4,[x2]
     ] {
         assert_eq!(word(&bytes, offset), opcode);
     }
@@ -1193,7 +1193,7 @@ fn original_kernel_gpce_maps_and_cio_sleep_do_not_imply_native_retirement() {
     ] {
         assert_eq!(hex::encode(Sha256::digest(&bytes[start..end])), digest);
     }
-    // Follow the actual IOCommandGate allocation and authenticated sleep slot.
+    // Follow the IOCommandGate allocation and authenticated sleep slot.
     // The local byte is an event identity, not a proven sleep output parameter.
     for (start, end, digest) in [
         (
@@ -1228,7 +1228,7 @@ fn original_kernel_gpce_maps_and_cio_sleep_do_not_imply_native_retirement() {
     assert_eq!(quad(&bytes, 0xf02f10 + 16 + 0x210), 0x801110e10540c2c0);
     assert_eq!(branch_target(&bytes, 0x540c338), 0x540abc0);
     assert_eq!(branch_target(&bytes, 0x5407868), 0x4c07e20);
-    // All read/write/wait wrappers preserve their actual map and die argument;
+    // All read/write/wait wrappers preserve their map and die argument;
     // a request register is not a substitute for SRAM/PC or every PS register.
     for offset in [0x2b8d3d8, 0x2b8d44c, 0x2b8d4c8] {
         assert_eq!(word(&bytes, offset), 0x52800c41); // RegMap62
@@ -1237,36 +1237,36 @@ fn original_kernel_gpce_maps_and_cio_sleep_do_not_imply_native_retirement() {
         assert_eq!(word(&bytes, offset), 0x52800c61); // RegMap63
     }
     for (offset, opcode) in [
-        (0x2b8d3a4, 0xb9400108), // actual die count object+631c
+        (0x2b8d3a4, 0xb9400108), // die count object+631c
         (0x2b8d3ac, 0x54000242), // invalid die rejects before register dispatch
         (0x2fa59f4, 0x52800259), // separate diagnostic capture: eighteen words
-        (0x2fa5a10, 0xb9000b40), // retain actual read result in diagnostic row
+        (0x2fa5a10, 0xb9000b40), // keep read result in diagnostic row
         (0x2fa5a28, 0x3707fdf6), // second diagnostic cluster, not PS table
-        (0x2fa5c6c, 0x12000c08), // VDD CIO sync tests actual low4
+        (0x2fa5c6c, 0x12000c08), // VDD CIO sync tests low4
         (0x2fa5c7c, 0x71003d1f), // first word f or inspect second word
-        (0x2fa5c88, 0x1a9f17e1), // actual PS comparison becomes VDD CIO argument
+        (0x2fa5c88, 0x1a9f17e1), // PS comparison becomes VDD CIO argument
         (0x2ba7010, 0x3900ffff), // local event byte starts zero
         (0x540c2e0, 0xaa0103f5), // commandSleep preserves event pointer
         (0x5407860, 0xaa1503e2), // workloop passes event identity to lock sleep
         (0x2ba70e8, 0x3940ffe8), // read local event byte after commandSleep
-        (0x2ba70ec, 0x3607fa88), // zero event byte retries actual physical read
-        (0x2ba7104, 0xd65f0fff), // syntactic nonzero-byte fallthrough; no writer qualified
+        (0x2ba70ec, 0x3607fa88), // zero event byte retries physical read
+        (0x2ba7104, 0xd65f0fff), // syntactic nonzero-byte fallthrough; no writer checked
     ] {
         assert_eq!(word(&bytes, offset), opcode, "controller at {offset:#x}");
     }
-    // TBZ's signed imm14 identifies the actual retry target independently of
+    // TBZ's signed imm14 identifies the retry target independently of
     // the source-window hash. A syntactic fallthrough exists, but sleep takes
-    // the byte address as an event key; no writer making it nonzero is qualified.
+    // the byte address as an event key; no writer making it nonzero is checked.
     let test_branch = word(&bytes, 0x2ba70ec);
     let displacement = ((((test_branch >> 5) & 0x3fff) << 18) as i32 >> 16) as isize;
     assert_eq!(0x2ba70ecusize.wrapping_add_signed(displacement), 0x2ba703c);
-    // Neither a clear mask nor commandSleep returning qualifies a selected
+    // Neither a clear mask nor commandSleep returning checks a selected
     // native sequence, end retirement or the complete initial handoff state.
 }
 
 #[test]
 #[ignore = "oracle: STELA_TEST_PMGR_LLB"]
-fn original_llb_group_table_publication_retains_actual_metadata_and_pointer_widths() {
+fn original_llb_group_table_publication_keeps_metadata_and_pointer_widths() {
     let bytes = llb();
     for (start, end, digest) in [
         (
@@ -1296,27 +1296,27 @@ fn original_llb_group_table_publication_retains_actual_metadata_and_pointer_widt
         (0x4d20c, 0x321827ea), // groups0/1 table base fragment mask3ff00
         (0x4d248, 0xd348fd29), // groups2/3 table PA shifted eight
         (0x4d250, 0xd348fd29),
-        (0x4d264, 0x12be000a), // groups2/3 retain twenty-eight base bits
+        (0x4d264, 0x12be000a), // groups2/3 keep twenty-eight base bits
         (0x4d268, 0x0a090141), // selected base fragment, no guessed high bits
-        (0x4d664, 0xd344a6c1), // actual code PA bits41:4
+        (0x4d664, 0xd344a6c1), // code PA bits41:4
         (0x4d668, 0x531d7288), // pointer-table slot stride eight
-        (0x4d66c, 0x8b0802a0), // actual group table PA plus slot offset
+        (0x4d66c, 0x8b0802a0), // group table PA plus slot offset
         (0x103a0, 0xf9000001), // pointer store is64-bit
         (0x103a8, 0xb9000001), // controller field store is32-bit
         (0x4f1e8, 0xb9400109), // metadata word1 is a physical input
         (0x4f1ec, 0x53144d29), // word1 shift uses32-bit arithmetic
         (0x4f1f0, 0xb85fc10a), // separate metadata word0 read
         (0x4f1f4, 0xd3741d4a), // word0 low8 supplies page offset
-        (0x4f208, 0xeb17001f), // actual region end bounds before allocation
+        (0x4f208, 0xeb17001f), // region end bounds before allocation
         (0x4f238, 0x52802001), // table alignment256
-        (0x4f250, 0xa901fd00), // publish actual allocated group table PA
-        (0x4f254, 0x91040000), // reserve256 bytes per actual group
+        (0x4f250, 0xa901fd00), // publish allocated group table PA
+        (0x4f254, 0x91040000), // reserve256 bytes per group
         (0x4f268, 0x52800401), // code pool alignment32
     ] {
         assert_eq!(word(&bytes, offset), opcode, "table/SRAM at {offset:#x}");
     }
     assert_eq!(branch_target(&bytes, 0x4d284), 0x103a8);
     assert_eq!(branch_target(&bytes, 0x4d690), 0x103a0);
-    // These encode actual installation effects, not a hardware decoder for
+    // These encode installation effects, not a hardware decoder for
     // request->table->selected PC. Metadata and supplied SRAM stay required.
 }

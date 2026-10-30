@@ -147,6 +147,7 @@ fn legacy_native_feature_gates_match_public_admission_and_leave_requirements_nam
         assert!(
             iommu(&node, &flat_fixture_extent(&Some))
                 .unwrap_err()
+                .to_string()
                 .contains(requirement),
             "{requirement}"
         );
@@ -212,6 +213,7 @@ fn t6000_remaps_do_not_admit_an_unselected_translation_owner() {
     assert!(
         iommu(&node, &flat_fixture_extent(&Some))
             .unwrap_err()
+            .to_string()
             .contains("multi-instance DMA remap")
     );
     assert!(!super::super::models("dart,t6000", |key| node.property(key)));
@@ -236,7 +238,7 @@ fn t6000_remaps_do_not_admit_an_unselected_translation_owner() {
 }
 
 #[test]
-fn mapper_sid_and_multi_instance_dma_require_actual_native_routing() {
+fn mapper_sid_and_multi_instance_dma_require_native_routing() {
     let mapper = |sid: u32| {
         encode(
             &[
@@ -272,6 +274,7 @@ fn mapper_sid_and_multi_instance_dma_require_actual_native_routing() {
     assert!(
         iommu(&Node::root(&tree).unwrap(), &flat_fixture_extent(&Some))
             .unwrap_err()
+            .to_string()
             .contains("mapper SID")
     );
     let first = legacy(
@@ -292,6 +295,7 @@ fn mapper_sid_and_multi_instance_dma_require_actual_native_routing() {
     assert!(
         iommus(&Node::root(&tree).unwrap(), &flat_fixture_extent(&Some))
             .unwrap_err()
+            .to_string()
             .contains("ambiguous native DMA routing")
     );
     let two = [one.as_slice(), one].concat();
@@ -305,6 +309,7 @@ fn mapper_sid_and_multi_instance_dma_require_actual_native_routing() {
     assert!(
         iommu(&Node::root(&tree).unwrap(), &flat_fixture_extent(&Some))
             .unwrap_err()
+            .to_string()
             .contains("multi-instance DMA routing")
     );
 }
@@ -341,6 +346,7 @@ fn native_family_traversal_keeps_mixed_groups_and_refuses_unknown_generations() 
     assert!(
         iommus(&Node::root(&unknown).unwrap(), &flat_fixture_extent(&Some))
             .unwrap_err()
+            .to_string()
             .contains("unsupported or conflicting")
     );
     assert!(!super::super::models("dart,gen3", |_| None));
@@ -400,7 +406,10 @@ fn t8110_windows_select_one_register_file_revision_per_node() {
                 );
                 assert_eq!((bank.streams, bank.vm_base), (16, 1 << 40));
             }
-            Err(reason) => assert!(bank.unwrap_err().contains(reason), "{windows:x?}"),
+            Err(reason) => assert!(
+                bank.unwrap_err().to_string().contains(reason),
+                "{windows:x?}"
+            ),
         }
     }
 }

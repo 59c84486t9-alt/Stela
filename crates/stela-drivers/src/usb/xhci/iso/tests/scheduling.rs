@@ -9,7 +9,7 @@ fn scheduled_wrap_and_subframes() {
         let base = backing.as_mut_ptr() as u64;
         let mut dma =
         // SAFETY: The scheduling fixture owns this entire stable vector through every
-        // retained frame ticket and payload completion; all model accesses occur
+        // frame ticket and payload completion; all model accesses occur
         // synchronously before it is dropped.
         unsafe { RegionAllocator::new(base..base + backing.len() as u64 * 8) };
         let (mut c, model) = controller(&mut dma, HIGH_SPEED, context_bytes, true);
@@ -53,7 +53,7 @@ fn scheduled_window_and_phase_preflight() {
     let mut backing = vec![0u64; 32 * 1024];
     let base = backing.as_mut_ptr() as u64;
     let mut dma =
-    // SAFETY: The window-preflight fixture retains this unresized vector across
+    // SAFETY: The window-preflight fixture keeps this unresized vector across
     // accepted and rejected schedules. Its CPU-addressed allocations have no hardware
     // or asynchronous users.
     unsafe { RegionAllocator::new(base..base + backing.len() as u64 * 8) };
@@ -71,7 +71,7 @@ fn scheduled_window_and_phase_preflight() {
         assert_schedule_refused(&mut c, &model, buffer.physical(), target);
     }
     // Inclusive final frame of the donor's window, still within one
-    // unambiguous future half-cycle. The actual encoded Frame ID is 895.
+    // unambiguous future half-cycle. The encoded Frame ID is 895.
     let ticket = c
         .submit_iso_scheduled(
             1,
@@ -88,7 +88,7 @@ fn scheduled_window_and_phase_preflight() {
     c.cancel(1, 3).unwrap();
     assert!(c.completed_iso(&ticket).unwrap().is_err());
 
-    // Full-speed bInterval=2 means an actual 16-microframe interval.
+    // Full-speed bInterval=2 means a 16-microframe interval.
     let (mut c, model) = controller(&mut dma, FULL_SPEED, 32, true);
     let mut ep = endpoint(0x81, FULL_SPEED);
     ep.interval = 2;

@@ -1,0 +1,511 @@
+// SPDX-License-Identifier: BSD-3-Clause-Clear AND GPL-2.0-only
+// Copyright (C) 2020-2023 MediaTek Inc.
+// Count comparison and queue updates follow pinned Linux mac80211/mlme.c.
+//! Associated WMM observations from this owner's completed native RX, followed
+//! by an independently guarded real EDCA command. Negotiated identity is immutable.
+use super::*;
+use station::phy::{AccessCategory, Role, Wmm};
+
+const OBSERVATION_LIFETIME_US: u64 = 30_000_000;
+
+/// Last complete EDCA ACK plus descriptor/mapping retirement. This is
+/// local queue configuration, not new association or authentication evidence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AppliedEdca {
+    pub parameter_set_count: u8,
+    pub access_categories: [AccessCategory; 4],
+}
+
+pub(super) struct Observed<C: 'static> {
+    resource: Arc<C>,
+    context: Arc<station::AssociationContext>,
+    profile: Profile,
+    association: u64,
+    peer_generation: u64,
+    ptk: Option<KeyIdentity>,
+    gtk: Option<KeyIdentity>,
+    seen: u64,
+    count: u8,
+    parameters: [AccessCategory; 4],
+    // Keep the normalized completed DMA observation, never caller bytes.
+    _frame: Mpdu,
+}
+
+impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
+    pub fn applied_edca(&self) -> Option<&AppliedEdca> {
+        self.state().modern.as_ref()?.applied_edca.as_ref()
+    }
+    pub fn pending_edca(&self) -> bool {
+        self.state().edca.is_some()
+    }
+
+    pub(super) fn observe_edca(s: &mut Owned<I, Q, C>, frame: Mpdu) -> Result<(), Error> {
+        let p = s.profile.ok_or(Error::WrongProfile)?;
+        let modern = s.modern.as_ref().ok_or(Error::WrongPhase)?;
+        s.station
+            .validate_association_context(modern.context())
+            .map_err(Error::Station)?;
+        let h = frame.header();
+        let subtype = h.control & 0x00fc;
+        let channel = (
+            frame.radio.band,
+            frame.radio.channel,
+            frame.radio.frequency_mhz,
+        );
+        // A frame received before a channel switch is no longer the AP's.
+        if Self::switched_from(s, channel) {
+            return Ok(());
+        }
+        if h.transmitter != Some(p.peer)
+            || frame.bytes().get(16..22) != Some(p.peer.0.as_slice())
+            || (
+                frame.radio.band,
+                frame.radio.channel,
+                frame.radio.frequency_mhz,
+            ) != (p.channel.band, p.channel.number, p.channel.frequency_mhz)
+            || modern.context().bssid() != p.peer
+            || s.station.operating_definition().map(|d| d.control) != Some(p.channel)
+        {
+            return Err(Error::WrongProfile);
+        }
+        // Contradictory current-peer evidence cannot leave an older pending
+        // relaxation eligible. This drops only an unsubmitted CPU observation.
+        s.edca = None;
+        if s.phase != Phase::Associated
+            || frame.fcs_error
+            || frame.monitor_only
+            || h.protected()
+            || h.fragmented()
+            || h.control & 0x0300 != 0
+            || h.length != 24
+            || frame.aggregation != wifi::Aggregation::default()
+            || !matches!(subtype, 0x0080 | 0x0050)
+            || (subtype == 0x0080 && h.receiver != crate::Mac::BROADCAST)
+            || (subtype == 0x0050 && h.receiver != p.interface.address)
+        {
+            return Err(Error::WrongProfile);
+        }
+        let mut elements = frame.bytes().get(36..).ok_or(Error::WrongProfile)?;
+        // mac80211 processes a beacon's channel switch elements first.
+        if subtype == 0x0080 {
+            Self::process_channel_switch(s, elements, csa::Source::Beacon, None);
+        }
+        let modern = s.modern.as_ref().ok_or(Error::WrongPhase)?;
+        // mac80211 `ieee80211_handle_bss_capability`: on 2.4 GHz the slot
+        // follows the AP's Short Slot Time capability; elsewhere it is 9 us.
+        if p.channel.band == wifi::Band::Ghz2 {
+            let capabilities = u16::from_le_bytes([frame.bytes()[34], frame.bytes()[35]]);
+            let slot = if capabilities & (1 << 10) != 0 { 9 } else { 20 };
+            s.slot_time = (slot != p.slot_time).then_some(slot);
+        }
+        if let (Some(signal), Some(association)) =
+            (frame.radio.signal_dbm, s.station.association_epoch())
+        {
+            s.cqm.beacon(association, i32::from(signal));
+        }
+        // mac80211 `ieee80211_config_bw`: the AP's operation narrowed to the
+        // association, applied when it differs from the current channel.
+        let context = modern.context().clone();
+        let operating = s.station.operating_definition().ok_or(Error::WrongPhase)?;
+        let current = s.channel.unwrap_or(operating);
+        s.channel_change = match context.beacon_definition(elements, operating.control) {
+            Ok(definition) if definition == current => None,
+            Ok(definition) if definition.within(&operating) => Some(Some(definition)),
+            _ => Some(None),
+        };
+        if elements.len() > 2300 {
+            return Err(Error::WrongProfile);
+        }
+        let mut observed = None;
+        while !elements.is_empty() {
+            let n = usize::from(*elements.get(1).ok_or(Error::WrongProfile)?);
+            let data = elements.get(2..2 + n).ok_or(Error::WrongProfile)?;
+            // MU-EDCA requires its own current count and firmware semantics.
+            if elements[0] == 255 && data.first() == Some(&38) {
+                return Err(Error::Unsupported);
+            }
+            if elements[0] == 221 && data.get(..4) == Some(&[0, 0x50, 0xf2, 2]) {
+                if observed.is_some() {
+                    return Err(Error::WrongProfile);
+                }
+                observed =
+                    Some(Wmm::parse(data, Role::AccessPoint).map_err(|_| Error::WrongProfile)?);
+            }
+            elements = &elements[2 + n..];
+        }
+        let Some(observed) = observed else {
+            return Ok(());
+        };
+        let parameters = observed.parameters.ok_or(Error::Unsupported)?;
+        let negotiated = modern.context().negotiated();
+        negotiated.wmm.as_ref().ok_or(Error::Unsupported)?;
+        let original_ap = negotiated.peer().wmm().ok_or(Error::Unsupported)?;
+        // U-APSD continues to use the immutable association. Admission
+        // control is host-side: data TIDs follow the applied flags, as
+        // `ieee80211_sta_wmm_params` updates `wmm_acm`.
+        if observed.qos_info & 0x80 != original_ap.qos_info & 0x80
+            || parameters.iter().any(|ac| ac.ecw_min == 0)
+        {
+            return Err(Error::Unsupported);
+        }
+        let count = observed.qos_info & 15;
+        let applied = modern.applied_edca.as_ref().ok_or(Error::WrongPhase)?;
+        // Pinned source uses equality, not ordering:15 ->0 is a real update.
+        if count == applied.parameter_set_count {
+            return Ok(());
+        }
+        s.edca = Some(Observed {
+            resource: s.controller.state().resource.clone(),
+            context: modern.context().clone(),
+            profile: p,
+            association: s.station.association_epoch().ok_or(Error::WrongPhase)?,
+            peer_generation: s.peer_generation,
+            ptk: s.ptk.as_ref().and_then(|key| key.slot().installed()),
+            gtk: s.gtk.as_ref().and_then(|key| key.slot().installed()),
+            seen: s.controller.state().control.clock.now_us(),
+            count,
+            parameters,
+            _frame: frame,
+        });
+        Ok(())
+    }
+
+    /// Whether a beacon changed the channel: `Some(false)` when the change
+    /// leaves the associated channel.
+    pub fn pending_channel(&self) -> Option<bool> {
+        self.state().channel_change.map(|change| change.is_some())
+    }
+
+    /// mac80211 `ieee80211_link_change_chanreq` to `mt7925_change_chanctx`:
+    /// sends the channel a beacon changed through `mt7925_mcu_set_chctx`.
+    ///
+    /// # Safety
+    /// As `update_slot_time_modern`.
+    pub unsafe fn update_channel_modern<
+        H: wifi::regulatory::HardwarePolicy,
+        O: wifi::regulatory::OsPolicy,
+    >(
+        &mut self,
+        authority: &mut wifi::regulatory::Owner<H, O>,
+        admission: wifi::regulatory::AssociationAdmission,
+    ) -> Result<(), Error> {
+        let s = self.state_mut();
+        let Some(Some(definition)) = s.channel_change else {
+            return Err(Error::WrongPhase);
+        };
+        if s.phase != Phase::Associated {
+            return Err(Error::WrongPhase);
+        }
+        Self::command_ready(s)?;
+        let profile = s.profile.ok_or(Error::WrongPhase)?;
+        let body = profile.channel_request(&definition).map_err(Error::Codec)?;
+        s.replies.try_reserve(1).map_err(|_| Error::NoMemory)?;
+        let phase = &mut s.phase;
+        let controller = &mut s.controller;
+        let replies = &mut s.replies;
+        // SAFETY: covered by this function's own safety contract.
+        unsafe {
+            authority.publish_association(
+                admission,
+                &s.station,
+                wifi::regulatory::AssociationUse::Management,
+                |_, _| {
+                    *phase = Phase::Quarantined;
+                    Self::command_parts(controller, replies, Command::BssInfo, &body)?;
+                    *phase = Phase::Associated;
+                    Ok(())
+                },
+            )
+        }
+        .map_err(Error::Regulatory)??;
+        s.channel = Some(definition);
+        s.channel_change = None;
+        Ok(())
+    }
+
+    /// Whether the firmware holds the BSS in dynamic power save.
+    pub fn power_save(&self) -> bool {
+        self.state().power_save
+    }
+
+    /// Linux `mt7925_mcu_uni_bss_ps` for BSS_CHANGED_PS: the firmware saves
+    /// power between beacons while `enable`, waking for traffic itself.
+    ///
+    /// # Safety
+    /// As `update_slot_time_modern`.
+    pub unsafe fn set_power_save_modern<
+        H: wifi::regulatory::HardwarePolicy,
+        O: wifi::regulatory::OsPolicy,
+    >(
+        &mut self,
+        authority: &mut wifi::regulatory::Owner<H, O>,
+        admission: wifi::regulatory::AssociationAdmission,
+        enable: bool,
+    ) -> Result<(), Error> {
+        let s = self.state_mut();
+        if s.phase != Phase::Associated {
+            return Err(Error::WrongPhase);
+        }
+        Self::command_ready(s)?;
+        let profile = s.profile.ok_or(Error::WrongPhase)?;
+        let body = profile.power_save_request(enable).map_err(Error::Codec)?;
+        s.replies.try_reserve(1).map_err(|_| Error::NoMemory)?;
+        let phase = &mut s.phase;
+        let controller = &mut s.controller;
+        let replies = &mut s.replies;
+        // SAFETY: covered by this function's own safety contract.
+        unsafe {
+            authority.publish_association(
+                admission,
+                &s.station,
+                wifi::regulatory::AssociationUse::Management,
+                |_, _| {
+                    *phase = Phase::Quarantined;
+                    Self::command_parts(controller, replies, Command::BssInfo, &body)?;
+                    *phase = Phase::Associated;
+                    Ok(())
+                },
+            )
+        }
+        .map_err(Error::Regulatory)??;
+        s.power_save = enable;
+        Ok(())
+    }
+
+    /// Linux `mt7925_mcu_set_rssimonitor` for BSS_CHANGED_CQM: firmware RSSI
+    /// events past `threshold` dBm with `hysteresis`, or none for `None`.
+    /// Firmware without RSSI_NOTIFY_EVT_EN, for which Linux leaves
+    /// IEEE80211_VIF_SUPPORTS_CQM_RSSI clear, is watched from beacons.
+    ///
+    /// # Safety
+    /// As `update_slot_time_modern`.
+    pub unsafe fn set_rssi_monitor_modern<
+        H: wifi::regulatory::HardwarePolicy,
+        O: wifi::regulatory::OsPolicy,
+    >(
+        &mut self,
+        authority: &mut wifi::regulatory::Owner<H, O>,
+        admission: wifi::regulatory::AssociationAdmission,
+        monitor: Option<(i32, u32)>,
+    ) -> Result<(), Error> {
+        let s = self.state_mut();
+        let flags = s
+            .controller
+            .state()
+            .policy
+            .as_ref()
+            .and_then(|policy| policy.capabilities().observed().chip_flags());
+        if s.phase != Phase::Associated {
+            return Err(Error::WrongPhase);
+        }
+        // Without firmware RSSI events mac80211 watches beacons instead.
+        if flags.unwrap_or(0) & 2 == 0 {
+            s.cqm.set(monitor, false);
+            return Ok(());
+        }
+        Self::command_ready(s)?;
+        let profile = s.profile.ok_or(Error::WrongPhase)?;
+        let (threshold, hysteresis) = monitor.unwrap_or_default();
+        let hysteresis = hysteresis as i32;
+        let body = profile
+            .rssi_monitor_request(
+                monitor.is_some(),
+                threshold.wrapping_add(hysteresis) as i8,
+                threshold.wrapping_sub(hysteresis) as i8,
+            )
+            .map_err(Error::Codec)?;
+        s.replies.try_reserve(1).map_err(|_| Error::NoMemory)?;
+        let phase = &mut s.phase;
+        let controller = &mut s.controller;
+        let replies = &mut s.replies;
+        // SAFETY: covered by this function's own safety contract.
+        unsafe {
+            authority.publish_association(
+                admission,
+                &s.station,
+                wifi::regulatory::AssociationUse::Management,
+                |_, _| {
+                    *phase = Phase::Quarantined;
+                    Self::command_parts(controller, replies, Command::RssiMonitor, &body)?;
+                    *phase = Phase::Associated;
+                    Ok(())
+                },
+            )
+        }
+        .map_err(Error::Regulatory)??;
+        s.cqm.set(monitor, true);
+        Ok(())
+    }
+
+    pub fn pending_slot_time(&self) -> bool {
+        self.state().slot_time.is_some()
+    }
+
+    /// Linux `mt7925_link_info_changed` on BSS_CHANGED_ERP_SLOT: sends the
+    /// slot time a beacon changed through `mt7925_mcu_set_timing`.
+    ///
+    /// # Safety
+    /// The exact-controller, applied-policy and revocation contracts of
+    /// `update_edca_modern` apply.
+    pub unsafe fn update_slot_time_modern<
+        H: wifi::regulatory::HardwarePolicy,
+        O: wifi::regulatory::OsPolicy,
+    >(
+        &mut self,
+        authority: &mut wifi::regulatory::Owner<H, O>,
+        admission: wifi::regulatory::AssociationAdmission,
+    ) -> Result<(), Error> {
+        let s = self.state_mut();
+        let slot = s.slot_time.ok_or(Error::WrongPhase)?;
+        if s.phase != Phase::Associated {
+            return Err(Error::WrongPhase);
+        }
+        Self::command_ready(s)?;
+        let mut profile = s.profile.ok_or(Error::WrongPhase)?;
+        profile.slot_time = slot;
+        let body = profile.timing().map_err(Error::Codec)?;
+        s.replies.try_reserve(1).map_err(|_| Error::NoMemory)?;
+        let phase = &mut s.phase;
+        let current = &mut s.profile;
+        let controller = &mut s.controller;
+        let replies = &mut s.replies;
+        // SAFETY: covered by this function's own safety contract.
+        unsafe {
+            authority.publish_association(
+                admission,
+                &s.station,
+                wifi::regulatory::AssociationUse::Management,
+                |_, _| {
+                    *phase = Phase::Quarantined;
+                    Self::command_parts(controller, replies, Command::BssInfo, &body)?;
+                    *current = Some(profile);
+                    *phase = Phase::Associated;
+                    Ok(())
+                },
+            )
+        }
+        .map_err(Error::Regulatory)??;
+        s.slot_time = None;
+        Ok(())
+    }
+
+    /// No received event waits ahead of a command's reply.
+    pub(super) fn command_ready(s: &Owned<I, Q, C>) -> Result<(), Error> {
+        let controller = s.controller.state();
+        if !s.pending_rx.is_empty() || !controller.mailbox.as_ref().unwrap().receive_idle() {
+            return Err(Error::NeedsDrain);
+        }
+        Ok(())
+    }
+
+    fn validate_edca(s: &Owned<I, Q, C>, observed: &Observed<C>) -> Result<(), Error> {
+        if s.phase != Phase::Associated {
+            return Err(Error::WrongPhase);
+        }
+        if s.modern
+            .as_ref()
+            .is_none_or(|m| !Arc::ptr_eq(m.context(), &observed.context))
+            || !Arc::ptr_eq(&observed.resource, &s.controller.state().resource)
+            || s.profile != Some(observed.profile)
+            || s.station.association_epoch() != Some(observed.association)
+            || s.peer_generation != observed.peer_generation
+            || s.ptk.as_ref().and_then(|key| key.slot().installed()) != observed.ptk
+            || s.gtk.as_ref().and_then(|key| key.slot().installed()) != observed.gtk
+        {
+            return Err(Error::Station(station::Error::Stale));
+        }
+        s.station
+            .validate_association_context(&observed.context)
+            .map_err(Error::Station)?;
+        if s.controller
+            .state()
+            .control
+            .clock
+            .now_us()
+            .checked_sub(observed.seen)
+            .is_none_or(|age| age > OBSERVATION_LIFETIME_US)
+        {
+            return Err(Error::GrantTimeout);
+        }
+        Ok(())
+    }
+
+    /// Install the latest completed current-peer WMM observation.
+    /// `limit` is the current immutable control-channel regulatory WMM rule;
+    /// clamping and request encoding happen inside publication guards.
+    ///
+    /// # Safety
+    /// The exact-controller, applied-policy, revocation and kept autonomous
+    /// user contracts of `configure_modern` apply. `limit` must belong to that
+    /// same current OS country/control-channel rule, not an invented relaxation.
+    /// As Linux `mt7925_mcu_set_tx` does, the command goes beside live
+    /// traffic and block-ack sessions; only received events queued ahead of
+    /// its reply must drain first. External publication/reset/IRQ
+    /// paths serialize through this owner and permission; no raw user may publish new work during the checked drain and
+    /// command. This function preserves keys/context and grants no new
+    /// PHY, ACM, U-APSD, PMF or 6 GHz admission.
+    pub unsafe fn update_edca_modern<
+        H: wifi::regulatory::HardwarePolicy,
+        O: wifi::regulatory::OsPolicy,
+    >(
+        &mut self,
+        authority: &mut wifi::regulatory::Owner<H, O>,
+        admission: wifi::regulatory::AssociationAdmission,
+        limit: Option<&wifi::regulatory::database::Wmm>,
+    ) -> Result<(), Error> {
+        let s = self.state_mut();
+        let observed = s.edca.as_ref().ok_or(Error::WrongPhase)?;
+        Self::validate_edca(s, observed)?;
+        Self::command_ready(s)?;
+        s.replies.try_reserve(1).map_err(|_| Error::NoMemory)?;
+        let clock = s.controller.state().control.clock;
+        let observed = s.edca.as_ref().unwrap();
+        let phase = &mut s.phase;
+        let controller = &mut s.controller;
+        let replies = &mut s.replies;
+        // SAFETY: covered by this function's exact-controller/policy contract.
+        let result = unsafe {
+            authority.publish_edca(
+                admission,
+                &s.station,
+                observed.count,
+                &observed.parameters,
+                limit,
+                |operation| {
+                    if clock
+                        .now_us()
+                        .checked_sub(observed.seen)
+                        .is_none_or(|age| age > OBSERVATION_LIFETIME_US)
+                    {
+                        return Err(Error::GrantTimeout);
+                    }
+                    let effective = *operation.effective();
+                    let body = wire::modern::Configuration::observed_edca_request(
+                        observed.profile,
+                        operation.observed(),
+                        &effective,
+                    )
+                    .map_err(Error::Codec)?;
+                    *phase = Phase::Quarantined;
+                    Self::command_parts(controller, replies, Command::Edca, &body)?;
+                    if clock
+                        .now_us()
+                        .checked_sub(observed.seen)
+                        .is_none_or(|age| age > OBSERVATION_LIFETIME_US)
+                    {
+                        return Err(Error::GrantTimeout);
+                    }
+                    Ok(AppliedEdca {
+                        parameter_set_count: observed.count,
+                        access_categories: effective,
+                    })
+                },
+            )
+        }
+        .map_err(Error::Regulatory)??;
+        s.modern.as_mut().unwrap().applied_edca = Some(result);
+        s.edca = None;
+        s.phase = Phase::Associated;
+        Ok(())
+    }
+}

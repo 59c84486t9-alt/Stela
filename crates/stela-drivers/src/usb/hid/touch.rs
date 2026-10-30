@@ -272,7 +272,7 @@ impl Assembler {
 
 impl UsbInput {
     /// Enable only the descriptor's single-Finger scalar absolute profile.
-    /// Device capacity comes from its actual acknowledged Feature GET_REPORT.
+    /// Device capacity comes from its acknowledged Feature GET_REPORT.
     /// Other layouts remain available unchanged as raw HID reports/events.
     /// A rejected enable keeps the previous selection; stale identity clears it.
     pub fn enable_touch_frames(
@@ -313,7 +313,7 @@ impl UsbInput {
 
 #[cfg(test)]
 mod tests {
-    use super::super::touch_tests::SINGLE;
+    use super::super::tests::touch::SINGLE;
     use super::*;
     use alloc::vec;
     fn fixture() -> (Descriptor, events::Decoder, Assembler) {
@@ -407,7 +407,7 @@ mod tests {
         );
     }
     #[test]
-    fn descriptor_bounds_and_actual_capacity_refuse_invalid_mandatory_values() {
+    fn descriptor_bounds_and_capacity_refuse_invalid_mandatory_values() {
         for (offset, value) in [(1, 128), (2, 2), (7, 4)] {
             let (d, mut decoder, mut a) = fixture();
             update(&d, &mut decoder, &mut a, &raw(1, 1, 2, 1));
@@ -424,14 +424,14 @@ mod tests {
         }
         let (d, mut decoder, mut a) = fixture();
         let mut invalid = raw(1, 1, 1, 7);
-        invalid[4] = 0x80; // X=32778, outside actual logical maximum.
+        invalid[4] = 0x80; // X=32778, outside logical maximum.
         assert_eq!(
             update(&d, &mut decoder, &mut a, &invalid).discarded,
             [TouchDiscard::InvalidValue]
         );
     }
     #[test]
-    fn report_and_application_identity_are_never_combined_and_latest_scan_is_not_replayed() {
+    fn touch_frames_require_matching_identity_and_a_new_scan() {
         let (d, mut decoder, mut a) = fixture();
         let frame = d.decode(&raw(1, 1, 2, 7)).unwrap();
         let event = decoder.update(&d, &frame).remove(0);
@@ -458,7 +458,7 @@ mod tests {
             update(&d, &mut decoder, &mut a, &raw(1, 1, 1, 7)).discarded,
             [TouchDiscard::RepeatedScan]
         );
-        // No monotonic time requirement: actual 16-bit counter rollover works.
+        // No monotonic time requirement: 16-bit counter rollover works.
         assert_eq!(
             update(&d, &mut decoder, &mut a, &raw(1, 1, 1, 0))
                 .frames

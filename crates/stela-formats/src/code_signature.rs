@@ -20,7 +20,7 @@ const CSMAGIC_EMBEDDED_DER_ENTITLEMENTS: u32 = 0xfade_7172;
 const CSMAGIC_BLOBWRAPPER: u32 = 0xfade_0b01;
 const CSSLOT_SIGNATURESLOT: u32 = 0x1_0000;
 /// The SHA-256 fingerprint of the Apple Code Signing Certification
-/// Authority certificate, which issues only Apple's own signing identities
+/// Permission certificate, which issues only Apple's own signing identities
 /// (Software Signing) under the Apple Root CA.
 const APPLE_CODE_SIGNING_CA: [u8; 32] = [
     0x5b, 0xda, 0xb1, 0x28, 0x8f, 0xc1, 0x68, 0x92, 0xfe, 0xf5, 0x0c, 0x65, 0x8d, 0xb5, 0x4f, 0x1e,
@@ -184,7 +184,7 @@ pub struct CodeSignature {
     pub start_offset: u64,
     pub end_offset: u64,
     /// Whether a verified CMS signature binds the code directory to a
-    /// signing certificate the Apple Code Signing Certification Authority
+    /// signing certificate the Apple Code Signing Certification Permission
     /// issued under the Apple Root CA: code Apple itself signed ("anchor
     /// apple"). A signature that fails verification is not Apple's.
     pub apple_signed: bool,

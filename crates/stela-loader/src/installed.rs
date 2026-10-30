@@ -9,7 +9,7 @@
 //! `boot/active`; a `--boot-hash` names it instead. The LocalPolicy's
 //! signature is the SEP's, so without a [`PolicyAuthority`] its `nsih` only
 //! narrows the choice. Whatever names it, a candidate
-//! `<volume-group>/boot/<hash>/` qualifies by evidence when all three hold,
+//! `<volume-group>/boot/<hash>/` checks by evidence when all three hold,
 //! and exactly one candidate must:
 //!
 //! - its Image4 objects carry one manifest whose SHA-384 is the directory's
@@ -33,6 +33,7 @@
 //! manifest. The product version and build come from the volume group's
 //! `SystemVersion.plist` on Preboot, the model and board name from the
 //! DeviceTree, and chip and board identifiers from the boot manifest.
+use crate::{Error, Result, Within};
 use crate::{
     apple_device_tree::DeviceTree,
     boot_bundle::{self, Bundle, Input, Inputs, Options, RootHash, Source, Target},
@@ -43,7 +44,7 @@ use crate::{
     root_selection::Root,
 };
 use alloc::{format, string::String, vec::Vec};
-use anyhow::{Context, Result, anyhow, bail, ensure};
+use stela_contracts::{refuse, require};
 use {
     stela_formats::apfs, stela_formats::apfs::Container, stela_formats::apfs::Volume,
     stela_formats::apfs::btree::Hash, stela_formats::img4, stela_formats::payload::ReadAt,
@@ -75,7 +76,7 @@ pub struct Evidence {
     /// What named the directory: a LocalPolicy, `boot/active`, the
     /// `--boot-hash`, or nothing (evidence alone).
     pub named_by: Option<String>,
-    /// Every requirement that failed; empty when the directory qualifies.
+    /// Every requirement that failed; empty when the directory checks.
     pub problems: Vec<String>,
 }
 
@@ -99,25 +100,29 @@ pub fn root_hash_record(payload: &[u8]) -> Result<(Hash, &[u8])> {
         Ok(u32::from_le_bytes(
             payload
                 .get(at..at + 4)
-                .context("truncated root-hash record")?
+                .ok_or(refuse!("truncated root-hash record"))?
                 .try_into()
                 .unwrap(),
         ))
     };
-    ensure!(
-        word(0)? == ROOT_HASH_RECORD_VERSION,
-        "root-hash record version {} is not {ROOT_HASH_RECORD_VERSION}",
-        word(0)?
+    let version = word(0)?;
+    require!(
+        version == ROOT_HASH_RECORD_VERSION,
+        "root-hash record version {version} is not {ROOT_HASH_RECORD_VERSION}",
+        version,
+        ROOT_HASH_RECORD_VERSION
     );
-    let hash = Hash::from_type(word(8)?).map_err(|e| anyhow!("{e}"))?;
+    let hash = Hash::from_type(word(8)?)?;
     let length = word(12)? as usize;
-    ensure!(
+    require!(
         length == hash.size(),
-        "root-hash record holds {length} bytes for a {hash:?} hash"
+        "root-hash record holds {length} bytes for a {hash} hash",
+        length,
+        ?hash
     );
     let bytes = payload
         .get(ROOT_HASH_HEADER_BYTES..ROOT_HASH_HEADER_BYTES + length)
-        .context("truncated root-hash record")?;
+        .ok_or(refuse!("truncated root-hash record"))?;
     Ok((hash, bytes))
 }
 
@@ -136,8 +141,7 @@ fn evaluate<R: ReadAt>(
     };
     let mut manifests: Vec<Vec<u8>> = Vec::new();
     for object in &set.objects {
-        if let Some(manifest) =
-            preboot::manifest(container, preboot, object).map_err(|e| anyhow!("{e}"))?
+        if let Some(manifest) = preboot::manifest(container, preboot, object)?
             && !manifests.contains(&manifest)
         {
             manifests.push(manifest);
@@ -183,8 +187,8 @@ fn evaluate<R: ReadAt>(
     };
     let record = match root_hash {
         Some(object) => {
-            let file = preboot::read(container, preboot, &object).map_err(|e| anyhow!("{e}"))?;
-            let parts = img4::parse(&file).map_err(|e| anyhow!("{}: {e}", object.path))?;
+            let file = preboot::read(container, preboot, &object)?;
+            let parts = img4::parse(&file).within(|| refuse!("{path}", path = object.path))?;
             let digest = manifest
                 .as_ref()
                 .and_then(|m| m.object("isys"))
@@ -202,13 +206,13 @@ fn evaluate<R: ReadAt>(
                 None => {}
             }
             let im4p = im4p::parse(parts.payload)?;
-            ensure!(
+            require!(
                 im4p.compression_algorithm.is_none(),
-                "{}: a compressed root-hash object",
-                object.path
+                "{path}: a compressed root-hash object",
+                path = object.path
             );
             let (hash, bytes) =
-                root_hash_record(im4p.payload).with_context(|| object.path.clone())?;
+                root_hash_record(im4p.payload).within(|| refuse!("{path}", path = object.path))?;
             evidence.root_hash = Some(hex::encode(bytes));
             Some((hash, bytes.to_vec()))
         }
@@ -247,7 +251,7 @@ fn named<R: ReadAt>(
         sets.iter()
             .any(|s| s.volume_group == group && s.boot_hash.eq_ignore_ascii_case(hash))
     };
-    let files = preboot::local_policies(container, preboot, group).map_err(|e| anyhow!("{e}"))?;
+    let files = preboot::local_policies(container, preboot, group)?;
     let mut policies = Vec::new();
     for (path, bytes) in &files {
         match LocalPolicy::parse(path, bytes) {
@@ -289,7 +293,7 @@ fn named<R: ReadAt>(
             several.len()
         )),
     }
-    match preboot::active(container, preboot, group).map_err(|e| anyhow!("{e}"))? {
+    match preboot::active(container, preboot, group)? {
         Some(hash) if exists(&hash) => Ok(Some((hash, format!("{group}/boot/active")))),
         Some(hash) => {
             notes.push(format!("{group}/boot/active names a missing boot/{hash}"));
@@ -305,7 +309,7 @@ pub fn select<R: ReadAt>(
     container: &mut Container<R>,
     request: &Request,
 ) -> Result<(Volume, BootSet, Evidence)> {
-    let (preboot, sets) = preboot::candidates(container).map_err(|e| anyhow!("{e}"))?;
+    let (preboot, sets) = preboot::candidates(container)?;
     let listed = || {
         sets.iter()
             .map(BootSet::directory)
@@ -323,11 +327,11 @@ pub fn select<R: ReadAt>(
             groups.push(set.volume_group.clone());
         }
     }
-    ensure!(
+    require!(
         !groups.is_empty(),
-        "NVRAM boots volume group {}, which has no boot directory here; the candidates are {}",
-        wanted.unwrap_or_default(),
-        listed()
+        "NVRAM boots volume group {unwrap_or_default}, which has no boot directory here; the candidates are {listed}",
+        unwrap_or_default = wanted.unwrap_or_default(),
+        listed = listed()
     );
     let mut notes = Vec::new();
     let mut chosen: Vec<(BootSet, Option<String>)> = Vec::new();
@@ -357,11 +361,11 @@ pub fn select<R: ReadAt>(
             None => chosen.extend(in_group.map(|s| (s.clone(), None))),
         }
     }
-    ensure!(
+    require!(
         !chosen.is_empty(),
-        "no boot directory is named {}; the candidates are {}",
-        request.boot_hash.unwrap_or_default(),
-        listed()
+        "no boot directory is named {unwrap_or_default}; the candidates are {listed}",
+        unwrap_or_default = request.boot_hash.unwrap_or_default(),
+        listed = listed()
     );
     let mut qualified = Vec::new();
     let mut refused = Vec::new();
@@ -384,20 +388,19 @@ pub fn select<R: ReadAt>(
             let (set, evidence) = qualified.remove(0);
             Ok((preboot, set, evidence))
         }
-        0 => bail!(
-            "no boot directory is shown to be the installed system's ({})",
-            refused.join(" | ")
-        ),
-        count => bail!(
-            "{count} boot directories ({}) each match their System volume, and neither a \
-             LocalPolicy nor boot/active names one ({})",
-            qualified
+        0 => Err(refuse!(
+            "no boot directory is shown to be the installed system's ({refused})",
+            refused = refused.join(" | ")
+        )
+        .into()),
+        count => {
+            let directories = qualified
                 .iter()
                 .map(|(set, _)| set.directory())
-                .collect::<Vec<_>>()
-                .join(", "),
-            refused.join(" | ")
-        ),
+                .collect::<Vec<_>>();
+            Err(refuse!("{count} boot directories ({directories}) each match their System volume, and neither a \
+                 LocalPolicy nor boot/active names one ({refused})", count, directories = directories.join(", "), refused = refused.join(" | ")).into())
+        }
     }
 }
 
@@ -432,14 +435,14 @@ struct Disk<'a, R: ReadAt> {
 impl<R: ReadAt> Disk<'_, R> {
     fn read(&mut self, object: &preboot::Object) -> Result<Vec<u8>> {
         preboot::read(self.container, &self.preboot, object)
-            .map_err(|e| anyhow!("{}: {e}", object.path))
+            .within(|| refuse!("{path}", path = object.path))
     }
 
     /// The single object of `kind`, decoded, and its manifest.
     fn decode(&mut self, kind: &[u8; 4], limit: u64) -> Result<(Decoded, Option<Vec<u8>>)> {
-        let object = self.set.require(kind).map_err(|e| anyhow!("{e}"))?.clone();
+        let object = self.set.require(kind)?.clone();
         let file = self.read(&object)?;
-        let parts = img4::parse(&file).map_err(|e| anyhow!("{}: {e}", object.path))?;
+        let parts = img4::parse(&file).within(|| refuse!("{path}", path = object.path))?;
         let (bytes, receipt) = im4p::decode(parts.payload, limit)?;
         let decoded = Decoded {
             source: Source {
@@ -458,11 +461,11 @@ impl<R: ReadAt> Disk<'_, R> {
 
     /// An optional object kept as its encoded payload, as the SEP firmware is.
     fn opaque(&mut self, kind: &[u8; 4]) -> Result<Option<Decoded>> {
-        let Some(object) = self.set.object(kind).map_err(|e| anyhow!("{e}"))?.cloned() else {
+        let Some(object) = self.set.object(kind)?.cloned() else {
             return Ok(None);
         };
         let file = self.read(&object)?;
-        let parts = img4::parse(&file).map_err(|e| anyhow!("{}: {e}", object.path))?;
+        let parts = img4::parse(&file).within(|| refuse!("{path}", path = object.path))?;
         Ok(Some(Decoded {
             source: Source {
                 component: format!("Preboot {}", String::from_utf8_lossy(kind)),
@@ -484,16 +487,17 @@ impl<R: ReadAt> Disk<'_, R> {
         let inode = self
             .preboot
             .lookup(device, &path, true)
-            .map_err(|e| anyhow!("{path}: {e}"))?;
+            .within(|| refuse!("{path}", path))?;
         let bytes = self
             .preboot
             .read(device, &inode)
-            .map_err(|e| anyhow!("{path}: {e}"))?;
-        let text = core::str::from_utf8(&bytes).with_context(|| format!("{path} is not UTF-8"))?;
+            .within(|| refuse!("{path}", path))?;
+        let text =
+            core::str::from_utf8(&bytes).map_err(|_| refuse!("{path} is not UTF-8", path))?;
         let field = |key: &str| -> Result<String> {
             plist_string(text, key)
-                .with_context(|| path.clone())?
-                .with_context(|| format!("{path} has no {key}"))
+                .within(|| refuse!("{path}", path))?
+                .ok_or_else(|| refuse!("{path} has no {key}", path, key).into())
         };
         Ok((field("ProductVersion")?, field("ProductBuildVersion")?))
     }
@@ -503,11 +507,11 @@ impl<R: ReadAt> Disk<'_, R> {
 /// property list; `None` when the key is absent. Binary property lists are
 /// refused.
 pub(crate) fn plist_string(text: &str, key: &str) -> Result<Option<String>> {
-    ensure!(
+    require!(
         !text.starts_with("bplist"),
         "binary property lists are unsupported"
     );
-    ensure!(
+    require!(
         text.contains("<plist") && text.contains("<dict>"),
         "not an XML property list"
     );
@@ -520,21 +524,21 @@ pub(crate) fn plist_string(text: &str, key: &str) -> Result<Option<String>> {
         .strip_prefix("<string>")
         .and_then(|rest| rest.split_once("</string>"))
         .map(|(value, _)| value)
-        .with_context(|| format!("{key} is not a string"))?;
+        .ok_or_else(|| refuse!("{key} is not a string", key))?;
     let mut decoded = String::new();
     let mut rest = value;
     while let Some(at) = rest.find('&') {
         decoded.push_str(&rest[..at]);
         let (entity, after) = rest[at..]
             .split_once(';')
-            .context("unterminated XML entity")?;
+            .ok_or(refuse!("unterminated XML entity"))?;
         decoded.push(match entity {
             "&amp" => '&',
             "&lt" => '<',
             "&gt" => '>',
             "&quot" => '"',
             "&apos" => '\'',
-            _ => bail!("unsupported XML entity {entity};"),
+            _ => return Err(refuse!("unsupported XML entity {entity};", entity).into()),
         });
         rest = after;
     }
@@ -546,13 +550,19 @@ fn root_string(tree: &DeviceTree, property: &str) -> Result<String> {
     tree.property("/", property)
         .and_then(|p| p.as_str())
         .map(Into::into)
-        .with_context(|| format!("the DeviceTree root has no {property}"))
+        .ok_or_else(|| refuse!("the DeviceTree root has no {property}", property).into())
 }
 
 fn manifest_id(manifest: Option<&im4m::Manifest>, key: &str) -> Result<Option<u32>> {
     match manifest.and_then(|m| m.property(key)) {
-        Some(im4m::Value::Integer(value)) => Ok(Some(u32::try_from(*value)?)),
-        Some(_) => bail!("boot manifest {key} is not an integer"),
+        Some(im4m::Value::Integer(value)) => Ok(Some(u32::try_from(*value).map_err(|_| {
+            refuse!(
+                "boot manifest {key} {value:#x} exceeds u32",
+                key,
+                value = *value
+            )
+        })?)),
+        Some(_) => Err(refuse!("boot manifest {key} is not an integer", key).into()),
         None => Ok(None),
     }
 }
@@ -583,9 +593,11 @@ pub fn prepare<R: ReadAt>(
     let tree = DeviceTree::parse(&device_tree.bytes)?;
     let product_type = root_string(&tree, "model")?;
     if let Some(wanted) = model {
-        ensure!(
+        require!(
             wanted == product_type,
-            "the disk's system is a {product_type}, not a {wanted}"
+            "the disk's system is a {product_type}, not a {wanted}",
+            product_type,
+            wanted
         );
     }
     let target_type = root_string(&tree, "target-type")?;
@@ -679,25 +691,25 @@ pub fn prepare_disk<R: ReadAt>(
     request: &Request,
     options: &Options,
 ) -> Result<(u64, Installed)> {
-    let mut partitions = apfs::container_partitions(source).map_err(|e| anyhow!("{e}"))?;
+    let mut partitions = apfs::container_partitions(source)?;
     if let Some(volume) = &request.volume {
-        ensure!(
+        require!(
             volume.kind == VolumeType::Apfs,
-            "NVRAM boots a {:?} partition, not an APFS container",
-            volume.kind
+            "NVRAM boots a {kind} partition, not an APFS container",
+            kind = alloc::format!("{:?}", volume.kind)
         );
         partitions.retain(|(_, guid)| guid.is_none_or(|g| g.0 == volume.partition));
-        ensure!(
+        require!(
             !partitions.is_empty(),
-            "NVRAM boots partition {}, which this disk does not have",
-            uuid_text(&volume.partition)
+            "NVRAM boots partition {partition}, which this disk does not have",
+            partition = uuid_text(&volume.partition)
         );
     }
     let mut found = Vec::new();
     let mut failures = Vec::new();
     for (offset, _) in partitions {
         let result = Container::open(&mut *source, offset)
-            .map_err(|e| anyhow!("{e}"))
+            .map_err(Error::from)
             .and_then(|mut container| prepare(&mut container, request, options));
         match result {
             Ok(installed) => found.push((offset, installed)),
@@ -706,15 +718,18 @@ pub fn prepare_disk<R: ReadAt>(
     }
     match found.len() {
         1 => Ok(found.remove(0)),
-        0 => bail!("no installed system to boot: {}", failures.join("; ")),
-        count => bail!(
-            "{count} containers hold a bootable system (at {}); NVRAM's boot-volume must name one",
-            found
+        0 => Err(refuse!(
+            "no installed system to boot: {failures}",
+            failures = failures.join("; ")
+        )
+        .into()),
+        count => {
+            let offsets = found
                 .iter()
                 .map(|(offset, _)| format!("{offset:#x}"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
+                .collect::<Vec<_>>();
+            Err(refuse!("{count} containers hold a bootable system (at {offsets}); NVRAM's boot-volume must name one", count, offsets = offsets.join(", ")).into())
+        }
     }
 }
 

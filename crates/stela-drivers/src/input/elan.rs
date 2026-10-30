@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! Native ELAN proprietary I2C and SMBus touchpads.
-//! The platform supplies exclusive powered I2C ownership and an actual IRQ pin;
+//! The platform supplies exclusive powered I2C ownership and an IRQ pin;
 //! CPU interrupt delivery stays masked while the physical pin is polled.
 //! Firmware flashing, GPIO/rail sequencing and
 //! guest contact/trackpoint routing remain separate requirements.
-//! Pinned donor sources and retained copyrights are in input/THIRD_PARTY.md.
+//! Pinned donor sources and kept copyrights are in input/THIRD_PARTY.md.
 pub use super::hid_i2c::{Interrupt, InterruptError};
 use crate::bus::i2c::{self, Address, Bus, Timer};
 mod device;
@@ -90,7 +90,7 @@ pub struct Capabilities {
     pub quick_wakeup: bool,
 }
 impl Capabilities {
-    /// Actual full report transfer size selected by the firmware pattern.
+    /// Full report transfer size selected by the firmware pattern.
     pub fn report_length(&self) -> usize {
         if self.pattern <= 1 { 34 } else { 39 }
     }
@@ -105,7 +105,7 @@ pub struct I2cDevice<B, I, T> {
 }
 impl<B: Bus, I: Interrupt, T: Timer> I2cDevice<B, I, T> {
     /// Construction performs no hardware access. The platform must establish
-    /// actual ELAN attachment, power, exclusive bus ownership and IRQ routing.
+    /// ELAN attachment, power, exclusive bus ownership and IRQ routing.
     pub fn new(bus: B, interrupt: I, timer: T, address: Address) -> Result<Self, Error> {
         timer.check_duration(200_000).map_err(ErrorKind::Clock)?;
         if !matches!(

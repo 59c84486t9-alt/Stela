@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Synaptics source copyrights and adaptation scope: ../synaptics.rs and
 // input/THIRD_PARTY.md.
-//! Actual secondary-contact/count records from the source advanced gesture mode.
+//! Secondary-contact/count records from the source advanced gesture mode.
 //! Native sequence numbers preserve interleaving with ordinary touch records;
 //! they are host ordering tokens, never device timestamps or scan identifiers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Data {
     /// Source half-resolution fields expanded by two, without coordinate wrap
-    /// or fabricated independent tracking IDs or per-contact width.
+    /// or invented independent tracking IDs or per-contact width.
     Secondary {
         x: u16,
         y: u16,

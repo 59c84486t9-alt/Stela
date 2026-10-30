@@ -6,7 +6,8 @@ use crate::bus::{
     dma::{mapping::DmaDomain, memory::PageSource},
     mmio::owned::{self, Mapping},
     pci::{
-        Address, Bar,
+        Address, Bar, Function,
+        owned::OwnedConfig,
         requester::{ClaimError, RequesterBinding, StoppedRequester},
     },
 };
@@ -37,25 +38,35 @@ impl fmt::Display for ServiceError {
 
 /// The mount's native owners: configuration and BAR mappings from its native
 /// MMIO platform, requester DMA domains from its IOMMU or the passthrough
-/// domain ([`DomainKind`](crate::bus::dma::mapping::DomainKind)), retained DMA
+/// domain ([`DomainKind`](crate::bus::dma::mapping::DomainKind)), kept DMA
 /// pages and the ACPI namespace.
 ///
 /// # Safety
 /// Implementations transfer ownership: each claimed requester is the unique
 /// owner of its function's configuration space, with its engines, DMA and
 /// interrupts stopped and drained, as [`StoppedRequester::from_stopped_pci`]
-/// requires. Each mapping covers exactly the requested BAR, uncached and
+/// requires. Each bridge is the unique owner of its configuration space,
+/// left forwarding. Each mapping covers exactly the requested BAR, uncached and
 /// read/write, with no other accessor. Each domain meets the [`DmaDomain`]
 /// contract for its kind. Every
 /// returned owner stays valid in every access context `probe`'s drivers use.
 /// A mount that supplies the ACPI namespace also grants `probe` port I/O to
 /// the i8042 at ports 0x60 and 0x64 when the namespace lists one, with IRQ1
 /// and IRQ12 masked at every interrupt controller and no other user of
-/// those ports.
+/// those ports, and to the I/O window (BAR 4) of each Intel i801 SMBus host
+/// it claims, with no other user than the AML its arbitration hands it to.
+/// Each firmware memory mapping is the one AML reaches the same firmware-owned
+/// RAM through: writable, live in every such context for the program, and
+/// never aliased by a Rust reference.
 pub unsafe trait NativeServices {
     /// Claim the function at `address` as a stopped requester through an owned
     /// mapping of its configuration space.
     fn claim_stopped(&self, address: Address) -> Result<StoppedRequester, ServiceError>;
+
+    /// The PCI-to-PCI bridge at `address` through an owned mapping of its
+    /// configuration space, left forwarding, for a driver that sets its
+    /// link's upstream end as Linux's ASPM core does through `bus->self`.
+    fn bridge(&self, address: Address) -> Result<Function<OwnedConfig>, ServiceError>;
 
     /// Map memory BAR `bar` of the function at `address` for its driver.
     fn map_bar(&self, address: Address, bar: Bar) -> Result<Mapping, ServiceError>;
@@ -65,11 +76,11 @@ pub unsafe trait NativeServices {
     /// inside it, as Intel VMD does.
     fn bar_resource(&self, address: Address, bar: Bar) -> Result<owned::Resource, ServiceError>;
 
-    /// The mapping authority that issues [`Self::map_bar`]'s mappings.
+    /// The mapping permission that issues [`Self::map_bar`]'s mappings.
     fn authority(&self) -> Result<owned::Authority, ServiceError>;
 
     /// The DMA domain for the requester `binding` names. The domain keeps the
-    /// binding, and with it the configuration epoch it retains.
+    /// binding, and with it the configuration epoch it keeps.
     fn domain(&self, binding: RequesterBinding) -> Result<Arc<dyn DmaDomain>, ServiceError>;
 
     /// Pages for driver DMA rings and buffers, for the rest of the boot.
@@ -86,7 +97,7 @@ pub unsafe trait NativeServices {
     fn interrupts(&self) -> Result<&'static dyn IrqController, ServiceError>;
 
     /// The first EC installed and connected during boot's staged ACPI
-    /// initialization. Probe retains the receipt instead of installing a
+    /// initialization. Probe keeps the receipt instead of installing a
     /// second operation-region handler.
     #[cfg(feature = "native-acpi")]
     fn embedded_controller(
@@ -120,6 +131,18 @@ pub unsafe trait NativeServices {
         device: &crate::platform::acpi::resources::DeviceResources<'_>,
         ordinal: usize,
     ) -> Result<owned::Resource, ServiceError>;
+
+    /// The mapping AML's SystemMemory regions reach `bytes` of firmware RAM
+    /// at `physical` through, for a mailbox the firmware shares with its
+    /// methods, such as a UCSI `_CRS`, which Linux `ucsi_acpi_probe` maps
+    /// write-back. It lives for the program, as the namespace does; the
+    /// mount refuses a range that overlaps RAM it allocates.
+    #[cfg(feature = "native-acpi")]
+    fn firmware_memory(
+        &self,
+        physical: u64,
+        bytes: usize,
+    ) -> Result<core::ptr::NonNull<u8>, ServiceError>;
 }
 
 /// ACPI hardware IDs of the classes attached through [`NativeServices`].
@@ -180,6 +203,10 @@ pub(crate) mod tests {
             self.requests.borrow_mut().push(address);
             Err(ServiceError::Unavailable)
         }
+        fn bridge(&self, address: Address) -> Result<Function<OwnedConfig>, ServiceError> {
+            self.requests.borrow_mut().push(address);
+            Err(ServiceError::Unavailable)
+        }
         fn map_bar(&self, address: Address, _: Bar) -> Result<Mapping, ServiceError> {
             self.requests.borrow_mut().push(address);
             Err(ServiceError::Unavailable)
@@ -211,6 +238,14 @@ pub(crate) mod tests {
         #[cfg(feature = "native-acpi")]
         fn acpi(&self) -> Option<&'static crate::platform::acpi::Session> {
             None
+        }
+        #[cfg(feature = "native-acpi")]
+        fn firmware_memory(
+            &self,
+            _: u64,
+            _: usize,
+        ) -> Result<core::ptr::NonNull<u8>, ServiceError> {
+            Err(ServiceError::Unavailable)
         }
     }
 

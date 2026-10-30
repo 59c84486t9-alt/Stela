@@ -74,7 +74,7 @@ const SHA_CONSTANTS: [u32; 68] = [
 ];
 
 pub(super) unsafe fn sha256(state: *mut u32, blocks: *const u8, count: usize) {
-    // SAFETY: the caller qualifies SHA/SSE controls and the complete extents.
+    // SAFETY: the caller checks SHA/SSE controls and the complete extents.
     unsafe { sha256_kernel(state, blocks, count, SHA_CONSTANTS.as_ptr()) };
 }
 
@@ -584,7 +584,7 @@ pub(super) unsafe extern "sysv64" fn aes_decrypt(
 // (MIT OR Apache-2.0); integer pointers keep the UEFI soft-float ABI unchanged.
 const SHA1_REVERSE: [u8; 16] = [15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0];
 pub(super) unsafe fn sha1(state: *mut u32, blocks: *const u8, count: usize) {
-    // SAFETY: the caller qualified SHA/SSE and supplied complete state/blocks.
+    // SAFETY: the caller checked SHA/SSE and supplied complete state/blocks.
     unsafe { sha1_kernel(state, blocks, count, SHA1_REVERSE.as_ptr()) };
 }
 #[unsafe(naked)]
@@ -908,43 +908,29 @@ mod tests {
         assert_eq!(after, before);
     }
     #[test]
-    fn sha_kernel_preserves_xmm_and_mxcsr() {
+    fn sha_kernels_preserve_xmm_and_mxcsr() {
         if !sha_usable() {
             return;
         }
-        let mut state = [0u32; 8];
         let data = [0x57u8; 128];
-        preserved(
-            sha256_kernel as *const () as usize,
-            [
-                state.as_mut_ptr() as usize,
-                data.as_ptr() as usize,
-                2,
+        let mut sha256 = [0u32; 8];
+        let mut sha1 = [0u32; 5];
+        for (kernel, state, constants) in [
+            (
+                sha256_kernel as *const () as usize,
+                sha256.as_mut_ptr() as usize,
                 SHA_CONSTANTS.as_ptr() as usize,
-                0,
-                0,
-            ],
-        );
-    }
-    #[test]
-    fn sha1_kernel_preserves_xmm_and_mxcsr() {
-        if !sha_usable() {
-            return;
-        }
-        let mut state = [0u32; 5];
-        let data = [0x57u8; 128];
-        preserved(
-            sha1_kernel as *const () as usize,
-            [
-                state.as_mut_ptr() as usize,
-                data.as_ptr() as usize,
-                2,
+            ),
+            (
+                sha1_kernel as *const () as usize,
+                sha1.as_mut_ptr() as usize,
                 SHA1_REVERSE.as_ptr() as usize,
-                0,
-                0,
-            ],
-        );
+            ),
+        ] {
+            preserved(kernel, [state, data.as_ptr() as usize, 2, constants, 0, 0]);
+        }
     }
+
     #[test]
     fn aes_kernels_preserve_xmm_and_mxcsr() {
         if !aes_usable() {

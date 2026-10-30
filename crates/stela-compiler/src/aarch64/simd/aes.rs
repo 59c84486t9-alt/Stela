@@ -25,7 +25,7 @@ pub struct Operand {
 }
 
 /// Only the exact .16B encodings are accepted. Other classes and reserved size
-/// encodings decline and retain the shared decoder's unsupported failure.
+/// encodings decline and keep the shared decoder's unsupported failure.
 pub fn decode(word: u32) -> Option<Result<Operand, Unsupported>> {
     let kind = match word & FORM_MASK {
         AESE => Kind::Encrypt,

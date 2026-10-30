@@ -27,10 +27,10 @@
 use super::host;
 use crate::output;
 use core::arch::asm;
-use stela_runtime::machine::apple::AppleDevices;
 use stela_runtime::pc::power::{
     self, ALL_FIXED_STATUS, HostPower, POWER_BUTTON, ResetRegister, SCI_ENABLE, SLEEP_WAKE_STATUS,
 };
+use stela_soc::machine::AppleDevices;
 
 /// The stop codes `isa-debug-exit` reports.
 pub const RESTART_CODE: u32 = 0x15;
@@ -181,7 +181,7 @@ impl HostPowerControl {
         if self.acpi.is_some_and(|acpi| acpi.hardware_active()) {
             return true;
         }
-        let Some(power) = self.power.filter(|power| power.fixed_power_button) else {
+        let Some(power) = self.power.as_ref().filter(|power| power.fixed_power_button) else {
             output::arguments(format_args!(
                 "POWER host button: no fixed-feature power button\n"
             ));
@@ -228,7 +228,7 @@ impl HostPowerControl {
         if let Some(acpi) = self.acpi.filter(|acpi| acpi.hardware_active()) {
             return acpi.take_power_button();
         }
-        let Some(power) = self.power.filter(|_| self.button) else {
+        let Some(power) = self.power.as_ref().filter(|_| self.button) else {
             return false;
         };
         let mut pressed = false;
@@ -253,7 +253,7 @@ impl HostPowerControl {
         output::close_logs();
         self.disks.shutdown(false);
         output::debug_exit(RESTART_CODE);
-        match self.power.and_then(|power| power.reset) {
+        match self.power.as_ref().and_then(|power| power.reset) {
             Some((register, value)) => {
                 // SAFETY: the FADT's reset register; the machine resets.
                 unsafe { write_reset(register, value) };
@@ -296,11 +296,13 @@ impl HostPowerControl {
         let evaluated = self.acpi.and_then(super::aml::HostAcpi::prepare_soft_off);
         let soft_off = self
             .power
+            .as_ref()
             .and_then(|power| Some((power, evaluated.or(power.soft_off)?)));
         // Linux's `efi_poweroff_required`: a hardware-reduced platform, or
         // one without S5, powers off through the firmware.
         let reduced = self
             .power
+            .as_ref()
             .is_some_and(|power| power.sleep_registers.is_some());
         if let Some(efi) = self.efi
             && (soft_off.is_none() || reduced)

@@ -3,11 +3,11 @@
 // 1998-2000 Bruce Kalk; 2001 Stefan Gmeiner; 2003 Peter Osterlund,
 // Dmitry Torokhov. Source identities and scope: input/THIRD_PARTY.md.
 //! Conventional Synaptics absolute PS/2 operation under the existing i8042 owner.
-//! Firmware queries and six-byte packets retain their actual bytes, including
+//! Firmware queries and six-byte packets keep their bytes, including
 //! acknowledged advanced/image-mode secondary-contact/count records.
-//! Four/extended-button records retain their targets and validity. Physical
+//! Four/extended-button records keep their targets and validity. Physical
 //! passthrough commands and wrapped records preserve parent acknowledgements;
-//! One ordinary physical mouse child is genuinely negotiated and retains its
+//! One ordinary physical mouse child is negotiated and keeps its
 //! own input. Vendor children, guest binding and DMI policy remain separate.
 //! ForcePad timing requires a matched native firmware identifier.
 use super::*;
@@ -18,8 +18,35 @@ pub mod child;
 mod forcepad;
 pub mod passthrough;
 
-const GET_INFO: u8 = 0xe9;
 const EXTENDED: u32 = 1 << 23;
+/// SYN_CAP_INTERTOUCH.
+const INTERTOUCH: u32 = 1 << 14;
+/// Linux `topbuttonpad_pnp_ids`.
+const TOP_BUTTON_PADS: &[&str] = &[
+    "LEN0017", "LEN0018", "LEN0019", "LEN0023", "LEN002A", "LEN002B", "LEN002C", "LEN002D",
+    "LEN002E", "LEN0033", "LEN0034", "LEN0035", "LEN0036", "LEN0037", "LEN0038", "LEN0039",
+    "LEN0041", "LEN0042", "LEN0045", "LEN0047", "LEN2000", "LEN2001", "LEN2002", "LEN2003",
+    "LEN2004", "LEN2005", "LEN2006", "LEN2007", "LEN2008", "LEN2009", "LEN200A", "LEN200B",
+];
+/// Linux `smbus_pnp_ids`: with the top-button pads, the pads whose
+/// InterTouch Linux uses by default.
+const INTERTOUCH_PADS: &[&str] = &[
+    "DLL0597", "DLL060d", "LEN0048", "LEN0046", "LEN0049", "LEN004a", "LEN005b", "LEN005e",
+    "LEN006c", "LEN007a", "LEN0071", "LEN0072", "LEN0073", "LEN0091", "LEN0092", "LEN0093",
+    "LEN0096", "LEN0097", "LEN0099", "LEN009b", "LEN0402", "LEN040f", "LEN0411", "LEN200f",
+    "LEN2044", "LEN2054", "LEN2055", "LEN2058", "LEN205b", "LEN2068", "SYN1221", "SYN3003",
+    "SYN3015", "SYN3052", "SYN3221", "SYN323d", "SYN3257", "TOS01f6", "TOS0213",
+];
+
+/// Linux `psmouse_matches_pnp_id`: whether a `PNP:` firmware identifier
+/// lists one of `ids`, without case.
+fn pnp_matches(firmware_id: &str, ids: &[&str]) -> bool {
+    firmware_id.strip_prefix("PNP: ").is_some_and(|listed| {
+        listed
+            .split(' ')
+            .any(|id| ids.iter().any(|name| id.eq_ignore_ascii_case(name)))
+    })
+}
 const AGM_CAPABILITIES: u32 = (1 << 19) | (1 << 11);
 const FRAME_LIMIT: usize = 32;
 
@@ -64,7 +91,7 @@ pub struct Capabilities {
     pub extended_10: u32,
     pub board: Option<u16>,
     pub resolution: Option<(u8, u8)>,
-    /// Observed firmware bounds; None retains the donor's documented nominal
+    /// Observed firmware bounds; None keeps the donor's documented nominal
     /// coordinate range, never an invented queried hardware value.
     pub minimum: Option<(u16, u16)>,
     pub maximum: Option<(u16, u16)>,
@@ -85,7 +112,7 @@ impl Capabilities {
     fn image_sensor(&self) -> bool {
         self.extended_0c & (1 << 11) != 0
     }
-    /// Effective configured bounds: actual selected source quirk, otherwise
+    /// Effective configured bounds: selected source quirk, otherwise
     /// observed firmware bounds or the documented nominal fallback.
     pub fn bounds(&self) -> ((u16, u16), (u16, u16)) {
         if let Some(quirk) = self.coordinate_quirk {
@@ -108,7 +135,7 @@ pub struct Frame {
     pub pressure: u8,
     /// Raw protocol W encoding, not an inferred physical contact width.
     pub width: u8,
-    /// Actual finger-count encoding; this does not supply separate coordinates.
+    /// Finger-count encoding; this does not supply separate coordinates.
     pub fingers: Option<u8>,
     pub touching: Option<bool>,
     /// Source decoded left/right/middle/back/forward bits. Clickpad compatibility
@@ -116,7 +143,7 @@ pub struct Frame {
     pub buttons: u8,
     /// None is no source update, including firmware8.1/8.2 clear-ExtBit packets.
     pub extended_buttons: Option<buttons::Extended>,
-    /// Source middle-button scroll record, retained independently of position.
+    /// Source middle-button scroll record, kept independently of position.
     pub scroll: i8,
 }
 #[derive(Debug, Default)]
@@ -172,6 +199,29 @@ impl Engine {
             queries: Vec::new(),
             query: None,
         }
+    }
+    /// Linux `synaptics_setup_intertouch` by default: InterTouch for a pad
+    /// that has it and that `topbuttonpad_pnp_ids` or `smbus_pnp_ids` lists,
+    /// except T440p board 2722.
+    pub(super) fn intertouch(&self) -> Option<Companion> {
+        let c = self.capabilities.as_ref()?;
+        let firmware_id = self.firmware_id.as_deref()?;
+        let listed =
+            pnp_matches(firmware_id, TOP_BUTTON_PADS) || pnp_matches(firmware_id, INTERTOUCH_PADS);
+        let broken = c.board == Some(2722) && pnp_matches(firmware_id, &["LEN0036"]);
+        (c.extended_0c & INTERTOUCH != 0 && listed && !broken).then_some(Companion::Rmi)
+    }
+    /// An engine for the touchpad `firmware_id` names: a `PNP:` identifier
+    /// selects its ForcePad and board coordinate profiles.
+    pub(super) fn for_firmware(high_rate: bool, firmware_id: Option<&str>) -> Self {
+        let mut engine = Self::new(high_rate);
+        if let Some(firmware_id) = firmware_id.filter(|id| id.starts_with("PNP: ")) {
+            engine.firmware_id = Some(alloc::string::String::from(firmware_id));
+            if forcepad::matches(firmware_id) {
+                engine.forcepad = Some(forcepad::State::default());
+            }
+        }
+        engine
     }
     pub(super) fn backpressured(&self) -> bool {
         self.frames.len() + self.advanced.len() + self.passthrough.len() >= FRAME_LIMIT
@@ -456,7 +506,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     /// Explicit ordinary touchpad attachment. The platform must establish the
     /// same native i8042 grant as `new`, select a conventional non-ForcePad
     /// profile and resolve board quirks separately. High rate selects the source
-    /// 80pps mode; false selects 40pps. Actual identity/capabilities are queried.
+    /// 80pps mode; false selects 40pps. Identity/capabilities are queried.
     pub fn new_synaptics(
         registers: R,
         timer: T,
@@ -471,9 +521,9 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         controller.synaptics = Some(Engine::new(high_rate));
         Ok(controller)
     }
-    /// ForcePad attachment selected by the actual native firmware identifier.
+    /// ForcePad attachment selected by the native firmware identifier.
     /// Only the pinned source's PNP SYN300D/SYN3014 profiles are admitted.
-    /// The caller still owns the i8042 grant and remaining board qualification.
+    /// The caller still owns the i8042 grant and remaining board validation.
     pub fn new_synaptics_forcepad(
         registers: R,
         timer: T,
@@ -486,9 +536,9 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         }
         Self::new_synaptics_pnp(registers, timer, config, high_rate, firmware_id)
     }
-    /// Attach using the actual native firmware PnP identifier. Source-listed
+    /// Attach using the native firmware PnP identifier. Source-listed
     /// ForcePad and queried-board coordinate quirks are selected from that
-    /// retained identifier; other platform/board obligations remain explicit.
+    /// identifier; other platform/board obligations remain explicit.
     pub fn new_synaptics_pnp(
         registers: R,
         timer: T,
@@ -500,11 +550,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             return Err(ErrorKind::InvalidConfiguration.into());
         }
         let mut controller = Self::new_synaptics(registers, timer, config, high_rate)?;
-        let engine = controller.synaptics.as_mut().unwrap();
-        engine.firmware_id = Some(alloc::string::String::from(firmware_id));
-        if forcepad::matches(firmware_id) {
-            engine.forcepad = Some(forcepad::State::default());
-        }
+        controller.synaptics = Some(Engine::for_firmware(high_rate, Some(firmware_id)));
         Ok(controller)
     }
     pub fn synaptics_capabilities(&self) -> Option<&Capabilities> {
@@ -535,7 +581,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             .as_mut()
             .map_or_else(Vec::new, |e| e.passthrough.drain(..).collect())
     }
-    /// Actual last count packet in the current acknowledged mode epoch.
+    /// Last count packet in the current acknowledged mode epoch.
     pub fn synaptics_count_observation(&self) -> Option<(u64, u8)> {
         self.synaptics.as_ref()?.count_observation
     }
@@ -568,7 +614,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         let mut bytes = [0; 3];
         for (index, byte) in bytes.iter_mut().enumerate() {
             let result = self.response(Port::Mouse, start, self.config.command_timeout_us);
-            // A late read is a failed response but still consumed its actual
+            // A late read is a failed response but still consumed its
             // byte. Keep that observation with this query before propagating.
             if let Some(observed) = self.observed_response {
                 *byte = observed.data;
@@ -724,7 +770,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             | if major >= 4 { 4 } else { 0 }
             | u8::from(c.extended());
         c.queries = queries;
-        // Retain actual identity/query observations even if mode's ACK fails.
+        // Keep identity/query observations even if mode's ACK fails.
         self.synaptics.as_mut().unwrap().capabilities = Some(c);
         self.synaptics_sliced(mode)?;
         self.device_command(Port::Mouse, SET_RATE, &[0x14])?;
@@ -765,7 +811,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         }
         Ok(())
     }
-    /// Select the source's 40pps (<80) or 80pps (>=80) rate. Actual reporting
+    /// Select the source's 40pps (<80) or 80pps (>=80) rate. Reporting
     /// disable, mode and reporting-enable acknowledgements are required. Other
     /// accepted mode bits and existing temporal/contact state remain intact.
     pub fn set_synaptics_rate(&mut self, requested: u32) -> Result<u16, super::Error> {
@@ -789,7 +835,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         Ok(if high_rate { 80 } else { 40 })
     }
     /// Program the source firmware-relative mode0 and stop native ports. The
-    /// i8042 owner and retained observations remain here; this does not grant a
+    /// i8042 owner and kept observations remain here; this does not grant a
     /// firmware/OS ownership handoff. Every disable/mode/inhibition step must
     /// succeed before held input is retired. Uncertain effects cannot replay.
     pub fn cleanup_synaptics(&mut self) -> Result<Vec<Input>, super::Error> {
@@ -828,8 +874,8 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             Err(kind) => Err(self.fail(kind)),
         }
     }
-    /// Send one actual child-port byte using sliced encoding and CLIENT_CMD.
-    /// Success covers parent ACKs only. A child ACK/response remains a genuine
+    /// Send one child-port byte using sliced encoding and CLIENT_CMD.
+    /// Success covers parent ACKs only. A child ACK/response remains a
     /// wrapped input record; no child identity, activation or owner is invented.
     pub fn write_synaptics_passthrough(&mut self, byte: u8) -> Result<(), super::Error> {
         self.require_synaptics_passthrough()?;
@@ -849,9 +895,9 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         result.map_err(|kind| self.fail(kind))
     }
     /// Acknowledge parent reporting-disable, source client-format mode and
-    /// reporting-enable. The child owner must select its actual protocol and
+    /// reporting-enable. The child owner must select its protocol and
     /// remain in command mode; this method never negotiates or activates it.
-    /// Packets observed while the setting is uncertain retain format=None.
+    /// Packets observed while the setting is uncertain keep format=None.
     pub fn configure_synaptics_passthrough(
         &mut self,
         format: passthrough::Format,

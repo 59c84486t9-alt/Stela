@@ -8,13 +8,13 @@ fn request_list_wrap_and_service() {
         let mut backing = vec![0u64; 32 * 1024];
         let base = backing.as_mut_ptr() as u64;
         let mut dma =
-        // SAFETY: The request-list fixture retains this stable vector through all
+        // SAFETY: The request-list fixture keeps this stable vector through all
         // queued interval descriptors and completed payloads. Every device-peer
         // access is synchronous and identity-mapped into it.
         unsafe { RegionAllocator::new(base..base + backing.len() as u64 * 8) };
         let (mut c, model) = controller(&mut dma, HIGH_SPEED, context_bytes, true);
         let mut ep = endpoint(0x81, HIGH_SPEED);
-        ep.interval = 2; // Actual retained recipe: two microframes.
+        ep.interval = 2; // Recipe: two microframes.
         c.configure(1, &[ep], None, &mut dma).unwrap();
         let mut buffer = dma.allocate(4096, 4096).unwrap();
         buffer.bytes_mut().fill(0xa7);
@@ -104,7 +104,7 @@ fn request_list_window_preflight() {
     c.configure(1, &[endpoint(0x81, FULL_SPEED)], None, &mut dma)
         .unwrap();
     model.borrow_mut().mfindex = 0;
-    // Full speed's actual interval is eight microframes. Frame 895 is
+    // Full speed's interval is eight microframes. Frame 895 is
     // admissible, while the prospective second request is frame 896.
     assert_eq!(
         c.iso_schedule_list(1, 3, IsoSchedule::AtMicroframe(895 * 8), 1)
@@ -173,7 +173,7 @@ fn request_list_ring_collision() {
     let mut backing = vec![0u64; 32 * 1024];
     let base = backing.as_mut_ptr() as u64;
     let mut dma =
-    // SAFETY: This collision fixture retains the original ring and payload
+    // SAFETY: This collision fixture keeps the original ring and payload
     // allocations for both pending and rejected lists; no background or physical DMA
     // accessor exists.
     unsafe { RegionAllocator::new(base..base + backing.len() as u64 * 8) };

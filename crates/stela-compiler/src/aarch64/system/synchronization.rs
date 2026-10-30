@@ -190,7 +190,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_isb_option_retains_its_raw_option() {
+    fn every_isb_option_keeps_its_raw_option() {
         for option in 0..=OPTION_MASK {
             assert_eq!(
                 decode(ISB_CLASS | option << OPTION_SHIFT),
@@ -267,7 +267,7 @@ mod tests {
     }
 
     #[test]
-    fn every_nxs_scope_retains_nxs() {
+    fn every_nxs_scope_keeps_nxs() {
         for encoded_scope in 0..=SCOPE_MASK {
             assert_eq!(
                 decode(DSB_NXS_CLASS | encoded_scope << NXS_SCOPE_SHIFT),
@@ -282,7 +282,7 @@ mod tests {
     }
 
     #[test]
-    fn bti_retains_every_target_kind() {
+    fn bti_keeps_every_target_kind() {
         for targets in 0..=BTI_TARGET_MASK {
             assert_eq!(
                 decode(BTI_CLASS | targets << BTI_TARGET_SHIFT),
@@ -294,7 +294,7 @@ mod tests {
     }
 
     #[test]
-    fn timed_waits_retain_all_registers_including_zero() {
+    fn timed_waits_keep_all_registers_including_zero() {
         for (class, kind) in [
             (WFET_CLASS, WaitKind::Event),
             (WFIT_CLASS, WaitKind::Interrupt),

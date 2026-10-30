@@ -1,8 +1,9 @@
 //! The collection's `__PRELINK_INFO,__info`: the XML property list XNU's
 //! `OSKext` reads each kext's identity and placement from. Keys follow XNU
 //! `libkern/libkern/prelink.h` at `xnu-12377.121.6`.
-use anyhow::{Result, bail};
+use crate::Result;
 use plist::{Dictionary, Value};
+use stela_contracts::refuse;
 
 /// Where a kext lies in the collection, at unslid addresses.
 #[derive(Debug, Clone, Copy)]
@@ -55,7 +56,8 @@ pub fn info(entries: &[Entry<'_>], collection: [u8; 16], boot: [u8; 16]) -> Resu
     root.insert("_PrelinkKCID".into(), Value::Data(collection.to_vec()));
     root.insert("_BootKCID".into(), Value::Data(boot.to_vec()));
     let mut xml = Vec::new();
-    plist::to_writer_xml(&mut xml, &Value::Dictionary(root))?;
+    plist::to_writer_xml(&mut xml, &Value::Dictionary(root))
+        .map_err(|error| refuse!("cannot write the prelink information", %error))?;
     xml.push(0);
     Ok(xml)
 }
@@ -68,13 +70,19 @@ pub fn check(name: &str, value: &Value) -> Result<()> {
             .iter()
             .try_for_each(|(key, value)| check(key, value)),
         Value::Boolean(_) | Value::Data(_) | Value::Integer(_) | Value::String(_) => Ok(()),
-        _ => bail!("Info.plist key {name} holds a value the kernel cannot read: {value:?}"),
+        _ => Err(refuse!(
+            "Info.plist key {name} holds a value the kernel cannot read: {value}",
+            name,
+            ?value
+        )
+        .into()),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Result;
 
     #[test]
     fn records_each_kexts_placement_and_both_collections() -> Result<()> {

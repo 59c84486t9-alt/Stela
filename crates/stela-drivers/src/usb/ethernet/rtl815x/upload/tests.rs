@@ -280,7 +280,7 @@ fn execute(bytes: &[u8], revision: u16) -> (Chip<Io>, Rc<RefCell<Hardware>>) {
 }
 
 #[test]
-fn mac_phy_and_speedup_effects_require_completion_and_never_claim_carrier_ready() {
+fn link_effects_require_completion_before_carrier() {
     for revision in [
         0x5c10, 0x5c20, 0x5c30, 0x6010, 0x6400, 0x7030, 0x7410, 0x7420,
     ] {

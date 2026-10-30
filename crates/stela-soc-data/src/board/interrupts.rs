@@ -1,8 +1,10 @@
 //! DeviceTree placement and validation for interrupts.
 use super::{
     AIC2_DIE_STRIDE, AIC2_MAX_DIES, AIC3_IRQ_CFG, AIC3_TIMESTAMPS, AicLayout, BTreeMap, Node,
-    String, Vec, format,
+    String, Vec,
 };
+use crate::Result;
+use stela_contracts::refuse;
 
 /// The AIC: its core block's guest PA, NR_IRQ (the inputs each die
 /// reports) and its layout, which counts its populated dies.
@@ -36,10 +38,10 @@ const AIC3_OFFSETS: [(&str, u32); 10] = [
 /// AICv3's once its stated offsets match the modeled layout. An `aic,3`
 /// with `max-extint-num` selects the driver's doubled array layout
 /// (`getAICIntMaskSetOffset`), which is not modeled.
-pub(super) fn aic_layout(aic: &Node<'_>, version: &str, event: u64) -> Result<AicLayout, String> {
+pub(super) fn aic_layout(aic: &Node<'_>, version: &str, event: u64) -> Result<AicLayout> {
     let timestamps = aic.first_u32("#shared-timestamps").unwrap_or(0);
     let timestamps = u8::try_from(timestamps)
-        .map_err(|_| format!("/arm-io/aic has {timestamps} shared timestamps"))?;
+        .map_err(|_| refuse!("/arm-io/aic has {timestamps} shared timestamps", timestamps))?;
     match version {
         "aic,1" => return Ok(AicLayout::V1),
         "aic,2" => return Ok(AicLayout::aic2(event, timestamps)),
@@ -48,15 +50,20 @@ pub(super) fn aic_layout(aic: &Node<'_>, version: &str, event: u64) -> Result<Ai
     for (name, expected) in AIC3_OFFSETS {
         let found = aic
             .first_u32(name)
-            .ok_or_else(|| format!("/arm-io/aic has no {name}"))?;
+            .ok_or_else(|| refuse!("/arm-io/aic has no {name}", name))?;
         if found != expected {
-            return Err(format!(
-                "/arm-io/aic {name} is {found:#x}, not the modeled {expected:#x}"
+            return Err(refuse!(
+                "/arm-io/aic {name} is {found:#x}, not the modeled {expected:#x}",
+                name,
+                found,
+                expected
             ));
         }
     }
     if aic.property("max-extint-num").is_some() {
-        return Err("/arm-io/aic max-extint-num selects an unmodeled array layout".into());
+        return Err(refuse!(
+            "/arm-io/aic max-extint-num selects an unmodeled array layout"
+        ));
     }
     Ok(AicLayout::aic3(event, timestamps))
 }
@@ -84,16 +91,18 @@ const AIC3_DIE_STRIDES: [&str; 4] = [
 /// returns 0). Specifiers for another parent are not the AIC's: every M3
 /// Pro and later CLPC (`/arm-io/pmgr/clpc`) follows its AIC lines with
 /// notification FourCCs such as 0x70305452 for `/arm-io/aon-ptd`.
-pub(super) fn aic_vectors(root: &Node<'_>, aic: u32) -> Result<Vec<u32>, String> {
+pub(super) fn aic_vectors(root: &Node<'_>, aic: u32) -> Result<Vec<u32>> {
     let mut cells_of = BTreeMap::new();
     root.visit(&mut |node| {
         if let Some(phandle) = node.first_u32("AAPL,phandle") {
             cells_of.insert(phandle, node.first_u32("#interrupt-cells").unwrap_or(1));
         }
     })
-    .ok_or("DeviceTree walk failed")?;
+    .ok_or(refuse!("DeviceTree walk failed"))?;
     if cells_of.get(&aic) != Some(&1) {
-        return Err("/arm-io/aic does not number each input in one cell".into());
+        return Err(refuse!(
+            "/arm-io/aic does not number each input in one cell"
+        ));
     }
     let mut vectors = Vec::new();
     let mut failure = None;
@@ -117,9 +126,10 @@ pub(super) fn aic_vectors(root: &Node<'_>, aic: u32) -> Result<Vec<u32>, String>
             }
             let Some(&count) = cells_of.get(&parent) else {
                 failure.get_or_insert_with(|| {
-                    format!(
-                        "{} names interrupt parent {parent:#x}, which no node is",
-                        name()
+                    refuse!(
+                        "{node} names interrupt parent {parent:#x}, which no node is",
+                        node = name(),
+                        parent
                     )
                 });
                 return;
@@ -129,7 +139,7 @@ pub(super) fn aic_vectors(root: &Node<'_>, aic: u32) -> Result<Vec<u32>, String>
             }
             let Some((specifier, tail)) = rest.split_at_checked(count as usize) else {
                 failure.get_or_insert_with(|| {
-                    format!("{} ends inside an interrupt specifier", name())
+                    refuse!("{node} ends inside an interrupt specifier", node = name())
                 });
                 return;
             };
@@ -139,7 +149,7 @@ pub(super) fn aic_vectors(root: &Node<'_>, aic: u32) -> Result<Vec<u32>, String>
             rest = tail;
         }
     })
-    .ok_or("DeviceTree walk failed")?;
+    .ok_or(refuse!("DeviceTree walk failed"))?;
     match failure {
         Some(failure) => Err(failure),
         None => Ok(vectors),
@@ -173,7 +183,7 @@ pub(super) fn aic_inputs(
     aic: &Node<'_>,
     layout: AicLayout,
     vectors: &[u32],
-) -> Result<(u16, AicLayout), String> {
+) -> Result<(u16, AicLayout)> {
     let max_irq = u32::from(layout.max_irq());
     let mut inputs = 0;
     let mut dies = 0;
@@ -182,7 +192,7 @@ pub(super) fn aic_inputs(
         dies = dies.max(vector / max_irq + 1);
     }
     if inputs == 0 {
-        return Err("no node names the AIC as its interrupt parent".into());
+        return Err(refuse!("no node names the AIC as its interrupt parent"));
     }
     let mask = |name: &str| aic.first_u32(name).unwrap_or(0xffff);
     let (field, max_field) = match layout {
@@ -194,16 +204,20 @@ pub(super) fn aic_inputs(
         ),
     };
     if inputs & !field != 0 || max_irq & !max_field != 0 {
-        return Err(format!(
-            "/arm-io/aic's {inputs} inputs or {max_irq} IRQs per die exceed the fields its driver reads"
+        return Err(refuse!(
+            "/arm-io/aic's {inputs} inputs or {max_irq} IRQs per die exceed the fields its driver reads",
+            inputs,
+            max_irq
         ));
     }
     let inputs = u16::try_from(inputs).expect("below MAX_IRQ");
     if matches!(layout, AicLayout::V2 { version: 3, .. }) && dies > 1 {
         for name in AIC3_DIE_STRIDES {
             if aic.first_u32(name) != Some(AIC2_DIE_STRIDE as u32) {
-                return Err(format!(
-                    "/arm-io/aic {name} is not the modeled die stride {AIC2_DIE_STRIDE:#x}"
+                return Err(refuse!(
+                    "/arm-io/aic {name} is not the modeled die stride {AIC2_DIE_STRIDE:#x}",
+                    name,
+                    AIC2_DIE_STRIDE
                 ));
             }
         }
@@ -211,15 +225,20 @@ pub(super) fn aic_inputs(
     match layout {
         AicLayout::V1 => {
             if dies > 1 {
-                return Err(format!("an aic,1 input is above its {max_irq:#x} IRQs"));
+                return Err(refuse!(
+                    "an aic,1 input is above its {max_irq:#x} IRQs",
+                    max_irq
+                ));
             }
             let words = aic
                 .property("ipid-mask")
                 .map(|mask| mask.len() / 4)
-                .ok_or("/arm-io/aic has no ipid-mask")?;
+                .ok_or(refuse!("/arm-io/aic has no ipid-mask"))?;
             if words != usize::from(inputs).div_ceil(32) {
-                return Err(format!(
-                    "/arm-io/aic ipid-mask has {words} words for {inputs} inputs"
+                return Err(refuse!(
+                    "/arm-io/aic ipid-mask has {words} words for {inputs} inputs",
+                    words,
+                    inputs
                 ));
             }
             Ok((inputs, layout))
@@ -228,7 +247,7 @@ pub(super) fn aic_inputs(
             let dies = u8::try_from(dies)
                 .ok()
                 .filter(|&dies| dies <= AIC2_MAX_DIES)
-                .ok_or_else(|| format!("an AIC vector names die {}", dies - 1))?;
+                .ok_or_else(|| refuse!("an AIC vector names die {die}", die = dies - 1))?;
             Ok((inputs, layout.with_dies(dies)))
         }
     }
@@ -250,19 +269,23 @@ mod tests {
         );
         assert_eq!(
             board(&tree_with(0x8122, "Apple M3", M3, &AIC3_OFFSETS[1..])),
-            Err("/arm-io/aic has no rev-offset".into())
+            Err(refuse!("/arm-io/aic has no rev-offset"))
         );
         let mut moved = AIC3_OFFSETS;
         moved[4].1 = 0x20000;
         assert_eq!(
             board(&tree_with(0x8122, "Apple M3", M3, &moved)),
-            Err("/arm-io/aic extint-baseaddress is 0x20000, not the modeled 0x10000".into())
+            Err(refuse!(
+                "/arm-io/aic extint-baseaddress is 0x20000, not the modeled 0x10000"
+            ))
         );
         let mut doubled = AIC3_OFFSETS.to_vec();
         doubled.push(("max-extint-num", 0x2000));
         assert_eq!(
             board(&tree_with(0x8122, "Apple M3", M3, &doubled)),
-            Err("/arm-io/aic max-extint-num selects an unmodeled array layout".into())
+            Err(refuse!(
+                "/arm-io/aic max-extint-num selects an unmodeled array layout"
+            ))
         );
         // The M3's driver reads NR_IRQ under an 11-bit mask, which holds
         // the UART's 740 but not a 9-bit one.
@@ -272,10 +295,9 @@ mod tests {
         masked.last_mut().unwrap().1 = 0x1ff;
         assert_eq!(
             board(&tree_with(0x8122, "Apple M3", M3, &masked)),
-            Err(
+            Err(refuse!(
                 "/arm-io/aic's 740 inputs or 4096 IRQs per die exceed the fields its driver reads"
-                    .into()
-            )
+            ))
         );
         // A J514cAP-shaped CLPC: three AIC lines, then notification FourCCs
         // for the always-on PTD, which are not AIC inputs.
@@ -398,22 +420,23 @@ mod tests {
         );
         assert_eq!(
             aic_inputs(&aic, v2, &[0x8000]),
-            Err("an AIC vector names die 8".into())
+            Err(refuse!("an AIC vector names die 8"))
         );
         // The aic,2 driver reads NR_IRQ from INFO1 [10:0].
         assert_eq!(
             aic_inputs(&aic, v2, &[0x7ff]),
-            Err(
+            Err(refuse!(
                 "/arm-io/aic's 2048 inputs or 4096 IRQs per die exceed the fields its driver reads"
-                    .into()
-            )
+            ))
         );
         // An M3 Ultra's second die (its CLPC's 0x15bf) needs the stated die
         // strides.
         let v3 = AicLayout::aic3(AIC3_EVENT, 16);
         assert_eq!(
             aic_inputs(&aic, v3, &[0x5bf, 0x15bf]),
-            Err("/arm-io/aic extintrcfg-stride is not the modeled die stride 0x4a00".into())
+            Err(refuse!(
+                "/arm-io/aic extintrcfg-stride is not the modeled die stride 0x4a00"
+            ))
         );
         let stride = (AIC2_DIE_STRIDE as u32).to_le_bytes();
         let strided = encode(&AIC3_DIE_STRIDES.map(|name| (name, stride.as_slice())), &[]);
@@ -425,7 +448,7 @@ mod tests {
         assert_eq!(aic_inputs(&aic, v3, &[0x5bf]), Ok((0x5c0, v3)));
         assert_eq!(
             aic_inputs(&aic, v2, &[]),
-            Err("no node names the AIC as its interrupt parent".into())
+            Err(refuse!("no node names the AIC as its interrupt parent"))
         );
         // An M1's 896 inputs fill its 28-word ipid-mask; its one die holds
         // 0x400 IRQs.
@@ -437,16 +460,16 @@ mod tests {
         );
         assert_eq!(
             aic_inputs(&aic, AicLayout::V1, &[0x35f]),
-            Err("/arm-io/aic ipid-mask has 28 words for 864 inputs".into())
+            Err(refuse!("/arm-io/aic ipid-mask has 28 words for 864 inputs"))
         );
         assert_eq!(
             aic_inputs(&aic, AicLayout::V1, &[0x400]),
-            Err("an aic,1 input is above its 0x400 IRQs".into())
+            Err(refuse!("an aic,1 input is above its 0x400 IRQs"))
         );
         let aic = Node::root(&plain).unwrap();
         assert_eq!(
             aic_inputs(&aic, AicLayout::V1, &[0x37f]),
-            Err("/arm-io/aic has no ipid-mask".into())
+            Err(refuse!("/arm-io/aic has no ipid-mask"))
         );
     }
 }

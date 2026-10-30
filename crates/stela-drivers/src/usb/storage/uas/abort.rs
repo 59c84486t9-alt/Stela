@@ -1,4 +1,4 @@
-//! Opt-in, serialized ABORT TASK for a genuinely outstanding timed-out CDB.
+//! Opt-in, serialized ABORT TASK for an outstanding timed-out CDB.
 //! No task-set, LUN-reset or general asynchronous management service is implied.
 // SPDX-License-Identifier: GPL-2.0-only
 use super::*;
@@ -8,8 +8,8 @@ const ABORT_TASK: u8 = 1;
 const FUNCTION_COMPLETE: u8 = 0;
 const TASK_IU_BYTES: usize = 16;
 
-/// A nonzero tag admitted by this attachment's actual configured stream limit.
-/// The management tag is selected while its original task remains retained.
+/// A nonzero tag admitted by this attachment's configured stream limit.
+/// The management tag is selected while its original task remains held.
 #[derive(Clone, Copy)]
 struct TaskTag(u16);
 impl TaskTag {
@@ -46,13 +46,13 @@ impl Host {
     /// Execute one ordinary CDB, attempting ABORT TASK only if its deadline
     /// expires. The original command still returns `Timeout`; no data is
     /// published from an aborted command. A recovery attempt permanently fences
-    /// this class owner and retains all allocations. Fully acknowledged native
+    /// this class owner and keeps all allocations. Fully acknowledged native
     /// retirement permits the existing whole-device reset/rebind; uncertainty
     /// also quarantines the native slot and requires controller-level recovery.
     ///
-    /// Recovery requires the actual original Command TD completion and a
+    /// Recovery requires the original Command TD completion and a
     /// successful native stop/dequeue/drain of its status request before either
-    /// IU buffer is rewritten. SuperSpeed uses a distinct actually allocated
+    /// IU buffer is rewritten. SuperSpeed uses a distinct allocated
     /// status stream; HS uses its ordinary status FIFO. An older READY/Sense IU
     /// arriving there is an explicit failed recovery, never silently discarded.
     /// `timeout_us` must be nonzero and at most the ordinary command deadline.
@@ -103,7 +103,7 @@ impl<I: Io> Engine<I> {
             return AbortTaskOutcome::NotAcknowledged(error);
         }
         // A device task response cannot retire the xHC's outstanding data TD.
-        // Clear each receipt only after actual native cancellation ACK/drain.
+        // Clear each receipt only after native cancellation ACK/drain.
         let retirement = (|| {
             for pipe in [Pipe::Input, Pipe::Output] {
                 if self.pending[pipe.index()].is_some() {
@@ -151,7 +151,7 @@ impl<I: Io> Engine<I> {
         let started = self.io.now();
         loop {
             // Do not consume the device response before the TMF's own command
-            // TD has genuinely completed. No original data completion is polled.
+            // TD has completed. No original data completion is polled.
             if let Some(ticket) = &self.pending[Pipe::Command.index()]
                 && let Some(completion) = self.io.completed(ticket)
             {
@@ -168,7 +168,7 @@ impl<I: Io> Engine<I> {
                 let count = completion?;
                 let response = self.status.bytes().get(..count).ok_or(PROTOCOL_ERROR)?;
                 // A Response IU has no LUN field. Its fresh tag identifies the
-                // one TMF retaining the original task tag and exact LUN.
+                // one TMF keeping the original task tag and exact LUN.
                 if response.len() != 8
                     || response[0] != RESPONSE_IU
                     || response[1] != 0

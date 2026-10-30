@@ -134,7 +134,7 @@ fn odd_add(code: &mut Code, shape: Shape, rollback: &mut Vec<usize>, check: SumC
     guard_normal_or_zero(code, shape, LEFT, rollback);
 
     // ECX still holds the real ADD status. Exact matrix vectors need no jam;
-    // inexact vectors retain the per-lane residual check. Keep the preceding
+    // inexact vectors keep the per-lane residual check. Keep the preceding
     // result guard: exact subnormal cancellation must still use BF flushing.
     let exact = if matches!(check, SumCheck::ExactVector) {
         code.asm()

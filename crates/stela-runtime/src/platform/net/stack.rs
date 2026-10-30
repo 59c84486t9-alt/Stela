@@ -8,7 +8,7 @@ pub use client::{HttpRequest, HttpTransfer, TlsUnavailable};
 mod dad;
 mod rdnss;
 mod tls;
-use super::{Clock, Ipv4, NetError, http};
+use super::{Clock, ClockError, Ipv4, NetError, http};
 use alloc::{string::String, vec, vec::Vec};
 pub use automatic::Automatic;
 use core::net::Ipv6Addr;
@@ -147,6 +147,8 @@ pub struct Transfer {
 pub struct Stack<L: Link, C: Clock> {
     phy: Phy<L>,
     clock: C,
+    last_time: u64,
+    clock_failure: Option<ClockError>,
     iface: Interface,
     sockets: SocketSet<'static>,
     /// Absent once a configuration is set by hand.
@@ -157,13 +159,16 @@ pub struct Stack<L: Link, C: Clock> {
     /// Names looked up, their first address and when it was found.
     resolved: Vec<(String, IpAddress, u64)>,
     dns_servers: Vec<IpAddress>,
+    /// DNS servers set by hand, which replace DHCP's and router
+    /// advertisements'.
+    fixed_dns: Option<Vec<IpAddress>>,
     conflicts: Vec<Ipv6Addr>,
     probe_nonce: u64,
 }
 
 impl<L: Link, C: Clock> Stack<L, C> {
     /// Seed TCP sequence/port choices from host cryptographic entropy.
-    pub fn new(link: L, clock: C, seed: u64) -> Self {
+    pub fn new(link: L, clock: C, seed: u64) -> Result<Self, NetError> {
         let mac = link.mac();
         let local_ipv6 = automatic::link_local(mac.0);
         let mut config = InterfaceConfig::new(HardwareAddress::Ethernet(EthernetAddress(mac.0)));
@@ -179,15 +184,20 @@ impl<L: Link, C: Clock> Stack<L, C> {
             rdnss: Default::default(),
             manage_ipv6: true,
         };
-        let now = Instant::from_micros(clock.now_us() as i64);
+        let initial = clock.now_us().map_err(NetError::Clock)?;
+        let now = Instant::from_micros(
+            i64::try_from(initial).map_err(|_| NetError::Clock(ClockError::OutOfRange(initial)))?,
+        );
         let mut iface = Interface::new(config, &mut phy, now);
         iface.update_ip_addrs(|a| a.push(IpCidr::Ipv6(Ipv6Cidr::new(local_ipv6, 64))).unwrap());
         let mut sockets = SocketSet::new(Vec::new());
         let dhcp = Some(sockets.add(dhcpv4::Socket::new()));
         let dns = sockets.add(dns::Socket::new(&[], Vec::new()));
-        Self {
+        Ok(Self {
             phy,
             clock,
+            last_time: initial,
+            clock_failure: None,
             iface,
             sockets,
             dhcp,
@@ -196,9 +206,10 @@ impl<L: Link, C: Clock> Stack<L, C> {
             next_port: FIRST_EPHEMERAL + (seed % 8192) as u16,
             resolved: Vec::new(),
             dns_servers: Vec::new(),
+            fixed_dns: None,
             conflicts: Vec::new(),
             probe_nonce: seed,
-        }
+        })
     }
 
     pub fn link_mut(&mut self) -> &mut L {
@@ -207,6 +218,28 @@ impl<L: Link, C: Clock> Stack<L, C> {
 
     pub fn config(&self) -> Option<&Config> {
         self.config.as_ref()
+    }
+
+    /// Gives the interface `address`/`prefix` and the default router
+    /// `router` by hand instead of by DHCP. IPv6 autoconfiguration goes on.
+    pub fn set_ipv4(
+        &mut self,
+        address: core::net::Ipv4Addr,
+        prefix: u8,
+        router: Option<core::net::Ipv4Addr>,
+    ) -> Result<(), NetError> {
+        self.set_config(Config {
+            address: Ipv4Cidr::new(address, prefix),
+            router,
+            dns: Vec::new(),
+        })
+    }
+
+    /// Resolves names with `servers` in place of DHCP's and router
+    /// advertisements'.
+    pub fn set_dns(&mut self, servers: &[core::net::IpAddr]) -> Result<(), NetError> {
+        self.fixed_dns = Some(servers.iter().map(|&server| server.into()).collect());
+        self.update_dns()
     }
 
     /// Configures the interface by hand instead of by DHCP.
@@ -245,18 +278,44 @@ impl<L: Link, C: Clock> Stack<L, C> {
             }
         }
         self.config = config;
-        self.update_dns();
+        self.update_dns()?;
         Ok(())
     }
 
-    fn now(&self) -> u64 {
-        self.clock.now_us()
+    fn poison_clock(&mut self, error: ClockError) -> NetError {
+        let error = *self.clock_failure.get_or_insert(error);
+        for (_, socket) in self.sockets.iter_mut() {
+            if let smoltcp::socket::Socket::Tcp(socket) = socket {
+                socket.abort();
+            }
+        }
+        NetError::Clock(error)
+    }
+    fn now(&mut self) -> Result<u64, NetError> {
+        if let Some(error) = self.clock_failure {
+            return Err(NetError::Clock(error));
+        }
+        let value = match self.clock.now_us() {
+            Ok(value) => value,
+            Err(error) => return Err(self.poison_clock(error)),
+        };
+        if value < self.last_time {
+            return Err(self.poison_clock(ClockError::Regressed {
+                previous: self.last_time,
+                current: value,
+            }));
+        }
+        if value > i64::MAX as u64 {
+            return Err(self.poison_clock(ClockError::OutOfRange(value)));
+        }
+        self.last_time = value;
+        Ok(value)
     }
 
     /// Moves every frame the link holds through the interface, then takes
     /// DHCP's news. A link refusal since the last poll is the error.
     pub fn poll(&mut self) -> Result<(), NetError> {
-        let now = Instant::from_micros(self.now() as i64);
+        let now = Instant::from_micros(self.now()? as i64);
         self.phy.received = false;
         self.iface.poll(now, &mut self.phy, &mut self.sockets);
         if let Some(dhcp) = self.dhcp {
@@ -274,7 +333,7 @@ impl<L: Link, C: Clock> Stack<L, C> {
             }
         }
         self.probe_ipv6()?;
-        self.update_dns();
+        self.update_dns()?;
         match self.phy.fault.take() {
             Some(error) => Err(error.into()),
             None => Ok(()),
@@ -285,16 +344,17 @@ impl<L: Link, C: Clock> Stack<L, C> {
     /// arrivals and the last poll took none: until its signal, smoltcp's next
     /// timer or the bound, whichever is first. A link that does not signal
     /// returns at once, and its caller polls.
-    pub fn wait(&mut self, micros: u64) {
-        let deadline = self.now().saturating_add(micros);
-        self.wait_until(deadline);
+    pub fn wait(&mut self, micros: u64) -> Result<(), NetError> {
+        let deadline = self.now()?.saturating_add(micros);
+        self.wait_until(deadline)
     }
 
-    fn wait_until(&mut self, deadline: u64) {
+    fn wait_until(&mut self, deadline: u64) -> Result<(), NetError> {
+        self.now()?;
         if !self.phy.link.signals() || self.phy.received {
-            return;
+            return Ok(());
         }
-        let now = self.now();
+        let now = self.now()?;
         let timer = self
             .iface
             .poll_delay(Instant::from_micros(now as i64), &self.sockets)
@@ -307,33 +367,37 @@ impl<L: Link, C: Clock> Stack<L, C> {
             .min()
             .unwrap_or(u64::MAX);
         let until = deadline.min(timer).min(dad);
-        if until > now {
-            self.clock.sleep(until);
+        if until > now
+            && let Err(error) = self.clock.sleep(until)
+        {
+            return Err(self.poison_clock(error));
         }
+        self.now()?;
+        Ok(())
     }
 
     /// Waits for carrier and, without a configuration by hand, a DHCP
     /// lease.
     pub fn dhcp(&mut self) -> Result<&Config, NetError> {
-        let start = self.now();
+        let start = self.now()?;
         while !self.phy.link.carrier() {
-            if self.now() >= start + CARRIER_WAIT_US {
+            if self.now()? >= start + CARRIER_WAIT_US {
                 return Err(NetError::NoCarrier);
             }
         }
-        let deadline = self.now() + DHCP_WAIT_US;
+        let deadline = self.now()? + DHCP_WAIT_US;
         while self.config.is_none() {
             if self.dhcp.is_none() {
                 return Err(NetError::Invalid("DHCP after a configuration by hand"));
             }
-            if self.now() >= deadline {
+            if self.now()? >= deadline {
                 return Err(NetError::Dhcp(
                     "no IPv4 lease: no DHCP server answered within 30 seconds",
                 ));
             }
             self.poll()?;
             if self.config.is_none() {
-                self.wait_until(deadline);
+                self.wait_until(deadline)?;
             }
         }
         Ok(self.config.as_ref().unwrap())
@@ -347,7 +411,7 @@ impl<L: Link, C: Clock> Stack<L, C> {
         if let Ok(address) = host.parse() {
             return Ok(address);
         }
-        let now = self.now();
+        let now = self.now()?;
         let known = self.resolved.iter().position(|(name, ..)| name == host);
         if let Some(index) = known
             && self.address_usable(self.resolved[index].1)
@@ -364,6 +428,7 @@ impl<L: Link, C: Clock> Stack<L, C> {
                 self.resolved.push((String::from(host), address, now));
                 Ok(address)
             }
+            (Err(error @ NetError::Clock(_)), _) => Err(error),
             (Err(error), Some(index)) => {
                 if self.address_usable(self.resolved[index].1) {
                     Ok(self.resolved[index].1)
@@ -376,10 +441,12 @@ impl<L: Link, C: Clock> Stack<L, C> {
     }
 
     fn lookup(&mut self, host: &str) -> Result<IpAddress, NetError> {
-        if self.ipv6_ready()
-            && let Ok(address) = self.lookup_type(host, DnsQueryType::Aaaa)
-        {
-            return Ok(address);
+        if self.ipv6_ready() {
+            match self.lookup_type(host, DnsQueryType::Aaaa) {
+                Ok(address) => return Ok(address),
+                Err(error @ NetError::Clock(_)) => return Err(error),
+                Err(_) => {}
+            }
         }
         if self.config.is_some() {
             self.lookup_type(host, DnsQueryType::A)
@@ -390,16 +457,16 @@ impl<L: Link, C: Clock> Stack<L, C> {
         }
     }
     fn lookup_type(&mut self, host: &str, kind: DnsQueryType) -> Result<IpAddress, NetError> {
-        let dns_deadline = self.now().saturating_add(DNS_WAIT_US);
+        let dns_deadline = self.now()?.saturating_add(DNS_WAIT_US);
         while self.dns_servers.is_empty() {
             self.poll()?;
-            if self.now() >= dns_deadline {
+            if self.now()? >= dns_deadline {
                 return Err(NetError::Dns(String::from(
                     "no DNS server from DHCPv4 or IPv6 router advertisements",
                 )));
             }
             if self.dns_servers.is_empty() {
-                self.wait_until(dns_deadline);
+                self.wait_until(dns_deadline)?;
             }
         }
         let query = self
@@ -407,10 +474,10 @@ impl<L: Link, C: Clock> Stack<L, C> {
             .get_mut::<dns::Socket>(self.dns)
             .start_query(self.iface.context(), host, kind)
             .map_err(|error| NetError::Dns(alloc::format!("{host}: {error:?}")))?;
-        let deadline = self.now() + DNS_WAIT_US;
+        let deadline = self.now()? + DNS_WAIT_US;
         loop {
             self.poll()?;
-            let now = self.now();
+            let now = self.now()?;
             let socket = self.sockets.get_mut::<dns::Socket>(self.dns);
             match socket.get_query_result(query) {
                 Ok(addresses) => {
@@ -421,7 +488,7 @@ impl<L: Link, C: Clock> Stack<L, C> {
                         .ok_or_else(|| NetError::Dns(alloc::format!("{host}: no address")));
                 }
                 Err(dns::GetQueryResultError::Pending) if now < deadline => {
-                    self.wait_until(deadline)
+                    self.wait_until(deadline)?
                 }
                 Err(dns::GetQueryResultError::Pending) => {
                     socket.cancel_query(query);
@@ -458,11 +525,12 @@ impl<L: Link, C: Clock> Stack<L, C> {
         socket
             .connect(self.iface.context(), (address, port), local)
             .map_err(|_| NetError::Invalid("TCP connect"))?;
+        let idle_at = self.now()?.saturating_add(IDLE_US);
         Ok(Transfer {
             socket: self.sockets.add(socket),
             request: core::mem::take(&mut *request),
             sent: 0,
-            idle_at: self.now() + IDLE_US,
+            idle_at,
         })
     }
 
@@ -487,7 +555,7 @@ impl<L: Link, C: Clock> Stack<L, C> {
         Ok(transfer)
     }
 
-    /// Sends as much of one caller-retained raw payload as the stream accepts.
+    /// Sends as much of one caller-kept raw payload as the stream accepts.
     /// Zero is backpressure while the connection is opening or its send window
     /// is full; the caller must retry the unchanged bytes.
     pub fn write(&mut self, transfer: &mut Transfer, bytes: &[u8]) -> Result<usize, NetError> {
@@ -498,7 +566,7 @@ impl<L: Link, C: Clock> Stack<L, C> {
         if bytes.is_empty() {
             return Ok(0);
         }
-        let now = self.now();
+        let now = self.now()?;
         let socket = self.sockets.get_mut::<tcp::Socket>(transfer.socket);
         if socket.can_send() {
             let sent = socket.send_slice(bytes).map_err(|_| NetError::Reset)?;
@@ -535,7 +603,7 @@ impl<L: Link, C: Clock> Stack<L, C> {
         mut take: impl FnMut(&[u8], bool) -> Result<bool, NetError>,
     ) -> Result<bool, NetError> {
         self.poll()?;
-        let now = self.now();
+        let now = self.now()?;
         let socket = self.sockets.get_mut::<tcp::Socket>(transfer.socket);
         if socket.can_send() && transfer.sent < transfer.request.len() {
             transfer.sent += socket
@@ -592,14 +660,16 @@ impl<L: Link, C: Clock> Stack<L, C> {
         deadline: u64,
         mut take: impl FnMut(&[u8], bool) -> Result<bool, NetError>,
     ) -> Result<(), NetError> {
-        let result = loop {
-            match self.read(&mut transfer, &mut take) {
-                Ok(true) => break Ok(()),
-                Ok(false) if self.now() >= deadline => break Err(NetError::Timeout("HTTP")),
-                Ok(false) => self.wait_until(deadline.min(transfer.idle_at)),
-                Err(error) => break Err(error),
+        let result = (|| {
+            loop {
+                match self.read(&mut transfer, &mut take) {
+                    Ok(true) => break Ok(()),
+                    Ok(false) if self.now()? >= deadline => break Err(NetError::Timeout("HTTP")),
+                    Ok(false) => self.wait_until(deadline.min(transfer.idle_at))?,
+                    Err(error) => break Err(error),
+                }
             }
-        };
+        })();
         self.close(transfer);
         result
     }
@@ -617,7 +687,14 @@ impl<L: Link, C: Clock> Stack<L, C> {
         let transfer = self.open(host, request, POST_BUFFER)?;
         let mut reply = Vec::new();
         let mut response = None;
-        self.finish(transfer, self.now() + POST_WAIT_US, |bytes, closed| {
+        let deadline = match self.now() {
+            Ok(now) => now.saturating_add(POST_WAIT_US),
+            Err(error) => {
+                self.close(transfer);
+                return Err(error);
+            }
+        };
+        self.finish(transfer, deadline, |bytes, closed| {
             reply.extend_from_slice(bytes);
             response = http::response(&reply, closed)?;
             Ok(response.is_some())
@@ -646,519 +723,4 @@ impl<L: Link, C: Clock> Stack<L, C> {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
-    mod http_flow;
-    #[cfg(all(not(target_os = "uefi"), feature = "native-reference-peer"))]
-    mod tls;
-    use super::*;
-    use alloc::{collections::VecDeque, rc::Rc};
-    use core::cell::{Cell, RefCell};
-    use stela_drivers::net::Mac;
-
-    const CLIENT: Mac = Mac([2, 0, 0, 0, 0, 1]);
-    const SERVER: [u8; 6] = [2, 0, 0, 0, 0, 2];
-    const CLIENT_IP: Ipv4 = Ipv4::new(10, 0, 2, 15);
-    const SERVER_IP: Ipv4 = Ipv4::new(10, 0, 2, 2);
-
-    /// Each reading advances 20 µs, so waits end.
-    #[derive(Clone, Default)]
-    pub(crate) struct TestClock(Rc<Cell<u64>>);
-
-    impl Clock for TestClock {
-        fn now_us(&self) -> u64 {
-            self.0.set(self.0.get() + 20);
-            self.0.get()
-        }
-    }
-
-    /// Frames from one end to the other.
-    #[derive(Default)]
-    struct Queue(VecDeque<Vec<u8>>);
-
-    struct End {
-        mac: Mac,
-        out: Rc<RefCell<Queue>>,
-        into: Rc<RefCell<Queue>>,
-    }
-
-    impl Link for End {
-        fn mac(&self) -> Mac {
-            self.mac
-        }
-        fn transmit(&mut self, frame: &[u8]) -> Result<(), LinkError> {
-            self.out.borrow_mut().0.push_back(frame.to_vec());
-            Ok(())
-        }
-        fn receive(&mut self) -> Result<Option<Vec<u8>>, LinkError> {
-            Ok(self.into.borrow_mut().0.pop_front())
-        }
-    }
-
-    /// A smoltcp HTTP server serving `pattern(offset)` for ranges of a
-    /// `size`-byte resource, stepped whenever the client reads its link;
-    /// every `drop_every`th frame to the client is lost and every
-    /// `swap_every`th pair swapped.
-    struct Lan {
-        client: End,
-        server: Phy<End>,
-        iface: Interface,
-        sockets: SocketSet<'static>,
-        listener: SocketHandle,
-        clock: TestClock,
-        size: u64,
-        request: Vec<u8>,
-        reply: Option<(Vec<u8>, u64, u64)>,
-        sent: u64,
-        raw: bool,
-        raw_sent: usize,
-        frames: usize,
-        drop_every: usize,
-        swap_every: usize,
-        ipv6: bool,
-        dns_listener: Option<SocketHandle>,
-        dns_queries: Vec<u16>,
-    }
-
-    fn pattern(offset: u64) -> u8 {
-        (offset.wrapping_mul(0x9e37_79b9) >> 13) as u8
-    }
-
-    impl Lan {
-        fn new(size: u64, clock: TestClock) -> Self {
-            let (a, b) = (Rc::default(), Rc::default());
-            let client = End {
-                mac: CLIENT,
-                out: Rc::clone(&a),
-                into: Rc::clone(&b),
-            };
-            let mut server = Phy {
-                link: End {
-                    mac: Mac(SERVER),
-                    out: b,
-                    into: a,
-                },
-                fault: None,
-                received: false,
-                probes: Vec::new(),
-                local_ipv6: Ipv6Addr::UNSPECIFIED,
-                approved_ipv6: Vec::new(),
-                rdnss: Default::default(),
-                manage_ipv6: false,
-            };
-            let config = InterfaceConfig::new(HardwareAddress::Ethernet(EthernetAddress(SERVER)));
-            let mut iface = Interface::new(config, &mut server, Instant::ZERO);
-            iface.update_ip_addrs(|a| a.push(IpCidr::new(SERVER_IP.into(), 24)).unwrap());
-            let mut sockets = SocketSet::new(Vec::new());
-            let mut socket = tcp::Socket::new(
-                tcp::SocketBuffer::new(vec![0; 1 << 20]),
-                tcp::SocketBuffer::new(vec![0; 1 << 20]),
-            );
-            socket.listen(80).unwrap();
-            let listener = sockets.add(socket);
-            Self {
-                client,
-                server,
-                iface,
-                sockets,
-                listener,
-                clock,
-                size,
-                request: Vec::new(),
-                reply: None,
-                sent: 0,
-                raw: false,
-                raw_sent: 0,
-                frames: 0,
-                drop_every: 0,
-                swap_every: 0,
-                ipv6: false,
-                dns_listener: None,
-                dns_queries: Vec::new(),
-            }
-        }
-
-        fn ipv6(size: u64, clock: TestClock) -> Self {
-            use smoltcp::socket::udp;
-            let mut lan = Self::new(size, clock);
-            lan.ipv6 = true;
-            lan.iface.update_ip_addrs(|addresses| {
-                addresses.clear();
-                for address in ["fe80::1", "2001:db8:1234::53"] {
-                    addresses
-                        .push(IpCidr::new(address.parse::<Ipv6Addr>().unwrap().into(), 64))
-                        .unwrap();
-                }
-            });
-            let mut dns = udp::Socket::new(
-                udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 4], vec![0; 2048]),
-                udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 4], vec![0; 2048]),
-            );
-            dns.bind(53).unwrap();
-            lan.dns_listener = Some(lan.sockets.add(dns));
-            lan
-        }
-
-        fn step(&mut self) {
-            let now = Instant::from_micros(self.clock.0.get() as i64);
-            self.iface.poll(now, &mut self.server, &mut self.sockets);
-            if let Some(handle) = self.dns_listener {
-                let dns = self.sockets.get_mut::<smoltcp::socket::udp::Socket>(handle);
-                while dns.can_recv() {
-                    let (query, endpoint) = dns.recv().unwrap();
-                    assert_eq!(u16::from_be_bytes([query[4], query[5]]), 1);
-                    let mut end = 12;
-                    while query[end] != 0 {
-                        end += usize::from(query[end]) + 1;
-                    }
-                    end += 1;
-                    let kind = u16::from_be_bytes([query[end], query[end + 1]]);
-                    self.dns_queries.push(kind);
-                    let mut reply = query[..end + 4].to_vec();
-                    reply[2..4].copy_from_slice(&0x8180u16.to_be_bytes());
-                    reply[6..8].copy_from_slice(&1u16.to_be_bytes());
-                    reply[8..12].fill(0);
-                    reply.extend_from_slice(&[0xc0, 0x0c]);
-                    reply.extend_from_slice(&kind.to_be_bytes());
-                    reply.extend_from_slice(&[0, 1, 0, 0, 0, 60]);
-                    assert_eq!(kind, 28, "IPv6-only link must query AAAA");
-                    reply.extend_from_slice(&16u16.to_be_bytes());
-                    reply.extend_from_slice(
-                        &"2001:db8:1234::53".parse::<Ipv6Addr>().unwrap().octets(),
-                    );
-                    dns.send_slice(&reply, endpoint).unwrap();
-                }
-            }
-            let socket = self.sockets.get_mut::<tcp::Socket>(self.listener);
-            while socket.can_recv() {
-                socket
-                    .recv(|bytes| {
-                        self.request.extend_from_slice(bytes);
-                        (bytes.len(), ())
-                    })
-                    .unwrap();
-            }
-            if self.raw {
-                while self.raw_sent < self.request.len() && socket.can_send() {
-                    let n = socket.send_slice(&self.request[self.raw_sent..]).unwrap();
-                    self.raw_sent += n;
-                }
-            } else if self.reply.is_none() && self.request.windows(4).any(|w| w == b"\r\n\r\n") {
-                let text = core::str::from_utf8(&self.request).unwrap();
-                let range = text.split("Range: bytes=").nth(1).unwrap();
-                let range = range.split("\r\n").next().unwrap();
-                let (first, last) = range.split_once('-').unwrap();
-                let (first, last): (u64, u64) = (first.parse().unwrap(), last.parse().unwrap());
-                let head = alloc::format!(
-                    "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {first}-{last}/{}\r\nContent-Length: {}\r\n\r\n",
-                    self.size,
-                    last - first + 1
-                );
-                self.reply = Some((head.into_bytes(), first, last + 1));
-            }
-            if let Some((head, first, end)) = &mut self.reply {
-                if !head.is_empty() {
-                    let n = socket.send_slice(head).unwrap();
-                    head.drain(..n);
-                }
-                while head.is_empty() && *first + self.sent < *end && socket.can_send() {
-                    let at = *first + self.sent;
-                    let chunk: Vec<u8> = (at..(*end).min(at + 4096)).map(pattern).collect();
-                    self.sent += socket.send_slice(&chunk).unwrap() as u64;
-                }
-                if *first + self.sent == *end {
-                    socket.close();
-                }
-            }
-            self.iface.poll(now, &mut self.server, &mut self.sockets);
-            // Impair what the server sent.
-            let mut queue = self.client.into.borrow_mut();
-            let mut kept = VecDeque::new();
-            while let Some(frame) = queue.0.pop_front() {
-                self.frames += 1;
-                if self.drop_every != 0 && self.frames.is_multiple_of(self.drop_every) {
-                    continue;
-                }
-                kept.push_back(frame);
-                if self.swap_every != 0 && self.frames.is_multiple_of(self.swap_every) {
-                    let n = kept.len();
-                    if n >= 2 {
-                        kept.swap(n - 1, n - 2);
-                    }
-                }
-            }
-            queue.0 = kept;
-        }
-    }
-
-    impl Link for Lan {
-        fn mac(&self) -> Mac {
-            CLIENT
-        }
-        fn transmit(&mut self, frame: &[u8]) -> Result<(), LinkError> {
-            if self.ipv6
-                && frame.len() >= 62
-                && frame[12..14] == [0x86, 0xdd]
-                && frame[20] == 58
-                && frame[54] == 133
-            {
-                self.client
-                    .into
-                    .borrow_mut()
-                    .0
-                    .push_back(automatic::tests::advertisement());
-            }
-            self.client.transmit(frame)
-        }
-        fn receive(&mut self) -> Result<Option<Vec<u8>>, LinkError> {
-            if self.client.into.borrow().0.is_empty() {
-                self.step();
-            }
-            self.client.receive()
-        }
-    }
-
-    fn stack(lan: Lan, clock: TestClock) -> Stack<Lan, TestClock> {
-        let mut s = Stack::new(lan, clock, 7);
-        s.set_config(Config {
-            address: Ipv4Cidr::new(CLIENT_IP, 24),
-            router: None,
-            dns: Vec::new(),
-        })
-        .unwrap();
-        s
-    }
-
-    #[test]
-    fn slaac_deadline_remains_visible_without_a_socket_deadline() {
-        let clock = TestClock::default();
-        let mut stack = Stack::new(Lan::ipv6(8192, clock.clone()), clock.clone(), 7);
-        stack
-            .set_config(Config {
-                address: Ipv4Cidr::new(CLIENT_IP, 24),
-                router: None,
-                dns: Vec::new(),
-            })
-            .unwrap();
-        stack.poll().unwrap();
-        // The only socket is an idle DNS client. The emitted first RS still
-        // owns a future retry timer even when no socket has a deadline.
-        let delay = stack
-            .iface
-            .poll_delay(Instant::from_micros(clock.now_us() as i64), &stack.sockets)
-            .expect("router discovery retry remains scheduled");
-        assert!(delay > Duration::ZERO && delay <= Duration::from_secs(4));
-    }
-
-    #[test]
-    fn an_existing_ipv4_default_route_does_not_block_ipv6_router_admission() {
-        let clock = TestClock::default();
-        let mut stack = Stack::new(Lan::ipv6(8192, clock.clone()), clock.clone(), 7);
-        // An authored already-configured IPv4 interface must not be erased
-        // by the DHCP socket's legitimate initial Deconfigured event.
-        stack
-            .set_config(Config {
-                address: Ipv4Cidr::new(CLIENT_IP, 24),
-                router: Some(SERVER_IP),
-                dns: Vec::new(),
-            })
-            .unwrap();
-        for _ in 0..1000 {
-            stack.poll().unwrap();
-            if stack.ipv6_ready() {
-                break;
-            }
-            clock.0.set(clock.0.get() + 10_000);
-        }
-        assert!(stack.ipv6_ready());
-        assert!(stack.iface.routes().get_default_ipv4_route().is_some());
-        assert!(stack.iface.routes().get_default_ipv6_route().is_some());
-        assert_eq!(stack.config().unwrap().router, Some(SERVER_IP));
-    }
-
-    #[test]
-    fn ipv6_only_ra_rdnss_aaaa_and_tcp_range_are_usable_without_ipv4() {
-        let clock = TestClock::default();
-        let lan = Lan::ipv6(8192, clock.clone());
-        let mut stack = Stack::new(lan, clock, 7);
-        let configuration = stack.automatic().unwrap();
-        assert!(stack.config().is_none());
-        assert!(!configuration.dns.is_empty());
-        let mut bytes = Vec::new();
-        assert_eq!(
-            stack
-                .get_range("restore.test", "/source", 7, 4102, |chunk| bytes
-                    .extend_from_slice(chunk))
-                .unwrap(),
-            8192
-        );
-        assert_eq!(bytes, (7..4103).map(pattern).collect::<Vec<_>>());
-        assert_eq!(stack.phy.link.dns_queries, vec![28]);
-        assert!(
-            stack
-                .iface
-                .ip_addrs()
-                .iter()
-                .all(|address| matches!(address, IpCidr::Ipv6(_)))
-        );
-    }
-
-    #[test]
-    fn a_range_arrives_whole_and_in_order_through_loss_and_reordering() {
-        let clock = TestClock::default();
-        let mut lan = Lan::new(1 << 40, clock.clone());
-        lan.drop_every = 97;
-        lan.swap_every = 13;
-        let mut s = stack(lan, clock);
-        let start = 3 << 30;
-        let length = 3 << 20;
-        let mut body = Vec::new();
-        let size = s
-            .get_range("10.0.2.2", "/a.ipsw", start, start + length - 1, |b| {
-                body.extend_from_slice(b)
-            })
-            .unwrap_or_else(|error| {
-                panic!(
-                    "{error:?}; received={} server_sent={} frames={} clock={}",
-                    body.len(),
-                    s.phy.link.sent,
-                    s.phy.link.frames,
-                    s.phy.link.clock.0.get()
-                )
-            });
-        assert_eq!(size, 1 << 40);
-        assert_eq!(body.len() as u64, length);
-        assert!(body.iter().zip(start..).all(|(&b, at)| b == pattern(at)));
-        let request = core::str::from_utf8(&s.link_mut().request).unwrap();
-        assert!(request.starts_with("GET /a.ipsw HTTP/1.1\r\nHost: 10.0.2.2\r\n"));
-    }
-
-    #[test]
-    fn a_network_without_dhcp_reports_no_ipv4_lease() {
-        /// Each reading advances 100 ms.
-        struct Coarse(Cell<u64>);
-        impl Clock for Coarse {
-            fn now_us(&self) -> u64 {
-                self.0.set(self.0.get() + 100_000);
-                self.0.get()
-            }
-        }
-        let silent = End {
-            mac: CLIENT,
-            out: Rc::default(),
-            into: Rc::default(),
-        };
-        let mut stack = Stack::new(silent, Coarse(Cell::new(0)), 7);
-        match stack.dhcp() {
-            Err(NetError::Dhcp(why)) => assert!(why.starts_with("no IPv4 lease"), "{why}"),
-            other => panic!("{other:?}"),
-        }
-    }
-
-    #[test]
-    fn a_silent_or_absent_peer_times_out() {
-        let clock = TestClock::default();
-        let mut lan = Lan::new(100, clock.clone());
-        lan.drop_every = 1;
-        let mut s = stack(lan, clock);
-        assert_eq!(
-            s.get_range("10.0.2.2", "/", 0, 9, |_| ()),
-            Err(NetError::Timeout("TCP transfer"))
-        );
-        let clock = TestClock::default();
-        let mut s = stack(Lan::new(100, clock.clone()), clock);
-        // Port 81 has no listener: smoltcp answers with a reset.
-        assert_eq!(
-            s.get_range("10.0.2.2:81", "/", 0, 9, |_| ()),
-            Err(NetError::Reset)
-        );
-    }
-
-    #[test]
-    fn a_signalling_link_sleeps_until_the_deadline_when_nothing_arrives() {
-        /// A clock whose sleeps jump to the time asked for.
-        #[derive(Clone, Default)]
-        struct Sleeping(Rc<Cell<u64>>, Rc<Cell<usize>>);
-        impl Clock for Sleeping {
-            fn now_us(&self) -> u64 {
-                self.0.get()
-            }
-            fn sleep(&self, until_us: u64) {
-                self.1.set(self.1.get() + 1);
-                self.0.set(until_us.max(self.0.get()));
-            }
-        }
-        struct Signalling(End);
-        impl Link for Signalling {
-            fn mac(&self) -> Mac {
-                self.0.mac
-            }
-            fn transmit(&mut self, frame: &[u8]) -> Result<(), LinkError> {
-                self.0.transmit(frame)
-            }
-            fn receive(&mut self) -> Result<Option<Vec<u8>>, LinkError> {
-                self.0.receive()
-            }
-            fn signals(&self) -> bool {
-                true
-            }
-        }
-        let clock = Sleeping::default();
-        let silent = Signalling(End {
-            mac: CLIENT,
-            out: Rc::default(),
-            into: Rc::default(),
-        });
-        let mut stack = Stack::new(silent, clock.clone(), 7);
-        match stack.dhcp() {
-            Err(NetError::Dhcp(why)) => assert!(why.starts_with("no IPv4 lease"), "{why}"),
-            other => panic!("{other:?}"),
-        }
-        // DHCP's retransmissions bound each sleep, so the 30 s wait takes a
-        // handful of sleeps rather than a poll per clock reading.
-        assert!((1..64).contains(&clock.1.get()), "{}", clock.1.get());
-        assert!(clock.0.get() >= DHCP_WAIT_US);
-    }
-
-    #[test]
-    fn a_name_keeps_its_address_and_falls_back_to_it_when_a_lookup_fails() {
-        let clock = TestClock::default();
-        // No DNS server is configured, so every lookup fails.
-        let mut s = stack(Lan::new(100, clock.clone()), clock);
-        assert!(matches!(s.resolve("cdn.example"), Err(NetError::Dns(_))));
-        let now = s.now();
-        s.resolved
-            .push((String::from("cdn.example"), SERVER_IP.into(), now));
-        assert_eq!(s.resolve("cdn.example"), Ok(SERVER_IP.into()));
-        s.resolved[0].2 = now.wrapping_sub(RESOLVED_US);
-        assert_eq!(s.resolve("cdn.example"), Ok(SERVER_IP.into()));
-        assert_eq!(s.resolve("10.0.2.2"), Ok(SERVER_IP.into()));
-    }
-
-    #[test]
-    fn raw_stream_retains_partial_dynamic_writes_and_opaque_replies() {
-        let clock = TestClock::default();
-        let mut lan = Lan::new(0, clock.clone());
-        lan.raw = true;
-        let mut s = stack(lan, clock);
-        let payload: Vec<u8> = (0..200_000).map(|n| (n * 37) as u8).collect();
-        let mut transfer = s.open_raw("10.0.2.2", 80, 1 << 20).unwrap();
-        let (mut sent, mut received) = (0, Vec::new());
-        for _ in 0..1_000_000 {
-            if sent < payload.len() {
-                sent += s.write(&mut transfer, &payload[sent..]).unwrap();
-            }
-            let done = s
-                .read(&mut transfer, |bytes, _| {
-                    received.extend_from_slice(bytes);
-                    Ok(received.len() == payload.len())
-                })
-                .unwrap();
-            if done {
-                break;
-            }
-        }
-        assert_eq!(sent, payload.len());
-        assert_eq!(received, payload);
-        s.close(transfer);
-    }
-}
+pub(crate) mod tests;

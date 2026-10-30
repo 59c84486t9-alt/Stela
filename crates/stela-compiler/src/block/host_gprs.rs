@@ -1,7 +1,7 @@
 //! Normalized host integer-register capture and recovery availability.
 
 /// Host registers in architectural encoding order after platform capture.
-/// The extended bank exists only when the platform captured or qualified its
+/// The extended bank exists only when the platform captured or checked its
 /// architectural initialization state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HostGprSnapshot {

@@ -187,7 +187,11 @@ fn catalog(sub: u16, generic: bool, bytes: Vec<u8>) -> Catalog {
 }
 fn model(sub: u16) -> (Hci<Model>, Rc<RefCell<Trace>>) {
     let device = device(0x0a5c, 0x21e8, 0xff);
-    let binding = Binding::new(&device, &xhci::interfaces(&device.configuration)[0]).unwrap();
+    let binding = Binding::new(
+        &device,
+        &crate::usb::descriptor::interfaces(&device.configuration)[0],
+    )
+    .unwrap();
     let mut steps = VecDeque::new();
     let mut add = |op, p: &[u8], reply: &[u8]| {
         steps.push_back(Step {
@@ -230,7 +234,7 @@ pub(super) type DiagnosticScript = VecDeque<(Vec<u8>, Vec<(Pipe, Vec<u8>)>)>;
 pub(super) fn diagnostic_fixture(sub: u16) -> (Device, Catalog, DiagnosticScript) {
     let (hci, _) = model(sub);
     // Future completions must remain in the peripheral until their exact
-    // command is delivered. Reset/minidriver settling genuinely polls HCI.
+    // command is delivered. Reset/minidriver settling polls HCI.
     let replies = hci
         .io
         .steps
@@ -311,7 +315,7 @@ fn all_usb_chip_profiles_replay_source_order_and_required_delays() {
     }
 }
 #[test]
-fn fallback_only_permits_missing_and_retains_exact_runtime_target() {
+fn fallback_only_permits_missing_and_keeps_exact_runtime_target() {
     let (mut hci, _) = model(0x220e);
     let cat = catalog(0x220e, true, image_bytes());
     let p = Recording {
@@ -394,7 +398,7 @@ fn malformed_images_are_rejected_before_download_mode() {
     }
 }
 #[test]
-fn every_submission_failure_retains_observations_and_never_reuses_attachment() {
+fn every_submission_failure_keeps_observations_and_never_reuses_attachment() {
     for failed in 1..=14 {
         let (mut hci, trace) = model(0x220e);
         hci.io.fail_command = Some(failed);
@@ -439,7 +443,7 @@ fn status_wrong_duplicate_and_silent_completions_do_not_credit_commands() {
     }
 }
 #[test]
-fn zero_credits_wait_for_real_statusless_nop_and_asynchronous_packets_are_retained() {
+fn zero_credits_wait_for_real_statusless_nop_and_asynchronous_packets_are_kept() {
     let (mut hci, _) = model(0x220e);
     hci.io.steps[7].responses = vec![
         (cc(0xfc4c, &[0], 0), Some(0)),
@@ -487,7 +491,7 @@ fn default_address_needs_real_platform_value_and_readback() {
     assert_eq!(report.address, [1, 2, 3, 4, 5, 6]);
 }
 #[test]
-fn retained_native_initialization_and_cleanup_failure_are_explicit() {
+fn kept_native_initialization_and_cleanup_failure_are_explicit() {
     let (mut hci, trace) = model(0x220e);
     let cat = catalog(0x220e, false, image_bytes());
     assert!(matches!(
@@ -525,15 +529,21 @@ fn vendor_descriptor_admission_matches_source_and_requires_real_interface() {
         0x105b, 0x0bb4, 0x0489, 0x04ca, 0x0a5c, 0x0b05, 0x050d, 0x13d3, 0x413c, 0x0930,
     ] {
         let device = device(vendor, 0xabcd, 0xff);
-        let interface = &xhci::interfaces(&device.configuration)[0];
+        let interface = &crate::usb::descriptor::interfaces(&device.configuration)[0];
         assert!(is_vendor_interface(&device, interface));
         assert!(Binding::new(&device, interface).is_ok());
         assert!(is_candidate(&device));
     }
     let unknown = device(0x1234, 0x5678, 0xff);
-    assert!(Binding::new(&unknown, &xhci::interfaces(&unknown.configuration)[0]).is_err());
+    assert!(
+        Binding::new(
+            &unknown,
+            &crate::usb::descriptor::interfaces(&unknown.configuration)[0]
+        )
+        .is_err()
+    );
     let known = device(0x0a5c, 0x21e8, 0xff);
-    let mut fabricated = xhci::interfaces(&known.configuration)[0].clone();
+    let mut fabricated = crate::usb::descriptor::interfaces(&known.configuration)[0].clone();
     fabricated.endpoints[0].address = 0x8f;
     assert!(Binding::new(&known, &fabricated).is_err());
 }
@@ -568,7 +578,7 @@ fn short_identity_and_finalize_responses_fail_with_partial_observations() {
         }
     }
     let (mut hci, trace) = model(0x220e);
-    hci.io.steps[1].responses[0].0[10] = 0xff; // Actual manufacturer low byte.
+    hci.io.steps[1].responses[0].0[10] = 0xff; // Manufacturer low byte.
     let error = initialize(&mut hci, &catalog(0x220e, false, image_bytes())).unwrap_err();
     assert!(matches!(attempt(&error).0, Error::Protocol { .. }));
     assert_eq!(trace.borrow().commands.len(), 2);

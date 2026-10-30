@@ -1,9 +1,9 @@
-//! Dual-stack HTTP and TLS transport over retained native Ethernet adapters.
+//! Dual-stack HTTP and TLS transport over kept native Ethernet adapters.
 //!
 //! smoltcp owns ARP, IPv4/IPv6, DHCPv4, DNS and TCP. SLAAC/RDNSS admission
-//! includes duplicate-address detection; the URL-aware request layer retains
+//! includes duplicate-address detection; the URL-aware request layer keeps
 //! redirect policy and range validators. TLS uses the shared protocol provider
-//! and requires actual owned entropy and a UTC-correlated continuous clock.
+//! and requires owned entropy and a UTC-correlated continuous clock.
 //! Missing native capabilities refuse HTTPS; they cannot select plaintext.
 //! Stateful DHCPv6 is unsupported. Raw guest relay bytes stay opaque.
 use alloc::string::String;
@@ -24,6 +24,8 @@ pub use stack::{
 pub enum NetError {
     /// The link adapter failed or refused a frame.
     Link(String),
+    /// The owned transport clock refused; this stack cannot be reused.
+    Clock(ClockError),
     /// The link reports no carrier.
     NoCarrier,
     /// IPv6 duplicate-address detection found another owner.
@@ -75,6 +77,7 @@ impl fmt::Display for NetError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Link(why) => write!(f, "network link: {why}"),
+            Self::Clock(why) => write!(f, "network clock: {why}"),
             Self::NoCarrier => f.write_str("network link has no carrier"),
             Self::DuplicateAddress(address) => {
                 write!(f, "IPv6 address {address} is already in use")
@@ -107,19 +110,44 @@ impl From<LinkError> for NetError {
     }
 }
 
-/// Microseconds from an arbitrary origin, monotonic.
-pub trait Clock {
-    fn now_us(&self) -> u64;
-    /// Sleep until an interrupt or the clock reads `until_us`, whichever is
-    /// first; the stack calls it only for a link that signals arrivals. A
-    /// clock that cannot sleep returns at once, and the stack polls.
-    fn sleep(&self, until_us: u64) {
-        let _ = until_us;
+/// A failed time observation never becomes a usable timestamp.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClockError {
+    Unavailable,
+    Native(stela_drivers::platform::work::WorkError),
+    Calibration(stela_drivers::ClockError),
+    Regressed { previous: u64, current: u64 },
+    OutOfRange(u64),
+}
+impl fmt::Display for ClockError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unavailable => f.write_str("continuous clock unavailable"),
+            Self::Native(error) => write!(f, "native source refused: {error:?}"),
+            Self::Calibration(error) => write!(f, "TSC calibration refused: {error:?}"),
+            Self::Regressed { previous, current } => write!(
+                f,
+                "clock regressed from {previous} to {current} microseconds"
+            ),
+            Self::OutOfRange(value) => {
+                write!(f, "clock value {value} exceeds the transport time range")
+            }
+        }
     }
 }
-
+impl core::error::Error for ClockError {}
+/// Microseconds from one monotonic origin. Native implementations
+/// preserve source/context errors instead of substituting a timestamp.
+pub trait Clock {
+    fn now_us(&self) -> Result<u64, ClockError>;
+    /// Sleep until an interrupt or `until_us`; no-sleep clocks return at once.
+    fn sleep(&self, until_us: u64) -> Result<(), ClockError> {
+        let _ = until_us;
+        Ok(())
+    }
+}
 impl Clock for stela_drivers::Clock {
-    fn now_us(&self) -> u64 {
-        self.now_us()
+    fn now_us(&self) -> Result<u64, ClockError> {
+        self.try_now_us().map_err(ClockError::Calibration)
     }
 }

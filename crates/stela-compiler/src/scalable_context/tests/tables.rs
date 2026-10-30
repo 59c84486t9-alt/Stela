@@ -23,7 +23,7 @@ fn table_features() -> ScalableFeatures {
 }
 
 #[test]
-fn fixed_table_routes_retain_compatible_legacy_profiles() {
+fn fixed_table_routes_keep_compatible_legacy_profiles() {
     let legacy = ScalableProfile::new(
         VectorLength::from_bytes(64).unwrap(),
         ScalableMode::new(true, false),

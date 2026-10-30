@@ -1,4 +1,4 @@
-//! Retained native requester and register ownership for the polled xHCI core.
+//! Native requester and register ownership for the polled xHCI core.
 use super::*;
 use crate::bus::{
     dma::{
@@ -13,7 +13,7 @@ use crate::bus::{
 use alloc::sync::Arc;
 use core::{cell::Cell, mem::ManuallyDrop};
 
-/// The actual paired resources. Numeric PCI/BAR geometry does not grant them.
+/// The paired resources. Numeric PCI/BAR geometry does not grant them.
 pub struct Resources {
     pub function: Function<OwnedConfig>,
     pub registers: Mapping,
@@ -32,8 +32,8 @@ pub enum Error {
 }
 
 struct Owner {
-    // Until an actual stop/original-domain drain/IRQ drain/unmap boundary is
-    // implemented, dropping any native handle retains this complete owner.
+    // Until a stop/original-domain drain/IRQ drain/unmap boundary is
+    // implemented, dropping any native handle keeps this complete owner.
     // Neither a replacement domain nor HCRST certifies old-route retirement.
     resources: RefCell<ManuallyDrop<Resources>>,
     register_failure: Rc<Cell<Option<usize>>>,
@@ -54,7 +54,7 @@ impl Registers for Access {
             self.0.register_failure.set(Some(offset));
             return u32::MAX;
         }
-        // SAFETY: actual retained UC BAR mapping; exclusive serialized access.
+        // SAFETY: UC BAR mapping; exclusive serialized access.
         u32::from_le(unsafe { pointer.as_ptr().cast::<u32>().read_volatile() })
     }
     fn write32(&mut self, offset: usize, value: u32) {
@@ -110,7 +110,7 @@ impl DmaAllocator for NoBoot {
     }
 }
 
-/// CPU-owned actual requester-domain payload. No device address escapes.
+/// CPU-owned requester-domain payload. No device address escapes.
 /// Submission consumes this owner; a live/uncertain TD exposes no CPU slice.
 pub struct Payload {
     buffer: memory::Buffer,
@@ -212,7 +212,7 @@ impl Controller {
             .native_memory
             .as_ref()
             .ok_or(BlockError::Unsupported("USB controller uses boot DMA"))?;
-        // Match the one-TRB 64KiB boundary using the actual allocated IOVA.
+        // Match the one-TRB 64KiB boundary using the allocated IOVA.
         let buffer = memory.allocate(bytes, MAX_TD, self.dma_profile.maximum())?;
         Ok(Payload {
             buffer,
@@ -220,8 +220,8 @@ impl Controller {
         })
     }
 
-    /// Reuses actual descriptor/TT/route enumeration, allocating every context
-    /// and EP0 buffer through this retained native memory owner.
+    /// Reuses descriptor/TT/route enumeration, allocating every context
+    /// and EP0 buffer through this native memory owner.
     pub fn enumerate_native(
         &mut self,
         failures: &mut Vec<(String, BlockError)>,
@@ -339,7 +339,7 @@ impl Controller {
                 .map(|r| r.map(Completion::Isochronous)),
         }?;
         Some(result.and_then(|completion| {
-            // SAFETY: genuine terminal event granted this exact TD's payload.
+            // SAFETY: terminal event granted this exact TD's payload.
             unsafe {
                 transfer.payload.buffer.sync_cpu(0..transfer.length)?;
             }
@@ -348,8 +348,8 @@ impl Controller {
         }))
     }
 
-    /// Actual Stop/Set-Dequeue (and any required Reset/TT clear) must ACK.
-    /// Success supplies ownership only, never a fabricated receive byte count.
+    /// Stop/Set-Dequeue (and any required Reset/TT clear) must ACK.
+    /// Success supplies ownership only, never an invented receive byte count.
     pub fn cancel_native(&mut self, transfer: &mut Transfer) -> Result<(), BlockError> {
         self.validate_id(transfer.device_id())?;
         if self
@@ -373,7 +373,7 @@ impl Controller {
                 self.cancel_native_iso(ticket)?;
             }
         }
-        // SAFETY: acknowledged actual endpoint retirement, not a timeout.
+        // SAFETY: acknowledged endpoint retirement, not a timeout.
         unsafe {
             transfer.payload.buffer.sync_cpu(0..transfer.length)?;
         }
@@ -382,24 +382,24 @@ impl Controller {
     }
 }
 
-/// Attach the actual retained requester using separate native CPU and IOVA views.
+/// Attach the requester using separate native CPU and IOVA views.
 ///
 /// # Safety
-/// These are the exclusively owned actual requester, UC BAR0, D0 power/root
+/// These are the exclusively owned requester, UC BAR0, D0 power/root
 /// route, isolated original DMA domain, fresh exclusive RAM source and original
 /// IRQ registration. The requester is initially stopped with BME clear. Every
 /// former firmware/driver/bypass/peer DMA path and callback is already stopped
-/// and drained with its original backing retained; attaching a new domain does
+/// and drained with its original backing kept; attaching a new domain does
 /// not establish that fact. In particular, an unresolved boot controller cannot
 /// be replaced by passing its BDF and a new domain here. The IRQ registration
-/// covers every old source/callback and can acknowledge their actual retirement.
+/// covers every old source/callback and can acknowledge their retirement.
 /// The clock is calibrated/advancing in this serialized process context. No
 /// concurrent firmware, hot-removal, class, MMIO or reset actor may run. RAM
 /// returned by the source is exclusively CPU-owned until publication.
 ///
 /// Native raw-address payload submission is unavailable; use consumed typed
 /// payloads. Full controller retirement is a separate boundary. Dropping this owner
-/// permanently retains its actual configuration/BAR/IRQ/power resources.
+/// permanently keeps its configuration/BAR/IRQ/power resources.
 pub unsafe fn attach(
     resources: Resources,
     firmware: &dyn crate::firmware::Provider,
@@ -445,7 +445,7 @@ pub unsafe fn attach(
             if resources.function.config().read16(4) & 4 != 0 {
                 return Err(Error::BusMaster);
             }
-            // Actual original source mask, callback synchronization and route
+            // Original source mask, callback synchronization and route
             // retirement; IMAN.IE=0 alone cannot establish these facts.
             resources.irq.retire().map_err(Error::Irq)?;
             let command = resources.function.config().read16(4);

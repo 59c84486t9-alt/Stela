@@ -57,7 +57,7 @@ fn runtime(cache: &std::path::Path, words: &[u32]) -> Result<BlockRuntime> {
 }
 
 #[test]
-fn pacga_preserves_original_state_and_provenance_across_aot_hot_and_disk_cache() -> Result<()> {
+fn pacga_keeps_state_across_every_cache() -> Result<()> {
     let cache = tempfile::tempdir()?;
     let words = [MOV_X7_42, PACGA_X1_X2_X3, 0];
     let mut runtime = runtime(cache.path(), &words)?;

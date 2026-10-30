@@ -127,8 +127,8 @@ impl MemoryProfile {
         {
             return Err(MemoryStatus::InvalidRequest);
         }
-        // Actual host admission belongs to the domain/prepared entry. This
-        // profile checks storage geometry and the retained target's recipes.
+        // Host admission belongs to the domain/prepared entry. This
+        // profile checks storage geometry and the target's recipes.
         if requirements.required_host_caps & host_caps::ATOMIC_LOAD16 != 0
             && !target.supports(TargetCpu::AtomicLoad16)
             || requirements.required_host_caps & host_caps::CX16 != 0
@@ -173,7 +173,7 @@ impl MemoryProfile {
 
 /// The resolver joins adjacent fragments of one atomic quantity only when
 /// physical storage and attributes agree. Guest permissions remain checked
-/// separately, in reached order. Gaps retain their architectural translation
+/// separately, in reached order. Gaps keep their architectural translation
 /// fault and are not replaced by a platform-layout decline.
 fn fragments_compatible(views: &[(Arc<MemoryView>, MappingAttributes)], quantity: usize) -> bool {
     views.windows(2).all(|pair| {
@@ -238,11 +238,13 @@ impl<'a, P: DataPolicy> CheckedMemoryEntry<'a, P> {
         }
         // SAFETY: the caller binds the checked body's exact requirements and
         // inherits the low-level callback's staging and lifetime contract. The
-        // actual current-owner proof remains borrowed through finalization.
+        // current-owner proof remains borrowed through finalization.
         let result = match self.session {
             // SAFETY: same checked requirements; the matching real session
             // loan is borrowed through invocation and finalization.
             Some(session) => unsafe { self.thread.with_checked_view_in(session, callback) },
+            // SAFETY: The caller keeps the recorded callback requirements and staging
+            // borrows. Without a shared session, with_checked_view takes its own loan.
             None => unsafe { self.thread.with_checked_view(callback) },
         };
         if let Some(authority) = self.native_system {
@@ -376,14 +378,18 @@ mod tests {
     unsafe impl Sync for Storage {}
     impl Drop for Storage {
         fn drop(&mut self) {
+            // SAFETY: the pointer came from `alloc_zeroed` with this layout and is freed once.
             unsafe { dealloc(self.0.as_ptr(), self.1) }
         }
     }
     fn domain(host_residue: usize, backing_offset: usize, tagged: bool) -> Arc<MemoryDomain> {
         let layout = Layout::from_size_align(80, 16).unwrap();
+        // SAFETY: `layout` has a nonzero size.
         let pointer = NonNull::new(unsafe { alloc_zeroed(layout) }).unwrap();
         let owner = Arc::new(Storage(pointer, layout));
         let backing =
+            // SAFETY: `owner` keeps this zeroed write-back allocation alive, and nothing else
+            // aliases it.
             unsafe { MemoryBacking::new(pointer.add(host_residue), 64, RIGHTS, owner) }.unwrap();
         let view = MemoryView::new(backing, 0x1000, backing_offset, 16, RIGHTS).unwrap();
         MemoryDomain::new_for_address_space(
@@ -528,8 +534,11 @@ mod tests {
             (31, RIGHTS, profile_requirements::TAG_GRANULES, 0, 0),
         ] {
             let layout = Layout::from_size_align(64, 16).unwrap();
+            // SAFETY: `layout` has a nonzero size.
             let pointer = NonNull::new(unsafe { alloc_zeroed(layout) }).unwrap();
             let owner = Arc::new(Storage(pointer, layout));
+            // SAFETY: `owner` keeps this zeroed write-back allocation alive, and nothing else
+            // aliases it.
             let backing = unsafe { MemoryBacking::new(pointer, bytes, rights, owner) }.unwrap();
             let view = MemoryView::new(backing, 0x1000, 0, bytes, rights).unwrap();
             let domain = MemoryDomain::new(
@@ -550,8 +559,11 @@ mod tests {
     fn partial_quantity_boundaries_cache_physical_layout_without_permission_prevalidation() {
         fn physical() -> Arc<MemoryBacking> {
             let layout = Layout::from_size_align(64, 16).unwrap();
+            // SAFETY: `layout` has a nonzero size.
             let pointer = NonNull::new(unsafe { alloc_zeroed(layout) }).unwrap();
             let owner = Arc::new(Storage(pointer, layout));
+            // SAFETY: `owner` keeps this zeroed write-back allocation alive, and nothing else
+            // aliases it.
             unsafe { MemoryBacking::new(pointer, 64, RIGHTS, owner) }.unwrap()
         }
         for (same_backing, boundary, gap, same_attributes, expected) in [

@@ -4,8 +4,10 @@ use super::{
     requester::RequesterClaim,
     vtd::{MmioRegisters, RequesterDomain, Unit},
 };
+use crate::Result;
 use alloc::{format, string::String, sync::Arc, vec::Vec};
 use core::ptr::NonNull;
+use stela_contracts::refuse;
 use stela_drivers::bus::dma::{
     mapping::{Direction, DmaMapping},
     memory::{CacheAttribute, CpuMapping, PageSource, PinnedPages},
@@ -21,27 +23,24 @@ struct Buffer {
     dma: DmaMapping,
 }
 impl Buffer {
-    fn new(
-        domain: Arc<RequesterDomain<MmioRegisters>>,
-        direction: Direction,
-    ) -> Result<Self, String> {
+    fn new(domain: Arc<RequesterDomain<MmioRegisters>>, direction: Direction) -> Result<Self> {
         let pages = crate::native_memory::SOURCE
             .allocate(BYTES, BYTES, CacheAttribute::WriteBack)
-            .map_err(|e| format!("isolation pages: {e:?}"))?;
+            .map_err(|e| refuse!("isolation pages: {e}", ?e))?;
         let cpu = pages
             .cpu_mapping(CacheAttribute::WriteBack)
-            .map_err(|e| format!("isolation CPU map: {e:?}"))?;
+            .map_err(|e| refuse!("isolation CPU map: {e}", ?e))?;
         let dma = DmaMapping::map(domain, pages.clone(), direction, 0x0fff_ffff)
-            .map_err(|e| format!("isolation DMA map: {e:?}"))?;
+            .map_err(|e| refuse!("isolation DMA map: {e}", ?e))?;
         Ok(Self { pages, cpu, dma })
     }
-    fn fill(&self, seed: u8) -> Result<(), String> {
+    fn fill(&self, seed: u8) -> Result<()> {
         let pointer = self
             .cpu
             .address(0, BYTES)
-            .map_err(|e| format!("CPU bounds: {e:?}"))?;
+            .map_err(|e| refuse!("CPU bounds: {e}", ?e))?;
         for i in 0..BYTES {
-            // SAFETY: stopped/completed fixture DMA; exclusive retained CPU pin.
+            // SAFETY: stopped/completed fixture DMA; exclusive kept CPU pin.
             unsafe {
                 pointer
                     .as_ptr()
@@ -51,41 +50,41 @@ impl Buffer {
         }
         Ok(())
     }
-    fn check(&self, seed: u8) -> Result<(), String> {
+    fn check(&self, seed: u8) -> Result<()> {
         let pointer = self
             .cpu
             .address(0, BYTES)
-            .map_err(|e| format!("CPU bounds: {e:?}"))?;
+            .map_err(|e| refuse!("CPU bounds: {e}", ?e))?;
         for i in 0..BYTES {
-            // SAFETY: caller observed actual RUN-clear, or a matched rejected
-            // transaction; retained mapping prevents target reuse throughout.
+            // SAFETY: caller observed RUN-clear, or a matched rejected
+            // transaction; mapping prevents target reuse throughout.
             if unsafe { pointer.as_ptr().add(i).read_volatile() } != seed.wrapping_add(i as u8) {
-                return Err(format!("isolation retained RAM mismatch at {i}"));
+                return Err(refuse!("isolation retained RAM mismatch at {i}", i));
             }
         }
         Ok(())
     }
-    fn address(&self) -> Result<u64, String> {
+    fn address(&self) -> Result<u64> {
         self.dma
             .address()
-            .map_err(|e| format!("isolation IOVA: {e:?}"))
+            .map_err(|e| refuse!("isolation IOVA: {e}", ?e))
     }
-    fn publish(&self) -> Result<(), String> {
+    fn publish(&self) -> Result<()> {
         self.dma
             .sync_for_device(0..BYTES)
-            .map_err(|e| format!("device visibility: {e:?}"))
+            .map_err(|e| refuse!("device visibility: {e}", ?e))
     }
-    fn complete(&self) -> Result<(), String> {
+    fn complete(&self) -> Result<()> {
         // SAFETY: exact EDU RUN-clear; no IRQ/work/submission can restart DMA.
-        unsafe { self.dma.sync_for_cpu(0..BYTES) }.map_err(|e| format!("CPU visibility: {e:?}"))
+        unsafe { self.dma.sync_for_cpu(0..BYTES) }.map_err(|e| refuse!("CPU visibility: {e}", ?e))
     }
-    fn unmap(&mut self) -> Result<(), String> {
-        // SAFETY: exact requester idle and BM disabled, no IRQ/work producer.
-        // Actual context IOTLB acknowledgement precedes return/reuse.
-        unsafe { self.dma.unmap() }.map_err(|e| format!("isolation unmap: {e:?}"))
+    fn unmap(&mut self) -> Result<()> {
+        // SAFETY: requester idle and BM disabled, no IRQ/work producer.
+        // Context IOTLB acknowledgement precedes return/reuse.
+        unsafe { self.dma.unmap() }.map_err(|e| refuse!("isolation unmap: {e}", ?e))
     }
 }
-fn roundtrip(device: &Device, send: &Buffer, receive: &Buffer, seed: u8) -> Result<(), String> {
+fn roundtrip(device: &Device, send: &Buffer, receive: &Buffer, seed: u8) -> Result<()> {
     send.publish()?;
     receive.publish()?;
     device.transfer(send.address()?, BUFFER, false)?;
@@ -94,17 +93,17 @@ fn roundtrip(device: &Device, send: &Buffer, receive: &Buffer, seed: u8) -> Resu
     receive.check(seed)
 }
 
-/// Called only after Prepared's actual common post-EBS quiescence sequence.
+/// Called only after Prepared's common post-EBS quiescence sequence.
 /// Any error is fatal to host-check; uncertain mappings/contexts quarantine.
 pub(super) fn run(
     mut prepared: Prepared<
         stela_drivers::bus::pci::Function<stela_drivers::bus::pci::owned::OwnedConfig>,
     >,
-) -> Result<String, String> {
+) -> Result<String> {
     let (second_index, second_bar) = prepared
         .second
         .take()
-        .ok_or_else(|| String::from("second isolation requester missing"))?;
+        .ok_or_else(|| refuse!("second isolation requester missing"))?;
     let a = Device {
         edu_registers: prepared.edu_registers.clone(),
         clock: prepared.clock,
@@ -117,25 +116,25 @@ pub(super) fn run(
         .clock
         .ticks_per_microsecond
         .checked_mul(TIMEOUT_US)
-        .ok_or_else(|| String::from("isolation timeout overflow"))?;
-    // SAFETY: complete actual DMAR ownership, UC fixture root mapping retained;
+        .ok_or_else(|| refuse!("isolation timeout overflow"))?;
+    // SAFETY: complete DMAR ownership, UC fixture root mapping kept;
     // both EDUs idle, virtio reset acknowledged and legacy channels masked.
     let registers = unsafe {
         MmioRegisters::new(
             NonNull::new(prepared.hardware.base as *mut u8)
-                .ok_or_else(|| String::from("zero isolation unit"))?,
+                .ok_or_else(|| refuse!("zero isolation unit"))?,
             prepared.hardware.bytes,
             crate::apic::rdtsc,
             timeout,
         )
     }
-    .map_err(|e| format!("isolation registers: {e:?}"))?;
+    .map_err(|e| refuse!("isolation registers: {e}", ?e))?;
     let requesters: Vec<u16> = prepared
         .functions
         .iter()
         .map(|f| u16::from(f.address.device) * 8 + u16::from(f.address.function))
         .collect();
-    // Remove descending indices so both genuine unique configuration owners
+    // Remove descending indices so both unique configuration owners
     // survive inventory changes. Neither a RID nor an address creates a claim.
     let mut indices = [prepared.edu, second_index];
     indices.sort_unstable();
@@ -144,14 +143,14 @@ pub(super) fn run(
     let mut claims = Vec::new();
     for function in [first_function, second_function] {
         // SAFETY: granted exact coherent QEMU endpoint, stopped/drained above;
-        // permanent host-check root retained; ATS/PRI/PASID/NoSnoop off.
+        // permanent host-check root kept; ATS/PRI/PASID/NoSnoop off.
         claims.push(
             unsafe { RequesterClaim::from_stopped_pci(function) }
-                .map_err(|e| format!("isolation requester claim: {e:?}"))?,
+                .map_err(|e| refuse!("isolation requester claim: {e}", ?e))?,
         );
     }
     claims.sort_unstable_by_key(RequesterClaim::requester);
-    // SAFETY: actual complete exclusive fixture unit and all masters stopped.
+    // SAFETY: complete exclusive fixture unit and all masters stopped.
     let unit = unsafe {
         Unit::take_over(
             registers,
@@ -161,29 +160,27 @@ pub(super) fn run(
             &[],
         )
     }
-    .map_err(|e| format!("isolation takeover: {e:?}"))?;
+    .map_err(|e| refuse!("isolation takeover: {e}", ?e))?;
     let mut domains = Vec::new();
     for claim in claims {
-        // SAFETY: actual retained stopped claim, same independently qualified
+        // SAFETY: stopped claim, same checked
         // endpoint coherency grant, no alternate config/reset/IRQ owner.
         domains.push(
             unsafe { unit.attach_requester(claim) }
-                .map_err(|e| format!("isolation context: {e:?}"))?,
+                .map_err(|e| refuse!("isolation context: {e}", ?e))?,
         );
     }
     let da = &domains[0];
     let db = &domains[1];
     if da.requester() != 0x10 || db.requester() != 0x18 || da.domain_id() == db.domain_id() {
-        return Err(String::from(
-            "isolation context identities differ from fixture",
-        ));
+        return Err(refuse!("isolation context identities differ from fixture"));
     }
     if !unit
         .pending_faults()
-        .map_err(|e| format!("initial faults: {e:?}"))?
+        .map_err(|e| refuse!("initial faults: {e}", ?e))?
         .is_empty()
     {
-        return Err(String::from("prior isolation faults"));
+        return Err(refuse!("prior isolation faults"));
     }
     let mut send_a = Buffer::new(da.clone(), Direction::ToDevice)?;
     let mut receive_a = Buffer::new(da.clone(), Direction::FromDevice)?;
@@ -211,72 +208,75 @@ pub(super) fn run(
                     .is_ok_and(|iova| iova == b.pages.physical_pages()[0])
             })
     {
-        return Err(String::from(
-            "fixture did not establish same-IOVA disjoint nonidentity RAM",
+        return Err(refuse!(
+            "fixture did not establish same-IOVA disjoint nonidentity RAM"
         ));
     }
     protected_a.publish()?;
     // SAFETY: all ordinary DMA targets mapped in this exact context. The
-    // controlled wrong-domain probe also retains the possible target backing.
-    unsafe { da.set_bus_master(true) }.map_err(|e| format!("A BM: {e:?}"))?;
-    unsafe { db.set_bus_master(true) }.map_err(|e| format!("B BM: {e:?}"))?;
+    // controlled wrong-domain probe also keeps the possible target backing.
+    unsafe { da.set_bus_master(true) }.map_err(|e| refuse!("A BM: {e}", ?e))?;
+    // SAFETY: every ordinary DMA target of B's context is mapped in it as well.
+    unsafe { db.set_bus_master(true) }.map_err(|e| refuse!("B BM: {e}", ?e))?;
     roundtrip(&a, &send_a, &receive_a, 0x31)?;
     roundtrip(&b, &send_b, &receive_b, 0x97)?;
     if !unit
         .pending_faults()
-        .map_err(|e| format!("roundtrip faults: {e:?}"))?
+        .map_err(|e| refuse!("roundtrip faults: {e}", ?e))?
         .is_empty()
     {
-        return Err(String::from("unexpected two-domain roundtrip fault"));
+        return Err(refuse!("unexpected two-domain roundtrip fault"));
     }
     let protected_iova = protected_a.address()?;
     b.transfer(BUFFER, protected_iova, true)?;
     let faults = unit
         .pending_faults()
-        .map_err(|e| format!("wrong-domain faults: {e:?}"))?;
+        .map_err(|e| refuse!("wrong-domain faults: {e}", ?e))?;
     let fault = faults
         .iter()
         .find(|f| {
             f.requester == db.requester() && f.address == protected_iova && !f.read && f.reason != 0
         })
-        .ok_or_else(|| format!("missing matched wrong-domain fault: {faults:?}"))?;
+        .ok_or_else(|| refuse!("missing matched wrong-domain fault: {faults}", ?faults))?;
     protected_a.check(0xd3)?;
     unit.acknowledge_fault(fault.index)
-        .map_err(|e| format!("wrong-domain fault ACK: {e:?}"))?;
+        .map_err(|e| refuse!("wrong-domain fault ACK: {e}", ?e))?;
     // The identical IOVA really exists in A: after B's rejected transaction,
-    // A writes its own retained page, then actual completion permits CPU read.
+    // A writes its own page, then completion permits CPU read.
     a.transfer(BUFFER, protected_a.address()?, true)?;
     protected_a.complete()?;
     protected_a.check(0x31)?;
-    unsafe { da.set_bus_master(false) }.map_err(|e| format!("A stop BM: {e:?}"))?;
+    // SAFETY: stopping bus mastering only revokes the requester's DMA.
+    unsafe { da.set_bus_master(false) }.map_err(|e| refuse!("A stop BM: {e}", ?e))?;
     send_a.unmap()?;
     receive_a.unmap()?;
     protected_a.unmap()?;
     // SAFETY: A idle, no mappings or callbacks; detach awaits real context and
     // IOTLB invalidation ACK while B's separate context remains running.
-    let owner_a = unsafe { da.detach() }.map_err(|e| format!("A detach: {e:?}"))?;
+    let owner_a = unsafe { da.detach() }.map_err(|e| refuse!("A detach: {e}", ?e))?;
     roundtrip(&b, &send_b, &receive_b, 0x97)?;
     if !unit
         .pending_faults()
-        .map_err(|e| format!("post-detach faults: {e:?}"))?
+        .map_err(|e| refuse!("post-detach faults: {e}", ?e))?
         .is_empty()
     {
-        return Err(String::from("B affected by A context removal"));
+        return Err(refuse!("B affected by A context removal"));
     }
-    unsafe { db.set_bus_master(false) }.map_err(|e| format!("B stop BM: {e:?}"))?;
+    // SAFETY: stopping bus mastering only revokes the requester's DMA.
+    unsafe { db.set_bus_master(false) }.map_err(|e| refuse!("B stop BM: {e}", ?e))?;
     send_b.unmap()?;
     receive_b.unmap()?;
-    // SAFETY: B idle, mapping/work/IRQ-free; actual context/IOTLB ACK required.
-    let owner_b = unsafe { db.detach() }.map_err(|e| format!("B detach: {e:?}"))?;
+    // SAFETY: B idle, mapping/work/IRQ-free; context/IOTLB ACK required.
+    let owner_b = unsafe { db.detach() }.map_err(|e| refuse!("B detach: {e}", ?e))?;
     let did_a = da.domain_id();
     let did_b = db.domain_id();
     drop(domains);
     // SAFETY: all requesters stopped, all contexts detached with hardware ACK.
-    unsafe { unit.shut_down() }.map_err(|e| format!("isolation TE-off ACK: {e:?}"))?;
+    unsafe { unit.shut_down() }.map_err(|e| refuse!("isolation TE-off ACK: {e}", ?e))?;
     for owner in [owner_a, owner_b] {
         let function = owner
             .into_function()
-            .map_err(|error| format!("isolation original config owner: {error:?}"))?;
+            .map_err(|error| refuse!("isolation original config owner: {error}", ?error))?;
         super::diagnostic::retire_function(function)?;
     }
     for function in prepared.functions {

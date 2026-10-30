@@ -354,7 +354,7 @@ pub(in crate::x86_64) fn emit(
     target: TargetCpu,
 ) -> Result<bool, CompileError> {
     // These two vector lengths have source-bound, paired mapping measurements.
-    // Other lengths retain the existing mapping until separately qualified.
+    // Other lengths keep the existing mapping until separately checked.
     const QUALIFIED_MAPPING_LENGTHS: [usize; 2] = [16, 64];
     let mut recipe = Recipe::default();
     if QUALIFIED_MAPPING_LENGTHS.contains(&length.bytes()) {

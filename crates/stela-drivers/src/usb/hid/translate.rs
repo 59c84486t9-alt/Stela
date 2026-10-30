@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// Linux HID input mapping reference and retained notices: usb/THIRD_PARTY.md
+// Linux HID input mapping reference and kept notices: usb/THIRD_PARTY.md
 // and the parent HID module.
 //! The HID report translator every HID transport shares: a device's report
 //! descriptor decodes each input report into descriptor events, and its

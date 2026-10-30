@@ -7,10 +7,11 @@
 //! `load base + (vmaddr - lowest vmaddr)` and zero-fills the rest of
 //! `vmsize`, as Asahi m1n1 `proxyclient/m1n1/macho.py` `prepare_image` does.
 use super::thread_state::{Arm64UnixThread, unix_thread};
-use alloc::{borrow::ToOwned, format, string::String, vec, vec::Vec};
-use anyhow::{Context, Result, bail, ensure};
+use crate::Result;
+use alloc::{borrow::ToOwned, string::String, vec, vec::Vec};
 use object::macho;
 use serde::Serialize;
+use stela_contracts::{refuse, require};
 
 const MACH_HEADER_64_BYTES: usize = 32;
 const SEGMENT_COMMAND_64_BYTES: usize = 72;
@@ -66,8 +67,9 @@ fn word(bytes: &[u8], offset: usize) -> Result<u32> {
     Ok(u32::from_le_bytes(
         bytes
             .get(offset..offset + 4)
-            .context("truncated Mach-O field")?
-            .try_into()?,
+            .ok_or(refuse!("truncated Mach-O field"))?
+            .try_into()
+            .unwrap(),
     ))
 }
 
@@ -75,14 +77,17 @@ fn quad(bytes: &[u8], offset: usize) -> Result<u64> {
     Ok(u64::from_le_bytes(
         bytes
             .get(offset..offset + 8)
-            .context("truncated Mach-O field")?
-            .try_into()?,
+            .ok_or(refuse!("truncated Mach-O field"))?
+            .try_into()
+            .unwrap(),
     ))
 }
 
 fn fixed_name(bytes: &[u8]) -> Result<String> {
     let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-    Ok(core::str::from_utf8(&bytes[..end])?.to_owned())
+    Ok(core::str::from_utf8(&bytes[..end])
+        .map_err(|_| refuse!("Mach-O name is not UTF-8"))?
+        .to_owned())
 }
 
 impl KernelCollection {
@@ -103,29 +108,31 @@ impl KernelCollection {
     }
 
     fn parse_kind(bytes: &[u8], expected_type: u32, entered: bool) -> Result<Self> {
-        ensure!(
+        require!(
             word(bytes, 0)? == macho::MH_MAGIC_64,
             "not a little-endian 64-bit Mach-O"
         );
-        ensure!(
+        require!(
             word(bytes, 4)? == macho::CPU_TYPE_ARM64,
             "not an arm64 Mach-O"
         );
         let cpu_subtype = word(bytes, 8)?;
         let file_type = word(bytes, 12)?;
-        ensure!(
+        require!(
             file_type == expected_type,
-            "Mach-O file type {file_type} is not the expected {expected_type}"
+            "Mach-O file type {file_type} is not the expected {expected_type}",
+            file_type,
+            expected_type
         );
         let command_count = word(bytes, 16)? as usize;
         let commands_bytes = word(bytes, 20)? as usize;
-        ensure!(
+        require!(
             commands_bytes <= MAX_LOAD_COMMAND_BYTES,
             "load commands exceed 1 MiB"
         );
         let commands = bytes
             .get(MACH_HEADER_64_BYTES..MACH_HEADER_64_BYTES + commands_bytes)
-            .context("load commands extend past the file")?;
+            .ok_or(refuse!("load commands extend past the file"))?;
         let mut segments = vec![];
         let mut fileset_entries = vec![];
         let mut thread = None;
@@ -134,70 +141,70 @@ impl KernelCollection {
         for _ in 0..command_count {
             let command = word(commands, offset)?;
             let size = word(commands, offset + 4)? as usize;
-            ensure!(
+            require!(
                 size >= 8 && size.is_multiple_of(8),
-                "malformed load command size {size}"
+                "malformed load command size {size}",
+                size
             );
             let raw = commands
                 .get(offset..offset + size)
-                .context("load command extends past sizeofcmds")?;
+                .ok_or(refuse!("load command extends past sizeofcmds"))?;
             match command {
                 macho::LC_SEGMENT_64 => segments.push(segment(raw)?),
                 LC_FILESET_ENTRY => fileset_entries.push(fileset_entry(raw)?),
                 macho::LC_UNIXTHREAD => {
-                    ensure!(thread.is_none(), "duplicate LC_UNIXTHREAD");
+                    require!(thread.is_none(), "duplicate LC_UNIXTHREAD");
                     thread = Some(unix_thread(raw)?);
                 }
                 macho::LC_UUID => {
-                    uuid = Some(hex::encode(raw.get(8..24).context("short LC_UUID")?))
+                    uuid = Some(hex::encode(raw.get(8..24).ok_or(refuse!("short LC_UUID"))?))
                 }
                 _ => {}
             }
             offset += size;
         }
-        ensure!(
+        require!(
             offset == commands_bytes,
             "load commands do not fill sizeofcmds"
         );
-        ensure!(
-            thread.is_some() == entered,
-            "image {} an LC_UNIXTHREAD entry point",
-            if entered {
-                "has no"
-            } else {
-                "unexpectedly has"
-            }
+        require!(
+            thread.is_some() || !entered,
+            "image has no LC_UNIXTHREAD entry point"
         );
-        ensure!(!segments.is_empty(), "image has no segments");
+        require!(
+            thread.is_none() || entered,
+            "auxiliary collection has an LC_UNIXTHREAD entry point"
+        );
+        require!(!segments.is_empty(), "image has no segments");
         let mut ordered: Vec<&Segment> = segments.iter().filter(|s| s.vm_size > 0).collect();
         ordered.sort_by_key(|s| s.vm_address);
         for pair in ordered.windows(2) {
-            ensure!(
+            require!(
                 pair[0].vm_end() <= pair[1].vm_address,
-                "segments {} and {} overlap",
-                pair[0].name,
-                pair[1].name
+                "segments {first} and {second} overlap",
+                first = pair[0].name,
+                second = pair[1].name
             );
         }
         for segment in &segments {
-            ensure!(
+            require!(
                 segment.file_size <= segment.vm_size,
-                "segment {} file bytes exceed its VM size",
-                segment.name
+                "segment {name} file bytes exceed its VM size",
+                name = segment.name
             );
             let end = segment
                 .file_offset
                 .checked_add(segment.file_size)
-                .context("segment file range overflows")?;
-            ensure!(
+                .ok_or(refuse!("segment file range overflows"))?;
+            require!(
                 end <= bytes.len() as u64,
-                "segment {} extends past the file",
-                segment.name
+                "segment {name} extends past the file",
+                name = segment.name
             );
         }
         let vm_base = ordered
             .first()
-            .context("image has no mapped segments")?
+            .ok_or(refuse!("image has no mapped segments"))?
             .vm_address;
         let vm_end = ordered.iter().map(|s| s.vm_end()).max().unwrap_or(vm_base);
         let collection = Self {
@@ -213,7 +220,7 @@ impl KernelCollection {
         if let Some(thread) = &collection.thread {
             collection
                 .segment_containing(thread.pc)
-                .context("entry point lies outside every segment")?;
+                .ok_or(refuse!("entry point lies outside every segment"))?;
         }
         Ok(collection)
     }
@@ -237,8 +244,12 @@ impl KernelCollection {
         self.vm_end - self.vm_base
     }
 
+    /// The entry thread, which an auxiliary collection lacks.
     pub fn entry(&self) -> Result<&Arm64UnixThread> {
-        self.thread.as_ref().context("image has no entry point")
+        Ok(self
+            .thread
+            .as_ref()
+            .ok_or(refuse!("image has no entry point"))?)
     }
 
     /// Entry PC relative to the load base.
@@ -249,9 +260,10 @@ impl KernelCollection {
     /// Physical address of a linked virtual address for an image whose load
     /// base is placed at `load_base`.
     pub fn physical_address(&self, load_base: u64, address: u64) -> Result<u64> {
-        ensure!(
+        require!(
             (self.vm_base..self.vm_end).contains(&address),
-            "{address:#x} lies outside the image"
+            "{address:#x} lies outside the image",
+            address
         );
         Ok(load_base + (address - self.vm_base))
     }
@@ -259,7 +271,7 @@ impl KernelCollection {
     /// The image as it lies in memory from its load base: every segment's
     /// file bytes at its VM offset, with zero fill elsewhere.
     pub fn memory_image(&self, bytes: &[u8]) -> Result<Vec<u8>> {
-        let length = usize::try_from(self.image_bytes())?;
+        let length = self.image_bytes() as usize;
         let mut image = vec![0u8; length];
         for segment in &self.segments {
             let source = &bytes
@@ -274,19 +286,19 @@ impl KernelCollection {
     pub fn span(&self, first: &str, last: &str) -> Result<core::ops::Range<u64>> {
         let start = self
             .segment(first)
-            .with_context(|| format!("image has no segment {first}"))?;
+            .ok_or_else(|| refuse!("image has no segment {first}", first))?;
         let end = self
             .segment(last)
-            .with_context(|| format!("image has no segment {last}"))?;
+            .ok_or_else(|| refuse!("image has no segment {last}", last))?;
         if end.vm_end() < start.vm_address {
-            bail!("segment {last} precedes {first}");
+            return Err(refuse!("segment {last} precedes {first}", last, first).into());
         }
         Ok(start.vm_address - self.vm_base..end.vm_end() - self.vm_base)
     }
 }
 
 fn segment(raw: &[u8]) -> Result<Segment> {
-    ensure!(raw.len() >= SEGMENT_COMMAND_64_BYTES, "short LC_SEGMENT_64");
+    require!(raw.len() >= SEGMENT_COMMAND_64_BYTES, "short LC_SEGMENT_64");
     Ok(Segment {
         name: fixed_name(&raw[8..8 + SEGMENT_NAME_BYTES])?,
         vm_address: quad(raw, 24)?,
@@ -299,21 +311,23 @@ fn segment(raw: &[u8]) -> Result<Segment> {
 }
 
 fn fileset_entry(raw: &[u8]) -> Result<FilesetEntry> {
-    ensure!(
+    require!(
         raw.len() >= FILESET_ENTRY_COMMAND_BYTES,
         "short LC_FILESET_ENTRY"
     );
     let id_offset = word(raw, 24)? as usize;
-    ensure!(
+    require!(
         (FILESET_ENTRY_COMMAND_BYTES..raw.len()).contains(&id_offset),
         "fileset entry id lies outside its command"
     );
     let id = raw[id_offset..]
         .split(|&b| b == 0)
         .next()
-        .context("fileset entry id is not terminated")?;
+        .ok_or(refuse!("fileset entry id is not terminated"))?;
     Ok(FilesetEntry {
-        id: core::str::from_utf8(id)?.to_owned(),
+        id: core::str::from_utf8(id)
+            .map_err(|_| refuse!("fileset entry id is not UTF-8"))?
+            .to_owned(),
         vm_address: quad(raw, 8)?,
         file_offset: quad(raw, 16)?,
     })
@@ -322,6 +336,7 @@ fn fileset_entry(raw: &[u8]) -> Result<FilesetEntry> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use anyhow::Result;
 
     pub(crate) struct Builder {
         file_type: u32,

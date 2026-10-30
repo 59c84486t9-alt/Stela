@@ -7,13 +7,12 @@
 mod asix;
 pub mod firmware;
 mod framing;
-#[cfg(test)]
-pub(crate) mod generation_tests;
 mod identity;
 mod registers;
 pub mod rtl815x;
 
-use super::xhci::{Device, Endpoint, Interface, Shared, SlotId, TransferTicket};
+use super::descriptor::{Endpoint, Interface};
+use super::xhci::{Device, Shared, SlotId, TransferTicket};
 use crate::{
     block::BlockError,
     bus::dma::{DmaAllocator, DmaBuffer},
@@ -45,7 +44,7 @@ pub(crate) fn asix_ids() -> Vec<(u16, u16)> {
 }
 
 /// Synchronous endpoint-zero requests. Success includes the exact transferred
-/// byte count; short replies/writes are errors, never fabricated register values.
+/// byte count; short replies/writes are errors, never invented register values.
 pub trait Control {
     fn control(&mut self, request: [u8; 8], output: &[u8]) -> Result<Vec<u8>, BlockError>;
     fn delay_us(&mut self, microseconds: u64);
@@ -235,9 +234,9 @@ impl UsbEthernet {
         controller.borrow_mut().device(device.id)?;
         if binding.setting.1 != 0 {
             controller.borrow_mut().device(device.id)?.control(
-                super::xhci::setup(
+                super::descriptor::setup(
                     1,
-                    super::xhci::SET_INTERFACE,
+                    super::descriptor::SET_INTERFACE,
                     u16::from(binding.setting.1),
                     u16::from(binding.setting.0),
                     0,
@@ -462,7 +461,8 @@ impl Link for UsbEthernet {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
+    pub(crate) mod generation;
     use super::*;
 
     #[test]

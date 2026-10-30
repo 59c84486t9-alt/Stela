@@ -1,7 +1,7 @@
 //! Orthogonal native fault sites, minted by the compiler's emission plan.
 use super::{FaultRecoveryError, RecoveredPosition, RetirementPhase};
 
-/// Portable classification tag. A decoded tag carries no guest-fault authority.
+/// Portable classification tag. A decoded tag carries no guest-fault permission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum RecoverySiteKind {
@@ -24,7 +24,7 @@ impl TryFrom<u8> for RecoverySiteKind {
     }
 }
 
-/// A site qualified by matching admitted source, profile and native code/plan.
+/// A site checked by matching admitted source, profile and native code/plan.
 /// A source-word shape or portable kind alone cannot mint a guest site.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RecoverySite {
@@ -32,9 +32,9 @@ pub struct RecoverySite {
     translated: Option<TranslatedAccess>,
 }
 
-/// The compiler-emitted access descriptor at a qualified helper return token.
+/// The compiler-emitted access descriptor at a checked helper return token.
 /// No public constructor exists: portable tags and arbitrary byte pairs cannot
-/// mint helper-failure authority.
+/// mint helper-failure permission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TranslatedAccess {
     bytes: u8,

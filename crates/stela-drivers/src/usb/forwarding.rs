@@ -5,9 +5,10 @@
 //! claim. Descriptors remain the device's original bytes. No guest addresses,
 //! USB/IP socket, application identity or synthetic class driver is involved.
 //! Ordinary transfers use one bounded TD per endpoint. ISO requests queue bounded
-//! packet lists on the native controller's actual service-interval scheduler;
+//! packet lists on the native controller's service-interval scheduler;
 //! primary streams inherit the native controller's explicit admission limits.
-use super::xhci::{self, Endpoint, Interface, Shared};
+use super::descriptor::{Endpoint, Interface};
+use super::xhci::{self, Shared};
 use crate::{
     block::BlockError,
     bus::dma::{DmaAllocator, DmaBuffer},
@@ -17,15 +18,13 @@ use alloc::{collections::BTreeMap, vec::Vec};
 mod configuration;
 mod descriptors;
 mod isochronous;
-#[cfg(test)]
-mod native_tests;
 mod transfer;
 
 /// A request identity belongs to one owner and is never reused in its lifetime.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Request(u64);
 
-/// Actual hardware transfer result. Packet-level ISO faults are retained.
+/// Hardware transfer result. Packet-level ISO faults are held.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Status {
     Complete,
@@ -43,7 +42,7 @@ pub struct Completion {
     pub actual: Option<usize>,
     /// IN data only, copied after hardware relinquishes the complete buffer.
     pub data: Vec<u8>,
-    /// Empty for a single TD. A packet-list request retains every packet,
+    /// Empty for a single TD. A packet-list request keeps every packet,
     /// including short, missed-service, failed and cancelled intervals. Its IN
     /// payloads are in these records; `data` stays empty to preserve holes.
     pub packets: Vec<IsoPacketCompletion>,
@@ -94,7 +93,7 @@ pub struct Device {
 }
 
 impl Device {
-    /// Only the topology authority may call this after reserving the physical
+    /// Only the topology permission may call this after reserving the physical
     /// device and excluding all other native class owners, including EP0 users.
     pub(in crate::usb) fn claimed(
         controller: Shared,
@@ -147,7 +146,7 @@ impl Device {
             .endpoint_ready(1)
     }
 
-    /// Send an actual EP0 request. Requests that change host-managed USB state
+    /// Send an EP0 request. Requests that change host-managed USB state
     /// must use configure/set_interface/clear_halt so physical and host contexts
     /// cannot diverge. SET_ADDRESS and hub operations remain topology-owned.
     pub fn control(&mut self, request: [u8; 8], out: &[u8]) -> Result<Vec<u8>, BlockError> {
@@ -228,7 +227,16 @@ impl Device {
             .controller
             .borrow_mut()
             .device(self.physical.id)?
-            .control(xhci::setup(0, xhci::SET_CONFIGURATION, 0, 0, 0), &[]);
+            .control(
+                crate::usb::descriptor::setup(
+                    0,
+                    crate::usb::descriptor::SET_CONFIGURATION,
+                    0,
+                    0,
+                    0,
+                ),
+                &[],
+            );
         self.fenced = true;
         result?;
         self.configuration = 0;
@@ -238,7 +246,7 @@ impl Device {
 }
 
 impl xhci::Host {
-    /// Claim an actual enumerated, unbound physical leaf for whole-device
+    /// Claim an enumerated, unbound physical leaf for whole-device
     /// forwarding. Native class claims and prior forwarding claims are refused
     /// by the topology/controller ledger before an owner is constructed.
     pub fn forward_device(&mut self, id: xhci::SlotId) -> Result<Device, BlockError> {
@@ -249,6 +257,7 @@ impl xhci::Host {
 
 #[cfg(test)]
 mod tests {
+    mod native;
     use super::*;
     use crate::{bus::dma::RegionAllocator, usb::xhci::model};
     use alloc::{rc::Rc, vec};
@@ -278,7 +287,7 @@ mod tests {
     }
 
     #[test]
-    fn native_buffers_and_completions_preserve_short_in_and_out_requests() {
+    fn short_transfers_complete_in_both_directions() {
         let mut memory = vec![0u64; 512 * 1024];
         let start = memory.as_mut_ptr() as u64;
         // SAFETY: this model exclusively owns backing RAM until all owners drop.
@@ -317,13 +326,8 @@ mod tests {
         assert_eq!((done.status, done.actual), (Status::Cancelled, None));
         assert!(!owner.pipes.contains_key(&0x83));
         assert!(owner.pipes.contains_key(&0x81));
-        assert!(
-            model
-                .borrow()
-                .setup
-                .iter()
-                .any(|(setup, _)| *setup == xhci::setup(1, xhci::SET_INTERFACE, 2, 7, 0))
-        );
+        assert!(model.borrow().setup.iter().any(|(setup, _)| *setup
+            == crate::usb::descriptor::setup(1, crate::usb::descriptor::SET_INTERFACE, 2, 7, 0)));
         owner.configure(19, &mut dma).unwrap();
         let done = owner.poll(retained).unwrap().unwrap();
         assert_eq!(done.status, Status::Cancelled);
@@ -331,7 +335,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_native_cancellation_retains_request_buffer_and_fences_owner() {
+    fn failed_native_cancellation_keeps_request_buffer_and_fences_owner() {
         let mut memory = vec![0u64; 512 * 1024];
         let start = memory.as_mut_ptr() as u64;
         // SAFETY: exclusive fixture RAM remains live even after failed cancel.
@@ -365,13 +369,17 @@ mod tests {
         let bytes = configuration();
         model.borrow_mut().descriptors.push((2, 0, bytes.clone()));
         let reply = owner
-            .control(xhci::setup(0x80, 6, 0x200, 0, 57), &[])
+            .control(crate::usb::descriptor::setup(0x80, 6, 0x200, 0, 57), &[])
             .unwrap();
         assert_eq!(reply, bytes);
         assert_eq!(owner.descriptors().configurations[0], bytes);
-        assert!(owner.control(xhci::setup(0, 9, 19, 0, 0), &[]).is_err());
+        assert!(
+            owner
+                .control(crate::usb::descriptor::setup(0, 9, 19, 0, 0), &[])
+                .is_err()
+        );
         owner.configure(19, &mut dma).unwrap();
-        let request = xhci::setup(0xa1, 0x81, 0x100, 0x2303, 2);
+        let request = crate::usb::descriptor::setup(0xa1, 0x81, 0x100, 0x2303, 2);
         model
             .borrow_mut()
             .control_replies
@@ -379,7 +387,10 @@ mod tests {
         assert_eq!(owner.control(request, &[]).unwrap(), vec![0x44, 0x55]);
         assert!(
             owner
-                .control(xhci::setup(0xa1, 0x81, 0x100, 0x2309, 2), &[])
+                .control(
+                    crate::usb::descriptor::setup(0xa1, 0x81, 0x100, 0x2309, 2),
+                    &[]
+                )
                 .is_err()
         );
         assert!(owner.submit(0x81, 1, 16, &[]).is_err());
@@ -400,7 +411,7 @@ mod tests {
             // USB 2.0 9.3.4 ignores the direction bit for a control endpoint.
             // EP0 exists in Address state without a configured data pipe.
             for endpoint in [0, 0x80] {
-                let request = xhci::setup(0x82, 0, 0, endpoint, 2);
+                let request = crate::usb::descriptor::setup(0x82, 0, 0, endpoint, 2);
                 model
                     .borrow_mut()
                     .control_replies
@@ -416,26 +427,35 @@ mod tests {
             for endpoint in [0x10, 0x70, 0x90, 0x100, 0x180, 0x83] {
                 assert!(
                     owner
-                        .control(xhci::setup(0x82, 0, 0, endpoint, 2), &[])
+                        .control(crate::usb::descriptor::setup(0x82, 0, 0, endpoint, 2), &[])
                         .is_err()
                 );
             }
             if !configured {
                 assert!(
                     owner
-                        .control(xhci::setup(0x82, 0, 0, 0x81, 2), &[])
+                        .control(crate::usb::descriptor::setup(0x82, 0, 0, 0x81, 2), &[])
                         .is_err()
                 );
             }
             // Admitting EP0 must not open raw standard state changes.
             assert!(
                 owner
-                    .control(xhci::setup(2, xhci::CLEAR_FEATURE, 0, 0, 0), &[])
+                    .control(
+                        crate::usb::descriptor::setup(
+                            2,
+                            crate::usb::descriptor::CLEAR_FEATURE,
+                            0,
+                            0,
+                            0
+                        ),
+                        &[]
+                    )
                     .is_err()
             );
             assert_eq!(model.borrow().setup.len(), before);
         }
-        let request = xhci::setup(0x82, 0, 0, 0x81, 2);
+        let request = crate::usb::descriptor::setup(0x82, 0, 0, 0x81, 2);
         model
             .borrow_mut()
             .control_replies
@@ -455,13 +475,18 @@ mod tests {
         bytes[4] = 1;
         let (mut owner, model) = owner_with_configuration(&mut dma, bytes);
         owner.configure(19, &mut dma).unwrap();
-        model.borrow_mut().stall_control = Some(xhci::SET_INTERFACE);
+        model.borrow_mut().stall_control = Some(crate::usb::descriptor::SET_INTERFACE);
         owner.set_interface(3, 0, &mut dma).unwrap();
         assert!(!owner.fenced());
         for endpoint in [0x81, 2] {
-            assert!(model.borrow().setup.iter().any(
-                |(request, _)| *request == xhci::setup(2, xhci::CLEAR_FEATURE, 0, endpoint, 0)
-            ));
+            assert!(model.borrow().setup.iter().any(|(request, _)| *request
+                == crate::usb::descriptor::setup(
+                    2,
+                    crate::usb::descriptor::CLEAR_FEATURE,
+                    0,
+                    endpoint,
+                    0
+                )));
         }
     }
 }

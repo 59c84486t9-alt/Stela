@@ -11,7 +11,7 @@
 //!
 //! One controller runs one command ring, one event ring on interrupter 0
 //! (polled; its interrupt stays disabled). Ordinary endpoints use one transfer
-//! ring; qualified SuperSpeed bulk endpoints may use primary stream arrays,
+//! ring; checked SuperSpeed bulk endpoints may use primary stream arrays,
 //! each nonzero stream owning its own transfer ring. Every ring is a single
 //! 256-TRB segment closed by a Link TRB. A TD is
 //! one TRB of at most 64 KiB that never crosses a 64 KiB boundary (the
@@ -32,17 +32,17 @@
 //! independently proven controller reset and fresh lifecycle publication.
 //!
 //! FS/HS and standard SuperSpeed isochronous service intervals, including hub
-//! routes and actual USB2 transaction translators, use queued submit_iso /
+//! routes and USB2 transaction translators, use queued submit_iso /
 //! completed_iso on xHCI 1.0+. Payloads fit one TRB/service and completion
 //! ownership survives uncertain cancellation. Extended SSP payloads are refused.
 //!
-//! Hubs require observed healthy power and retained upstream current contracts:
-//! actual root protocol/power selects the USB-standard default, and actual
+//! Hubs require observed healthy power and kept upstream current contracts:
+//! root protocol/power selects the USB-standard default, and
 //! configuration descriptors and hub status bound downstream current. Refused
 //! rather than handled:
 //! Extended SSP isochronous payloads, secondary stream arrays, hubs more than
-//! five tiers deep, and controllers without 4 KiB pages. The retained [`Host`] explicitly
-//! polls root events and hub bitmaps after attach and returns actual topology
+//! five tiers deep, and controllers without 4 KiB pages. The kept [`Host`] explicitly
+//! polls root events and hub bitmaps after attach and returns topology
 //! changes. Old IDs remain tombstones; finite slot exhaustion is reported.
 //! Controller save/restore requires observed U3 roots and acknowledged CSS/CRS;
 //! reset-on-resume profiles require fresh lifecycle publication. Hub over-current
@@ -93,9 +93,10 @@ mod streams;
 mod teardown;
 mod transfer;
 
+use super::descriptor::*;
 pub use bind::Plan;
 use bind::bind_with_provider;
-pub use descriptor::{Device, Endpoint, Interface, SuperSpeedCompanion, interfaces};
+pub use descriptor::Device;
 pub use identity::{DeviceAccess, DeviceRef, SlotId};
 pub use iso::{IsoCompletion, IsoSchedule, IsoStatus, IsoTransfer};
 pub use lifecycle::{Changes, Host};
@@ -250,7 +251,6 @@ pub const LOW_SPEED: u8 = 2;
 pub const HIGH_SPEED: u8 = 3;
 pub const SUPER_SPEED: u8 = 4;
 pub const SUPER_SPEED_PLUS: u8 = 5;
-pub(crate) const SS_ENDPOINT_COMPANION: u8 = 0x30;
 
 const CONTROL_TYPE: u32 = 4;
 const MAX_SLOTS: usize = 32;
@@ -283,27 +283,6 @@ const DEBOUNCE_TIMEOUT_US: u64 = 2_000_000;
 const PORT_INIT_TRIES: usize = 4;
 const ADDRESS_RECOVERY_US: u64 = 2_000;
 
-// bmRequestType: direction, type and recipient (USB 2.0 Table 9-2).
-pub const DEVICE_TO_HOST: u8 = 0x80;
-pub const TYPE_CLASS: u8 = 0x20;
-pub const TYPE_VENDOR: u8 = 0x40;
-pub const RECIPIENT_INTERFACE: u8 = 0x01;
-pub const RECIPIENT_ENDPOINT: u8 = 0x02;
-pub const RECIPIENT_OTHER: u8 = 0x03;
-
-// Standard requests and descriptors (USB 2.0 9.4, 9.6).
-pub const GET_STATUS: u8 = 0;
-pub const CLEAR_FEATURE: u8 = 1;
-pub const SET_FEATURE: u8 = 3;
-pub const GET_DESCRIPTOR: u8 = 6;
-pub const SET_CONFIGURATION: u8 = 9;
-pub const SET_INTERFACE: u8 = 11;
-pub const DEVICE_DESCRIPTOR: u8 = 1;
-pub const CONFIGURATION_DESCRIPTOR: u8 = 2;
-pub const STRING_DESCRIPTOR: u8 = 3;
-pub const INTERFACE_DESCRIPTOR: u8 = 4;
-pub const ENDPOINT_DESCRIPTOR: u8 = 5;
-pub const INTERFACE_ASSOCIATION_DESCRIPTOR: u8 = 11;
 const HUB_DESCRIPTOR: u8 = 0x29;
 const HUB_CLASS: u8 = 9;
 /// The multi-TT hub bDeviceProtocol (USB 2.0 11.23.1), and the interface
@@ -353,15 +332,7 @@ impl Registers for Bar {
     }
 }
 
-/// An eight-byte SETUP packet.
-pub fn setup(request_type: u8, request: u8, value: u16, index: u16, length: u16) -> [u8; 8] {
-    let [v0, v1] = value.to_le_bytes();
-    let [i0, i1] = index.to_le_bytes();
-    let [l0, l1] = length.to_le_bytes();
-    [request_type, request, v0, v1, i0, i1, l0, l1]
-}
-
-/// Enumeration reports retain the original error alongside the operation
+/// Enumeration reports keep the original error alongside the operation
 /// that failed. In particular, Address Device and an EP0 transfer can both
 /// report USB Transaction Error, with different recovery requirements.
 fn during<T>(
@@ -386,7 +357,7 @@ struct Transfer {
 
 struct Slot {
     generation: u64,
-    /// Genuine parent retained by the physical topology at enumeration.
+    /// Parent kept by the physical topology at enumeration.
     parent_id: Option<SlotId>,
     /// Original physical descriptor inventory for topology reconciliation.
     inventory: Option<Device>,
@@ -420,7 +391,7 @@ struct Attachment {
     /// The high-speed hub slot and port a low- or full-speed device's
     /// transactions go through.
     translator: Option<(u8, u8)>,
-    /// Actual hub slot/port, kept separately from the saturated route nibble.
+    /// Hub slot/port, kept separately from the saturated route nibble.
     parent: Option<(u8, u8)>,
 }
 
@@ -672,7 +643,7 @@ impl Controller {
         commands.buffer.sync_dirty()?;
         events.sync_dirty()?;
         event_table.sync_dirty()?;
-        // Native coherent polling must be qualified by the actual domain
+        // Native coherent polling must be checked by the domain
         // before publishing any controller pointer or starting DMA.
         events.coherent_u32(12)?;
         // All buffers satisfy the same immutable aperture before any pointer
@@ -906,7 +877,7 @@ impl Controller {
                     != Some(&reset::Ownership::Enabled);
             if event.kind() == reset::PORT_STATUS_CHANGE {
                 // Preserve one notification per physical root port until the
-                // runtime owner checks actual PORTSC; commands never consume it.
+                // runtime owner checks PORTSC; commands never consume it.
                 if let Some(old) = self
                     .pending
                     .iter_mut()
@@ -1034,7 +1005,7 @@ impl Controller {
 }
 
 /// All fixed controller/port waits fit this interval. Caller-supplied budgets
-/// also pass fallible admission at their actual submission boundary.
+/// also pass fallible admission at their submission boundary.
 fn clock_ready(clock: Clock) -> Result<(), BlockError> {
     clock
         .check_duration(60_000_000)
@@ -1065,7 +1036,7 @@ impl crate::usb::handoff::Dwords for dyn Registers + '_ {
 /// What the class drivers found on one controller.
 #[derive(Default)]
 pub struct Found {
-    /// Runtime topology owner, retained even for an empty/hub-only controller.
+    /// Runtime topology owner, kept even for an empty/hub-only controller.
     /// Poll explicitly to obtain new class owners and permanently retired IDs.
     pub hosts: Vec<Host>,
     /// Native UAC2 owners; idle until an explicit PCM start request.
@@ -1081,7 +1052,7 @@ pub struct Found {
     pub links: Vec<cdc::UsbNet>,
     /// Raw physical HCI transports; vendor firmware initialization is unverified.
     pub bluetooth: Vec<bluetooth::UsbHci>,
-    /// Retained pre-HCI upload evidence; never promoted to HCI without rebind.
+    /// Pre-HCI upload evidence; never promoted to HCI without rebind.
     pub bootloaders: Vec<bluetooth::ath3k::UsbBootloader>,
     /// Devices or interfaces no driver here takes, and why.
     pub unused: Vec<(String, &'static str)>,
@@ -1089,7 +1060,7 @@ pub struct Found {
     /// Descriptor inventory of all addressed devices, including hubs and devices
     /// without a supported class driver. Hardware state belongs to Controller.
     pub devices: Vec<Device>,
-    /// Resident or uploaded Renesas firmware, bound to the actual PCI revision.
+    /// Resident or uploaded Renesas firmware, bound to the PCI revision.
     pub controller_firmware: Option<renesas::Receipt>,
 }
 
@@ -1116,7 +1087,7 @@ pub fn attach_with_provider(
 }
 
 /// Attach with the original exact-target firmware and controller errors. The
-/// compatibility entry point retains its BlockError signature; callers that
+/// compatibility entry point keeps its BlockError signature; callers that
 /// need provider diagnostics can use this additive boundary directly.
 pub fn attach_with_firmware_diagnostics(
     function: &mut Function,
@@ -1187,7 +1158,7 @@ pub fn start(
     )
 }
 
-/// Start with synchronously borrowed firmware. Class drivers retain only owned
+/// Start with synchronously borrowed firmware. Class drivers keep only owned
 /// evidence metadata after upload; no borrowed image escapes this call.
 pub fn start_with_provider(
     registers: Box<dyn Registers>,
@@ -1227,7 +1198,7 @@ fn start_with_policies(
     if signal {
         controller.signal();
     }
-    // The policy came from this same actual PCI function before BAR access,
+    // The policy came from this same PCI function before BAR access,
     // and applies only to the controller reset just completed above. No public
     // raw-register caller can supply a guessed PCI identity or enable streams.
     let mut found = Found::default();

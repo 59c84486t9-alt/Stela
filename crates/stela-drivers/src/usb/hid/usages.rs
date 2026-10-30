@@ -123,7 +123,7 @@ impl Local {
         }
         // Linux hid_concatenate_last_usage_page: complete trailing short
         // usages using the final page, stopping at an already completed page.
-        // Extended usages retain their own page and do not stop the walk.
+        // Extended usages keep their own page and do not stop the walk.
         for (usage, extended) in self.selected.iter_mut().rev() {
             if *extended {
                 continue;

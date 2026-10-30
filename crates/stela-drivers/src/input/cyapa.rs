@@ -101,13 +101,13 @@ pub struct Capabilities {
     pub query: [u8; 27],
     pub product_id: [u8; 15],
     pub firmware_version: (u8, u8),
-    /// Actual source capability bits 3..5, corresponding to report bits 0..2.
+    /// Source capability bits 3..5, corresponding to report bits 0..2.
     pub button_capabilities: u8,
     pub maximum: (u16, u16),
     pub physical_size: (u16, u16),
 }
-/// Complete, owned Gen3 register operations. Implementations must retain the
-/// original transport error, perform the actual bus framing and never replay a
+/// Complete, owned Gen3 register operations. Implementations must keep the
+/// original transport error, perform the bus framing and never replay a
 /// mutable transfer. An alternate read probe requires `allow_fallback` to remain
 /// true after the first error. The built-in providers share the same engine.
 pub trait RegisterAccess {

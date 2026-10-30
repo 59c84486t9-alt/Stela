@@ -2,12 +2,12 @@
 // Copyright (C) 2015 Endless Mobile, Inc.
 //! EPATCH v2 adapted from the pinned btrtl iovec/section/priority-list parser.
 //! Unknown section bodies are skipped by that format policy, with metadata and
-//! whole-body hashes retained. Nonzero key/security selection is not implemented.
+//! whole-body hashes kept. Nonzero key/security selection is not implemented.
 use super::{Configuration, FormatError, Project, Staged};
 use crate::bytes::le32;
 use alloc::vec::Vec;
 use core::cmp::Reverse;
-use sha2::{Digest, Sha256};
+use stela_crypto::{Sha256, digest::Digest};
 const HEADER: usize = 20;
 const MAX_IMAGE: usize = 4 * 1024 * 1024;
 const SNIPPETS: u32 = 1;
@@ -149,7 +149,7 @@ impl<'a> V2Patch<'a> {
             });
             at = end;
         }
-        // This slice supports the actually observed one-byte extension records,
+        // This slice supports the observed one-byte extension records,
         // completely, followed by the canonical terminal project instruction.
         // Other extension programs are explicit unsupported input, not guessed.
         if bytes.get(at) != Some(&0xff) || at >= tail {
@@ -233,7 +233,7 @@ mod tests {
         b
     }
     #[test]
-    fn complete_version_controls_unknown_sections_and_donor_reverse_ties_are_retained() {
+    fn complete_version_controls_unknown_sections_and_donor_reverse_ties_are_kept() {
         let b = image();
         let p = V2Patch::parse(&b, Project::Rtl8852Bu, 0, 0).unwrap();
         assert_eq!(p.metadata.version, [1, 2, 3, 4, 5, 6, 7, 8]);

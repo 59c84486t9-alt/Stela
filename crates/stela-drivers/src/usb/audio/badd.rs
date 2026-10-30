@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //! UAC3 Basic Audio Device Definition: profile-declared topology, not synthesized
-//! device observations. BADD intentionally has no class-specific descriptors.
+//! device observations. BADD has no class-specific descriptors.
 //! Reference Linux stream.c/mixer.c and audio-v3.h, Copyright (c) 2017 Ruslan Bilovol.
 use super::descriptors::{capacity, scope, service_interval};
 use super::{
@@ -9,7 +9,7 @@ use super::{
 };
 use crate::{
     audio::Direction,
-    usb::xhci::{INTERFACE_ASSOCIATION_DESCRIPTOR, Interface},
+    usb::descriptor::{INTERFACE_ASSOCIATION_DESCRIPTOR, Interface},
 };
 use alloc::vec::Vec;
 

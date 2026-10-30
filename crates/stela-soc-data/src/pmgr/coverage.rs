@@ -7,9 +7,9 @@
 //! Generation-specific ID/die encodings and ADT records are decoded by the board
 //! reader before this boundary. No application identity participates.
 //!
-//! A result is a binding candidate only when every required consumer has actual
+//! A result is a binding candidate only when every required consumer has
 //! clock, power, quiesce and reset sinks. Positive unavailable admission evidence
-//! qualifies controller state alone, without claiming functional support or
+//! checks controller state alone, without claiming functional support or
 //! removing those consumers from the inventory. This module never enables controls or
 //! delivers lifecycle events. A DART-only consumer list is not a full inventory.
 use alloc::collections::{BTreeMap, BTreeSet};
@@ -27,14 +27,14 @@ pub struct DomainId {
 /// all parents remain dependencies even when this domain is physical.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Domain {
-    /// Original firmware identity; aliases retain their separate names.
+    /// Original firmware identity; aliases keep their separate names.
     pub name: String,
     pub id: DomainId,
     pub address: Option<u64>,
     pub parents: [Option<DomainId>; 4],
 }
 
-/// Actual handlers registered by the machine for one resource. These are
+/// Handlers registered by the machine for one resource. These are
 /// obligations for the whole physical domain, irrespective of whether its
 /// original property was called clock-gates or power-gates.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -62,7 +62,7 @@ pub enum Admission {
 }
 
 /// One original resource. Distinct inherited views and protocol endpoints keep
-/// their names; proven views of one owner may share its actual sink.
+/// their names; proven views of one owner may share its sink.
 #[derive(Debug, Clone, Copy)]
 pub struct Consumer<'a> {
     /// Stable identity within this complete inventory. ADT sibling names

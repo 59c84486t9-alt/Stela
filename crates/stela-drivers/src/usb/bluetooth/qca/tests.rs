@@ -156,7 +156,11 @@ fn binding(kind: Kind) -> Binding {
         serial: None,
         language: None,
     };
-    Binding::new(&device, &xhci::interfaces(&device.configuration)[0]).unwrap()
+    Binding::new(
+        &device,
+        &crate::usb::descriptor::interfaces(&device.configuration)[0],
+    )
+    .unwrap()
 }
 fn rampatch(v: &Version, body: usize) -> Vec<u8> {
     let p = v.profile().unwrap();
@@ -374,7 +378,7 @@ fn exact_source_board_gf_and_custom_directory_rules_are_preserved() {
         assert_eq!(v.rampatch_name(), patch);
         assert_eq!(v.nvm_name(), nvm);
     }
-    // NVM selection must use the actual post-patch OTP/RAM/board response.
+    // NVM selection must use the post-patch OTP/RAM/board response.
     let before = version(0x00130201, 1, 0, 0, 0, 0);
     let after = version(0x00130201, 2, 0x400c1211, 3, 10, 0x8000);
     let (mut hci, catalog, _) = model(before, after, 0, 1, 1);
@@ -442,7 +446,7 @@ fn bulk_splitting_and_rom_patch_version_guards_cover_all_boundaries() {
     assert!(RampatchVersion::parse(&[0; 39], &v, p).is_err());
 }
 #[test]
-fn every_usb_failure_retains_pending_or_completed_ownership_and_closes_once() {
+fn every_usb_failure_keeps_pending_or_completed_ownership_and_closes_once() {
     let before = version(0x00130201, 1, 0, 0, 0, 0);
     let after = version(0x00130201, 2, 0, 0, 0, 0);
     let (probe, _, _) = model(before.clone(), after.clone(), 0, 4097, 4097);
@@ -569,7 +573,7 @@ fn wcn_debug_acl_is_reclassified_exactly_across_usb_fragment_boundaries() {
 }
 
 #[test]
-fn event_acl_and_truncated_dump_signatures_retain_first_fault_and_quarantine() {
+fn dump_signatures_keep_first_fault_and_quarantine() {
     use crate::usb::bluetooth::{ErrorKind, Packet};
     let event = vec![0xff, 9, 1, 8, 0, 0, 0, 0x20, 0, 0, 0];
     let short_event = vec![0xff, 2, 1, 8];

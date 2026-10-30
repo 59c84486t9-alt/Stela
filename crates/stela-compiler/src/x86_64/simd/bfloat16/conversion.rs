@@ -143,14 +143,14 @@ pub(in crate::x86_64) fn emit(code: &mut Code, operand: &ConversionOperand, pc: 
     }
 }
 
-/// Prepare selectors once; preserves every XMM and RSP. R8/R9/R11 retain
+/// Prepare selectors once; preserves every XMM and RSP. R8/R9/R11 keep
 /// rounding selectors and R10 starts fresh. AH selects mandatory nearest-even.
 pub(in crate::x86_64) fn prepare_conversion_rounding(code: &mut Code) {
     integer_rounding_policy(code, DISCARDED_BITS, true);
 }
 
 /// Integer-only packed normal-Single guard and BF16 rounding. Source XMM1
-/// survives; result XMM0 retains rounded Single fields, XMM2..5 are scratch.
+/// survives; result XMM0 keeps rounded Single fields, XMM2..5 are scratch.
 /// R8/R9/R11 selectors survive; R10 records discarded lanes. RAX/RCX/RDX and
 /// flags are scratch. No frame, environment, state writes, or packed slot layout.
 pub(in crate::x86_64) fn quantize_normal_conversion(code: &mut Code, failures: &mut Vec<usize>) {

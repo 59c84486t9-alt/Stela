@@ -6,7 +6,8 @@
 use super::{Binding, Entity, Error, Graph, UAC1, UAC2};
 use crate::{
     bus::dma::{DmaAllocator, DmaBuffer, RegionAllocator},
-    usb::xhci::{self, Endpoint, Shared, SlotId, TransferTicket},
+    usb::descriptor::Endpoint,
+    usb::xhci::{self, Shared, SlotId, TransferTicket},
 };
 use alloc::{collections::VecDeque, vec::Vec};
 
@@ -14,7 +15,7 @@ const MESSAGE_BYTES: usize = 6;
 const MAX_PACKET: usize = 1024;
 
 /// A changed attribute, not its replacement value. Requery through the existing
-/// descriptor-qualified CUR/RANGE control APIs before changing audio policy.
+/// descriptor-checked CUR/RANGE control APIs before changing audio policy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StatusAttribute {
     Current,
@@ -33,7 +34,7 @@ pub struct StatusNotice {
 
 /// UAC1 reports an entire entity, without a selector, channel or replacement
 /// value. The memory flag names a memory-space change; it grants no vendor
-/// memory protocol or authority to change a running stream.
+/// memory protocol or permission to change a running stream.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Uac1StatusNotice {
     pub entity: u8,
@@ -42,7 +43,7 @@ pub struct Uac1StatusNotice {
     pub raw: [u8; 2],
 }
 
-/// The actual protocol determines the wire layout and invalidation scope.
+/// The protocol determines the wire layout and invalidation scope.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StatusEvent {
     Uac1(Uac1StatusNotice),
@@ -60,7 +61,7 @@ impl StatusPlan {
         if !matches!(binding.graph.protocol, UAC1 | UAC2) {
             return Ok(None);
         }
-        let interfaces = xhci::interfaces(configuration);
+        let interfaces = crate::usb::descriptor::interfaces(configuration);
         // Binding::parse already checked complete configuration/interface counts,
         // and associations before native attachment. Status endpoint aliases are
         // checked separately below (the binding only checked streaming DCIs).
@@ -213,7 +214,7 @@ impl StatusPlan {
 /// supplies bounded backpressure: drain it before polling rearms the endpoint.
 /// All DMA allocations live for the boot even if this object is dropped. Drop
 /// does not retire hardware or free its endpoint; call `stop` for acknowledged
-/// teardown. Failed teardown retains the poisoned owner for platform recovery. A poisoned native endpoint cannot be revived here.
+/// teardown. Failed teardown keeps the poisoned owner for platform recovery. A poisoned native endpoint cannot be revived here.
 pub struct StatusNotifications {
     shared: Shared,
     id: SlotId,
@@ -260,7 +261,7 @@ impl StatusNotifications {
         })
     }
     /// Configure and arm. An uncertain publication leaves this object poisoned,
-    /// retaining its DMA and staged endpoint for actual `stop` attempt; unresolved native failures require platform recovery.
+    /// keeping its DMA and staged endpoint for `stop` attempt; unresolved native failures require platform recovery.
     pub fn start(&mut self) -> Result<(), Error> {
         let mut controller = self.shared.borrow_mut();
         let mut device = controller.device(self.id)?;
@@ -377,9 +378,9 @@ impl StatusNotifications {
     pub fn stop(&mut self) -> Result<(), Error> {
         let mut controller = self.shared.borrow_mut();
         let mut device = controller.device(self.id)?;
-        // A terminal transfer error may require actual Reset Endpoint and Set
+        // A terminal transfer error may require Reset Endpoint and Set
         // Dequeue before ordinary submission-readiness permits Drop. The exact
-        // retained ticket authorizes cancellation without weakening that fence.
+        // ticket authorizes cancellation without weakening that fence.
         if !self.cancelled
             && let Some(ticket) = &self.ticket
         {
@@ -392,7 +393,7 @@ impl StatusNotifications {
         // Reset Endpoint retires xHC DMA, but the device's endpoint HALT is a
         // separate USB feature. An unpolled STALL can race cancellation, so clear
         // it for every configured endpoint, including already-clear devices.
-        // Require actual EP0 acknowledgement, including a later explicit retry.
+        // Require EP0 acknowledgement, including a later explicit retry.
         if self.configured
             && let Err(error) = device.clear(&self.plan.endpoint)
         {

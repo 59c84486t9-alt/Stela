@@ -172,7 +172,7 @@ pub(crate) fn raw_memory(
 ) -> Result<stela_engine::memory::OwnedMemory> {
     use std::io::Read;
     let Some(path) = path else {
-        return stela_engine::memory::OwnedMemory::map(vec![]);
+        return Ok(stela_engine::memory::OwnedMemory::map(vec![])?);
     };
     let mut bytes = Vec::new();
     File::open(path)?
@@ -218,7 +218,9 @@ pub(crate) fn raw_memory(
             executable: false,
         });
     }
-    stela_engine::memory::OwnedMemory::map_with_data_limits(specs, limits)
+    Ok(stela_engine::memory::OwnedMemory::map_with_data_limits(
+        specs, limits,
+    )?)
 }
 
 pub(crate) fn memory_hashes(

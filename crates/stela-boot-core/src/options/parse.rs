@@ -26,7 +26,7 @@ pub(super) fn system(text: &str) -> Result<System, Error> {
 
 impl ParseState<'_> {
     /// Consume exactly the value words required by this spelling. Duplicate
-    /// checks deliberately stay on their original side of value parsing.
+    /// checks stay on their original side of value parsing.
     fn apply(&mut self, name: &str) -> Result<(), Error> {
         let options = &mut self.options;
         let mut value = || self.words.next();
@@ -141,6 +141,26 @@ impl ParseState<'_> {
                 let path = value().ok_or(Error::MissingWifiKey)?;
                 if options.wifi_key.replace(String::from(path)).is_some() {
                     return Err(Error::DuplicateWifiKey);
+                }
+            }
+            IPV4 => {
+                let ipv4 = value().and_then(StaticIpv4::parse).ok_or(Error::Ipv4)?;
+                if options.ipv4.replace(ipv4).is_some() {
+                    return Err(Error::DuplicateIpv4);
+                }
+            }
+            IPV4_GATEWAY => {
+                let gateway = value()
+                    .and_then(|word| word.parse().ok())
+                    .ok_or(Error::Ipv4Gateway)?;
+                if options.ipv4_gateway.replace(gateway).is_some() {
+                    return Err(Error::DuplicateIpv4Gateway);
+                }
+            }
+            DNS => {
+                let servers = value().and_then(dns_servers).ok_or(Error::Dns)?;
+                if !core::mem::replace(&mut options.dns, servers).is_empty() {
+                    return Err(Error::DuplicateDns);
                 }
             }
             WIFI_COUNTRY => {

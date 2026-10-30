@@ -10,7 +10,7 @@ impl<X: Transport, A: Attention, T: Timer> Device<X, A, T> {
     pub fn f1a_capabilities(&self) -> impl Iterator<Item = &f1a::Capabilities> {
         self.f1a.iter().map(|engine| &engine.capabilities)
     }
-    /// Register actual discovered F1A functions using a verified platform button
+    /// Register discovered F1A functions using a verified platform button
     /// count. This does not infer button wiring or invent logical key mappings.
     pub fn initialize_f1a(&mut self, buttons: u8) -> Result<(), Error> {
         self.configured()?;

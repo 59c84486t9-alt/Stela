@@ -1,6 +1,6 @@
-//! Seeded infallible ChaCha20 streams for retained host owners.
+//! Seeded infallible ChaCha20 streams for kept host owners.
 //! Synchronization, true seed acquisition and execution-context ownership
-//! belong to the platform that retains the generator, not to this primitive.
+//! belong to the platform that keeps the generator, not to this primitive.
 use chacha20::ChaCha20Rng;
 use rand_core::{SeedableRng, TryRng};
 use zeroize::{Zeroize, ZeroizeOnDrop};

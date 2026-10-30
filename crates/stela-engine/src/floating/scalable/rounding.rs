@@ -1,6 +1,5 @@
 //! Completion of SVE FRINT*.
 
-use anyhow::anyhow;
 use stela_compiler::{
     GuestState,
     aarch64::{
@@ -9,6 +8,7 @@ use stela_compiler::{
         sve::floating::rounding::Operand,
     },
 };
+use stela_contracts::refuse;
 
 use super::{CompletionError, NumericalControls};
 use crate::scalable::ScalableState;
@@ -23,7 +23,7 @@ fn read_lane(source: &[u8], offset: usize, element_bytes: usize) -> u64 {
 
 /// Complete one merging FRINT instruction using the central scalable setter.
 /// Raw FPCR and every inactive element remain unchanged. Numerical enables are
-/// effective streaming controls; FA64 retains the precise unsupported boundary.
+/// effective streaming controls; FA64 keeps the precise unsupported boundary.
 pub(super) fn complete(
     state: &mut GuestState,
     scalable: &mut ScalableState,
@@ -31,7 +31,7 @@ pub(super) fn complete(
     controls: NumericalControls,
 ) -> Result<(), CompletionError> {
     if !scalable.mode().streaming() {
-        return Err(anyhow!("scalable rounding requires streaming state").into());
+        return Err(refuse!("scalable rounding requires streaming state").into());
     }
     if !matches!(
         operand.operation,
@@ -43,7 +43,7 @@ pub(super) fn complete(
             | RoundingOperation::Current
             | RoundingOperation::CurrentExact
     ) {
-        return Err(anyhow!("bounded FRINT is not a merging SVE rounding operand").into());
+        return Err(refuse!("bounded FRINT is not a merging SVE rounding operand").into());
     }
     let length = scalable.vector_length().bytes();
     let predicate_bytes = scalable.vector_length().predicate_bytes();

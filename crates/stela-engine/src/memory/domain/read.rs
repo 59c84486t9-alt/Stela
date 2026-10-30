@@ -1,4 +1,4 @@
-//! Exact native read footprints, including the separately owned system-RAM
+//! Native read footprints, including the separately owned system-RAM
 //! CX16 alternative. Source permissions never grant its extra host rights.
 use super::{
     AccessKind, Arc, DomainRole, MemoryDomain, MemoryStatus, ResolvedAccess, access, monitor,
@@ -13,12 +13,12 @@ pub(super) struct PreparedRead {
 }
 impl PreparedRead {
     /// # Safety
-    /// The caller retains the resolved live mapping/native invocation. When
-    /// this recipe writes back, the actual monitor's physical observer/load
+    /// The caller keeps the resolved live mapping/native invocation. When
+    /// this recipe writes back, the monitor's physical observer/load
     /// gate covers its entire aligned footprint, including every alias.
     pub(super) unsafe fn read_in_observer(&self) -> Result<u128, MemoryStatus> {
         // SAFETY: preparation established host rights/geometry; caller supplies
-        // the retained physical gate and native target/control ownership.
+        // the physical gate and native target/control ownership.
         unsafe { self.native.read() }.map_err(|_| MemoryStatus::Unsupported)
     }
 }
@@ -30,7 +30,7 @@ impl MemoryDomain {
     ) -> Result<PreparedRead, MemoryStatus> {
         let pointer = first.host_ptr().as_ptr() as usize;
         if self.role != DomainRole::NativeSystemRam {
-            // Legacy profiles retain their real read-only host contract.
+            // Legacy profiles keep their real read-only host contract.
             access::read_footprint(pointer, bytes, self.target)
                 .map_err(|_| MemoryStatus::Unsupported)?;
         }
@@ -88,7 +88,7 @@ impl MemoryDomain {
                     monitor::AccessError::Monitor(_) => MemoryStatus::Domain,
                 })
         } else {
-            // SAFETY: this is the retained read-only SCA recipe; no host writer
+            // SAFETY: this is the read-only SCA recipe; no host writer
             // effect requires an observer gate. Native invocation pins rights.
             unsafe { read.read_in_observer() }
         }

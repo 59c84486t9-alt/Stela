@@ -62,10 +62,10 @@ impl Prepared {
     }
 
     /// # Safety
-    /// Actual source/entry review proves EVERY sample gap for this retained root
+    /// Source/entry review proves EVERY sample gap for this root
     /// (including firmware/SMM, masked original C, calibration and idle) is at
     /// most max_gap_ns. Periodic IRQ delivery alone is not such a proof. This
-    /// enables short 24-bit diagnostics; it does not qualify an arbitrary Linux
+    /// enables short 24-bit diagnostics; it does not check an arbitrary Linux
     /// driver domain whose masked execution has no established upper bound.
     pub unsafe fn qualify_bounded(mut self, max_gap_ns: u64) -> Result<Self, WorkError> {
         let ticks = ticks_ceil(max_gap_ns)?;

@@ -2,8 +2,11 @@
 use core::fmt;
 pub mod interval;
 
+/// `EFI_UNSPECIFIED_TIMEZONE`: the time is local, its offset unknown.
+pub const UNSPECIFIED_ZONE: i16 = 0x07ff;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-/// Raw UEFI calendar fields. These copied values confer no source authority.
+/// Raw UEFI calendar fields. These copied values confer no source permission.
 /// `timezone_minutes` is the EFI field; `0x07ff` means unspecified.
 pub struct Time {
     pub year: u16,
@@ -57,7 +60,7 @@ impl fmt::Display for Error {
 }
 impl core::error::Error for Error {}
 
-/// Normalize fields only. The caller separately admits the actual RTC source,
+/// Normalize fields only. The caller separately admits the RTC source,
 /// serialized runtime-service gate and continuous-counter epoch/correlation.
 /// UEFI 2.11 §8.3.1 defines UTC = Local + TimeZone. Daylight adjustment is already
 /// reflected in both local time and timezone; adding another hour is incorrect.
@@ -93,7 +96,7 @@ pub fn utc(time: Time, unspecified: UnspecifiedZone) -> Result<Timestamp, Error>
     }
     let zone = match time.timezone_minutes {
         -1440..=1440 => time.timezone_minutes,
-        0x07ff => match unspecified {
+        UNSPECIFIED_ZONE => match unspecified {
             UnspecifiedZone::RequireKnown => return Err(Error::UnspecifiedTimezone),
             UnspecifiedZone::RtcIsUtc => 0,
         },
@@ -203,7 +206,7 @@ mod tests {
         );
     }
     #[test]
-    fn daylight_is_already_accounted_for_and_nanoseconds_are_retained() {
+    fn daylight_is_already_accounted_for_and_nanoseconds_are_kept() {
         let standard = Time {
             hour: 12,
             timezone_minutes: 480,

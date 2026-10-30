@@ -39,6 +39,7 @@ pub fn complete<E>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Result;
 
     #[test]
     fn all_register_roles_snapshot_inputs_and_preserve_other_state() {
@@ -125,9 +126,13 @@ mod tests {
         ] {
             let mut state = GuestState::default();
             let initial = state.clone();
-            let result = complete(instruction, &mut state, |_, _| -> Result<u64, ()> {
-                panic!("invalid operand reached key service")
-            });
+            let result = complete(
+                instruction,
+                &mut state,
+                |_, _| -> Result<u64, core::convert::Infallible> {
+                    panic!("invalid operand reached key service")
+                },
+            );
             assert_eq!(result, Err(Fault::InvalidOperands));
             assert_eq!(state, initial);
         }

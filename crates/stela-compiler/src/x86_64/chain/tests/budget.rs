@@ -47,7 +47,7 @@ impl Mapping {
     }
     fn run(&self) -> u128 {
         // SAFETY: installed thunk has the SysV128 return ABI and touches only
-        // its retained control/table. It clobbers caller-volatile registers.
+        // its control/table. It clobbers caller-volatile registers.
         unsafe {
             let enter: unsafe extern "sysv64" fn() -> u128 = core::mem::transmute(self.page);
             enter()
@@ -315,7 +315,7 @@ fn interrupt_at_rendezvous(policy: Interruption) -> InterruptionOutcome {
     let retained = Arc::clone(&control);
     let retained_gate = Arc::clone(&gate);
     let worker = std::thread::spawn(move || {
-        // SAFETY: main retains the RX mapping until join; both allocations
+        // SAFETY: main keeps the RX mapping until join; both allocations
         // remain owned, and the generated program writes only their declared
         // native counters/test rendezvous using caller-volatile registers.
         let result = unsafe {
@@ -335,7 +335,7 @@ fn interrupt_at_rendezvous(policy: Interruption) -> InterruptionOutcome {
         std::thread::yield_now();
     }
     // Ready synchronizes the native accounting prefix. Publish before opening
-    // the rendezvous; the next actual production guard must observe the epoch.
+    // the rendezvous; the next production guard must observe the epoch.
     let published = control.linked.load(Ordering::Acquire);
     control.epoch.fetch_add(1, Ordering::Release);
     gate.release.store(1, Ordering::Release);

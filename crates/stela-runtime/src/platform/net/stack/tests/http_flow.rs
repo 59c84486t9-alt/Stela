@@ -1,4 +1,4 @@
-//! Request redirects and refusal controls through actual smoltcp connections.
+//! Request redirects and refusal controls through smoltcp connections.
 use super::*;
 struct Peer {
     lan: Lan,
@@ -74,7 +74,7 @@ impl Link for Peer {
 }
 fn stack(replies: Vec<Vec<u8>>) -> Stack<Peer, TestClock> {
     let clock = TestClock::default();
-    let mut stack = Stack::new(Peer::new(clock.clone(), replies), clock, 7);
+    let mut stack = Stack::new(Peer::new(clock.clone(), replies), clock, 7).unwrap();
     stack
         .set_config(Config {
             address: Ipv4Cidr::new(CLIENT_IP, 24),
@@ -137,7 +137,7 @@ fn relative_redirect_rebuilds_host_path_and_pins_the_final_range() {
     assert_eq!(sockets(&stack), 0);
 }
 #[test]
-fn proxy_and_network_authentication_have_explicit_failures_and_retire_sockets() {
+fn authentication_failures_are_explicit() {
     for (status, expected) in [
         (407, NetError::ProxyAuthentication),
         (511, NetError::NetworkAuthentication),
@@ -160,49 +160,50 @@ fn proxy_and_network_authentication_have_explicit_failures_and_retire_sockets() 
     }
 }
 #[test]
-fn https_upgrade_without_time_never_falls_back_to_plain_tcp() {
-    let mut stack = stack(vec![
-        b"HTTP/1.1 302 Found\r\nLocation: https://10.0.2.2/next\r\nContent-Length: 0\r\n\r\n"
-            .to_vec(),
-    ]);
-    let mut transfer = stack
-        .open_http(
-            "http://10.0.2.2/p",
+fn refused_redirects_send_nothing_further() {
+    let redirect = |status: &str, location: &str| {
+        alloc::format!("HTTP/1.1 {status}\r\nLocation: {location}\r\nContent-Length: 0\r\n\r\n")
+            .into_bytes()
+    };
+    let tls = NetError::TlsUnavailable(TlsUnavailable::CorrelatedClock);
+    for (reply, request, expected) in [
+        // An HTTPS upgrade without trusted time never falls back to plain TCP.
+        (
+            redirect("302 Found", "https://10.0.2.2/next"),
             HttpRequest::range(0, 1, None),
-            1024,
-            Err(TlsUnavailable::CorrelatedClock),
-        )
-        .unwrap();
-    assert_eq!(
-        failure(&mut stack, &mut transfer),
-        NetError::TlsUnavailable(TlsUnavailable::CorrelatedClock)
-    );
-    assert_eq!(stack.link_mut().requests.len(), 1);
-    assert_eq!(sockets(&stack), 0);
-    stack.close_http(transfer);
-}
-#[test]
-fn cross_origin_post_redirect_never_replays_its_body() {
-    let mut stack=stack(vec![b"HTTP/1.1 307 Temporary Redirect\r\nLocation: http://10.0.2.3/next\r\nContent-Length: 0\r\n\r\n".to_vec()]);
-    let mut transfer = stack
-        .open_http(
-            "http://10.0.2.2/p",
+            tls.clone(),
+        ),
+        // A POST upgraded to HTTPS still requires its real TLS capability.
+        (
+            redirect("307 Temporary Redirect", "https://10.0.2.2/next"),
+            HttpRequest::post(&[], "text/plain", b"body"),
+            tls,
+        ),
+        // A cross-origin POST redirect never replays its body or credentials.
+        (
+            redirect("307 Temporary Redirect", "http://10.0.2.3/next"),
             HttpRequest::post(
                 &[("Authorization", "Bearer private")],
                 "text/plain",
                 b"private-body",
             ),
-            1024,
-            Err(TlsUnavailable::CorrelatedClock),
-        )
-        .unwrap();
-    assert_eq!(
-        failure(&mut stack, &mut transfer),
-        NetError::Redirect(http::RedirectError::Origin)
-    );
-    assert_eq!(stack.link_mut().requests.len(), 1);
-    assert_eq!(sockets(&stack), 0);
-    stack.close_http(transfer);
+            NetError::Redirect(http::RedirectError::Origin),
+        ),
+    ] {
+        let mut stack = stack(vec![reply]);
+        let mut transfer = stack
+            .open_http(
+                "http://10.0.2.2/p",
+                request,
+                1024,
+                Err(TlsUnavailable::CorrelatedClock),
+            )
+            .unwrap();
+        assert_eq!(failure(&mut stack, &mut transfer), expected);
+        assert_eq!(stack.link_mut().requests.len(), 1);
+        assert_eq!(sockets(&stack), 0);
+        stack.close_http(transfer);
+    }
 }
 
 #[test]
@@ -260,25 +261,5 @@ fn truncated_pinned_range_resumes_only_its_missing_bytes() {
             .unwrap()
             .contains("Range: bytes=1-1\r\nIf-Range: \"v1\"")
     );
-    stack.close_http(transfer);
-}
-
-#[test]
-fn post_secure_upgrade_requires_its_real_tls_capability() {
-    let mut stack=stack(vec![b"HTTP/1.1 307 Temporary Redirect\r\nLocation: https://10.0.2.2/next\r\nContent-Length: 0\r\n\r\n".to_vec()]);
-    let mut transfer = stack
-        .open_http(
-            "http://10.0.2.2/p",
-            HttpRequest::post(&[], "text/plain", b"body"),
-            1024,
-            Err(TlsUnavailable::CorrelatedClock),
-        )
-        .unwrap();
-    assert_eq!(
-        failure(&mut stack, &mut transfer),
-        NetError::TlsUnavailable(TlsUnavailable::CorrelatedClock)
-    );
-    assert_eq!(stack.link_mut().requests.len(), 1);
-    assert_eq!(sockets(&stack), 0);
     stack.close_http(transfer);
 }

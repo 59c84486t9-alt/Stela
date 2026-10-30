@@ -2,13 +2,14 @@
 // Copyright (C) The Asahi Linux Contributors
 // Copyright (c) 2026 Stela contributors
 //! Explicit native Broadcom PCIe attachment. No discovery or guest service is
-//! implied. Actual original configuration, UC BARs, coherent domain and root
+//! implied. Original configuration, UC BARs, coherent domain and root
 //! epoch survive terminal source stop, posted-write completion and IRQ drain.
 mod config;
 pub(crate) mod delivery;
 pub use delivery::MsiCompletion;
 mod registers;
 use super::{Board, Chip, PciIdentity, Platform, Result as DriverResult, Space, Transport, memory};
+use crate::bus::pci::regs;
 use crate::{
     Clock,
     bus::{
@@ -55,7 +56,7 @@ impl From<Error> for super::Error {
 
 /// Original native configuration mapping owner, or an explicit device model.
 /// # Safety
-/// Accesses are actual serialized native config effects under the unique owner;
+/// Accesses are serialized native config effects under the unique owner;
 /// owned_address is its immutable real BDF, not copied Function metadata. The
 /// returned Mapping is that same original mapping and resource epoch, without
 /// escaped aliases/accessors. No reset/removal/config writer can revoke it.
@@ -63,7 +64,7 @@ pub unsafe trait Configuration: MsiConfigSpace + 'static {
     fn owned_address(&self) -> Address;
     fn into_mapping(self) -> Mapping;
 }
-// SAFETY: OwnedConfig retains the original exclusive native mapping and BDF;
+// SAFETY: OwnedConfig keeps the original exclusive native mapping and BDF;
 // its concrete accesses are exact-width volatile loads/stores.
 unsafe impl Configuration for OwnedConfig {
     fn owned_address(&self) -> Address {
@@ -73,18 +74,18 @@ unsafe impl Configuration for OwnedConfig {
         self.into_mapping()
     }
 }
-/// Actual monotonic microsecond clock, or an explicit advancing device model.
+/// Monotonic microsecond clock, or an explicit advancing device model.
 /// # Safety
 /// This clock advances during bounded waits, does not regress, and includes
-/// time spent in actual config/MMIO/domain calls. Final operations are process
-/// context. A stalled clock or artificial tick count is not native qualification.
+/// time spent in config/MMIO/domain calls. Final operations are process
+/// context. A stalled clock or artificial tick count is not native validation.
 pub unsafe trait Time: 'static {
     fn now_us(&self) -> u64;
 }
 pub struct NativeClock(Clock, u64);
 impl NativeClock {
     /// # Safety
-    /// This is the platform's actually calibrated invariant TSC; it advances
+    /// This is the platform's calibrated invariant TSC; it advances
     /// monotonically on every execution context admitted by this attachment.
     pub unsafe fn new(clock: Clock) -> Result<Self, Error> {
         clock
@@ -112,14 +113,14 @@ pub struct Inputs<
     T: Time = NativeClock,
 > {
     pub function: Function<C>,
-    /// Actual coordinated root/resource/reset/firmware-node lifetime owner.
+    /// Coordinated root/resource/reset/firmware-node lifetime owner.
     pub retained: RetainedOwner,
     pub topology: native_aspm::Topology<C>,
     pub registers: R,
     pub domain: Arc<dyn DmaDomain>,
     pub pages: Box<dyn PageSource>,
     pub board: Board,
-    /// Original values read from this same retained requester's firmware node.
+    /// Original values read from this same requester's firmware node.
     pub properties: Vec<(&'static str, Vec<u8>)>,
     pub clock: T,
     pub interrupts: &'static dyn IrqController,
@@ -129,8 +130,8 @@ struct Allocator {
     domain: Arc<dyn DmaDomain>,
     pages: Box<dyn PageSource>,
 }
-// SAFETY: the native constructor's actual coherent same-requester grant binds
-// this exact domain and PageSource. Each result independently retains real pins.
+// SAFETY: the native constructor's coherent same-requester grant binds
+// this exact domain and PageSource. Each result independently keeps real pins.
 unsafe impl memory::CoherentAllocator for Allocator {
     fn allocate(&mut self, bytes: usize) -> DriverResult<memory::CoherentBuffer> {
         let pages = self
@@ -140,7 +141,7 @@ unsafe impl memory::CoherentAllocator for Allocator {
         if pages.logical_bytes() < bytes {
             return Err(Error::Requirement("complete actual native coherent allocation").into());
         }
-        // SAFETY: exact same retained qualified requester/domain as the platform.
+        // SAFETY: same checked requester/domain as the platform.
         unsafe { memory::CoherentBuffer::map(pages, self.domain.clone()) }
     }
 }
@@ -177,9 +178,9 @@ impl<C: Configuration> NativeSource<C> {
     }
 }
 // SAFETY: admission is a fresh independently drained unpublished reset epoch;
-// retirement's stopped latch requires actual FLR, domain payload completion
+// retirement's stopped latch requires FLR, domain payload completion
 // AND the independent root/route posted-MSI completion. Registry then drains
-// actual CPU pending vectors/callbacks separately.
+// CPU pending vectors/callbacks separately.
 unsafe impl<C: Configuration> Source for NativeSource<C> {
     fn mask(&mut self) -> Result<(), irq::IrqError> {
         let result = {
@@ -208,19 +209,19 @@ unsafe impl<C: Configuration> Source for NativeSource<C> {
         };
         let result = (|| {
             self.delivery.borrow_mut().bind_route(message)?;
-            // SAFETY: registry retains the actual route and original owners.
+            // SAFETY: registry keeps the route and original owners.
             unsafe { self.config.borrow_mut().msi.program(message) }.map_err(Error::Msi)
         })();
         self.checked(result, irq::IrqError::Route)
     }
     unsafe fn unmask(&mut self) -> Result<(), irq::IrqError> {
-        // SAFETY: actual registry published the live retained callback.
+        // SAFETY: registry published the live callback.
         let result = unsafe { self.config.borrow_mut().msi.unmask() }.map_err(Error::Msi);
         self.checked(result, irq::IrqError::Mask)
     }
     unsafe fn synchronize(&mut self) -> Result<(), irq::IrqError> {
         self.quiesce()?;
-        // Only after actual CPU pending-vector/callback drain may this sole
+        // Only after CPU pending-vector/callback drain may this sole
         // work item be canceled. Process service is exclusively serialized.
         self.signals.pending.store(false, Ordering::Release);
         Ok(())
@@ -257,22 +258,22 @@ pub struct NativePlatform<
 }
 impl<C: Configuration, R: Registers, T: Time> NativePlatform<C, R, T> {
     /// # Safety
-    /// Inputs are this actual exclusive native endpoint's original config,
-    /// reserved UC BAR0/2 mappings, complete retained bridge/root topology and
+    /// Inputs are this exclusive native endpoint's original config,
+    /// reserved UC BAR0/2 mappings, complete kept bridge/root topology and
     /// acknowledged stopped requester epoch. Former device/firmware/CPU/DMA/IRQ
     /// owners, aliases, timers and work are independently stopped/drained. The
-    /// same actual domain is attached to this requester and retains its root /
+    /// same domain is attached to this requester and keeps its root /
     /// remapper epoch, with native coherent WB payload/ring-index accesses and
     /// low IOVA capability; the allocator returns real exclusive zeroed pages.
-    /// Board/properties are immutable actual observations from its bound node.
-    /// Shared combo/reset and ASPM policy ownership are actually coordinated;
+    /// Board/properties are immutable observations from its bound node.
+    /// Shared combo/reset and ASPM policy ownership are coordinated;
     /// no firmware/AML, raw config/mapping alias, reset or removal can race.
     /// NativeClock's TSC is calibrated/invariant/monotonic in this context, and
-    /// IRQ registry routing is actually qualified. One process/deferred owner
+    /// IRQ registry routing is checked. One process/deferred owner
     /// serializes all service/retirement. No device effect is inferred from
     /// numerical matching. Constructor errors return every original input owner
     /// without native writes; later failures quarantine uncertain ownership.
-    // Return the exact potentially unqualified owners without allocating or
+    // Return the exact potentially unchecked owners without allocating or
     // dropping any native resource on rejection.
     #[allow(
         clippy::result_large_err,
@@ -285,8 +286,8 @@ impl<C: Configuration, R: Registers, T: Time> NativePlatform<C, R, T> {
             let device = f.device;
             let address = f.address;
             let c = f.config();
-            let class = c.read32(8);
-            let subsystem = c.read32(0x2c);
+            let class = c.read32(regs::CLASS_REVISION);
+            let subsystem = c.read32(regs::SUBSYSTEM_VENDOR_ID);
             if class == u32::MAX || subsystem == u32::MAX {
                 return Err(Error::Requirement(
                     "actual readable native class/subsystem identity",
@@ -384,7 +385,7 @@ impl<C: Configuration, R: Registers, T: Time> NativePlatform<C, R, T> {
             retired: false,
         })
     }
-    /// Allocate through the same actual domain bound by construction; this
+    /// Allocate through the same domain bound by construction; this
     /// entry cannot accidentally pair the platform with another requester's DMA.
     pub fn into_transport(mut self) -> DriverResult<Transport<Self>> {
         let mut allocator = self.allocator.take().expect("unused native allocator");
@@ -414,7 +415,7 @@ impl<C: Configuration, R: Registers, T: Time> NativePlatform<C, R, T> {
         if let Some(configuration) = &self.configuration {
             let mut state = configuration.borrow_mut();
             state.disabled = Some(state.msi.begin_device_retirement().map_err(Error::Msi)?);
-            // SAFETY: one serialized terminal stop on the exact original config;
+            // SAFETY: one serialized terminal stop on the original config;
             // pins/root/route remain owned; no BAR access after this reset.
             unsafe {
                 state
@@ -427,13 +428,13 @@ impl<C: Configuration, R: Registers, T: Time> NativePlatform<C, R, T> {
         } else if let Some(function) = self.function.as_mut() {
             self.layout.stop(function.config(), &self.clock)?;
         }
-        // SAFETY: actual supported FLR and current BM-off exclude new requests;
-        // submissions are terminal, every actual page/domain/root stays retained.
+        // SAFETY: supported FLR and current BM-off exclude new requests;
+        // submissions are terminal, every page/domain/root stays held.
         // BM/TRPND/reset alone never authorize this operation's success.
         unsafe { self.domain.as_ref().unwrap().drain_posted_writes() }.map_err(Error::Dma)?;
         if self.registration.is_some() {
-            // SAFETY: actual source/reset and payload completion above; this
-            // independently retained root/route owner completes MSI delivery.
+            // SAFETY: source/reset and payload completion above; this
+            // independently kept root/route owner completes MSI delivery.
             unsafe { self.delivery.as_ref().unwrap().borrow().drain() }?;
         }
         self.signals.stopped.store(true, Ordering::Release);
@@ -448,7 +449,7 @@ impl<C: Configuration, R: Registers, T: Time> NativePlatform<C, R, T> {
             // The registry has released its source/callback on acknowledged
             // retirement. No second native owner or config access path exists.
             let mut state = configuration.borrow_mut();
-            // SAFETY: actual device/domain completion preceded real registry
+            // SAFETY: device/domain completion preceded real registry
             // CPU/callback/work drain. This release performs no config access.
             let (function, retained) =
                 unsafe { state.disabled.as_mut().unwrap().release_after_drain() }
@@ -468,10 +469,10 @@ impl<C: Configuration, R: Registers, T: Time> NativePlatform<C, R, T> {
             );
         }
         // SAFETY: all CPU/config/BAR/device/posted/IRQ/deferred users are stopped
-        // and drained. Every mapping remains retained on failed native unmap.
+        // and drained. Every mapping remains held on failed native unmap.
         unsafe { self.registers.as_mut().unwrap().retire() }?;
         for mapping in &mut self.mappings {
-            // SAFETY: exact original owned mappings after the same actual drain.
+            // SAFETY: original owned mappings after the same drain.
             unsafe { mapping.retire() }.map_err(Error::Mapping)?;
         }
         self.retired = true;
@@ -520,8 +521,8 @@ unsafe impl<C: Configuration, R: Registers, T: Time> Platform for NativePlatform
                     .disable(function)
                     .map_err(Error::Aspm)?;
             }
-            // SAFETY: actual reset completed with no published DMA address;
-            // all original root/domain/backing resources remain retained.
+            // SAFETY: reset completed with no published DMA address;
+            // all original root/domain/backing resources remain held.
             unsafe { self.domain.as_ref().unwrap().drain_posted_writes() }.map_err(Error::Dma)?;
             self.layout.enable(function.config())?;
             Ok(())
@@ -571,7 +572,7 @@ unsafe impl<C: Configuration, R: Registers, T: Time> Platform for NativePlatform
         }
         if space == Space::Configuration {
             // Only source vendor window controls are DWORD writes. Command,
-            // PMCSR and MSI use their independently checked native word paths.
+            // PMCSR and MSI use their checked native word paths.
             if !matches!(offset, 0x70 | 0x74 | 0x78 | 0x80 | 0x84 | 0x88) {
                 return Err(
                     Error::Requirement("source Broadcom vendor DWORD configuration").into(),
@@ -638,7 +639,7 @@ unsafe impl<C: Configuration, R: Registers, T: Time> Platform for NativePlatform
         let function = self.function.take().unwrap();
         let retained = self.retained.take().unwrap();
         // SAFETY: real current reset epoch, former owners drained; actual
-        // registry retains callback, route, root and original config resources.
+        // registry keeps callback, route, root and original config resources.
         let msi = match unsafe { MsiConfig::new(function, retained) } {
             Ok(msi) => msi,
             Err((error, (function, retained))) => {
@@ -721,7 +722,7 @@ impl<C: Configuration, R: Registers, T: Time> Drop for NativePlatform<C, R, T> {
     }
 }
 impl<C: Configuration, R: Registers, T: Time> Transport<NativePlatform<C, R, T>> {
-    /// An actual callback requested process service; packet/HCI completion
+    /// A callback requested process service; packet/HCI completion
     /// still comes exclusively from the coherent DMA completion rings.
     pub fn service_pending(&self) -> bool {
         self.platform

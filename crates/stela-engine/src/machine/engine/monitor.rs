@@ -12,7 +12,7 @@ pub struct MonitorLocation {
     pub illegal: bool,
 }
 
-/// The operation that actually changed architectural state. Exceptions include
+/// The operation that changed architectural state. Exceptions include
 /// faults and interrupts as well as calls; no endpoint or call pairing is inferred.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MonitorKind {
@@ -46,7 +46,7 @@ pub struct MonitorEvent {
 impl<H: Host, D: Devices> Machine<H, D> {
     /// Emit GENTER/GEXIT and guarded exception/ERET boundaries synchronously
     /// through [`Host::report`], off by default. This adds no guest memory reads,
-    /// counter samples, endpoint interpretation or retained call stack. The host
+    /// counter samples, endpoint interpretation or kept call stack. The host
     /// controls diagnostic output cost; there is no queue or silent hit limit.
     pub fn set_monitor_tracing(&mut self, enabled: bool) {
         self.monitor_tracing = enabled;
@@ -214,7 +214,7 @@ mod tests {
     }
 
     #[test]
-    fn monitor_tracing_retains_gl2_interrupts_faults_and_illegal_erets() {
+    fn monitor_tracing_keeps_gl2_interrupts_faults_and_illegal_erets() {
         use super::super::Exception;
         let mut machine = gxf(Chip::AppleM2);
         machine.cpu.set_pstate(Pstate::reset(2));

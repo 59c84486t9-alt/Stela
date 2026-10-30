@@ -352,7 +352,7 @@ pub fn store() -> Option<&'static mut Shared> {
     with_boot(|boot| boot.is_some()).then(|| Box::leak(Box::new(Shared)))
 }
 
-/// Share compiled blocks between PEs, retaining up to `bound` bytes of buffers
+/// Share compiled blocks between PEs, keeping up to `bound` bytes of buffers
 /// and cache metadata in the loader's store or a store for this boot. Allocator
 /// overhead and shared immutable preparation storage are outside this budget.
 pub fn share(bound: usize) {

@@ -60,7 +60,7 @@ impl Shape {
     }
 }
 
-/// The `aligned` value computed by Arm Mem and retained by each MemSingle.
+/// The `aligned` value computed by Arm Mem and kept by each MemSingle.
 /// It describes the original access, not a fresh instruction at a split address.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MemoryCheck {

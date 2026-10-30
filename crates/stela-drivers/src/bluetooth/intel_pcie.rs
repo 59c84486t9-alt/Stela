@@ -32,21 +32,21 @@ pub struct Identity {
     pub subsystem_vendor: u16,
     pub subsystem_device: u16,
 }
-/// The actual native PCI/config/MMIO/IRQ/requester lifetime, or an explicit
+/// The native PCI/config/MMIO/IRQ/requester lifetime, or an explicit
 /// independent hardware model. Implementations must not synthesize MMIO/DMA
 /// completions or turn a masked interrupt into a stopped-device observation.
 ///
 /// # Safety
-/// The identity is the exclusively owned actual Function. BAR0's required byte
-/// accesses through offset0x28a5 are UC mapped and retained. One real MSI-X
+/// The identity is the exclusively owned Function. BAR0's required byte
+/// accesses through offset0x28a5 are UC mapped and kept. One real MSI-X
 /// entry0 and its registered callback/message belong to this same PCI/reset
 /// epoch; there is no MSI/INTx fallback. All old callbacks and firmware owners
 /// are drained, all callbacks only schedule this serialized process/deferred
 /// service, and shared hardware reset is authorized by the platform coordinator.
 /// Supplied DMA pages are boot-lifetime reserved, coherent and identity-addressed
-/// for this exact requester. Native owners cannot be revoked while retained.
+/// for this requester. Native owners cannot be revoked while kept.
 /// `retire_vector_zero` must mask and drain the real route/callback/work lifetime;
-/// it does not certify that device DMA has stopped. Drop must retain any failed
+/// it does not certify that device DMA has stopped. Drop must keep any failed
 /// physical ownership rather than releasing a still-active route/mapping.
 pub unsafe trait Platform: 'static {
     fn identity(&self) -> Identity;
@@ -61,7 +61,7 @@ pub unsafe trait Platform: 'static {
     fn service_begin(&mut self) -> Result<()> {
         Ok(())
     }
-    /// Restore a source actually masked by the hard-IRQ callback after this
+    /// Restore a source masked by the hard-IRQ callback after this
     /// serialized completion/cause service. Pure polling/model owners need no
     /// extra operation beyond the device's automask acknowledgment.
     fn service_complete(&mut self) -> Result<()> {
@@ -134,8 +134,8 @@ pub struct TxReceipt {
     pub next_index: u16,
     pub alive: Option<Snapshot>,
 }
-/// Actual DMA storage stays reserved for the boot. On failed physical retirement
-/// the platform/IRQ/MMIO lifetime is deliberately leaked too. Safe APIs never
+/// DMA storage stays reserved for the boot. On failed physical retirement
+/// the platform/IRQ/MMIO lifetime is leaked too. Safe APIs never
 /// reopen or rewrite that uncertain owner.
 pub struct Transport<P: Platform> {
     platform: ManuallyDrop<P>,
@@ -348,8 +348,8 @@ impl<P: Platform> Transport<P> {
         if self.snapshot.boot_stage & (LOCKDOWN | ABORT | HALTED) != 0 {
             return Err(Error::Controller(Box::new(self.snapshot.clone())));
         }
-        // WARNING is retained in the snapshot; the source does not stop solely
-        // for its warning bit. Actual abort/lockdown/halt are terminal.
+        // WARNING is held in the snapshot; the source does not stop solely
+        // for its warning bit. Abort/lockdown/halt are terminal.
         let _warning = self.snapshot.boot_stage & WARNING;
         Ok(())
     }
@@ -505,7 +505,7 @@ impl<P: Platform> Transport<P> {
         }
     }
     /// Drain real completion/cause state in serialized deferred context. Empty
-    /// means no traffic, not a fabricated command event or readiness indication.
+    /// means no traffic, not an invented command event or readiness indication.
     pub fn poll(&mut self) -> Result<Vec<Packet>> {
         self.active()?;
         if let Err(e) = self.service() {
@@ -610,7 +610,7 @@ impl<P: Platform> Transport<P> {
             alive,
         })
     }
-    /// After the real OP boot notification, request D0 and observe an actual
+    /// After the real OP boot notification, request D0 and observe a
     /// subsequent GP0. IML has no D0 handshake and cannot call this method.
     pub fn enter_d0(&mut self) -> Result<Snapshot> {
         self.active()?;
@@ -665,7 +665,7 @@ impl<P: Platform> Transport<P> {
         let result: Result<()> = (|| {
             self.write(FH_MASK, u32::MAX)?;
             self.write(HW_MASK, u32::MAX)?;
-            // The IRQ registry's source quiescence requires actual device DMA
+            // The IRQ registry's source quiescence requires device DMA
             // stop, not just masked MSI-X. Stop/reset first; its source rereads
             // those acknowledgments before callback/CPU/work retirement. Even
             // a failed stop still attempts the real route mask/drain, whose
@@ -737,13 +737,13 @@ impl<P: Platform> Drop for Transport<P> {
     fn drop(&mut self) {
         let _ = self.close();
         if self.retired {
-            // SAFETY: actual route/callback drain plus bus-master disconnect
+            // SAFETY: route/callback drain plus bus-master disconnect
             // acknowledgment and reset boot-stage0 proved physical retirement.
             unsafe {
                 ManuallyDrop::drop(&mut self.platform);
             }
         }
-        // Otherwise retain the actual platform owner forever. DMA pages are
+        // Otherwise keep the platform owner forever. DMA pages are
         // permanently reserved independently; no destructor can recycle them.
     }
 }

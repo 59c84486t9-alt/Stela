@@ -147,7 +147,7 @@ impl<H: Copy + Eq> Control<H> {
 
     /// The control handshake has supplied the separate connection port and
     /// is now waiting for commands. A scheduler may time out only earlier
-    /// phases; an established control is intentionally long-lived and idle.
+    /// phases; an established control is long-lived and idle.
     pub fn ready(&self) -> bool {
         matches!(
             self.phase,
@@ -666,59 +666,42 @@ mod tests {
     }
 
     #[test]
-    fn peer_accepts_full_socks5_destination_and_returns_success() {
-        let mut input = HELLO.to_vec();
-        input.extend(0x105u16.to_le_bytes());
-        input.extend([5, 1, 0]);
-        input.extend([5, 1, 0, 3, 4]);
-        input.extend(b"test");
-        input.extend(443u16.to_be_bytes());
-        let mut stream = Memory::new(input, 1);
-        let mut peer = Peer::new(Version::One);
-        let destination = (0..5000).find_map(|_| match peer.poll(&mut stream) {
-            Poll::Ready(result) => Some(result.unwrap()),
-            Poll::Pending => None,
-        });
-        assert_eq!(
-            destination,
-            Some(Destination {
-                host: String::from("test"),
-                port: 443,
-            })
-        );
-        let mut expected = HELLO.to_vec();
-        expected.extend([5, 0, 5, 0, 5, 0, 0, 3, 4]);
-        expected.extend(b"test");
-        expected.extend(443u16.to_be_bytes());
-        assert_eq!(stream.output, expected);
-    }
-
-    #[test]
-    fn peer_accepts_split_command_socks5_exchange_used_by_current_purple() {
-        let mut input = HELLO.to_vec();
-        input.extend(0x105u16.to_le_bytes());
-        input.extend([0, 5, 1]);
-        input.extend([0, 3, 4]);
-        input.extend(b"test");
-        input.extend(443u16.to_be_bytes());
-        let mut stream = Memory::new(input, 1);
-        let mut peer = Peer::new(Version::One);
-        let destination = (0..5000).find_map(|_| match peer.poll(&mut stream) {
-            Poll::Ready(result) => Some(result.unwrap()),
-            Poll::Pending => None,
-        });
-        assert_eq!(
-            destination,
-            Some(Destination {
-                host: String::from("test"),
-                port: 443,
-            })
-        );
-        let mut expected = HELLO.to_vec();
-        expected.extend([5, 0, 5, 0, 0, 3, 4]);
-        expected.extend(b"test");
-        expected.extend(443u16.to_be_bytes());
-        assert_eq!(stream.output, expected);
+    fn peer_accepts_socks5_destinations_whole_or_split_across_commands() {
+        // The whole SOCKS5 greeting and request, and the split exchange the
+        // current restore client sends.
+        for (greeting, request, replies) in [
+            (
+                &[5, 1, 0][..],
+                &[5, 1, 0, 3, 4][..],
+                &[5, 0, 5, 0, 5, 0, 0, 3, 4][..],
+            ),
+            (&[0, 5, 1], &[0, 3, 4], &[5, 0, 5, 0, 0, 3, 4]),
+        ] {
+            let mut input = HELLO.to_vec();
+            input.extend(0x105u16.to_le_bytes());
+            input.extend(greeting);
+            input.extend(request);
+            input.extend(b"test");
+            input.extend(443u16.to_be_bytes());
+            let mut stream = Memory::new(input, 1);
+            let mut peer = Peer::new(Version::One);
+            let destination = (0..5000).find_map(|_| match peer.poll(&mut stream) {
+                Poll::Ready(result) => Some(result.unwrap()),
+                Poll::Pending => None,
+            });
+            assert_eq!(
+                destination,
+                Some(Destination {
+                    host: String::from("test"),
+                    port: 443,
+                })
+            );
+            let mut expected = HELLO.to_vec();
+            expected.extend(replies);
+            expected.extend(b"test");
+            expected.extend(443u16.to_be_bytes());
+            assert_eq!(stream.output, expected);
+        }
     }
 
     #[test]

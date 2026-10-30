@@ -12,7 +12,7 @@ fn invalid() -> BlockError {
 }
 
 pub(super) fn inventory(device: &xhci::Device) -> Result<Vec<Configuration>, BlockError> {
-    if device.descriptor[0..2] != [18, xhci::DEVICE_DESCRIPTOR]
+    if device.descriptor[0..2] != [18, crate::usb::descriptor::DEVICE_DESCRIPTOR]
         || device.descriptor[4] == 9
         || device.configurations.len() != usize::from(device.descriptor[17])
         || device.configurations.is_empty()
@@ -24,7 +24,7 @@ pub(super) fn inventory(device: &xhci::Device) -> Result<Vec<Configuration>, Blo
     for bytes in &device.configurations {
         total = total.checked_add(bytes.len()).ok_or_else(invalid)?;
         if bytes.len() < 9
-            || bytes[0..2] != [9, xhci::CONFIGURATION_DESCRIPTOR]
+            || bytes[0..2] != [9, crate::usb::descriptor::CONFIGURATION_DESCRIPTOR]
             || usize::from(u16::from_le_bytes([bytes[2], bytes[3]])) != bytes.len()
             || bytes.len() > 4096
             || total > 65536
@@ -45,8 +45,9 @@ pub(super) fn inventory(device: &xhci::Device) -> Result<Vec<Configuration>, Blo
             }
             let d = bytes.get(at..at + length).ok_or_else(invalid)?;
             match d[1] {
-                xhci::CONFIGURATION_DESCRIPTOR | xhci::DEVICE_DESCRIPTOR => return Err(invalid()),
-                xhci::INTERFACE_DESCRIPTOR => {
+                crate::usb::descriptor::CONFIGURATION_DESCRIPTOR
+                | crate::usb::descriptor::DEVICE_DESCRIPTOR => return Err(invalid()),
+                crate::usb::descriptor::INTERFACE_DESCRIPTOR => {
                     if length < 9
                         || d[5] == 9
                         || settings.iter().any(|s| (s.0, s.1) == (d[2], d[3]))
@@ -56,7 +57,7 @@ pub(super) fn inventory(device: &xhci::Device) -> Result<Vec<Configuration>, Blo
                     settings.push((d[2], d[3], d[4], 0));
                     endpoints = 0;
                 }
-                xhci::ENDPOINT_DESCRIPTOR => {
+                crate::usb::descriptor::ENDPOINT_DESCRIPTOR => {
                     if length < 7 || d[2] & 0x70 != 0 || d[2] & 15 == 0 || d[3] & 3 == 0 {
                         return Err(invalid());
                     }
@@ -71,7 +72,7 @@ pub(super) fn inventory(device: &xhci::Device) -> Result<Vec<Configuration>, Blo
                 0x30 if length != 6 || !preceding_endpoint => return Err(invalid()),
                 _ => {}
             }
-            preceding_endpoint = d[1] == xhci::ENDPOINT_DESCRIPTOR;
+            preceding_endpoint = d[1] == crate::usb::descriptor::ENDPOINT_DESCRIPTOR;
             at += length;
         }
         let mut numbers: Vec<u8> = settings.iter().map(|s| s.0).collect();
@@ -85,7 +86,7 @@ pub(super) fn inventory(device: &xhci::Device) -> Result<Vec<Configuration>, Blo
         {
             return Err(invalid());
         }
-        let interfaces = xhci::interfaces(bytes);
+        let interfaces = crate::usb::descriptor::interfaces(bytes);
         if interfaces.len() != settings.len() {
             return Err(invalid());
         }
@@ -136,7 +137,7 @@ mod tests {
         ]
     }
     #[test]
-    fn retains_nonsequential_composite_configuration_and_alternates() {
+    fn keeps_nonsequential_composite_configuration_and_alternates() {
         let mut d = device(vec![composite()]);
         d.descriptor[17] = 1;
         let inventory = inventory(&d).unwrap();

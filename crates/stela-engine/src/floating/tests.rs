@@ -217,7 +217,7 @@ fn unsupported_controls_leave_complete_state_unchanged() {
 }
 
 #[test]
-fn vector_lanes_snapshot_aliases_and_ignore_nep_and_inactive_upper_bits() {
+fn vector_lanes_snapshot_aliases() {
     for (shape, format) in VECTOR_ARRANGEMENTS {
         let (_, one, two, ..) = FORMATS.iter().copied().find(|row| row.0 == format).unwrap();
         let exponent_unit = two - one;
@@ -473,7 +473,7 @@ fn scalar_fused_merges_addend_and_snapshots_all_four_register_roles() {
 }
 
 #[test]
-fn vector_fused_snapshots_accumulator_and_ignores_nep_and_inactive_lanes() {
+fn fused_lanes_snapshot_the_accumulator() {
     for (shape, format) in VECTOR_ARRANGEMENTS {
         for operation in [FusedOperation::Add, FusedOperation::Subtract] {
             for nep in [false, true] {
@@ -946,7 +946,7 @@ fn narrowing_places_result_in_requested_half_and_preserves_only_upper_form_low_h
 }
 
 #[test]
-fn narrowing_unions_status_and_odd_rounding_retains_a_low_significand_bit() {
+fn narrowing_unions_status_and_odd_rounding_keeps_a_low_significand_bit() {
     let mut state = conversion_state();
     state.v[1] = [0x0080_0000_7f7f_ffff, 0x3f80_0000_7f80_0001];
     let mut expected = state.clone();
@@ -1354,3 +1354,6 @@ fn unsupported_conversion_controls_preserve_every_register_flags_and_status() {
         }
     }
 }
+
+#[cfg(all(feature = "std", target_arch = "x86_64"))]
+mod fused_native;

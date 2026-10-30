@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Complete FIFO transfers and serialized actual command/reply ownership.
+//! Complete FIFO transfers and serialized command/reply ownership.
 use super::*;
 const IDLE_HEADERS: usize = 6;
 const DRAIN_PACKETS: usize = 8;
@@ -77,7 +77,7 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
             self.failed_packet = Some(packet);
             return Err(ErrorKind::Length(length));
         }
-        // Preserve only the actually completed peek if the full transfer fails.
+        // Preserve only the completed peek if the full transfer fails.
         self.failed_packet = Some(packet.clone());
         self.raw_read(&mut packet.bytes[..usize::from(length)])?;
         packet.received = length;
@@ -249,8 +249,8 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
     }
     fn deep(&mut self, sleeping: bool) -> Result<(), ErrorKind> {
         if self.generation == Generation::Gen6 && !sleeping {
-            // The actual Gen6 preparation ping may NACK. Accept only an actual
-            // NACK with completed controller recovery; retain it for the owner.
+            // The Gen6 preparation ping may NACK. Accept only a
+            // NACK with completed controller recovery; keep it for the owner.
             if let Err(kind) = self.raw_write(&[4, 0, 5, 0, 0x2f, 0, 0]) {
                 match kind {
                     ErrorKind::Bus(
@@ -476,7 +476,7 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
         if let Some(update) = &mut self.interval_update {
             update.applied = Some(applied);
         }
-        // The SET response contains actual applied values, not a status byte.
+        // The SET response contains applied values, not a status byte.
         let actual = self.gen6_intervals()?;
         if let Some(update) = &mut self.interval_update {
             update.readback = Some(actual);
@@ -542,7 +542,7 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
     /// Select an explicitly requested low-power scan interval (20–1000 ms).
     /// The returned interval is the device's acknowledged value. Gen6 reuses
     /// the matching LP slot, otherwise fills LP1 only when empty, then LP2;
-    /// the ACTIVE interval and the other LP slot retain their actual values.
+    /// the ACTIVE interval and the other LP slot keep their values.
     /// This is a device operation; scheduling and platform wake remain external.
     pub fn low_power(&mut self, interval_ms: u16) -> Result<u16, Error> {
         self.ready()?;
@@ -576,7 +576,7 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
                 mode
             };
             // Keep newly observed settings even if the subsequent power/IRQ
-            // acknowledgement fails; the owner must retain actual side effects.
+            // acknowledgement fails; the owner must keep side effects.
             self.capabilities
                 .as_mut()
                 .ok_or(ErrorKind::NotReady)?
@@ -595,7 +595,7 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
     /// Run the donor's mutual-fine and self-capacitance calibration sequence
     /// while scanning is suspended. Physical reports drained around commands
     /// remain queued. Complete rejections permit one resume command; uncertain
-    /// failures retain the owner for platform reset and send no further command.
+    /// failures keep the owner for platform reset and send no further command.
     pub fn calibrate(&mut self) -> Result<(), CalibrationError> {
         let mut phase = CalibrationPhase::SuspendScanning;
         let mut attempted = false;

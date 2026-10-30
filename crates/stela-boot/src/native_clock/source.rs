@@ -1,6 +1,8 @@
-//! Actual retained source selection. No nominal TSC/frequency or bootstrap Cpu.
+//! Source selection. No nominal TSC/frequency or bootstrap Cpu.
 use super::{WorkError, counter::Counter, pm};
 use alloc::sync::Arc;
+pub(crate) use stela_boot_core::hpet::ElapsedBounds;
+pub(super) use stela_boot_core::source_health::Health;
 
 #[derive(Clone)]
 pub(crate) enum Prepared {
@@ -75,13 +77,26 @@ impl Prepared {
             Self::Pm(_) => None,
         }
     }
+    pub(super) fn continuous_period(&self) -> Result<u32, WorkError> {
+        match self {
+            Self::Hpet(counter) => counter.continuous_period(),
+            Self::Pm(_) => Err(WorkError::Unavailable),
+        }
+    }
+    pub(super) fn elapsed_bounds(&self, ticks: u64) -> Result<ElapsedBounds, WorkError> {
+        match self {
+            Self::Hpet(counter) => counter.elapsed_bounds(ticks),
+            Self::Pm(_) => Err(WorkError::Unavailable),
+        }
+    }
+
     /// # Safety
     /// Every real PM sample gap, including masked original execution and VMM/
     /// firmware interruptions, obeys max_gap_ns. This is only the existing
     /// explicit bounded fixture compatibility path, never arbitrary WQ entry.
     pub(crate) unsafe fn qualify_bounded(self, max_gap_ns: u64) -> Result<Self, WorkError> {
         match self {
-            // SAFETY: caller supplies the complete actual PM source gap bound.
+            // SAFETY: caller supplies the complete PM source gap bound.
             Self::Pm(pm) => unsafe { pm.qualify_bounded(max_gap_ns) }.map(Self::Pm),
             Self::Hpet(counter) => {
                 counter.check_process()?;
@@ -105,13 +120,24 @@ impl Prepared {
         }
     }
     /// # Safety
-    /// Exact original source and CPU/root lifetime are retained; caller excludes
+    /// Original source and CPU/root lifetime are held; caller excludes
     /// its own IRQs while mutating the serialized previous/elapsed sample pair.
     pub(super) unsafe fn read(&self) -> Result<u64, WorkError> {
         match self {
-            // SAFETY: caller supplies original retained PM/CPU ownership.
+            // SAFETY: caller supplies original kept PM/CPU ownership.
             Self::Pm(pm) => unsafe { pm.read() }.map(u64::from),
             Self::Hpet(counter) => counter.read_irq(),
+        }
+    }
+    pub(super) fn progress_after(&self, previous: u64) -> Result<u64, WorkError> {
+        match self {
+            Self::Hpet(counter) => counter.progress_after(previous),
+            // The separate bounded PM fixture keeps its existing wrap/gap
+            // contract; it can never mint a continuous CounterEpoch.
+            Self::Pm(pm) => {
+                // SAFETY: caller holds the original bounded PM/CPU lease.
+                unsafe { pm.read() }.map(u64::from)
+            }
         }
     }
     pub(super) fn delta(&self, previous: u64, current: u64) -> Result<u64, WorkError> {

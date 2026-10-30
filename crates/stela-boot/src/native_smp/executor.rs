@@ -1,7 +1,8 @@
 //! Physical AP lifetime and processor-local native resources. Startup ACKs
 //! prove entry/ownership only; the runtime publication protocol separately
-//! requires an actual recovered native loan before any CPU settlement.
+//! requires a recovered native loan before any CPU settlement.
 use super::{bootstrap, firmware, resources, topology, tsc_sync};
+use crate::Refusal;
 use crate::{
     apic::{self, Apic},
     engine::{host, interrupts},
@@ -15,6 +16,7 @@ use core::{
     cell::UnsafeCell,
     sync::atomic::{AtomicU8, Ordering},
 };
+use stela_contracts::refuse;
 
 mod mailbox;
 
@@ -28,10 +30,10 @@ const SYNCING: u8 = 3;
 /// more, so the next AP may start from it.
 const ENTERED: u8 = 4;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum StartupFailure {
     Resources,
-    Bootstrap(&'static str),
+    Bootstrap(Refusal),
     FaultRecord {
         slot: usize,
         cause: stela_boot_core::early_fault::RecordError,
@@ -52,7 +54,7 @@ pub(crate) enum StartupFailure {
     },
     Refused {
         slot: usize,
-        reason: &'static str,
+        reason: Refusal,
     },
 }
 
@@ -62,7 +64,7 @@ struct Argument {
     processor: topology::Processor,
     source: topology::Snapshot,
     effective_pat: u64,
-    // An explicit authored diagnostic request, never execution/ISA authority.
+    // An explicit authored diagnostic request, never execution/ISA permission.
     #[cfg(feature = "diagnostics")]
     fp_qualification: bool,
     stack_bottom: u64,
@@ -72,7 +74,7 @@ struct Argument {
     observed: UnsafeCell<Option<topology::Snapshot>>,
     descriptors: UnsafeCell<Option<interrupts::Observation>>,
     doorbells: UnsafeCell<Option<&'static core::sync::atomic::AtomicU64>>,
-    refusal: UnsafeCell<Option<&'static str>>,
+    refusal: UnsafeCell<Option<Refusal>>,
     status: AtomicU8,
     tsc: tsc_sync::Sync,
     mailbox: mailbox::Mailbox,
@@ -97,7 +99,7 @@ impl Processor {
         self.argument.processor.apic_id
     }
 
-    /// This is startup evidence, never runtime quiescence authority.
+    /// This is startup evidence, never runtime quiescence permission.
     pub(crate) fn observation(&self) -> &topology::Snapshot {
         assert_eq!(self.argument.status.load(Ordering::Acquire), READY);
         // SAFETY: the owning AP wrote this once before Release READY and never
@@ -111,7 +113,7 @@ impl Processor {
 
     pub(crate) fn descriptors(&self) -> interrupts::Observation {
         assert_eq!(self.argument.status.load(Ordering::Acquire), READY);
-        // SAFETY: one immutable publication before READY, retained for boot.
+        // SAFETY: one immutable publication before READY, kept for boot.
         unsafe { (&*self.argument.descriptors.get()).expect("ready AP descriptors") }
     }
 
@@ -126,7 +128,7 @@ impl Processor {
         if self.argument.status.load(Ordering::Acquire) != READY {
             return Err(StartupFailure::Refused {
                 slot: self.slot,
-                reason: "executor is not ready",
+                reason: refuse!("executor is not ready"),
             });
         }
         // SAFETY: the AP published this pinned read-only atomic reference before
@@ -155,7 +157,7 @@ impl Processor {
 }
 
 pub(crate) struct Executors {
-    /// BSP is deliberately absent: it already owns its local HostOwner.
+    /// BSP is absent: it already owns its local HostOwner.
     processors: Vec<Processor>,
 }
 
@@ -176,31 +178,33 @@ unsafe extern "sysv64" fn enter(argument: u64) -> ! {
             .expect("AP descriptors")
     };
     let tables_pointer = tables as *const interrupts::Tables;
+    // SAFETY: this AP alone owns `tables`, taken once above, and installs them before any interrupt
+    // or native call.
     unsafe {
         interrupts::install_on(tables, interrupts::interrupt);
     }
     // Its own GDT, IDT and stack: the low page is the next AP's.
     argument.status.store(ENTERED, Ordering::Release);
     let initialized = (|| {
-        // SAFETY: CPL0 on the actual selected AP, with private descriptors.
+        // SAFETY: CPL0 on the selected AP, with private descriptors.
         let observed =
-            unsafe { firmware::observe() }.map_err(|_| "AP source-control capture refused")?;
+            unsafe { firmware::observe() }.map_err(|_| refuse!("AP source-control capture refused"))?;
         if !observed.matches(argument.processor) {
-            return Err("AP physical identity changed");
+            return Err(refuse!("AP physical identity changed"));
         }
         // SAFETY: this AP alone consumes its private disjoint host resources.
         let mut config = unsafe {
             (&mut *argument.config.get())
                 .take()
-                .ok_or("AP resources absent")?
+                .ok_or(refuse!("AP resources absent"))?
         };
         observed
             .qualify_native(matches!(
                 config.placement,
                 stela_engine::machine::mmu::placement::Placement::FiveLevel
             ))
-            .map_err(|_| "AP native controls refused")?;
-        // The trampoline installs the BSP's already-qualified effective PAT;
+            .map_err(|_| refuse!("AP native controls refused"))?;
+        // The trampoline installs the BSP's already-checked effective PAT;
         // The offline trampoline installed the complete validated BSP image.
         let source = topology::Snapshot {
             pat: argument.effective_pat,
@@ -208,20 +212,20 @@ unsafe extern "sysv64" fn enter(argument: u64) -> ! {
         };
         observed
             .same_memory_types(&source)
-            .map_err(|_| "AP memory types differ")?;
+            .map_err(|_| refuse!("AP memory types differ"))?;
         config.apic_base = observed.apic_base;
         let loader_root = config.window_root;
         // SAFETY: configured pool/arena/bounce entries belong only to this AP;
         // tables/local record remain pinned through every native call and park.
         let owner =
-            unsafe { host::install(config) }.map_err(|_| "AP private host installation failed")?;
+            unsafe { host::install(config) }.map_err(|_| refuse!("AP private host installation failed"))?;
         #[cfg(feature = "diagnostics")]
         let mut owner = owner;
-        let apic = u32::try_from(argument.processor.apic_id).map_err(|_| "AP APIC ID")?;
+        let apic = u32::try_from(argument.processor.apic_id).map_err(|_| refuse!("AP APIC ID"))?;
         host::join_shootdown(
             crate::native_mmio::PROCESSORS
                 .slot(apic)
-                .ok_or("AP missing from the aperture's processors")?,
+                .ok_or(refuse!("AP missing from the aperture's processors"))?,
         );
         #[cfg(feature = "diagnostics")]
         super::context_check::check(&mut owner.host())?;
@@ -229,18 +233,22 @@ unsafe extern "sysv64" fn enter(argument: u64) -> ! {
         if argument.fp_qualification {
             host::fp_diagnostic::check(&mut owner.host())?;
         }
-        // Retain the actual installed private root/control state, not the
+        // Keep the installed private root/control state, not the
         // earlier loader root observed before Host initialization.
         let installed =
-            unsafe { firmware::observe() }.map_err(|_| "AP installed-control capture refused")?;
+            // SAFETY: CPL0 on the selected AP, after its private descriptors were installed.
+            unsafe { firmware::observe() }.map_err(|_| refuse!("AP installed-control capture refused"))?;
         if installed.cr3 == loader_root || !installed.matches(argument.processor) {
-            return Err("AP private root or physical identity differs");
+            return Err(refuse!("AP private root or physical identity differs"));
         }
+        // SAFETY: reads this CPU's descriptor registers and RSP and changes nothing.
         let descriptors = unsafe { interrupts::observe() };
         if !(argument.stack_bottom..argument.stack_top).contains(&descriptors.rsp)
+                // SAFETY: `tables` were installed on this AP and live for the rest of its
+                // execution.
             || !unsafe { &*tables_pointer }.matches(descriptors)
         {
-            return Err("AP private descriptor or stack differs");
+            return Err(refuse!("AP private descriptor or stack differs"));
         }
         // SAFETY: only this AP publishes these immutable observations, before
         // Release READY. The counter lives in its permanently pinned GS record.
@@ -264,11 +272,9 @@ unsafe extern "sysv64" fn enter(argument: u64) -> ! {
                 if argument.mailbox.poll(&mut owner, &mut worker) {
                     continue;
                 }
-                // STI's interrupt shadow includes HLT: a pending 0x60 wakes
-                // this AP without a poll-to-sleep lost-notification window.
-                unsafe {
-                    asm!("sti", "hlt", "cli", options(nomem, nostack));
-                }
+                // SAFETY: interrupts are disabled and this AP's IDT takes its
+                // 0x60 doorbell, which ends the wait even when already pending.
+                unsafe { crate::native_idle::wait(|| None) };
             }
         }
         Err(reason) => {
@@ -279,6 +285,7 @@ unsafe extern "sysv64" fn enter(argument: u64) -> ! {
             // Host state may not exist after refusal, so keep maskable IRQs
             // disabled rather than route a doorbell into an uninstalled Host.
             loop {
+                // SAFETY: halts this refused AP with maskable interrupts off; it touches no memory.
                 unsafe {
                     asm!("cli", "hlt", options(nomem, nostack));
                 }
@@ -299,7 +306,7 @@ unsafe extern "sysv64" fn enter(argument: u64) -> ! {
 /// `capture` is the immutable loader-owned copy, validated before EBS. `sender`
 /// addresses the live local APIC (identity UC mapping or x2APIC), and `tsc_hz`
 /// is the calibrated source clock. No firmware call may follow. Keep all AP
-/// resources retained on delivery failure; no uncertain AP is admitted here.
+/// resources kept on delivery failure; no uncertain AP is admitted here.
 pub(crate) unsafe fn quiesce_firmware_aps(
     capture: &firmware::Capture,
     sender: &Apic,
@@ -322,9 +329,9 @@ pub(crate) unsafe fn quiesce_firmware_aps(
     let targets = topology::enabled_unselected(source, &selected[..1])
         .map_err(StartupFailure::FirmwareTopology)?;
     if source[selected[0] as usize].apic_id != u64::from(sender.id()) {
-        return Err(StartupFailure::Bootstrap(
-            "firmware BSP differs from the live local APIC",
-        ));
+        return Err(StartupFailure::Bootstrap(refuse!(
+            "firmware BSP differs from the live local APIC"
+        )));
     }
     if tsc_hz == 0 {
         return Err(StartupFailure::Delivery(
@@ -352,7 +359,7 @@ pub(crate) unsafe fn quiesce_firmware_aps(
     for index in targets {
         let processor = source[index];
         let id = destination(index)?;
-        // SAFETY: source identity, actual BSP exclusion, full destination set
+        // SAFETY: source identity, BSP exclusion, full destination set
         // and source clock were checked before any effect. No SIPI is sent.
         unsafe { sender.init_only(id, tsc_hz) }.map_err(|cause| StartupFailure::FirmwareInit {
             processor_number: processor.processor_number,
@@ -377,7 +384,7 @@ pub(crate) unsafe fn quiesce_firmware_aps(
 /// owned and immutable as metadata. The caller already called native_smp::validate.
 /// The post-EBS loader already called quiesce_firmware_aps before reclaiming
 /// firmware boot-services RAM; INIT delivery is not an AP READY observation.
-/// No native guest execution is admitted merely by returning this startup set.
+/// No native guest execution is admitted by returning this startup set.
 pub(crate) unsafe fn start(
     handoff: &'static Handoff,
     capture: &'static firmware::Capture,
@@ -396,7 +403,7 @@ pub(crate) unsafe fn start(
     );
     let mut processors = Vec::with_capacity(cores - 1);
     let mut started: Vec<Starting> = Vec::with_capacity(cores - 1);
-    // SAFETY: CPL0, actual BSP; PAT exists under the validated native floor.
+    // SAFETY: CPL0, BSP; PAT exists under the validated native floor.
     let memory_source = unsafe { firmware::observe() }.map_err(|_| StartupFailure::Resources)?;
     let source_expected = topology::Snapshot {
         pat: memory_source.pat,
@@ -550,12 +557,14 @@ pub(crate) unsafe fn start(
         // has left the low page, and each installs its private host beside
         // the others while the BSP takes their TSC synchronization in turn.
         loop {
-            // A sealed hardware exception is an actual failed startup, not a
+            // A sealed hardware exception is a failed startup, not a
             // timeout or a synthetic READY. Return without reusing any owned
             // AP/low-page resource whose execution remains uncertain.
             if let Some(cause) =
+                // SAFETY: the low startup page stays owned by this bringup until the AP leaves it
+                // or fails.
                 unsafe { bootstrap::failure(layout::physical(physical) as *const u8) }
-                    .map_err(|cause| StartupFailure::FaultRecord { slot, cause })?
+                        .map_err(|cause| StartupFailure::FaultRecord { slot, cause })?
             {
                 return Err(StartupFailure::EarlyException { slot, cause });
             }
@@ -633,10 +642,10 @@ fn serve(
                 } = started.swap_remove(index);
                 let installed = processor.observation();
                 let descriptors = processor.descriptors();
-                // This is the actual Acquire READY publication after high
-                // entry, private Host/context qualification and retained
+                // This is the Acquire READY publication after high
+                // entry, private Host/context validation and kept
                 // observations; no new success flag or runtime stopped-worker
-                // authority is inferred from the log record.
+                // permission is inferred from the log record.
                 crate::output::arguments(format_args!(
                     "NATIVE READY slot={slot} apic={destination:#x} cr3={:#x} cr0={:#x} cr4={:#x} efer={:#x} pat={:#x} rsp={:#x} gdt={:#x} idt={:#x} gs={:#x}\n",
                     installed.cr3,
@@ -666,6 +675,7 @@ fn serve(
 fn refused(slot: usize, argument: &Argument) -> StartupFailure {
     // SAFETY: the owner published this immutable reason before the Acquire
     // REFUSED observation; storage remains pinned.
-    let reason = unsafe { *argument.refusal.get() }.expect("refused AP publishes a reason");
+    let reason =
+        unsafe { (*argument.refusal.get()).clone() }.expect("refused AP publishes a reason");
     StartupFailure::Refused { slot, reason }
 }

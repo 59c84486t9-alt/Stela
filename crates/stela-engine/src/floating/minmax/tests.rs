@@ -305,3 +305,10 @@ fn enabled_exceptions_decline_all_shapes_before_any_register_or_status_commit() 
         }
     }
 }
+
+#[cfg(all(
+    feature = "std",
+    target_arch = "x86_64",
+    any(target_os = "macos", target_os = "linux")
+))]
+mod native;

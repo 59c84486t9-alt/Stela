@@ -1,9 +1,11 @@
-//! Actual EDU MSI lifecycle under the source-bound QEMU TCG fixture grant.
+//! EDU MSI lifecycle under the source-bound QEMU TCG fixture grant.
+use crate::Result;
 use alloc::{format, string::String, sync::Arc};
 use core::{
     arch::asm,
     sync::atomic::{AtomicU32, AtomicU64, Ordering},
 };
+use stela_contracts::refuse;
 use stela_drivers::{
     Clock,
     bus::{
@@ -20,7 +22,7 @@ pub(super) struct Edu {
 }
 impl Edu {
     pub(super) fn read(&self, offset: usize) -> u32 {
-        // SAFETY: actual retained root-stable UC EDU BAR, checked by the
+        // SAFETY: root-stable UC EDU BAR, checked by the
         // enclosing exclusive QEMU-only fixture before ownership transfer.
         unsafe { ((self.base + offset) as *const u32).read_volatile() }
     }
@@ -41,7 +43,7 @@ impl Edu {
         self.bad_ack.load(Ordering::Relaxed)
     }
     fn dma_idle(&self) -> bool {
-        // SAFETY: actual owned EDU DMA_COMMAND supports a 64-bit read.
+        // SAFETY: owned EDU DMA_COMMAND supports a 64-bit read.
         unsafe { ((self.base + 0x98) as *const u64).read_volatile() & 1 == 0 }
     }
 }
@@ -53,7 +55,7 @@ impl Handler for Edu {
         if self.read(0x24) != 0 {
             self.bad_ack.fetch_add(1, Ordering::Relaxed);
         }
-        // Release publishes actual cause/ACK observation to the waiting owner.
+        // Release publishes cause/ACK observation to the waiting owner.
         self.received.fetch_add(1, Ordering::Release);
         if cause == 0 {
             Disposition::NotMine
@@ -78,7 +80,7 @@ impl EduSource {
 // SAFETY: only the exact QEMU EDU fixture creates this source, after DMA has
 // completed, BusMaster is off and VT-d shutdown acknowledged. It has no queued
 // worker/timer; RUN-clear/idle, cause ACK and synchronous TCG device callbacks
-// qualify stopped DMA/posted interrupts. This is not physical PCI quiescence.
+// check stopped DMA/posted interrupts. This is not physical PCI quiescence.
 unsafe impl Source for EduSource {
     fn mask(&mut self) -> Result<(), IrqError> {
         let offset = u16::from(self.msi.offset);
@@ -201,21 +203,21 @@ pub(super) struct Parts {
     pub source: EduSource,
     pub edu: Arc<Edu>,
 }
-pub(super) fn prepare_source(function: Function, base: u64, clock: Clock) -> Result<Parts, String> {
+pub(super) fn prepare_source(function: Function, base: u64, clock: Clock) -> Result<Parts> {
     let interrupts = function.interrupts();
     if interrupts.msix.is_some() {
-        return Err(String::from("EDU fixture has unexpected MSI-X"));
+        return Err(refuse!("EDU fixture has unexpected MSI-X"));
     }
     let msi = interrupts
         .msi
-        .ok_or_else(|| String::from("EDU has no actual MSI capability"))?;
+        .ok_or_else(|| refuse!("EDU has no actual MSI capability"))?;
     if !(0x40..=0xec).contains(&msi.offset) || !msi.offset.is_multiple_of(4) || msi.vectors != 1 {
-        return Err(String::from("unsupported EDU MSI layout"));
+        return Err(refuse!("unsupported EDU MSI layout"));
     }
     let timeout = clock
         .ticks_per_microsecond
         .checked_mul(2_000_000)
-        .ok_or_else(|| String::from("IRQ timeout overflow"))?;
+        .ok_or_else(|| refuse!("IRQ timeout overflow"))?;
     let apic_base = crate::apic::base_msr();
     let apic_registers = apic_base & crate::apic::BASE_ADDRESS;
     let apic = crate::apic::Apic::new(apic_base, apic_registers);
@@ -224,10 +226,10 @@ pub(super) fn prepare_source(function: Function, base: u64, clock: Clock) -> Res
         crate::engine::interrupts::TIMER_VECTOR,
         clock.ticks_per_microsecond * 1_000_000,
     );
-    // SAFETY: same strict TCG/SMM-off single-BSP fixture, actual installed
-    // reserved-vector IDT and permanently retained identity UC APIC mapping.
+    // SAFETY: same strict TCG/SMM-off single-BSP fixture, installed
+    // reserved-vector IDT and permanently kept identity UC APIC mapping.
     unsafe { super::initialize(apic_base, apic_registers, timeout) }
-        .map_err(|error| format!("native IRQ attach: {error:?}"))?;
+        .map_err(|error| refuse!("native IRQ attach: {error}", ?error))?;
     let edu = Arc::new(Edu {
         base: base as usize,
         received: AtomicU64::new(0),
@@ -242,23 +244,22 @@ pub(super) fn prepare_source(function: Function, base: u64, clock: Clock) -> Res
     Ok(Parts { source, edu })
 }
 
-pub(crate) fn run(
-    function: Function,
-    base: u64,
-    clock: Clock,
-) -> Result<(String, Function), String> {
+pub(crate) fn run(function: Function, base: u64, clock: Clock) -> Result<(String, Function)> {
     let Parts { source, edu } = prepare_source(function, base, clock)?;
     let mut registration = super::CONTROLLER
         .request_owned(source, edu.clone())
-        .map_err(|error| format!("EDU MSI request: {error:?}"))?;
+        .map_err(|error| refuse!("EDU MSI request: {error}", ?error))?;
     let vector = registration.vector();
     // No heap/resource lock is held. The real IDT handler acknowledges the
     // EDU cause and the registry EOIs before its inflight reference ends.
+    // SAFETY: no heap or resource lock is held, the IDT handler is installed and interrupts are
+    // masked again right after the wait.
     unsafe {
         asm!("sti", options(nostack));
     }
     edu.write(0x60, 1);
     let completed = clock.wait(2_000_000, || edu.received.load(Ordering::Acquire) != 0);
+    // SAFETY: masks interrupts on this CPU.
     unsafe {
         asm!("cli", options(nostack));
     }
@@ -268,20 +269,21 @@ pub(crate) fn run(
         || edu.bad_ack.load(Ordering::Relaxed) != 0
         || registration.handled() != Ok(1)
     {
-        return Err(format!(
-            "actual EDU MSI failed completed={completed} count={} cause={:#x} bad_ack={}",
-            edu.received.load(Ordering::Acquire),
-            edu.observed.load(Ordering::Relaxed),
-            edu.bad_ack.load(Ordering::Relaxed)
+        return Err(refuse!(
+            "actual EDU MSI failed completed={completed} count={count} cause={cause:#x} bad_ack={bad_ack}",
+            completed,
+            count = edu.received.load(Ordering::Acquire),
+            cause = edu.observed.load(Ordering::Relaxed),
+            bad_ack = edu.bad_ack.load(Ordering::Relaxed)
         ));
     }
     let retired = registration
         .retire()
-        .map_err(|error| format!("EDU MSI retire: {error:?}"))?;
+        .map_err(|error| refuse!("EDU MSI retire: {error}", ?error))?;
     if retired.route().vector() != vector {
-        return Err(String::from("EDU MSI retired a different route"));
+        return Err(refuse!("EDU MSI retired a different route"));
     }
-    // Recover exactly the original uniquely owned Function after actual
+    // Recover exactly the original uniquely owned Function after
     // source/IRR/ISR/callback/work drain. No second ECAM enumeration or cloned
     // configuration/root owner is introduced by the following INTx phase.
     // SAFETY: concrete source owns the stopped EDU/Function. Keep its original
@@ -295,23 +297,24 @@ pub(crate) fn run(
     drop(source_edu);
     drop(handler);
     if Arc::strong_count(&edu) != 1 {
-        return Err(String::from(
-            "retired IRQ retained handler/source unexpectedly",
-        ));
+        return Err(refuse!("retired IRQ retained handler/source unexpectedly"));
     }
     // Trigger a new device cause after acknowledged MSI disable/detach. The
-    // retained observer must see no callback before the cause is cleared.
+    // observer must see no callback before the cause is cleared.
     edu.write(0x60, 2);
+    // SAFETY: no heap or resource lock is held, the IDT handler is installed and interrupts are
+    // masked again right after the wait.
     unsafe {
         asm!("sti", options(nostack));
     }
     let late = clock.wait(1_000, || edu.received.load(Ordering::Acquire) != 1);
+    // SAFETY: masks interrupts on this CPU.
     unsafe {
         asm!("cli", options(nostack));
     }
     edu.write(0x64, u32::MAX);
     if late || edu.read(0x24) != 0 {
-        return Err(String::from("EDU MSI callback survived retire"));
+        return Err(refuse!("EDU MSI callback survived retire"));
     }
     Ok((
         format!(
@@ -321,5 +324,5 @@ pub(crate) fn run(
     ))
 }
 
-// Actual retained native configuration owner, never a CPU-bound raw transport.
+// Native configuration owner, never a CPU-bound raw transport.
 type Function = PciFunction<OwnedConfig>;

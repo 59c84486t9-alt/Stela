@@ -1,11 +1,13 @@
 //! Immutable PMIC startup routes, AP SRAM ports and supplied initial bytes.
 use super::Window;
+use crate::Result;
 use alloc::vec::Vec;
+use stela_contracts::refuse;
 pub const WINDOW_BYTES: u16 = 16;
 /// Known original AP startup register routes whose device-side effects have
-/// not yet been qualified. Binding one makes accesses explicit requirements,
+/// not yet been checked. Binding one makes accesses explicit requirements,
 /// never bus NACKs or apparently healthy storage/status values. This grants no
-/// firmware execution or identity; callers qualify the actual resource family.
+/// firmware execution or identity; callers check the resource family.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FirmwareStartup {
     Maverick,
@@ -99,11 +101,11 @@ impl FirmwareSram {
         ]
     }
 
-    pub fn validate(self) -> Result<(), &'static str> {
+    pub fn validate(self) -> Result<()> {
         if self.bytes == 0 || self.chunk != WINDOW_BYTES {
-            return Err(
-                "PMU firmware SRAM requires a nonempty capacity and qualified 16-byte window",
-            );
+            return Err(refuse!(
+                "PMU firmware SRAM requires a nonempty capacity and qualified 16-byte window"
+            ));
         }
         let windows = self.windows();
         for (i, a) in windows.iter().enumerate() {
@@ -112,7 +114,7 @@ impl FirmwareSram {
                     .iter()
                     .any(|b| super::configuration::overlaps(*a, *b))
             {
-                return Err("PMU firmware SRAM ports overlap or exceed 16 bits");
+                return Err(refuse!("PMU firmware SRAM ports overlap or exceed 16 bits"));
             }
         }
         Ok(())
@@ -125,10 +127,12 @@ pub struct FirmwareHistory {
     initial: Vec<u8>,
 }
 impl FirmwareHistory {
-    pub fn new(ports: FirmwareSram, initial: Vec<u8>) -> Result<Self, &'static str> {
+    pub fn new(ports: FirmwareSram, initial: Vec<u8>) -> Result<Self> {
         ports.validate()?;
         if initial.len() != usize::from(ports.bytes) {
-            return Err("PMU firmware SRAM requires every initial byte explicitly supplied");
+            return Err(refuse!(
+                "PMU firmware SRAM requires every initial byte explicitly supplied"
+            ));
         }
         Ok(Self { ports, initial })
     }

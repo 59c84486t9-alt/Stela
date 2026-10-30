@@ -5,18 +5,43 @@
 #![cfg_attr(not(test), no_std)]
 extern crate alloc;
 
+pub use stela_contracts::Refusal;
+
+/// A refused request names the values that decided it.
+pub type Result<T, E = Refusal> = core::result::Result<T, E>;
+
 pub mod aperture;
+#[cfg(target_arch = "x86_64")]
+pub mod apic;
+pub mod assigned_topology;
+pub mod audio_check_samples;
+pub mod bluetooth_dsbr;
+pub mod boot_progress;
+pub mod bundle;
 pub mod console_lines;
+#[cfg(feature = "native-acpi")]
+pub mod crs;
 pub mod dmar;
 pub mod early_fault;
 pub mod entropy;
 pub mod firmware_state;
 pub mod firmware_time;
 pub mod guarded_stacks;
+pub mod handoff_records;
+pub mod heap;
+pub mod host_resources;
 pub mod hpet;
+pub mod interrupt_image;
+pub mod ioapic;
+pub mod irq_context;
 pub mod madt;
 pub mod memory_budget;
 pub mod memory_types;
+#[cfg(target_arch = "x86_64")]
+pub mod msr;
+pub mod native_memory;
+pub mod native_profile;
+pub mod native_resources;
 pub mod options;
 pub mod paging_controls;
 pub mod passthrough;
@@ -29,11 +54,14 @@ pub mod remapping;
 #[cfg(target_arch = "x86_64")]
 pub mod requester;
 pub mod root_transition;
+pub mod screen;
+pub mod source_health;
 pub mod storage;
 pub mod topology;
 pub mod tsc;
 #[cfg(target_arch = "x86_64")]
 pub mod vtd;
+pub mod work_check_fixture;
 pub mod worker_bindings;
 pub mod xstate;
 

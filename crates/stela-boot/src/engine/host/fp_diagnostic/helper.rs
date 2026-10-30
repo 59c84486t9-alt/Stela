@@ -1,9 +1,11 @@
 //! Real translated-access helper return and abandonment on owned ARM tables.
 use super::super::{BareHost, RamRange, load_root, native_return, state};
 use super::{Image, Probe, RETURN_RAX, RETURN_RDX, pointer, same_legacy, stela_native_fp_probe};
+use crate::Result;
 use alloc::vec::Vec;
 use core::{arch::global_asm, mem, mem::offset_of, ptr};
 use stela_compiler::{GuestState, block::BlockExit, context::ExecutionContext};
+use stela_contracts::refuse;
 use stela_drivers::bus::dma::memory::{CacheAttribute, CpuMapping, PageSource, PinnedPages};
 use stela_engine::machine::FaultCause;
 use stela_engine::machine::Host;
@@ -30,7 +32,7 @@ struct Observation {
     fp_errors: u64,
 }
 
-// Own the actual native heap pins/verified WB CPU mapping through the last
+// Own the native heap pins/verified WB CPU mapping through the last
 // native/helper frame. The original guest RAM is never read or modified.
 struct GuestScope {
     _pages: PinnedPages,
@@ -39,7 +41,7 @@ struct GuestScope {
     original_tlb: Option<mmu::translated::Tlb>,
 }
 impl GuestScope {
-    fn new() -> Result<Self, &'static str> {
+    fn new() -> Result<Self> {
         if state().native
             || state().recorded.is_some()
             || state().regime.is_some()
@@ -48,11 +50,13 @@ impl GuestScope {
             || state().legacy_translations_dirty
             || state().tag_checks != [false; 2]
         {
-            return Err("helper FP diagnostic requires fresh actual startup ownership");
+            return Err(refuse!(
+                "helper FP diagnostic requires fresh actual startup ownership"
+            ));
         }
         let pages = crate::native_memory::SOURCE
             .allocate(5 * PAGE, PAGE, CacheAttribute::WriteBack)
-            .map_err(|_| "helper FP private page reservation unavailable")?;
+            .map_err(|_| refuse!("helper FP private page reservation unavailable"))?;
         if pages.page_shift() != 12
             || pages.physical_pages().len() != 5
             || !pages
@@ -60,17 +64,17 @@ impl GuestScope {
                 .windows(2)
                 .all(|pair| pair[0].checked_add(PAGE as u64) == Some(pair[1]))
         {
-            return Err("helper FP private page geometry differs");
+            return Err(refuse!("helper FP private page geometry differs"));
         }
         let mapping = pages
             .cpu_mapping(CacheAttribute::WriteBack)
-            .map_err(|_| "helper FP private CPU mapping unavailable")?;
-        // Four genuinely owned ARM 4KiB tables followed by one data page.
-        // Software walks read them through this same actual RAM reservation.
+            .map_err(|_| refuse!("helper FP private CPU mapping unavailable"))?;
+        // Four owned ARM 4KiB tables followed by one data page.
+        // Software walks read them through this same RAM reservation.
         for level in 0..3 {
             let table = mapping
                 .address(level * PAGE, 8)
-                .map_err(|_| "helper FP table bounds")?;
+                .map_err(|_| refuse!("helper FP table bounds"))?;
             // SAFETY: exclusive aligned zeroed private pinned page; no other
             // CPU/guest/DMA has access to this authored fixture reservation.
             unsafe {
@@ -82,10 +86,10 @@ impl GuestScope {
         }
         let leaf = mapping
             .address(3 * PAGE + (MAPPED as usize / PAGE) * 8, 8)
-            .map_err(|_| "helper FP leaf bounds")?;
+            .map_err(|_| refuse!("helper FP leaf bounds"))?;
         let data = mapping
             .address(4 * PAGE, 8)
-            .map_err(|_| "helper FP data bounds")?;
+            .map_err(|_| refuse!("helper FP data bounds"))?;
         // SAFETY: same uniquely owned table/data pages; valid privileged RW,
         // AF-set normal-WB leaf, with both execute-never bits set.
         unsafe {
@@ -96,7 +100,7 @@ impl GuestScope {
         }
         let mut ram = Vec::new();
         ram.try_reserve_exact(1)
-            .map_err(|_| "helper FP RAM metadata unavailable")?;
+            .map_err(|_| refuse!("helper FP RAM metadata unavailable"))?;
         ram.push(RamRange {
             guest: TABLE_BASE,
             host: pages.physical_pages()[0],
@@ -134,7 +138,7 @@ impl GuestScope {
 impl Drop for GuestScope {
     fn drop(&mut self) {
         // No allocation or pin release can bypass a live native/helper frame.
-        // A failure here is terminal, retaining this stack and backing.
+        // A failure here is terminal, keeping this stack and backing.
         assert!(
             !state().native && super::super::local::native_frames_idle(),
             "helper FP private RAM still has a live frame"
@@ -156,8 +160,8 @@ impl Drop for GuestScope {
 }
 
 // Copied body is position-independent: every data/label reference stays inside
-// its exact source extent. The real helper address is supplied through the
-// retained private GuestState, never identified by an application/call site.
+// its source extent. The real helper address is supplied through the
+// private GuestState, never identified by an application/call site.
 global_asm!(
     r#"
 .global stela_helper_fp_body
@@ -255,7 +259,7 @@ stela_helper_fp_return:
     mov rcx, [rax]
     mov [rbp], rcx
     mov dword ptr [rbp + {guest_reserved}], {done}
-    // Compare actual defined FP fields before returning through any Rust.
+    // Compare defined FP fields before returning through any Rust.
     mov eax, [r12 + {expected}]
     cmp eax, [r12 + {returned}]
     jne stela_helper_fp_bad
@@ -387,31 +391,31 @@ unsafe extern "C" {
     static stela_helper_fp_zero: u8;
 }
 
-pub(super) fn check(host: &mut BareHost<'_>) -> Result<(), &'static str> {
+pub(super) fn check(host: &mut BareHost<'_>) -> Result<()> {
     let scope = GuestScope::new()?;
     let source = ptr::addr_of!(stela_helper_fp_body) as usize;
     let bytes = (ptr::addr_of!(stela_helper_fp_body_end) as usize)
         .checked_sub(source)
         .filter(|&bytes| bytes != 0 && bytes < 4096)
-        .ok_or("helper FP source extent differs")?;
+        .ok_or(refuse!("helper FP source extent differs"))?;
     let return_offset = (ptr::addr_of!(stela_helper_fp_return) as usize)
         .checked_sub(source)
         .filter(|&offset| offset < bytes)
-        .ok_or("helper FP source return differs")?;
+        .ok_or(refuse!("helper FP source return differs"))?;
     // SAFETY: source symbols delimit the exact baseline authored body and its
     // position-independent literals; original guest inputs are untouched.
     let code = host
         .install(unsafe { core::slice::from_raw_parts(source as *const u8, bytes) })
-        .map_err(|_| "helper FP code arena full")?;
-    let copied_address = |label: *const u8| -> Result<u64, &'static str> {
+        .map_err(|_| refuse!("helper FP code arena full"))?;
+    let copied_address = |label: *const u8| -> Result<u64> {
         let offset = (label as usize)
             .checked_sub(source)
             .filter(|&offset| offset < bytes)
-            .ok_or("helper FP source label outside body")?;
+            .ok_or(refuse!("helper FP source label outside body"))?;
         code.0
             .checked_add(offset)
             .map(|address| address as u64)
-            .ok_or("helper FP installed label overflow")
+            .ok_or(refuse!("helper FP installed label overflow"))
     };
     let expected_fip = copied_address(ptr::addr_of!(stela_helper_fp_divide))?;
     let expected_fdp = copied_address(ptr::addr_of!(stela_helper_fp_zero))?;
@@ -444,12 +448,14 @@ pub(super) fn check(host: &mut BareHost<'_>) -> Result<(), &'static str> {
                 fp_errors: u64::MAX,
             };
             if state().native || state().recorded.is_some() {
-                return Err("helper FP entered with preceding live native frame");
+                return Err(refuse!(
+                    "helper FP entered with preceding live native frame"
+                ));
             }
             state().native = true;
             let entered = super::super::rdtsc();
-            // SAFETY: sealed current actual Host, private pinned ARM tables/data,
-            // caller/probe/frame/context and exact installed code remain owned
+            // SAFETY: sealed current Host, private pinned ARM tables/data,
+            // caller/probe/frame/context and installed code remain owned
             // through the true helper/return/recovery. No synthetic TLB fill.
             unsafe {
                 stela_native_fp_probe(&mut probe, code.0, &mut guest, &mut context, context_abi);
@@ -478,10 +484,10 @@ pub(super) fn check(host: &mut BareHost<'_>) -> Result<(), &'static str> {
                 || state().helper_calls != calls + 1
                 || state().helper_fills != fills + 1
             {
-                return Err("helper FP original caller or actual walk differs");
+                return Err(refuse!("helper FP original caller or actual walk differs"));
             }
             if fip != expected_fip || fdp != expected_fdp || fop != 0x435 {
-                return Err("helper FP actual guest register seed differs");
+                return Err(refuse!("helper FP actual guest register seed differs"));
             }
             if address == MAPPED {
                 expected.reserved = RETURNED;
@@ -489,7 +495,7 @@ pub(super) fn check(host: &mut BareHost<'_>) -> Result<(), &'static str> {
                 let data = scope
                     .mapping
                     .address(4 * PAGE, 8)
-                    .map_err(|_| "helper FP data mapping differs")?;
+                    .map_err(|_| refuse!("helper FP data mapping differs"))?;
                 if result
                     != (NativeExit::Exit {
                         next_pc: RETURN_RAX,
@@ -500,7 +506,9 @@ pub(super) fn check(host: &mut BareHost<'_>) -> Result<(), &'static str> {
                     || observed.returned_registers[0] != data.as_ptr() as u64
                     || observed.expected_registers[1..] != observed.returned_registers[1..]
                 {
-                    return Err("helper FP real mapped return or full Saved ABI differs");
+                    return Err(refuse!(
+                        "helper FP real mapped return or full Saved ABI differs"
+                    ));
                 }
             } else {
                 expected.reserved = STARTED;
@@ -510,15 +518,19 @@ pub(super) fn check(host: &mut BareHost<'_>) -> Result<(), &'static str> {
                     || observed.returned_registers != [0; 16]
                     || observed.fp_errors != u64::MAX
                 {
-                    return Err("helper FP missing mapping did not abandon exact actual frame");
+                    return Err(refuse!(
+                        "helper FP missing mapping did not abandon exact actual frame"
+                    ));
                 }
             }
             if guest != expected {
-                return Err("helper FP private source execution marker/state differs");
+                return Err(refuse!(
+                    "helper FP private source execution marker/state differs"
+                ));
             }
         }
     }
-    // Retire every actual translation while its real pages/mapping stay owned.
+    // Retire every translation while its real pages/mapping stay owned.
     drop(scope);
     host.discard_code();
     Ok(())

@@ -27,6 +27,7 @@
 //! powers it off, and `--deadline` (counted from the start) stops it with
 //! `STELA STOPPED`. Every wait prints `BEAT` every 10 s and flushes the log;
 //! a fatal error, panic or x86 exception flushes it too (`output`).
+use crate::Result;
 use crate::{
     apic::{self, Apic, rdtsc},
     console::{self, Framebuffer},
@@ -41,6 +42,7 @@ use crate::{
     paging::{self, PAGE},
     storage,
 };
+use alloc::string::ToString;
 use alloc::{boxed::Box, format, string::String, vec::Vec};
 use core::{
     arch::asm,
@@ -48,8 +50,9 @@ use core::{
     sync::atomic::{AtomicU64, Ordering},
 };
 use stela_boot_core::options::HostCheck;
+use stela_contracts::refuse;
 use stela_drivers::{
-    Handoff,
+    Handoff, PlatformCaptures,
     block::{BlockDevice, Shared, Transport},
     bus::dma::RegionAllocator,
     input::{Input, InputDevice},
@@ -164,7 +167,7 @@ impl Timing {
 
 /// What the check takes from the firmware, handed to [`run`].
 struct Machine {
-    /// Actual activated table/catalog owner; no hardware grant from metadata.
+    /// Activated table/catalog owner; no hardware grant from metadata.
     active_tables: Option<paging::ActivatedTables>,
     config_prepared: Option<paging::config::Prepared>,
     config_source: Option<paging::config::Source>,
@@ -174,6 +177,8 @@ struct Machine {
     timing: Timing,
     screen: Option<Framebuffer>,
     storage: Option<Handoff>,
+    /// Board captures for the storage probe; Wi-Fi files are not read here.
+    captures: PlatformCaptures,
     power: Option<HostPower>,
     apic_base: u64,
     stack_top: usize,
@@ -220,8 +225,8 @@ pub fn boot(options: Vec<u8>) -> ! {
 
 /// Before ExitBootServices: the options, the CPU and TSC checks, and what
 /// the rest needs from the firmware; then leave boot services.
-fn prepare(options: &[u8]) -> Result<(Machine, paging::Tables), &'static str> {
-    let text = core::str::from_utf8(options).map_err(|_| "stela.cfg is not UTF-8")?;
+fn prepare(options: &[u8]) -> Result<(Machine, paging::Tables)> {
+    let text = core::str::from_utf8(options).map_err(|_| refuse!("stela.cfg is not UTF-8"))?;
     let options = HostCheck::parse(text).map_err(stela_boot_core::options::Error::message)?;
     let started = rdtsc();
     output::arguments(format_args!("HOST CHECK {}\n", text.trim()));
@@ -244,6 +249,7 @@ fn prepare(options: &[u8]) -> Result<(Machine, paging::Tables), &'static str> {
         options,
         screen: Framebuffer::from_firmware(),
         storage: None,
+        captures: storage::captures(Default::default()),
         power: crate::system::host_power(),
         apic_base: apic::base_msr(),
         stack_top: 0,
@@ -289,10 +295,10 @@ fn prepare(options: &[u8]) -> Result<(Machine, paging::Tables), &'static str> {
         let handoff = machine
             .storage
             .as_ref()
-            .ok_or("native DMA fixture needs PCI discovery")?;
+            .ok_or(refuse!("native DMA fixture needs PCI discovery"))?;
         // This is now scoped protocol discovery and copied DATA only. Keep
         // application TPL: PCI_IO/handle/pool services may allocate internally.
-        // Actual destructive BAR sizing moved after EBS and device quiescence.
+        // Destructive BAR sizing moved after EBS and device quiescence.
         let prepared = crate::native_dma::diagnostic::Prepared::prepare(
             handoff,
             machine.options.native_dma_isolation_check,
@@ -300,8 +306,8 @@ fn prepare(options: &[u8]) -> Result<(Machine, paging::Tables), &'static str> {
         match prepared {
             Ok(prepared) => machine.native_dma = Some(prepared),
             Err(error) => {
-                machine.record("native-dma", Verdict::Fail, error);
-                return Err("native DMA fixture preparation failed");
+                machine.record("native-dma", Verdict::Fail, error.to_string());
+                return Err(refuse!("native DMA fixture preparation failed"));
             }
         }
     }
@@ -309,7 +315,7 @@ fn prepare(options: &[u8]) -> Result<(Machine, paging::Tables), &'static str> {
         let clock = machine
             .storage
             .as_ref()
-            .ok_or("native work proof needs native clock")?
+            .ok_or(refuse!("native work proof needs native clock"))?
             .clock;
         machine.native_work = Some(crate::native_work_check::Prepared::prepare(clock)?);
     }
@@ -376,7 +382,7 @@ extern "sysv64" fn run(machine: &mut Machine) -> ! {
             .active_tables
             .as_ref()
             .unwrap_or_else(|| output::fatal("actual native root missing"));
-        // SAFETY: this exact bounded TCG HostCheck path owns the actual retained
+        // SAFETY: this exact bounded TCG HostCheck path owns the kept
         // root and firmware-transferred config/controller inventory; no AP or
         // guest executes, and every pre-EBS accessor has ended.
         let source =
@@ -396,7 +402,7 @@ extern "sysv64" fn run(machine: &mut Machine) -> ! {
         let result = if machine.options.native_irq_work_check {
             match machine.native_work.take() {
                 Some(work) => prepared.run_irq_work(work),
-                None => Err(String::from("IRQ work stacks missing")),
+                None => Err(refuse!("IRQ work stacks missing")),
             }
         } else {
             prepared.run()
@@ -438,10 +444,10 @@ extern "sysv64" fn run(machine: &mut Machine) -> ! {
                         "native-dma"
                     },
                     Verdict::Fail,
-                    error,
+                    error.to_string(),
                 );
                 // The unit/requester may be in an uncertain DMA state. Unit
-                // and lease Drop retained its resources; do not resume probe.
+                // and lease Drop kept its resources; do not resume probe.
                 output::fatal("native DMA fixture failed; normal probing inhibited");
             }
         }
@@ -450,7 +456,7 @@ extern "sysv64" fn run(machine: &mut Machine) -> ! {
         match prepared.run() {
             Ok(proof) => machine.record("native-work", Verdict::Pass, proof),
             Err(error) => {
-                machine.record("native-work", Verdict::Fail, error);
+                machine.record("native-work", Verdict::Fail, error.to_string());
                 output::fatal("native work failed; pending contexts retained");
             }
         }
@@ -485,7 +491,7 @@ fn disks(machine: &mut Machine, handoff: &Handoff) -> Vec<InputDevice> {
     // SAFETY: one CPU after ExitBootServices; `dma` was reserved for this.
     let mut dma = unsafe { RegionAllocator::new(handoff.dma.clone()) };
     // SAFETY: this handoff describes the running machine and its tables.
-    let mut devices = unsafe { probe(handoff, &mut dma) };
+    let mut devices = unsafe { probe(handoff, machine.captures, &mut dma) };
     for window in &devices.unmapped {
         output::arguments(format_args!("STORAGE UNMAPPED ecam={window:x?}\n"));
     }
@@ -582,7 +588,7 @@ fn disks(machine: &mut Machine, handoff: &Handoff) -> Vec<InputDevice> {
         Some((guid, path)) => {
             let (verdict, detail) = match open_log(&mut devices.disks, guid, &path) {
                 Ok(detail) => (Verdict::Pass, detail),
-                Err(error) => (Verdict::Fail, error),
+                Err(error) => (Verdict::Fail, error.to_string()),
             };
             machine.record("log", verdict, detail);
         }
@@ -592,35 +598,31 @@ fn disks(machine: &mut Machine, handoff: &Handoff) -> Vec<InputDevice> {
 }
 
 /// Keep the output in the file at `path` on USB partition `guid`.
-fn open_log(
-    devices: &mut Vec<Box<dyn BlockDevice>>,
-    guid: Guid,
-    path: &str,
-) -> Result<String, String> {
+fn open_log(devices: &mut Vec<Box<dyn BlockDevice>>, guid: Guid, path: &str) -> Result<String> {
     let partition = pc::storage::open_unique(devices, guid)
-        .map_err(|error| format!("partition {guid}: {error}"))?;
+        .map_err(|error| refuse!("partition {guid}: {error}", %guid, %error))?;
     let transport = partition.disk().transport;
     if transport != Transport::Usb {
-        return Err(format!(
-            "partition {guid} is on a {transport:?} disk: the host check writes only USB disks"
-        ));
+        return Err(
+            refuse!("partition {guid} is on a {transport} disk: the host check writes only USB disks", %guid, ?transport),
+        );
     }
     let block = u64::from(partition.identity().block_size);
-    let mut volume =
-        Fat32::open(Bytes::new(partition)).map_err(|error| format!("partition {guid}: {error}"))?;
+    let mut volume = Fat32::open(Bytes::new(partition))
+        .map_err(|error| refuse!("partition {guid}: {error}", %guid, %error))?;
     let file = volume
         .file(path)
-        .map_err(|error| format!("partition {guid}: {error}"))?;
+        .map_err(|error| refuse!("partition {guid}: {error}", %guid, %error))?;
     let runs = boot_log::file_runs(&file, block, boot_log::PARTITION_BYTES)
-        .map_err(|error| format!("{path}: {error}"))?;
+        .map_err(|error| refuse!("{path}: {error}", path, %error))?;
     let pieces = runs.len();
     let partition = volume.into_inner().into_inner();
     let file = Shared::new(Box::new(partition))
         .runs(runs)
-        .map_err(|error| format!("{path}: {error}"))?;
+        .map_err(|error| refuse!("{path}: {error}", path, %error))?;
     let blocks = file.identity().blocks;
     if !nor::open_log(&Shared::new(Box::new(file)), block, blocks * block) {
-        return Err(format!("{path}: the boot log could not be opened"));
+        return Err(refuse!("{path}: the boot log could not be opened", path));
     }
     Ok(format!(
         "{path} on partition {guid}: {blocks} blocks of {block} bytes in {pieces} runs"
@@ -714,9 +716,9 @@ fn enabled(ticks: u64, mut done: impl FnMut() -> bool) -> u64 {
     rdtsc() - start
 }
 
-extern "sysv64" fn interrupt(frame: &mut Frame) {
+extern "sysv64" fn interrupt(frame: &mut Frame, _saved: &interrupts::SavedState<'_>) {
     let _configuration_interrupt = paging::config::Interrupt::enter();
-    // SAFETY: unchanged IDT/IST entry supplies this actual hardware frame.
+    // SAFETY: unchanged IDT/IST entry supplies this hardware frame.
     if unsafe { crate::native_irq::dispatch_frame(frame.vector as u8, frame.rsp as usize) } {
         return;
     }
@@ -868,7 +870,7 @@ fn finish(machine: &mut Machine, keyboards: &mut [InputDevice]) -> ! {
     // The host check keeps the firmware's tables, which map no runtime
     // services for a firmware power-off.
     let mut power = HostPowerControl::new(
-        machine.power,
+        machine.power.clone(),
         None,
         None,
         machine.timing.tsc_hz,

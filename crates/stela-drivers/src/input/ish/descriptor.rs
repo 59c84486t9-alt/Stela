@@ -119,7 +119,7 @@ pub(super) fn parse(bytes: &[u8]) -> Result<Vec<ReportLayout>> {
                 }
             }
             (3, _) => return Err(Error::Requirement("reserved HID item type")),
-            _ => {} // Other item bytes are retained verbatim in the descriptor.
+            _ => {} // Other item bytes are held verbatim in the descriptor.
         }
     }
     if depth != 0 || !stack.is_empty() || reports.is_empty() {

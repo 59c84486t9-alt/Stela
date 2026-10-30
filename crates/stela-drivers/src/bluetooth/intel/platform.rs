@@ -5,7 +5,7 @@
 //! Capture belongs before ExitBootServices: the packed UEFI value is revision
 //! byte + LE u32, GUID e65d8884-d4af-4b20-8d03-772ecc3da531. The donor does not
 //! reject revision/reserved bits after a successful read. Preserve them here;
-//! command bytes follow its actual mask behavior, without a guessed whitelist.
+//! command bytes follow its mask behavior, without a guessed whitelist.
 mod capture;
 pub use capture::{DsbrCapture, DsbrCaptureObservation};
 
@@ -45,7 +45,7 @@ pub struct PlatformInputs {
 /// `applied` is Some only after a real successful 0xfc0a Command Complete.
 /// Absent/Unavailable then record the documented donor default explicitly.
 /// None means this initialization path did not modify DSBR; supplied raw input
-/// is still retained, including when firmware was already operational.
+/// is still held, including when firmware was already operational.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DsbrReport {
     pub input: DsbrInput,

@@ -8,9 +8,10 @@
 //! getting dart-id"); `dart_register_iommu_restriction` reads it from a
 //! mapper's DART. The numbering covers every DART, so a DART keeps the
 //! number it has on the real board whichever DARTs stay visible.
+use crate::Result;
 use crate::apple_device_tree::{DeviceTree, Node};
 use alloc::{string::String, vec::Vec};
-use anyhow::{Result, ensure};
+use stela_contracts::require;
 
 const DART_ID: &str = "dart-id";
 const DEVICE_TYPE: &str = "device_type";
@@ -40,7 +41,7 @@ fn number(node: &mut Node, counters: &mut Vec<(String, u32)>) -> Result<()> {
             }
         };
         let id = counters[index].1;
-        ensure!(id < 256, "more than 256 DARTs of one compatible");
+        require!(id < 256, "more than 256 DARTs of one compatible");
         node.set_property(DART_ID, id.to_le_bytes().to_vec())?;
         counters[index].1 += 1;
     }

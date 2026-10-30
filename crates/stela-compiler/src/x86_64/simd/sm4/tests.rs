@@ -55,7 +55,7 @@ fn baseline_and_gfni_sboxes_match_every_arm_table_entry_in_each_byte_position() 
     }
 }
 #[test]
-fn four_round_encryption_and_key_recipes_keep_aliases_flags_and_unrelated_state() {
+fn sm4_recipes_change_only_their_destination() {
     let mut random = 0x3c6ef372fe94f82b_u64;
     let mut cases = 0;
     for gfni in [false, true] {
@@ -121,7 +121,7 @@ fn four_round_encryption_and_key_recipes_keep_aliases_flags_and_unrelated_state(
 }
 
 #[test]
-fn actual_key_schedule_and_eight_encrypt_groups_match_the_standard_sm4_known_answer() {
+fn key_schedule_and_eight_encrypt_groups_match_the_standard_sm4_known_answer() {
     for gfni in [false, true] {
         if gfni && !TargetCpu::detect().supports(TargetCpu::Gfni) {
             continue;
@@ -178,7 +178,7 @@ fn actual_key_schedule_and_eight_encrypt_groups_match_the_standard_sm4_known_ans
 }
 
 #[test]
-fn inverse_affine_matches_gnu_register_and_sib_forms_and_counts_one_instruction() {
+fn inverse_affine_encoding_matches_gnu_as() {
     use crate::x86_64::asm::Rm;
     for (destination, matrix, expected) in [
         (

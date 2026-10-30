@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn block_zero_probe_uses_actual_lun_and_geometry_before_any_mode_page() {
+fn block_zero_probe_uses_lun_and_geometry_before_any_mode_page() {
     use crate::usb::storage::Scsi;
     for streams in [None, Some(2)] {
         for block_size in [512, 4096, MAX_TD] {

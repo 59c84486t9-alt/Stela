@@ -2,71 +2,36 @@
 name = "stela-drivers"
 version.workspace = true
 edition.workspace = true
-# Original Stela code is MIT; Linux-derived controller code retains its
-# GPL/ISC notices and the Intel shared initialization also retains BSD terms.
-# GPU patches keep the terms of the upstream files they change.
-license = "MIT AND BSD-3-Clause AND GPL-2.0-only AND GPL-2.0-or-later AND BSD-3-Clause-Clear AND ISC AND Apache-2.0 WITH LLVM-exception"
+# Original Stela code is MIT; Linux-derived USB, Bluetooth and input code
+# retains its GPL/ISC notices and the Intel shared initialization also retains
+# BSD terms.
+license = "MIT AND BSD-3-Clause AND GPL-2.0-only AND GPL-2.0-or-later AND ISC"
 
 [lints]
 workspace = true
 
 [features]
-# Native x86 ACPICA interpreter; builds freestanding C with clang.
-native-acpi = ["dep:cc"]
-# Common native Linux kernel services; selecting this attaches no GPU.
-linux-kernel = ["dep:cc", "dep:stela-crypto"]
-# `block::RamDisk`, the in-memory disk the runtime's tests run models on.
-ram-disk = []
-# Build the implemented native NVIDIA OS hooks, not a complete GPU driver.
-nvidia-port = ["dep:cc"]
-# Native Xe command/page-table support; not an initialized Intel GPU driver.
-intel-port = ["linux-kernel"]
-# Native AMD page-entry and BAR support; requires real mapping/GMC owners.
-amd-port = ["linux-kernel"]
-# Hosted AMD encoder build; its C runtime is not yet ported to UEFI.
-amd-commands = ["dep:cc"]
-# Stela's Metal device over the internal Vulkan boundary; no Vulkan driver.
-metal = ["dep:stela-contracts"]
-# The Metal device's native backend over a loaded Vulkan driver (NVK).
-metal-vulkan = ["metal", "dep:ash"]
+native-acpi = ["stela-driver-base/native-acpi", "stela-driver-net/native-acpi"]
+linux-kernel = ["stela-driver-gpu/linux-kernel"]
+ram-disk = ["stela-driver-base/ram-disk"]
+nvidia-port = ["stela-driver-gpu/nvidia-port"]
+intel-port = ["stela-driver-gpu/intel-port"]
+amd-port = ["stela-driver-gpu/amd-port"]
+amd-commands = ["stela-driver-gpu/amd-commands"]
+metal = ["stela-driver-gpu/metal"]
+metal-vulkan = ["stela-driver-gpu/metal-vulkan"]
 
 [dependencies]
+stela-driver-audio = { path = "../stela-driver-audio" }
+stela-driver-base = { path = "../stela-driver-base" }
 stela-driver-core = { path = "../stela-driver-core" }
-# Vulkan bindings for the Metal device's native backend; no loader is linked.
-ash = { version = "0.38", default-features = false, optional = true }
-stela-crypto = { path = "../stela-crypto", optional = true }
-# The call gate contract the Metal service is entered through.
-stela-contracts = { path = "../stela-contracts", default-features = false, optional = true }
-# BIP-CMAC uses the shared checked AES backend; expanded keys clear on retirement.
-aes = { version = "0.8", default-features = false, features = ["zeroize"] }
-# WPA2-Personal: PBKDF2/PRF/MIC over HMAC-SHA1 and HMAC-SHA256.
-hmac = { version = "0.12", default-features = false }
-# WPA3-Personal: SAE over P-256, hash-to-element through its simplified SWU map.
-p256 = { version = "0.13", default-features = false, features = ["arithmetic", "expose-field", "hash2curve"] }
-sha1 = { version = "0.10", default-features = false }
-sha2 = { version = "0.10", default-features = false }
-# Cryptographic MIC comparison retains an explicit optimization barrier.
-subtle = { version = "2.6", default-features = false }
-# Retained source GTK/IGTK batch material must clear after actual retirement.
+stela-driver-gpu = { path = "../stela-driver-gpu" }
+stela-driver-net = { path = "../stela-driver-net" }
+stela-driver-storage = { path = "../stela-driver-storage" }
+# SHA-1 and SHA-256 over Bluetooth firmware images.
+stela-crypto = { path = "../stela-crypto" }
 zeroize = { version = "1.9", default-features = false, features = ["alloc"] }
-# Fallible native mapping metadata; the maintained owner supports alloc-only UEFI.
-triomphe = { version = "=0.1.16", default-features = false }
 
-[build-dependencies]
-# Reuse retained shared-input/object/digest versions; no new crate fetch.
-libc = "0.2"
-object = { version = "0.37", default-features = false, features = ["read"] }
+[dev-dependencies]
+stela-driver-base = { path = "../stela-driver-base", features = ["test-support"] }
 sha2 = { version = "0.10", default-features = false }
-cc = { version = "1", optional = true }
-
-[[test]]
-name = "nvidia_mmio"
-required-features = ["nvidia-port"]
-
-[[test]]
-name = "amd_native_mmio"
-required-features = ["amd-port"]
-
-[[test]]
-name = "intel_activation"
-required-features = ["intel-port"]

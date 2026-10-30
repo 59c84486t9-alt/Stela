@@ -129,7 +129,7 @@ impl Fixture {
             ]);
             identities.push(Identity {
                 midr: 0, // MPIDR membership alone is under test.
-                mpidr: 0x8000_0000 | (complex as u64) << CORETYPE_SHIFT | u64::from(reg),
+                mpidr: crate::board::mpidr::compose(complex as u8, reg).unwrap(),
                 clock: None,
                 caches: None,
             });
@@ -449,7 +449,7 @@ fn adt_and_live_profile_affinities_must_agree_for_every_pe() {
     for mutation in 0..7 {
         let mut f = Fixture::new();
         match mutation {
-            0 => f.identities[7].mpidr ^= 1 << CORETYPE_SHIFT,
+            0 => f.identities[7].mpidr ^= 1 << crate::board::mpidr::CORETYPE_SHIFT,
             1 => f.identities[7].mpidr ^= 1 << 8,
             2 => {
                 f.identities.pop();
@@ -582,7 +582,7 @@ fn original_j473_views_resolve_all_ten_source_constructed_owners() {
             .processor_associations(cpus.chip, &root, &cpus.processors, 0)
             .is_err()
     );
-    // Source-integrity witnesses pin actual normal-mode constructor and
+    // Source-integrity witnesses pin normal-mode constructor and
     // consumer instruction spans, independently of synthetic fixtures.
     for (offset, count, expected) in [
         (

@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 //! xHCI-backed physical HCI I/O. DMA storage lives for the rest of the boot,
 //! including when an unplugged/faulted controller cannot acknowledge a stop.
-use super::super::xhci::{Device, Endpoint, Shared, SlotId, TransferTicket};
+use super::super::descriptor::Endpoint;
+use super::super::xhci::{Device, Shared, SlotId, TransferTicket};
 use super::{ACL_READ, Binding, EVENT_READ, Hci, Io, Pipe};
 use crate::{
     Clock,
@@ -337,7 +338,8 @@ impl Drop for Host {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
+    pub(crate) mod generation;
     use super::*;
     use crate::{
         bus::dma::RegionAllocator,
@@ -380,17 +382,20 @@ mod tests {
                 serial: None,
                 language: None,
             };
-            let binding =
-                Binding::new(&device, &xhci::interfaces(&device.configuration)[0]).unwrap();
+            let binding = Binding::new(
+                &device,
+                &crate::usb::descriptor::interfaces(&device.configuration)[0],
+            )
+            .unwrap();
             let mut hci = Hci::attach(controller, &device, binding, &mut dma).unwrap();
             let before = backing.clone();
             assert!(
                 hci.io
-                    .control_read(xhci::setup(0xc0, 1, 48, 0, 64))
+                    .control_read(crate::usb::descriptor::setup(0xc0, 1, 48, 0, 64))
                     .is_err()
             );
             assert!(hci.io.control_pending);
-            // The actual outstanding control buffer, transfer/command/event
+            // The outstanding control buffer, transfer/command/event
             // rings and all other DMA bytes remain untouched by this retry.
             assert_eq!(backing, before);
             assert!(hci.close().is_err());
@@ -405,12 +410,16 @@ mod tests {
         use core::cell::RefCell;
         let mut backing = vec![0u64; 64 * 1024];
         let start = backing.as_mut_ptr() as u64;
-        // SAFETY: retained backing exclusively owns these actual modeled DMA pages.
+        // SAFETY: backing exclusively owns these modeled DMA pages.
         let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
         let (controller, _) = xhci::model::cancellation_controller(&mut dma);
         let controller = Rc::new(RefCell::new(controller));
         let device = firmware_device(controller.borrow().test_device_id(1).unwrap());
-        let binding = Binding::new(&device, &xhci::interfaces(&device.configuration)[0]).unwrap();
+        let binding = Binding::new(
+            &device,
+            &crate::usb::descriptor::interfaces(&device.configuration)[0],
+        )
+        .unwrap();
         let mut hci = Hci::attach(controller, &device, binding, &mut dma).unwrap();
         assert_eq!(hci.io.receive(Pipe::Event).unwrap(), None);
         assert!(hci.io.events.queued.is_some());
@@ -458,12 +467,15 @@ mod tests {
         for rate in [0, u64::MAX, u64::MAX / 2 / MAX_NATIVE_BUDGET_US + 1] {
             let mut backing = vec![0u64; 64 * 1024];
             let start = backing.as_mut_ptr() as u64;
-            // SAFETY: retained fixture exclusively owns backing until teardown.
+            // SAFETY: fixture exclusively owns backing until teardown.
             let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
             let (mut controller, model) = xhci::model::cancellation_controller(&mut dma);
             let device = firmware_device(controller.test_device_id(1).unwrap());
-            let binding =
-                Binding::new(&device, &xhci::interfaces(&device.configuration)[0]).unwrap();
+            let binding = Binding::new(
+                &device,
+                &crate::usb::descriptor::interfaces(&device.configuration)[0],
+            )
+            .unwrap();
             controller.clock.ticks_per_microsecond = rate;
             let before = backing.clone();
             let commands = model.borrow().seen.clone();
@@ -482,17 +494,21 @@ mod tests {
         }
     }
     #[test]
-    fn firmware_bulk_uses_actual_dma_and_invalid_or_zero_budget_never_publishes() {
+    fn firmware_bulk_uses_dma_and_invalid_or_zero_budget_never_publishes() {
         use alloc::rc::Rc;
         use core::cell::RefCell;
         let mut backing = vec![0u64; 64 * 1024];
         let start = backing.as_mut_ptr() as u64;
-        // SAFETY: retained backing exclusively owns these actual modeled DMA pages.
+        // SAFETY: backing exclusively owns these modeled DMA pages.
         let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
         let (controller, model) = xhci::model::cancellation_controller(&mut dma);
         let controller = Rc::new(RefCell::new(controller));
         let device = firmware_device(controller.borrow().test_device_id(1).unwrap());
-        let binding = Binding::new(&device, &xhci::interfaces(&device.configuration)[0]).unwrap();
+        let binding = Binding::new(
+            &device,
+            &crate::usb::descriptor::interfaces(&device.configuration)[0],
+        )
+        .unwrap();
         let mut hci = Hci::attach(controller, &device, binding, &mut dma).unwrap();
         let payload = vec![0xa5; 4096];
         hci.io.write_firmware(&payload, 3_000_000).unwrap();
@@ -524,7 +540,11 @@ mod tests {
         model.borrow_mut().fail = Some((STOP_ENDPOINT, CONTEXT_STATE_ERROR));
         let controller = Rc::new(RefCell::new(controller));
         let device = firmware_device(controller.borrow().test_device_id(1).unwrap());
-        let binding = Binding::new(&device, &xhci::interfaces(&device.configuration)[0]).unwrap();
+        let binding = Binding::new(
+            &device,
+            &crate::usb::descriptor::interfaces(&device.configuration)[0],
+        )
+        .unwrap();
         let mut hci = Hci::attach(controller, &device, binding, &mut dma).unwrap();
         assert_eq!(
             hci.io.write_firmware(&[0xa5; 64], 3_000_000),
@@ -542,6 +562,3 @@ mod tests {
         assert_eq!(backing, after);
     }
 }
-
-#[cfg(test)]
-pub(crate) mod generation_tests;

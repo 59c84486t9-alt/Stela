@@ -131,7 +131,7 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, pc: GuestAddress, target:
     if widening.supports(TargetCpu::F16c) || target.supports(TargetCpu::Fma) {
         code.asm().vzeroupper();
     }
-    // FPMulAdd retains enabled exceptions under either AH setting.
+    // FPMulAdd keeps enabled exceptions under either AH setting.
     test_control(code, FPCR_EXCEPTION_ENABLE_MASK);
     helper.push(branch(code, Condition::NotZero));
     super::read_numerical_vector(code, operand.shape, operand.left, lanes::LEFT);

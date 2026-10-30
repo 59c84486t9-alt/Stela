@@ -39,7 +39,7 @@ impl NativeMapping {
     }
 }
 
-// SAFETY: this owner only retains an immutable raw mapping descriptor and its
+// SAFETY: this owner only keeps an immutable raw mapping descriptor and its
 // unmap obligation. It provides no safe byte access/protection/remap operation;
 // adoption requires stable storage and externally synchronized raw accesses.
 unsafe impl Send for NativeMapping {}
@@ -55,22 +55,6 @@ impl Drop for NativeMapping {
         unsafe { libc::munmap(self.base.as_ptr().cast(), self.bytes) };
     }
 }
-
-#[cfg(host_memory)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum StorageError {
-    AliasExtentMismatch,
-    AliasesOverlap,
-}
-
-#[cfg(host_memory)]
-impl core::fmt::Display for StorageError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "retained native storage failed: {self:?}")
-    }
-}
-#[cfg(host_memory)]
-impl core::error::Error for StorageError {}
 
 /// One physical storage lifetime, optionally with its two native aliases. A
 /// `MemoryBacking` holds this owner; this owner must never hold the backing,
@@ -116,7 +100,7 @@ impl NativeStorage {
         })
     }
 
-    /// Retain equal-sized guest/publisher aliases of the same private backing.
+    /// Keep equal-sized guest/publisher aliases of the same private backing.
     ///
     /// # Safety
     /// If the checked lengths match and native ranges do not overlap, both
@@ -130,9 +114,13 @@ impl NativeStorage {
         primary: NativeMapping,
         publisher: NativeMapping,
         file: File,
-    ) -> Result<Arc<Self>, StorageError> {
+    ) -> Result<Arc<Self>, stela_contracts::Refusal> {
         if primary.bytes != publisher.bytes {
-            return Err(StorageError::AliasExtentMismatch);
+            return Err(stela_contracts::refuse!(
+                "published aliases differ in extent",
+                primary = primary.bytes,
+                publisher = publisher.bytes
+            ));
         }
         let primary_start = primary.base.as_ptr() as usize;
         let publisher_start = publisher.base.as_ptr() as usize;
@@ -140,7 +128,7 @@ impl NativeStorage {
         if primary_start < publisher_start + publisher.bytes
             && publisher_start < primary_start + primary.bytes
         {
-            return Err(StorageError::AliasesOverlap);
+            return Err(stela_contracts::refuse!("published aliases overlap"));
         }
         Ok(Arc::new(Self {
             primary,
@@ -285,7 +273,7 @@ mod tests {
     }
 
     #[test]
-    fn native_mapping_releases_only_after_final_retained_owner() {
+    fn native_mapping_releases_only_after_final_kept_owner() {
         let storage = NativeStorage::anonymous(anonymous(host_page_size().unwrap()));
         let base = storage.primary_base();
         let retained = Arc::clone(&storage);
@@ -293,8 +281,9 @@ mod tests {
         assert_eq!(storage.publisher_base(), None);
         drop(storage);
         assert!(mapped(base));
-        // SAFETY: retained private RW raw storage; no guest execution or references.
+        // SAFETY: private RW raw storage; no guest execution or references.
         unsafe { base.as_ptr().write(0x5a) };
+        // SAFETY: the storage is still mapped, and nothing writes it concurrently.
         assert_eq!(unsafe { retained.primary_base().as_ptr().read() }, 0x5a);
         drop(retained);
     }
@@ -321,19 +310,21 @@ mod tests {
         memory.write(allocation.guest_address, &[0x31]).unwrap();
         let storage = Arc::clone(&memory.allocations[0].storage);
         let base = storage.primary_base();
-        // SAFETY: retained raw RW Normal-WB storage with private serialized access;
+        // SAFETY: raw RW Normal-WB storage with private serialized access;
         // no rights changes or external accesses occur while backing exists.
         let backing =
             unsafe { MemoryBacking::new(base, storage.bytes(), permissions(), storage) }.unwrap();
         drop(memory);
         assert!(mapped(base));
         let pointer = backing.host_pointer(0, 1, AccessKind::Read).unwrap();
+        // SAFETY: `pointer` is a checked readable byte of this test's private storage, with no
+        // concurrent writer.
         assert_eq!(unsafe { pointer.as_ptr().read() }, 0x31);
         drop(backing);
     }
 
     #[test]
-    fn canonical_backing_retains_both_publication_aliases_and_file() {
+    fn canonical_backing_keeps_both_publication_aliases_and_file() {
         let region = published();
         let storage = Arc::clone(&region.storage);
         let guest = storage.primary_base();
@@ -371,9 +362,12 @@ mod tests {
         drop(region);
         assert!(retained_storage.upgrade().is_some());
         assert!(mapped(guest) && mapped(publisher));
+        // SAFETY: querying descriptor flags only reads process state.
         assert_ne!(unsafe { libc::fcntl(descriptor, libc::F_GETFD) }, -1);
         let pointer = backing.host_pointer(0, 1, AccessKind::Write).unwrap();
+        // SAFETY: `pointer` is a checked writable byte of this test's private storage.
         unsafe { pointer.as_ptr().write(0x42) };
+        // SAFETY: `guest` maps the same storage, with no concurrent writer.
         assert_eq!(unsafe { guest.as_ptr().read() }, 0x42);
         drop(first);
         drop(alias);
@@ -387,16 +381,19 @@ mod tests {
         let page = host_page_size().unwrap();
         let primary = anonymous(page);
         let publisher = anonymous(2 * page);
-        // SAFETY: this intentionally mismatched pair is rejected before admission;
+        // SAFETY: this mismatched pair is rejected before admission;
         // both arguments still own independent complete private RAM mappings.
         let result = unsafe {
             NativeStorage::published_aliases(primary, publisher, tempfile::tempfile().unwrap())
         };
-        assert_eq!(result.unwrap_err(), StorageError::AliasExtentMismatch);
+        assert_eq!(
+            result.unwrap_err().what(),
+            "published aliases differ in extent"
+        );
     }
 
     #[test]
-    fn unpublished_transaction_drop_releases_retained_storage() {
+    fn unpublished_transaction_drop_releases_kept_storage() {
         let mut memory = OwnedMemory::map(Vec::new()).unwrap();
         let rights = DataPermissions {
             readable: true,

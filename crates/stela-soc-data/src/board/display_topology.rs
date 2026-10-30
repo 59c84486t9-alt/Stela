@@ -1,9 +1,11 @@
 //! DeviceTree placement and validation for display topology.
 use super::dma_routes::{native_dma_mapper_list, native_dma_phandle, native_dma_route};
 use super::{
-    ASC, DCP_EXPERT, DCP_EXPERT_HARDWARE_FEATURES, DISPLAY_CROSSBAR, DPTX_PHY, Iommu, Node, String,
-    Vec, asc, dcp, external_output, format, rtbuddy_nub,
+    ASC, DCP_EXPERT, DCP_EXPERT_HARDWARE_FEATURES, DISPLAY_CROSSBAR, DPTX_PHY, Iommu, Node, Vec,
+    asc, dcp, external_output, format, rtbuddy_nub,
 };
+use crate::{Refusal, Result};
+use stela_contracts::{refusal::Within, refuse};
 
 /// The `dcpext` display coprocessor and the register apertures around it,
 /// from the J473AP DeviceTree: the ASC wrapper `reg[0]` and four mailbox IRQs,
@@ -15,11 +17,11 @@ pub struct DcpController {
     pub mapper: u32,
     pub surface_phandle: Option<u32>,
     /// Full original surface mapper list, primary first; additional PIODMA
-    /// ownership is retained without inventing execution for that producer.
+    /// ownership is held without inventing execution for that producer.
     pub surface_routes: Vec<DcpMapperRoute>,
     pub role: &'static str,
     pub identity: dcp::ExternalIdentity,
-    /// Explicit sole-TRAD selection, checked before this ordinal is retained.
+    /// Explicit sole-TRAD selection, checked before this ordinal is held.
     pub instance: usize,
     /// OS mapper context, distinct from the incoming `stream` before remap.
     pub mapper_context: u32,
@@ -28,7 +30,7 @@ pub struct DcpController {
     pub interrupts: [u32; 4],
     pub quiesced: bool,
     pub regions: Vec<(&'static str, (u64, u64))>,
-    /// The [`Board::darts`] index and stream of its `iommu-parent`
+    /// The [`super::Board::darts`] index and stream of its `iommu-parent`
     /// (`mapper-dcpext`, dart-dcpext stream 5 on J473AP).
     pub iommu: usize,
     pub stream: u32,
@@ -36,8 +38,8 @@ pub struct DcpController {
     /// hands the coprocessor only a DVA's low 32 bits
     /// (`AppleA7IOP::_restrictDVA`, kernel file 0x1bb1424).
     pub window: Option<u64>,
-    /// The [`Board::darts`] index and stream the swap surfaces are read
-    /// through: the visible display pipe's ([`DISPEXT`]) first
+    /// The [`super::Board::darts`] index and stream the swap surfaces are read
+    /// through: the visible display pipe's ([`super::DISPEXT`]) first
     /// `iommu-parent` (J473AP `mapper-dispext0`, dart-dispext0 stream 0, the
     /// framebuffer mapping Linux `plane.c` gives the display DART; the second,
     /// `mapper-dispext0-piodma`, is the pipe's programmed-I/O DMA).
@@ -56,13 +58,15 @@ pub struct DcpMapperRoute {
 
 /// One selected external coprocessor, its expert and pipe, with distinct
 /// incoming DMA stream and OS mapper context. Refuse incomplete graphs and
-/// ambiguous owners before retaining an instance ordinal.
+/// ambiguous owners before keeping an instance ordinal.
 pub(super) fn dcp_device(
     io: &Node<'_>,
     translate: &dyn Fn(u64) -> Option<u64>,
     darts: &[Iommu],
-) -> Result<Option<DcpController>, String> {
-    let children = io.children().ok_or("DCP arm-io children are malformed")?;
+) -> Result<Option<DcpController>> {
+    let children = io
+        .children()
+        .ok_or(refuse!("DCP arm-io children are malformed"))?;
     let mut matches = children.iter().filter_map(|n| {
         n.compatible(ASC)
             .then(|| n.property("role").and_then(external_output))
@@ -73,11 +77,13 @@ pub(super) fn dcp_device(
         return Ok(None);
     };
     if matches.next().is_some() {
-        return Err("one GOP resource cannot back two external pipelines".into());
+        return Err(refuse!(
+            "one GOP resource cannot back two external pipelines"
+        ));
     }
     let path = format!("/arm-io/{}", profile.controller);
-    let err = |reason: &str| format!("{path}: {reason}");
-    let place = |offset: u64, bytes: u64| -> Result<(u64, u64), String> {
+    let err = |what: &'static str| refuse!("{path}", path).because(Refusal::new(what));
+    let place = |offset: u64, bytes: u64| -> Result<(u64, u64)> {
         if bytes == 0 {
             return Err(err("aperture is empty"));
         }
@@ -151,16 +157,18 @@ pub(super) fn dcp_device(
     if interrupts.iter().any(|&irq| u16::try_from(irq).is_err()) {
         return Err(err("mailbox interrupt exceeds the AIC encoding"));
     }
-    let route = |parent: u32| -> Result<(usize, usize, u32, u32), String> {
-        let route = native_dma_route(darts, parent).map_err(|why| err(&why))?;
+    let route = |parent: u32| -> Result<(usize, usize, u32, u32)> {
+        let route = native_dma_route(darts, parent).within(|| refuse!("{path}", path))?;
         Ok((route.iommu, route.instance, route.context, route.stream))
     };
-    let phandle = native_dma_phandle(node, "AAPL,phandle").map_err(|why| err(&why))?;
+    let phandle = native_dma_phandle(node, "AAPL,phandle").within(|| refuse!("{path}", path))?;
     let mapper = native_dma_phandle(node, "iommu-parent")
-        .map_err(|why| err(&why))?
+        .within(|| refuse!("{path}", path))?
         .ok_or_else(|| err("controller has no iommu-parent"))?;
-    let surface_phandle = native_dma_phandle(&pipe, "AAPL,phandle").map_err(|why| err(&why))?;
-    let surface_mappers = native_dma_mapper_list(&pipe, "iommu-parent").map_err(|why| err(&why))?;
+    let surface_phandle =
+        native_dma_phandle(&pipe, "AAPL,phandle").within(|| refuse!("{path}", path))?;
+    let surface_mappers =
+        native_dma_mapper_list(&pipe, "iommu-parent").within(|| refuse!("{path}", path))?;
     let (iommu, instance, mapper_context, stream) = route(mapper)?;
     let surface_routes = surface_mappers
         .into_iter()
@@ -174,7 +182,7 @@ pub(super) fn dcp_device(
                 stream,
             })
         })
-        .collect::<Result<Vec<_>, String>>()?;
+        .collect::<Result<Vec<_>>>()?;
     let primary_route = surface_routes
         .first()
         .ok_or_else(|| err("pipe has no surface iommu-parent"))?;
@@ -198,7 +206,7 @@ pub(super) fn dcp_device(
             }
             Ok((profile.pipe, range))
         })
-        .collect::<Result<Vec<_>, String>>()?;
+        .collect::<Result<Vec<_>>>()?;
     // Preserve existing optional J473 aperture placement. These physical-link
     // services remain outside admission; they are not invented T6000 nodes.
     if profile.identity == dcp::ExternalIdentity::Unnumbered {
@@ -408,7 +416,7 @@ mod tests {
                 ("display-crossbar0", (0x2_3c00_0000, 0x4000)),
             ]
         );
-        // A native controller cannot be exposed without its actual pipe.
+        // A native controller cannot be exposed without its pipe.
         assert!(board(&build(DCPEXT_ROLE, false, false)).is_err());
         // DCPEXT and its pipe are admitted with a native nub; the PHY and
         // crossbar stay hidden, and a wrong role is not a DCP.

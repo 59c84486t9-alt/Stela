@@ -236,7 +236,7 @@ fn real_descriptor_fetch_initialization_input_control_and_restart() {
             .iter()
             .any(|(request, _)| request[1] == SET_PROTOCOL)
     );
-    assert!(input.poll_hid().reports.is_empty()); // Actual queued TD remains NAKed.
+    assert!(input.poll_hid().reports.is_empty()); // Queued TD remains NAKed.
     let ticket = input.queued;
     assert!(ticket.is_some());
     assert!(input.poll_hid().reports.is_empty());
@@ -462,7 +462,7 @@ fn report_descriptor_header_walks_every_entry_and_bounds_length() {
 }
 
 #[test]
-fn actual_relative_and_absolute_pointer_reports_preserve_qemu_native_inputs() {
+fn relative_and_absolute_pointer_reports_preserve_qemu_native_inputs() {
     for relative in [true, false] {
         let pointer = [
             5,
@@ -579,7 +579,7 @@ fn actual_relative_and_absolute_pointer_reports_preserve_qemu_native_inputs() {
 }
 
 #[test]
-fn actual_boot_fallback_is_explicit_and_uses_standard_boot_bytes() {
+fn boot_fallback_is_explicit_and_uses_standard_boot_bytes() {
     let descriptor = [0xfe, 0, 0];
     let mut backing = vec![0u64; 128 * 1024];
     let start = backing.as_mut_ptr() as u64;
@@ -663,3 +663,7 @@ fn retired_identity_refuses_old_hid_control_poll_and_restart_without_dma_mutatio
     assert_eq!(hardware.borrow().seen, commands);
     assert_eq!(hardware.borrow().setup, requests);
 }
+
+mod delimiter;
+mod sparse;
+pub(super) mod touch;

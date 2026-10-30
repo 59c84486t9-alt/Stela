@@ -2,7 +2,7 @@
 // Copyright (C) 2023 Dmitry Baryshkov <dmitry.baryshkov@linaro.org>
 // Copyright (c) 2026 Stela contributors
 //! OnSemi NB7VPQ904M register/channel programming from pinned Linux driver.
-//! Actual Vcc/enable resources and the board's lane map come from the platform.
+//! Vcc/enable resources and the board's lane map come from the platform.
 use super::{
     Error, Mode, Orientation, Pin, Power, PowerOperation, Registers, Route, Supply,
     require_orientation,

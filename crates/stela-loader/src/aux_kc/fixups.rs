@@ -7,7 +7,9 @@
 //! `next` counting 4-byte strides to the following pointer in its page.
 use std::collections::BTreeMap;
 
-use anyhow::{Context, Result, ensure};
+use super::fit;
+use crate::Result;
+use stela_contracts::{refuse, require};
 
 use crate::kernel_collection::PAGE_BYTES;
 
@@ -43,17 +45,17 @@ pub struct Pointer {
 
 impl Pointer {
     fn encode(self, next: u64) -> Result<u64> {
-        ensure!(
+        require!(
             self.target < TARGET_LIMIT,
-            "a pointer target {:#x} past the 1 GiB a kernel-collection fixup reaches",
-            self.target
+            "a pointer target {target:#x} past the 1 GiB a kernel-collection fixup reaches",
+            target = self.target
         );
         let mut raw = self.target | (self.level as u64) << 30 | next << 51;
         if let Some(signature) = self.signature {
-            ensure!(
+            require!(
                 signature.key < 4,
-                "pointer authentication key {}",
-                signature.key
+                "pointer authentication key {key}",
+                key = signature.key
             );
             raw |= u64::from(signature.diversity) << 32
                 | u64::from(signature.address_diversity) << 48
@@ -83,7 +85,7 @@ pub fn encode(
 ) -> Result<Vec<u8>> {
     let starts = HEADER_BYTES.next_multiple_of(8);
     let mut payload = vec![0u8; starts];
-    payload.extend(u32::try_from(segments.len())?.to_le_bytes());
+    payload.extend(fit::<u32, _>(segments.len(), "the segment count")?.to_le_bytes());
     let offsets = payload.len();
     payload.resize(offsets + 4 * segments.len(), 0);
     for (index, segment) in segments.iter().enumerate() {
@@ -92,15 +94,17 @@ pub fn encode(
             continue;
         }
         let pages = segment.size.div_ceil(PAGE_BYTES);
-        let mut page_starts = vec![DYLD_CHAINED_PTR_START_NONE; usize::try_from(pages)?];
+        let mut page_starts =
+            vec![DYLD_CHAINED_PTR_START_NONE; fit(pages, "a segment's page count")?];
         let mut chain = pointers.range(range).peekable();
         while let Some((&address, pointer)) = chain.next() {
             let offset = address - segment.address;
-            ensure!(
+            require!(
                 address.is_multiple_of(STRIDE) && offset % PAGE_BYTES <= PAGE_BYTES - 8,
-                "a pointer at {address:#x} is misaligned or crosses a page"
+                "a pointer at {address:#x} is misaligned or crosses a page",
+                address
             );
-            let page = usize::try_from(offset / PAGE_BYTES)?;
+            let page: usize = fit(offset / PAGE_BYTES, "a pointer's page")?;
             if page_starts[page] == DYLD_CHAINED_PTR_START_NONE {
                 page_starts[page] = (offset % PAGE_BYTES) as u16;
             }
@@ -108,40 +112,42 @@ pub fn encode(
                 Some(&(&following, _))
                     if (following - segment.address) / PAGE_BYTES == page as u64 =>
                 {
-                    ensure!(
+                    require!(
                         following - address >= 8,
-                        "pointers at {address:#x} and {following:#x} overlap"
+                        "pointers at {address:#x} and {following:#x} overlap",
+                        address,
+                        following
                     );
                     (following - address) / STRIDE
                 }
                 _ => 0,
             };
-            ensure!(next <= NEXT_LIMIT, "a chain step past its page");
-            let slot = usize::try_from(address)?;
+            require!(next <= NEXT_LIMIT, "a chain step past its page");
+            let slot: usize = fit(address, "a pointer's collection offset")?;
             image
                 .get_mut(slot..slot + 8)
-                .context("a pointer past the collection")?
+                .ok_or(refuse!("a pointer past the collection"))?
                 .copy_from_slice(&pointer.encode(next)?.to_le_bytes());
         }
         payload.resize(payload.len().next_multiple_of(8), 0);
         let start = payload.len();
-        let offset = u32::try_from(start - starts)?;
+        let offset: u32 = fit(start - starts, "a segment's chain start offset")?;
         payload[offsets + 4 * index..offsets + 4 * index + 4]
             .copy_from_slice(&offset.to_le_bytes());
         let size = 22 + 2 * page_starts.len();
-        payload.extend(u32::try_from(size)?.to_le_bytes());
-        payload.extend(u16::try_from(PAGE_BYTES)?.to_le_bytes());
+        payload.extend(fit::<u32, _>(size, "a segment's chain starts size")?.to_le_bytes());
+        payload.extend(fit::<u16, _>(PAGE_BYTES, "the page size")?.to_le_bytes());
         payload.extend(DYLD_CHAINED_PTR_64_KERNEL_CACHE.to_le_bytes());
         payload.extend(segment.address.wrapping_sub(header).to_le_bytes());
         payload.extend(0u32.to_le_bytes());
-        payload.extend(u16::try_from(page_starts.len())?.to_le_bytes());
+        payload.extend(fit::<u16, _>(page_starts.len(), "a segment's page count")?.to_le_bytes());
         payload.extend(page_starts.iter().flat_map(|start| start.to_le_bytes()));
     }
     payload.resize(payload.len().next_multiple_of(8), 0);
-    let end = u32::try_from(payload.len())?;
+    let end: u32 = fit(payload.len(), "the fixup chains' size")?;
     let header_fields = [
         0,
-        u32::try_from(starts)?,
+        fit(starts, "the chain starts offset")?,
         end,
         end,
         0,
@@ -157,6 +163,7 @@ pub fn encode(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Result;
 
     fn word(bytes: &[u8], offset: usize) -> u32 {
         u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())

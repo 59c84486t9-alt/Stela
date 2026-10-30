@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Actual register-prefix I2C framing for the shared Gen3 register engine.
+//! Register-prefix I2C framing for the shared Gen3 register engine.
 use super::{Address, Bus, ErrorKind, Operation, RegisterAccess};
 impl<B: Bus> RegisterAccess for B {
     fn read_register(

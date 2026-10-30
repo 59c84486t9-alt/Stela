@@ -13,8 +13,10 @@
 //! guest, so the download overlaps the restore's own writes. A range that
 //! fails resumes from its last byte received, a few times.
 use super::network::Shared;
+use crate::Result;
 use crate::output;
 use alloc::{collections::VecDeque, string::String};
+use stela_contracts::refuse;
 use {
     stela_formats::payload::Layout, stela_formats::payload::PayloadManifest,
     stela_formats::payload::ReadAt, stela_runtime::net::HttpTransfer, stela_runtime::net::NetError,
@@ -50,22 +52,22 @@ pub struct Remote {
 }
 
 impl Remote {
-    pub fn new(network: Shared, manifest: &PayloadManifest) -> Result<Self, String> {
+    pub fn new(network: Shared, manifest: &PayloadManifest) -> Result<Self> {
         let Layout::Remote { url, etag } = &manifest.layout else {
-            return Err(String::from("the install payload is not a remote image"));
+            return Err(refuse!("the install payload is not a remote image"));
         };
         network
             .0
             .borrow()
             .check_url(url)
-            .map_err(|error| alloc::format!("{error}"))?;
+            .map_err(|error| refuse!("remote image URL: {error}", %error))?;
         let last = manifest
             .source
             .bytes
             .checked_sub(1)
-            .ok_or_else(|| String::from("the remote image is empty"))?;
+            .ok_or_else(|| refuse!("the remote image is empty"))?;
         Ranged::with_identity(0, last, etag, manifest.source.bytes)
-            .map_err(|error| alloc::format!("{error}"))?;
+            .map_err(|error| refuse!("remote image range: {error}", %error))?;
         output::arguments(format_args!(
             "REMOTE IMAGE {url} bytes={} etag={etag}\n",
             manifest.source.bytes
@@ -152,7 +154,11 @@ impl Remote {
             } else if self.end() > before {
                 failures = 0;
             } else if self.range.is_some() {
-                self.network.0.borrow_mut().wait(WAIT_US);
+                let result = self.network.0.borrow_mut().wait(WAIT_US);
+                if let Err(error) = result {
+                    self.stop();
+                    return Err(error);
+                }
             }
         }
         Ok(())

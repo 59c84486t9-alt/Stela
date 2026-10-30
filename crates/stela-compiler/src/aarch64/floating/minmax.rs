@@ -24,7 +24,7 @@ impl MinMaxOperation {
 }
 
 /// Evaluate one lane with fresh exception bits and no host floating-point effects.
-/// Number variants restrict alternative min/max behavior while retaining AH's
+/// Number variants restrict alternative min/max behavior while keeping AH's
 /// ordinary NaN priority, output flushing and post-operation denormal checks.
 pub fn evaluate(
     format: Format,

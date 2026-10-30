@@ -122,7 +122,7 @@ pub struct AppleState {
     pub apctl: [u64; 2],
     /// KERNELKEYLO/HI_EL1.
     pub kernel_key: [u64; 2],
-    /// Distinct source-qualified Apple EL2 PAC bank; unknown until written.
+    /// Distinct source-checked Apple EL2 PAC bank; unknown until written.
     pub pointer_keys: super::pointer_keys::Bank,
     /// VMSA_LOCK_EL1 and the EL whose translation registers it locks.
     pub vmsa_lock: u64,
@@ -234,10 +234,10 @@ pub struct Cpu {
     /// identity gives them (`machine::caches`).
     pub caches: Option<super::caches::Caches>,
     /// The serial lane's byte-observed reservation (`engine::exclusive`).
-    /// Converted PEs retain their actual monitor in canonical_memory.
+    /// Converted PEs keep their monitor in canonical_memory.
     pub monitor: Option<Reservation>,
     /// Linear canonical monitor/event owner after shared-system conversion.
-    /// The legacy fields above grant no authority while this owner is present.
+    /// The legacy fields above grant no permission while this owner is present.
     pub(in crate::machine) canonical_memory: Option<super::engine::SharedMemory>,
     /// The PE's Apple AMX unit (`machine::amx`).
     pub amx: super::amx::Unit,
@@ -420,7 +420,7 @@ impl Cpu {
         }
     }
 
-    /// The actual event register; converted PEs read their canonical endpoint.
+    /// The event register; converted PEs read their canonical endpoint.
     pub fn event_is_set(&self) -> bool {
         self.canonical_memory
             .as_ref()
@@ -443,7 +443,7 @@ impl Cpu {
         }
     }
     /// CLREX and legal exception return clear the same local reservation as
-    /// checked native stores. The physical global mark retains its own lifetime.
+    /// checked native stores. The physical global mark keeps its own lifetime.
     pub(crate) fn prepare_clear_exclusive(
         &mut self,
     ) -> Result<PreparedExclusiveClear<'_>, stela_compiler::context::memory::MemoryStatus> {

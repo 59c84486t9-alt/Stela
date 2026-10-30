@@ -343,7 +343,7 @@ fn odd_top_narrowing_jams_only_inexact_lane_and_preserves_low_source_bits() {
 }
 
 #[test]
-fn bfloat_ah_top_alias_uses_nearest_even_and_suppresses_retained_enables() {
+fn bfloat_ah_top_alias_uses_nearest_even_and_suppresses_kept_enables() {
     use stela_compiler::aarch64::floating::FPCR_AH;
     const EVEN_MIDPOINT: u32 = 0x3f80_8000;
     const ODD_MIDPOINT: u32 = 0x3f81_8000;

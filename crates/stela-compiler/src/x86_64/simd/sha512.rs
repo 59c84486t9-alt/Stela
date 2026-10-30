@@ -171,7 +171,7 @@ fn packed_rotate(code: &mut Code, destination: u8, scratch: u8, source: u8, amou
 }
 
 fn small_sigma(code: &mut Code, rotations: [u8; 2], shift: u8) {
-    // XMM2 holds both independent sigma inputs. XMM0/1 retain old W/Y.
+    // XMM2 holds both independent sigma inputs. XMM0/1 keep old W/Y.
     packed_rotate(
         code,
         SIGMA_OUTPUT_XMM,

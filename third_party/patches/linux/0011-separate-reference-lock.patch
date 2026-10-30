@@ -1,0 +1,343 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Thu, 29 Oct 2026 08:35:05 -0400
+Subject: [PATCH] refactor(refcount): separate reference lock helpers
+
+---
+ lib/Makefile        |   2 +-
+ lib/refcount.c      | 149 ------------------------------------------
+ lib/refcount_lock.c | 155 ++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 156 insertions(+), 150 deletions(-)
+ create mode 100644 lib/refcount_lock.c
+
+diff --git a/lib/Makefile b/lib/Makefile
+index fdcce33353b6cb81f535ac1219fd815655bf553a..c341b06378d320a2490d9d45dab64006319f6f2a 100644
+--- a/lib/Makefile
++++ b/lib/Makefile
+@@ -59,7 +59,7 @@ obj-y += bcd.o sort.o parser.o debug_locks.o random32.o \
+ 	 list_sort.o uuid.o iov_iter.o clz_ctz.o \
+ 	 bsearch.o find_bit.o find_random_bit.o llist.o lwq.o \
+ 	 memweight.o kfifo.o percpu-refcount.o rhashtable.o base64.o \
+-	 once.o refcount.o rcuref.o usercopy.o errseq.o bucket_locks.o \
++	 once.o refcount.o refcount_lock.o rcuref.o usercopy.o errseq.o bucket_locks.o \
+ 	 generic-radix-tree.o bitmap-str.o
+ obj-y += string_helpers.o
+ obj-y += hexdump.o
+diff --git a/lib/refcount.c b/lib/refcount.c
+index a207a8f22b3ca35890671e51c480266d89e4d8d6..37ee5a318a4b67160f80d62f5e69425c9bd6f5c2 100644
+--- a/lib/refcount.c
++++ b/lib/refcount.c
+@@ -35,152 +35,3 @@ void refcount_warn_saturate(refcount_t *r, enum refcount_saturation_type t)
+ 	}
+ }
+ EXPORT_SYMBOL(refcount_warn_saturate);
+-
+-/**
+- * refcount_dec_if_one - decrement a refcount if it is 1
+- * @r: the refcount
+- *
+- * No atomic_t counterpart, it attempts a 1 -> 0 transition and returns the
+- * success thereof.
+- *
+- * Like all decrement operations, it provides release memory order and provides
+- * a control dependency.
+- *
+- * It can be used like a try-delete operator; this explicit case is provided
+- * and not cmpxchg in generic, because that would allow implementing unsafe
+- * operations.
+- *
+- * Return: true if the resulting refcount is 0, false otherwise
+- */
+-bool refcount_dec_if_one(refcount_t *r)
+-{
+-	int val = 1;
+-
+-	return atomic_try_cmpxchg_release(&r->refs, &val, 0);
+-}
+-EXPORT_SYMBOL(refcount_dec_if_one);
+-
+-/**
+- * refcount_dec_not_one - decrement a refcount if it is not 1
+- * @r: the refcount
+- *
+- * No atomic_t counterpart, it decrements unless the value is 1, in which case
+- * it will return false.
+- *
+- * Was often done like: atomic_add_unless(&var, -1, 1)
+- *
+- * Return: true if the decrement operation was successful, false otherwise
+- */
+-bool refcount_dec_not_one(refcount_t *r)
+-{
+-	unsigned int new, val = atomic_read(&r->refs);
+-
+-	do {
+-		if (unlikely(val == REFCOUNT_SATURATED))
+-			return true;
+-
+-		if (val == 1)
+-			return false;
+-
+-		new = val - 1;
+-		if (new > val) {
+-			WARN_ONCE(new > val, "refcount_t: underflow; use-after-free.\n");
+-			return true;
+-		}
+-
+-	} while (!atomic_try_cmpxchg_release(&r->refs, &val, new));
+-
+-	return true;
+-}
+-EXPORT_SYMBOL(refcount_dec_not_one);
+-
+-/**
+- * refcount_dec_and_mutex_lock - return holding mutex if able to decrement
+- *                               refcount to 0
+- * @r: the refcount
+- * @lock: the mutex to be locked
+- *
+- * Similar to atomic_dec_and_mutex_lock(), it will WARN on underflow and fail
+- * to decrement when saturated at REFCOUNT_SATURATED.
+- *
+- * Provides release memory ordering, such that prior loads and stores are done
+- * before, and provides a control dependency such that free() must come after.
+- * See the comment on top.
+- *
+- * Return: true and hold mutex if able to decrement refcount to 0, false
+- *         otherwise
+- */
+-bool refcount_dec_and_mutex_lock(refcount_t *r, struct mutex *lock)
+-{
+-	if (refcount_dec_not_one(r))
+-		return false;
+-
+-	mutex_lock(lock);
+-	if (!refcount_dec_and_test(r)) {
+-		mutex_unlock(lock);
+-		return false;
+-	}
+-
+-	return true;
+-}
+-EXPORT_SYMBOL(refcount_dec_and_mutex_lock);
+-
+-/**
+- * refcount_dec_and_lock - return holding spinlock if able to decrement
+- *                         refcount to 0
+- * @r: the refcount
+- * @lock: the spinlock to be locked
+- *
+- * Similar to atomic_dec_and_lock(), it will WARN on underflow and fail to
+- * decrement when saturated at REFCOUNT_SATURATED.
+- *
+- * Provides release memory ordering, such that prior loads and stores are done
+- * before, and provides a control dependency such that free() must come after.
+- * See the comment on top.
+- *
+- * Return: true and hold spinlock if able to decrement refcount to 0, false
+- *         otherwise
+- */
+-bool refcount_dec_and_lock(refcount_t *r, spinlock_t *lock)
+-{
+-	if (refcount_dec_not_one(r))
+-		return false;
+-
+-	spin_lock(lock);
+-	if (!refcount_dec_and_test(r)) {
+-		spin_unlock(lock);
+-		return false;
+-	}
+-
+-	return true;
+-}
+-EXPORT_SYMBOL(refcount_dec_and_lock);
+-
+-/**
+- * refcount_dec_and_lock_irqsave - return holding spinlock with disabled
+- *                                 interrupts if able to decrement refcount to 0
+- * @r: the refcount
+- * @lock: the spinlock to be locked
+- * @flags: saved IRQ-flags if the is acquired
+- *
+- * Same as refcount_dec_and_lock() above except that the spinlock is acquired
+- * with disabled interrupts.
+- *
+- * Return: true and hold spinlock if able to decrement refcount to 0, false
+- *         otherwise
+- */
+-bool refcount_dec_and_lock_irqsave(refcount_t *r, spinlock_t *lock,
+-				   unsigned long *flags)
+-{
+-	if (refcount_dec_not_one(r))
+-		return false;
+-
+-	spin_lock_irqsave(lock, *flags);
+-	if (!refcount_dec_and_test(r)) {
+-		spin_unlock_irqrestore(lock, *flags);
+-		return false;
+-	}
+-
+-	return true;
+-}
+-EXPORT_SYMBOL(refcount_dec_and_lock_irqsave);
+diff --git a/lib/refcount_lock.c b/lib/refcount_lock.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..bb5239c8984ccc680806d8a0ec0ed0c536828823
+--- /dev/null
++++ b/lib/refcount_lock.c
+@@ -0,0 +1,155 @@
++// SPDX-License-Identifier: GPL-2.0
++/* Out-of-line refcount locking helpers, separated from saturation reporting. */
++#include <linux/mutex.h>
++#include <linux/refcount.h>
++#include <linux/spinlock.h>
++#include <linux/bug.h>
++
++/**
++ * refcount_dec_if_one - decrement a refcount if it is 1
++ * @r: the refcount
++ *
++ * No atomic_t counterpart, it attempts a 1 -> 0 transition and returns the
++ * success thereof.
++ *
++ * Like all decrement operations, it provides release memory order and provides
++ * a control dependency.
++ *
++ * It can be used like a try-delete operator; this explicit case is provided
++ * and not cmpxchg in generic, because that would allow implementing unsafe
++ * operations.
++ *
++ * Return: true if the resulting refcount is 0, false otherwise
++ */
++bool refcount_dec_if_one(refcount_t *r)
++{
++	int val = 1;
++
++	return atomic_try_cmpxchg_release(&r->refs, &val, 0);
++}
++EXPORT_SYMBOL(refcount_dec_if_one);
++
++/**
++ * refcount_dec_not_one - decrement a refcount if it is not 1
++ * @r: the refcount
++ *
++ * No atomic_t counterpart, it decrements unless the value is 1, in which case
++ * it will return false.
++ *
++ * Was often done like: atomic_add_unless(&var, -1, 1)
++ *
++ * Return: true if the decrement operation was successful, false otherwise
++ */
++bool refcount_dec_not_one(refcount_t *r)
++{
++	unsigned int new, val = atomic_read(&r->refs);
++
++	do {
++		if (unlikely(val == REFCOUNT_SATURATED))
++			return true;
++
++		if (val == 1)
++			return false;
++
++		new = val - 1;
++		if (new > val) {
++			WARN_ONCE(new > val, "refcount_t: underflow; use-after-free.\n");
++			return true;
++		}
++
++	} while (!atomic_try_cmpxchg_release(&r->refs, &val, new));
++
++	return true;
++}
++EXPORT_SYMBOL(refcount_dec_not_one);
++
++/**
++ * refcount_dec_and_mutex_lock - return holding mutex if able to decrement
++ *                               refcount to 0
++ * @r: the refcount
++ * @lock: the mutex to be locked
++ *
++ * Similar to atomic_dec_and_mutex_lock(), it will WARN on underflow and fail
++ * to decrement when saturated at REFCOUNT_SATURATED.
++ *
++ * Provides release memory ordering, such that prior loads and stores are done
++ * before, and provides a control dependency such that free() must come after.
++ * See the comment on top.
++ *
++ * Return: true and hold mutex if able to decrement refcount to 0, false
++ *         otherwise
++ */
++bool refcount_dec_and_mutex_lock(refcount_t *r, struct mutex *lock)
++{
++	if (refcount_dec_not_one(r))
++		return false;
++
++	mutex_lock(lock);
++	if (!refcount_dec_and_test(r)) {
++		mutex_unlock(lock);
++		return false;
++	}
++
++	return true;
++}
++EXPORT_SYMBOL(refcount_dec_and_mutex_lock);
++
++/**
++ * refcount_dec_and_lock - return holding spinlock if able to decrement
++ *                         refcount to 0
++ * @r: the refcount
++ * @lock: the spinlock to be locked
++ *
++ * Similar to atomic_dec_and_lock(), it will WARN on underflow and fail to
++ * decrement when saturated at REFCOUNT_SATURATED.
++ *
++ * Provides release memory ordering, such that prior loads and stores are done
++ * before, and provides a control dependency such that free() must come after.
++ * See the comment on top.
++ *
++ * Return: true and hold spinlock if able to decrement refcount to 0, false
++ *         otherwise
++ */
++bool refcount_dec_and_lock(refcount_t *r, spinlock_t *lock)
++{
++	if (refcount_dec_not_one(r))
++		return false;
++
++	spin_lock(lock);
++	if (!refcount_dec_and_test(r)) {
++		spin_unlock(lock);
++		return false;
++	}
++
++	return true;
++}
++EXPORT_SYMBOL(refcount_dec_and_lock);
++
++/**
++ * refcount_dec_and_lock_irqsave - return holding spinlock with disabled
++ *                                 interrupts if able to decrement refcount to 0
++ * @r: the refcount
++ * @lock: the spinlock to be locked
++ * @flags: saved IRQ-flags if the is acquired
++ *
++ * Same as refcount_dec_and_lock() above except that the spinlock is acquired
++ * with disabled interrupts.
++ *
++ * Return: true and hold spinlock if able to decrement refcount to 0, false
++ *         otherwise
++ */
++bool refcount_dec_and_lock_irqsave(refcount_t *r, spinlock_t *lock,
++				   unsigned long *flags)
++{
++	if (refcount_dec_not_one(r))
++		return false;
++
++	spin_lock_irqsave(lock, *flags);
++	if (!refcount_dec_and_test(r)) {
++		spin_unlock_irqrestore(lock, *flags);
++		return false;
++	}
++
++	return true;
++}
++EXPORT_SYMBOL(refcount_dec_and_lock_irqsave);

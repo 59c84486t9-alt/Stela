@@ -1,4 +1,4 @@
-//! Actual native ownership, never a BAR address interpreted as a CPU pointer.
+//! Native ownership, never a BAR address interpreted as a CPU pointer.
 use super::*;
 use crate::{
     Clock,
@@ -17,29 +17,29 @@ pub struct NativeResources {
     pub pci: Function<OwnedConfig>,
     pub registers: Mapping,
     pub domain: Arc<dyn DmaDomain>,
-    pub memory: Arc<dyn PageSource>,
+    pub memory: &'static dyn PageSource,
     pub clock: Clock,
 }
 
-/// Attach a retained native EHCI requester. Initialization errors retain the
+/// Attach a native EHCI requester. Initialization errors keep the
 /// entire owner in `Failure`; dropping it permanently quarantines resources.
 ///
 /// # Safety
-/// These are the actual paired requester/configuration/BAR resources, with
+/// These are the paired requester/configuration/BAR resources, with
 /// exclusive D0, reset, removal, bridge-routing and assignment ownership for
-/// their complete retained lifetime. The BAR is this function's real BAR0;
+/// their complete lifetime. The BAR is this function's real BAR0;
 /// numeric geometry alone is insufficient. No other firmware/driver accessor
 /// may use this controller. The real requester domain is already bound and
 /// isolated, BME is initially clear, and no uncontrolled DMA engine exists.
-/// This domain retains the actual previous requester/root translation path;
+/// This domain keeps the previous requester/root translation path;
 /// if assignment changed, its producer must already have stopped and drained
-/// every old DMA route with original pins/owners retained before rebinding.
+/// every old DMA route with original pins/owners kept before rebinding.
 /// The new domain cannot certify retirement through a different old domain.
 /// Companion controllers and their port/reset ownership must be stopped and
 /// exclusively coordinated before CONFIGFLAG routes roots to EHCI. The clock
 /// must be calibrated, monotonic and advancing in this context. All operations
 /// run in one serialized process/deferred context, including final release.
-/// The platform retains actual masked IRQ-route ownership (MSI/MSI-X/INTx),
+/// The platform keeps masked IRQ-route ownership (MSI/MSI-X/INTx),
 /// acknowledges prior posted IRQ delivery, and stops/drains every prior IRQ,
 /// deferred callback and firmware accessor before attachment and until release.
 /// USBINTR0 or BMEclear alone cannot establish those IRQ/callback facts.
@@ -307,7 +307,7 @@ impl Controller {
         self.wait(self.operational + STS, HALT, 0, TRANSITION_US)?;
         self.put(CONFIG, 1)?;
         self.wait(self.operational + CONFIG, 1, 1, TRANSITION_US)?;
-        self.hw().delay_us(5_000)?; // Actual root-routing settle, not register readback.
+        self.hw().delay_us(5_000)?; // Root-routing settle, not register readback.
         // HCRST is not USB device-address retirement. Before minting any
         // default-address owner, prove every untracked EHCI root isolated.
         for index in 0..self.ports.len() {
@@ -315,7 +315,7 @@ impl Controller {
             let value = self.read(at)?;
             if value & OWNER != 0 {
                 continue;
-            } // Actual companion route, not ours.
+            } // Companion route, not ours.
             if value & (PORT_RESET | PORT_RESUME | PORT_SUSPEND) != 0 {
                 return Err(Error::Unsupported("EHCI inherited root transition"));
             }
@@ -382,7 +382,7 @@ impl Controller {
         self.hw().bus_master(false)?;
         self.hw().drain()?;
         if let Some(arena) = self.arena.as_mut() {
-            // SAFETY: engines halted, BMEclear, actual drain, serialized no IRQ.
+            // SAFETY: engines halted, BMEclear, drain, serialized no IRQ.
             unsafe {
                 arena.dma.unmap()?;
             }

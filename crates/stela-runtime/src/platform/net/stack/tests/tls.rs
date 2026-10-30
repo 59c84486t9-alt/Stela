@@ -204,7 +204,7 @@ impl Link for Peer {
 #[test]
 fn authenticated_tls_stream_preserves_request_and_small_window_backpressure() {
     let clock = TestClock::default();
-    let mut stack = Stack::new(Peer::new(clock.clone()), clock, 7);
+    let mut stack = Stack::new(Peer::new(clock.clone()), clock, 7).unwrap();
     stack
         .set_config(Config {
             address: Ipv4Cidr::new(CLIENT_IP, 24),
@@ -265,7 +265,7 @@ impl TimeProvider for UnavailableTime {
 #[test]
 fn unavailable_time_refuses_before_tcp_or_tls_publication() {
     let clock = TestClock::default();
-    let mut stack = Stack::new(Peer::new(clock.clone()), clock, 7);
+    let mut stack = Stack::new(Peer::new(clock.clone()), clock, 7).unwrap();
     let url = http::Url::parse("https://valid.test:80/path").unwrap();
     let result = stack.open_tls(
         url,
@@ -297,7 +297,7 @@ impl TimeProvider for RevocableTime {
 #[test]
 fn lost_time_refuses_before_pending_socket_output_can_progress() {
     let clock = TestClock::default();
-    let mut stack = Stack::new(Peer::new(clock.clone()), clock, 7);
+    let mut stack = Stack::new(Peer::new(clock.clone()), clock, 7).unwrap();
     stack
         .set_config(Config {
             address: Ipv4Cidr::new(CLIENT_IP, 24),
@@ -352,7 +352,7 @@ fn entropy_failure_refuses_before_tcp_or_tls_publication() {
     static OWNER: std::sync::OnceLock<ProviderOwner> = std::sync::OnceLock::new();
     let owner = OWNER.get_or_init(|| ProviderOwner::new(Arc::new(UnavailableEntropy)));
     let clock = TestClock::default();
-    let mut stack = Stack::new(Peer::new(clock.clone()), clock, 7);
+    let mut stack = Stack::new(Peer::new(clock.clone()), clock, 7).unwrap();
     let result = stack.open_tls(
         http::Url::parse("https://valid.test:80/p").unwrap(),
         Vec::new(),
@@ -376,7 +376,7 @@ fn entropy_failure_refuses_before_tcp_or_tls_publication() {
 #[test]
 fn url_aware_https_request_delivers_authenticated_response_and_retires_socket() {
     let clock = TestClock::default();
-    let mut stack = Stack::new(Peer::new(clock.clone()), clock, 7);
+    let mut stack = Stack::new(Peer::new(clock.clone()), clock, 7).unwrap();
     stack
         .set_config(Config {
             address: Ipv4Cidr::new(CLIENT_IP, 24),
@@ -432,7 +432,7 @@ fn url_aware_https_request_delivers_authenticated_response_and_retires_socket() 
 #[test]
 fn same_host_post_upgrade_replays_only_after_tls_verification() {
     let clock = TestClock::default();
-    let mut stack = Stack::new(Peer::upgrade(clock.clone()), clock, 7);
+    let mut stack = Stack::new(Peer::upgrade(clock.clone()), clock, 7).unwrap();
     stack
         .set_config(Config {
             address: Ipv4Cidr::new(CLIENT_IP, 24),
@@ -489,7 +489,7 @@ fn untrusted_certificate_blocks_the_upgraded_post_body() {
     static OWNER: std::sync::OnceLock<ProviderOwner> = std::sync::OnceLock::new();
     let owner = OWNER.get_or_init(|| ProviderOwner::new(Arc::new(Random)));
     let clock = TestClock::default();
-    let mut stack = Stack::new(Peer::upgrade(clock.clone()), clock, 7);
+    let mut stack = Stack::new(Peer::upgrade(clock.clone()), clock, 7).unwrap();
     stack
         .set_config(Config {
             address: Ipv4Cidr::new(CLIENT_IP, 24),

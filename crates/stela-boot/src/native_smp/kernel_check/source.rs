@@ -122,7 +122,7 @@ pub(super) fn tables() -> Vec<(u64, u64)> {
     entries
 }
 
-/// Writes through a read-only source VA alias must retain the exact ADD prefix.
+/// Writes through a read-only source VA alias must keep the exact ADD prefix.
 pub(super) fn permission_body() -> Vec<u8> {
     let mut words = Vec::new();
     constant(&mut words, 0, ALIAS);

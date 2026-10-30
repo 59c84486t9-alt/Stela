@@ -3,7 +3,6 @@ use super::*;
 use crate::aarch64::sve::predicate_generation;
 use alloc::vec::Vec;
 
-const RET_X30: u32 = 0xd65f_03c0;
 const WORDS: [u32; 45] = [
     0x25104000, // brka_p_p_p_
     0x25504000, // brkas_p_p_p_z
@@ -95,22 +94,8 @@ fn generation_production_dispatch_preserves_exact_body_source_maps() {
                         VectorLength::from_bytes(bytes).unwrap(),
                         target,
                     );
-                    assert_eq!(
-                        &native.x86_64_code[..CONTEXT_WRAPPER_BYTES],
-                        context_wrapper()
-                    );
-                    assert_eq!(
-                        native.source_map,
-                        [
-                            (GuestAddress(0x1000), CONTEXT_WRAPPER_BYTES),
-                            (GuestAddress(0x1004), CONTEXT_WRAPPER_BYTES + expected.len())
-                        ]
-                    );
-                    assert_eq!(
-                        &native.x86_64_code[CONTEXT_WRAPPER_BYTES..native.source_map[1].1],
-                        expected
-                    );
-                    assert_eq!(&native.x86_64_code[native.source_map[1].1..], [RET]);
+
+                    assert_single_body(&native, GuestAddress(0x1000), &expected);
                 }
             }
         }

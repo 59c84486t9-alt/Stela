@@ -3,9 +3,8 @@
 //! Linux r8152 register/OCP and distinct RTL8152B/RTL8153A startup paths.
 //! Revision-specific implementations must be ready before configuration selection.
 use super::registers::*;
-use crate::usb::xhci::{
-    DEVICE_TO_HOST, FULL_SPEED, HIGH_SPEED, LOW_SPEED, SUPER_SPEED, TYPE_VENDOR, setup,
-};
+use crate::usb::descriptor::{DEVICE_TO_HOST, TYPE_VENDOR, setup};
+use crate::usb::xhci::{FULL_SPEED, HIGH_SPEED, LOW_SPEED, SUPER_SPEED};
 use crate::{block::BlockError, net::Mac};
 use alloc::vec::Vec;
 mod rtl8153a;
@@ -510,8 +509,8 @@ impl<C: Control> Chip<C> {
         self.aldps(true)
     }
 
-    /// Actual PHY carrier drives MAC enabling. A disconnected link is never
-    /// assumed up merely because USB enumeration or initialization succeeded.
+    /// PHY carrier drives MAC enabling. A disconnected link is never
+    /// assumed up because USB enumeration or initialization succeeded.
     pub fn carrier(&mut self) -> Result<bool, BlockError> {
         if !self.initialized {
             return Err(BlockError::Unsupported("RTL815x chip is not initialized"));

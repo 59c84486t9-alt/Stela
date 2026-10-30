@@ -2,7 +2,7 @@
 use super::*;
 use stela_formats::boot_bundle::Nvram;
 
-/// Entry state and bundle provenance retained through machine construction.
+/// Entry state and bundle provenance kept through machine construction.
 pub(super) struct GuestImage {
     pub entry: u64,
     pub x0: u64,
@@ -67,7 +67,7 @@ pub(super) fn load(
         crate::status::done("");
         image
     } else {
-        // SAFETY: the loader retains this source allocation in the shared physmap.
+        // SAFETY: the loader keeps this source allocation in the shared physmap.
         let source = unsafe {
             core::slice::from_raw_parts(
                 layout::physical(handoff.source.physical) as *const u8,

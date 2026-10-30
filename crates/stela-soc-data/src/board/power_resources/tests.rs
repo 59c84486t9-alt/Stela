@@ -13,7 +13,7 @@ use crate::board::fixture_support::flat_fixture_extent;
 use {crate::board::DART, stela_contracts::adt::encode};
 
 #[test]
-fn usb_and_phy_resource_owners_require_qualified_complete_lists() {
+fn usb_and_phy_resource_owners_require_checked_complete_lists() {
     for (compatible, owner) in [
         (
             b"usb-drd,t6000\0usb-drd,t8103\0".as_slice(),
@@ -65,7 +65,7 @@ fn usb_and_phy_resource_owners_require_qualified_complete_lists() {
 }
 
 #[test]
-fn generic_pmgr_selects_its_register_implementation_without_borrowing_another_family() {
+fn pmgr_register_child_must_match_parent_family() {
     let parent = encode(&[("name", b"pmgr"), ("compatible", b"pmgr2,arch")], &[]);
     let child = encode(
         &[("name", b"pmgr-child"), ("compatible", b"pmgr2,t8152")],
@@ -127,7 +127,7 @@ fn original_v2_board_graphs_preserve_all_parents_and_physical_locations() {
         assert!(coverage.iter().all(|domain| !domain.bindable()));
         // Account for every original resource, including repeated sibling
         // display names. This remains source accounting, not chip/device
-        // admission or a lifecycle sink qualification.
+        // admission or a lifecycle sink validation.
         let complete = decode_power_states(&root, &node, &|address, bytes| {
             io.translate_range(address, bytes)
         })
@@ -212,7 +212,7 @@ fn tree(records: &[(u16, Option<u8>, [u16; 2])], children: &[Vec<u8>]) -> Vec<u8
 }
 
 #[test]
-fn physical_candidates_require_actual_registration_and_only_qualified_views_share_ownership() {
+fn mmio_ownership_follows_supported_parent_aliases() {
     use crate::board::UART;
     let reg = |address: u64| {
         [address, 0x1000]
@@ -287,7 +287,7 @@ fn physical_candidates_require_actual_registration_and_only_qualified_views_shar
 }
 
 #[test]
-fn complete_inventory_keeps_gate_kinds_and_distinguishes_mapper_ownership_from_dma_dependencies() {
+fn dma_dependencies_do_not_inherit_mapper_power_ownership() {
     let mapper = encode(
         &[
             ("name", b"mapper"),
@@ -357,7 +357,7 @@ fn complete_inventory_keeps_gate_kinds_and_distinguishes_mapper_ownership_from_d
 }
 
 #[test]
-fn repeated_sibling_names_keep_actual_ancestry_and_ambiguous_admission_is_atomic() {
+fn repeated_sibling_names_keep_ancestry_and_ambiguous_admission_is_atomic() {
     let first = encode(&[("name", b"view")], &[]);
     let leaf = encode(&[("name", b"leaf")], &[]);
     let second = encode(&[("name", b"view"), ("reg", &words(&[0]))], &[leaf]);
@@ -394,6 +394,7 @@ fn repeated_sibling_names_keep_actual_ancestry_and_ambiguous_admission_is_atomic
             states
                 .apply_admission(&bytes, &[entry.into()])
                 .unwrap_err()
+                .to_string()
                 .contains("ambiguous")
         );
         assert_eq!(states, before);
@@ -702,7 +703,7 @@ fn inventory_uses_exact_admitted_dart_profiles_and_legacy_mapper_default() {
 }
 
 #[test]
-fn usb_root_port_views_share_the_controller_and_unknown_children_keep_their_requirements() {
+fn usb_port_ownership_requires_valid_number_and_no_register_range() {
     let port = |number: u32, register: bool| {
         let number = words(&[number]);
         let mut properties = alloc::vec![
@@ -753,7 +754,7 @@ fn usb_root_port_views_share_the_controller_and_unknown_children_keep_their_requ
 }
 
 #[test]
-fn parsing_preserves_physical_aliases_and_parents_and_rejects_broken_complete_graphs() {
+fn parsing_rejects_broken_graphs() {
     let records = [
         (1, Some(0), [0, 0]),
         (2, Some(1), [0, 0]),
@@ -988,7 +989,7 @@ fn multi_die(dies: u32, compatible: &[u8], stride: Option<u64>) -> Vec<u8> {
     )
 }
 
-fn multi_die_states(bytes: &[u8]) -> Result<PowerStates, String> {
+fn multi_die_states(bytes: &[u8]) -> Result<PowerStates, crate::Refusal> {
     let root = Node::root(bytes).unwrap();
     let io = root.child("arm-io").unwrap();
     decode_power_states(&root, &io.child("pmgr").unwrap(), &|address, bytes| {
@@ -997,7 +998,7 @@ fn multi_die_states(bytes: &[u8]) -> Result<PowerStates, String> {
 }
 
 #[test]
-fn die_qualified_gates_reach_each_dies_strided_pmgr_records() {
+fn die_checked_gates_reach_each_dies_strided_pmgr_records() {
     let id = |die, device| DomainId { die, device };
     for (compatible, property, stride) in [
         (&b"pmgr1,t8112"[..], Some(0x40_0000_0000), 0x40_0000_0000),
@@ -1041,22 +1042,32 @@ fn die_qualified_gates_reach_each_dies_strided_pmgr_records() {
 
 #[test]
 fn unplaced_dies_and_reserved_gate_bits_stay_explicit_requirements() {
-    // A die without a qualified stride has no placed PMGR instance.
+    // A die without a checked stride has no placed PMGR instance.
     let error = multi_die_states(&multi_die(2, b"pmgr1,t8112", None)).unwrap_err();
-    assert!(error.contains("without a qualified die-stride"), "{error}");
+    assert!(
+        error.to_string().contains("without a qualified die-stride"),
+        "{error}"
+    );
     // A one-die SoC places no die-1 records for a die-1 gate.
     let error = multi_die_states(&multi_die(1, b"pmgr1,t8112", None)).unwrap_err();
-    assert!(error.contains("UnknownRequirement"), "{error}");
+    assert!(error.to_string().contains("UnknownRequirement"), "{error}");
     // A stride inside one die's bank never aliases two dies' registers.
     let error = multi_die_states(&multi_die(2, b"pmgr1,t8112", Some(8))).unwrap_err();
-    assert!(error.contains("overlaps another die"), "{error}");
+    assert!(
+        error.to_string().contains("overlaps another die"),
+        "{error}"
+    );
     // The 4-bit die field reaches 16 dies.
     let error = multi_die_states(&multi_die(17, b"pmgr1,t8112", Some(1))).unwrap_err();
-    assert!(error.contains("exceeds the PMGR die field"), "{error}");
+    assert!(
+        error.to_string().contains("exceeds the PMGR die field"),
+        "{error}"
+    );
     let bytes = encode(&[("clock-gates", &words(&[0x0001_0002]))], &[]);
     assert!(
         gate_ids(&Node::root(&bytes).unwrap(), "/node", "clock-gates")
             .unwrap_err()
+            .to_string()
             .contains("reserved")
     );
     let bytes = encode(&[("clock-gates", &words(&[0xf000_0002]))], &[]);

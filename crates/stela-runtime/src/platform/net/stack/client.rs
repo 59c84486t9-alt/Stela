@@ -10,13 +10,17 @@ pub enum TlsUnavailable {
     CorrelatedClock,
     Entropy,
     Trust,
+    Provider,
 }
 impl fmt::Display for TlsUnavailable {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            Self::CorrelatedClock => "a qualified continuous UTC-correlated clock is unavailable",
+            Self::CorrelatedClock => {
+                "no UTC clock: the firmware has no valid real-time clock or the TSC is not invariant"
+            }
             Self::Entropy => "owned secure entropy is unavailable",
             Self::Trust => "the certificate trust store is unavailable",
+            Self::Provider => "the TLS provider refused its configuration",
         })
     }
 }
@@ -267,7 +271,7 @@ impl<L: Link, C: Clock> Stack<L, C> {
         body: &[u8],
         security: Result<Arc<ClientConfig>, TlsUnavailable>,
     ) -> Result<Vec<u8>, NetError> {
-        let deadline = self.now().saturating_add(POST_WAIT_US);
+        let deadline = self.now()?.saturating_add(POST_WAIT_US);
         let mut transfer = self.open_http(
             url,
             HttpRequest::post(headers, content_type, body),
@@ -276,20 +280,22 @@ impl<L: Link, C: Clock> Stack<L, C> {
         )?;
         let mut reply = Zeroizing::new(Vec::new());
         let mut response = None;
-        let result = loop {
-            match self.read_http(&mut transfer, |bytes, closed| {
-                reply.extend_from_slice(bytes);
-                response = http::response(&reply, closed)?;
-                Ok(response.is_some())
-            }) {
-                Ok(true) => break Ok(()),
-                Ok(false) if self.now() >= deadline => {
-                    break Err(NetError::Timeout("HTTP request"));
+        let result = (|| {
+            loop {
+                match self.read_http(&mut transfer, |bytes, closed| {
+                    reply.extend_from_slice(bytes);
+                    response = http::response(&reply, closed)?;
+                    Ok(response.is_some())
+                }) {
+                    Ok(true) => break Ok(()),
+                    Ok(false) if self.now()? >= deadline => {
+                        break Err(NetError::Timeout("HTTP request"));
+                    }
+                    Ok(false) => self.wait_until(deadline)?,
+                    Err(error) => break Err(error),
                 }
-                Ok(false) => self.wait_until(deadline),
-                Err(error) => break Err(error),
             }
-        };
+        })();
         self.close_http(transfer);
         result?;
         Ok(response.expect("completed response").body)

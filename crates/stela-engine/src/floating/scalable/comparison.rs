@@ -1,6 +1,5 @@
 //! Completion of SVE FP comparisons into a packed predicate.
 
-use anyhow::anyhow;
 use stela_compiler::{
     GuestState,
     aarch64::{
@@ -8,6 +7,7 @@ use stela_compiler::{
         sve::floating::comparison::{self, Operand},
     },
 };
+use stela_contracts::refuse;
 
 use super::{CompletionError, NumericalControls};
 use crate::scalable::ScalableState;
@@ -22,7 +22,7 @@ fn read_lane(source: &[u8], offset: usize, element_bytes: usize) -> u64 {
 
 /// No destination or FPSR effects commit until every active lane succeeds.
 /// The caller resolves enabled-feature access and the selected FA64 profile.
-/// Ordinary streaming masks numerical trap enables while retaining raw FPCR.
+/// Ordinary streaming masks numerical trap enables while keeping raw FPCR.
 pub(super) fn complete(
     state: &mut GuestState,
     scalable: &mut ScalableState,
@@ -30,7 +30,7 @@ pub(super) fn complete(
     controls: NumericalControls,
 ) -> Result<(), CompletionError> {
     if !scalable.mode().streaming() {
-        return Err(anyhow!("scalable FP comparison requires streaming state").into());
+        return Err(refuse!("scalable FP comparison requires streaming state").into());
     }
     let length = scalable.vector_length();
     let vector_bytes = length.bytes();
@@ -76,6 +76,7 @@ pub(super) fn complete(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Result;
     use stela_compiler::aarch64::{
         floating::{
             FPCR_AH, FPCR_EXCEPTION_ENABLE_MASK, FPSR_QC, Format, INPUT_DENORMAL, INVALID,

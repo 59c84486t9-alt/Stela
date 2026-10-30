@@ -13,14 +13,16 @@
 //! it whenever a System register write, an exception, an exception return
 //! or a PE switch may change either. Thunks clobber only RAX and flags.
 //!
-//! A [`count_thunk`] reads a count instead: the system count the engine's
-//! clock shows at the host's TSC ([`Count`]), less the cell's `value`.
-//! It also clobbers RCX and RDX, which are dead at every block exit (the
-//! direct exit returns in RAX and RDX, and chaining uses RCX).
+//! A [`count_thunk`] reads a count instead: the system count a clock
+//! publishes in a [`CountState`] at the host's TSC, through the reader's
+//! [`Count`], less the cell's `value`. It also clobbers RCX and RDX, which
+//! are dead at every block exit (the direct exit returns in RAX and RDX,
+//! and chaining uses RCX).
 use super::asm::{Alu, Asm, Cond, Gpr, Mem, Patch, ShiftOp, Size, Unary};
 use super::pointer::Thunk;
 use crate::{GuestAddress, block::ExitKind};
 use alloc::vec::Vec;
+use core::sync::atomic::AtomicU64;
 
 /// What a thunk reads.
 #[repr(C)]
@@ -34,22 +36,46 @@ pub struct Cell {
 const VALUE: i8 = core::mem::offset_of!(Cell, value) as i8;
 const _: () = assert!(core::mem::offset_of!(Cell, readable) == 0);
 
-/// The engine's system count at a host TSC value `tsc`: the larger of
-/// `((tsc - base) * per_tsc >> 64) + offset` and `last`, which becomes the
-/// new `last`, so the count never runs backwards.
+/// A clock's count as every reader computes it: at host count `host`
+/// (`((tsc - base) * per_tsc) >> 64`), `min(host + offset, ceiling)`, with
+/// wrapping addition. A writer makes `sequence` odd, changes `offset` and
+/// `ceiling` and makes it even again; a reader takes both from one even
+/// sequence and samples the TSC before that sequence ends, so readers on
+/// different cores see one count (a seqlock).
+#[repr(C, align(64))]
+#[derive(Debug, Default)]
+pub struct CountState {
+    pub sequence: AtomicU64,
+    pub offset: AtomicU64,
+    pub ceiling: AtomicU64,
+}
+
+const SEQUENCE: i8 = core::mem::offset_of!(CountState, sequence) as i8;
+const STATE_OFFSET: i8 = core::mem::offset_of!(CountState, offset) as i8;
+const CEILING: i8 = core::mem::offset_of!(CountState, ceiling) as i8;
+
+/// One reader of a [`CountState`] at `state`: its TSC scale, and `last`,
+/// the count it last read, below which it never reads, so its own count
+/// never runs backwards. `seen_*` hold the read in progress.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Count {
     pub base: u64,
     pub per_tsc: u64,
-    pub offset: u64,
     pub last: u64,
+    pub state: u64,
+    pub seen_sequence: u64,
+    pub seen_offset: u64,
+    pub seen_ceiling: u64,
 }
 
 const BASE: i8 = core::mem::offset_of!(Count, base) as i8;
 const PER_TSC: i8 = core::mem::offset_of!(Count, per_tsc) as i8;
-const OFFSET: i8 = core::mem::offset_of!(Count, offset) as i8;
 const LAST: i8 = core::mem::offset_of!(Count, last) as i8;
+const STATE: i8 = core::mem::offset_of!(Count, state) as i8;
+const SEEN_SEQUENCE: i8 = core::mem::offset_of!(Count, seen_sequence) as i8;
+const SEEN_OFFSET: i8 = core::mem::offset_of!(Count, seen_offset) as i8;
+const SEEN_CEILING: i8 = core::mem::offset_of!(Count, seen_ceiling) as i8;
 
 /// Xt's frame slot.
 fn register(rt: u8) -> Mem {
@@ -68,24 +94,49 @@ pub fn thunk(pc: GuestAddress, rt: u8, cell: u64) -> Thunk {
     finish(code, miss, pc)
 }
 
-/// The thunk completing `MRS Xt, <count>` at `pc` with the count at
-/// `count` less the `value` of the cell at `cell`, else exiting at `pc`.
+/// The thunk completing `MRS Xt, <count>` at `pc` with the count of the
+/// reader at `count` less the `value` of the cell at `cell`, else exiting
+/// at `pc`. It spins while a writer publishes; `lfence` keeps the TSC
+/// sample between the two sequence reads (Intel SDM Vol. 2B, RDTSC).
 pub fn count_thunk(pc: GuestAddress, rt: u8, cell: u64, count: u64) -> Thunk {
     use Gpr::{Rax, Rcx, Rdx};
     use Size::Qword;
     let (mut code, miss) = open(cell);
     let field = |offset| Mem::base_disp8(Rcx, offset);
+    let state = |offset| Mem::base_disp8(Rax, offset);
     let mut asm = Asm::new(&mut code);
     asm.mov_imm64(Rcx, count);
+    let start = asm.jmp8();
+    let busy = asm.len();
+    asm.pause();
+    asm.bind(start);
+    asm.mov_load(Qword, Rax, field(STATE));
+    asm.mov_load(Qword, Rdx, state(SEQUENCE));
+    asm.test_imm(Size::Byte, Rdx, 1);
+    let publishing = asm.jcc8(Cond::Ne);
+    asm.bind_back(publishing, busy);
+    asm.mov_store(Qword, field(SEEN_SEQUENCE), Rdx);
+    asm.mov_load(Qword, Rdx, state(STATE_OFFSET));
+    asm.mov_store(Qword, field(SEEN_OFFSET), Rdx);
+    asm.mov_load(Qword, Rdx, state(CEILING));
+    asm.mov_store(Qword, field(SEEN_CEILING), Rdx);
+    asm.lfence();
     asm.rdtsc();
+    asm.lfence();
     asm.shift_imm(ShiftOp::Shl, Qword, Rdx, 32);
     asm.alu(Alu::Or, Qword, Rax, Rdx);
     asm.alu_load(Alu::Sub, Qword, Rax, field(BASE));
     asm.unary(Unary::Mul, Qword, field(PER_TSC));
-    asm.alu_load(Alu::Add, Qword, Rdx, field(OFFSET));
-    asm.mov_load(Qword, Rax, field(LAST));
-    asm.alu(Alu::Cmp, Qword, Rdx, Rax);
-    asm.cmov(Cond::B, Qword, Rdx, Rax);
+    asm.mov_load(Qword, Rax, field(STATE));
+    asm.mov_load(Qword, Rax, state(SEQUENCE));
+    asm.alu_load(Alu::Cmp, Qword, Rax, field(SEEN_SEQUENCE));
+    let changed = asm.jcc8(Cond::Ne);
+    asm.bind_back(changed, busy);
+    asm.alu_load(Alu::Add, Qword, Rdx, field(SEEN_OFFSET));
+    asm.alu_load(Alu::Cmp, Qword, Rdx, field(SEEN_CEILING));
+    asm.cmov(Cond::A, Qword, Rdx, field(SEEN_CEILING));
+    asm.alu_load(Alu::Cmp, Qword, Rdx, field(LAST));
+    asm.cmov(Cond::B, Qword, Rdx, field(LAST));
     asm.mov_store(Qword, field(LAST), Rdx);
     if rt != 31 {
         asm.mov_imm64(Rax, cell);
@@ -235,17 +286,22 @@ mod tests {
         assert_eq!(state.x, before);
     }
 
-    /// A count read adds the offset to the scaled TSC (zero here, as
-    /// `per_tsc` is), never reads below `last` and keeps what it read
-    /// there, and subtracts the cell's value; XZR still moves `last`.
+    /// A count read adds the state's offset to the scaled TSC (zero here,
+    /// as `per_tsc` is), stays at or below its ceiling, never reads below
+    /// `last` and keeps what it read there, and subtracts the cell's value;
+    /// XZR still moves `last`.
     #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
     #[test]
-    fn count_thunks_read_a_monotonic_count_less_the_cell_value() {
+    fn count_thunks_read_a_monotonic_bounded_count_less_the_cell_value() {
         use crate::GuestState;
+        use core::sync::atomic::Ordering::Relaxed;
         let mut cell = alloc::boxed::Box::new(Cell::default());
+        let published = alloc::boxed::Box::new(CountState::default());
+        published.offset.store(100, Relaxed);
+        published.ceiling.store(u64::MAX, Relaxed);
         let mut count = alloc::boxed::Box::new(Count {
-            offset: 100,
             last: 50,
+            state: &*published as *const CountState as u64,
             ..Count::default()
         });
         let (cell_at, count_at) = (&mut *cell as *mut Cell, &mut *count as *mut Count);
@@ -259,20 +315,23 @@ mod tests {
                 value: 30,
             })
         };
+        let last = || {
+            // SAFETY: the Count box is live and every thunk run has returned.
+            unsafe { (*count_at).last }
+        };
         assert_eq!(run(&read.code, &mut state), NEXT);
-        // SAFETY: count_at points into the live Count box and the preceding thunk has returned.
-        assert_eq!((state.x[3], unsafe { (*count_at).last }), (70, 100));
-        // SAFETY: the box remains live and the native thunk is not running during this write.
-        unsafe { (*count_at).offset = 80 };
+        assert_eq!((state.x[3], last()), (70, 100));
+        published.offset.store(80, Relaxed);
         assert_eq!(run(&read.code, &mut state), NEXT);
-        // SAFETY: count_at points into the live Count box and the preceding thunk has returned.
-        assert_eq!((state.x[3], unsafe { (*count_at).last }), (70, 100));
-        // SAFETY: the box remains live and the native thunk is not running during this write.
-        unsafe { (*count_at).offset = 500 };
+        assert_eq!((state.x[3], last()), (70, 100));
+        published.offset.store(500, Relaxed);
+        published.ceiling.store(300, Relaxed);
+        assert_eq!(run(&read.code, &mut state), NEXT);
+        assert_eq!((state.x[3], last()), (270, 300));
+        published.ceiling.store(u64::MAX, Relaxed);
         let before = state.x;
         let discard = count_thunk(PC, 31, cell_at as u64, count_at as u64);
         assert_eq!(run(&discard.code, &mut state), NEXT);
-        // SAFETY: count_at still names the live Count box after the discard thunk returns.
-        assert_eq!((state.x, unsafe { (*count_at).last }), (before, 500));
+        assert_eq!((state.x, last()), (before, 500));
     }
 }

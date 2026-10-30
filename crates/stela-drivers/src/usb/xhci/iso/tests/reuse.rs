@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! xHCI isochronous retained-ring reuse fixtures.
+//! xHCI isochronous kept-ring reuse fixtures.
 use super::*;
 
 struct Exhausted;
@@ -92,11 +92,11 @@ fn reconfiguration_reuses_ring_cursor() {
 }
 
 #[test]
-fn allocation_failure_retains_reclaimed_rings() {
+fn allocation_failure_keeps_reclaimed_rings() {
     let mut backing = vec![0u64; 32 * 1024];
     let start = backing.as_mut_ptr() as u64;
     let mut dma =
-    // SAFETY: This allocation-failure fixture retains the original backing for both
+    // SAFETY: This allocation-failure fixture keeps the original backing for both
     // reclaimed rings and retry allocations. No callback can outlive the vector or
     // access it concurrently.
     unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
@@ -198,7 +198,7 @@ fn endpoint_owner_preflight() {
     let mut backing = vec![0u64; 32 * 1024];
     let start = backing.as_mut_ptr() as u64;
     let mut dma =
-    // SAFETY: This owner-preflight fixture retains all original and foreign ring
+    // SAFETY: This owner-preflight fixture keeps all original and foreign ring
     // allocations within its live vector; validation and any model accesses are
     // synchronous.
     unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };

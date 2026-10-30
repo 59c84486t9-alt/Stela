@@ -106,7 +106,7 @@ impl Io for Model {
     }
 }
 fn device(kind: Kind, revision: u16) -> Device {
-    // Intentionally raw vendor interface: no interrupt IN or bulk IN exists.
+    // Raw vendor interface: no interrupt IN or bulk IN exists.
     let config = vec![
         9, 2, 25, 0, 1, 1, 0, 0x80, 50, 9, 4, 0, 0, 1, 0xff, 0, 0, 0, 7, 5, 2, 2, 64, 0, 0,
     ];
@@ -184,7 +184,11 @@ fn model(
     body: usize,
 ) -> (Bootloader<Model>, Catalog, Rc<RefCell<Trace>>) {
     let device = device(kind, 1);
-    let binding = Binding::new(&device, &xhci::interfaces(&device.configuration)[0]).unwrap();
+    let binding = Binding::new(
+        &device,
+        &crate::usb::descriptor::interfaces(&device.configuration)[0],
+    )
+    .unwrap();
     let hardware = UsbIdentity::read(&device).hardware();
     let patch = image(body);
     let config = vec![0xa5; 20 + body];
@@ -247,7 +251,7 @@ fn attempt(e: &Error) -> (&Error, &Attempt) {
     }
 }
 #[test]
-fn source_alias_revision_and_actual_raw_interface_selection_is_exact() {
+fn source_alias_revision_and_raw_interface_selection_is_exact() {
     assert_eq!(SOURCE_USB_IDS.len(), 62);
     assert_eq!(
         SOURCE_USB_IDS
@@ -287,17 +291,17 @@ fn source_alias_revision_and_actual_raw_interface_selection_is_exact() {
     );
     for kind in [Kind::Ar3011, Kind::Ar3012] {
         let d = device(kind, 1);
-        let mut i = xhci::interfaces(&d.configuration)[0].clone();
+        let mut i = crate::usb::descriptor::interfaces(&d.configuration)[0].clone();
         assert!(Binding::new(&d, &i).is_ok());
         i.number = 1;
         assert!(Binding::new(&d, &i).is_err());
         let mut d = d.clone();
         d.configuration[20] = 3;
-        let i = &xhci::interfaces(&d.configuration)[0];
+        let i = &crate::usb::descriptor::interfaces(&d.configuration)[0];
         assert!(Binding::new(&d, i).is_err());
     }
     let d = device(Kind::Ar3012, 2);
-    assert!(Binding::new(&d, &xhci::interfaces(&d.configuration)[0]).is_err());
+    assert!(Binding::new(&d, &crate::usb::descriptor::interfaces(&d.configuration)[0]).is_err());
 }
 #[test]
 fn monolithic_and_split_images_complete_real_raw_protocol_with_exact_body_boundaries() {
@@ -376,7 +380,7 @@ fn crystal_selection_syscfg_always_loads_and_normal_mode_is_not_resubmitted() {
     }
 }
 #[test]
-fn every_operation_failure_is_terminal_and_retains_pending_bytes_and_first_error() {
+fn operation_failures_are_terminal_and_keep_first_error() {
     for kind in [Kind::Ar3011, Kind::Ar3012] {
         let (owner, _, _) = model(kind, 0, false, 0, 4097);
         let operations = owner.io.steps.len();
@@ -469,7 +473,7 @@ fn successful_upload_with_failed_retirement_keeps_full_historical_evidence() {
 }
 
 #[test]
-fn real_bind_configures_only_raw_output_and_retains_the_completed_uploader() {
+fn real_bind_configures_only_raw_output_and_keeps_the_completed_uploader() {
     use crate::bus::dma::RegionAllocator;
     let mut backing = vec![0u64; 64 * 1024];
     let start = backing.as_mut_ptr() as u64;
@@ -500,7 +504,10 @@ fn real_bind_configures_only_raw_output_and_retains_the_completed_uploader() {
             .iter()
             .filter(|(s, _)| s[0] == 0x40)
             .collect::<Vec<_>>(),
-        [&(xhci::setup(0x40, 1, 0, 0, 20), bytes[..20].to_vec())]
+        [&(
+            crate::usb::descriptor::setup(0x40, 1, 0, 0, 20),
+            bytes[..20].to_vec()
+        )]
     );
     assert_eq!(
         observed.outgoing,
@@ -514,11 +521,11 @@ fn real_bind_configures_only_raw_output_and_retains_the_completed_uploader() {
 }
 
 #[test]
-fn native_body_timeout_and_failed_stop_preserve_bytes_and_terminal_raw_owner() {
+fn body_timeout_keeps_bytes_and_terminal_owner() {
     use crate::bus::dma::RegionAllocator;
     let mut backing = vec![0u64; 64 * 1024];
     let start = backing.as_mut_ptr() as u64;
-    // SAFETY: retained backing exclusively owns all controller and raw DMA pages.
+    // SAFETY: backing exclusively owns all controller and raw DMA pages.
     let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
     let (controller, hardware) = xhci::model::unconfigured_cancellation_controller(&mut dma);
     hardware.borrow_mut().silence_transfer = Some(4);

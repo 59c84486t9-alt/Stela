@@ -27,9 +27,9 @@ use stela_loader::{
     mount_interface::CHOSEN_DISK,
 };
 use {
-    stela_formats::payload::gpt::DEFAULT_MIN_APPLE_BYTES, stela_runtime::machine::apple::sep_state,
-    stela_runtime::pc::boot_log, stela_runtime::pc::machine_state,
-    stela_runtime::pc::storage::Target, stela_soc_data::nor::CAPACITY, stela_soc_data::nor::Image,
+    stela_formats::payload::gpt::DEFAULT_MIN_APPLE_BYTES, stela_runtime::pc::boot_log,
+    stela_runtime::pc::machine_state, stela_runtime::pc::storage::Target,
+    stela_soc::machine::sep_state, stela_soc_data::nor::CAPACITY, stela_soc_data::nor::Image,
     stela_soc_data::nor::SECTOR_SIZE, stela_soc_data::nor::nvram::Partition,
     stela_soc_data::nor::nvram::Variables,
 };

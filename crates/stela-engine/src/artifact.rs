@@ -5,6 +5,7 @@ extern crate alloc;
 use alloc::{string::String, vec::Vec};
 use serde::{Deserialize, Serialize};
 use stela_compiler::GuestAddress;
+use stela_contracts::{Refusal, refuse};
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct Identity {
@@ -32,38 +33,26 @@ pub struct Manifest {
     pub memory_requirements: Option<stela_compiler::context::memory::MemoryRequirements>,
 }
 
-/// Actual loaded artifact data. Host cache paths and cache-hit bookkeeping are
-/// preparation details, not retained native/source ownership or entry grants.
-/// Actual loaders bind native bytes before retaining this descriptive container.
+/// Loaded artifact data. Host cache paths and cache-hit bookkeeping are
+/// preparation details, not kept native/source ownership or entry grants.
+/// Loaders bind native bytes before keeping this descriptive container.
 /// This data is not a nonforgeable capability; source/PE owners remain mandatory.
 #[derive(Debug)]
 pub(crate) struct LoadedArtifact {
     pub(crate) manifest: Manifest,
 }
 impl LoadedArtifact {
-    pub(crate) fn bind(manifest: Manifest, native: &[u8]) -> Result<Self, ArtifactError> {
+    pub(crate) fn bind(manifest: Manifest, native: &[u8]) -> Result<Self, Refusal> {
         validate_native_snapshot(&manifest, native)?;
         Ok(Self { manifest })
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ArtifactError(&'static str);
-impl core::fmt::Display for ArtifactError {
-    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        formatter.write_str(self.0)
-    }
-}
-impl core::error::Error for ArtifactError {}
-
-pub(crate) fn validate_native_snapshot(
-    manifest: &Manifest,
-    native: &[u8],
-) -> Result<(), ArtifactError> {
+pub(crate) fn validate_native_snapshot(manifest: &Manifest, native: &[u8]) -> Result<(), Refusal> {
     if native.len() != manifest.native_bytes
         || stela_formats::sha256(native) != manifest.native_sha256
     {
-        return Err(ArtifactError("native snapshot checksum mismatch"));
+        return Err(refuse!("native snapshot checksum mismatch"));
     }
     Ok(())
 }
@@ -75,9 +64,9 @@ pub(crate) fn validate_source_map(
     base: GuestAddress,
     source_bytes: usize,
     first_native_offset: usize,
-) -> Result<(), ArtifactError> {
+) -> Result<(), Refusal> {
     if manifest.verified {
-        return Err(ArtifactError(
+        return Err(refuse!(
             "invalid block source map length or verification claim",
         ));
     }
@@ -94,16 +83,16 @@ pub(crate) fn validate_source_map(
 }
 
 /// Shared geometry for absolute artifact PCs and page-relative stored PCs.
-/// Callers retain their own source-extent and identity checks.
+/// Callers keep their own source-extent and identity checks.
 pub(crate) fn validate_source_map_geometry(
     base: u64,
     source_bytes: usize,
     native_bytes: usize,
     first_native_offset: usize,
     entries: impl ExactSizeIterator<Item = (u64, usize)>,
-) -> Result<(), ArtifactError> {
+) -> Result<(), Refusal> {
     if entries.len() != source_bytes / 4 {
-        return Err(ArtifactError(
+        return Err(refuse!(
             "invalid block source map length or verification claim",
         ));
     }
@@ -113,15 +102,15 @@ pub(crate) fn validate_source_map_geometry(
             .ok()
             .and_then(|index| index.checked_mul(4))
             .and_then(|offset| base.checked_add(offset))
-            .ok_or(ArtifactError("source map address overflow"))?;
+            .ok_or(refuse!("source map address overflow"))?;
         if guest != expected {
-            return Err(ArtifactError("block source map guest mismatch"));
+            return Err(refuse!("block source map guest mismatch"));
         }
         if native >= native_bytes
             || !prior.is_none_or(|old| native > old)
             || (index == 0 && native != first_native_offset)
         {
-            return Err(ArtifactError("invalid block native source map offset"));
+            return Err(refuse!("invalid block native source map offset"));
         }
         prior = Some(native);
     }
@@ -140,7 +129,7 @@ mod tests {
         let overflow = [(u64::MAX - 3, 0), (0, 4)];
         assert_eq!(
             validate_source_map_geometry(u64::MAX - 3, 8, 8, 0, overflow.into_iter()),
-            Err(ArtifactError("source map address overflow"))
+            Err(refuse!("source map address overflow"))
         );
     }
 }

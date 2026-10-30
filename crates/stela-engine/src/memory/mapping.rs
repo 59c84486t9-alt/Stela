@@ -10,26 +10,29 @@ use super::{
     MAX_IMAGE_MEMORY_BYTES, MemoryRegion, host_page_size,
 };
 use super::{MemoryRegionSpec, OwnedMemory};
+use crate::Result;
+#[cfg(host_memory)]
+use crate::error::Io;
 #[cfg(host_memory)]
 use alloc::collections::BTreeMap;
 #[cfg(not(host_memory))]
 use alloc::vec::Vec;
-use anyhow::Result;
-#[cfg(host_memory)]
-use anyhow::{Context, bail, ensure};
 #[cfg(host_memory)]
 use core::marker::PhantomData;
 #[cfg(host_memory)]
 use std::fs::File;
 #[cfg(host_memory)]
 use std::os::fd::AsRawFd;
+use stela_contracts::refuse;
+#[cfg(host_memory)]
+use stela_contracts::require;
 
 /// Exact-address private mapping of existing ordinary file bytes, without a
 /// heap copy or implicit guest-visible BSS. The logical extent must fit the file;
 /// host-page rounding may include the file's final partial page, whose padding
 /// is never exposed through the safe guest-memory API.
 ///
-/// Retained allocation storage keeps the file descriptor. MAP_PRIVATE prevents our writes
+/// Allocation storage keeps the file descriptor. MAP_PRIVATE prevents our writes
 /// from modifying the file; it does not freeze unrelated writes/truncation to
 /// that inode. Source identity, provenance and stability for the entire mapping
 /// lifetime are the caller's responsibility. Truncation can cause native faults.
@@ -96,7 +99,7 @@ impl From<FileMemoryRegionSpec> for MappingSpec {
 pub(super) fn page_rounded(bytes: u64, page: u64) -> Result<u64> {
     Ok(bytes
         .checked_add(page - 1)
-        .context("guest mapping size overflow")?
+        .ok_or(refuse!("guest mapping size overflow"))?
         & !(page - 1))
 }
 
@@ -113,7 +116,7 @@ impl OwnedMemory {
     #[cfg(not(host_memory))]
     pub fn map(specs: Vec<MemoryRegionSpec>) -> Result<Self> {
         let _ = specs;
-        anyhow::bail!("freestanding guest RAM mappings are not mounted")
+        Err(refuse!("freestanding guest RAM mappings are not mounted").into())
     }
 
     #[cfg(host_memory)]
@@ -123,7 +126,7 @@ impl OwnedMemory {
     ) -> Result<Self> {
         let mut table = BTreeMap::new();
         for limit in limits {
-            ensure!(
+            require!(
                 table.insert(limit.guest_address, limit).is_none(),
                 "duplicate data protection limit"
             );
@@ -132,16 +135,16 @@ impl OwnedMemory {
             let spec = specs
                 .iter()
                 .find(|s| s.guest_address == address)
-                .context("data protection limit has no mapping")?;
-            ensure!(
+                .ok_or(refuse!("data protection limit has no mapping"))?;
+            require!(
                 !spec.executable,
                 "data protection limit cannot grant executable source rights"
             );
-            ensure!(
+            require!(
                 !limit.writable || limit.readable,
                 "maximum write permission requires read permission"
             );
-            ensure!(
+            require!(
                 (!spec.readable || limit.readable) && (!spec.writable || limit.writable),
                 "initial data protection exceeds maximum"
             );
@@ -159,7 +162,7 @@ impl OwnedMemory {
         limits: Vec<DataProtectionLimit>,
     ) -> Result<Self> {
         let _ = (specs, limits);
-        anyhow::bail!("freestanding guest RAM mappings are not mounted")
+        Err(refuse!("freestanding guest RAM mappings are not mounted").into())
     }
 
     /// Map owned file-backed regions without copying their contents.
@@ -185,7 +188,7 @@ impl OwnedMemory {
         limit: u64,
         limits: BTreeMap<u64, DataProtectionLimit>,
     ) -> Result<Self> {
-        ensure!(
+        require!(
             cfg!(all(
                 target_arch = "x86_64",
                 any(target_os = "linux", target_os = "macos")
@@ -198,11 +201,11 @@ impl OwnedMemory {
         let mut previous_end = 0u64;
         // Validate the complete set before changing the process address space.
         for spec in &specs {
-            ensure!(
+            require!(
                 spec.guest_address >= page && spec.guest_address.is_multiple_of(page),
                 "guest address must be nonzero and host-page aligned"
             );
-            ensure!(
+            require!(
                 spec.virtual_bytes > 0,
                 "guest virtual size must be positive"
             );
@@ -210,31 +213,32 @@ impl OwnedMemory {
             let end = spec
                 .guest_address
                 .checked_add(mapped_bytes)
-                .context("guest mapping address overflow")?;
-            ensure!(
+                .ok_or(refuse!("guest mapping address overflow"))?;
+            require!(
                 end <= DIRECT_RAM_USER_END,
                 "guest mapping exceeds canonical user range"
             );
-            usize::try_from(end).context("guest mapping exceeds native address range")?;
-            ensure!(spec.guest_address >= previous_end, "guest mappings overlap");
+            usize::try_from(end)
+                .map_err(|_| refuse!("guest mapping exceeds native address range"))?;
+            require!(spec.guest_address >= previous_end, "guest mappings overlap");
             match &spec.initial {
-                InitialMemory::Anonymous(bytes) => ensure!(
+                InitialMemory::Anonymous(bytes) => require!(
                     bytes.len() as u64 <= spec.virtual_bytes,
                     "initial bytes exceed guest virtual size"
                 ),
                 InitialMemory::File { file, offset } => {
-                    ensure!(
+                    require!(
                         offset.is_multiple_of(page),
                         "file mapping offset must be host-page aligned"
                     );
                     libc::off_t::try_from(*offset)
-                        .context("file mapping offset exceeds native range")?;
-                    let metadata = file.metadata().context("cannot inspect backing file")?;
-                    ensure!(metadata.is_file(), "file mapping requires an ordinary file");
+                        .map_err(|_| refuse!("file mapping offset exceeds native range"))?;
+                    let metadata = file.metadata().io("inspect backing file")?;
+                    require!(metadata.is_file(), "file mapping requires an ordinary file");
                     let file_end = offset
                         .checked_add(spec.virtual_bytes)
-                        .context("file mapping extent overflow")?;
-                    ensure!(
+                        .ok_or(refuse!("file mapping extent overflow"))?;
+                    require!(
                         file_end <= metadata.len(),
                         "file mapping exceeds backing file bytes"
                     );
@@ -243,26 +247,26 @@ impl OwnedMemory {
                     let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
                     if flags == -1 {
                         return Err(std::io::Error::last_os_error())
-                            .context("cannot inspect backing file access mode");
+                            .io("inspect backing file access mode");
                     }
-                    ensure!(
+                    require!(
                         flags & libc::O_ACCMODE != libc::O_WRONLY,
                         "backing file descriptor is not readable"
                     );
                 }
             }
-            ensure!(
+            require!(
                 !(spec.writable && spec.executable),
                 "writable guest code is unsupported"
             );
-            ensure!(
+            require!(
                 !spec.writable || spec.readable,
                 "write-only guest memory is unsupported by the x86-64 protection profile"
             );
             total = total
                 .checked_add(mapped_bytes)
-                .context("guest mapping size overflow")?;
-            ensure!(total <= limit, "guest mappings exceed memory limit");
+                .ok_or(refuse!("guest mapping size overflow"))?;
+            require!(total <= limit, "guest mappings exceed memory limit");
             previous_end = end;
         }
 
@@ -284,8 +288,8 @@ impl OwnedMemory {
                     0,
                     file.as_raw_fd(),
                     libc::off_t::try_from(*offset)
-                        .context("file mapping offset exceeds native range")?,
-                    usize::try_from(spec.virtual_bytes)?,
+                        .map_err(|_| refuse!("file mapping offset exceeds native range"))?,
+                    spec.virtual_bytes as usize,
                 ),
             };
             let flags = libc::MAP_PRIVATE | source_flags;
@@ -308,18 +312,18 @@ impl OwnedMemory {
                 )
             };
             if mapped == libc::MAP_FAILED {
-                return Err(std::io::Error::last_os_error()).with_context(|| {
-                    format!("cannot map guest range at {:#x}", spec.guest_address)
-                });
+                return Err(std::io::Error::last_os_error())
+                    .io(refuse!("map a guest range", address = spec.guest_address));
             }
             if mapped != requested {
                 // SAFETY: this allocation belongs to this call, including when
                 // macOS substituted a non-overlapping address for an occupied hint.
                 unsafe { libc::munmap(mapped, length) };
-                bail!(
-                    "requested guest address {:#x} is unavailable",
-                    spec.guest_address
-                );
+                return Err(refuse!(
+                    "requested guest address is unavailable",
+                    address = spec.guest_address
+                )
+                .into());
             }
             // SAFETY: newly owned whole pages with a checked address and
             // extent, coherent write-back storage and no guest references
@@ -336,7 +340,7 @@ impl OwnedMemory {
                     (NativeStorage::private_file(native, file), None)
                 }
             };
-            // Register retained ownership before any later operation can fail.
+            // Register kept ownership before any later operation can fail.
             let limit = limits.get(&spec.guest_address);
             memory.allocations.push(Allocation {
                 shared_backing: None,
@@ -379,8 +383,7 @@ impl OwnedMemory {
             } | if spec.writable { libc::PROT_WRITE } else { 0 };
             // SAFETY: this owner exclusively owns the validated mapped range.
             if unsafe { libc::mprotect(mapped, length, protection) } != 0 {
-                return Err(std::io::Error::last_os_error())
-                    .context("cannot protect guest mapping");
+                return Err(std::io::Error::last_os_error()).io("protect guest mapping");
             }
         }
         Ok(memory)

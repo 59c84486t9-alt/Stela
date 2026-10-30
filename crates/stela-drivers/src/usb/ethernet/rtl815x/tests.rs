@@ -1,4 +1,5 @@
 use super::*;
+use crate::usb::descriptor::*;
 use crate::usb::ethernet;
 use crate::usb::xhci::{model, model::*, *};
 use alloc::string::String;
@@ -536,6 +537,8 @@ fn rtl8152b_binds_real_xhci_dma_moves_aggregates_wraps_and_quiesces() {
                     unsafe { core::slice::from_raw_parts(buffer as *const u8, bytes).to_vec() };
                 assert!(link.transmit(&[0x88; 60]).is_err());
                 assert_eq!(
+                    // SAFETY: the pointer addresses this test's own live pages, and the stopped
+                    // model writes nothing concurrently.
                     unsafe { core::slice::from_raw_parts(buffer as *const u8, bytes) },
                     before
                 );
@@ -545,7 +548,7 @@ fn rtl8152b_binds_real_xhci_dma_moves_aggregates_wraps_and_quiesces() {
 }
 
 #[test]
-fn rtl815x_firmware_uses_actual_ep0_dma_wrapping_and_poison_guards() {
+fn rtl815x_firmware_uses_ep0_dma_wrapping_and_poison_guards() {
     use ethernet::{
         firmware::{Firmware, tests::synthetic_upload},
         rtl815x::{Chip, FirmwareModel, Revision},
@@ -667,7 +670,7 @@ fn rtl8153_missing_exact_firmware_never_creates_a_native_link() {
 }
 
 #[test]
-fn rtl8153_native_usb2_usb3_binding_uploads_exact_provider_and_retains_owned_receipt() {
+fn rtl8153_native_usb2_usb3_binding_uploads_exact_provider_and_keeps_owned_receipt() {
     use crate::{
         firmware::{Catalog, Provenance, Provider, Resource, Target},
         net::Link,
@@ -865,7 +868,7 @@ fn rtl8153_native_usb2_usb3_binding_uploads_exact_provider_and_retains_owned_rec
         } else {
             assert!(link.firmware.is_none());
         }
-        drop(provider); // Actual native link must not borrow the image/catalog.
+        drop(provider); // Native link must not borrow the image/catalog.
         assert!(link.carrier());
         link.transmit(&[0x5a; 1514]).unwrap();
         assert_eq!(model.borrow().outgoing[0].len(), 1522);

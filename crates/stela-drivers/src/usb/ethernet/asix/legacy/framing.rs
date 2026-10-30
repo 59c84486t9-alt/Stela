@@ -74,7 +74,7 @@ impl Decoder {
         let mut frames = Vec::new();
         while offset + 2 <= bytes.len() {
             if self.remaining == 0 {
-                // Finish a retained low half before recognizing a new split header.
+                // Finish a low half before recognizing a new split header.
                 // The pinned donor reverses these cases and loses 2+2 headers.
                 if bytes.len() - offset == 2 && !self.split {
                     self.header = u32::from(u16::from_le_bytes(

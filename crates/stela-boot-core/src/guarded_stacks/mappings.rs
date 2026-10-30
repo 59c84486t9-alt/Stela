@@ -1,4 +1,4 @@
-//! Read-only page-table qualification, separate from actual ownership admission.
+//! Read-only page-table validation, separate from ownership admission.
 use super::Slot;
 const PAGE: u64 = 4096;
 const ADDRESS: u64 = 0x000f_ffff_ffff_f000;
@@ -68,7 +68,7 @@ fn leaf(
     Err(Error::Geometry)
 }
 /// Observed leaf data only. It grants no mapping, table-frame, CPU or memory
-/// authority; native users separately retain the actual root/table owners.
+/// permission; native users separately keep the root/table owners.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Observation {
     pub physical: u64,
@@ -77,7 +77,7 @@ pub struct Observation {
     pub nx: bool,
     pub pat_index: usize,
 }
-/// Decode one actual or modeled root using the caller's bounded table reader.
+/// Decode one or modeled root using the caller's bounded table reader.
 /// Missing/foreign table storage is an error, not an absent device mapping.
 pub fn observe(
     address: u64,
@@ -99,8 +99,8 @@ pub fn observe(
     })
 }
 /// Verify an entire page-aligned alignment/guard hole is absent in every
-/// retained root. The supplied reader and numeric roots remain data only;
-/// native callers separately retain every actual table/root/control owner.
+/// root. The supplied reader and numeric roots remain data only;
+/// native callers separately keep every table/root/control owner.
 pub fn absent(
     range: core::ops::Range<u64>,
     roots: &[u64],
@@ -127,11 +127,11 @@ pub fn absent(
     }
     Ok(())
 }
-/// Check every retained root against the exact physical backing, RW/NX,
+/// Check every root against the exact physical backing, RW/NX,
 /// supervisor access and WB PAT selection; both guard pages must be absent.
-/// The caller still owns/retains actual table pages, root/control epochs,
+/// The caller still owns/keeps table pages, root/control epochs,
 /// MTRR-effective WB, RAM exclusion and all writable aliases. A synthetic
-/// reader or numeric root list confers none of that native authority.
+/// reader or numeric root list confers none of that native permission.
 pub fn qualify(
     slot: &Slot,
     physical: u64,
@@ -280,7 +280,7 @@ mod tests {
         );
     }
     #[test]
-    fn observation_preserves_actual_leaf_fields_and_rejects_unknown_table_storage() {
+    fn observation_preserves_leaf_fields_and_rejects_unknown_table_storage() {
         let t = tables();
         let read = |table: u64, index: usize| {
             table

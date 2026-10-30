@@ -336,7 +336,7 @@ mod tests {
     }
 
     #[test]
-    fn binary_scalar_vector_and_pairwise_forms_cover_every_width_and_alias() {
+    fn binary_minmax_decoding_covers_every_form() {
         let mut arrangements = 0;
         for (opcode, operation) in SCALAR_OPERATIONS {
             for (field, format) in [

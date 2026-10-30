@@ -6,9 +6,11 @@
 //! RAM, the board's devices and a hub (`stela_engine::machine::engine::
 //! parallel`).
 use super::{SLICE, WAIT_POLLS_PER_SECOND, host, output};
+use crate::Result;
 use crate::{apic::Apic, native_smp::executor::Executors};
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use stela_compiler::TargetCpu;
+use stela_contracts::refuse;
 use stela_engine::machine::Cpu;
 use stela_engine::machine::CpuProfile;
 use stela_engine::machine::Host;
@@ -21,9 +23,9 @@ pub(crate) use stela_engine::machine::engine::SourcePhase;
 use stela_engine::machine::engine::publication::WorkerBinding;
 pub(crate) use stela_engine::machine::engine::{Counts, RunBudget};
 use stela_engine::machine::exception::Pstate;
-use stela_runtime::machine::apple::AppleDevices;
+use stela_soc::machine::AppleDevices;
 
-/// Budget for retained block buffers and index/FIFO metadata shared by the PEs
+/// Budget for kept block buffers and index/FIFO metadata shared by the PEs
 /// (`translations::share`).
 pub(crate) const SHARED_CODE_BYTES: usize = 64 << 20;
 
@@ -67,6 +69,8 @@ pub(crate) struct Settings {
     pub target: TargetCpu,
     pub traces: Vec<u64>,
     pub watches: Vec<(u64, u64)>,
+    /// `--profile`: time each engine phase, as the home machine does.
+    pub step_timing: bool,
 }
 
 /// Give each AP the PE its worker binding names, to run on a machine of its
@@ -79,7 +83,7 @@ pub(crate) fn spawn<H: Host>(
     sender: &Apic,
     tsc_hz: u64,
     settings: &Settings,
-) -> Result<(), &'static str> {
+) -> Result<()> {
     for binding in bindings {
         if binding.pe == home.processor() {
             continue;
@@ -88,7 +92,7 @@ pub(crate) fn spawn<H: Host>(
             .processors()
             .iter()
             .find(|processor| processor.slot() == binding.worker.0)
-            .ok_or("a PE's worker has no AP")?;
+            .ok_or(refuse!("a PE's worker has no AP"))?;
         let pe = Pe {
             pe: binding.pe,
             devices: home.devices.worker(),
@@ -97,6 +101,7 @@ pub(crate) fn spawn<H: Host>(
             target: settings.target,
             traces: settings.traces.clone(),
             watches: settings.watches.clone(),
+            step_timing: settings.step_timing,
         };
         processor.spawn(Box::new(move |owner| pe.run(owner)), sender, tsc_hz)?;
     }
@@ -119,6 +124,7 @@ struct Pe {
     target: TargetCpu,
     traces: Vec<u64>,
     watches: Vec<(u64, u64)>,
+    step_timing: bool,
 }
 
 impl Pe {
@@ -131,6 +137,7 @@ impl Pe {
             target,
             traces,
             watches,
+            step_timing,
         } = self;
         // This core's driver calls keep the engine's TLB entries.
         let _tagged = super::storage::TaggedRoots::enable();
@@ -145,6 +152,7 @@ impl Pe {
         let before = own();
         let mut machine = Machine::new_at(cpu, owner.host(), devices, profile, target, pe)
             .unwrap_or_else(|error| output::fatal(error));
+        machine.set_step_timing(step_timing);
         let observing = !traces.is_empty() || !watches.is_empty();
         if !traces.is_empty() {
             machine.set_traces(&traces);
@@ -175,6 +183,9 @@ impl Pe {
             if observing {
                 report_diagnostics(&mut machine);
             }
+            // What this PE answered degraded: the home PE reports its own
+            // and the devices' coprocessor requests.
+            super::reports::unmodeled_report(&mut machine, Vec::new());
             match stop {
                 // A PE that waits for an interrupt serves the host meanwhile.
                 stop if machine.yielded_for_interrupt(&stop) => super::service::serve(false),
@@ -187,7 +198,7 @@ impl Pe {
 }
 
 /// The home and secondary PEs' records, including the PE that made each hit.
-/// Each machine retains at most TRACE_HITS and WATCH_HITS between drains;
+/// Each machine keeps at most TRACE_HITS and WATCH_HITS between drains;
 /// their last records report any overflow rather than hiding lost hits.
 pub(super) fn report_diagnostics<H: Host>(machine: &mut Machine<H, Board>) {
     for hit in machine.take_trace_hits() {
@@ -234,7 +245,7 @@ pub(super) fn report_source_observations<H: Host>(home: &Machine<H, Board>) {
             Some(observed) => {
                 let source = observed.source;
                 output::arguments(format_args!(
-                    "PE SOURCE pe={pe} sequence={} observed_host_counter={:#x} phase={:?} pc={:#x} el={} daif={:#x} sp={:#x} lr={:#x}\n",
+                    "PE SOURCE pe={pe} sequence={} observed_host_counter={:#x} phase={:?} pc={:#x} el={} daif={:#x} sp={:#x} fp={:#x} lr={:#x}\n",
                     observed.sequence,
                     source.host_counter,
                     source.phase,
@@ -242,6 +253,7 @@ pub(super) fn report_source_observations<H: Host>(home: &Machine<H, Board>) {
                     source.el,
                     source.daif,
                     source.sp,
+                    source.fp,
                     source.lr
                 ));
             }
@@ -257,9 +269,9 @@ pub(super) fn report_source_observations<H: Host>(home: &Machine<H, Board>) {
     for pe in 0..hub.pes() {
         match hub.broadcast_profile(pe) {
             Some(profile) => {
-                let [tlb, code, power] = profile.kinds;
+                let [tlb, code, power, completion] = profile.kinds;
                 output::arguments(format_args!(
-                    "PE BROADCAST pe={pe} tlb={}/{}/{}/{}/{}/{} code={}/{}/{}/{}/{}/{} power={}/{}/{}/{}/{}/{} active={:?} active_start={:#x} dropped={}\n",
+                    "PE BROADCAST pe={pe} tlb={}/{}/{}/{}/{}/{} code={}/{}/{}/{}/{}/{} power={}/{}/{}/{}/{}/{} completion={}/{}/{}/{}/{}/{} active={:?} active_start={:#x} dropped={}\n",
                     tlb.started,
                     tlb.completed,
                     tlb.recipients,
@@ -278,6 +290,12 @@ pub(super) fn report_source_observations<H: Host>(home: &Machine<H, Board>) {
                     power.elapsed_ticks,
                     power.maximum_ticks,
                     power.polls,
+                    completion.started,
+                    completion.completed,
+                    completion.recipients,
+                    completion.elapsed_ticks,
+                    completion.maximum_ticks,
+                    completion.polls,
                     profile.active,
                     profile.active_start,
                     profile.dropped_updates

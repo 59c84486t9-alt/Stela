@@ -1,17 +1,19 @@
-//! Authored controller fixture over the actual registered native RAM owner.
+//! Authored controller fixture over the registered native RAM owner.
 //! Geometry follows the model's direct resource contract; these configuration
 //! words are explicit fixture policy, never Apple boot-state measurements.
+use crate::Result;
 use alloc::{sync::Arc, vec};
+use stela_contracts::refuse;
 use stela_engine::memory::RegisteredSystemRam;
-use stela_runtime::machine::apple::AppleDevices;
-use stela_runtime::machine::apple::memory_resources::LifecycleState;
-use stela_runtime::machine::apple::memory_resources::t8112::CHANNEL_STRIDE;
-use stela_runtime::machine::apple::memory_resources::t8112::CHANNELS;
-use stela_runtime::machine::apple::memory_resources::t8112::ChannelConfiguration;
-use stela_runtime::machine::apple::memory_resources::t8112::Prepared;
-use stela_runtime::machine::apple::memory_resources::t8112::cache::EmptyResource;
-use stela_runtime::machine::apple::memory_resources::t8112::cache::SoftwareImage;
-use stela_runtime::machine::apple::memory_resources::t8112::cache::ZeroWayConfiguration;
+use stela_soc::machine::AppleDevices;
+use stela_soc::machine::memory_resources::LifecycleState;
+use stela_soc::machine::memory_resources::t8112::CHANNEL_STRIDE;
+use stela_soc::machine::memory_resources::t8112::CHANNELS;
+use stela_soc::machine::memory_resources::t8112::ChannelConfiguration;
+use stela_soc::machine::memory_resources::t8112::Prepared;
+use stela_soc::machine::memory_resources::t8112::cache::EmptyResource;
+use stela_soc::machine::memory_resources::t8112::cache::SoftwareImage;
+use stela_soc::machine::memory_resources::t8112::cache::ZeroWayConfiguration;
 use stela_soc_data::amcc::Layout;
 use stela_soc_data::amcc::LockGroup;
 use stela_soc_data::amcc::Register;
@@ -26,7 +28,7 @@ const DCS: u64 = APERTURE + 0x1000000;
 pub(super) const DRAIN: u64 = DCS + 0xa40;
 pub(super) const FLUSH: u64 = APERTURE + 0xf01c2c;
 
-pub(super) fn devices(ram: Arc<RegisteredSystemRam>) -> Result<AppleDevices, &'static str> {
+pub(super) fn devices(ram: Arc<RegisteredSystemRam>) -> Result<AppleDevices> {
     let register = |offset, mask, value| Register {
         offset,
         mask,
@@ -100,7 +102,7 @@ pub(super) fn devices(ram: Arc<RegisteredSystemRam>) -> Result<AppleDevices, &'s
         ram,
     )?;
     let lock_owner = owner.initialize_amcc_locks(locks, [None; 4], lifecycle)?;
-    // Authored input deliberately has no outer-cache allocation path. No
+    // Authored input has no outer-cache allocation path. No
     // original command line, capacity, reset image or PMP grant is supplied.
     let cache = EmptyResource::initialized(
         lock_owner,
@@ -110,6 +112,6 @@ pub(super) fn devices(ram: Arc<RegisteredSystemRam>) -> Result<AppleDevices, &'s
     let mut devices = AppleDevices::new();
     devices
         .add_t8112_empty_memory_resources(owner, cache)
-        .map_err(|_| "cold actual MCC placement refused")?;
+        .map_err(|_| refuse!("cold actual MCC placement refused"))?;
     Ok(devices)
 }

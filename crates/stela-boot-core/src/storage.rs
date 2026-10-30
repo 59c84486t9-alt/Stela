@@ -1,11 +1,13 @@
 //! The host-storage options of `stela.cfg`: `split` separates the
 //! `--storage` and `--storage-check` targets from the rest of the line, and
 //! the USB check requests are validated against them.
+use crate::Result;
 use alloc::{string::String, vec::Vec};
+use stela_contracts::refuse;
 use stela_runtime::pc::storage::Target;
 
 /// The storage options, and the rest of `stela.cfg` for the mount.
-pub fn split(options: &str) -> Result<(Vec<Target>, Vec<Target>, String), &'static str> {
+pub fn split(options: &str) -> Result<(Vec<Target>, Vec<Target>, String)> {
     let mut open = Vec::new();
     let mut check = Vec::new();
     let mut rest = String::new();
@@ -23,31 +25,30 @@ pub fn split(options: &str) -> Result<(Vec<Target>, Vec<Target>, String), &'stat
                 continue;
             }
         };
-        list.push(words.next().ok_or("missing storage target")?.parse()?);
+        list.push(
+            words
+                .next()
+                .ok_or(refuse!("missing storage target"))?
+                .parse()?,
+        );
     }
     Ok((open, check, rest))
 }
 
-pub fn reset_requested(
-    text: &str,
-    open: &[Target],
-    check: &[Target],
-) -> Result<bool, &'static str> {
+pub fn reset_requested(text: &str, open: &[Target], check: &[Target]) -> Result<bool> {
     let reset_count = text
         .split_ascii_whitespace()
         .filter(|word| *word == "--usb-reset-check")
         .count();
     if reset_count > 1 || reset_count == 1 && (check.len() != 1 || !open.is_empty()) {
-        return Err("USB reset check requires exactly one storage-check target");
+        return Err(refuse!(
+            "USB reset check requires exactly one storage-check target"
+        ));
     }
     Ok(reset_count == 1)
 }
 
-pub fn media_requested(
-    text: &str,
-    open: &[Target],
-    check: &[Target],
-) -> Result<bool, &'static str> {
+pub fn media_requested(text: &str, open: &[Target], check: &[Target]) -> Result<bool> {
     let count = text
         .split_ascii_whitespace()
         .filter(|word| *word == "--usb-media-check")
@@ -60,7 +61,9 @@ pub fn media_requested(
                     .split_ascii_whitespace()
                     .any(|word| word == "--usb-reset-check"))
     {
-        return Err("USB media check requires one storage-check target and excludes reset check");
+        return Err(refuse!(
+            "USB media check requires one storage-check target and excludes reset check"
+        ));
     }
     Ok(count == 1)
 }

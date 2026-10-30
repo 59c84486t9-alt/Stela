@@ -185,4 +185,4 @@ impl Drop for Host {
 }
 
 #[cfg(test)]
-pub(crate) mod generation_tests;
+pub(crate) mod tests;

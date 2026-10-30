@@ -5,7 +5,7 @@ use core::cell::Cell;
 pub struct Statistics {
     pub first_word_fetches: u64,
     pub full_source_fetches: u64,
-    /// Actual Execute MMU resolution calls; M=0 can resolve without descriptors.
+    /// Execute MMU resolution calls; M=0 can resolve without descriptors.
     pub resolutions: u64,
     pub descriptor_reads: u64,
     pub requested_bytes: u64,

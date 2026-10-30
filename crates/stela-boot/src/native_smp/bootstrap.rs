@@ -8,7 +8,9 @@
 //! remain outside this containment. No early IST/task gate is supplied: a
 //! corrupt stack, IDT or faulting exception delivery can still double/triple
 //! fault. This contains ordinary delivered exceptions, not every CPU shutdown.
+use crate::Result;
 use core::arch::global_asm;
+use stela_contracts::refuse;
 
 use super::memory_types::{Image, MAX_WRITABLE, Write, amd};
 use crate::{layout, tables::PAGE};
@@ -42,7 +44,7 @@ global_asm!(
     "lea {page}(%ebp), %esp",
     "lidtl (stela_ap_idtr32 - stela_ap_start)(%ebp)",
     // No shared high memory is reached before the cache/MTRR image. INIT
-    // retains cache contents, so flush under the now-installed early32 IDT.
+    // keeps cache contents, so flush under the now-installed early32 IDT.
     "mov %cr0, %eax",
     "andl $0xdfffffff, %eax", // NW=0
     "orl $0x40000000, %eax", // CD=1
@@ -52,8 +54,8 @@ global_asm!(
     "mov %eax, %cr4",
     "mov (stela_ap_root - stela_ap_start)(%ebp), %eax",
     "mov %eax, %cr3",
-    // The AP has qualified long mode/NX/PAT/FXSR/SSE before INIT. It never
-    // inherits firmware PCID, CET or unqualified OS XSTATE controls.
+    // The AP has checked long mode/NX/PAT/FXSR/SSE before INIT. It never
+    // inherits firmware PCID, CET or unchecked OS XSTATE controls.
     "mov $0xc0000080, %ecx",
     "mov $0x900, %eax", // LME | NXE; LMA is hardware-owned.
     "xor %edx, %edx",
@@ -289,6 +291,23 @@ fn offset(symbol: *const u8) -> usize {
     unsafe { symbol.offset_from(&raw const stela_ap_start) as usize }
 }
 
+/// The exception stubs, IDTs and fault record lie inside the copied image,
+/// and the record is aligned for its sealed 8-byte fields.
+fn image_holds_its_tables(bytes: usize) -> bool {
+    use early::{EXCEPTIONS, Record, STUB_BYTES};
+    let record = offset(&raw const stela_ap_fault_record);
+    record.is_multiple_of(8)
+        && [
+            (offset(&raw const stela_ap_stubs32), EXCEPTIONS * STUB_BYTES),
+            (offset(&raw const stela_ap_stubs64), EXCEPTIONS * STUB_BYTES),
+            (offset(&raw const stela_ap_idt32), EXCEPTIONS * 8),
+            (offset(&raw const stela_ap_idt64), EXCEPTIONS * 16),
+            (record, core::mem::size_of::<Record>()),
+        ]
+        .into_iter()
+        .all(|(table, size)| table + size <= bytes)
+}
+
 pub(crate) struct Entry<'a> {
     /// Identity-mapped paging root, below 4 GiB, containing the low page and
     /// the permanently pinned high-window entry/stack/argument mappings.
@@ -297,7 +316,7 @@ pub(crate) struct Entry<'a> {
     /// This selected physical AP's own immutable firmware CPUID1 EAX, not
     /// the BSP's signature or a model name selected by the ARM guest profile.
     pub processor_signature: u32,
-    /// The BSP's installed PAT, qualified against each AP's memory-type state.
+    /// The BSP's installed PAT, checked against each AP's memory-type state.
     pub pat: u64,
     pub memory_types: &'a Image,
     pub stack_top: u64,
@@ -311,14 +330,13 @@ pub(crate) struct Entry<'a> {
 /// `mapped` is the exclusive writable alias of one owned page at `physical`.
 /// No AP is reading that page, including a timed-out prior startup. The page,
 /// root, entry, stack and argument mappings remain live through AP entry and
-/// recovery; the caller has qualified this AP's features and memory types.
+/// recovery; the caller has checked this AP's features and memory types.
 /// The low identity alias is executable and the high stack is writable/NX.
-pub(crate) unsafe fn prepare(
-    mapped: *mut u8,
-    physical: u64,
-    entry: Entry<'_>,
-) -> Result<u8, &'static str> {
+pub(crate) unsafe fn prepare(mapped: *mut u8, physical: u64, entry: Entry<'_>) -> Result<u8> {
     let bytes = offset(&raw const stela_ap_end);
+    if !image_holds_its_tables(bytes) {
+        return Err(refuse!("AP bootstrap tables lie outside its image"));
+    }
     if !(PAGE..1 << 20).contains(&physical)
         || !physical.is_multiple_of(PAGE)
         || bytes > PAGE as usize - early::STACK_BYTES
@@ -329,7 +347,7 @@ pub(crate) unsafe fn prepare(
         || entry.stack_top == 0
         || entry.stack_top & 15 != 0
     {
-        return Err("invalid owned AP bootstrap mappings");
+        return Err(refuse!("invalid owned AP bootstrap mappings"));
     }
     // SAFETY: exclusive owned destination and immutable assembly text. All
     // patch symbols lie inside `bytes`, which fits in the supplied page.
@@ -443,37 +461,13 @@ pub(crate) unsafe fn prepare(
     Ok((physical / PAGE) as u8)
 }
 
-/// Observe only an actual sealed early AP failure; an empty/unfinished record
+/// Observe only a sealed early AP failure; an empty/unfinished record
 /// never supplies READY or permission to reuse the low page.
 ///
 /// # Safety
-/// `mapped` is the retained actual owned SIPI page, prepared for this one AP.
+/// `mapped` is the owned SIPI page, prepared for this one AP.
 pub(crate) unsafe fn failure(mapped: *const u8) -> Result<Option<EarlyFault>, early::RecordError> {
-    // SAFETY: the caller retains this AP's owned SIPI page, whose assembly
+    // SAFETY: the caller keeps this AP's owned SIPI page, whose assembly
     // publishes the aligned record once and leaves its sealed payload immutable.
     unsafe { early::read(mapped.add(offset(&raw const stela_ap_fault_record)).cast()) }
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn actual_owned_image_and_record_leave_an_independent_low_stack() {
-        use super::*;
-        use early::{EXCEPTIONS, Record, STACK_BYTES, STUB_BYTES};
-        let image = offset(&raw const stela_ap_end);
-        assert!(image + STACK_BYTES <= PAGE as usize);
-        for (table, bytes) in [
-            (offset(&raw const stela_ap_stubs32), EXCEPTIONS * STUB_BYTES),
-            (offset(&raw const stela_ap_stubs64), EXCEPTIONS * STUB_BYTES),
-            (offset(&raw const stela_ap_idt32), EXCEPTIONS * 8),
-            (offset(&raw const stela_ap_idt64), EXCEPTIONS * 16),
-            (
-                offset(&raw const stela_ap_fault_record),
-                core::mem::size_of::<Record>(),
-            ),
-        ] {
-            assert!(table + bytes <= image);
-        }
-        assert!(offset(&raw const stela_ap_fault_record).is_multiple_of(8));
-    }
 }

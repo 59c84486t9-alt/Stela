@@ -1,7 +1,8 @@
-//! The actual activated legacy table owner. This retains real allocated table
+//! The activated legacy table owner. This keeps real allocated table
 //! pages and CPU/root/control observations. It supplies no controller, ECAM,
 //! reset, cache-policy or hardware-service grant by itself.
 use super::*;
+use crate::Refusal;
 use alloc::sync::Arc;
 use core::{
     arch::x86_64::{__cpuid, __cpuid_count},
@@ -11,7 +12,7 @@ use core::{
 };
 use stela_boot_core::guarded_stacks::mappings;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum RootError {
     Privilege,
     CpuFeatures,
@@ -26,7 +27,7 @@ pub(crate) enum RootError {
     Traversal(mappings::Error),
     AliasMissing { physical: u64 },
     AliasMismatch { physical: u64 },
-    Transition(&'static str),
+    Transition(Refusal),
 }
 impl fmt::Display for RootError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -52,7 +53,7 @@ impl fmt::Display for RootError {
             Self::AliasMismatch { physical } => {
                 write!(f, "native table-frame mapping mismatches at {physical:#x}")
             }
-            Self::Transition(error) => f.write_str(error),
+            Self::Transition(error) => write!(f, "{error}"),
         }
     }
 }
@@ -96,7 +97,7 @@ pub(super) fn validate_cpu() -> Result<(), RootError> {
         return Err(RootError::CpuFeatures);
     }
     let flags: u64;
-    // SAFETY: actual CPL0 CPU; this only observes flags/control ownership.
+    // SAFETY: CPL0 CPU; this only observes flags/control ownership.
     unsafe {
         asm!("pushfq","pop {}",out(reg)flags);
     }
@@ -124,9 +125,9 @@ impl Context {
             root,
             cr0,
             cr4,
-            // SAFETY: architectural MSRs of this actual qualified CPL0 CPU.
+            // SAFETY: architectural MSRs of this checked CPL0 CPU.
             efer: unsafe { msr::EFER.read() },
-            // SAFETY: the actual BSP was qualified for PAT before activation;
+            // SAFETY: the BSP was checked for PAT before activation;
             // this remains the same non-migrating CPU. Observation only.
             pat: unsafe { msr::PAT.read() },
         })
@@ -135,7 +136,7 @@ impl Context {
         if !privileged() || processor() != self.cpu {
             return Err(RootError::WrongCpu);
         }
-        // BSP is a genuine per-CPU architectural bit, avoiding a legacy APIC-ID
+        // BSP is a per-CPU architectural bit, avoiding a legacy APIC-ID
         // collision on a different processor before any table-page dereference.
         let apic = crate::apic::base_msr();
         if apic & BSP == 0 || apic != self.apic {
@@ -179,7 +180,7 @@ impl RetainedRoot {
         }
     }
 }
-/// The primary CPU-affine activation owner, retained by the real standalone
+/// The primary CPU-affine activation owner, kept by the real standalone
 /// or HostCheck machine. Existing mappings also need their own context/resource
 /// pins; carrying this value does not authorize arbitrary MMIO or configuration.
 #[must_use = "retain the actual activated table owner through every native consumer"]
@@ -201,7 +202,7 @@ impl ActivatedTables {
             closed: AtomicBool::new(false),
         });
         root.check_current()?;
-        // Actual CR3 still reaches these pages after the lexical primary owner
+        // CR3 still reaches these pages after the lexical primary owner
         // drops. Preserve the original builder/catalog for the whole boot; this
         // is retention, not a fictitious table-reclamation or quiescence proof.
         core::mem::forget(root.clone());

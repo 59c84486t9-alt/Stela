@@ -27,8 +27,8 @@ impl Controller {
         }
         self.registers = Box::new(NoAccess);
     }
-    /// Read actual retained native allocations after checking the caller's
-    /// genuine attachment identity. Includes controller-wide and retry owners;
+    /// Read kept native allocations after checking the caller's
+    /// attachment identity. Includes controller-wide and retry owners;
     /// allocation lengths include full ring padding, never just active TRBs.
     pub(crate) fn reset_allocation_geometry(
         &self,
@@ -149,8 +149,8 @@ impl Registers for AddressRegisters {
                 // SAFETY: the live DCBAA slot points to the output context
                 // allocated by address() before publishing this command.
                 model.output = unsafe { ((model.dcbaa + 8) as *const u64).read_volatile() };
-                // SAFETY: EP0's dequeue pointer in the actual input context
-                // points to this test controller's retained control ring.
+                // SAFETY: EP0's dequeue pointer in the input context
+                // points to this test controller's control ring.
                 model.control_ring = unsafe {
                     ((parameter + 2 * model.context_bytes as u64 + 8) as *const u64).read_volatile()
                         & !0xf
@@ -159,7 +159,7 @@ impl Registers for AddressRegisters {
                 model.address_code
             } else {
                 if matches!(kind, RESET_ENDPOINT | STOP_ENDPOINT) {
-                    // SAFETY: EP0 state in the actual retained output context.
+                    // SAFETY: EP0 state in the output context.
                     unsafe {
                         ((model.output + model.context_bytes as u64) as *mut u32)
                             .write_volatile(ENDPOINT_STOPPED);
@@ -254,7 +254,7 @@ fn address_controller_with_capabilities(
             original: registers,
             words,
         });
-        // Actual reads of the installed independent wire image precede capture;
+        // Reads of the installed independent wire image precede capture;
         // caller integers never replace an already-constructed Controller field.
         let version = (registers.read32(0x00) >> 16) as u16;
         let hcs2 = registers.read32(0x08);
@@ -351,7 +351,7 @@ pub(crate) struct CancelModel {
     pub(crate) setup: Vec<([u8; 8], Vec<u8>)>,
     pub(crate) incoming_events: alloc::collections::VecDeque<Vec<u8>>,
     pub(crate) incoming_acl: alloc::collections::VecDeque<Vec<u8>>,
-    /// Opt-in independent test peripherals, keyed by actual configured DCI.
+    /// Opt-in independent test peripherals, keyed by configured DCI.
     pub(crate) incoming_bulk:
         alloc::collections::BTreeMap<usize, alloc::collections::VecDeque<Vec<u8>>>,
     pub(crate) outgoing_bulk: alloc::collections::BTreeMap<usize, Vec<Vec<u8>>>,
@@ -397,7 +397,7 @@ impl CancelModel {
         }
     }
     pub(crate) fn set_state(&mut self, dci: usize, state: u32) {
-        // EP State occupies bits 2:0; hardware transitions retain the configured
+        // EP State occupies bits 2:0; hardware transitions keep the configured
         // Interval, Mult and stream-array fields in the rest of this word.
         // SAFETY: same live context as state().
         unsafe {
@@ -518,6 +518,8 @@ impl CancelModel {
                     let flags = unsafe { ((parameter + 4) as *const u32).read_volatile() };
                     for index in 2..32 {
                         if flags & (1 << index) != 0 {
+                            // SAFETY: the model device, its pages and its domain belong to this
+                            // test alone; no other driver, worker or DMA touches them.
                             self.rings[index] = unsafe {
                                 ((parameter + (index as u64 + 1) * self.context_bytes as u64 + 8)
                                     as *const u64)
@@ -591,7 +593,7 @@ impl CancelModel {
     pub(crate) fn scripted(&mut self, bulk: bool, packet: &[u8]) {
         use crate::usb::bluetooth::Pipe;
         // Opt-in command-correlated peripheral: future replies must not be
-        // visible during the actual mandatory settling poll of an earlier HCI
+        // visible during the mandatory settling poll of an earlier HCI
         // command. Standard zero-data USB requests do not carry HCI commands.
         if !bulk && !packet.is_empty() && !self.control_script.is_empty() {
             assert!(self.script.is_none(), "two HCI control peripherals");
@@ -673,6 +675,8 @@ impl CancelModel {
                 // synchronous modeled control completion.
                 let next =
                     self.rings[dci] + (((self.indices[dci] + 1) % (RING_TRBS - 1)) * TRB) as u64;
+                // SAFETY: the pointer addresses this test's own live pages, and the stopped model
+                // writes nothing concurrently.
                 let buffer = unsafe { (next as *const u64).read_volatile() };
                 if matches!(request[0], 0x80 | 0x81)
                     && request[1] == GET_DESCRIPTOR
@@ -694,7 +698,7 @@ impl CancelModel {
                     received = reply.len();
                     assert!(received <= length);
                     // SAFETY: this synchronous device reply fits the live
-                    // Data TRB allocation, retained through completion.
+                    // Data TRB allocation, kept through completion.
                     unsafe {
                         core::ptr::copy_nonoverlapping(reply.as_ptr(), buffer as *mut u8, received);
                     }
@@ -740,6 +744,8 @@ impl CancelModel {
                 if request[0] & 0x80 == 0 && self.short_control_out {
                     received = length - 1;
                 }
+                // SAFETY: the pointer addresses live memory this test's model owns, in bounds, and
+                // nothing accesses it concurrently.
                 unsafe { core::slice::from_raw_parts(buffer as *const u8, length).to_vec() }
             };
             if request[0] & 0x80 == 0 && request[1] != SET_CONFIGURATION {
@@ -886,8 +892,8 @@ fn cancellation_controller_with_capabilities(
     cancellation_controller_with_context(dma, configurations, speed, capability_words, 32)
 }
 
-/// Actual Address Device and SET_CONFIGURATION acknowledgements for endpoint
-/// peers that exercise retained 32- and 64-byte contexts. No generation, parent
+/// Address Device and SET_CONFIGURATION acknowledgements for endpoint
+/// peers that exercise 32- and 64-byte contexts. No generation, parent
 /// identity or current grant is synthesized by the later endpoint-only peer.
 pub(crate) fn configured_endpoint_controller(
     dma: &mut dyn DmaAllocator,
@@ -1003,7 +1009,7 @@ fn cancellation_controller_with_context(
     controller.clock.ticks_per_microsecond = 1;
     if !configurations.is_empty() {
         // These are the fixture's original wire descriptor/current profiles;
-        // production discovery retains the descriptors before class binding.
+        // production discovery keeps the descriptors before class binding.
         controller.current_descriptions(1, configurations).unwrap();
     }
     (controller, model)
@@ -1139,20 +1145,30 @@ pub(crate) fn forwarding_fixture<C: crate::bus::pci::ConfigSpace>(
     (controller, model)
 }
 
+/// The interface version, HCSPARAMS2 and HCCPARAMS1 a fixture's
+/// capability registers report.
+pub(crate) struct CapabilityImage {
+    pub(crate) version: u16,
+    pub(crate) hcs2: u32,
+    pub(crate) hcc1: u32,
+}
+
 /// A forwarding peer whose capability-register image is installed and read
 /// before the original Controller captures its immutable scheduling policy.
-/// The existing fixture above retains its no-CFC/default capability path.
-#[allow(clippy::too_many_arguments)]
+/// The existing fixture above keeps its no-CFC/default capability path.
 pub(crate) fn forwarding_scheduled_fixture<C: crate::bus::pci::ConfigSpace>(
     dma: &mut dyn DmaAllocator,
     configurations: &[Vec<u8>],
     speed: u8,
     function: &mut Function<C>,
-    version: u16,
-    hcs2: u32,
-    hcc1: u32,
+    capabilities: CapabilityImage,
     wrap: impl FnOnce(Box<dyn Registers>, Rc<RefCell<CancelModel>>) -> Box<dyn Registers>,
 ) -> (Controller, Rc<RefCell<CancelModel>>) {
+    let CapabilityImage {
+        version,
+        hcs2,
+        hcc1,
+    } = capabilities;
     let (mut controller, model) = cancellation_controller_with_capabilities(
         dma,
         configurations,
@@ -1164,8 +1180,8 @@ pub(crate) fn forwarding_scheduled_fixture<C: crate::bus::pci::ConfigSpace>(
     (controller, model)
 }
 
-/// Same actual failed ordinary-TD fixture with its unique submitted ticket
-/// retained by asynchronous class owners instead of a fabricated ring address.
+/// Same failed ordinary-TD fixture with its unique submitted ticket
+/// by asynchronous class owners instead of an invented ring address.
 pub(crate) fn controller_with_unresolved_ticket(
     dma: &mut dyn DmaAllocator,
     buffer: u64,
@@ -1208,7 +1224,7 @@ pub(crate) fn controller_with_unresolved_ticket(
     (Rc::new(RefCell::new(controller)), ticket)
 }
 
-/// Actual high-speed class profile, with the retained original configuration.
+/// High-speed class profile, with the original configuration.
 pub(crate) fn high_speed_media_controller(
     dma: &mut dyn DmaAllocator,
     configuration: &[u8],
@@ -1216,9 +1232,9 @@ pub(crate) fn high_speed_media_controller(
     cancellation_controller_at_speed(dma, &[configuration.to_vec()], HIGH_SPEED)
 }
 
-/// Status fixture: a device-side endpoint halt persists until the actual EP0
+/// Status fixture: a device-side endpoint halt persists until the EP0
 /// CLEAR_FEATURE request is accepted. The underlying peer still consumes real
-/// contexts/TRBs and posts the actual control transfer completion.
+/// contexts/TRBs and posts the control transfer completion.
 pub(crate) fn status_interrupt_controller(
     dma: &mut dyn DmaAllocator,
     configuration: &[u8],

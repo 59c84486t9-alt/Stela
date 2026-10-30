@@ -53,7 +53,7 @@ fn round_result(
     tiny: bool,
     overflow: bool,
 ) -> Outcome {
-    // Widen the already-rounded representation exactly; retain the original
+    // Widen the already-rounded representation exactly; keep the original
     // BF operation's status. The shared output policy then uses Single's sign
     // position for both normal results and flushed zeros.
     let widened = StatusAnd {
@@ -388,7 +388,7 @@ mod tests {
     }
 
     #[test]
-    fn retained_enables_require_caller_execution_profile_handling() {
+    fn kept_enables_require_caller_execution_profile_handling() {
         let fpcr = EXCEPTIONS << FPCR_EXCEPTION_ENABLE_SHIFT;
         let expected = Err(UnsupportedControl {
             enabled_exceptions: EXCEPTIONS,

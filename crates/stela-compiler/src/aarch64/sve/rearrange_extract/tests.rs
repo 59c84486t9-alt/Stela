@@ -119,7 +119,7 @@ mod prefix {
     }
 
     #[test]
-    fn every_predicate_and_element_retains_unpredicated_only_clast_policy() {
+    fn every_predicate_and_element_keeps_unpredicated_only_clast_policy() {
         for class in [CLASTA_VECTOR, CLASTB_VECTOR] {
             for size in 0..=SIZE_MASK {
                 for predicate in 0..=PREDICATE_MASK {

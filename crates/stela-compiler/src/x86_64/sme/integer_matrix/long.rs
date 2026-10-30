@@ -39,7 +39,7 @@ pub(crate) struct Recipe {
 }
 
 impl Recipe {
-    /// Measured checked kernels; unsigned byte products retain the SSE2 recipe.
+    /// Measured checked kernels; unsigned byte products keep the SSE2 recipe.
     pub(super) fn selected(operand: &LongOperation, target: TargetCpu) -> Self {
         let sse41 = target.supports(TargetCpu::Sse41);
         Self {
@@ -70,7 +70,7 @@ fn za_pointer(code: &mut Code, operand: &LongOperation, length: VectorLength) {
         asm.alu_imm8(Alu::Add, Size::Dword, Gpr::Rcx, operand.offset as i8);
     }
     // Accepted SME lengths, group counts and component counts are powers of two.
-    // Low32 addition retains the exact mathematical result modulo the partition.
+    // Low32 addition keeps the exact mathematical result modulo the partition.
     // Clear component bits in the same mask to align the first selected row.
     let partition_rows = length.bytes() / usize::from(operand.group_size);
     let row_mask = ((partition_rows - 1) & !(usize::from(operand.factor) - 1)) as u32;

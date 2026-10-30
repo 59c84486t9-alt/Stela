@@ -250,7 +250,7 @@ mod tests {
     }
 
     #[test]
-    fn plain_rows_and_columns_copy_with_offsets_and_masks() {
+    fn extract_copies_rows_and_columns_with_offsets() {
         let mut registers = numbered();
         // extrx: Z row 5 into X at byte offset 500, wrapping the pool.
         extract_x(Generation::M2, &mut registers, (5 << 20) | (500 << 10));

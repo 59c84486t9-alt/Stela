@@ -181,7 +181,7 @@ fn every_store_split_preserves_sources_and_later_in_block_effects() -> Result<()
 }
 
 #[test]
-fn fault_prefix_and_repaired_continuation_keep_exact_pc_and_writeback() -> Result<()> {
+fn fault_continuation_keeps_pc_and_writeback() -> Result<()> {
     let data = Mapping::new()?;
     let code = Mapping::new()?;
     for target in [TargetCpu::Baseline, TargetCpu::detect()] {

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Elantech source: Copyright (C) 2007-2009 Arjan Opmeer.
 // Trademarks are the property of their respective owners.
-//! Actual Elantech v1-v4 PS/2 configuration and input under the i8042 owner.
+//! Elantech v1-v4 PS/2 configuration and input under the i8042 owner.
 //! Queried v3/v4 pointing sticks share this owner; an optional attachment can
 //! require their presence. Board overrides and guest device binding are separate.
 //! Raw reports, accumulated positions and software tracking remain distinct.
@@ -15,6 +15,27 @@ mod v3;
 mod v4;
 pub use v4::{V4Frame, V4Info, V4Slot, V4State, V4Update};
 const FRAME_LIMIT: usize = 32;
+
+/// Whether GETINFO after three 1:1 scalings answered Elantech's knock, as
+/// Linux `elantech_detect` checks it.
+pub(super) fn knocked(reply: [u8; 3]) -> bool {
+    reply[..2] == [0x3c, 3] && matches!(reply[2], 0xc8 | 0)
+}
+
+/// Linux `ETP_NEW_IC_SMBUS_HOST_NOTIFY`: whether the firmware version names
+/// a new IC that takes SMBus Host Notify.
+pub(super) fn host_notify(firmware: u32) -> bool {
+    firmware & 0x0f2000 == 0x0f2000 && firmware & 0xff > 0
+}
+
+/// Linux `elantech_is_signature_valid`: whether the firmware version query's
+/// answer is an Elantech version rather than a mouse's status.
+pub(super) fn signature_valid(probe: [u8; 3]) -> bool {
+    probe[0] != 0
+        && (probe[1] == 0
+            || ((probe[0] & 15) >= 6 && (probe[1] & 0xaf) == 15 && probe[2] < 40)
+            || ![200, 100, 80, 60, 40, 20, 10].contains(&probe[2]))
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
@@ -118,8 +139,8 @@ pub struct Contact {
     pub primary: Option<(i32, i32)>,
     /// Present only when a separate second coordinate is encoded.
     pub secondary: Option<(i32, i32)>,
-    /// V3 two-finger primary references this actually observed head. Source
-    /// reconnect retains its historical cache; this sequence never implies a
+    /// V3 two-finger primary references this observed head. Source
+    /// reconnect keeps its historical cache; this sequence never implies a
     /// fresh coordinate was encoded in the tail. None also covers a missing head.
     pub head_sequence: Option<u64>,
     /// Advertised left/right/back/forward; parity bits do not invent middle keys.
@@ -133,7 +154,7 @@ pub enum Report {
     Contacts(Contact),
     Debounce,
     StartupSuppressed,
-    /// Actual first half of a v3 two-finger report; source emits no input yet.
+    /// First half of a v3 two-finger report; source emits no input yet.
     Head {
         point: (i32, i32),
     },
@@ -402,7 +423,7 @@ impl Engine {
 }
 impl<R: Registers, T: Timer> Controller<R, T> {
     /// Explicit ordinary Elantech attachment under the same native i8042 grant.
-    /// Actual firmware selects v1-v4 and queried v3/v4 pointing-stick presence.
+    /// Firmware selects v1-v4 and queried v3/v4 pointing-stick presence.
     /// Older integrated/board override profiles remain explicit unsupported
     /// operations, never silently generic mice.
     pub fn new_elantech(registers: R, timer: T, config: Config) -> Result<Self, super::Error> {
@@ -418,7 +439,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         self.elantech.as_ref()?.capabilities.as_ref()
     }
     /// Source software MT state. Tracking IDs and accumulated/default coordinates
-    /// are separate from actual absolute-head provenance in each slot.
+    /// are separate from absolute-head provenance in each slot.
     pub fn elantech_multitouch(&self) -> Option<&V4State> {
         let engine = self.elantech.as_ref()?;
         (engine.capabilities.as_ref()?.hardware == 4).then_some(&engine.multitouch)

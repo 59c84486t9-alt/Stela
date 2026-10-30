@@ -1,9 +1,11 @@
 //! Original Engine loader allocations, including their real catalog storage.
 //! Allocation ownership supplies no controller, firmware-service or CPU grant.
 use super::{AllocatedTablePage, RootError, allocate_table};
+use crate::Result;
 use alloc::vec::Vec;
 use core::arch::asm;
 use stela_boot_core::guarded_stacks::mappings;
+use stela_contracts::refuse;
 
 pub(crate) struct Builder {
     root: u64,
@@ -11,11 +13,11 @@ pub(crate) struct Builder {
     levels: u32,
 }
 impl Builder {
-    pub(crate) fn new() -> Result<Self, &'static str> {
+    pub(crate) fn new() -> Result<Self> {
         let mut pages = Vec::new();
         pages
             .try_reserve_exact(1)
-            .map_err(|_| "loader table catalog allocation failed")?;
+            .map_err(|_| refuse!("loader table catalog allocation failed"))?;
         // The real-mode/AP trampoline loads this original root below 4 GiB.
         let allocation = allocate_table(uefi::boot::AllocateType::MaxAddress(u32::MAX as u64))?;
         let root = allocation.physical;
@@ -60,7 +62,7 @@ impl crate::tables::Frames for Builder {
     }
 }
 
-/// A genuine separate LOADER_DATA allocation contains the MOVED original
+/// A separate LOADER_DATA allocation contains the MOVED original
 /// non-Clone page owners. No firmware-heap Vec or Arc pointer crosses roots.
 struct CatalogBacking {
     physical: u64,
@@ -83,7 +85,7 @@ impl CatalogBacking {
             pages,
         )
         .map_err(|error| RootError::CatalogAllocation(error.status()))?;
-        // SAFETY: this fresh, exclusive actual allocation has exactly bytes
+        // SAFETY: this fresh, exclusive allocation has exactly bytes
         // writable bytes. It is not a table, DMA buffer or published catalog.
         unsafe {
             allocation.as_ptr().write_bytes(0, bytes);
@@ -96,7 +98,7 @@ impl CatalogBacking {
     }
     fn place(&mut self, index: usize, owner: AllocatedTablePage) {
         assert!(index < self.count);
-        // SAFETY: actual original catalog allocation, checked slot geometry;
+        // SAFETY: original catalog allocation, checked slot geometry;
         // each owner is moved once before publication, with no active readers.
         unsafe {
             (self.physical as *mut AllocatedTablePage)
@@ -105,14 +107,27 @@ impl CatalogBacking {
         }
     }
     fn physical(&self, index: usize) -> Option<u64> {
+        // SAFETY: construction/checked original loader root supplies identity aliases.
+        unsafe { self.physical_alias(index, false) }
+    }
+    /// # Safety
+    /// The caller keeps the original root or its checked shared
+    /// window, including this original catalog allocation; no numeric root grant.
+    unsafe fn physical_alias(&self, index: usize, shared: bool) -> Option<u64> {
         if index >= self.count {
             return None;
         }
-        // SAFETY: retained original metadata allocation; construction or actual
+        // SAFETY: original metadata allocation; construction or
         // original-loader context supplies its checked identity alias. Read only
         // the observation field, without cloning the original allocation owner.
+        let address = if shared {
+            crate::layout::physical(self.physical)
+        } else {
+            self.physical
+        };
+        // SAFETY: caller supplies the original allocation and real alias.
         Some(unsafe {
-            core::ptr::addr_of!((*(self.physical as *const AllocatedTablePage).add(index)).physical)
+            core::ptr::addr_of!((*(address as *const AllocatedTablePage).add(index)).physical)
                 .read_volatile()
         })
     }
@@ -127,6 +142,66 @@ pub(crate) struct LoaderTables {
     catalog: CatalogBacking,
 }
 impl LoaderTables {
+    pub(crate) fn levels(&self) -> u32 {
+        self.levels
+    }
+    /// # Safety
+    /// The SAME kept HostOwner owns current_root and cloned its window from
+    /// this original allocation owner. Its CPU/exclusion scope is held; all
+    /// aliases remain held and no root/table mutation overlaps these reads.
+    pub(crate) unsafe fn check_shared_root(&self, current_root: u64) -> Result<(), RootError> {
+        let (first, last) = crate::layout::window_entries();
+        for index in first..=last {
+            // SAFETY: caller supplies the pinned shared-window context.
+            let original =
+                unsafe { self.read_shared(self.root, index) }.ok_or(RootError::CatalogSize)?;
+            // SAFETY: HostOwner keeps this root frame and its physmap.
+            let current = unsafe {
+                (crate::layout::physical(current_root) as *const u64)
+                    .add(index)
+                    .read_volatile()
+            };
+            // Hardware A/D observations may differ between root entries;
+            // address, permissions, memory attributes and all other bits agree.
+            if (current ^ original) & !((1 << 5) | (1 << 6)) != 0 {
+                return Err(RootError::AliasMismatch {
+                    physical: current_root,
+                });
+            }
+        }
+        Ok(())
+    }
+    unsafe fn read_shared(&self, table: u64, index: usize) -> Option<u64> {
+        if index >= super::ENTRIES {
+            return None;
+        }
+        if !(0..self.catalog.count)
+            // SAFETY: enclosing checked HostOwner scope keeps these exact aliases.
+            .any(|slot| unsafe { self.catalog.physical_alias(slot, true) } == Some(table))
+        {
+            return None;
+        }
+        // SAFETY: original allocated table owner was found, not a pointer walk
+        // over caller-supplied physical addresses. Read has native width.
+        Some(unsafe {
+            (crate::layout::physical(table) as *const u64)
+                .add(index)
+                .read_volatile()
+        })
+    }
+    /// # Safety
+    /// Same HostOwner/shared-window scope as check_shared_root; caller
+    /// revalidates CPU, current root, IF/geometry before and after observation.
+    pub(crate) unsafe fn observe_shared(
+        &self,
+        address: u64,
+    ) -> Result<Option<mappings::Observation>, RootError> {
+        mappings::observe(address, self.root, self.levels, |table, index| {
+            // SAFETY: the enclosing kept/excluded shared-window owner.
+            unsafe { self.read_shared(table, index) }
+        })
+        .map_err(RootError::Traversal)
+    }
     pub(crate) fn root(&self) -> u64 {
         self.root
     }
@@ -136,7 +211,7 @@ impl LoaderTables {
         {
             return None;
         }
-        // SAFETY: original allocated page owner is retained in the actual
+        // SAFETY: original allocated page owner is held in the
         // catalog; construction or checked loader context supplies its alias.
         Some(unsafe { (table as *const u64).add(index).read_volatile() })
     }
@@ -181,7 +256,7 @@ impl LoaderTables {
             return Err(RootError::Privilege);
         }
         let (flags, root, cr4): (u64, u64, u64);
-        // SAFETY: actual CPL0; controlled boot installation runs without
+        // SAFETY: CPL0; controlled boot installation runs without
         // migration, callbacks or another table builder using these pages.
         unsafe {
             asm!("pushfq", "pop {}", "mov {}, cr3", "mov {}, cr4", out(reg) flags, out(reg) root, out(reg) cr4, options(nomem, preserves_flags));
@@ -198,8 +273,8 @@ impl LoaderTables {
         // Sealing checked all original identity and high-window aliases. The
         // sole builder was consumed; later native mappings must preserve them.
         self.read_owned(self.root, index)
-            .ok_or(RootError::Transition(
-                "loader root entry is outside its owned table",
-            ))
+            .ok_or(RootError::Transition(refuse!(
+                "loader root entry is outside its owned table"
+            )))
     }
 }

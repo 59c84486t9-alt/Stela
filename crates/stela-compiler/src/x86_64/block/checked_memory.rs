@@ -21,7 +21,7 @@ pub(crate) fn emit(
         source_map: Vec::new(),
     };
     let mut fixups = Vec::new();
-    // DIT qualification covers the individual recipes, not region allocation.
+    // DIT validation covers the individual recipes, not region allocation.
     let register_regions = register_regions && !target.data_independent_timing();
     let mut cursor = 0;
     while cursor < instructions.len() {
@@ -161,7 +161,7 @@ fn emit_register_span(
             );
             block.x86_64_code.append(region.code);
         } else {
-            // A rejected candidate consumes its exact original span. Trying
+            // A rejected candidate consumes its original span. Trying
             // shorter suffixes could evade the candidate's measured cost gate.
             block.source_map.extend(
                 baseline

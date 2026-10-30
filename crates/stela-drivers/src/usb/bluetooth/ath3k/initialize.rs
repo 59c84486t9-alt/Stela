@@ -7,10 +7,7 @@ use super::{
 };
 use crate::{
     firmware::{Provider, Requirement},
-    usb::{
-        bluetooth::{FirmwareReceipt, Io},
-        xhci,
-    },
+    usb::bluetooth::{FirmwareReceipt, Io},
 };
 use alloc::{boxed::Box, vec::Vec};
 const ATTEMPT_US: u64 = 120_000_000;
@@ -90,7 +87,7 @@ impl<B: Io> Engine<'_, B> {
         self.bounded()?;
         let bytes = self
             .io
-            .control_read(xhci::setup(0xc0, request, 0, 0, length))
+            .control_read(crate::usb::descriptor::setup(0xc0, request, 0, 0, length))
             .map_err(Error::Usb)?;
         if bytes.len() != usize::from(length) {
             return Err(Error::protocol("ATH3K control IN exact length", &bytes));
@@ -135,7 +132,10 @@ impl<B: Io> Engine<'_, B> {
         };
         self.attempt.pending = Some(operation);
         self.io
-            .control(xhci::setup(0x40, 1, 0, 0, 20), &bytes[..20])
+            .control(
+                crate::usb::descriptor::setup(0x40, 1, 0, 0, 20),
+                &bytes[..20],
+            )
             .map_err(Error::Usb)?;
         self.attempt.completed.push(operation);
         self.attempt.pending = None;
@@ -162,7 +162,7 @@ impl<B: Io> Engine<'_, B> {
         self.bounded()?;
         self.attempt.pending = Some(operation);
         self.io
-            .control(xhci::setup(0x40, request, 0, 0, 0), &[])
+            .control(crate::usb::descriptor::setup(0x40, request, 0, 0, 0), &[])
             .map_err(Error::Usb)?;
         self.attempt.completed.push(operation);
         self.attempt.pending = None;

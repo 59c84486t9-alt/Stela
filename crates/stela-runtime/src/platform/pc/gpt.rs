@@ -1,6 +1,8 @@
 //! GUID partition tables, and a block device confined to one partition.
+use crate::Result;
 use alloc::{format, string::String, vec::Vec};
 use core::{fmt, str::FromStr};
+use stela_contracts::refuse;
 use stela_drivers::block::{BlockDevice, BlockError, Command, Finished, Identity};
 
 const SIGNATURE: &[u8; 8] = b"EFI PART";
@@ -231,17 +233,17 @@ pub fn format(
     block_size: u32,
     disk: Guid,
     partitions: &[Partition],
-) -> Result<Vec<(u64, Vec<u8>)>, &'static str> {
+) -> Result<Vec<(u64, Vec<u8>)>> {
     let size = block_size as usize;
     if size < 512 || !size.is_power_of_two() || partitions.len() > ENTRIES {
-        return Err("unsupported GPT geometry");
+        return Err(refuse!("unsupported GPT geometry"));
     }
     let array_blocks = (ENTRIES * ENTRY_BYTES).div_ceil(size) as u64;
     let first_usable = 2 + array_blocks;
     let last_usable = blocks
         .checked_sub(2 + array_blocks)
         .filter(|last| *last >= first_usable)
-        .ok_or("disk too small for a GPT")?;
+        .ok_or(refuse!("disk too small for a GPT"))?;
     let mut array = vec![0u8; array_blocks as usize * size];
     for (entry, partition) in array
         .as_chunks_mut::<ENTRY_BYTES>()
@@ -253,7 +255,7 @@ pub fn format(
             || partition.last_lba > last_usable
             || partition.first_lba > partition.last_lba
         {
-            return Err("partition outside the usable range");
+            return Err(refuse!("partition outside the usable range"));
         }
         entry[..16].copy_from_slice(&partition.kind.0);
         entry[16..32].copy_from_slice(&partition.unique.0);

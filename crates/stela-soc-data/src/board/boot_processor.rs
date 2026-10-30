@@ -1,6 +1,8 @@
 //! The running handoff PE, preserving the board's processor indices.
 use super::{Node, Processor};
+use crate::Result;
 use alloc::{format, string::String};
+use stela_contracts::refuse;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BootProcessor {
@@ -17,27 +19,29 @@ pub struct BootProcessor {
 pub(super) fn boot_processor(
     root: &Node<'_>,
     processors: &[Processor],
-) -> Result<Option<BootProcessor>, String> {
+) -> Result<Option<BootProcessor>> {
     let children = root
         .child("cpus")
         .and_then(|cpus| cpus.children())
-        .ok_or("DeviceTree has no complete /cpus roster")?;
+        .ok_or(refuse!("DeviceTree has no complete /cpus roster"))?;
     let nodes: alloc::vec::Vec<_> = children
         .iter()
         .filter(|cpu| cpu.property("cluster-type").is_some())
         .collect();
     if nodes.len() != processors.len() {
-        return Err("handoff CPU nodes differ from the processor roster".into());
+        return Err(refuse!(
+            "handoff CPU nodes differ from the processor roster"
+        ));
     }
     let mut boot = None;
     for (cpu, (node, processor)) in nodes.iter().zip(processors).enumerate() {
         match node.property("state") {
             None | Some(b"waiting\0") => continue,
             Some(b"running\0") => {}
-            Some(_) => return Err(format!("PE {cpu} state is not running or waiting")),
+            Some(_) => return Err(refuse!("PE {cpu} state is not running or waiting", cpu)),
         }
         if boot.is_some() {
-            return Err("DeviceTree has more than one running CPU".into());
+            return Err(refuse!("DeviceTree has more than one running CPU"));
         }
         let name = node
             .property("name")
@@ -46,19 +50,21 @@ pub(super) fn boot_processor(
             .filter(|name| {
                 !name.is_empty() && !name.contains(['/', '\0']) && !matches!(*name, "." | "..")
             })
-            .ok_or("running CPU has no unique child name")?;
+            .ok_or(refuse!("running CPU has no unique child name"))?;
         if nodes
             .iter()
             .filter(|other| other.property("name") == node.property("name"))
             .count()
             != 1
         {
-            return Err("running CPU has an ambiguous child name".into());
+            return Err(refuse!("running CPU has an ambiguous child name"));
         }
         if node.property("reg") != Some(processor.reg.to_le_bytes().as_slice())
             || node.property("cluster-type") != Some([processor.cluster_type, 0].as_slice())
         {
-            return Err("running CPU identity differs from the processor roster".into());
+            return Err(refuse!(
+                "running CPU identity differs from the processor roster"
+            ));
         }
         boot = Some(BootProcessor {
             cpu,

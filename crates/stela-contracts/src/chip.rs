@@ -5,7 +5,9 @@
 //! chip lacks UNDEFINED (or a NOP, where Arm decodes it so), as
 //! [`Chip::admit_table`] does for a PE whose identification withholds
 //! features its chip has.
+use crate::Refusal;
 use crate::cpu_features::{CAPS, CHIPS, Feature};
+use crate::refuse;
 use alloc::{vec, vec::Vec};
 
 #[rustfmt::skip]
@@ -123,7 +125,7 @@ impl AdmitTable {
     const SHIFT: u32 = 21;
     const PREFIXES: usize = 1 << (32 - Self::SHIFT);
 
-    /// The actual immutable chip policy used to construct this table.
+    /// The immutable chip policy used to construct this table.
     pub fn chip(&self) -> Chip {
         self.chip
     }
@@ -208,7 +210,7 @@ impl Chip {
     /// there is none: the PE presents what some forms' words need for one
     /// value of an encoding field the table does not place, but withholds
     /// what they need for the others (an SME2 PE without FEAT_SME_I16I64).
-    pub fn admit_table(self, withheld: u64) -> Result<AdmitTable, &'static str> {
+    pub fn admit_table(self, withheld: u64) -> Result<AdmitTable, Refusal> {
         const PREFIX: u32 = AdmitTable::PREFIXES as u32 - 1;
         let bit = 1u8 << self as u8;
         let presented = self.features() & !withheld;
@@ -216,10 +218,10 @@ impl Chip {
             .iter()
             .any(|(requires, strict)| met(requires, presented) && !met(strict, presented))
         {
-            return Err(
+            return Err(refuse!(
                 "the identification withholds a feature only some encodings of a \
-                        form it presents need, which the admit table cannot tell apart",
-            );
+                        form it presents need, which the admit table cannot tell apart"
+            ));
         }
         let mut by_prefix = vec![Vec::new(); AdmitTable::PREFIXES];
         for (index, group) in forms::ABSENT.iter().enumerate() {

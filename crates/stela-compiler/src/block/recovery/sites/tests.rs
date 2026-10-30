@@ -107,7 +107,7 @@ fn translated_return_token_is_exact_before_and_descriptor_is_compiler_owned() {
             plan().qualify_recovery(template(&block, &forged)),
             Err(RecoveryQualificationError::RecoveryPlan)
         ));
-        // The live plan retains the actual descriptor, not just its portable tag.
+        // The live plan keeps the descriptor, not just its portable tag.
         assert_ne!(
             RecoverySite::translated_helper(8, 0),
             RecoverySite::translated_helper(8, 1)

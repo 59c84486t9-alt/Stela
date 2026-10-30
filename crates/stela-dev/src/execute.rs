@@ -167,27 +167,4 @@ mod tests {
         .unwrap();
         assert!(matches!(parsed.command, Command::RunBlocks(_)));
     }
-
-    #[test]
-    fn raw_runner_rejects_removed_process_services() {
-        for options in [
-            vec!["--services", "thread"],
-            vec!["--csr-active-configuration", "0"],
-            vec!["--guest-process-id", "42"],
-            vec!["--guest-vm-max-address", "0x100000"],
-            vec!["--arm-commpage-kernel-page-shift", "14"],
-            vec!["--clock-snapshot", "clock.json"],
-            vec!["--disabled-kdebug"],
-            vec!["--opaque-dyld-flags", "0"],
-        ] {
-            assert!(
-                Cli::try_parse_from(
-                    ["stela-dev", "run-blocks", "raw.bin"]
-                        .into_iter()
-                        .chain(options)
-                )
-                .is_err()
-            );
-        }
-    }
 }

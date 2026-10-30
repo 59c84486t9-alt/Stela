@@ -1,4 +1,4 @@
-//! Layout data only; the actual constructor separately validates the original
+//! Layout data only; the constructor separately validates the original
 //! handoff, RootIdentity, sealed table/cache state and complete raw allocation.
 use super::*;
 use stela_boot_core::guarded_stacks::{Layout, Slot};
@@ -128,7 +128,7 @@ impl Plan {
             Self::Mixed { base, .. } => {
                 // Recompute this fixed checked descriptor on the preparation
                 // stack; do not add a heap allocation or1.6KiB enum payload to
-                // every production Uniform plan merely for diagnostic metadata.
+                // every production Uniform plan for diagnostic metadata.
                 let layout =
                     native_smp::resources::prototype_tasks(*base).map_err(|_| Error::Geometry)?;
                 let end = raw.physical.checked_add(raw.bytes).ok_or(Error::Geometry)?;

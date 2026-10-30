@@ -1,4 +1,4 @@
-//! Actual retained RAM with independent CPU/device caches and nonidentity labels.
+//! RAM with independent CPU/device caches and nonidentity labels.
 //! This peer checks production core publication; it is not physical xHCI evidence.
 use super::*;
 use crate::bus::dma::{
@@ -30,7 +30,7 @@ struct Backing {
 unsafe impl Send for Backing {}
 // SAFETY: same serialized peer, no concurrent device/CPU writers or safe slices.
 unsafe impl Sync for Backing {}
-// SAFETY: aligned zeroed actual fixture RAM retains these immutable model pages.
+// SAFETY: aligned zeroed fixture RAM keeps these immutable model pages.
 unsafe impl PageBacking for Backing {
     fn cpu_base(&self) -> NonNull<u8> {
         self.pointer
@@ -156,8 +156,8 @@ fn cpu(binding: &Binding, range: Range<usize>) -> NonNull<u8> {
         .address(range.start, range.len())
         .unwrap()
 }
-// SAFETY: unique exact IOVAs/tokens, same original retained pins, real copy-based
-// CPU/device visibility, failures retain ownership. Only serialized model I/O.
+// SAFETY: unique exact IOVAs/tokens, same original pins, real copy-based
+// CPU/device visibility, failures keep ownership. Only serialized model I/O.
 unsafe impl DmaDomain for Peer {
     unsafe fn map(
         &self,
@@ -212,7 +212,7 @@ unsafe impl DmaDomain for Peer {
         let after = state.fail_after_copy;
         if !failed || after {
             let binding = state.bindings.get_mut(&token.id).unwrap();
-            // SAFETY: same exact retained pins and checked range, CPU-owned writes.
+            // SAFETY: same exact pins and checked range, CPU-owned writes.
             let data = unsafe {
                 core::slice::from_raw_parts(cpu(binding, range.clone()).as_ptr(), range.len())
             };
@@ -242,7 +242,7 @@ unsafe impl DmaDomain for Peer {
             return Err(DmaError::VisibilityFailed);
         }
         let binding = &state.bindings[&token.id];
-        // SAFETY: caller's actual completion owns this precise range; peer serial.
+        // SAFETY: caller's completion owns this precise range; peer serial.
         unsafe {
             core::ptr::copy_nonoverlapping(
                 binding.device[range.clone()].as_ptr(),
@@ -287,7 +287,7 @@ fn memory(peer: &Arc<Peer>) -> Rc<Native> {
 }
 
 #[test]
-fn native_ring_publishes_real_iova_td_before_first_cycle_and_retains_failed_visibility() {
+fn native_ring_publishes_real_iova_td_before_first_cycle_and_keeps_failed_visibility() {
     for failure in [None, Some(0), Some(1)] {
         let peer = Peer::new();
         let memory = memory(&peer);
@@ -461,7 +461,7 @@ fn native_core_uses_real_dcbaa_erst_scratchpads_and_coherent_owned_event_trbs() 
 }
 
 #[test]
-fn native_missing_coherence_refuses_before_pointer_publication_or_run_and_retains_original_maps() {
+fn native_missing_coherence_refuses_before_pointer_publication_or_run_and_keeps_original_maps() {
     let peer = Peer::new();
     peer.state.lock().unwrap().coherent = false;
     let registers = Rc::new(RefCell::new(RegistersState::default()));

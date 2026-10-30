@@ -36,6 +36,8 @@ impl core::fmt::Display for LzfseError {
     }
 }
 
+impl core::error::Error for LzfseError {}
+
 pub type Result<T> = core::result::Result<T, LzfseError>;
 
 const END_OF_STREAM: u32 = u32::from_le_bytes(*b"bvx$");

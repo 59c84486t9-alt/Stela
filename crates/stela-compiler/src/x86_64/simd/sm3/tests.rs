@@ -4,7 +4,7 @@ use crate::{
     GuestState, context::ExecutionContext, x86_64::asm::vector_extensions::execution::Native,
 };
 
-// Literal lane-wise Arm operation model. It intentionally does not share the
+// Literal lane-wise Arm operation model. It does not share the
 // emitted recipe's register allocation, staging, packing or Boolean identities.
 fn reference(
     kind: Kind,
@@ -89,7 +89,7 @@ fn vector(words: [u32; 4]) -> [u64; 2] {
 }
 
 #[test]
-fn actual_baseline_recipes_match_lane_model_under_all_source_alias_partitions() {
+fn baseline_recipes_match_lane_model_under_all_source_alias_partitions() {
     let mut cases = 0;
     let mut random = 0x6a09e667f3bcc908_u64;
     // Restricted-growth tuples enumerate all15 equality partitions of four

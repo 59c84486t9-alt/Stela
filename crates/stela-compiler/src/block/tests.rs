@@ -1135,7 +1135,7 @@ fn guarded_half_arithmetic_validates_its_inline_suffix_in_every_profile() {
 }
 
 #[test]
-fn analysis_shares_consumed_prefix_and_reports_static_and_dynamic_transfer_roles() {
+fn analysis_reports_transfer_roles_for_each_branch_kind() {
     let base = GuestAddress(0x1000);
     for (word, kinds, targets, dynamic) in [
         (0x14000002, vec![SuccessorKind::Direct], vec![0x1008], None),
@@ -1540,7 +1540,7 @@ fn basic_pac_integer_fields_distinguish_sp_zero_and_discard() {
 }
 
 #[test]
-fn generic_code_requires_explicit_profile_and_retains_helper_source_boundary() {
+fn generic_code_requires_explicit_profile_and_keeps_helper_source_boundary() {
     const PACGA_X1_X2_X3: u32 = 0x9ac3_3041;
     let pc = GuestAddress(0x1000);
     let source = bytes(&[PACGA_X1_X2_X3]);

@@ -8,7 +8,7 @@ mod uac3;
 use crate::usb::audio::*;
 use crate::{
     bus::dma::RegionAllocator,
-    usb::xhci::{interfaces, setup},
+    usb::descriptor::{interfaces, setup},
 };
 use alloc::{collections::BTreeMap, vec::Vec};
 
@@ -409,7 +409,7 @@ fn finite_pcm_is_exact_across_many_packet_ring_wraps_and_restart() {
     });
 }
 #[test]
-fn duplex_capture_uses_actual_packet_bytes_and_shared_clock_is_not_retuned() {
+fn duplex_capture_uses_packet_bytes_and_shared_clock_is_not_retuned() {
     run(|a| {
         a.start_capture(1, 48000).unwrap();
         a.start_playback(0, 48000, &vec![7; 24000], true).unwrap();
@@ -485,7 +485,7 @@ fn explicit_feedback_updates_packetizer_and_stale_feedback_stops() {
     });
 }
 #[test]
-fn implicit_feedback_uses_actual_capture_packet_frames_and_retains_requested_capture() {
+fn implicit_feedback_uses_capture_packet_frames_and_keeps_requested_capture() {
     run(|a| {
         let c = a.binding.formats[1].clone();
         a.binding.formats[0].sync = Sync::Implicit {

@@ -3,10 +3,7 @@
 use super::*;
 use crate::aarch64::sme::movement;
 use alloc::string::String;
-use alloc::vec::Vec;
 
-const RET_X30: u32 = 0xd65f_03c0;
-const NOP: u32 = 0xd503_201f;
 const MOVA_Z0_ZA0H_BYTE: u32 = 0xc002_0000;
 const MOVA_ZA0H_BYTE_Z0: u32 = 0xc000_0000;
 const MOVA_TWO_Z0_ZA0H_BYTE: u32 = 0xc006_0000;
@@ -82,10 +79,6 @@ const NORMAL_FORMS: &[(&str, u32)] = &[
     ("zero_zt_i_", 0xc048_0001),
 ];
 
-fn words(input: &[u32]) -> Vec<u8> {
-    input.iter().flat_map(|word| word.to_le_bytes()).collect()
-}
-
 fn profile(
     bytes: usize,
     streaming: bool,
@@ -143,28 +136,8 @@ fn all_normal_forms_route_through_exact_compiler_body_and_maps() {
                 let mut body = Code::new();
                 x86_64::sme::movement::emit(&mut body, &operand, profile.vector_length(), target)
                     .unwrap();
-                assert_eq!(
-                    native.source_map,
-                    [
-                        (SOURCE_BASE, CONTEXT_WRAPPER_BYTES),
-                        (
-                            GuestAddress(SOURCE_BASE.0 + INSTRUCTION_BYTES as u64),
-                            CONTEXT_WRAPPER_BYTES + body.len()
-                        ),
-                    ]
-                );
-                assert_eq!(
-                    &native.x86_64_code[..CONTEXT_WRAPPER_BYTES],
-                    context_wrapper()
-                );
-                assert_eq!(
-                    &native.x86_64_code[CONTEXT_WRAPPER_BYTES..CONTEXT_WRAPPER_BYTES + body.len()],
-                    body
-                );
-                assert_eq!(
-                    &native.x86_64_code[CONTEXT_WRAPPER_BYTES + body.len()..],
-                    [RET]
-                );
+
+                assert_single_body(&native, SOURCE_BASE, &body);
             }
         }
         assert!(crate::testing::leaf(&words(&[word, RET_X30]), SOURCE_BASE).is_err());

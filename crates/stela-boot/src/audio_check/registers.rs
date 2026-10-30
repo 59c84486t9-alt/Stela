@@ -1,4 +1,4 @@
-//! Read actual command-engine state before shutdown on a qualification error.
+//! Read command-engine state before shutdown on a validation error.
 use crate::output;
 use alloc::rc::Rc;
 use core::{cell::RefCell, ops::Range};

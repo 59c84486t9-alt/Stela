@@ -6,8 +6,9 @@
 //! revisions 1 and 2 only; Asahi m1n1 `proxyclient/m1n1/tgtypes.py` records
 //! that iBoot for macOS 12 and later reports revision 3 with this same
 //! 1024-byte command line, so that is the revision emitted here.
+use crate::Result;
 use alloc::string::String;
-use anyhow::{Result, ensure};
+use stela_contracts::{refuse, require};
 pub use {stela_formats::boot_bundle::schema::BootArgs, stela_formats::boot_bundle::schema::Video};
 
 pub const BOOT_LINE_LENGTH: usize = 1024;
@@ -44,9 +45,10 @@ pub mod offset {
 pub const BYTES: usize = offset::MEM_SIZE_ACTUAL + 8;
 
 pub fn encode(args: &BootArgs) -> Result<[u8; BYTES]> {
-    ensure!(
+    require!(
         args.command_line.len() < BOOT_LINE_LENGTH && !args.command_line.contains('\0'),
-        "boot-args must be under {BOOT_LINE_LENGTH} bytes without NUL"
+        "boot-args must be under {BOOT_LINE_LENGTH} bytes without NUL",
+        BOOT_LINE_LENGTH
     );
     let mut out = [0u8; BYTES];
     let mut put = |at: usize, bytes: &[u8]| out[at..at + bytes.len()].copy_from_slice(bytes);
@@ -78,7 +80,7 @@ pub fn encode(args: &BootArgs) -> Result<[u8; BYTES]> {
 }
 
 pub fn decode(bytes: &[u8]) -> Result<BootArgs> {
-    ensure!(bytes.len() >= BYTES, "boot_args needs {BYTES} bytes");
+    require!(bytes.len() >= BYTES, "boot_args needs {BYTES} bytes", BYTES);
     let u16_at = |at: usize| u16::from_le_bytes(bytes[at..at + 2].try_into().unwrap());
     let u32_at = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
     let u64_at = |at: usize| u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap());
@@ -102,7 +104,8 @@ pub fn decode(bytes: &[u8]) -> Result<BootArgs> {
         machine_type: u32_at(offset::MACHINE_TYPE),
         device_tree: u64_at(offset::DEVICE_TREE),
         device_tree_length: u32_at(offset::DEVICE_TREE_LENGTH),
-        command_line: String::from_utf8(line[..end].to_vec())?,
+        command_line: String::from_utf8(line[..end].to_vec())
+            .map_err(|_| refuse!("boot-args command line is not UTF-8"))?,
         boot_flags: u64_at(offset::BOOT_FLAGS),
         mem_size_actual: u64_at(offset::MEM_SIZE_ACTUAL),
     })
@@ -111,6 +114,7 @@ pub fn decode(bytes: &[u8]) -> Result<BootArgs> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Result;
 
     #[test]
     fn layout_matches_the_natural_alignment_of_boot_h() {

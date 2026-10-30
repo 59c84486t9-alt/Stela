@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Actual unpublished Address/Disable/physical-reset/Address lifetime peer.
+//! Unpublished Address/Disable/physical-reset/Address lifetime peer.
 use super::*;
 
 fn attachment(speed: u8) -> Attachment {
@@ -32,7 +32,7 @@ fn unpublished_profile(
     let range = memory.as_mut_ptr() as u64
         ..memory.as_mut_ptr() as u64 + core::mem::size_of_val(memory) as u64;
     // SAFETY: memory is the live, aligned backing allocation for every modeled
-    // DMA owner; callers retain it until both controller and peer are dropped.
+    // DMA owner; callers keep it until both controller and peer are dropped.
     let mut dma = unsafe { RegionAllocator::new(range) };
     let commands = Ring::with_profile(&mut dma, profile).unwrap();
     let events = dma.allocate(RING_TRBS * 16, 64).unwrap();
@@ -187,7 +187,7 @@ fn generations(kind: Kind) {
             assert_eq!(c.slot_ownership[usize::from(slot)], Ownership::Vacant);
             assert!(c.device(previous).is_err());
             assert!(c.power.retained(slot));
-            // Actual physical reset acknowledgment retires the old current
+            // Physical reset acknowledgment retires the old current
             // grant. No ownership/SlotId/endpoint-state receipt is injected.
             c.reset_root_device(attachment(speed)).unwrap();
             assert_eq!(hardware.borrow().reset_writes, 1);
@@ -272,7 +272,7 @@ fn generations(kind: Kind) {
                         c.drain();
                     }
                     let before = backing.clone();
-                    identity::raw_tests::refuse(&mut c, slot, data.physical(), trb);
+                    identity::tests::raw::refuse(&mut c, slot, data.physical(), trb);
                     assert_eq!(backing, before);
                     if let Some(ticket) = ordinary {
                         assert_eq!(
@@ -336,8 +336,8 @@ fn generations(kind: Kind) {
                         .unwrap()
                         .configure(core::slice::from_ref(&endpoint), None, &mut dma)
                         .unwrap();
-                    // The original peer's bulk parser deliberately rejects ISO;
-                    // this peer consumes its actual published Isoch TRB instead.
+                    // The original peer's bulk parser rejects ISO;
+                    // this peer consumes its published Isoch TRB instead.
                     struct Unused;
                     impl Registers for Unused {
                         fn read32(&mut self, _: usize) -> u32 {
@@ -373,7 +373,7 @@ fn generations(kind: Kind) {
                         c.drain();
                     }
                     let before = backing.clone();
-                    identity::raw_tests::refuse(&mut c, slot, data.physical(), trb);
+                    identity::tests::raw::refuse(&mut c, slot, data.physical(), trb);
                     assert_eq!(backing, before);
                     assert_eq!(
                         c.completed_iso(&ticket),
@@ -442,7 +442,7 @@ impl Registers for FatalAfterDisable {
             && let Some(reads) = &mut self.status_reads
         {
             *reads += 1;
-            // The first read receives the peer's actual matching Disable ACK;
+            // The first read receives the peer's matching Disable ACK;
             // the independent following health read reports a fatal controller.
             if *reads > 1 {
                 return status | HCE;
@@ -498,16 +498,15 @@ fn matching_disable_ack_permanently_fences_raw_access_before_fatal_health_failur
         assert!(c.power.retained(slot));
         let data = dma.allocate(64, 64).unwrap();
         let before = backing.clone();
-        identity::raw_tests::refuse(&mut c, slot, data.physical(), 0);
+        identity::tests::raw::refuse(&mut c, slot, data.physical(), 0);
         assert_eq!(backing, before);
     }
 }
 
-#[path = "slot_resource_tests.rs"]
 mod slot_resource_tests;
 
 #[test]
-fn immutable_uas_planner_retains_current_generation_after_actual_slot_reuse() {
+fn immutable_uas_planner_keeps_current_generation_after_slot_reuse() {
     for context in [32, 64] {
         let mut backing = vec![0u64; 512 * 1024];
         let (mut c, previous, hardware, mut dma) =
@@ -524,7 +523,7 @@ fn immutable_uas_planner_retains_current_generation_after_actual_slot_reuse() {
         assert_eq!(hardware.borrow().reset_writes, 1);
         assert!(!c.power.retained(slot));
         // Identify reads the real descriptor/configuration bytes through EP0
-        // after an actual fresh Enable/Address; no SlotId is manufactured.
+        // after a fresh Enable/Address; no SlotId is manufactured.
         let mut device = c
             .identify(attachment(SUPER_SPEED), "reused UAS peer".into(), &mut dma)
             .unwrap();

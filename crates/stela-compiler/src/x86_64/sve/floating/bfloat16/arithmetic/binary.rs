@@ -253,7 +253,7 @@ pub(in crate::x86_64) fn emit(
             failures.push(branch(code, Condition::NotZero));
             Host::MoveAligned.register(code, SOURCE, RESULT, target);
             // Directed host overflow may return a finite maximum, so every
-            // operation retains the non-IXC status guard. A nonexceptional BF
+            // operation keeps the non-IXC status guard. A nonexceptional BF
             // p8 product has at most sixteen bits and is exact at Single p24.
             numerical::capture_status(code, &frame);
             code.asm()

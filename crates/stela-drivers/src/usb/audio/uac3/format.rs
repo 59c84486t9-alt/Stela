@@ -3,7 +3,7 @@
 use super::super::descriptors::{capacity, service_interval};
 use super::super::{Control, Error, Format, Sync};
 use super::{Reader, graph::ParsedGraph};
-use crate::{audio::Direction, bytes::le16, usb::xhci::Interface};
+use crate::{audio::Direction, bytes::le16, usb::descriptor::Interface};
 use alloc::vec::Vec;
 
 pub(super) fn parse<C: Control>(

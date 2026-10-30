@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-//! A descriptor-advertised hardware mixer composes with actual PCM/DMA ownership.
+//! A descriptor-advertised hardware mixer composes with PCM/DMA ownership.
 use super::*;
 
 struct MixerDevice {

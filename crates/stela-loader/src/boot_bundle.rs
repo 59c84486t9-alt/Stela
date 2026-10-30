@@ -10,6 +10,7 @@
 //! with x0 holding the `boot_args` address. `boot_args` values follow m1n1
 //! `_write_boot_args`. The format is specified in
 //! `docs/design/runtime.md#kernel-boot-bundle`.
+use crate::Result;
 use crate::aic;
 use crate::apple_device_tree::DeviceTree;
 use crate::boot_args::{self, BootArgs, Video};
@@ -28,9 +29,7 @@ use crate::nvram;
 use crate::root_selection;
 use crate::soc_variant;
 use crate::trust_cache;
-use anyhow::{Context, Result, bail, ensure};
-use stela_contracts::ctrr;
-use stela_contracts::tag_storage;
+use stela_contracts::{ctrr, refuse, require, tag_storage};
 
 use stela_formats::sha256;
 use stela_soc_data::board;
@@ -47,10 +46,16 @@ pub use {
     stela_formats::boot_bundle::schema::Region, stela_formats::boot_bundle::schema::SCHEMA_VERSION,
     stela_formats::boot_bundle::schema::Source, stela_formats::boot_bundle::schema::Target,
 };
+mod device_tree;
+mod layout;
+mod patches;
+use device_tree::*;
+use layout::*;
+use patches::*;
 
 /// The revision of the content [`prepare`] writes within its schema; a
 /// bundle of another revision is prepared again (`stela setup update stela`).
-pub const REVISION: u32 = 30;
+pub const REVISION: u32 = 32;
 /// m1n1 `_write_boot_args`: the physical aperture base XNU expects, offset
 /// by `phys_base` modulo 32 MiB.
 const VIRT_BASE: u64 = 0xfffffe0010000000;
@@ -95,8 +100,8 @@ pub struct Input<'a> {
 pub struct Inputs<'a> {
     pub target: Target,
     pub kernel_collection: Input<'a>,
-    /// Kexts linked against `kernel_collection` (`stela_loader::aux_kc`),
-    /// which SPTM maps beside it.
+    /// Kexts linked against `kernel_collection` (`aux_kc`), which SPTM maps
+    /// beside it.
     pub auxiliary_collection: Option<Input<'a>>,
     pub sptm: Input<'a>,
     pub txm: Input<'a>,
@@ -126,13 +131,13 @@ impl Inputs<'_> {
     /// The guest DRAM base of the target board, from its DeviceTree or its
     /// SoC (`board::board_dram_base`); `None` when the target names no chip.
     pub fn dram_base(&self) -> Result<Option<u64>> {
-        self.target
-            .chip_id
-            .map(|chip_id| {
-                stela_soc_data::board::board_dram_base(self.device_tree.bytes, chip_id)
-                    .map_err(anyhow::Error::msg)
-            })
-            .transpose()
+        let Some(chip_id) = self.target.chip_id else {
+            return Ok(None);
+        };
+        Ok(Some(stela_soc_data::board::board_dram_base(
+            self.device_tree.bytes,
+            chip_id,
+        )?))
     }
 }
 
@@ -216,8 +221,6 @@ const TXM_SPLITS: &[Split] = &[
 /// The physical order SPTM requires (m1n1: "Required by SPTM in this order"),
 /// as `(image, split)` or a standalone region name.
 const REGION_ORDER: &[&str] = &[
-    // Outside SPTM's contiguous image sequence, inside the CTRR-A run.
-    "BootManifest",
     "TXM-ro",
     "TXM-rx",
     "TXM-bx",
@@ -272,29 +275,62 @@ fn validate_sptm_region_order(regions: &[Region]) -> Result<()> {
     let mut previous: Option<(&str, u64)> = None;
     for &(name, optional) in SPTM_REGION_ORDER {
         let Some(region) = regions.iter().find(|region| region.name == name) else {
-            ensure!(
+            require!(
                 optional,
-                "SPTM region order: missing required region {name}"
+                "SPTM region order: missing required region {name}",
+                name
             );
             continue;
         };
         let start = region.guest_pa;
         let end = start
             .checked_add(region.memory_bytes)
-            .with_context(|| format!("SPTM region order: {name} range overflows"))?;
+            .ok_or_else(|| refuse!("SPTM region order: {name} range overflows", name))?;
         // The original CMN/CCMN checks reject null/sentinel endpoints.
-        ensure!(
+        require!(
             start > 0 && start < u64::MAX - 1 && end > 0 && end < u64::MAX,
-            "SPTM region order: {name} has invalid range {start:#x}..{end:#x}"
+            "SPTM region order: {name} has invalid range {start:#x}..{end:#x}",
+            name,
+            start,
+            end
         );
         if let Some((previous_name, previous_end)) = previous {
-            ensure!(
+            require!(
                 start == previous_end,
                 "SPTM region order: {name} starts at {start:#x}, not immediately after \
-                 {previous_name} ending at {previous_end:#x}"
+                 {previous_name} ending at {previous_end:#x}",
+                name,
+                start,
+                previous_name,
+                previous_end
             );
         }
         previous = Some((name, end));
+    }
+    Ok(())
+}
+
+/// SPTM gives XNU the physical slide, physBase up to the first image, as
+/// free memory (`PHYS_SLIDE`, registered at raw 0xba7dc of 26A434's SPTM):
+/// no region may lie in it.
+fn validate_physical_slide(regions: &[Region], phys_base: u64) -> Result<()> {
+    let first = SPTM_REGION_ORDER[0].0;
+    let start = regions
+        .iter()
+        .find(|region| region.name == first)
+        .ok_or_else(|| refuse!("physical slide: missing region {first}", first))?
+        .guest_pa;
+    for region in regions {
+        let end = region.guest_pa.saturating_add(region.memory_bytes);
+        require!(
+            end <= phys_base || region.guest_pa >= start,
+            "{name} at {guest_pa:#x} lies in the physical slide {phys_base:#x}..{start:#x}, \
+             which SPTM gives XNU as free memory",
+            name = region.name,
+            guest_pa = region.guest_pa,
+            phys_base,
+            start
+        );
     }
     Ok(())
 }
@@ -308,25 +344,26 @@ fn sptm_image_span(regions: &[Region]) -> Result<core::ops::Range<u64>> {
         let region = regions
             .iter()
             .find(|region| region.name == name)
-            .with_context(|| format!("SPTM image span: missing region {name}"))?;
+            .ok_or_else(|| refuse!("SPTM image span: missing region {name}", name))?;
         let end = region
             .guest_pa
             .checked_add(region.memory_bytes)
-            .with_context(|| format!("SPTM image span: {name} range overflows"))?;
+            .ok_or_else(|| refuse!("SPTM image span: {name} range overflows", name))?;
         match &mut span {
             None => span = Some(region.guest_pa..end),
             Some(span) => {
-                ensure!(
+                require!(
                     region.guest_pa == span.end,
-                    "SPTM image span: {name} starts at {:#x}, expected {:#x}",
-                    region.guest_pa,
-                    span.end
+                    "SPTM image span: {name} starts at {guest_pa:#x}, expected {end:#x}",
+                    name,
+                    guest_pa = region.guest_pa,
+                    end = span.end
                 );
                 span.end = end;
             }
         }
     }
-    span.context("SPTM image span is empty")
+    span.ok_or(refuse!("SPTM image span is empty").into())
 }
 
 /// The secure kernel's entries, unset: the board has no exclave image
@@ -347,6 +384,9 @@ pub const DEVICE_TREE_FILE: &str = "devicetree.adt";
 pub const ORIGINAL_DEVICE_TREE_FILE: &str = "original-devicetree.adt";
 const TRUST_CACHE_FILE: &str = "trustcache.bin";
 const BOOT_MANIFEST_FILE: &str = "boot-manifest.im4m";
+/// The region of the original boot manifest, in iBoot's loaded-object
+/// carveout rather than the memory map (`layout::boot_manifest_region`).
+const BOOT_MANIFEST_REGION: &str = "BootManifest";
 const SEP_FILE: &str = "sepfw.im4p";
 const RAMDISK_FILE: &str = "ramdisk.img";
 /// The engine handoff's file-name capacity (`stela-boot` `handoff::MAX_NAME`).
@@ -367,7 +407,7 @@ fn resolve(collection: &KernelCollection, mark: Mark) -> Result<u64> {
     let segment = |name: &str| {
         collection
             .segment(name)
-            .with_context(|| format!("image has no segment {name}"))
+            .ok_or_else(|| refuse!("image has no segment {name}", name))
     };
     Ok(match mark {
         ImageStart => 0,
@@ -390,10 +430,11 @@ impl LoadedImage {
         for split in splits {
             let start = resolve(&collection, split.start)?;
             let end = resolve(&collection, split.end)?;
-            ensure!(
+            require!(
                 start < end && start.is_multiple_of(PAGE_BYTES) && end.is_multiple_of(PAGE_BYTES),
-                "{name}-{} is not a non-empty page-aligned range",
-                split.suffix
+                "{name}-{suffix} is not a non-empty page-aligned range",
+                name,
+                suffix = split.suffix
             );
             pieces.push((format!("{name}-{}", split.suffix), start..end));
         }
@@ -402,15 +443,18 @@ impl LoadedImage {
         sorted.sort_by_key(|r| r.start);
         let mut cursor = 0;
         for range in sorted {
-            ensure!(
+            require!(
                 range.start == cursor,
-                "{name} regions leave a gap or overlap at image offset {cursor:#x}"
+                "{name} regions leave a gap or overlap at image offset {cursor:#x}",
+                name,
+                cursor
             );
             cursor = range.end;
         }
-        ensure!(
+        require!(
             cursor == collection.image_bytes(),
-            "{name} regions do not reach the image end"
+            "{name} regions do not reach the image end",
+            name
         );
         Ok(Self {
             name,
@@ -449,7 +493,8 @@ fn range_value(base: u64, length: u64) -> Vec<u8> {
 
 fn parse_size(text: &str, recipe: &str) -> Result<usize> {
     let digits = text.trim_start_matches("0x");
-    usize::from_str_radix(digits, 16).with_context(|| format!("bad size {text} in {recipe}"))
+    usize::from_str_radix(digits, 16)
+        .map_err(|_| refuse!("bad size {text} in {recipe}", text, recipe).into())
 }
 
 /// The value one recipe alternative yields from the supplied board data.
@@ -462,9 +507,11 @@ fn alternative_value(
         let Some(value) = options.mac_addresses.get(name) else {
             return Ok(None);
         };
-        ensure!(
+        require!(
             value.len() == MAC_ADDRESS_BYTES,
-            "MAC address {name} must be {MAC_ADDRESS_BYTES} bytes"
+            "MAC address {name} must be {MAC_ADDRESS_BYTES} bytes",
+            name,
+            MAC_ADDRESS_BYTES
         );
         return Ok(Some(value.clone()));
     }
@@ -495,9 +542,10 @@ fn alternative_value(
             Some((digits, size)) => (digits, Some(parse_size(size, recipe)?)),
             None => (spec, None),
         };
-        ensure!(
+        require!(
             digits.len().is_multiple_of(2) && digits.bytes().all(|b| b.is_ascii_hexdigit()),
-            "{recipe} does not hold whole hex bytes"
+            "{recipe} does not hold whole hex bytes",
+            recipe
         );
         let mut value: Vec<u8> = digits
             .as_bytes()
@@ -510,16 +558,23 @@ fn alternative_value(
             })
             .collect();
         if let Some(size) = size {
-            ensure!(
+            require!(
                 value.len() <= size,
-                "{recipe} holds {} bytes; it allows {size}",
-                value.len()
+                "{recipe} holds {value_len} bytes; it allows {size}",
+                recipe,
+                value_len = value.len(),
+                size
             );
             value.resize(size, 0);
         }
         return Ok(Some(value));
     }
-    bail!("unknown fill-in source {alternative} in {recipe}")
+    Err(refuse!(
+        "unknown fill-in source {alternative} in {recipe}",
+        alternative,
+        recipe
+    )
+    .into())
 }
 
 /// Resolve every template placeholder as iBoot does: the first recipe
@@ -541,7 +596,7 @@ fn resolve_placeholders(
         }
         let node = tree
             .node_mut(&placeholder.path)
-            .context("placeholder node disappeared")?;
+            .ok_or(refuse!("placeholder node disappeared"))?;
         let resolution = match chosen {
             Some((alternative, value)) => {
                 let bytes = value.len();
@@ -586,7 +641,7 @@ pub fn prepare(inputs: &Inputs, options: &Options) -> Result<Bundle> {
 /// [`prepare`], with `ramdisk` moved into the bundle; `inputs` must name no
 /// ramdisk of its own.
 pub fn prepare_owned(inputs: &Inputs, ramdisk: OwnedRamdisk, options: &Options) -> Result<Bundle> {
-    ensure!(
+    require!(
         inputs.ramdisk.is_none(),
         "a bundle has one ramdisk, given both borrowed and owned"
     );
@@ -629,18 +684,27 @@ fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> 
     let load_base = options
         .phys_base
         .checked_add(options.load_offset)
-        .context("load base overflows")?;
+        .ok_or(refuse!("load base overflows"))?;
     let (mut regions, top_of_kernel_data) = place(contents, load_base)?;
     validate_sptm_region_order(&regions)?;
-    ensure!(
+    if let (Some(manifest), Some(_)) = (&inputs.boot_manifest, &shaped.boot_manifest_object) {
+        regions.insert(
+            0,
+            boot_manifest_region(&carveouts, manifest.bytes.len() as u64)?,
+        );
+    }
+    validate_physical_slide(&regions, options.phys_base)?;
+    require!(
         top_of_kernel_data <= dram_end,
-        "regions end at {top_of_kernel_data:#x}, past DRAM end {dram_end:#x}"
+        "regions end at {top_of_kernel_data:#x}, past DRAM end {dram_end:#x}",
+        top_of_kernel_data,
+        dram_end
     );
     let region = |name: &str| {
         regions
             .iter()
             .find(|r| r.name == name)
-            .with_context(|| format!("no region {name}"))
+            .ok_or_else(|| refuse!("no region {name}", name))
     };
     let read_only_region = shaped
         .memory_controller
@@ -649,7 +713,7 @@ fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> 
             lock_regs::ctrr_a(
                 controller,
                 options.dram_base,
-                load_base,
+                region("TXM-ro")?.guest_pa,
                 sptm_rx.guest_pa + page_round(sptm_rx.memory_bytes),
             )
         })
@@ -673,22 +737,14 @@ fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> 
         })
         .transpose()?;
     if let Some(object) = &shaped.boot_manifest_object {
-        let manifest = region("BootManifest")?;
-        let protected = read_only_region
-            .as_ref()
-            .context("boot manifest publication requires a read-only boot region")?;
-        ensure!(
-            manifest.guest_pa >= protected.base
-                && manifest.guest_pa + manifest.memory_bytes <= protected.base + protected.bytes,
-            "boot manifest lies outside the read-only boot region"
-        );
+        let manifest = region(BOOT_MANIFEST_REGION)?;
         shaped
             .security
             .extend(object.place(&mut shaped.tree, manifest.guest_pa)?);
     }
     let tree = &shaped.tree;
     let device_tree = tree.serialize();
-    ensure!(
+    require!(
         device_tree.len() as u64 == device_tree_bytes,
         "DeviceTree size changed after placement"
     );
@@ -758,2717 +814,21 @@ fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> 
     Ok(Bundle { files, manifest })
 }
 
-/// The options with the physical base raised past iBoot's carveouts, which
-/// sit below the managed range, and the carveouts placed.
-struct Placement {
-    options: Options,
-    carveouts: Vec<Placed>,
-    dram_end: u64,
-}
-
-impl Placement {
-    fn new(inputs: &Inputs, options: &Options) -> Result<Self> {
-        let table = inputs
-            .target
-            .chip_id
-            .map(carveouts::for_chip)
-            .unwrap_or_default();
-        let reservation = carveouts::reserve(&table, options.dram_base, options.dram_size)?;
-        let dram_end = options
-            .dram_base
-            .checked_add(options.dram_size)
-            .context("DRAM end overflows")?;
-        let options = Options {
-            phys_base: options.phys_base.max(reservation.managed_floor()),
-            ..options.clone()
-        };
-        if let (Some(chip_id), Some(base)) = (inputs.target.chip_id, inputs.dram_base()?) {
-            ensure!(
-                options.dram_base == base,
-                "guest DRAM base {:#x} is not ApChipID {chip_id:#x}'s {base:#x}",
-                options.dram_base
-            );
-        }
-        ensure!(
-            options.phys_base >= options.dram_base
-                && options.phys_base < dram_end
-                && options.phys_base.is_multiple_of(PAGE_BYTES)
-                && options.load_offset.is_multiple_of(PAGE_BYTES),
-            "phys_base must be a page-aligned address inside DRAM"
-        );
-        Ok(Self {
-            options,
-            carveouts: reservation.into_regions(),
-            dram_end,
-        })
-    }
-}
-
-/// The boot images, split into their regions.
-struct Images {
-    kernel: LoadedImage,
-    auxiliary: Option<LoadedImage>,
-    sptm: LoadedImage,
-    txm: LoadedImage,
-}
-
-impl Images {
-    fn load(inputs: &Inputs) -> Result<Self> {
-        Ok(Self {
-            kernel: LoadedImage::new(
-                "BootKC",
-                KERNEL_FILE,
-                KernelCollection::parse(inputs.kernel_collection.bytes)?,
-                inputs.kernel_collection.bytes,
-                KERNEL_SPLITS,
-            )?,
-            auxiliary: inputs
-                .auxiliary_collection
-                .as_ref()
-                .map(|input| {
-                    LoadedImage::new(
-                        "AuxKC",
-                        AUXILIARY_FILE,
-                        KernelCollection::parse_auxiliary(input.bytes)?,
-                        input.bytes,
-                        AUXILIARY_SPLITS,
-                    )
-                })
-                .transpose()?,
-            sptm: LoadedImage::new(
-                "SPTM",
-                SPTM_FILE,
-                KernelCollection::parse_executable(inputs.sptm.bytes)?,
-                inputs.sptm.bytes,
-                SPTM_SPLITS,
-            )?,
-            txm: LoadedImage::new(
-                "TXM",
-                TXM_FILE,
-                KernelCollection::parse_executable(inputs.txm.bytes)?,
-                inputs.txm.bytes,
-                TXM_SPLITS,
-            )?,
-        })
-    }
-
-    /// The manifest's images, SPTM's first: where execution starts.
-    fn manifest_images(&self, regions: &[Region]) -> Result<Vec<Image>> {
-        [&self.sptm, &self.txm, &self.kernel]
-            .into_iter()
-            .map(|image| {
-                let offset = image.collection.entry_offset()?;
-                let (name, range) = image
-                    .pieces
-                    .iter()
-                    .find(|(_, r)| r.contains(&offset))
-                    .context("entry lies outside every region")?;
-                let region = regions
-                    .iter()
-                    .find(|r| r.name == *name)
-                    .with_context(|| format!("no region {name}"))?;
-                Ok(Image {
-                    name: image.name.into(),
-                    file: image.file.into(),
-                    uuid: image.collection.uuid.clone(),
-                    vm_base: image.collection.vm_base,
-                    vm_bytes: image.collection.image_bytes(),
-                    entry: Entry {
-                        image: image.name.into(),
-                        virtual_address: image.collection.entry()?.pc,
-                        physical_address: region.guest_pa + (offset - range.start),
-                    },
-                    fileset_entries: image.collection.fileset_entries.len(),
-                })
-            })
-            .collect()
-    }
-}
-
-/// The DeviceTree as iBoot hands it over, before the memory map is laid
-/// out, and what shaping it decided.
-struct Shaped {
-    tree: DeviceTree,
-    placeholders: Vec<PlaceholderDecision>,
-    boot_cpu: BootCpu,
-    security: Vec<Decision>,
-    unresolved: Vec<String>,
-    nvram_published: bool,
-    memory_controller: Option<&'static lock_regs::MemoryController>,
-    hidden_devices: Vec<String>,
-    boot_manifest_object: Option<boot_manifests::Object>,
-}
-
-impl Shaped {
-    fn new(inputs: &Inputs, options: &Options, carveouts: &[Placed]) -> Result<Self> {
-        let boot_manifest = inputs
-            .boot_manifest
-            .as_ref()
-            .map(|input| im4m::parse(input.bytes))
-            .transpose()?;
-        let cryptex1_manifest = inputs
-            .cryptex1_manifest
-            .as_ref()
-            .map(|input| im4m::parse(input.bytes))
-            .transpose()?;
-        for manifest in boot_manifest.iter().chain(&cryptex1_manifest) {
-            check_board(manifest, &inputs.target)?;
-        }
-        let mut tree = DeviceTree::parse(inputs.device_tree.bytes)?;
-        let original_tree = tree.clone();
-        // iBoot merges the fused variant's overlays as it loads the tree.
-        let (variant, variant_decisions) =
-            soc_variant::apply(&mut tree, inputs.target.chip_id, inputs.target.board_id)?
-                .map_or((None, vec![]), |(variant, decisions)| {
-                    (Some(variant), decisions)
-                });
-        let placeholders = resolve_placeholders(&mut tree, options)?;
-        let boot_cpu = select_boot_cpu(&tree, &original_tree, options.boot_cpu.as_deref())?;
-        let mut unresolved = shape_device_tree(&mut tree, &inputs.target, options, &boot_cpu)?;
-        let (mut security, policy_unresolved) = boot_policy::apply(
-            &mut tree,
-            &options.security,
-            boot_manifest.as_ref(),
-            cryptex1_manifest.as_ref(),
-        )?;
-        unresolved.extend(policy_unresolved);
-        security.extend(variant_decisions);
-        let mut shaped = Self {
-            tree,
-            placeholders,
-            boot_cpu,
-            security,
-            unresolved,
-            nvram_published: false,
-            memory_controller: None,
-            hidden_devices: vec![],
-            boot_manifest_object: None,
-        };
-        shaped.hand_off(inputs, options, boot_manifest.as_ref())?;
-        let fused = variant.map(|variant| variant.name);
-        shaped.publish_platform(inputs, carveouts, fused)?;
-        apply_overlay(&mut shaped.tree, &options.overlay)?;
-        verify_boot_cpu(&shaped.tree, &original_tree, &shaped.boot_cpu)?;
-        shaped
-            .unresolved
-            .extend(platform_gaps(&shaped.tree, inputs));
-        shaped.boot_manifest_object = shaped.boot_manifest_object(inputs, options)?;
-        Ok(shaped)
-    }
-
-    fn record(&mut self, (decisions, gaps): (Vec<Decision>, Vec<String>)) {
-        self.security.extend(decisions);
-        self.unresolved.extend(gaps);
-    }
-
-    /// The root, the OS environment, the boot command and the machine
-    /// identity iBoot writes into `/chosen`.
-    fn hand_off(
-        &mut self,
-        inputs: &Inputs,
-        options: &Options,
-        boot_manifest: Option<&im4m::Manifest>,
-    ) -> Result<()> {
-        if let Some(root_hash) = &inputs.root_hash {
-            if root_hash.volume == boot_policy::SealedVolume::BaseSystem {
-                boot_policy::require_image_boot(&options.boot_args)?;
-            }
-            let manifest = inputs
-                .boot_manifest
-                .as_ref()
-                .zip(boot_manifest)
-                .map(|(input, manifest)| (input.bytes, manifest));
-            let applied = boot_policy::apply_root_hash(
-                &mut self.tree,
-                root_hash.volume,
-                root_hash.im4p.as_ref().map(|input| input.bytes),
-                manifest,
-            )?;
-            self.record(applied);
-        }
-        if let Some(environment) = options.osenvironment {
-            let applied = boot_policy::apply_environment(&mut self.tree, environment)?;
-            self.record(applied);
-        }
-        // iBoot deletes the environments once one is applied.
-        self.security
-            .extend(handoff::remove_environments(&mut self.tree));
-        let applied = handoff::apply(&mut self.tree, inputs.target.chip_id)?;
-        self.record(applied);
-        let applied = handoff::apply_boot_command(&mut self.tree, options.boot_command)?;
-        self.record(applied);
-        let applied = handoff::apply_identity(&mut self.tree, options.ecid, inputs.target.chip_id)?;
-        self.record(applied);
-        match &options.root {
-            Some(root) => self
-                .security
-                .extend(root_selection::apply(&mut self.tree, root)?),
-            None => self.unresolved.push(
-                "/chosen apfs-preboot-uuid, boot-uuid, boot-objects-path: no root volume was named; \
-                 template values kept"
-                    .into(),
-            ),
-        }
-        boot_policy::refuse_ramdisk_image_root(&options.boot_args)
-    }
-
-    /// The carveouts, interrupt controller, NVRAM, memory-controller locks,
-    /// DARTs, operating points and device admissions iBoot publishes.
-    fn publish_platform(
-        &mut self,
-        inputs: &Inputs,
-        carveouts: &[Placed],
-        fused: Option<&'static str>,
-    ) -> Result<()> {
-        let tree = &mut self.tree;
-        let unresolved = &mut self.unresolved;
-        carveouts::publish(tree, carveouts)?;
-        if let Some(chip_id) = inputs.target.chip_id {
-            aic::publish(tree, chip_id)?;
-        }
-        self.nvram_published = nvram::publish(tree)?;
-        self.memory_controller = match inputs
-            .target
-            .chip_id
-            .and_then(|chip| lock_regs::table(chip, fused))
-        {
-            Some(controller) if lock_regs::publish(tree, controller)? => Some(controller),
-            Some(_) => {
-                unresolved.push(format!(
-                    "{}: the template has no node for iBoot's AMCC map; SPTM's CTRR setup stops",
-                    lock_regs::AMCC
-                ));
-                None
-            }
-            None if tree.node(lock_regs::AMCC).is_some() => {
-                unresolved.push(format!(
-                    "{}: no iBoot AMCC map for this SoC; the template stays empty and SPTM's CTRR \
-                     setup stops on it",
-                    lock_regs::AMCC
-                ));
-                None
-            }
-            None => None,
-        };
-        if let Some(controller) = inputs
-            .target
-            .chip_id
-            .and_then(|chip| lock_regs::ioa_table(chip, fused))
-        {
-            lock_regs::publish_ioa(tree, controller)?;
-        }
-        darts::publish(tree)?;
-        if let Some(chip_id) = inputs.target.chip_id {
-            for table in dvfs::publish(tree, chip_id)? {
-                let (name, domain) = (&table.name, &table.domain);
-                unresolved.push(match table.contents {
-                    dvfs::Contents::OperatingPoints => format!(
-                        "/arm-io/pmgr {name}: {domain} operating points without calibrated voltages (0)"
-                    ),
-                    dvfs::Contents::SingleState => {
-                        format!("/arm-io/pmgr {name}: {domain} has one state; its clock is not modeled")
-                    }
-                    dvfs::Contents::Unpublished => format!(
-                        "/arm-io/pmgr {name}: ApChipID {chip_id:#x} has no {domain} operating points; \
-                         the table is left out and ApplePMGR stops on it"
-                    ),
-                });
-            }
-        }
-        self.hidden_devices = devices::hide_unmodeled(tree);
-        if !self.hidden_devices.is_empty() {
-            unresolved.push(format!(
-                "{} device admissions are restricted by missing models or providers (hidden_devices)",
-                self.hidden_devices.len()
-            ));
-        }
-        if let Some(chip_id) = inputs.target.chip_id
-            && let Some(tables) = gpu_dvfs::publish(tree, chip_id)?
-        {
-            unresolved.push(format!(
-                "/arm-io/sgx perf-states, perf-states-sram: {} GPU operating points in {} table \
-                 without calibrated voltages (0)",
-                tables.states, tables.tables
-            ));
-        }
-        Ok(())
-    }
-
-    /// The boot manifest's object, reserved in the tree: the IM4M boot
-    /// policy selected, unchanged. The payload tag belongs to the source
-    /// input, not a guessed iBoot identity or name. A tethered restore loads
-    /// the IPSW's firmware under the same ticket.
-    fn boot_manifest_object(
-        &mut self,
-        inputs: &Inputs,
-        options: &Options,
-    ) -> Result<Option<boot_manifests::Object>> {
-        let restore = options.boot_command == Some(handoff::BootCommand::TetheredRestore);
-        let object = inputs
-            .boot_manifest
-            .as_ref()
-            .map(|manifest| {
-                boot_manifests::Object::new(
-                    &self.tree,
-                    &inputs.kernel_collection.source.payload_type,
-                    manifest.bytes,
-                )
-                .map(|object| match restore {
-                    true => object.admits_firmware(),
-                    false => object,
-                })
-            })
-            .transpose()?;
-        if let Some(object) = &object {
-            object.reserve(&mut self.tree)?;
-            self.unresolved.push(
-                "/chosen/secure-boot-hashes state: iBoot's loaded-object authentication flags are \
-                 not reproduced; only the supplied original kernel manifest is forwarded"
-                    .into(),
-            );
-        }
-        Ok(object)
-    }
-}
-
-/// Every region's content in [`REGION_ORDER`], before placement; the
-/// DeviceTree's size is set once the memory map is laid out.
-fn contents(
-    inputs: &Inputs,
-    ramdisk_bytes: Option<usize>,
-    trust_cache: &[u8],
-    images: &Images,
-    core_locks_handed_off: bool,
-    unresolved: &mut Vec<String>,
-) -> Result<Vec<Content>> {
-    let content = |name: &str, file: &str, bytes: u64, memory_bytes: u64| Content {
-        name: name.into(),
-        file: file.into(),
-        file_offset: 0,
-        bytes,
-        memory_bytes,
-        virtual_address: None,
-    };
-    let mut contents = vec![];
-    for name in REGION_ORDER {
-        let content = match *name {
-            "TrustCache" => content(
-                name,
-                TRUST_CACHE_FILE,
-                trust_cache.len() as u64,
-                page_round(trust_cache.len() as u64),
-            ),
-            "BootManifest" => match &inputs.boot_manifest {
-                Some(manifest) => content(
-                    name,
-                    BOOT_MANIFEST_FILE,
-                    manifest.bytes.len() as u64,
-                    page_round(manifest.bytes.len() as u64),
-                ),
-                None => continue,
-            },
-            "DeviceTree" => content(name, DEVICE_TREE_FILE, 0, 0),
-            "RAMDisk" => match ramdisk_bytes {
-                Some(bytes) => content(name, RAMDISK_FILE, bytes as u64, page_round(bytes as u64)),
-                None => continue,
-            },
-            // iBoot adds the SEPFW entry whether or not it loaded SEP firmware
-            // (0x29dd8, before its loaded test at 0x29df4); only
-            // `sepfw-loaded`/`sepfw-booted`/`sep-boot-slot` depend on a load.
-            // The run-time load needs the region: `seputil --restore` reaches
-            // `AppleSEPFirmware::_initFromMemory`, whose
-            // `_setupSepFirmwareMemoryRegion` panics without SEPFW and whose
-            // `_copyInData` copies the delivered image into it, refusing an
-            // image longer than the region. Stela's SEP has no `fromPreload`
-            // path, so the region is reserved (zero-filled), large enough for
-            // the SEP image in the `IMG4` container the restore host delivers,
-            // and `sepfw-loaded` stays unpublished.
-            "SEPFW" => match &inputs.sep_firmware {
-                Some(sep) => content(
-                    name,
-                    SEP_FILE,
-                    0,
-                    page_round(sep_firmware_region_bytes(sep.bytes)),
-                ),
-                None => {
-                    unresolved.push("SEPFW: no SEP firmware input; the region is absent".into());
-                    continue;
-                }
-            },
-            lock_regs::CL4_DUMMY_PAGE if core_locks_handed_off => content(
-                name,
-                CL4_DUMMY_PAGE_FILE,
-                lock_regs::CL4_DUMMY_PAGE_BYTES as u64,
-                lock_regs::CL4_DUMMY_PAGE_BYTES as u64,
-            ),
-            lock_regs::CL4_DUMMY_PAGE => continue,
-            "BootArgs" => content(
-                name,
-                BOOT_ARGS_FILE,
-                boot_args::BYTES as u64,
-                BOOT_ARGS_REGION_BYTES,
-            ),
-            piece if piece.starts_with("AuxKC") && images.auxiliary.is_none() => continue,
-            piece => {
-                let image = [&images.kernel, &images.sptm, &images.txm]
-                    .into_iter()
-                    .chain(&images.auxiliary)
-                    .find(|image| piece.starts_with(image.name))
-                    .with_context(|| format!("no image provides {piece}"))?;
-                let range = image
-                    .pieces
-                    .iter()
-                    .find(|(n, _)| n == piece)
-                    .map(|(_, r)| r.clone())
-                    .with_context(|| format!("{} has no split {piece}", image.name))?;
-                Content {
-                    name: piece.into(),
-                    file: image.file.into(),
-                    file_offset: range.start,
-                    bytes: range.end - range.start,
-                    memory_bytes: range.end - range.start,
-                    virtual_address: Some(image.collection.vm_base + range.start),
-                }
-            }
-        };
-        contents.push(content);
-    }
-    unresolved.push(
-        "RTBuddySeg: iBoot-provided RTKit buddy segment; content unknown, the region is absent"
-            .into(),
-    );
-    Ok(contents)
-}
-
-/// Lays the memory map out with zero values first: its size is fixed by the
-/// entry count, so the DeviceTree size is known before placement. Returns
-/// that size, which the DeviceTree content now has.
-fn reserve_memory_map(tree: &mut DeviceTree, contents: &mut [Content]) -> Result<u64> {
-    let memory_map = tree
-        .node_mut(MEMORY_MAP)
-        .context("DeviceTree has no /chosen/memory-map")?;
-    memory_map
-        .properties
-        .retain(|p| !p.name().starts_with(RESERVED_ENTRY_PREFIX));
-    let extra_entries = [
-        "slide",
-        "TXM-entry",
-        "TXM-virt",
-        "BootKC-entry",
-        "BootKC-virt",
-        "SPTM-rm",
-    ]
-    .into_iter()
-    .chain(ABSENT_SECURE_KERNEL);
-    for name in contents
-        .iter()
-        .map(|c| c.name.as_str())
-        .chain(extra_entries)
-    {
-        memory_map.set_property(name, vec![0; MEMORY_MAP_ENTRY_BYTES])?;
-    }
-    let device_tree_bytes = tree.encoded_bytes() as u64;
-    for content in contents {
-        if content.name == "DeviceTree" {
-            content.bytes = device_tree_bytes;
-            content.memory_bytes = page_round(device_tree_bytes);
-        }
-    }
-    Ok(device_tree_bytes)
-}
-
-/// Every region back to back from `load_base`, each in whole pages, and
-/// where the last one ends.
-fn place(contents: Vec<Content>, load_base: u64) -> Result<(Vec<Region>, u64)> {
-    let mut cursor = load_base;
-    let mut regions = vec![];
-    for content in contents {
-        regions.push(Region {
-            name: content.name,
-            file: content.file,
-            file_offset: content.file_offset,
-            bytes: content.bytes,
-            guest_pa: cursor,
-            memory_bytes: content.memory_bytes,
-            sha256: String::new(),
-            virtual_address: content.virtual_address,
-        });
-        cursor = cursor
-            .checked_add(page_round(content.memory_bytes))
-            .context("loaded region end overflows")?;
-    }
-    Ok((regions, cursor))
-}
-
-/// The placed regions and the auxiliary entries in `/chosen/memory-map`.
-fn fill_memory_map(
-    tree: &mut DeviceTree,
-    regions: &[Region],
-    images: &Images,
-    options: &Options,
-    load_base: u64,
-) -> Result<()> {
-    let memory_map = tree.node_mut(MEMORY_MAP).context("memory-map")?;
-    for region in regions {
-        memory_map.set_property(
-            &region.name,
-            range_value(region.guest_pa, region.memory_bytes),
-        )?;
-    }
-    let sptm_span = sptm_image_span(regions)?;
-    for (name, value) in [
-        (
-            "slide",
-            range_value(options.phys_base, load_base - options.phys_base),
-        ),
-        (
-            "TXM-entry",
-            range_value(images.txm.collection.entry_offset()?, 0),
-        ),
-        ("TXM-virt", range_value(0, 0)),
-        (
-            "BootKC-entry",
-            range_value(images.kernel.collection.entry_offset()?, 0),
-        ),
-        ("BootKC-virt", range_value(0, 0)),
-        (
-            "SPTM-rm",
-            range_value(sptm_span.start, sptm_span.end - sptm_span.start),
-        ),
-    ]
-    .into_iter()
-    .chain(ABSENT_SECURE_KERNEL.map(|name| (name, range_value(u64::MAX, u64::MAX))))
-    {
-        memory_map.set_property(name, value)?;
-    }
-    Ok(())
-}
-
-fn boot_args_for(
-    options: &Options,
-    dram_end: u64,
-    top_of_kernel_data: u64,
-    device_tree_region: &Region,
-    device_tree_length: usize,
-) -> Result<BootArgs> {
-    let virt_base = VIRT_BASE + (options.phys_base % VIRT_BASE_ALIGNMENT);
-    Ok(BootArgs {
-        revision: boot_args::REVISION,
-        version: boot_args::VERSION,
-        virt_base,
-        phys_base: options.phys_base,
-        mem_size: dram_end - options.phys_base,
-        top_of_kernel_data,
-        video: Video::default(),
-        machine_type: 0,
-        device_tree: device_tree_region.guest_pa - options.phys_base + virt_base,
-        device_tree_length: u32::try_from(device_tree_length)?,
-        command_line: options.boot_args.clone(),
-        boot_flags: 0,
-        mem_size_actual: options.dram_size,
-    })
-}
-
-/// Bundle files by name, in manifest order.
-type Files = Vec<(String, Vec<u8>)>;
-
-/// The bundle's files in manifest order, and the ramdisk's source.
-fn files(
-    inputs: &Inputs,
-    images: Images,
-    device_tree: Vec<u8>,
-    trust_cache: Vec<u8>,
-    boot_args_bytes: Vec<u8>,
-    core_locks_handed_off: bool,
-    owned: Option<OwnedRamdisk>,
-) -> Result<(Files, Option<Source>)> {
-    let mut files = vec![
-        (KERNEL_FILE.to_owned(), images.kernel.memory),
-        (SPTM_FILE.to_owned(), images.sptm.memory),
-        (TXM_FILE.to_owned(), images.txm.memory),
-        (DEVICE_TREE_FILE.to_owned(), device_tree),
-        (
-            ORIGINAL_DEVICE_TREE_FILE.to_owned(),
-            inputs.device_tree.bytes.to_vec(),
-        ),
-        (TRUST_CACHE_FILE.to_owned(), trust_cache),
-        (BOOT_ARGS_FILE.to_owned(), boot_args_bytes),
-    ];
-    if let Some(auxiliary) = images.auxiliary {
-        files.push((AUXILIARY_FILE.to_owned(), auxiliary.memory));
-    }
-    if let Some(manifest) = &inputs.boot_manifest {
-        files.push((BOOT_MANIFEST_FILE.to_owned(), manifest.bytes.to_vec()));
-    }
-    if core_locks_handed_off {
-        files.push((CL4_DUMMY_PAGE_FILE.to_owned(), lock_regs::cl4_dummy_page()));
-    }
-    if let Some(sep) = &inputs.sep_firmware {
-        files.push((SEP_FILE.to_owned(), sep.bytes.to_vec()));
-    }
-    let ramdisk_source = match owned {
-        Some(ramdisk) => {
-            files.push((RAMDISK_FILE.to_owned(), ramdisk.bytes));
-            Some(ramdisk.source)
-        }
-        None => inputs.ramdisk.as_ref().map(|ramdisk| {
-            files.push((RAMDISK_FILE.to_owned(), ramdisk.bytes.to_vec()));
-            source_of(ramdisk)
-        }),
-    };
-    for (name, image) in &inputs.board_firmware {
-        // The manifest admits only simple names; these checks keep the name
-        // within the engine handoff and distinct from the bundle's own files.
-        ensure!(
-            name.len() <= MAX_FILE_NAME && !files.iter().any(|(file, _)| file == name),
-            "board firmware name {name:?} is too long or already a bundle file"
-        );
-        files.push((name.clone(), image.bytes.to_vec()));
-    }
-    Ok((files, ramdisk_source))
-}
-
-/// Each region's hash, over the bytes its file supplies.
-fn hash_regions(regions: &mut [Region], files: &[(String, Vec<u8>)]) -> Result<()> {
-    for region in regions {
-        let (_, bytes) = files
-            .iter()
-            .find(|(name, _)| *name == region.file)
-            .with_context(|| format!("no file {}", region.file))?;
-        let start = usize::try_from(region.file_offset)?;
-        let end = start + usize::try_from(region.bytes)?;
-        ensure!(
-            end <= bytes.len(),
-            "region {} exceeds its file",
-            region.name
-        );
-        region.sha256 = sha256(&bytes[start..end]);
-    }
-    Ok(())
-}
-
-/// Every input's source, in manifest order.
-fn sources(inputs: &Inputs, ramdisk_source: Option<Source>) -> Vec<Source> {
-    let mut sources = vec![source_of(&inputs.kernel_collection)];
-    sources.extend(inputs.auxiliary_collection.iter().map(source_of));
-    sources.extend([
-        source_of(&inputs.sptm),
-        source_of(&inputs.txm),
-        source_of(&inputs.device_tree),
-        source_of(&inputs.static_trust_cache),
-    ]);
-    sources.extend(
-        inputs
-            .sep_firmware
-            .iter()
-            .chain(&inputs.boot_manifest)
-            .chain(&inputs.cryptex1_manifest)
-            .chain(&inputs.extra_trust_caches)
-            .map(source_of),
-    );
-    sources.extend(ramdisk_source);
-    sources.extend(
-        inputs
-            .root_hash
-            .iter()
-            .filter_map(|r| r.im4p.as_ref())
-            .chain(inputs.board_firmware.iter().map(|(_, image)| image))
-            .map(source_of),
-    );
-    sources
-}
-
-/// TAG_OFFSET_EL2 as iBoot locks it on a chip with memory tagging, 0
-/// elsewhere: the tag storage at the top of the managed range
-/// (`stela_engine::machine::tag_storage`), which must lie above every
-/// placed region.
-fn tag_offset(
-    chip: Option<stela_contracts::Chip>,
-    options: &Options,
-    dram_end: u64,
-    top_of_kernel_data: u64,
-) -> Result<u64> {
-    if !chip.is_some_and(|chip| stela_contracts::Feature::FEAT_MTE.on(chip)) {
-        return Ok(0);
-    }
-    let value = tag_storage::hand_off(
-        options.phys_base,
-        dram_end - options.phys_base,
-        options.dram_size,
-    )
-    .context("the tag storage's base does not fit TAG_OFFSET_EL2")?;
-    ensure!(
-        tag_storage::base(value) >= top_of_kernel_data,
-        "the tag storage at {:#x} overlaps the regions ending at {top_of_kernel_data:#x}",
-        tag_storage::base(value)
-    );
-    Ok(value)
-}
-
 /// A global manifest must name the selected board.
 fn check_board(manifest: &im4m::Manifest, target: &Target) -> Result<()> {
     for (name, expected) in [("CHIP", target.chip_id), ("BORD", target.board_id)] {
         if let (Some(Value::Integer(found)), Some(expected)) = (manifest.property(name), expected) {
-            ensure!(
+            require!(
                 *found == u64::from(expected),
-                "manifest {name} {found:#x} differs from the identity's {expected:#x}"
+                "manifest {name} {found:#x} differs from the identity's {expected:#x}",
+                name,
+                found = *found,
+                expected
             );
         }
     }
     Ok(())
-}
-
-fn apply_overlay(tree: &mut DeviceTree, overlay: &[OverlayProperty]) -> Result<()> {
-    for entry in overlay {
-        let mut parent = String::from("/");
-        for component in entry.path.split('/').filter(|c| !c.is_empty()) {
-            tree.ensure_child(&parent, component)?;
-            parent = format!("{}/{component}", parent.trim_end_matches('/'));
-        }
-        tree.set_property(&entry.path, &entry.property, entry.value.clone())?;
-    }
-    Ok(())
-}
-
-/// Bootloader-provided inputs SPTM reads that no restore member supplies.
-fn platform_gaps(tree: &DeviceTree, inputs: &Inputs) -> Vec<String> {
-    let mut gaps = vec![];
-    if tree.property(lock_regs::AMCC, "aperture-count").is_none() {
-        gaps.extend(lock_regs::gaps(None));
-    }
-    gaps.extend(carveouts::gaps(tree, inputs.target.chip_id));
-    if inputs.extra_trust_caches.is_empty() {
-        gaps.push(
-            "TrustCache: static module only; Cryptex1 trust caches load later through their manifest"
-                .into(),
-        );
-    }
-    gaps.push("ExclaveOSTrustCache: the identity lists no Ap,ExclaveOS component".into());
-    gaps.push("SEPPatches: iBoot's SEP patch region is not in the restore image".into());
-    gaps
-}
-
-const CPU_RUNNING: &[u8] = b"running\0";
-const CPU_WAITING: &[u8] = b"waiting\0";
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct CpuIdentity {
-    path: String,
-    affinity: u32,
-    cluster_type: u8,
-}
-
-/// Original 26A434 ADTs encode cluster-type as E/P/M plus NUL, reg as u32
-/// and state as running/waiting plus NUL. See the pinned source matrix in
-/// iboot-handoff.md. These are source identities, not inferred CPU ordinals.
-fn cpu_identities(tree: &DeviceTree) -> Result<Vec<CpuIdentity>> {
-    let cpus = tree.node("/cpus").context("DeviceTree has no /cpus")?;
-    ensure!(!cpus.children.is_empty(), "DeviceTree has no CPU nodes");
-    let mut identities: Vec<CpuIdentity> = Vec::new();
-    for cpu in &cpus.children {
-        let name = cpu.name().context("DeviceTree CPU has no name")?;
-        ensure!(
-            !name.is_empty() && !name.contains('/') && !matches!(name, "." | ".."),
-            "DeviceTree CPU name is not one child component"
-        );
-        let path = format!("/cpus/{name}");
-        let property = |name: &str| -> Result<&crate::apple_device_tree::Property> {
-            let mut matching = cpu
-                .properties
-                .iter()
-                .filter(|property| property.name() == name);
-            let property = matching
-                .next()
-                .with_context(|| format!("{path} has no {name}"))?;
-            ensure!(
-                matching.next().is_none(),
-                "{path} has ambiguous {name} properties"
-            );
-            ensure!(!property.placeholder, "{path} has no resolved {name}");
-            Ok(property)
-        };
-        property("name")?;
-        let cluster_type = match property("cluster-type")?.value.as_slice() {
-            [kind @ (b'E' | b'P' | b'M'), 0] => *kind,
-            _ => bail!("{path} cluster-type is not an original E/P/M string"),
-        };
-        let affinity = property("reg")?
-            .as_u32()
-            .with_context(|| format!("{path} reg is not one original u32 affinity"))?;
-        ensure!(
-            [CPU_RUNNING, CPU_WAITING].contains(&property("state")?.value.as_slice()),
-            "{path} state is not running or waiting"
-        );
-        ensure!(
-            !identities.iter().any(|cpu| cpu.path == path),
-            "duplicate original CPU path {path}"
-        );
-        ensure!(
-            !identities.iter().any(|cpu| cpu.affinity == affinity),
-            "duplicate original CPU affinity {affinity:#x}"
-        );
-        identities.push(CpuIdentity {
-            path,
-            affinity,
-            cluster_type,
-        });
-    }
-    Ok(identities)
-}
-
-fn select_boot_cpu(
-    tree: &DeviceTree,
-    original: &DeviceTree,
-    requested: Option<&str>,
-) -> Result<BootCpu> {
-    let cpus = cpu_identities(tree)?;
-    let source = cpu_identities(original)?;
-    let (selected, selection) = match requested {
-        Some(name) => {
-            ensure!(
-                !name.is_empty() && !name.contains('/') && !matches!(name, "." | ".."),
-                "boot CPU override must name one original /cpus child"
-            );
-            let path = format!("/cpus/{name}");
-            (
-                cpus.iter()
-                    .find(|cpu| cpu.path == path)
-                    .with_context(|| format!("DeviceTree has no boot CPU {path}"))?,
-                BootCpuSelection::Explicit,
-            )
-        }
-        None => (
-            cpus.first()
-                .context("DeviceTree has no CPU for automatic boot selection")?,
-            BootCpuSelection::First,
-        ),
-    };
-    let original_index = source
-        .iter()
-        .position(|cpu| cpu.path == selected.path)
-        .context("selected boot CPU is absent from the original DeviceTree")?;
-    ensure!(
-        source[original_index] == *selected,
-        "selected boot CPU identity differs from the original DeviceTree"
-    );
-    Ok(BootCpu {
-        path: selected.path.clone(),
-        affinity: selected.affinity,
-        cluster_type: selected.cluster_type,
-        original_index,
-        selection,
-    })
-}
-
-/// Preflight every state before publishing exactly one running node. The
-/// original iBoot publishes running at 26A434 J314s 0x3abd4..0x3abf8. The
-/// first CPU is required by the kernel's own CPU numbering: 26A434 T8112 PMGR
-/// indexes its per-core register table by the topology's (cluster, core) and
-/// panics for an E-core once a P-core boots first (docs/research/cpu-topology.md).
-fn mark_boot_cpu(tree: &mut DeviceTree, selected: &BootCpu) -> Result<()> {
-    let cpus = cpu_identities(tree)?;
-    ensure!(
-        cpus.iter().any(|cpu| cpu.path == selected.path
-            && cpu.affinity == selected.affinity
-            && cpu.cluster_type == selected.cluster_type),
-        "selected boot CPU does not match the prepared topology"
-    );
-    for cpu in cpus {
-        let state = if cpu.path == selected.path {
-            CPU_RUNNING
-        } else {
-            CPU_WAITING
-        };
-        tree.set_property(&cpu.path, "state", state.to_vec())?;
-    }
-    Ok(())
-}
-
-/// User overlays cannot replace the selected PE, rename/reorder CPUs or
-/// change a retained source affinity. Existing fused-variant filtering is
-/// independent of this selection and retains original relative order.
-fn verify_boot_cpu(tree: &DeviceTree, original: &DeviceTree, selected: &BootCpu) -> Result<()> {
-    let cpus = cpu_identities(tree)?;
-    let source = cpu_identities(original)?;
-    let original_cpu = source
-        .get(selected.original_index)
-        .context("boot CPU source index is outside the original DeviceTree")?;
-    ensure!(
-        original_cpu.path == selected.path
-            && original_cpu.affinity == selected.affinity
-            && original_cpu.cluster_type == selected.cluster_type,
-        "boot CPU provenance differs from the original DeviceTree"
-    );
-    let mut previous = None;
-    let mut running = Vec::new();
-    for cpu in &cpus {
-        let index = source
-            .iter()
-            .position(|original| original == cpu)
-            .with_context(|| {
-                format!("{} identity differs from the original DeviceTree", cpu.path)
-            })?;
-        ensure!(
-            previous.is_none_or(|previous| index > previous),
-            "CPU order differs from the original DeviceTree"
-        );
-        previous = Some(index);
-        if tree
-            .property(&cpu.path, "state")
-            .is_some_and(|p| p.value == CPU_RUNNING)
-        {
-            running.push(cpu);
-        }
-    }
-    ensure!(
-        running.len() == 1 && running[0].path == selected.path,
-        "prepared DeviceTree must have exactly the selected boot CPU running"
-    );
-    if selected.selection == BootCpuSelection::First {
-        ensure!(
-            cpus.first().is_some_and(|cpu| cpu.path == selected.path),
-            "automatic boot CPU is not the first original CPU"
-        );
-    }
-    Ok(())
-}
-
-/// Board facts and boot-time slots that iBoot adds to its template tree.
-fn shape_device_tree(
-    tree: &mut DeviceTree,
-    target: &Target,
-    options: &Options,
-    boot_cpu: &BootCpu,
-) -> Result<Vec<String>> {
-    let mut unresolved = vec![];
-    let chosen = "/chosen";
-    tree.set_property(
-        chosen,
-        "dram-base",
-        options.dram_base.to_le_bytes().to_vec(),
-    )?;
-    tree.set_property(
-        chosen,
-        "dram-size",
-        options.dram_size.to_le_bytes().to_vec(),
-    )?;
-    for (name, value) in [("chip-id", target.chip_id), ("board-id", target.board_id)] {
-        match value {
-            Some(value) => tree.set_property(chosen, name, value.to_le_bytes().to_vec())?,
-            None => unresolved.push(format!("/chosen {name}: absent from the restore identity")),
-        }
-    }
-    // m1n1 load_macos_sptm creates these keys for every boot.
-    tree.ensure_child(chosen, "hibernation")?;
-    for key in ["key-sptm-ctrr", "key-xnu-ctrr"] {
-        tree.set_property("/chosen/hibernation", key, vec![0; HIBERNATION_KEY_BYTES])?;
-    }
-    mark_boot_cpu(tree, boot_cpu)?;
-    // iBoot adds the clock rates at hand-off; every CPU node carries them.
-    for cpu in cpu_nodes(tree)? {
-        for property in CPU_FREQUENCY_PROPERTIES {
-            tree.set_property(
-                &cpu,
-                property,
-                options.timebase_frequency.to_le_bytes().to_vec(),
-            )?;
-        }
-    }
-    unresolved.push(
-        "/cpus fixed-frequency and peripheral-frequency take the timebase rate; Apple's values are unobserved"
-            .into(),
-    );
-    unresolved.extend(set_die_count(tree, target.chip_id)?);
-    unresolved.push(
-        "/chosen/boot-object-manifests: no signed LocalPolicy or personalized manifest objects; \
-         a supplied original boot manifest is forwarded separately"
-            .into(),
-    );
-    unresolved.push("preoslog: iBoot log region omitted".into());
-    unresolved.push(
-        "other rows iBoot writes stay as the template ships them or absent \
-         (docs/research/iboot-handoff.md lists each with its reason)"
-            .into(),
-    );
-    Ok(unresolved)
-}
-
-/// The ApChipIDs whose 26A434 iBoots carry no `die-count` row: every T8103
-/// (J274, J293, J313, J456, J457), T8112 (J413, J415, J473, J493) and T8140
-/// (J700) iBoot lacks the string. Every other board's iBoot writes it.
-const NO_DIE_COUNT: [u32; 3] = [0x8103, 0x8112, 0x8140];
-/// The Ultras, for which iBoot writes 2: J375D/J314C/J375C compute
-/// `chip == 0x6002 ? 2 : 1` (J375D 0x36454, compare 0x3c1d0), J575D/J514C/
-/// J514M `chip == 0x6032 ? 2 : 1` (J575D 0x3a66c, compare 0x41a00), and the
-/// T6022 boards' builds store 2 (J180D 0x39c1c, J475D 0x39bf0) where the
-/// T6020/T6021 builds store 1 (J414C 0x3a634).
-const ULTRAS: [u32; 3] = [0x6002, 0x6022, 0x6032];
-/// The M5 Pro, Max and Ultra share one ApChipID; their iBoot counts two dies
-/// only when the die-configuration fuses at 0x2_8837_4010 read
-/// `0xa050_c030`, `0xa55a_c33c` (J775D 0x520d8, J714C 0x50a5c), which is the
-/// `h17d` variant whose CPUs the variant pass keeps on both dies.
-const FUSED_DIES: u32 = 0x6050;
-
-/// iBoot's `/arm-io` `die-count` (J180D writes it beside `usbphy-frequency`
-/// on the `arm-io` node, file 0x39d84..0x39d98, creating the property).
-/// `ApplePMGR::start` reads it from its provider's provider's provider, the
-/// `arm-io` device (mac14j KC VA 0xfffffe0009b35804..0xfffffe0009b358e0),
-/// defaulting to one die (0xfffffe0009b357fc). The value is the chip's rule
-/// above; the CPU nodes' dies (`die-id`, which the runtime's PMGR reader
-/// counts) must agree, and give the fused count on the T6050.
-fn set_die_count(tree: &mut DeviceTree, chip_id: Option<u32>) -> Result<Option<String>> {
-    let Some(chip) = chip_id else {
-        return Ok(Some(
-            "/arm-io die-count: no ApChipID selects iBoot's row".into(),
-        ));
-    };
-    if NO_DIE_COUNT.contains(&chip) {
-        return Ok(None);
-    }
-    let dies = cpu_dies(tree)?;
-    let count = if chip == FUSED_DIES {
-        dies
-    } else {
-        let count = if ULTRAS.contains(&chip) { 2 } else { 1 };
-        ensure!(
-            dies == count,
-            "ApChipID {chip:#x}'s iBoot writes die-count {count}, but its CPUs are on {dies} dies"
-        );
-        count
-    };
-    ensure!(tree.node("/arm-io").is_some(), "DeviceTree has no /arm-io");
-    tree.set_property("/arm-io", "die-count", count.to_le_bytes().to_vec())?;
-    Ok(None)
-}
-
-/// The dies the CPU nodes name: their highest `die-id` plus one.
-fn cpu_dies(tree: &DeviceTree) -> Result<u32> {
-    let mut highest = 0u32;
-    for cpu in cpu_nodes(tree)? {
-        if let Some(die) = tree.property(&cpu, "die-id") {
-            let word = die
-                .value
-                .first_chunk::<4>()
-                .with_context(|| format!("{cpu} die-id is not a u32"))?;
-            highest = highest.max(u32::from_le_bytes(*word));
-        }
-    }
-    highest
-        .checked_add(1)
-        .context("CPU die-id exceeds the die count")
-}
-
-/// Paths of the `/cpus` children that describe processors.
-fn cpu_nodes(tree: &DeviceTree) -> Result<Vec<String>> {
-    let cpus = tree.node("/cpus").context("DeviceTree has no /cpus")?;
-    Ok(cpus
-        .children
-        .iter()
-        .filter(|cpu| cpu.property("state").is_some())
-        .filter_map(|cpu| cpu.name().map(|name| format!("/cpus/{name}")))
-        .collect())
-}
-
-fn cpu_frequency_patches(tree: &DeviceTree, region: &Region) -> Result<Vec<Patch>> {
-    let bytes = tree.serialize();
-    let mut patches = vec![];
-    for cpu in cpu_nodes(tree)? {
-        for property in CPU_FREQUENCY_PROPERTIES {
-            let at = tree.locate(&cpu, property)?;
-            patches.push(Patch {
-                source: PatchSource::Timebase,
-                required: false,
-                region: region.name.clone(),
-                file: region.file.clone(),
-                file_offset: at.value_offset as u64,
-                bytes: at.value_bytes as u64,
-                encoding: Encoding::U64Le,
-                field: format!("{cpu} {property}"),
-                prepared_hex: hex::encode(
-                    &bytes[at.value_offset..at.value_offset + at.value_bytes],
-                ),
-                rule: "CNTFRQ_EL0 the machine presents, in Hz".into(),
-            });
-        }
-    }
-    Ok(patches)
-}
-
-fn device_tree_patches(tree: &DeviceTree, region: &Region) -> Result<Vec<Patch>> {
-    let mut patches = vec![];
-    let slots: &[(&str, &str, PatchSource, bool, Encoding, &str)] = &[
-        (
-            "/chosen",
-            "dram-size",
-            PatchSource::DramSize,
-            false,
-            Encoding::U64Le,
-            "installed guest DRAM bytes",
-        ),
-        (
-            "/chosen",
-            "random-seed",
-            PatchSource::Entropy,
-            true,
-            Encoding::Bytes,
-            "random bytes",
-        ),
-        (
-            "/chosen",
-            "cl4-entropy",
-            PatchSource::Entropy,
-            true,
-            Encoding::Bytes,
-            "random bytes",
-        ),
-        (
-            "/chosen/hibernation",
-            "key-sptm-ctrr",
-            PatchSource::Entropy,
-            true,
-            Encoding::Bytes,
-            "random bytes",
-        ),
-        (
-            "/chosen/hibernation",
-            "key-xnu-ctrr",
-            PatchSource::Entropy,
-            true,
-            Encoding::Bytes,
-            "random bytes",
-        ),
-        (
-            "/vram",
-            "reg",
-            PatchSource::Framebuffer,
-            false,
-            Encoding::Bytes,
-            "u64 framebuffer base, u64 framebuffer bytes",
-        ),
-    ];
-    let bytes = tree.serialize();
-    for &(path, property, source, required, encoding, rule) in slots {
-        let Ok(at) = tree.locate(path, property) else {
-            bail!("DeviceTree has no patch slot {path} {property}");
-        };
-        patches.push(Patch {
-            source,
-            required,
-            region: region.name.clone(),
-            file: region.file.clone(),
-            file_offset: at.value_offset as u64,
-            bytes: at.value_bytes as u64,
-            encoding,
-            field: format!("{path} {property}"),
-            prepared_hex: hex::encode(&bytes[at.value_offset..at.value_offset + at.value_bytes]),
-            rule: rule.into(),
-        });
-    }
-    // iBoot fills the display configuration in place, only where the
-    // template has it (26A434 J473 iBoot 0x24148..0x2425c).
-    for (property, rule) in [
-        (
-            "display-rotation",
-            "u32 degrees, from boot_args.Video.v_depth bits 8..15",
-        ),
-        (
-            "display-scale",
-            "u32 scale, boot_args.Video.v_depth bits 16..23 plus one",
-        ),
-        (
-            "display-boot-rotation",
-            "u32 degrees, from boot_args.Video.v_depth bits 24..31",
-        ),
-    ] {
-        let Ok(at) = tree.locate("/chosen", property) else {
-            continue;
-        };
-        patches.push(Patch {
-            source: PatchSource::Framebuffer,
-            required: false,
-            region: region.name.clone(),
-            file: region.file.clone(),
-            file_offset: at.value_offset as u64,
-            bytes: at.value_bytes as u64,
-            encoding: Encoding::Bytes,
-            field: format!("/chosen {property}"),
-            prepared_hex: hex::encode(&bytes[at.value_offset..at.value_offset + at.value_bytes]),
-            rule: rule.into(),
-        });
-    }
-    // Native IOMobileFramebufferAP::allocate_carveout reads these capacities
-    // (original mac13j VA 0xfffffe000ad95600..ad95638).
-    // The same runtime Framebuffer supplies Video and these scalar slots;
-    // never retain the physical board's 4096x2160 capacity for another GOP.
-    for profile in stela_soc_data::board::EXTERNAL_OUTPUTS
-        .iter()
-        .filter(|p| p.admitted)
-    {
-        let path = format!("/arm-io/{}", profile.pipe);
-        let Some(pipe) = tree.node(&path).filter(|node| {
-            node.property("compatible").is_some_and(|p| {
-                p.value
-                    .split(|&b| b == 0)
-                    .any(|name| name == profile.compatible.as_bytes())
-            })
-        }) else {
-            continue;
-        };
-        let geometry = ["framebuffer-width", "framebuffer-height"];
-        if geometry.iter().all(|name| pipe.property(name).is_none()) {
-            continue;
-        }
-        for property in geometry {
-            let at = tree.locate(&path, property)?;
-            ensure!(
-                at.value_bytes == 4,
-                "{path} {property} is not one native u32"
-            );
-            patches.push(Patch {
-                source: PatchSource::Framebuffer,
-                required: true,
-                region: region.name.clone(),
-                file: region.file.clone(),
-                file_offset: at.value_offset as u64,
-                bytes: 4,
-                encoding: Encoding::Bytes,
-                field: format!("{path} {property}"),
-                prepared_hex: hex::encode(&bytes[at.value_offset..at.value_offset + 4]),
-                rule: "the actual single native GOP scanout dimensions, also used by boot_args.Video and the DCP".into(),
-            });
-        }
-    }
-    Ok(patches)
-}
-
-/// iBoot's NOR hand-off: the machine replaces the prepared empty bank with
-/// its persistent NOR's current bank; without one the prepared bank stands
-/// and variables last one boot.
-fn nvram_patches(tree: &DeviceTree, region: &Region) -> Result<Vec<Patch>> {
-    let bytes = tree.serialize();
-    ["nvram-proxy-data", "nvram-current-bank"]
-        .into_iter()
-        .map(|property| {
-            let at = tree.locate("/chosen", property)?;
-            Ok(Patch {
-                source: PatchSource::Nvram,
-                required: false,
-                region: region.name.clone(),
-                file: region.file.clone(),
-                file_offset: at.value_offset as u64,
-                bytes: at.value_bytes as u64,
-                encoding: Encoding::Bytes,
-                field: format!("/chosen {property}"),
-                prepared_hex: hex::encode(
-                    &bytes[at.value_offset..at.value_offset + at.value_bytes],
-                ),
-                rule: "the persistent NOR's newest valid NVRAM bank and its index".into(),
-            })
-        })
-        .collect()
-}
-
-fn boot_args_patches(region: &Region, bytes: &[u8]) -> Vec<Patch> {
-    use boot_args::offset;
-    let fields: &[(&str, usize, usize, PatchSource, Encoding, &str)] = &[
-        (
-            "memSize",
-            offset::MEM_SIZE,
-            8,
-            PatchSource::DramSize,
-            Encoding::U64Le,
-            "dram-base + guest DRAM bytes - physBase",
-        ),
-        (
-            "memSizeActual",
-            offset::MEM_SIZE_ACTUAL,
-            8,
-            PatchSource::DramSize,
-            Encoding::U64Le,
-            "guest DRAM bytes",
-        ),
-        (
-            "Video.v_baseAddr",
-            offset::VIDEO_BASE,
-            8,
-            PatchSource::Framebuffer,
-            Encoding::U64Le,
-            "framebuffer guest physical address",
-        ),
-        (
-            "Video.v_display",
-            offset::VIDEO_DISPLAY,
-            8,
-            PatchSource::Framebuffer,
-            Encoding::U64Le,
-            "1 for a graphical boot, 0 with -v (m1n1 set_bootargs)",
-        ),
-        (
-            "Video.v_rowBytes",
-            offset::VIDEO_ROW_BYTES,
-            8,
-            PatchSource::Framebuffer,
-            Encoding::U64Le,
-            "bytes per scanline",
-        ),
-        (
-            "Video.v_width",
-            offset::VIDEO_WIDTH,
-            8,
-            PatchSource::Framebuffer,
-            Encoding::U64Le,
-            "pixels",
-        ),
-        (
-            "Video.v_height",
-            offset::VIDEO_HEIGHT,
-            8,
-            PatchSource::Framebuffer,
-            Encoding::U64Le,
-            "pixels",
-        ),
-        (
-            "Video.v_depth",
-            offset::VIDEO_DEPTH,
-            8,
-            PatchSource::Framebuffer,
-            Encoding::U64Le,
-            "bits per pixel in bits 0..8",
-        ),
-        (
-            "CommandLine",
-            offset::COMMAND_LINE,
-            boot_args::BOOT_LINE_LENGTH,
-            PatchSource::BootArgs,
-            Encoding::CString,
-            "kernel boot-args",
-        ),
-    ];
-    fields
-        .iter()
-        .map(|&(field, at, length, source, encoding, rule)| Patch {
-            source,
-            required: false,
-            region: region.name.clone(),
-            file: region.file.clone(),
-            file_offset: at as u64,
-            bytes: length as u64,
-            encoding,
-            field: format!("boot_args.{field}"),
-            prepared_hex: hex::encode(&bytes[at..at + length]),
-            rule: rule.into(),
-        })
-        .collect()
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::boot_policy::SecurityPolicy;
-    use crate::kernel_collection::tests::{BASE, Builder};
-    use alloc::collections::BTreeMap;
-    use object::macho;
-
-    const PAGE: u64 = PAGE_BYTES;
-
-    fn ordered_region_fixture(optional_images: bool) -> Vec<Region> {
-        // Spell the ABI fixture independently of the preparer's placement list.
-        let names = [
-            "TXM-ro",
-            "TXM-rx",
-            "TXM-bx",
-            "TrustCache",
-            "AuxKC-ro",
-            "AuxKC-rx",
-            "BootKC-rx",
-            "BootKC-bx",
-            "BootKC-ro",
-            "BootKC-rs",
-            "CL4-rx",
-            "CL4-ro",
-            "DeviceTree",
-            "SPTM-ro",
-            "SPTM-rx",
-            "SPTM-rw",
-        ];
-        names
-            .into_iter()
-            .filter(|name| {
-                optional_images || !(name.starts_with("AuxKC") || name.starts_with("CL4"))
-            })
-            .enumerate()
-            .map(|(index, name)| Region {
-                name: name.into(),
-                file: "fixture".into(),
-                file_offset: 0,
-                bytes: PAGE,
-                guest_pa: 0x8_0000_0000 + index as u64 * PAGE,
-                memory_bytes: PAGE,
-                sha256: String::new(),
-                virtual_address: None,
-            })
-            .collect()
-    }
-
-    #[test]
-    fn sptm_order_accepts_optional_images_and_an_arbitrary_prefix() -> Result<()> {
-        for optional_images in [false, true] {
-            let mut regions = ordered_region_fixture(optional_images);
-            validate_sptm_region_order(&regions)?;
-            // A retained manifest precedes the first constrained image. SPTM
-            // constrains adjacency, not the first image's absolute address.
-            for region in &mut regions {
-                region.guest_pa += 7 * PAGE;
-            }
-            let mut prefix = regions[0].clone();
-            prefix.name = "BootManifest".into();
-            prefix.guest_pa -= PAGE;
-            regions.insert(0, prefix);
-            validate_sptm_region_order(&regions)?;
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn sptm_order_rejects_a_payload_inserted_inside_the_image_sequence() {
-        let mut regions = ordered_region_fixture(false);
-        let index = regions.iter().position(|r| r.name == "DeviceTree").unwrap();
-        let mut inserted = regions[index].clone();
-        inserted.name = "BootManifest".into();
-        for region in &mut regions[index..] {
-            region.guest_pa += PAGE;
-        }
-        regions.insert(index, inserted);
-        let error = validate_sptm_region_order(&regions)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("DeviceTree"), "{error}");
-        assert!(error.contains("BootKC-rs"), "{error}");
-        assert!(error.contains("not immediately after"), "{error}");
-    }
-
-    #[test]
-    fn sptm_order_rejects_missing_images_overlap_and_invalid_endpoints() {
-        let mut regions = ordered_region_fixture(false);
-        regions.retain(|r| r.name != "TrustCache");
-        assert!(
-            validate_sptm_region_order(&regions)
-                .unwrap_err()
-                .to_string()
-                .contains("missing required region TrustCache")
-        );
-        let mut regions = ordered_region_fixture(true);
-        regions[1].guest_pa -= PAGE;
-        assert!(validate_sptm_region_order(&regions).is_err());
-        for (start, length) in [(0, PAGE), (u64::MAX, 0), (u64::MAX - 2, PAGE)] {
-            let mut regions = ordered_region_fixture(false);
-            regions[0].guest_pa = start;
-            regions[0].memory_bytes = length;
-            assert!(validate_sptm_region_order(&regions).is_err());
-        }
-    }
-
-    #[test]
-    fn sptm_image_span_includes_link_edit_and_rejects_an_intervening_payload() -> Result<()> {
-        let mut regions = ordered_region_fixture(false);
-        let last = regions.last().unwrap();
-        let mut link_edit = last.clone();
-        link_edit.name = "SPTM-le".into();
-        link_edit.guest_pa += link_edit.memory_bytes;
-        regions.push(link_edit);
-        let span = sptm_image_span(&regions)?;
-        assert_eq!(span.end - span.start, 4 * PAGE);
-        assert_eq!(span.end, regions.last().unwrap().guest_pa + PAGE);
-
-        // The original 16-record table ends at SPTM-rw. A later payload
-        // before link-edit passes that check but invalidates SPTM-rm.
-        for adjustment in [PAGE, 0_u64.wrapping_sub(PAGE)] {
-            let mut bad = regions.clone();
-            let link_edit = bad.last_mut().unwrap();
-            link_edit.guest_pa = link_edit.guest_pa.wrapping_add(adjustment);
-            validate_sptm_region_order(&bad)?;
-            let error = sptm_image_span(&bad).unwrap_err().to_string();
-            assert!(error.contains("SPTM-le"), "{error}");
-        }
-        regions.pop();
-        assert!(
-            sptm_image_span(&regions)
-                .unwrap_err()
-                .to_string()
-                .contains("missing region SPTM-le")
-        );
-        let mut link_edit = regions.last().unwrap().clone();
-        link_edit.name = "SPTM-le".into();
-        link_edit.guest_pa = u64::MAX - PAGE + 1;
-        regions.push(link_edit);
-        assert!(
-            sptm_image_span(&regions)
-                .unwrap_err()
-                .to_string()
-                .contains("range overflows")
-        );
-        Ok(())
-    }
-
-    /// SHA-256 over every prepared file, by name, and the manifest.
-    fn prepared_digest(bundle: &Bundle) -> Result<String> {
-        let mut bytes = Vec::new();
-        for (name, data) in &bundle.files {
-            bytes.extend((name.len() as u64).to_le_bytes());
-            bytes.extend(name.as_bytes());
-            bytes.extend((data.len() as u64).to_le_bytes());
-            bytes.extend(data);
-        }
-        bytes.extend(serde_json::to_vec(&bundle.manifest)?);
-        Ok(sha256(&bytes))
-    }
-
-    fn source(component: &str) -> Source {
-        Source {
-            component: component.into(),
-            member: format!("{component}.im4p"),
-            container_sha256: "0".repeat(64),
-            payload_type: "test".into(),
-            description: "synthetic".into(),
-            decoded_bytes: 0,
-            decoded_sha256: "0".repeat(64),
-        }
-    }
-
-    fn page(fill: u8) -> Vec<u8> {
-        vec![fill; PAGE as usize]
-    }
-
-    fn kernel() -> Vec<u8> {
-        Builder::new(macho::MH_FILESET)
-            .segment("__TEXT", PAGE, &page(0))
-            .segment("__DATA_SPTM", PAGE, &page(1))
-            .segment("__TEXT_EXEC", PAGE, &page(2))
-            .segment("__TEXT_BOOT_EXEC", PAGE, &page(3))
-            .segment("__PRELINK_INFO", PAGE, &page(4))
-            .segment("__DATA", PAGE, &page(5))
-            .segment("__LINKEDIT", PAGE, &page(6))
-            .fileset("com.apple.kernel", BASE)
-            .thread(BASE + 3 * PAGE)
-            .build()
-    }
-
-    fn sptm() -> Vec<u8> {
-        Builder::new(macho::MH_EXECUTE)
-            .segment("__TEXT", PAGE, &page(0))
-            .segment("__TEXT_EXEC", PAGE, &page(7))
-            .segment("__DATA", PAGE, &page(8))
-            .segment("__LINKEDIT", PAGE, &[9; 0x20])
-            .thread(BASE + PAGE + 0x388)
-            .build()
-    }
-
-    fn txm() -> Vec<u8> {
-        Builder::new(macho::MH_EXECUTE)
-            .segment("__TEXT", PAGE, &page(0))
-            .segment("__TEXT_EXEC", PAGE, &page(10))
-            .segment("__TEXT_BOOT_EXEC", PAGE, &page(11))
-            .segment("__DATA", PAGE, &page(12))
-            .segment("__LINKEDIT", PAGE, &[13; 0x20])
-            .thread(BASE + 2 * PAGE)
-            .build()
-    }
-
-    fn device_tree() -> Vec<u8> {
-        let mut tree = DeviceTree {
-            root: crate::apple_device_tree::Node::named("device-tree").unwrap(),
-        };
-        for child in ["chosen", "cpus", "vram", "pram"] {
-            tree.ensure_child("/", child).unwrap();
-        }
-        tree.ensure_child("/chosen", "memory-map").unwrap();
-        lock_regs::tests::template(&mut tree, false).unwrap();
-        tree.ensure_child("/cpus", "cpu0").unwrap();
-        tree.set_property("/cpus/cpu0", "state", b"waiting\0".to_vec())
-            .unwrap();
-        tree.set_property("/cpus/cpu0", "cluster-type", b"E\0".to_vec())
-            .unwrap();
-        tree.set_property("/cpus/cpu0", "reg", 0u32.to_le_bytes().to_vec())
-            .unwrap();
-        tree.set_property("/vram", "reg", vec![0; 16]).unwrap();
-        tree.set_property("/pram", "reg", vec![0; 16]).unwrap();
-        tree.set_property("/chosen", "random-seed", vec![0; 0x100])
-            .unwrap();
-        tree.set_property("/chosen", "cl4-entropy", vec![0; 0xc0])
-            .unwrap();
-        for index in 0..17 {
-            tree.set_property(
-                "/chosen/memory-map",
-                &format!("MemoryMapReserved-{index}"),
-                vec![0; 16],
-            )
-            .unwrap();
-        }
-        let chosen = tree.node_mut("/chosen").unwrap();
-        chosen
-            .set_property(
-                "software-behavior",
-                b"syscfg/SwBh/0x10,zeroes/0x10\0".to_vec(),
-            )
-            .unwrap();
-        chosen
-            .set_property(
-                "mac-address-wifi0",
-                b"macaddr/wifiaddr,syscfg/WMac/6\0".to_vec(),
-            )
-            .unwrap();
-        chosen
-            .set_property("repair-status", b"syscfg/rpcp\0".to_vec())
-            .unwrap();
-        for property in &mut chosen.properties[3..] {
-            property.placeholder = true;
-        }
-        // Security inputs the template carries, with typed manifest slots.
-        for (name, bytes) in [
-            ("boot-manifest-hash", 48),
-            ("effective-production-status-ap", 4),
-            ("effective-security-mode-ap", 4),
-            ("sepfw-load-at-boot", 4),
-            ("osenvironment", 32),
-            ("display-rotation", 4),
-            ("display-scale", 4),
-            ("display-boot-rotation", 4),
-        ] {
-            tree.set_property("/chosen", name, vec![0; bytes]).unwrap();
-        }
-        tree.set_property("/chosen", "cs-system-policy", b"default\0".to_vec())
-            .unwrap();
-        tree.ensure_child("/chosen", "manifest-properties").unwrap();
-        for (slot, bytes) in [
-            ("UnusedIntegerProperty0", 8),
-            ("UnusedIntegerProperty1", 8),
-            ("UnusedBooleanProperty0", 4),
-            ("UnusedBooleanProperty1", 4),
-        ] {
-            tree.set_property("/chosen/manifest-properties", slot, vec![0; bytes])
-                .unwrap();
-        }
-        tree.serialize()
-    }
-
-    fn boot_manifest() -> Vec<u8> {
-        use crate::im4m::tests::{der, entry, manifest};
-        manifest(
-            &[
-                entry("BORD", &der(&[0x02], &[0x2e])),
-                entry("CPRO", &der(&[0x01], &[0xff])),
-                entry("CSEC", &der(&[0x01], &[0xff])),
-                entry("SDOM", &der(&[0x02], &[1])),
-            ],
-            &[entry("test", &der(&[0x31], &[]))],
-        )
-    }
-
-    #[test]
-    fn die_count_follows_each_chips_iboot_rule() -> Result<()> {
-        let tree = |dies: &[Option<u32>]| -> Result<DeviceTree> {
-            let mut tree = DeviceTree {
-                root: crate::apple_device_tree::Node::named("device-tree")?,
-            };
-            tree.ensure_child("/", "cpus")?;
-            tree.ensure_child("/", "arm-io")?;
-            for (index, die) in dies.iter().enumerate() {
-                let cpu = format!("cpu{index}");
-                tree.ensure_child("/cpus", &cpu)?;
-                let path = format!("/cpus/{cpu}");
-                tree.set_property(&path, "state", b"waiting\0".to_vec())?;
-                if let Some(die) = die {
-                    // The templates carry die-id as a 64-bit cell pair.
-                    tree.set_property(&path, "die-id", u64::from(*die).to_le_bytes().to_vec())?;
-                }
-            }
-            Ok(tree)
-        };
-        let two = [Some(0), Some(0), Some(1), Some(1)];
-        let one = [Some(0), Some(0)];
-        let count = |dies: &[Option<u32>], chip| -> Result<Option<u32>> {
-            let mut tree = tree(dies)?;
-            assert_eq!(set_die_count(&mut tree, Some(chip))?, None);
-            Ok(tree
-                .property("/arm-io", "die-count")
-                .map(|p| u32::from_le_bytes(p.value[..].try_into().unwrap())))
-        };
-        // The iBoots without the row, and the chip rules of those with it.
-        for chip in NO_DIE_COUNT {
-            assert_eq!(count(&one, chip)?, None);
-        }
-        for chip in ULTRAS {
-            assert_eq!(count(&two, chip)?, Some(2));
-            assert!(count(&one, chip).is_err());
-        }
-        for chip in [0x6000, 0x6021, 0x6031, 0x8122, 0x8152] {
-            assert_eq!(count(&one, chip)?, Some(1));
-            assert_eq!(count(&[None, None], chip)?, Some(1));
-            assert!(count(&two, chip).is_err());
-        }
-        // The T6050's fused count is the variant's remaining CPU dies.
-        assert_eq!(count(&two, FUSED_DIES)?, Some(2));
-        assert_eq!(count(&one, FUSED_DIES)?, Some(1));
-        let mut unknown = tree(&one)?;
-        assert!(set_die_count(&mut unknown, None)?.is_some());
-        assert!(unknown.property("/arm-io", "die-count").is_none());
-        let mut malformed = tree(&[Some(1)])?;
-        malformed.set_property("/cpus/cpu0", "die-id", vec![1])?;
-        assert!(set_die_count(&mut malformed, Some(0x6002)).is_err());
-        Ok(())
-    }
-
-    #[test]
-    fn fill_in_sources_follow_iboots_resolver() -> Result<()> {
-        let options = Options {
-            syscfg: BTreeMap::from([("ARXN".to_owned(), vec![9; 2])]),
-            ..Options::default()
-        };
-        let value = |alternative: &str| alternative_value(alternative, alternative, &options);
-        assert_eq!(value("hex/0200fA")?, Some(vec![2, 0, 0xfa]));
-        assert_eq!(value("hex/0102/0x4")?, Some(vec![1, 2, 0, 0]));
-        for refused in [
-            "hex/012",
-            "hex/0x12",
-            "hex/+1",
-            "hex/010203/0x2",
-            "string/x",
-        ] {
-            assert!(value(refused).is_err(), "{refused}");
-        }
-        // No keybag provider is modelled: the source yields nothing.
-        assert_eq!(value("syscfg-mismatch/ARXN")?, None);
-        assert_eq!(value("syscfg/ARXN")?, Some(vec![9; 2]));
-        Ok(())
-    }
-
-    #[test]
-    fn syscfg_recipe_lengths_truncate_pad_and_preserve_the_source() -> Result<()> {
-        let options = Options {
-            syscfg: BTreeMap::from([("Test".to_owned(), vec![1, 2, 3, 4])]),
-            ..Options::default()
-        };
-        let value = |recipe: &str| alternative_value(recipe, recipe, &options);
-        assert_eq!(value("syscfg/Test")?, Some(vec![1, 2, 3, 4]));
-        assert_eq!(value("syscfg/Test/0x2")?, Some(vec![1, 2]));
-        assert_eq!(value("syscfg/Test/4")?, Some(vec![1, 2, 3, 4]));
-        assert_eq!(value("syscfg/Test/0x6")?, Some(vec![1, 2, 3, 4, 0, 0]));
-        assert_eq!(value("syscfg/Test/0")?, Some(vec![]));
-        assert_eq!(value("syscfg/None/0x2")?, None);
-        assert!(value("syscfg/Test/no-size").is_err());
-        assert_eq!(options.syscfg["Test"], [1, 2, 3, 4]);
-        Ok(())
-    }
-
-    fn cpu_tree(layout: &[(&str, u32, u8)]) -> DeviceTree {
-        let mut cpus = crate::apple_device_tree::Node::named("cpus").unwrap();
-        for &(name, affinity, kind) in layout {
-            let mut cpu = crate::apple_device_tree::Node::named(name).unwrap();
-            cpu.set_property("reg", affinity.to_le_bytes().to_vec())
-                .unwrap();
-            cpu.set_property("cluster-type", vec![kind, 0]).unwrap();
-            cpu.set_property("state", CPU_WAITING.to_vec()).unwrap();
-            cpus.children.push(cpu);
-        }
-        let mut root = crate::apple_device_tree::Node::named("device-tree").unwrap();
-        root.children.push(cpus);
-        DeviceTree { root }
-    }
-
-    #[test]
-    fn boot_cpu_automatic_selection_preserves_original_order_and_publishes_one_running_node()
-    -> Result<()> {
-        // Names and numeric affinities deliberately disagree with DT order.
-        let original = cpu_tree(&[
-            ("cpu9", 0x902, b'P'),
-            ("cpu88", 0, b'E'),
-            ("cpu1", 0x100, b'P'),
-        ]);
-        let mut tree = original.clone();
-        tree.set_property("/cpus/cpu88", "state", CPU_RUNNING.to_vec())?;
-        tree.set_property("/cpus/cpu1", "state", CPU_RUNNING.to_vec())?;
-        let selected = select_boot_cpu(&tree, &original, None)?;
-        assert_eq!(
-            selected,
-            BootCpu {
-                path: "/cpus/cpu9".into(),
-                affinity: 0x902,
-                cluster_type: b'P',
-                original_index: 0,
-                selection: BootCpuSelection::First,
-            }
-        );
-        mark_boot_cpu(&mut tree, &selected)?;
-        verify_boot_cpu(&tree, &original, &selected)?;
-        assert_eq!(cpu_identities(&tree)?, cpu_identities(&original)?);
-        for (name, state) in [
-            ("cpu9", CPU_RUNNING),
-            ("cpu88", CPU_WAITING),
-            ("cpu1", CPU_WAITING),
-        ] {
-            assert_eq!(
-                tree.property(&format!("/cpus/{name}"), "state")
-                    .unwrap()
-                    .value,
-                state
-            );
-        }
-        assert_eq!(
-            serde_json::to_value(&selected)?,
-            serde_json::json!({
-                "path": "/cpus/cpu9", "affinity": 0x902, "cluster_type": b'P',
-                "original_index": 0, "selection": "first",
-            })
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn boot_cpu_explicit_override_remains_distinct_from_automatic_selection() -> Result<()> {
-        let original = cpu_tree(&[("cpu0", 0, b'E'), ("cpu4", 0x100, b'P')]);
-        let mut tree = original.clone();
-        let selected = select_boot_cpu(&tree, &original, Some("cpu0"))?;
-        assert_eq!(selected.selection, BootCpuSelection::Explicit);
-        assert_eq!(
-            (
-                selected.path.as_str(),
-                selected.affinity,
-                selected.original_index
-            ),
-            ("/cpus/cpu0", 0, 0)
-        );
-        mark_boot_cpu(&mut tree, &selected)?;
-        verify_boot_cpu(&tree, &original, &selected)?;
-        assert_eq!(
-            tree.property("/cpus/cpu4", "state").unwrap().value,
-            CPU_WAITING
-        );
-        for name in ["", ".", "..", "cpu0/child", "/cpus/cpu0", "missing"] {
-            assert!(
-                select_boot_cpu(&tree, &original, Some(name)).is_err(),
-                "{name}"
-            );
-        }
-        let e_only = cpu_tree(&[("cpu0", 0, b'E')]);
-        assert_eq!(
-            select_boot_cpu(&e_only, &e_only, None)?.selection,
-            BootCpuSelection::First
-        );
-        assert!(select_boot_cpu(&e_only, &e_only, Some("cpu0")).is_ok());
-        let empty = cpu_tree(&[]);
-        assert!(select_boot_cpu(&empty, &empty, None).is_err());
-        Ok(())
-    }
-
-    #[test]
-    fn boot_cpu_invalid_source_fields_refuse_before_any_state_is_written() -> Result<()> {
-        let original = cpu_tree(&[
-            ("cpu0", 0, b'E'),
-            ("cpu4", 0x100, b'P'),
-            ("cpu5", 0x101, b'P'),
-        ]);
-        let selected = select_boot_cpu(&original, &original, None)?;
-        for (property, value) in [
-            ("state", b"running".to_vec()),
-            ("state", b"unknown\0".to_vec()),
-            ("cluster-type", vec![b'P', 0, 0]),
-            ("cluster-type", vec![b'X', 0]),
-            ("reg", 0x100u64.to_le_bytes().to_vec()),
-        ] {
-            let mut tree = original.clone();
-            tree.set_property("/cpus/cpu4", property, value)?;
-            let before = tree.clone();
-            assert!(
-                select_boot_cpu(&tree, &original, None).is_err(),
-                "{property}"
-            );
-            assert!(mark_boot_cpu(&mut tree, &selected).is_err(), "{property}");
-            assert_eq!(tree, before);
-        }
-        for property in ["state", "reg", "cluster-type"] {
-            let mut tree = original.clone();
-            tree.node_mut("/cpus/cpu4")
-                .unwrap()
-                .remove_property(property);
-            let before = tree.clone();
-            assert!(select_boot_cpu(&tree, &original, None).is_err());
-            assert!(mark_boot_cpu(&mut tree, &selected).is_err());
-            assert_eq!(tree, before);
-        }
-        let mut duplicate = original.clone();
-        let cpu = duplicate.node("/cpus/cpu4").unwrap().clone();
-        duplicate.node_mut("/cpus").unwrap().children.push(cpu);
-        assert!(select_boot_cpu(&duplicate, &duplicate, None).is_err());
-        let mut aliased = original.clone();
-        aliased.set_property("/cpus/cpu5", "reg", 0x100u32.to_le_bytes().to_vec())?;
-        assert!(select_boot_cpu(&aliased, &aliased, None).is_err());
-        for property in ["name", "state", "reg", "cluster-type"] {
-            let mut duplicate = original.clone();
-            let repeated = duplicate.property("/cpus/cpu4", property).unwrap().clone();
-            duplicate
-                .node_mut("/cpus/cpu4")
-                .unwrap()
-                .properties
-                .push(repeated);
-            assert!(
-                select_boot_cpu(&duplicate, &original, None).is_err(),
-                "{property}"
-            );
-        }
-        let mut unresolved = original.clone();
-        unresolved
-            .node_mut("/cpus/cpu4")
-            .unwrap()
-            .property_mut("reg")
-            .unwrap()
-            .placeholder = true;
-        assert!(select_boot_cpu(&unresolved, &original, None).is_err());
-        Ok(())
-    }
-
-    #[test]
-    fn boot_cpu_source_index_does_not_become_a_prepared_runtime_index() -> Result<()> {
-        let original = cpu_tree(&[("source-removed", 0, b'E'), ("retained", 0x100, b'P')]);
-        // An independently qualified earlier variant projection may retain a
-        // subset. Selection itself never removes or renames a CPU.
-        let mut prepared = cpu_tree(&[("retained", 0x100, b'P')]);
-        let selected = select_boot_cpu(&prepared, &original, None)?;
-        assert_eq!(selected.original_index, 1);
-        assert_eq!(
-            prepared.node("/cpus").unwrap().children[0].name(),
-            Some("retained")
-        );
-        mark_boot_cpu(&mut prepared, &selected)?;
-        verify_boot_cpu(&prepared, &original, &selected)?;
-        let mut forged = selected.clone();
-        forged.original_index = 0;
-        assert!(verify_boot_cpu(&prepared, &original, &forged).is_err());
-        Ok(())
-    }
-
-    #[test]
-    fn boot_cpu_overlay_cannot_replace_the_selected_state_or_source_identity() -> Result<()> {
-        let original = cpu_tree(&[
-            ("cpu0", 0, b'E'),
-            ("cpu4", 0x100, b'P'),
-            ("cpu5", 0x101, b'P'),
-        ]);
-        let selected = select_boot_cpu(&original, &original, None)?;
-        let mut prepared = original.clone();
-        mark_boot_cpu(&mut prepared, &selected)?;
-        for (path, property, value) in [
-            ("/cpus/cpu4", "state", CPU_RUNNING.to_vec()),
-            ("/cpus/cpu0", "state", CPU_WAITING.to_vec()),
-            ("/cpus/cpu0", "reg", 0x999u32.to_le_bytes().to_vec()),
-            ("/cpus/cpu0", "name", b"renamed\0".to_vec()),
-            ("/cpus/cpu0", "cluster-type", b"P\0".to_vec()),
-        ] {
-            let mut tree = prepared.clone();
-            apply_overlay(
-                &mut tree,
-                &[OverlayProperty {
-                    path: path.into(),
-                    property: property.into(),
-                    value,
-                }],
-            )?;
-            assert!(
-                verify_boot_cpu(&tree, &original, &selected).is_err(),
-                "{path} {property}"
-            );
-        }
-        let mut reordered = prepared.clone();
-        reordered.node_mut("/cpus").unwrap().children.swap(0, 1);
-        assert!(verify_boot_cpu(&reordered, &original, &selected).is_err());
-        Ok(())
-    }
-
-    fn trust_cache() -> Vec<u8> {
-        let mut module = 2u32.to_le_bytes().to_vec();
-        module.extend([0; 16]);
-        module.extend(1u32.to_le_bytes());
-        module.extend([0xee; 24]);
-        module
-    }
-
-    #[test]
-    fn unsupported_build_is_refused_before_image_parsing() {
-        let input = || Input {
-            bytes: &[],
-            source: source("unparsed"),
-        };
-        let inputs = Inputs {
-            target: Target {
-                product_type: "Mac14,3".into(),
-                device_class: "j473ap".into(),
-                product_version: "unsupported".into(),
-                product_build: "unsupported-build".into(),
-                variant: "Customer Erase Install (IPSW)".into(),
-                chip_id: Some(0x8112),
-                board_id: Some(0x2e),
-            },
-            kernel_collection: input(),
-            auxiliary_collection: None,
-            sptm: input(),
-            txm: input(),
-            device_tree: input(),
-            static_trust_cache: input(),
-            sep_firmware: None,
-            boot_manifest: None,
-            cryptex1_manifest: None,
-            extra_trust_caches: vec![],
-            board_firmware: vec![],
-            ramdisk: None,
-            root_hash: None,
-        };
-        let options = Options::default();
-        let borrowed = prepare(&inputs, &options).err().unwrap();
-        let owned = prepare_owned(
-            &inputs,
-            OwnedRamdisk {
-                bytes: vec![],
-                source: source("ramdisk"),
-            },
-            &options,
-        )
-        .err()
-        .unwrap();
-        for error in [borrowed, owned] {
-            let error = error
-                .downcast_ref::<stela_formats::builds::Unsupported>()
-                .unwrap();
-            assert_eq!(error.build, "unsupported-build");
-            assert!(
-                error
-                    .supported
-                    .contains(&stela_formats::builds::DEFAULT.build)
-            );
-        }
-    }
-
-    #[test]
-    fn lays_out_sptm_regions_and_patch_slots() -> Result<()> {
-        let (kernel, sptm, txm, tree, tc) = (kernel(), sptm(), txm(), device_tree(), trust_cache());
-        let input = |bytes: &'static [u8], name: &str| Input {
-            bytes,
-            source: source(name),
-        };
-        let leak = |v: Vec<u8>| -> &'static [u8] { Box::leak(v.into_boxed_slice()) };
-        let mut inputs = Inputs {
-            target: Target {
-                product_type: "Mac14,3".into(),
-                device_class: "j473ap".into(),
-                product_version: "27.0.1".into(),
-                product_build: "26A434".into(),
-                variant: "Customer Erase Install (IPSW)".into(),
-                chip_id: Some(0x8112),
-                board_id: Some(0x2e),
-            },
-            kernel_collection: input(leak(kernel), "KernelCache"),
-            auxiliary_collection: None,
-            sptm: input(leak(sptm), "Ap,SecurePageTableMonitor"),
-            txm: input(leak(txm), "Ap,TrustedExecutionMonitor"),
-            device_tree: input(leak(tree), "DeviceTree"),
-            static_trust_cache: input(leak(tc), "StaticTrustCache"),
-            sep_firmware: None,
-            boot_manifest: Some(input(leak(boot_manifest()), "BootManifest")),
-            cryptex1_manifest: None,
-            extra_trust_caches: vec![],
-            board_firmware: vec![(
-                "USB-C_HPM,47.bin".into(),
-                input(leak(vec![1, 2, 3]), "BoardFirmware"),
-            )],
-            ramdisk: Some(input(leak(vec![0x5a; 100]), "RestoreRamDisk")),
-            root_hash: None,
-        };
-        let options = Options {
-            dram_base: 0x8_0000_0000,
-            dram_size: 0x2_0000_0000,
-            phys_base: 0x8_0000_0000,
-            load_offset: 0,
-            boot_args: "-v".into(),
-            boot_cpu: Some("cpu0".into()),
-            osenvironment: None,
-            boot_command: None,
-            root: None,
-            ecid: None,
-            timebase_frequency: 24_000_000,
-            syscfg: BTreeMap::from([("SwBh".to_owned(), vec![7; 4])]),
-            mac_addresses: BTreeMap::from([("wifiaddr".to_owned(), vec![2, 0, 0, 0, 0, 1])]),
-            security: SecurityPolicy {
-                mode: boot_policy::SecurityMode::Reduced,
-                sip_bits: 0,
-                sepfw_load_at_boot: None,
-            },
-            overlay: vec![OverlayProperty {
-                path: "/chosen/lock-regs/amcc".into(),
-                property: "aperture-count".into(),
-                value: 1u32.to_le_bytes().to_vec(),
-            }],
-        };
-        // DRAM must sit at the target board's base: an M2 Pro's placement is
-        // refused for the M2, whose own base `placed_at` restores.
-        let elsewhere = options.placed_at(Some(0x100_0000_0000));
-        assert_eq!(
-            (elsewhere.dram_base, elsewhere.phys_base),
-            (0x100_0000_0000, 0x100_0000_0000)
-        );
-        let refusal = prepare(&inputs, &elsewhere).err().unwrap().to_string();
-        assert!(
-            refusal.contains("is not ApChipID 0x8112's 0x800000000"),
-            "{refusal}"
-        );
-        assert_eq!(
-            elsewhere.placed_at(inputs.dram_base()?).dram_base,
-            options.dram_base
-        );
-        let bundle = prepare(&inputs, &options)?;
-        // A change to the prepared content fails here until REVISION is bumped
-        // and the new digest pinned with it.
-        assert_eq!(
-            (REVISION, prepared_digest(&bundle)?),
-            (
-                30,
-                "6bf7a18074e0effa2b858063098ba3f5d98d651eadeb15fcd5eb16b760d8b87c".to_owned()
-            )
-        );
-        let original = bundle
-            .files
-            .iter()
-            .find(|(name, _)| name == ORIGINAL_DEVICE_TREE_FILE)
-            .unwrap();
-        assert_eq!(original.1, inputs.device_tree.bytes);
-        assert!(
-            !bundle
-                .manifest
-                .regions
-                .iter()
-                .any(|r| r.file == ORIGINAL_DEVICE_TREE_FILE)
-        );
-        // Origin is an independent loader input, not inferred from these
-        // fixtures' OS environment or verbose-only command line.
-        let origin_options = Options {
-            boot_command: Some(handoff::BootCommand::TetheredRestore),
-            ..options.clone()
-        };
-        let originated = prepare(&inputs, &origin_options)?;
-        let origin_tree = DeviceTree::parse(
-            &originated
-                .files
-                .iter()
-                .find(|(name, _)| name == DEVICE_TREE_FILE)
-                .unwrap()
-                .1,
-        )?;
-        for (path, name) in [
-            ("/chosen", "boot-command"),
-            ("/chosen/handoff", "boot_type"),
-        ] {
-            assert_eq!(origin_tree.property(path, name).unwrap().as_u32(), Some(7));
-        }
-        assert!(
-            !originated
-                .manifest
-                .unresolved
-                .iter()
-                .any(|gap| gap.starts_with("/chosen boot-command"))
-        );
-        // An owned ramdisk moves into the same bundle.
-        let borrowed = inputs.ramdisk.take().expect("a ramdisk");
-        let owned = OwnedRamdisk {
-            bytes: borrowed.bytes.to_vec(),
-            source: borrowed.source.clone(),
-        };
-        let moved = prepare_owned(&inputs, owned, &options)?;
-        assert_eq!(
-            serde_json::to_string(&moved.manifest)?,
-            serde_json::to_string(&bundle.manifest)?
-        );
-        inputs.ramdisk = Some(borrowed);
-        let twice = OwnedRamdisk {
-            bytes: vec![1],
-            source: source("RestoreRamDisk"),
-        };
-        assert!(prepare_owned(&inputs, twice, &options).is_err());
-        // Board firmware travels unchanged under its guest file name, which
-        // must not replace a bundle file.
-        let firmware = bundle.files.iter().find(|(n, _)| n == "USB-C_HPM,47.bin");
-        assert_eq!(firmware.map(|(_, b)| b.as_slice()), Some(&[1u8, 2, 3][..]));
-        let supplied = core::mem::take(&mut inputs.board_firmware);
-        inputs.board_firmware = vec![(KERNEL_FILE.into(), input(leak(vec![1]), "BoardFirmware"))];
-        assert!(prepare(&inputs, &options).is_err());
-        inputs.board_firmware = supplied;
-        let manifest = &bundle.manifest;
-        let names: Vec<_> = manifest.regions.iter().map(|r| r.name.as_str()).collect();
-        let expected: Vec<_> = REGION_ORDER
-            .iter()
-            .copied()
-            .filter(|n| {
-                !["SEPFW", lock_regs::CL4_DUMMY_PAGE].contains(n) && !n.starts_with("AuxKC")
-            })
-            .collect();
-        assert_eq!(names, expected);
-        // The M1 to M3 hand off no core lock registers.
-        assert!(manifest.core_locks.is_none());
-        // The original input manifest is retained byte for byte in the
-        // read-only boot run, with an exact (not page-rounded) guest length.
-        let manifest_region = manifest
-            .regions
-            .iter()
-            .find(|r| r.name == "BootManifest")
-            .unwrap();
-        let original_manifest = inputs.boot_manifest.as_ref().unwrap().bytes;
-        assert_eq!(
-            bundle
-                .files
-                .iter()
-                .find(|(n, _)| n == BOOT_MANIFEST_FILE)
-                .unwrap()
-                .1,
-            original_manifest
-        );
-        let prepared_tree = DeviceTree::parse(
-            &bundle
-                .files
-                .iter()
-                .find(|(n, _)| n == DEVICE_TREE_FILE)
-                .unwrap()
-                .1,
-        )?;
-        assert_eq!(
-            prepared_tree
-                .property("/chosen/boot-object-manifests", "test")
-                .unwrap()
-                .value,
-            range_value(manifest_region.guest_pa, original_manifest.len() as u64),
-        );
-        assert_eq!(
-            prepared_tree
-                .property("/chosen/secure-boot-hashes", "test")
-                .unwrap()
-                .value,
-            im4m::sha384(original_manifest),
-        );
-        let protected = manifest.read_only_region.as_ref().unwrap();
-        assert!(manifest_region.guest_pa >= protected.base);
-        assert!(
-            manifest_region.guest_pa + manifest_region.memory_bytes
-                <= protected.base + protected.bytes
-        );
-        // Regions are page-aligned, ascending and non-overlapping.
-        for pair in manifest.regions.windows(2) {
-            assert!(pair[0].guest_pa + pair[0].memory_bytes <= pair[1].guest_pa);
-            assert_eq!(pair[1].guest_pa % PAGE, 0);
-        }
-        let region = |name: &str| manifest.regions.iter().find(|r| r.name == name).unwrap();
-        assert_eq!(manifest.entry.image, "SPTM");
-        assert_eq!(
-            manifest.entry.physical_address,
-            region("SPTM-rx").guest_pa + 0x388
-        );
-        assert_eq!(manifest.entry_x0, region("BootArgs").guest_pa);
-        let kc = manifest.images.iter().find(|i| i.name == "BootKC").unwrap();
-        assert_eq!(kc.entry.physical_address, region("BootKC-bx").guest_pa);
-        assert_eq!(region("SPTM-le").memory_bytes, PAGE);
-        // iBoot's carveouts sit below physBase, which starts past them.
-        let phys_base = manifest.options.phys_base;
-        assert_eq!(phys_base, 0x8_0200_0000);
-        assert_eq!(manifest.boot_args.phys_base, phys_base);
-        assert_eq!(manifest.boot_args.mem_size, 0xa_0000_0000 - phys_base);
-        assert!(manifest.regions[0].guest_pa >= phys_base);
-        assert!(
-            manifest
-                .carveouts
-                .iter()
-                .all(|c| c.base >= 0x8_0000_0000 && c.base + c.bytes <= phys_base)
-        );
-        // CTRR-A covers the read-only run, ending where SPTM's data starts.
-        let ctrr = manifest.read_only_region.clone().unwrap();
-        assert_eq!(ctrr.base, manifest.regions[0].guest_pa);
-        assert_eq!(ctrr.base + ctrr.bytes, region("SPTM-rw").guest_pa);
-
-        let file = |name: &str| &bundle.files.iter().find(|(n, _)| n == name).unwrap().1;
-        let tree = DeviceTree::parse(file(DEVICE_TREE_FILE))?;
-        let map = tree.node(MEMORY_MAP).unwrap();
-        assert!(
-            map.properties
-                .iter()
-                .all(|p| !p.name().starts_with(RESERVED_ENTRY_PREFIX))
-        );
-        let entry = |name: &str| map.property(name).unwrap().value.clone();
-        let nvme = manifest.carveouts.iter().find(|c| c.id == 0x37).unwrap();
-        assert_eq!(
-            tree.property(carveouts::MEMORY_MAP, "region-id-55")
-                .unwrap()
-                .value,
-            range_value(nvme.base, nvme.bytes)
-        );
-        // The panic region is XNU's panic buffer, below physBase.
-        let panic = manifest.carveouts.iter().find(|c| c.id == 98).unwrap();
-        assert_eq!(panic.bytes, 0x18_8000);
-        assert_eq!(
-            tree.property(carveouts::PRAM, "reg").unwrap().value,
-            range_value(panic.base, panic.bytes)
-        );
-        assert_eq!(
-            tree.property("/chosen", carveouts::PANIC_LOG_SIZE)
-                .unwrap()
-                .as_u32(),
-            Some(0x18_8000)
-        );
-        assert_eq!(
-            entry("TrustCache"),
-            range_value(region("TrustCache").guest_pa, PAGE)
-        );
-        assert_eq!(entry("BootKC-entry"), range_value(3 * PAGE, 0));
-        for name in ABSENT_SECURE_KERNEL {
-            assert_eq!(entry(name), range_value(u64::MAX, u64::MAX));
-        }
-        assert_eq!(
-            entry("SPTM-rm"),
-            range_value(region("SPTM-ro").guest_pa, 4 * PAGE)
-        );
-        assert!(tree.placeholders().is_empty());
-        assert_eq!(
-            tree.property("/chosen", "mac-address-wifi0").unwrap().value,
-            vec![2, 0, 0, 0, 0, 1]
-        );
-        let mut behavior = vec![7; 4];
-        behavior.resize(16, 0);
-        assert_eq!(
-            tree.property("/chosen", "software-behavior").unwrap().value,
-            behavior
-        );
-        assert!(tree.property("/chosen", "repair-status").is_none());
-        for property in CPU_FREQUENCY_PROPERTIES {
-            assert_eq!(
-                tree.property("/cpus/cpu0", property).unwrap().as_u64(),
-                Some(24_000_000)
-            );
-        }
-        assert!(
-            manifest
-                .patches
-                .iter()
-                .any(|p| p.field == "/cpus/cpu0 timebase-frequency")
-        );
-        assert_eq!(
-            tree.property("/cpus/cpu0", "state").unwrap().as_str(),
-            Some("running")
-        );
-        assert_eq!(
-            manifest.boot_cpu,
-            Some(BootCpu {
-                path: "/cpus/cpu0".into(),
-                affinity: 0,
-                cluster_type: b'E',
-                original_index: 0,
-                selection: BootCpuSelection::Explicit,
-            })
-        );
-        assert_eq!(
-            tree.property("/chosen", "chip-id").unwrap().as_u32(),
-            Some(0x8112)
-        );
-
-        let args = boot_args::decode(file(BOOT_ARGS_FILE))?;
-        assert_eq!(
-            args.device_tree,
-            region("DeviceTree").guest_pa - args.phys_base + args.virt_base
-        );
-        assert_eq!(
-            args.device_tree_length as usize,
-            file(DEVICE_TREE_FILE).len()
-        );
-        assert_eq!(args.top_of_kernel_data, region("BootArgs").guest_pa + PAGE);
-        assert_eq!(args.command_line, "-v");
-
-        // Every patch addresses its prepared bytes in its file.
-        for patch in &manifest.patches {
-            let bytes = file(&patch.file);
-            let at = patch.file_offset as usize;
-            assert_eq!(
-                hex::encode(&bytes[at..at + patch.bytes as usize]),
-                patch.prepared_hex,
-                "{}",
-                patch.field
-            );
-        }
-        // Every region hash covers its file bytes.
-        for region in &manifest.regions {
-            let at = region.file_offset as usize;
-            assert_eq!(
-                sha256(&file(&region.file)[at..at + region.bytes as usize]),
-                region.sha256
-            );
-        }
-        assert!(manifest.unresolved.iter().any(|u| u.starts_with("SEPFW")));
-        let ramdisk = region("RAMDisk");
-        assert_eq!((ramdisk.bytes, ramdisk.memory_bytes), (100, PAGE));
-        assert_eq!(
-            map.property("RAMDisk").unwrap().value,
-            range_value(ramdisk.guest_pa, PAGE)
-        );
-        assert!(!manifest.unresolved.iter().any(|u| u.contains("lock-regs")));
-        assert!(manifest.unresolved.iter().any(|u| u.contains("lp-spih")));
-        assert_eq!(
-            tree.property("/chosen/asmb", "lp-smb0").unwrap().as_u32(),
-            Some(1)
-        );
-        assert_eq!(
-            tree.property("/chosen/lock-regs/amcc", "aperture-count")
-                .unwrap()
-                .as_u32(),
-            Some(1)
-        );
-        assert_eq!(
-            tree.property("/chosen/manifest-properties", "BORD")
-                .unwrap()
-                .as_u64(),
-            Some(0x2e)
-        );
-        assert!(
-            manifest
-                .security
-                .iter()
-                .any(|d| d.property == "boot-manifest-hash")
-        );
-        // The mount's reader accepts the manifest, revision and all, and
-        // reproduces the layout.
-        assert_eq!(manifest.revision, REVISION);
-        let json = serde_json::to_vec(manifest)?;
-        let consumed = stela_formats::boot_bundle::Manifest::parse(&json)?;
-        let mut changed_source = file(ORIGINAL_DEVICE_TREE_FILE).clone();
-        changed_source[0] ^= 1;
-        assert!(
-            consumed
-                .verify(&|name| {
-                    Some(if name == ORIGINAL_DEVICE_TREE_FILE {
-                        changed_source.as_slice()
-                    } else {
-                        file(name).as_slice()
-                    })
-                })
-                .is_err()
-        );
-        let verified = consumed.verify(&|name| Some(file(name).as_slice()))?;
-        let span = (manifest.top_of_kernel_data - options.dram_base) as usize;
-        let mut ram = vec![0u8; span];
-        let machine = stela_formats::boot_bundle::Machine {
-            dram_base: options.dram_base,
-            ram_bytes: span as u64,
-            dram_bytes: span as u64,
-            timebase_hz: 24_000_000,
-            framebuffer: None,
-            boot_args: None,
-            nvram: None,
-        };
-        let image = verified.load(
-            &machine,
-            &mut |b| {
-                b.fill(7);
-                Ok(())
-            },
-            &mut |pa, bytes| {
-                let at = (pa - options.dram_base) as usize;
-                ram[at..at + bytes.len()].copy_from_slice(bytes);
-                true
-            },
-        )?;
-        assert_eq!(image.entry_pa, manifest.entry.physical_address);
-        assert_eq!(image.x0, manifest.entry_x0);
-        let tc = region("TrustCache");
-        let at = (tc.guest_pa - options.dram_base) as usize;
-        assert_eq!(
-            &ram[at..at + tc.bytes as usize],
-            file(TRUST_CACHE_FILE).as_slice()
-        );
-        assert!(image.kept.iter().all(|field| field.contains("Video")
-            || field.contains("vram")
-            || field.contains("/chosen display-")
-            || field.contains("CommandLine")));
-
-        // An M4 bundle places iBoot's dummy CL4 page and states the core
-        // lock registers SPTM checks, which the mount's reader takes.
-        let m2 = (inputs.target.clone(), inputs.device_tree.bytes);
-        let m2_manifest = inputs.boot_manifest.take();
-        let mut m4_tree = DeviceTree::parse(inputs.device_tree.bytes)?;
-        m4_tree.ensure_child("/", "arm-io")?;
-        m4_tree.ensure_child("/arm-io", "mcc")?;
-        m4_tree.set_property(
-            "/arm-io/mcc",
-            "dram-base",
-            0x100_0000_0000u64.to_le_bytes().to_vec(),
-        )?;
-        inputs.device_tree.bytes = leak(m4_tree.serialize());
-        inputs.target.chip_id = Some(0x8132);
-        let m4_options = options.placed_at(inputs.dram_base()?);
-        let m4_bundle = prepare(&inputs, &m4_options)?;
-        inputs.target.chip_id = Some(0x8142);
-        let m5_bundle = prepare(&inputs, &m4_options)?;
-        (inputs.target, inputs.device_tree.bytes) = m2;
-        inputs.boot_manifest = m2_manifest;
-        let m4_manifest = &m4_bundle.manifest;
-        let page = m4_manifest
-            .regions
-            .iter()
-            .find(|r| r.name == lock_regs::CL4_DUMMY_PAGE)
-            .unwrap();
-        assert_eq!(page.memory_bytes, lock_regs::CL4_DUMMY_PAGE_BYTES as u64);
-        let core_locks = m4_manifest.core_locks.as_ref().unwrap();
-        let ctxr_b = core_locks
-            .locked
-            .iter()
-            .find(|locked| locked.region == stela_formats::boot_bundle::schema::LockRegion::CtxrB)
-            .unwrap();
-        assert_eq!(
-            (ctxr_b.first, ctxr_b.last),
-            (page.guest_pa, page.guest_pa + page.memory_bytes - 1)
-        );
-        // The policy enables kernel CTRR, so CTRR-D is locked too.
-        assert_eq!(core_locks.locked.len(), 6);
-        let consumed =
-            stela_formats::boot_bundle::Manifest::parse(&serde_json::to_vec(m4_manifest)?)?;
-        assert_eq!(consumed.core_locks.as_ref(), Some(core_locks));
-        assert_eq!(core_locks.tag_offset, 0);
-        // An M5 bundle also locks TAG_OFFSET_EL2 at the top of the managed
-        // range, which ends at DRAM's end.
-        let dram_end = m4_options.dram_base + m4_options.dram_size;
-        assert_eq!(
-            m5_bundle.manifest.core_locks.unwrap().tag_offset,
-            tag_storage::LOCK | (dram_end - tag_storage::bytes(m4_options.dram_size))
-        );
-
-        // A memory-device root cannot pivot to a disk image.
-        let ramdisk_pivot = Options {
-            boot_args: "-v rd=md0 rp0=file:///a.dmg".into(),
-            root: Some(root_selection::Root::Ramdisk),
-            ..options.clone()
-        };
-        let refusal = prepare(&inputs, &ramdisk_pivot).err().unwrap().to_string();
-        assert!(refusal.contains("memory device md0"), "{refusal}");
-
-        // With SEP firmware, SEPFW is a reserved, zero-filled staging region
-        // between RAMDisk and BootArgs that holds the image's IMG4 container;
-        // the image itself travels as a bundle file for the run-time load.
-        let sep = vec![0x5e; 3 * PAGE as usize];
-        inputs.sep_firmware = Some(input(leak(sep.clone()), "RestoreSEP"));
-        let staged = prepare(&inputs, &options)?;
-        inputs.sep_firmware = None;
-        let names: Vec<_> = staged.manifest.regions.iter().map(|r| &*r.name).collect();
-        let expected: Vec<_> = REGION_ORDER
-            .iter()
-            .copied()
-            .filter(|n| *n != lock_regs::CL4_DUMMY_PAGE && !n.starts_with("AuxKC"))
-            .collect();
-        assert_eq!(names, expected);
-        let sepfw = staged
-            .manifest
-            .regions
-            .iter()
-            .find(|r| r.name == "SEPFW")
-            .unwrap();
-        assert_eq!(sepfw.bytes, 0);
-        assert_eq!(sepfw.memory_bytes, 4 * PAGE);
-        assert!(sepfw.memory_bytes >= stela_formats::img4::container(&sep).len() as u64);
-        let file = |name: &str| &staged.files.iter().find(|(n, _)| n == name).unwrap().1;
-        assert_eq!(file(SEP_FILE), &sep);
-        let tree = DeviceTree::parse(file(DEVICE_TREE_FILE))?;
-        assert_eq!(
-            tree.property(MEMORY_MAP, "SEPFW").unwrap().value,
-            range_value(sepfw.guest_pa, sepfw.memory_bytes)
-        );
-        assert!(
-            !staged
-                .manifest
-                .unresolved
-                .iter()
-                .any(|u| u.starts_with("SEPFW"))
-        );
-
-        // An auxiliary collection's read-only and executable regions join
-        // SPTM's run before the boot collection's; its writable ones follow
-        // the boot collection's.
-        inputs.auxiliary_collection = Some(input(leak(auxiliary_collection()), "AuxKC"));
-        let linked = prepare(&inputs, &options)?;
-        let names: Vec<_> = linked
-            .manifest
-            .regions
-            .iter()
-            .map(|r| r.name.as_str())
-            .collect();
-        let at = |name: &str| names.iter().position(|n| *n == name).unwrap();
-        assert_eq!(
-            names[at("TrustCache")..=at("BootKC-rx")],
-            ["TrustCache", "AuxKC-ro", "AuxKC-rx", "BootKC-rx"]
-        );
-        assert_eq!(
-            names[at("BootKC-rw")..=at("AuxKC-le")],
-            ["BootKC-rw", "BootKC-le", "AuxKC-rw", "AuxKC-le"]
-        );
-        let region = |name: &str| {
-            linked
-                .manifest
-                .regions
-                .iter()
-                .find(|r| r.name == name)
-                .unwrap()
-        };
-        assert_eq!(
-            region("AuxKC-ro").guest_pa + 4 * PAGE,
-            region("AuxKC-rx").guest_pa
-        );
-        for (name, offset, bytes) in [
-            ("AuxKC-rw", 0, 2 * PAGE),
-            ("AuxKC-ro", 2 * PAGE, 4 * PAGE),
-            ("AuxKC-rx", 6 * PAGE, PAGE),
-            ("AuxKC-le", 7 * PAGE, PAGE),
-        ] {
-            let piece = region(name);
-            assert_eq!(
-                (piece.file.as_str(), piece.file_offset, piece.memory_bytes),
-                (AUXILIARY_FILE, offset, bytes)
-            );
-            assert_eq!(piece.virtual_address, Some(BASE + offset));
-        }
-        let file = |name: &str| &linked.files.iter().find(|(n, _)| n == name).unwrap().1;
-        assert_eq!(file(AUXILIARY_FILE).len() as u64, 8 * PAGE);
-        let tree = DeviceTree::parse(file(DEVICE_TREE_FILE))?;
-        assert_eq!(
-            tree.property(MEMORY_MAP, "AuxKC-rx").unwrap().value,
-            range_value(region("AuxKC-rx").guest_pa, PAGE)
-        );
-        assert!(
-            linked
-                .manifest
-                .sources
-                .iter()
-                .any(|source| source.component == "AuxKC")
-        );
-        inputs.auxiliary_collection = None;
-
-        // A manifest for another board is refused.
-        let mut other = Inputs { ..inputs };
-        other.target.board_id = Some(0x24);
-        assert!(prepare(&other, &options).is_err());
-        Ok(())
-    }
-
-    /// An auxiliary collection as `aux_kc` lays one out, a page a segment.
-    fn auxiliary_collection() -> Vec<u8> {
-        Builder::new(macho::MH_FILESET)
-            .segment("__PRELINK_INFO", PAGE, &page(0))
-            .segment("__DATA", PAGE, &page(1))
-            .segment("__TEXT", PAGE, &page(2))
-            .segment("__PRELINK_TEXT", PAGE, &page(3))
-            .segment("__DATA_CONST", PAGE, &page(4))
-            .segment("__RECEIPT_INFO", PAGE, &page(5))
-            .segment("__TEXT_EXEC", PAGE, &page(6))
-            .segment("__LINKEDIT", PAGE, &page(7))
-            .fileset("com.stela.StelaGPU", BASE + 3 * PAGE)
-            .build()
-    }
-}
-
-#[cfg(test)]
-mod metadata_tests;
+mod tests;

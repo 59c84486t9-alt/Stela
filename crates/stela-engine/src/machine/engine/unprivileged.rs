@@ -15,6 +15,7 @@ use crate::machine::{
     exception::Class,
     mmu::{self, Access, MemoryType},
 };
+use alloc::string::ToString;
 use alloc::{string::String, vec::Vec};
 use stela_compiler::aarch64::{MemoryTransfer, Register, Width, unprivileged::Operand};
 
@@ -152,7 +153,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                         address,
                         translation.physical,
                         write,
-                        detail,
+                        detail.to_string(),
                     ));
                 }
             }

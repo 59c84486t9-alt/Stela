@@ -1,5 +1,7 @@
 //! AES version, address-field and key-disable register geometry.
 //! The command FIFO, key material, DMA and cipher execution are device-owned.
+use crate::Result;
+use stela_contracts::refuse;
 /// The driver's `address-width` when the ADT gives none.
 pub const DEFAULT_ADDRESS_WIDTH: u32 = 36;
 /// The first `aes-version` with a DKey range.
@@ -44,26 +46,30 @@ impl Config {
 
     /// Refuses a version, width or key-disable layout no established
     /// driver contract covers.
-    pub fn validate(&self) -> Result<(), &'static str> {
+    pub fn validate(&self) -> Result<()> {
         if !matches!(self.version, 0..=3 | 5 | 6) {
-            return Err("AES aes-version without an established layout");
+            return Err(refuse!("AES aes-version without an established layout"));
         }
         if self.address_width > NARROW_ADDRESS_WIDTH && self.address_width != WIDE_ADDRESS_WIDTH {
-            return Err("AES address-width without an established address field width");
+            return Err(refuse!(
+                "AES address-width without an established address field width"
+            ));
         }
         let disable = &self.key_disable;
         let words = core::iter::once(Some(disable.word)).chain(disable.keys);
         for (index, offset) in words.clone().enumerate() {
             let Some(offset) = offset else { continue };
             if !offset.is_multiple_of(4) || u64::from(offset) + 4 > disable.bytes {
-                return Err("AES key-disable word outside its range or unaligned");
+                return Err(refuse!(
+                    "AES key-disable word outside its range or unaligned"
+                ));
             }
             if words
                 .clone()
                 .skip(index + 1)
                 .any(|other| other == Some(offset))
             {
-                return Err("AES key-disable words overlap");
+                return Err(refuse!("AES key-disable words overlap"));
             }
         }
         Ok(())

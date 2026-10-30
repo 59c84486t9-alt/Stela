@@ -57,7 +57,7 @@ pub(super) fn conflicts(frame: &[u8], target: Ipv6Addr, nonce: [u8; 6]) -> bool 
         135 if source.is_unspecified() && destination == solicited_node(target) => {
             // A DAD NS must use the solicited-node destination and omit the
             // source link-layer option. Validate the whole option tail before
-            // trusting a matching nonce (not merely its first option).
+            // trusting a matching nonce (not its first option).
             matches!(valid_options(&icmp[24..], true, nonce), Some(false))
         }
         _ => false,

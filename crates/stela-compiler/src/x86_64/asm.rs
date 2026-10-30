@@ -43,7 +43,7 @@ impl<'a> Asm<'a> {
             sites: None,
         }
     }
-    /// Mark exactly one actual guest memory operand, including its prefixes and
+    /// Mark exactly one guest memory operand, including its prefixes and
     /// immediate bytes. Frame/staging/address instructions must remain outside.
     pub(crate) fn guest_access(&mut self, emit: impl FnOnce(&mut Self)) {
         self.fault_site(crate::block::RecoverySite::guest_access(), emit);
@@ -613,6 +613,10 @@ impl<'a> Asm<'a> {
         let target = self.code.len();
         resolve_bytes(self.code, patch, target);
     }
+    /// Point `patch` at the earlier position `target` ([`Self::len`]).
+    pub(crate) fn bind_back(&mut self, patch: Patch, target: usize) {
+        resolve_bytes(self.code, patch, target);
+    }
 }
 
 /// Point `patch` in `code` at `target`.
@@ -632,6 +636,7 @@ fn resolve_bytes(code: &mut [u8], patch: Patch, target: usize) {
 
 #[cfg(test)]
 mod tests {
+    mod span;
     use super::*;
     use alloc::vec;
 
@@ -877,6 +882,3 @@ mod tests {
         assert_eq!(count, 3);
     }
 }
-
-#[cfg(test)]
-mod span_tests;

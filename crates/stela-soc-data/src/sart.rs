@@ -1,6 +1,8 @@
 //! Immutable SART register/entry geometry from the original SPTM layout tables.
-//! This describes placement and encoding, never live DMA permissions, retained
+//! This describes placement and encoding, never live DMA permissions, kept
 //! power, a hardware mapping, outstanding work or an execution owner.
+use crate::Result;
+use stela_contracts::refuse;
 /// Largest supported layout, version4.
 pub const MAX_ENTRIES: usize = 24;
 pub const PAGE: u64 = 4096;
@@ -76,7 +78,7 @@ impl Layout {
     /// 26, 29 and 30 or 24, 26, 28, 30 and 31. Their entry write (T8103
     /// 0xfffffff0270cb6b0) stores CONFIG with the permissions alone, then
     /// PADDR, then CONFIG again with SIZE in its low bits.
-    pub fn new(version: u32, throttle_version: u32, offset: u32) -> Result<Self, &'static str> {
+    pub fn new(version: u32, throttle_version: u32, offset: u32) -> Result<Self> {
         let (entries, base, size, size_mask, base_mask, allow) = match version {
             1 => (
                 16,
@@ -96,7 +98,7 @@ impl Layout {
             ),
             3 => (16, BASE, Some(SIZE), WIDE, WIDE, ALLOW),
             4 => (24, 0x60, Some(0xc0), WIDE, WIDE, ALLOW),
-            _ => return Err("SART entry layout other than versions 1 to 4"),
+            _ => return Err(refuse!("SART entry layout other than versions 1 to 4")),
         };
         let (channels, throttles, status) = match throttle_version {
             1 => (3, [0x4014, 0x401c, 0x4024, 0], [0x4010, 0x4018, 0x4020, 0]),
@@ -106,10 +108,10 @@ impl Layout {
                 [0x8008, 0x800c, 0x8014, 0x801c],
                 [0x8000, 0x8004, 0x8010, 0x8018],
             ),
-            _ => return Err("SART throttle layout other than versions 1 to 4"),
+            _ => return Err(refuse!("SART throttle layout other than versions 1 to 4")),
         };
         if !offset.is_multiple_of(4) {
-            return Err("SART throttle offset is not word aligned");
+            return Err(refuse!("SART throttle offset is not word aligned"));
         }
         let at = |words: [u64; 4]| words.map(|word| word + u64::from(offset));
         Ok(Self {

@@ -15,21 +15,21 @@
 //! (`storage::RestoreRoot`), as block and input I/O do.
 mod security;
 use super::storage::RestoreRoot;
+use crate::Refusal;
+use crate::Result;
 use crate::output;
 use alloc::{format, rc::Rc, string::String, sync::Arc, vec::Vec};
 use core::cell::RefCell;
+use stela_contracts::refuse;
 use stela_drivers::{
     Clock,
     net::{Link, LinkError, Mac},
     probe::Adapter,
 };
-use stela_runtime::{
-    machine::apple::AppleDevices,
-    net::{
-        HttpRequest, HttpTransfer, NetError, Stack, TlsUnavailable, Transfer,
-        stack::DOWNLOAD_BUFFER,
-    },
+use stela_runtime::net::{
+    HttpRequest, HttpTransfer, NetError, Stack, TlsUnavailable, Transfer, stack::DOWNLOAD_BUFFER,
 };
+use stela_soc::machine::AppleDevices;
 
 /// One restore-time opaque TCP relay window. TLS stays end to end between the
 /// original Apple guest process and its requested server.
@@ -78,17 +78,23 @@ impl Link for RootLink {
 struct Ticking(Clock);
 
 impl stela_runtime::net::Clock for Ticking {
-    fn now_us(&self) -> u64 {
+    fn now_us(&self) -> Result<u64, stela_runtime::net::ClockError> {
         crate::status::tick();
-        self.0.now_us()
+        self.0
+            .try_now_us()
+            .map_err(stela_runtime::net::ClockError::Calibration)
     }
     /// The adapter's completion signal wakes the boot processor, which runs
     /// the stack.
-    fn sleep(&self, until_us: u64) {
-        let now = self.0.now_us();
+    fn sleep(&self, until_us: u64) -> Result<(), stela_runtime::net::ClockError> {
+        let now = self
+            .0
+            .try_now_us()
+            .map_err(stela_runtime::net::ClockError::Calibration)?;
         if until_us > now {
             super::host::sleep_for(until_us - now);
         }
+        Ok(())
     }
 }
 
@@ -102,8 +108,21 @@ pub struct HostNetwork {
 impl HostNetwork {
     /// Try each native adapter until DHCPv4 or IPv6 SLAAC provides a usable
     /// address. A failed adapter keeps its diagnostic while the next is tried.
-    pub fn open(links: Links, clock: Clock) -> Result<Self, String> {
-        let security = security::native();
+    pub fn open(
+        links: Links,
+        clock: Clock,
+        handoff: &crate::handoff::Handoff,
+        options: &stela_boot_core::options::System,
+    ) -> Result<Self> {
+        let security = security::native(handoff);
+        match &security {
+            Ok(_) => output::arguments(format_args!(
+                "NETWORK TLS certificate time: the firmware RTC carried forward on the invariant TSC\n"
+            )),
+            Err(unavailable) => {
+                output::arguments(format_args!("NETWORK TLS unavailable: {unavailable}\n"))
+            }
+        }
         let mut failures = Vec::new();
         for device in links.devices {
             let location = String::from(device.location());
@@ -114,9 +133,8 @@ impl HostNetwork {
             ));
             crate::status::progress(&format!("adapter {location}"));
             let mut seed = [0u8; 8];
-            crate::random::fill(&mut seed).map_err(|_| {
-                String::from("secure host entropy is unavailable for the network stack")
-            })?;
+            crate::random::fill(&mut seed)
+                .map_err(|_| refuse!("secure host entropy is unavailable for the network stack"))?;
             let mut stack = Stack::new(
                 RootLink {
                     device,
@@ -124,7 +142,18 @@ impl HostNetwork {
                 },
                 Ticking(clock),
                 u64::from_le_bytes(seed),
-            );
+            )
+            .map_err(|error| refuse!("host network stack: {error}", %error))?;
+            if let Some(ipv4) = options.ipv4 {
+                stack
+                    .set_ipv4(ipv4.address, ipv4.prefix, options.ipv4_gateway)
+                    .map_err(|error| refuse!("host network --ipv4 {ipv4}: {error}", %error))?;
+            }
+            if !options.dns.is_empty() {
+                stack
+                    .set_dns(&options.dns)
+                    .map_err(|error| refuse!("host network --dns: {error}", %error))?;
+            }
             match stack.automatic() {
                 Ok(config) => {
                     output::arguments(format_args!(
@@ -145,9 +174,13 @@ impl HostNetwork {
             }
         }
         if failures.is_empty() {
-            Err(String::from("no native host network adapter is available"))
+            Err(refuse!("no native host network adapter is available"))
         } else {
-            Err(format!("{NO_LEASE} {}", failures.join("; ")))
+            Err(refuse!(
+                "{NO_LEASE} {failures}",
+                NO_LEASE,
+                failures = failures.join("; ")
+            ))
         }
     }
 
@@ -157,7 +190,7 @@ impl HostNetwork {
     }
 
     /// Initial plaintext endpoint used by the signing transport; redirects
-    /// retain the full resulting URL and can never downgrade an HTTPS hop.
+    /// keep the full resulting URL and can never downgrade an HTTPS hop.
     pub fn post(
         &mut self,
         host: &str,
@@ -227,8 +260,8 @@ impl HostNetwork {
     }
 
     /// Waits up to `micros` for the adapter's next frame (`Stack::wait`).
-    pub fn wait(&mut self, micros: u64) {
-        self.stack.wait(micros);
+    pub fn wait(&mut self, micros: u64) -> Result<(), NetError> {
+        self.stack.wait(micros)
     }
 
     /// Opens one opaque TCP stream for the restore reverse proxy.
@@ -236,7 +269,7 @@ impl HostNetwork {
         self.stack.open_raw(host, port, RELAY_BUFFER)
     }
 
-    /// Sends caller-retained opaque bytes, returning zero under backpressure.
+    /// Sends caller-kept opaque bytes, returning zero under backpressure.
     pub fn relay_write(
         &mut self,
         transfer: &mut Transfer,
@@ -275,14 +308,18 @@ impl stela_runtime::restore::tss::Transport for Shared {
         self.0
             .borrow_mut()
             .post(host, path, headers, content_type, body)
-            .map_err(|error| stela_runtime::restore::Error::Transport(format!("{error}")))
+            .map_err(|error| {
+                stela_runtime::restore::Error::Transport(
+                    refuse!("signing request: {error}", %error),
+                )
+            })
     }
 }
 
 /// The signing transport when the host network did not open: every request
 /// is refused with the reason, so a restore stops at its first signing
 /// request.
-pub struct Offline(pub String);
+pub struct Offline(pub Refusal);
 
 impl stela_runtime::restore::tss::Transport for Offline {
     fn post(
@@ -293,10 +330,9 @@ impl stela_runtime::restore::tss::Transport for Offline {
         _content_type: &str,
         _body: &[u8],
     ) -> stela_runtime::restore::Result<Vec<u8>> {
-        Err(stela_runtime::restore::Error::Transport(format!(
-            "no host network for http://{host}{path}: {}",
-            self.0
-        )))
+        Err(stela_runtime::restore::Error::Transport(
+            refuse!("no host network for http://{host}{path}", host, path).because(self.0.clone()),
+        ))
     }
 }
 
@@ -314,13 +350,13 @@ pub struct GuestNetwork {
 impl GuestNetwork {
     /// The second adapter when the mount's own client (`wants_client`)
     /// keeps the first, otherwise the first.
-    pub fn open(links: &mut Links, wants_client: bool) -> Result<Self, String> {
+    pub fn open(links: &mut Links, wants_client: bool) -> Result<Self> {
         let index = usize::from(wants_client);
         if links.devices.len() <= index {
-            return Err(format!(
-                "the guest network needs host network adapter {} of its own; {} found",
-                index + 1,
-                links.devices.len()
+            return Err(refuse!(
+                "the guest network needs host network adapter {adapter} of its own; {found} found",
+                adapter = index + 1,
+                found = links.devices.len()
             ));
         }
         let device = links.devices.remove(index);

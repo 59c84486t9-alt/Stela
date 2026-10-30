@@ -5,7 +5,8 @@
 use super::{Error, Result};
 use crate::usb::{
     bluetooth::Binding,
-    xhci::{self, Endpoint, FULL_SPEED, HIGH_SPEED, Interface},
+    descriptor::{Endpoint, Interface},
+    xhci::{FULL_SPEED, HIGH_SPEED},
 };
 use alloc::vec::Vec;
 
@@ -14,7 +15,7 @@ pub enum AirMode {
     Cvsd,
     Transparent,
 }
-/// Actual host-stack SCO connection/voice observations, not guessed link state.
+/// Host-stack SCO connection/voice observations, not guessed link state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Voice {
     pub connections: u8,
@@ -51,7 +52,7 @@ impl Bindings {
                 "exact MT7925 USB 13d3:3602:0100 interface0",
             ));
         }
-        let interfaces = xhci::interfaces(&device.configuration);
+        let interfaces = crate::usb::descriptor::interfaces(&device.configuration);
         let iso: Vec<_> = interfaces.iter().filter(|i| i.number == 2).collect();
         let alternate = if iso.len() > 1 { 1 } else { 0 };
         let selected = iso
@@ -113,7 +114,7 @@ impl Bindings {
     }
     fn standard_sco(binding: &Binding, use_alt3_for_wbs: bool) -> Result<Self> {
         let device = binding.device();
-        let interfaces = xhci::interfaces(&device.configuration);
+        let interfaces = crate::usb::descriptor::interfaces(&device.configuration);
         let sco: Vec<_> = interfaces
             .iter()
             .filter(|i| i.number == 1)
@@ -156,7 +157,7 @@ impl Bindings {
             .iter()
             .any(|i| super::binding::pair(i, self.speed, 1) == Ok(pair))
     }
-    /// The caller supplies actual current voice state. Missing/malformed
+    /// The caller supplies current voice state. Missing/malformed
     /// source-selected alternates refuse, with no invented bandwidth fallback.
     pub fn sco(&self, voice: Voice) -> Result<Option<Pair>> {
         if voice.connections == 0 {
@@ -273,7 +274,7 @@ mod tests {
     use super::*;
     use crate::usb::bluetooth::mediatek::media::tests::binding;
     #[test]
-    fn selects_actual_same_device_alternates_and_source_voice_policy() {
+    fn selects_same_device_alternates_and_source_voice_policy() {
         let binding = binding();
         let b = Bindings::new(&binding).unwrap();
         assert_eq!(

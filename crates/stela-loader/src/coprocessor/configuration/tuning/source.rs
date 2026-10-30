@@ -1,15 +1,16 @@
 //! Checked native group/revision selection, with input bytes supplied intact.
 use super::{OFFSET_MASK, Table, Width};
+use crate::Result;
 use crate::coprocessor::configuration::Provenance;
 use alloc::{string::String, vec::Vec};
-use anyhow::{Context, Result, ensure};
 use serde::Serialize;
+use stela_contracts::{refuse, require};
 use stela_formats::sha256;
 
 const GROUP_BYTES: usize = 0x38;
 const REVISION_BYTES: usize = 0x58;
 
-/// The actual native provider determines kind and group coordinates. The bank
+/// The native provider determines kind and group coordinates. The bank
 /// contains bounded source pointers, never live pointers into released UEFI RAM.
 pub struct Input {
     pub image_base: u64,
@@ -54,80 +55,82 @@ fn u32_at(b: &[u8], at: usize) -> Result<u32> {
     Ok(u32::from_le_bytes(
         b.get(at..)
             .and_then(|b| b.get(..4))
-            .context("truncated native tuning u32")?
-            .try_into()?,
+            .ok_or(refuse!("truncated native tuning u32"))?
+            .try_into()
+            .unwrap(),
     ))
 }
 fn u64_at(b: &[u8], at: usize) -> Result<u64> {
     Ok(u64::from_le_bytes(
         b.get(at..)
             .and_then(|b| b.get(..8))
-            .context("truncated native tuning pointer")?
-            .try_into()?,
+            .ok_or(refuse!("truncated native tuning pointer"))?
+            .try_into()
+            .unwrap(),
     ))
 }
 fn slice(source: &[u8], at: u64, bytes: usize) -> Result<&[u8]> {
     source
-        .get(usize::try_from(at)?..)
+        .get(at as usize..)
         .and_then(|b| b.get(..bytes))
-        .context("native tuning source span exceeds input")
+        .ok_or(refuse!("native tuning source span exceeds input").into())
 }
 fn span<'a>(source: &'a [u8], raw: &[u8], at: usize, base: u64) -> Result<(Option<u64>, &'a [u8])> {
     let pointer = u64_at(raw, at)?;
     let lower = u64_at(raw, at + 8)?;
     let upper = u64_at(raw, at + 16)?;
     if pointer == 0 {
-        ensure!(
+        require!(
             lower == 0 && upper == 0,
             "null native tuning span has nonnull bounds"
         );
         return Ok((None, &[]));
     }
-    ensure!(
+    require!(
         lower <= pointer && pointer < upper,
         "native tuning source pointer exceeds its bounds"
     );
     let offset = pointer
         .checked_sub(base)
-        .context("native tuning source pointer precedes image")?;
+        .ok_or(refuse!("native tuning source pointer precedes image"))?;
     let lower_offset = lower
         .checked_sub(base)
-        .context("native tuning lower bound precedes image")?;
-    slice(source, lower_offset, usize::try_from(upper - lower)?)?;
+        .ok_or(refuse!("native tuning lower bound precedes image"))?;
+    slice(source, lower_offset, (upper - lower) as usize)?;
     Ok((
         Some(offset),
-        slice(source, offset, usize::try_from(upper - pointer)?)?,
+        slice(source, offset, (upper - pointer) as usize)?,
     ))
 }
 
 impl Table {
-    /// Native 0x6eb8 selects the first row whose revision is <= actual revision
+    /// Native 0x6eb8 selects the first row whose revision is <= revision
     /// in source order. 0x1136b0 traverses narrow/wide tables to a low 27-bit all-one
     /// sentinel, strips flag bits and optionally filters signed offsets.
-    /// Hashes establish source integrity, not hardware/provider selection authority.
+    /// Hashes establish source integrity, not hardware/provider selection permission.
     /// No source identity, hardware ID or table contents select Rust behavior.
     pub fn select(source: &[u8], input: Input, width: Width) -> Result<Option<Self>> {
         input.source_provenance.validate()?;
         input.hardware_provenance.validate()?;
         let source_hash = sha256(source);
-        ensure!(
+        require!(
             source_hash == input.source_provenance.input_sha256,
             "native tuning source identity mismatch"
         );
-        ensure!(
+        require!(
             [1, 3].contains(&input.kind),
             "native tuning source kind is not qualified"
         );
-        ensure!(
+        require!(
             input.groups <= 4096,
             "native tuning group count exceeds bound"
         );
         let group_bytes = input
             .groups
             .checked_mul(GROUP_BYTES)
-            .context("native tuning group geometry overflows")?;
+            .ok_or(refuse!("native tuning group geometry overflows"))?;
         let groups = slice(source, input.groups_file_offset, group_bytes)?;
-        ensure!(
+        require!(
             sha256(groups) == input.source_provenance.span_sha256,
             "native tuning group span identity mismatch"
         );
@@ -138,13 +141,14 @@ impl Table {
                 bytes,
                 provenance,
             } => {
-                ensure!(bytes != 0, "empty native tuning filter is not qualified");
+                require!(bytes != 0, "empty native tuning filter is not qualified");
                 let end = i64::from(first) + i64::from(bytes);
                 (
                     Some((
                         first,
-                        i32::try_from(end)
-                            .context("wrapped native tuning filter is not qualified")?,
+                        i32::try_from(end).map_err(|_| {
+                            refuse!("wrapped native tuning filter is not qualified")
+                        })?,
                     )),
                     provenance,
                 )
@@ -160,13 +164,13 @@ impl Table {
         let Some((group_index, group)) = matching.next() else {
             return Ok(None);
         };
-        ensure!(
+        require!(
             matching.next().is_none(),
             "ambiguous native tuning hardware group"
         );
         let (revisions_at, revisions) = span(source, group, 0, input.image_base)?;
-        let count = usize::try_from(u64_at(group, 0x20)?)?;
-        ensure!(
+        let count = u64_at(group, 0x20)? as usize;
+        require!(
             count <= 4096
                 && count
                     .checked_mul(REVISION_BYTES)
@@ -204,7 +208,7 @@ impl Table {
             }
             let signed = ((encoded << 5) as i32) >> 5;
             if filter_window.is_none_or(|(first, end)| first <= signed && signed < end) {
-                ensure!(
+                require!(
                     records.len() / width.bytes() < 255,
                     "native tuning table exceeds byte-count capacity"
                 );
@@ -212,7 +216,7 @@ impl Table {
                 records.extend_from_slice(&entry[4..]);
             }
         }
-        ensure!(
+        require!(
             terminated,
             "native tuning source table lacks bounded sentinel"
         );
@@ -233,7 +237,7 @@ impl Table {
                 selected_revision: u32_at(row, 0)?,
                 group_file_offset: input.groups_file_offset + (group_index * GROUP_BYTES) as u64,
                 revision_file_offset: revisions_at
-                    .context("native tuning revision pointer is null")?
+                    .ok_or(refuse!("native tuning revision pointer is null"))?
                     + (revision_index * REVISION_BYTES) as u64,
                 table_file_offset: table_at,
                 table_source_sha256: sha256(source_bytes),
@@ -252,6 +256,7 @@ pub(in crate::coprocessor) mod tests {
         tests::{w32, w64},
     };
     use alloc::vec;
+    use anyhow::Result;
 
     pub(in crate::coprocessor) fn fixture(width: Width) -> Vec<u8> {
         let mut b = vec![0; 0x500];
@@ -295,10 +300,11 @@ pub(in crate::coprocessor) mod tests {
     }
     pub(in crate::coprocessor) fn table(width: Width) -> Result<Table> {
         let b = fixture(width);
-        Table::select(&b, input(&b), width)?.context("missing synthetic selected table")
+        Table::select(&b, input(&b), width)?
+            .ok_or(refuse!("missing synthetic selected table").into())
     }
     #[test]
-    fn selection_retains_native_order_width_and_masked_offsets() -> Result<()> {
+    fn selection_keeps_native_order_width_and_masked_offsets() -> Result<()> {
         for width in [Width::Bits32, Width::Bits64] {
             let b = fixture(width);
             let t = Table::select(&b, input(&b), width)?.unwrap();

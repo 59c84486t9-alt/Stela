@@ -9,13 +9,13 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-/// The C target of the native GPU code, as `stela-drivers/build/native.rs`
+/// The C target of the native GPU code, as `stela-driver-gpu/build/native.rs`
 /// compiles it: LP64 COFF with the UEFI Win64 calling convention.
 pub const NATIVE_TARGET: &str = "x86_64-pc-cygwin";
 
 /// Stela's GPU sources.
 pub fn gpu() -> PathBuf {
-    crate::tools::root().join("crates/stela-drivers/src/gpu")
+    crate::tools::root().join("crates/stela-driver-gpu/src")
 }
 
 /// An upstream source: the submodule `third_party/<name>`.

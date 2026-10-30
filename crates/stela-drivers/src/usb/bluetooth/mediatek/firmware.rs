@@ -5,7 +5,7 @@
 use super::FormatError;
 use crate::bytes::le32;
 use alloc::vec::Vec;
-use sha2::{Digest, Sha256};
+use stela_crypto::{Sha256, digest::Digest};
 const HEADER: usize = 32;
 const GLOBAL: usize = 64;
 const MAP: usize = 64;
@@ -16,7 +16,7 @@ const MAX_SECTIONS: usize = 256;
 
 /// Raw complete map includes all security/key/CRC, mode, alignment and reserved
 /// fields. These bytes are transmitted unchanged, never treated as host-side
-/// vendor authentication. Hashes retain both the complete region (including
+/// vendor authentication. Hashes keep both the complete region (including
 /// nonuploaded metadata) and its independently bounded download extent.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SectionMetadata {
@@ -49,7 +49,7 @@ impl SectionMetadata {
     pub fn specification(&self) -> &[u8] {
         &self.map[MAP - SPECIFICATION..]
     }
-    /// Actual donor download-selection request; byte0 selects legacy download.
+    /// Donor download-selection request; byte0 selects legacy download.
     pub fn request(&self) -> [u8; SPECIFICATION + 1] {
         let mut bytes = [0; SPECIFICATION + 1];
         bytes[1..].copy_from_slice(self.specification());
@@ -90,10 +90,10 @@ impl<'a> Patch<'a> {
         if !(HEADER + GLOBAL + MAP..=MAX_IMAGE).contains(&bytes.len()) {
             return Err(FormatError::Size);
         }
-        // Exact source-backed ALPS header family of the current 7961/7922/7925
+        // Source-backed ALPS header family of the current 7961/7922/7925
         // inputs. Other encodings remain unsupported, not inferred compatible.
         // The C struct is 28 bytes; the format reserves a 32-byte header area.
-        // Retain the remaining four bytes raw rather than misplacing magic.
+        // Keep the remaining four bytes raw rather than misplacing magic.
         if &bytes[16..20] != b"ALPS" || bytes[24..28] != [0xff; 4] {
             return Err(FormatError::Header);
         }

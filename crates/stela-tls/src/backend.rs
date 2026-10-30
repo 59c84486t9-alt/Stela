@@ -89,7 +89,7 @@ impl<R: Entropy> Key<R> {
         let mut key = core::ptr::null_mut();
         let mut public = [0u8; 65];
         let mut length = 0;
-        // SAFETY: actual output slots/array and concrete RNG remain live across
+        // SAFETY: output slots/array and concrete RNG remain live across
         // the synchronous checked call; C publishes a key only on success.
         let status = unsafe {
             stela_mbed_kx_new(
@@ -162,7 +162,7 @@ pub fn verify(
         <[der::asn1::UintRef<'_>; 2]>::from_der(signature).map_err(|_| Error(-1))?;
     }
     // SAFETY: the synchronous backend borrows exactly these readable slices;
-    // it retains no pointers and checks public-key shape/algorithm/signature.
+    // it keeps no pointers and checks public-key shape/algorithm/signature.
     let status = unsafe {
         stela_mbed_verify(
             kind,
@@ -191,8 +191,8 @@ impl Digest {
     pub fn new(bits: u32, key: Option<&[u8]>) -> Result<Self, Error> {
         let mut state = core::ptr::null_mut();
         let (pointer, bytes) = key.map_or((core::ptr::null(), 0), |key| (key.as_ptr(), key.len()));
-        // SAFETY: synchronous call borrows the actual key/output slot, publishes
-        // only its complete unique context, and retains no key pointer.
+        // SAFETY: synchronous call borrows the key/output slot, publishes
+        // only its complete unique context, and keeps no key pointer.
         let status =
             unsafe { stela_mbed_md_new(bits, key.is_some() as c_int, pointer, bytes, &mut state) };
         if status != 0 {
@@ -245,19 +245,19 @@ impl Drop for Digest {
     }
 }
 // SAFETY: each context has its own allocation, no thread-affine state or
-// retained callback/input pointer. Global allocator installation is immutable
+// callback/input pointer. Global allocator installation is immutable
 // and must be thread safe; mutation requires an exclusive Rust borrow.
 unsafe impl Send for Digest {}
 // SAFETY: shared methods only clone a plain context by const read; each clone
 // is independent. Updating/finishing/freeing always require unique ownership.
 unsafe impl Sync for Digest {}
 
-// SAFETY: key owns independent scalar/group/public allocations and retains its
+// SAFETY: key owns independent scalar/group/public allocations and keeps its
 // concrete RNG. No caller/input pointer escapes a synchronous backend call.
 // Installed allocator is immutable and supports independent concurrent objects.
 unsafe impl<R: Entropy + Send> Send for Key<R> {}
 // SAFETY: shared access exposes only immutable public bytes; all scalar/group
-// mutation and destruction need unique ownership. The retained RNG is Sync.
+// mutation and destruction need unique ownership. The kept RNG is Sync.
 unsafe impl<R: Entropy + Sync> Sync for Key<R> {}
 
 #[cfg(test)]

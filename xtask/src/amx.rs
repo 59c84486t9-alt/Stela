@@ -149,7 +149,7 @@ pub struct AmxReference {
     #[arg(long, default_value_t = 1)]
     seed: u64,
     /// Exercise every ALU mode/type pair (at least 16 chains and 256 steps),
-    /// plus generation boundary bits, while retaining seeded surrounding bits.
+    /// plus generation boundary bits, while keeping seeded surrounding bits.
     #[arg(long)]
     generation_boundaries: bool,
     /// Only this corsix mnemonic, such as `fma32`.

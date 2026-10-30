@@ -1,0 +1,535 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 1997, 1998, 1999, 2000, 2009 Ingo Molnar, Hajnalka Szabo
+// Multiple IO-APIC support (C) 1999 Ken-ichi Yaku and Hidemi Kishimoto;
+// further tested and cleaned up by Zach Brown and Ingo Molnar.
+//! Legacy IOAPIC ownership and redirection ordering. Protocol references:
+//! Linux a804c5742bff224d4cb4d25dd383554d598be32b, arch/x86/kernel/apic/io_apic.c
+//! and arch/x86/include/asm/io_apic.h (Ingo Molnar and contributors), recorded
+//! in stela-drivers/src/platform/THIRD_PARTY.md. CPU/IDT/AP bootstrap is never
+//! owned here.
+use alloc::{boxed::Box, sync::Arc};
+use core::{
+    cell::UnsafeCell,
+    mem::ManuallyDrop,
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+};
+use stela_drivers::bus::irq::{
+    FIRST_VECTOR, IrqError, LineRoute, Platform, Polarity, Route, RouteRequest, Source, Target,
+    Trigger, VECTOR_COUNT,
+};
+
+const MASK: u32 = 1 << 16;
+const REMOTE_IRR: u32 = 1 << 14;
+const DELIVERY: u32 = 1 << 12;
+const CONFIG: u32 = 0xff | 7 << 8 | 1 << 11 | 1 << 13 | 1 << 15 | MASK;
+const MAX_PINS: usize = 120;
+
+/// # Safety
+/// Real IOREGSEL/IOWIN accesses to the one kept, root-stable UC mapping.
+/// No other firmware/CPU/controller owner may touch the selector/window.
+/// Every index passed here is <= 0xff. Operations must order MMIO.
+pub unsafe trait Registers: Send + Sync {
+    fn read(&self, index: u8) -> u32;
+    fn write(&self, index: u8, value: u32);
+}
+
+pub struct Mmio(usize);
+impl Mmio {
+    /// # Safety
+    /// `base` is an exclusive UC IOAPIC mapping of at least 32 bytes,
+    /// aligned to 4 KiB and kept across all roots through final release or
+    /// permanent quarantine. No WB/WC alias exists. No IRQ-context release.
+    pub unsafe fn new(base: usize) -> Result<Self, IrqError> {
+        if base == 0 || base & 4095 != 0 || base.checked_add(32).is_none() {
+            return Err(IrqError::Route);
+        }
+        Ok(Self(base))
+    }
+}
+// SAFETY: `new` admits only the aligned uncached IOAPIC window, kept mapped for the unit's
+// life, and `Unit` serializes each selector/window pair with interrupts saved and disabled.
+unsafe impl Registers for Mmio {
+    fn read(&self, index: u8) -> u32 {
+        // SAFETY: the unit lock and IRQ save serialize this selector/window pair on the owning CPU.
+        unsafe {
+            (self.0 as *mut u32).write_volatile(u32::from(index));
+            ((self.0 + 16) as *const u32).read_volatile()
+        }
+    }
+    fn write(&self, index: u8, value: u32) {
+        // SAFETY: the unit lock and IRQ save serialize this selector/window pair on the owning CPU.
+        unsafe {
+            (self.0 as *mut u32).write_volatile(u32::from(index));
+            ((self.0 + 16) as *mut u32).write_volatile(value);
+        }
+    }
+}
+
+/// Real contributors to one physical line, kept as an immutable group.
+/// # Safety
+/// Every physical sharer, SCI fixed/GPE source or PCI INTx contributor is
+/// owned/kept here. Mask and stop acknowledge real device effects, drain
+/// workers/timers/posted writes and exclude new causes until enable. No final
+/// release in IRQ context. No missing sharer may keep this line asserted.
+/// SharedHandlers membership and this source group must describe the same
+/// pre-bound lifetime; dynamic join/remove is unavailable.
+pub unsafe trait Devices: Send {
+    fn mask(&mut self) -> Result<(), IrqError>;
+    fn quiesce(&mut self) -> Result<(), IrqError>;
+    /// # Safety
+    /// The owned route and every callback are fully published.
+    unsafe fn enable(&mut self) -> Result<(), IrqError>;
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct State {
+    pub masked: bool,
+    pub remote_irr: bool,
+    pub delivery_pending: bool,
+}
+
+pub struct Unit<R: Registers, P: Platform> {
+    registers: R,
+    platform: P,
+    id: u8,
+    gsi_base: u32,
+    pins: u16,
+    held: AtomicBool,
+    claims: UnsafeCell<[bool; MAX_PINS]>,
+    epochs: UnsafeCell<[u64; MAX_PINS]>,
+    next_epoch: UnsafeCell<u64>,
+    quarantined: AtomicU64,
+}
+// SAFETY: all selector/window and claim access is serialized by IRQ-save lock.
+// The platform confines operations to the owning CPU. Arc lifetime is held
+// through every route or quarantined route; no hard-IRQ allocation/release.
+unsafe impl<R: Registers, P: Platform> Sync for Unit<R, P> {}
+
+impl<R: Registers, P: Platform> Unit<R, P> {
+    /// # Safety
+    /// Exclusive selector/window owner, matched MADT physical unit and
+    /// ID. CPU adapter is initialized on the same BSP; local APIC EOI broadcast
+    /// suppression is disabled and remains disabled through final retirement.
+    /// No other CPU/SMM/firmware can program these redirection entries. Pin
+    /// ownership/quiescence must separately be proved for each claim.
+    pub unsafe fn attach(
+        registers: R,
+        platform: P,
+        id: u8,
+        gsi_base: u32,
+    ) -> Result<Arc<Self>, IrqError> {
+        platform.check_cpu()?;
+        let saved = platform.save_and_disable();
+        let version = registers.read(1);
+        // SAFETY: `saved` came from `save_and_disable` on this CPU above.
+        unsafe { platform.restore(saved) };
+        if version == u32::MAX {
+            return Err(IrqError::FailedRead);
+        }
+        // Every version takes the local APIC's broadcast EOI, the only EOI
+        // used here: Intel's 0x11 and 0x20, AMD's 0x21. The MADT's ID is the
+        // unit's, as Linux keeps it on x86-64; firmware need not program the
+        // ID register to match.
+        let pins = ((version >> 16) & 255) as u16 + 1;
+        if pins as usize > MAX_PINS || gsi_base.checked_add(u32::from(pins)).is_none() {
+            return Err(IrqError::Unsupported);
+        }
+        Ok(Arc::new(Self {
+            registers,
+            platform,
+            id,
+            gsi_base,
+            pins,
+            held: AtomicBool::new(false),
+            claims: UnsafeCell::new([false; MAX_PINS]),
+            epochs: UnsafeCell::new([0; MAX_PINS]),
+            next_epoch: UnsafeCell::new(1),
+            quarantined: AtomicU64::new(0),
+        }))
+    }
+    pub fn id(&self) -> u8 {
+        self.id
+    }
+    pub fn gsi_base(&self) -> u32 {
+        self.gsi_base
+    }
+    pub fn pins(&self) -> u16 {
+        self.pins
+    }
+    pub fn quarantine_count(&self) -> u64 {
+        self.quarantined.load(Ordering::Relaxed)
+    }
+    pub fn state(&self, gsi: u32) -> Result<State, IrqError> {
+        self.platform.check_cpu()?;
+        let pin = gsi
+            .checked_sub(self.gsi_base)
+            .filter(|p| *p < u32::from(self.pins))
+            .ok_or(IrqError::Route)? as u8;
+        let _guard = self.lock();
+        let low = self.low(pin)?;
+        Ok(State {
+            masked: low & MASK != 0,
+            remote_irr: low & REMOTE_IRR != 0,
+            delivery_pending: low & DELIVERY != 0,
+        })
+    }
+    /// Mask an unclaimed firmware route before another subsystem takes it.
+    ///
+    /// # Safety
+    /// The caller has the exclusive handoff of this physical line and its
+    /// former firmware consumers; no registered contributor owns it.
+    pub unsafe fn mask_unclaimed(&self, gsi: u32) -> Result<(), IrqError> {
+        self.platform.check_cpu()?;
+        let pin = gsi
+            .checked_sub(self.gsi_base)
+            .filter(|pin| *pin < u32::from(self.pins))
+            .ok_or(IrqError::Route)? as u8;
+        let _guard = self.lock();
+        // SAFETY: the selector/claims lock protects this pin's metadata.
+        if unsafe { (*self.claims.get())[usize::from(pin)] } {
+            return Err(IrqError::Route);
+        }
+        let low = self.low(pin)?;
+        self.registers.write(0x10 + pin * 2, low | MASK);
+        if self.low(pin)? & MASK == 0 {
+            return Err(IrqError::Mask);
+        }
+        Ok(())
+    }
+    fn lock(&self) -> Guard<'_, R, P> {
+        let saved = self.platform.save_and_disable();
+        while self
+            .held
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            core::hint::spin_loop();
+        }
+        Guard { unit: self, saved }
+    }
+    fn low(&self, pin: u8) -> Result<u32, IrqError> {
+        let raw = self.registers.read(0x10 + pin * 2);
+        if raw == u32::MAX {
+            Err(IrqError::FailedRead)
+        } else {
+            Ok(raw)
+        }
+    }
+    /// # Safety
+    /// Validated MADT electrical route, no NMI/PIRQ alias and ownership
+    /// of every physical sharer. All contributors are stopped/drained with no
+    /// old firmware/CPU callback, pending interrupt or worker. The initially
+    /// masked entry is not evidence of this grant. Complete group retirement
+    /// is required before reconfiguration or membership changes.
+    pub unsafe fn claim(
+        self: &Arc<Self>,
+        line: LineRoute,
+        devices: Box<dyn Devices>,
+    ) -> Result<Pin<R, P>, IrqError> {
+        self.platform.check_cpu()?;
+        // This slice has an end-to-end level completion proof through
+        // Remote IRR/EOI. Edge IOAPIC drain is not inferred from MSI coverage.
+        if line.trigger != Trigger::Level {
+            return Err(IrqError::Unsupported);
+        }
+        let pin = line
+            .gsi
+            .checked_sub(self.gsi_base)
+            .filter(|p| *p < u32::from(self.pins))
+            .ok_or(IrqError::Route)? as u8;
+        let _guard = self.lock();
+        let low = self.low(pin)?;
+        if low & MASK == 0 || low & (REMOTE_IRR | DELIVERY) != 0 {
+            return Err(IrqError::Drain);
+        }
+        // SAFETY: the unit lock held above serializes the claim table.
+        let claims = unsafe { &mut *self.claims.get() };
+        if claims[usize::from(pin)] {
+            return Err(IrqError::Exhausted);
+        }
+        // Selector lock also owns the fixed pin metadata. Never wrap and make
+        // an old handler's parent-mask endpoint valid for a later claim.
+        // SAFETY: the unit lock held above serializes the epoch counter.
+        let next_epoch = unsafe { &mut *self.next_epoch.get() };
+        let epoch = *next_epoch;
+        *next_epoch = next_epoch.checked_add(1).ok_or(IrqError::Exhausted)?;
+        // SAFETY: the unit lock held above serializes the epoch table.
+        unsafe { (*self.epochs.get())[usize::from(pin)] = epoch };
+        claims[usize::from(pin)] = true;
+        Ok(Pin {
+            unit: ManuallyDrop::new(self.clone()),
+            devices: ManuallyDrop::new(devices),
+            line,
+            pin,
+            epoch,
+            target: None,
+            retired: true,
+        })
+    }
+}
+struct Guard<'a, R: Registers, P: Platform> {
+    unit: &'a Unit<R, P>,
+    saved: u64,
+}
+impl<R: Registers, P: Platform> Drop for Guard<'_, R, P> {
+    fn drop(&mut self) {
+        self.unit.held.store(false, Ordering::Release);
+        // SAFETY: `saved` came from `save_and_disable` when this guard locked the unit.
+        unsafe { self.unit.platform.restore(self.saved) };
+    }
+}
+
+/// Process/deferred source; real callback/source group is owned by Registry.
+/// An abandoned programmed pin keeps/quarantines its unit, contributors and
+/// claim rather than permitting uncertain delivery into a reused vector.
+pub struct Pin<R: Registers, P: Platform> {
+    unit: ManuallyDrop<Arc<Unit<R, P>>>,
+    devices: ManuallyDrop<Box<dyn Devices>>,
+    line: LineRoute,
+    pin: u8,
+    epoch: u64,
+    target: Option<Target>,
+    retired: bool,
+}
+impl<R: Registers, P: Platform> Pin<R, P> {
+    /// Pre-bind a real parent mask endpoint in process context before callback
+    /// publication. It never enables/programs a route or acquires a new pin.
+    pub fn parent_mask(&self) -> Result<ParentMask<R, P>, IrqError> {
+        self.unit.platform.check_cpu()?;
+        let _guard = self.unit.lock();
+        // SAFETY: the unit lock held above serializes the epoch table.
+        if unsafe { (*self.unit.epochs.get())[usize::from(self.pin)] } != self.epoch {
+            return Err(IrqError::Unregistered);
+        }
+        Ok(ParentMask {
+            unit: Arc::clone(&self.unit),
+            pin: self.pin,
+            epoch: self.epoch,
+        })
+    }
+}
+
+/// Constructorless pin/epoch endpoint, kept by the fixed callback
+/// group. Final Drop remains process/deferred, even though mask is IRQ-safe.
+pub struct ParentMask<R: Registers, P: Platform> {
+    unit: Arc<Unit<R, P>>,
+    pin: u8,
+    epoch: u64,
+}
+impl<R: Registers, P: Platform> ParentMask<R, P> {
+    /// Rearm the same claimed route after its deferred source has been drained.
+    /// This does not enable contributors or create another route.
+    ///
+    /// # Safety
+    /// Process context on the owning CPU. The native callback has returned and
+    /// its pending flag is clear. The source handler acknowledged or locally
+    /// masked every contributor it observed; any outstanding deferred worker
+    /// keeps its disabled contributor until that device's work completes.
+    /// No callback/source-owner retirement overlaps this operation. A new
+    /// physical event after unmask is handled by the same callback.
+    pub unsafe fn rearm(&self) -> Result<(), IrqError> {
+        self.unit.platform.check_cpu()?;
+        let _guard = self.unit.lock();
+        // SAFETY: the lock serializes claim/epoch checks with route retirement.
+        if unsafe { (*self.unit.epochs.get())[usize::from(self.pin)] } != self.epoch {
+            return Err(IrqError::Unregistered);
+        }
+        let low = self.unit.low(self.pin)?;
+        let vector = low as u8;
+        if low & MASK == 0
+            || vector < FIRST_VECTOR
+            || usize::from(vector - FIRST_VECTOR) >= VECTOR_COUNT
+        {
+            return Err(IrqError::Route);
+        }
+        if low & (REMOTE_IRR | DELIVERY) != 0 || self.unit.platform.pending(vector)? {
+            return Err(IrqError::Drain);
+        }
+        self.unit.registers.write(0x10 + self.pin * 2, low & !MASK);
+        if self.unit.low(self.pin)? & MASK != 0 {
+            return Err(IrqError::Mask);
+        }
+        Ok(())
+    }
+}
+// SAFETY: Pin alone creates this endpoint from its Unit/claim. The
+// existing IRQ-save selector lock checks the nonwrapping epoch and performs
+// MASK/readback without allocation, callbacks or final owner release.
+unsafe impl<R: Registers, P: Platform> stela_drivers::bus::irq::ParentMask for ParentMask<R, P> {
+    fn mask(&self) -> Result<(), IrqError> {
+        self.unit.platform.check_cpu()?;
+        let _guard = self.unit.lock();
+        // SAFETY: the unit lock held above serializes the epoch table.
+        if unsafe { (*self.unit.epochs.get())[usize::from(self.pin)] } != self.epoch {
+            return Err(IrqError::Unregistered);
+        }
+        let low = self.unit.low(self.pin)?;
+        self.unit.registers.write(0x10 + self.pin * 2, low | MASK);
+        if self.unit.low(self.pin)? & MASK == 0 {
+            Err(IrqError::Mask)
+        } else {
+            Ok(())
+        }
+    }
+}
+// SAFETY: devices and unit are held, physical ownership comes from claim's
+// explicit grant. The canonical registry alone publishes/releases callbacks.
+unsafe impl<R: Registers, P: Platform> Source for Pin<R, P> {
+    fn mask(&mut self) -> Result<(), IrqError> {
+        self.unit.platform.check_cpu()?;
+        let result = {
+            let _guard = self.unit.lock();
+            let low = self.unit.low(self.pin)?;
+            self.unit.registers.write(0x10 + self.pin * 2, low | MASK);
+            if self.unit.low(self.pin)? & MASK == 0 {
+                Err(IrqError::Mask)
+            } else {
+                Ok(())
+            }
+        };
+        // Controller masks first, so a contributor cannot arrive during stop.
+        result?;
+        self.devices.mask()
+    }
+    fn quiesce(&mut self) -> Result<(), IrqError> {
+        self.devices.quiesce()
+    }
+    fn route(&self) -> RouteRequest {
+        RouteRequest::Line(self.line)
+    }
+    unsafe fn program(&mut self, route: Route) -> Result<(), IrqError> {
+        self.unit.platform.check_cpu()?;
+        let Route::Line { target, line } = route else {
+            return Err(IrqError::Route);
+        };
+        if line != self.line
+            || target.destination == 255
+            || target.vector < FIRST_VECTOR
+            || usize::from(target.vector - FIRST_VECTOR) >= VECTOR_COUNT
+        {
+            return Err(IrqError::Route);
+        }
+        let _guard = self.unit.lock();
+        // SAFETY: the unit lock held above serializes the epoch table.
+        if unsafe { (*self.unit.epochs.get())[usize::from(self.pin)] } != self.epoch {
+            return Err(IrqError::Unregistered);
+        }
+        let low = self.unit.low(self.pin)?;
+        if low & MASK == 0 || low & (REMOTE_IRR | DELIVERY) != 0 {
+            return Err(IrqError::Drain);
+        }
+        // From this point failure keeps the complete route claim. LOW MASK
+        // was acknowledged before any HIGH/destination change (Linux mask_entry).
+        self.retired = false;
+        self.target = Some(target);
+        let expected = MASK
+            | u32::from(target.vector)
+            | if line.polarity == Polarity::Low {
+                1 << 13
+            } else {
+                0
+            }
+            | if line.trigger == Trigger::Level {
+                1 << 15
+            } else {
+                0
+            };
+        self.unit
+            .registers
+            .write(0x11 + self.pin * 2, u32::from(target.destination) << 24);
+        self.unit.registers.write(0x10 + self.pin * 2, expected);
+        let high = self.unit.registers.read(0x11 + self.pin * 2);
+        let actual = self.unit.low(self.pin)?;
+        if high == u32::MAX {
+            return Err(IrqError::FailedRead);
+        }
+        if actual & CONFIG != expected
+            || high >> 24 != u32::from(target.destination)
+            || actual & (REMOTE_IRR | DELIVERY) != 0
+        {
+            return Err(IrqError::Route);
+        }
+        Ok(())
+    }
+    unsafe fn unmask(&mut self) -> Result<(), IrqError> {
+        self.unit.platform.check_cpu()?;
+        if self.target.is_none() || self.retired {
+            return Err(IrqError::Route);
+        }
+        // Contributors may assert while IOAPIC is still masked; enabling the
+        // final route observes an already asserted level and delivers it.
+        // SAFETY: `program` published the route and every callback before unmask.
+        unsafe { self.devices.enable() }?;
+        let _guard = self.unit.lock();
+        let low = self.unit.low(self.pin)?;
+        if low & MASK == 0 || low & (REMOTE_IRR | DELIVERY) != 0 {
+            return Err(IrqError::Drain);
+        }
+        self.unit.registers.write(0x10 + self.pin * 2, low & !MASK);
+        if self.unit.low(self.pin)? & MASK != 0 {
+            return Err(IrqError::Mask);
+        }
+        Ok(())
+    }
+    unsafe fn synchronize(&mut self) -> Result<(), IrqError> {
+        self.unit.platform.check_cpu()?;
+        self.devices.quiesce()?;
+        let start = self.unit.platform.ticks();
+        loop {
+            let low = {
+                let _guard = self.unit.lock();
+                self.unit.low(self.pin)?
+            };
+            if low & MASK == 0 {
+                return Err(IrqError::Mask);
+            }
+            if low & (REMOTE_IRR | DELIVERY) == 0 {
+                break;
+            }
+            if self.unit.platform.ticks().wrapping_sub(start) >= self.unit.platform.timeout_ticks()
+            {
+                return Err(IrqError::Drain);
+            }
+            core::hint::spin_loop();
+        }
+        if let Some(target) = self.target
+            && self.unit.platform.pending(target.vector)?
+        {
+            return Err(IrqError::Drain);
+        }
+        self.retired = true;
+        // Controller and callback retirement completed. Keep the physical pin
+        // claim until Source Drop, while refusing every old handler endpoint.
+        let _guard = self.unit.lock();
+        // SAFETY: the unit lock held above serializes the epoch table.
+        unsafe { (*self.unit.epochs.get())[usize::from(self.pin)] = 0 };
+        Ok(())
+    }
+}
+impl<R: Registers, P: Platform> Drop for Pin<R, P> {
+    fn drop(&mut self) {
+        if !self.retired || self.unit.platform.check_cpu().is_err() {
+            self.unit.quarantined.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        {
+            let _guard = self.unit.lock();
+            // SAFETY: the unit lock and IRQ save serialize this selector/window pair on the owning
+            // CPU.
+            unsafe {
+                (*self.unit.claims.get())[usize::from(self.pin)] = false;
+                (*self.unit.epochs.get())[usize::from(self.pin)] = 0;
+            }
+        }
+        // Registry retirement proved callback lifetime + CPU/IOAPIC
+        // drain; only this process-context final release frees contributors.
+        // SAFETY: the unit lock and IRQ save serialize this selector/window pair on the owning CPU.
+        unsafe {
+            ManuallyDrop::drop(&mut self.devices);
+            ManuallyDrop::drop(&mut self.unit);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests;

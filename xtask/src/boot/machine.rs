@@ -172,6 +172,20 @@ pub(super) fn attach_display(arguments: &Run, bundle: bool, command: &mut Proces
     }
 }
 
+/// `--host-audio`'s HD Audio controller and codec.
+pub(super) fn attach_audio(arguments: &Run, command: &mut Process) {
+    if arguments.host_audio {
+        command.args([
+            "-audiodev",
+            "none,id=host-audio",
+            "-device",
+            "intel-hda,id=host-hda",
+            "-device",
+            "hda-duplex,bus=host-hda.0,audiodev=host-audio",
+        ]);
+    }
+}
+
 /// The host's xHCI controller, when a USB device needs it.
 pub(super) fn attach_usb(arguments: &Run, command: &mut Process) {
     let host_usb = arguments.usb_image.is_some()

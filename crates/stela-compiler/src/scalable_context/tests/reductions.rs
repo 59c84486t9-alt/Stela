@@ -3,9 +3,6 @@ use super::*;
 use crate::aarch64::sve::reductions::{self, Output};
 use alloc::vec::Vec;
 
-const RET_X30: u32 = 0xd65f_03c0;
-const NOP: u32 = 0xd503_201f;
-const MOVPRFX_Z0_Z1: u32 = 0x0420_bc20;
 const MOVPRFX_PREDICATED_Z0_Z1: u32 = 0x0410_2020;
 const SIGNED_ADD: u32 = 0x0400_2000;
 const RESERVED_SIGNED_DOUBLEWORD: u32 = 0x04c0_2020;
@@ -74,26 +71,8 @@ fn scalar_reductions_all_35_widths_have_exact_dispatch_body_maps_and_targets() {
                         VectorLength::from_bytes(bytes).unwrap(),
                         target,
                     );
-                    assert_eq!(
-                        &native.x86_64_code[..CONTEXT_WRAPPER_BYTES],
-                        context_wrapper()
-                    );
-                    assert_eq!(
-                        native.source_map,
-                        [
-                            (GuestAddress(0x1000), CONTEXT_WRAPPER_BYTES),
-                            (GuestAddress(0x1004), CONTEXT_WRAPPER_BYTES + 1),
-                            (
-                                GuestAddress(0x1008),
-                                CONTEXT_WRAPPER_BYTES + 1 + expected.len()
-                            ),
-                        ]
-                    );
-                    assert_eq!(
-                        &native.x86_64_code[CONTEXT_WRAPPER_BYTES + 1..native.source_map[2].1],
-                        expected
-                    );
-                    assert_eq!(&native.x86_64_code[native.source_map[2].1..], [RET]);
+
+                    assert_bodies(&native, GuestAddress(0x1000), &[NOP_BODY, &expected]);
                 }
             }
         }

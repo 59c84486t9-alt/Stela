@@ -210,7 +210,7 @@ mod tests {
     }
 
     #[test]
-    fn reduction_prefix_metadata_has_no_documented_authority_for_all_seventeen_forms() {
+    fn reduction_prefix_metadata_has_no_documented_permission_for_all_seventeen_forms() {
         for (class, kind, _) in ENCODINGS {
             for size in 0..=SIZE_MASK {
                 if kind == Kind::SignedAdd && size == SIZE_MASK {

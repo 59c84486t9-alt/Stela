@@ -12,7 +12,7 @@ use crate::bytes::{le16, le32};
 use crate::{block::BlockError, firmware as resources};
 use alloc::{boxed::Box, format, string::String, vec::Vec};
 use core::fmt;
-use sha2::{Digest, Sha256};
+use stela_crypto::{Sha256, digest::Digest};
 
 const HEADER: usize = 64;
 const MAX_BYTES: usize = 128 * 1024;

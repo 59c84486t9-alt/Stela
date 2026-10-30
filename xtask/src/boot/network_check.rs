@@ -36,7 +36,7 @@ impl Fixture {
             }
         });
         Ok(Self {
-            // A name deliberately exercises DNS, as well as DHCP and TCP.
+            // A name exercises DNS, as well as DHCP and TCP.
             url: format!("http://localhost:{port}{PATH}"),
             sha256,
             port,
@@ -143,7 +143,7 @@ pub fn verify(
             });
         }
         // These independent peer observations prevent a serial success marker
-        // from crediting DHCP/DNS paths the check did not actually exercise.
+        // from crediting DHCP/DNS paths the check did not exercise.
         if !peer
             .lines()
             .any(|line| line.starts_with("DHCP OFFER 10.0.2.15 to "))

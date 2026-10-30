@@ -13,55 +13,42 @@ native-reference-peer = ["stela-tls/native-reference-peer"]
 default = ["std"]
 # Host-side native hardware-reference runners; never enables guest OS services.
 test-support = ["stela-engine/test-support"]
-native-profile = ["stela-contracts/native-profile", "stela-engine/native-profile"]
-std = ["stela-soc-data/std", "stela-engine/std", "anyhow/std", "stela-contracts/std", "stela-formats/std", "serde/std", "serde_json/std", "stela-compiler/std", "dep:tempfile", "dep:libc"]
+native-profile = ["stela-soc/native-profile"]
+std = ["stela-soc/std", "stela-soc-data/std", "stela-engine/std", "stela-contracts/std", "stela-formats/std", "serde/std", "serde_json/std", "stela-compiler/std", "dep:libc"]
 
 [dependencies]
+stela-soc = { path = "../stela-soc", default-features = false }
 stela-soc-data = { path = "../stela-soc-data", default-features = false }
 stela-engine = { path = "../stela-engine", default-features = false }
 stela-contracts = { path = "../stela-contracts", default-features = false }
 stela-crypto = { path = "../stela-crypto" }
 stela-tls = { path = "../stela-tls" }
 stela-formats = { path = "../stela-formats", default-features = false }
-anyhow = { version = "1", default-features = false }
 serde.workspace = true
 serde_json = { version = "1", default-features = false, features = ["alloc"] }
-tempfile = { workspace = true, optional = true }
 libc = { workspace = true, optional = true }
-sha1 = { version = "0.10", default-features = false }
 sha2 = { version = "0.10", default-features = false }
-# SEP root derivations and secret lifetime; both work without std.
-hmac = { version = "0.12", default-features = false }
 zeroize = { version = "1.9", default-features = false, features = ["alloc"] }
-# Stela-owned SEP system identity keys; constant-time no_std curve arithmetic.
-p256 = { version = "0.13.2", default-features = false, features = ["arithmetic", "ecdsa"] }
-# Public RSA verification for Image4 evidence; no private-key operations.
-crypto-bigint = { version = "0.5", default-features = false }
-# The AES engine model's cipher: constant-time, no_std, AES-NI when present.
-aes = { version = "0.8", default-features = false }
 hex = { version = "0.4", default-features = false, features = ["alloc"] }
-# Inflates deflate IPSW members in place, in no_std: no unsafe code, and the
-# same inflater flate2 and the zip crate already use on the host.
-miniz_oxide = { version = "0.9", default-features = false, features = ["with-alloc"] }
 stela-compiler = { path = "../stela-compiler", default-features = false }
 stela-drivers = { path = "../stela-drivers" }
 # The client network's protocols (`platform::net`): ARP, IPv4, DHCPv4,
 # DNS and TCP with window scaling, reassembly and Reno (CUBIC needs std floats).
-smoltcp = { version = "0.14", default-features = false, features = ["alloc", "medium-ethernet", "proto-ipv4", "proto-ipv6-slaac", "iface-max-addr-count-8", "iface-max-route-count-8", "socket-tcp", "socket-tcp-reno", "socket-dhcpv4", "socket-dns", "assembler-max-segment-count-32"] }
+smoltcp = { version = "0.14", default-features = false, features = ["alloc", "medium-ethernet", "proto-ipv4", "proto-ipv6-slaac", "iface-max-addr-count-8", "iface-max-route-count-8", "socket-tcp", "socket-tcp-reno", "socket-dhcpv4", "socket-dns", "dns-max-server-count-3", "assembler-max-segment-count-32"] }
 # HTTP/1.1 response heads and chunk sizes.
 httparse = { version = "1.10", default-features = false }
 
 [dev-dependencies]
+anyhow = "1"
+stela-soc = { path = "../stela-soc", features = ["test-support"] }
 stela-soc-data = { path = "../stela-soc-data", features = ["test-support"] }
 stela-engine = { path = "../stela-engine", features = ["test-support"] }
 stela-formats = { path = "../stela-formats", features = ["test-support"] }
 stela-contracts = { path = "../stela-contracts", features = ["test-support"] }
+# The drivers' RAM disk, which the mount and restore tests run on.
+stela-drivers = { path = "../stela-drivers", features = ["ram-disk"] }
 # Authored IPv6 DNS peer; production uses the built-in DNS client socket.
 smoltcp = { version = "0.14", default-features = false, features = ["socket-udp"] }
-# The drivers' RAM disk, which the device model tests run on.
-stela-drivers = { path = "../stela-drivers", features = ["ram-disk"] }
-# The reference LZFSE encoder the no_std decoder is checked against.
-lzfse_rust = "0.2"
 
 [target.'cfg(not(target_os = "uefi"))'.dev-dependencies]
 rustls = { version = "=0.23.45", default-features = false, features = ["std", "tls12"] }

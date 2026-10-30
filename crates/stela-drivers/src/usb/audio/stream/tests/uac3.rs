@@ -341,7 +341,7 @@ impl Transport for GeneralDevice {
 fn run(c: Vec<u8>, f: impl FnOnce(&mut AudioDevice<GeneralDevice>)) {
     let mut memory = vec![0u64; 256 * 1024];
     let base = memory.as_mut_ptr() as u64;
-    // SAFETY: exclusive model RAM outlives all retained DMA and device owners.
+    // SAFETY: exclusive model RAM outlives all kept DMA and device owners.
     let mut dma = unsafe { RegionAllocator::new(base..base + memory.len() as u64 * 8) };
     let mut transport = GeneralDevice::new();
     let binding = plan(&c).unwrap().discover(&mut transport).unwrap();
@@ -349,7 +349,7 @@ fn run(c: Vec<u8>, f: impl FnOnce(&mut AudioDevice<GeneralDevice>)) {
     f(&mut a);
 }
 #[test]
-fn uac3_pure_plan_requires_actual_stable_high_capability_replies_before_binding() {
+fn uac3_pure_plan_requires_stable_high_capability_replies_before_binding() {
     let c = configuration();
     let p = plan(&c).unwrap();
     assert!(matches!(p, crate::usb::audio::Plan::DiscoverUac3(_)));
@@ -424,7 +424,7 @@ fn uac3_real_clocks_pcm_and_independent_feature_registers_observe_power_before_c
     });
 }
 #[test]
-fn uac3_discovery_validates_graph_power_domains_and_actual_cluster_relationships() {
+fn uac3_discovery_validates_graph_power_domains_and_cluster_relationships() {
     let base = configuration();
     for mode in 0..7 {
         let mut c = base.clone();
@@ -460,7 +460,7 @@ fn uac3_discovery_validates_graph_power_domains_and_actual_cluster_relationships
             _ => unreachable!(),
         }
         let mut transport = GeneralDevice::new();
-        // A third cluster exists but has a different actual channel order.
+        // A third cluster exists but has a different channel order.
         let mut wrong = cluster(103);
         wrong[11] = 3;
         wrong[17] = 2;
@@ -525,7 +525,7 @@ fn graph_units() -> Vec<u8> {
     c
 }
 #[test]
-fn uac3_mixer_signal_and_clock_selectors_and_multiplier_use_discovered_layouts() {
+fn uac3_controls_use_discovered_layouts() {
     run(graph_units(), |a| {
         assert_eq!(a.binding.graph.signal_cluster(8), Ok((2, 3)));
         assert!(a.binding.entity_clusters.contains(&(8, 101)));
@@ -558,7 +558,7 @@ fn uac3_mixer_signal_and_clock_selectors_and_multiplier_use_discovered_layouts()
     );
 }
 #[test]
-fn uac3_generic_implicit_feedback_uses_actual_capture_and_retires_both_power_domains() {
+fn uac3_generic_implicit_feedback_uses_capture_and_retires_both_power_domains() {
     let mut c = configuration();
     let output = c
         .windows(7)

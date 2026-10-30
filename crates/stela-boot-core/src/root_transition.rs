@@ -1,5 +1,5 @@
 //! Allocation-free physical-backing equivalence for an owned root transition.
-//! Metadata equality alone never grants native memory or publication authority.
+//! Metadata equality alone never grants native memory or publication permission.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
     EmptyRange,

@@ -44,6 +44,7 @@ pub struct MaterializedSource {
     pub phase: SourcePhase,
     pub pc: u64,
     pub sp: u64,
+    pub fp: u64,
     pub lr: u64,
     pub el: u8,
     pub daif: u8,
@@ -65,6 +66,7 @@ pub(super) struct Slot {
     counter: AtomicU64,
     pc: AtomicU64,
     sp: AtomicU64,
+    fp: AtomicU64,
     lr: AtomicU64,
     mode: AtomicU64,
 }
@@ -74,7 +76,7 @@ impl Slot {
         let sequence = self.sequence.load(SeqCst);
         let Some(next) = sequence.checked_add(2).filter(|_| sequence & 1 == 0) else {
             // Never wrap and make a newer copy appear to have an old sequence.
-            // Retain the last observation, which remains explicitly stale.
+            // Keep the last observation, which remains explicitly stale.
             return;
         };
         // Do not wait if an accidental duplicate attachment also publishes.
@@ -89,6 +91,7 @@ impl Slot {
         self.counter.store(source.host_counter, SeqCst);
         self.pc.store(source.pc, SeqCst);
         self.sp.store(source.sp, SeqCst);
+        self.fp.store(source.fp, SeqCst);
         self.lr.store(source.lr, SeqCst);
         self.mode.store(
             (source.phase as u64) << 16 | u64::from(source.el) << 8 | u64::from(source.daif),
@@ -110,6 +113,7 @@ impl Slot {
             let counter = self.counter.load(SeqCst);
             let pc = self.pc.load(SeqCst);
             let sp = self.sp.load(SeqCst);
+            let fp = self.fp.load(SeqCst);
             let lr = self.lr.load(SeqCst);
             let mode = self.mode.load(SeqCst);
             if self.sequence.load(SeqCst) == sequence {
@@ -120,6 +124,7 @@ impl Slot {
                         phase: SourcePhase::decode(mode >> 16)?,
                         pc,
                         sp,
+                        fp,
                         lr,
                         el: (mode >> 8) as u8,
                         daif: mode as u8,

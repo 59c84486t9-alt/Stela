@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright (C) 2017 Intel Corporation
 // Copyright (c) 2026 Stela contributors
-//! Actual PNP0CA0 attachment to the native ACPICA/SCI provider.
+//! PNP0CA0 attachment to the native ACPICA/SCI provider.
 //!
-//! Discovery is safe only under an actual hardware Session. Mapping allocation
-//! and dependency installation remain the native platform's authorities. Bind
+//! Discovery is safe only under a hardware Session. Mapping allocation
+//! and dependency installation remain the native platform's permissions. Bind
 //! consumes their leases; start performs real PPM reset/discovery. A failed start
-//! retains those leases for explicit recovery. No synthetic notifications or
+//! keeps those leases for explicit recovery. No synthetic notifications or
 //! connector observations are generated here.
 
 use super::super::{
@@ -28,7 +28,7 @@ use core::{
 /// by firmware even after the driver's CPU mapping is retired.
 ///
 /// # Safety
-/// Implementors must own an actual mapping lease of the returned physical range,
+/// Implementors must own a mapping lease of the returned physical range,
 /// keep its aligned CPU range stable, writable and coherent for their lifetime,
 /// and exclude aliases accessible through Rust references. Firmware may publish
 /// updates concurrently according to UCSI. Drop must retire only this CPU mapping
@@ -38,10 +38,10 @@ pub unsafe trait Mapping {
     fn base(&self) -> NonNull<u8>;
 }
 
-/// Native dependency owner retained while UCSI may execute firmware methods.
+/// Native dependency owner kept while UCSI may execute firmware methods.
 ///
 /// # Safety
-/// The returned handle must identify the actual `_DEP` service whose installed
+/// The returned handle must identify the `_DEP` service whose installed
 /// native EC/GPIO/serial/other handlers this lease owns. Those handlers, IRQs,
 /// region mappings and work execution must remain operational until drop. A
 /// handle, `_STA` result or boolean assertion alone is not an implementation.
@@ -49,10 +49,18 @@ pub unsafe trait Dependency<'a> {
     fn handle(&self) -> Handle<'a>;
 }
 
-// SAFETY: Box retains the real dependency owner and forwards its exact handle.
+// SAFETY: Box keeps the real dependency owner and forwards its exact handle.
 unsafe impl<'a, D: Dependency<'a> + ?Sized> Dependency<'a> for Box<D> {
     fn handle(&self) -> Handle<'a> {
         (**self).handle()
+    }
+}
+
+// SAFETY: the receipt pins the installed EC's operation-region handler and
+// its supplier admission, which stay operational while any receipt is kept.
+unsafe impl<'a> Dependency<'a> for crate::platform::ec::capability::Installed<'a> {
+    fn handle(&self) -> Handle<'a> {
+        crate::platform::ec::capability::Installed::handle(self)
     }
 }
 
@@ -138,7 +146,7 @@ fn inspect(handle: Handle<'_>) -> Result<Device<'_>, Error> {
     })
 }
 
-/// Enumerate actual present PNP0CA0 namespace devices. Namespace paths or caller
+/// Enumerate present PNP0CA0 namespace devices. Namespace paths or caller
 /// IDs cannot be used to bypass hardware mode, `_STA`, `_DEP` or `_CRS` checks.
 /// A malformed/unsupported device is returned individually for platform reporting.
 pub fn discover(session: &Session) -> Result<Vec<Result<Device<'_>, Error>>, Error> {
@@ -188,7 +196,7 @@ pub enum State {
     Running,
     Suspended,
     Faulted,
-    /// Notify removal did not complete; original resource owners are retained
+    /// Notify removal did not complete; original resource owners are held
     /// permanently rather than treating a consumed registration as an ACK.
     Quarantined,
     Retired,
@@ -214,7 +222,7 @@ pub struct Attachment<'a, M: Mapping, D: Dependency<'a>, C: Timer> {
     state: State,
 }
 impl<'a, M: Mapping, D: Dependency<'a>, C: Timer> Attachment<'a, M, D, C> {
-    /// Bind exact firmware resources and install actual deferred ACPICA Notify.
+    /// Bind exact firmware resources and install deferred ACPICA Notify.
     /// This only refreshes VERSION; start explicitly publishes PPM commands.
     pub fn bind(
         device: Device<'a>,
@@ -246,7 +254,7 @@ impl<'a, M: Mapping, D: Dependency<'a>, C: Timer> Attachment<'a, M, D, C> {
             return Err(Error::ResourcesChanged);
         }
         // SAFETY: Mapping's unsafe contract owns this exact firmware resource;
-        // equality above binds it to the real namespace _CRS and retains it.
+        // equality above binds it to the real namespace _CRS and keeps it.
         let mailbox = unsafe { Mailbox::new(mapping.base(), device.resource.bytes, aml) }.map_err(
             |error| {
                 Error::Ucsi(UcsiError::Transport {
@@ -259,7 +267,7 @@ impl<'a, M: Mapping, D: Dependency<'a>, C: Timer> Attachment<'a, M, D, C> {
         let pending = Arc::new(AtomicBool::new(false));
         let target = pending.clone();
         let notification = device.handle.notify(move |_| {
-            // The actual event is only a work hint. Never run AML or publish a
+            // The event is only a work hint. Never run AML or publish a
             // made-up CCI in a Notify callback; process service reads firmware.
             target.store(true, Ordering::Release);
         })?;
@@ -315,7 +323,7 @@ impl<'a, M: Mapping, D: Dependency<'a>, C: Timer> Attachment<'a, M, D, C> {
         self.revalidate()?;
         Ok(&mut self.controller)
     }
-    /// Initialize or explicitly recover a faulted binding. The retained mapping
+    /// Initialize or explicitly recover a faulted binding. The kept mapping
     /// and dependency owners remain available if any real firmware step fails.
     pub fn start(&mut self) -> Result<(), Error> {
         if !matches!(self.state, State::Bound | State::Suspended | State::Faulted) {
@@ -386,9 +394,9 @@ impl<'a, M: Mapping, D: Dependency<'a>, C: Timer> Attachment<'a, M, D, C> {
         self.state = State::Suspended;
         Ok(())
     }
-    /// Reset a faulted PPM if needed, disable actual firmware notifications,
+    /// Reset a faulted PPM if needed, disable firmware notifications,
     /// remove/drain the ACPICA callback, then release CPU/dependency leases.
-    /// On any error resources stay retained, so platform services must remain up.
+    /// On any error resources stay held, so platform services must remain up.
     pub fn detach(&mut self) -> Result<(), Error> {
         if let Some(error) = self.removal_error {
             return Err(Error::NotificationRemovalUncertain(error));

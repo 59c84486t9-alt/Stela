@@ -57,7 +57,7 @@ fn thread(flags: u32) -> ThreadState {
 }
 
 #[test]
-fn sign_authenticate_and_return_share_aot_hot_and_new_runtime_cache_without_keys() -> Result<()> {
+fn pointer_authentication_code_is_cached_without_keys() -> Result<()> {
     let cache = tempfile::tempdir()?;
     let program = [PACIBSP, ADD, AUTIBSP, RET];
     let mut vm = runtime(cache.path(), &program)?;
@@ -114,11 +114,15 @@ fn ordinary_profile_declines_and_missing_context_preserves_committed_prefix() ->
     )?;
     let mut state = thread(15);
     let before = state.registers.clone();
+    // SAFETY: the test program reads and writes only its own registered guest data, and nothing
+    // else mutates it.
     let outcome = unsafe { ordinary.run(&mut state, None, 4)? };
     assert!(matches!(outcome.reason, StopReason::Unsupported { .. }));
     assert_eq!(outcome.blocks_executed, 0);
     assert_eq!(state.registers, before);
     let mut vm = runtime(cache.path(), &program)?;
+    // SAFETY: the test program reads and writes only its own registered guest data, and nothing
+    // else mutates it.
     let result = unsafe { vm.run(&mut state, None, 4)? };
     assert!(matches!(
         result.reason,
@@ -139,6 +143,8 @@ fn foreign_process_context_is_rejected_before_any_native_execution_or_publicatio
     let mut vm = runtime(cache.path(), &[ADD, PACIBSP])?;
     let mut state = thread(5);
     let before = state.registers.clone();
+    // SAFETY: the test program reads and writes only its own registered guest data, and nothing
+    // else mutates it.
     assert!(unsafe { vm.run_with_pauth(&mut state, None, 4, &context(2)) }.is_err());
     assert_eq!(state.pc, GuestAddress(BASE));
     assert_eq!(state.registers, before);
@@ -154,6 +160,8 @@ fn classic_aut_failure_writes_poison_and_continues_without_immediate_fpac_trap()
     let mut state = thread(10);
     state.registers.x[30] = keys.sign_ib(STOP, state.registers.sp)? ^ (1 << 48);
     let before = state.registers.clone();
+    // SAFETY: the test program reads and writes only its own registered guest data, and nothing
+    // else mutates it.
     let result = unsafe { vm.run_with_pauth(&mut state, Some(GuestAddress(BASE + 4)), 1, &keys)? };
     assert_eq!(result.reason, StopReason::StopAddress);
     assert_eq!(state.pc, GuestAddress(BASE + 4));
@@ -169,7 +177,7 @@ fn classic_aut_failure_writes_poison_and_continues_without_immediate_fpac_trap()
 }
 
 #[test]
-fn retab_keeps_signed_lr_and_failed_target_precedes_budget_and_stop_address() -> Result<()> {
+fn retab_failure_precedes_budget_and_stop() -> Result<()> {
     let cache = tempfile::tempdir()?;
     let mut vm = runtime(cache.path(), &[RETAB])?;
     let keys = context(1);
@@ -180,6 +188,8 @@ fn retab_keeps_signed_lr_and_failed_target_precedes_budget_and_stop_address() ->
         let before = state.registers.clone();
         let target = if corrupt { STOP | (2 << 61) } else { STOP };
         let result =
+            // SAFETY: the test program reads and writes only its own registered guest data, and
+            // nothing else mutates it.
             unsafe { vm.run_with_pauth(&mut state, Some(GuestAddress(target)), 1, &keys)? };
         assert_eq!(state.registers, before);
         assert_eq!(state.pc, GuestAddress(target));
@@ -214,6 +224,8 @@ fn zero_budget_or_existing_stop_does_not_sign_or_authenticate() -> Result<()> {
     for (stop, budget) in [(None, 0), (Some(GuestAddress(BASE)), 3)] {
         let mut state = thread(0);
         let before = state.registers.clone();
+        // SAFETY: the test program reads and writes only its own registered guest data, and nothing
+        // else mutates it.
         let result = unsafe { vm.run_with_pauth(&mut state, stop, budget, &context(1))? };
         assert_eq!(result.blocks_executed, 0);
         assert!(result.pointer_authentication_events.is_empty());
@@ -230,6 +242,8 @@ fn poisoned_return_cannot_fetch_registered_code_or_be_accepted_as_a_resumption_s
     let keys = context(1);
     let mut state = thread(8);
     state.registers.x[30] = keys.sign_ib(STOP, state.registers.sp)? ^ (1 << 48);
+    // SAFETY: the test program reads and writes only its own registered guest data, and nothing
+    // else mutates it.
     let first = unsafe { vm.run_with_pauth(&mut state, None, 1, &keys)? };
     assert!(matches!(
         first.reason,
@@ -242,6 +256,8 @@ fn poisoned_return_cannot_fetch_registered_code_or_be_accepted_as_a_resumption_s
     )?;
     let before = state.registers.clone();
     for stop in [None, Some(poison)] {
+        // SAFETY: the test program reads and writes only its own registered guest data, and nothing
+        // else mutates it.
         let result = unsafe { vm.run_with_pauth(&mut state, stop, 3, &keys)? };
         assert_eq!(
             result.reason,
@@ -252,6 +268,8 @@ fn poisoned_return_cannot_fetch_registered_code_or_be_accepted_as_a_resumption_s
         assert_eq!(state.pc, poison);
         assert_eq!(state.registers, before);
     }
+    // SAFETY: the test program reads and writes only its own registered guest data, and nothing
+    // else mutates it.
     let no_fetch = unsafe { vm.run_with_pauth(&mut state, Some(poison), 0, &keys)? };
     assert_eq!(no_fetch.reason, StopReason::BudgetExhausted);
     assert_eq!(no_fetch.blocks_executed, 0);

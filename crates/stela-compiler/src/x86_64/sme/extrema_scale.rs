@@ -25,7 +25,7 @@ const SCRATCH: [u8; 4] = [2, 3, 4, 5];
 
 /// Absolute extrema admit every numeric lane. FSCALE admits normal inputs and
 /// normal results using the shared exact exponent-adjustment kernel. All other
-/// lanes, and retained enables, exit once before any architectural group commit.
+/// lanes, and kept enables, exit once before any architectural group commit.
 /// Integer operations preserve complete caller MXCSR.
 /// Clobbers RAX/RCX/RDX, host flags, XMM0..5; preserves RDI/R15 and guest NZCV.
 pub(crate) fn emit(

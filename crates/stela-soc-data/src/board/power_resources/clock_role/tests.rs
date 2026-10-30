@@ -75,7 +75,7 @@ fn selected(states: &PowerStates) -> &super::super::PowerResource {
 }
 
 #[test]
-fn each_qualified_provider_pair_requires_its_matching_bus_and_actual_binding() {
+fn each_checked_provider_pair_requires_its_matching_bus_and_binding() {
     let binding = words(&[0x99, 0x636c6b47]);
     for (bus, controller) in PROVIDER_BINDINGS {
         let mut bytes = tree(Some(&binding), controller, &[], &[], false);
@@ -131,7 +131,7 @@ fn provider_preserves_published_ids_and_only_activates_real_ancestors() {
     assert_eq!(child.clocks, [domain_id(1)]);
     assert_eq!(validate_power_graph(&states), Ok(()));
     // Neither provider role nor absent own start gates manufactures a
-    // source state or a lifecycle sink for its actual inherited supply.
+    // source state or a lifecycle sink for its inherited supply.
     let mut missing = states.clone();
     missing.domains.clear();
     missing.registers.clear();
@@ -159,12 +159,12 @@ fn normal_consumers_child_gates_and_provider_power_remain_enforced() {
             ClockRole::PmgrProvider(_)
         ));
         let error = validate_power_graph(&states).unwrap_err();
-        assert!(error.contains("197"), "{error}");
+        assert!(error.to_string().contains("197"), "{error}");
     }
 }
 
 #[test]
-fn compatible_or_names_cannot_replace_actual_function_provider_binding() {
+fn compatible_or_names_cannot_replace_function_provider_binding() {
     for binding in [
         None,
         Some(words(&[0x98, 0x636c6b47])),
@@ -178,7 +178,12 @@ fn compatible_or_names_cannot_replace_actual_function_provider_binding() {
                 .iter()
                 .all(|resource| resource.clock_role == ClockRole::Consumer)
         );
-        assert!(validate_power_graph(&states).unwrap_err().contains("197"));
+        assert!(
+            validate_power_graph(&states)
+                .unwrap_err()
+                .to_string()
+                .contains("197")
+        );
     }
     let binding = words(&[0x99, 0x636c6b47]);
     let mut foreign_bus = tree(Some(&binding), "pmgr1,t6000", &[], &[], false);
@@ -231,6 +236,7 @@ fn malformed_or_ambiguous_provider_inputs_and_changed_role_refuse() {
         states
             .apply_admission(&bytes, &[])
             .unwrap_err()
+            .to_string()
             .contains("differs")
     );
     assert_eq!(
@@ -263,6 +269,7 @@ fn malformed_or_ambiguous_provider_inputs_and_changed_role_refuse() {
     assert!(
         inventory(&Node::root(&bytes).unwrap())
             .unwrap_err()
+            .to_string()
             .contains("ambiguous")
     );
 }
@@ -516,7 +523,7 @@ fn original_provider_start_and_clock_receiver_source_is_pinned() {
             expected
         );
     }
-    // Actual selected vtable and GOT bindings, including PMGR super-start
+    // Selected vtable and GOT bindings, including PMGR super-start
     // to IOService::start. Authenticated source pointers are kept intact.
     for (offset, expected) in [
         (0x13156b0, 0x80113c6802b0c17cu64), // selected_t6000_start

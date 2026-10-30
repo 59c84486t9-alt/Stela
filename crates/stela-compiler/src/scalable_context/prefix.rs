@@ -229,7 +229,7 @@ mod tests {
         }
 
         #[test]
-        fn direct_follower_targets_retain_the_follower_map_entry() {
+        fn direct_follower_targets_keep_the_follower_map_entry() {
             for bytes in [16, 32, 64, 128, 256] {
                 let native = crate::testing::context_leaf(
                     &source(&[BRANCH_TO_FOLLOWER, PREFIX, AND_DESTRUCTIVE, RET]),

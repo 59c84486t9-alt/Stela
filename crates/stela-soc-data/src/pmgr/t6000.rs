@@ -1,12 +1,14 @@
-//! T6000 PMGR address routing, qualified by original 26A434 J314s sources.
+//! T6000 PMGR address routing, checked by original 26A434 J314s sources.
 //!
 //! `AppleT6000PMGR::initRegMaps` (kernel file 0x2ef4f44) binds forty-four
 //! RegMap selectors. `readACCReg` (0x2f087f4) selects E/P0/P1 mapping lists
 //! (0x76d088/0x76d0c0/0x76d108), then subtracts the selected logical base.
-//! Bridge IDs 0..=0xc0 select consecutive DT views beginning at the actual
+//! Bridge IDs 0..=0xc0 select consecutive DT views beginning at the
 //! `bridge-reg-index` (48 on J314s). These are routing rules, not register
 //! access permissions, reset values, tuning, power state or command completion.
-//! A caller must still use an actual device owner for every physical effect.
+//! A caller must still use a device owner for every physical effect.
+use crate::Result;
+use stela_contracts::refuse;
 
 pub mod reconfiguration;
 pub mod tunables;
@@ -72,7 +74,7 @@ pub const BINDINGS: [(u8, usize); 44] = [
     (0x50, 47),
 ];
 
-/// One original ACC mapping row. Its span comes from the actual DT view,
+/// One original ACC mapping row. Its span comes from the DT view,
 /// just as the original driver queries the selected RegMap's size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AccRange {
@@ -132,13 +134,15 @@ pub struct View {
 }
 
 impl View {
-    fn route(self, offset: u64, bytes: u64) -> Result<u64, &'static str> {
+    fn route(self, offset: u64, bytes: u64) -> Result<u64> {
         if bytes == 0 || offset.checked_add(bytes).is_none_or(|end| end > self.bytes) {
-            return Err("T6000 PMGR access exceeds the actual register view");
+            return Err(refuse!(
+                "T6000 PMGR access exceeds the actual register view"
+            ));
         }
         self.physical
             .checked_add(offset)
-            .ok_or("T6000 PMGR address overflows")
+            .ok_or(refuse!("T6000 PMGR address overflows"))
     }
 }
 
@@ -153,12 +157,14 @@ impl<'a> Layout<'a> {
         registers: &'a [Option<(u64, u64)>],
         bridge_reg_index: usize,
         bridge_count: usize,
-    ) -> Result<Self, &'static str> {
+    ) -> Result<Self> {
         if bridge_reg_index != BRIDGE_REG_INDEX
             || bridge_count != BRIDGE_COUNT
             || registers.len() != BRIDGE_REG_INDEX + BRIDGE_COUNT
         {
-            return Err("T6000 PMGR register/bridge topology is not qualified");
+            return Err(refuse!(
+                "T6000 PMGR register/bridge topology is not qualified"
+            ));
         }
         let layout = Self { registers };
         for (_, index) in BINDINGS {
@@ -173,11 +179,11 @@ impl<'a> Layout<'a> {
                 let end = u64::from(row.logical)
                     .checked_add(bytes)
                     .filter(|end| *end <= u64::from(u32::MAX) + 1)
-                    .ok_or("T6000 ACC logical range overflows")?;
+                    .ok_or(refuse!("T6000 ACC logical range overflows"))?;
                 for prior in &rows[..i] {
                     let prior_end = u64::from(prior.logical) + layout.register(prior.map)?.bytes;
                     if u64::from(row.logical) < prior_end && u64::from(prior.logical) < end {
-                        return Err("T6000 ACC logical register views overlap");
+                        return Err(refuse!("T6000 ACC logical register views overlap"));
                     }
                 }
             }
@@ -185,35 +191,41 @@ impl<'a> Layout<'a> {
         Ok(layout)
     }
 
-    fn view(&self, index: usize) -> Result<View, &'static str> {
+    fn view(&self, index: usize) -> Result<View> {
         let (physical, bytes) = self
             .registers
             .get(index)
             .copied()
             .flatten()
-            .ok_or("T6000 PMGR required register view is not mapped")?;
+            .ok_or(refuse!("T6000 PMGR required register view is not mapped"))?;
         if bytes == 0 || physical.checked_add(bytes).is_none() {
-            return Err("T6000 PMGR required register view is empty or overflows");
+            return Err(refuse!(
+                "T6000 PMGR required register view is empty or overflows"
+            ));
         }
         Ok(View { physical, bytes })
     }
 
-    pub fn register(&self, map: u8) -> Result<View, &'static str> {
+    pub fn register(&self, map: u8) -> Result<View> {
         let (_, index) = BINDINGS
             .iter()
             .find(|(selector, _)| *selector == map)
-            .ok_or("T6000 PMGR RegMap selector is not qualified")?;
+            .ok_or(refuse!("T6000 PMGR RegMap selector is not qualified"))?;
         self.view(*index)
     }
 
-    /// Route the first die's actual E/P0/P1 complex. Multi-die projection,
-    /// harvesting and additional PE ownership require their own actual plan.
-    pub fn acc(&self, complex: usize, logical: u32, bytes: u64) -> Result<u64, &'static str> {
+    /// Route the first die's E/P0/P1 complex. Multi-die projection,
+    /// harvesting and additional PE ownership require their own plan.
+    pub fn acc(&self, complex: usize, logical: u32, bytes: u64) -> Result<u64> {
         let rows = match complex {
             0 => &E_ACC[..],
             1 => &P0_ACC[..],
             2 => &P1_ACC[..],
-            _ => return Err("T6000 ACC complex has no qualified physical die binding"),
+            _ => {
+                return Err(refuse!(
+                    "T6000 ACC complex has no qualified physical die binding"
+                ));
+            }
         };
         for row in rows {
             if let Some(offset) = logical.checked_sub(row.logical) {
@@ -223,12 +235,16 @@ impl<'a> Layout<'a> {
                 }
             }
         }
-        Err("T6000 ACC logical address is outside every original mapping")
+        Err(refuse!(
+            "T6000 ACC logical address is outside every original mapping"
+        ))
     }
 
-    pub fn bridge(&self, id: usize) -> Result<View, &'static str> {
+    pub fn bridge(&self, id: usize) -> Result<View> {
         if id >= BRIDGE_COUNT {
-            return Err("T6000 bridge ID is outside the original controller family");
+            return Err(refuse!(
+                "T6000 bridge ID is outside the original controller family"
+            ));
         }
         self.view(BRIDGE_REG_INDEX + id)
     }
@@ -280,7 +296,7 @@ mod tests {
     }
 
     #[test]
-    fn complete_layout_rejects_missing_overflowing_and_ambiguous_actual_geometry() {
+    fn complete_layout_rejects_missing_overflowing_and_ambiguous_geometry() {
         let mut regs = registers();
         assert!(Layout::new(&regs, 48, 32).is_err());
         assert!(Layout::new(&regs[..240], 48, 193).is_err());
@@ -403,7 +419,7 @@ mod original {
         .enumerate()
         {
             assert_eq!(word(&bytes, 0x76d3c8 + 4 * complex) as usize, rows.len());
-            // Chained-fixup payload supplies the actual list's file coordinate;
+            // Chained-fixup payload supplies the list's file coordinate;
             // its authenticated pointer metadata is not an executable PAC value.
             assert_eq!(
                 quad(&bytes, 0x1316360 + complex * 8) & 0xffffffff,

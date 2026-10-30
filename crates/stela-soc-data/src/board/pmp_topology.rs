@@ -1,117 +1,119 @@
 //! DeviceTree placement and validation for pmp topology.
 use super::dma_routes::{native_dma_phandle, native_dma_route};
-use super::{ASC, Iommu, NativeDmaRoute, Node, String, apertures, asc, rtbuddy_nub};
-use alloc::format;
+use super::{ASC, Iommu, NativeDmaRoute, Node, apertures, asc, rtbuddy_nub};
+use crate::Result;
+use stela_contracts::refuse;
 
 /// The PMP's DT placement: `reg[0]` is the ASC wrapper and its four
 /// interrupts the mailbox lines. Its nub is `user-power-managed`; the
-/// PTD bank that `ptd-update-reg-index` names is [`MemoryCache`]'s.
+/// PTD bank that `ptd-update-reg-index` names is [`super::MemoryCache`]'s.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PmpController {
     pub wrapper: (u64, u64),
     pub interrupts: [u16; 4],
     pub quiesced: bool,
     /// Original IOMapper provider. Absence does not prove RTBuddy selected its
-    /// null-mapper physical-buffer branch; native services must qualify it.
+    /// null-mapper physical-buffer branch; native services must check it.
     pub mapper: Option<u32>,
 }
 
 impl PmpController {
-    /// Read the static physical-parent/nub inputs used by the qualified RTBuddy
+    /// Read the static physical-parent/nub inputs used by the checked RTBuddy
     /// startup. This is not an observer of later IORegistry property overrides.
     /// The caller must exclude those overrides for the lifetime of native DMA.
-    pub fn native_dma_configuration(
-        &self,
-        tree: &[u8],
-    ) -> Result<(Option<u32>, Option<u64>), String> {
-        let root = Node::root(tree).ok_or("PMP configuration ADT is malformed")?;
+    pub fn native_dma_configuration(&self, tree: &[u8]) -> Result<(Option<u32>, Option<u64>)> {
+        let root = Node::root(tree).ok_or(refuse!("PMP configuration ADT is malformed"))?;
         let children = root
             .children()
-            .ok_or("PMP configuration root is malformed")?;
+            .ok_or(refuse!("PMP configuration root is malformed"))?;
         let mut ios = children
             .into_iter()
             .filter(|n| n.property("name") == Some(b"arm-io\0"));
-        let io = ios.next().ok_or("PMP configuration has no arm-io")?;
+        let io = ios
+            .next()
+            .ok_or(refuse!("PMP configuration has no arm-io"))?;
         if ios.next().is_some() {
-            return Err("PMP configuration has duplicate arm-io nodes".into());
+            return Err(refuse!("PMP configuration has duplicate arm-io nodes"));
         }
         let mut found = None;
         for node in io
             .children()
-            .ok_or("PMP configuration arm-io is malformed")?
+            .ok_or(refuse!("PMP configuration arm-io is malformed"))?
         {
             if !node.compatible(ASC) || node.property("role") != Some(b"PMP\0") {
                 continue;
             }
             let registers =
-                apertures::registers(&node).ok_or("PMP configuration reg is malformed")?;
+                apertures::registers(&node).ok_or(refuse!("PMP configuration reg is malformed"))?;
             let &(address, bytes) = registers
                 .first()
-                .ok_or("PMP configuration wrapper is absent")?;
+                .ok_or(refuse!("PMP configuration wrapper is absent"))?;
             if (io.translate_range(address, bytes), bytes) != (Some(self.wrapper.0), self.wrapper.1)
             {
                 continue;
             }
             if found.is_some() {
-                return Err("PMP configuration has ambiguous physical owners".into());
+                return Err(refuse!("PMP configuration has ambiguous physical owners"));
             }
             if native_dma_phandle(&node, "iommu-parent")? != self.mapper || self.mapper.is_none() {
-                return Err("PMP configuration IOMapper differs from its retained source".into());
+                return Err(refuse!(
+                    "PMP configuration IOMapper differs from its retained source"
+                ));
             }
             let nub = rtbuddy_nub(&node, "PMP native DMA")?;
             for owner in [&node, &nub] {
                 let properties = owner
                     .properties()
-                    .ok_or("PMP configuration properties are malformed")?;
+                    .ok_or(refuse!("PMP configuration properties are malformed"))?;
                 if properties
                     .iter()
                     .enumerate()
                     .any(|(i, (name, _))| properties[..i].iter().any(|(prior, _)| prior == name))
                 {
-                    return Err("PMP configuration owner has duplicate properties".into());
+                    return Err(refuse!("PMP configuration owner has duplicate properties"));
                 }
             }
-            let property =
-                |node: &Node<'_>, name: &str, bytes: usize| -> Result<Option<u64>, String> {
-                    let properties = node
-                        .properties()
-                        .ok_or("PMP configuration properties are malformed")?;
-                    let mut values = properties
-                        .into_iter()
-                        .filter(|(key, _)| *key == name.as_bytes());
-                    let Some((_, value)) = values.next() else {
-                        return Ok(None);
-                    };
-                    if values.next().is_some() || value.len() != bytes {
-                        return Err(format!(
-                            "PMP configuration {name} is duplicate or has the wrong width"
-                        ));
-                    }
-                    let mut cell = [0; 8];
-                    cell[..bytes].copy_from_slice(value);
-                    Ok(Some(u64::from_le_bytes(cell)))
+            let property = |node: &Node<'_>, name: &str, bytes: usize| -> Result<Option<u64>> {
+                let properties = node
+                    .properties()
+                    .ok_or(refuse!("PMP configuration properties are malformed"))?;
+                let mut values = properties
+                    .into_iter()
+                    .filter(|(key, _)| *key == name.as_bytes());
+                let Some((_, value)) = values.next() else {
+                    return Ok(None);
                 };
+                if values.next().is_some() || value.len() != bytes {
+                    return Err(refuse!(
+                        "PMP configuration {name} is duplicate or has the wrong width",
+                        name
+                    ));
+                }
+                let mut cell = [0; 8];
+                cell[..bytes].copy_from_slice(value);
+                Ok(Some(u64::from_le_bytes(cell)))
+            };
             if property(&nub, "user-power-managed", 4)? != Some(1) {
-                return Err("PMP native DMA nub is not user-power-managed".into());
+                return Err(refuse!("PMP native DMA nub is not user-power-managed"));
             }
             if bytes < asc::WRAPPER_BYTES {
-                return Err("PMP native DMA wrapper is too short".into());
+                return Err(refuse!("PMP native DMA wrapper is too short"));
             }
             found = Some((
                 property(&node, "mapper-index", 4)?.map(|v| v as u32),
                 property(&nub, "asc-dram-mask", 8)?,
             ));
         }
-        found.ok_or_else(|| "PMP configuration has no matching physical source owner".into())
+        found.ok_or_else(|| refuse!("PMP configuration has no matching physical source owner"))
     }
 
-    /// Join the original phandle to one declared actual DART context. Buffer
+    /// Join the original phandle to one declared DART context. Buffer
     /// mapping must subsequently use that placed owner, preserving its remap.
-    pub fn dma_route(&self, darts: &[Iommu]) -> Result<NativeDmaRoute, String> {
+    pub fn dma_route(&self, darts: &[Iommu]) -> Result<NativeDmaRoute> {
         native_dma_route(
             darts,
             self.mapper
-                .ok_or("PMP native services have no qualified IOMapper")?,
+                .ok_or(refuse!("PMP native services have no qualified IOMapper"))?,
         )
     }
 }
@@ -119,7 +121,7 @@ impl PmpController {
 pub(super) fn pmp_controller(
     io: &Node<'_>,
     translate: &dyn Fn(u64, u64) -> Option<u64>,
-) -> Result<Option<PmpController>, String> {
+) -> Result<Option<PmpController>> {
     let Some(node) = io
         .child("pmp")
         .filter(|n| n.compatible(ASC) && n.property("role") == Some(b"PMP\0".as_slice()))
@@ -128,19 +130,21 @@ pub(super) fn pmp_controller(
     };
     let nub = rtbuddy_nub(&node, "PMP")?;
     if nub.first_u32("user-power-managed") != Some(1) {
-        return Err("PMP nub is not user-power-managed".into());
+        return Err(refuse!("PMP nub is not user-power-managed"));
     }
     let &(offset, bytes) = apertures::registers(&node)
-        .ok_or("PMP has no reg pairs")?
+        .ok_or(refuse!("PMP has no reg pairs"))?
         .first()
         .filter(|(_, bytes)| *bytes >= asc::WRAPPER_BYTES)
-        .ok_or("PMP wrapper bank is absent or too short")?;
-    let physical = translate(offset, bytes).ok_or("PMP wrapper outside arm-io ranges")?;
-    let irqs = node.cells32("interrupts").ok_or("PMP has no interrupts")?;
-    let irq = |index: usize| -> Result<u16, String> {
+        .ok_or(refuse!("PMP wrapper bank is absent or too short"))?;
+    let physical = translate(offset, bytes).ok_or(refuse!("PMP wrapper outside arm-io ranges"))?;
+    let irqs = node
+        .cells32("interrupts")
+        .ok_or(refuse!("PMP has no interrupts"))?;
+    let irq = |index: usize| -> Result<u16> {
         irqs.get(index)
             .and_then(|&n| u16::try_from(n).ok())
-            .ok_or_else(|| "PMP needs four valid mailbox interrupts".into())
+            .ok_or_else(|| refuse!("PMP needs four valid mailbox interrupts"))
     };
     Ok(Some(PmpController {
         wrapper: (physical, bytes),
@@ -231,7 +235,7 @@ mod tests {
 
     #[test]
     #[ignore = "oracle: STELA_TEST_CPU_DT_DIR"]
-    fn original_pmp_retains_its_dart_mapper_instead_of_assuming_physical_buffers() {
+    fn original_pmp_keeps_its_dart_mapper_instead_of_assuming_physical_buffers() {
         let path = std::path::PathBuf::from(std::env::var("STELA_TEST_CPU_DT_DIR").unwrap())
             .join("DeviceTree.j473ap.adt");
         let bytes = std::fs::read(path).unwrap();

@@ -1,6 +1,6 @@
 //! A machine's state on its machine-state partition: the NOR image (NVRAM)
 //! and, after it, the SEP's area (its UID/GID roots and anti-replay store,
-//! `stela_runtime::machine::apple::sep_state`, which the SEP model owns;
+//! `stela_soc::machine::sep_state`, which the SEP model owns;
 //! setup only copies the area whole and never reads its keys).
 //!
 //! - `nvram reset` writes a fresh NOR image, as clearing a Mac's NVRAM
@@ -32,9 +32,8 @@ use std::{
 };
 use stela_loader::boot_selection;
 use {
-    stela_runtime::machine::apple::sep_state, stela_runtime::pc::boot_log,
-    stela_soc_data::nor::CAPACITY, stela_soc_data::nor::Image,
-    stela_soc_data::nor::nvram::Variables,
+    stela_runtime::pc::boot_log, stela_soc::machine::sep_state, stela_soc_data::nor::CAPACITY,
+    stela_soc_data::nor::Image, stela_soc_data::nor::nvram::Variables,
 };
 
 const MAGIC: &str = "STELA MACHINE STATE 1";
@@ -58,7 +57,7 @@ struct Header {
 pub(super) enum Nvram {
     Blank,
     Valid(Variables),
-    Invalid(String),
+    Invalid(stela_contracts::Refusal),
 }
 
 pub(super) fn nvram(bytes: &[u8]) -> Nvram {
@@ -71,12 +70,12 @@ pub(super) fn nvram(bytes: &[u8]) -> Nvram {
     });
     match parsed {
         Ok(variables) => Nvram::Valid(variables),
-        Err(error) => Nvram::Invalid(error.into()),
+        Err(error) => Nvram::Invalid(error),
     }
 }
 
 /// What the SEP's area holds.
-pub(super) fn sep(area: &[u8]) -> Result<bool, &'static str> {
+pub(super) fn sep(area: &[u8]) -> Result<bool, stela_contracts::Refusal> {
     sep_state::blank(&area[..stela_formats::machine_state::SEP_ROOTS_BYTES]).map(|blank| !blank)
 }
 

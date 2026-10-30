@@ -58,12 +58,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "anyhow"
-version = "1.0.104"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
-
-[[package]]
 name = "base16ct"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -868,8 +862,6 @@ name = "stela-boot"
 version = "0.1.0"
 dependencies = [
  "serde_json",
- "sha1",
- "sha2",
  "stela-boot-core",
  "stela-compiler",
  "stela-contracts",
@@ -879,6 +871,7 @@ dependencies = [
  "stela-formats",
  "stela-loader",
  "stela-runtime",
+ "stela-soc",
  "stela-soc-data",
  "stela-tls",
  "uefi",
@@ -888,13 +881,23 @@ dependencies = [
 name = "stela-boot-core"
 version = "0.1.0"
 dependencies = [
+ "serde_json",
  "stela-compiler",
+ "stela-contracts",
  "stela-crypto",
  "stela-drivers",
  "stela-engine",
+ "stela-formats",
  "stela-loader",
  "stela-runtime",
+ "stela-soc",
+ "stela-soc-data",
+ "uefi-raw",
 ]
+
+[[package]]
+name = "stela-c-build"
+version = "0.1.0"
 
 [[package]]
 name = "stela-compiler"
@@ -926,25 +929,54 @@ dependencies = [
 ]
 
 [[package]]
-name = "stela-driver-core"
+name = "stela-driver-audio"
 version = "0.1.0"
 dependencies = [
- "sha2",
+ "stela-driver-base",
+ "stela-driver-core",
 ]
 
 [[package]]
-name = "stela-drivers"
+name = "stela-driver-base"
 version = "0.1.0"
 dependencies = [
- "aes 0.8.4",
  "cc",
- "hmac",
+ "stela-c-build",
+ "stela-driver-core",
+ "triomphe",
+]
+
+[[package]]
+name = "stela-driver-core"
+version = "0.1.0"
+dependencies = [
+ "stela-crypto",
+]
+
+[[package]]
+name = "stela-driver-gpu"
+version = "0.1.0"
+dependencies = [
+ "cc",
  "libc",
  "object",
- "p256",
- "sha1",
  "sha2",
+ "stela-c-build",
  "stela-crypto",
+ "stela-driver-base",
+ "stela-driver-core",
+ "triomphe",
+ "zeroize",
+]
+
+[[package]]
+name = "stela-driver-net"
+version = "0.1.0"
+dependencies = [
+ "hmac",
+ "p256",
+ "stela-crypto",
+ "stela-driver-base",
  "stela-driver-core",
  "subtle",
  "triomphe",
@@ -952,15 +984,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "stela-driver-storage"
+version = "0.1.0"
+dependencies = [
+ "stela-driver-base",
+ "stela-driver-core",
+]
+
+[[package]]
+name = "stela-drivers"
+version = "0.1.0"
+dependencies = [
+ "stela-crypto",
+ "stela-driver-audio",
+ "stela-driver-base",
+ "stela-driver-core",
+ "stela-driver-gpu",
+ "stela-driver-net",
+ "stela-driver-storage",
+ "zeroize",
+]
+
+[[package]]
 name = "stela-engine"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "hex",
  "libc",
  "serde",
  "serde_json",
- "sha2",
  "stela-compiler",
  "stela-contracts",
  "stela-crypto",
@@ -986,7 +1038,6 @@ dependencies = [
  "miniz_oxide",
  "serde",
  "serde_json",
- "sha1",
  "sha2",
  "stela-contracts",
  "stela-crypto",
@@ -996,13 +1047,13 @@ dependencies = [
 name = "stela-loader"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "hex",
  "object",
  "serde",
  "serde_json",
  "sha2",
  "stela-contracts",
+ "stela-crypto",
  "stela-driver-core",
  "stela-formats",
  "stela-soc-data",
@@ -1012,18 +1063,11 @@ dependencies = [
 name = "stela-runtime"
 version = "0.1.0"
 dependencies = [
- "aes 0.8.4",
- "anyhow",
- "crypto-bigint",
  "hex",
- "hmac",
  "httparse",
  "libc",
- "miniz_oxide",
- "p256",
  "serde",
  "serde_json",
- "sha1",
  "sha2",
  "smoltcp",
  "stela-compiler",
@@ -1032,9 +1076,27 @@ dependencies = [
  "stela-drivers",
  "stela-engine",
  "stela-formats",
+ "stela-soc",
  "stela-soc-data",
  "stela-tls",
- "tempfile",
+ "zeroize",
+]
+
+[[package]]
+name = "stela-soc"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "hmac",
+ "p256",
+ "sha2",
+ "stela-compiler",
+ "stela-contracts",
+ "stela-crypto",
+ "stela-drivers",
+ "stela-engine",
+ "stela-formats",
+ "stela-soc-data",
  "zeroize",
 ]
 

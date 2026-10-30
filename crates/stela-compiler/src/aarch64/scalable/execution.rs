@@ -47,7 +47,7 @@ pub enum GuestMemoryQuantity {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstructionExecutionRequirements {
     pc: GuestAddress,
-    /// Conjunction of the existing decoder's clauses. Each clause retains its
+    /// Conjunction of the existing decoder's clauses. Each clause keeps its
     /// own ALL and ANY sets; flattening ANY sets would change the condition.
     feature_clauses: Box<[FeatureRequirement]>,
     access: ScalableAccessRequirements,

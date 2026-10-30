@@ -82,7 +82,7 @@ pub enum Loss {
     Bandwidth,
     BufferOverrun,
 }
-/// Completion authority for one accepted queued SCO packet. Retirement after
+/// Completion permission for one accepted queued SCO packet. Retirement after
 /// cancellation cannot establish whether an unobserved radio delivery occurred.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OutputDisposition {
@@ -96,10 +96,10 @@ pub struct OutputReceipt {
     pub disposition: OutputDisposition,
 }
 /// Physical media boundary for this same exclusively owned HCI function.
-/// Implementations retain all uncertain DMA, including on failed cancellation.
+/// Implementations keep all uncertain DMA, including on failed cancellation.
 /// Replace must cancel/drain and drop old endpoint contexts before SET_INTERFACE
 /// and fresh configuration. Successful quiesce permits only stream restart;
-/// it is no physical suspend/resume or shared-radio reset authority.
+/// it is no physical suspend/resume or shared-radio reset permission.
 pub trait MediaIo: Io {
     /// Some(sequence) means accepted, never delivered. None is bounded
     /// backpressure with no publication or ownership change.
@@ -123,7 +123,7 @@ pub trait MediaIo: Io {
     fn read_media(&mut self, kind: Kind) -> core::result::Result<Option<Read>, BlockError>;
     fn write_media(&mut self, kind: Kind, bytes: &[u8]) -> Result<()>;
     fn quiesce_media(&mut self) -> core::result::Result<(), BlockError>;
-    /// Drain media, remove the old SCO voice/alternate, retaining the configured
+    /// Drain media, remove the old SCO voice/alternate, keeping the configured
     /// third interrupt interface for ordinary HCI Reset. No shared reset.
     fn reset_media_epoch(&mut self) -> core::result::Result<(), BlockError>;
     fn resume_media(&mut self) -> core::result::Result<(), BlockError>;
@@ -150,7 +150,7 @@ pub enum Lifecycle {
     Off,
     Failed,
 }
-/// Actual synchronous command completion and returned command allowance. These
+/// Synchronous command completion and returned command allowance. These
 /// credits belong to the caller's HCI stack after setup, not this USB transport.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SetupReport {
@@ -174,9 +174,9 @@ pub struct Session<B: MediaIo> {
 }
 impl<B: MediaIo> Session<B> {
     /// Consume one initialized exact-device transport before handing it to a
-    /// Bluetooth stack. `command_credits` is the caller's actual current HCI
+    /// Bluetooth stack. `command_credits` is the caller's current HCI
     /// allowance; no other command may be outstanding or concurrently submitted.
-    /// USB identity alone cannot pass the retained live MT7925 initialization
+    /// USB identity alone cannot pass the live MT7925 initialization
     /// check. Failure closes the entire function and requires a fresh rebind.
     pub fn start(mut hci: Hci<B>, dma: &mut dyn DmaAllocator, command_credits: u8) -> Result<Self> {
         let result = Self::prepare(&mut hci, dma, command_credits);
@@ -308,7 +308,7 @@ impl<B: MediaIo> Session<B> {
             ));
         }
         hci.io.start_iso(bindings.iso(), dma)?;
-        // Source btmtk_usb_isointf_init: receive is posted before this genuine
+        // Source btmtk_usb_isointf_init: receive is posted before this
         // synchronous vendor command. A Command Status is not its completion.
         let mut pending = Vec::new();
         let setup = Self::command(hci, &[0x98, 0xfd, 2, 8, 1], &mut pending, false)?;
@@ -403,7 +403,7 @@ impl<B: MediaIo> Session<B> {
         }
         Ok(completion.unwrap())
     }
-    /// Last observed lifecycle; active operations validate the retained native
+    /// Last observed lifecycle; active operations validate the native
     /// device generation independently before using session-owned state.
     pub fn lifecycle(&self) -> Lifecycle {
         self.lifecycle
@@ -412,7 +412,7 @@ impl<B: MediaIo> Session<B> {
         self.setup.as_ref().expect("MT7925 setup completion")
     }
     /// Latest ordinary HCI Reset completion, distinct from the historical vendor
-    /// setup and any physical/shared reset authority. Its CC is also queued for
+    /// setup and any physical/shared reset permission. Its CC is also queued for
     /// the caller's HCI stack, in observed order with asynchronous packets.
     pub fn last_reset(&self) -> Option<&SetupReport> {
         self.last_reset.as_ref()
@@ -423,7 +423,7 @@ impl<B: MediaIo> Session<B> {
     pub(in crate::usb::bluetooth) fn take_pending_observations(&mut self) -> Vec<Received> {
         core::mem::take(&mut self.pending)
     }
-    /// Historical initialization evidence for this retained owner, never proof
+    /// Historical initialization evidence for this owner, never proof
     /// that a later physical reset/power loss preserved radio state. Such a
     /// transition invalidates the owner and requires a fresh attachment.
     /// `power_on` replaces it with its own setup's.
@@ -476,8 +476,8 @@ impl<B: MediaIo> Session<B> {
             .map_err(|e| self.fail(Error::Hci(e)))
     }
     /// Ordinary controller HCI Reset, as source hci_dev_init_sync performs after
-    /// vendor setup. Caller owns actual HCI command credits/no pending command.
-    /// Retire the old voice/partial media epoch, await genuine CC, then repost
+    /// vendor setup. Caller owns HCI command credits/no pending command.
+    /// Retire the old voice/partial media epoch, await CC, then repost
     /// third-interface RX without reapplying fd98. This is no USB/subsystem or
     /// Wi-Fi reset, and failed completion cannot resume the media owner.
     fn reset(&mut self) -> Result<()> {
@@ -710,7 +710,7 @@ impl<B: MediaIo> Session<B> {
     }
     /// btusb_mtk_shutdown: WMT function control off, then the ISO interface
     /// and transport retire, leaving the owner `Off` for `power_on`.
-    /// `command_credits` is the caller's actual HCI allowance; zero refuses
+    /// `command_credits` is the caller's HCI allowance; zero refuses
     /// without effects. MediaTek only; any failure is terminal.
     pub fn shutdown(&mut self, command_credits: u8) -> Result<ShutdownReport> {
         self.hci.io.validate()?;
@@ -858,4 +858,4 @@ impl<B: MediaIo> Drop for Session<B> {
 }
 
 #[cfg(test)]
-pub(in crate::usb::bluetooth) mod generation_tests;
+pub(in crate::usb::bluetooth) mod tests;

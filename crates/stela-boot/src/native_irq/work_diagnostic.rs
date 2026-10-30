@@ -1,8 +1,9 @@
-//! Opt-in actual EDU MSI → preallocated queue → owned BSP work stack.
+//! Opt-in EDU MSI → preallocated queue → owned BSP work stack.
 //! Device/config/Executor ownership stays !Send on the BSP. The ISR receives
 //! only the existing bounded IRQ register access plus Send+Sync queue/events.
 //! No production OSL/SCI/provider capability is installed.
 use super::diagnostic::{self, Edu, EduSource};
+use crate::Result;
 use alloc::{boxed::Box, format, rc::Rc, string::String, sync::Arc, vec::Vec};
 use core::{
     alloc::{GlobalAlloc, Layout},
@@ -11,6 +12,7 @@ use core::{
     ops::Range,
     sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering},
 };
+use stela_contracts::refuse;
 use stela_drivers::{
     Clock,
     bus::{
@@ -30,10 +32,10 @@ const BAD_WORKER: u64 = 32;
 const BAD_ASYNC_STATE: u64 = 64;
 const BAD_IRQ_HEAP: u64 = 128;
 struct BspCpu;
-// SAFETY: actual source-bound one-BSP fixture. Genuine registered dispatch
+// SAFETY: source-bound one-BSP fixture. Registered dispatch
 // brackets depth from unchanged IDT entry, including its real saved Frame.rsp.
-// Only that ISR and retained owned process callbacks receive this adapter.
-// This does not qualify other CPU entry paths or production ISR FP preservation.
+// Only that ISR and kept owned process callbacks receive this adapter.
+// This does not check other CPU entry paths or production ISR FP preservation.
 unsafe impl Cpu for BspCpu {
     fn check_cpu(&self) -> Result<(), WorkError> {
         super::NativePlatform(())
@@ -46,12 +48,14 @@ unsafe impl Cpu for BspCpu {
     fn save_disable(&self) -> Result<u64, WorkError> {
         self.check_cpu()?;
         let flags;
+        // SAFETY: saves RFLAGS and masks interrupts on this CPU; `restore` undoes it.
         unsafe {
             asm!("pushfq", "pop {}", "cli", out(reg) flags);
         }
         Ok(flags)
     }
     unsafe fn restore(&self, flags: u64) {
+        // SAFETY: the caller passes flags `save_disable` read on this CPU.
         unsafe {
             asm!("push {}", "popfq", in(reg) flags);
         }
@@ -66,7 +70,7 @@ unsafe impl Cpu for BspCpu {
 }
 struct Events {
     // This is a nonowning pointer to a Send+Sync queue, never a !Send device or
-    // Runtime. The actual executor/source/IRQ handle retain its Arc throughout
+    // Runtime. The executor/source/IRQ handle keep its Arc throughout
     // every admitted callback, retirement, and uncertain quarantine.
     queue: AtomicPtr<Queue<16>>,
     edu: Arc<Edu>,
@@ -84,6 +88,8 @@ struct Events {
 }
 impl Events {
     unsafe fn queue(&self) -> &Queue<16> {
+        // SAFETY: callers run only while the published queue is held by its executor and
+        // handler.
         unsafe { &*self.queue.load(Ordering::Acquire) }
     }
     fn bad(&self, bits: u64) {
@@ -96,11 +102,12 @@ struct WorkHandler {
 }
 impl Handler for WorkHandler {
     fn handle(&self) -> Disposition {
-        // Actual asynchronous IRQ mutation: the common entry, not a promise
+        // Asynchronous IRQ mutation: the common entry, not a promise
         // about inspected Rust code avoiding SIMD, must restore the caller.
+        // SAFETY: the IRQ entry saved the interrupted FP state and restores it on return.
         unsafe { poison_irq_fp() };
-        // Reuse the existing actual cause/W1C/readback handler. Registry emits
-        // EOI after this whole callback and its genuine context scope finish.
+        // Reuse the existing cause/W1C/readback handler. Registry emits
+        // EOI after this whole callback and its context scope finish.
         let disposition = self.events.edu.handle();
         if !heap_probe(0) {
             self.events.bad(BAD_IRQ_HEAP);
@@ -124,7 +131,7 @@ impl Handler for WorkHandler {
             self.events.bad(BAD_ISR_SP);
         }
         let before = self.events.worker.load(Ordering::Acquire);
-        // SAFETY: queue/provider and callback context are genuinely retained;
+        // SAFETY: queue/provider and callback context are held;
         // only a bounded event is submitted, with no CPU-affine owner erasure.
         if unsafe {
             self.queue.execute(
@@ -144,8 +151,8 @@ impl Handler for WorkHandler {
         disposition
     }
 }
-// Rc<Executor> makes the actual config/device/work owner genuinely !Send. It
-// is retained in the checked BSP registry; no unsafe Send/Sync implementation.
+// Rc<Executor> makes the config/device/work owner !Send. It
+// is held in the checked BSP registry; no unsafe Send/Sync implementation.
 struct WorkSource {
     inner: EduSource,
     executor: Rc<Executor<16>>,
@@ -153,8 +160,8 @@ struct WorkSource {
     clock: Clock,
 }
 // SAFETY: exact stopped EDU grant inherited after real DMA/IOTLB/TEoff ACK.
-// Both quiescence phases retain the actual device and executor while draining;
-// failed hardware/work/metadata checks leave the complete registration retained.
+// Both quiescence phases keep the device and executor while draining;
+// failed hardware/work/metadata checks leave the complete registration kept.
 unsafe impl Source for WorkSource {
     fn mask(&mut self) -> Result<(), IrqError> {
         self.inner.mask()
@@ -163,9 +170,11 @@ unsafe impl Source for WorkSource {
         self.inner.route()
     }
     unsafe fn program(&mut self, route: Route) -> Result<(), IrqError> {
+        // SAFETY: forwards the registry's own call under the same contract.
         unsafe { self.inner.program(route) }
     }
     unsafe fn unmask(&mut self) -> Result<(), IrqError> {
+        // SAFETY: forwards the registry's own call under the same contract.
         unsafe { self.inner.unmask() }
     }
     fn quiesce(&mut self) -> Result<(), IrqError> {
@@ -179,6 +188,7 @@ unsafe impl Source for WorkSource {
             .map_err(|_| IrqError::Drain)
     }
     unsafe fn synchronize(&mut self) -> Result<(), IrqError> {
+        // SAFETY: forwards the registry's own call under the same contract.
         unsafe { self.inner.synchronize() }?;
         self.executor
             .runtime()
@@ -194,15 +204,16 @@ unsafe impl Source for WorkSource {
         unsafe { self.executor.runtime().retire() }.map_err(|_| IrqError::Drain)
     }
 }
-fn deadline(clock: Clock) -> Result<u64, String> {
+fn deadline(clock: Clock) -> Result<u64> {
     clock
         .ticks_per_microsecond
         .checked_mul(TIMEOUT_US)
         .and_then(|n| crate::apic::rdtsc().checked_add(n))
-        .ok_or_else(|| String::from("IRQ work deadline overflow"))
+        .ok_or_else(|| refuse!("IRQ work deadline overflow"))
 }
 fn stack_pointer() -> usize {
     let sp;
+    // SAFETY: reads RSP and changes nothing.
     unsafe {
         asm!("mov {}, rsp",out(reg) sp, options(nomem,nostack,preserves_flags));
     }
@@ -210,6 +221,7 @@ fn stack_pointer() -> usize {
 }
 fn interrupt_flags() -> u64 {
     let flags;
+    // SAFETY: reads RFLAGS through the stack and changes nothing.
     unsafe {
         asm!("pushfq", "pop {}", out(reg) flags, options(preserves_flags));
     }
@@ -228,7 +240,7 @@ fn heap_probe(expected_if: u64) -> bool {
             return false;
         };
         let before = crate::ALLOCATOR.usage().live;
-        // SAFETY: valid nonzero layout; this function retains exclusive
+        // SAFETY: valid nonzero layout; this function keeps exclusive
         // ownership of the allocation until its matching deallocation.
         let block = unsafe { crate::ALLOCATOR.alloc_zeroed(layout) };
         if block.is_null() {
@@ -237,14 +249,19 @@ fn heap_probe(expected_if: u64) -> bool {
         let mut valid =
             (block as usize).is_multiple_of(alignment) && interrupt_flags() & IF == expected_if;
         for offset in 0..size {
+            // SAFETY: `block` is this function's live allocation of `size` bytes and `offset` is
+            // below `size`.
             unsafe {
                 valid &= block.add(offset).read_volatile() == 0;
                 block.add(offset).write_volatile(0xa5);
             }
         }
         for offset in 0..size {
+            // SAFETY: `block` is this function's live allocation of `size` bytes and `offset` is
+            // below `size`.
             valid &= unsafe { block.add(offset).read_volatile() } == 0xa5;
         }
+        // SAFETY: `block` came from `alloc_zeroed` with this layout and is freed once.
         unsafe { crate::ALLOCATOR.dealloc(block, layout) };
         valid &= crate::ALLOCATOR.usage().live == before && interrupt_flags() & IF == expected_if;
         if !valid {
@@ -254,10 +271,13 @@ fn heap_probe(expected_if: u64) -> bool {
     true
 }
 unsafe fn events<'a>(ctx: *mut c_void) -> &'a Events {
+    // SAFETY: callers pass the `Events` context they queued, which outlives every job.
     unsafe { &*ctx.cast::<Events>() }
 }
 unsafe extern "C" fn deferred(ctx: *mut c_void) {
+    // SAFETY: `ctx` is the `Events` context this job was queued with.
     let state = unsafe { events(ctx) };
+    // SAFETY: the queue stays held while any job it admitted runs.
     let queue = unsafe { state.queue() };
     let sp = stack_pointer();
     match queue.current_id() {
@@ -292,10 +312,12 @@ const _: () = {
     assert!(core::mem::offset_of!(AsyncCall, preflight) == 32);
 };
 unsafe extern "C" fn foreground(ctx: *mut c_void) {
+    // SAFETY: `ctx` is the `Events` context this job was queued with.
     let state = unsafe { events(ctx) };
     if !heap_probe(IF) {
         state.bad(BAD_IRQ_HEAP);
     }
+    // SAFETY: the queue stays held while any job it admitted runs.
     match unsafe { state.queue() }.current_id() {
         Ok(id) => state.foreground.store(id.get(), Ordering::Release),
         Err(_) => {
@@ -303,8 +325,8 @@ unsafe extern "C" fn foreground(ctx: *mut c_void) {
             return;
         }
     }
-    // The MMIO address is the existing actual bounded EDU IRQ access, not a
-    // fabricated mapping/claim. This local borrow never escapes into a job.
+    // The MMIO address is the existing bounded EDU IRQ access, not an
+    // invented mapping/claim. This local borrow never escapes into a job.
     let mut call = AsyncCall {
         delivered: &state.delivered,
         trigger: state.edu.interrupt_trigger(),
@@ -312,6 +334,8 @@ unsafe extern "C" fn foreground(ctx: *mut c_void) {
         result: u64::MAX,
         preflight: [0; 3],
     };
+    // SAFETY: `call` lives on this stack for the whole call, and its trigger is the EDU's mapped
+    // interrupt register.
     unsafe { msi_with_fp_sentinel(&mut call) };
     for (destination, value) in state.async_observation.iter().zip([
         call.result,
@@ -335,7 +359,7 @@ pub(crate) fn run(
     base: u64,
     clock: Clock,
     prepared: crate::native_work_check::Prepared,
-) -> Result<String, String> {
+) -> Result<String> {
     let batch = prepared.into_irq_stacks()?;
     let parts = diagnostic::prepare_source(function, base, clock)?;
     let cpu = Arc::new(BspCpu);
@@ -354,15 +378,15 @@ pub(crate) fn run(
         errors: AtomicU64::new(0),
         async_observation: [const { AtomicU64::new(0) }; 4],
     });
-    // SAFETY: actual retained provider/code/root/event owner; only the owned
-    // native handler and actual BSP callbacks can submit or execute this work.
+    // SAFETY: provider/code/root/event owner; only the owned
+    // native handler and BSP callbacks can submit or execute this work.
     let queue = unsafe { Queue::<16>::new(cpu, events.clone()) }
-        .map_err(|e| format!("IRQ queue: {e:?}"))?;
+        .map_err(|e| refuse!("IRQ queue: {e}", ?e))?;
     events
         .queue
         .store(Arc::as_ptr(&queue).cast_mut(), Ordering::Release);
     let executor = Rc::new(
-        Executor::new(queue.clone(), batch.stacks).map_err(|e| format!("IRQ executor: {e:?}"))?,
+        Executor::new(queue.clone(), batch.stacks).map_err(|e| refuse!("IRQ executor: {e}", ?e))?,
     );
     let handler = Arc::new(WorkHandler {
         queue: queue.clone(),
@@ -376,13 +400,16 @@ pub(crate) fn run(
     });
     let mut registration = super::CONTROLLER
         .request_owned(*source, handler.clone())
-        .map_err(|e| format!("IRQ work request: {e:?}"))?;
+        .map_err(|e| refuse!("IRQ work request: {e}", ?e))?;
     let vector = registration.vector();
-    // Dispatcher deliberately permits actual MSI progress. All callbacks run
-    // on retained real task stacks; no resource/queue lock spans this window.
+    // Dispatcher permits MSI progress. All callbacks run
+    // on kept real task stacks; no resource/queue lock spans this window.
+    // SAFETY: the handler is registered and the runtime's stacks are owned; interrupts are masked
+    // again right after.
     unsafe {
         asm!("sti", options(nostack));
     }
+    // SAFETY: `foreground` and `events` stay held until the call completes or times out.
     let result = unsafe {
         executor.runtime().call_foreground(
             foreground,
@@ -390,6 +417,7 @@ pub(crate) fn run(
             events.deadline.load(Ordering::Acquire),
         )
     };
+    // SAFETY: masks interrupts on this CPU.
     unsafe {
         asm!("cli", options(nostack));
     }
@@ -404,26 +432,30 @@ pub(crate) fn run(
         // Run the real stop attempt before reporting retention. Any uncertain
         // source/work/metadata failure keeps Source+Rc<Executor> in its slot.
         drop(registration);
-        return Err(format!(
-            "IRQ work observation failed result={result:?} errors={:#x} delivered={} worker={} quarantine={} retained_BSP_owner={} released_stack_leases={} async_result={} fcw_fsw_ftw_fop={:#x} fip={:#x} fdp={:#x}",
-            events.errors.load(Ordering::Acquire),
-            events.delivered.load(Ordering::Acquire),
-            events.worker.load(Ordering::Acquire),
-            super::CONTROLLER.quarantine_count(),
-            Rc::strong_count(&executor) >= 2,
-            batch.releases.released(),
-            events.async_observation[0].load(Ordering::Acquire),
-            events.async_observation[1].load(Ordering::Acquire),
-            events.async_observation[2].load(Ordering::Acquire),
-            events.async_observation[3].load(Ordering::Acquire)
+        return Err(refuse!(
+            "IRQ work observation failed result={result} errors={errors:#x} delivered={delivered} \
+             worker={worker} quarantine={quarantine} retained_BSP_owner={retained} \
+             released_stack_leases={released} async_result={async_result} \
+             fcw_fsw_ftw_fop={fpu_control:#x} fip={fip:#x} fdp={fdp:#x}",
+            ?result,
+            errors = events.errors.load(Ordering::Acquire),
+            delivered = events.delivered.load(Ordering::Acquire),
+            worker = events.worker.load(Ordering::Acquire),
+            quarantine = super::CONTROLLER.quarantine_count(),
+            retained = Rc::strong_count(&executor) >= 2,
+            released = batch.releases.released(),
+            async_result = events.async_observation[0].load(Ordering::Acquire),
+            fpu_control = events.async_observation[1].load(Ordering::Acquire),
+            fip = events.async_observation[2].load(Ordering::Acquire),
+            fdp = events.async_observation[3].load(Ordering::Acquire)
         ));
     }
     // This exercises the source's two real quiescence/drain phases. The queued
     // job is pending here and cannot release device/context resources early.
     let retired = registration
         .retire()
-        .map_err(|e| format!("IRQ work mask/synchronize/drain: {e:?}"))?;
-    // SAFETY: actual route+callback+work drain just completed on this BSP;
+        .map_err(|e| refuse!("IRQ work mask/synchronize/drain: {e}", ?e))?;
+    // SAFETY: route+callback+work drain just completed on this BSP;
     // keep returned callback while consuming its original concrete source.
     let (source, returned_handler, _route) = unsafe { retired.into_parts() };
     let WorkSource {
@@ -439,26 +471,29 @@ pub(crate) fn run(
         || Arc::strong_count(&handler) != 1
         || !matches!(queue.current_id(), Err(WorkError::Closed))
     {
-        return Err(String::from("IRQ work callback/owner retirement failed"));
+        return Err(refuse!("IRQ work callback/owner retirement failed"));
     }
-    // Actual late device cause must not submit into the now closed queue.
+    // Late device cause must not submit into the now closed queue.
     parts.edu.write(0x60, 2);
+    // SAFETY: the handler is registered and the runtime's stacks are owned; interrupts are masked
+    // again right after.
     unsafe {
         asm!("sti", options(nostack));
     }
     let late = clock.wait(1_000, || events.delivered.load(Ordering::Acquire) != 1);
+    // SAFETY: masks interrupts on this CPU.
     unsafe {
         asm!("cli", options(nostack));
     }
     parts.edu.write(0x64, u32::MAX);
     if late || parts.edu.read(0x24) != 0 {
-        return Err(String::from("IRQ work survived source retirement"));
+        return Err(refuse!("IRQ work survived source retirement"));
     }
     drop(registration);
     drop(executor);
     if batch.releases.released() != 4 {
-        return Err(String::from(
-            "IRQ worker stack leases did not release after synchronization",
+        return Err(refuse!(
+            "IRQ worker stack leases did not release after synchronization"
         ));
     }
     Ok(format!(
@@ -469,8 +504,8 @@ pub(crate) fn run(
     ))
 }
 
-/// Deliberate caller-saved data mutation in the actual fixture ISR. The
-/// entry's default controls are retained; all XMM lanes and x87 data change.
+/// Deliberate caller-saved data mutation in the fixture ISR. The
+/// entry's default controls are held; all XMM lanes and x87 data change.
 /// Only the separate opt-in EDU fixture calls this diagnostic helper.
 #[unsafe(naked)]
 unsafe extern "sysv64" fn poison_irq_fp() {
@@ -497,7 +532,7 @@ unsafe extern "sysv64" fn poison_irq_fp() {
     );
 }
 
-/// Synchronous actual owned-stack probe; no pointer to this local frame
+/// Synchronous owned-stack probe; no pointer to this local frame
 /// escapes. Before/after snapshots cover all16 XMM registers and x87/MXCSR
 /// state across the real asynchronous MSI, then restore the caller fully.
 #[unsafe(naked)]
@@ -602,7 +637,7 @@ unsafe extern "C" fn msi_with_fp_sentinel(_: *mut AsyncCall) {
         "fld1",
         "fldpi",
         // Safely masked pending invalid-operation status (0/0). Modern Intel
-        // need not update FOP for a masked divide; seed actual pointer/opcode
+        // need not update FOP for a masked divide; seed pointer/opcode
         // registers below through FXRSTOR, then immediately reobserve them.
         // No FWAIT may expose an unmasked x87 exception in this diagnostic.
         "mov rax, 0x3ff0000000000000",
@@ -618,9 +653,9 @@ unsafe extern "C" fn msi_with_fp_sentinel(_: *mut AsyncCall) {
         "fldcw [rsp+1568]",
         "fxsave64 [rsp+544]",
         // This owned image is an input register setup, never rewritten failed
-        // evidence. Only the immediate actual FXSAVE observation is retained.
+        // evidence. Only the immediate FXSAVE observation is held.
         // DE F9 at label8 has architectural FOP0x6f9; FDP is the owned slot
-        // actually used by the preceding source memory load.
+        // used by the preceding source memory load.
         "mov word ptr [rsp+550], 0x6f9",
         "lea rax, [rip+8b]",
         "mov [rsp+552], rax",
@@ -628,7 +663,7 @@ unsafe extern "C" fn msi_with_fp_sentinel(_: *mut AsyncCall) {
         "mov [rsp+560], rax",
         "fxrstor64 [rsp+544]",
         "fxsave64 [rsp+544]",
-        // Preserve actual preflight bytes for a failed diagnostic, including
+        // Preserve preflight bytes for a failed diagnostic, including
         // an oracle that cannot produce meaningful x87 pointer/opcode state.
         "mov rax, [rsp+544]",
         "mov [rbx+32], rax",

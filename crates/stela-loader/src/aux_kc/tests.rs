@@ -7,6 +7,7 @@ use ::object::{
 
 use super::*;
 use crate::kernel_collection::tests::{BASE, Builder};
+use anyhow::Result;
 
 const BOOT_UUID: [u8; 16] = [0x5a; 16];
 const IOLOG: u64 = BASE + 0x4100;

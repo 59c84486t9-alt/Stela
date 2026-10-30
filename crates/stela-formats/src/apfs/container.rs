@@ -77,6 +77,13 @@ pub struct Container<R> {
 }
 
 impl<R: ReadAt> Container<R> {
+    /// Whether a container superblock starts `offset` bytes into `source`:
+    /// a partition a restore created but has not formatted yet holds none.
+    pub fn starts_at(source: R, offset: u64) -> Result<bool> {
+        let block = Device::new(source, offset, MINIMUM_BLOCK_SIZE).read_block(0)?;
+        Ok(block.get(32..36) == Some(NX_MAGIC))
+    }
+
     /// Open the container that starts `offset` bytes into `source`, from its
     /// newest valid checkpoint.
     pub fn open(source: R, offset: u64) -> Result<Self> {

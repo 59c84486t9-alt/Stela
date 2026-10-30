@@ -7,7 +7,7 @@ use core::{
 };
 use stela_compiler::x86_64::chain::ChainControl;
 
-/// Retained by its hub inbox even when no Machine owns the PE. The hub exposes
+/// By its hub inbox even when no Machine owns the PE. The hub exposes
 /// only the interruption epoch; all other fields belong to its admitted Machine.
 #[repr(C, align(64))]
 pub(super) struct Storage {
@@ -31,7 +31,7 @@ impl Storage {
         unsafe { AtomicU64::from_ptr(core::ptr::addr_of_mut!((*self.control.get()).budget)) }
     }
     pub(super) fn interrupt_epoch(&self) -> &AtomicU64 {
-        // SAFETY: the retained control has a naturally aligned epoch field.
+        // SAFETY: the control has a naturally aligned epoch field.
         // Every Rust access is atomic; native thunks perform aligned loads.
         unsafe {
             AtomicU64::from_ptr(core::ptr::addr_of_mut!(
@@ -51,7 +51,7 @@ impl Storage {
 }
 
 /// The sole local-control writer. It can move between threads with its Machine,
-/// but cannot be shared; a hub retains Storage without granting this role.
+/// but cannot be shared; a hub keeps Storage without granting this role.
 pub(super) struct Owner {
     storage: Arc<Storage>,
     _single_writer: PhantomData<Cell<()>>,
@@ -88,7 +88,7 @@ impl Owner {
         self.storage.control.get() as u64
     }
 
-    /// Reset every local field, retaining the inbox's monotonic notification epoch.
+    /// Reset every local field, keeping the inbox's monotonic notification epoch.
     pub(super) fn initialize(&mut self, table: u64, contexts: [u64; 2]) {
         let control = self.storage.control.get();
         // SAFETY: this Owner is the sole local writer, with no native call

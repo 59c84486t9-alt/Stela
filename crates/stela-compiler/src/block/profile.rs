@@ -1,5 +1,5 @@
 //! Optional selected-recipe metadata. This is separate from the serialized
-//! native artifact and never supplies execution or recovery authority.
+//! native artifact and never supplies execution or recovery permission.
 use alloc::vec::Vec;
 
 /// Counts emitted guest-register-frame memory operands on covered successful
@@ -23,7 +23,7 @@ pub struct RegisterTraffic {
     pub nzcv_pressure_stores: u64,
     pub nzcv_boundary_stores: u64,
     pub nzcv_direct_stores: u64,
-    /// Peak retained GPR/NZCV values, aggregated by maximum rather than sum.
+    /// Peak kept GPR/NZCV values, aggregated by maximum rather than sum.
     pub peak_resident: u64,
 }
 
@@ -148,7 +148,7 @@ mod tests {
     use alloc::vec;
 
     #[test]
-    fn selected_metadata_preserves_bytes_and_counts_only_admitted_register_and_callback_paths() {
+    fn profiled_compile_matches_plain_code_and_counts_admitted_paths() {
         let mut words = vec![0x9100_0400u32; 8]; // ADD X0,X0,#1.
         words.extend([0x3940_0121, 0x3900_013f, 0xa942_4ff4, 0xb400_0040]);
         let source: Vec<_> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
@@ -243,7 +243,7 @@ mod tests {
     }
 
     #[test]
-    fn pressure_and_flag_stores_are_disjoint_and_peak_aggregation_is_a_maximum() {
+    fn register_traffic_counts_disjoint_stores_and_takes_peak_maximum() {
         let stats = crate::x86_64::AllocationStats {
             state_loads: 9,
             pressure_stores: 7,

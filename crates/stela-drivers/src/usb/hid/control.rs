@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// Linux USB HID lifecycle/control reference and retained notices:
+// Linux USB HID lifecycle/control reference and kept notices:
 // usb/THIRD_PARTY.md and the parent HID module.
-//! Descriptor-qualified synchronous HID class controls through owned EP0.
+//! Descriptor-checked synchronous HID class controls through owned EP0.
 use super::*;
 
 impl UsbInput {
@@ -52,7 +52,7 @@ impl UsbInput {
 
     /// Synchronous SET_REPORT on EP0 supports LED output, gamepad control and
     /// digitizer feature negotiation.
-    /// Success means actual status-stage ACK. Errors preserve uncertain effects;
+    /// Success means status-stage ACK. Errors preserve uncertain effects;
     /// this method never automatically retries a state-changing report.
     pub fn set_report(&mut self, kind: ReportType, id: u8, bytes: &[u8]) -> Result<(), BlockError> {
         self.control_ready()?;

@@ -1,5 +1,7 @@
-//! Retained boot files, final memory-map inventory and the engine transfer.
+//! Boot files, final memory-map inventory and the engine transfer.
 use super::*;
+use crate::Result;
+use stela_contracts::refuse;
 
 pub(super) struct RetainedFiles {
     pub options: Region,
@@ -13,7 +15,7 @@ pub(super) fn retain_files(
     options: Vec<u8>,
     source: Vec<u8>,
     bundle: BundleFiles,
-) -> Result<RetainedFiles, &'static str> {
+) -> Result<RetainedFiles> {
     let options_region = Region {
         physical: options.as_ptr() as u64,
         bytes: options.len() as u64,
@@ -25,7 +27,7 @@ pub(super) fn retain_files(
     let mut files = [File::default(); MAX_FILES];
     for (slot, (name, contents)) in files.iter_mut().zip(&bundle) {
         if name.len() > MAX_NAME {
-            return Err("bundle file name too long");
+            return Err(refuse!("bundle file name too long"));
         }
         slot.name[..name.len()].copy_from_slice(name.as_bytes());
         slot.name_bytes = name.len();
@@ -102,8 +104,8 @@ pub(super) struct Transfer {
 impl Transfer {
     /// # Safety
     /// Boot services have ended. `root` maps this code and the trampoline,
-    /// and the engine's retained image, stack, handoff and shared physmap.
-    pub(super) unsafe fn enter(self) -> Result<core::convert::Infallible, &'static str> {
+    /// and the engine's image, stack, handoff and shared physmap.
+    pub(super) unsafe fn enter(self) -> Result<core::convert::Infallible> {
         let Self {
             placement,
             root,

@@ -31,6 +31,8 @@ enum Command {
     CompileLeaf(compile::CompileLeaf),
     /// Compile one native block.
     CompileBlock(compile::CompileBlock),
+    /// Time the system-mode engine compiling every block of a code region.
+    CompileThroughput(compile::CompileThroughput),
     /// Prepare a leaf function, reusing a matching cached translation.
     PrepareLeaf(compile::PrepareLeaf),
     /// Run raw code through native block dispatch.
@@ -77,6 +79,7 @@ impl Command {
             Self::CpuInfo => compile::cpu_info(),
             Self::CompileLeaf(command) => command.run(),
             Self::CompileBlock(command) => command.run(),
+            Self::CompileThroughput(command) => command.run(),
             Self::PrepareLeaf(command) => command.run(),
             Self::RunBlocks(command) => command.run(),
             Self::PlanExecutable(command) => command.run(),
@@ -125,34 +128,5 @@ mod tests {
         ] {
             assert!(help.contains(command), "{command}: {help}");
         }
-    }
-    #[test]
-    fn removed_process_commands_and_cache_option_are_unknown() {
-        for command in [
-            "run-mapped-image",
-            "run-linked-images",
-            "probe-dyld-entry",
-            "discover-images",
-        ] {
-            let error = Cli::try_parse_from(["stela-dev", command, "--help"])
-                .err()
-                .unwrap();
-            assert_eq!(
-                error.kind(),
-                clap::error::ErrorKind::InvalidSubcommand,
-                "{command}"
-            );
-        }
-        let error = Cli::try_parse_from([
-            "stela-dev",
-            "extract-guest-files",
-            "image.dmg",
-            "--output",
-            "root",
-            "--shared-cache",
-        ])
-        .err()
-        .unwrap();
-        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 }

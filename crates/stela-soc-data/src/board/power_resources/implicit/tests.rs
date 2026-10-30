@@ -124,6 +124,7 @@ fn another_soc_aperture_geometry_compatible_or_domain_cannot_inherit_a_binding()
         assert!(
             states(&bytes, "pmgr1,t8112", domains())
                 .unwrap_err()
+                .to_string()
                 .contains("ambiguous")
         );
     }
@@ -152,7 +153,7 @@ fn endpoint_translation_alone_cannot_hide_an_internal_aperture_hole() {
     )
     .unwrap();
     assert!(requirements.is_empty());
-    // A complete affine mapping cannot qualify an overlapping fragment
+    // A complete affine mapping cannot check an overlapping fragment
     // whose priority could change an interior byte's translation.
     inventory.ranges = vec![
         (binding.physical, binding.physical, binding.bytes),
@@ -171,7 +172,7 @@ fn endpoint_translation_alone_cannot_hide_an_internal_aperture_hole() {
 }
 
 #[test]
-fn partial_trailing_register_cells_cannot_qualify_an_exact_native_view() {
+fn partial_trailing_register_cells_cannot_check_an_native_view() {
     for binding in T8112 {
         for trailing in [1, 4, 8, 15, 16] {
             let mut reg = [binding.physical, binding.bytes]

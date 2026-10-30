@@ -1,4 +1,4 @@
-//! Retain the platform entropy capability behind the protocol provider's trait.
+//! Keep the platform entropy capability behind the protocol provider's trait.
 use alloc::sync::Arc;
 use stela_drivers::entropy::Entropy;
 use stela_tls::{EntropySource, ProviderOwner};
@@ -12,9 +12,9 @@ impl EntropySource for OwnedEntropy {
     }
 }
 
-/// The returned owner retains the original secure source, including its failure
-/// and unchanged-output contract. The boot composition must retain this exact
-/// owner for its whole provider lifetime; this does not supply time authority.
+/// The returned owner keeps the original secure source, including its failure
+/// and unchanged-output contract. The boot composition must keep this exact
+/// owner for its whole provider lifetime; this does not supply time permission.
 pub fn provider_owner(entropy: Arc<dyn Entropy>) -> ProviderOwner {
     ProviderOwner::new(Arc::new(OwnedEntropy(entropy)))
 }
@@ -30,7 +30,7 @@ mod tests {
         }
     }
     #[test]
-    fn original_source_is_retained_and_failure_preserves_output() {
+    fn original_source_is_kept_and_failure_preserves_output() {
         let source: Arc<dyn Entropy> = Arc::new(Refusing);
         let weak = Arc::downgrade(&source);
         let adapter = OwnedEntropy(source.clone());

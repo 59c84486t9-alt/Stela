@@ -3,10 +3,12 @@
 //! runs the host drivers, owns them, and their domains refuse other
 //! processors and interrupt handlers.
 use super::CLAIMED_DISPLAYS;
+use crate::Result;
 use crate::{native_mmio, output};
-use alloc::{boxed::Box, format, string::String, sync::Arc, vec, vec::Vec};
+use alloc::{boxed::Box, format, sync::Arc, vec, vec::Vec};
 use core::{cell::RefCell, ops::Range, ptr::NonNull};
 use stela_boot_core::remapping::{self, Present};
+use stela_contracts::refuse;
 use stela_drivers::{
     Clock,
     bus::{
@@ -205,10 +207,11 @@ unsafe fn inspect(
     mut function: Function<OwnedConfig>,
     base: u64,
     ivrs: &Ivrs<'_>,
-) -> Result<FunctionInspection, String> {
+) -> Result<FunctionInspection> {
     let mut refusals = Vec::new();
     for bytes in APERTURES {
-        let span = PhysicalSpan::new(base, bytes).map_err(|error| format!("span {error:?}"))?;
+        let span =
+            PhysicalSpan::new(base, bytes).map_err(|error| refuse!("span {error}", ?error))?;
         // SAFETY: forwarded; the IVHD names these registers.
         let resource = match unsafe { mmio.claim_platform(span) } {
             Ok(resource) => resource,
@@ -226,7 +229,7 @@ unsafe fn inspect(
                 CacheAttribute::Uncached,
                 Protection::ReadWrite,
             )
-            .map_err(|error| format!("mapping {error:?}"))?;
+            .map_err(|error| refuse!("mapping {error}", ?error))?;
         let inputs = Inputs {
             function,
             mappings: vec![mapping],
@@ -240,18 +243,20 @@ unsafe fn inspect(
                 // Release the aperture so the next size can claim it.
                 for mut mapping in inputs.mappings {
                     // SAFETY: the refused inspection was the mapping's only use.
-                    unsafe { mapping.retire() }.map_err(|error| format!("unmap {error:?}"))?;
+                    unsafe { mapping.retire() }
+                        .map_err(|error| refuse!("unmap {error}", ?error))?;
                 }
                 let authority = mmio.authority();
                 authority
                     .register_resource(resource)
                     .and_then(|id| authority.unregister_resource(id))
-                    .map_err(|error| format!("release {error:?}"))?;
+                    .map_err(|error| refuse!("release {error}", ?error))?;
             }
         }
     }
-    Err(format!(
-        "its function or registers did not match the IVRS: {refusals:?}"
+    Err(refuse!(
+        "its function or registers did not match the IVRS: {refusals}",
+        ?refusals
     ))
 }
 

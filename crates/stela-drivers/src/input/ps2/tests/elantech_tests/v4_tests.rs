@@ -1,4 +1,4 @@
-//! Actual v4 configuration, five-contact I/O, retained failures and software MT.
+//! V4 configuration, five-contact I/O, kept failures and software MT.
 use super::*;
 
 fn target_v4(firmware: u32) -> (Controller<Model, Time>, Rc<RefCell<Hardware>>) {
@@ -166,7 +166,7 @@ fn v4_five_contacts_oldest_pointer_middle_buttons_and_invalid_ids_follow_source(
 }
 
 #[test]
-fn v4_every_query_loss_and_late_byte_retains_progress_and_never_replays_or_enables() {
+fn v4_query_byte_faults_never_replay() {
     for query in 1..=8 {
         for byte in 0..3 {
             for late in [false, true] {
@@ -197,7 +197,7 @@ fn v4_every_query_loss_and_late_byte_retains_progress_and_never_replays_or_enabl
 }
 
 #[test]
-fn v4_rate_restore_late_ack_retains_both_real_mode_writes_without_claiming_current_mode() {
+fn v4_rate_restore_late_ack_keeps_both_real_mode_writes_without_claiming_current_mode() {
     let (mut c, h) = target_v4(0x381f17);
     {
         let mut hw = h.borrow_mut();
@@ -225,7 +225,7 @@ fn v4_rate_restore_late_ack_retains_both_real_mode_writes_without_claiming_curre
 #[test]
 fn v4_tracking_wrap_preserves_oldest_contact_and_exact_source_counter() {
     let (mut c, h) = configured(0x060001);
-    // Advance the genuine owner through actual framed heads/releases rather
+    // Advance the owner through framed heads/releases rather
     // than injecting a tracking counter into production state.
     for _ in 0..65534 {
         read_frame(&mut c, &h, packet(false, 1, 1));
@@ -248,7 +248,7 @@ fn v4_tracking_wrap_preserves_oldest_contact_and_exact_source_counter() {
 }
 
 #[test]
-fn v4_late_mode_effect_backpressure_bad_signature_and_stop_are_retained() {
+fn v4_late_mode_effect_backpressure_bad_signature_and_stop_are_kept() {
     let (mut c, h) = target_v4(0x060001);
     h.borrow_mut().elantech.as_mut().unwrap().late_write = Some(7);
     let error = c.initialize().unwrap_err();
@@ -340,7 +340,7 @@ fn v4_geometry_and_signature_refusals_precede_mode_or_preserve_exact_bad_packet(
 
 #[test]
 #[ignore = "oracle: STELA_ELANTECH_V4_CONTROLS_ORACLE"]
-fn unchanged_linux_v4_configuration_matches_actual_mode_rate_and_register_transactions() {
+fn unchanged_linux_v4_configuration_matches_mode_rate_and_register_transactions() {
     extern crate std;
     let records =
         std::fs::read_to_string(std::env::var("STELA_ELANTECH_V4_CONTROLS_ORACLE").unwrap())
@@ -428,7 +428,7 @@ fn unchanged_linux_v4_configuration_matches_actual_mode_rate_and_register_transa
 
 #[test]
 #[ignore = "oracle: STELA_ELANTECH_V4_REPORTS_ORACLE"]
-fn unchanged_linux_v4_reports_and_mt_policy_match_actual_configured_i8042_device() {
+fn unchanged_linux_v4_reports_and_mt_policy_match_configured_i8042_device() {
     extern crate std;
     let records =
         std::fs::read_to_string(std::env::var("STELA_ELANTECH_V4_REPORTS_ORACLE").unwrap())

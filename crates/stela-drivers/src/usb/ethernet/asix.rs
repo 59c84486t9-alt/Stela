@@ -51,7 +51,7 @@ fn request<C: Control>(
     if !*accessible {
         return Err(BlockError::Unsupported("ASIX register access poisoned"));
     }
-    let request = crate::usb::xhci::setup(
+    let request = crate::usb::descriptor::setup(
         if read { 0xc0 } else { 0x40 },
         command,
         value,
@@ -168,7 +168,7 @@ impl<C: Control> Chip<C> {
             chip.mac_write(AX_PHYPWR_RSTCTL, 2, power | AX_PHYPWR_RSTCTL_AT)?;
         }
         // The internal PHY's standard identification words must be readable.
-        // Their complete value is retained rather than replaced with a rebrand
+        // Their complete value is held rather than replaced with a rebrand
         // assumption. UA1/UA2 handling comes from GENERAL_STATUS below.
         chip.phy_id =
             (u32::from(chip.phy_read(MII_PHYSID1)?) << 16) | u32::from(chip.phy_read(MII_PHYSID2)?);

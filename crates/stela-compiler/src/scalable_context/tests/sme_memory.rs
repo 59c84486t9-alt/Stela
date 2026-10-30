@@ -4,8 +4,6 @@ use crate::aarch64::sme::memory::{self as sme_memory, Operand as SmeMemoryOperan
 use alloc::vec;
 use alloc::vec::Vec;
 
-const RET_X30: u32 = 0xd65f_03c0;
-const NOP: u32 = 0xd503_201f;
 const GUEST_BASE: GuestAddress = GuestAddress(0x1000);
 const BASE_REGISTER_SHIFT: u32 = 5;
 const BASE_REGISTER_MASK: u32 = 31 << BASE_REGISTER_SHIFT;
@@ -142,25 +140,8 @@ fn every_form_dispatches_exact_body_and_source_map() {
             GUEST_BASE.0,
         )
         .unwrap();
-        assert_eq!(
-            &native.x86_64_code[..CONTEXT_WRAPPER_BYTES],
-            context_wrapper()
-        );
-        assert_eq!(
-            native.source_map,
-            [
-                (GUEST_BASE, CONTEXT_WRAPPER_BYTES),
-                (
-                    GuestAddress(GUEST_BASE.0 + INSTRUCTION_BYTES as u64),
-                    CONTEXT_WRAPPER_BYTES + expected.len()
-                )
-            ]
-        );
-        assert_eq!(
-            &native.x86_64_code[CONTEXT_WRAPPER_BYTES..native.source_map[1].1],
-            expected
-        );
-        assert_eq!(&native.x86_64_code[native.source_map[1].1..], [RET]);
+
+        assert_single_body(&native, GUEST_BASE, &expected);
         assert_eq!(
             crate::testing::context_leaf_memory(&bytes, GUEST_BASE, profile, target()).unwrap(),
             x86_64::sme::memory::requirements(&operand)
@@ -306,7 +287,7 @@ fn complete_body_requirements_fold_every_memory_instruction() {
 // Append to scalable_context/sme_memory_tests.rs; reuse its source/profile/target helpers.
 
 #[test]
-fn prepared_memory_metadata_retains_per_pc_features_helpers_and_quantities() {
+fn prepared_memory_metadata_keeps_per_pc_features_helpers_and_quantities() {
     use crate::aarch64::scalable::execution::{
         GuestMemoryQuantity, ScalableAccessCheck, ScalableAccessRequirements,
     };

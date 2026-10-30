@@ -1,4 +1,4 @@
-//! Independent SMBus peripheral: actual count-bearing responses and commands.
+//! Independent SMBus peripheral: count-bearing responses and commands.
 use super::super::InterruptError;
 use super::*;
 use crate::bus::smbus as wire;
@@ -102,7 +102,7 @@ impl Bus for Wire {
             _ => panic!("wrong SMBus protocol"),
         }
         // A destructive read or mutation has already happened, but host
-        // outputs are committed only on actual successful completion.
+        // outputs are committed only on successful completion.
         if h.fail_operation == Some(h.effects.len()) {
             return Err(failure());
         }
@@ -218,7 +218,7 @@ fn elan_smbus_real_hello_enable_queries_and_metadata_have_no_i2c_descriptors() {
     assert_eq!(d.initialize().unwrap_err().kind, ErrorKind::AlreadyActive);
 }
 #[test]
-fn elan_smbus_all_sparse_contact_packets_preserve_actual_payload_without_padding() {
+fn elan_smbus_all_sparse_contact_packets_preserve_payload_without_padding() {
     let h = hardware();
     let mut d = device(&h);
     d.initialize().unwrap();
@@ -283,7 +283,7 @@ fn elan_smbus_short_trackpoint_and_full_trackpoint_counts_are_distinct() {
     }
 }
 #[test]
-fn elan_smbus_strict_lengths_hello_and_actual_mode_are_not_zero_filled_successes() {
+fn elan_smbus_strict_lengths_hello_and_mode_are_not_zero_filled_successes() {
     for command in [0xa7, 0xa3, 0xa1, 0xae, 0xac, 0xad, 0xa0, 0xa2, 0xa4] {
         for length in 1..=32 {
             let h = hardware();
@@ -351,7 +351,7 @@ fn elan_smbus_all_initialization_late_faults_remain_uncertain_without_replay() {
     }
 }
 #[test]
-fn elan_smbus_sleep_resume_enable_preserves_actual_pending_queue_and_identity() {
+fn elan_smbus_sleep_resume_enable_preserves_pending_queue_and_identity() {
     let h = hardware();
     let mut d = device(&h);
     let packet = ordinary(16, 7, 255);

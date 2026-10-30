@@ -1,4 +1,4 @@
-//! Native wire controls. All use actual xHC DMA rings, events and stop/dequeue.
+//! Native wire controls. All use xHC DMA rings, events and stop/dequeue.
 use super::*;
 use crate::usb::xhci::{HIGH_SPEED, SUPER_SPEED, model};
 use alloc::{rc::Rc, vec};
@@ -20,7 +20,7 @@ fn fixture(memory: &mut [u64], speed: u8, context: usize, streams: u16) -> Fixtu
         .unwrap()
         .set_configuration(1)
         .unwrap();
-    let interface = crate::usb::xhci::interfaces(&device.configuration).remove(0);
+    let interface = crate::usb::descriptor::interfaces(&device.configuration).remove(0);
     let binding = Binding::new(&device, &interface).unwrap();
     let host = if speed == SUPER_SPEED && streams == 1 {
         let endpoints = binding.endpoints();
@@ -47,7 +47,7 @@ fn fixture(memory: &mut [u64], speed: u8, context: usize, streams: u16) -> Fixtu
             binding,
         }
     } else {
-        // SAFETY: this fixture exclusively owns the actual interface/endpoints.
+        // SAFETY: this fixture exclusively owns the interface/endpoints.
         unsafe { Host::new(controller, &device, binding, &mut dma) }.unwrap()
     };
     (host, hardware, dma)
@@ -142,7 +142,7 @@ fn native_abort_task_requires_response_and_separate_pending_data_retirement() {
     }
 }
 #[test]
-fn native_abort_task_negative_short_old_tag_and_missing_responses_retain_original_dma() {
+fn native_abort_task_negative_short_old_tag_and_missing_responses_keep_original_dma() {
     use model::UasAbortFault as F;
     for speed in [HIGH_SPEED, SUPER_SPEED] {
         for fault in [
@@ -245,7 +245,7 @@ fn native_abort_uses_distinct_allocated_stream_and_fences_all_later_tag_reuse() 
     for streams in [1, 2] {
         let mut memory = vec![0u64; 512 * 1024];
         let (mut host, hardware, _) = fixture(&mut memory, SUPER_SPEED, 64, streams);
-        // With two actual streams an ordinary completed command first consumes
+        // With two streams an ordinary completed command first consumes
         // tag1; the outstanding CDB then uses2 and the TMF must use free stream1.
         if streams == 2 {
             assert!(host.command(LUN, &[0; 6], Data::None).is_ok());
@@ -291,7 +291,7 @@ fn native_abort_invalid_deadline_and_ordinary_success_have_no_recovery_effects()
     assert!(hardware.borrow().uas_abort_requests().is_empty());
 }
 
-/// Construct actual native outstanding IO up to the same Command/READY receipts
+/// Construct native outstanding IO up to the same Command/READY receipts
 /// as the production command loop; stop before its deadline to snapshot owners.
 fn outstanding(host: &mut Host, hardware: &Rc<RefCell<model::ResetHardware>>) {
     hardware.borrow_mut().hang_next = true;
@@ -366,7 +366,7 @@ fn native_abort_stale_generation_refuses_before_mmio_and_dma_rewrite() {
     let (mut host, hardware, mut dma) = fixture(&mut memory, SUPER_SPEED, 64, 2);
     outstanding(&mut host, &hardware);
     let controller = host.engine.io.controller.clone();
-    // SAFETY: this fixture owns the sole actual UAS interface and all its DCIs.
+    // SAFETY: this fixture owns the sole UAS interface and all its DCIs.
     let fresh = unsafe {
         controller.borrow_mut().reset_and_reuse_root(
             &host.device,
@@ -396,7 +396,7 @@ fn native_abort_foreign_controller_identity_refuses_before_mmio_and_dma_rewrite(
     outstanding(&mut host, &hardware);
     let mut foreign_memory = vec![0u64; 512 * 1024];
     let (foreign, _, _) = fixture(&mut foreign_memory, HIGH_SPEED, 32, 2);
-    // This is another actual native controller's opaque identity, not a forged
+    // This is another native controller's opaque identity, not a forged
     // numeric slot or caller-supplied generation.
     host.engine.io.id = foreign.device.id;
     let snapshot = contents(&host);

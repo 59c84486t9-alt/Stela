@@ -1,0 +1,42 @@
+[package]
+name = "stela-soc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = ["std"]
+# Fixtures the runtime's restore tests drive the USB session through.
+test-support = []
+native-profile = ["stela-contracts/native-profile", "stela-engine/native-profile"]
+std = ["stela-soc-data/std", "stela-engine/std", "stela-contracts/std", "stela-formats/std", "stela-compiler/std"]
+
+[dependencies]
+stela-soc-data = { path = "../stela-soc-data", default-features = false }
+stela-engine = { path = "../stela-engine", default-features = false }
+stela-contracts = { path = "../stela-contracts", default-features = false }
+stela-crypto = { path = "../stela-crypto" }
+stela-formats = { path = "../stela-formats", default-features = false }
+stela-compiler = { path = "../stela-compiler", default-features = false }
+stela-drivers = { path = "../stela-drivers" }
+# SHA-384 for SEP evidence; SHA-1/SHA-256 and AES are stela-crypto's.
+sha2 = { version = "0.10", default-features = false }
+# SEP root derivations and secret lifetime; both work without std.
+hmac = { version = "0.12", default-features = false }
+zeroize = { version = "1.9", default-features = false, features = ["alloc"] }
+# Stela-owned SEP system identity keys; constant-time no_std curve arithmetic.
+p256 = { version = "0.13.2", default-features = false, features = ["arithmetic", "ecdsa"] }
+hex = { version = "0.4", default-features = false, features = ["alloc"] }
+
+[dev-dependencies]
+stela-soc-data = { path = "../stela-soc-data", features = ["test-support"] }
+stela-engine = { path = "../stela-engine", features = ["test-support"] }
+stela-formats = { path = "../stela-formats", features = ["test-support"] }
+stela-contracts = { path = "../stela-contracts", features = ["test-support"] }
+# The drivers' RAM disk, which the USB mass-storage peer tests run on.
+stela-drivers = { path = "../stela-drivers", features = ["ram-disk"] }
+# An independent AES the cipher models are checked against.
+aes = { version = "0.8", default-features = false }

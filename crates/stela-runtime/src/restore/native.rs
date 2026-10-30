@@ -1,9 +1,10 @@
 //! Translate the native mux API's empty windows into Pending, not EOF. This
 //! adapter only borrows the USB service for the current scheduler poll.
 use super::{Error, Result, driver::Ports};
-use crate::machine::apple::{MuxState, MuxStream, MuxStreamState, UsbClient};
 use core::task::Poll;
-fn transport(error: &'static str) -> Error {
+use stela_contracts::Refusal;
+use stela_soc::machine::{MuxState, MuxStream, MuxStreamState, UsbClient};
+fn transport(error: impl Into<Refusal>) -> Error {
     Error::Transport(error.into())
 }
 impl Ports for UsbClient<'_> {
@@ -77,8 +78,8 @@ impl Ports for UsbClient<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::usb::{
-        mux::{Mux, tests::connected},
+    use stela_soc::usb::{
+        mux::{Mux, test_support::connected},
         session::Session,
     };
     #[test]
@@ -98,7 +99,7 @@ mod tests {
         assert_eq!(client.state(other), Ok(MuxStreamState::Connecting));
         assert!(Ports::read(&mut client, other, &mut bytes).is_pending());
         assert!(Ports::write(&mut client, other, b"x").is_pending());
-        // Fill the actual bounded mux queue/window. Zero must become Pending.
+        // Fill the bounded mux queue/window. Zero must become Pending.
         let mut blocked = false;
         for _ in 0..1000 {
             match Ports::write(&mut client, id, b"x") {
@@ -116,7 +117,7 @@ mod tests {
         assert_eq!(client.state(other), Ok(MuxStreamState::Connecting));
         assert!(Ports::read(&mut client, id, &mut bytes).is_pending());
         // A fresh real mux lets us verify close/release without draining the
-        // deliberately full transmit queue used above.
+        // full transmit queue used above.
         let (mux, id) = connected();
         let mut session = Session::test_mux(mux);
         let mut client = UsbClient::test_session(&mut session);

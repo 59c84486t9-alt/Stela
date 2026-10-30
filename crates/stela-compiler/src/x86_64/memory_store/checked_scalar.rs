@@ -382,7 +382,7 @@ mod tests {
     use crate::{GuestAddress, Lifter, aarch64::Decoder};
 
     #[test]
-    fn profiled_register_offset_counts_actual_aliased_frame_loads_and_sp_check() {
+    fn profiled_register_offset_counts_aliased_frame_loads_and_sp_check() {
         let operand = Operand::from_operation(
             &Operation::MemoryRegisterOffset(crate::aarch64::register_offset::Operand {
                 transfer: MemoryTransfer::Store,

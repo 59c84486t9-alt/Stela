@@ -3,7 +3,9 @@
 //! firmware's boot menu (UEFI 2.10 §3.1.3 `Boot####` load options, §3.3
 //! `BootOrder`). `stela.efi` starts one by naming it in `BootNext` and
 //! restarting, so the firmware boots it exactly as it would itself.
+use crate::Result;
 use alloc::{format, string::String, vec::Vec};
+use stela_contracts::refuse;
 
 /// `LOAD_OPTION_ACTIVE`: the firmware boots the entry.
 const ACTIVE: u32 = 0x1;
@@ -30,18 +32,18 @@ pub struct LoadOption {
 }
 
 impl LoadOption {
-    pub fn parse(bytes: &[u8]) -> Result<Self, &'static str> {
+    pub fn parse(bytes: &[u8]) -> Result<Self> {
         let attributes = u32::from_le_bytes(
             bytes
                 .get(..4)
-                .ok_or("a boot entry is shorter than its header")?
+                .ok_or(refuse!("a boot entry is shorter than its header"))?
                 .try_into()
                 .unwrap(),
         );
         let list_bytes = u16::from_le_bytes(
             bytes
                 .get(4..6)
-                .ok_or("a boot entry is shorter than its header")?
+                .ok_or(refuse!("a boot entry is shorter than its header"))?
                 .try_into()
                 .unwrap(),
         ) as usize;
@@ -50,7 +52,7 @@ impl LoadOption {
         loop {
             let unit = bytes
                 .get(at..at + 2)
-                .ok_or("a boot entry's description is not terminated")?;
+                .ok_or(refuse!("a boot entry's description is not terminated"))?;
             at += 2;
             match u16::from_le_bytes([unit[0], unit[1]]) {
                 0 => break,
@@ -67,7 +69,7 @@ impl LoadOption {
             .into();
         let list = bytes
             .get(at..at + list_bytes)
-            .ok_or("a boot entry's device path runs past it")?;
+            .ok_or(refuse!("a boot entry's device path runs past it"))?;
         Ok(Self {
             attributes,
             description,
@@ -111,7 +113,7 @@ pub fn variable(number: u16) -> String {
 
 /// A device path's first instance up to its end node; refuses a node
 /// shorter than its header or running past the path.
-fn first_instance(path: &[u8]) -> Result<&[u8], &'static str> {
+fn first_instance(path: &[u8]) -> Result<&[u8]> {
     let mut at = 0;
     while let Some(header) = path.get(at..at + 4) {
         if header[0] == END {
@@ -119,11 +121,11 @@ fn first_instance(path: &[u8]) -> Result<&[u8], &'static str> {
         }
         let length = u16::from_le_bytes([header[2], header[3]]) as usize;
         if length < 4 || at + length > path.len() {
-            return Err("a boot entry's device path has a malformed node");
+            return Err(refuse!("a boot entry's device path has a malformed node").into());
         }
         at += length;
     }
-    Err("a boot entry's device path has no end node")
+    Err(refuse!("a boot entry's device path has no end node").into())
 }
 
 /// The GPT partition GUID a path's hard drive node names.

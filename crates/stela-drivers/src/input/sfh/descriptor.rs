@@ -2,7 +2,7 @@
 //! AMD SFH HID descriptors from the pinned Linux donor. Acceleration motion
 //! and ordinary ALS color usages are omitted: the source supplies no values.
 //! Signed acceleration X/Y maxima are corrected to i32::MAX, as for Z.
-//! ACS retains the complete source light/color descriptor. See ../THIRD_PARTY.md.
+//! ACS keeps the complete source light/color descriptor. See ../THIRD_PARTY.md.
 //! Copyright 2020-2021 Advanced Micro Devices, Inc.
 //! Authors: Nehal Bakulchandra Shah, Sandeep Singh, Basavaraj Natikar.
 pub(super) const ACCEL3_REPORT_DESCRIPTOR: &[u8] = &[

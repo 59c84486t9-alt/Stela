@@ -1,5 +1,7 @@
 //! Immutable SMC key/wake geometry and original RTC helper interface.
-//! These fields grant no oscillator, wake-delivery or SRAM authority.
+//! These fields grant no oscillator, wake-delivery or SRAM permission.
+use crate::Result;
+use stela_contracts::refuse;
 pub const SRAM_BYTES: u64 = 0x4000;
 pub const WATCHDOG_BYTES: u64 = 0x14;
 pub const fn code(name: &[u8; 4]) -> u32 {
@@ -29,11 +31,11 @@ pub enum RtcKeyProfile {
 impl RtcKeyProfile {
     /// Match the complete original helper descriptor to its resolved SMC PMU
     /// provider. A phandle alone cannot assign a key or an oscillator owner.
-    pub fn from_function(cells: &[u32], provider: u32) -> Result<Self, &'static str> {
+    pub fn from_function(cells: &[u32], provider: u32) -> Result<Self> {
         if provider != 0 && cells == [provider, code(b"keyR"), RTC_KEY] {
             Ok(Self::Hex48Little)
         } else {
-            Err("SMC RTC helper/provider descriptor is unqualified")
+            Err(refuse!("SMC RTC helper/provider descriptor is unqualified"))
         }
     }
 }

@@ -110,7 +110,11 @@ fn fixture(
     (device, catalog, replies)
 }
 fn binding(device: &xhci::Device) -> Binding {
-    Binding::new(device, &xhci::interfaces(&device.configuration)[0]).unwrap()
+    Binding::new(
+        device,
+        &crate::usb::descriptor::interfaces(&device.configuration)[0],
+    )
+    .unwrap()
 }
 fn hci(sub: u16) -> Hci<Model> {
     let (device, _, _) = fixture(sub);
@@ -122,7 +126,7 @@ fn hci(sub: u16) -> Hci<Model> {
 }
 
 #[test]
-fn broadcom_diagnostic_controls_preserve_actual_wire_and_usb_record_boundaries() {
+fn broadcom_diagnostic_controls_preserve_wire_and_usb_record_boundaries() {
     for sub in [0x2105, 0x220e, 0x410e] {
         let mut owner = Session::start(hci(sub), &mut NoDma).unwrap();
         assert_eq!(owner.pair().input.address, 0x83);
@@ -182,7 +186,7 @@ fn broadcom_diagnostic_binding_and_initialization_refuse_before_native_start() {
 }
 
 #[test]
-fn broadcom_diagnostic_read_error_retains_prior_hci_and_enable_error_retains_delivery_history() {
+fn broadcom_diagnostic_read_error_keeps_prior_hci_and_enable_error_keeps_delivery_history() {
     let mut owner = Session::start(hci(0x220e), &mut NoDma).unwrap();
     owner.set_enabled(true).unwrap();
     owner.hci.io.fail_write = true;
@@ -264,7 +268,7 @@ fn broadcom_diagnostic_real_native_bulk_mode_records_and_failed_retirement_own_d
     for fault in 0..3 {
         let mut backing = vec![0u64; 128 * 1024];
         let start = backing.as_mut_ptr() as u64;
-        // SAFETY: exclusively retained aligned fixture backing outlives DMA.
+        // SAFETY: exclusively kept aligned fixture backing outlives DMA.
         let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
         let (controller, model) = xhci::model::cancellation_controller(&mut dma);
         let controller = Rc::new(RefCell::new(controller));
@@ -359,7 +363,7 @@ fn broadcom_diagnostic_reentrant_allocator_cannot_retire_foreign_endpoint_or_dma
             if self.foreign.borrow().is_none() {
                 let mut controller = self.controller.borrow_mut();
                 let mut device = controller.device(self.id)?;
-                // This is a distinct actual endpoint owner, installed only
+                // This is a distinct endpoint owner, installed only
                 // after the diagnostic adapter's allocation admission check.
                 device.configure(&[self.endpoint], None, self.dma)?;
                 let mut foreign = self.dma.allocate(64, 64)?;
@@ -377,7 +381,7 @@ fn broadcom_diagnostic_reentrant_allocator_cannot_retire_foreign_endpoint_or_dma
     }
     let mut backing = vec![0u64; 128 * 1024];
     let start = backing.as_mut_ptr() as u64;
-    // SAFETY: exclusively retained fixture memory outlives both native owners.
+    // SAFETY: exclusively kept fixture memory outlives both native owners.
     let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
     let (controller, model) = xhci::model::cancellation_controller(&mut dma);
     let controller = Rc::new(RefCell::new(controller));

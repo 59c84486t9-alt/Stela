@@ -2,10 +2,7 @@
 // Copyright (C) 2015 Intel Corporation
 //! Broadcom USB Bluetooth identities: USB and HCI versions, chip names and patch-file names.
 use super::{Error, Result};
-use crate::{
-    firmware::Target,
-    usb::xhci::{Device, Interface},
-};
+use crate::{firmware::Target, usb::descriptor::Interface, usb::xhci::Device};
 use alloc::{format, string::String, vec::Vec};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -32,7 +29,7 @@ impl UsbIdentity {
 }
 
 /// Exact Linux btusb BCM_PATCHRAM vendor/interface entries. This is candidate
-/// admission only; genuine HCI version/manufacturer still binds firmware.
+/// admission only; HCI version/manufacturer still binds firmware.
 pub fn is_vendor_interface(device: &Device, interface: &Interface) -> bool {
     let usb = UsbIdentity::read(device);
     interface.number == 0
@@ -56,7 +53,7 @@ pub fn is_vendor_interface(device: &Device, interface: &Interface) -> bool {
 
 pub(super) fn is_candidate(device: &Device) -> bool {
     let usb = UsbIdentity::read(device);
-    crate::usb::xhci::interfaces(&device.configuration)
+    crate::usb::descriptor::interfaces(&device.configuration)
         .iter()
         .any(|i| {
             is_vendor_interface(device, i)
@@ -112,7 +109,7 @@ pub struct Identity {
     pub verbose: [u8; 7],
     pub features: [u8; 9],
     pub local_name: Vec<u8>,
-    /// Actual fc5a response, may differ from descriptor identity; no substitution.
+    /// Fc5a response, may differ from descriptor identity; no substitution.
     pub product: [u8; 5],
 }
 impl Identity {

@@ -5,8 +5,6 @@ use crate::context::memory::{SpAlignmentRequirement, flags, host_caps, profile_r
 use alloc::vec;
 use alloc::vec::Vec;
 
-const RET_X30: u32 = 0xd65f_03c0;
-const NOP: u32 = 0xd503_201f;
 const LD1D_Z0_Z1_PN8_X5_X0: u32 = 0xa000_60a0;
 const LD1D_Z0_Z1_PN8_SP: u32 = 0xa040_63e0;
 const STNT1B_Z0_Z3_PN8_X5: u32 = 0xa060_80a1;
@@ -116,25 +114,8 @@ fn multi_forms_dispatch_exact_bodies_and_maps_at_vector_length_boundaries() {
                 TargetCpu::Baseline,
                 GUEST_BASE.0,
             );
-            assert_eq!(
-                &native.x86_64_code[..CONTEXT_WRAPPER_BYTES],
-                context_wrapper()
-            );
-            assert_eq!(
-                native.source_map,
-                [
-                    (GUEST_BASE, CONTEXT_WRAPPER_BYTES),
-                    (
-                        GuestAddress(GUEST_BASE.0 + INSTRUCTION_BYTES as u64),
-                        CONTEXT_WRAPPER_BYTES + expected.len()
-                    ),
-                ]
-            );
-            assert_eq!(
-                &native.x86_64_code[CONTEXT_WRAPPER_BYTES..native.source_map[1].1],
-                expected
-            );
-            assert_eq!(&native.x86_64_code[native.source_map[1].1..], [RET]);
+
+            assert_single_body(&native, GUEST_BASE, &expected);
             assert_eq!(
                 crate::testing::context_leaf_memory(
                     &bytes,
@@ -208,7 +189,7 @@ fn multi_requirements_fold_every_effect_and_preserve_four_argument_descriptor() 
 }
 
 #[test]
-fn multi_scan_and_compile_share_reserved_mode_and_feature_declines() {
+fn scan_and_compile_decline_the_same_multi_vector_loads() {
     let length = VectorLength::from_bytes(16).unwrap();
     let sme_without_sme2 = ScalableProfile::new_with_features(
         length,

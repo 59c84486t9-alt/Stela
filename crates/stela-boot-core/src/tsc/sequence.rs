@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! Fail-sticky arithmetic for a single counter/control observation stream.
 //! This is model data, not a CPU lease, calibrated clock or watchdog. The native
-//! owner must supply genuinely ordered samples from its retained CPU, establish
+//! owner must supply ordered samples from its CPU, establish
 //! rate/reference reliability and service any required reference watchdog. A
 //! successful comparison never proves reference identity or time continuity.
 use super::{Error, RateWindow, RationalRate};
@@ -16,7 +16,7 @@ pub struct CounterSequence {
     failure: Option<Error>,
 }
 impl CounterSequence {
-    /// Start at zero elapsed time. `adjustment` is the actual observed control
+    /// Start at zero elapsed time. `adjustment` is the observed control
     /// when supported; absence is not a substitute for a reference watchdog.
     pub fn new(rate: RationalRate, initial: u64, adjustment: Option<u64>) -> Result<Self, Error> {
         rate.hz()?;
@@ -63,9 +63,9 @@ impl CounterSequence {
         self.elapsed_ns = elapsed_ns;
         Ok(elapsed_ns)
     }
-    /// Validate a separately obtained rate window against the exact retained
+    /// Validate a separately obtained rate window against the kept
     /// rational rate. This comparison does not attest that the reference sample
-    /// was timely, continuous, independent or from the same retained source.
+    /// was timely, continuous, independent or from the same source.
     pub fn compare_reference(&mut self, observed: RateWindow) -> Result<(), Error> {
         self.elapsed_ns()?;
         if !observed.contains_rate(self.rate) {

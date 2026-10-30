@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! One actual native epoch. IRQ callbacks mask; a sole process owner speaks IPC.
+//! One native epoch. IRQ callbacks mask; a sole process owner speaks IPC.
 use super::{
     descriptor,
     protocol::{Engine, Frame},
@@ -26,20 +26,20 @@ use core::{
     sync::atomic::{AtomicBool, AtomicU32, Ordering},
 };
 
-/// Actual retained original config owner, or the explicit native register peer.
+/// Original config owner, or the explicit native register peer.
 /// # Safety
 /// Native reads/writes use the sole original config mapping and real BDF under
 /// its exclusive reset/resource/root epoch; no alias/config writer may race.
 pub unsafe trait Configuration: MsiConfigSpace + 'static {
     fn owned_address(&self) -> Address;
 }
-// SAFETY: OwnedConfig supplies actual original exclusive mapped native config.
+// SAFETY: OwnedConfig supplies original exclusive mapped native config.
 unsafe impl Configuration for OwnedConfig {
     fn owned_address(&self) -> Address {
         self.address()
     }
 }
-/// Actual monotonic advancing native clock, or an explicit advancing model.
+/// Monotonic advancing native clock, or an explicit advancing model.
 /// # Safety
 /// Includes time spent in native register/config/domain operations, never
 /// regresses, and advances in every admitted process/deferred wait context.
@@ -58,7 +58,7 @@ impl NativeClock {
         Ok(Self(clock))
     }
 }
-// SAFETY: constructor requires the actual calibrated invariant monotonic clock.
+// SAFETY: constructor requires the calibrated invariant monotonic clock.
 unsafe impl Time for NativeClock {
     fn now_us(&self) -> u64 {
         self.0.now_us()
@@ -80,7 +80,7 @@ pub struct Inputs<
 struct Signals {
     pending: AtomicBool,
     /// Register+1 of the first IRQ access/readback failure. This diagnostic does
-    /// not fabricate a process-context copy of an arbitrary backend error.
+    /// not invent a process-context copy of an arbitrary backend error.
     fault: AtomicU32,
     ever_armed: AtomicBool,
     terminal: AtomicBool,
@@ -153,7 +153,7 @@ struct NativeSource<C: Configuration, R: Registers> {
 }
 // SAFETY: fresh admission is independently stopped/drained. After any route
 // programming this source cannot claim posted-MSI completion: quiesce refuses
-// and every owner stays retained. No inferred barrier grants route reuse.
+// and every owner stays held. No inferred barrier grants route reuse.
 unsafe impl<C: Configuration, R: Registers> Source for NativeSource<C, R> {
     fn mask(&mut self) -> core::result::Result<(), irq::IrqError> {
         let result = (|| {
@@ -188,7 +188,7 @@ unsafe impl<C: Configuration, R: Registers> Source for NativeSource<C, R> {
             .signals
             .ever_armed
             .store(true, Ordering::Release);
-        // SAFETY: exact typed route is owned and published by the actual registry.
+        // SAFETY: exact typed route is owned and published by the registry.
         let result = { unsafe { self.config.borrow_mut().msi.program(message) } };
         result.map_err(|e| {
             self.config
@@ -203,7 +203,7 @@ unsafe impl<C: Configuration, R: Registers> Source for NativeSource<C, R> {
             return Err(irq::IrqError::Mask);
         }
         // The controller remains masked until the sole process starts IPC.
-        // SAFETY: registry retains its actual callback/route and original owners.
+        // SAFETY: registry keeps its callback/route and original owners.
         let result = { unsafe { self.config.borrow_mut().msi.unmask() } };
         result.map_err(|e| {
             self.config
@@ -245,20 +245,20 @@ pub struct Native<
 }
 impl<C: Configuration, R: Registers, T: Time> Native<C, R, T> {
     /// # Safety
-    /// Inputs retain the actual exclusive native9d35 endpoint, original config,
+    /// Inputs keep the exclusive native9d35 endpoint, original config,
     /// complete UC BAR0, powered D0 root/resource/reset/firmware epoch and the
     /// requester's DMA domain, isolated or the passthrough domain, meeting the
     /// `DmaDomain` contract for its kind. No old DMA/postedMSI, IRQ/worker, alias,
     /// firmware or reset/removal user remains; this is independently drained,
-    /// never inferred from disabled bits. MSI routing is genuinely qualified.
-    /// The same retained root producer has examined the complete actual PCI
+    /// never inferred from disabled bits. MSI routing is checked.
+    /// The same root producer has examined the complete PCI
     /// inventory and excluded Intel a309/a30a Mehlow platforms, as original
     /// Linux probe requires. This constructor cannot establish that global fact;
     /// local IDs, a boolean or numeric token cannot substitute. No automatic
     /// producer or attachment is implied. One owning-CPU process serializes all
     /// service/stop; only the documented IRQ callback accesses shared registers.
-    /// Clock/domain/native access contracts remain valid for every retained owner.
-    /// Rejection returns exact original owners without any native write.
+    /// Clock/domain/native access contracts remain valid for every owner.
+    /// Rejection returns original owners without any native write.
     pub unsafe fn new(
         mut inputs: Inputs<C, R, T>,
     ) -> core::result::Result<Self, (Error, Inputs<C, R, T>)> {
@@ -496,7 +496,7 @@ impl<C: Configuration, R: Registers, T: Time> Native<C, R, T> {
             ));
         }
         // Original config owner enables BME only under the already attached real
-        // isolated domain. RMP2 remains0 until the actual route is published.
+        // isolated domain. RMP2 remains0 until the route is published.
         let observed = c.read16(4);
         if observed == u16::MAX {
             return Err(Error::Config(4));
@@ -508,7 +508,7 @@ impl<C: Configuration, R: Registers, T: Time> Native<C, R, T> {
         }
         let function = self.function.take().unwrap();
         let retained = self.retained.take().unwrap();
-        // SAFETY: same actual original owners; fresh IRQ/posted/drained epoch.
+        // SAFETY: same original owners; fresh IRQ/posted/drained epoch.
         let msi = match unsafe { MsiConfig::new(function, retained) } {
             Ok(msi) => msi,
             Err((e, (function, retained))) => {
@@ -663,12 +663,12 @@ impl<C: Configuration, R: Registers, T: Time> Native<C, R, T> {
         let result = self.exchange(command, device, Some(report_id), &[]);
         self.record(result)
     }
-    /// Return the actual bounded acknowledgement payload, including nonempty
+    /// Return the bounded acknowledgement payload, including nonempty
     /// firmware acknowledgements; do not invent an empty-response requirement.
     pub fn set_feature(&mut self, device: u8, bytes: &[u8]) -> Result<Vec<u8>> {
         self.set_report(device, ReportKind::Feature, bytes)
     }
-    /// Send a descriptor-qualified HID Output report through ISHTP SET_REPORT.
+    /// Send a descriptor-checked HID Output report through ISHTP SET_REPORT.
     /// Output and Feature reports share command 3; their layouts stay distinct.
     pub fn set_output(&mut self, device: u8, bytes: &[u8]) -> Result<Vec<u8>> {
         self.set_report(device, ReportKind::Output, bytes)
@@ -804,7 +804,7 @@ impl<C: Configuration, R: Registers, T: Time> Native<C, R, T> {
             self.transmit()?;
         }
         self.shared().mask()?;
-        // Bounded batch; another actual IRQ or service call drains a later batch.
+        // Bounded batch; another IRQ or service call drains a later batch.
         for _ in 0..64 {
             self.shared()
                 .signals
@@ -927,7 +927,7 @@ impl<C: Configuration, R: Registers, T: Time> Native<C, R, T> {
         };
         if let Some(c) = &self.config {
             // SAFETY: one terminal narrow BME-clear on original config, with all
-            // native mappings/domain/IRQ owners retained; no reset or release.
+            // native mappings/domain/IRQ owners kept; no reset or release.
             unsafe {
                 c.borrow_mut()
                     .disabled
@@ -942,9 +942,9 @@ impl<C: Configuration, R: Registers, T: Time> Native<C, R, T> {
         let host = read(self.regs(), HOST_COMM)?;
         store(self.regs(), HOST_COMM, host & !0x80)?;
         // SAFETY: submissions/firmware DMA are terminal and acknowledged idle;
-        // exact original domain/root/config/IRQ/mappings remain retained.
+        // original domain/root/config/IRQ/mappings remain held.
         unsafe { self.domain.as_ref().unwrap().drain_posted_writes() }.map_err(Error::Dma)?;
-        // Deliberately no registration.retire/release/unmap. Translated payload
+        // No registration.retire/release/unmap. Translated payload
         // completion does not drain already posted MSI on the original route.
         Err(Error::PostedMsiRetirementUnavailable)
     }
@@ -952,7 +952,7 @@ impl<C: Configuration, R: Registers, T: Time> Native<C, R, T> {
 impl<C: Configuration, R: Registers, T: Time> Drop for Native<C, R, T> {
     fn drop(&mut self) {
         // Neither Drop nor a failed stop can certify original posted-MSI/root
-        // completion. Preserve every actual uncertain owner, even after panic.
+        // completion. Preserve every uncertain owner, even after panic.
         if let Some(v) = self.registration.take() {
             core::mem::forget(v);
         }

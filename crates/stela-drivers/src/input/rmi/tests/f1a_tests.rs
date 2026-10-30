@@ -3,7 +3,7 @@ use super::*;
 fn install(h: &Rc<RefCell<Hardware>>) {
     let mut h = h.borrow_mut();
     h.memory[0xe8] = 0;
-    // Three actual F1A interrupt sources; all belong to the same record.
+    // Three F1A interrupt sources; all belong to the same record.
     h.memory[0x1e9..0x1ef].copy_from_slice(&[0x10, 0x30, 0x40, 0x80, 3, 0x1a]);
 }
 fn frame(poll: &InputPoll) -> &f1a::Frame {
@@ -75,7 +75,7 @@ fn f1a_requires_a_real_function_irq_and_verified_representable_button_count() {
     assert_eq!(h.borrow().memory[0x41], 1);
 }
 #[test]
-fn f1a_uses_one_mixed_attention_and_retains_complete_earlier_reports() {
+fn f1a_uses_one_mixed_attention_and_keeps_complete_earlier_reports() {
     let h = hardware();
     install(&h);
     super::f12_tests::install_f12(&h, 2);

@@ -42,7 +42,7 @@ fn frame(poll: &InputPoll) -> &f11::Frame {
 }
 
 #[test]
-fn f11_configures_real_control_bank_and_reports_exact_contacts_relative_and_tail() {
+fn f11_reports_contacts_from_configured_bank() {
     let h = hardware();
     let length = install(&h, 0x50, 7, &[0xff, 0x23, 0x45, 0xa5, 0x5a]);
     let mut d = control_device(&h);
@@ -212,7 +212,7 @@ fn mixed_f11_f12_consume_one_observed_attention_in_pdt_order() {
 }
 
 #[test]
-fn resume_rezero_waits_on_actual_clock_and_late_effect_error_never_replays() {
+fn resume_rezero_waits_on_clock_and_late_effect_error_never_replays() {
     let h = hardware();
     install(&h, 0, 0, &[]);
     let mut d = control_device(&h);

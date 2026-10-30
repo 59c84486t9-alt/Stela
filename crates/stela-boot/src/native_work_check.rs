@@ -1,6 +1,7 @@
 //! Opt-in native work execution proof, never an installed ACPICA provider.
-//! Uses genuine reserved LoaderData stack pages and the host-check's retained
+//! Uses reserved LoaderData stack pages and the host-check's kept
 //! BSP/root/IDT ownership. No interpreter, AP bootstrap, or mapper is invented.
+use crate::Result;
 use crate::{
     apic,
     paging::{NX, PAGE, PRESENT, Tables, WRITABLE},
@@ -14,8 +15,11 @@ use core::{
     ptr::NonNull,
     sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
 };
-use sha2::Digest;
+use stela_boot_core::work_check_fixture as fixture;
+use stela_contracts::Refusal;
+use stela_contracts::refuse;
 use stela_crypto::Sha256;
+use stela_crypto::digest::Digest;
 use stela_drivers::{
     Clock,
     platform::work::{
@@ -24,8 +28,7 @@ use stela_drivers::{
 };
 use stela_engine::freestanding::BootArena;
 use stela_runtime::pc::acpi;
-mod fixture;
-// Reuse the actual read-only native PAT/MTRR/translation qualifier unchanged.
+// Reuse the read-only native PAT/MTRR/translation qualifier unchanged.
 use crate::native_memory::cache;
 const CHUNK: usize = 2 * 1024 * 1024;
 const STACK_BYTES: usize = 128 * 1024;
@@ -59,9 +62,9 @@ struct Backing {
     reservation: Arc<Reservation>,
     bounds: Range<usize>,
 }
-// SAFETY: exact current root has these independently owned LoaderData pages
-// RW+NX/WB, preceding guard is genuinely absent. The source reservation and
-// root stay retained for the complete bounded BSP fixture, including failures.
+// SAFETY: current root has these independently owned LoaderData pages
+// RW+NX/WB, preceding guard is absent. The source reservation and
+// root stay held for the complete bounded BSP fixture, including failures.
 // LoaderData reservation remains owned until VM stop; this proof does not
 // claim a dynamic physical page allocator or live all-root unmap capability.
 unsafe impl StackBacking for Backing {
@@ -82,7 +85,7 @@ fn bounds(base: usize, i: usize) -> Range<usize> {
     guard + PAGE..guard + PAGE + STACK_BYTES
 }
 impl Prepared {
-    pub(crate) fn prepare(clock: Clock) -> Result<Self, &'static str> {
+    pub(crate) fn prepare(clock: Clock) -> Result<Self> {
         let hv = core::arch::x86_64::__cpuid(0x4000_0000);
         if [
             hv.ebx.to_le_bytes(),
@@ -92,16 +95,17 @@ impl Prepared {
         .concat()
             != b"TCGTCGTCGTCG"
         {
-            return Err("native work proof requires one QEMU TCG BSP");
+            return Err(refuse!("native work proof requires one QEMU TCG BSP"));
         }
-        let rsdp = crate::storage::rsdp().ok_or("native work fixture RSDP missing")?;
-        // SAFETY: actual firmware tables are mapped and retained before EBS.
-        let madt = unsafe { acpi::find(rsdp, b"APIC") }.map_err(|_| "work MADT unavailable")?;
+        let rsdp = crate::storage::rsdp().ok_or(refuse!("native work fixture RSDP missing"))?;
+        // SAFETY: firmware tables are mapped and kept before EBS.
+        let madt =
+            unsafe { acpi::find(rsdp, b"APIC") }.map_err(|_| refuse!("work MADT unavailable"))?;
         fixture::one_processor(madt, apic_id())?;
         let start = crate::firmware::pages(2 * CHUNK / PAGE)?;
         let base = start.next_multiple_of(CHUNK);
         if STACK_COUNT * (STACK_BYTES + PAGE) > CHUNK {
-            return Err("work stacks exceed reserved arena");
+            return Err(refuse!("work stacks exceed reserved arena"));
         }
         Ok(Self {
             reservation: Arc::new(Reservation {
@@ -120,7 +124,7 @@ impl Prepared {
             pages: CHUNK / PAGE,
         }
     }
-    pub(crate) fn map(&self, tables: &mut Tables) -> Result<(), &'static str> {
+    pub(crate) fn map(&self, tables: &mut Tables) -> Result<()> {
         for i in 0..STACK_COUNT {
             for page in bounds(self.reservation.arena, i).step_by(PAGE) {
                 tables.page(page, PRESENT | WRITABLE | NX)?;
@@ -128,27 +132,27 @@ impl Prepared {
         }
         Ok(())
     }
-    fn verify_arena(&self) -> Result<(), String> {
+    fn verify_arena(&self) -> Result<()> {
         if Sha256::digest(self.madt).as_slice() != self.madt_hash {
-            return Err(String::from("work MADT changed before execution"));
+            return Err(refuse!("work MADT changed before execution"));
         }
-        fixture::one_processor(self.madt, apic_id()).map_err(String::from)?;
+        fixture::one_processor(self.madt, apic_id())?;
         let madt_hex: String = self.madt.iter().map(|b| format!("{b:02x}")).collect();
         crate::output::arguments(format_args!("NATIVE WORK MADT {madt_hex}\n"));
         if flags() & IF != 0 {
-            return Err(String::from("work entry requires IRQs off"));
+            return Err(refuse!("work entry requires IRQs off"));
         }
         for i in 0..STACK_COUNT {
             let span = bounds(self.reservation.arena, i);
             cache::verify_writeback(span.start as u64, span.start as u64, span.len(), 0)
-                .map_err(|e| format!("work stack WB mapping: {e:?}"))?;
+                .map_err(|e| refuse!("work stack WB mapping: {e}", ?e))?;
             if leaf(span.start - PAGE).is_some() {
-                return Err(String::from("work stack guard is present"));
+                return Err(refuse!("work stack guard is present"));
             }
             for page in span.step_by(PAGE) {
-                let entry = leaf(page).ok_or_else(|| String::from("stack missing"))?;
+                let entry = leaf(page).ok_or_else(|| refuse!("stack missing"))?;
                 if entry & (WRITABLE | NX) != (WRITABLE | NX) {
-                    return Err(String::from("stack lacks actual RW+NX"));
+                    return Err(refuse!("stack lacks actual RW+NX"));
                 }
             }
         }
@@ -156,7 +160,7 @@ impl Prepared {
     }
     /// Reuse the exact LoaderData/guard/cache proof for the separate real-IRQ
     /// composition, without invoking or broadening the process-only acceptance.
-    pub(crate) fn into_irq_stacks(self) -> Result<StackBatch, String> {
+    pub(crate) fn into_irq_stacks(self) -> Result<StackBatch> {
         self.verify_arena()?;
         let spans: Vec<_> = (0..4).map(|i| bounds(self.reservation.arena, i)).collect();
         let stacks = spans
@@ -175,7 +179,7 @@ impl Prepared {
             releases: ReleaseCount(self.reservation),
         })
     }
-    pub(crate) fn run(self) -> Result<String, String> {
+    pub(crate) fn run(self) -> Result<String> {
         self.verify_arena()?;
         let cpu = Arc::new(NativeCpu { apic_id: apic_id() });
         let state = Arc::new(Probe {
@@ -190,10 +194,10 @@ impl Prepared {
             cpu: cpu.clone(),
             baseline: controls(),
         });
-        // SAFETY: genuine provider state/code/root retained by this queue;
-        // only this BSP and retained proof callbacks produce work.
+        // SAFETY: provider state/code/root kept by this queue;
+        // only this BSP and kept proof callbacks produce work.
         let queue = unsafe { Queue::<16>::new(cpu.clone(), state.clone()) }.map_err(error)?;
-        let make_stacks = |first| -> Result<Vec<Stack>, String> {
+        let make_stacks = |first| -> Result<Vec<Stack>> {
             (first..first + 4)
                 .map(|i| {
                     Stack::new(Box::new(Backing {
@@ -210,7 +214,7 @@ impl Prepared {
             .runtime
             .store(runtime.get_ref() as *const _ as usize, Ordering::Release);
         if runtime.current_id() != Err(WorkError::Unavailable) {
-            return Err(String::from("dispatcher invented a thread ID"));
+            return Err(refuse!("dispatcher invented a thread ID"));
         }
         let apic = apic::Apic::new(apic::base_msr(), apic::base_msr() & apic::BASE_ADDRESS);
         apic.start(
@@ -219,7 +223,7 @@ impl Prepared {
             self.clock
                 .ticks_per_microsecond
                 .checked_mul(1_000_000)
-                .ok_or_else(|| String::from("APIC deadline overflow"))?,
+                .ok_or_else(|| refuse!("APIC deadline overflow"))?,
         );
         let original = flags();
         for phase in 0..2 {
@@ -228,15 +232,20 @@ impl Prepared {
             let deadline = next_deadline(self.clock, TIMEOUT_US)?;
             state.deadline.store(deadline, Ordering::Release);
             if phase == 1 {
+                // SAFETY: phase 1 dispatches with interrupts on; the BSP's IDT and APIC timer are
+                // installed and `original` flags are restored after the phase.
                 unsafe {
                     asm!("sti", options(nostack));
                 }
             }
             let expected = flags();
+            // SAFETY: `state` outlives the call and its runtime pointer is published; the
+            // dispatcher runs only this BSP's queued callbacks.
             unsafe { abi_probe_dispatch(Arc::as_ptr(&state) as *mut c_void) };
             if flags() & IF != expected & IF {
-                return Err(String::from("dispatcher IF changed across real contexts"));
+                return Err(refuse!("dispatcher IF changed across real contexts"));
             }
+            // SAFETY: `original` holds the flags this CPU had before the phases.
             unsafe { cpu.restore(original) };
             verify(&state, self.reservation.arena, phase)?;
         }
@@ -249,6 +258,8 @@ impl Prepared {
             (Kind::General, cyclic_drain),
             (Kind::General, cyclic_drain),
         ] {
+            // SAFETY: the callbacks are static and `state` stays alive through `retire` below; none
+            // unwinds or frees the executor.
             unsafe { runtime.queue().execute(kind, callback, context) }.map_err(error)?;
         }
         runtime.drain(deadline).map_err(error)?;
@@ -256,52 +267,67 @@ impl Prepared {
             if !(0..state.next.load(Ordering::Acquire))
                 .any(|i| state.events[i].load(Ordering::Acquire) >> 32 == event)
             {
-                return Err(format!("actual drain-cycle result {event} missing"));
+                return Err(refuse!("actual drain-cycle result {event} missing", event));
             }
         }
-        // SAFETY: all actual proof callbacks finished, no real source exists;
+        // SAFETY: all proof callbacks finished, no real source exists;
         // this fixture has no producer/work/reset path that can restart them.
         unsafe { runtime.retire() }.map_err(error)?;
         drop(executor);
         if self.reservation.released.load(Ordering::Acquire) != 4 {
-            return Err(String::from("idle stack leases not released"));
+            return Err(refuse!("idle stack leases not released"));
         }
-        // Timeout leaves a genuine foreground continuation on the other four
-        // owned stacks. Abandonment must retain the entire runtime allocation.
+        // Timeout leaves a foreground continuation on the other four
+        // owned stacks. Abandonment must keep the entire runtime allocation.
+        // SAFETY: `state` is the queue's owner, and only this BSP produces work.
         let queue = unsafe { Queue::<16>::new(cpu.clone(), state.clone()) }.map_err(error)?;
         let executor = Executor::new(queue, make_stacks(4)?).map_err(error)?;
         let runtime = executor.runtime();
         let raw = runtime.get_ref() as *const Runtime<16>;
         state.runtime.store(raw as usize, Ordering::Release);
         let deadline = next_deadline(self.clock, 1000)?;
+        // SAFETY: `suspended` and `state` stay held after the timeout: the pending runtime is
+        // quarantined, never freed.
         if unsafe {
             runtime.call_foreground(suspended, Arc::as_ptr(&state) as *mut c_void, deadline)
         } != Err(WorkError::TimedOut)
+                // SAFETY: retirement only inspects the suspended job and refuses; it releases
+                // nothing.
             || unsafe { runtime.retire() } != Err(WorkError::Pending)
         {
-            return Err(String::from("suspended work falsely retired"));
+            return Err(refuse!("suspended work falsely retired"));
         }
         let quarantined = work::quarantined_owners();
         drop(executor);
         if self.reservation.released.load(Ordering::Acquire) != 4
             || work::quarantined_owners() <= quarantined
+                // SAFETY: the quarantined runtime at `raw` is held and never moved or freed.
             || unsafe { Pin::new_unchecked(&*raw) }.step() != Err(WorkError::Closed)
         {
-            return Err(String::from("pending runtime/stack quarantine failed"));
+            return Err(refuse!("pending runtime/stack quarantine failed"));
         }
+        // SAFETY: `state` is the queue's owner, and only this BSP produces work.
         let queue = unsafe { Queue::<2>::new(cpu, state.clone()) }.map_err(error)?;
+        // SAFETY: `no_op` ignores its null context, and the queue closes before any executor runs
+        // it.
         unsafe { queue.execute(Kind::General, no_op, core::ptr::null_mut()) }.map_err(error)?;
+        // SAFETY: `no_op` ignores its null context, and the queue closes before any executor runs
+        // it.
         unsafe { queue.execute(Kind::General, no_op, core::ptr::null_mut()) }.map_err(error)?;
+        // SAFETY: `no_op` ignores its null context, and the queue closes before any executor runs
+        // it.
         if unsafe { queue.execute(Kind::General, no_op, core::ptr::null_mut()) }
             != Err(WorkError::Full)
         {
-            return Err(String::from("overflow was accepted"));
+            return Err(refuse!("overflow was accepted"));
         }
         queue.close().map_err(error)?;
+        // SAFETY: `no_op` ignores its null context, and the queue closes before any executor runs
+        // it.
         if unsafe { queue.execute(Kind::Notify, no_op, core::ptr::null_mut()) }
             != Err(WorkError::Closed)
         {
-            return Err(String::from("close admitted new work"));
+            return Err(refuse!("close admitted new work"));
         }
         drop(queue);
         Ok(format!(
@@ -310,18 +336,19 @@ impl Prepared {
         ))
     }
 }
-fn next_deadline(clock: Clock, microseconds: u64) -> Result<u64, String> {
+fn next_deadline(clock: Clock, microseconds: u64) -> Result<u64> {
     clock
         .ticks_per_microsecond
         .checked_mul(microseconds)
         .and_then(|delta| apic::rdtsc().checked_add(delta))
-        .ok_or_else(|| String::from("native work deadline overflow"))
+        .ok_or_else(|| refuse!("native work deadline overflow"))
 }
-fn error(e: WorkError) -> String {
-    format!("native work: {e:?}")
+fn error(error: WorkError) -> Refusal {
+    refuse!("native work: {error}", ?error)
 }
 fn flags() -> u64 {
     let f: u64;
+    // SAFETY: reads RFLAGS through the stack and changes nothing.
     unsafe {
         asm!("pushfq","pop {}",out(reg)f,options(preserves_flags));
     }
@@ -340,10 +367,10 @@ fn apic_id() -> u32 {
 struct NativeCpu {
     apic_id: u32,
 }
-// SAFETY: only this actual source-bound QEMU BSP executes this bounded proof;
-// actual CLI/POPFQ and TSC are used. No autonomous/IRQ OSL provider is installed.
-// All current callers are retained process callbacks. No IRQ producer invokes
-// this adapter yet; actual source IRQ metadata/delivery remains unqualified.
+// SAFETY: only this source-bound QEMU BSP executes this bounded proof;
+// CLI/POPFQ and TSC are used. No autonomous/IRQ OSL provider is installed.
+// All current callers are held process callbacks. No IRQ producer invokes
+// this adapter yet; source IRQ metadata/delivery remains unchecked.
 unsafe impl Cpu for NativeCpu {
     fn check_cpu(&self) -> Result<(), WorkError> {
         if apic_id() == self.apic_id {
@@ -354,20 +381,22 @@ unsafe impl Cpu for NativeCpu {
     }
     fn in_interrupt(&self) -> bool {
         // Restricted fixture call graph: neither this private adapter nor its
-        // queue/runtime is published to any ISR. All actual callers are the
-        // retained dispatcher/process callbacks. This is not IRQ metadata and
+        // queue/runtime is published to any ISR. All callers are the
+        // dispatcher/process callbacks. This is not IRQ metadata and
         // must never be installed as a production/IRQ-reachable Cpu adapter.
         false
     }
     fn save_disable(&self) -> Result<u64, WorkError> {
         self.check_cpu()?;
         let f: u64;
+        // SAFETY: saves RFLAGS and masks interrupts on this CPU; `restore` undoes it.
         unsafe {
             asm!("pushfq","pop {}","cli",out(reg)f);
         }
         Ok(f)
     }
     unsafe fn restore(&self, f: u64) {
+        // SAFETY: the caller passes flags `save_disable` read on this CPU.
         unsafe {
             asm!("push {}","popfq",in(reg)f);
         }
@@ -383,6 +412,7 @@ unsafe impl Cpu for NativeCpu {
 fn leaf(address: usize) -> Option<u64> {
     let root: u64;
     let cr4: u64;
+    // SAFETY: reads CR3 and CR4 at ring 0 and changes nothing.
     unsafe {
         asm!("mov {}, cr3",out(reg)root,options(nomem,nostack,preserves_flags));
         asm!("mov {}, cr4",out(reg)cr4,options(nomem,nostack,preserves_flags));
@@ -391,6 +421,7 @@ fn leaf(address: usize) -> Option<u64> {
     let levels = if cr4 & (1 << 12) != 0 { 5 } else { 4 };
     for level in (0..levels).rev() {
         let index = (address >> (12 + level * 9)) & 511;
+        // SAFETY: the firmware identity map covers every paging structure this walk reads.
         let value = unsafe { ((table as *const u64).add(index)).read_volatile() };
         if value & 1 == 0 {
             return None;
@@ -416,6 +447,8 @@ struct Probe {
 }
 impl Probe {
     unsafe fn runtime(&self) -> Pin<&Runtime<16>> {
+        // SAFETY: the caller ensures the published runtime is still alive; it is pinned in its
+        // executor.
         unsafe {
             Pin::new_unchecked(&*(self.runtime.load(Ordering::Acquire) as *const Runtime<16>))
         }
@@ -427,6 +460,7 @@ impl Probe {
         }
     }
     fn event(&self, n: u64) {
+        // SAFETY: the published runtime outlives every job it runs.
         let r = unsafe { self.runtime() };
         let id = self.require(r.current_id());
         let i = self.next.fetch_add(1, Ordering::AcqRel);
@@ -434,6 +468,7 @@ impl Probe {
             self.cpu.fatal(WorkError::Full);
         }
         let rsp: usize;
+        // SAFETY: reads RSP and changes nothing.
         unsafe {
             asm!("mov {}, rsp",out(reg)rsp,options(nomem,nostack,preserves_flags));
         }
@@ -443,18 +478,24 @@ impl Probe {
     }
 }
 unsafe fn probe<'a>(p: *mut c_void) -> &'a Probe {
+    // SAFETY: callers pass the `Probe` context they queued, which outlives every job.
     unsafe { &*p.cast::<Probe>() }
 }
 unsafe extern "C" fn abi_dispatch_body(p: *mut c_void) {
+    // SAFETY: `p` is the `Probe` context this job was queued with.
     let f = unsafe { probe(p) };
+    // SAFETY: the published runtime is alive and `foreground` and `p` stay held through
+    // completion.
     f.require(unsafe {
         f.runtime()
             .call_foreground(foreground, p, f.deadline.load(Ordering::Acquire))
     });
 }
 unsafe extern "C" fn foreground(p: *mut c_void) {
+    // SAFETY: `p` is the `Probe` context this job was queued with.
     let f = unsafe { probe(p) };
     f.event(10);
+    // SAFETY: the published runtime outlives every job it runs.
     let r = unsafe { f.runtime() };
     for (kind, callback) in [
         (Kind::Notify, notify_one as Callback),
@@ -462,6 +503,7 @@ unsafe extern "C" fn foreground(p: *mut c_void) {
         (Kind::General, abi_probe),
         (Kind::General, abi_probe_b),
     ] {
+        // SAFETY: the callbacks are static and the probe context outlives them; none unwinds.
         f.require(unsafe { r.queue().execute(kind, callback, p) });
     }
     if f.next.load(Ordering::Acquire) != 1 {
@@ -471,20 +513,25 @@ unsafe extern "C" fn foreground(p: *mut c_void) {
     f.event(11);
 }
 unsafe extern "C" fn notify_one(p: *mut c_void) {
+    // SAFETY: `p` is the `Probe` context this job was queued with.
     let f = unsafe { probe(p) };
     f.event(20);
+    // SAFETY: the published runtime outlives every job it runs.
     f.require(unsafe { f.runtime() }.yield_now());
     f.event(21);
 }
 unsafe extern "C" fn notify_two(p: *mut c_void) {
+    // SAFETY: `p` is the `Probe` context this job was queued with.
     unsafe { probe(p) }.event(22);
 }
 unsafe extern "C" fn abi_yield_b(p: *mut c_void) {
+    // SAFETY: `p` is the `Probe` context this job was queued with.
     let f = unsafe { probe(p) };
     if controls() != f.baseline {
         f.cpu.fatal(WorkError::CorruptContext);
     }
     f.event(40);
+    // SAFETY: the published runtime outlives every job it runs.
     f.require(unsafe { f.runtime() }.yield_now());
     if controls() != f.baseline {
         f.cpu.fatal(WorkError::CorruptContext);
@@ -492,27 +539,33 @@ unsafe extern "C" fn abi_yield_b(p: *mut c_void) {
     f.event(41);
 }
 unsafe extern "C" fn abi_yield(p: *mut c_void) {
+    // SAFETY: `p` is the `Probe` context this job was queued with.
     let f = unsafe { probe(p) };
     f.event(30);
     let (mxcsr, fcw) = controls();
     let changed_mx = (mxcsr & !(3 << 13)) | 2 << 13;
     let changed_cw = (fcw & !(3 << 10)) | 2 << 10;
+    // SAFETY: loads valid MXCSR and x87 control words that change only the rounding mode; the
+    // originals are restored below.
     unsafe {
         asm!("ldmxcsr [{}]",in(reg)&changed_mx,options(nostack));
         asm!("fldcw [{}]",in(reg)&changed_cw,options(nostack));
     }
-    // This continuation deliberately differs from the dispatcher's incoming
+    // This continuation differs from the dispatcher's incoming
     // IF state in phase 1. Resumption must restore the task's saved IF=0;
     // another task may still execute with IF=1 in between.
     let saved_flags = f.require(f.cpu.save_disable());
+    // SAFETY: the published runtime outlives every job it runs.
     f.require(unsafe { f.runtime() }.yield_now());
     if flags() & IF != 0 {
         f.cpu.fatal(WorkError::CorruptContext);
     }
+    // SAFETY: `saved_flags` came from `save_disable` on this CPU in this job.
     unsafe { f.cpu.restore(saved_flags) };
     if controls() != (changed_mx, changed_cw) {
         f.cpu.fatal(WorkError::CorruptContext);
     }
+    // SAFETY: restores the control words read on entry.
     unsafe {
         asm!("ldmxcsr [{}]",in(reg)&mxcsr,options(nostack));
         asm!("fldcw [{}]",in(reg)&fcw,options(nostack));
@@ -522,13 +575,14 @@ unsafe extern "C" fn abi_yield(p: *mut c_void) {
 fn controls() -> (u32, u16) {
     let mut mxcsr = 0;
     let mut fcw = 0;
+    // SAFETY: stores the control words into locals and changes nothing.
     unsafe {
         asm!("stmxcsr [{}]",in(reg)&mut mxcsr,options(nostack,preserves_flags));
         asm!("fnstcw [{}]",in(reg)&mut fcw,options(nostack,preserves_flags));
     }
     (mxcsr, fcw)
 }
-/// Actual Win64 callback: touch all four caller-provided home slots, preserve
+/// Win64 callback: touch all four caller-provided home slots, preserve
 /// all nonvolatile registers it changes, and check them across a yielding C
 /// helper (which crosses the explicit SysV context-switch boundary).
 macro_rules! abi_callback {
@@ -824,8 +878,11 @@ abi_callback!(abi_probe, abi_yield, 0x3132333435363738u64);
 abi_callback!(abi_probe_b, abi_yield_b, 0x4142434445464748u64);
 abi_callback!(abi_probe_dispatch, abi_dispatch_body, 0x5152535455565758u64);
 unsafe extern "C" fn serial_drain(p: *mut c_void) {
+    // SAFETY: `p` is the `Probe` context this job was queued with.
     let f = unsafe { probe(p) };
+    // SAFETY: the published runtime outlives every job it runs.
     let r = unsafe { f.runtime() };
+    // SAFETY: the callbacks are static and the probe context outlives them; none unwinds.
     f.require(unsafe { r.queue().execute(Kind::Notify, notify_two, p) });
     if r.drain(f.deadline.load(Ordering::Acquire)) != Err(WorkError::WouldDeadlock) {
         f.cpu.fatal(WorkError::CorruptContext);
@@ -833,7 +890,9 @@ unsafe extern "C" fn serial_drain(p: *mut c_void) {
     f.event(50);
 }
 unsafe extern "C" fn cyclic_drain(p: *mut c_void) {
+    // SAFETY: `p` is the `Probe` context this job was queued with.
     let f = unsafe { probe(p) };
+    // SAFETY: the published runtime outlives every job it runs.
     match unsafe { f.runtime() }.drain(f.deadline.load(Ordering::Acquire)) {
         Ok(()) => f.event(60),
         Err(WorkError::WouldDeadlock) => f.event(61),
@@ -841,13 +900,15 @@ unsafe extern "C" fn cyclic_drain(p: *mut c_void) {
     }
 }
 unsafe extern "C" fn suspended(p: *mut c_void) {
+    // SAFETY: `p` is the `Probe` context this job was queued with.
     let f = unsafe { probe(p) };
     while !f.released.load(Ordering::Acquire) {
+        // SAFETY: the published runtime outlives every job it runs.
         f.require(unsafe { f.runtime() }.yield_now());
     }
 }
 unsafe extern "C" fn no_op(_: *mut c_void) {}
-fn verify(f: &Probe, base: usize, phase: u64) -> Result<(), String> {
+fn verify(f: &Probe, base: usize, phase: u64) -> Result<()> {
     let count = f.next.load(Ordering::Acquire);
     let events: Vec<_> = (0..count)
         .map(|i| f.events[i].load(Ordering::Acquire))
@@ -856,29 +917,29 @@ fn verify(f: &Probe, base: usize, phase: u64) -> Result<(), String> {
         events
             .iter()
             .position(|v| v >> 32 == event)
-            .ok_or_else(|| format!("missing event {event}"))
+            .ok_or_else(|| refuse!("missing event {event}", event))
     };
     if !(pos(20)? < pos(21)? && pos(21)? < pos(22)? && pos(30)? < pos(40)? && pos(40)? < pos(31)?) {
-        return Err(format!("work ordering differs: {events:?}"));
+        return Err(refuse!("work ordering differs: {events}", ?events));
     }
     let mut ids: Vec<_> = events.iter().map(|e| e & u64::from(u32::MAX)).collect();
     ids.sort_unstable();
     ids.dedup();
     if ids.len() != 4 {
-        return Err(String::from("task contexts did not have distinct IDs"));
+        return Err(refuse!("task contexts did not have distinct IDs"));
     }
     if events[pos(10)?] as u32 != events[pos(11)?] as u32
         || events[pos(20)?] as u32 != events[pos(22)?] as u32
     {
-        return Err(String::from("resumed task identity changed"));
+        return Err(refuse!("resumed task identity changed"));
     }
     for i in 0..count {
         let rsp = f.rsp[i].load(Ordering::Acquire);
         if !(0..4).any(|j| bounds(base, j).contains(&rsp)) {
-            return Err(String::from("callback ran on unowned dispatcher stack"));
+            return Err(refuse!("callback ran on unowned dispatcher stack"));
         }
         if (f.observed_flags[i].load(Ordering::Acquire) & IF != 0) != (phase == 1) {
-            return Err(String::from("callback IF changed across context switch"));
+            return Err(refuse!("callback IF changed across context switch"));
         }
     }
     Ok(())

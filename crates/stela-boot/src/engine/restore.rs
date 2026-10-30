@@ -5,17 +5,18 @@
 //! pieces on the USB's FAT32 partition. [`Mode::Install`] erases the stick
 //! SSD and installs recoveryOS without the macOS system image; macOS is
 //! installed from recoveryOS. [`Mode::Update`] (`--update-restore`) runs
-//! Apple's stock update. The opt-in, unqualified option study
+//! Apple's stock update. The opt-in, unchecked option study
 //! (`--restore-study`) reads an exact IPSW extent on an explicitly selected
 //! raw partition with the study's options ([`Mode::Study`]). Neither source
 //! is an ANS namespace or a pointer into translated memory. Live USB
-//! qualification and the complete intact SEP trust route remain research
+//! validation and the complete intact SEP trust route remain research
 //! requirements.
 use super::{
     bundle::{self, Bytes},
     network,
     remote::Remote,
 };
+use crate::Result;
 use crate::{
     handoff::Handoff,
     output,
@@ -23,19 +24,20 @@ use crate::{
 };
 use alloc::{boxed::Box, collections::VecDeque, format, rc::Rc, string::String, vec::Vec};
 use core::{cell::RefCell, task::Poll};
+use stela_contracts::Refusal;
+use stela_contracts::refuse;
 use stela_drivers::block::{Ahead, BlockDevice, ReadAhead};
 use {
     stela_formats::payload::PayloadManifest, stela_formats::payload::Purpose,
-    stela_formats::payload::ReadAt, stela_runtime::machine::apple::AppleDevices,
-    stela_runtime::machine::apple::MuxStream, stela_runtime::machine::apple::UsbClient,
-    stela_runtime::machine::apple::UsbId, stela_runtime::net::Transfer,
+    stela_formats::payload::ReadAt, stela_runtime::net::Transfer,
     stela_runtime::restore::answers::Answers, stela_runtime::restore::driver::Driver,
     stela_runtime::restore::driver::Ports, stela_runtime::restore::proxy::Control,
     stela_runtime::restore::proxy::Destination, stela_runtime::restore::proxy::Event as ProxyEvent,
     stela_runtime::restore::proxy::Peer, stela_runtime::restore::proxy::Version,
     stela_runtime::restore::route::Route, stela_runtime::restore::source::Extent,
     stela_runtime::restore::store::Store, stela_runtime::restore::store::Verify,
-    stela_runtime::restore::stream::ByteStream,
+    stela_runtime::restore::stream::ByteStream, stela_soc::machine::AppleDevices,
+    stela_soc::machine::MuxStream, stela_soc::machine::UsbClient, stela_soc::machine::UsbId,
 };
 
 /// The bundle's boot manifest (`stela_loader::boot_bundle`).
@@ -48,7 +50,7 @@ pub enum Mode {
     /// system image when the payload holds it ([`Route::Stock`]), else
     /// without ([`Route::Recovery`]).
     Install,
-    /// The original restore's explicit development-board policy: retain and
+    /// The original restore's explicit development-board policy: keep and
     /// report FDR failures, but allow restored to continue past them.
     DevelopmentInstall,
     /// The same, with the inventory's Update identity: restored_update
@@ -72,7 +74,7 @@ impl Mode {
 /// Any IPSW source, its errors described; a remote image's reader also
 /// reads ahead between the restore's requests ([`Source::pump`]).
 pub struct Source {
-    reader: Box<dyn ReadAt<Error = String>>,
+    reader: Box<dyn ReadAt<Error = Refusal>>,
     remote: Option<Rc<RefCell<Remote>>>,
     /// The partition's read-ahead ([`Source::extent`]).
     ahead: Option<Ahead>,
@@ -81,12 +83,14 @@ pub struct Source {
 struct Described<R>(R);
 
 impl<R: ReadAt> ReadAt for Described<R> {
-    type Error = String;
+    type Error = Refusal;
     fn len(&self) -> u64 {
         self.0.len()
     }
-    fn read_at(&mut self, offset: u64, buffer: &mut [u8]) -> Result<(), String> {
-        self.0.read_at(offset, buffer).map_err(|e| format!("{e:?}"))
+    fn read_at(&mut self, offset: u64, buffer: &mut [u8]) -> Result<()> {
+        self.0
+            .read_at(offset, buffer)
+            .map_err(|error| refuse!("payload read at {offset:#x}: {error}", offset, ?error))
     }
 }
 
@@ -133,13 +137,14 @@ impl Source {
 
     /// The study's raw source: the IPSW from the partition's first byte,
     /// read ahead in the host storage's largest commands.
-    pub fn extent(partition: Box<dyn BlockDevice>, bytes: u64) -> Result<Self, String> {
+    pub fn extent(partition: Box<dyn BlockDevice>, bytes: u64) -> Result<Self> {
         let ahead = Ahead::new(ReadAhead::new(
             partition,
             READ_AHEAD_BYTES,
             READ_AHEAD_DEPTH,
         ));
-        let extent = Extent::new(Bytes::new(ahead.clone()), bytes).map_err(|e| format!("{e}"))?;
+        let extent = Extent::new(Bytes::new(ahead.clone()), bytes)
+            .map_err(|error| refuse!("restore source extent: {error}", %error))?;
         let mut source = Self::new(extent);
         source.ahead = Some(ahead);
         Ok(source)
@@ -147,22 +152,23 @@ impl Source {
 }
 
 impl ReadAt for Source {
-    type Error = String;
+    type Error = Refusal;
     fn len(&self) -> u64 {
         self.reader.len()
     }
-    fn read_at(&mut self, offset: u64, buffer: &mut [u8]) -> Result<(), String> {
+    fn read_at(&mut self, offset: u64, buffer: &mut [u8]) -> Result<()> {
         self.reader.read_at(offset, buffer)
     }
 }
 
 /// The restore inventory the loader read.
-pub fn inventory(handoff: &Handoff) -> Result<PayloadManifest, String> {
+pub fn inventory(handoff: &Handoff) -> Result<PayloadManifest> {
     let file = handoff.files[..handoff.file_count]
         .iter()
         .find(|f| f.name() == RESTORE_INVENTORY_FILE)
-        .ok_or("restore inventory was not loaded")?;
-    PayloadManifest::parse(bundle::contents(file)).map_err(|e| format!("{e}"))
+        .ok_or(refuse!("restore inventory was not loaded"))?;
+    PayloadManifest::parse(bundle::contents(file))
+        .map_err(|error| refuse!("restore inventory: {error}", %error))
 }
 
 /// A file the loader read beside the inventory.
@@ -200,7 +206,7 @@ const READ_AHEAD_DEPTH: usize = 4;
 /// commands.
 const PREFETCH_CHUNKS: usize = 8;
 
-/// Native services retained for the whole restore session.
+/// Native services kept for the whole restore session.
 pub struct Services {
     pub signer: Option<stela_runtime::restore::tss::Signer>,
     pub fdr_storage: Option<Box<dyn BlockDevice>>,
@@ -208,7 +214,7 @@ pub struct Services {
 }
 
 /// libimobiledevice uses one 1 MiB buffer per direction. Keep the same finite
-/// bound while retaining bytes under either guest or host TCP backpressure.
+/// bound while keeping bytes under either guest or host TCP backpressure.
 const PROXY_BUFFER: usize = network::RELAY_BUFFER;
 const PROXY_READ: usize = 64 << 10;
 const PROXY_CONNECTIONS: usize = 4;
@@ -590,7 +596,7 @@ impl Experiment {
         identity: Option<usize>,
         verify: Verify,
         services: Services,
-    ) -> Result<Self, String> {
+    ) -> Result<Self> {
         let Services {
             signer,
             fdr_storage,
@@ -605,7 +611,8 @@ impl Experiment {
             Some(identity) => identity,
             None => manifest
                 .restore_identity(purpose)
-                .map_err(|e| format!("{e}"))? as usize,
+                .map_err(|error| refuse!("restore identity: {error}", %error))?
+                as usize,
         };
         // Recorded block hashes check each block as the restore reads it;
         // without them every member is read whole first, to build them.
@@ -613,16 +620,16 @@ impl Experiment {
         let verify = match (recorded, verify) {
             (true, _) => Verify::OnRead,
             (false, Verify::OnRead) => {
-                return Err(String::from(
-                    "--verify-on-read needs the payload's recorded block hashes, and this restore inventory names none",
+                return Err(refuse!(
+                    "--verify-on-read needs the payload's recorded block hashes, and this restore inventory names none"
                 ));
             }
             (false, Verify::Full) => Verify::Full,
         };
         let personalized = signer.is_some();
         if mode == Mode::DevelopmentInstall && !personalized {
-            return Err(String::from(
-                "the development install needs --tss for required boot firmware",
+            return Err(refuse!(
+                "the development install needs --tss for required boot firmware"
             ));
         }
         output::arguments(format_args!(
@@ -643,23 +650,25 @@ impl Experiment {
                 Verify::OnRead => "on-read",
             }
         ));
-        let mut store = Store::open(source, manifest, identity).map_err(|e| format!("{e}"))?;
+        let mut store = Store::open(source, manifest, identity)
+            .map_err(|error| refuse!("restore store: {error}", %error))?;
         store.set_verify(verify);
         if recorded {
             // Both modes check reads against the manifest's recorded hashes.
-            let blocks = inventory_file(handoff, RESTORE_BLOCKS_FILE)
-                .ok_or("the restore inventory's block hashes were not loaded")?;
+            let blocks = inventory_file(handoff, RESTORE_BLOCKS_FILE).ok_or(refuse!(
+                "the restore inventory's block hashes were not loaded"
+            ))?;
             store
                 .adopt_block_hashes(blocks)
-                .map_err(|e| format!("{e}"))?;
+                .map_err(|error| refuse!("restore block hashes: {error}", %error))?;
         }
         let mut answers = Answers::new(store);
         let route = match mode {
             Mode::Install if answers.has_system_image() => Route::Stock,
             Mode::Install => Route::Recovery,
             Mode::DevelopmentInstall if !answers.has_system_image() => {
-                return Err(String::from(
-                    "--development-restore needs a payload containing the macOS system image",
+                return Err(refuse!(
+                    "--development-restore needs a payload containing the macOS system image"
                 ));
             }
             Mode::DevelopmentInstall => Route::Development,
@@ -667,22 +676,23 @@ impl Experiment {
             Mode::Study => Route::StelaFirmwareStudy,
         };
         if mode == Mode::DevelopmentInstall && network.is_some() {
-            return Err(String::from(
-                "the development restore refuses an FDR reverse-proxy network",
+            return Err(refuse!(
+                "the development restore refuses an FDR reverse-proxy network"
             ));
         }
         if let Some(bytes) = inventory_file(handoff, stela_runtime::restore::fdr::FILE) {
             if mode == Mode::DevelopmentInstall {
-                return Err(String::from(
-                    "the development restore refuses an FDR diagnostic/archive",
+                return Err(refuse!(
+                    "the development restore refuses an FDR diagnostic/archive"
                 ));
             }
             let placement = super::fdr::Placement::parse(bytes)?;
             answers.fdr_diagnostic = Some(
                 stela_runtime::restore::fdr::Diagnostic::decode(placement.diagnostic)
-                    .map_err(|error| format!("FDR diagnostic refused: {error}"))?,
+                    .map_err(|error| refuse!("FDR diagnostic refused: {error}", %error))?,
             );
-            let device = fdr_storage.ok_or("the required FDR storage volume was not opened")?;
+            let device =
+                fdr_storage.ok_or(refuse!("the required FDR storage volume was not opened"))?;
             answers.fdr_commit = Some(super::fdr::writer(device, &placement)?);
             output::arguments(format_args!(
                 "FDR DIAGNOSTIC bytes={} sha256={} original Memory-store import; durable host commit enabled; factory trust unqualified\n",
@@ -695,26 +705,23 @@ impl Experiment {
             // The bundle boots under the AP ticket Apple personalized for it,
             // which also answers RootTicket.
             let booted = inventory_file(handoff, BOOT_MANIFEST_FILE)
-                .ok_or("--tss needs the bundle's boot manifest")?;
-            answers.boot_with(booted.to_vec()).map_err(|error| {
-                format!(
-                    "--tss needs a bundle whose boot manifest Apple personalized for this machine \
-                     (stela-dev boot prepare --tss): {error}"
-                )
-            })?;
+                .ok_or(refuse!("--tss needs the bundle's boot manifest"))?;
+            answers.boot_with(booted.to_vec()).map_err(|error| refuse!("--tss needs a bundle whose boot manifest Apple personalized for this machine \
+                     (stela-dev boot prepare --tss): {error}", %error))?;
         }
         // Serve the system-image content-key GET from the inventory's keys.
         answers
             .stage_system_image_keys()
-            .map_err(|e| format!("{e}"))?;
-        if let Some(seconds) = handoff.wall_seconds {
+            .map_err(|error| refuse!("system image keys: {error}", %error))?;
+        if let Some(wall) = handoff.wall {
             // The firmware's time at the handoff, carried forward on the TSC.
-            let (tsc, hz) = (handoff.wall_tsc, handoff.tsc_hz);
+            let hz = handoff.tsc_hz;
             answers.clock = Some(Box::new(move || {
-                seconds + (super::host::rdtsc() - tsc) / hz
+                wall.unix_seconds_at(super::host::rdtsc(), hz)
             }));
         }
-        let driver = Driver::new(answers, route).map_err(|e| format!("{e}"))?;
+        let driver = Driver::new(answers, route)
+            .map_err(|error| refuse!("restore driver: {error}", %error))?;
         Ok(Self {
             usb,
             driver,

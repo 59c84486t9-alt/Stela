@@ -38,7 +38,7 @@ fn lifted(word: u32) -> Operation {
 }
 
 #[test]
-fn allocated_pair_stores_retain_register_roles_and_descriptor_intent() {
+fn allocated_pair_stores_keep_register_roles_and_descriptor_intent() {
     for (form, bytes, mode, non_temporal) in FORMS {
         for data in [
             [0, 1],

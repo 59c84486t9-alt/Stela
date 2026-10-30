@@ -1,6 +1,6 @@
-//! Observational checkpoints; none grants execution or memory authority.
+//! Observational checkpoints; none grants execution or memory permission.
 
-/// Disjoint checkpoints in a recovered native round on its actual local Host.
+/// Disjoint checkpoints in a recovered native round on its local Host.
 /// Whole-round time includes the intervals between these points. BodyReturned
 /// includes native entry/return, checked memory callbacks and finalization,
 /// plus successor source validation, installation and preparation within a warm
@@ -48,7 +48,7 @@ impl NativeTimingWork {
     ];
 }
 
-/// Immutable attribution for an actually recovered native body. Deferred
+/// Immutable attribution for a recovered native body. Deferred
 /// service terminals have not retired; a failed access is a separate attempt.
 /// Native byte intervals are static source attribution, not executed x86 counts.
 #[derive(Debug, Clone, Copy)]

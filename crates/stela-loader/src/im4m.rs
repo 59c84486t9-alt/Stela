@@ -9,10 +9,11 @@
 //! properties and every other entry describes one boot object
 //! ([blacktop/ipsw img4 manifest](https://github.com/blacktop/ipsw/blob/master/pkg/img4/manifest.go)).
 //! The signature and certificates are kept but not evaluated.
+use crate::Result;
 use alloc::{string::String, vec, vec::Vec};
-use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
 use sha2::{Digest, Sha384};
+use stela_contracts::{refuse, require};
 
 const CLASS_UNIVERSAL: u8 = 0;
 const CLASS_PRIVATE: u8 = 3;
@@ -43,7 +44,10 @@ impl<'a> Der<'a> {
     }
 
     fn byte(&mut self) -> Result<u8> {
-        let byte = *self.bytes.get(self.position).context("truncated DER")?;
+        let byte = *self
+            .bytes
+            .get(self.position)
+            .ok_or(refuse!("truncated DER"))?;
         self.position += 1;
         Ok(byte)
     }
@@ -55,7 +59,7 @@ impl<'a> Der<'a> {
             number = 0;
             loop {
                 let byte = self.byte()?;
-                ensure!(number >> 25 == 0, "DER tag number overflows");
+                require!(number >> 25 == 0, "DER tag number overflows");
                 number = (number << 7) | u32::from(byte & 0x7f);
                 if byte & 0x80 == 0 {
                     break;
@@ -67,7 +71,7 @@ impl<'a> Der<'a> {
             usize::from(length_byte)
         } else {
             let width = usize::from(length_byte & 0x7f);
-            ensure!(
+            require!(
                 (1..=size_of::<usize>()).contains(&width),
                 "indefinite or oversized DER length"
             );
@@ -77,18 +81,18 @@ impl<'a> Der<'a> {
                 length = length
                     .checked_mul(256)
                     .and_then(|n| n.checked_add(byte))
-                    .context("DER length overflow")?;
+                    .ok_or(refuse!("DER length overflow"))?;
             }
             length
         };
         let end = self
             .position
             .checked_add(length)
-            .context("DER range overflow")?;
+            .ok_or(refuse!("DER range overflow"))?;
         let value = self
             .bytes
             .get(self.position..end)
-            .context("DER value is out of bounds")?;
+            .ok_or(refuse!("DER value is out of bounds"))?;
         self.position = end;
         Ok((
             Header {
@@ -102,11 +106,12 @@ impl<'a> Der<'a> {
 
     fn universal(&mut self, number: u32) -> Result<&'a [u8]> {
         let (header, value) = self.next()?;
-        ensure!(
+        require!(
             header.class == CLASS_UNIVERSAL && header.number == number,
-            "expected universal DER tag {number}, found class {} tag {}",
-            header.class,
-            header.number
+            "expected universal DER tag {number}, found class {class} tag {number2}",
+            number,
+            class = header.class,
+            number2 = header.number
         );
         Ok(value)
     }
@@ -117,10 +122,16 @@ impl<'a> Der<'a> {
 }
 
 fn four_cc(number: u32) -> Result<String> {
-    let text = String::from_utf8(number.to_be_bytes().to_vec())?;
-    ensure!(
+    let text = String::from_utf8(number.to_be_bytes().to_vec()).map_err(|_| {
+        refuse!(
+            "private tag {number:#x} is not a four-character name",
+            number
+        )
+    })?;
+    require!(
         text.bytes().all(|b| b.is_ascii_graphic()),
-        "private tag {number:#x} is not a four-character name"
+        "private tag {number:#x} is not a four-character name",
+        number
     );
     Ok(text)
 }
@@ -180,7 +191,7 @@ impl Manifest {
 }
 
 fn integer(bytes: &[u8]) -> Result<u64> {
-    ensure!(
+    require!(
         !bytes.is_empty() && bytes[0] & 0x80 == 0,
         "negative or empty DER integer"
     );
@@ -189,41 +200,48 @@ fn integer(bytes: &[u8]) -> Result<u64> {
     } else {
         bytes
     };
-    ensure!(digits.len() <= 8, "DER integer exceeds 64 bits");
+    require!(digits.len() <= 8, "DER integer exceeds 64 bits");
     Ok(digits.iter().fold(0, |n, &b| (n << 8) | u64::from(b)))
 }
 
 fn value(header: Header, bytes: &[u8]) -> Result<Value> {
-    ensure!(
+    require!(
         header.class == CLASS_UNIVERSAL && !header.constructed,
         "unsupported manifest property value"
     );
     Ok(match header.number {
         TAG_INTEGER => Value::Integer(integer(bytes)?),
         TAG_BOOLEAN => {
-            ensure!(bytes.len() == 1, "DER boolean is not one byte");
+            require!(bytes.len() == 1, "DER boolean is not one byte");
             Value::Boolean(bytes[0] != 0)
         }
         TAG_OCTET_STRING => Value::Data(bytes.to_vec()),
-        other => bail!("unsupported manifest property value tag {other}"),
+        other => {
+            return Err(refuse!("unsupported manifest property value tag {other}", other).into());
+        }
     })
 }
 
 /// `[PRIVATE name] SEQUENCE { IA5 name, inner }` → `(name, inner)`.
 fn named<'a>(header: Header, bytes: &'a [u8]) -> Result<(String, Der<'a>)> {
-    ensure!(
+    require!(
         header.class == CLASS_PRIVATE && header.constructed,
         "expected a private named manifest entry"
     );
     let name = four_cc(header.number)?;
     let mut outer = Der::new(bytes);
     let mut sequence = Der::new(outer.universal(TAG_SEQUENCE)?);
-    ensure!(outer.done(), "trailing bytes after manifest entry {name}");
+    require!(
+        outer.done(),
+        "trailing bytes after manifest entry {name}",
+        name
+    );
     let label = sequence.universal(TAG_IA5_STRING)?;
-    ensure!(
+    require!(
         label == name.as_bytes(),
-        "manifest entry {name} is labeled {}",
-        String::from_utf8_lossy(label)
+        "manifest entry {name} is labeled {label}",
+        name,
+        label = String::from_utf8_lossy(label).into_owned()
     );
     Ok((name, sequence))
 }
@@ -235,7 +253,11 @@ fn properties(set: &[u8]) -> Result<Vec<Property>> {
         let (header, bytes) = reader.next()?;
         let (name, mut entry) = named(header, bytes)?;
         let (value_header, value_bytes) = entry.next()?;
-        ensure!(entry.done(), "trailing fields in manifest property {name}");
+        require!(
+            entry.done(),
+            "trailing fields in manifest property {name}",
+            name
+        );
         properties.push(Property {
             name,
             value: value(value_header, value_bytes)?,
@@ -252,28 +274,28 @@ pub fn sha384(bytes: &[u8]) -> [u8; SHA384_BYTES] {
 pub fn parse(bytes: &[u8]) -> Result<Manifest> {
     let mut outer = Der::new(bytes);
     let mut sequence = Der::new(outer.universal(TAG_SEQUENCE)?);
-    ensure!(outer.done(), "trailing bytes after IM4M");
-    ensure!(
+    require!(outer.done(), "trailing bytes after IM4M");
+    require!(
         sequence.universal(TAG_IA5_STRING)? == b"IM4M",
         "expected an IM4M"
     );
     let version = integer(sequence.universal(TAG_INTEGER)?)?;
     let mut body = Der::new(sequence.universal(TAG_SET)?);
     let (header, manb) = body.next()?;
-    ensure!(body.done(), "IM4M body holds more than MANB");
+    require!(body.done(), "IM4M body holds more than MANB");
     let (name, mut manb) = named(header, manb)?;
-    ensure!(name == "MANB", "IM4M body is {name}, expected MANB");
+    require!(name == "MANB", "IM4M body is {name}, expected MANB", name);
     let mut entries = Der::new(manb.universal(TAG_SET)?);
-    ensure!(manb.done(), "trailing fields in MANB");
+    require!(manb.done(), "trailing fields in MANB");
     let mut manifest_properties = None;
     let mut objects = vec![];
     while !entries.done() {
         let (header, bytes) = entries.next()?;
         let (tag, mut entry) = named(header, bytes)?;
         let list = properties(entry.universal(TAG_SET)?)?;
-        ensure!(entry.done(), "trailing fields in manifest entry {tag}");
+        require!(entry.done(), "trailing fields in manifest entry {tag}", tag);
         if tag == MANIFEST_PROPERTIES {
-            ensure!(manifest_properties.is_none(), "duplicate MANP");
+            require!(manifest_properties.is_none(), "duplicate MANP");
             manifest_properties = Some(list);
         } else {
             objects.push(Object {
@@ -284,10 +306,10 @@ pub fn parse(bytes: &[u8]) -> Result<Manifest> {
     }
     sequence.universal(TAG_OCTET_STRING)?;
     sequence.universal(TAG_SEQUENCE)?;
-    ensure!(sequence.done(), "trailing fields after IM4M certificates");
+    require!(sequence.done(), "trailing fields after IM4M certificates");
     Ok(Manifest {
         version,
-        properties: manifest_properties.context("IM4M has no MANP")?,
+        properties: manifest_properties.ok_or(refuse!("IM4M has no MANP"))?,
         objects,
         sha384: hex::encode(sha384(bytes)),
         digest: sha384(bytes),
@@ -298,6 +320,7 @@ pub fn parse(bytes: &[u8]) -> Result<Manifest> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use anyhow::Result;
 
     pub(crate) fn der(first: &[u8], value: &[u8]) -> Vec<u8> {
         let mut out = first.to_vec();

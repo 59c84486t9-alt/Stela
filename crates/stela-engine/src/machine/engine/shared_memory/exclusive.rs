@@ -1,4 +1,4 @@
-//! Stopped system-service exclusives use the native lane's actual owner.
+//! Stopped system-service exclusives use the native lane's owner.
 use super::*;
 use crate::{
     memory::domain::{CheckedMemoryEntry, MemoryFault},
@@ -43,7 +43,7 @@ fn invoke(
 ) -> Result<ExclusiveResult, MemoryStatus> {
     request.data = core::ptr::from_mut(&mut data).cast();
     let mut fault = None;
-    // SAFETY: the typed prepared owner retains the actual native target, RAM
+    // SAFETY: the typed prepared owner keeps the native target, RAM
     // and source policy. All 32 staging bytes are initialized/private/disjoint;
     // only the existing validated callback can access them during this borrow.
     unsafe {
@@ -274,16 +274,18 @@ mod tests {
         }
     }
     #[test]
-    fn actual_prepared_adapter_keeps_dense_w_pairs_and_every_scalar_width_exact() {
+    fn prepared_adapter_keeps_dense_w_pairs_and_every_scalar_width_exact() {
         for (bytes, pair) in [(1, false), (2, false), (4, false), (8, false), (8, true)] {
             let (mut machine, ram, events) = super::super::tests::machine();
             machine
                 .install_shared_memory_for_processors(Arc::clone(&ram), &events)
                 .unwrap();
             let original = core::array::from_fn::<_, 64, _>(|i| i as u8 ^ 0xa5);
+            // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+            // registered.
             unsafe { ram.publish_physical(PA, &original) }.unwrap();
             let memory = machine.cpu.canonical_memory.as_mut().unwrap();
-            // This is the actual POSIX model's prepared authority, not a
+            // This is the POSIX model's prepared permission, not a
             // forged production CPL0/current-worker proof.
             let entry = memory
                 .memory
@@ -314,6 +316,8 @@ mod tests {
             assert!(stored.fault.is_none());
             assert_eq!(stored.data.status, 0);
             let mut actual = [0; 64];
+            // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+            // registered.
             unsafe { ram.read_physical(PA, &mut actual) }.unwrap();
             let mut expected = original;
             expected[..bytes as usize].copy_from_slice(&value.to_le_bytes()[..bytes as usize]);
@@ -328,6 +332,8 @@ mod tests {
             .unwrap();
         const LEAF: u64 = 0x10000 + 3 * 4096 + 4 * 8;
         const READ_ONLY: u64 = PA | 3 | (1 << 10) | (3 << 8) | (1 << 7);
+        // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+        // registered.
         unsafe { ram.publish_physical(LEAF, &READ_ONLY.to_le_bytes()) }.unwrap();
         let memory = machine.cpu.canonical_memory.as_mut().unwrap();
         let input = payload(ExclusiveOperation::Store, false, 0x1234);
@@ -365,6 +371,8 @@ mod tests {
             })
         ));
         let mut actual = [0; 64];
+        // SAFETY: the buffers are private locals, disjoint from the registered RAM, which stays
+        // registered.
         unsafe { ram.read_physical(PA, &mut actual) }.unwrap();
         assert_eq!(actual, [0; 64]);
     }

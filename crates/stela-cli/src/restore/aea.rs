@@ -437,7 +437,7 @@ mod tests {
     }
 
     #[test]
-    fn metadata_redacts_wrapped_credentials_and_retains_public_endpoint() {
+    fn metadata_redacts_wrapped_credentials_and_keeps_public_endpoint() {
         let bytes = header(&[
             (
                 FCS_FIELD,

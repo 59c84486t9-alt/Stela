@@ -140,7 +140,7 @@ const DEVICES: &[(u16, u16, u16, u16, u8)] = &[
 mod tests {
     use super::*;
     #[test]
-    fn exact_id_revision_boundaries_retain_each_source_policy() {
+    fn exact_id_revision_boundaries_keep_each_source_policy() {
         assert_eq!(DEVICES.len(), 24);
         for &(v, p, lo, hi, flags) in DEVICES {
             for revision in [lo, hi] {

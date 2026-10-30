@@ -1,4 +1,4 @@
-//! Actual command effects, asynchronous responses and retained failure ownership.
+//! Command effects, asynchronous responses and kept failure ownership.
 use super::*;
 fn target(generation: Generation) -> (Rc<RefCell<Hardware>>, Device<Wire, Irq, Time>) {
     let (h, mut d) = if generation == Generation::Gen6 {
@@ -21,7 +21,7 @@ fn commands(h: &Rc<RefCell<Hardware>>, first: usize) -> Vec<Vec<u8>> {
         .collect()
 }
 #[test]
-fn both_generations_acknowledge_scan_intervals_and_keep_reporting_wake_and_stop() {
+fn scan_interval_changes_keep_reporting() {
     for generation in [Generation::Gen5, Generation::Gen6] {
         for interval in [20, 30, 50, 51, 80, 255, 256, 1000] {
             let (h, mut d) = target(generation);
@@ -80,7 +80,7 @@ fn both_generations_acknowledge_scan_intervals_and_keep_reporting_wake_and_stop(
     }
 }
 #[test]
-fn gen6_empty_slot_actual_applied_intervals_and_readback_own_power_admission() {
+fn gen6_empty_slot_applied_intervals_and_readback_own_power_admission() {
     let (h, mut d) = target(Generation::Gen6);
     h.borrow_mut().intervals = (9, 0, 77);
     h.borrow_mut().set_intervals = Some((9, 66, 77));
@@ -231,7 +231,7 @@ fn calibration_uses_both_sensing_modes_and_preserves_reports_around_scan_command
     }
 }
 #[test]
-fn calibration_rejection_resumes_once_and_keeps_primary_and_cleanup_failures() {
+fn calibration_rejection_resumes_once() {
     for generation in [Generation::Gen5, Generation::Gen6] {
         for mode in [0, 2] {
             for reject_resume in [false, true] {
@@ -326,7 +326,7 @@ fn calibration_timeout_and_late_bus_effects_never_replay_or_resume_uncertain_com
     }
 }
 #[test]
-fn every_low_power_late_failure_retains_owner_and_refuses_replay() {
+fn every_low_power_late_failure_keeps_owner_and_refuses_replay() {
     for generation in [Generation::Gen5, Generation::Gen6] {
         let (sample, mut owner) = target(generation);
         let first = sample.borrow().effects.len();
@@ -363,7 +363,7 @@ fn every_low_power_late_failure_retains_owner_and_refuses_replay() {
 
 #[test]
 #[ignore = "oracle: STELA_CYAPA_CONTROL_ORACLE"]
-fn retained_linux_control_commands_match_actual_native_device_operations() {
+fn kept_linux_control_commands_match_native_device_operations() {
     extern crate std;
     let path = std::env::var("STELA_CYAPA_CONTROL_ORACLE").expect("source records path");
     let records = std::fs::read_to_string(path).expect("source records");

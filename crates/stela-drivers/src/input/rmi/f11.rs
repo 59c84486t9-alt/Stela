@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! Ordinary five-byte F11 absolute/relative reports and native controls.
-//! Pinned source and retained copyrights are in input/THIRD_PARTY.md.
+//! Pinned source and kept copyrights are in input/THIRD_PARTY.md.
 use super::{
     Error, Function,
     transport::{Transport, buffer},
@@ -262,7 +262,7 @@ impl Engine {
         let pinch = gesture7 & 64 != 0;
         let flick = gesture7 & 16 != 0;
         let rotate = gesture8 & 2 != 0;
-        // Follow the source's actual pointer layout: pinch aliases flick[0],
+        // Follow the source's pointer layout: pinch aliases flick[0],
         // rotation aliases flick[1..3]. Without flick, pinch and rotation are
         // disjoint. The source's separate size formula undercounts some cases.
         packet_size += if flick {

@@ -55,7 +55,7 @@ impl Device {
         Ok(())
     }
 
-    /// A repeated SET_CONFIGURATION is deliberately sent again: USB resets all
+    /// A repeated SET_CONFIGURATION is sent again: USB resets all
     /// interfaces/toggles even when bConfigurationValue has not changed.
     pub fn configure(&mut self, value: u8, dma: &mut dyn DmaAllocator) -> Result<(), BlockError> {
         self.ready()?;
@@ -84,7 +84,13 @@ impl Device {
             .borrow_mut()
             .device(self.physical.id)?
             .control(
-                xhci::setup(0, xhci::SET_CONFIGURATION, u16::from(value), 0, 0),
+                crate::usb::descriptor::setup(
+                    0,
+                    crate::usb::descriptor::SET_CONFIGURATION,
+                    u16::from(value),
+                    0,
+                    0,
+                ),
                 &[],
             );
         if let Err(error) = result {
@@ -146,9 +152,9 @@ impl Device {
             .borrow_mut()
             .device(self.physical.id)?
             .control(
-                xhci::setup(
+                crate::usb::descriptor::setup(
                     1,
-                    xhci::SET_INTERFACE,
+                    crate::usb::descriptor::SET_INTERFACE,
                     u16::from(alternate),
                     u16::from(number),
                     0,
@@ -157,7 +163,7 @@ impl Device {
             );
         // USB 9.4.10 permits STALL when only one setting exists. Follow
         // usb_set_interface's manual fallback: that same setting remains active,
-        // then reset each non-ISO endpoint through actual CLEAR_FEATURE ACKs.
+        // then reset each non-ISO endpoint through CLEAR_FEATURE ACKs.
         let manual = matches!(
             result,
             Err(BlockError::Device {
@@ -188,7 +194,7 @@ impl Device {
         Ok(())
     }
 
-    /// Allocate checked primary streams on actual advertised bulk endpoints.
+    /// Allocate checked primary streams on advertised bulk endpoints.
     /// Stream count is the native controller's acknowledged usable count.
     pub fn enable_streams(
         &mut self,

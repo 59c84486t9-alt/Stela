@@ -133,7 +133,7 @@ impl Ring {
             }
         }
         // Make the complete TD and Link visible while its first Cycle still
-        // belongs to software. Only then publish that actual ownership word.
+        // belongs to software. Only then publish that ownership word.
         self.buffer.sync_dirty()?;
         if let Some((at, control, cycle)) = first {
             fence(Ordering::Release);
@@ -156,7 +156,7 @@ mod tests {
         let boundary = (base + 65536).next_multiple_of(65536);
         for offset in (64..4096u64).step_by(64) {
             // SAFETY: each allocator is used sequentially, within this live
-            // backing; no segment is published to hardware or retained.
+            // backing; no segment is published to hardware or kept.
             let mut dma = unsafe { RegionAllocator::new(boundary - offset..boundary + 8192) };
             let ring = Ring::new(&mut dma).unwrap();
             assert_eq!(ring.buffer.physical(), boundary);
@@ -180,6 +180,8 @@ mod tests {
         ));
         // Alignment padding is part of the allocation budget, not permission
         // to return a truncated or boundary-crossing ring.
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         let mut short = unsafe { RegionAllocator::new(boundary - 64..boundary + 2048) };
         assert!(matches!(
             Ring::new(&mut short),

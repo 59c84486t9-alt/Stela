@@ -1,6 +1,6 @@
 //! Architectural data translations, not a cache of current PTE bytes or RAM.
 //! Valid mappings may remain stale until guest maintenance. Fetches still walk
-//! and compare actual source bytes; all data hits still resolve actual RAM.
+//! and compare source bytes; all data hits still resolve RAM.
 use super::{DataPart, mmu};
 use alloc::{boxed::Box, vec};
 
@@ -33,7 +33,7 @@ pub struct Statistics {
 
 #[derive(Default)]
 pub(super) struct DataTlb {
-    // None until actual Machine preparation; stopped helpers disable reuse.
+    // None until Machine preparation; stopped helpers disable reuse.
     generation: Option<u64>,
     // Lazy, bounded allocation; no table-sized array on a native callback stack.
     cells: Box<[Option<Entry>]>,

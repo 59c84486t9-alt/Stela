@@ -2,16 +2,17 @@
 //!
 //! Allocation and mapping remain with the boot resource owner. These operations
 //! check source policy and geometry; coordinates/provenance are not ownership
-//! or execution authority. The actual owners must survive firmware heap use.
+//! or execution permission. The owners must survive firmware heap use.
 use super::{Action, Field, Provenance, source_record};
+use crate::Result;
 use crate::coprocessor::Staged;
-use anyhow::{Result, ensure};
+use stela_contracts::{refuse, require};
 
 const BASE: u32 = u32::from_be_bytes(*b"RHB1");
 const SIZE: u32 = u32::from_be_bytes(*b"RHS1");
 const MINIMUM: u64 = 0x400;
 
-/// Actual selected native bank state, independent of the image allocation.
+/// Selected native bank state, independent of the image allocation.
 #[derive(Debug, Clone, Copy)]
 pub enum BankState {
     Allocate,
@@ -26,12 +27,12 @@ pub struct Policy {
     pub bank: u16,
     pub alignment: u64,
     pub state: BankState,
-    /// Covers selected bank identity/state and actual allocator alignment.
+    /// Covers selected bank identity/state and allocator alignment.
     pub provenance: Provenance,
 }
 
-/// Resource demand for the caller's actual allocator and selected mapper.
-/// This value carries no allocation, mapping or backend authority.
+/// Resource demand for the caller's allocator and selected mapper.
+/// This value carries no allocation, mapping or backend permission.
 #[derive(Debug, Clone, Copy)]
 pub struct Request {
     pub bank: u16,
@@ -39,14 +40,14 @@ pub struct Request {
     pub bytes: u64,
 }
 
-/// Coordinates returned by the actual allocation and selected mapping owners.
+/// Coordinates returned by the allocation and selected mapping owners.
 /// The PA interval must be independent of the staged image. IOP is separate.
 pub struct Mapping {
     pub bank: u16,
     pub physical: u64,
     pub iop: u64,
     pub bytes: u64,
-    /// Covers both actual allocation and complete readable/writable IOP mapping.
+    /// Covers both allocation and complete readable/writable IOP mapping.
     pub provenance: Provenance,
 }
 
@@ -59,26 +60,26 @@ impl Staged {
     /// iBoot ceb34 reads the original RHS1 request; only an absent tag takes
     /// its 64MiB fallback. This operation requires the present original family.
     /// ceb98 clamps a reserved bank to the request; eebd0 rounds an allocation
-    /// to the actual allocator granule, obtained by the same native lookup as
+    /// to the allocator granule, obtained by the same native lookup as
     /// alignment (ee5e0, d020c). Real allocator bounds/security remain required.
     pub fn heap_request(&self, policy: &Policy) -> Result<Request> {
         policy.provenance.validate()?;
-        ensure!(
+        require!(
             policy.bank != 0 && policy.bank <= 0x27d,
             "invalid native heap bank"
         );
-        ensure!(
+        require!(
             policy.alignment.is_power_of_two(),
             "invalid native heap alignment"
         );
         let (base, _) = source_record(self, BASE)?;
         let (size, raw) = source_record(self, SIZE)?;
-        ensure!(
+        require!(
             base.bytes == 8 && size.bytes == 4,
             "unqualified native heap record widths"
         );
-        let requested = u64::from(u32::from_le_bytes(raw.try_into()?));
-        ensure!(
+        let requested = u64::from(u32::from_le_bytes(raw.try_into().unwrap()));
+        require!(
             requested != 0,
             "zero native heap request requires separate bank policy"
         );
@@ -86,10 +87,10 @@ impl Staged {
             BankState::Allocate => requested
                 .checked_add(policy.alignment - 1)
                 .map(|n| n & !(policy.alignment - 1))
-                .ok_or_else(|| anyhow::anyhow!("native heap allocation size overflows"))?,
+                .ok_or_else(|| refuse!("native heap allocation size overflows"))?,
             BankState::Reserved { bytes } => requested.min(bytes),
         };
-        ensure!(
+        require!(
             bytes >= MINIMUM && bytes <= u64::from(u32::MAX),
             "native heap size cannot initialize firmware"
         );
@@ -101,34 +102,34 @@ impl Staged {
     }
 
     /// cec28 takes mapping result+0x28, not its physical+0x20. cec94/cecb0
-    /// install that IOP base and actual length. FW12470 refuses zero base/size
+    /// install that IOP base and length. FW12470 refuses zero base/size
     /// and maps the range before initializing the heap. Produce both fields
     /// together for the still-required complete configuration transaction.
     pub fn heap_fields(&self, policy: &Policy, mapping: Mapping) -> Result<Fields> {
         let request = self.heap_request(policy)?;
         mapping.provenance.validate()?;
-        ensure!(
+        require!(
             mapping.bank == request.bank,
             "native heap allocation uses a different bank"
         );
-        ensure!(
+        require!(
             mapping.bytes == request.bytes,
             "native heap mapping length disagrees with bank policy"
         );
-        ensure!(
+        require!(
             mapping.iop != 0,
             "native firmware cannot initialize a zero-address heap"
         );
         let physical_end = mapping
             .physical
             .checked_add(mapping.bytes)
-            .ok_or_else(|| anyhow::anyhow!("native heap physical range overflows"))?;
+            .ok_or_else(|| refuse!("native heap physical range overflows"))?;
         mapping
             .iop
             .checked_add(mapping.bytes)
-            .ok_or_else(|| anyhow::anyhow!("native heap IOP range overflows"))?;
+            .ok_or_else(|| refuse!("native heap IOP range overflows"))?;
         if matches!(policy.state, BankState::Allocate) {
-            ensure!(
+            require!(
                 mapping.physical & (request.alignment - 1) == 0,
                 "native allocated heap is misaligned"
             );
@@ -137,8 +138,8 @@ impl Staged {
         let image_end = image
             .physical_base
             .checked_add(image.backing_bytes)
-            .ok_or_else(|| anyhow::anyhow!("staged image allocation overflows"))?;
-        ensure!(
+            .ok_or_else(|| refuse!("staged image allocation overflows"))?;
+        require!(
             physical_end <= image.physical_base || mapping.physical >= image_end,
             "native external heap overlaps staged firmware allocation"
         );
@@ -164,6 +165,7 @@ mod tests {
         configuration::tests::{config_policy, provenance},
         tests::{fixture, prepare, w32, w64},
     };
+    use anyhow::Result;
 
     fn image(requested: u32) -> alloc::vec::Vec<u8> {
         let mut b = fixture();
@@ -257,11 +259,11 @@ mod tests {
         }
         let configured = staged.configure(complete)?;
         assert_eq!(
-            u64::from_le_bytes(configured.bytes()[0x208..0x210].try_into()?),
+            u64::from_le_bytes(configured.bytes()[0x208..0x210].try_into().unwrap()),
             0x2000000
         );
         assert_eq!(
-            u32::from_le_bytes(configured.bytes()[0x218..0x21c].try_into()?),
+            u32::from_le_bytes(configured.bytes()[0x218..0x21c].try_into().unwrap()),
             0x8000
         );
         for f in &configured.plan().chains.pointers {

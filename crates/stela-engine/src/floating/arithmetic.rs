@@ -1,6 +1,4 @@
 //! Completion of elementwise, indexed and pairwise arithmetic.
-#[cfg(all(test, target_arch = "x86_64"))]
-mod native_tests;
 
 use stela_compiler::{
     GuestState,
@@ -82,6 +80,8 @@ pub(super) fn complete(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_arch = "x86_64")]
+    mod native;
     use super::*;
     use stela_compiler::aarch64::floating::{
         BinaryOperation, DIVIDE_BY_ZERO, EXCEPTIONS, FPCR_AH, FPCR_EXCEPTION_ENABLE_SHIFT, FPSR_QC,
@@ -234,7 +234,7 @@ mod tests {
     }
 
     #[test]
-    fn every_routing_mode_refuses_retained_enables_without_partial_effects() {
+    fn every_routing_mode_refuses_kept_enables_without_partial_effects() {
         for inputs in [
             Inputs::Elementwise {
                 left: LAST_VECTOR_REGISTER,

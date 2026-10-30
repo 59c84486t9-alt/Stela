@@ -2,11 +2,13 @@
 //! identity, its base and the symbols each of its fileset entries defines.
 use std::collections::HashMap;
 
-use anyhow::{Context, Result, ensure};
+use super::fit;
+use crate::{Result, Within};
 use object::{
     LittleEndian as LE, macho,
     read::macho::{MachHeader, Nlist},
 };
+use stela_contracts::{refuse, require};
 
 use crate::kernel_collection::KernelCollection;
 
@@ -21,15 +23,18 @@ pub struct BootCollection<'a> {
 
 impl<'a> BootCollection<'a> {
     pub fn parse(data: &'a [u8]) -> Result<Self> {
-        let collection = KernelCollection::parse(data).context("reading the boot collection")?;
-        let uuid = hex::decode(
-            collection
-                .uuid
-                .as_deref()
-                .context("the boot collection has no LC_UUID")?,
-        )?
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("the boot collection's UUID is not 16 bytes"))?;
+        let collection =
+            KernelCollection::parse(data).within(|| refuse!("reading the boot collection"))?;
+        let uuid = collection
+            .uuid
+            .as_deref()
+            .ok_or(refuse!("the boot collection has no LC_UUID"))
+            .and_then(|uuid| {
+                hex::decode(uuid)
+                    .ok()
+                    .and_then(|bytes| bytes.try_into().ok())
+                    .ok_or(refuse!("the boot collection's UUID is not 16 bytes"))
+            })?;
         Ok(Self {
             data,
             collection,
@@ -56,19 +61,32 @@ impl<'a> BootCollection<'a> {
         let segment = self
             .collection
             .segment_containing(address)
-            .with_context(|| format!("{address:#x} lies outside the boot collection"))?;
-        ensure!(
+            .ok_or_else(|| refuse!("{address:#x} lies outside the boot collection", address))?;
+        require!(
             address + 8 <= segment.vm_address + segment.file_size,
-            "{address:#x} has no bytes in the boot collection"
+            "{address:#x} has no bytes in the boot collection",
+            address
         );
-        let offset = usize::try_from(segment.file_offset + (address - segment.vm_address))?;
-        let raw = u64::from_le_bytes(self.data[offset..offset + 8].try_into()?);
+        let offset: usize = fit(
+            segment.file_offset + (address - segment.vm_address),
+            "a boot collection file offset",
+        )?;
+        let raw = u64::from_le_bytes(
+            self.data
+                .get(offset..offset + 8)
+                .and_then(|bytes| bytes.try_into().ok())
+                .ok_or(refuse!(
+                    "a boot collection pointer {address:#x} past the file",
+                    address
+                ))?,
+        );
         if raw == 0 {
             return Ok(None);
         }
-        ensure!(
+        require!(
             raw >> 30 & 3 == 0,
-            "the boot collection's pointer at {address:#x} leaves it"
+            "the boot collection's pointer at {address:#x} leaves it",
+            address
         );
         Ok(Some(self.base() + (raw & 0x3fff_ffff)))
     }
@@ -79,10 +97,10 @@ impl<'a> BootCollection<'a> {
         let offset = self
             .collection
             .fileset_entry(entry)
-            .with_context(|| format!("the boot collection has no {entry}"))?
+            .ok_or_else(|| refuse!("the boot collection has no {entry}", entry))?
             .file_offset;
         let header = macho::MachHeader64::<LE>::parse(self.data, offset)
-            .with_context(|| format!("{entry}'s Mach-O header"))?;
+            .within(|| refuse!("{entry}'s Mach-O header", entry))?;
         let mut commands = header.load_commands(LE, self.data, offset)?;
         let mut exports = HashMap::new();
         while let Some(command) = commands.next()? {
@@ -98,12 +116,15 @@ impl<'a> BootCollection<'a> {
                     && kind & macho::N_EXT != 0
                     && kind & macho::N_PEXT == 0
                 {
-                    let name = core::str::from_utf8(nlist.name(LE, table.strings())?)?;
+                    let name =
+                        core::str::from_utf8(nlist.name(LE, table.strings())?).map_err(|_| {
+                            refuse!("{entry} exports a symbol whose name is not UTF-8", entry)
+                        })?;
                     exports.insert(name.to_owned(), nlist.n_value(LE));
                 }
             }
         }
-        ensure!(!exports.is_empty(), "{entry} exports no symbols");
+        require!(!exports.is_empty(), "{entry} exports no symbols", entry);
         Ok(exports)
     }
 }

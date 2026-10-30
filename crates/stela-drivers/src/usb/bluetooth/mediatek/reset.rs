@@ -3,7 +3,7 @@
 //! btusb_mtk_reset without a reset GPIO: btmtk_usb_subsys_reset through the
 //! uhw register window, then usb_queue_reset_device whatever its outcome.
 use super::super::{Error, Hci, Io, State};
-use crate::{block::BlockError, usb::xhci::setup};
+use crate::{block::BlockError, usb::descriptor::setup};
 
 const MISC: u32 = 0x7000_2510;
 const SUBSYS_RESET: u32 = 0x7000_2610;

@@ -16,16 +16,21 @@
 //! serial number, so one without a serial cannot be chosen, and the USB
 //! Stela started from is left out. Filesystems are never resized: another
 //! system's space is freed only by deleting its partition.
+use crate::Refusal;
+use crate::Result;
 use crate::{
-    choice::{self, Press, Wait, window},
+    choice::{self, Press, Wait},
     console::{Framebuffer, font},
     output,
     payload::{Aligned, device_path, disk_model, disk_serial},
     ui::{self, Canvas},
 };
+use alloc::string::ToString;
 use alloc::{format, string::String, vec, vec::Vec};
-use sha2::Digest;
+use stela_boot_core::screen::{disk_size as size, window};
+use stela_contracts::refuse;
 use stela_crypto::Sha256;
+use stela_crypto::digest::Digest;
 use uefi::{
     Handle,
     boot::{self, OpenProtocolAttributes, OpenProtocolParams, ScopedProtocol},
@@ -80,24 +85,24 @@ impl Disk {
             .partitions[index]
     }
 
-    fn read(&mut self, lba: u64, blocks: u64) -> Result<Vec<u8>, &'static str> {
+    fn read(&mut self, lba: u64, blocks: u64) -> Result<Vec<u8>> {
         let mut buffer = Aligned::new((blocks * self.geometry.block_bytes) as usize);
         self.io
             .read_blocks(self.media, lba, buffer.bytes())
-            .map_err(|_| "the disk cannot be read")?;
+            .map_err(|_| refuse!("the disk cannot be read"))?;
         Ok(buffer.bytes().to_vec())
     }
 
-    fn write(&mut self, lba: u64, bytes: &[u8]) -> Result<(), &'static str> {
+    fn write(&mut self, lba: u64, bytes: &[u8]) -> Result<()> {
         let mut buffer = Aligned::new(bytes.len());
         buffer.bytes().copy_from_slice(bytes);
         self.io
             .write_blocks(self.media, lba, buffer.bytes())
-            .map_err(|_| "the disk refused a write")
+            .map_err(|_| refuse!("the disk refused a write"))
     }
 
     /// Zero `bytes` from block `lba`.
-    fn zero(&mut self, lba: u64, bytes: u64) -> Result<(), &'static str> {
+    fn zero(&mut self, lba: u64, bytes: u64) -> Result<()> {
         let block = self.geometry.block_bytes;
         let zeros = vec![0u8; WRITE_BYTES as usize];
         let mut done = 0;
@@ -166,7 +171,7 @@ struct Picker {
     size: u64,
     /// Whether the confirmation's install button has the focus.
     install: bool,
-    notice: Option<&'static str>,
+    notice: Option<Refusal>,
 }
 
 /// Choose the partition macOS is installed on, creating it if need be; its
@@ -278,7 +283,7 @@ impl Picker {
             Press::Up if count > 0 => self.disk = (self.disk + count - 1) % count,
             Press::Down if count > 0 => self.disk = (self.disk + 1) % count,
             Press::Enter if count > 0 => match self.chosen().refusal {
-                Some(refusal) => self.notice = Some(refusal),
+                Some(refusal) => self.notice = Some(refusal.into()),
                 None => self.open_disk(),
             },
             _ => {}
@@ -321,7 +326,7 @@ impl Picker {
                     let (first, end) = self.aligned(segment);
                     let bytes = self.span_bytes((first, end));
                     if bytes < MIN_BYTES {
-                        self.notice = Some("macOS needs at least 64 GB");
+                        self.notice = Some(refuse!("macOS needs at least 64 GB"));
                     } else {
                         self.place = Some(Place::Free { first, end });
                         self.size = bytes / MIB * MIB;
@@ -340,13 +345,14 @@ impl Picker {
                     content: Content::Partition(_),
                     ..
                 }) => {
-                    self.notice = Some("Choose free space, or delete this partition first");
+                    self.notice =
+                        Some(refuse!("Choose free space, or delete this partition first"));
                 }
                 Some(Segment {
                     content: Content::Foreign,
                     ..
                 }) => {
-                    self.notice = Some("Erase the disk first");
+                    self.notice = Some(refuse!("Erase the disk first"));
                 }
                 None => {}
             },
@@ -409,8 +415,8 @@ impl Picker {
     }
 
     /// Write the confirmed change; the partition's `SERIAL:GUID`.
-    fn write(&mut self) -> Result<String, &'static str> {
-        let place = self.place.ok_or("nothing was chosen")?;
+    fn write(&mut self) -> Result<String> {
+        let place = self.place.ok_or(refuse!("nothing was chosen"))?;
         let deleting = self.deleting();
         let size = self.size;
         let erased = self.erased;
@@ -418,7 +424,7 @@ impl Picker {
         let serial = disk
             .serial
             .clone()
-            .ok_or("the disk reports no serial number")?;
+            .ok_or(refuse!("the disk reports no serial number"))?;
         let block = disk.geometry.block_bytes;
         let mut seed = 0u64;
         let mut entropy = || {
@@ -461,7 +467,7 @@ impl Picker {
         let changed = matches!(place, Place::Free { .. }) || !deleting.is_empty() || erased;
         if let Place::Free { .. } = place {
             if table.partitions.len() >= 128 {
-                return Err("the disk's partition table is full");
+                return Err(refuse!("the disk's partition table is full"));
             }
             table.partitions.push(gpt::Partition {
                 type_guid: Role::AppleRegion.type_guid(),
@@ -482,13 +488,14 @@ impl Picker {
         ));
         if changed {
             let writes = gpt::encode(disk.geometry, &table)
-                .map_err(|_| "the new partition table is invalid")?;
+                .map_err(|_| refuse!("the new partition table is invalid"))?;
             for write in writes {
                 disk.write(write.lba, &write.bytes)?;
             }
         }
         let bytes = blocks * block;
-        let split = machine_state::split(bytes).map_err(|_| "the partition is too small")?;
+        let split =
+            machine_state::split(bytes).map_err(|_| refuse!("the partition is too small"))?;
         disk.zero(first, MIB)?;
         disk.zero(
             first + split.namespace_bytes / block,
@@ -496,7 +503,7 @@ impl Picker {
         )?;
         disk.io
             .flush_blocks()
-            .map_err(|_| "the disk did not finish writing")?;
+            .map_err(|_| refuse!("the disk did not finish writing"))?;
         Ok(target)
     }
 }
@@ -577,7 +584,7 @@ fn disks() -> Vec<Disk> {
         };
         let found = gpt::read(geometry, |lba, blocks| {
             disk.read(lba, blocks)
-                .map_err(stela_formats::payload::PayloadError::Disk)
+                .map_err(|error| stela_formats::payload::PayloadError::Io(error.to_string()))
         });
         match found {
             Ok(Found::Table { table, .. }) => disk.table = Some(table),
@@ -596,23 +603,6 @@ fn disks() -> Vec<Disk> {
         disks.push(disk);
     }
     disks
-}
-
-/// `bytes` as people read disk sizes: decimal units, three figures.
-fn size(bytes: u64) -> String {
-    let tenths = |unit: u64| (bytes * 10 + unit / 2) / unit;
-    match bytes {
-        b if b >= 1000 * GB => {
-            let t = tenths(1000 * GB);
-            format!("{}.{} TB", t / 10, t % 10)
-        }
-        b if b >= 10 * GB => format!("{} GB", (b + GB / 2) / GB),
-        b if b >= GB => {
-            let t = tenths(GB);
-            format!("{}.{} GB", t / 10, t % 10)
-        }
-        b => format!("{} MB", (b + 500_000) / 1_000_000),
-    }
 }
 
 /// A partition type's name and colour.
@@ -707,8 +697,8 @@ impl Picker {
             Page::Size => self.draw_size(canvas, &layout),
             Page::Confirm => self.draw_confirm(canvas, &layout),
         }
-        if let Some(notice) = self.notice {
-            canvas.text_centred(width / 2, height - 76, notice, 1, ui::ORANGE);
+        if let Some(notice) = &self.notice {
+            canvas.text_centred(width / 2, height - 76, &notice.to_string(), 1, ui::ORANGE);
         }
         let keys: &[(&str, &str)] = match self.page {
             Page::Partitions => &[
@@ -1157,17 +1147,4 @@ struct Bar {
     y: usize,
     width: usize,
     height: usize,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn sizes_read_as_three_figures_in_decimal_units() {
-        assert_eq!(size(1_000_204_886_016), "1.0 TB");
-        assert_eq!(size(512 * GB), "512 GB");
-        assert_eq!(size(8_600_000_000), "8.6 GB");
-        assert_eq!(size(260 * 1_000_000), "260 MB");
-    }
 }

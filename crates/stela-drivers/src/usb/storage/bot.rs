@@ -4,11 +4,11 @@
 // Copyright 1999-2002 Matthew Dharm; 2000 David L. Brown, Jr.;
 // 2000 Stephen J. Gowdy; 2002 Alan Stern; 1999 Michael Gee.
 // Block-zero ordering: Linux sd.c, Drew Eckhardt 1992; Eric Youngdale
-// 1993-1995, 1999. Retained lifecycle uses Stela's shared xHCI authority.
-use super::super::xhci::{
-    DEVICE_TO_HOST, Device, Interface, Operation, RECIPIENT_INTERFACE, TYPE_CLASS,
-};
+// 1993-1995, 1999. Lifecycle uses Stela's shared xHCI permission.
+use super::super::descriptor::{DEVICE_TO_HOST, Interface, RECIPIENT_INTERFACE, TYPE_CLASS};
+use super::super::xhci::{Device, Operation};
 use super::{Data, Endpoint, MAX_TD, Shared, scsi, setup};
+mod ehci;
 mod quirks;
 use crate::{
     block::{BlockError, Sense},
@@ -16,6 +16,7 @@ use crate::{
 };
 use alloc::vec::Vec;
 use core::ops::{Deref, DerefMut};
+pub(in crate::usb) use ehci::{EhciBulk, block as ehci_error};
 
 const RESET: u8 = 0xff;
 const GET_MAX_LUN: u8 = 0xfe;
@@ -35,15 +36,21 @@ pub(super) fn supported(device: &Device) -> Result<(), &'static str> {
     quirks::Flags::from_device(device).map(|_| ())
 }
 
-/// Private seam: every native transfer returns only after completion or actual
+/// Private seam: every native transfer returns only after completion or
 /// xHCI cancellation. An error may leave poison; ready must expose it before
 /// the CPU touches either DMA buffer again. No hosted USB API is used.
 pub(super) trait Io {
     fn ready(&mut self) -> Result<(), BlockError>;
     fn control(&mut self, request: [u8; 8]) -> Result<Vec<u8>, BlockError>;
     fn clear(&mut self, endpoint: Endpoint) -> Result<(), BlockError>;
-    fn bulk(&mut self, endpoint: Endpoint, buffer: u64, length: usize)
-    -> Result<usize, BlockError>;
+    fn bulk(
+        &mut self,
+        endpoint: Endpoint,
+        buffer: &mut DmaBuffer,
+        length: usize,
+    ) -> Result<usize, BlockError>;
+    /// Isolate the device after its transport was poisoned.
+    fn quarantine(&mut self);
     fn delay(&self, micros: u64);
     /// The transport's clock, in microseconds.
     fn now_us(&self) -> u64;
@@ -61,7 +68,7 @@ pub(super) trait Io {
     fn submit(
         &mut self,
         endpoint: Endpoint,
-        buffer: u64,
+        buffer: &mut DmaBuffer,
         length: usize,
     ) -> Result<Pending, BlockError> {
         Ok(Pending::Done(self.bulk(endpoint, buffer, length)))
@@ -161,15 +168,21 @@ impl Io for Native {
     fn bulk(
         &mut self,
         endpoint: Endpoint,
-        buffer: u64,
+        buffer: &mut DmaBuffer,
         length: usize,
     ) -> Result<usize, BlockError> {
         self.controller.borrow_mut().device(self.id)?.transfer(
             endpoint.dci(),
-            buffer,
+            buffer.physical(),
             length,
             COMMAND_US,
         )
+    }
+    fn quarantine(&mut self) {
+        let mut controller = self.controller.borrow_mut();
+        if let Ok(mut device) = controller.device(self.id) {
+            device.quarantine();
+        }
     }
     fn delay(&self, micros: u64) {
         let clock = self.controller.borrow().clock;
@@ -181,9 +194,10 @@ impl Io for Native {
     fn submit(
         &mut self,
         endpoint: Endpoint,
-        buffer: u64,
+        buffer: &mut DmaBuffer,
         length: usize,
     ) -> Result<Pending, BlockError> {
+        let buffer = buffer.physical();
         let mut controller = self.controller.borrow_mut();
         let deadline = controller
             .clock
@@ -272,8 +286,8 @@ impl Io for Native {
     }
 }
 
-/// The unique owner can move to a fresh transport only after actual whole-device
-/// retirement and successful native reconstruction. Retained old media aliases
+/// The unique owner can move to a fresh transport only after whole-device
+/// retirement and successful native reconstruction. Old media aliases
 /// keep their poisoned Bot, whose buffer slots are then permanently empty.
 /// This never manufactures another DmaBuffer or rewinds its allocator.
 struct TransportBuffer(Option<DmaBuffer>);
@@ -406,7 +420,7 @@ impl<I: Io> Bot<I> {
             max_lun,
         ))
     }
-    /// Perform actual transport admission before committing any moved buffers.
+    /// Perform transport admission before committing any moved buffers.
     fn startup(io: &mut I, interface: u8, flags: quirks::Flags) -> Result<u8, BlockError> {
         io.ready()?;
         let request = setup(
@@ -460,6 +474,11 @@ impl<I: Io> Bot<I> {
     }
     pub fn max_lun(&self) -> u8 {
         self.max_lun
+    }
+    /// Poison the transport and isolate its device.
+    pub fn quarantine(&mut self) {
+        self.poisoned = true;
+        self.io.quarantine();
     }
     pub fn poisoned(&self) -> bool {
         self.poisoned
@@ -677,13 +696,13 @@ impl<I: Io> Bot<I> {
         self.tag = self.tag.wrapping_add(1);
         let wrapper = cbw(self.tag, lun, cdb, length, is_in);
         self.wrapper.bytes_mut()[..31].copy_from_slice(&wrapper);
-        // BULK32 pads the actual native transfer; stale wrapper bytes cannot
+        // BULK32 pads the native transfer; stale wrapper bytes cannot
         // leak through the extra donor-defined byte.
         let cbw_length = self.flags.cbw_len();
         self.wrapper.bytes_mut()[31] = 0;
         let pending = match self
             .io
-            .submit(self.endpoints[1], self.wrapper.physical(), cbw_length)
+            .submit(self.endpoints[1], &mut self.wrapper, cbw_length)
         {
             Ok(pending) => pending,
             Err(error) => return self.failed(error),
@@ -855,7 +874,7 @@ impl<I: Io> Bot<I> {
                 .copy_from_slice(&bytes[begun.moved..begun.moved + piece]);
         }
         let endpoint = self.endpoints[usize::from(!begun.is_in)];
-        match self.io.submit(endpoint, self.buffer.physical(), piece) {
+        match self.io.submit(endpoint, &mut self.buffer, piece) {
             Ok(pending) => Next::Stage(Stage::Data(pending, piece)),
             Err(error) => Next::Done(self.failed(error)),
         }
@@ -877,10 +896,7 @@ impl<I: Io> Bot<I> {
     }
 
     fn submit_status(&mut self) -> Next {
-        match self
-            .io
-            .submit(self.endpoints[0], self.wrapper.physical(), 13)
-        {
+        match self.io.submit(self.endpoints[0], &mut self.wrapper, 13) {
             Ok(pending) => Next::Stage(Stage::Status(pending)),
             Err(error) => Next::Done(self.failed(error)),
         }
@@ -952,16 +968,9 @@ impl Bot<Native> {
     pub fn interface(&self) -> u8 {
         self.interface
     }
-    pub fn quarantine(&mut self) {
-        self.poisoned = true;
-        let mut controller = self.io.controller.borrow_mut();
-        if let Ok(mut device) = controller.device(self.io.id) {
-            device.quarantine();
-        }
-    }
-    /// Reconstruct the genuine attachment while retaining its two transport
+    /// Reconstruct the attachment while keeping its two transport
     /// allocations. Root-leaf reset also reuses the controller's retired
-    /// resources; downstream reset retains the existing allocation behavior.
+    /// resources; downstream reset keeps the existing allocation behavior.
     /// Every fallible reconstruction step precedes moving either buffer owner.
     pub fn reset_and_rebind(
         &mut self,
@@ -981,7 +990,7 @@ impl Bot<Native> {
             .attachment
             .as_ref()
             .ok_or_else(|| fail("BOT has no retained native attachment"))?;
-        let interfaces = super::super::xhci::interfaces(&old.configuration);
+        let interfaces = super::super::descriptor::interfaces(&old.configuration);
         if old.configuration.get(4) != Some(&1)
             || interfaces.is_empty()
             || interfaces.iter().any(|i| i.number != self.interface)
@@ -1013,7 +1022,7 @@ impl Bot<Native> {
                 .find(|bytes| bytes.get(5) == Some(&old.configuration_value()))
                 .cloned()
                 .ok_or_else(|| fail("USB reset lost the selected configuration"))?;
-            let setting = super::super::xhci::interfaces(&fresh.configuration)
+            let setting = super::super::descriptor::interfaces(&fresh.configuration)
                 .into_iter()
                 .find(|i| {
                     i.number == self.interface
@@ -1041,7 +1050,7 @@ impl Bot<Native> {
                         device.control(
                             setup(
                                 1,
-                                super::super::xhci::SET_INTERFACE,
+                                super::super::descriptor::SET_INTERFACE,
                                 u16::from(setting.alternate),
                                 u16::from(setting.number),
                                 0,
@@ -1088,7 +1097,7 @@ impl Bot<Native> {
             // acknowledged all old endpoint DMA, and fresh configuration and
             // endpoint commands have acknowledged the replacement. No request
             // in the new transport refers to either application buffer yet.
-            // Move the actual unique owners; old aliases stay poisoned and
+            // Move the unique owners; old aliases stay poisoned and
             // cannot inspect or submit these addresses again.
             let mut buffer = self.buffer.transfer();
             let mut wrapper = self.wrapper.transfer();

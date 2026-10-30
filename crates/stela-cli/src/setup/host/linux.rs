@@ -506,7 +506,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn lsblk_listings_old_and_new_name_esps_and_removable_disks() {
+    fn lsblk_old_and_new_formats_name_esps_and_removable_disks() {
         let new = r#"{"blockdevices": [
             {"name": "sdb", "type": "disk", "size": 64023257088, "model": "Ultra Fit ",
              "tran": "usb", "rm": true, "hotplug": true, "ro": false, "mountpoint": null,
@@ -563,7 +563,7 @@ mod tests {
     }
 
     #[test]
-    fn hotplug_nvme_and_emmc_are_fixed_and_an_sd_card_typed() {
+    fn removal_kind_follows_transport_not_hotplug() {
         let listing = r#"{"blockdevices": [
             {"name": "nvme1n1", "type": "disk", "size": 1000204886016, "model": "WD Blue",
              "tran": "nvme", "rm": false, "hotplug": true, "ro": false, "mountpoint": null,

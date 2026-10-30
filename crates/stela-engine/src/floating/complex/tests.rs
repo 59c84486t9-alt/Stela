@@ -199,7 +199,7 @@ fn fixture(operand: Operand) -> (GuestState, GuestState) {
 }
 
 #[test]
-fn register_shapes_and_rotations_ignore_unselected_components_and_q0_poison() {
+fn register_shapes_ignore_unselected_components() {
     for (format, shape) in SHAPES {
         for kind in [Kind::Add, Kind::MultiplyAdd] {
             for rotation in ROTATIONS {

@@ -124,7 +124,7 @@ impl Context {
             (true, true) => 7,
         };
         // Bulk has no periodic payload. Keep the existing 3072-byte average
-        // transfer hint; periodic hints use the actual advertised service bytes.
+        // transfer hint; periodic hints use the advertised service bytes.
         Ok(Self {
             info: interval << 16,
             info2: 3 << 1 | kind << 3 | burst << 8 | packet << 16,
@@ -137,7 +137,7 @@ impl Context {
 mod tests {
     extern crate std;
     use super::*;
-    use crate::usb::xhci::SuperSpeedCompanion;
+    use crate::usb::descriptor::SuperSpeedCompanion;
 
     fn endpoint(kind: u8, packet: u16, interval: u8) -> Endpoint {
         Endpoint {
@@ -226,7 +226,7 @@ mod tests {
     }
 
     #[test]
-    fn superspeed_companion_controls_burst_and_actual_periodic_payload() {
+    fn superspeed_companion_controls_burst_and_periodic_payload() {
         for speed in [SUPER_SPEED, SUPER_SPEED_PLUS] {
             for burst in 0..=15 {
                 let mut ep = endpoint(2, 1024, 0);

@@ -1,25 +1,29 @@
 //! Read-only physical cache/routing query over the captured installation image.
-//! A caller must separately prove actual WB PAT mappings, enabled caches and
+//! A caller must separately prove WB PAT mappings, enabled caches and
 //! exclusion of incompatible aliases; this image does not grant RAM ownership.
 use super::{Image, VARIABLE_BASE, amd};
+use crate::Result;
 use core::ops::Range;
+use stela_contracts::refuse;
 
-pub fn range(base: u64, mask: u64, bits: u8) -> Result<Range<u64>, &'static str> {
+pub fn range(base: u64, mask: u64, bits: u8) -> Result<Range<u64>> {
     let address = ((1u64 << bits) - 1) & !4095;
     let size = (!mask & address) + 4096;
     let start = base & address;
     if !size.is_power_of_two() || !start.is_multiple_of(size) {
-        return Err("noncontiguous or misaligned native memory-type range");
+        return Err(refuse!(
+            "noncontiguous or misaligned native memory-type range"
+        ));
     }
     Ok(start..start + size)
 }
 
 impl Image {
-    fn value(&self, index: u32) -> Result<u64, &'static str> {
+    fn value(&self, index: u32) -> Result<u64> {
         let value = self.writes[..self.count]
             .iter()
             .find(|write| write.index == index)
-            .ok_or("incomplete installed memory-type image")?;
+            .ok_or(refuse!("incomplete installed memory-type image"))?;
         Ok(u64::from(value.low) | u64::from(value.high) << 32)
     }
 
@@ -27,12 +31,14 @@ impl Image {
     /// ([`amd::State::routes`]), both read/write DRAM routing for every byte.
     /// Undefined overlaps and partial coverage refuse. No page/PAT or
     /// live-current-control assertion is implied by a captured image query.
-    pub fn writeback_ram(&self, start: u64, bytes: u64) -> Result<(), &'static str> {
+    pub fn writeback_ram(&self, start: u64, bytes: u64) -> Result<()> {
         let end = start
             .checked_add(bytes)
-            .ok_or("native RAM range overflow")?;
+            .ok_or(refuse!("native RAM range overflow"))?;
         if bytes == 0 || end > 1u64 << self.physical_bits {
-            return Err("native RAM range exceeds physical memory-type geometry");
+            return Err(refuse!(
+                "native RAM range exceeds physical memory-type geometry"
+            ));
         }
         let routing = self.amd.filter(amd::State::routes);
         let mut cursor = start;
@@ -57,14 +63,14 @@ impl Image {
                 if let Some(state) = routing
                     && (state.syscfg & amd::FIXED_DRAM == 0 || kind & 0x18 != 0x18)
                 {
-                    return Err("AMD fixed range is not read/write DRAM");
+                    return Err(refuse!("AMD fixed range is not read/write DRAM"));
                 }
                 kind &= 7;
             } else {
                 if cursor < 1 << 20 {
                     next = next.min(1 << 20);
                     if routing.is_some() {
-                        return Err("AMD low RAM without fixed routing is unqualified");
+                        return Err(refuse!("AMD low RAM without fixed routing is unqualified"));
                     }
                 }
                 for index in 0..u32::from(self.cap as u8) {
@@ -82,7 +88,7 @@ impl Image {
                         // Every matched type must be WB. UC/WT precedence and
                         // undefined mixed overlaps therefore cannot admit RAM.
                         if base as u8 != 6 {
-                            return Err("native RAM intersects a non-WB MTRR");
+                            return Err(refuse!("native RAM intersects a non-WB MTRR"));
                         }
                         kind = 6;
                         matched = true;
@@ -115,13 +121,15 @@ impl Image {
                             if span.contains(&cursor) {
                                 next = next.min(span.end);
                                 if base & 0x18 != 0x18 {
-                                    return Err("AMD IORR does not route both directions to DRAM");
+                                    return Err(refuse!(
+                                        "AMD IORR does not route both directions to DRAM"
+                                    ));
                                 }
                             }
                         }
                     }
                     if !dram {
-                        return Err("AMD native RAM is not routed to read/write DRAM");
+                        return Err(refuse!("AMD native RAM is not routed to read/write DRAM"));
                     }
                     if !matched
                         && state.syscfg & (amd::TOM2_WB | amd::TOM2_ENABLE)
@@ -134,7 +142,7 @@ impl Image {
                 }
             }
             if kind != 6 {
-                return Err("native RAM lacks full WB memory-type coverage");
+                return Err(refuse!("native RAM lacks full WB memory-type coverage"));
             }
             cursor = next;
         }

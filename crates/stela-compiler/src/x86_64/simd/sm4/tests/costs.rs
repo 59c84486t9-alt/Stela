@@ -1,4 +1,4 @@
-//! Manual hardware comparison of actual complete compiled SM4 leaves.
+//! Manual hardware comparison of complete compiled SM4 leaves.
 use super::*;
 use crate::GuestAddress;
 use alloc::{format, vec::Vec};

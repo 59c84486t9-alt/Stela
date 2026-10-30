@@ -1,12 +1,13 @@
-//! Source-qualified cold SLID transformation, before the complete patch policy.
+//! Source-checked cold SLID transformation, before the complete patch policy.
 //!
-//! The boot-policy owner supplies actual hardware classification and entropy
+//! The boot-policy owner supplies hardware classification and entropy
 //! provenance. This proposal cannot certify either input or install a mapping.
 use super::{Action, Configured, Field, Policy, Provenance, source_record};
+use crate::Result;
 use crate::coprocessor::{HardwareIdentity, Staged};
 use alloc::string::String;
-use anyhow::{Context, Result, ensure};
 use serde::Serialize;
+use stela_contracts::{refuse, require};
 use stela_formats::sha256;
 
 const CHAIN_STARTS: u32 = u32::from_be_bytes(*b"CSSS");
@@ -23,7 +24,7 @@ const BOOT_HEADER_OFFSETS: [u64; 8] = [0x20, 0xc0, 0x204, 0xc00, 0x1020, 0x1204,
 pub struct ColdSlideInput {
     pub hardware_boot_type: u16,
     pub hardware_provenance: Provenance,
-    /// Bytes from the parent's actual entropy owner, not decoded PACE/defaults.
+    /// Bytes from the parent's entropy owner, not decoded PACE/defaults.
     /// The full entropy value is consumed and is never included in the proposal.
     pub entropy: u64,
     pub entropy_provenance: Provenance,
@@ -43,8 +44,8 @@ pub struct ColdSlideProposal {
     control_file_offset: u64,
     control_source_sha256: String,
     patch_value: u64,
-    /// Native header/bootstrap virtual delta. The parent must qualify each
-    /// actual segment mapping, including omit-DART policy; never add it to PA.
+    /// Native header/bootstrap virtual delta. The parent must check each
+    /// segment mapping, including omit-DART policy; never add it to PA.
     remap_slide: u64,
     header_image_offset: u64,
     header_file_offset: u64,
@@ -90,31 +91,33 @@ impl Staged {
             0x20 | 0x40 => input.entropy,
             0x100 | 0x101 => input.entropy & 0xfc000,
             0x400 | 0x800 => (input.entropy & 0x0eefe000) | 0x100000,
-            _ => anyhow::bail!("unqualified native coprocessor slide hardware type"),
+            _ => return Err(refuse!("unqualified native coprocessor slide hardware type").into()),
         };
         let plan = self.plan();
         let bay = plan
             .patchbay
             .as_ref()
-            .context("cold slide requires an original patchbay")?;
+            .ok_or(refuse!("cold slide requires an original patchbay"))?;
         let scalar = |tag| -> Result<(&super::Record, u64)> {
             let (record, value) = source_record(self, tag)?;
-            ensure!(record.bytes == 8, "cold slide tag is not 64-bit");
-            Ok((record, u64::from_le_bytes(value.try_into()?)))
+            require!(record.bytes == 8, "cold slide tag is not 64-bit");
+            Ok((record, u64::from_le_bytes(value.try_into().unwrap())))
         };
         let (_, chain_starts) = scalar(CHAIN_STARTS)?;
         let section = plan
             .sections
             .iter()
             .find(|s| s.name == "__chain_starts")
-            .context("cold slide requires original chain-start coordinates")?;
-        ensure!(
+            .ok_or(refuse!(
+                "cold slide requires original chain-start coordinates"
+            ))?;
+        require!(
             chain_starts != 0 && chain_starts == section.virtual_address,
             "cold slide CSSS does not identify the original chain-start section"
         );
         let (record, original_control) = scalar(SLIDE)?;
         let granule = original_control & SLIDE_GRANULE_MASK;
-        ensure!(
+        require!(
             granule == 0x1000,
             "native remap granule disagrees with qualified cold bootstrap shift"
         );
@@ -125,7 +128,7 @@ impl Staged {
                 .segment
                 .vm_end()
                 .checked_add(remap_slide)
-                .context("cold slide overflows linked IOP segment map")?;
+                .ok_or(refuse!("cold slide overflows linked IOP segment map"))?;
         }
         // iBoot 112724/1127e8 locates the native uuid header independently of
         // Mach-O LC_UUID. 110ca4 writes the slide to version5 header+0x20.
@@ -137,20 +140,20 @@ impl Staged {
         });
         let (header_image_offset, header) = headers
             .next()
-            .context("native cold bootstrap uuid header is absent")?;
-        ensure!(
+            .ok_or(refuse!("native cold bootstrap uuid header is absent"))?;
+        require!(
             headers.next().is_none(),
             "ambiguous native bootstrap headers"
         );
-        ensure!(
-            u32::from_le_bytes(header[4..8].try_into()?) == 5,
+        require!(
+            u32::from_le_bytes(header[4..8].try_into().unwrap()) == 5,
             "native cold slide requires a qualified version5 bootstrap header"
         );
         let uuid = plan
             .uuid
             .as_ref()
-            .context("native bootstrap lacks Mach-O UUID")?;
-        ensure!(
+            .ok_or(refuse!("native bootstrap lacks Mach-O UUID"))?;
+        require!(
             hex::encode(&header[0x10..0x20]) == *uuid,
             "native bootstrap UUID disagrees with Mach-O"
         );
@@ -158,11 +161,12 @@ impl Staged {
             .sections
             .iter()
             .find(|s| s.name == "_rtk_patchbay")
-            .context("native bootstrap lacks original patchbay section")?;
-        ensure!(
-            u64::from(u32::from_le_bytes(header[0x28..0x2c].try_into()?))
+            .ok_or(refuse!("native bootstrap lacks original patchbay section"))?;
+        require!(
+            u64::from(u32::from_le_bytes(header[0x28..0x2c].try_into().unwrap()))
                 == patchbay_section.virtual_address
-                && u64::from(u32::from_le_bytes(header[0x2c..0x30].try_into()?)) == bay.bytes,
+                && u64::from(u32::from_le_bytes(header[0x2c..0x30].try_into().unwrap()))
+                    == bay.bytes,
             "native bootstrap patchbay coordinates disagree with original section"
         );
         let loaded = plan
@@ -175,11 +179,11 @@ impl Staged {
                         .checked_add(0x40)
                         .is_some_and(|end| end <= s.segment.vm_address + s.segment.file_size)
             })
-            .context("native bootstrap header is not wholly file-backed")?;
+            .ok_or(refuse!("native bootstrap header is not wholly file-backed"))?;
         let header_file_offset = loaded.segment.file_offset
             + (plan.vm_base + header_image_offset - loaded.segment.vm_address);
         let slide_start = header_image_offset + 0x20;
-        ensure!(
+        require!(
             !plan
                 .chains
                 .pointers
@@ -211,7 +215,7 @@ impl Staged {
     /// native version5 header slide. The proposal is bound to these staged
     /// bytes, and the policy must explicitly install its matching SLID value.
     pub fn configure_cold(self, policy: Policy, slide: ColdSlideProposal) -> Result<Configured> {
-        ensure!(
+        require!(
             self.placement().staged_sha256 == slide.original_staged_sha256
                 && self.plan().source.decoded_sha256 == slide.source.decoded_sha256
                 && self.plan().product_build == slide.product_build
@@ -219,13 +223,10 @@ impl Staged {
                 && self.plan().hardware.compatible == slide.hardware.compatible,
             "cold bootstrap proposal belongs to different staged source/identity"
         );
-        ensure!(
-            policy.fields.iter().any(|f| f.tag == SLIDE && matches!(&f.action, Action::Replace(v) if v == &slide.patch_value.to_le_bytes())),
-            "complete cold policy must install the proposed SLID value"
-        );
+        require!(policy.fields.iter().any(|f| f.tag == SLIDE && matches!(&f.action, Action::Replace(v) if v == &slide.patch_value.to_le_bytes())), "complete cold policy must install the proposed SLID value");
         let mut configured = self.configure(policy)?;
-        let at = usize::try_from(slide.header_image_offset)?;
-        ensure!(
+        let at = slide.header_image_offset as usize;
+        require!(
             sha256(&configured.bytes()[at..at + 0x40]) == slide.header_source_sha256,
             "patchbay policy overlaps native bootstrap header"
         );
@@ -244,6 +245,7 @@ pub(in crate::coprocessor) mod tests {
         self as native_root,
         tests::{fixture, prepare, w32, w64},
     };
+    use anyhow::Result;
     use configuration::tests::{config_policy, provenance};
     use native_root::{configuration, publication};
     use publication::tests::publication_policy;
@@ -298,7 +300,7 @@ pub(in crate::coprocessor) mod tests {
         *policy.fields.iter_mut().find(|f| f.tag == tag).unwrap() = proposal.field(provenance())?;
         let configured = staged.configure_cold(policy, proposal.clone())?;
         assert_eq!(
-            u64::from_le_bytes(configured.bytes()[0x40..0x48].try_into()?),
+            u64::from_le_bytes(configured.bytes()[0x40..0x48].try_into().unwrap()),
             proposal.remap_slide()
         );
         assert!(configured.receipt().cold_slide.is_some());
@@ -347,7 +349,7 @@ pub(in crate::coprocessor) mod tests {
         let staged = prepare(&decoded)?.stage(0x80000000, 0x3000)?;
         for kind in [0x20, 0x40] {
             let proposal = staged.cold_slide_proposal(slide_input(kind, 0))?;
-            // A genuine entropy owner may return zero; inventing a nonzero slide
+            // An entropy owner may return zero; inventing a nonzero slide
             // would disagree with the original producer. It still authorizes no entry.
             assert_eq!(
                 (proposal.patch_value(), proposal.remap_slide()),

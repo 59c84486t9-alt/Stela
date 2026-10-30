@@ -1,12 +1,14 @@
 //! Selected original T8112 resources. Membership is derived by the same
-//! normal-mode resolver for each PE, preserving the actual running boot PE.
+//! normal-mode resolver for each PE, preserving the running boot PE.
 //! Capacities stay inside the complete original eight-PE/two-complex envelope;
 //! this adapter cannot expand an Apple source profile to additional host cores.
 use super::*;
+use crate::Result;
+use stela_contracts::refuse;
 
 impl<'a> BspSource<'a> {
-    /// Construct metadata for `count` actual assigned workers, BSP first. The
-    /// caller must retain a started physical roster and join native authority.
+    /// Construct metadata for `count` assigned workers, BSP first. The
+    /// caller must keep a started physical roster and join native permission.
     /// Selection keeps the source boot PE first and each complex contiguous
     /// for XNU's L2-sharing interval consumer, preserving source order within
     /// each complex after the boot member.
@@ -18,19 +20,22 @@ impl<'a> BspSource<'a> {
         boot_reg: u32,
         acc_harvesting: u32,
         count: usize,
-    ) -> Result<Self, String> {
-        let root = Node::root(original).ok_or("assigned original source tree is malformed")?;
+    ) -> Result<Self> {
+        let root =
+            Node::root(original).ok_or(refuse!("assigned original source tree is malformed"))?;
         let cpus = root
             .child("cpus")
-            .ok_or("assigned original source lacks CPUs")?;
+            .ok_or(refuse!("assigned original source lacks CPUs"))?;
         let nodes = cpus
             .children()
-            .ok_or("assigned original CPU list is malformed")?;
-        // The normal-mode association resolver qualifies this original family
+            .ok_or(refuse!("assigned original CPU list is malformed"))?;
+        // The normal-mode association resolver checks this original family
         // as two four-core complexes. Counts beyond this envelope require a
         // separate whole-consumer capacity proof, never cloning a source slot.
         if nodes.len() != 8 || count == 0 || count > nodes.len() {
-            return Err("assigned T8112 worker count exceeds the qualified source envelope".into());
+            return Err(refuse!(
+                "assigned T8112 worker count exceeds the qualified source envelope"
+            ));
         }
         let mut regs = vec![boot_reg];
         let boot_complex = boot_reg >> 8;
@@ -54,7 +59,9 @@ impl<'a> BspSource<'a> {
             for cluster in member.clusters {
                 if let Some(old) = result.clusters.iter().find(|old| old.id == cluster.id) {
                     if old != &cluster {
-                        return Err("assigned source cluster metadata conflicts across PEs".into());
+                        return Err(refuse!(
+                            "assigned source cluster metadata conflicts across PEs"
+                        ));
                     }
                 } else {
                     result.clusters.push(cluster);
@@ -63,7 +70,9 @@ impl<'a> BspSource<'a> {
             for cache in member.caches {
                 if let Some(old) = result.caches.iter().find(|old| old.id == cache.id) {
                     if old != &cache {
-                        return Err("assigned source cache metadata conflicts across PEs".into());
+                        return Err(refuse!(
+                            "assigned source cache metadata conflicts across PEs"
+                        ));
                     }
                 } else {
                     result.caches.push(cache);
@@ -73,7 +82,7 @@ impl<'a> BspSource<'a> {
                 if let Some(old) = result.powers.iter_mut().find(|old| old.id == power.id) {
                     for core in power.cores {
                         if old.cores.contains(&core) {
-                            return Err("assigned source repeats core power membership".into());
+                            return Err(refuse!("assigned source repeats core power membership"));
                         }
                         old.cores.push(core);
                     }
@@ -124,24 +133,25 @@ impl<'a> BspSource<'a> {
     }
 
     /// Original node name for this exact selected resource slot.
-    pub fn name_for(&self, slot: GuestSlotId) -> Result<&str, String> {
+    pub fn name_for(&self, slot: GuestSlotId) -> Result<&str> {
         let reg = self
             .slots
             .iter()
             .find(|member| member.id == slot)
-            .ok_or("assigned source slot is absent")?
+            .ok_or(refuse!("assigned source slot is absent"))?
             .reg;
-        let root = Node::root(self.source).ok_or("assigned retained source is malformed")?;
+        let root =
+            Node::root(self.source).ok_or(refuse!("assigned retained source is malformed"))?;
         let cpus = root
             .child("cpus")
-            .ok_or("assigned retained source lacks CPUs")?;
+            .ok_or(refuse!("assigned retained source lacks CPUs"))?;
         let nodes = cpus
             .children()
-            .ok_or("assigned retained CPU list is malformed")?;
+            .ok_or(refuse!("assigned retained CPU list is malformed"))?;
         let node = nodes
             .iter()
             .find(|node| word(node, "reg") == Ok(reg))
-            .ok_or("assigned retained source PE is absent")?;
+            .ok_or(refuse!("assigned retained source PE is absent"))?;
         text(node, "name")
     }
 }

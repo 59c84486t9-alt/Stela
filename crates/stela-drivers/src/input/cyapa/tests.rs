@@ -387,7 +387,7 @@ fn cyapa_bad_counts_ids_duplicates_status_and_coordinates_fail_before_publicatio
     }
 }
 #[test]
-fn cyapa_real_suspend_wake_identity_and_stop_have_actual_power_ownership() {
+fn cyapa_real_suspend_wake_identity_and_stop_have_power_ownership() {
     for target in [State::Sleeping, State::ButtonsOnly, State::PoweredDown] {
         let h = hardware([0x8f, 8, 0], 0xff);
         let mut d = device(&h);
@@ -506,7 +506,7 @@ fn cyapa_invalid_firmware_query_power_ack_timeout_and_irq_remain_explicit() {
 }
 
 #[test]
-fn cyapa_late_suspend_stop_and_wake_power_effects_keep_original_fault_and_caps() {
+fn late_power_faults_keep_first_fault_and_caps() {
     for target in [
         State::Sleeping,
         State::ButtonsOnly,
@@ -559,7 +559,7 @@ fn cyapa_late_suspend_stop_and_wake_power_effects_keep_original_fault_and_caps()
 }
 
 #[test]
-fn cyapa_i2c_complete_late_status_retains_actual_header_without_power_or_launch() {
+fn cyapa_i2c_complete_late_status_keeps_header_without_power_or_launch() {
     for raw in [[0x8f, 8, 0], [0, 0x11, 0]] {
         let h = hardware(raw, 0x17);
         h.borrow_mut().jump = Some((1, 4_000_000));

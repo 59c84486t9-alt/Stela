@@ -3,6 +3,16 @@ use super::OwnedMemory;
 #[cfg(host_memory)]
 use super::{MemoryRegion, domain};
 
+/// One data-protection request shared by host and bound-domain transactions.
+#[cfg(host_memory)]
+#[derive(Clone, Copy)]
+pub(super) struct ProtectionChange {
+    pub address: u64,
+    pub bytes: u64,
+    pub readable: bool,
+    pub writable: bool,
+}
+
 /// Maximum data rights supplied by the address-space loader. Omitted entries
 /// default to initial rights; executable snapshots are never mutable here.
 #[derive(Debug, Clone, Copy)]
@@ -94,20 +104,31 @@ impl OwnedMemory {
         writable: bool,
         protect: impl FnMut(u64, u64, i32) -> core::result::Result<(), Option<i32>>,
     ) -> core::result::Result<(), ProtectionError> {
-        self.protect_data_with_service(address, bytes, readable, writable, None, protect)
+        self.protect_data_with_service(
+            ProtectionChange {
+                address,
+                bytes,
+                readable,
+                writable,
+            },
+            None,
+            protect,
+        )
     }
 
-    #[allow(clippy::too_many_arguments)]
     #[cfg(host_memory)]
     pub(super) fn protect_data_with_service(
         &mut self,
-        address: u64,
-        bytes: u64,
-        readable: bool,
-        writable: bool,
+        change: ProtectionChange,
         service: Option<&domain::MemoryServiceLoan>,
         mut protect: impl FnMut(u64, u64, i32) -> core::result::Result<(), Option<i32>>,
     ) -> core::result::Result<(), ProtectionError> {
+        let ProtectionChange {
+            address,
+            bytes,
+            readable,
+            writable,
+        } = change;
         use ProtectionError as E;
         if let Some(loan) = service {
             let shared = self.shared.as_ref().ok_or(E::SharedDomainBound)?;
@@ -207,9 +228,7 @@ impl OwnedMemory {
             }
         }
         if self.shared.is_some() {
-            return self.protect_shared(
-                address, bytes, readable, writable, next, rollback, service, protect,
-            );
+            return self.protect_shared(change, next, rollback, service, protect);
         }
         if let Err(errno) = protect(address, bytes, host_protection(readable, writable)) {
             // Some host kernels can partially change a failed range. Restore

@@ -1,6 +1,6 @@
 //! HPET table/geometry decoding and coherent counter sample validation.
 //! Results describe firmware bytes and observations; hardware ownership belongs
-//! to the actual native resource provider.
+//! to the native resource provider.
 use stela_crypto::{Sha256, digest::Digest};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -82,7 +82,41 @@ pub struct Geometry {
     pub period_fs: u32,
     pub timers: usize,
 }
+/// Outward elapsed-time bounds from an eligible continuously running HPET.
+/// This data carries no mapping, CPU or controller permission.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ElapsedBounds {
+    pub lower_ns: u64,
+    pub upper_ns: u64,
+}
+
 impl Geometry {
+    /// HPET 1.0a section 2.4.1 bounds error by 500 ppm over any 1 ms interval.
+    /// Monotonicity bounds an arbitrary remainder by one such interval; keep
+    /// that whole 1 ms edge envelope rather than assuming submillisecond rate
+    /// exactness. No uncertainty threshold is imposed on a consumer.
+    ///
+    /// https://www.intel.com/content/dam/www/public/us/en/documents/technical-specifications/software-developers-hpet-spec-1-0a.pdf
+    pub fn elapsed_bounds(self, ticks: u64) -> Result<ElapsedBounds, Error> {
+        if !(100_000..=100_000_000).contains(&self.period_fs) {
+            return Err(Error::UnsupportedGeometry);
+        }
+        const PPM: u128 = 1_000_000;
+        const ACCURACY_PPM: u128 = 500;
+        const EDGE_NS: u128 = 1_000_000;
+        // ticks*period is femtoseconds. Nanosecond conversion's 10^6 and
+        // rate error's 10^6 cancel, keeping a single outward division.
+        let nominal_fs = u128::from(ticks) * u128::from(self.period_fs);
+        let lower = (nominal_fs / (PPM + ACCURACY_PPM)).saturating_sub(EDGE_NS);
+        let upper = nominal_fs
+            .div_ceil(PPM - ACCURACY_PPM)
+            .checked_add(EDGE_NS)
+            .ok_or(Error::TimeOverflow)?;
+        Ok(ElapsedBounds {
+            lower_ns: u64::try_from(lower).map_err(|_| Error::TimeOverflow)?,
+            upper_ns: u64::try_from(upper).map_err(|_| Error::TimeOverflow)?,
+        })
+    }
     pub fn qualify(descriptor: Descriptor, id: u32, period_fs: u32) -> Result<Self, Error> {
         let timers = ((id >> 8) & 31) as usize + 1;
         if id & ID_MASK != descriptor.block_id & ID_MASK
@@ -103,7 +137,7 @@ impl Geometry {
 }
 
 /// A coherent low word lies between two unchanged high observations.
-/// Used only after three ordered actual UC reads; no elapsed time inference.
+/// Used only after three ordered UC reads; no elapsed time inference.
 pub fn coherent_counter(first: u32, low: u32, last: u32) -> Option<u64> {
     (first == last).then_some(u64::from(last) << 32 | u64::from(low))
 }
@@ -175,6 +209,54 @@ mod tests {
         assert_eq!(
             coherent_counter(u32::MAX, u32::MAX, u32::MAX),
             Some(u64::MAX)
+        );
+    }
+    #[test]
+    fn elapsed_bounds_cover_rate_extremes_and_short_interval_edges() {
+        let geometry = Geometry {
+            period_fs: 10_000_000,
+            timers: 1,
+        };
+        for ticks in [0, 1, 10, 10_000, 100_000, 100_000_000, 86_400_000_000_000] {
+            let bounds = geometry.elapsed_bounds(ticks).unwrap();
+            let nominal_ns = u128::from(ticks) * 10;
+            assert!(u128::from(bounds.lower_ns) <= nominal_ns);
+            assert!(u128::from(bounds.upper_ns) >= nominal_ns);
+            // Both allowed frequency extremes remain enclosed, including
+            // the fractional endpoints that need outward rounding.
+            let fastest_floor = nominal_ns * 1_000_000 / 1_000_500;
+            let slowest_ceil = (nominal_ns * 1_000_000).div_ceil(999_500);
+            assert!(u128::from(bounds.lower_ns) <= fastest_floor);
+            assert!(u128::from(bounds.upper_ns) >= slowest_ceil);
+        }
+        assert_eq!(
+            geometry.elapsed_bounds(0).unwrap(),
+            ElapsedBounds {
+                lower_ns: 0,
+                upper_ns: 1_000_000
+            }
+        );
+    }
+
+    #[test]
+    fn elapsed_bounds_refuse_bad_periods_and_unrepresentable_upper_time() {
+        for period_fs in [0, 99_999, 100_000_001, u32::MAX] {
+            assert_eq!(
+                Geometry {
+                    period_fs,
+                    timers: 1
+                }
+                .elapsed_bounds(1),
+                Err(Error::UnsupportedGeometry)
+            );
+        }
+        assert_eq!(
+            Geometry {
+                period_fs: 100_000_000,
+                timers: 1
+            }
+            .elapsed_bounds(u64::MAX),
+            Err(Error::TimeOverflow)
         );
     }
 }

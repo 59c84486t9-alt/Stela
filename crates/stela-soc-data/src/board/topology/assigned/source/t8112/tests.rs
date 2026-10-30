@@ -173,7 +173,7 @@ fn replace(bytes: &mut [u8], path: &[&str], field: &str, value: &[u8]) {
     bytes[offset..offset + value.len()].copy_from_slice(value);
 }
 #[test]
-fn authored_t8112_nonzero_bsp_retains_canonical_full_graph_and_source_coordinates() {
+fn authored_t8112_nonzero_bsp_keeps_canonical_full_graph_and_source_coordinates() {
     let original = authored(false);
     let prepared = authored(true);
     let source =
@@ -244,7 +244,7 @@ fn authored_t8112_nonzero_bsp_retains_canonical_full_graph_and_source_coordinate
 }
 
 #[test]
-fn selected_t8112_resources_cover_each_worker_once_and_retain_actual_boot_state() {
+fn selected_t8112_resources_cover_each_worker_once_and_keep_boot_state() {
     struct Roster(Vec<AssignedCore>);
     impl RetainedRoster for Roster {
         fn revision(&self) -> u64 {

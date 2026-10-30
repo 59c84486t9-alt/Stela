@@ -9,7 +9,7 @@ const CONTACT_OFFSET: usize = 2;
 const CONTACT_BYTES: usize = 5;
 const HOVER_OFFSET: usize = 28;
 const WIDTH_REDUCTION: u32 = 90;
-/// Complete actual transfer. Packet ID, rather than length alone, selects
+/// Complete transfer. Packet ID, rather than length alone, selects
 /// ordinary twelve-bit or high-precision sixteen-bit contact encoding.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Packet {
@@ -42,7 +42,7 @@ pub struct Absolute {
     pub raw: Packet,
     /// Hardware slots; only present slots consume five-byte wire records.
     pub contacts: [Option<Contact>; 5],
-    /// Actual left/right/middle bits0..2, without logical mapping changes.
+    /// Left/right/middle bits0..2, without logical mapping changes.
     pub buttons: u8,
     pub hover: bool,
 }

@@ -3,7 +3,7 @@
 // Copyright (c) 2026 Stela contributors
 //! Real polled Intel SCU/PMC IPC register engine from pinned intel_scu_ipc.c.
 //! Platform discovery, power, mapping leases and interrupt delivery ownership
-//! remain explicit native prerequisites; no ACPI/PCI attachment is fabricated.
+//! remain explicit native prerequisites; no ACPI/PCI attachment is invented.
 use crate::usb::typec::ucsi::Timer;
 use core::{
     ptr::NonNull,
@@ -21,14 +21,14 @@ pub trait Registers {
     fn read32(&mut self, offset: usize) -> Result<u32, RegisterError>;
     fn write32(&mut self, offset: usize, value: u32) -> Result<(), RegisterError>;
 }
-/// Native scalar MMIO. CPU accesses use actual aligned volatile u32 words.
+/// Native scalar MMIO. CPU accesses use aligned volatile u32 words.
 pub struct Mmio {
     base: NonNull<u8>,
     bytes: usize,
 }
 impl Mmio {
     /// # Safety
-    /// Caller retains the actual native device's mapping lease, mapped as
+    /// Caller keeps the native device's mapping lease, mapped as
     /// uncached device MMIO and aligned to four bytes. The resource must remain
     /// powered and exclusively serialized for this object's lifetime. For an
     /// IPC mapping, CPU interrupt delivery must be masked or owned by this same

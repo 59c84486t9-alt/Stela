@@ -334,7 +334,7 @@ fn pmp_range_capacity_is_bounded_by_its_own_update_alias() {
 #[test]
 #[cfg(feature = "std")]
 #[ignore = "oracle: STELA_TEST_MCC_J473_DT"]
-fn original_j473_uses_its_actual_2048_slot_update_alias() {
+fn original_j473_uses_its_2048_slot_update_alias() {
     use stela_crypto::{Sha256, digest::Digest};
     let path = std::env::var("STELA_TEST_MCC_J473_DT").unwrap();
     let data = std::fs::read(path).unwrap();

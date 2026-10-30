@@ -36,7 +36,7 @@ struct Hub {
 }
 #[derive(Clone)]
 struct Grant {
-    /// Reserved before Address Device, retained until physical reset proof.
+    /// Reserved before Address Device, kept until physical reset proof.
     generation: Option<u64>,
     parent_id: Option<SlotId>,
     attachment: Attachment,
@@ -456,8 +456,8 @@ impl Controller {
         let Some(slot) = self.power.port_owner(raw, root) else {
             return Ok(None);
         };
-        // Authority is the old retained grant, never a fresh lookup from a
-        // retained numerical slot. A changed generation refuses the operation.
+        // Permission is the old grant, never a fresh lookup from a
+        // numerical slot. A changed generation refuses the operation.
         let grant = self.power.grant(slot)?;
         let state = self
             .slots
@@ -576,7 +576,7 @@ impl Controller {
         value: u8,
     ) -> Result<u16, BlockError> {
         // A configured hub owns its powered ports and descendant contracts.
-        // Endpoint teardown alone cannot authorize replacing that authority.
+        // Endpoint teardown alone cannot authorize replacing that permission.
         // Reconfiguration needs explicit subtree retirement and a fresh hub
         // owner; the cached same-value helper remains a harmless no-op.
         if self.power.grant(slot)?.hub.is_some() {

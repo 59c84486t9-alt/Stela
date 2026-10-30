@@ -7,11 +7,13 @@
 //! INIT at 0xfffffff0270d4b28 checks that handoff count; MAP_PAGES at d52d0
 //! bounds tag by that same count. ENABLE_CG at d5a48 writes 0x28100=63 even
 //! with J314s handoff 253. That control is not the software tag bound.
+use crate::Result;
+use stela_contracts::refuse;
 const MAX_TAG_SLOTS: u16 = 256;
 const TAGS_PER_STATUS_WORD: u16 = 8;
 const STATUS_WORD_BYTES: u64 = 4;
 const VDMA_ENTRY_BYTES: u64 = 32;
-/// The only source-qualified NVMMU control encoding. The engine retains no
+/// The only source-checked NVMMU control encoding. The engine keeps no
 /// translation cache after a synchronous command; no alternate encoding's
 /// effect is inferred from the control's historical name/count interpretation.
 pub const NVMMU_CONTROL: u16 = 63;
@@ -29,9 +31,9 @@ impl QueueGeometry {
     /// The AP's min(CAP.MQES+1,257)-1 and 8-bit TCB ID bound this complete
     /// linear contract to 1..256 software slots. This is an explicit emulated
     /// resource declaration, not a generation-dependent hardware default.
-    pub fn linear(handoff: u32) -> Result<Self, &'static str> {
+    pub fn linear(handoff: u32) -> Result<Self> {
         if handoff == 0 || handoff > u32::from(MAX_TAG_SLOTS) {
-            return Err("ANS linear handoff entries must be in 1..=256");
+            return Err(refuse!("ANS linear handoff entries must be in 1..=256"));
         }
         Ok(Self {
             handoff: handoff as u16,

@@ -2,8 +2,8 @@
 //! numerical traps while FPSR still accumulates.
 use crate::aarch64::floating::{FPCR_AHP, FPCR_EXCEPTION_ENABLE_MASK};
 
-/// Adapt retained enables to FPProcessException's streaming trap condition.
-/// Full A64 execution retains the ordinary numerical exception-enable policy.
+/// Adapt kept enables to FPProcessException's streaming trap condition.
+/// Full A64 execution keeps the ordinary numerical exception-enable policy.
 pub const fn effective_fpcr(fpcr: u32, streaming: bool, full_a64: bool) -> u32 {
     if streaming && !full_a64 {
         fpcr & !FPCR_EXCEPTION_ENABLE_MASK

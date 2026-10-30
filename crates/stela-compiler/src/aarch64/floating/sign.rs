@@ -37,7 +37,7 @@ mod tests {
     }
 
     #[test]
-    fn retained_exception_enables_do_not_block_sign_operations() {
+    fn kept_exception_enables_do_not_block_sign_operations() {
         for format in [Format::Half, Format::Single, Format::Double] {
             let sign = format.sign_mask();
             for value in [

@@ -152,10 +152,10 @@ impl Controller {
                 Some(Ok(event)) => event,
                 // A missing transfer completion leaves EP0 Running, not
                 // Halted. Only acknowledged Stop/Set Dequeue permits reuse;
-                // failed cancellation is reported and retains poison.
+                // failed cancellation is reported and keeps poison.
                 Some(Err(error)) => return self.fail_control(control, error),
             };
-            // An event must name this TD's actual Setup/Data/Status TRB.
+            // An event must name this TD's Setup/Data/Status TRB.
             // Event Data is never submitted by this control path. Only Data
             // short packets may precede the final zero-length Status ACK.
             let data_address = (control.length > 0).then(|| control.addresses[1]);
@@ -216,7 +216,7 @@ impl Controller {
         let state = self.slot(control.slot)?;
         state.endpoints[1].as_mut().unwrap().in_flight = 0;
         let bytes = if control.is_in {
-            // SAFETY: the actual Status completion retired this EP0 TD's
+            // SAFETY: the Status completion retired this EP0 TD's
             // Data stage.
             unsafe {
                 state.control.sync_cpu(0..control.received)?;
@@ -265,7 +265,7 @@ impl Controller {
         if endpoint.poisoned {
             return Err(BlockError::Unsupported("xHCI endpoint cancellation failed"));
         }
-        // Set before issuing any command, so every error path retains poison.
+        // Set before issuing any command, so every error path keeps poison.
         endpoint.poisoned = true;
         let pointers = endpoint.streams.as_ref().map_or_else(
             || vec![(0u16, endpoint.ring.dequeue_pointer())],
@@ -447,7 +447,7 @@ impl Controller {
         });
         // A failed split control/bulk transaction may leave the external
         // high-speed hub's TT occupied even after xHC DMA has retired. Only
-        // the actual hub request ACK permits this endpoint to resume.
+        // the hub request ACK permits this endpoint to resume.
         if cancel.clear_tt {
             self.hub_tt_requests(slot, dci)
         } else {

@@ -26,7 +26,7 @@ pub struct EarlyFault {
     pub vector: u8,
     pub error: Option<u64>,
     pub pc: u64,
-    /// Only #PF defines the retained CR2 as this exception's address.
+    /// Only #PF defines the CR2 as this exception's address.
     pub address: Option<u64>,
 }
 
@@ -98,11 +98,11 @@ fn decode(
     })
 }
 /// # Safety
-/// The record is the actual aligned owned SIPI allocation, not arbitrary bytes.
+/// The record is the aligned owned SIPI allocation, not arbitrary bytes.
 /// The AP is the sole claimant; its assembly latches the first exception and
 /// never changes payload after publishing SEALED, including later NMI entry.
 pub unsafe fn read(record: *const Record) -> Result<Option<EarlyFault>, RecordError> {
-    // SAFETY: the caller retains an aligned live Record; its seal is atomic
+    // SAFETY: the caller keeps an aligned live Record; its seal is atomic
     // while the AP may still be publishing the payload.
     let seal = unsafe { &(*record).seal }.load(Ordering::Acquire);
     match seal {
@@ -183,7 +183,7 @@ mod tests {
         );
     }
     #[test]
-    fn incomplete_records_never_become_actual_exception_evidence() {
+    fn incomplete_records_never_become_exception_evidence() {
         let mut record = Record {
             seal: AtomicU32::new(0),
             vector: 13,

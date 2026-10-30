@@ -2,13 +2,13 @@
 //! Standard HID-over-I2C transport, following Linux i2c-hid-core.c.
 //!
 //! Copyright (c) 2012 Benjamin Tissoires, Ecole Nationale de l'Aviation Civile
-//! and Red Hat, Inc. Retained notices and upstream source hashes are in
+//! and Red Hat, Inc. Notices and upstream source hashes are in
 //! input/THIRD_PARTY.md. This is a native Stela backend, not a Linux shim.
 //!
 //! The platform supplies an exclusively owned, powered I2C attachment, the ACPI
-//! descriptor register and the actual interrupt pin. The CPU route stays masked
+//! descriptor register and the interrupt pin. The CPU route stays masked
 //! and drained; this polled backend observes the pin itself. Reset completes
-//! by a new zero-length IRQ acknowledgement, except exact source-qualified
+//! by a new zero-length IRQ acknowledgement, except source-checked
 //! no-reset-IRQ devices that explicitly expose their separate delay contract.
 //! Raw HID reports and the exact report descriptor pass to a shared HID consumer;
 //! no keyboard, touchpad or touchscreen descriptor is substituted here.
@@ -33,8 +33,8 @@ const ADDRESS_WAKE_DELAY_US: u64 = 400;
 const GOODIX_RESUME_DELAY_US: u64 = 1_500_000;
 const QUIRK_RESET_DELAY_US: u64 = 100_000;
 
-/// Actual platform IRQ provider. Masking must acknowledge the CPU route's
-/// mask/drain, not merely change a local boolean. `asserted` samples this
+/// Platform IRQ provider. Masking must acknowledge the CPU route's
+/// mask/drain, not change a local boolean. `asserted` samples this
 /// attachment's physical active level even while the CPU route is masked.
 pub trait Interrupt {
     fn mask_and_drain(&mut self) -> Result<(), InterruptError>;
@@ -127,14 +127,14 @@ enum State {
     Faulted,
 }
 /// One observed input result. No-data and ELAN's documented bogus interrupt are
-/// visible outcomes, not empty fabricated HID reports.
+/// visible outcomes, not empty invented HID reports.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InputReport {
     Data(Vec<u8>),
     Empty,
     SpuriousInterrupt,
     /// Exact upstream BAD_INPUT_SIZE devices return the complete read buffer
-    /// when their header is invalid. Preserve every actual byte and expose the
+    /// when their header is invalid. Preserve every byte and expose the
     /// original wire length; a consumer never mistakes this for a valid header.
     CorrectedLength {
         data: Vec<u8>,
@@ -144,7 +144,7 @@ pub enum InputReport {
 }
 
 /// Evidence for the most recent successful reset sequence. These outcomes are
-/// deliberately distinct: a known no-IRQ device never claims an observed ACK.
+/// distinct: a known no-IRQ device never claims an observed ACK.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ResetCompletion {
     InterruptAcknowledgement,
@@ -154,7 +154,7 @@ pub enum ResetCompletion {
 }
 
 /// Captured control-report bytes and the full HID length advertised on wire.
-/// A caller may deliberately bound the read; truncation is never hidden.
+/// A caller may bound the read; truncation is never hidden.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ControlReport {
     pub data: Vec<u8>,
@@ -184,7 +184,7 @@ pub struct Device<B, I, T> {
 impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
     /// Does not touch hardware. GPIO/reset-rail sequencing and ACPI descriptor
     /// discovery belong to the platform; no vendor/ACPI identity supplies IRQ
-    /// completion in place of the required actual pin provider.
+    /// completion in place of the required pin provider.
     pub fn new(
         bus: B,
         interrupt: I,
@@ -381,7 +381,7 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
             // Linux i2c_hid_finish_hwreset uses this exact 100ms contract only
             // for the listed device identities. Do not relabel it as an IRQ ACK.
             self.delay(QUIRK_RESET_DELAY_US);
-            // Consume any actual response/input accumulated during the delay;
+            // Consume any response/input accumulated during the delay;
             // a stale delayed reset response cannot become guest input later.
             self.drain_before_reset()?;
             ResetCompletion::DeviceQuirkDelay
@@ -467,7 +467,7 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
             Err(kind) => Err(self.fail(kind)),
         }
     }
-    /// Read only when the actual device IRQ pin is asserted. Returned HID bytes
+    /// Read only when the device IRQ pin is asserted. Returned HID bytes
     /// include the report ID if the device's descriptor uses numbered reports.
     pub fn poll(&mut self) -> Result<Option<InputReport>, Error> {
         self.ready()?;

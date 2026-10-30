@@ -91,12 +91,12 @@ fn evaluate(fpcr: u32, bits: u64, square_root: bool) -> Outcome {
     }
 }
 
-/// Increased-precision FPRecipEstimate for Single + AH; retained enables cannot trap.
+/// Increased-precision FPRecipEstimate for Single + AH; enables cannot trap.
 pub fn reciprocal(fpcr: u32, bits: u64) -> Outcome {
     evaluate(fpcr, bits, false)
 }
 
-/// Increased-precision FPRSqrtEstimate for Single + AH; retained enables cannot trap.
+/// Increased-precision FPRSqrtEstimate for Single + AH; enables cannot trap.
 pub fn reciprocal_sqrt(fpcr: u32, bits: u64) -> Outcome {
     evaluate(fpcr, bits, true)
 }
@@ -129,7 +129,7 @@ mod tests {
     }
 
     #[test]
-    fn unit_special_values_and_retained_enables_have_fixed_bits_without_status() {
+    fn unit_special_values_and_kept_enables_have_fixed_bits_without_status() {
         let controls = FPCR_AH | FPCR_EXCEPTION_ENABLE_MASK;
         for (input, reciprocal_bits, sqrt_bits) in [
             (0x3f80_0000, 0x3f7f_f000, 0x3f7f_f000),

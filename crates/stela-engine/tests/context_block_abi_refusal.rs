@@ -138,7 +138,7 @@ fn normal_thread_rejects_a_numerical_exit_before_pc_or_instruction_commit() -> R
     );
     runtime.register_code(BASE, source())?;
     let prepared = runtime.prepare(BASE)?.prepared;
-    // A deliberately invalid native body: a no-effect struct-return that asks
+    // An invalid native body: a no-effect struct-return that asks
     // an ordinary engine for the context-only service exit.
     let mut native = MOV_RAX_IMMEDIATE.to_vec();
     native.extend(BASE.0.to_le_bytes());

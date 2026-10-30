@@ -19,8 +19,8 @@ pub enum Deadline {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Reliability {
-    /// Actual adjustment observation; native code still checks instability,
-    /// retained controls/epoch and changes, not just this feature combination.
+    /// Adjustment observation; native code still checks instability,
+    /// controls/epoch and changes, not just this feature combination.
     AdjustmentMonitored {
         observed: u64,
     },
@@ -44,7 +44,7 @@ pub struct CounterPolicy {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HpetPowerConstraint {
     NoPc10Indication,
-    /// Preserve this actual power/control lease; a later limit change requires
+    /// Preserve this power/control lease; a later limit change requires
     /// requalification/source transition, not disabling deep idle as a workaround.
     RequiresStablePackageLimit {
         observed: u64,
@@ -77,10 +77,37 @@ fn msr(snapshot: &Snapshot, index: u32) -> Result<u64, Error> {
     }
     Ok(value)
 }
+/// Linux cc9de5d4 init_amd derives the always-running LAPIC timer for
+/// family0x12 onward even when CPUID6 does not expose the Intel ARAT bit.
+pub fn deadline_policy(snapshot: &Snapshot) -> Result<Deadline, Error> {
+    let identity = leaf(snapshot, 0)?;
+    let basic = leaf(snapshot, 1)?;
+    let amd = [identity.ebx, identity.edx, identity.ecx]
+        == [
+            u32::from_le_bytes(*b"Auth"),
+            u32::from_le_bytes(*b"enti"),
+            u32::from_le_bytes(*b"cAMD"),
+        ];
+    let base = basic.eax >> 8 & 15;
+    let family = if base == 15 {
+        base + (basic.eax >> 20 & 255)
+    } else {
+        base
+    };
+    if amd && family > 0x11 {
+        return Ok(Deadline::Arat);
+    }
+    if identity.eax >= 6 && leaf(snapshot, 6)?.eax & (1 << 2) != 0 {
+        Ok(Deadline::Arat)
+    } else {
+        Ok(Deadline::RequiresOwnedBroadcast)
+    }
+}
+
 fn intel(identity: Cpuid) -> bool {
     [identity.ebx, identity.edx, identity.ecx] == INTEL
 }
-/// Classify actual observations or authored model input. Caller/package data is
+/// Classify observations or authored model input. Caller/package data is
 /// not trusted native ownership; native admission independently binds it to the
 /// current CPU, original capture, resource/control owner and reliability policy.
 pub fn counter_policy(snapshot: &Snapshot, packages: u32) -> Result<CounterPolicy, Error> {
@@ -118,11 +145,7 @@ pub fn counter_policy(snapshot: &Snapshot, packages: u32) -> Result<CounterPolic
         Some(observed) if packages <= 4 => Reliability::AdjustmentMonitored { observed },
         _ => Reliability::RequiresOwnedReferenceWatchdog,
     };
-    let deadline = if identity.eax >= 6 && leaf(snapshot, 6)?.eax & (1 << 2) != 0 {
-        Deadline::Arat
-    } else {
-        Deadline::RequiresOwnedBroadcast
-    };
+    let deadline = deadline_policy(snapshot)?;
     let rate = if intel(identity) && identity.eax >= 0x15 {
         let ratio = leaf(snapshot, 0x15)?;
         if ratio.eax != 0 && ratio.ebx != 0 && ratio.ecx != 0 {
@@ -160,4 +183,63 @@ pub fn hpet_power_constraint(snapshot: &Snapshot) -> Result<HpetPowerConstraint,
         return Err(Error::Pc10StopsHpet);
     }
     Ok(HpetPowerConstraint::RequiresStablePackageLimit { observed })
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::*;
+    fn observed(family: u32, amd: bool, arat: bool) -> Snapshot {
+        let mut snapshot = Snapshot::default();
+        let vendor = if amd {
+            [*b"Auth", *b"enti", *b"cAMD"]
+        } else {
+            [*b"Genu", *b"ineI", *b"ntel"]
+        };
+        snapshot.records[0] = Cpuid {
+            leaf: 0,
+            eax: 6,
+            ebx: u32::from_le_bytes(vendor[0]),
+            edx: u32::from_le_bytes(vendor[1]),
+            ecx: u32::from_le_bytes(vendor[2]),
+            ..Cpuid::default()
+        };
+        snapshot.records[1] = Cpuid {
+            leaf: 1,
+            eax: (15 << 8) | ((family - 15) << 20),
+            ..Cpuid::default()
+        };
+        snapshot.records[2] = Cpuid {
+            leaf: 6,
+            eax: if arat { 1 << 2 } else { 0 },
+            ..Cpuid::default()
+        };
+        snapshot.count = 3;
+        snapshot
+    }
+    #[test]
+    fn amd_deep_idle_timer_support_does_not_require_the_intel_feature_bit() {
+        assert_eq!(
+            deadline_policy(&observed(0x19, true, false)),
+            Ok(Deadline::Arat)
+        );
+        assert_eq!(
+            deadline_policy(&observed(0x12, true, false)),
+            Ok(Deadline::Arat)
+        );
+        assert_eq!(
+            deadline_policy(&observed(0x11, true, false)),
+            Ok(Deadline::RequiresOwnedBroadcast)
+        );
+    }
+    #[test]
+    fn other_vendors_need_their_observed_arat_bit() {
+        assert_eq!(
+            deadline_policy(&observed(0x19, false, false)),
+            Ok(Deadline::RequiresOwnedBroadcast)
+        );
+        assert_eq!(
+            deadline_policy(&observed(0x19, false, true)),
+            Ok(Deadline::Arat)
+        );
+    }
 }

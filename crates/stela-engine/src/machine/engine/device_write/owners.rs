@@ -1,6 +1,7 @@
 //! Sequential real memory/CPU borrows of one stopped synchronous write owner.
 use super::*;
 use crate::memory::{CanonicalRamService, RegisteredSystemRam};
+use stela_contracts::refuse;
 
 pub(in crate::machine::engine) mod sealed {
     pub trait Sealed {}
@@ -12,7 +13,7 @@ pub trait CanonicalDeviceWrite: sealed::Sealed {
     fn processors(&mut self) -> Result<ProcessorWrite<'_>, DeviceError>;
 }
 
-/// Real canonical all-writer gates, retained until this phase ends. Every
+/// Real canonical all-writer gates, kept until this phase ends. Every
 /// assigned physical owner already completed its fence and remains held in the
 /// same generation. Only the selected source owner/BSP helper can act here.
 pub struct CanonicalWriteMemory<'a> {
@@ -35,7 +36,7 @@ impl CanonicalDeviceMemory for CanonicalWriteMemory<'_> {
         &self.memory
     }
     fn fence_cpu_memory(&mut self) {
-        // Other workers' actual fences remain completed under the unchanged
+        // Other workers' fences remain completed under the unchanged
         // hold; no external/queued producer or device reentrancy is admitted.
         self.host.memory_barrier();
     }
@@ -60,9 +61,9 @@ impl<'a> WriteOwners<'a> {
     }
     fn validate(&self) -> Result<(), DeviceError> {
         self.processors.require_native_hold(self.held).map_err(|_| {
-            DeviceError::TransferRefused(
-                "canonical write lost its actual stopped generation".into(),
-            )
+            DeviceError::TransferRefused(refuse!(
+                "canonical write lost its actual stopped generation"
+            ))
         })
     }
 }
@@ -70,13 +71,9 @@ impl sealed::Sealed for WriteOwners<'_> {}
 impl CanonicalDeviceWrite for WriteOwners<'_> {
     fn memory(&mut self) -> Result<CanonicalWriteMemory<'_>, DeviceError> {
         self.validate()?;
-        let memory = self
-            .ram
-            .try_service()
-            .map_err(|_| DeviceError::TransferRefused("canonical write RAM owner failed".into()))?
-            .ok_or_else(|| {
-                DeviceError::TransferRefused("canonical write RAM gates unavailable".into())
-            })?;
+        let memory = self.ram.service().map_err(|_| {
+            DeviceError::TransferRefused(refuse!("canonical write RAM owner failed"))
+        })?;
         Ok(CanonicalWriteMemory {
             memory,
             host: self.processors.native_host(),

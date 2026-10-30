@@ -6,13 +6,15 @@ use super::GPIO_T6000;
 use super::Node;
 use super::String;
 use super::Vec;
-use super::format;
 use super::single_range;
 use super::spmi_topology::cells_of;
+use crate::Result;
+use stela_contracts::refusal::Within;
+use stela_contracts::refuse;
 
-/// Compatible identifies register semantics, while role bounds the qualified
+/// Compatible identifies register semantics, while role bounds the checked
 /// board owner. Only the AP S5L bank is admitted: auxiliary restoration,
-/// wake groups and nets remain explicit unqualified board dependencies.
+/// wake groups and nets remain explicit unchecked board dependencies.
 pub(super) fn gpio_profile<'a>(
     property: impl Fn(&str) -> Option<&'a [u8]>,
 ) -> Option<crate::gpio::Profile> {
@@ -55,7 +57,7 @@ pub(super) fn gpio_bank(
     io: &Node<'_>,
     translate: &dyn Fn(u64, u64) -> Option<u64>,
     aic: u32,
-) -> Result<Option<GpioBank>, String> {
+) -> Result<Option<GpioBank>> {
     let Some(node) = AP_GPIO_NAMES
         .iter()
         .find_map(|name| io.child(name))
@@ -87,9 +89,12 @@ pub(super) fn aux_gpio_banks(
     io: &Node<'_>,
     translate: &dyn Fn(u64, u64) -> Option<u64>,
     aic: u32,
-) -> Result<Vec<AuxGpioBank>, String> {
+) -> Result<Vec<AuxGpioBank>> {
     let mut banks = Vec::new();
-    for node in io.children().ok_or("/arm-io children are malformed")? {
+    for node in io
+        .children()
+        .ok_or(refuse!("/arm-io children are malformed"))?
+    {
         let name = node
             .property("name")
             .and_then(|name| core::str::from_utf8(name).ok())
@@ -98,8 +103,7 @@ pub(super) fn aux_gpio_banks(
         if AP_GPIO_NAMES.contains(&name) || !node.compatible(GPIO) {
             continue;
         }
-        let bank =
-            gpio_geometry(&node, translate, aic).map_err(|error| format!("{name}: {error}"))?;
+        let bank = gpio_geometry(&node, translate, aic).within(|| refuse!("{name}", name))?;
         let mut client_pins = Vec::new();
         root.visit(&mut |client| {
             if client.first_u32("interrupt-parent") == Some(bank.phandle)
@@ -116,11 +120,15 @@ pub(super) fn aux_gpio_banks(
                 }
             }
         })
-        .ok_or("DeviceTree walk failed")?;
+        .ok_or(refuse!("DeviceTree walk failed"))?;
         client_pins.sort_unstable();
         client_pins.dedup();
         if let Some(&pin) = client_pins.iter().find(|&&pin| pin >= bank.pins) {
-            return Err(format!("{name}: a client names pin {pin} past the bank"));
+            return Err(refuse!(
+                "{name}: a client names pin {pin} past the bank",
+                name,
+                pin
+            ));
         }
         banks.push(AuxGpioBank {
             name: name.into(),
@@ -151,19 +159,19 @@ fn gpio_geometry(
     node: &Node<'_>,
     translate: &dyn Fn(u64, u64) -> Option<u64>,
     aic: u32,
-) -> Result<GpioBank, String> {
+) -> Result<GpioBank> {
     let (physical, bytes) = single_range(node, translate)?;
     let pins = node
         .first_u32("#gpio-pins")
-        .ok_or("GPIO pin count missing")?;
+        .ok_or(refuse!("GPIO pin count missing"))?;
     let groups = node
         .first_u32("#gpio-int-groups")
-        .ok_or("GPIO group count missing")?;
+        .ok_or(refuse!("GPIO group count missing"))?;
     let lines = node
         .cells32("interrupts")
-        .ok_or("GPIO interrupts missing")?
+        .ok_or(refuse!("GPIO interrupts missing"))?
         .into_iter()
-        .map(|irq| u16::try_from(irq).map_err(|_| "GPIO interrupt too large"))
+        .map(|irq| u16::try_from(irq).map_err(|_| refuse!("GPIO interrupt too large")))
         .collect::<Result<Vec<_>, _>>()?;
     if pins == 0
         || pins > GPIO_PINS
@@ -173,10 +181,11 @@ fn gpio_geometry(
         || node.first_u32("interrupt-parent") != Some(aic)
         || bytes < GPIO_IRQ_BASE + u64::from(groups) * GPIO_IRQ_STRIDE
     {
-        return Err("unsupported GPIO geometry or interrupt parent".into());
+        return Err(refuse!("unsupported GPIO geometry or interrupt parent"));
     }
-    let profile = gpio_profile(|key| node.property(key))
-        .ok_or("GPIO register profile or board role is unqualified")?;
+    let profile = gpio_profile(|key| node.property(key)).ok_or(refuse!(
+        "GPIO register profile or board role is unqualified"
+    ))?;
     let no_restore_pins = match node.property("no-restore-gpio-pins") {
         None => Vec::new(),
         Some(raw) if raw.len().is_multiple_of(4) => {
@@ -186,13 +195,13 @@ fn gpio_geometry(
                 .enumerate()
                 .any(|(index, pin)| *pin >= pins || values[..index].contains(pin))
             {
-                return Err(
-                    "GPIO restoration exclusions contain an invalid or duplicate pin".into(),
-                );
+                return Err(refuse!(
+                    "GPIO restoration exclusions contain an invalid or duplicate pin"
+                ));
             }
             values
         }
-        Some(_) => return Err("GPIO restoration exclusions have incomplete cells".into()),
+        Some(_) => return Err(refuse!("GPIO restoration exclusions have incomplete cells")),
     };
     if profile == crate::gpio::Profile::S5l8960x
         && [
@@ -204,7 +213,9 @@ fn gpio_geometry(
         .iter()
         .any(|key| node.property(key).is_some())
     {
-        return Err("S5L AP GPIO restoration/wake overrides are unqualified".into());
+        return Err(refuse!(
+            "S5L AP GPIO restoration/wake overrides are unqualified"
+        ));
     }
     Ok(GpioBank {
         profile,
@@ -215,7 +226,7 @@ fn gpio_geometry(
         groups,
         phandle: node
             .first_u32("AAPL,phandle")
-            .ok_or("GPIO phandle missing")?,
+            .ok_or(refuse!("GPIO phandle missing"))?,
         lines,
         i2c_lines: Vec::new(),
     })
@@ -226,7 +237,7 @@ fn gpio_geometry(
 pub(super) const AP_GPIO_BANK: u32 = 0x5041;
 
 /// Every AP-bank pin an `arm-io` I2C node names as its SCL or SDA line.
-pub(super) fn i2c_lines(io: &Node<'_>, pins: u32) -> Result<Vec<u32>, String> {
+pub(super) fn i2c_lines(io: &Node<'_>, pins: u32) -> Result<Vec<u32>> {
     let mut lines = Vec::new();
     let mut failure = None;
     io.visit(&mut |node| {
@@ -237,11 +248,11 @@ pub(super) fn i2c_lines(io: &Node<'_>, pins: u32) -> Result<Vec<u32>, String> {
             match cells[..] {
                 [pin, _, AP_GPIO_BANK] if pin < pins => lines.push(pin),
                 [_, _, bank] if bank != AP_GPIO_BANK => {}
-                _ => failure = Some(format!("unsupported {name} pin encoding")),
+                _ => failure = Some(refuse!("unsupported {name} pin encoding", name)),
             }
         }
     })
-    .ok_or("I2C line walk failed")?;
+    .ok_or(refuse!("I2C line walk failed"))?;
     match failure {
         Some(error) => Err(error),
         None => Ok(lines),
@@ -255,7 +266,7 @@ mod tests {
     use crate::board::fixture_support::flat_fixture_extent;
 
     #[test]
-    fn s5l_gpio_admission_requires_qualified_pair_and_ap_role() {
+    fn s5l_gpio_admission_requires_checked_pair_and_ap_role() {
         let compatible = b"gpio,t6000\0gpio,s5l8960x\0";
         for role in [
             b"AP\0".as_slice(),

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Authored pure protocol controls; these do not qualify a native receiver.
+//! Authored pure protocol controls; these do not check a native receiver.
 use super::*;
 use alloc::vec;
 
@@ -90,7 +90,7 @@ fn separate_primary_applications_and_exact_byte_profiles_are_required() {
 }
 
 #[test]
-fn usb_status_ack_does_not_publish_protocol_or_feature_authority() {
+fn usb_status_ack_does_not_publish_protocol_or_feature_permission() {
     let mut g = group();
     let enable = g.next(0).unwrap();
     assert_eq!(enable.bytes, [SHORT, RECEIVER, 0x80, 0, 0, 9, 0]);
@@ -284,7 +284,7 @@ fn duplicate_notifications_and_unknown_families_never_mint_extra_routes_or_queri
 }
 
 #[test]
-fn deadlines_and_lifecycle_revoke_authority_without_resetting_consumed_signatures() {
+fn deadlines_and_lifecycle_revoke_permission_without_resetting_consumed_signatures() {
     let mut g = group();
     listen(&mut g);
     g.observe(&notification(1, 1), 10);
@@ -333,3 +333,5 @@ fn all_fifteen_successful_signatures_remain_consumed_until_physical_retirement()
     assert_eq!(g.routes[0].view.feature_signatures_used, 15);
     assert!(g.routes[0].view.version.is_none());
 }
+
+mod native;

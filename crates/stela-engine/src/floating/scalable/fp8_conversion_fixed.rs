@@ -25,7 +25,7 @@ fn bytes(vector: [u64; 2]) -> [u8; VECTOR_BYTES] {
 }
 
 /// Admission establishes FP/ASIMD and FPMR access, plus FullA64 if streaming.
-/// Fixed instructions retain exception enables; effective streaming suppression
+/// Fixed instructions keep exception enables; effective streaming suppression
 /// must never be borrowed from the scalable conversion rules.
 pub(super) fn complete(
     state: &mut GuestState,

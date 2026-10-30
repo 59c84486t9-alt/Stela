@@ -24,7 +24,7 @@ fn outcome(bits: u32, exceptions: u32) -> Result<Outcome, UnsupportedControl> {
 }
 
 #[test]
-fn widening_retains_every_raw_bfloat16_field() {
+fn widening_keeps_every_raw_bfloat16_field() {
     for (input, expected) in [
         (0, 0),
         (0x8000, SINGLE_SIGN),
@@ -159,7 +159,7 @@ fn conversion_nan_quieting_precedes_payload_truncation_and_suppression() {
 }
 
 #[test]
-fn alternative_conversion_forces_nearest_and_suppresses_retained_enables() {
+fn alternative_conversion_forces_nearest_and_suppresses_kept_enables() {
     const MIDPOINT_ODD: u32 = 0x3f81_8000;
     for round in ROUNDINGS {
         for controls in [0, FPCR_FIZ, FPCR_FZ, FPCR_FIZ | FPCR_FZ] {
@@ -304,7 +304,7 @@ fn absent_extended_and_half_controls_cannot_select_another_algorithm() {
 }
 
 #[test]
-fn ordinary_mode_refuses_every_retained_enable_before_exact_operations() {
+fn ordinary_mode_refuses_every_kept_enable_before_exact_operations() {
     for enabled in [
         INVALID,
         DIVIDE_BY_ZERO,

@@ -27,7 +27,7 @@ unsafe impl Sync for Backing {}
 // SAFETY: exact aligned owned CPU storage; physical labels are model only.
 unsafe impl PageBacking for Backing {
     fn cpu_base(&self) -> NonNull<u8> {
-        // SAFETY: Box and UnsafeCell retain stable allocated storage.
+        // SAFETY: Box and UnsafeCell keep stable allocated storage.
         unsafe { NonNull::new_unchecked(core::ptr::addr_of_mut!((*self.ram.get()).0).cast()) }
     }
     fn physical_pages(&self) -> &[u64] {
@@ -86,7 +86,7 @@ struct DomainState {
     drains: usize,
 }
 struct Domain(Mutex<DomainState>);
-// SAFETY: isolated synchronous model retains exact pages/token; no actual IOMMU.
+// SAFETY: isolated synchronous model keeps exact pages/token; no IOMMU.
 unsafe impl DmaDomain for Domain {
     unsafe fn map(
         &self,
@@ -167,7 +167,7 @@ unsafe impl DmaDomain for Domain {
             .cpu_mapping(CacheAttribute::WriteBack)
             .unwrap();
         let pointer = cpu.address(offset, 4).unwrap();
-        // SAFETY: exact retained model mapping, natural u32 alignment and bounds.
+        // SAFETY: model mapping, natural u32 alignment and bounds.
         let value = unsafe { pointer.as_ptr().cast::<u32>().read_volatile() };
         state.reads.push((token.id, offset));
         Ok(value)
@@ -183,7 +183,7 @@ impl Domain {
             .unwrap()
             .cpu_mapping(CacheAttribute::WriteBack)
             .unwrap();
-        // SAFETY: serialized device model writing its actual retained allocation.
+        // SAFETY: serialized device model writing its allocation.
         unsafe {
             cpu.address(word * 4, 4)
                 .unwrap()
@@ -194,7 +194,7 @@ impl Domain {
     }
 }
 struct Time(AtomicU64);
-impl Timer for Arc<Time> {
+impl Timer for Time {
     fn start(&self) -> u64 {
         !self.now_us().rotate_left(17)
     }
@@ -225,7 +225,7 @@ struct RegisterState {
 }
 struct Model(Arc<Mutex<RegisterState>>);
 #[test]
-fn native_clock_refusal_precedes_sfh_authority_registers_and_dma() {
+fn native_clock_refusal_precedes_sfh_permission_registers_and_dma() {
     struct Untouched;
     impl Registers for Untouched {
         fn check_authority(&mut self) -> Result<(), Error> {
@@ -249,7 +249,7 @@ fn native_clock_refusal_precedes_sfh_authority_registers_and_dma() {
         (u64::MAX, crate::ClockError::DurationOverflow),
     ] {
         let domain = Arc::new(Domain(Mutex::new(DomainState::default())));
-        // SAFETY: no live device; deliberately inaccessible register fixture.
+        // SAFETY: no live device; inaccessible register fixture.
         let result = unsafe {
             Controller::claim(
                 Untouched,
@@ -341,7 +341,7 @@ fn fixture(sensors: &[Sensor]) -> Fixture {
         response_delay: 0,
     }));
     let domain = Arc::new(Domain(Mutex::new(DomainState::default())));
-    // SAFETY: isolated register+domain/page model, no native device authority.
+    // SAFETY: isolated register+domain/page model, no native device permission.
     let controller =
         unsafe { Controller::claim(Model(registers.clone()), time, domain.clone()) }.unwrap();
     (
@@ -450,7 +450,7 @@ fn continuous_coherence_refusal_occurs_before_dma_publication() {
     assert_eq!(domain.0.lock().unwrap().unmaps, 1);
 }
 #[test]
-fn timeout_retains_iova_and_late_enable_is_completed_without_replay_before_stop() {
+fn timeout_keeps_iova_and_late_enable_is_completed_without_replay_before_stop() {
     let (mut controller, registers, domain, pages) = fixture(&[Sensor::Gyroscope]);
     registers.lock().unwrap().respond = false;
     assert!(matches!(
@@ -500,7 +500,7 @@ fn stale_response_cannot_grant_new_enable_or_release_unknown_dma() {
     assert_eq!(pages.0.load(Ordering::Relaxed), 1);
 }
 #[test]
-fn authority_loss_and_failed_command_write_never_fabricate_reports_or_completion() {
+fn permission_loss_and_failed_command_write_never_invent_reports_or_completion() {
     let (mut controller, registers, domain, pages) = fixture(&[Sensor::AmbientColor]);
     registers.lock().unwrap().fail = Some(C2P_COMMAND);
     assert_eq!(
@@ -523,7 +523,7 @@ fn authority_loss_and_failed_command_write_never_fabricate_reports_or_completion
 }
 
 #[test]
-fn failed_fabric_drain_retains_every_published_mapping_and_first_error() {
+fn failed_fabric_drain_keeps_every_published_mapping_and_first_error() {
     let (mut controller, registers, domain, pages) = fixture(&[Sensor::Gyroscope]);
     controller.initialize(&pages).unwrap();
     domain.0.lock().unwrap().deny_drain = true;
@@ -577,7 +577,7 @@ fn late_successful_publication_and_response_reads_do_not_grant_completion() {
     }
 }
 #[test]
-fn control_feature_and_input_reports_reflect_programmed_state_and_poll_event() {
+fn reports_reflect_programmed_state() {
     let (mut controller, _, _, pages) = fixture(&[Sensor::Gyroscope]);
     controller.initialize(&pages).unwrap();
     let mut feature = [0; 21];
@@ -596,7 +596,7 @@ fn control_feature_and_input_reports_reflect_programmed_state_and_poll_event() {
 }
 
 #[test]
-fn actual_acs_dialect_is_required_and_unknown_advertisements_remain_visible() {
+fn acs_dialect_is_required_and_unknown_advertisements_remain_visible() {
     for dialect in [0, 1, 3, 15] {
         let (controller, registers, domain, _) = fixture(&[Sensor::Gyroscope]);
         registers.lock().unwrap().acs = (1 << 5) | dialect;

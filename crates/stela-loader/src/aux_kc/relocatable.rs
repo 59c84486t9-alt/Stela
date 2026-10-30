@@ -1,10 +1,12 @@
 //! The arm64e relocatable objects a kext compiles to (`MH_OBJECT`), read
 //! into the sections, symbols and relocations the linker places.
-use anyhow::{Context, Result, bail, ensure};
+use super::fit;
+use crate::{Result, Within};
 use object::{
     LittleEndian as LE, macho,
     read::macho::{MachHeader, Nlist, Section as _, Segment as _},
 };
+use stela_contracts::{refuse, require};
 
 #[derive(Debug)]
 pub struct Section<'a> {
@@ -101,13 +103,14 @@ pub struct Object<'a> {
 }
 
 pub fn parse(data: &[u8]) -> Result<Object<'_>> {
-    let header = macho::MachHeader64::<LE>::parse(data, 0).context("not a 64-bit Mach-O")?;
-    ensure!(
+    let header =
+        macho::MachHeader64::<LE>::parse(data, 0).within(|| refuse!("not a 64-bit Mach-O"))?;
+    require!(
         header.cputype(LE) == macho::CPU_TYPE_ARM64
             && header.cpusubtype(LE) & !macho::CPU_SUBTYPE_MASK & 0xff == macho::CPU_SUBTYPE_ARM64E,
         "not an arm64e object"
     );
-    ensure!(
+    require!(
         header.filetype(LE) == macho::MH_OBJECT,
         "not a relocatable object"
     );
@@ -148,7 +151,7 @@ fn read_section<'a>(section: &macho::Section64<LE>, data: &'a [u8]) -> Result<Se
     } else {
         section
             .data(LE, data)
-            .map_err(|_| anyhow::anyhow!("{segment},{name} extends past the file"))?
+            .map_err(|_| refuse!("{segment},{name} extends past the file", segment, name))?
     };
     Ok(Section {
         segment,
@@ -164,13 +167,19 @@ fn read_section<'a>(section: &macho::Section64<LE>, data: &'a [u8]) -> Result<Se
 }
 
 fn read_symbol(nlist: &macho::Nlist64<LE>, strings: object::StringTable<'_>) -> Result<Symbol> {
-    let name = core::str::from_utf8(nlist.name(LE, strings)?)?.to_owned();
+    let name = core::str::from_utf8(nlist.name(LE, strings)?)
+        .map_err(|_| refuse!("a symbol name is not UTF-8"))?
+        .to_owned();
     let kind = nlist.n_type() & macho::N_TYPE;
     let desc = nlist.n_desc(LE);
     let definition = match kind {
         _ if nlist.n_type() & macho::N_STAB != 0 => Definition::Debug,
         macho::N_UNDF if nlist.n_value(LE) != 0 => {
-            bail!("{name} is a common symbol; kexts build with -fno-common")
+            return Err(refuse!(
+                "{name} is a common symbol; kexts build with -fno-common",
+                name
+            )
+            .into());
         }
         macho::N_UNDF => Definition::Undefined {
             weak: desc & macho::N_WEAK_REF != 0,
@@ -178,11 +187,13 @@ fn read_symbol(nlist: &macho::Nlist64<LE>, strings: object::StringTable<'_>) -> 
         macho::N_SECT => Definition::Section {
             section: usize::from(nlist.n_sect())
                 .checked_sub(1)
-                .context("a symbol in section 0")?,
+                .ok_or(refuse!("a symbol in section 0"))?,
             address: nlist.n_value(LE),
         },
         macho::N_ABS => Definition::Absolute(nlist.n_value(LE)),
-        _ => bail!("symbol {name} has unsupported type {kind:#x}"),
+        _ => {
+            return Err(refuse!("symbol {name} has unsupported type {kind:#x}", name, kind).into());
+        }
     };
     Ok(Symbol {
         name,
@@ -194,7 +205,9 @@ fn read_symbol(nlist: &macho::Nlist64<LE>, strings: object::StringTable<'_>) -> 
 
 fn fixed(name: &[u8; 16]) -> Result<String> {
     let end = name.iter().position(|&byte| byte == 0).unwrap_or(16);
-    Ok(core::str::from_utf8(&name[..end])?.to_owned())
+    Ok(core::str::from_utf8(&name[..end])
+        .map_err(|_| refuse!("a section or segment name is not UTF-8"))?
+        .to_owned())
 }
 
 /// Decodes a section's relocations, folding `ARM64_RELOC_ADDEND` and
@@ -210,26 +223,26 @@ fn decode(
     let mut pending_minus = None;
     for relocation in relocations {
         let info = relocation.info(LE);
-        ensure!(
+        require!(
             info.r_address & macho::R_SCATTERED == 0,
             "scattered relocations are not arm64's"
         );
         let offset = u64::from(info.r_address);
         if info.r_type == macho::ARM64_RELOC_ADDEND {
-            ensure!(!info.r_extern, "an extern ARM64_RELOC_ADDEND");
+            require!(!info.r_extern, "an extern ARM64_RELOC_ADDEND");
             // A 24-bit signed addend.
             pending_addend = Some(i64::from(((info.r_symbolnum << 8) as i32) >> 8));
             continue;
         }
         let target = if info.r_extern {
             let symbol = info.r_symbolnum as usize;
-            ensure!(symbol < object.symbols.len(), "relocation names no symbol");
+            require!(symbol < object.symbols.len(), "relocation names no symbol");
             Target::Symbol(symbol)
         } else {
             let ordinal = (info.r_symbolnum as usize)
                 .checked_sub(1)
                 .filter(|&section| section < object.sections.len())
-                .context("relocation names no section")?;
+                .ok_or(refuse!("relocation names no section"))?;
             Target::Section(ordinal)
         };
         if info.r_type == macho::ARM64_RELOC_SUBTRACTOR {
@@ -237,31 +250,33 @@ fn decode(
             continue;
         }
         let in_place = |bytes: usize| -> Result<i64> {
-            let start = usize::try_from(offset)?;
+            let start: usize = fit(offset, "a relocation offset")?;
             let field = section
                 .data
                 .get(start..start + bytes)
-                .context("relocation past its section")?;
+                .ok_or(refuse!("relocation past its section"))?;
             Ok(match bytes {
-                4 => i64::from(i32::from_le_bytes(field.try_into()?)),
-                _ => i64::from_le_bytes(field.try_into()?),
+                4 => i64::from(i32::from_le_bytes(
+                    field.try_into().map_err(|_| refuse!("a short addend"))?,
+                )),
+                _ => i64::from_le_bytes(field.try_into().map_err(|_| refuse!("a short addend"))?),
             })
         };
         let width = 1usize << info.r_length;
         let (kind, addend) = match info.r_type {
             macho::ARM64_RELOC_UNSIGNED => {
                 if let Some((minus_offset, minus)) = pending_minus.take() {
-                    ensure!(minus_offset == offset, "a subtractor without its pair");
-                    let bytes = u8::try_from(width)?;
-                    ensure!(matches!(bytes, 4 | 8), "a {bytes}-byte difference");
+                    require!(minus_offset == offset, "a subtractor without its pair");
+                    let bytes: u8 = fit(width, "a relocation width")?;
+                    require!(matches!(bytes, 4 | 8), "a {bytes}-byte difference", bytes);
                     (Kind::Difference { minus, bytes }, in_place(width)?)
                 } else {
-                    ensure!(width == 8, "a {width}-byte pointer");
+                    require!(width == 8, "a {width}-byte pointer", width);
                     (Kind::Pointer, in_place(8)?)
                 }
             }
             macho::ARM64_RELOC_AUTHENTICATED_POINTER => {
-                ensure!(width == 8, "a {width}-byte authenticated pointer");
+                require!(width == 8, "a {width}-byte authenticated pointer", width);
                 let raw = in_place(8)? as u64;
                 let kind = Kind::Authenticated {
                     key: ((raw >> 49) & 3) as u8,
@@ -275,17 +290,20 @@ fn decode(
             macho::ARM64_RELOC_PAGEOFF12 => (Kind::PageOffset12, 0),
             macho::ARM64_RELOC_GOT_LOAD_PAGE21 => (Kind::GotPage21, 0),
             macho::ARM64_RELOC_GOT_LOAD_PAGEOFF12 => (Kind::GotPageOffset12, 0),
-            other => bail!(
-                "{},{} has relocation type {other}, which a kext's code does not use",
-                section.segment,
-                section.name
-            ),
+            other => return Err(refuse!(
+                "{segment},{section} has relocation type {other}, which a kext's code does not use",
+                segment = section.segment,
+                section = section.name,
+                other
+            )
+            .into()),
         };
         let addend = match pending_addend.take() {
             Some(extra) => {
-                ensure!(
+                require!(
                     matches!(kind, Kind::Branch26 | Kind::Page21 | Kind::PageOffset12),
-                    "an ARM64_RELOC_ADDEND before {kind:?}"
+                    "an ARM64_RELOC_ADDEND before {kind}",
+                    ?kind
                 );
                 extra
             }
@@ -298,7 +316,7 @@ fn decode(
             addend,
         });
     }
-    ensure!(
+    require!(
         pending_addend.is_none() && pending_minus.is_none(),
         "a relocation pair without its second half"
     );

@@ -47,7 +47,7 @@ pub(super) fn emit(code: &mut Code, operand: &Operand) {
             load(code, source);
             if source != Register::Zero {
                 // Only the low source word participates; the EAX result also
-                // clears unsupported storage bits rather than retaining them.
+                // clears unsupported storage bits rather than keeping them.
                 mask(code, register);
             }
             // A four-byte replacement cannot corrupt the other FP field.

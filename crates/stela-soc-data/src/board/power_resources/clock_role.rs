@@ -1,11 +1,13 @@
 //! Source driver roles distinguish published gate indices from start-time
-//! dependencies. This grants no native PMGR resource or lifecycle authority.
+//! dependencies. This grants no native PMGR resource or lifecycle permission.
 use super::{DomainId, Node, name_of};
-use alloc::{string::String, vec::Vec};
+use crate::Result;
+use alloc::vec::Vec;
+use stela_contracts::refuse;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum ClockRole {
-    /// Ordinary consumers retain all collected ancestor and local gates.
+    /// Ordinary consumers keep all collected ancestor and local gates.
     #[default]
     Consumer,
     /// A bound PMGR function provider publishes its own gate-index metadata;
@@ -14,7 +16,7 @@ pub enum ClockRole {
 }
 
 /// Source-created provider identity, not an arbitrary gate exemption. Private
-/// fields retain the actual function binding and active ancestor requirements.
+/// fields keep the function binding and active ancestor requirements.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PmgrClockProvider {
     phandle: u32,
@@ -61,10 +63,10 @@ const PROVIDER_BINDINGS: [(&str, &str); 4] = [
     ("arm-io,t6020", "pmgr1,t6021"),
 ];
 
-/// The actual arm-io function-clock_gate must target the direct qualified
+/// The arm-io function-clock_gate must target the direct checked
 /// controller by phandle and selector clkG. A family match alone grants no
 /// role, and no passive index becomes a successful later gate operation.
-pub(super) fn provider<'a>(root: &Node<'a>) -> Result<Option<ProviderNode<'a>>, String> {
+pub(super) fn provider<'a>(root: &Node<'a>) -> Result<Option<ProviderNode<'a>>> {
     let io = root
         .child("arm-io")
         .or_else(|| (name_of(root) == "arm-io").then(|| root.clone()));
@@ -73,7 +75,7 @@ pub(super) fn provider<'a>(root: &Node<'a>) -> Result<Option<ProviderNode<'a>>, 
     };
     let children = io
         .children()
-        .ok_or("clock provider has malformed arm-io children")?;
+        .ok_or(refuse!("clock provider has malformed arm-io children"))?;
     let candidates = children
         .iter()
         .filter(|node| {
@@ -89,14 +91,16 @@ pub(super) fn provider<'a>(root: &Node<'a>) -> Result<Option<ProviderNode<'a>>, 
         return Ok(None);
     };
     let [phandle, selector] = raw.as_chunks::<4>().0 else {
-        return Err("PMGR clock function binding requires a phandle and selector".into());
+        return Err(refuse!(
+            "PMGR clock function binding requires a phandle and selector"
+        ));
     };
     if raw.len() != 8 {
-        return Err("PMGR clock function binding has partial cells".into());
+        return Err(refuse!("PMGR clock function binding has partial cells"));
     }
     let phandle = u32::from_le_bytes(*phandle);
     if phandle == 0 {
-        return Err("PMGR clock function has a zero phandle".into());
+        return Err(refuse!("PMGR clock function has a zero phandle"));
     }
     if u32::from_le_bytes(*selector) != 0x636c6b47 {
         return Ok(None);
@@ -113,11 +117,11 @@ pub(super) fn provider<'a>(root: &Node<'a>) -> Result<Option<ProviderNode<'a>>, 
         }
         pending.extend(
             node.children()
-                .ok_or("clock provider has malformed source descendants")?,
+                .ok_or(refuse!("clock provider has malformed source descendants"))?,
         );
     }
     if references > 1 {
-        return Err("PMGR clock provider phandle is ambiguous".into());
+        return Err(refuse!("PMGR clock provider phandle is ambiguous"));
     }
     let mut selected = candidates.into_iter().filter(|node| {
         node.property("AAPL,phandle")
@@ -128,10 +132,11 @@ pub(super) fn provider<'a>(root: &Node<'a>) -> Result<Option<ProviderNode<'a>>, 
         return Ok(None);
     };
     if selected.next().is_some() {
-        return Err("PMGR clock provider phandle is ambiguous".into());
+        return Err(refuse!("PMGR clock provider phandle is ambiguous"));
     }
-    super::super::apertures::registers(node)
-        .ok_or("PMGR clock provider lacks complete actual reg pairs")?;
+    super::super::apertures::registers(node).ok_or(refuse!(
+        "PMGR clock provider lacks complete actual reg pairs"
+    ))?;
     Ok(Some(ProviderNode {
         registers: node.property("reg").expect("checked reg pairs"),
         phandle,

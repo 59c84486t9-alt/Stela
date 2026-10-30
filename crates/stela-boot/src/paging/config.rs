@@ -1,9 +1,10 @@
-//! Configuration access under the actual activated standalone table owner.
-//! The one native Authority retains real firmware/root reservations. Captured
+//! Configuration access under the activated standalone table owner.
+//! The one native Permission keeps real firmware/root reservations. Captured
 //! MCFG observations alone cannot construct this Source.
 mod platform;
 mod prepare;
 use super::{ActivatedTables, PAGE, RootError};
+use crate::Refusal;
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::{
     fmt,
@@ -19,12 +20,12 @@ use stela_drivers::bus::{
     pci::{Address, EcamWindow, owned::OwnedConfig},
 };
 
-// A separate canonical high-half window; actual builder refuses any overlap.
+// A separate canonical high-half window; builder refuses any overlap.
 const APERTURE: usize = 0xffff_9000_0000_0000;
 const LEAVES: usize = 16;
 const SLOTS: usize = LEAVES * 512;
 static IRQ_DEPTH: AtomicU32 = AtomicU32::new(0);
-/// Actual HostCheck ISR entry, not inferred from an IF bit.
+/// HostCheck ISR entry, not inferred from an IF bit.
 pub(crate) struct Interrupt;
 impl Interrupt {
     pub(crate) fn enter() -> Self {
@@ -46,7 +47,7 @@ pub(crate) enum Error {
     Firmware(uefi::Status),
     Mapping(owned::Error),
     Root(RootError),
-    Tables(&'static str),
+    Tables(Refusal),
     Config(stela_drivers::bus::pci::owned::ConfigError),
     NotReady(Address),
 }
@@ -61,7 +62,7 @@ impl fmt::Display for Error {
             Self::Firmware(status) => write!(f, "PCI firmware inventory: {status:?}"),
             Self::Mapping(error) => write!(f, "owned PCI mapping: {error:?}"),
             Self::Root(error) => write!(f, "owned PCI root: {error}"),
-            Self::Tables(error) => f.write_str(error),
+            Self::Tables(error) => write!(f, "{error}"),
             Self::Config(error) => write!(f, "owned PCI configuration: {error:?}"),
             Self::NotReady(address) => {
                 write!(f, "PCI {address} returned CRS; no qualified retry clock")
@@ -83,7 +84,7 @@ struct Backing {
     platform: Arc<platform::Platform>,
     span: PhysicalSpan,
 }
-// SAFETY: only Source's actual post-EBS exclusive bus handoff mints these
+// SAFETY: only Source's post-EBS exclusive bus handoff mints these
 // complete ECAM reservations. Original tables/resource exclusions stay pinned;
 // no other config/reset writer is published for this standalone boot path.
 unsafe impl ResourceBacking for Backing {
@@ -96,7 +97,7 @@ unsafe impl ResourceBacking for Backing {
 }
 impl Source {
     /// # Safety
-    /// Actual standalone/HostCheck post-EBS BSP owns all captured PCI roots,
+    /// Standalone/HostCheck post-EBS BSP owns all captured PCI roots,
     /// excluding firmware/SMM configuration/reset and every competing accessor.
     /// No AP, guest, root publisher or outside cache writer runs on this path.
     /// Keep the original ActivatedTables and this Source through every consumer.
@@ -108,7 +109,7 @@ impl Source {
         let windows = prepared.windows.clone();
         let platform = Arc::new(platform::Platform::new(root.root.clone(), prepared)?);
         let aliases = platform.aliases()?;
-        // SAFETY: actual retained single root and complete checked alias walk;
+        // SAFETY: single root and complete checked alias walk;
         // this mutually exclusive boot route installs the sole global registry.
         let authority = unsafe { Authority::activate(platform.clone(), platform.space, aliases) }
             .map_err(Error::Mapping)?;
@@ -136,7 +137,7 @@ impl Source {
             _local: PhantomData,
         })
     }
-    /// Exact function access, retaining its real mapping until explicit retirement.
+    /// Exact function access, keeping its real mapping until explicit retirement.
     pub(crate) fn config(&self, address: Address) -> Result<OwnedConfig, Error> {
         self.platform.check_bus(address)?;
         let bus = self
@@ -171,7 +172,7 @@ impl Source {
                 Protection::ReadWrite,
             )
             .map_err(Error::Mapping)?;
-        // SAFETY: unique original bus reservation, actual current root and exact
+        // SAFETY: unique original bus reservation, current root and exact
         // 4K lease; no raw accessor or second writer is exposed by this Source.
         match unsafe { OwnedConfig::attach(address, bus.window, mapping) } {
             Ok(config) => Ok(config),
@@ -187,8 +188,8 @@ impl Source {
     pub(crate) fn windows(&self) -> impl Iterator<Item = EcamWindow> + '_ {
         self.buses.iter().map(|bus| bus.window)
     }
-    /// Read-only bridge/ARI topology through genuine config owners. Even
-    /// absent/CRS mappings are returned to the actual retirement owner.
+    /// Read-only bridge/ARI topology through config owners. Even
+    /// absent/CRS mappings are returned to the retirement owner.
     pub(crate) fn inventory(
         &self,
         window: &EcamWindow,
@@ -233,8 +234,8 @@ impl Source {
         }
         Ok(())
     }
-    /// The private permit is minted only by actual post-EBS fixture binding,
-    /// after its exact requester/controller identity and route were rechecked.
+    /// The private permit is minted only by post-EBS fixture binding,
+    /// after its requester/controller identity and route were rechecked.
     pub(crate) fn fixture_registers(
         &self,
         permit: &crate::native_dma::diagnostic::RegisterSpan<'_>,

@@ -53,7 +53,7 @@ impl fmt::Display for TimeError {
 }
 impl core::error::Error for TimeError {}
 
-/// Retains the actual admitted clock and UTC correlation. Implementations must
+/// Keeps the admitted clock and UTC correlation. Implementations must
 /// include RTC resolution, capture bracketing and elapsed counter uncertainty,
 /// round bounds outward, and refuse source/epoch loss or arithmetic failure.
 /// Copying a timestamp or counter frequency does not fulfill this contract.
@@ -105,7 +105,7 @@ impl ServerCertVerifier for IntervalVerifier {
         )?;
         // Endpoint searches may choose different cross-signed intermediates.
         // WebPKI's path callback restricts the second check to the first path's
-        // actual DER chain and anchor. A refusal lets its mature path builder
+        // DER chain and anchor. A refusal lets its mature path builder
         // try another candidate; only one path spanning BOTH bounds succeeds.
         let failure =
             || Error::InvalidCertificate(rustls::CertificateError::ApplicationVerificationFailure);
@@ -193,7 +193,7 @@ pub(crate) fn client_config_with_roots(
 }
 /// Mozilla trust with normal WebPKI checks at both admitted UTC bounds.
 /// Source refusal prevents configuration/ClientHello publication; Channel keeps
-/// checking that same retained source before every protocol/output advance.
+/// checking that same source before every protocol/output advance.
 pub fn client_config_with_interval(
     owner: &'static ProviderOwner,
     source: Arc<dyn UtcSource>,

@@ -1,6 +1,5 @@
 //! Completion of SVE arithmetic from full source snapshots.
 
-use anyhow::anyhow;
 use stela_compiler::{
     GuestState,
     aarch64::{
@@ -12,6 +11,7 @@ use stela_compiler::{
         sve::floating::arithmetic::{Inputs, Kind, Operand, ResultShape, Source},
     },
 };
+use stela_contracts::{refuse, require};
 
 use crate::scalable::ScalableState;
 
@@ -31,14 +31,6 @@ const DOUBLE_QUIET_BIT: u64 = 0x0008_0000_0000_0000;
 
 use super::{CompletionError, NumericalControls};
 
-fn require(condition: bool, message: &'static str) -> Result<(), CompletionError> {
-    if condition {
-        Ok(())
-    } else {
-        Err(anyhow!(message).into())
-    }
-}
-
 struct Sources {
     descriptors: [Source; MAX_SOURCES],
     bytes: [[u8; MAX_VECTOR_BYTES]; MAX_SOURCES],
@@ -50,7 +42,7 @@ impl Sources {
         state: &GuestState,
         scalable: &ScalableState,
         operand: &Operand,
-    ) -> anyhow::Result<Self> {
+    ) -> crate::Result<Self> {
         let unused = Source::ImmediateBits(0);
         let (descriptors, count) = match operand.inputs {
             Inputs::Unary { source } => ([Source::Vector(source), unused, unused], 1),
@@ -196,12 +188,12 @@ fn evaluate(
                 exceptions: maximum.exceptions | minimum.exceptions,
             }
         }
-        _ => return Err(anyhow!("scalable numerical kind/operand shape differ").into()),
+        _ => return Err(refuse!("scalable numerical kind/operand shape differ").into()),
     };
     Ok(outcome)
 }
 
-fn identity(kind: Kind, format: Format, fpcr: u32) -> anyhow::Result<u64> {
+fn identity(kind: Kind, format: Format, fpcr: u32) -> Result<u64, stela_contracts::Refusal> {
     if kind == Kind::Binary(BinaryOperation::Add) {
         return Ok(0);
     }
@@ -217,7 +209,7 @@ fn identity(kind: Kind, format: Format, fpcr: u32) -> anyhow::Result<u64> {
         Kind::MinMax(MinMaxOperation::MinimumNumber | MinMaxOperation::MaximumNumber) => {
             infinity | quiet | if fpcr & FPCR_AH != 0 { sign } else { 0 }
         }
-        _ => return Err(anyhow!("operation has no scalable reduction identity")),
+        _ => return Err(refuse!("operation has no scalable reduction identity")),
     })
 }
 
@@ -251,11 +243,11 @@ fn complex_lane(
     let component = lane % COMPLEX_COMPONENTS;
     match operand.kind {
         Kind::ComplexAdd(rotation) => {
-            require(sources.count == 2, "complex add requires two sources")?;
+            require!(sources.count == 2, "complex add requires two sources");
             let negate = match rotation {
                 Rotation::Degrees90 => component == REAL_COMPONENT,
                 Rotation::Degrees270 => component == IMAGINARY_COMPONENT,
-                _ => return Err(anyhow!("unallocated complex-add rotation").into()),
+                _ => return Err(refuse!("unallocated complex-add rotation").into()),
             };
             let left = sources.raw_lane(0, lane, element_bytes);
             let mut right = sources.raw_lane(1, lane ^ 1, element_bytes);
@@ -271,10 +263,10 @@ fn complex_lane(
             )?)
         }
         Kind::ComplexMultiplyAdd(rotation) => {
-            require(
+            require!(
                 sources.count == 3,
                 "complex multiply-add requires three sources",
-            )?;
+            );
             let (selected, negate_real, negate_imaginary) = match rotation {
                 Rotation::Degrees0 => (REAL_COMPONENT, false, false),
                 Rotation::Degrees90 => (IMAGINARY_COMPONENT, true, false),
@@ -316,7 +308,7 @@ fn complex_lane(
                 right,
             )?)
         }
-        _ => Err(anyhow!("complex lane requires a complex operation").into()),
+        _ => Err(refuse!("complex lane requires a complex operation").into()),
     }
 }
 
@@ -328,10 +320,10 @@ pub(super) fn complete(
     operand: &Operand,
     controls: NumericalControls,
 ) -> Result<(), CompletionError> {
-    require(
+    require!(
         scalable.mode().streaming(),
         "scalable arithmetic requires streaming state",
-    )?;
+    );
     let length = scalable.vector_length().bytes();
     let element_bytes = operand.format.bits() as usize / BITS_PER_BYTE;
     let count = length / element_bytes;
@@ -341,10 +333,10 @@ pub(super) fn complete(
             let complex = matches!(operand.kind, Kind::ComplexMultiplyAdd(_));
             let elements =
                 VECTOR_CHUNK_BYTES / element_bytes / if complex { COMPLEX_COMPONENTS } else { 1 };
-            require(
+            require!(
                 usize::from(index) < elements,
                 "scalable index outside its segment",
-            )?;
+            );
         }
     }
     let mut predicate_storage = [0; MAX_PREDICATE_BYTES];
@@ -363,7 +355,7 @@ pub(super) fn complete(
         let positions = match operand.shape {
             ResultShape::ScalarReduction => 1,
             ResultShape::QuadReduction => VECTOR_CHUNK_BYTES / element_bytes,
-            ResultShape::Vector => return Err(anyhow!("reduction lacks its result shape").into()),
+            ResultShape::Vector => return Err(refuse!("reduction lacks its result shape").into()),
         };
         let mut values = [0; MAX_VECTOR_BYTES / size_of::<u16>()];
         for position in 0..positions {
@@ -386,10 +378,10 @@ pub(super) fn complete(
             write_lane(&mut result, position, element_bytes, bits);
         }
     } else {
-        require(
+        require!(
             operand.shape == ResultShape::Vector,
             "non-reduction has a reduction result shape",
-        )?;
+        );
         scalable.read_z(state, operand.destination, &mut result[..length])?;
         for lane in 0..count {
             if !active(predicate, lane, element_bytes) {

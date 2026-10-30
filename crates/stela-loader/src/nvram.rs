@@ -15,9 +15,10 @@
 //! 26A434 `mBoot` table at file 0x1b0110 provides three firmware records,
 //! two syscfg records and one NVRAM record.
 //! XNU `IONVRAMCHRPHandler.cpp` validates CHRP checksums and Adler-32.
+use crate::Result;
 use crate::apple_device_tree::DeviceTree;
 use alloc::vec::Vec;
-use anyhow::{Result, ensure};
+use stela_contracts::{refuse, require};
 use stela_soc_data::nor::{Image, nvram};
 
 const CHOSEN: &str = "/chosen";
@@ -25,7 +26,7 @@ const PROXY: &str = "nvram-proxy-data";
 const SPINOR: &str = "/arm-io/spi1/spinor";
 // The J473 26A434 DeviceTree still carries the earlier one-MiB placeholder
 // geometry even though mBoot's table describes the physical eight-MiB
-// layout. Accept only that exact source template (or an already normalized
+// layout. Accept only that source template (or an already normalized
 // tree), then publish the mBoot-derived regions from `nor`.
 const TEMPLATE_CAPACITY: u32 = 0x100000;
 const TEMPLATE_FIRMWARE: &[(u32, u32)] = &[(0, 0xc0000)];
@@ -48,7 +49,7 @@ pub fn publish(tree: &mut DeviceTree) -> Result<bool> {
     let Some(slot) = tree.property(CHOSEN, PROXY) else {
         return Ok(false);
     };
-    ensure!(
+    require!(
         !slot.value.is_empty(),
         "NVRAM proxy slot is empty, not a template reservation"
     );
@@ -61,7 +62,7 @@ pub fn publish(tree: &mut DeviceTree) -> Result<bool> {
             .into_iter()
             .flat_map(u32::to_le_bytes)
             .collect();
-        ensure!(
+        require!(
             spinor
                 .property("ranges")
                 .is_some_and(|p| { p.value == template_ranges || p.value == assigned_ranges }),
@@ -87,12 +88,13 @@ pub fn publish(tree: &mut DeviceTree) -> Result<bool> {
             let path = alloc::format!("{SPINOR}/{name}");
             let node = tree
                 .node(&path)
-                .ok_or_else(|| anyhow::anyhow!("missing {path}"))?;
-            ensure!(
+                .ok_or_else(|| refuse!("missing {path}", path))?;
+            require!(
                 node.property("reg").is_some_and(|p| {
                     p.value.is_empty() || p.value == template || p.value == assigned
                 }),
-                "unsupported {path} partition"
+                "unsupported {path} partition",
+                path
             );
         }
         tree.set_property(SPINOR, "ranges", assigned_ranges)?;

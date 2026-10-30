@@ -50,7 +50,7 @@ impl Recipe {
 }
 
 impl Controller {
-    /// Return the interrupt endpoints from the last actual successful
+    /// Return the interrupt endpoints from the last successful
     /// SET_CONFIGURATION. An empty list does not manufacture a class binding.
     pub fn interrupt_pipes(&self, id: &DeviceId) -> Result<Vec<InterruptPipe>, Error> {
         let index = self.identity(id)?;
@@ -125,7 +125,7 @@ impl Controller {
         self.start(&pipe.device, Some(pipe.endpoint), None, data, 0, timeout_us)
     }
     /// Reset only this exact interrupt endpoint's USB halt/toggle after an
-    /// actual CLEAR_FEATURE Status ACK. Failed control preserves the old state.
+    /// CLEAR_FEATURE Status ACK. Failed control preserves the old state.
     pub fn clear_interrupt_halt(&mut self, pipe: &InterruptPipe) -> Result<(), Error> {
         let index = self.interrupt_pipe(pipe)?;
         self.control_internal(&pipe.device, [2, 1, 0, 0, pipe.endpoint, 0, 0, 0], &[], 0)?;

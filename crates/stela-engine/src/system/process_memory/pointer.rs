@@ -248,7 +248,7 @@ mod tests {
     }
 
     #[test]
-    fn only_actual_extended_factory_can_construct_cpa2_and_base_entry_declines_it() {
+    fn only_extended_factory_can_construct_cpa2_and_base_entry_declines_it() {
         let ids = ids();
         let domain = domain();
         assert!(super::super::ProcessMemoryFeatures::from_snapshot(&ids).is_err());
@@ -283,7 +283,7 @@ mod tests {
     }
 
     #[test]
-    fn actual_same_bank_modes_bind_full_profile_and_private_policy() {
+    fn same_bank_modes_bind_full_profile_and_private_policy() {
         for (raw, mode) in [
             (0, EffectivePointerChecks::Unchecked),
             (

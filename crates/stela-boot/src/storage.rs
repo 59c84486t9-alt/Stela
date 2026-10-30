@@ -9,7 +9,9 @@
 mod bluetooth_platform;
 #[cfg(feature = "diagnostics")]
 mod media_check;
+use crate::Result;
 use stela_boot_core::storage as options;
+use stela_contracts::refuse;
 #[cfg(feature = "diagnostics")]
 mod reset_check;
 pub use options::split;
@@ -18,7 +20,7 @@ use crate::{output, paging::Tables};
 use alloc::{sync::Arc, vec::Vec};
 use core::time::Duration;
 use stela_drivers::{
-    Clock, Handoff,
+    Clock, Handoff, PlatformCaptures,
     block::BlockDevice,
     bus::{dma::RegionAllocator, pci},
     probe::probe,
@@ -47,12 +49,22 @@ const CHECK_BYTES: usize = 1024 * 1024 + 3 * 4096;
 
 pub struct Prepared {
     handoff: Handoff,
+    captures: PlatformCaptures,
     open: Vec<Target>,
     check: Vec<Target>,
     #[cfg(feature = "diagnostics")]
     usb_reset_check: bool,
     #[cfg(feature = "diagnostics")]
     usb_media_check: bool,
+}
+
+/// The board captures the drivers read after ExitBootServices, taken while
+/// firmware variables are reachable; `wifi` comes from the loader's files.
+pub fn captures(wifi: stela_drivers::net::wifi::intel::platform::Observations) -> PlatformCaptures {
+    PlatformCaptures {
+        bluetooth: bluetooth_platform::capture(),
+        wifi,
+    }
 }
 
 pub fn rsdp() -> Option<u64> {
@@ -69,24 +81,24 @@ pub fn rsdp() -> Option<u64> {
 pub fn prepare(
     options: &[u8],
     firmware: Option<Arc<stela_drivers::firmware::Catalog>>,
-    wifi_platform: stela_drivers::net::wifi::intel::platform::Observations,
-) -> Result<Option<Prepared>, &'static str> {
-    let text = core::str::from_utf8(options).map_err(|_| "stela.cfg is not UTF-8")?;
+    captures: PlatformCaptures,
+) -> Result<Option<Prepared>> {
+    let text = core::str::from_utf8(options).map_err(|_| refuse!("stela.cfg is not UTF-8"))?;
     let (open, check, _) = split(text)?;
     let usb_reset_check = options::reset_requested(text, &open, &check)?;
     let usb_media_check = options::media_requested(text, &open, &check)?;
     #[cfg(not(feature = "diagnostics"))]
     if usb_reset_check || usb_media_check {
-        return Err("USB checks require a diagnostics build");
+        return Err(refuse!("USB checks require a diagnostics build"));
     }
     if open.is_empty() && check.is_empty() {
         return Ok(None);
     }
     let mut handoff = discover()?;
     handoff.firmware = firmware;
-    handoff.wifi_platform = wifi_platform;
     Ok(Some(Prepared {
         handoff,
+        captures,
         open,
         check,
         #[cfg(feature = "diagnostics")]
@@ -177,11 +189,12 @@ fn root_bridges() -> Vec<(u16, core::ops::RangeInclusive<u8>)> {
 /// What the storage drivers need after ExitBootServices: the ECAM windows,
 /// DMA pages below 4 GiB, the TSC rate and every range to map uncached.
 /// Runs before ExitBootServices.
-pub fn discover() -> Result<Handoff, &'static str> {
-    let rsdp = rsdp().ok_or("firmware has no ACPI tables")?;
+pub fn discover() -> Result<Handoff> {
+    let rsdp = rsdp().ok_or(refuse!("firmware has no ACPI tables"))?;
     // SAFETY: the firmware's RSDP, its tables mapped while boot services last.
-    let mcfg = unsafe { acpi::find(rsdp, b"MCFG") }.map_err(|_| "no valid ACPI MCFG table")?;
-    let mcfg = acpi::mcfg(mcfg).map_err(|_| "invalid ACPI MCFG table")?;
+    let mcfg =
+        unsafe { acpi::find(rsdp, b"MCFG") }.map_err(|_| refuse!("no valid ACPI MCFG table"))?;
+    let mcfg = acpi::mcfg(mcfg).map_err(|_| refuse!("invalid ACPI MCFG table"))?;
     let bridges = root_bridges();
     let ecam = if bridges.is_empty() {
         output::arguments(format_args!(
@@ -218,7 +231,7 @@ pub fn discover() -> Result<Handoff, &'static str> {
     let (dma, pages) = match allocate(DMA_PAGES + extra) {
         Ok(dma) => (dma, DMA_PAGES + extra),
         Err(_) => (
-            allocate(DMA_PAGES).map_err(|_| "firmware has no DMA pages below 4 GiB")?,
+            allocate(DMA_PAGES).map_err(|_| refuse!("firmware has no DMA pages below 4 GiB"))?,
             DMA_PAGES,
         ),
     };
@@ -269,7 +282,9 @@ pub fn discover() -> Result<Handoff, &'static str> {
             output::arguments(format_args!(
                 "PCI firmware resource buffer release failed: {status:?}\n"
             ));
-            return Err("PCI firmware resource buffer remains retained; handoff refused");
+            return Err(refuse!(
+                "PCI firmware resource buffer remains retained; handoff refused"
+            ));
         }
         Err(error) => output::arguments(format_args!(
             "PCI firmware observation unavailable: {error}; native owned discovery required\n"
@@ -278,8 +293,6 @@ pub fn discover() -> Result<Handoff, &'static str> {
 
     Ok(Handoff {
         firmware: None,
-        bluetooth_platform: bluetooth_platform::capture(),
-        wifi_platform: Default::default(),
         completion: None,
         ecam,
         mapped,
@@ -292,7 +305,7 @@ pub fn discover() -> Result<Handoff, &'static str> {
 
 impl Prepared {
     /// Map ECAM and the controllers' registers uncached.
-    pub fn map(&self, tables: &mut Tables) -> Result<(), &'static str> {
+    pub fn map(&self, tables: &mut Tables) -> Result<()> {
         self.handoff
             .mapped
             .iter()
@@ -307,7 +320,7 @@ impl Prepared {
         #[cfg(feature = "diagnostics")]
         let mut devices = if self.usb_media_check {
             // SAFETY: same exclusive post-EBS grant as probe; this explicit
-            // fixture diagnostic attaches native USB and retains every owner.
+            // fixture diagnostic attaches native USB and keeps every owner.
             match unsafe { media_check::probe_and_rescan(&self.handoff, &mut dma, &self.check[0]) }
             {
                 Ok(devices) => devices,
@@ -322,11 +335,11 @@ impl Prepared {
             }
         } else {
             // SAFETY: this handoff describes the running machine and its tables.
-            unsafe { probe(&self.handoff, &mut dma) }
+            unsafe { probe(&self.handoff, self.captures, &mut dma) }
         };
         #[cfg(not(feature = "diagnostics"))]
         // SAFETY: this handoff describes the running machine and its tables.
-        let mut devices = unsafe { probe(&self.handoff, &mut dma) };
+        let mut devices = unsafe { probe(&self.handoff, self.captures, &mut dma) };
         for window in &devices.unmapped {
             output::arguments(format_args!("STORAGE UNMAPPED ecam={window:x?}\n"));
         }

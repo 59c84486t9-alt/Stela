@@ -58,7 +58,7 @@ pub const POOL: [HostGpr; 6] = [
     HostGpr::R10,
     HostGpr::R11,
 ];
-/// Borrow only within a nonfaulting span, with exact native ABI restoration.
+/// Borrow only within a nonfaulting span, with native ABI restoration.
 pub const CALLEE_POOL: [HostGpr; 6] = [
     HostGpr::Rbx,
     HostGpr::Rbp,

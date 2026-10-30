@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-//! Actual descriptor-qualified native EP0 and interrupt DMA observations.
+//! Descriptor-checked native EP0 and interrupt DMA observations.
 use super::*;
 use crate::{
     block::BlockError,
     bus::dma::{DmaAllocator, RegionAllocator},
     usb::{
         audio::{Plan, UsbAudio},
-        xhci::{Device, Shared},
+        xhci::{self, Device, Shared},
     },
 };
 use alloc::{rc::Rc, vec};
@@ -61,7 +61,7 @@ fn peer(
         vendor_ethernet_tcr: None,
         vendor_ethernet_revision: None,
     };
-    let all = xhci::interfaces(&raw);
+    let all = crate::usb::descriptor::interfaces(&raw);
     let plan = Plan::parse(&all[0], &all, &raw, xhci::HIGH_SPEED).unwrap();
     let owner = UsbAudio::attach(shared.clone(), &device, plan, dma).unwrap();
     (owner, model, shared)
@@ -73,25 +73,34 @@ fn allocator(memory: &mut [u64]) -> RegionAllocator {
 }
 
 #[test]
-fn actual_native_terminal_queries_preserve_raw_connected_channels_with_pcm_owned() {
+fn native_terminal_queries_preserve_raw_connected_channels_with_pcm_owned() {
     let mut backing = vec![0u64; 512 * 1024];
     let mut dma = allocator(&mut backing);
     let (mut audio, model, _) = peer(&mut dma, 1);
-    // PCM must consume genuine device validity, RANGE, current-frequency and
+    // PCM must consume device validity, RANGE, current-frequency and
     // validity replies before the native isochronous queue can be owned. The
     // connector peer has no implicit clock responses or synthetic startup.
     model.borrow_mut().control_replies.extend([
-        (xhci::setup(0xa1, 1, 0x0200, 0x0a00, 1), vec![1]),
-        (xhci::setup(0xa1, 2, 0x0100, 0x0a00, 2), vec![1, 0]),
         (
-            xhci::setup(0xa1, 2, 0x0100, 0x0a00, 14),
+            crate::usb::descriptor::setup(0xa1, 1, 0x0200, 0x0a00, 1),
+            vec![1],
+        ),
+        (
+            crate::usb::descriptor::setup(0xa1, 2, 0x0100, 0x0a00, 2),
+            vec![1, 0],
+        ),
+        (
+            crate::usb::descriptor::setup(0xa1, 2, 0x0100, 0x0a00, 14),
             vec![1, 0, 0x80, 0xbb, 0, 0, 0x80, 0xbb, 0, 0, 0, 0, 0, 0],
         ),
         (
-            xhci::setup(0xa1, 1, 0x0100, 0x0a00, 4),
+            crate::usb::descriptor::setup(0xa1, 1, 0x0100, 0x0a00, 4),
             vec![0x80, 0xbb, 0, 0],
         ),
-        (xhci::setup(0xa1, 1, 0x0200, 0x0a00, 1), vec![1]),
+        (
+            crate::usb::descriptor::setup(0xa1, 1, 0x0200, 0x0a00, 1),
+            vec![1],
+        ),
     ]);
     audio
         .start_playback(0, 48_000, &[0x55; 12288], false)
@@ -104,7 +113,8 @@ fn actual_native_terminal_queries_preserve_raw_connected_channels_with_pcm_owned
             [2, 3, 0, 0, 0, 7],
             [5, 0x35, 0, 0, 0x80, 9],
         ] {
-            let request = xhci::setup(0xa1, 1, 0x0200, u16::from(terminal) << 8, 6);
+            let request =
+                crate::usb::descriptor::setup(0xa1, 1, 0x0200, u16::from(terminal) << 8, 6);
             model
                 .borrow_mut()
                 .control_replies
@@ -147,7 +157,7 @@ fn absent_reserved_or_foreign_connector_access_does_not_submit_a_control() {
 }
 
 #[test]
-fn actual_short_or_stalled_connector_query_never_fabricates_connected_state() {
+fn short_or_stalled_connector_query_never_invents_connected_state() {
     for stalled in [false, true] {
         let mut backing = vec![0u64; 512 * 1024];
         let mut dma = allocator(&mut backing);
@@ -158,32 +168,32 @@ fn actual_short_or_stalled_connector_query_never_fabricates_connected_state() {
                 audio.connector_status(3),
                 Err(Error::Transport(BlockError::Device { status: 6 }))
             );
-            // The first failed request actually halted EP0 and the engine
+            // The first failed request halted EP0 and the engine
             // acknowledged Reset Endpoint + Set Dequeue before returning it.
             assert!(model.borrow().seen.contains(&14));
             assert!(model.borrow().seen.contains(&16));
             model.borrow_mut().stall_control = None;
         } else {
-            model
-                .borrow_mut()
-                .control_replies
-                .push_back((xhci::setup(0xa1, 1, 0x0200, 0x0300, 6), vec![2, 3, 0, 0, 0]));
+            model.borrow_mut().control_replies.push_back((
+                crate::usb::descriptor::setup(0xa1, 1, 0x0200, 0x0300, 6),
+                vec![2, 3, 0, 0, 0],
+            ));
             assert_eq!(audio.connector_status(3), Err(Error::ControlLength));
         }
-        // A later actual complete observation can succeed after the native
-        // EP0 engine's genuine acknowledged recovery; the failed read cached
+        // A later complete observation can succeed after the native
+        // EP0 engine's acknowledged recovery; the failed read cached
         // no connected/disconnected replacement and changed no terminal state.
-        model
-            .borrow_mut()
-            .control_replies
-            .push_back((xhci::setup(0xa1, 1, 0x0200, 0x0300, 6), vec![0; 6]));
+        model.borrow_mut().control_replies.push_back((
+            crate::usb::descriptor::setup(0xa1, 1, 0x0200, 0x0300, 6),
+            vec![0; 6],
+        ));
         assert!(!audio.connector_status(3).unwrap().connected());
         audio.shutdown().unwrap();
     }
 }
 
 #[test]
-fn actual_connector_interrupt_invalidates_but_never_replaces_a_status_query() {
+fn connector_interrupt_invalidates_but_never_replaces_a_status_query() {
     let mut backing = vec![0u64; 512 * 1024];
     let mut dma = allocator(&mut backing);
     let (mut audio, model, _) = peer(&mut dma, 1);
@@ -196,7 +206,7 @@ fn actual_connector_interrupt_invalidates_but_never_replaces_a_status_query() {
         let notice = status.next_notice().unwrap().unwrap();
         assert_eq!(notice.raw, raw);
         model.borrow_mut().control_replies.push_back((
-            xhci::setup(0xa1, 1, 0x0200, u16::from(terminal) << 8, 6),
+            crate::usb::descriptor::setup(0xa1, 1, 0x0200, u16::from(terminal) << 8, 6),
             vec![2, 3, 0, 0, 0, 0],
         ));
         assert_eq!(audio.connector_status(terminal).unwrap().channels, 2);
@@ -266,7 +276,7 @@ fn native_connectors_match_original_linux_complete_control_observations() {
             continue;
         }
         assert_eq!(result, 6);
-        let request = xhci::setup(
+        let request = crate::usb::descriptor::setup(
             kind as u8,
             request as u8,
             value as u16,

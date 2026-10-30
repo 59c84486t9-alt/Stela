@@ -154,11 +154,11 @@ pub struct Run {
     #[arg(long)]
     cpu: Option<String>,
     /// Firmware-visible x86 cores, one thread each. This supplies the host
-    /// inventory; the mount independently selects/qualifies native workers.
+    /// inventory; the mount independently selects/checks native workers.
     #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u16).range(1..=64))]
     host_cores: u16,
     /// Firmware-visible SMT threads per core. Native execution independently
-    /// selects one qualified thread per physical core.
+    /// selects one checked thread per physical core.
     #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u16).range(1..))]
     host_threads: u16,
     /// Guest machine memory for QEMU; defaults to 1G, 8G for system mode
@@ -241,8 +241,8 @@ pub struct Run {
     /// mount's hashes and every byte of the images.
     #[arg(long)]
     storage_check: bool,
-    /// Qualify native conventional HDA after ExitBootServices. Playback compares
-    /// actual WAV PCM; duplex checks both DMA engines with a silent null source.
+    /// Check native conventional HDA after ExitBootServices. Playback compares
+    /// WAV PCM; duplex checks both DMA engines with a silent null source.
     #[arg(long, value_enum, num_args = 0..=1, default_missing_value = "duplex",
         conflicts_with_all = ["module", "usb_image", "payload", "storage_check"])]
     audio_check: Option<audio_check::Mode>,
@@ -328,6 +328,11 @@ pub struct Run {
     /// `--input`.
     #[arg(long, conflicts_with_all = ["module", "usb_image", "payload"])]
     input: bool,
+    /// Attach QEMU's ICH6 HD Audio controller with a duplex codec on a silent
+    /// backend, which probe's native HD Audio owner attaches whenever the
+    /// mount starts the host's devices (for example with `--input`).
+    #[arg(long, conflicts_with = "audio_check")]
+    host_audio: bool,
     /// Give the mount a host network adapter: a `virtio-net-pci`, which the
     /// mount drives after ExitBootServices for its own requests (`--tss`,
     /// `--network-check`), on a QEMU `stream` netdev to xtask's own LAN
@@ -349,6 +354,10 @@ pub struct Run {
     /// Requires system mode, such as --scenario system-kernel.
     #[arg(long, requires = "network_adapter", conflicts_with = "network_check")]
     network_self_check: bool,
+    /// Give the mount its LAN address by hand instead of from the peer's
+    /// DHCP: adds `--ipv4 10.0.2.15/24 --ipv4-gateway 10.0.2.2 --dns 10.0.2.2`.
+    #[arg(long, requires = "network_adapter")]
+    static_ipv4: bool,
     /// Give the guest its USB Ethernet adapter: a second `virtio-net-pci`
     /// on a LAN peer of its own (logged to `guest-network.log`), which the
     /// mount bridges to the guest's CDC-ECM adapter: adds `--guest-network`.
@@ -694,6 +703,9 @@ fn launch(arguments: Run) -> Result<ExitCode> {
     if arguments.guest_network {
         options.push_str(" --guest-network");
     }
+    if arguments.static_ipv4 {
+        options.push_str(" --ipv4 10.0.2.15/24 --ipv4-gateway 10.0.2.2 --dns 10.0.2.2");
+    }
     if arguments.verify_on_read {
         options.push_str(" --verify-on-read");
     }
@@ -771,6 +783,7 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         &mut command,
     );
     machine::attach_display(&arguments, bundle, &mut command);
+    machine::attach_audio(&arguments, &mut command);
     network::attach(&arguments, &paths.output, &mut command)?;
     machine::attach_usb(&arguments, &mut command);
     storage::attach_usb_boot(&arguments, &mut command);
@@ -1330,7 +1343,7 @@ fn native_mmio_observation(serial: &str) -> Option<&str> {
         .then_some(line)
 }
 
-/// Old single-requester output never qualifies the two-context fixture.
+/// Old single-requester output never checks the two-context fixture.
 fn native_isolation_verified(serial: &str) -> bool {
     serial.lines().any(|line| {
         let reason = line

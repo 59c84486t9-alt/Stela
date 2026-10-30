@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Controller quirks adapted from Linux xhci-pci.c and pci-quirks.c at
 // a804c5742bff224d4cb4d25dd383554d598be32b.
-//! Actual PCI-revision quirks; no device identity grants DMA isolation.
+//! PCI-revision quirks; no device identity grants DMA isolation.
 use super::*;
 use crate::bus::pci::ConfigSpace;
 
@@ -29,7 +29,7 @@ pub(super) struct Profile {
 }
 impl Profile {
     pub fn pci<C: ConfigSpace>(function: &mut Function<C>) -> Result<Self, BlockError> {
-        // Read back the actual owner. A copied Function identity is not proof.
+        // Read back the owner. A copied Function identity is not proof.
         streams::pci_policy(function)?;
         let revision = function.config().read8(8);
         if (function.vendor, function.device, revision) == (0x1b73, 0x1000, 0) {
@@ -179,7 +179,7 @@ mod tests {
         .unwrap()
     }
     #[test]
-    fn actual_asmedia_owner_acknowledges_both_mailbox_phases_with_narrow_control_stores() {
+    fn asmedia_owner_acknowledges_both_mailbox_phases_with_narrow_control_stores() {
         let mut f = function(true);
         after_reset(
             &mut f,

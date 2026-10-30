@@ -366,7 +366,7 @@ mod tests {
     }
 
     #[test]
-    fn all_retained_enables_decline_even_for_exact_or_unordered_inputs() {
+    fn all_kept_enables_decline_even_for_exact_or_unordered_inputs() {
         for (format, one, _) in VALUES {
             for exception in [
                 INVALID,

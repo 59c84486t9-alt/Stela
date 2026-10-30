@@ -1,6 +1,9 @@
 //! DeviceTree placement and validation for gfx topology.
-use super::{ASC, Node, String, Vec, agx, apertures, asc, format, rtbuddy_nub};
+use super::{ASC, Node, Vec, agx, apertures, asc, rtbuddy_nub};
+use crate::{Refusal, Result};
 use alloc::vec;
+use stela_contracts::refusal::Within;
+use stela_contracts::refuse;
 
 /// Whether `compatible` names an `sgx` GPU whose whole interface is modeled
 /// on every SoC that carries it (`agx::generation`, every SoC 26A434
@@ -29,7 +32,7 @@ pub struct GfxController {
     /// The GPU's TTBAT as the boot stage publishes it (`gptbat-ready`,
     /// `ttbat-phys-addr-base` in 16 KiB pages; the loader sets it to
     /// `gpu-region-base`): the MMU is handed off rooted there
-    /// ([`agx::sgx::Sgx::handed_off`]).
+    /// (stateful `Sgx::handed_off`).
     pub ttbat: u64,
     /// The shared TTBR1 window's page-directory page (`gfx-shared-l2-region`,
     /// one page, as SPTM's `uat_bootstrap_parse_dt` requires).
@@ -38,19 +41,25 @@ pub struct GfxController {
 
 /// The `sgx` banks of [`GfxController::sgx`] from `reg[0]` and `reg[1]`
 /// (physical base, bytes).
-fn sgx_banks(block: (u64, u64), info: (u64, u64)) -> Result<Vec<(u64, u64, u64)>, &'static str> {
+fn sgx_banks(block: (u64, u64), info: (u64, u64)) -> Result<Vec<(u64, u64, u64)>> {
     if block.1 == 0 || info.1 == 0 {
-        return Err("sgx register view is empty");
+        return Err(refuse!("sgx register view is empty"));
     }
-    let block_end = block.0.checked_add(block.1).ok_or("sgx block overflows")?;
-    let info_end = info.0.checked_add(info.1).ok_or("sgx info overflows")?;
+    let block_end = block
+        .0
+        .checked_add(block.1)
+        .ok_or(refuse!("sgx block overflows"))?;
+    let info_end = info
+        .0
+        .checked_add(info.1)
+        .ok_or(refuse!("sgx info overflows"))?;
     if info.0 < block.0 {
-        return Err("sgx reg[1] lies below reg[0]");
+        return Err(refuse!("sgx reg[1] lies below reg[0]"));
     }
     let mut banks = vec![(block.0, block.1, 0)];
     if info_end > block_end {
         if info.0 < block_end {
-            return Err("sgx reg[1] straddles the end of reg[0]");
+            return Err(refuse!("sgx reg[1] straddles the end of reg[0]"));
         }
         banks.push((info.0, info.1, info.0 - block.0));
     }
@@ -61,7 +70,7 @@ pub(super) fn gfx_controller(
     io: &Node<'_>,
     translate: &dyn Fn(u64, u64) -> Option<u64>,
     chip_id: u32,
-) -> Result<Option<GfxController>, String> {
+) -> Result<Option<GfxController>> {
     let asc = io
         .child("gfx-asc")
         .filter(|n| n.compatible(ASC) && n.property("role") == Some(b"GFX\0".as_slice()));
@@ -74,22 +83,26 @@ pub(super) fn gfx_controller(
     let (asc, sgx) = match (asc, sgx) {
         (None, None) => return Ok(None),
         (Some(asc), Some(sgx)) => (asc, sgx),
-        _ => return Err("the GFX coprocessor and the sgx GPU must be visible together".into()),
+        _ => {
+            return Err(refuse!(
+                "the GFX coprocessor and the sgx GPU must be visible together"
+            ));
+        }
     };
     let gpu = agx::generation::by_chip(chip_id)
         .filter(|gpu| sgx.compatible(gpu.compatible))
-        .ok_or_else(|| format!("sgx is not the GPU of ApChipID {chip_id:#x}"))?;
+        .ok_or_else(|| refuse!("sgx is not the GPU of ApChipID {chip_id:#x}", chip_id))?;
     gpu.admitted()
-        .map_err(|reason| format!("{} is not modeled: {reason}", gpu.compatible))?;
+        .within(|| refuse!("{compatible} is not modeled", compatible = gpu.compatible))?;
     rtbuddy_nub(&asc, "GFX")?;
     let place = |node: &Node<'_>, index: usize, minimum: u64, what: &str| {
         let (offset, bytes) = apertures::registers(node)
             .and_then(|regs| regs.get(index).copied())
             .filter(|&(_, bytes)| bytes >= minimum)
-            .ok_or_else(|| format!("{what} bank is absent or too short"))?;
-        let physical =
-            translate(offset, bytes).ok_or_else(|| format!("{what} outside arm-io ranges"))?;
-        Ok::<_, String>((physical, bytes))
+            .ok_or_else(|| refuse!("{what} bank is absent or too short", what))?;
+        let physical = translate(offset, bytes)
+            .ok_or_else(|| refuse!("{what} outside arm-io ranges", what))?;
+        Ok::<_, Refusal>((physical, bytes))
     };
     let wrapper = place(&asc, 0, asc::WRAPPER_BYTES, "gfx-asc wrapper")?;
     let block = place(&sgx, 0, 1, "sgx register")?;
@@ -98,21 +111,25 @@ pub(super) fn gfx_controller(
     agx::registers::covers(gpu.family, &banks)?;
     let irqs = asc
         .cells32("interrupts")
-        .ok_or("gfx-asc has no interrupts")?;
-    let irq = |index: usize| -> Result<u16, String> {
+        .ok_or(refuse!("gfx-asc has no interrupts"))?;
+    let irq = |index: usize| -> Result<u16> {
         irqs.get(index)
             .and_then(|&n| u16::try_from(n).ok())
-            .ok_or_else(|| "gfx-asc needs four valid mailbox interrupts".into())
+            .ok_or_else(|| refuse!("gfx-asc needs four valid mailbox interrupts"))
     };
     if sgx.property("gptbat-ready").is_none() {
-        return Err("sgx has no gptbat-ready: the boot stage published no GPU TTBAT".into());
+        return Err(refuse!(
+            "sgx has no gptbat-ready: the boot stage published no GPU TTBAT"
+        ));
     }
     let ttbat = sgx
         .property("ttbat-phys-addr-base")
         .and_then(|bytes| <[u8; 4]>::try_from(bytes).ok())
         .map(|page| u64::from(u32::from_le_bytes(page)) << agx::uat::PAGE_SHIFT)
         .filter(|&base| base != 0)
-        .ok_or("sgx ttbat-phys-addr-base is not one nonzero 32-bit page number")?;
+        .ok_or(refuse!(
+            "sgx ttbat-phys-addr-base is not one nonzero 32-bit page number"
+        ))?;
     let u64_property = |name: &str| {
         sgx.property(name)
             .and_then(|bytes| <[u8; 8]>::try_from(bytes).ok())
@@ -123,7 +140,11 @@ pub(super) fn gfx_controller(
         u64_property("gfx-shared-l2-region-size"),
     ) {
         (Some(base), Some(agx::uat::PAGE_BYTES)) if base != 0 => base,
-        _ => return Err("sgx gfx-shared-l2-region is not one nonzero 16 KiB page".into()),
+        _ => {
+            return Err(refuse!(
+                "sgx gfx-shared-l2-region is not one nonzero 16 KiB page"
+            ));
+        }
     };
     Ok(Some(GfxController {
         gpu,

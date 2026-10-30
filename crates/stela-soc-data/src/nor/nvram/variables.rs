@@ -14,7 +14,9 @@ use super::{
     APPLE_HEADER_SIZE, BANK_SIZE, HEADER_SIZE, adler, checksum, generation, partition_name,
     validate,
 };
+use crate::Result;
 use alloc::vec::Vec;
+use stela_contracts::refuse;
 
 /// The escape byte that starts a run of `0x00` or `0xff`.
 const ESCAPE: u8 = 0xff;
@@ -66,7 +68,7 @@ pub struct Variables {
     regions: Vec<Region>,
 }
 
-fn unescape(bytes: &[u8]) -> Result<Vec<u8>, &'static str> {
+fn unescape(bytes: &[u8]) -> Result<Vec<u8>> {
     let mut value = Vec::with_capacity(bytes.len());
     let mut at = 0;
     while at < bytes.len() {
@@ -76,11 +78,13 @@ fn unescape(bytes: &[u8]) -> Result<Vec<u8>, &'static str> {
             value.push(byte);
             continue;
         }
-        let run = *bytes.get(at).ok_or("NVRAM value ends inside an escape")?;
+        let run = *bytes
+            .get(at)
+            .ok_or(refuse!("NVRAM value ends inside an escape"))?;
         at += 1;
         let count = usize::from(run & RUN_LENGTH);
         if count == 0 {
-            return Err("NVRAM value has an empty escaped run");
+            return Err(refuse!("NVRAM value has an empty escaped run"));
         }
         let fill = if run & RUN_OF_ONES != 0 { ESCAPE } else { 0 };
         value.extend(core::iter::repeat_n(fill, count));
@@ -110,7 +114,7 @@ fn escape(value: &[u8]) -> Vec<u8> {
     bytes
 }
 
-fn entries(payload: &[u8]) -> Result<Vec<Entry>, &'static str> {
+fn entries(payload: &[u8]) -> Result<Vec<Entry>> {
     let mut entries = Vec::new();
     let mut at = 0;
     while at < payload.len() && payload[at] != 0 {
@@ -118,12 +122,12 @@ fn entries(payload: &[u8]) -> Result<Vec<Entry>, &'static str> {
         let end = rest
             .iter()
             .position(|&b| b == 0)
-            .ok_or("NVRAM entry runs past its partition")?;
+            .ok_or(refuse!("NVRAM entry runs past its partition"))?;
         let entry = &rest[..end];
         let split = entry
             .iter()
             .position(|&b| b == SEPARATOR)
-            .ok_or("NVRAM entry has no '='")?;
+            .ok_or(refuse!("NVRAM entry has no '='"))?;
         entries.push((entry[..split].to_vec(), unescape(&entry[split + 1..])?));
         at += end + 1;
     }
@@ -132,7 +136,7 @@ fn entries(payload: &[u8]) -> Result<Vec<Entry>, &'static str> {
 
 impl Variables {
     /// The variables of a valid bank.
-    pub fn parse(bank: &[u8]) -> Result<Self, &'static str> {
+    pub fn parse(bank: &[u8]) -> Result<Self> {
         validate(bank)?;
         let mut regions = Vec::new();
         let mut offset = 0;
@@ -192,20 +196,17 @@ impl Variables {
 
     /// Set `name` in `partition`; refused when the bank has no such
     /// partition or the name cannot be stored.
-    pub fn set(
-        &mut self,
-        partition: Partition,
-        name: &[u8],
-        value: &[u8],
-    ) -> Result<(), &'static str> {
+    pub fn set(&mut self, partition: Partition, name: &[u8], value: &[u8]) -> Result<()> {
         if name.is_empty() || name.iter().any(|&b| b == 0 || b == SEPARATOR) {
-            return Err("an NVRAM name is non-empty and holds no NUL or '='");
+            return Err(refuse!(
+                "an NVRAM name is non-empty and holds no NUL or '='"
+            ));
         }
         let region = self
             .regions
             .iter_mut()
             .find(|r| r.partition == partition)
-            .ok_or("the NVRAM bank has no such partition")?;
+            .ok_or(refuse!("the NVRAM bank has no such partition"))?;
         match region.entries.iter_mut().find(|(n, _)| n == name) {
             Some(entry) => entry.1 = value.to_vec(),
             None => region.entries.push((name.to_vec(), value.to_vec())),
@@ -216,7 +217,7 @@ impl Variables {
     /// The bank these variables save as: the same partitions, the entries
     /// re-serialized, generation `old + 1`, checksums renewed. Refused when
     /// a partition overflows.
-    pub fn encode(&self) -> Result<Vec<u8>, &'static str> {
+    pub fn encode(&self) -> Result<Vec<u8>> {
         let mut bank = self.bank.clone();
         for region in &self.regions {
             let mut payload = Vec::new();
@@ -227,7 +228,7 @@ impl Variables {
                 payload.push(0);
             }
             if payload.len() >= region.end - region.start {
-                return Err("NVRAM variables overflow their partition");
+                return Err(refuse!("NVRAM variables overflow their partition"));
             }
             let slot = &mut bank[region.start..region.end];
             slot.fill(0);
@@ -236,7 +237,7 @@ impl Variables {
         let next = self
             .generation()
             .checked_add(1)
-            .ok_or("NVRAM generation overflow")?;
+            .ok_or(refuse!("NVRAM generation overflow"))?;
         bank[GENERATION_AT..GENERATION_AT + 4].copy_from_slice(&next.to_le_bytes());
         let sum = adler(&bank[GENERATION_AT..]);
         bank[ADLER_AT..ADLER_AT + 4].copy_from_slice(&sum.to_le_bytes());

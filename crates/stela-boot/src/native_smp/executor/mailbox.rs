@@ -1,6 +1,8 @@
 //! One scoped ownership transfer to one fixed physical AP. Erasure is private;
-//! the heap-pinned job retains the actual non-'static native frame loan.
+//! the heap-pinned job keeps the non-'static native frame loan.
 use super::*;
+use crate::Result;
+use stela_contracts::refuse;
 use stela_engine::machine::engine::publication;
 use stela_engine::machine::engine::publication::NativeFrame;
 use stela_engine::machine::engine::publication::NativeLoan;
@@ -60,11 +62,13 @@ unsafe fn invoke<C: Command>(
     host: &mut host::HostOwner,
     owner: &mut Option<WorkerOwner>,
 ) {
-    // SAFETY: send<C> publishes this exact heap allocation, retained by Pending
+    // SAFETY: send<C> publishes this exact heap allocation, kept by Pending
     // until Acquire DONE. There is no concurrent access to its typed fields.
     let job = unsafe { &*(pointer as *const Job<C>) };
+    // SAFETY: the job is this AP's alone until it publishes DONE, so nothing else reaches `input`.
     let input = unsafe { (&mut *job.input.get()).take().expect("unconsumed AP job") };
     let output = input.execute(host, owner);
+    // SAFETY: nothing else reaches `output` until this AP publishes DONE.
     unsafe { *job.output.get() = Some(output) };
 }
 struct Pending<C: Command> {
@@ -87,6 +91,7 @@ impl<C: Command> Pending<C> {
                 // A timeout is not quiescence. Never unwind/free guest frames,
                 // services, descriptors, stack or this job while the AP can run.
                 loop {
+                    // SAFETY: halts this AP with maskable interrupts off; it touches no memory.
                     unsafe {
                         asm!("cli", "hlt", options(nomem, nostack));
                     }
@@ -112,7 +117,7 @@ impl<C: Command> Drop for Pending<C> {
     fn drop(&mut self) {
         if !self.collected {
             self.complete();
-            // The actual returned payload is still owned by this job. Dropping
+            // The returned payload is still owned by this job. Dropping
             // it never tells WorkerPublications that the CPU was recovered.
             self.mailbox.state.store(IDLE, Ordering::Release);
         }
@@ -153,7 +158,7 @@ impl Processor {
         mailbox.state.store(PENDING, Ordering::Release);
         // SAFETY: the selected AP's descriptors/GS and vector0x60 are online.
         // A delivery failure cannot return borrowed ownership: pending waits
-        // for actual completion or stops permanently retaining all resources.
+        // for completion or stops permanently keeping all resources.
         let delivered = unsafe {
             sender.notify(
                 self.apic_id() as u32,
@@ -175,19 +180,19 @@ impl Processor {
         ram: alloc::sync::Arc<stela_engine::memory::RegisteredSystemRam>,
         sender: &Apic,
         tsc_hz: u64,
-    ) -> Result<publication::InitialPublication, &'static str> {
+    ) -> Result<publication::InitialPublication> {
         let command = Initial {
             owner,
             apic: self.apic_id() as u32,
             ram,
         };
         self.send(command, sender, tsc_hz)
-            .map_err(|_| "native initialization transport busy")?
+            .map_err(|_| refuse!("native initialization transport busy"))?
             .finish()
     }
     /// # Safety
-    /// The BSP must retain every original frame/service borrow until finish or
-    /// Drop has observed the actual AP return. It must not forget/leak Pending
+    /// The BSP must keep every original frame/service borrow until finish or
+    /// Drop has observed the AP return. It must not forget/leak Pending
     /// and then reuse those borrowed resources, migrate, or release their stack.
     /// The blocking outer execution scope owns this obligation; no 'static
     /// native payload, copied CPU snapshot or numeric ACK can replace it.
@@ -253,10 +258,10 @@ impl Processor {
         work: Box<dyn FnOnce(&mut host::HostOwner) + Send>,
         sender: &Apic,
         tsc_hz: u64,
-    ) -> Result<(), &'static str> {
+    ) -> Result<()> {
         let pending = self
             .send(Spawned(work), sender, tsc_hz)
-            .map_err(|_| "AP mailbox busy")?;
+            .map_err(|_| refuse!("AP mailbox busy"))?;
         // Its drop would wait for a return that never comes; the leaked job
         // stays where the AP reads it.
         core::mem::forget(pending);
@@ -300,32 +305,32 @@ struct Initial {
     ram: alloc::sync::Arc<stela_engine::memory::RegisteredSystemRam>,
 }
 impl Command for Initial {
-    type Output = Result<publication::InitialPublication, &'static str>;
+    type Output = Result<publication::InitialPublication>;
     fn execute(
         mut self,
         host: &mut host::HostOwner,
         owner: &mut Option<WorkerOwner>,
     ) -> Self::Output {
         if owner.is_some() {
-            return Err("native worker already initialized");
+            return Err(refuse!("native worker already initialized"));
         }
-        // Qualify the same retained physical bytes in this actual AP's MMU and
+        // Check the same physical bytes in this AP's MMU and
         // cache controls before its owner publishes any runtime admission.
         for (_, physical, bytes) in self.ram.placements() {
             let cpu = crate::layout::physical(physical);
-            // SAFETY: fixed pristine AP owner; the caller retains the canonical
+            // SAFETY: fixed pristine AP owner; the caller keeps the canonical
             // reservation and its complete closed all-writer contract.
             unsafe { crate::native_memory::qualify_reserved_writeback(cpu, physical, bytes) }
-                .map_err(|_| "AP canonical RAM effective cache type refused")?;
+                .map_err(|_| refuse!("AP canonical RAM effective cache type refused"))?;
         }
-        // SAFETY: same retained canonical owner, no raw guest dispatch/DMA;
+        // SAFETY: same canonical owner, no raw guest dispatch/DMA;
         // this pristine physical Host remains pinned through all later loans.
         unsafe { host.register_system_ram(self.ram) }?;
         host.bind_worker(self.owner.binding().worker, self.apic)?;
         let published = self
             .owner
             .publish_initial(&mut host.host())
-            .map_err(|_| "native initial publication refused")?;
+            .map_err(|_| refuse!("native initial publication refused"))?;
         *owner = Some(self.owner);
         Ok(published)
     }

@@ -204,7 +204,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sys_and_sysl_keep_every_field_and_exclude_other_classes() {
+    fn sys_decoding_keeps_fields_and_excludes_other_classes() {
         // TLBI VAE1, X3 and DC ZVA, X0: op0=1 fields from the June 2026 tables.
         let tlbi = decode_sys(0xd508_8723).unwrap();
         assert_eq!(tlbi.direction(), Direction::Write);

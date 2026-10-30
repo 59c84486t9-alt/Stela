@@ -1,6 +1,7 @@
 //! Shared pure ADT fixtures for Data parsing and Runtime model integration.
-//! These builders grant no mapping, executor or native effect authority.
+//! These builders grant no mapping, executor or native effect permission.
 use super::*;
+use crate::Result;
 pub const PMGR: &str = "pmgr1,t8112";
 /// Existing unit fixtures explicitly declare an affine synthetic map.
 /// Production callers supply Node::translate_range, never this adapter.
@@ -223,7 +224,7 @@ pub fn spmi_controllers(
     io: &Node<'_>,
     translate: &dyn Fn(u64, u64) -> Option<u64>,
     aic: u32,
-) -> Result<Vec<SpmiController>, String> {
+) -> Result<Vec<SpmiController>> {
     super::spmi_topology::spmi_controllers(io, translate, aic)
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -239,20 +240,20 @@ pub fn implicit_state_fixture() -> (PowerStates, [ImplicitSupplyFixture; 3]) {
 pub fn parse_watchdog_fixture(
     node: &Node<'_>,
     translate: &dyn Fn(u64, u64) -> Option<u64>,
-) -> Result<Option<WatchdogSide>, String> {
+) -> Result<Option<WatchdogSide>> {
     super::watchdog_side(node, translate)
 }
 pub fn parse_iommu_fixture(
     node: &Node<'_>,
     translate: &dyn Fn(u64, u64) -> Option<u64>,
-) -> Result<Iommu, String> {
+) -> Result<Iommu> {
     super::dart_topology::iommu(node, translate)
 }
 pub fn parse_dcp_fixture(
     io: &Node<'_>,
     translate: &dyn Fn(u64) -> Option<u64>,
     darts: &[Iommu],
-) -> Result<Option<DcpController>, String> {
+) -> Result<Option<DcpController>> {
     super::display_topology::dcp_device(io, translate, darts)
 }
 
@@ -261,12 +262,12 @@ pub fn parse_smc_fixture(
     root: &Node<'_>,
     io: &Node<'_>,
     translate: &dyn Fn(u64, u64) -> Option<u64>,
-) -> Result<Option<SmcController>, String> {
+) -> Result<Option<SmcController>> {
     super::smc_topology::smc_controller(root, io, translate)
 }
 
 /// Explicit synthetic gate/resource metadata for Runtime model fixtures.
-/// The actual Runtime owner still validates every lifecycle/supply binding.
+/// The Runtime owner still validates every lifecycle/supply binding.
 pub fn power_states_fixture(
     blocks: Vec<(u64, u64)>,
     registers: Vec<u64>,

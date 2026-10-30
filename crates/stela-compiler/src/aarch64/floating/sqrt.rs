@@ -274,7 +274,7 @@ mod tests {
     }
 
     #[test]
-    fn every_retained_exception_enable_refuses_even_early_return_values() {
+    fn every_kept_exception_enable_refuses_even_early_return_values() {
         for format in FORMATS {
             for bit in 0..u32::BITS {
                 let status = 1 << bit;

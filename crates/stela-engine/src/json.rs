@@ -1,5 +1,5 @@
 //! Atomic JSON files for manifests, receipts and ledgers.
-use anyhow::{Context, Result};
+use crate::{Result, error::Io};
 use serde::Serialize;
 use std::{fs::File, io::Write, path::Path};
 
@@ -10,15 +10,19 @@ pub fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
-    std::fs::create_dir_all(parent)?;
+    std::fs::create_dir_all(parent).io("create a JSON file's directory")?;
     let mut bytes = serde_json::to_vec_pretty(value)?;
     bytes.push(b'\n');
-    let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
-    tmp.write_all(&bytes)?;
-    tmp.persist(path).map_err(|e| e.error)?;
+    let mut tmp = tempfile::NamedTempFile::new_in(parent).io("create a temporary JSON file")?;
+    tmp.write_all(&bytes).io("write a JSON file")?;
+    tmp.persist(path)
+        .map_err(|e| e.error)
+        .io("replace a JSON file")?;
     Ok(())
 }
 
 pub fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
-    serde_json::from_reader(File::open(path)?).context("read JSON")
+    Ok(serde_json::from_reader(
+        File::open(path).io("open a JSON file")?,
+    )?)
 }

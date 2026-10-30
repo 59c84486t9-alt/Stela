@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 //! Owned image metadata shared by explicit native Bluetooth initializers.
-//! Receipts retain integrity/provenance evidence without firmware/provider borrows.
+//! Receipts keep integrity/provenance evidence without firmware/provider borrows.
 use crate::firmware::Image;
 use alloc::string::String;
 

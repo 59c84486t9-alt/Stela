@@ -1,4 +1,4 @@
-//! A conservative limit, never CPU or memory execution authority. Keep the
+//! A conservative limit, never CPU or memory execution permission. Keep the
 //! current legacy native lane's known capabilities only; wider state and DIT
 //! cannot be enabled by a caller-provided declaration.
 use stela_compiler::TargetCpu;

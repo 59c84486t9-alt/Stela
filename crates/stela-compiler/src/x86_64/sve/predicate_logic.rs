@@ -386,7 +386,7 @@ fn dilate(code: &mut Code, stride: usize) {
     }
     let input_bits = CHUNK_BITS / stride;
     // The first dilation mask discards unused low32 bits; this clears the
-    // only higher bits that could otherwise overlap its retained groups.
+    // only higher bits that could otherwise overlap its groups.
     code.asm().mov(Size::Dword, Rax, Rax);
     let mut block = input_bits / 2;
     while block != 0 {

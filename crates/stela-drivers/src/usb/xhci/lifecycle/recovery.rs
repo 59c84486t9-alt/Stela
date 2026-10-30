@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Linux hub_event/port_event cooldown, power-on and actual-status recovery.
+//! Linux hub_event/port_event cooldown, power-on and status recovery.
 //! An upstream reset publishes a fresh hub owner; old aliases stay fenced.
 use super::*;
 
@@ -40,7 +40,7 @@ impl Host {
         let owner = hub.recovery.as_mut().unwrap();
         let mut c = self.controller.borrow_mut();
         c.validate_recovery_id(owner.id())?;
-        // Reobserve the actual root and every unaffected physical ancestor
+        // Reobserve the root and every unaffected physical ancestor
         // before each batch of private EP0 effects, including after cooldown.
         c.observe_current_ancestors_for(owner.id(), false)?;
         let (status, change) = hub_status(&mut c, owner)?;
@@ -67,7 +67,7 @@ impl Host {
         );
         c.observe_current_ancestors_for(owner.id(), false)?;
         // Never substitute bus power for a lost self-powered contract. Preserve
-        // the full old current ledger while waiting for actual restoration.
+        // the full old current ledger while waiting for restoration.
         let device = c.recovery_control(owner, setup(0x80, GET_STATUS, 0, 0, 2))?;
         if device.len() != 2 || (device[0] & 1 != 0) != c.power.hub_is_self_powered(owner.slot)? {
             return Err(BlockError::Unsupported(
@@ -113,7 +113,7 @@ impl Host {
             }
         }
         // Private recovery transfers have finished; stop EP0 again before
-        // Disable Slot. Any uncertainty retains the capability and original DMA.
+        // Disable Slot. Any uncertainty keeps the capability and original DMA.
         c.validate_recovery_id(owner.id())?;
         let original_parent = c.original_parent(owner.id())?;
         c.disable_slot(owner.slot, reset::Ownership::Retired)

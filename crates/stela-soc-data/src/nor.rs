@@ -1,7 +1,9 @@
-//! Source-qualified SPI NOR image geometry and CHRP bank representation.
+//! Source-checked SPI NOR image geometry and CHRP bank representation.
 //! This image is data. Flash commands, selected transactions and durability
 //! remain owned by the native device and block-storage adapters.
+use crate::Result;
 use alloc::{vec, vec::Vec};
+use stela_contracts::refuse;
 pub mod nvram;
 
 pub const CAPACITY: usize = 0x800000;
@@ -25,9 +27,9 @@ impl Image {
             .copy_from_slice(&nvram::empty_bank());
         image
     }
-    pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, &'static str> {
+    pub fn from_bytes(bytes: Vec<u8>) -> Result<Self> {
         if bytes.len() != CAPACITY {
-            return Err("NOR image is not 8 MiB");
+            return Err(refuse!("NOR image is not 8 MiB"));
         }
         Ok(Self(bytes))
     }
@@ -40,16 +42,16 @@ impl Image {
         &mut self.0
     }
 
-    pub fn bank(&self, bank: u32) -> Result<&[u8], &'static str> {
+    pub fn bank(&self, bank: u32) -> Result<&[u8]> {
         if bank >= nvram::BANK_COUNT {
-            return Err("NVRAM bank is outside anvram");
+            return Err(refuse!("NVRAM bank is outside anvram"));
         }
         let start = ANVRAM.0 as usize + bank as usize * nvram::BANK_SIZE;
         Ok(&self.0[start..start + nvram::BANK_SIZE])
     }
     /// The newest valid NVRAM bank, by generation; the higher bank wins a
     /// tie.
-    pub fn current_bank(&self) -> Result<u32, &'static str> {
+    pub fn current_bank(&self) -> Result<u32> {
         (0..nvram::BANK_COUNT)
             .filter_map(|bank| {
                 let bytes = self.bank(bank).ok()?;
@@ -58,7 +60,7 @@ impl Image {
             })
             .max_by_key(|&(generation, bank)| (generation, bank))
             .map(|(_, bank)| bank)
-            .ok_or("the NOR image holds no valid NVRAM bank")
+            .ok_or(refuse!("the NOR image holds no valid NVRAM bank"))
     }
     /// The bank boot firmware hands off, without changing the flash image.
     ///
@@ -72,7 +74,7 @@ impl Image {
     /// A checksummed Apple header at a bank boundary identifies damaged NOR;
     /// a completely erased die is also NOR. Unidentified nonblank data is
     /// refused, rather than treating a wrong host partition as corrupt NVRAM.
-    pub fn boot_bank(&self) -> Result<(u32, Vec<u8>), &'static str> {
+    pub fn boot_bank(&self) -> Result<(u32, Vec<u8>)> {
         if let Ok(current) = self.current_bank() {
             return Ok((current, self.bank(current)?.to_vec()));
         }
@@ -82,18 +84,22 @@ impl Image {
         {
             return Ok((nvram::CURRENT_BANK, nvram::empty_bank()));
         }
-        Err("the NOR image has neither a valid NVRAM bank nor an identifiable Apple bank header")
+        Err(refuse!(
+            "the NOR image has neither a valid NVRAM bank nor an identifiable Apple bank header"
+        ))
     }
     /// Save `bank` as XNU's `IONVRAMCHRPHandler` does: into the bank after
     /// the current one, round robin. `bank` must be valid and newer than the
     /// current bank. Returns the bank written and the offsets of the erase
     /// sectors it changed, for the host to store.
-    pub fn save_bank(&mut self, bank: &[u8]) -> Result<(u32, Vec<usize>), &'static str> {
+    pub fn save_bank(&mut self, bank: &[u8]) -> Result<(u32, Vec<usize>)> {
         nvram::validate(bank)?;
         let current = self.current_bank()?;
         let old = nvram::generation(self.bank(current)?);
         if nvram::generation(bank) <= old {
-            return Err("a saved NVRAM bank must be newer than the current one");
+            return Err(refuse!(
+                "a saved NVRAM bank must be newer than the current one"
+            ));
         }
         let next = (current + 1) % nvram::BANK_COUNT;
         let start = ANVRAM.0 as usize + next as usize * nvram::BANK_SIZE;
@@ -107,7 +113,7 @@ impl Image {
         Ok((next, changed))
     }
 
-    pub fn with_proxy(mut self, bank: u32, proxy: &[u8]) -> Result<Self, &'static str> {
+    pub fn with_proxy(mut self, bank: u32, proxy: &[u8]) -> Result<Self> {
         nvram::validate(proxy)?;
         self.bank(bank)?;
         let start = ANVRAM.0 as usize + bank as usize * nvram::BANK_SIZE;

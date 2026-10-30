@@ -277,7 +277,7 @@ fn classic_dot_ignores_raw_ebf_and_preserves_status_with_all_aliases() {
 }
 
 #[test]
-fn clamp_and_subtract_use_original_destination_and_named_operands() {
+fn clamp_and_subtract_read_the_destination_first() {
     let (mut state, mut scalable) = setup(16);
     put(
         &mut scalable,

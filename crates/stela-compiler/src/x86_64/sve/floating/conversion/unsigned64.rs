@@ -75,7 +75,7 @@ pub(crate) fn from_integer(code: &mut Code, format: Format) {
     asm.test(Size::Qword, Rax, Rax);
     let low = asm.jcc(Cond::Ns);
     // For n >= 2^63, n/2 fits signed X. OR the discarded low bit into the
-    // quotient: it retains sticky information for all four IEEE rounding modes.
+    // quotient: it keeps sticky information for all four IEEE rounding modes.
     asm.mov(Size::Qword, Rcx, Rax);
     asm.alu_imm8(Alu::And, Size::Dword, Rcx, 1);
     asm.shift_one(ShiftOp::Shr, Size::Qword, Rax);

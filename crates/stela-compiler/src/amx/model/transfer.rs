@@ -7,7 +7,7 @@ use crate::amx::{AmxOperation, AmxRegisters, Generation};
 const MULTIPLE: u64 = 1 << 62;
 const NON_CONSECUTIVE: u64 = 1 << 61;
 const MULTIPLE_MEANS_FOUR: u64 = 1 << 60;
-/// Qualified transfer alignment; only M1's misalignment fault is recovered.
+/// Checked transfer alignment; only M1's misalignment fault is recovered.
 const MULTIPLE_ALIGNMENT: u64 = 128;
 const INTERLEAVED_LANES: usize = 16;
 

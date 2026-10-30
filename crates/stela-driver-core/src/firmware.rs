@@ -2,7 +2,7 @@
 //! Exact host-device firmware resources, independent of a filesystem or OS loader.
 //!
 //! A setup/boot loader supplies owned [`Resource`] buffers and their manifests to
-//! [`Catalog::from_handoff`], then retains the catalog while drivers borrow images.
+//! [`Catalog::from_handoff`], then keeps the catalog while drivers borrow images.
 //! The host-only manifest and reserved-page boot handoff supply it separately
 //! from guest Apple boot bundles.
 //! No vendor firmware is embedded here. Length and SHA-256 checks establish
@@ -41,7 +41,7 @@ pub mod smbios;
 
 use alloc::{string::String, vec::Vec};
 use core::fmt;
-use sha2::{Digest, Sha256};
+use stela_crypto::{Sha256, digest::Digest};
 
 /// An owned diagnostic name. Copying borrowed bytes uses a fallible reserve;
 /// OOM keeps the original byte count and SHA-256 instead of aborting. This
@@ -162,7 +162,7 @@ pub struct Requirement<'a> {
     pub minimum_bytes: usize,
 }
 
-/// Source identity retained with every accepted image; not an authentication proof.
+/// Source identity kept with every accepted image; not an authentication proof.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Provenance<'a> {
     /// Package name or source URL.
@@ -318,7 +318,7 @@ struct Entry {
 
 /// Immutable verified resource catalog. Failed construction publishes no entries.
 /// Loading never performs filesystem IO, allocates image copies or tries fallback
-/// resource names. Drivers retain responsibility for choosing compatible APIs.
+/// resource names. Drivers keep responsibility for choosing compatible APIs.
 pub struct Catalog {
     entries: Vec<Entry>,
 }
@@ -405,7 +405,7 @@ impl Catalog {
     }
 
     /// Permanent immutable loader pages or static data, without an image copy.
-    /// The caller must obtain actual static references; constructing references
+    /// The caller must obtain static references; constructing references
     /// from physical addresses remains the platform's unsafe mapping boundary.
     pub fn from_persistent_handoff(
         resources: Vec<Resource<'_, &'static [u8]>>,

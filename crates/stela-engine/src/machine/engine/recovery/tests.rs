@@ -1,14 +1,16 @@
 use super::super::Fetched;
-use super::super::tests::{BASE, machine};
+use super::super::tests::{BASE, machine, make_pending};
 
 #[test]
 fn legacy_first_fault_qualification_is_cached_and_reports_dispatcher_cost() {
-    let mut machine = machine(&[0x91000400, 0xf9400043, 0xd4000001]);
+    let program = [0x91000400u32, 0xf9400043, 0xd4000001];
+    let input: Vec<u8> = program.into_iter().flat_map(u32::to_le_bytes).collect();
+    let mut machine = machine(&program);
     let Ok(Fetched::Block(index)) = machine.fetch_block(BASE, false) else {
         panic!("actual emission");
     };
+    make_pending(&mut machine, index, &input);
     let mut owner = machine.fault_recovery.remove(&index).unwrap();
-    owner.test_make_pending();
     let started = std::time::Instant::now();
     let first = owner.qualify(BASE).unwrap().to_vec();
     let cold = started.elapsed();
@@ -28,15 +30,15 @@ fn legacy_first_fault_qualification_is_cached_and_reports_dispatcher_cost() {
     );
     eprintln!(
         "dispatcher recovery qualification: source={} native={} cold_ns={} cached_average_ns={} (current host; no native guest entered)",
-        owner.input.len(),
-        owner.template.native.x86_64_code.len(),
+        input.len(),
+        owner.code_bytes(),
         cold.as_nanos(),
         cached.as_nanos() / 32
     );
 }
 
 use super::super::{Prepared, prepare};
-use super::{CodeRecovery, RecoveryRows};
+use super::{Emission, Template};
 use alloc::{sync::Arc, vec::Vec};
 use stela_compiler::block::{FaultRecovery, RecoveryBinding, UnqualifiedFaultRecovery};
 
@@ -88,22 +90,22 @@ fn compiled_owner_moves_one_compact_minted_row_bank_without_binding_copies() {
     let portable_bytes = portable.capacity() * core::mem::size_of::<UnqualifiedFaultRecovery>()
         + portable_binding_bytes;
     drop(portable);
-    let native_pointer = compiled.native.x86_64_code.as_ptr();
-    let map_pointer = compiled.native.source_map.as_ptr();
     let native_bytes = compiled.native.x86_64_code.len();
-    let owner = CodeRecovery::compiled(compiled, source, preparation);
-    let RecoveryRows::Qualified(bank) = &owner.rows else {
-        panic!("actual compiler-minted bank");
-    };
+    let mut owner =
+        Template::compiled(Arc::new(Emission::new(source, compiled, preparation))).installed();
+    assert_eq!(
+        owner.code_bytes(),
+        native_bytes,
+        "the code's image, not a copy"
+    );
+    let bank = owner.test_rows_mut();
     assert_eq!(bank.len(), rows);
-    assert_eq!(owner.template.native.x86_64_code.as_ptr(), native_pointer);
-    assert_eq!(owner.template.native.source_map.as_ptr(), map_pointer);
     for (row, pointer) in bank.iter().zip(binding_pointers) {
         assert_eq!(row.bindings.as_ptr(), pointer);
     }
     let old_row_bytes =
         capacity * core::mem::size_of::<FaultRecovery>() + binding_bytes + portable_bytes;
-    let retained_row_bytes = core::mem::size_of_val(bank.as_ref()) + binding_bytes;
+    let retained_row_bytes = core::mem::size_of_val(bank) + binding_bytes;
     assert!(
         retained_row_bytes < old_row_bytes,
         "one exact-length bank replaces duplicate portable and capacity storage"
@@ -127,10 +129,8 @@ fn exact_lazy_qualification_replaces_portable_bank_with_only_minted_rows() {
             .map(UnqualifiedFaultRecovery::from)
             .collect(),
     };
-    let mut owner = CodeRecovery::stored(template, source, preparation);
-    assert!(matches!(owner.rows, RecoveryRows::Pending(_)));
+    let mut owner = Template::stored(template, source, preparation).installed();
     assert_eq!(owner.qualify(BASE).unwrap(), expected);
-    assert!(matches!(owner.rows, RecoveryRows::Qualified(_)));
     assert_eq!(owner.qualification_attempts, 1);
     assert_eq!(owner.qualify(BASE).unwrap(), expected);
     assert_eq!(owner.qualification_attempts, 1);
@@ -164,11 +164,10 @@ fn dirty_guest_binding_buffers_move_with_the_compact_minted_bank() {
         .map(|row| row.bindings.as_ptr())
         .collect();
     let expected = compiled.fault_recovery.clone();
-    let owner = CodeRecovery::compiled(compiled, source, preparation);
-    let RecoveryRows::Qualified(rows) = &owner.rows else {
-        panic!("minted bank");
-    };
-    assert_eq!(rows.as_ref(), expected);
+    let mut owner =
+        Template::compiled(Arc::new(Emission::new(source, compiled, preparation))).installed();
+    let rows = owner.test_rows_mut();
+    assert_eq!(rows, expected.as_slice());
     for (row, pointer) in rows.iter().zip(pointers) {
         assert_eq!(row.bindings.as_ptr(), pointer);
     }

@@ -48,8 +48,8 @@ struct Saved {
     ret: u64,
 }
 
-// This helper image is separate from the original host image retained by
-// stela_enter_block. Normal return restores the actual guest image; abandon
+// This helper image is separate from the original host image kept by
+// stela_enter_block. Normal return restores the guest image; abandon
 // restores the original host image through the one real recovery continuation.
 #[repr(C)]
 struct HelperFooter {
@@ -249,10 +249,10 @@ fn abandon(state: &mut State, saved: &Saved, address: u64, write: bool, cause: F
         address,
         write,
         cause,
-        registers: [
+        registers: stela_compiler::block::HostGprSnapshot::legacy([
             saved.rax, saved.rcx, saved.rdx, saved.rbx, rsp, saved.rbp, saved.rsi, saved.rdi,
             saved.r8, saved.r9, saved.r10, saved.r11, saved.r12, saved.r13, saved.r14, saved.r15,
-        ],
+        ]),
     });
     // SAFETY: the recovery path restores the stack `stela_enter_block` left
     // and returns from it; nothing on this stack is used again.

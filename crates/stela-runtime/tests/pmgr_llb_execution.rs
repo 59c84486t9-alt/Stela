@@ -38,7 +38,7 @@ const ARENA: usize = 16 << 20;
 static EXECUTION: std::sync::Mutex<()> = std::sync::Mutex::new(());
 const GUARD_BASE: u64 = 0x1fc000000;
 // Reserve source SRAM and the T8112/T6000 physical-I/O interval without mapping
-// their contents. Every actual access must leave native code for qualification.
+// their contents. Every access must leave native code for validation.
 const GUARD_BYTES: usize = (0x400000000 - GUARD_BASE) as usize;
 struct Original {
     base: u64,
@@ -137,7 +137,7 @@ struct RamWrite {
 }
 
 /// Optional observations are a bounded original trace, not a register model.
-/// A row is consumed once, in order, only at its actual matching read. Writes
+/// A row is consumed once, in order, only at its matching read. Writes
 /// still need a real modeled owner and never become successful trace entries.
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -238,11 +238,11 @@ impl Ram {
         let q = |offset| u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap());
         // These are original literal addresses, not a Mach-O load command.
         // File bytes are known; the source's other RAM extents are UNKNOWN
-        // until actual executed stores initialize them.
+        // until executed stores initialize them.
         assert_eq!(q(0x380), original.base);
         assert_eq!(q(0x3a8), GUARD_BASE);
         assert_eq!(q(0x3c0), original.ram_end);
-        assert_eq!(q(0x418), 0); // source relocation context, not a fabricated pointer
+        assert_eq!(q(0x418), 0); // source relocation context, not an invented pointer
         let mut ram = Self {
             start: GUARD_BASE,
             bytes: vec![0; (q(0x3c0) - GUARD_BASE) as usize],
@@ -388,7 +388,7 @@ impl Devices for Bus {
     }
 }
 
-/// All guest data accesses fault out of native code and use the actual
+/// All guest data accesses fault out of native code and use the
 /// instrumented RAM/device route. No guest RAM is mapped into the host.
 struct ProbeHost {
     ram: Rc<RefCell<Ram>>,
@@ -564,7 +564,7 @@ fn original_llb_entry_executes_with_an_explicit_unknown_input_and_committed_writ
 
 #[test]
 #[ignore = "oracle: STELA_TEST_PMGR_M1_LLB"]
-fn original_m1_pro_llb_entry_retains_its_own_link_profile_and_unknown_input() {
+fn original_m1_pro_llb_entry_keeps_its_own_link_profile_and_unknown_input() {
     execute_original(&M1_PRO);
 }
 
@@ -578,7 +578,7 @@ fn execute_original(original: &Original) {
     }
     // EL2 is required by the unchanged first instruction, MSR VTTBR_EL2.
     // This is an explicitly cold-reset MODEL scenario, not proof of the
-    // BootROM's entry HCR or an actual hardware handoff snapshot.
+    // BootROM's entry HCR or a hardware handoff snapshot.
     let cpu = Cpu::of(original.chip, original.base, Pstate::reset(2));
     let ram = Rc::new(RefCell::new(Ram::from_original(&bytes, original)));
     ram.borrow_mut().observations = Observations::load(original);

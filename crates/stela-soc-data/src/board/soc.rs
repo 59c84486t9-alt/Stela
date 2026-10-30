@@ -1,7 +1,9 @@
 //! Source-backed CPU identities, cache geometry, and DeviceTree CPU admission.
 use super::{KernelLimits, topology};
+use crate::Result;
 use crate::wake;
-use alloc::{format, string::String, vec::Vec};
+use alloc::{format, vec::Vec};
+use stela_contracts::refuse;
 use stela_contracts::{
     Chip,
     adt::Node,
@@ -19,7 +21,7 @@ use rows::SOCS;
 /// ADT's `aic-iack-offset`, as Linux `arch/arm64/boot/dts/apple` places it
 /// (0x8000 in `t8112.dtsi`, 0xc000 in `t600x-die0.dtsi` and
 /// `t602x-die0.dtsi`, 0x40000 in `t8122.dtsi`, `t6030.dtsi`,
-/// `t6031-die0.dtsi` and `t8132.dtsi`) and [`AIC3_EVENT`] states for the
+/// `t6031-die0.dtsi` and `t8132.dtsi`) and [`rows::AIC3_EVENT`] states for the
 /// later SoCs. `dram_base` is where the SoC places DRAM: the constant every
 /// 26A434 iBoot of the SoC writes to `/chosen dram-base` (payload file
 /// offsets: T8103 J274 0x15950 and T8112 J473 0x23904, 0x8_0000_0000; T6000
@@ -32,16 +34,16 @@ use rows::SOCS;
 /// ([`board_dram_base`]).
 /// `pmgr` is the `compatible` of the SoC's `/arm-io/pmgr` in its boards'
 /// 26A434 DeviceTrees. Power-state
-/// ownership and optional register-family qualification are independent.
+/// ownership and optional register-family validation are independent.
 /// `lockdown` is
 /// the CONTROL offset of the lockdown registers in each PE's `cpu-impl-reg`
 /// and each cluster's `cpm-impl-reg` (`platform::apple::lockdown`), on the
-/// SoCs whose SPTM writes them ([`LOCKDOWN`]); the M4 and later SPTMs write
+/// SoCs whose SPTM writes them ([`rows::LOCKDOWN`]); the M4 and later SPTMs write
 /// none, so their boards map no lockdown block.
 /// `operating_points` is each cluster type's core clocks in MHz, lowest
 /// first, in each [`CoreType`]: the opp tables of Linux
 /// `arch/arm64/boot/dts/apple/t8112.dtsi` (`ecluster_opp`, `pcluster_opp`)
-/// and the other files [`M1_POINTS`] names, including the P states they
+/// and the other files [`rows::M1_POINTS`] names, including the P states they
 /// leave disabled until CPU deep sleep. The highest paces the
 /// cycle counter of Apple's performance monitor (`machine::pmu`), and the
 /// bundle publishes them as iBoot's `voltage-states` tables, which the IPSW
@@ -55,7 +57,7 @@ use rows::SOCS;
 /// (`platform::apple::fuse`): the T8112's 26A434 `ApplePMGR::
 /// readPMGRAONFuseReg` reads `reg[36]`. `cpu_start` is the offset of the
 /// CPU start registers (`platform::apple::cpustart`) from the PMGR node's
-/// `reg[0]` ([`CPU_START_T8112`] and its siblings). Each [`CoreType`] also
+/// `reg[0]` ([`rows::CPU_START_T8112`] and its siblings). Each [`CoreType`] also
 /// holds its cache geometry ([`CoreCaches`]), where known.
 pub(super) struct Soc {
     pub(super) chip_id: u32,
@@ -92,19 +94,11 @@ pub struct CoreType {
 impl CoreType {
     /// Compose the established MPIDR identity independently of the MIDR,
     /// caches and clocks that a complete PE profile also requires. `reg`
-    /// retains the physical cluster/core coordinates; core type never
+    /// keeps the physical cluster/core coordinates; core type never
     /// creates another physical cluster. Returns `None` for an unknown
     /// mapping, out-of-field core type or undeclared `reg` bits.
     pub fn mpidr(&self, reg: u32) -> Option<u64> {
-        // XNU xnu-12377.121.6 apple_arm64_regs.h:102–107 defines
-        // MPIDR_CORETYPE at bits 18:16, E=0, P=1, M=4.
-        const CORETYPE_MASK: u8 = 7;
-        const CORETYPE_SHIFT: u32 = 16;
-        let aff2 = self.mpidr_aff2?;
-        if aff2 & !CORETYPE_MASK != 0 || reg & !MPIDR_CLUSTER_CORE != 0 {
-            return None;
-        }
-        Some(0x8000_0000 | u64::from(aff2) << CORETYPE_SHIFT | u64::from(reg))
+        super::mpidr::compose(self.mpidr_aff2?, reg)
     }
 }
 
@@ -301,7 +295,7 @@ pub fn operating_points(chip_id: u32) -> Option<Vec<(u8, &'static [u32])>> {
 }
 
 /// The observed core types and their configured or unknown CPU requirements,
-/// for an ApChipID with one row ([`only_row`]). The number of types does not
+/// for an ApChipID with one row (`only_row`). The number of types does not
 /// define the number of physical clusters.
 pub fn core_types(chip_id: u32) -> Option<&'static [CoreType]> {
     Some(only_row(chip_id)?.cores)
@@ -326,7 +320,7 @@ pub fn template_variant(chip_id: u32) -> Option<&'static str> {
 }
 
 /// The `product-soc-name` of the SoC with `chip_id`, for an ApChipID with one
-/// row ([`only_row`]).
+/// row (`only_row`).
 pub fn name(chip_id: u32) -> Option<&'static str> {
     Some(only_row(chip_id)?.name)
 }
@@ -351,17 +345,20 @@ pub fn level1_caches(chip_id: u32, cluster_type: u8) -> Option<(Cache, Cache)> {
 }
 
 /// The guest DRAM base of the SoC with `chip_id`.
-pub fn dram_base(chip_id: u32) -> Result<u64, String> {
-    chip_row(chip_id)
-        .map(|soc| soc.dram_base)
-        .ok_or_else(|| format!("ApChipID {chip_id:#x} has no SoC row and no DRAM base"))
+pub fn dram_base(chip_id: u32) -> Result<u64> {
+    chip_row(chip_id).map(|soc| soc.dram_base).ok_or_else(|| {
+        refuse!(
+            "ApChipID {chip_id:#x} has no SoC row and no DRAM base",
+            chip_id
+        )
+    })
 }
 
 /// The guest DRAM base of a board whose SoC is `chip_id`: its DeviceTree's
 /// `/arm-io/mcc` `dram-base`, which most M3 and later boards state, or else
 /// the SoC's base ([`dram_base`]). Where both exist they must agree.
-pub fn board_dram_base(tree: &[u8], chip_id: u32) -> Result<u64, String> {
-    let root = Node::root_exact(tree).ok_or("DeviceTree has no root or is malformed")?;
+pub fn board_dram_base(tree: &[u8], chip_id: u32) -> Result<u64> {
+    let root = Node::root_exact(tree).ok_or(refuse!("DeviceTree has no root or is malformed"))?;
     let stated = root
         .child("arm-io")
         .and_then(|io| io.child("mcc"))
@@ -369,12 +366,15 @@ pub fn board_dram_base(tree: &[u8], chip_id: u32) -> Result<u64, String> {
         .map(|bytes| {
             <[u8; 8]>::try_from(bytes)
                 .map(u64::from_le_bytes)
-                .map_err(|_| "/arm-io/mcc dram-base is not 8 bytes")
+                .map_err(|_| refuse!("/arm-io/mcc dram-base is not 8 bytes"))
         })
         .transpose()?;
     match (stated, dram_base(chip_id)) {
-        (Some(stated), Ok(public)) if stated != public => Err(format!(
-            "/arm-io/mcc dram-base {stated:#x} is not ApChipID {chip_id:#x}'s {public:#x}"
+        (Some(stated), Ok(public)) if stated != public => Err(refuse!(
+            "/arm-io/mcc dram-base {stated:#x} is not ApChipID {chip_id:#x}'s {public:#x}",
+            stated,
+            chip_id,
+            public
         )),
         (Some(stated), _) => Ok(stated),
         (None, public) => public,
@@ -409,25 +409,26 @@ pub struct Processor {
 /// (its template's `reg` 0x1000 to 0x1205; XNU's T6050
 /// `MAX_CPU_CLUSTER_PHY_ID` is 18). Each chip's kernel limits bound the
 /// cluster numbers further. A `reg` beyond Aff1 and Aff0 refuses.
-/// The `reg` bits a `/cpus` node may set: Aff1 and Aff0.
-const MPIDR_CLUSTER_CORE: u32 = 0xffff;
-
-pub fn cpus(chip_id: u32, soc_name: &str, processors: &[Processor]) -> Result<Cpus, String> {
+pub fn cpus(chip_id: u32, soc_name: &str, processors: &[Processor]) -> Result<Cpus> {
     let rows: Vec<&Soc> = SOCS.iter().filter(|soc| soc.chip_id == chip_id).collect();
     if rows.is_empty() {
-        return Err(format!(
-            "ApChipID {chip_id:#x} ({soc_name}) has no public MIDR part"
+        return Err(refuse!(
+            "ApChipID {chip_id:#x} ({soc_name}) has no public MIDR part",
+            chip_id,
+            soc_name
         ));
     }
     let Some(soc) = rows.iter().find(|soc| soc.name == soc_name) else {
         let names: Vec<&str> = rows.iter().map(|soc| soc.name).collect();
-        return Err(format!(
-            "ApChipID {chip_id:#x} is {}, but the DeviceTree names {soc_name}",
-            names.join(" or ")
+        return Err(refuse!(
+            "ApChipID {chip_id:#x} is {names}, but the DeviceTree names {soc_name}",
+            chip_id,
+            names = names.join(" or "),
+            soc_name
         ));
     };
     if processors.is_empty() {
-        return Err("the DeviceTree has no /cpus nodes".into());
+        return Err(refuse!("the DeviceTree has no /cpus nodes"));
     }
     topology::validate(processors)?;
     if let Some(limits) = soc.limits {
@@ -444,31 +445,32 @@ pub fn cpus(chip_id: u32, soc_name: &str, processors: &[Processor]) -> Result<Cp
                 .and_then(|core| core.midr_part)
                 .map(u64::from)
                 .ok_or_else(|| {
-                    format!(
-                        "{} cluster type {} has no public MIDR part",
-                        soc.name,
-                        char::from(processor.cluster_type)
+                    refuse!(
+                        "{name} cluster type {kind} has no public MIDR part",
+                        name = soc.name,
+                        kind = char::from(processor.cluster_type)
                     )
                 })?;
             let core = core.expect("a part requires a core descriptor");
-            if processor.reg & !MPIDR_CLUSTER_CORE != 0 {
-                return Err(format!(
-                    "{} cpu reg {:#x} has no public MPIDR mapping",
-                    soc.name, processor.reg
+            if processor.reg & !super::mpidr::CLUSTER_CORE != 0 {
+                return Err(refuse!(
+                    "{name} cpu reg {reg:#x} has no public MPIDR mapping",
+                    name = soc.name,
+                    reg = processor.reg
                 ));
             }
             let mpidr = core.mpidr(processor.reg).ok_or_else(|| {
-                format!(
-                    "{} cluster type {} has no public MPIDR mapping",
-                    soc.name,
-                    char::from(processor.cluster_type)
+                refuse!(
+                    "{name} cluster type {kind} has no public MPIDR mapping",
+                    name = soc.name,
+                    kind = char::from(processor.cluster_type)
                 )
             })?;
             let caches = core.caches.ok_or_else(|| {
-                format!(
-                    "{} cluster type {} has no cache geometry",
-                    soc.name,
-                    char::from(processor.cluster_type)
+                refuse!(
+                    "{name} cluster type {kind} has no cache geometry",
+                    name = soc.name,
+                    kind = char::from(processor.cluster_type)
                 )
             })?;
             Ok(Identity {
@@ -481,7 +483,7 @@ pub fn cpus(chip_id: u32, soc_name: &str, processors: &[Processor]) -> Result<Cp
                 caches: Some(core_caches(caches, processor)?),
             })
         })
-        .collect::<Result<_, String>>()?;
+        .collect::<Result<_>>()?;
     Ok(Cpus {
         lockdown: soc.lockdown,
         chip: soc.chip,
@@ -492,15 +494,20 @@ pub fn cpus(chip_id: u32, soc_name: &str, processors: &[Processor]) -> Result<Cp
 
 /// A PE's caches: its cluster type's level 1 caches and the level 2 its
 /// `/cpus` node sizes.
-fn core_caches(caches: CoreCaches, processor: &Processor) -> Result<Caches, String> {
+fn core_caches(caches: CoreCaches, processor: &Processor) -> Result<Caches> {
     let bytes = processor
         .l2_bytes
-        .ok_or_else(|| format!("cpu reg {:#x} has no l2-cache-size", processor.reg))?;
+        .ok_or_else(|| refuse!("cpu reg {reg:#x} has no l2-cache-size", reg = processor.reg))?;
     let unified = Cache {
         bytes,
         ways: caches.unified_ways,
         line: LINE,
     };
-    Caches::split_unified(caches.instruction, caches.data, unified)
-        .map_err(|reason| format!("cpu reg {:#x}: {reason}", processor.reg))
+    Caches::split_unified(caches.instruction, caches.data, unified).map_err(|reason| {
+        refuse!(
+            "cpu reg {reg:#x}: {reason}",
+            reg = processor.reg,
+            reason = format!("{reason}")
+        )
+    })
 }

@@ -7,7 +7,7 @@ pub(in crate::machine::engine) mod sealed {
     pub trait Sealed {}
 }
 
-/// Actual live canonical RAM/worker borrow, never a stored readiness grant.
+/// Live canonical RAM/worker borrow, never a stored readiness grant.
 /// Only engine-held services implement this interface.
 pub trait CanonicalDeviceMemory: sealed::Sealed {
     fn memory(&self) -> &CanonicalRamService<'_>;
@@ -27,7 +27,7 @@ pub enum DeviceReadShape {
     },
 }
 
-/// An actual scalar read consumed its input. Preserve data and retire once
+/// A scalar read consumed its input. Preserve data and retire once
 /// even when forwarding its resulting board effects fails afterward.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConsumedScalar {
@@ -35,7 +35,7 @@ pub struct ConsumedScalar {
     pub settlement: Result<(), DeviceError>,
 }
 
-/// Diagnostic only. The private pending owner retains the actual recovered
+/// Diagnostic only. The private pending owner keeps the recovered
 /// native frame and same-generation worker hold; copying this grants nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DeviceReadRequest {
@@ -179,7 +179,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         shape: DeviceReadShape,
         now: u64,
     ) -> Result<ConsumedPair, DeviceError> {
-        let refused = |reason: &str| DeviceError::TransferRefused(reason.into());
+        let refused = |reason: &'static str| DeviceError::TransferRefused(reason.into());
         if self.serial_hold.is_none() {
             return Err(refused(
                 "canonical device read requires its actual recovered-frame memory continuation",
@@ -194,9 +194,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 .ram_owner(),
         );
         let memory = ram
-            .try_service()
-            .map_err(|_| refused("canonical read RAM owner failed"))?
-            .ok_or_else(|| refused("canonical read RAM gates unavailable"))?;
+            .service()
+            .map_err(|_| refused("canonical read RAM owner failed"))?;
         let mut memory = device_write::CanonicalWriteMemory::serial(memory, &mut self.host);
         match shape {
             DeviceReadShape::Scalar { bytes } => self
@@ -279,7 +278,7 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
         Stop::DeviceRead(request)
     }
 
-    /// Consume the actual stopped native read exactly once. Public diagnostics
+    /// Consume the stopped native read exactly once. Public diagnostics
     /// cannot select a PE, address, instruction or worker generation here.
     ///
     /// # Safety
@@ -288,8 +287,8 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
     /// and this call. No independently advancing queued/background producer,
     /// direct DMA, firmware/SMI, external writer or reentrant device submission
     /// is admitted. Synchronous requests may remain queued only under the
-    /// actual exclusive Devices owner preventing their advancement. The same
-    /// controller/request owner must settle its actual effect before returning.
+    /// exclusive Devices owner preventing their advancement. The same
+    /// controller/request owner must settle its effect before returning.
     pub unsafe fn complete_device_read(&mut self) -> Step {
         if let Some(Pending::Terminal(stop)) = &self.pending_device_read {
             return Err(stop.clone());
@@ -378,7 +377,7 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
             Ok(consumed) => consumed,
             Err(error) => {
                 // Err is contractually effect-free. It may not be retried as
-                // another source read; retain the terminal pending marker.
+                // another source read; keep the terminal pending marker.
                 drop(service);
                 let stop = self.unsupported(RequirementKind::Device {
                     physical: read.request.physical,
@@ -410,9 +409,14 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
         self.cpu.retired = retired.wrapping_add(1);
         self.cpu.pstate.btype = 0;
         self.device_lines = None;
+        // The canonical service still borrows the host: count by field.
         self.statistics.device_accesses += 1;
+        *self
+            .device_registers
+            .entry(read.request.physical)
+            .or_default() += 1;
         if let Err(error) = settlement {
-            // Unknown board settlement poisons RAM/monitor and leaves actual
+            // Unknown board settlement poisons RAM/monitor and leaves
             // worker sessions held. Returned load data is nevertheless final.
             drop(service);
             let stop = self.unsupported(RequirementKind::Device {

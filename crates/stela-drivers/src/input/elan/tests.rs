@@ -1,4 +1,4 @@
-//! Independent ELAN peripheral with actual command effects, ACK timing,
+//! Independent ELAN peripheral with command effects, ACK timing,
 //! physical attention, compressed reports and late fault injection.
 use super::*;
 use crate::bus::i2c::Operation;
@@ -357,7 +357,7 @@ fn elan_trackpoint_real_format_and_motion_limits_preserve_both_report_ids() {
     }
 }
 #[test]
-fn elan_actual_wake_before_mode_profiles_wait_two_hundred_ms_and_neighbors_do_not() {
+fn elan_wake_before_mode_profiles_wait_two_hundred_ms_and_neighbors_do_not() {
     for (ic, product, early) in [
         (0x0e, 5, true),
         (0x0e, 6, true),
@@ -391,7 +391,7 @@ fn elan_actual_wake_before_mode_profiles_wait_two_hundred_ms_and_neighbors_do_no
     }
 }
 #[test]
-fn elan_quick_and_normal_resume_preserve_identity_real_power_bits_and_stopped_state() {
+fn resume_keeps_identity_and_power_bits() {
     for (ic, product, quick) in [
         (0x0d, 0xc2, true),
         (0x0d, 0xb8, true),
@@ -655,7 +655,7 @@ fn elan_pressure_width_nibbles_coordinate_limits_and_wide_areas_are_not_truncate
     }
 }
 #[test]
-fn elan_early_and_late_wake_sleep_power_and_stop_failures_keep_actual_effects_uncertain() {
+fn power_command_failures_leave_effects_uncertain() {
     for (ic, product) in [(8, 0x42), (8, 0x26)] {
         let h = hardware(0, product, ic);
         h.borrow_mut().fail_command = Some((5, 0x800));
@@ -717,5 +717,4 @@ fn elan_resume_reset_and_source_quick_wake_have_distinct_real_queue_effects() {
     }
 }
 
-#[path = "high_precision_tests.rs"]
 mod high_precision_tests;

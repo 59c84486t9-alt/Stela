@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-//! Retained coherent device IOVAs; CPU pointers never become device addresses.
+//! Coherent device IOVAs; CPU pointers never become device addresses.
 use super::{Error, Result};
 use crate::bus::dma::{
     mapping::{Direction, DmaDomain, DmaMapping},
@@ -11,7 +11,7 @@ use core::sync::atomic::{Ordering, fence};
 /// Source firmware's whole allowed DMA window, starting at IOVA zero.
 pub const DMA_WINDOW_BYTES: u64 = 0xffff_fe00;
 
-/// An actual retained CPU mapping, RAM pin and device-domain mapping.
+/// A kept CPU mapping, RAM pin and device-domain mapping.
 /// An active Drop uses the common DMA quarantine; it never unmaps live DMA.
 pub struct CoherentBuffer {
     cpu: CpuMapping,
@@ -21,12 +21,12 @@ pub struct CoherentBuffer {
 }
 impl CoherentBuffer {
     /// # Safety
-    /// These actual exclusive zeroed WB pages and domain belong to the same
+    /// These exclusive zeroed WB pages and domain belong to the same
     /// requester/reset epoch as the enclosing transport. The real platform
     /// guarantees native coherent scalar CPU/device accesses, including shared
     /// volatile ring indices. No noncoherent cache-maintenance substitute or
     /// numerical address grant is sufficient. The domain, pins and mapping must
-    /// remain valid through actual device/posted/IRQ/CPU/deferred retirement.
+    /// remain valid through device/posted/IRQ/CPU/deferred retirement.
     pub unsafe fn map(pages: PinnedPages, domain: Arc<dyn DmaDomain>) -> Result<Self> {
         let bytes = pages.logical_bytes();
         let cpu = pages
@@ -97,20 +97,20 @@ impl CoherentBuffer {
         Ok(())
     }
     /// # Safety
-    /// Actual device DMA and posted writes, CPU/IRQ callbacks and deferred
+    /// Device DMA and posted writes, CPU/IRQ callbacks and deferred
     /// submissions are stopped/drained; no new access can begin or resume.
     pub(super) unsafe fn release(&mut self) -> Result<()> {
-        // SAFETY: caller provides actual retirement, not a mask/readiness token.
+        // SAFETY: caller provides retirement, not a mask/readiness token.
         unsafe { self.mapping.unmap() }.map_err(Error::Dma)
     }
 }
 
-/// The actual requester's coherent RAM/domain allocator, or an explicit model.
+/// The requester's coherent RAM/domain allocator, or an explicit model.
 /// # Safety
-/// Every returned allocation owns unique actual pins/CPU mappings and low IOVAs
-/// in this transport's retained requester/reset epoch. Native coherency and
-/// alignment are actual platform properties, never inferred from WB metadata.
-/// Errors after effects retain uncertain backing/domain ownership. No identity
+/// Every returned allocation owns unique pins/CPU mappings and low IOVAs
+/// in this transport's requester/reset epoch. Native coherency and
+/// alignment are platform properties, never inferred from WB metadata.
+/// Errors after effects keep uncertain backing/domain ownership. No identity
 /// fallback or DMA address derived from a CPU pointer is allowed.
 pub unsafe trait CoherentAllocator {
     fn allocate(&mut self, bytes: usize) -> Result<CoherentBuffer>;

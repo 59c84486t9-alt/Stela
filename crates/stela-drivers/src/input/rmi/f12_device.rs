@@ -11,7 +11,7 @@ impl<X: Transport, A: Attention, T: i2c::Timer> Device<X, A, T> {
     pub fn f12_capabilities(&self) -> impl Iterator<Item = &f12::Capabilities> {
         self.f12.iter().map(|engine| &engine.capabilities)
     }
-    /// Configure each actually discovered F12 descriptor/control block before
+    /// Configure each discovered F12 descriptor/control block before
     /// enabling its absolute-data interrupt. Other function engines stay masked.
     pub fn initialize_f12(&mut self, dribble: Option<bool>) -> Result<(), Error> {
         self.configured()?;
@@ -60,7 +60,7 @@ impl<X: Transport, A: Attention, T: i2c::Timer> Device<X, A, T> {
         })();
         self.fault(result)
     }
-    /// A late read failure retains all earlier completed frames and the exact
+    /// A late read failure keeps all earlier completed frames and the exact
     /// consumed control status. No partially read frame is published.
     pub fn poll_f12(&mut self) -> F12Poll {
         let mut outcome = F12Poll {

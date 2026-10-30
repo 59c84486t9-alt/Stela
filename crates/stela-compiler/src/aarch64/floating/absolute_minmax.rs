@@ -12,7 +12,7 @@ pub enum AbsoluteMinMaxOperation {
 
 /// Evaluate FPAbsMin/FPAbsMax without host floating-point effects.
 /// These operations ignore AH and input/output flushing. Numeric results have
-/// their sign cleared; NaN propagation retains the original operand signs.
+/// their sign cleared; NaN propagation keeps the original operand signs.
 pub fn evaluate(
     format: Format,
     operation: AbsoluteMinMaxOperation,

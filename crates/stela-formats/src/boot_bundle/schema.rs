@@ -568,7 +568,7 @@ pub struct CoreLocks {
     pub tag_offset: u64,
 }
 
-/// One `/chosen` value written or deliberately kept, and why.
+/// One `/chosen` value written or kept, and why.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Decision {
     pub path: String,

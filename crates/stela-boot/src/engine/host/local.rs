@@ -1,6 +1,8 @@
 //! State owned by this physical host processor for its executor lifetime.
 //! GS is private to Stela at CPL0, including translated execution and faults.
 use super::State;
+use crate::Result;
+use stela_contracts::refuse;
 pub(crate) mod context;
 use core::{
     arch::asm,
@@ -15,7 +17,8 @@ pub(crate) struct Local {
     this: *mut Local,
     /// Native assembly and the local recovery path share this one slot.
     recovery_rsp: UnsafeCell<u64>,
-    handler: extern "sysv64" fn(&mut super::super::interrupts::Frame),
+    handler: super::super::interrupts::Handler,
+    entry_tables: *const super::super::interrupts::Tables,
     state: UnsafeCell<Option<State>>,
     interrupted: AtomicBool,
     xstate: super::super::xstate::EntryAbi,
@@ -36,6 +39,7 @@ impl Local {
             this: core::ptr::null_mut(),
             recovery_rsp: UnsafeCell::new(0),
             handler: super::super::interrupts::interrupt,
+            entry_tables: core::ptr::null(),
             state: UnsafeCell::new(None),
             interrupted: AtomicBool::new(false),
             xstate: super::super::xstate::EntryAbi::EMPTY,
@@ -61,7 +65,7 @@ pub(crate) struct Owner {
     _pinned: PhantomData<*mut ()>,
 }
 
-/// Fixed root pages and the only RAM the actual shadow publisher may map.
+/// Fixed root pages and the only RAM the shadow publisher may map.
 /// This immutable view pins the original physical owner; it does not move it.
 pub(crate) struct MmioRoots {
     roots: alloc::vec::Vec<u64>,
@@ -78,8 +82,8 @@ impl MmioRoots {
 }
 
 impl Owner {
-    /// Retain immutable clock/CPU views without moving this !Send owner. The
-    /// actual owner refuses destruction while any view can still enter it.
+    /// Keep immutable clock/CPU views without moving this !Send owner. The
+    /// owner refuses destruction while any view can still enter it.
     pub(crate) fn retain_clock_root(
         &mut self,
     ) -> Result<alloc::sync::Arc<()>, stela_drivers::platform::work::WorkError> {
@@ -106,13 +110,15 @@ impl Owner {
     /// backing, before a guest regime, frame or registered RAM exists: the
     /// host drivers that read a bundle's DRAM base run after `install`.
     /// Root contexts and MMIO views see only the host spans, which stay.
-    pub(crate) fn place_ram(&mut self, base: u64) -> Result<(), &'static str> {
+    pub(crate) fn place_ram(&mut self, base: u64) -> Result<()> {
         if current() != self.local.as_ptr() {
-            return Err("native Host owner migrated");
+            return Err(refuse!("native Host owner migrated"));
         }
         let state = state();
         if state.native || state.regime.is_some() || state.registered_ram.is_some() {
-            return Err("guest RAM is placed before the guest's memory is registered");
+            return Err(refuse!(
+                "guest RAM is placed before the guest's memory is registered"
+            ));
         }
         super::ram::place(&mut state.ram, base);
         Ok(())
@@ -122,18 +128,18 @@ impl Owner {
     /// live. This replaces metadata; it allocates/copies no guest RAM.
     ///
     /// # Safety
-    /// This is the source-qualified registered RAM for this executor. Its
-    /// all-writer contract is retained. Direct `SYSTEM_MODE` guest data writers
+    /// This is the source-checked registered RAM for this executor. Its
+    /// all-writer contract is held. Direct `SYSTEM_MODE` guest data writers
     /// must never bypass this all-writer owner, including between checked calls.
-    /// Only the source-qualified checked service and registered host/table
+    /// Only the source-checked checked service and registered host/table
     /// publishers may touch data; returning to serial execution additionally
     /// requires the canonical reservation/event ownership join.
     pub(crate) unsafe fn register_system_ram(
         &mut self,
         ram: alloc::sync::Arc<stela_engine::memory::RegisteredSystemRam>,
-    ) -> Result<(), &'static str> {
+    ) -> Result<()> {
         if current() != self.local.as_ptr() {
-            return Err("native Host owner migrated");
+            return Err(refuse!("native Host owner migrated"));
         }
         let state = state();
         if self.root_context.strong_count() != 0
@@ -141,12 +147,14 @@ impl Owner {
             || state.regime.is_some()
             || state.registered_ram.is_some()
         {
-            return Err("native RAM adoption requires pristine owner-local dispatch");
+            return Err(refuse!(
+                "native RAM adoption requires pristine owner-local dispatch"
+            ));
         }
         let mut incoming = alloc::vec::Vec::new();
         incoming
             .try_reserve_exact(ram.placements().count())
-            .map_err(|_| "canonical RAM placement allocation failed")?;
+            .map_err(|_| refuse!("canonical RAM placement allocation failed"))?;
         incoming.extend(
             ram.placements()
                 .map(|(guest, host, bytes)| super::RamRange {
@@ -155,7 +163,7 @@ impl Owner {
                     bytes: bytes as u64,
                 }),
         );
-        // End the mutable state borrow before checking the same retained root
+        // End the mutable state borrow before checking the same root
         // identity and closing old RAM-absence/publication generations.
         let _ = state;
         self.join_ram_identity(&incoming)?;
@@ -165,50 +173,54 @@ impl Owner {
         Ok(())
     }
 
-    /// Bind this actual selected physical core once, before runtime dispatch.
+    /// Bind this selected physical core once, before runtime dispatch.
     pub(crate) fn bind_worker(
         &mut self,
         worker: stela_engine::machine::engine::publication::WorkerId,
         expected_apic: u32,
-    ) -> Result<(), &'static str> {
+    ) -> Result<()> {
         if current() != self.local.as_ptr() {
-            return Err("native Host owner migrated");
+            return Err(refuse!("native Host owner migrated"));
         }
         let state = state();
         if state.apic.id() != expected_apic {
-            return Err("native Host physical identity differs");
+            return Err(refuse!("native Host physical identity differs"));
         }
         if state.native || state.regime.is_some() {
-            return Err("native Host worker binding requires pristine dispatch");
+            return Err(refuse!(
+                "native Host worker binding requires pristine dispatch"
+            ));
         }
         // SAFETY: this unique processor-local owner has no active native call.
         if unsafe { *self.local.as_ref().recovery_rsp.get() } != 0 {
-            return Err("native Host worker binding has active recovery frame");
+            return Err(refuse!(
+                "native Host worker binding has active recovery frame"
+            ));
         }
         // SAFETY: this processor's unique owner, before any native dispatch;
         // handler code never changes the immutable runtime worker binding.
         let binding = unsafe { &mut *self.local.as_ref().worker.get() };
         if binding.is_some() {
-            return Err("native Host worker already bound");
+            return Err(refuse!("native Host worker already bound"));
         }
-        // SAFETY: install's owned post-EBS platform contract retains actual
+        // SAFETY: install's owned post-EBS platform contract keeps
         // destination affinity and stable declarations through retirement.
         // BSP canonical preparation and AP Initial both arrive here only after
         // their local Host/control installation. No firmware snapshot or BSP
-        // observation mints an AP lease. Hardware qualification stays separate.
+        // observation mints an AP lease. Hardware validation stays separate.
         let declarations = unsafe { stela_engine::NativeCpuOwner::new(worker, expected_apic) }
-            .map_err(|_| "native Host CPU declaration admission refused")?;
+            .map_err(|_| refuse!("native Host CPU declaration admission refused"))?;
         // SAFETY: same unique processor-local owner, no active dispatch.
         let slot = unsafe { &mut *self.local.as_ref().declarations.get() };
         if slot.is_some() {
-            return Err("native Host CPU declarations already owned");
+            return Err(refuse!("native Host CPU declarations already owned"));
         }
         *slot = Some(declarations);
         *binding = Some(worker);
         Ok(())
     }
 
-    /// Borrow the sole host handle while retaining its processor-local owner.
+    /// Borrow the sole host handle while keeping its processor-local owner.
     pub(crate) fn host(&mut self) -> super::BareHost<'_> {
         assert_eq!(current(), self.local.as_ptr(), "host state owner migrated");
         super::BareHost {
@@ -220,7 +232,6 @@ impl Owner {
 
 const _: () = assert!(core::mem::offset_of!(Local, this) == 0);
 pub(super) const RECOVERY_RSP_OFFSET: usize = core::mem::offset_of!(Local, recovery_rsp);
-pub(crate) const HANDLER_OFFSET: usize = core::mem::offset_of!(Local, handler);
 pub(crate) const XSTATE_IMAGE_BYTES_OFFSET: usize = core::mem::offset_of!(Local, xstate)
     + core::mem::offset_of!(super::super::xstate::EntryAbi, image_bytes);
 pub(crate) const XSTATE_SUPPORTED_MASK_OFFSET: usize = core::mem::offset_of!(Local, xstate)
@@ -232,11 +243,11 @@ pub(crate) const XSTATE_EXTENDED_OFFSET: usize = core::mem::offset_of!(Local, xs
 pub(crate) const XSTATE_ACTIVE_OFFSET: usize = core::mem::offset_of!(Local, xstate_active);
 pub(super) const HELPER_RSP_OFFSET: usize = core::mem::offset_of!(Local, helper_rsp);
 
-/// Install only an actual destination capture before making this Local/IDT
+/// Install only a destination capture before making this Local/IDT
 /// active. A caller-supplied mask/size cannot create this contract.
 ///
 /// # Safety
-/// The actual descriptor owner retains `owner` and the permanently pinned
+/// The descriptor owner keeps `owner` and the permanently pinned
 /// normal/fatal IST allocations while any vector can enter this Local. It
 /// checked each real stack's frame/image/handler budget and all-root mappings.
 /// No returning same-IST nested entry is admitted. This does not enable state.
@@ -262,10 +273,11 @@ unsafe fn set_base(base: u64) {
 /// # Safety
 /// Called once for this processor, with interrupts disabled. `local` is private,
 /// pinned and mapped through every root until this processor is permanently
-/// stopped; its descriptor owner retains it after this call.
+/// stopped; its descriptor owner keeps it after this call.
 pub(crate) unsafe fn activate(
     local: &mut Local,
-    handler: extern "sysv64" fn(&mut super::super::interrupts::Frame),
+    handler: super::super::interrupts::Handler,
+    tables: *const super::super::interrupts::Tables,
 ) {
     assert!(
         local.this.is_null(),
@@ -276,6 +288,7 @@ pub(crate) unsafe fn activate(
         "processor xstate descriptor owner absent"
     );
     local.handler = handler;
+    local.entry_tables = tables;
     local.this = local;
     // SAFETY: the descriptor owner pins this private record for the CPU lifetime.
     unsafe { set_base(local as *mut Local as u64) };
@@ -311,7 +324,7 @@ pub(super) unsafe fn install(state: State) -> Owner {
 
 fn current() -> *mut Local {
     let pointer: *mut Local;
-    // SAFETY: the caller retains the local Owner. Guest translations do not
+    // SAFETY: the caller keeps the local Owner. Guest translations do not
     // change GS, and every engine/shadow root maps this private allocation.
     unsafe {
         asm!("mov {}, gs:[0]", out(reg) pointer, options(readonly, nostack, preserves_flags))
@@ -322,7 +335,7 @@ fn current() -> *mut Local {
 pub(super) fn state() -> &'static mut State {
     // SAFETY: execution is pinned to the Owner's host CPU. Outside native
     // code interrupts are disabled and calls never overlap; native execution
-    // retains no State reference while a fault/helper borrows it.
+    // keeps no State reference while a fault/helper borrows it.
     unsafe {
         (&mut *(*current()).state.get())
             .as_mut()
@@ -330,10 +343,10 @@ pub(super) fn state() -> &'static mut State {
     }
 }
 
-/// Actual current-owner slots only; numbers or copied records cannot prove
+/// Current-owner slots only; numbers or copied records cannot prove
 /// that a private fixture may release mapped backing after a continuation.
 pub(super) fn native_frames_idle() -> bool {
-    // SAFETY: as for state(): caller retains this actual processor's Owner,
+    // SAFETY: as for state(): caller keeps this processor's Owner,
     // IF is clear and no frame/handler overlaps this process boundary.
     unsafe {
         let local = &*current();
@@ -341,7 +354,7 @@ pub(super) fn native_frames_idle() -> bool {
     }
 }
 
-/// Actual normal/terminal hardware-entry metadata set by the shared IDT asm.
+/// Normal/terminal hardware-entry metadata set by the shared IDT asm.
 /// IF does not identify IRQ context; process IRQ-save still reads false here.
 pub(super) fn irq_active() -> bool {
     let normal: u64;
@@ -407,7 +420,7 @@ impl Drop for Owner {
         unsafe {
             let local = self.local.as_ref();
             // Revoke before any state/arena destruction, even if a stale
-            // non-Send handle retained this exact owner incarnation.
+            // non-Send handle kept this owner incarnation.
             if let Some(owner) = (&mut *local.declarations.get()).take() {
                 drop(owner);
             }
@@ -430,18 +443,45 @@ impl Drop for Owner {
 }
 
 pub(super) fn native_worker() -> Option<stela_engine::machine::engine::publication::WorkerId> {
-    // SAFETY: callers retain this processor's live Owner/GS record. The worker
+    // SAFETY: callers keep this processor's live Owner/GS record. The worker
     // binding is set once by that owner after checking its real local APIC ID.
     unsafe { *(*current()).worker.get() }
 }
 
 /// Lend only the current GS owner's destination-local declaration handle.
 pub(super) fn native_cpu_lease() -> Option<stela_engine::NativeCpuLease> {
-    // SAFETY: callers retain this actual processor's live exclusive HostOwner;
+    // SAFETY: callers keep this processor's live exclusive HostOwner;
     // retirement revokes before destroying state, and handlers never lend it.
     unsafe {
         (&*(*current()).declarations.get())
             .as_ref()
             .map(|owner| owner.lease())
     }
+}
+
+/// The original permanently pinned descriptor/IST owner of this GS.
+/// This never resolves an arbitrary address supplied by a caller.
+pub(crate) fn interrupt_owner() -> (
+    &'static super::super::interrupts::Tables,
+    super::super::interrupts::Handler,
+    [u64; 2],
+) {
+    let pointer = current();
+    assert!(!pointer.is_null(), "interrupt local owner absent");
+    // SAFETY: only the installed assembly interrupt dispatch calls this while
+    // its active IST slot is held. activate records the original Tables
+    // allocation, which install_on pins/maps for the entire CPU lifetime.
+    let local = unsafe { &*pointer };
+    assert!(
+        !local.entry_tables.is_null(),
+        "interrupt descriptor owner absent"
+    );
+    // SAFETY: same original permanently pinned allocation, never user memory.
+    let tables = unsafe { &*local.entry_tables };
+    assert!(
+        tables.owns_local(pointer),
+        "interrupt GS differs from its original descriptor owner"
+    );
+    // SAFETY: local CPU's assembly owns these slots; dispatch has IF clear.
+    (tables, local.handler, unsafe { *local.xstate_active.get() })
 }

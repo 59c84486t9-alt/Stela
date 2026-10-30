@@ -1,21 +1,27 @@
-//! Bounded broadcast observations. No observation grants quiescence authority.
+//! Bounded broadcast observations. No observation grants quiescence permission.
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BroadcastKind {
+    /// A TLBI posted to the other PEs.
     Tlb,
+    /// An instruction cache invalidation posted to the other PEs.
     Code,
+    /// A CPU power change posted to the other PEs.
     Power,
+    /// A wait, at a DSB or after a power change, for the other PEs to
+    /// apply what this one posted.
+    Completion,
 }
 impl BroadcastKind {
-    pub const ALL: [Self; 3] = [Self::Tlb, Self::Code, Self::Power];
+    pub const ALL: [Self; 4] = [Self::Tlb, Self::Code, Self::Power, Self::Completion];
     pub const fn index(self) -> usize {
         self as usize
     }
 }
 
 /// Whole broadcast duration includes posting and processing incoming mail.
-/// Counts saturate; they are retained observations, never completion receipts.
+/// Counts saturate; they are held observations, never completion receipts.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct BroadcastCounts {
     pub started: u64,
@@ -29,7 +35,7 @@ pub struct BroadcastCounts {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct BroadcastProfile {
-    pub kinds: [BroadcastCounts; 3],
+    pub kinds: [BroadcastCounts; 4],
     pub active: Option<BroadcastKind>,
     /// Raw owner counter at entry; meaningful only while active is Some.
     pub active_start: u64,
@@ -62,7 +68,7 @@ impl AtomicCounts {
 #[derive(Default)]
 pub(super) struct Slot {
     sequence: AtomicU64,
-    kinds: [AtomicCounts; 3],
+    kinds: [AtomicCounts; 4],
     active: AtomicU64,
     start: AtomicU64,
     dropped: AtomicBool,
@@ -263,7 +269,7 @@ mod tests {
     }
 
     #[test]
-    fn exhausted_publication_retains_observation_and_counts_saturate() {
+    fn exhausted_publication_keeps_observation_and_counts_saturate() {
         let slot = Slot::default();
         slot.kinds[0]
             .elapsed_ticks

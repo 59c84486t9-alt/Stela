@@ -42,7 +42,7 @@ pub(super) fn parse(d: &[u8], protocol: u8) -> Result<Entity, Error> {
     })
 }
 impl Graph {
-    /// Cluster metadata follows actual sources. Mixer outputs declare their own
+    /// Cluster metadata follows sources. Mixer outputs declare their own
     /// cluster; a selector with incompatible sources requires a separate policy.
     pub fn signal_cluster(&self, id: u8) -> Result<(u8, u32), Error> {
         self.cluster(id, &mut [false; 256])
@@ -201,7 +201,7 @@ impl Graph {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{block::BlockError, usb::xhci::setup};
+    use crate::{block::BlockError, usb::descriptor::setup};
     use alloc::{collections::BTreeMap, vec::Vec};
 
     fn graph_fixture(protocol: u8) -> Graph {

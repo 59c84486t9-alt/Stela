@@ -196,8 +196,8 @@ mod tests {
             );
         }
         rsdp[0] = b'X';
-        // SAFETY: as above.
         assert_eq!(
+            // SAFETY: as above.
             unsafe { find(rsdp.as_ptr() as u64, b"MCFG") },
             Err(AcpiError::BadRsdp)
         );

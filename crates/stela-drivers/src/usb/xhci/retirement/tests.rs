@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Actual command/context/event peers; no quiescence receipt is injected.
+//! Command/context/event peers; no quiescence receipt is injected.
 use super::*;
 use crate::bus::dma::RegionAllocator;
 use reset::tests::{Fault, Hardware};
@@ -26,7 +26,7 @@ fn configured(
 }
 
 #[test]
-fn whole_slot_retirement_stops_actual_ordinary_and_stream_dma_before_disable() {
+fn whole_slot_retirement_stops_ordinary_and_stream_dma_before_disable() {
     for speed in [HIGH_SPEED, SUPER_SPEED] {
         for context in [32, 64] {
             let mut memory = vec![0u64; 512 * 1024];
@@ -64,7 +64,7 @@ fn whole_slot_retirement_stops_actual_ordinary_and_stream_dma_before_disable() {
                 .physical();
             let before = hardware.borrow().commands_seen.len();
             c.disable_slot(old.slot, Ownership::Retired).unwrap();
-            // The independent hardware peer requires every actual output
+            // The independent hardware peer requires every output
             // endpoint Stopped, no outstanding TD, and the complete ordered
             // event ring consumed when it accepts this Disable Slot command.
             let seen = hardware.borrow().commands_seen[before..].to_vec();
@@ -121,7 +121,7 @@ fn whole_slot_retirement_stops_actual_ordinary_and_stream_dma_before_disable() {
                     .any(|event| { event.kind() == TRANSFER_EVENT && event.slot() == old.slot })
             );
             // The old device's port still holds its current grant, so the ID
-            // that comes back stays unaddressed with its retained allocation.
+            // that comes back stays unaddressed with its allocation.
             assert_eq!(c.fresh_slot().unwrap(), 2);
             assert_eq!(c.slot_ownership[1], Ownership::Tombstone);
             assert_eq!(c.slot(old.slot).unwrap()._output.physical(), output);
@@ -183,7 +183,7 @@ fn whole_slot_retirement_keeps_allocations_until_exact_disable_acknowledgment() 
         assert!(c.device(old.id).is_err());
         assert_eq!(hardware.borrow().accesses, accesses);
         // Timeouts and mismatched completions cannot establish fresh command
-        // authority even if the hardware physically stopped the old slot.
+        // permission even if the hardware physically stopped the old slot.
         if fault != Fault::Disable {
             assert!(c.fresh_slot().is_err());
             assert_eq!(hardware.borrow().commands_seen, commands);
@@ -211,7 +211,7 @@ fn whole_slot_retirement_refuses_published_vacancy_and_invalid_owners_before_mmi
     }
 }
 
-/// Registers still execute every actual hardware-peer command and payload.
+/// Registers still execute every hardware-peer command and payload.
 /// Only the device's full descriptor response is corrupted, after its DMA write
 /// and before the host observes the real transfer event.
 struct InvalidDescriptor {
@@ -232,8 +232,8 @@ impl Registers for InvalidDescriptor {
 
     fn write32(&mut self, offset: usize, value: u32) {
         let data = if offset == 0x1000 + 4 && value == 1 {
-            // SAFETY: this is the actual current DCBAA output context and EP0
-            // TRB memory retained by the controller under test. No pointer is
+            // SAFETY: this is the current DCBAA output context and EP0
+            // TRB memory kept by the controller under test. No pointer is
             // synthesized as proof of readiness or retirement.
             unsafe {
                 let output = (self.output as *const u64).read_volatile();
@@ -271,11 +271,13 @@ impl Registers for InvalidDescriptor {
         self.inner.write32(offset, value);
         if let Some((buffer, length)) = data {
             assert_eq!(length, 18);
-            // SAFETY: the actual peer just completed this descriptor DMA. The
+            // SAFETY: the peer just completed this descriptor DMA. The
             // adversarial device returns an invalid descriptor's bLength byte.
             if self.stall {
                 self.hardware.borrow_mut().stall_completed_control(1);
             } else {
+                // SAFETY: the pointer addresses this test's own live pages, and the stopped model
+                // writes nothing concurrently.
                 unsafe { (buffer as *mut u8).write_volatile(0) };
             }
             self.hardware.borrow_mut().fault = self.cleanup_fault;
@@ -347,7 +349,7 @@ fn failed_real_descriptor_enumeration_stops_ep0_before_returning_unpublished_slo
 }
 
 #[test]
-fn failed_real_descriptor_cleanup_retains_ep0_dma_on_stop_reset_and_dequeue_faults() {
+fn failed_real_descriptor_cleanup_keeps_ep0_dma_on_stop_reset_and_dequeue_faults() {
     for (fault, stall) in [
         (Fault::Stop(1), false),
         (Fault::SilentStop(1), false),
@@ -413,7 +415,7 @@ enum Operation {
 }
 
 /// Additional wire operations of the same independent peer. A submitted Isoch
-/// TRB remains hardware-owned in its actual pending-TD map until its ordered
+/// TRB remains hardware-owned in its pending-TD map until its ordered
 /// stopped event; a rejected Address Device never activates EP0.
 struct AdditionalOperation {
     inner: Box<dyn Registers>,
@@ -464,7 +466,7 @@ impl Registers for AdditionalOperation {
 }
 
 #[test]
-fn whole_slot_retirement_drains_actual_iso_service_and_retains_dma_on_failure() {
+fn whole_slot_retirement_drains_iso_service_and_keeps_dma_on_failure() {
     for speed in [HIGH_SPEED, SUPER_SPEED] {
         for context in [32, 64] {
             for fault in [
@@ -533,7 +535,7 @@ fn whole_slot_retirement_drains_actual_iso_service_and_retains_dma_on_failure() 
 }
 
 #[test]
-fn failed_actual_address_device_retires_disabled_ep0_without_illegal_stop_or_dequeue() {
+fn failed_address_device_retires_disabled_ep0_without_illegal_stop_or_dequeue() {
     for context in [32, 64] {
         let mut memory = vec![0u64; 512 * 1024];
         let (shared, old, hardware, mut dma) =
@@ -568,7 +570,7 @@ fn failed_actual_address_device_retires_disabled_ep0_without_illegal_stop_or_deq
 }
 
 #[test]
-fn fatal_status_after_actual_disable_ack_preserves_dcbaa_and_retained_allocation() {
+fn fatal_status_after_disable_ack_preserves_dcbaa_and_kept_allocation() {
     let mut memory = vec![0u64; 512 * 1024];
     let (shared, old, hardware, _dma) = configured(&mut memory, HIGH_SPEED, 32);
     let mut c = shared.borrow_mut();

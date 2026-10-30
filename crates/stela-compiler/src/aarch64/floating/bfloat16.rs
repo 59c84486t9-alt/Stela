@@ -39,7 +39,7 @@ pub fn negate(fpcr: u32, bits: u16) -> u16 {
 fn effective_control(fpcr: u32) -> Result<Control, UnsupportedControl> {
     let control = Control(fpcr);
     if control.alternative() {
-        // FPConvertBF and BFMulAddH suppress exceptions under AH. Retain AH/DN
+        // FPConvertBF and BFMulAddH suppress exceptions under AH. Keep AH/DN
         // while forcing input/output flush and nearest-even independently.
         Ok(Control(
             (fpcr | FPCR_FIZ | FPCR_FZ)

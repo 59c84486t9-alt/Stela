@@ -1,4 +1,4 @@
-//! Queried firmware, actual sliced commands and real i8042 data/reply lanes.
+//! Queried firmware, sliced commands and real i8042 data/reply lanes.
 use super::*;
 use alloc::collections::BTreeMap;
 pub(super) struct Peripheral {
@@ -210,7 +210,87 @@ fn real_queried_identity_bounds_capabilities_and_mode_precede_reporting() {
     }
 }
 #[test]
-fn old_and_new_absolute_records_keep_pressure_width_buttons_and_signed_edge_coordinates() {
+fn the_protocol_probe_selects_synaptics_by_its_identity_with_the_firmware_profile() {
+    let (explicit, h) = target(true, true);
+    let mut c = Controller::new_probing(
+        Model(h.clone()),
+        Time(h.borrow().time.clone()),
+        explicit.config,
+        Some("PNP: LEN0033 PNP0f13"),
+    )
+    .unwrap();
+    c.initialize().unwrap();
+    let capabilities = c.synaptics_capabilities().unwrap();
+    assert_eq!(
+        capabilities.coordinate_quirk,
+        Some(synaptics::board::Bounds {
+            minimum: (1024, 2258),
+            maximum: (5052, 4832)
+        })
+    );
+    assert!(c.synaptics.as_ref().unwrap().high_rate);
+    assert_eq!(
+        h.borrow().synaptics.as_ref().unwrap().queried[..2],
+        [0, 0],
+        "the probe's identity query, then the engine's own"
+    );
+}
+fn intertouch(firmware_id: &str) -> (Controller<Model, Time>, Rc<RefCell<Hardware>>) {
+    let (explicit, h) = target(true, true);
+    // SYN_CAP_INTERTOUCH beside the fixture's other extended capabilities.
+    h.borrow_mut()
+        .synaptics
+        .as_mut()
+        .unwrap()
+        .queries
+        .insert(12, [2, 0x60, 0]);
+    let mut c = Controller::new_probing(
+        Model(h.clone()),
+        Time(h.borrow().time.clone()),
+        explicit.config,
+        Some(firmware_id),
+    )
+    .unwrap();
+    c.initialize().unwrap();
+    (c, h)
+}
+#[test]
+fn intertouch_is_the_companion_of_a_listed_pad_that_has_it() {
+    assert_eq!(
+        intertouch("PNP: LEN0073 PNP0f13").0.smbus_companion(),
+        Some(Companion::Rmi)
+    );
+    assert_eq!(
+        intertouch("PNP: len2004 PNP0f13").0.smbus_companion(),
+        Some(Companion::Rmi),
+        "a top-button pad, matched without case"
+    );
+    assert_eq!(intertouch("PNP: SYN1B7F PNP0f13").0.smbus_companion(), None);
+    let (c, _) = ready_synaptics(true);
+    assert_eq!(c.smbus_companion(), None, "no PNP identifier");
+}
+#[test]
+fn a_handed_over_mouse_port_drops_its_bytes_until_reclaimed() {
+    let (mut c, h) = intertouch("PNP: LEN0073 PNP0f13");
+    assert!(h.borrow().scanning[1]);
+    c.hand_mouse_to_companion().unwrap();
+    assert!(!h.borrow().scanning[1]);
+    assert_eq!(
+        h.borrow().synaptics.as_ref().unwrap().mode,
+        None,
+        "reset to its defaults"
+    );
+    emit(&h, Port::Mouse, &new_packet(3000, 3000, 60, 4, 1));
+    assert!(c.poll().unwrap().is_empty());
+    c.hand_mouse_to_companion().unwrap();
+    c.reclaim_mouse().unwrap();
+    assert!(h.borrow().scanning[1]);
+    assert!(h.borrow().synaptics.as_ref().unwrap().mode.is_some());
+    emit(&h, Port::Mouse, &new_packet(3000, 3000, 60, 4, 1));
+    assert!(!c.poll().unwrap().is_empty());
+}
+#[test]
+fn absolute_records_decode_every_field_in_both_formats() {
     for new in [false, true] {
         let (mut c, h) = ready_synaptics(new);
         for (x, y) in [
@@ -286,7 +366,7 @@ fn incompatible_profiles_and_bad_query_identity_never_arm_absolute_mode() {
     }
 }
 #[test]
-fn incomplete_queries_and_late_mode_ack_keep_actual_observations_and_never_replay() {
+fn incomplete_queries_are_not_replayed() {
     for query in [0, 3, 10, 1, 16, 2, 9, 12, 8, 13, 15] {
         for count in 0..3 {
             let (mut c, h) = target(true, true);
@@ -318,7 +398,7 @@ fn incomplete_queries_and_late_mode_ack_keep_actual_observations_and_never_repla
     assert!(c.needs_reset());
 }
 #[test]
-fn sibling_input_and_same_port_fa_coordinates_survive_stop_and_fresh_restart() {
+fn fa_coordinates_survive_restart() {
     let (mut c, h) = ready_synaptics(true);
     let packet = new_packet(0x0ffa, 0x0ffe, 0xfa, 5, 3);
     // Keyboard command consumes the first mouse prefix into its pending lane.
@@ -401,7 +481,7 @@ fn queued_raw_frames_apply_bounded_backpressure_and_can_resume_without_reset() {
     assert!(!c.needs_reset());
 }
 #[test]
-fn restart_requeries_actual_identity_and_refuses_changed_hardware_before_mode_mutation() {
+fn restart_requeries_identity_and_refuses_changed_hardware_before_mode_mutation() {
     for query in [0, 3, 10, 1, 16, 2, 9, 8, 13, 15] {
         let (mut c, h) = ready_synaptics(true);
         let original = c.synaptics_capabilities().cloned();
@@ -479,7 +559,7 @@ fn late_acknowledgements_never_publish_mode_or_stopped_success_and_survive_clean
     }
 }
 #[test]
-fn successful_but_late_query_reads_retain_actual_prefix_before_timeout() {
+fn successful_but_late_query_reads_keep_prefix_before_timeout() {
     for query in [0, 3, 10, 1, 16, 2, 9, 12, 8, 13, 15] {
         for index in 0..3 {
             let (mut c, h) = target(true, true);
@@ -545,7 +625,7 @@ fn advanced_mode_requires_its_own_real_command_and_never_publishes_late_ack_as_s
     assert!(c.needs_reset());
 }
 #[test]
-fn advanced_contacts_counts_and_unknown_records_retain_wire_order_without_pointer_fabrication() {
+fn advanced_contacts_counts_and_unknown_records_keep_wire_order_without_pointer_fabrication() {
     let (mut c, h) = advanced_target();
     c.initialize().unwrap();
     let first = new_packet(2000, 2500, 60, 5, 1);
@@ -654,8 +734,7 @@ fn image_target() -> (Controller<Model, Time>, Rc<RefCell<Hardware>>) {
     (c, h)
 }
 #[test]
-fn image_sensor_uses_source_count_policy_and_current_actual_count_without_legacy_touch_hysteresis()
-{
+fn image_sensor_uses_source_count_policy_and_current_count_without_legacy_touch_hysteresis() {
     let (mut c, h) = image_target();
     c.initialize().unwrap();
     assert!(c.synaptics_capabilities().unwrap().advanced_mode);
@@ -699,7 +778,7 @@ fn image_sensor_uses_source_count_policy_and_current_actual_count_without_legacy
     }
 }
 #[test]
-fn image_sensor_epoch_reset_refuses_old_absolute_format_and_requires_actual_activation_ack() {
+fn image_sensor_epoch_reset_refuses_old_absolute_format_and_requires_activation_ack() {
     let (mut c, h) = image_target();
     c.initialize().unwrap();
     emit(&h, Port::Mouse, &[0x84, 5, 0, 0xc0, 0, 0x20]);
@@ -870,7 +949,7 @@ fn pnp_target(
     (c, h)
 }
 #[test]
-fn actual_pnp_and_queried_board_select_coordinate_rules_without_replacing_raw_bounds() {
+fn pnp_and_queried_board_select_coordinate_rules_without_replacing_raw_bounds() {
     for (firmware, board, min, max) in [
         ("PNP: LEN0033", Some(3000), (1024, 2258), (5052, 4832)),
         ("PNP: LEN0042", Some(3000), (1232, 1156), (5710, 4696)),
@@ -927,7 +1006,7 @@ fn actual_pnp_and_queried_board_select_coordinate_rules_without_replacing_raw_bo
     }
 }
 #[test]
-fn pnp_rule_is_explicit_and_changed_actual_board_is_refused_before_mode_rearm() {
+fn pnp_rule_is_explicit_and_changed_board_is_refused_before_mode_rearm() {
     let (base, h) = target(true, true);
     assert!(matches!(
         Controller::new_synaptics_pnp(
@@ -1015,7 +1094,7 @@ fn wrapped(packet: [u8; 4]) -> [u8; 6] {
     [0x84, packet[0], packet[3], 0xc4, packet[1], packet[2]]
 }
 #[test]
-fn actual_child_reset_identity_negotiation_input_and_stop_remain_separate_from_parent() {
+fn child_reset_identity_negotiation_input_and_stop_remain_separate_from_parent() {
     for (wheel, explorer, protocol) in [
         (false, false, MouseProtocol::Standard),
         (true, false, MouseProtocol::IntelliMouse),
@@ -1141,7 +1220,7 @@ fn bound_child_blocks_raw_mutations_but_explicit_input_release_preserves_live_ro
     );
 }
 #[test]
-fn child_failures_retain_real_reply_or_late_effect_without_synthetic_ack_or_replay() {
+fn child_failures_keep_real_reply_or_late_effect_without_synthetic_ack_or_replay() {
     for phase in 0..4 {
         let (mut c, h) = child_target(true, true);
         c.initialize().unwrap();
@@ -1197,7 +1276,7 @@ fn child_failures_retain_real_reply_or_late_effect_without_synthetic_ack_or_repl
     }
 }
 #[test]
-fn child_resend_retries_only_explicitly_rejected_byte_and_uncertain_parent_mode_never_activates() {
+fn child_resend_retries_only_the_rejected_byte() {
     let (mut c, h) = child_target(true, true);
     c.initialize().unwrap();
     h.borrow_mut()
@@ -1233,6 +1312,10 @@ fn child_resend_retries_only_explicitly_rejected_byte_and_uncertain_parent_mode_
             .count(),
         1
     );
+}
+
+#[test]
+fn uncertain_parent_mode_never_activates_the_child() {
     let (mut c, h) = child_target(true, true);
     c.initialize().unwrap();
     h.borrow_mut().synaptics.as_mut().unwrap().late_mode_ack = true;
@@ -1308,7 +1391,7 @@ fn child_stop_failure_keeps_held_input_and_unknown_replacement_is_not_rearmed() 
     );
 }
 #[test]
-fn every_actual_child_reply_is_required_and_late_observations_survive_failure() {
+fn every_child_reply_is_required_and_late_observations_survive_failure() {
     for reply in 1..=27 {
         for late in [false, true] {
             let (mut c, h) = child_target(true, true);
@@ -1352,7 +1435,7 @@ fn every_actual_child_reply_is_required_and_late_observations_survive_failure() 
     }
 }
 #[test]
-fn child_get_id_without_ack_retains_actual_identity_and_does_not_invent_acknowledgement() {
+fn child_get_id_without_ack_keeps_identity_and_does_not_invent_acknowledgement() {
     for byte in [0, 3, 4] {
         let (mut c, h) = child_target(true, true);
         c.initialize().unwrap();
@@ -1420,7 +1503,7 @@ fn child_get_id_without_ack_retains_actual_identity_and_does_not_invent_acknowle
 }
 
 #[test]
-fn actual_consumed_child_id_is_distinct_from_later_queued_unsolicited_data() {
+fn consumed_child_id_is_distinct_from_later_queued_unsolicited_data() {
     for ackless in [false, true] {
         let (mut c, h) = child_target(true, true);
         c.initialize().unwrap();
@@ -1480,7 +1563,7 @@ fn actual_consumed_child_id_is_distinct_from_later_queued_unsolicited_data() {
 }
 
 #[test]
-fn genuine_child_ack_and_data_may_precede_the_later_parent_outer_ack() {
+fn child_ack_and_data_may_precede_the_later_parent_outer_ack() {
     for (wheel, explorer, protocol) in [
         (false, false, MouseProtocol::Standard),
         (true, false, MouseProtocol::IntelliMouse),
@@ -1502,7 +1585,7 @@ fn genuine_child_ack_and_data_may_precede_the_later_parent_outer_ack() {
     }
 }
 #[test]
-fn child_backpressure_and_malformed_packets_keep_actual_raw_and_explicit_release() {
+fn child_backpressure_keeps_raw_packets() {
     let (mut c, h) = child_target(false, false);
     c.initialize().unwrap();
     c.initialize_synaptics_mouse().unwrap();
@@ -1548,7 +1631,7 @@ fn child_backpressure_and_malformed_packets_keep_actual_raw_and_explicit_release
     );
 }
 #[test]
-fn bound_child_actual_extra_buttons_are_reported_and_retained_across_physical_packets() {
+fn bound_child_extra_buttons_are_reported_and_kept_across_physical_packets() {
     let (mut c, h) = child_target(true, true);
     {
         let mut hw = h.borrow_mut();
@@ -1584,7 +1667,7 @@ fn bound_child_actual_extra_buttons_are_reported_and_retained_across_physical_pa
     );
 }
 #[test]
-fn explorer_scroll_requires_actual_magic_acks_and_preserves_modes_buttons_and_restart() {
+fn explorer_scroll_requires_magic_acks() {
     let (mut c, h) = child_target(true, true);
     c.initialize().unwrap();
     c.initialize_synaptics_mouse().unwrap();
@@ -1857,7 +1940,7 @@ fn cleanup_acknowledges_relative_mode_and_child_stop_before_retiring_held_input(
     assert_eq!(c.synaptics_child_protocol(), None);
 }
 #[test]
-fn cleanup_late_mode_and_later_port_failure_preserve_actual_effects_and_held_state() {
+fn cleanup_failures_keep_held_state() {
     for late_mode in [false, true] {
         let (mut c, h) = ready_synaptics(true);
         emit(&h, Port::Mouse, &new_packet(2000, 2500, 50, 5, 1));
@@ -1947,7 +2030,7 @@ fn runtime_rates_use_source_threshold_preserve_other_modes_and_survive_clean_res
     );
 }
 #[test]
-fn runtime_rate_failures_retain_acknowledged_mode_and_never_replay_uncertain_commands() {
+fn runtime_rate_failures_keep_acknowledged_mode_and_never_replay_uncertain_commands() {
     for phase in 0..3 {
         let (mut c, h) = ready_synaptics(true);
         match phase {
@@ -1986,7 +2069,7 @@ fn runtime_rate_failures_retain_acknowledged_mode_and_never_replay_uncertain_com
 }
 
 #[test]
-fn forcepad_requires_actual_source_firmware_identifier_and_new_absolute_profile() {
+fn forcepad_requires_source_firmware_identifier_and_new_absolute_profile() {
     for firmware in [
         "SYN300D",
         "pnp: SYN300D",
@@ -2094,7 +2177,7 @@ fn forcepad_interleaved_raw_records_preserve_pressure_epoch_and_fault_release() 
     assert!(c.needs_reset());
 }
 #[test]
-fn actual_client_bytes_use_sliced_transport_without_fabricating_child_ack_or_identity() {
+fn client_bytes_use_sliced_transport_without_fabricating_child_ack_or_identity() {
     let (mut c, h) = passthrough_target();
     c.initialize().unwrap();
     for byte in 0..=255 {
@@ -2140,7 +2223,7 @@ fn actual_client_bytes_use_sliced_transport_without_fabricating_child_ack_or_ide
     assert!(c.is_ready());
 }
 #[test]
-fn genuine_wrapped_child_records_interleave_with_parent_replies_without_pointer_aliasing() {
+fn wrapped_child_records_interleave_with_parent_replies_without_pointer_aliasing() {
     let (mut c, h) = passthrough_target();
     c.initialize().unwrap();
     let record = [0x84, 0xfa, 0xbb, 0xc4, 0xcc, 0xdd];
@@ -2210,7 +2293,7 @@ fn client_format_changes_require_all_acks_and_preserve_uncertain_raw_record_form
     assert!(c.drain_synaptics_passthrough().is_empty());
 }
 #[test]
-fn failed_child_write_and_passthrough_backpressure_retain_real_effects_and_ownership() {
+fn passthrough_failures_keep_ownership() {
     let (mut c, h) = passthrough_target();
     c.initialize().unwrap();
     h.borrow_mut().synaptics.as_mut().unwrap().late_client_ack = true;
@@ -2251,7 +2334,7 @@ fn failed_child_write_and_passthrough_backpressure_retain_real_effects_and_owner
 
 #[test]
 #[ignore = "oracle: STELA_SYNAPTICS_CLEANUP_ORACLE"]
-fn unchanged_linux_cleanup_mode_matches_actual_quiesced_i8042_owner() {
+fn unchanged_linux_cleanup_mode_matches_quiesced_i8042_owner() {
     extern crate std;
     let records =
         std::fs::read_to_string(std::env::var("STELA_SYNAPTICS_CLEANUP_ORACLE").unwrap()).unwrap();
@@ -2306,7 +2389,7 @@ fn unchanged_linux_cleanup_mode_matches_actual_quiesced_i8042_owner() {
 
 #[test]
 #[ignore = "oracle: STELA_SYNAPTICS_BOARD_ORACLE"]
-fn unchanged_linux_board_coordinates_match_actual_pnp_queried_device() {
+fn unchanged_linux_board_coordinates_match_pnp_queried_device() {
     extern crate std;
     let records =
         std::fs::read_to_string(std::env::var("STELA_SYNAPTICS_BOARD_ORACLE").unwrap()).unwrap();
@@ -2346,7 +2429,7 @@ fn unchanged_linux_board_coordinates_match_actual_pnp_queried_device() {
 
 #[test]
 #[ignore = "oracle: STELA_SYNAPTICS_CHILD_ORACLE"]
-fn unchanged_linux_child_packets_and_oob_match_actual_bound_i8042_mouse() {
+fn unchanged_linux_child_packets_and_oob_match_bound_i8042_mouse() {
     extern crate std;
     let records =
         std::fs::read_to_string(std::env::var("STELA_SYNAPTICS_CHILD_ORACLE").unwrap()).unwrap();
@@ -2354,7 +2437,7 @@ fn unchanged_linux_child_packets_and_oob_match_actual_bound_i8042_mouse() {
 }
 #[test]
 #[ignore = "oracle: STELA_SYNAPTICS_EXPLORER_ORACLE"]
-fn unchanged_linux_explorer_scroll_matches_actual_acknowledged_child_mode() {
+fn unchanged_linux_explorer_scroll_matches_acknowledged_child_mode() {
     extern crate std;
     let records =
         std::fs::read_to_string(std::env::var("STELA_SYNAPTICS_EXPLORER_ORACLE").unwrap()).unwrap();
@@ -2454,7 +2537,7 @@ fn compare_linux_child_records(records: &str, enhanced: bool) {
 
 #[test]
 #[ignore = "oracle: STELA_SYNAPTICS_RATE_ORACLE"]
-fn unchanged_linux_rate_commands_match_actual_i8042_controls() {
+fn unchanged_linux_rate_commands_match_i8042_controls() {
     extern crate std;
     let records =
         std::fs::read_to_string(std::env::var("STELA_SYNAPTICS_RATE_ORACLE").unwrap()).unwrap();
@@ -2507,7 +2590,7 @@ fn unchanged_linux_rate_commands_match_actual_i8042_controls() {
 
 #[test]
 #[ignore = "oracle: STELA_SYNAPTICS_FORCEPAD_ORACLE"]
-fn unchanged_linux_forcepad_temporal_records_match_actual_i8042_reports() {
+fn unchanged_linux_forcepad_temporal_records_match_i8042_reports() {
     extern crate std;
     let records =
         std::fs::read_to_string(std::env::var("STELA_SYNAPTICS_FORCEPAD_ORACLE").unwrap()).unwrap();
@@ -2558,7 +2641,7 @@ fn unchanged_linux_forcepad_temporal_records_match_actual_i8042_reports() {
 
 #[test]
 #[ignore = "oracle: STELA_SYNAPTICS_PT_ORACLE"]
-fn unchanged_linux_passthrough_commands_and_fields_match_actual_i8042_transport() {
+fn unchanged_linux_passthrough_commands_and_fields_match_i8042_transport() {
     extern crate std;
     let records =
         std::fs::read_to_string(std::env::var("STELA_SYNAPTICS_PT_ORACLE").unwrap()).unwrap();
@@ -2625,7 +2708,7 @@ fn unchanged_linux_passthrough_commands_and_fields_match_actual_i8042_transport(
                         1
                     }
                 );
-                // Linux's callback view depends on its actual bound child state.
+                // Linux's callback view depends on its bound child state.
                 // This comparison selects that view without inventing native binding.
                 let bytes = if number(2) != 2 {
                     vec![received.first()]
@@ -2643,7 +2726,7 @@ fn unchanged_linux_passthrough_commands_and_fields_match_actual_i8042_transport(
 
 #[test]
 #[ignore = "oracle: STELA_SYNAPTICS_BUTTONS_ORACLE"]
-fn unchanged_linux_button_reports_match_actual_i8042_extended_updates() {
+fn unchanged_linux_button_reports_match_i8042_extended_updates() {
     extern crate std;
     let records =
         std::fs::read_to_string(std::env::var("STELA_SYNAPTICS_BUTTONS_ORACLE").unwrap()).unwrap();
@@ -2691,7 +2774,7 @@ fn unchanged_linux_button_reports_match_actual_i8042_extended_updates() {
 
 #[test]
 #[ignore = "oracle: STELA_SYNAPTICS_IMAGE_ORACLE"]
-fn unchanged_linux_image_count_policy_matches_actual_i8042_reports() {
+fn unchanged_linux_image_count_policy_matches_i8042_reports() {
     extern crate std;
     let records =
         std::fs::read_to_string(std::env::var("STELA_SYNAPTICS_IMAGE_ORACLE").unwrap()).unwrap();
@@ -2732,7 +2815,7 @@ fn unchanged_linux_image_count_policy_matches_actual_i8042_reports() {
 
 #[test]
 #[ignore = "oracle: STELA_SYNAPTICS_AGM_ORACLE"]
-fn unchanged_linux_agm_records_match_actual_advanced_mode_input() {
+fn unchanged_linux_agm_records_match_advanced_mode_input() {
     extern crate std;
     let records =
         std::fs::read_to_string(std::env::var("STELA_SYNAPTICS_AGM_ORACLE").unwrap()).unwrap();
@@ -2782,7 +2865,7 @@ fn unchanged_linux_agm_records_match_actual_advanced_mode_input() {
 
 #[test]
 #[ignore = "oracle: STELA_SYNAPTICS_ORACLE"]
-fn unchanged_linux_absolute_records_match_actual_i8042_input() {
+fn unchanged_linux_absolute_records_match_i8042_input() {
     extern crate std;
     let records =
         std::fs::read_to_string(std::env::var("STELA_SYNAPTICS_ORACLE").unwrap()).unwrap();

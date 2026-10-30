@@ -34,9 +34,10 @@
 //! placeholder, so the bundle records the gap and the driver's own stop
 //! ("voltage-states1 not found") remains the explicit failure, after the
 //! monitors and the kernel's earlier boot have run.
+use crate::Result;
 use crate::apple_device_tree::DeviceTree;
 use alloc::{format, string::String, vec::Vec};
-use anyhow::{Result, ensure};
+use stela_contracts::{refuse, require};
 use stela_soc_data::board;
 
 const PMGR: &str = "/arm-io/pmgr";
@@ -70,7 +71,7 @@ pub struct Table {
 fn cluster(domain: &str, chip_id: u32) -> Result<Option<Vec<u8>>> {
     // The original J314s tree has separate PCPU (table 5) and PCPU1
     // (table 13) records. The suffix identifies a domain, not a core count;
-    // each table retains its own identity and uses its core type's OPPs.
+    // each table keeps its own identity and uses its core type's OPPs.
     let (cluster_type, suffix) = if let Some(suffix) = domain.strip_prefix("ECPU") {
         (b'E', suffix)
     } else if let Some(suffix) = domain.strip_prefix("PCPU") {
@@ -78,11 +79,12 @@ fn cluster(domain: &str, chip_id: u32) -> Result<Option<Vec<u8>>> {
     } else if let Some(suffix) = domain.strip_prefix("MCPU") {
         (b'M', suffix)
     } else {
-        anyhow::bail!("CPU domain {domain} names no cluster type");
+        return Err(refuse!("CPU domain {domain} names no cluster type", domain).into());
     };
-    ensure!(
+    require!(
         suffix.bytes().all(|byte| byte.is_ascii_digit()),
-        "CPU domain {domain} has an invalid cluster suffix"
+        "CPU domain {domain} has an invalid cluster suffix",
+        domain
     );
     let Some(points) = board::operating_points(chip_id)
         .and_then(|clusters| clusters.into_iter().find(|(kind, _)| *kind == cluster_type))
@@ -90,10 +92,20 @@ fn cluster(domain: &str, chip_id: u32) -> Result<Option<Vec<u8>>> {
     else {
         return Ok(None);
     };
-    ensure!(!points.is_empty(), "{domain} has no operating points");
+    require!(
+        !points.is_empty(),
+        "{domain} has no operating points",
+        domain
+    );
     let mut value = Vec::with_capacity(points.len() * 8);
     for &mhz in points {
-        let period = u32::try_from(PERIOD_SCALE / (u64::from(mhz) * 1_000_000))?;
+        let period = u32::try_from(PERIOD_SCALE / (u64::from(mhz) * 1_000_000)).map_err(|_| {
+            refuse!(
+                "{domain} operating point of {mhz} MHz has no u32 period",
+                domain,
+                mhz
+            )
+        })?;
         value.extend_from_slice(&period.to_le_bytes());
         value.extend_from_slice(&0u32.to_le_bytes());
     }
@@ -106,9 +118,12 @@ pub fn publish(tree: &mut DeviceTree, chip_id: u32) -> Result<Vec<Table>> {
     let Some(domains) = tree.property(PMGR, PERF_DOMAINS).map(|p| p.value.clone()) else {
         return Ok(Vec::new());
     };
-    ensure!(
+    require!(
         domains.len().is_multiple_of(DOMAIN),
-        "{PMGR} {PERF_DOMAINS} is not a run of {DOMAIN}-byte domains"
+        "{PMGR} {PERF_DOMAINS} is not a run of {DOMAIN}-byte domains",
+        PMGR,
+        PERF_DOMAINS,
+        DOMAIN
     );
     let mut written = Vec::new();
     for entry in domains.as_chunks::<DOMAIN>().0 {
@@ -118,7 +133,13 @@ pub fn publish(tree: &mut DeviceTree, chip_id: u32) -> Result<Vec<Table>> {
         }
         let label = &entry[12..];
         let label = &label[..label.iter().position(|&b| b == 0).unwrap_or(label.len())];
-        let domain = String::from(core::str::from_utf8(label)?);
+        let domain = String::from(core::str::from_utf8(label).map_err(|_| {
+            refuse!(
+                "{PMGR} {PERF_DOMAINS} label is not UTF-8",
+                PMGR,
+                PERF_DOMAINS
+            )
+        })?);
         let (contents, value) = if entry[2] == 1 {
             match cluster(&domain, chip_id)? {
                 Some(value) => (Contents::OperatingPoints, Some(value)),

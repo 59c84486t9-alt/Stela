@@ -31,7 +31,7 @@ fn reciprocal_sqrt_table(scaled: u64) -> u64 {
         ((scaled & !1) + 1) * 2
     };
     // The source loop chooses the largest b with midpoint*b*b < numerator.
-    // Subtracting one before division retains that strict inequality exactly.
+    // Subtracting one before division keeps that strict inequality exactly.
     let bound = ((RECIPROCAL_SQRT_NUMERATOR - 1) / midpoint).isqrt();
     bound.div_ceil(2)
 }
@@ -141,7 +141,7 @@ fn reciprocal_exponent(format: Format, bits: u64) -> u64 {
 
 /// Evaluate one lane; callers own scalar merging, active lanes and sticky commit.
 /// Unsigned kinds always interpret low32 bits and ignore format/FPCR entirely.
-/// AH floating kinds suppress all exception effects and accept retained enables.
+/// AH floating kinds suppress all exception effects and accept kept enables.
 pub fn evaluate(
     kind: Kind,
     format: Format,

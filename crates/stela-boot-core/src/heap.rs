@@ -1,0 +1,1158 @@
+//! Boot heap: two-level segregated fit (TLSF). Every block starts with a
+//! boundary tag naming its size and the block before it, so deallocation
+//! coalesces both neighbours without a walk, and free blocks are kept in bins
+//! by size, 16 per power of two, whose bitmaps find the smallest fitting one
+//! in constant time.
+//!
+//! The system engine allocates and frees small blocks constantly. Blocks of up
+//! to 4 KiB with at most 16-byte alignment are therefore rounded up to a
+//! power-of-two size class and, once freed, kept on that class's LIFO list
+//! for the next allocation of the class instead of returning to the bins.
+//!
+//! Every PE on a core of its own allocates at once, so each core the engine
+//! runs on keeps a small cache of free blocks per class ([`Heap::tag_cpu`]),
+//! which it takes from and gives back to without the lock, moving them to
+//! and from the class lists [`BATCH`] at a time under it.
+use core::{
+    alloc::{GlobalAlloc, Layout},
+    cell::UnsafeCell,
+    marker::PhantomData,
+    ops::Range,
+    ptr,
+    sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, AtomicUsize, Ordering},
+};
+// Explicit, so the NVIDIA LUT fixture can compile this file by path.
+#[path = "heap/failure.rs"]
+mod failure;
+
+const PAGE_BYTES: usize = 4096;
+/// A block's boundary tag, at its start: the address of the block before it
+/// and its own size, a multiple of [`GRANULE`] whose low bits hold [`FREE`]
+/// and [`PREVIOUS_FREE`]. A payload follows it.
+#[repr(C)]
+struct Header {
+    previous: usize,
+    size: usize,
+}
+/// A free block's links in its bin, after its header.
+#[repr(C)]
+struct Links {
+    next: *mut Header,
+    previous: *mut Header,
+}
+/// Block sizes and payload addresses are multiples of this.
+const GRANULE: usize = 16;
+const HEADER_BYTES: usize = core::mem::size_of::<Header>();
+/// The smallest block: a header and its links. A remainder smaller than
+/// this stays in the allocation beside it.
+const MIN_BLOCK: usize = HEADER_BYTES + core::mem::size_of::<Links>();
+const FREE: usize = 1;
+const PREVIOUS_FREE: usize = 2;
+const FLAGS: usize = FREE | PREVIOUS_FREE;
+/// Bins per power of two.
+const SUB_BITS: u32 = 4;
+const SUBS: usize = 1 << SUB_BITS;
+/// Blocks smaller than this share the first level, a bin per granule.
+const LINEAR: usize = GRANULE << SUB_BITS;
+/// First levels: the linear one, then one per power of two from [`LINEAR`].
+const LEVELS: usize = (usize::BITS - LINEAR.trailing_zeros() + 1) as usize;
+
+/// The bin of a free block of `size` bytes.
+fn bin(size: usize) -> (usize, usize) {
+    if size < LINEAR {
+        return (0, size / GRANULE);
+    }
+    let top = usize::BITS - 1 - size.leading_zeros();
+    (
+        (top + 1 - LINEAR.trailing_zeros()) as usize,
+        (size >> (top - SUB_BITS)) & (SUBS - 1),
+    )
+}
+
+/// `size` rounded up to the next bin boundary, so that every block of its
+/// bin holds it.
+fn bin_round(size: usize) -> Option<usize> {
+    if size < LINEAR {
+        return Some(size);
+    }
+    let step = (1 << (usize::BITS - 1 - size.leading_zeros() - SUB_BITS)) - 1;
+    size.checked_add(step).map(|size| size & !step)
+}
+
+/// The size of `block`.
+///
+/// # Safety
+/// `block` is a block header of the heap, read with its lock held.
+unsafe fn size(block: *mut Header) -> usize {
+    // SAFETY: the caller's live header.
+    unsafe { (*block).size & !FLAGS }
+}
+
+/// A free `block`'s links.
+///
+/// # Safety
+/// `block` is a block of at least [`MIN_BLOCK`] bytes.
+unsafe fn links(block: *mut Header) -> *mut Links {
+    // SAFETY: the links lie inside the caller's block.
+    unsafe { block.cast::<u8>().add(HEADER_BYTES).cast() }
+}
+
+/// The free blocks of the bin whose first block is `head`.
+///
+/// # Safety
+/// The lock is held while the iterator is used.
+unsafe fn bin_blocks(head: *mut Header) -> impl Iterator<Item = *mut Header> {
+    core::iter::successors((!head.is_null()).then_some(head), |&block| {
+        // SAFETY: a binned free block, read with the lock held.
+        let next = unsafe { (*links(block)).next };
+        (!next.is_null()).then_some(next)
+    })
+}
+/// A freed size-class block, linked through its first word.
+struct Small {
+    next: *mut Small,
+}
+const SMALLEST: usize = 16;
+const CLASSES: usize = 9;
+const SMALL_ALIGNMENT: usize = 16;
+/// Cores with a cache of their own; later ones take the lock every time.
+const CPUS: usize = 64;
+/// Free blocks a core keeps per class, and moves to or from the class list
+/// at once.
+const CACHED: usize = 64;
+const BATCH: usize = 32;
+/// What IA32_TSC_AUX holds, for RDTSCP to read: `TAG` and the core's cache
+/// index.
+const TAG: u32 = 0x5a7e_0000;
+
+/// One core's free blocks by class.
+struct Cache {
+    blocks: [[*mut Small; CACHED]; CLASSES],
+    counts: [usize; CLASSES],
+}
+
+impl Cache {
+    const EMPTY: Self = Self {
+        blocks: [[ptr::null_mut(); CACHED]; CLASSES],
+        counts: [0; CLASSES],
+    };
+}
+/// Size buckets of the free list's live allocations: from 4 KiB, each a
+/// power of two, the last holding everything from 128 MiB.
+pub const LARGE_BUCKETS: usize = 16;
+
+/// The [`LARGE_BUCKETS`] bucket of a free-list allocation of `bytes`.
+fn large_bucket(bytes: usize) -> usize {
+    ((usize::BITS - 1 - bytes.max(1).leading_zeros()) as usize)
+        .saturating_sub(12)
+        .min(LARGE_BUCKETS - 1)
+}
+
+/// The size class of `layout`, or `None` for the free list.
+fn class(layout: Layout) -> Option<usize> {
+    let bytes = layout.size().max(SMALLEST).next_power_of_two();
+    (layout.align() <= SMALL_ALIGNMENT && bytes <= SMALLEST << (CLASSES - 1))
+        .then(|| (bytes / SMALLEST).trailing_zeros() as usize)
+}
+struct State {
+    /// The heap's extent.
+    start: usize,
+    end: usize,
+    /// Nonempty levels, each level's nonempty bins, and the bins' free
+    /// blocks.
+    levels: u64,
+    bins: [u16; LEVELS],
+    heads: [[*mut Header; SUBS]; LEVELS],
+    /// Free blocks in the bins.
+    extents: usize,
+    small: [*mut Small; CLASSES],
+    ready: bool,
+    total: usize,
+    /// Bytes allocated and not freed, size-class blocks by their class.
+    live: usize,
+    /// Bytes carved from the bins and not released: live blocks and the
+    /// size-class blocks kept for reuse.
+    carved: usize,
+    peak: usize,
+    /// Allocations the bins served.
+    carves: u64,
+    /// Live allocations the bins served: count and bytes by [`large_bucket`].
+    large: [(u64, usize); LARGE_BUCKETS],
+}
+
+impl State {
+    /// Link free `block` into its bin.
+    ///
+    /// # Safety
+    /// The lock is held and `block` is a free block in no bin.
+    unsafe fn insert(&mut self, block: *mut Header) {
+        // SAFETY: the caller's free block, which holds its links.
+        let (level, sub) = bin(unsafe { size(block) });
+        let head = self.heads[level][sub];
+        // SAFETY: as above; `head`, when not null, is a binned free block.
+        unsafe {
+            links(block).write(Links {
+                next: head,
+                previous: ptr::null_mut(),
+            });
+            if !head.is_null() {
+                (*links(head)).previous = block;
+            }
+        }
+        self.heads[level][sub] = block;
+        self.bins[level] |= 1 << sub;
+        self.levels |= 1 << level;
+        self.extents += 1;
+    }
+
+    /// Unlink free `block` from its bin.
+    ///
+    /// # Safety
+    /// The lock is held and `block` is in its bin.
+    unsafe fn remove(&mut self, block: *mut Header) {
+        // SAFETY: the caller's binned free block and its binned neighbours.
+        unsafe {
+            let (level, sub) = bin(size(block));
+            let Links { next, previous } = links(block).read();
+            if !next.is_null() {
+                (*links(next)).previous = previous;
+            }
+            if previous.is_null() {
+                self.heads[level][sub] = next;
+                if next.is_null() {
+                    self.bins[level] &= !(1 << sub);
+                    if self.bins[level] == 0 {
+                        self.levels &= !(1 << level);
+                    }
+                }
+            } else {
+                (*links(previous)).next = next;
+            }
+        }
+        self.extents -= 1;
+    }
+
+    /// Tell the block after `block`, if any, where `block` starts and
+    /// whether it is free.
+    ///
+    /// # Safety
+    /// The lock is held and `block`'s header is current.
+    unsafe fn tell_following(&mut self, block: *mut Header) {
+        // SAFETY: the caller's block; the one after it, inside the heap, is
+        // a block whose header this updates.
+        unsafe {
+            let following = block as usize + size(block);
+            if following < self.end {
+                let following = following as *mut Header;
+                let free = if (*block).size & FREE != 0 {
+                    PREVIOUS_FREE
+                } else {
+                    0
+                };
+                (*following).previous = block as usize;
+                (*following).size = (*following).size & !PREVIOUS_FREE | free;
+            }
+        }
+    }
+
+    /// A free block `fits` accepts: the first of the smallest bin all of
+    /// whose blocks hold `need` bytes, else one of `need`'s own bin.
+    ///
+    /// # Safety
+    /// The lock is held.
+    unsafe fn find(&self, need: usize, fits: impl Fn(*mut Header) -> bool) -> *mut Header {
+        if let Some((level, sub)) = bin_round(need).map(bin)
+            && level < LEVELS
+        {
+            let subs = u32::from(self.bins[level]) & (u32::MAX << sub);
+            let found = if subs != 0 {
+                Some((level, subs))
+            } else {
+                let above = u64::MAX.checked_shl(level as u32 + 1).unwrap_or(0);
+                let levels = self.levels & above;
+                (levels != 0).then(|| {
+                    let level = levels.trailing_zeros() as usize;
+                    (level, u32::from(self.bins[level]))
+                })
+            };
+            if let Some((level, subs)) = found {
+                let block = self.heads[level][subs.trailing_zeros() as usize];
+                if fits(block) {
+                    return block;
+                }
+            }
+        }
+        // Rounding passed over the blocks of `need`'s own bin that hold it.
+        let (level, sub) = bin(need);
+        if level >= LEVELS {
+            return ptr::null_mut();
+        }
+        // SAFETY: the caller's lock.
+        unsafe { bin_blocks(self.heads[level][sub]) }
+            .find(|&block| fits(block))
+            .unwrap_or(ptr::null_mut())
+    }
+
+    fn count_large(&mut self, bytes: usize, allocated: bool) {
+        let (count, total) = &mut self.large[large_bucket(bytes)];
+        if allocated {
+            *count += 1;
+            *total += bytes;
+        } else {
+            *count -= 1;
+            *total -= bytes;
+        }
+    }
+}
+
+/// How full the heap is, in bytes.
+#[derive(Clone, Copy, Debug)]
+pub struct Usage {
+    pub total: usize,
+    pub live: usize,
+    pub carved: usize,
+    pub peak: usize,
+    /// The largest free block: the most one allocation can get.
+    pub largest: usize,
+    /// Free blocks in the bins.
+    pub extents: usize,
+    /// Allocations the bins served.
+    pub carves: u64,
+    /// Live allocations the bins served, as count and bytes by power
+    /// of two from 4 KiB ([`LARGE_BUCKETS`]); the rest of `live` is
+    /// size-class blocks.
+    pub large: [(u64, usize); LARGE_BUCKETS],
+}
+pub struct Heap {
+    held: AtomicBool,
+    failure_reported: AtomicBool,
+    /// Where the first failed allocation is reported; it must not allocate.
+    failure_sink: fn(core::fmt::Arguments<'_>),
+    state: UnsafeCell<State>,
+    caches: [UnsafeCell<Cache>; CPUS],
+    /// Each core's bytes allocated from its cache less those freed to it,
+    /// which [`State::live`] does not count; written by that core alone.
+    cached: [AtomicIsize; CPUS],
+    /// Each core's bytes allocated less those it freed, by every route:
+    /// what its own work holds, which other cores' allocations leave
+    /// alone; written by that core alone.
+    own: [AtomicIsize; CPUS],
+    /// [`Self::own`]'s size-class blocks by class, from each core's tagging.
+    own_classes: [[AtomicIsize; CLASSES]; CPUS],
+    /// Cores tagged so far, and whether any is.
+    tagged: AtomicUsize,
+    any_tagged: AtomicBool,
+    /// `State::live` and `State::total` as the lock last left them, for
+    /// [`Heap::low`] to read without taking it.
+    live: AtomicUsize,
+    total: AtomicUsize,
+    waits: AtomicU64,
+}
+// SAFETY: all list/header mutations use the real acquire/release exclusion.
+// UEFI callers mask local interrupts before acquiring the lock. Critical
+// sections cannot migrate/block; NMI and fault handlers never reenter the heap.
+unsafe impl Sync for Heap {}
+impl Default for Heap {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Heap {
+    /// Report the first failed allocation to `sink`, which must neither
+    /// allocate nor wait (the mount's serial port).
+    pub const fn reporting_failures(self, sink: fn(core::fmt::Arguments<'_>)) -> Self {
+        Self {
+            failure_sink: sink,
+            ..self
+        }
+    }
+
+    pub const fn new() -> Self {
+        Self {
+            held: AtomicBool::new(false),
+            failure_reported: AtomicBool::new(false),
+            failure_sink: |_| {},
+            caches: [const { UnsafeCell::new(Cache::EMPTY) }; CPUS],
+            cached: [const { AtomicIsize::new(0) }; CPUS],
+            own: [const { AtomicIsize::new(0) }; CPUS],
+            own_classes: [const { [const { AtomicIsize::new(0) }; CLASSES] }; CPUS],
+            tagged: AtomicUsize::new(0),
+            any_tagged: AtomicBool::new(false),
+            live: AtomicUsize::new(0),
+            total: AtomicUsize::new(0),
+            waits: AtomicU64::new(0),
+            state: UnsafeCell::new(State {
+                start: 0,
+                end: 0,
+                levels: 0,
+                bins: [0; LEVELS],
+                heads: [[ptr::null_mut(); SUBS]; LEVELS],
+                extents: 0,
+                small: [ptr::null_mut(); CLASSES],
+                ready: false,
+                total: 0,
+                live: 0,
+                carved: 0,
+                peak: 0,
+                carves: 0,
+                large: [(0, 0); LARGE_BUCKETS],
+            }),
+        }
+    }
+    fn lock(&self) -> Guard<'_> {
+        // Save before spinning: an ISR must not wait for its interrupted
+        // context to release this same lock. No state access crosses the asm.
+        #[cfg(target_os = "uefi")]
+        let flags: usize;
+        #[cfg(target_os = "uefi")]
+        // SAFETY: the UEFI allocator executes at CPL0 on this CPU; save IF
+        // before masking reentry, with no state borrow spanning restoration.
+        unsafe {
+            core::arch::asm!("pushfq", "pop {}", "cli", out(reg) flags);
+        }
+        if self
+            .held
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            self.waits.fetch_add(1, Ordering::Relaxed);
+            while self
+                .held
+                .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+                .is_err()
+            {
+                core::hint::spin_loop();
+            }
+        }
+        Guard {
+            heap: self,
+            #[cfg(target_os = "uefi")]
+            flags,
+            same_cpu: PhantomData,
+        }
+    }
+    fn try_lock(&self) -> Option<Guard<'_>> {
+        // Mask before the single attempt, as for the blocking owner. An ISR
+        // cannot safely wait on its interrupted context's allocator lock.
+        #[cfg(target_os = "uefi")]
+        let flags: usize;
+        #[cfg(target_os = "uefi")]
+        // SAFETY: the UEFI allocator executes at CPL0 on this CPU; save IF
+        // before masking reentry, with no state borrow spanning restoration.
+        unsafe {
+            core::arch::asm!("pushfq", "pop {}", "cli", out(reg) flags);
+        }
+        if self
+            .held
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            #[cfg(target_os = "uefi")]
+            // SAFETY: no guard/state access was acquired. Restore this CPU's
+            // exact incoming flags, including an already-clear interrupt flag.
+            unsafe {
+                core::arch::asm!("push {}", "popfq", in(reg) flags);
+            }
+            return None;
+        }
+        Some(Guard {
+            heap: self,
+            #[cfg(target_os = "uefi")]
+            flags,
+            same_cpu: PhantomData,
+        })
+    }
+    /// # Safety
+    /// The entire aligned extent is live RW+NX boot-private Normal-WB RAM, has
+    /// no aliases/references/other owners, and remains reserved for the boot.
+    /// Called exactly once before any Rust allocation with reentry excluded.
+    pub unsafe fn initialize(&self, base: *mut u8, bytes: usize) {
+        let _guard = self.lock();
+        // SAFETY: this live acquire/release guard excludes every metadata
+        // writer and masks local reentry until this state borrow ends.
+        let state = unsafe { &mut *self.state.get() };
+        assert!(!state.ready && !base.is_null());
+        let start = aligned(base as usize, GRANULE).expect("a heap below the address space's end");
+        let end = (base as usize + bytes) & !(GRANULE - 1);
+        assert!(end >= start + MIN_BLOCK);
+        let block = start as *mut Header;
+        // SAFETY: initialize's exclusive live extent holds this first block,
+        // aligned to a granule and at least the smallest block.
+        unsafe {
+            block.write(Header {
+                previous: 0,
+                size: (end - start) | FREE,
+            });
+        }
+        state.start = start;
+        state.end = end;
+        // SAFETY: the guard and the one free block just written.
+        unsafe { state.insert(block) };
+        state.ready = true;
+        state.total = end - start;
+    }
+
+    /// Attempt ordinary heap allocation without waiting for the heap lock.
+    /// Zero-sized requests, an uninitialized heap, contention and exhaustion
+    /// return NULL without changing heap bytes or accounting. Success uses the
+    /// ordinary size-class/alignment/header rules and exact-layout deallocation.
+    /// This makes one lock attempt; a successful free-list search is finite,
+    /// but is not promised to take constant time.
+    ///
+    /// # Safety
+    /// The caller preserves the initialized heap's RAM/mapping/owner
+    /// lifetime and exclusively owns a successful payload until its one matching
+    /// `GlobalAlloc::dealloc` on this same heap with this exact layout. NMI/fault
+    /// handlers do not reenter the heap. No physical/page/DMA permission follows.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "reserved nonblocking entry for the retained Linux GPU heap registration"
+        )
+    )]
+    pub unsafe fn try_allocate(&self, layout: Layout) -> *mut u8 {
+        if layout.size() == 0 {
+            return ptr::null_mut();
+        }
+        let Some(guard) = self.try_lock() else {
+            return ptr::null_mut();
+        };
+        // SAFETY: this guard exclusively protects the heap state. The
+        // shared body checks initialization before accessing backing storage.
+        let block = unsafe { allocate_locked(&mut *self.state.get(), layout) };
+        drop(guard);
+        block
+    }
+
+    /// Attempt allocation as in `try_allocate`, then zero the entire payload
+    /// before returning it. Zeroing owns only the successful payload and takes
+    /// place after releasing the metadata guard/restoring the incoming IRQ state.
+    ///
+    /// # Safety
+    /// The complete `try_allocate` ownership and exclusion contract applies.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "zeroed counterpart of the reserved Linux GPU heap entry"
+        )
+    )]
+    pub unsafe fn try_allocate_zeroed(&self, layout: Layout) -> *mut u8 {
+        // SAFETY: the caller keeps the same heap, mapping and exact layout.
+        let block = unsafe { self.try_allocate(layout) };
+        if !block.is_null() {
+            // SAFETY: successful allocation gives this full payload exclusively.
+            unsafe { block.write_bytes(0, layout.size()) };
+        }
+        block
+    }
+
+    /// Select whole, zeroed pages inside a CPU interval from this same heap.
+    /// No reservation or CPU-to-physical relationship is inferred here.
+    /// Invalid geometry and exhaustion change no free-list bytes/accounting.
+    /// Returned pointers use ordinary `GlobalAlloc::dealloc` and their original
+    /// layout; page alignment excludes the small-object size-class route.
+    ///
+    /// # Safety
+    /// The caller obeys the initialized heap's allocation/exclusion contract,
+    /// keeps its RAM/mapping/root epoch, and owns the returned payload
+    /// exclusively until exact-layout deallocation. `allowed` constrains payload
+    /// bytes only; the canonical allocation header remains private heap metadata.
+    pub unsafe fn alloc_pages_zeroed_in(&self, layout: Layout, allowed: Range<usize>) -> *mut u8 {
+        if layout.size() == 0
+            || !layout.size().is_multiple_of(PAGE_BYTES)
+            || layout.align() < PAGE_BYTES
+            || allowed
+                .end
+                .checked_sub(allowed.start)
+                .is_none_or(|bytes| bytes < layout.size())
+        {
+            return ptr::null_mut();
+        }
+        let guard = self.lock();
+        // SAFETY: acquire/release exclusion, as for ordinary allocation.
+        let state = unsafe { &mut *self.state.get() };
+        if !state.ready {
+            return ptr::null_mut();
+        }
+        // SAFETY: lock held; selection changes nothing until a complete fit.
+        let block = unsafe { carve_within(state, layout.size(), layout.align(), allowed) };
+        if !block.is_null() {
+            state.live += layout.size();
+            state.count_large(layout.size(), true);
+        }
+        // No metadata/state borrow survives zeroing or a possible IRQ restore.
+        drop(guard);
+        if !block.is_null() {
+            // SAFETY: the selected full payload is exclusively owned and live.
+            unsafe { block.write_bytes(0, layout.size()) };
+        }
+        block
+    }
+
+    /// Whether more than three quarters of the heap is allocated, as the
+    /// lock and each core's cache last left it.
+    pub fn low(&self) -> bool {
+        self.live() > self.total.load(Ordering::Relaxed) / 4 * 3
+    }
+
+    /// Bytes allocated and not freed: the class lists' and the caches'.
+    fn live(&self) -> usize {
+        self.live
+            .load(Ordering::Relaxed)
+            .saturating_add_signed(self.cached_live())
+    }
+
+    /// Bytes the caches allocated less those freed to them.
+    fn cached_live(&self) -> isize {
+        (0..self.tagged.load(Ordering::Relaxed).min(CPUS))
+            .map(|cpu| self.cached[cpu].load(Ordering::Relaxed))
+            .sum()
+    }
+
+    /// Give the calling core a cache of its own, which every later
+    /// allocation on it uses. Once per core, where it RDTSCP reads
+    /// IA32_TSC_AUX and no one else uses it.
+    ///
+    /// # Safety
+    /// Ring 0, on a core that runs no other code using IA32_TSC_AUX.
+    #[cfg(target_os = "uefi")]
+    pub unsafe fn tag_cpu(&self) {
+        // RDTSCP: CPUID 8000_0001h EDX bit 27.
+        let highest = core::arch::x86_64::__cpuid(0x8000_0000).eax;
+        if highest < 0x8000_0001 || core::arch::x86_64::__cpuid(0x8000_0001).edx & (1 << 27) == 0 {
+            return;
+        }
+        let cpu = self.tagged.fetch_add(1, Ordering::Relaxed);
+        if cpu >= CPUS {
+            return;
+        }
+        // SAFETY: as the caller guarantees.
+        unsafe { crate::msr::TSC_AUX.write(u64::from(TAG | cpu as u32)) };
+        self.any_tagged.store(true, Ordering::Release);
+    }
+
+    /// The calling core's cache, if it has one.
+    fn cpu(&self) -> Option<usize> {
+        if !self.any_tagged.load(Ordering::Relaxed) {
+            return None;
+        }
+        #[cfg(not(target_os = "uefi"))]
+        let aux = 0;
+        #[cfg(target_os = "uefi")]
+        let aux: u32;
+        // SAFETY: RDTSCP exists, as some core was tagged.
+        #[cfg(target_os = "uefi")]
+        unsafe {
+            core::arch::asm!("rdtscp", out("eax") _, out("edx") _, out("ecx") aux,
+                options(nomem, nostack, preserves_flags));
+        }
+        (aux & !0xffff == TAG)
+            .then_some((aux & 0xffff) as usize)
+            .filter(|&cpu| cpu < CPUS)
+    }
+
+    /// A block of `class` from core `cpu`'s cache, refilled under the lock
+    /// when empty; null when the heap has none.
+    ///
+    /// # Safety
+    /// On core `cpu`, with interrupts disabled.
+    unsafe fn take_cached(&self, cpu: usize, class: usize) -> *mut u8 {
+        // SAFETY: only this core reaches its cache, and nothing interrupts.
+        let cache = unsafe { &mut *self.caches[cpu].get() };
+        if cache.counts[class] == 0 {
+            let _guard = self.lock();
+            // SAFETY: the guard excludes all free-list writers, while
+            // CPU-local cache ownership is already exclusive to this core.
+            let state = unsafe { &mut *self.state.get() };
+            while cache.counts[class] < BATCH {
+                let head = state.small[class];
+                let block = if head.is_null() {
+                    // SAFETY: the initialized heap is exclusively guarded;
+                    // this class supplies its nonzero extent and alignment.
+                    unsafe { carve(state, SMALLEST << class, SMALL_ALIGNMENT) }
+                } else {
+                    // SAFETY: the guarded class head is a complete free Small
+                    // node previously published by matching deallocation.
+                    state.small[class] = unsafe { (*head).next };
+                    head.cast()
+                };
+                if block.is_null() {
+                    break;
+                }
+                cache.blocks[class][cache.counts[class]] = block.cast();
+                cache.counts[class] += 1;
+            }
+        }
+        if cache.counts[class] == 0 {
+            return ptr::null_mut();
+        }
+        cache.counts[class] -= 1;
+        self.count_cached(cpu, (SMALLEST << class) as isize);
+        cache.blocks[class][cache.counts[class]].cast()
+    }
+
+    /// Give `block` of `class` to core `cpu`'s cache, moving a batch to the
+    /// class list under the lock when full.
+    ///
+    /// # Safety
+    /// On core `cpu`, with interrupts disabled; `block` is a freed block of
+    /// `class`.
+    unsafe fn give_cached(&self, cpu: usize, class: usize, block: *mut u8) {
+        // SAFETY: only this core reaches its cache, and nothing interrupts.
+        let cache = unsafe { &mut *self.caches[cpu].get() };
+        if cache.counts[class] == CACHED {
+            let _guard = self.lock();
+            // SAFETY: the guard excludes all free-list writers, while
+            // CPU-local cache ownership is already exclusive to this core.
+            let state = unsafe { &mut *self.state.get() };
+            for _ in 0..BATCH {
+                cache.counts[class] -= 1;
+                let freed = cache.blocks[class][cache.counts[class]];
+                // SAFETY: a free block of this class that only the cache held.
+                unsafe {
+                    freed.write(Small {
+                        next: state.small[class],
+                    })
+                };
+                state.small[class] = freed;
+            }
+        }
+        cache.blocks[class][cache.counts[class]] = block.cast();
+        cache.counts[class] += 1;
+        self.count_cached(cpu, -((SMALLEST << class) as isize));
+    }
+
+    /// Add `bytes` to core `cpu`'s count, which only it writes.
+    fn count_cached(&self, cpu: usize, bytes: isize) {
+        let count = &self.cached[cpu];
+        count.store(count.load(Ordering::Relaxed) + bytes, Ordering::Relaxed);
+    }
+
+    /// Acquisitions of the heap's lock that found it held: with every PE
+    /// on a core of its own, the cores' allocations meet there.
+    pub fn waits(&self) -> u64 {
+        self.waits.load(Ordering::Relaxed)
+    }
+
+    /// The calling core's bytes allocated less those it freed, once it is
+    /// tagged.
+    pub fn own(&self) -> Option<isize> {
+        self.cpu().map(|cpu| self.own[cpu].load(Ordering::Relaxed))
+    }
+
+    /// Each tagged core's bytes allocated less those it freed: a block one
+    /// core allocates and another frees moves between their counts.
+    pub fn owned(&self) -> impl Iterator<Item = isize> + '_ {
+        let cores = self.tagged.load(Ordering::Relaxed).min(CPUS);
+        self.own[..cores]
+            .iter()
+            .map(|own| own.load(Ordering::Relaxed))
+    }
+
+    /// Add `bytes` to the calling core's own count, which only it writes.
+    fn count_own(&self, layout: Layout, allocated: bool) {
+        if let Some(cpu) = self.cpu() {
+            let class = class(layout);
+            let bytes = class.map_or(layout.size(), |class| SMALLEST << class) as isize;
+            let bytes = if allocated { bytes } else { -bytes };
+            let count = &self.own[cpu];
+            count.store(count.load(Ordering::Relaxed) + bytes, Ordering::Relaxed);
+            if let Some(class) = class {
+                let count = &self.own_classes[cpu][class];
+                count.store(count.load(Ordering::Relaxed) + bytes, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// Live size-class bytes by class (16 bytes doubling to 4 KiB), as the
+    /// tagged cores counted them: allocations before tagging are not in it.
+    pub fn class_live(&self) -> [isize; CLASSES] {
+        let cores = self.tagged.load(Ordering::Relaxed).min(CPUS);
+        core::array::from_fn(|class| {
+            self.own_classes[..cores]
+                .iter()
+                .map(|classes| classes[class].load(Ordering::Relaxed))
+                .sum()
+        })
+    }
+
+    /// The heap's usage, walking the free list for its largest extent.
+    pub fn usage(&self) -> Usage {
+        let _guard = self.lock();
+        // SAFETY: the guard excludes metadata writers throughout; no state
+        // reference escapes it.
+        let state = unsafe { &*self.state.get() };
+        self.usage_locked(state)
+    }
+
+    // The caller keeps the metadata guard; CPU cache counters remain
+    // relaxed estimates even while this free-list metadata is exclusively read.
+    fn usage_locked(&self, state: &State) -> Usage {
+        // The largest block is in the highest nonempty bin.
+        let largest = if state.levels == 0 {
+            0
+        } else {
+            let level = 63 - state.levels.leading_zeros() as usize;
+            let sub = 15 - state.bins[level].leading_zeros() as usize;
+            // SAFETY: the caller's guard.
+            unsafe { bin_blocks(state.heads[level][sub]) }
+                // SAFETY: binned free blocks, read with the guard held.
+                .map(|block| unsafe { size(block) })
+                .max()
+                .unwrap_or(0)
+        };
+        let live = state.live.saturating_add_signed(self.cached_live());
+        Usage {
+            total: state.total,
+            live,
+            carved: state.carved,
+            peak: state.peak,
+            largest,
+            extents: state.extents,
+            carves: state.carves,
+            large: state.large,
+        }
+    }
+}
+struct Guard<'a> {
+    heap: &'a Heap,
+    #[cfg(target_os = "uefi")]
+    flags: usize,
+    // A saved interrupt state belongs to the acquiring CPU, even though the
+    // underlying heap may be shared. Do not make this guard Send or Sync.
+    same_cpu: PhantomData<*mut ()>,
+}
+impl Drop for Guard<'_> {
+    fn drop(&mut self) {
+        // SAFETY: the lock is still held; no other borrow of the state lives.
+        let state = unsafe { &*self.heap.state.get() };
+        self.heap.live.store(state.live, Ordering::Relaxed);
+        self.heap.total.store(state.total, Ordering::Relaxed);
+        self.heap.held.store(false, Ordering::Release);
+        #[cfg(target_os = "uefi")]
+        // SAFETY: this CPU's saved flags; the guard cannot migrate and no
+        // lock/state access spans restoration. An incoming clear IF stays clear.
+        unsafe {
+            core::arch::asm!("push {}", "popfq", in(reg) self.flags);
+        }
+    }
+}
+/// Disable interrupts, returning RFLAGS before.
+fn interrupts_off() -> usize {
+    #[cfg(not(target_os = "uefi"))]
+    let flags = 0;
+    #[cfg(target_os = "uefi")]
+    let flags: usize;
+    // SAFETY: CPL0; changes only IF.
+    #[cfg(target_os = "uefi")]
+    unsafe {
+        core::arch::asm!("pushfq", "pop {}", "cli", out(reg) flags)
+    };
+    flags
+}
+
+/// Restore RFLAGS' interrupt flag as [`interrupts_off`] found it.
+fn restore_interrupts(flags: usize) {
+    // SAFETY: this core's flags from `interrupts_off`.
+    #[cfg(target_os = "uefi")]
+    unsafe {
+        core::arch::asm!("push {}", "popfq", in(reg) flags)
+    };
+    #[cfg(not(target_os = "uefi"))]
+    let _ = flags;
+}
+
+fn aligned(value: usize, alignment: usize) -> Option<usize> {
+    value
+        .checked_add(alignment - 1)
+        .map(|v| v & !(alignment - 1))
+}
+/// Ordinary and attempted allocation share the original locked algorithm.
+///
+/// # Safety
+/// The heap's guard exclusively owns `state`. Initialization is checked
+/// before backing access; successful allocations keep their original layout.
+unsafe fn allocate_locked(state: &mut State, layout: Layout) -> *mut u8 {
+    if !state.ready {
+        return ptr::null_mut();
+    }
+    let Some(class) = class(layout) else {
+        // SAFETY: this helper keeps the initialized state guard and
+        // GlobalAlloc's layout supplies the payload size and alignment.
+        let block = unsafe { carve(state, layout.size(), layout.align()) };
+        if !block.is_null() {
+            state.live += layout.size();
+            state.count_large(layout.size(), true);
+        }
+        return block;
+    };
+    let head = state.small[class];
+    let block = if head.is_null() {
+        // SAFETY: guarded initialized state and a validated nonzero class.
+        unsafe { carve(state, SMALLEST << class, SMALL_ALIGNMENT) }
+    } else {
+        // SAFETY: a block of this class that `dealloc` linked and
+        // nothing else owns.
+        state.small[class] = unsafe { (*head).next };
+        head.cast()
+    };
+    if !block.is_null() {
+        state.live += SMALLEST << class;
+    }
+    block
+}
+
+// SAFETY: callers follow the GlobalAlloc contract. The free-list split returns
+// a disjoint aligned extent, and its header records the original bytes until
+// the single matching deallocation.
+unsafe impl GlobalAlloc for Heap {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        if let Some(class) = class(layout)
+            && let Some(cpu) = self.cpu()
+        {
+            let flags = interrupts_off();
+            // SAFETY: on this core, with interrupts disabled.
+            let block = unsafe { self.take_cached(cpu, class) };
+            restore_interrupts(flags);
+            if !block.is_null() {
+                self.count_own(layout, true);
+            }
+            if block.is_null() {
+                failure::report(self, layout);
+            }
+            return block;
+        }
+        let block = {
+            let _guard = self.lock();
+            // SAFETY: the guard excludes all free-list writers, while
+            // CPU-local cache ownership is already exclusive to this core.
+            let state = unsafe { &mut *self.state.get() };
+            // SAFETY: the guard owns this state for the entire operation.
+            unsafe { allocate_locked(state, layout) }
+        };
+        if !block.is_null() {
+            self.count_own(layout, true);
+        }
+        if block.is_null() {
+            failure::report(self, layout);
+        }
+        block
+    }
+    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+        self.count_own(layout, false);
+        if let Some(class) = class(layout)
+            && let Some(cpu) = self.cpu()
+        {
+            let flags = interrupts_off();
+            // SAFETY: on this core, with interrupts disabled; the caller's
+            // block of this class, which it no longer accesses.
+            unsafe { self.give_cached(cpu, class, pointer) };
+            restore_interrupts(flags);
+            return;
+        }
+        let _guard = self.lock();
+        // SAFETY: this live acquire/release guard excludes every metadata
+        // writer and masks local reentry until this state borrow ends.
+        let state = unsafe { &mut *self.state.get() };
+        if let Some(class) = class(layout) {
+            state.live -= SMALLEST << class;
+            let block = pointer.cast::<Small>();
+            // SAFETY: the caller's block of this class, at least 16 bytes
+            // and 16-byte aligned, which it no longer accesses.
+            unsafe {
+                block.write(Small {
+                    next: state.small[class],
+                })
+            };
+            state.small[class] = block;
+        } else {
+            state.live -= layout.size();
+            state.count_large(layout.size(), false);
+            // SAFETY: GlobalAlloc requires this live allocation and
+            // layout; its last owner has ended all payload access, lock held.
+            unsafe { release(state, pointer) };
+        }
+    }
+}
+
+/// Where a payload of `payload` bytes aligned to `alignment` fits in free
+/// `block`, starting at or after `from` and ending by `limit`: its address,
+/// after a gap before its header that is empty or large enough to stay free.
+///
+/// # Safety
+/// The lock is held and `block` is a free block.
+unsafe fn fit(
+    block: *mut Header,
+    payload: usize,
+    alignment: usize,
+    from: usize,
+    limit: usize,
+) -> Option<usize> {
+    let base = block as usize;
+    // SAFETY: the caller's free block.
+    let end = (base + unsafe { size(block) }).min(limit);
+    let mut user = aligned(base.checked_add(HEADER_BYTES)?.max(from), alignment)?;
+    let gap = user - HEADER_BYTES - base;
+    if gap != 0 && gap < MIN_BLOCK {
+        user = aligned(user.checked_add(MIN_BLOCK - gap)?, alignment)?;
+    }
+    (user.checked_add(payload)? <= end).then_some(user)
+}
+
+/// Allocate the payload at `user` of `payload` bytes from free `block`,
+/// which is out of its bin: a gap before its header and a remainder after
+/// it that can hold a block become free blocks; a smaller remainder stays
+/// in the allocation.
+///
+/// # Safety
+/// The lock is held, `block` is a free block in no bin and `fit` placed
+/// `user` in it.
+unsafe fn take(state: &mut State, block: *mut Header, user: usize, payload: usize) -> *mut u8 {
+    let base = block as usize;
+    let head = user - HEADER_BYTES;
+    // SAFETY: the caller's free block, unbinned; every header written lies
+    // inside it, and each new block is at least the smallest one.
+    unsafe {
+        let end = base + size(block);
+        let (previous, previous_free) = if head > base {
+            (*block).size = (head - base) | FREE;
+            state.insert(block);
+            (base, PREVIOUS_FREE)
+        } else {
+            ((*block).previous, 0)
+        };
+        let mut used_end = user + payload;
+        if end - used_end < MIN_BLOCK {
+            used_end = end;
+        }
+        let used = head as *mut Header;
+        used.write(Header {
+            previous,
+            size: (used_end - head) | previous_free,
+        });
+        if used_end < end {
+            let rest = used_end as *mut Header;
+            rest.write(Header {
+                previous: head,
+                size: (end - used_end) | FREE,
+            });
+            state.tell_following(rest);
+            state.insert(rest);
+        } else {
+            state.tell_following(used);
+        }
+        state.carved += used_end - head;
+    }
+    state.peak = state.peak.max(state.carved);
+    user as *mut u8
+}
+
+/// `size` bytes aligned to `alignment` from the bins.
+///
+/// # Safety
+/// The heap's lock is held and `state` is initialized.
+unsafe fn carve(state: &mut State, size: usize, alignment: usize) -> *mut u8 {
+    let alignment = alignment.max(GRANULE);
+    let Some(payload) = aligned(size.max(1), GRANULE) else {
+        return ptr::null_mut();
+    };
+    // A larger alignment may need a gap before the header that can hold a
+    // block of its own.
+    let extra = if alignment > GRANULE {
+        alignment + MIN_BLOCK
+    } else {
+        0
+    };
+    let Some(need) = payload
+        .checked_add(HEADER_BYTES)
+        .and_then(|need| need.checked_add(extra))
+    else {
+        return ptr::null_mut();
+    };
+    state.carves += 1;
+    // SAFETY: binned free blocks, with the caller's guard held.
+    let fits = |block| unsafe { fit(block, payload, alignment, 0, usize::MAX) };
+    // SAFETY: the caller's guard.
+    let block = unsafe { state.find(need, |block| fits(block).is_some()) };
+    let Some(user) = (!block.is_null()).then(|| fits(block)).flatten() else {
+        return ptr::null_mut();
+    };
+    // SAFETY: the guard; `block` is binned and `fit` placed `user` in it.
+    unsafe {
+        state.remove(block);
+        take(state, block, user, payload)
+    }
+}
+
+/// Page selection inside a CPU interval: the lowest payload address that
+/// fits, over every free block. Selection changes nothing until it fits.
+///
+/// # Safety
+/// Heap lock held; nonzero page-sized payload and at least page alignment.
+unsafe fn carve_within(
+    state: &mut State,
+    size: usize,
+    alignment: usize,
+    allowed: Range<usize>,
+) -> *mut u8 {
+    let chosen = state
+        .heads
+        .iter()
+        .flatten()
+        // SAFETY: the caller's guard.
+        .flat_map(|&head| unsafe { bin_blocks(head) })
+        .filter_map(|block| {
+            // SAFETY: a binned free block, read with the guard held.
+            unsafe { fit(block, size, alignment, allowed.start, allowed.end) }
+                .map(|user| (user, block))
+        })
+        .min_by_key(|&(user, _)| user);
+    let Some((user, block)) = chosen else {
+        return ptr::null_mut();
+    };
+    // SAFETY: the guard; `block` is binned and `fit` placed `user` in it.
+    unsafe {
+        state.remove(block);
+        take(state, block, user, size)
+    }
+}
+
+/// Return the block of an allocation `carve` made to the bins, coalescing
+/// it with free neighbours.
+///
+/// # Safety
+/// The heap's lock is held, and `pointer` came from `carve` and is no longer
+/// accessed.
+unsafe fn release(state: &mut State, pointer: *mut u8) {
+    // SAFETY: the allocation's header precedes its payload; its neighbours'
+    // headers are current, and free ones are binned.
+    unsafe {
+        let mut block = pointer.sub(HEADER_BYTES).cast::<Header>();
+        let mut bytes = size(block);
+        state.carved -= bytes;
+        let following = block as usize + bytes;
+        if following < state.end && (*(following as *mut Header)).size & FREE != 0 {
+            let following = following as *mut Header;
+            state.remove(following);
+            bytes += size(following);
+        }
+        if (*block).size & PREVIOUS_FREE != 0 {
+            let previous = (*block).previous as *mut Header;
+            state.remove(previous);
+            bytes += size(previous);
+            block = previous;
+        }
+        // A free block's predecessor is never free: it would have merged.
+        (*block).size = bytes | FREE;
+        state.tell_following(block);
+        state.insert(block);
+    }
+}
+
+// Explicit for the same reason as `failure`.
+#[cfg(test)]
+#[path = "heap/tests.rs"]
+mod tests;

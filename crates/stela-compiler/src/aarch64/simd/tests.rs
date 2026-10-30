@@ -104,7 +104,7 @@ fn comparisons_distinguish_zero_operands_and_reserved_scalar_vector_sizes() {
 }
 
 #[test]
-fn actual_xcode_words_keep_vector_bank_and_address_units() {
+fn xcode_words_keep_vector_bank_and_address_units() {
     for (word, expected) in [
         (
             0xfd42f100,
@@ -236,7 +236,7 @@ fn all_byte_masks_and_widths_expand_without_accepting_other_movi_classes() {
         31, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 15, 14, 13, 12, 11, 10,
     ] {
         // A fixed-bit neighbor may be another admitted class (e.g. STP),
-        // but must never retain MOVI semantics.
+        // but must never keep MOVI semantics.
         assert!(!matches!(
             decode(0x6f00e400 ^ (1 << bit)),
             Some(Ok(Operand::MoveImmediate { .. }))

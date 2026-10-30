@@ -20,8 +20,7 @@ fn configured(firmware: u32) -> (Controller<Model, Time>, Rc<RefCell<Hardware>>)
 }
 
 #[test]
-fn default_attachment_admits_queried_child_without_predicted_presence_and_requeries_same_identity()
-{
+fn trackpoint_attaches_only_after_query() {
     for firmware in [0x050001, 0x060001, 0x064001, 0x0f0001] {
         for present in [false, true] {
             let (mut c, h) = target(firmware);
@@ -90,7 +89,7 @@ fn packet(prefix: u32, x: u8, y: u8, buttons: u8) -> [u8; 6] {
 }
 
 #[test]
-fn actual_integrated_profile_matches_presence_and_report_id_verification_precedes_mode_and_ready() {
+fn integrated_trackpoint_verifies_report_id_before_mode() {
     for firmware in [0x050001, 0x060001, 0x064001, 0x0f0001, 0x0f2002] {
         for product in [8, 9, 0x0d, 0x0e, 10, 0x74] {
             let (mut c, h) = target_point(firmware, product);
@@ -143,7 +142,7 @@ fn actual_integrated_profile_matches_presence_and_report_id_verification_precede
 }
 
 #[test]
-fn integrated_motion_and_touchpad_state_stay_distinct_through_interleaving_and_stop() {
+fn trackpoint_and_touchpad_state_stay_separate() {
     let (mut c, h) = configured(0x0f2002);
     let raw = packet(0x06000030, 255, 255, 5);
     emit(&h, Port::Mouse, &raw);
@@ -184,7 +183,7 @@ fn integrated_motion_and_touchpad_state_stay_distinct_through_interleaving_and_s
 }
 
 #[test]
-fn report_id_uses_only_source_two_byte_echo_and_retains_late_or_missing_actual_reply() {
+fn report_id_uses_only_source_two_byte_echo_and_keeps_late_or_missing_reply() {
     for byte in 0..=255 {
         let (mut c, h) = target_point(0x0f0001, 8);
         h.borrow_mut().elantech.as_mut().unwrap().readback = Some([0x10, 3, byte]);
@@ -274,7 +273,7 @@ fn report_id_late_write_and_changed_known_identity_never_replay_or_arm_reporting
 
 #[test]
 #[ignore = "oracle: STELA_ELANTECH_TRACKPOINT_ORACLE"]
-fn unchanged_linux_integrated_trackpoint_records_match_actual_native_profiles() {
+fn unchanged_linux_integrated_trackpoint_records_match_native_profiles() {
     extern crate std;
     let records =
         std::fs::read_to_string(std::env::var("STELA_ELANTECH_TRACKPOINT_ORACLE").unwrap())
@@ -360,7 +359,7 @@ fn unchanged_linux_integrated_trackpoint_records_match_actual_native_profiles() 
 }
 #[test]
 #[ignore = "oracle: STELA_ELANTECH_TRACKPOINT_CONTROLS_ORACLE"]
-fn unchanged_linux_integrated_report_id_configuration_matches_actual_native_transactions() {
+fn unchanged_linux_integrated_report_id_configuration_matches_native_transactions() {
     extern crate std;
     let records = std::fs::read_to_string(
         std::env::var("STELA_ELANTECH_TRACKPOINT_CONTROLS_ORACLE").unwrap(),

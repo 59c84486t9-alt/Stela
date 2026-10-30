@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) 2024 Intel Corporation
-//! Shared Intel secure-download engine over the actual PCIe HCI transport.
+//! Shared Intel secure-download engine over the PCIe HCI transport.
 //! Original RFH, completion words, padding and every packet remain in the owned
 //! transcript on success and failure; no USB identity or completion is invented.
 use super::{Kind, Packet, Platform, State, Transport};
@@ -28,7 +28,7 @@ impl core::error::Error for Error {}
 /// Initialize an already-started, exclusively owned real PCIe transport. The
 /// controller's secure ROM authenticates the signed image; a Catalog hash alone
 /// does not prove that authentication. Native MMIO/MSI-X attachment and deep
-/// power/radio/profile qualification remain separate from this report.
+/// power/radio/profile validation remain separate from this report.
 pub fn initialize<P: Platform>(
     transport: &mut Transport<P>,
     provider: &dyn Provider,
@@ -60,7 +60,7 @@ impl<P: Platform> Native<'_, P> {
     fn finish<T>(&mut self, result: Result<T, intel::Error>) -> Result<T, intel::Error> {
         // send/poll/D0 can queue complete packets before a later fault. Closing
         // does not erase them. Transfer the final batch on every exit and apply
-        // the same limit before publishing success; retain an earlier cause.
+        // the same limit before publishing success; keep an earlier cause.
         let pending: Vec<_> = self.transport.received.drain(..).collect();
         self.retain(&pending);
         if result.is_ok() && self.received_bytes > TRANSCRIPT_BYTES {
@@ -94,7 +94,7 @@ impl<P: Platform> intel::CommandIo for Native<'_, P> {
     fn events(&mut self) -> Result<Vec<Vec<u8>>, intel::Error> {
         let packets = self.transport.poll()?;
         self.retain(&packets);
-        // Retain the complete final batch too. The underlying transport caps a
+        // Keep the complete final batch too. The underlying transport caps a
         // batch at128x4KiB, so a refused transcript remains finitely bounded.
         if self.received_bytes > TRANSCRIPT_BYTES {
             return Err(intel::Error::Protocol("bounded PCIe firmware transcript"));
@@ -104,7 +104,7 @@ impl<P: Platform> intel::CommandIo for Native<'_, P> {
             .filter_map(|packet| {
                 if packet.diagnostic {
                     // Original vendor debug event97 is a source-defined side
-                    // channel; its full packet stays in the retained transcript.
+                    // channel; its full packet stays in the transcript.
                     None
                 } else if packet.kind == Kind::Event {
                     Some(Ok(packet.bytes))
@@ -133,7 +133,7 @@ impl<P: Platform> intel::CommandIo for Native<'_, P> {
         Ok(())
     }
     fn intel_mode(&mut self, _bootloader: bool) -> Result<(), intel::Error> {
-        // PCIe never changes framing: every real command retains its four-byte
+        // PCIe never changes framing: every real command keeps its four-byte
         // Intel packet type. This only validates the live transport owner.
         self.transport.active().map_err(Into::into)
     }

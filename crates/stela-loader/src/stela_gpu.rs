@@ -5,9 +5,10 @@
 //! interrupt on the AIC input past every one the tree's AIC clients use, so
 //! neither collides with anything the board places; the runtime mounts the
 //! gate where this answers.
+use crate::Result;
 use crate::apple_device_tree::{DeviceTree, Node};
 use alloc::vec::Vec;
-use anyhow::{Context, Result, ensure};
+use stela_contracts::{refuse, require};
 
 const ARM_IO: &str = "/arm-io";
 const NAME: &str = "stela-gpu";
@@ -27,13 +28,23 @@ pub struct Placement {
 
 /// Adds the gate's node for a window of `bytes`, a power of two.
 pub fn place_gpu_gate(tree: &mut DeviceTree, bytes: u64) -> Result<Placement> {
-    ensure!(bytes.is_power_of_two(), "the gate window is a power of two");
-    let arm_io = tree.node(ARM_IO).context("DeviceTree has no /arm-io")?;
-    ensure!(arm_io.child(NAME).is_none(), "/arm-io already has a {NAME}");
+    require!(bytes.is_power_of_two(), "the gate window is a power of two");
+    let arm_io = tree
+        .node(ARM_IO)
+        .ok_or(refuse!("DeviceTree has no /arm-io"))?;
+    require!(
+        arm_io.child(NAME).is_none(),
+        "/arm-io already has a {NAME}",
+        NAME
+    );
     for cells in ["#address-cells", "#size-cells"] {
-        ensure!(word(arm_io, cells) == Some(2), "/arm-io {cells} is not 2");
+        require!(
+            word(arm_io, cells) == Some(2),
+            "/arm-io {cells} is not 2",
+            cells
+        );
     }
-    let ranges = quads(arm_io, "ranges", 3).context("/arm-io has no ranges")?;
+    let ranges = quads(arm_io, "ranges", 3).ok_or(refuse!("/arm-io has no ranges"))?;
     let used: Vec<(u64, u64)> = arm_io
         .children
         .iter()
@@ -47,18 +58,18 @@ pub fn place_gpu_gate(tree: &mut DeviceTree, bytes: u64) -> Result<Placement> {
             gap(range[0], range[2], bytes, &used)
                 .map(|offset| (offset, range[1] + (offset - range[0])))
         })
-        .context("/arm-io has no gap for the StelaGPU gate")?;
+        .ok_or(refuse!("/arm-io has no gap for the StelaGPU gate"))?;
     let aic = tree
         .property(AIC, PHANDLE)
         .and_then(|phandle| phandle.as_u32())
-        .context("/arm-io/aic has no phandle")?;
+        .ok_or(refuse!("/arm-io/aic has no phandle"))?;
     let mut used = Vec::new();
     interrupts_of(&tree.root, aic, &mut used);
     let irq = used
         .into_iter()
         .max()
         .map_or(Some(0), |last| last.checked_add(1))
-        .context("the AIC has no input past its clients'")?;
+        .ok_or(refuse!("the AIC has no input past its clients'"))?;
     let mut node = Node::named(NAME)?;
     node.set_property("compatible", COMPATIBLE.to_vec())?;
     node.set_property(INTERRUPT_PARENT, aic.to_le_bytes().to_vec())?;
@@ -66,7 +77,7 @@ pub fn place_gpu_gate(tree: &mut DeviceTree, bytes: u64) -> Result<Placement> {
     node.set_property("device_type", b"stela-gpu\0".to_vec())?;
     node.set_property("reg", [offset, bytes].map(u64::to_le_bytes).concat())?;
     tree.node_mut(ARM_IO)
-        .context("DeviceTree has no /arm-io")?
+        .ok_or(refuse!("DeviceTree has no /arm-io"))?
         .children
         .push(node);
     Ok(Placement { physical, irq })

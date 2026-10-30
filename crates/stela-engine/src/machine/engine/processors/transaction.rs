@@ -1,6 +1,6 @@
-//! A consuming synchronous borrow of the actual scheduler/native owners.
+//! A consuming synchronous borrow of the scheduler/native owners.
 //! Controller preflight and its final infallible commit surround this access;
-//! no post-write pending queue substitutes for actual CPU settlement.
+//! no post-write pending queue substitutes for CPU settlement.
 use super::super::{
     DebugMode, MemoryChecks, Mirrors, NativeSystem, PredictionContext, Regime, Statistics, Watch,
     clock, pointer::PointerService,
@@ -10,7 +10,7 @@ use super::{
     Processors, Wait, check_owners, pause_cpu,
 };
 
-/// One synchronous device-write access to the actual scheduler and native
+/// One synchronous device-write access to the scheduler and native
 /// owners. Only the engine constructs it. Applying one complete batch consumes
 /// the access; dropping it after another owner's refusal changes nothing.
 /// A device must preflight every native/controller owner first, then apply the
@@ -31,7 +31,7 @@ pub struct ProcessorWrite<'a> {
     pub(super) forwarded: Option<&'a mut alloc::vec::Vec<ProcessorChange>>,
 }
 
-/// Successful settlement keeps the exclusive actual-owner borrow through the
+/// Successful settlement keeps the exclusive owner borrow through the
 /// caller's infallible native/controller commit. It cannot apply another batch.
 #[must_use = "hold the actual-owner lease until the controller has committed"]
 pub struct SettledProcessorWrite<'a> {
@@ -44,7 +44,7 @@ impl SettledProcessorWrite<'_> {
     }
 }
 
-/// Exact owners changed by translations_changed/sync_regime. Every reference
+/// Owners changed by translations_changed/sync_regime. Every reference
 /// belongs to this Machine/native worker, never a global or a copied context.
 pub(super) struct NativeProcessorState<'a> {
     pub host: &'a mut dyn Host,
@@ -158,7 +158,7 @@ impl NativeProcessorState<'_> {
     }
 
     /// The existing translations_changed/sync_regime effects, through the
-    /// actual borrowed native owners. No guest cache maintenance is invented.
+    /// borrowed native owners. No guest cache maintenance is invented.
     fn settle(
         &mut self,
         cpu: &mut Cpu,
@@ -181,7 +181,7 @@ impl NativeProcessorState<'_> {
         let amu_timed = cpu.amu.as_ref().map(|monitors| monitors.timed());
         if pmu_timed.is_some() || amu_timed.is_some() {
             let now = if pmu_timed == Some(true) || amu_timed == Some(true) {
-                clock.read(self.host.counter())
+                clock.read(|| self.host.counter())
             } else {
                 0
             };
@@ -262,7 +262,7 @@ impl<'a> ProcessorWrite<'a> {
                 .iter()
                 .any(|change| change.pe == pe && change.paused)
         };
-        // Borrow the actual local monitors before any clock/controller effect.
+        // Borrow the local monitors before any clock/controller effect.
         // Dropping a later refused preparation preserves every reservation.
         let mut clears = alloc::vec::Vec::new();
         if paused(self.current) {
@@ -292,9 +292,9 @@ impl<'a> ProcessorWrite<'a> {
         if changes.is_empty() {
             return Ok(SettledProcessorWrite { owners: self });
         }
-        let host = self.native.host.counter();
-        self.clock.end_slice(host, self.native.statistics.blocks);
-        let now = self.clock.read(host);
+        self.clock
+            .end_slice(|| self.native.host.counter(), self.native.statistics.blocks);
+        let now = self.clock.read(|| self.native.host.counter());
         for change in changes {
             match &mut self.peers[change.pe] {
                 Peer::Running => pause_cpu(self.cpu, self.waiting, now, change.paused),

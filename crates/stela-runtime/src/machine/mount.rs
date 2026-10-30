@@ -3,87 +3,31 @@
 //! lifecycle. The host's inputs (console, disks, cables, scanout, entropy and
 //! board firmware files) come from the caller, so `stela.efi` and
 //! `stela-dev boot check` mount the same machine.
-use super::apple::AicInput;
-use super::apple::AppleDevices;
-use super::apple::AscLines;
-use super::apple::ConsoleSink;
-use super::apple::Range;
-use super::apple::RtcEpoch;
-use super::apple::Scanout;
-use super::apple::SepEntropy;
-use super::apple::SepProvisioning;
-use super::apple::UsbCables;
-use super::apple::UsbId;
-use super::apple::memory_resources::t6000_cold;
-use super::apple::memory_resources::t8112;
-use super::apple::sep_state;
-use super::apple::typec;
-use alloc::{boxed::Box, format, string::String, vec, vec::Vec};
+use crate::Result;
+use alloc::{boxed::Box, string::String, vec, vec::Vec};
 use core::fmt;
+use stela_contracts::refusal::Within;
+use stela_contracts::refuse;
 use stela_drivers::block::BlockDevice;
 use stela_engine::machine::ctrr;
+use stela_soc::machine::AicInput;
+use stela_soc::machine::AppleDevices;
+use stela_soc::machine::AscLines;
+use stela_soc::machine::ConsoleSink;
+use stela_soc::machine::DcpextDma;
+use stela_soc::machine::DcpextNub;
+use stela_soc::machine::Range;
+use stela_soc::machine::RtcEpoch;
+use stela_soc::machine::Scanout;
+use stela_soc::machine::SepEntropy;
+use stela_soc::machine::SepProvisioning;
+use stela_soc::machine::UsbCables;
+use stela_soc::machine::UsbId;
+use stela_soc::machine::memory_resources::MemoryResources;
+use stela_soc::machine::sep_state;
+use stela_soc::machine::typec;
 use stela_soc_data::board::{Board, PmgrBankRefusal};
 use stela_soc_data::pmu::WallClock;
-
-/// Already constructed native owners, consumed by the board mount. Descriptor
-/// equality is checked before any host input or bus placement is consumed.
-/// This is placement, not canonical execution or native PMP admission.
-#[allow(
-    clippy::large_enum_variant,
-    reason = "cold placement resources are moved once and consumed together before guest entry"
-)]
-pub enum MemoryResources {
-    /// Source-checked cold resources whose lifecycle is sampled from the actual
-    /// placed PMGR before the native memory owners are constructed.
-    T8112Cold(super::apple::t8112_cold::Plan),
-    /// Direct MCC/AMCC/PTD frontend; keeps its full source graph and canonical
-    /// RAM separate from the T8112 cache/quota protocol.
-    T6000Cold(t6000_cold::Plan),
-    T8112 {
-        memory: t8112::Prepared,
-        cache: t8112::cache::EmptyResource,
-    },
-}
-
-impl MemoryResources {
-    fn validate(
-        &self,
-        controller: Option<&stela_soc_data::board::MemoryController>,
-        descriptor: Option<&stela_soc_data::board::MemoryCache>,
-        direct: Option<&stela_soc_data::board::DirectMemoryCache>,
-    ) -> Result<(), String> {
-        if direct.is_some() && !matches!(self, Self::T6000Cold(_)) {
-            return Err("cache/quota native memory cannot adopt a direct MCC descriptor".into());
-        }
-        match self {
-            Self::T8112Cold(plan) => plan.validate(controller, descriptor),
-            Self::T6000Cold(plan) => {
-                if descriptor.is_some() {
-                    return Err("direct native memory cannot adopt a cache/quota descriptor".into());
-                }
-                plan.validate(controller, direct)
-            }
-            Self::T8112 { memory, cache } => {
-                if descriptor != Some(memory.descriptor()) || controller != Some(cache.source()) {
-                    return Err(
-                        "native memory resources differ from the live board descriptors".into(),
-                    );
-                }
-                if !alloc::sync::Arc::ptr_eq(memory.registered_ram(), cache.registered_ram()) {
-                    return Err(
-                        "native memory resources require the same actual registered RAM".into(),
-                    );
-                }
-                if cache.binding().0.checked_add(cache.binding().1)
-                    != Some(memory.descriptor().channels.0)
-                {
-                    return Err("native cache and DCS physical ownership is not contiguous".into());
-                }
-                Ok(())
-            }
-        }
-    }
-}
 
 /// The regions iBoot leaves in the memory controller's lock groups:
 /// CTRR-A over the bundle's read-only run, and CTRR-C and CTRR-D over the
@@ -105,7 +49,7 @@ pub fn memory_locks(
     programmed
 }
 
-/// Report unsupported PMGR qualifications once, before a device is placed.
+/// Report unsupported PMGR validations once, before a device is placed.
 /// A diagnostic supplies no successful MMIO or lifecycle response.
 pub fn pmgr_qualifications(refusals: &[PmgrBankRefusal], log: &mut dyn FnMut(fmt::Arguments<'_>)) {
     for (index, refusal) in refusals.iter().enumerate() {
@@ -119,7 +63,7 @@ pub fn pmgr_qualifications(refusals: &[PmgrBankRefusal], log: &mut dyn FnMut(fmt
     }
 }
 
-/// Paths qualified by immutable source identity and bundle admission. Keeping
+/// Paths checked by immutable source identity and bundle admission. Keeping
 /// CLPC unavailable is a documented degradation, not a successful controller.
 pub fn clpc_absence(hidden: &[String], log: &mut dyn FnMut(fmt::Arguments<'_>)) {
     for (index, path) in hidden.iter().enumerate() {
@@ -172,12 +116,12 @@ pub fn devices<C: ConsoleSink + 'static>(
     console: C,
     inputs: Inputs<'_>,
     log: &mut dyn FnMut(fmt::Arguments<'_>),
-) -> Result<(AppleDevices, Option<UsbId>), String> {
+) -> Result<(AppleDevices, Option<UsbId>)> {
     devices_with_memory(board, console, inputs, None, log)
 }
 
-/// Mount the ordinary board around actual native memory owners. Callers must
-/// retain their registered RAM and close all native/host writers before guest
+/// Mount the ordinary board around native memory owners. Callers must
+/// keep their registered RAM and close all native/host writers before guest
 /// entry. No legacy memory constructor is used when native owners are supplied.
 pub fn devices_with_memory<C: ConsoleSink + 'static>(
     board: &Board,
@@ -185,9 +129,11 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
     inputs: Inputs<'_>,
     memory: Option<MemoryResources>,
     log: &mut dyn FnMut(fmt::Arguments<'_>),
-) -> Result<(AppleDevices, Option<UsbId>), String> {
+) -> Result<(AppleDevices, Option<UsbId>)> {
     if board.direct_memory_cache.is_some() && memory.is_none() {
-        return Err("direct MCC/AMCC/PTD requires its actual qualified native memory owner".into());
+        return Err(refuse!(
+            "direct MCC/AMCC/PTD requires its actual qualified native memory owner"
+        ));
     }
     if let Some(memory) = memory.as_ref() {
         match memory {
@@ -219,8 +165,9 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
         firmware,
         build,
     } = inputs;
-    let build =
-        build.ok_or("the board's coprocessors need the boot bundle's supported macOS build")?;
+    let build = build.ok_or(refuse!(
+        "the board's coprocessors need the boot bundle's supported macOS build"
+    ))?;
     let place = |device: stela_soc_data::board::Device| {
         (
             Range {
@@ -237,10 +184,10 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
     let mut devices = AppleDevices::for_boot_processor(boot);
     devices
         .add_uart(console, &[uart.0], Some(uart.1))
-        .map_err(|error| format!("UART placement: {error:?}"))?;
+        .map_err(|error| refuse!("UART placement: {error}", ?error))?;
     devices
         .add_watchdog_with_side(wdt.0, board.watchdog_side.as_ref(), Some(wdt.1), now)
-        .map_err(|error| format!("watchdog placement: {error:?}"))?;
+        .map_err(|error| refuse!("watchdog placement: {error}", ?error))?;
     devices.add_aic_for_processors(
         aic.physical,
         aic.inputs,
@@ -265,11 +212,11 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
     }
     match (board.ans.as_ref(), backing) {
         (Some(ans), Some(backing)) => devices.add_ans(ans, backing, build)?,
-        (Some(_), None) => return Err("a visible ANS2 requires --storage SERIAL:GUID".into()),
+        (Some(_), None) => return Err(refuse!("a visible ANS2 requires --storage SERIAL:GUID")),
         (None, Some(_)) => {
-            return Err(
-                "--storage was supplied but this DeviceTree exposes no modeled ANS2".into(),
-            );
+            return Err(refuse!(
+                "--storage was supplied but this DeviceTree exposes no modeled ANS2"
+            ));
         }
         (None, None) => (),
     }
@@ -283,7 +230,7 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
         // A newly created Stela PMIC starts with its own oscillator origin
         // and no pending native fault or off-to-wake events. These are explicit
         // cold resource inputs, not Apple persistent/reset-state measurements.
-        // Retained PMIC resources must instead supply their actual history.
+        // PMIC resources must instead supply their history.
         let history = spmi
             .pmus
             .iter()
@@ -305,11 +252,11 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
     for component in &board.coresight {
         devices
             .add_coresight_lock(component.physical)
-            .map_err(|error| format!("CoreSight lock placement: {error:?}"))?;
+            .map_err(|error| refuse!("CoreSight lock placement: {error}", ?error))?;
         if let Some(physical) = component.pc_sampler() {
             devices
                 .add_coresight_sampler(component.cpu, physical)
-                .map_err(|error| format!("UTTDBG sampler placement: {error:?}"))?;
+                .map_err(|error| refuse!("UTTDBG sampler placement: {error}", ?error))?;
         }
     }
     for block in &board.lockdown {
@@ -320,7 +267,7 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
         let rvbar = block.cpu.zip(reset);
         devices
             .add_lockdown(block.name, block.control, range, rvbar)
-            .map_err(|error| format!("{} placement: {error:?}", block.name))?;
+            .map_err(|error| refuse!("{name} placement: {error}", name = block.name, ?error))?;
     }
     if let Some(entry) = reset {
         for block in &board.processor_registers {
@@ -340,13 +287,13 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
                     },
                     entry,
                 )
-                .map_err(|error| format!("PE startup register placement: {error:?}"))?;
+                .map_err(|error| refuse!("PE startup register placement: {error}", ?error))?;
         }
     }
     for block in &board.counters {
         devices
             .add_core_counters(block.cpu, block.physical, block.layout)
-            .map_err(|error| format!("sampler counter placement: {error:?}"))?;
+            .map_err(|error| refuse!("sampler counter placement: {error}", ?error))?;
     }
     let mpidrs: Vec<u64> = board.cpus.processors.iter().map(|pe| pe.mpidr).collect();
     devices.add_fast_ipi(&mpidrs);
@@ -359,7 +306,7 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
     for phy in &board.typec_phys {
         devices
             .add_atc_phy(phy)
-            .map_err(|error| format!("ATC PHY placement: {error:?}"))?;
+            .map_err(|error| refuse!("ATC PHY placement: {error}", ?error))?;
     }
     let mut darts = Vec::new();
     for dart in &board.darts {
@@ -380,29 +327,31 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
                 Some(irq),
                 dart.apf,
             )
-            .map_err(|error| format!("DART placement: {error}"))?;
+            .within(|| refuse!("DART placement"))?;
         if let Some((physical, bytes)) = dart.smmu {
             devices
                 .add_dart_smmu(placed[0], Range { physical, bytes })
-                .map_err(|error| format!("DART SMMU placement: {error:?}"))?;
+                .map_err(|error| refuse!("DART SMMU placement: {error}", ?error))?;
         }
         darts.push(placed);
     }
     let native_dart = |group: usize, instance: usize| {
         let mounted = darts
             .get(group)
-            .ok_or("native DMA route names an unmounted DART group")?;
+            .ok_or(refuse!("native DMA route names an unmounted DART group"))?;
         let declared = board
             .darts
             .get(group)
-            .ok_or("native DMA route has no declared DART group")?;
+            .ok_or(refuse!("native DMA route has no declared DART group"))?;
         if mounted.len() != declared.instances.len() {
-            return Err("native DMA mounted DART group differs from its complete declaration");
+            return Err(refuse!(
+                "native DMA mounted DART group differs from its complete declaration"
+            ));
         }
         mounted
             .get(instance)
             .copied()
-            .ok_or("native DMA route names an unmounted DART instance")
+            .ok_or(refuse!("native DMA route names an unmounted DART instance"))
     };
     // The PMGR's power states precede the display, whose views reach into
     // its windows.
@@ -419,7 +368,7 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
             blocks.len()
         ));
     }
-    // The display's PTD update view must borrow this actual publication bank,
+    // The display's PTD update view must borrow this publication bank,
     // before a broad display container can claim any overlapping bytes.
     if let Some(memory) = memory {
         match memory {
@@ -454,30 +403,34 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
                 route.stream as usize,
             )?;
         }
-        let scanout = scanout.ok_or("visible external DCP requires one actual scanout")?;
+        let scanout = scanout.ok_or(refuse!("visible external DCP requires one actual scanout"))?;
         let range = |(physical, bytes): (u64, u64)| Range { physical, bytes };
         devices.add_dcpext(
-            range(dcp.wrapper),
-            dcp.interrupts,
-            dcp.quiesced,
-            dcp.role,
-            dcp.identity,
+            DcpextNub {
+                wrapper: range(dcp.wrapper),
+                interrupts: dcp.interrupts,
+                quiesced: dcp.quiesced,
+                role: dcp.role,
+                identity: dcp.identity,
+            },
             scanout,
-            (native_dart(dcp.iommu, dcp.instance)?, dcp.stream as usize),
-            dcp.window,
-            match (
-                dcp.surface,
-                dcp.surface_instance,
-                dcp.surface_routes.first(),
-            ) {
-                (Some((iommu, stream)), Some(instance), Some(primary))
-                    if (primary.iommu, primary.instance, primary.stream)
-                        == (iommu, instance, stream) =>
-                {
-                    Some((native_dart(iommu, instance)?, stream as usize))
-                }
-                (None, None, None) => None,
-                _ => return Err("DCP surface DMA owner metadata is incomplete".into()),
+            DcpextDma {
+                link: (native_dart(dcp.iommu, dcp.instance)?, dcp.stream as usize),
+                window: dcp.window,
+                surface: match (
+                    dcp.surface,
+                    dcp.surface_instance,
+                    dcp.surface_routes.first(),
+                ) {
+                    (Some((iommu, stream)), Some(instance), Some(primary))
+                        if (primary.iommu, primary.instance, primary.stream)
+                            == (iommu, instance, stream) =>
+                    {
+                        Some((native_dart(iommu, instance)?, stream as usize))
+                    }
+                    (None, None, None) => None,
+                    _ => return Err(refuse!("DCP surface DMA owner metadata is incomplete")),
+                },
             },
             build,
         )?;
@@ -490,7 +443,9 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
         for group in
             core::iter::once(dcp.iommu).chain(dcp.surface_routes.iter().map(|route| route.iommu))
         {
-            let instances = darts.get(group).ok_or("display DART group is missing")?;
+            let instances = darts
+                .get(group)
+                .ok_or(refuse!("display DART group is missing"))?;
             for instance in 0..instances.len() {
                 let owner = native_dart(group, instance)?;
                 if !display_darts.contains(&owner) {
@@ -501,20 +456,24 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
         devices.add_display_with_darts(&regions, dcp.role, &display_darts)?;
     }
     if let Some(sep) = board.sep {
-        let group = darts.get(sep.iommu).ok_or("SEP DART group is missing")?;
+        let group = darts
+            .get(sep.iommu)
+            .ok_or(refuse!("SEP DART group is missing"))?;
         let [dart] = group.as_slice() else {
-            return Err("SEP DMA owner requires explicit multiple-TRAD selection".into());
+            return Err(refuse!(
+                "SEP DMA owner requires explicit multiple-TRAD selection"
+            ));
         };
         if sep.instance != 0 {
-            return Err("SEP selected TRAD is outside its sole-owner group".into());
+            return Err(refuse!("SEP selected TRAD is outside its sole-owner group"));
         }
         let ranges = sep
             .ranges
             .map(|(physical, bytes)| Range { physical, bytes });
         let lines = AscLines::from_interrupts(sep.irqs.map(|irq| AicInput::new(0, irq as u16)));
-        let ecid = sep
-            .ecid
-            .ok_or("SEP needs /chosen unique-chip-id (the machine ECID); none in the tree")?;
+        let ecid = sep.ecid.ok_or(refuse!(
+            "SEP needs /chosen unique-chip-id (the machine ECID); none in the tree"
+        ))?;
         let state = match sep_state {
             Some(location) => {
                 log(format_args!("SEP state on the machine-state partition\n"));
@@ -550,7 +509,7 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
         // bus master's contract (`stela_soc_data::board::Iommu`).
         let group = darts
             .get(controller.iommu)
-            .ok_or("USB DART group is missing")?;
+            .ok_or(refuse!("USB DART group is missing"))?;
         for (instance, _) in group.iter().enumerate() {
             devices.validate_native_dart(
                 "USB declared bank",
@@ -639,7 +598,7 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
         let events = board
             .cluster_events
             .get(index)
-            .ok_or("CPU cluster has no DT event selection")?;
+            .ok_or(refuse!("CPU cluster has no DT event selection"))?;
         // The board validated each CPM word against the translated DT reg.
         devices.add_cpm_power(
             cluster.base + stela_soc_data::cpm::T8112_OFFSET,
@@ -718,7 +677,7 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
         devices.add_gfx(gfx, build)?;
     }
     // Finalize only after every native constructor, including SGX's final
-    // overlapping-window placement, has registered its actual banks.
+    // overlapping-window placement, has registered its banks.
     if let Some(states) = board.power_states.as_ref() {
         let retention = board
             .darts
@@ -736,10 +695,10 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
         .iter()
         .any(|dart| !dart.clock_gates.is_empty() || !dart.power_gates.is_empty())
     {
-        return Err("DART resource gates require a modeled PMGR".into());
+        return Err(refuse!("DART resource gates require a modeled PMGR"));
     }
     if restore && restore_usb.is_none() {
-        return Err("restore study requires a DT-placed USB device".into());
+        return Err(refuse!("restore study requires a DT-placed USB device"));
     }
     Ok((devices, restore_usb))
 }
@@ -748,44 +707,6 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
 mod tests {
     use super::*;
     use stela_soc_data::board::PmgrBank;
-
-    #[test]
-    fn native_memory_preflight_matches_live_descriptors_and_actual_ram() {
-        let (memory, cache) = t8112::cache::EmptyResource::service_test_components();
-        let descriptor = memory.descriptor().clone();
-        let controller = cache.source().clone();
-        let resources = MemoryResources::T8112 { memory, cache };
-        assert_eq!(
-            resources.validate(Some(&controller), Some(&descriptor), None),
-            Ok(())
-        );
-
-        let mut changed = descriptor.clone();
-        changed.ptd.interrupts[0] ^= 1;
-        assert!(
-            resources
-                .validate(Some(&controller), Some(&changed), None)
-                .is_err()
-        );
-        let mut changed = controller.clone();
-        changed.apertures[0] += 0x40000;
-        assert!(
-            resources
-                .validate(Some(&changed), Some(&descriptor), None)
-                .is_err()
-        );
-        assert!(resources.validate(None, Some(&descriptor), None).is_err());
-        assert!(resources.validate(Some(&controller), None, None).is_err());
-
-        let (memory, _) = t8112::cache::EmptyResource::service_test_components();
-        let (_, cache) = t8112::cache::EmptyResource::service_test_components();
-        assert!(
-            MemoryResources::T8112 { memory, cache }
-                .validate(Some(&controller), Some(&descriptor), None)
-                .unwrap_err()
-                .contains("same actual registered RAM")
-        );
-    }
 
     #[test]
     fn clpc_absence_reports_each_path_once() {

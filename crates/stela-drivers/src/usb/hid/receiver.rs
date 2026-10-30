@@ -1,14 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Linux HID++/receiver reference: Copyright (c) 2011 Logitech;
 // 2012-2013 Google; 2013-2014 Red Hat Inc. Exact identities: ../THIRD_PARTY.md.
-//! Descriptor-qualified c539 HID++ side-channel on the existing native HID owner.
+//! Descriptor-checked c539 HID++ side-channel on the existing native HID owner.
 //! Standard input remains canonical and has no invented paired-slot identity.
 use super::*;
 use alloc::rc::{Rc, Weak};
 use core::cell::RefCell;
 
-#[cfg(test)]
-mod native_tests;
 #[cfg(test)]
 mod tests;
 pub(in crate::usb) mod transport;
@@ -50,7 +48,7 @@ pub enum Error {
     EpochExhausted,
 }
 
-/// These acknowledgements describe actual USB status stages, not HID++ success.
+/// These acknowledgements describe USB status stages, not HID++ success.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Initialization {
     ArmInput,
@@ -256,7 +254,7 @@ impl Group {
         } else {
             route.view.error = Some(Error::UnsupportedNotification);
         }
-        // Link bit6 remains an observation, not online authority. Only a
+        // Link bit6 remains an observation, not online permission. Only a
         // correlated root reply can establish protocol reachability.
     }
     fn observe(&mut self, bytes: &[u8], now: u64) {

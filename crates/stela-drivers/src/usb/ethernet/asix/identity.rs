@@ -3,7 +3,7 @@
 // Legacy identities: Copyright (C) 2003-2006 David Hollis;
 // 2005 Phil Chang; 2006 James Painter; 2002-2003 TiVo Inc.
 //! Exact ASIX donor USB/interface candidates; chip/PHY readiness is separate.
-use crate::usb::xhci::Interface;
+use crate::usb::descriptor::Interface;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::usb::ethernet) enum Identity {
@@ -30,7 +30,7 @@ pub(in crate::usb::ethernet) const IDS: &[(u16, u16, Identity)] = &[
 
 // asix_devices.c USB_DEVICE entries: no additional donor class predicate.
 // Stela currently admits only vendor-class interfaces with a unique bulk pair;
-// compatible class configurations retain their own planner and preference.
+// compatible class configurations keep their own planner and preference.
 pub(in crate::usb::ethernet) const LEGACY_IDS: &[(u16, u16, Identity)] = &[
     (0x17ef, 0x7203, Identity::Ax88772 { eeprom_mac: true }),
     (0x0b95, 0x772b, Identity::Ax88772 { eeprom_mac: true }),

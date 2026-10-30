@@ -168,7 +168,7 @@ fn shared_literal_forms_use_the_checked_scalar_service_and_exact_source_map() {
 }
 
 #[test]
-fn shared_simd_literal_forms_retain_checked_asimd_requirements_and_source_maps() {
+fn shared_simd_literal_forms_keep_checked_asimd_requirements_and_source_maps() {
     use crate::context::memory::{SpAlignmentRequirement, flags, host_caps};
     for (form, bytes) in [(0x1c00_0000u32, 4u64), (0x5c00_0000, 8), (0x9c00_0000, 16)] {
         for destination in 0..32 {
@@ -296,7 +296,7 @@ fn checked_exclusive_widths_preserve_source_quantity_and_host_requirements() {
                 requirements.required_profile,
                 profile_requirements::NATIVE_ACCESS | profile_requirements::TAG_GRANULES
             );
-            // Actual emission must preserve the same consumed plan and source map.
+            // Emission must preserve the same consumed plan and source map.
             let native = plan.compile().unwrap();
             assert!(!native.native.x86_64_code.is_empty());
             assert_eq!(native.native.source_map.len(), 2);

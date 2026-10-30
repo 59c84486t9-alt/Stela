@@ -23,12 +23,12 @@ pub(super) const DIRECTORY: &str = "usr/standalone/firmware";
 
 /// The firmware images the bundle's board runs, or why its DeviceTree is
 /// not a board the engine models.
-pub(super) fn needed(bundle: &Bundle) -> Result<Vec<String>, String> {
+pub(super) fn needed(bundle: &Bundle) -> Result<Vec<String>> {
     let (_, tree) = bundle
         .files
         .iter()
         .find(|(name, _)| name == DEVICE_TREE_FILE)
-        .ok_or("the bundle has no DeviceTree")?;
+        .context("the bundle has no DeviceTree")?;
     Ok(board::board(tree)?.firmware_files())
 }
 

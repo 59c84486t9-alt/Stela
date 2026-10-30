@@ -8,16 +8,17 @@ use super::storage::NativeStorage;
 #[cfg(host_memory)]
 use super::{DIRECT_RAM_USER_END, host_page_size};
 use super::{MemoryRegion, SharedBindingError, backing, domain};
+use crate::Result;
+#[cfg(host_memory)]
+use crate::error::Io;
 use alloc::rc::Rc;
 use alloc::sync::Arc;
 #[cfg(not(host_memory))]
 use alloc::vec::Vec;
-#[cfg(host_memory)]
-use anyhow::{Context, bail};
-use anyhow::{Result, ensure};
 use core::marker::PhantomData;
 #[cfg(host_memory)]
 use std::os::fd::AsRawFd;
+use stela_contracts::{refuse, require};
 
 /// Runtime-published data with a permanently read-only, non-executable guest
 /// view and an unexposed writable alias. Publication and translated accesses
@@ -45,7 +46,7 @@ impl PublishedReadOnlyRegion {
     #[cfg(host_memory)]
     pub fn map(guest_base: u64, initial: &[u8]) -> Result<Self> {
         use std::io::Write;
-        ensure!(
+        require!(
             cfg!(all(
                 target_arch = "x86_64",
                 any(target_os = "linux", target_os = "macos")
@@ -53,12 +54,12 @@ impl PublishedReadOnlyRegion {
             "published guest mappings require an x86-64 Linux or macOS host"
         );
         let page = host_page_size()? as u64;
-        ensure!(
+        require!(
             !initial.is_empty() && initial.len() <= 65536,
             "published read-only region requires 1..65536 bytes"
         );
         let bytes = page_rounded(initial.len() as u64, page)?;
-        ensure!(
+        require!(
             guest_base.is_multiple_of(page)
                 && guest_base >= page
                 && guest_base
@@ -66,9 +67,13 @@ impl PublishedReadOnlyRegion {
                     .is_some_and(|end| end <= DIRECT_RAM_USER_END),
             "published region requires an aligned lower-user guest range"
         );
-        let mut backing = tempfile::tempfile()?;
-        backing.set_len(bytes)?;
-        backing.write_all(initial)?;
+        let mut backing = tempfile::tempfile().io("create a published region's backing file")?;
+        backing
+            .set_len(bytes)
+            .io("size a published region's backing file")?;
+        backing
+            .write_all(initial)
+            .io("write a published region's backing file")?;
         // Reserve the guest view first so the kernel-chosen alias cannot take
         // the requested guest address. Neither call may replace host memory.
         let requested = guest_base as usize as *mut libc::c_void;
@@ -87,12 +92,12 @@ impl PublishedReadOnlyRegion {
             )
         };
         if guest == libc::MAP_FAILED {
-            return Err(std::io::Error::last_os_error()).context("cannot map published guest view");
+            return Err(std::io::Error::last_os_error()).io("map published guest view");
         }
         if guest != requested {
             // SAFETY: release only this newly substituted allocation.
             unsafe { libc::munmap(guest, bytes as usize) };
-            bail!("published guest address {guest_base:#x} is unavailable");
+            return Err(refuse!("published guest address is unavailable", guest_base).into());
         }
         // SAFETY: newly owned read-only pages with a checked extent; accesses
         // are serialized and no guest references escape.
@@ -116,17 +121,17 @@ impl PublishedReadOnlyRegion {
         };
         if publisher == libc::MAP_FAILED {
             let error = std::io::Error::last_os_error();
-            // The retained guest-mapping guard rolls back this failed pair.
-            return Err(error).context("cannot map runtime publication alias");
+            // The kept guest-mapping guard rolls back this failed pair.
+            return Err(error).io("map runtime publication alias");
         }
         let Some(publisher_mapping) = core::ptr::NonNull::new(publisher) else {
             // SAFETY: release only this newly created null publisher alias;
-            // the retained guest guard rolls back the other mapping.
+            // the guest guard rolls back the other mapping.
             unsafe { libc::munmap(publisher, bytes as usize) };
-            bail!("null publication mapping is unsupported");
+            return Err(refuse!("null publication mapping is unsupported").into());
         };
         // SAFETY: the second complete mapping aliases this same private file at
-        // the same offset; both aliases and the file now share one retained owner.
+        // the same offset; both aliases and the file now share one owner.
         let storage = unsafe {
             NativeStorage::published_aliases(
                 guest_mapping,
@@ -154,7 +159,7 @@ impl PublishedReadOnlyRegion {
     #[cfg(not(host_memory))]
     pub fn map(guest_base: u64, initial: &[u8]) -> Result<Self> {
         let _ = (guest_base, initial);
-        anyhow::bail!("freestanding publication aliases are not mounted")
+        Err(refuse!("freestanding publication aliases are not mounted").into())
     }
 
     pub fn region(&self) -> &MemoryRegion {
@@ -162,7 +167,7 @@ impl PublishedReadOnlyRegion {
     }
 
     pub(super) fn extent(&self, offset: usize, bytes: usize) -> Result<()> {
-        ensure!(
+        require!(
             offset
                 .checked_add(bytes)
                 .is_some_and(|end| end <= self.region.virtual_bytes as usize),

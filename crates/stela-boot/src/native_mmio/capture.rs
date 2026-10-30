@@ -1,7 +1,9 @@
-//! Owned copies of the actual UEFI resource settings and final memory map.
+//! Owned copies of the UEFI resource settings and final memory map.
 //! No firmware protocol, borrowed descriptor buffer or allocator crosses EBS.
 use super::*;
+use crate::Result;
 use crate::{handoff::Region, tables::Frames};
+use stela_contracts::refuse;
 use stela_runtime::pc::acpi;
 use uefi::{
     boot,
@@ -24,7 +26,7 @@ pub(super) struct Memory {
     pub kind: u32,
     pub attributes: u64,
 }
-/// All fields are initialized by the actual loader. Kept in reserved
+/// All fields are initialized by the loader. Kept in reserved
 /// LOADER_DATA pages, mapped by the native physmap and never offered to guests.
 #[repr(C)]
 pub(crate) struct Wire {
@@ -92,7 +94,7 @@ impl Wire {
                     .any(|r| r.kind == 2 && r.start <= physical && end <= r.end)
             })
     }
-    /// Classification of this actual sealed final map; not an allocation grant.
+    /// Classification of this sealed final map; not an allocation grant.
     pub(crate) fn loader_ram(&self, physical: u64, bytes: u64) -> bool {
         physical.is_multiple_of(PAGE)
             && bytes != 0
@@ -102,6 +104,14 @@ impl Wire {
                     .iter()
                     .any(|r| r.kind == 2 && r.start <= physical && end <= r.end)
             })
+    }
+    /// Whether every map entry overlapping `first..end` is the firmware's:
+    /// reserved, runtime services, ACPI tables or NVS, MMIO or PAL code,
+    /// none of which the host allocates.
+    pub(super) fn firmware_owned(&self, first: u64, end: u64) -> bool {
+        self.memory().iter().all(|r| {
+            r.end <= first || end <= r.start || matches!(r.kind, 0 | 5 | 6 | 9 | 10 | 11 | 13)
+        })
     }
     pub(super) fn excludes_memory(&self, first: u64, end: u64) -> bool {
         self.memory().iter().all(|r| {
@@ -116,9 +126,9 @@ pub(crate) struct Prepared {
     region: Region,
 }
 impl Prepared {
-    /// Copy genuine root settings without disconnecting the firmware's bus
+    /// Copy root settings without disconnecting the firmware's bus
     /// driver. A missing/unsupported descriptor set leaves MMIO unavailable.
-    pub(crate) fn capture() -> Result<Self, &'static str> {
+    pub(crate) fn capture() -> Result<Self> {
         let bytes = size_of::<Wire>().next_multiple_of(PAGE as usize);
         let base = crate::firmware::pages(bytes / PAGE as usize)?;
         // SAFETY: fresh owned loader pages, zero is valid for every wire field.
@@ -127,16 +137,16 @@ impl Prepared {
             &mut *(base as *mut Wire)
         };
         let handles = boot::find_handles::<PciRootBridgeIo>()
-            .map_err(|_| "MMIO root bridge inventory unavailable")?;
+            .map_err(|_| refuse!("MMIO root bridge inventory unavailable"))?;
         if handles.is_empty() {
-            return Err("MMIO root bridge inventory empty");
+            return Err(refuse!("MMIO root bridge inventory empty"));
         }
         // Block firmware event callbacks while borrowing and copying these
         // immutable settings. This BSP performs no connect/disconnect or
         // protocol installation while borrowed; MP capture already joined.
         // Exclusive opening would stop the firmware PCI bus driver and can
         // destroy its children/assignments, so it is not an inventory read.
-        // SAFETY: actual application-level BSP entry, before EBS, with joined
+        // SAFETY: application-level BSP entry, before EBS, with joined
         // MP callbacks; the matching guard restores TPL on every exit path.
         let tpl = unsafe { boot::raise_tpl(boot::Tpl::NOTIFY) };
         for (bridge, handle) in handles.into_iter().enumerate() {
@@ -152,25 +162,26 @@ impl Prepared {
                     boot::OpenProtocolAttributes::GetProtocol,
                 )
             }
-            .map_err(|_| "MMIO root bridge settings unavailable")?;
+            .map_err(|_| refuse!("MMIO root bridge settings unavailable"))?;
             let descriptors = root
                 .configuration()
-                .map_err(|_| "MMIO root settings unavailable")?;
+                .map_err(|_| refuse!("MMIO root settings unavailable"))?;
             for descriptor in descriptors {
                 if wire.root_count == MAX_ROOTS {
-                    return Err("MMIO root inventory capacity exceeded");
+                    return Err(refuse!("MMIO root inventory capacity exceeded"));
                 }
                 let space = match descriptor.resource_range_type {
                     ResourceRangeType::Memory => 0,
                     ResourceRangeType::Io => 1,
                     ResourceRangeType::Bus => 2,
                     ResourceRangeType::Unknown(_) => {
-                        return Err("MMIO root resource type unsupported");
+                        return Err(refuse!("MMIO root resource type unsupported"));
                     }
                 };
                 wire.roots[wire.root_count] = RootWindow {
                     segment: root.segment_nr(),
-                    bridge: u32::try_from(bridge + 1).map_err(|_| "MMIO bridge count overflow")?,
+                    bridge: u32::try_from(bridge + 1)
+                        .map_err(|_| refuse!("MMIO bridge count overflow"))?,
                     flags: descriptor.general_flags,
                     specific: descriptor.type_specific_flags,
                     space,
@@ -184,18 +195,19 @@ impl Prepared {
             }
         }
         drop(tpl);
-        let rsdp = crate::storage::rsdp().ok_or("MMIO ACPI root unavailable")?;
-        // SAFETY: the actual UEFI configuration table points to retained readable
+        let rsdp = crate::storage::rsdp().ok_or(refuse!("MMIO ACPI root unavailable"))?;
+        // SAFETY: the UEFI configuration table points to kept readable
         // firmware tables before EBS. find validates RSDP/root/SDT checksums.
         for (signature, destination, length) in [
             (b"APIC", &mut wire.madt[..], &mut wire.madt_bytes),
             (b"MCFG", &mut wire.mcfg[..], &mut wire.mcfg_bytes),
             (b"FACP", &mut wire.fadt[..], &mut wire.fadt_bytes),
         ] {
+            // SAFETY: `rsdp` is the firmware's ACPI root, which the identity map covers after EBS.
             let source = unsafe { acpi::find(rsdp, signature) }
-                .map_err(|_| "MMIO ACPI inventory unavailable")?;
+                .map_err(|_| refuse!("MMIO ACPI inventory unavailable"))?;
             if source.len() > destination.len() {
-                return Err("MMIO ACPI table capacity exceeded");
+                return Err(refuse!("MMIO ACPI table capacity exceeded"));
             }
             destination[..source.len()].copy_from_slice(source);
             *length = source.len();
@@ -203,7 +215,7 @@ impl Prepared {
         // HPET is optional for other clocks. Absence, invalid checksum or
         // unsupported original length leaves the typed HPET factory unavailable;
         // no default address/capability is reconstructed.
-        // SAFETY: same actual pre-EBS readable firmware ACPI root as above.
+        // SAFETY: same pre-EBS readable firmware ACPI root as above.
         if let Ok(source) = unsafe { acpi::find(rsdp, b"HPET") }
             && source.len() == wire.hpet.len()
         {
@@ -222,52 +234,47 @@ impl Prepared {
     }
     /// Prepare one empty shared-window PT. No physical device mapping or cache
     /// policy is created here; the post-EBS owner publishes individual leaves.
-    pub(crate) fn aperture(
-        &self,
-        frames: &mut dyn Frames,
-        root: u64,
-        cores: usize,
-    ) -> Result<(), &'static str> {
+    pub(crate) fn aperture(&self, frames: &mut dyn Frames, root: u64, cores: usize) -> Result<()> {
         // SAFETY: this private pre-EBS capture owns these exact loader pages.
         let wire = unsafe { &mut *(self.region.physical as *mut Wire) };
         let base = crate::layout::window() + APERTURE_OFFSET;
         for (index, slot) in wire.leaves.iter_mut().enumerate() {
             let address = base + (index as u64) * (PAGE << 9);
             let leaf = crate::tables::entry(frames, root, address, 0, true)?
-                .ok_or("MMIO aperture missing")?;
+                .ok_or(refuse!("MMIO aperture missing"))?;
             // SAFETY: the builder returned the first slot of a new PT for an
             // aligned address.
             if (0..ENTRIES).any(|i| unsafe { leaf.add(i).read_volatile() } != 0) {
-                return Err("MMIO aperture overlaps an existing mapping");
+                return Err(refuse!("MMIO aperture overlaps an existing mapping"));
             }
             *slot = leaf as u64;
         }
         let first = crate::tables::entry(frames, root, base, 1, false)?
-            .ok_or("MMIO aperture directory missing")?;
+            .ok_or(refuse!("MMIO aperture directory missing"))?;
         let directory = first as u64 & ADDRESS;
         if first as u64 != directory {
-            return Err("MMIO aperture is not directory aligned");
+            return Err(refuse!("MMIO aperture is not directory aligned"));
         }
         // SAFETY: the directory the builder walked for `base`.
         if (LEAVES..ENTRIES).any(|i| unsafe { first.add(i).read_volatile() } != 0) {
-            return Err("MMIO aperture overlaps an existing mapping");
+            return Err(refuse!("MMIO aperture overlaps an existing mapping"));
         }
         wire.root = root;
         wire.leaf = wire.leaves[0];
         wire.directory = directory;
         wire.virtual_base = base;
-        wire.cores = u32::try_from(cores).map_err(|_| "MMIO core count overflow")?;
+        wire.cores = u32::try_from(cores).map_err(|_| refuse!("MMIO core count overflow"))?;
         wire.levels = crate::layout::top_level() + 1;
         Ok(())
     }
-    /// Seal from the actual successful ExitBootServices map, after every owned
+    /// Seal from the successful ExitBootServices map, after every owned
     /// allocation. On overflow magic stays absent and post-EBS admission refuses.
-    pub(crate) fn finish(&self, map: &impl MemoryMap) -> Result<(), &'static str> {
+    pub(crate) fn finish(&self, map: &impl MemoryMap) -> Result<()> {
         // SAFETY: sole loader writer, not published to the engine until sealed.
         let wire = unsafe { &mut *(self.region.physical as *mut Wire) };
         for entry in map.entries() {
             if wire.memory_count == MAX_MEMORY {
-                return Err("MMIO final memory inventory capacity exceeded");
+                return Err(refuse!("MMIO final memory inventory capacity exceeded"));
             }
             let end = entry
                 .phys_start
@@ -275,16 +282,18 @@ impl Prepared {
                     entry
                         .page_count
                         .checked_mul(PAGE)
-                        .ok_or("MMIO memory size overflow")?,
+                        .ok_or(refuse!("MMIO memory size overflow"))?,
                 )
-                .ok_or("MMIO memory end overflow")?;
+                .ok_or(refuse!("MMIO memory end overflow"))?;
             if end <= entry.phys_start
                 || !entry.phys_start.is_multiple_of(PAGE)
                 || wire.memory[..wire.memory_count]
                     .iter()
                     .any(|previous| previous.start < end && entry.phys_start < previous.end)
             {
-                return Err("MMIO final memory inventory has invalid or overlapping entries");
+                return Err(refuse!(
+                    "MMIO final memory inventory has invalid or overlapping entries"
+                ));
             }
             wire.memory[wire.memory_count] = Memory {
                 start: entry.phys_start,

@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 //! The legacy USB Bluetooth HCI interface and its endpoints. Endpoint numbers
 //! are discovered, never assumed from the specification's suggested addresses.
-use super::super::xhci::{Device, Endpoint, FULL_SPEED, HIGH_SPEED, Interface};
+use super::super::descriptor::{Endpoint, Interface};
+use super::super::xhci::{Device, FULL_SPEED, HIGH_SPEED};
 use alloc::vec::Vec;
 
 pub const CLASS: u8 = 0xe0;
@@ -41,8 +42,8 @@ impl Binding {
         if interface.number != HCI_INTERFACE {
             return Err("Bluetooth HCI on an interface other than 0");
         }
-        // Do not accept caller-fabricated interface data detached from the device.
-        if !super::super::xhci::interfaces(&device.configuration).contains(interface) {
+        // Do not accept caller-invented interface data detached from the device.
+        if !super::super::descriptor::interfaces(&device.configuration).contains(interface) {
             return Err("Bluetooth interface is not in configuration");
         }
         let first = |kind: u8, input: bool| {

@@ -1,6 +1,5 @@
 //! Completion of SME2 FP8 conversions.
 
-use anyhow::anyhow;
 use stela_compiler::{
     GuestState,
     aarch64::{
@@ -12,6 +11,7 @@ use stela_compiler::{
         },
     },
 };
+use stela_contracts::require;
 
 use super::{CompletionError, NumericalControls};
 use crate::scalable::ScalableState;
@@ -21,22 +21,15 @@ const PAIR_COUNT: u8 = 2;
 const HALF_BYTES: usize = size_of::<u16>();
 type GroupBytes = [[u8; MAX_VECTOR_BYTES]; MAX_GROUP_COUNT];
 
-fn require(condition: bool, message: &'static str) -> Result<(), CompletionError> {
-    if condition {
-        Ok(())
-    } else {
-        Err(anyhow!(message).into())
-    }
-}
-
 fn validate_group(group: VectorGroup) -> Result<(), CompletionError> {
-    require(
+    require!(
         matches!(group.count, 1 | 2 | 4)
             && group.first.is_multiple_of(group.count)
             && usize::from(group.first) + usize::from(group.count)
                 <= usize::from(VECTOR_REGISTER_COUNT),
         "invalid SME FP8 vector group",
-    )
+    );
+    Ok(())
 }
 
 fn snapshot_group(
@@ -70,25 +63,25 @@ pub(super) fn complete(
     operand: &Operand,
     controls: NumericalControls,
 ) -> Result<(), CompletionError> {
-    require(
+    require!(
         scalable.mode().streaming(),
         "SME FP8 conversion requires streaming state",
-    )?;
+    );
     let source = operand.source;
     let destination = operand.destination;
     match operand.conversion {
-        Conversion::Widen { .. } => require(
+        Conversion::Widen { .. } => require!(
             source.count == 1
                 && destination.count == PAIR_COUNT
                 && operand.format != ElementFormat::Single,
             "invalid SME FP8 widening shape",
-        )?,
-        Conversion::Narrow { interleaved } => require(
+        ),
+        Conversion::Narrow { interleaved } => require!(
             usize::from(source.count) == operand.format.bytes()
                 && destination.count == 1
                 && (!interleaved || operand.format == ElementFormat::Single),
             "invalid SME FP8 narrowing shape",
-        )?,
+        ),
     }
     validate_group(destination)?;
     let sources = snapshot_group(state, scalable, source)?;

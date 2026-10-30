@@ -128,7 +128,7 @@ fn word_pair_cx8(code: &mut Code, compare: [Register; 2], source: [Register; 2])
     });
     asm.mov(Qword, Rbx, R9);
     // Every input half is zero-extended. Failed CX8 writes EAX/EDX, while success
-    // retains those staged halves, so both paths return complete W results.
+    // keeps those staged halves, so both paths return complete W results.
     commit_rax(code, DWORD_BYTES, compare[0]);
     code.asm().mov(Dword, Rax, Rdx);
     commit_rax(code, DWORD_BYTES, compare[1]);

@@ -93,7 +93,7 @@ fn immediate(code: &mut Code, format: Format, bits: u64, target: TargetCpu) {
 }
 
 /// Reject only active pairs whose two magnitudes are zero. Removing the sign
-/// after OR accepts exactly-one-zero inputs while retaining every signed-zero
+/// after OR accepts exactly-one-zero inputs while keeping every signed-zero
 /// tie for the shared semantic helper. Double requires both dwords to be zero.
 /// LEFT/RIGHT/ACTIVE and the invariant classification masks remain live.
 pub(super) fn guard_zero_pairs(

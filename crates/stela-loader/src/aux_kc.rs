@@ -30,8 +30,9 @@ mod unit;
 use std::collections::BTreeMap;
 use std::iter;
 
+use crate::Result;
 use ::object::macho;
-use anyhow::{Context, Result, ensure};
+use stela_contracts::{refuse, require};
 
 use crate::kernel_collection::PAGE_BYTES;
 use boot::BootCollection;
@@ -93,11 +94,11 @@ struct Symbols {
 /// Links `kexts` against the boot collection `boot` into an auxiliary
 /// collection that carries `receipt`.
 pub fn link(boot: &[u8], kexts: &[Kext<'_>], receipt: &[u8]) -> Result<Vec<u8>> {
-    ensure!(
+    require!(
         !kexts.is_empty(),
         "an auxiliary collection holds at least one kext"
     );
-    ensure!(
+    require!(
         !receipt.is_empty(),
         "XNU refuses an auxiliary collection without a receipt"
     );
@@ -107,12 +108,12 @@ pub fn link(boot: &[u8], kexts: &[Kext<'_>], receipt: &[u8]) -> Result<Vec<u8>> 
         .map(|kext| Unit::new(kext, &boot))
         .collect::<Result<Vec<_>>>()?;
     for (index, unit) in units.iter().enumerate() {
-        ensure!(
+        require!(
             units[..index]
                 .iter()
                 .all(|other| other.identifier != unit.identifier),
-            "{} is listed twice",
-            unit.identifier
+            "{kext} is listed twice",
+            kext = unit.identifier
         );
     }
     let uuid = unit::uuid(
@@ -162,10 +163,11 @@ pub fn link(boot: &[u8], kexts: &[Kext<'_>], receipt: &[u8]) -> Result<Vec<u8>> 
     let mapped = segments;
     let file_of = |index: usize, address: u64| -> Result<u64> {
         let segment = mapped[index];
-        ensure!(
+        require!(
             (segment.address..=segment.address + segment.size).contains(&address),
-            "{address:#x} lies outside {}",
-            SEGMENTS[index].0
+            "{address:#x} lies outside {segment}",
+            address,
+            segment = SEGMENTS[index].0
         );
         Ok(segment.file_offset + address - segment.address)
     };
@@ -190,14 +192,14 @@ pub fn link(boot: &[u8], kexts: &[Kext<'_>], receipt: &[u8]) -> Result<Vec<u8>> 
         })
         .collect::<Result<Vec<_>>>()?;
     let info = prelink::info(&entries, uuid, boot.uuid)?;
-    ensure!(
+    require!(
         info.len() as u64 <= info_bound,
         "the prelink info outgrew its bound"
     );
 
-    let mut image = vec![0u8; usize::try_from(segments[LINKEDIT].address)?];
+    let mut image = vec![0u8; fit(segments[LINKEDIT].address, "the collection's mapped size")?];
     let write = |image: &mut [u8], address: u64, bytes: &[u8]| -> Result<()> {
-        let start = usize::try_from(address)?;
+        let start: usize = fit(address, "a pointer's collection offset")?;
         image[start..start + bytes.len()].copy_from_slice(bytes);
         Ok(())
     };
@@ -226,7 +228,7 @@ pub fn link(boot: &[u8], kexts: &[Kext<'_>], receipt: &[u8]) -> Result<Vec<u8>> 
         &fixup_segments,
         &pointers,
     )?;
-    let fixup_bytes = u32::try_from(linkedit.len())?;
+    let fixup_bytes: u32 = fit(linkedit.len(), "the fixup chains' size")?;
     let linkedit_offset = segments[LINKEDIT].file_offset;
     let mut symbols = Vec::with_capacity(units.len());
     for unit in &units {
@@ -258,7 +260,10 @@ pub fn link(boot: &[u8], kexts: &[Kext<'_>], receipt: &[u8]) -> Result<Vec<u8>> 
                         segment: region.name(),
                         address: section.address,
                         size: section.bytes.len() as u64,
-                        file_offset: u32::try_from(file_of(holder(region), section.address)?)?,
+                        file_offset: fit(
+                            file_of(holder(region), section.address)?,
+                            "a section's file offset",
+                        )?,
                         align: section.align,
                         flags: section.flags,
                     });
@@ -284,7 +289,7 @@ pub fn link(boot: &[u8], kexts: &[Kext<'_>], receipt: &[u8]) -> Result<Vec<u8>> 
         )?;
         header.uuid(unit.uuid)?;
         let header = header.finish(macho::MH_KEXT_BUNDLE, boot.cpu_subtype(), KEXT_FLAGS)?;
-        ensure!(
+        require!(
             header.len() == commands::kext_header_bytes(unit.sections.len()),
             "a kext header of unplanned size"
         );
@@ -329,32 +334,46 @@ pub fn link(boot: &[u8], kexts: &[Kext<'_>], receipt: &[u8]) -> Result<Vec<u8>> 
                 .collect(),
         })?;
     }
-    header.chained_fixups(u32::try_from(linkedit_offset)?, fixup_bytes)?;
+    header.chained_fixups(
+        fit(linkedit_offset, "the __LINKEDIT file offset")?,
+        fixup_bytes,
+    )?;
     for unit in &units {
         let address = unit.ranges[Region::Text as usize].start;
         header.fileset_entry(&unit.identifier, address, file_of(PRELINK_TEXT, address)?)?;
     }
     let header = header.finish(macho::MH_FILESET, boot.cpu_subtype(), 0)?;
-    ensure!(
+    require!(
         header.len() as u64 == header_bytes,
         "a collection header of unplanned size"
     );
     write(&mut image, segments[TEXT].address, &header)?;
 
-    let mut file = vec![0u8; usize::try_from(linkedit_offset)? + linkedit.len()];
+    let linkedit_start: usize = fit(linkedit_offset, "the __LINKEDIT file offset")?;
+    let mut file = vec![0u8; linkedit_start + linkedit.len()];
     for segment in &segments[..LINKEDIT] {
         let (from, to) = (
-            usize::try_from(segment.address)?,
-            usize::try_from(segment.file_offset)?,
+            fit(segment.address, "a segment's address")?,
+            fit(segment.file_offset, "a segment's file offset")?,
         );
-        let size = usize::try_from(segment.size)?;
+        let size: usize = fit(segment.size, "a segment's size")?;
         file[to..to + size].copy_from_slice(&image[from..from + size]);
     }
-    file[usize::try_from(linkedit_offset)?..].copy_from_slice(&linkedit);
+    file[linkedit_start..].copy_from_slice(&linkedit);
     Ok(file)
 }
 
 /// The collection segment a kext region lies in.
+/// `value` narrowed to the type of the `field` that holds it, refused when
+/// the collection outgrows that field.
+fn fit<T: TryFrom<V>, V: Copy + stela_contracts::refusal::ToValue>(
+    value: V,
+    field: &'static str,
+) -> Result<T> {
+    T::try_from(value)
+        .map_err(|_| refuse!("{field} {value:#x} overflows its field", field, value).into())
+}
+
 fn holder(region: Region) -> usize {
     match region {
         Region::Text => PRELINK_TEXT,
@@ -399,11 +418,11 @@ fn symbol_table(unit: &Unit<'_>, linkedit: &mut Vec<u8>, base: u64) -> Result<Sy
         let ordinal = order
             .iter()
             .position(|index| index == section)
-            .context("a symbol in no section")?
+            .ok_or(refuse!("a symbol in no section"))?
             + 1;
-        table.extend(u32::try_from(strings.len())?.to_le_bytes());
+        table.extend(fit::<u32, _>(strings.len(), "the symbol strings' size")?.to_le_bytes());
         table.push(macho::N_SECT | if *external { macho::N_EXT } else { 0 });
-        table.push(u8::try_from(ordinal).context("a kext with more than 255 sections")?);
+        table.push(fit(ordinal, "a symbol's section ordinal")?);
         table.extend(0u16.to_le_bytes());
         table.extend(address.to_le_bytes());
         strings.extend(name.as_bytes());
@@ -413,13 +432,13 @@ fn symbol_table(unit: &Unit<'_>, linkedit: &mut Vec<u8>, base: u64) -> Result<Sy
     linkedit.extend(table);
     let string_offset = base + linkedit.len() as u64;
     strings.resize(strings.len().next_multiple_of(8), 0);
-    let string_bytes = u32::try_from(strings.len())?;
+    let string_bytes: u32 = fit(strings.len(), "the symbol strings' size")?;
     linkedit.extend(strings);
     Ok(Symbols {
-        offset: u32::try_from(offset)?,
-        count: u32::try_from(entries.len())?,
+        offset: fit(offset, "the symbol table's file offset")?,
+        count: fit(entries.len(), "the symbol count")?,
         locals,
-        strings: u32::try_from(string_offset)?,
+        strings: fit(string_offset, "the string table's file offset")?,
         string_bytes,
     })
 }

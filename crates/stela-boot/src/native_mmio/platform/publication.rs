@@ -1,7 +1,7 @@
-//! RAM-only publication capability shared with the actual MMIO root authority.
+//! RAM-only publication capability shared with the MMIO root permission.
 //! Candidate child module of native_mmio::platform; not admitted boot source.
 //! It owns no second root catalog and never interprets UC device permissions
-//! as RAM ownership. Callers supply genuine PageSource pins and retain every
+//! as RAM ownership. Callers supply PageSource pins and keep every
 //! referenced data/table pin through quiescence, unmap and TLB acknowledgement.
 use super::*;
 use core::{mem::ManuallyDrop, ops::Range, sync::atomic::AtomicUsize};
@@ -35,7 +35,7 @@ struct Inner {
     armed: AtomicBool,
     pins: ManuallyDrop<UnsafeCell<ParentPins>>,
 }
-// SAFETY: immutable source/scope metadata can be retained on any CPU. Every
+// SAFETY: immutable source/scope metadata can be held on any CPU. Every
 // effect rejects foreign contexts before accessing the owner-local tables.
 // Parent pin state is touched only with the SAME Platform::held lock and IRQs
 // disabled. Neither capability moves the original !Send HostOwner.
@@ -54,7 +54,7 @@ fn shared_parent(platform: &Platform, first: u64) -> Result<Parent, Error> {
         let mut table = *root;
         for level in (3..platform.resources.wire.levels).rev() {
             let index = ((first >> (12 + 9 * level)) & 511) as usize;
-            // SAFETY: actual retained LOADER_DATA table; index is bounded.
+            // SAFETY: LOADER_DATA table; index is bounded.
             let value = unsafe { platform.table(table)?.add(index).read_volatile() };
             if value & (PRESENT | WRITABLE | HUGE | (1 << 3) | (1 << 4)) != (PRESENT | WRITABLE) {
                 return Err(Error::Unavailable);
@@ -90,14 +90,14 @@ impl Inner {
     }
 }
 
-/// Unique source-qualified RAM page-table publisher for one reserved one-GiB
+/// Unique source-checked RAM page-table publisher for one reserved one-GiB
 /// stack window. A live capability or QualifiedRam prevents Source::Session closing.
 pub(crate) struct RootPublication {
     inner: Arc<Inner>,
 }
-/// Genuine original WB RAM and CPU mapping, qualified in this exact root epoch.
-/// This grants no device, DMA, IOVA, VRAM or WC authority. Safe Drop alone does
-/// not remove page-table references: the actual RAM mapper owns that unsafe
+/// Original WB RAM and CPU mapping, checked in this exact root epoch.
+/// This grants no device, DMA, IOVA, VRAM or WC permission. Safe Drop alone does
+/// not remove page-table references: the RAM mapper owns that unsafe
 /// publication/retirement obligation and keeps these pins until acknowledged.
 pub(crate) struct QualifiedRam {
     pages: ManuallyDrop<PinnedPages>,
@@ -131,12 +131,12 @@ impl QualifiedRam {
 impl Drop for QualifiedRam {
     fn drop(&mut self) {
         if self.owner.check_current().is_err() {
-            // Retain original physical/CPU pins AND the publication/scope;
+            // Keep original physical/CPU pins AND the publication/scope;
             // no affine or allocator release occurs on a foreign CPU/ISR.
             quarantine();
             return;
         }
-        // SAFETY: qualified process context. The actual RAM mapper's unsafe
+        // SAFETY: checked process context. The RAM mapper's unsafe
         // publication contract requires all references/TLBs to be retired
         // before it releases its last QualifiedRam, including error paths.
         unsafe {
@@ -152,7 +152,7 @@ impl RootPublication {
         self.inner.window.clone()
     }
     /// Cache encoding for NEW WB RAM leaves. Source activation observes PAT0
-    /// as architectural WB, and every check preserves that exact actual PAT.
+    /// as architectural WB, and every check preserves that exact PAT.
     pub(crate) fn writeback_leaf_bits(&self) -> Result<u64, Error> {
         self.check_current()?;
         if self.inner.platform.snapshot.pat as u8 != 6 {
@@ -167,7 +167,7 @@ impl RootPublication {
         self.inner.check_current()
     }
 
-    /// Qualify before acquiring a publication guard: the existing cache
+    /// Check before acquiring a publication guard: the existing cache
     /// decoder may allocate bounded observation metadata. The caller supplies
     /// real native PageSource pins, never an address tuple or synthetic backing.
     pub(crate) fn qualify(&self, pages: &PinnedPages) -> Result<QualifiedRam, Error> {
@@ -219,7 +219,7 @@ impl RootPublication {
         let lock = match self.inner.platform.lock() {
             Ok(lock) => lock,
             Err(error) => {
-                // SAFETY: exact enclosing same-CPU save, no publication.
+                // SAFETY: enclosing same-CPU save, no publication.
                 unsafe { self.inner.platform.context.restore(flags) };
                 return Err(error);
             }
@@ -234,8 +234,8 @@ impl RootPublication {
     }
 }
 
-/// Same physical CPU, actual process scope and the MMIO authority's single
-/// publication lock. No allocation, waiting, callback or switch while retained.
+/// Same physical CPU, process scope and the MMIO permission's single
+/// publication lock. No allocation, waiting, callback or switch while kept.
 #[must_use]
 pub(crate) struct PublicationGuard<'a> {
     inner: &'a Inner,
@@ -247,7 +247,7 @@ pub(crate) struct PublicationGuard<'a> {
 impl PublicationGuard<'_> {
     pub(crate) fn parent_value(&self) -> Result<u64, Error> {
         self.inner.check_current()?;
-        // SAFETY: exact retained shared parent and bounded slot, under held.
+        // SAFETY: exact shared parent and bounded slot, under held.
         Ok(unsafe { self.inner.parent_slot()?.read_volatile() })
     }
     pub(crate) fn table(&self, pages: &QualifiedRam) -> Result<NonNull<u64>, Error> {
@@ -263,9 +263,9 @@ impl PublicationGuard<'_> {
     ///
     /// # Safety
     /// No old/new stack or table user can race this parent transition. New
-    /// child entries reference only caller-retained QualifiedRam WB pages,
-    /// with supervisor RW+NX leaves and an actually absent stack guard. All
-    /// pins remain retained through unmap and actual TLB acknowledgement.
+    /// child entries reference only caller-kept QualifiedRam WB pages,
+    /// with supervisor RW+NX leaves and an absent stack guard. All
+    /// pins remain held through unmap and TLB acknowledgement.
     pub(crate) unsafe fn replace_parent(
         &mut self,
         expected: u64,
@@ -317,8 +317,8 @@ impl PublicationGuard<'_> {
         Ok(next)
     }
     /// # Safety
-    /// Caller published/cleared only its retained WB stack mappings. Every
-    /// user is excluded until this actual acknowledgement completes.
+    /// Caller published/cleared only its WB stack mappings. Every
+    /// user is excluded until this acknowledgement completes.
     pub(crate) unsafe fn invalidate(&mut self, first: u64, bytes: u64) -> Result<(), Error> {
         self.inner.check_current()?;
         let end = first.checked_add(bytes).ok_or(Error::InvalidRange)?;
@@ -330,7 +330,7 @@ impl PublicationGuard<'_> {
         {
             return Err(Error::InvalidRange);
         }
-        // SAFETY: qualified one-CPU CPL0, complete range preflighted, PGE/PCID
+        // SAFETY: checked one-CPU CPL0, complete range preflighted, PGE/PCID
         // remain disabled. Inactive roots flush before their next CR3 entry.
         unsafe {
             asm!("mfence", options(nostack, preserves_flags));
@@ -342,14 +342,14 @@ impl PublicationGuard<'_> {
         self.inner.check_current()
     }
     /// # Safety
-    /// Actual consumers are stopped; cleared parent/child entries cannot be
-    /// republished concurrently. All pins remain retained until success.
+    /// Consumers are stopped; cleared parent/child entries cannot be
+    /// republished concurrently. All pins remain held until success.
     pub(crate) unsafe fn flush_root(&mut self) -> Result<(), Error> {
         self.inner.check_current()?;
         if self.retired.is_some() {
             return Err(Error::Busy);
         }
-        // SAFETY: actual captured current root, one CPU and PGE/PCID clear;
+        // SAFETY: captured current root, one CPU and PGE/PCID clear;
         // reload invalidates paging-structure caches as well as leaf TLBs.
         unsafe {
             asm!("mfence", "mov cr3, {}", in(reg) self.inner.platform.snapshot.cr3,
@@ -370,9 +370,9 @@ impl Drop for PublicationGuard<'_> {
                 .fatal(stela_drivers::platform::work::WorkError::CorruptContext);
         }
         drop(self.lock.take());
-        // SAFETY: exact enclosing save on the same actual physical CPU.
+        // SAFETY: enclosing save on the same physical CPU.
         unsafe { self.inner.platform.context.restore(self.flags) };
-        // Final backing release follows unlock and exact original IRQ restoration.
+        // Final backing release follows unlock and original IRQ restoration.
         drop(self.retired.take());
     }
 }
@@ -380,7 +380,7 @@ impl Drop for PublicationGuard<'_> {
 impl Drop for Inner {
     fn drop(&mut self) {
         if !self.armed.load(Ordering::Acquire) {
-            // SAFETY: never published; construction retained no PTE pin.
+            // SAFETY: never published; construction kept no PTE pin.
             unsafe {
                 ManuallyDrop::drop(&mut self.pins);
                 ManuallyDrop::drop(&mut self.authority);
@@ -403,17 +403,17 @@ impl Drop for Inner {
         let lock = match self.platform.lock() {
             Ok(lock) => lock,
             Err(_) => {
-                // SAFETY: exact same-CPU save, no source change.
+                // SAFETY: same-CPU save, no source change.
                 unsafe { self.platform.context.restore(flags) };
                 quarantine();
                 return;
             }
         };
         // SAFETY: final owner and the same publication lock. All child pins
-        // also retain Inner, so final Drop cannot precede their final release.
+        // also keep Inner, so final Drop cannot precede their final release.
         let pins = unsafe { &*self.pins.get() };
         let empty = self.parent_slot().is_ok_and(|slot| {
-            // SAFETY: actual retained shared-parent slot, under held.
+            // SAFETY: shared-parent slot, under held.
             unsafe { slot.read_volatile() == 0 }
         }) && pins.published.is_none()
             && pins.retiring.is_none();
@@ -421,13 +421,13 @@ impl Drop for Inner {
             self.platform.ram_publisher.store(false, Ordering::Release);
         }
         drop(lock);
-        // SAFETY: exact enclosing physical-CPU save.
+        // SAFETY: enclosing physical-CPU save.
         unsafe { self.platform.context.restore(flags) };
         if !empty {
             quarantine();
             return;
         }
-        // SAFETY: qualified final context, actual parent empty and all table
+        // SAFETY: checked final context, parent empty and all table
         // retirement acknowledgements complete. No resource release under held.
         unsafe {
             ManuallyDrop::drop(&mut self.pins);
@@ -439,7 +439,7 @@ impl Drop for Inner {
 }
 
 impl ScopedSource {
-    /// Bind the SAME actual root catalog and publication lock to a RAM-only
+    /// Bind the SAME root catalog and publication lock to a RAM-only
     /// provider. This is not a new host owner, device grant or root activation.
     pub(crate) fn root_publication(
         &self,

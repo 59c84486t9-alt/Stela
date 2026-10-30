@@ -5,7 +5,7 @@ use super::*;
 
 const WAKE: u32 = 7 << 20;
 // include/linux/usb.h USB_RESUME_TIMEOUT is 40ms at the pin; the older
-// ehci-hub.c "20 msec" comment does not describe its actual macro value.
+// ehci-hub.c "20 msec" comment does not describe its macro value.
 const RESUME_SIGNAL_US: u64 = 40_000;
 const RESUME_RECOVERY_US: u64 = 10_000;
 const RESUME_CLEAR_US: u64 = 2_000;
@@ -63,7 +63,7 @@ impl Controller {
                 actual & !(PORT_CHANGES | WAKE) | PORT_SUSPEND,
             )?;
             self.wait_suspend_link(index, actual, true, false)?;
-            // Let the actual link settle before its private owner is returned.
+            // Let the link settle before its private owner is returned.
             self.hw().delay_us(5_000)?;
             let settled = self.read(self.port_at(index))?;
             self.suspend_link(actual, settled, true, false)?;
@@ -77,7 +77,7 @@ impl Controller {
         })
     }
 
-    /// Resume only the retained capability's original suspended root. Actual
+    /// Resume only the capability's original suspended root. Actual
     /// 40ms resume signaling and cleared link/status acknowledgements precede
     /// a new public generation. No USB address, configuration or toggle is
     /// guessed or reset; old handles remain permanently stale.

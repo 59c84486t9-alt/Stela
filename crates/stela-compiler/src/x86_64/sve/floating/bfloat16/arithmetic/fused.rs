@@ -93,7 +93,7 @@ fn exact_exponent_guard(code: &mut Code, failures: &mut Vec<usize>) {
 }
 
 /// Compress an exact Double to a rebased Single-shaped integer representation.
-/// The low29 discarded bits become one sticky bit. Sixteen retained guard bits
+/// The low29 discarded bits become one sticky bit. Sixteen kept guard bits
 /// remain below BF precision, so every final BF rounding mode sees the same
 /// below-half/equal-half/above-half and nonzero-remainder classification.
 fn compress(code: &mut Code, failures: &mut Vec<usize>) {

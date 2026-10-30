@@ -1,12 +1,16 @@
 //! Hosts without native execution: every mapping operation fails.
-use anyhow::{Result, bail};
+use crate::Result;
 use stela_compiler::GuestState;
+use stela_contracts::refuse;
 
 pub fn ensure_supported() -> Result<()> {
     #[cfg(feature = "std")]
-    bail!("native leaf execution requires x86-64 macOS or Linux with the System V ABI");
+    return Err(refuse!(
+        "native leaf execution requires x86-64 macOS or Linux with the System V ABI"
+    )
+    .into());
     #[cfg(not(feature = "std"))]
-    bail!("freestanding executable storage owner is not mounted")
+    return Err(refuse!("freestanding executable storage owner is not mounted").into());
 }
 
 #[derive(Debug)]
@@ -21,8 +25,8 @@ impl Mapping {
     /// Invoke this owned mapping with the compiler's leaf ABI.
     ///
     /// # Safety
-    /// The bytes must implement the leaf ABI for the actual admitted host
-    /// target. The caller retains exclusive guest state and every accessed
+    /// The bytes must implement the leaf ABI for the admitted host
+    /// target. The caller keeps exclusive guest state and every accessed
     /// memory/service owner through return and any fault settlement.
     pub unsafe fn call(&self, _state: &mut GuestState) -> Result<()> {
         ensure_supported()
@@ -32,7 +36,7 @@ impl Mapping {
     ///
     /// # Safety
     /// The code, target, source map and context requirements must describe the
-    /// same checked compilation. The caller retains exclusive state, the live
+    /// same checked compilation. The caller keeps exclusive state, the live
     /// context and all reachable memory/service owners through return, context
     /// finalization and recovered source-PC settlement; entry cannot reenter.
     pub unsafe fn call_context_block(
@@ -46,7 +50,7 @@ impl Mapping {
 
     /// # Safety
     /// The bytes must implement the two-argument context-leaf ABI for the
-    /// actual admitted target. The caller retains exclusive state and a valid
+    /// admitted target. The caller keeps exclusive state and a valid
     /// context with all borrowed memory/service owners until call completion
     /// and architectural failure finalization. No callback may reenter them.
     pub unsafe fn call_context(
@@ -76,9 +80,9 @@ impl Mapping {
     /// Invoke this owned mapping with the compiler's ordinary block ABI.
     ///
     /// # Safety
-    /// The bytes must implement the struct-return block ABI for the actual
+    /// The bytes must implement the struct-return block ABI for the
     /// admitted target. Every directly addressed guest range must remain
-    /// mapped with the compiled rights, and the caller retains exclusive
+    /// mapped with the compiled rights, and the caller keeps exclusive
     /// state, memory/fault owners and source identity through full settlement.
     pub unsafe fn call_block(
         &self,

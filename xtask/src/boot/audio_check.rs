@@ -1,4 +1,4 @@
-//! Independent native HDA evidence. WAV proves actual playback bytes; the null
+//! Independent native HDA evidence. WAV proves playback bytes; the null
 //! backend proves capture DMA replaces a poisoned ring, not microphone audio.
 use anyhow::{Context, Result, bail, ensure};
 use clap::ValueEnum;
@@ -21,12 +21,12 @@ pub const WAV: &str = "audio-playback.wav";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub(super) enum Mode {
-    /// Capture actual PCM to a WAV and compare repeated deterministic samples.
+    /// Capture PCM to a WAV and compare repeated deterministic samples.
     Playback,
     /// Exercise playback and capture DMA with QEMU's silent null audio backend.
     Duplex,
     /// Measure WAV PCM on an existing direct fixed-gain path, with codec power
-    /// explicitly unqualified (for a device lacking mandatory FG power caps).
+    /// explicitly unchecked (for a device lacking mandatory FG power caps).
     TransportPlayback,
     /// Measure both DMA engines on that bounded path, using a silent source.
     TransportDuplex,

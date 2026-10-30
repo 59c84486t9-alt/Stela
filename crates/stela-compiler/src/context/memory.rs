@@ -22,7 +22,7 @@ pub const MEMORY_REQUEST_LENGTH_OFFSET: u32 = 16;
 pub const MEMORY_REQUEST_FLAGS_OFFSET: u32 = 20;
 pub const MEMORY_REQUEST_PC_OFFSET: u32 = 24;
 
-/// Access descriptor bits retain architectural intent across the native ABI.
+/// Access descriptor bits keep architectural intent across the native ABI.
 pub mod flags {
     pub const WRITE: u32 = 1 << 0;
     pub const TAG_CHECKED: u32 = 1 << 1;
@@ -167,7 +167,7 @@ pub mod profile_requirements {
     /// CPA arithmetic/address specialization is separately typed and validated.
     /// Original-SP checking is separately specialized and validated.
     pub const NATIVE_ACCESS: u32 = 1 << 0;
-    /// Physical allocation-tag granules retain guest/physical alignment.
+    /// Physical allocation-tag granules keep guest/physical alignment.
     pub const TAG_GRANULES: u32 = 1 << 1;
     /// Require the fixed named implementation identity above. This is a body
     /// requirement, never a raw access descriptor or a copy of CPU controls.
@@ -212,6 +212,20 @@ impl MemoryStatus {
         .into_iter()
         .find(|status| *status as u32 == code)
     }
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Translation => "translation",
+            Self::Permission => "permission",
+            Self::Alignment => "alignment",
+            Self::TagCheck => "tag check",
+            Self::Unsupported => "unsupported",
+            Self::InvalidRequest => "invalid request",
+            Self::Domain => "domain",
+            Self::StackAlignment => "stack alignment",
+        }
+    }
 }
 
 /// Buffer bytes are little endian. Reads may change staging before a later part
@@ -251,7 +265,7 @@ pub type MemoryCallback = unsafe extern "sysv64" fn(
     request: *const MemoryRequest,
 ) -> u32;
 
-/// Borrowed dispatch view. Its owner retains resolver, tag and monitor state.
+/// Borrowed dispatch view. Its owner keeps resolver, tag and monitor state.
 /// Callback failures preserve a diagnostic record after native stack unwind.
 #[repr(C)]
 #[derive(Debug)]

@@ -1,4 +1,4 @@
-//! Independent HID-I2C peripheral model: addresses/registers, actual pin state,
+//! Independent HID-I2C peripheral model: addresses/registers, pin state,
 //! reset FIFO, power-dependent behavior, commands and wire reports.
 use super::*;
 use alloc::{collections::VecDeque, rc::Rc, vec};
@@ -296,7 +296,7 @@ fn ready() -> (Device<Model, Pin, Time>, Rc<RefCell<Hardware>>) {
     (d, h)
 }
 #[test]
-fn reset_requires_actual_irq_and_zero_report_before_descriptor_or_ready() {
+fn reset_requires_irq_and_zero_report_before_descriptor_or_ready() {
     let (mut d, h) = ready();
     assert!(d.is_ready());
     assert_eq!(h.borrow().reset_count, 1);
@@ -461,7 +461,7 @@ fn elan_does_not_receive_the_reset_breaking_second_power_on() {
     assert!(d.is_ready());
 }
 #[test]
-fn source_qualified_resume_profiles_apply_distinct_physical_effects() {
+fn source_checked_resume_profiles_apply_distinct_physical_effects() {
     for (vendor, product, reset, delay, no_sleep) in [
         (0x044e, 1, true, false, false),
         (0x06cb, 0x7a13, true, false, false),
@@ -535,7 +535,7 @@ fn restart_identity_change_is_explicit() {
 }
 
 #[test]
-fn late_errors_after_actual_side_effects_never_replay_or_publish_ready() {
+fn late_errors_after_side_effects_never_replay_or_publish_ready() {
     let (mut d, h) = ready();
     h.borrow_mut().fail_after_opcode = Some(SET_REPORT);
     let count = h.borrow().commands.len();
@@ -654,7 +654,7 @@ fn continuously_asserted_device_pin_bounds_pre_reset_drain() {
 }
 
 #[test]
-fn source_qualified_no_irq_devices_expose_delay_instead_of_inventing_ack() {
+fn source_checked_no_irq_devices_expose_delay_instead_of_inventing_ack() {
     for (vendor, product) in [
         (0x0911, 0x5288),
         (0x103c, 0x184f),
@@ -681,7 +681,7 @@ fn source_qualified_no_irq_devices_expose_delay_instead_of_inventing_ack() {
         assert_eq!(d.poll().unwrap(), Some(InputReport::Data(vec![17, 1, 2])));
     }
     // Source identity is exact: a neighboring ordinary device still requires
-    // its new actual zero-length response regardless of elapsed time.
+    // its new zero-length response regardless of elapsed time.
     let (mut d, h) = device(0x2386, 0x3119);
     h.borrow_mut().no_reset_ack = true;
     assert_eq!(d.initialize().unwrap_err().kind, ErrorKind::ResetTimeout);
@@ -694,7 +694,7 @@ fn source_qualified_no_irq_devices_expose_delay_instead_of_inventing_ack() {
 }
 
 #[test]
-fn no_irq_profile_keeps_actual_irq_and_mutable_command_failure_requirements() {
+fn no_irq_profile_keeps_irq_and_mutable_command_failure_requirements() {
     let (mut d, h) = device(0x2386, 0x3118);
     h.borrow_mut().no_reset_ack = true;
     h.borrow_mut().fail_irq = true;
@@ -717,7 +717,7 @@ fn no_irq_profile_keeps_actual_irq_and_mutable_command_failure_requirements() {
     assert!(d.needs_reset());
 
     // Even when a no-IRQ device does emit a real ACK, consume it without
-    // relabeling the qualified delay as IRQ evidence or leaking it to poll.
+    // relabeling the checked delay as IRQ evidence or leaking it to poll.
     let (mut d, h) = device(0x2386, 0x3118);
     d.initialize().unwrap();
     assert_eq!(
@@ -730,7 +730,7 @@ fn no_irq_profile_keeps_actual_irq_and_mutable_command_failure_requirements() {
 }
 
 #[test]
-fn exact_bad_input_size_profiles_expose_original_header_and_all_actual_bytes() {
+fn exact_bad_input_size_profiles_expose_original_header_and_all_bytes() {
     for (vendor, product) in [(0x0911, 0x5288), (0x048d, 0x837a)] {
         for reported_length in [1u16, 33, 65535] {
             let (mut d, h) = device(vendor, product);

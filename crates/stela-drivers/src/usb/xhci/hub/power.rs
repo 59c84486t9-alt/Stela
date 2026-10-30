@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! Selective external-port suspend/resume, following pinned hub.c
 //! usb_port_suspend/usb_port_resume. The topology owner gates client access and
-//! controls child wake features; this layer proves the actual port transition.
+//! controls child wake features; this layer proves the port transition.
 use super::*;
 
 const USB2_SUSPEND: u16 = 2;
@@ -93,7 +93,7 @@ impl Controller {
                 "USB suspend port has no retained child",
             ))?;
         self.live_slot(child)?;
-        // Read actual output endpoint contexts, not a caller assertion that a
+        // Read output endpoint contexts, not a caller assertion that a
         // class stopped. EP0, streams and a nested hub's interrupt ring all
         // participate. No transition is published on uncertain retirement.
         fence(Ordering::Acquire);
@@ -201,7 +201,7 @@ impl Controller {
         }
     }
 
-    /// Resume only the retained power session. A connection/reset/power change
+    /// Resume only the power session. A connection/reset/power change
     /// remains visible to the topology owner and requires normal fresh binding.
     #[cfg(test)]
     pub(in super::super) fn resume_hub_port(
@@ -292,13 +292,13 @@ mod tests {
     }
 
     #[test]
-    fn external_hub_suspend_resume_observes_actual_link_and_retains_identity_current() {
+    fn external_hub_suspend_resume_observes_link_and_keeps_identity_current() {
         for speed in [HIGH_SPEED, SUPER_SPEED] {
             for context in [32, 64] {
                 let nodes = BTreeMap::from([(0, Node::hub(speed, 1)), (1, Node::leaf(speed))]);
                 let mut backing = vec![0u64; 256 * 1024];
                 let start = backing.as_mut_ptr() as u64;
-                // SAFETY: backing retains all controller/endpoint fixture DMA.
+                // SAFETY: backing keeps all controller/endpoint fixture DMA.
                 let mut dma =
                     unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
                 let (mut c, model) = controller(&mut dma, context, nodes);
@@ -399,7 +399,7 @@ mod tests {
             let nodes = BTreeMap::from([(0, Node::hub(speed, 1)), (1, Node::leaf(speed))]);
             let mut backing = vec![0u64; 256 * 1024];
             let start = backing.as_mut_ptr() as u64;
-            // SAFETY: every modeled transfer refers to retained fixture RAM.
+            // SAFETY: every modeled transfer refers to kept fixture RAM.
             let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
             let (mut c, model) = controller(&mut dma, 32, nodes);
             let mut failures = Vec::new();

@@ -8,12 +8,19 @@ members = [
     "crates/stela-compiler",
     "crates/stela-drivers",
     "crates/stela-driver-core",
-    "crates/stela-drivers/src/gpu/metal/input",
+    "crates/stela-c-build",
+    "crates/stela-driver-audio",
+    "crates/stela-driver-base",
+    "crates/stela-driver-gpu",
+    "crates/stela-driver-net",
+    "crates/stela-driver-storage",
+    "crates/stela-driver-gpu/src/metal/input",
     "crates/stela-fingerprint",
     "crates/stela-contracts",
     "crates/stela-formats",
     "crates/stela-soc-data",
     "crates/stela-engine",
+    "crates/stela-soc",
     "crates/stela-runtime",
     "crates/stela-tls",
     "xtask",
@@ -30,11 +37,18 @@ default-members = [
     "crates/stela-compiler",
     "crates/stela-drivers",
     "crates/stela-driver-core",
-    "crates/stela-drivers/src/gpu/metal/input",
+    "crates/stela-c-build",
+    "crates/stela-driver-audio",
+    "crates/stela-driver-base",
+    "crates/stela-driver-gpu",
+    "crates/stela-driver-net",
+    "crates/stela-driver-storage",
+    "crates/stela-driver-gpu/src/metal/input",
     "crates/stela-contracts",
     "crates/stela-formats",
     "crates/stela-soc-data",
     "crates/stela-engine",
+    "crates/stela-soc",
     "crates/stela-runtime",
     "crates/stela-tls",
 ]
@@ -66,6 +80,7 @@ stela-contracts = { path = "crates/stela-contracts" }
 stela-formats = { path = "crates/stela-formats" }
 stela-engine = { path = "crates/stela-engine" }
 stela-soc-data = { path = "crates/stela-soc-data" }
+stela-soc = { path = "crates/stela-soc" }
 stela-runtime = { path = "crates/stela-runtime" }
 stela-tls = { path = "crates/stela-tls" }
 stela-loader = { path = "crates/stela-loader" }
@@ -75,7 +90,8 @@ stela-cli = { path = "crates/stela-cli" }
 unsafe_op_in_unsafe_fn = "deny"
 
 [workspace.lints.clippy]
-all = "warn"
+all = { level = "warn", priority = -1 }
+undocumented_unsafe_blocks = "warn"
 
 # Backtraces keep their files and lines; full debug information made a
 # test build's target directory 60 % larger and its links slower.

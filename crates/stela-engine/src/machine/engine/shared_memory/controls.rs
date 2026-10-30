@@ -1,4 +1,4 @@
-//! Immutable effective controls copied only while Machine owns the actual Cpu.
+//! Immutable effective controls copied only while Machine owns the Cpu.
 use super::*;
 use crate::{
     machine::{cpu::Cpu, system::Register as SystemRegister},
@@ -40,7 +40,7 @@ pub(super) struct Controls {
     pub(super) sp: CheckedMemoryProfile,
     /// Real source FP access permission and nonstreaming AdvSIMD mode.
     pub(super) asimd: bool,
-    /// Resolved only when actual source feature facts exclude FEAT_CPA2.
+    /// Resolved only when source feature facts exclude FEAT_CPA2.
     /// An unknown or enabled CPA2 implementation never implies unchecked adds.
     pub(super) address_checks: Option<EffectiveAddressChecks>,
     identification: Arc<Snapshot>,
@@ -105,7 +105,7 @@ impl Controls {
             CheckedMemoryProfile::SpAlignmentDisabled
         };
         let asimd = cpu.floating_point_trap().is_none() && cpu.svcr() & 1 == 0;
-        // All effective fields above come from this actual stopped Cpu anew.
+        // All effective fields above come from this stopped Cpu anew.
         // Only immutable declarations and their digest may be reused, after
         // exact equality; no source, access or physical-target proof is cached.
         if let Some(cached) = cpu
@@ -176,7 +176,7 @@ impl Controls {
     }
 
     /// Full conservative charge for the sole cached declaration, even when
-    /// its immutable payload is also retained by the actual memory policy.
+    /// its immutable payload is also kept by the memory policy.
     pub(super) fn retained_bytes(&self) -> usize {
         core::mem::size_of::<Option<Self>>()
             + self.identification.retained_bytes()
@@ -249,7 +249,7 @@ pub(super) mod tests {
         (cpu, profile, missing)
     }
     #[test]
-    fn fp_memory_admission_tracks_actual_cpacr_and_cptr_permissions() {
+    fn fp_memory_admission_tracks_cpacr_and_cptr_permissions() {
         let (mut cpu, profile, missing) = captured();
         assert!(
             !Controls::capture(&cpu, profile.name, &missing)
@@ -271,7 +271,7 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn actual_cpu_ids_and_effective_controls_qualify_without_raw_authority() {
+    fn cpu_ids_and_effective_controls_check_without_raw_permission() {
         let (mut cpu, profile, missing) = captured();
         let controls = Controls::capture(&cpu, profile.name, &missing).unwrap();
         assert_eq!(controls.sp, CheckedMemoryProfile::SpAlignmentDisabled);
@@ -305,11 +305,11 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn cached_digest_separates_qualified_address_controls_from_legacy_identity() {
+    fn cached_digest_separates_checked_address_controls_from_legacy_identity() {
         let (mut cpu, profile, missing) = captured();
         let controls = Controls::capture(&cpu, profile.name, &missing).unwrap();
         // Preserve the prior serialization as a negative compatibility input;
-        // the new source-qualified address policy must not reuse that key.
+        // the new source-checked address policy must not reuse that key.
         let legacy = stela_formats::sha256(
             alloc::format!(
                 "{:?} {:?} {:?} {} {}",
@@ -329,7 +329,7 @@ pub(super) mod tests {
                 .identity()
         );
         // CPA0 and CPA1 resolve the same unchecked address behavior, but their
-        // distinct actual declarations must still produce distinct identities.
+        // distinct declarations must still produce distinct identities.
         let isar3 = cpu.read(SystemRegister::ID_AA64ISAR3_EL1);
         for cpa in [0, 1] {
             cpu.registers

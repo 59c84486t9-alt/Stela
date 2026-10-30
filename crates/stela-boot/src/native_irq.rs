@@ -12,18 +12,18 @@ use core::{
 use stela_drivers::bus::irq::{IrqController, IrqError, Platform, Registry, Target};
 use stela_drivers::platform::work::Cpu;
 
-mod context;
-#[allow(dead_code)]
-mod crs;
+use stela_boot_core::crs;
+use stela_boot_core::irq_context as context;
 #[cfg(feature = "diagnostics")]
 pub(crate) mod diagnostic;
-#[allow(dead_code)]
-pub mod ioapic;
+pub use stela_boot_core::ioapic;
 #[cfg(feature = "diagnostics")]
 pub(crate) mod level_diagnostic;
-#[allow(dead_code)]
 pub mod madt;
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "the native clock, IRQ root and MMIO platform services have no production consumer until the native counter and deadline work (R9, D6) wires them"
+)]
 pub(crate) mod root;
 #[cfg(feature = "diagnostics")]
 pub(crate) mod work_diagnostic;
@@ -34,7 +34,7 @@ static BASE: AtomicU64 = AtomicU64::new(0);
 static REGISTERS: AtomicU64 = AtomicU64::new(0);
 static BSP: AtomicU32 = AtomicU32::new(0);
 static TIMEOUT: AtomicU64 = AtomicU64::new(0);
-// Main's original immutable CPU/root view, permanently retained with this
+// Main's original immutable CPU/root view, permanently kept with this
 // static registry and its possible quarantines. Never moves HostOwner itself.
 static ROOT_ADAPTER: AtomicPtr<crate::native_clock::IrqAdapter> =
     AtomicPtr::new(core::ptr::null_mut());
@@ -53,11 +53,11 @@ fn root_cpu() -> Option<&'static Arc<dyn Cpu>> {
 /// No local timer register or engine vector is changed.
 ///
 /// # Safety
-/// Actual post-EBS main owns the installed 0x50..0x5f IDT stubs and exclusively
+/// Post-EBS main owns the installed 0x50..0x5f IDT stubs and exclusively
 /// hands those routes to this registry. Physical delivery/remapping policy is
-/// qualified; no firmware/SMM/other CPU owns these routes. The actual root and
-/// descriptor allocations remain retained through this permanent registration.
-/// Active external routes must be stopped before leaving their qualified root
+/// checked; no firmware/SMM/other CPU owns these routes. The root and
+/// descriptor allocations remain held through this permanent registration.
+/// Active external routes must be stopped before leaving their checked root
 /// execution scope; the CPU view refuses unsupported root/context changes.
 pub(crate) unsafe fn adopt(
     execution: &crate::native_clock::DriverExecution<'_>,
@@ -77,16 +77,16 @@ pub(crate) unsafe fn adopt(
     }
     let adapter = Box::new(adapter);
     let saved = adapter.cpu.save_disable().map_err(|_| IrqError::WrongCpu)?;
-    // SAFETY: typed actual main-owned APIC mapping, installed IDT/CPU grant
+    // SAFETY: typed main-owned APIC mapping, installed IDT/CPU grant
     // and explicit external-route handoff required above. Deadline units for
-    // this adopted path are actual fixed PM-clock monotonic nanoseconds.
+    // this adopted path are fixed PM-clock monotonic nanoseconds.
     let result = unsafe { initialize(adapter.base, adapter.registers, 2_000_000_000) };
     if result.is_ok() {
         ROOT_ADAPTER.store(Box::into_raw(adapter), Ordering::Release);
-        // SAFETY: the original same-CPU view is now permanently retained.
+        // SAFETY: the original same-CPU view is now permanently kept.
         unsafe { root_cpu().unwrap().restore(saved) };
     } else {
-        // SAFETY: exact enclosing CPU save, no switch or publication occurred.
+        // SAFETY: enclosing CPU save, no switch or publication occurred.
         unsafe { adapter.cpu.restore(saved) };
     }
     result
@@ -151,9 +151,9 @@ fn id(apic: &Apic) -> Result<u32, IrqError> {
 /// # Safety
 /// One BSP only, with interrupts disabled, no migration/SMM/other owner of the
 /// reserved vectors or APIC, and the existing IDT's 0x50..0x5f stubs installed.
-/// The actual xAPIC UC mapping is root-stable for the permanent registry lifetime
+/// The xAPIC UC mapping is root-stable for the permanent registry lifetime
 /// (including quarantine); x2APIC mode uses the existing APIC MSR adapter.
-/// Interrupt remapping is off and physical MSI is qualified by the platform.
+/// Interrupt remapping is off and physical MSI is checked by the platform.
 pub unsafe fn initialize(base: u64, registers: u64, timeout_ticks: u64) -> Result<(), IrqError> {
     if READY.load(Ordering::Acquire) {
         return Err(IrqError::Unavailable);
@@ -187,17 +187,18 @@ pub unsafe fn initialize(base: u64, registers: u64, timeout_ticks: u64) -> Resul
 }
 
 pub fn dispatch(vector: u8) -> bool {
-    // Existing CPU entry calls this with local IRQs off. It does not supply
+    // SAFETY: Existing CPU entry calls this with local IRQs off. It does not supply
     // an interrupted-SP witness, so no such frame proof may be claimed.
     unsafe { dispatch_entry(vector, None) }
 }
 
-/// Actual device-vector dispatch with the unchanged IDT's hardware frame.
+/// Device-vector dispatch with the unchanged IDT's hardware frame.
 /// # Safety
-/// Called only by the genuine existing CPU interrupt handler with IRQs off;
+/// Called only by the existing CPU interrupt handler with IRQs off;
 /// `interrupted_rsp` is Frame.rsp from that entry, not the ISR's current RSP.
 #[cfg(feature = "diagnostics")]
 pub(crate) unsafe fn dispatch_frame(vector: u8, interrupted_rsp: usize) -> bool {
+    // SAFETY: the caller passes the interrupted RSP from its own CPU entry frame.
     unsafe { dispatch_entry(vector, Some(interrupted_rsp)) }
 }
 unsafe fn dispatch_entry(vector: u8, interrupted_rsp: Option<usize>) -> bool {
@@ -212,7 +213,7 @@ unsafe fn dispatch_entry(vector: u8, interrupted_rsp: Option<usize>) -> bool {
     if cpu.is_err() {
         return false;
     }
-    // SAFETY: the actual existing ISR entry and owning BSP were checked above;
+    // SAFETY: the existing ISR entry and owning BSP were checked above;
     // IRQs stay disabled through this balanced callback/EOI scope.
     let _context = unsafe { CONTEXT.enter(cpu, interrupted_rsp) }
         .unwrap_or_else(|_| crate::output::fatal("native IRQ context depth exhausted"));
@@ -222,7 +223,7 @@ pub(crate) fn current_context() -> Result<Option<context::Snapshot>, IrqError> {
     CONTEXT.current(NativePlatform(()).check_cpu())
 }
 
-// SAFETY: initialization qualifies the actual existing APIC/IDT on one BSP,
+// SAFETY: initialization checks the existing APIC/IDT on one BSP,
 // preserves its mapping forever, refuses migration and uses real IRQ-save,
 // APIC pending/EOI and physical MSI operations. No CPU/IDT is allocated here.
 unsafe impl Platform for NativePlatform {

@@ -116,7 +116,7 @@ impl RegistersPeer {
             ENABLE_SLOT => {
                 if device.mode == Mode::VisibilityError {
                     // The ACK's exact event is the next CPU sync. Refuse the
-                    // following device sync, then inspect its actual range.
+                    // following device sync, then inspect its range.
                     let mut state = self.peer.state.lock().unwrap();
                     state.fail_sync = Some(state.syncs.len() + 1);
                 }
@@ -231,7 +231,7 @@ impl Registers for RegistersPeer {
 }
 
 #[test]
-fn initial_output_visibility_precedes_actual_address_ack_and_failed_address_retirement() {
+fn initial_output_visibility_precedes_address_ack_and_failed_address_retirement() {
     for mode in [
         Mode::Addressed,
         Mode::AddressError,

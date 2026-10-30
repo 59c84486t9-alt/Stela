@@ -599,7 +599,7 @@ mod tests {
         assert!(c.carrier().is_err());
     }
     #[test]
-    fn phy_advertisement_is_intersected_with_actual_basic_capabilities() {
+    fn phy_advertisement_is_intersected_with_basic_capabilities() {
         for mask in 0u16..16 {
             let hw = Rc::new(RefCell::new(model::Hardware::new(0x20, PHY_C)));
             hw.borrow_mut().phy[1] = AN_CAPABLE | (mask << 11);

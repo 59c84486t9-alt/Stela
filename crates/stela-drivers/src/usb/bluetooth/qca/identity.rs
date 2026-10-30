@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) 2005-2008 Marcel Holtmann <marcel@holtmann.org>
-//! Exact source USB candidate IDs and runtime OTP/DFU identities.
+//! Source USB candidate IDs and runtime OTP/DFU identities.
 use super::{Error, Result};
 use crate::{firmware::Target, usb::xhci::Device};
 use alloc::{format, string::String};
@@ -258,7 +258,7 @@ impl Version {
         )
     }
     pub fn revision_label(&self) -> String {
-        // Running patch build is not a silicon selector; the actual rampatch
+        // Running patch build is not a silicon selector; the rampatch
         // header independently guards against downgrade. Preserve it in raw.
         format!(
             "rom-{:08x}:ram-{:08x}:chip-{:02x}:platform-{:02x}:flags-{:04x}",

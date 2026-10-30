@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (c) 2008-2009 Atheros Communications Inc.
 //! AR3011/AR3012 raw USB firmware bootloader. This owner is never an HCI link:
-//! completed download requests still require genuine USB reenumeration before
+//! completed download requests still require USB reenumeration before
 //! another, freshly inventoried runtime device can attach.
 mod host;
 mod identity;
@@ -13,7 +13,8 @@ use super::{FirmwareReceipt, Io};
 use crate::{
     block::BlockError,
     firmware::Provider,
-    usb::xhci::{self, Device, Endpoint, Interface},
+    usb::descriptor::{Endpoint, Interface},
+    usb::xhci::{self, Device},
 };
 use alloc::{boxed::Box, vec::Vec};
 pub use host::Host;
@@ -36,7 +37,7 @@ impl Binding {
         }
         if interface.number != 0
             || interface.alternate != 0
-            || !xhci::interfaces(&device.configuration).contains(interface)
+            || !crate::usb::descriptor::interfaces(&device.configuration).contains(interface)
         {
             return Err("ATH3K requires actual interface-zero alternate-zero");
         }
@@ -147,7 +148,7 @@ impl core::fmt::Display for Error {
     }
 }
 impl core::error::Error for Error {}
-/// Retained exactly-once raw uploader, including terminal failures and uncertain
+/// Exactly-once raw uploader, including terminal failures and uncertain
 /// DMA ownership. No operation can reinterpret this attachment as a runtime HCI.
 pub struct Bootloader<B: Io> {
     binding: Binding,
@@ -185,4 +186,4 @@ impl<B: Io> Bootloader<B> {
 }
 
 #[cfg(test)]
-pub(crate) use host::generation_tests;
+pub(crate) use host::tests::generation as generation_tests;

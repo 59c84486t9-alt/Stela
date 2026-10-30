@@ -13,13 +13,14 @@
 //! else of its `MANP`; the file is a bare `IM4M` or an `IMG4` carrying one.
 //!
 //! Its signature is the SEP's, made with a key only the SEP holds. Stela
-//! never treats an unverified LocalPolicy as authority: without a
+//! never treats an unverified LocalPolicy as permission: without a
 //! [`PolicyAuthority`] its `nsih` only narrows which directory the
-//! evidence of `stela_loader::installed` must qualify.
+//! evidence of `stela_loader::installed` must check.
 use crate::im4m::{self, Property, Value};
-use alloc::{format, string::String, vec::Vec};
-use anyhow::{Context, Result, ensure};
+use crate::{Result, Within};
+use alloc::{string::String, vec::Vec};
 use serde::Serialize;
+use stela_contracts::{Refusal, refuse, require};
 
 const POLICY_OBJECT: &str = "lpol";
 const SHA384_BYTES: usize = 48;
@@ -31,28 +32,27 @@ const UUID_BYTES: usize = 16;
 /// The SEP owner (root, on the main thread) provides the real implementation
 /// against Stela's own SEP keys; `stela_loader::installed` and
 /// `stela_loader::upgrade` take `Option<&dyn PolicyAuthority>` and, with
-/// one, use the `nsih` and manifest signature as authority instead of
+/// one, use the `nsih` and manifest signature as permission instead of
 /// narrowing by evidence alone. [`Unverified`] is the placeholder until it
 /// is wired: it refuses by name so a verified boot never silently succeeds.
 pub trait PolicyAuthority {
     /// `Ok` only when `manifest`, an `IM4M`, is a LocalPolicy this
     /// machine's SEP signed.
-    fn verify(&self, manifest: &[u8]) -> core::result::Result<(), String>;
+    fn verify(&self, manifest: &[u8]) -> Result<(), Refusal>;
 }
 
 /// The SEP keys are not yet wired, so no LocalPolicy signature can be
 /// checked. Passing this where a [`PolicyAuthority`] is wanted refuses every
 /// policy by name rather than accepting an unverified one; a boot without an
-/// authority falls back to evidence (`stela_loader::installed`).
+/// permission falls back to evidence (`stela_loader::installed`).
 pub struct Unverified;
 
 impl PolicyAuthority for Unverified {
-    fn verify(&self, _manifest: &[u8]) -> core::result::Result<(), String> {
-        Err(
-            "LocalPolicy signature verification needs the SEP owner's keys, which are not \
-             wired into stela_loader::local_policy::PolicyAuthority yet"
-                .into(),
-        )
+    fn verify(&self, _manifest: &[u8]) -> Result<(), Refusal> {
+        Err(refuse!(
+            "LocalPolicy signature verification needs the SEP owner's keys, which are not wired \
+             into stela_loader::local_policy::PolicyAuthority yet"
+        ))
     }
 }
 
@@ -76,14 +76,16 @@ pub struct LocalPolicy {
 fn data<'a>(properties: &'a [Property], name: &str, bytes: usize) -> Result<Option<&'a [u8]>> {
     match properties.iter().find(|p| p.name == name).map(|p| &p.value) {
         Some(Value::Data(value)) => {
-            ensure!(
+            require!(
                 value.len() == bytes,
-                "LocalPolicy {name} is {} bytes, not {bytes}",
-                value.len()
+                "LocalPolicy {name} is {value_len} bytes, not {bytes}",
+                name,
+                value_len = value.len(),
+                bytes
             );
             Ok(Some(value))
         }
-        Some(other) => anyhow::bail!("LocalPolicy {name} is {other:?}, not data"),
+        Some(other) => Err(refuse!("LocalPolicy {name} is {other}, not data", name, ?other).into()),
         None => Ok(None),
     }
 }
@@ -94,11 +96,11 @@ impl LocalPolicy {
         let manifest = match stela_formats::img4::parse(file) {
             Ok(parts) => parts
                 .manifest
-                .with_context(|| format!("{path} is an IMG4 without a manifest"))?
+                .ok_or_else(|| refuse!("{path} is an IMG4 without a manifest", path))?
                 .to_vec(),
             Err(_) => file.to_vec(),
         };
-        let parsed = im4m::parse(&manifest).with_context(|| String::from(path))?;
+        let parsed = im4m::parse(&manifest).within(|| refuse!("LocalPolicy {path}", path))?;
         let properties = parsed
             .object(POLICY_OBJECT)
             .map(|o| o.properties.clone())
@@ -119,9 +121,9 @@ impl LocalPolicy {
 
     /// Ask `authority` to verify the signature.
     pub fn verify(&mut self, authority: &dyn PolicyAuthority) -> Result<()> {
-        authority
-            .verify(&self.manifest)
-            .map_err(|e| anyhow::anyhow!("{}: {e}", self.path))?;
+        authority.verify(&self.manifest).map_err(|reason| {
+            refuse!("LocalPolicy {path} does not verify", path = self.path).because(reason)
+        })?;
         self.verified = true;
         Ok(())
     }
@@ -145,11 +147,11 @@ mod tests {
     struct Accept(bool);
 
     impl PolicyAuthority for Accept {
-        fn verify(&self, _: &[u8]) -> core::result::Result<(), String> {
+        fn verify(&self, _: &[u8]) -> Result<(), Refusal> {
             if self.0 {
                 Ok(())
             } else {
-                Err("not signed by this SEP".into())
+                Err(refuse!("not signed by this SEP"))
             }
         }
     }
@@ -170,7 +172,7 @@ mod tests {
     }
 
     #[test]
-    fn the_unverified_authority_refuses_every_policy_by_name() {
+    fn the_unverified_permission_refuses_every_policy_by_name() {
         let bytes = policy(&[0xab; 48], &[0x11; 16]);
         let mut parsed = LocalPolicy::parse("G/LocalPolicy/x.img4", &bytes).unwrap();
         let error = format!("{:#}", parsed.verify(&Unverified).unwrap_err());

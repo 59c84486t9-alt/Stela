@@ -3,10 +3,11 @@
 
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
+use stela_contracts::{refuse, require};
 mod context;
 pub mod leaf;
 
-use anyhow::{Result, ensure};
+use crate::Result;
 use stela_compiler::{
     GuestState,
     aarch64::scalable::{
@@ -72,16 +73,18 @@ impl ScalableState {
         operation: impl FnOnce(&mut Self, &mut [u8]) -> Result<R, E>,
     ) -> Result<R, E>
     where
-        E: From<anyhow::Error>,
+        E: From<crate::Error>,
     {
         let maximum_rows = self.length.bytes();
         if rows == 0 || rows > maximum_rows {
-            return Err(anyhow::anyhow!("ZA scratch row count exceeds the physical matrix").into());
+            return Err(E::from(
+                refuse!("ZA scratch row count exceeds the physical matrix", rows).into(),
+            ));
         }
         let storage = self
             .za_scratch
             .take()
-            .ok_or_else(|| E::from(anyhow::anyhow!("ZA scratch is already borrowed")))?;
+            .ok_or_else(|| E::from(refuse!("ZA scratch is already borrowed").into()))?;
         let mut loan = ZaRowScratchLoan {
             state: self,
             storage,
@@ -91,8 +94,7 @@ impl ScalableState {
         if bytes > loan.storage.len() {
             loan.storage
                 .try_reserve_exact(bytes - loan.storage.len())
-                .map_err(anyhow::Error::from)
-                .map_err(E::from)?;
+                .map_err(|error| E::from(error.into()))?;
             loan.storage.resize(bytes, 0);
         }
         operation(loan.state, &mut loan.storage[..bytes])
@@ -213,7 +215,7 @@ impl ScalableState {
         register: u8,
         value: [u64; 2],
     ) -> Result<()> {
-        ensure!(is_z_register(register), "vector register out of range");
+        require!(is_z_register(register), "vector register out of range");
         if self.mode.streaming() {
             let start = usize::from(register) * self.upper_vector_bytes();
             let end = start + self.upper_vector_bytes();
@@ -278,7 +280,7 @@ impl ScalableState {
     ///
     /// # Safety
     ///
-    /// The callback must not retain pointers or references from the view, access
+    /// The callback must not keep pointers or references from the view, access
     /// memory outside the described register buffers, modify pointer/length/mode
     /// fields, or unwind after changing controls. It may update register bytes,
     /// TPIDR2 and FPMR. Guest RAM must not alias this storage or its Rust owner.
@@ -362,15 +364,15 @@ impl ScalableState {
     }
 
     fn check_vector(&self, register: u8, bytes: usize) -> Result<()> {
-        ensure!(self.mode.streaming(), "Z register requires streaming mode");
-        ensure!(is_z_register(register), "vector register out of range");
-        ensure!(bytes == self.length.bytes(), "Z register length mismatch");
+        require!(self.mode.streaming(), "Z register requires streaming mode");
+        require!(is_z_register(register), "vector register out of range");
+        require!(bytes == self.length.bytes(), "Z register length mismatch");
         Ok(())
     }
 
     fn check_predicate_bytes(&self, bytes: usize) -> Result<()> {
-        ensure!(self.mode.streaming(), "predicate requires streaming mode");
-        ensure!(
+        require!(self.mode.streaming(), "predicate requires streaming mode");
+        require!(
             bytes == self.length.predicate_bytes(),
             "predicate length mismatch"
         );
@@ -379,7 +381,7 @@ impl ScalableState {
 
     fn predicate_range(&self, register: u8, bytes: usize) -> Result<core::ops::Range<usize>> {
         self.check_predicate_bytes(bytes)?;
-        ensure!(
+        require!(
             is_predicate_register(register),
             "predicate register out of range"
         );
@@ -393,18 +395,18 @@ impl ScalableState {
         bytes: usize,
         lookup: bool,
     ) -> Result<core::ops::Range<usize>> {
-        ensure!(
+        require!(
             self.mode.za_enabled(),
             "matrix register requires ZA enabled"
         );
-        ensure!(!lookup || self.sme2, "ZT0 requires SME2");
+        require!(!lookup || self.sme2, "ZT0 requires SME2");
         let limit = if lookup {
             LOOKUP_TABLE_BYTES
         } else {
             self.za_bytes()
         };
         let end = offset.checked_add(bytes).filter(|end| *end <= limit);
-        let end = end.ok_or_else(|| anyhow::anyhow!("matrix register range out of bounds"))?;
+        let end = end.ok_or_else(|| refuse!("matrix register range out of bounds"))?;
         let base = if lookup { self.za_bytes() } else { 0 };
         Ok(base + offset..base + end)
     }
@@ -434,6 +436,7 @@ pub mod block;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Result;
     use stela_compiler::aarch64::scalable::MAX_VECTOR_BYTES;
 
     fn length(bytes: usize) -> VectorLength {
@@ -542,7 +545,7 @@ mod tests {
     }
 
     #[test]
-    fn clone_and_scoped_view_keep_storage_independent_and_stable() -> Result<()> {
+    fn clones_and_views_keep_storage_independent() -> Result<()> {
         let mut state = ScalableState::new(length(32), true);
         let mut registers = GuestState::default();
         state.apply_mode(&mut registers, ScalableMode::new(true, true))?;

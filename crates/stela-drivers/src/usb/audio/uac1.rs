@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //! USB Audio 1.0 Type-I PCM: descriptor frequencies and endpoint controls.
 //! Reference: Linux sound/usb/{format,clock,mixer}.c, pinned in THIRD_PARTY.md.
-//! Alan Cox, Thomas Sailer, Takashi Iwai and Daniel Mack retain their notices.
+//! Alan Cox, Thomas Sailer, Takashi Iwai and Daniel Mack keep their notices.
 use super::{Binding, Control, Entity, Error, Format, Graph, RateRange, Sync};
 use super::{CLASS, STREAMING_SUBCLASS, UAC1};
 use crate::{
     audio::Direction,
     bytes::le16,
-    usb::xhci::{Interface, setup},
+    usb::descriptor::{Interface, setup},
 };
 use alloc::vec::Vec;
 
@@ -199,7 +199,7 @@ fn graph(control: &Interface) -> Result<(Graph, Vec<u8>), Error> {
         entities,
     };
     graph.validate()?;
-    // Validate feature-channel extents against the actual source cluster.
+    // Validate feature-channel extents against the source cluster.
     for entity in &graph.entities {
         if let Entity::Feature {
             source, controls, ..
@@ -424,7 +424,7 @@ pub(super) fn binding(
     while at < configuration.len() {
         let n = usize::from(configuration[at]);
         let d = &configuration[at..at + n]; // scope() validated all extents
-        if d[1] == crate::usb::xhci::INTERFACE_ASSOCIATION_DESCRIPTOR {
+        if d[1] == crate::usb::descriptor::INTERFACE_ASSOCIATION_DESCRIPTOR {
             let range = u16::from(d[2])..u16::from(d[2]) + u16::from(d[3]);
             if !range.contains(&u16::from(control.number))
                 && collection.iter().any(|id| range.contains(&u16::from(*id)))

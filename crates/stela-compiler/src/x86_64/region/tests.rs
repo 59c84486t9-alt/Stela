@@ -335,7 +335,7 @@ fn leaf_entries_preserve_interior_targets_and_fallthroughs() {
 }
 
 #[test]
-fn clean_byte_load_tier_retains_five_nonclobbered_slots() {
+fn clean_byte_load_tier_keeps_five_nonclobbered_slots() {
     let load = instruction(
         2,
         Operation::Memory {
@@ -730,7 +730,7 @@ fn repeated_read_only_inputs_are_cached_without_architectural_writes() {
 }
 
 #[test]
-fn pair_loads_retain_clean_results_and_reject_changed_shared_recipe() {
+fn pair_loads_keep_clean_results_and_reject_changed_shared_recipe() {
     let data = [Register::X(16), Register::X(17)];
     let operation = Operation::MemoryPair {
         transfer: MemoryTransfer::Load {
@@ -1463,7 +1463,7 @@ fn define_flags(destination: Register, source: Register) -> Operation {
 }
 
 #[test]
-fn profiled_region_counts_actual_cross_register_renaming_and_flag_pressure() {
+fn profiled_region_counts_cross_register_renaming_and_flag_pressure() {
     let renamed = [
         instruction(0, define_flags(Register::X(0), Register::X(0))),
         instruction(1, add(Register::X(1), Register::X(0))),
@@ -1668,7 +1668,7 @@ fn caller_pool_is_still_exact_for_legacy_cost_and_load_chunk() {
 }
 
 #[test]
-fn wider_loop_admission_uses_actual_capacity_not_five_participants() {
+fn wider_loop_admission_uses_capacity_not_five_participants() {
     let mut instructions: Vec<_> = (0..7)
         .map(|index| {
             instruction(

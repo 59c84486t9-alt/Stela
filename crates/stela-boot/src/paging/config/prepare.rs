@@ -1,5 +1,5 @@
-//! Actual firmware resource observations, captured before EBS. They become
-//! permissions only when joined to this boot's real retained root/controller
+//! Firmware resource observations, captured before EBS. They become
+//! permissions only when joined to this boot's real root/controller
 //! handoff and the single native mapping registry.
 use super::{APERTURE, Error, LEAVES, PAGE};
 use alloc::vec::Vec;
@@ -29,7 +29,7 @@ impl Prepared {
         }
         let physical_bits = core::arch::x86_64::__cpuid(0x8000_0008).eax as u8;
         let rsdp = crate::storage::rsdp().ok_or(Error::ResourceInventory)?;
-        // SAFETY: actual UEFI configuration table before EBS; the ACPI parser
+        // SAFETY: UEFI configuration table before EBS; the ACPI parser
         // checks the source table/checksum and returns owned MCFG observations.
         let table = unsafe { acpi::find(rsdp, b"MCFG") }.map_err(|_| Error::ResourceInventory)?;
         let all = acpi::mcfg(table).map_err(|_| Error::ResourceInventory)?;
@@ -37,12 +37,12 @@ impl Prepared {
         let handles = boot::find_handles::<PciRootBridgeIo>()
             .map_err(|error| Error::Firmware(error.status()))?;
         let mut roots = Vec::new();
-        // SAFETY: actual pre-EBS BSP; joined MP callbacks and this short
+        // SAFETY: pre-EBS BSP; joined MP callbacks and this short
         // Notify-level read exclude event-driven root settings changes. No
         // connect/disconnect/assignment occurs while copying descriptors.
         let tpl = unsafe { boot::raise_tpl(boot::Tpl::NOTIFY) };
         for (index, handle) in handles.into_iter().enumerate() {
-            // SAFETY: boot-only read of the genuine protocol. Firmware retains
+            // SAFETY: boot-only read of the protocol. Firmware keeps
             // the descriptor storage; configuration() copies its data. Neither
             // this borrow nor any callback address survives capture/EBS.
             let bridge = unsafe {
@@ -147,7 +147,7 @@ impl Prepared {
         }
         Ok(result)
     }
-    /// Allocate actual empty leaf tables before EBS. No device is mapped yet.
+    /// Allocate empty leaf tables before EBS. No device is mapped yet.
     pub(crate) fn map(&mut self, tables: &mut super::super::Tables) -> Result<(), Error> {
         if self.leaves.is_some() {
             return Err(Error::ResourceConflict);

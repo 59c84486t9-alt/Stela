@@ -1,0 +1,240 @@
+use super::{
+    Memory, TestService, call, connect, new_function, new_library, render_pipeline_request,
+    service, status,
+};
+use crate::metal::service::wire::{
+    BufferResponse, ComputePipelineResponse, Empty, FunctionHandleRequest, FunctionHandleResponse,
+    Handle, LinkedFunctionsRecord, NewComputePipelineRequest, NewFunctionTableRequest,
+    NewRenderPipelineRequest, Operation, RenderPipelineResponse, SetFunctionsRequest, Span, Status,
+};
+use core::num::NonZeroU64;
+
+/// Links `functions` with Metal's default call stack depth.
+fn linked(memory: &mut Memory, functions: &[u64]) -> LinkedFunctionsRecord {
+    LinkedFunctionsRecord {
+        functions: memory.records(functions),
+        private_functions: Span::default(),
+        libraries: Span::default(),
+        max_call_stack_depth: 1,
+    }
+}
+
+fn compute_pipeline(
+    service: &mut TestService,
+    connection: NonZeroU64,
+    function: u64,
+    linked_functions: LinkedFunctionsRecord,
+    flags: u64,
+    memory: &mut Memory,
+) -> Result<ComputePipelineResponse, super::Outcome> {
+    let request = NewComputePipelineRequest {
+        compute_function: function,
+        max_total_threads_per_threadgroup: 0,
+        stage_input: Default::default(),
+        linked_functions,
+        flags,
+    };
+    call(
+        service,
+        connection,
+        Operation::NewComputePipeline,
+        &request,
+        memory,
+    )
+}
+
+fn handle(
+    service: &mut TestService,
+    connection: NonZeroU64,
+    pipeline: u64,
+    function: u64,
+    stage: u64,
+) -> Result<FunctionHandleResponse, super::Outcome> {
+    let request = FunctionHandleRequest {
+        pipeline,
+        function,
+        stage,
+    };
+    call(
+        service,
+        connection,
+        Operation::FunctionHandle,
+        &request,
+        &mut Memory::default(),
+    )
+}
+
+#[test]
+fn compute_pipelines_link_functions_and_answer_their_handles() {
+    let mut service = service();
+    let connection = connect(&mut service);
+    let memory = &mut Memory::default();
+    let library = new_library(&mut service, connection, memory);
+    let mut function = |name| {
+        new_function(&mut service, connection, library, name, &[], memory)
+            .unwrap()
+            .handle
+    };
+    let (kernel, visible) = (function("kernel"), function("visible"));
+    let functions = linked(memory, &[visible]);
+    let pipeline =
+        compute_pipeline(&mut service, connection, kernel, functions, 0, memory).unwrap();
+    assert_eq!(pipeline.thread_execution_width, 32);
+    assert_eq!(pipeline.resource_id, 0, "not for indirect command buffers");
+    assert_eq!(
+        handle(&mut service, connection, pipeline.handle, visible, 0),
+        Ok(FunctionHandleResponse { value: 1 })
+    );
+    assert_eq!(
+        handle(&mut service, connection, pipeline.handle, kernel, 0),
+        Ok(FunctionHandleResponse { value: 0 })
+    );
+    assert_eq!(
+        status(handle(
+            &mut service,
+            connection,
+            pipeline.handle,
+            visible,
+            1
+        )),
+        Status::Malformed
+    );
+    assert_eq!(
+        status(compute_pipeline(
+            &mut service,
+            connection,
+            kernel,
+            LinkedFunctionsRecord::default(),
+            1 << 40,
+            memory,
+        )),
+        Status::Malformed
+    );
+
+    // A visible function table holds handle values.
+    let table: BufferResponse = call(
+        &mut service,
+        connection,
+        Operation::NewFunctionTable,
+        &NewFunctionTableRequest { function_count: 4 },
+        memory,
+    )
+    .unwrap();
+    assert_ne!(table.gpu_address, 0);
+    let set = SetFunctionsRequest {
+        table: table.handle,
+        index: 2,
+        handles: memory.records(&[1u64, 0]),
+    };
+    call::<_, Empty>(
+        &mut service,
+        connection,
+        Operation::SetFunctions,
+        &set,
+        memory,
+    )
+    .unwrap();
+    let past = SetFunctionsRequest { index: 3, ..set };
+    assert_eq!(
+        status(call::<_, Empty>(
+            &mut service,
+            connection,
+            Operation::SetFunctions,
+            &past,
+            memory
+        )),
+        Status::Invalid
+    );
+
+    // The pipeline keeps the functions its descriptor named.
+    let release = |service: &mut TestService, handle| {
+        status(call::<_, Empty>(
+            service,
+            connection,
+            Operation::Release,
+            &Handle { handle },
+            &mut Memory::default(),
+        ))
+    };
+    assert_eq!(release(&mut service, kernel), Status::Ok);
+    assert_eq!(release(&mut service, visible), Status::Ok);
+    assert_eq!(release(&mut service, library), Status::Ok);
+    assert_eq!(
+        handle(&mut service, connection, pipeline.handle, visible, 0).map_err(|o| o.status),
+        Err(Status::StaleHandle)
+    );
+    assert_eq!(release(&mut service, pipeline.handle), Status::Ok);
+}
+
+#[test]
+fn render_pipelines_decode_their_targets_and_stages() {
+    let mut service = service();
+    let connection = connect(&mut service);
+    let memory = &mut Memory::default();
+    let library = new_library(&mut service, connection, memory);
+    let mut function = |name| {
+        new_function(&mut service, connection, library, name, &[], memory)
+            .unwrap()
+            .handle
+    };
+    let (vertex, fragment, visible) = (
+        function("vertex"),
+        function("fragment"),
+        function("visible"),
+    );
+    let request = NewRenderPipelineRequest {
+        fragment_linked_functions: linked(memory, &[visible]),
+        ..render_pipeline_request(vertex, fragment)
+    };
+    let pipeline: RenderPipelineResponse = call(
+        &mut service,
+        connection,
+        Operation::NewRenderPipeline,
+        &request,
+        memory,
+    )
+    .unwrap();
+    // MTLRenderStageFragment, then MTLRenderStageVertex.
+    assert_eq!(
+        handle(&mut service, connection, pipeline.handle, visible, 2),
+        Ok(FunctionHandleResponse { value: 1 })
+    );
+    assert_eq!(
+        handle(&mut service, connection, pipeline.handle, visible, 1),
+        Ok(FunctionHandleResponse { value: 0 })
+    );
+    let stage = |service: &mut TestService, stage| {
+        status(handle(service, connection, pipeline.handle, visible, stage))
+    };
+    assert_eq!(
+        stage(&mut service, 4),
+        Status::Unsupported,
+        "tile functions"
+    );
+    assert_eq!(stage(&mut service, 3), Status::Malformed, "two stages");
+
+    let mut masked = request;
+    masked.targets.color_attachments[0].write_mask = 1 << 4;
+    assert_eq!(
+        status(call::<_, RenderPipelineResponse>(
+            &mut service,
+            connection,
+            Operation::NewRenderPipeline,
+            &masked,
+            memory,
+        )),
+        Status::Malformed
+    );
+    let mut wrong = request;
+    wrong.fragment_function = pipeline.handle;
+    assert_eq!(
+        status(call::<_, RenderPipelineResponse>(
+            &mut service,
+            connection,
+            Operation::NewRenderPipeline,
+            &wrong,
+            memory,
+        )),
+        Status::StaleHandle
+    );
+}

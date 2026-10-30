@@ -203,7 +203,7 @@ fn single_store(bytes: u8) -> Option<&'static [u8]> {
 
 /// Inspect the exact shared store: address, the data's frame load (or
 /// zero) into RCX, and one host store, or with `crossing` the page-crossing
-/// store recipe (`memory_store::crossing_store`), retaining its emitted
+/// store recipe (`memory_store::crossing_store`), keeping its emitted
 /// instruction boundaries. Branches stay within that recipe. Also returns the
 /// index of the staged data's segment in the ends.
 pub fn ordinary_store_ends(

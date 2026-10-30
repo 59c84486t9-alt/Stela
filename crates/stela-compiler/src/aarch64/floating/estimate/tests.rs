@@ -125,7 +125,7 @@ fn zero_infinity_and_negative_domains_have_operation_specific_results() {
 }
 
 #[test]
-fn ah_suppresses_all_status_and_accepts_retained_enables_without_forcing_fz16() {
+fn ah_suppresses_all_status_and_accepts_kept_enables_without_forcing_fz16() {
     let enables = EXCEPTIONS << FPCR_EXCEPTION_ENABLE_SHIFT;
     for format in FORMATS {
         for kind in FLOATING_KINDS {
@@ -356,7 +356,7 @@ fn unsigned_domains_ignore_every_raw_control_and_preserve_status() {
 }
 
 #[test]
-fn ah_zero_floating_kinds_retain_explicit_enable_refusals() {
+fn ah_zero_floating_kinds_keep_explicit_enable_refusals() {
     for exception in [
         INVALID,
         DIVIDE_BY_ZERO,

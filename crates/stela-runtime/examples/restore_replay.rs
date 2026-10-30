@@ -7,6 +7,7 @@ use std::{
     path::Path,
     task::Poll,
 };
+use stela_contracts::refuse;
 use {
     stela_formats::payload::PayloadManifest, stela_formats::payload::ReadAt,
     stela_runtime::restore::Error, stela_runtime::restore::answers::Answers,
@@ -52,7 +53,7 @@ impl ByteStream for Transcript {
         Poll::Ready(
             self.input
                 .read(&mut b[..n])
-                .map_err(|e| Error::Transport(e.to_string())),
+                .map_err(|error| Error::Transport(refuse!("host stream: {error}", ?error))),
         )
     }
     fn write(&mut self, b: &[u8]) -> Poll<stela_runtime::restore::Result<usize>> {
@@ -63,7 +64,7 @@ impl ByteStream for Transcript {
         Poll::Ready(
             self.output
                 .write(&b[..b.len().min(11)])
-                .map_err(|e| Error::Transport(e.to_string())),
+                .map_err(|error| Error::Transport(refuse!("host stream: {error}", ?error))),
         )
     }
 }

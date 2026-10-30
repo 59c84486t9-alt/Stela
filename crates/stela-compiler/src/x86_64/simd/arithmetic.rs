@@ -223,7 +223,7 @@ fn zero_product(operation: BinaryOperation) -> bool {
 }
 
 /// The full path's status checks distinguish exact zeros from underflowed
-/// nonzero results. Division retains its existing conservative domain.
+/// nonzero results. Division keeps its existing conservative domain.
 fn accepts_zero(operation: BinaryOperation) -> bool {
     match operation {
         BinaryOperation::Add

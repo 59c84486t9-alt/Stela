@@ -148,7 +148,7 @@ fn inspect_archive(path: &Path, stela_library: bool) -> Result<Value> {
         .and_then(|name| name.to_str())
         .context("archive name")?;
     // The libraries Stela's Meson definition builds must remain independent
-    // of Linux device access. Inspect actual objects rather than only Meson
+    // of Linux device access. Inspect objects rather than only Meson
     // options. Upstream
     // archives keep device queries Stela never calls; libdrm is headers
     // only, so a live call into it cannot link.
@@ -382,7 +382,7 @@ pub fn build(options: BuildOptions<'_>) -> Result<()> {
         })
         .transpose()?;
     // Original ACO optionally invokes this original disassembler through PATH.
-    // Bind its actual bytes rather than treating a successful IR fallback as
+    // Bind its bytes rather than treating a successful IR fallback as
     // evidence that emitted machine code was decoded.
     let clrx_disassembler = llvm_sdk
         .as_ref()

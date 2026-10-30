@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! RMI paged I2C and SMBus 2/3 mapping-table transports. Linux retained notices
+//! RMI paged I2C and SMBus 2/3 mapping-table transports. Linux kept notices
 //! and exact pinned donor hashes are in input/THIRD_PARTY.md.
 use super::{Error, State};
 use crate::bus::{i2c, smbus};
@@ -158,12 +158,20 @@ impl<B: i2c::Bus> Transport for I2c<B> {
 }
 
 /// The SMBus RMI sensor shares physical state with its PS/2 companion. The
-/// platform must own both transports and actually reset the companion before
+/// platform must own both transports and reset the companion before
 /// activation, then restore its known PS/2 state on detach. An AML identity or
 /// a local flag cannot implement these physical effects.
 pub trait Companion {
     fn reset_for_smbus(&mut self) -> Result<(), CompanionError>;
     fn restore_ps2(&mut self) -> Result<(), CompanionError>;
+}
+impl<C: Companion + ?Sized> Companion for alloc::boxed::Box<C> {
+    fn reset_for_smbus(&mut self) -> Result<(), CompanionError> {
+        (**self).reset_for_smbus()
+    }
+    fn restore_ps2(&mut self) -> Result<(), CompanionError> {
+        (**self).restore_ps2()
+    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CompanionError {
@@ -188,7 +196,7 @@ pub struct Smbus<B, C, T> {
     state: State,
 }
 impl<B: smbus::Bus, C: Companion, T: i2c::Timer> Smbus<B, C, T> {
-    /// `reset_delay_us` is the actual platform-qualified companion firmware
+    /// `reset_delay_us` is the platform-checked companion firmware
     /// settling time (Linux default100ms). It runs before every mode/version
     /// read, independently of the controller's later F01 settling interval.
     pub fn new(
@@ -226,7 +234,7 @@ impl<B: smbus::Bus, C: Companion, T: i2c::Timer> Smbus<B, C, T> {
         while self.timer.elapsed_us(start) < self.reset_delay_us {
             self.timer.relax();
         }
-        // Reading this byte actually switches the device into SMBus mode.
+        // Reading this byte switches the device into SMBus mode.
         let mut version = 0;
         self.bus
             .transaction(
@@ -269,7 +277,7 @@ impl<B: smbus::Bus, C: Companion, T: i2c::Timer> Smbus<B, C, T> {
             length as u8,
             u8::from(!read),
         ];
-        // Commit the software cache only once the actual map write is accepted.
+        // Commit the software cache only once the map write is accepted.
         self.bus
             .transaction(
                 self.address,
@@ -369,7 +377,7 @@ impl<B: smbus::Bus, C: Companion, T: i2c::Timer> Transport for Smbus<B, C, T> {
     }
     fn reset(&mut self, _command_address: u16) -> Result<(), Error> {
         active(self.state)?;
-        // Linux intentionally omits the RMI software RESET on SMBus: only the
+        // Linux omits the RMI software RESET on SMBus: only the
         // exclusive PS/2 companion may reset this shared physical device.
         let result = self.enable();
         self.finish(result)

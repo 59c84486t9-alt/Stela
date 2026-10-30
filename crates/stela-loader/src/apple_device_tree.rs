@@ -15,9 +15,10 @@
 //! they are while the value keeps its length.
 pub mod assigned;
 
+use crate::Result;
 use alloc::{borrow::ToOwned, format, string::String, vec, vec::Vec};
-use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
+use stela_contracts::{refuse, require};
 pub use stela_formats::boot_bundle::schema::Placeholder;
 
 /// `kPropNameLength`: the NUL-padded property name field.
@@ -49,11 +50,12 @@ pub struct Property {
 
 impl Property {
     pub fn new(name: &str, value: Vec<u8>) -> Result<Self> {
-        ensure!(
+        require!(
             !name.is_empty() && name.len() < PROPERTY_NAME_BYTES && !name.contains('\0'),
-            "property name {name:?} does not fit the 32-byte ADT name field"
+            "property name {name} does not fit the 32-byte ADT name field",
+            ?name
         );
-        ensure!(
+        require!(
             value.len() <= LENGTH_MASK as usize,
             "property value is too large"
         );
@@ -132,13 +134,14 @@ impl Node {
     /// position; template slots such as `UnusedIntegerProperty0` are filled
     /// this way.
     pub fn replace_property(&mut self, old: &str, name: &str, value: Vec<u8>) -> Result<()> {
-        ensure!(
+        require!(
             old == name || self.property(name).is_none(),
-            "node already has a property {name}"
+            "node already has a property {name}",
+            name
         );
         let slot = self
             .property_mut(old)
-            .with_context(|| format!("node has no property {old}"))?;
+            .ok_or_else(|| refuse!("node has no property {old}", old))?;
         *slot = Property::new(name, value)?;
         Ok(())
     }
@@ -191,17 +194,21 @@ impl Reader<'_> {
         let end = self
             .position
             .checked_add(length)
-            .context("DeviceTree offset overflow")?;
-        let bytes = self
-            .bytes
-            .get(self.position..end)
-            .with_context(|| format!("DeviceTree truncated at offset {:#x}", self.position))?;
+            .ok_or(refuse!("DeviceTree offset overflow"))?;
+        let bytes = self.bytes.get(self.position..end).ok_or_else(|| {
+            refuse!(
+                "DeviceTree truncated at offset {position:#x}",
+                position = self.position
+            )
+        })?;
         self.position = end;
         Ok(bytes)
     }
 
     fn word(&mut self) -> Result<u32> {
-        Ok(u32::from_le_bytes(self.take(WORD_BYTES)?.try_into()?))
+        Ok(u32::from_le_bytes(
+            self.take(WORD_BYTES)?.try_into().unwrap(),
+        ))
     }
 
     fn remaining(&self) -> usize {
@@ -214,15 +221,16 @@ impl Reader<'_> {
         let end = raw_name
             .iter()
             .position(|&b| b == 0)
-            .with_context(|| format!("property name at {at:#x} is not NUL-terminated"))?;
-        ensure!(
+            .ok_or_else(|| refuse!("property name at {at:#x} is not NUL-terminated", at))?;
+        require!(
             raw_name[end..].iter().all(|&b| b == 0),
-            "property name at {at:#x} has bytes after its terminator"
+            "property name at {at:#x} has bytes after its terminator",
+            at
         );
         let name = core::str::from_utf8(&raw_name[..end])
-            .with_context(|| format!("property name at {at:#x} is not UTF-8"))?
+            .map_err(|_| refuse!("property name at {at:#x} is not UTF-8", at))?
             .to_owned();
-        ensure!(!name.is_empty(), "empty property name at {at:#x}");
+        require!(!name.is_empty(), "empty property name at {at:#x}", at);
         let encoded = self.word()?;
         let length = (encoded & LENGTH_MASK) as usize;
         let value = self.take(length)?.to_vec();
@@ -241,12 +249,16 @@ impl Reader<'_> {
     }
 
     fn node(&mut self, depth: usize) -> Result<Node> {
-        ensure!(depth < MAX_DEPTH, "DeviceTree nesting exceeds {MAX_DEPTH}");
+        require!(
+            depth < MAX_DEPTH,
+            "DeviceTree nesting exceeds {MAX_DEPTH}",
+            MAX_DEPTH
+        );
         let property_count = self.word()? as usize;
         let child_count = self.word()? as usize;
         // Every property and child occupies at least a header; reject counts
         // that cannot fit before allocating for them.
-        ensure!(
+        require!(
             property_count.saturating_mul(PROPERTY_HEADER_BYTES)
                 + child_count.saturating_mul(NODE_HEADER_BYTES)
                 <= self.remaining(),
@@ -269,10 +281,10 @@ impl DeviceTree {
     pub fn parse(bytes: &[u8]) -> Result<Self> {
         let mut reader = Reader { bytes, position: 0 };
         let root = reader.node(0)?;
-        ensure!(
+        require!(
             reader.remaining() == 0,
-            "{} trailing bytes after the DeviceTree root",
-            reader.remaining()
+            "{remaining} trailing bytes after the DeviceTree root",
+            remaining = reader.remaining()
         );
         Ok(Self { root })
     }
@@ -303,7 +315,7 @@ impl DeviceTree {
 
     pub fn set_property(&mut self, path: &str, name: &str, value: Vec<u8>) -> Result<()> {
         self.node_mut(path)
-            .with_context(|| format!("DeviceTree has no node {path}"))?
+            .ok_or_else(|| refuse!("DeviceTree has no node {path}", path))?
             .set_property(name, value)
     }
 
@@ -311,7 +323,7 @@ impl DeviceTree {
     pub fn ensure_child(&mut self, parent: &str, child: &str) -> Result<()> {
         let node = self
             .node_mut(parent)
-            .with_context(|| format!("DeviceTree has no node {parent}"))?;
+            .ok_or_else(|| refuse!("DeviceTree has no node {parent}", parent))?;
         if node.child(child).is_none() {
             node.children.push(Node::named(child)?);
         }
@@ -350,7 +362,7 @@ impl DeviceTree {
                 .children
                 .iter()
                 .position(|c| c.name() == Some(component))
-                .with_context(|| format!("DeviceTree has no node {path}"))?;
+                .ok_or_else(|| refuse!("DeviceTree has no node {path}", path))?;
             offset += node.children[..index]
                 .iter()
                 .map(Node::encoded_bytes)
@@ -369,7 +381,7 @@ impl DeviceTree {
             }
             offset += property.encoded_bytes();
         }
-        bail!("DeviceTree node {path} has no property {name}")
+        Err(refuse!("DeviceTree node {path} has no property {name}", path, name).into())
     }
 }
 
@@ -415,6 +427,7 @@ fn write_node(node: &Node, out: &mut Vec<u8>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Result;
 
     fn property(name: &str, value: &[u8], flags: u32) -> Vec<u8> {
         let mut out = vec![0u8; PROPERTY_NAME_BYTES];

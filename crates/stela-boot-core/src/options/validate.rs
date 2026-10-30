@@ -4,6 +4,7 @@ use super::*;
 pub(super) fn system(options: &System) -> Result<(), Error> {
     restore(options)?;
     wifi(options)?;
+    ipv4(options)?;
     install(options)?;
     boot_selection(options)?;
     dram(options)?;
@@ -35,6 +36,15 @@ fn restore(options: &System) -> Result<(), Error> {
 fn wifi(options: &System) -> Result<(), Error> {
     if options.ssid.is_none() && (options.wifi_key.is_some() || options.wifi_country.is_some()) {
         return Err(Error::Constraint(Constraint::WifiDependency));
+    }
+    Ok(())
+}
+
+fn ipv4(options: &System) -> Result<(), Error> {
+    if let Some(gateway) = options.ipv4_gateway
+        && !options.ipv4.is_some_and(|ipv4| ipv4.neighbors(gateway))
+    {
+        return Err(Error::Constraint(Constraint::Ipv4Gateway));
     }
     Ok(())
 }

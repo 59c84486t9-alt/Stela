@@ -2,7 +2,7 @@
 // Copyright (C) 2015 Intel Corporation
 //! Bounded secure boot stages, adapted from pinned btintel_bootloader_setup_tlv.
 //! IML inherits only named prior-observed ROM inputs after the same hardware's
-//! genuine boot event and matching image/version. No FW_ID is guessed before IML.
+//! boot event and matching image/version. No FW_ID is guessed before IML.
 use super::*;
 
 struct Prepared<'p> {
@@ -91,7 +91,7 @@ impl<B: CommandIo> Engine<'_, B> {
                 Some(_) => firmware::RSA_BYTES + 321,
             },
         });
-        // An initial IML image has no invented DDC companion. For the actual
+        // An initial IML image has no invented DDC companion. For the
         // operational stage, record BOTH immutable loads before the first error.
         let configuration_result = (!intermediate).then(|| {
             provider.load(Requirement {
@@ -124,7 +124,7 @@ impl<B: CommandIo> Engine<'_, B> {
         })
     }
     fn upload(&mut self, sfi: &firmware::Sfi<'_>) -> Result<[u8; 6]> {
-        // Each stage requires its own secure result and genuine boot event.
+        // Each stage requires its own secure result and boot event.
         self.secure = false;
         self.boot = None;
         self.allow_secure = false;
@@ -153,7 +153,7 @@ impl<B: CommandIo> Engine<'_, B> {
         if !self.events.is_empty() {
             return Err(Error::Protocol("stale response before reset"));
         }
-        // Reset has actual transport delivery only, never a synthetic HCI CC.
+        // Reset has transport delivery only, never a synthetic HCI CC.
         self.submit(INTEL_RESET, &reset)?;
         self.vendor(true)?;
         self.hci.finish_boot()?;

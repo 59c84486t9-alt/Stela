@@ -135,7 +135,7 @@ fn direct(code: &mut Code, bytes: u8, operation: Rmw, discard: bool) {
 fn retry(code: &mut Code, bytes: u8, operation: Rmw) {
     read_rax(code, bytes);
     let repeat = code.len();
-    // Failed narrow CMPXCHG replaces AL/AX, retaining the zero upper bits from
+    // Failed narrow CMPXCHG replaces AL/AX, keeping the zero upper bits from
     // the initial exact-width read. R8 holds proposed data; RAX stays old data.
     let wide = register_size(bytes);
     code.asm().mov(wide, Gpr::R8, Gpr::Rax);

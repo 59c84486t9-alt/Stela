@@ -1,6 +1,8 @@
 //! Extended-state geometry and control validation for the boot entry ABI.
 mod image;
 pub use image::{ImageError, ImageFormat};
+mod owner;
+pub use owner::XstateOwner;
 pub const LEGACY_BYTES: usize = 512;
 pub const STANDARD_HEADER_OFFSET: usize = LEGACY_BYTES;
 pub const STANDARD_HEADER_BYTES: usize = 64;
@@ -16,6 +18,22 @@ pub const FORMAT_XSAVE_LEGACY_SSE: u64 = 2;
 pub struct EntryMetadata {
     format: u64,
     mask: u64,
+}
+impl EntryMetadata {
+    /// Decode only the tags emitted by the standard-save entry. This
+    /// pure operation grants no CPU, stack or image ownership.
+    pub fn save_format(&self) -> Option<SaveFormat> {
+        match (self.format, self.mask) {
+            (FORMAT_FXSAVE, 0) => Some(SaveFormat::Fxsave),
+            (FORMAT_XSAVE, mask) if mask & (X87 | SSE) == X87 | SSE => {
+                Some(SaveFormat::Xsave { mask })
+            }
+            (FORMAT_XSAVE_LEGACY_SSE, mask) if mask & X87 != 0 && mask & SSE == 0 => {
+                Some(SaveFormat::XsaveLegacySse { mask })
+            }
+            _ => None,
+        }
+    }
 }
 pub const ENTRY_METADATA_BYTES: usize = core::mem::size_of::<EntryMetadata>();
 pub const ENTRY_FORMAT_OFFSET: usize = core::mem::offset_of!(EntryMetadata, format);
@@ -74,8 +92,8 @@ struct Component {
     compact_alignment: bool,
 }
 
-/// Assembly metadata is installed only with its actual descriptor owner. A
-/// copied number/ABI record is not a CPU, backing or entry authority.
+/// Assembly metadata is installed only with its descriptor owner. A
+/// copied number/ABI record is not a CPU, backing or entry permission.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct EntryAbi {
@@ -83,8 +101,8 @@ pub struct EntryAbi {
     pub image_bytes: u64,
     pub supported_mask: u64,
     pub xsave_available: u64,
-    /// 1 when the controls `configure_xstate` qualified enable XSAVE
-    /// (CR4.OSXSAVE). Entries use these qualified controls, which stay fixed
+    /// 1 when the controls `configure_xstate` checked enable XSAVE
+    /// (CR4.OSXSAVE). Entries use these checked controls, which stay fixed
     /// for the owner's lifetime, instead of reading CR0, CR4, EFER, IA32_XSS
     /// and IA32_XFD again: under a hypervisor each read is a VM exit, and
     /// every native block entry and return crosses this boundary.
@@ -344,7 +362,7 @@ mod tests {
     }
 
     #[test]
-    fn standard_geometry_retains_every_supported_user_component_and_full_size() {
+    fn standard_geometry_keeps_every_supported_user_component_and_full_size() {
         let layout = layout();
         assert_eq!(layout.abi.image_bytes, 2688);
         assert_eq!(
@@ -364,7 +382,7 @@ mod tests {
     }
 
     #[test]
-    fn osxsave_enable_boundary_retains_legacy_sse_without_manufacturing_xcr0() {
+    fn osxsave_enable_boundary_keeps_legacy_sse_without_manufacturing_xcr0() {
         let layout = layout();
         let mut actual = controls();
         actual.cr4 |= CR4_OSXSAVE;
@@ -519,5 +537,48 @@ mod tests {
             .unwrap_err(),
             LayoutError::ResourceLimit
         );
+    }
+}
+
+#[cfg(test)]
+mod metadata_tests {
+    use super::*;
+    #[test]
+    fn saved_metadata_tags_keep_legacy_and_extended_images_distinct() {
+        assert_eq!(
+            EntryMetadata {
+                format: FORMAT_FXSAVE,
+                mask: 0
+            }
+            .save_format(),
+            Some(SaveFormat::Fxsave)
+        );
+        assert_eq!(
+            EntryMetadata {
+                format: FORMAT_XSAVE,
+                mask: X87 | SSE | AVX
+            }
+            .save_format(),
+            Some(SaveFormat::Xsave {
+                mask: X87 | SSE | AVX
+            })
+        );
+        assert_eq!(
+            EntryMetadata {
+                format: FORMAT_XSAVE_LEGACY_SSE,
+                mask: X87
+            }
+            .save_format(),
+            Some(SaveFormat::XsaveLegacySse { mask: X87 })
+        );
+        for (format, mask) in [
+            (FORMAT_FXSAVE, X87),
+            (FORMAT_XSAVE, X87),
+            (FORMAT_XSAVE_LEGACY_SSE, X87 | SSE),
+            (FORMAT_XSAVE, 0),
+            (3, X87 | SSE),
+        ] {
+            assert_eq!(EntryMetadata { format, mask }.save_format(), None);
+        }
     }
 }

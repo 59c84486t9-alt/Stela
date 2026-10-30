@@ -127,7 +127,7 @@ impl Rtc {
     }
 }
 
-/// An outside-scratch retained-history owner, whose initial bytes the
+/// An outside-scratch kept-history owner, whose initial bytes the
 /// placement must supply explicitly (the native placement configuration).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Retained {

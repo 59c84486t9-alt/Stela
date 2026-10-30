@@ -1,4 +1,4 @@
-//! Source-system SCA reads whose actual canonical host RAM is read/write.
+//! Source-system SCA reads whose canonical host RAM is read/write.
 //! The CX16 alternative is never permission to perform a guest write.
 use super::{
     AccessError, SCA_BYTES, SCA_OFFSET_MASK, compare_exchange_part, read_part, validate_part,
@@ -12,7 +12,7 @@ enum Recipe {
 }
 
 /// A concrete native recipe and exact host footprint. Construction classifies
-/// code only; `read` separately requires actual target/mapping/gate authority.
+/// code only; `read` separately requires target/mapping/gate permission.
 #[derive(Debug, Clone, Copy)]
 pub(in crate::memory) struct Read {
     pointer: usize,
@@ -55,7 +55,7 @@ impl Read {
     }
 
     /// # Safety
-    /// The actual current host admits `target`. The entire footprint is pinned,
+    /// The current host admits `target`. The entire footprint is pinned,
     /// coherent WB, readable native RAM. For `writes_back`, it is also writable,
     /// every touched physical granule is held under the same all-writer gate,
     /// and an unchanged-value host writeback is permitted. Device/external DMA,
@@ -63,13 +63,15 @@ impl Read {
     /// operation neither publishes a source store nor invalidates reservations.
     pub(in crate::memory) unsafe fn read(self) -> Result<u128, AccessError> {
         if self.recipe == Recipe::Load {
-            // SAFETY: caller retains the exact readable load footprint/target.
+            // SAFETY: caller keeps the exact readable load footprint/target.
             return unsafe { read_part(self.pointer as *const u8, self.bytes, self.target) };
         }
         // A single locked CMPXCHG16B returns the SCA snapshot. Zero is replaced
         // only by zero; failure writes the observed old value. Host RW rights
         // are required even for a source read-only mapping. No retry or split
         // plain pair load is used, and neighboring bytes are unchanged.
+        // SAFETY: Recipe selection checked CX16 and aligned the full SCA footprint.
+        // read's caller pins it with read/write rights and holds its all-writer gate.
         let snapshot = unsafe {
             compare_exchange_part(self.footprint.0 as *mut u8, SCA_BYTES, 0, 0, self.target)
         }?;
@@ -86,12 +88,13 @@ mod tests {
     #[repr(align(16))]
     struct Storage(UnsafeCell<[u8; 32]>);
     // SAFETY: private test storage has no racing Rust references; native
-    // accesses use the monitor's actual physical writer/observer gates.
+    // accesses use the monitor's physical writer/observer gates.
     unsafe impl Send for Storage {}
+    // SAFETY: shared references rely on the same argument as `Send` above.
     unsafe impl Sync for Storage {}
 
     #[test]
-    fn actual_cx16_reads_preserve_every_byte_at_all_supported_offsets_and_widths() {
+    fn cx16_reads_preserve_every_byte_at_all_supported_offsets_and_widths() {
         let target = TargetCpu::X86_64_V2;
         if !target.supported() {
             return;
@@ -122,6 +125,7 @@ mod tests {
                     let mut expected = [0; 16];
                     expected[..bytes].copy_from_slice(&original[offset..offset + bytes]);
                     assert_eq!(actual, u128::from_le_bytes(expected));
+                    // SAFETY: no access is in flight, so reading the storage races nothing.
                     assert_eq!(unsafe { *storage.0.get() }, original);
                 }
             }

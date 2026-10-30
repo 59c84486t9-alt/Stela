@@ -40,7 +40,7 @@ pub enum InitializationError {
     LowerSecurity,
 }
 
-/// Actual initialized EL2 storage. Common fields own ELR/SPSR/ESR/FAR/VBAR once;
+/// Initialized EL2 storage. Common fields own ELR/SPSR/ESR/FAR/VBAR once;
 /// this is not another EL1 bank or a cached view of another control owner.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct El2Initialization {
@@ -343,7 +343,7 @@ mod tests {
         );
     }
     #[test]
-    fn bank_transitions_preserve_actual_stack_values_and_flags() {
+    fn bank_transitions_preserve_stack_values_and_flags() {
         let mut state = SystemState::new_with_higher_el(
             PSTATE_EL1H,
             0x1000,

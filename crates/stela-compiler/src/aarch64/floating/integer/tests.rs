@@ -363,7 +363,7 @@ fn javascript_modulo_range_fraction_and_zero_flags() {
 }
 
 #[test]
-fn retained_enables_decline_before_integer_or_special_value_effects() {
+fn kept_enables_decline_before_integer_or_special_value_effects() {
     for exception in [
         INVALID,
         super::super::DIVIDE_BY_ZERO,

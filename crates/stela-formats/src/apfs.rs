@@ -216,6 +216,12 @@ pub fn require_system_container<R: ReadAt>(namespace: &mut R) -> Result<()> {
             ApfsError::Malformed("more than one iBootSystemContainer partition")
         });
     };
+    // An interrupted restore leaves the partition without its container.
+    if !Container::starts_at(&mut *namespace, offset)? {
+        return Err(ApfsError::NotFound(
+            "an APFS container in the iBootSystemContainer partition".into(),
+        ));
+    }
     Container::open(namespace, offset)?.volume_with_role(volume::APFS_VOL_ROLE_XART)?;
     Ok(())
 }
@@ -406,6 +412,13 @@ pub(crate) mod tests {
             panic!("an ISC container without xART was accepted");
         };
         assert!(what.contains("0x100"), "{what}");
+        // A restore that partitioned the disk but stopped before formatting
+        // the container left no system container either.
+        let mut unformatted = on_typed_gpt(&[0; 4096], unique, ISC_PARTITION_TYPE);
+        let Err(ApfsError::NotFound(what)) = require_system_container(&mut unformatted) else {
+            panic!("an unformatted ISC partition was not reported missing");
+        };
+        assert!(what.contains("APFS container"), "{what}");
     }
 
     #[test]

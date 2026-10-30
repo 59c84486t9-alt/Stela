@@ -1,5 +1,5 @@
 //! Original J314s/T6000 source guards, independent of the earlier J473 ledger.
-//! These qualify resource and access contracts, never physical reset values.
+//! These check resource and access contracts, never physical reset values.
 #![cfg(feature = "std")]
 
 use sha2::{Digest, Sha256};
@@ -87,7 +87,7 @@ fn original_m1_table_covers_all_196_physical_records_without_initial_state_credi
     let (_, physical) = inventory(&adt());
     let bytes = iboot();
     // The returned range is 349 sixteen-byte rows. The auxiliary fields are
-    // not the all-zero J473 table and have no qualified initial-PS meaning.
+    // not the all-zero J473 table and have no checked initial-PS meaning.
     assert_eq!(word(&bytes, 0x42fa4), 0x5282ba0a); // byte extent 0x15d0
     let table = &bytes[0x1dd708..0x1decd8];
     assert_eq!(table.len(), 349 * 16);
@@ -110,7 +110,7 @@ fn original_m1_table_covers_all_196_physical_records_without_initial_state_credi
         5,
         "auxiliary field, never an initial power level"
     );
-    // Actual firmware setters read the physical register, preserve fields,
+    // Firmware setters read the physical register, preserve fields,
     // write a low-nibble target and poll target/current equality. Table
     // presence cannot substitute the original hardware reads or their effects.
     for (offset, opcode) in [
@@ -130,7 +130,7 @@ fn original_m1_table_covers_all_196_physical_records_without_initial_state_credi
 
 #[test]
 #[ignore = "oracle: STELA_TEST_PMGR_M1_ADT"]
-fn original_isp_has_actual_camera_dart_sensor_and_performance_requirements() {
+fn original_isp_has_camera_dart_sensor_and_performance_requirements() {
     let bytes = adt();
     let (records, physical) = inventory(&bytes);
     assert_eq!(physical[&0x28e5803a8], 0x125);
@@ -286,8 +286,8 @@ fn complete_t6000_request_routes_preserve_wait_and_provider_boundaries() {
     ] {
         assert_eq!(hex::encode(Sha256::digest(&bytes[start..end])), digest);
     }
-    // Resolve actual original call stubs through their pinned chained-fixup
-    // metadata. This is source identity, not a fabricated authenticated pointer
+    // Resolve original call stubs through their pinned chained-fixup
+    // metadata. This is source identity, not an invented authenticated pointer
     // installed in the executing guest.
     assert_eq!(quad(&bytes, 0x133dee0), 0x8011000002b2e458); // readPMGRReg
     assert_eq!(quad(&bytes, 0x133df08), 0x8011000002b2e4c8); // writePMGRReg
@@ -307,11 +307,11 @@ fn complete_t6000_request_routes_preserve_wait_and_provider_boundaries() {
     }
     assert_eq!(branch_target(&bytes, 0x2f0a500), 0x2f25904);
     assert_eq!(branch_target(&bytes, 0x2f0a53c), 0x2f258b4);
-    // VDD_CIO is a feature-qualified provider transaction, not another direct
+    // VDD_CIO is a feature-checked provider transaction, not another direct
     // MMIO completion. Its persistent enableMask and callback must remain owned.
     assert_eq!(word(&bytes, 0x2f0a908), 0x52800941); // feature4a
-    assert_eq!(word(&bytes, 0x2f0a974), 0xb905c92a); // retain enableMask
-    assert_eq!(word(&bytes, 0x2f0a9ac), 0xd73f0910); // actual provider call
+    assert_eq!(word(&bytes, 0x2f0a974), 0xb905c92a); // keep enableMask
+    assert_eq!(word(&bytes, 0x2f0a9ac), 0xd73f0910); // provider call
     let llb = original(
         "STELA_TEST_PMGR_M1_LLB",
         "f45549025d8cb4aa5e1cdb6107a25f90999f6b96da0b31a2f3cfb90561653ae1",
@@ -435,10 +435,10 @@ fn original_j314s_cram_aperture_consumers_and_copied_cleanup_are_exact() {
     assert_eq!(quad(&bytes, 0x3d8), 0x1fc038000);
     assert_eq!(quad(&bytes, 0x3e0), 0x1fc03c000); // first explicit zero-store interval
     assert_eq!(branch_target(&bytes, 0x28), 0x282c0); // before relocation/initialization
-    assert_eq!(word(&bytes, 0xcf274), 0xf0000ce3); // actual runtime-tail flag address
+    assert_eq!(word(&bytes, 0xcf274), 0xf0000ce3); // runtime-tail flag address
     assert_eq!(word(&bytes, 0xcf278), 0x91178063);
     assert_eq!(word(&bytes, 0xcf27c), 0x39400063); // unknown byte read before memory helper stores
-    assert_eq!(word(&bytes, 0x1a8), 0xa8817d5f); // actual early STP xzr pair
+    assert_eq!(word(&bytes, 0x1a8), 0xa8817d5f); // early STP xzr pair
     assert_eq!(branch_target(&bytes, 0x1b8), 0x224e8);
     assert_eq!(quad(&bytes, 0x22660), 0x1fc038000); // startup SP
     assert_eq!(branch_target(&bytes, 0x2250c), 0xf5210); // first identity load/store helper
@@ -449,13 +449,13 @@ fn original_j314s_cram_aperture_consumers_and_copied_cleanup_are_exact() {
     assert_eq!(branch_target(&bytes, 0xf5888), 0xcf804); // source span copy
     assert_eq!(branch_target(&bytes, 0xf58a4), 0xcf770); // remaining scratch initialization
     assert_eq!(branch_target(&bytes, 0x102a14), 0xf57ec); // prepare copied cleanup
-    assert_eq!(branch_target(&bytes, 0x102a18), 0xf7c60); // actual table translation
+    assert_eq!(branch_target(&bytes, 0x102a18), 0xf7c60); // table translation
     assert_eq!(branch_target(&bytes, 0xf7c74), 0x22a40); // select translation regime
     assert_eq!(branch_target(&bytes, 0xf7cd4), 0xf7afc); // page-table descriptor walk
     assert_eq!(branch_target(&bytes, 0x102de4), 0x59134); // final transfer adapter
     assert_eq!(branch_target(&bytes, 0x591b0), 0x108368);
     assert_eq!(branch_target(&bytes, 0x108368), 0x25dc8); // returns runtime scratch bounds
-    assert_eq!(word(&bytes, 0x591f4), 0xd63f0b1f); // actual authenticated indirect call
+    assert_eq!(word(&bytes, 0x591f4), 0xd63f0b1f); // authenticated indirect call
     // Release is inside the copied extent, not a standalone callable helper.
     assert_eq!(word(&bytes, 0x2c910), 0xd51bf702); // allocation count cleared before poll
     assert_eq!(branch_target(&bytes, 0x2ca48), 0x2cac0);
@@ -511,17 +511,17 @@ fn original_physical_counter_alias_is_read_only_and_separate_from_siq_tuning() {
         for caller in direct {
             assert_eq!(branch_target(bytes, caller), 0x438);
         }
-        // The same physical counter drives actual CNTP TVAL/CTL timing.
+        // The same physical counter drives CNTP TVAL/CTL timing.
         assert_eq!(branch_target(bytes, target + 0x30), 0x440);
         assert_eq!(branch_target(bytes, target + 0x38), 0x42c);
         assert_eq!(branch_target(bytes, target + 0x58), 0x440);
         assert_eq!(word(bytes, 0x440), 0xd51be200); // CNTP_TVAL_EL0
         assert_eq!(word(bytes, 0x42c), 0xd51be220); // CNTP_CTL_EL0
         assert_eq!(branch_target(bytes, 0x524), 0x44c);
-        assert_eq!(word(bytes, 0x44c), 0xd53be000); // actual CNTFRQ_EL0
+        assert_eq!(word(bytes, 0x44c), 0xd53be000); // CNTFRQ_EL0
     }
-    assert_eq!(branch_target(&llb, 0x119c20), 0x58c); // first actual live-entry caller
-    // After the alias, the next actual entry requirement is the original
+    assert_eq!(branch_target(&llb, 0x119c20), 0x58c); // first live-entry caller
+    // After the alias, the next entry requirement is the original
     // physical SEP transport. Metadata identifies ownership, not a ready bit.
     let bytes = adt();
     let root = Node::root(&bytes).unwrap();
@@ -542,7 +542,7 @@ fn original_physical_counter_alias_is_read_only_and_separate_from_siq_tuning() {
         .unwrap();
     assert_eq!(parent + 0x196400000 - child, 0x396400000);
     assert_eq!(quad(&llb, 0x1a1628), 0x811400008110); // original transport offsets
-    assert_eq!(word(&llb, 0x15654), 0xb940014a); // actual 32-bit physical read
+    assert_eq!(word(&llb, 0x15654), 0xb940014a); // 32-bit physical read
 }
 
 #[test]
@@ -633,14 +633,14 @@ fn original_j314s_sep_transport_and_complete_rom_table_are_distinct_from_ready_s
             (42, 46, 146),
         ]
     );
-    assert_eq!(table[6 * 56], 16); // initial native request = actual ROM entropy
+    assert_eq!(table[6 * 56], 16); // initial native request = ROM entropy
     assert_eq!(table[6 * 56 + 1], 116);
     assert_eq!(word(&bytes, 0x155608 + 4), 2_000_000);
     assert_eq!(quad(&bytes, 0x1a1628), 0x811400008110);
     assert_eq!(quad(&bytes, 0x1a1630), 0x883000008800);
     assert_eq!(quad(&bytes, 0x1a1638), 0x810400008100);
-    assert_eq!(word(&bytes, 0x154bc), 0x3680010a); // actual FULL poll
-    assert_eq!(word(&bytes, 0x15514), 0x3688012a); // actual EMPTY poll
+    assert_eq!(word(&bytes, 0x154bc), 0x3680010a); // FULL poll
+    assert_eq!(word(&bytes, 0x15514), 0x3688012a); // EMPTY poll
     assert_eq!(word(&bytes, 0x154f0), 0xa9002909); // full frame send (two64bit stores)
     assert_eq!(word(&bytes, 0x15544), 0xa9402508); // full frame receive (two64bit loads)
     assert_eq!(word(&bytes, 0x15654), 0xb940014a); // actual32bit control read

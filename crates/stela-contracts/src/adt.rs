@@ -67,7 +67,7 @@ fn property_at(data: &[u8], offset: usize) -> Option<Property<'_>> {
 }
 
 impl<'a> Node<'a> {
-    /// Translate a complete extent through this node's actual `ranges`.
+    /// Translate a complete extent through this node's `ranges`.
     /// Adjacent rows may contribute only when every byte has the same affine
     /// translation. Matching endpoints alone cannot establish ownership.
     /// Rows may overlap where they translate the shared bytes alike, as the
@@ -559,7 +559,7 @@ mod tests {
     }
 
     #[test]
-    fn extent_translation_refuses_malformed_zero_and_overflowing_authority() {
+    fn extent_translation_refuses_malformed_zero_and_overflowing_permission() {
         for ranges in [
             vec![],
             vec![(0, 0, 0)],

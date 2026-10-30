@@ -32,7 +32,7 @@ pub struct PciIo {
     rom_size: u64,
     rom_image: *mut c_void,
 }
-// This binary is x86-64 only; EFIAPI uses that target's actual UEFI ABI.
+// This binary is x86-64 only; EFIAPI uses that target's UEFI ABI.
 const _: () = {
     assert!(size_of::<usize>() == 8);
     assert!(size_of::<PciIo>() == 160);
@@ -83,11 +83,11 @@ fn status(value: Status) -> Result<(), Error> {
     }
 }
 impl PciIo {
-    // Only a live ScopedProtocol obtained from actual firmware can construct a
+    // Only a live ScopedProtocol obtained from firmware can construct a
     // usable borrow; no copy of this callback-bearing object enters a Handoff.
     pub fn address(&mut self) -> Result<Address, Error> {
         let (mut segment, mut bus, mut device, mut function) = (0, 0, 0, 0);
-        // SAFETY: original scoped firmware protocol, actual EFIAPI signature,
+        // SAFETY: original scoped firmware protocol, EFIAPI signature,
         // writable local UINTN outputs; boot services remain active.
         status(unsafe {
             (self.location)(self, &mut segment, &mut bus, &mut device, &mut function)
@@ -104,7 +104,7 @@ impl PciIo {
     }
     pub fn read_header(&mut self) -> Result<[u8; 64], Error> {
         let mut header = [0; 64];
-        // Width0=EfiPciIoWidthUint8, count64 actual bytes; no raw ECAM access.
+        // Width0=EfiPciIoWidthUint8, count64 bytes; no raw ECAM access.
         // SAFETY: live boot protocol and bounded writable local output; the
         // firmware performs its own controller/configuration addressing.
         status(unsafe {
@@ -115,8 +115,8 @@ impl PciIo {
     #[cfg(feature = "diagnostics")]
     fn configuration_snapshot(&mut self) -> Result<ConfigurationSnapshot, Error> {
         let mut words = Box::new([0u32; 1024]);
-        // SAFETY: actual live EFIAPI protocol, 64 aligned Uint32 reads of the
-        // standard 256-byte config space into retained owned DATA storage.
+        // SAFETY: live EFIAPI protocol, 64 aligned Uint32 reads of the
+        // standard 256-byte config space into kept owned DATA storage.
         status(unsafe { (self.config_read)(self, 2, 0, 64, words.as_mut_ptr().cast()) })?;
         let mut bytes = 256;
         if words[1] & (1 << 20) != 0 {
@@ -132,7 +132,7 @@ impl PciIo {
                 if entry as u8 == 0x10 {
                     // Only PCI Express exposes extended config. Pinned EDK2
                     // PciIoVerifyConfigAccess explicitly refuses >255 for PCI.
-                    // SAFETY: real declared PCIe capability; actual protocol
+                    // SAFETY: real declared PCIe capability; protocol
                     // status still controls support, never filled-in zeros.
                     status(unsafe {
                         (self.config_read)(self, 2, 256, 960, words.as_mut_ptr().add(64).cast())
@@ -150,7 +150,7 @@ impl PciIo {
             return Err(Error::BarIndex);
         }
         let mut raw = ptr::null_mut();
-        // SAFETY: actual live EFIAPI protocol; Resources is a writable VOID**.
+        // SAFETY: live EFIAPI protocol; Resources is a writable VOID**.
         // Supports is optional and unused. A successful response is a firmware
         // pool allocation containing a complete EndTag-terminated resource list.
         status(unsafe { (self.bar_attributes)(self, index, ptr::null_mut(), &mut raw) })?;
@@ -163,7 +163,7 @@ impl PciIo {
         // SAFETY: original successful pool allocation, copied records own all
         // returned DATA and hold no firmware pointers. This is called once even
         // when copy_regions refuses the descriptor. On FreePool failure the
-        // actual pool remains firmware-owned and caller must stop preparation.
+        // pool remains firmware-owned and caller must stop preparation.
         unsafe { uefi::boot::free_pool(raw) }.map_err(|error| Error::Release(error.status()))?;
         result
     }
@@ -178,7 +178,7 @@ unsafe fn copy_regions(base: NonNull<u8>) -> Result<Vec<BarRegion>, Error> {
     let mut offset = 0usize;
     let mut checksum = 0u8;
     loop {
-        // SAFETY: caller retains the protocol's complete descriptor chain;
+        // SAFETY: caller keeps the protocol's complete descriptor chain;
         // offset advances only by checked lengths of specified descriptors.
         let tag = unsafe { base.as_ptr().add(offset).read() };
         match tag {
@@ -187,7 +187,7 @@ unsafe fn copy_regions(base: NonNull<u8>) -> Result<Vec<BarRegion>, Error> {
                     .checked_add(2)
                     .filter(|n| *n <= isize::MAX as usize)
                     .ok_or(Error::DescriptorRange)?;
-                // SAFETY: the actual small EndTag record has its checksum byte.
+                // SAFETY: the small EndTag record has its checksum byte.
                 let value = unsafe { base.as_ptr().add(end - 1).read() };
                 if value != 0 && checksum.wrapping_add(tag).wrapping_add(value) != 0 {
                     return Err(Error::Checksum);
@@ -234,7 +234,7 @@ unsafe fn copy_regions(base: NonNull<u8>) -> Result<Vec<BarRegion>, Error> {
 
 /// No handles/protocol pointers escape this firmware-only census. All native
 /// functions (including those without a firmware handle) must still be found
-/// through the later actual-root configuration factory and identity rechecked.
+/// through the later root configuration factory and identity rechecked.
 pub struct Census {
     pub functions: Vec<FunctionObservation>,
     pub failures: Vec<CaptureFailure>,
@@ -264,7 +264,7 @@ pub struct FunctionObservation {
     pub(crate) configuration: Option<ConfigurationSnapshot>,
     pub address: Address,
     pub header: [u8; 64],
-    // A missing/unimplemented BAR is preserved as the actual firmware status;
+    // A missing/unimplemented BAR is preserved as the firmware status;
     // it is not turned into an empty device or a guessed identity translation.
     pub bars: [Result<Vec<BarRegion>, Error>; 6],
 }
@@ -303,7 +303,7 @@ fn capture_mode(_copy_configuration: bool) -> Result<Census, CaptureFailure> {
         failures: Vec::new(),
     };
     // Reserve before starting callbacks, so an allocation refusal never leaves
-    // a protocol, returned pool allocation or callback-bearing token retained.
+    // a protocol, returned pool allocation or callback-bearing token kept.
     result
         .functions
         .try_reserve_exact(handles.len())
@@ -313,9 +313,9 @@ fn capture_mode(_copy_configuration: bool) -> Result<Census, CaptureFailure> {
         .try_reserve_exact(handles.len())
         .map_err(|_| CaptureFailure::Allocation)?;
     for handle in handles {
-        // SAFETY: GetProtocol is the actual firmware's scoped instance. This
+        // SAFETY: GetProtocol is the firmware's scoped instance. This
         // consumer only reads header/GetLocation/GetBarAttributes; the firmware
-        // retains controller driving/reset authority until actual EBS handoff.
+        // keeps controller driving/reset permission until EBS handoff.
         // All borrowed callbacks and returned pool storage end in this loop.
         let mut protocol = match unsafe {
             boot::open_protocol::<PciIo>(
@@ -359,7 +359,7 @@ fn capture_mode(_copy_configuration: bool) -> Result<Census, CaptureFailure> {
         };
         let bars = core::array::from_fn(|bar| protocol.bar_regions(bar as u8));
         // FreePool refusal cannot be followed by EBS as though reclamation had
-        // succeeded. Caller stops preparation with the actual status retained.
+        // succeeded. Caller stops preparation with the status kept.
         if let Some(status) = bars.iter().find_map(|bar| match bar {
             Err(Error::Release(status)) => Some(*status),
             _ => None,

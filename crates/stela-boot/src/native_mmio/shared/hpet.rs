@@ -1,6 +1,6 @@
 //! Production HPET ownership through the shared native resource registry.
 //! The immutable CPU/root pin survives only the checked RAM ownership join;
-//! this owner grants no absent-RAM or mutable root-publication authority.
+//! this owner grants no absent-RAM or mutable root-publication permission.
 use super::*;
 use crate::{engine::host::RootIdentity, native_clock::hpet::Descriptor};
 use core::mem::ManuallyDrop;
@@ -47,10 +47,10 @@ impl HpetMapping {
     }
     /// # Safety
     /// Every real counter/configuration reader and callback has stopped and
-    /// drained under this retained CPU/root owner; no future entry can begin.
+    /// drained under this CPU/root owner; no future entry can begin.
     /// Counter configuration has been restored only by its authorized owner.
-    /// On failure retain this whole object; neither resource nor identity may
-    /// be reused merely because the mapping's metadata became inaccessible.
+    /// On failure keep this whole object; neither resource nor identity may
+    /// be reused because the mapping's metadata became inaccessible.
     pub(crate) unsafe fn retire_mapping(&mut self) -> Result<(), WorkError> {
         self.check_process()?;
         if self.retired {
@@ -60,7 +60,7 @@ impl HpetMapping {
         if !self.mapping_retired {
             if let Some(mapping) = self.mapping.as_mut() {
                 // SAFETY: caller supplies real complete source/callback drain;
-                // this is the original mapping, on its qualified process CPU.
+                // this is the original mapping, on its checked process CPU.
                 unsafe { mapping.retire() }.map_err(unavailable)?;
             }
             self.mapping_retired = true;
@@ -80,9 +80,9 @@ impl Drop for HpetMapping {
         if !self.retired || self.check_process().is_err() {
             return;
         }
-        // SAFETY: explicit acknowledged unmap/resource retirement and actual
+        // SAFETY: explicit acknowledged unmap/resource retirement and
         // CPU/root exclusion above. No raw counter reader can remain. A live
-        // or uncertain owner instead retains every field permanently.
+        // or uncertain owner instead keeps every field permanently.
         unsafe {
             ManuallyDrop::drop(&mut self.mapping);
             ManuallyDrop::drop(&mut self.authority);
@@ -91,7 +91,7 @@ impl Drop for HpetMapping {
         }
     }
 }
-/// Non-Clone whole-controller grant; only the actual production Source mints it.
+/// Non-Clone whole-controller grant; only the production Source mints it.
 pub(crate) struct ExclusiveHpet {
     mapping: HpetMapping,
 }
@@ -106,22 +106,22 @@ fn unavailable<T>(_: T) -> WorkError {
 
 impl Source {
     /// # Safety
-    /// The actual post-EBS BSP dispatcher owns this entire original captured
+    /// The post-EBS BSP dispatcher owns this entire original captured
     /// controller and rounded page, including every firmware/SMM/native route,
     /// comparator, legacy-replacement, reset, decode and counter writer. No
     /// outside actor may resume until acknowledged final drain/unmap. A table,
     /// EBS observation or quiet configuration alone does not supply this grant.
     /// RootIdentity is this same real HostOwner; controls and all root/window
-    /// mappings stay retained through pause, RAM adoption and quarantine.
+    /// mappings stay held through pause, RAM adoption and quarantine.
     pub(crate) unsafe fn take_hpet(
         &self,
         identity: Arc<RootIdentity>,
     ) -> Result<ExclusiveHpet, Error> {
         identity.check_dispatch().map_err(failed)?;
-        // Source was activated by this exact original HostOwner. Its host
+        // Source was activated by this original HostOwner. Its host
         // root differs from the loader window root, and RestoreRoot can be
         // active here; comparing their numeric CR3s would reject a valid owner.
-        // Identity pointer equality preserves the actual captured owner instead.
+        // Identity pointer equality preserves the captured owner instead.
         if !Arc::ptr_eq(&identity, &self.identity) {
             return Err(Error::Unavailable);
         }
@@ -146,7 +146,7 @@ impl Source {
             kind: ResourceKind::Registers,
         }));
         let registration = self.authority.register_resource(resource.clone())?;
-        // Retain every original owner BEFORE an alias/PTE effect. Constructor
+        // Keep every original owner BEFORE an alias/PTE effect. Constructor
         // errors can then quarantine the same real identity/resource bundle.
         let mut owned = HpetMapping {
             descriptor,
@@ -173,7 +173,7 @@ impl Source {
             Err(error) => {
                 // SAFETY: no counter/IRQ/consumer was published and no Mapping
                 // escaped this constructor. A registry-held uncertain map
-                // prevents unregistering, so the whole bundle stays retained.
+                // prevents unregistering, so the whole bundle stays held.
                 let _ = unsafe { owned.retire_mapping() };
                 Err(error)
             }

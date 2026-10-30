@@ -137,7 +137,7 @@ pub(crate) fn to_integer_words(
     } else {
         normal_half_to_single_fields(code, INPUT, SIGN, SINGLE_BIAS, target);
     }
-    // Field widening intentionally biases raw zero. Correct both active zero
+    // Field widening biases raw zero. Correct both active zero
     // and sanitized inactive zero before host conversion, preventing false IXC.
     Host::AndNot.register(code, ZERO_LANES, INPUT, target);
     Host::MoveAligned.register(code, INPUT, ZERO_LANES, target);

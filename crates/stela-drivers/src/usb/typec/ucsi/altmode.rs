@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright (C) 2018 Intel Corporation
 // Copyright (c) 2026 Stela contributors
-//! Actual UCSI CAM transactions and native DisplayPort coordination.
+//! UCSI CAM transactions and native DisplayPort coordination.
 //!
 //! UCSI cannot read a partner DisplayPort Status VDO. A native provider must
 //! supply it, with a real connector attachment lease. No synthetic Enter ACK,
@@ -55,7 +55,7 @@ impl From<super::Error> for Error {
         Self::Ucsi(error)
     }
 }
-/// Native observations from an actual controller/TCPC/GPU status source. The
+/// Native observations from a controller/TCPC/GPU status source. The
 /// epoch must change on detach, reattachment and provider ownership reset, even
 /// if orientation and partner identity repeat. It is not the UCSI reset epoch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -63,17 +63,17 @@ pub struct Observation {
     pub attachment_epoch: u64,
     pub orientation: Orientation,
     pub partner_status: Option<u32>,
-    /// Sequence of the actual status notification; repeated snapshots retain it.
+    /// Sequence of the status notification; repeated snapshots keep it.
     pub status_sequence: u64,
 }
-/// Owns the actual connector-to-GPU association and its attachment/status lease.
-/// Providers retain resources and serialize physical detach notifications with
+/// Owns the connector-to-GPU association and its attachment/status lease.
+/// Providers keep resources and serialize physical detach notifications with
 /// these operations. Missing Status VDO access must return None, never a guess.
 /// `prepare` leaves output disabled; `enable` permits training but does not prove
-/// a working link. `hpd` receives the actual level/IRQ after CAM and route setup.
-/// `disable` is idempotent and performs actual hardware quiescence. Status
+/// a working link. `hpd` receives the level/IRQ after CAM and route setup.
+/// `disable` is idempotent and performs hardware quiescence. Status
 /// sequences identify real received status events, including equal successive
-/// VDOs. Snapshots are non-consuming; the platform must retain newer events
+/// VDOs. Snapshots are non-consuming; the platform must keep newer events
 /// until a later update. It must not increment the sequence for ordinary reads.
 pub trait NativeDisplayPort {
     fn observe(&mut self, connector: ConnectorNumber) -> Result<Observation, ResourceError>;
@@ -84,7 +84,7 @@ pub trait NativeDisplayPort {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AlternateMode {
-    /// Actual zero-based PPM table index. Duplicates retain distinct indices.
+    /// Zero-based PPM table index. Duplicates keep distinct indices.
     pub index: u8,
     pub svid: u16,
     pub vdo: u32,

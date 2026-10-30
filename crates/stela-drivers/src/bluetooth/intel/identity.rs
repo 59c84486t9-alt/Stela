@@ -184,7 +184,7 @@ pub(super) fn build_key(build: [u8; 3]) -> (u8, u8, u8) {
 mod tests {
     use super::*;
     #[test]
-    fn firmware_selection_retains_exact_usb_silicon_and_boot_loader_identity() {
+    fn firmware_selection_keeps_exact_usb_silicon_and_boot_loader_identity() {
         let (device, _, _) = super::super::tests::fixture();
         let mut version = [0, 0x37, 0x14, 1, 6, 3, 1, 30, 26, 0];
         let identity = Identity::parse(&device, &version).unwrap();

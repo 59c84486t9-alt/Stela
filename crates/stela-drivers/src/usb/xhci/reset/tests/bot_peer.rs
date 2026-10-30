@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Independent CBW/data/CSW peer on the actual command/context/TD DMA model.
+//! Independent CBW/data/CSW peer on the command/context/TD DMA model.
 use super::*;
 
 struct Command {

@@ -1,4 +1,4 @@
-//! Native controller fixture: consumes actual command/context/EP0/normal TRBs.
+//! Native controller fixture: consumes command/context/EP0/normal TRBs.
 use super::*;
 use alloc::collections::{BTreeMap, VecDeque};
 
@@ -57,7 +57,7 @@ impl PortModel {
         }
     }
 }
-/// USB 3.0 Table 9-8 FUNCTION_SUSPEND options, retained per configured
+/// USB 3.0 Table 9-8 FUNCTION_SUSPEND options, kept per configured
 /// interface. Pinned Linux ch9.h puts LP/RW in wIndex bits 8/9; hub.c's
 /// usb_disable_remote_wakeup sends both clear through SET_FEATURE, not CLEAR.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -305,7 +305,7 @@ fn read32(at: u64) -> u32 {
         at >= 65536 && at.is_multiple_of(4),
         "invalid fixture DMA word {at:#x}"
     );
-    // SAFETY: caller uses only retained actual fixture DMA fields.
+    // SAFETY: caller uses only kept fixture DMA fields.
     unsafe { (at as *const u32).read_volatile() }
 }
 fn read64(at: u64) -> u64 {
@@ -313,7 +313,7 @@ fn read64(at: u64) -> u64 {
         at >= 65536 && at.is_multiple_of(8),
         "invalid fixture DMA pointer {at:#x}"
     );
-    // SAFETY: caller uses only retained actual fixture DMA fields.
+    // SAFETY: caller uses only kept fixture DMA fields.
     unsafe { (at as *const u64).read_volatile() }
 }
 fn write32(at: u64, value: u32) {
@@ -406,7 +406,7 @@ impl Hardware {
     }
     fn event(&mut self, parameter: u64, code: u32, kind: u32, slot: u8, dci: u8, residual: usize) {
         let at = self.event_base + ((self.events % RING_TRBS) * TRB) as u64;
-        // SAFETY: event_base came from the published actual ERST allocation.
+        // SAFETY: event_base came from the published ERST allocation.
         unsafe {
             (at as *mut u64).write_volatile(parameter);
         }
@@ -481,7 +481,7 @@ impl Hardware {
                             );
                             continue;
                         }
-                        // SAFETY: copied complete retained xHCI contexts are disjoint.
+                        // SAFETY: copied complete kept xHCI contexts are disjoint.
                         unsafe {
                             core::ptr::copy_nonoverlapping(
                                 input as *const u8,
@@ -536,7 +536,7 @@ impl Hardware {
                 }
                 STOP_ENDPOINT | RESET_ENDPOINT => {
                     if let Some((trb, _, _)) = self.pending_interrupts.remove(&(slot, dci)) {
-                        // Stopped transfer event precedes actual Stop ACK.
+                        // Stopped transfer event precedes Stop ACK.
                         self.event(trb, 26, TRANSFER_EVENT, slot, dci, 0);
                     }
                     let output = self.outputs[&slot] + u64::from(dci) * self.context_bytes as u64;
@@ -577,7 +577,7 @@ impl Hardware {
                 Ok(Vec::new())
             }
             (RECIPIENT_INTERFACE, SET_FEATURE) => {
-                // Strict peer: only actual configured SuperSpeed interfaces,
+                // Strict peer: only configured SuperSpeed interfaces,
                 // selector zero, no data, and the two defined option bits.
                 // A malformed request must STALL without changing any function.
                 if node.speed < SUPER_SPEED
@@ -653,7 +653,7 @@ impl Hardware {
                     return Err(6);
                 }
                 node.configured = value != 0;
-                // Acknowledged SET_CONFIGURATION selects the actual descriptor
+                // Acknowledged SET_CONFIGURATION selects the descriptor
                 // interfaces and resets each function's options. Alternate
                 // settings do not create additional functions.
                 node.functions.clear();
@@ -921,12 +921,12 @@ impl Hardware {
             {
                 disk.transfer(dci & 1 != 0, buffer, length as usize);
             } else if dci & 1 != 0 {
-                // SAFETY: actual published IN payload belongs to this fixture.
+                // SAFETY: published IN payload belongs to this fixture.
                 unsafe {
                     core::ptr::write_bytes(buffer as *mut u8, slot, length as usize);
                 }
             } else {
-                // SAFETY: actual published OUT payload belongs to this fixture.
+                // SAFETY: published OUT payload belongs to this fixture.
                 self.outgoing.push(
                     unsafe { core::slice::from_raw_parts(buffer as *const u8, length as usize) }
                         .to_vec(),

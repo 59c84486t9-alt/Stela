@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) 2015 Intel Corporation
 //! Owned native-consumer evidence. Only metadata is copied from Catalog images;
-//! actual stage identities and receipts are moved from the bounded initializer.
+//! stage identities and receipts are moved from the bounded initializer.
 use super::{
     ControllerIdentity, DsbrReport, FirmwareEvidence, FirmwareReceipt, Report, StageObservation,
 };
@@ -21,7 +21,7 @@ pub enum OwnedFirmwareEvidence {
     },
     RunningUnknown,
 }
-/// Initialization observations retained beyond provider/catalog lifetime. This
+/// Initialization observations kept beyond provider/catalog lifetime. This
 /// contains no firmware buffers and is not a current transport/radio state.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OwnedReport {

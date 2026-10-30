@@ -2,13 +2,13 @@
 //! objects live below a content-addressed package directory, so replacing the
 //! active manifest never overwrites bytes the previous manifest still names.
 use super::*;
-use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
+use stela_crypto::{Sha256, digest::Digest};
 
 pub struct Package {
     manifest: Vec<u8>,
@@ -368,7 +368,7 @@ impl Package {
 
     /// Prepare immutable object names and publish only after all files are
     /// durable. An interrupted publication leaves the previous manifest valid;
-    /// unreferenced package objects are retained for recovery, never guessed away.
+    /// unreferenced package objects are held for recovery, never guessed away.
     pub fn publish(&self, directory: &Path) -> Result<(), Error> {
         self.publish_checkpointed(directory, |_| Ok(()))
     }

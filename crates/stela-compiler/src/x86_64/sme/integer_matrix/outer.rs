@@ -24,7 +24,7 @@ const WORD_SIGN_SHIFT: u8 = 15;
 
 /// Exact 16-bit products with independent input signedness.
 ///
-/// The same-sign paths retain `word_products` byte for byte. Mixed paths also
+/// The same-sign paths keep `word_products` byte for byte. Mixed paths also
 /// clobber XMM5. Correcting the unsigned high word by the unsigned other input
 /// for each negative signed input reconstructs the full signed 32-bit product.
 fn word_products_signedness(

@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: MIT
 //! Native config/mapping/Registry models composed with the literal IPC device.
-//! These are software ownership/effect tests, not physical platform qualification.
+//! These are software ownership/effect tests, not physical platform validation.
 use super::*;
 #[test]
 fn native_clock_rejects_invalid_calibration_and_unrepresentable_attempt_before_attachment() {
     for rate in [0, u64::MAX, u64::MAX / 2 / 120_000_000 + 1] {
-        // SAFETY: constructor receives deliberately invalid negative metadata;
-        // it must refuse before exposing a native time/attachment authority.
         assert!(
+            // SAFETY: constructor receives invalid negative metadata; it must refuse
+            // before exposing a native time/attachment permission.
             unsafe {
                 crate::bluetooth::bcm4377::native::NativeClock::new(crate::Clock {
                     ticks_per_microsecond: rate,
@@ -35,7 +35,7 @@ use crate::bus::{
         native_aspm::{RootBus, Topology},
         owned::{
             OwnedConfig,
-            tests::{Counters, fixture as owned_config},
+            test_support::{Counters, fixture as owned_config},
         },
     },
 };
@@ -111,7 +111,7 @@ impl State {
         self.pending.store(true, Ordering::Relaxed);
         let registry = self.registry.load(Ordering::Relaxed);
         assert!(!registry.is_null());
-        // SAFETY: test Registry is leaked, owns this route, and retains context.
+        // SAFETY: test Registry is leaked, owns this route, and keeps context.
         assert!(unsafe { &*registry }.dispatch(self.vector.load(Ordering::Relaxed)));
     }
 }
@@ -165,7 +165,7 @@ impl ConfigSpace for Config {
         }
     }
     fn write32(&mut self, offset: u16, value: u32) {
-        // Even an effect-then-fault keeps the actual original storage retained.
+        // Even an effect-then-fault keeps the original storage kept.
         self.inner.write32(offset, value);
         self.state.access(Event::Write(offset, 4, value));
     }
@@ -207,9 +207,9 @@ impl ConfigSpace for Config {
         }
     }
 }
-// SAFETY: exact narrow actual RAM effects model one retained original config.
+// SAFETY: exact narrow RAM effects model one original config.
 unsafe impl MsiConfigSpace for Config {}
-// SAFETY: this wrapper retains/returns the actual original owned fixture map.
+// SAFETY: this wrapper keeps/returns the original owned fixture map.
 unsafe impl Configuration for Config {
     fn owned_address(&self) -> Address {
         self.inner.address()
@@ -233,7 +233,7 @@ struct NativeDomain {
     domain: Arc<Domain>,
     state: Arc<State>,
 }
-// SAFETY: delegates the actual retained-page model's mappings; its independently
+// SAFETY: delegates the page model's mappings; its independently
 // modeled stopped flag and completion fault control retirement, not fence tokens.
 unsafe impl DmaDomain for NativeDomain {
     unsafe fn map(
@@ -242,7 +242,7 @@ unsafe impl DmaDomain for NativeDomain {
         direction: Direction,
         limit: u64,
     ) -> core::result::Result<DomainMapping, DmaError> {
-        // SAFETY: caller retains exact pins/domain as in delegated model.
+        // SAFETY: caller keeps exact pins/domain as in delegated model.
         unsafe { self.domain.map(pages, direction, limit) }
     }
     unsafe fn unmap(&self, mapping: DomainMapping) -> core::result::Result<(), DmaError> {
@@ -256,7 +256,7 @@ unsafe impl DmaDomain for NativeDomain {
         range: Range<usize>,
         direction: Direction,
     ) -> core::result::Result<(), DmaError> {
-        // SAFETY: exact mapping/direction/bounds delegated to the retained domain.
+        // SAFETY: exact mapping/direction/bounds delegated to the domain.
         unsafe { self.domain.sync_for_device(mapping, range, direction) }
     }
     unsafe fn sync_for_cpu(
@@ -265,7 +265,7 @@ unsafe impl DmaDomain for NativeDomain {
         range: Range<usize>,
         direction: Direction,
     ) -> core::result::Result<(), DmaError> {
-        // SAFETY: no continuous CPU handoff is fabricated by this model.
+        // SAFETY: no continuous CPU handoff is invented by this model.
         unsafe { self.domain.sync_for_cpu(mapping, range, direction) }
     }
     unsafe fn drain_posted_writes(&self) -> core::result::Result<(), DmaError> {
@@ -290,7 +290,7 @@ impl PageSource for PageModel {
         assert_eq!(attribute, CacheAttribute::WriteBack);
         let reserved = bytes.next_multiple_of(4096);
         let layout = Layout::from_size_align(reserved, alignment).unwrap();
-        // SAFETY: exact allocation retained by existing real PageBacking model.
+        // SAFETY: exact allocation kept by existing real PageBacking model.
         let pointer = NonNull::new(unsafe { alloc_zeroed(layout) }).unwrap();
         let mut next = self.0.lock().unwrap();
         let physical = (0..reserved / 4096)
@@ -309,8 +309,8 @@ impl PageSource for PageModel {
     }
 }
 struct Delivery(Arc<State>);
-// SAFETY: independent actual route model; payload and MSI completion are
-// separate events, with independent injected failures and retained ownership.
+// SAFETY: independent route model; payload and MSI completion are
+// separate events, with independent injected failures and kept ownership.
 unsafe impl host::delivery::DeliveryOwner for Delivery {
     fn bind_route(&mut self, message: irq::MsiMessage) -> core::result::Result<(), host::Error> {
         assert_eq!(message.address, 0xfee0_0000);
@@ -336,7 +336,7 @@ unsafe impl host::delivery::DeliveryOwner for Delivery {
     }
 }
 struct Cpu(Arc<State>);
-// SAFETY: explicit same-CPU APIC delivery model, actual Registry controls slots.
+// SAFETY: explicit same-CPU APIC delivery model, Registry controls slots.
 unsafe impl irq::Platform for Cpu {
     fn check_cpu(&self) -> core::result::Result<(), irq::IrqError> {
         Ok(())
@@ -383,7 +383,7 @@ unsafe impl ResourceBacking for BarResource {
     }
 }
 struct BarPlatform(Arc<State>);
-// SAFETY: fresh actual aligned CPU allocations model full symbolic BARs;
+// SAFETY: fresh aligned CPU allocations model full symbolic BARs;
 // acknowledged unmap alone returns each exact allocation to the model heap.
 unsafe impl MappingPlatform for BarPlatform {
     fn check_context(&self, _: AddressSpace) -> core::result::Result<(), owned::Error> {
@@ -395,7 +395,7 @@ unsafe impl MappingPlatform for BarPlatform {
         request: MapRequest,
     ) -> core::result::Result<InstalledMapping, MapFailure> {
         let layout = Layout::from_size_align(request.physical.bytes() as usize, 4096).unwrap();
-        // SAFETY: valid layout; authority owns this exact allocation/token.
+        // SAFETY: valid layout; permission owns this exact allocation/token.
         let cpu_base = NonNull::new(unsafe { alloc_zeroed(layout) }).unwrap();
         Ok(InstalledMapping {
             token: request.id,
@@ -414,7 +414,7 @@ unsafe impl MappingPlatform for BarPlatform {
         if self.0.fail_bar_unmap.load(Ordering::Relaxed) {
             return Err(owned::Error::UnmapFailed);
         }
-        // SAFETY: exact original allocation after stopped mapping consumers.
+        // SAFETY: original allocation after stopped mapping consumers.
         unsafe {
             dealloc(
                 mapping.cpu_base.as_ptr(),
@@ -430,7 +430,7 @@ struct NativeRegisters {
     state: Arc<State>,
 }
 // SAFETY: explicit composed device model owns original BAR mappings and exact
-// source MMIO effects; native mapped retirement retains original reservations.
+// source MMIO effects; native mapped retirement keeps original reservations.
 unsafe impl Registers for NativeRegisters {
     fn spans(&self) -> [PhysicalSpan; 2] {
         self.registers.spans()
@@ -516,7 +516,7 @@ fn fixture_native(device_id: u16, completion: bool) -> Fixture {
         physical_bits: 48,
         virtual_bits: 48,
     };
-    // SAFETY: isolated symbolic MMIO resources and actual private CPU storage.
+    // SAFETY: isolated symbolic MMIO resources and private CPU storage.
     let authority =
         unsafe { Authority::isolated_model(Arc::new(BarPlatform(state.clone())), space, vec![]) }
             .unwrap();
@@ -536,7 +536,7 @@ fn fixture_native(device_id: u16, completion: bool) -> Fixture {
         Ok(registers) => registers,
         Err((error, _)) => panic!("valid BARs {error:?}"),
     };
-    // SAFETY: actual complete inventory for this explicit direct-root model.
+    // SAFETY: complete inventory for this explicit direct-root model.
     let topology = unsafe { Topology::new(vec![], vec![RootBus { segment: 0, bus: 1 }]) };
     let domain = Arc::new(NativeDomain {
         domain: device.lock().unwrap().domain.clone(),
@@ -720,7 +720,7 @@ fn native_d0_preserves_pme_status_and_all_pci_control_writes_are_narrow() {
 fn late_effect_then_config_failure_has_one_uncertain_reset_and_no_release() {
     let (mut t, device, state, counters) = transport(fixture_native(0x5f69, true));
     t.start(&catalog(&device, false)).unwrap();
-    // Find admission-time access count; the next actual command read fails.
+    // Find admission-time access count; the next command read fails.
     state.fault_access.store(
         state.accesses.load(Ordering::Relaxed) + 1,
         Ordering::Relaxed,
@@ -763,7 +763,7 @@ fn native_constructor_rejects_malformed_original_owners_before_any_write() {
                 f.inputs.function.config().inner.write32(0x84, 1 << 28);
             }
             6 => {
-                // SAFETY: deliberately wrong explicit model root declaration.
+                // SAFETY: wrong explicit model root declaration.
                 f.inputs.topology =
                     unsafe { Topology::new(vec![], vec![RootBus { segment: 0, bus: 2 }]) };
             }
@@ -828,7 +828,7 @@ fn every_constructor_config_read_fault_returns_the_same_original_unmodified_owne
     }
 }
 #[test]
-fn effect_then_failed_msi_enable_admission_retains_registry_and_original_epoch() {
+fn effect_then_failed_msi_enable_admission_keeps_registry_and_original_epoch() {
     let (mut t, device, state, counters) = transport(fixture_native(0x5f69, true));
     state.fail_enable_ack.store(true, Ordering::Relaxed);
     let first = t.start(&catalog(&device, false)).unwrap_err();

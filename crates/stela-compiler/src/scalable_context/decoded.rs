@@ -464,7 +464,7 @@ impl Decoded {
 }
 
 /// Existing register-only AdvSIMD recipes can share checked blocks without
-/// borrowing guest RAM. Memory variants must retain their typed adapters;
+/// borrowing guest RAM. Memory variants must keep their typed adapters;
 /// numerical FP remains on its separately recovered block/service path. Keep
 /// this exhaustive by variant so a future SIMD family needs explicit review.
 fn checked_register_asimd(operation: &Operation) -> bool {
@@ -670,7 +670,7 @@ mod checked_register_tests {
         }
     }
     #[test]
-    fn shared_register_simd_prefix_retains_real_branch_extent_and_source_map() {
+    fn shared_register_simd_prefix_keeps_real_branch_extent_and_source_map() {
         // Generic move/vector-zero/integer-zero/compare/conditional-branch
         // prefix. A following unallocated word is outside its consumed block.
         let words: [u32; 7] = [
@@ -713,7 +713,7 @@ mod checked_register_tests {
         }
     }
     #[test]
-    fn simd_guest_memory_never_receives_register_only_authority() {
+    fn simd_guest_memory_never_receives_register_only_permission() {
         let base = GuestAddress(0x4000);
         for word in [
             0x3dc00020, 0x3d800020, 0xad400440, 0xad000440, 0x4c407020, 0x4c007020,

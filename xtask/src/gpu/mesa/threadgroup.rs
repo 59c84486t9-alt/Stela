@@ -38,7 +38,7 @@ pub(super) fn verify(
         evidence,
         "metal-shared-assembly",
     )?;
-    // Export the semantic fixture through its actual LLVM producer, rather than
+    // Export the semantic fixture through its LLVM producer, rather than
     // maintaining a second bitcode fixture or interpreting the source ourselves.
     let mixed = evidence.join("multiple-threadgroups.bc");
     run(
@@ -170,7 +170,7 @@ pub(super) fn verify(
         check_input(&report, entry, snapshots[index].1)?;
     }
 
-    // The AMD shared-memory probe needs the retained LLVM backend.
+    // The AMD shared-memory probe needs the LLVM backend.
     if stela.defines("stela_amd_air_threadgroup_test") {
         probes.run(
             stela

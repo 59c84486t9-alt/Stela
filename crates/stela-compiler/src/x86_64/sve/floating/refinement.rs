@@ -100,7 +100,7 @@ fn reject_non_normal(code: &mut Code, format: Format, register: u8, failures: &m
 
 /// Owns only unpredicated vector FRECPS/FRSQRTS, without registration or feature
 /// dispatch. Baseline requires an exact normal product, checked FMA does not.
-/// NaN, zero, infinity, subnormal and Half inputs retain exact completion;
+/// NaN, zero, infinity, subnormal and Half inputs keep exact completion;
 /// cancellation, tiny/overflowing results and nonprecision host status decline.
 /// All chunks stage before one guest commit; every refusal restores MXCSR/RSP.
 pub(in crate::x86_64) fn emit(

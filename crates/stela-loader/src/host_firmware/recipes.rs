@@ -36,7 +36,7 @@ impl Artifact {
         }
     }
     pub fn verify(&self, bytes: &[u8]) -> Result<(), Error> {
-        use sha2::{Digest, Sha256};
+        use stela_crypto::{Sha256, digest::Digest};
         if bytes.len() != self.length || hex::encode(Sha256::digest(bytes)) != self.sha256 {
             return Err(Error(format!(
                 "pinned host firmware artifact differs: {}",
@@ -233,7 +233,7 @@ fn select_intel_rsa(request: &Request) -> Option<&'static Recipe> {
         return None;
     }
     // These filenames are selected only by observed variant0x14/hw1/fw3.
-    // Retain every other exact boot-loader field verbatim in the manifest.
+    // Keep every other exact boot-loader field verbatim in the manifest.
     let fields: Vec<_> = request.target.revision.split(':').collect();
     if fields.len() != 11 || fields[..4] != ["37", "14", "01", "03"] {
         return None;
@@ -454,7 +454,7 @@ mod tests {
     }
 
     #[test]
-    fn intel_rsa_recipes_retain_complete_observed_usb_and_loader_identity() {
+    fn intel_rsa_recipes_keep_complete_observed_usb_and_loader_identity() {
         let revision = "37:14:01:03:dev-0005:otp-00-00-00:key-00-00:locks-00-00-00:min-00-00-00:loader-01-1e-1a-00:unlock-00";
         let value = serde_json::json!({"schema":1,"complete":true,"requirements":[{
             "name":"intel/ibt-20-1-3.sfi", "target":{"driver":"intel-bluetooth-usb-rsa","hardware":"usb:8087:0029:0001","revision":revision,"board":null},"minimum_bytes":645

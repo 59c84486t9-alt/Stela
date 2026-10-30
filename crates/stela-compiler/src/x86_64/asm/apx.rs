@@ -1,4 +1,4 @@
-//! APX new-destination integer forms; private until full recovery qualification.
+//! APX new-destination integer forms; private until full recovery validation.
 use super::{Alu, Asm, Gpr, Rm, Size};
 
 /// A promoted ALU operation with independent destination and explicit flag policy.

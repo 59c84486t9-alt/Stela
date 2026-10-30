@@ -24,6 +24,7 @@ pub(crate) struct Mutex<T: ?Sized> {
 // SAFETY: all accesses use the atomic exclusion, and ownership can cross CPUs
 // only for Send payloads. Local interrupt/preemption obligations are above.
 unsafe impl<T: ?Sized + Send> Send for Mutex<T> {}
+// SAFETY: shared references rely on the same argument as `Send` above.
 unsafe impl<T: ?Sized + Send> Sync for Mutex<T> {}
 
 impl<T> Mutex<T> {
@@ -90,11 +91,13 @@ impl<T: ?Sized> Mutex<T> {
 impl<T: ?Sized> Deref for MutexGuard<'_, T> {
     type Target = T;
     fn deref(&self) -> &T {
+        // SAFETY: the guard holds the lock, so no other access to the value exists.
         unsafe { &*self.owner.value.get() }
     }
 }
 impl<T: ?Sized> DerefMut for MutexGuard<'_, T> {
     fn deref_mut(&mut self) -> &mut T {
+        // SAFETY: the guard holds the lock, so no other access to the value exists.
         unsafe { &mut *self.owner.value.get() }
     }
 }

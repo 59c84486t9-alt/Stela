@@ -1,6 +1,8 @@
 //! DeviceTree placement and validation for smc topology.
 use super::spmi_topology::cells_of;
-use super::{ASC, Node, String, Vec, apertures, asc, format, rtbuddy_nub, smc};
+use super::{ASC, Node, Vec, apertures, asc, rtbuddy_nub, smc};
+use crate::Result;
+use stela_contracts::refuse;
 
 /// The SMC's DT placement: `reg[0]` is the ASC wrapper, its four
 /// interrupts the mailbox lines, `reg[timers-reg-index]` the hardware
@@ -31,7 +33,7 @@ pub(super) fn smc_controller(
     root: &Node<'_>,
     io: &Node<'_>,
     translate: &dyn Fn(u64, u64) -> Option<u64>,
-) -> Result<Option<SmcController>, String> {
+) -> Result<Option<SmcController>> {
     let Some(node) = io
         .child("smc")
         .filter(|n| n.compatible(ASC) && n.property("role") == Some(b"SMC\0".as_slice()))
@@ -39,14 +41,14 @@ pub(super) fn smc_controller(
         return Ok(None);
     };
     let nub = rtbuddy_nub(&node, "SMC")?;
-    let regs = apertures::registers(&node).ok_or("SMC has no reg pairs")?;
-    let place = |index: usize, minimum: u64, what: &str| -> Result<(u64, u64), String> {
+    let regs = apertures::registers(&node).ok_or(refuse!("SMC has no reg pairs"))?;
+    let place = |index: usize, minimum: u64, what: &str| -> Result<(u64, u64)> {
         let &(offset, bytes) = regs
             .get(index)
             .filter(|(_, bytes)| *bytes >= minimum)
-            .ok_or_else(|| format!("SMC {what} bank is absent or too short"))?;
-        let physical =
-            translate(offset, bytes).ok_or_else(|| format!("SMC {what} outside arm-io ranges"))?;
+            .ok_or_else(|| refuse!("SMC {what} bank is absent or too short", what))?;
+        let physical = translate(offset, bytes)
+            .ok_or_else(|| refuse!("SMC {what} outside arm-io ranges", what))?;
         Ok((physical, bytes))
     };
     let wrapper = place(0, asc::WRAPPER_BYTES, "wrapper")?;
@@ -54,11 +56,13 @@ pub(super) fn smc_controller(
         .first_u32("timers-reg-index")
         .map(|index| place(index as usize, smc::WATCHDOG_BYTES, "watchdog"))
         .transpose()?;
-    let irqs = node.cells32("interrupts").ok_or("SMC has no interrupts")?;
-    let irq = |index: usize| -> Result<u16, String> {
+    let irqs = node
+        .cells32("interrupts")
+        .ok_or(refuse!("SMC has no interrupts"))?;
+    let irq = |index: usize| -> Result<u16> {
         irqs.get(index)
             .and_then(|&n| u16::try_from(n).ok())
-            .ok_or_else(|| "SMC needs four valid mailbox interrupts".into())
+            .ok_or_else(|| refuse!("SMC needs four valid mailbox interrupts"))
     };
     let interrupts = [irq(0)?, irq(1)?, irq(2)?, irq(3)?];
     let read64 = |name: &str| {
@@ -68,9 +72,9 @@ pub(super) fn smc_controller(
     };
     let (base, size) = read64("region-base")
         .zip(read64("region-size"))
-        .ok_or("SMC nub has no region-base/region-size")?;
+        .ok_or(refuse!("SMC nub has no region-base/region-size"))?;
     if size < smc::SRAM_BYTES {
-        return Err("SMC region is smaller than the shared page".into());
+        return Err(refuse!("SMC region is smaller than the shared page"));
     }
     let mut gpio_keys = Vec::new();
     let mut wake_bits = smc::WakeBits::default();
@@ -96,7 +100,7 @@ pub(super) fn smc_controller(
         }
         let phandle = pmu
             .first_u32("AAPL,phandle")
-            .ok_or("smc-pmu has no phandle")?;
+            .ok_or(refuse!("smc-pmu has no phandle"))?;
         root.visit(&mut |candidate| {
             for (name, value) in candidate.properties().unwrap_or_default() {
                 if name.starts_with(b"function-")
@@ -108,7 +112,7 @@ pub(super) fn smc_controller(
                 }
             }
         })
-        .ok_or("DeviceTree walk failed")?;
+        .ok_or(refuse!("DeviceTree walk failed"))?;
     }
     gpio_keys.sort_unstable();
     gpio_keys.dedup();

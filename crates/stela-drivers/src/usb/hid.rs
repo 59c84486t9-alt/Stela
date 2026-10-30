@@ -2,32 +2,26 @@
 // Linux HID reference: Copyright (c) 1999 Andreas Gal;
 // 2000-2005 Vojtech Pavlik; 2005 Michael Haboustak for Concept2, Inc;
 // 2006-2012 Jiri Kosina; 2007-2008 Oliver Neukum.
-// Retained source identities and adaptation scope: usb/THIRD_PARTY.md.
-//! Native USB HID report transport and descriptor-qualified input.
+// Source identities and adaptation scope: usb/THIRD_PARTY.md.
+//! Native USB HID report transport and descriptor-checked input.
 //!
-//! The original report descriptor and every received report retain IDs,
+//! The original report descriptor and every received report keep IDs,
 //! collections, usages and values through `poll_hid`, including consumer keys,
 //! gamepads, extra buttons and multitouch. No contact/axis semantics or receiver
 //! identity is synthesized. Delimiter sets select their primary usage branch;
 //! vendor protocols require explicit additional support. Existing `poll` exposes
 //! the legacy keyboard/pointer input vocabulary and standard boot fallback for
-//! actual boot-subclass interfaces.
-//! EP0 controls use actual descriptor lengths and status-stage acknowledgements;
-//! endpoint stop/restart shares the controller's DMA retirement authority.
+//! boot-subclass interfaces.
+//! EP0 controls use descriptor lengths and status-stage acknowledgements;
+//! endpoint stop/restart shares the controller's DMA retirement permission.
 mod control;
-#[cfg(test)]
-mod delimiter_tests;
 pub mod descriptor;
 mod error;
 pub mod events;
 mod lifecycle;
 pub mod receiver;
 mod report;
-#[cfg(test)]
-mod sparse_tests;
 mod touch;
-#[cfg(test)]
-mod touch_tests;
 pub mod translate;
 mod usages;
 
@@ -36,10 +30,10 @@ pub use error::{ParseError, ParseErrorKind, Reader, UsageError};
 pub use touch::{TouchDiscard, TouchFrame, TouchPoll};
 pub use translate::{Translated, Translator};
 
-use super::xhci::{
-    Controller, DEVICE_TO_HOST, Device, Endpoint, GET_DESCRIPTOR, Interface, Plan,
-    RECIPIENT_INTERFACE, STALL, Shared, SlotId, TYPE_CLASS, setup,
+use super::descriptor::{
+    DEVICE_TO_HOST, Endpoint, GET_DESCRIPTOR, Interface, RECIPIENT_INTERFACE, TYPE_CLASS, setup,
 };
+use super::xhci::{Controller, Device, Plan, STALL, Shared, SlotId};
 use crate::{
     block::BlockError,
     bus::dma::{DmaAllocator, DmaBuffer},
@@ -161,8 +155,8 @@ pub const NO_REPORTS: &str = "HID interface without an input report";
 pub enum State {
     Running,
     Stopped,
-    /// A transport/cancellation failed. Retain the TD and DMA until the shared
-    /// controller can actually acknowledge retirement.
+    /// A transport/cancellation failed. Keep the TD and DMA until the shared
+    /// controller can acknowledge retirement.
     Faulted,
 }
 
@@ -179,7 +173,7 @@ pub enum ReceivedReport {
 }
 
 /// One bounded service pass: native compatibility inputs and every received
-/// descriptor-qualified HID report. Frontends must consume `reports` to expose
+/// descriptor-checked HID report. Frontends must consume `reports` to expose
 /// consumer controls, extra buttons, gamepads and touch to the guest.
 #[derive(Debug, Default)]
 pub struct Poll {
@@ -305,7 +299,7 @@ impl UsbInput {
                 Ok(())
             };
             // The generic layout is authoritative for all report kinds. Boot
-            // fallback is allowed only for an actual boot subclass interface.
+            // fallback is allowed only for a boot subclass interface.
             let raw = read_descriptor(&mut c, device, interface);
             let described = raw.as_ref().map_err(Clone::clone).and_then(|bytes| {
                 let descriptor = Descriptor::parse(bytes)
@@ -422,13 +416,13 @@ impl UsbInput {
         self.poll_hid().inputs
     }
 
-    /// Service the actual owned interrupt-IN endpoint, bounded to 16 reports.
+    /// Service the owned interrupt-IN endpoint, bounded to 16 reports.
     pub fn poll_hid(&mut self) -> Poll {
         self.poll_touch_hid().hid
     }
 
-    /// Same actual HID service pass, with opt-in complete hybrid frames. Use
-    /// this method to consume assembled output; `poll_hid` retains raw output.
+    /// Same HID service pass, with opt-in complete hybrid frames. Use
+    /// this method to consume assembled output; `poll_hid` keeps raw output.
     pub fn poll_touch_hid(&mut self) -> TouchPoll {
         let mut touch = TouchPoll::default();
         let mut polled = Poll::default();

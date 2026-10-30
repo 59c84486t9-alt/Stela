@@ -13,8 +13,8 @@ use rustls::{
     },
 };
 use zeroize::Zeroizing;
-/// Retained cryptographically secure entropy source. Failure leaves the output
-/// unchanged; native integration supplies the actual owned entropy capability.
+/// Cryptographically secure entropy source. Failure leaves the output
+/// unchanged; native integration supplies the owned entropy capability.
 pub trait EntropySource: Send + Sync {
     fn fill(&self, output: &mut [u8]) -> Result<(), GetRandomFailed>;
 }
@@ -37,7 +37,7 @@ impl ProviderOwner {
             },
         }
     }
-    /// Rustls requires static group/random references. Caller retains this exact
+    /// Rustls requires static group/random references. Caller keeps this exact
     /// unique provider owner through the whole boot, never replaces its source.
     pub fn provider(&'static self) -> CryptoProvider {
         CryptoProvider {

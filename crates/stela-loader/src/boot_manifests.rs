@@ -15,9 +15,10 @@
 //! to choose the iBoot slot to stage into and fails without it. A restore
 //! boot's firmware comes from the IPSW under the one personalized ticket
 //! that also admits the kernel ([`Object::admits_firmware`]).
+use crate::Result;
 use crate::{apple_device_tree::DeviceTree, boot_policy::Decision, im4m};
 use alloc::{format, string::String, vec::Vec};
-use anyhow::{Result, ensure};
+use stela_contracts::require;
 
 const CHOSEN: &str = "/chosen";
 const MANIFESTS: &str = "/chosen/boot-object-manifests";
@@ -38,18 +39,19 @@ impl Object {
     /// Require a real IM4M which names the loaded payload, and whose whole
     /// encoding is the boot manifest already selected in `/chosen`.
     pub fn new(tree: &DeviceTree, tag: &str, original: &[u8]) -> Result<Self> {
-        ensure!(
+        require!(
             tag.len() == 4 && tag.bytes().all(|b| b.is_ascii_alphanumeric()),
             "boot manifest object name is not a four-character payload tag"
         );
         let manifest = im4m::parse(original)?;
-        ensure!(
+        require!(
             manifest.object(tag).is_some(),
-            "boot manifest does not name the loaded {tag} payload"
+            "boot manifest does not name the loaded {tag} payload",
+            tag
         );
         let object = Self {
             tag: tag.into(),
-            bytes: u64::try_from(original.len())?,
+            bytes: original.len() as u64,
             digest: manifest.digest,
             firmware: false,
         };
@@ -70,10 +72,11 @@ impl Object {
     }
 
     fn check_hash(&self, tree: &DeviceTree) -> Result<()> {
-        ensure!(
+        require!(
             tree.property(CHOSEN, BOOT_HASH)
                 .is_some_and(|p| p.value == self.digest),
-            "retained boot manifest differs from /chosen {BOOT_HASH}"
+            "retained boot manifest differs from /chosen {BOOT_HASH}",
+            BOOT_HASH
         );
         Ok(())
     }
@@ -85,9 +88,11 @@ impl Object {
         let rows = core::iter::once((MANIFESTS, self.tag.as_str()))
             .chain(self.hash_rows().map(|name| (HASHES, name)));
         for (path, name) in rows {
-            ensure!(
+            require!(
                 tree.property(path, name).is_none(),
-                "boot manifest row {path}/{name} already exists"
+                "boot manifest row {path}/{name} already exists",
+                path,
+                name
             );
         }
         tree.ensure_child(CHOSEN, "boot-object-manifests")?;
@@ -105,12 +110,12 @@ impl Object {
 
     /// Fill the reserved physical range after placing the unchanged bytes.
     pub fn place(&self, tree: &mut DeviceTree, address: u64) -> Result<Vec<Decision>> {
-        ensure!(
+        require!(
             address != 0 && address.checked_add(self.bytes).is_some(),
             "boot manifest physical range is empty or wraps"
         );
         self.check_hash(tree)?;
-        ensure!(
+        require!(
             tree.property(MANIFESTS, &self.tag)
                 .is_some_and(|p| p.value == self.range(0))
                 && self.hash_rows().all(|name| {
@@ -149,6 +154,7 @@ impl Object {
 mod tests {
     use super::*;
     use crate::im4m::tests::{der, entry, manifest};
+    use anyhow::Result;
 
     fn input() -> (DeviceTree, Vec<u8>) {
         let bytes = manifest(&[], &[entry("krnl", &der(&[0x31], &[]))]);
@@ -228,26 +234,21 @@ mod tests {
     }
 
     #[test]
-    fn an_existing_sfr_row_refuses_without_a_partial_record() -> Result<()> {
-        let (mut tree, bytes) = input();
-        let object = Object::new(&tree, "krnl", &bytes)?.admits_firmware();
-        tree.ensure_child(CHOSEN, "secure-boot-hashes")?;
-        tree.set_property(HASHES, FIRMWARE_HASH, alloc::vec![0; im4m::SHA384_BYTES])?;
-        let before = tree.clone();
-        assert!(object.reserve(&mut tree).is_err());
-        assert_eq!(tree, before);
-        Ok(())
-    }
-
-    #[test]
-    fn a_conflicting_hash_does_not_leave_a_partial_manifest_record() -> Result<()> {
-        let (mut tree, bytes) = input();
-        let object = Object::new(&tree, "krnl", &bytes)?;
-        tree.ensure_child(CHOSEN, "secure-boot-hashes")?;
-        tree.set_property(HASHES, "krnl", alloc::vec![0; im4m::SHA384_BYTES])?;
-        let before = tree.clone();
-        assert!(object.reserve(&mut tree).is_err());
-        assert_eq!(tree, before);
+    fn a_refused_reservation_leaves_no_partial_record() -> Result<()> {
+        // An SFR row already present for a firmware-admitting object, and a
+        // conflicting hash already recorded under the object's own name.
+        for (firmware, row) in [(true, FIRMWARE_HASH), (false, "krnl")] {
+            let (mut tree, bytes) = input();
+            let mut object = Object::new(&tree, "krnl", &bytes)?;
+            if firmware {
+                object = object.admits_firmware();
+            }
+            tree.ensure_child(CHOSEN, "secure-boot-hashes")?;
+            tree.set_property(HASHES, row, alloc::vec![0; im4m::SHA384_BYTES])?;
+            let before = tree.clone();
+            assert!(object.reserve(&mut tree).is_err(), "{row}");
+            assert_eq!(tree, before, "{row}");
+        }
         Ok(())
     }
 }

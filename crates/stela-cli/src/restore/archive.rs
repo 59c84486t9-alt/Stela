@@ -15,7 +15,7 @@ const IM4P_HEADER_LIMIT: u64 = 256 * 1024 * 1024;
 
 type Archive = zip::ZipArchive<File>;
 
-/// A member's actual size and SHA-256, and its IM4P identity when it is one.
+/// A member's size and SHA-256, and its IM4P identity when it is one.
 #[derive(Debug, Clone, Serialize)]
 pub struct MemberDigest {
     pub bytes: u64,

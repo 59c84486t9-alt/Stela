@@ -64,7 +64,7 @@ impl<C: Control> Chip<C> {
         }
         for (index, chunk) in data.chunks(512).enumerate() {
             let at = address + index as u32 * 512;
-            let request = super::super::super::xhci::setup(
+            let request = super::super::super::descriptor::setup(
                 0x40,
                 5,
                 at as u16,

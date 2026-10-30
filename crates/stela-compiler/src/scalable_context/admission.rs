@@ -38,7 +38,7 @@ pub(super) fn require_features(
     Ok(())
 }
 
-// The existing contextual compiler uses this adapter; the leaf collector retains
+// The existing contextual compiler uses this adapter; the leaf collector keeps
 // clauses from the same operand decoder without decoding source a second time.
 pub(super) fn decode(
     pc: GuestAddress,

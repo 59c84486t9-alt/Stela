@@ -7,7 +7,7 @@ use core::cell::{Cell, RefCell};
 unsafe fn bytes(address: u64, n: usize) -> Vec<u8> {
     (0..n)
         .map(|i| {
-            // SAFETY: each caller uses an address read from live retained test DMA.
+            // SAFETY: each caller uses an address read from live test DMA.
             unsafe { (address as *const u8).add(i).read_volatile() }
         })
         .collect()
@@ -147,7 +147,7 @@ impl Model {
     fn context(&mut self) {
         self.context = u64::from(self.reg(CI_LOW)) | u64::from(self.reg(CI_HIGH)) << 32;
         assert_ne!(self.context, 0);
-        // SAFETY: source context is published from the retained test allocation.
+        // SAFETY: source context is published from the test allocation.
         let c = unsafe { bytes(self.context, 152) };
         assert_eq!(
             &c[..16],
@@ -165,7 +165,7 @@ impl Model {
             // SAFETY: these are live source context address members.
             assert_eq!(unsafe { read64(self.context + o) } % 128, 0);
         }
-        // SAFETY: DBGC fragment's address is read from the actual live context.
+        // SAFETY: DBGC fragment's address is read from the live context.
         let fragment = unsafe { read64(self.context + 112) };
         // SAFETY: live208-byte model fragment.
         let b = unsafe { bytes(fragment, 208) };
@@ -273,7 +273,7 @@ impl Model {
                 if v >> 16 == 513 {
                     assert_eq!(self.index(16, 1), next);
                     let index = (next + 63) % 64;
-                    // SAFETY: model fetches the actual published FRBD.
+                    // SAFETY: model fetches the published FRBD.
                     let d = unsafe { bytes(self.dma_pointer(80) + u64::from(index) * 16, 16) };
                     let tag = u16::from_le_bytes([d[0], d[1]]);
                     assert_eq!(tag, index);
@@ -305,7 +305,7 @@ impl Model {
                     assert_eq!(&d[12..], &[0; 4]);
                     let size = usize::from(u16::from_le_bytes([d[1], d[2]]));
                     let address = u64::from_le_bytes(d[4..12].try_into().unwrap());
-                    // SAFETY: source descriptor gives a retained DMA packet buffer.
+                    // SAFETY: source descriptor gives a DMA packet buffer.
                     let packet = unsafe { bytes(address, size) };
                     self.transmitted.push(packet.clone());
                     self.time.set(self.time.get() + self.tx_delay);
@@ -314,7 +314,7 @@ impl Model {
                         let completion = self
                             .completion_override
                             .unwrap_or(u32::from(next) | (1 << 24) | (1 << 31));
-                        // SAFETY: actual device-owned live URBD0 and head index.
+                        // SAFETY: device-owned live URBD0 and head index.
                         unsafe {
                             write(
                                 self.dma_pointer(64) + u64::from(tail) * 4,
@@ -322,7 +322,7 @@ impl Model {
                             );
                         }
                         if self.duplicate_completion {
-                            // SAFETY: second actual source completion entry in live DMA.
+                            // SAFETY: second source completion entry in live DMA.
                             unsafe {
                                 write(
                                     self.dma_pointer(64) + u64::from((tail + 1) % 32) * 4,
@@ -395,7 +395,7 @@ impl Model {
     }
 }
 pub(super) struct ModelPlatform(Rc<RefCell<Model>>);
-// SAFETY: explicit independent hardware model. All pointers name retained test
+// SAFETY: explicit independent hardware model. All pointers name kept test
 // DMA, operations are serialized, and the enclosing test backing outlives it.
 unsafe impl Platform for ModelPlatform {
     fn identity(&self) -> Identity {
@@ -475,7 +475,7 @@ impl Drop for ModelPlatform {
 }
 pub(super) fn allocator(backing: &mut [u64]) -> RegionAllocator {
     let start = backing.as_mut_ptr() as u64;
-    // SAFETY: test retains backing, with exclusive physical/DMA use until drop.
+    // SAFETY: test keeps backing, with exclusive physical/DMA use until drop.
     unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) }
 }
 pub(super) fn transport(
@@ -486,7 +486,7 @@ pub(super) fn transport(
     (Transport::new(ModelPlatform(m.clone()), dma).unwrap(), m)
 }
 #[test]
-fn every_source_id_boots_actual_published_context_and_posts_exactly61_buffers() {
+fn every_source_id_boots_published_context_and_posts_exactly61_buffers() {
     assert_eq!(
         DEVICE_IDS,
         &[0x4d76, 0xa876, 0xe376, 0xe476, 0xd346, 0x6e74]
@@ -520,7 +520,7 @@ fn every_source_id_boots_actual_published_context_and_posts_exactly61_buffers() 
     }
 }
 #[test]
-fn actual_tfd_payload_and_source_next_index_completions_wrap_without_hci_fabrication() {
+fn tfd_payload_and_source_next_index_completions_wrap_without_hci_fabrication() {
     let mut backing = vec![0u64; 1024 * 1024];
     let mut dma = allocator(&mut backing);
     let (mut t, m) = transport(0xa876, &mut dma);
@@ -560,7 +560,7 @@ fn rx_completions_drain_coalesced_frames_preserve_padding_and_rearm_only_returne
     }
 }
 #[test]
-fn intel_reset_requires_actual_tx_and_gp0_then_real_boot_event_before_d0() {
+fn intel_reset_requires_tx_and_gp0_then_real_boot_event_before_d0() {
     let mut backing = vec![0u64; 1024 * 1024];
     let mut dma = allocator(&mut backing);
     let (mut t, m) = transport(0x4d76, &mut dma);
@@ -636,7 +636,7 @@ fn old_gp0_cannot_acknowledge_a_silent_d0_request() {
         t.send(Kind::Command, &[1, 0xfc, 0]).unwrap();
         t.poll().unwrap();
         m.borrow_mut().silence_d0 = silent;
-        // A genuine older OP GP0 is already pending before the new SLEEP write.
+        // An older OP GP0 is already pending before the new SLEEP write.
         m.borrow_mut().cause(0, 1);
         if silent {
             assert!(matches!(t.enter_d0(), Err(Error::Timeout(_))));
@@ -672,7 +672,7 @@ fn d0_preexisting_stage_change_and_late_write_acknowledgment_are_refused() {
 }
 
 #[test]
-fn rom_stage_without_actual_gp0_never_starts_rx_or_claims_startup() {
+fn rom_stage_without_gp0_never_starts_rx_or_claims_startup() {
     let mut backing = vec![0u64; 1024 * 1024];
     let mut dma = allocator(&mut backing);
     let (mut t, m) = transport(0xa876, &mut dma);
@@ -690,7 +690,7 @@ fn rom_stage_without_actual_gp0_never_starts_rx_or_claims_startup() {
     assert_eq!(m.borrow().dropped, 1);
 }
 #[test]
-fn actual_abort_lockdown_halt_and_mailbox_fault_observations_survive_cleanup() {
+fn abort_lockdown_halt_and_mailbox_fault_observations_survive_cleanup() {
     for stage in [
         ROM | (1 << 10),
         ROM | (1 << 11),
@@ -715,7 +715,7 @@ fn actual_abort_lockdown_halt_and_mailbox_fault_observations_survive_cleanup() {
     }
 }
 #[test]
-fn silent_tx_and_failed_physical_retirement_keep_first_fault_live_bytes_and_platform() {
+fn silent_tx_with_failed_retirement_keeps_first_fault() {
     let mut backing = vec![0u64; 1024 * 1024];
     let mut dma = allocator(&mut backing);
     let (mut t, m) = transport(0xa876, &mut dma);
@@ -825,7 +825,7 @@ fn mmio_start_read_and_effect_then_write_errors_cannot_reopen_or_rewrite_dma() {
 }
 
 #[test]
-fn active_tx_rx_and_cause_errors_retain_first_fault_and_failed_cleanup_owner() {
+fn active_transfer_errors_keep_first_fault() {
     for operation in 0..7 {
         for cleanup_fails in [false, true] {
             let mut backing = vec![0u64; 1024 * 1024];
@@ -1009,7 +1009,7 @@ fn malformed_rfh_hci_type_payload_and_unposted_rx_tags_never_reuse_owned_storage
         ));
         assert_eq!(t.state(), State::Failed);
         if let Some(address) = raw {
-            // SAFETY: physically retired test backing still retains this buffer.
+            // SAFETY: physically retired test backing still keeps this buffer.
             let bytes = unsafe { bytes(address, 8) };
             assert_eq!(bytes[2], 1);
         }
@@ -1034,12 +1034,12 @@ fn out_of_order_rx_cannot_overwrite_a_still_posted_buffer_during_rearm() {
             ..
         })
     ));
-    // SAFETY: real modeled reset retired storage, which remains retained.
+    // SAFETY: real modeled reset retired storage, which remains held.
     assert_eq!(unsafe { bytes(address, 4096) }, before);
     assert_eq!(t.state(), State::Failed);
 }
 #[test]
-fn reset_transmit_does_not_complete_without_actual_matching_alive_stage() {
+fn reset_transmit_does_not_complete_without_matching_alive_stage() {
     for no_cause in [false, true] {
         let mut backing = vec![0u64; 1024 * 1024];
         let mut dma = allocator(&mut backing);
@@ -1576,7 +1576,7 @@ mod native_models {
         }
     }
     struct Bar(Arc<Mutex<Hardware>>);
-    // SAFETY: independent actual-resource model, same function/epoch and span.
+    // SAFETY: independent resource model, same function/epoch and span.
     unsafe impl msix::BarAccess for Bar {
         fn physical_span(&self) -> PhysicalSpan {
             PhysicalSpan::new(BASE, BAR_BYTES).unwrap()
@@ -1613,7 +1613,7 @@ mod native_models {
     }
     struct Registers(Arc<Mutex<Hardware>>);
     // SAFETY: explicit independent physical register model, serialized by Mutex;
-    // actual MMIO effects precede injected late errors. No production emulation.
+    // MMIO effects precede injected late errors. No production emulation.
     unsafe impl native::Registers for Registers {
         fn full_bar(&self) -> PhysicalSpan {
             PhysicalSpan::new(BASE, BAR_BYTES).unwrap()
@@ -1669,7 +1669,7 @@ mod native_models {
             drop(h);
             if let Some(registry) = callback {
                 // An already-posted message can reach the CPU after source
-                // masking. Deliver through the actual registered IDT route.
+                // masking. Deliver through the registered IDT route.
                 assert!(registry.dispatch(irq::FIRST_VECTOR));
             }
             Ok(())
@@ -1689,7 +1689,7 @@ mod native_models {
         fail_pending: Arc<AtomicBool>,
         eoi: Arc<AtomicU64>,
     }
-    // SAFETY: independent existing-controller model; its actual source uses
+    // SAFETY: independent existing-controller model; its source uses
     // the real Registry implementation and this owned vector/CPU inventory.
     unsafe impl irq::Platform for Cpu {
         fn check_cpu(&self) -> core::result::Result<(), irq::IrqError> {
@@ -1743,8 +1743,8 @@ mod native_models {
         h.lock().unwrap().route = Some(registry);
         let address = h.lock().unwrap().bt.identity.address;
         let function = Function::new(address, Config(h.clone())).unwrap();
-        // The retained root is the actual independent Function hardware model,
-        // not a numeric token. All BAR/register/config views retain that epoch.
+        // The kept root is the independent Function hardware model,
+        // not a numeric token. All BAR/register/config views keep that epoch.
         let inputs = native::Inputs {
             function,
             retained: h.clone(),
@@ -1807,7 +1807,7 @@ mod native_models {
         assert_eq!((h.config_drops, h.bar_drops, h.register_drops), (1, 1, 1));
     }
     #[test]
-    fn native_missing_stop_or_cpu_drain_never_releases_actual_owners() {
+    fn native_missing_stop_or_cpu_drain_never_releases_owners() {
         for no_stop in [false, true] {
             let mut backing = vec![0u64; 1024 * 1024];
             let mut dma = allocator(&mut backing);
@@ -1824,8 +1824,8 @@ mod native_models {
                 !h.lock().unwrap().bt.armed,
                 "failed stop omitted actual route mask"
             );
-            // Failed explicit retirement retains a closing tombstone for its
-            // actual vector, rather than releasing it or running the callback.
+            // Failed explicit retirement keeps a closing tombstone for its
+            // vector, rather than releasing it or running the callback.
             let eoi = h.lock().unwrap().callback_eoi.load(Ordering::Relaxed);
             assert!(registry.dispatch(irq::FIRST_VECTOR));
             assert_eq!(
@@ -1905,7 +1905,7 @@ mod native_models {
         t.close().unwrap();
     }
     #[test]
-    fn native_failed_msix_program_and_callback_mask_keep_raw_fault_and_terminal_owner() {
+    fn msix_failures_keep_raw_fault_and_terminal_owner() {
         for failed_arm in [false, true] {
             let mut backing = vec![0u64; 1024 * 1024];
             let mut dma = allocator(&mut backing);
@@ -1955,7 +1955,7 @@ mod native_models {
         assert_eq!(h.lock().unwrap().bt.writes.len(), writes);
     }
     #[test]
-    fn native_constructor_refuses_unqualified_inputs_without_writes_and_returns_exact_owners() {
+    fn native_constructor_refuses_unqualified_inputs_without_writes_and_returns_owners() {
         for failure in 0..7 {
             let (mut inputs, h, registry, _) = inputs();
             match failure {
@@ -1971,7 +1971,7 @@ mod native_models {
             }
             let before = h.lock().unwrap().config;
             // SAFETY: negative independent model inputs; constructor must refuse
-            // their unqualified metadata without changing any physical state.
+            // their unchecked metadata without changing any physical state.
             let (error, returned) = match unsafe { native::NativePlatform::new(inputs) } {
                 Ok(_) => panic!("unqualified native inputs admitted"),
                 Err(refusal) => refusal,

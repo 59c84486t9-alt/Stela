@@ -1,19 +1,19 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Actual root PE-clear isolation before releasing a USB address lease.
+//! Root PE-clear isolation before releasing a USB address lease.
 //! Linux ehci_hub_control ClearPortFeature(ENABLE) supplies the neutral write;
 //! native schedule/payload/cache ownership and acknowledgement are additional.
 use super::*;
 
 impl Controller {
     /// Disable this exact root and retire every device/endpoint handle.
-    /// The physical device may retain its old address; actual PE0 isolates it
+    /// The physical device may keep its old address; PE0 isolates it
     /// before that bus address (including address0) can be assigned elsewhere.
     /// No TD is cancelled implicitly, port power is preserved, and a privately
     /// suspended root requires its explicit resume capability first.
     ///
     /// Complete schedule stop and original requester drain/cache ownership
     /// precede handle revocation and the port write. Failed isolation closes
-    /// the attachment and retains all native/DMA resources; software retirement
+    /// the attachment and keeps all native/DMA resources; software retirement
     /// alone can never release a reachable physical bus address.
     pub fn disable_port(&mut self, id: &DeviceId) -> Result<(), Error> {
         let index = self.identity(id)?;
@@ -42,7 +42,7 @@ impl Controller {
         let isolated = (|| {
             let at = self.port_at(index);
             // Never acknowledge unseen changes or replay a reset/resume. PE
-            // clears by software; setting it requires an actual HS reset.
+            // clears by software; setting it requires a HS reset.
             self.write(at, value & !(ENABLE | PORT_CHANGES))?;
             self.wait(
                 at,

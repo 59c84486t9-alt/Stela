@@ -216,7 +216,7 @@ fn exact_assigned_cardinality_constructs_below_and_at_capacity_without_stock_cou
     }
 }
 #[test]
-fn above_capacity_names_the_actual_consumer_and_never_truncates() {
+fn above_capacity_names_the_consumer_and_never_truncates() {
     let (host, mut r, a) = fixture(&contiguous(21));
     assert_eq!(
         Plan::build(&host, &r, &a).unwrap_err(),
@@ -276,7 +276,7 @@ fn sparse_affinity_span_and_physical_cluster_boundaries_are_independent_of_count
     );
 }
 #[test]
-fn sixth_and_seventh_cluster_and_64_bit_mask_limits_do_not_alias() {
+fn cluster_mask_limits_do_not_alias() {
     for n in [6, 7] {
         let regs: Vec<_> = (0..n).map(|i| i << 8).collect();
         let (host, r, a) = fixture(&regs);
@@ -482,7 +482,7 @@ fn mixed_core_types_share_physical_cluster_cache_and_keep_distinct_aff2() {
     assert_eq!(plan.pes()[1].identity.mpidr >> 16 & 7, 4);
 }
 #[test]
-fn same_plan_retains_roster_and_resource_revision_without_native_authority() {
+fn same_plan_keeps_roster_and_resource_revision_without_native_permission() {
     let (host, r, a) = fixture(&[0, 1]);
     let plan = Plan::build(&host, &r, &a).unwrap();
     host.revision.set(8);
@@ -563,7 +563,7 @@ fn cpu_family_never_substitutes_for_explicit_source_variant_or_host_cardinality(
         Chip::AppleM6,
     ] {
         // All resources and semantics are synthetic explicit input, not
-        // claims that these fields qualify any unobserved silicon.
+        // claims that these fields check any unobserved silicon.
         let (host, mut r, a) = fixture(&contiguous(12));
         r.profile.chip = chip;
         let plan = Plan::build(&host, &r, &a).unwrap();

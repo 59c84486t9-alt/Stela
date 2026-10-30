@@ -107,7 +107,7 @@ pub const MAX_PROCESSORS: usize = 256;
 /// each has [`acknowledge`]d it: a processor acknowledges a generation once
 /// it has flushed every aperture translation older than the request.
 /// Installation needs no remote flush, since processors do not cache
-/// not-present entries, and the authority's lock orders installations and
+/// not-present entries, and the permission's lock orders installations and
 /// retirements.
 ///
 /// [`join`]: Self::join

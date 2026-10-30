@@ -1,7 +1,8 @@
 //! The Mach-O load commands an auxiliary collection and its kexts carry,
 //! as XNU `EXTERNAL_HEADERS/mach-o/loader.h` at `xnu-12377.121.6` lays them
 //! out.
-use anyhow::Result;
+use super::fit;
+use crate::Result;
 use object::macho;
 
 pub const HEADER_BYTES: usize = 32;
@@ -83,7 +84,8 @@ impl Commands {
     fn begin(&mut self, command: u32, size: usize) -> Result<()> {
         self.count += 1;
         self.bytes.extend(command.to_le_bytes());
-        self.bytes.extend(u32::try_from(size)?.to_le_bytes());
+        self.bytes
+            .extend(fit::<u32, _>(size, "a load command's size")?.to_le_bytes());
         Ok(())
     }
 
@@ -106,7 +108,7 @@ impl Commands {
         self.words(&[
             segment.protection,
             segment.protection,
-            u32::try_from(segment.sections.len())?,
+            fit(segment.sections.len(), "a segment's section count")?,
             0,
         ]);
         for section in &segment.sections {
@@ -164,7 +166,10 @@ impl Commands {
         self.begin(macho::LC_FILESET_ENTRY, size)?;
         self.bytes.extend(address.to_le_bytes());
         self.bytes.extend(file_offset.to_le_bytes());
-        self.words(&[u32::try_from(FILESET_ENTRY_BYTES)?, 0]);
+        self.words(&[
+            fit(FILESET_ENTRY_BYTES, "the fileset entry name offset")?,
+            0,
+        ]);
         self.bytes.extend(id.as_bytes());
         self.bytes.resize(start + size, 0);
         Ok(())
@@ -179,7 +184,7 @@ impl Commands {
             cpu_subtype,
             file_type,
             self.count,
-            u32::try_from(self.bytes.len())?,
+            fit(self.bytes.len(), "the load commands' size")?,
             flags,
             0,
         ] {

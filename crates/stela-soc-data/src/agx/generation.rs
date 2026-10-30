@@ -31,6 +31,8 @@
 //! admitted only with an identification a source states ([`Gpu::identity`]).
 
 use super::Identity;
+use crate::Result;
+use stela_contracts::refuse;
 
 /// How `readChipInfo` reads the GPU's size from the identification words.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -130,8 +132,8 @@ pub struct Model {
     /// T8112, 42 on T600x and T602x, whose DRAM lies at 1 TiB).
     pub uat_output_bits: u32,
     /// The native ASC control word required by a recovered firmware callback.
-    /// Only G14G's global callback has this qualified binding (26A434
-    /// armfw_g14g startup 0x371b0..0x371f8 and retained wake 0x378d0..0x37904).
+    /// Only G14G's global callback has this checked binding (26A434
+    /// armfw_g14g startup 0x371b0..0x371f8 and kept wake 0x378d0..0x37904).
     /// Other families' unrecovered callbacks remain protocol refusals; their
     /// SGX apertures must not inherit G14G's private physical requirement.
     pub native_asc_control: Option<u64>,
@@ -575,10 +577,10 @@ pub fn compatible_admitted(compatible: &str) -> bool {
 impl Family {
     /// What the models need of this family, when its interface is modeled;
     /// otherwise why it is not.
-    pub fn model(&self) -> Result<&'static Model, &'static str> {
+    pub fn model(&self) -> Result<&'static Model> {
         match self.interface {
             Interface::Modeled(model) => Ok(model),
-            Interface::Unrecovered(reason) => Err(reason),
+            Interface::Unrecovered(reason) => Err(reason.into()),
         }
     }
 }
@@ -586,13 +588,13 @@ impl Family {
 impl Gpu {
     /// The identification the model reports, when the GPU's whole interface
     /// is modeled; otherwise why it is not.
-    pub fn admitted(&self) -> Result<Identity, &'static str> {
+    pub fn admitted(&self) -> Result<Identity> {
         self.family.model()?;
-        let identity = self
-            .identity
-            .ok_or("no source states the GPU's identification registers")?;
+        let identity = self.identity.ok_or(refuse!(
+            "no source states the GPU's identification registers"
+        ))?;
         if !self.family.generations.contains(&identity.generation) {
-            return Err("the GPU's generation is not one its kext accepts");
+            return Err(refuse!("the GPU's generation is not one its kext accepts"));
         }
         Ok(identity)
     }
@@ -603,7 +605,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_census_gpu_is_named_once_and_m1_and_m2_are_admitted() {
+    fn every_census_gpu_is_named_once() {
         for (index, gpu) in GPUS.iter().enumerate() {
             assert!(gpu.compatible.starts_with("gpu,t"));
             assert!(
@@ -615,6 +617,10 @@ mod tests {
             assert!(gpu.firmware.starts_with("armfw_g"));
             assert!(gpu.family.kext.ends_with(gpu.family.name));
         }
+    }
+
+    #[test]
+    fn only_m1_and_m2_gpus_are_admitted() {
         let admitted: alloc::vec::Vec<_> = GPUS
             .iter()
             .filter(|gpu| gpu.admitted().is_ok())
@@ -633,9 +639,11 @@ mod tests {
         assert_eq!(G15G.model(), Ok(&G15G_MODEL));
         assert_eq!(
             by_chip(0x8122).unwrap().admitted(),
-            Err("no source states the GPU's identification registers")
+            Err(refuse!(
+                "no source states the GPU's identification registers"
+            ))
         );
-        assert_eq!(G15S.model(), Err(NOT_CHECKED));
+        assert_eq!(G15S.model(), Err(NOT_CHECKED.into()));
         assert!(by_chip(0x9999).is_none());
         // M1 Pro, Max and Ultra share one compatible, admitted as a whole.
         assert!(compatible_admitted("gpu,t6000"));
@@ -643,6 +651,10 @@ mod tests {
         assert!(compatible_admitted("gpu,t6020"));
         assert!(!compatible_admitted("gpu,t8122"));
         assert!(!compatible_admitted("gpu,t9999"));
+    }
+
+    #[test]
+    fn only_g14g_and_g17g_send_dashboard_signals() {
         // Only the G14G and G17G kexts send dashboard signals.
         let dashboards: alloc::vec::Vec<_> = GPUS
             .iter()

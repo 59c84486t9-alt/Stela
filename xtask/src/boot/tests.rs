@@ -128,7 +128,7 @@ fn native_clock_requires_exclusive_topology() {
 }
 
 #[test]
-fn native_mmio_requires_complete_actual_mapping_and_refusal_proof() {
+fn native_mmio_requires_complete_mapping_and_refusal_proof() {
     let stack = "CHECK native-stack finite=4 actual_rsp=0x9000,0xa000 source=retired parent=clear+TLB; no Linux owner or CPU-time grant";
     let mmio = "CHECK native-mmio PASS authority=actual roots=all native_cpus=1 effective_cache=Intel-UC aperture=owned-PTE map=published retire=actual-clear+TLB reuse=readback foreign-root=refused WC=refused clock=HPET64 retained_hpet=1 root_lifetime=kernel-image ioapics=1 MCFG=0xb0000000 buses=0..=0 vendor=0x12378086; bounded authored diagnostic, Linux and physical hardware unqualified";
     let mixed32 = "CHECK native-mixed32 PASS contexts=32 kernel=21 rust=11 raw_bytes=1798144 payload_bytes=1785856 alignment_padding=12288 guards=all-roots holes=absent cache=WB retire=32-views raw=whole-boot-owned refusals=wrong-inventory+allocation-capacity; no C-current, Clock or provider grant";

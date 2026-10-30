@@ -7,7 +7,7 @@ use alloc::rc::Rc;
 use core::cell::RefCell;
 
 #[test]
-fn rtl8153b_actual_calibration_power_phy_and_receive_paths() {
+fn rtl8153b_calibration_power_phy_and_receive_paths() {
     for revision in [0x6000, 0x6010] {
         let bytes = if revision == 0x6010 {
             synthetic_upload(revision)

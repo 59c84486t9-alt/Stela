@@ -110,7 +110,7 @@ fn stale_hid_stop_and_cached_stopped_success_preserve_state_before_mmio() {
     for stopped in [false, true] {
         let mut ram = vec![0u64; 512 * 1024];
         let start = ram.as_mut_ptr() as u64;
-        // SAFETY: both original addressed controllers retain exclusive live RAM.
+        // SAFETY: both original addressed controllers keep exclusive live RAM.
         let mut dma = unsafe { model::RegionAllocator::new(start..start + ram.len() as u64 * 8) };
         let (mut previous, old_peer, _) = fixture(&mut dma);
         let (mut current, peer, trap) = fixture(&mut dma);
@@ -182,7 +182,7 @@ fn stale_hid_stop_and_cached_stopped_success_preserve_state_before_mmio() {
                 pressed: true
             }]
         );
-        // Restoring the original controller lets its genuine owner complete
+        // Restoring the original controller lets its owner complete
         // lifecycle work. The rejected alias changed neither held keys nor
         // decoder state, so a running owner still emits its real release.
         previous.controller = original;
@@ -206,14 +206,15 @@ fn stale_hid_stop_and_cached_stopped_success_preserve_state_before_mmio() {
     }
 }
 #[test]
-fn actual_same_controller_root_reuse_refuses_retained_hid_stop_without_touching_current_dma() {
+fn same_controller_root_reuse_refuses_kept_hid_stop_without_touching_current_dma() {
     for speed in [xhci::HIGH_SPEED, xhci::SUPER_SPEED] {
         for context in [32, 64] {
             for stopped in [false, true] {
                 let mut memory = vec![0u64; 512 * 1024];
                 let (shared, original, hardware, mut dma) =
                     model::reset_hid_fixture(&mut memory, speed, context, 1);
-                let interface = xhci::interfaces(&original.configuration).remove(0);
+                let interface =
+                    crate::usb::descriptor::interfaces(&original.configuration).remove(0);
                 let endpoint = interface.endpoints[0];
                 shared
                     .borrow_mut()
@@ -248,7 +249,7 @@ fn actual_same_controller_root_reuse_refuses_retained_hid_stop_without_touching_
                     assert_eq!(previous.state(), State::Stopped);
                 }
                 // SAFETY: the fixture exclusively owns the original complete
-                // leaf inventory; retained old consumers are exercised only
+                // leaf inventory; old consumers are exercised only
                 // for pure rejection after this acknowledged retirement.
                 let mut fresh = unsafe {
                     shared.borrow_mut().reset_and_reuse_root(
@@ -270,7 +271,7 @@ fn actual_same_controller_root_reuse_refuses_retained_hid_stop_without_touching_
                         .iter()
                         .any(|(kind, slot, _)| *kind == 10 && *slot == original.slot)
                 );
-                let interface = xhci::interfaces(&fresh.configuration).remove(0);
+                let interface = crate::usb::descriptor::interfaces(&fresh.configuration).remove(0);
                 {
                     let mut c = shared.borrow_mut();
                     let mut access = c.device(fresh.id).unwrap();

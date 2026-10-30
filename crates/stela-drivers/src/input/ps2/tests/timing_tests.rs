@@ -97,8 +97,8 @@ fn native_clock_and_duration_refusal_precedes_every_i8042_profile_effect() {
     );
 }
 
-/// Model100ns raw timer: legacy quotient access deliberately fails. This is a
-/// test service, not a fabricated native clock calibration or platform fact.
+/// Model100ns raw timer: legacy quotient access fails. This is a
+/// test service, not an invented native clock calibration or platform fact.
 struct RawTimer(Rc<Cell<u64>>);
 impl Timer for RawTimer {
     fn now_us(&self) -> u64 {

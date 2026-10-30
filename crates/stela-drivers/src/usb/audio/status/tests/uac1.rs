@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-//! UAC1 status words through actual xHCI TD, DMA and cancellation ownership.
+//! UAC1 status words through xHCI TD, DMA and cancellation ownership.
 extern crate std;
 use super::*;
 
@@ -40,7 +40,7 @@ fn notice(raw: [u8; 2]) -> StatusEvent {
 }
 
 #[test]
-fn actual_uac1_entity_and_memory_words_wrap_rearm_and_apply_backpressure() {
+fn uac1_streams_wrap_and_apply_backpressure() {
     let mut backing = memory();
     let mut dma = allocator(&mut backing);
     let (audio, model, _) = peer_configuration(&mut dma, &configuration(4));
@@ -50,7 +50,7 @@ fn actual_uac1_entity_and_memory_words_wrap_rearm_and_apply_backpressure() {
     let geometry = (owner.packet.physical(), owner.allocator.remaining());
     for _ in 0..320 {
         let pending = model.borrow().active[3];
-        assert_eq!(owner.poll().unwrap(), 0); // NAK retains the genuine TD
+        assert_eq!(owner.poll().unwrap(), 0); // NAK keeps the TD
         assert_eq!(model.borrow().active[3], pending);
         model.borrow_mut().push_event(vec![0x80, 2, 0xc0, 4]);
         assert_eq!(owner.poll().unwrap(), 2);
@@ -61,7 +61,7 @@ fn actual_uac1_entity_and_memory_words_wrap_rearm_and_apply_backpressure() {
         assert_eq!(owner.poll().unwrap(), 0); // second event still holds back rearm
         assert_eq!(owner.next_event().unwrap(), Some(notice([0xc0, 4])));
         assert_eq!(owner.next_event().unwrap(), None);
-        assert_eq!(audio.binding(), &binding); // neither event changes PCM authority
+        assert_eq!(audio.binding(), &binding); // neither event changes PCM permission
         assert_eq!(owner.poll().unwrap(), 0);
         assert!(model.borrow().active[3].is_some());
         assert_eq!(
@@ -82,7 +82,7 @@ fn actual_uac1_entity_and_memory_words_wrap_rearm_and_apply_backpressure() {
 }
 
 #[test]
-fn actual_uac1_foreign_reserved_unknown_and_truncated_words_publish_no_prefix() {
+fn uac1_foreign_reserved_unknown_and_truncated_words_publish_no_prefix() {
     let mut backing = memory();
     let mut dma = allocator(&mut backing);
     let (audio, model, _) = peer_configuration(&mut dma, &configuration(4));
@@ -93,7 +93,7 @@ fn actual_uac1_foreign_reserved_unknown_and_truncated_words_publish_no_prefix() 
         vec![0x80, 2, 0x82, 1],  // streaming endpoint origin
         vec![0x80, 2, 0x90, 2],  // reserved bit 4
         vec![0x80, 2, 0xa0, 2],  // reserved bit 5
-        vec![0x80, 2, 0x80, 0],  // interface-wide protocol not retained
+        vec![0x80, 2, 0x80, 0],  // interface-wide protocol not kept
         vec![0x80, 2, 0x80, 99], // absent entity
         vec![0x80],
         vec![0x80, 2, 0x80], // do not silently drop a trailing half-word
@@ -113,16 +113,16 @@ fn actual_uac1_foreign_reserved_unknown_and_truncated_words_publish_no_prefix() 
 }
 
 #[test]
-fn uac1_two_byte_endpoint_admission_uses_actual_protocol_and_exclusive_dci() {
+fn uac1_two_byte_endpoint_admission_uses_protocol_and_exclusive_dci() {
     for speed in [xhci::FULL_SPEED, xhci::HIGH_SPEED] {
         let raw = configuration(2);
-        let all = xhci::interfaces(&raw);
+        let all = crate::usb::descriptor::interfaces(&raw);
         let binding = Binding::parse(&all[0], &all, &raw, speed).unwrap();
         let plan = StatusPlan::discover(&binding, &raw).unwrap().unwrap();
         assert_eq!(plan.message_bytes(), 2);
         assert_eq!(plan.endpoint.max_packet, 2);
         let mut wrong = raw.clone();
-        wrong[16] = UAC2; // actual AC bInterfaceProtocol disagrees with binding
+        wrong[16] = UAC2; // AC bInterfaceProtocol disagrees with binding
         assert!(StatusPlan::discover(&binding, &wrong).is_err());
         let mut alias = raw.clone();
         alias.extend_from_slice(&[9, 4, 8, 0, 1, 3, 0, 0, 0, 7, 5, 0x81, 3, 2, 0, 4]);
@@ -144,12 +144,12 @@ fn uac1_two_byte_endpoint_admission_uses_actual_protocol_and_exclusive_dci() {
 }
 
 #[test]
-fn actual_uac1_stall_usb_clear_failure_retains_dma_until_real_recovery() {
+fn uac1_stall_usb_clear_failure_keeps_dma_until_real_recovery() {
     let mut backing = memory();
     let mut dma = allocator(&mut backing);
     let (audio, model, _) = peer_configuration(&mut dma, &configuration(2));
     let mut owner = audio.status_notifications(&mut dma).unwrap().unwrap();
-    // The peer consumes halt injection when the actual start doorbell publishes
+    // The peer consumes halt injection when the start doorbell publishes
     // this TD, before polling observes its terminal STALL event.
     model.borrow_mut().halt_transfer = Some(3);
     owner.start().unwrap();
@@ -197,7 +197,7 @@ fn actual_uac1_stall_usb_clear_failure_retains_dma_until_real_recovery() {
 }
 
 #[test]
-fn actual_uac1_cached_event_refuses_retired_device_before_any_mmio() {
+fn uac1_cached_event_refuses_retired_device_before_any_mmio() {
     let mut backing = memory();
     let mut dma = allocator(&mut backing);
     let (audio, model, _) = peer_configuration(&mut dma, &configuration(2));
@@ -233,7 +233,7 @@ fn uac1_unchanged_linux_irq_callback_oracle() {
         Some("linux cc9de5d4b5ab6459f5774946aa3195ad51236fa8")
     );
     let raw = configuration(4);
-    let all = xhci::interfaces(&raw);
+    let all = crate::usb::descriptor::interfaces(&raw);
     let binding = Binding::parse(&all[0], &all, &raw, xhci::HIGH_SPEED).unwrap();
     let plan = StatusPlan::discover(&binding, &raw).unwrap().unwrap();
     let mut words = 0;
@@ -262,7 +262,7 @@ fn uac1_unchanged_linux_irq_callback_oracle() {
                     admitted += 1;
                 } else {
                     // Linux ignores reserved bits and looks up unknown IDs in
-                    // later callbacks. Stela refuses both at its retained graph
+                    // later callbacks. Stela refuses both at its graph
                     // boundary, without publishing any valid packet prefix.
                     assert!(event.is_err());
                 }
@@ -285,7 +285,7 @@ fn uac1_unchanged_linux_irq_callback_oracle() {
                 };
                 assert_eq!((controls, memories, queued), (length / 2, 0, 1));
                 // The donor discards a trailing half-word. Native whole-packet
-                // refusal is deliberately stronger and tested through actual DMA.
+                // refusal is stronger and tested through DMA.
                 lengths += 1;
             }
             kind => panic!("unknown source oracle record {kind}"),

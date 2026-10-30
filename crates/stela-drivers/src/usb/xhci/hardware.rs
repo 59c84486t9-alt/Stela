@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Halt/reset/save/restore adapted from pinned Linux xhci.c.
 // Copyright (C) 2008 Intel Corp. Author: Sarah Sharp.
-//! Controller state transitions retain all DMA allocations and public identities.
+//! Controller state transitions keep all DMA allocations and public identities.
 //! Reset is not a claim that an old endpoint or class handle became usable.
 use super::*;
 
@@ -152,9 +152,9 @@ pub(super) fn start(
     handshake(registers, clock, operational, USBSTS, HCH, 0, HALT_US)
 }
 
-/// Linux deliberately faults these controllers when clearing stale high pointer
-/// halves; doing that requires a retained nonidentity IOMMU domain. This owner
-/// has no such authority, so it never attempts the unsafe write sequence.
+/// Linux faults these controllers when clearing stale high pointer
+/// halves; doing that requires a nonidentity IOMMU domain. This owner
+/// has no such permission, so it never attempts the unsafe write sequence.
 pub(super) fn pre_reset(
     registers: &mut dyn Registers,
     operational: usize,
@@ -221,8 +221,8 @@ impl Snapshot {
     }
 }
 impl Controller {
-    /// Requires actual root links to be in U3. The lifecycle owner establishes
-    /// USB bus suspend and retains endpoint DMA before calling this boundary.
+    /// Requires root links to be in U3. The lifecycle owner establishes
+    /// USB bus suspend and keeps endpoint DMA before calling this boundary.
     /// It cannot authorize suspend by supplying an asserted boolean.
     pub(super) fn suspend_controller(&mut self) -> Result<(), BlockError> {
         self.settle_command();
@@ -293,7 +293,7 @@ impl Controller {
     }
 
     /// Restore the same hardware context. SRE/HCE, removal or failed handshakes
-    /// retain failure and every old DMA owner; no reset/re-enumeration is invented.
+    /// keep failure and every old DMA owner; no reset/re-enumeration is invented.
     pub(super) fn resume_controller(&mut self) -> Result<(), BlockError> {
         let State::Suspended(snapshot) = self.hardware else {
             return Err(BlockError::Unsupported(
@@ -336,7 +336,7 @@ impl Controller {
         Ok(())
     }
 
-    /// Terminal stop retains all allocations and permanently blocks old traffic.
+    /// Terminal stop keeps all allocations and permanently blocks old traffic.
     /// HCH alone is not a per-endpoint completion or permission to reuse a slot.
     #[cfg(test)]
     pub(super) fn stop_controller(&mut self) -> Result<(), BlockError> {
@@ -418,9 +418,11 @@ mod tests {
     }
 
     #[test]
-    fn actual_save_restore_commands_preserve_dma_cursors_and_block_suspended_mutation() {
+    fn save_restore_commands_preserve_dma_cursors_and_block_suspended_mutation() {
         let mut backing = vec![0u64; 32 * 1024];
         let base = backing.as_mut_ptr() as u64;
+        // SAFETY: the model device, its pages and its domain belong to this test alone; no other
+        // driver, worker or DMA touches them.
         let mut dma = unsafe { RegionAllocator::new(base..base + backing.len() as u64 * 8) };
         let model = Rc::new(RefCell::new(Model::new()));
         let mut c = Controller::new(
@@ -450,8 +452,8 @@ mod tests {
         assert!(c.ready().is_err());
         assert!(c.command(0, 0, ENABLE_SLOT << 10).is_err());
         assert_eq!(model.borrow().writes.len(), writes);
-        // Simulated retained controller state, lost externally visible pointer
-        // registers. Restore must rewrite them, retaining the event cursor.
+        // Simulated kept controller state, lost externally visible pointer
+        // registers. Restore must rewrite them, keeping the event cursor.
         for at in [DCBAAP, CRCR, CONFIG] {
             model.borrow_mut().words[(0x40 + at) / 4] = 0;
         }
@@ -468,7 +470,7 @@ mod tests {
     }
 
     #[test]
-    fn actual_zhaoxin_9202_suspend_refuses_before_mutation_and_9203_keeps_saved_context() {
+    fn zhaoxin_9202_suspend_refuses_before_mutation_and_9203_keeps_saved_context() {
         use crate::bus::pci::{Address, ConfigSpace};
         struct Pci(u16);
         impl ConfigSpace for Pci {
@@ -497,6 +499,8 @@ mod tests {
             let quirks = quirks::Profile::pci(&mut function).unwrap();
             let mut backing = vec![0u64; 32 * 1024];
             let base = backing.as_mut_ptr() as u64;
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             let mut dma = unsafe { RegionAllocator::new(base..base + backing.len() as u64 * 8) };
             let model = Rc::new(RefCell::new(Model::new()));
             let mut c = Controller::with_hardware_profile(
@@ -555,6 +559,8 @@ mod tests {
         for save in [true, false] {
             let mut backing = vec![0u64; 32 * 1024];
             let base = backing.as_mut_ptr() as u64;
+            // SAFETY: the model device, its pages and its domain belong to this test alone; no
+            // other driver, worker or DMA touches them.
             let mut dma = unsafe { RegionAllocator::new(base..base + backing.len() as u64 * 8) };
             let model = Rc::new(RefCell::new(Model::new()));
             let mut c = Controller::new(

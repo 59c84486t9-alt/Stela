@@ -9,7 +9,7 @@ fn routed_payload_completion() {
         let base = backing.as_mut_ptr() as u64;
         let mut dma =
         // SAFETY: The routed-transfer fixture owns this unresized vector throughout
-        // retained controller, descriptor and payload accesses. The independent
+        // controller, descriptor and payload accesses. The independent
         // device peer runs synchronously on the current thread.
         unsafe { RegionAllocator::new(base..base + backing.len() as u64 * 8) };
         let parent_speed = if speed == FULL_SPEED {
@@ -85,7 +85,7 @@ fn queued_dma_contexts_and_schedules() {
                 let mut backing = vec![0u64; 128 * 1024];
                 let start = backing.as_mut_ptr() as u64;
                 let mut dma =
-                    // SAFETY: This speed/context fixture retains the full stable
+                    // SAFETY: This speed/context fixture keeps the full stable
                     // vector for every queued ring and payload. All addresses are
                     // identity-mapped CPU pointers and no hardware user can outlive
                     // the scope.
@@ -96,7 +96,7 @@ fn queued_dma_contexts_and_schedules() {
                 let out = dma.allocate(4096, 4096).unwrap();
                 let input = dma.allocate(4096, 4096).unwrap();
                 // SAFETY: out is the live uniquely allocated payload, with out.len
-                // bytes inside the retained vector. Initialization precedes every
+                // bytes inside the vector. Initialization precedes every
                 // submission, so no model peer reads or writes it concurrently.
                 unsafe {
                     core::ptr::write_bytes(out.as_ptr(), 0xa5, out.len());

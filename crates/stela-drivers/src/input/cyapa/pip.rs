@@ -10,7 +10,7 @@ pub use report::{Contact, ContactType, Event, Frame, Record, Touches};
 
 const MAX_PACKET: usize = 256;
 const MAX_PENDING: usize = 16;
-/// Complete actual FIFO read, including the actual little-endian length field.
+/// Complete FIFO read, including the little-endian length field.
 /// A two-byte reset notice advertises zero, without manufacturing missing bytes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Packet {
@@ -138,7 +138,7 @@ pub struct CalibrationError {
 }
 /// Observations from the most recent explicit Gen6 interval SET attempt.
 /// `applied` survives a later GET failure; only matching SET/GET observations
-/// qualify publication in `Capabilities::power_intervals`.
+/// check publication in `Capabilities::power_intervals`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct IntervalUpdate {
     pub requested: (u16, u16, u16),
@@ -156,7 +156,7 @@ pub struct Capabilities {
     pub electrodes: (u8, u8),
     /// Gen6 queried receive electrodes and the corresponding four-aligned count.
     pub receive_electrodes: Option<(u8, u16)>,
-    /// Gen6 actual ACTIVE/LP1/LP2 intervals, read back without changing policy.
+    /// Gen6 ACTIVE/LP1/LP2 intervals, read back without changing policy.
     pub power_intervals: Option<(u16, u16, u16)>,
     pub physical_size_mm: (u16, u16),
     pub maximum: (u16, u16),
@@ -185,7 +185,7 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
     pub fn new(bus: B, interrupt: I, timer: T, address: Address) -> Result<Self, Error> {
         Self::with_generation(bus, interrupt, timer, address, Generation::Gen5)
     }
-    /// Same exclusive startup grant as `new`; actual Gen6 identity must qualify
+    /// Same exclusive startup grant as `new`; Gen6 identity must check
     /// before any Gen6 power/proximity/command-IRQ mutation is permitted.
     pub fn new_gen6(bus: B, interrupt: I, timer: T, address: Address) -> Result<Self, Error> {
         Self::with_generation(bus, interrupt, timer, address, Generation::Gen6)
@@ -217,7 +217,7 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
         })
     }
     /// Most recent expected, controller-recovered Gen6 preparation-ping NACK.
-    /// This is retained as an observed protocol outcome, not silently discarded.
+    /// This is held as an observed protocol outcome, not silently discarded.
     pub fn take_wake_notice(&mut self) -> Option<i2c::Error> {
         self.wake_notice.take()
     }
@@ -227,7 +227,7 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
     pub fn capabilities(&self) -> Option<&Capabilities> {
         self.capabilities.as_ref()
     }
-    /// Completed observations are retained separately from validated settings,
+    /// Completed observations are held separately from validated settings,
     /// including after a partial update quarantines the peripheral owner.
     pub fn interval_update(&self) -> Option<&IntervalUpdate> {
         self.interval_update.as_ref()

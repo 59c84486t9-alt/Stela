@@ -1,4 +1,4 @@
-//! Actual xHC command/status/data TD peer for the narrow UAS task-management cut.
+//! XHC command/status/data TD peer for the narrow UAS task-management cut.
 //! It decodes DMA wire bytes and emits native transfer events, never host results.
 use super::*;
 
@@ -115,7 +115,7 @@ impl Hardware {
             }
             _ => {}
         }
-        // A genuine FUNCTION COMPLETE retires only the device's task record.
+        // A FUNCTION COMPLETE retires only the device's task record.
         // It does not consume, write, complete or remove any xHC data TD.
         if self.uas_abort.fault == Fault::None {
             self.task = None;

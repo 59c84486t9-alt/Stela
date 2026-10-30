@@ -177,7 +177,7 @@ struct Harness {
     incoming_mxcsr: Vec<u32>,
 }
 
-/// A test transport, not the production MemorySystem. It deliberately poisons
+/// A test transport, not the production MemorySystem. It poisons
 /// callback scratch registers and MXCSR after touching the reached prefix.
 unsafe extern "sysv64" fn callback(
     view: *mut MemoryContextView,
@@ -227,7 +227,7 @@ unsafe extern "sysv64" fn callback(
         view.completed_bytes += part_bytes as u64;
     }
     let poison_mxcsr: u32 = 0x3f81;
-    // SAFETY: all XMM registers are caller-saved; the deliberately changed
+    // SAFETY: all XMM registers are caller-saved; the changed
     // valid MXCSR is restored by the exact common callback wrapper under test.
     unsafe {
         core::arch::asm!(
@@ -281,7 +281,7 @@ impl NativeCode {
             )
             .unwrap();
         }
-        // SAFETY: private test mapping is retained until all native calls end.
+        // SAFETY: private test mapping is held until all native calls end.
         let address = unsafe {
             mmap(
                 core::ptr::null_mut(),
@@ -384,10 +384,10 @@ fn low_bytes(vector: [u64; 2]) -> [u8; 16] {
 }
 
 #[test]
-fn actual_callback_defaults_mxcsr_and_restores_hostile_caller_on_both_outcomes() {
+fn callback_defaults_mxcsr_and_restores_hostile_caller_on_both_outcomes() {
     fn set_mxcsr(value: u32) {
         // SAFETY: tests use only allocated SSE control/status bits, mask
-        // every exception, and restore the actual original environment.
+        // every exception, and restore the original environment.
         unsafe {
             core::arch::asm!("ldmxcsr [{}]", in(reg) &value, options(nostack));
         }
@@ -414,8 +414,8 @@ fn actual_callback_defaults_mxcsr_and_restores_hostile_caller_on_both_outcomes()
             let mut view = view(&mut harness);
             let original = Original(mxcsr());
             set_mxcsr(caller);
-            // This executes the actual emitted common callback wrapper.
-            // The transport records actual entry MXCSR and poisons it
+            // This executes the emitted common callback wrapper.
+            // The transport records entry MXCSR and poisons it
             // before either success or an explicit service refusal.
             let result = code.run(&mut actual, &mut view);
             let returned = mxcsr();
@@ -440,7 +440,7 @@ fn actual_callback_defaults_mxcsr_and_restores_hostile_caller_on_both_outcomes()
 }
 
 #[test]
-fn actual_native_staging_defers_all_destinations_and_writeback_on_later_faults() {
+fn native_staging_defers_all_destinations_and_writeback_on_later_faults() {
     for load in [false, true] {
         for pair in [false, true] {
             for bytes in [1, 2, 4, 8, 16] {
@@ -569,7 +569,7 @@ fn actual_native_staging_defers_all_destinations_and_writeback_on_later_faults()
 }
 
 #[test]
-fn actual_literal_loads_zero_upper_bits_and_commit_only_after_the_complete_read() {
+fn literal_loads_zero_upper_bits_and_commit_only_after_the_complete_read() {
     for bytes in [DWORD_BYTES, QWORD_BYTES, VECTOR_BYTES] {
         for destination in 0..VECTOR_REGISTER_COUNT {
             for residue in [0, 4, 8, 12] {
@@ -675,7 +675,7 @@ fn original_sp_fault_precedes_offset_and_callback() {
 }
 
 #[test]
-fn actual_register_extensions_and_zero_index_keep_original_inputs() {
+fn register_extensions_and_zero_index_keep_original_inputs() {
     use crate::aarch64::simd::memory;
     for load in [false, true] {
         for bytes in [1u8, 2, 4, 8, 16] {
@@ -782,7 +782,7 @@ fn actual_register_extensions_and_zero_index_keep_original_inputs() {
 }
 
 #[test]
-fn actual_non_temporal_pairs_stage_duplicate_store_sources() {
+fn non_temporal_pairs_stage_duplicate_store_sources() {
     for load in [false, true] {
         for bytes in [4, 8, 16] {
             let vectors = if load { [3, 31] } else { [31, 31] };
@@ -847,7 +847,7 @@ fn actual_non_temporal_pairs_stage_duplicate_store_sources() {
 }
 
 #[test]
-fn actual_checked_adapter_keeps_disabled_sp_unaligned_read_capability() {
+fn checked_adapter_keeps_disabled_sp_unaligned_read_capability() {
     use crate::aarch64::{Operation, Register};
     let operation = Operation::Simd(Operand::Memory {
         load: true,
