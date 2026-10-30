@@ -292,7 +292,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             return Err(Error::WrongPhase);
         }
         s.station
-            .authorize_port(epoch, &Self::link_keys(&s.ptk, &s.gtk)?)
+            .authorize_port(epoch, &Self::link_keys(&s.ptk, &s.gtk, &s.links)?)
             .map_err(Error::Station)
     }
 }

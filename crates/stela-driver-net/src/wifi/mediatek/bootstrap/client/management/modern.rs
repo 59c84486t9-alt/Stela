@@ -47,7 +47,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                         .authorize_protected_port(
                             context,
                             session.association,
-                            &Self::link_keys(&s.ptk, &s.gtk)?,
+                            &Self::link_keys(&s.ptk, &s.gtk, &s.links)?,
                         )
                         .map_err(Error::Station)
                 },

@@ -364,7 +364,8 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             return Err(Error::Unsupported);
         }
         if header.data_present() {
-            let p = s.profile.ok_or(Error::WrongProfile)?;
+            // Each link's AP has a WCID of its own.
+            let (p, ..) = Self::link_of(s, d.wcid)?;
             // mt792x_rx_get_wcid first resolves raw peer WCID, then
             // maps a non-U2M frame through that peer's VIF to its BCMC slot.
             // A copied raw BCMC number is not a validated peer lookup.
@@ -382,14 +383,14 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             {
                 return Err(Error::WrongPhase);
             }
-            let p = s.profile.ok_or(Error::WrongProfile)?;
+            let (p, ptk, gtk) = Self::link_of(s, d.wcid)?;
             if channel != p.channel {
                 return Err(Error::WrongProfile);
             }
             let owner = if header.receiver.is_multicast() {
-                s.gtk.as_ref()
+                gtk
             } else {
-                s.ptk.as_ref()
+                ptk
             }
             .ok_or(Error::NoKey)?;
             let key = owner.slot().installed().ok_or(Error::NoKey)?;

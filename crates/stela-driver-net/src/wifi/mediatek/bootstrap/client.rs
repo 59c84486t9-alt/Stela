@@ -284,6 +284,8 @@ struct Owned<I: BarIo, Q: QueueIo, C: 'static> {
     /// The interface's own registration while an AP MLD association's
     /// setup link holds its slots.
     single_link: Option<Context>,
+    /// An AP MLD association's other links.
+    links: Vec<multi_link::Link<C>>,
 }
 /// On uncertain/live Drop keep the entire controller, station, real key
 /// material history and resources. No new owner may reset their PN.
@@ -377,6 +379,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 mlme_receipt: None,
                 six_ghz: None,
                 single_link: None,
+                links: Vec::new(),
             })),
         })
     }
@@ -487,12 +490,12 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 context,
                 links,
             } => {
-                // The MT7925 programs no affiliated link's records yet.
-                if !links.is_empty() {
-                    return Err(Error::Unsupported);
-                }
                 if let Some(context) = context {
-                    return Self::prepare_modern(s, ticket, context);
+                    return Self::prepare_modern(s, ticket, context, links);
+                }
+                // Only an EHT association has other links.
+                if !links.is_empty() {
+                    return Err(Error::WrongProfile);
                 }
                 let clock = s.controller.state().control.clock;
                 let began = clock.now_us();
@@ -603,6 +606,10 @@ pub enum Event {
     Bss(scan::result::Bss),
     Ingress(Ingress),
     Raw(crate::wifi::mediatek::ring::rx::Frame),
+    /// An operation the association needs that the driver does not perform,
+    /// reported once; the driver continues with its documented degraded
+    /// response.
+    Unsupported(&'static str),
 }
 impl<I: BarIo, Q: QueueIo, C: 'static> Drop for Client<I, Q, C> {
     fn drop(&mut self) {

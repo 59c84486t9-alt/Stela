@@ -719,6 +719,20 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
         Self::reconcile(s);
         Ok(result?)
     }
+    /// The GTK of the AP of the association's link `link_id`, which the real
+    /// OS supplicant takes from the handshake's MLO GTK KDE.
+    pub fn install_link_key(
+        &mut self,
+        link_id: u8,
+        index: u8,
+        material: &[u8],
+        seed: ReplaySeed,
+    ) -> Result<KeyIdentity, LinkControlError> {
+        let s = self.state_mut();
+        let result = s.client.install_link_key(link_id, index, material, seed);
+        Self::reconcile(s);
+        Ok(result?)
+    }
     /// The OS supplies this only after its authenticated handshake.
     pub fn authorize_port(&mut self, epoch: u64) -> Result<(), LinkControlError> {
         Ok(self.state_mut().client.authorize_port(epoch)?)

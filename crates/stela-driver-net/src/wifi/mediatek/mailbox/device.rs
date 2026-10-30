@@ -90,8 +90,8 @@ pub struct Deactivated {
 
 impl<C: 'static> Interface<C> {
     /// # Safety
-    /// Caller exclusively owns this non-MLO station interface's firmware
-    /// context/indices on this mailbox requester. Context fields follow
+    /// Caller exclusively owns this station interface's, or station MLD
+    /// link's, firmware context/indices on this mailbox requester. Context fields follow
     /// the per-chip source caller ordering and firmware resource selector;
     /// RF band is not a substitute. No previous registration/key/RX/TX/IRQ/work
     /// users remain. `resource` keeps the real function/controller claim,

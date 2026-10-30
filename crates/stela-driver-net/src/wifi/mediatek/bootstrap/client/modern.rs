@@ -65,15 +65,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         let ciphers = s.ciphers.ok_or(Error::NoKey)?;
         let cipher = if pairwise { ciphers.0 } else { ciphers.1 };
         let bss = if profile.cipher == 0 {
-            profile.cipher = match cipher {
-                Cipher::Wep40 => 1,
-                Cipher::Tkip => 2,
-                Cipher::Ccmp128 => 4,
-                Cipher::Ccmp256 => 10,
-                Cipher::Gcmp128 => 11,
-                Cipher::Gcmp256 => 12,
-                Cipher::Wep104 => 5,
-            };
+            profile.cipher = cipher_code(cipher);
             Some(
                 modern
                     .wire
@@ -93,6 +85,8 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         let current_profile = &mut s.profile;
         let controller = &mut s.controller;
         let replies = &mut s.replies;
+        // mt7925_set_key: the MLDs' PTK goes to every link's AP WCID.
+        let links: &mut [multi_link::Link<C>] = if pairwise { &mut s.links } else { &mut [] };
         // SAFETY: covered by this function's own safety contract.
         unsafe {
             authority.publish_association(
@@ -110,7 +104,78 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                     if !key.is_quarantined() {
                         *phase = Phase::Associated;
                     }
-                    result.map_err(Error::Key)
+                    let identity = result.map_err(Error::Key)?;
+                    for link in links.iter_mut() {
+                        *phase = Phase::Quarantined;
+                        let key = multi_link::LinkKey {
+                            pairwise: true,
+                            cipher,
+                            index,
+                            material,
+                            seed,
+                        };
+                        Self::install_link_key(controller, replies, link, &key)?;
+                        *phase = Phase::Associated;
+                    }
+                    Ok(identity)
+                },
+            )
+        }
+        .map_err(Error::Regulatory)?
+    }
+
+    /// Install the GTK of the AP of the association's link `link_id`, its
+    /// MLO GTK KDE's, under the same permission as `install_key_modern`.
+    ///
+    /// # Safety
+    /// As `install_key_modern`.
+    pub unsafe fn install_link_key_modern<
+        H: wifi::regulatory::HardwarePolicy,
+        O: wifi::regulatory::OsPolicy,
+    >(
+        &mut self,
+        authority: &mut wifi::regulatory::Owner<H, O>,
+        admission: wifi::regulatory::AssociationAdmission,
+        link_id: u8,
+        index: u8,
+        material: &[u8],
+        seed: ReplaySeed,
+    ) -> Result<KeyIdentity, Error> {
+        let s = self.state_mut();
+        if s.phase != Phase::Associated {
+            return Err(Error::WrongPhase);
+        }
+        let modern = s.modern.as_ref().ok_or(Error::WrongPhase)?;
+        s.station
+            .validate_association_context(&modern.context)
+            .map_err(Error::Station)?;
+        let cipher = s.ciphers.ok_or(Error::NoKey)?.1;
+        let link = s
+            .links
+            .iter_mut()
+            .find(|link| link.link_id == link_id)
+            .ok_or(Error::WrongProfile)?;
+        let phase = &mut s.phase;
+        let controller = &mut s.controller;
+        let replies = &mut s.replies;
+        // SAFETY: covered by this function's own safety contract.
+        unsafe {
+            authority.publish_association(
+                admission,
+                &s.station,
+                wifi::regulatory::AssociationUse::Management,
+                |_, _| {
+                    *phase = Phase::Quarantined;
+                    let key = multi_link::LinkKey {
+                        pairwise: false,
+                        cipher,
+                        index,
+                        material,
+                        seed,
+                    };
+                    let identity = Self::install_link_key(controller, replies, link, &key)?;
+                    *phase = Phase::Associated;
+                    Ok(identity)
                 },
             )
         }
@@ -247,10 +312,18 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             // Keep Station immutably borrowed with the canonical guards while
             // mutating only its disjoint native controller and raw journals.
             let station = &s.station;
-            let controller = &mut s.controller;
+            let mut roc = radio::Roc {
+                controller: &mut s.controller,
+                transport_facts: &mut s.transport_facts,
+                asynchronous: &mut s.asynchronous,
+                phase: &mut s.phase,
+                roc_token: &mut s.roc_token,
+                roc_deadline: &mut s.roc_deadline,
+                profile: &mut s.profile,
+            };
             let replies = &mut s.replies;
-            let transport_facts = &mut s.transport_facts;
             let format = &mut s.format_generation;
+            let links = &mut s.links;
             let m = s.modern.as_mut().unwrap();
             // SAFETY: covered by this function's own safety contract.
             unsafe {
@@ -263,7 +336,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                         *format = None;
                         for (index, (command, body)) in m.commands.iter().enumerate() {
                             if index == 1 {
-                                controller
+                                roc.controller
                                     .state_mut()
                                     .control
                                     .clear_peer_admission(p.wcid)
@@ -274,17 +347,21 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                             // Source filter transport precedes the final awake update;
                             // preserve its one-way/raw fact rather than inventing ACK.
                             if index + 1 == m.commands.len() {
-                                let fact = controller
+                                let fact = roc
+                                    .controller
                                     .state_mut()
                                     .mailbox
                                     .as_mut()
                                     .unwrap()
                                     .initial(&m.filter)
                                     .map_err(Error::Transport)?;
-                                transport_facts.push(fact);
+                                roc.transport_facts.push(fact);
                             }
-                            Self::command_parts(controller, replies, *command, body)?;
+                            Self::command_parts(roc.controller, replies, *command, body)?;
                             m.completed += 1;
+                        }
+                        for link in links.iter_mut() {
+                            Self::activate_link(&mut roc, replies, p, link)?;
                         }
                         Ok::<(), Error>(())
                     },
@@ -361,11 +438,12 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         s: &mut Owned<I, Q, C>,
         ticket: Ticket,
         context: Arc<AssociationContext>,
+        links: Vec<Arc<AssociationContext>>,
     ) -> Result<(), Error> {
         s.station
             .validate_association_context(&context)
             .map_err(Error::Station)?;
-        let mut p = s.profile.ok_or(Error::WrongProfile)?;
+        let p = s.profile.ok_or(Error::WrongProfile)?;
         if context.ticket() != ticket
             || context.bssid() != p.peer
             || context.channel() != p.channel
@@ -380,47 +458,11 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         actual
             .validate_capabilities(context.negotiated().local())
             .map_err(|_| Error::WrongProfile)?;
-        p.aid = context.response().aid;
-        p.basic_rates = context.negotiated().legacy.basic;
-        p.supported_rates = context.negotiated().legacy.supported;
-        p.beacon_interval = context.beacon().beacon_interval;
-        p.dtim_period = context.dtim_period();
-        // Source use_short_slot is always true outside2GHz and follows the
-        // AP capability on2GHz; no caller timing guess enters Configure.
-        p.slot_time = if p.channel.band != wifi::Band::Ghz2
-            || context.response().capabilities & (1 << 10) != 0
-        {
-            9
-        } else {
-            20
-        };
-        let definition = context.definition();
-        let (mbssid_indicator, mbssid_index) = mbssid(&context.beacon().elements)?;
-        let operation = wire::modern::Operation {
-            center_channel: center_channel(p.channel.band, definition.center1_mhz)?,
-            second_center_channel: definition
-                .center2_mhz
-                .map(|mhz| center_channel(p.channel.band, mhz))
-                .transpose()?
-                .unwrap_or(0),
-            punctured: definition.punctured,
-            he: context
-                .operations()
-                .he
-                .as_ref()
-                .map(|h| wire::modern::HeOperation {
-                    packet_extension: h.packet_extension(),
-                    rts_threshold: h.rts_threshold(),
-                    color_enabled: h.color_enabled(),
-                    color: h.color(),
-                }),
-            mbssid_indicator,
-            mbssid_index,
-        };
+        let p = associated(p, &context);
         let mut wire = wire::modern::Configuration::new(
             p,
             context.negotiated().clone(),
-            operation,
+            operation(&context, p.channel.band)?,
             *actual.he_source_maps(),
         )
         .map_err(Error::Codec)?;
@@ -454,6 +496,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         }
         commands.push((Command::BssInfo, p.beacon_filter().map_err(Error::Codec)?));
         commands.push((Command::BssInfo, p.awake().map_err(Error::Codec)?));
+        Self::prepare_links(s, links, p, &wire)?;
         s.profile = Some(p);
         let filter = p.filter_request(true).map_err(Error::Codec)?;
         let prepared_edca = context.negotiated().edca();
@@ -471,6 +514,68 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         s.phase = Phase::AwaitingModernAdmission;
         Ok(())
     }
+}
+
+/// The firmware cipher code of `cipher`.
+pub(super) fn cipher_code(cipher: Cipher) -> u8 {
+    match cipher {
+        Cipher::Wep40 => 1,
+        Cipher::Tkip => 2,
+        Cipher::Ccmp128 => 4,
+        Cipher::Ccmp256 => 10,
+        Cipher::Gcmp128 => 11,
+        Cipher::Gcmp256 => 12,
+        Cipher::Wep104 => 5,
+    }
+}
+
+/// `p` once `context` associated it: the AID, rates, beacon timing and slot
+/// time the association gives the BSS.
+pub(super) fn associated(mut p: Profile, context: &AssociationContext) -> Profile {
+    p.aid = context.response().aid;
+    p.basic_rates = context.negotiated().legacy.basic;
+    p.supported_rates = context.negotiated().legacy.supported;
+    p.beacon_interval = context.beacon().beacon_interval;
+    p.dtim_period = context.dtim_period();
+    // Source use_short_slot is always true outside2GHz and follows the
+    // AP capability on2GHz; no caller timing guess enters Configure.
+    p.slot_time =
+        if p.channel.band != wifi::Band::Ghz2 || context.response().capabilities & (1 << 10) != 0 {
+            9
+        } else {
+            20
+        };
+    p
+}
+
+/// The BSS operation `context` runs on `band`, as the firmware takes it.
+pub(super) fn operation(
+    context: &AssociationContext,
+    band: wifi::Band,
+) -> Result<wire::modern::Operation, Error> {
+    let definition = context.definition();
+    let (mbssid_indicator, mbssid_index) = mbssid(&context.beacon().elements)?;
+    Ok(wire::modern::Operation {
+        center_channel: center_channel(band, definition.center1_mhz)?,
+        second_center_channel: definition
+            .center2_mhz
+            .map(|mhz| center_channel(band, mhz))
+            .transpose()?
+            .unwrap_or(0),
+        punctured: definition.punctured,
+        he: context
+            .operations()
+            .he
+            .as_ref()
+            .map(|h| wire::modern::HeOperation {
+                packet_extension: h.packet_extension(),
+                rts_threshold: h.rts_threshold(),
+                color_enabled: h.color_enabled(),
+                color: h.color(),
+            }),
+        mbssid_indicator,
+        mbssid_index,
+    })
 }
 
 pub(super) fn center_channel(band: wifi::Band, mhz: u32) -> Result<u8, Error> {

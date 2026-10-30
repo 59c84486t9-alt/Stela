@@ -4,6 +4,14 @@
 use super::*;
 use crate::wifi::mediatek::bootstrap::client::modern::tests::pmf_controls::{inputs, inputs_akm};
 use crate::wifi::security::PacketNumber;
+use crate::wifi::station::{
+    self,
+    multi_link::{Affiliation, Mld, Setup},
+    wire::{
+        AssociationRequest,
+        multi_link::{self, Basic},
+    },
+};
 
 #[test]
 fn a_pmf_association_opens_its_port_after_the_handshake_keys() {
@@ -194,31 +202,31 @@ fn an_sae_exchange_associates_like_ieee80211_mgd_assoc() {
     stop(&mut link, &model);
 }
 
-/// An AP MLD's association on its setup link alone, as mac80211 makes one
-/// when no other link is requested: SAE and the association run on the
-/// link's address, and the BSS and AP records name both MLDs, as
-/// `mt7925_mcu_bss_mld_tlv` and `mt7925_mcu_sta_mld_tlv` write them.
-#[test]
-fn an_ap_mld_association_names_both_mlds_in_its_records() {
-    use crate::wifi::station::{
-        multi_link::{Affiliation, Mld, Setup},
-        wire::multi_link::Basic,
-    };
-    const AP_MLD: Mac = Mac([2, 9, 9, 9, 9, 9]);
-    const SETUP_LINK: Mac = Mac([2, 0xa, 0, 0, 0, 1]);
+const AP_MLD: Mac = Mac([2, 9, 9, 9, 9, 9]);
+const SETUP_LINK: Mac = Mac([2, 0xa, 0, 0, 0, 1]);
+/// The AP and the station's address on the AP MLD's link 1.
+const OTHER: Mac = Mac([2, 6, 7, 8, 9, 11]);
+const OTHER_LINK: Mac = Mac([2, 0xa, 0, 0, 0, 2]);
+const CHANNEL_52: wifi::Channel = wifi::Channel {
+    band: Band::Ghz5,
+    number: 52,
+    frequency_mhz: 5260,
+};
+
+/// A link whose SAE with the AP MLD on its setup link, link 0, succeeded
+/// and whose association, requesting the links `links` takes from the
+/// setup link's BSS and request and answered with the profiles it gives,
+/// awaits its configuration.
+fn mld_association(
+    links: impl FnOnce(
+        &scan::result::Bss,
+        &AssociationRequest,
+    ) -> (Vec<station::multi_link::Link>, Vec<multi_link::Profile>),
+) -> (TestLink, Model, scan::result::Bss) {
     let to_link = |subtype, body: &[u8]| {
         let mut frame = response(subtype, body);
         frame[4..10].copy_from_slice(&SETUP_LINK.0);
         frame
-    };
-    let ap_mld = |link_id| {
-        Basic {
-            address: AP_MLD,
-            link_id,
-            mld_capabilities: link_id.map(|_| 0),
-            ..Basic::default()
-        }
-        .encode()
     };
     let affiliation = Affiliation {
         mld: Mld {
@@ -230,13 +238,14 @@ fn an_ap_mld_association_names_both_mlds_in_its_records() {
     };
     let (client, model) = setup_modern();
     let (mut join, bss) = inputs_akm(&client, 8);
+    let (requested, profiles) = links(&bss, &join.request);
     join.request = join
         .request
         .with_multi_link(Setup {
             association: affiliation,
             mld_capabilities: 0,
             eml_capabilities: 0,
-            links: Vec::new(),
+            links: requested,
         })
         .unwrap();
     let client = ManagedClient::new(client, country(), Environment::Indoor).unwrap();
@@ -283,7 +292,13 @@ fn an_ap_mld_association_names_both_mlds_in_its_records() {
         link.service().unwrap();
         let mut frame = vec![3, 0, transaction as u8, 0, status as u8, 0];
         frame.extend_from_slice(data);
-        frame.extend(ap_mld(None));
+        frame.extend(
+            Basic {
+                address: AP_MLD,
+                ..Basic::default()
+            }
+            .encode(),
+        );
         incoming(&model, &to_link(0xb0, &frame), None, false);
         link.service().unwrap();
     }
@@ -295,39 +310,62 @@ fn an_ap_mld_association_names_both_mlds_in_its_records() {
     link.service().unwrap();
     let mut assoc = vec![0x11, 0, 0, 0, 1, 0xc0];
     assoc.extend_from_slice(&bss.elements);
-    assoc.extend(ap_mld(Some(0)));
+    assoc.extend(
+        Basic {
+            address: AP_MLD,
+            link_id: Some(0),
+            mld_capabilities: Some(0),
+            profiles,
+            ..Basic::default()
+        }
+        .encode(),
+    );
     incoming(&model, &to_link(0x10, &assoc), None, false);
     link.service().unwrap();
     assert_eq!(link.phase(), Phase::AwaitingModernAdmission);
+    (link, model, bss)
+}
+
+/// Every `tag` record of the `command` packets of `commands`, after a
+/// `header`-byte command header.
+fn records(commands: &[Vec<u8>], command: u8, header: usize, tag: u16) -> Vec<Vec<u8>> {
+    commands
+        .iter()
+        .filter(|packet| packet[34] == command)
+        .filter_map(|packet| {
+            let mut rest = &packet[48 + header..];
+            while rest.len() >= 4 {
+                let length = usize::from(u16::from_le_bytes([rest[2], rest[3]]));
+                if rest[..2] == tag.to_le_bytes() {
+                    return Some(rest[..length].to_vec());
+                }
+                rest = &rest[length..];
+            }
+            None
+        })
+        .collect()
+}
+
+/// An AP MLD's association on its setup link alone, as mac80211 makes one
+/// when no other link is requested: SAE and the association run on the
+/// link's address, the BSS and AP records name both MLDs, as
+/// `mt7925_mcu_bss_mld_tlv` and `mt7925_mcu_sta_mld_tlv` write them, and the
+/// MLDs' PTK opens the port.
+#[test]
+fn an_ap_mld_association_names_both_mlds_in_its_records() {
+    let (mut link, model, _) = mld_association(|_, _| (Vec::new(), Vec::new()));
     let before = model.response.lock().unwrap().client_commands.len();
     link.configure().unwrap();
     let commands = model.response.lock().unwrap().client_commands[before..].to_vec();
-    let record = |command: u8, header: usize, tag: u16| {
-        commands
-            .iter()
-            .filter(|packet| packet[34] == command)
-            .find_map(|packet| {
-                let mut rest = &packet[48 + header..];
-                while rest.len() >= 4 {
-                    let length = usize::from(u16::from_le_bytes([rest[2], rest[3]]));
-                    if rest[..2] == tag.to_le_bytes() {
-                        return Some(rest[..length].to_vec());
-                    }
-                    rest = &rest[length..];
-                }
-                None
-            })
-            .unwrap()
-    };
     // UNI_BSS_INFO_MLD: link 0 of the group of BSS 0, own MLD 32, the
     // station MLD's address.
-    let bss = record(2, 4, 26);
+    let bss = &records(&commands, 2, 4, 26)[0];
     assert_eq!(
         (bss[4], bss[5], &bss[6..12], bss[13]),
         (0, 32, &LOCAL.0[..], 0)
     );
     // STA_REC_MLD names the AP MLD with the setup link's WCID 1 alone.
-    let peer = record(3, 8, 0x20);
+    let peer = &records(&commands, 3, 8, 0x20)[0];
     assert_eq!((&peer[4..10], peer[16]), (&AP_MLD.0[..], 1));
     // mt792x_tx: a management frame the station addresses to the AP MLD
     // leaves the setup link from the station's address there.
@@ -363,5 +401,176 @@ fn an_ap_mld_association_names_both_mlds_in_its_records() {
                 .iter()
                 .all(|frame| frame[4..10] == AP.0 && frame[10..16] == SETUP_LINK.0)
     );
+    retire(&mut link, &model);
+}
+
+/// An AP MLD's association adding link 1, as mt7925 adds a link: its
+/// interface registers on the next BSS slot under its own address, one MLO
+/// channel request takes both links' channels, and its BSS and AP records
+/// name both MLDs with the setup link primary. The MLDs' PTK goes to both
+/// APs' WCIDs, each link's GTK to its own, and the port opens with both
+/// pairs; the link's records and interface leave with the association.
+#[test]
+fn an_ap_mld_association_adds_its_other_link_on_an_interface_of_its_own() {
+    let (mut link, model, _) = mld_association(|bss, request| {
+        let mut elements = bss.elements.clone();
+        let mut rest = &mut elements[..];
+        while !rest.is_empty() {
+            let n = usize::from(rest[1]);
+            let (element, next) = rest.split_at_mut(2 + n);
+            match (element[0], element.get(2)) {
+                (61, _) => element[2] = 52,
+                (192, _) => element[3] = 58,
+                (255, Some(106)) => element[9] = 58,
+                _ => {}
+            }
+            rest = next;
+        }
+        let observation = Arc::new(station::NativeBssObservation {
+            bss: scan::result::Bss {
+                bssid: OTHER,
+                transmitter: OTHER,
+                channel: CHANNEL_52,
+                elements: elements.clone(),
+                ..bss.clone()
+            },
+        });
+        let mut answer = vec![0x11, 0, 0, 0];
+        answer.extend_from_slice(&elements);
+        (
+            vec![station::multi_link::Link {
+                link_id: 1,
+                local: OTHER_LINK,
+                observation,
+                request: request.clone(),
+            }],
+            vec![multi_link::Profile {
+                link_id: 1,
+                complete: true,
+                address: Some(OTHER),
+                bss_parameters_change_count: Some(0),
+                body: answer,
+                ..multi_link::Profile::default()
+            }],
+        )
+    });
+    let before = model.response.lock().unwrap().client_commands.len();
+    link.configure().unwrap();
+    let commands = model.response.lock().unwrap().client_commands[before..].to_vec();
+    // The link's DEV_INFO: band chosen by the firmware, link index 1, the
+    // station's link address.
+    let [device] = &commands
+        .iter()
+        .filter(|packet| packet[34] == 1)
+        .collect::<Vec<_>>()[..]
+    else {
+        panic!("one interface registered");
+    };
+    assert_eq!(
+        (device[49], device[56], device[57], &device[58..64]),
+        (0xff, 1, 1, &OTHER_LINK.0[..])
+    );
+    // MT7925_ROC_REQ_MLSR_AA for BSS 0 on channel 36 and BSS 1 on 52.
+    let roc = model
+        .response
+        .lock()
+        .unwrap()
+        .roc_requests
+        .last()
+        .unwrap()
+        .clone();
+    assert_eq!(
+        (roc[8], roc[10], roc[19], roc[28], roc[32], roc[34]),
+        (0, 36, 11, 3, 1, 52)
+    );
+    // UNI_BSS_INFO_MLD: link 1 of the group of BSS 0, own MLD 33.
+    let bss = records(&commands, 2, 4, 26);
+    assert_eq!(
+        bss.iter()
+            .map(|m| (m[4], m[5], &m[6..12], m[13]))
+            .collect::<Vec<_>>(),
+        [(0, 32, &LOCAL.0[..], 0), (0, 33, &LOCAL.0[..], 1)]
+    );
+    // STA_REC_MLD: the setup link's AP alone, again, then link 1's AP,
+    // WCID 2, beside it.
+    let peers = records(&commands, 3, 8, 0x20);
+    let [setup, again, other] = &peers[..] else {
+        panic!("three AP records");
+    };
+    assert_eq!(setup, again);
+    assert_eq!(
+        (
+            &other[4..10],
+            &other[10..12],
+            &other[12..14],
+            other[16],
+            other[22]
+        ),
+        (&AP_MLD.0[..], &[1, 0][..], &[2, 0][..], 2, 0)
+    );
+    let epoch = link.station().association_epoch().unwrap();
+    link.install_key(true, 0, &[1; 16], ReplaySeed::ZERO)
+        .unwrap();
+    link.install_key(false, 2, &[0x44; 16], ReplaySeed::ZERO)
+        .unwrap();
+    drop(drain_notices(&mut link));
+    // SAFETY: modeled queues, notices and old key users are drained, and the
+    // model OS's handshake supplied this IGTK.
+    unsafe { link.install_management_key(epoch, 4, &[0x55; 16], PacketNumber::new(100).unwrap()) }
+        .unwrap();
+    // Link 1's GTK is still missing.
+    assert!(link.authorize_port(epoch).is_err());
+    link.install_link_key(1, 1, &[0x46; 16], ReplaySeed::ZERO)
+        .unwrap();
+    {
+        let model = model.response.lock().unwrap();
+        assert_eq!(
+            (model.keys.get(&1), model.keys.get(&2)),
+            (Some(&vec![1; 16]), Some(&vec![1; 16]))
+        );
+        assert_eq!(model.keys.get(&18), Some(&vec![0x46; 16]));
+    }
+    link.authorize_port(epoch).unwrap();
+    assert!(link.carrier());
+    // Link 1's beacons and management go to the OS as they came, what this
+    // leaves untracked reported once a link.
+    let mut beacon = response(0x80, &[0; 12]);
+    beacon[4..10].copy_from_slice(&Mac::BROADCAST.0);
+    let mut action = response(0xd0, &[3, 0]);
+    action[4..10].copy_from_slice(&OTHER_LINK.0);
+    for frame in [&beacon, &action, &beacon] {
+        let mut frame = frame.clone();
+        frame[10..16].copy_from_slice(&OTHER.0);
+        frame[16..22].copy_from_slice(&OTHER.0);
+        let mut bytes = incoming_bytes(&frame, None, false);
+        bytes[13] = 52;
+        device_receive(&model.queues[&0xd4520], &bytes, true, 0);
+    }
+    link.service().unwrap();
+    let reported = drain_notices(&mut link)
+        .into_iter()
+        .filter_map(|notice| match notice.event {
+            LinkEvent::Controller(Event::Unsupported(operation)) => Some(operation),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        reported,
+        [
+            "MLO link beacon tracking: EDCA, channel switch, bandwidth and beacon loss",
+            "MLO link management: departures, actions and block ack sessions",
+        ]
+    );
+    assert!(link.carrier());
+    let before = model.response.lock().unwrap().client_commands.len();
+    depart(&mut link, &model);
+    let commands = model.response.lock().unwrap().client_commands[before..].to_vec();
+    // The link's interface deactivates: its BSS, then its device.
+    assert!(
+        commands
+            .iter()
+            .any(|packet| packet[34] == 1 && packet[57] == 1 && packet[56] == 0)
+    );
+    assert!(!model.response.lock().unwrap().keys.contains_key(&2));
     retire(&mut link, &model);
 }

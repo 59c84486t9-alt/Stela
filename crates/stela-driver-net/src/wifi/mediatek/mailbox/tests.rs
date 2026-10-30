@@ -18,6 +18,8 @@ pub(crate) struct Response {
     pub(crate) home_channel: Option<u8>,
     pub(crate) wrong_roc_token: bool,
     pub(crate) client_commands: Vec<Vec<u8>>,
+    /// Every ROC request the client published, an MLO ROC's links in order.
+    pub(crate) roc_requests: Vec<Vec<u8>>,
     pub(crate) peers: alloc::collections::BTreeMap<u16, Vec<u8>>,
     pub(crate) receive_ba: alloc::collections::BTreeMap<(u16, u8), Vec<u8>>,
     pub(crate) transmit_ba: alloc::collections::BTreeMap<(u16, u8), Vec<u8>>,
@@ -72,6 +74,7 @@ impl Default for Response {
             home_channel: None,
             wrong_roc_token: false,
             client_commands: Vec::new(),
+            roc_requests: Vec::new(),
             peers: alloc::collections::BTreeMap::new(),
             receive_ba: alloc::collections::BTreeMap::new(),
             transmit_ba: alloc::collections::BTreeMap::new(),
@@ -331,8 +334,11 @@ unsafe impl QueueIo for DeviceIo {
                 if command == 0x27 && model.client_execution {
                     let body = &packet[48..];
                     if body[4] == 0 {
-                        assert_eq!(body.len(), 28);
+                        // A ROC, or an MLO ROC with its UNI_ROC_SUB_LINK; the
+                        // grant answers the first.
+                        assert!(body.len() == 28 || (body.len() == 52 && body[28] == 3));
                         assert_eq!(&body[4..8], &[0, 0, 24, 0]);
+                        model.roc_requests.push(body.to_vec());
                         model.roc_channel = Some(body[10]);
                         let mut grant = vec![0; 68];
                         grant[..4].copy_from_slice(&(7u32 << 27).to_le_bytes());
@@ -345,7 +351,7 @@ unsafe impl QueueIo for DeviceIo {
                         grant[55] = body[10];
                         grant[57] = body[12];
                         grant[59] = body[14];
-                        grant[61] = 0;
+                        grant[61] = body[19];
                         grant[62] = 0;
                         grant[64..68].copy_from_slice(&body[20..24]);
                         device_receive(&self.rx, &grant, true, 0);
