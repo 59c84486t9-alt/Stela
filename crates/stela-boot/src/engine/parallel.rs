@@ -269,9 +269,9 @@ pub(super) fn report_source_observations<H: Host>(home: &Machine<H, Board>) {
     for pe in 0..hub.pes() {
         match hub.broadcast_profile(pe) {
             Some(profile) => {
-                let [tlb, code, power] = profile.kinds;
+                let [tlb, code, power, completion] = profile.kinds;
                 output::arguments(format_args!(
-                    "PE BROADCAST pe={pe} tlb={}/{}/{}/{}/{}/{} code={}/{}/{}/{}/{}/{} power={}/{}/{}/{}/{}/{} active={:?} active_start={:#x} dropped={}\n",
+                    "PE BROADCAST pe={pe} tlb={}/{}/{}/{}/{}/{} code={}/{}/{}/{}/{}/{} power={}/{}/{}/{}/{}/{} completion={}/{}/{}/{}/{}/{} active={:?} active_start={:#x} dropped={}\n",
                     tlb.started,
                     tlb.completed,
                     tlb.recipients,
@@ -290,6 +290,12 @@ pub(super) fn report_source_observations<H: Host>(home: &Machine<H, Board>) {
                     power.elapsed_ticks,
                     power.maximum_ticks,
                     power.polls,
+                    completion.started,
+                    completion.completed,
+                    completion.recipients,
+                    completion.elapsed_ticks,
+                    completion.maximum_ticks,
+                    completion.polls,
                     profile.active,
                     profile.active_start,
                     profile.dropped_updates

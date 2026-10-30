@@ -395,7 +395,9 @@ impl Hub {
     }
 
     /// Post `maintenance` to every other running PE, without waking those
-    /// that sleep; the serials to wait for.
+    /// that sleep; the serials to wait for. An instruction cache
+    /// invalidation the PE has yet to read already covers the same page
+    /// again, as IC IVAU of each line of a page posts it.
     pub(super) fn broadcast(&self, from: usize, maintenance: Maintenance) -> Vec<(usize, u64)> {
         let mut posted = Vec::new();
         for pe in self.others(from) {
@@ -404,7 +406,15 @@ impl Hub {
             self.post(pe, |mail| {
                 mail.serial += 1;
                 serial = mail.serial;
-                mail.maintenance.push(maintenance);
+                let covered = match maintenance {
+                    Maintenance::Code(page) => mail.maintenance.iter().any(|posted| {
+                        matches!(posted, Maintenance::Code(held) if held.is_none() || *held == page)
+                    }),
+                    _ => false,
+                };
+                if !covered {
+                    mail.maintenance.push(maintenance);
+                }
             });
             inbox.posted.store(serial, Ordering::Release);
             posted.push((pe, serial));
@@ -932,28 +942,58 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// and wait until each running one has applied them.
     pub(super) fn forward_power(&mut self) -> Step {
         for change in core::mem::take(&mut self.forwarded_power) {
-            self.broadcast(Maintenance::Power(change))?;
+            self.post(Maintenance::Power(change));
+            self.complete_maintenance()?;
         }
         Ok(())
     }
 
-    /// Broadcast `maintenance` and wait until every other running PE has
-    /// applied it, reading this PE's own mail meanwhile: two PEs may wait on
-    /// each other. A start that arrives meanwhile is posted again.
-    pub(super) fn broadcast(&mut self, maintenance: Maintenance) -> Step {
+    /// Post `maintenance` to every other running PE, which applies it at
+    /// its next return to the engine, brought there by the post. A TLBI or
+    /// IC IVAU completes for the other PEs at this PE's next DSB, which
+    /// waits for them ([`Self::complete_maintenance`]): a run of
+    /// maintenance waits once.
+    pub(super) fn post(&mut self, maintenance: Maintenance) {
         let Some(hub) = self.parallel.clone() else {
-            return Ok(());
+            return;
         };
-        let started = self.host.counter();
-        self.observe_parallel_source(SourcePhase::BroadcastEnter);
-        let mut posted = hub.broadcast(self.current, maintenance);
         let profile = self.observation_inbox(&hub).map(|inbox| &inbox.broadcasts);
+        let started = profile.map(|_| self.host.counter());
+        let posted = hub.broadcast(self.current, maintenance);
         let kind = match maintenance {
             Maintenance::Tlb(_) => BroadcastKind::Tlb,
             Maintenance::Code(_) => BroadcastKind::Code,
             Maintenance::Power(_) => BroadcastKind::Power,
         };
-        let active = profile.and_then(|slot| slot.begin(kind, started, posted.len()));
+        if let (Some(slot), Some(started)) = (profile, started)
+            && let Some(active) = slot.begin(kind, started, posted.len())
+        {
+            slot.finish(active, 0, 0);
+        }
+        for (pe, serial) in posted {
+            match self.posted.iter_mut().find(|(held, _)| *held == pe) {
+                Some((_, held)) => *held = serial,
+                None => self.posted.push((pe, serial)),
+            }
+        }
+    }
+
+    /// Wait until every other running PE has applied the maintenance this
+    /// one posted, reading this PE's own mail meanwhile: two PEs may wait
+    /// on each other. A start that arrives meanwhile is posted again.
+    pub(super) fn complete_maintenance(&mut self) -> Step {
+        let Some(hub) = self.parallel.clone() else {
+            return Ok(());
+        };
+        if self.posted.is_empty() {
+            return Ok(());
+        }
+        let mut posted = core::mem::take(&mut self.posted);
+        let started = self.host.counter();
+        self.observe_parallel_source(SourcePhase::BroadcastEnter);
+        let profile = self.observation_inbox(&hub).map(|inbox| &inbox.broadcasts);
+        let active =
+            profile.and_then(|slot| slot.begin(BroadcastKind::Completion, started, posted.len()));
         let mut polls = 0u64;
         // A PE stopping the others need not wait for this one meanwhile.
         hub.set_parked(self.current, true);

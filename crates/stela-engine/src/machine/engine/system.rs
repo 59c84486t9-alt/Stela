@@ -852,10 +852,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
             Translation::TableBase => self.table_base_changed(),
             Translation::Maintenance(reach, everywhere, broadcast) => {
                 self.tlb_maintained(reach, everywhere);
-                if let Some(scope) = broadcast
-                    && let Err(stop) = self.broadcast(super::parallel::Maintenance::Tlb(scope))
-                {
-                    return Some(Err(stop));
+                if let Some(scope) = broadcast {
+                    self.post(super::parallel::Maintenance::Tlb(scope));
                 }
             }
             Translation::Unchanged if regime => self.sync_regime(),
@@ -866,18 +864,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
             Code::Page(physical) => {
                 self.invalidate_code_page(physical);
                 self.host.code_invalidated(Some(physical));
-                if let Err(stop) =
-                    self.broadcast(super::parallel::Maintenance::Code(Some(physical)))
-                {
-                    return Some(Err(stop));
-                }
+                self.post(super::parallel::Maintenance::Code(Some(physical)));
             }
             Code::All => {
                 self.discard_code(Discard::Maintenance);
                 self.host.code_invalidated(None);
-                if let Err(stop) = self.broadcast(super::parallel::Maintenance::Code(None)) {
-                    return Some(Err(stop));
-                }
+                self.post(super::parallel::Maintenance::Code(None));
             }
         }
         // The state the accessor changed before refusing is resynchronized

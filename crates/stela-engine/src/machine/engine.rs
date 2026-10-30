@@ -734,6 +734,9 @@ pub struct Machine<H: Host, D: Devices> {
     /// Instruction-cache maintenance other PEs broadcast while this one
     /// waited mid-instruction, applied at its next mail read.
     deferred_code: Vec<Option<u64>>,
+    /// The latest serial of the maintenance this PE posted to each other PE
+    /// and has not yet seen applied, which its next DSB waits for.
+    posted: Vec<(usize, u64)>,
     lines_epoch: u64,
     pending_device_read: Option<device_read::Pending>,
     pending_device_write: Option<device_write::Pending>,
@@ -922,6 +925,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             attached: None,
             forwarded_power: Vec::new(),
             deferred_code: Vec::new(),
+            posted: Vec::new(),
             lines_epoch: 0,
             pending_device_read: None,
             pending_device_write: None,

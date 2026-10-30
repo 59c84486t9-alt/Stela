@@ -39,14 +39,22 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 // to memory with XS 0), and is UNDEFINED without FEAT_XS.
                 Synchronization::DataCompletion { nxs: true, .. } => {
                     match self.cpu.registers.implemented(Feature::FEAT_XS) {
-                        Ok(true) => self.next(),
+                        Ok(true) => {
+                            self.complete_maintenance()?;
+                            self.next()
+                        }
                         Ok(false) => self.undefined(),
                         Err(reason) => Err(self.unsupported(RequirementKind::Native(reason))),
                     }
                 }
                 Synchronization::ErrorSynchronization => self.error_synchronization(),
-                Synchronization::DataCompletion { .. }
-                | Synchronization::StoreBypassBarrier { .. }
+                // The TLB and instruction cache maintenance this PE posted
+                // completes for the other PEs (`parallel` `post`).
+                Synchronization::DataCompletion { .. } => {
+                    self.complete_maintenance()?;
+                    self.next()
+                }
+                Synchronization::StoreBypassBarrier { .. }
                 | Synchronization::BranchTarget { .. }
                 | Synchronization::TraceSynchronization
                 | Synchronization::OtherHint { .. }

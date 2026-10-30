@@ -346,9 +346,11 @@ fn source_observation_uses_only_the_attached_owner_and_remains_stale() {
     assert_eq!(hub.source_observation(1), Some(second));
 
     // Real boundary hooks publish once at entry and once on return, not
-    // on each wait-loop spin. No other live PE needs to acknowledge here.
+    // on each wait-loop spin. A PE that stops reading mail needs not
+    // acknowledge what was posted to it.
+    home.post(Maintenance::Code(None));
     hub.set_live(1, false);
-    home.broadcast(Maintenance::Code(None)).unwrap();
+    home.complete_maintenance().unwrap();
     let broadcast = hub.source_observation(0).unwrap();
     assert_eq!(broadcast.sequence, 4);
     assert_eq!(broadcast.source.phase, SourcePhase::BroadcastExit);
@@ -359,35 +361,123 @@ fn source_observation_uses_only_the_attached_owner_and_remains_stale() {
     assert_eq!(hub.source_observation(1), Some(second));
 }
 
+/// A machine of PE 0 of two in `hub`, running `words`.
+fn first_of_two(
+    words: &[u32],
+    hub: &Arc<Hub>,
+) -> Machine<super::super::tests::FakeHost, crate::machine::NoDevices> {
+    use stela_contracts::identity::Identity;
+    let identities = (0..2)
+        .map(|pe| Identity {
+            midr: 0x611f_0320,
+            mpidr: 0x8000_0000 | pe << 8,
+            clock: None,
+            caches: None,
+        })
+        .collect::<Vec<_>>();
+    let mut machine = super::super::tests::board(words, crate::machine::NoDevices, identities);
+    machine.enter_parallel(Arc::clone(hub)).unwrap();
+    machine
+}
+
 #[test]
-fn broadcast_profile_reuses_boundary_clocks_and_requires_the_attached_owner() {
-    use super::super::tests::machine;
-    let mut machine = machine(&[0xd503_201f]);
-    let (hub, _) = hub(1);
-    machine.enter_parallel(Arc::clone(&hub)).unwrap();
+fn broadcast_profile_counts_posts_and_completion_waits_for_the_attached_owner() {
+    let (hub, _) = hub(2);
+    let mut machine = first_of_two(&[0xd503_201f], &hub);
+    // Unobserved, a post reads no clock; the completion reads its two.
     let reads = machine.host.counter_reads;
-    machine.broadcast(Maintenance::Code(None)).unwrap();
+    machine.post(Maintenance::Code(None));
+    assert_eq!(machine.host.counter_reads, reads);
+    hub.set_live(1, false);
+    machine.complete_maintenance().unwrap();
     assert_eq!(machine.host.counter_reads - reads, 2);
     assert!(hub.broadcast_profile(0).is_none());
 
     hub.set_source_observations(true);
+    hub.set_live(1, true);
     let reads = machine.host.counter_reads;
-    machine.broadcast(Maintenance::Code(None)).unwrap();
-    // The two existing broadcast clocks and two source observations;
-    // accounting adds no clock read or native notification.
-    assert_eq!(machine.host.counter_reads - reads, 4);
+    machine.post(Maintenance::Code(Some(0x4000)));
+    machine.post(Maintenance::Code(Some(0x4000)));
+    hub.set_live(1, false);
+    machine.complete_maintenance().unwrap();
+    // A clock for each post, and the completion's two and its two source
+    // observations; accounting adds no native notification.
+    assert_eq!(machine.host.counter_reads - reads, 6);
     let observed = hub.broadcast_profile(0).unwrap();
     let code = observed.kinds[BroadcastKind::Code.index()];
     assert_eq!(
         (code.started, code.completed, code.recipients, code.polls),
-        (1, 1, 0, 0)
+        (2, 2, 2, 0)
+    );
+    let completion = observed.kinds[BroadcastKind::Completion.index()];
+    assert_eq!(
+        (
+            completion.started,
+            completion.completed,
+            completion.recipients
+        ),
+        (1, 1, 1)
     );
     assert_eq!((observed.active, observed.dropped_updates), (None, false));
-    assert!(hub.broadcast_profile(1).is_none());
+    // PE 1 posted nothing.
+    let idle = hub.broadcast_profile(1).unwrap();
+    assert!(idle.kinds.iter().all(|counts| counts.started == 0));
+
+    // With nothing posted, a completion waits for nothing.
+    let reads = machine.host.counter_reads;
+    machine.complete_maintenance().unwrap();
+    assert_eq!(machine.host.counter_reads, reads);
+
+    hub.set_live(1, true);
     let attached = machine.attached.take().unwrap();
-    machine.broadcast(Maintenance::Code(None)).unwrap();
+    machine.post(Maintenance::Code(None));
+    hub.set_live(1, false);
+    machine.complete_maintenance().unwrap();
     assert_eq!(hub.broadcast_profile(0), Some(observed));
     machine.attached = Some(attached);
+}
+
+#[test]
+fn a_page_invalidation_the_pe_has_yet_to_read_covers_the_same_page_again() {
+    let (hub, _) = hub(2);
+    let mut machine = first_of_two(&[], &hub);
+    machine.post(Maintenance::Code(Some(0x4000)));
+    machine.post(Maintenance::Code(Some(0x4000)));
+    machine.post(Maintenance::Code(Some(0x8000)));
+    machine.post(Maintenance::Code(None));
+    machine.post(Maintenance::Code(Some(0xc000)));
+    let mail = hub.take(1).unwrap();
+    let pages: Vec<_> = mail
+        .maintenance
+        .iter()
+        .map(|maintenance| match maintenance {
+            Maintenance::Code(page) => *page,
+            _ => unreachable!(),
+        })
+        .collect();
+    assert_eq!(pages, [Some(0x4000), Some(0x8000), None]);
+    // Every post counts: the PE's acknowledgment of the last one is the
+    // one waited for.
+    assert_eq!((mail.serial, machine.posted.as_slice()), (5, &[(1, 5)][..]));
+}
+
+#[test]
+fn maintenance_posted_to_another_pe_completes_at_the_next_dsb() {
+    let (hub, _) = hub(2);
+    // DSB ISH.
+    let mut machine = first_of_two(&[0xd503_3b9f], &hub);
+    machine.post(Maintenance::Code(Some(0x4000)));
+    assert_eq!(machine.posted, [(1, 1)]);
+    // PE 1 reads its mail at its next return to the engine.
+    let mail = hub.take(1).unwrap();
+    hub.acknowledge(1, mail.serial);
+    machine.host.exits = vec![super::super::NativeExit::Exit {
+        next_pc: super::super::tests::BASE,
+        kind: stela_compiler::block::ExitKind::System as u64,
+    }];
+    machine.step().unwrap();
+    assert!(machine.posted.is_empty());
+    assert_eq!(machine.cpu.pc, super::super::tests::BASE + 4);
 }
 
 #[test]
