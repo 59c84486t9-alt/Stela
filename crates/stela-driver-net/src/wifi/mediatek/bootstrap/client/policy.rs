@@ -24,10 +24,13 @@ pub use link::{
 static NEXT_OWNER: wifi::Identities = wifi::Identities::new();
 static NEXT_BSS: wifi::Identities = wifi::Identities::new();
 
+/// Where the station operates, as cfg80211's `reg_is_indoor` knows it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Environment {
+    /// The user says it is indoors: indoor-only channels may initiate.
     Indoor,
-    Outdoor,
+    /// `ENVIRON_ANY`: indoor-only channels never initiate.
+    Any,
 }
 #[derive(Debug)]
 pub enum PolicyError {

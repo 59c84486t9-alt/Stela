@@ -17,7 +17,7 @@ use super::{
 use crate::{
     bytes::le32,
     wifi::{
-        Band,
+        Band, Channel,
         regulatory::{channel, database::Country},
     },
 };
@@ -225,6 +225,22 @@ impl Plan {
             plan.power[i] = Some(power);
         }
         Some(plan)
+    }
+
+    /// The channel `ieee80211_register_hw` starts the radio on: the first
+    /// enabled one of the first band that has one.
+    pub fn default_channel(&self) -> Option<Channel> {
+        BANDS
+            .into_iter()
+            .zip(&self.domain)
+            .find_map(|(band, channels)| {
+                let number = channels.first()?.hardware_value;
+                Some(Channel {
+                    band,
+                    number,
+                    frequency_mhz: frequency(band, number as u8),
+                })
+            })
     }
 
     pub fn inputs(&self) -> remaining::Inputs<'_> {

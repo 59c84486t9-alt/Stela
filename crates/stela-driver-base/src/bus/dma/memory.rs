@@ -123,6 +123,30 @@ pub trait PageSource {
     }
 }
 
+/// A borrowed provider, such as the mount's `&'static dyn PageSource`.
+impl<T: PageSource + ?Sized> PageSource for &T {
+    fn page_geometry(&self) -> Result<PageGeometry, MemoryError> {
+        (**self).page_geometry()
+    }
+    fn allocate(
+        &self,
+        bytes: usize,
+        alignment: usize,
+        attribute: CacheAttribute,
+    ) -> Result<PinnedPages, MemoryError> {
+        (**self).allocate(bytes, alignment, attribute)
+    }
+    fn allocate_below(
+        &self,
+        bytes: usize,
+        alignment: usize,
+        attribute: CacheAttribute,
+        physical_end_exclusive: u64,
+    ) -> Result<PinnedPages, MemoryError> {
+        (**self).allocate_below(bytes, alignment, attribute, physical_end_exclusive)
+    }
+}
+
 /// The unique owner of an allocation and its established CPU mapping.
 ///
 /// # Safety

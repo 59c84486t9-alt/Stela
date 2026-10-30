@@ -4,9 +4,10 @@
 //! Linux mt76 at a804c5742bff224d4cb4d25dd383554d598be32b.
 //!
 //! Exact identity, bounded firmware parsing and download are separate from
-//! PCI ownership, WFDMA transport, radio initialization and client association.
-//! These primitives do not publish an Ethernet link or claim a ready radio.
+//! PCI ownership, WFDMA transport, radio initialization and client association;
+//! [`attach`] composes them into an MT7925 station link.
 pub mod acpi;
+pub mod attach;
 pub mod bootstrap;
 pub mod control;
 pub mod download;

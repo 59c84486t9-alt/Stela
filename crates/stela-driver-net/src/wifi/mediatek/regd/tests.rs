@@ -40,6 +40,14 @@ fn power(rows: Option<&[power::Channel]>, value: u8) -> i8 {
 #[test]
 fn the_domain_holds_each_band_s_regulated_channels() {
     let plan = planned(0x1f, None, &Sar::default());
+    assert_eq!(
+        plan.default_channel(),
+        Some(Channel {
+            band: Band::Ghz2,
+            number: 1,
+            frequency_mhz: 2412
+        })
+    );
     let inputs = plan.inputs();
     assert_eq!(inputs.channel_configuration, 0x1f);
     assert_eq!(
@@ -157,6 +165,14 @@ fn a_missing_band_stops_the_channel_update_as_the_source_does() {
         sar: &Sar::default(),
     })
     .unwrap();
+    assert_eq!(
+        plan.default_channel(),
+        Some(Channel {
+            band: Band::Ghz5,
+            number: 36,
+            frequency_mhz: 5180
+        })
+    );
     let inputs = plan.inputs();
     assert!(inputs.domain.channels_2ghz.is_empty());
     assert_eq!(*values(inputs.domain.channels_5ghz).last().unwrap(), 177);
