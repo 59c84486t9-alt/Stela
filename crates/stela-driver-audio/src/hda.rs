@@ -50,6 +50,8 @@ pub use realtek::{
     RealtekHeadphoneRoute, RealtekOem, RealtekReport,
 };
 mod routing;
+mod setup;
+pub use setup::CodecSetup;
 mod sigmatel;
 pub use sigmatel::{
     Idt73PowerReport, Idt83PortPower, Idt83PowerReport, Idt95PowerReport, SigmatelGpio,

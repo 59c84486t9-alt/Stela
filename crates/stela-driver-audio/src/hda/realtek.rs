@@ -10,6 +10,11 @@ use alloc::vec::Vec;
 
 mod family;
 pub use family::RealtekFamily;
+
+/// Whether the managed ALC882/ALC662-family initialization owns this codec.
+pub(super) fn managed(id: u32, revision: u32) -> bool {
+    family::family(id, revision).is_ok()
+}
 mod oem;
 pub use oem::RealtekOem;
 mod laptop;

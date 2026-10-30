@@ -102,7 +102,7 @@ impl State {
     }
 }
 
-fn profile(id: u32) -> Result<SigmatelProfile, Error> {
+pub(super) fn profile(id: u32) -> Result<SigmatelProfile, Error> {
     match id {
         0x8384_7690 => Ok(SigmatelProfile::Stac9200),
         0x8384_7632..=0x8384_7637 => Ok(SigmatelProfile::Stac925x),
