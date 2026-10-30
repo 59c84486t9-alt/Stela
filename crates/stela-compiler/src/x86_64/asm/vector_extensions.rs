@@ -243,6 +243,52 @@ pub(crate) fn byte_dot_supported(target: TargetCpu) -> bool {
         && !target.data_independent_timing()
 }
 
+/// AVX512-FP16's packed forms on XMM registers need VL. The DIT profile keeps
+/// its reviewed recipes.
+pub(crate) fn half_supported(target: TargetCpu) -> bool {
+    target.supports(TargetCpu::Avx512fp16.with_avx512vl()) && !target.data_independent_timing()
+}
+
+/// The writemask of [`half_arithmetic`].
+const HALF_WRITEMASK: u8 = 1;
+
+/// K1 selects the low `lanes` Half lanes, through EAX.
+pub(crate) fn half_writemask(code: &mut Code, lanes: u8) {
+    let mut asm = code.asm();
+    asm.mov_imm32(Gpr::Rax, (1 << lanes) - 1);
+    asm.kmovw(HALF_WRITEMASK, Gpr::Rax);
+}
+
+/// An AVX512-FP16 packed binary operation, by its map 5 opcode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HalfOpcode {
+    Add = 0x58,
+    Multiply = 0x59,
+    Subtract = 0x5c,
+}
+
+/// VADDPH, VMULPH or VSUBPH of the XMM registers `destination` and `source`
+/// under MXCSR.RC, in the [`half_writemask`] lanes: the others clear and raise
+/// no status. The instructions ignore MXCSR.DAZ and FTZ.
+pub(crate) fn half_arithmetic(code: &mut Code, opcode: HalfOpcode, destination: u8, source: u8) {
+    code.asm().evex(
+        Evex {
+            map: Map::M5,
+            pp: Pp::None,
+            w: false,
+            length: 0,
+            mask: HALF_WRITEMASK,
+            zeroing: true,
+            broadcast: false,
+            scale: 16,
+        },
+        opcode as u8,
+        destination,
+        destination,
+        Rm::Xmm(source),
+    );
+}
+
 /// VPDPWUUD (AVX-VNNI-INT16): add to each dword of `sum` the two products of
 /// its unsigned words in `left` and `right`, wrapping. The DIT profile keeps
 /// its reviewed recipe.
@@ -1150,6 +1196,30 @@ mod scalable_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn half_arithmetic_matches_gnu_encodings() {
+        let target = TargetCpu::X86_64_V4.with_avx512fp16();
+        assert!(half_supported(target));
+        assert!(!half_supported(TargetCpu::X86_64_V4));
+        assert!(!half_supported(target.with_data_independent_timing()));
+        let mut code = Code::new();
+        half_writemask(&mut code, 4);
+        half_arithmetic(&mut code, HalfOpcode::Add, 0, 1);
+        half_arithmetic(&mut code, HalfOpcode::Subtract, 9, 10);
+        half_arithmetic(&mut code, HalfOpcode::Multiply, 2, 3);
+        assert_eq!(
+            code,
+            [
+                &[0xb8, 0x0f, 0, 0, 0][..],            // mov eax,0xf
+                &[0xc5, 0xf8, 0x92, 0xc8],             // kmovw k1,eax
+                &[0x62, 0xf5, 0x7c, 0x89, 0x58, 0xc1], // vaddph xmm0{k1}{z},xmm0,xmm1
+                &[0x62, 0x55, 0x34, 0x89, 0x5c, 0xca], // vsubph xmm9{k1}{z},xmm9,xmm10
+                &[0x62, 0xf5, 0x6c, 0x89, 0x59, 0xd3], // vmulph xmm2{k1}{z},xmm2,xmm3
+            ]
+            .concat()
+        );
+    }
 
     #[test]
     fn byte_blend_has_explicit_mask_and_refuses_missing_state_or_dit() {

@@ -407,3 +407,129 @@ fn full_path_mixed_lanes_preserve_distinct_pairs_and_reject_late_bad_inputs() {
         }
     }
 }
+
+/// llvm-mc encodings with their register fields clear: FADD, FSUB, FMUL, FABD
+/// and FMULX of 4H and 8H, FADDP of both, then the scalar forms and FNMUL.
+const HALF_FORMS: [u32; 18] = [
+    0x0e40_1400,
+    0x4e40_1400,
+    0x0ec0_1400,
+    0x4ec0_1400,
+    0x2e40_1c00,
+    0x6e40_1c00,
+    0x2ec0_1400,
+    0x6ec0_1400,
+    0x0e40_1c00,
+    0x4e40_1c00,
+    0x2e40_1400,
+    0x6e40_1400,
+    0x1ee0_2800,
+    0x1ee0_3800,
+    0x1ee0_0800,
+    0x1ee0_8800,
+    0x7ec0_1400,
+    0x5e40_1c00,
+];
+/// FADDP H, and FMUL 8H, FMULX 4H and FMUL H by element with Vm = V2.
+const HALF_FIXED_RIGHT: [u32; 4] = [0x5e30_d800, 0x4f12_9800, 0x2f32_9000, 0x5f32_9800];
+
+/// Run the block; the state must match exact completion, on the inline path
+/// or after a helper exit that left only the prefix's effects.
+fn check_half(mapping: &Mapping, operand: &Operand, state: GuestState) -> bool {
+    let mut expected = state.clone();
+    expected.x[8] += 1;
+    let prefix = expected.clone();
+    complete(&mut expected, operand).unwrap();
+    expected.x[9] += 1;
+    let mut actual = state;
+    let saved = mxcsr();
+    // SAFETY: the owned block contains only non-memory instructions, compiled
+    // for this host. State satisfies its ordinary one-pointer block ABI.
+    let exit = unsafe { mapping.call_block(&mut actual) }.unwrap();
+    assert_eq!(mxcsr(), saved, "MXCSR {operand:?}");
+    let inline = exit.kind == ExitKind::Fallthrough as u64;
+    if inline {
+        assert_eq!(exit.next_pc, PC + 12, "{operand:?}");
+    } else {
+        assert_eq!(exit.kind, ExitKind::FloatingPoint as u64, "{operand:?}");
+        assert_eq!(exit.next_pc, PC + 4, "{operand:?}");
+        assert_eq!(actual, prefix, "helper exit {operand:?}");
+        complete(&mut actual, operand).unwrap();
+        actual.x[9] += 1;
+    }
+    assert_eq!(actual, expected, "{operand:?} inline={inline}");
+    inline
+}
+
+#[test]
+fn half_arithmetic_matches_completion_on_each_host_recipe() {
+    let host = stela_compiler::x86_64::modeled::host();
+    let mut words = Vec::new();
+    for (d, n, m) in [(0, 1, 2), (31, 31, 31)] {
+        words.extend(HALF_FORMS.map(|base| base | d | n << 5 | m << 16));
+    }
+    words.extend(HALF_FIXED_RIGHT.map(|base| base | 3 | 1 << 5));
+    const VALUES: [u64; 10] = [
+        0x3c00, 0x3c01, 0xbc00, 0x0400, 0x7bff, 0x4248, 0x0000, 0x0001, 0x7c00, 0x7c01,
+    ];
+    let mut random = 0x1f83_d9ab_fb41_bd6b_u64;
+    let mut next = move || {
+        random ^= random << 13;
+        random ^= random >> 7;
+        random ^= random << 17;
+        random
+    };
+    for target in [TargetCpu::X86_64_V3, TargetCpu::X86_64_V4.with_avx512fp16()] {
+        if !host.supports(target) {
+            continue;
+        }
+        let mut inline = 0;
+        for &word in &words {
+            let operand = decode(word).unwrap().unwrap();
+            assert_eq!(operand.format, Format::Half, "{word:#x}");
+            let source: Vec<_> = [PREFIX, word, SUFFIX]
+                .into_iter()
+                .flat_map(u32::to_le_bytes)
+                .collect();
+            let block = CompilationPlan::new(
+                &source,
+                GuestAddress(PC),
+                &stela_compiler::Options::new(BlockProfile::new(Features::SYSTEM_MODE), target),
+            )
+            .unwrap()
+            .compile()
+            .unwrap();
+            let mapping = Mapping::new(&block.native.x86_64_code).unwrap();
+            let controls = [0, FPCR_FZ16, FPCR_AH | FPCR_FZ16, FPCR_NEP, FPCR_DN];
+            for (case, &(a, b)) in VALUES
+                .iter()
+                .flat_map(|a| VALUES.iter().map(move |b| (*a, *b)))
+                .collect::<Vec<_>>()
+                .iter()
+                .enumerate()
+            {
+                let rc = (case % 4) as u32;
+                let control = controls[case % controls.len()];
+                let state = input(&operand, a, b, control | rc << FPCR_ROUNDING_SHIFT);
+                inline += u32::from(check_half(&mapping, &operand, state));
+            }
+            // Distinct normal lanes, across rounding modes.
+            for sample in 0..64 {
+                let mut state = input(
+                    &operand,
+                    0x3c00,
+                    0x3c00,
+                    (sample % 4) << FPCR_ROUNDING_SHIFT,
+                );
+                for limb in state.v.as_flattened_mut() {
+                    *limb = (0..4).fold(0, |limb, lane| {
+                        let exponent = 8 + next() % 14;
+                        limb | (next() & 0x83ff | exponent << 10) << (16 * lane)
+                    });
+                }
+                inline += u32::from(check_half(&mapping, &operand, state));
+            }
+        }
+        assert!(inline > 1000, "{target:?} inline={inline}");
+    }
+}

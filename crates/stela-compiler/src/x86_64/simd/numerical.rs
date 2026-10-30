@@ -1150,6 +1150,17 @@ pub(super) fn prepare_vector_input_range_below(code: &mut Code, format: Format, 
     );
 }
 
+/// [`prepare_vector_result_range`] for Half's word lanes.
+pub(super) fn prepare_half_result_range(code: &mut Code) {
+    packed(
+        code,
+        Host::EqualDword,
+        MINIMUM_EXPONENT_VECTOR,
+        MINIMUM_EXPONENT_VECTOR,
+    );
+    ShiftOpcode::RightWord.emit(code, MINIMUM_EXPONENT_VECTOR, u16::BITS as u8 - SIGN_BITS);
+}
+
 pub(in crate::x86_64) fn prepare_vector_result_range(code: &mut Code) {
     packed(
         code,

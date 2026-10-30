@@ -41,7 +41,7 @@ const SIG_DFL: usize = 0;
 
 /// The host's features plus the modeled ones when the host can hold their
 /// state (AVX), with the handler installed.
-pub(crate) fn host() -> TargetCpu {
+pub fn host() -> TargetCpu {
     let host = TargetCpu::detect();
     if !host.supports(TargetCpu::Avx2) {
         return host;
@@ -733,6 +733,7 @@ unsafe extern "C" fn trap(_: i32, _: *mut c_void, context: *mut c_void) {
     }
 }
 
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::{

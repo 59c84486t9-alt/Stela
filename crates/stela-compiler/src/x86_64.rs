@@ -104,12 +104,20 @@ pub mod isa;
 mod literal;
 pub(crate) mod memory_context;
 mod memory_recipe;
-#[cfg(all(test, target_arch = "x86_64", target_os = "linux"))]
-pub(crate) mod modeled;
+#[cfg(all(
+    any(test, feature = "test-support"),
+    target_arch = "x86_64",
+    target_os = "linux"
+))]
+pub mod modeled;
 /// Without the Linux signal-frame models, tests run only what the host has.
-#[cfg(all(test, target_arch = "x86_64", target_os = "macos"))]
-pub(crate) mod modeled {
-    pub(crate) fn host() -> crate::TargetCpu {
+#[cfg(all(
+    any(test, feature = "test-support"),
+    target_arch = "x86_64",
+    target_os = "macos"
+))]
+pub mod modeled {
+    pub fn host() -> crate::TargetCpu {
         crate::TargetCpu::detect()
     }
 }
