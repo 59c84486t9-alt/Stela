@@ -58,8 +58,10 @@
 //! key and retained unlock records do not outlive the sepOS start; each
 //! checks its key and reports that once. Loading class keys opens the VEK
 //! as an unwrap does, which checks the secret and KEK, and keeps the
-//! volume's class keys for [`file_key`] until the sepOS restarts or the
-//! VEK's state is dropped; the sealed-System bit is not interpreted, which
+//! volume's class keys for [`file_key`] until the sepOS restarts, the VEK's
+//! state is dropped or they are unloaded with 19 and the VEK third, as APFS
+//! does on unmount (`apfs_keybag_unload_class_keys` 0x481e660, call
+//! 0x481e808); the sealed-System bit is not interpreted, which
 //! it reports once. Dropping an unlock record's state releases nothing, as
 //! none is held. Other protection operations, the remaining `fv` commands
 //! and other types refuse. [`media`] serves the container media keys under
@@ -93,6 +95,7 @@ const COMMIT: u32 = 5;
 const REMOVE_VEK_STATE: u32 = 6;
 const RETAIN_UNLOCK_RECORD: u32 = 15;
 const LOAD_CLASS_KEYS: u32 = 18;
+const UNLOAD_CLASS_KEYS: u32 = 19;
 const COMMIT_KEK: u32 = 22;
 /// LOAD_CLASS_KEYS's u64: the volume group's System volume is sealed.
 const SEALED_SYSTEM: u64 = 1 << 2;
@@ -266,7 +269,7 @@ impl VolumeKeys {
                         Vek::parse(third)?;
                         self.report(UNRECORDED_COMMIT, notes);
                     }
-                    REMOVE_VEK_STATE if vek_only => {
+                    REMOVE_VEK_STATE | UNLOAD_CLASS_KEYS if vek_only => {
                         let volume = Vek::parse(third)?.volume();
                         self.class_keys.retain(|keys| keys.volume() != volume);
                     }
