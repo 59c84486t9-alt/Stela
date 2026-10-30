@@ -329,5 +329,18 @@ fn an_ap_mld_association_names_both_mlds_in_its_records() {
     // STA_REC_MLD names the AP MLD with the setup link's WCID 1 alone.
     let peer = record(3, 8, 0x20);
     assert_eq!((&peer[4..10], peer[16]), (&AP_MLD.0[..], 1));
+    // mt792x_tx: a management frame the station addresses to the AP MLD
+    // leaves the setup link from the station's address there.
+    let mut action = vec![0xd0, 0, 0, 0];
+    for address in [AP_MLD, LOCAL, AP_MLD] {
+        action.extend_from_slice(&address.0);
+    }
+    action.extend_from_slice(&[0, 0, 3, 0]);
+    let context = link.station().association_context().unwrap();
+    let on_air = Client::<Bar, Q, NativeGuard>::on_setup_link(&action, context);
+    assert_eq!(
+        (&on_air[4..10], &on_air[10..16], &on_air[16..22]),
+        (&AP.0[..], &SETUP_LINK.0[..], &AP.0[..])
+    );
     stop(&mut link, &model);
 }

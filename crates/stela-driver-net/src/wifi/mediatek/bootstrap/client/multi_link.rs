@@ -5,7 +5,8 @@
 //! interface rebound to the setup link's own address for authentication,
 //! and back to the interface's once the association's peers retire.
 use super::*;
-use crate::wifi::mediatek::mcu::client::MldLink;
+use crate::wifi::{mediatek::mcu::client::MldLink, station::AssociationContext};
+use alloc::borrow::Cow;
 use station::multi_link::Affiliation;
 
 impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
@@ -49,6 +50,27 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             primary_wcid: profile.wcid,
             eml: None,
         }
+    }
+
+    /// `mt792x_tx` for a management frame of `association` to its AP: sent
+    /// with the device's address translation off, it takes the setup link's
+    /// addresses, the AP's there as its BSSID.
+    pub(super) fn on_setup_link<'a>(
+        bytes: &'a [u8],
+        association: &AssociationContext,
+    ) -> Cow<'a, [u8]> {
+        let Some(affiliation) = association.affiliation() else {
+            return Cow::Borrowed(bytes);
+        };
+        if bytes.len() < 22 || bytes[4] & 1 != 0 {
+            return Cow::Borrowed(bytes);
+        }
+        let mut frame = bytes.to_vec();
+        let ap = association.bssid();
+        frame[4..10].copy_from_slice(&ap.0);
+        frame[10..16].copy_from_slice(&affiliation.local.0);
+        frame[16..22].copy_from_slice(&ap.0);
+        Cow::Owned(frame)
     }
 
     /// `mt7925_change_vif_links` restoring the single-link station once the

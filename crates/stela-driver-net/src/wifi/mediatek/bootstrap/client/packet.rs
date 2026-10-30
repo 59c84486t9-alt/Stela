@@ -71,7 +71,12 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 omac: p.interface.omac_index,
                 wmm: p.interface.wmm_index,
                 band: p.interface.band_index,
-                mld: false,
+                // A station MLD's data leaves its MLD addresses to the
+                // device's address translation.
+                mld: s
+                    .modern
+                    .as_ref()
+                    .is_some_and(|m| m.context().affiliation().is_some()),
             }),
             phy_band_one: false,
             queue: if management {
@@ -146,13 +151,17 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         bytes: &[u8],
         (config, context, grant): (txwi::Config, PacketOwner<C>, Option<u64>),
     ) -> Result<Receipt, Error> {
+        let bytes = match (&config.frame.kind, context.context.as_deref()) {
+            (txwi::Kind::Management, Some(association)) => Self::on_setup_link(bytes, association),
+            _ => alloc::borrow::Cow::Borrowed(bytes),
+        };
         let controller = controller.state_mut();
         let clock = controller.control.clock;
         controller
             .data_tx
             .as_mut()
             .unwrap()
-            .submit_if(source, config, bytes, context, || {
+            .submit_if(source, config, &bytes, context, || {
                 grant.is_none_or(|deadline| clock.now_us() < deadline)
             })
             .map_err(|e| {
