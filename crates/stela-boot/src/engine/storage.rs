@@ -31,7 +31,7 @@ use stela_drivers::{
     },
     bus::dma::RegionAllocator,
     input::InputDevice,
-    probe::{NativeServices, probe_with_provider},
+    probe::{NativeServices, native::usb4, probe_with_provider},
 };
 use stela_runtime::pc::{
     gpt::{Guid, PartitionDevice},
@@ -502,7 +502,9 @@ pub unsafe fn open(
     // consumes them yet.
     Vec::leak(core::mem::take(&mut devices.hda_hosts));
     for host in &devices.usb4_hosts {
-        let ready = &host.ready;
+        let usb4::Connection::Firmware { icm, ready, early } = &host.connection else {
+            continue;
+        };
         output::arguments(format_args!(
             "HOST USB4 {}: firmware connection manager ready ({:?}), security level {}\n",
             host.location,
@@ -512,8 +514,8 @@ pub unsafe fn open(
                 |level| alloc::format!("{level:?}")
             )
         ));
-        for event in &host.early {
-            super::usb::report_usb4(host, event);
+        for event in early {
+            super::usb::report_usb4(&host.location, icm, event);
         }
     }
     for (address, error) in &devices.failures {

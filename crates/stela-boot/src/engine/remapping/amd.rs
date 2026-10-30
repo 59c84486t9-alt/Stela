@@ -171,7 +171,7 @@ fn named(scope: MemoryScope, segment: u16, present: &[Present]) -> Vec<u16> {
 pub(super) struct Taken {
     unit: RefCell<Unit<Platform>>,
     segment: u16,
-    requesters: Vec<u16>,
+    requesters: RefCell<Vec<u16>>,
 }
 
 /// The function at `address`'s own configuration page.
@@ -384,7 +384,7 @@ pub(super) unsafe fn take(
         taken.push(Taken {
             unit: RefCell::new(unit),
             segment: id.segment,
-            requesters,
+            requesters: RefCell::new(requesters),
         });
     }
     taken
@@ -392,7 +392,18 @@ pub(super) unsafe fn take(
 
 impl Taken {
     pub(super) fn covers(&self, segment: u16, rid: u16) -> bool {
-        self.segment == segment && self.requesters.contains(&rid)
+        self.segment == segment && self.requesters.borrow().contains(&rid)
+    }
+
+    /// Cover requester `rid`, which arrived below a covered bridge. Its
+    /// device table entry is left as it was until it attaches.
+    pub(super) fn admit(&self, rid: u16) -> Result<(), Error> {
+        let unit = self.unit.try_borrow().map_err(|_| Error::Busy)?;
+        if !unit.covers(self.segment, rid) {
+            return Err(Error::Requester);
+        }
+        self.requesters.borrow_mut().push(rid);
+        Ok(())
     }
 
     /// A domain of its own for `binding`'s requester.

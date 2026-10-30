@@ -1,32 +1,62 @@
-//! USB4/Thunderbolt hosts whose firmware runs the connection manager (ICM),
-//! attached as Linux's `nhi_probe` and `icm_probe` attach them when ACPI
-//! grants the OS no native USB4 control, which this mount never requests.
-//! As Linux does with no authorizing agent, a device the firmware leaves
-//! awaiting approval gets no PCIe tunnel.
-use super::{Bridge, Claimed, Failure, NativeServices, ServiceError, claim, map};
+//! USB4/Thunderbolt hosts, attached as Linux's `nhi_probe` and `nhi_select_cm`
+//! attach them when ACPI grants the OS no native USB4 control, which this
+//! mount never requests. A host whose firmware runs the connection manager
+//! (ICM) keeps it; as Linux does with no authorizing agent, a device that
+//! firmware leaves awaiting approval gets no PCIe tunnel. Any other host gets
+//! the software connection manager ([`Manager`]).
+//!
+//! Software hosts come up before the PCI scan ([`bring_up`]), so the scan
+//! finds what they tunnel as it finds any other function, and a USB device
+//! behind a USB3 tunnel is there when the xHCI controllers attach.
+use super::{Bridge, Claimed, Failure, Kind, NativeServices, ServiceError, claim, map};
 use crate::{
     Clock,
     bus::{
         mmio::owned::Mapping,
-        pci::{Address, ConfigSpace, Function, owned::OwnedConfig, regs},
+        pci::{Address, ConfigSpace, EcamWindow, Function, hotplug, owned::OwnedConfig, regs},
         thunderbolt::{
+            channel::{self, Channel},
             controller::{self, Controller},
-            icm, ring,
+            icm,
+            manager::Manager,
+            ring,
         },
     },
-    probe::Error,
+    probe::{Devices, Error, Handoff, Warning},
 };
-use alloc::{boxed::Box, string::String, sync::Arc, vec::Vec};
+use alloc::{boxed::Box, format, string::String, sync::Arc, vec::Vec};
 use core::fmt;
 
-/// An attached host: its ICM transport and the firmware's protocol
-/// parameters, with the claimed function and BAR0 mapping it runs on.
+/// How long a domain's routers stay silent before it counts as found, and
+/// the longest the finding takes.
+const QUIET_MS: u64 = 700;
+const SETTLE_MS: u64 = 3000;
+/// How long the PCIe links of new tunnels get to train and their functions
+/// to answer.
+const LINK_MS: u64 = 1000;
+/// The wait after link training before configuration requests
+/// (PCI Express Base 6.0 §6.6.1).
+const LINK_RECOVERY_MS: u64 = 100;
+/// Between looks at the hosts.
+const POLL_US: u64 = 1000;
+
+/// What runs a host's domain.
+pub enum Connection {
+    /// Its firmware: the ICM transport and the firmware's protocol
+    /// parameters, with what arrived before DRIVER_READY was answered.
+    Firmware {
+        icm: Box<icm::Host<ring::Mmio>>,
+        ready: icm::DriverReady,
+        early: Vec<icm::Event>,
+    },
+    /// This mount.
+    Software { manager: Manager },
+}
+
+/// An attached host, with the claimed function and BAR0 mapping it runs on.
 pub struct Host {
     pub location: String,
-    pub icm: icm::Host<ring::Mmio>,
-    pub ready: icm::DriverReady,
-    /// Firmware messages that arrived before DRIVER_READY was answered.
-    pub early: Vec<icm::Event>,
+    pub connection: Connection,
     _owners: (Function<OwnedConfig>, Mapping),
 }
 
@@ -36,26 +66,32 @@ pub enum Refusal {
     /// The `IMR_VALID` property says the firmware image is invalid, which
     /// `nhi_imr_valid` refuses.
     InvalidFirmwareImage,
-    /// Its firmware runs no connection manager; a software one is not
-    /// attached yet.
-    SoftwareConnectionManager,
     Clock,
     Ring(ring::Error),
     Controller(controller::Error),
     Icm(icm::Error),
+    Channel(channel::Error),
+    Platform(ServiceError),
+    /// What arrived below a hot-plug bridge has no place.
+    Arrival(hotplug::Error),
 }
 
 impl fmt::Display for Refusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidFirmwareImage => f.write_str("firmware image not valid"),
-            Self::SoftwareConnectionManager => {
-                f.write_str("needs a software connection manager, which is not attached yet")
-            }
             Self::Clock => f.write_str("uncalibrated clock"),
             Self::Ring(error) => write!(f, "NHI ring: {error:?}"),
             Self::Controller(error) => write!(f, "NHI preparation: {error:?}"),
             Self::Icm(error) => write!(f, "ICM: {error:?}"),
+            Self::Channel(error) => write!(f, "control channel: {error:?}"),
+            Self::Platform(error) => write!(f, "connection manager: {error}"),
+            Self::Arrival(hotplug::Error::Buses) => {
+                f.write_str("tunnelled PCIe device: the bridge has no bus numbers left for it")
+            }
+            Self::Arrival(hotplug::Error::Windows) => {
+                f.write_str("tunnelled PCIe device: the bridge's memory windows cannot hold it")
+            }
         }
     }
 }
@@ -79,8 +115,9 @@ fn invalid_image(_: &dyn NativeServices, _: Address, _: &[Bridge]) -> bool {
 }
 
 /// Attach the USB4 host at `address`: prepare its NHI as `nhi_probe` does,
-/// enable its bus mastering, then start the ICM transport and wait for the
-/// firmware's answer to DRIVER_READY.
+/// enable its bus mastering, then start its connection manager. A firmware
+/// one has answered DRIVER_READY on return; a software one is yet to run.
+/// `isolated` is [`NativeServices::usb4_platform`]'s.
 ///
 /// # Safety
 /// [`NativeServices`]' contract holds for `services`, `clock` is the
@@ -94,6 +131,7 @@ pub(in crate::probe) unsafe fn attach(
     address: Address,
     bridges: &[Bridge],
     clock: Clock,
+    isolated: bool,
 ) -> Result<Host, Failure> {
     let refused =
         |refusal: Refusal, kept: Option<Box<dyn core::any::Any>>| (Error::Usb4(refusal), kept);
@@ -105,12 +143,8 @@ pub(in crate::probe) unsafe fn attach(
         domain,
         bars,
     } = claim(services, address).map_err(|error| (Error::Native(error), None))?;
-    if icm::Family::of(function.vendor, function.device).is_none() {
-        return Err(refused(
-            Refusal::SoftwareConnectionManager,
-            Some(Box::new((function, domain))),
-        ));
-    }
+    let family = icm::Family::of(function.vendor, function.device);
+    let location = format!("{address}");
     let mapping = match map(services, address, &bars, 0) {
         Ok(mapping) => mapping,
         Err(error) => {
@@ -154,9 +188,8 @@ pub(in crate::probe) unsafe fn attach(
         }
         {
             // SAFETY: the configuration and registers are the claimed
-            // function's and its BAR0; this mount negotiates no native USB4
-            // control, so its firmware's ICM is the connection manager, and
-            // the claimed requester's DMA and interrupts are stopped.
+            // function's and its BAR0, and the claimed requester's DMA and
+            // interrupts are stopped.
             let mut controller = unsafe { Controller::new(&mut *config, registers.clone()) }
                 .map_err(Refusal::Controller)?;
             while controller
@@ -170,8 +203,28 @@ pub(in crate::probe) unsafe fn attach(
         // `nhi_probe`'s pci_set_master, now that the domain is attached.
         let command = config.read16(regs::COMMAND);
         config.write16(regs::COMMAND, command | regs::COMMAND_MASTER);
-        // SAFETY: as above; the domain is the claimed requester's own, and
-        // the prepared NHI has its interrupts masked and rings idle.
+        if family.is_none() {
+            let platform = services
+                .usb4_platform(&location, isolated)
+                .map_err(Refusal::Platform)?;
+            // SAFETY: as above; the domain is the claimed requester's own,
+            // the prepared NHI has its interrupts masked and rings idle, and
+            // no firmware runs a connection manager on it.
+            let mut channel = unsafe {
+                Channel::new(
+                    registers.clone(),
+                    services.pages(),
+                    domain.clone(),
+                    u64::MAX,
+                )
+            }
+            .map_err(Refusal::Channel)?;
+            channel.start(now()?).map_err(Refusal::Channel)?;
+            let manager = Manager::new(Box::new(channel), platform);
+            return Ok(Connection::Software { manager });
+        }
+        // SAFETY: as above; this mount negotiates no native USB4 control, so
+        // its firmware's ICM is the connection manager.
         let mut host = unsafe {
             icm::Host::new(
                 &*config,
@@ -190,18 +243,22 @@ pub(in crate::probe) unsafe fn attach(
                 Some(icm::Event::DriverReady {
                     request: answered,
                     parameters,
-                }) if answered == request => return Ok((host, parameters, early)),
+                }) if answered == request => {
+                    return Ok(Connection::Firmware {
+                        icm: Box::new(host),
+                        ready: parameters,
+                        early,
+                    });
+                }
                 Some(event) => early.push(event),
                 None => core::hint::spin_loop(),
             }
         }
     })();
     match started {
-        Ok((icm, ready, early)) => Ok(Host {
-            location: alloc::format!("{address}"),
-            icm,
-            ready,
-            early,
+        Ok(connection) => Ok(Host {
+            location,
+            connection,
             _owners: (function, mapping),
         }),
         Err(refusal) => Err(refused(
@@ -209,4 +266,194 @@ pub(in crate::probe) unsafe fn attach(
             Some(Box::new((function, domain, mapping, registers))),
         )),
     }
+}
+
+/// A hot-plug bridge, and how to reach what hangs from it.
+struct Slot {
+    window: EcamWindow,
+    address: Address,
+}
+
+impl Slot {
+    /// Whether something has arrived below it for [`hotplug::adopt`].
+    ///
+    /// # Safety
+    /// As for [`bring_up`].
+    unsafe fn arrived(&self) -> bool {
+        let Address {
+            bus,
+            device,
+            function,
+            ..
+        } = self.address;
+        // SAFETY: forwarded; the window is mapped, and only probe reaches it.
+        let config = unsafe { self.window.config(bus, device, function) };
+        // SAFETY: as above.
+        hotplug::arrived(&config, |bus, device, function| unsafe {
+            self.window.config(bus, device, function)
+        })
+    }
+}
+
+/// What a look over the mapped windows found.
+#[derive(Default)]
+struct Survey {
+    bridges: Vec<Bridge>,
+    slots: Vec<Slot>,
+    hosts: Vec<Address>,
+}
+
+/// # Safety
+/// As for [`bring_up`].
+unsafe fn survey(handoff: &Handoff) -> Survey {
+    let mut found = Survey::default();
+    for window in &handoff.ecam {
+        if !handoff.is_mapped(&window.range()) {
+            continue;
+        }
+        // SAFETY: mapped as checked; the caller owns the machine.
+        for mut function in unsafe { Function::enumerate(window) } {
+            let address = function.address;
+            if function.class[..2] == [6, 4] {
+                found.bridges.push(Bridge {
+                    address,
+                    secondary: function.config().read8(0x19),
+                    aspm: crate::bus::pci::aspm_control(&function),
+                });
+                if hotplug::hot_plug_capable(&*function.config()) {
+                    found.slots.push(Slot {
+                        window: *window,
+                        address,
+                    });
+                }
+            }
+            if Kind::of(&function) == Some(Kind::Usb4)
+                && icm::Family::of(function.vendor, function.device).is_none()
+            {
+                found.hosts.push(address);
+            }
+        }
+    }
+    found
+}
+
+/// Poll the software connection managers for up to `ms`, until `done` holds.
+/// `done` hears whether any of them has work in progress.
+fn pump(hosts: &mut [Host], clock: Clock, ms: u64, mut done: impl FnMut(bool) -> bool) {
+    let Ok(start) = clock.try_now_us() else {
+        return;
+    };
+    loop {
+        let mut busy = false;
+        for host in hosts.iter_mut() {
+            if let Connection::Software { manager } = &mut host.connection {
+                busy |= manager.poll() && !manager.idle();
+            }
+        }
+        let Ok(now) = clock.try_now_us() else {
+            return;
+        };
+        if done(busy) || now.saturating_sub(start) >= ms * 1000 || clock.try_delay(POLL_US).is_err()
+        {
+            return;
+        }
+    }
+}
+
+/// Start the USB4 hosts no firmware runs a connection manager on, let their
+/// domains come up, and number and place the PCIe functions they tunnel. The
+/// addresses returned are the hosts dealt with here, attached or not.
+///
+/// PCIe tunnels of later plug events keep their functions unused: there is no
+/// scan to find them, as Linux's pciehp would.
+///
+/// # Safety
+/// [`NativeServices`]' contract holds for `services`. The caller owns the
+/// machine, and no driver has started.
+pub(in crate::probe) unsafe fn bring_up(
+    services: &dyn NativeServices,
+    handoff: &Handoff,
+    devices: &mut Devices,
+) -> Vec<Address> {
+    // SAFETY: forwarded.
+    let Survey {
+        bridges,
+        slots,
+        hosts,
+    } = unsafe { survey(handoff) };
+    let clock = handoff.clock;
+    let isolated = hosts
+        .iter()
+        .copied()
+        .chain(slots.iter().map(|slot| slot.address))
+        .all(|address| services.dma_translated(address));
+    for &address in &hosts {
+        // SAFETY: as for tg3 in probe; the look found every bridge.
+        match unsafe { attach(services, address, &bridges, clock, isolated) } {
+            Ok(host) => devices.usb4_hosts.push(host),
+            Err((error, kept)) => {
+                devices.failures.push((address, error));
+                devices.owners.extend(kept);
+            }
+        }
+    }
+    let attached = &mut devices.usb4_hosts;
+    let Ok(start) = clock.try_now_us() else {
+        return hosts;
+    };
+    let mut quiet_since = start;
+    pump(attached, clock, SETTLE_MS, |busy| {
+        let now = clock.try_now_us().unwrap_or(start);
+        if busy {
+            quiet_since = now;
+        }
+        now.saturating_sub(quiet_since) >= QUIET_MS * 1000
+    });
+    let tunnels: usize = attached
+        .iter()
+        .map(|host| match &host.connection {
+            Connection::Software { manager } => manager.pcie_tunnels(),
+            Connection::Firmware { .. } => 0,
+        })
+        .sum();
+    if tunnels == 0 {
+        return hosts;
+    }
+    let waiting = || {
+        // SAFETY: forwarded.
+        slots.iter().filter(|slot| unsafe { slot.arrived() })
+    };
+    pump(attached, clock, LINK_MS, |_| waiting().count() >= tunnels);
+    pump(attached, clock, LINK_RECOVERY_MS, |_| false);
+    let adopting: Vec<&Slot> = waiting().collect();
+    for slot in adopting {
+        let bridge = slot.address;
+        // SAFETY: forwarded; the functions below a bridge are still probe's.
+        let adopted = hotplug::adopt(
+            bridge.segment,
+            (bridge.bus, bridge.device, bridge.function),
+            |bus, device, function| unsafe { slot.window.config(bus, device, function) },
+        );
+        let arrivals = match adopted {
+            Ok(arrivals) => arrivals,
+            Err(error) => {
+                devices
+                    .failures
+                    .push((bridge, Error::Usb4(Refusal::Arrival(error))));
+                continue;
+            }
+        };
+        for address in arrivals.functions {
+            if let Err(error) = services.requester_arrived(address, bridge) {
+                devices.failures.push((address, Error::Native(error)));
+            }
+        }
+        for address in arrivals.payload_mismatches {
+            devices.warnings.push((
+                address,
+                Warning::Message("largest payload below its link's: expect malformed packets"),
+            ));
+        }
+    }
+    hosts
 }

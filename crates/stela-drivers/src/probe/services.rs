@@ -10,8 +10,9 @@ use crate::bus::{
         owned::OwnedConfig,
         requester::{ClaimError, RequesterBinding, StoppedRequester},
     },
+    thunderbolt::manager::Platform,
 };
-use alloc::sync::Arc;
+use alloc::{boxed::Box, sync::Arc};
 use core::fmt;
 
 /// Why a service refused a request.
@@ -82,6 +83,30 @@ pub unsafe trait NativeServices {
     /// The DMA domain for the requester `binding` names. The domain keeps the
     /// binding, and with it the configuration epoch it keeps.
     fn domain(&self, binding: RequesterBinding) -> Result<Arc<dyn DmaDomain>, ServiceError>;
+
+    /// Whether the mount's IOMMU confines the DMA of the function at
+    /// `address`.
+    fn dma_translated(&self, _address: Address) -> bool {
+        false
+    }
+
+    /// Bring the function at `address`, which arrived below `bridge` after
+    /// the IOMMU was taken, under the unit that translates the bridge. A
+    /// mount that translates nothing has nothing to do.
+    fn requester_arrived(&self, _address: Address, _bridge: Address) -> Result<(), ServiceError> {
+        Ok(())
+    }
+
+    /// What the software connection manager of the USB4 host at `location`
+    /// needs of the mount. `isolated` says [`Self::dma_translated`] holds for
+    /// the host and every hot-plug bridge its tunnels can come up on.
+    fn usb4_platform(
+        &self,
+        _location: &str,
+        _isolated: bool,
+    ) -> Result<Box<dyn Platform + Send>, ServiceError> {
+        Err(ServiceError::Unavailable)
+    }
 
     /// Pages for driver DMA rings and buffers, for the rest of the boot.
     fn pages(&self) -> &'static dyn PageSource;

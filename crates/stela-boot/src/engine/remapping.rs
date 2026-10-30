@@ -27,7 +27,7 @@ use stela_boot_core::remapping::{self, Present};
 use stela_drivers::bus::{
     dma::{mapping::DmaDomain, memory::CacheAttribute},
     mmio::owned::{PhysicalSpan, Protection},
-    pci::{EcamWindow, requester::RequesterBinding},
+    pci::{Address, EcamWindow, requester::RequesterBinding},
 };
 use stela_runtime::pc::acpi;
 
@@ -42,7 +42,6 @@ const CLAIMED_DISPLAYS: &[u16] = &[];
 
 struct Taken {
     segment: u16,
-    requesters: Vec<u16>,
     unit: Arc<Unit<MmioRegisters>>,
 }
 
@@ -69,6 +68,11 @@ unsafe fn inventory(window: &EcamWindow) -> Vec<Present> {
         let value = unsafe { (address as *const u32).read_volatile() };
         (value != u32::MAX).then_some(value)
     })
+}
+
+/// The requester ID of the function at `address`.
+fn requester(address: Address) -> u16 {
+    u16::from(address.bus) << 8 | u16::from(address.device) << 3 | u16::from(address.function)
 }
 
 impl Remappers {
@@ -181,7 +185,6 @@ impl Remappers {
                         ));
                         remappers.taken.push(Taken {
                             segment: *segment,
-                            requesters,
                             unit: taken,
                         });
                     }
@@ -264,6 +267,42 @@ impl Remappers {
         }
     }
 
+    /// The VT-d unit that allows `rid` on `segment`.
+    fn vtd(&self, segment: u16, rid: u16) -> Option<&Taken> {
+        self.taken
+            .iter()
+            .find(|taken| taken.segment == segment && taken.unit.allows(rid))
+    }
+
+    /// Whether a taken unit confines the DMA of the function at `address`.
+    pub(super) fn translates(&self, address: Address) -> bool {
+        let rid = requester(address);
+        self.amd
+            .iter()
+            .any(|taken| taken.covers(address.segment, rid))
+            || self.vtd(address.segment, rid).is_some()
+    }
+
+    /// Bring the function at `address`, which arrived below `bridge`, under
+    /// the unit that translates the bridge. With none, nothing changes.
+    pub(super) fn admit(&self, address: Address, bridge: Address) -> Result<(), VtdError> {
+        let (rid, parent) = (requester(address), requester(bridge));
+        if let Some(taken) = self
+            .amd
+            .iter()
+            .find(|taken| taken.covers(bridge.segment, parent))
+        {
+            return taken.admit(rid).map_err(|error| {
+                output::arguments(format_args!(
+                    "HOST IOMMU AMD-Vi admission refused: {error:?}\n"
+                ));
+                VtdError::Busy
+            });
+        }
+        self.vtd(bridge.segment, parent)
+            .map_or(Ok(()), |taken| taken.unit.admit_requester(rid))
+    }
+
     /// The domain of its own for `binding`'s requester when a taken unit
     /// covers it; the binding back when none does.
     pub(super) fn domain(
@@ -280,11 +319,7 @@ impl Remappers {
                 VtdError::Busy
             }));
         }
-        let Some(taken) = self
-            .taken
-            .iter()
-            .find(|taken| taken.segment == segment && taken.requesters.contains(&rid))
-        else {
+        let Some(taken) = self.vtd(segment, rid) else {
             return Err(binding);
         };
         // SAFETY: the driver's binding of its stopped function, whose bus
