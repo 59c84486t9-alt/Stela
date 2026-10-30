@@ -251,6 +251,14 @@ fn the_rest_of_asahis_boot_sequence_is_served() {
 }
 
 #[test]
+fn removing_gain_maps_returns_the_clients_record_with_success() {
+    let input = [7, 0, 0, 0, 1, 1, 0xaa, 0xaa, 0, 0xaa, 0xaa, 0xaa];
+    let reply = returned(methods().call(*b"A480", &input, 0xc));
+    assert_eq!(reply[..8], input[..8]);
+    assert_eq!(reply[8..], IO_RETURN_SUCCESS.to_le_bytes());
+}
+
+#[test]
 fn calls_off_the_interface_or_its_sizes_refuse_by_name() {
     let mut methods = methods();
     assert!(methods.call(*b"A999", &[], 4).is_err());
