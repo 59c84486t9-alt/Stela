@@ -325,6 +325,8 @@ mod tests {
 
     #[test]
     fn only_potentially_crossing_loads_require_atomic_load16() {
+        // A line-atomic (Intel) host never needs the granule load.
+        let target = TargetCpu::X86_64_V3;
         for kind in [Kind::Acquire, Kind::Release, Kind::AcquirePc] {
             for bytes in [BYTE_BYTES, HALFWORD_BYTES, DWORD_BYTES, QWORD_BYTES] {
                 for base in [Register::X(0), Register::X(30), Register::Sp] {
@@ -338,16 +340,12 @@ mod tests {
                         extension: LoadExtension::Zero,
                     };
                     assert_eq!(
-                        requires_atomic_load16(
-                            &operand,
-                            TargetCpu::detect(),
-                            MemoryChecks::DEFAULT
-                        ),
+                        requires_atomic_load16(&operand, target, MemoryChecks::DEFAULT),
                         kind != Kind::Release && bytes != BYTE_BYTES && base != Register::Sp
                     );
                     // An unchecked SP is an ordinary base.
                     assert_eq!(
-                        requires_atomic_load16(&operand, TargetCpu::detect(), UNCHECKED),
+                        requires_atomic_load16(&operand, target, UNCHECKED),
                         kind != Kind::Release && bytes != BYTE_BYTES
                     );
                 }
@@ -369,7 +367,7 @@ mod tests {
                 let inside_quantity = effective / 16 == last / 16;
                 let crosses_baseline = effective / 8 != last / 8;
                 assert_eq!(
-                    requires_atomic_load16(&operand, TargetCpu::detect(), MemoryChecks::DEFAULT),
+                    requires_atomic_load16(&operand, target, MemoryChecks::DEFAULT),
                     inside_quantity && crosses_baseline
                 );
             }
@@ -379,7 +377,7 @@ mod tests {
                 option: 15,
                 requirement: Barrier::All,
             },
-            TargetCpu::detect(),
+            target,
             MemoryChecks::DEFAULT,
         ));
         // A single agent's acquire loads are plain loads.
@@ -396,10 +394,11 @@ mod tests {
             displacement: 0,
             extension: LoadExtension::Zero,
         };
+        assert!(!requires_atomic_load16(&operand, target, single));
         assert!(!requires_atomic_load16(
             &operand,
-            TargetCpu::detect(),
-            single
+            target.with_line_atomic(),
+            MemoryChecks::DEFAULT
         ));
     }
 
