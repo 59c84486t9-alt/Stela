@@ -2,7 +2,7 @@
 //! detected before clamping.
 use super::rearrange::{add_or_subtract, lane_constant};
 use super::{Host, commit, greater, packed, read_vector, rearrange::constant, shuffle};
-use crate::x86_64::asm::{Alu, Code, Cond, Gpr, ShiftOp, Size};
+use crate::x86_64::asm::{Alu, Code, Cond, Gpr, ShiftOp, Size, vector_extensions};
 use crate::x86_64::simd::encode::guest;
 use crate::{
     GuestState, TargetCpu,
@@ -154,8 +154,9 @@ fn mixed_add(code: &mut Code, lane: u8, unsigned_result: bool) {
     }
 }
 
-/// Clamp the wide source lanes. XMM6 holds the upper-bound mask across the
-/// second comparison; the compare recipe uses only XMM0-4 and XMM7.
+/// Clamp the wide source lanes into XMM0, marking saturated ones in XMM4.
+/// XMM6 holds the upper-bound mask across the second comparison; the compare
+/// recipe uses only XMM0-4 and XMM7.
 fn narrow(
     code: &mut Code,
     operand: &Operand,
@@ -164,6 +165,18 @@ fn narrow(
     target: TargetCpu,
 ) {
     let lane = operand.lane_bytes;
+    if vector_extensions::saturating_narrow(
+        code,
+        lane * 2,
+        [!unsigned_source, !unsigned_result],
+        1,
+        0,
+        Some(4),
+        target,
+    ) {
+        packed(code, Host::MoveAligned, 0, 1);
+        return;
+    }
     let high = if unsigned_result {
         (1u64 << (lane * 8)) - 1
     } else {

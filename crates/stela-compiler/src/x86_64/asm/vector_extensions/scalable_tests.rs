@@ -1,7 +1,7 @@
 //! Streaming SVE and SME extension recipes (VNNI byte dots, GFNI byte and
 //! AVX-512 quadword shifts, AVX-512 integer conversions, table permutes,
-//! quadword extrema and lane compares), compared with the reviewed SSE
-//! recipes on random Z, P, ZA and selector state.
+//! quadword extrema, lane compares and saturating narrows), compared with the
+//! reviewed SSE recipes on random Z, P, ZA and selector state.
 use super::execution::Native;
 use crate::aarch64::floating::features::NumericalFeatures;
 use crate::aarch64::scalable::{
@@ -438,4 +438,40 @@ fn streaming_lane_compares_match_the_sse_recipes() {
         Values::Indices,
         |word, _| !unchanged.contains(&word),
     );
+}
+
+/// llvm-mc encodings: SQXTNB, SQXTNT, UQXTNB, SQXTUNB and SQXTUNT; SQSHRNB,
+/// SQRSHRNB, UQSHRNB, SQSHRUNT, UQRSHRNT, SQRSHRUNB and SQSHRUNB, with B, H
+/// and S results.
+const NARROWS: [u32; 12] = [
+    0x4528_4083,
+    0x4530_4483,
+    0x4560_4883,
+    0x4560_5083,
+    0x4528_5483,
+    0x4579_2083,
+    0x453d_2883,
+    0x4528_3083,
+    0x4530_0483,
+    0x4560_3c83,
+    0x457f_0883,
+    0x452d_0083,
+];
+
+#[test]
+fn streaming_saturating_narrows_match_the_sse_recipes() {
+    // Signed B and H sources keep their single PACKSS or PACKUS.
+    let packs = [
+        0x4528_4083,
+        0x4530_4483,
+        0x4528_5483,
+        0x453d_2883,
+        0x4530_0483,
+        0x452d_0083,
+    ];
+    for values in [Values::Bits, Values::Indices] {
+        compare(&NARROWS, &[TargetCpu::X86_64_V4], values, |word, _| {
+            !packs.contains(&word)
+        });
+    }
 }

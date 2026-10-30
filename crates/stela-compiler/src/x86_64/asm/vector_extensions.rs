@@ -725,6 +725,92 @@ pub(crate) fn test(
     true
 }
 
+/// Saturating narrows of `source_lane_bytes` lanes need AVX-512 VL with BW
+/// for halfword sources (VPMOVSWB) and F for wider ones, the lane compare's
+/// extensions for the saturation mask and SSE4.1 to re-extend.
+pub(crate) fn saturating_narrow_supported(source_lane_bytes: u8, target: TargetCpu) -> bool {
+    matches!(source_lane_bytes, 2 | 4 | 8)
+        && compare_supported(source_lane_bytes, target)
+        && target.supports(TargetCpu::Sse41)
+}
+
+/// Saturate each `source_lane_bytes` lane of `source`, signed or unsigned as
+/// `signed[0]`, to the half-width range that `signed[1]` names, into
+/// consecutive lanes of the low quadword of `destination`, clearing its high
+/// quadword: VPMOVS{WB,DW,QD} or VPMOVUS{WB,DW,QD}, after a signed maximum
+/// with zero for a signed source and unsigned result. With `saturated`, each
+/// source lane of that register is all ones where the result differs from
+/// the source (PMOVSX or PMOVZX back, then VPCMP) and zero elsewhere.
+/// `destination` and `saturated` must differ from `source`. Clobbers K1.
+pub(crate) fn saturating_narrow(
+    code: &mut Code,
+    source_lane_bytes: u8,
+    signed: [bool; 2],
+    destination: u8,
+    source: u8,
+    saturated: Option<u8>,
+    target: TargetCpu,
+) -> bool {
+    if !saturating_narrow_supported(source_lane_bytes, target) {
+        return false;
+    }
+    let [signed_source, signed_result] = signed;
+    assert!(
+        signed_source || !signed_result,
+        "Arm has no unsigned-to-signed narrow"
+    );
+    assert!(
+        destination != source && saturated != Some(source),
+        "the source is read last"
+    );
+    let mut narrowed = source;
+    if signed_source && !signed_result {
+        Host::Xor.register(code, destination, destination, target);
+        match source_lane_bytes {
+            2 => Host::MaxSignedWord.register(code, destination, source, target),
+            4 => Host::MaxSignedDword.register(code, destination, source, target),
+            _ => {
+                quadword_extremum(code, destination, source, true, true, target);
+            }
+        }
+        narrowed = destination;
+    }
+    let opcode = match source_lane_bytes {
+        2 => 0x10,
+        4 => 0x13,
+        _ => 0x15,
+    } + if signed_result { 0x10 } else { 0 };
+    // ModRM.reg names the wide source and r/m the narrow destination.
+    code.asm().evex(
+        masked(Map::M0f38, Pp::Pf3, false, 0, false),
+        opcode,
+        narrowed,
+        0,
+        Rm::Xmm(destination),
+    );
+    if let Some(saturated) = saturated {
+        let extend = match (source_lane_bytes, signed_result) {
+            (2, true) => Host::SignExtendByteToWord,
+            (2, false) => Host::ZeroExtendByteToWord,
+            (4, true) => Host::SignExtendWordToDword,
+            (4, false) => Host::ZeroExtendWordToDword,
+            (_, true) => Host::SignExtendDwordToQword,
+            (_, false) => Host::ZeroExtendDwordToQword,
+        };
+        extend.register(code, saturated, destination, target);
+        compare(
+            code,
+            source_lane_bytes,
+            true,
+            Predicate::NotEqual,
+            saturated,
+            source,
+            target,
+        );
+    }
+    true
+}
+
 /// AVX-512 conversions between S/D lanes and W/X integers: unsigned dwords
 /// need F and VL, quadwords DQ as well. SSE2 already converts signed dwords.
 /// The DIT profile keeps its reviewed recipe.
@@ -1602,6 +1688,133 @@ mod tests {
                 }
                 if sample % 2 == 0 {
                     state.v[2] = state.v[1];
+                }
+                let mut expected = state.clone();
+                baseline.run(&mut expected, &mut ExecutionContext::default());
+                extended.run(&mut state, &mut ExecutionContext::default());
+                assert_eq!(state, expected, "{word:#010x} sample={sample}");
+            }
+        }
+    }
+
+    #[test]
+    fn saturating_narrows_check_each_extension_and_match_gnu_encodings() {
+        let mut code = Code::new();
+        for (lane_bytes, target) in [
+            (2, TargetCpu::Avx512f.with_avx512vl().with_avx512dq()),
+            (8, TargetCpu::X86_64_V4.with_data_independent_timing()),
+            (1, TargetCpu::X86_64_V4),
+        ] {
+            assert!(!saturating_narrow(
+                &mut code,
+                lane_bytes,
+                [true, true],
+                1,
+                0,
+                Some(4),
+                target
+            ));
+        }
+        assert!(code.is_empty());
+        // GNU as: VPMOVSWB xmm1, xmm0; VPMOVUSDW xmm2, xmm0; and VPMOVSQD
+        // xmm1, xmm0, PMOVSXDQ xmm4, xmm1, VPCMPNEQQ k1, xmm4, xmm0 and
+        // VPMOVM2Q xmm4, k1.
+        let target = TargetCpu::X86_64_V4;
+        for (lane_bytes, signed, destination, saturated) in [
+            (2, [true, true], 1, None),
+            (4, [false, false], 2, None),
+            (8, [true, true], 1, Some(4)),
+        ] {
+            assert!(saturating_narrow(
+                &mut code,
+                lane_bytes,
+                signed,
+                destination,
+                0,
+                saturated,
+                target
+            ));
+        }
+        assert_eq!(
+            code.into_bytes(),
+            [
+                0x62, 0xf2, 0x7e, 0x08, 0x20, 0xc1, 0x62, 0xf2, 0x7e, 0x08, 0x13, 0xc2, 0x62, 0xf2,
+                0x7e, 0x08, 0x25, 0xc1, 0x66, 0x0f, 0x38, 0x25, 0xe1, 0x62, 0xf3, 0xdd, 0x08, 0x1f,
+                0xc8, 0x04, 0x62, 0xf2, 0xfe, 0x08, 0x38, 0xe1,
+            ]
+        );
+    }
+
+    #[test]
+    fn saturating_narrows_match_the_sse_recipes() {
+        use crate::{GuestAddress, GuestState, context::ExecutionContext};
+        use alloc::vec::Vec;
+        use execution::Native;
+        if !TargetCpu::detect().supports(TargetCpu::X86_64_V4) {
+            return;
+        }
+        // Lanes at and beyond every B/H/S bound, of each signedness.
+        let bounds: [u64; 12] = [
+            0x00ff_00ff_00ff_00ff,
+            0x0100_0100_0100_0100,
+            0x007f_0080_ff80_ff7f,
+            0x0000_ffff_0001_0000,
+            0x0000_7fff_ffff_8000,
+            0xffff_7fff_0000_8000,
+            0x0000_0000_ffff_ffff,
+            0x0000_0001_0000_0000,
+            0x0000_0000_7fff_ffff,
+            0xffff_ffff_8000_0000,
+            0xffff_ffff_7fff_ffff,
+            0x8000_0000_0000_0000,
+        ];
+        let mut random = 0x9e37_79b9_7f4a_7c15_u64;
+        // SQXTN, UQXTN and SQXTUN on each lane size, their second-part and
+        // scalar forms, and SQSHRN, UQSHRN, SQRSHRUN, SQRSHRN2, UQRSHRN2 and
+        // scalar SQSHRUN.
+        for word in [
+            0x0e21_4823u32,
+            0x2e61_4823,
+            0x2ea1_2823,
+            0x4ea1_4823,
+            0x6e21_4823,
+            0x6e61_2823,
+            0x5e21_4823,
+            0x7ea1_4823,
+            0x7e61_2823,
+            0x0f0d_9423,
+            0x2f11_9423,
+            0x2f39_8c23,
+            0x4f20_9c23,
+            0x6f0f_9c23,
+            0x7f3b_8423,
+        ] {
+            let source: Vec<u8> = [word, 0xd65f03c0]
+                .into_iter()
+                .flat_map(u32::to_le_bytes)
+                .collect();
+            let compile = |target| {
+                crate::testing::leaf_for(&source, GuestAddress(0x1000), target)
+                    .unwrap()
+                    .x86_64_code
+            };
+            let baseline = compile(TargetCpu::X86_64_V3);
+            let extended = compile(TargetCpu::X86_64_V4);
+            assert_ne!(baseline, extended, "{word:#010x} uses VPMOVS or VPMOVUS");
+            let [baseline, extended] = [&baseline, &extended].map(|code| Native::new(code));
+            for sample in 0..48 {
+                let mut state = GuestState::default();
+                for vector in &mut state.v {
+                    for limb in vector {
+                        random ^= random << 13;
+                        random ^= random >> 7;
+                        random ^= random << 17;
+                        *limb = if sample % 2 == 0 {
+                            bounds[(random % bounds.len() as u64) as usize]
+                        } else {
+                            random
+                        };
+                    }
                 }
                 let mut expected = state.clone();
                 baseline.run(&mut expected, &mut ExecutionContext::default());

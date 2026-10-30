@@ -217,10 +217,20 @@ fn saturating_narrow(
         packed(code, Host::MoveAligned, 6, 0);
     } else {
         rounded_right(code, wide, operand.amount, signed_source, round, target);
-        if lane < 4 {
-            saturating_narrow_pack(code, lane, signed_source, unsigned_result, target);
-        } else {
-            saturating_narrow_qword(code, unsigned_result, signed_source, target);
+        if !vector_extensions::saturating_narrow(
+            code,
+            wide,
+            [signed_source, !unsigned_result],
+            6,
+            0,
+            Some(4),
+            target,
+        ) {
+            if lane < 4 {
+                saturating_narrow_pack(code, lane, signed_source, unsigned_result, target);
+            } else {
+                saturating_narrow_qword(code, unsigned_result, signed_source, target);
+            }
         }
     }
     let scalar = operand.bytes == lane;
