@@ -210,6 +210,32 @@ fn real_queried_identity_bounds_capabilities_and_mode_precede_reporting() {
     }
 }
 #[test]
+fn the_protocol_probe_selects_synaptics_by_its_identity_with_the_firmware_profile() {
+    let (explicit, h) = target(true, true);
+    let mut c = Controller::new_probing(
+        Model(h.clone()),
+        Time(h.borrow().time.clone()),
+        explicit.config,
+        Some("PNP: LEN0033 PNP0f13"),
+    )
+    .unwrap();
+    c.initialize().unwrap();
+    let capabilities = c.synaptics_capabilities().unwrap();
+    assert_eq!(
+        capabilities.coordinate_quirk,
+        Some(synaptics::board::Bounds {
+            minimum: (1024, 2258),
+            maximum: (5052, 4832)
+        })
+    );
+    assert!(c.synaptics.as_ref().unwrap().high_rate);
+    assert_eq!(
+        h.borrow().synaptics.as_ref().unwrap().queried[..2],
+        [0, 0],
+        "the probe's identity query, then the engine's own"
+    );
+}
+#[test]
 fn absolute_records_decode_every_field_in_both_formats() {
     for new in [false, true] {
         let (mut c, h) = ready_synaptics(new);

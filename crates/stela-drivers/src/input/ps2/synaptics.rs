@@ -18,7 +18,6 @@ pub mod child;
 mod forcepad;
 pub mod passthrough;
 
-const GET_INFO: u8 = 0xe9;
 const EXTENDED: u32 = 1 << 23;
 const AGM_CAPABILITIES: u32 = (1 << 19) | (1 << 11);
 const FRAME_LIMIT: usize = 32;
@@ -172,6 +171,18 @@ impl Engine {
             queries: Vec::new(),
             query: None,
         }
+    }
+    /// An engine for the touchpad `firmware_id` names: a `PNP:` identifier
+    /// selects its ForcePad and board coordinate profiles.
+    pub(super) fn for_firmware(high_rate: bool, firmware_id: Option<&str>) -> Self {
+        let mut engine = Self::new(high_rate);
+        if let Some(firmware_id) = firmware_id.filter(|id| id.starts_with("PNP: ")) {
+            engine.firmware_id = Some(alloc::string::String::from(firmware_id));
+            if forcepad::matches(firmware_id) {
+                engine.forcepad = Some(forcepad::State::default());
+            }
+        }
+        engine
     }
     pub(super) fn backpressured(&self) -> bool {
         self.frames.len() + self.advanced.len() + self.passthrough.len() >= FRAME_LIMIT
@@ -500,11 +511,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             return Err(ErrorKind::InvalidConfiguration.into());
         }
         let mut controller = Self::new_synaptics(registers, timer, config, high_rate)?;
-        let engine = controller.synaptics.as_mut().unwrap();
-        engine.firmware_id = Some(alloc::string::String::from(firmware_id));
-        if forcepad::matches(firmware_id) {
-            engine.forcepad = Some(forcepad::State::default());
-        }
+        controller.synaptics = Some(Engine::for_firmware(high_rate, Some(firmware_id)));
         Ok(controller)
     }
     pub fn synaptics_capabilities(&self) -> Option<&Capabilities> {
