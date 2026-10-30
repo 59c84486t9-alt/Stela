@@ -38,6 +38,8 @@ mod platform;
 pub mod services;
 #[cfg(feature = "native-acpi")]
 pub mod smbus;
+#[cfg(feature = "native-acpi")]
+pub mod typec;
 use crate::net::wifi::network::Network;
 pub use services::{NativeServices, ServiceError};
 
@@ -123,6 +125,8 @@ pub enum PlatformError {
     #[cfg(feature = "native-acpi")]
     Battery(crate::platform::battery::Error),
     Smbus(crate::bus::smbus::Error),
+    #[cfg(feature = "native-acpi")]
+    Ucsi(crate::usb::typec::ucsi::acpi::attachment::Error),
     /// Finding a device or evaluating its method failed.
     #[cfg(feature = "native-acpi")]
     AcpiMethod(crate::platform::acpi::Error),
@@ -152,6 +156,8 @@ impl fmt::Display for PlatformError {
             #[cfg(feature = "native-acpi")]
             Self::Battery(error) => write!(f, "battery: {error:?}"),
             Self::Smbus(error) => error.fmt(f),
+            #[cfg(feature = "native-acpi")]
+            Self::Ucsi(error) => write!(f, "UCSI: {error:?}"),
             #[cfg(feature = "native-acpi")]
             Self::AcpiMethod(error) => write!(f, "ACPI method: {error:?}"),
         }
@@ -1242,14 +1248,20 @@ pub unsafe fn probe_with_provider(
         services.and_then(|services| services.acpi().map(|session| (services, session)))
     {
         // Before any other device's methods, which may read EC fields.
-        match services.embedded_controller() {
-            Ok(Some(installed)) => devices.owners.push(Box::new(installed)),
+        let ec = match services.embedded_controller() {
+            Ok(Some(installed)) => {
+                devices.owners.push(Box::new(installed.clone()));
+                Some(installed)
+            }
             Ok(None) => power::attach_ec(session, &mut devices),
-            Err(error) => devices.platform_failures.push((
-                String::from("embedded controller"),
-                PlatformError::Native(error),
-            )),
-        }
+            Err(error) => {
+                devices.platform_failures.push((
+                    String::from("embedded controller"),
+                    PlatformError::Native(error),
+                ));
+                None
+            }
+        };
         for address in core::mem::take(&mut smbus_functions) {
             // SAFETY: the mount grants each i801's I/O window to probe.
             match unsafe { smbus::attach(services, session, address, &bridges, handoff.clock) } {
@@ -1273,6 +1285,7 @@ pub unsafe fn probe_with_provider(
         );
         i2c::attach(services, session, handoff.clock, &mut devices);
         power::attach_power(session, &mut devices);
+        typec::attach(services, session, ec.as_ref(), handoff.clock, &mut devices);
     }
     #[cfg(feature = "native-acpi")]
     for address in smbus_functions {

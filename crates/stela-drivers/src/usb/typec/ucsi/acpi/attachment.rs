@@ -56,6 +56,14 @@ unsafe impl<'a, D: Dependency<'a> + ?Sized> Dependency<'a> for Box<D> {
     }
 }
 
+// SAFETY: the receipt pins the installed EC's operation-region handler and
+// its supplier admission, which stay operational while any receipt is kept.
+unsafe impl<'a> Dependency<'a> for crate::platform::ec::capability::Installed<'a> {
+    fn handle(&self) -> Handle<'a> {
+        crate::platform::ec::capability::Installed::handle(self)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
     Acpi(acpi::Error),

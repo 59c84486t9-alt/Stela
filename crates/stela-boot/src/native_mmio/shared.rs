@@ -629,6 +629,12 @@ impl Source {
         Ok(generation)
     }
 
+    /// Whether the final memory map leaves `first..end` to the firmware,
+    /// overlapping no RAM the host allocates.
+    pub(crate) fn firmware_owned(&self, first: u64, end: u64) -> bool {
+        self.platform.wire().firmware_owned(first, end)
+    }
+
     /// Reserve the registers at `span`, which an ACPI device's `_CRS` names,
     /// when the final memory map leaves them outside RAM and they avoid the
     /// local APIC. The permission refuses a span that overlaps another

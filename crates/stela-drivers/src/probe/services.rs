@@ -55,6 +55,9 @@ impl fmt::Display for ServiceError {
 /// and IRQ12 masked at every interrupt controller and no other user of
 /// those ports, and to the I/O window (BAR 4) of each Intel i801 SMBus host
 /// it claims, with no other user than the AML its arbitration hands it to.
+/// Each firmware memory mapping is the one AML reaches the same firmware-owned
+/// RAM through: writable, live in every such context for the program, and
+/// never aliased by a Rust reference.
 pub unsafe trait NativeServices {
     /// Claim the function at `address` as a stopped requester through an owned
     /// mapping of its configuration space.
@@ -128,6 +131,18 @@ pub unsafe trait NativeServices {
         device: &crate::platform::acpi::resources::DeviceResources<'_>,
         ordinal: usize,
     ) -> Result<owned::Resource, ServiceError>;
+
+    /// The mapping AML's SystemMemory regions reach `bytes` of firmware RAM
+    /// at `physical` through, for a mailbox the firmware shares with its
+    /// methods, such as a UCSI `_CRS`, which Linux `ucsi_acpi_probe` maps
+    /// write-back. It lives for the program, as the namespace does; the
+    /// mount refuses a range that overlaps RAM it allocates.
+    #[cfg(feature = "native-acpi")]
+    fn firmware_memory(
+        &self,
+        physical: u64,
+        bytes: usize,
+    ) -> Result<core::ptr::NonNull<u8>, ServiceError>;
 }
 
 /// ACPI hardware IDs of the classes attached through [`NativeServices`].
@@ -223,6 +238,14 @@ pub(crate) mod tests {
         #[cfg(feature = "native-acpi")]
         fn acpi(&self) -> Option<&'static crate::platform::acpi::Session> {
             None
+        }
+        #[cfg(feature = "native-acpi")]
+        fn firmware_memory(
+            &self,
+            _: u64,
+            _: usize,
+        ) -> Result<core::ptr::NonNull<u8>, ServiceError> {
+            Err(ServiceError::Unavailable)
         }
     }
 

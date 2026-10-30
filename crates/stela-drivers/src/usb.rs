@@ -3,8 +3,8 @@
 //! keyboards and pointers ([`hid`]), Bulk-Only and UAS mass storage
 //! ([`storage`]), CDC ECM/NCM and vendor Ethernet adapters ([`cdc`],
 //! [`ethernet`]), Bluetooth HCI transports ([`bluetooth`]) and UAC2 audio
-//! ([`audio`]). [`typec`] holds the UCSI and Type-C mux library, which the
-//! mount does not attach yet.
+//! ([`audio`]). [`typec`] holds the UCSI and Type-C mux library; probe
+//! attaches ACPI UCSI managers from it.
 pub mod audio;
 pub mod bluetooth;
 pub mod cdc;
