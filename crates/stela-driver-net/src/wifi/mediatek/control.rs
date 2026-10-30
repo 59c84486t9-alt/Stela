@@ -2,7 +2,10 @@
 // Copyright (C) 2020-2023 MediaTek Inc.
 //! Source-backed PCIe ownership, WFDMA stop and firmware-state polling. These
 //! are register observations, not a firmware epoch or DMA/IRQ fence.
-use super::registers::{self, BarIo, Registers};
+use super::{
+    identity::Chip,
+    registers::{self, BarIo, Registers},
+};
 
 mod cold_start;
 pub mod dma;
@@ -29,6 +32,9 @@ const MT_WFDMA_NEED_REINIT: u32 = 1 << 1;
 const MT_UWFDMA0_GLO_CFG_EXT1: u32 = 0x7c0242b4;
 const MT_DMASHDL_SW_CONTROL: u32 = 0x7c026004;
 const MT_CONN_ON_LPCTL: u32 = 0x7c060010;
+const MT_HW_BOUND: u32 = 0x70010020;
+const MT_HW_CHIPID: u32 = 0x70010200;
+const MT_HW_REV: u32 = 0x70010204;
 const MT_CONN_ON_MISC: u32 = 0x7c0600f0;
 const DISABLE: u32 = 1 | (1 << 2) | (1 << 15) | (1 << 28) | (1 << 27) | (1 << 21);
 const BUSY: u32 = (1 << 1) | (1 << 3);
@@ -199,6 +205,43 @@ impl<I: BarIo> Control<I> {
             // from the device after each delay, never inferred by time.
             self.clock.delay(1000);
         }
+    }
+    /// `mt792xe_mcu_fw_pmctrl`: hand the function to its firmware, retrying
+    /// the MT_CONN_ON_LPCTL request through at most ten 50 ms polls.
+    pub fn firmware_own(&mut self) -> Result<Observation, Error> {
+        self.guard(false)?;
+        self.driver_owned = false;
+        self.dma_stopped = false;
+        let result = (|| {
+            for attempts in 1..=10 {
+                self.registers.write32(MT_CONN_ON_LPCTL, 1 << 0)?;
+                match self.poll(MT_CONN_ON_LPCTL, 1 << 2, 1 << 2, 50_000) {
+                    Ok(status) => return Ok(status),
+                    Err(Error::Timeout { .. }) if attempts < 10 => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            unreachable!("the final ownership timeout returns above")
+        })();
+        self.finish(result)
+    }
+    /// The registers `mt7925_pci_probe` identifies the chip by once the
+    /// driver owns it: MT_HW_CHIPID, MT_HW_REV and, for MT7921, MT_HW_BOUND,
+    /// raw. The remap window is restored afterwards.
+    pub fn identity_registers(&mut self) -> Result<(u32, u32, Option<u32>), Error> {
+        self.guard(true)?;
+        let result = (|| {
+            let chip = self.registers.read32(MT_HW_CHIPID)?;
+            let revision = self.registers.read32(MT_HW_REV)?;
+            let bound = if self.registers.chip() == Chip::Mt7921 {
+                Some(self.registers.read32(MT_HW_BOUND)?)
+            } else {
+                None
+            };
+            self.registers.restore_remap()?;
+            Ok((chip, revision, bound))
+        })();
+        self.finish(result)
     }
     /// The common MT792xe MT_CONN_ON_LPCTL request retries at most ten 50ms polls. ASPM
     /// requires a minimum 2ms wake delay before each status read.

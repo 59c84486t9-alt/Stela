@@ -7,7 +7,7 @@ use super::{
     acpi::Sar,
     control::{self, Control, mac::MacInitialized, rx_ring, tx_ring},
     firmware::{Prepared, auxiliary::Auxiliary, clc::Inputs as ClcInputs},
-    identity::{Chip, Identity},
+    identity::{Chip, Identity, IdentityError, PciIdentity},
     mailbox::{
         self, Mailbox,
         clc::{Execution, remaining},
@@ -73,6 +73,7 @@ pub enum Error {
     Clc(mailbox::clc::Error),
     Remaining(remaining::Error),
     Codec(super::mcu::init::Error),
+    Identity(IdentityError),
 }
 impl core::fmt::Display for Error {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -80,6 +81,38 @@ impl core::fmt::Display for Error {
     }
 }
 impl core::error::Error for Error {}
+/// The [`Identity`] of the function `pci` names, as `mt7925_pci_probe` reads
+/// it: the firmware, then the driver, owns the function, then its identity
+/// registers are read through the remap window its PCI IDs select. `aspm`
+/// is whether its link enables ASPM.
+///
+/// # Safety
+/// As for [`Controller::new`], before its firmware epoch: the mapping is
+/// this function's exclusively claimed, uncached BAR0, kept by `owner`.
+pub unsafe fn identify(
+    pci: PciIdentity,
+    base: NonNull<u8>,
+    bytes: usize,
+    owner: Arc<dyn core::any::Any>,
+    clock: Clock,
+    aspm: bool,
+) -> Result<Identity, Error> {
+    let chip = pci
+        .chip()
+        .ok_or(Error::Identity(IdentityError::UnsupportedPci(pci)))?;
+    // SAFETY: covered by this function's own safety contract.
+    let io = unsafe { MmioBar::from_owned_window(base, bytes, owner) }.map_err(Error::Register)?;
+    // SAFETY: the chip comes from this function's own PCI IDs.
+    let registers = unsafe { Registers::new(chip, io) };
+    // SAFETY: covered by this function's own safety contract.
+    let mut control = unsafe { Control::new(registers, clock) }.map_err(Error::Control)?;
+    control.firmware_own().map_err(Error::Control)?;
+    control.driver_own(aspm).map_err(Error::Control)?;
+    let (raw_chip, raw_revision, raw_bound) =
+        control.identity_registers().map_err(Error::Control)?;
+    Identity::observed(pci, raw_chip, raw_revision, raw_bound).map_err(Error::Identity)
+}
+
 pub(in crate::wifi::mediatek) struct NativeWindow {
     base: NonNull<u8>,
     bytes: usize,

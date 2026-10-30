@@ -44,6 +44,21 @@ pub struct PciIdentity {
     pub revision: u8,
 }
 
+impl PciIdentity {
+    /// The chip the function's IDs name, before its registers confirm it.
+    pub fn chip(self) -> Option<Chip> {
+        if self.vendor != 0x14c3 {
+            return None;
+        }
+        match self.device {
+            0x7961 | 0x0608 => Some(Chip::Mt7921),
+            0x7922 | 0x0616 => Some(Chip::Mt7922),
+            0x7925 | 0x0717 => Some(Chip::Mt7925),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Identity {
     pub pci: PciIdentity,
@@ -75,18 +90,13 @@ impl Identity {
         raw_revision: u32,
         raw_bound: Option<u32>,
     ) -> Result<Self, IdentityError> {
-        let candidate = if pci.vendor == 0x14c3 {
-            match pci.device {
-                0x7961 | 0x0608 => Some((Chip::Mt7921, 0x7961)),
-                0x7922 | 0x0616 => Some((Chip::Mt7922, 0x7922)),
-                0x7925 | 0x0717 => Some((Chip::Mt7925, 0x7925)),
-                _ => None,
-            }
-        } else {
-            None
-        };
-        let Some((chip, expected)) = candidate else {
+        let Some(chip) = pci.chip() else {
             return Err(IdentityError::UnsupportedPci(pci));
+        };
+        let expected = match chip {
+            Chip::Mt7921 => 0x7961,
+            Chip::Mt7922 => 0x7922,
+            Chip::Mt7925 => 0x7925,
         };
         if raw_chip == u32::MAX || raw_revision == u32::MAX || raw_bound == Some(u32::MAX) {
             return Err(IdentityError::FailedRegisterRead);
@@ -94,7 +104,8 @@ impl Identity {
         if chip == Chip::Mt7921 && raw_bound.is_none() {
             return Err(IdentityError::MissingBoundObservation);
         }
-        if raw_chip != expected
+        // mt76_chip: the low half of MT_HW_CHIPID.
+        if raw_chip & 0xffff != expected
             || (chip == Chip::Mt7921 && raw_bound.is_some_and(|v| v & 0x80 != 0))
         {
             return Err(IdentityError::UnsupportedChip {

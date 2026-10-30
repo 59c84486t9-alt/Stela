@@ -68,6 +68,10 @@ unsafe impl BarIo for Model {
         }
         if offset == 0xe0010 && value == 2 {
             self.attempts += 1;
+        } else if offset == 0xe0010 && value == 1 {
+            // SET_OWN: the firmware takes the function and reports OWN_SYNC.
+            *self.registers.get_mut(&offset).unwrap() |= 4;
+            self.attempts = 0;
         } else {
             self.registers.insert(offset, value);
             if offset == MT_WFDMA0_GLO_CFG && value & DISABLE == 0 {
@@ -159,6 +163,60 @@ fn ownership_retries_bound_attempts_and_never_proceed_on_timeout() {
             assert_eq!(c.driver_own(false), Err(Error::Poisoned));
             assert_eq!(c.registers.test_io().operations.len(), count);
         }
+    }
+}
+#[test]
+fn firmware_ownership_precedes_the_driver_s_and_bounds_its_attempts() {
+    let mut c = setup(Chip::Mt7925, Model::default());
+    assert_eq!(c.firmware_own().unwrap().value & 4, 4);
+    assert_eq!(c.driver_own(false).unwrap().attempts, 1);
+    let mut m = Model {
+        ignore_write: Some(0xe0010),
+        ..Model::default()
+    };
+    m.registers.insert(0xe0010, 0);
+    let mut c = setup(Chip::Mt7925, m);
+    assert!(matches!(
+        c.firmware_own(),
+        Err(Error::Timeout {
+            address: MT_CONN_ON_LPCTL,
+            mask: 4,
+            expected: 4,
+            ..
+        })
+    ));
+    let requests = c.registers.test_io().operations.iter();
+    assert_eq!(requests.filter(|&&op| op == (1, 0xe0010, 1)).count(), 10);
+    assert_eq!(c.driver_own(false), Err(Error::Poisoned));
+}
+#[test]
+fn identity_registers_read_through_the_remap_and_restore_it() {
+    // (chip, selector, window base, selector value written)
+    for (chip, selector, window, remap) in [
+        (Chip::Mt7921, 0xfe24c, 0x40000, 0x1234_7001),
+        (Chip::Mt7925, 0x155024, 0x130000, 0x7001_5678),
+    ] {
+        let mut m = Model::default();
+        m.registers.extend([
+            (selector, 0x1234_5678),
+            (window + 0x200, 0x0001_7961),
+            (window + 0x204, 0x8a10),
+            (window + 0x20, 0x7f),
+        ]);
+        let mut c = setup(chip, m);
+        assert_eq!(c.identity_registers(), Err(Error::NotDriverOwned));
+        c.firmware_own().unwrap();
+        c.driver_own(false).unwrap();
+        let bound = (chip == Chip::Mt7921).then_some(0x7f);
+        assert_eq!(c.identity_registers(), Ok((0x0001_7961, 0x8a10, bound)));
+        let io = c.registers.test_io();
+        assert!(io.operations.contains(&(1, selector, remap)));
+        let restored = if chip == Chip::Mt7925 {
+            0x1234_5678
+        } else {
+            remap
+        };
+        assert_eq!(io.registers[&selector], restored);
     }
 }
 #[test]
