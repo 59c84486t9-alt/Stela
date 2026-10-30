@@ -266,6 +266,15 @@ pub fn texture(capabilities: &Capabilities, descriptor: &TextureDescriptor) -> R
     if cpu_access == CpuAccess::HostImageCopy {
         image.usage |= ImageUsage::HOST_TRANSFER;
     }
+    // Passes with custom sample positions draw only to depth and stencil
+    // attachments made for them.
+    if capabilities.programmable_sample_positions
+        && !description.is_color()
+        && descriptor.sample_count > 1
+        && usage.contains(TextureUsage::RENDER_TARGET)
+    {
+        image.flags |= ImageCreate::SAMPLE_LOCATIONS_COMPATIBLE_DEPTH;
+    }
     let range = full_range(descriptor, description);
     let views = shader_views(
         view_type(descriptor.texture_type),

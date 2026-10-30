@@ -308,6 +308,7 @@ option_set! {
         const ARRAY_2D_COMPATIBLE = 0x20;
         const EXTENDED_USAGE = 0x100;
         const ALIAS = 0x400;
+        const SAMPLE_LOCATIONS_COMPATIBLE_DEPTH = 0x1000;
     }
 }
 

@@ -111,6 +111,28 @@ fn cube_arrays_become_cube_compatible_layered_images() {
 }
 
 #[test]
+fn multisample_depth_targets_take_custom_sample_positions() {
+    let mut depth = descriptor(TextureType::D2Multisample, PixelFormat::Depth32Float);
+    depth.sample_count = 4;
+    depth.usage = TextureUsage::RENDER_TARGET;
+    let compatible = |capabilities: &Capabilities, depth: &TextureDescriptor| {
+        texture(capabilities, depth)
+            .unwrap()
+            .image
+            .flags
+            .contains(ImageCreate::SAMPLE_LOCATIONS_COMPATIBLE_DEPTH)
+    };
+    let mut capabilities = capabilities();
+    assert!(capabilities.programmable_sample_positions);
+    assert!(compatible(&capabilities, &depth));
+    let mut color = depth;
+    color.pixel_format = PixelFormat::Rgba8Unorm;
+    assert!(!compatible(&capabilities, &color));
+    capabilities.programmable_sample_positions = false;
+    assert!(!compatible(&capabilities, &depth));
+}
+
+#[test]
 fn shape_rules_follow_metal() {
     let capabilities = capabilities();
     let invalid = |change: fn(&mut TextureDescriptor)| {
