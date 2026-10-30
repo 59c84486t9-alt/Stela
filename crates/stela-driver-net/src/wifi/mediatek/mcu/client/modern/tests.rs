@@ -632,7 +632,7 @@ fn a_secondary_link_names_the_primary_and_its_own_records() {
     p.wcid = 2;
     p.interface.bss_index = 1;
     let link = link(None);
-    let peer = c.link_peer_request(p, &link).unwrap();
+    let peer = c.clone().with_link(link).peer_request(p, true).unwrap();
     let mld = field(&peer, 8, 0x20);
     assert_eq!(mld[4..10], link.ap.0);
     // Primary 1, secondary 2, WLAN 1; two links: WCID 1 on BSS 0, WCID 2
@@ -642,17 +642,16 @@ fn a_secondary_link_names_the_primary_and_its_own_records() {
     let eht = field(&peer, 8, 0x21);
     assert_eq!((eht[5], eht[7], &eht[10..12]), (0xff, 2, &[0, 0][..]));
     let eml = c
-        .link_peer_request(
-            p,
-            &MldLink {
-                eml: Some(0x0081),
-                ..link
-            },
-        )
+        .clone()
+        .with_link(MldLink {
+            eml: Some(0x0081),
+            ..link
+        })
+        .peer_request(p, true)
         .unwrap();
     let eht = field(&eml, 8, 0x21);
     assert_eq!((eht[7], &eht[10..12]), (0, &[0x81, 0][..]));
-    let bss = c.link_bss_request(p, &link, true).unwrap();
+    let bss = c.clone().with_link(link).bss_request(p, true).unwrap();
     let m = field(&bss, 4, 26);
     assert_eq!((m[4], m[5], m[13], m[14]), (0, 33, 1, 0));
     assert_eq!(m[6..12], link.local.0);

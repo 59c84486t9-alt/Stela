@@ -417,13 +417,20 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             mbssid_indicator,
             mbssid_index,
         };
-        let wire = wire::modern::Configuration::new(
+        let mut wire = wire::modern::Configuration::new(
             p,
             context.negotiated().clone(),
             operation,
             *actual.he_source_maps(),
         )
         .map_err(Error::Codec)?;
+        // The setup link runs where its authentication bound the interface.
+        if let Some(affiliation) = context.affiliation() {
+            if p.interface.address != affiliation.local {
+                return Err(Error::WrongProfile);
+            }
+            wire = wire.with_link(Self::mld_link(affiliation, p));
+        }
         let mut commands = Vec::new();
         commands.try_reserve_exact(7).map_err(|_| Error::NoMemory)?;
         commands.push((

@@ -193,3 +193,141 @@ fn an_sae_exchange_associates_like_ieee80211_mgd_assoc() {
     assert!(link.carrier());
     stop(&mut link, &model);
 }
+
+/// An AP MLD's association on its setup link alone, as mac80211 makes one
+/// when no other link is requested: SAE and the association run on the
+/// link's address, and the BSS and AP records name both MLDs, as
+/// `mt7925_mcu_bss_mld_tlv` and `mt7925_mcu_sta_mld_tlv` write them.
+#[test]
+fn an_ap_mld_association_names_both_mlds_in_its_records() {
+    use crate::wifi::station::{
+        multi_link::{Affiliation, Mld, Setup},
+        wire::multi_link::Basic,
+    };
+    const AP_MLD: Mac = Mac([2, 9, 9, 9, 9, 9]);
+    const SETUP_LINK: Mac = Mac([2, 0xa, 0, 0, 0, 1]);
+    let to_link = |subtype, body: &[u8]| {
+        let mut frame = response(subtype, body);
+        frame[4..10].copy_from_slice(&SETUP_LINK.0);
+        frame
+    };
+    let ap_mld = |link_id| {
+        Basic {
+            address: AP_MLD,
+            link_id,
+            mld_capabilities: link_id.map(|_| 0),
+            ..Basic::default()
+        }
+        .encode()
+    };
+    let affiliation = Affiliation {
+        mld: Mld {
+            local: LOCAL,
+            ap: AP_MLD,
+        },
+        link_id: 0,
+        local: SETUP_LINK,
+    };
+    let (client, model) = setup_modern();
+    let (mut join, bss) = inputs_akm(&client, 8);
+    join.request = join
+        .request
+        .with_multi_link(Setup {
+            association: affiliation,
+            mld_capabilities: 0,
+            eml_capabilities: 0,
+            links: Vec::new(),
+        })
+        .unwrap();
+    let client = ManagedClient::new(client, country(), Environment::Indoor).unwrap();
+    let mut link = ManagedLink::new(
+        client,
+        Provider(
+            Arc::new(AtomicUsize::new(0)),
+            core::sync::atomic::AtomicBool::new(false),
+        ),
+    )
+    .unwrap();
+    link.begin_scan(
+        scan::Request::new(vec![CHANNEL], vec![], vec![]).unwrap(),
+        1_000_000,
+    )
+    .unwrap();
+    let mut body = vec![0; 8];
+    body.extend_from_slice(&100u16.to_le_bytes());
+    body.extend_from_slice(&0x11u16.to_le_bytes());
+    body.extend_from_slice(&bss.elements);
+    let mut beacon = response(0x80, &body);
+    beacon[4..10].copy_from_slice(&Mac::BROADCAST.0);
+    incoming(&model, &beacon, None, false);
+    link.service().unwrap();
+    let handle = link.bss().next().unwrap().0;
+    done(&model);
+    link.service().unwrap();
+    // SAFETY: complete source-model terminal scan and old-user drain.
+    unsafe { link.retire_scan_after_drain() }.unwrap();
+    let session = link
+        .begin_external_authentication(handle, profile(), Some(affiliation), 2_000_000)
+        .unwrap();
+    for (transaction, status, data) in [(1, 126, &[19, 0][..]), (2, 0, &[1][..])] {
+        link.transmit_external_authentication(
+            &session,
+            crate::wifi::station::external::Frame {
+                transaction,
+                status,
+                data,
+            },
+        )
+        .unwrap();
+        finish_tx(&model);
+        link.service().unwrap();
+        let mut frame = vec![3, 0, transaction as u8, 0, status as u8, 0];
+        frame.extend_from_slice(data);
+        frame.extend(ap_mld(None));
+        incoming(&model, &to_link(0xb0, &frame), None, false);
+        link.service().unwrap();
+    }
+    assert!(link.station().external_authenticated());
+    drop(drain_notices(&mut link));
+    link.associate_external(&session, handle, join).unwrap();
+    let request = &finish_tx(&model)[0];
+    assert_eq!(request[10..16], SETUP_LINK.0);
+    link.service().unwrap();
+    let mut assoc = vec![0x11, 0, 0, 0, 1, 0xc0];
+    assoc.extend_from_slice(&bss.elements);
+    assoc.extend(ap_mld(Some(0)));
+    incoming(&model, &to_link(0x10, &assoc), None, false);
+    link.service().unwrap();
+    assert_eq!(link.phase(), Phase::AwaitingModernAdmission);
+    let before = model.response.lock().unwrap().client_commands.len();
+    link.configure().unwrap();
+    let commands = model.response.lock().unwrap().client_commands[before..].to_vec();
+    let record = |command: u8, header: usize, tag: u16| {
+        commands
+            .iter()
+            .filter(|packet| packet[34] == command)
+            .find_map(|packet| {
+                let mut rest = &packet[48 + header..];
+                while rest.len() >= 4 {
+                    let length = usize::from(u16::from_le_bytes([rest[2], rest[3]]));
+                    if rest[..2] == tag.to_le_bytes() {
+                        return Some(rest[..length].to_vec());
+                    }
+                    rest = &rest[length..];
+                }
+                None
+            })
+            .unwrap()
+    };
+    // UNI_BSS_INFO_MLD: link 0 of the group of BSS 0, own MLD 32, the
+    // station MLD's address.
+    let bss = record(2, 4, 26);
+    assert_eq!(
+        (bss[4], bss[5], &bss[6..12], bss[13]),
+        (0, 32, &LOCAL.0[..], 0)
+    );
+    // STA_REC_MLD names the AP MLD with the setup link's WCID 1 alone.
+    let peer = record(3, 8, 0x20);
+    assert_eq!((&peer[4..10], peer[16]), (&AP_MLD.0[..], 1));
+    stop(&mut link, &model);
+}
