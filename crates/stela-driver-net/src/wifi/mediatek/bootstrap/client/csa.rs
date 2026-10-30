@@ -157,13 +157,15 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
     /// A Spectrum Management or (Protected Dual of) Public channel switch
     /// action frame from the current AP, consumed as mac80211's MLME does.
     pub(super) fn channel_switch_action(s: &mut Owned<I, Q, C>, frame: &Mpdu, body: &[u8]) -> bool {
-        let h = frame.header();
         let Some(p) = s.profile else {
             return false;
         };
+        let frame = Self::translated(s, frame);
+        let h = frame.header();
+        let (_, peer) = Self::association_addresses(s, p);
         if h.control & 0x00fc != 0x00d0
-            || h.transmitter != Some(p.peer)
-            || frame.bytes().get(16..22) != Some(p.peer.0.as_slice())
+            || h.transmitter != Some(peer)
+            || frame.bytes().get(16..22) != Some(peer.0.as_slice())
         {
             return false;
         }

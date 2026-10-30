@@ -169,7 +169,8 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
     /// The receive handlers from `ieee80211_rx_h_action` through
     /// `ieee80211_rx_h_action_return` for an unprotected action frame.
     pub(super) fn receive_action(s: &mut Owned<I, Q, C>, frame: &Mpdu) -> Result<Receive, Error> {
-        Self::receive_plain_action(s, frame, frame.bytes())
+        let frame = Self::translated(s, frame);
+        Self::receive_plain_action(s, &frame, frame.bytes())
     }
 
     /// `receive_action` for an action frame a PMF association authenticated,
@@ -199,7 +200,8 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         let Some(&category) = bytes.get(24) else {
             return Ok(Receive::Done);
         };
-        let ap = h.transmitter == Some(p.peer);
+        let (local, peer) = Self::association_addresses(s, p);
+        let ap = h.transmitter == Some(peer);
         if !ap && !matches!(category, SPECTRUM_MANAGEMENT | PUBLIC | SELF_PROTECTED) {
             return Ok(Receive::Done);
         }
@@ -212,7 +214,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         let verdict = kernel(
             bytes,
             ap,
-            bytes.get(16..22) == Some(p.peer.0.as_slice()),
+            bytes.get(16..22) == Some(peer.0.as_slice()),
             frame.radio.band == wifi::Band::Ghz5,
             negotiated.ht.as_ref().map(|ht| ht.capability),
             negotiated.he.is_some(),
@@ -232,7 +234,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 if reply.try_reserve_exact(CODED + 6).is_ok() {
                     reply.extend_from_slice(&[0xd0, 0, 0, 0]);
                     reply.extend_from_slice(&bytes[10..16]);
-                    reply.extend_from_slice(&p.interface.address.0);
+                    reply.extend_from_slice(&local.0);
                     reply.extend_from_slice(&bytes[16..22]);
                     reply.extend_from_slice(&[0, 0, SPECTRUM_MANAGEMENT, 2, bytes[26], 39, 3]);
                     reply.extend_from_slice(&[bytes[29], 1 << 2, bytes[31]]);
@@ -253,9 +255,9 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         }
         // ieee80211_rx_h_action_post_userspace
         if category == SA_QUERY && bytes.get(25) == Some(&0) {
-            if h.receiver == p.interface.address
+            if h.receiver == local
                 && ap
-                && bytes.get(16..22) == Some(p.peer.0.as_slice())
+                && bytes.get(16..22) == Some(peer.0.as_slice())
                 && bytes.len() >= CODED + 2
             {
                 if protect {
@@ -264,9 +266,9 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 let mut reply = Vec::new();
                 if reply.try_reserve_exact(CODED + 2).is_ok() {
                     reply.extend_from_slice(&[0xd0, 0, 0, 0]);
-                    reply.extend_from_slice(&p.peer.0);
-                    reply.extend_from_slice(&p.interface.address.0);
-                    reply.extend_from_slice(&p.peer.0);
+                    reply.extend_from_slice(&peer.0);
+                    reply.extend_from_slice(&local.0);
+                    reply.extend_from_slice(&peer.0);
                     reply.extend_from_slice(&[0, 0, SA_QUERY, 1, bytes[26], bytes[27]]);
                     Self::queue_reply(s, reply);
                 }
@@ -285,7 +287,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             reply.extend_from_slice(bytes);
             reply[24] |= 0x80;
             reply.copy_within(10..16, 4);
-            reply[10..16].copy_from_slice(&p.interface.address.0);
+            reply[10..16].copy_from_slice(&local.0);
             Self::queue_reply(s, reply);
         }
         Ok(Receive::Done)

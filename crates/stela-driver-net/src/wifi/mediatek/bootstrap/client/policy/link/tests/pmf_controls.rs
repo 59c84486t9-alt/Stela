@@ -562,6 +562,25 @@ fn an_ap_mld_association_adds_its_other_link_on_an_interface_of_its_own() {
         ]
     );
     assert!(link.carrier());
+    // The AP MLD's protected ADDBA request for TID 0 on the setup link starts
+    // a session on both links' AP WCIDs, as mt7925_mcu_uni_rx_ba programs it.
+    let before = model.response.lock().unwrap().client_commands.len();
+    let mut addba = response(0x40d0, &[3, 0, 1, 0x02, 0x10, 0, 0, 0x10, 0]);
+    addba[4..10].copy_from_slice(&SETUP_LINK.0);
+    incoming(&model, &addba, Some((1, 0, 1)), false);
+    for _ in 0..4 {
+        link.service().unwrap();
+        finish_tx(&model);
+    }
+    let commands = model.response.lock().unwrap().client_commands[before..].to_vec();
+    let sessions = records(&commands, 3, 8, 6);
+    assert_eq!(sessions.len(), 2);
+    let wcids: Vec<_> = commands
+        .iter()
+        .filter(|packet| packet[34] == 3 && packet.get(56..58) == Some(&[6, 0]))
+        .map(|packet| (packet[48], packet[49]))
+        .collect();
+    assert_eq!(wcids, [(0, 1), (1, 2)]);
     let before = model.response.lock().unwrap().client_commands.len();
     depart(&mut link, &model);
     let commands = model.response.lock().unwrap().client_commands[before..].to_vec();

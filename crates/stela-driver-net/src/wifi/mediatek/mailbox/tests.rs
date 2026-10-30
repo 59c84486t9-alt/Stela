@@ -513,7 +513,8 @@ unsafe impl QueueIo for DeviceIo {
                 }
                 if model.client_execution {
                     model.client_commands.push(packet.clone());
-                    if command == 2 && packet[52] == 0 && packet.len() > 84 {
+                    // The model transmits on BSS 0, an MLD association's setup link.
+                    if command == 2 && packet[48] == 0 && packet[52] == 0 && packet.len() > 84 {
                         let mut rest = &packet[52..];
                         while !rest.is_empty() {
                             let len = u16::from_le_bytes(rest[2..4].try_into().unwrap()) as usize;

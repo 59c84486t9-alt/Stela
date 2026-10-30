@@ -417,6 +417,43 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         })
     }
 
+    /// The station's and the AP's addresses in the association's frames as
+    /// `translated` gives them: the MLDs' for an MLD association, else the
+    /// interface's and the BSS's of `p`.
+    pub(super) fn association_addresses(
+        s: &Owned<I, Q, C>,
+        p: Profile,
+    ) -> (crate::Mac, crate::Mac) {
+        s.station
+            .association_context()
+            .and_then(|context| context.affiliation())
+            .map_or((p.interface.address, p.peer), |affiliation| {
+                (affiliation.mld.local, affiliation.mld.ap)
+            })
+    }
+
+    /// `frame` as `ieee80211_prepare_and_rx_handle` hands it on: an MLD
+    /// association's unicast frame from a link's AP names the MLDs.
+    pub(super) fn translated<'a>(s: &Owned<I, Q, C>, frame: &'a Mpdu) -> Cow<'a, Mpdu> {
+        s.station
+            .mld_view(frame)
+            .map_or(Cow::Borrowed(frame), |(view, _)| view)
+    }
+
+    /// `record`'s body for each link of the association, the setup link's
+    /// first, as `mt7925_mcu_uni_rx_ba` and `mt7925_mcu_uni_tx_ba` program a
+    /// block ack session on every link's AP WCID.
+    pub(super) fn on_every_link(
+        s: &Owned<I, Q, C>,
+        record: impl Fn(Profile) -> Result<Vec<u8>, wire::Error>,
+    ) -> Result<Vec<Vec<u8>>, Error> {
+        let p = s.profile.ok_or(Error::WrongProfile)?;
+        [p].into_iter()
+            .chain(s.links.iter().map(|link| link.profile))
+            .map(|p| record(p).map_err(Error::Codec))
+            .collect()
+    }
+
     /// The AP's WCID on each link of the association whose setup link `p`
     /// configures, the setup link's first.
     pub(super) fn peer_wcids(s: &Owned<I, Q, C>, p: Profile) -> Vec<u16> {
