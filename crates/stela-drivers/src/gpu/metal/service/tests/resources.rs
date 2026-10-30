@@ -1,10 +1,8 @@
-use super::{Memory, TestService, call, connect, service_on, status};
+use super::{IDENTITY, Memory, TestService, call, connect, options, service_on, status, texture};
 use crate::gpu::metal::{
     abi::{
-        CompareFunction, CpuCacheMode, HazardTrackingMode, HeapType, ResourceOptions,
-        SamplerAddressMode, SamplerBorderColor, SamplerMinMagFilter, SamplerMipFilter,
-        SamplerReductionMode, SparsePageSize, StorageMode, SwizzleChannels, TextureType,
-        TextureUsage,
+        CompareFunction, HeapType, SamplerAddressMode, SamplerBorderColor, SamplerMinMagFilter,
+        SamplerMipFilter, SamplerReductionMode, SparsePageSize, StorageMode, TextureType,
     },
     device::fixture::MockBackend,
     pixel_format::PixelFormat,
@@ -15,43 +13,11 @@ use crate::gpu::metal::{
             HeapDescriptorRecord, HeapUsageRequest, HeapUsageResponse, NewBufferRequest,
             NewHeapBufferRequest, NewTextureViewRequest, Operation, RegionRecord,
             SamplerDescriptorRecord, SamplerResponse, SizeAndAlignRecord, Status,
-            TextureBytesRequest, TextureDescriptorRecord, TextureResponse,
+            TextureBytesRequest, TextureResponse,
         },
     },
 };
 use core::num::NonZeroU64;
-
-fn options(storage_mode: StorageMode) -> u64 {
-    ResourceOptions {
-        cpu_cache_mode: CpuCacheMode::DefaultCache,
-        storage_mode,
-        hazard_tracking_mode: HazardTrackingMode::Default,
-    }
-    .raw()
-}
-
-const IDENTITY: [u8; 4] = [2, 3, 4, 5];
-
-fn texture(storage_mode: StorageMode) -> TextureDescriptorRecord {
-    assert_eq!(
-        SwizzleChannels::IDENTITY.0.map(|swizzle| swizzle.raw()),
-        IDENTITY
-    );
-    TextureDescriptorRecord {
-        texture_type: TextureType::D2.raw(),
-        pixel_format: PixelFormat::Rgba8Unorm.raw(),
-        width: 8,
-        height: 4,
-        depth: 1,
-        mipmap_level_count: 1,
-        sample_count: 1,
-        array_length: 1,
-        options: options(storage_mode),
-        usage: TextureUsage::SHADER_READ.bits(),
-        swizzle: IDENTITY,
-        reserved: 0,
-    }
-}
 
 fn release(service: &mut TestService, connection: NonZeroU64, handle: u64) -> Status {
     status(call::<_, Empty>(

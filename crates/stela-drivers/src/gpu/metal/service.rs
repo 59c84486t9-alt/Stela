@@ -13,6 +13,7 @@
 //! refused, and closing a connection releases what it still holds, newest
 //! first, so views and aliases go before the resources under them.
 use super::{
+    command_buffer::blit::Region,
     device::{
         BufferId, ComputePipelineId, CounterBufferId, Device, EventId, FunctionId, HeapId,
         LibraryId, RenderPipelineId, SamplerId, TextureId,
@@ -38,6 +39,16 @@ pub mod wire;
 /// A decoded value, or the value's name when it is not one.
 fn known<T>(value: Option<T>, name: &'static str) -> Result<T, Fault> {
     value.ok_or(Fault::malformed(name))
+}
+
+/// `MTLRegion` of one slice and level.
+fn region(record: &wire::RegionRecord) -> Region {
+    Region {
+        slice: record.slice,
+        level: record.level,
+        origin: record.origin,
+        size: record.size,
+    }
 }
 
 fn boolean(raw: u32) -> Result<bool, Fault> {

@@ -1,6 +1,6 @@
 //! Buffers, textures, samplers and heaps.
 use super::{
-    Call, Object, Service, boolean, known,
+    Call, Object, Service, boolean, known, region,
     wire::{
         AUTOMATIC, BufferRangeRequest, BufferResponse, Empty, Fault, Handle, HeapBufferSizeRequest,
         HeapDescriptorRecord, HeapUsageRequest, HeapUsageResponse, NewBufferRequest,
@@ -15,7 +15,6 @@ use crate::gpu::metal::{
         SamplerMinMagFilter, SamplerMipFilter, SamplerReductionMode, SparsePageSize,
         SwizzleChannels, TextureSwizzle, TextureType, TextureUsage,
     },
-    command_buffer::blit::Region,
     device::{BufferId, Device, HeapId, TextureId, resources::Strides},
     error::Error,
     heap::{HeapDescriptor, SizeAndAlign},
@@ -85,7 +84,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         let texture = self.object::<TextureId>(call.connection, request.texture)?;
         let bytes = call.memory.read(request.bytes)?;
         self.device
-            .replace_region(texture, &region(&request), bytes, strides(&request))?;
+            .replace_region(texture, &region(&request.region), bytes, strides(&request))?;
         call.reply(&Empty {})
     }
 
@@ -93,8 +92,12 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         let request: TextureBytesRequest = call.request()?;
         let texture = self.object::<TextureId>(call.connection, request.texture)?;
         let mut bytes = call.memory.read(request.bytes)?.to_vec();
-        self.device
-            .get_bytes(texture, &region(&request), &mut bytes, strides(&request))?;
+        self.device.get_bytes(
+            texture,
+            &region(&request.region),
+            &mut bytes,
+            strides(&request),
+        )?;
         call.memory.write(request.bytes, &bytes)?;
         call.reply(&Empty {})
     }
@@ -319,16 +322,6 @@ fn sampler_descriptor(record: &SamplerDescriptorRecord) -> Result<SamplerDescrip
             "compare function",
         )?,
     })
-}
-
-fn region(request: &TextureBytesRequest) -> Region {
-    let region = &request.region;
-    Region {
-        slice: region.slice,
-        level: region.level,
-        origin: region.origin,
-        size: region.size,
-    }
 }
 
 fn strides(request: &TextureBytesRequest) -> Strides {

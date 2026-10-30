@@ -5,8 +5,9 @@
 //! Commands keep Metal's encoding rules: one encoder at a time, opened by
 //! its `Begin*` command and closed by `EndEncoding`. Handles name objects of
 //! the committing connection, zero for nil; sizes are `MTLSize`s and
-//! origins `MTLOrigin`s.
-use super::{Record, Span};
+//! origins `MTLOrigin`s. Commands taking a list (viewports, scissor
+//! rectangles, view mappings) carry it as their data.
+use super::{Record, RegionRecord, Span};
 
 records! {
     /// `commit` of the command buffer `commands` encode.
@@ -121,14 +122,6 @@ records! {
         pub size: u64,
     }
 
-    /// A region of one slice and mipmap level of a texture.
-    pub struct RegionRecord {
-        pub slice: u64,
-        pub level: u64,
-        pub origin: [u64; 3],
-        pub size: [u64; 3],
-    }
-
     /// Texel data in a buffer at Metal's row and image strides; zero
     /// `bytes_per_image` for a single image.
     pub struct BufferLayoutRecord {
@@ -197,6 +190,314 @@ records! {
         pub texture: u64,
         pub slice: u64,
         pub level: u64,
+    }
+
+    /// An attachment of a render pass: its texture (zero for none), the
+    /// slice, level and depth plane it renders to, those of its resolve
+    /// texture (zero for none), and its actions.
+    pub struct PassAttachmentRecord {
+        pub texture: u64,
+        pub level: u64,
+        pub slice: u64,
+        pub depth_plane: u64,
+        pub resolve_texture: u64,
+        pub resolve_level: u64,
+        pub resolve_slice: u64,
+        pub resolve_depth_plane: u64,
+        pub load_action: u64,
+        pub store_action: u64,
+        pub store_action_options: u64,
+    }
+
+    /// `MTLRenderPassColorAttachmentDescriptor`.
+    pub struct PassColorRecord {
+        pub attachment: PassAttachmentRecord,
+        pub clear_color: [f64; 4],
+    }
+
+    /// `MTLRenderPassDepthAttachmentDescriptor`.
+    pub struct PassDepthRecord {
+        pub attachment: PassAttachmentRecord,
+        pub clear_depth: f64,
+        pub resolve_filter: u64,
+    }
+
+    /// `MTLRenderPassStencilAttachmentDescriptor`.
+    pub struct PassStencilRecord {
+        pub attachment: PassAttachmentRecord,
+        pub clear_stencil: u32,
+        pub reserved: u32,
+        pub resolve_filter: u64,
+    }
+
+    /// `renderCommandEncoderWithDescriptor:`; `sample_position_count`
+    /// `[f32; 2]` sample positions follow, then `counter_sample_count`
+    /// `CounterSampleRecord`s. Tile memory is any nonzero imageblock
+    /// sample length, threadgroup memory length or tile size.
+    pub struct BeginRender {
+        pub color_attachments: [PassColorRecord; 8],
+        pub depth_attachment: PassDepthRecord,
+        pub stencil_attachment: PassStencilRecord,
+        pub visibility_result_buffer: u64,
+        pub render_target_array_length: u64,
+        pub render_target_width: u64,
+        pub render_target_height: u64,
+        pub default_raster_sample_count: u64,
+        pub tile_memory: u32,
+        pub rasterization_rate_map: u32,
+        pub sample_position_count: u32,
+        pub counter_sample_count: u32,
+    }
+
+    /// A sample a pass writes at one of its boundaries
+    /// (`sampleBufferAttachments`): a `PassBoundaryCode`.
+    pub struct CounterSampleRecord {
+        pub buffer: u64,
+        pub index: u64,
+        pub boundary: u64,
+    }
+
+    /// A render stage's binding: `stage` is one `MTLRenderStages` bit.
+    pub struct StageBuffer {
+        pub stage: u64,
+        pub buffer: u64,
+        pub offset: u64,
+        pub index: u64,
+    }
+
+    /// `set*BufferOffset:atIndex:` of a render stage.
+    pub struct StageBufferOffset {
+        pub stage: u64,
+        pub offset: u64,
+        pub index: u64,
+    }
+
+    /// `set*Bytes:length:atIndex:` of a render stage; the bytes follow.
+    pub struct StageBytes {
+        pub stage: u64,
+        pub index: u64,
+    }
+
+    /// `set*Texture:atIndex:` of a render stage.
+    pub struct StageTexture {
+        pub stage: u64,
+        pub texture: u64,
+        pub index: u64,
+    }
+
+    /// `set*SamplerState:atIndex:` of a render stage, or with
+    /// `lodMinClamp:lodMaxClamp:` when `clamped`.
+    pub struct StageSampler {
+        pub stage: u64,
+        pub sampler: u64,
+        pub index: u64,
+        pub clamped: u32,
+        pub lod_min: f32,
+        pub lod_max: f32,
+        pub reserved: u32,
+    }
+
+    /// `setVertexBuffer:offset:attributeStride:atIndex:`.
+    pub struct VertexBufferStride {
+        pub buffer: u64,
+        pub offset: u64,
+        pub stride: u64,
+        pub index: u64,
+    }
+
+    /// `MTLViewport`.
+    pub struct ViewportRecord {
+        pub origin_x: f64,
+        pub origin_y: f64,
+        pub width: f64,
+        pub height: f64,
+        pub znear: f64,
+        pub zfar: f64,
+    }
+
+    /// `MTLScissorRect`.
+    pub struct ScissorRecord {
+        pub x: u64,
+        pub y: u64,
+        pub width: u64,
+        pub height: u64,
+    }
+
+    /// One raw value: a cull mode, winding, fill mode, clip mode or store
+    /// action.
+    pub struct Mode {
+        pub mode: u64,
+    }
+
+    /// `setDepthBias:slopeScale:clamp:`.
+    pub struct DepthBias {
+        pub constant: f32,
+        pub slope: f32,
+        pub clamp: f32,
+        pub reserved: u32,
+    }
+
+    /// `MTLStencilDescriptor`.
+    pub struct StencilRecord {
+        pub compare_function: u64,
+        pub stencil_failure_operation: u64,
+        pub depth_failure_operation: u64,
+        pub depth_stencil_pass_operation: u64,
+        pub read_mask: u32,
+        pub write_mask: u32,
+    }
+
+    /// `setDepthStencilState:` of a state made from this
+    /// `MTLDepthStencilDescriptor`; nil is the default descriptor.
+    pub struct DepthStencilRecord {
+        pub depth_compare_function: u64,
+        pub depth_write_enabled: u32,
+        pub reserved: u32,
+        pub front_face_stencil: StencilRecord,
+        pub back_face_stencil: StencilRecord,
+    }
+
+    /// `setStencilFrontReferenceValue:backReferenceValue:`.
+    pub struct StencilReference {
+        pub front: u32,
+        pub back: u32,
+    }
+
+    /// `setBlendColorRed:green:blue:alpha:`.
+    pub struct BlendColor {
+        pub color: [f32; 4],
+    }
+
+    /// `MTLVertexAmplificationViewMapping`.
+    pub struct ViewMappingRecord {
+        pub viewport_array_index_offset: u32,
+        pub render_target_array_index_offset: u32,
+    }
+
+    /// `setVisibilityResultMode:offset:`.
+    pub struct VisibilityMode {
+        pub mode: u64,
+        pub offset: u64,
+    }
+
+    /// `setColorStoreAction:atIndex:`.
+    pub struct ColorStoreAction {
+        pub action: u64,
+        pub index: u64,
+    }
+
+    /// `memoryBarrierWithScope:afterStages:beforeStages:`.
+    pub struct RenderBarrier {
+        pub scope: u64,
+        pub after: u64,
+        pub before: u64,
+    }
+
+    /// `drawPrimitives:vertexStart:vertexCount:instanceCount:baseInstance:`.
+    pub struct DrawPrimitives {
+        pub primitive: u64,
+        pub vertex_start: u64,
+        pub vertex_count: u64,
+        pub instance_count: u64,
+        pub base_instance: u64,
+    }
+
+    /// `drawIndexedPrimitives:indexCount:indexType:indexBuffer:
+    /// indexBufferOffset:instanceCount:baseVertex:baseInstance:`.
+    pub struct DrawIndexed {
+        pub primitive: u64,
+        pub index_count: u64,
+        pub index_type: u64,
+        pub index_buffer: u64,
+        pub index_buffer_offset: u64,
+        pub instance_count: u64,
+        pub base_vertex: i64,
+        pub base_instance: u64,
+    }
+
+    /// `drawPrimitives:indirectBuffer:indirectBufferOffset:`.
+    pub struct DrawIndirect {
+        pub primitive: u64,
+        pub buffer: u64,
+        pub offset: u64,
+    }
+
+    /// `drawIndexedPrimitives:indexType:indexBuffer:indexBufferOffset:
+    /// indirectBuffer:indirectBufferOffset:`.
+    pub struct DrawIndexedIndirect {
+        pub primitive: u64,
+        pub index_type: u64,
+        pub index_buffer: u64,
+        pub index_buffer_offset: u64,
+        pub buffer: u64,
+        pub offset: u64,
+    }
+
+    /// `setTessellationFactorBuffer:offset:instanceStride:`.
+    pub struct FactorBuffer {
+        pub buffer: u64,
+        pub offset: u64,
+        pub instance_stride: u64,
+    }
+
+    /// `setTessellationFactorScale:`.
+    pub struct FactorScale {
+        pub scale: f32,
+        pub reserved: u32,
+    }
+
+    /// The patches a patch draw reads: its control points per patch, and
+    /// its patch index buffer and control point index buffer (zero for
+    /// none) with their offsets.
+    pub struct PatchSourceRecord {
+        pub control_points: u64,
+        pub patch_index_buffer: u64,
+        pub patch_index_offset: u64,
+        pub control_point_index_buffer: u64,
+        pub control_point_index_offset: u64,
+    }
+
+    /// `drawPatches:patchStart:patchCount:…` and `drawIndexedPatches:…`.
+    pub struct DrawPatches {
+        pub source: PatchSourceRecord,
+        pub patch_start: u64,
+        pub patch_count: u64,
+        pub instance_count: u64,
+        pub base_instance: u64,
+    }
+
+    /// `drawPatches:…indirectBuffer:indirectBufferOffset:` and its indexed
+    /// form.
+    pub struct DrawPatchesIndirect {
+        pub source: PatchSourceRecord,
+        pub buffer: u64,
+        pub offset: u64,
+    }
+
+    /// `drawMeshThreadgroups:…`, whose `size` counts threadgroups, and
+    /// `drawMeshThreads:…`, whose `size` counts threads.
+    pub struct DrawMesh {
+        pub size: [u64; 3],
+        pub object_threads: [u64; 3],
+        pub mesh_threads: [u64; 3],
+    }
+
+    /// `drawMeshThreadgroupsWithIndirectBuffer:…`.
+    pub struct DrawMeshIndirect {
+        pub buffer: u64,
+        pub offset: u64,
+        pub object_threads: [u64; 3],
+        pub mesh_threads: [u64; 3],
+    }
+}
+
+raw_enum! {
+    /// Where a pass writes a counter sample.
+    pub enum PassBoundaryCode: u64 {
+        StartOfVertex = 0,
+        EndOfVertex = 1,
+        StartOfFragment = 2,
+        EndOfFragment = 3,
     }
 }
 
@@ -272,12 +573,89 @@ raw_enum! {
     }
 }
 
+raw_enum! {
+    /// Commands of `MTLRenderCommandEncoder`.
+    pub enum RenderCode: u32 {
+        /// `BeginRender` and its sample positions and counter samples.
+        Begin = 0x0301,
+        /// `SetPipeline`.
+        SetPipeline = 0x0302,
+        /// `StageBuffer`.
+        SetBuffer = 0x0303,
+        /// `StageBufferOffset`.
+        SetBufferOffset = 0x0304,
+        /// `StageBytes` and the bytes.
+        SetBytes = 0x0305,
+        /// `StageTexture`.
+        SetTexture = 0x0306,
+        /// `StageSampler`.
+        SetSampler = 0x0307,
+        /// `VertexBufferStride`.
+        SetVertexBufferStride = 0x0308,
+        /// `ViewportRecord`s, without a record of their own.
+        SetViewports = 0x0309,
+        /// `ScissorRecord`s, without a record of their own.
+        SetScissorRects = 0x030a,
+        /// `Mode`: an `MTLCullMode`.
+        SetCullMode = 0x030b,
+        /// `Mode`: an `MTLWinding`.
+        SetFrontFacingWinding = 0x030c,
+        /// `DepthBias`.
+        SetDepthBias = 0x030d,
+        /// `DepthStencilRecord`.
+        SetDepthStencilState = 0x030e,
+        /// `StencilReference`.
+        SetStencilReference = 0x030f,
+        /// `BlendColor`.
+        SetBlendColor = 0x0310,
+        /// `Mode`: an `MTLTriangleFillMode`.
+        SetTriangleFillMode = 0x0311,
+        /// `Mode`: an `MTLDepthClipMode`.
+        SetDepthClipMode = 0x0312,
+        /// `ViewMappingRecord`s, without a record of their own.
+        SetVertexAmplification = 0x0313,
+        /// `VisibilityMode`.
+        SetVisibilityResultMode = 0x0314,
+        /// `ColorStoreAction`.
+        SetColorStoreAction = 0x0315,
+        /// `Mode`: an `MTLStoreAction`.
+        SetDepthStoreAction = 0x0316,
+        /// `Mode`: an `MTLStoreAction`.
+        SetStencilStoreAction = 0x0317,
+        /// `RenderBarrier`.
+        MemoryBarrier = 0x0318,
+        /// `DrawPrimitives`.
+        DrawPrimitives = 0x0319,
+        /// `DrawIndexed`.
+        DrawIndexed = 0x031a,
+        /// `DrawIndirect`.
+        DrawIndirect = 0x031b,
+        /// `DrawIndexedIndirect`.
+        DrawIndexedIndirect = 0x031c,
+        /// `FactorBuffer`.
+        SetTessellationFactorBuffer = 0x031d,
+        /// `FactorScale`.
+        SetTessellationFactorScale = 0x031e,
+        /// `DrawPatches`.
+        DrawPatches = 0x031f,
+        /// `DrawPatchesIndirect`.
+        DrawPatchesIndirect = 0x0320,
+        /// `DrawMesh`.
+        DrawMeshThreadgroups = 0x0321,
+        /// `DrawMesh`.
+        DrawMeshThreads = 0x0322,
+        /// `DrawMeshIndirect`.
+        DrawMeshIndirect = 0x0323,
+    }
+}
+
 /// A command's code, grouped by encoder in the high byte.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CommandCode {
     CommandBuffer(CommandBufferCode),
     Compute(ComputeCode),
     Blit(BlitCode),
+    Render(RenderCode),
 }
 
 impl CommandCode {
@@ -286,6 +664,7 @@ impl CommandCode {
             0x00 => CommandBufferCode::from_raw(raw).map(Self::CommandBuffer),
             0x01 => ComputeCode::from_raw(raw).map(Self::Compute),
             0x02 => BlitCode::from_raw(raw).map(Self::Blit),
+            0x03 => RenderCode::from_raw(raw).map(Self::Render),
             _ => None,
         }
     }

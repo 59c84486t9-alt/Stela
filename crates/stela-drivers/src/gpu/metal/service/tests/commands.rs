@@ -1,15 +1,23 @@
-use super::{Memory, TestService, call, connect, new_function, new_library, service, status};
+use super::{
+    Memory, TestService, call, connect, new_function, new_library, options,
+    render_pipeline_request, service, status, texture,
+};
 use crate::gpu::metal::{
-    abi::{CpuCacheMode, DispatchType, HazardTrackingMode, ResourceOptions, StorageMode},
+    abi::{
+        CompareFunction, CullMode, DispatchType, LoadAction, PrimitiveType, StencilOperation,
+        StorageMode, StoreAction, TextureUsage,
+    },
     service::{
         Outcome,
         wire::{
             self, BufferResponse, ComputePipelineResponse, Empty, NewBufferRequest,
-            NewComputePipelineRequest, Operation, Record, Status, Value,
+            NewComputePipelineRequest, Operation, Record, RenderPipelineResponse, Status,
+            TextureDescriptorRecord, TextureResponse, Value,
             commands::{
-                BeginCompute, BlitCode, CommandBufferCode, CommandHeader, CommitRequest,
-                ComputeCode, CopyBuffer, Dispatch, FillBuffer, Resource, SetBuffer, SetBytes,
-                SetPipeline,
+                BeginCompute, BeginRender, BlitCode, CommandBufferCode, CommandHeader,
+                CommitRequest, ComputeCode, CopyBuffer, DepthStencilRecord, Dispatch,
+                DrawPrimitives, FillBuffer, Mode, PassAttachmentRecord, RenderCode, Resource,
+                SetBuffer, SetBytes, SetPipeline, StencilRecord, ViewportRecord,
             },
         },
     },
@@ -51,14 +59,9 @@ fn commit(
 }
 
 fn new_buffer(service: &mut TestService, connection: NonZeroU64, storage_mode: StorageMode) -> u64 {
-    let options = ResourceOptions {
-        cpu_cache_mode: CpuCacheMode::DefaultCache,
-        storage_mode,
-        hazard_tracking_mode: HazardTrackingMode::Default,
-    };
     let request = NewBufferRequest {
         length: 256,
-        options: options.raw(),
+        options: options(storage_mode),
     };
     let buffer: BufferResponse = call(
         service,
@@ -260,5 +263,130 @@ fn refused_commands_discard_the_command_buffer() {
         commit(&mut service, connection, &Stream::default()),
         Ok(Value { value: 1 }),
         "nothing refused was submitted"
+    );
+}
+
+#[test]
+fn render_passes_replay_their_state_and_draws() {
+    let mut service = service();
+    let connection = connect(&mut service);
+    let memory = &mut Memory::default();
+    let library = new_library(&mut service, connection, memory);
+    let mut function = |name| {
+        new_function(&mut service, connection, library, name, &[], memory)
+            .unwrap()
+            .handle
+    };
+    let (vertex, fragment) = (function("vertex"), function("fragment"));
+    let pipeline: RenderPipelineResponse = call(
+        &mut service,
+        connection,
+        Operation::NewRenderPipeline,
+        &render_pipeline_request(vertex, fragment),
+        memory,
+    )
+    .unwrap();
+    let target = TextureDescriptorRecord {
+        usage: TextureUsage::RENDER_TARGET.bits(),
+        ..texture(StorageMode::Private)
+    };
+    let target: TextureResponse = call(
+        &mut service,
+        connection,
+        Operation::NewTexture,
+        &target,
+        memory,
+    )
+    .unwrap();
+
+    let mut begin = BeginRender::default();
+    begin.color_attachments[0].attachment = PassAttachmentRecord {
+        texture: target.handle,
+        load_action: LoadAction::Clear.raw(),
+        store_action: StoreAction::Store.raw(),
+        ..Default::default()
+    };
+    let viewport = ViewportRecord {
+        width: 8.0,
+        height: 4.0,
+        zfar: 1.0,
+        ..Default::default()
+    };
+    let stencil = StencilRecord {
+        compare_function: CompareFunction::Always.raw(),
+        stencil_failure_operation: StencilOperation::Keep.raw(),
+        depth_failure_operation: StencilOperation::Keep.raw(),
+        depth_stencil_pass_operation: StencilOperation::Keep.raw(),
+        read_mask: u32::MAX,
+        write_mask: u32::MAX,
+    };
+    let depth_stencil = DepthStencilRecord {
+        depth_compare_function: CompareFunction::Less.raw(),
+        depth_write_enabled: 1,
+        reserved: 0,
+        front_face_stencil: stencil,
+        back_face_stencil: stencil,
+    };
+    let draw = DrawPrimitives {
+        primitive: PrimitiveType::Triangle.raw(),
+        vertex_start: 0,
+        vertex_count: 3,
+        instance_count: 1,
+        base_instance: 0,
+    };
+    let mut stream = Stream::default();
+    stream
+        .push(RenderCode::Begin.raw(), &begin, &[])
+        .push(
+            RenderCode::SetPipeline.raw(),
+            &SetPipeline {
+                pipeline: pipeline.handle,
+            },
+            &[],
+        )
+        .push(
+            RenderCode::SetViewports.raw(),
+            &Empty {},
+            wire::bytes(&viewport),
+        )
+        .push(
+            RenderCode::SetCullMode.raw(),
+            &Mode {
+                mode: CullMode::Back.raw(),
+            },
+            &[],
+        )
+        .push(RenderCode::SetDepthStencilState.raw(), &depth_stencil, &[])
+        .push(RenderCode::DrawPrimitives.raw(), &draw, &[])
+        .end();
+    assert_eq!(
+        commit(&mut service, connection, &stream),
+        Ok(Value { value: 1 })
+    );
+    let commands = submitted(&mut service);
+    assert!(
+        commands
+            .iter()
+            .any(|command| matches!(command, Command::BeginRendering(_)))
+    );
+    assert!(commands.iter().any(|command| matches!(
+        command,
+        Command::Draw {
+            vertex_count: 3,
+            instance_count: 1,
+            ..
+        }
+    )));
+
+    // A pass declaring more counter samples than its data holds.
+    let mut stream = Stream::default();
+    let short = BeginRender {
+        counter_sample_count: 1,
+        ..begin
+    };
+    stream.push(RenderCode::Begin.raw(), &short, &[]);
+    assert_eq!(
+        status(commit(&mut service, connection, &stream)),
+        Status::Malformed
     );
 }

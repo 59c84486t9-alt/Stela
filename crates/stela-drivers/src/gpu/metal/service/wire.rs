@@ -34,7 +34,7 @@ macro_rules! primitives {
     )*};
 }
 
-primitives!(u8, u32, u64, i32, i64, f32);
+primitives!(u8, u32, u64, i32, i64, f32, f64);
 // SAFETY: an array of records has no padding between its elements.
 unsafe impl<T: Record, const N: usize> Record for [T; N] {}
 // SAFETY: the block's layout is checked to be its fields' sizes, all of

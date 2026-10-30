@@ -7,7 +7,7 @@ use super::{
         self, Empty, Fault, Record, Status, Value,
         commands::{
             BufferLayoutRecord, CommandBufferCode, CommandCode, CommandHeader, CommitRequest,
-            EventCommand, RegionRecord,
+            EventCommand,
         },
     },
 };
@@ -16,16 +16,18 @@ use crate::gpu::metal::{
     capabilities::Size,
     command_buffer::{
         BufferRef, CommandBuffer,
-        blit::{BlitTexture, BufferLayout, Region},
+        blit::{BlitTexture, BufferLayout},
     },
     device::{BufferId, EventId, SamplerId, TextureId},
     shader::Compiler,
     vulkan::backend::Backend,
 };
+use alloc::vec::Vec;
 use core::num::NonZeroU64;
 
 mod blit;
 mod compute;
+mod render;
 
 /// The entries of a command stream.
 struct Stream<'a>(&'a [u8]);
@@ -62,6 +64,12 @@ impl<'a> Payload<'a> {
     /// The command's record, with no data after it.
     fn record<T: Record>(self) -> Result<T, Fault> {
         wire::read(self.0)
+    }
+
+    /// The records filling the command's data, which has no record of its
+    /// own.
+    fn list<T: Record>(self) -> Result<Vec<T>, Fault> {
+        wire::read_array(self.0)
     }
 
     /// The command's record and the data after it.
@@ -104,6 +112,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             }
             CommandCode::Compute(code) => self.compute(connection, commands, code, payload),
             CommandCode::Blit(code) => self.blit(connection, commands, code, payload),
+            CommandCode::Render(code) => self.render(connection, commands, code, payload),
         }
     }
 
@@ -210,13 +219,4 @@ fn grid(size: [u64; 3]) -> Result<[u32; 3], Fault> {
             .map_err(|_| Fault::new(Status::Invalid, "a grid dimension exceeds 32 bits"))?;
     }
     Ok(grid)
-}
-
-fn region(record: RegionRecord) -> Region {
-    Region {
-        slice: record.slice,
-        level: record.level,
-        origin: record.origin,
-        size: record.size,
-    }
 }

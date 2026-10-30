@@ -1,18 +1,11 @@
-use super::{Memory, TestService, call, connect, new_function, new_library, service, status};
-use crate::gpu::metal::{
-    abi::{
-        BlendFactor, BlendOperation, ColorWriteMask, PrimitiveTopologyClass,
-        TessellationControlPointIndexType, TessellationFactorFormat,
-        TessellationFactorStepFunction, TessellationPartitionMode, Winding,
-    },
-    pixel_format::PixelFormat,
-    service::wire::{
-        BufferResponse, ColorAttachmentRecord, ComputePipelineResponse, Empty,
-        FunctionHandleRequest, FunctionHandleResponse, Handle, LinkedFunctionsRecord,
-        NewComputePipelineRequest, NewFunctionTableRequest, NewRenderPipelineRequest, Operation,
-        PipelineFlags, RenderPipelineResponse, RenderTargetsRecord, SetFunctionsRequest, Span,
-        Status, TessellationRecord,
-    },
+use super::{
+    Memory, TestService, call, connect, new_function, new_library, render_pipeline_request,
+    service, status,
+};
+use crate::gpu::metal::service::wire::{
+    BufferResponse, ComputePipelineResponse, Empty, FunctionHandleRequest, FunctionHandleResponse,
+    Handle, LinkedFunctionsRecord, NewComputePipelineRequest, NewFunctionTableRequest,
+    NewRenderPipelineRequest, Operation, RenderPipelineResponse, SetFunctionsRequest, Span, Status,
 };
 use core::num::NonZeroU64;
 
@@ -189,45 +182,9 @@ fn render_pipelines_decode_their_targets_and_stages() {
         function("fragment"),
         function("visible"),
     );
-    let unused = ColorAttachmentRecord {
-        pixel_format: 0,
-        source_rgb_blend_factor: BlendFactor::One.raw(),
-        destination_rgb_blend_factor: BlendFactor::Zero.raw(),
-        rgb_blend_operation: BlendOperation::Add.raw(),
-        source_alpha_blend_factor: BlendFactor::One.raw(),
-        destination_alpha_blend_factor: BlendFactor::Zero.raw(),
-        alpha_blend_operation: BlendOperation::Add.raw(),
-        write_mask: ColorWriteMask::KNOWN.bits(),
-        blending_enabled: 0,
-        reserved: 0,
-    };
-    let mut targets = RenderTargetsRecord {
-        color_attachments: [unused; 8],
-        raster_sample_count: 1,
-        rasterization_enabled: 1,
-        ..RenderTargetsRecord::default()
-    };
-    targets.color_attachments[0].pixel_format = PixelFormat::Rgba8Unorm.raw();
     let request = NewRenderPipelineRequest {
-        vertex_function: vertex,
-        fragment_function: fragment,
-        input_primitive_topology: PrimitiveTopologyClass::Unspecified.raw(),
-        max_vertex_amplification_count: 1,
-        targets,
-        vertex_descriptor: Default::default(),
-        tessellation: TessellationRecord {
-            partition_mode: TessellationPartitionMode::Pow2.raw(),
-            max_tessellation_factor: 16,
-            factor_format: TessellationFactorFormat::Half.raw(),
-            control_point_index_type: TessellationControlPointIndexType::None.raw(),
-            factor_step_function: TessellationFactorStepFunction::Constant.raw(),
-            output_winding_order: Winding::Clockwise.raw(),
-            factor_scale_enabled: 0,
-            reserved: 0,
-        },
-        vertex_linked_functions: LinkedFunctionsRecord::default(),
         fragment_linked_functions: linked(memory, &[visible]),
-        flags: PipelineFlags::EMPTY.bits(),
+        ..render_pipeline_request(vertex, fragment)
     };
     let pipeline: RenderPipelineResponse = call(
         &mut service,
@@ -246,16 +203,15 @@ fn render_pipelines_decode_their_targets_and_stages() {
         handle(&mut service, connection, pipeline.handle, visible, 1),
         Ok(FunctionHandleResponse { value: 0 })
     );
+    let stage = |service: &mut TestService, stage| {
+        status(handle(service, connection, pipeline.handle, visible, stage))
+    };
     assert_eq!(
-        status(handle(
-            &mut service,
-            connection,
-            pipeline.handle,
-            visible,
-            4
-        )),
-        Status::Malformed
+        stage(&mut service, 4),
+        Status::Unsupported,
+        "tile functions"
     );
+    assert_eq!(stage(&mut service, 3), Status::Malformed, "two stages");
 
     let mut masked = request;
     masked.targets.color_attachments[0].write_mask = 1 << 4;

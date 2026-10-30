@@ -8,7 +8,7 @@ use super::{
         FunctionHandleRequest, FunctionHandleResponse, LayoutRecord, LinkedFunctionsRecord,
         NewComputePipelineRequest, NewFunctionTableRequest, NewMeshPipelineRequest,
         NewRenderPipelineRequest, PipelineFlags, RenderPipelineResponse, RenderTargetsRecord,
-        SetFunctionsRequest, TessellationRecord,
+        SetFunctionsRequest, Status, TessellationRecord,
     },
 };
 use crate::gpu::metal::{
@@ -243,10 +243,12 @@ fn optional_format(raw: u64) -> Result<Option<PixelFormat>, Fault> {
 }
 
 /// One bit of `MTLRenderStages`.
-fn render_stage(raw: u64) -> Result<Stage, Fault> {
+/// The stage of one `MTLRenderStages` bit.
+pub(super) fn render_stage(raw: u64) -> Result<Stage, Fault> {
     match raw {
         1 => Ok(Stage::Vertex),
         2 => Ok(Stage::Fragment),
+        4 => Err(Fault::new(Status::Unsupported, "tile functions")),
         8 => Ok(Stage::Object),
         16 => Ok(Stage::Mesh),
         _ => Err(Fault::malformed("render stage")),

@@ -1,20 +1,29 @@
 use super::{
     GuestMemory, Outcome, Service,
     wire::{
-        self, ConstantInfo, ConstantRecord, Empty, Fault, FunctionReflectionRequest,
-        FunctionReflectionResponse, Handle, Length, LibraryFunctionNamesRequest, NegotiateRequest,
-        NegotiateResponse, NewFunctionRequest, NewLibraryRequest, Operation, Record, Span, Status,
+        self, ColorAttachmentRecord, ConstantInfo, ConstantRecord, Empty, Fault,
+        FunctionReflectionRequest, FunctionReflectionResponse, Handle, Length,
+        LibraryFunctionNamesRequest, LinkedFunctionsRecord, NegotiateRequest, NegotiateResponse,
+        NewFunctionRequest, NewLibraryRequest, NewRenderPipelineRequest, Operation, PipelineFlags,
+        Record, RenderTargetsRecord, Span, Status, TessellationRecord, TextureDescriptorRecord,
     },
 };
 use crate::gpu::{
     metal::{
-        abi::{DataType, FunctionType},
+        abi::{
+            BlendFactor, BlendOperation, ColorWriteMask, CpuCacheMode, DataType, FunctionType,
+            HazardTrackingMode, PrimitiveTopologyClass, ResourceOptions, StorageMode,
+            SwizzleChannels, TessellationControlPointIndexType, TessellationFactorFormat,
+            TessellationFactorStepFunction, TessellationPartitionMode, TextureType, TextureUsage,
+            Winding,
+        },
         capabilities::block::Block,
         device::{
             LibraryId,
             fixture::{MockBackend, MockCompiler, device_on},
         },
         library::tests::fixture,
+        pixel_format::PixelFormat,
     },
     protocol::identity::DeviceEpoch,
 };
@@ -83,6 +92,83 @@ impl GuestMemory for Memory {
         let range = self.range(span)?;
         self.bytes[range].copy_from_slice(bytes);
         Ok(())
+    }
+}
+
+fn options(storage_mode: StorageMode) -> u64 {
+    ResourceOptions {
+        cpu_cache_mode: CpuCacheMode::DefaultCache,
+        storage_mode,
+        hazard_tracking_mode: HazardTrackingMode::Default,
+    }
+    .raw()
+}
+
+const IDENTITY: [u8; 4] = [2, 3, 4, 5];
+
+fn texture(storage_mode: StorageMode) -> TextureDescriptorRecord {
+    assert_eq!(
+        SwizzleChannels::IDENTITY.0.map(|swizzle| swizzle.raw()),
+        IDENTITY
+    );
+    TextureDescriptorRecord {
+        texture_type: TextureType::D2.raw(),
+        pixel_format: PixelFormat::Rgba8Unorm.raw(),
+        width: 8,
+        height: 4,
+        depth: 1,
+        mipmap_level_count: 1,
+        sample_count: 1,
+        array_length: 1,
+        options: options(storage_mode),
+        usage: TextureUsage::SHADER_READ.bits(),
+        swizzle: IDENTITY,
+        reserved: 0,
+    }
+}
+
+/// A render pipeline of `vertex` and `fragment` drawing to one RGBA8 color
+/// attachment.
+fn render_pipeline_request(vertex: u64, fragment: u64) -> NewRenderPipelineRequest {
+    let unused = ColorAttachmentRecord {
+        pixel_format: 0,
+        source_rgb_blend_factor: BlendFactor::One.raw(),
+        destination_rgb_blend_factor: BlendFactor::Zero.raw(),
+        rgb_blend_operation: BlendOperation::Add.raw(),
+        source_alpha_blend_factor: BlendFactor::One.raw(),
+        destination_alpha_blend_factor: BlendFactor::Zero.raw(),
+        alpha_blend_operation: BlendOperation::Add.raw(),
+        write_mask: ColorWriteMask::KNOWN.bits(),
+        blending_enabled: 0,
+        reserved: 0,
+    };
+    let mut targets = RenderTargetsRecord {
+        color_attachments: [unused; 8],
+        raster_sample_count: 1,
+        rasterization_enabled: 1,
+        ..RenderTargetsRecord::default()
+    };
+    targets.color_attachments[0].pixel_format = PixelFormat::Rgba8Unorm.raw();
+    NewRenderPipelineRequest {
+        vertex_function: vertex,
+        fragment_function: fragment,
+        input_primitive_topology: PrimitiveTopologyClass::Unspecified.raw(),
+        max_vertex_amplification_count: 1,
+        targets,
+        vertex_descriptor: Default::default(),
+        tessellation: TessellationRecord {
+            partition_mode: TessellationPartitionMode::Pow2.raw(),
+            max_tessellation_factor: 16,
+            factor_format: TessellationFactorFormat::Half.raw(),
+            control_point_index_type: TessellationControlPointIndexType::None.raw(),
+            factor_step_function: TessellationFactorStepFunction::Constant.raw(),
+            output_winding_order: Winding::Clockwise.raw(),
+            factor_scale_enabled: 0,
+            reserved: 0,
+        },
+        vertex_linked_functions: LinkedFunctionsRecord::default(),
+        fragment_linked_functions: LinkedFunctionsRecord::default(),
+        flags: PipelineFlags::EMPTY.bits(),
     }
 }
 

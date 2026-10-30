@@ -1,5 +1,5 @@
 //! Commands of `MTLBlitCommandEncoder`.
-use super::{Payload, region};
+use super::Payload;
 use crate::gpu::metal::{
     abi::{BlitOption, StorageMode},
     capabilities::FormatCapabilities,
@@ -10,7 +10,7 @@ use crate::gpu::metal::{
     device::TextureId,
     error::ensure,
     service::{
-        Object, Service, known,
+        Object, Service, known, region,
         wire::{
             Empty, Fault,
             commands::{
@@ -57,7 +57,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
                 commands.copy_buffer_to_texture(
                     source,
                     texture,
-                    region(request.region),
+                    region(&request.region),
                     options,
                 )?;
             }
@@ -68,7 +68,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
                 let options = blit_options(request.options)?;
                 commands.copy_texture_to_buffer(
                     texture,
-                    region(request.region),
+                    region(&request.region),
                     destination,
                     options,
                 )?;
@@ -77,7 +77,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
                 let request: CopyTexture = payload.record()?;
                 commands.copy_texture(
                     self.blit_texture(connection, request.source)?,
-                    region(request.region),
+                    region(&request.region),
                     self.blit_texture(connection, request.destination)?,
                     request.destination_slice,
                     request.destination_level,
