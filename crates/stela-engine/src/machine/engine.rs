@@ -8,8 +8,8 @@ pub use boundary::{ConsumedPair, DeviceError, Devices, Host, NoDevices, ScalarRe
 use mirrors::*;
 use reports::*;
 pub use reports::{
-    Discard, Event, Occupancy, Requirement, RequirementKind, Reset, Statistics, Stop, Surveyed,
-    Suspension, TRACE_HITS, TraceHit, WATCH_HITS, WatchHit,
+    DeviceRegister, Discard, Event, Occupancy, Requirement, RequirementKind, Reset, Statistics,
+    Stop, Surveyed, Suspension, TRACE_HITS, TraceHit, WATCH_HITS, WatchHit,
 };
 mod amx;
 mod apple_maintenance;
@@ -606,8 +606,12 @@ pub struct Machine<H: Host, D: Devices> {
     /// count at their last instructions (see [`Self::exit_words`]).
     exit_words: BTreeMap<u32, u64>,
     /// Device accesses by physical address: the registers the guest reads
-    /// and writes most ([`Self::device_registers`]).
-    device_registers: BTreeMap<u64, u64>,
+    /// and writes most and, under step timing, the costliest
+    /// ([`Self::device_registers`]).
+    device_registers: BTreeMap<u64, DeviceRegister>,
+    /// The register the native fault being handled reached, which its
+    /// exit's ticks are charged to ([`Self::timing_exit`]).
+    timed_device: Option<u64>,
     #[cfg(all(feature = "std", feature = "native-profile"))]
     floating_profile: Option<alloc::boxed::Box<floating_profile::Sampler>>,
     #[cfg(all(feature = "std", feature = "native-profile"))]
@@ -874,6 +878,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             step_timing: None,
             exit_words: BTreeMap::new(),
             device_registers: BTreeMap::new(),
+            timed_device: None,
             #[cfg(all(feature = "std", feature = "native-profile"))]
             floating_profile: None,
             #[cfg(all(feature = "std", feature = "native-profile"))]

@@ -76,15 +76,25 @@ impl<H: Host, D: Devices> Machine<H, D> {
         now
     }
 
-    /// Charge the ticks since `since` to handling an exit in `slot`.
+    /// Charge the ticks since `since` to handling an exit in `slot`, and a
+    /// native device fault's to the register it reached.
     #[inline]
     pub(super) fn timing_exit(&mut self, slot: usize, since: u64) {
+        let device = self
+            .timed_device
+            .take()
+            .filter(|_| slot == step_timing::DEVICE_FAULT_SLOT);
         if self.step_timing.is_none() {
             return;
         }
         let now = self.host.profile_ticks();
         if let Some(timing) = &mut self.step_timing {
             let spent = now.wrapping_sub(since);
+            if let Some(physical) = device
+                && let Some(register) = self.device_registers.get_mut(&physical)
+            {
+                register.ticks += spent;
+            }
             timing.phases[step_timing::Phase::Exit as usize] += spent;
             timing.lifetime_maxima[step_timing::Phase::Exit as usize].observe(
                 spent,

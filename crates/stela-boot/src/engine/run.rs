@@ -467,7 +467,7 @@ impl Heartbeat {
         cost.mark("performance");
         self.translation = translation_report(machine, self.translation, compiled);
         cost.mark("translation");
-        self.exits.report(machine);
+        self.exits.report(machine, tsc_hz);
         self.translated.report(machine);
         self.shadows.report();
         cost.mark("exits");

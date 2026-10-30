@@ -628,14 +628,16 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
     /// Device accesses by the physical address they reached: which
     /// device registers to serve faster.
-    pub fn device_registers(&self) -> &BTreeMap<u64, u64> {
+    pub fn device_registers(&self) -> &BTreeMap<u64, DeviceRegister> {
         &self.device_registers
     }
 
-    /// Count a device access at `physical`.
+    /// Count a device access at `physical`, the register its native fault's
+    /// handling is timed for.
     pub(super) fn count_device_access(&mut self, physical: u64) {
         self.statistics.device_accesses += 1;
-        *self.device_registers.entry(physical).or_default() += 1;
+        self.device_registers.entry(physical).or_default().accesses += 1;
+        self.timed_device = Some(physical);
     }
 
     /// The word an instruction inside a compiled block executes as: its

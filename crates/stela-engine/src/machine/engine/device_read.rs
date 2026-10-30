@@ -411,10 +411,11 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
         self.device_lines = None;
         // The canonical service still borrows the host: count by field.
         self.statistics.device_accesses += 1;
-        *self
-            .device_registers
+        self.device_registers
             .entry(read.request.physical)
-            .or_default() += 1;
+            .or_default()
+            .accesses += 1;
+        self.timed_device = Some(read.request.physical);
         if let Err(error) = settlement {
             // Unknown board settlement poisons RAM/monitor and leaves
             // worker sessions held. Returned load data is nevertheless final.
