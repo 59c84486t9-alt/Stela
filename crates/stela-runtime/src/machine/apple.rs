@@ -810,7 +810,7 @@ impl AppleDevices {
         }
         let device = self.bus.add(Box::new(gpu_gate::Gate::new(service, irq)));
         self.bus
-            .map(device, physical, gpu_gate::BYTES, 0)
+            .map(device, physical, stela_contracts::gate::window::BYTES, 0)
             .map_err(|error| format!("StelaGPU gate placement: {error:?}"))?;
         self.gpu_gate = Some(device);
         Ok(())
@@ -3766,8 +3766,14 @@ mod tests {
         d.write(0, GATE, 8, 0, 0).unwrap();
         let page = d.read(0, GATE + 8, 8, 0).unwrap();
         assert_eq!(page, 1);
-        d.write(2, GATE + page * gpu_gate::PAGE, 8, 0x1234, 0)
-            .unwrap();
+        d.write(
+            2,
+            GATE + page * stela_contracts::gate::window::PAGE,
+            8,
+            0x1234,
+            0,
+        )
+        .unwrap();
         d.serve_call(1, &mut Caller, 0).unwrap();
         assert!(served.borrow().is_empty());
         d.serve_call(2, &mut Caller, 0).unwrap();

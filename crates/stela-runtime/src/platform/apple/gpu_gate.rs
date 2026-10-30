@@ -2,10 +2,9 @@
 //! connection for each task and the task enters the native GPU service
 //! with no kernel crossing per call.
 //!
-//! Page 0 is the kext's control page. Page `n` (1 to [`CONNECTIONS`]) is
-//! connection `n`'s gate, which the kext maps into the one task it opened
-//! the connection for: holding that mapping is the task's authority. Pages
-//! are the guest's 16 KiB, so no task maps another's gate.
+//! The window's layout is [`window`]'s. Holding a gate page's mapping is
+//! its task's authority; pages are the guest's 16 KiB, so no task maps
+//! another's gate.
 //!
 //! A 64-bit store to a gate's `CALL` names a call record in the storing
 //! thread's memory. The service runs it in the store's own step, on that
@@ -22,38 +21,17 @@ use alloc::{boxed::Box, collections::BTreeMap};
 use core::num::NonZeroU64;
 use stela_contracts::{
     bus::AdvancePolicy,
-    gate::{CallerFault, CallerMemory, GateService},
+    gate::{
+        CallerFault, CallerMemory, GateService,
+        window::{
+            ACK, CALL, CLOSE, COUNT, FAULT, FAULT_DENIED, FAULT_NOT_RAM, FAULT_UNSUPPORTED, OPEN,
+            OPENED, PAGE, STATUS,
+        },
+    },
     interrupt::{AicInput, Wire},
 };
 
-/// The guest's page: the unit one task maps.
-pub const PAGE: u64 = 0x4000;
-/// Connections the window has gates for.
-pub const CONNECTIONS: usize = 255;
-/// The window: the control page and every gate.
-pub const BYTES: u64 = PAGE * (CONNECTIONS as u64 + 1);
-
-/// Control: a store opens a connection.
-const OPEN: u64 = 0x00;
-/// Control: the gate page of the last open, 0 when it failed.
-const OPENED: u64 = 0x08;
-/// Control: a store of a gate page closes its connection.
-const CLOSE: u64 = 0x10;
-/// Control: the number of gate pages.
-const COUNT: u64 = 0x18;
-/// Control: 1 while completed work is unacknowledged.
-const STATUS: u64 = 0x20;
-/// Control: a store acknowledges completed work.
-const ACK: u64 = 0x28;
-/// Gate: a store names a call record.
-const CALL: u64 = 0x00;
-/// Gate: why the last call's record was out of reach, 0 for none.
-const FAULT: u64 = 0x08;
-
-/// [`FAULT`] values.
-const DENIED: u64 = 1;
-const NOT_RAM: u64 = 2;
-const UNSUPPORTED: u64 = 3;
+const CONNECTIONS: usize = stela_contracts::gate::window::CONNECTIONS as usize;
 
 const NAME: &str = "stela-gpu-gate";
 
@@ -94,9 +72,9 @@ impl Gate {
         };
         self.faults[gate] = match self.service.serve(connection, record, caller) {
             Ok(()) => 0,
-            Err(CallerFault::Denied { .. }) => DENIED,
-            Err(CallerFault::NotRam { .. }) => NOT_RAM,
-            Err(CallerFault::Unsupported(_)) => UNSUPPORTED,
+            Err(CallerFault::Denied { .. }) => FAULT_DENIED,
+            Err(CallerFault::NotRam { .. }) => FAULT_NOT_RAM,
+            Err(CallerFault::Unsupported(_)) => FAULT_UNSUPPORTED,
         };
     }
 
@@ -318,7 +296,7 @@ mod tests {
         assert_eq!(log.borrow().served, [(2, 0x22, 0x22), (1, 0x11, 0x11)]);
         store(&mut gate, 3, first * PAGE + CALL, 0x1000).unwrap();
         gate.serve(3, &mut Caller);
-        assert_eq!(load(&mut gate, first * PAGE + FAULT), DENIED);
+        assert_eq!(load(&mut gate, first * PAGE + FAULT), FAULT_DENIED);
     }
 
     #[test]
