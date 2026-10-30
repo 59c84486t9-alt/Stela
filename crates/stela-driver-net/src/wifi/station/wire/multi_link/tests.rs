@@ -121,3 +121,118 @@ fn a_reduced_neighbor_report_names_the_reporting_mlds_other_links() {
     elements.pop();
     assert!(affiliated(&elements).is_err());
 }
+
+/// A 5 GHz association requesting a 6 GHz link: the link's profile carries
+/// its rates and HE, HE 6 GHz and EHT capabilities, and refuses the outer HT
+/// and VHT capabilities it lacks; SSID, RSN and WMM stay inherited.
+#[test]
+fn a_requested_link_profile_refuses_the_outer_elements_it_lacks() {
+    let outer = [
+        0, 1, b'n', 1, 1, 0x8c, 48, 2, 1, 0, 45, 1, 0xaa, 191, 1, 0xbb, 255, 2, 35, 1, 255, 2, 108,
+        2, 221, 1, 0x50,
+    ];
+    let six = [
+        0, 1, b'n', 1, 1, 0x8c, 48, 2, 1, 0, 255, 2, 35, 3, 255, 2, 59, 4, 255, 2, 108, 5,
+    ];
+    let element = association_request(
+        MLD,
+        0,
+        0,
+        &outer,
+        &[Requested {
+            link_id: 2,
+            address: LINK,
+            capability: 0x0010,
+            elements: &six,
+        }],
+    );
+    let basic = Basic::find(&element).unwrap().unwrap();
+    assert_eq!(basic.mld_capabilities, Some(0));
+    assert_eq!(basic.eml_capabilities, None);
+    let profile = &basic.profiles[0];
+    assert_eq!((profile.link_id, profile.address), (2, Some(LINK)));
+    assert_eq!(
+        profile.body,
+        [
+            0x10, 0, 1, 1, 0x8c, 255, 2, 35, 3, 255, 2, 59, 4, 255, 2, 108, 5, 255, 5, 56, 2, 45,
+            191, 0
+        ]
+    );
+    // EMLSR support adds the EML capabilities.
+    let eml = association_request(MLD, 0, 0x0001, &outer, &[]);
+    assert_eq!(
+        Basic::find(&eml).unwrap().unwrap().eml_capabilities,
+        Some(1)
+    );
+}
+
+fn answer(link_id: u8, status: u16, count: Option<u8>, elements: &[u8]) -> Profile {
+    let mut body = 0x0010u16.to_le_bytes().to_vec();
+    body.extend_from_slice(&status.to_le_bytes());
+    body.extend_from_slice(elements);
+    Profile {
+        link_id,
+        complete: true,
+        address: Some(LINK),
+        bss_parameters_change_count: count,
+        body,
+        ..Profile::default()
+    }
+}
+
+#[test]
+fn a_response_answers_each_requested_link_with_its_inherited_elements() {
+    let response = |profiles| {
+        let mut elements = vec![1, 1, 0x8c, 45, 1, 0xaa, 221, 1, 0x50];
+        elements.extend(
+            Basic {
+                address: MLD,
+                link_id: Some(0),
+                mld_capabilities: Some(0),
+                profiles,
+                ..Basic::default()
+            }
+            .encode(),
+        );
+        elements
+    };
+    // The 6 GHz link refuses the outer HT operation; WMM is inherited.
+    let accepted = answer(2, 0, Some(1), &[1, 1, 0x8c, 255, 4, 56, 1, 45, 0]);
+    let refused = answer(3, 17, None, &[]);
+    let elements = response(vec![accepted, refused]);
+    let (basic, answers) = association_response(MLD, &elements, &[2, 3]).unwrap();
+    assert_eq!(basic.link_id, Some(0));
+    assert_eq!(
+        answers,
+        [
+            Answer {
+                link_id: 2,
+                status: 0,
+                capability: 0x10,
+                elements: vec![1, 1, 0x8c, 221, 1, 0x50],
+            },
+            Answer {
+                link_id: 3,
+                status: 17,
+                capability: 0x10,
+                elements: vec![1, 1, 0x8c, 45, 1, 0xaa, 221, 1, 0x50],
+            },
+        ]
+    );
+    // Another AP MLD, a missing link and an accepted link without its
+    // change count end the association.
+    assert_eq!(
+        association_response(LINK, &elements, &[2]).unwrap_err(),
+        Error::WrongPeer
+    );
+    assert!(association_response(MLD, &elements, &[4]).is_err());
+    let uncounted = response(vec![answer(2, 0, None, &[])]);
+    assert!(association_response(MLD, &uncounted, &[2]).is_err());
+}
+
+#[test]
+fn an_authentication_names_the_mld_alone() {
+    let mut expected = vec![255, 10, 107, 0x00, 0x00, 7];
+    expected.extend_from_slice(&MLD.0);
+    assert_eq!(authentication(MLD), expected);
+}

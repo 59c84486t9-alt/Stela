@@ -1,10 +1,14 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Layouts follow pinned Linux include/linux/ieee80211-eht.h and
 // include/linux/ieee80211.h; fragmentation follows net/wireless/scan.c
-// (cfg80211_defragment_element) and net/mac80211/util.c
-// (ieee80211_fragment_element). Source notices in wifi/THIRD_PARTY.md.
+// (cfg80211_defragment_element, cfg80211_is_element_inherited) and
+// net/mac80211/util.c (ieee80211_fragment_element); request profiles and
+// response answers follow net/mac80211/mlme.c (ieee80211_assoc_add_ml_elem,
+// ieee80211_add_non_inheritance_elem, ieee80211_assoc_config_link). Source
+// notices in wifi/THIRD_PARTY.md.
 //! The Basic Multi-Link element (IEEE 802.11be-2024 9.4.2.321.2) of an AP
-//! MLD and of a non-AP MLD's association, and the affiliated APs a Reduced
+//! MLD and of a non-AP MLD's authentication and association, its per-STA
+//! profiles with their inheritance, and the affiliated APs a Reduced
 //! Neighbor Report names through its MLD parameters (9.4.2.169.2).
 use super::Error;
 use crate::Mac;
@@ -19,6 +23,8 @@ const SUBELEMENT_FRAGMENT: u8 = 254;
 /// IEEE80211_MLE_SUBELEM_PER_STA_PROFILE.
 const PER_STA_PROFILE: u8 = 0;
 const REDUCED_NEIGHBOR_REPORT: u8 = 201;
+/// WLAN_EID_EXT_NON_INHERITANCE.
+const NON_INHERITANCE: u8 = 56;
 
 /// IEEE80211_ML_CONTROL_TYPE and its Basic variant.
 const TYPE: u16 = 0x0007;
@@ -369,6 +375,258 @@ impl Profile {
         out.extend_from_slice(&self.body);
         out
     }
+}
+
+/// Whether `ieee80211_add_link_elems` writes the element `id` (its
+/// extension ID after 255) into a link's part of a request: the rates,
+/// power capability, supported channels and the HT, VHT, HE, HE 6 GHz band
+/// and EHT capabilities.
+fn link_element(id: u8, body: &[u8]) -> bool {
+    matches!(
+        (id, body.first()),
+        (1 | 50 | 33 | 36 | 45 | 191, _) | (EXTENSION, Some(35 | 59 | 108))
+    )
+}
+
+/// The link elements `ieee80211_add_link_elems` records as present among
+/// `elements` for the Non-Inheritance element, an extension as 256 plus its
+/// ID; it records neither the rates nor the HE 6 GHz band capabilities.
+fn present(elements: &[u8]) -> Vec<u16> {
+    let mut present = Vec::new();
+    let mut rest = elements;
+    while let [id, length, tail @ ..] = rest {
+        let Some(body) = tail.get(..usize::from(*length)) else {
+            break;
+        };
+        rest = &tail[body.len()..];
+        match (*id, body.first()) {
+            (33 | 36 | 45 | 191, _) => present.push(u16::from(*id)),
+            (EXTENSION, Some(&ext @ (35 | 108))) => present.push(256 + u16::from(ext)),
+            _ => {}
+        }
+    }
+    present.sort_unstable();
+    present
+}
+
+/// `ieee80211_add_non_inheritance_elem`: the elements of `outer` that
+/// `inner` lacks, or nothing when it lacks none.
+fn non_inheritance(outer: &[u16], inner: &[u16]) -> Vec<u8> {
+    let missing = || outer.iter().filter(|id| !inner.contains(id));
+    let ids: Vec<u8> = missing()
+        .filter(|&&id| id < 256)
+        .map(|&id| id as u8)
+        .collect();
+    let extensions: Vec<u8> = missing()
+        .filter(|&&id| id >= 256)
+        .map(|&id| id as u8)
+        .collect();
+    if ids.is_empty() && extensions.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::from([
+        EXTENSION,
+        (3 + ids.len() + extensions.len()) as u8,
+        NON_INHERITANCE,
+        ids.len() as u8,
+    ]);
+    out.extend_from_slice(&ids);
+    out.push(extensions.len() as u8);
+    out.extend_from_slice(&extensions);
+    out
+}
+
+/// `cfg80211_is_element_inherited`: whether a per-STA profile whose
+/// Non-Inheritance element is `refused` takes the outer element `id`.
+fn inherited(id: u8, body: &[u8], refused: Option<&[u8]>) -> bool {
+    // WLAN_EID_MULTIPLE_BSSID and a multi-link element are never inherited.
+    if id == 71 || (id == EXTENSION && body.first() == Some(&MULTI_LINK)) {
+        return false;
+    }
+    let Some(refused) = refused else {
+        return true;
+    };
+    let (list, extension) = if id == EXTENSION {
+        let Some(&ext) = body.first() else {
+            return true;
+        };
+        let skip = 1 + usize::from(refused.first().copied().unwrap_or(0));
+        (refused.get(skip..), ext)
+    } else {
+        (Some(refused), id)
+    };
+    list.and_then(|list| {
+        let count = usize::from(*list.first()?);
+        list.get(1..1 + count)
+    })
+    .is_none_or(|ids| !ids.contains(&extension))
+}
+
+/// The elements a per-STA profile's `elements` stand for in a frame whose
+/// own elements are `outer`: its own, then each outer element of an ID it
+/// lacks that its Non-Inheritance element does not refuse, as
+/// `ieee802_11_parse_elems_full` merges a link's profile.
+pub fn merged(elements: &[u8], outer: &[u8]) -> Result<Vec<u8>, Error> {
+    let own = split(elements)?;
+    let refused = own
+        .iter()
+        .find(|(id, body)| *id == EXTENSION && body.first() == Some(&NON_INHERITANCE))
+        .map(|(_, body)| &body[1..]);
+    let mut out = Vec::new();
+    for &(id, body) in &own {
+        if !(id == EXTENSION && body.first() == Some(&NON_INHERITANCE)) {
+            out.extend_from_slice(&[id, body.len() as u8]);
+            out.extend_from_slice(body);
+        }
+    }
+    let same = |(a, x): (u8, &[u8]), (b, y): (u8, &[u8])| {
+        a == b && (a != EXTENSION || x.first() == y.first())
+    };
+    for &(id, body) in &split(outer)? {
+        if !own.iter().any(|&element| same(element, (id, body))) && inherited(id, body, refused) {
+            out.extend_from_slice(&[id, body.len() as u8]);
+            out.extend_from_slice(body);
+        }
+    }
+    Ok(out)
+}
+
+fn split(elements: &[u8]) -> Result<Vec<(u8, &[u8])>, Error> {
+    let mut parts = Vec::new();
+    let mut rest = elements;
+    while let [id, length, tail @ ..] = rest {
+        let body = tail.get(..usize::from(*length)).ok_or(Error::Truncated)?;
+        parts.push((*id, body));
+        rest = &tail[body.len()..];
+    }
+    if !rest.is_empty() {
+        return Err(Error::Truncated);
+    }
+    Ok(parts)
+}
+
+/// One other link a non-AP MLD's association requests.
+#[derive(Clone, Copy, Debug)]
+pub struct Requested<'a> {
+    pub link_id: u8,
+    /// The station's address on the link.
+    pub address: Mac,
+    /// The capability field the link's own association would carry.
+    pub capability: u16,
+    /// The elements the link's own association request would carry.
+    pub elements: &'a [u8],
+}
+
+/// `ieee80211_assoc_add_ml_elem`: the Basic Multi-Link element of the
+/// station MLD `address` for an association request whose own elements are
+/// `outer`. It advertises the MLD capabilities and, when they support EMLSR
+/// or EMLMR, the EML capabilities, and requests each of `links` in a
+/// complete per-STA profile: the station's link address, the link's
+/// capability and link elements, and a Non-Inheritance element for the
+/// outer link elements the link lacks.
+pub fn association_request(
+    address: Mac,
+    mld_capabilities: u16,
+    eml_capabilities: u16,
+    outer: &[u8],
+    links: &[Requested<'_>],
+) -> Vec<u8> {
+    let outer_present = present(outer);
+    let profiles = links
+        .iter()
+        .map(|link| {
+            let mut body = link.capability.to_le_bytes().to_vec();
+            let mut rest = link.elements;
+            while let [id, length, tail @ ..] = rest {
+                let Some(element) = tail.get(..usize::from(*length)) else {
+                    break;
+                };
+                if link_element(*id, element) {
+                    body.extend_from_slice(&[*id, *length]);
+                    body.extend_from_slice(element);
+                }
+                rest = &tail[element.len()..];
+            }
+            body.extend(non_inheritance(&outer_present, &present(link.elements)));
+            Profile {
+                link_id: link.link_id,
+                complete: true,
+                address: Some(link.address),
+                body,
+                ..Profile::default()
+            }
+        })
+        .collect();
+    Basic {
+        address,
+        eml_capabilities: (eml_capabilities & EML_SUPPORT != 0).then_some(eml_capabilities),
+        mld_capabilities: Some(mld_capabilities),
+        profiles,
+        ..Basic::default()
+    }
+    .encode()
+}
+
+/// What an AP MLD's association response says of one requested link.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Answer {
+    pub link_id: u8,
+    pub status: u16,
+    /// The link's capability field.
+    pub capability: u16,
+    /// The link's elements, the response's own inherited.
+    pub elements: Vec<u8>,
+}
+
+/// The AP MLD `ap`'s Basic Multi-Link element in an association response
+/// with `elements`, and its answer for each link of `requested`, as
+/// `ieee80211_rx_mgmt_assoc_resp` and `ieee80211_assoc_config_link` take
+/// them: the element must name the AP MLD, each requested link needs a
+/// complete profile, and an accepted one its BSS parameters change count.
+pub fn association_response(
+    ap: Mac,
+    elements: &[u8],
+    requested: &[u8],
+) -> Result<(Basic, Vec<Answer>), Error> {
+    let basic = Basic::find(elements)?.ok_or(Error::Invalid("multi-link response element"))?;
+    if basic.address != ap {
+        return Err(Error::WrongPeer);
+    }
+    let answers = requested
+        .iter()
+        .map(|&link_id| {
+            let profile = basic
+                .profiles
+                .iter()
+                .find(|profile| profile.link_id == link_id && profile.complete)
+                .ok_or(Error::Invalid("link missing from association response"))?;
+            let mut body = &profile.body[..];
+            let capability = word(&mut body)?;
+            let status = word(&mut body)?;
+            if status == 0 && profile.bss_parameters_change_count.is_none() {
+                return Err(Error::Invalid(
+                    "per-STA profile BSS parameters change count",
+                ));
+            }
+            Ok(Answer {
+                link_id,
+                status,
+                capability,
+                elements: merged(body, elements)?,
+            })
+        })
+        .collect::<Result<_, Error>>()?;
+    Ok((basic, answers))
+}
+
+/// The authentication frame's Basic Multi-Link element of a non-AP MLD:
+/// its MLD address alone (IEEE 802.11be-2024 35.3.5.4).
+pub fn authentication(address: Mac) -> Vec<u8> {
+    Basic {
+        address,
+        ..Basic::default()
+    }
+    .encode()
 }
 
 /// The APs of the reporting AP's own MLD that `elements`' Reduced Neighbor
