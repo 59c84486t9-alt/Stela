@@ -42,6 +42,55 @@ pub struct Region {
     pub size: [u64; 3],
 }
 
+impl Region {
+    /// Validates the region of `descriptor`'s texture and returns its
+    /// subresource, offset and extent.
+    pub fn resolve(
+        &self,
+        descriptor: &TextureDescriptor,
+        aspects: ImageAspects,
+    ) -> Result<(Subresource, [i32; 3], [u32; 3])> {
+        ensure(
+            self.level < descriptor.mipmap_level_count,
+            "level beyond the texture's mipmaps",
+        )?;
+        ensure(
+            self.slice < descriptor.slice_count(),
+            "slice beyond the texture",
+        )?;
+        let size = descriptor.level_extent(self.level);
+        let block = descriptor.pixel_format.describe().block;
+        let block_size = [u64::from(block.width), u64::from(block.height), 1];
+        for axis in 0..3 {
+            let end = self.origin[axis].checked_add(self.size[axis]);
+            ensure(
+                end.is_some_and(|end| end <= size[axis]),
+                "region extends past the texture",
+            )?;
+            ensure(
+                self.origin[axis].is_multiple_of(block_size[axis]),
+                "regions start on block boundaries",
+            )?;
+            ensure(
+                self.size[axis].is_multiple_of(block_size[axis])
+                    || self.origin[axis] + self.size[axis] == size[axis],
+                "regions cover whole blocks",
+            )?;
+        }
+        let subresource = Subresource {
+            aspects,
+            mip_level: self.level as u32,
+            base_array_layer: self.slice as u32,
+            layer_count: 1,
+        };
+        Ok((
+            subresource,
+            self.origin.map(|origin| origin as i32),
+            self.size.map(|size| size as u32),
+        ))
+    }
+}
+
 /// A buffer's side of a buffer-texture copy.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BufferLayout {
@@ -55,52 +104,6 @@ pub struct BufferLayout {
 impl BlitTexture<'_> {
     fn description(&self) -> &'static Description {
         self.descriptor.pixel_format.describe()
-    }
-
-    /// Validates `region` and returns its subresource, offset and extent.
-    fn region(
-        &self,
-        region: &Region,
-        aspects: ImageAspects,
-    ) -> Result<(Subresource, [i32; 3], [u32; 3])> {
-        ensure(
-            region.level < self.descriptor.mipmap_level_count,
-            "level beyond the texture's mipmaps",
-        )?;
-        ensure(
-            region.slice < self.descriptor.slice_count(),
-            "slice beyond the texture",
-        )?;
-        let size = self.descriptor.level_extent(region.level);
-        let block = self.description().block;
-        let block_size = [u64::from(block.width), u64::from(block.height), 1];
-        for axis in 0..3 {
-            let end = region.origin[axis].checked_add(region.size[axis]);
-            ensure(
-                end.is_some_and(|end| end <= size[axis]),
-                "region extends past the texture",
-            )?;
-            ensure(
-                region.origin[axis].is_multiple_of(block_size[axis]),
-                "regions start on block boundaries",
-            )?;
-            ensure(
-                region.size[axis].is_multiple_of(block_size[axis])
-                    || region.origin[axis] + region.size[axis] == size[axis],
-                "regions cover whole blocks",
-            )?;
-        }
-        let subresource = Subresource {
-            aspects,
-            mip_level: region.level as u32,
-            base_array_layer: region.slice as u32,
-            layer_count: 1,
-        };
-        Ok((
-            subresource,
-            region.origin.map(|origin| origin as i32),
-            region.size.map(|size| size as u32),
-        ))
     }
 
     /// The aspect a copy reads or writes; combined depth-stencil formats
@@ -232,7 +235,7 @@ impl CommandBuffer {
         self.blit()?;
         check_copy_compatible(&src, &dst)?;
         let aspects = src.description().image_aspects();
-        let (src_subresource, src_offset, extent) = src.region(&src_region, aspects)?;
+        let (src_subresource, src_offset, extent) = src_region.resolve(src.descriptor, aspects)?;
         // Compressed-to-uncompressed copies scale the extent by the blocks.
         let (src_block, dst_block) = (src.description().block, dst.description().block);
         let size = [
@@ -246,7 +249,7 @@ impl CommandBuffer {
             origin: dst_origin,
             size,
         };
-        let (dst_subresource, dst_offset, _) = dst.region(&dst_region, aspects)?;
+        let (dst_subresource, dst_offset, _) = dst_region.resolve(dst.descriptor, aspects)?;
         if extent.contains(&0) {
             return Ok(());
         }
@@ -295,10 +298,10 @@ impl CommandBuffer {
                     origin: [0; 3],
                     size,
                 };
-                let (src, src_offset, extent) =
-                    src.region(&region(src_slice + slice, src_level + level), aspects)?;
-                let (dst, dst_offset, _) =
-                    dst.region(&region(dst_slice + slice, dst_level + level), aspects)?;
+                let (src, src_offset, extent) = region(src_slice + slice, src_level + level)
+                    .resolve(src.descriptor, aspects)?;
+                let (dst, dst_offset, _) = region(dst_slice + slice, dst_level + level)
+                    .resolve(dst.descriptor, aspects)?;
                 regions.push(ImageCopy {
                     src,
                     src_offset,
@@ -459,7 +462,7 @@ fn buffer_image_copy(
     options: BlitOption,
 ) -> Result<BufferImageCopy> {
     let aspect = texture.copy_aspect(options)?;
-    let (subresource, offset, extent) = texture.region(region, aspect)?;
+    let (subresource, offset, extent) = region.resolve(texture.descriptor, aspect)?;
     let block = texture.description().block;
     let block_bytes = texture.block_bytes(aspect);
     let rows = region.size[1].div_ceil(u64::from(block.height));

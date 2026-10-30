@@ -3,7 +3,10 @@ use super::{BufferId, Device, HeapId, SamplerId, Slab, TextureId};
 use crate::gpu::metal::{
     abi::{CpuCacheMode, HazardTrackingMode, HeapType, ResourceOptions, StorageMode, TextureType},
     binding::{HeapArray, NULL_DESCRIPTOR, ResourceId},
-    command_buffer::{BufferRef, blit::BufferLayout},
+    command_buffer::{
+        BufferRef,
+        blit::{BufferLayout, Region},
+    },
     error::{Error, Result, ensure, require},
     hazard::FULL,
     heap::{self, HeapAllocator, HeapDescriptor, SizeAndAlign},
@@ -16,7 +19,7 @@ use crate::gpu::metal::{
     shader::Compiler,
     sparse::{self, MappingRequest, SparseLayout, SparsePages, SparseTexture},
     vulkan::{
-        BufferCreate, BufferUsage, MemoryProperties,
+        BufferCreate, BufferUsage, ImageAspects, MemoryProperties,
         backend::{Backend, BufferAllocation, Descriptor, Object},
         command::{BufferImageCopy, Command, SparseBind},
         object::{
@@ -26,6 +29,7 @@ use crate::gpu::metal::{
     },
 };
 use alloc::{collections::BTreeMap, vec::Vec};
+use core::ops::Range;
 
 const TEXTURE_ARRAYS: [HeapArray; 2] = [HeapArray::SampledImages, HeapArray::StorageImages];
 const TEXEL_BUFFER_ARRAYS: [HeapArray; 2] = [
@@ -572,9 +576,95 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         Ok(created)
     }
 
-    /// `replaceRegion:mipmapLevel:slice:withBytes:bytesPerRow:bytesPerImage:`
-    /// with tightly packed bytes, for textures the CPU can write.
+    /// `replaceRegion:mipmapLevel:slice:withBytes:bytesPerRow:bytesPerImage:`,
+    /// for textures the CPU can write.
     pub fn replace_region(
+        &mut self,
+        id: TextureId,
+        region: &Region,
+        bytes: &[u8],
+        strides: Strides,
+    ) -> Result<()> {
+        let (copy, rows) = self.cpu_region(id, region, strides, bytes.len())?;
+        let packed: Vec<u8> = rows
+            .into_iter()
+            .flat_map(|row| &bytes[row])
+            .copied()
+            .collect();
+        self.write_region(id, &copy, &packed)
+    }
+
+    /// `getBytes:bytesPerRow:bytesPerImage:fromRegion:mipmapLevel:slice:`.
+    pub fn get_bytes(
+        &mut self,
+        id: TextureId,
+        region: &Region,
+        bytes: &mut [u8],
+        strides: Strides,
+    ) -> Result<()> {
+        let (copy, rows) = self.cpu_region(id, region, strides, bytes.len())?;
+        let mut packed = alloc::vec![0; rows.iter().map(ExactSizeIterator::len).sum()];
+        self.read_region(id, &copy, &mut packed)?;
+        let mut packed = packed.as_slice();
+        for row in rows {
+            let (head, rest) = packed.split_at(row.len());
+            bytes[row].copy_from_slice(head);
+            packed = rest;
+        }
+        Ok(())
+    }
+
+    /// The copy of a color texture's `region` and the ranges of its rows in
+    /// `length` bytes laid out by `strides`.
+    fn cpu_region(
+        &self,
+        id: TextureId,
+        region: &Region,
+        strides: Strides,
+        length: usize,
+    ) -> Result<(BufferImageCopy, Vec<Range<usize>>)> {
+        let descriptor = &self.resources.textures.get(id.0)?.descriptor;
+        let description = descriptor.pixel_format.describe();
+        ensure(
+            description.is_color(),
+            "the CPU reaches depth and stencil textures through blits",
+        )?;
+        let (subresource, offset, extent) = region.resolve(descriptor, ImageAspects::COLOR)?;
+        let block = description.block;
+        let row_bytes = region.size[0].div_ceil(u64::from(block.width)) * u64::from(block.bytes);
+        let rows = region.size[1].div_ceil(u64::from(block.height));
+        let images = region.size[2];
+        ensure(
+            strides.bytes_per_row >= row_bytes,
+            "bytesPerRow is smaller than a row",
+        )?;
+        ensure(
+            images <= 1 || strides.bytes_per_image >= strides.bytes_per_row * rows,
+            "bytesPerImage is smaller than an image",
+        )?;
+        let starts = (0..images).flat_map(|image| {
+            (0..rows).map(move |row| image * strides.bytes_per_image + row * strides.bytes_per_row)
+        });
+        let rows = starts
+            .map(|start| {
+                let end = start + row_bytes;
+                ensure(end <= length as u64, "the bytes end before the region")?;
+                Ok(start as usize..end as usize)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let copy = BufferImageCopy {
+            buffer_offset: 0,
+            buffer_row_length: 0,
+            buffer_image_height: 0,
+            subresource,
+            offset,
+            extent,
+        };
+        Ok((copy, rows))
+    }
+
+    /// Writes `region` from tightly packed bytes.
+    fn write_region(
         &mut self,
         id: TextureId,
         region: &BufferImageCopy,
@@ -604,8 +694,8 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         Ok(())
     }
 
-    /// `getBytes:bytesPerRow:bytesPerImage:fromRegion:mipmapLevel:slice:`.
-    pub fn get_bytes(
+    /// Reads `region` into tightly packed bytes.
+    fn read_region(
         &mut self,
         id: TextureId,
         region: &BufferImageCopy,
@@ -1334,6 +1424,14 @@ fn cpu_copy_rows(
         images: size[2] as u32,
         next: 0,
     })
+}
+
+/// The row strides of texels in CPU memory: `bytesPerRow`, and
+/// `bytesPerImage`, which only regions deeper than one image read.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Strides {
+    pub bytes_per_row: u64,
+    pub bytes_per_image: u64,
 }
 
 /// `region` reading its texels from the CPU copy, whose rows span the whole

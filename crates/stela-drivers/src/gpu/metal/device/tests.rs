@@ -4,6 +4,7 @@ use super::{
         MeshPipelineRequest, RenderPipelineRequest,
     },
     queue::{AttachmentRequest, CounterSet, RenderPassRequest},
+    resources::Strides,
     *,
 };
 use crate::gpu::metal::{
@@ -17,6 +18,7 @@ use crate::gpu::metal::{
     capabilities::Size,
     command_buffer::{
         BufferRef,
+        blit::Region,
         counters::{COUNTER_ERROR_VALUE, CounterSample},
         generated::{GeneratedLayoutKey, GeneratedWork},
         indirect::ExecutionRange,
@@ -33,9 +35,9 @@ use crate::gpu::metal::{
     shader::{LinkedFunction, Linking, Specialization, Stage},
     sparse::{MappingUpdate, SparseRegion},
     vulkan::{
-        ImageAspects, MemoryProperties, PrimitiveTopology, ShaderStages,
+        MemoryProperties, PrimitiveTopology, ShaderStages,
         backend::Descriptor,
-        command::{BufferImageCopy, Command, Subresource},
+        command::Command,
         object::{Buffer, MemoryRequest, Pipeline},
     },
 };
@@ -1016,29 +1018,54 @@ fn managed_textures_keep_a_cpu_copy_without_host_image_copy() {
         ..texture(PixelFormat::Rgba8Unorm, TextureUsage::SHADER_READ)
     };
     let texture = device.new_texture(&descriptor).unwrap();
-    let region = BufferImageCopy {
-        buffer_offset: 0,
-        buffer_row_length: 0,
-        buffer_image_height: 0,
-        subresource: Subresource {
-            aspects: ImageAspects::COLOR,
-            mip_level: 0,
-            base_array_layer: 0,
-            layer_count: 1,
-        },
-        offset: [2, 1, 0],
-        extent: [2, 2, 1],
+    let region = Region {
+        slice: 0,
+        level: 0,
+        origin: [2, 1, 0],
+        size: [2, 2, 1],
+    };
+    let tight = Strides {
+        bytes_per_row: 8,
+        bytes_per_image: 0,
     };
     let written: Vec<u8> = (0..16).collect();
-    device.replace_region(texture, &region, &written).unwrap();
+    device
+        .replace_region(texture, &region, &written, tight)
+        .unwrap();
     let mut read = [0; 16];
-    device.get_bytes(texture, &region, &mut read).unwrap();
+    device
+        .get_bytes(texture, &region, &mut read, tight)
+        .unwrap();
     assert_eq!(read[..], written[..], "reads come from the CPU copy");
-    assert!(
-        device
-            .replace_region(texture, &region, &written[..12])
-            .is_err()
-    );
+    // Rows of 8 bytes, 12 apart: the 4 between them are left alone.
+    let strided = Strides {
+        bytes_per_row: 12,
+        ..tight
+    };
+    let mut read = [0xee; 20];
+    device
+        .get_bytes(texture, &region, &mut read, strided)
+        .unwrap();
+    assert_eq!(read[..8], written[..8]);
+    assert_eq!(read[8..12], [0xee; 4]);
+    assert_eq!(read[12..], written[8..]);
+    let refused = [
+        (&written[..12], tight, "the bytes end before the region"),
+        (
+            &written[..],
+            Strides {
+                bytes_per_row: 4,
+                ..tight
+            },
+            "bytesPerRow is smaller than a row",
+        ),
+    ];
+    for (bytes, strides, reason) in refused {
+        assert_eq!(
+            device.replace_region(texture, &region, bytes, strides),
+            Err(Error::Invalid(reason))
+        );
+    }
 
     let level1 = device.texture_cpu_copy(texture, 1, 0).unwrap().unwrap();
     assert_eq!((level1.offset, level1.bytes_per_row), (8 * 4 * 4, 4 * 4));
