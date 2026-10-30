@@ -19,15 +19,20 @@ use super::{
         LibraryId, RenderPipelineId, SamplerId, TextureId,
     },
     error::Error,
+    indirect::IndirectCommandBufferId,
     shader::Compiler,
     vulkan::backend::Backend,
 };
 use crate::gpu::protocol::identity::{DeviceEpoch, ObjectHandle, ObjectTable};
 use alloc::{collections::BTreeMap, vec::Vec};
-use core::num::{NonZeroU32, NonZeroU64};
+use core::{
+    num::{NonZeroU32, NonZeroU64},
+    ops::Range,
+};
 use wire::{Fault, Handle, NegotiateRequest, NegotiateResponse, Operation, Record, Span, Status};
 
 mod commands;
+mod indirect;
 mod libraries;
 mod pipelines;
 mod queue;
@@ -49,6 +54,16 @@ fn region(record: &wire::RegionRecord) -> Region {
         origin: record.origin,
         size: record.size,
     }
+}
+
+/// `first..first + count` of an indirect command buffer's commands.
+fn command_range(first: u64, count: u64) -> Result<Range<usize>, Fault> {
+    let index = |value| usize::try_from(value).map_err(|_| Fault::malformed("command range"));
+    let first = index(first)?;
+    let end = first
+        .checked_add(index(count)?)
+        .ok_or(Fault::malformed("command range"))?;
+    Ok(first..end)
 }
 
 fn boolean(raw: u32) -> Result<bool, Fault> {
@@ -83,6 +98,7 @@ enum Object {
     ComputePipeline(ComputePipelineId),
     Event(EventId),
     CounterBuffer(CounterBufferId),
+    IndirectCommandBuffer(IndirectCommandBufferId),
 }
 
 /// A kind of object a handle may name.
@@ -114,6 +130,7 @@ kinds! {
     ComputePipeline(ComputePipelineId);
     Event(EventId);
     CounterBuffer(CounterBufferId);
+    IndirectCommandBuffer(IndirectCommandBufferId);
 }
 
 /// An object and when its connection made it.
@@ -355,6 +372,10 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             }
             Operation::Wait => self.wait(&mut call),
             Operation::Commit => self.commit(&mut call),
+            Operation::NewIndirectCommandBuffer => self.new_indirect_command_buffer(&mut call),
+            Operation::IndirectResourceId => self.indirect_resource_id(&mut call),
+            Operation::EncodeIndirect => self.encode_indirect(&mut call),
+            Operation::ResetIndirect => self.reset_indirect(&mut call),
         }
     }
 
@@ -458,6 +479,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             Object::ComputePipeline(id) => device.destroy_compute_pipeline(id),
             Object::Event(id) => device.destroy_event(id),
             Object::CounterBuffer(id) => device.destroy_counter_sample_buffer(id),
+            Object::IndirectCommandBuffer(id) => device.destroy_indirect_command_buffer(id),
         }
     }
 }

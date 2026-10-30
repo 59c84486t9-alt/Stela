@@ -607,6 +607,46 @@ raw_enum! {
     }
 }
 
+records! {
+    /// `newIndirectCommandBufferWithDescriptor:maxCommandCount:options:`:
+    /// an `MTLIndirectCommandType` set and the `IndirectInherits` set.
+    pub struct NewIndirectRequest {
+        pub command_types: u64,
+        pub inherits: u64,
+        pub max_command_count: u64,
+        pub max_vertex_buffer_bind_count: u64,
+        pub max_fragment_buffer_bind_count: u64,
+        pub max_kernel_buffer_bind_count: u64,
+        pub max_kernel_threadgroup_memory_bind_count: u64,
+        pub max_object_buffer_bind_count: u64,
+        pub max_mesh_buffer_bind_count: u64,
+        pub support_ray_tracing: u32,
+        pub support_dynamic_attribute_stride: u32,
+    }
+
+    /// `EncodeIndirect`: a stream of `IndirectTarget`ed entries for the
+    /// buffer's commands.
+    pub struct EncodeIndirectRequest {
+        pub buffer: u64,
+        pub commands: Span,
+    }
+}
+
+option_set! {
+    /// The state an indirect command buffer's commands inherit from the
+    /// encoder that executes them.
+    pub struct IndirectInherits: u64 {
+        const PIPELINE_STATE = 1 << 0;
+        const BUFFERS = 1 << 1;
+        const CULL_MODE = 1 << 2;
+        const DEPTH_STENCIL_STATE = 1 << 3;
+        const DEPTH_BIAS = 1 << 4;
+        const DEPTH_CLIP_MODE = 1 << 5;
+        const FRONT_FACING_WINDING = 1 << 6;
+        const TRIANGLE_FILL_MODE = 1 << 7;
+    }
+}
+
 option_set! {
     /// What a pipeline request asks besides its records.
     pub struct PipelineFlags: u64 {
@@ -778,6 +818,14 @@ operations! {
     /// Replays a command stream into a command buffer, submits it and
     /// answers its serial.
     Commit = 0x040b => commands::CommitRequest, Value;
+    NewIndirectCommandBuffer = 0x0501 => NewIndirectRequest, Handle;
+    /// `gpuResourceID`, which makes the buffer GPU-resident.
+    IndirectResourceId = 0x0502 => Handle, Value;
+    /// Encodes commands from the CPU (`indirectRenderCommandAtIndex:`,
+    /// `indirectComputeCommandAtIndex:`).
+    EncodeIndirect = 0x0503 => EncodeIndirectRequest, Empty;
+    /// `resetWithRange:`.
+    ResetIndirect = 0x0504 => commands::IndirectRange, Empty;
 }
 
 pub mod commands;

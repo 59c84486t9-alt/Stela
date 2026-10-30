@@ -55,7 +55,11 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             }
             ComputeCode::SetBytes => {
                 let (SetBytes { index }, bytes) = payload.split()?;
-                commands.set_compute_bytes(&mut self.device.resolver(), bytes, binding(index)?)?;
+                commands.set_compute_bytes(
+                    &mut self.device.resolver(),
+                    bytes.bytes(),
+                    binding(index)?,
+                )?;
             }
             ComputeCode::SetTexture => {
                 let SetTexture { texture, index } = payload.record()?;

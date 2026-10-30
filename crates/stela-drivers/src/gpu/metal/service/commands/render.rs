@@ -1,22 +1,21 @@
 //! Commands of `MTLRenderCommandEncoder`.
-use super::{Payload, binding, grid};
+use super::{Payload, binding, count, depth_stencil_state, grid, index_type, primitive};
 use crate::gpu::metal::{
     abi::{
-        BarrierScope, CompareFunction, CullMode, DepthClipMode, IndexType, LoadAction,
-        MultisampleDepthResolveFilter, MultisampleStencilResolveFilter, PrimitiveType,
-        RenderStages, StencilOperation, StoreAction, StoreActionOptions, TriangleFillMode,
-        VisibilityResultMode, Winding,
+        BarrierScope, CullMode, DepthClipMode, LoadAction, MultisampleDepthResolveFilter,
+        MultisampleStencilResolveFilter, RenderStages, StoreAction, StoreActionOptions,
+        TriangleFillMode, VisibilityResultMode, Winding,
     },
     command_buffer::{
         CommandBuffer,
-        render::{PassBoundary, PatchSource, ScissorRect, Viewport},
+        render::{PassBoundary, ScissorRect, Viewport},
     },
     device::{
         BufferId, CounterBufferId, RenderPipelineId, TextureId,
         queue::{AttachmentRequest, RenderPassRequest},
     },
     pass::AttachmentSlot,
-    pipeline::{DepthStencilDescriptor, MAX_COLOR_ATTACHMENTS, StencilDescriptor, depth_stencil},
+    pipeline::MAX_COLOR_ATTACHMENTS,
     service::{
         Service, boolean, known,
         pipelines::render_stage,
@@ -24,13 +23,12 @@ use crate::gpu::metal::{
             self, Fault, Status,
             commands::{
                 BeginRender, BlendColor, ColorStoreAction, CounterSampleRecord, DepthBias,
-                DepthStencilRecord, DrawIndexed, DrawIndexedIndirect, DrawIndirect, DrawMesh,
-                DrawMeshIndirect, DrawPatches, DrawPatchesIndirect, DrawPrimitives, FactorBuffer,
-                FactorScale, Mode, PassAttachmentRecord, PassBoundaryCode, PatchSourceRecord,
-                RenderBarrier, RenderCode, ScissorRecord, SetPipeline, StageBuffer,
-                StageBufferOffset, StageBytes, StageSampler, StageTexture, StencilRecord,
-                StencilReference, VertexBufferStride, ViewMappingRecord, ViewportRecord,
-                VisibilityMode,
+                DrawIndexed, DrawIndexedIndirect, DrawIndirect, DrawMesh, DrawMeshIndirect,
+                DrawPatches, DrawPatchesIndirect, DrawPrimitives, FactorBuffer, FactorScale, Mode,
+                PassAttachmentRecord, PassBoundaryCode, RenderBarrier, RenderCode, ScissorRecord,
+                SetPipeline, StageBuffer, StageBufferOffset, StageBytes, StageSampler,
+                StageTexture, StencilReference, VertexBufferStride, ViewMappingRecord,
+                ViewportRecord, VisibilityMode,
             },
         },
     },
@@ -51,7 +49,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         match code {
             RenderCode::Begin => {
                 let (record, data) = payload.split::<BeginRender>()?;
-                let request = self.render_pass(connection, &record, data)?;
+                let request = self.render_pass(connection, &record, data.bytes())?;
                 self.device.begin_render(commands, &request)?;
             }
             RenderCode::SetPipeline => {
@@ -87,7 +85,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
                 commands.set_render_bytes(
                     &mut self.device.resolver(),
                     render_stage(stage)?,
-                    bytes,
+                    bytes.bytes(),
                     binding(index)?,
                 )?;
             }
@@ -168,8 +166,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
                 commands.set_depth_bias(constant, slope, clamp)?;
             }
             RenderCode::SetDepthStencilState => {
-                let record: DepthStencilRecord = payload.record()?;
-                let state = depth_stencil(&depth_stencil_descriptor(&record)?);
+                let state = depth_stencil_state(&payload.record()?)?;
                 commands.set_depth_stencil_state(Some(&state))?;
             }
             RenderCode::SetStencilReference => {
@@ -459,68 +456,8 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         let buffer = self.object::<CounterBufferId>(connection, record.buffer)?;
         Ok((buffer, index, boundary))
     }
-
-    fn patch_source(
-        &self,
-        connection: NonZeroU64,
-        record: &PatchSourceRecord,
-    ) -> Result<PatchSource, Fault> {
-        let indices = |buffer, offset| {
-            Ok::<_, Fault>(
-                self.optional_buffer(connection, buffer)?
-                    .map(|buffer| (buffer, offset)),
-            )
-        };
-        Ok(PatchSource {
-            control_points: u32::try_from(record.control_points)
-                .map_err(|_| Fault::malformed("patch control points"))?,
-            patch_indices: indices(record.patch_index_buffer, record.patch_index_offset)?,
-            control_point_indices: indices(
-                record.control_point_index_buffer,
-                record.control_point_index_offset,
-            )?,
-        })
-    }
-}
-
-/// A draw's count, start or base, which the GPU takes in 32 bits.
-fn count(value: u64) -> Result<u32, Fault> {
-    u32::try_from(value).map_err(|_| Fault::new(Status::Invalid, "a draw argument exceeds 32 bits"))
-}
-
-fn primitive(raw: u64) -> Result<PrimitiveType, Fault> {
-    known(PrimitiveType::from_raw(raw), "primitive type")
-}
-
-fn index_type(raw: u64) -> Result<IndexType, Fault> {
-    known(IndexType::from_raw(raw), "index type")
 }
 
 fn store_action(raw: u64) -> Result<StoreAction, Fault> {
     known(StoreAction::from_raw(raw), "store action")
-}
-
-fn depth_stencil_descriptor(record: &DepthStencilRecord) -> Result<DepthStencilDescriptor, Fault> {
-    Ok(DepthStencilDescriptor {
-        depth_compare_function: compare_function(record.depth_compare_function)?,
-        depth_write_enabled: boolean(record.depth_write_enabled)?,
-        front_face_stencil: stencil(&record.front_face_stencil)?,
-        back_face_stencil: stencil(&record.back_face_stencil)?,
-    })
-}
-
-fn stencil(record: &StencilRecord) -> Result<StencilDescriptor, Fault> {
-    let operation = |raw| known(StencilOperation::from_raw(raw), "stencil operation");
-    Ok(StencilDescriptor {
-        stencil_compare_function: compare_function(record.compare_function)?,
-        stencil_failure_operation: operation(record.stencil_failure_operation)?,
-        depth_failure_operation: operation(record.depth_failure_operation)?,
-        depth_stencil_pass_operation: operation(record.depth_stencil_pass_operation)?,
-        read_mask: record.read_mask,
-        write_mask: record.write_mask,
-    })
-}
-
-fn compare_function(raw: u64) -> Result<CompareFunction, Fault> {
-    known(CompareFunction::from_raw(raw), "compare function")
 }

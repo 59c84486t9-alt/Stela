@@ -546,6 +546,47 @@ records! {
     }
 }
 
+records! {
+    /// `executeCommandsInBuffer:withRange:`, and the blit encoder's
+    /// `resetCommandsInBuffer:withRange:` and
+    /// `optimizeIndirectCommandBuffer:withRange:`.
+    pub struct IndirectRange {
+        pub buffer: u64,
+        pub first: u64,
+        pub count: u64,
+    }
+
+    /// `executeCommandsInBuffer:indirectBuffer:indirectBufferOffset:`.
+    pub struct ExecuteIndirect {
+        pub buffer: u64,
+        pub range_buffer: u64,
+        pub offset: u64,
+    }
+
+    /// `copyIndirectCommandBuffer:sourceRange:destination:
+    /// destinationIndex:`.
+    pub struct CopyCommands {
+        pub source: u64,
+        pub first: u64,
+        pub count: u64,
+        pub destination: u64,
+        pub index: u64,
+    }
+
+    /// The command of an indirect command buffer that an encoding entry
+    /// edits; the entry's record follows.
+    pub struct IndirectTarget {
+        pub command: u64,
+    }
+
+    /// `drawPatches:…` of an indirect render command and its tessellation
+    /// factor buffer.
+    pub struct IndirectPatches {
+        pub draw: DrawPatches,
+        pub factors: FactorBuffer,
+    }
+}
+
 raw_enum! {
     /// Where a pass writes a counter sample.
     pub enum PassBoundaryCode: u64 {
@@ -629,6 +670,105 @@ raw_enum! {
         SynchronizeTexture = 0x020a,
         /// `ResolveCounters`.
         ResolveCounters = 0x020b,
+    }
+}
+
+raw_enum! {
+    /// Commands of render, compute and blit encoders on indirect command
+    /// buffers.
+    pub enum IndirectCode: u32 {
+        /// `IndirectRange`, of a render or compute encoder.
+        Execute = 0x0501,
+        /// `ExecuteIndirect`, of a render or compute encoder.
+        ExecuteIndirect = 0x0502,
+        /// `IndirectRange`, of a blit encoder.
+        Reset = 0x0503,
+        /// `CopyCommands`, of a blit encoder.
+        Copy = 0x0504,
+        /// `IndirectRange`, of a blit encoder.
+        Optimize = 0x0505,
+    }
+}
+
+raw_enum! {
+    /// `EncodeIndirect` entries for `MTLIndirectRenderCommand`: each is an
+    /// `IndirectTarget` and the record of the render command alike.
+    pub enum IndirectRenderCode: u32 {
+        /// `SetPipeline`.
+        SetPipeline = 0x0601,
+        /// `StageBuffer`.
+        SetBuffer = 0x0602,
+        /// `VertexBufferStride`.
+        SetVertexBufferStride = 0x0603,
+        /// `Mode`: an `MTLCullMode`.
+        SetCullMode = 0x0604,
+        /// `Mode`: an `MTLWinding`.
+        SetFrontFacingWinding = 0x0605,
+        /// `DepthBias`.
+        SetDepthBias = 0x0606,
+        /// `DepthStencilRecord`.
+        SetDepthStencilState = 0x0607,
+        /// `Mode`: an `MTLTriangleFillMode`.
+        SetTriangleFillMode = 0x0608,
+        /// `Mode`: an `MTLDepthClipMode`.
+        SetDepthClipMode = 0x0609,
+        /// No record.
+        SetBarrier = 0x060a,
+        /// No record.
+        ClearBarrier = 0x060b,
+        /// `DrawPrimitives`.
+        DrawPrimitives = 0x060c,
+        /// `DrawIndexed`.
+        DrawIndexed = 0x060d,
+        /// `IndirectPatches`.
+        DrawPatches = 0x060e,
+        /// `DrawMesh`.
+        DrawMeshThreadgroups = 0x060f,
+        /// `DrawMesh`.
+        DrawMeshThreads = 0x0610,
+        /// No record.
+        Reset = 0x0611,
+    }
+}
+
+raw_enum! {
+    /// `EncodeIndirect` entries for `MTLIndirectComputeCommand`.
+    pub enum IndirectComputeCode: u32 {
+        /// `SetPipeline`.
+        SetPipeline = 0x0701,
+        /// `SetBuffer`.
+        SetBuffer = 0x0702,
+        /// `SetThreadgroupMemory`.
+        SetThreadgroupMemory = 0x0703,
+        /// `StageInRegion`.
+        SetStageInRegion = 0x0704,
+        /// No record.
+        SetBarrier = 0x0705,
+        /// No record.
+        ClearBarrier = 0x0706,
+        /// `Dispatch`.
+        DispatchThreadgroups = 0x0707,
+        /// `Dispatch`.
+        DispatchThreads = 0x0708,
+        /// No record.
+        Reset = 0x0709,
+    }
+}
+
+/// An `EncodeIndirect` entry's code.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EncodeCode {
+    Render(IndirectRenderCode),
+    Compute(IndirectComputeCode),
+}
+
+impl EncodeCode {
+    pub fn from_raw(raw: u32) -> Option<Self> {
+        match raw >> 8 {
+            0x06 => IndirectRenderCode::from_raw(raw).map(Self::Render),
+            0x07 => IndirectComputeCode::from_raw(raw).map(Self::Compute),
+            _ => None,
+        }
     }
 }
 
@@ -730,6 +870,7 @@ pub enum CommandCode {
     Blit(BlitCode),
     Render(RenderCode),
     ResourceState(ResourceStateCode),
+    Indirect(IndirectCode),
 }
 
 impl CommandCode {
@@ -740,6 +881,7 @@ impl CommandCode {
             0x02 => BlitCode::from_raw(raw).map(Self::Blit),
             0x03 => RenderCode::from_raw(raw).map(Self::Render),
             0x04 => ResourceStateCode::from_raw(raw).map(Self::ResourceState),
+            0x05 => IndirectCode::from_raw(raw).map(Self::Indirect),
             _ => None,
         }
     }

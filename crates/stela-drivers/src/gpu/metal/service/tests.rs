@@ -1,11 +1,13 @@
 use super::{
     GuestMemory, Outcome, Service,
     wire::{
-        self, ColorAttachmentRecord, ConstantInfo, ConstantRecord, Empty, Fault,
+        self, BufferResponse, ColorAttachmentRecord, ConstantInfo, ConstantRecord, Empty, Fault,
         FunctionReflectionRequest, FunctionReflectionResponse, Handle, Length,
         LibraryFunctionNamesRequest, LinkedFunctionsRecord, NegotiateRequest, NegotiateResponse,
-        NewFunctionRequest, NewLibraryRequest, NewRenderPipelineRequest, Operation, PipelineFlags,
-        Record, RenderTargetsRecord, Span, Status, TessellationRecord, TextureDescriptorRecord,
+        NewBufferRequest, NewFunctionRequest, NewLibraryRequest, NewRenderPipelineRequest,
+        Operation, PipelineFlags, Record, RenderTargetsRecord, Span, Status, TessellationRecord,
+        TextureDescriptorRecord, Value,
+        commands::{CommandBufferCode, CommandHeader, CommitRequest},
     },
 };
 use crate::gpu::{
@@ -24,6 +26,7 @@ use crate::gpu::{
         },
         library::tests::fixture,
         pixel_format::PixelFormat,
+        vulkan::command::Command,
     },
     protocol::identity::DeviceEpoch,
 };
@@ -31,6 +34,7 @@ use alloc::{vec, vec::Vec};
 use core::num::NonZeroU64;
 
 mod commands;
+mod indirect;
 mod pipelines;
 mod queue;
 mod resources;
@@ -170,6 +174,69 @@ fn render_pipeline_request(vertex: u64, fragment: u64) -> NewRenderPipelineReque
         fragment_linked_functions: LinkedFunctionsRecord::default(),
         flags: PipelineFlags::EMPTY.bits(),
     }
+}
+
+/// A command or encoding stream under construction.
+#[derive(Default)]
+struct Stream(Vec<u8>);
+
+impl Stream {
+    /// An entry of `parts`, one after the other.
+    fn entry(&mut self, code: u32, parts: &[&[u8]]) -> &mut Self {
+        let length = parts.iter().map(|part| part.len()).sum::<usize>() as u32;
+        self.0
+            .extend_from_slice(wire::bytes(&CommandHeader { code, length }));
+        for part in parts {
+            self.0.extend_from_slice(part);
+        }
+        self.0.resize(self.0.len().next_multiple_of(8), 0);
+        self
+    }
+
+    fn push<T: Record>(&mut self, code: u32, record: &T, data: &[u8]) -> &mut Self {
+        self.entry(code, &[wire::bytes(record), data])
+    }
+
+    fn end(&mut self) -> &mut Self {
+        self.push(CommandBufferCode::EndEncoding.raw(), &Empty {}, &[])
+    }
+}
+
+fn commit(
+    service: &mut TestService,
+    connection: NonZeroU64,
+    stream: &Stream,
+) -> Result<Value, Outcome> {
+    let memory = &mut Memory::default();
+    let request = CommitRequest {
+        commands: memory.put(&stream.0),
+    };
+    call(service, connection, Operation::Commit, &request, memory)
+}
+
+fn new_buffer(service: &mut TestService, connection: NonZeroU64, storage_mode: StorageMode) -> u64 {
+    let request = NewBufferRequest {
+        length: 256,
+        options: options(storage_mode),
+    };
+    let buffer: BufferResponse = call(
+        service,
+        connection,
+        Operation::NewBuffer,
+        &request,
+        &mut Memory::default(),
+    )
+    .unwrap();
+    buffer.handle
+}
+
+/// The commands of the last submission.
+fn submitted(service: &mut TestService) -> Vec<Command> {
+    let segments = service.device().backend().submissions.last().unwrap();
+    segments
+        .iter()
+        .flat_map(|segment| segment.commands.iter().cloned())
+        .collect()
 }
 
 fn service() -> TestService {

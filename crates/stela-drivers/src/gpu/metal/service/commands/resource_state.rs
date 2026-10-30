@@ -7,7 +7,7 @@ use crate::gpu::metal::{
     service::{
         Service, known,
         wire::{
-            self, Empty, Fault,
+            Empty, Fault,
             commands::{
                 MappingRecord, MoveEndRecord, MoveMappings, ResourceStateCode,
                 UpdateMappingIndirect, UpdateMappings,
@@ -36,7 +36,8 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             ResourceStateCode::UpdateMappings => {
                 let (UpdateMappings { texture, mode }, data) = payload.split()?;
                 let image = self.sparse_image(connection, texture)?;
-                let updates = wire::read_array::<MappingRecord>(data)?
+                let updates = data
+                    .list::<MappingRecord>()?
                     .into_iter()
                     .map(|record| MappingUpdate {
                         level: record.level,

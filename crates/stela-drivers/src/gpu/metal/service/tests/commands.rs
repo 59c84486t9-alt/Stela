@@ -1,89 +1,26 @@
 use super::{
-    Memory, TestService, call, connect, new_function, new_library, options,
-    render_pipeline_request, service, status, texture,
+    Memory, Stream, call, commit, connect, new_buffer, new_function, new_library,
+    render_pipeline_request, service, status, submitted, texture,
 };
 use crate::gpu::metal::{
     abi::{
         CompareFunction, CullMode, DispatchType, LoadAction, PrimitiveType, StencilOperation,
         StorageMode, StoreAction, TextureUsage,
     },
-    service::{
-        Outcome,
-        wire::{
-            self, BufferResponse, ComputePipelineResponse, CounterSetCode, Empty, Handle,
-            NewBufferRequest, NewComputePipelineRequest, NewCounterBufferRequest, Operation,
-            Record, RenderPipelineResponse, Status, TextureDescriptorRecord, TextureResponse,
-            Value,
-            commands::{
-                BeginCompute, BeginRender, BlitCode, CommandBufferCode, CommandHeader,
-                CommitRequest, ComputeCode, CopyBuffer, DepthStencilRecord, Dispatch,
-                DrawPrimitives, FillBuffer, MappingRecord, Mode, PassAttachmentRecord, RenderCode,
-                ResolveCounters, Resource, ResourceStateCode, SampleCounters, SetBuffer, SetBytes,
-                SetPipeline, StencilRecord, UpdateMappings, ViewportRecord,
-            },
+    service::wire::{
+        self, ComputePipelineResponse, CounterSetCode, Empty, Handle, NewComputePipelineRequest,
+        NewCounterBufferRequest, Operation, RenderPipelineResponse, Status,
+        TextureDescriptorRecord, TextureResponse, Value,
+        commands::{
+            BeginCompute, BeginRender, BlitCode, CommandBufferCode, ComputeCode, CopyBuffer,
+            DepthStencilRecord, Dispatch, DrawPrimitives, FillBuffer, MappingRecord, Mode,
+            PassAttachmentRecord, RenderCode, ResolveCounters, Resource, ResourceStateCode,
+            SampleCounters, SetBuffer, SetBytes, SetPipeline, StencilRecord, UpdateMappings,
+            ViewportRecord,
         },
     },
     vulkan::command::Command,
 };
-use alloc::vec::Vec;
-use core::num::NonZeroU64;
-
-/// A command stream under construction.
-#[derive(Default)]
-struct Stream(Vec<u8>);
-
-impl Stream {
-    fn push<T: Record>(&mut self, code: u32, record: &T, data: &[u8]) -> &mut Self {
-        let length = (core::mem::size_of::<T>() + data.len()) as u32;
-        self.0
-            .extend_from_slice(wire::bytes(&CommandHeader { code, length }));
-        self.0.extend_from_slice(wire::bytes(record));
-        self.0.extend_from_slice(data);
-        self.0.resize(self.0.len().next_multiple_of(8), 0);
-        self
-    }
-
-    fn end(&mut self) -> &mut Self {
-        self.push(CommandBufferCode::EndEncoding.raw(), &Empty {}, &[])
-    }
-}
-
-fn commit(
-    service: &mut TestService,
-    connection: NonZeroU64,
-    stream: &Stream,
-) -> Result<Value, Outcome> {
-    let memory = &mut Memory::default();
-    let request = CommitRequest {
-        commands: memory.put(&stream.0),
-    };
-    call(service, connection, Operation::Commit, &request, memory)
-}
-
-fn new_buffer(service: &mut TestService, connection: NonZeroU64, storage_mode: StorageMode) -> u64 {
-    let request = NewBufferRequest {
-        length: 256,
-        options: options(storage_mode),
-    };
-    let buffer: BufferResponse = call(
-        service,
-        connection,
-        Operation::NewBuffer,
-        &request,
-        &mut Memory::default(),
-    )
-    .unwrap();
-    buffer.handle
-}
-
-/// The commands of the last submission.
-fn submitted(service: &mut TestService) -> Vec<Command> {
-    let segments = service.device().backend().submissions.last().unwrap();
-    segments
-        .iter()
-        .flat_map(|segment| segment.commands.iter().cloned())
-        .collect()
-}
 
 #[test]
 fn compute_commands_replay_into_a_submitted_command_buffer() {
