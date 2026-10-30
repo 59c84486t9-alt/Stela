@@ -25,7 +25,10 @@ use crate::usb::{
 pub use crate::usb::{
     ecm::Counters as UsbNetworkCounters,
     host::{Descriptor as UsbDescriptor, MuxEndpoints},
-    mux::{State as MuxState, StreamId as MuxStream, StreamState as MuxStreamState},
+    mux::{
+        Backpressure as MuxBackpressure, State as MuxState, StreamId as MuxStream,
+        StreamState as MuxStreamState,
+    },
     session::Log as UsbLog,
 };
 use alloc::{boxed::Box, format, string::String, vec, vec::Vec};
@@ -509,6 +512,9 @@ impl<'a> UsbClient<'a> {
 impl UsbClient<'_> {
     pub fn mux_state(&self) -> MuxState {
         self.0.mux_state()
+    }
+    pub fn backpressure(&self) -> MuxBackpressure {
+        self.0.backpressure()
     }
     pub fn control_ready(&self) -> bool {
         self.0.control_ready()

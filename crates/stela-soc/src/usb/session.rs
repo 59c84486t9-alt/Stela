@@ -4,7 +4,7 @@
 use super::{
     BusPeer, MAX_PACKET,
     host::{Descriptor, Host, TransferStatus},
-    mux::{Mux, State, StreamId, StreamState},
+    mux::{Backpressure, Mux, State, StreamId, StreamState},
     plist::{self, Channel},
 };
 use crate::Result;
@@ -106,6 +106,9 @@ impl Session {
     }
     pub fn control_ready(&self) -> bool {
         self.mux.control_ready()
+    }
+    pub fn backpressure(&self) -> Backpressure {
+        self.mux.backpressure()
     }
     pub fn state(&self, stream: StreamId) -> Result<StreamState> {
         self.mux.stream_state(stream)

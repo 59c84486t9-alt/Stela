@@ -37,7 +37,8 @@ use {
     stela_runtime::restore::route::Route, stela_runtime::restore::source::Extent,
     stela_runtime::restore::store::Store, stela_runtime::restore::store::Verify,
     stela_runtime::restore::stream::ByteStream, stela_soc::machine::AppleDevices,
-    stela_soc::machine::MuxStream, stela_soc::machine::UsbClient, stela_soc::machine::UsbId,
+    stela_soc::machine::MuxBackpressure, stela_soc::machine::MuxStream,
+    stela_soc::machine::UsbClient, stela_soc::machine::UsbId,
 };
 
 /// The bundle's boot manifest (`stela_loader::boot_bundle`).
@@ -189,6 +190,8 @@ pub struct Experiment {
     failure: Option<(String, u64)>,
     ledger: usize,
     mode: Mode,
+    /// The mux's backpressure as the last poll found it.
+    backpressure: MuxBackpressure,
 }
 
 /// How long the guest runs on after its restore fails. A failure is often
@@ -730,6 +733,7 @@ impl Experiment {
             failure: None,
             ledger: 0,
             mode,
+            backpressure: MuxBackpressure::default(),
         })
     }
     /// Read ahead from the host's storage, without the guest's devices.
@@ -757,17 +761,23 @@ impl Experiment {
     }
 
     /// The image sent so far and the share of polls the host was behind
-    /// (no chunk read ahead) or the guest was (its window full), while the
-    /// restore sends one.
+    /// (no chunk read ahead) or the guest was (the mux took no more), while
+    /// the restore sends one; and the writes the guest's receive window and
+    /// the mux's transmit queue each refused, with the largest window.
     pub fn asr_report(&self) -> Option<String> {
         let asr = self.driver.asr()?;
         let (sent, size) = asr.progress();
+        let backpressure = self.backpressure;
         Some(format!(
-            "ASR HOST sent={}MiB/{}MiB polls_host_behind={} polls_guest_full={}",
+            "ASR HOST sent={}MiB/{}MiB polls_host_behind={} polls_guest_full={} \
+             refused_window={} refused_queue={} largest_window={}KiB",
             sent >> 20,
             size >> 20,
             asr.starved,
-            asr.full
+            asr.full,
+            backpressure.window,
+            backpressure.queue,
+            backpressure.largest_window >> 10
         ))
     }
 
@@ -790,6 +800,7 @@ impl Experiment {
             proxy.poll(&mut client);
         }
         let result = self.driver.poll_ports(&mut client);
+        self.backpressure = client.backpressure();
         for message in &self.driver.session.ledger()[self.ledger..] {
             output::arguments(format_args!("{label} ledger={message:?}\n"));
         }

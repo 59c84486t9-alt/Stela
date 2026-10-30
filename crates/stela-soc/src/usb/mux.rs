@@ -73,6 +73,16 @@ pub struct Mux {
     /// TCP packets shorter than a TCP header, which usbmuxd drops
     /// ("Incoming TCP packet is too small").
     short_tcp: u64,
+    backpressure: Backpressure,
+}
+/// What held back [`Mux::write`] since the connection began: the writes the
+/// peer's receive window refused and those the transmit queue did, and the
+/// largest window the peer advertised.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Backpressure {
+    pub window: u64,
+    pub queue: u64,
+    pub largest_window: u32,
 }
 impl Default for Mux {
     fn default() -> Self {
@@ -97,6 +107,7 @@ impl Mux {
             streams: Vec::new(),
             logs: VecDeque::new(),
             short_tcp: 0,
+            backpressure: Backpressure::default(),
         };
         let mut version = Vec::new();
         version.extend_from_slice(&2u32.to_be_bytes());
@@ -117,6 +128,9 @@ impl Mux {
     }
     pub fn state(&self) -> State {
         self.state
+    }
+    pub fn backpressure(&self) -> Backpressure {
+        self.backpressure
     }
     pub fn take_packet(&mut self) -> Option<Vec<u8>> {
         let packet = self.outgoing.pop_front()?;
@@ -260,7 +274,15 @@ impl Mux {
             .len()
             .min(available)
             .min(TX_MTU - self.header() - TCP_HEADER);
-        if count == 0 || !self.can_emit(self.header() + TCP_HEADER + count) {
+        if bytes.is_empty() {
+            return Ok(0);
+        }
+        if count == 0 {
+            self.backpressure.window += 1;
+            return Ok(0);
+        }
+        if !self.can_emit(self.header() + TCP_HEADER + count) {
+            self.backpressure.queue += 1;
             return Ok(0);
         }
         let sequence = stream.next;
@@ -467,6 +489,7 @@ impl Mux {
         }
         stream.acknowledged = acknowledgement;
         stream.window = window;
+        self.backpressure.largest_window = self.backpressure.largest_window.max(window);
         if connecting || !data.is_empty() {
             stream.reply = Some(ACK);
         }
@@ -674,6 +697,19 @@ mod tests {
         while mux.emit(CONTROL, b"log").is_ok() {}
         assert!(mux.queued_bytes <= MAX_FRAME);
         assert!(mux.outgoing.len() <= MAX_QUEUED);
+    }
+    #[test]
+    fn backpressure_names_the_window_or_the_queue_that_refused_a_write() {
+        let (mut mux, id) = connected();
+        assert_eq!(mux.backpressure().largest_window, 256 << 8);
+        mux.streams[0].window = 4;
+        assert_eq!(mux.write(id, b"abcdef"), Ok(4));
+        assert_eq!(mux.write(id, b"ef"), Ok(0));
+        assert_eq!(mux.write(id, b""), Ok(0));
+        mux.streams[0].window = u32::MAX;
+        while mux.write(id, &[0; 4096]).unwrap() != 0 {}
+        let backpressure = mux.backpressure();
+        assert_eq!((backpressure.window, backpressure.queue), (1, 1));
     }
     #[test]
     fn replies_owed_while_writes_fill_the_queue_are_coalesced_not_fatal() {
