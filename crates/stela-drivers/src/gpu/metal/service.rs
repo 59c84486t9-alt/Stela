@@ -335,6 +335,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             Operation::NewFunction => self.new_function(&mut call),
             Operation::FunctionReflection => self.function_reflection(&mut call),
             Operation::FunctionBindings => self.function_bindings(&mut call),
+            Operation::ArgumentLayout => reflection::argument_layout(&mut call),
             Operation::NewBuffer => self.new_buffer(&mut call),
             Operation::NewBufferNoCopy => self.new_buffer_no_copy(&mut call),
             Operation::BufferDidModifyRange => self.buffer_did_modify_range(&mut call),

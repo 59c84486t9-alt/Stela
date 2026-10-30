@@ -281,6 +281,30 @@ records! {
         pub reserved: u32,
     }
 
+    /// `ArgumentLayout`: `ArgumentRecord`s, and the span receiving each
+    /// one's `u32` offset in their order.
+    pub struct ArgumentLayoutRequest {
+        pub arguments: Span,
+        pub out: Span,
+    }
+
+    /// An `MTLArgumentDescriptor`.
+    pub struct ArgumentRecord {
+        pub data_type: u64,
+        pub index: u32,
+        pub array_length: u32,
+        pub constant_block_alignment: u32,
+        pub reserved: u32,
+    }
+
+    /// `encodedLength` and `alignment`, and the length of the offsets
+    /// written when they fit.
+    pub struct ArgumentLayoutResponse {
+        pub encoded_length: u32,
+        pub alignment: u32,
+        pub length: u64,
+    }
+
     /// `newBufferWithLength:options:`.
     pub struct NewBufferRequest {
         pub length: u64,
@@ -879,6 +903,8 @@ operations! {
     /// pipeline's reflection gathers from its functions, and the layouts
     /// of `newArgumentEncoderWithBufferIndex:`.
     FunctionBindings = 0x0105 => FunctionBindingsRequest, FunctionBindingsResponse;
+    /// The layout of `newArgumentEncoderWithArguments:`.
+    ArgumentLayout = 0x0106 => ArgumentLayoutRequest, ArgumentLayoutResponse;
     /// `newBufferWithLength:options:`.
     NewBuffer = 0x0201 => NewBufferRequest, BufferResponse;
     /// `didModifyRange:`.

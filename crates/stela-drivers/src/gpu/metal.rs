@@ -13,6 +13,7 @@
 mod macros;
 
 pub mod abi;
+pub mod argument;
 pub mod binding;
 pub mod capabilities;
 pub mod command_buffer;

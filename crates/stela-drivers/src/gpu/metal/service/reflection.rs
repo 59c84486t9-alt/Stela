@@ -1,15 +1,16 @@
 //! Binding reflection: a function's bindings, flattened into records that
-//! name the types they reach by index.
+//! name the types they reach by index, and argument buffer layouts.
 use super::{
     Call, Service,
     libraries::Names,
     wire::{
-        self, BindingInfo, Fault, FunctionBindingsRequest, FunctionBindingsResponse, MemberInfo,
-        NO_TYPE, TypeInfo,
+        self, ArgumentLayoutRequest, ArgumentLayoutResponse, ArgumentRecord, BindingInfo, Fault,
+        FunctionBindingsRequest, FunctionBindingsResponse, MemberInfo, NO_TYPE, TypeInfo,
     },
 };
 use crate::gpu::metal::{
     abi::DataType,
+    argument::{self, ArgumentDescriptor},
     device::FunctionId,
     reflection::{Binding, BindingKind, PointerType, StructType, TextureReferenceType, Type},
     shader::Compiler,
@@ -63,6 +64,34 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         call.write_fitting(request.out, &data)?;
         call.reply(&response)
     }
+}
+
+pub(super) fn argument_layout(call: &mut Call) -> Result<(), Fault> {
+    let request: ArgumentLayoutRequest = call.request()?;
+    let arguments = wire::read_array::<ArgumentRecord>(call.memory.read(request.arguments)?)?
+        .into_iter()
+        .map(|record| {
+            Ok(ArgumentDescriptor {
+                data_type: DataType::from_raw(record.data_type)
+                    .ok_or(Fault::malformed("argument data type"))?,
+                index: record.index,
+                array_length: record.array_length,
+                constant_block_alignment: record.constant_block_alignment,
+            })
+        })
+        .collect::<Result<Vec<_>, Fault>>()?;
+    let layout = argument::layout(&arguments)?;
+    let offsets: Vec<u8> = layout
+        .offsets
+        .iter()
+        .flat_map(|offset| offset.to_le_bytes())
+        .collect();
+    call.write_fitting(request.out, &offsets)?;
+    call.reply(&ArgumentLayoutResponse {
+        encoded_length: layout.encoded_length,
+        alignment: layout.alignment,
+        length: offsets.len() as u64,
+    })
 }
 
 /// The `TypeInfo`s and `MemberInfo`s a binding reaches.

@@ -1,12 +1,13 @@
-use super::{Memory, call, connect, new_function, new_library, service};
+use super::{Memory, call, connect, new_function, new_library, service, status};
 use crate::gpu::metal::{
     abi::{DataType, TextureType},
     reflection::{BindingAccess, BindingType},
     service::{
         GuestMemory,
         wire::{
-            self, BindingInfo, FunctionBindingsRequest, FunctionBindingsResponse, MemberInfo,
-            NO_TYPE, Operation, TypeInfo,
+            self, ArgumentLayoutRequest, ArgumentLayoutResponse, ArgumentRecord, BindingInfo,
+            FunctionBindingsRequest, FunctionBindingsResponse, MemberInfo, NO_TYPE, Operation,
+            Status, TypeInfo,
         },
     },
 };
@@ -122,4 +123,54 @@ fn bindings_flatten_their_types_before_them() {
         (BindingType::Sampler.raw() as u32, 1, 0, NO_TYPE)
     );
     assert_eq!(at + 19, response.length as usize, "the names follow");
+}
+
+#[test]
+fn argument_descriptors_answer_their_layout() {
+    let mut service = service();
+    let connection = connect(&mut service);
+    let memory = &mut Memory::default();
+    let record = |data_type: DataType, index, array_length| ArgumentRecord {
+        data_type: data_type.raw(),
+        index,
+        array_length,
+        ..ArgumentRecord::default()
+    };
+    let records = [
+        record(DataType::Float4, 2, 0),
+        record(DataType::Texture, 0, 2),
+    ];
+    let arguments = memory.records(&records);
+    let out = memory.put(&[0; 8]);
+    let response: ArgumentLayoutResponse = call(
+        &mut service,
+        connection,
+        Operation::ArgumentLayout,
+        &ArgumentLayoutRequest { arguments, out },
+        memory,
+    )
+    .unwrap();
+    assert_eq!(
+        (response.encoded_length, response.alignment, response.length),
+        (32, 16, 8)
+    );
+    assert_eq!(memory.read(out).unwrap(), [16, 0, 0, 0, 0, 0, 0, 0]);
+
+    let unknown = ArgumentLayoutRequest {
+        arguments: memory.records(&[ArgumentRecord {
+            data_type: 1000,
+            ..records[0]
+        }]),
+        out,
+    };
+    assert_eq!(
+        status(call::<_, ArgumentLayoutResponse>(
+            &mut service,
+            connection,
+            Operation::ArgumentLayout,
+            &unknown,
+            memory,
+        )),
+        Status::Malformed
+    );
 }
