@@ -1,12 +1,17 @@
 //! Engine boundary refusal and authorized Before settlement tests.
-use super::super::tests::{BASE, FakeHost, NATIVE_CODE_STRIDE, machine};
+use super::super::tests::{BASE, FakeHost, installed_code, machine, make_pending};
 use super::super::*;
 use stela_compiler::block::{
     HostGprSnapshot, HostSpillSnapshot, RecoveryQualificationError, RecoverySiteKind,
 };
 
+const PROGRAM: [u32; 2] = [0xf9400043, 0xd4000001]; // ldr x3,[x2]; svc #0
+/// The admitted input [`PROGRAM`]'s block compiles from.
+fn input() -> Vec<u8> {
+    PROGRAM.into_iter().flat_map(u32::to_le_bytes).collect()
+}
 fn fixture() -> (Machine<FakeHost, NoDevices>, usize, usize) {
-    let mut machine = machine(&[0xf9400043, 0xd4000001]); // ldr x3,[x2]; svc #0
+    let mut machine = machine(&PROGRAM);
     let Ok(Fetched::Block(index)) = machine.fetch_block(BASE, false) else {
         panic!("actual compiled block");
     };
@@ -99,37 +104,10 @@ fn host_fetch_page_table_and_protection_faults_never_project_as_guest_access() {
     }
 }
 #[test]
-fn executable_owner_readback_detects_code_change_before_any_settlement() {
-    let (mut machine, index, offset) = fixture();
-    let body = machine.blocks[index].code.0 / NATIVE_CODE_STRIDE - 1;
-    machine.host.installed[body][offset] ^= 1;
-    terminal(
-        machine,
-        index,
-        captured(offset),
-        NativeFailureReason::LiveCodeMismatch,
-    );
-}
-#[test]
-fn undeclared_body_patch_is_not_accepted_as_chain_ownership() {
-    let (mut machine, index, offset) = fixture();
-    let at = machine.blocks[index].code.0 + offset;
-    machine.patch_native(
-        NativeCode(at),
-        &[0x90; stela_compiler::x86_64::chain::JUMP_BYTES],
-    );
-    terminal(
-        machine,
-        index,
-        captured(offset),
-        NativeFailureReason::PatchPlan,
-    );
-}
-#[test]
 fn portable_guest_tag_on_internal_frame_cannot_mint_projection_permission() {
     let (mut machine, index, _) = fixture();
+    make_pending(&mut machine, index, &input());
     let owner = machine.fault_recovery.get_mut(&index).unwrap();
-    owner.test_make_pending();
     let mut forged = owner.test_pending_rows_mut()[0].clone();
     forged.start = 0;
     forged.end = 1;
@@ -145,8 +123,8 @@ fn portable_guest_tag_on_internal_frame_cannot_mint_projection_permission() {
 #[test]
 fn portable_missing_guest_tag_is_refused_instead_of_falling_back_to_source_map() {
     let (mut machine, index, offset) = fixture();
+    make_pending(&mut machine, index, &input());
     let owner = machine.fault_recovery.get_mut(&index).unwrap();
-    owner.test_make_pending();
     owner
         .test_pending_rows_mut()
         .iter_mut()
@@ -262,10 +240,7 @@ fn guarded_landing_pad_retires_and_clears_btype_before_later_load_fault() {
 
 #[test]
 fn load_before_native_terminal_adapters_keeps_checked_fault_plan() {
-    for (terminal_word, expected) in [
-        (0xd538_d088, recovery::NativeAdapter::MirroredRead),
-        (0xdac1_47f1, recovery::NativeAdapter::PointerAuthentication),
-    ] {
+    for terminal_word in [0xd538_d088, 0xdac1_47f1] {
         let mut machine = machine(&[0xf9400043, terminal_word]);
         let Ok(Fetched::Block(index)) = machine.fetch_block(BASE, false) else {
             panic!("actual native adapter emission");
@@ -279,10 +254,6 @@ fn load_before_native_terminal_adapters_keeps_checked_fault_plan() {
             .find(|row| row.site.kind() == RecoverySiteKind::GuestAccess)
             .unwrap()
             .start;
-        assert!(machine.native_patches.values().any(|patch| matches!(patch.purpose,
-            recovery::PatchPurpose::NativeAdapter { pc, kind }
-                if pc == BASE + 4 && core::mem::discriminant(&kind) == core::mem::discriminant(&expected))),
-            "actual terminal adapter must be installed");
         machine
             .native_fault(index, captured(offset), 0, None)
             .unwrap();
@@ -290,40 +261,9 @@ fn load_before_native_terminal_adapters_keeps_checked_fault_plan() {
         assert_eq!(machine.cpu.retired, 0);
     }
 }
-#[test]
-fn native_adapter_patch_cannot_borrow_another_source_word() {
-    let mut machine = machine(&[0xf9400043, 0xd538_d088]);
-    let Ok(Fetched::Block(index)) = machine.fetch_block(BASE, false) else {
-        panic!("emission");
-    };
-    let offset = machine
-        .fault_recovery
-        .get_mut(&index)
-        .unwrap()
-        .test_rows_mut()
-        .iter()
-        .find(|row| row.site.kind() == RecoverySiteKind::GuestAccess)
-        .unwrap()
-        .start;
-    let patch = machine
-        .native_patches
-        .values_mut()
-        .find(|patch| matches!(patch.purpose, recovery::PatchPurpose::NativeAdapter { .. }))
-        .unwrap();
-    patch.purpose = recovery::PatchPurpose::NativeAdapter {
-        pc: BASE,
-        kind: recovery::NativeAdapter::MirroredRead,
-    };
-    terminal(
-        machine,
-        index,
-        captured(offset),
-        NativeFailureReason::PatchPlan,
-    );
-}
 
 fn translated_fixture() -> (Machine<FakeHost, NoDevices>, usize, usize) {
-    let mut machine = super::super::tests::translated_machine(&[0xf9400043, 0xd4000001]);
+    let mut machine = super::super::tests::translated_machine(&PROGRAM);
     let Ok(Fetched::Block(index)) = machine.fetch_block(BASE, false) else {
         panic!("translated emission");
     };
@@ -345,8 +285,8 @@ fn translated_fixture() -> (Machine<FakeHost, NoDevices>, usize, usize) {
         (8, false, false, false)
     );
     assert_eq!(row.end, offset + 1, "only exact CALL return token");
-    assert_eq!(&owner.native().x86_64_code[offset..offset + 2], &[8, 0]);
-    owner.test_make_pending();
+    assert_eq!(installed_code(&mut machine, index, offset, 2), [8, 0]);
+    make_pending(&mut machine, index, &input());
     (machine, index, offset)
 }
 fn helper_capture(offset: usize) -> NativeFault {

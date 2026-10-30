@@ -311,6 +311,42 @@ pub(super) fn translated_machine(words: &[u32]) -> Machine<FakeHost, NoDevices> 
     machine
 }
 
+/// `bytes` of block `index`'s code as installed, from `offset`.
+pub(super) fn installed_code<D: Devices>(
+    machine: &mut Machine<FakeHost, D>,
+    index: usize,
+    offset: usize,
+    bytes: usize,
+) -> Vec<u8> {
+    let mut code = vec![0; bytes];
+    let at = NativeCode(machine.blocks[index].code.0 + offset);
+    assert!(machine.host.read_native(at, &mut code), "installed code");
+    code
+}
+
+/// Block `index`'s owner made a stored record's, whose template `input`
+/// compiles to.
+pub(super) fn make_pending<D: Devices>(
+    machine: &mut Machine<FakeHost, D>,
+    index: usize,
+    input: &[u8],
+) {
+    let (pc, variant) = (machine.blocks[index].pc, machine.block_variant(index));
+    let preparation = machine.preparation(variant);
+    let mut compiled = preparation.compile_input(input, pc).unwrap();
+    compiled.fault_recovery = Vec::new();
+    let template = Arc::new(super::stored::Emission::new(
+        input.to_vec(),
+        compiled,
+        preparation,
+    ));
+    machine
+        .fault_recovery
+        .get_mut(&index)
+        .unwrap()
+        .test_make_pending(template);
+}
+
 pub(super) fn machine(words: &[u32]) -> Machine<FakeHost, NoDevices> {
     board(words, NoDevices, Vec::new())
 }
@@ -3367,8 +3403,8 @@ fn dc_clean_blocks_follow_the_traps_and_faults_complete_in_the_engine() {
         stela_compiler::block::RecoverySiteKind::GuestAccess,
     );
     assert_eq!(
-        &machine.fault_recovery[&entered].native().x86_64_code[offset..offset + 3],
-        &[0x0f, 0xb6, 0x08],
+        installed_code(&mut machine, entered, offset, 3),
+        [0x0f, 0xb6, 0x08],
         "actual MOVZX byte probe at the minted DC clean site"
     );
     machine.host.exits = vec![NativeExit::Fault(NativeFault {
@@ -5076,7 +5112,7 @@ fn dc_zva_blocks_follow_the_permission_and_faults_complete_in_the_engine() {
         &[0x48, 0x89, 0x48, 0x00]
     };
     assert_eq!(
-        &machine.fault_recovery[&entered].native().x86_64_code[offset..offset + expected.len()],
+        installed_code(&mut machine, entered, offset, expected.len()),
         expected,
         "actual first zero store at the minted DC ZVA site"
     );

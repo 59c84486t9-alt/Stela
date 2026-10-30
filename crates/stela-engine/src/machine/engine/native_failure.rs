@@ -22,7 +22,6 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     pe: capture.pe,
                     retired_before: capture.retired,
                 },
-                source_record: None,
             });
             self.native_failure = Some(recovery::CapturedFailure {
                 summary,
@@ -60,10 +59,6 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 direct_links,
             }),
             reason,
-            source_record: self
-                .fault_recovery
-                .get(&index)
-                .and_then(recovery::CodeRecovery::source_record),
         });
         self.native_failure = Some(recovery::CapturedFailure {
             summary: failure.clone(),
@@ -87,17 +82,15 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let Some(block) = (index < self.blocks.len()).then(|| &self.blocks[index]) else {
             return Err(self.fail_native(index, fault, NativeFailureReason::UnknownCode));
         };
-        let (code, entry_pc, source_bytes) = (block.code, block.pc, block.source_bytes);
+        let (entry_pc, source_bytes) = (block.pc, block.source_bytes);
         let Some(owner) = self.fault_recovery.get_mut(&index) else {
             return Err(self.fail_native(index, fault, NativeFailureReason::UnknownCode));
         };
-        if fault.offset >= owner.native().x86_64_code.len() {
+        if fault.offset >= owner.code_bytes() {
             return Err(self.fail_native(index, fault, NativeFailureReason::CodeExtent));
         }
-        if let Err(reason) = owner.validate_live(&mut self.host, code, &self.native_patches) {
-            return Err(self.fail_native(index, fault, reason));
-        }
-        let table = match owner.qualify(entry_pc) {
+        let qualified = owner.qualify(entry_pc);
+        let table = match qualified {
             Ok(table) => table,
             Err(reason) => return Err(self.fail_native(index, fault, reason)),
         };

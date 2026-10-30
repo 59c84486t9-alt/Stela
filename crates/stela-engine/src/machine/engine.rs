@@ -93,7 +93,7 @@ pub use processors::{
     PeerState, PreparedProcessorPower, ProcessorBinding, ProcessorChange, ProcessorPowerError,
     ProcessorWrite, Processors, SettledProcessorWrite,
 };
-pub use recovery::{NativeFailure, NativeFailureReason, SourceRecord, UnsettledChain};
+pub use recovery::{NativeFailure, NativeFailureReason, UnsettledChain};
 pub use shared_memory::{
     HeldRamService, MAX_NATIVE_EPOCH_BODIES, NativeCohort, NativeEpochDeadline, NativeEpochEnd,
     NativeEpochStatistics, NativeRun, NativeRunIdentity, NativeRunObservation, NativeTransport,
@@ -624,7 +624,6 @@ pub struct Machine<H: Host, D: Devices> {
     /// faultable access, which a native fault applies first. Kept apart
     /// from [`Block`], whose fields every exit reads.
     fault_recovery: BTreeMap<usize, recovery::CodeRecovery>,
-    native_patches: BTreeMap<usize, recovery::OwnedPatch>,
     native_failure: Option<recovery::CapturedFailure>,
     /// Every variant a block was compiled for, once: what a [`VariantId`]
     /// names.
@@ -878,7 +877,6 @@ impl<H: Host, D: Devices> Machine<H, D> {
             reclaimed_at: None,
             memory_release_blocks: MEMORY_RELEASE_BLOCKS,
             fault_recovery: BTreeMap::new(),
-            native_patches: BTreeMap::new(),
             native_failure: None,
             variants: Vec::new(),
             index: BTreeMap::new(),

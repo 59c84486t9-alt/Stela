@@ -229,10 +229,6 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// their own code is reclaimed. A block no longer indexed has no live
     /// chain into it, as its page was forgotten whole then.
     pub(super) fn evict_code(&mut self, range: core::ops::Range<usize>) {
-        self.native_patches.retain(|&at, patch| {
-            at.checked_add(patch.bytes.len())
-                .is_some_and(|end| end <= range.start || at >= range.end)
-        });
         let evicted: Vec<usize> = (0..self.blocks.len())
             .filter(|&slot| range.contains(&self.blocks[slot].code.0))
             .collect();
@@ -275,7 +271,6 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.blocks.clear();
         self.free_blocks.clear();
         self.fault_recovery.clear();
-        self.native_patches.clear();
         self.index.clear();
         self.code_pages.clear();
         self.pages.clear();

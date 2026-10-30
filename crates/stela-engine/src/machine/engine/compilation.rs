@@ -171,12 +171,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                         physical,
                         variant,
                         &source,
-                        recovery::CodeRecovery::stored(compiled, input, preparation.clone())
-                            .with_record(SourceRecord {
-                                page,
-                                raw_page_sha256: *key,
-                                preparation_context: *context,
-                            }),
+                        recovery::Template::stored(compiled, input, preparation.clone()),
                     )
                     .map(Some);
             }
@@ -198,12 +193,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                             physical,
                             variant,
                             &source,
-                            recovery::CodeRecovery::compiled(compiled.emission.clone())
-                                .with_record(SourceRecord {
-                                    page,
-                                    raw_page_sha256: *key,
-                                    preparation_context: *context,
-                                }),
+                            recovery::Template::compiled(compiled.emission.clone()),
                         )
                         .map(Some);
                 }
@@ -263,14 +253,6 @@ impl<H: Host, D: Devices> Machine<H, D> {
         ));
         // An offer is kept until the store proves it; with memory low the
         // block is only compiled, as one the store cannot hold.
-        let source_record = stored
-            .as_ref()
-            .zip(context)
-            .map(|((key, _), context)| SourceRecord {
-                page,
-                raw_page_sha256: *key,
-                preparation_context: context,
-            });
         if let (Some((key, _)), Some(context)) = (stored, context)
             && !self.host.memory_low()
             && let Some(translations) = self.host.translations()
@@ -285,12 +267,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
             });
             self.statistics.offered += 1;
         }
-        let mut recovery = recovery::CodeRecovery::compiled(emission);
-        if let Some(record) = source_record {
-            recovery = recovery.with_record(record);
-        }
-        self.install(pc, physical, variant, &source, recovery)
-            .map(Some)
+        self.install(
+            pc,
+            physical,
+            variant,
+            &source,
+            recovery::Template::compiled(emission),
+        )
+        .map(Some)
     }
 
     /// How the next fetch compiles its block, in the PE's current state:
@@ -377,7 +361,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         physical: u64,
         variant: Variant,
         source: &[u8],
-        compiled: recovery::CodeRecovery,
+        compiled: recovery::Template,
     ) -> Result<Fetched, Stop> {
         let started = self.host.counter();
         let installed = self.place(pc, physical, variant, source, compiled);
@@ -391,7 +375,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         physical: u64,
         variant: Variant,
         source: &[u8],
-        compiled: recovery::CodeRecovery,
+        compiled: recovery::Template,
     ) -> Result<Fetched, Stop> {
         let single = variant.single;
         if compiled.portable_requires_unavailable_capture() {
@@ -494,7 +478,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             }
             None => self.blocks.push(block),
         };
-        self.fault_recovery.insert(index, compiled);
+        self.fault_recovery.insert(index, compiled.installed());
         self.index.insert((pc, physical, id), index);
         self.code_pages
             .entry(physical & !(FETCH_PAGE - 1))
@@ -505,30 +489,6 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
     pub(super) fn patch_native(&mut self, code: NativeCode, bytes: &[u8]) {
         self.host.patch(code, bytes);
-        self.native_patches.insert(
-            code.0,
-            recovery::OwnedPatch {
-                bytes: bytes.to_vec(),
-                purpose: recovery::PatchPurpose::Chain,
-            },
-        );
-    }
-
-    pub(super) fn patch_native_adapter(
-        &mut self,
-        code: NativeCode,
-        bytes: &[u8],
-        pc: u64,
-        kind: recovery::NativeAdapter,
-    ) {
-        self.host.patch(code, bytes);
-        self.native_patches.insert(
-            code.0,
-            recovery::OwnedPatch {
-                bytes: bytes.to_vec(),
-                purpose: recovery::PatchPurpose::NativeAdapter { pc, kind },
-            },
-        );
     }
 
     /// Redirect the PAC exit ending a block's `native` code, installed at
@@ -565,12 +525,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let installed = self.host.install(&thunk.code).ok()?;
         let site = code.0 as u64 + site as u64;
         let jump = chain::jump(site, installed.0 as u64)?;
-        self.patch_native_adapter(
-            NativeCode(site as usize),
-            &jump,
-            pc,
-            recovery::NativeAdapter::PointerAuthentication,
-        );
+        self.patch_native(NativeCode(site as usize), &jump);
         let successor = thunk.next.map(|next| Successor {
             site: installed.0 as u64 + next as u64,
             target: GuestAddress(pc + INSTRUCTION),
@@ -610,12 +565,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let installed = self.host.install(&thunk.code).ok()?;
         let site = code.0 as u64 + site as u64;
         let jump = chain::jump(site, installed.0 as u64)?;
-        self.patch_native_adapter(
-            NativeCode(site as usize),
-            &jump,
-            pc,
-            recovery::NativeAdapter::MirroredRead,
-        );
+        self.patch_native(NativeCode(site as usize), &jump);
         thunk.next.map(|next| Successor {
             site: installed.0 as u64 + next as u64,
             target: GuestAddress(pc + INSTRUCTION),
