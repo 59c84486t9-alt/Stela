@@ -24,7 +24,7 @@ use crate::gpu::metal::{
             RenderPipelineRequest,
         },
     },
-    pipeline::{ColorAttachmentDescriptor, RenderTargets, TessellationDescriptor},
+    pipeline::{ColorAttachmentDescriptor, RenderTargets, StageThreads, TessellationDescriptor},
     pixel_format::PixelFormat,
     shader::{Compiler, Stage},
     vertex::{
@@ -75,14 +75,28 @@ impl<B: Backend, C: Compiler> Service<B, C> {
 
     pub(super) fn new_mesh_pipeline(&mut self, call: &mut Call) -> Result<(), Fault> {
         let request: NewMeshPipelineRequest = call.request()?;
+        let flags = flags(request.flags)?;
         let connection = call.connection;
         let memory = &*call.memory;
+        let threads = |max_total_threads, multiple| StageThreads {
+            max_total_threads,
+            multiple_of_width: flags.contains(multiple),
+        };
         let pipeline = MeshPipelineRequest {
             object_function: self.optional(connection, request.object_function)?,
             mesh_function: self.object(connection, request.mesh_function)?,
             fragment_function: self.optional(connection, request.fragment_function)?,
             targets: render_targets(&request.targets)?,
             max_vertex_amplification_count: request.max_vertex_amplification_count,
+            object_threads: threads(
+                request.max_total_threads_per_object_threadgroup,
+                PipelineFlags::OBJECT_THREADGROUP_SIZE_IS_MULTIPLE_OF_WIDTH,
+            ),
+            mesh_threads: threads(
+                request.max_total_threads_per_mesh_threadgroup,
+                PipelineFlags::MESH_THREADGROUP_SIZE_IS_MULTIPLE_OF_WIDTH,
+            ),
+            payload_memory_length: request.payload_memory_length,
             object_linked_functions: self.linked(
                 connection,
                 memory,
@@ -191,12 +205,27 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         pipeline: RenderPipelineId,
     ) -> Result<(), Fault> {
         let object = Object::RenderPipeline(pipeline);
-        let (handle, resource_id) = self.adopt(call.connection, object, |device| {
-            device.render_pipeline_resource_id(pipeline)
+        let (handle, (resource_id, mesh)) = self.adopt(call.connection, object, |device| {
+            let mesh = device.render_pipeline_state(pipeline)?.plan.mesh;
+            Ok((device.render_pipeline_resource_id(pipeline)?, mesh))
         })?;
+        let (object, mesh, width) = mesh.map_or((None, None, 0), |threads| {
+            (
+                threads.object,
+                Some(threads.mesh),
+                threads.thread_execution_width,
+            )
+        });
+        let threads =
+            |stage: Option<StageThreads>| stage.map_or(0, |stage| stage.max_total_threads);
+        let widths = |stage: Option<StageThreads>| stage.map_or(0, |_| width);
         call.reply(&RenderPipelineResponse {
             handle: handle.handle,
             resource_id,
+            max_total_threads_per_object_threadgroup: threads(object),
+            max_total_threads_per_mesh_threadgroup: threads(mesh),
+            object_thread_execution_width: widths(object),
+            mesh_thread_execution_width: widths(mesh),
         })
     }
 

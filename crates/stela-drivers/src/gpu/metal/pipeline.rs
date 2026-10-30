@@ -310,6 +310,57 @@ pub struct MeshRenderPipelineDescriptor<'a> {
     pub fragment_function: Option<&'a CompiledShader>,
     pub targets: RenderTargets,
     pub max_vertex_amplification_count: u64,
+    pub object_threads: StageThreads,
+    pub mesh_threads: StageThreads,
+    pub payload_memory_length: u64,
+}
+
+/// One mesh pipeline stage's threadgroups:
+/// `maxTotalThreadsPer{Object,Mesh}Threadgroup`, zero for the device's
+/// limit, and `{object,mesh}ThreadgroupSizeIsMultipleOfThreadExecutionWidth`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct StageThreads {
+    pub max_total_threads: u64,
+    pub multiple_of_width: bool,
+}
+
+/// The threadgroups a mesh pipeline's draws may launch: its object stage's,
+/// when it has one, and its mesh stage's. NVIDIA's subgroups are always the
+/// thread execution width, so sizes that are multiples of it run in full
+/// subgroups.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MeshThreads {
+    pub object: Option<StageThreads>,
+    pub mesh: StageThreads,
+    pub thread_execution_width: u64,
+}
+
+impl MeshThreads {
+    /// Checks a draw's threads per object and per mesh threadgroup.
+    pub fn check(&self, object: [u32; 3], mesh: [u32; 3]) -> Result<()> {
+        let total = |threads: [u32; 3]| threads.iter().map(|&size| u64::from(size)).product();
+        let width = self.thread_execution_width;
+        if let Some(stage) = self.object {
+            let total: u64 = total(object);
+            ensure(
+                total <= stage.max_total_threads,
+                "object threadgroup exceeds maxTotalThreadsPerObjectThreadgroup",
+            )?;
+            ensure(
+                !stage.multiple_of_width || total.is_multiple_of(width),
+                "object threadgroup is not a multiple of the thread execution width",
+            )?;
+        }
+        let total: u64 = total(mesh);
+        ensure(
+            total <= self.mesh.max_total_threads,
+            "mesh threadgroup exceeds maxTotalThreadsPerMeshThreadgroup",
+        )?;
+        ensure(
+            !self.mesh.multiple_of_width || total.is_multiple_of(width),
+            "mesh threadgroup is not a multiple of the thread execution width",
+        )
+    }
 }
 
 /// A render pipeline state: its Vulkan pipeline and what encoders check
@@ -324,8 +375,9 @@ pub struct RenderPipelinePlan {
     pub color_formats: [Option<PixelFormat>; MAX_COLOR_ATTACHMENTS],
     pub depth_format: Option<PixelFormat>,
     pub stencil_format: Option<PixelFormat>,
-    /// Draws are mesh dispatches (`drawMeshThreadgroups`).
-    pub mesh: bool,
+    /// Draws are mesh dispatches (`drawMeshThreadgroups`) of these
+    /// threadgroups.
+    pub mesh: Option<MeshThreads>,
     /// Draws are patch draws (`drawPatches`).
     pub tessellation: Option<Tessellation>,
 }
@@ -464,7 +516,31 @@ pub fn mesh_render_pipeline(
     )?;
     plan.info.stages = stages;
     plan.amplification_count = amplification_count;
-    plan.mesh = true;
+    let limits = &capabilities.limits;
+    ensure(
+        descriptor.payload_memory_length <= limits.max_object_payload_length,
+        "payloadMemoryLength exceeds the object payload limit",
+    )?;
+    let capped = |stage: StageThreads, limit: u64| StageThreads {
+        max_total_threads: match stage.max_total_threads {
+            0 => limit,
+            requested => requested.min(limit),
+        },
+        ..stage
+    };
+    plan.mesh = Some(MeshThreads {
+        object: descriptor.object_function.map(|_| {
+            capped(
+                descriptor.object_threads,
+                limits.max_total_threads_per_threadgroup,
+            )
+        }),
+        mesh: capped(
+            descriptor.mesh_threads,
+            limits.max_mesh_threads_per_threadgroup,
+        ),
+        thread_execution_width: limits.thread_execution_width,
+    });
     Ok(plan)
 }
 
@@ -610,7 +686,7 @@ fn targets(
             .map(|attachment| attachment.pixel_format),
         depth_format,
         stencil_format,
-        mesh: false,
+        mesh: None,
         tessellation: None,
     })
 }

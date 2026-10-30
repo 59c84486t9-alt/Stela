@@ -469,11 +469,19 @@ records! {
 
     /// `newRenderPipelineStateWithMeshDescriptor:`; zero object and
     /// fragment functions are none.
+    /// `MTLMeshRenderPipelineDescriptor`; zero total threads leave the
+    /// device's limits, and `flags` may say each stage's threadgroup sizes
+    /// are multiples of the thread execution width.
     pub struct NewMeshPipelineRequest {
         pub object_function: u64,
         pub mesh_function: u64,
         pub fragment_function: u64,
         pub max_vertex_amplification_count: u64,
+        pub max_total_threads_per_object_threadgroup: u64,
+        pub max_total_threads_per_mesh_threadgroup: u64,
+        pub payload_memory_length: u64,
+        /// `PipelineFlags`.
+        pub flags: u64,
         pub targets: RenderTargetsRecord,
         pub object_linked_functions: LinkedFunctionsRecord,
         pub mesh_linked_functions: LinkedFunctionsRecord,
@@ -481,10 +489,15 @@ records! {
     }
 
     /// A new render pipeline and its `gpuResourceID`, zero when indirect
-    /// command buffers cannot switch to it.
+    /// command buffers cannot switch to it; a mesh pipeline's threadgroup
+    /// properties, zero for others and for a missing object stage.
     pub struct RenderPipelineResponse {
         pub handle: u64,
         pub resource_id: u64,
+        pub max_total_threads_per_object_threadgroup: u64,
+        pub max_total_threads_per_mesh_threadgroup: u64,
+        pub object_thread_execution_width: u64,
+        pub mesh_thread_execution_width: u64,
     }
 
     /// `newComputePipelineStateWithDescriptor:`; zero total threads leaves
@@ -656,6 +669,10 @@ option_set! {
         const INDIRECT_COMMAND_BUFFERS = 1 << 1;
         /// `threadGroupSizeIsMultipleOfThreadExecutionWidth`.
         const THREADGROUP_SIZE_IS_MULTIPLE_OF_WIDTH = 1 << 2;
+        /// `objectThreadgroupSizeIsMultipleOfThreadExecutionWidth`.
+        const OBJECT_THREADGROUP_SIZE_IS_MULTIPLE_OF_WIDTH = 1 << 3;
+        /// `meshThreadgroupSizeIsMultipleOfThreadExecutionWidth`.
+        const MESH_THREADGROUP_SIZE_IS_MULTIPLE_OF_WIDTH = 1 << 4;
     }
 }
 

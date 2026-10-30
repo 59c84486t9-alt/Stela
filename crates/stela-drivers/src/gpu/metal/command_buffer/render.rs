@@ -1291,7 +1291,7 @@ impl CommandBuffer {
             .as_ref()
             .ok_or(Error::Invalid("no render pipeline state is set"))?;
         ensure(
-            !pipeline.plan.mesh,
+            pipeline.plan.mesh.is_none(),
             "mesh pipelines draw with drawMeshThreadgroups",
         )?;
         ensure(
@@ -1462,7 +1462,10 @@ impl CommandBuffer {
             .pipeline
             .as_ref()
             .ok_or(Error::Invalid("no render pipeline state is set"))?;
-        ensure(state.plan.mesh, "vertex pipelines draw with drawPrimitives")?;
+        ensure(
+            state.plan.mesh.is_some(),
+            "vertex pipelines draw with drawPrimitives",
+        )?;
         ensure(
             !mesh_threads.contains(&0),
             "mesh threadgroups have at least one thread",

@@ -400,7 +400,7 @@ impl CommandBuffer {
             .as_ref()
             .ok_or(Error::Invalid("no render pipeline state is set"))?;
         let plan = &state.plan;
-        if plan.mesh || plan.tessellation.is_some() {
+        if plan.mesh.is_some() || plan.tessellation.is_some() {
             return Err(Error::Unsupported(
                 "GPU-resident indirect draws of mesh and tessellated pipelines",
             ));

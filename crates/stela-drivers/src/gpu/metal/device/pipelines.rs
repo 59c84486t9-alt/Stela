@@ -16,7 +16,7 @@ use crate::gpu::metal::{
     library::Library,
     pipeline::{
         self, ComputePipelineDescriptor, MeshRenderPipelineDescriptor, RenderPipelineDescriptor,
-        RenderTargets, TessellatedVertex, TessellationDescriptor,
+        RenderTargets, StageThreads, TessellatedVertex, TessellationDescriptor,
     },
     shader::{
         CompiledShader, Compiler, Interface, LinkedFunction, Linking, Reflection, Specialization,
@@ -307,6 +307,9 @@ pub struct MeshPipelineRequest {
     pub fragment_function: Option<FunctionId>,
     pub targets: RenderTargets,
     pub max_vertex_amplification_count: u64,
+    pub object_threads: StageThreads,
+    pub mesh_threads: StageThreads,
+    pub payload_memory_length: u64,
     pub object_linked_functions: LinkedFunctions,
     pub mesh_linked_functions: LinkedFunctions,
     pub fragment_linked_functions: LinkedFunctions,
@@ -747,6 +750,9 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             fragment_function: fragment.as_ref(),
             targets: request.targets,
             max_vertex_amplification_count: request.max_vertex_amplification_count,
+            object_threads: request.object_threads,
+            mesh_threads: request.mesh_threads,
+            payload_memory_length: request.payload_memory_length,
         };
         let interfaces: Vec<Interface> = object
             .into_iter()
@@ -816,18 +822,11 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 .unwrap_or_default()
         };
         let linkings = [linking(Stage::Object), linking(Stage::Mesh)];
-        let mut info = render.state.plan.info.clone();
-        let limits = &self.capabilities.limits;
-        let total =
-            |threads: [u32; 3]| threads.iter().map(|&size| u64::from(size)).product::<u64>();
-        ensure(
-            total(mesh_threads) <= limits.max_mesh_threads_per_threadgroup,
-            "mesh threadgroup size",
-        )?;
-        ensure(
-            total(object_threads) <= limits.max_total_threads_per_threadgroup,
-            "object threadgroup size",
-        )?;
+        let plan = &render.state.plan;
+        plan.mesh
+            .ok_or(Error::Invalid("not a mesh pipeline"))?
+            .check(object_threads, mesh_threads)?;
+        let mut info = plan.info.clone();
         let mut stages = Vec::new();
         let mut codes = Vec::new();
         // The first stage is the one mesh draws launch; the mesh function

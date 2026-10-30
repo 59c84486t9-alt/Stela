@@ -29,9 +29,9 @@ use crate::gpu::metal::{
     pass::{AttachedTexture, AttachmentDescriptor, RenderPassDescriptor, Target, render_pass},
     pipeline::{
         ColorAttachmentDescriptor, ComputePipelineDescriptor, MAX_COLOR_ATTACHMENTS,
-        MeshRenderPipelineDescriptor, RenderPipelineDescriptor, RenderTargets, TessellatedVertex,
-        TessellationDescriptor, compute_pipeline, mesh_render_pipeline, render_pipeline,
-        tessellation,
+        MeshRenderPipelineDescriptor, RenderPipelineDescriptor, RenderTargets, StageThreads,
+        TessellatedVertex, TessellationDescriptor, compute_pipeline, mesh_render_pipeline,
+        render_pipeline, tessellation,
     },
     pixel_format::PixelFormat,
     resource::TextureDescriptor,
@@ -578,6 +578,9 @@ fn mesh_thread_draws_cover_the_grid_with_the_first_stage() {
             fragment_function: None,
             targets,
             max_vertex_amplification_count: 1,
+            object_threads: StageThreads::default(),
+            mesh_threads: StageThreads::default(),
+            payload_memory_length: 0,
         };
         let state = RenderPipelineState {
             id: 2,

@@ -372,10 +372,39 @@ fn mesh_pipelines_keep_the_fragment_for_their_variants() {
         fragment_function: Some(&fragment),
         targets: RenderTargets::default(),
         max_vertex_amplification_count: 1,
+        object_threads: StageThreads::default(),
+        mesh_threads: StageThreads {
+            max_total_threads: 64,
+            multiple_of_width: true,
+        },
+        payload_memory_length: 0,
     };
     let plan = mesh_render_pipeline(&capabilities(), &descriptor).unwrap();
-    assert!(plan.mesh);
     assert_eq!(plan.info.stages, [(ShaderStages::FRAGMENT, ShaderCode(3))]);
+    let threads = plan.mesh.unwrap();
+    let limits = &capabilities().limits;
+    assert_eq!(
+        threads.object.unwrap().max_total_threads,
+        limits.max_total_threads_per_threadgroup,
+        "zero leaves the device's limit"
+    );
+    assert_eq!(threads.mesh.max_total_threads, 64);
+    assert_eq!(threads.check([128, 1, 1], [64, 1, 1]), Ok(()));
+    assert_eq!(
+        threads.check([1, 1, 1], [128, 1, 1]),
+        Err(Error::Invalid(
+            "mesh threadgroup exceeds maxTotalThreadsPerMeshThreadgroup"
+        ))
+    );
+    assert_eq!(
+        threads.check([1, 1, 1], [48, 1, 1]),
+        Err(Error::Invalid(
+            "mesh threadgroup is not a multiple of the thread execution width"
+        ))
+    );
+    descriptor.payload_memory_length = limits.max_object_payload_length + 1;
+    assert!(mesh_render_pipeline(&capabilities(), &descriptor).is_err());
+    descriptor.payload_memory_length = 0;
     descriptor.object_function = Some(&mesh);
     assert!(mesh_render_pipeline(&capabilities(), &descriptor).is_err());
 }
