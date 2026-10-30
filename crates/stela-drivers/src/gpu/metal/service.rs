@@ -7,10 +7,9 @@
 //! (names, library bytes, texel data, command streams) stays in guest memory
 //! as [`Span`]s that the gate resolves through [`GuestMemory`]; the service
 //! never dereferences a guest address itself. Each connection names device
-//! objects by its own generation-checked handles
-//! ([`identity`](crate::gpu::protocol::identity)), so a handle of another
-//! connection, of a destroyed object or of another kind of object is
-//! refused, and closing a connection releases what it still holds, newest
+//! objects by its own generation-checked handles ([`identity`]), so a handle
+//! of another connection, of a destroyed object or of another kind of object
+//! is refused, and closing a connection releases what it still holds, newest
 //! first, so views and aliases go before the resources under them.
 use super::{
     command_buffer::blit::Region,
@@ -23,15 +22,16 @@ use super::{
     shader::Compiler,
     vulkan::backend::Backend,
 };
-use crate::gpu::protocol::identity::{DeviceEpoch, ObjectHandle, ObjectTable};
 use alloc::{collections::BTreeMap, vec::Vec};
 use core::{
     num::{NonZeroU32, NonZeroU64},
     ops::Range,
 };
+use identity::{DeviceEpoch, ObjectHandle, ObjectTable};
 use wire::{Fault, Handle, NegotiateRequest, NegotiateResponse, Operation, Record, Span, Status};
 
 mod commands;
+pub mod identity;
 mod indirect;
 mod libraries;
 mod pipelines;

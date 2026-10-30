@@ -1,5 +1,6 @@
 use super::{
     GuestMemory, Outcome, Service,
+    identity::DeviceEpoch,
     wire::{
         self, BufferResponse, ColorAttachmentRecord, ConstantInfo, ConstantRecord, Empty, Fault,
         FunctionReflectionRequest, FunctionReflectionResponse, Handle, Length,
@@ -10,25 +11,22 @@ use super::{
         commands::{CommandBufferCode, CommandHeader, CommitRequest},
     },
 };
-use crate::gpu::{
-    metal::{
-        abi::{
-            BlendFactor, BlendOperation, ColorWriteMask, CpuCacheMode, DataType, FunctionType,
-            HazardTrackingMode, PrimitiveTopologyClass, ResourceOptions, StorageMode,
-            SwizzleChannels, TessellationControlPointIndexType, TessellationFactorFormat,
-            TessellationFactorStepFunction, TessellationPartitionMode, TextureType, TextureUsage,
-            Winding,
-        },
-        capabilities::block::Block,
-        device::{
-            LibraryId,
-            fixture::{MockBackend, MockCompiler, device_on},
-        },
-        library::tests::fixture,
-        pixel_format::PixelFormat,
-        vulkan::command::Command,
+use crate::gpu::metal::{
+    abi::{
+        BlendFactor, BlendOperation, ColorWriteMask, CpuCacheMode, DataType, FunctionType,
+        HazardTrackingMode, PrimitiveTopologyClass, ResourceOptions, StorageMode, SwizzleChannels,
+        TessellationControlPointIndexType, TessellationFactorFormat,
+        TessellationFactorStepFunction, TessellationPartitionMode, TextureType, TextureUsage,
+        Winding,
     },
-    protocol::identity::DeviceEpoch,
+    capabilities::block::Block,
+    device::{
+        LibraryId,
+        fixture::{MockBackend, MockCompiler, device_on},
+    },
+    library::tests::fixture,
+    pixel_format::PixelFormat,
+    vulkan::command::Command,
 };
 use alloc::{vec, vec::Vec};
 use core::num::NonZeroU64;

@@ -10,15 +10,12 @@ use crate::gpu::metal::{
     compiler::{self, AirCompiler},
     native::{InternalKernels, Loader, NativeBackend},
 };
-use crate::gpu::{
-    metal::{
-        device::Device,
-        error::Error,
-        service::Service,
-        shader::Compiler,
-        vulkan::{backend::Backend, physical::PciBusInfo},
-    },
-    protocol::identity::DeviceEpoch,
+use crate::gpu::metal::{
+    device::Device,
+    error::Error,
+    service::{Service, identity::DeviceEpoch},
+    shader::Compiler,
+    vulkan::{backend::Backend, physical::PciBusInfo},
 };
 
 /// The GPU the platform hands the Metal device.

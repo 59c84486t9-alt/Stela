@@ -7,10 +7,8 @@
 //! or response is exactly its record's size. Enumerations and option sets
 //! cross as Metal's raw values and are decoded with their declarations'
 //! own checks; a handle is a connection's `ObjectHandle`, zero for none.
-use crate::gpu::{
-    metal::{capabilities::block::Block, error::Error},
-    protocol::identity::TableError,
-};
+use super::identity::TableError;
+use crate::gpu::metal::{capabilities::block::Block, error::Error};
 use alloc::vec::Vec;
 
 /// The protocol version a connection negotiates. A major version changes
