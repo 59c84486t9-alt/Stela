@@ -9,7 +9,7 @@ use crate::wifi::mediatek::{
 use core::sync::atomic::Ordering;
 use reg::database::{
     Database,
-    tests::{country, fixture},
+    tests::{country, country_of, fixture},
 };
 use sha2::{Digest, Sha256};
 
@@ -32,12 +32,12 @@ pub(super) fn setup_modern_radio(
         [
             vec![domain::Channel {
                 hardware_value: 1,
-                flags: 0,
+                flags: WIDE,
             }],
             [36, 40, 44, 48]
                 .map(|hardware_value| domain::Channel {
                     hardware_value,
-                    flags: 1 << 8,
+                    flags: WIDE,
                 })
                 .to_vec(),
             vec![],
@@ -236,38 +236,38 @@ fn managed_modern_ap_observation_configures_eht_keys_qos_and_revocation() {
     assert!(model.memory.lock().unwrap().mappings.is_empty());
 }
 #[test]
-fn source_hardware_footprint_and_country_width_refuse_before_configuration() {
-    for hardware in [true, false] {
-        let (client, model) = if hardware { setup() } else { setup_modern() };
-        let country = if hardware {
-            country()
-        } else {
-            let mut b = fixture();
-            b[60..64].copy_from_slice(&40_000u32.to_be_bytes());
-            Database::parse(Arc::from(b.clone()), Sha256::digest(&b).into())
-                .unwrap()
-                .select(*b"US")
-                .unwrap()
-        };
-        let (mut driver, model) = awaiting(client, model, country);
-        let before = model.response.lock().unwrap().client_commands.len();
-        let denied = driver.configure_modern(105);
-        assert!(
-            matches!(
-                denied,
-                Err(PolicyError::Regulatory(reg::Error::HardwareDenied))
-            ) && hardware
-                || matches!(denied, Err(PolicyError::Regulatory(reg::Error::OsDenied)))
-                    && !hardware
-        );
-        assert_eq!(before, model.response.lock().unwrap().client_commands.len());
-        assert_eq!(driver.phase(), Phase::AwaitingModernAdmission);
-        driver.revoke().unwrap();
-        // SAFETY: the model device is stopped and drained, so nothing still uses what this
-        // releases.
-        unsafe { driver.retire_peer_after_drain() }.unwrap();
-        finish_stop(&mut driver, &model);
-    }
+fn source_hardware_footprint_refuses_before_configuration() {
+    let (client, model) = setup();
+    let (mut driver, model) = awaiting(client, model, country());
+    let before = model.response.lock().unwrap().client_commands.len();
+    assert!(matches!(
+        driver.configure_modern(105),
+        Err(PolicyError::Regulatory(reg::Error::HardwareDenied))
+    ));
+    assert_eq!(before, model.response.lock().unwrap().client_commands.len());
+    assert_eq!(driver.phase(), Phase::AwaitingModernAdmission);
+    driver.revoke().unwrap();
+    // SAFETY: the model device is stopped and drained, so nothing still uses what this
+    // releases.
+    unsafe { driver.retire_peer_after_drain() }.unwrap();
+    finish_stop(&mut driver, &model);
+}
+#[test]
+fn a_domain_wider_than_its_country_is_refused_at_attachment() {
+    let (client, model) = setup_modern();
+    // 80 MHz programmed where the country allows 40 MHz.
+    let narrow = country_of(&[
+        (2_400_000, 2_500_000, 80_000, 3000, 0),
+        (5_150_000, 5_350_000, 40_000, 3000, 0),
+    ]);
+    let error = match ManagedClient::new(client, narrow, Environment::Indoor) {
+        Err(error) => error,
+        Ok(_) => panic!("a wider domain admitted"),
+    };
+    assert!(matches!(error.error, PolicyError::RestrictionMismatch));
+    let mut corrected = ManagedClient::new(error.client, country(), Environment::Indoor).unwrap();
+    corrected.revoke().unwrap();
+    finish_stop(&mut corrected, &model);
 }
 #[test]
 fn unequal_wide_power_rows_refuse_split_eirp_rules_before_configuration() {
@@ -429,20 +429,20 @@ fn active_six_ghz_rnr_requires_programmed_probe_policy_and_reuses_refused_owner(
         [
             vec![domain::Channel {
                 hardware_value: 1,
-                flags: 0,
+                flags: WIDE,
             }],
             vec![domain::Channel {
                 hardware_value: 36,
-                flags: 0,
+                flags: WIDE,
             }],
             vec![
                 domain::Channel {
                     hardware_value: 1,
-                    flags: 0,
+                    flags: SIX_GHZ,
                 },
                 domain::Channel {
                     hardware_value: 5,
-                    flags: 2,
+                    flags: SIX_GHZ | reg::channel::NO_IR,
                 },
             ],
         ],
@@ -476,21 +476,7 @@ fn active_six_ghz_rnr_requires_programmed_probe_policy_and_reuses_refused_owner(
         memory,
         drops,
     };
-    let original = fixture();
-    let mut b = vec![0; 112];
-    b[..24].copy_from_slice(&original[..24]);
-    b[17] = 3;
-    b[20..26].copy_from_slice(&[0, 8, 0, 14, 0, 20]);
-    b[32..48].copy_from_slice(&original[24..40]);
-    b[56..72].copy_from_slice(&original[48..64]);
-    b[80..96].copy_from_slice(&original[48..64]);
-    b[84..88].copy_from_slice(&5_945_000u32.to_be_bytes());
-    b[88..92].copy_from_slice(&5_985_000u32.to_be_bytes());
-    b[92..96].copy_from_slice(&40_000u32.to_be_bytes());
-    let country = Database::parse(Arc::from(b.clone()), Sha256::digest(&b).into())
-        .unwrap()
-        .select(*b"US")
-        .unwrap();
+    let country = three_band_country();
     let mut driver = ManagedClient::new(client, country, Environment::Indoor).unwrap();
     let target = scan::SixGhz {
         channel_index: 0,

@@ -59,7 +59,7 @@ pub(crate) fn domain_channels(band: Band) -> Vec<domain::Channel> {
             Band::Ghz5 => 36,
             Band::Ghz6 => 1,
         },
-        flags: 2 | 16 | 32 | 128 | 256 | 8192 | (1 << 20),
+        flags: 2 | 16 | 32 | 128 | 256 | 8192 | (1 << 19) | (1 << 20),
     }]
 }
 pub(crate) fn prepare(

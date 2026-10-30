@@ -338,30 +338,46 @@ pub(crate) mod tests {
         ));
     }
     /// Deliberate database model, not a shipped regulatory policy/release.
-    pub(crate) fn fixture() -> Vec<u8> {
-        let mut b = vec![0; 72];
+    /// A database whose one country, FCC "US", has `rules`: start, end and
+    /// maximum bandwidth in kHz, EIRP in mBm and regulatory.db flags.
+    pub(crate) fn encode(rules: &[(u32, u32, u32, u16, u8)]) -> Vec<u8> {
+        let first = (20 + 2 * rules.len()).next_multiple_of(4);
+        let mut b = vec![0; first + 24 * rules.len()];
         b[..4].copy_from_slice(b"RGDB");
         b[4..8].copy_from_slice(&20u32.to_be_bytes());
         b[8..10].copy_from_slice(b"US");
         b[10..12].copy_from_slice(&4u16.to_be_bytes());
-        b[16..19].copy_from_slice(&[3, 2, 1]);
-        b[20..24].copy_from_slice(&[0, 6, 0, 12]);
-        for (at, start, end) in [(24, 2_400_000u32, 2_500_000u32), (48, 5_150_000, 5_350_000)] {
+        b[16..19].copy_from_slice(&[3, rules.len() as u8, 1]);
+        for (i, &(start, end, bandwidth, eirp, flags)) in rules.iter().enumerate() {
+            let at = first + 24 * i;
+            b[20 + 2 * i..22 + 2 * i].copy_from_slice(&(at as u16 / 4).to_be_bytes());
             b[at] = 16;
-            b[at + 2..at + 4].copy_from_slice(&3000u16.to_be_bytes());
+            b[at + 1] = flags;
+            b[at + 2..at + 4].copy_from_slice(&eirp.to_be_bytes());
             b[at + 4..at + 8].copy_from_slice(&start.to_be_bytes());
             b[at + 8..at + 12].copy_from_slice(&end.to_be_bytes());
-            b[at + 12..at + 16].copy_from_slice(&80_000u32.to_be_bytes());
+            b[at + 12..at + 16].copy_from_slice(&bandwidth.to_be_bytes());
         }
         b
     }
-    pub(crate) fn country() -> Country {
-        let b = fixture();
+    const RULES: &[(u32, u32, u32, u16, u8)] = &[
+        (2_400_000, 2_500_000, 80_000, 3000, 0),
+        (5_150_000, 5_350_000, 80_000, 3000, 0),
+    ];
+    pub(crate) fn fixture() -> Vec<u8> {
+        encode(RULES)
+    }
+    /// The "US" country of `encode(rules)`.
+    pub(crate) fn country_of(rules: &[(u32, u32, u32, u16, u8)]) -> Country {
+        let b = encode(rules);
         let hash = Sha256::digest(&b).into();
         Database::parse(Arc::from(b), hash)
             .unwrap()
             .select(*b"US")
             .unwrap()
+    }
+    pub(crate) fn country() -> Country {
+        country_of(RULES)
     }
     #[test]
     fn selected_country_is_pinned_explicit_and_bounds_checked() {

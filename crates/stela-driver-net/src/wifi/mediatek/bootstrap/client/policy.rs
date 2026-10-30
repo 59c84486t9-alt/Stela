@@ -64,7 +64,9 @@ struct Observed {
 struct Programmed {
     channel: Channel,
     flags: u32,
-    max_half_dbm: i8,
+    /// The highest rate power programmed for it; `None` when the source
+    /// rate-power channel list has no row for it, so nothing transmits there.
+    max_half_dbm: Option<i8>,
 }
 struct Snapshot {
     context: reg::NativeContext,
@@ -251,14 +253,12 @@ impl Snapshot {
                 let channel = channel(band, u16::from_le_bytes([e[0], e[1]]))
                     .ok_or(PolicyError::RestrictionMismatch)?;
                 let flags = u32::from_le_bytes(e[4..8].try_into().unwrap());
-                let rule = country
-                    .rule(u32::from(channel.frequency_mhz) * 1000, 20_000)
-                    .ok_or(PolicyError::RestrictionMismatch)?;
-                if flags & 1 != 0
-                    || (rule.no_ir && flags & 2 == 0)
-                    || (rule.dfs && flags & 8 == 0)
-                    || (rule.indoor_only && flags & (1 << 9) == 0)
-                    || (rule.no_ofdm && flags & (1 << 6) == 0)
+                // The programmed channel keeps every restriction cfg80211
+                // gives it under the country, and its power stays within the
+                // regulatory limit mt76_connac_get_ch_power applies.
+                let required = country.channel(channel.frequency_mhz);
+                if (flags | required.flags) & reg::channel::DISABLED != 0
+                    || flags & required.flags != required.flags
                     || channels.iter().any(|c: &Programmed| c.channel == channel)
                 {
                     return Err(PolicyError::RestrictionMismatch);
@@ -266,9 +266,8 @@ impl Snapshot {
                 let max_half_dbm = powers
                     .iter()
                     .find(|&&(c, _)| c == channel)
-                    .map(|&(_, max)| max)
-                    .ok_or(PolicyError::PowerMismatch)?;
-                if i32::from(max_half_dbm) * 50 > i32::from(rule.max_eirp_mbm) {
+                    .map(|&(_, max)| max);
+                if max_half_dbm.is_some_and(|max| i32::from(max) > 2 * required.max_reg_dbm) {
                     return Err(PolicyError::PowerMismatch);
                 }
                 channels.push(Programmed {
@@ -398,7 +397,8 @@ impl reg::HardwareLease for HardwareGuard<'_> {
                 c.flags & ((1 << 11) | 1) == 0
                     && (c.flags & (1 << 9) == 0 || self.1 == Environment::Indoor)
                     && (purpose != reg::Purpose::Probe || c.flags & (2 | 8) == 0)
-                    && i32::from(c.max_half_dbm) * 50 <= profile.max_eirp_mbm
+                    && c.max_half_dbm
+                        .is_some_and(|max| i32::from(max) * 50 <= profile.max_eirp_mbm)
             }
         }
     }

@@ -10,8 +10,6 @@ use crate::wifi::mediatek::{
     ring::{rx::tests::device_receive, tests::Source},
 };
 use core::sync::atomic::Ordering;
-use reg::database::{Database, tests::fixture};
-use sha2::{Digest, Sha256};
 
 mod custom_probe;
 
@@ -35,16 +33,16 @@ fn setup(six_capability: bool, six_programmed: bool, flags: u32) -> (TestLink, M
         [
             vec![domain::Channel {
                 hardware_value: 1,
-                flags: 0,
+                flags: WIDE,
             }],
             vec![domain::Channel {
                 hardware_value: 36,
-                flags: 0,
+                flags: WIDE,
             }],
             if six_programmed {
                 vec![domain::Channel {
                     hardware_value: 1,
-                    flags,
+                    flags: SIX_GHZ | flags,
                 }]
             } else {
                 vec![]
@@ -79,25 +77,8 @@ fn setup(six_capability: bool, six_programmed: bool, flags: u32) -> (TestLink, M
         memory,
         drops,
     };
-    // Authored three-band database, parsed and hash-bound through the normal
-    // input path. It cannot override NIC, CLC, domain or per-channel power.
-    let original = fixture();
-    let mut bytes = vec![0; 112];
-    bytes[..24].copy_from_slice(&original[..24]);
-    bytes[17] = 3;
-    bytes[20..26].copy_from_slice(&[0, 8, 0, 14, 0, 20]);
-    bytes[32..48].copy_from_slice(&original[24..40]);
-    bytes[56..72].copy_from_slice(&original[48..64]);
-    bytes[80..96].copy_from_slice(&original[48..64]);
-    bytes[84..88].copy_from_slice(&5_945_000u32.to_be_bytes());
-    bytes[88..92].copy_from_slice(&5_985_000u32.to_be_bytes());
-    bytes[92..96].copy_from_slice(&40_000u32.to_be_bytes());
-    let digest = Sha256::digest(&bytes).into();
-    let country = Database::parse(Arc::from(bytes), digest)
-        .unwrap()
-        .select(*b"US")
-        .unwrap();
-    let client = ManagedClient::new(client, country, Environment::Indoor).unwrap();
+    // It cannot override NIC, CLC, domain or per-channel power.
+    let client = ManagedClient::new(client, three_band_country(), Environment::Indoor).unwrap();
     (ManagedLink::new(client, Source).unwrap(), model)
 }
 

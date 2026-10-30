@@ -22,6 +22,10 @@ use crate::{
             bootstrap::client::{Client, Error as ClientError, Event, Phase as ClientPhase},
             mcu::{client::Profile, device::Context},
         },
+        regulatory::{
+            channel,
+            database::{Country, tests::country_of},
+        },
         scan,
         security::ReplaySeed,
         station::{self, Join, PortPolicy, data::TxClass, wire::AssociationRequest},
@@ -39,6 +43,18 @@ pub(crate) const CHANNEL: wifi::Channel = wifi::Channel {
     number: 36,
     frequency_mhz: 5180,
 };
+/// The flags cfg80211 gives every channel under an 80 MHz rule.
+pub(crate) const WIDE: u32 = channel::NO_160MHZ | channel::NO_320MHZ;
+/// The flags cfg80211 gives the 6 GHz channels of [`three_band_country`].
+pub(crate) const SIX_GHZ: u32 = channel::NO_80MHZ | WIDE;
+/// The test "US", with a 40 MHz rule over 6 GHz channels 1 to 5.
+pub(crate) fn three_band_country() -> Country {
+    country_of(&[
+        (2_400_000, 2_500_000, 80_000, 3000, 0),
+        (5_150_000, 5_350_000, 80_000, 3000, 0),
+        (5_945_000, 5_985_000, 40_000, 3000, 0),
+    ])
+}
 pub(crate) struct Policy(pub(crate) bool);
 impl station::RegulatoryPolicy for Policy {
     fn allow_management_tx(&mut self, _: wifi::Channel) -> bool {

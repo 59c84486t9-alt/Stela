@@ -24,6 +24,7 @@ pub use six_ghz_authentication::{
 };
 mod scan;
 pub use scan::{ScanAdmission, ScanOperation};
+pub mod channel;
 pub mod database;
 pub mod wmm;
 pub use association::{AssociationAdmission, AssociationOperation, AssociationUse, EdcaOperation};
