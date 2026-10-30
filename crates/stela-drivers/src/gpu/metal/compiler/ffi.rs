@@ -9,6 +9,7 @@ pub(super) const VARYINGS: usize = 32;
 pub(super) const COLOR_OUTPUTS: usize = 9;
 pub(super) const FUNCTION_CONSTANTS: usize = 256;
 pub(super) const NAME_BYTES: usize = 8192;
+pub(super) const SAMPLER_STATES: usize = 256;
 
 /// `enum stela_air_error_kind`.
 pub(super) mod kind {
@@ -229,6 +230,14 @@ pub(super) struct LinkedFunction {
     pub name_bytes: usize,
 }
 
+/// `struct stela_air_constexpr_sampler`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub(super) struct ConstexprSampler {
+    pub state: u64,
+    pub id: u64,
+}
+
 /// `struct stela_metal_specialization`.
 #[repr(C)]
 #[derive(Debug)]
@@ -250,6 +259,8 @@ pub struct Specialization {
     pub(super) module_count: u32,
     pub(super) linked_function_count: u32,
     pub(super) max_call_stack_depth: u32,
+    pub(super) sampler_count: u32,
+    pub(super) samplers: *const ConstexprSampler,
 }
 
 /// `struct stela_metal_tessellation`: the raw values of the pipeline's
@@ -320,6 +331,7 @@ mod tests {
             ("STELA_METAL_COLOR_OUTPUTS", COLOR_OUTPUTS),
             ("STELA_METAL_FUNCTION_CONSTANTS", FUNCTION_CONSTANTS),
             ("STELA_METAL_NAME_BYTES", NAME_BYTES),
+            ("STELA_METAL_SAMPLER_STATES", SAMPLER_STATES),
             ("STELA_METAL_REFLECTION_BYTES", size_of::<Reflection>()),
             ("STELA_METAL_TARGET_BYTES", size_of::<Target>()),
             (
@@ -343,6 +355,10 @@ mod tests {
             (
                 "STELA_METAL_LINKED_FUNCTION_BYTES",
                 size_of::<LinkedFunction>(),
+            ),
+            (
+                "STELA_METAL_CONSTEXPR_SAMPLER_BYTES",
+                size_of::<ConstexprSampler>(),
             ),
         ];
         for (name, value) in expected {

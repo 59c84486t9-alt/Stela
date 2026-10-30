@@ -16,6 +16,7 @@
 #include "llvm-c/Transforms/PassBuilder.h"
 #include "util/hash_table.h"
 #include "util/ralloc.h"
+#include <inttypes.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -2559,16 +2560,34 @@ fp_conversion(struct translator *t, LLVMValueRef inst, LLVMOpcode op)
    return put_value(t, inst, value, 0);
 }
 
+/* A constexpr sampler's MTLResourceID, or NULL after reporting a state the
+ * options give no sampler. */
+static nir_def *
+constexpr_sampler(struct translator *t, uint64_t state)
+{
+   const struct stela_air_options *options = t->options;
+   for (unsigned i = 0; i < options->constexpr_sampler_count; i++) {
+      if (options->constexpr_samplers[i].state == state)
+         return nir_imm_int64(&t->b, options->constexpr_samplers[i].id);
+   }
+   fail(t, STELA_AIR_ARGUMENT, "constexpr sampler state %#" PRIx64 " has no sampler", state);
+   return NULL;
+}
+
 static const struct stela_air_sampler *
 sampler_argument(void *translator, LLVMValueRef value, nir_def **id)
 {
-   const struct value *v = find_value(translator, value);
+   struct translator *t = translator;
+   uint64_t state;
+   if (stela_air_metadata_sampler_state(&t->metadata, value, &state)) {
+      *id = constexpr_sampler(t, state);
+      return NULL;
+   }
+   const struct value *v = find_value(t, value);
    *id = v ? v->id : NULL;
    return v && !v->array ? v->sampler : NULL;
 }
 
-/* A call of one of AIR's texture functions; false with no error when the
- * call is something else. */
 /* The read-write word at a texture call's pointer operand. */
 static const struct value *
 texture_word(struct translator *t, LLVMValueRef pointer)
@@ -2599,6 +2618,8 @@ texture_store_word(void *translator, LLVMValueRef pointer, nir_def *value)
    return t->error->kind == STELA_AIR_OK;
 }
 
+/* A call of one of AIR's texture functions; false with no error when the
+ * call is something else. */
 static bool
 texture_call(struct translator *t, LLVMValueRef inst, const char *name, size_t name_length,
              bool *lowered)
@@ -4360,6 +4381,7 @@ translate(const void *bitcode, size_t size, const char *entry,
    if (!bitcode || size < 4 || size > AIR_MAX_BITCODE_BYTES ||
        memcmp(bitcode, "BC\xc0\xde", 4) || !entry || !*entry || !nir_options ||
        !options || !options->max_instructions || (options->constant_count && !options->constants) ||
+       (options->constexpr_sampler_count && !options->constexpr_samplers) ||
        (compute && (!options->workgroup_size[0] ||
        !options->workgroup_size[1] || !options->workgroup_size[2]))) {
       fail(&t, STELA_AIR_INPUT, "invalid AIR bitcode/options");

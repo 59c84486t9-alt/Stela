@@ -52,6 +52,71 @@ impl Default for SamplerDescriptor {
     }
 }
 
+impl SamplerDescriptor {
+    /// The sampler a constexpr sampler's state encodes: the first word of
+    /// the `[2 x i64]` Apple's compiler emits for it into AIR, whose bits
+    /// from the low end are three 3-bit address modes (s, t, r), 2-bit mag,
+    /// min and mip filters, the pixel-coordinates flag, a 4-bit compare
+    /// function, the anisotropy less one in 4 bits, the half LOD minimum
+    /// and maximum clamps, and 2-bit border color and reduction mode.
+    pub fn from_constexpr(state: u64) -> Result<Self> {
+        let field = |shift: u32, bits: u32| state >> shift & ((1 << bits) - 1);
+        let invalid = Error::Invalid("constexpr sampler state");
+        ensure(state >> 60 == 0, "constexpr sampler state")?;
+        let address = |shift| match field(shift, 3) {
+            // clamp_to_zero is clamp_to_border with the default border.
+            0 => Ok(SamplerAddressMode::ClampToBorderColor),
+            1 => Ok(SamplerAddressMode::ClampToEdge),
+            2 => Ok(SamplerAddressMode::Repeat),
+            3 => Ok(SamplerAddressMode::MirrorRepeat),
+            _ => Err(invalid),
+        };
+        let filter = |shift| match field(shift, 2) {
+            2 => Err(Error::Unsupported("bicubic sampler filtering")),
+            raw => SamplerMinMagFilter::from_raw(raw).ok_or(invalid),
+        };
+        let compare_function = match field(16, 4) {
+            1 => CompareFunction::Less,
+            2 => CompareFunction::LessEqual,
+            3 => CompareFunction::Greater,
+            4 => CompareFunction::GreaterEqual,
+            5 => CompareFunction::Equal,
+            6 => CompareFunction::NotEqual,
+            7 => CompareFunction::Always,
+            8 => CompareFunction::Never,
+            _ => return Err(invalid),
+        };
+        Ok(Self {
+            address_modes: [address(0)?, address(3)?, address(6)?],
+            mag_filter: filter(9)?,
+            min_filter: filter(11)?,
+            mip_filter: SamplerMipFilter::from_raw(field(13, 2)).ok_or(invalid)?,
+            normalized_coordinates: field(15, 1) == 0,
+            compare_function,
+            max_anisotropy: field(20, 4) + 1,
+            lod_min_clamp: half(field(24, 16)),
+            lod_max_clamp: half(field(40, 16)),
+            border_color: SamplerBorderColor::from_raw(field(56, 2)).ok_or(invalid)?,
+            reduction_mode: SamplerReductionMode::from_raw(field(58, 2)).ok_or(invalid)?,
+        })
+    }
+}
+
+/// The value of an IEEE half's bits.
+fn half(bits: u64) -> f32 {
+    let (exponent, mantissa) = ((bits >> 10 & 0x1f) as u32, (bits & 0x3ff) as u32);
+    let magnitude = match exponent {
+        0 => mantissa as f32 * f32::from_bits((127 - 24) << 23),
+        0x1f => f32::from_bits(0xff << 23 | mantissa << 13),
+        _ => f32::from_bits((exponent + 127 - 15) << 23 | mantissa << 13),
+    };
+    if bits >> 15 & 1 == 1 {
+        -magnitude
+    } else {
+        magnitude
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SamplerPlan {
     pub float: SamplerInfo,
@@ -359,6 +424,64 @@ mod tests {
             sampler(&capabilities(), &mipmapped),
             Err(Error::Invalid(_))
         ));
+    }
+
+    /// States Apple's compiler emitted for MSL constexpr samplers.
+    #[test]
+    fn constexpr_states_decode_as_apples_compiler_encodes_them() {
+        let default = SamplerDescriptor {
+            lod_max_clamp: 65504.0,
+            ..SamplerDescriptor::default()
+        };
+        assert_eq!(
+            SamplerDescriptor::from_constexpr(0x007b_ff00_0008_0049),
+            Ok(default)
+        );
+        // filter::linear, mip_filter::linear, max_anisotropy(8)
+        assert_eq!(
+            SamplerDescriptor::from_constexpr(0x007b_ff00_0078_4a49),
+            Ok(SamplerDescriptor {
+                min_filter: SamplerMinMagFilter::Linear,
+                mag_filter: SamplerMinMagFilter::Linear,
+                mip_filter: SamplerMipFilter::Linear,
+                max_anisotropy: 8,
+                ..default
+            })
+        );
+        // s_address::clamp_to_border, border_color::opaque_white
+        let border = SamplerDescriptor::from_constexpr(0x027b_ff00_0008_0048).unwrap();
+        assert_eq!(
+            (border.address_modes, border.border_color),
+            (
+                [
+                    SamplerAddressMode::ClampToBorderColor,
+                    SamplerAddressMode::ClampToEdge,
+                    SamplerAddressMode::ClampToEdge
+                ],
+                SamplerBorderColor::OpaqueWhite
+            )
+        );
+        // coord::pixel, compare_func::less_equal, lod_clamp(1, MAXHALF)
+        let pixel = SamplerDescriptor::from_constexpr(0x007b_ff3c_0002_8049).unwrap();
+        assert_eq!(
+            (
+                pixel.normalized_coordinates,
+                pixel.compare_function,
+                pixel.lod_min_clamp
+            ),
+            (false, CompareFunction::LessEqual, 1.0)
+        );
+        // filter::bicubic
+        assert_eq!(
+            SamplerDescriptor::from_constexpr(0x007b_ff00_0008_1449),
+            Err(Error::Unsupported("bicubic sampler filtering"))
+        );
+        for reserved in [1 << 60, 0x007b_ff00_0000_0049, 0x007b_ff00_0008_004c] {
+            assert!(matches!(
+                SamplerDescriptor::from_constexpr(reserved),
+                Err(Error::Invalid(_))
+            ));
+        }
     }
 
     #[test]

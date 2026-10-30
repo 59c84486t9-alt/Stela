@@ -65,6 +65,10 @@ struct stela_air_linked_function {
    const char *name;
    size_t name_bytes;
 };
+/* The sampler a constexpr sampler's state is: its 64-bit MTLResourceID. */
+struct stela_air_constexpr_sampler {
+   uint64_t state, id;
+};
 
 struct stela_air_buffer {
    unsigned argument;
@@ -357,6 +361,11 @@ bool stela_air_inspect_stage(const void *, size_t, const char *entry,
  * Only the lists are read; inspection validates the rest. */
 bool stela_air_entry_stage(const void *, size_t, const char *entry, unsigned *stage,
                            struct stela_air_error *);
+/* A module's constexpr sampler states, AIR_MAX_SAMPLER_STATES at most, as
+ * stela_air_metadata_sampler_states lists them. */
+#define AIR_MAX_SAMPLER_STATES AIR_MAX_METADATA_OPERANDS
+bool stela_air_sampler_states(const void *, size_t, uint64_t *states, unsigned *count,
+                              struct stela_air_error *);
 
 /* One validated VS/FS varying map. Identifiers borrow from the supplied entry
  * descriptors; caller must own/copy those strings beyond inspector callbacks.
@@ -421,6 +430,16 @@ bool stela_air_metadata_function_constants(struct stela_air_metadata *m,
                                            LLVMValueRef *storage, unsigned *count);
 /* Whether global stores a function constant. */
 bool stela_air_metadata_is_function_constant(struct stela_air_metadata *m, LLVMValueRef global);
+/* The module's constexpr samplers: each operand of !air.sampler_states names
+ * an internal AS2 constant [2 x i64] global, which texture calls take as
+ * their sampler, holding Apple's encoding of the sampler's state. The second
+ * word is zero; states[i] is the first, metal/sampler.rs decodes it. Each
+ * global is listed once. */
+bool stela_air_metadata_sampler_states(struct stela_air_metadata *m, LLVMValueRef *globals,
+                                       uint64_t *states, unsigned *count);
+/* The state of global when it is a validated module's constexpr sampler. */
+bool stela_air_metadata_sampler_state(struct stela_air_metadata *m, LLVMValueRef global,
+                                      uint64_t *state);
 /* One LLVM-only storage validator shared by conservative reflection and NIR.
  * These describe the qualified ABI, not compiler provenance or GPU limits.
  * No shared storage is allocated here; only actually used globals are lowered

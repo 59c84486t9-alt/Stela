@@ -27,6 +27,10 @@ static_assert(sizeof(struct stela_metal_stage_in) == STELA_METAL_STAGE_IN_BYTES,
               "metal/compiler.rs mirrors the stage-in layout");
 static_assert(STELA_METAL_FUNCTION_CONSTANTS == AIR_MAX_FUNCTION_CONSTANTS,
               "the reflection holds every function constant the frontend admits");
+static_assert(sizeof(struct stela_air_constexpr_sampler) == STELA_METAL_CONSTEXPR_SAMPLER_BYTES,
+              "metal/compiler.rs mirrors the constexpr samplers");
+static_assert(STELA_METAL_SAMPLER_STATES == AIR_MAX_SAMPLER_STATES,
+              "a module's states fit the listing");
 
 /* Reports the first error; always false. */
 static bool
@@ -309,6 +313,17 @@ stela_metal_reflect(const void *air, size_t size, const char *entry,
                                 fail(r.error, STELA_AIR_INPUT, "invalid reflection request");
 }
 
+bool
+stela_metal_sampler_states(const void *air, size_t size,
+                           uint64_t states[STELA_METAL_SAMPLER_STATES], uint32_t *count,
+                           struct stela_air_error *error)
+{
+   unsigned listed;
+   bool valid = stela_air_sampler_states(air, size, states, &listed, error);
+   *count = listed;
+   return valid;
+}
+
 /* The binding data of the metal_abi callbacks, which read its first member,
  * and of the threadgroup callback. */
 struct binding {
@@ -411,7 +426,8 @@ stela_metal_compile(const void *air, size_t size, const char *entry,
        (specialization->varying_count && !specialization->varyings) ||
        (specialization->constant_count && !specialization->constants) ||
        (specialization->module_count && !specialization->modules) ||
-       (specialization->linked_function_count && !specialization->linked_functions)) {
+       (specialization->linked_function_count && !specialization->linked_functions) ||
+       (specialization->sampler_count && !specialization->samplers)) {
       fail(error, STELA_AIR_INPUT, "invalid compilation request");
       return NULL;
    }
@@ -462,6 +478,8 @@ stela_metal_compile(const void *air, size_t size, const char *entry,
       .bind_texture_id = stela_metal_bind_texture_id,
       .bind_sampler_id = stela_metal_bind_sampler_id,
       .resource_id = stela_metal_resource_id,
+      .constexpr_samplers = specialization->samplers,
+      .constexpr_sampler_count = specialization->sampler_count,
       .texture_levels = stela_metal_texture_levels,
       .command_count = stela_metal_command_count,
       .encode_command = stela_metal_encode_command,

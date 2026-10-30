@@ -296,7 +296,7 @@ fn reflected(entry: &str) -> Result<Interface> {
         "fragment" | "unlinked" => Stage::Fragment,
         "object" => Stage::Object,
         "mesh" => Stage::Mesh,
-        "constants" => Stage::Kernel,
+        "constants" | "sampling" => Stage::Kernel,
         _ => return Err(Error::Invalid("no such function")),
     };
     let mut interface = interface(stage);
@@ -365,6 +365,13 @@ impl Compiler for MockCompiler {
             }),
             _ => reflected(entry).map(|interface| Reflection::Stage(Box::new(interface))),
         }
+    }
+    fn sampler_states(&mut self, _: u64, entry: &str, _: &Specialization) -> Result<Vec<u64>> {
+        // The default state, and filter::linear with the default's state.
+        Ok(match entry {
+            "sampling" => alloc::vec![0x007b_ff00_0008_0049, 0x007b_ff00_0008_0a49],
+            _ => Vec::new(),
+        })
     }
     fn compile(
         &mut self,
@@ -661,6 +668,48 @@ fn samplers_are_shared_and_clamped_variants_cached() {
         .filter(|object| matches!(object, Object::Sampler(_)))
         .count();
     assert_eq!(samplers, 2, "the sampler and its clamped variant");
+}
+
+#[test]
+fn constexpr_samplers_are_created_once_and_reach_compilation() {
+    let mut device = device();
+    let kernel = device.new_function(1, "sampling", Vec::new()).unwrap();
+    // Indirect command support compiles the pipeline's function at once.
+    let request = ComputePipelineRequest {
+        compute_function: kernel,
+        threadgroup_size_is_multiple_of_thread_execution_width: false,
+        max_total_threads_per_threadgroup: 64,
+        stage_input: None,
+        linked_functions: LinkedFunctions::default(),
+        support_indirect_command_buffers: true,
+    };
+    let created = |device: &mut TestDevice| {
+        let descriptors = &device.backend().descriptors;
+        descriptors
+            .iter()
+            .filter(|(_, descriptor)| matches!(descriptor, Descriptor::Sampler(_)))
+            .count()
+    };
+    device.new_compute_pipeline(&request).unwrap();
+    let samplers = device.compiler.compiled.last().unwrap().samplers.clone();
+    assert_eq!(created(&mut device), 2);
+    // Each is the sampler of the descriptor its state encodes.
+    let (default, linear) = (0x007b_ff00_0008_0049, 0x007b_ff00_0008_0a49);
+    let mut id = |state| {
+        let sampler = device
+            .new_sampler(&SamplerDescriptor::from_constexpr(state).unwrap())
+            .unwrap();
+        device.sampler_resource_id(sampler).unwrap().0
+    };
+    assert_eq!(samplers, [(default, id(default)), (linear, id(linear))]);
+    device.new_compute_pipeline(&request).unwrap();
+    assert_eq!(device.compiler.compiled.len(), 2);
+    assert_eq!(device.compiler.compiled[1].samplers, samplers);
+    assert_eq!(
+        created(&mut device),
+        2,
+        "later pipelines reuse the samplers"
+    );
 }
 
 #[test]

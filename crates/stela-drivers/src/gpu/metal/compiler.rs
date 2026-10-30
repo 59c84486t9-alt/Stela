@@ -95,6 +95,9 @@ pub struct Service {
         *mut ffi::Reflection,
         *mut ffi::AirError,
     ) -> bool,
+    /// `stela_metal_sampler_states`.
+    pub sampler_states:
+        unsafe extern "C" fn(*const c_void, usize, *mut u64, *mut u32, *mut ffi::AirError) -> bool,
     /// `stela_metal_compile`.
     pub compile: unsafe extern "C" fn(
         *const c_void,
@@ -202,6 +205,43 @@ impl Compiler for AirCompiler {
         let selected = select(&self.libraries, library, entry)?;
         let (reflection, _) = selected.reflect(&self.service, &mut self.refusal)?;
         Ok(reflection)
+    }
+
+    fn sampler_states(
+        &mut self,
+        library: u64,
+        entry: &str,
+        specialization: &Specialization,
+    ) -> Result<Vec<u64>> {
+        let selected = select(&self.libraries, library, entry)?;
+        let own = (selected.slice_hash, specialization.constants.as_slice());
+        let linked = linked_modules(&self.libraries, &specialization.linking, own)?;
+        let mut states = Vec::new();
+        for bitcode in
+            core::iter::once(selected.air.bitcode).chain(linked.iter().map(|module| module.bitcode))
+        {
+            let mut listed = [0; ffi::SAMPLER_STATES];
+            let mut count = 0;
+            let mut error = ffi::AirError::NONE;
+            // SAFETY: the bitcode outlives the call, which writes at most
+            // SAMPLER_STATES states, the count and the error.
+            let valid = unsafe {
+                (self.service.sampler_states)(
+                    bitcode.as_ptr().cast(),
+                    bitcode.len(),
+                    listed.as_mut_ptr(),
+                    &mut count,
+                    &mut error,
+                )
+            };
+            if !valid {
+                return Err(refuse(&mut self.refusal, entry, &error));
+            }
+            states.extend_from_slice(listed.get(..count as usize).ok_or(MALFORMED)?);
+        }
+        states.sort_unstable();
+        states.dedup();
+        Ok(states)
     }
 
     fn compile(
@@ -329,6 +369,11 @@ impl AirCompiler {
             })
             .collect();
         let constants = constant_values(&specialization.constants);
+        let samplers: Vec<_> = specialization
+            .samplers
+            .iter()
+            .map(|&(state, id)| ffi::ConstexprSampler { state, id })
+            .collect();
         let count = |len: usize| u32::try_from(len).map_err(|_| MALFORMED);
         let raw = ffi::Specialization {
             workgroup_size: specialization.workgroup_size.unwrap_or_default(),
@@ -348,6 +393,8 @@ impl AirCompiler {
             module_count: count(modules.len())?,
             linked_function_count: count(functions.len())?,
             max_call_stack_depth: linking.max_call_stack_depth,
+            sampler_count: count(samplers.len())?,
+            samplers: samplers.as_ptr(),
         };
         let mut error = ffi::AirError::NONE;
         let air = selected.air.bitcode;

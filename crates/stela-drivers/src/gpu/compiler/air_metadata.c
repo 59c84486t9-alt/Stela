@@ -330,7 +330,8 @@ stela_air_metadata_validate(struct stela_air_metadata *t)
       const char *allowed[] = {"air.version", "air.language_version", "air.compile_options",
                                "air.kernel", "air.vertex", "air.fragment", "air.object",
                                "air.mesh", "air.visible", "llvm.ident", "llvm.module.flags",
-                               "air.function_constants", "air.source_file_name"};
+                               "air.function_constants", "air.source_file_name",
+                               "air.sampler_states"};
       bool found = false;
       for (unsigned i = 0; i < ARRAY_SIZE(allowed); i++)
          found |= size == strlen(allowed[i]) && !memcmp(name, allowed[i], size);
@@ -339,10 +340,13 @@ stela_air_metadata_validate(struct stela_air_metadata *t)
                      (int)MIN2(size, 160), name);
    }
    struct stela_air_function_constant constants[AIR_MAX_FUNCTION_CONSTANTS];
-   unsigned constant_count;
+   LLVMValueRef samplers[AIR_MAX_SAMPLER_STATES];
+   uint64_t states[AIR_MAX_SAMPLER_STATES];
+   unsigned constant_count, sampler_count;
    if (!version_metadata(t, "air.version", false) ||
        !version_metadata(t, "air.language_version", true) || !module_flags(t) ||
-       !stela_air_metadata_function_constants(t, constants, NULL, &constant_count))
+       !stela_air_metadata_function_constants(t, constants, NULL, &constant_count) ||
+       !stela_air_metadata_sampler_states(t, samplers, states, &sampler_count))
       return false;
    LLVMValueRef nodes[AIR_MAX_METADATA_OPERANDS];
    unsigned count;
@@ -792,6 +796,72 @@ stela_air_metadata_is_function_constant(struct stela_air_metadata *t, LLVMValueR
       LLVMGetMDNodeOperands(nodes[i], fields);
       if (fields[0] == global)
          return true;
+   }
+   return false;
+}
+
+/* A constexpr sampler's global and its state's first word. */
+static bool
+sampler_state(LLVMValueRef global, uint64_t *state)
+{
+   LLVMValueRef initializer = global && LLVMIsAGlobalVariable(global) ? LLVMGetInitializer(global) : NULL;
+   LLVMTypeRef type = initializer ? LLVMTypeOf(initializer) : NULL;
+   LLVMLinkage linkage = initializer ? LLVMGetLinkage(global) : LLVMExternalLinkage;
+   if (!type || LLVMGetPointerAddressSpace(LLVMTypeOf(global)) != 2 ||
+       !LLVMIsGlobalConstant(global) || LLVMIsThreadLocal(global) ||
+       (linkage != LLVMInternalLinkage && linkage != LLVMPrivateLinkage) ||
+       LLVMGetTypeKind(type) != LLVMArrayTypeKind || LLVMGetArrayLength2(type) != 2 ||
+       LLVMGetTypeKind(LLVMGetElementType(type)) != LLVMIntegerTypeKind ||
+       LLVMGetIntTypeWidth(LLVMGetElementType(type)) != 64)
+      return false;
+   LLVMValueRef words[2] = {LLVMGetAggregateElement(initializer, 0),
+                            LLVMGetAggregateElement(initializer, 1)};
+   if (!words[0] || !words[1] || !LLVMIsAConstantInt(words[0]) || !LLVMIsAConstantInt(words[1]) ||
+       LLVMConstIntGetZExtValue(words[1]))
+      return false;
+   *state = LLVMConstIntGetZExtValue(words[0]);
+   return true;
+}
+
+bool
+stela_air_metadata_sampler_states(struct stela_air_metadata *t, LLVMValueRef *globals,
+                                  uint64_t *states, unsigned *count)
+{
+   LLVMValueRef nodes[AIR_MAX_METADATA_OPERANDS];
+   if (!stela_air_named_md(t, "air.sampler_states", nodes, count))
+      return false;
+   for (unsigned i = 0; i < *count; i++) {
+      LLVMValueRef fields[AIR_MAX_METADATA_OPERANDS];
+      unsigned field_count;
+      if (!stela_air_md_node(t, nodes[i], fields, &field_count) || field_count != 2 ||
+          !stela_air_md_string(fields[0], "air.sampler_state") ||
+          !sampler_state(fields[1], &states[i]))
+         return fail(t, STELA_AIR_METADATA, "invalid constexpr sampler metadata");
+      globals[i] = fields[1];
+      for (unsigned j = 0; j < i; j++) {
+         if (globals[j] == globals[i])
+            return fail(t, STELA_AIR_METADATA, "duplicate constexpr sampler");
+      }
+   }
+   return true;
+}
+
+bool
+stela_air_metadata_sampler_state(struct stela_air_metadata *t, LLVMValueRef global,
+                                 uint64_t *state)
+{
+   LLVMValueRef nodes[AIR_MAX_METADATA_OPERANDS];
+   unsigned count = LLVMGetNamedMetadataNumOperands(t->module, "air.sampler_states");
+   if (count > AIR_MAX_METADATA_OPERANDS)
+      return false;
+   LLVMGetNamedMetadataOperands(t->module, "air.sampler_states", nodes);
+   for (unsigned i = 0; i < count; i++) {
+      LLVMValueRef fields[2];
+      if (LLVMIsAMDNode(nodes[i]) && LLVMGetMDNodeNumOperands(nodes[i]) == 2) {
+         LLVMGetMDNodeOperands(nodes[i], fields);
+         if (fields[1] == global)
+            return sampler_state(global, state);
+      }
    }
    return false;
 }
@@ -2295,6 +2365,40 @@ stela_air_inspect_stage(const void *bitcode, size_t size, const char *entry,
    return inspect(bitcode, size, AIR_MAX_METADATA_OPERANDS, NULL, data, error, entry, stage, visit);
 }
 
+/* Parses AIR bitcode into m->module, in *context; false after reporting
+ * why. close_module disposes of both. */
+static bool
+parse_module(struct stela_air_metadata *m, const void *bitcode, size_t size,
+             LLVMContextRef *context)
+{
+   *context = LLVMContextCreate();
+   if (!*context)
+      return fail(m, STELA_AIR_ALLOCATION, "LLVM context unavailable");
+   LLVMContextSetDiagnosticHandler(*context, inspection_diagnostic, m);
+   LLVMMemoryBufferRef buffer = LLVMCreateMemoryBufferWithMemoryRangeCopy(bitcode, size, "Metal input");
+   bool parsed = buffer && !LLVMParseBitcodeInContext2(*context, buffer, &m->module);
+   if (buffer)
+      LLVMDisposeMemoryBuffer(buffer);
+   return (parsed && m->error->kind == STELA_AIR_OK) ||
+      fail(m, STELA_AIR_BITCODE, "LLVM refused AIR bitcode");
+}
+
+static void
+close_module(struct stela_air_metadata *m, LLVMContextRef context)
+{
+   if (m->module)
+      LLVMDisposeModule(m->module);
+   if (context)
+      LLVMContextDispose(context);
+}
+
+static bool
+valid_bitcode(const void *bitcode, size_t size)
+{
+   return bitcode && size >= 4 && size <= AIR_MAX_BITCODE_BYTES &&
+          !memcmp(bitcode, "BC\xc0\xde", 4);
+}
+
 bool
 stela_air_entry_stage(const void *bitcode, size_t size, const char *entry, unsigned *stage,
                       struct stela_air_error *error)
@@ -2302,22 +2406,12 @@ stela_air_entry_stage(const void *bitcode, size_t size, const char *entry, unsig
    struct stela_air_error local = {0};
    struct stela_air_metadata m = {.error = error ? error : &local};
    *m.error = (struct stela_air_error){0};
-   if (!bitcode || size < 4 || size > AIR_MAX_BITCODE_BYTES || memcmp(bitcode, "BC\xc0\xde", 4) ||
-       !entry || !stage_text(entry, strlen(entry)))
+   if (!valid_bitcode(bitcode, size) || !entry || !stage_text(entry, strlen(entry)))
       return fail(&m, STELA_AIR_INPUT, "invalid AIR entry query");
-   LLVMContextRef context = LLVMContextCreate();
-   if (!context)
-      return fail(&m, STELA_AIR_ALLOCATION, "LLVM context unavailable");
-   LLVMContextSetDiagnosticHandler(context, inspection_diagnostic, &m);
-   LLVMMemoryBufferRef buffer = LLVMCreateMemoryBufferWithMemoryRangeCopy(bitcode, size, "Metal input");
-   bool parsed = buffer && !LLVMParseBitcodeInContext2(context, buffer, &m.module);
-   if (buffer)
-      LLVMDisposeMemoryBuffer(buffer);
+   LLVMContextRef context;
    bool found = false;
-   if (!parsed || m.error->kind != STELA_AIR_OK) {
-      fail(&m, STELA_AIR_BITCODE, "LLVM refused AIR bitcode");
+   if (!parse_module(&m, bitcode, size, &context))
       goto done;
-   }
    LLVMValueRef fn = LLVMGetNamedFunction(m.module, entry);
    /* In enum stela_air_stage order after the kernels. */
    const char *lists[] = {"air.kernel", "air.vertex", "air.fragment", "air.object", "air.mesh",
@@ -2345,8 +2439,24 @@ stela_air_entry_stage(const void *bitcode, size_t size, const char *entry, unsig
    if (!found)
       fail(&m, STELA_AIR_ARGUMENT, "entry is not a listed AIR function");
 done:
-   if (m.module)
-      LLVMDisposeModule(m.module);
-   LLVMContextDispose(context);
+   close_module(&m, context);
    return found && m.error->kind == STELA_AIR_OK;
+}
+
+bool
+stela_air_sampler_states(const void *bitcode, size_t size, uint64_t *states, unsigned *count,
+                         struct stela_air_error *error)
+{
+   struct stela_air_error local = {0};
+   struct stela_air_metadata m = {.error = error ? error : &local};
+   *m.error = (struct stela_air_error){0};
+   *count = 0;
+   if (!valid_bitcode(bitcode, size))
+      return fail(&m, STELA_AIR_INPUT, "invalid AIR sampler state query");
+   LLVMContextRef context;
+   LLVMValueRef globals[AIR_MAX_SAMPLER_STATES];
+   bool listed = parse_module(&m, bitcode, size, &context) &&
+                 stela_air_metadata_sampler_states(&m, globals, states, count);
+   close_module(&m, context);
+   return listed;
 }

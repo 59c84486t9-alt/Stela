@@ -120,6 +120,9 @@ pub(super) struct Resources {
     cpu_copy_uploads: Vec<(TextureId, BufferImageCopy)>,
     /// Sparse textures by image, with their heaps.
     sparse: BTreeMap<Image, (HeapId, SparseTexture)>,
+    /// The samplers of constexpr sampler states by state. Any pipeline
+    /// compiled later may name one, so each lives as long as the device.
+    constexpr_samplers: BTreeMap<u64, ResourceId>,
 }
 
 impl<B: Backend, C: Compiler> Device<B, C> {
@@ -778,6 +781,17 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             None => float_index,
         };
         Ok((ResourceId::new(float_index, integer_index), samplers))
+    }
+
+    /// The sampler of a constexpr sampler state.
+    pub(super) fn constexpr_sampler(&mut self, state: u64) -> Result<ResourceId> {
+        if let Some(&id) = self.resources.constexpr_samplers.get(&state) {
+            return Ok(id);
+        }
+        let sampler = self.new_sampler(&SamplerDescriptor::from_constexpr(state)?)?;
+        let id = self.sampler_resource_id(sampler)?;
+        self.resources.constexpr_samplers.insert(state, id);
+        Ok(id)
     }
 
     /// `gpuResourceID` of a sampler.

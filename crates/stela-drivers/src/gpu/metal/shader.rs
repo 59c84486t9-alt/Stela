@@ -458,6 +458,10 @@ pub struct Specialization {
     pub dynamic_threadgroups: bool,
     /// The functions and libraries the stage links.
     pub linking: Linking,
+    /// The sampler of each constexpr sampler state the function and its
+    /// linking declare ([`Compiler::sampler_states`]), as (state,
+    /// `gpuResourceID`).
+    pub samplers: Vec<(u64, u64)>,
 }
 
 /// What a pipeline stage links into its function (`MTLLinkedFunctions` and
@@ -561,6 +565,19 @@ pub trait Compiler {
         entry: &str,
         specialization: &Specialization,
     ) -> Result<Reflection>;
+
+    /// The constexpr sampler states of `entry` of `library` and of the
+    /// functions and libraries `specialization` links, each once, which
+    /// [`SamplerDescriptor::from_constexpr`] decodes. Compiling the function
+    /// takes their samplers.
+    ///
+    /// [`SamplerDescriptor::from_constexpr`]: super::sampler::SamplerDescriptor::from_constexpr
+    fn sampler_states(
+        &mut self,
+        library: u64,
+        entry: &str,
+        specialization: &Specialization,
+    ) -> Result<Vec<u64>>;
 
     /// Compiles `entry` of `library`, registering its NIR with the backend.
     fn compile(

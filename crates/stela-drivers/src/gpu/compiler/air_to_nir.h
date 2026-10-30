@@ -286,6 +286,11 @@ struct stela_air_options {
    /* Texture and sampler array arguments' elements, which also need
     * bind_texture_id or bind_sampler_id; zero refuses the arrays. */
    stela_air_resource_id resource_id;
+   /* The samplers of the constexpr sampler states of the input and its
+    * linked modules, which bind_sampler_id resolves; a state with none is
+    * refused. */
+   const struct stela_air_constexpr_sampler *constexpr_samplers;
+   unsigned constexpr_sampler_count;
    /* Storage textures' level counts; NULL refuses get_num_mip_levels of
     * them. */
    stela_air_texture_levels texture_levels;

@@ -396,6 +396,70 @@ array_arguments_bind_their_elements(void)
           strstr(error.detail, "array"));
 }
 
+/* kernel_body sampling with a constexpr sampler of Metal's default state,
+ * as Apple's compiler emits one. */
+static const char *constexpr_global =
+   "@__air_sampler_state = internal addrspace(2) constant [2 x i64]"
+   " [i64 34901797601017929, i64 0], align 8\n";
+static const char *constexpr_metadata =
+   "!air.sampler_states = !{!30}\n"
+   "!30 = !{!\"air.sampler_state\", ptr addrspace(2) @__air_sampler_state}\n";
+
+static const char *
+join(const char *first, const char *second)
+{
+   static char buffer[2][8192];
+   static unsigned next;
+   char *joined = buffer[next++ & 1];
+   assert(strlen(first) + strlen(second) < sizeof(buffer[0]));
+   snprintf(joined, sizeof(buffer[0]), "%s%s", first, second);
+   return joined;
+}
+
+/* A constexpr sampler is the sampler the options give its state. */
+static void
+constexpr_samplers_bind_their_samplers(void)
+{
+   char body[8192];
+   snprintf(body, sizeof(body), "%s%s", constexpr_global,
+            replace(kernel_body, "ptr addrspace(2) %smp, <2", "ptr addrspace(2) @__air_sampler_state, <2"));
+   const char *metadata = join(kernel_metadata, constexpr_metadata);
+   const uint64_t state = 34901797601017929ull, id = 0x0000000700000005ull;
+
+   LLVMMemoryBufferRef input = bitcode(body, metadata);
+   uint64_t states[AIR_MAX_SAMPLER_STATES];
+   unsigned listed;
+   struct stela_air_error error = {0};
+   assert(stela_air_sampler_states(LLVMGetBufferStart(input), LLVMGetBufferSize(input), states,
+                                   &listed, &error) &&
+          listed == 1 && states[0] == state);
+   LLVMDisposeMemoryBuffer(input);
+
+   struct stela_air_options o = options(&primary, true);
+   o.constexpr_samplers = &(struct stela_air_constexpr_sampler){state, id};
+   o.constexpr_sampler_count = 1;
+   nir_shader *shader = kernel_with(body, metadata, &o, &error);
+   if (!shader)
+      fprintf(stderr, "constexpr: %u %s\n", error.kind, error.detail);
+   assert(shader);
+   nir_validate_shader(shader, "constexpr sampler kernel");
+   nir_tex_instr *sample = count(shader).first[nir_texop_txl];
+   int source = nir_tex_instr_src_index(sample, nir_tex_src_sampler_deref);
+   nir_alu_instr *half = nir_def_as_alu(nir_def_as_deref(sample->src[source].src.ssa)->arr.index.ssa);
+   assert(half->op == nir_op_unpack_64_2x32_split_x && nir_src_is_const(half->src[0].src) &&
+          nir_src_as_uint(half->src[0].src) == id);
+   ralloc_free(shader);
+
+   /* A state the options give no sampler. */
+   refuse(body, metadata, STELA_AIR_ARGUMENT, "has no sampler");
+   /* A state whose second word is not zero. */
+   refuse(replace(body, "i64 0], align 8", "i64 1], align 8"), metadata, STELA_AIR_METADATA,
+          "constexpr sampler");
+   /* A sampler state listed twice. */
+   refuse(body, replace(metadata, "!{!30}", "!{!30, !30}"), STELA_AIR_METADATA,
+          "duplicate constexpr sampler");
+}
+
 /* A storage texture's level selects its descriptor, which an access whose
  * level varies between threads indexes non-uniformly. */
 static void
@@ -611,11 +675,12 @@ main(void)
    storage_levels_select_their_descriptor();
    sparse_texels_report_their_residency();
    array_arguments_bind_their_elements();
+   constexpr_samplers_bind_their_samplers();
    unsupported_texture_uses_are_refused();
    kernels_take_texture_atomics();
    glsl_type_singleton_decref();
    puts("AIR textures: sample/level/offset, write, read_write array read, size queries, "
-        "implicit-derivative fragment sampling, depth compare, gather, storage levels, arrays, atomics and "
-        "refusals passed");
+        "implicit-derivative fragment sampling, depth compare, gather, storage levels, arrays, atomics, "
+        "constexpr samplers and refusals passed");
    return 0;
 }

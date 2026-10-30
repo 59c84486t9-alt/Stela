@@ -262,20 +262,44 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         self.pipelines.functions.remove(id.0).map(drop)
     }
 
+    /// `specialization` of function `id`, with its function constant values
+    /// and the samplers of the constexpr sampler states it and its linking
+    /// declare.
+    fn specialize(
+        &mut self,
+        id: FunctionId,
+        specialization: Specialization,
+    ) -> Result<(u64, String, Specialization)> {
+        let function = self.pipelines.functions.get(id.0)?;
+        let (library, entry) = (function.library, function.entry.clone());
+        let specialization = Specialization {
+            constants: function.constants.clone(),
+            ..specialization
+        };
+        let samplers = self
+            .compiler
+            .sampler_states(library, &entry, &specialization)?
+            .into_iter()
+            .map(|state| Ok((state, self.constexpr_sampler(state)?.0)))
+            .collect::<Result<_>>()?;
+        Ok((
+            library,
+            entry,
+            Specialization {
+                samplers,
+                ..specialization
+            },
+        ))
+    }
+
     fn compile(
         &mut self,
         id: FunctionId,
         specialization: Specialization,
     ) -> Result<CompiledShader> {
-        let function = self.pipelines.functions.get(id.0)?;
-        let stage = function.interface()?.stage;
-        let specialization = Specialization {
-            constants: function.constants.clone(),
-            ..specialization
-        };
-        let compiled = self
-            .compiler
-            .compile(function.library, &function.entry, &specialization)?;
+        let stage = self.pipelines.interface(id)?.stage;
+        let (library, entry, specialization) = self.specialize(id, specialization)?;
+        let compiled = self.compiler.compile(library, &entry, &specialization)?;
         if compiled.interface.stage != stage {
             self.compiler.release(compiled.code);
             return Err(Error::Invalid("the compiler changed the function's stage"));
@@ -289,20 +313,14 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         specialization: Specialization,
         tessellation: &Tessellation,
     ) -> Result<TessellationStages> {
-        let function = self.pipelines.functions.get(id.0)?;
-        let expected = function
-            .interface()
+        let expected = self
+            .pipelines
+            .interface(id)
             .map(|interface| (interface.stage, interface.patch))?;
-        let specialization = Specialization {
-            constants: function.constants.clone(),
-            ..specialization
-        };
-        let stages = self.compiler.compile_tessellation(
-            function.library,
-            &function.entry,
-            &specialization,
-            tessellation,
-        )?;
+        let (library, entry, specialization) = self.specialize(id, specialization)?;
+        let stages =
+            self.compiler
+                .compile_tessellation(library, &entry, &specialization, tessellation)?;
         let interface = &stages.evaluation.interface;
         if (interface.stage, interface.patch) != expected {
             for code in [stages.vertex, stages.control, stages.evaluation.code] {

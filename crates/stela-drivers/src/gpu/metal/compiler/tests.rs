@@ -33,6 +33,7 @@ struct Compiled {
     modules: Vec<(usize, Option<Values>)>,
     linked_functions: Vec<String>,
     max_call_stack_depth: u32,
+    samplers: Vec<(u64, u64)>,
 }
 
 /// Function constant values by index.
@@ -62,6 +63,10 @@ struct Fake {
     refuse_compilation: Option<Refused>,
     compiled: Vec<Compiled>,
     released: Vec<usize>,
+    /// Every module's constexpr sampler states, and the sizes of the
+    /// modules listed.
+    states: Vec<u64>,
+    listed: Vec<usize>,
 }
 
 std::thread_local! {
@@ -72,6 +77,8 @@ std::thread_local! {
             refuse_compilation: None,
             compiled: Vec::new(),
             released: Vec::new(),
+            states: Vec::new(),
+            listed: Vec::new(),
         })
     };
 }
@@ -116,6 +123,34 @@ unsafe extern "C" fn reflect(
         }
         // SAFETY: the compiler passes its reflection record.
         unsafe { *reflection = fake.reflection };
+        true
+    })
+}
+
+unsafe extern "C" fn sampler_states(
+    air: *const c_void,
+    size: usize,
+    states: *mut u64,
+    count: *mut u32,
+    error: *mut ffi::AirError,
+) -> bool {
+    // SAFETY: the compiler passes a module's bitcode and room for
+    // SAMPLER_STATES states.
+    let (air, out) = unsafe {
+        (
+            slice::from_raw_parts(air.cast::<u8>(), size),
+            slice::from_raw_parts_mut(states, ffi::SAMPLER_STATES),
+        )
+    };
+    assert!(air.starts_with(b"BC\xc0\xde"), "modules are bitcode");
+    FAKE.with_borrow_mut(|fake| {
+        if refused(fake.refuse_reflection, error) {
+            return false;
+        }
+        fake.listed.push(size);
+        out[..fake.states.len()].copy_from_slice(&fake.states);
+        // SAFETY: the compiler passes its count.
+        unsafe { *count = fake.states.len() as u32 };
         true
     })
 }
@@ -176,6 +211,17 @@ unsafe extern "C" fn compile(
             })
             .collect()
     });
+    // SAFETY: as above.
+    let samplers = unsafe {
+        slice::from_raw_parts(
+            specialization.samplers,
+            specialization.sampler_count as usize,
+        )
+    };
+    let samplers = samplers
+        .iter()
+        .map(|sampler| (sampler.state, sampler.id))
+        .collect();
     // SAFETY: as above.
     let (modules, linked_functions) = unsafe {
         (
@@ -244,6 +290,7 @@ unsafe extern "C" fn compile(
             modules,
             linked_functions,
             max_call_stack_depth: specialization.max_call_stack_depth,
+            samplers,
         });
         ptr::without_provenance_mut(0x1000 * fake.compiled.len())
     })
@@ -269,6 +316,7 @@ unsafe extern "C" fn release(shader: *mut c_void) {
 fn compiler(device: &PhysicalDevice) -> AirCompiler {
     let service = Service {
         reflect,
+        sampler_states,
         compile,
         tessellation_stages,
         release,
@@ -770,6 +818,54 @@ fn linked_modules_reach_the_service_once_each() {
             })
         ),
         Err(Error::Invalid("no function of that name"))
+    );
+}
+
+#[test]
+fn constexpr_samplers_are_listed_across_linked_modules_and_reach_the_service() {
+    reflecting(|r| r.stage = 3);
+    let (mut compiler, library) = with_library();
+    let dynamic = compiler.add_library(dynamic_fixture()).unwrap();
+    FAKE.with_borrow_mut(|fake| {
+        fake.states = vec![7, 3, 7];
+        fake.listed.clear();
+    });
+    let specialization = Specialization {
+        linking: Linking {
+            libraries: vec![dynamic],
+            ..Linking::default()
+        },
+        ..Specialization::default()
+    };
+    // The function's module and the library's, each state once.
+    assert_eq!(
+        compiler.sampler_states(library, "kernel", &specialization),
+        Ok(vec![3, 7])
+    );
+    FAKE.with_borrow(|fake| assert_eq!(fake.listed.len(), 2));
+    let specialization = Specialization {
+        samplers: vec![(3, 0x2_0000_0001), (7, 0x5_0000_0005)],
+        ..specialization
+    };
+    compiler
+        .compile(library, "kernel", &specialization)
+        .unwrap();
+    FAKE.with_borrow(|fake| {
+        assert_eq!(
+            fake.compiled.last().unwrap().samplers,
+            [(3, 0x2_0000_0001), (7, 0x5_0000_0005)]
+        );
+    });
+    FAKE.with_borrow_mut(|fake| {
+        fake.refuse_reflection = Some((ffi::kind::METADATA, 0, "invalid constexpr sampler"))
+    });
+    assert_eq!(
+        compiler.sampler_states(library, "kernel", &specialization),
+        Err(Error::Unsupported("AIR metadata"))
+    );
+    assert_eq!(
+        compiler.refusal().map(|refusal| refusal.detail.as_str()),
+        Some("invalid constexpr sampler")
     );
 }
 

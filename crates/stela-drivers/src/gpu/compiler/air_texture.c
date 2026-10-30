@@ -327,7 +327,7 @@ sampler_deref(struct call *call)
       return NULL;
    nir_def *id;
    const struct stela_air_sampler *sampler = call->c->sampler(call->c->translator, value, &id);
-   if (!sampler) {
+   if (!sampler && !id) {
       fail(call, "texture call samples with a value that is not a sampler");
       return NULL;
    }
@@ -339,7 +339,7 @@ sampler_deref(struct call *call)
    else if (!id && options->bind_sampler)
       deref = options->bind_sampler(call->b, sampler, integer, options->binding_data);
    if (!deref || deref->type != glsl_bare_sampler_type()) {
-      fail(call, "sampler %u is unbound", sampler->index);
+      fail(call, "a sampler is unbound");
       return NULL;
    }
    return deref;

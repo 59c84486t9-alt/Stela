@@ -137,6 +137,15 @@ compile(const uint8_t *air, size_t size, const char *entry,
       specialization.stage_in = &stage_in;
    if (reflection.patch)
       specialization.tessellation = &tessellation;
+   /* Each constexpr sampler state a sampler of its own, as the device
+    * creates them. */
+   static uint64_t states[STELA_METAL_SAMPLER_STATES];
+   static struct stela_air_constexpr_sampler samplers[STELA_METAL_SAMPLER_STATES];
+   if (!stela_metal_sampler_states(air, size, states, &specialization.sampler_count, error))
+      return NULL;
+   for (unsigned i = 0; i < specialization.sampler_count; i++)
+      samplers[i] = (struct stela_air_constexpr_sampler){states[i], (uint64_t)i << 32 | i};
+   specialization.samplers = samplers;
    return stela_metal_compile(air, size, entry, target, &specialization, error);
 }
 

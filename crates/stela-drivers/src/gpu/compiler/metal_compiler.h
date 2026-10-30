@@ -145,8 +145,13 @@ struct stela_metal_specialization {
    /* The stage's maxCallStackDepth, to which recursion through visible
     * function tables unrolls. */
    uint32_t max_call_stack_depth;
+   /* The sampler of each constexpr sampler state of the function's and the
+    * linked modules (stela_metal_sampler_states). */
+   uint32_t sampler_count;
+   const struct stela_air_constexpr_sampler *samplers;
 };
-#define STELA_METAL_SPECIALIZATION_BYTES 112u
+#define STELA_METAL_SPECIALIZATION_BYTES 120u
+#define STELA_METAL_CONSTEXPR_SAMPLER_BYTES 16u
 #define STELA_METAL_MODULE_BYTES 32u
 #define STELA_METAL_LINKED_FUNCTION_BYTES 16u
 /* The metal_abi.h layouts it points to. */
@@ -157,6 +162,14 @@ struct stela_metal_specialization {
 bool stela_metal_reflect(const void *air, size_t size, const char *entry,
                          struct stela_metal_reflection *reflection,
                          struct stela_air_error *error);
+
+#define STELA_METAL_SAMPLER_STATES 256u
+
+/* The constexpr sampler states the AIR module declares, each Apple's
+ * encoding, which metal/sampler.rs decodes. False after reporting why. */
+bool stela_metal_sampler_states(const void *air, size_t size,
+                                uint64_t states[STELA_METAL_SAMPLER_STATES], uint32_t *count,
+                                struct stela_air_error *error);
 
 /* Compiles entry against the specialization: NIR whose entry point is
  * main, which stela_metal_release frees, or NULL after reporting why. A
