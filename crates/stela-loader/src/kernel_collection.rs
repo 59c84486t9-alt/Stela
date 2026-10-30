@@ -353,6 +353,11 @@ pub(crate) mod tests {
             self
         }
 
+        pub(crate) fn command(mut self, raw: Vec<u8>) -> Self {
+            self.commands.push(raw);
+            self
+        }
+
         pub(crate) fn thread(mut self, pc: u64) -> Self {
             let mut raw = vec![];
             raw.extend(macho::LC_UNIXTHREAD.to_le_bytes());
