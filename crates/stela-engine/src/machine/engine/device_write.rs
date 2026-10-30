@@ -406,7 +406,7 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
         self.cpu.retired = retired.wrapping_add(1);
         self.cpu.pstate.btype = 0;
         self.device_lines = None;
-        self.statistics.device_accesses += 1;
+        self.count_device_access(write.request.physical);
         if let Err(error) = settlement {
             if let Ok(Some(memory)) = ram.try_service() {
                 memory.fail();

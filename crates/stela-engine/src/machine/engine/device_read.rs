@@ -409,7 +409,12 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
         self.cpu.retired = retired.wrapping_add(1);
         self.cpu.pstate.btype = 0;
         self.device_lines = None;
+        // The canonical service still borrows the host: count by field.
         self.statistics.device_accesses += 1;
+        *self
+            .device_registers
+            .entry(read.request.physical)
+            .or_default() += 1;
         if let Err(error) = settlement {
             // Unknown board settlement poisons RAM/monitor and leaves
             // worker sessions held. Returned load data is nevertheless final.

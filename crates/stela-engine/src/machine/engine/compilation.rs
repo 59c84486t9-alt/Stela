@@ -626,6 +626,18 @@ impl<H: Host, D: Devices> Machine<H, D> {
         words
     }
 
+    /// Device accesses by the physical address they reached: which
+    /// device registers to serve faster.
+    pub fn device_registers(&self) -> &BTreeMap<u64, u64> {
+        &self.device_registers
+    }
+
+    /// Count a device access at `physical`.
+    pub(super) fn count_device_access(&mut self, physical: u64) {
+        self.statistics.device_accesses += 1;
+        *self.device_registers.entry(physical).or_default() += 1;
+    }
+
     /// The word an instruction inside a compiled block executes as: its
     /// original word, or the UDF or NOP of a form the chip lacks. The
     /// block's last is kept as it was compiled; others are read again.

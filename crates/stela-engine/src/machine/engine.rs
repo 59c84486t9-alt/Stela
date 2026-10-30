@@ -605,6 +605,9 @@ pub struct Machine<H: Host, D: Devices> {
     /// the instruction word that took them, except those the live blocks
     /// count at their last instructions (see [`Self::exit_words`]).
     exit_words: BTreeMap<u32, u64>,
+    /// Device accesses by physical address: the registers the guest reads
+    /// and writes most ([`Self::device_registers`]).
+    device_registers: BTreeMap<u64, u64>,
     #[cfg(all(feature = "std", feature = "native-profile"))]
     floating_profile: Option<alloc::boxed::Box<floating_profile::Sampler>>,
     #[cfg(all(feature = "std", feature = "native-profile"))]
@@ -870,6 +873,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             statistics: Statistics::default(),
             step_timing: None,
             exit_words: BTreeMap::new(),
+            device_registers: BTreeMap::new(),
             #[cfg(all(feature = "std", feature = "native-profile"))]
             floating_profile: None,
             #[cfg(all(feature = "std", feature = "native-profile"))]

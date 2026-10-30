@@ -185,6 +185,8 @@ pub(super) struct ExitsSeen {
     /// `Statistics::lookup_misses` and `lookup_forgets`.
     pub(super) misses: [u64; 5],
     pub(super) forgets: [u64; 4],
+    /// `Machine::device_registers`.
+    pub(super) registers: BTreeMap<u64, u64>,
 }
 
 /// The `ExitKind`s `Statistics::exit_kinds` counts.
@@ -197,6 +199,7 @@ impl ExitsSeen {
     /// left compiled code, so the engine's exit causes can be ranked.
     pub(super) fn report<H: Host>(&mut self, machine: &Machine<H, parallel::Board>) {
         const SHOWN: usize = 24;
+        const REGISTERS: usize = 16;
         let statistics = &machine.statistics;
         let entries = statistics.blocks - statistics.chained;
         let kinds = statistics.exit_kinds;
@@ -264,6 +267,27 @@ impl ExitsSeen {
             output::arguments(format_args!(" {word:#010x}:{count}"));
         }
         output::arguments(format_args!("\n"));
+        let registers = machine.device_registers().clone();
+        let mut top: Vec<_> = registers
+            .iter()
+            .map(|(physical, &count)| {
+                let last = self.registers.get(physical).copied().unwrap_or_default();
+                (count - last, *physical)
+            })
+            .filter(|&(count, _)| count != 0)
+            .collect();
+        top.sort_unstable_by(|a, b| b.cmp(a));
+        let accesses: u64 = top.iter().map(|&(count, _)| count).sum();
+        let shown: u64 = top.iter().take(REGISTERS).map(|&(count, _)| count).sum();
+        output::arguments(format_args!(
+            "DEVICE REGISTERS accesses={accesses} registers={} shown={}%",
+            top.len(),
+            (shown * 100).checked_div(accesses).unwrap_or(100)
+        ));
+        for (count, physical) in top.into_iter().take(REGISTERS) {
+            output::arguments(format_args!(" {physical:#x}:{count}"));
+        }
+        output::arguments(format_args!("\n"));
         *self = Self {
             entries,
             kinds,
@@ -272,6 +296,7 @@ impl ExitsSeen {
             drops,
             misses,
             forgets,
+            registers,
         };
     }
 }

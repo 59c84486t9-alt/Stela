@@ -162,7 +162,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let Ok(instruction) = Decoder.lift(GuestAddress(pc), word) else {
             return refuse(self, "device access by an undecodable instruction");
         };
-        self.statistics.device_accesses += 1;
+        self.count_device_access(physical);
         self.device_lines = None;
         if let Some(load) = ScalarLoad::from_instruction(&instruction) {
             let (accessed, writeback) = self.scalar_address(load.address());
