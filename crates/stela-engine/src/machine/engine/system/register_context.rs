@@ -91,8 +91,17 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
                 self.regime = true;
             }
         }
+        let masks = cpu.pstate.daif;
         cpu.set_pstate(next);
-        if field == Pstate::D {
+        if matches!(field, Pstate::D | Pstate::A | Pstate::I | Pstate::F) {
+            // The masks derive nothing but an open DAIF cell's value, as
+            // for MSR DAIFSet and DAIFClr (`Machine::pstate_immediate`).
+            let cell = &mut self.machine.mirrors[super::super::mirrors::DAIF_MIRROR];
+            if cell.readable != 0 {
+                cell.value = super::super::mirrors::daif_register(next.daif);
+            }
+        }
+        if (masks ^ next.daif) & DAIF_D != 0 {
             // PSTATE.D masks same-EL debug exceptions, watchpoints included.
             self.regime = true;
         }

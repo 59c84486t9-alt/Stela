@@ -35,7 +35,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// An exception entry or return, GENTER or GEXIT moved the PE from EL
     /// and GXF state `from`: what derives from PSTATE goes, but the mirrored
     /// reads keep their cells per state ([`Mirrors`]), and an open DAIF
-    /// cell reads the new masks.
+    /// cell reads the new masks and open GL1 exception register cells what
+    /// the entry wrote.
     pub(super) fn transitioned(&mut self, from: usize) {
         self.forget_derived();
         let pstate = self.cpu.pstate;
@@ -44,6 +45,20 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let daif = &mut self.mirrors[DAIF_MIRROR];
         if daif.readable != 0 {
             daif.value = daif_register(pstate.daif);
+        }
+        for index in GUARDED_MIRRORS {
+            if self.mirrors[index].readable == 0 {
+                continue;
+            }
+            let read = decode_register(read_word(MIRRORED[index])).expect("an MRS word");
+            let physical = self.now();
+            self.mirrors[index] = match self.cpu.apple_access(read, physical) {
+                RegisterOutcome::Read(value) => register_read::Cell {
+                    readable: 1,
+                    value: self.degraded_read(read, value),
+                },
+                _ => register_read::Cell::default(),
+            };
         }
         self.sync_host_regime();
     }

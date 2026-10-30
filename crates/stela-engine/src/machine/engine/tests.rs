@@ -4771,6 +4771,49 @@ fn pac_returns_go_through_a_lookup_thunk() {
 /// the cell opens on a plain read and closes on any derived change
 /// other than a PSTATE mask, SPSel, TTBR0 or SPRR_PERM write.
 #[test]
+fn guarded_exception_register_cells_follow_entries_and_bank_writes() {
+    const MRS_SPSR_GL1: u32 = 0xd53e_fa68; // mrs x8, spsr_gl1
+    const MSR_ELR_GL1: u32 = 0xd51e_fac9; // msr elr_gl1, x9
+    assert_eq!(
+        read_word(registers::encodings::SPSR_GL1),
+        MRS_SPSR_GL1 & !31
+    );
+    assert!(guarded_bank(registers::encodings::ELR_GL1));
+    assert!(guarded_bank(registers::encodings::SPSR_GL12));
+    assert!(!guarded_bank(registers::encodings::GXF_STATUS_EL1));
+    let spsr = GUARDED_MIRRORS[0];
+    let mut machine = machine(&[]);
+    machine.cpu.pstate.el = 1;
+    // Outside the guarded level the read is not plain: no cell opens.
+    machine.cpu.apple.guarded[0].spsr = 0x3c5;
+    let _ = machine.system_instruction(MRS_SPSR_GL1);
+    assert_eq!(machine.mirrors[spsr].readable, 0);
+    machine.cpu.pstate.guarded = true;
+    machine.system_instruction(MRS_SPSR_GL1).unwrap();
+    assert_eq!(
+        machine.mirrors[spsr],
+        register_read::Cell {
+            readable: 1,
+            value: 0x3c5
+        }
+    );
+    // An entry writes the bank; the transition reads it into the cell.
+    machine.cpu.apple.guarded[0].spsr = 0x3c4;
+    machine.transitioned(mirror_state(1, true));
+    assert_eq!(machine.mirrors[spsr].value, 0x3c4);
+    // A write of the bank closes its cells in every state.
+    machine.mirrors.banks[mirror_state(2, false)][spsr].readable = 1;
+    machine.cpu.state.x[9] = 0x8000;
+    machine.system_instruction(MSR_ELR_GL1).unwrap();
+    assert_eq!(machine.cpu.apple.guarded[0].elr, 0x8000);
+    assert_eq!(machine.mirrors[spsr].readable, 0);
+    assert_eq!(
+        machine.mirrors.banks[mirror_state(2, false)][spsr].readable,
+        0
+    );
+}
+
+#[test]
 fn mirrored_reads_complete_natively_from_the_open_cell() {
     const ADD: u32 = 0x9100_0400; // add x0, x0, #1
     const MRS: u32 = 0xd538_d088; // mrs x8, tpidr_el1
@@ -4875,6 +4918,24 @@ fn mirrored_reads_complete_natively_from_the_open_cell() {
     assert_eq!(machine.mirrors[daif], cell);
     assert_eq!(machine.mirrors[thread].readable, 1);
     machine.system_instruction(DAIFCLR_D).unwrap();
+    assert_eq!(*machine.mirrors, Mirrors::default());
+    // MSR DAIF of the register keeps them as well, unless it changes D.
+    const MSR_DAIF: u32 = 0xd51b_4229; // msr daif, x9
+    machine.system_instruction(MRS).unwrap();
+    machine.system_instruction(MRS_DAIF).unwrap();
+    let masks = machine.cpu.state.x[8];
+    machine.cpu.state.x[9] = masks ^ 1 << 7;
+    machine.system_instruction(MSR_DAIF).unwrap();
+    assert_eq!(machine.mirrors[thread].readable, 1);
+    assert_eq!(
+        machine.mirrors[daif],
+        register_read::Cell {
+            readable: 1,
+            value: masks ^ 1 << 7
+        }
+    );
+    machine.cpu.state.x[9] = masks ^ 1 << 9;
+    machine.system_instruction(MSR_DAIF).unwrap();
     assert_eq!(*machine.mirrors, Mirrors::default());
     // A read to XZR has no cell to open, nor a thunk.
     assert_eq!(mirrored_read(base, 0xd538_d09f), None); // mrs xzr, tpidr_el1

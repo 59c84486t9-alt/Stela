@@ -7,14 +7,15 @@ use super::*;
 /// and plainness follow from System registers and PSTATE alone, so a read
 /// the engine found plain stays plain, with the same value, until derived
 /// state may change ([`Machine::derived_changed`]). They are the thread
-/// pointers, Apple's GL2 thread pointer and GXF status, SPRR_PERM_EL0
-/// ([`SPRR_PERM_MIRROR`]) and DAIF; and the virtual count and Apple's alias
-/// of it, whose cells hold the offset they subtract from the clock's count
-/// ([`COUNT_MIRRORS`]).
-pub(super) const MIRRORED: [Encoding; 10] = {
+/// pointers, Apple's GL2 thread pointer and GXF status, the GL1 exception
+/// registers a guarded level saves on entry ([`GUARDED_MIRRORS`]),
+/// SPRR_PERM_EL0 ([`SPRR_PERM_MIRROR`]) and DAIF; and the virtual count and
+/// Apple's alias of it, whose cells hold the offset they subtract from the
+/// clock's count ([`COUNT_MIRRORS`]).
+pub(super) const MIRRORED: [Encoding; 13] = {
     use registers::encodings::{
-        CNTVCT_ALIAS_EL0, DAIF, GXF_STATUS_EL1, SPRR_PERM_EL0, TPIDR_EL0, TPIDR_EL1, TPIDR_EL2,
-        TPIDR_GL2, TPIDRRO_EL0,
+        ASPSR_GL1, CNTVCT_ALIAS_EL0, DAIF, ELR_GL1, GXF_STATUS_EL1, SPRR_PERM_EL0, SPSR_GL1,
+        TPIDR_EL0, TPIDR_EL1, TPIDR_EL2, TPIDR_GL2, TPIDRRO_EL0,
     };
     use stela_compiler::aarch64::system::registers::CNTVCT_EL0;
     [
@@ -24,6 +25,9 @@ pub(super) const MIRRORED: [Encoding; 10] = {
         TPIDR_EL2,
         TPIDR_GL2,
         GXF_STATUS_EL1,
+        SPSR_GL1,
+        ASPSR_GL1,
+        ELR_GL1,
         SPRR_PERM_EL0,
         CNTVCT_EL0,
         CNTVCT_ALIAS_EL0,
@@ -127,6 +131,43 @@ const _: () = assert!(matches!(
     MIRRORED[COUNT_MIRRORS[1]],
     registers::encodings::CNTVCT_ALIAS_EL0
 ));
+
+/// The [`MIRRORED`] indices of SPSR_GL1, ASPSR_GL1 and ELR_GL1, which a
+/// guarded level reads when it is entered: GENTER and an exception taken to
+/// the level write them, so a transition reads them again into their open
+/// cells ([`Machine::transitioned`]), and a write of a GL bank register,
+/// through any name, closes them ([`guarded_bank`]). They open only in a
+/// guarded level, where they are plain.
+pub(super) const GUARDED_MIRRORS: [usize; 3] = [6, 7, 8];
+const _: () = assert!(matches!(
+    [
+        MIRRORED[GUARDED_MIRRORS[0]],
+        MIRRORED[GUARDED_MIRRORS[1]],
+        MIRRORED[GUARDED_MIRRORS[2]]
+    ],
+    [
+        registers::encodings::SPSR_GL1,
+        registers::encodings::ASPSR_GL1,
+        registers::encodings::ELR_GL1
+    ]
+));
+
+/// Whether `encoding` names a register of a GL bank: GL1's (`S3_6_C15_C10_*`)
+/// or GL1's from EL2 (`S3_6_C15_C9_*`).
+pub(super) fn guarded_bank(encoding: Encoding) -> bool {
+    (encoding.op0(), encoding.op1(), encoding.crn()) == (3, 6, 15)
+        && matches!(encoding.crm(), 9 | 10)
+}
+
+/// MRS X0 of `encoding`.
+pub(super) fn read_word(encoding: Encoding) -> u32 {
+    0xd530_0000
+        | u32::from(encoding.op0() & 1) << 19
+        | u32::from(encoding.op1()) << 16
+        | u32::from(encoding.crn()) << 12
+        | u32::from(encoding.crm()) << 8
+        | u32::from(encoding.op2()) << 5
+}
 
 /// The [`MIRRORED`] index of SPRR_PERM_EL0, which dyld and JIT runtimes
 /// write around each write to their protected pages and read back at once.

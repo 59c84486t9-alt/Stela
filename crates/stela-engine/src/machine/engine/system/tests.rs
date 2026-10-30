@@ -1417,8 +1417,11 @@ fn mirrored_cells_open_exactly_on_the_plain_reads() {
             let Ok(()) = machine.system_instruction(access(true, encoding, 1)) else {
                 continue;
             };
+            // Outside a guarded level a GL bank read is refused, a
+            // degraded answer no cell keeps.
             let read = (machine.cpu.pstate.el, machine.cpu.pc) == (pstate.el, BASE + 4)
-                && machine.statistics.exceptions == exceptions;
+                && machine.statistics.exceptions == exceptions
+                && (pstate.guarded || !super::super::GUARDED_MIRRORS.contains(&index));
             let value = machine.cpu.state.x[1];
             assert_eq!(
                 machine.mirrors[index],

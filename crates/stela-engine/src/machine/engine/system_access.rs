@@ -311,6 +311,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let Some(index) = mirrored(access) else {
             return self.register_access(word, access);
         };
+        if GUARDED_MIRRORS.contains(&index) && !self.cpu.pstate.guarded {
+            return self.register_access(word, access);
+        }
         let before = self.completion_point();
         let step = self.register_access(word, access);
         let after = self.position();
@@ -553,6 +556,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
             RegisterOutcome::Written(changes) => {
                 if let Some(access) = access {
                     self.degraded_written(access);
+                    if guarded_bank(access.encoding()) {
+                        for index in GUARDED_MIRRORS {
+                            self.mirrors.close(index);
+                        }
+                    }
                 }
                 if let Some(missing) = changes.unmodeled {
                     let refusal = Refusal::UnsupportedSetting(missing);
