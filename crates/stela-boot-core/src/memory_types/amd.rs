@@ -30,6 +30,22 @@ pub const VENDOR: [u32; 3] = [
     u32::from_le_bytes(*b"cAMD"),
 ];
 
+/// The routing registers `syscfg` enables (APM Vol. 2 7.9): MtrrVarDramEn
+/// the IORRs and TOP_MEM, MtrrTom2En TOP_MEM2. Disabled registers have no
+/// effect and are never read, as a hypervisor need not implement them (KVM
+/// raises #GP for the IORRs).
+pub fn enabled(syscfg: u64) -> impl Iterator<Item = u32> {
+    REGISTERS.into_iter().skip(1).filter(move |&index| {
+        syscfg
+            & if index == TOP_MEM2 {
+                TOM2_ENABLE
+            } else {
+                VARIABLE_DRAM
+            }
+            != 0
+    })
+}
+
 pub fn architectural(snapshot: &Snapshot) -> bool {
     let Some(vendor) = snapshot.get(0, 0) else {
         return false;
@@ -64,9 +80,17 @@ impl State {
                 "AMD64 controls or full fixed-DRAM observation is unqualified"
             ));
         }
-        let register = |index| super::register(snapshot, index);
+        let syscfg = super::register(snapshot, SYSCFG)?;
+        // A register SYSCFG disables reads as zero, which routes nothing.
+        let register = |index| {
+            if enabled(syscfg).any(|enabled| enabled == index) {
+                super::register(snapshot, index)
+            } else {
+                Ok(0)
+            }
+        };
         let state = Self {
-            syscfg: register(SYSCFG)?,
+            syscfg,
             iorr: [
                 (register(IORR_BASE)?, register(IORR_BASE + 1)?),
                 (register(IORR_BASE + 2)?, register(IORR_BASE + 3)?),
@@ -214,6 +238,25 @@ mod tests {
         changed = source;
         changed.amd_fixed_raw = false;
         assert!(State::from_snapshot(&changed, 52).is_err());
+        // Only SYSCFG is observed while it enables no routing register; an
+        // enabled register must have been observed.
+        changed = source;
+        changed.msr_count = 1;
+        assert_eq!(enabled(0).count(), 0);
+        let state = State::from_snapshot(&changed, 52).unwrap();
+        assert!(!state.routes());
+        for enable in [VARIABLE_DRAM, TOM2_ENABLE] {
+            changed.msrs[0].value = enable;
+            assert!(State::from_snapshot(&changed, 52).is_err());
+        }
+        assert!(enabled(VARIABLE_DRAM).eq([
+            IORR_BASE,
+            IORR_BASE + 1,
+            IORR_BASE + 2,
+            IORR_BASE + 3,
+            TOP_MEM
+        ]));
+        assert!(enabled(TOM2_ENABLE).eq([TOP_MEM2]));
         for bit in 23..=26 {
             changed = source;
             changed.msrs[0].value = 1 << bit;
@@ -243,10 +286,13 @@ mod tests {
             (2, 0xffff_ffff_a800),
         ] {
             let mut changed = source;
+            changed.msrs[0].value = VARIABLE_DRAM | TOM2_ENABLE;
+            assert!(State::from_snapshot(&changed, 48).is_ok());
             changed.msrs[slot].value = value;
             assert!(State::from_snapshot(&changed, 48).is_err());
         }
         let mut changed = source;
+        changed.msrs[0].value = VARIABLE_DRAM;
         changed.msrs[2].value = 0xffff_ffff_f800;
         changed.msrs[4].value = 0xffff_ffff_f800;
         assert!(State::from_snapshot(&changed, 48).is_err());
