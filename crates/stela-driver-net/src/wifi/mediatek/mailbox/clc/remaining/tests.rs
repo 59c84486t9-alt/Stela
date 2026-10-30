@@ -122,6 +122,7 @@ pub(crate) fn prepare_with_channels(
         owner.prepare_remaining(
             &fixture.mailbox,
             RemainingInputs {
+                channel_configuration: owner.channel_configuration(),
                 domain: domain::Inputs {
                     alpha2,
                     channels_2ghz: &chan[0],

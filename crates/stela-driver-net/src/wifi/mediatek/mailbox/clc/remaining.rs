@@ -10,6 +10,9 @@ use crate::wifi::mediatek::{
 use alloc::vec::Vec;
 
 pub struct Inputs<'a> {
+    /// `clc_chan_conf` once MTCL masked it: within the UNII flags of the
+    /// last CLC rule sent.
+    pub channel_configuration: u8,
     pub domain: domain::Inputs<'a>,
     pub power: power::Inputs<'a>,
 }
@@ -45,6 +48,8 @@ pub enum Error {
     WrongCountry,
     CapabilitiesIncomplete,
     BandSelection,
+    /// The channel configuration enables UNII bands the CLC did not.
+    ChannelConfiguration,
     NoMemory,
     Transport {
         step: Step,
@@ -89,6 +94,9 @@ impl<C: 'static> Execution<C> {
         mailbox: &Mailbox<W, F, R>,
         inputs: Inputs<'_>,
     ) -> Result<(), Error> {
+        if inputs.channel_configuration & !self.channel_configuration() != 0 {
+            return Err(Error::ChannelConfiguration);
+        }
         let state = self.owned_mut();
         if state.owner != mailbox.owner {
             return Err(Error::Clc(super::Error::WrongMailbox));
@@ -124,17 +132,9 @@ impl<C: 'static> Execution<C> {
             state.capabilities.observed().six_ghz().unwrap_or(false),
         ];
         if mailbox.identity.chip == Chip::Mt7925 {
-            // Source rate-power skips6GHz when the last now-completed CLC
-            // rule's flags are zero. This only selects the bounded source plan;
-            // the CLC completion and its source context precede
-            // this planning operation, with no predicted response permission.
-            expected[2] &= state
-                .plan
-                .requests()
-                .iter()
-                .filter_map(|r| r.pending_channel_flags())
-                .next_back()
-                .is_some_and(|f| f != 0);
+            // mt7925_mcu_set_rate_txpower skips 6 GHz without a channel
+            // configuration.
+            expected[2] &= inputs.channel_configuration != 0;
         }
         let domain =
             domain::Request::build(mailbox.identity.chip, inputs.domain).map_err(Error::Domain)?;

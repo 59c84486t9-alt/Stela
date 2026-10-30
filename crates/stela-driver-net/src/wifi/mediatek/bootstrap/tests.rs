@@ -353,11 +353,13 @@ impl NativeFixture {
                 }
             }
         }
+        let channel_configuration = self.controller.policy().unwrap().channel_configuration();
         // SAFETY: the model device, its pages and its domain belong to this test alone; no
         // other driver, worker or DMA touches them.
         unsafe {
             self.controller.execute_remaining(
                 crate::wifi::mediatek::mailbox::clc::remaining::Inputs {
+                    channel_configuration,
                     domain: domain::Inputs {
                         alpha2: *b"US",
                         channels_2ghz: &chan[0],

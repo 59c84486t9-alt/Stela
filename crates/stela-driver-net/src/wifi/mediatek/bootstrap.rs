@@ -4,6 +4,7 @@
 //! Ordinary PCIe bootstrap, including every source selectable queue.
 //! Protocol facts never publish an associated Link or check policy.
 use super::{
+    acpi::Sar,
     control::{self, Control, mac::MacInitialized, rx_ring, tx_ring},
     firmware::{Prepared, auxiliary::Auxiliary, clc::Inputs as ClcInputs},
     identity::{Chip, Identity},
@@ -13,6 +14,7 @@ use super::{
         init::Fact,
     },
     mcu::{device::Context, init::Request},
+    regd,
     registers::{self, BarIo, MmioBar, Registers},
     ring::{
         self, MmioQueue, QueueIo, TxRing,
@@ -23,7 +25,7 @@ use super::{
 use crate::{
     Clock,
     bus::dma::{mapping::DmaDomain, memory::PageSource},
-    wifi::Band,
+    wifi::{Band, regulatory::database::Country},
 };
 use alloc::{alloc::alloc, boxed::Box, sync::Arc, vec::Vec};
 use core::{alloc::Layout, ptr::NonNull};
@@ -51,8 +53,12 @@ pub enum Error {
     RequiredRfkill,
     ChannelNotInDomain,
     UnsupportedBand,
+    /// Only MT7925's regulatory programming is ported.
+    UnsupportedChip(Chip),
     FirmwareStatus(u32),
-    UnvalidatedHeaderFormat { wcid: u16 },
+    UnvalidatedHeaderFormat {
+        wcid: u16,
+    },
     Interface(mailbox::device::Error),
     WrongFirmware,
     Register(registers::Error),
@@ -446,6 +452,47 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Controller<I, Q, C> {
             .map_err(Error::Clc)?;
         s.phase = Phase::Clc;
         Ok(())
+    }
+    /// The channel domain and rate power `mt7925_mcu_regd_update` programs
+    /// for `country` after the completed CLC, under the platform's `sar`.
+    pub fn regulatory_plan(&self, country: &Country, sar: &Sar) -> Result<regd::Plan, Error> {
+        self.require(Phase::Clc)?;
+        let s = self.state();
+        if s.identity.chip != Chip::Mt7925 {
+            return Err(Error::UnsupportedChip(s.identity.chip));
+        }
+        let policy = s.policy.as_ref().ok_or(Error::MissingPolicy)?;
+        let observed = policy.capabilities().observed();
+        let phy = observed.phy().ok_or(Error::MissingCapabilities)?;
+        let selection = policy
+            .auxiliary()
+            .select_clc(policy.eeprom().observed().byte())
+            .map_err(|error| Error::Clc(mailbox::clc::Error::Selection(error)))?;
+        regd::Plan::new(regd::Inputs {
+            country,
+            bands: [
+                phy.has_2ghz(),
+                phy.has_5ghz(),
+                observed.six_ghz().unwrap_or(false),
+            ],
+            channel_configuration: policy.channel_configuration(),
+            // MT792x_CLC_BE_CTRL.
+            eht_control: selection.records()[2].map(|record| record.payload()),
+            sar,
+        })
+        .ok_or(Error::NoMemory)
+    }
+    /// Whether the firmware offers its own regulatory domain
+    /// (`MT7925_REGD_SUPPORTED`: `MT792x_CHIP_CAP_REGD_EN` and a REGD CLC
+    /// record), which `mt7925_regd_update` programs in place of the OS's.
+    pub fn firmware_regulatory_domain(&self) -> bool {
+        self.policy().is_some_and(|policy| {
+            policy.capabilities().observed().chip_flags().unwrap_or(0) & 1 << 5 != 0
+                && policy
+                    .auxiliary()
+                    .select_clc(policy.eeprom().observed().byte())
+                    .is_ok_and(|selection| selection.records()[3].is_some())
+        })
     }
     /// # Safety
     /// Same kept permission must meet Execution::prepare_remaining:

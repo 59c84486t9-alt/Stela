@@ -209,6 +209,16 @@ impl<C: 'static> Execution<C> {
     pub fn plan(&self) -> &Plan {
         &self.owned().plan
     }
+    /// `clc_chan_conf`: the UNII flags of the last CLC rule sent; Connac2's
+    /// rules carry none.
+    pub fn channel_configuration(&self) -> u8 {
+        self.plan()
+            .requests()
+            .iter()
+            .filter_map(|r| r.pending_channel_flags())
+            .next_back()
+            .unwrap_or(0)
+    }
     /// Original source observations kept with their guard.
     /// This is not a new applied-policy or radio-permission receipt.
     pub(in crate::wifi::mediatek) fn source_inputs(&self) -> Inputs {
