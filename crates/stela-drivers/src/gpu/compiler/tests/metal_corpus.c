@@ -125,6 +125,8 @@ compile(const uint8_t *air, size_t size, const char *entry,
    memset(&stage_in, 0, sizeof(stage_in));
    for (unsigned i = 0; i < reflection.attribute_count; i++) {
       const struct stela_metal_attribute_use *attribute = &reflection.attributes[i];
+      if (!attribute->active)
+         continue;
       stage_in.attributes[attribute->index] = (struct stela_metal_stage_in_attribute){
          attribute_format(attribute), 0, attribute->index};
       stage_in.layouts[attribute->index] = (struct stela_metal_stage_in_layout){

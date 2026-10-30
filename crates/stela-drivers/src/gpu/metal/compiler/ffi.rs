@@ -94,6 +94,9 @@ pub(super) struct AttributeUse {
     pub primitive: u32,
     pub components: u32,
     pub patch_control_point: u32,
+    pub active: u32,
+    pub name: u32,
+    pub name_bytes: u32,
 }
 
 #[repr(C)]

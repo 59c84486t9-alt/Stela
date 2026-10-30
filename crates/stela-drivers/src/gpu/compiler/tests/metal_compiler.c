@@ -414,6 +414,19 @@ static const char *vertex =
    "!40 = !{i32 0, !\"air.vertex_input\", !\"air.location_index\", i32 3, i32 1,"
    " !\"air.arg_type_name\", !\"float4\", !\"air.arg_name\", !\"p\"}\n";
 
+/* Returns its first vertex input; it never reads the second. */
+static const char *unread =
+   "define <4 x float> @unread(<4 x float> %p, <4 x float> %q) {\n"
+   "ret <4 x float> %p\n}\n"
+   "!air.vertex = !{!2}\n"
+   "!2 = !{ptr @unread, !3, !4}\n!3 = !{!30}\n"
+   "!30 = !{!\"air.position\", !\"air.arg_type_name\", !\"float4\", !\"air.arg_name\", !\"position\"}\n"
+   "!4 = !{!40, !41}\n"
+   "!40 = !{i32 0, !\"air.vertex_input\", !\"air.location_index\", i32 0, i32 1,"
+   " !\"air.arg_type_name\", !\"float4\", !\"air.arg_name\", !\"p\"}\n"
+   "!41 = !{i32 1, !\"air.vertex_input\", !\"air.location_index\", i32 1, i32 1,"
+   " !\"air.arg_type_name\", !\"float4\", !\"air.arg_name\", !\"q\"}\n";
+
 #define CONTROL_POINT "{ <4 x float>, <2 x float> }"
 
 /* A triangle patch's function at the position of a control point its
@@ -635,7 +648,10 @@ render_stages_compile_at_their_linked_locations(void)
    assert(reflect(vertex, "vertex", &reflection, &error));
    assert(reflection.stage == STELA_METAL_VERTEX && reflection.varying_count == 1);
    assert(reflection.attribute_count == 1 && reflection.attributes[0].index == 3 &&
-          reflection.attributes[0].components == 4 && !reflection.attributes[0].patch_control_point);
+          reflection.attributes[0].components == 4 && !reflection.attributes[0].patch_control_point &&
+          reflection.attributes[0].active);
+   assert(!strcmp(name(&reflection, reflection.attributes[0].name,
+                       reflection.attributes[0].name_bytes), "p"));
    const struct stela_metal_varying *uv = &reflection.varyings[0];
    assert(!strcmp(name(&reflection, uv->identifier, uv->identifier_bytes), "user(uv)"));
    assert(uv->primitive == STELA_AIR_FLOAT && uv->components == 2 && !uv->per_primitive);
@@ -668,6 +684,15 @@ render_stages_compile_at_their_linked_locations(void)
    assert(pulling && varying(pulling, nir_var_shader_in, VARYING_SLOT_VAR0 + 1));
    stela_metal_release(pulling);
 
+   /* An input the function never reads is reflected inactive and not fetched. */
+   assert(reflect(unread, "unread", &reflection, &error));
+   assert(reflection.attribute_count == 2 && reflection.attributes[0].active &&
+          !reflection.attributes[1].active);
+   nir_shader *reading = compile(unread, "unread", &specialization, &error);
+   assert(reading && varying(reading, nir_var_shader_in, VERT_ATTRIB_GENERIC0) &&
+          !varying(reading, nir_var_shader_in, VERT_ATTRIB_GENERIC0 + 1));
+   stela_metal_release(reading);
+
    /* A varying the pipeline did not link is refused. */
    const struct stela_metal_specialization unlinked = {.varyings = linked, .varying_count = 1};
    assert(!compile(fragment, "fragment", &unlinked, &error) && error.kind == STELA_AIR_ARGUMENT);
@@ -686,9 +711,13 @@ patch_functions_compile_behind_their_tessellation_stages(void)
    assert(reflect(patch, "patch", &reflection, &error));
    assert(reflection.stage == STELA_METAL_VERTEX && reflection.patch == STELA_AIR_PATCH_TRIANGLE &&
           reflection.patch_control_points == 3);
-   /* The control points' members the function reads. */
-   assert(reflection.attribute_count == 1 && reflection.attributes[0].index == 1 &&
-          reflection.attributes[0].components == 4 && reflection.attributes[0].patch_control_point);
+   /* The control points' members, of which the function reads the first. */
+   assert(reflection.attribute_count == 2 && reflection.attributes[0].index == 1 &&
+          reflection.attributes[0].components == 4 && reflection.attributes[0].patch_control_point &&
+          reflection.attributes[0].active);
+   assert(reflection.attributes[1].index == 2 && !reflection.attributes[1].active);
+   assert(!strcmp(name(&reflection, reflection.attributes[1].name,
+                       reflection.attributes[1].name_bytes), "uv"));
 
    const struct stela_metal_specialization plain = {0};
    assert(!compile(patch, "patch", &plain, &error) && error.kind == STELA_AIR_ARGUMENT);
@@ -730,9 +759,13 @@ kernels_compile_with_their_stage_in(void)
    struct stela_metal_reflection reflection;
    struct stela_air_error error;
    assert(reflect(staged, "staged", &reflection, &error));
-   /* The attributes the kernel reads. */
-   assert(reflection.stage == STELA_METAL_KERNEL && reflection.attribute_count == 1 &&
-          reflection.attributes[0].index == 0 && reflection.attributes[0].components == 4);
+   /* Both attributes, of which the kernel reads the first. */
+   assert(reflection.stage == STELA_METAL_KERNEL && reflection.attribute_count == 2 &&
+          reflection.attributes[0].index == 0 && reflection.attributes[0].components == 4 &&
+          reflection.attributes[0].active);
+   assert(reflection.attributes[1].index == 1 && !reflection.attributes[1].active);
+   assert(!strcmp(name(&reflection, reflection.attributes[1].name,
+                       reflection.attributes[1].name_bytes), "index"));
 
    struct stela_metal_stage_in stage_in = {0};
    stage_in.attributes[0] = (struct stela_metal_stage_in_attribute){31, 0, 2};

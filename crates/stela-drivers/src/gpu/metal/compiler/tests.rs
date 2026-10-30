@@ -413,13 +413,27 @@ fn reflections_become_interfaces_with_their_provenance() {
         r.texture_count = 1;
         r.samplers[0] = 5;
         r.sampler_count = 1;
+        let position = add_name(r, b"position");
         r.attributes[0] = ffi::AttributeUse {
             index: 1,
             primitive: FLOAT,
             components: 3,
             patch_control_point: 0,
+            active: 1,
+            name: position,
+            name_bytes: 8,
         };
-        r.attribute_count = 1;
+        let normal = add_name(r, b"normal");
+        r.attributes[1] = ffi::AttributeUse {
+            index: 2,
+            primitive: ffi::primitive::HALF,
+            components: 4,
+            patch_control_point: 0,
+            active: 0,
+            name: normal,
+            name_bytes: 6,
+        };
+        r.attribute_count = 2;
         add_varying(r, "user(uv)", FLOAT, 2);
         r.amplification = 1;
         let name = add_name(r, b"tint");
@@ -462,6 +476,7 @@ fn reflections_become_interfaces_with_their_provenance() {
         }]
     );
     assert_eq!(interface.samplers, [5]);
+    // Only the attribute the function reads needs a layout.
     assert_eq!(
         interface.attributes,
         [AttributeUse {
@@ -470,6 +485,20 @@ fn reflections_become_interfaces_with_their_provenance() {
             components: 3,
             patch_control_point: false
         }]
+    );
+    let declared = |name: &str, index, data_type, active| DeclaredAttribute {
+        name: String::from(name),
+        index,
+        data_type,
+        active,
+        patch_control_point: false,
+    };
+    assert_eq!(
+        interface.declared_attributes,
+        [
+            declared("position", 1, DataType::Float3, true),
+            declared("normal", 2, DataType::Half4, false),
+        ]
     );
     assert_eq!(
         interface.varyings,
@@ -924,6 +953,9 @@ fn kernels_compile_with_their_stage_in() {
             primitive: ffi::primitive::UINT,
             components: 2,
             patch_control_point: 0,
+            active: 1,
+            name: 0,
+            name_bytes: 0,
         };
         r.attribute_count = 1;
     });
@@ -987,6 +1019,9 @@ fn post_tessellation_vertex_functions_compile_with_their_stage_in() {
             primitive: ffi::primitive::FLOAT,
             components: 4,
             patch_control_point: 1,
+            active: 1,
+            name: 0,
+            name_bytes: 0,
         };
         r.attribute_count = 1;
     });

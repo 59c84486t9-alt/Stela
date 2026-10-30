@@ -159,14 +159,18 @@ add_sampler(struct reflecting *r, const struct stela_air_sampler *sampler)
 
 static bool
 add_attribute(struct reflecting *r, unsigned location, enum stela_air_primitive primitive,
-              unsigned components, bool patch_control_point)
+              unsigned components, bool patch_control_point, bool active, const char *name,
+              size_t name_bytes)
 {
    struct stela_metal_reflection *out = r->out;
    if (out->attribute_count == STELA_METAL_ATTRIBUTES)
       return fail(r->error, STELA_AIR_LIMIT, "attributes exceed the table");
-   out->attributes[out->attribute_count++] = (struct stela_metal_attribute_use){
-      location, primitive, components, patch_control_point};
-   return true;
+   struct stela_metal_attribute_use *attribute = &out->attributes[out->attribute_count++];
+   *attribute = (struct stela_metal_attribute_use){
+      .index = location, .primitive = primitive, .components = components,
+      .patch_control_point = patch_control_point, .active = active,
+      .name_bytes = (uint32_t)name_bytes};
+   return add_name(r, name, name_bytes, &attribute->name);
 }
 
 static bool
@@ -185,10 +189,11 @@ reflect_kernel(const struct stela_air_inspection *info, const struct stela_air_e
                    argument->kind == 1 ? add_buffer(r, &argument->buffer, argument->argument_buffer) :
                    argument->kind == 3 ? add_texture(r, &argument->texture) :
                    argument->kind == 4 ? add_sampler(r, &argument->sampler) :
-                   /* The stage-in attributes the kernel reads. */
-                   argument->kind == 5 && argument->used ?
+                   argument->kind == 5 ?
                                          add_attribute(r, argument->location, argument->primitive,
-                                                       argument->type_components, false) :
+                                                       argument->type_components, false,
+                                                       argument->used, argument->name,
+                                                       argument->name_bytes) :
                                          true;
       if (!added)
          return false;
@@ -226,13 +231,13 @@ add_input(struct reflecting *r, const struct stela_air_stage_io *io)
       out->barycentrics = 1;
       return true;
    case STELA_AIR_VERTEX_INPUT:
-      return add_attribute(r, io->location, io->primitive, io->components, false);
+      return add_attribute(r, io->location, io->primitive, io->components, false, io->used,
+                           io->name, io->name_bytes);
    case STELA_AIR_CONTROL_POINTS:
-      /* The members the function reads. */
       for (unsigned i = 0; i < io->member_count; i++) {
          const struct stela_air_struct_member *member = &io->members[i];
-         if (!member->unused && !add_attribute(r, member->location, member->primitive,
-                                               member->components, true))
+         if (!add_attribute(r, member->location, member->primitive, member->components, true,
+                            !member->unused, member->name, member->name_bytes))
             return false;
       }
       return true;

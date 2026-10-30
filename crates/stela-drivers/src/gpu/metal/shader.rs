@@ -120,14 +120,25 @@ pub struct ThreadgroupUse {
     pub declared_bytes: u64,
 }
 
-/// A `[[stage_in]]` attribute of a vertex function. A post-tessellation
-/// vertex function's is each control point's (`patchControlPointData`) or
-/// its patch's (`patchData`).
+/// A `[[stage_in]]` attribute a function reads. A post-tessellation vertex
+/// function's is each control point's (`patchControlPointData`) or its
+/// patch's (`patchData`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AttributeUse {
     pub index: u32,
     pub numeric: NumericClass,
     pub components: u8,
+    pub patch_control_point: bool,
+}
+
+/// A stage-in attribute as Metal reflects it (`MTLVertexAttribute`,
+/// `MTLAttribute`): `active` when the function reads it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DeclaredAttribute {
+    pub name: String,
+    pub index: u32,
+    pub data_type: DataType,
+    pub active: bool,
     pub patch_control_point: bool,
 }
 
@@ -225,7 +236,12 @@ pub struct Interface {
     pub textures: Vec<TextureUse>,
     pub samplers: Vec<u32>,
     pub threadgroup: Vec<ThreadgroupUse>,
+    /// The stage-in attributes the function reads, which its pipeline's
+    /// vertex or stage-in descriptor must lay out.
     pub attributes: Vec<AttributeUse>,
+    /// Every stage-in attribute the function declares, as `vertexAttributes`
+    /// and `stageInputAttributes` report them.
+    pub declared_attributes: Vec<DeclaredAttribute>,
     /// A vertex or mesh function's varying outputs, or a fragment
     /// function's varying inputs.
     pub varyings: Vec<Varying>,
@@ -624,6 +640,7 @@ pub(crate) mod tests {
             samplers: Vec::new(),
             threadgroup: Vec::new(),
             attributes: Vec::new(),
+            declared_attributes: Vec::new(),
             varyings: Vec::new(),
             color_outputs: Vec::new(),
             writes_depth: false,

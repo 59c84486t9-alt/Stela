@@ -30,10 +30,10 @@ use super::{
     error::{Error, Result, ensure, require},
     library::{Air, Header, Library},
     shader::{
-        Access, AttributeUse, BufferUse, ColorOutput, CompiledShader, Compiler, FunctionConstant,
-        Interface, Linking, MAX_PATCH_CONTROL_POINTS, NumericClass, Patch, PatchDomain, Provenance,
-        Reflection, Scalar, Specialization, Stage, Tessellation, TessellationStages, TextureUse,
-        ThreadgroupUse, Varying,
+        Access, AttributeUse, BufferUse, ColorOutput, CompiledShader, Compiler, DeclaredAttribute,
+        FunctionConstant, Interface, Linking, MAX_PATCH_CONTROL_POINTS, NumericClass, Patch,
+        PatchDomain, Provenance, Reflection, Scalar, Specialization, Stage, Tessellation,
+        TessellationStages, TextureUse, ThreadgroupUse, Varying,
     },
     vertex::{Attribute, STRIDE_DYNAMIC, StageInputDescriptor, VertexDescriptor},
     vulkan::{object::ShaderCode, physical::PhysicalDevice},
@@ -866,8 +866,33 @@ fn interface(reflection: &ffi::Reflection) -> Result<Interface> {
             declared_bytes: threadgroup.bytes.into(),
         })
         .collect::<Vec<_>>();
+    let declared_attributes = rows(&r.attributes, r.attribute_count)?
+        .iter()
+        .map(|attribute| {
+            let name = name(r, attribute.name, attribute.name_bytes)?;
+            let scalar = match scalar(attribute.primitive)? {
+                Scalar::Float => DataType::Float,
+                Scalar::Half => DataType::Half,
+                Scalar::Int => DataType::Int,
+                Scalar::Uint => DataType::UInt,
+                Scalar::Short => DataType::Short,
+                Scalar::Ushort => DataType::UShort,
+                Scalar::Char => DataType::Char,
+                Scalar::Uchar => DataType::UChar,
+            };
+            let components = components(attribute.components)?;
+            Ok(DeclaredAttribute {
+                name: String::from(str::from_utf8(name).map_err(|_| MALFORMED)?),
+                index: attribute.index,
+                data_type: DataType::vector(scalar, components.into()).ok_or(MALFORMED)?,
+                active: attribute.active != 0,
+                patch_control_point: attribute.patch_control_point != 0,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
     let attributes = rows(&r.attributes, r.attribute_count)?
         .iter()
+        .filter(|attribute| attribute.active != 0)
         .map(|attribute| {
             Ok(AttributeUse {
                 index: attribute.index,
@@ -940,6 +965,7 @@ fn interface(reflection: &ffi::Reflection) -> Result<Interface> {
         samplers: rows(&r.samplers, r.sampler_count)?.to_vec(),
         threadgroup,
         attributes,
+        declared_attributes,
         varyings,
         color_outputs,
         writes_depth: r.writes_depth != 0,

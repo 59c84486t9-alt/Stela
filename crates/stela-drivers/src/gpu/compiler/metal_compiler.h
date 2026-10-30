@@ -43,10 +43,11 @@ struct stela_metal_texture_use {
 struct stela_metal_threadgroup_use {
    uint32_t index, bytes;
 };
-/* A stage-in attribute; of a post-tessellation vertex function, a control
- * point's or else its patch's. */
+/* A stage-in attribute the function declares; of a post-tessellation
+ * vertex function, a control point's or else its patch's. active marks one
+ * the function reads, which alone needs a layout; its name is in names. */
 struct stela_metal_attribute_use {
-   uint32_t index, primitive, components, patch_control_point;
+   uint32_t index, primitive, components, patch_control_point, active, name, name_bytes;
 };
 /* A varying: its identifier is names[identifier, identifier + bytes). */
 struct stela_metal_varying {
@@ -63,9 +64,9 @@ struct stela_metal_function_constant {
 };
 
 /* One function's reflection; a visible function's holds only its stage and
- * the module's facts. names holds the varying identifiers, the
- * function constants' names and types and the module's llvm.ident, whose
- * bytes are zero when it records none. */
+ * the module's facts. names holds the attribute names, the varying
+ * identifiers, the function constants' names and types and the module's
+ * llvm.ident, whose bytes are zero when it records none. */
 struct stela_metal_reflection {
    uint32_t stage, max_total_threads;
    uint64_t threadgroup_bytes;
@@ -93,7 +94,7 @@ struct stela_metal_reflection {
    struct stela_metal_function_constant function_constants[STELA_METAL_FUNCTION_CONSTANTS];
    char names[STELA_METAL_NAME_BYTES];
 };
-#define STELA_METAL_REFLECTION_BYTES 18424u
+#define STELA_METAL_REFLECTION_BYTES 18792u
 
 /* The target's facts, fixed for a device. nir is the Vulkan driver's
  * compiler options, which must outlive every shader compiled with them. */

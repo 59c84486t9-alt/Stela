@@ -2144,6 +2144,8 @@ stage_arguments(struct translator *t, LLVMValueRef fn)
                                         io->components)))
             return false;
       } else {
+         /* A vertex input the function never reads is not fetched. */
+         if (io->semantic == STELA_AIR_VERTEX_INPUT && !io->used) continue;
          nir_variable *var = stage_variable(t, io, false);
          if (!var) return false;
          if (io->interpolant) continue; /* Calls interpolate it. */
