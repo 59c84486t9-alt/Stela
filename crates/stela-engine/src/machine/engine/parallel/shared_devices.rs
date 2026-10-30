@@ -440,6 +440,19 @@ impl<D: Devices> Devices for SharedDevices<D> {
             devices.deadline(now)
         })
     }
+    /// The home machine's [`Self::lines`] and [`Self::deadline`] under one
+    /// lock, from one advance of the devices.
+    fn lines_and_deadline(&mut self, cpu: usize, now: u64) -> (Lines, Option<u64>) {
+        if !self.home {
+            return (self.lines(cpu, now), None);
+        }
+        let mut devices = self.board.lock(Call::Lines);
+        let now = self.now(now);
+        let (lines, deadline) = devices.lines_and_deadline(cpu, now);
+        self.board.lines.lock().unwrap_or_else(|e| e.into_inner())[cpu] = lines;
+        self.notify(&mut devices, cpu, now);
+        (lines, deadline)
+    }
     fn system_register(
         &mut self,
         cpu: usize,

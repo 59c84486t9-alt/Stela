@@ -418,6 +418,42 @@ impl MmioDevice for AdvancingClient {
     }
 }
 
+/// Counts its advances and changes again one count later.
+struct CountingClient {
+    advances: u32,
+}
+
+impl MmioDevice for CountingClient {
+    fn name(&self) -> &'static str {
+        "counting-advance-test"
+    }
+
+    fn read(&mut self, _: u64, _: Width, _: &mut Access<'_>) -> Result<u64, MmioError> {
+        unreachable!("advance-only fixture")
+    }
+
+    fn write(&mut self, _: u64, _: Width, _: u64, _: &mut Access<'_>) -> Result<(), MmioError> {
+        unreachable!("advance-only fixture")
+    }
+
+    fn advance(&mut self, access: &mut Access<'_>) -> Result<Option<u64>, MmioError> {
+        self.advances += 1;
+        Ok(Some(access.now + 1))
+    }
+}
+
+#[test]
+fn lines_and_deadline_answer_from_one_advance() {
+    let mut board = AppleDevices::new();
+    let id = board.bus.add(Box::new(CountingClient { advances: 0 }));
+    assert_eq!(
+        board.lines_and_deadline(0, 17),
+        (Lines::default(), Some(18))
+    );
+    let client = board.bus.device::<CountingClient>(id).unwrap();
+    assert_eq!(client.advances, 1);
+}
+
 #[test]
 fn deadline_advance_keeps_reset_and_wires_before_later_service_failure() {
     let mut board = AppleDevices::new();

@@ -44,8 +44,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     .host
                     .native_timing_work_start(NativeTimingWork::DeviceLines);
                 let started = self.timing_start();
-                let lines = self.devices.lines(pe, now);
-                let until = self.devices.deadline(now).unwrap_or(u64::MAX);
+                let (lines, until) = self.devices.lines_and_deadline(pe, now);
+                let until = until.unwrap_or(u64::MAX);
                 self.statistics.line_queries += 1;
                 self.statistics.line_ticks += self.timing_since(started);
                 #[cfg(feature = "native-profile")]

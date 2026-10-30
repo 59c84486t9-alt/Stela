@@ -685,6 +685,56 @@ fn width(bytes: u8) -> Result<Width, DeviceError> {
         .ok_or_else(|| DeviceError::Refused(refuse!("{bytes}-byte device access", bytes)))
 }
 
+impl AppleDevices {
+    /// Bring the fast IPIs and every device to `now` for PE `cpu`, which
+    /// settles every PE's pins: the next count at which one changes by
+    /// itself, none when an advance was refused and the machine halts, or
+    /// `Err` when the board halted on the time itself.
+    fn advance_to(&mut self, cpu: usize, now: u64) -> Result<Option<u64>, ()> {
+        self.observe_time(now, "advance");
+        if !self.publish_rtc_time_or_halt(now) {
+            return Err(());
+        }
+        self.settle_lifecycle(cpu, now);
+        let deferred = self
+            .ipi
+            .as_mut()
+            .and_then(|ipi| ipi.advance(now, &mut self.latch));
+        let mut access = Access::new(cpu, now, &mut self.latch);
+        let advanced = self.bus.advance(&mut access);
+        let reset = reset_reason(&access);
+        let device = advanced.as_ref().ok().copied().flatten();
+        let settled = self.settle(cpu, now, reset);
+        let refused = advanced.map_err(describe).and(settled).err();
+        if let Some(error) = &refused
+            && self.reset.is_none()
+        {
+            // A model that cannot advance stops the machine like a reset
+            // would, with the model's own reason.
+            self.reset = Some(Reset {
+                transition: Transition::Halt,
+                reason: format!("device advance refused: {error:?}{}", self.rtc_regression()),
+            });
+        }
+        self.watch_pmu();
+        if refused.is_some() {
+            return Ok(None);
+        }
+        let usb = self
+            .usb_masters
+            .iter()
+            .filter(|master| {
+                (master.port.ready || master.attached)
+                    && self
+                        .bus
+                        .device::<Dwc3>(master.device)
+                        .is_some_and(Dwc3::lifecycle_active)
+            })
+            .map(|master| master.next_poll);
+        Ok([deferred, device].into_iter().flatten().chain(usb).min())
+    }
+}
+
 fn reset_reason(access: &Access<'_>) -> Option<Reset> {
     access.reset_request().map(|request| Reset {
         transition: request.transition,
@@ -895,38 +945,7 @@ impl Devices for AppleDevices {
     }
 
     fn lines(&mut self, cpu: usize, now: u64) -> Lines {
-        self.observe_time(now, "lines");
-        if !self.publish_rtc_time_or_halt(now) {
-            return Lines::default();
-        }
-        self.settle_lifecycle(cpu, now);
-        if let Some(ipi) = self.ipi.as_mut() {
-            ipi.advance(now, &mut self.latch);
-        }
-        let mut access = Access::new(cpu, now, &mut self.latch);
-        let advanced = self.bus.advance(&mut access);
-        let reset = reset_reason(&access);
-        let settled = self.settle(cpu, now, reset);
-        if let Err(error) = advanced.map_err(describe).and(settled)
-            && self.reset.is_none()
-        {
-            // A model that cannot advance stops the machine like a reset
-            // would, with the model's own reason.
-            self.reset = Some(Reset {
-                transition: Transition::Halt,
-                reason: format!("device advance refused: {error:?}{}", self.rtc_regression()),
-            });
-        }
-        self.watch_pmu();
-        // The AIC and the fast-IPI lines are the AP's, powered off with it.
-        if self.sleep.asleep {
-            return Lines::default();
-        }
-        let pins = self.latch.pins(cpu);
-        Lines {
-            irq: pins.irq,
-            fiq: pins.fiq,
-        }
+        self.lines_and_deadline(cpu, now).0
     }
 
     /// The latched pins: [`Self::lines`] advances every device and settles
@@ -944,51 +963,15 @@ impl Devices for AppleDevices {
     }
 
     fn deadline(&mut self, now: u64) -> Option<u64> {
-        self.observe_time(now, "deadline");
-        if !self.publish_rtc_time_or_halt(now) {
-            return None;
-        }
-        self.settle_lifecycle(0, now);
         // Time-driven state is the board's, not a PE's: the access names
         // cpu0.
-        let deferred = self
-            .ipi
-            .as_mut()
-            .and_then(|ipi| ipi.advance(now, &mut self.latch));
-        let mut access = Access::new(0, now, &mut self.latch);
-        let advanced = self.bus.advance(&mut access);
-        let reset = reset_reason(&access);
-        let device = advanced.as_ref().ok().copied().flatten();
-        let settled = self.settle(0, now, reset);
-        if let Err(error) = advanced.map_err(describe).and(settled) {
-            if self.reset.is_none() {
-                self.reset = Some(Reset {
-                    transition: Transition::Halt,
-                    reason: format!("device advance refused: {error:?}{}", self.rtc_regression()),
-                });
-            }
-            return None;
-        }
-        self.watch_pmu();
-        let usb = self
-            .usb_masters
-            .iter()
-            .filter(|master| {
-                (master.port.ready || master.attached)
-                    && self
-                        .bus
-                        .device::<Dwc3>(master.device)
-                        .is_some_and(Dwc3::lifecycle_active)
-            })
-            .map(|master| master.next_poll)
-            .min();
-        let device = match (device, usb) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        };
-        match (deferred, device) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
+        self.advance_to(0, now).ok().flatten()
+    }
+
+    fn lines_and_deadline(&mut self, cpu: usize, now: u64) -> (Lines, Option<u64>) {
+        match self.advance_to(cpu, now) {
+            Ok(deadline) => (self.pins(cpu).unwrap_or_default(), deadline),
+            Err(()) => (Lines::default(), None),
         }
     }
 

@@ -412,6 +412,11 @@ pub trait Devices {
     fn deadline(&mut self, _now: u64) -> Option<u64> {
         None
     }
+    /// [`Self::lines`], then [`Self::deadline`] at the same `now`: a board
+    /// answers both from one advance.
+    fn lines_and_deadline(&mut self, cpu: usize, now: u64) -> (Lines, Option<u64>) {
+        (self.lines(cpu, now), self.deadline(now))
+    }
     /// An MRS (`write` `None`) or MSR by PE `cpu` of a System register the
     /// board implements for all its PEs rather than one core, such as
     /// Apple's fast-IPI registers: `None` for an encoding it does not
