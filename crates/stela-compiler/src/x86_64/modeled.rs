@@ -8,7 +8,7 @@
 //! which Intel SDE provides for each Intel extension.
 use crate::TargetCpu;
 use core::ffi::c_void;
-use std::sync::{Once, OnceLock};
+use std::sync::{Once, OnceLock, atomic::AtomicUsize, atomic::Ordering};
 
 /// `ucontext_t.uc_mcontext.gregs`, after `uc_flags`, `uc_link` and the
 /// 24-byte `stack_t`.
@@ -40,10 +40,10 @@ const SA_SIGINFO: i32 = 4;
 const SIG_DFL: usize = 0;
 
 /// The host's features plus the modeled ones when the host can hold their
-/// state (AVX), with the handler installed.
+/// state (AVX) under Linux's signal frame, with the handler installed.
 pub fn host() -> TargetCpu {
     let host = TargetCpu::detect();
-    if !host.supports(TargetCpu::Avx2) {
+    if !cfg!(target_os = "linux") || !host.supports(TargetCpu::Avx2) {
         return host;
     }
     static INSTALL: Once = Once::new();
@@ -55,9 +55,18 @@ pub fn host() -> TargetCpu {
             flags: SA_SIGINFO,
             restorer: 0,
         };
+        let mut prior = SigAction {
+            handler: SIG_DFL,
+            mask: [0; 16],
+            flags: 0,
+            restorer: 0,
+        };
         // SAFETY: a valid action for SIGILL; the handler is async-signal-safe.
-        let installed = unsafe { sigaction(SIGILL, &action, core::ptr::null_mut()) };
+        let installed = unsafe { sigaction(SIGILL, &action, &mut prior) };
         assert_eq!(installed, 0);
+        if prior.flags & SA_SIGINFO != 0 {
+            PRIOR.store(prior.handler, Ordering::Relaxed);
+        }
     });
     let host = host
         .with_avx_vnni_int8()
@@ -70,6 +79,9 @@ pub fn host() -> TargetCpu {
         host
     }
 }
+
+/// The SA_SIGINFO handler SIGILL had, zero for none.
+static PRIOR: AtomicUsize = AtomicUsize::new(0);
 
 #[repr(C)]
 struct SigAction {
@@ -778,7 +790,7 @@ fn apply(
     }
 }
 
-unsafe extern "C" fn trap(_: i32, _: *mut c_void, context: *mut c_void) {
+unsafe extern "C" fn trap(signal: i32, info: *mut c_void, context: *mut c_void) {
     // SAFETY: the kernel passes a ucontext_t whose RIP addresses the
     // instruction that faulted, and fpregs its XSAVE image.
     unsafe {
@@ -811,6 +823,13 @@ unsafe extern "C" fn trap(_: i32, _: *mut c_void, context: *mut c_void) {
                 *rip += length as u64;
                 return;
             }
+        }
+        let prior = PRIOR.load(Ordering::Relaxed);
+        if prior != 0 {
+            let prior: unsafe extern "C" fn(i32, *mut c_void, *mut c_void) =
+                core::mem::transmute(prior);
+            prior(signal, info, context.cast());
+            return;
         }
         // Fault again without the handler.
         let message = b"modeled: unmodeled instruction, restoring SIGILL\n";
