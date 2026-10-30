@@ -267,11 +267,7 @@ pub(in crate::x86_64) fn from_integer(
     let signed_single = operand.format == Format::Single && integer.signed;
     if shape != Shape::Scalar
         && (signed_single
-            || vector_extensions::packed_conversion_supported(
-                operand.format,
-                integer.signed,
-                target,
-            ))
+            || vector_extensions::packed_conversion_supported(operand.format, integer, target))
     {
         let IntegerOperand::Simd { register, .. } = operand.integer else {
             unreachable!("vector integer source")
@@ -289,7 +285,7 @@ pub(in crate::x86_64) fn from_integer(
                 code,
                 RESULT_VECTOR,
                 operand.format,
-                integer.signed,
+                integer,
                 target,
             );
         }
@@ -456,11 +452,7 @@ pub(in crate::x86_64) fn to_integer(
     let signed_single = operand.format == Format::Single && integer.signed;
     let packed_result = shape != Shape::Scalar
         && (signed_single
-            || vector_extensions::packed_conversion_supported(
-                operand.format,
-                integer.signed,
-                target,
-            ));
+            || vector_extensions::packed_conversion_supported(operand.format, integer, target));
     let mut helper_patches = Vec::new();
     test_control(code, FPCR_EXCEPTION_ENABLE_MASK);
     helper_patches.push(branch(code, Condition::NotZero));
@@ -474,7 +466,7 @@ pub(in crate::x86_64) fn to_integer(
                 code,
                 RESULT_VECTOR,
                 operand.format,
-                integer.signed,
+                integer,
                 mode == IntegerRounding::TowardZero,
                 target,
             );

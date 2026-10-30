@@ -1,7 +1,8 @@
 //! Streaming SVE and SME extension recipes (VNNI byte dots, GFNI byte and
-//! AVX-512 quadword shifts), compared with the reviewed SSE recipes on random
-//! Z, P, ZA and selector state.
+//! AVX-512 quadword shifts, AVX-512 integer conversions), compared with the
+//! reviewed SSE recipes on random Z, P, ZA and selector state.
 use super::execution::Native;
+use crate::aarch64::floating::features::NumericalFeatures;
 use crate::aarch64::scalable::{
     ScalableMode, VectorLength,
     features::{ScalableFeature, ScalableFeatures},
@@ -100,12 +101,43 @@ const SHIFTS: [u32; 27] = [
     0x040f_8543,
 ];
 
-/// Compile each of `words` for SVL 16, 32 and 64 in streaming mode with ZA,
+/// Random vector contents.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Values {
+    Bits,
+    /// One kind of lane per sample: raw bits, Single pairs within ±4096 in
+    /// eighths, Doubles in quarters of magnitude 2^-2 to 2^45, or small
+    /// signed integers, with non-negative floats in half the samples, under a
+    /// random FPCR rounding mode.
+    Numbers,
+}
+
+impl Values {
+    fn lane(self, kind: u64, random: u64) -> u64 {
+        if self == Self::Bits {
+            return random;
+        }
+        let single = |bits: u64| u64::from((bits as i16 as f32 / 8.0).to_bits());
+        let signs = if kind & 1 == 0 { 0 } else { 1 << 63 | 1 << 31 };
+        match kind >> 1 & 3 {
+            0 => random,
+            1 => (single(random >> 16) | single(random >> 40) << 32) & !signs,
+            2 => {
+                ((random as i64 >> (16 + (random >> 3) % 48)) as f64 / 4.0).to_bits()
+                    & !(signs & 1 << 63)
+            }
+            _ => (random as i64 >> 40) as u64,
+        }
+    }
+}
+
+/// Compile each of `words` as a context block (which may exit to the
+/// numerical runtime) for SVL 16, 32 and 64 in streaming mode with ZA,
 /// under a declared SME2 profile (which requires PSTATE.DIT clear, so every
 /// recipe is admitted), on x86-64-v3 and each host-supported candidate;
 /// require `changed` words to emit different code and compare the complete
-/// state after both.
-fn compare(words: &[u32], candidates: &[TargetCpu], changed: impl Fn(u32) -> bool) {
+/// state after both from `values`.
+fn compare(words: &[u32], candidates: &[TargetCpu], values: Values, changed: impl Fn(u32) -> bool) {
     let host = TargetCpu::detect();
     let candidates: Vec<_> = candidates
         .iter()
@@ -134,9 +166,16 @@ fn compare(words: &[u32], candidates: &[TargetCpu], changed: impl Fn(u32) -> boo
         for &word in words {
             let source: Vec<u8> = [word, RET].into_iter().flat_map(u32::to_le_bytes).collect();
             let compile = |target| {
-                crate::testing::context_leaf(&source, GuestAddress(0x1000), profile, target)
-                    .unwrap()
-                    .x86_64_code
+                crate::testing::context_block(
+                    &source,
+                    GuestAddress(0x1000),
+                    profile,
+                    NumericalFeatures::default(),
+                    target,
+                )
+                .unwrap()
+                .native
+                .x86_64_code
             };
             let baseline = compile(TargetCpu::X86_64_V3);
             for &candidate in &candidates {
@@ -147,14 +186,21 @@ fn compare(words: &[u32], candidates: &[TargetCpu], changed: impl Fn(u32) -> boo
                 let [baseline, extended] = [&baseline, &extended].map(|code| Native::new(code));
                 for _ in 0..16 {
                     let mut state = GuestState::default();
+                    let kind = next();
                     for vector in &mut state.v {
-                        *vector = [next(), next()];
+                        *vector = [values.lane(kind, next()), values.lane(kind, next())];
                     }
                     state.x = core::array::from_fn(|_| next());
+                    if values == Values::Numbers {
+                        state.fpcr = (next() as u32 & 3) << 22;
+                    }
+                    let z_upper = (0..4 * svl)
+                        .flat_map(|_| values.lane(kind, next()).to_le_bytes())
+                        .collect();
                     let mut bank =
                         |bytes: usize| -> Vec<u8> { (0..bytes).map(|_| next() as u8).collect() };
                     let mut banks = Banks {
-                        z_upper: bank(32 * svl),
+                        z_upper,
                         predicates: bank(17 * svl / 8),
                         ffr: bank(svl / 8),
                         za: bank(svl * svl),
@@ -181,6 +227,7 @@ fn streaming_and_za_byte_dots_match_the_sse_recipes() {
             TargetCpu::X86_64_V3.with_avx_vnni(),
             TargetCpu::X86_64_V4.with_avx512vnni(),
         ],
+        Values::Bits,
         |_| true,
     );
 }
@@ -205,7 +252,59 @@ const EXTENDED_SHIFTS: [u32; 14] = [
 
 #[test]
 fn streaming_byte_and_quadword_shifts_match_the_sse_recipes() {
-    compare(&SHIFTS, &[TargetCpu::X86_64_V4.with_gfni()], |word| {
-        EXTENDED_SHIFTS.contains(&word)
-    });
+    compare(
+        &SHIFTS,
+        &[TargetCpu::X86_64_V4.with_gfni()],
+        Values::Bits,
+        |word| EXTENDED_SHIFTS.contains(&word),
+    );
+}
+
+/// llvm-mc encodings of SCVTF and UCVTF, then FCVTZS and FCVTZU, for Z3 from
+/// Z1 under P1: S from W, S from X, D from W and D from X, then W from S, X
+/// from S, W from D and X from D.
+const CONVERSIONS: [u32; 16] = [
+    0x6594_a423,
+    0x6595_a423,
+    0x65d4_a423,
+    0x65d5_a423,
+    0x65d0_a423,
+    0x65d1_a423,
+    0x65d6_a423,
+    0x65d7_a423,
+    0x659c_a423,
+    0x659d_a423,
+    0x65dc_a423,
+    0x65dd_a423,
+    0x65d8_a423,
+    0x65d9_a423,
+    0x65de_a423,
+    0x65df_a423,
+];
+
+#[test]
+fn streaming_integer_conversions_match_the_sse_recipes() {
+    let signed_w = [0x6594_a423, 0x65d0_a423, 0x659c_a423, 0x65d8_a423];
+    // Packed F, VL and DQ forms take every pair but signed W.
+    compare(
+        &CONVERSIONS,
+        &[TargetCpu::X86_64_V4],
+        Values::Numbers,
+        |word| !signed_w.contains(&word),
+    );
+    // F alone has the scalar unsigned forms: from X, and to W or X.
+    let scalar_unsigned = [
+        0x65d5_a423,
+        0x65d7_a423,
+        0x659d_a423,
+        0x65dd_a423,
+        0x65d9_a423,
+        0x65df_a423,
+    ];
+    compare(
+        &CONVERSIONS,
+        &[TargetCpu::X86_64_V3.with_avx512f()],
+        Values::Numbers,
+        |word| scalar_unsigned.contains(&word),
+    );
 }

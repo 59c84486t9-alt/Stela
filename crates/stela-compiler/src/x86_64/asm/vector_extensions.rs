@@ -1,7 +1,10 @@
 //! Capability-checked packed bit operations (Intel SDM Vol. 2).
 use super::{Code, Evex, Gpr, Map, Mem, Pp, Rm, Vex};
 use crate::TargetCpu;
-use crate::aarch64::floating::Format;
+use crate::aarch64::floating::{
+    Format,
+    integer::{IntegerFormat, IntegerWidth},
+};
 use crate::x86_64::isa::{ShiftOpcode as Shift, SimdOpcode as Host};
 
 /// Transform each byte of `destination` by the bit matrix `matrix`
@@ -574,19 +577,25 @@ pub(crate) fn byte_table(
     true
 }
 
-/// AVX-512 conversions between S/D lanes and integers of the same width:
-/// unsigned dwords need F and VL, quadwords DQ as well. SSE2 already
-/// converts signed dwords. The DIT profile keeps its reviewed recipe.
-pub(crate) fn packed_conversion_supported(format: Format, signed: bool, target: TargetCpu) -> bool {
-    let required = match (format, signed) {
-        (Format::Single, false) => TargetCpu::Avx512f.with_avx512vl(),
-        (Format::Double, _) => TargetCpu::Avx512f.with_avx512vl().with_avx512dq(),
-        _ => return false,
+/// AVX-512 conversions between S/D lanes and W/X integers: unsigned dwords
+/// need F and VL, quadwords DQ as well. SSE2 already converts signed dwords.
+/// The DIT profile keeps its reviewed recipe.
+pub(crate) fn packed_conversion_supported(
+    format: Format,
+    integer: IntegerFormat,
+    target: TargetCpu,
+) -> bool {
+    let required = match (format, integer.width, integer.signed) {
+        (Format::Half, ..) | (_, IntegerWidth::Bits16, _) | (_, IntegerWidth::Bits32, true) => {
+            return false;
+        }
+        (_, IntegerWidth::Bits32, false) => TargetCpu::Avx512f.with_avx512vl(),
+        (_, IntegerWidth::Bits64, _) => TargetCpu::Avx512f.with_avx512vl().with_avx512dq(),
     };
     target.supports(required) && !target.data_independent_timing()
 }
 
-/// EVEX.128 for a packed conversion; a quadword integer sets W.
+/// EVEX.128 for a packed conversion.
 const fn packed_conversion(pp: Pp, w: bool) -> Evex {
     Evex {
         map: Map::M0f,
@@ -600,48 +609,65 @@ const fn packed_conversion(pp: Pp, w: bool) -> Evex {
     }
 }
 
-/// Convert the integer lanes of `xmm` in place to S/D lanes rounded by
-/// MXCSR: VCVTUDQ2PS, VCVTQQ2PD or VCVTUQQ2PD. Inexact results set PE.
+/// Convert the `integer` lanes of `xmm` in place to S/D lanes rounded by
+/// MXCSR: VCVTUDQ2PS/PD, VCVTQQ2PS/PD or VCVTUQQ2PS/PD. Inexact results set
+/// PE. Between widths the two narrow lanes are the low quadword; a narrow
+/// result clears the high one.
 pub(crate) fn packed_from_integer(
     code: &mut Code,
     xmm: u8,
     format: Format,
-    signed: bool,
+    integer: IntegerFormat,
     target: TargetCpu,
 ) -> bool {
-    if !packed_conversion_supported(format, signed, target) {
+    if !packed_conversion_supported(format, integer, target) {
         return false;
     }
-    let (prefix, opcode) = match (format, signed) {
-        (Format::Single, _) => (packed_conversion(Pp::Pf2, false), 0x7a),
-        (_, true) => (packed_conversion(Pp::Pf3, true), 0xe6),
-        (_, false) => (packed_conversion(Pp::Pf3, true), 0x7a),
+    let (pp, opcode) = match (format, integer.signed) {
+        (Format::Single, true) => (Pp::None, 0x5b),
+        (Format::Single, false) => (Pp::Pf2, 0x7a),
+        (_, true) => (Pp::Pf3, 0xe6),
+        (_, false) => (Pp::Pf3, 0x7a),
     };
-    code.asm().evex(prefix, opcode, xmm, 0, Rm::Xmm(xmm));
+    let quadword = integer.width == IntegerWidth::Bits64;
+    code.asm().evex(
+        packed_conversion(pp, quadword),
+        opcode,
+        xmm,
+        0,
+        Rm::Xmm(xmm),
+    );
     true
 }
 
-/// Convert the S/D lanes of `xmm` in place to integers, truncated or rounded
-/// by MXCSR: VCVT(T)PS2UDQ, VCVT(T)PD2QQ or VCVT(T)PD2UQQ. An unrepresentable
-/// result sets IE and PE marks an inexact one, as for the scalar forms.
+/// Convert the S/D lanes of `xmm` in place to `integer` lanes, truncated or
+/// rounded by MXCSR: VCVT(T)PS2UDQ/QQ/UQQ or VCVT(T)PD2UDQ/QQ/UQQ, with
+/// lanes placed as for [`packed_from_integer`]. An unrepresentable result
+/// sets IE and PE marks an inexact one, as for the scalar forms.
 pub(crate) fn packed_to_integer(
     code: &mut Code,
     xmm: u8,
     format: Format,
-    signed: bool,
+    integer: IntegerFormat,
     truncate: bool,
     target: TargetCpu,
 ) -> bool {
-    if !packed_conversion_supported(format, signed, target) {
+    if !packed_conversion_supported(format, integer, target) {
         return false;
     }
-    let (prefix, opcode) = match (format, signed) {
-        (Format::Single, _) => (packed_conversion(Pp::None, false), 0x79),
-        (_, true) => (packed_conversion(Pp::P66, true), 0x7b),
-        (_, false) => (packed_conversion(Pp::P66, true), 0x79),
+    let pp = if integer.width == IntegerWidth::Bits64 {
+        Pp::P66
+    } else {
+        Pp::None
     };
-    code.asm()
-        .evex(prefix, opcode - u8::from(truncate), xmm, 0, Rm::Xmm(xmm));
+    let opcode = if integer.signed { 0x7b } else { 0x79 } - u8::from(truncate);
+    code.asm().evex(
+        packed_conversion(pp, format == Format::Double),
+        opcode,
+        xmm,
+        0,
+        Rm::Xmm(xmm),
+    );
     true
 }
 
@@ -1195,20 +1221,28 @@ mod tests {
     #[test]
     fn integer_conversions_check_each_extension_and_match_gnu_encodings() {
         let quadword = TargetCpu::Avx512f.with_avx512vl().with_avx512dq();
-        for (format, signed, target) in [
-            (Format::Single, true, quadword),
-            (Format::Single, false, TargetCpu::Avx512f),
-            (Format::Double, true, TargetCpu::Avx512f.with_avx512vl()),
+        let integer = |width, signed| IntegerFormat { width, signed };
+        let [w, x] = [IntegerWidth::Bits32, IntegerWidth::Bits64];
+        for (format, integer, target) in [
+            (Format::Single, integer(w, true), quadword),
+            (Format::Double, integer(w, true), quadword),
+            (Format::Half, integer(IntegerWidth::Bits16, false), quadword),
+            (Format::Single, integer(w, false), TargetCpu::Avx512f),
+            (
+                Format::Single,
+                integer(x, true),
+                TargetCpu::Avx512f.with_avx512vl(),
+            ),
             (
                 Format::Double,
-                false,
+                integer(x, false),
                 quadword.with_data_independent_timing(),
             ),
         ] {
             let mut code = Code::new();
-            assert!(!packed_from_integer(&mut code, 0, format, signed, target));
+            assert!(!packed_from_integer(&mut code, 0, format, integer, target));
             assert!(!packed_to_integer(
-                &mut code, 0, format, signed, true, target
+                &mut code, 0, format, integer, true, target
             ));
             assert!(code.is_empty());
         }
@@ -1229,22 +1263,25 @@ mod tests {
             code.into_bytes()
         };
         // GNU as, on XMM0 and RAX/EAX.
-        for (format, signed, from, rounded, truncated) in [
-            (Format::Single, false, 0x7f7a, 0x7c79, 0x7c78),
-            (Format::Double, true, 0xfee6, 0xfd7b, 0xfd7a),
-            (Format::Double, false, 0xfe7a, 0xfd79, 0xfd78),
+        for (format, integer, from, rounded, truncated) in [
+            (Format::Single, integer(w, false), 0x7f7a, 0x7c79, 0x7c78),
+            (Format::Single, integer(x, true), 0xfc5b, 0x7d7b, 0x7d7a),
+            (Format::Single, integer(x, false), 0xff7a, 0x7d79, 0x7d78),
+            (Format::Double, integer(w, false), 0x7e7a, 0xfc79, 0xfc78),
+            (Format::Double, integer(x, true), 0xfee6, 0xfd7b, 0xfd7a),
+            (Format::Double, integer(x, false), 0xfe7a, 0xfd79, 0xfd78),
         ] {
             let encoding = |fields: u16| {
                 let [pp, opcode] = fields.to_be_bytes();
                 [0x62, 0xf1, pp, 0x08, opcode, 0xc0]
             };
             assert_eq!(
-                packed(&|code| packed_from_integer(code, 0, format, signed, quadword)),
+                packed(&|code| packed_from_integer(code, 0, format, integer, quadword)),
                 encoding(from)
             );
             for (truncate, expected) in [(false, rounded), (true, truncated)] {
                 assert_eq!(
-                    packed(&|code| packed_to_integer(code, 0, format, signed, truncate, quadword)),
+                    packed(&|code| packed_to_integer(code, 0, format, integer, truncate, quadword)),
                     encoding(expected)
                 );
             }
