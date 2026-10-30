@@ -1,9 +1,10 @@
 //! StelaGPU's call gate in the guest's DeviceTree: `/arm-io/stela-gpu`,
 //! whose nub the StelaGPU kext matches by `compatible` and maps by `reg`.
 //! The window goes in the first gap of `/arm-io`'s `ranges`, aligned to its
-//! size, that no `/arm-io` device's registers use, so it collides with
-//! nothing the board places; the runtime mounts the gate at the physical
-//! address this answers.
+//! size, that no `/arm-io` device's registers use, and the completion
+//! interrupt on the AIC input past every one the tree's AIC clients use, so
+//! neither collides with anything the board places; the runtime mounts the
+//! gate where this answers.
 use crate::apple_device_tree::{DeviceTree, Node};
 use alloc::vec::Vec;
 use anyhow::{Context, Result, ensure};
@@ -12,9 +13,20 @@ const ARM_IO: &str = "/arm-io";
 const NAME: &str = "stela-gpu";
 const COMPATIBLE: &[u8] = b"gpu,stela\0";
 
-/// Adds the gate's node for a window of `bytes`, a power of two, and
-/// answers the window's physical address.
-pub fn place_gpu_gate(tree: &mut DeviceTree, bytes: u64) -> Result<u64> {
+const AIC: &str = "/arm-io/aic";
+const PHANDLE: &str = "AAPL,phandle";
+const INTERRUPT_PARENT: &str = "interrupt-parent";
+
+/// Where the gate's node places it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Placement {
+    pub physical: u64,
+    /// The AIC input of its completion interrupt.
+    pub irq: u32,
+}
+
+/// Adds the gate's node for a window of `bytes`, a power of two.
+pub fn place_gpu_gate(tree: &mut DeviceTree, bytes: u64) -> Result<Placement> {
     ensure!(bytes.is_power_of_two(), "the gate window is a power of two");
     let arm_io = tree.node(ARM_IO).context("DeviceTree has no /arm-io")?;
     ensure!(arm_io.child(NAME).is_none(), "/arm-io already has a {NAME}");
@@ -36,15 +48,42 @@ pub fn place_gpu_gate(tree: &mut DeviceTree, bytes: u64) -> Result<u64> {
                 .map(|offset| (offset, range[1] + (offset - range[0])))
         })
         .context("/arm-io has no gap for the StelaGPU gate")?;
+    let aic = tree
+        .property(AIC, PHANDLE)
+        .and_then(|phandle| phandle.as_u32())
+        .context("/arm-io/aic has no phandle")?;
+    let mut used = Vec::new();
+    interrupts_of(&tree.root, aic, &mut used);
+    let irq = used
+        .into_iter()
+        .max()
+        .map_or(Some(0), |last| last.checked_add(1))
+        .context("the AIC has no input past its clients'")?;
     let mut node = Node::named(NAME)?;
     node.set_property("compatible", COMPATIBLE.to_vec())?;
+    node.set_property(INTERRUPT_PARENT, aic.to_le_bytes().to_vec())?;
+    node.set_property("interrupts", irq.to_le_bytes().to_vec())?;
     node.set_property("device_type", b"stela-gpu\0".to_vec())?;
     node.set_property("reg", [offset, bytes].map(u64::to_le_bytes).concat())?;
     tree.node_mut(ARM_IO)
         .context("DeviceTree has no /arm-io")?
         .children
         .push(node);
-    Ok(physical)
+    Ok(Placement { physical, irq })
+}
+
+/// Collects the AIC inputs of `node` and its descendants whose interrupt
+/// parent is the AIC with phandle `aic`.
+fn interrupts_of(node: &Node, aic: u32, used: &mut Vec<u32>) {
+    if word(node, INTERRUPT_PARENT) == Some(aic)
+        && let Some(interrupts) = node.property("interrupts")
+    {
+        let (cells, _) = interrupts.value.as_chunks::<4>();
+        used.extend(cells.iter().map(|cell| u32::from_le_bytes(*cell)));
+    }
+    for child in &node.children {
+        interrupts_of(child, aic, used);
+    }
 }
 
 /// The first offset of `start..start + length`, aligned to `bytes`, whose
@@ -102,10 +141,20 @@ mod tests {
 
     const WINDOW: u64 = 0x40_0000;
 
+    const AIC_PHANDLE: u32 = 7;
+
     fn device(name: &str, offset: u64, length: u64) -> Node {
         let mut node = Node::named(name).unwrap();
         node.set_property("reg", [offset, length].map(u64::to_le_bytes).concat())
             .unwrap();
+        node
+    }
+
+    fn interrupting(mut node: Node, parent: u32, irqs: &[u32]) -> Node {
+        node.set_property(INTERRUPT_PARENT, parent.to_le_bytes().to_vec())
+            .unwrap();
+        let irqs = irqs.iter().flat_map(|irq| irq.to_le_bytes()).collect();
+        node.set_property("interrupts", irqs).unwrap();
         node
     }
 
@@ -120,7 +169,11 @@ mod tests {
             .map(u64::to_le_bytes)
             .concat();
         arm_io.set_property("ranges", ranges).unwrap();
+        let mut aic = device("aic", 0x1000_0000 - 0x1_0000, 0x1_0000);
+        aic.set_property(PHANDLE, AIC_PHANDLE.to_le_bytes().to_vec())
+            .unwrap();
         arm_io.children = children;
+        arm_io.children.push(aic);
         let mut root = Node::named("device-tree").unwrap();
         root.children.push(arm_io);
         DeviceTree { root }
@@ -129,12 +182,20 @@ mod tests {
     #[test]
     fn the_gate_takes_the_first_aligned_gap_no_device_uses() {
         let mut tree = tree(vec![
-            device("aic", 0, 0x10_0000),
-            device("wdt", 0x40_0000, 0x1_0000),
+            interrupting(device("uart", 0, 0x10_0000), AIC_PHANDLE, &[0x20, 0x31]),
+            interrupting(device("wdt", 0x40_0000, 0x1_0000), AIC_PHANDLE, &[0x2c]),
+            interrupting(device("gpio", 0x60_0000, 0x1_0000), 99, &[0x400]),
         ]);
-        assert_eq!(place_gpu_gate(&mut tree, WINDOW).unwrap(), 0x2_0080_0000);
+        assert_eq!(
+            place_gpu_gate(&mut tree, WINDOW).unwrap(),
+            Placement {
+                physical: 0x2_0080_0000,
+                irq: 0x32,
+            }
+        );
         let node = tree.node("/arm-io/stela-gpu").unwrap();
         assert_eq!(node.property("compatible").unwrap().value, COMPATIBLE);
+        assert_eq!(node.property("interrupts").unwrap().as_u32(), Some(0x32));
         assert_eq!(
             node.property("reg").unwrap().value,
             [0x80_0000, WINDOW].map(u64::to_le_bytes).concat()
