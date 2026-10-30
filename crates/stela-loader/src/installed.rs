@@ -31,8 +31,9 @@
 //! payload type; each is split into its payload, decoded unchanged, and its
 //! personalized manifest. The kernel collection's manifest is the boot
 //! manifest. The product version and build come from the volume group's
-//! `SystemVersion.plist` on Preboot, the model and board name from the
-//! DeviceTree, and chip and board identifiers from the boot manifest.
+//! `SystemVersion.plist` on Preboot, its Cryptex1's when it has one, the model
+//! and board name from the DeviceTree, and chip and board identifiers from
+//! the boot manifest.
 use crate::{Error, Result, Within};
 use crate::{
     apple_device_tree::DeviceTree,
@@ -46,10 +47,16 @@ use crate::{
 use alloc::{format, string::String, vec::Vec};
 use stela_contracts::{refuse, require};
 use {
-    stela_formats::apfs, stela_formats::apfs::Container, stela_formats::apfs::Volume,
-    stela_formats::apfs::btree::Hash, stela_formats::img4, stela_formats::payload::ReadAt,
-    stela_formats::preboot, stela_formats::preboot::BootSet,
-    stela_formats::preboot::SYSTEM_VERSION, stela_formats::sha256,
+    stela_formats::apfs,
+    stela_formats::apfs::Container,
+    stela_formats::apfs::Volume,
+    stela_formats::apfs::btree::Hash,
+    stela_formats::img4,
+    stela_formats::payload::ReadAt,
+    stela_formats::preboot,
+    stela_formats::preboot::BootSet,
+    stela_formats::preboot::{CRYPTEX_SYSTEM_VERSION, SYSTEM_VERSION},
+    stela_formats::sha256,
 };
 
 /// The variant recorded for a bundle read from an installed system.
@@ -482,12 +489,15 @@ impl<R: ReadAt> Disk<'_, R> {
 
     /// `ProductVersion` and `ProductBuildVersion` of the volume group.
     fn system_version(&mut self) -> Result<(String, String)> {
-        let path = format!("{}/{SYSTEM_VERSION}", self.set.volume_group);
+        let group = &self.set.volume_group;
         let device = &mut self.container.device;
-        let inode = self
-            .preboot
-            .lookup(device, &path, true)
-            .within(|| refuse!("{path}", path))?;
+        let mut path = format!("{group}/{CRYPTEX_SYSTEM_VERSION}");
+        let mut found = self.preboot.lookup(device, &path, true);
+        if matches!(found, Err(apfs::ApfsError::NotFound(_))) {
+            path = format!("{group}/{SYSTEM_VERSION}");
+            found = self.preboot.lookup(device, &path, true);
+        }
+        let inode = found.within(|| refuse!("{path}", path))?;
         let bytes = self
             .preboot
             .read(device, &inode)

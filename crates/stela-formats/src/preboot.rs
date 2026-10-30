@@ -35,6 +35,11 @@ pub const OBJECT_DIRECTORIES: [&str; 2] = [
 /// `System/Library/CoreServices/SystemVersion.plist` under the volume
 /// group's Preboot directory (asahi-installer `src/osenum.py`).
 pub const SYSTEM_VERSION: &str = "System/Library/CoreServices/SystemVersion.plist";
+/// The same under the volume group's Cryptex1 (26A434 `ramrod_splat_install`
+/// copies the System volume's there), where a system with one keeps it and
+/// [`SYSTEM_VERSION`] does not exist: an update of the Cryptex1 replaces it,
+/// so it names the version that runs.
+pub const CRYPTEX_SYSTEM_VERSION: &str = "cryptex1/current/SystemVersion.plist";
 /// A SHA-384 in hexadecimal.
 const BOOT_HASH_CHARACTERS: usize = 96;
 const PEEK_BYTES: usize = 64;
