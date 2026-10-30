@@ -26,18 +26,6 @@ const RUNTIME: [&str; 4] = ["memcpy", "memmove", "memset", "memcmp"];
 /// imports change, so each supplied service leaves this list with its change.
 const OPEN: &[(&str, &[&str])] = &[
     (
-        "lib/string.c",
-        &[
-            "memchr",
-            "memset32",
-            "sized_strscpy",
-            "strcasecmp",
-            "strcspn",
-            "strncasecmp",
-        ],
-    ),
-    ("lib/kstrtox.c", &["kstrtoll"]),
-    (
         "lib/hexdump.c, lib/ratelimit.c",
         &["print_hex_dump", "___ratelimit"],
     ),

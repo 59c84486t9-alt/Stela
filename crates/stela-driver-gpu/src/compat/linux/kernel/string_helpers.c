@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Owned common string helpers following Linux
- * cc9de5d4b5ab6459f5774946aa3195ad51236fa8 lib/string.c and
- * lib/string_helpers.c. Their original GPL notices remain with those sources.
- * Existing MIT kernel/string.c is unchanged. */
+ * cc9de5d4b5ab6459f5774946aa3195ad51236fa8 lib/string_helpers.c. Its
+ * original GPL notices remain with that source; lib/string.c itself is
+ * compiled unchanged. */
 #include <linux/ctype.h>
 #include <linux/string.h>
 
@@ -22,41 +22,6 @@ char *skip_spaces(const char *str)
 	return (char *)str;
 }
 
-
-int strncmp(const char *left, const char *right, size_t count)
-{
-	for (size_t i = 0; i < count; i++) {
-		unsigned char a = (unsigned char)left[i];
-		unsigned char b = (unsigned char)right[i];
-		if (a != b)
-			return a < b ? -1 : 1;
-		if (!a)
-			break;
-	}
-	return 0;
-}
-
-char *strchr(const char *string, int character)
-{
-	for (;;) {
-		if (*string == (char)character)
-			return (char *)string;
-		if (!*string)
-			return NULL;
-		string++;
-	}
-}
-
-char *strnchr(const char *string, size_t count, int character)
-{
-	for (size_t i = 0; i < count; i++) {
-		if (string[i] == (char)character)
-			return (char *)(string + i);
-		if (!string[i])
-			break;
-	}
-	return NULL;
-}
 
 char *strreplace(char *string, char old, char replacement)
 {
@@ -107,7 +72,8 @@ static void leading_whitespace(void)
 int main(void)
 {
 	leading_whitespace();
-	/* Exercise the actual implementation, not compiler-folded libc calls. */
+	/* Exercise lib/string.c's implementations, not compiler-folded libc
+	 * calls. */
 	int (*volatile compare)(const char *, const char *, size_t) = strncmp;
 	char *(*volatile find)(const char *, int) = strchr;
 	char *(*volatile bounded_find)(const char *, size_t, int) = strnchr;

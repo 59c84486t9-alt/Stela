@@ -177,6 +177,7 @@ impl Linux {
         // extra conversion diagnostics remain confined to its own source.
         let upstream = [
             PathBuf::from(format!("{DRM}/drm_fourcc.c")),
+            PathBuf::from(format!("{LINUX}/lib/string.c")),
             PathBuf::from(format!("{LINUX}/lib/scatterlist.c")),
             PathBuf::from(format!("{LINUX}/lib/find_bit.c")),
             PathBuf::from(format!("{LINUX}/lib/bitmap.c")),
@@ -349,6 +350,7 @@ impl Linux {
             ),
             ("linux_printf", "printf.c", "STELA_LINUX_PRINTF_TEST"),
             ("linux_uuid", "uuid.c", "STELA_LINUX_UUID_TEST"),
+            ("linux_kstrtox", "kstrtox.c", "STELA_LINUX_KSTRTOX_TEST"),
             ("linux_refcount", "refcount.c", "STELA_LINUX_REFCOUNT_TEST"),
             (
                 "linux_const_string",
