@@ -576,6 +576,56 @@ fn bulk_dma_partial_short_and_events_precede_aic() {
     assert_eq!(latch.take_aic_inputs(), [(irqs()[0], false)]);
 }
 #[test]
+fn an_out_buffer_software_changes_while_the_core_owns_it_is_recorded() {
+    let (mut dwc, mut dart, mut ram, mut latch) = setup();
+    let mut access = Access::new(0, 0, &mut latch);
+    configure(&mut dwc, 2, 0, &mut access);
+    trb(&mut ram, TRB, 1024, HWO | CSP | IOC | 1 << 4);
+    ram.put_u64(TRB + 16, TRB + 0x100);
+    assert!(ram.write(TRB + 24, &[0, 0, 0, 0, 0x81, 0, 0, 0]));
+    trb(&mut ram, TRB + 0x100, 1024, HWO | LST | IOC | 1 << 4);
+    start(&mut dwc, 2, TRB, &mut access);
+    let mut packet = |dwc: &mut Dwc3, ram: &mut Ram, data: &mut [u8]| {
+        let mut port = Port {
+            iommu: &mut dart,
+            stream: SID,
+            memory: ram,
+            access: &mut access,
+        };
+        dwc.peer(&mut port).packet(1, Token::Out, data)
+    };
+    assert_eq!(
+        packet(&mut dwc, &mut ram, &mut [0x5a; 512]),
+        Ok(Reply::Ack(512))
+    );
+    assert_eq!(
+        packet(&mut dwc, &mut ram, &mut [0x6b; 7]),
+        Ok(Reply::Ack(7))
+    );
+    // Software leaves the first buffer alone; it zeroes the second's
+    // header between the core's packets.
+    assert!(
+        dwc.transfer_history()
+            .all(|step| !step.contains("clobbered"))
+    );
+    assert_eq!(
+        packet(&mut dwc, &mut ram, &mut [0x7c; 512]),
+        Ok(Reply::Ack(512))
+    );
+    assert!(ram.write(PAYLOAD, &[0; 4]));
+    assert_eq!(packet(&mut dwc, &mut ram, &mut []), Ok(Reply::Ack(0)));
+    let clobbered: alloc::vec::Vec<_> = dwc
+        .transfer_history()
+        .filter(|step| step.contains("clobbered"))
+        .collect();
+    assert_eq!(clobbered.len(), 1);
+    assert!(clobbered[0].starts_with(&format!(
+        "ep=2 clobbered trb={:#x} buffer={PAYLOAD:#x} wrote=[7c, 7c, 7c, 7c, 7c,",
+        TRB + 0x100
+    )));
+    assert!(clobbered[0].contains("found=[00, 00, 00, 00, 7c,"));
+}
+#[test]
 fn programmed_ring_wrap_mask_and_overflow_backpressure() {
     let (mut dwc, mut dart, mut ram, mut latch) = setup();
     let mut access = Access::new(0, 0, &mut latch);

@@ -147,6 +147,22 @@ struct Endpoint {
 struct Transfer {
     trb: u64,
     done: u32,
+    /// The leading bytes of an OUT TRB's payload as the core wrote them,
+    /// read back at completion: software owns the buffer only after.
+    head: [u8; HEAD_BYTES],
+}
+
+/// [`Transfer::head`]'s length: a usbmux v2 and TCP header fits.
+const HEAD_BYTES: usize = 36;
+
+impl Transfer {
+    fn at(trb: u64) -> Self {
+        Self {
+            trb,
+            done: 0,
+            head: [0; HEAD_BYTES],
+        }
+    }
 }
 
 /// A step of a non-control endpoint's transfer, kept so a peer that
@@ -166,6 +182,15 @@ enum Step {
         ctrl: u32,
         resume: Option<u64>,
         event: bool,
+    },
+    /// An OUT TRB's buffer whose leading payload bytes changed while the
+    /// core owned it: what the core wrote and what it read back.
+    Clobbered {
+        ep: usize,
+        trb: u64,
+        buffer: u64,
+        wrote: [u8; HEAD_BYTES],
+        found: [u8; HEAD_BYTES],
     },
 }
 
@@ -322,6 +347,15 @@ impl Dwc3 {
             } => format!(
                 "ep={ep} completed trb={trb:#x} buffer={buffer:#x} size={size} done={done} ctrl={ctrl:#x} event={event} resume={}",
                 resume.map_or_else(|| String::from("none"), |trb| format!("{trb:#x}"))
+            ),
+            Step::Clobbered {
+                ep,
+                trb,
+                buffer,
+                wrote,
+                found,
+            } => format!(
+                "ep={ep} clobbered trb={trb:#x} buffer={buffer:#x} wrote={wrote:02x?} found={found:02x?}"
             ),
         })
     }
@@ -795,10 +829,7 @@ impl Dwc3 {
                 if !ep.resource || ep.active.is_some() || !address.is_multiple_of(TRB_BYTES) {
                     failed = true;
                 } else {
-                    ep.active = Some(Transfer {
-                        trb: address,
-                        done: 0,
-                    });
+                    ep.active = Some(Transfer::at(address));
                     ep.not_ready = false;
                     result |= 1 << 16;
                 }
@@ -1042,10 +1073,33 @@ impl Dwc3 {
             });
             return Err(refuse!("DWC3 payload DMA fault; reset required"));
         }
+        let start = transfer.done as usize;
+        if token == Token::Out && n >= 2 && start < HEAD_BYTES {
+            let end = (start + bytes).min(HEAD_BYTES);
+            transfer.head[start..end].copy_from_slice(&data[..end - start]);
+        }
         transfer.done += bytes as u32;
         let short = short_packet;
         let complete = transfer.done == size & LENGTH || short;
         if complete {
+            // Software must leave a buffer alone while the core owns its
+            // TRB; one it changed meanwhile is recorded for diagnosis.
+            let kept = (transfer.done as usize).min(HEAD_BYTES);
+            let mut found = [0; HEAD_BYTES];
+            if token == Token::Out
+                && n >= 2
+                && kept != 0
+                && port.read(buffer, &mut found[..kept]).is_ok()
+                && found[..kept] != transfer.head[..kept]
+            {
+                self.record(Step::Clobbered {
+                    ep: n,
+                    trb: transfer.trb,
+                    buffer,
+                    wrote: transfer.head,
+                    found,
+                });
+            }
             let residual = (size & LENGTH) - transfer.done;
             let mut completion = [0; 8];
             completion[..4].copy_from_slice(&residual.to_le_bytes());
@@ -1077,10 +1131,7 @@ impl Dwc3 {
             ep.active = if last {
                 None
             } else {
-                Some(Transfer {
-                    trb: self.fetch(port, next_trb)?.0,
-                    done: 0,
-                })
+                Some(Transfer::at(self.fetch(port, next_trb)?.0))
             };
             if n >= 2 {
                 self.record(Step::Completed {
