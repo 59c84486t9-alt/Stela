@@ -538,6 +538,75 @@ records! {
     }
 }
 
+records! {
+    /// A 64-bit value: an event's, a serial, a byte count.
+    pub struct Value {
+        pub value: u64,
+    }
+
+    /// `setSignaledValue:` of an event.
+    pub struct EventValueRequest {
+        pub event: u64,
+        pub value: u64,
+    }
+
+    /// `waitUntilSignaledValue:timeoutMS:` of an event, in nanoseconds.
+    pub struct WaitEventRequest {
+        pub event: u64,
+        pub value: u64,
+        pub timeout: u64,
+    }
+
+    /// `waitUntilCompleted` of the command buffer committed as `serial`,
+    /// each wait bounded by `timeout` nanoseconds.
+    pub struct WaitRequest {
+        pub serial: u64,
+        pub timeout: u64,
+    }
+
+    /// Whether a wait saw its value before its timeout.
+    pub struct WaitResponse {
+        pub reached: u32,
+        pub reserved: u32,
+    }
+
+    /// `newCounterSampleBufferWithDescriptor:` of a `CounterSetCode`.
+    pub struct NewCounterBufferRequest {
+        pub counter_set: u64,
+        pub sample_count: u64,
+    }
+
+    /// `resolveCounterRange:` into a span of 64-bit values.
+    pub struct ResolveCountersRequest {
+        pub buffer: u64,
+        pub first: u64,
+        pub count: u64,
+        pub out: Span,
+    }
+
+    /// Whether the samples were resolved (`resolveCounterRange:` answers
+    /// nil while a timestamp is pending) and their length.
+    pub struct ResolveCountersResponse {
+        pub resolved: u32,
+        pub reserved: u32,
+        pub length: u64,
+    }
+
+    /// `sampleTimestamps:gpuTimestamp:`.
+    pub struct TimestampsResponse {
+        pub cpu: u64,
+        pub gpu: u64,
+    }
+}
+
+raw_enum! {
+    /// The `MTLCounterSet`s the device samples, which the frontend names.
+    pub enum CounterSetCode: u64 {
+        Timestamp = 0,
+        Statistic = 1,
+    }
+}
+
 option_set! {
     /// What a pipeline request asks besides its records.
     pub struct PipelineFlags: u64 {
@@ -692,4 +761,18 @@ operations! {
     /// `gpuAddress` is the table's `gpuResourceID`.
     NewFunctionTable = 0x0305 => NewFunctionTableRequest, BufferResponse;
     SetFunctions = 0x0306 => SetFunctionsRequest, Empty;
+    /// `newEvent` and `newSharedEvent`.
+    NewEvent = 0x0401 => Empty, Handle;
+    /// `signaledValue`.
+    EventSignaledValue = 0x0402 => Handle, Value;
+    SetEventSignaledValue = 0x0403 => EventValueRequest, Empty;
+    WaitEvent = 0x0404 => WaitEventRequest, WaitResponse;
+    NewCounterBuffer = 0x0405 => NewCounterBufferRequest, Handle;
+    ResolveCounters = 0x0406 => ResolveCountersRequest, ResolveCountersResponse;
+    SampleTimestamps = 0x0407 => Empty, TimestampsResponse;
+    /// `currentAllocatedSize`.
+    AllocatedSize = 0x0408 => Empty, Value;
+    /// Submits ready work and answers the completed serial.
+    Poll = 0x0409 => Empty, Value;
+    Wait = 0x040a => WaitRequest, WaitResponse;
 }

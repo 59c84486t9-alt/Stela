@@ -14,8 +14,8 @@
 //! first, so views and aliases go before the resources under them.
 use super::{
     device::{
-        BufferId, ComputePipelineId, Device, FunctionId, HeapId, LibraryId, RenderPipelineId,
-        SamplerId, TextureId,
+        BufferId, ComputePipelineId, CounterBufferId, Device, EventId, FunctionId, HeapId,
+        LibraryId, RenderPipelineId, SamplerId, TextureId,
     },
     error::Error,
     shader::Compiler,
@@ -28,6 +28,7 @@ use wire::{Fault, Handle, NegotiateRequest, NegotiateResponse, Operation, Record
 
 mod libraries;
 mod pipelines;
+mod queue;
 mod resources;
 #[cfg(test)]
 mod tests;
@@ -68,6 +69,8 @@ enum Object {
     Function(FunctionId),
     RenderPipeline(RenderPipelineId),
     ComputePipeline(ComputePipelineId),
+    Event(EventId),
+    CounterBuffer(CounterBufferId),
 }
 
 /// A kind of object a handle may name.
@@ -97,6 +100,8 @@ kinds! {
     Function(FunctionId);
     RenderPipeline(RenderPipelineId);
     ComputePipeline(ComputePipelineId);
+    Event(EventId);
+    CounterBuffer(CounterBufferId);
 }
 
 /// An object and when its connection made it.
@@ -315,6 +320,28 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             Operation::FunctionHandle => self.function_handle(&mut call),
             Operation::NewFunctionTable => self.new_function_table(&mut call),
             Operation::SetFunctions => self.set_functions(&mut call),
+            Operation::NewEvent => {
+                let event = self.device.new_event()?;
+                let handle = self.hold(connection, Object::Event(event))?;
+                call.reply(&handle)
+            }
+            Operation::EventSignaledValue => self.event_signaled_value(&mut call),
+            Operation::SetEventSignaledValue => self.set_event_signaled_value(&mut call),
+            Operation::WaitEvent => self.wait_event(&mut call),
+            Operation::NewCounterBuffer => self.new_counter_buffer(&mut call),
+            Operation::ResolveCounters => self.resolve_counters(&mut call),
+            Operation::SampleTimestamps => {
+                let (cpu, gpu) = self.device.sample_timestamps()?;
+                call.reply(&wire::TimestampsResponse { cpu, gpu })
+            }
+            Operation::AllocatedSize => call.reply(&wire::Value {
+                value: self.device.current_allocated_size(),
+            }),
+            Operation::Poll => {
+                let value = self.device.poll()?;
+                call.reply(&wire::Value { value })
+            }
+            Operation::Wait => self.wait(&mut call),
         }
     }
 
@@ -416,6 +443,8 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             Object::Function(id) => device.destroy_function(id),
             Object::RenderPipeline(id) => device.destroy_render_pipeline(id),
             Object::ComputePipeline(id) => device.destroy_compute_pipeline(id),
+            Object::Event(id) => device.destroy_event(id),
+            Object::CounterBuffer(id) => device.destroy_counter_sample_buffer(id),
         }
     }
 }
