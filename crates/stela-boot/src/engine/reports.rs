@@ -3,18 +3,37 @@
 
 use super::*;
 
+/// One sampled PC: how often it was seen and the code around it, which names
+/// a user-space image the serial log has no map of.
+pub(super) struct HotPc {
+    pub(super) count: u32,
+    /// `HOT_CODE_BYTES` from `HOT_CODE_BEFORE` before the PC; zero if unread.
+    pub(super) code: [u8; HOT_CODE_BYTES],
+}
+
+pub(super) const HOT_CODE_BYTES: usize = 32;
+pub(super) const HOT_CODE_BEFORE: u64 = 16;
+
 /// The PCs the running PE was at most often at the heartbeat's service
 /// boundaries, sampled at most once a millisecond: where guest time goes.
-pub(super) fn hot_report(hot: &mut BTreeMap<u64, u32>) {
+pub(super) fn hot_report(hot: &mut BTreeMap<u64, HotPc>) {
     const SHOWN: usize = 16;
-    let total: u32 = hot.values().sum();
-    let mut counts: Vec<(u32, u64)> = hot.iter().map(|(&pc, &count)| (count, pc)).collect();
+    const SHOWN_CODE: usize = 6;
+    let total: u32 = hot.values().map(|sample| sample.count).sum();
+    let mut counts: Vec<(u32, u64)> = hot.iter().map(|(&pc, s)| (s.count, pc)).collect();
     counts.sort_unstable_by(|a, b| b.cmp(a));
     output::arguments(format_args!("HOT samples={total}"));
-    for (count, pc) in counts.into_iter().take(SHOWN) {
+    for &(count, pc) in counts.iter().take(SHOWN) {
         output::arguments(format_args!(" {pc:#x}:{count}"));
     }
     output::arguments(format_args!("\n"));
+    for &(_, pc) in counts.iter().take(SHOWN_CODE) {
+        output::arguments(format_args!("HOT CODE {pc:#x} "));
+        for byte in hot[&pc].code {
+            output::arguments(format_args!("{byte:02x}"));
+        }
+        output::arguments(format_args!("\n"));
+    }
     hot.clear();
 }
 

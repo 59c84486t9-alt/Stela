@@ -380,7 +380,7 @@ pub(super) struct Heartbeat {
     pub(super) samples: Vec<[u64; CHAIN]>,
     pub(super) sampled: u64,
     /// The running PE's PC at service boundaries, at most once a millisecond.
-    pub(super) hot: BTreeMap<u64, u32>,
+    pub(super) hot: BTreeMap<u64, HotPc>,
     pub(super) hot_sampled: u64,
     /// Samples taken at EL0.
     pub(super) user: u32,
@@ -429,7 +429,17 @@ impl Heartbeat {
         tsc_hz: u64,
     ) {
         if now.wrapping_sub(self.hot_sampled) >= tsc_hz / 1000 {
-            *self.hot.entry(machine.cpu.pc).or_default() += 1;
+            let pc = machine.cpu.pc;
+            self.hot
+                .entry(pc)
+                .or_insert_with(|| {
+                    let mut code = [0; HOT_CODE_BYTES];
+                    if !machine.read_virtual(pc.wrapping_sub(HOT_CODE_BEFORE), &mut code) {
+                        code.fill(0);
+                    }
+                    HotPc { count: 0, code }
+                })
+                .count += 1;
             self.hot_sampled = now;
         }
         if now.wrapping_sub(self.sampled) >= tsc_hz && self.samples.len() < BEAT_SECONDS as usize {
