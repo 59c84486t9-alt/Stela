@@ -328,6 +328,11 @@ pub struct Run {
     /// `--input`.
     #[arg(long, conflicts_with_all = ["module", "usb_image", "payload"])]
     input: bool,
+    /// Attach QEMU's ICH6 HD Audio controller with a duplex codec on a silent
+    /// backend, which probe's native HD Audio owner attaches whenever the
+    /// mount starts the host's devices (for example with `--input`).
+    #[arg(long, conflicts_with = "audio_check")]
+    host_audio: bool,
     /// Give the mount a host network adapter: a `virtio-net-pci`, which the
     /// mount drives after ExitBootServices for its own requests (`--tss`,
     /// `--network-check`), on a QEMU `stream` netdev to xtask's own LAN
@@ -771,6 +776,7 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         &mut command,
     );
     machine::attach_display(&arguments, bundle, &mut command);
+    machine::attach_audio(&arguments, &mut command);
     network::attach(&arguments, &paths.output, &mut command)?;
     machine::attach_usb(&arguments, &mut command);
     storage::attach_usb_boot(&arguments, &mut command);
