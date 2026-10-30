@@ -77,6 +77,65 @@ fn sleep_preparation_evaluates_s5_and_runs_pts() {
 }
 
 #[test]
+fn device_properties_come_from_the_dsd_properties_set() {
+    let _serial = TEST_SERIAL.lock().unwrap();
+    // `op`, then PkgLength over `body`, then `body` (one or two length bytes).
+    let enclose = |op: &[u8], body: &[u8]| {
+        let length = if body.len() + 1 < 64 {
+            std::vec![(body.len() + 1) as u8]
+        } else {
+            let total = body.len() + 2;
+            std::vec![0x40 | (total & 0xf) as u8, (total >> 4) as u8]
+        };
+        [op, &length, body].concat()
+    };
+    let package = |entries: &[Vec<u8>]| {
+        let body = [&[entries.len() as u8][..], &entries.concat()].concat();
+        enclose(&[0x12], &body)
+    };
+    let pair = |key: &str, value: u8| {
+        let string = [&[0x0d][..], key.as_bytes(), &[0]].concat();
+        package(&[string, std::vec![value]]) // Zero or One
+    };
+    let uuid = |bytes: &[u8; 16]| enclose(&[0x11], &[&[0x0a, 0x10][..], bytes].concat());
+    let dsd = package(&[
+        uuid(&[0; 16]),
+        package(&[pair("IMR_VALID", 1)]),
+        uuid(&DEVICE_PROPERTIES),
+        // An entry that is not a (key, value) pair: the whole set is skipped.
+        package(&[pair("IMR_VALID", 1), std::vec![0x0a, 7]]),
+        uuid(&DEVICE_PROPERTIES),
+        package(&[pair("IMR_VALID", 0), pair("WAKE_SUPPORTED", 1)]),
+    ]);
+    // Scope (\_SB) { Device (NHI0) { Name (_DSD, ...) } }
+    let name = [&[0x08][..], b"_DSD", &dsd].concat();
+    let device = enclose(&[0x5b, 0x82], &[&b"NHI0"[..], &name].concat());
+    let scope = enclose(&[0x10], &[&b"\\_SB_"[..], &device].concat());
+    let mut dsdt = include_bytes!("fixtures/namespace.aml").to_vec();
+    dsdt.extend(scope);
+    let length = dsdt.len() as u32;
+    dsdt[4..8].copy_from_slice(&length.to_le_bytes());
+    checksum(&mut dsdt, 9);
+    let (provider, _) = fixture_dsdt(dsdt);
+    // SAFETY: test provider owns all services; singleton serialized.
+    let session = unsafe { Session::start(provider, Mode::InterpreterOnly) }.unwrap();
+    let nhi = session.handle("\\_SB.NHI0").unwrap();
+    // The first, foreign set and the malformed one are passed over.
+    assert!(matches!(
+        nhi.property("IMR_VALID"),
+        Ok(Some(Value::Integer(0)))
+    ));
+    assert!(matches!(
+        nhi.property("WAKE_SUPPORTED"),
+        Ok(Some(Value::Integer(1)))
+    ));
+    assert!(matches!(nhi.property("MISSING"), Ok(None)));
+    let ucsi = session.handle("\\_SB.UCSI").unwrap();
+    assert!(matches!(ucsi.property("IMR_VALID"), Ok(None)));
+    session.shutdown().unwrap();
+}
+
+#[test]
 fn wake_gpes_follow_prw_and_every_notification_reaches_the_global_handler() {
     let _serial = TEST_SERIAL.lock().unwrap();
     let mut dsdt = include_bytes!("fixtures/namespace.aml").to_vec();

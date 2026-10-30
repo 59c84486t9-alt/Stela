@@ -35,6 +35,10 @@ const GPE_EDGE: u32 = 0x00;
 /// `ACPI_DEVICE_NOTIFY` and `ACPI_ALL_NOTIFY`: notification values from
 /// 0x80, and every value.
 const DEVICE_NOTIFY: u32 = 2;
+/// The `_DSD` device-properties UUID, daffd814-6eba-4d8c-8a91-bc9bbf4aa301.
+const DEVICE_PROPERTIES: [u8; 16] = [
+    0x14, 0xd8, 0xff, 0xda, 0xba, 0x6e, 0x8c, 0x4d, 0x8a, 0x91, 0xbc, 0x9b, 0xbf, 0x4a, 0xa3, 0x01,
+];
 const ALL_NOTIFY: u32 = 3;
 
 /// Exact ACPICA status, without collapsing firmware errors into generic success.
@@ -1039,6 +1043,43 @@ impl<'a> Handle<'a> {
             )
             .map(Some)
         }
+    }
+    /// The `_DSD` device property `name`, as Linux's `acpi_dev_get_property`
+    /// finds it: in the first well-formed device-properties set that names
+    /// it. None when the device has no `_DSD` or no such property; a set
+    /// whose entries are not (string, value) pairs is skipped and a malformed
+    /// UUID/set pair ends the search, as `acpi_extract_properties` does.
+    pub fn property(self, name: &str) -> Result<Option<Value<'a>>, Error> {
+        if self.child("_DSD").is_err() {
+            return Ok(None);
+        }
+        let Some(Value::Package(dsd)) = self.evaluate(Some("_DSD"), &[])? else {
+            return Ok(None);
+        };
+        let mut entries = dsd.into_iter();
+        while let (Some(uuid), Some(set)) = (entries.next(), entries.next()) {
+            let (Value::Buffer(uuid), Value::Package(set)) = (uuid, set) else {
+                break;
+            };
+            if uuid != DEVICE_PROPERTIES
+                || !set.iter().all(|property| {
+                    matches!(property, Value::Package(pair)
+                        if pair.len() == 2 && matches!(pair[0], Value::String(_)))
+                })
+            {
+                continue;
+            }
+            for property in set {
+                let Value::Package(mut pair) = property else {
+                    continue;
+                };
+                let value = pair.pop();
+                if matches!(&pair[0], Value::String(key) if key == name.as_bytes()) {
+                    return Ok(value);
+                }
+            }
+        }
+        Ok(None)
     }
     /// Evaluate the specification UCSI `_DSM` with an empty package Arg3.
     pub fn dsm(
