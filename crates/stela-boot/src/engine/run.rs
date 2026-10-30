@@ -623,7 +623,7 @@ pub(super) fn beat_report<H: Host>(
         "BEAT blocks={} pc={:#x} {}{} lr={:#x} ticks/block={} native={}% \
          compiled={} discards={} evictions={} chained={}% exceptions={} interrupts={} \
          waits={} \
-         heap={}M/{}M carved={}M peak={}M largest={}M \
+         heap={}M/{}M carved={}M peak={}M largest={}M extents={} carves={} walked={} \
          shadow_peak={}M/{}M/{}M exhausted={} code_peak={}M/{}M\n",
         next.blocks,
         cpu.pc,
@@ -644,6 +644,9 @@ pub(super) fn beat_report<H: Host>(
         heap.carved >> 20,
         heap.peak >> 20,
         heap.largest >> 20,
+        heap.extents,
+        heap.carves,
+        heap.walked,
         shadow.shadow_peak[0] >> 20,
         shadow.shadow_peak[1] >> 20,
         shadow.shadow_bytes >> 20,

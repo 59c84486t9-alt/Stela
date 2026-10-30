@@ -81,6 +81,10 @@ struct State {
     /// the size-class blocks kept for reuse.
     carved: usize,
     peak: usize,
+    /// Allocations the free list served, and the free extents they passed
+    /// over before the one they took.
+    carves: u64,
+    walked: u64,
 }
 
 /// How full the heap is, in bytes.
@@ -92,6 +96,11 @@ pub struct Usage {
     pub peak: usize,
     /// The largest free extent: the most one allocation can get.
     pub largest: usize,
+    /// Free extents on the address-ordered list.
+    pub extents: usize,
+    /// Allocations the free list served, and the extents they passed over.
+    pub carves: u64,
+    pub walked: u64,
 }
 pub struct Heap {
     held: AtomicBool,
@@ -157,6 +166,8 @@ impl Heap {
                 live: 0,
                 carved: 0,
                 peak: 0,
+                carves: 0,
+                walked: 0,
             }),
         }
     }
@@ -517,7 +528,7 @@ impl Heap {
     // The caller keeps the metadata guard; CPU cache counters remain
     // relaxed estimates even while this free-list metadata is exclusively read.
     fn usage_locked(&self, state: &State) -> Usage {
-        let mut largest = 0;
+        let (mut largest, mut extents) = (0, 0);
         let mut node = state.first;
         while !node.is_null() {
             // SAFETY: a free-list node, read with the lock held.
@@ -525,6 +536,7 @@ impl Heap {
                 largest = largest.max((*node).bytes);
                 node = (*node).next;
             }
+            extents += 1;
         }
         let live = state.live.saturating_add_signed(self.cached_live());
         Usage {
@@ -533,6 +545,9 @@ impl Heap {
             carved: state.carved,
             peak: state.peak,
             largest,
+            extents,
+            carves: state.carves,
+            walked: state.walked,
         }
     }
 }
@@ -703,6 +718,7 @@ unsafe fn carve(state: &mut State, size: usize, alignment: usize) -> *mut u8 {
     let header = core::mem::size_of::<Header>();
     let alignment = alignment.max(WORD);
     let mut link = &mut state.first as *mut *mut Free;
+    state.carves += 1;
     loop {
         // SAFETY: link is State.first or a next field in its free
         // node, protected against mutation by the same heap guard.
@@ -726,6 +742,7 @@ unsafe fn carve(state: &mut State, size: usize, alignment: usize) -> *mut u8 {
             // SAFETY: the whole current node is still free and locked; its
             // next link remains live until the following iteration completes.
             link = unsafe { &mut (*node).next };
+            state.walked += 1;
             continue;
         }
         // SAFETY: the original selection proved a complete aligned fit.
