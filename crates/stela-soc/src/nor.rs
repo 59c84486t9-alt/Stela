@@ -54,12 +54,30 @@ const WRITE_ENABLE: u8 = 0x06;
 const WRITE_DISABLE: u8 = 0x04;
 const READ_ID: u8 = 0x9f;
 
-#[derive(Clone)]
+/// A command between CS edges. Copy, with its page buffer inline, so the
+/// controller checkpoints it for each transfer without allocating.
+#[derive(Clone, Copy)]
 struct Transaction {
     command: u8,
     position: usize,
     address: usize,
-    data: Vec<u8>,
+    data: [u8; PAGE_SIZE],
+    length: usize,
+}
+
+impl Transaction {
+    fn data(&self) -> &[u8] {
+        &self.data[..self.length]
+    }
+
+    fn push(&mut self, byte: u8) -> Result<()> {
+        if self.length == PAGE_SIZE {
+            return Err(refuse!("NOR program exceeds the modeled page buffer"));
+        }
+        self.data[self.length] = byte;
+        self.length += 1;
+        Ok(())
+    }
 }
 
 pub(crate) struct Checkpoint(Option<Transaction>);
@@ -97,7 +115,7 @@ impl Nor {
             .collect()
     }
     pub(crate) fn checkpoint(&self) -> Checkpoint {
-        Checkpoint(self.transaction.clone())
+        Checkpoint(self.transaction)
     }
     pub(crate) fn restore(&mut self, checkpoint: Checkpoint) {
         self.transaction = checkpoint.0;
@@ -120,10 +138,10 @@ impl Nor {
             if t.position < required {
                 return Err(refuse!("incomplete NOR command at CS rising"));
             }
-            if t.command == PROGRAM && t.data.is_empty() {
+            if t.command == PROGRAM && t.length == 0 {
                 return Err(refuse!("empty NOR page program"));
             }
-            if t.command == WRITE_STATUS && t.data != [0] {
+            if t.command == WRITE_STATUS && t.data() != [0] {
                 return Err(refuse!("NOR status protection fields are not modeled"));
             }
         }
@@ -143,7 +161,7 @@ impl Nor {
                 WRITE_DISABLE => self.enabled = false,
                 PROGRAM if self.enabled => {
                     let base = t.address & !(PAGE_SIZE - 1);
-                    for (i, byte) in t.data.into_iter().enumerate() {
+                    for (i, &byte) in t.data().iter().enumerate() {
                         let offset = (base | ((t.address + i) & (PAGE_SIZE - 1))) % CAPACITY;
                         self.image.bytes_mut()[offset] &= byte;
                         self.dirty.insert(offset / SECTOR_SIZE);
@@ -196,7 +214,8 @@ impl Nor {
                 command: byte,
                 position: 0,
                 address: 0,
-                data: Vec::new(),
+                data: [0; PAGE_SIZE],
+                length: 0,
             });
             return Ok(ERASED);
         };
@@ -222,14 +241,11 @@ impl Nor {
                 self.image.bytes()[(t.address + t.position - prefix) % CAPACITY]
             }
             PROGRAM => {
-                if t.data.len() == PAGE_SIZE {
-                    return Err(refuse!("NOR program exceeds the modeled page buffer"));
-                }
-                t.data.push(byte);
+                t.push(byte)?;
                 ERASED
             }
             WRITE_STATUS if t.position == 0 && byte == 0 => {
-                t.data.push(byte);
+                t.push(byte)?;
                 ERASED
             }
             _ => return Err(refuse!("unsupported NOR command length or status fields")),
@@ -449,5 +465,27 @@ mod tests {
         nor.select(true).unwrap();
         assert!(nor.shift(0x5a).is_err());
         assert_eq!(nor.shift(READ_ID), Ok(ERASED));
+    }
+    #[test]
+    fn a_restored_checkpoint_drops_the_program_bytes_after_it() {
+        let mut nor = Nor::new(Image::fresh());
+        command(&mut nor, &[WRITE_ENABLE]);
+        nor.select(true).unwrap();
+        for b in [PROGRAM, 0, 0, 0, 0x12] {
+            nor.shift(b).unwrap();
+        }
+        let checkpoint = nor.checkpoint();
+        nor.shift(0x34).unwrap();
+        nor.restore(checkpoint);
+        nor.shift(0x56).unwrap();
+        nor.select(false).unwrap();
+        assert_eq!(nor.image.bytes()[..3], [0x12, 0x56, ERASED]);
+        // A full page refuses its next byte.
+        command(&mut nor, &[WRITE_ENABLE]);
+        nor.select(true).unwrap();
+        for b in [PROGRAM, 0, 1, 0].into_iter().chain([0; PAGE_SIZE]) {
+            nor.shift(b).unwrap();
+        }
+        assert!(nor.shift(0).is_err());
     }
 }
