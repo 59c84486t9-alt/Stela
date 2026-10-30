@@ -134,12 +134,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
         // those read, and so validated against the stored page.
         let within =
             |compiled: &stela_compiler::block::CompiledBlock| compiled.source_bytes <= available;
+        let reading = self.host.counter();
         let stored = match variant.single {
             true => None,
             false => self
                 .stored_page(pc, physical, &source)
                 .map(|stored| (stored.key, stored.record.clone())),
         };
+        self.statistics.page_ticks += self.host.counter().wrapping_sub(reading);
         let preparation = self.preparation(variant);
         preparation.admit(&mut source);
         let context = stored
@@ -174,6 +176,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     )
                     .map(Some);
             }
+            let looking = self.host.counter();
             if let Some(compiled) = self
                 .host
                 .translations()
@@ -184,6 +187,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 }
                 if compiled.matches(key, pc, context, &source) {
                     self.statistics.shared += 1;
+                    self.statistics.shared_ticks += self.host.counter().wrapping_sub(looking);
                     return self
                         .install(
                             pc,
@@ -341,6 +345,20 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// Install `compiled`, the block at `pc` of `variant` compiled from the
     /// admitted `source`, and its thunks, and index it.
     pub(super) fn install(
+        &mut self,
+        pc: u64,
+        physical: u64,
+        variant: Variant,
+        source: &[u8],
+        compiled: recovery::CodeRecovery,
+    ) -> Result<Fetched, Stop> {
+        let started = self.host.counter();
+        let installed = self.place(pc, physical, variant, source, compiled);
+        self.statistics.install_ticks += self.host.counter().wrapping_sub(started);
+        installed
+    }
+
+    fn place(
         &mut self,
         pc: u64,
         physical: u64,

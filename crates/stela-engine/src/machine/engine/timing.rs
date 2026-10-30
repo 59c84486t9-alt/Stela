@@ -46,6 +46,15 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
     }
 
+    /// The profile clock's ticks since `since`, or none without step timing.
+    #[inline]
+    pub(super) fn timing_since(&mut self, since: u64) -> u64 {
+        match self.step_timing {
+            Some(_) => self.host.profile_ticks().wrapping_sub(since),
+            None => 0,
+        }
+    }
+
     /// Charge the ticks since `since` to `phase`; the profile clock now.
     #[inline]
     pub(super) fn timing_charge(&mut self, phase: step_timing::Phase, since: u64) -> u64 {

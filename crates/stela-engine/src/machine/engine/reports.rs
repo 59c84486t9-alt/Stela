@@ -331,6 +331,19 @@ pub struct Statistics {
     /// Blocks another thread of the process (or its ahead-of-time
     /// translation) had prepared, installed instead of compiled.
     pub shared: u64,
+    /// Counter ticks spent, for blocks not yet installed, reading, hashing
+    /// and looking up their fetch pages; finding `shared` blocks; and
+    /// installing every block.
+    pub page_ticks: u64,
+    pub shared_ticks: u64,
+    pub install_ticks: u64,
+    /// Device transfers run because their deadline came, and the devices'
+    /// interrupt lines and deadline asked anew because a cached answer
+    /// expired, with the profile clock ticks each took under step timing.
+    pub due_transfers: u64,
+    pub transfer_ticks: u64,
+    pub line_queries: u64,
+    pub line_ticks: u64,
     /// Guest instructions in `compiled`.
     pub compiled_instructions: u64,
     pub exceptions: u64,
@@ -394,6 +407,13 @@ impl core::ops::AddAssign for Statistics {
             stored,
             offered,
             shared,
+            page_ticks,
+            shared_ticks,
+            install_ticks,
+            due_transfers,
+            transfer_ticks,
+            line_queries,
+            line_ticks,
             compiled_instructions,
             exceptions,
             interrupts,
@@ -438,6 +458,13 @@ impl core::ops::AddAssign for Statistics {
             (&mut self.stored, stored),
             (&mut self.offered, offered),
             (&mut self.shared, shared),
+            (&mut self.page_ticks, page_ticks),
+            (&mut self.shared_ticks, shared_ticks),
+            (&mut self.install_ticks, install_ticks),
+            (&mut self.due_transfers, due_transfers),
+            (&mut self.transfer_ticks, transfer_ticks),
+            (&mut self.line_queries, line_queries),
+            (&mut self.line_ticks, line_ticks),
             (&mut self.compiled_instructions, compiled_instructions),
             (&mut self.exceptions, exceptions),
             (&mut self.interrupts, interrupts),

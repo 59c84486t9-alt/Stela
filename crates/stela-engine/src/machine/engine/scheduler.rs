@@ -104,10 +104,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if now >= deadline {
             // A device's asynchronous work it cannot carry out is dropped,
             // reported once.
+            let started = self.timing_start();
             if let Err(error) = self.device_transfer(now) {
                 let advance = RequirementKind::DeviceAdvance(format!("{error:?}"));
                 self.degrade(self.requirement(advance));
             }
+            self.statistics.due_transfers += 1;
+            self.statistics.transfer_ticks += self.timing_since(started);
             self.device_lines = None;
         }
         Ok(())

@@ -536,6 +536,13 @@ impl Heartbeat {
             // the interval, its waits, and the blocks it compiled and
             // installed from another PE.
             let mut shares = String::from("PES TIME idle%/spin%/sync%/waits/compiled/shared");
+            // Per PE: the interval's share compiling, reading and hashing
+            // fetch pages, finding shared blocks and installing blocks.
+            let mut fetches = String::from("PES FETCH compile%/page%/shared%/install%");
+            // Per PE: device transfers whose deadline came and device line
+            // queries, each as a count and, with `--profile`, a share of the
+            // interval.
+            let mut device_work = String::from("PES DEVICES transfers/transfer%/queries/query%");
             // Per PE with `--profile`: the interval's share in each engine
             // phase, in step timing's order.
             let mut phases = String::from("PES PHASES");
@@ -565,6 +572,20 @@ impl Heartbeat {
                     now.compiled.saturating_sub(before.compiled),
                     now.shared.saturating_sub(before.shared),
                 ));
+                fetches.push_str(&format!(
+                    " {pe}:{}/{}/{}/{}",
+                    percent(now.compile_ticks.saturating_sub(before.compile_ticks)),
+                    percent(now.page_ticks.saturating_sub(before.page_ticks)),
+                    percent(now.shared_ticks.saturating_sub(before.shared_ticks)),
+                    percent(now.install_ticks.saturating_sub(before.install_ticks)),
+                ));
+                device_work.push_str(&format!(
+                    " {pe}:{}/{}/{}/{}",
+                    now.due_transfers.saturating_sub(before.due_transfers),
+                    tsc_percent(now.transfer_ticks.saturating_sub(before.transfer_ticks)),
+                    now.line_queries.saturating_sub(before.line_queries),
+                    tsc_percent(now.line_ticks.saturating_sub(before.line_ticks)),
+                ));
                 phases.push_str(&format!(" {pe}:"));
                 for (slot, (now, before)) in now.phases.iter().zip(before.phases).enumerate() {
                     if slot > 0 {
@@ -593,6 +614,8 @@ impl Heartbeat {
             ));
             self.lock_waits = waits;
             output::arguments(format_args!("{shares}\n"));
+            output::arguments(format_args!("{fetches}\n"));
+            output::arguments(format_args!("{device_work}\n"));
             if machine.step_timing().is_some() {
                 output::arguments(format_args!("{phases}\n"));
             }
