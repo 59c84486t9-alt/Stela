@@ -1,7 +1,9 @@
 # The kernel headers the StelaGPU kext compiles against: libkern, IOKit,
-# Mach, BSD, the platform expert and the headers xnu ships beside them.
+# Mach, BSD, the platform expert and the headers xnu ships beside them, and
+# the DriverKit interfaces whose kernel headers `cargo xtask guest` generates.
 /libkern/**/*.h
 /iokit/IOKit/**/*.h
+/iokit/DriverKit/
 /osfmk/**/*.h
 /bsd/**/*.h
 /pexpert/**/*.h
