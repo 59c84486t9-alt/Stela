@@ -7,6 +7,7 @@ use crate::gpu::metal::{
     capabilities::ShaderFeatures,
     command_buffer::Segment,
     error::{Error, Result},
+    library::tests::fixture,
     nvidia::{CHIPS, Chip, PcieLink, fixture::nvk},
     shader::{
         Access, BufferUse, CompiledShader, Compiler, FunctionConstant, Interface, Patch,
@@ -413,6 +414,6 @@ pub(crate) fn device() -> TestDevice {
         location_number: 0,
     });
     let mut device = Device::new(MockBackend::new(), MockCompiler::default(), &platform).unwrap();
-    assert_eq!(device.new_library(Vec::new()), Ok(LIBRARY));
+    assert_eq!(device.new_library(fixture(false)), Ok(LIBRARY));
     device
 }

@@ -10,9 +10,10 @@
 //! goes once nothing uses it.
 use super::{BufferId, ComputePipelineId, Device, FunctionId, LibraryId, RenderPipelineId, Slab};
 use crate::gpu::metal::{
-    abi::{FunctionType, PrimitiveTopologyClass},
+    abi::{DataType, FunctionType, PrimitiveTopologyClass},
     command_buffer::{ComputePipelineState, IndirectCompute, RenderPipelineState},
     error::{Error, Result, ensure, require},
+    library::Library,
     pipeline::{
         self, ComputePipelineDescriptor, MeshRenderPipelineDescriptor, RenderPipelineDescriptor,
         RenderTargets, TessellatedVertex, TessellationDescriptor,
@@ -52,10 +53,11 @@ impl Users {
     }
 }
 
-/// `MTLLibrary`: the compiler's library.
+/// `MTLLibrary`: the compiler's library and its functions' names.
 #[derive(Debug)]
 struct LibraryObject {
     library: u64,
+    names: Vec<String>,
     users: Users,
 }
 
@@ -212,6 +214,31 @@ impl RenderObject {
     }
 }
 
+/// A value of `MTLFunctionConstantValues`: of `data_type`, its lanes
+/// packed, for the constant at an index or of a name.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConstantValue {
+    pub key: ConstantKey,
+    pub data_type: DataType,
+    pub value: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ConstantKey {
+    Index(u32),
+    Name(String),
+}
+
+impl ConstantValue {
+    pub fn at(index: u32, data_type: DataType, value: Vec<u8>) -> Self {
+        Self {
+            key: ConstantKey::Index(index),
+            data_type,
+            value,
+        }
+    }
+}
+
 /// `MTLLinkedFunctions`, the `preloadedLibraries` and the call stack depth
 /// of a pipeline stage. Every function compiles into the stage, so
 /// `binaryFunctions` join `functions`.
@@ -288,12 +315,24 @@ pub struct MeshPipelineRequest {
 impl<B: Backend, C: Compiler> Device<B, C> {
     /// `newLibraryWithData:`: keeps a Metal library for its functions.
     pub fn new_library(&mut self, data: Vec<u8>) -> Result<LibraryId> {
+        let names = Library::parse(&data)
+            .map_err(|_| Error::Invalid("Metal library"))?
+            .functions()
+            .iter()
+            .map(|function| String::from(function.name))
+            .collect();
         let library = self.compiler.add_library(data)?;
         let index = self.pipelines.libraries.insert(LibraryObject {
             library,
+            names,
             users: Users::CREATED,
         });
         Ok(LibraryId(index))
+    }
+
+    /// `functionNames`.
+    pub fn library_function_names(&self, id: LibraryId) -> Result<&[String]> {
+        Ok(&self.pipelines.libraries.get(id.0)?.names)
     }
 
     /// Ends the creator's use of a library, which goes with the last
@@ -314,33 +353,60 @@ impl<B: Backend, C: Compiler> Device<B, C> {
     }
 
     /// `newFunctionWithName:constantValues:`: reflects the function without
-    /// compiling it.
+    /// compiling it. Values of constants the function does not declare are
+    /// ignored, as one set of values often serves several functions.
     pub fn new_function(
         &mut self,
         library: LibraryId,
         entry: &str,
-        constants: Vec<(u32, Vec<u8>)>,
+        values: &[ConstantValue],
     ) -> Result<FunctionId> {
+        let kept = Kept::library(library);
+        self.pipelines.ensure_created(&kept)?;
+        let compiled = self.pipelines.library(library)?;
+        // Values set by name take their constants' indices, which the
+        // function's declarations give whatever its values.
+        let declared = if values
+            .iter()
+            .any(|value| matches!(value.key, ConstantKey::Name(_)))
+        {
+            let unspecialized = Specialization::default();
+            let reflection = self.compiler.reflect(compiled, entry, &unspecialized)?;
+            reflection.constants().to_vec()
+        } else {
+            Vec::new()
+        };
+        let indexed: Vec<(u32, &ConstantValue)> = values
+            .iter()
+            .filter_map(|value| match &value.key {
+                ConstantKey::Index(index) => Some((*index, value)),
+                ConstantKey::Name(name) => declared
+                    .iter()
+                    .find(|constant| constant.name == *name)
+                    .map(|constant| (constant.index, value)),
+            })
+            .collect();
+        ensure(
+            indexed
+                .iter()
+                .enumerate()
+                .all(|(n, (index, _))| indexed[n + 1..].iter().all(|(other, _)| other != index)),
+            "a function constant has two values",
+        )?;
+        let constants: Vec<(u32, Vec<u8>)> = indexed
+            .iter()
+            .map(|&(index, value)| (index, value.value.clone()))
+            .collect();
         let specialization = Specialization {
             constants: constants.clone(),
             ..Specialization::default()
         };
-        let kept = Kept::library(library);
-        self.pipelines.ensure_created(&kept)?;
-        let compiled = self.pipelines.library(library)?;
         let reflection = self.compiler.reflect(compiled, entry, &specialization)?;
         reflection.validate()?;
-        ensure(
-            constants
-                .iter()
-                .enumerate()
-                .all(|(n, (index, _))| constants[n + 1..].iter().all(|(other, _)| other != index)),
-            "a function constant has two values",
-        )?;
         for constant in reflection.constants() {
-            match constants.iter().find(|(index, _)| *index == constant.index) {
+            match indexed.iter().find(|(index, _)| *index == constant.index) {
                 Some((_, value)) => ensure(
-                    constant.accepts(value),
+                    value.data_type == constant.data_type && constant.accepts(&value.value),
                     "a function constant value of another type",
                 )?,
                 None => ensure(
