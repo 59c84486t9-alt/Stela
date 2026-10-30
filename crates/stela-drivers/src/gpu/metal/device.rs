@@ -19,6 +19,8 @@ use super::{
 use alloc::vec::Vec;
 
 mod execution_sets;
+#[cfg(test)]
+pub(crate) mod fixture;
 pub mod indirect;
 pub mod pipelines;
 pub mod queue;
