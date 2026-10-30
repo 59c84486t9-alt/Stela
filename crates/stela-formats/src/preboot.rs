@@ -17,13 +17,13 @@
 //! directories alike (`stela_loader::recovery`).
 use crate::{
     apfs::{
-        ApfsError, Container, FileKind, Volume,
+        ApfsError, Container, FileKind, ISC_PARTITION_TYPE, Volume,
         btree::Seal,
-        uuid_text,
+        typed_partitions, uuid_text,
         volume::{APFS_VOL_ROLE_PREBOOT, APFS_VOL_ROLE_SYSTEM, Inode},
     },
     img4,
-    payload::ReadAt,
+    payload::{ReadAt, gpt},
 };
 use alloc::{format, string::String, vec, vec::Vec};
 
@@ -42,6 +42,11 @@ pub const SYSTEM_VERSION: &str = "System/Library/CoreServices/SystemVersion.plis
 pub const CRYPTEX_SYSTEM_VERSION: &str = "cryptex1/current/SystemVersion.plist";
 /// Where the volume group keeps its active Cryptex1.
 const CRYPTEX_CURRENT: &str = "cryptex1/current";
+/// The SEP firmware on the iBootSystemContainer's iSCPreboot volume, which
+/// `seputil` loads at boot.
+const SEP_FIRMWARE: &str = "SFR/current/sep-firmware.img4";
+/// The largest SEP firmware this reads.
+const SEP_FIRMWARE_LIMIT: u64 = 64 * 1024 * 1024;
 /// A SHA-384 in hexadecimal.
 const BOOT_HASH_CHARACTERS: usize = 96;
 const PEEK_BYTES: usize = 64;
@@ -379,6 +384,29 @@ pub fn cryptex1_ticket<R: ReadAt>(
     }
     let bytes = preboot.read(device, &inode)?;
     Ok(Some((path, bytes)))
+}
+
+/// The SEP firmware image of the machine's iBootSystemContainer, with its
+/// path; `None` when `source` has no such partition or it has no image.
+pub fn sep_firmware<R: ReadAt>(source: &mut R) -> Result<Option<(String, Vec<u8>)>> {
+    let isc = gpt::Guid::parse(ISC_PARTITION_TYPE).expect("constant GUID");
+    let partitions = typed_partitions(&mut *source, isc)?.unwrap_or_default();
+    for (offset, _) in partitions {
+        let mut container = Container::open(&mut *source, offset)?;
+        let preboot = container.volume_with_role(APFS_VOL_ROLE_PREBOOT)?;
+        let device = &mut container.device;
+        let Ok(inode) = preboot.lookup(device, SEP_FIRMWARE, true) else {
+            continue;
+        };
+        if inode.size > SEP_FIRMWARE_LIMIT {
+            return Err(PrebootError::Object(format!(
+                "{SEP_FIRMWARE} is larger than SEP firmware"
+            )));
+        }
+        let path = format!("{}/{SEP_FIRMWARE}", preboot.name);
+        return Ok(Some((path, preboot.read(device, &inode)?)));
+    }
+    Ok(None)
 }
 
 /// The name of the snapshot a sealed System volume roots from: iBoot builds

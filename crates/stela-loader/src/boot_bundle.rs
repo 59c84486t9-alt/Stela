@@ -104,7 +104,8 @@ pub struct Inputs<'a> {
     pub txm: Input<'a>,
     pub device_tree: Input<'a>,
     pub static_trust_cache: Input<'a>,
-    /// Copied unchanged: SEP firmware stays an encrypted IM4P.
+    /// Copied unchanged: SEP firmware stays encrypted, an `IM4P` or, read
+    /// from an installed system, the `IMG4` `seputil` delivers.
     pub sep_firmware: Option<Input<'a>>,
     /// The identity's global (non-personalized) IM4M for the boot objects.
     pub boot_manifest: Option<Input<'a>>,

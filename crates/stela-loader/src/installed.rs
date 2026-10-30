@@ -421,7 +421,7 @@ pub struct Installed {
     pub evidence: Evidence,
 }
 
-struct Decoded {
+pub struct Decoded {
     bytes: Vec<u8>,
     source: Source,
 }
@@ -604,6 +604,7 @@ pub fn prepare<R: ReadAt>(
     container: &mut Container<R>,
     request: &Request,
     options: &Options,
+    sep_firmware: Option<&Decoded>,
 ) -> Result<Installed> {
     let model = request.model;
     let (preboot, set, evidence) = select(container, request)?;
@@ -626,7 +627,8 @@ pub fn prepare<R: ReadAt>(
         .then(|| disk.decode(b"bstc", COMPONENT_LIMIT))
         .transpose()?
         .map(|(decoded, _)| decoded);
-    let sep = disk.opaque(SEP_FIRMWARE_TYPE)?;
+    let boot_set_sep = disk.opaque(SEP_FIRMWARE_TYPE)?;
+    let sep = boot_set_sep.as_ref().or(sep_firmware);
     // The evidence already required this object and checked its signature.
     let root_hash = disk.opaque(ROOT_HASH_TYPE)?;
     let pivot_root_hash = disk.opaque(BASE_SYSTEM_ROOT_HASH_TYPE)?;
@@ -675,7 +677,7 @@ pub fn prepare<R: ReadAt>(
         txm: txm.input(),
         device_tree: device_tree.input(),
         static_trust_cache: trust_cache.input(),
-        sep_firmware: sep.as_ref().map(Decoded::input),
+        sep_firmware: sep.map(Decoded::input),
         boot_manifest: boot_manifest.as_ref().map(Decoded::input),
         cryptex1_manifest: cryptex1_manifest.as_ref().map(Decoded::input),
         extra_trust_caches: base_system_trust_cache.iter().map(Decoded::input).collect(),
@@ -755,12 +757,28 @@ pub fn prepare_disk<R: ReadAt>(
             partition = uuid_text(&volume.partition)
         );
     }
+    let sep_firmware = preboot::sep_firmware(&mut *source)
+        .within(|| refuse!("the SEP firmware"))?
+        .map(|(path, bytes)| Decoded {
+            source: Source {
+                component: "SEP firmware".into(),
+                member: path,
+                container_sha256: sha256(&bytes),
+                payload_type: "img4".into(),
+                description: "the iBootSystemContainer's SEP firmware".into(),
+                decoded_bytes: bytes.len() as u64,
+                decoded_sha256: sha256(&bytes),
+            },
+            bytes,
+        });
     let mut found = Vec::new();
     let mut failures = Vec::new();
     for (offset, _) in partitions {
         let result = Container::open(&mut *source, offset)
             .map_err(Error::from)
-            .and_then(|mut container| prepare(&mut container, request, options));
+            .and_then(|mut container| {
+                prepare(&mut container, request, options, sep_firmware.as_ref())
+            });
         match result {
             Ok(installed) => found.push((offset, installed)),
             Err(error) => failures.push(format!("container at {offset:#x}: {error:#}")),

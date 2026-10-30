@@ -96,6 +96,7 @@ pub fn prepare(path: &Path) -> Result<Preboot> {
         &mut container,
         &installed::Request::default(),
         &Options::default(),
+        None,
     )?;
     Ok(Preboot {
         path: path.to_owned(),
