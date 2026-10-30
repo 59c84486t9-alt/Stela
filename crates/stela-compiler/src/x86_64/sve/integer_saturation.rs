@@ -6,7 +6,7 @@ use crate::aarch64::{
     sve::integer_saturation::{Arithmetic, Half, Input, Kind, Operand, Signedness},
 };
 use crate::x86_64::asm::Gpr::Rax;
-use crate::x86_64::asm::{Code, Rm};
+use crate::x86_64::asm::{Code, Rm, vector_extensions};
 
 use super::super::isa::{ShiftOpcode, SimdOpcode as Host};
 
@@ -372,6 +372,7 @@ fn difference(
     element: ElementSize,
     signedness: Signedness,
     widening: Option<Half>,
+    target: TargetCpu,
 ) {
     if let Some(half) = widening {
         widen_interleaved(code, 0, element, signedness, half);
@@ -387,6 +388,14 @@ fn difference(
         binary(code, Host::MaxSignedWord, 0, 1);
         binary(code, Host::MinSignedWord, 1, 3);
         binary(code, Host::SubWord, 0, 1);
+        return;
+    }
+    let signed = signedness == Signedness::Signed;
+    if element == ElementSize::Doubleword && vector_extensions::quadword_supported(target) {
+        copy(code, 3, 0);
+        vector_extensions::quadword_extremum(code, 0, 1, signed, true, target);
+        vector_extensions::quadword_extremum(code, 1, 3, signed, false, target);
+        binary(code, Host::SubQword, 0, 1);
         return;
     }
     if signedness == Signedness::Signed {
@@ -522,7 +531,7 @@ pub(crate) fn emit(code: &mut Code, operand: Operand, length: VectorLength, targ
                 widening,
                 accumulate,
             } => {
-                difference(code, element, signedness, widening);
+                difference(code, element, signedness, widening, target);
                 if accumulate {
                     load_z_chunk(code, operand.destination, chunk, 2, length, target);
                     binary(code, arithmetic_opcode(element, false), 0, 2);

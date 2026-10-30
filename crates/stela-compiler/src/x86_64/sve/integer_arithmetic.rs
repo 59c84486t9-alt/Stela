@@ -2,9 +2,9 @@
 use crate::TargetCpu;
 use crate::aarch64::scalable::{ElementSize, Predication, VectorLength};
 use crate::aarch64::sve::integer_arithmetic::{Binary, Kind, Operand, Source};
-use crate::x86_64::asm::BitTest;
 use crate::x86_64::asm::Gpr::{Rax, Rcx, Rdx};
 use crate::x86_64::asm::{Alu, Code, Cond, Rm, Size, Unary};
+use crate::x86_64::asm::{BitTest, vector_extensions};
 use crate::x86_64::isa::{ShiftOpcode, SimdOpcode as Host};
 use crate::x86_64::scalable::{load_z_chunk, read_predicate_mask, store_z_chunk};
 
@@ -115,6 +115,11 @@ fn minmax(code: &mut Code, element: ElementSize, unsigned: bool, maximum: bool, 
         opcode.register(code, RESULT, RIGHT, target);
         return;
     }
+    if element == ElementSize::Doubleword
+        && vector_extensions::quadword_extremum(code, RESULT, RIGHT, !unsigned, maximum, target)
+    {
+        return;
+    }
     copy(code, SAVED_LEFT, RESULT);
     copy(code, SAVED_RIGHT, RIGHT);
     crate::x86_64::simd::greater(code, element.bytes() as u8, unsigned, target);
@@ -170,6 +175,12 @@ fn unary(code: &mut Code, element: ElementSize, absolute: bool, target: TargetCp
     };
     if absolute && let Some(opcode) = direct.filter(|opcode| target.supports(opcode.requires())) {
         opcode.register(code, RESULT, RESULT, target);
+        return;
+    }
+    if absolute
+        && element == ElementSize::Doubleword
+        && vector_extensions::quadword_absolute(code, RESULT, target)
+    {
         return;
     }
     if !absolute {

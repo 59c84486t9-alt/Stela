@@ -3,7 +3,7 @@ use super::isa::SimdOpcode;
 use super::isa::SimdOpcode as Host;
 use super::{MemoryChecks, memory_address, memory_writeback};
 use crate::aarch64::simd::{Comparison, IntegerOperation, Operand};
-use crate::x86_64::asm::{Code, Gpr, Mem};
+use crate::x86_64::asm::{Code, Gpr, Mem, vector_extensions};
 use alloc::vec::Vec;
 pub(in crate::x86_64) mod absolute_selection;
 mod aes;
@@ -494,7 +494,9 @@ pub(super) fn emit_after(
                             _ => unreachable!(),
                         };
                         opcode.register(code, 0, 0, target);
-                    } else {
+                    } else if lane_bytes != 8
+                        || !vector_extensions::quadword_absolute(code, 0, target)
+                    {
                         packed(code, Host::Xor, 1, 1);
                         packed(
                             code,

@@ -595,6 +595,48 @@ pub(crate) fn table(
     true
 }
 
+/// Quadword minima, maxima and absolute values need AVX-512 F and VL. The
+/// DIT profile keeps its reviewed recipe.
+pub(crate) fn quadword_supported(target: TargetCpu) -> bool {
+    target.supports(TargetCpu::Avx512f.with_avx512vl()) && !target.data_independent_timing()
+}
+
+/// EVEX.128.66.0F38.W1, unmasked.
+const QUADWORD: Evex = masked(Map::M0f38, Pp::P66, true, 0, false);
+
+/// VPMAXSQ, VPMINSQ, VPMAXUQ or VPMINUQ: each quadword of `destination`
+/// becomes the larger or smaller of it and the one in `source`.
+pub(crate) fn quadword_extremum(
+    code: &mut Code,
+    destination: u8,
+    source: u8,
+    signed: bool,
+    maximum: bool,
+    target: TargetCpu,
+) -> bool {
+    if !quadword_supported(target) {
+        return false;
+    }
+    let opcode = match (signed, maximum) {
+        (true, false) => 0x39,
+        (false, false) => 0x3b,
+        (true, true) => 0x3d,
+        (false, true) => 0x3f,
+    };
+    code.asm()
+        .evex(QUADWORD, opcode, destination, destination, Rm::Xmm(source));
+    true
+}
+
+/// VPABSQ: the absolute value of each quadword of `xmm`, in place.
+pub(crate) fn quadword_absolute(code: &mut Code, xmm: u8, target: TargetCpu) -> bool {
+    if !quadword_supported(target) {
+        return false;
+    }
+    code.asm().evex(QUADWORD, 0x1f, xmm, 0, Rm::Xmm(xmm));
+    true
+}
+
 /// AVX-512 conversions between S/D lanes and W/X integers: unsigned dwords
 /// need F and VL, quadwords DQ as well. SSE2 already converts signed dwords.
 /// The DIT profile keeps its reviewed recipe.
@@ -1337,6 +1379,80 @@ mod tests {
             )),
             [0x62, 0xf1, 0x7e, 0x08, 0x78, 0xc0]
         );
+    }
+
+    #[test]
+    fn quadword_extrema_match_gnu_encodings() {
+        let target = TargetCpu::Avx512f.with_avx512vl();
+        let mut code = Code::new();
+        assert!(!quadword_absolute(&mut code, 0, TargetCpu::Avx512f));
+        assert!(!quadword_extremum(
+            &mut code,
+            0,
+            1,
+            true,
+            true,
+            target.with_data_independent_timing()
+        ));
+        assert!(code.is_empty());
+        // GNU as: VPABSQ xmm2, xmm2; VPMINSQ, VPMINUQ, VPMAXSQ and VPMAXUQ
+        // xmm0, xmm0, xmm1.
+        assert!(quadword_absolute(&mut code, 2, target));
+        for (signed, maximum) in [(true, false), (false, false), (true, true), (false, true)] {
+            assert!(quadword_extremum(&mut code, 0, 1, signed, maximum, target));
+        }
+        assert_eq!(
+            code.into_bytes(),
+            [
+                0x62, 0xf2, 0xfd, 0x08, 0x1f, 0xd2, 0x62, 0xf2, 0xfd, 0x08, 0x39, 0xc1, 0x62, 0xf2,
+                0xfd, 0x08, 0x3b, 0xc1, 0x62, 0xf2, 0xfd, 0x08, 0x3d, 0xc1, 0x62, 0xf2, 0xfd, 0x08,
+                0x3f, 0xc1,
+            ]
+        );
+    }
+
+    #[test]
+    fn quadword_absolute_values_match_the_sse2_recipe() {
+        use crate::{GuestAddress, GuestState, context::ExecutionContext};
+        use alloc::vec::Vec;
+        use execution::Native;
+        let candidate = TargetCpu::X86_64_V3.with_avx512f().with_avx512vl();
+        if !TargetCpu::detect().supports(candidate) {
+            return;
+        }
+        let mut random = 0x9e37_79b9_7f4a_7c15_u64;
+        // ABS V3.2D, V1.2D and ABS D3, D1.
+        for word in [0x4ee0_b823u32, 0x5ee0_b823] {
+            let source: Vec<u8> = [word, 0xd65f03c0]
+                .into_iter()
+                .flat_map(u32::to_le_bytes)
+                .collect();
+            let compile = |target| {
+                crate::testing::leaf_for(&source, GuestAddress(0x1000), target)
+                    .unwrap()
+                    .x86_64_code
+            };
+            let baseline = compile(TargetCpu::X86_64_V3);
+            let extended = compile(candidate);
+            assert_ne!(baseline, extended, "{word:#010x} uses VPABSQ");
+            let [baseline, extended] = [&baseline, &extended].map(|code| Native::new(code));
+            for sample in 0..32 {
+                let mut state = GuestState::default();
+                for vector in &mut state.v {
+                    for limb in vector {
+                        random ^= random << 13;
+                        random ^= random >> 7;
+                        random ^= random << 17;
+                        *limb = random;
+                    }
+                }
+                state.v[1][sample % 2] = [0, i64::MIN as u64, u64::MAX][sample % 3];
+                let mut expected = state.clone();
+                baseline.run(&mut expected, &mut ExecutionContext::default());
+                extended.run(&mut state, &mut ExecutionContext::default());
+                assert_eq!(state, expected, "{word:#010x} sample={sample}");
+            }
+        }
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! Streaming SVE and SME extension recipes (VNNI byte dots, GFNI byte and
-//! AVX-512 quadword shifts, AVX-512 integer conversions and table
-//! permutes), compared with the reviewed SSE recipes on random Z, P, ZA and
-//! selector state.
+//! AVX-512 quadword shifts, AVX-512 integer conversions, table permutes and
+//! quadword extrema), compared with the reviewed SSE recipes on random Z, P,
+//! ZA and selector state.
 use super::execution::Native;
 use crate::aarch64::floating::features::NumericalFeatures;
 use crate::aarch64::scalable::{
@@ -363,5 +363,42 @@ fn streaming_table_lookups_match_the_baseline_recipes() {
         &[TargetCpu::X86_64_V4.with_avx512vbmi()],
         Values::Indices,
         |word, svl| !two_registers(word) || svl < 64,
+    );
+}
+
+/// llvm-mc encodings of quadword SMAX, SMIN, UMAX and UMIN by vector, SMAX
+/// and UMIN by immediate; ABS; SABD, UABD, SABA and UABA; SMAXV, UMINV, SMINV
+/// and UMAXV; SMAXQV and UMINQV; SCLAMP and UCLAMP.
+const QUADWORDS: [u32; 19] = [
+    0x04c8_04a3,
+    0x04ca_04a3,
+    0x04c9_04a3,
+    0x04cb_04a3,
+    0x25e8_df23,
+    0x25eb_d903,
+    0x04d6_a4a3,
+    0x04cc_04a3,
+    0x04cd_04a3,
+    0x45c5_f883,
+    0x45c5_fc83,
+    0x04c8_24a3,
+    0x04cb_24a3,
+    0x04ca_24a3,
+    0x04c9_24a3,
+    0x04cc_24a3,
+    0x04cf_24a3,
+    0x44c5_c083,
+    0x44c5_c483,
+];
+
+#[test]
+fn streaming_quadword_extrema_match_the_sse_recipes() {
+    // One chunk of SMAXQV or UMINQV is already the result.
+    let segment_reductions = [0x04cc_24a3, 0x04cf_24a3];
+    compare(
+        &QUADWORDS,
+        &[TargetCpu::X86_64_V3.with_avx512f().with_avx512vl()],
+        Values::Bits,
+        |word, svl| svl > 16 || !segment_reductions.contains(&word),
     );
 }
