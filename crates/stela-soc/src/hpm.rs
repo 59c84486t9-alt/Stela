@@ -35,6 +35,7 @@ use super::{
 const VENDOR: u8 = 0x00;
 const DEVICE: u8 = 0x01;
 const MODE: u8 = 0x03;
+const TYPE: u8 = 0x04;
 const UID: u8 = 0x05;
 const COMMAND: u8 = 0x08;
 const DATA: u8 = 0x09;
@@ -100,7 +101,10 @@ const DATA_UFP: u32 = 1 << 7;
 ///
 /// Header+0x48 and +0x4c hold the application configuration's offset from
 /// the header and its size (0x800, 0x1fd). The configuration starts with
-/// version 1 and the same size, a board tag ("J473") and, at +0x18, the
+/// version 1 and the same size; its byte 8 (0x0a) is the customer version,
+/// which the flasher takes from there as `appConfigVersion`
+/// (`getAceHeaderOffset` 0x155c..0x159c) and compares with the running die's
+/// (register 0x2c). Then come a board tag ("J473") and, at +0x18, the
 /// offset of its register records (0x3a, after the board strings). Each
 /// record is `[register][length - 1][length bytes]` with ascending
 /// registers; the first non-ascending register ends the run. The layout is
@@ -116,6 +120,7 @@ const DATA_UFP: u32 = 1 << 7;
 pub struct Firmware {
     pub device: u32,
     pub version: u32,
+    pub customer_version: u8,
     pub config: Vec<(u8, Vec<u8>)>,
 }
 impl Firmware {
@@ -188,6 +193,7 @@ impl Firmware {
         Ok(Self {
             device,
             version,
+            customer_version: config[8],
             config: records,
         })
     }
@@ -306,6 +312,13 @@ impl Hpm {
                 data[..4].copy_from_slice(b"APP ");
                 4
             }
+            // The interface the bus reaches: the restore flasher accepts
+            // only "I2C " before it treats the die as an Ace2
+            // (`-[iecsUpdater flash:andErrorResponse:]` 0x1f7c..0x1fac).
+            TYPE => {
+                data[..4].copy_from_slice(b"I2C ");
+                4
+            }
             VERSION => {
                 data[..4].copy_from_slice(&self.firmware.version.to_le_bytes());
                 4
@@ -322,7 +335,14 @@ impl Hpm {
                 1
             }
             BOOT_FLAGS => MAX_DATA,
-            REVISION => 1,
+            // Silicon revision 0, which the class-10 driver reads alone, then
+            // the running firmware's customer version: the flasher reads both
+            // as one big-endian version (0x22f4..0x2340) and installs an image
+            // only when its version or customer version is newer.
+            REVISION => {
+                data[1] = self.firmware.customer_version;
+                2
+            }
             DATA_CONTROL => {
                 data[..4].copy_from_slice(&self.data_control);
                 4
@@ -607,6 +627,7 @@ mod tests {
         Firmware {
             device: 0x00cd3218,
             version: 0x00216300,
+            customer_version: 0x0a,
             config: alloc::vec![(CONFIG, config), (TX_IDENTITY, alloc::vec![6, 0xac, 5])],
         }
     }
@@ -645,6 +666,7 @@ mod tests {
             word(&mut image, at + 0x48, 0x80);
             word(&mut image, at + 0x4c, 0x70);
             image[at + 0x80..at + 0x84].copy_from_slice(&[1, 0, 0x70, 0]);
+            image[at + 0x88] = firmware.customer_version;
             image[at + 0x98] = 0x1a;
             let mut records = alloc::vec![CONFIG, 62];
             records.extend_from_slice(&firmware.config[0].1);
@@ -787,7 +809,8 @@ mod tests {
         let mut h = Hpm::new(Port::new(), identity(), 0x3f);
         let uid = read(&mut h, UID, 16);
         assert_eq!((&uid[..14], uid[15]), (&b"Stela HPM die "[..], 0x3f));
-        assert_eq!(read(&mut h, REVISION, 1), [0]);
+        assert_eq!(read(&mut h, TYPE, 4), b"I2C ");
+        assert_eq!(read(&mut h, REVISION, 2), [0, 0x0a]);
         assert_eq!(read(&mut h, BOOT_FLAGS, 64), [0; 64]);
         assert_eq!(read(&mut h, CONFIG, 63)[62] & 0x60, 0x60);
         let identity = read(&mut h, TX_IDENTITY, 49);
