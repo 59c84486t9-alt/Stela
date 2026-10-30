@@ -165,8 +165,13 @@ impl AppleDevices {
                     .as_deref()
                     .ok_or(refuse!("HPM names no firmware"))?,
             );
-            let image = firmware(&name)
-                .ok_or_else(|| refuse!("board firmware {name} was not supplied", name))?;
+            let image = firmware(&name).ok_or_else(|| {
+                refuse!(
+                    "board firmware {name} is in neither the boot bundle nor the board's flash, \
+                     which an install fills",
+                    name
+                )
+            })?;
             let die = Firmware::from_image(image).within(|| refuse!("{name}", name))?;
             let port = self.typec_port(target.port.ok_or(refuse!("HPM has no port number"))?);
             let pin = target

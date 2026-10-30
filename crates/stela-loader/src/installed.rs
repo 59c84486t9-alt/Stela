@@ -644,7 +644,7 @@ pub fn prepare<R: ReadAt>(
         cryptex1_manifest: None,
         extra_trust_caches: Vec::new(),
         ramdisk: None,
-        // Board device firmware is not yet read from the System volume.
+        // The installed volumes hold none: the engine reads the board's flash.
         board_firmware: Vec::new(),
         root_hash: Some(RootHash {
             volume: SealedVolume::System,
