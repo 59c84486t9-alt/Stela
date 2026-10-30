@@ -6,7 +6,7 @@
 // dmar_disable_qi, iommu_disable_irq_remapping) at commit
 // a804c5742bff224d4cb4d25dd383554d598be32b, and drivers/iommu/amd/init.c
 // (iommu_disable) at commit cc9de5d4b5ab6459f5774946aa3195ad51236fa8. Source
-// hashes and license terms: crates/stela-drivers/src/platform/THIRD_PARTY.md
+// hashes and license terms: crates/stela-driver-base/src/platform/THIRD_PARTY.md
 // and LICENSES/GPL-2.0-only.txt.
 //! IOMMU state the firmware leaves on at ExitBootServices. VT-d translation,
 //! queued invalidation and interrupt remapping, and AMD-Vi translation and

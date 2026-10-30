@@ -59,7 +59,7 @@ def main():
     parser.add_argument("--common-archive", type=Path)
     args = parser.parse_args()
     linux = ROOT / "third_party/linux"
-    compat = ROOT / "crates/stela-drivers/src/gpu/compat/linux"
+    compat = ROOT / "crates/stela-driver-gpu/src/compat/linux"
     head = command(["git", "rev-parse", "HEAD"], linux).strip()
     subprocess.run(["git", "merge-base", "--is-ancestor", PIN, head], cwd=linux, check=True)
     subprocess.run(["git", "diff", "--quiet", "HEAD"], cwd=linux, check=True)

@@ -1,0 +1,34 @@
+[package]
+name = "stela-driver-net"
+version.workspace = true
+edition.workspace = true
+# Original Stela code is MIT; Linux-derived adapter code retains its GPL/ISC
+# notices, and the Intel Wi-Fi ports also retain their BSD terms.
+license = "MIT AND BSD-3-Clause AND GPL-2.0-only AND GPL-2.0-or-later AND BSD-3-Clause-Clear AND ISC"
+
+[lints]
+workspace = true
+
+[features]
+native-acpi = ["stela-driver-base/native-acpi"]
+
+[dependencies]
+stela-driver-base = { path = "../stela-driver-base" }
+stela-driver-core = { path = "../stela-driver-core" }
+# SHA-1, SHA-256 and AES (key wrap, BIP-CMAC/GMAC); expanded keys clear on retirement.
+stela-crypto = { path = "../stela-crypto" }
+# WPA2-Personal: PBKDF2/PRF/MIC over HMAC-SHA1 and HMAC-SHA256.
+hmac = { version = "0.12", default-features = false }
+# WPA3-Personal: SAE over P-256, hash-to-element through its simplified SWU map.
+p256 = { version = "0.13", default-features = false, features = ["arithmetic", "expose-field", "hash2curve"] }
+# Cryptographic MIC comparison retains an explicit optimization barrier.
+subtle = { version = "2.6", default-features = false }
+# Retained source GTK/IGTK batch material must clear after actual retirement.
+zeroize = { version = "1.9", default-features = false, features = ["alloc"] }
+triomphe = { version = "=0.1.16", default-features = false }
+
+[dev-dependencies]
+stela-driver-base = { path = "../stela-driver-base", features = ["test-support"] }
+# Independent SHA-256 and AES the tests check fixtures and ciphers against.
+sha2 = { version = "0.10", default-features = false }
+aes = { version = "0.8", default-features = false }

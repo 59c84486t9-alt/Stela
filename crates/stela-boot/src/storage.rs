@@ -20,7 +20,7 @@ use crate::{output, paging::Tables};
 use alloc::{sync::Arc, vec::Vec};
 use core::time::Duration;
 use stela_drivers::{
-    Clock, Handoff,
+    Clock, Handoff, PlatformCaptures,
     block::BlockDevice,
     bus::{dma::RegionAllocator, pci},
     probe::probe,
@@ -49,12 +49,22 @@ const CHECK_BYTES: usize = 1024 * 1024 + 3 * 4096;
 
 pub struct Prepared {
     handoff: Handoff,
+    captures: PlatformCaptures,
     open: Vec<Target>,
     check: Vec<Target>,
     #[cfg(feature = "diagnostics")]
     usb_reset_check: bool,
     #[cfg(feature = "diagnostics")]
     usb_media_check: bool,
+}
+
+/// The board captures the drivers read after ExitBootServices, taken while
+/// firmware variables are reachable; `wifi` comes from the loader's files.
+pub fn captures(wifi: stela_drivers::net::wifi::intel::platform::Observations) -> PlatformCaptures {
+    PlatformCaptures {
+        bluetooth: bluetooth_platform::capture(),
+        wifi,
+    }
 }
 
 pub fn rsdp() -> Option<u64> {
@@ -71,7 +81,7 @@ pub fn rsdp() -> Option<u64> {
 pub fn prepare(
     options: &[u8],
     firmware: Option<Arc<stela_drivers::firmware::Catalog>>,
-    wifi_platform: stela_drivers::net::wifi::intel::platform::Observations,
+    captures: PlatformCaptures,
 ) -> Result<Option<Prepared>> {
     let text = core::str::from_utf8(options).map_err(|_| refuse!("stela.cfg is not UTF-8"))?;
     let (open, check, _) = split(text)?;
@@ -86,9 +96,9 @@ pub fn prepare(
     }
     let mut handoff = discover()?;
     handoff.firmware = firmware;
-    handoff.wifi_platform = wifi_platform;
     Ok(Some(Prepared {
         handoff,
+        captures,
         open,
         check,
         #[cfg(feature = "diagnostics")]
@@ -283,8 +293,6 @@ pub fn discover() -> Result<Handoff> {
 
     Ok(Handoff {
         firmware: None,
-        bluetooth_platform: bluetooth_platform::capture(),
-        wifi_platform: Default::default(),
         completion: None,
         ecam,
         mapped,
@@ -327,11 +335,11 @@ impl Prepared {
             }
         } else {
             // SAFETY: this handoff describes the running machine and its tables.
-            unsafe { probe(&self.handoff, &mut dma) }
+            unsafe { probe(&self.handoff, self.captures, &mut dma) }
         };
         #[cfg(not(feature = "diagnostics"))]
         // SAFETY: this handoff describes the running machine and its tables.
-        let mut devices = unsafe { probe(&self.handoff, &mut dma) };
+        let mut devices = unsafe { probe(&self.handoff, self.captures, &mut dma) };
         for window in &devices.unmapped {
             output::arguments(format_args!("STORAGE UNMAPPED ecam={window:x?}\n"));
         }

@@ -6,7 +6,8 @@ use crate::bus::{
     dma::{mapping::DmaDomain, memory::PageSource},
     mmio::owned::{self, Mapping},
     pci::{
-        Address, Bar,
+        Address, Bar, Function,
+        owned::OwnedConfig,
         requester::{ClaimError, RequesterBinding, StoppedRequester},
     },
 };
@@ -44,7 +45,8 @@ impl fmt::Display for ServiceError {
 /// Implementations transfer ownership: each claimed requester is the unique
 /// owner of its function's configuration space, with its engines, DMA and
 /// interrupts stopped and drained, as [`StoppedRequester::from_stopped_pci`]
-/// requires. Each mapping covers exactly the requested BAR, uncached and
+/// requires. Each bridge is the unique owner of its configuration space,
+/// left forwarding. Each mapping covers exactly the requested BAR, uncached and
 /// read/write, with no other accessor. Each domain meets the [`DmaDomain`]
 /// contract for its kind. Every
 /// returned owner stays valid in every access context `probe`'s drivers use.
@@ -56,6 +58,11 @@ pub unsafe trait NativeServices {
     /// Claim the function at `address` as a stopped requester through an owned
     /// mapping of its configuration space.
     fn claim_stopped(&self, address: Address) -> Result<StoppedRequester, ServiceError>;
+
+    /// The PCI-to-PCI bridge at `address` through an owned mapping of its
+    /// configuration space, left forwarding, for a driver that sets its
+    /// link's upstream end as Linux's ASPM core does through `bus->self`.
+    fn bridge(&self, address: Address) -> Result<Function<OwnedConfig>, ServiceError>;
 
     /// Map memory BAR `bar` of the function at `address` for its driver.
     fn map_bar(&self, address: Address, bar: Bar) -> Result<Mapping, ServiceError>;
@@ -177,6 +184,10 @@ pub(crate) mod tests {
     // SAFETY: every request is refused; no owner is transferred.
     unsafe impl NativeServices for Refusing {
         fn claim_stopped(&self, address: Address) -> Result<StoppedRequester, ServiceError> {
+            self.requests.borrow_mut().push(address);
+            Err(ServiceError::Unavailable)
+        }
+        fn bridge(&self, address: Address) -> Result<Function<OwnedConfig>, ServiceError> {
             self.requests.borrow_mut().push(address);
             Err(ServiceError::Unavailable)
         }

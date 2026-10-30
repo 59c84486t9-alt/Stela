@@ -32,12 +32,17 @@ impl Chip {
                 "source Broadcom PCI network-other Function",
             ));
         }
-        match identity.device {
-            0x5fa0 => Ok(Self::Bcm4377),
-            0x5f69 => Ok(Self::Bcm4378),
-            0x5f71 => Ok(Self::Bcm4387),
-            0x5f72 => Ok(Self::Bcm4388),
-            _ => Err(Error::Unsupported("source Broadcom PCIe device ID")),
+        Self::of_device(identity.device).ok_or(Error::Unsupported("source Broadcom PCIe device ID"))
+    }
+    /// The chip a Broadcom device ID names, as `bcm4377_devid_table` lists
+    /// them.
+    pub fn of_device(device: u16) -> Option<Self> {
+        match device {
+            0x5fa0 => Some(Self::Bcm4377),
+            0x5f69 => Some(Self::Bcm4378),
+            0x5f71 => Some(Self::Bcm4387),
+            0x5f72 => Some(Self::Bcm4388),
+            _ => None,
         }
     }
     pub fn number(self) -> u16 {

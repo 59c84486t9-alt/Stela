@@ -16,7 +16,7 @@ use crate::bus::{
         msi::MsiConfigSpace,
         owned::{
             OwnedConfig,
-            tests::{Counters, fixture},
+            test_support::{Counters, fixture},
         },
     },
 };

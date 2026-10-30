@@ -1805,7 +1805,10 @@ fn start_platform(handoff: &'static Handoff, host_owner: &mut host::HostOwner) -
 /// The network `--wifi` names, with the secret of the key file the loader
 /// read, whose bytes are wiped here. A file it cannot use is reported once,
 /// without its contents, and no network is joined.
-fn wifi_network(handoff: &Handoff, options: &Options) -> Option<stela_drivers::probe::WifiConfig> {
+fn wifi_network(
+    handoff: &Handoff,
+    options: &Options,
+) -> Option<stela_drivers::net::wifi::network::Network> {
     let ssid = options.ssid.as_ref()?;
     let path = options
         .wifi_key
@@ -1826,7 +1829,7 @@ fn wifi_network(handoff: &Handoff, options: &Options) -> Option<stela_drivers::p
             bytes,
         )
     };
-    let secret = stela_drivers::probe::WifiSecret::parse(key);
+    let secret = stela_drivers::net::wifi::network::Secret::parse(key);
     for byte in key.iter_mut() {
         // SAFETY: a byte of the key, which nothing else reads.
         unsafe { core::ptr::write_volatile(byte, 0) };
@@ -1844,7 +1847,7 @@ fn wifi_network(handoff: &Handoff, options: &Options) -> Option<stela_drivers::p
         .wifi_country
         .as_deref()
         .and_then(|code| code.as_bytes().try_into().ok());
-    Some(stela_drivers::probe::WifiConfig {
+    Some(stela_drivers::net::wifi::network::Network {
         ssid: ssid.as_bytes().to_vec(),
         secret,
         country,
@@ -1950,6 +1953,7 @@ fn start_devices(
             let heap = handoff.heap.physical..handoff.heap.physical + handoff.heap.bytes;
             let tsc_hz = handoff.tsc_hz;
             let host_clock = storage_handoff.clock;
+            let captures = handoff.storage.captures;
             let mmio = *native_mmio;
             let medium_partition = options.install_source;
             let log_partition = handoff.log_partition.map(Guid);
@@ -1965,21 +1969,22 @@ fn start_devices(
                 unsafe {
                     storage::open(
                         &storage_handoff,
+                        captures,
                         root,
                         native
                             .as_ref()
                             .map(|native| native as &dyn stela_drivers::probe::NativeServices),
-                        &storage::Partitions {
+                        &storage::Selection {
                             targets: &targets,
                             medium: medium_partition,
                             preboot: owned_preboot.as_ref(),
                             store: translation_store,
                             log: log_partition,
                             fdr: fdr_partition,
+                            usb_disks: &owned_usb,
+                            wifi: owned_wifi.as_ref(),
+                            external,
                         },
-                        &owned_usb,
-                        owned_wifi.as_ref(),
-                        external,
                     )
                 }
             });

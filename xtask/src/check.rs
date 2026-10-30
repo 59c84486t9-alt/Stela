@@ -59,15 +59,20 @@ pub fn run(fix: bool) -> Result<()> {
         uefi(["-p", "stela-boot-core", "--features", "native-acpi"]),
         uefi(BOOT),
         uefi([BOOT[0], BOOT[1], "--features", "diagnostics"]),
+        uefi(["-p", "stela-driver-base", "--features", "native-acpi"]),
+        uefi(["-p", "stela-driver-net", "--features", "native-acpi"]),
+        uefi(["-p", "stela-driver-storage"]),
+        uefi(["-p", "stela-driver-audio"]),
         // Native GPU hooks are optional while their larger vendor ports are
         // in progress, but their C/Rust ABI and UEFI target still belong to
         // the gate.
         uefi([
             "-p",
-            "stela-drivers",
+            "stela-driver-gpu",
             "--features",
             "nvidia-port,intel-port,amd-port",
         ]),
+        uefi(["-p", "stela-drivers", "--features", "native-acpi"]),
     ];
     boot_lane.extend(CROSS.map(|(target, packages)| {
         let mut clippy = command(["clippy", "--all-targets", "--locked"]);

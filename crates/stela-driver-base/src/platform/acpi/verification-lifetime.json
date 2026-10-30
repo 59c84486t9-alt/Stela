@@ -1,0 +1,118 @@
+{
+  "target": "Native x86-64 Stela ACPICA lifetime safety for translated ARM64 macOS",
+  "base_commit": "cb7813c0b191bc4ddea71c0d2f673244d0e56efb",
+  "original_verification": "verification.json retained unchanged as initial evidence",
+  "native_services_abi_bytes": 280,
+  "fatal_offset": 272,
+  "destroy_offset": 264,
+  "source": [
+    {
+      "path": "crates/stela-driver-base/src/platform/acpi.rs",
+      "bytes": 64675,
+      "sha256": "2fa6779e34fb75dc071b945d0299c1e9bddb6be3d0cf779d6562876f13d8a766"
+    },
+    {
+      "path": "crates/stela-driver-base/src/platform/acpi/bridge.c",
+      "bytes": 15180,
+      "sha256": "5902c06f1346e57e054ecfdc6bd6c4de660cd48133dbcc1d0094c5e9b8aea9a2"
+    },
+    {
+      "path": "crates/stela-driver-base/src/platform/acpi/bridge.h",
+      "bytes": 2693,
+      "sha256": "8357ed2996547d54176e92a2c42e030525a7d075354d6f03c66bba6876cc1400"
+    },
+    {
+      "path": "crates/stela-driver-base/src/platform/acpi/README.md",
+      "bytes": 10641,
+      "sha256": "408a2b610b3e476e52cf8ea6b827c8fd610acb4a25c1760448b19ede4e64d715"
+    },
+    {
+      "path": "crates/stela-driver-base/src/platform/acpi/sources.json",
+      "bytes": 68208,
+      "sha256": "8a0aa0496e9b581728f61ed3a0f62fabf1ae0b631f9bee9c46cf5f2fdd2909bf"
+    },
+    {
+      "path": "crates/stela-driver-base/src/platform/acpi/fixtures/dynamic.aml",
+      "bytes": 151,
+      "sha256": "65aa51c581004ed49530f02a253c4532ad896ae92eac63410d270128c83fcd5e"
+    },
+    {
+      "path": "crates/stela-driver-base/src/platform/acpi/fixtures/dynamic-host.asl",
+      "bytes": 329,
+      "sha256": "73195a054d2af0e70f95c8c808a8fe09c7a72b4e45b05072f97936ee67805495"
+    },
+    {
+      "path": "crates/stela-driver-base/src/platform/acpi/fixtures/dynamic-host.aml",
+      "bytes": 102,
+      "sha256": "cc86a10deb67d194c9160914d9304c83c15ca412ae92cfbb1b679a0096cb5fa7"
+    },
+    {
+      "path": "crates/stela-driver-base/src/platform/acpi/fixtures/dynamic.asl",
+      "bytes": 524,
+      "sha256": "00604cbccd0bbd293ff21d504778718e7049d93ebc5f00b435a0e50db24e3e41"
+    }
+  ],
+  "gates": {
+    "driver_tests": 382,
+    "ignored": 8,
+    "compile_fail_docs": 1,
+    "actual_acpica_tests": 2,
+    "asan_ubsan_acpica_tests": 2,
+    "fmt": "pass",
+    "strict_hosted": "pass",
+    "strict_uefi": "pass",
+    "pinned_source_verification": "203 unchanged/adapted-source-license entries,162 interpreter units,6 authoredfixtureinputs"
+  },
+  "logs": [
+    {
+      "path": ".stela/acpi-root-final-fmt.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": ".stela/acpi-root-full-tests.log",
+      "bytes": 42616,
+      "sha256": "8f3d2e078b487d5427627aed3e46057902ef4bb234a31ec07c0bf88ad24c4ab2"
+    },
+    {
+      "path": ".stela/acpi-root-clippy.log",
+      "bytes": 431,
+      "sha256": "459af378b749a386e5ece9436bf1d836879dae4307870e53532980c519ebd7bc"
+    },
+    {
+      "path": ".stela/acpi-root-uefi-clippy.log",
+      "bytes": 465,
+      "sha256": "6bdc048182b17b3dfa1e20e37dad2e69f8310a51c1b6ffaad6ec1f1807183fde"
+    },
+    {
+      "path": ".stela/acpi-root-full-sanitize.log",
+      "bytes": 4994,
+      "sha256": "a6e37f2d2e06656a33f7f6251e62ed74d21b0e047342e2b63c8f7b76b0f2a047"
+    },
+    {
+      "path": ".stela/acpi-root-source-verification.log",
+      "bytes": 90,
+      "sha256": "3450775e0210c869d7bbf06cfa35c0a5e86da1d63064044e5e2c465f9a299103"
+    }
+  ],
+  "coverage": [
+    "Actual dynamic AML Load creates SSDT namespace and retained package Name reference",
+    "Pinned AML Unload direct/nested reports AE_AML_OPERAND_TYPE; real Load returns integer not oldDDBhandle",
+    "Actual native acpi_unload_parent_table invoked at idle deletes real node; no coremodification",
+    "Real namespace reader leases and locked nodebinding; stale handles/references/Notify removal refuse without dereference",
+    "Purge actual coreobjectcache then ASan/UBSan staleoperations; callbackcontext retained until realquiescenttermination",
+    "Mandatory nonreturning fatal on predeletequiescefailure verified childexit86"
+  ],
+  "limits": [
+    "Native provider must invoke native deletion outside active AMLframes/interpreter callbacks; no safe deletion API exposed",
+    "Fullsession namespace rebinding after deletion unimplemented",
+    "Native SCI/regions/deferredwork/IRQallocation provider and actualbootattachment remain unimplemented",
+    "No physicalhost firmware validation and no UEFIexecution claim for thislifetimeleaf",
+    "Previous UEFIlinkedABI proof applies only to initialverification; changedABI compiled strictUEFI and checked actualC/Rust layout hosted"
+  ],
+  "generator": {
+    "iasl_commit": "e80cbd7b52de20aa8c75bfba9845e9cb61f2e681",
+    "version": "20240827",
+    "authored_fixtures_license": "MIT"
+  }
+}

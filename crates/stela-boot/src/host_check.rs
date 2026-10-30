@@ -52,7 +52,7 @@ use core::{
 use stela_boot_core::options::HostCheck;
 use stela_contracts::refuse;
 use stela_drivers::{
-    Handoff,
+    Handoff, PlatformCaptures,
     block::{BlockDevice, Shared, Transport},
     bus::dma::RegionAllocator,
     input::{Input, InputDevice},
@@ -177,6 +177,8 @@ struct Machine {
     timing: Timing,
     screen: Option<Framebuffer>,
     storage: Option<Handoff>,
+    /// Board captures for the storage probe; Wi-Fi files are not read here.
+    captures: PlatformCaptures,
     power: Option<HostPower>,
     apic_base: u64,
     stack_top: usize,
@@ -247,6 +249,7 @@ fn prepare(options: &[u8]) -> Result<(Machine, paging::Tables)> {
         options,
         screen: Framebuffer::from_firmware(),
         storage: None,
+        captures: storage::captures(Default::default()),
         power: crate::system::host_power(),
         apic_base: apic::base_msr(),
         stack_top: 0,
@@ -488,7 +491,7 @@ fn disks(machine: &mut Machine, handoff: &Handoff) -> Vec<InputDevice> {
     // SAFETY: one CPU after ExitBootServices; `dma` was reserved for this.
     let mut dma = unsafe { RegionAllocator::new(handoff.dma.clone()) };
     // SAFETY: this handoff describes the running machine and its tables.
-    let mut devices = unsafe { probe(handoff, &mut dma) };
+    let mut devices = unsafe { probe(handoff, machine.captures, &mut dma) };
     for window in &devices.unmapped {
         output::arguments(format_args!("STORAGE UNMAPPED ecam={window:x?}\n"));
     }

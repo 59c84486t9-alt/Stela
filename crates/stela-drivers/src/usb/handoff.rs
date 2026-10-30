@@ -9,6 +9,7 @@
 //! register (UHCI), turns its SMIs off, and halts it with its interrupts
 //! masked. Firmware that does not let go in time loses the controller anyway,
 //! as in Linux; the result records that.
+use crate::bus::pci::regs;
 use crate::{
     Clock, Handoff,
     bus::{
@@ -17,10 +18,6 @@ use crate::{
     },
 };
 use core::fmt;
-
-const COMMAND: u16 = 4;
-const COMMAND_IO: u16 = 1;
-const COMMAND_MEMORY: u16 = 2;
 
 /// The USB host controller interfaces, by PCI programming interface.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -182,7 +179,7 @@ pub unsafe fn early<C: ConfigSpace>(
     let clock = handoff.clock;
     let bars = function.bars();
     let config = function.config();
-    let command = config.read16(COMMAND);
+    let command = config.read16(regs::COMMAND);
     if command == u16::MAX {
         return Some(Err(Error::Removed));
     }
@@ -192,12 +189,12 @@ pub unsafe fn early<C: ConfigSpace>(
             _ => None,
         });
         port.ok_or(Error::NoRegisters).map(|port| {
-            config.write16(COMMAND, command | COMMAND_IO);
+            config.write16(regs::COMMAND, command | regs::COMMAND_IO);
             uhci(config, &mut Ports(port), clock)
         })
     } else {
         memory(&bars, handoff).map(|(mut mmio, bytes)| {
-            config.write16(COMMAND, command | COMMAND_MEMORY);
+            config.write16(regs::COMMAND, command | regs::COMMAND_MEMORY);
             match kind {
                 Kind::Ohci => ohci(&mut mmio, bytes, clock),
                 Kind::Ehci => ehci(config, &mut mmio, bytes, clock),
@@ -205,7 +202,7 @@ pub unsafe fn early<C: ConfigSpace>(
             }
         })
     };
-    config.write16(COMMAND, command);
+    config.write16(regs::COMMAND, command);
     Some(result.and_then(|handed| handed))
 }
 

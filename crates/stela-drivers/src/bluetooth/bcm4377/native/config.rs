@@ -5,12 +5,9 @@
 // include/uapi/linux/pci_regs.h. See ../../THIRD_PARTY.md.
 //! Supported endpoint FLR, D0 and native command/control writes.
 use super::{Configuration, Error, Time};
+use crate::bus::pci::regs;
 use crate::bus::pci::{CapabilityError, ConfigSpace, Function, Layout as Extent, msi::MsiError};
 
-const COMMAND: u16 = 4;
-const MEMORY: u16 = 2;
-const BUS_MASTER: u16 = 4;
-const INTX_DISABLE: u16 = 1 << 10;
 const FLR_SUPPORTED: u32 = 1 << 28;
 const INITIATE_FLR: u16 = 1 << 15;
 const TRANSACTION_PENDING: u16 = 1 << 5;
@@ -65,13 +62,16 @@ impl Layout {
         let expected = u32::from(f.vendor) | u32::from(f.device) << 16;
         let address = f.address;
         let c = f.config();
-        if c.owned_address() != address || read32(c, 0)? != expected || c.read8(0x0e) & 0x7f != 0 {
+        if c.owned_address() != address
+            || read32(c, regs::VENDOR_ID)? != expected
+            || c.read8(regs::HEADER_TYPE) & 0x7f != 0
+        {
             return Err(Error::Requirement(
                 "same actual owned type-zero PCI endpoint",
             ));
         }
-        let command = read16(c, COMMAND)?;
-        if command & BUS_MASTER != 0 || command & INTX_DISABLE == 0 {
+        let command = read16(c, regs::COMMAND)?;
+        if command & regs::COMMAND_MASTER != 0 || command & regs::COMMAND_INTX_DISABLE == 0 {
             return Err(Error::Requirement(
                 "actual stopped requester with bus mastering and INTx disabled",
             ));
@@ -211,8 +211,12 @@ impl Layout {
         self.d0(c, time)
     }
     pub(super) fn enable<C: Configuration>(self, c: &mut C) -> Result<(), Error> {
-        let command = read16(c, COMMAND)?;
-        write16(c, COMMAND, command | MEMORY | BUS_MASTER | INTX_DISABLE)
+        let command = read16(c, regs::COMMAND)?;
+        write16(
+            c,
+            regs::COMMAND,
+            command | regs::COMMAND_MEMORY | regs::COMMAND_MASTER | regs::COMMAND_INTX_DISABLE,
+        )
     }
     fn d0<C: Configuration>(self, c: &mut C, time: &dyn Time) -> Result<(), Error> {
         let Some(offset) = self.power.map(|offset| offset + 4) else {
@@ -250,9 +254,13 @@ impl Layout {
     }
     pub(super) fn stop<C: Configuration>(self, c: &mut C, time: &dyn Time) -> Result<(), Error> {
         let deadline = time.now_us().saturating_add(OPERATION_US);
-        let command = read16(c, COMMAND)?;
+        let command = read16(c, regs::COMMAND)?;
         timely(time, deadline, "native bus-master stop")?;
-        write16(c, COMMAND, (command | INTX_DISABLE) & !BUS_MASTER)?;
+        write16(
+            c,
+            regs::COMMAND,
+            (command | regs::COMMAND_INTX_DISABLE) & !regs::COMMAND_MASTER,
+        )?;
         timely(time, deadline, "native bus-master stop")?;
         // TRPND covers non-posted requests only. Neither it nor BM-clear/FLR
         // completion authorizes any DMA unmap or CPU vector retirement.
@@ -314,8 +322,8 @@ impl Layout {
                 return Err(Error::ConfigReadback { offset, observed });
             }
         }
-        let command = read16(c, COMMAND)?;
-        if command & BUS_MASTER != 0
+        let command = read16(c, regs::COMMAND)?;
+        if command & regs::COMMAND_MASTER != 0
             || read16(c, self.msi + 2)? & 1 != 0
             || self
                 .msix
@@ -330,7 +338,7 @@ impl Layout {
         // FLR can reset Command including INTxDisable. Reassert only that
         // narrow control while still inside the one terminal stop closure.
         timely(time, deadline, "native post-FLR INTx disable")?;
-        write16(c, COMMAND, command | INTX_DISABLE)?;
+        write16(c, regs::COMMAND, command | regs::COMMAND_INTX_DISABLE)?;
         timely(time, deadline, "native FLR completion")
     }
 }

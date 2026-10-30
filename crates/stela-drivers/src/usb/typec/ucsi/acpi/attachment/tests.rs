@@ -4,7 +4,7 @@
 extern crate std;
 
 use super::*;
-use crate::platform::acpi::{Argument, Mode, ObjectType, Reference, tests::TEST_SERIAL};
+use crate::platform::acpi::{Argument, Mode, ObjectType, Reference, test_support::TEST_SERIAL};
 use alloc::{collections::VecDeque, rc::Rc};
 use core::{
     cell::{Cell, RefCell, UnsafeCell},
@@ -343,7 +343,7 @@ fn namespace_mutators() -> Vec<u8> {
     result
 }
 fn provider() -> acpi::Services {
-    acpi::tests::reduced_hardware_fixture(&namespace_mutators())
+    acpi::test_support::reduced_hardware_fixture(&namespace_mutators())
 }
 fn fire(session: &Session) {
     session

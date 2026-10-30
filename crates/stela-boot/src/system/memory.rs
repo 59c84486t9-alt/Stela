@@ -238,11 +238,13 @@ pub(super) fn map(
         .as_ref()
         .map_or(&[][..], |storage| &storage.mapped[..]);
     runtime.map(frames, root, ram, mapped)?;
-    let mut storage = match storage {
-        Some(storage) => Storage::new(storage)?,
+    let storage = match storage {
+        Some(storage) => Storage::new(
+            storage,
+            crate::storage::captures(host_firmware.wifi_observations()),
+        )?,
         None => Storage::absent(),
     };
-    storage.wifi_platform = host_firmware.wifi_observations();
     // The framebuffer is written, never read back, so its writes combine.
     let video = PRESENT | WRITABLE | NX | WRITE_COMBINING;
     if let Some(screen) = screen {

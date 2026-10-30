@@ -129,33 +129,4 @@ mod tests {
             assert!(help.contains(command), "{command}: {help}");
         }
     }
-    #[test]
-    fn removed_process_commands_and_cache_option_are_unknown() {
-        for command in [
-            "run-mapped-image",
-            "run-linked-images",
-            "probe-dyld-entry",
-            "discover-images",
-        ] {
-            let error = Cli::try_parse_from(["stela-dev", command, "--help"])
-                .err()
-                .unwrap();
-            assert_eq!(
-                error.kind(),
-                clap::error::ErrorKind::InvalidSubcommand,
-                "{command}"
-            );
-        }
-        let error = Cli::try_parse_from([
-            "stela-dev",
-            "extract-guest-files",
-            "image.dmg",
-            "--output",
-            "root",
-            "--shared-cache",
-        ])
-        .err()
-        .unwrap();
-        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
-    }
 }

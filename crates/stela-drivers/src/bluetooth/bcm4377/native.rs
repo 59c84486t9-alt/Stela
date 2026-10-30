@@ -9,6 +9,7 @@ pub(crate) mod delivery;
 pub use delivery::MsiCompletion;
 mod registers;
 use super::{Board, Chip, PciIdentity, Platform, Result as DriverResult, Space, Transport, memory};
+use crate::bus::pci::regs;
 use crate::{
     Clock,
     bus::{
@@ -285,8 +286,8 @@ impl<C: Configuration, R: Registers, T: Time> NativePlatform<C, R, T> {
             let device = f.device;
             let address = f.address;
             let c = f.config();
-            let class = c.read32(8);
-            let subsystem = c.read32(0x2c);
+            let class = c.read32(regs::CLASS_REVISION);
+            let subsystem = c.read32(regs::SUBSYSTEM_VENDOR_ID);
             if class == u32::MAX || subsystem == u32::MAX {
                 return Err(Error::Requirement(
                     "actual readable native class/subsystem identity",

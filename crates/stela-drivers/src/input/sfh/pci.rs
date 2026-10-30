@@ -196,7 +196,7 @@ mod tests {
             AddressSpace, Authority, Error as MapError, InstalledMapping, MapFailure, MapRequest,
             MappingPlatform, PhysicalSpan, Resource, ResourceBacking, ResourceKind,
         },
-        pci::{owned::tests::fixture, requester::FunctionRole},
+        pci::{owned::test_support::fixture, requester::FunctionRole},
     };
     use alloc::{boxed::Box, sync::Arc, vec::Vec};
     use core::{
@@ -311,7 +311,7 @@ mod tests {
         device: u16,
     ) -> (
         StoppedRequester,
-        Arc<crate::bus::pci::owned::tests::Counters>,
+        Arc<crate::bus::pci::owned::test_support::Counters>,
     ) {
         let (mut config, counters) = fixture(ADDRESS);
         config.write32(0, u32::from(device) << 16 | 0x1022);
