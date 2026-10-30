@@ -257,36 +257,29 @@ impl Engine {
 }
 
 /// Advance the XTS tweak by one block: multiply by the primitive element in
-/// GF(2^128), little-endian, reducing with x^128 + x^7 + x^2 + x + 1 (0x87).
-fn double_tweak(tweak: &mut [u8; BLOCK]) {
-    let mut carry = 0u8;
-    for byte in tweak.iter_mut() {
-        let next = *byte >> 7;
-        *byte = (*byte << 1) | carry;
-        carry = next;
-    }
-    if carry != 0 {
-        tweak[0] ^= 0x87;
-    }
+/// GF(2^128), little-endian, reducing with x^128 + x^7 + x^2 + x + 1 (0x87),
+/// without a branch on the tweak.
+fn double_tweak(tweak: u128) -> u128 {
+    tweak << 1 ^ 0u128.wrapping_sub(tweak >> 127) & 0x87
 }
 
 /// One data unit: the tweak starts as the 16-byte little-endian unit number
 /// encrypted under the tweak key and doubles per block. Units are block
 /// multiples, so no ciphertext stealing is needed.
 fn xts(data_cipher: &Aes128, tweak_cipher: &Aes128, unit: u64, data: &mut [u8], encrypt: bool) {
-    let mut tweak = [0u8; BLOCK];
-    tweak[..8].copy_from_slice(&unit.to_le_bytes());
-    tweak_cipher.encrypt_block(GenericArray::from_mut_slice(&mut tweak));
+    let mut first = [0u8; BLOCK];
+    first[..8].copy_from_slice(&unit.to_le_bytes());
+    tweak_cipher.encrypt_block(GenericArray::from_mut_slice(&mut first));
+    let mut tweak = u128::from_le_bytes(first);
+    first.zeroize();
     let mut blocks: [stela_crypto::cipher::Block<Aes128>; 8] = Default::default();
-    let mut masks = [[0u8; BLOCK]; 8];
+    let mut masks = [0u128; 8];
     let (chunks, _) = data.as_chunks_mut::<BLOCK>();
     for group in chunks.chunks_mut(8) {
         for (index, chunk) in group.iter().enumerate() {
             masks[index] = tweak;
-            for ((byte, plain), mask) in blocks[index].iter_mut().zip(chunk.iter()).zip(tweak) {
-                *byte = *plain ^ mask;
-            }
-            double_tweak(&mut tweak);
+            blocks[index] = (u128::from_le_bytes(*chunk) ^ tweak).to_le_bytes().into();
+            tweak = double_tweak(tweak);
         }
         if encrypt {
             data_cipher.encrypt_blocks(&mut blocks[..group.len()]);
@@ -294,9 +287,8 @@ fn xts(data_cipher: &Aes128, tweak_cipher: &Aes128, unit: u64, data: &mut [u8], 
             data_cipher.decrypt_blocks(&mut blocks[..group.len()]);
         }
         for (index, chunk) in group.iter_mut().enumerate() {
-            for ((byte, cipher), mask) in chunk.iter_mut().zip(blocks[index]).zip(masks[index]) {
-                *byte = cipher ^ mask;
-            }
+            let block: [u8; BLOCK] = blocks[index].into();
+            *chunk = (u128::from_le_bytes(block) ^ masks[index]).to_le_bytes();
         }
     }
     // Decryption batches can keep plaintext and key-derived tweak masks.

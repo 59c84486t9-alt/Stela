@@ -35,7 +35,7 @@ fn xts_batches_match_scalar_block_transforms() {
             for (byte, mask) in chunk.iter_mut().zip(tweak) {
                 *byte ^= mask;
             }
-            double_tweak(&mut tweak);
+            tweak = double_tweak(u128::from_le_bytes(tweak)).to_le_bytes();
         }
         let mut batched = plain.clone();
         xts(&data_cipher, &tweak_cipher, unit, &mut batched, true);
