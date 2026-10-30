@@ -448,6 +448,17 @@ pub struct Prepare {
     /// the others are taken from the IPSW's restore ramdisk.
     #[arg(long, conflicts_with = "disk")]
     board_firmware: Vec<PathBuf>,
+    /// A kext to link into an auxiliary kernel collection against the boot
+    /// collection: the directory `cargo xtask guest` builds, holding its
+    /// `Info.plist` and arm64e objects (such as `target/guest/StelaGPU.kext`),
+    /// which the installed system keeps in `/Library/Extensions`; repeat for
+    /// each kext.
+    #[arg(long = "kext", requires = "kext_receipt", conflicts_with = "disk")]
+    kexts: Vec<PathBuf>,
+    /// The receipt the auxiliary collection carries, which XNU requires
+    /// before it loads the collection's kexts.
+    #[arg(long, requires = "kexts")]
+    kext_receipt: Option<PathBuf>,
 }
 
 /// The recoveryOS copy `--disk-recovery` boots.
@@ -634,6 +645,71 @@ pub(super) fn boot_args(console: &str, mode: &[&str]) -> String {
 }
 
 impl Prepare {
+    /// The `--kext` bundles linked against `kernel` (`stela_loader::aux_kc`).
+    fn auxiliary_collection(&self, kernel: &[u8]) -> Result<Option<Decoded>> {
+        let Some(receipt) = &self.kext_receipt else {
+            return Ok(None);
+        };
+        let receipt =
+            std::fs::read(receipt).with_context(|| format!("cannot read {}", receipt.display()))?;
+        let mut bundles = Vec::with_capacity(self.kexts.len());
+        for directory in &self.kexts {
+            let read = |path: &std::path::Path| {
+                std::fs::read(path).with_context(|| format!("cannot read {}", path.display()))
+            };
+            let name = directory
+                .file_name()
+                .and_then(|name| name.to_str())
+                .with_context(|| format!("{} has no UTF-8 name", directory.display()))?;
+            let mut objects = Vec::new();
+            for entry in std::fs::read_dir(directory)
+                .with_context(|| format!("cannot list {}", directory.display()))?
+            {
+                let path = entry?.path();
+                if path.extension().is_some_and(|extension| extension == "o") {
+                    objects.push(path);
+                }
+            }
+            objects.sort();
+            let objects = objects
+                .iter()
+                .map(|path| read(path))
+                .collect::<Result<Vec<_>>>()?;
+            bundles.push((
+                read(&directory.join("Info.plist"))?,
+                objects,
+                name.to_owned(),
+            ));
+        }
+        let kexts: Vec<_> = bundles
+            .iter()
+            .map(|(info, objects, name)| stela_loader::aux_kc::Kext {
+                info,
+                objects: objects.iter().map(Vec::as_slice).collect(),
+                bundle_path: format!("/Library/Extensions/{name}"),
+            })
+            .collect();
+        let bytes = stela_loader::aux_kc::link(kernel, &kexts, &receipt)?;
+        let digest = stela_formats::sha256(&bytes);
+        let names: Vec<_> = bundles.iter().map(|(_, _, name)| name.as_str()).collect();
+        Ok(Some(Decoded {
+            source: Source {
+                component: "AuxiliaryKernelCollection".into(),
+                member: names.join(", "),
+                container_sha256: digest.clone(),
+                payload_type: "raw".into(),
+                description: format!(
+                    "{} linked against the boot kernel collection",
+                    names.join(", ")
+                ),
+                decoded_bytes: bytes.len() as u64,
+                decoded_sha256: digest,
+            },
+            bytes,
+            declared_digest: None,
+        }))
+    }
+
     fn run(self) -> Result<()> {
         ensure!(
             !self.output.exists(),
@@ -855,6 +931,7 @@ impl Prepare {
                 ))
             })
             .collect::<Result<Vec<_>>>()?;
+        let auxiliary = self.auxiliary_collection(&kernel.bytes)?;
         // Set below when the images come from the restore ramdisk.
         let sourced: Vec<(String, Decoded)>;
         let ramdisk_component: Decoded;
@@ -869,6 +946,7 @@ impl Prepare {
                 board_id: parse_id(identity.ap_board_id.as_deref())?,
             },
             kernel_collection: input(&kernel),
+            auxiliary_collection: auxiliary.as_ref().map(input),
             sptm: input(&sptm),
             txm: input(&txm),
             device_tree: input(&device_tree),

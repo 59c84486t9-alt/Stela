@@ -95,6 +95,9 @@ pub struct Input<'a> {
 pub struct Inputs<'a> {
     pub target: Target,
     pub kernel_collection: Input<'a>,
+    /// Kexts linked against `kernel_collection` (`stela_loader::aux_kc`),
+    /// which SPTM maps beside it.
+    pub auxiliary_collection: Option<Input<'a>>,
     pub sptm: Input<'a>,
     pub txm: Input<'a>,
     pub device_tree: Input<'a>,
@@ -180,6 +183,14 @@ const KERNEL_SPLITS: &[Split] = &[
     split("rw", SegmentStart("__PRELINK_INFO"), SegmentEnd("__DATA")),
     split("le", SegmentStart("__LINKEDIT"), ImageEnd),
 ];
+/// An auxiliary collection's writable segments come first, then its
+/// read-only ones with the executable `__TEXT_EXEC` last (`aux_kc`).
+const AUXILIARY_SPLITS: &[Split] = &[
+    split("rw", ImageStart, SegmentStart("__TEXT")),
+    split("ro", SegmentStart("__TEXT"), SegmentStart("__TEXT_EXEC")),
+    split("rx", SegmentStart("__TEXT_EXEC"), SegmentEnd("__TEXT_EXEC")),
+    split("le", SegmentStart("__LINKEDIT"), ImageEnd),
+];
 const SPTM_SPLITS: &[Split] = &[
     split("ro", ImageStart, SegmentStart("__TEXT_EXEC")),
     split("rx", SegmentStart("__TEXT_EXEC"), SegmentEnd("__TEXT_EXEC")),
@@ -211,6 +222,8 @@ const REGION_ORDER: &[&str] = &[
     "TXM-rx",
     "TXM-bx",
     "TrustCache",
+    "AuxKC-ro",
+    "AuxKC-rx",
     "BootKC-rx",
     "BootKC-bx",
     "BootKC-ro",
@@ -224,6 +237,8 @@ const REGION_ORDER: &[&str] = &[
     "TXM-le",
     "BootKC-rw",
     "BootKC-le",
+    "AuxKC-rw",
+    "AuxKC-le",
     // M4 and later, without a CL4 image (`lock_regs::CL4_DUMMY_PAGE`).
     lock_regs::CL4_DUMMY_PAGE,
     "RAMDisk",
@@ -323,6 +338,7 @@ fn sptm_image_span(regions: &[Region]) -> Result<core::ops::Range<u64>> {
 const ABSENT_SECURE_KERNEL: [&str; 3] = ["CL4-entry", "CL4-rx", "CL4-virt"];
 
 const KERNEL_FILE: &str = "kernelcache.img";
+const AUXILIARY_FILE: &str = "auxkc.img";
 const SPTM_FILE: &str = "sptm.img";
 const TXM_FILE: &str = "txm.img";
 /// The bundle file holding the prepared DeviceTree.
@@ -788,9 +804,10 @@ impl Placement {
     }
 }
 
-/// The three boot images, split into their regions.
+/// The boot images, split into their regions.
 struct Images {
     kernel: LoadedImage,
+    auxiliary: Option<LoadedImage>,
     sptm: LoadedImage,
     txm: LoadedImage,
 }
@@ -805,6 +822,19 @@ impl Images {
                 inputs.kernel_collection.bytes,
                 KERNEL_SPLITS,
             )?,
+            auxiliary: inputs
+                .auxiliary_collection
+                .as_ref()
+                .map(|input| {
+                    LoadedImage::new(
+                        "AuxKC",
+                        AUXILIARY_FILE,
+                        KernelCollection::parse_auxiliary(input.bytes)?,
+                        input.bytes,
+                        AUXILIARY_SPLITS,
+                    )
+                })
+                .transpose()?,
             sptm: LoadedImage::new(
                 "SPTM",
                 SPTM_FILE,
@@ -827,7 +857,7 @@ impl Images {
         [&self.sptm, &self.txm, &self.kernel]
             .into_iter()
             .map(|image| {
-                let offset = image.collection.entry_offset();
+                let offset = image.collection.entry_offset()?;
                 let (name, range) = image
                     .pieces
                     .iter()
@@ -845,7 +875,7 @@ impl Images {
                     vm_bytes: image.collection.image_bytes(),
                     entry: Entry {
                         image: image.name.into(),
-                        virtual_address: image.collection.thread.pc,
+                        virtual_address: image.collection.entry()?.pc,
                         physical_address: region.guest_pa + (offset - range.start),
                     },
                     fileset_entries: image.collection.fileset_entries.len(),
@@ -1178,9 +1208,11 @@ fn contents(
                 boot_args::BYTES as u64,
                 BOOT_ARGS_REGION_BYTES,
             ),
+            piece if piece.starts_with("AuxKC") && images.auxiliary.is_none() => continue,
             piece => {
                 let image = [&images.kernel, &images.sptm, &images.txm]
                     .into_iter()
+                    .chain(&images.auxiliary)
                     .find(|image| piece.starts_with(image.name))
                     .with_context(|| format!("no image provides {piece}"))?;
                 let range = image
@@ -1291,12 +1323,12 @@ fn fill_memory_map(
         ),
         (
             "TXM-entry",
-            range_value(images.txm.collection.entry_offset(), 0),
+            range_value(images.txm.collection.entry_offset()?, 0),
         ),
         ("TXM-virt", range_value(0, 0)),
         (
             "BootKC-entry",
-            range_value(images.kernel.collection.entry_offset(), 0),
+            range_value(images.kernel.collection.entry_offset()?, 0),
         ),
         ("BootKC-virt", range_value(0, 0)),
         (
@@ -1362,6 +1394,9 @@ fn files(
         (TRUST_CACHE_FILE.to_owned(), trust_cache),
         (BOOT_ARGS_FILE.to_owned(), boot_args_bytes),
     ];
+    if let Some(auxiliary) = images.auxiliary {
+        files.push((AUXILIARY_FILE.to_owned(), auxiliary.memory));
+    }
     if let Some(manifest) = &inputs.boot_manifest {
         files.push((BOOT_MANIFEST_FILE.to_owned(), manifest.bytes.to_vec()));
     }
@@ -1414,13 +1449,14 @@ fn hash_regions(regions: &mut [Region], files: &[(String, Vec<u8>)]) -> Result<(
 
 /// Every input's source, in manifest order.
 fn sources(inputs: &Inputs, ramdisk_source: Option<Source>) -> Vec<Source> {
-    let mut sources = vec![
-        source_of(&inputs.kernel_collection),
+    let mut sources = vec![source_of(&inputs.kernel_collection)];
+    sources.extend(inputs.auxiliary_collection.iter().map(source_of));
+    sources.extend([
         source_of(&inputs.sptm),
         source_of(&inputs.txm),
         source_of(&inputs.device_tree),
         source_of(&inputs.static_trust_cache),
-    ];
+    ]);
     sources.extend(
         inputs
             .sep_firmware
@@ -2772,6 +2808,7 @@ mod tests {
                 board_id: Some(0x2e),
             },
             kernel_collection: input(),
+            auxiliary_collection: None,
             sptm: input(),
             txm: input(),
             device_tree: input(),
@@ -2828,6 +2865,7 @@ mod tests {
                 board_id: Some(0x2e),
             },
             kernel_collection: input(leak(kernel), "KernelCache"),
+            auxiliary_collection: None,
             sptm: input(leak(sptm), "Ap,SecurePageTableMonitor"),
             txm: input(leak(txm), "Ap,TrustedExecutionMonitor"),
             device_tree: input(leak(tree), "DeviceTree"),
@@ -2965,7 +3003,9 @@ mod tests {
         let expected: Vec<_> = REGION_ORDER
             .iter()
             .copied()
-            .filter(|n| !["SEPFW", lock_regs::CL4_DUMMY_PAGE].contains(n))
+            .filter(|n| {
+                !["SEPFW", lock_regs::CL4_DUMMY_PAGE].contains(n) && !n.starts_with("AuxKC")
+            })
             .collect();
         assert_eq!(names, expected);
         // The M1 to M3 hand off no core lock registers.
@@ -3319,7 +3359,7 @@ mod tests {
         let expected: Vec<_> = REGION_ORDER
             .iter()
             .copied()
-            .filter(|n| *n != lock_regs::CL4_DUMMY_PAGE)
+            .filter(|n| *n != lock_regs::CL4_DUMMY_PAGE && !n.starts_with("AuxKC"))
             .collect();
         assert_eq!(names, expected);
         let sepfw = staged
@@ -3346,11 +3386,87 @@ mod tests {
                 .any(|u| u.starts_with("SEPFW"))
         );
 
+        // An auxiliary collection's read-only and executable regions join
+        // SPTM's run before the boot collection's; its writable ones follow
+        // the boot collection's.
+        inputs.auxiliary_collection = Some(input(leak(auxiliary_collection()), "AuxKC"));
+        let linked = prepare(&inputs, &options)?;
+        let names: Vec<_> = linked
+            .manifest
+            .regions
+            .iter()
+            .map(|r| r.name.as_str())
+            .collect();
+        let at = |name: &str| names.iter().position(|n| *n == name).unwrap();
+        assert_eq!(
+            names[at("TrustCache")..=at("BootKC-rx")],
+            ["TrustCache", "AuxKC-ro", "AuxKC-rx", "BootKC-rx"]
+        );
+        assert_eq!(
+            names[at("BootKC-rw")..=at("AuxKC-le")],
+            ["BootKC-rw", "BootKC-le", "AuxKC-rw", "AuxKC-le"]
+        );
+        let region = |name: &str| {
+            linked
+                .manifest
+                .regions
+                .iter()
+                .find(|r| r.name == name)
+                .unwrap()
+        };
+        assert_eq!(
+            region("AuxKC-ro").guest_pa + 4 * PAGE,
+            region("AuxKC-rx").guest_pa
+        );
+        for (name, offset, bytes) in [
+            ("AuxKC-rw", 0, 2 * PAGE),
+            ("AuxKC-ro", 2 * PAGE, 4 * PAGE),
+            ("AuxKC-rx", 6 * PAGE, PAGE),
+            ("AuxKC-le", 7 * PAGE, PAGE),
+        ] {
+            let piece = region(name);
+            assert_eq!(
+                (piece.file.as_str(), piece.file_offset, piece.memory_bytes),
+                (AUXILIARY_FILE, offset, bytes)
+            );
+            assert_eq!(piece.virtual_address, Some(BASE + offset));
+        }
+        let file = |name: &str| &linked.files.iter().find(|(n, _)| n == name).unwrap().1;
+        assert_eq!(file(AUXILIARY_FILE).len() as u64, 8 * PAGE);
+        let tree = DeviceTree::parse(file(DEVICE_TREE_FILE))?;
+        assert_eq!(
+            tree.property(MEMORY_MAP, "AuxKC-rx").unwrap().value,
+            range_value(region("AuxKC-rx").guest_pa, PAGE)
+        );
+        assert!(
+            linked
+                .manifest
+                .sources
+                .iter()
+                .any(|source| source.component == "AuxKC")
+        );
+        inputs.auxiliary_collection = None;
+
         // A manifest for another board is refused.
         let mut other = Inputs { ..inputs };
         other.target.board_id = Some(0x24);
         assert!(prepare(&other, &options).is_err());
         Ok(())
+    }
+
+    /// An auxiliary collection as `aux_kc` lays one out, a page a segment.
+    fn auxiliary_collection() -> Vec<u8> {
+        Builder::new(macho::MH_FILESET)
+            .segment("__PRELINK_INFO", PAGE, &page(0))
+            .segment("__DATA", PAGE, &page(1))
+            .segment("__TEXT", PAGE, &page(2))
+            .segment("__PRELINK_TEXT", PAGE, &page(3))
+            .segment("__DATA_CONST", PAGE, &page(4))
+            .segment("__RECEIPT_INFO", PAGE, &page(5))
+            .segment("__TEXT_EXEC", PAGE, &page(6))
+            .segment("__LINKEDIT", PAGE, &page(7))
+            .fileset("com.stela.StelaGPU", BASE + 3 * PAGE)
+            .build()
     }
 }
 

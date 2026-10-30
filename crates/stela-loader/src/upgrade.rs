@@ -509,6 +509,7 @@ pub fn prepare<R: ReadAt>(
             board_id: id("BORD"),
         },
         kernel_collection: kernel.input(),
+        auxiliary_collection: None,
         sptm: sptm.input(),
         txm: txm.input(),
         device_tree: device_tree.input(),

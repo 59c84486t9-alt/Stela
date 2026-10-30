@@ -54,7 +54,8 @@ pub struct KernelCollection {
     pub uuid: Option<String>,
     pub segments: Vec<Segment>,
     pub fileset_entries: Vec<FilesetEntry>,
-    pub thread: Arm64UnixThread,
+    /// The entry thread; an auxiliary collection has none.
+    pub thread: Option<Arm64UnixThread>,
     /// Lowest segment `vmaddr`; the image's load base maps here.
     pub vm_base: u64,
     /// End of the highest segment.
@@ -85,17 +86,23 @@ fn fixed_name(bytes: &[u8]) -> Result<String> {
 }
 
 impl KernelCollection {
-    /// Parse an `MH_FILESET` kernel collection.
+    /// Parse the boot `MH_FILESET` kernel collection, which has an entry.
     pub fn parse(bytes: &[u8]) -> Result<Self> {
-        Self::parse_kind(bytes, macho::MH_FILESET)
+        Self::parse_kind(bytes, macho::MH_FILESET, true)
+    }
+
+    /// Parse an auxiliary `MH_FILESET` kernel collection, which XNU enters
+    /// through no entry of its own.
+    pub fn parse_auxiliary(bytes: &[u8]) -> Result<Self> {
+        Self::parse_kind(bytes, macho::MH_FILESET, false)
     }
 
     /// Parse an `MH_EXECUTE` boot image such as SPTM or TXM.
     pub fn parse_executable(bytes: &[u8]) -> Result<Self> {
-        Self::parse_kind(bytes, macho::MH_EXECUTE)
+        Self::parse_kind(bytes, macho::MH_EXECUTE, true)
     }
 
-    fn parse_kind(bytes: &[u8], expected_type: u32) -> Result<Self> {
+    fn parse_kind(bytes: &[u8], expected_type: u32, entered: bool) -> Result<Self> {
         ensure!(
             word(bytes, 0)? == macho::MH_MAGIC_64,
             "not a little-endian 64-bit Mach-O"
@@ -152,7 +159,15 @@ impl KernelCollection {
             offset == commands_bytes,
             "load commands do not fill sizeofcmds"
         );
-        let thread = thread.context("image has no LC_UNIXTHREAD entry point")?;
+        ensure!(
+            thread.is_some() == entered,
+            "image {} an LC_UNIXTHREAD entry point",
+            if entered {
+                "has no"
+            } else {
+                "unexpectedly has"
+            }
+        );
         ensure!(!segments.is_empty(), "image has no segments");
         let mut ordered: Vec<&Segment> = segments.iter().filter(|s| s.vm_size > 0).collect();
         ordered.sort_by_key(|s| s.vm_address);
@@ -195,9 +210,11 @@ impl KernelCollection {
             vm_base,
             vm_end,
         };
-        collection
-            .segment_containing(collection.thread.pc)
-            .context("entry point lies outside every segment")?;
+        if let Some(thread) = &collection.thread {
+            collection
+                .segment_containing(thread.pc)
+                .context("entry point lies outside every segment")?;
+        }
         Ok(collection)
     }
 
@@ -220,9 +237,13 @@ impl KernelCollection {
         self.vm_end - self.vm_base
     }
 
+    pub fn entry(&self) -> Result<&Arm64UnixThread> {
+        self.thread.as_ref().context("image has no entry point")
+    }
+
     /// Entry PC relative to the load base.
-    pub fn entry_offset(&self) -> u64 {
-        self.thread.pc - self.vm_base
+    pub fn entry_offset(&self) -> Result<u64> {
+        Ok(self.entry()?.pc - self.vm_base)
     }
 
     /// Physical address of a linked virtual address for an image whose load
@@ -413,9 +434,9 @@ pub(crate) mod tests {
         assert_eq!(kc.segments.len(), 3);
         assert_eq!(kc.vm_base, BASE);
         assert_eq!(kc.image_bytes(), 0xc000);
-        assert_eq!(kc.entry_offset(), 0x4008);
+        assert_eq!(kc.entry_offset()?, 0x4008);
         assert_eq!(
-            kc.segment_containing(kc.thread.pc).unwrap().name,
+            kc.segment_containing(kc.entry()?.pc).unwrap().name,
             "__TEXT_EXEC"
         );
         assert_eq!(
@@ -433,6 +454,7 @@ pub(crate) mod tests {
         assert_eq!(&image[0x4000..0x4010], &[0xaa; 0x10]);
         assert_eq!(image[0x4010], 0);
         assert!(KernelCollection::parse_executable(&bytes).is_err());
+        assert!(KernelCollection::parse_auxiliary(&bytes).is_err());
         Ok(())
     }
 
@@ -442,6 +464,8 @@ pub(crate) mod tests {
             .segment("__TEXT", 0x4000, &[0; 0x4000])
             .build();
         assert!(KernelCollection::parse(&no_thread).is_err());
+        let auxiliary = KernelCollection::parse_auxiliary(&no_thread).unwrap();
+        assert!(auxiliary.thread.is_none() && auxiliary.entry_offset().is_err());
         let outside = Builder::new(macho::MH_EXECUTE)
             .segment("__TEXT", 0x4000, &[0; 0x4000])
             .thread(BASE + 0x8000)
