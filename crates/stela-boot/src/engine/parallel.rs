@@ -183,6 +183,9 @@ impl Pe {
             if observing {
                 report_diagnostics(&mut machine);
             }
+            // What this PE answered degraded: the home PE reports its own
+            // and the devices' coprocessor requests.
+            super::reports::unmodeled_report(&mut machine, Vec::new());
             match stop {
                 // A PE that waits for an interrupt serves the host meanwhile.
                 stop if machine.yielded_for_interrupt(&stop) => super::service::serve(false),
