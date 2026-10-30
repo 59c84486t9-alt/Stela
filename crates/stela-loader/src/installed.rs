@@ -66,6 +66,8 @@ pub const COMPONENT_LIMIT: u64 = 64 * 1024 * 1024;
 const SEP_FIRMWARE_TYPE: &[u8; 4] = b"sepi";
 /// The System volume's root hash, as an Image4 object.
 const ROOT_HASH_TYPE: &[u8; 4] = b"isys";
+/// The BaseSystem's root hash, as an Image4 object.
+const BASE_SYSTEM_ROOT_HASH_TYPE: &[u8; 4] = b"csys";
 const ROOT_HASH_RECORD_VERSION: u32 = 2;
 /// The record's header: version, reserved, hash type and hash length.
 const ROOT_HASH_HEADER_BYTES: usize = 16;
@@ -615,9 +617,19 @@ pub fn prepare<R: ReadAt>(
     let (txm, _) = disk.decode(b"trxm", COMPONENT_LIMIT)?;
     let (device_tree, _) = disk.decode(b"dtre", COMPONENT_LIMIT)?;
     let (trust_cache, _) = disk.decode(b"trst", COMPONENT_LIMIT)?;
+    // The root pivots through BaseSystem (`Inputs::pivot_root_hash`), whose
+    // code, the dyld shared cache among it, this trust cache lists.
+    let base_system_trust_cache = disk
+        .set
+        .object(b"bstc")?
+        .is_some()
+        .then(|| disk.decode(b"bstc", COMPONENT_LIMIT))
+        .transpose()?
+        .map(|(decoded, _)| decoded);
     let sep = disk.opaque(SEP_FIRMWARE_TYPE)?;
     // The evidence already required this object and checked its signature.
     let root_hash = disk.opaque(ROOT_HASH_TYPE)?;
+    let pivot_root_hash = disk.opaque(BASE_SYSTEM_ROOT_HASH_TYPE)?;
     let cryptex1_manifest = options
         .ecid
         .map(|ecid| disk.cryptex1_manifest(ecid))
@@ -666,7 +678,7 @@ pub fn prepare<R: ReadAt>(
         sep_firmware: sep.as_ref().map(Decoded::input),
         boot_manifest: boot_manifest.as_ref().map(Decoded::input),
         cryptex1_manifest: cryptex1_manifest.as_ref().map(Decoded::input),
-        extra_trust_caches: Vec::new(),
+        extra_trust_caches: base_system_trust_cache.iter().map(Decoded::input).collect(),
         ramdisk: None,
         // The installed volumes hold none: the engine reads the board's flash.
         board_firmware: Vec::new(),
@@ -678,6 +690,7 @@ pub fn prepare<R: ReadAt>(
                 .as_deref()
                 .map(preboot::root_snapshot_name),
         }),
+        pivot_root_hash: pivot_root_hash.as_ref().map(Decoded::input),
     };
     let mut options = options.placed_at(inputs.dram_base()?);
     options.boot_command = Some(crate::handoff::installed_command(

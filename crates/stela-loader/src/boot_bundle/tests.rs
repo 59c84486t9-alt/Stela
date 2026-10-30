@@ -670,6 +670,7 @@ fn unsupported_build_is_refused_before_image_parsing() {
         board_firmware: vec![],
         ramdisk: None,
         root_hash: None,
+        pivot_root_hash: None,
     };
     let options = Options::default();
     let borrowed = prepare(&inputs, &options).err().unwrap();
@@ -729,6 +730,7 @@ fn lays_out_sptm_regions_and_patch_slots() -> Result<()> {
         )],
         ramdisk: Some(input(leak(vec![0x5a; 100]), "RestoreRamDisk")),
         root_hash: None,
+        pivot_root_hash: None,
     };
     let options = Options {
         dram_base: 0x8_0000_0000,

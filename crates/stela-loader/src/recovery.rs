@@ -626,6 +626,7 @@ pub fn prepare<R: ReadAt>(
             im4p: root_hash.as_ref().map(Decoded::input),
             snapshot: None,
         }),
+        pivot_root_hash: None,
     };
     let directory = set.directory();
     let mut options = options.placed_at(inputs.dram_base()?);

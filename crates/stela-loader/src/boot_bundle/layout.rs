@@ -223,6 +223,15 @@ impl Shaped {
                 let applied = boot_policy::apply_root_snapshot(&mut self.tree, snapshot)?;
                 self.record(applied);
             }
+            if let Some(im4p) = &inputs.pivot_root_hash {
+                let applied = boot_policy::apply_root_hash(
+                    &mut self.tree,
+                    boot_policy::SealedVolume::BaseSystem,
+                    Some(im4p.bytes),
+                    manifest,
+                )?;
+                self.record(applied);
+            }
         }
         if let Some(environment) = options.osenvironment {
             let applied = boot_policy::apply_environment(&mut self.tree, environment)?;
@@ -740,6 +749,7 @@ pub(super) fn sources(inputs: &Inputs, ramdisk_source: Option<Source>) -> Vec<So
             .root_hash
             .iter()
             .filter_map(|r| r.im4p.as_ref())
+            .chain(&inputs.pivot_root_hash)
             .chain(inputs.board_firmware.iter().map(|(_, image)| image))
             .map(source_of),
     );
