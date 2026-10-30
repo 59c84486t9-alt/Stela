@@ -136,6 +136,9 @@ pub struct Limits {
     /// `VkPhysicalDeviceDeviceGeneratedCommandsPropertiesEXT`; `None` unless
     /// the device enables `deviceGeneratedCommands`.
     pub generated_commands: Option<GeneratedCommandsLimits>,
+    /// `minImportedHostPointerAlignment` of `VK_EXT_external_memory_host`;
+    /// `None` without the extension.
+    pub host_pointer_alignment: Option<u64>,
     /// `VkPhysicalDeviceSparseProperties`.
     pub sparse: SparseLimits,
 }

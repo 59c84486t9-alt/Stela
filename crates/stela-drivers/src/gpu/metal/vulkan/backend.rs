@@ -96,6 +96,12 @@ pub trait Backend {
         info: &BufferInfo,
         request: MemoryRequest,
     ) -> Result<BufferAllocation>;
+    /// A buffer over `info.size` bytes of the process's memory at
+    /// `address`, imported with `VK_EXT_external_memory_host` and reached
+    /// there by the host; the process keeps the range mapped for the
+    /// buffer's life. Both are multiples of
+    /// [`host_pointer_alignment`](super::physical::Limits::host_pointer_alignment).
+    fn create_host_buffer(&mut self, info: &BufferInfo, address: u64) -> Result<BufferAllocation>;
     /// A buffer bound at `offset` in `memory`; returns its device address.
     fn create_placed_buffer(
         &mut self,

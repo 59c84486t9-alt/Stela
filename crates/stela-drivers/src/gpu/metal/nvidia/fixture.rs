@@ -216,6 +216,7 @@ fn limits() -> Limits {
             max_stride: 1 << 12,
             pipeline_stages: ShaderStages::KNOWN.difference(ShaderStages::GEOMETRY),
         }),
+        host_pointer_alignment: Some(4096),
         sparse: SparseLimits {
             residency_standard_2d_block_shape: true,
             residency_standard_2d_multisample_block_shape: true,

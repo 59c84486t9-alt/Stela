@@ -45,7 +45,7 @@ impl Default for UnifiedImageLayoutsFeatures {
 
 /// Extensions the device enables when the driver offers them. The
 /// requirements decide which absences refuse the device.
-const ENABLED: [&CStr; 24] = [
+const ENABLED: [&CStr; 25] = [
     UNIFIED_IMAGE_LAYOUTS,
     generated::NAME,
     ext::robustness2::NAME,
@@ -58,6 +58,7 @@ const ENABLED: [&CStr; 24] = [
     ext::sample_locations::NAME,
     khr::calibrated_timestamps::NAME,
     ext::memory_budget::NAME,
+    ext::external_memory_host::NAME,
     ext::pci_bus_info::NAME,
     ext::image_drm_format_modifier::NAME,
     khr::vertex_attribute_divisor::NAME,
@@ -403,6 +404,7 @@ pub(super) fn probe(
     let mut divisor = vk::PhysicalDeviceVertexAttributeDivisorPropertiesKHR::default();
     let mut dynamic_state3 = vk::PhysicalDeviceExtendedDynamicState3PropertiesEXT::default();
     let mut generated = generated::Properties::default();
+    let mut host = vk::PhysicalDeviceExternalMemoryHostPropertiesEXT::default();
     let mut properties = vk::PhysicalDeviceProperties2::default()
         .push_next(&mut v11)
         .push_next(&mut v12)
@@ -421,6 +423,9 @@ pub(super) fn probe(
     }
     if extensions.has(ext::extended_dynamic_state3::NAME) {
         properties = properties.push_next(&mut dynamic_state3);
+    }
+    if extensions.has(ext::external_memory_host::NAME) {
+        properties = properties.push_next(&mut host);
     }
     if extensions.has(generated::NAME) {
         // The bindings cannot chain the structure, so it goes first by hand.
@@ -491,6 +496,9 @@ pub(super) fn probe(
     limits.generated_commands = chain
         .generated_commands()
         .then(|| generated::limits(&generated));
+    limits.host_pointer_alignment = extensions
+        .has(ext::external_memory_host::NAME)
+        .then_some(host.min_imported_host_pointer_alignment);
     Some(PhysicalDevice {
         identity,
         limits,
@@ -637,6 +645,7 @@ fn limits(
             max_mesh_output_primitives: mesh.max_mesh_output_primitives,
         }),
         generated_commands: None,
+        host_pointer_alignment: None,
         sparse: SparseLimits {
             residency_standard_2d_block_shape: on(sparse.residency_standard2_d_block_shape),
             residency_standard_2d_multisample_block_shape: on(

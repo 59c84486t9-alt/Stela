@@ -10,8 +10,8 @@ use crate::gpu::metal::{
         GuestMemory, Outcome,
         wire::{
             AUTOMATIC, BufferRangeRequest, BufferResponse, Empty, Handle, HeapBufferSizeRequest,
-            HeapDescriptorRecord, HeapUsageRequest, HeapUsageResponse, NewBufferRequest,
-            NewHeapBufferRequest, NewTextureViewRequest, Operation, RegionRecord,
+            HeapDescriptorRecord, HeapUsageRequest, HeapUsageResponse, NewBufferNoCopyRequest,
+            NewBufferRequest, NewHeapBufferRequest, NewTextureViewRequest, Operation, RegionRecord,
             SamplerDescriptorRecord, SamplerResponse, SizeAndAlignRecord, Status,
             TextureBytesRequest, TextureResponse,
         },
@@ -290,5 +290,39 @@ fn samplers_decode_their_descriptors() {
     assert_eq!(
         release(&mut service, connection, sampler.handle),
         Status::Ok
+    );
+}
+
+#[test]
+fn buffers_wrap_guest_memory_without_copying() {
+    let mut service = service_on(MockBackend::new());
+    let connection = connect(&mut service);
+    let memory = &mut Memory::default();
+    let request = NewBufferNoCopyRequest {
+        bytes: memory.put(&[0; 8192]),
+        options: options(StorageMode::Shared),
+    };
+    let buffer: BufferResponse = call(
+        &mut service,
+        connection,
+        Operation::NewBufferNoCopy,
+        &request,
+        memory,
+    )
+    .unwrap();
+    assert_eq!(buffer.contents, request.bytes.address);
+    let unaligned = NewBufferNoCopyRequest {
+        bytes: memory.put(&[0; 100]),
+        ..request
+    };
+    assert_eq!(
+        status(call::<_, BufferResponse>(
+            &mut service,
+            connection,
+            Operation::NewBufferNoCopy,
+            &unaligned,
+            memory,
+        )),
+        Status::Invalid
     );
 }

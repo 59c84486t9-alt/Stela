@@ -83,6 +83,11 @@ const MAX_OBJECTS: NonZeroU32 = NonZeroU32::new(1 << 20).unwrap();
 pub trait GuestMemory {
     fn read(&self, span: Span) -> Result<&[u8], Fault>;
     fn write(&mut self, span: Span, bytes: &[u8]) -> Result<(), Fault>;
+    /// Where the backend, which shares the task's address space, reaches a
+    /// span the task maps: memory a buffer is made over
+    /// (`newBufferWithBytesNoCopy:`), which the task keeps mapped while the
+    /// buffer lives.
+    fn address(&self, span: Span) -> Result<u64, Fault>;
 }
 
 /// A device object a connection holds.
@@ -329,6 +334,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             Operation::NewFunction => self.new_function(&mut call),
             Operation::FunctionReflection => self.function_reflection(&mut call),
             Operation::NewBuffer => self.new_buffer(&mut call),
+            Operation::NewBufferNoCopy => self.new_buffer_no_copy(&mut call),
             Operation::BufferDidModifyRange => self.buffer_did_modify_range(&mut call),
             Operation::NewTexture => self.new_texture(&mut call),
             Operation::NewTextureView => self.new_texture_view(&mut call),

@@ -158,8 +158,49 @@ impl<B: Backend, C: Compiler> Device<B, C> {
     pub fn new_buffer(&mut self, length: u64, options: ResourceOptions) -> Result<BufferId> {
         let plan = resource::buffer(&self.capabilities, length, options)?;
         let allocation = self.backend.create_buffer(&plan.info, plan.memory)?;
+        Ok(self.own_buffer(allocation, length, options))
+    }
+
+    /// `newBufferWithBytesNoCopy:length:options:deallocator:`: a buffer over
+    /// the process's memory at `address`, imported where it is, so its
+    /// `contents` is `address`. The frontend runs the deallocator once the
+    /// last command buffer that used the buffer completes.
+    pub fn new_buffer_with_bytes_no_copy(
+        &mut self,
+        address: u64,
+        length: u64,
+        options: ResourceOptions,
+    ) -> Result<BufferId> {
+        let alignment = self
+            .backend
+            .physical_device()
+            .limits
+            .host_pointer_alignment
+            .ok_or(Error::Unsupported("newBufferWithBytesNoCopy"))?;
+        ensure(
+            matches!(
+                options.storage_mode,
+                StorageMode::Shared | StorageMode::Managed
+            ),
+            "bytesNoCopy buffers are shared or managed",
+        )?;
+        ensure(
+            address != 0 && address.is_multiple_of(alignment) && length.is_multiple_of(alignment),
+            "bytesNoCopy memory starts and ends on a page",
+        )?;
+        let plan = resource::buffer(&self.capabilities, length, options)?;
+        let allocation = self.backend.create_host_buffer(&plan.info, address)?;
+        Ok(self.own_buffer(allocation, length, options))
+    }
+
+    fn own_buffer(
+        &mut self,
+        allocation: BufferAllocation,
+        length: u64,
+        options: ResourceOptions,
+    ) -> BufferId {
         self.allocated += allocation.allocated;
-        Ok(BufferId(self.resources.buffers.insert(BufferObject {
+        BufferId(self.resources.buffers.insert(BufferObject {
             buffer: allocation.buffer,
             memory: allocation.memory,
             memory_offset: 0,
@@ -168,7 +209,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             options,
             backing: Backing::Owned(allocation.allocated),
             dependents: 0,
-        })))
+        }))
     }
 
     /// A shared buffer of the device's own that holds `bytes`.

@@ -1930,3 +1930,52 @@ fn uncommitted_command_buffers_return_their_upload_memory() {
         "each command buffer reused the first one's chunk"
     );
 }
+
+#[test]
+fn bytes_no_copy_buffers_are_the_memory_they_wrap() {
+    let mut device = device();
+    let address = 0x7000_0000;
+    let buffer = device
+        .new_buffer_with_bytes_no_copy(address, 8192, options(StorageMode::Shared))
+        .unwrap();
+    assert_eq!(device.buffer_contents(buffer), Ok(address));
+    let refused = [
+        (
+            address + 16,
+            4096,
+            StorageMode::Shared,
+            "bytesNoCopy memory starts and ends on a page",
+        ),
+        (
+            address,
+            100,
+            StorageMode::Shared,
+            "bytesNoCopy memory starts and ends on a page",
+        ),
+        (
+            address,
+            4096,
+            StorageMode::Private,
+            "bytesNoCopy buffers are shared or managed",
+        ),
+    ];
+    for (address, length, storage_mode, reason) in refused {
+        assert_eq!(
+            device.new_buffer_with_bytes_no_copy(address, length, options(storage_mode)),
+            Err(Error::Invalid(reason))
+        );
+    }
+
+    let mut backend = MockBackend::new();
+    backend
+        .physical
+        .as_mut()
+        .unwrap()
+        .limits
+        .host_pointer_alignment = None;
+    let mut device = device_on(backend);
+    assert_eq!(
+        device.new_buffer_with_bytes_no_copy(address, 4096, options(StorageMode::Shared)),
+        Err(Error::Unsupported("newBufferWithBytesNoCopy"))
+    );
+}

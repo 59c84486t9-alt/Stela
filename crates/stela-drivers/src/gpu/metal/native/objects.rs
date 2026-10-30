@@ -188,6 +188,16 @@ pub(super) fn buffer<T>(
     build(&create)
 }
 
+/// A buffer whose memory is imported host memory.
+pub(super) fn host_buffer<T>(
+    info: &BufferInfo,
+    build: impl FnOnce(&vk::BufferCreateInfo<'_>) -> Result<T>,
+) -> Result<T> {
+    let mut external = vk::ExternalMemoryBufferCreateInfo::default()
+        .handle_types(vk::ExternalMemoryHandleTypeFlags::HOST_ALLOCATION_EXT);
+    buffer(info, |create| build(&create.push_next(&mut external)))
+}
+
 pub(super) fn image<T>(
     info: &ImageInfo,
     build: impl FnOnce(&vk::ImageCreateInfo<'_>) -> Result<T>,

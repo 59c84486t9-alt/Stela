@@ -226,6 +226,12 @@ records! {
         pub heap_offset: u64,
     }
 
+    /// `newBufferWithBytesNoCopy:length:options:deallocator:`.
+    pub struct NewBufferNoCopyRequest {
+        pub bytes: Span,
+        pub options: u64,
+    }
+
     /// `didModifyRange:`.
     pub struct BufferRangeRequest {
         pub buffer: u64,
@@ -810,6 +816,9 @@ operations! {
     HeapUsage = 0x020e => HeapUsageRequest, HeapUsageResponse;
     /// `makeAliasable` of a heap buffer or texture.
     MakeAliasable = 0x020f => Handle, Empty;
+    /// The frontend runs the deallocator once the last command buffer that
+    /// used the buffer completes.
+    NewBufferNoCopy = 0x0210 => NewBufferNoCopyRequest, BufferResponse;
     NewRenderPipeline = 0x0301 => NewRenderPipelineRequest, RenderPipelineResponse;
     NewMeshPipeline = 0x0302 => NewMeshPipelineRequest, RenderPipelineResponse;
     NewComputePipeline = 0x0303 => NewComputePipelineRequest, ComputePipelineResponse;

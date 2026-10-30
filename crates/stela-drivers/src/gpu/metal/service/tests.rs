@@ -97,6 +97,11 @@ impl GuestMemory for Memory {
         self.bytes[range].copy_from_slice(bytes);
         Ok(())
     }
+
+    fn address(&self, span: Span) -> Result<u64, Fault> {
+        self.range(span)?;
+        Ok(span.address)
+    }
 }
 
 fn options(storage_mode: StorageMode) -> u64 {

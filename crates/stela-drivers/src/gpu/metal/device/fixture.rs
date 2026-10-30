@@ -40,6 +40,8 @@ pub(crate) struct MockBackend {
     pub(crate) submissions: Vec<Vec<Segment>>,
     pub(crate) writes: Vec<(Memory, u64, Vec<u8>)>,
     pub(crate) invalidated: Vec<(Memory, u64, u64)>,
+    /// Host memory each imported memory is, by memory.
+    pub(crate) host: BTreeMap<u64, u64>,
     pub(crate) semaphores: BTreeMap<u64, u64>,
     pub(crate) queries_ready: bool,
     pub(crate) layouts: Vec<IndirectCommandsLayoutInfo>,
@@ -90,6 +92,16 @@ impl Backend for MockBackend {
     }
     fn create_buffer(&mut self, info: &BufferInfo, _: MemoryRequest) -> Result<BufferAllocation> {
         let id = self.id();
+        Ok(BufferAllocation {
+            buffer: Buffer(id),
+            memory: Memory(id),
+            address: id << 32,
+            allocated: info.size,
+        })
+    }
+    fn create_host_buffer(&mut self, info: &BufferInfo, address: u64) -> Result<BufferAllocation> {
+        let id = self.id();
+        self.host.insert(id, address);
         Ok(BufferAllocation {
             buffer: Buffer(id),
             memory: Memory(id),
@@ -222,8 +234,12 @@ impl Backend for MockBackend {
         self.invalidated.push((memory, offset, size));
         Ok(())
     }
-    /// Memory `n` is mapped at `1 << 63 | n << 32`.
+    /// Memory `n` is mapped at `1 << 63 | n << 32`, unless it is imported
+    /// host memory.
     fn mapped_address(&self, memory: Memory) -> Result<u64> {
+        if let Some(&address) = self.host.get(&memory.0) {
+            return Ok(address);
+        }
         Ok(1 << 63 | memory.0 << 32)
     }
     fn copy_to_image(&mut self, _: Image, _: &BufferImageCopy, _: &[u8]) -> Result<()> {

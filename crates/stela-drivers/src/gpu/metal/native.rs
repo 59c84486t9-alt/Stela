@@ -102,6 +102,7 @@ struct ExtensionFns {
     sample_locations: Option<ext::sample_locations::Device>,
     mesh: Option<ext::mesh_shader::Device>,
     calibrated: Option<khr::calibrated_timestamps::Device>,
+    external_memory_host: Option<ext::external_memory_host::Device>,
     conditional: ext::conditional_rendering::Device,
     /// With the snapshot's `generated_commands` limits.
     generated: Option<generated::Fns>,
@@ -228,6 +229,8 @@ impl NativeBackend {
                 .then(|| ext::mesh_shader::Device::new(&instance, &device)),
             calibrated: has(khr::calibrated_timestamps::NAME)
                 .then(|| khr::calibrated_timestamps::Device::new(&instance, &device)),
+            external_memory_host: has(ext::external_memory_host::NAME)
+                .then(|| ext::external_memory_host::Device::new(&instance, &device)),
             // A requirement: the device was refused without it.
             conditional: ext::conditional_rendering::Device::new(&instance, &device),
             generated: features
@@ -669,6 +672,97 @@ impl Backend for NativeBackend {
                 Object::Memory(Memory(raw(memory))),
             ],
         )?;
+        Ok(BufferAllocation {
+            buffer: Buffer(raw(buffer)),
+            memory: Memory(raw(memory)),
+            address: self.address(buffer, info),
+            allocated: needs.size,
+        })
+    }
+
+    fn create_host_buffer(&mut self, info: &BufferInfo, address: u64) -> Result<BufferAllocation> {
+        let host = self
+            .fns
+            .external_memory_host
+            .as_ref()
+            .ok_or(Error::Unsupported("host memory import"))?;
+        let handle_type = vk::ExternalMemoryHandleTypeFlags::HOST_ALLOCATION_EXT;
+        let pointer = address as *mut core::ffi::c_void;
+        let mut host_properties = vk::MemoryHostPointerPropertiesEXT::default();
+        // SAFETY: the pointer is the process's own memory, which the caller
+        // keeps mapped.
+        unsafe {
+            (host.fp().get_memory_host_pointer_properties_ext)(
+                self.device.handle(),
+                handle_type,
+                pointer,
+                &mut host_properties,
+            )
+        }
+        .result()
+        .map_err(failure)?;
+        let buffer = objects::host_buffer(info, |create| {
+            // SAFETY: the create info outlives the call.
+            unsafe { self.device.create_buffer(create, None) }.map_err(failure)
+        })?;
+        // SAFETY: the buffer was just created.
+        let needs = unsafe { self.device.get_buffer_memory_requirements(buffer) };
+        let request = MemoryRequest {
+            required: super::vulkan::MemoryProperties::HOST_VISIBLE,
+            preferred: super::vulkan::MemoryProperties::HOST_COHERENT,
+            mapped: false,
+        };
+        let types = needs.memory_type_bits & host_properties.memory_type_bits;
+        let index = objects::memory_candidates(&self.snapshot.memory, types, request)
+            .first()
+            .copied();
+        let Some(index) = index else {
+            // SAFETY: nothing uses the new buffer.
+            unsafe { self.device.destroy_buffer(buffer, None) };
+            return Err(Error::Unsupported("host memory of a buffer's memory type"));
+        };
+        let mut import = vk::ImportMemoryHostPointerInfoEXT::default()
+            .handle_type(handle_type)
+            .host_pointer(pointer);
+        let mut flags =
+            vk::MemoryAllocateFlagsInfo::default().flags(vk::MemoryAllocateFlags::DEVICE_ADDRESS);
+        let allocate = vk::MemoryAllocateInfo::default()
+            .allocation_size(info.size)
+            .memory_type_index(index)
+            .push_next(&mut import)
+            .push_next(&mut flags);
+        // SAFETY: the allocate info and its chain outlive the call.
+        let memory = match unsafe { self.device.allocate_memory(&allocate, None) } {
+            Ok(memory) => memory,
+            Err(error) => {
+                // SAFETY: nothing uses the new buffer.
+                unsafe { self.device.destroy_buffer(buffer, None) };
+                return Err(failure(error));
+            }
+        };
+        // SAFETY: the memory was imported for this buffer.
+        let bound = unsafe { self.device.bind_buffer_memory(buffer, memory, 0) }.map_err(failure);
+        self.or_destroy(
+            bound,
+            &[
+                Object::Buffer(Buffer(raw(buffer))),
+                Object::Memory(Memory(raw(memory))),
+            ],
+        )?;
+        // The host reaches the memory where it already is.
+        let coherent = self.snapshot.memory.types[index as usize]
+            .properties
+            .contains(super::vulkan::MemoryProperties::HOST_COHERENT);
+        let pointer =
+            NonNull::new(pointer.cast::<u8>()).ok_or(Error::Invalid("null host memory"))?;
+        self.mappings.insert(
+            raw(memory),
+            Mapping {
+                pointer,
+                size: info.size,
+                coherent,
+            },
+        );
         Ok(BufferAllocation {
             buffer: Buffer(raw(buffer)),
             memory: Memory(raw(memory)),

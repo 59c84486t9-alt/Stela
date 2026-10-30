@@ -3,8 +3,8 @@ use super::{
     Call, Object, Service, boolean, known, region,
     wire::{
         AUTOMATIC, BufferRangeRequest, BufferResponse, Empty, Fault, Handle, HeapBufferSizeRequest,
-        HeapDescriptorRecord, HeapUsageRequest, HeapUsageResponse, NewBufferRequest,
-        NewBufferTextureRequest, NewHeapBufferRequest, NewHeapTextureRequest,
+        HeapDescriptorRecord, HeapUsageRequest, HeapUsageResponse, NewBufferNoCopyRequest,
+        NewBufferRequest, NewBufferTextureRequest, NewHeapBufferRequest, NewHeapTextureRequest,
         NewTextureViewRequest, SamplerDescriptorRecord, SamplerResponse, SizeAndAlignRecord,
         TextureBytesRequest, TextureDescriptorRecord, TextureResponse,
     },
@@ -31,6 +31,17 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         let request: NewBufferRequest = call.request()?;
         let options = options(request.options)?;
         let buffer = self.device.new_buffer(request.length, options)?;
+        let response = self.adopt_buffer(call.connection, buffer)?;
+        call.reply(&response)
+    }
+
+    pub(super) fn new_buffer_no_copy(&mut self, call: &mut Call) -> Result<(), Fault> {
+        let request: NewBufferNoCopyRequest = call.request()?;
+        let options = options(request.options)?;
+        let address = call.memory.address(request.bytes)?;
+        let buffer =
+            self.device
+                .new_buffer_with_bytes_no_copy(address, request.bytes.length, options)?;
         let response = self.adopt_buffer(call.connection, buffer)?;
         call.reply(&response)
     }
