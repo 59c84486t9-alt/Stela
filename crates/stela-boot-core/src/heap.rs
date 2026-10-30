@@ -64,6 +64,17 @@ impl Cache {
         counts: [0; CLASSES],
     };
 }
+/// Size buckets of the free list's live allocations: from 4 KiB, each a
+/// power of two, the last holding everything from 128 MiB.
+pub const LARGE_BUCKETS: usize = 16;
+
+/// The [`LARGE_BUCKETS`] bucket of a free-list allocation of `bytes`.
+fn large_bucket(bytes: usize) -> usize {
+    ((usize::BITS - 1 - bytes.max(1).leading_zeros()) as usize)
+        .saturating_sub(12)
+        .min(LARGE_BUCKETS - 1)
+}
+
 /// The size class of `layout`, or `None` for the free list.
 fn class(layout: Layout) -> Option<usize> {
     let bytes = layout.size().max(SMALLEST).next_power_of_two();
@@ -85,6 +96,21 @@ struct State {
     /// over before the one they took.
     carves: u64,
     walked: u64,
+    /// Live free-list allocations' count and bytes by [`large_bucket`].
+    large: [(u64, usize); LARGE_BUCKETS],
+}
+
+impl State {
+    fn count_large(&mut self, bytes: usize, allocated: bool) {
+        let (count, total) = &mut self.large[large_bucket(bytes)];
+        if allocated {
+            *count += 1;
+            *total += bytes;
+        } else {
+            *count -= 1;
+            *total -= bytes;
+        }
+    }
 }
 
 /// How full the heap is, in bytes.
@@ -101,6 +127,10 @@ pub struct Usage {
     /// Allocations the free list served, and the extents they passed over.
     pub carves: u64,
     pub walked: u64,
+    /// Live allocations the free list served, as count and bytes by power
+    /// of two from 4 KiB ([`LARGE_BUCKETS`]); the rest of `live` is
+    /// size-class blocks.
+    pub large: [(u64, usize); LARGE_BUCKETS],
 }
 pub struct Heap {
     held: AtomicBool,
@@ -116,6 +146,8 @@ pub struct Heap {
     /// what its own work holds, which other cores' allocations leave
     /// alone; written by that core alone.
     own: [AtomicIsize; CPUS],
+    /// [`Self::own`]'s size-class blocks by class, from each core's tagging.
+    own_classes: [[AtomicIsize; CLASSES]; CPUS],
     /// Cores tagged so far, and whether any is.
     tagged: AtomicUsize,
     any_tagged: AtomicBool,
@@ -153,6 +185,7 @@ impl Heap {
             caches: [const { UnsafeCell::new(Cache::EMPTY) }; CPUS],
             cached: [const { AtomicIsize::new(0) }; CPUS],
             own: [const { AtomicIsize::new(0) }; CPUS],
+            own_classes: [const { [const { AtomicIsize::new(0) }; CLASSES] }; CPUS],
             tagged: AtomicUsize::new(0),
             any_tagged: AtomicBool::new(false),
             live: AtomicUsize::new(0),
@@ -168,6 +201,7 @@ impl Heap {
                 peak: 0,
                 carves: 0,
                 walked: 0,
+                large: [(0, 0); LARGE_BUCKETS],
             }),
         }
     }
@@ -347,6 +381,7 @@ impl Heap {
         let block = unsafe { carve_within(state, layout.size(), layout.align(), allowed) };
         if !block.is_null() {
             state.live += layout.size();
+            state.count_large(layout.size(), true);
         }
         // No metadata/state borrow survives zeroing or a possible IRQ restore.
         drop(guard);
@@ -508,12 +543,40 @@ impl Heap {
         self.cpu().map(|cpu| self.own[cpu].load(Ordering::Relaxed))
     }
 
+    /// Each tagged core's bytes allocated less those it freed: a block one
+    /// core allocates and another frees moves between their counts.
+    pub fn owned(&self) -> impl Iterator<Item = isize> + '_ {
+        let cores = self.tagged.load(Ordering::Relaxed).min(CPUS);
+        self.own[..cores]
+            .iter()
+            .map(|own| own.load(Ordering::Relaxed))
+    }
+
     /// Add `bytes` to the calling core's own count, which only it writes.
-    fn count_own(&self, bytes: isize) {
+    fn count_own(&self, layout: Layout, allocated: bool) {
         if let Some(cpu) = self.cpu() {
+            let class = class(layout);
+            let bytes = class.map_or(layout.size(), |class| SMALLEST << class) as isize;
+            let bytes = if allocated { bytes } else { -bytes };
             let count = &self.own[cpu];
             count.store(count.load(Ordering::Relaxed) + bytes, Ordering::Relaxed);
+            if let Some(class) = class {
+                let count = &self.own_classes[cpu][class];
+                count.store(count.load(Ordering::Relaxed) + bytes, Ordering::Relaxed);
+            }
         }
+    }
+
+    /// Live size-class bytes by class (16 bytes doubling to 4 KiB), as the
+    /// tagged cores counted them: allocations before tagging are not in it.
+    pub fn class_live(&self) -> [isize; CLASSES] {
+        let cores = self.tagged.load(Ordering::Relaxed).min(CPUS);
+        core::array::from_fn(|class| {
+            self.own_classes[..cores]
+                .iter()
+                .map(|classes| classes[class].load(Ordering::Relaxed))
+                .sum()
+        })
     }
 
     /// The heap's usage, walking the free list for its largest extent.
@@ -548,6 +611,7 @@ impl Heap {
             extents,
             carves: state.carves,
             walked: state.walked,
+            large: state.large,
         }
     }
 }
@@ -619,6 +683,7 @@ unsafe fn allocate_locked(state: &mut State, layout: Layout) -> *mut u8 {
         let block = unsafe { carve(state, layout.size(), layout.align()) };
         if !block.is_null() {
             state.live += layout.size();
+            state.count_large(layout.size(), true);
         }
         return block;
     };
@@ -651,7 +716,7 @@ unsafe impl GlobalAlloc for Heap {
             let block = unsafe { self.take_cached(cpu, class) };
             restore_interrupts(flags);
             if !block.is_null() {
-                self.count_own((SMALLEST << class) as isize);
+                self.count_own(layout, true);
             }
             if block.is_null() {
                 failure::report(self, layout);
@@ -667,7 +732,7 @@ unsafe impl GlobalAlloc for Heap {
             unsafe { allocate_locked(state, layout) }
         };
         if !block.is_null() {
-            self.count_own(class(layout).map_or(layout.size(), |class| SMALLEST << class) as isize);
+            self.count_own(layout, true);
         }
         if block.is_null() {
             failure::report(self, layout);
@@ -675,7 +740,7 @@ unsafe impl GlobalAlloc for Heap {
         block
     }
     unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        self.count_own(-(class(layout).map_or(layout.size(), |class| SMALLEST << class) as isize));
+        self.count_own(layout, false);
         if let Some(class) = class(layout)
             && let Some(cpu) = self.cpu()
         {
@@ -703,6 +768,7 @@ unsafe impl GlobalAlloc for Heap {
             state.small[class] = block;
         } else {
             state.live -= layout.size();
+            state.count_large(layout.size(), false);
             // SAFETY: GlobalAlloc requires this live allocation and
             // layout; its last owner has ended all payload access, lock held.
             unsafe { release(state, pointer) };

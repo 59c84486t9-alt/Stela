@@ -639,6 +639,43 @@ impl Heartbeat {
     }
 }
 
+/// `HEAP small=310M large=62M 128K:352/73M cores=300M/20M classes=16:8M,…`:
+/// the heap's live bytes in size-class blocks and free-list allocations,
+/// the latter by power of two where a size holds a megabyte or more, each
+/// tagged core's share, and the tagged cores' bytes by size class.
+fn heap_report(heap: &stela_boot_core::heap::Usage) {
+    let large: usize = heap.large.iter().map(|&(_, bytes)| bytes).sum();
+    let mut line = format!(
+        "HEAP small={}M large={}M",
+        heap.live.saturating_sub(large) >> 20,
+        large >> 20
+    );
+    for (bucket, &(count, bytes)) in heap.large.iter().enumerate() {
+        if bytes >= 1 << 20 {
+            let size = 4096usize << bucket;
+            let size = if size >= 1 << 20 {
+                format!("{}M", size >> 20)
+            } else {
+                format!("{}K", size >> 10)
+            };
+            line.push_str(&format!(" {size}:{count}/{}M", bytes >> 20));
+        }
+    }
+    let cores: Vec<String> = crate::ALLOCATOR
+        .owned()
+        .map(|own| format!("{}M", own >> 20))
+        .collect();
+    line.push_str(&format!(" cores={}", cores.join("/")));
+    let classes: Vec<String> = crate::ALLOCATOR
+        .class_live()
+        .iter()
+        .enumerate()
+        .map(|(class, &bytes)| format!("{}:{}M", 16 << class, bytes >> 20))
+        .collect();
+    line.push_str(&format!(" classes={}", classes.join(",")));
+    output::arguments(format_args!("{line}\n"));
+}
+
 /// The heartbeat's position and engine lines: the boot PE's place, the
 /// ticks per block and compiled share, compilation, discards, chaining and
 /// events over the interval, the heap and the shadow and code pools.
@@ -687,6 +724,7 @@ pub(super) fn beat_report<H: Host>(
         shadow.code_peak >> 20,
         shadow.code_bytes >> 20,
     ));
+    heap_report(&heap);
     output::arguments(format_args!(
         "REGISTERS pe={} pc={:#x} x19={:#x} x20={:#x} x21={:#x} x22={:#x} x23={:#x} lr={:#x}\n",
         machine.processor(),
