@@ -113,6 +113,17 @@ pub trait Bus {
     ) -> Result<(), Error>;
 }
 
+impl<B: Bus + ?Sized> Bus for alloc::boxed::Box<B> {
+    fn transaction(
+        &mut self,
+        address: Address,
+        transaction: Transaction<'_>,
+        pec: bool,
+    ) -> Result<(), Error> {
+        (**self).transaction(address, transaction, pec)
+    }
+}
+
 /// Fixed-length SMBus I²C-block protocols: exactly 1..=32 payload bytes with
 /// no on-wire count prefix. Separate from SMBus Block, ProcessCall, arbitrary
 /// I²C transfers and combined repeated START. Failure never permits replay.
@@ -153,6 +164,9 @@ pub enum ErrorKind {
     /// The controller was busy before this driver started a transaction;
     /// another owner's operation is never killed to acquire the bus.
     Busy,
+    /// ACPI AML accessed the host's registers, so firmware owns the host from
+    /// then on, as Linux's i801 then inhibits its own access.
+    FirmwareOwned,
     StatusStuck,
     BufferModeRejected,
     /// Controller DEV_ERR: NACK, invalid command or communication timeout.

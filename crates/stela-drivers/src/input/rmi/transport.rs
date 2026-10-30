@@ -165,6 +165,14 @@ pub trait Companion {
     fn reset_for_smbus(&mut self) -> Result<(), CompanionError>;
     fn restore_ps2(&mut self) -> Result<(), CompanionError>;
 }
+impl<C: Companion + ?Sized> Companion for alloc::boxed::Box<C> {
+    fn reset_for_smbus(&mut self) -> Result<(), CompanionError> {
+        (**self).reset_for_smbus()
+    }
+    fn restore_ps2(&mut self) -> Result<(), CompanionError> {
+        (**self).restore_ps2()
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CompanionError {
     Unavailable,

@@ -11,7 +11,11 @@ fn native_empty_owner_rescans_change_and_reset_without_retargeting_old_disks() {
         let (controller, device, hardware, mut dma) =
             xhci::model::reset_fixture(&mut memory, speed, 32, 3);
         hardware.borrow_mut().empty_media = true;
-        let binding = Binding::new(&device, &xhci::interfaces(&device.configuration)[0]).unwrap();
+        let binding = Binding::new(
+            &device,
+            &crate::usb::descriptor::interfaces(&device.configuration)[0],
+        )
+        .unwrap();
         let mut failures = Vec::new();
         // SAFETY: This reset fixture supplies the current controller, device
         // and binding with unused UAS endpoint contexts. memory stays alive

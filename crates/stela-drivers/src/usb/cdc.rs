@@ -29,10 +29,10 @@
 //! taken to be up. Frames above the 1514-byte Ethernet maximum are refused.
 mod ntb;
 
-use super::xhci::{
-    DEVICE_TO_HOST, Device, Endpoint, Interface, Plan, RECIPIENT_INTERFACE, SET_INTERFACE, Shared,
-    SlotId, TYPE_CLASS, TransferTicket, setup,
+use super::descriptor::{
+    DEVICE_TO_HOST, Endpoint, Interface, RECIPIENT_INTERFACE, SET_INTERFACE, TYPE_CLASS, setup,
 };
+use super::xhci::{Device, Plan, Shared, SlotId, TransferTicket};
 use crate::{
     block::BlockError,
     bus::dma::{DmaAllocator, DmaBuffer},

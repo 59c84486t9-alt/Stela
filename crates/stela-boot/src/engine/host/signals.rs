@@ -60,8 +60,8 @@ pub(crate) fn sleep_for(micros: u64) {
     let ticks = if armed { ticks.min(remaining) } else { ticks };
     state.apic.write(apic::LVT_TIMER, u32::from(TIMER_VECTOR));
     state.apic.write(apic::INITIAL, ticks);
-    // SAFETY: STI's interrupt shadow covers HLT, so no wake-up is lost.
-    unsafe { asm!("sti", "hlt", "cli", options(nomem, nostack)) };
+    // SAFETY: interrupts are disabled and the host IDT takes the timer.
+    unsafe { crate::native_idle::wait(Some(u64::from(ticks) * 1_000_000 / state.apic_hz)) };
     let slept = ticks - state.apic.read(apic::CURRENT);
     state.apic.write(apic::LVT_TIMER, lvt);
     // A count that ran out during the sleep fires at once.

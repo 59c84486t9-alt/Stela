@@ -9,7 +9,7 @@ use super::{
 };
 use crate::{
     audio::Direction,
-    usb::xhci::{INTERFACE_ASSOCIATION_DESCRIPTOR, Interface},
+    usb::descriptor::{INTERFACE_ASSOCIATION_DESCRIPTOR, Interface},
 };
 use alloc::vec::Vec;
 

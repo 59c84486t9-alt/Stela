@@ -216,13 +216,45 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         req: &crate::wifi::mediatek::mcu::init::Request,
         abort: &crate::wifi::mediatek::mcu::init::Request,
     ) -> Result<(), Error> {
+        *s.phase = Phase::Quarantined;
+        let grant = Self::wait_grant(s, token, req, abort, |g| {
+            g.bss == p.interface.bss_index
+                && g.channel == p.channel.number as u8
+                && g.center == g.channel
+                && g.center2 == 0
+                && g.band
+                    == match p.channel.band {
+                        wifi::Band::Ghz2 => 1,
+                        wifi::Band::Ghz5 => 2,
+                        wifi::Band::Ghz6 => 3,
+                    }
+                && g.width == 0
+                && g.sco == 0
+                && g.request_type == 0
+                && g.hardware_band <= 3
+        })?;
+        let mut actual = p;
+        actual.interface.band_index = grant.hardware_band;
+        *s.profile = Some(actual);
+        *s.phase = Phase::Joining;
+        Ok(())
+    }
+    /// Publish one ROC request and wait for the grant of `token` that
+    /// `accepts` takes, holding the channel for the grant's duration; abort
+    /// the request if none comes in time.
+    pub(super) fn wait_grant(
+        s: &mut Roc<'_, I, Q, C>,
+        token: u8,
+        req: &crate::wifi::mediatek::mcu::init::Request,
+        abort: &crate::wifi::mediatek::mcu::init::Request,
+        accepts: impl Fn(&wire::RocGrant) -> bool,
+    ) -> Result<wire::RocGrant, Error> {
         s.transport_facts
             .try_reserve(1)
             .map_err(|_| Error::NoMemory)?;
         s.asynchronous
             .try_reserve(64)
             .map_err(|_| Error::NoMemory)?;
-        *s.phase = Phase::Quarantined;
         *s.roc_token = token;
         let fact = s
             .controller
@@ -256,40 +288,20 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                     && e.event_id == 0x27
                 {
                     for g in wire::roc_grants(e.payload).map_err(Error::Codec)? {
-                        if g.bss == p.interface.bss_index
-                            && g.token == token
-                            && g.channel == p.channel.number as u8
-                            && g.center == g.channel
-                            && g.center2 == 0
-                            && g.band
-                                == match p.channel.band {
-                                    wifi::Band::Ghz2 => 1,
-                                    wifi::Band::Ghz5 => 2,
-                                    wifi::Band::Ghz6 => 3,
-                                }
-                            && g.width == 0
-                            && g.sco == 0
-                            && g.request_type == 0
-                            && g.hardware_band <= 3
-                            && g.duration_ms > 0
-                        {
+                        if g.token == token && g.duration_ms > 0 && accepts(&g) {
                             match_grant = Some(g);
                         }
                     }
                 }
             }
             if let Some(g) = match_grant {
-                let mut actual = p;
-                actual.interface.band_index = g.hardware_band;
-                *s.profile = Some(actual);
                 *s.roc_deadline = Some(
                     clock
                         .now_us()
                         .checked_add(u64::from(g.duration_ms) * 1000)
                         .ok_or(Error::NeedsDrain)?,
                 );
-                *s.phase = Phase::Joining;
-                return Ok(());
+                return Ok(g);
             }
             if deadline.passed() {
                 // Source set_roc's timeout sends the matching abort.

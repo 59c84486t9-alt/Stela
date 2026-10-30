@@ -20,6 +20,70 @@ fn message(code: u8, index: u8, count: u8, flags: u8, info: u16, words: usize) -
     wire.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
     Message::decode(PacketType::IcmResponse, 15, &wire).unwrap()
 }
+/// An ICM event whose words follow the header.
+fn event(code: u8, words: &[u32]) -> Message {
+    let mut wire = u32::from(code).to_be_bytes().to_vec();
+    for word in words {
+        wire.extend_from_slice(&word.to_be_bytes());
+    }
+    wire.extend_from_slice(&[0; 4]);
+    Message::decode(PacketType::IcmEvent, 15, &wire).unwrap()
+}
+#[test]
+fn notifications_follow_each_family_layout() {
+    // icm_tr_event_device_connected: uuid, route_hi, route_lo, then
+    // connection_id and link_info (approved, boot).
+    let tr = event(3, &[0, 0, 0, 0, 0x1, 0x0000_0301, 0x0500_0007]);
+    assert_eq!(
+        Notification::decode(Family::Titan, &tr),
+        Ok(Notification::DeviceConnected {
+            location: Location::Route(0x1_0000_0301),
+            approved: true,
+            rejected: false,
+            boot: true,
+        })
+    );
+    // icm_fr_event_device_connected: uuid, then key, id and link_info.
+    let fr = event(3, &[0, 0, 0, 0, 0x0021_0000 | 0x0201]);
+    let connected = Notification::decode(Family::Alpine, &fr).unwrap();
+    assert_eq!(
+        connected,
+        Notification::DeviceConnected {
+            location: Location::Link { link: 1, depth: 2 },
+            approved: false,
+            rejected: false,
+            boot: false,
+        }
+    );
+    assert_eq!(
+        std::format!("{connected}"),
+        "device connected at link 1 depth 2, awaiting approval"
+    );
+    assert_eq!(
+        Notification::decode(Family::IceLake, &event(4, &[0, 0x301])),
+        Ok(Notification::DeviceDisconnected {
+            location: Location::Route(0x301)
+        })
+    );
+    assert_eq!(
+        Notification::decode(Family::Alpine, &event(4, &[0x0012_0000])),
+        Ok(Notification::DeviceDisconnected {
+            location: Location::Link { link: 2, depth: 1 }
+        })
+    );
+    assert_eq!(
+        Notification::decode(Family::Titan, &event(3, &[0, 0, 0, 0, 0x1])),
+        Err(Error::Length)
+    );
+    assert_eq!(
+        Notification::decode(Family::Maple, &event(0xa, &[0])),
+        Ok(Notification::Rtd3Veto)
+    );
+    assert_eq!(
+        Notification::decode(Family::Maple, &event(0x2f, &[0])),
+        Ok(Notification::Other(0x2f))
+    );
+}
 #[test]
 fn icm_preserves_unverified_trailer_unknown_event_and_sof() {
     let mut raw = message(0xfe, 0xff, 0, 0xa4, 0xffff, 2);

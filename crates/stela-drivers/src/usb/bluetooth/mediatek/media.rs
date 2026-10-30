@@ -74,7 +74,7 @@ pub(in crate::usb::bluetooth) mod tests {
     use crate::bus::dma::{DmaAllocator, DmaBuffer};
     use crate::usb::{
         bluetooth::{Binding, Hci, InitializationReport, Io, Pipe},
-        xhci::{self, Device, HIGH_SPEED},
+        xhci::{Device, HIGH_SPEED},
     };
     use alloc::{boxed::Box, collections::VecDeque, vec::Vec};
     pub(in crate::usb::bluetooth) fn binding() -> Binding {
@@ -134,7 +134,7 @@ pub(in crate::usb::bluetooth) mod tests {
             vendor_ethernet_tcr: None,
             vendor_ethernet_revision: None,
         };
-        Binding::new(&d, &xhci::interfaces(&d.configuration)[0]).unwrap()
+        Binding::new(&d, &crate::usb::descriptor::interfaces(&d.configuration)[0]).unwrap()
     }
     struct NoDma;
     impl DmaAllocator for NoDma {

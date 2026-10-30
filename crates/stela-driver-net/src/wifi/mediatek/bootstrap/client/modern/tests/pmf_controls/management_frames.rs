@@ -44,7 +44,7 @@ fn prekey_control_port_transport() {
         Err(ClientError::WrongProfile)
     ));
     assert!(!protection.authenticated.get());
-    assert!(!driver.station().port_open(None, None));
+    assert!(!driver.station().port_open(&[]));
     let peer = driver.state().profile.unwrap().wcid;
     let original = raw.clone();
     let descriptor = u32::from_le_bytes(raw[4..8].try_into().unwrap());

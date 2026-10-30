@@ -83,7 +83,11 @@ pub(crate) fn refuse(peer: &mut Peer, target: &Shared) {
     );
     let before_data = peer.data.bytes().to_vec();
     assert!(native.validate().is_err());
-    assert!(native.control(xhci::setup(0x80, 8, 0, 0, 1), &[]).is_err());
+    assert!(
+        native
+            .control(crate::usb::descriptor::setup(0x80, 8, 0, 0, 1), &[])
+            .is_err()
+    );
     assert!(native.preflight(&[peer.endpoint]).is_err());
     assert!(
         native

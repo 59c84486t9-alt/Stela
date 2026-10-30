@@ -10,9 +10,10 @@ use alloc::{format, string::String, vec::Vec};
 /// A host keyboard or pointer.
 pub enum InputDevice {
     Virtio(VirtioInput),
-    Usb(UsbInput),
-    /// The i8042 controller, for both of its ports.
-    Ps2(ps2::Controller),
+    Usb(Box<UsbInput>),
+    /// The i8042 controller, for both of its ports, shared with the SMBus
+    /// companion of its mouse port's touchpad.
+    Ps2(ps2::Shared),
     I2cHid(Box<I2cHid>),
     /// An ELAN or Cypress touchpad, read as a mouse.
     Touchpad(Box<touchpad::TouchpadInput>),
@@ -72,16 +73,19 @@ impl InputDevice {
                 inputs.extend(device.poll());
                 Ok(())
             }
-            Self::Ps2(controller) => match controller.poll() {
-                Ok(polled) => {
-                    inputs.extend(polled);
-                    Ok(())
+            Self::Ps2(controller) => {
+                let mut controller = controller.borrow_mut();
+                match controller.poll() {
+                    Ok(polled) => {
+                        inputs.extend(polled);
+                        Ok(())
+                    }
+                    Err(error) => {
+                        inputs.extend(controller.drain_events());
+                        Err(InputError::Ps2(error))
+                    }
                 }
-                Err(error) => {
-                    inputs.extend(controller.drain_events());
-                    Err(InputError::Ps2(error))
-                }
-            },
+            }
             Self::I2cHid(device) => device.poll(inputs).map_err(InputError::I2cHid),
             Self::Touchpad(device) => device.poll(inputs).map_err(InputError::Touchpad),
             Self::Ish(device) => device.poll(inputs).map_err(InputError::Ish),
@@ -95,9 +99,10 @@ impl InputDevice {
         match self {
             Self::Virtio(_) | Self::Touchpad(_) => Ok(()),
             Self::Usb(device) => device.set_leds(u16::from(leds)).map_err(InputError::Usb),
-            Self::Ps2(controller) if controller.has_keyboard() => {
-                controller.set_leds(ps2_leds(leds)).map_err(InputError::Ps2)
-            }
+            Self::Ps2(controller) if controller.borrow().has_keyboard() => controller
+                .borrow_mut()
+                .set_leds(ps2_leds(leds))
+                .map_err(InputError::Ps2),
             Self::Ps2(_) => Ok(()),
             Self::I2cHid(device) => device.set_leds(u16::from(leds)).map_err(InputError::I2cHid),
             Self::Ish(device) => device.set_leds(u16::from(leds)).map_err(InputError::Ish),
@@ -120,7 +125,7 @@ impl InputDevice {
         match self {
             Self::Virtio(device) => device.broken,
             Self::Usb(device) => device.failed(),
-            Self::Ps2(controller) => controller.needs_reset(),
+            Self::Ps2(controller) => controller.borrow().needs_reset(),
             Self::I2cHid(device) => device.device().needs_reset(),
             Self::Touchpad(device) => device.stopped(),
             Self::Ish(device) => device.stopped(),

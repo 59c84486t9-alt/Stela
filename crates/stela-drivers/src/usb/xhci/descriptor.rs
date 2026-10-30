@@ -1,25 +1,7 @@
-//! A device's identity and the interfaces and endpoints of its
-//! configuration descriptor (USB 2.0 9.6, USB 3.2 9.6.7).
+//! A device the controller addressed, and its endpoints' xHCI contexts.
 use super::*;
 
-/// USB 3.x endpoint companion, kept with the endpoint it immediately follows.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct SuperSpeedCompanion {
-    pub max_burst: u8,
-    pub attributes: u8,
-    pub bytes_per_interval: u16,
-}
-
-/// An endpoint as its descriptor describes it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Endpoint {
-    pub address: u8,
-    pub attributes: u8,
-    pub max_packet: u16,
-    pub interval: u8,
-    pub companion: Option<SuperSpeedCompanion>,
-}
-
+/// xHCI views of an endpoint.
 impl Endpoint {
     pub(in crate::usb) fn validate_context(&self, speed: u8) -> Result<(), BlockError> {
         endpoint::Context::new(self, speed).map(|_| ())
@@ -29,83 +11,6 @@ impl Endpoint {
         let number = self.address & 0xf;
         2 * number + u8::from(self.address & 0x80 != 0)
     }
-    pub fn is_in(&self) -> bool {
-        self.address & 0x80 != 0
-    }
-    pub fn kind(&self) -> u8 {
-        self.attributes & 3
-    }
-}
-
-/// One interface setting from a configuration descriptor, with the class
-/// descriptors that follow it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Interface {
-    pub number: u8,
-    pub alternate: u8,
-    pub class: u8,
-    pub subclass: u8,
-    pub protocol: u8,
-    pub endpoints: Vec<Endpoint>,
-    /// Descriptors between this interface's and the next one's, endpoints
-    /// excluded, whole (length and type first).
-    pub extra: Vec<Vec<u8>>,
-}
-
-/// The interfaces of a configuration descriptor, in order.
-pub fn interfaces(configuration: &[u8]) -> Vec<Interface> {
-    let mut interfaces: Vec<Interface> = Vec::new();
-    let mut at = 0;
-    let mut preceding_endpoint = false;
-    while at + 2 <= configuration.len() {
-        let length = usize::from(configuration[at]);
-        if length < 2 || at + length > configuration.len() {
-            break;
-        }
-        let d = &configuration[at..at + length];
-        match d[1] {
-            INTERFACE_DESCRIPTOR if length >= 9 => interfaces.push(Interface {
-                number: d[2],
-                alternate: d[3],
-                class: d[5],
-                subclass: d[6],
-                protocol: d[7],
-                endpoints: Vec::new(),
-                extra: Vec::new(),
-            }),
-            ENDPOINT_DESCRIPTOR if length >= 7 => {
-                if let Some(interface) = interfaces.last_mut() {
-                    interface.endpoints.push(Endpoint {
-                        address: d[2],
-                        attributes: d[3],
-                        max_packet: u16::from_le_bytes([d[4], d[5]]),
-                        interval: d[6],
-                        companion: None,
-                    });
-                }
-            }
-            _ => {
-                if let Some(interface) = interfaces.last_mut() {
-                    if d[1] == SS_ENDPOINT_COMPANION
-                        && length == 6
-                        && preceding_endpoint
-                        && let Some(endpoint) = interface.endpoints.last_mut()
-                    {
-                        endpoint.companion = Some(SuperSpeedCompanion {
-                            max_burst: d[2],
-                            attributes: d[3],
-                            bytes_per_interval: u16::from_le_bytes([d[4], d[5]]),
-                        });
-                    }
-                    // Preserve the original bytes, including recognized companions.
-                    interface.extra.push(d.to_vec());
-                }
-            }
-        }
-        preceding_endpoint = d[1] == ENDPOINT_DESCRIPTOR && length >= 7;
-        at += length;
-    }
-    interfaces
 }
 
 /// A device the controller addressed, with what it said about itself.

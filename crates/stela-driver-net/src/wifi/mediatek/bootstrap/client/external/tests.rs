@@ -6,7 +6,7 @@ use crate::wifi::mediatek::bootstrap::tests::{Bar, NativeGuard, Q};
 use crate::wifi::mediatek::ring::{rx::tests::device_receive, tests::Source};
 use core::sync::atomic::Ordering;
 
-fn finish(mut client: Client<Bar, Q, NativeGuard>, model: Model, now: u64) {
+fn retire(client: &mut Client<Bar, Q, NativeGuard>, now: u64) {
     if client.station().phase() == station::Phase::ExternalAuthenticating {
         let session = client.station().external_authentication().unwrap().clone();
         client.cancel_external_authentication(&session).unwrap();
@@ -17,6 +17,14 @@ fn finish(mut client: Client<Bar, Q, NativeGuard>, model: Model, now: u64) {
     // SAFETY: all model descriptors, mailbox/ROC notifications and
     // DMA users have been consumed; no independent physical user.
     unsafe { client.retire_peer_after_drain() }.unwrap();
+}
+
+fn finish(mut client: Client<Bar, Q, NativeGuard>, model: Model, now: u64) {
+    retire(&mut client, now);
+    stop(client, model);
+}
+
+fn stop(mut client: Client<Bar, Q, NativeGuard>, model: Model) {
     client.stop().unwrap();
     model.response.lock().unwrap().clc_processing = false;
     model.bar.0.lock().unwrap().values.insert(0xd4208, 0);
@@ -34,6 +42,7 @@ fn sae_commit_token_retry_confirm_transport_never_grants_association() {
         .begin_external_authentication(
             profile(),
             vec![b'x', 0, 0xff],
+            None,
             0,
             2_000_000,
             &mut Policy(true),
@@ -45,7 +54,7 @@ fn sae_commit_token_retry_confirm_transport_never_grants_association() {
         station::Phase::ExternalAuthenticating
     );
     assert_eq!(client.phase(), Phase::Joining);
-    assert!(!client.station().port_open(None, None));
+    assert!(!client.station().port_open(&[]));
     assert!(client.station().association_context().is_none());
     assert!(
         client
@@ -123,7 +132,7 @@ fn sae_commit_token_retry_confirm_transport_never_grants_association() {
         client.station().phase(),
         station::Phase::ExternalAuthenticating
     );
-    assert!(!client.station().port_open(None, None));
+    assert!(!client.station().port_open(&[]));
     for (index, (transaction, bytes)) in [
         (1_u16, &[19, 0, 0xff, 7][..]),
         (2_u16, &[0x34, 0x12, 0xaa][..]),
@@ -188,7 +197,7 @@ fn sae_commit_token_retry_confirm_transport_never_grants_association() {
 fn sae_frames_go_again_by_tx_status_until_ieee80211_auth_max_tries() {
     let (mut client, model) = setup();
     let session = client
-        .begin_external_authentication(profile(), vec![b'x'], 0, 3_000_000, &mut Policy(true))
+        .begin_external_authentication(profile(), vec![b'x'], None, 0, 3_000_000, &mut Policy(true))
         .unwrap();
     client
         .transmit_external_authentication(
@@ -267,11 +276,91 @@ fn sae_frames_go_again_by_tx_status_until_ieee80211_auth_max_tries() {
     finish(client, model, 2_800_002);
 }
 
+/// `mt7925_change_vif_links`: an AP MLD's SAE runs on the setup link's own
+/// address, naming the station MLD in the multi-link element, and the
+/// interface gets its address back once the peer retires.
+#[test]
+fn an_ap_mld_exchange_runs_on_the_setup_link_address() {
+    use crate::wifi::station::multi_link::{Affiliation, Mld};
+    let link = crate::Mac([2, 0xb, 0, 0, 0, 1]);
+    let affiliation = Affiliation {
+        mld: Mld {
+            local: LOCAL,
+            ap: crate::Mac([2, 0xa, 0, 0, 0, 1]),
+        },
+        link_id: 1,
+        local: link,
+    };
+    let address = |client: &Client<Bar, Q, NativeGuard>| {
+        client
+            .state()
+            .interface
+            .registered_context()
+            .unwrap()
+            .address
+    };
+    let (mut client, model) = setup();
+    // Only the interface's own address can be an MLD's.
+    let foreign = Affiliation {
+        mld: Mld {
+            local: link,
+            ..affiliation.mld
+        },
+        ..affiliation
+    };
+    assert!(
+        client
+            .begin_external_authentication(
+                profile(),
+                vec![b'x'],
+                Some(foreign),
+                0,
+                2_000_000,
+                &mut Policy(true)
+            )
+            .is_err()
+    );
+    let session = client
+        .begin_external_authentication(
+            profile(),
+            vec![b'x'],
+            Some(affiliation),
+            0,
+            2_000_000,
+            &mut Policy(true),
+        )
+        .unwrap();
+    assert_eq!(session.multi_link(), Some(&affiliation));
+    assert_eq!(address(&client), link);
+    client
+        .transmit_external_authentication(
+            &session,
+            crate::wifi::station::external::Frame {
+                transaction: 1,
+                status: 126,
+                data: &[19, 0],
+            },
+            1,
+            &Source,
+            &mut Policy(true),
+        )
+        .unwrap();
+    let packet = &finish_tx(&model)[0];
+    assert_eq!((&packet[4..10], &packet[10..16]), (&AP.0[..], &link.0[..]));
+    let element = crate::wifi::station::wire::multi_link::authentication(LOCAL);
+    assert!(packet.ends_with(&element));
+    client.poll(2, &Source, &mut Policy(true)).unwrap();
+    assert_eq!(client.poll_released().unwrap().len(), 1);
+    retire(&mut client, 3);
+    assert_eq!(address(&client), LOCAL);
+    stop(client, model);
+}
+
 #[test]
 fn a_denied_sae_exchange_ends_like_ieee80211_rx_mgmt_auth() {
     let (mut client, model) = setup();
     let session = client
-        .begin_external_authentication(profile(), vec![b'x'], 0, 2_000_000, &mut Policy(true))
+        .begin_external_authentication(profile(), vec![b'x'], None, 0, 2_000_000, &mut Policy(true))
         .unwrap();
     client
         .transmit_external_authentication(
@@ -313,7 +402,7 @@ fn a_denied_sae_exchange_ends_like_ieee80211_rx_mgmt_auth() {
 fn cancellation_keeps_real_pending_dma_and_late_rx_until_explicit_peer_drain() {
     let (mut client, model) = setup();
     let session = client
-        .begin_external_authentication(profile(), vec![b'x'], 0, 2_000_000, &mut Policy(true))
+        .begin_external_authentication(profile(), vec![b'x'], None, 0, 2_000_000, &mut Policy(true))
         .unwrap();
     let receipt = client
         .transmit_external_authentication(
@@ -372,6 +461,7 @@ fn cancellation_keeps_real_pending_dma_and_late_rx_until_explicit_peer_drain() {
         client.begin_external_authentication(
             profile(),
             vec![b'x'],
+            None,
             4,
             2_000_000,
             &mut Policy(true)
@@ -382,7 +472,7 @@ fn cancellation_keeps_real_pending_dma_and_late_rx_until_explicit_peer_drain() {
     // SAFETY: this model consumed all old RX/TX/ROC and has no delayed users.
     unsafe { client.retire_peer_after_drain() }.unwrap();
     let next = client
-        .begin_external_authentication(profile(), vec![b'x'], 4, 2_000_000, &mut Policy(true))
+        .begin_external_authentication(profile(), vec![b'x'], None, 4, 2_000_000, &mut Policy(true))
         .unwrap();
     assert!(!Arc::ptr_eq(&session, &next));
     let before = model.response.lock().unwrap().client_commands.len();
@@ -399,10 +489,24 @@ fn stale_foreign_and_invalid_os_commands_are_refused_before_roc_or_dma() {
     let (mut client, model) = setup();
     let (mut other, other_model) = setup();
     let session = client
-        .begin_external_authentication(profile(), vec![b'x'], 100, 2_000_000, &mut Policy(true))
+        .begin_external_authentication(
+            profile(),
+            vec![b'x'],
+            None,
+            100,
+            2_000_000,
+            &mut Policy(true),
+        )
         .unwrap();
     let foreign = other
-        .begin_external_authentication(profile(), vec![b'x'], 100, 2_000_000, &mut Policy(true))
+        .begin_external_authentication(
+            profile(),
+            vec![b'x'],
+            None,
+            100,
+            2_000_000,
+            &mut Policy(true),
+        )
         .unwrap();
     let before = model.response.lock().unwrap().client_commands.len();
     let queue_head = model.queues[&0xd4300].lock().unwrap().head;
@@ -504,6 +608,7 @@ fn frontend_and_native_deadlines_cancel_without_retransmission_or_permission() {
             .begin_external_authentication(
                 profile(),
                 vec![b'x'],
+                None,
                 0,
                 if native_timeout { 10_000 } else { 2_000_000 },
                 &mut Policy(true),
@@ -527,7 +632,7 @@ fn frontend_and_native_deadlines_cancel_without_retransmission_or_permission() {
         assert_eq!(client.phase(), Phase::NeedsDrain);
         assert_eq!(model.queues[&0xd4300].lock().unwrap().head, 0);
         assert_eq!(client.state().roc_token, 0);
-        assert!(!client.station().port_open(None, None));
+        assert!(!client.station().port_open(&[]));
         assert!(matches!(
             client.transmit_external_authentication(
                 &session,
@@ -550,7 +655,7 @@ fn frontend_and_native_deadlines_cancel_without_retransmission_or_permission() {
 fn rx_rejects_wrong_peer_channel_algorithm_transaction_and_short_fixed_fields() {
     let (mut client, model) = setup();
     let session = client
-        .begin_external_authentication(profile(), vec![b'x'], 0, 2_000_000, &mut Policy(true))
+        .begin_external_authentication(profile(), vec![b'x'], None, 0, 2_000_000, &mut Policy(true))
         .unwrap();
     let mut oversized = vec![0; 2305];
     oversized[..6].copy_from_slice(&[3, 0, 1, 0, 0, 0]);
@@ -592,7 +697,7 @@ fn rx_rejects_wrong_peer_channel_algorithm_transaction_and_short_fixed_fields() 
                 client.station().external_authentication().unwrap(),
                 &session
             ));
-            assert!(!client.station().port_open(None, None));
+            assert!(!client.station().port_open(&[]));
             assert!(client.station().association_context().is_none());
         }
         assert!(matches!(
@@ -682,7 +787,7 @@ fn exchange_deadline_during_dma_preparation_refuses_producer_publication() {
     }
     let (mut client, model) = setup();
     let session = client
-        .begin_external_authentication(profile(), vec![b'x'], 0, 500_000, &mut Policy(true))
+        .begin_external_authentication(profile(), vec![b'x'], None, 0, 500_000, &mut Policy(true))
         .unwrap();
     let source = DelayedSource {
         clock: client.state().controller.state().control.clock,
@@ -744,6 +849,7 @@ fn peer_firmware_refusal_quarantines_original_exchange_and_resources() {
         client.begin_external_authentication(
             profile(),
             vec![b'x'],
+            None,
             0,
             2_000_000,
             &mut Policy(true)
@@ -770,7 +876,7 @@ fn peer_firmware_refusal_quarantines_original_exchange_and_resources() {
         station::Phase::ExternalAuthenticating
     );
     assert!(client.state().format_generation.is_none());
-    assert!(!client.station().port_open(None, None));
+    assert!(!client.station().port_open(&[]));
     assert_eq!(model.queues[&0xd4300].lock().unwrap().head, 0);
     let before = model.response.lock().unwrap().client_commands.len();
     assert!(matches!(
@@ -791,6 +897,7 @@ fn peer_firmware_refusal_quarantines_original_exchange_and_resources() {
         client.begin_external_authentication(
             profile(),
             vec![b'x'],
+            None,
             1,
             2_000_000,
             &mut Policy(true)

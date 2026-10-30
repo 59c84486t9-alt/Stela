@@ -41,6 +41,8 @@ pub enum Error {
     AlreadyAttempted,
     NoRegistration,
     WrongReceipt,
+    /// A rebinding to other firmware indices than the registration's.
+    OtherSlots,
     Firmware {
         step: Step,
         status: u32,
@@ -88,8 +90,8 @@ pub struct Deactivated {
 
 impl<C: 'static> Interface<C> {
     /// # Safety
-    /// Caller exclusively owns this non-MLO station interface's firmware
-    /// context/indices on this mailbox requester. Context fields follow
+    /// Caller exclusively owns this station interface's, or station MLD
+    /// link's, firmware context/indices on this mailbox requester. Context fields follow
     /// the per-chip source caller ordering and firmware resource selector;
     /// RF band is not a substitute. No previous registration/key/RX/TX/IRQ/work
     /// users remain. `resource` keeps the real function/controller claim,
@@ -252,6 +254,50 @@ impl<C: 'static> Interface<C> {
             context: state.context,
         })
     }
+    /// `mt7925_change_vif_links` turning this station into a station MLD's
+    /// link, or back: the BSS and device deactivated, then the same firmware
+    /// indices activated under `context`'s address and link index. The
+    /// owner's own peer, key and RX users must already be gone; the slots
+    /// stay this owner's throughout.
+    pub fn rebind<W: QueueIo, F: QueueIo, R: QueueIo>(
+        &mut self,
+        mailbox: &mut Mailbox<W, F, R>,
+        context: Context,
+    ) -> Result<(), Error> {
+        self.check(mailbox)?;
+        let state = self.owned_mut();
+        if state.phase != Phase::Registered || state.deactivate_attempted {
+            return Err(Error::NoRegistration);
+        }
+        let old = state.context;
+        if (context.bss_index, context.omac_index, context.band_index)
+            != (old.bss_index, old.omac_index, old.band_index)
+            || (context.wmm_index, context.broadcast_wcid) != (old.wmm_index, old.broadcast_wcid)
+        {
+            return Err(Error::OtherSlots);
+        }
+        let removal = Requests::station(old, false).map_err(Error::Context)?;
+        let addition = Requests::station(context, true).map_err(Error::Context)?;
+        // The four replies of this rebinding replace the last registration's.
+        state.replies.clear();
+        state.phase = Phase::Quarantined;
+        for (step, (command, body)) in [
+            (Step::DeactivateBss, removal.first()),
+            (Step::DeactivateDevice, removal.second()),
+        ] {
+            Self::send(state, mailbox, step, command, body)?;
+        }
+        state.context = context;
+        for (step, (command, body)) in [
+            (Step::ActivateDevice, addition.first()),
+            (Step::ActivateBss, addition.second()),
+        ] {
+            Self::send(state, mailbox, step, command, body)?;
+        }
+        state.phase = Phase::Registered;
+        Ok(())
+    }
+
     /// # Safety
     /// After this exact deactivation, every interface-owned firmware key/WCID
     /// has acknowledged removal/reset as required by its owner; every

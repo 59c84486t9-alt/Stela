@@ -5,17 +5,20 @@
 //! is no boolean completion API or transition to associated.
 
 use super::*;
-use station::external::Session;
+use station::{external::Session, multi_link::Affiliation};
 
 impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
     /// Claim the same real preassociation peer namespace used by ordinary join.
     /// The selected OS BSS supplies the SSID/profile. Credential computation is
     /// external; this operation neither installs keys nor marks an association.
     /// Cancellation/timeout uses the ordinary remove + independent drain fence.
+    /// With an AP MLD, `multi_link` names the setup link the exchange runs
+    /// on under its own address.
     pub fn begin_external_authentication(
         &mut self,
-        profile: Profile,
+        mut profile: Profile,
         ssid: Vec<u8>,
+        multi_link: Option<Affiliation>,
         now: u64,
         budget: u64,
         policy: &mut impl station::RegulatoryPolicy,
@@ -57,13 +60,36 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             .now_us()
             .checked_add(budget)
             .ok_or(Error::Station(station::Error::Overflow))?;
+        let link = multi_link
+            .as_ref()
+            .map(|affiliation| Self::setup_link_context(s, affiliation))
+            .transpose()?;
+        if let Some(context) = link {
+            profile.interface = context;
+        }
         // Every fallible body is prepared before Station or hardware mutation.
-        let bss = profile.bss_request(false).map_err(Error::Codec)?;
+        let bss = match &multi_link {
+            Some(affiliation) => {
+                profile.link_bss_request(false, &Self::mld_link(affiliation, profile))
+            }
+            None => profile.bss_request(false),
+        }
+        .map_err(Error::Codec)?;
         let peer = profile.peer_request(true, false).map_err(Error::Codec)?;
         let broadcast = profile.broadcast_request().map_err(Error::Codec)?;
         let session = s
             .station
-            .begin_external_authentication(profile.peer, profile.channel, ssid, now, budget, policy)
+            .begin_external_authentication(
+                station::external::Peer {
+                    bssid: profile.peer,
+                    channel: profile.channel,
+                    ssid,
+                    multi_link,
+                },
+                now,
+                budget,
+                policy,
+            )
             .map_err(Error::Station)?;
         s.authentication_deadline = Some(deadline);
         s.profile = Some(profile);
@@ -73,6 +99,9 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         s.peer_generation = generation;
         s.format_generation = None;
         s.phase = Phase::Quarantined;
+        if let Some(link) = link {
+            Self::bind_setup_link(s, link)?;
+        }
         s.controller
             .state_mut()
             .control

@@ -918,7 +918,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
                 .join_modern(join, beacon, profile, now, source, &mut check)
                 .map_err(PolicyError::Client);
         }
-        let beacon = self.native_beacon(handle)?;
+        let beacon = self.observation(handle)?;
         self.peer = Some(join.channel);
         self.protection.set(true, false);
         // SAFETY: permission and client are private disjoint fields of this
@@ -938,8 +938,8 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
         }
         .map_err(PolicyError::Client)
     }
-    /// The client's own record of the beacon the OS chose.
-    fn native_beacon(&self, handle: BssHandle) -> Result<Arc<PmfBssObservation>, PolicyError> {
+    /// The client's own record of the beacon of the BSS `handle` names.
+    pub fn observation(&self, handle: BssHandle) -> Result<Arc<PmfBssObservation>, PolicyError> {
         let observed = self
             .observed
             .iter()
@@ -1211,6 +1211,42 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
                 &mut self.authority,
                 admission,
                 pairwise,
+                index,
+                material,
+                seed,
+            )
+        }
+        .map_err(PolicyError::Client)
+    }
+    /// The GTK of the AP of the association's link `link_id`, from the
+    /// handshake's MLO GTK KDE.
+    pub fn install_link_key(
+        &mut self,
+        link_id: u8,
+        index: u8,
+        material: &[u8],
+        seed: ReplaySeed,
+    ) -> Result<KeyIdentity, PolicyError> {
+        self.live()?;
+        let context = self
+            .client
+            .modern_context()
+            .ok_or(PolicyError::Bss)?
+            .clone();
+        let admission = self
+            .authority
+            .admit_association(
+                self.client.station(),
+                context,
+                reg::AssociationUse::Management,
+            )
+            .map_err(PolicyError::Regulatory)?;
+        // SAFETY: same exclusive privately kept controller and permission.
+        unsafe {
+            self.client.install_link_key_modern(
+                &mut self.authority,
+                admission,
+                link_id,
                 index,
                 material,
                 seed,

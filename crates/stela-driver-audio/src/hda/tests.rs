@@ -374,6 +374,7 @@ fn headphone_binding(route: &AnalogRoute, stream: StreamId) -> RealtekHeadphoneR
 mod cirrus;
 mod conexant;
 mod reset;
+mod setup;
 mod sigmatel;
 
 mod links;

@@ -469,6 +469,53 @@ pub unsafe fn open(
     // The owners native attachments keep, and those of failed ones, stay
     // for the boot: their mappings and DMA domains outlive the devices.
     Vec::leak(core::mem::take(&mut devices.owners));
+    // EHCI controllers run for the boot; their roots' storage shares them.
+    Vec::leak(core::mem::take(&mut devices.ehci_hosts));
+    for host in &devices.hda_hosts {
+        let location = &host.location;
+        for codec in &host.codecs {
+            let graph = &codec.graph;
+            match &codec.setup {
+                Ok(setup) => output::arguments(format_args!(
+                    "HOST HD AUDIO {location} codec {}: {:08x} revision {:08x}, {setup}\n",
+                    graph.address, graph.vendor_id, graph.revision_id
+                )),
+                Err(error) => output::arguments(format_args!(
+                    "HOST HD AUDIO {location} codec {}: {:08x} setup failed: {error:?}\n",
+                    graph.address, graph.vendor_id
+                )),
+            }
+        }
+        for failure in &host.codec_failures {
+            output::arguments(format_args!(
+                "HOST HD AUDIO {location} codec {} failed discovery attempt {}: {:?}\n",
+                failure.address, failure.attempt, failure.error
+            ));
+        }
+        if let Some(error) = &host.discovery_error {
+            output::arguments(format_args!(
+                "HOST HD AUDIO {location}: no usable codec ({error:?})\n"
+            ));
+        }
+    }
+    // HD Audio controllers stay attached for the boot; no guest audio device
+    // consumes them yet.
+    Vec::leak(core::mem::take(&mut devices.hda_hosts));
+    for host in &devices.usb4_hosts {
+        let ready = &host.ready;
+        output::arguments(format_args!(
+            "HOST USB4 {}: firmware connection manager ready ({:?}), security level {}\n",
+            host.location,
+            ready.family,
+            ready.security.map_or(
+                alloc::string::String::from("unreported"),
+                |level| alloc::format!("{level:?}")
+            )
+        ));
+        for event in &host.early {
+            super::usb::report_usb4(host, event);
+        }
+    }
     for (address, error) in &devices.failures {
         output::arguments(format_args!("STORAGE FAILED pci={address} error={error}\n"));
     }
@@ -523,6 +570,7 @@ pub unsafe fn open(
     };
     let usb = super::usb::HostUsb::new(
         core::mem::take(&mut devices.usb_hosts),
+        core::mem::take(&mut devices.usb4_hosts),
         dma,
         handoff.firmware.clone(),
         root,

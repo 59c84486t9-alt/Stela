@@ -103,7 +103,7 @@ fn device(composite: bool) -> Device {
 }
 fn binding(composite: bool) -> Binding {
     let device = device(composite);
-    let interfaces = xhci::interfaces(&device.configuration);
+    let interfaces = crate::usb::descriptor::interfaces(&device.configuration);
     Binding::new(
         &device,
         interfaces
@@ -372,7 +372,7 @@ fn explicit_close_and_drop_cancel_without_reopening() {
 #[test]
 fn hci_interfaces_need_their_three_endpoints_on_interface_zero() {
     let original = device(false);
-    let first = |d: &Device| xhci::interfaces(&d.configuration)[0].clone();
+    let first = |d: &Device| crate::usb::descriptor::interfaces(&d.configuration)[0].clone();
     assert!(Binding::new(&original, &first(&original)).is_ok());
     // Without its bulk IN endpoint (made a second interrupt IN) the
     // interface has no inbound ACL pipe.
@@ -388,7 +388,7 @@ fn hci_interfaces_need_their_three_endpoints_on_interface_zero() {
     let mut fabricated = first(&original);
     fabricated.number = 4;
     assert!(Binding::new(&original, &fabricated).is_err());
-    let sco = &xhci::interfaces(&original.configuration)[1];
+    let sco = &crate::usb::descriptor::interfaces(&original.configuration)[1];
     assert!(Binding::new(&original, sco).is_err());
 }
 
@@ -397,7 +397,7 @@ fn extra_endpoints_are_ignored_and_other_interfaces_refused_like_btusb() {
     let mut d = device(true);
     d.descriptor[4..7].copy_from_slice(&[0xef, 2, 1]);
     assert_eq!(
-        Binding::new(&d, &xhci::interfaces(&d.configuration)[2]).unwrap_err(),
+        Binding::new(&d, &crate::usb::descriptor::interfaces(&d.configuration)[2]).unwrap_err(),
         "Bluetooth HCI on an interface other than 0"
     );
 }
@@ -415,7 +415,11 @@ fn hci_interface_discovers_its_endpoints_and_commands_go_to_the_device() {
     device.configuration[4] = 3;
     let length = device.configuration.len() as u16;
     device.configuration[2..4].copy_from_slice(&length.to_le_bytes());
-    let binding = Binding::new(&device, &xhci::interfaces(&device.configuration)[1]).unwrap();
+    let binding = Binding::new(
+        &device,
+        &crate::usb::descriptor::interfaces(&device.configuration)[1],
+    )
+    .unwrap();
     assert_eq!(binding.interface(), 0);
     assert_eq!(binding.events.address, 0x87);
     assert_eq!(binding.input.address, 0x86);

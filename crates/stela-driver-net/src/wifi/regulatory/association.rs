@@ -30,6 +30,8 @@ pub enum AssociationUse {
 /// Exact borrowed profile for providers to check; this is not a permit.
 /// Providers must inspect the complete enabled source envelope, including basic
 /// rates and autonomous responses, not just the selected width/MCS or one MPDU.
+/// An MLD association's use is one operation per link, each on its own
+/// channel.
 #[derive(Debug)]
 pub struct AssociationOperation<'a> {
     context: &'a AssociationContext,
@@ -139,7 +141,27 @@ fn current(station: &Station, operation: &AssociationOperation<'_>) -> Result<()
     Ok(())
 }
 
+/// Check `operation` on every link of `station`'s association: the setup
+/// link's own, then each other link where it operates, as its own operation.
 fn check(
+    hardware: &mut impl HardwareLease,
+    os: &mut impl OsLease,
+    station: &Station,
+    operation: &AssociationOperation<'_>,
+) -> Result<(), Error> {
+    check_link(hardware, os, operation)?;
+    for link in station.link_contexts() {
+        let operation = AssociationOperation {
+            context: link,
+            definition: link.definition(),
+            purpose: operation.purpose,
+        };
+        check_link(hardware, os, &operation)?;
+    }
+    Ok(())
+}
+
+fn check_link(
     hardware: &mut impl HardwareLease,
     os: &mut impl OsLease,
     operation: &AssociationOperation<'_>,
@@ -202,7 +224,7 @@ impl<H: HardwarePolicy, O: OsPolicy> Owner<H, O> {
         let mut hardware = self.hardware.acquire().ok_or(Error::HardwareUnavailable)?;
         let native = hardware.context();
         let mut os = self.os.acquire(native).ok_or(Error::OsUnavailable)?;
-        check(&mut hardware, &mut os, &operation)?;
+        check(&mut hardware, &mut os, station, &operation)?;
         Ok(AssociationAdmission {
             owner: self.identity,
             native,
@@ -250,7 +272,7 @@ impl<H: HardwarePolicy, O: OsPolicy> Owner<H, O> {
         if admission.os_revision != os.revision() {
             return Err(Error::Stale);
         }
-        check(&mut hardware, &mut os, &association)?;
+        check(&mut hardware, &mut os, station, &association)?;
         let effective = super::wmm::station(observed, limit).map_err(|_| Error::Mismatch)?;
         let operation = EdcaOperation {
             association,
@@ -302,7 +324,7 @@ impl<H: HardwarePolicy, O: OsPolicy> Owner<H, O> {
         if admission.os_revision != os.revision() {
             return Err(Error::Stale);
         }
-        check(&mut hardware, &mut os, &operation)?;
+        check(&mut hardware, &mut os, station, &operation)?;
         let result = consume(station, &operation);
         drop(os);
         drop(hardware);
@@ -345,7 +367,12 @@ impl<H: HardwarePolicy, O: OsPolicy> Owner<H, O> {
         if admission.os_revision != os.revision() {
             return Err(Error::Stale);
         }
-        check(&mut hardware, &mut os, &operation)?;
+        check(
+            &mut hardware,
+            &mut os,
+            native_owner.association_station(),
+            &operation,
+        )?;
         if matches!(purpose, NativeManagementUse::AuthorizePort)
             && (operation.context().pmf().is_none() || !os.allows_protected_port(&operation))
         {
@@ -363,7 +390,12 @@ impl<H: HardwarePolicy, O: OsPolicy> Owner<H, O> {
                 definition: operation.definition,
                 purpose: AssociationUse::Data,
             };
-            check(&mut hardware, &mut os, &data)?;
+            check(
+                &mut hardware,
+                &mut os,
+                native_owner.association_station(),
+                &data,
+            )?;
         }
         let result = consume(native_owner, &operation);
         drop(os);
@@ -409,7 +441,7 @@ impl<H: HardwarePolicy, O: OsPolicy> Owner<H, O> {
         if admission.os_revision != os.revision() {
             return Err(Error::Stale);
         }
-        check(&mut hardware, &mut os, &operation)?;
+        check(&mut hardware, &mut os, station, &operation)?;
         let result = submit(&mut hardware, &operation);
         drop(os);
         drop(hardware);

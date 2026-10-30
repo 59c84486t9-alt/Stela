@@ -610,3 +610,83 @@ fn full_source_modern_peer_bss_edca_ba_and_puncture_match_exact_requests() {
         expected.len()
     );
 }
+
+/// A station MLD's secondary link on BSS 1 with AP WCID 2, its primary link
+/// being BSS 0 with AP WCID 1.
+fn link(eml: Option<u16>) -> MldLink {
+    MldLink {
+        link_id: 1,
+        local: Mac([2, 0, 0, 0, 0, 0xd]),
+        ap: Mac([2, 0, 0, 0, 0, 0xa]),
+        primary_bss: 0,
+        primary_wcid: 1,
+        eml,
+    }
+}
+
+/// `mt7925_mcu_sta_mld_tlv` and `mt7925_mcu_sta_eht_mld_tlv` for the
+/// secondary link, `mt7925_mcu_bss_mld_tlv` for its BSS.
+#[test]
+fn a_secondary_link_names_the_primary_and_its_own_records() {
+    let (mut p, c) = fixture(Band::Ghz5, Mode::Eht, Width::Mhz20);
+    p.wcid = 2;
+    p.interface.bss_index = 1;
+    let link = link(None);
+    let peer = c.clone().with_link(link).peer_request(p, true).unwrap();
+    let mld = field(&peer, 8, 0x20);
+    assert_eq!(mld[4..10], link.ap.0);
+    // Primary 1, secondary 2, WLAN 1; two links: WCID 1 on BSS 0, WCID 2
+    // on BSS 1.
+    assert_eq!(mld[10..18], [1, 0, 2, 0, 1, 0, 2, 0]);
+    assert_eq!(mld[20..28], [1, 0, 0, 0, 2, 0, 1, 0]);
+    let eht = field(&peer, 8, 0x21);
+    assert_eq!((eht[5], eht[7], &eht[10..12]), (0xff, 2, &[0, 0][..]));
+    let eml = c
+        .clone()
+        .with_link(MldLink {
+            eml: Some(0x0081),
+            ..link
+        })
+        .peer_request(p, true)
+        .unwrap();
+    let eht = field(&eml, 8, 0x21);
+    assert_eq!((eht[7], &eht[10..12]), (0, &[0x81, 0][..]));
+    let bss = c.clone().with_link(link).bss_request(p, true).unwrap();
+    let m = field(&bss, 4, 26);
+    assert_eq!((m[4], m[5], m[13], m[14]), (0, 33, 1, 0));
+    assert_eq!(m[6..12], link.local.0);
+    // The single-link records keep naming the AP and the interface.
+    let single = field(&c.peer_request(p, true).unwrap(), 8, 0x20).to_vec();
+    assert_eq!((single[16], &single[4..10]), (1, &p.peer.0[..]));
+}
+
+/// `mt7925_mcu_set_mlo_roc`: the setup link acquires, the other joins as a
+/// sub-link, both MLSR at 20 MHz.
+#[test]
+fn an_mlo_channel_request_holds_both_links() {
+    let (p, _) = fixture(Band::Ghz5, Mode::Eht, Width::Mhz20);
+    let mut other = p;
+    other.interface.bss_index = p.interface.bss_index + 1;
+    other.channel = Channel {
+        band: Band::Ghz2,
+        number: 6,
+        frequency_mhz: 2437,
+    };
+    let request = p.mlo_roc(other, 7, 5).unwrap();
+    let bytes = request.body();
+    assert_eq!(bytes.len(), 4 + 2 * 24);
+    let first = &bytes[4..28];
+    let second = &bytes[28..52];
+    let bss = p.interface.bss_index;
+    assert_eq!(first[..6], [0, 0, 24, 0, bss, 7]);
+    assert_eq!(second[..6], [3, 0, 24, 0, bss + 1, 7]);
+    assert_eq!((second[6], second[8], second[10], second[13]), (6, 1, 6, 6));
+    // A 2.4 GHz link makes it MT7925_ROC_REQ_MLSR_AG.
+    assert_eq!(
+        (first[15], second[15], &second[16..21]),
+        (10, 10, &[5, 0, 0, 0, 255][..])
+    );
+    other.channel = p.channel;
+    let same = p.mlo_roc(other, 7, 5).unwrap();
+    assert_eq!(same.body()[4 + 15], 11);
+}

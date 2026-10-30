@@ -77,6 +77,219 @@ fn sleep_preparation_evaluates_s5_and_runs_pts() {
 }
 
 #[test]
+fn processors_and_their_cst_come_from_objects_and_devices() {
+    let _serial = TEST_SERIAL.lock().unwrap();
+    let enclose = |op: &[u8], body: &[u8]| {
+        let length = if body.len() + 1 < 64 {
+            std::vec![(body.len() + 1) as u8]
+        } else {
+            let total = body.len() + 2;
+            std::vec![0x40 | (total & 0xf) as u8, (total >> 4) as u8]
+        };
+        [op, &length, body].concat()
+    };
+    let package = |entries: &[Vec<u8>]| {
+        let body = [&[entries.len() as u8][..], &entries.concat()].concat();
+        enclose(&[0x12], &body)
+    };
+    // ResourceTemplate () { Register (FFixedHW, 1, 2, hint, 3) }
+    let register = |hint: u8| {
+        let mut template = std::vec![0x82, 0x0c, 0, 0x7f, 1, 2, 3, hint, 0, 0, 0, 0, 0, 0, 0];
+        template.extend_from_slice(&[0x79, 0]);
+        enclose(
+            &[0x11],
+            &[&[0x0a, template.len() as u8][..], &template].concat(),
+        )
+    };
+    let cst = package(&[
+        std::vec![0x0a, 2],
+        package(&[
+            register(0),
+            std::vec![0x01],
+            std::vec![0x01],
+            std::vec![0x0b, 0xe8, 0x03],
+        ]),
+        package(&[
+            register(0x10),
+            std::vec![0x0a, 2],
+            std::vec![0x0a, 70],
+            std::vec![0x0b, 0xf4, 0x01],
+        ]),
+    ]);
+    // Processor (CPU0, 1, 0x410, 6) { Name (_CST, ...) Method (_OSC, 4) { Return (Arg3) } }
+    let processor = enclose(
+        &[0x5b, 0x83],
+        &[
+            &b"CPU0"[..],
+            &[1, 0x10, 0x04, 0, 0, 6],
+            &[0x08],
+            b"_CST",
+            &cst,
+            &[0x14, 0x08],
+            b"_OSC",
+            &[0x04, 0xa4, 0x6b],
+        ]
+        .concat(),
+    );
+    // Device (CPU1) { Name (_HID, "ACPI0007") Name (_UID, 2) Method (_PDC, 1) {} }
+    let device = enclose(
+        &[0x5b, 0x82],
+        &[
+            &b"CPU1"[..],
+            &[0x08],
+            b"_HID",
+            &[0x0d],
+            b"ACPI0007",
+            &[0, 0x08],
+            b"_UID",
+            &[0x0a, 2],
+            &[0x14, 0x06],
+            b"_PDC",
+            &[0x01],
+        ]
+        .concat(),
+    );
+    let scope = enclose(&[0x10], &[&b"\\_SB_"[..], &processor, &device].concat());
+    let mut dsdt = include_bytes!("fixtures/namespace.aml").to_vec();
+    dsdt.extend(scope);
+    let length = dsdt.len() as u32;
+    dsdt[4..8].copy_from_slice(&length.to_le_bytes());
+    checksum(&mut dsdt, 9);
+    // Processor 1 is APIC 0 and processor 2 APIC 3, both enabled.
+    let mut madt = table(b"APIC", 60, 5);
+    madt[44..52].copy_from_slice(&[0, 8, 1, 0, 1, 0, 0, 0]);
+    madt[52..60].copy_from_slice(&[0, 8, 2, 3, 1, 0, 0, 0]);
+    checksum(&mut madt, 9);
+    let (provider, _) = fixture_tables(dsdt, std::vec![madt]);
+    // SAFETY: test provider owns all services; singleton serialized.
+    let session = unsafe { Session::start(provider, Mode::InterpreterOnly) }.unwrap();
+    let processors = session.processors().unwrap();
+    let ids: Vec<_> = processors
+        .iter()
+        .map(|&(_, id, device)| (id, device))
+        .collect();
+    assert_eq!(ids, [(1, false), (2, true)]);
+    let states = processors[0].0.cst().unwrap().unwrap().unwrap();
+    assert_eq!(states.len(), 2);
+    assert_eq!(states[1].kind, 2);
+    assert_eq!(states[1].latency_us, 70);
+    assert_eq!(
+        states[1].entry,
+        processor::Entry::FixedHardware {
+            address: 0x10,
+            vendor: 1,
+            class: 2,
+            access_size: 3
+        }
+    );
+    assert!(processors[1].0.cst().unwrap().is_none());
+    // CPU0 grants its _OSC; CPU1 has none, so both are given _PDC, which
+    // only CPU1 has.
+    let granted = processors[0].0.osc(&[0; 16], 1, &[0, 0x31a]).unwrap();
+    assert_eq!(granted, Ok(std::vec![0, 0x31a]));
+    let declaration = session
+        .processor_idle(processor::capabilities(true))
+        .unwrap();
+    assert_eq!(
+        declaration.handshake,
+        processor::Handshake::Pdc {
+            accepted: 1,
+            present: 2
+        }
+    );
+    let apics: Vec<_> = declaration
+        .processors
+        .iter()
+        .map(|declared| {
+            (
+                declared.apic,
+                declared
+                    .cst
+                    .as_ref()
+                    .map(|states| states.as_ref().map(Vec::len)),
+            )
+        })
+        .collect();
+    assert_eq!(apics, [(0, Some(Ok(2))), (3, None)]);
+    session.shutdown().unwrap();
+}
+
+#[test]
+fn osc_errors_fail_queries_and_unknown_uuids_as_linux_checks() {
+    // A request whose capabilities were masked still took effect.
+    assert_eq!(
+        osc_result(0, std::vec![0x10, 0x100]),
+        Ok(std::vec![0x10, 0x100])
+    );
+    assert_eq!(osc_result(0, std::vec![0x2, 0]), Ok(std::vec![0x2, 0]));
+    assert_eq!(osc_result(0, std::vec![0x4, 0]), Err(Osc::Refused(0x4)));
+    // A query ignores masking but fails on any other error.
+    assert_eq!(osc_result(1, std::vec![0x11, 0]), Ok(std::vec![0x11, 0]));
+    assert_eq!(osc_result(1, std::vec![0x9, 0]), Err(Osc::Refused(0x9)));
+    // Undefined bits are not errors.
+    assert_eq!(osc_result(0, std::vec![0x80, 0]), Ok(std::vec![0x80, 0]));
+}
+
+#[test]
+fn device_properties_come_from_the_dsd_properties_set() {
+    let _serial = TEST_SERIAL.lock().unwrap();
+    // `op`, then PkgLength over `body`, then `body` (one or two length bytes).
+    let enclose = |op: &[u8], body: &[u8]| {
+        let length = if body.len() + 1 < 64 {
+            std::vec![(body.len() + 1) as u8]
+        } else {
+            let total = body.len() + 2;
+            std::vec![0x40 | (total & 0xf) as u8, (total >> 4) as u8]
+        };
+        [op, &length, body].concat()
+    };
+    let package = |entries: &[Vec<u8>]| {
+        let body = [&[entries.len() as u8][..], &entries.concat()].concat();
+        enclose(&[0x12], &body)
+    };
+    let pair = |key: &str, value: u8| {
+        let string = [&[0x0d][..], key.as_bytes(), &[0]].concat();
+        package(&[string, std::vec![value]]) // Zero or One
+    };
+    let uuid = |bytes: &[u8; 16]| enclose(&[0x11], &[&[0x0a, 0x10][..], bytes].concat());
+    let dsd = package(&[
+        uuid(&[0; 16]),
+        package(&[pair("IMR_VALID", 1)]),
+        uuid(&DEVICE_PROPERTIES),
+        // An entry that is not a (key, value) pair: the whole set is skipped.
+        package(&[pair("IMR_VALID", 1), std::vec![0x0a, 7]]),
+        uuid(&DEVICE_PROPERTIES),
+        package(&[pair("IMR_VALID", 0), pair("WAKE_SUPPORTED", 1)]),
+    ]);
+    // Scope (\_SB) { Device (NHI0) { Name (_DSD, ...) } }
+    let name = [&[0x08][..], b"_DSD", &dsd].concat();
+    let device = enclose(&[0x5b, 0x82], &[&b"NHI0"[..], &name].concat());
+    let scope = enclose(&[0x10], &[&b"\\_SB_"[..], &device].concat());
+    let mut dsdt = include_bytes!("fixtures/namespace.aml").to_vec();
+    dsdt.extend(scope);
+    let length = dsdt.len() as u32;
+    dsdt[4..8].copy_from_slice(&length.to_le_bytes());
+    checksum(&mut dsdt, 9);
+    let (provider, _) = fixture_dsdt(dsdt);
+    // SAFETY: test provider owns all services; singleton serialized.
+    let session = unsafe { Session::start(provider, Mode::InterpreterOnly) }.unwrap();
+    let nhi = session.handle("\\_SB.NHI0").unwrap();
+    // The first, foreign set and the malformed one are passed over.
+    assert!(matches!(
+        nhi.property("IMR_VALID"),
+        Ok(Some(Value::Integer(0)))
+    ));
+    assert!(matches!(
+        nhi.property("WAKE_SUPPORTED"),
+        Ok(Some(Value::Integer(1)))
+    ));
+    assert!(matches!(nhi.property("MISSING"), Ok(None)));
+    let ucsi = session.handle("\\_SB.UCSI").unwrap();
+    assert!(matches!(ucsi.property("IMR_VALID"), Ok(None)));
+    session.shutdown().unwrap();
+}
+
+#[test]
 fn wake_gpes_follow_prw_and_every_notification_reaches_the_global_handler() {
     let _serial = TEST_SERIAL.lock().unwrap();
     let mut dsdt = include_bytes!("fixtures/namespace.aml").to_vec();

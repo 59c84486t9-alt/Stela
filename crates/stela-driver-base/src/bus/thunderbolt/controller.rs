@@ -4,7 +4,8 @@
 //! Native NHI controller preparation from Linux pci.c/nhi.c.
 //!
 //! Intel force-power/FW_READY/LTR, USB4v2 host reset and interrupt
-//! masking. This never claims CM ownership, enables PCI bus mastering, supplies
+//! masking, which `nhi_probe` runs before either connection manager starts.
+//! This never claims CM ownership, enables PCI bus mastering, supplies
 //! an identity DMA domain or starts rings/tunnels. Platform grants precede it.
 use super::ring::{CAPABILITIES, Registers};
 use crate::bus::pci::ConfigSpace;
@@ -62,6 +63,11 @@ impl Profile {
         } else {
             InterruptStyle::Usb4MaskClear
         }
+    }
+    /// The NHI profile `pci.c::nhi_ids` gives this identity, by its 24-bit
+    /// class code.
+    pub fn identify(vendor: u16, device: u16, class: u32) -> Result<Self, Error> {
+        Self::select(vendor, device, class)
     }
     fn select(vendor: u16, device: u16, class: u32) -> Result<Self, Error> {
         if vendor == 0 || vendor == u16::MAX || device == u16::MAX || class == 0xff_ffff {
@@ -189,8 +195,9 @@ impl<'a, C: ConfigSpace, R: Registers> Controller<'a, C, R> {
     /// ConfigSpace and Registers identify the same live physical NHI
     /// requester, ownership/reset epoch and BAR0. The kept Registers owns
     /// its PCI function/MMIO/power reservation, including quarantine.
-    /// Native ACPI/platform services positively granted software CM ownership;
-    /// no firmware ICM or other owner controls this NHI. Shared power
+    /// The platform selected the connection manager as Linux's
+    /// `nhi_select_cm` does (firmware ICM, or a software CM), and no other
+    /// host software controls this NHI or its rings. Shared power
     /// resources and PCI D0/memory decode are established and kept. The
     /// platform resolves the firmware IMR_VALID property and rejects invalid
     /// firmware instead of substituting an unknown/default-success result. All

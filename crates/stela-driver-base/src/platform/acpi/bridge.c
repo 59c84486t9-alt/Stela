@@ -266,6 +266,19 @@ acpi_status stela_acpi_evaluate(acpi_handle handle, const char *path, union acpi
 acpi_status stela_acpi_walk(const char *hid, acpi_walk_callback callback, void *context) {
     return acpi_get_devices((char *)hid, callback, context, 0);
 }
+acpi_status stela_acpi_walk_processors(acpi_walk_callback callback, void *context) {
+    return acpi_walk_namespace(ACPI_TYPE_PROCESSOR, ACPI_ROOT_OBJECT, ACPI_UINT32_MAX, callback, 0, context, 0);
+}
+/* Linux acpi_processor_get_info: a Processor object's ProcessorID. */
+acpi_status stela_acpi_processor_id(acpi_handle handle, u32 *id) {
+    union acpi_object object;
+    struct acpi_buffer buffer = {sizeof(object), &object};
+    acpi_status status = acpi_evaluate_object(handle, 0, 0, &buffer);
+    if (ACPI_FAILURE(status)) return status;
+    if (object.type != ACPI_TYPE_PROCESSOR) return AE_TYPE;
+    *id = object.processor.proc_id;
+    return AE_OK;
+}
 u64 stela_acpi_layout(u32 field) {
     switch(field) {
     case 0: return sizeof(struct stela_acpi_services);

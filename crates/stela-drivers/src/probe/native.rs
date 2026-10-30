@@ -26,9 +26,13 @@ use crate::{
         wifi::mediatek,
     },
     storage::nvme,
+    usb::ehci,
 };
-use alloc::{boxed::Box, string::String, sync::Arc, vec::Vec};
-use core::any::Any;
+use alloc::{boxed::Box, rc::Rc, string::String, sync::Arc, vec::Vec};
+use core::{any::Any, cell::RefCell};
+
+pub mod hda;
+pub mod usb4;
 
 /// A Broadcom Tigon3 adapter over owned BAR0 and APE mappings.
 pub type Tg3 = tg3::Packet<tg3::io::Mmio<OwnedConfig>, Clock>;
@@ -76,6 +80,12 @@ pub(super) enum Kind {
     /// A Broadcom PCIe Bluetooth function, as `bcm4377_devid_table` lists
     /// them.
     Bcm4377,
+    /// An EHCI host controller (class 0c0320).
+    Ehci,
+    /// An HD Audio controller the bounded identity table admits.
+    Hda,
+    /// A USB4/Thunderbolt host interface, as `pci.c::nhi_ids` lists them.
+    Usb4,
 }
 
 impl Kind {
@@ -103,6 +113,18 @@ impl Kind {
             && bcm4377::Chip::of_device(function.device).is_some()
         {
             Some(Self::Bcm4377)
+        } else if function.class == ehci::CLASS {
+            Some(Self::Ehci)
+        } else if crate::audio::hda::pci::identify(function).is_ok() {
+            Some(Self::Hda)
+        } else if crate::bus::thunderbolt::controller::Profile::identify(
+            function.vendor,
+            function.device,
+            u32::from_be_bytes([0, function.class[0], function.class[1], function.class[2]]),
+        )
+        .is_ok()
+        {
+            Some(Self::Usb4)
         } else {
             None
         }
@@ -184,6 +206,45 @@ fn map(
 /// What a failed attach leaves: the error and any owner that must outlive
 /// the device because it may hold mappings or DMA.
 pub(super) type Failure = (Error, Option<Box<dyn Any>>);
+
+/// Attach an EHCI host controller from its claimed function, BAR0 registers
+/// and requester domain, returning the controller and that domain.
+///
+/// # Safety
+/// [`NativeServices`]' contract holds for `services`, `clock` is the
+/// handoff's calibrated clock, and the handoff took this controller from
+/// its BIOS owner and reset every companion controller of its roots.
+#[expect(
+    clippy::result_large_err,
+    reason = "a failed attach hands back the owners that must outlive the device"
+)]
+pub(super) unsafe fn ehci(
+    services: &dyn NativeServices,
+    address: Address,
+    clock: Clock,
+) -> Result<(ehci::host::Shared, Arc<dyn DmaDomain>), Failure> {
+    let refused = |error: ServiceError| (Error::Native(error), None);
+    let Claimed {
+        function,
+        domain,
+        bars,
+    } = claim(services, address).map_err(refused)?;
+    let registers = map(services, address, &bars, 0).map_err(refused)?;
+    let resources = ehci::NativeResources {
+        pci: function,
+        registers,
+        domain: domain.clone(),
+        memory: services.pages(),
+        clock,
+    };
+    // SAFETY: the mount claimed the stopped function, its BAR0 mapped
+    // uncached and its own domain, with its interrupts masked; the caller's
+    // handoff stopped the BIOS owner and the companions.
+    match unsafe { ehci::attach(resources) } {
+        Ok(controller) => Ok((Rc::new(RefCell::new(controller)), domain)),
+        Err(failure) => Err((Error::Ehci(failure.error), Some(Box::new(failure)))),
+    }
+}
 
 /// Attach a Tigon3 adapter: BAR0 holds the MAC registers, BAR2 the APE.
 ///

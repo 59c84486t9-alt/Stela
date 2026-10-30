@@ -137,7 +137,7 @@ impl Context {
 mod tests {
     extern crate std;
     use super::*;
-    use crate::usb::xhci::SuperSpeedCompanion;
+    use crate::usb::descriptor::SuperSpeedCompanion;
 
     fn endpoint(kind: u8, packet: u16, interval: u8) -> Endpoint {
         Endpoint {

@@ -227,7 +227,9 @@ impl<'a> Services<'a> {
 // root reaches; a claimed function is stopped before `from_stopped_pci`
 // checks it. Every domain is the passthrough domain, which is what the
 // requesters have with the remapping units off. The ACPI namespace is
-// offered only with the i8042's interrupts masked.
+// offered only with the i8042's interrupts masked; ring 0 reaches the i8042's
+// and each claimed i801's ports, which nothing else here uses. Firmware
+// memory is the AML provider's own mapping of RAM the map leaves to firmware.
 unsafe impl NativeServices for Services<'_> {
     fn embedded_controller(
         &self,
@@ -363,5 +365,28 @@ unsafe impl NativeServices for Services<'_> {
 
     fn acpi(&self) -> Option<&'static stela_drivers::platform::acpi::Session> {
         self.acpi.map(HostAcpi::session)
+    }
+
+    fn firmware_memory(
+        &self,
+        physical: u64,
+        bytes: usize,
+    ) -> Result<core::ptr::NonNull<u8>, ServiceError> {
+        let acpi = self.acpi.ok_or(ServiceError::Unavailable)?;
+        let end = physical
+            .checked_add(bytes as u64)
+            .filter(|_| bytes != 0)
+            .ok_or(ServiceError::Refused(
+                "firmware memory range is empty or wraps",
+            ))?;
+        if !self.mmio.firmware_owned(physical, end) {
+            return Err(ServiceError::Refused(
+                "firmware memory overlaps RAM the host allocates",
+            ));
+        }
+        acpi.firmware_memory(physical, bytes as u64)
+            .ok_or(ServiceError::Refused(
+                "firmware memory lies beyond the identity map",
+            ))
     }
 }

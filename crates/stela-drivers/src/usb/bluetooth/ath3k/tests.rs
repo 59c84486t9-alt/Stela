@@ -184,7 +184,11 @@ fn model(
     body: usize,
 ) -> (Bootloader<Model>, Catalog, Rc<RefCell<Trace>>) {
     let device = device(kind, 1);
-    let binding = Binding::new(&device, &xhci::interfaces(&device.configuration)[0]).unwrap();
+    let binding = Binding::new(
+        &device,
+        &crate::usb::descriptor::interfaces(&device.configuration)[0],
+    )
+    .unwrap();
     let hardware = UsbIdentity::read(&device).hardware();
     let patch = image(body);
     let config = vec![0xa5; 20 + body];
@@ -287,17 +291,17 @@ fn source_alias_revision_and_raw_interface_selection_is_exact() {
     );
     for kind in [Kind::Ar3011, Kind::Ar3012] {
         let d = device(kind, 1);
-        let mut i = xhci::interfaces(&d.configuration)[0].clone();
+        let mut i = crate::usb::descriptor::interfaces(&d.configuration)[0].clone();
         assert!(Binding::new(&d, &i).is_ok());
         i.number = 1;
         assert!(Binding::new(&d, &i).is_err());
         let mut d = d.clone();
         d.configuration[20] = 3;
-        let i = &xhci::interfaces(&d.configuration)[0];
+        let i = &crate::usb::descriptor::interfaces(&d.configuration)[0];
         assert!(Binding::new(&d, i).is_err());
     }
     let d = device(Kind::Ar3012, 2);
-    assert!(Binding::new(&d, &xhci::interfaces(&d.configuration)[0]).is_err());
+    assert!(Binding::new(&d, &crate::usb::descriptor::interfaces(&d.configuration)[0]).is_err());
 }
 #[test]
 fn monolithic_and_split_images_complete_real_raw_protocol_with_exact_body_boundaries() {
@@ -500,7 +504,10 @@ fn real_bind_configures_only_raw_output_and_keeps_the_completed_uploader() {
             .iter()
             .filter(|(s, _)| s[0] == 0x40)
             .collect::<Vec<_>>(),
-        [&(xhci::setup(0x40, 1, 0, 0, 20), bytes[..20].to_vec())]
+        [&(
+            crate::usb::descriptor::setup(0x40, 1, 0, 0, 20),
+            bytes[..20].to_vec()
+        )]
     );
     assert_eq!(
         observed.outgoing,

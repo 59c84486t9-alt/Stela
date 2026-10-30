@@ -259,8 +259,11 @@ fn standard<C: ConfigSpace>(config: &C, status: u16) -> Result<(), ClaimError> {
 }
 
 fn extended<C: ConfigSpace>(config: &C) -> Result<(), ClaimError> {
+    // Linux `pci_cfg_space_size_ext`: an all-ones first extended header means
+    // no extended space, as on every conventional PCI function. A removal is
+    // caught by the identity read that follows the walk.
     if config.read32(0x100) == u32::MAX {
-        return Err(ClaimError::ReadFailed { offset: 0x100 });
+        return Ok(());
     }
     let mut singleton = 0u32;
     for entry in config.extended_capabilities() {

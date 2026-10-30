@@ -120,7 +120,7 @@ pub(in crate::usb) fn discover(
                 controller.borrow_mut().device(device.id)?.control(
                     setup(
                         0x01,
-                        crate::usb::xhci::SET_INTERFACE,
+                        crate::usb::descriptor::SET_INTERFACE,
                         u16::from(interface.alternate),
                         u16::from(interface.number),
                         0,

@@ -18,6 +18,8 @@ pub(crate) struct Response {
     pub(crate) home_channel: Option<u8>,
     pub(crate) wrong_roc_token: bool,
     pub(crate) client_commands: Vec<Vec<u8>>,
+    /// Every ROC request the client published, an MLO ROC's links in order.
+    pub(crate) roc_requests: Vec<Vec<u8>>,
     pub(crate) peers: alloc::collections::BTreeMap<u16, Vec<u8>>,
     pub(crate) receive_ba: alloc::collections::BTreeMap<(u16, u8), Vec<u8>>,
     pub(crate) transmit_ba: alloc::collections::BTreeMap<(u16, u8), Vec<u8>>,
@@ -72,6 +74,7 @@ impl Default for Response {
             home_channel: None,
             wrong_roc_token: false,
             client_commands: Vec::new(),
+            roc_requests: Vec::new(),
             peers: alloc::collections::BTreeMap::new(),
             receive_ba: alloc::collections::BTreeMap::new(),
             transmit_ba: alloc::collections::BTreeMap::new(),
@@ -331,8 +334,11 @@ unsafe impl QueueIo for DeviceIo {
                 if command == 0x27 && model.client_execution {
                     let body = &packet[48..];
                     if body[4] == 0 {
-                        assert_eq!(body.len(), 28);
+                        // A ROC, or an MLO ROC with its UNI_ROC_SUB_LINK; the
+                        // grant answers the first.
+                        assert!(body.len() == 28 || (body.len() == 52 && body[28] == 3));
                         assert_eq!(&body[4..8], &[0, 0, 24, 0]);
+                        model.roc_requests.push(body.to_vec());
                         model.roc_channel = Some(body[10]);
                         let mut grant = vec![0; 68];
                         grant[..4].copy_from_slice(&(7u32 << 27).to_le_bytes());
@@ -345,7 +351,7 @@ unsafe impl QueueIo for DeviceIo {
                         grant[55] = body[10];
                         grant[57] = body[12];
                         grant[59] = body[14];
-                        grant[61] = 0;
+                        grant[61] = body[19];
                         grant[62] = 0;
                         grant[64..68].copy_from_slice(&body[20..24]);
                         device_receive(&self.rx, &grant, true, 0);
@@ -507,7 +513,8 @@ unsafe impl QueueIo for DeviceIo {
                 }
                 if model.client_execution {
                     model.client_commands.push(packet.clone());
-                    if command == 2 && packet[52] == 0 && packet.len() > 84 {
+                    // The model transmits on BSS 0, an MLD association's setup link.
+                    if command == 2 && packet[48] == 0 && packet[52] == 0 && packet.len() > 84 {
                         let mut rest = &packet[52..];
                         while !rest.is_empty() {
                             let len = u16::from_le_bytes(rest[2..4].try_into().unwrap()) as usize;
@@ -1543,6 +1550,54 @@ pub(crate) fn initial_context(chip: Chip, bss: u8) -> super::super::mcu::device:
         },
         address: crate::Mac([2, 1, 2, 3, 4, bss]),
     }
+}
+#[test]
+fn an_interface_rebinds_its_slots_to_a_station_mld_link_address() {
+    use device::{Error, Interface, Step};
+    let response = Arc::new(Mutex::new(Response {
+        device_execution: true,
+        ..Response::default()
+    }));
+    let (mut mailbox, _, _, _) = setup_controlled(Chip::Mt7925, true, false, 4, response.clone());
+    let context = initial_context(Chip::Mt7925, 0);
+    // SAFETY: modeled exclusive interface resources with no earlier users.
+    let mut interface = unsafe { Interface::claim(&mailbox, context, ()) }.unwrap();
+    interface.activate(&mut mailbox).unwrap();
+    let link = super::super::mcu::device::Context {
+        address: crate::Mac([2, 0xa, 0, 0, 0, 1]),
+        ..context
+    };
+    interface.rebind(&mut mailbox, link).unwrap();
+    assert_eq!(interface.registered_context(), Some(link));
+    assert!(response.lock().unwrap().device_active && response.lock().unwrap().bss_active);
+    assert_eq!(
+        interface
+            .replies()
+            .iter()
+            .map(|r| r.step)
+            .collect::<Vec<_>>(),
+        vec![
+            Step::DeactivateBss,
+            Step::DeactivateDevice,
+            Step::ActivateDevice,
+            Step::ActivateBss
+        ]
+    );
+    // Other firmware slots are another interface's to claim.
+    let other = super::super::mcu::device::Context {
+        bss_index: 1,
+        ..link
+    };
+    assert!(matches!(
+        interface.rebind(&mut mailbox, other),
+        Err(Error::OtherSlots)
+    ));
+    // Back to the single-link station.
+    interface.rebind(&mut mailbox, context).unwrap();
+    assert_eq!(interface.registered_context(), Some(context));
+    let receipt = interface.deactivate(&mut mailbox).unwrap();
+    // SAFETY: the model has no users of the removed registration.
+    unsafe { interface.retire_after_drain(receipt) }.unwrap();
 }
 #[test]
 fn native_initial_interface_requires_both_real_commands_and_later_user_drain() {

@@ -18,8 +18,35 @@ pub mod child;
 mod forcepad;
 pub mod passthrough;
 
-const GET_INFO: u8 = 0xe9;
 const EXTENDED: u32 = 1 << 23;
+/// SYN_CAP_INTERTOUCH.
+const INTERTOUCH: u32 = 1 << 14;
+/// Linux `topbuttonpad_pnp_ids`.
+const TOP_BUTTON_PADS: &[&str] = &[
+    "LEN0017", "LEN0018", "LEN0019", "LEN0023", "LEN002A", "LEN002B", "LEN002C", "LEN002D",
+    "LEN002E", "LEN0033", "LEN0034", "LEN0035", "LEN0036", "LEN0037", "LEN0038", "LEN0039",
+    "LEN0041", "LEN0042", "LEN0045", "LEN0047", "LEN2000", "LEN2001", "LEN2002", "LEN2003",
+    "LEN2004", "LEN2005", "LEN2006", "LEN2007", "LEN2008", "LEN2009", "LEN200A", "LEN200B",
+];
+/// Linux `smbus_pnp_ids`: with the top-button pads, the pads whose
+/// InterTouch Linux uses by default.
+const INTERTOUCH_PADS: &[&str] = &[
+    "DLL0597", "DLL060d", "LEN0048", "LEN0046", "LEN0049", "LEN004a", "LEN005b", "LEN005e",
+    "LEN006c", "LEN007a", "LEN0071", "LEN0072", "LEN0073", "LEN0091", "LEN0092", "LEN0093",
+    "LEN0096", "LEN0097", "LEN0099", "LEN009b", "LEN0402", "LEN040f", "LEN0411", "LEN200f",
+    "LEN2044", "LEN2054", "LEN2055", "LEN2058", "LEN205b", "LEN2068", "SYN1221", "SYN3003",
+    "SYN3015", "SYN3052", "SYN3221", "SYN323d", "SYN3257", "TOS01f6", "TOS0213",
+];
+
+/// Linux `psmouse_matches_pnp_id`: whether a `PNP:` firmware identifier
+/// lists one of `ids`, without case.
+fn pnp_matches(firmware_id: &str, ids: &[&str]) -> bool {
+    firmware_id.strip_prefix("PNP: ").is_some_and(|listed| {
+        listed
+            .split(' ')
+            .any(|id| ids.iter().any(|name| id.eq_ignore_ascii_case(name)))
+    })
+}
 const AGM_CAPABILITIES: u32 = (1 << 19) | (1 << 11);
 const FRAME_LIMIT: usize = 32;
 
@@ -172,6 +199,29 @@ impl Engine {
             queries: Vec::new(),
             query: None,
         }
+    }
+    /// Linux `synaptics_setup_intertouch` by default: InterTouch for a pad
+    /// that has it and that `topbuttonpad_pnp_ids` or `smbus_pnp_ids` lists,
+    /// except T440p board 2722.
+    pub(super) fn intertouch(&self) -> Option<Companion> {
+        let c = self.capabilities.as_ref()?;
+        let firmware_id = self.firmware_id.as_deref()?;
+        let listed =
+            pnp_matches(firmware_id, TOP_BUTTON_PADS) || pnp_matches(firmware_id, INTERTOUCH_PADS);
+        let broken = c.board == Some(2722) && pnp_matches(firmware_id, &["LEN0036"]);
+        (c.extended_0c & INTERTOUCH != 0 && listed && !broken).then_some(Companion::Rmi)
+    }
+    /// An engine for the touchpad `firmware_id` names: a `PNP:` identifier
+    /// selects its ForcePad and board coordinate profiles.
+    pub(super) fn for_firmware(high_rate: bool, firmware_id: Option<&str>) -> Self {
+        let mut engine = Self::new(high_rate);
+        if let Some(firmware_id) = firmware_id.filter(|id| id.starts_with("PNP: ")) {
+            engine.firmware_id = Some(alloc::string::String::from(firmware_id));
+            if forcepad::matches(firmware_id) {
+                engine.forcepad = Some(forcepad::State::default());
+            }
+        }
+        engine
     }
     pub(super) fn backpressured(&self) -> bool {
         self.frames.len() + self.advanced.len() + self.passthrough.len() >= FRAME_LIMIT
@@ -500,11 +550,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             return Err(ErrorKind::InvalidConfiguration.into());
         }
         let mut controller = Self::new_synaptics(registers, timer, config, high_rate)?;
-        let engine = controller.synaptics.as_mut().unwrap();
-        engine.firmware_id = Some(alloc::string::String::from(firmware_id));
-        if forcepad::matches(firmware_id) {
-            engine.forcepad = Some(forcepad::State::default());
-        }
+        controller.synaptics = Some(Engine::for_firmware(high_rate, Some(firmware_id)));
         Ok(controller)
     }
     pub fn synaptics_capabilities(&self) -> Option<&Capabilities> {

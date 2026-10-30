@@ -28,7 +28,11 @@ pub(crate) fn peer(controller: Shared, dma: &mut dyn DmaAllocator) -> Bootloader
         vendor_ethernet_tcr: None,
         vendor_ethernet_revision: None,
     };
-    let binding = Binding::new(&device, &xhci::interfaces(&device.configuration)[0]).unwrap();
+    let binding = Binding::new(
+        &device,
+        &crate::usb::descriptor::interfaces(&device.configuration)[0],
+    )
+    .unwrap();
     controller
         .borrow_mut()
         .device(device.id)
@@ -44,11 +48,11 @@ pub(crate) fn peer(controller: Shared, dma: &mut dyn DmaAllocator) -> Bootloader
     let mut peer = Bootloader::attach(controller, binding, dma).unwrap();
     peer.io.clock.ticks_per_microsecond = 1000;
     peer.io
-        .control(xhci::setup(0x40, 1, 0, 0, 1), &[0x5a])
+        .control(crate::usb::descriptor::setup(0x40, 1, 0, 0, 1), &[0x5a])
         .unwrap();
     assert_eq!(
         peer.io
-            .control_read(xhci::setup(0xc0, 5, 0, 0, 1))
+            .control_read(crate::usb::descriptor::setup(0xc0, 5, 0, 0, 1))
             .unwrap()
             .len(),
         1
@@ -66,10 +70,14 @@ pub(crate) fn refuse(peer: &mut Bootloader<Host>, target: &Shared) {
     let before = peer.io.buffer.bytes().to_vec();
     assert!(
         peer.io
-            .control(xhci::setup(0x40, 1, 0, 0, 1), &[0x7a])
+            .control(crate::usb::descriptor::setup(0x40, 1, 0, 0, 1), &[0x7a])
             .is_err()
     );
-    assert!(peer.io.control_read(xhci::setup(0xc0, 5, 0, 0, 1)).is_err());
+    assert!(
+        peer.io
+            .control_read(crate::usb::descriptor::setup(0xc0, 5, 0, 0, 1))
+            .is_err()
+    );
     assert!(peer.io.write_firmware(&[0x7a; 64], 3_000_000).is_err());
     assert!(peer.io.write_firmware(&[], 0).is_err());
     assert!(peer.io.quiesce_bulk().is_err());

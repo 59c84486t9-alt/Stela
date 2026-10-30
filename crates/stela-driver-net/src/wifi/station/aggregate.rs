@@ -23,28 +23,34 @@ impl Station {
         }
         self.validate_association_context(group.context())?;
         let join = self.join.as_ref().ok_or(Error::NotAssociated)?;
-        let channel = self.current_channel().ok_or(Error::NotAssociated)?;
+        let (local, peer) = self.addresses()?;
+        // One parent's members share a transmitter: the AP, or for
+        // group-addressed members the AP of their link.
+        let mut sender = None;
         for frame in group.members() {
+            let (view, link) = self.mld_view(frame)?;
+            let frame = view.as_ref();
             let h = frame.header();
             if !h.data_present() || h.control & 0x0300 != 0x0200 {
                 return Err(Error::Unsupported("nonstation FromDS aggregate").into());
             }
-            if h.transmitter != Some(join.bssid)
-                || (h.receiver != self.local && !h.receiver.is_multicast())
+            let transmitter = if h.receiver.is_multicast() {
+                link.ap
+            } else {
+                peer
+            };
+            if h.transmitter != Some(transmitter)
+                || sender
+                    .replace(transmitter)
+                    .is_some_and(|other| other != transmitter)
+                || (h.receiver != local && !h.receiver.is_multicast())
                 || (h.receiver.is_multicast()
-                    && Mac(frame.bytes()[16..22].try_into().unwrap()) == self.local)
+                    && Mac(frame.bytes()[16..22].try_into().unwrap()) == local)
             {
                 return Err(Error::Unsupported("aggregate peer/receiver").into());
             }
-            if (
-                frame.radio.band,
-                frame.radio.channel,
-                frame.radio.frequency_mhz,
-            ) != (channel.band, channel.number, channel.frequency_mhz)
-            {
-                return Err(Error::WrongChannel.into());
-            }
         }
+        let transmitter = sender.ok_or(Error::Unsupported("empty aggregate"))?;
         let candidate = group.checked()?;
         match join.policy {
             PortPolicy::Open => {
@@ -60,9 +66,9 @@ impl Station {
                 for frame in group.members() {
                     let h = frame.header();
                     let expected = if h.receiver.is_multicast() {
-                        KeyScope::Group(join.bssid)
+                        KeyScope::Group(transmitter)
                     } else {
-                        KeyScope::Pairwise(join.bssid)
+                        KeyScope::Pairwise(transmitter)
                     };
                     if key.scope() != expected
                         || key.cipher()

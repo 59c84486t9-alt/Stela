@@ -438,6 +438,10 @@ pub(crate) fn table(signature: &[u8; 4], length: usize, revision: u8) -> Vec<u8>
     bytes
 }
 pub(crate) fn fixture_dsdt(dsdt: Vec<u8>) -> (Services, Arc<Counts>) {
+    fixture_tables(dsdt, vec![])
+}
+/// The fixture platform with `tables` listed in the XSDT after the FADT.
+pub(crate) fn fixture_tables(dsdt: Vec<u8>, extra: Vec<Vec<u8>>) -> (Services, Arc<Counts>) {
     let counts = Arc::new(Counts::default());
     let mut rsdp = vec![0; 36];
     rsdp[..8].copy_from_slice(b"RSD PTR ");
@@ -447,8 +451,12 @@ pub(crate) fn fixture_dsdt(dsdt: Vec<u8>) -> (Services, Arc<Counts>) {
     rsdp[24..32].copy_from_slice(&0x2000u64.to_le_bytes());
     checksum(&mut rsdp[..20], 8);
     checksum(&mut rsdp, 32);
-    let mut xsdt = table(b"XSDT", 44, 1);
+    let mut xsdt = table(b"XSDT", 44 + 8 * extra.len(), 1);
     xsdt[36..44].copy_from_slice(&0x3000u64.to_le_bytes());
+    for index in 0..extra.len() {
+        let address = 0x5000 + 0x1000 * index as u64;
+        xsdt[44 + 8 * index..52 + 8 * index].copy_from_slice(&address.to_le_bytes());
+    }
     checksum(&mut xsdt, 9);
     let mut fadt = table(b"FACP", 276, 6);
     fadt[56..60].copy_from_slice(&0x1000u32.to_le_bytes());
@@ -459,12 +467,15 @@ pub(crate) fn fixture_dsdt(dsdt: Vec<u8>) -> (Services, Arc<Counts>) {
     fadt[140..148].copy_from_slice(&0x4000u64.to_le_bytes());
     checksum(&mut fadt, 9);
     let context = Box::into_raw(Box::new(TestPlatform {
-        tables: vec![
+        tables: [
             (0x1000, rsdp),
             (0x2000, xsdt),
             (0x3000, fadt),
             (0x4000, dsdt),
-        ],
+        ]
+        .into_iter()
+        .chain((0x5000..).step_by(0x1000).zip(extra))
+        .collect(),
         leases: Mutex::new(BTreeMap::new()),
         work: Mutex::new(VecDeque::new()),
         counts: counts.clone(),

@@ -31,7 +31,7 @@ use core::{
     arch::asm,
     cell::{Cell, RefCell},
     ffi::{c_char, c_void},
-    ptr,
+    ptr::{self, NonNull},
     sync::atomic::{AtomicBool, AtomicU32, Ordering},
 };
 use stela_drivers::{
@@ -40,6 +40,7 @@ use stela_drivers::{
         Interrupt, Mode, PciId, SERVICES_ABI_BYTES, SERVICES_ABI_VERSION, Services, Session,
         Status, Value, Work,
     },
+    usb::typec::ucsi::acpi::attachment as ucsi,
 };
 use stela_engine::machine::mmu::placement::Placement;
 
@@ -57,6 +58,9 @@ const WAIT_FOREVER: u16 = 0xffff;
 const SIGNAL_FATAL: u32 = 0;
 /// RFLAGS.IF.
 const INTERRUPTS: u64 = 1 << 9;
+/// Connector changes one poll reads from a UCSI manager, bounding a port that
+/// keeps changing; the rest stay pending for the next poll.
+const UCSI_SERVICE_BUDGET: usize = 16;
 const PCI_ADDRESS: u16 = 0xcf8;
 const PCI_DATA: u16 = 0xcfc;
 /// The header [`allocate`] keeps before each allocation: its layout's size.
@@ -1030,6 +1034,13 @@ impl HostAcpi {
         }
         Ok(None)
     }
+    /// `bytes` of firmware RAM at `physical` through the mapping AML's
+    /// SystemMemory regions reach it by, kept for the program as theirs are.
+    pub(super) fn firmware_memory(&self, physical: u64, bytes: u64) -> Option<NonNull<u8>> {
+        // SAFETY: this permanent provider is held by the leaked Session.
+        let provider = unsafe { &*self.provider };
+        provider.reach(physical, bytes).and_then(NonNull::new)
+    }
     pub(super) fn retain_power(&self, power: stela_drivers::probe::Power) {
         *self.power.borrow_mut() = power;
     }
@@ -1127,11 +1138,72 @@ impl HostAcpi {
                 output::arguments(format_args!("HOST ACPI lid refresh failed: {error:?}\n"));
             }
         }
+        self.service_ucsi();
         // SAFETY: run Notify/_Q work queued by device methods on the BSP.
         // A budgeted EC continuation owns only its disabled GPE, allowing
         // unrelated fixed events and GPEs to keep making SCI progress.
         if unsafe { drain_work(self.provider.cast_mut().cast()) } != AE_OK {
             output::fatal("ACPI deferred work completion failed");
+        }
+    }
+
+    /// Linux `ucsi_acpi_notify`'s work: each running UCSI manager whose
+    /// Notify arrived reads and acknowledges its connector changes. A manager
+    /// that faults is reported once and left stopped.
+    fn service_ucsi(&self) {
+        let mut power = self.power.borrow_mut();
+        for (index, ucsi) in power.ucsi.iter_mut().enumerate() {
+            if ucsi.state() != ucsi::State::Running || !ucsi.needs_service() {
+                continue;
+            }
+            match ucsi.service(UCSI_SERVICE_BUDGET) {
+                Ok(report) => {
+                    for change in &report.changes {
+                        output::arguments(format_args!(
+                            "HOST USB-C {index} connector {}: {}\n",
+                            change.number.get(),
+                            change.status
+                        ));
+                    }
+                    if let Some(error) = report.error {
+                        output::arguments(format_args!(
+                            "HOST USB-C {index} connector change failed: {error:?}\n"
+                        ));
+                    }
+                }
+                Err(error) => output::arguments(format_args!(
+                    "HOST USB-C {index} manager stopped: {error:?}\n"
+                )),
+            }
+        }
+    }
+
+    /// The firmware's processor idle declaration, once the processors are
+    /// told `capabilities`; `None`, reported, when AML refuses it.
+    pub(super) fn processor_idle(
+        &'static self,
+        capabilities: u32,
+    ) -> Option<stela_drivers::platform::acpi::processor::Declaration> {
+        // SAFETY: this permanent provider is held by the leaked Session.
+        let provider = unsafe { &*self.provider };
+        match provider
+            .executor
+            .call_owned(5_000_000, move || self.session.processor_idle(capabilities))
+        {
+            Ok(Ok(declaration)) => Some(declaration),
+            Ok(Err(error)) => {
+                output::arguments(format_args!(
+                    "UNSUPPORTED ACPI processor idle declaration: ACPICA status {:#x}\n",
+                    error.0
+                ));
+                None
+            }
+            Err(error) => {
+                output::arguments(format_args!(
+                    "ACPI processor idle continuation unavailable: {error}\n"
+                ));
+                None
+            }
         }
     }
 

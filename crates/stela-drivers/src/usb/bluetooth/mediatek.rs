@@ -165,7 +165,7 @@ impl core::fmt::Display for Error {
 impl core::error::Error for Error {}
 pub fn is_candidate(device: &crate::usb::xhci::Device) -> bool {
     UsbIdentity::read(device).candidate()
-        && crate::usb::xhci::interfaces(&device.configuration)
+        && crate::usb::descriptor::interfaces(&device.configuration)
             .iter()
             .any(|i| i.alternate == 0 && (i.class, i.subclass, i.protocol) == (super::CLASS, 1, 1))
 }

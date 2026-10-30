@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! Real vendor EP0/bulk peer, keeping the exact addressed generation.
 use super::super::*;
+use crate::usb::descriptor::*;
 use crate::usb::xhci::{model, model::bind, *};
 
 pub(crate) fn peer(controller: Shared, dma: &mut dyn DmaAllocator) -> UsbEthernet {

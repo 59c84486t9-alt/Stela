@@ -2,7 +2,7 @@
 //! UAC3 power-domain controls adapted from Linux sound/usb/power.c. A SET ACK
 //! alone is insufficient: wait for the specified recovery and observe CUR again.
 use super::{Control, Error};
-use crate::{block::BlockError, usb::xhci::setup};
+use crate::{block::BlockError, usb::descriptor::setup};
 
 const D0: u8 = 0;
 const D1: u8 = 1;

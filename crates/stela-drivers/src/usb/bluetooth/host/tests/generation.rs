@@ -22,7 +22,10 @@ pub(crate) fn peer(controller: Shared, dma: &mut dyn DmaAllocator) -> Hci<Host> 
     // Class request/ordinary receives and interface/profile commands.
     // No firmware initialization, command-credit or radio success is invented.
     peer.io
-        .control(xhci::setup(0x20, 0, 0, 0, 3), &[3, 0x0c, 0])
+        .control(
+            crate::usb::descriptor::setup(0x20, 0, 0, 0, 3),
+            &[3, 0x0c, 0],
+        )
         .unwrap();
     assert_eq!(peer.io.receive(Pipe::Event).unwrap(), None);
     assert_eq!(peer.io.receive(Pipe::Acl).unwrap(), None);
@@ -46,12 +49,15 @@ pub(crate) fn refuse(peer: &mut Hci<Host>, target: &Shared) {
     let before_transmit = peer.io.transmit.bytes().to_vec();
     assert!(
         peer.io
-            .control(xhci::setup(0x20, 0, 0, 0, 3), &[3, 0x0c, 0])
+            .control(
+                crate::usb::descriptor::setup(0x20, 0, 0, 0, 3),
+                &[3, 0x0c, 0]
+            )
             .is_err()
     );
     assert!(
         peer.io
-            .control_read(xhci::setup(0xc0, 1, 0, 0, 64))
+            .control_read(crate::usb::descriptor::setup(0xc0, 1, 0, 0, 64))
             .is_err()
     );
     assert!(peer.io.receive(Pipe::Event).is_err());

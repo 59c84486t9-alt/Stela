@@ -208,11 +208,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
     }
     fn up(s: &State<I, Q, C, S>) -> bool {
         let c = s.client.client.state();
-        Self::active(s)
-            && c.station.port_open(
-                c.ptk.as_ref().map(HardwareKey::slot),
-                c.gtk.as_ref().map(HardwareKey::slot),
-            )
+        Self::active(s) && c.station.port_open(&Client::key_slots(c))
     }
     fn reconcile(s: &mut State<I, Q, C, S>) {
         let epoch = s.client.station().association_epoch();
@@ -300,6 +296,14 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
     }
     pub fn bss(&self) -> impl Iterator<Item = (BssHandle, &scan::result::Bss)> {
         self.state().client.bss()
+    }
+    /// The client's own record of the beacon of the BSS `handle` names, as
+    /// another link of an AP MLD association takes it.
+    pub fn observation(
+        &self,
+        handle: BssHandle,
+    ) -> Result<Arc<super::PmfBssObservation>, LinkControlError> {
+        Ok(self.state().client.observation(handle)?)
     }
     /// The 6 GHz part of a split scan (WIPHY_FLAG_SPLIT_SCAN_6GHZ), planned
     /// from the BSSes this link knows as `cfg80211_scan_6ghz` plans from the
@@ -720,6 +724,20 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
     ) -> Result<KeyIdentity, LinkControlError> {
         let s = self.state_mut();
         let result = s.client.install_key(pairwise, index, material, seed);
+        Self::reconcile(s);
+        Ok(result?)
+    }
+    /// The GTK of the AP of the association's link `link_id`, which the real
+    /// OS supplicant takes from the handshake's MLO GTK KDE.
+    pub fn install_link_key(
+        &mut self,
+        link_id: u8,
+        index: u8,
+        material: &[u8],
+        seed: ReplaySeed,
+    ) -> Result<KeyIdentity, LinkControlError> {
+        let s = self.state_mut();
+        let result = s.client.install_link_key(link_id, index, material, seed);
         Self::reconcile(s);
         Ok(result?)
     }

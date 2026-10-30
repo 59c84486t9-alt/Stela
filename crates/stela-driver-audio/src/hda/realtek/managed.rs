@@ -176,6 +176,17 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         }
         Ok(state)
     }
+    /// Whether the controller's original PCI subsystem selects an OEM
+    /// procedure for `graph`, as Linux's fixup table does.
+    pub(in crate::hda) fn realtek_oem_selected(
+        &mut self,
+        graph: &CodecGraph,
+    ) -> Result<bool, Error> {
+        Ok(self
+            .registers
+            .codec_pci_subsystem()?
+            .is_some_and(|subsystem| super::oem::select(graph.vendor_id, subsystem).is_ok()))
+    }
     /// Cold source-checked ALC882/ALC662-family initialization and kept
     /// held-D0 ownership. Every GPIO/companion-amp policy remains unselected.
     /// Unknown boards use only their firmware analog routes; this is

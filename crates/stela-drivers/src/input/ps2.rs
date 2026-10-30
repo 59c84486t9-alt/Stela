@@ -9,11 +9,13 @@
 //! mask both IRQ routes and provide exclusive controller ownership. This engine
 //! leaves IRQs and set-1 translation disabled. It does not probe unadvertised
 //! ports, active multiplexers or DMI quirks. [`synaptics`] and [`elantech`] supply
-//! explicit absolute touchpad profiles under this same controller. Every
+//! absolute touchpad profiles under this same controller, selected explicitly
+//! or by [`Controller::new_probing`]'s psmouse protocol probe. Every
 //! command is acknowledged; a failed/uncertain command quarantines this owner.
 use super::Input;
 use crate::{Clock, bus::i2c::Timer};
-use alloc::{collections::VecDeque, vec::Vec};
+use alloc::{collections::VecDeque, rc::Rc, vec::Vec};
+use core::cell::RefCell;
 
 pub mod elantech;
 mod keyboard;
@@ -53,6 +55,7 @@ const SET_SCAN: u8 = 0xf0;
 const SET_LEDS: u8 = 0xed;
 const SCALE_ONE_TO_ONE: u8 = 0xe6;
 const SET_RESOLUTION: u8 = 0xe8;
+const GET_INFO: u8 = 0xe9;
 const QUEUE_LIMIT: usize = 64;
 const MAX_ATTEMPTS: usize = 2;
 
@@ -249,6 +252,31 @@ struct Byte {
     received_us: u64,
 }
 
+/// A controller shared with the SMBus companion of its mouse port's touchpad.
+pub type Shared = Rc<RefCell<Controller>>;
+
+/// The SMBus companion Linux uses by default for the touchpad on the mouse
+/// port, as `synaptics_setup_intertouch` and `elantech_setup_smbus` choose it.
+/// The InterTouch platform data (clickpad, top buttons, trackstick buttons)
+/// shapes Linux's input properties, which the mouse emulation does not use.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Companion {
+    /// Synaptics InterTouch: RMI4 at 0x2c.
+    Rmi,
+    /// An Elantech IC with SMBus Host Notify: ELAN at 0x15.
+    Elan,
+}
+
+impl Companion {
+    /// The companion's seven-bit SMBus address.
+    pub fn address(self) -> u8 {
+        match self {
+            Self::Rmi => 0x2c,
+            Self::Elan => 0x15,
+        }
+    }
+}
+
 /// Owns the controller for both ports, including cross-port bytes received
 /// while the sibling executes a command. No IRQ worker or firmware user runs
 /// concurrently with this polled engine.
@@ -267,7 +295,18 @@ pub struct Controller<R = PortIo, T = Clock> {
     mouse: mouse::Mouse,
     synaptics: Option<synaptics::Engine>,
     elantech: Option<elantech::Engine>,
+    /// The mouse port's `PNP:` identifier when its touchpad protocol is
+    /// probed at the first initialization.
+    probe: Option<Probe>,
+    /// The mouse port is handed to its SMBus companion, and its bytes are
+    /// dropped, as `psmouse_smbus_process_byte` drops them.
+    companion: bool,
     observed_response: Option<ObservedResponse>,
+}
+
+/// The psmouse protocol probe the first initialization runs on the mouse port.
+struct Probe {
+    firmware_id: Option<alloc::string::String>,
 }
 impl<R: Registers, T: Timer> Controller<R, T> {
     /// Validates configuration and keeps the timer origin; call `initialize`
@@ -307,8 +346,36 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             mouse: mouse::Mouse::default(),
             synaptics: None,
             elantech: None,
+            probe: None,
+            companion: false,
             observed_response: None,
         })
+    }
+    /// Select the mouse port's protocol as Linux `psmouse_extensions` does
+    /// for the protocols this owner drives: a Synaptics identity selects
+    /// [`synaptics`] at 80 packets a second, else an Elantech knock and
+    /// firmware signature select [`elantech`], else the mouse is reset and
+    /// the IntelliMouse/Explorer probe runs. `firmware_id` is the port's
+    /// `PNP: <_HID> <_CID>...` identifier, which selects Synaptics ForcePad
+    /// and board profiles. The protocol stays selected across restarts.
+    pub fn new_probing(
+        registers: R,
+        timer: T,
+        config: Config,
+        firmware_id: Option<&str>,
+    ) -> Result<Self, Error> {
+        let mut controller = Self::new(registers, timer, config)?;
+        if config.mouse {
+            // The longest touchpad command wait, Elantech's retry delay.
+            controller
+                .timer
+                .check_duration(500_000)
+                .map_err(ErrorKind::Clock)?;
+            controller.probe = Some(Probe {
+                firmware_id: firmware_id.map(alloc::string::String::from),
+            });
+        }
+        Ok(controller)
     }
     pub fn is_ready(&self) -> bool {
         self.state == State::Ready
@@ -572,6 +639,55 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         }
         Ok(())
     }
+    /// The three bytes GETINFO returns: a mouse's status, or a touchpad
+    /// query's answer after its sliced command.
+    fn info(&mut self) -> Result<[u8; 3], ErrorKind> {
+        self.device_command(Port::Mouse, GET_INFO, &[])?;
+        let start = self.timer.start();
+        let mut bytes = [0; 3];
+        for byte in &mut bytes {
+            *byte = self.response(Port::Mouse, start, self.config.command_timeout_us)?;
+        }
+        Ok(bytes)
+    }
+    /// Linux `synaptics_detect`, then `elantech_detect`; a mouse that is
+    /// neither is reset, as `psmouse_extensions` resets it after its probes.
+    fn select_touchpad(&mut self) -> Result<(), ErrorKind> {
+        self.sliced_command(0)?;
+        if self.info()?[1] == 0x47 {
+            let firmware_id = self.probe.as_ref().and_then(|p| p.firmware_id.as_deref());
+            self.synaptics = Some(synaptics::Engine::for_firmware(true, firmware_id));
+            return Ok(());
+        }
+        self.device_command(Port::Mouse, DEFAULTS, &[])?;
+        self.device_command(Port::Mouse, DISABLE_REPORTING, &[])?;
+        for _ in 0..3 {
+            self.device_command(Port::Mouse, SCALE_ONE_TO_ONE, &[])?;
+        }
+        if elantech::knocked(self.info()?) {
+            self.sliced_command(1)?;
+            if elantech::signature_valid(self.info()?) {
+                self.elantech = Some(elantech::Engine::default());
+                return Ok(());
+            }
+        }
+        self.reset_mouse()
+    }
+    /// Reset the mouse, check it is an ordinary ID 0 mouse, and leave it at
+    /// its defaults with reporting disabled.
+    fn reset_mouse(&mut self) -> Result<(), ErrorKind> {
+        self.reset_device(Port::Mouse)?;
+        let id = self.response(
+            Port::Mouse,
+            self.timer.start(),
+            self.config.command_timeout_us,
+        )?;
+        if id != 0 {
+            return Err(ErrorKind::UnsupportedMouseId(id));
+        }
+        self.device_command(Port::Mouse, DEFAULTS, &[])?;
+        self.device_command(Port::Mouse, DISABLE_REPORTING, &[])
+    }
     fn mouse_id(&mut self) -> Result<u8, ErrorKind> {
         match self.send_byte(Port::Mouse, GET_ID, self.config.command_timeout_us, true)? {
             Some(id) => Ok(id),
@@ -646,50 +762,11 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         if self.config.mouse {
             self.command(ENABLE_MOUSE)?;
             self.device_command(Port::Mouse, DISABLE_REPORTING, &[])?;
-            self.reset_device(Port::Mouse)?;
-            let id = self.response(
-                Port::Mouse,
-                self.timer.start(),
-                self.config.command_timeout_us,
-            )?;
-            if id != 0 {
-                return Err(ErrorKind::UnsupportedMouseId(id));
+            self.reset_mouse()?;
+            if self.probe.is_some() && self.synaptics.is_none() && self.elantech.is_none() {
+                self.select_touchpad()?;
             }
-            self.device_command(Port::Mouse, DEFAULTS, &[])?;
-            self.device_command(Port::Mouse, DISABLE_REPORTING, &[])?;
-            if self.synaptics.is_some() {
-                self.initialize_synaptics()?;
-            } else if self.elantech.is_some() {
-                self.initialize_elantech()?;
-                self.begin_elantech_rate_change();
-                self.device_command(Port::Mouse, SET_RATE, &[100])?;
-                self.restore_elantech_rate_mode()?;
-                self.device_command(Port::Mouse, SET_RESOLUTION, &[3])?;
-                self.device_command(Port::Mouse, SCALE_ONE_TO_ONE, &[])?;
-            } else {
-                self.device_command(Port::Mouse, SCALE_ONE_TO_ONE, &[])?;
-                self.device_command(Port::Mouse, SET_RESOLUTION, &[2])?;
-                if self.config.wheel {
-                    for rate in [200, 100, 80] {
-                        self.device_command(Port::Mouse, SET_RATE, &[rate])?;
-                    }
-                    let id = self.mouse_id()?;
-                    if !matches!(id, 0 | 3 | 4) {
-                        return Err(ErrorKind::UnsupportedMouseId(id));
-                    }
-                    for rate in [200, 200, 80] {
-                        self.device_command(Port::Mouse, SET_RATE, &[rate])?;
-                    }
-                    let protocol = match self.mouse_id()? {
-                        0 => MouseProtocol::Standard,
-                        3 => MouseProtocol::IntelliMouse,
-                        4 => MouseProtocol::Explorer,
-                        id => return Err(ErrorKind::UnsupportedMouseId(id)),
-                    };
-                    self.mouse.set_protocol(protocol);
-                }
-                self.device_command(Port::Mouse, SET_RATE, &[100])?;
-            }
+            self.set_up_mouse()?;
         }
         // Both configured devices have now acknowledged reporting disable and
         // their new protocol is known. Only now is the keyboard response lane
@@ -703,6 +780,98 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             self.device_command(Port::Keyboard, ENABLE_REPORTING, &[])?;
         }
         Ok(())
+    }
+    /// Set up the mouse's selected protocol, its reporting still disabled.
+    fn set_up_mouse(&mut self) -> Result<(), ErrorKind> {
+        if self.synaptics.is_some() {
+            return self.initialize_synaptics();
+        }
+        if self.elantech.is_some() {
+            self.initialize_elantech()?;
+            self.begin_elantech_rate_change();
+            self.device_command(Port::Mouse, SET_RATE, &[100])?;
+            self.restore_elantech_rate_mode()?;
+            self.device_command(Port::Mouse, SET_RESOLUTION, &[3])?;
+            return self.device_command(Port::Mouse, SCALE_ONE_TO_ONE, &[]);
+        }
+        self.device_command(Port::Mouse, SCALE_ONE_TO_ONE, &[])?;
+        self.device_command(Port::Mouse, SET_RESOLUTION, &[2])?;
+        if self.config.wheel {
+            for rate in [200, 100, 80] {
+                self.device_command(Port::Mouse, SET_RATE, &[rate])?;
+            }
+            let id = self.mouse_id()?;
+            if !matches!(id, 0 | 3 | 4) {
+                return Err(ErrorKind::UnsupportedMouseId(id));
+            }
+            for rate in [200, 200, 80] {
+                self.device_command(Port::Mouse, SET_RATE, &[rate])?;
+            }
+            let protocol = match self.mouse_id()? {
+                0 => MouseProtocol::Standard,
+                3 => MouseProtocol::IntelliMouse,
+                4 => MouseProtocol::Explorer,
+                id => return Err(ErrorKind::UnsupportedMouseId(id)),
+            };
+            self.mouse.set_protocol(protocol);
+        }
+        self.device_command(Port::Mouse, SET_RATE, &[100])
+    }
+    /// The SMBus companion Linux uses by default for the touchpad on the
+    /// mouse port, if the selected protocol has one.
+    pub fn smbus_companion(&self) -> Option<Companion> {
+        if let Some(engine) = &self.synaptics {
+            return engine.intertouch();
+        }
+        let firmware = self.elantech_capabilities()?.firmware;
+        // Linux's i2c_blacklist_pnp_ids is empty.
+        elantech::host_notify(firmware).then_some(Companion::Elan)
+    }
+    /// Hand the mouse port to its SMBus companion, as Linux
+    /// `psmouse_smbus_init` leaves it after the protocol probe: the device is
+    /// reset to its defaults with reporting disabled, its held buttons are
+    /// released, and its bytes are dropped from then on. Handing over a port
+    /// already handed over does nothing.
+    pub fn hand_mouse_to_companion(&mut self) -> Result<(), Error> {
+        self.ready()?;
+        if !self.config.mouse {
+            return Err(ErrorKind::InvalidConfiguration.into());
+        }
+        if self.companion {
+            return Ok(());
+        }
+        self.observed_response = None;
+        let result = (|| {
+            self.device_command(Port::Mouse, DISABLE_REPORTING, &[])?;
+            self.companion = true;
+            self.reset_mouse()
+        })();
+        result.map_err(|kind| self.fail(kind))?;
+        self.mouse.release(&mut self.events);
+        if let Some(engine) = &mut self.synaptics {
+            engine.release(&mut self.events);
+        }
+        if let Some(engine) = &mut self.elantech {
+            engine.release(&mut self.events);
+        }
+        Ok(())
+    }
+    /// Take the mouse port back from its SMBus companion: the selected
+    /// protocol is set up again and reporting enabled, as Linux's rescan
+    /// restores a PS/2 device whose companion is gone.
+    pub fn reclaim_mouse(&mut self) -> Result<(), Error> {
+        self.ready()?;
+        if !self.companion {
+            return Ok(());
+        }
+        self.observed_response = None;
+        let result = (|| {
+            self.reset_mouse()?;
+            self.companion = false;
+            self.set_up_mouse()?;
+            self.device_command(Port::Mouse, ENABLE_REPORTING, &[])
+        })();
+        result.map_err(|kind| self.fail(kind))
     }
     /// Reset, test, initialize and enable only the configured attached ports.
     /// Ownership remains in this object on failure; a faulted object cannot
@@ -800,6 +969,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                 self.config.packet_timeout_us,
                 &mut self.events,
             ),
+            Port::Mouse if self.config.mouse && self.companion => Ok(()),
             Port::Mouse if self.config.mouse && self.synaptics.is_some() => {
                 self.synaptics.as_mut().unwrap().feed(
                     byte.data,

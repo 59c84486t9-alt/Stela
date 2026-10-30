@@ -93,9 +93,10 @@ mod streams;
 mod teardown;
 mod transfer;
 
+use super::descriptor::*;
 pub use bind::Plan;
 use bind::bind_with_provider;
-pub use descriptor::{Device, Endpoint, Interface, SuperSpeedCompanion, interfaces};
+pub use descriptor::Device;
 pub use identity::{DeviceAccess, DeviceRef, SlotId};
 pub use iso::{IsoCompletion, IsoSchedule, IsoStatus, IsoTransfer};
 pub use lifecycle::{Changes, Host};
@@ -250,7 +251,6 @@ pub const LOW_SPEED: u8 = 2;
 pub const HIGH_SPEED: u8 = 3;
 pub const SUPER_SPEED: u8 = 4;
 pub const SUPER_SPEED_PLUS: u8 = 5;
-pub(crate) const SS_ENDPOINT_COMPANION: u8 = 0x30;
 
 const CONTROL_TYPE: u32 = 4;
 const MAX_SLOTS: usize = 32;
@@ -283,27 +283,6 @@ const DEBOUNCE_TIMEOUT_US: u64 = 2_000_000;
 const PORT_INIT_TRIES: usize = 4;
 const ADDRESS_RECOVERY_US: u64 = 2_000;
 
-// bmRequestType: direction, type and recipient (USB 2.0 Table 9-2).
-pub const DEVICE_TO_HOST: u8 = 0x80;
-pub const TYPE_CLASS: u8 = 0x20;
-pub const TYPE_VENDOR: u8 = 0x40;
-pub const RECIPIENT_INTERFACE: u8 = 0x01;
-pub const RECIPIENT_ENDPOINT: u8 = 0x02;
-pub const RECIPIENT_OTHER: u8 = 0x03;
-
-// Standard requests and descriptors (USB 2.0 9.4, 9.6).
-pub const GET_STATUS: u8 = 0;
-pub const CLEAR_FEATURE: u8 = 1;
-pub const SET_FEATURE: u8 = 3;
-pub const GET_DESCRIPTOR: u8 = 6;
-pub const SET_CONFIGURATION: u8 = 9;
-pub const SET_INTERFACE: u8 = 11;
-pub const DEVICE_DESCRIPTOR: u8 = 1;
-pub const CONFIGURATION_DESCRIPTOR: u8 = 2;
-pub const STRING_DESCRIPTOR: u8 = 3;
-pub const INTERFACE_DESCRIPTOR: u8 = 4;
-pub const ENDPOINT_DESCRIPTOR: u8 = 5;
-pub const INTERFACE_ASSOCIATION_DESCRIPTOR: u8 = 11;
 const HUB_DESCRIPTOR: u8 = 0x29;
 const HUB_CLASS: u8 = 9;
 /// The multi-TT hub bDeviceProtocol (USB 2.0 11.23.1), and the interface
@@ -351,14 +330,6 @@ impl Registers for Bar {
     fn size(&self) -> Option<usize> {
         Some(self.bytes)
     }
-}
-
-/// An eight-byte SETUP packet.
-pub fn setup(request_type: u8, request: u8, value: u16, index: u16, length: u16) -> [u8; 8] {
-    let [v0, v1] = value.to_le_bytes();
-    let [i0, i1] = index.to_le_bytes();
-    let [l0, l1] = length.to_le_bytes();
-    [request_type, request, v0, v1, i0, i1, l0, l1]
 }
 
 /// Enumeration reports keep the original error alongside the operation

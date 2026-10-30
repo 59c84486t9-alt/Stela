@@ -2,7 +2,7 @@
 //! UAC3 high-capability cluster requests, bounded and stable across the
 //! required header/full-descriptor transactions. Linux stream.c is the reference.
 use super::super::{Control, Error};
-use crate::{bytes::le16, usb::xhci::setup};
+use crate::{bytes::le16, usb::descriptor::setup};
 use alloc::vec::Vec;
 
 const HEADER: usize = 6;

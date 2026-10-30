@@ -459,6 +459,12 @@ impl Hardware {
             GET_ID if port == Port::Mouse => {
                 self.emit(port, self.force_id.unwrap_or(self.mouse_id))
             }
+            // A mouse's status: disabled, resolution 2, 100 reports a second.
+            GET_INFO if port == Port::Mouse => {
+                for byte in [0, 2, 100] {
+                    self.emit(port, byte);
+                }
+            }
             _ => panic!("unknown device command {data:x}"),
         }
     }
@@ -606,6 +612,20 @@ fn controller(config: Config) -> (Controller<Model, Time>, Rc<RefCell<Hardware>>
         Controller::new(Model(h.clone()), Time(time), config).unwrap(),
         h,
     )
+}
+#[test]
+fn a_probed_mouse_that_is_no_touchpad_is_reset_and_probed_for_its_wheel() {
+    let (base, h) = controller(Config::default());
+    let mut c = Controller::new_probing(
+        Model(h.clone()),
+        Time(h.borrow().time.clone()),
+        base.config,
+        Some("PNP: PNP0f13"),
+    )
+    .unwrap();
+    c.initialize().unwrap();
+    assert_eq!(c.mouse_protocol(), Some(MouseProtocol::IntelliMouse));
+    assert!(c.synaptics_capabilities().is_none() && c.elantech_capabilities().is_none());
 }
 fn ready() -> (Controller<Model, Time>, Rc<RefCell<Hardware>>) {
     let (mut c, h) = controller(Config::default());

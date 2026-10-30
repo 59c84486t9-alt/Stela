@@ -132,7 +132,7 @@ fn owning_link_authentication_uses_bss_and_backpressures_native_receive() {
     let mut link = ManagedLink::new(client, Source).unwrap();
     let before = model.response.lock().unwrap().client_commands.len();
     assert!(
-        link.begin_external_authentication(BssHandle(0), profile(), 2_000_000)
+        link.begin_external_authentication(BssHandle(0), profile(), None, 2_000_000)
             .is_err()
     );
     assert_eq!(model.response.lock().unwrap().client_commands.len(), before);
@@ -159,12 +159,12 @@ fn owning_link_authentication_uses_bss_and_backpressures_native_receive() {
     wrong.peer.0[5] ^= 1;
     let before = model.response.lock().unwrap().client_commands.len();
     assert!(
-        link.begin_external_authentication(handle, wrong, 2_000_000)
+        link.begin_external_authentication(handle, wrong, None, 2_000_000)
             .is_err()
     );
     assert_eq!(model.response.lock().unwrap().client_commands.len(), before);
     let session = link
-        .begin_external_authentication(handle, profile(), 2_000_000)
+        .begin_external_authentication(handle, profile(), None, 2_000_000)
         .unwrap();
     assert_eq!(session.ssid(), b"x");
     assert!(!link.carrier());

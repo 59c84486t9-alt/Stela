@@ -94,6 +94,17 @@ pub trait Attention {
     fn pending(&mut self) -> Result<bool, AttentionError>;
     fn acknowledge(&mut self) -> Result<(), AttentionError>;
 }
+impl<A: Attention + ?Sized> Attention for alloc::boxed::Box<A> {
+    fn mask_and_drain(&mut self) -> Result<(), AttentionError> {
+        (**self).mask_and_drain()
+    }
+    fn pending(&mut self) -> Result<bool, AttentionError> {
+        (**self).pending()
+    }
+    fn acknowledge(&mut self) -> Result<(), AttentionError> {
+        (**self).acknowledge()
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AttentionError {
     Unavailable,

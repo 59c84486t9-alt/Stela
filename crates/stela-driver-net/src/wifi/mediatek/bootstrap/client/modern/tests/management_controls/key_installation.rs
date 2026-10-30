@@ -27,10 +27,10 @@ fn initial_key_batch_and_replay_floor() {
         model.response.lock().unwrap().keys[&19],
         [vec![0x44; 16], vec![0x55; 16]].concat()
     );
-    assert!(!driver.station().port_open(
-        Some(driver.state().ptk.as_ref().unwrap().slot()),
-        Some(driver.state().gtk.as_ref().unwrap().slot())
-    ));
+    assert!(!driver.station().port_open(&[
+        driver.state().ptk.as_ref().unwrap().slot(),
+        driver.state().gtk.as_ref().unwrap().slot()
+    ]));
     let proof = received(&mut driver, &model, 9);
     let permit = admit(&mut owner, &driver, AssociationUse::Management);
     assert_eq!(

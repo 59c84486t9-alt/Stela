@@ -13,7 +13,7 @@ use super::{
 use crate::{Direction, Error, bus::i2c::Timer};
 use alloc::vec::Vec;
 
-mod headset;
+pub(super) mod headset;
 pub use headset::{ConexantHeadsetInitialization, ConexantHeadsetKind, ConexantHeadsetReport};
 
 const GET_EAPD: u16 = 0xf0c;
@@ -58,7 +58,7 @@ fn route_policy(id: u32) -> Result<RoutePolicy, Error> {
         Ok(RoutePolicy::Standard)
     }
 }
-fn profile(id: u32) -> Result<bool, Error> {
+pub(super) fn profile(id: u32) -> Result<bool, Error> {
     match id {
         // CX20549 uses a single ADC amp regardless of selected input index.
         0x14f1_5045 => Ok(true),

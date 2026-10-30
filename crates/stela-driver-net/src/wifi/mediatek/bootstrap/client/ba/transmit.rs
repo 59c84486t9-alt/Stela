@@ -349,16 +349,17 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 }
                 // Generic TX_OPERATIONAL's source params.ssn is0; the request
                 // software snapshot is a separate management input, not this.
-                let body = wire::modern::ba_request(
-                    s.profile.ok_or(Error::WrongProfile)?,
-                    session.tid(),
-                    0,
-                    agreement.window(),
-                    agreement.amsdu_in_ampdu(),
-                    true,
-                    true,
-                )
-                .map_err(Error::Codec)?;
+                let bodies = Self::on_every_link(s, |p| {
+                    wire::modern::ba_request(
+                        p,
+                        session.tid(),
+                        0,
+                        agreement.window(),
+                        agreement.amsdu_in_ampdu(),
+                        true,
+                        true,
+                    )
+                })?;
                 let mut started = false;
                 // SAFETY: covered by this function's own safety contract.
                 let result = unsafe {
@@ -368,12 +369,14 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                         wifi::regulatory::AssociationUse::Management,
                         |_, _| {
                             started = true;
-                            Self::command_parts(
-                                &mut s.controller,
-                                &mut s.replies,
-                                Command::StationRecord,
-                                &body,
-                            )
+                            bodies.iter().try_for_each(|body| {
+                                Self::command_parts(
+                                    &mut s.controller,
+                                    &mut s.replies,
+                                    Command::StationRecord,
+                                    body,
+                                )
+                            })
                         },
                     )
                 }
@@ -422,17 +425,13 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         if Self::tx_ba_pending(s, &session) {
             return Err(Error::NeedsDrain);
         }
-        let body = wire::modern::ba_request(
-            s.profile.ok_or(Error::WrongProfile)?,
-            session.tid(),
-            0,
-            1,
-            false,
-            false,
-            true,
-        )
-        .map_err(Error::Codec)?;
-        if let Err(error) = Self::command(s, Command::StationRecord, &body) {
+        let bodies = Self::on_every_link(s, |p| {
+            wire::modern::ba_request(p, session.tid(), 0, 1, false, false, true)
+        })?;
+        if let Err(error) = bodies
+            .iter()
+            .try_for_each(|body| Self::command(s, Command::StationRecord, body))
+        {
             // SAFETY: an uncertain publication keeps every owner, as the contract requires.
             let _ = unsafe {
                 s.station

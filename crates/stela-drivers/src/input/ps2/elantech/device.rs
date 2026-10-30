@@ -206,16 +206,12 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             self.device_command(Port::Mouse, SCALE_ONE_TO_ONE, &[])?;
         }
         let knock = self.elan_reply(QueryKind::Knock)?;
-        if knock[..2] != [0x3c, 3] || !matches!(knock[2], 0xc8 | 0) {
+        if !knocked(knock) {
             return Err(ErrorKind::Elantech(Error::Knock(knock)));
         }
         let probe = self.elan_query(1, QueryKind::FirmwareProbe)?;
         let firmware = u32::from_be_bytes([0, probe[0], probe[1], probe[2]]);
-        let valid = probe[0] != 0
-            && (probe[1] == 0
-                || ((probe[0] & 15) >= 6 && (probe[1] & 0xaf) == 15 && probe[2] < 40)
-                || ![200, 100, 80, 60, 40, 20, 10].contains(&probe[2]));
-        if !valid {
+        if !signature_valid(probe) {
             return Err(ErrorKind::Elantech(Error::Signature(firmware)));
         }
         let identity = self.elan_query(1, QueryKind::Firmware)?;

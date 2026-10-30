@@ -421,6 +421,22 @@ impl<R: Registers + 'static, T: Timer + 'static, C: HostConfiguration + 'static>
         self.complete(result, false, start)
     }
 
+    /// [`I801::enable_host_notify`] on the kept host.
+    pub fn enable_host_notify(&mut self) -> Result<(), Error> {
+        if self.failure.is_some() {
+            return Err(ErrorKind::NeedsReset.into());
+        }
+        self.owners.as_mut().unwrap().0.enable_host_notify()
+    }
+
+    /// [`I801::take_host_notify`] on the kept host.
+    pub fn take_host_notify(&mut self) -> Result<Option<u8>, Error> {
+        if self.failure.is_some() {
+            return Err(ErrorKind::NeedsReset.into());
+        }
+        self.owners.as_mut().unwrap().0.take_host_notify()
+    }
+
     pub fn release(mut self) -> Result<(I801<R, T>, C), Self> {
         if self.active
             || self.failure.is_some()

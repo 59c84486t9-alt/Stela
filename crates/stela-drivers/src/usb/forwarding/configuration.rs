@@ -84,7 +84,13 @@ impl Device {
             .borrow_mut()
             .device(self.physical.id)?
             .control(
-                xhci::setup(0, xhci::SET_CONFIGURATION, u16::from(value), 0, 0),
+                crate::usb::descriptor::setup(
+                    0,
+                    crate::usb::descriptor::SET_CONFIGURATION,
+                    u16::from(value),
+                    0,
+                    0,
+                ),
                 &[],
             );
         if let Err(error) = result {
@@ -146,9 +152,9 @@ impl Device {
             .borrow_mut()
             .device(self.physical.id)?
             .control(
-                xhci::setup(
+                crate::usb::descriptor::setup(
                     1,
-                    xhci::SET_INTERFACE,
+                    crate::usb::descriptor::SET_INTERFACE,
                     u16::from(alternate),
                     u16::from(number),
                     0,

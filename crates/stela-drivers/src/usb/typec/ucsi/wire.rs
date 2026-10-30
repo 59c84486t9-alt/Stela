@@ -4,6 +4,7 @@
 //! UCSI wire fields from pinned Linux ucsi.h. Unknown bits remain observable.
 
 use super::Error;
+use core::fmt;
 
 pub(super) const RESET: u64 = 1;
 pub(super) const CANCEL: u64 = 2;
@@ -249,9 +250,71 @@ impl ConnectorStatus {
     }
 }
 
+/// `connected, sink, USB PD, partner DFP, USB data`, or `disconnected`:
+/// the power direction, power operation mode, partner type and partner
+/// flags by Linux `ucsi.h`'s `UCSI_CONSTAT_*` names.
+impl fmt::Display for ConnectorStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if !self.connected() {
+            return f.write_str("disconnected");
+        }
+        let direction = if self.power_source() {
+            "source"
+        } else {
+            "sink"
+        };
+        let mode = match self.power_mode() {
+            1 => "default USB power",
+            2 => "BC 1.2",
+            3 => "USB PD",
+            4 => "Type-C 1.5 A",
+            5 => "Type-C 3 A",
+            _ => "no power operation mode",
+        };
+        let partner = match self.partner_type() {
+            1 => "DFP",
+            2 => "UFP",
+            3 => "powered cable",
+            4 => "powered cable and UFP",
+            5 => "debug accessory",
+            6 => "audio accessory",
+            _ => "unknown",
+        };
+        write!(f, "connected, {direction}, {mode}, partner {partner}")?;
+        if self.usb_data() {
+            f.write_str(", USB data")?;
+        }
+        if self.alternate_mode() {
+            f.write_str(", alternate mode")?;
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::string::ToString;
+
+    #[test]
+    fn status_reads_as_its_linux_field_names() {
+        let v12 = Version::new(0x0120).unwrap();
+        let status = |bits: u32| {
+            let mut bytes = [0; 9];
+            bytes[..4].copy_from_slice(&bits.to_le_bytes());
+            ConnectorStatus::parse(v12, &bytes).unwrap().to_string()
+        };
+        assert_eq!(status(0), "disconnected");
+        // Connected sink on USB PD to a DFP with USB data.
+        assert_eq!(
+            status(1 << 19 | 3 << 16 | 1 << 29 | 1 << 21),
+            "connected, sink, USB PD, partner DFP, USB data"
+        );
+        assert_eq!(
+            status(1 << 19 | 1 << 20 | 5 << 16 | 2 << 29 | 1 << 22),
+            "connected, source, Type-C 3 A, partner UFP, alternate mode"
+        );
+    }
     #[test]
     fn fields_are_version_and_length_checked() {
         let v1 = Version::new(0x0110).unwrap();

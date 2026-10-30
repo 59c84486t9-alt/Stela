@@ -15,7 +15,10 @@
 //! [`Station::receive_external_authentication`]: super::station::Station::receive_external_authentication
 //! [`Akm::Sae`]: super::supplicant::Akm::Sae
 use super::{
-    station::external::{Received, Session},
+    station::{
+        external::{Received, Session},
+        wire::multi_link::Basic,
+    },
     supplicant::{hmac_sha256, kdf_sha256},
 };
 use crate::Mac;
@@ -55,6 +58,7 @@ const SCALAR_BYTES: usize = 32;
 /// container IDs.
 const EXTENSION: u8 = 255;
 const PASSWORD_IDENTIFIER: u8 = 33;
+const REJECTED_GROUPS: u8 = 92;
 const TOKEN_CONTAINER: u8 = 93;
 /// The P-256 prime, the context of the hunting-and-pecking KDF.
 const PRIME: [u8; 32] = [
@@ -113,6 +117,9 @@ pub enum Error {
     Exhausted,
     /// The random source gave no usable scalar.
     Random,
+    /// An AP MLD's frame does not name the AP MLD in its multi-link
+    /// element, or an MLD exchange is not hash-to-element.
+    MultiLink,
 }
 
 /// The larger then the smaller address, as 12.4.4.2 orders them.
@@ -328,7 +335,10 @@ impl Exchange {
     }
 
     /// Begin the exchange of an external authentication session: its
-    /// station, AP and, for hash-to-element, SSID. The frames go out
+    /// station, AP and, for hash-to-element, SSID; an MLD session's
+    /// exchange runs between the two MLDs' addresses, as wpa_supplicant
+    /// gives SAE its own and the AP MLD's, by hash-to-element, whose token
+    /// container leaves the AP's multi-link element apart. The frames go out
     /// through [`Station::external_authentication_transmit`] under the same
     /// session.
     ///
@@ -340,6 +350,11 @@ impl Exchange {
         identifier: Option<&[u8]>,
         random: &mut dyn FnMut() -> [u8; 32],
     ) -> Result<Self, Error> {
+        let (own, peer) = match session.multi_link() {
+            Some(_) if derivation != Derivation::HashToElement => return Err(Error::MultiLink),
+            Some(affiliation) => (affiliation.mld.local, affiliation.mld.ap),
+            None => (session.local(), session.peer()),
+        };
         let template = (derivation == Derivation::HashToElement)
             .then(|| Template::derive(session.ssid(), password, identifier));
         Self::new(
@@ -347,18 +362,32 @@ impl Exchange {
             password,
             template.as_ref(),
             identifier,
-            session.local(),
-            session.peer(),
+            own,
+            peer,
             random,
         )
     }
 
     /// Take the AP's frame of the session, as
-    /// [`Station::receive_external_authentication`] passed it on.
+    /// [`Station::receive_external_authentication`] passed it on. An AP
+    /// MLD's commit and confirm must name it in the multi-link element after
+    /// their SAE fields, as `wpas_sme_ml_auth` checks.
     ///
     /// [`Station::receive_external_authentication`]: super::station::Station::receive_external_authentication
     pub fn receive_from(&mut self, received: &Received) -> Result<Option<Frame>, Error> {
-        self.receive(received.transaction(), received.status(), received.data())
+        let (transaction, status, data) =
+            (received.transaction(), received.status(), received.data());
+        let Some(affiliation) = received.session().multi_link() else {
+            return self.receive(transaction, status, data);
+        };
+        let end = fields_end(transaction, status, data);
+        let named = Basic::find(&data[end..]).ok().flatten();
+        if matches!(status, 0 | STATUS_HASH_TO_ELEMENT)
+            && named.is_none_or(|basic| basic.address != affiliation.mld.ap)
+        {
+            return Err(Error::MultiLink);
+        }
+        self.receive(transaction, status, &data[..end])
     }
 
     /// commit-scalar = (rand + mask) mod r, COMMIT-ELEMENT = -(mask * PWE).
@@ -578,6 +607,31 @@ impl Exchange {
             Err(Error::Confirm)
         }
     }
+}
+
+/// Where the SAE fields of an AP's hash-to-element frame end and its other
+/// elements begin, as `sae_parse_commit` and `sae_check_confirm` give
+/// wpa_supplicant its `ie_offset`: after a commit's group, scalar, element
+/// and the password identifier, rejected groups and token container that
+/// follow them, after an anti-clogging request's group and token container,
+/// and after a confirm's send-confirm and value.
+fn fields_end(transaction: u16, status: u16, data: &[u8]) -> usize {
+    let mut end = match (transaction, status) {
+        (COMMIT, STATUS_ANTI_CLOGGING) => 2,
+        (COMMIT, _) => 2 + SCALAR_BYTES + ELEMENT_BYTES,
+        _ => 2 + 32,
+    };
+    let fields: &[u8] = match (transaction, status) {
+        (COMMIT, STATUS_ANTI_CLOGGING) => &[TOKEN_CONTAINER],
+        (COMMIT, _) => &[PASSWORD_IDENTIFIER, REJECTED_GROUPS, TOKEN_CONTAINER],
+        _ => &[],
+    };
+    while let Some(&[EXTENSION, length, id]) = data.get(end..end + 3)
+        && fields.contains(&id)
+    {
+        end += 2 + usize::from(length);
+    }
+    end.min(data.len())
 }
 
 /// A commit's scalar in (1, r) and its element on the curve; elements after

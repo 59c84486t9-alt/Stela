@@ -7,10 +7,7 @@ use super::{
 };
 use crate::{
     firmware::{Provider, Requirement},
-    usb::{
-        bluetooth::{Hci, Io, State},
-        xhci,
-    },
+    usb::bluetooth::{Hci, Io, State},
 };
 use alloc::boxed::Box;
 const GET_VERSION: u8 = 0x09;
@@ -89,7 +86,7 @@ impl<B: Io> Engine<'_, B> {
     }
     fn read(&mut self, request: u8, bytes: u16) -> Result<alloc::vec::Vec<u8>> {
         self.bounded()?;
-        let setup = xhci::setup(0xc0, request, 0, 0, bytes);
+        let setup = crate::usb::descriptor::setup(0xc0, request, 0, 0, bytes);
         let data = self.hci.io.control_read(setup).map_err(Error::Usb)?;
         if data.len() != usize::from(bytes) {
             return Err(Error::protocol("vendor control IN exact length", &data));
@@ -133,7 +130,7 @@ impl<B: Io> Engine<'_, B> {
         self.hci
             .io
             .control(
-                xhci::setup(0x40, DOWNLOAD, 0, 0, header as u16),
+                crate::usb::descriptor::setup(0x40, DOWNLOAD, 0, 0, header as u16),
                 &bytes[..header],
             )
             .map_err(Error::Usb)?;

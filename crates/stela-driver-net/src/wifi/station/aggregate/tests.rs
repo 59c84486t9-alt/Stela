@@ -190,7 +190,7 @@ fn complete_split_parent_consumes_one_pn_and_preserves_absent_member_observation
         s.receive_ordered_group(&group, Some(&mut slot)),
         Err(GroupError::Security(security::Error::Replay))
     ));
-    assert!(!s.port_open(None, None)); // Replay authentication never opens port.
+    assert!(!s.port_open(&[])); // Replay authentication never opens port.
     drop(received);
     drop(group);
     assert!(!live.get());

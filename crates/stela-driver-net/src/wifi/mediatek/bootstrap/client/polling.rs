@@ -99,7 +99,9 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             }
             if kind == Some(0) {
                 if let Some(p) = s.profile {
-                    let reports = s.txs.receive(&f.bytes, p.wcid, p.channel.band);
+                    let reports = s
+                        .txs
+                        .receive(&f.bytes, &Self::peer_wcids(s, p), p.channel.band);
                     events.extend(reports.into_iter().map(Event::TxStatus));
                 }
                 continue;
@@ -177,6 +179,13 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                     group: header.receiver.is_multicast(),
                     key_index: frame.security.key.map(|key| key.index()),
                 });
+                continue;
+            }
+            if modern_data
+                && !frame.header().data_present()
+                && Self::on_other_link(s, &frame, &mut events)
+            {
+                events.push(Event::Raw(f));
                 continue;
             }
             if s.phase == Phase::Scanning {
@@ -353,10 +362,8 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                     );
                     continue;
                 }
-                let (ptk, gtk) = (
-                    s.ptk.as_mut().ok_or(Error::NoKey)?,
-                    s.gtk.as_mut().ok_or(Error::NoKey)?,
-                );
+                let (ptk, gtk) =
+                    Self::receiving(&mut s.ptk, &mut s.gtk, &mut s.links, &frame.radio)?;
                 let ingress = s
                     .station
                     .receive_msdu_refs(epoch, &frame, &mut [ptk.slot_mut(), gtk.slot_mut()])

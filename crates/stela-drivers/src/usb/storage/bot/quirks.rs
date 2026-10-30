@@ -50,6 +50,17 @@ impl Flags {
         )?;
         Ok(Self(flags.0, device.speed >= SUPER_SPEED))
     }
+    /// A high-speed device by its device descriptor.
+    pub fn high_speed(descriptor: &[u8; 18]) -> Result<Self, &'static str> {
+        let d = descriptor;
+        let flags = Self::from_id(
+            u16::from_le_bytes([d[8], d[9]]),
+            u16::from_le_bytes([d[10], d[11]]),
+            u16::from_le_bytes([d[12], d[13]]),
+            true,
+        )?;
+        Ok(Self(flags.0, false))
+    }
     pub(super) fn from_id(
         vendor: u16,
         product: u16,

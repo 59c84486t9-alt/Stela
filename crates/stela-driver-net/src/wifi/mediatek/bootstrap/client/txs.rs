@@ -112,19 +112,28 @@ impl State {
     }
 
     /// `mt7925_mac_add_txs` over one TXS packet: eight-word records after a
-    /// two-word header. Records for other stations or unrequested IDs are
-    /// ignored.
-    pub(super) fn receive(&mut self, bytes: &[u8], wcid: u16, band: wifi::Band) -> Vec<TxStatus> {
+    /// two-word header. A record names one of `wcids`, the AP's WCID on each
+    /// link of the association, the setup link's first, whose rate on `band`
+    /// it tracks; records for other stations or unrequested IDs are ignored.
+    pub(super) fn receive(
+        &mut self,
+        bytes: &[u8],
+        wcids: &[u16],
+        band: wifi::Band,
+    ) -> Vec<TxStatus> {
         let mut out = Vec::new();
         for record in bytes.get(8..).unwrap_or_default().as_chunks::<32>().0 {
             let word = |i: usize| u32::from_le_bytes(record[i * 4..i * 4 + 4].try_into().unwrap());
             let (w0, w3) = (word(0), word(3));
             let pid = (w3 >> 24) as u8;
-            if (w0 >> 23) & 3 > 1 || pid < FIRST || ((word(2) >> 16) & 0xfff) as u16 != wcid {
+            let wcid = ((word(2) >> 16) & 0xfff) as u16;
+            if (w0 >> 23) & 3 > 1 || pid < FIRST || !wcids.contains(&wcid) {
                 continue;
             }
             let acked = w0 & (7 << 16) == 0;
-            if let Some(rate) = rate(w0, w3, band, self.rate) {
+            if wcids.first() == Some(&wcid)
+                && let Some(rate) = rate(w0, w3, band, self.rate)
+            {
                 self.rate = Some(rate);
             }
             if let Some(at) = self.waiting.iter().position(|waiting| waiting.pid == pid) {
@@ -219,6 +228,19 @@ mod tests {
         assert_eq!([LAST, FIRST], [0, 0].map(|_| state.pid(false, true, 0)));
     }
 
+    /// A record under the AP's WCID on another link of the association
+    /// reports its frame; only the setup link's records give the rate.
+    #[test]
+    fn another_links_status_reports_its_frame_without_its_rate() {
+        let mut state = State::default();
+        let mut bytes = vec![0; 8];
+        bytes.extend_from_slice(&record(true, 4 << 6 | 1 << 10 | 7, 2, 3, 6));
+        assert!(state.receive(&bytes, &[5], wifi::Band::Ghz5).is_empty());
+        assert!(state.early.is_empty());
+        assert!(state.receive(&bytes, &[5, 6], wifi::Band::Ghz5).is_empty());
+        assert_eq!((state.rate, &state.early[..]), (None, &[(3, true)][..]));
+    }
+
     #[test]
     fn status_reports_ack_and_rate_like_mt7925_mac_add_txs() {
         let mut state = State::default();
@@ -227,7 +249,7 @@ mod tests {
         let mut bytes = vec![0; 8];
         bytes.extend_from_slice(&record(true, 4 << 6 | 1 << 10 | 7, 2, 3, 5));
         bytes.extend_from_slice(&record(true, 0, 0, 9, 6));
-        assert!(state.receive(&bytes, 5, wifi::Band::Ghz5).is_empty());
+        assert!(state.receive(&bytes, &[5], wifi::Band::Ghz5).is_empty());
         let vht = state.rate.unwrap();
         assert_eq!(
             (vht.encoding, vht.index, vht.nss, vht.bandwidth),
@@ -257,7 +279,7 @@ mod tests {
         );
         let mut bytes = vec![0; 8];
         bytes.extend_from_slice(&record(false, 1 << 6 | 12, 0, 4, 5));
-        let late = state.receive(&bytes, 5, wifi::Band::Ghz5);
+        let late = state.receive(&bytes, &[5], wifi::Band::Ghz5);
         assert_eq!((late[0].receipt, late[0].acked), (receipt(4), false));
         assert_eq!(state.rate.unwrap().index, 7); // 54 Mb/s on 5 GHz
         state.expire(100 + TIMEOUT_US - 1);

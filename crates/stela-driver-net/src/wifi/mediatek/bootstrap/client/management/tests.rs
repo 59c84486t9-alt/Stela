@@ -88,10 +88,10 @@ fn initial_igtk_batch_binds_original_peer_keys_and_preserves_exact_retry() {
         model.response.lock().unwrap().keys[&19],
         [alloc::vec![0x44; 16], alloc::vec![0x55; 16]].concat()
     );
-    assert!(!driver.station().port_open(
-        Some(driver.state().ptk.as_ref().unwrap().slot()),
-        Some(driver.state().gtk.as_ref().unwrap().slot())
-    ));
+    assert!(!driver.station().port_open(&[
+        driver.state().ptk.as_ref().unwrap().slot(),
+        driver.state().gtk.as_ref().unwrap().slot()
+    ]));
     assert_eq!(
         model.response.lock().unwrap().client_commands.len(),
         commands + 1

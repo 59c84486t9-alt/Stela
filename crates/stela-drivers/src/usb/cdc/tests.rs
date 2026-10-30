@@ -1,5 +1,6 @@
 use super::*;
 use crate::usb::cdc;
+use crate::usb::descriptor::*;
 use crate::usb::xhci::{model, model::*, *};
 use alloc::rc::Rc;
 use core::cell::RefCell;

@@ -140,7 +140,7 @@ impl Host {
             controller.borrow_mut().device(device.id)?.control(
                 super::setup(
                     0x01,
-                    super::super::xhci::SET_INTERFACE,
+                    super::super::descriptor::SET_INTERFACE,
                     u16::from(binding.alternate()),
                     u16::from(binding.interface()),
                     0,
@@ -196,7 +196,7 @@ impl Host {
         if !self.engine.buffers_present() {
             return Err(fail("UAS transport DMA owners already transferred"));
         }
-        let interfaces = super::super::xhci::interfaces(&self.device.configuration);
+        let interfaces = super::super::descriptor::interfaces(&self.device.configuration);
         if self.device.configuration.get(4) != Some(&1)
             || interfaces.is_empty()
             || interfaces
@@ -232,7 +232,7 @@ impl Host {
                 .find(|bytes| bytes.get(5) == Some(&self.binding.configuration_value()))
                 .cloned()
                 .ok_or_else(|| fail("USB reset lost the selected configuration"))?;
-            let interface = super::super::xhci::interfaces(&fresh.configuration)
+            let interface = super::super::descriptor::interfaces(&fresh.configuration)
                 .into_iter()
                 .find(|interface| {
                     interface.number == self.binding.interface()

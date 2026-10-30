@@ -97,7 +97,7 @@ impl<B: Io> Engine<'_, B> {
     }
     fn register(&mut self, address: u32) -> Result<u32> {
         let request =
-            crate::usb::xhci::setup(0xc0, 0x63, (address >> 16) as u16, address as u16, 4);
+            crate::usb::descriptor::setup(0xc0, 0x63, (address >> 16) as u16, address as u16, 4);
         let bytes = self.control_read(request)?;
         if bytes.len() != 4 {
             return Err(Error::protocol("complete vendor register read", &bytes));
@@ -210,7 +210,7 @@ impl<B: Io> Engine<'_, B> {
         loop {
             // Vendor EP0 is the only WMT completion source. Interrupt CC/Status
             // is held as auxiliary evidence, never synthesized into WMT.
-            let bytes = self.control_read(crate::usb::xhci::setup(0xc0, 1, 48, 0, 64))?;
+            let bytes = self.control_read(crate::usb::descriptor::setup(0xc0, 1, 48, 0, 64))?;
             if !bytes.is_empty() {
                 let event = WmtEvent::parse(bytes, operation)?;
                 self.attempt.last_wmt = Some(event.clone());
@@ -386,7 +386,7 @@ impl<B: Io> Engine<'_, B> {
         self.wait(100_000)?;
         self.firmware = false;
         // Options only: this does not assert/reset the shared combo subsystem.
-        let request = crate::usb::xhci::setup(
+        let request = crate::usb::descriptor::setup(
             0x5e,
             2,
             (EP_RESET_OPTION >> 16) as u16,

@@ -35,7 +35,7 @@ impl Control for Peer {
 impl Peer {
     fn read(&mut self, selector: u8, channel: u8, request: u8, length: u16, reply: &[u8]) {
         self.expected.push_back(Transaction {
-            request: xhci::setup(
+            request: crate::usb::descriptor::setup(
                 0xa1,
                 request,
                 u16::from(selector) << 8 | u16::from(channel),
@@ -48,7 +48,7 @@ impl Peer {
     }
     fn send(&mut self, request: u8, selector: u8, channel: u8, bytes: &[u8]) {
         self.expected.push_back(Transaction {
-            request: xhci::setup(
+            request: crate::usb::descriptor::setup(
                 0x21,
                 request,
                 u16::from(selector) << 8 | u16::from(channel),
@@ -406,7 +406,7 @@ fn native(
         vendor_ethernet_tcr: None,
         vendor_ethernet_revision: None,
     };
-    let all = xhci::interfaces(&raw);
+    let all = crate::usb::descriptor::interfaces(&raw);
     let plan = super::super::Plan::parse(&all[0], &all, &raw, xhci::HIGH_SPEED).unwrap();
     let audio = super::super::UsbAudio::attach(shared.clone(), &device, plan, dma).unwrap();
     (audio, model, shared)
@@ -445,7 +445,7 @@ fn native_ep0_probes_once_and_writes_exact_dma() {
             vec![1; bytes.len()],
         ]
         .concat();
-        let probe = xhci::setup(0xa1, 2, address, 0x0200, raw.len() as u16);
+        let probe = crate::usb::descriptor::setup(0xa1, 2, address, 0x0200, raw.len() as u16);
         model.borrow_mut().control_replies.extend([
             (probe, raw.clone()),
             (probe, raw.clone()),
@@ -455,7 +455,7 @@ fn native_ep0_probes_once_and_writes_exact_dma() {
             audio.set_feature_value(2, 2, feature, value).unwrap();
         }
         assert!(model.borrow().control_replies.is_empty());
-        let write = xhci::setup(0x21, 1, address, 0x0200, bytes.len() as u16);
+        let write = crate::usb::descriptor::setup(0x21, 1, address, 0x0200, bytes.len() as u16);
         let writes = model
             .borrow()
             .setup
@@ -473,10 +473,10 @@ fn native_ep0_short_range_and_stalled_set_propagate_failures() {
         let mut dma = allocator(&mut backing);
         let (mut audio, model, _) = native(&mut dma);
         if failure == 0 {
-            model
-                .borrow_mut()
-                .control_replies
-                .push_back((xhci::setup(0xa1, 2, 3 << 8, 0x0200, 5), vec![1, 0, 0xf8, 8]));
+            model.borrow_mut().control_replies.push_back((
+                crate::usb::descriptor::setup(0xa1, 2, 3 << 8, 0x0200, 5),
+                vec![1, 0, 0xf8, 8],
+            ));
             assert_eq!(
                 audio.set_feature_value(2, 0, FeatureControl::Bass, FeatureValue::Tone(0)),
                 Err(Error::ControlLength)
@@ -497,7 +497,7 @@ fn native_ep0_short_range_and_stalled_set_propagate_failures() {
             assert!(model.borrow().seen.contains(&14)); // Reset Endpoint
             assert!(model.borrow().seen.contains(&16)); // Set Dequeue
             assert!(model.borrow().setup.iter().any(|(r, payload)| *r
-                == xhci::setup(0x21, 1, 7 << 8 | 1, 0x0200, 1)
+                == crate::usb::descriptor::setup(0x21, 1, 7 << 8 | 1, 0x0200, 1)
                 && *payload == [1]));
         }
     }

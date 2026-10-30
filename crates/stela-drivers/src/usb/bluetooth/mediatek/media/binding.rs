@@ -5,7 +5,8 @@
 use super::{Error, Result};
 use crate::usb::{
     bluetooth::Binding,
-    xhci::{self, Endpoint, FULL_SPEED, HIGH_SPEED, Interface},
+    descriptor::{Endpoint, Interface},
+    xhci::{FULL_SPEED, HIGH_SPEED},
 };
 use alloc::vec::Vec;
 
@@ -51,7 +52,7 @@ impl Bindings {
                 "exact MT7925 USB 13d3:3602:0100 interface0",
             ));
         }
-        let interfaces = xhci::interfaces(&device.configuration);
+        let interfaces = crate::usb::descriptor::interfaces(&device.configuration);
         let iso: Vec<_> = interfaces.iter().filter(|i| i.number == 2).collect();
         let alternate = if iso.len() > 1 { 1 } else { 0 };
         let selected = iso
@@ -113,7 +114,7 @@ impl Bindings {
     }
     fn standard_sco(binding: &Binding, use_alt3_for_wbs: bool) -> Result<Self> {
         let device = binding.device();
-        let interfaces = xhci::interfaces(&device.configuration);
+        let interfaces = crate::usb::descriptor::interfaces(&device.configuration);
         let sco: Vec<_> = interfaces
             .iter()
             .filter(|i| i.number == 1)

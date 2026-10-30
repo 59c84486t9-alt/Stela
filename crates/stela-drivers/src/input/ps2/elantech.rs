@@ -16,6 +16,27 @@ mod v4;
 pub use v4::{V4Frame, V4Info, V4Slot, V4State, V4Update};
 const FRAME_LIMIT: usize = 32;
 
+/// Whether GETINFO after three 1:1 scalings answered Elantech's knock, as
+/// Linux `elantech_detect` checks it.
+pub(super) fn knocked(reply: [u8; 3]) -> bool {
+    reply[..2] == [0x3c, 3] && matches!(reply[2], 0xc8 | 0)
+}
+
+/// Linux `ETP_NEW_IC_SMBUS_HOST_NOTIFY`: whether the firmware version names
+/// a new IC that takes SMBus Host Notify.
+pub(super) fn host_notify(firmware: u32) -> bool {
+    firmware & 0x0f2000 == 0x0f2000 && firmware & 0xff > 0
+}
+
+/// Linux `elantech_is_signature_valid`: whether the firmware version query's
+/// answer is an Elantech version rather than a mouse's status.
+pub(super) fn signature_valid(probe: [u8; 3]) -> bool {
+    probe[0] != 0
+        && (probe[1] == 0
+            || ((probe[0] & 15) >= 6 && (probe[1] & 0xaf) == 15 && probe[2] < 40)
+            || ![200, 100, 80, 60, 40, 20, 10].contains(&probe[2]))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
     Knock([u8; 3]),

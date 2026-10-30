@@ -3,6 +3,8 @@
 //! The platform supplies owned OSL services. There is no implicit identity map,
 //! interrupt routing, EC driver, scheduler, allocator, or permissive I/O fallback.
 //! See [`Services`] and `acpi/README.md` before installing a provider.
+mod io_window;
+pub mod processor;
 pub mod resources;
 use alloc::{boxed::Box, ffi::CString, string::String, sync::Arc, vec::Vec};
 use core::{
@@ -12,6 +14,7 @@ use core::{
     ptr,
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
+pub use io_window::IoWindow;
 
 pub type Status = u32;
 pub type Interrupt = unsafe extern "C" fn(*mut c_void) -> u32;
@@ -33,7 +36,17 @@ const GPE_EDGE: u32 = 0x00;
 /// `ACPI_DEVICE_NOTIFY` and `ACPI_ALL_NOTIFY`: notification values from
 /// 0x80, and every value.
 const DEVICE_NOTIFY: u32 = 2;
+/// The `_DSD` device-properties UUID, daffd814-6eba-4d8c-8a91-bc9bbf4aa301.
+const DEVICE_PROPERTIES: [u8; 16] = [
+    0x14, 0xd8, 0xff, 0xda, 0xba, 0x6e, 0x8c, 0x4d, 0x8a, 0x91, 0xbc, 0x9b, 0xbf, 0x4a, 0xa3, 0x01,
+];
 const ALL_NOTIFY: u32 = 3;
+/// `_OSC` status DWORD bits.
+const OSC_QUERY_ENABLE: u32 = 1;
+const OSC_REQUEST_ERROR: u32 = 2;
+const OSC_INVALID_UUID_ERROR: u32 = 4;
+const OSC_INVALID_REVISION_ERROR: u32 = 8;
+const OSC_CAPABILITIES_MASK_ERROR: u32 = 16;
 
 /// Exact ACPICA status, without collapsing firmware errors into generic success.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -192,6 +205,11 @@ unsafe extern "C" {
         callback: unsafe extern "C" fn(*mut c_void, u32, *mut c_void, *mut *mut c_void) -> Status,
         context: *mut c_void,
     ) -> Status;
+    fn stela_acpi_walk_processors(
+        callback: unsafe extern "C" fn(*mut c_void, u32, *mut c_void, *mut *mut c_void) -> Status,
+        context: *mut c_void,
+    ) -> Status;
+    fn stela_acpi_processor_id(handle: *mut c_void, id: *mut u32) -> Status;
     fn acpi_get_name(handle: *mut c_void, kind: u32, buffer: *mut RawBuffer) -> Status;
     fn acpi_get_handle(parent: *mut c_void, path: *const c_char, out: *mut *mut c_void) -> Status;
     fn acpi_os_free(pointer: *mut c_void);
@@ -419,7 +437,57 @@ impl Session {
         unsafe { acpi_put_table(table) };
         Ok(Some(bytes))
     }
+    /// Every processor the namespace declares, with its ACPI ID, as Linux's
+    /// `acpi_processor_get_info` reads it: a legacy `Processor` object's
+    /// ProcessorID, present per `_STA` when it has one, or an `ACPI0007`
+    /// device's `_UID`. The bool is true for a device declaration.
+    pub fn processors(&self) -> Result<Vec<(Handle<'_>, u32, bool)>, Error> {
+        let mut found = Vec::new();
+        for handle in self.collect(|callback, context| {
+            // SAFETY: the walk is synchronous and `context` outlives it.
+            unsafe { stela_acpi_walk_processors(callback, context) }
+        })? {
+            if handle.child("_STA").is_ok()
+                && !matches!(handle.evaluate(Some("_STA"), &[])?, Some(Value::Integer(status)) if status & 1 != 0)
+            {
+                continue;
+            }
+            let guard = self.guard()?;
+            let mut id = 0;
+            // SAFETY: the bound handle names a live Processor object.
+            checked(unsafe { stela_acpi_processor_id(handle.raw, &mut id) })?;
+            guard.check()?;
+            found.push((handle, id, false));
+        }
+        for handle in self.devices("ACPI0007")? {
+            if handle.child("_UID").is_err() {
+                continue;
+            }
+            match handle.evaluate(Some("_UID"), &[])? {
+                Some(Value::Integer(uid)) => {
+                    if let Ok(uid) = u32::try_from(uid) {
+                        found.push((handle, uid, true));
+                    }
+                }
+                _ => continue,
+            }
+        }
+        Ok(found)
+    }
     fn walk(&self, hid: *const c_char) -> Result<Vec<Handle<'_>>, Error> {
+        self.collect(|callback, context| {
+            // SAFETY: the walk is synchronous and `context` outlives it.
+            unsafe { stela_acpi_walk(hid, callback, context) }
+        })
+    }
+    /// The handles a synchronous ACPICA walk reports to its callback.
+    fn collect(
+        &self,
+        walk: impl FnOnce(
+            unsafe extern "C" fn(*mut c_void, u32, *mut c_void, *mut *mut c_void) -> Status,
+            *mut c_void,
+        ) -> Status,
+    ) -> Result<Vec<Handle<'_>>, Error> {
         let guard = self.guard()?;
         let mut raw = Vec::<*mut c_void>::new();
         unsafe extern "C" fn collect(
@@ -428,14 +496,11 @@ impl Session {
             context: *mut c_void,
             _: *mut *mut c_void,
         ) -> Status {
-            // SAFETY: synchronous acpi_get_devices call owns this Vec.
+            // SAFETY: the synchronous walk owns this Vec.
             unsafe { &mut *context.cast::<Vec<*mut c_void>>() }.push(handle);
             0
         }
-        // SAFETY: all callback storage lives through this synchronous walk.
-        checked(unsafe {
-            stela_acpi_walk(hid, collect, (&mut raw as *mut Vec<*mut c_void>).cast())
-        })?;
+        checked(walk(collect, (&mut raw as *mut Vec<*mut c_void>).cast()))?;
         guard.check()?;
         raw.into_iter()
             .map(|raw| {
@@ -766,6 +831,36 @@ pub struct Reference<'a> {
     pub handle: Handle<'a>,
     pub actual_type: ObjectType,
 }
+/// Why an `_OSC` handshake failed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Osc {
+    /// The object has no `_OSC`.
+    Absent,
+    /// Its result is not a buffer the length of the capabilities.
+    InvalidReturn,
+    /// The firmware refused the request: its status DWORD.
+    Refused(u32),
+}
+
+/// `acpi_osc_error_check`: a query fails on any defined error bit but a
+/// masked capability, which only says some were not granted; a request
+/// fails only on an unrecognized UUID, since the firmware acted on the rest.
+fn osc_result(status: u32, returned: Vec<u32>) -> Result<Vec<u32>, Osc> {
+    let mut errors = returned[0]
+        & (OSC_REQUEST_ERROR
+            | OSC_INVALID_UUID_ERROR
+            | OSC_INVALID_REVISION_ERROR
+            | OSC_CAPABILITIES_MASK_ERROR);
+    let query = status & OSC_QUERY_ENABLE != 0;
+    if query {
+        errors &= !OSC_CAPABILITIES_MASK_ERROR;
+    }
+    if errors != 0 && (query || errors & OSC_INVALID_UUID_ERROR != 0) {
+        return Err(Osc::Refused(returned[0]));
+    }
+    Ok(returned)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Value<'a> {
     Integer(u64),
@@ -1038,6 +1133,43 @@ impl<'a> Handle<'a> {
             .map(Some)
         }
     }
+    /// The `_DSD` device property `name`, as Linux's `acpi_dev_get_property`
+    /// finds it: in the first well-formed device-properties set that names
+    /// it. None when the device has no `_DSD` or no such property; a set
+    /// whose entries are not (string, value) pairs is skipped and a malformed
+    /// UUID/set pair ends the search, as `acpi_extract_properties` does.
+    pub fn property(self, name: &str) -> Result<Option<Value<'a>>, Error> {
+        if self.child("_DSD").is_err() {
+            return Ok(None);
+        }
+        let Some(Value::Package(dsd)) = self.evaluate(Some("_DSD"), &[])? else {
+            return Ok(None);
+        };
+        let mut entries = dsd.into_iter();
+        while let (Some(uuid), Some(set)) = (entries.next(), entries.next()) {
+            let (Value::Buffer(uuid), Value::Package(set)) = (uuid, set) else {
+                break;
+            };
+            if uuid != DEVICE_PROPERTIES
+                || !set.iter().all(|property| {
+                    matches!(property, Value::Package(pair)
+                        if pair.len() == 2 && matches!(pair[0], Value::String(_)))
+                })
+            {
+                continue;
+            }
+            for property in set {
+                let Value::Package(mut pair) = property else {
+                    continue;
+                };
+                let value = pair.pop();
+                if matches!(&pair[0], Value::String(key) if key == name.as_bytes()) {
+                    return Ok(value);
+                }
+            }
+        }
+        Ok(None)
+    }
     /// Evaluate the specification UCSI `_DSM` with an empty package Arg3.
     pub fn dsm(
         self,
@@ -1054,6 +1186,47 @@ impl<'a> Handle<'a> {
                 Argument::Package(&[]),
             ],
         )
+    }
+    /// Linux's `acpi_run_osc`: `_OSC` with `capabilities` as its DWORDs, the
+    /// first being the status/query DWORD, and the DWORDs the firmware
+    /// returns.
+    pub fn osc(
+        self,
+        uuid: &[u8; 16],
+        revision: u64,
+        capabilities: &[u32],
+    ) -> Result<Result<Vec<u32>, Osc>, Error> {
+        if capabilities.len() < 2 {
+            return Err(BAD_PARAMETER);
+        }
+        if self.child("_OSC").is_err() {
+            return Ok(Err(Osc::Absent));
+        }
+        let bytes: Vec<u8> = capabilities
+            .iter()
+            .flat_map(|dword| dword.to_le_bytes())
+            .collect();
+        let returned = self.evaluate(
+            Some("_OSC"),
+            &[
+                Argument::Buffer(uuid),
+                Argument::Integer(revision),
+                Argument::Integer(capabilities.len() as u64),
+                Argument::Buffer(&bytes),
+            ],
+        )?;
+        Ok(match returned {
+            Some(Value::Buffer(returned)) if returned.len() == bytes.len() => osc_result(
+                capabilities[0],
+                returned
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|dword| u32::from_le_bytes(*dword))
+                    .collect(),
+            ),
+            _ => Err(Osc::InvalidReturn),
+        })
     }
     /// Install a true ACPICA device Notify callback. Callback work must be short,
     /// nonblocking and enqueue driver work; the provider supplies deferred dispatch.

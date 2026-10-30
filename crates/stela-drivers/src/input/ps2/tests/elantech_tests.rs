@@ -270,6 +270,26 @@ fn elantech_identity_register_programming_and_readback_precede_reporting() {
         assert!(!c.has_wheel());
     }
 }
+#[test]
+fn the_protocol_probe_selects_elantech_by_its_knock_and_firmware_signature() {
+    let (explicit, h) = target(0x040216);
+    let mut c = Controller::new_probing(
+        Model(h.clone()),
+        Time(h.borrow().time.clone()),
+        explicit.config,
+        None,
+    )
+    .unwrap();
+    c.initialize().unwrap();
+    assert_eq!(c.elantech_capabilities().unwrap().firmware, 0x040216);
+}
+#[test]
+fn new_ics_take_host_notify_by_their_firmware_version() {
+    assert!(elantech::host_notify(0x0f2001));
+    assert!(!elantech::host_notify(0x0f2000), "revision zero");
+    assert!(!elantech::host_notify(0x0f0001), "no PS2_SMBUS_NOTIFY bit");
+    assert!(!elantech::host_notify(0x040216));
+}
 fn v1_packet(firmware: u32, x: u16, y: u16, fingers: u8, buttons: u8) -> [u8; 4] {
     let old = firmware < 0x020000;
     let mut p = [

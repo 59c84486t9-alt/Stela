@@ -443,10 +443,11 @@ unsafe impl Idle for NativeIdle {
                 .idle
                 .store(deadline.unwrap_or(NONE), Ordering::Relaxed);
             self.state.rearm(now)?;
-            // SAFETY: incoming IF was set, root owns IDT/LAPIC. STI's
-            // shadow spans HLT; same-CPU interrupt publication cannot be lost.
+            let ticks = self.state.cpu.controller().read(apic::CURRENT);
+            // SAFETY: incoming IF was set, root owns IDT/LAPIC. The wait
+            // ends on any interrupt, including one published before it.
             unsafe {
-                asm!("sti", "hlt", "cli", options(nostack));
+                crate::native_idle::wait(Some(u64::from(ticks) * 1_000_000 / self.state.apic_hz));
             }
             self.state.idle.store(NONE, Ordering::Relaxed);
             self.state.pending.swap(false, Ordering::AcqRel);

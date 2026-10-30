@@ -210,6 +210,86 @@ fn real_queried_identity_bounds_capabilities_and_mode_precede_reporting() {
     }
 }
 #[test]
+fn the_protocol_probe_selects_synaptics_by_its_identity_with_the_firmware_profile() {
+    let (explicit, h) = target(true, true);
+    let mut c = Controller::new_probing(
+        Model(h.clone()),
+        Time(h.borrow().time.clone()),
+        explicit.config,
+        Some("PNP: LEN0033 PNP0f13"),
+    )
+    .unwrap();
+    c.initialize().unwrap();
+    let capabilities = c.synaptics_capabilities().unwrap();
+    assert_eq!(
+        capabilities.coordinate_quirk,
+        Some(synaptics::board::Bounds {
+            minimum: (1024, 2258),
+            maximum: (5052, 4832)
+        })
+    );
+    assert!(c.synaptics.as_ref().unwrap().high_rate);
+    assert_eq!(
+        h.borrow().synaptics.as_ref().unwrap().queried[..2],
+        [0, 0],
+        "the probe's identity query, then the engine's own"
+    );
+}
+fn intertouch(firmware_id: &str) -> (Controller<Model, Time>, Rc<RefCell<Hardware>>) {
+    let (explicit, h) = target(true, true);
+    // SYN_CAP_INTERTOUCH beside the fixture's other extended capabilities.
+    h.borrow_mut()
+        .synaptics
+        .as_mut()
+        .unwrap()
+        .queries
+        .insert(12, [2, 0x60, 0]);
+    let mut c = Controller::new_probing(
+        Model(h.clone()),
+        Time(h.borrow().time.clone()),
+        explicit.config,
+        Some(firmware_id),
+    )
+    .unwrap();
+    c.initialize().unwrap();
+    (c, h)
+}
+#[test]
+fn intertouch_is_the_companion_of_a_listed_pad_that_has_it() {
+    assert_eq!(
+        intertouch("PNP: LEN0073 PNP0f13").0.smbus_companion(),
+        Some(Companion::Rmi)
+    );
+    assert_eq!(
+        intertouch("PNP: len2004 PNP0f13").0.smbus_companion(),
+        Some(Companion::Rmi),
+        "a top-button pad, matched without case"
+    );
+    assert_eq!(intertouch("PNP: SYN1B7F PNP0f13").0.smbus_companion(), None);
+    let (c, _) = ready_synaptics(true);
+    assert_eq!(c.smbus_companion(), None, "no PNP identifier");
+}
+#[test]
+fn a_handed_over_mouse_port_drops_its_bytes_until_reclaimed() {
+    let (mut c, h) = intertouch("PNP: LEN0073 PNP0f13");
+    assert!(h.borrow().scanning[1]);
+    c.hand_mouse_to_companion().unwrap();
+    assert!(!h.borrow().scanning[1]);
+    assert_eq!(
+        h.borrow().synaptics.as_ref().unwrap().mode,
+        None,
+        "reset to its defaults"
+    );
+    emit(&h, Port::Mouse, &new_packet(3000, 3000, 60, 4, 1));
+    assert!(c.poll().unwrap().is_empty());
+    c.hand_mouse_to_companion().unwrap();
+    c.reclaim_mouse().unwrap();
+    assert!(h.borrow().scanning[1]);
+    assert!(h.borrow().synaptics.as_ref().unwrap().mode.is_some());
+    emit(&h, Port::Mouse, &new_packet(3000, 3000, 60, 4, 1));
+    assert!(!c.poll().unwrap().is_empty());
+}
+#[test]
 fn absolute_records_decode_every_field_in_both_formats() {
     for new in [false, true] {
         let (mut c, h) = ready_synaptics(new);

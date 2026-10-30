@@ -7,7 +7,7 @@ use crate::{
             Binding, FirmwareStatus, InitializationError, InitializationReport, Pipe, State,
             intel::PlatformInputs,
         },
-        xhci::{self, Device, FULL_SPEED},
+        xhci::{Device, FULL_SPEED},
     },
 };
 use alloc::{collections::VecDeque, rc::Rc, string::String};
@@ -245,7 +245,11 @@ fn fixture(project: Project, config: bool) -> (Hci<Model>, Catalog, Rc<RefCell<T
     add(0x1001, &[], &version(project, true));
     add(0x1009, &[], &[0, 1, 2, 3, 4, 5, 6]);
     let trace = Rc::new(RefCell::new(Trace::default()));
-    let binding = Binding::new(&device, &xhci::interfaces(&device.configuration)[0]).unwrap();
+    let binding = Binding::new(
+        &device,
+        &crate::usb::descriptor::interfaces(&device.configuration)[0],
+    )
+    .unwrap();
     assert_eq!(hci, version(project, false)[1]);
     (
         Hci::from_io(

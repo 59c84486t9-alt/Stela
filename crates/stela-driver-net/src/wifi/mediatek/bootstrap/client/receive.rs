@@ -219,14 +219,14 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         // SAFETY: This private entry is reached only by the native source bypass or
         // the exact currently installed BA queue's ordered release.
         let group = unsafe { parent.ordered() };
+        let head = &group.members()[0];
+        let (ptk, gtk) = Self::receiving(&mut s.ptk, &mut s.gtk, &mut s.links, &head.radio)?;
         let slot = if key.is_some() {
-            let owner = if group.members()[0].header().receiver.is_multicast() {
-                s.gtk.as_mut()
+            Some(if head.header().receiver.is_multicast() {
+                gtk.slot_mut()
             } else {
-                s.ptk.as_mut()
-            }
-            .ok_or(Error::NoKey)?;
-            Some(owner.slot_mut())
+                ptk.slot_mut()
+            })
         } else {
             None
         };
@@ -234,10 +234,8 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             .station
             .receive_ordered_group(&group, slot)
             .map_err(Error::Aggregate)?;
-        let ptk = s.ptk.as_ref().ok_or(Error::NoKey)?.slot();
-        let gtk = s.gtk.as_ref().ok_or(Error::NoKey)?.slot();
         s.station
-            .receive_group_refs(&received, &[ptk, gtk])
+            .receive_group_refs(&received, &[ptk.slot(), gtk.slot()])
             .map_err(Error::Data)
     }
 }

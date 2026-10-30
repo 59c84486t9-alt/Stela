@@ -70,7 +70,7 @@ fn setup_modern_bands(
                 hardware_value: 1,
                 flags: WIDE,
             }],
-            [36, 40, 44, 48]
+            [36, 40, 44, 48, 52, 56, 60, 64]
                 .map(|hardware_value| domain::Channel {
                     hardware_value,
                     flags: WIDE | five,
@@ -85,7 +85,7 @@ fn setup_modern_bands(
         ],
         |band, n| {
             wifi::mediatek::mcu::power::Limits::uniform(if split && band == Band::Ghz5 {
-                if [40, 44, 48].contains(&n) { 20 } else { 40 }
+                if n == 36 { 40 } else { 20 }
             } else {
                 -3
             })

@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear
 // Copyright (C) 2020-2023 MediaTek Inc.
-//! Full single-link MT7925 modern station/BSS/EDCA and BA requests.
+//! Full MT7925 modern station/BSS/EDCA and BA requests, on one link of a
+//! station MLD too.
 //! Negotiated metadata encodes capabilities; only the current shared
 //! association owner and matching native completions can install these bytes.
-use super::{Error, Profile, put16, put32, tlv};
+use super::{Error, MldLink, Profile, put16, put32, tlv};
 use crate::wifi::{
     Band,
     station::phy::{AccessCategory, McsMaps, Negotiated, Width},
@@ -38,6 +39,9 @@ pub struct Configuration {
     local_he_maps: [McsMaps; 3],
     /// The BSS's operating width: the negotiated one until a channel switch.
     width: Width,
+    /// The station MLD link the BSS and its AP are, whose MLD records every
+    /// BSS and peer request then carries.
+    link: Option<MldLink>,
 }
 impl Configuration {
     pub fn new(
@@ -78,6 +82,20 @@ impl Configuration {
             self.local_he_maps,
             width,
         )
+        .map(|switched| Self {
+            link: self.link,
+            ..switched
+        })
+    }
+    /// The configuration of one link of a station MLD.
+    pub fn with_link(self, link: MldLink) -> Self {
+        Self {
+            link: Some(link),
+            ..self
+        }
+    }
+    pub const fn link(&self) -> Option<&MldLink> {
+        self.link.as_ref()
     }
     fn checked(
         profile: Profile,
@@ -142,6 +160,7 @@ impl Configuration {
             operation,
             local_he_maps,
             width,
+            link: None,
         })
     }
     pub fn negotiated(&self) -> &Negotiated {
@@ -152,11 +171,11 @@ impl Configuration {
     }
     pub fn peer_request(&self, profile: Profile, associated: bool) -> Result<Vec<u8>, Error> {
         self.matches(profile)?;
-        profile.peer_request_inner(true, associated, Some(self))
+        profile.peer_request_inner(true, associated, Some(self), self.link.as_ref())
     }
     pub fn bss_request(&self, profile: Profile, enable: bool) -> Result<Vec<u8>, Error> {
         self.matches(profile)?;
-        profile.bss_request_inner(enable, Some(self))
+        profile.bss_request_inner(enable, Some(self), self.link.as_ref())
     }
     fn matches(&self, profile: Profile) -> Result<(), Error> {
         // Recheck supplied resources/rates/antenna against this kept

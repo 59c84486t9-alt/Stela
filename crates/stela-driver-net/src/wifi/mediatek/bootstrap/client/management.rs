@@ -137,7 +137,8 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             .as_ref()
             .and_then(|k| k.slot().installed())
             .ok_or(Error::NoKey)?;
-        if ptk.scope() != KeyScope::Pairwise(p.peer)
+        let peer = s.station.pairwise_peer().ok_or(Error::WrongProfile)?;
+        if ptk.scope() != KeyScope::Pairwise(peer)
             || gtk.scope() != KeyScope::Group(p.peer)
             || ptk.slot() != p.wcid
             || gtk.slot() != p.interface.broadcast_wcid
@@ -394,6 +395,10 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         {
             return Err(Error::WrongProfile);
         }
+        // An MLD association's unicast frame names the MLDs before its PTK,
+        // the MLDs', checks it.
+        let frame = Self::translated(s, &frame).into_owned();
+        let (local, _) = Self::association_addresses(s, p);
         let mut body = Vec::new();
         body.try_reserve_exact(frame.bytes().len())
             .map_err(|_| Error::NoMemory)?;
@@ -411,7 +416,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 .ptk
                 .as_mut()
                 .ok_or(Error::NoKey)?
-                .authorize_unicast_management(&frame, p.interface.address)
+                .authorize_unicast_management(&frame, local)
                 .map_err(|e| Error::Key(mailbox::key::Error::Security(e)))?;
             body.extend_from_slice(proof.body());
             proof.packet_number()

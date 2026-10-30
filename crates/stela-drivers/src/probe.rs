@@ -25,6 +25,8 @@ use alloc::{boxed::Box, string::String, sync::Arc, vec::Vec};
 use core::fmt;
 
 #[cfg(feature = "native-acpi")]
+mod companion;
+#[cfg(feature = "native-acpi")]
 mod i2c;
 #[cfg(feature = "native-acpi")]
 mod power;
@@ -34,6 +36,10 @@ pub mod native;
 #[cfg(any(test, feature = "native-acpi"))]
 mod platform;
 pub mod services;
+#[cfg(feature = "native-acpi")]
+pub mod smbus;
+#[cfg(feature = "native-acpi")]
+pub mod typec;
 use crate::net::wifi::network::Network;
 pub use services::{NativeServices, ServiceError};
 
@@ -55,6 +61,10 @@ pub enum Error {
     MediatekWifi(net::wifi::mediatek::attach::AttachError),
     IntelBluetooth(crate::bluetooth::intel_pcie::Error),
     Bcm4377(crate::bluetooth::bcm4377::Error),
+    Ehci(usb::ehci::Error),
+    HdaPci(crate::audio::hda::pci::AttachError),
+    Hda(crate::audio::Error),
+    Usb4(native::usb4::Refusal),
 }
 
 impl fmt::Display for Error {
@@ -72,6 +82,10 @@ impl fmt::Display for Error {
             Self::MediatekWifi(error) => write!(f, "mt76: {error}"),
             Self::IntelBluetooth(error) => write!(f, "btintel_pcie: {error}"),
             Self::Bcm4377(error) => write!(f, "hci_bcm4377: {error}"),
+            Self::Ehci(error) => write!(f, "EHCI: {error:?}"),
+            Self::HdaPci(error) => write!(f, "HD Audio PCI: {error:?}"),
+            Self::Hda(error) => write!(f, "HD Audio: {error:?}"),
+            Self::Usb4(refusal) => write!(f, "USB4 host: {refusal}"),
         }
     }
 }
@@ -118,6 +132,9 @@ pub enum PlatformError {
     EcDiscovery(crate::platform::ec::discovery::native::DiscoveryError),
     #[cfg(feature = "native-acpi")]
     Battery(crate::platform::battery::Error),
+    Smbus(crate::bus::smbus::Error),
+    #[cfg(feature = "native-acpi")]
+    Ucsi(crate::usb::typec::ucsi::acpi::attachment::Error),
     /// Finding a device or evaluating its method failed.
     #[cfg(feature = "native-acpi")]
     AcpiMethod(crate::platform::acpi::Error),
@@ -146,6 +163,9 @@ impl fmt::Display for PlatformError {
             Self::EcDiscovery(error) => write!(f, "embedded controller description: {error:?}"),
             #[cfg(feature = "native-acpi")]
             Self::Battery(error) => write!(f, "battery: {error:?}"),
+            Self::Smbus(error) => error.fmt(f),
+            #[cfg(feature = "native-acpi")]
+            Self::Ucsi(error) => write!(f, "UCSI: {error:?}"),
             #[cfg(feature = "native-acpi")]
             Self::AcpiMethod(error) => write!(f, "ACPI method: {error:?}"),
         }
@@ -343,11 +363,18 @@ fn unsupported(class: [u8; 3]) -> Option<&'static str> {
         [0x02, 0x00, _] => Some("Ethernet controller"),
         [0x02, 0x80, _] => Some("Wi-Fi controller other than Intel's or MediaTek's"),
         [0x02, ..] => Some("network controller"),
-        [0x04, 0x03, _] => Some("HD Audio controller (audio is not attached yet)"),
+        // Admitted identities attach through the mount's native services.
+        [0x04, 0x03, _] => Some("HD Audio controller outside the supported identities"),
+        // EHCI attaches through the mount's native services.
+        [0x0c, 0x03, 0x20] => None,
         [0x0c, 0x03, _] => {
-            Some("USB host controller other than xHCI (taken from firmware, not driven)")
+            Some("UHCI or OHCI USB host controller (taken from firmware, not driven)")
         }
-        [0x0c, 0x0a, _] => Some("USB4/Thunderbolt host (not attached yet)"),
+        // Listed NHIs attach through the mount's native services.
+        [0x0c, 0x0a, _] => Some("USB4/Thunderbolt host outside the supported NHI identities"),
+        [0x0c, 0x05, _] => Some(
+            "SMBus host other than an Intel i801 under native ACPI (no Host Notify for touchpad companions)",
+        ),
         [0x08, 0x05, _] => Some("SD host controller without standard SDHCI interface"),
         [0x0d, 0x11, _] => Some("PCIe Bluetooth controller other than Intel's"),
         _ => None,
@@ -373,6 +400,12 @@ pub struct Devices {
     pub usb_devices: Vec<xhci::Device>,
     /// Explicitly polled USB topology owners, including empty controllers.
     pub usb_hosts: Vec<xhci::Host>,
+    /// Attached EHCI controllers, which their roots' storage transports share.
+    pub ehci_hosts: Vec<usb::ehci::host::Shared>,
+    /// HD Audio controllers and their bound codecs.
+    pub hda_hosts: Vec<native::hda::Host>,
+    /// USB4/Thunderbolt hosts whose firmware connection manager answered.
+    pub usb4_hosts: Vec<native::usb4::Host>,
     /// Native SDHCI socket owners, including empty/removable card sockets.
     pub sd_hosts: Vec<sdhci::Host>,
     /// Native Realtek socket owners, kept for empty/removable SD/MMC cards.
@@ -425,6 +458,9 @@ pub struct Devices {
     /// The batteries, AC adapter and lid the ACPI namespace lists.
     #[cfg(feature = "native-acpi")]
     pub power: Power,
+    /// Intel i801 SMBus hosts, shared with the touchpad companions on them.
+    #[cfg(feature = "native-acpi")]
+    pub smbus_hosts: Vec<smbus::Host>,
     /// ECAM windows that were not mapped, and so not scanned.
     pub unmapped: Vec<EcamWindow>,
     /// Whether the mount supplied [`NativeServices`]. Drivers that attach
@@ -749,9 +785,14 @@ pub unsafe fn probe_with_provider(
     // Broadcom PCIe Bluetooth functions, attached once the scan has found
     // every bridge of their segment.
     let mut broadcom_bluetooth = Vec::new();
+    let mut usb4_hosts = Vec::new();
     let mut mehlow = false;
     // Each PCI bridge and its secondary bus, for ACPI companion lookups.
     let mut bridges = Vec::new();
+    // i801 SMBus hosts, attached under ACPI arbitration once the embedded
+    // controller is.
+    #[cfg(feature = "native-acpi")]
+    let mut smbus_functions = Vec::new();
     for window in &handoff.ecam {
         if !handoff.is_mapped(&window.range()) {
             devices.unmapped.push(*window);
@@ -785,6 +826,11 @@ pub unsafe fn probe_with_provider(
                 continue;
             }
             crate::working(&alloc::format!("PCI {address}"));
+            #[cfg(feature = "native-acpi")]
+            if smbus::matches(&function) {
+                smbus_functions.push(address);
+                continue;
+            }
             if let Some(kind) = usb::handoff::Kind::of(function.class) {
                 // SAFETY: the caller owns the machine and no driver has bound
                 // this controller yet, as Linux's early PCI fixup runs.
@@ -852,6 +898,62 @@ pub unsafe fn probe_with_provider(
                     }
                     native::Kind::Bcm4377 => {
                         broadcom_bluetooth.push(address);
+                        continue;
+                    }
+                    native::Kind::Usb4 => {
+                        usb4_hosts.push(address);
+                        continue;
+                    }
+                    native::Kind::Ehci => {
+                        // SAFETY: as for tg3 below; the handoff above took
+                        // this controller and reset its companions, which
+                        // the scan reaches first as lower functions.
+                        match unsafe { native::ehci(services, address, handoff.clock) } {
+                            Ok((controller, domain)) => {
+                                // SAFETY: `domain` is the claimed controller's;
+                                // the CPU alone touches these storage buffers,
+                                // copying through the controller's own arena.
+                                let mut dma = unsafe {
+                                    crate::bus::dma::DomainAllocator::new(
+                                        services.pages(),
+                                        domain,
+                                        u64::from(u32::MAX),
+                                    )
+                                };
+                                let found = usb::ehci::host::enumerate(
+                                    &controller,
+                                    &alloc::format!("{address} EHCI"),
+                                    handoff.clock,
+                                    &mut dma,
+                                );
+                                devices.disks.extend(
+                                    found
+                                        .disks
+                                        .into_iter()
+                                        .map(|disk| Box::new(disk) as Box<dyn BlockDevice>),
+                                );
+                                devices.usb_storage.extend(found.storage);
+                                devices.usb_failures.extend(found.failures);
+                                devices.usb_unused.extend(found.unused);
+                                devices.ehci_hosts.push(controller);
+                            }
+                            Err((error, kept)) => {
+                                devices.failures.push((address, error));
+                                devices.owners.extend(kept);
+                            }
+                        }
+                        continue;
+                    }
+                    native::Kind::Hda => {
+                        // SAFETY: as for tg3 below; only conventional
+                        // controllers, which no firmware agent drives, match.
+                        match unsafe { native::hda::attach(services, address, handoff.clock) } {
+                            Ok(host) => devices.hda_hosts.push(host),
+                            Err((error, kept)) => {
+                                devices.failures.push((address, error));
+                                devices.owners.extend(kept);
+                            }
+                        }
                         continue;
                     }
                     native::Kind::IntelWifi => {
@@ -1002,9 +1104,12 @@ pub unsafe fn probe_with_provider(
                                 .into_iter()
                                 .map(|d| Box::new(d) as Box<dyn BlockDevice>),
                         );
-                        devices
-                            .inputs
-                            .extend(found.inputs.into_iter().map(InputDevice::Usb));
+                        devices.inputs.extend(
+                            found
+                                .inputs
+                                .into_iter()
+                                .map(|input| InputDevice::Usb(Box::new(input))),
+                        );
                         devices.usb_devices.extend(found.devices);
                         devices.usb_hosts.extend(found.hosts);
                         devices.usb_storage.extend(found.storage);
@@ -1156,6 +1261,22 @@ pub unsafe fn probe_with_provider(
             }
         }
     }
+    for address in usb4_hosts {
+        let Some(services) = services else {
+            devices
+                .failures
+                .push((address, Error::Native(ServiceError::Unavailable)));
+            continue;
+        };
+        // SAFETY: as for tg3; the scan found every bridge of the segment.
+        match unsafe { native::usb4::attach(services, address, &bridges, handoff.clock) } {
+            Ok(host) => devices.usb4_hosts.push(host),
+            Err((error, kept)) => {
+                devices.failures.push((address, error));
+                devices.owners.extend(kept);
+            }
+        }
+    }
     for address in broadcom_bluetooth {
         let Some(services) = services else {
             devices
@@ -1218,21 +1339,51 @@ pub unsafe fn probe_with_provider(
         services.and_then(|services| services.acpi().map(|session| (services, session)))
     {
         // Before any other device's methods, which may read EC fields.
-        match services.embedded_controller() {
-            Ok(Some(installed)) => devices.owners.push(Box::new(installed)),
+        let ec = match services.embedded_controller() {
+            Ok(Some(installed)) => {
+                devices.owners.push(Box::new(installed.clone()));
+                Some(installed)
+            }
             Ok(None) => power::attach_ec(session, &mut devices),
-            Err(error) => devices.platform_failures.push((
-                String::from("embedded controller"),
-                PlatformError::Native(error),
-            )),
+            Err(error) => {
+                devices.platform_failures.push((
+                    String::from("embedded controller"),
+                    PlatformError::Native(error),
+                ));
+                None
+            }
+        };
+        for address in core::mem::take(&mut smbus_functions) {
+            // SAFETY: the mount grants each i801's I/O window to probe.
+            match unsafe { smbus::attach(services, session, address, &bridges, handoff.clock) } {
+                Ok(host) => devices.smbus_hosts.push(host),
+                Err(error) => devices
+                    .platform_failures
+                    .push((alloc::format!("{address} SMBus"), error)),
+            }
         }
         let usb_released = !devices
             .platform_failures
             .iter()
             .any(|(_, error)| matches!(error, PlatformError::Handoff(_)));
-        platform::attach_i8042(session, handoff.clock, usb_released, &mut devices);
+        let smbus_hosts = devices.smbus_hosts.clone();
+        platform::attach_i8042(
+            session,
+            handoff.clock,
+            usb_released,
+            &smbus_hosts,
+            &mut devices,
+        );
         i2c::attach(services, session, handoff.clock, &mut devices);
         power::attach_power(session, &mut devices);
+        typec::attach(services, session, ec.as_ref(), handoff.clock, &mut devices);
+    }
+    #[cfg(feature = "native-acpi")]
+    for address in smbus_functions {
+        devices.platform_failures.push((
+            alloc::format!("{address} SMBus"),
+            PlatformError::Native(ServiceError::Unavailable),
+        ));
     }
     devices
 }
@@ -1257,13 +1408,15 @@ mod tests {
             Some("RAID storage controller (Intel RST/VMD mode)")
         );
         assert_eq!(
-            unsupported([0x0c, 0x03, 0x20]),
-            Some("USB host controller other than xHCI (taken from firmware, not driven)")
+            unsupported([0x0c, 0x03, 0x10]),
+            Some("UHCI or OHCI USB host controller (taken from firmware, not driven)")
         );
+        assert_eq!(unsupported([0x0c, 0x03, 0x20]), None); // EHCI: native
         assert_eq!(
             unsupported([0x08, 0x05, 0x02]),
             Some("SD host controller without standard SDHCI interface")
         );
+        assert!(unsupported([0x0c, 0x05, 0x00]).is_some_and(|why| why.contains("i801")));
         assert_eq!(unsupported([0x06, 0x04, 0x00]), None); // PCI bridge
         assert_eq!(unsupported([0x03, 0x00, 0x00]), None); // display: GPU inventory
     }

@@ -356,6 +356,23 @@ pub(super) fn configure(environment: &Environment<'_>, command: &Request) -> Res
         writeln!(text, "  {}", super::wifi::describe(&network, &record.esp))?;
         record.wifi = Some(network);
     }
+    if let Some(ipv4) = command.ipv4 {
+        record.addresses.ipv4 = Some(super::addresses::Ipv4::new(ipv4, command.ipv4_gateway)?);
+    }
+    if command.automatic_ipv4 && record.addresses.ipv4.take().is_some() {
+        writeln!(text, "  IPv4           from DHCP")?;
+    }
+    if let Some(dns) = &command.dns {
+        record.addresses.dns = dns.clone();
+    }
+    if command.automatic_dns && !std::mem::take(&mut record.addresses.dns).is_empty() {
+        writeln!(text, "  DNS            from DHCP and the router")?;
+    }
+    if command.ipv4.is_some() || command.dns.is_some() {
+        for line in record.addresses.describe() {
+            writeln!(text, "  {line}")?;
+        }
+    }
     if command.no_wifi && record.wifi.take().is_some() {
         writeln!(
             text,

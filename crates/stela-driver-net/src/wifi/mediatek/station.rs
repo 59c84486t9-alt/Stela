@@ -5,9 +5,10 @@
 //! wpa_supplicant and mac80211 keep one: a scan of every band, 6 GHz last as
 //! cfg80211 splits it, the strongest BSS of the network whose security the
 //! station supports, open-system or SAE authentication and association on
-//! mac80211's channel and mode, the 4-way and group key handshakes, their
-//! keys and the controlled port. A lost or failed connection scans again
-//! after wpa_supplicant's delays.
+//! mac80211's channel and mode, with an AP MLD's setup link and one more link
+//! when the NIC supports MLO, the 4-way and group key handshakes, their keys
+//! and the controlled port. A lost or failed connection scans again after
+//! wpa_supplicant's delays.
 use super::{
     bootstrap::client::{
         self, BssHandle, Event, LinkControlError, LinkEvent, ManagedLink, Phase, PolicyError,
@@ -37,11 +38,16 @@ use crate::{
             Join, PortPolicy,
             data::Ingress,
             external::{self, Received},
+            multi_link::{self as mlo, Affiliation, Mld, Setup},
             operations::Operations,
-            phy::{Capabilities, Role},
-            wire::{AssociationRequest, six_ghz::Selection},
+            phy::{Capabilities, Mode, Role},
+            wire::{
+                AssociationRequest,
+                multi_link::{Basic, affiliated},
+                six_ghz::Selection,
+            },
         },
-        supplicant::{Akm, EAPOL, IntegrityKey, Step, Supplicant},
+        supplicant::{self, Akm, EAPOL, IntegrityKey, MultiLink, Step, Supplicant},
     },
 };
 use alloc::{boxed::Box, format, string::String, sync::Arc, vec, vec::Vec};
@@ -106,8 +112,74 @@ fn power_type_usable(bss: &Bss, channels: &[(Channel, u32)]) -> bool {
         .is_some_and(|(info, flags)| PowerType::usable(info, flags))
 }
 
+/// The AP MLD `bss` is a link of, as its Basic Multi-Link element names it:
+/// the AP MLD's address and the link's ID.
+fn ap_mld(bss: &Bss) -> Option<(Mac, u8)> {
+    let basic = Basic::find(&bss.elements).ok()??;
+    Some((basic.address, basic.link_id?))
+}
+
+/// `mt76_select_links` beside the setup link `bss` of the AP MLD `ap`: the
+/// first link by ID that the RNR of `bss` reports on another band, whose AP
+/// `observed` holds as that link of the same AP MLD and `usable` takes.
+fn other_link<'a, H: Copy>(
+    bss: &Bss,
+    ap: Mac,
+    observed: &[(H, &'a Bss)],
+    usable: impl Fn(&Bss) -> bool,
+) -> Option<(u8, H, &'a Bss)> {
+    let mut reported = affiliated(&bss.elements).ok()?;
+    reported.sort_by_key(|link| link.link_id);
+    reported.into_iter().find_map(|link| {
+        observed
+            .iter()
+            .find(|(_, other)| {
+                other.bssid == link.bssid
+                    && other.channel.number == u16::from(link.channel)
+                    && other.channel.band != bss.channel.band
+                    && ap_mld(other) == Some((ap, link.link_id))
+                    && usable(other)
+            })
+            .map(|&(handle, other)| (link.link_id, handle, other))
+    })
+}
+
+/// The whole element `id` with `body`.
+fn element(id: u8, body: &[u8]) -> Vec<u8> {
+    let mut element = vec![id, body.len() as u8];
+    element.extend_from_slice(body);
+    element
+}
+
+/// Link `link_id` of an AP MLD association's handshakes, the station at
+/// `local` and the AP of `bss`, as wpa_supplicant keeps it in `sm->mlo`.
+fn keyed_link(link_id: u8, local: Mac, bss: &Bss) -> supplicant::Link {
+    supplicant::Link {
+        link_id,
+        local,
+        ap: bss.bssid,
+        rsn: element(48, security::rsn_element(&bss.elements).unwrap_or_default()),
+        rsnxe: connection::find(&bss.elements, 244).map(|body| element(244, body)),
+        accepted: false,
+    }
+}
+
+/// The handshake of an association with `bss` under `security` and `pmk`.
+fn candidate(bss: &Bss, security: Security, pmk: Zeroizing<[u8; 32]>) -> Candidate {
+    Candidate {
+        bssid: bss.bssid,
+        security,
+        pmk,
+        own_rsn: security.element(),
+        peer_rsn: element(48, security::rsn_element(&bss.elements).unwrap_or_default()),
+        links: None,
+    }
+}
+
 /// The chosen BSS of the network.
 struct Candidate {
+    /// The authenticator: the BSS, or the AP MLD of a multi-link
+    /// association.
     bssid: Mac,
     security: Security,
     /// The PMK the 4-way handshake proves: the passphrase's or the PSK, or
@@ -117,6 +189,26 @@ struct Candidate {
     own_rsn: Vec<u8>,
     /// The AP's whole RSN element.
     peer_rsn: Vec<u8>,
+    /// The links of a multi-link association.
+    links: Option<MultiLink>,
+}
+
+/// The links of an AP MLD association, as `ieee80211_mgd_assoc` requests
+/// them.
+struct Links {
+    /// The setup link, which the SAE exchange and association run on.
+    affiliation: Affiliation,
+    /// The other link requested, on another band.
+    other: Option<OtherLink>,
+}
+
+/// Another link of an AP MLD association.
+struct OtherLink {
+    link_id: u8,
+    /// The station's random address on the link.
+    local: Mac,
+    handle: BssHandle,
+    bss: Bss,
 }
 
 /// An SAE exchange with the chosen BSS, before its association.
@@ -128,6 +220,8 @@ struct Authenticating {
     exchange: Exchange,
     /// Whether the exchange derives its element by hash-to-element.
     h2e: bool,
+    /// The AP MLD links the association requests.
+    links: Option<Links>,
 }
 
 enum State {
@@ -271,6 +365,9 @@ impl<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> St
                         now,
                         format!("MT7925: SAE authentication ended: {failure:?}"),
                     );
+                }
+                LinkEvent::Controller(Event::Unsupported(operation)) => {
+                    self.fail(format!("MT7925 unsupported: {operation}"));
                 }
                 LinkEvent::Controller(Event::ConnectionLost(_)) => {
                     self.fail(String::from("MT7925: the AP ended the association"));
@@ -465,12 +562,16 @@ impl<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> St
             self.authenticate(handle, bss, security)
                 .map(State::Authenticating)
         } else {
-            self.association(&bss, security, None, self.pmk.clone())
-                .and_then(|(join, profile, candidate)| {
+            self.association(&bss, security, None)
+                .and_then(|(join, profile)| {
                     self.link
                         .join(handle, join, profile)
                         .map_err(|error| format!("{error}"))?;
-                    Ok(State::Joining(Box::new(candidate)))
+                    Ok(State::Joining(Box::new(candidate(
+                        &bss,
+                        security,
+                        self.pmk.clone(),
+                    ))))
                 })
         };
         match started {
@@ -491,7 +592,8 @@ impl<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> St
         let Secret::Passphrase(passphrase) = &self.network.secret else {
             return Err(String::from("MT7925: SAE needs the network's passphrase"));
         };
-        let (_, profile, _) = self.association(&bss, security, None, self.pmk.clone())?;
+        let (join, profile) = self.association(&bss, security, None)?;
+        let links = self.links(&bss, &join.request)?;
         let session = if bss.channel.band == Band::Ghz6 {
             // The exchange binds the RSN element and RSNXE the association
             // will carry.
@@ -506,8 +608,12 @@ impl<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> St
                 SAE_BUDGET_US,
             )
         } else {
-            self.link
-                .begin_external_authentication(handle, profile, SAE_BUDGET_US)
+            self.link.begin_external_authentication(
+                handle,
+                profile,
+                links.as_ref().map(|links| links.affiliation),
+                SAE_BUDGET_US,
+            )
         }
         .map_err(|error| format!("{error}"))?;
         let derivation = Derivation::for_rsnxe(connection::find(&bss.elements, 244));
@@ -538,7 +644,112 @@ impl<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> St
             session,
             exchange,
             h2e: derivation == Derivation::HashToElement,
+            links,
         }))
+    }
+
+    /// `ieee80211_mgd_assoc` for an AP MLD: when the NIC reports MLO and
+    /// `bss`, on 2.4 or 5 GHz, is a link of an AP MLD that `request`
+    /// associates with as EHT with PMF, the station takes a random address on
+    /// it and requests one more link as `mt76_select_links` picks it.
+    fn links(&self, bss: &Bss, request: &AssociationRequest) -> Result<Option<Links>, String> {
+        let Some((ap, link_id)) = ap_mld(bss) else {
+            return Ok(None);
+        };
+        let mlo = self
+            .link
+            .local_advertisement(bss.channel.band)
+            .map_err(|error| format!("{error}"))?
+            .mlo();
+        if bss.channel.band == Band::Ghz6
+            || mlo.reported_supported() != Some(true)
+            || request.pmf().is_none()
+            || request.modern().map(|modern| modern.mode()) != Some(Mode::Eht)
+        {
+            return Ok(None);
+        }
+        // The links run on 2.4 and 5 GHz channels that may transmit.
+        let usable = |other: &Bss| {
+            other.channel.band != Band::Ghz6
+                && self
+                    .link
+                    .channels(other.channel.band)
+                    .iter()
+                    .any(|&(channel, _)| channel == other.channel)
+        };
+        let observed: Vec<_> = self.link.bss().collect();
+        let other = other_link(bss, ap, &observed, usable)
+            .map(|(link_id, handle, other)| (link_id, handle, other.clone()));
+        let affiliation = Affiliation {
+            mld: Mld {
+                local: self.link.mac(),
+                ap,
+            },
+            link_id,
+            local: self.random_address()?,
+        };
+        let other = match other {
+            Some((link_id, handle, bss)) => Some(OtherLink {
+                link_id,
+                local: self.random_address()?,
+                handle,
+                bss,
+            }),
+            None => None,
+        };
+        Ok(Some(Links { affiliation, other }))
+    }
+
+    /// `eth_random_addr`: a random locally administered unicast address.
+    fn random_address(&self) -> Result<Mac, String> {
+        let mut address = [0; 6];
+        self.entropy
+            .fill(&mut address)
+            .map_err(|error| format!("MT7925 link address: {error}"))?;
+        address[0] = (address[0] & 0xfe) | 0x02;
+        Ok(Mac(address))
+    }
+
+    /// The multi-link setup of `links` with the AP MLD whose setup link is
+    /// `bss`, each other link requested as it would associate alone, and the
+    /// links the handshakes key. The station MLD reports mt7925's MLD
+    /// capabilities, one simultaneous link, and no EML capabilities.
+    fn multi_link(
+        &self,
+        links: &Links,
+        bss: &Bss,
+        security: Security,
+        rsnxe: Option<&[u8]>,
+    ) -> Result<(Setup, MultiLink), String> {
+        let affiliation = links.affiliation;
+        let mut requested = Vec::new();
+        let mut keyed = vec![keyed_link(affiliation.link_id, affiliation.local, bss)];
+        if let Some(other) = &links.other {
+            let (join, _) = self.association(&other.bss, security, rsnxe)?;
+            let observation = self
+                .link
+                .observation(other.handle)
+                .map_err(|error| format!("{error}"))?;
+            requested.push(mlo::Link {
+                link_id: other.link_id,
+                local: other.local,
+                observation,
+                request: join.request,
+            });
+            keyed.push(keyed_link(other.link_id, other.local, &other.bss));
+        }
+        Ok((
+            Setup {
+                association: affiliation,
+                mld_capabilities: 0,
+                eml_capabilities: 0,
+                links: requested,
+            },
+            MultiLink {
+                association: affiliation.link_id,
+                links: keyed,
+            },
+        ))
     }
 
     /// Send one SAE frame of `session`.
@@ -597,19 +808,30 @@ impl<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> St
             session,
             exchange,
             h2e,
+            links,
         } = *authenticating;
         let Some(pmk) = exchange.pmk() else {
             return self.failed(now, String::from("MT7925: SAE gave no PMK"));
         };
         let rsnxe = h2e.then_some(&sae::H2E_RSNXE[..]);
-        let started =
-            self.association(&bss, security, rsnxe, pmk)
-                .and_then(|(join, _, candidate)| {
-                    self.link
-                        .associate_external(&session, handle, join)
-                        .map_err(|error| format!("{error}"))?;
-                    Ok(candidate)
-                });
+        let started = self
+            .association(&bss, security, rsnxe)
+            .and_then(|(mut join, _)| {
+                let mut candidate = candidate(&bss, security, pmk);
+                if let Some(links) = &links {
+                    let (setup, keyed) = self.multi_link(links, &bss, security, rsnxe)?;
+                    join.request = join
+                        .request
+                        .with_multi_link(setup)
+                        .map_err(|error| format!("MT7925 multi-link request: {error:?}"))?;
+                    candidate.bssid = links.affiliation.mld.ap;
+                    candidate.links = Some(keyed);
+                }
+                self.link
+                    .associate_external(&session, handle, join)
+                    .map_err(|error| format!("{error}"))?;
+                Ok(candidate)
+            });
         match started {
             Ok(candidate) => self.state = State::Joining(Box::new(candidate)),
             Err(message) => self.failed(now, message),
@@ -618,14 +840,13 @@ impl<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> St
 
     /// `ieee80211_mgd_assoc`: the association request and station profile
     /// for `bss` on mac80211's mode and channel, its RSN element with an SAE
-    /// exchange's `rsnxe`, and the handshake's `pmk`.
+    /// exchange's `rsnxe`.
     fn association(
         &self,
         bss: &Bss,
         security: Security,
         rsnxe: Option<&[u8]>,
-        pmk: Zeroizing<[u8; 32]>,
-    ) -> Result<(Join, Profile, Candidate), String> {
+    ) -> Result<(Join, Profile), String> {
         let band = bss.channel.band;
         let advertisement = self
             .link
@@ -724,20 +945,7 @@ impl<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> St
             policy: PortPolicy::Controlled,
             request,
         };
-        let body = security::rsn_element(&bss.elements).unwrap_or_default();
-        let mut peer_rsn = vec![48, body.len() as u8];
-        peer_rsn.extend_from_slice(body);
-        Ok((
-            join,
-            profile,
-            Candidate {
-                bssid: bss.bssid,
-                security,
-                pmk,
-                own_rsn,
-                peer_rsn,
-            },
-        ))
+        Ok((join, profile))
     }
 
     /// Configure the association the AP accepted, then await message 1.
@@ -750,6 +958,22 @@ impl<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> St
         if let Err(error) = self.link.configure() {
             return self.failed(now, format!("{error}"));
         }
+        let mut links = candidate.links;
+        if let Some(links) = &mut links {
+            // The links the AP MLD accepted, the setup link among them.
+            let accepted: Vec<u8> = self
+                .link
+                .station()
+                .link_contexts()
+                .iter()
+                .filter_map(|context| context.affiliation())
+                .map(|affiliation| affiliation.link_id)
+                .chain([links.association])
+                .collect();
+            for link in &mut links.links {
+                link.accepted = accepted.contains(&link.link_id);
+            }
+        }
         match Supplicant::new(
             candidate.security.suites(),
             candidate.pmk,
@@ -757,7 +981,11 @@ impl<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> St
             candidate.bssid,
             candidate.own_rsn,
             candidate.peer_rsn,
-        ) {
+        )
+        .and_then(|supplicant| match links {
+            Some(links) => supplicant.with_multi_link(links),
+            None => Ok(supplicant),
+        }) {
             Ok(supplicant) => {
                 self.state = State::Handshake {
                     supplicant: Box::new(supplicant),
@@ -837,6 +1065,19 @@ impl<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> St
             self.link
                 .install_key(false, key.index, &key.material, key.receive)
                 .map_err(|error| format!("{error}"))?;
+        }
+        // Each other link's GTK goes to its AP's broadcast WCID.
+        for link in step.links {
+            let key = link.group;
+            self.link
+                .install_link_key(link.link_id, key.index, &key.material, key.receive)
+                .map_err(|error| format!("{error}"))?;
+            if link.integrity.is_some() {
+                self.fail(String::from(
+                    "MT7925 unsupported: MLO link IGTKs; another link's group-addressed \
+                     robust management frames reach the OS unverified",
+                ));
+            }
         }
         match &mut self.state {
             State::Handshake { ptk, integrity, .. } => {
@@ -976,3 +1217,6 @@ impl<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> Li
         self.link.receive()
     }
 }
+
+#[cfg(test)]
+mod tests;

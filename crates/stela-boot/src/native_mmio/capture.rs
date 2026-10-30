@@ -105,6 +105,14 @@ impl Wire {
                     .any(|r| r.kind == 2 && r.start <= physical && end <= r.end)
             })
     }
+    /// Whether every map entry overlapping `first..end` is the firmware's:
+    /// reserved, runtime services, ACPI tables or NVS, MMIO or PAL code,
+    /// none of which the host allocates.
+    pub(super) fn firmware_owned(&self, first: u64, end: u64) -> bool {
+        self.memory().iter().all(|r| {
+            r.end <= first || end <= r.start || matches!(r.kind, 0 | 5 | 6 | 9 | 10 | 11 | 13)
+        })
+    }
     pub(super) fn excludes_memory(&self, first: u64, end: u64) -> bool {
         self.memory().iter().all(|r| {
             r.end <= first

@@ -19,6 +19,7 @@ pub use csa::ChannelSwitchStep;
 mod local;
 pub mod management;
 mod modern;
+mod multi_link;
 mod packet;
 mod pmf;
 mod six_ghz;
@@ -69,6 +70,7 @@ use crate::{
             },
             mcu::{
                 client::{self as wire, Profile},
+                device::Context,
                 key::Context as KeyContext,
                 runtime::Command,
             },
@@ -279,6 +281,11 @@ struct Owned<I: BarIo, Q: QueueIo, C: 'static> {
     mlme_receipt: Option<Receipt>,
     /// The bound 6 GHz transport until its peer retires after drain.
     six_ghz: Option<six_ghz::Bound>,
+    /// The interface's own registration while an AP MLD association's
+    /// setup link holds its slots.
+    single_link: Option<Context>,
+    /// An AP MLD association's other links.
+    links: Vec<multi_link::Link<C>>,
 }
 /// On uncertain/live Drop keep the entire controller, station, real key
 /// material history and resources. No new owner may reset their PN.
@@ -371,6 +378,8 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 authentication_end: None,
                 mlme_receipt: None,
                 six_ghz: None,
+                single_link: None,
+                links: Vec::new(),
             })),
         })
     }
@@ -479,9 +488,14 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 request: _,
                 response,
                 context,
+                links,
             } => {
                 if let Some(context) = context {
-                    return Self::prepare_modern(s, ticket, context);
+                    return Self::prepare_modern(s, ticket, context, links);
+                }
+                // Only an EHT association has other links.
+                if !links.is_empty() {
+                    return Err(Error::WrongProfile);
                 }
                 let clock = s.controller.state().control.clock;
                 let began = clock.now_us();
@@ -592,6 +606,10 @@ pub enum Event {
     Bss(scan::result::Bss),
     Ingress(Ingress),
     Raw(crate::wifi::mediatek::ring::rx::Frame),
+    /// An operation the association needs that the driver does not perform,
+    /// reported once; the driver continues with its documented degraded
+    /// response.
+    Unsupported(&'static str),
 }
 impl<I: BarIo, Q: QueueIo, C: 'static> Drop for Client<I, Q, C> {
     fn drop(&mut self) {

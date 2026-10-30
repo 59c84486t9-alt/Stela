@@ -43,7 +43,7 @@ fn native_fixture(
 ) {
     let (controller, device, hardware, mut dma) =
         crate::usb::xhci::model::reset_fixture(memory, speed, context, 1);
-    let interface = crate::usb::xhci::interfaces(&device.configuration).remove(0);
+    let interface = crate::usb::descriptor::interfaces(&device.configuration).remove(0);
     let mut failures = Vec::new();
     // SAFETY: this fixture exclusively owns the attachment and all DCIs.
     let (storage, mut disks) = unsafe {
@@ -296,7 +296,7 @@ fn native_uas_old_same_pointer_ticket_cannot_consume_unread_current_completion()
             let mut memory = vec![0u64; 512 * 1024];
             let (controller, device, hardware, mut dma) =
                 crate::usb::xhci::model::reset_fixture(&mut memory, speed, context, 1);
-            let interface = crate::usb::xhci::interfaces(&device.configuration).remove(0);
+            let interface = crate::usb::descriptor::interfaces(&device.configuration).remove(0);
             // SAFETY: exclusive fixture attachment and unconfigured DCIs.
             let mut old = unsafe {
                 Host::new(

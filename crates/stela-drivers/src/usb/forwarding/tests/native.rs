@@ -1347,7 +1347,7 @@ fn modeled_state_transitions_preserve_configured_endpoint_context_fields() {
         attributes: 1,
         max_packet: 256,
         interval: 5,
-        companion: Some(xhci::SuperSpeedCompanion {
+        companion: Some(crate::usb::descriptor::SuperSpeedCompanion {
             max_burst: 1,
             attributes: 2,
             bytes_per_interval: 1536,
@@ -1494,7 +1494,7 @@ fn same_controller_root_reuse_preserves_stale_forwarding_cache_and_current_compl
                     .configure(physical.configuration_value(), &mut dma)
                     .unwrap();
                 let original = previous.physical.clone();
-                let endpoints = xhci::interfaces(&original.configuration)
+                let endpoints = crate::usb::descriptor::interfaces(&original.configuration)
                     .remove(0)
                     .endpoints;
                 let endpoint = endpoints[0];

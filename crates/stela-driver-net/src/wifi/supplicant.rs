@@ -6,7 +6,9 @@
 //! 12.7.7) for AKM 00-0F-AC:2 (PSK, HMAC-SHA1 MIC), 00-0F-AC:6
 //! (PSK-SHA256, AES-128-CMAC MIC) and 00-0F-AC:8 (SAE, whose PMK
 //! [`sae`](super::sae) derives; AES-128-CMAC MIC), in the order wpa_supplicant's
-//! `wpa_sm_rx_eapol` checks them. The suites come from the association's
+//! `wpa_sm_rx_eapol` checks them, between the two MLDs of a multi-link
+//! association with its MLO KDEs (IEEE 802.11be-2024 12.7.6) and each link's
+//! group keys. The suites come from the association's
 //! [`pmf::Selection`] or its RSN key ciphers; the keys it yields are the
 //! arguments of [`KeySlot::begin_install`] and the IGTK's of
 //! [`management`](super::security::management).
@@ -54,7 +56,16 @@ const RSN_ELEMENT: u8 = 0x30;
 const VENDOR: u8 = 0xdd;
 const IEEE_OUI: [u8; 3] = [0x00, 0x0f, 0xac];
 const GTK_KDE: u8 = 1;
+const MAC_ADDRESS_KDE: u8 = 3;
 const IGTK_KDE: u8 = 9;
+const MLO_LINK_KDE: u8 = 12;
+const MLO_GTK_KDE: u8 = 16;
+const MLO_IGTK_KDE: u8 = 17;
+/// An MLO Link KDE's link information: the link ID and whether the AP's
+/// RSNE and RSNXE follow its address.
+const LINK_ID: u8 = 0x0f;
+const LINK_RSNE: u8 = 1 << 4;
+const LINK_RSNXE: u8 = 1 << 5;
 
 /// The KCK and KEK lengths of every AKM here.
 const KCK_BYTES: usize = 16;
@@ -143,6 +154,10 @@ pub enum Error {
     GroupKey,
     /// A message out of the handshake's order.
     Sequence,
+    /// A multi-link message 3 whose MAC Address KDE names another AP MLD,
+    /// or whose MLO Link KDEs or group keys miss a link the AP MLD accepted
+    /// or differ from what the AP advertises there.
+    MultiLink,
 }
 
 /// HMAC-SHA1 over the concatenation of `parts`.
@@ -483,9 +498,10 @@ impl core::fmt::Debug for IntegrityKey {
     }
 }
 
-/// The body of the 00-0F-AC KDE of `kind` among decrypted key data (12.7.2,
-/// Table 12-10), after its OUI and type.
-fn kde(data: &[u8], kind: u8) -> Result<Option<&[u8]>, Error> {
+/// The bodies of the 00-0F-AC KDEs of `kind` among decrypted key data
+/// (12.7.2, Table 12-10), after their OUI and type.
+fn kdes(data: &[u8], kind: u8) -> Result<Vec<&[u8]>, Error> {
+    let mut found = Vec::new();
     let mut rest = data;
     while rest.len() >= 2 {
         let (id, length) = (rest[0], usize::from(rest[1]));
@@ -494,11 +510,24 @@ fn kde(data: &[u8], kind: u8) -> Result<Option<&[u8]>, Error> {
         }
         let element = rest.get(2..2 + length).ok_or(Error::Malformed)?;
         if id == VENDOR && length >= 4 && element[..3] == IEEE_OUI && element[3] == kind {
-            return Ok(Some(&element[4..]));
+            found.push(&element[4..]);
         }
         rest = &rest[2 + length..];
     }
-    Ok(None)
+    Ok(found)
+}
+
+/// The body of the first KDE of `kind`.
+fn kde(data: &[u8], kind: u8) -> Result<Option<&[u8]>, Error> {
+    Ok(kdes(data, kind)?.first().copied())
+}
+
+/// A KDE of `kind` holding `body`.
+fn put_kde(out: &mut Vec<u8>, kind: u8, body: &[u8]) {
+    out.extend_from_slice(&[VENDOR, 4 + body.len() as u8]);
+    out.extend_from_slice(&IEEE_OUI);
+    out.push(kind);
+    out.extend_from_slice(body);
 }
 
 /// The GTK of the GTK KDE. A TKIP GTK's Michael keys trade places, as
@@ -531,6 +560,54 @@ fn group_key(
         receive: ReplaySeed::uniform(receive),
         scope: KeyScope::Group(authenticator),
     })
+}
+
+/// The link and GTK of an MLO GTK KDE, `wpa_mlo_install_gtk`'s layout: its
+/// key ID and link ID, then its PN and the key.
+fn link_group_key(body: &[u8], suites: &Suites, ap: Mac) -> Result<TemporalKey, Error> {
+    let [info, rest @ ..] = body else {
+        return Err(Error::Malformed);
+    };
+    let (pn, key) = rest.split_at_checked(6).ok_or(Error::Malformed)?;
+    let index = info & 0b11;
+    if index == 0 || key.len() != suites.group.key_length() || suites.group == Cipher::Tkip {
+        return Err(Error::GroupKey);
+    }
+    let mut counter = [0; 8];
+    counter[..6].copy_from_slice(pn);
+    let receive = PacketNumber::new(u64::from_le_bytes(counter)).ok_or(Error::Malformed)?;
+    Ok(TemporalKey {
+        index,
+        cipher: suites.group,
+        material: Zeroizing::new(key.to_vec()),
+        receive: ReplaySeed::uniform(receive),
+        scope: KeyScope::Group(ap),
+    })
+}
+
+/// The IGTK of an MLO IGTK KDE: its key ID and IPN, the link, then the key.
+fn link_integrity_key(body: &[u8], cipher: ManagementCipher) -> Result<IntegrityKey, Error> {
+    let [low, high, ipn @ ..] = body else {
+        return Err(Error::Malformed);
+    };
+    let index = u16::from_le_bytes([*low, *high]);
+    if !matches!(index, 4 | 5) || ipn.len() != 7 + cipher.key_length() {
+        return Err(Error::GroupKey);
+    }
+    let mut counter = [0; 8];
+    counter[..6].copy_from_slice(&ipn[..6]);
+    Ok(IntegrityKey {
+        index: index as u8,
+        cipher,
+        material: Zeroizing::new(ipn[7..].to_vec()),
+        receive: PacketNumber::new(u64::from_le_bytes(counter)).ok_or(Error::Malformed)?,
+    })
+}
+
+/// The link an MLO GTK KDE (its first byte's high nibble) or MLO IGTK KDE
+/// (its ninth byte's) keys.
+fn kde_link(body: &[u8], at: usize) -> Option<u8> {
+    body.get(at).map(|info| info >> 4)
 }
 
 /// The IGTK of the IGTK KDE, when PMF is negotiated and the authenticator
@@ -577,10 +654,51 @@ pub struct Step {
     pub reply: Option<Vec<u8>>,
     /// The pairwise key to install, sent with message 4.
     pub pairwise: Option<TemporalKey>,
-    /// A group key to install.
+    /// A group key to install: a multi-link association's setup link's.
     pub group: Option<TemporalKey>,
-    /// An IGTK to install.
+    /// An IGTK to install: a multi-link association's setup link's.
     pub integrity: Option<IntegrityKey>,
+    /// The group keys of a multi-link association's other links.
+    pub links: Vec<LinkKeys>,
+}
+
+/// One link's group keys of a multi-link association.
+#[derive(Debug)]
+pub struct LinkKeys {
+    pub link_id: u8,
+    pub group: TemporalKey,
+    pub integrity: Option<IntegrityKey>,
+}
+
+/// One link a multi-link association requested.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Link {
+    pub link_id: u8,
+    /// The station's address on the link.
+    pub local: Mac,
+    /// The AP's address on the link.
+    pub ap: Mac,
+    /// The AP's whole RSN element and RSNXE on the link.
+    pub rsn: Vec<u8>,
+    pub rsnxe: Option<Vec<u8>>,
+    /// Whether the AP MLD accepted the link.
+    pub accepted: bool,
+}
+
+/// The links a multi-link association's handshakes key, as wpa_supplicant
+/// keeps them in `sm->mlo`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MultiLink {
+    /// The setup link's ID.
+    pub association: u8,
+    /// The setup link and each other link the association requested.
+    pub links: Vec<Link>,
+}
+
+impl MultiLink {
+    fn accepted(&self) -> impl Iterator<Item = &Link> {
+        self.links.iter().filter(|link| link.accepted)
+    }
 }
 
 /// The supplicant state of one association.
@@ -601,6 +719,8 @@ pub struct Supplicant {
     tentative: Option<(Ptk, [u8; 32])>,
     /// The PTK message 3 confirmed.
     ptk: Option<Ptk>,
+    /// The links of a multi-link association.
+    multi_link: Option<MultiLink>,
 }
 
 impl Supplicant {
@@ -634,7 +754,125 @@ impl Supplicant {
             snonce: None,
             tentative: None,
             ptk: None,
+            multi_link: None,
         })
+    }
+
+    /// Key a multi-link association between the MLDs `new` named: its
+    /// setup link accepted among the links it requested.
+    pub fn with_multi_link(mut self, multi_link: MultiLink) -> Result<Self, Error> {
+        let mut ids: Vec<u8> = multi_link.links.iter().map(|link| link.link_id).collect();
+        ids.sort_unstable();
+        if ids.windows(2).any(|pair| pair[0] == pair[1])
+            || !multi_link
+                .accepted()
+                .any(|link| link.link_id == multi_link.association)
+        {
+            return Err(Error::MultiLink);
+        }
+        self.multi_link = Some(multi_link);
+        Ok(self)
+    }
+
+    /// The MAC Address KDE naming the station MLD that a multi-link
+    /// association's messages 2 and 4 and group message 2 carry.
+    fn own_address(&self) -> Vec<u8> {
+        let mut data = Vec::new();
+        if self.multi_link.is_some() {
+            put_kde(&mut data, MAC_ADDRESS_KDE, &self.own.0);
+        }
+        data
+    }
+
+    /// `wpa_supplicant_validate_link_kde` for message 3 of a multi-link
+    /// association: its MAC Address KDE names the AP MLD, and one MLO Link
+    /// KDE for each link the AP MLD accepted names the AP there with the RSN
+    /// element and RSNXE it advertises.
+    fn validate_links(&self, data: &[u8]) -> Result<(), Error> {
+        let Some(multi_link) = &self.multi_link else {
+            return Ok(());
+        };
+        if kde(data, MAC_ADDRESS_KDE)? != Some(&self.authenticator.0[..]) {
+            return Err(Error::MultiLink);
+        }
+        let reported = kdes(data, MLO_LINK_KDE)?;
+        if reported.len() != multi_link.accepted().count() {
+            return Err(Error::MultiLink);
+        }
+        for body in reported {
+            let [info, address @ ..] = body else {
+                return Err(Error::Malformed);
+            };
+            let (address, mut elements) = address.split_at_checked(6).ok_or(Error::Malformed)?;
+            let link = multi_link
+                .accepted()
+                .find(|link| link.link_id == info & LINK_ID)
+                .ok_or(Error::MultiLink)?;
+            let mut next = || -> Result<&[u8], Error> {
+                let length = usize::from(*elements.get(1).ok_or(Error::Malformed)?);
+                let (element, rest) = elements
+                    .split_at_checked(2 + length)
+                    .ok_or(Error::Malformed)?;
+                elements = rest;
+                Ok(element)
+            };
+            if address != link.ap.0
+                || info & LINK_RSNE == 0
+                || next()? != link.rsn
+                || (info & LINK_RSNXE != 0) != link.rsnxe.is_some()
+                || link
+                    .rsnxe
+                    .as_ref()
+                    .is_some_and(|rsnxe| next().ok() != Some(&rsnxe[..]))
+            {
+                return Err(Error::MultiLink);
+            }
+        }
+        Ok(())
+    }
+
+    /// The group keys of `data`: its GTK and IGTK KDEs, or each accepted
+    /// link's MLO GTK and IGTK KDEs, the setup link's first, under the Key
+    /// RSC `rsc` a single link's GTK takes.
+    fn group_keys(
+        &self,
+        data: &[u8],
+        rsc: [u8; 8],
+    ) -> Result<(TemporalKey, Option<IntegrityKey>, Vec<LinkKeys>), Error> {
+        let Some(multi_link) = &self.multi_link else {
+            let group = group_key(data, rsc, &self.suites, self.authenticator)?;
+            return Ok((group, integrity_key(data, &self.suites)?, Vec::new()));
+        };
+        let groups = kdes(data, MLO_GTK_KDE)?;
+        let integrities = kdes(data, MLO_IGTK_KDE)?;
+        let mut keys = Vec::new();
+        for link in multi_link.accepted() {
+            let body = groups
+                .iter()
+                .find(|body| kde_link(body, 0) == Some(link.link_id))
+                .ok_or(Error::MissingGroupKey)?;
+            let group = link_group_key(body, &self.suites, link.ap)?;
+            let integrity = match (
+                self.suites.management,
+                integrities
+                    .iter()
+                    .find(|body| kde_link(body, 8) == Some(link.link_id)),
+            ) {
+                (Some(cipher), Some(body)) => Some(link_integrity_key(body, cipher)?),
+                _ => None,
+            };
+            keys.push(LinkKeys {
+                link_id: link.link_id,
+                group,
+                integrity,
+            });
+        }
+        let at = keys
+            .iter()
+            .position(|keys| keys.link_id == multi_link.association)
+            .ok_or(Error::MultiLink)?;
+        let setup = keys.remove(at);
+        Ok((setup.group, setup.integrity, keys))
     }
 
     /// Whether a 4-way handshake finished.
@@ -679,12 +917,26 @@ impl Supplicant {
             &key.nonce,
             &snonce,
         );
+        // wpa_supplicant_send_2_of_4: a multi-link association names the
+        // station MLD and its address on each other requested link.
+        let mut data = self.own_rsn.clone();
+        data.extend(self.own_address());
+        for link in self.multi_link.iter().flat_map(|multi_link| {
+            multi_link
+                .links
+                .iter()
+                .filter(|link| link.link_id != multi_link.association)
+        }) {
+            let mut body = Vec::from([link.link_id]);
+            body.extend_from_slice(&link.local.0);
+            put_kde(&mut data, MLO_LINK_KDE, &body);
+        }
         let reply = build(
             self.suites.akm,
             PAIRWISE | MIC,
             key.replay,
             &snonce,
-            &self.own_rsn,
+            &data,
             Some(ptk.kck()),
         );
         self.tentative = Some((ptk, key.nonce));
@@ -707,14 +959,14 @@ impl Supplicant {
         if rsn_element(&data) != Some(&self.peer_rsn[..]) {
             return Err(Error::RsnElement);
         }
-        let group = group_key(&data, key.sequence(), &self.suites, self.authenticator)?;
-        let integrity = integrity_key(&data, &self.suites)?;
+        self.validate_links(&data)?;
+        let (group, integrity, links) = self.group_keys(&data, key.sequence())?;
         let reply = build(
             self.suites.akm,
             PAIRWISE | MIC | SECURE,
             key.replay,
             &[0; NONCE],
-            &[],
+            &self.own_address(),
             Some(ptk.kck()),
         );
         let pairwise = TemporalKey {
@@ -733,6 +985,7 @@ impl Supplicant {
             pairwise: Some(pairwise),
             group: Some(group),
             integrity,
+            links,
         })
     }
 
@@ -743,14 +996,13 @@ impl Supplicant {
         }
         key.verify(self.suites.akm, ptk.kck())?;
         let data = unwrap(ptk.kek(), key.data)?;
-        let group = group_key(&data, key.sequence(), &self.suites, self.authenticator)?;
-        let integrity = integrity_key(&data, &self.suites)?;
+        let (group, integrity, links) = self.group_keys(&data, key.sequence())?;
         let reply = build(
             self.suites.akm,
             MIC | SECURE,
             key.replay,
             &[0; NONCE],
-            &[],
+            &self.own_address(),
             Some(ptk.kck()),
         );
         self.replay = Some(key.replay);
@@ -758,6 +1010,7 @@ impl Supplicant {
             reply: Some(reply),
             group: Some(group),
             integrity,
+            links,
             ..Step::default()
         })
     }

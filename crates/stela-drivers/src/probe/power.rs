@@ -1,5 +1,6 @@
-//! The embedded controller, batteries, AC adapter and lid the ACPI namespace
-//! describes, attached through the mount's ACPI session.
+//! The embedded controller, batteries, AC adapter, lid and UCSI connector
+//! managers the ACPI namespace describes, attached through the mount's ACPI
+//! session.
 use super::{Devices, PlatformError};
 use crate::platform::{
     ac::AcAdapter,
@@ -8,6 +9,7 @@ use crate::platform::{
     ec::{
         self,
         binding::{Binding, Scope},
+        capability::Installed,
         discovery::{
             Ecdt,
             native::{Device, DiscoveryError},
@@ -25,12 +27,13 @@ const AC: &str = "ACPI0003";
 const LID: &str = "PNP0C0D";
 
 /// The batteries, AC adapter and lid the namespace lists, each read once
-/// as it attached.
+/// as it attached, and its started UCSI connector managers.
 #[derive(Default)]
 pub struct Power {
     pub batteries: Vec<Battery<'static>>,
     pub ac: Option<AcAdapter<'static>>,
     pub lid: Option<Lid<'static>>,
+    pub ucsi: Vec<super::typec::Ucsi>,
 }
 
 fn fail(devices: &mut Devices, location: String, error: PlatformError) {
@@ -137,15 +140,19 @@ pub unsafe fn install_embedded_controller(
     result
 }
 
-pub(super) fn attach_ec(session: &'static Session, devices: &mut Devices) {
+/// Install and keep the EC, returning its supplier receipt for devices
+/// whose `_DEP` names it; a binding not yet connected issues none.
+pub(super) fn attach_ec(
+    session: &'static Session,
+    devices: &mut Devices,
+) -> Option<Installed<'static>> {
     // SAFETY: NativeServices::acpi grants the provider/controller contract.
     let installed = unsafe { install_embedded_controller(session) };
     devices.platform_failures.extend(installed.failures);
-    devices.owners.extend(
-        installed
-            .binding
-            .map(|binding| Box::new(binding) as Box<dyn core::any::Any>),
-    );
+    let binding = installed.binding?;
+    let receipt = Installed::from_binding(&binding).ok();
+    devices.owners.push(Box::new(binding));
+    receipt
 }
 
 /// Attach every battery and the first AC adapter and lid, reading each once

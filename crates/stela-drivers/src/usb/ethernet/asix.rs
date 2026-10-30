@@ -51,7 +51,7 @@ fn request<C: Control>(
     if !*accessible {
         return Err(BlockError::Unsupported("ASIX register access poisoned"));
     }
-    let request = crate::usb::xhci::setup(
+    let request = crate::usb::descriptor::setup(
         if read { 0xc0 } else { 0x40 },
         command,
         value,

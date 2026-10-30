@@ -8,7 +8,8 @@ use super::super::{
 use crate::{
     block::BlockError,
     bus::dma::DmaAllocator,
-    usb::xhci::{self, Endpoint},
+    usb::descriptor::Endpoint,
+    usb::xhci::{self},
 };
 use alloc::{boxed::Box, vec::Vec};
 
@@ -190,7 +191,7 @@ fn plan_binding(binding: &Binding) -> Result<Pair, Error> {
         return Err(Error::Unsupported("source Broadcom PatchRAM interface0"));
     }
     let d = binding.device();
-    let interfaces = xhci::interfaces(&d.configuration);
+    let interfaces = crate::usb::descriptor::interfaces(&d.configuration);
     let settings: Vec<_> = interfaces
         .iter()
         .filter(|i| i.number == 2 && i.alternate == 0)

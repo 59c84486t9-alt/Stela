@@ -10,13 +10,17 @@ pub enum TlsUnavailable {
     CorrelatedClock,
     Entropy,
     Trust,
+    Provider,
 }
 impl fmt::Display for TlsUnavailable {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            Self::CorrelatedClock => "a qualified continuous UTC-correlated clock is unavailable",
+            Self::CorrelatedClock => {
+                "no UTC clock: the firmware has no valid real-time clock or the TSC is not invariant"
+            }
             Self::Entropy => "owned secure entropy is unavailable",
             Self::Trust => "the certificate trust store is unavailable",
+            Self::Provider => "the TLS provider refused its configuration",
         })
     }
 }

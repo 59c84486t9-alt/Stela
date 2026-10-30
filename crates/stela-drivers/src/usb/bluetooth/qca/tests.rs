@@ -156,7 +156,11 @@ fn binding(kind: Kind) -> Binding {
         serial: None,
         language: None,
     };
-    Binding::new(&device, &xhci::interfaces(&device.configuration)[0]).unwrap()
+    Binding::new(
+        &device,
+        &crate::usb::descriptor::interfaces(&device.configuration)[0],
+    )
+    .unwrap()
 }
 fn rampatch(v: &Version, body: usize) -> Vec<u8> {
     let p = v.profile().unwrap();

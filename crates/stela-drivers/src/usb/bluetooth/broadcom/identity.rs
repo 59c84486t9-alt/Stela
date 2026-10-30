@@ -2,10 +2,7 @@
 // Copyright (C) 2015 Intel Corporation
 //! Broadcom USB Bluetooth identities: USB and HCI versions, chip names and patch-file names.
 use super::{Error, Result};
-use crate::{
-    firmware::Target,
-    usb::xhci::{Device, Interface},
-};
+use crate::{firmware::Target, usb::descriptor::Interface, usb::xhci::Device};
 use alloc::{format, string::String, vec::Vec};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,7 +53,7 @@ pub fn is_vendor_interface(device: &Device, interface: &Interface) -> bool {
 
 pub(super) fn is_candidate(device: &Device) -> bool {
     let usb = UsbIdentity::read(device);
-    crate::usb::xhci::interfaces(&device.configuration)
+    crate::usb::descriptor::interfaces(&device.configuration)
         .iter()
         .any(|i| {
             is_vendor_interface(device, i)

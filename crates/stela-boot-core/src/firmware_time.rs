@@ -2,6 +2,9 @@
 use core::fmt;
 pub mod interval;
 
+/// `EFI_UNSPECIFIED_TIMEZONE`: the time is local, its offset unknown.
+pub const UNSPECIFIED_ZONE: i16 = 0x07ff;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 /// Raw UEFI calendar fields. These copied values confer no source permission.
 /// `timezone_minutes` is the EFI field; `0x07ff` means unspecified.
@@ -93,7 +96,7 @@ pub fn utc(time: Time, unspecified: UnspecifiedZone) -> Result<Timestamp, Error>
     }
     let zone = match time.timezone_minutes {
         -1440..=1440 => time.timezone_minutes,
-        0x07ff => match unspecified {
+        UNSPECIFIED_ZONE => match unspecified {
             UnspecifiedZone::RequireKnown => return Err(Error::UnspecifiedTimezone),
             UnspecifiedZone::RtcIsUtc => 0,
         },

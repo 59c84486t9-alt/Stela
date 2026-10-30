@@ -13,7 +13,8 @@ use super::{FirmwareReceipt, Io};
 use crate::{
     block::BlockError,
     firmware::Provider,
-    usb::xhci::{self, Device, Endpoint, Interface},
+    usb::descriptor::{Endpoint, Interface},
+    usb::xhci::{self, Device},
 };
 use alloc::{boxed::Box, vec::Vec};
 pub use host::Host;
@@ -36,7 +37,7 @@ impl Binding {
         }
         if interface.number != 0
             || interface.alternate != 0
-            || !xhci::interfaces(&device.configuration).contains(interface)
+            || !crate::usb::descriptor::interfaces(&device.configuration).contains(interface)
         {
             return Err("ATH3K requires actual interface-zero alternate-zero");
         }

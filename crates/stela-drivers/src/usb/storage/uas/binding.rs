@@ -2,7 +2,8 @@
 //! Interface.extra alone omits endpoint boundaries and cannot establish this.
 // SPDX-License-Identifier: GPL-2.0-only
 // Linux uas-detect.h::uas_find_endpoints at the crate's pinned reference.
-use crate::usb::xhci::{Device, Endpoint, Interface};
+use crate::usb::descriptor::{Endpoint, Interface};
+use crate::usb::xhci::Device;
 
 #[derive(Clone, Debug)]
 pub struct Binding {
@@ -220,7 +221,7 @@ mod tests {
                             continue;
                         }
                         let raw = raw([a, b, c, d]);
-                        let interface = crate::usb::xhci::interfaces(&raw).remove(0);
+                        let interface = crate::usb::descriptor::interfaces(&raw).remove(0);
                         let binding = Binding::from_raw(&raw, &interface).unwrap();
                         assert_eq!(binding.endpoints().map(|ep| ep.address), [1, 0x82, 0x83, 4]);
                         assert_eq!(binding.alternate(), 1);
@@ -243,7 +244,7 @@ mod tests {
                     raw.pop();
                 }
             }
-            let mut interfaces = crate::usb::xhci::interfaces(&raw);
+            let mut interfaces = crate::usb::descriptor::interfaces(&raw);
             let interface = interfaces.remove(0);
             assert!(
                 Binding::from_raw(&raw, &interface).is_err(),
@@ -264,7 +265,7 @@ mod tests {
             }
             let length = configuration.len() as u16;
             configuration[2..4].copy_from_slice(&length.to_le_bytes());
-            let interface = crate::usb::xhci::interfaces(&configuration).remove(0);
+            let interface = crate::usb::descriptor::interfaces(&configuration).remove(0);
             let mut device = crate::usb::xhci::model::device(vec![configuration.clone()]);
             device.configuration = configuration;
             device.speed = crate::usb::xhci::SUPER_SPEED;

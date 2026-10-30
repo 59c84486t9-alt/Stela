@@ -124,7 +124,7 @@ impl State {
     }
 }
 
-fn profile(id: u32) -> Result<CirrusProfile, Error> {
+pub(super) fn profile(id: u32) -> Result<CirrusProfile, Error> {
     match id {
         0x1013_4206 | 0x1013_4207 => Ok(CirrusProfile::Cs420x),
         0x1013_4208 => Ok(CirrusProfile::Cs4208),

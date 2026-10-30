@@ -222,16 +222,17 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                     1_000_000,
                 )
                 .map_err(Error::Reorder)?;
-                let body = wire::modern::ba_request(
-                    s.profile.ok_or(Error::WrongProfile)?,
-                    session.tid(),
-                    session.start_sequence(),
-                    session.window(),
-                    session.firmware_amsdu(),
-                    true,
-                    false,
-                )
-                .map_err(Error::Codec)?;
+                let bodies = Self::on_every_link(s, |p| {
+                    wire::modern::ba_request(
+                        p,
+                        session.tid(),
+                        session.start_sequence(),
+                        session.window(),
+                        session.firmware_amsdu(),
+                        true,
+                        false,
+                    )
+                })?;
                 s.replies.try_reserve(1).map_err(|_| Error::NoMemory)?;
                 let (ticket, session) = (*ticket, session.clone());
                 let station = &s.station;
@@ -246,7 +247,14 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                         wifi::regulatory::AssociationUse::Management,
                         |_, _| {
                             started = true;
-                            Self::command_parts(controller, replies, Command::StationRecord, &body)
+                            bodies.iter().try_for_each(|body| {
+                                Self::command_parts(
+                                    controller,
+                                    replies,
+                                    Command::StationRecord,
+                                    body,
+                                )
+                            })
                         },
                     )
                 };
@@ -397,17 +405,21 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             return Err(Error::NeedsDrain);
         }
         native.stop(); // terminal software queue plus serialized timer/callback cancellation
-        let body = wire::modern::ba_request(
-            s.profile.ok_or(Error::WrongProfile)?,
-            session.tid(),
-            session.start_sequence(),
-            session.window(),
-            session.firmware_amsdu(),
-            false,
-            false,
-        )
-        .map_err(Error::Codec)?;
-        if let Err(error) = Self::command(s, Command::StationRecord, &body) {
+        let bodies = Self::on_every_link(s, |p| {
+            wire::modern::ba_request(
+                p,
+                session.tid(),
+                session.start_sequence(),
+                session.window(),
+                session.firmware_amsdu(),
+                false,
+                false,
+            )
+        })?;
+        if let Err(error) = bodies
+            .iter()
+            .try_for_each(|body| Self::command(s, Command::StationRecord, body))
+        {
             // SAFETY: an uncertain publication keeps every owner, as the contract requires.
             let _ = unsafe {
                 s.station

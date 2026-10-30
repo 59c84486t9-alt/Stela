@@ -87,6 +87,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             None => Self::bss_request(s, p, false)?,
         };
         Self::command(s, Command::BssInfo, &bss)?;
+        Self::remove_links(s)?;
         s.phase = Phase::NeedsDrain;
         Ok(())
     }
@@ -145,6 +146,8 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 unsafe { key.as_mut().unwrap().retire_after_drain(r) }.map_err(Error::Key)?;
             }
         }
+        // SAFETY: covered by this function's own safety contract.
+        unsafe { Self::retire_links(s) }?;
         s.station
             .complete_removal(
                 s.remove_ticket.take().ok_or(Error::WrongPhase)?,
@@ -177,7 +180,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         s.pmf_authentication = None;
         s.authentication_deadline = None;
         s.six_ghz = None;
-        Ok(())
+        Self::unbind_links(s)
     }
 
     /// Interface disable ACKs then WFDMA disable/idle observation. This

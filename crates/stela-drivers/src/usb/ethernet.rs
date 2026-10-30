@@ -11,7 +11,8 @@ mod identity;
 mod registers;
 pub mod rtl815x;
 
-use super::xhci::{Device, Endpoint, Interface, Shared, SlotId, TransferTicket};
+use super::descriptor::{Endpoint, Interface};
+use super::xhci::{Device, Shared, SlotId, TransferTicket};
 use crate::{
     block::BlockError,
     bus::dma::{DmaAllocator, DmaBuffer},
@@ -233,9 +234,9 @@ impl UsbEthernet {
         controller.borrow_mut().device(device.id)?;
         if binding.setting.1 != 0 {
             controller.borrow_mut().device(device.id)?.control(
-                super::xhci::setup(
+                super::descriptor::setup(
                     1,
-                    super::xhci::SET_INTERFACE,
+                    super::descriptor::SET_INTERFACE,
                     u16::from(binding.setting.1),
                     u16::from(binding.setting.0),
                     0,

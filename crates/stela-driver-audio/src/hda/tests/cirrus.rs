@@ -75,7 +75,7 @@ fn capture() -> PinOptions {
     }
 }
 
-fn cs4208_device(inherited: bool, pin18: bool) -> Rc<RefCell<Model>> {
+pub(super) fn cs4208_device(inherited: bool, pin18: bool) -> Rc<RefCell<Model>> {
     let model = analog_model();
     let mut m = model.borrow_mut();
     m.parameters.insert((0, 0), 0x1013_4208);

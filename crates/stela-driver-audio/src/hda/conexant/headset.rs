@@ -50,7 +50,7 @@ pub struct ConexantHeadsetInitialization {
 pub(super) struct State {
     microphone_control: u8,
 }
-pub(super) fn is_profile(id: u32) -> bool {
+pub(in crate::hda) fn is_profile(id: u32) -> bool {
     matches!(id, 0x14f1_1f86 | 0x14f1_1f87)
 }
 pub(super) fn route_options(

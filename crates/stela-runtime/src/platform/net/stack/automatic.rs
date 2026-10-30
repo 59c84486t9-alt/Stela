@@ -23,18 +23,24 @@ pub(super) fn link_local(mac: [u8; 6]) -> Ipv6Addr {
 }
 impl<L: Link, C: Clock> Stack<L, C> {
     pub(super) fn update_dns(&mut self) -> Result<(), NetError> {
-        let mut servers: Vec<IpAddress> = self
-            .config
-            .iter()
-            .flat_map(|config| config.dns.iter().copied().map(IpAddress::Ipv4))
-            .collect();
-        let now = self.now()?;
-        for server in self.phy.rdnss.servers(now) {
-            let address = IpAddress::Ipv6(server);
-            if !servers.contains(&address) {
-                servers.push(address);
+        let servers = match &self.fixed_dns {
+            Some(servers) => servers.clone(),
+            None => {
+                let mut servers: Vec<IpAddress> = self
+                    .config
+                    .iter()
+                    .flat_map(|config| config.dns.iter().copied().map(IpAddress::Ipv4))
+                    .collect();
+                let now = self.now()?;
+                for server in self.phy.rdnss.servers(now) {
+                    let address = IpAddress::Ipv6(server);
+                    if !servers.contains(&address) {
+                        servers.push(address);
+                    }
+                }
+                servers
             }
-        }
+        };
         if servers != self.dns_servers {
             self.sockets
                 .get_mut::<dns::Socket>(self.dns)
@@ -369,6 +375,33 @@ pub(super) mod tests {
         stack.probe_ipv6().unwrap();
         assert_eq!(stack.phy.approved_ipv6, [stack.phy.local_ipv6]);
         assert_eq!(stack.phy.link.transmissions, 1);
+    }
+    #[test]
+    fn addresses_and_servers_set_by_hand_replace_dhcp_and_advertised_dns() {
+        let router = Router {
+            frames: VecDeque::new(),
+            probes: 0,
+        };
+        let mut stack = Stack::new(router, ClockStep(core::cell::Cell::new(0)), 7).unwrap();
+        let address = core::net::Ipv4Addr::new(192, 168, 1, 20);
+        stack
+            .set_ipv4(address, 24, Some(core::net::Ipv4Addr::new(192, 168, 1, 1)))
+            .unwrap();
+        stack.set_dns(&["9.9.9.9".parse().unwrap()]).unwrap();
+        let configuration = stack.automatic().unwrap();
+        assert!(
+            configuration
+                .addresses
+                .contains(&IpCidr::Ipv4(Ipv4Cidr::new(address, 24)))
+        );
+        // The router's advertised RDNSS server does not displace the fixed one.
+        for _ in 0..200 {
+            stack.poll().unwrap();
+        }
+        assert_eq!(
+            stack.dns_servers,
+            [IpAddress::Ipv4(core::net::Ipv4Addr::new(9, 9, 9, 9))]
+        );
     }
     #[test]
     fn ipv6_only_link_uses_real_router_advertisement_and_dad() {

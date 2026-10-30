@@ -388,3 +388,181 @@ fn group_keys_and_message_3_wait_for_their_handshake() {
         Error::Version
     );
 }
+
+/// The setup link 0 and link 1 the AP MLD accepted, and link 2 it refused.
+fn multi_link() -> MultiLink {
+    let link = |link_id: u8, rsnxe: Option<Vec<u8>>, accepted| Link {
+        link_id,
+        local: Mac([0x02, 0x0a, 0, 0, 0, link_id]),
+        ap: Mac([0x02, 0x0b, 0, 0, 0, link_id]),
+        rsn: RSN.to_vec(),
+        rsnxe,
+        accepted,
+    };
+    MultiLink {
+        association: 0,
+        links: vec![
+            link(0, None, true),
+            link(1, Some(vec![244, 1, 0x20]), true),
+            link(2, None, false),
+        ],
+    }
+}
+
+/// The MLO Link KDE naming `link`'s AP with its RSN element and RSNXE.
+fn link_kde(link: &Link) -> Vec<u8> {
+    let mut body = vec![link.link_id | LINK_RSNE];
+    if link.rsnxe.is_some() {
+        body[0] |= LINK_RSNXE;
+    }
+    body.extend_from_slice(&link.ap.0);
+    body.extend_from_slice(&link.rsn);
+    body.extend(link.rsnxe.iter().flatten());
+    let mut kde = Vec::new();
+    put_kde(&mut kde, MLO_LINK_KDE, &body);
+    kde
+}
+
+/// An MLO GTK KDE of `link_id` with PN 3, and its MLO IGTK KDE with IPN 9.
+fn link_keys(link_id: u8, index: u8, fill: u8) -> Vec<u8> {
+    let mut gtk = vec![index | link_id << 4, 3, 0, 0, 0, 0, 0];
+    gtk.extend_from_slice(&[fill; 16]);
+    let mut igtk = vec![4, 0, 9, 0, 0, 0, 0, 0, link_id << 4];
+    igtk.extend_from_slice(&[fill + 0x10; 16]);
+    let mut kdes = Vec::new();
+    put_kde(&mut kdes, MLO_GTK_KDE, &gtk);
+    put_kde(&mut kdes, MLO_IGTK_KDE, &igtk);
+    kdes
+}
+
+/// A multi-link handshake through message 2, which names the station MLD
+/// and its address on each other requested link.
+fn multi_link_begun() -> (Authenticator, Supplicant, Suites) {
+    let suites = Suites {
+        management: Some(ManagementCipher::Cmac128),
+        ..suites(Akm::Sae)
+    };
+    let mut message_2 = RSN.to_vec();
+    put_kde(&mut message_2, MAC_ADDRESS_KDE, &STATION.0);
+    for link in &multi_link().links[1..] {
+        let mut body = vec![link.link_id];
+        body.extend_from_slice(&link.local.0);
+        put_kde(&mut message_2, MLO_LINK_KDE, &body);
+    }
+    let mut ap = Authenticator::between(suites, Zeroizing::new([0x44; 32]), AP, STATION, message_2);
+    let mut station = supplicant(suites).with_multi_link(multi_link()).unwrap();
+    let step = station.receive(&ap.message_1(), &mut random).unwrap();
+    ap.message_2(&step.reply.unwrap());
+    (ap, station, suites)
+}
+
+/// Message 3 of the AP MLD: its address, then `links` and `keys`.
+fn multi_link_message_3(
+    ap: &mut Authenticator,
+    address: Mac,
+    links: &[u8],
+    keys: &[u8],
+) -> Vec<u8> {
+    let mut data = RSN.to_vec();
+    put_kde(&mut data, MAC_ADDRESS_KDE, &address.0);
+    data.extend_from_slice(links);
+    data.extend_from_slice(keys);
+    ap.signed(PAIRWISE | ACK | MIC | INSTALL | SECURE | ENCRYPTED, &data)
+}
+
+#[test]
+fn a_multi_link_handshake_names_the_mlds_and_keys_each_accepted_link() {
+    let (mut ap, mut station, _) = multi_link_begun();
+    let accepted = &multi_link().links[..2];
+    let links: Vec<u8> = accepted.iter().flat_map(link_kde).collect();
+    let keys = [link_keys(0, 1, 0x50), link_keys(1, 1, 0x60)].concat();
+    let frame = multi_link_message_3(&mut ap, AP, &links, &keys);
+    let step = station.receive(&frame, &mut random).unwrap();
+    // Message 4 names the station MLD.
+    let reply = step.reply.unwrap();
+    ap.signed_reply(&reply, PAIRWISE | MIC | SECURE);
+    let mut address = Vec::new();
+    put_kde(&mut address, MAC_ADDRESS_KDE, &STATION.0);
+    assert_eq!(Frame::parse(&reply).unwrap().data, address);
+    assert_eq!(step.pairwise.unwrap().scope, KeyScope::Pairwise(AP));
+    let group = step.group.unwrap();
+    assert_eq!(
+        (group.index, &group.material[..], group.scope, group.receive),
+        (
+            1,
+            &[0x50; 16][..],
+            KeyScope::Group(accepted[0].ap),
+            ReplaySeed::uniform(PacketNumber::new(3).unwrap())
+        )
+    );
+    assert_eq!(step.integrity.unwrap().material[..], [0x60; 16]);
+    let [link] = &step.links[..] else {
+        panic!("one other link");
+    };
+    assert_eq!(link.link_id, 1);
+    assert_eq!(
+        (&link.group.material[..], link.group.scope),
+        (&[0x60; 16][..], KeyScope::Group(accepted[1].ap))
+    );
+    let integrity = link.integrity.as_ref().unwrap();
+    assert_eq!(
+        (integrity.index, integrity.receive, &integrity.material[..]),
+        (4, PacketNumber::new(9).unwrap(), &[0x70; 16][..])
+    );
+
+    // The group key handshake rekeys each link and names the station MLD.
+    let keys = [link_keys(1, 2, 0x61), link_keys(0, 2, 0x51)].concat();
+    let frame = ap.signed(ACK | MIC | SECURE | ENCRYPTED, &keys);
+    let step = station.receive(&frame, &mut random).unwrap();
+    let reply = step.reply.unwrap();
+    ap.signed_reply(&reply, MIC | SECURE);
+    assert_eq!(Frame::parse(&reply).unwrap().data, address);
+    assert_eq!(step.group.unwrap().material[..], [0x51; 16]);
+    assert_eq!(step.links[0].group.material[..], [0x61; 16]);
+}
+
+#[test]
+fn a_multi_link_message_3_misnaming_or_missing_a_link_installs_nothing() {
+    let accepted = &multi_link().links[..2];
+    let links: Vec<u8> = accepted.iter().flat_map(link_kde).collect();
+    let keys = [link_keys(0, 1, 0x50), link_keys(1, 1, 0x60)].concat();
+    let without_rsnxe = Link {
+        rsnxe: None,
+        ..accepted[1].clone()
+    };
+    let refused = [link_kde(&accepted[0]), link_kde(&multi_link().links[2])].concat();
+    for (address, links, keys, error) in [
+        // Another AP MLD.
+        (STATION, &links[..], &keys[..], Error::MultiLink),
+        // Link 1 missing, an RSNXE the AP advertises missing, a refused link.
+        (AP, &link_kde(&accepted[0])[..], &keys[..], Error::MultiLink),
+        (
+            AP,
+            &[link_kde(&accepted[0]), link_kde(&without_rsnxe)].concat()[..],
+            &keys[..],
+            Error::MultiLink,
+        ),
+        (AP, &refused[..], &keys[..], Error::MultiLink),
+        // Link 1's GTK missing.
+        (
+            AP,
+            &links[..],
+            &link_keys(0, 1, 0x50)[..],
+            Error::MissingGroupKey,
+        ),
+    ] {
+        let (mut ap, mut station, _) = multi_link_begun();
+        let frame = multi_link_message_3(&mut ap, address, links, keys);
+        assert_eq!(station.receive(&frame, &mut random).unwrap_err(), error);
+        assert!(!station.established());
+    }
+    // The setup link must be among the accepted ones.
+    let mut unaccepted = multi_link();
+    unaccepted.links[0].accepted = false;
+    assert_eq!(
+        supplicant(suites(Akm::Sae))
+            .with_multi_link(unaccepted)
+            .err(),
+        Some(Error::MultiLink)
+    );
+}
