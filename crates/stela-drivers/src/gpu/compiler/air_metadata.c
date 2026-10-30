@@ -909,6 +909,8 @@ stage_type_matches(LLVMTypeRef type, enum stela_air_primitive p, unsigned n)
 bool
 stela_air_metadata_output_type(const struct stela_air_stage_io *io, LLVMTypeRef type)
 {
+   if (io->semantic == STELA_AIR_PRIMITIVE_CULLED)
+      return LLVMGetTypeKind(type) == LLVMIntegerTypeKind && LLVMGetIntTypeWidth(type) == 1;
    return stage_type_matches(type, io->primitive, io->components);
 }
 
@@ -1039,6 +1041,8 @@ output_type(const struct stela_air_stage_io *io)
    case STELA_AIR_VARYING: case STELA_AIR_RENDER_TARGET: return stage_varying(io->primitive);
    case STELA_AIR_POINT_SIZE: case STELA_AIR_DEPTH: case STELA_AIR_CLIP_DISTANCE:
       return io->primitive == STELA_AIR_FLOAT && scalar;
+   case STELA_AIR_PRIMITIVE_CULLED:
+      return io->type_name_bytes == strlen("bool") && !memcmp(io->type_name, "bool", strlen("bool"));
    default: return integer && scalar; /* Indices, the primitive ID, masks and stencil. */
    }
 }
@@ -1088,11 +1092,16 @@ mesh_output(struct stela_air_metadata *m, LLVMValueRef node, bool per_primitive,
       io->semantic = STELA_AIR_VIEWPORT;
    } else if (per_primitive && stela_air_md_string(fields[0], "air.primitive_id")) {
       io->semantic = STELA_AIR_MESH_PRIMITIVE_ID;
+   } else if (per_primitive && stela_air_md_string(fields[0], "air.primitive_culled")) {
+      io->semantic = STELA_AIR_PRIMITIVE_CULLED;
    } else {
       return fail(m, STELA_AIR_METADATA, "unsupported mesh output semantic");
    }
    if (!output_reflection(m, fields, f, n, io))
       return false;
+   /* A bool, which no primitive names, in one lane. */
+   if (io->semantic == STELA_AIR_PRIMITIVE_CULLED)
+      io->components = 1;
    return (output_type(io) && stage_text(io->name, io->name_bytes)) ||
       fail(m, STELA_AIR_TYPE, "unsupported mesh output type");
 }

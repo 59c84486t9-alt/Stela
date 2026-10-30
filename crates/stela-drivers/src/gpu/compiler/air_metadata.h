@@ -275,6 +275,7 @@ enum stela_air_stage_semantic {
    STELA_AIR_POINT_SIZE, STELA_AIR_LAYER, STELA_AIR_VIEWPORT,
    STELA_AIR_CLIP_DISTANCE, /* A [clip_distances x float] leaf. */
    STELA_AIR_MESH_PRIMITIVE_ID, /* A mesh primitive's primitive ID. */
+   STELA_AIR_PRIMITIVE_CULLED, /* A mesh primitive's bool [[primitive_culled]]. */
    /* Fragment outputs. */
    STELA_AIR_DEPTH, STELA_AIR_SAMPLE_MASK, STELA_AIR_STENCIL,
 };

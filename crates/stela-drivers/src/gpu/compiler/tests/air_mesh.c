@@ -26,6 +26,7 @@ static const char *module =
    "declare void @air.set_primitive_data_mesh.v4f32(ptr addrspace(7), i32, i32, <4 x float>)\n"
    "declare void @air.set_render_target_array_index_mesh.i32(ptr addrspace(7), i32, i32)\n"
    "declare void @air.set_primitive_id_mesh(ptr addrspace(7), i32, i32)\n"
+   "declare void @air.set_primitive_culled_mesh(ptr addrspace(7), i32, i1)\n"
    "declare void @air.set_index_mesh(ptr addrspace(7), i32, i8)\n"
    "declare void @air.set_primitive_count_mesh(ptr addrspace(7), i32)\n";
 
@@ -78,6 +79,8 @@ static const char *mesh_body = MESH(
    "call void @air.set_primitive_data_mesh.v4f32(ptr addrspace(7) %m, i32 0, i32 %tid, <4 x float> %pos)\n"
    "call void @air.set_render_target_array_index_mesh.i32(ptr addrspace(7) %m, i32 %tid, i32 %s)\n"
    "call void @air.set_primitive_id_mesh(ptr addrspace(7) %m, i32 %tid, i32 %tid)\n"
+   "%odd = trunc i32 %tid to i1\n"
+   "call void @air.set_primitive_culled_mesh(ptr addrspace(7) %m, i32 %tid, i1 %odd)\n"
    "%v = trunc i32 %tid to i8\n"
    "call void @air.set_index_mesh(ptr addrspace(7) %m, i32 %tid, i8 %v)\n"
    "call void @air.set_primitive_count_mesh(ptr addrspace(7) %m, i32 %s)\n");
@@ -95,12 +98,14 @@ static const char *mesh_metadata =
    " !\"air.arg_name\", !\"color\"}\n"
    "!62 = !{!\"air.clip_distance\", !\"air.clip_distance_array_size\", i32 2,"
    " !\"air.arg_type_name\", !\"float\", !\"air.arg_name\", !\"clip\"}\n"
-   "!52 = !{!63, !64, !65}\n"
+   "!52 = !{!63, !64, !65, !66}\n"
    "!63 = !{!\"air.mesh_primitive_data\", i32 0, !\"user(normal)\", !\"air.arg_type_name\", !\"float4\","
    " !\"air.arg_name\", !\"normal\"}\n"
    "!64 = !{!\"air.render_target_array_index\", !\"air.arg_type_name\", !\"uint\","
    " !\"air.arg_name\", !\"layer\"}\n"
    "!65 = !{!\"air.primitive_id\", !\"air.arg_type_name\", !\"uint\", !\"air.arg_name\", !\"id\"}\n"
+   "!66 = !{!\"air.primitive_culled\", !\"air.arg_type_name\", !\"bool\", !\"air.arg_name\","
+   " !\"culled\"}\n"
    "!41 = !{i32 1, !\"air.payload\", !\"air.arg_type_size\", i32 128, !\"air.arg_type_align_size\", i32 4,"
    " !\"air.arg_type_name\", !\"uint\", !\"air.arg_name\", !\"mtl_payload\"}\n"
    "!42 = !{i32 2, !\"air.thread_position_in_grid\", !\"air.arg_type_name\", !\"uint\","
@@ -307,12 +312,16 @@ meshes_output_primitives(void)
    assert(layer && layer->data.per_primitive);
    nir_variable *id = output(shader, VARYING_SLOT_PRIMITIVE_ID);
    assert(id && id->data.per_primitive);
+   /* Whether a primitive is culled is an int, as NAK stores it. */
+   nir_variable *culled = output(shader, VARYING_SLOT_CULL_PRIMITIVE);
+   assert(culled && culled->data.per_primitive &&
+          glsl_get_base_type(glsl_without_array(culled->type)) == GLSL_TYPE_INT);
    nir_variable *indices = output(shader, VARYING_SLOT_PRIMITIVE_INDICES);
    assert(indices && indices->data.per_primitive && glsl_get_length(indices->type) == 32);
    assert(glsl_get_vector_elements(glsl_get_array_element(indices->type)) == 3);
 
-   /* Six setters, and the index's three corners. */
-   assert(intrinsics(shader, nir_intrinsic_store_deref) == 9);
+   /* Seven setters, and the index's three corners. */
+   assert(intrinsics(shader, nir_intrinsic_store_deref) == 10);
    assert(intrinsics(shader, nir_intrinsic_set_vertex_and_primitive_count) == 1);
    ralloc_free(shader);
 }

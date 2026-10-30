@@ -1803,6 +1803,7 @@ stage_location(struct translator *t, const struct stela_air_stage_io *io)
    case STELA_AIR_SAMPLE_MASK: return FRAG_RESULT_SAMPLE_MASK;
    case STELA_AIR_STENCIL: return FRAG_RESULT_STENCIL;
    case STELA_AIR_MESH_PRIMITIVE_ID: return VARYING_SLOT_PRIMITIVE_ID;
+   case STELA_AIR_PRIMITIVE_CULLED: return VARYING_SLOT_CULL_PRIMITIVE;
    default: break;
    }
    return VARYING_SLOT_VAR0 + varying_slot(t, io)->location;
@@ -1853,10 +1854,11 @@ stage_variable(struct translator *t, const struct stela_air_stage_io *io, bool o
    memcpy(name, source, n); name[n] = 0;
    enum glsl_base_type base = io->primitive == STELA_AIR_FLOAT || io->primitive == STELA_AIR_HALF ?
       GLSL_TYPE_FLOAT : stage_signed(io->primitive) ? GLSL_TYPE_INT : GLSL_TYPE_UINT;
-   /* The indices and masks are ints, as SPIR-V's builtins are. */
+   /* The indices and masks are ints, as SPIR-V's builtins are, and so is
+    * whether a primitive is culled, as NAK stores it. */
    if (io->semantic == STELA_AIR_LAYER || io->semantic == STELA_AIR_VIEWPORT ||
        io->semantic == STELA_AIR_SAMPLE_MASK || io->semantic == STELA_AIR_STENCIL ||
-       io->semantic == STELA_AIR_MESH_PRIMITIVE_ID)
+       io->semantic == STELA_AIR_MESH_PRIMITIVE_ID || io->semantic == STELA_AIR_PRIMITIVE_CULLED)
       base = GLSL_TYPE_INT;
    /* Clip distances are a compact float array, as SPIR-V's ClipDistance is. */
    bool clip = io->semantic == STELA_AIR_CLIP_DISTANCE;
@@ -3244,7 +3246,8 @@ argument_load(struct translator *t, LLVMValueRef inst)
  * mesh, in DXMT's AIR forms: the handle, then indices, then the value. */
 enum mesh_setter {
    MESH_POSITION, MESH_POINT_SIZE, MESH_CLIP_DISTANCE, MESH_VERTEX_DATA, MESH_PRIMITIVE_DATA,
-   MESH_LAYER, MESH_VIEWPORT, MESH_PRIMITIVE_ID, MESH_INDEX, MESH_PRIMITIVE_COUNT, MESH_GRID,
+   MESH_LAYER, MESH_VIEWPORT, MESH_PRIMITIVE_ID, MESH_CULLED, MESH_INDEX, MESH_PRIMITIVE_COUNT,
+   MESH_GRID,
 };
 
 static const struct {
@@ -3261,6 +3264,7 @@ static const struct {
    [MESH_LAYER] = {"air.set_render_target_array_index_mesh", 3, true, STELA_AIR_LAYER},
    [MESH_VIEWPORT] = {"air.set_viewport_array_index_mesh", 3, true, STELA_AIR_VIEWPORT},
    [MESH_PRIMITIVE_ID] = {"air.set_primitive_id_mesh", 3, false, STELA_AIR_MESH_PRIMITIVE_ID},
+   [MESH_CULLED] = {"air.set_primitive_culled_mesh", 3, false, STELA_AIR_PRIMITIVE_CULLED},
    [MESH_INDEX] = {"air.set_index_mesh", 3},
    [MESH_PRIMITIVE_COUNT] = {"air.set_primitive_count_mesh", 2},
    [MESH_GRID] = {"air.set_threadgroups_per_grid_mesh_properties", 2},
@@ -3406,7 +3410,7 @@ mesh_call(struct translator *t, LLVMValueRef inst, LLVMValueRef callee, const ch
    unsigned count = io->per_primitive ? entry->max_primitives : entry->max_vertices;
    bool clip = setter == MESH_CLIP_DISTANCE;
    nir_def *element = values[clip || data ? 2 : 1];
-   value = stage_widen(b, value, io->primitive);
+   value = setter == MESH_CULLED ? nir_b2i32(b, value) : stage_widen(b, value, io->primitive);
    return mesh_store(t, t->outputs[output], element, count, clip ? values[1] : NULL,
                      io->clip_distances, value, BITFIELD_MASK(value->num_components));
 }
