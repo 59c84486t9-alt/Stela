@@ -110,7 +110,8 @@ pub trait Translations {
     /// The block at `pc` of the page whose bytes hash to `key`, prepared
     /// in `context` at that very PC since the record was read, if the
     /// store has one: shared, so a store other machines reach copies none
-    /// of it while they wait.
+    /// of it while they wait. A store may index blocks by part of `key` and
+    /// `context`; the caller [`SharedTranslation::matches`] what it gets.
     fn prepared(
         &mut self,
         _key: &Digest,

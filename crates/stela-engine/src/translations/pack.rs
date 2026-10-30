@@ -288,8 +288,15 @@ struct Pending {
     preparation: Arc<Preparation>,
 }
 
-/// A shared block's page key, PC and context.
-type SharedKey = (Digest, u64, Digest);
+/// A shared block's PC and the leading words of its page key and context:
+/// a compact index whose rare collision only replaces an entry, as a hit
+/// still matches the whole key and context ([`SharedTranslation::matches`]).
+type SharedKey = (u64, u64, u64);
+
+fn shared_key(key: &Digest, pc: u64, context: &Digest) -> SharedKey {
+    let word = |digest: &Digest| u64::from_le_bytes(digest.0[..8].try_into().expect("a word"));
+    (pc, word(key), word(context))
+}
 
 #[derive(Debug)]
 struct SharedEntry {
@@ -407,7 +414,7 @@ impl<'a> Store<'a> {
     }
 
     fn keep_shared(&mut self, offer: Offer) {
-        let key = (offer.key(), offer.pc(), offer.context());
+        let key = shared_key(&offer.key(), offer.pc(), &offer.context());
         let bytes = offer
             .retained_bytes()
             .saturating_add(size_of::<(SharedKey, SharedEntry)>());
@@ -628,7 +635,7 @@ impl Translations for Store<'_> {
         context: &Digest,
     ) -> Option<Arc<SharedTranslation>> {
         self.shared
-            .get(&(*key, pc, *context))
+            .get(&shared_key(key, pc, context))
             .map(|entry| Arc::clone(&entry.translation))
     }
 
