@@ -161,6 +161,17 @@ impl Station {
         })
     }
 
+    /// The AP the association's pairwise key is shared with: the AP MLD a
+    /// multi-link request names, or the BSS.
+    pub fn pairwise_peer(&self) -> Option<Mac> {
+        let join = self.join.as_ref()?;
+        Some(
+            join.request
+                .multi_link()
+                .map_or(join.bssid, |setup| setup.association.mld.ap),
+        )
+    }
+
     /// The links the current association's frames arrive on: the setup link,
     /// then each other link it made.
     pub fn on_air(&self) -> impl Iterator<Item = OnAir> + '_ {

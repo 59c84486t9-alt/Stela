@@ -342,5 +342,26 @@ fn an_ap_mld_association_names_both_mlds_in_its_records() {
         (&on_air[4..10], &on_air[10..16], &on_air[16..22]),
         (&AP.0[..], &SETUP_LINK.0[..], &AP.0[..])
     );
-    stop(&mut link, &model);
+    // The PTK is the MLDs', the setup link's GTK its AP's: the port opens
+    // with the keys the handshake gives.
+    let epoch = link.station().association_epoch().unwrap();
+    link.install_key(true, 0, &[1; 16], ReplaySeed::ZERO)
+        .unwrap();
+    link.install_key(false, 2, &[0x44; 16], ReplaySeed::ZERO)
+        .unwrap();
+    drop(drain_notices(&mut link));
+    // SAFETY: modeled queues, notices and old key users are drained, and the
+    // model OS's handshake supplied this IGTK.
+    unsafe { link.install_management_key(epoch, 4, &[0x55; 16], PacketNumber::new(100).unwrap()) }
+        .unwrap();
+    link.authorize_port(epoch).unwrap();
+    assert!(link.carrier());
+    let sent = depart(&mut link, &model);
+    assert!(
+        !sent.is_empty()
+            && sent
+                .iter()
+                .all(|frame| frame[4..10] == AP.0 && frame[10..16] == SETUP_LINK.0)
+    );
+    retire(&mut link, &model);
 }

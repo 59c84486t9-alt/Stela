@@ -188,10 +188,12 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             omac_index: profile.interface.omac_index,
             station_disabled: false,
         };
+        // An AP MLD's PTK is the MLDs'.
+        let peer = s.station.pairwise_peer().ok_or(Error::WrongPhase)?;
         let m = s.controller.state().mailbox.as_ref().unwrap();
         let resource = s.controller.state().resource.clone();
         for (owner, slot, scope) in [
-            (&mut s.ptk, profile.wcid, KeyScope::Pairwise(profile.peer)),
+            (&mut s.ptk, profile.wcid, KeyScope::Pairwise(peer)),
             (
                 &mut s.gtk,
                 profile.interface.broadcast_wcid,

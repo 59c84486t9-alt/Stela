@@ -1079,14 +1079,10 @@ impl Station {
         if self.phase != Phase::Associated || epoch != self.epoch {
             return Err(Error::NotAssociated);
         }
-        let join = self.join.as_ref().ok_or(Error::NotAssociated)?;
-        let bssid = join.bssid;
+        let bssid = self.join.as_ref().ok_or(Error::NotAssociated)?.bssid;
         // A multi-link association's PTK is the AP MLD's; each link keeps
         // its own GTK.
-        let peer = join
-            .request
-            .multi_link()
-            .map_or(bssid, |setup| setup.association.mld.ap);
+        let peer = self.pairwise_peer().ok_or(Error::NotAssociated)?;
         let ptk = pairwise
             .installed()
             .filter(|key| key.scope() == KeyScope::Pairwise(peer))

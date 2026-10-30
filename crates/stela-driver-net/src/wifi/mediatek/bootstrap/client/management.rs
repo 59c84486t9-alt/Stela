@@ -137,7 +137,8 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             .as_ref()
             .and_then(|k| k.slot().installed())
             .ok_or(Error::NoKey)?;
-        if ptk.scope() != KeyScope::Pairwise(p.peer)
+        let peer = s.station.pairwise_peer().ok_or(Error::WrongProfile)?;
+        if ptk.scope() != KeyScope::Pairwise(peer)
             || gtk.scope() != KeyScope::Group(p.peer)
             || ptk.slot() != p.wcid
             || gtk.slot() != p.interface.broadcast_wcid
