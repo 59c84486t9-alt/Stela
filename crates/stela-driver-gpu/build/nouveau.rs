@@ -25,10 +25,7 @@ const RUNTIME: [&str; 4] = ["memcpy", "memmove", "memset", "memcmp"];
 /// lacks, or defines only as a trap, by service. Building fails when the
 /// imports change, so each supplied service leaves this list with its change.
 const OPEN: &[(&str, &[&str])] = &[
-    (
-        "lib/hexdump.c, lib/ratelimit.c",
-        &["print_hex_dump", "___ratelimit"],
-    ),
+    ("lib/ratelimit.c", &["___ratelimit"]),
     (
         "mm/vmalloc.c",
         &[

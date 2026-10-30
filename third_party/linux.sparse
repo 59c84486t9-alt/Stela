@@ -19,6 +19,7 @@
 /lib/kobject_uevent.c
 /lib/ctype.c
 /lib/string.c
+/lib/hexdump.c
 /lib/bitrev.c
 /lib/find_bit.c
 /lib/find_random_bit.c

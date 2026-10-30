@@ -178,6 +178,7 @@ impl Linux {
         let upstream = [
             PathBuf::from(format!("{DRM}/drm_fourcc.c")),
             PathBuf::from(format!("{LINUX}/lib/string.c")),
+            PathBuf::from(format!("{LINUX}/lib/hexdump.c")),
             PathBuf::from(format!("{LINUX}/lib/scatterlist.c")),
             PathBuf::from(format!("{LINUX}/lib/find_bit.c")),
             PathBuf::from(format!("{LINUX}/lib/bitmap.c")),
