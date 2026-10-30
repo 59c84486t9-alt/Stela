@@ -103,6 +103,34 @@ fn every_option_survives_a_round_trip() {
 }
 
 #[test]
+fn usb4_approvals_repeat_and_keep_their_canonical_spelling() {
+    let first = "d0e30f35-5f6a-4b1e-9c00-112233445566";
+    let second = "01234567-89ab-cdef-0123-456789abcdef";
+    let options = round_trip(&format!(
+        "--system --usb4-approve {} --usb4-approve {second}",
+        first.to_uppercase()
+    ));
+    assert_eq!(options.usb4_approved.len(), 2);
+    assert_eq!(
+        options.to_string(),
+        format!("--system --usb4-approve {first} --usb4-approve {second}")
+    );
+    for (text, error) in [
+        ("--system --usb4-approve", Error::Usb4Approve),
+        ("--system --usb4-approve nonsense", Error::Usb4Approve),
+    ] {
+        assert_eq!(System::parse(text).err(), Some(error), "{text}");
+    }
+    assert_eq!(
+        System::parse(&format!(
+            "--system --usb4-approve {first} --usb4-approve {first}"
+        ))
+        .err(),
+        Some(Error::DuplicateUsb4Approve)
+    );
+}
+
+#[test]
 fn wifi_names_escape_spaces_and_the_key_path_defaults() {
     let options = round_trip("--system --wifi Home%20Net%25 --wifi-country gb");
     assert_eq!(options.ssid.as_deref(), Some("Home Net%"));

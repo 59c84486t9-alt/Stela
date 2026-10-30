@@ -8,6 +8,7 @@ use crate::Result;
 use alloc::{string::String, vec::Vec};
 use core::fmt;
 use stela_contracts::refuse;
+pub use stela_drivers::bus::thunderbolt::manager::Uuid;
 use stela_loader::{
     boot_selection::{self, BootVolume},
     handoff::BootCommand,
@@ -35,6 +36,7 @@ pub const NATIVE_CORES: &str = "--native-cores";
 pub const WIFI: &str = "--wifi";
 pub const WIFI_KEY: &str = "--wifi-key";
 pub const WIFI_COUNTRY: &str = "--wifi-country";
+pub const USB4_APPROVE: &str = "--usb4-approve";
 /// The ESP file `--wifi` reads its key from without `--wifi-key`.
 pub const DEFAULT_WIFI_KEY: &str = "\\EFI\\stela\\wifi.key";
 /// IEEE 802.11 SSIDs are 1 to 32 octets.
@@ -288,6 +290,9 @@ pub struct System {
     /// Whole host disks, by serial, that the guest sees as USB mass
     /// storage behind the native hub (`--usb-storage SERIAL`, repeatable).
     pub usb_storage: Vec<String>,
+    /// USB4 devices that get a PCIe tunnel where no IOMMU confines their DMA
+    /// (`--usb4-approve UUID`, repeatable).
+    pub usb4_approved: Vec<Uuid>,
     /// Every other host disk the engine does not open itself is USB mass
     /// storage too, up to the hub's free ports (`--external-disks`).
     pub external_disks: bool,
@@ -375,6 +380,7 @@ impl Default for System {
             network_check: None,
             audio_check: None,
             usb_storage: Vec::new(),
+            usb4_approved: Vec::new(),
             external_disks: false,
             guest_network: false,
             ssid: None,
@@ -682,6 +688,9 @@ impl fmt::Display for System {
         line.flag("--development-restore", self.development_restore)?;
         for serial in &self.usb_storage {
             line.value("--usb-storage", Some(serial))?;
+        }
+        for uuid in &self.usb4_approved {
+            line.value(USB4_APPROVE, Some(uuid))?;
         }
         line.flag(EXTERNAL_DISKS, self.external_disks)?;
         line.flag("--guest-network", self.guest_network)?;

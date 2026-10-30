@@ -41,8 +41,9 @@ pub const MARKER_BYTES: usize = MAGIC.len() + 4 * FIELDS;
 /// `EFI/stela/`. Revision 10: `--wifi SSID`, `--wifi-key PATH` and
 /// `--wifi-country XX` join a Wi-Fi network for the mount's network.
 /// Revision 11: `--ipv4 ADDRESS/PREFIX`, `--ipv4-gateway ADDRESS` and
-/// `--dns SERVERS` set the mount network's addresses by hand.
-pub const OPTIONS_REVISION: u32 = 11;
+/// `--dns SERVERS` set the mount network's addresses by hand. Revision 12:
+/// `--usb4-approve UUID` admits a USB4 device's PCIe tunnel without an IOMMU.
+pub const OPTIONS_REVISION: u32 = 12;
 
 /// The startup choices, beside `stela.cfg` on the ESP.
 pub const CHOICES_FILE: &str = "\\EFI\\stela\\choices.cfg";

@@ -176,6 +176,13 @@ impl ParseState<'_> {
                     return Err(Error::DuplicateWifiCountry);
                 }
             }
+            USB4_APPROVE => {
+                let uuid = value().and_then(Uuid::parse).ok_or(Error::Usb4Approve)?;
+                if options.usb4_approved.contains(&uuid) {
+                    return Err(Error::DuplicateUsb4Approve);
+                }
+                options.usb4_approved.push(uuid);
+            }
             EXTERNAL_DISKS => options.external_disks = true,
             "--audio-check" => {
                 if options.audio_check.is_some() {
