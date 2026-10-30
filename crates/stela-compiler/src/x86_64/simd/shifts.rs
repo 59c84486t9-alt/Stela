@@ -2,7 +2,7 @@
 use super::{
     Host, commit, greater, packed, read_vector, rearrange::constant, shuffle, vector_offset,
 };
-use crate::x86_64::asm::{Alu, Code, Cond, Gpr, ShiftOp, Size, Unary};
+use crate::x86_64::asm::{Alu, Code, Cond, Gpr, ShiftOp, Size, Unary, vector_extensions};
 use crate::x86_64::simd::encode::guest;
 use crate::{
     TargetCpu,
@@ -39,8 +39,44 @@ fn add(code: &mut Code, destination: u8, source: u8, lane_bytes: u8) {
         source,
     );
 }
-pub(crate) fn logical_shift(code: &mut Code, xmm: u8, lane_bytes: u8, amount: u8, left: bool) {
+/// Shift each byte of `xmm` by `amount` with one GFNI affine transform: left,
+/// logically right, or right filling with the sign (`signed`). The matrix
+/// goes through `gpr` into XMM5.
+pub(crate) fn byte_shift(
+    code: &mut Code,
+    xmm: u8,
+    amount: u8,
+    left: bool,
+    signed: bool,
+    gpr: Gpr,
+    target: TargetCpu,
+) -> bool {
+    let matrix = vector_extensions::byte_matrix(|bit| {
+        if left {
+            bit.checked_sub(amount)
+        } else if signed {
+            Some((bit + amount).min(BITS_PER_BYTE - 1))
+        } else {
+            Some(bit + amount).filter(|from| *from < BITS_PER_BYTE)
+        }
+    });
+    vector_extensions::byte_affine(code, xmm, 5, matrix, gpr, target)
+}
+
+/// Byte lanes use [`byte_shift`] when available, else a word shift and a lane
+/// mask; either clobbers XMM5 and RCX (and the mask XMM7).
+pub(crate) fn logical_shift(
+    code: &mut Code,
+    xmm: u8,
+    lane_bytes: u8,
+    amount: u8,
+    left: bool,
+    target: TargetCpu,
+) {
     if amount == 0 {
+        return;
+    }
+    if lane_bytes == 1 && byte_shift(code, xmm, amount, left, false, Rcx, target) {
         return;
     }
     let opcode = match (left, lane_bytes) {
@@ -64,12 +100,29 @@ pub(crate) fn logical_shift(code: &mut Code, xmm: u8, lane_bytes: u8, amount: u8
         packed(code, Host::And, xmm, 5);
     }
 }
-pub(crate) fn right_shift(code: &mut Code, xmm: u8, lane_bytes: u8, amount: u8, signed: bool) {
+/// Signed qwords use VPSRAQ and signed bytes a GFNI affine transform when
+/// available; the replicated-sign recipes clobber XMM4 as well.
+pub(crate) fn right_shift(
+    code: &mut Code,
+    xmm: u8,
+    lane_bytes: u8,
+    amount: u8,
+    signed: bool,
+    target: TargetCpu,
+) {
     if amount == 0 {
         return;
     }
     if !signed {
-        logical_shift(code, xmm, lane_bytes, amount, false);
+        logical_shift(code, xmm, lane_bytes, amount, false, target);
+        return;
+    }
+    let extended = match lane_bytes {
+        1 => byte_shift(code, xmm, amount, false, true, Rcx, target),
+        8 => vector_extensions::arithmetic_qword_right(code, xmm, amount, target),
+        _ => false,
+    };
+    if extended {
         return;
     }
     match lane_bytes {
@@ -86,8 +139,8 @@ pub(crate) fn right_shift(code: &mut Code, xmm: u8, lane_bytes: u8, amount: u8, 
                 packed(code, Host::Xor, 4, 4);
                 packed(code, Host::GreaterByte, 4, xmm);
             }
-            logical_shift(code, xmm, lane_bytes, amount, false);
-            logical_shift(code, 4, lane_bytes, lane_bytes * 8 - amount, true);
+            logical_shift(code, xmm, lane_bytes, amount, false, target);
+            logical_shift(code, 4, lane_bytes, lane_bytes * 8 - amount, true, target);
             packed(code, Host::Or, xmm, 4);
         }
         _ => unreachable!("reviewed lane width"),
@@ -99,20 +152,29 @@ pub(crate) fn rounded_right(
     amount: u8,
     signed: bool,
     round: bool,
+    target: TargetCpu,
 ) {
     if round {
         packed(code, Host::MoveAligned, 1, 0);
-        logical_shift(code, 1, lane_bytes, amount - 1, false);
+        logical_shift(code, 1, lane_bytes, amount - 1, false, target);
         lane_mask(code, 2, lane_bytes, 1);
         packed(code, Host::And, 1, 2);
     }
-    right_shift(code, 0, lane_bytes, amount, signed);
+    right_shift(code, 0, lane_bytes, amount, signed, target);
     if round {
         add(code, 0, 1, lane_bytes);
     }
 }
-fn narrow(code: &mut Code, lane_bytes: u8, amount: u8, round: bool, upper: bool, destination: u8) {
-    rounded_right(code, lane_bytes * 2, amount, false, round);
+fn narrow(
+    code: &mut Code,
+    lane_bytes: u8,
+    amount: u8,
+    round: bool,
+    upper: bool,
+    destination: u8,
+    target: TargetCpu,
+) {
+    rounded_right(code, lane_bytes * 2, amount, false, round, target);
     pack_truncated(code, lane_bytes, upper, destination);
 }
 
@@ -137,7 +199,7 @@ fn saturating_narrow(
         // QC stays untouched, including poisoned inactive scalar lanes.
         match lane {
             1 | 2 => {
-                right_shift(code, 0, wide, operand.amount, true);
+                right_shift(code, 0, wide, operand.amount, true, target);
                 packed(
                     code,
                     if lane == 1 {
@@ -154,7 +216,7 @@ fn saturating_narrow(
         }
         packed(code, Host::MoveAligned, 6, 0);
     } else {
-        rounded_right(code, wide, operand.amount, signed_source, round);
+        rounded_right(code, wide, operand.amount, signed_source, round, target);
         if lane < 4 {
             saturating_narrow_pack(code, lane, signed_source, unsigned_result, target);
         } else {
@@ -323,7 +385,14 @@ pub(super) fn pack_truncated(code: &mut Code, lane_bytes: u8, upper: bool, desti
         commit(code, destination, 0);
     }
 }
-fn widen(code: &mut Code, lane_bytes: u8, amount: u8, signed: bool, upper: bool) {
+fn widen(
+    code: &mut Code,
+    lane_bytes: u8,
+    amount: u8,
+    signed: bool,
+    upper: bool,
+    target: TargetCpu,
+) {
     if upper {
         Shift::RightBytes.emit(code, 0, 8);
     }
@@ -352,7 +421,7 @@ fn widen(code: &mut Code, lane_bytes: u8, amount: u8, signed: bool, upper: bool)
         0,
         1,
     );
-    logical_shift(code, 0, lane_bytes * 2, amount, true);
+    logical_shift(code, 0, lane_bytes * 2, amount, true, target);
 }
 
 pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu) {
@@ -390,7 +459,7 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu) {
             unsigned_result,
         } => {
             if bytes > lane_bytes {
-                saturating_immediate_vector(code, operand, signed_source, unsigned_result);
+                saturating_immediate_vector(code, operand, signed_source, unsigned_result, target);
                 return;
             }
             register_shift(
@@ -420,7 +489,7 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu) {
     match kind {
         Kind::Register { .. } | Kind::SaturatingImmediate { .. } => unreachable!(),
         Kind::Narrow { round, upper } => {
-            narrow(code, lane_bytes, amount, round, upper, destination);
+            narrow(code, lane_bytes, amount, round, upper, destination, target);
             return;
         }
         Kind::SaturatingNarrow {
@@ -440,9 +509,9 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu) {
             );
             return;
         }
-        Kind::Widen { signed, upper } => widen(code, lane_bytes, amount, signed, upper),
+        Kind::Widen { signed, upper } => widen(code, lane_bytes, amount, signed, upper, target),
         Kind::Left { insert } => {
-            logical_shift(code, 0, lane_bytes, amount, true);
+            logical_shift(code, 0, lane_bytes, amount, true, target);
             if insert && amount != 0 {
                 read_vector(code, destination, 1);
                 let preserve = (1u64 << amount) - 1; // amount is 0..lane_bits-1, including qword
@@ -457,7 +526,7 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu) {
             accumulate,
             insert,
         } => {
-            rounded_right(code, lane_bytes, amount, signed, round);
+            rounded_right(code, lane_bytes, amount, signed, round, target);
             if accumulate || insert {
                 read_vector(code, destination, 1);
                 if accumulate {
@@ -489,6 +558,7 @@ fn saturating_immediate_vector(
     operand: &Operand,
     signed_source: bool,
     unsigned_result: bool,
+    target: TargetCpu,
 ) {
     let lane = operand.lane_bytes;
     read_vector(code, operand.source, 0);
@@ -540,9 +610,9 @@ fn saturating_immediate_vector(
         return;
     }
     packed(code, Host::MoveAligned, 6, 0);
-    logical_shift(code, 0, lane, operand.amount, true);
+    logical_shift(code, 0, lane, operand.amount, true, target);
     packed(code, Host::MoveAligned, 3, 0);
-    right_shift(code, 0, lane, operand.amount, !unsigned_result);
+    right_shift(code, 0, lane, operand.amount, !unsigned_result, target);
     packed(code, Host::MoveAligned, 1, 6);
     super::equal(code, lane, crate::TargetCpu::Baseline);
     packed(code, Host::EqualDword, 4, 4);
@@ -563,7 +633,7 @@ fn saturating_immediate_vector(
                 Shift::RightWord.emit(code, 1, 9);
                 packed(code, Host::PackUnsignedWordToByte, 1, 1);
             } else {
-                logical_shift(code, 1, lane, 1, false);
+                logical_shift(code, 1, lane, 1, false, target);
             }
             packed(code, Host::Xor, 5, 1); // MAX for positive, MIN for negative
         }

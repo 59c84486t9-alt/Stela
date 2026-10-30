@@ -1,8 +1,9 @@
 //! Per-lane variable shifts by unsigned counts.
 use super::repeated_constant;
+use crate::x86_64::asm::Gpr::Rax;
 use crate::x86_64::asm::{Code, Rm};
 use crate::x86_64::simd::shifts::{
-    logical_shift as shared_logical_shift, right_shift as shared_right_shift,
+    byte_shift, logical_shift as shared_logical_shift, right_shift as shared_right_shift,
 };
 use crate::{
     TargetCpu,
@@ -41,13 +42,14 @@ const WORD_SIGN_SHIFT: u8 = u16::BITS as u8 - 1;
 fn packed(code: &mut Code, opcode: Host, destination: u8, source: u8) {
     opcode.register(code, destination, source, TargetCpu::Baseline);
 }
-/// Byte logical masks use one repeated qword constant, avoiding two-limb setup.
-fn logical_shift(code: &mut Code, xmm: u8, lane: u8, amount: u8, left: bool) {
+/// Byte logical masks use one repeated qword constant, avoiding two-limb
+/// setup, unless GFNI shifts the bytes directly. Either clobbers XMM5 and RAX.
+fn logical_shift(code: &mut Code, xmm: u8, lane: u8, amount: u8, left: bool, target: TargetCpu) {
     if lane != 1 {
-        shared_logical_shift(code, xmm, lane, amount, left);
+        shared_logical_shift(code, xmm, lane, amount, left, target);
         return;
     }
-    if amount == 0 {
+    if amount == 0 || byte_shift(code, xmm, amount, left, false, Rax, target) {
         return;
     }
     let opcode = if left {
@@ -64,18 +66,19 @@ fn logical_shift(code: &mut Code, xmm: u8, lane: u8, amount: u8, left: bool) {
     repeated_constant(code, 5, ElementSize::Byte, u64::from(mask));
     packed(code, Host::And, xmm, 5);
 }
-/// Arithmetic word shifts independently sign-extend each even and odd byte.
-/// XMM4 is scratch; XMM1, XMM2 and old mergeXMM6 survive unchanged.
-fn right_shift(code: &mut Code, xmm: u8, lane: u8, amount: u8, signed: bool) {
+/// Arithmetic word shifts independently sign-extend each even and odd byte,
+/// unless GFNI shifts the bytes directly. XMM4, XMM5 and RAX are scratch;
+/// XMM1, XMM2 and old merge XMM6 survive unchanged.
+fn right_shift(code: &mut Code, xmm: u8, lane: u8, amount: u8, signed: bool, target: TargetCpu) {
     if !signed {
-        logical_shift(code, xmm, lane, amount, false);
+        logical_shift(code, xmm, lane, amount, false, target);
         return;
     }
     if lane != 1 {
-        shared_right_shift(code, xmm, lane, amount, signed);
+        shared_right_shift(code, xmm, lane, amount, signed, target);
         return;
     }
-    if amount == 0 {
+    if amount == 0 || byte_shift(code, xmm, amount, false, true, Rax, target) {
         return;
     }
     const BYTE_BITS: u8 = u8::BITS as u8;
@@ -132,7 +135,7 @@ fn sign_mask(code: &mut Code, element: ElementSize) {
         _ => unreachable!(),
     }
 }
-pub(super) fn chunk(code: &mut Code, kind: Kind, element: ElementSize) {
+pub(super) fn chunk(code: &mut Code, kind: Kind, element: ElementSize, target: TargetCpu) {
     assert!(matches!(
         kind,
         Kind::LogicalLeft | Kind::LogicalRight | Kind::ArithmeticRight
@@ -174,9 +177,16 @@ pub(super) fn chunk(code: &mut Code, kind: Kind, element: ElementSize) {
         }
         packed(code, Host::MoveAligned, 3, 0);
         if kind == Kind::ArithmeticRight {
-            right_shift(code, 3, lane, amount as u8, true);
+            right_shift(code, 3, lane, amount as u8, true, target);
         } else {
-            logical_shift(code, 3, lane, amount as u8, kind == Kind::LogicalLeft);
+            logical_shift(
+                code,
+                3,
+                lane,
+                amount as u8,
+                kind == Kind::LogicalLeft,
+                target,
+            );
         }
         packed(code, Host::Xor, 3, 0);
         packed(code, Host::And, 3, 2);
@@ -188,7 +198,7 @@ pub(super) fn chunk(code: &mut Code, kind: Kind, element: ElementSize) {
         repeated_constant(code, 5, element, u64::from(u8::MAX) ^ (bits as u64 - 1));
         packed(code, Host::And, 2, 5);
     } else {
-        logical_shift(code, 2, lane, bits.trailing_zeros() as u8, false);
+        logical_shift(code, 2, lane, bits.trailing_zeros() as u8, false, target);
     }
     equal_zero(code, 2, element);
     if kind == Kind::ArithmeticRight {

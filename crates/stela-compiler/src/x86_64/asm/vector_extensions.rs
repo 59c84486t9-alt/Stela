@@ -4,12 +4,16 @@ use crate::TargetCpu;
 use crate::aarch64::floating::Format;
 use crate::x86_64::isa::{ShiftOpcode as Shift, SimdOpcode as Host};
 
-/// Reverse each byte in `destination`, using `scratch` and RAX for the
-/// anti-diagonal affine matrix. The DIT profile keeps its reviewed recipe.
-pub(crate) fn reverse_bytes(
+/// Transform each byte of `destination` by the bit matrix `matrix`
+/// (GF2P8AFFINEQB): result bit i is the parity of the source bits selected by
+/// matrix byte 7 - i. The matrix goes through `gpr` into `scratch`. The DIT
+/// profile keeps its reviewed recipes.
+pub(crate) fn byte_affine(
     code: &mut Code,
     destination: u8,
     scratch: u8,
+    matrix: u64,
+    gpr: Gpr,
     target: TargetCpu,
 ) -> bool {
     if !target.supports(TargetCpu::Gfni) || target.data_independent_timing() {
@@ -17,8 +21,8 @@ pub(crate) fn reverse_bytes(
     }
     debug_assert_ne!(destination, scratch);
     let mut asm = code.asm();
-    asm.mov_imm64(Gpr::Rax, 0x8040_2010_0804_0201);
-    asm.movq_to_xmm(scratch, Gpr::Rax);
+    asm.mov_imm64(gpr, matrix);
+    asm.movq_to_xmm(scratch, gpr);
     asm.simd(
         Host::UnpackLowQword,
         scratch,
@@ -26,6 +30,66 @@ pub(crate) fn reverse_bytes(
         TargetCpu::Baseline,
     );
     asm.gf2p8affineqb(destination, Rm::Xmm(scratch), 0);
+    true
+}
+
+/// The [`byte_affine`] matrix whose result bit i is source bit `source(i)`,
+/// or zero where it is `None`.
+pub(crate) fn byte_matrix(source: impl Fn(u8) -> Option<u8>) -> u64 {
+    (0..8).fold(0, |matrix, bit| match source(bit) {
+        Some(from) => matrix | 1 << from << (8 * (7 - bit)),
+        None => matrix,
+    })
+}
+
+/// Reverse each byte in `destination`, using `scratch` and RAX for the
+/// anti-diagonal affine matrix.
+pub(crate) fn reverse_bytes(
+    code: &mut Code,
+    destination: u8,
+    scratch: u8,
+    target: TargetCpu,
+) -> bool {
+    byte_affine(
+        code,
+        destination,
+        scratch,
+        byte_matrix(|bit| Some(7 - bit)),
+        Gpr::Rax,
+        target,
+    )
+}
+
+/// VPSRAQ: shift each quadword of `xmm` right by `amount`, filling with its
+/// sign; 64 or more leaves only the sign.
+pub(crate) fn arithmetic_qword_right(
+    code: &mut Code,
+    xmm: u8,
+    amount: u8,
+    target: TargetCpu,
+) -> bool {
+    if !merge_supported(target) {
+        return false;
+    }
+    let mut asm = code.asm();
+    // EVEX.vvvv names the destination; ModRM.reg is the /4 extension.
+    asm.evex(
+        Evex {
+            map: Map::M0f,
+            pp: Pp::P66,
+            w: true,
+            length: 0,
+            mask: 0,
+            zeroing: false,
+            broadcast: false,
+            scale: 16,
+        },
+        0x72,
+        4,
+        xmm,
+        Rm::Xmm(xmm),
+    );
+    asm.data(&[amount]);
     true
 }
 

@@ -14,7 +14,7 @@ use crate::{
     x86_64::isa::ShiftOpcode as Shift,
 };
 
-fn half(code: &mut Code, lane: u8, signed: bool, subtract: bool, round: bool) {
+fn half(code: &mut Code, lane: u8, signed: bool, subtract: bool, round: bool, target: TargetCpu) {
     if round && lane <= 2 {
         if signed {
             lane_constant(code, 2, lane, 1u64 << (lane * 8 - 1));
@@ -40,8 +40,8 @@ fn half(code: &mut Code, lane: u8, signed: bool, subtract: bool, round: bool) {
         packed(code, Host::AndNot, 2, 1);
         lane_constant(code, 3, lane, 1);
         packed(code, Host::And, 2, 3);
-        right_shift(code, 0, lane, 1, signed);
-        right_shift(code, 1, lane, 1, signed);
+        right_shift(code, 0, lane, 1, signed, target);
+        right_shift(code, 1, lane, 1, signed, target);
         packed(code, add_or_subtract(lane, true), 0, 1);
         packed(code, add_or_subtract(lane, true), 0, 2);
     } else {
@@ -49,7 +49,7 @@ fn half(code: &mut Code, lane: u8, signed: bool, subtract: bool, round: bool) {
         packed(code, Host::MoveAligned, 2, 0);
         packed(code, if round { Host::Or } else { Host::And }, 2, 1);
         packed(code, Host::Xor, 0, 1);
-        right_shift(code, 0, lane, 1, signed);
+        right_shift(code, 0, lane, 1, signed, target);
         if round {
             packed(code, add_or_subtract(lane, true), 2, 0);
             packed(code, Host::MoveAligned, 0, 2);
@@ -93,8 +93,8 @@ fn pair_long(code: &mut Code, lane: u8, signed: bool, target: TargetCpu) {
                 }
                 4 => {
                     Shift::LeftQword.emit(code, 0, 32);
-                    right_shift(code, 0, 8, 32, true);
-                    right_shift(code, 1, 8, 32, true);
+                    right_shift(code, 0, 8, 32, true, target);
+                    right_shift(code, 1, 8, 32, true, target);
                 }
                 _ => unreachable!("signed halfword path uses PMADDWD"),
             }
@@ -130,7 +130,7 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu) {
             round,
         } => {
             read_vector(code, right, 1);
-            half(code, lane, signed, subtract, round);
+            half(code, lane, signed, subtract, round, target);
         }
         Kind::HighNarrow {
             subtract,
@@ -139,7 +139,7 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu) {
         } => {
             read_vector(code, right, 1);
             packed(code, add_or_subtract(lane * 2, subtract), 0, 1);
-            rounded_right(code, lane * 2, lane * 8, false, round);
+            rounded_right(code, lane * 2, lane * 8, false, round, target);
             pack_truncated(code, lane, upper, destination);
             return;
         }

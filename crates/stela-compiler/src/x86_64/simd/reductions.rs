@@ -338,13 +338,13 @@ fn leading_count(code: &mut Code, lane: u8, sign: bool, target: TargetCpu) {
     let mut step = lane * 4;
     while step != 0 {
         packed(code, Host::MoveAligned, 1, 0);
-        logical_shift(code, 1, lane, lane * 8 - step, false);
+        logical_shift(code, 1, lane, lane * 8 - step, false, target);
         packed(code, equal_opcode(lane), 1, 3); // missing high half: increment and shift
         lane_constant(code, 4, lane, u64::from(step));
         packed(code, Host::And, 4, 1);
         packed(code, add_opcode(lane), 2, 4);
         packed(code, Host::MoveAligned, 4, 0);
-        logical_shift(code, 4, lane, step, true);
+        logical_shift(code, 4, lane, step, true, target);
         packed(code, Host::Xor, 4, 0);
         packed(code, Host::And, 4, 1);
         packed(code, Host::Xor, 0, 4);

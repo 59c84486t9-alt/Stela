@@ -1,7 +1,12 @@
-//! VNNI byte dot products in streaming SVE and SME, compared with the
-//! reviewed SSE recipes on random Z, P, ZA and selector state.
+//! Streaming SVE and SME extension recipes (VNNI byte dots, GFNI byte and
+//! AVX-512 quadword shifts), compared with the reviewed SSE recipes on random
+//! Z, P, ZA and selector state.
 use super::execution::Native;
-use crate::aarch64::scalable::{ScalableMode, VectorLength};
+use crate::aarch64::scalable::{
+    ScalableMode, VectorLength,
+    features::{ScalableFeature, ScalableFeatures},
+    profile::ScalableControls,
+};
 use crate::context::{ExecutionContext, ScalableStateView};
 use crate::scalable_context::ScalableProfile;
 use crate::{GuestAddress, GuestState, TargetCpu};
@@ -60,16 +65,53 @@ fn run(native: &Native, svl: usize, state: &mut GuestState, banks: &mut Banks) {
     native.run(state, &mut context);
 }
 
-#[test]
-fn streaming_and_za_byte_dots_match_the_sse_recipes() {
+/// llvm-mc encodings of streaming SVE shifts on B and D elements: ASR, LSR
+/// and LSL by immediate, unpredicated and merging; ASRD, SRSHR, URSHR, USRA,
+/// SSRA and SRSRA; ASR by wide elements; LSR, ASR and LSL by vector and ASR.D
+/// by vector; SQSHL and UQRSHL by vector; SLI and SRI; SHRNB and RSHRNT;
+/// SQSHL, UQSHL and SQSHLU by immediate.
+const SHIFTS: [u32; 27] = [
+    0x042d_9023,
+    0x0428_9423,
+    0x042f_9c23,
+    0x04bf_9023,
+    0x0480_8403,
+    0x0401_85c3,
+    0x0403_85a3,
+    0x0404_85a3,
+    0x040c_85a3,
+    0x048d_8703,
+    0x450d_e423,
+    0x45cf_e023,
+    0x4509_e823,
+    0x0422_8023,
+    0x0411_8443,
+    0x0410_8443,
+    0x0413_8443,
+    0x04d0_8443,
+    0x4408_8443,
+    0x440b_8443,
+    0x450b_f423,
+    0x45d7_f023,
+    0x452d_1023,
+    0x4528_1c23,
+    0x0406_8563,
+    0x04c7_8503,
+    0x040f_8543,
+];
+
+/// Compile each of `words` for SVL 16, 32 and 64 in streaming mode with ZA,
+/// under a declared SME2 profile (which requires PSTATE.DIT clear, so every
+/// recipe is admitted), on x86-64-v3 and each host-supported candidate;
+/// require `changed` words to emit different code and compare the complete
+/// state after both.
+fn compare(words: &[u32], candidates: &[TargetCpu], changed: impl Fn(u32) -> bool) {
     let host = TargetCpu::detect();
-    let candidates: Vec<_> = [
-        TargetCpu::X86_64_V3.with_avx_vnni(),
-        TargetCpu::X86_64_V4.with_avx512vnni(),
-    ]
-    .into_iter()
-    .filter(|target| host.supports(*target))
-    .collect();
+    let candidates: Vec<_> = candidates
+        .iter()
+        .copied()
+        .filter(|target| host.supports(*target))
+        .collect();
     if candidates.is_empty() {
         return;
     }
@@ -82,8 +124,14 @@ fn streaming_and_za_byte_dots_match_the_sse_recipes() {
     };
     for svl in [16, 32, 64] {
         let length = VectorLength::from_bytes(svl).unwrap();
-        let profile = ScalableProfile::new(length, ScalableMode::new(true, true));
-        for word in WORDS {
+        let profile = ScalableProfile::new_with_features(
+            length,
+            ScalableMode::new(true, true),
+            ScalableFeatures::of(ScalableFeature::Sme).with(ScalableFeature::Sme2),
+            ScalableControls::new(length, false),
+        )
+        .unwrap();
+        for &word in words {
             let source: Vec<u8> = [word, RET].into_iter().flat_map(u32::to_le_bytes).collect();
             let compile = |target| {
                 crate::testing::context_leaf(&source, GuestAddress(0x1000), profile, target)
@@ -93,7 +141,9 @@ fn streaming_and_za_byte_dots_match_the_sse_recipes() {
             let baseline = compile(TargetCpu::X86_64_V3);
             for &candidate in &candidates {
                 let extended = compile(candidate);
-                assert_ne!(baseline, extended, "{word:#010x} uses VNNI");
+                if changed(word) {
+                    assert_ne!(baseline, extended, "{word:#010x} uses {candidate:?}");
+                }
                 let [baseline, extended] = [&baseline, &extended].map(|code| Native::new(code));
                 for _ in 0..16 {
                     let mut state = GuestState::default();
@@ -121,4 +171,41 @@ fn streaming_and_za_byte_dots_match_the_sse_recipes() {
             }
         }
     }
+}
+
+#[test]
+fn streaming_and_za_byte_dots_match_the_sse_recipes() {
+    compare(
+        &WORDS,
+        &[
+            TargetCpu::X86_64_V3.with_avx_vnni(),
+            TargetCpu::X86_64_V4.with_avx512vnni(),
+        ],
+        |_| true,
+    );
+}
+
+/// The shifts above whose byte or signed quadword steps take GFNI or VPSRAQ.
+const EXTENDED_SHIFTS: [u32; 14] = [
+    0x042d_9023,
+    0x0428_9423,
+    0x042f_9c23,
+    0x04bf_9023,
+    0x0480_8403,
+    0x0401_85c3,
+    0x0403_85a3,
+    0x040c_85a3,
+    0x450d_e423,
+    0x45cf_e023,
+    0x4509_e823,
+    0x0411_8443,
+    0x0413_8443,
+    0x450b_f423,
+];
+
+#[test]
+fn streaming_byte_and_quadword_shifts_match_the_sse_recipes() {
+    compare(&SHIFTS, &[TargetCpu::X86_64_V4.with_gfni()], |word| {
+        EXTENDED_SHIFTS.contains(&word)
+    });
 }
