@@ -54,6 +54,8 @@ acpi_status stela_acpi_stop(void);
 acpi_status stela_acpi_preflight_wait_events(void);
 acpi_status stela_acpi_evaluate(acpi_handle, const char *, union acpi_object *, u32, struct acpi_buffer *);
 acpi_status stela_acpi_walk(const char *, acpi_walk_callback, void *);
+acpi_status stela_acpi_walk_processors(acpi_walk_callback, void *);
+acpi_status stela_acpi_processor_id(acpi_handle, u32 *);
 u64 stela_acpi_layout(u32);
 acpi_status stela_acpi_guard_enter(void **, u64 *);
 void stela_acpi_guard_leave(void *);
