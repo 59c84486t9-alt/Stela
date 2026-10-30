@@ -1615,6 +1615,12 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
       bool payload = (object || mesh_stage) && stela_air_md_string(fields[1], "air.payload");
       bool mesh = mesh_stage && stela_air_md_string(fields[1], "air.mesh");
       bool grid = object && stela_air_md_string(fields[1], "air.mesh_grid_properties");
+      /* A fragment input of a render target's color is programmable
+       * blending, which reads the target in raster order. */
+      if (render && render->entry.stage == STELA_AIR_FRAGMENT &&
+          stela_air_md_string(fields[1], "air.render_target"))
+         return fail(t, STELA_AIR_ARGUMENT,
+                     "programmable blending ([[color(n)]] inputs) needs an Apple GPU family");
       if (!buffer && !builtin && !interpolated && !vertex_input && !texture && !sampler &&
           !payload && !mesh && !grid && !control_points && !in_patch) {
          unsigned length;

@@ -457,6 +457,17 @@ static const char *fragment =
    "!40 = !{i32 0, !\"air.fragment_input\", !\"user(uv)\", !\"air.center\", !\"air.perspective\","
    " !\"air.arg_type_name\", !\"float2\", !\"air.arg_name\", !\"uv\"}\n";
 
+/* Returns the color its render target holds: programmable blending. */
+static const char *blended =
+   "define <4 x float> @blended(<4 x float> %previous) {\nret <4 x float> %previous\n}\n"
+   "!air.fragment = !{!2}\n"
+   "!2 = !{ptr @blended, !3, !4}\n!3 = !{!30}\n"
+   "!30 = !{!\"air.render_target\", i32 0, i32 0, !\"air.arg_type_name\", !\"float4\","
+   " !\"air.arg_name\", !\"color\"}\n"
+   "!4 = !{!40}\n"
+   "!40 = !{i32 0, !\"air.render_target\", i32 0, !\"air.arg_type_name\", !\"float4\","
+   " !\"air.arg_name\", !\"previous\"}\n";
+
 /* Reads its barycentric coordinates and interpolates its uv at the
  * centroid. */
 static const char *pulled =
@@ -662,6 +673,9 @@ render_stages_compile_at_their_linked_locations(void)
    assert(!compile(fragment, "fragment", &unlinked, &error) && error.kind == STELA_AIR_ARGUMENT);
    /* As are entries no AIR list names. */
    assert(!reflect(vertex, "missing", &reflection, &error) && error.kind == STELA_AIR_ARGUMENT);
+   /* Only Apple GPU families blend programmably. */
+   assert(!reflect(blended, "blended", &reflection, &error) && error.kind == STELA_AIR_ARGUMENT &&
+          strstr(error.detail, "programmable blending"));
 }
 
 static void

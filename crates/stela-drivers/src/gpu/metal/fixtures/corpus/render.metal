@@ -75,13 +75,12 @@ struct FragmentOut {
 fragment FragmentOut fragment_main(FragmentIn in [[stage_in]], texture2d<float> tex [[texture(0)]],
                                    sampler s [[sampler(0)]], bool front [[front_facing]],
                                    uint sample [[sample_id]], float2 point [[point_coord]],
-                                   uint primitive [[primitive_id]], uint coverage [[sample_mask]],
-                                   float4 previous [[color(0)]])
+                                   uint primitive [[primitive_id]], uint coverage [[sample_mask]])
 {
     FragmentOut out;
     float4 c = tex.sample(s, in.uv) * in.color;
     c += float4(dfdx(in.uv), dfdy(in.uv)) + float4(fwidth(in.sample_value));
-    c += float4(front, sample, primitive, in.flat_id) + float4(point, in.position.xy) + previous;
+    c += float4(front, sample, primitive, in.flat_id) + float4(point, in.position.xy);
     if (c.a < 0.01f)
         discard_fragment();
     out.color0 = c;
@@ -90,6 +89,12 @@ fragment FragmentOut fragment_main(FragmentIn in [[stage_in]], texture2d<float> 
     out.depth = in.position.z;
     out.mask = coverage & 0x5;
     return out;
+}
+
+// Programmable blending, which only Apple GPU families have: refused.
+fragment float4 fragment_blended(FragmentIn in [[stage_in]], float4 previous [[color(0)]])
+{
+    return previous * in.color;
 }
 
 fragment float4 fragment_interpolated(FragmentIn in [[stage_in]],
