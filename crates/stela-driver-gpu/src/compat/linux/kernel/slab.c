@@ -191,14 +191,38 @@ void kfree(const void *object)
  stela_linux_heap_free((u8 *)object - header->align, header->size, header->align);
 }
 
+/* The duplication helpers follow Linux cc9de5d4b5ab6459f5774946aa3195ad51236fa8
+ * mm/util.c. */
+static char *duplicate_string(const char *s, size_t len, gfp_t gfp)
+{
+	char *copy = kmalloc(len + 1, gfp);
+	if (!copy)
+		return NULL;
+	memcpy(copy, s, len);
+	copy[len] = '\0';
+	return copy;
+}
+
 char *kstrdup(const char *s, gfp_t gfp)
 {
-	if (!s)
-		return NULL;
-	size_t length = strlen(s) + 1;
-	char *copy = kmalloc(length, gfp);
+	return s ? duplicate_string(s, strlen(s), gfp) : NULL;
+}
+
+char *kstrndup(const char *s, size_t max, gfp_t gfp)
+{
+	return s ? duplicate_string(s, strnlen(s, max), gfp) : NULL;
+}
+
+char *kmemdup_nul(const char *s, size_t len, gfp_t gfp)
+{
+	return s ? duplicate_string(s, len, gfp) : NULL;
+}
+
+void *kmemdup_noprof(const void *src, size_t len, gfp_t gfp)
+{
+	void *copy = kmalloc(len, gfp);
 	if (copy)
-		memcpy(copy, s, length);
+		memcpy(copy, src, len);
 	return copy;
 }
 
@@ -407,6 +431,21 @@ int main(void)
 	assert(copy && !strcmp(copy, "alignment"));
 	kfree(copy);
 	assert(!kstrdup(NULL, GFP_KERNEL));
+	copy = kstrndup("alignment", 5, GFP_KERNEL);
+	assert(copy && !strcmp(copy, "align"));
+	kfree(copy);
+	copy = kstrndup("tail", 16, GFP_KERNEL);
+	assert(copy && !strcmp(copy, "tail"));
+	kfree(copy);
+	assert(!kstrndup(NULL, 4, GFP_KERNEL));
+	const char unterminated[3] = {'n', 'u', 'l'};
+	copy = kmemdup_nul(unterminated, sizeof(unterminated), GFP_KERNEL);
+	assert(copy && !strcmp(copy, "nul"));
+	kfree(copy);
+	const u8 bytes[5] = {1, 0, 2, 0, 3};
+	u8 *duplicate = kmemdup(bytes, sizeof(bytes), GFP_KERNEL);
+	assert(duplicate && !memcmp(duplicate, bytes, sizeof(bytes)));
+	kfree(duplicate);
 	policy_and_context();
 	nonblocking_policy_and_context();
 	stela_linux_exit();

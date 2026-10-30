@@ -29,7 +29,6 @@ const OPEN: &[(&str, &[&str])] = &[
         "lib/hexdump.c, lib/ratelimit.c",
         &["print_hex_dump", "___ratelimit"],
     ),
-    ("mm/util.c", &["kmemdup_noprof", "kstrndup"]),
     (
         "mm/vmalloc.c",
         &[
