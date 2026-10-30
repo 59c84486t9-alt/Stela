@@ -205,7 +205,7 @@ pub(super) struct LinkedVarying {
 /// `struct stela_air_constant_value`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
-pub(super) struct ConstantValue {
+pub struct ConstantValue {
     pub index: u32,
     pub bytes: *const c_void,
     pub size: usize,

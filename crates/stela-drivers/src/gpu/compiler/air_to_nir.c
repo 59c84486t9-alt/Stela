@@ -759,6 +759,16 @@ payload_argument(struct translator *t, LLVMValueRef param, const struct stela_ai
    return true;
 }
 
+/* Whether an argument is absent, its [[function_constant]] false: it binds
+ * nothing, once folding has left it no uses. */
+static bool
+absent_argument(struct translator *t, const struct stela_air_argument *argument, bool *absent)
+{
+   *absent = argument->absent;
+   return !*absent || !LLVMGetFirstUse(argument->value) ||
+      fail(t, STELA_AIR_ARGUMENT, "an argument whose function constant is false is used");
+}
+
 /* The arguments of a kernel, object or mesh function. */
 static bool
 compute_arguments(struct translator *t, const struct stela_air_kernel *kernel)
@@ -768,6 +778,11 @@ compute_arguments(struct translator *t, const struct stela_air_kernel *kernel)
    for (unsigned a = 0; a < kernel->count; a++) {
       const struct stela_air_argument *argument = &kernel->arguments[a];
       LLVMValueRef param = argument->value;
+      bool absent;
+      if (!absent_argument(t, argument, &absent))
+         return false;
+      if (absent)
+         continue;
       if (argument->is_mesh || argument->is_mesh_grid) {
          /* Only the mesh setters take these. */
          *(argument->is_mesh ? &t->mesh : &t->mesh_grid) = param;
@@ -2064,6 +2079,11 @@ stage_arguments(struct translator *t, LLVMValueRef fn)
       const struct stela_air_stage_io *io = &t->render.inputs[i];
       const struct stela_air_argument *argument = &t->render.arguments.arguments[i];
       LLVMValueRef param = LLVMGetParam(fn, io->argument);
+      bool absent;
+      if (!absent_argument(t, argument, &absent))
+         return false;
+      if (absent)
+         continue;
       nir_def *def;
       unsigned slot = 0;
       if (io->semantic == STELA_AIR_STAGE_TEXTURE || io->semantic == STELA_AIR_STAGE_SAMPLER) {
@@ -4495,6 +4515,8 @@ translate(const void *bitcode, size_t size, const char *entry,
       fail(&t, STELA_AIR_ARGUMENT, "entry must be a defined nonvariadic void C-convention kernel");
       goto done;
    }
+   if (!stela_air_fold_constants(&t.metadata, fn))
+      goto done;
    if (stage && (!stela_air_metadata_stage(&t.metadata, fn, stage->stage, &t.render) ||
                  !stela_air_metadata_stage_map(&t.metadata, &t.render, stage->varyings,
                                                stage->varying_count, stage->max_varying_slots)))

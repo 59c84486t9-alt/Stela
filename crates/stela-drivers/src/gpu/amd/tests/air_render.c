@@ -711,7 +711,7 @@ vertex(const struct stela_air_inspection *inspection, const struct stela_air_sta
    struct input *input = data;
    input->vertex = vs;
    struct stela_air_error error;
-   CHECK(stela_air_inspect_stage(input->bytes, input->size, input->fs_name, STELA_AIR_FRAGMENT, fragment,
+   CHECK(stela_air_inspect_stage(input->bytes, input->size, NULL, input->fs_name, STELA_AIR_FRAGMENT, fragment,
                                  input, &error));
    input->vertex = NULL;
    return true;
@@ -753,7 +753,7 @@ main(int argc, char **argv)
    record_end();
    expect_targets();
    struct stela_air_error error;
-   CHECK(stela_air_inspect_stage(input.bytes, input.size, input.vs_name, STELA_AIR_VERTEX, vertex, &input,
+   CHECK(stela_air_inspect_stage(input.bytes, input.size, NULL, input.vs_name, STELA_AIR_VERTEX, vertex, &input,
                                  &error));
    LLVMDisposeMemoryBuffer(buffer);
    glsl_type_singleton_decref();

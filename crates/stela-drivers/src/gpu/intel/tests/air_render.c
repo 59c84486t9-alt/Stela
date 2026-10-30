@@ -133,7 +133,7 @@ static bool vertex(const struct stela_air_inspection *inspection,
     (void)inspection;
     struct pair *p = data; p->vertex = entry;
     struct stela_air_error error;
-    bool ok = stela_air_inspect_stage(p->input->bytes, p->input->size, p->input->fragment,
+    bool ok = stela_air_inspect_stage(p->input->bytes, p->input->size, NULL, p->input->fragment,
         STELA_AIR_FRAGMENT, fragment, p, &error);
     p->vertex = NULL;
     return ok;
@@ -143,7 +143,7 @@ static void lower_pair(struct pair *p, unsigned reject)
 {
     struct stela_air_error error;
     p->reject = reject;
-    bool ok = stela_air_inspect_stage(p->input->bytes, p->input->size, p->input->vertex,
+    bool ok = stela_air_inspect_stage(p->input->bytes, p->input->size, NULL, p->input->vertex,
         STELA_AIR_VERTEX, vertex, p, &error);
     if (reject) {
         CHECK(!ok && !p->vertex);
@@ -524,13 +524,13 @@ static void inspect_refusals(const struct input *input)
 {
     struct stela_air_error error;
     unsigned callbacks = 0;
-    CHECK(!stela_air_inspect_stage(input->bytes, input->size, input->vertex, STELA_AIR_FRAGMENT,
+    CHECK(!stela_air_inspect_stage(input->bytes, input->size, NULL, input->vertex, STELA_AIR_FRAGMENT,
         unexpected_stage, &callbacks, &error) && !callbacks && error.kind != STELA_AIR_OK);
-    CHECK(!stela_air_inspect_stage(input->bytes, input->size, input->fragment, STELA_AIR_VERTEX,
+    CHECK(!stela_air_inspect_stage(input->bytes, input->size, NULL, input->fragment, STELA_AIR_VERTEX,
         unexpected_stage, &callbacks, &error) && !callbacks && error.kind != STELA_AIR_OK);
-    CHECK(!stela_air_inspect_stage(input->bytes, 3, input->vertex, STELA_AIR_VERTEX,
+    CHECK(!stela_air_inspect_stage(input->bytes, 3, NULL, input->vertex, STELA_AIR_VERTEX,
         unexpected_stage, &callbacks, &error) && !callbacks && error.kind != STELA_AIR_OK);
-    CHECK(!stela_air_inspect_stage(input->bytes, input->size, "", STELA_AIR_VERTEX,
+    CHECK(!stela_air_inspect_stage(input->bytes, input->size, NULL, "", STELA_AIR_VERTEX,
         unexpected_stage, &callbacks, &error) && !callbacks && error.kind != STELA_AIR_OK);
 }
 
@@ -564,7 +564,7 @@ int main(int argc, char **argv)
     if (argc == 6) {
         struct input refused = read_input(argv[4], NULL, argv[5]);
         struct stela_air_error error; unsigned callbacks = 0;
-        CHECK(!stela_air_inspect_stage(refused.bytes, refused.size, refused.fragment,
+        CHECK(!stela_air_inspect_stage(refused.bytes, refused.size, NULL, refused.fragment,
                   STELA_AIR_FRAGMENT, unexpected_stage, &callbacks, &error) &&
             !callbacks && error.kind != STELA_AIR_OK);
         record_begin("evidence");

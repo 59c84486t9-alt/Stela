@@ -158,9 +158,13 @@ struct stela_metal_specialization {
 #define STELA_METAL_PIPELINE_TESSELLATION_BYTES 24u
 #define STELA_METAL_STAGE_IN_BYTES 752u
 
-/* Reflects entry of the AIR module. False after reporting why in error. */
+/* Reflects entry of the AIR module specialized with the function constant
+ * values, without the arguments a false [[function_constant]] makes absent;
+ * with NULL values, unspecialized, with every argument it declares. False
+ * after reporting why in error. */
 bool stela_metal_reflect(const void *air, size_t size, const char *entry,
-                         struct stela_metal_reflection *reflection,
+                         const struct stela_air_constant_value *constants,
+                         uint32_t constant_count, struct stela_metal_reflection *reflection,
                          struct stela_air_error *error);
 
 #define STELA_METAL_SAMPLER_STATES 256u

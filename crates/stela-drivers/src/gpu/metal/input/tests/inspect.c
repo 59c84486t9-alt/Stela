@@ -66,7 +66,7 @@ int main(int argc, char **argv)
    puts("");
    struct inspection state = {.expect_complete=!strcmp(argv[2],"complete")};
    struct stela_air_error metadata_error;
-   if (!stela_air_inspect(view.bytes,(size_t)view.length,256,visit,&state,&metadata_error)) {
+   if (!stela_air_inspect(view.bytes,(size_t)view.length, NULL,256,visit,&state,&metadata_error)) {
       fprintf(stderr,"AIR inspection refused (%u): %s\n",metadata_error.kind,metadata_error.detail);
       abort();
    }

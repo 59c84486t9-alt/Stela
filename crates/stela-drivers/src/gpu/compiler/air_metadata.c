@@ -2,6 +2,7 @@
 #define STELA_AIR_METADATA_INTERNAL
 #include "air_metadata.h"
 #include "air_calls.h"
+#include "air_constants.h"
 #include "llvm-c/Analysis.h"
 #include "llvm-c/BitReader.h"
 #include <stdarg.h>
@@ -224,6 +225,20 @@ stela_air_metadata_global(struct stela_air_metadata *t, LLVMValueRef global,
       fail(t, STELA_AIR_TYPE, "unsupported global alignment");
 }
 
+/* llvm.used or llvm.compiler.used: an appending list of globals the
+ * optimizer keeps, such as [[function_constant]] arguments' predicates. */
+static bool
+retention_list(LLVMValueRef global)
+{
+   size_t bytes;
+   const char *name = LLVMGetValueName2(global, &bytes);
+   const char *section = LLVMGetSection(global);
+   return LLVMGetLinkage(global) == LLVMAppendingLinkage && section &&
+          !strcmp(section, "llvm.metadata") &&
+          ((bytes == strlen("llvm.used") && !memcmp(name, "llvm.used", bytes)) ||
+           (bytes == strlen("llvm.compiler.used") && !memcmp(name, "llvm.compiler.used", bytes)));
+}
+
 bool
 stela_air_metadata_globals(struct stela_air_metadata *t, bool *threadgroup)
 {
@@ -236,7 +251,8 @@ stela_air_metadata_globals(struct stela_air_metadata *t, bool *threadgroup)
       struct stela_air_global info;
       if (++count > AIR_MAX_ARGUMENTS)
          return fail(t, STELA_AIR_LIMIT, "global count exceeded");
-      if (global == constructors || stela_air_metadata_is_function_constant(t, global))
+      if (global == constructors || retention_list(global) ||
+          stela_air_metadata_is_function_constant(t, global))
          continue;
       if (!stela_air_metadata_global(t, global, &info))
          return false;
@@ -1478,6 +1494,30 @@ control_point_input(struct stela_air_metadata *m, struct stela_air_render *r,
    return true;
 }
 
+/* A [[function_constant]] argument's predicate, {ptr addrspace(2)
+ * @predicate, !"bool", !"name"}: an internal AS2 bool the module's
+ * constructors store. Once specialization has constructed it, *known is set,
+ * and *absent when it is false. */
+static bool
+argument_predicate(struct stela_air_metadata *m, LLVMValueRef node, bool *known, bool *absent)
+{
+   LLVMValueRef fields[AIR_MAX_METADATA_OPERANDS];
+   unsigned count;
+   if (!stela_air_md_node(m, node, fields, &count))
+      return false;
+   LLVMValueRef global = count == 3 ? fields[0] : NULL;
+   LLVMValueRef value = global && LLVMIsAGlobalVariable(global) ? LLVMGetInitializer(global) : NULL;
+   LLVMTypeRef type = value ? LLVMGlobalGetValueType(global) : NULL;
+   if (!value || !LLVMIsAConstantInt(value) || LLVMGetPointerAddressSpace(LLVMTypeOf(global)) != 2 ||
+       LLVMGetLinkage(global) != LLVMInternalLinkage || LLVMGetTypeKind(type) != LLVMIntegerTypeKind ||
+       LLVMGetIntTypeWidth(type) != 8 || !stela_air_md_string(fields[1], "bool") || !fields[2] ||
+       !LLVMIsAMDString(fields[2]))
+      return fail(m, STELA_AIR_METADATA, "invalid function constant argument predicate");
+   *known = LLVMIsGlobalConstant(global);
+   *absent = *known && !LLVMConstIntGetZExtValue(value);
+   return true;
+}
+
 static bool
 metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef args_node,
                    struct stela_air_kernel *kernel, struct stela_air_render *render)
@@ -1509,6 +1549,19 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
           !stela_air_md_uint(fields[0], &index) || index >= argc || used[index])
          return fail(t, STELA_AIR_METADATA, "invalid/duplicate argument index");
       used[index] = true;
+      /* A [[function_constant]] argument's kind follows its predicate. Only
+       * arguments known to exist claim their indices: one a false constant
+       * leaves absent shares them with those that replace it. */
+      bool known = true, absent = false;
+      if (stela_air_md_string(fields[1], "air.function_constant")) {
+         if (fields_count < 4)
+            return fail(t, STELA_AIR_METADATA, "invalid function constant argument predicate");
+         if (!argument_predicate(t, fields[2], &known, &absent))
+            return false;
+         memmove(&fields[1], &fields[3], (fields_count - 3) * sizeof(*fields));
+         fields_count -= 2;
+      }
+      bool claims = known && !absent;
       LLVMValueRef param = LLVMGetParam(fn, index);
       unsigned attributes_count = LLVMGetAttributeCountAtIndex(fn, index + 1);
       if (attributes_count > AIR_MAX_METADATA_OPERANDS)
@@ -1571,9 +1624,9 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
       }
       if (byval && !texture && !sampler)
          return fail(t, STELA_AIR_ARGUMENT, "unsupported typed parameter attribute");
-      if (builtin && builtins[builtin])
+      if (claims && builtin && builtins[builtin])
          return fail(t, STELA_AIR_METADATA, "duplicate builtin argument");
-      builtins[builtin] = true;
+      builtins[builtin] |= claims;
       struct stela_air_buffer desc = {.argument = index, .function_table = table};
       struct stela_air_texture texture_desc = {.argument = index};
       struct stela_air_sampler sampler_desc = {.argument = index};
@@ -1736,9 +1789,9 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
          if (slot >= slots || locations > slots - slot)
             return fail(t, STELA_AIR_METADATA, "duplicate or out-of-range texture or sampler location");
          for (unsigned i = slot; i < slot + locations; i++) {
-            if (indices[i])
+            if (claims && indices[i])
                return fail(t, STELA_AIR_METADATA, "duplicate or out-of-range texture or sampler location");
-            indices[i] = true;
+            indices[i] |= claims;
          }
          *(texture ? &texture_desc.length : &sampler_desc.length) = array ? locations : 0;
          primitive = STELA_AIR_PRIMITIVE_UNKNOWN;
@@ -1762,9 +1815,9 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
          bool *indices = shared ? shared_indices : buffer_indices;
          unsigned limit = shared ? t->max_threadgroup_buffers :
                           desc.address_space == 2 ? t->max_constant_buffers : t->max_device_buffers;
-         if (indices[desc.index] || (limit && desc.index >= limit))
+         if ((claims && indices[desc.index]) || (limit && desc.index >= limit))
             return fail(t, STELA_AIR_METADATA, "duplicate buffer or location exceeds AIR module limit");
-         indices[desc.index] = true;
+         indices[desc.index] |= claims;
          if (has_buffer_size && buffer_size != desc.type_size)
             return fail(t, STELA_AIR_ARGUMENT, "buffer size differs from its type at %u", index);
          if (indirect && (shared || !struct_info || !desc.type_size))
@@ -1817,11 +1870,11 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
             return fail(t, STELA_AIR_ARGUMENT, "barycentric coordinates are interpolated float1 to float3");
          components = type_components;
       } else if (vertex_input) {
-         if (!has_location || location >= AIR_MAX_VERTEX_ATTRIBUTES || attribute_locations[location] ||
-             !stage_varying(primitive) ||
+         if (!has_location || location >= AIR_MAX_VERTEX_ATTRIBUTES ||
+             (claims && attribute_locations[location]) || !stage_varying(primitive) ||
              !stage_type_matches(LLVMTypeOf(param), primitive, type_components))
             return fail(t, STELA_AIR_ARGUMENT, "unsupported/duplicate stage-in attribute at %u", index);
-         attribute_locations[location] = true;
+         attribute_locations[location] |= claims;
          components = type_components;
       } else if (in_patch) {
          unsigned lanes = render->entry.patch == STELA_AIR_PATCH_QUAD ? 2 : 3;
@@ -1851,6 +1904,7 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
          io->name = name; io->name_bytes = name_bytes;
          io->type_name = type_name; io->type_name_bytes = type_name_bytes;
          io->used = LLVMGetFirstUse(param) != NULL;
+         io->absent = absent;
          if (unused && io->used)
             return fail(t, STELA_AIR_METADATA, "used stage argument marked unused");
       }
@@ -1864,6 +1918,7 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
          .plain_buffer_type = primitive != STELA_AIR_PRIMITIVE_UNKNOWN,
          .name = name, .name_bytes = name_bytes, .type_name = type_name, .type_name_bytes = type_name_bytes,
          .primitive = primitive, .type_components = type_components, .used = LLVMGetFirstUse(param) != NULL,
+         .absent = absent,
       };
    }
    kernel->count = argc;
@@ -2160,7 +2215,7 @@ stela_air_metadata_stage_map(struct stela_air_metadata *m, const struct stela_ai
       const struct stela_air_stage_io *io = direction ? r->entry.outputs : r->entry.inputs;
       unsigned n = direction ? r->entry.output_count : r->entry.input_count;
       for (unsigned i = 0; i < n; i++) {
-         if (io[i].semantic != STELA_AIR_VARYING) continue;
+         if (io[i].semantic != STELA_AIR_VARYING || io[i].absent) continue;
          unsigned j;
          for (j = 0; j < count; j++) {
             if (rows[j].identifier_bytes == io[i].identifier_bytes &&
@@ -2209,7 +2264,7 @@ stela_air_link_stage_io(const struct stela_air_stage_entry *vs,
    }
    for (unsigned i = 0; i < fs->input_count; i++) {
       const struct stela_air_stage_io *f = &fs->inputs[i];
-      if (f->semantic != STELA_AIR_VARYING) continue;
+      if (f->semantic != STELA_AIR_VARYING || f->absent) continue;
       unsigned j;
       for (j = 0; j < n; j++) {
          if (f->identifier_bytes == result[j].identifier_bytes &&
@@ -2285,7 +2340,8 @@ command_use(LLVMModuleRef module)
 }
 
 static bool
-inspect(const void *bitcode, size_t size, unsigned max_entries,
+inspect(const void *bitcode, size_t size, const struct stela_air_constants *constants,
+        unsigned max_entries,
          stela_air_visit_entry visit, void *data, struct stela_air_error *error,
          const char *render_name, enum stela_air_stage stage, stela_air_visit_stage render_visit)
 {
@@ -2349,15 +2405,17 @@ inspect(const void *bitcode, size_t size, unsigned max_entries,
       fail(&m, STELA_AIR_TARGET, "AIR version and target triple disagree");
       goto done;
    }
-   struct stela_air_function_constant constants[AIR_MAX_FUNCTION_CONSTANTS];
+   struct stela_air_function_constant function_constants[AIR_MAX_FUNCTION_CONSTANTS];
    unsigned constant_count;
-   if (!stela_air_metadata_function_constants(&m, constants, NULL, &constant_count))
+   if (!stela_air_metadata_function_constants(&m, function_constants, NULL, &constant_count) ||
+       (constants && (!stela_air_specialize_constants(&m, constants->values, constants->count) ||
+                      !stela_air_construct_constants(&m))))
       goto done;
    struct stela_air_inspection info = {
       .target = target, .target_bytes = strlen(target), .air_minor = m.air_minor,
       .language_major = m.language_major, .language_minor = m.language_minor,
       .denorms_disable = m.denorms_disable, .fast_math = m.fast_math,
-      .function_constants = constants, .function_constant_count = constant_count,
+      .function_constants = function_constants, .function_constant_count = constant_count,
       .ident = m.ident, .ident_bytes = m.ident_bytes,
       .commands = command_use(m.module),
    };
@@ -2422,6 +2480,7 @@ inspect(const void *bitcode, size_t size, unsigned max_entries,
             .name = arg->name, .name_bytes = arg->name_bytes,
             .type_name = arg->type_name, .type_name_bytes = arg->type_name_bytes,
             .primitive = arg->primitive, .type_components = arg->type_components, .used = arg->used,
+            .absent = arg->absent,
          };
       }
       struct stela_air_entry entry = {
@@ -2447,14 +2506,16 @@ done:
 }
 
 bool
-stela_air_inspect(const void *bitcode, size_t size, unsigned max_entries,
-                   stela_air_visit_entry visit, void *data, struct stela_air_error *error)
+stela_air_inspect(const void *bitcode, size_t size, const struct stela_air_constants *constants,
+                  unsigned max_entries, stela_air_visit_entry visit, void *data,
+                  struct stela_air_error *error)
 {
-   return inspect(bitcode, size, max_entries, visit, data, error, NULL, 0, NULL);
+   return inspect(bitcode, size, constants, max_entries, visit, data, error, NULL, 0, NULL);
 }
 
 bool
-stela_air_inspect_stage(const void *bitcode, size_t size, const char *entry,
+stela_air_inspect_stage(const void *bitcode, size_t size, const struct stela_air_constants *constants,
+                        const char *entry,
                          enum stela_air_stage stage, stela_air_visit_stage visit,
                          void *data, struct stela_air_error *error)
 {
@@ -2462,7 +2523,8 @@ stela_air_inspect_stage(const void *bitcode, size_t size, const char *entry,
       if (error) *error = (struct stela_air_error){.kind = STELA_AIR_INPUT};
       return false;
    }
-   return inspect(bitcode, size, AIR_MAX_METADATA_OPERANDS, NULL, data, error, entry, stage, visit);
+   return inspect(bitcode, size, constants, AIR_MAX_METADATA_OPERANDS, NULL, data, error, entry,
+                  stage, visit);
 }
 
 /* Parses AIR bitcode into m->module, in *context; false after reporting

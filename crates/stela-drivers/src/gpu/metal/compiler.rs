@@ -92,6 +92,8 @@ pub struct Service {
         *const c_void,
         usize,
         *const c_char,
+        *const ffi::ConstantValue,
+        u32,
         *mut ffi::Reflection,
         *mut ffi::AirError,
     ) -> bool,
@@ -201,9 +203,14 @@ impl Compiler for AirCompiler {
         FEATURES
     }
 
-    fn reflect(&mut self, library: u64, entry: &str, _: &Specialization) -> Result<Reflection> {
+    fn reflect(
+        &mut self,
+        library: u64,
+        entry: &str,
+        specialization: &Specialization,
+    ) -> Result<Reflection> {
         let selected = select(&self.libraries, library, entry)?;
-        let (reflection, _) = selected.reflect(&self.service, &mut self.refusal)?;
+        let (reflection, _) = selected.reflect(&self.service, specialization, &mut self.refusal)?;
         Ok(reflection)
     }
 
@@ -315,7 +322,8 @@ impl AirCompiler {
         stage_in: Option<&ffi::StageIn>,
     ) -> Result<CompiledShader> {
         let selected = select(&self.libraries, library, entry)?;
-        let (reflection, provenance) = selected.reflect(&self.service, &mut self.refusal)?;
+        let (reflection, provenance) =
+            selected.reflect(&self.service, specialization, &mut self.refusal)?;
         let Reflection::Stage(interface) = reflection else {
             return Err(Error::Invalid("a visible function is not a pipeline stage"));
         };
@@ -626,22 +634,28 @@ fn select<'a>(
 }
 
 impl Selected<'_> {
-    /// The service's reflection, with the function's provenance.
+    /// The service's reflection of the function specialized with the
+    /// function constant values, with the function's provenance.
     fn reflect(
         &self,
         service: &Service,
+        specialization: &Specialization,
         refusal: &mut Option<Refusal>,
     ) -> Result<(Reflection, Provenance)> {
         let mut reflection = Box::new(ffi::Reflection::ZERO);
         let mut error = ffi::AirError::NONE;
         let air = self.air.bitcode;
-        // SAFETY: the AIR and entry outlive the call, which writes only the
-        // reflection and the error.
+        let values = constant_values(&specialization.constants);
+        let count = u32::try_from(values.len()).map_err(|_| MALFORMED)?;
+        // SAFETY: the AIR, entry and values outlive the call, which writes
+        // only the reflection and the error.
         let reflected = unsafe {
             (service.reflect)(
                 air.as_ptr().cast(),
                 air.len(),
                 self.entry.as_ptr(),
+                values.as_ptr(),
+                count,
                 &mut *reflection,
                 &mut error,
             )

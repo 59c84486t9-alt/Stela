@@ -59,6 +59,8 @@ type Refused = (u32, u32, &'static str);
 /// The fake service's answers and what it saw, per test thread.
 struct Fake {
     reflection: ffi::Reflection,
+    /// The function constant values of each reflection.
+    reflected: Vec<Values>,
     refuse_reflection: Option<Refused>,
     refuse_compilation: Option<Refused>,
     compiled: Vec<Compiled>,
@@ -73,6 +75,7 @@ std::thread_local! {
     static FAKE: RefCell<Fake> = const {
         RefCell::new(Fake {
             reflection: ffi::Reflection::ZERO,
+            reflected: Vec::new(),
             refuse_reflection: None,
             refuse_compilation: None,
             compiled: Vec::new(),
@@ -113,11 +116,17 @@ unsafe extern "C" fn reflect(
     air: *const c_void,
     size: usize,
     entry: *const c_char,
+    constants: *const ffi::ConstantValue,
+    constant_count: u32,
     reflection: *mut ffi::Reflection,
     error: *mut ffi::AirError,
 ) -> bool {
     check_input(air, size, entry);
-    FAKE.with_borrow(|fake| {
+    assert!(!constants.is_null(), "reflection is specialized");
+    // SAFETY: the compiler passes its values, which outlive the call.
+    let constants = values(unsafe { slice::from_raw_parts(constants, constant_count as usize) });
+    FAKE.with_borrow_mut(|fake| {
+        fake.reflected.push(constants);
         if refused(fake.refuse_reflection, error) {
             return false;
         }
@@ -640,6 +649,7 @@ fn compilations_carry_their_specialization_and_release_through_the_service() {
             fake.released,
             [fragment.code.0 as usize, kernel.code.0 as usize]
         );
+        assert_eq!(fake.reflected.last(), Some(&vec![(2, vec![1, 0])]));
     });
 }
 

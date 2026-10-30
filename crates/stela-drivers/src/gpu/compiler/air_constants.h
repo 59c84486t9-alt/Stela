@@ -16,4 +16,9 @@ bool stela_air_specialize_constants(struct stela_air_metadata *m,
  * program-scope constants they compute constant data, and removes them;
  * refuses constructors that depend on more than function constants. */
 bool stela_air_construct_constants(struct stela_air_metadata *m);
+
+/* Folds what the constructed module's function constants decide in fn, its
+ * entry with its callees inlined: the loads of constant data, the branches
+ * they decide and the blocks those leave unreachable. */
+bool stela_air_fold_constants(struct stela_air_metadata *m, LLVMValueRef fn);
 #endif

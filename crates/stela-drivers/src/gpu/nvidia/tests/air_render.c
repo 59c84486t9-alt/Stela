@@ -422,7 +422,7 @@ static bool vertex(const struct stela_air_inspection *inspection,
     struct run *run = data; run->vs = entry; struct stela_air_error error;
     /* Nested inspection keeps both descriptor/string sets live; neither is
      * retained after this callback, and translated NIR owns its own names. */
-    bool success = stela_air_inspect_stage(run->bytes, run->size, run->fragment,
+    bool success = stela_air_inspect_stage(run->bytes, run->size, NULL, run->fragment,
         STELA_AIR_FRAGMENT, fragment, run, &error);
     run->vs = NULL;
     memset(run->map, 0, sizeof(run->map));
@@ -455,7 +455,7 @@ int main(int argc, char **argv)
     stela_air_probe_input_record(true, run.size, input_hash, run.vertex);
     record_object("facts"); record_str("fragment_entry", run.fragment); record_end();
     glsl_type_singleton_init_or_ref(); struct stela_air_error error;
-    bool success = stela_air_inspect_stage(bytes, run.size, run.vertex, STELA_AIR_VERTEX, vertex, &run, &error);
+    bool success = stela_air_inspect_stage(bytes, run.size, NULL, run.vertex, STELA_AIR_VERTEX, vertex, &run, &error);
     if (!success) fprintf(stderr, "stage inspection failed: %u %s\n", error.kind, error.detail);
     CHECK(success && !run.vs && !run.varying_count);
     glsl_type_singleton_decref(); free(bytes); return 0;

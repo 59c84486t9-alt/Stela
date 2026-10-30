@@ -2590,7 +2590,7 @@ reflection_inspection_case(const char *prefix, const char *body, const char *met
    struct stela_air_error error;
    struct reflection_expectation expected = {complete, used, primitive, components};
    LLVMMemoryBufferRef input = stela_air_test_custom_bitcode(prefix, body, metadata, extra);
-   CHECK(stela_air_inspect(LLVMGetBufferStart(input), LLVMGetBufferSize(input), 8,
+   CHECK(stela_air_inspect(LLVMGetBufferStart(input), LLVMGetBufferSize(input), NULL, 8,
                           inspect_reflection, &expected, &error));
    CHECK(error.kind == STELA_AIR_OK);
    LLVMDisposeMemoryBuffer(input);
@@ -2671,7 +2671,7 @@ shared_reflection_case(const char *extra, bool complete)
    LLVMMemoryBufferRef input = shared_bitcode("ret void\n", false, extra);
    struct reflection_expectation expected = {complete, false, STELA_AIR_UINT, 1};
    struct stela_air_error error;
-   CHECK(stela_air_inspect(LLVMGetBufferStart(input), LLVMGetBufferSize(input), 8,
+   CHECK(stela_air_inspect(LLVMGetBufferStart(input), LLVMGetBufferSize(input), NULL, 8,
                           inspect_reflection, &expected, &error));
    /* A conservative absent-reflection result must not leak its local failure
     * into otherwise successful original LLVM/module inspection. */
@@ -2755,34 +2755,34 @@ inspection_tests(void)
    struct stela_air_error error;
    unsigned calls = 0;
    LLVMMemoryBufferRef input = stela_air_test_bitcode(stela_air_test_store_body, "");
-   CHECK(stela_air_inspect(LLVMGetBufferStart(input), LLVMGetBufferSize(input), 8, inspect_entry, &calls, &error));
+   CHECK(stela_air_inspect(LLVMGetBufferStart(input), LLVMGetBufferSize(input), NULL, 8, inspect_entry, &calls, &error));
    CHECK(calls == 1 && error.kind == STELA_AIR_OK);
-   CHECK(!stela_air_inspect(LLVMGetBufferStart(input), LLVMGetBufferSize(input), 0, inspect_entry, &calls, &error));
+   CHECK(!stela_air_inspect(LLVMGetBufferStart(input), LLVMGetBufferSize(input), NULL, 0, inspect_entry, &calls, &error));
    CHECK(error.kind == STELA_AIR_INPUT && calls == 1);
    LLVMDisposeMemoryBuffer(input);
    char *metadata = replace_once(stela_air_test_metadata, "!air.kernel = !{!2}", "!air.kernel = !{!2, !2}");
    input = stela_air_test_custom_bitcode(stela_air_test_prefix, stela_air_test_store_body, metadata, "");
    calls = 0;
-   CHECK(!stela_air_inspect(LLVMGetBufferStart(input), LLVMGetBufferSize(input), 8, inspect_entry, &calls, &error));
+   CHECK(!stela_air_inspect(LLVMGetBufferStart(input), LLVMGetBufferSize(input), NULL, 8, inspect_entry, &calls, &error));
    CHECK(error.kind == STELA_AIR_METADATA && calls == 0); /* No partial manifest. */
    LLVMDisposeMemoryBuffer(input); free(metadata);
    metadata = replace_once(stela_air_test_metadata, "i32 7, i32 1", "i32 128, i32 1");
    input = stela_air_test_custom_bitcode(stela_air_test_prefix, stela_air_test_store_body, metadata, "");
-   CHECK(!stela_air_inspect(LLVMGetBufferStart(input), LLVMGetBufferSize(input), 8, inspect_entry, &calls, &error));
+   CHECK(!stela_air_inspect(LLVMGetBufferStart(input), LLVMGetBufferSize(input), NULL, 8, inspect_entry, &calls, &error));
    CHECK(error.kind == STELA_AIR_METADATA && calls == 0);
    LLVMDisposeMemoryBuffer(input); free(metadata);
    /* Preserve the original integer shape rule: a scalar or uint3 builtin,
     * never a one-lane LLVM vector masquerading as a scalar argument. */
    char *prefix = replace_once(stela_air_test_prefix, "i32 %tid", "<1 x i32> %tid");
    input = stela_air_test_custom_bitcode(prefix, "ret void\n", stela_air_test_metadata, "");
-   CHECK(!stela_air_inspect(LLVMGetBufferStart(input), LLVMGetBufferSize(input), 8, inspect_entry, &calls, &error));
+   CHECK(!stela_air_inspect(LLVMGetBufferStart(input), LLVMGetBufferSize(input), NULL, 8, inspect_entry, &calls, &error));
    CHECK(error.kind == STELA_AIR_ARGUMENT && calls == 0);
    nir_shader *invalid_shape = translate(input, &test_nir_options, 100, &error);
    CHECK(!invalid_shape && error.kind == STELA_AIR_ARGUMENT);
    LLVMDisposeMemoryBuffer(input); free(prefix);
    /* Inspection is NOT a promise that a body/resource/pipeline can compile. */
    input = stela_air_test_bitcode("call void @unknown()\nret void\n", "declare void @unknown()\n");
-   CHECK(stela_air_inspect(LLVMGetBufferStart(input), LLVMGetBufferSize(input), 8, inspect_entry, &calls, &error));
+   CHECK(stela_air_inspect(LLVMGetBufferStart(input), LLVMGetBufferSize(input), NULL, 8, inspect_entry, &calls, &error));
    CHECK(calls == 1);
    nir_shader *nir = translate(input, &test_nir_options, 100, &error);
    CHECK(!nir && error.kind == STELA_AIR_INSTRUCTION);

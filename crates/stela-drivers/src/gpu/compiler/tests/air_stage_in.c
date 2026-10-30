@@ -182,7 +182,7 @@ patch_metadata_reflects_control_points_and_patch_inputs(void)
    LLVMMemoryBufferRef input = bitcode(quad);
    struct stela_air_error error = {0};
    bool seen = false;
-   bool inspected = stela_air_inspect_stage(LLVMGetBufferStart(input), LLVMGetBufferSize(input),
+   bool inspected = stela_air_inspect_stage(LLVMGetBufferStart(input), LLVMGetBufferSize(input), NULL,
                                             "patch", STELA_AIR_VERTEX, capture, &seen, &error);
    if (!inspected)
       fprintf(stderr, "inspection: %u %s\n", error.kind, error.detail);
@@ -330,7 +330,7 @@ kernels_fetch_their_stage_in_at_their_position(void)
    LLVMMemoryBufferRef input = bitcode(kernel);
    struct stela_air_error error = {0};
    bool seen = false;
-   assert(stela_air_inspect(LLVMGetBufferStart(input), LLVMGetBufferSize(input), 8, reflect_kernel,
+   assert(stela_air_inspect(LLVMGetBufferStart(input), LLVMGetBufferSize(input), NULL, 8, reflect_kernel,
                             &seen, &error) && seen);
    LLVMDisposeMemoryBuffer(input);
 

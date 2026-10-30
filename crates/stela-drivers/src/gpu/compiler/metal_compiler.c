@@ -181,7 +181,8 @@ reflect_kernel(const struct stela_air_inspection *info, const struct stela_air_e
    r->out->threadgroup_bytes = entry->threadgroup_bytes;
    for (unsigned i = 0; i < entry->argument_count; i++) {
       const struct stela_air_argument_info *argument = &entry->arguments[i];
-      bool added = argument->kind == 1 ? add_buffer(r, &argument->buffer, argument->argument_buffer) :
+      bool added = argument->absent ? true :
+                   argument->kind == 1 ? add_buffer(r, &argument->buffer, argument->argument_buffer) :
                    argument->kind == 3 ? add_texture(r, &argument->texture) :
                    argument->kind == 4 ? add_sampler(r, &argument->sampler) :
                    /* The stage-in attributes the kernel reads. */
@@ -212,6 +213,8 @@ static bool
 add_input(struct reflecting *r, const struct stela_air_stage_io *io)
 {
    struct stela_metal_reflection *out = r->out;
+   if (io->absent)
+      return true;
    switch (io->semantic) {
    case STELA_AIR_STAGE_BUFFER: return add_buffer(r, &io->buffer, io->argument_buffer);
    case STELA_AIR_STAGE_TEXTURE: return add_texture(r, &io->texture);
@@ -285,7 +288,8 @@ reflect_stage(const struct stela_air_inspection *info, const struct stela_air_st
 
 /* Reflects entry, and selects its stage by the AIR list that names it. */
 static bool
-reflect(const void *air, size_t size, const char *entry, struct reflecting *r)
+reflect(const void *air, size_t size, const char *entry,
+        const struct stela_air_constants *constants, struct reflecting *r)
 {
    *r->out = (struct stela_metal_reflection){0};
    unsigned stage;
@@ -293,10 +297,11 @@ reflect(const void *air, size_t size, const char *entry, struct reflecting *r)
       return false;
    r->out->stage = function_stages[stage];
    struct stela_air_error *error = r->error;
-   bool inspected = stage ? stela_air_inspect_stage(air, size, entry, (enum stela_air_stage)stage,
-                                                    reflect_stage, r, error) :
-                            stela_air_inspect(air, size, AIR_MAX_METADATA_OPERANDS, reflect_kernel, r,
-                                              error);
+   bool inspected = stage ? stela_air_inspect_stage(air, size, constants, entry,
+                                                    (enum stela_air_stage)stage, reflect_stage, r,
+                                                    error) :
+                            stela_air_inspect(air, size, constants, AIR_MAX_METADATA_OPERANDS,
+                                              reflect_kernel, r, error);
    /* A receiver's refusal is reported as the inspector's; keep the cause. */
    return inspected ? r->found || fail(error, STELA_AIR_ARGUMENT, "entry is not an AIR kernel") :
                       false;
@@ -304,13 +309,16 @@ reflect(const void *air, size_t size, const char *entry, struct reflecting *r)
 
 bool
 stela_metal_reflect(const void *air, size_t size, const char *entry,
+                    const struct stela_air_constant_value *constants, uint32_t constant_count,
                     struct stela_metal_reflection *reflection, struct stela_air_error *error)
 {
    struct stela_air_error local = {0};
    struct reflecting r = {.entry = entry, .out = reflection, .error = error ? error : &local};
    *r.error = (struct stela_air_error){0};
-   return reflection && entry ? reflect(air, size, entry, &r) :
-                                fail(r.error, STELA_AIR_INPUT, "invalid reflection request");
+   struct stela_air_constants values = {constants, constant_count};
+   return reflection && entry && (constants || !constant_count) ?
+             reflect(air, size, entry, constants ? &values : NULL, &r) :
+             fail(r.error, STELA_AIR_INPUT, "invalid reflection request");
 }
 
 bool
@@ -438,7 +446,9 @@ stela_metal_compile(const void *air, size_t size, const char *entry,
    }
    struct reflecting r = {.entry = entry, .out = reflection, .error = error};
    nir_shader *shader = NULL;
-   if (!reflect(air, size, entry, &r))
+   struct stela_air_constants constants = {specialization->constants,
+                                           specialization->constant_count};
+   if (!reflect(air, size, entry, &constants, &r))
       goto done;
    enum stela_metal_function_stage stage = reflection->stage;
    if (stage == STELA_METAL_VISIBLE) {

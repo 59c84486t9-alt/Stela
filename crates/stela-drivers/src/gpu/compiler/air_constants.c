@@ -15,7 +15,11 @@
  * that air.static_init constructors, listed in llvm.global_ctors, store.
  * Once the function constants are specialized, LLVM's global optimizer
  * evaluates the constructors as it does C++ static initializers; it runs on a
- * clone, so only the values it computes reach the module. */
+ * clone, so only the values it computes reach the module. A
+ * [[function_constant]] argument's predicate is one of them.
+ *
+ * What the constants then decide is folded, as Metal's compiler folds it: the
+ * paths a false constant disables are removed rather than translated. */
 #define STELA_AIR_METADATA_INTERNAL
 #include "air_constants.h"
 #include "llvm-c/Transforms/PassBuilder.h"
@@ -120,6 +124,44 @@ specialize(LLVMValueRef storage, LLVMValueRef value, bool defined)
    LLVMSetSection(storage, "");
 }
 
+/* air.normalize_function_constant_predicate.<type>(x), with which a
+ * constructor computes a [[function_constant]] argument's predicate: x as a
+ * bool of its type, 0 or 1. The global optimizer evaluates what replaces it;
+ * another form stays, and the constructor's evaluation refuses it. */
+static void
+normalize_predicates(LLVMModuleRef module)
+{
+   static const char prefix[] = "air.normalize_function_constant_predicate.";
+   LLVMBuilderRef builder = NULL;
+   for (LLVMValueRef fn = LLVMGetFirstFunction(module), next; fn; fn = next) {
+      next = LLVMGetNextFunction(fn);
+      size_t bytes;
+      const char *name = LLVMGetValueName2(fn, &bytes);
+      if (!LLVMIsDeclaration(fn) || bytes < strlen(prefix) || memcmp(name, prefix, strlen(prefix)))
+         continue;
+      if (!builder)
+         builder = LLVMCreateBuilderInContext(LLVMGetModuleContext(module));
+      for (LLVMUseRef use = LLVMGetFirstUse(fn), after; use; use = after) {
+         after = LLVMGetNextUse(use);
+         LLVMValueRef call = LLVMGetUser(use);
+         LLVMTypeRef type = LLVMTypeOf(call);
+         if (!LLVMIsACallInst(call) || LLVMGetCalledValue(call) != fn ||
+             LLVMGetNumArgOperands(call) != 1 || LLVMGetTypeKind(type) != LLVMIntegerTypeKind ||
+             LLVMTypeOf(LLVMGetOperand(call, 0)) != type)
+            continue;
+         LLVMPositionBuilderBefore(builder, call);
+         LLVMValueRef value = LLVMGetOperand(call, 0);
+         LLVMValueRef truth = LLVMBuildICmp(builder, LLVMIntNE, value, LLVMConstNull(type), "");
+         LLVMReplaceAllUsesWith(call, LLVMBuildZExtOrBitCast(builder, truth, type, ""));
+         LLVMInstructionEraseFromParent(call);
+      }
+      if (!LLVMGetFirstUse(fn))
+         LLVMDeleteFunction(fn);
+   }
+   if (builder)
+      LLVMDisposeBuilder(builder);
+}
+
 bool
 stela_air_specialize_constants(struct stela_air_metadata *m,
                                const struct stela_air_constant_value *values, unsigned count)
@@ -152,6 +194,7 @@ stela_air_specialize_constants(struct stela_air_metadata *m,
    LLVMValueRef test = LLVMGetNamedFunction(m->module, "air.is_function_constant_defined");
    if (test && !LLVMGetFirstUse(test))
       LLVMDeleteFunction(test);
+   normalize_predicates(m->module);
    return true;
 }
 
@@ -240,6 +283,25 @@ stela_air_construct_constants(struct stela_air_metadata *m)
          listed |= dropped[j] == dropped[i];
       if (!listed && !LLVMGetFirstUse(dropped[i]))
          LLVMDeleteFunction(dropped[i]);
+   }
+   return true;
+}
+
+bool
+stela_air_fold_constants(struct stela_air_metadata *m, LLVMValueRef fn)
+{
+   if (!LLVMGetNamedMetadataNumOperands(m->module, "air.function_constants"))
+      return true;
+   LLVMPassBuilderOptionsRef options = LLVMCreatePassBuilderOptions();
+   if (!options)
+      return fail(m, STELA_AIR_ALLOCATION, "LLVM pass options allocation failed");
+   /* SCCP folds the loads of constant data and the branches they decide,
+    * leaving the paths those disable unreachable. */
+   LLVMErrorRef error = LLVMRunPassesOnFunction(fn, "sccp,unreachableblockelim", NULL, options);
+   LLVMDisposePassBuilderOptions(options);
+   if (error) {
+      LLVMDisposeErrorMessage(LLVMGetErrorMessage(error));
+      return fail(m, STELA_AIR_INSTRUCTION, "function constant folding failed");
    }
    return true;
 }

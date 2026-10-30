@@ -273,9 +273,9 @@ static void stage_binding_prelude_contract(void)
       char *text=order?change(fixture,"!4 = !{!5,!6}","!4 = !{!6,!5}"):NULL;
       LLVMMemoryBufferRef raw=bitcode(text?text:fixture);free(text);
       struct snapshot vs,fs; struct stela_air_error link_error;
-      CHECK(stela_air_inspect_stage(LLVMGetBufferStart(raw),LLVMGetBufferSize(raw),
+      CHECK(stela_air_inspect_stage(LLVMGetBufferStart(raw),LLVMGetBufferSize(raw), NULL,
          "test_vertex",STELA_AIR_VERTEX,capture,&vs,&link_error));
-      CHECK(stela_air_inspect_stage(LLVMGetBufferStart(raw),LLVMGetBufferSize(raw),
+      CHECK(stela_air_inspect_stage(LLVMGetBufferStart(raw),LLVMGetBufferSize(raw), NULL,
          "test_fragment",STELA_AIR_FRAGMENT,capture,&fs,&link_error));
       struct stela_air_varying_slot map[16]; unsigned count=0;
       CHECK(stela_air_link_stage_io(&vs.entry,&fs.entry,16,map,16,&count,&link_error) && count==1);
@@ -296,8 +296,8 @@ static void stage_binding_prelude_contract(void)
 static void run(LLVMMemoryBufferRef raw,const char *vsname,const char *fsname,bool original)
 {
    struct snapshot vs,fs;struct stela_air_error e;
-   CHECK(stela_air_inspect_stage(LLVMGetBufferStart(raw),LLVMGetBufferSize(raw),vsname,STELA_AIR_VERTEX,capture,&vs,&e));
-   CHECK(stela_air_inspect_stage(LLVMGetBufferStart(raw),LLVMGetBufferSize(raw),fsname,STELA_AIR_FRAGMENT,capture,&fs,&e));
+   CHECK(stela_air_inspect_stage(LLVMGetBufferStart(raw),LLVMGetBufferSize(raw), NULL,vsname,STELA_AIR_VERTEX,capture,&vs,&e));
+   CHECK(stela_air_inspect_stage(LLVMGetBufferStart(raw),LLVMGetBufferSize(raw), NULL,fsname,STELA_AIR_FRAGMENT,capture,&fs,&e));
    CHECK(vs.entry.output_count==2 && fs.entry.output_count==1);
    CHECK(vs.entry.framebuffer_fetch_present && vs.entry.framebuffer_fetch_enabled &&
          fs.entry.framebuffer_fetch_present && fs.entry.framebuffer_fetch_enabled);
@@ -352,9 +352,9 @@ link_and_option_failures(LLVMMemoryBufferRef raw, const char *vsname, const char
 {
    struct snapshot vs, fs;
    struct stela_air_error e;
-   CHECK(stela_air_inspect_stage(LLVMGetBufferStart(raw), LLVMGetBufferSize(raw), vsname,
+   CHECK(stela_air_inspect_stage(LLVMGetBufferStart(raw), LLVMGetBufferSize(raw), NULL, vsname,
       STELA_AIR_VERTEX, capture, &vs, &e));
-   CHECK(stela_air_inspect_stage(LLVMGetBufferStart(raw), LLVMGetBufferSize(raw), fsname,
+   CHECK(stela_air_inspect_stage(LLVMGetBufferStart(raw), LLVMGetBufferSize(raw), NULL, fsname,
       STELA_AIR_FRAGMENT, capture, &fs, &e));
    struct stela_air_varying_slot rows[2]; unsigned n = 0;
    CHECK(stela_air_link_stage_io(&vs.entry, &fs.entry, 16, rows, 2, &n, &e) && n == 1);
@@ -386,13 +386,13 @@ link_and_option_failures(LLVMMemoryBufferRef raw, const char *vsname, const char
    CHECK(!stela_air_link_stage_io(&vs.entry, &fs.entry, 16, rows, 2, &n, &e));
    CHECK(n == 123 && rows[0].location == 9);
    fs.inputs[1] = saved_input;
-   CHECK(!stela_air_inspect_stage(LLVMGetBufferStart(raw), LLVMGetBufferSize(raw),
+   CHECK(!stela_air_inspect_stage(LLVMGetBufferStart(raw), LLVMGetBufferSize(raw), NULL,
       vsname, STELA_AIR_FRAGMENT, capture, &fs, &e) && e.kind == STELA_AIR_METADATA);
    char *vector_id = change(fixture, "i32 %id, ptr", "<3 x i32> %id, ptr");
    char *unused_id = change(vector_id, "%index = zext i32 %id to i64", "%index = zext i32 0 to i64");
    free(vector_id); LLVMMemoryBufferRef malformed = bitcode(unused_id);
    unsigned callbacks = 0;
-   CHECK(!stela_air_inspect_stage(LLVMGetBufferStart(malformed),LLVMGetBufferSize(malformed),
+   CHECK(!stela_air_inspect_stage(LLVMGetBufferStart(malformed),LLVMGetBufferSize(malformed), NULL,
       "test_vertex",STELA_AIR_VERTEX,count_stage_callback,&callbacks,&e) && e.kind == STELA_AIR_ARGUMENT);
    CHECK(callbacks == 0);
    o = options(STELA_AIR_VERTEX,rows,1,&callbacks); rows[0] = saved;
@@ -416,9 +416,9 @@ primitive_buffer_semantics(void)
    const char *sources[] = {vector, scalar};
    for (unsigned i = 0; i < 2; i++) {
       LLVMMemoryBufferRef raw = bitcode(sources[i]); struct snapshot vs, fs; struct stela_air_error e;
-      CHECK(stela_air_inspect_stage(LLVMGetBufferStart(raw), LLVMGetBufferSize(raw),
+      CHECK(stela_air_inspect_stage(LLVMGetBufferStart(raw), LLVMGetBufferSize(raw), NULL,
          "test_vertex", STELA_AIR_VERTEX, capture, &vs, &e));
-      CHECK(stela_air_inspect_stage(LLVMGetBufferStart(raw), LLVMGetBufferSize(raw),
+      CHECK(stela_air_inspect_stage(LLVMGetBufferStart(raw), LLVMGetBufferSize(raw), NULL,
          "test_fragment", STELA_AIR_FRAGMENT, capture, &fs, &e));
       struct stela_air_varying_slot map[16]; unsigned count = 0, callbacks = 0;
       CHECK(stela_air_link_stage_io(&vs.entry, &fs.entry, 16, map, 16, &count, &e));
@@ -459,9 +459,9 @@ aggregate_phi_semantics(void)
 {
    LLVMMemoryBufferRef initial = bitcode(fixture);
    struct snapshot vs, fs; struct stela_air_error error;
-   CHECK(stela_air_inspect_stage(LLVMGetBufferStart(initial), LLVMGetBufferSize(initial),
+   CHECK(stela_air_inspect_stage(LLVMGetBufferStart(initial), LLVMGetBufferSize(initial), NULL,
       "test_vertex", STELA_AIR_VERTEX, capture, &vs, &error));
-   CHECK(stela_air_inspect_stage(LLVMGetBufferStart(initial), LLVMGetBufferSize(initial),
+   CHECK(stela_air_inspect_stage(LLVMGetBufferStart(initial), LLVMGetBufferSize(initial), NULL,
       "test_fragment", STELA_AIR_FRAGMENT, capture, &fs, &error));
    LLVMDisposeMemoryBuffer(initial);
    struct stela_air_varying_slot map[16]; unsigned count = 0, calls = 0;
@@ -643,9 +643,9 @@ pointer_phi_stage_semantics(void)
 {
    LLVMMemoryBufferRef initial = bitcode(fixture);
    struct snapshot vs, fs; struct stela_air_error error;
-   CHECK(stela_air_inspect_stage(LLVMGetBufferStart(initial), LLVMGetBufferSize(initial),
+   CHECK(stela_air_inspect_stage(LLVMGetBufferStart(initial), LLVMGetBufferSize(initial), NULL,
       "test_vertex", STELA_AIR_VERTEX, capture, &vs, &error));
-   CHECK(stela_air_inspect_stage(LLVMGetBufferStart(initial), LLVMGetBufferSize(initial),
+   CHECK(stela_air_inspect_stage(LLVMGetBufferStart(initial), LLVMGetBufferSize(initial), NULL,
       "test_fragment", STELA_AIR_FRAGMENT, capture, &fs, &error));
    LLVMDisposeMemoryBuffer(initial);
    struct stela_air_varying_slot map[16]; unsigned count = 0, calls = 0;
@@ -723,9 +723,9 @@ pointer_equality_stage_semantics(void)
 {
    LLVMMemoryBufferRef initial = bitcode(fixture);
    struct snapshot vs, fs; struct stela_air_error error;
-   CHECK(stela_air_inspect_stage(LLVMGetBufferStart(initial), LLVMGetBufferSize(initial),
+   CHECK(stela_air_inspect_stage(LLVMGetBufferStart(initial), LLVMGetBufferSize(initial), NULL,
       "test_vertex", STELA_AIR_VERTEX, capture, &vs, &error));
-   CHECK(stela_air_inspect_stage(LLVMGetBufferStart(initial), LLVMGetBufferSize(initial),
+   CHECK(stela_air_inspect_stage(LLVMGetBufferStart(initial), LLVMGetBufferSize(initial), NULL,
       "test_fragment", STELA_AIR_FRAGMENT, capture, &fs, &error));
    LLVMDisposeMemoryBuffer(initial);
    struct stela_air_varying_slot map[16]; unsigned count = 0, calls = 0;
@@ -797,9 +797,9 @@ arithmetic_and_lane_semantics(void)
 {
    LLVMMemoryBufferRef initial = bitcode(fixture);
    struct snapshot vs, fs; struct stela_air_error e;
-   CHECK(stela_air_inspect_stage(LLVMGetBufferStart(initial), LLVMGetBufferSize(initial),
+   CHECK(stela_air_inspect_stage(LLVMGetBufferStart(initial), LLVMGetBufferSize(initial), NULL,
       "test_vertex", STELA_AIR_VERTEX, capture, &vs, &e));
-   CHECK(stela_air_inspect_stage(LLVMGetBufferStart(initial), LLVMGetBufferSize(initial),
+   CHECK(stela_air_inspect_stage(LLVMGetBufferStart(initial), LLVMGetBufferSize(initial), NULL,
       "test_fragment", STELA_AIR_FRAGMENT, capture, &fs, &e));
    LLVMDisposeMemoryBuffer(initial);
    struct stela_air_varying_slot map[16]; unsigned count = 0, calls = 0;
@@ -968,8 +968,8 @@ static void unused_stage_buffer_semantics(void)
       bool fragment=mode==1||mode==3,all_unused=mode==2||mode==3,dead_use=mode==4;
       char *text=unused_buffer_fixture(fragment,all_unused,dead_use);
       LLVMMemoryBufferRef raw=bitcode(text);struct snapshot vs,fs;struct stela_air_error error;
-      CHECK(stela_air_inspect_stage(LLVMGetBufferStart(raw),LLVMGetBufferSize(raw),"test_vertex",STELA_AIR_VERTEX,capture,&vs,&error));
-      CHECK(stela_air_inspect_stage(LLVMGetBufferStart(raw),LLVMGetBufferSize(raw),"test_fragment",STELA_AIR_FRAGMENT,capture,&fs,&error));
+      CHECK(stela_air_inspect_stage(LLVMGetBufferStart(raw),LLVMGetBufferSize(raw), NULL,"test_vertex",STELA_AIR_VERTEX,capture,&vs,&error));
+      CHECK(stela_air_inspect_stage(LLVMGetBufferStart(raw),LLVMGetBufferSize(raw), NULL,"test_fragment",STELA_AIR_FRAGMENT,capture,&fs,&error));
       struct snapshot *selected=fragment?&fs:&vs;
       CHECK(selected->entry.input_count==(fragment?4u:3u));
       unsigned buffer_at=fragment?2:1,unused_at=fragment?3:2;
@@ -1049,7 +1049,7 @@ int main(int argc,char **argv)
       b=file(argv[2]);run(b,"vertexShader","fragmentShader",true);LLVMDisposeMemoryBuffer(b);
       b=file(argv[4]);struct stela_air_error e;
       struct snapshot snapshot;
-      CHECK(!stela_air_inspect_stage(LLVMGetBufferStart(b),LLVMGetBufferSize(b),"samplingShader",STELA_AIR_FRAGMENT,capture,&snapshot,&e));
+      CHECK(!stela_air_inspect_stage(LLVMGetBufferStart(b),LLVMGetBufferSize(b), NULL,"samplingShader",STELA_AIR_FRAGMENT,capture,&snapshot,&e));
       CHECK(e.kind==STELA_AIR_METADATA || e.kind==STELA_AIR_TARGET || e.kind==STELA_AIR_ARGUMENT);
       printf("Original sampled texture remains typedunsupported: %u %s\n",e.kind,e.detail);LLVMDisposeMemoryBuffer(b);
    } else CHECK(argc==1);

@@ -186,7 +186,7 @@ sweep(const char *path, const struct stela_metal_target *target)
          continue;
       char *entry = strndup(name, name_bytes);
       struct stela_air_error error;
-      if (!stela_metal_reflect(air, size, entry, &reflection, &error)) {
+      if (!stela_metal_reflect(air, size, entry, NULL, 0, &reflection, &error)) {
          /* Helpers and other functions no entry metadata lists. */
          if (!strstr(error.detail, "not a listed AIR function"))
             printf("%s %s: reflection refused (%u): %s\n", path, entry, error.kind, error.detail),

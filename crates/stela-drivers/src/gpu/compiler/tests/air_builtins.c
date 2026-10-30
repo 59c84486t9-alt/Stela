@@ -338,7 +338,7 @@ kernels_bound_their_workgroups(void)
       LLVMMemoryBufferRef input = stela_air_test_custom_bitcode(module, body, text, "");
       free(text);
       unsigned reflected = 0;
-      assert(stela_air_inspect(LLVMGetBufferStart(input), LLVMGetBufferSize(input), 1,
+      assert(stela_air_inspect(LLVMGetBufferStart(input), LLVMGetBufferSize(input), NULL, 1,
                                reflect_max_threads, &reflected, &error));
       assert(reflected == limit);
       LLVMDisposeMemoryBuffer(input);

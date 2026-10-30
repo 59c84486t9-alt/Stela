@@ -52,6 +52,13 @@ struct stela_air_constant_value {
    const void *bytes;
    size_t size;
 };
+/* The function constant values inspection specializes a module with, as
+ * compilation does: an argument a false [[function_constant]] qualifies is
+ * then absent. Inspection without them reflects every such argument. */
+struct stela_air_constants {
+   const struct stela_air_constant_value *values;
+   unsigned count;
+};
 /* An AIR module linked with the input's, and the values of its function
  * constants: NULL for a module that declares none. */
 struct stela_air_module {
@@ -218,6 +225,7 @@ struct stela_air_argument_info {
    enum stela_air_primitive primitive;
    unsigned type_components; /* 1..4 only for known reflected builtin types. */
    bool used; /* Actual uses in this AIR module, not a final machine-code liveness claim. */
+   bool absent; /* Its [[function_constant]] is false. */
 };
 struct stela_air_entry {
    const char *name;
@@ -232,7 +240,8 @@ struct stela_air_entry {
 };
 typedef bool (*stela_air_visit_entry)(const struct stela_air_inspection *,
                                      const struct stela_air_entry *, void *);
-bool stela_air_inspect(const void *bitcode, size_t size, unsigned max_entries,
+bool stela_air_inspect(const void *bitcode, size_t size, const struct stela_air_constants *constants,
+                       unsigned max_entries,
                        stela_air_visit_entry visit, void *data,
                        struct stela_air_error *error);
 /* Additive render-only descriptor API. These enums are neither MTLFunctionType
@@ -305,6 +314,7 @@ struct stela_air_stage_io {
    enum stela_air_sampling sampling;
    enum stela_air_depth_qualifier depth; /* Only DEPTH. */
    bool used, invariant;
+   bool absent; /* An argument whose [[function_constant]] is false. */
    bool argument_buffer; /* Only STAGE_BUFFER: an air.indirect_buffer. */
    /* A VARYING the function interpolates itself, an interpolant<T, P>: its
     * argument is an opaque pointer the air.interpolate_* calls read, and it
@@ -354,7 +364,8 @@ struct stela_air_stage_entry {
 };
 typedef bool (*stela_air_visit_stage)(const struct stela_air_inspection *,
                                      const struct stela_air_stage_entry *, void *);
-bool stela_air_inspect_stage(const void *, size_t, const char *entry,
+bool stela_air_inspect_stage(const void *, size_t, const struct stela_air_constants *,
+                             const char *entry,
                              enum stela_air_stage, stela_air_visit_stage, void *,
                              struct stela_air_error *);
 /* The stage whose entry list names entry: *stage is zero for air.kernel.
@@ -454,8 +465,9 @@ struct stela_air_global {
 };
 bool stela_air_metadata_global(struct stela_air_metadata *m, LLVMValueRef global,
                                struct stela_air_global *info);
-/* Validates every global but function constants' storage and the
- * constructor list; `threadgroup` reports any threadgroup memory. */
+/* Validates every global but function constants' storage, the constructor
+ * list and llvm.used or llvm.compiler.used, which only keep globals from the
+ * optimizer; `threadgroup` reports any threadgroup memory. */
 bool stela_air_metadata_globals(struct stela_air_metadata *m, bool *threadgroup);
 /* llvm.global_ctors when it lists only air.static_init functions, which
  * compute the program-scope constants derived from function constants; NULL
@@ -521,6 +533,9 @@ struct stela_air_argument {
    enum stela_air_primitive primitive;
    unsigned type_components;
    bool used;
+   /* Its [[function_constant]] is false: it has no binding, and its index
+    * is another argument's to take. */
+   bool absent;
 };
 struct stela_air_kernel {
    unsigned count, field_count;

@@ -709,7 +709,7 @@ static void threadgroup_input(int argc,char **argv)
     struct stela_metal_threadgroup_request request={.size=sizeof(request),.abi=STELA_METAL_THREADGROUP_ABI,
         .count=(uint32_t)(argc-5),.rows=rows};
     struct bytes air=read_file(argv[2]);struct facts f={.name=argv[3]};struct stela_air_error air_error;
-    CHECK(stela_air_inspect(air.data,air.size,256,inspect,&f,&air_error)&&f.found);
+    CHECK(stela_air_inspect(air.data,air.size, NULL,256,inspect,&f,&air_error)&&f.found);
     struct bytes bytes=archive(air.data,air.size,f.name,f.air,f.major,f.minor,f.osmajor,f.osminor);
     struct stela_metal_assembly *library=assemble(&bytes);free(bytes.data);free(air.data);
     expect_targets("threadgroup");
@@ -760,7 +760,7 @@ static void shared_refusal(int argc,char **argv)
 {
     CHECK(argc==4);
     struct bytes air=read_file(argv[2]);struct facts f={.name=argv[3]};struct stela_air_error inspect_error;
-    CHECK(stela_air_inspect(air.data,air.size,256,inspect,&f,&inspect_error)&&f.found);
+    CHECK(stela_air_inspect(air.data,air.size, NULL,256,inspect,&f,&inspect_error)&&f.found);
     struct bytes bytes=archive(air.data,air.size,f.name,f.air,f.major,f.minor,f.osmajor,f.osminor);
     struct stela_metal_assembly *library=assemble(&bytes);free(bytes.data);free(air.data);
     for(unsigned i=0;i<ARRAY_SIZE(nv_targets);i++) {
@@ -786,7 +786,7 @@ int main(int argc,char **argv)
     else {
         CHECK((argc==4||argc==5)&&!strcmp(argv[1],"--input"));
         struct bytes air=read_file(argv[2]);struct facts f={.name=argv[3]};struct stela_air_error error;
-        CHECK(stela_air_inspect(air.data,air.size,256,inspect,&f,&error)&&f.found);
+        CHECK(stela_air_inspect(air.data,air.size, NULL,256,inspect,&f,&error)&&f.found);
         struct bytes bytes=archive(air.data,air.size,f.name,f.air,f.major,f.minor,f.osmajor,f.osminor);
         struct stela_metal_assembly *library=assemble(&bytes);free(air.data);free(bytes.data);
         targets(library,argc==5?(enum stela_air_fp_profile)strtoul(argv[4],NULL,10):STELA_AIR_FP_IEEE_DEFAULT,"unchanged-original-file",false);

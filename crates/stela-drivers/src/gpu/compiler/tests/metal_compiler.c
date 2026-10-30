@@ -168,6 +168,67 @@ static const char *derived = DERIVED("%x = shl nsw i32 %w, 1\n");
 /* A constructor that calls an AIR function, which no constant folds. */
 static const char *called = DERIVED("%x = call i32 @air.unknown(i32 %w)\n");
 
+/* A [[function_constant(use_tint)]] buffer and one for !use_tint at the
+ * same index, as Apple's compiler records them: each argument names an
+ * internal predicate the constructor computes and llvm.compiler.used keeps.
+ * The kernel reads the buffer whose constant holds, branching as `branch`
+ * says on use_tint, %on. */
+#define CONDITIONAL(branch, predicate)                                                     \
+   "@use_tint.init = linkonce_odr hidden addrspace(2) externally_initialized constant i8"  \
+   " undef, section \"air.fc_initializer\", align 1\n"                                     \
+   "@use_tint = internal unnamed_addr addrspace(2) global i8 undef, align 1\n"             \
+   "@tinted = internal addrspace(2) global i8 0, align 1\n"                                \
+   "@untinted = internal addrspace(2) global i8 0, align 1\n"                              \
+   "@llvm.global_ctors = appending global [1 x { i32, ptr, ptr }]"                         \
+   " [{ i32, ptr, ptr } { i32 65535, ptr @init, ptr null }]\n"                             \
+   "@llvm.compiler.used = appending global [2 x ptr] [ptr addrspacecast"                   \
+   " (ptr addrspace(2) @tinted to ptr), ptr addrspacecast (ptr addrspace(2) @untinted"     \
+   " to ptr)], section \"llvm.metadata\"\n"                                                \
+   "declare i8 @air.normalize_function_constant_predicate.i8(i8)\n"                        \
+   "define void @conditional(ptr addrspace(1) %data, ptr addrspace(1) %tint,"              \
+   " ptr addrspace(1) %plain) {\n"                                                         \
+   "%u = load i8, ptr addrspace(2) @use_tint, align 1\n"                                   \
+   "%on = icmp ne i8 %u, 0\n"                                                              \
+   branch                                                                                  \
+   "tinted:\n%t = load i32, ptr addrspace(1) %tint, align 4\n"                             \
+   "store i32 %t, ptr addrspace(1) %data, align 4\nret void\n"                             \
+   "untinted:\n%p = load i32, ptr addrspace(1) %plain, align 4\n"                          \
+   "store i32 %p, ptr addrspace(1) %data, align 4\nret void\n}\n"                          \
+   "define internal void @init() section \"air.static_init\" {\n"                          \
+   "%v = load i8, ptr addrspace(2) @use_tint.init, align 1\n"                              \
+   "store i8 %v, ptr addrspace(2) @use_tint, align 1\n"                                    \
+   "%t = call i8 @air.normalize_function_constant_predicate.i8(i8 %v)\n"                   \
+   "store i8 %t, ptr addrspace(2) @tinted, align 1\n"                                      \
+   "%n = xor i8 %t, 1\n"                                                                   \
+   "store i8 %n, ptr addrspace(2) @untinted, align 1\n"                                    \
+   "ret void\n}\n"                                                                         \
+   "!air.kernel = !{!2}\n"                                                                 \
+   "!2 = !{ptr @conditional, !3, !4}\n!3 = !{}\n!4 = !{!40, !41, !42}\n"                   \
+   "!40 = !{i32 0, !\"air.buffer\", !\"air.location_index\", i32 0, i32 1,"                \
+   " !\"air.read_write\", !\"air.address_space\", i32 1, !\"air.arg_type_size\", i32 4,"   \
+   " !\"air.arg_type_align_size\", i32 4, !\"air.arg_type_name\", !\"int\","               \
+   " !\"air.arg_name\", !\"data\"}\n"                                                      \
+   "!41 = !{i32 1, !\"air.function_constant\", !43, !\"air.buffer\","                      \
+   " !\"air.location_index\", i32 1, i32 1, !\"air.read\", !\"air.address_space\", i32 1," \
+   " !\"air.arg_type_size\", i32 4, !\"air.arg_type_align_size\", i32 4,"                  \
+   " !\"air.arg_type_name\", !\"int\", !\"air.arg_name\", !\"tint\"}\n"                    \
+   "!42 = !{i32 2, !\"air.function_constant\", !44, !\"air.buffer\","                      \
+   " !\"air.location_index\", i32 1, i32 1, !\"air.read_write\", !\"air.address_space\","  \
+   " i32 1, !\"air.arg_type_size\", i32 4, !\"air.arg_type_align_size\", i32 4,"           \
+   " !\"air.arg_type_name\", !\"int\", !\"air.arg_name\", !\"plain\"}\n"                   \
+   "!43 = !{ptr addrspace(2) @tinted, !\"" predicate "\", !\"use_tint\"}\n"                \
+   "!44 = !{ptr addrspace(2) @untinted, !\"bool\", !\"untinted\"}\n"                       \
+   "!air.function_constants = !{!50}\n"                                                    \
+   "!50 = !{ptr addrspace(2) @use_tint.init, !\"bool\", !\"use_tint\", i32 0}\n"
+
+static const char *conditional =
+   CONDITIONAL("br i1 %on, label %tinted, label %untinted\n", "bool");
+/* One reading tint whatever use_tint is. */
+static const char *unguarded = CONDITIONAL("br label %tinted\n", "bool");
+/* One whose predicate is not a bool. */
+static const char *mistyped =
+   CONDITIONAL("br i1 %on, label %tinted, label %untinted\n", "int");
+
 /* Texture and sampler array arguments, which a function reflects slot by
  * slot, reading the width of the second texture. */
 static const char *arrays =
@@ -469,17 +530,27 @@ bitcode(const char *fixture)
    return input;
 }
 
+/* Reflects entry specialized with the function constant values, or
+ * unspecialized with NULL values. */
 static bool
-reflect(const char *fixture, const char *entry, struct stela_metal_reflection *reflection,
-        struct stela_air_error *error)
+reflect_specialized(const char *fixture, const char *entry,
+                    const struct stela_air_constant_value *values, unsigned count,
+                    struct stela_metal_reflection *reflection, struct stela_air_error *error)
 {
    LLVMMemoryBufferRef input = bitcode(fixture);
    bool reflected = stela_metal_reflect(LLVMGetBufferStart(input), LLVMGetBufferSize(input), entry,
-                                        reflection, error);
+                                        values, count, reflection, error);
    if (!reflected)
       fprintf(stderr, "%s: %u %s\n", entry, error->kind, error->detail);
    LLVMDisposeMemoryBuffer(input);
    return reflected;
+}
+
+static bool
+reflect(const char *fixture, const char *entry, struct stela_metal_reflection *reflection,
+        struct stela_air_error *error)
+{
+   return reflect_specialized(fixture, entry, NULL, 0, reflection, error);
 }
 
 static nir_shader *
@@ -747,14 +818,24 @@ function_constants_reflect_and_specialize(void)
    assert(!compile(constants, "constants", &specialization, &error) && error.kind == STELA_AIR_INPUT);
 }
 
-/* The value of the shader's one 32-bit constant datum. */
-static int32_t
-datum(const nir_shader *shader)
+/* Whether the shader stores the constant value. */
+static bool
+stores_constant(nir_shader *shader, uint32_t value)
 {
-   int32_t value;
-   assert(shader->constant_data_size == sizeof(value));
-   memcpy(&value, shader->constant_data, sizeof(value));
-   return value;
+   nir_opt_constant_folding(shader);
+   nir_foreach_function_impl(impl, shader) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+            nir_intrinsic_instr *store = nir_instr_as_intrinsic(instr);
+            if (store->intrinsic == nir_intrinsic_store_global &&
+                nir_src_is_const(store->src[0]) && nir_src_as_uint(store->src[0]) == value)
+               return true;
+         }
+      }
+   }
+   return false;
 }
 
 static void
@@ -773,19 +854,58 @@ derived_constants_are_constructed_from_their_function_constants(void)
    nir_shader *shader = compile(derived, "derived", &specialization, &error);
    if (!shader)
       fprintf(stderr, "derived: %u %s\n", error.kind, error.detail);
-   assert(shader && datum(shader) == 10);
+   /* Its value folds into the store; none is left in constant data. */
+   assert(shader && stores_constant(shader, 10) && !shader->constant_data_size);
    stela_metal_release(shader);
 
    /* Without width, its definedness test selects eight. */
    specialization.constant_count = 0;
    shader = compile(derived, "derived", &specialization, &error);
-   assert(shader && datum(shader) == 8);
+   assert(shader && stores_constant(shader, 8));
    stela_metal_release(shader);
 
    /* Constructors are evaluated, never run. */
    assert(reflect(called, "derived", &reflection, &error));
    assert(!compile(called, "derived", &specialization, &error) && error.kind == STELA_AIR_INSTRUCTION &&
           strstr(error.detail, "program-scope constants"));
+}
+
+/* Arguments a false function constant makes absent: reflection leaves
+ * them out, folding removes the paths that read them, and another argument
+ * takes their index. */
+static void
+function_constants_select_arguments(void)
+{
+   struct stela_metal_reflection reflection;
+   struct stela_air_error error;
+   /* Unspecialized, the function declares both. */
+   assert(reflect(conditional, "conditional", &reflection, &error));
+   assert(reflection.buffer_count == 3);
+   for (uint8_t on = 0; on < 2; on++) {
+      const struct stela_air_constant_value value = {0, &on, sizeof(on)};
+      assert(reflect_specialized(conditional, "conditional", &value, 1, &reflection, &error));
+      uint32_t access = on ? STELA_METAL_ACCESS_READ :
+                             STELA_METAL_ACCESS_READ | STELA_METAL_ACCESS_WRITE;
+      assert(reflection.buffer_count == 2 && reflection.buffers[1].index == 1 &&
+             reflection.buffers[1].access == access);
+      const struct stela_metal_specialization specialization = {
+         .workgroup_size = {64, 1, 1}, .constants = &value, .constant_count = 1,
+      };
+      nir_shader *shader = compile(conditional, "conditional", &specialization, &error);
+      if (!shader)
+         fprintf(stderr, "conditional: %u %s\n", error.kind, error.detail);
+      assert(shader);
+      stela_metal_release(shader);
+
+      /* A function that reads an absent argument is refused. */
+      shader = compile(unguarded, "conditional", &specialization, &error);
+      assert(on ? shader != NULL :
+                  !shader && error.kind == STELA_AIR_ARGUMENT && strstr(error.detail, "is false"));
+      if (shader)
+         stela_metal_release(shader);
+   }
+   assert(!reflect(mistyped, "conditional", &reflection, &error) &&
+          error.kind == STELA_AIR_METADATA && strstr(error.detail, "predicate"));
 }
 
 static void
@@ -890,26 +1010,6 @@ linked_functions_resolve_tables_and_externals(void)
    /* A library that defines the kernel's own function again. */
    const char *twice[] = {linked, "define i32 @doubled(i32 %x) {\nret i32 %x\n}\n!air.visible = !{}\n"};
    assert(!compile_linked(tables, "tables", twice, 2, functions, 3, &error));
-}
-
-/* Whether the shader stores the constant value. */
-static bool
-stores_constant(nir_shader *shader, uint32_t value)
-{
-   nir_opt_constant_folding(shader);
-   nir_foreach_function_impl(impl, shader) {
-      nir_foreach_block(block, impl) {
-         nir_foreach_instr(instr, block) {
-            if (instr->type != nir_instr_type_intrinsic)
-               continue;
-            nir_intrinsic_instr *store = nir_instr_as_intrinsic(instr);
-            if (store->intrinsic == nir_intrinsic_store_global &&
-                nir_src_is_const(store->src[0]) && nir_src_as_uint(store->src[0]) == value)
-               return true;
-         }
-      }
-   }
-   return false;
 }
 
 /* compile() of biased, linking offsets with values, or NULL for none. */
@@ -1139,6 +1239,7 @@ main(void)
    mesh_stages_compile_with_their_launch();
    function_constants_reflect_and_specialize();
    derived_constants_are_constructed_from_their_function_constants();
+   function_constants_select_arguments();
    arrays_reflect_each_slot();
    defined_functions_inline_into_their_callers();
    linked_functions_resolve_tables_and_externals();
