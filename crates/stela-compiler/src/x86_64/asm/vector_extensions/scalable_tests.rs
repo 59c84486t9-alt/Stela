@@ -1,7 +1,8 @@
 //! Streaming SVE and SME extension recipes (VNNI byte dots, GFNI byte and
 //! AVX-512 quadword shifts, AVX-512 integer conversions, table permutes,
-//! quadword extrema, lane compares and saturating narrows), compared with the
-//! reviewed SSE recipes on random Z, P, ZA and selector state.
+//! quadword extrema and multiplies, lane compares and saturating narrows),
+//! compared with the reviewed SSE recipes on random Z, P, ZA and selector
+//! state.
 use super::execution::Native;
 use crate::aarch64::floating::features::NumericalFeatures;
 use crate::aarch64::scalable::{
@@ -474,4 +475,29 @@ fn streaming_saturating_narrows_match_the_sse_recipes() {
             !packs.contains(&word)
         });
     }
+}
+
+/// llvm-mc encodings of quadword MUL (predicated, unpredicated, immediate and
+/// indexed), MLA, MLS, MAD and indexed MLA, and MUL on S lanes.
+const MULTIPLIES: [u32; 9] = [
+    0x04d0_04a3,
+    0x04e5_6083,
+    0x25f0_d663,
+    0x04c5_4483,
+    0x04c5_6483,
+    0x04c4_c4a3,
+    0x44f5_f883,
+    0x44e5_0883,
+    0x04a5_6083,
+];
+
+#[test]
+fn streaming_quadword_multiplies_match_the_sse_recipes() {
+    // S lanes already take PMULLD.
+    compare(
+        &MULTIPLIES,
+        &[TargetCpu::X86_64_V4],
+        Values::Bits,
+        |word, _| word != 0x04a5_6083,
+    );
 }

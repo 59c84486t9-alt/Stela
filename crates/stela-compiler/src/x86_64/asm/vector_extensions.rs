@@ -628,6 +628,23 @@ pub(crate) fn quadword_extremum(
     true
 }
 
+/// VPMULLQ: the low 64 bits of each quadword product of `destination` and
+/// `source`, into `destination`. It needs AVX-512 DQ as well; the DIT
+/// profile keeps its reviewed recipe.
+pub(crate) fn quadword_multiply(
+    code: &mut Code,
+    destination: u8,
+    source: u8,
+    target: TargetCpu,
+) -> bool {
+    if !quadword_supported(target) || !target.supports(TargetCpu::Avx512dq) {
+        return false;
+    }
+    code.asm()
+        .evex(QUADWORD, 0x40, destination, destination, Rm::Xmm(source));
+    true
+}
+
 /// VPABSQ: the absolute value of each quadword of `xmm`, in place.
 pub(crate) fn quadword_absolute(code: &mut Code, xmm: u8, target: TargetCpu) -> bool {
     if !quadword_supported(target) {
@@ -1556,7 +1573,7 @@ mod tests {
     }
 
     #[test]
-    fn quadword_extrema_match_gnu_encodings() {
+    fn quadword_extrema_and_multiplies_match_gnu_encodings() {
         let target = TargetCpu::Avx512f.with_avx512vl();
         let mut code = Code::new();
         assert!(!quadword_absolute(&mut code, 0, TargetCpu::Avx512f));
@@ -1569,18 +1586,20 @@ mod tests {
             target.with_data_independent_timing()
         ));
         assert!(code.is_empty());
+        assert!(!quadword_multiply(&mut code, 2, 1, target));
         // GNU as: VPABSQ xmm2, xmm2; VPMINSQ, VPMINUQ, VPMAXSQ and VPMAXUQ
-        // xmm0, xmm0, xmm1.
+        // xmm0, xmm0, xmm1; VPMULLQ xmm2, xmm2, xmm1.
         assert!(quadword_absolute(&mut code, 2, target));
         for (signed, maximum) in [(true, false), (false, false), (true, true), (false, true)] {
             assert!(quadword_extremum(&mut code, 0, 1, signed, maximum, target));
         }
+        assert!(quadword_multiply(&mut code, 2, 1, target.with_avx512dq()));
         assert_eq!(
             code.into_bytes(),
             [
                 0x62, 0xf2, 0xfd, 0x08, 0x1f, 0xd2, 0x62, 0xf2, 0xfd, 0x08, 0x39, 0xc1, 0x62, 0xf2,
                 0xfd, 0x08, 0x3b, 0xc1, 0x62, 0xf2, 0xfd, 0x08, 0x3d, 0xc1, 0x62, 0xf2, 0xfd, 0x08,
-                0x3f, 0xc1,
+                0x3f, 0xc1, 0x62, 0xf2, 0xed, 0x08, 0x40, 0xd1,
             ]
         );
     }
