@@ -297,7 +297,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         } else {
             return None;
         };
-        if block.variant.single {
+        if self.variants[block.variant.0 as usize].single {
             return None;
         }
         let entry = &self.targets[chain::lookup_slot(next_pc)];
@@ -323,7 +323,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// exit out of the page goes through a lookup thunk instead.
     pub(super) fn link(&mut self, index: usize, next_pc: u64, kind: ExitKind) {
         let block = &self.blocks[index];
-        if block.variant.single || self.traces.binary_search(&next_pc).is_ok() {
+        if self.variants[block.variant.0 as usize].single
+            || self.traces.binary_search(&next_pc).is_ok()
+        {
             return;
         }
         let Some(position) = block
@@ -383,13 +385,16 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// the page's BTYPE is the block's.
     pub(super) fn link_dynamic(&mut self, index: usize, btype: u8) {
         let block = &self.blocks[index];
-        let Some(site) = block.dynamic_site.filter(|_| !block.variant.single) else {
+        let Some(site) = block
+            .dynamic_site
+            .filter(|_| !self.variants[block.variant.0 as usize].single)
+        else {
             return;
         };
         let Some((kind, fixed)) = dynamic_branch(block.terminal.1) else {
             return;
         };
-        let page = if block.variant.guarded_page {
+        let page = if self.variants[block.variant.0 as usize].guarded_page {
             0b11
         } else {
             0b01

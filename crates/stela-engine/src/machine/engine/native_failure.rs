@@ -198,7 +198,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         // DC ZVA block (Arm `AArch64_DataMemZero`), whatever stopped the
         // access.
         let (terminal, word) = self.blocks[index].terminal;
-        if pc == terminal && completes_natively(pc, word, self.blocks[index].variant.system) {
+        if pc == terminal && completes_natively(pc, word, self.block_variant(index).system) {
             self.statistics.system_exits += 1;
             let word = self.exit_word(index, pc)?;
             return self.completing(pc, |machine| machine.system_instruction(word));
@@ -229,7 +229,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             FaultCause::Watched | FaultCause::TagChecked => self.watched_access(index, pc),
             FaultCause::InvalidOpcode => {
                 let word = self.word(index, pc)?;
-                if self.blocks[index].checks.stack_alignment
+                if self.block_variant(index).checks.stack_alignment
                     && stack_based(word)
                     && !self.cpu.state.sp.is_multiple_of(16)
                 {
@@ -253,7 +253,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// explicitly.
     pub(super) fn run_translated(&mut self, index: usize, pc: u64, address: u64) -> Step {
         let block = &self.blocks[index];
-        if block.variant.translated || self.host.translation_helper().is_none() {
+        if self.variants[block.variant.0 as usize].translated
+            || self.host.translation_helper().is_none()
+        {
             let mut requirement = self.requirement(RequirementKind::Native(
                 "a mapped guest address outside the host's native ranges",
             ));

@@ -30,7 +30,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
             self.remember_target(pc, entry.block);
             return Ok(Fetched::Block(entry.block));
         }
-        let index = match self.index.get(&(pc, physical, variant)) {
+        let indexed = self
+            .known_variant(variant)
+            .and_then(|id| self.index.get(&(pc, physical, id)));
+        let index = match indexed {
             Some(&index) => index,
             None => {
                 let generation = self.code_generation;
@@ -66,7 +69,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// The fetch translated `pc`, so its page's entry is in the fetch cache.
     pub(super) fn remember_target(&mut self, pc: u64, index: usize) {
         let block = &self.blocks[index];
-        if block.variant.single || self.traces.binary_search(&pc).is_ok() {
+        if self.variants[block.variant.0 as usize].single || self.traces.binary_search(&pc).is_ok()
+        {
             return;
         }
         let (entry, first) = (block.code.0 as u64, block.first);
@@ -314,6 +318,29 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
     }
 
+    /// `variant`'s id, added to [`Self::variants`] the first time.
+    pub(super) fn variant_id(&mut self, variant: Variant) -> VariantId {
+        if let Some(id) = self.known_variant(variant) {
+            return id;
+        }
+        let id = u32::try_from(self.variants.len()).expect("a bounded set of variants");
+        self.variants.push(variant);
+        VariantId(id)
+    }
+
+    /// `variant`'s id, once a block was compiled for it.
+    pub(super) fn known_variant(&self, variant: Variant) -> Option<VariantId> {
+        self.variants
+            .iter()
+            .position(|known| *known == variant)
+            .map(|at| VariantId(at as u32))
+    }
+
+    /// What block `index` was compiled for.
+    pub(super) fn block_variant(&self, index: usize) -> Variant {
+        self.variants[self.blocks[index].variant.0 as usize]
+    }
+
     /// How blocks of `variant` are compiled, made once per variant.
     pub(super) fn preparation(&mut self, variant: Variant) -> Arc<Preparation> {
         let variant = Variant {
@@ -366,7 +393,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         source: &[u8],
         compiled: recovery::CodeRecovery,
     ) -> Result<Fetched, Stop> {
-        let Variant { checks, single, .. } = variant;
+        let single = variant.single;
         if compiled.portable_requires_unavailable_capture() {
             return Err(self.unsupported(RequirementKind::Native(
                 "native spill/extended-register invocation capture is not qualified",
@@ -440,6 +467,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 terminal,
             ));
         }
+        let id = self.variant_id(variant);
         let block = Block {
             pc,
             physical,
@@ -450,8 +478,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 .iter()
                 .map(|(guest, offset)| (guest.0, *offset))
                 .collect(),
-            checks,
-            variant,
+            variant: id,
             successors,
             dynamic_site,
             first,
@@ -468,11 +495,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
             None => self.blocks.push(block),
         };
         self.fault_recovery.insert(index, compiled);
-        self.index.insert((pc, physical, variant), index);
+        self.index.insert((pc, physical, id), index);
         self.code_pages
             .entry(physical & !(FETCH_PAGE - 1))
             .or_default()
-            .push((pc, physical, variant));
+            .push((pc, physical, id));
         Ok(Fetched::Block(index))
     }
 

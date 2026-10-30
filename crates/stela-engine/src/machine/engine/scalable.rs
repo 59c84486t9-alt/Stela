@@ -387,7 +387,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
             translated: false,
         };
         let variant = self.page_variant(variant, physical);
-        let index = match self.index.get(&(pc, physical, variant)) {
+        let indexed = self
+            .known_variant(variant)
+            .and_then(|id| self.index.get(&(pc, physical, id)));
+        let index = match indexed {
             Some(&index) => index,
             None => match self.compile(pc, physical, variant)? {
                 Fetched::Block(index) => index,

@@ -409,9 +409,7 @@ struct Block {
     code: NativeCode,
     /// Guest PC and native offset of every instruction, ascending.
     source_map: Vec<(u64, usize)>,
-    /// The memory checks it was compiled with.
-    checks: MemoryChecks,
-    variant: Variant,
+    variant: VariantId,
     /// Direct exits to static successors not yet chained, its own and its
     /// PAC thunk's.
     successors: Vec<Successor>,
@@ -543,6 +541,11 @@ const SPACES: usize = 64;
 /// for the ELs and GXF states a kernel's exceptions alternate between.
 const RECENT: usize = 4;
 
+/// A [`Variant`] in [`Machine::variants`]: a block's and its index keys'
+/// compact name for what it was compiled for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct VariantId(u32);
+
 /// What a block is compiled for besides its PC and PA.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct Variant {
@@ -623,13 +626,16 @@ pub struct Machine<H: Host, D: Devices> {
     fault_recovery: BTreeMap<usize, recovery::CodeRecovery>,
     native_patches: BTreeMap<usize, recovery::OwnedPatch>,
     native_failure: Option<recovery::CapturedFailure>,
-    /// Blocks by PC, PA, FP enablement and SP alignment checking.
-    index: BTreeMap<(u64, u64, Variant), usize>,
+    /// Every variant a block was compiled for, once: what a [`VariantId`]
+    /// names.
+    variants: Vec<Variant>,
+    /// Blocks by PC, PA and variant.
+    index: BTreeMap<(u64, u64, VariantId), usize>,
     /// The `index` keys of the blocks compiled from each physical page.
-    code_pages: BTreeMap<u64, Vec<(u64, u64, Variant)>>,
+    code_pages: BTreeMap<u64, Vec<(u64, u64, VariantId)>>,
     /// The last block [`Machine::stale_code`] checked, where its sweep goes
     /// on; `None` to start over.
-    stale_cursor: Option<(u64, u64, Variant)>,
+    stale_cursor: Option<(u64, u64, VariantId)>,
     /// The fetch pages read for the translation store, by physical page,
     /// until their code is invalidated or they are the least recently used
     /// ([`stored`]), and the count of their uses so far.
@@ -874,6 +880,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             fault_recovery: BTreeMap::new(),
             native_patches: BTreeMap::new(),
             native_failure: None,
+            variants: Vec::new(),
             index: BTreeMap::new(),
             code_pages: BTreeMap::new(),
             stale_cursor: None,

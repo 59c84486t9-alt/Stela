@@ -1193,7 +1193,7 @@ fn pstate_dit_selects_blocks_compiled_for_the_data_independent_timing_target() {
     let Ok(Fetched::Block(untimed)) = machine.fetch_block(BASE, false) else {
         panic!("block")
     };
-    assert!(!machine.blocks[untimed].variant.timing);
+    assert!(!machine.block_variant(untimed).timing);
     assert!(has(&machine, untimed, &LOCK_XADD) && !has(&machine, untimed, &PLAIN_ADD_STORE));
     machine.cpu.pstate.dit = false;
     assert!(matches!(machine.fetch_block(BASE, false), Ok(Fetched::Block(i)) if i == untimed));
@@ -1206,7 +1206,7 @@ fn pstate_dit_selects_blocks_compiled_for_the_data_independent_timing_target() {
         panic!("timed block")
     };
     assert_ne!(timed, untimed);
-    assert!(machine.blocks[timed].variant.timing);
+    assert!(machine.block_variant(timed).timing);
     assert!(has(&machine, timed, &PLAIN_ADD_STORE) && !has(&machine, timed, &LOCK_XADD));
     machine.cpu.pstate.dit = false;
     assert!(matches!(machine.fetch_block(BASE, false), Ok(Fetched::Block(i)) if i == untimed));
@@ -1230,7 +1230,7 @@ fn sctlr_sa_selects_blocks_with_or_without_the_sp_alignment_check() {
     let Ok(Fetched::Block(checked)) = machine.fetch_block(BASE, false) else {
         panic!("checked block")
     };
-    assert!(machine.blocks[checked].checks.stack_alignment && has_check(&machine, checked));
+    assert!(machine.block_variant(checked).checks.stack_alignment && has_check(&machine, checked));
     machine
         .cpu
         .registers
@@ -1240,7 +1240,9 @@ fn sctlr_sa_selects_blocks_with_or_without_the_sp_alignment_check() {
         panic!("unchecked block")
     };
     assert_ne!(checked, unchecked);
-    assert!(!machine.blocks[unchecked].checks.stack_alignment && !has_check(&machine, unchecked));
+    assert!(
+        !machine.block_variant(unchecked).checks.stack_alignment && !has_check(&machine, unchecked)
+    );
     assert!(stack_based(0xf940_07e0) && !stack_based(0xf940_0020));
     assert!(!stack_based(0x5800_003f), "a literal load has no base");
 }
@@ -1313,7 +1315,11 @@ fn native_alignment_checks_take_the_alignment_fault_of_the_access() {
                     machine.cpu.read(SystemRegister::FAR_EL1),
                 )
             }),
-            machine.blocks.iter().last().map(|block| block.checks),
+            machine
+                .blocks
+                .len()
+                .checked_sub(1)
+                .map(|last| machine.block_variant(last).checks),
         )
     };
     // EC 0x25 with IL and DFSC 0b100001; WnR for a store.
@@ -1452,7 +1458,7 @@ fn a_mapped_address_outside_the_native_ranges_runs_its_page_translated() {
     let Ok(Fetched::Block(index)) = machine.fetch_block(BASE, false) else {
         panic!("block")
     };
-    assert_eq!(machine.blocks[index].checks.range, check);
+    assert_eq!(machine.block_variant(index).checks.range, check);
     // With the helper, a range check's #UD and an elided access's #GP
     // alike run the page in the translated variant.
     const HELPER: u64 = 0x1000;
@@ -1473,9 +1479,10 @@ fn a_mapped_address_outside_the_native_ranges_runs_its_page_translated() {
             panic!("block")
         };
         let block = &machine.blocks[index];
-        assert!(block.variant.translated, "{cause:?}");
+        let variant = machine.block_variant(index);
+        assert!(variant.translated, "{cause:?}");
         assert_eq!(
-            block.checks,
+            variant.checks,
             current.checks.with_translation(HELPER),
             "{cause:?}"
         );
@@ -2313,7 +2320,7 @@ fn returns_and_exits_out_of_the_page_go_through_lookup_thunks() {
     assert!(renewed > context);
     // The thunk's entry for `far` names the old context.
     assert_eq!(machine.statistics.lookup_misses, [2, 0, 1, 0, 0]);
-    let variant = machine.blocks[0].variant;
+    let variant = machine.block_variant(0);
     let el = machine.cpu.pstate.el;
     assert_eq!(machine.context(el, variant, half), renewed);
     assert_ne!(machine.context(el ^ 1, variant, half), renewed);
@@ -2513,7 +2520,7 @@ fn indirect_branches_go_through_lookups_that_check_the_target() {
     machine.cpu.pstate.btype = 0;
     machine.step().unwrap();
     assert_eq!(machine.blocks.len(), 4);
-    assert!(!machine.blocks[2].variant.guarded_page && machine.blocks[3].variant.guarded_page);
+    assert!(!machine.block_variant(2).guarded_page && machine.block_variant(3).guarded_page);
     let control = machine.chain.address();
     for (index, kind, btype) in [
         (0, ExitKind::Call, 0b10),
@@ -3315,11 +3322,11 @@ fn dc_clean_blocks_follow_the_traps_and_faults_complete_in_the_engine() {
     };
     machine.host.exits = vec![fallthrough];
     machine.step().unwrap();
-    let block = &machine.blocks[0];
     assert_eq!(
-        block.variant.system.cache_clean,
+        machine.block_variant(0).system.cache_clean,
         cache_clean::Operations::ALL
     );
+    let block = &machine.blocks[0];
     let code = &machine.host.installed[block.code.0 / NATIVE_CODE_STRIDE - 1];
     let tail = chain::direct_exit(next, ExitKind::Fallthrough);
     assert_eq!(code[code.len() - chain::DIRECT_EXIT_BYTES..], tail);
@@ -3336,8 +3343,8 @@ fn dc_clean_blocks_follow_the_traps_and_faults_complete_in_the_engine() {
     machine.step().unwrap();
     let trapped = &machine.blocks[1];
     assert!(
-        !trapped
-            .variant
+        !machine
+            .block_variant(1)
             .system
             .cache_clean
             .contains(cache_clean::Operations::CIVAC)
@@ -5025,8 +5032,8 @@ fn dc_zva_blocks_follow_the_permission_and_faults_complete_in_the_engine() {
         kind: ExitKind::Fallthrough as u64,
     }];
     machine.step().unwrap();
+    assert_eq!(machine.block_variant(0).system.zero_block, Some(64));
     let block = &machine.blocks[0];
-    assert_eq!(block.variant.system.zero_block, Some(64));
     let code = &machine.host.installed[block.code.0 / NATIVE_CODE_STRIDE - 1];
     let tail = chain::direct_exit(next, ExitKind::Fallthrough);
     assert_eq!(code[code.len() - chain::DIRECT_EXIT_BYTES..], tail);
@@ -5045,8 +5052,8 @@ fn dc_zva_blocks_follow_the_permission_and_faults_complete_in_the_engine() {
         kind: ExitKind::Fallthrough as u64,
     }];
     machine.step().unwrap();
+    assert_eq!(machine.block_variant(1).system.zero_block, None);
     let trapped = &machine.blocks[1];
-    assert_eq!(trapped.variant.system.zero_block, None);
     let code = &machine.host.installed[trapped.code.0 / NATIVE_CODE_STRIDE - 1];
     assert_eq!(
         code[code.len() - chain::DIRECT_EXIT_BYTES..],
@@ -5063,7 +5070,7 @@ fn dc_zva_blocks_follow_the_permission_and_faults_complete_in_the_engine() {
         base + 4,
         stela_compiler::block::RecoverySiteKind::GuestAccess,
     );
-    let expected: &[u8] = if machine.blocks[entered].variant.system.zero_block.unwrap() == 4 {
+    let expected: &[u8] = if machine.block_variant(entered).system.zero_block.unwrap() == 4 {
         &[0x89, 0x08]
     } else {
         &[0x48, 0x89, 0x48, 0x00]
