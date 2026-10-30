@@ -408,9 +408,14 @@ pub(super) struct Drained {
 impl Drained {
     pub(super) fn take(devices: &mut AppleDevices) -> Self {
         let usb: Vec<_> = core::iter::from_fn(|| devices.take_usb_log()).collect();
-        let mux_error = usb
-            .iter()
-            .any(|log| matches!(log, stela_soc::machine::UsbLog::MuxControl(_)));
+        // Lost or refused mux data: what the core transferred before it.
+        let mux_error = usb.iter().any(|log| {
+            matches!(
+                log,
+                stela_soc::machine::UsbLog::MuxControl(_)
+                    | stela_soc::machine::UsbLog::MuxRejected(_)
+            )
+        });
         Self {
             // The console that adds them is a device another PE can reach.
             lines: GUEST_LINES

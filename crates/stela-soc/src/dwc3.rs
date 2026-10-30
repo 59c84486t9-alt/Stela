@@ -320,7 +320,7 @@ impl Dwc3 {
                 resume,
                 event,
             } => format!(
-                "ep={ep} completed trb={trb:#x} buffer={buffer:#x} size={size} done={done}                  ctrl={ctrl:#x} event={event} resume={}",
+                "ep={ep} completed trb={trb:#x} buffer={buffer:#x} size={size} done={done} ctrl={ctrl:#x} event={event} resume={}",
                 resume.map_or_else(|| String::from("none"), |trb| format!("{trb:#x}"))
             ),
         })
