@@ -1,6 +1,9 @@
 //! The station drives the managed link from scan to an open port against
 //! the device model and a software authenticator.
 use super::*;
+use crate::wifi::mediatek::bootstrap::client::policy::tests::{
+    passive_country, setup_passive_five,
+};
 use crate::wifi::{
     connection::security::Security,
     mediatek::{bootstrap::client::modern::tests::pmf_controls::inputs_akm, station::Station},
@@ -311,4 +314,54 @@ fn a_protected_psk_association_opens_its_port_once_the_igtk_installs() {
     assert!(!station.carrier());
     ap.signed_reply(&sent_eapol(&model), 0x308);
     assert!(station.carrier());
+}
+
+#[test]
+fn a_scan_listens_where_its_channels_bar_probes_and_finds_the_ap_there() {
+    let (client, model) = setup_passive_five();
+    let (_, bss) = modern_inputs(&client);
+    let client = ManagedClient::new(client, passive_country(), Environment::Indoor).unwrap();
+    let link = ManagedLink::new(
+        client,
+        Provider(Arc::new(AtomicUsize::new(0)), Default::default()),
+    )
+    .unwrap();
+    assert!(link.probes(Channel {
+        band: Band::Ghz2,
+        number: 1,
+        frequency_mhz: 2412,
+    }));
+    assert!(!link.probes(CHANNEL));
+    let network = Network {
+        ssid: b"x".to_vec(),
+        secret: Secret::parse(b"correct horse battery").unwrap(),
+        country: None,
+    };
+    let mut station = Station::new(
+        link,
+        profile().interface,
+        passive_country(),
+        network,
+        Arc::new(Fixed),
+        crate::Clock {
+            ticks_per_microsecond: 1,
+        },
+    );
+    // The first part probes 2.4 GHz and finds nothing.
+    assert!(!station.carrier());
+    done(&model);
+    assert!(!station.carrier());
+    // The second listens on 5 GHz, where the AP beacons; both parts' BSSes
+    // stay known for the choice, which authenticates with the AP.
+    let mut body = vec![0; 8];
+    body.extend_from_slice(&100u16.to_le_bytes());
+    body.extend_from_slice(&bss.capabilities.to_le_bytes());
+    body.extend_from_slice(&bss.elements);
+    let mut beacon = response(0x80, &body);
+    beacon[4..10].copy_from_slice(&Mac::BROADCAST.0);
+    incoming(&model, &beacon, None, false);
+    assert!(!station.carrier());
+    done(&model);
+    assert!(!station.carrier());
+    assert_eq!(finish_tx(&model)[0][..2], [0xb0, 0]);
 }

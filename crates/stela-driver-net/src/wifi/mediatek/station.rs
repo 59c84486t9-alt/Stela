@@ -119,7 +119,8 @@ enum State {
     Waiting {
         at: u64,
     },
-    Scanning,
+    /// A scan part runs; the parts after it follow in order.
+    Scanning(Vec<scan::Request>),
     Authenticating(Box<Authenticating>),
     Joining(Box<Candidate>),
     Handshake {
@@ -274,15 +275,7 @@ impl<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> St
         let phase = self.link.phase();
         match &self.state {
             State::Waiting { at } if now >= *at => self.scan(now),
-            State::Scanning if phase == Phase::ScanCompleted => {
-                // SAFETY: the link is polled with the device's interrupts
-                // masked, so the scan's completion event was its last user;
-                // the retirement itself refuses while receive work is queued.
-                match unsafe { self.link.retire_scan_after_drain() } {
-                    Ok(_) => self.choose(now),
-                    Err(error) => self.fail(format!("{error}")),
-                }
-            }
+            State::Scanning(_) if phase == Phase::ScanCompleted => self.scanned(now),
             State::Authenticating(authenticating)
                 if authenticating.exchange.accepted()
                     && self.link.station().external_authenticated() =>
@@ -329,25 +322,56 @@ impl<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> St
         }
     }
 
-    /// `wpa_supplicant_req_scan`: an active scan with the wildcard SSID on
-    /// every 2.4 and 5 GHz channel that may transmit.
+    /// `wpa_supplicant_req_scan`: a scan with the wildcard SSID on every 2.4
+    /// and 5 GHz channel that may transmit. It probes where the channel
+    /// permits and listens elsewhere, as mac80211 scans NO_IR channels
+    /// passively within one active scan, so it runs in those two parts.
     fn scan(&mut self, now: u64) {
-        let channels = [Band::Ghz2, Band::Ghz5]
+        let (active, passive): (Vec<_>, Vec<_>) = [Band::Ghz2, Band::Ghz5]
             .into_iter()
             .flat_map(|band| self.link.channels(band))
             .map(|(channel, _)| channel)
-            .collect();
-        let started = scan::Request::new(channels, vec![Vec::new()], Vec::new())
-            .map_err(|error| format!("MT7925 scan: {error:?}"))
-            .and_then(|request| {
-                self.link
-                    .begin_scan(request, SCAN_BUDGET_US)
-                    .map_err(|error| format!("{error}"))
-            });
-        self.state = match started {
-            Ok(_) => State::Scanning,
-            Err(message) => {
-                self.fail(message);
+            .partition(|&channel| self.link.probes(channel));
+        let parts = [(active, vec![Vec::new()]), (passive, Vec::new())]
+            .into_iter()
+            .filter(|(channels, _)| !channels.is_empty())
+            .map(|(channels, ssids)| scan::Request::new(channels, ssids, Vec::new()))
+            .collect::<Result<Vec<_>, _>>();
+        match parts {
+            Ok(parts) => self.next_scan(now, parts),
+            Err(error) => {
+                self.fail(format!("MT7925 scan: {error:?}"));
+                self.state = State::Waiting {
+                    at: now + SCAN_INTERVAL_US,
+                };
+            }
+        }
+    }
+
+    /// A scan part completed: retire it, then run the next.
+    fn scanned(&mut self, now: u64) {
+        // SAFETY: the link is polled with the device's interrupts masked, so
+        // the scan's completion event was its last user; the retirement
+        // itself refuses while receive work is queued.
+        if let Err(error) = unsafe { self.link.retire_scan_after_drain() } {
+            return self.fail(format!("{error}"));
+        }
+        if let State::Scanning(parts) = &mut self.state {
+            let parts = core::mem::take(parts);
+            self.next_scan(now, parts);
+        }
+    }
+
+    /// Start the first of `parts`, or choose a BSS once none remains.
+    fn next_scan(&mut self, now: u64, mut parts: Vec<scan::Request>) {
+        if parts.is_empty() {
+            return self.choose(now);
+        }
+        let part = parts.remove(0);
+        self.state = match self.link.begin_scan(part, SCAN_BUDGET_US) {
+            Ok(_) => State::Scanning(parts),
+            Err(error) => {
+                self.fail(format!("{error}"));
                 State::Waiting {
                     at: now + SCAN_INTERVAL_US,
                 }
@@ -503,7 +527,7 @@ impl<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> St
     /// request carries the exchange's PMKID, and its PMK keys the handshake.
     fn associate(&mut self, now: u64) {
         let State::Authenticating(authenticating) =
-            core::mem::replace(&mut self.state, State::Scanning)
+            core::mem::replace(&mut self.state, State::Scanning(Vec::new()))
         else {
             return;
         };
@@ -660,7 +684,9 @@ impl<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> St
 
     /// Configure the association the AP accepted, then await message 1.
     fn configure(&mut self, now: u64) {
-        let State::Joining(candidate) = core::mem::replace(&mut self.state, State::Scanning) else {
+        let State::Joining(candidate) =
+            core::mem::replace(&mut self.state, State::Scanning(Vec::new()))
+        else {
             return;
         };
         if let Err(error) = self.link.configure() {
@@ -819,7 +845,7 @@ impl<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> St
             bssid,
             management,
             ..
-        } = core::mem::replace(&mut self.state, State::Scanning)
+        } = core::mem::replace(&mut self.state, State::Scanning(Vec::new()))
         else {
             unreachable!("matched above")
         };

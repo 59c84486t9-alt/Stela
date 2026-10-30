@@ -289,6 +289,10 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
     pub fn channels(&self, band: Band) -> Vec<(wifi::Channel, u32)> {
         self.state().client.channels(band)
     }
+    /// Whether a scan may probe on `channel`; elsewhere it listens.
+    pub fn probes(&self, channel: wifi::Channel) -> bool {
+        self.state().client.probes(channel)
+    }
     pub fn local_advertisement(&self, band: Band) -> Result<Advertisement, LinkControlError> {
         self.state()
             .client

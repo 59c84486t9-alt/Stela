@@ -23,6 +23,8 @@ pub use link::{
 
 static NEXT_OWNER: wifi::Identities = wifi::Identities::new();
 static NEXT_BSS: wifi::Identities = wifi::Identities::new();
+/// IEEE80211_SCAN_RESULT_EXPIRE: how long a scan's BSS stays known.
+const BSS_EXPIRE_US: u64 = 30_000_000;
 
 /// Where the station operates, as cfg80211's `reg_is_indoor` knows it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -752,8 +754,23 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
             .client
             .begin_scan(request, now, budget, &mut check)
             .map_err(PolicyError::Client)?;
-        self.observed.clear();
+        // cfg80211_bss_expire: the BSSes earlier scans found stay until old.
+        self.observed.retain(|b| {
+            now.checked_sub(b.seen)
+                .is_some_and(|age| age <= BSS_EXPIRE_US)
+        });
         Ok(ticket)
+    }
+    /// Whether a scan may probe on `channel`, as its admission decides.
+    pub fn probes(&self, channel: Channel) -> bool {
+        Check {
+            snapshot: &self.snapshot,
+            country: &self.country,
+            environment: self.environment,
+            revoked: self.revoked,
+            peer: self.peer,
+        }
+        .tx(channel, true)
     }
     /// Whether the current association protects its management frames.
     pub fn protected(&self) -> bool {
@@ -832,7 +849,8 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
             for event in &events {
                 if let Event::Bss(bss) = event {
                     self.observed.retain(|b| {
-                        now.checked_sub(b.seen).is_some_and(|age| age <= 30_000_000)
+                        now.checked_sub(b.seen)
+                            .is_some_and(|age| age <= BSS_EXPIRE_US)
                             && (b.bss.bssid != bss.bssid || b.bss.channel != bss.channel)
                     });
                     if self.observed.len() >= 1024 {
@@ -868,7 +886,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
             .ok_or(PolicyError::Bss)?;
         if now
             .checked_sub(observed.seen)
-            .is_none_or(|age| age > 30_000_000)
+            .is_none_or(|age| age > BSS_EXPIRE_US)
             || observed.bss.channel != join.channel
             || observed.bss.bssid != join.bssid
         {

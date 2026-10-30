@@ -22,7 +22,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
             .ok_or(PolicyError::Bss)?;
         if now
             .checked_sub(observed.seen)
-            .is_none_or(|age| age > 30_000_000)
+            .is_none_or(|age| age > BSS_EXPIRE_US)
             || observed.bss.channel != profile.channel
             || observed.bss.bssid != profile.peer
             || observed.bss.transmitter != profile.peer
@@ -162,7 +162,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
             .ok_or(PolicyError::Bss)?;
         if now
             .checked_sub(observed.seen)
-            .is_none_or(|age| age > 30_000_000)
+            .is_none_or(|age| age > BSS_EXPIRE_US)
             || observed.bss.channel != join.channel
             || observed.bss.bssid != join.bssid
         {

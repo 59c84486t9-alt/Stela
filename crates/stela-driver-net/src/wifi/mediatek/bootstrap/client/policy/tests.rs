@@ -23,11 +23,22 @@ pub(super) fn setup_modern_radio(
     split: bool,
     channel: Channel,
 ) -> (Client<Bar, Q, NativeGuard>, Model) {
-    setup_modern_bands(split, channel, None)
+    setup_modern_bands(split, channel, 0, None)
 }
 /// A modern client whose board also programs 6 GHz channel 1 with `flags`.
 pub(crate) fn setup_six(flags: u32) -> (Client<Bar, Q, NativeGuard>, Model) {
-    setup_modern_bands(false, CHANNEL, Some(flags))
+    setup_modern_bands(false, CHANNEL, 0, Some(flags))
+}
+/// A modern client whose 5 GHz channels bar probes, under `passive_country`.
+pub(crate) fn setup_passive_five() -> (Client<Bar, Q, NativeGuard>, Model) {
+    setup_modern_bands(false, CHANNEL, channel::NO_IR, None)
+}
+/// The rules of `country()` with its 5 GHz band NO-IR.
+pub(crate) fn passive_country() -> Country {
+    country_of(&[
+        (2_400_000, 2_500_000, 80_000, 3000, 0),
+        (5_150_000, 5_350_000, 80_000, 3000, 8),
+    ])
 }
 /// The US rules of `country()` and its 6 GHz band.
 pub(crate) fn six_country() -> Country {
@@ -40,6 +51,7 @@ pub(crate) fn six_country() -> Country {
 fn setup_modern_bands(
     split: bool,
     channel: Channel,
+    five: u32,
     six: Option<u32>,
 ) -> (Client<Bar, Q, NativeGuard>, Model) {
     let mut f = NativeFixture::new(Chip::Mt7925);
@@ -61,7 +73,7 @@ fn setup_modern_bands(
             [36, 40, 44, 48]
                 .map(|hardware_value| domain::Channel {
                     hardware_value,
-                    flags: WIDE,
+                    flags: WIDE | five,
                 })
                 .to_vec(),
             six.map(|flags| domain::Channel {
