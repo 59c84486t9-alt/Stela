@@ -1372,7 +1372,7 @@ mod tests {
         ] {
             forms.push((base, signed, Form::Matrix));
         }
-        let host = TargetCpu::detect();
+        let host = crate::x86_64::modeled::host();
         let mut extended = 0;
         let mut random = 0x9e3779b97f4a7c15_u64;
         for target in [
