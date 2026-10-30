@@ -179,6 +179,7 @@ impl Linux {
             PathBuf::from(format!("{DRM}/drm_fourcc.c")),
             PathBuf::from(format!("{LINUX}/lib/string.c")),
             PathBuf::from(format!("{LINUX}/lib/hexdump.c")),
+            PathBuf::from(format!("{LINUX}/lib/ratelimit.c")),
             PathBuf::from(format!("{LINUX}/lib/scatterlist.c")),
             PathBuf::from(format!("{LINUX}/lib/find_bit.c")),
             PathBuf::from(format!("{LINUX}/lib/bitmap.c")),
@@ -352,6 +353,7 @@ impl Linux {
             ("linux_printf", "printf.c", "STELA_LINUX_PRINTF_TEST"),
             ("linux_uuid", "uuid.c", "STELA_LINUX_UUID_TEST"),
             ("linux_kstrtox", "kstrtox.c", "STELA_LINUX_KSTRTOX_TEST"),
+            ("linux_jiffies", "jiffies.c", "STELA_LINUX_JIFFIES_TEST"),
             ("linux_refcount", "refcount.c", "STELA_LINUX_REFCOUNT_TEST"),
             (
                 "linux_const_string",
