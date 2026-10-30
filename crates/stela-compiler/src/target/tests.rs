@@ -76,7 +76,7 @@ fn canonical_ids_and_aliases_keep_their_spelling() {
         "x86_64-baseline+ssse3+sse4.1+sse4.2+pclmulqdq+fma+f16c+popcnt+bmi1+aes+sha\
          +atomic-load16+cx8+cx16+avx2+avx512f+lzcnt+bmi2+fast-pdep+movbe+gfni\
          +avx512vl+avx512bw+avx512cd+avx512dq+avx512vpopcntdq+avx512bitalg+avx512vbmi+avx512vnni\
-         +avxvnni+avxvnniint8+avxvnniint16+avx512bf16+avxneconvert+avx512fp16+vaes+vpclmulqdq+sha512+sm3+sm4\
+         +avxvnni+avxvnniint8+avxvnniint16+avx512bf16+avxneconvert+avx512fp16+avx10.2+vaes+vpclmulqdq+sha512+sm3+sm4\
          +apx+apx-ndd+line-atomic+doit+dit"
     );
 }
@@ -338,6 +338,7 @@ const RICH: HostCpuid = HostCpuid {
     leaf7_edx: u32::MAX,
     leaf7_1_eax: u32::MAX,
     leaf7_1_edx: u32::MAX,
+    leaf24_ebx: u32::MAX,
     leaf29_ebx: u32::MAX,
     extended1_ecx: u32::MAX,
     xcr0: XCR0_AVX_STATE | XCR0_AVX512_STATE | XCR0_APX_STATE,
@@ -359,6 +360,7 @@ fn a_rich_host_has_every_feature_and_the_psabi_levels() {
 #[test]
 fn apx_destinations_require_the_separate_cpuid_bit() {
     let foundation = TargetCpu::from_cpuid(&HostCpuid {
+        leaf24_ebx: 0,
         leaf29_ebx: 0,
         ..RICH
     });

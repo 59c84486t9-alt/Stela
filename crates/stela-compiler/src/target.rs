@@ -53,6 +53,8 @@ pub struct HostCpuid {
     pub leaf7_1_eax: u32,
     /// Leaf 7 subleaf 1 EDX.
     pub leaf7_1_edx: u32,
+    /// Leaf 24H subleaf 0 EBX: the AVX10 converged version.
+    pub leaf24_ebx: u32,
     /// Leaf 29H subleaf 0 EBX: APX conditional, NDD and NF capabilities.
     pub leaf29_ebx: u32,
     /// Leaf 8000_0001H ECX.
@@ -115,6 +117,7 @@ impl HostCpuid {
             leaf7_edx: leaf7.edx,
             leaf7_1_eax: leaf7_1.eax,
             leaf7_1_edx: leaf7_1.edx,
+            leaf24_ebx: leaf(0x24).ebx,
             leaf29_ebx: leaf(0x29).ebx,
             extended1_ecx,
             xcr0,
@@ -328,6 +331,10 @@ features! {
     /// AVX-512 FP16: half-precision arithmetic.
     Avx512fp16, with_avx512fp16, "+avx512fp16", |cpu| {
         cpu.avx512f() && HostCpuid::bit(cpu.leaf7_edx, 23)
+    };
+    /// AVX10.2: VMINMAX among its converged EVEX instructions.
+    Avx102, with_avx10_2, "+avx10.2", |cpu| {
+        cpu.avx512f() && HostCpuid::bit(cpu.leaf7_1_edx, 19) && cpu.leaf24_ebx & 0xff >= 2
     };
     /// VAES: VEX and EVEX AES rounds on wide vectors.
     Vaes, with_vaes, "+vaes", |cpu| cpu.avx() && HostCpuid::bit(cpu.leaf7_ecx, 9);

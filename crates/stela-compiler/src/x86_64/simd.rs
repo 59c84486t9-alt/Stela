@@ -336,7 +336,9 @@ pub(super) fn emit_numerical_split(
         crate::aarch64::FloatingPointOperation::ExtremaScale(operand) => {
             extrema_scale::emit(code, operand, pc, target);
         }
-        crate::aarch64::FloatingPointOperation::MinMax(operand) => minmax::emit(code, operand, pc),
+        crate::aarch64::FloatingPointOperation::MinMax(operand) => {
+            minmax::emit(code, operand, pc, target)
+        }
         crate::aarch64::FloatingPointOperation::Rounding(operand) => {
             rounding::emit(code, operand, pc, target)
         }

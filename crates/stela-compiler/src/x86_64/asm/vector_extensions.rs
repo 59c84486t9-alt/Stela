@@ -290,6 +290,45 @@ pub(crate) fn half_arithmetic(code: &mut Code, opcode: HalfOpcode, destination: 
     );
 }
 
+/// AVX10.2's VMINMAX. The DIT profile keeps its reviewed recipe.
+pub(crate) fn extrema_supported(target: TargetCpu) -> bool {
+    target.supports(TargetCpu::Avx102) && !target.data_independent_timing()
+}
+
+/// VMINMAX's immediate: the result's sign follows the selection, so -0 orders
+/// below +0, and a NaN operand propagates; bit 0 selects maximum.
+const EXTREMA_SIGN_FROM_SELECTION: u8 = 1 << 2;
+
+/// VMINMAXPS/PD, or SS/SD when `scalar`: the IEEE 754-2019 minimum or `maximum`
+/// of `destination` and `right` into `destination`.
+pub(crate) fn extrema(
+    code: &mut Code,
+    format: Format,
+    scalar: bool,
+    maximum: bool,
+    destination: u8,
+    right: u8,
+) {
+    let mut asm = code.asm();
+    asm.evex(
+        Evex {
+            map: Map::M0f3a,
+            pp: Pp::P66,
+            w: format == Format::Double,
+            length: 0,
+            mask: 0,
+            zeroing: false,
+            broadcast: false,
+            scale: 16,
+        },
+        0x52 + u8::from(scalar),
+        destination,
+        destination,
+        Rm::Xmm(right),
+    );
+    asm.data(&[EXTREMA_SIGN_FROM_SELECTION | u8::from(maximum)]);
+}
+
 /// VFMADD132PH, VFMSUB132PH, VFNMADD132PH or VFNMSUB132PH, by the map 6 opcode
 /// they share with FMA3: `left` * `right` +/- `addend` into `left`, rounded once
 /// under MXCSR.RC, in the [`half_writemask`] lanes as [`half_arithmetic`] does.
@@ -1321,19 +1360,23 @@ mod tests {
         half_from_signed(&mut code, 0, true, Gpr::Rax);
         half_to_signed(&mut code, Gpr::Rax, 0, false, true);
         half_from_double(&mut code, 0, 1);
+        extrema(&mut code, Format::Single, false, false, 0, 1);
+        extrema(&mut code, Format::Double, true, true, 0, 1);
         assert_eq!(
             code,
             [
-                &[0xb8, 0x0f, 0, 0, 0][..],            // mov eax,0xf
-                &[0xc5, 0xf8, 0x92, 0xc8],             // kmovw k1,eax
-                &[0x62, 0xf5, 0x7c, 0x89, 0x58, 0xc1], // vaddph xmm0{k1}{z},xmm0,xmm1
-                &[0x62, 0x55, 0x34, 0x89, 0x5c, 0xca], // vsubph xmm9{k1}{z},xmm9,xmm10
-                &[0x62, 0xf5, 0x6c, 0x89, 0x59, 0xd3], // vmulph xmm2{k1}{z},xmm2,xmm3
-                &[0x62, 0xf6, 0x4d, 0x89, 0x98, 0xc1], // vfmadd132ph xmm0{k1}{z},xmm6,xmm1
-                &[0x62, 0x56, 0x2d, 0x89, 0x9c, 0xcb], // vfnmadd132ph xmm9{k1}{z},xmm10,xmm11
-                &[0x62, 0xf5, 0xfe, 0x08, 0x2a, 0xc0], // vcvtsi2sh xmm0,xmm0,rax
-                &[0x62, 0xf5, 0x7e, 0x08, 0x2c, 0xc0], // vcvttsh2si eax,xmm0
-                &[0x62, 0xf5, 0xff, 0x08, 0x5a, 0xc1], // vcvtsd2sh xmm0,xmm0,xmm1
+                &[0xb8, 0x0f, 0, 0, 0][..],                  // mov eax,0xf
+                &[0xc5, 0xf8, 0x92, 0xc8],                   // kmovw k1,eax
+                &[0x62, 0xf5, 0x7c, 0x89, 0x58, 0xc1],       // vaddph xmm0{k1}{z},xmm0,xmm1
+                &[0x62, 0x55, 0x34, 0x89, 0x5c, 0xca],       // vsubph xmm9{k1}{z},xmm9,xmm10
+                &[0x62, 0xf5, 0x6c, 0x89, 0x59, 0xd3],       // vmulph xmm2{k1}{z},xmm2,xmm3
+                &[0x62, 0xf6, 0x4d, 0x89, 0x98, 0xc1],       // vfmadd132ph xmm0{k1}{z},xmm6,xmm1
+                &[0x62, 0x56, 0x2d, 0x89, 0x9c, 0xcb],       // vfnmadd132ph xmm9{k1}{z},xmm10,xmm11
+                &[0x62, 0xf5, 0xfe, 0x08, 0x2a, 0xc0],       // vcvtsi2sh xmm0,xmm0,rax
+                &[0x62, 0xf5, 0x7e, 0x08, 0x2c, 0xc0],       // vcvttsh2si eax,xmm0
+                &[0x62, 0xf5, 0xff, 0x08, 0x5a, 0xc1],       // vcvtsd2sh xmm0,xmm0,xmm1
+                &[0x62, 0xf3, 0x7d, 0x08, 0x52, 0xc1, 0x04], // vminmaxps xmm0,xmm0,xmm1,4
+                &[0x62, 0xf3, 0xfd, 0x08, 0x53, 0xc1, 0x05], // vminmaxsd xmm0,xmm0,xmm1,5
             ]
             .concat()
         );

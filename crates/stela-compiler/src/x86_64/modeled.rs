@@ -74,7 +74,7 @@ pub fn host() -> TargetCpu {
         .with_sha512();
     // EVEX forms need the host's opmask and ZMM state.
     if host.supports(TargetCpu::Avx512f) {
-        host.with_avx512fp16()
+        host.with_avx512fp16().with_avx10_2()
     } else {
         host
     }
@@ -243,7 +243,7 @@ impl Frame {
     }
 }
 
-/// A register-only VEX3 or EVEX instruction without an immediate.
+/// A register-only VEX3 or EVEX instruction, with an immediate in EVEX map 3.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Instruction {
     evex: bool,
@@ -262,12 +262,19 @@ struct Instruction {
     opmask: u8,
     /// EVEX.z: masked lanes clear instead of keeping the destination.
     zeroing: bool,
+    /// The immediate byte of a map 3 form.
+    imm: u8,
 }
 
 impl Instruction {
-    /// C4 or 62, the payload bytes, the opcode and ModRM.
-    fn length(evex: bool) -> usize {
-        if evex { 6 } else { 5 }
+    /// C4 or 62, the payload bytes, the opcode, ModRM and any immediate, from
+    /// the first two bytes.
+    fn length(first: u8, payload: u8) -> usize {
+        match (first == 0x62, payload & 7) {
+            (true, 3) => 7,
+            (true, _) => 6,
+            (false, _) => 5,
+        }
     }
     fn decode(bytes: &[u8]) -> Option<Self> {
         let invert = |byte: u8, bit: u8| (!byte >> bit & 1) << 3;
@@ -285,15 +292,17 @@ impl Instruction {
                     rm: (modrm & 7) | invert(first, 5),
                     opmask: 0,
                     zeroing: false,
+                    imm: 0,
                 })
             }
             // EVEX.b (rounding or broadcast) and L'L = 3 are not modeled.
-            [0x62, p0, p1, p2, opcode, modrm]
+            [0x62, p0, p1, p2, opcode, modrm, ref rest @ ..]
                 if p0 & 8 == 0
                     && p1 & 4 != 0
                     && p2 & 0x10 == 0
                     && p2 >> 5 & 3 != 3
-                    && modrm >> 6 == 3 =>
+                    && modrm >> 6 == 3
+                    && rest.len() == usize::from(p0 & 7 == 3) =>
             {
                 Some(Self {
                     evex: true,
@@ -307,6 +316,7 @@ impl Instruction {
                     rm: (modrm & 7) | invert(p0, 5) | invert(p0, 6) << 1,
                     opmask: p2 & 7,
                     zeroing: p2 & 0x80 != 0,
+                    imm: rest.first().copied().unwrap_or(0),
                 })
             }
             _ => None,
@@ -773,6 +783,70 @@ fn half_lanes(
     Some(result)
 }
 
+/// VMINMAXPS/PD with bytes per lane `lane`, or SS/SD when `scalar`, at the
+/// immediates [`crate::x86_64::asm::vector_extensions::extrema`] uses: -0
+/// orders below +0, the first NaN returns quiet and an SNaN is invalid.
+fn extrema(
+    instruction: Instruction,
+    [first, second]: [&[u8; 64]; 2],
+    lane: usize,
+    scalar: bool,
+    control: &mut Control,
+) -> [u8; 64] {
+    let bits = |value: &[u8; 64], at: usize| {
+        let mut bytes = [0; 8];
+        bytes[..lane].copy_from_slice(&value[at..at + lane]);
+        u64::from_le_bytes(bytes)
+    };
+    let quiet = 1u64 << if lane == 4 { 22 } else { 51 };
+    let float = |bits: u64| {
+        if lane == 4 {
+            f64::from(f32::from_bits(bits as u32))
+        } else {
+            f64::from_bits(bits)
+        }
+    };
+    let mut result = if scalar { *first } else { [0; 64] };
+    let lanes = if scalar { 1 } else { instruction.bytes / lane };
+    for index in 0..lanes {
+        let at = index * lane;
+        let (a, b) = (bits(first, at), bits(second, at));
+        let (x, y) = (float(a), float(b));
+        let chosen = if x.is_nan() || y.is_nan() {
+            let signaling = |value: f64, bits: u64| value.is_nan() && bits & quiet == 0;
+            if signaling(x, a) || signaling(y, b) {
+                control.mxcsr |= half::INVALID;
+            }
+            quiet | if x.is_nan() { a } else { b }
+        } else {
+            let maximum = instruction.imm & 1 != 0;
+            match (x < y, y < x) {
+                (true, _) => {
+                    if maximum {
+                        b
+                    } else {
+                        a
+                    }
+                }
+                (_, true) => {
+                    if maximum {
+                        a
+                    } else {
+                        b
+                    }
+                }
+                _ if maximum => a & b,
+                _ => a | b,
+            }
+        };
+        result[at..at + lane].copy_from_slice(&chosen.to_le_bytes()[..lane]);
+    }
+    if scalar {
+        result[16..].fill(0);
+    }
+    result
+}
+
 /// The new value of the destination register from its old value and the
 /// vvvv and ModRM.rm sources, or `None` when the form is not modeled.
 fn apply(
@@ -784,6 +858,17 @@ fn apply(
 ) -> Option<[u8; 64]> {
     let bytes = instruction.bytes;
     if instruction.evex {
+        if let (3, opcode @ (0x52 | 0x53), 1, 0, 4 | 5) = (
+            instruction.map,
+            instruction.opcode,
+            instruction.pp,
+            instruction.opmask,
+            instruction.imm,
+        ) {
+            let lane = if instruction.w { 8 } else { 4 };
+            let sources = [&first, &second];
+            return Some(extrema(instruction, sources, lane, opcode == 0x53, control));
+        }
         let rounding = control.mxcsr >> 13 & 3;
         if instruction.map == 6 {
             let signs = match (instruction.opcode, instruction.pp, instruction.w) {
@@ -990,7 +1075,7 @@ unsafe extern "C" fn trap(signal: i32, info: *mut c_void, context: *mut c_void) 
         let image = *context.add(FPREGS).cast::<*mut u8>();
         let start = *rip as *const u8;
         // The faulting instruction is mapped; read only its own bytes.
-        let length = Instruction::length(start.read() == 0x62);
+        let length = Instruction::length(start.read(), start.add(1).read());
         let bytes = core::slice::from_raw_parts(start, length);
         let mut frame = Frame(image);
         if !image.is_null() && image.add(MAGIC1).cast::<u32>().read() == FP_XSTATE_MAGIC1 {
@@ -1069,7 +1154,7 @@ mod tests {
                     0xc0 | (self.reg & 7) << 3 | (self.rm & 7),
                 ];
             }
-            alloc::vec![
+            let mut bytes = alloc::vec![
                 0x62,
                 bit(self.reg, 3) << 7
                     | bit(self.rm, 4) << 6
@@ -1083,7 +1168,11 @@ mod tests {
                     | self.opmask,
                 self.opcode,
                 0xc0 | (self.reg & 7) << 3 | (self.rm & 7),
-            ]
+            ];
+            if self.map == 3 {
+                bytes.push(self.imm);
+            }
+            bytes
         }
     }
 
@@ -1133,6 +1222,7 @@ mod tests {
         let int16 = TargetCpu::X86_64_V3.with_avx_vnni_int16();
         let sha512 = TargetCpu::X86_64_V3.with_sha512();
         let fp16 = TargetCpu::X86_64_V4.with_avx512fp16();
+        let avx10_2 = TargetCpu::X86_64_V4.with_avx10_2();
         // YMM1 is the destination, YMM2 the vvvv source (0 when the form has
         // none) and YMM3 the ModRM.rm source.
         let vex = |opcode, pp, bytes, vvvv| Instruction {
@@ -1147,6 +1237,7 @@ mod tests {
             rm: 3,
             opmask: 0,
             zeroing: false,
+            imm: 0,
         };
         let mut forms = Vec::new();
         for bytes in [16, 32] {
@@ -1184,6 +1275,18 @@ mod tests {
                     ));
                 }
             }
+            for (w, imm) in [(false, 4), (false, 5), (true, 4), (true, 5)] {
+                forms.push((
+                    avx10_2,
+                    Instruction {
+                        evex: true,
+                        map: 3,
+                        w,
+                        imm,
+                        ..vex(0x52, 1, bytes, 2)
+                    },
+                ));
+            }
             for (opcode, pp) in [
                 (0x7d, 1),
                 (0x7c, 1),
@@ -1215,6 +1318,18 @@ mod tests {
                 ..vex(0x5a, 3, 16, 2)
             },
         ));
+        for (w, imm) in [(false, 4), (false, 5), (true, 4), (true, 5)] {
+            forms.push((
+                avx10_2,
+                Instruction {
+                    evex: true,
+                    map: 3,
+                    w,
+                    imm,
+                    ..vex(0x53, 1, 16, 2)
+                },
+            ));
+        }
         forms.extend([
             (sha512, vex(0xcb, 3, 32, 2)),
             (sha512, vex(0xcc, 3, 32, 0)),
@@ -1288,13 +1403,16 @@ mod tests {
                 .unwrap();
                 native.run(&mut state, &mut ExecutionContext::default());
                 // Intel SDE 10.13.1 raises only IE and ZE for VADDPH, VSUBPH,
-                // VMULPH and VF*132PH, and adds only PE for VDIVPH (no OE or UE), so
+                // VMULPH and VF*132PH, adds only PE for VDIVPH (no OE or UE) and
+                // raises nothing for VCVTSD2SH, so
                 // the rest of their status rests on IEEE 754 and
                 // `half_rounding_status_and_special_values`.
                 let emulated = half::INVALID | half::DIVIDE_BY_ZERO;
                 let compared = match (instruction.evex, instruction.opcode) {
                     (false, _) => !0,
                     (true, 0x5e) => !0x3f | emulated | half::INEXACT,
+                    (true, 0x52 | 0x53) => !0x3f | half::INVALID,
+                    (true, 0x5a) => !0x3f,
                     (true, _) => !0x3f | emulated,
                 };
                 assert_eq!(
@@ -1338,6 +1456,7 @@ mod tests {
                     rm: if to { 3 } else { 0 },
                     opmask: 0,
                     zeroing: false,
+                    imm: 0,
                 };
                 // X0 holds the MXCSR to run under, X1 receives the resulting
                 // one, X2 holds the caller's, X4 RAX before and X5 RAX after.
@@ -1490,6 +1609,7 @@ mod tests {
                 rm,
                 opmask,
                 zeroing,
+                imm: 0,
             };
             assert_eq!(
                 Instruction::decode(bytes),
