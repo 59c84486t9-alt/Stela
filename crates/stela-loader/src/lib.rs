@@ -44,6 +44,7 @@ pub mod nvram;
 pub mod recovery;
 pub mod root_selection;
 pub mod soc_variant;
+pub mod stela_gpu;
 mod thread_state;
 pub mod trust_cache;
 pub mod upgrade;
