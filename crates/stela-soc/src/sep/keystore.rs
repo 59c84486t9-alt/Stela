@@ -54,9 +54,11 @@
 //! [`FAILURE`], Stela's choice of generic failure: the AP sign-extends
 //! 0xff to -1, then maps it to IOReturn 0xe00002bc (0x2d3a324, table
 //! 0x725990). No sepOS-specific authorization error is invented.
+mod dictionary;
 mod keybag;
 mod reference_key;
 mod system_key;
+mod volume_key;
 
 use super::{
     endpoint::Service,
@@ -139,6 +141,7 @@ pub struct Environment {
 pub struct KeyStore {
     environment: Option<Environment>,
     system_keys: Option<system_key::SystemKeys>,
+    volume_keys: Option<volume_key::VolumeKeys>,
     diagnostics: Journal,
 }
 
@@ -147,8 +150,21 @@ impl KeyStore {
         Self {
             environment: None,
             system_keys: Some(system_key::SystemKeys::new(root)),
+            volume_keys: None,
             diagnostics: Journal::default(),
         }
+    }
+
+    /// Serve FileVault volume keys under the machine's system-key `root`,
+    /// with a fresh inline wrapping key in `engine` for this sepOS start.
+    pub(super) fn with_volume_keys(
+        mut self,
+        root: &[u8; 32],
+        engine: crate::inline_key::Engine,
+        entropy: &mut dyn super::Entropy,
+    ) -> Result<Self> {
+        self.volume_keys = Some(volume_key::VolumeKeys::new(root, engine, entropy)?);
+        Ok(self)
     }
 
     #[cfg(test)]
@@ -188,6 +204,7 @@ impl KeyStore {
             command,
             GET_CAPABILITIES | SET_ENVIRONMENT | system_key::PERFORM_OPERATION
         ) && !keybag::recognizes(command)
+            && !volume_key::recognizes(command)
         {
             return Err(refuse(refuse!("SEP keystore command is not implemented")));
         }
@@ -222,6 +239,30 @@ impl KeyStore {
             let mut reply_fields = (public.len() as u32).to_le_bytes().to_vec();
             reply_fields.extend_from_slice(&public);
             reply_fields.resize(reply_fields.len().next_multiple_of(4), 0);
+            let reply = message.reply(&reply_fields);
+            payload.output(&reply).map_err(refuse)?;
+            return Ok(Frame {
+                tag: command | REPLY,
+                parameter: 0,
+                data: (reply.len() as u32) << LENGTH_SHIFT,
+                ..frame
+            });
+        }
+        if volume_key::recognizes(command) {
+            let keys = self
+                .volume_keys
+                .as_mut()
+                .ok_or_else(|| refuse(refuse!("SEP keystore requires provisioned volume keys")))?;
+            let diagnostics = &mut self.diagnostics;
+            let reply_fields = keys
+                .request(
+                    command,
+                    message.variant(),
+                    &mut fields,
+                    entropy,
+                    &mut |note| diagnostics.record(note),
+                )
+                .map_err(refuse)?;
             let reply = message.reply(&reply_fields);
             payload.output(&reply).map_err(refuse)?;
             return Ok(Frame {

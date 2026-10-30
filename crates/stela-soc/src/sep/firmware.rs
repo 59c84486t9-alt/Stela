@@ -65,6 +65,8 @@ pub struct SepFirmware {
     observe: bool,
     /// Where sepOS finds its state, until it activates.
     state: Option<state::Location>,
+    /// The inline key engine sepOS provisions at each start, shared with ANS.
+    inline: crate::inline_key::Engine,
 }
 
 impl SepFirmware {
@@ -83,7 +85,13 @@ impl SepFirmware {
             ecid,
             observe,
             state: Some(state),
+            inline: crate::inline_key::Engine::default(),
         }
+    }
+
+    /// Provision `engine`, which ANS shares, at each sepOS start.
+    pub fn set_inline_engine(&mut self, engine: crate::inline_key::Engine) {
+        self.inline = engine;
     }
 
     /// The firmware Stela measured and accepted, if any.
@@ -229,6 +237,7 @@ impl Firmware for SepFirmware {
         let (store, _) = state::open(location, self.ecid, self.rom.entropy())?;
         let os = SepOs::new(self.security)
             .with_services(store, self.observe)?
+            .with_volume_keys(self.inline.clone(), self.rom.entropy())?
             .with_booted_manifest(
                 evidence
                     .manifest

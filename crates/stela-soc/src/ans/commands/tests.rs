@@ -45,7 +45,7 @@ fn os_build_tunnel_stores_only_the_recovered_message_and_checks_extensions() {
     command.0[40] = 1;
     command.0[44..52].copy_from_slice(&0x1000u64.to_le_bytes());
     assert_eq!(
-        ans.execute(0, &command, &mut port, &mut sart)
+        ans.execute(0, &command, None, &mut port, &mut sart)
             .unwrap()
             .status,
         SUCCESS
@@ -57,7 +57,10 @@ fn os_build_tunnel_stores_only_the_recovered_message_and_checks_extensions() {
     request[16] = 1;
     request[24..30].fill(b'X');
     port.write(0x1000, &request).unwrap();
-    assert!(ans.execute(0, &command, &mut port, &mut sart).is_err());
+    assert!(
+        ans.execute(0, &command, None, &mut port, &mut sart)
+            .is_err()
+    );
     assert_eq!(&ans.os_build[..6], b"26A434");
     port.read(0x104c, &mut status).unwrap();
     assert_eq!(status, [0xff; 4]);
@@ -70,9 +73,13 @@ fn os_build_tunnel_stores_only_the_recovered_message_and_checks_extensions() {
     assert_eq!(tunnel_buffer(4096), 0x4000);
     assert_eq!(tunnel_buffer(0x4001), 0x8000);
     command.0[60..64].copy_from_slice(&4096u32.to_le_bytes());
-    assert!(ans.execute(0, &command, &mut port, &mut sart).is_err());
+    assert!(
+        ans.execute(0, &command, None, &mut port, &mut sart)
+            .is_err()
+    );
     command.0[60..64].copy_from_slice(&tunnel_buffer(4096).to_le_bytes());
-    ans.execute(0, &command, &mut port, &mut sart).unwrap();
+    ans.execute(0, &command, None, &mut port, &mut sart)
+        .unwrap();
     let mut output = [0; 16];
     port.read(0x2000, &mut output).unwrap();
     assert_eq!(&output[..8], &die::NAND_ID.to_le_bytes());
@@ -84,7 +91,8 @@ fn os_build_tunnel_stores_only_the_recovered_message_and_checks_extensions() {
     request[12..16].copy_from_slice(&0xbau32.to_le_bytes());
     port.write(0x1000, &request).unwrap();
     port.write(0x2000, &[0xa5; 4096]).unwrap();
-    ans.execute(0, &command, &mut port, &mut sart).unwrap();
+    ans.execute(0, &command, None, &mut port, &mut sart)
+        .unwrap();
     let mut geometry = [0; 0x80];
     port.read(0x2000, &mut geometry).unwrap();
     let field = |offset| u32::from_le_bytes(geometry[offset..offset + 4].try_into().unwrap());
@@ -100,7 +108,10 @@ fn os_build_tunnel_stores_only_the_recovered_message_and_checks_extensions() {
     assert_eq!(&geometry[0x70..0x72], &[0, 0xa5]);
     // Tunnel buffers outside the SART's allow-list refuse.
     sart.write(0, Width::Word, 0, port.access).unwrap();
-    assert!(ans.execute(0, &command, &mut port, &mut sart).is_err());
+    assert!(
+        ans.execute(0, &command, None, &mut port, &mut sart)
+            .is_err()
+    );
     // An unknown request type refuses and leaves the request it read
     // in the submission record.
     sart.write(0, Width::Word, 0xff, port.access).unwrap();
@@ -113,7 +124,10 @@ fn os_build_tunnel_stores_only_the_recovered_message_and_checks_extensions() {
         tcb: [0; 128],
         tunnel: None,
     });
-    assert!(ans.execute(0, &command, &mut port, &mut sart).is_err());
+    assert!(
+        ans.execute(0, &command, None, &mut port, &mut sart)
+            .is_err()
+    );
     assert_eq!(ans.last_submission.as_ref().unwrap().tunnel, Some(request));
 }
 
@@ -158,7 +172,9 @@ fn device_time_tunnel_records_the_recovery_request_and_unserved_types_refuse_by_
     command.0[..4].copy_from_slice(&[APPLE_TUNNEL, 0, 8, 0]);
     command.0[40] = 1;
     command.0[44..52].copy_from_slice(&REQUEST.to_le_bytes());
-    let outcome = ans.execute(0, &command, &mut port, &mut sart).unwrap();
+    let outcome = ans
+        .execute(0, &command, None, &mut port, &mut sart)
+        .unwrap();
     assert_eq!(outcome.status, SUCCESS);
     let mut status = [1; 4];
     port.read(REQUEST + 0x4c, &mut status).unwrap();
@@ -183,7 +199,7 @@ fn device_time_tunnel_records_the_recovery_request_and_unserved_types_refuse_by_
                    request: [u8; 80],
                    command: Command| {
         port.write(REQUEST, &request).unwrap();
-        let error = ans.execute(0, &command, port, sart).err().unwrap();
+        let error = ans.execute(0, &command, None, port, sart).err().unwrap();
         let mut status = [0; 4];
         port.read(REQUEST + 0x4c, &mut status).unwrap();
         assert_eq!(status, [0xff; 4]);
@@ -271,7 +287,9 @@ fn sanitize_counter_tunnel_fills_its_whole_output_with_zero_counters() {
     command.0[44..52].copy_from_slice(&0x1000u64.to_le_bytes());
     command.0[52..60].copy_from_slice(&0x2000u64.to_le_bytes());
     command.0[60..64].copy_from_slice(&die::SANITIZE_COUNTER_BYTES.to_le_bytes());
-    let status = ans.execute(0, &command, &mut port, &mut sart).unwrap();
+    let status = ans
+        .execute(0, &command, None, &mut port, &mut sart)
+        .unwrap();
     assert_eq!(status.status, SUCCESS);
     let mut output = alloc::vec![0xffu8; bytes];
     port.read(0x2000, &mut output).unwrap();
@@ -292,7 +310,10 @@ fn sanitize_counter_tunnel_fills_its_whole_output_with_zero_counters() {
     assert_eq!(status, [0; 4]);
     // Another output size refuses.
     command.0[60..64].copy_from_slice(&4096u32.to_le_bytes());
-    assert!(ans.execute(0, &command, &mut port, &mut sart).is_err());
+    assert!(
+        ans.execute(0, &command, None, &mut port, &mut sart)
+            .is_err()
+    );
 }
 
 #[test]
@@ -339,7 +360,9 @@ fn tunable_table_tunnel_records_its_buffer_and_refuses_other_shapes() {
     command.0[44..52].copy_from_slice(&0x1000u64.to_le_bytes());
     command.0[52..60].copy_from_slice(&0x2000u64.to_le_bytes());
     command.0[60..64].copy_from_slice(&tunnel_buffer(1).to_le_bytes());
-    let outcome = ans.execute(0, &command, &mut port, &mut sart).unwrap();
+    let outcome = ans
+        .execute(0, &command, None, &mut port, &mut sart)
+        .unwrap();
     assert_eq!(outcome.status, SUCCESS);
     let mut status = [1; 4];
     port.read(0x104c, &mut status).unwrap();
@@ -352,7 +375,7 @@ fn tunable_table_tunnel_records_its_buffer_and_refuses_other_shapes() {
     // Another length, a request extension field, a V5 kind and a
     // buffer outside the allow-list each refuse without a record.
     let refused = |ans: &mut Ans, port: &mut Port<'_, '_>, sart: &mut Sart, command| {
-        assert!(ans.execute(0, &command, port, sart).is_err());
+        assert!(ans.execute(0, &command, None, port, sart).is_err());
         assert_eq!(ans.tunable_tables().len(), 1);
     };
     let mut other = Command(command.0);
@@ -397,7 +420,9 @@ fn same_layout_format_erases_data_and_preserves_fixed_auxiliary_namespaces() {
         command.0[24..32].copy_from_slice(&0x2000u64.to_le_bytes());
         command.0[40..48].copy_from_slice(&lba.to_le_bytes());
         let mut sart = Sart::new(Bounds::Exclusive);
-        ans.execute(1, &command, port, &mut sart).unwrap().status
+        ans.execute(1, &command, None, port, &mut sart)
+            .unwrap()
+            .status
     };
     let mut block = [0; 4096];
     for (nsid, lba, fill) in [
@@ -430,13 +455,13 @@ fn same_layout_format_erases_data_and_preserves_fixed_auxiliary_namespaces() {
     for (sizes, cdw10) in [([0, 4, 2], 0), ([6, 4, 2], 0), ([0, 3, 2], 1)] {
         port.write(0x1000, &request(sizes)).unwrap();
         create.0[40] = cdw10;
-        assert!(ans.execute(0, &create, &mut port, &mut sart).is_err());
+        assert!(ans.execute(0, &create, None, &mut port, &mut sart).is_err());
         assert_eq!(ans.medium.erased_blocks(), 0);
     }
     create.0[40] = 0;
     for sizes in [[0, 3, 2], [7, 3, 2]] {
         port.write(0x1000, &request(sizes)).unwrap();
-        let outcome = ans.execute(0, &create, &mut port, &mut sart).unwrap();
+        let outcome = ans.execute(0, &create, None, &mut port, &mut sart).unwrap();
         assert_eq!(outcome.status, SUCCESS);
         assert_eq!(ans.medium.erased_blocks(), 7);
     }
@@ -541,7 +566,8 @@ fn a_queued_host_disk_completes_io_transfers_after_the_doorbell() {
         command
     };
     let mut run = |ans: &mut Ans, port: &mut Port<'_, '_>, opcode| {
-        let Ok(Executed::Host(wait)) = ans.execute(1, &command(opcode), port, &mut sart) else {
+        let Ok(Executed::Host(wait)) = ans.execute(1, &command(opcode), None, port, &mut sart)
+        else {
             panic!("the command waits for its host transfer");
         };
         assert!(
@@ -592,7 +618,9 @@ fn dataset_management_deallocates_checked_ranges_and_reads_zero() {
         command.0[24..32].copy_from_slice(&0x3000u64.to_le_bytes());
         command.0[40..48].copy_from_slice(&lba.to_le_bytes());
         let mut sart = Sart::new(Bounds::Exclusive);
-        ans.execute(1, &command, port, &mut sart).unwrap().status
+        ans.execute(1, &command, None, port, &mut sart)
+            .unwrap()
+            .status
     };
     for lba in 0..8 {
         port.write(0x3000, &[0x5a; 4096]).unwrap();
@@ -622,27 +650,27 @@ fn dataset_management_deallocates_checked_ranges_and_reads_zero() {
     // A range past the namespace fails the whole command unchanged.
     port.write(0x2000, &list(&[(0, 2, 0), (0, 2, 7)])).unwrap();
     let outcome = ans
-        .execute(1, &dsm(1, DEALLOCATE), &mut port, &mut sart)
+        .execute(1, &dsm(1, DEALLOCATE), None, &mut port, &mut sart)
         .unwrap();
     assert_eq!(outcome.status, LBA_RANGE);
     assert_eq!(ans.erased_blocks(), 0);
     // Hints, reserved fields and context attributes refuse.
     for (count, attributes) in [(0, 1 | DEALLOCATE), (0, 0), (0x100, DEALLOCATE)] {
         assert!(
-            ans.execute(1, &dsm(count, attributes), &mut port, &mut sart)
+            ans.execute(1, &dsm(count, attributes), None, &mut port, &mut sart)
                 .is_err()
         );
     }
     port.write(0x2000, &list(&[(1, 1, 0)])).unwrap();
     assert!(
-        ans.execute(1, &dsm(0, DEALLOCATE), &mut port, &mut sart)
+        ans.execute(1, &dsm(0, DEALLOCATE), None, &mut port, &mut sart)
             .is_err()
     );
     assert_eq!(ans.erased_blocks(), 0);
     // eanFormat's whole-namespace range, then two ranges of one command.
     port.write(0x2000, &list(&[(0, 8, 0)])).unwrap();
     let outcome = ans
-        .execute(1, &dsm(0, DEALLOCATE), &mut port, &mut sart)
+        .execute(1, &dsm(0, DEALLOCATE), None, &mut port, &mut sart)
         .unwrap();
     assert_eq!(outcome.status, SUCCESS);
     assert_eq!(ans.erased_blocks(), 8);
@@ -658,7 +686,7 @@ fn dataset_management_deallocates_checked_ranges_and_reads_zero() {
     assert_eq!(ans.erased_blocks(), 7);
     port.write(0x2000, &list(&[(0, 1, 3), (0, 0, 5)])).unwrap();
     let outcome = ans
-        .execute(1, &dsm(1, DEALLOCATE), &mut port, &mut sart)
+        .execute(1, &dsm(1, DEALLOCATE), None, &mut port, &mut sart)
         .unwrap();
     assert_eq!(outcome.status, SUCCESS);
     assert_eq!(ans.erased_blocks(), 8);
@@ -707,7 +735,9 @@ fn identify_dataset_management(disk: RamDisk, dlfeat: u8) {
         command.0[4..8].copy_from_slice(&nsid.to_le_bytes());
         command.0[24..32].copy_from_slice(&0x1000u64.to_le_bytes());
         command.0[40] = cns;
-        let outcome = ans.execute(0, &command, &mut port, &mut sart).unwrap();
+        let outcome = ans
+            .execute(0, &command, None, &mut port, &mut sart)
+            .unwrap();
         assert_eq!(outcome.status, SUCCESS);
         port.read(0x1000, &mut data).unwrap();
         if cns == 1 {
@@ -763,10 +793,16 @@ fn unknown_vendor_effects_refuse_without_dma() {
     };
     let mut command = Command([0; 64]);
     command.0[0] = APPLE_TUNNEL;
-    assert!(ans.execute(0, &command, &mut port, &mut sart).is_err());
+    assert!(
+        ans.execute(0, &command, None, &mut port, &mut sart)
+            .is_err()
+    );
     assert_eq!(ans.os_build, [0; 16]);
     command.0[0] = 0xc2;
-    assert!(ans.execute(0, &command, &mut port, &mut sart).is_err());
+    assert!(
+        ans.execute(0, &command, None, &mut port, &mut sart)
+            .is_err()
+    );
 }
 
 #[test]

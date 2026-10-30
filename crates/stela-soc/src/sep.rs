@@ -116,6 +116,16 @@ impl Sep {
         })
     }
 
+    /// Share `engine` with ANS: sepOS provisions it at each start and wraps
+    /// the volume keys it hands the AP with it.
+    pub fn with_inline_engine(mut self, engine: crate::inline_key::Engine) -> Self {
+        self.mailbox
+            .firmware_mut::<firmware::SepFirmware>()
+            .expect("SEP owns its firmware engine")
+            .set_inline_engine(engine);
+        self
+    }
+
     /// Drain the `sks`/`pnon`/`scrd` traffic observed this run (`--sep-observe`).
     pub fn observations(&mut self) -> alloc::vec::Vec<alloc::string::String> {
         self.mailbox

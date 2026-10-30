@@ -34,7 +34,8 @@ impl AppleDevices {
             Some(irq(placement.completion_irq)),
             placement.geometry,
         )?
-        .handed_off_linear();
+        .handed_off_linear()
+        .with_inline_engine(self.inline_keys.clone());
         let asc = self.bus.add(Box::new(wrapper));
         self.coprocessors.push(("ANS", asc));
         self.bus
@@ -325,9 +326,10 @@ impl AppleDevices {
                 "SEP incoming stream exceeds its mounted DART capacity"
             ));
         }
-        let device = self.bus.add(Box::new(Sep::new(
-            entropy, lines, security, ecid, observe, state,
-        )?));
+        let device = self.bus.add(Box::new(
+            Sep::new(entropy, lines, security, ecid, observe, state)?
+                .with_inline_engine(self.inline_keys.clone()),
+        ));
         self.bus
             .map(device, wrapper.physical, wrapper.bytes, 0)
             .map_err(|e| refuse!("SEP wrapper placement: {e}", ?e))?;

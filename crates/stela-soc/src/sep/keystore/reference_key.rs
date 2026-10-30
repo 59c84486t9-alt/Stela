@@ -12,8 +12,9 @@
 //! types 4/5 are admitted. Credential bags, deletion/revocation, attestation,
 //! private export and unsupported key classes remain separate operations.
 use super::super::Entropy;
+use super::dictionary::{dictionary, number, tagged};
 use crate::Result;
-use alloc::{vec, vec::Vec};
+use alloc::vec::Vec;
 use hmac::{Hmac, Mac};
 use p256::{
     SecretKey,
@@ -201,37 +202,6 @@ fn field<'a>(fields: &mut Cursor<'a>, name: &[u8], tag: u32) -> Result<&'a [u8]>
     let value = pair.take(tag)?.value;
     pair.end()?;
     Ok(value)
-}
-
-fn number(value: u8) -> Vec<u8> {
-    if value < 128 {
-        tagged(2, &[value])
-    } else {
-        tagged(2, &[0, value])
-    }
-}
-
-/// Only fixed-size, internally authored fields reach this encoder.
-fn tagged(tag: u8, bytes: &[u8]) -> Vec<u8> {
-    assert!(bytes.len() < 256);
-    let mut result = vec![tag];
-    if bytes.len() >= 128 {
-        result.push(0x81);
-    }
-    result.push(bytes.len() as u8);
-    result.extend_from_slice(bytes);
-    result
-}
-
-fn dictionary(fields: &[(&[u8], Vec<u8>)]) -> Vec<u8> {
-    debug_assert!(fields.windows(2).all(|f| f[0].0 < f[1].0));
-    let mut bytes = Vec::new();
-    for (key, value) in fields {
-        let mut pair = tagged(12, key);
-        pair.extend_from_slice(value);
-        bytes.extend(tagged(0x30, &pair));
-    }
-    tagged(0x31, &bytes)
 }
 
 #[cfg(test)]

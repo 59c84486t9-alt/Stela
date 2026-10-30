@@ -15,6 +15,7 @@ use super::{
     tunables,
 };
 use crate::Result;
+use crate::inline_key::InlineKey;
 use alloc::{vec, vec::Vec};
 use stela_contracts::refuse;
 use stela_drivers::block::{BlockError, Finished, Request};
@@ -180,6 +181,11 @@ const ONCS: u16 = 1 | (1 << 2);
 /// ([`super::host::HostDisk::deallocates_zeroed`]); 000b otherwise.
 const DLFEAT_READ_ZEROS: u8 = 1;
 
+/// CDW0 bits 11:10 (byte 1 bits 3:2): the inline crypto mode
+/// `AppleNVMeRequest::BuildCommandReadWriteStruct` (0x3deba30) sets for a
+/// keyed read or write (`inline_key`).
+pub(super) const CRYPTO: u8 = 0b1100;
+
 pub(super) struct Command(pub [u8; 64]);
 impl Command {
     pub fn opcode(&self) -> u8 {
@@ -198,7 +204,7 @@ impl Command {
         self.word(4)
     }
     pub fn validate(&self) -> Result<()> {
-        if self.0[1] != 0 || self.0[8..24].iter().any(|&b| b != 0) {
+        if self.0[1] & !CRYPTO != 0 || self.0[8..24].iter().any(|&b| b != 0) {
             return Err(refuse!(
                 "ANS fused, SGL, metadata or reserved command fields are not modeled"
             ));
@@ -287,6 +293,8 @@ pub(super) enum Wait {
         plan: ReadPlan,
         bytes: usize,
         prps: Prps,
+        /// The inline key and first data unit the read decrypts with.
+        inline: Option<(InlineKey, u64)>,
     },
     Compare {
         plan: ReadPlan,
@@ -335,16 +343,24 @@ fn ascii(data: &mut [u8], value: &[u8]) {
 }
 
 impl Ans {
+    /// Execute `cmd` from `queue`, transforming its data with the TCB's
+    /// `inline` key, if any.
     pub(super) fn execute(
         &mut self,
         queue: usize,
         cmd: &Command,
+        inline: Option<InlineKey>,
         port: &mut Port<'_, '_>,
         sart: &mut Sart,
     ) -> Result<Executed> {
         if queue != 0 {
             let key = (queue as u32) << 16 | u32::from(cmd.cid());
-            return self.io(key, cmd, port);
+            return self.io(key, cmd, inline, port);
+        }
+        if inline.is_some() {
+            return Err(refuse!(
+                "ANS admin command with an inline key is not modeled"
+            ));
         }
         self.admin(cmd, port, sart).map(Executed::Done)
     }
@@ -678,10 +694,23 @@ impl Ans {
         }
     }
 
-    /// I/O command `cmd`, whose host transfer runs under `key`.
-    fn io(&mut self, key: u32, cmd: &Command, port: &mut Port<'_, '_>) -> Result<Executed> {
+    /// I/O command `cmd`, whose host transfer runs under `key`. A read or
+    /// write with an `inline` key transforms each 4 KiB block in line, the
+    /// first as the data unit in CDW14..15.
+    fn io(
+        &mut self,
+        key: u32,
+        cmd: &Command,
+        inline: Option<InlineKey>,
+        port: &mut Port<'_, '_>,
+    ) -> Result<Executed> {
         if self.medium.namespace(cmd.nsid()).is_none() {
             return Ok(Executed::Done(Outcome::status(INVALID_NAMESPACE)));
+        }
+        if inline.is_some() && !matches!(cmd.opcode(), READ | WRITE) {
+            return Err(refuse!(
+                "ANS inline crypto on an I/O command other than read or write is not modeled"
+            ));
         }
         if cmd.opcode() == FLUSH {
             // CDW10 bit 0 asks for a barrier: IONVMeBlockStorageDevice's
@@ -706,9 +735,10 @@ impl Ans {
         // bits 3:0 NVMe's Dataset Management access frequency, bits 10:8
         // the request's priority tier and bit 12 passive I/O. The writes'
         // bit 11 has no established meaning and refuses.
+        let unit = cmd.long(56);
         if controls & !(FORCE_UNIT_ACCESS | 0xffff) != 0
             || cmd.word(52) & !HINTS != 0
-            || !cmd.zero_words(56)
+            || inline.is_none() && unit != 0
         {
             return Err(refuse!(
                 "ANS protection, encryption, metadata or read/write hints are not modeled"
@@ -731,7 +761,13 @@ impl Ans {
                 let request = plan.address.map(|lba| Request::Read { lba, bytes });
                 let requests = request.into_iter().collect();
                 let wait = if cmd.opcode() == READ {
-                    Wait::Read { plan, bytes, prps }
+                    let inline = inline.map(|key| (key, unit));
+                    Wait::Read {
+                        plan,
+                        bytes,
+                        prps,
+                        inline,
+                    }
                 } else {
                     let mut data = vec![0; bytes];
                     prps.read(port, &mut data)?;
@@ -742,6 +778,9 @@ impl Ans {
             WRITE => {
                 let mut data = vec![0; bytes];
                 prps.read(port, &mut data)?;
+                if let Some(key) = &inline {
+                    key.transform(unit, &mut data, true)?;
+                }
                 let address = self.medium.address(nsid, lba, blocks).expect(range);
                 // Force Unit Access: this write completes durably whatever
                 // the cache. A read returns the same bytes either way.
@@ -789,8 +828,26 @@ impl Ans {
         port: &mut Port<'_, '_>,
     ) -> Result<Outcome> {
         Ok(match (wait, done) {
-            (Wait::Read { plan, bytes, prps }, done) => match host_bytes(done) {
+            (
+                Wait::Read {
+                    plan,
+                    bytes,
+                    prps,
+                    inline,
+                },
+                done,
+            ) => match host_bytes(done) {
                 Ok(host) => {
+                    // Deallocated blocks read as zeros (DLFEAT) after the
+                    // inline engine as well.
+                    let host = match inline {
+                        Some((key, unit)) => {
+                            let mut data = host.unwrap_or_else(|| vec![0; bytes]);
+                            key.transform(unit, &mut data, false)?;
+                            Some(data)
+                        }
+                        None => host,
+                    };
                     prps.write(port, &plan.finish(bytes, host))?;
                     Outcome::status(SUCCESS)
                 }

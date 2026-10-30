@@ -5,7 +5,6 @@
 pub mod agx_pio;
 pub mod dart_gen3;
 pub mod hpm_spmi;
-pub mod inline_key;
 pub mod mxwrap;
 pub mod nhi;
 pub mod pcie;

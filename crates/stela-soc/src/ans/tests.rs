@@ -133,6 +133,19 @@ impl Rig {
         command: Command,
         grant: Option<u8>,
     ) -> Result<(), MmioError> {
+        self.submit_keyed(queue, tag, command, grant, 0, [0; 64])
+    }
+    /// `submit_granting` with inline crypto `mode` and key `area` in the
+    /// TCB, as SPTM's MAP_PAGES copies them.
+    fn submit_keyed(
+        &mut self,
+        queue: usize,
+        tag: u16,
+        command: Command,
+        grant: Option<u8>,
+        mode: u8,
+        area: [u8; 64],
+    ) -> Result<(), MmioError> {
         let Command {
             opcode,
             nsid,
@@ -152,7 +165,9 @@ impl Rig {
         tcb[4..6].copy_from_slice(&(words[2] as u16).to_le_bytes());
         tcb[24..32].copy_from_slice(&prp.to_le_bytes());
         tcb[1] = grant.unwrap_or_else(|| commands::Command(cmd).direction(queue).unwrap_or(0));
+        tcb[1] |= mode << 2;
         tcb[56..64].copy_from_slice(&cmd[56..64]);
+        tcb[64..].copy_from_slice(&area);
         let (sq, tcbs, doorbell) = if queue == 0 {
             (SQ, TCB, ADMIN_SUBMIT)
         } else {
@@ -526,6 +541,85 @@ fn writes_reads_compare_fua_flush_and_namespace_range() {
         u16::from_le_bytes(rig.bytes(IOCQ + 2 * 16 + 14, 2).try_into().unwrap()) >> 1,
         0x80
     );
+}
+
+#[test]
+fn inline_keyed_writes_store_ciphertext_and_reads_return_plaintext() {
+    let engine = crate::inline_key::Engine::default();
+    engine.provision(zeroize::Zeroizing::new([9; 32]));
+    let mut rig = Rig::new();
+    rig.ans.inline = engine.clone();
+    rig.io_queues();
+    let key = [0x3c; 32];
+    let area = engine.wrap(&key).unwrap();
+    let mut raw = [0; 64];
+    raw[32..].copy_from_slice(&key);
+    let command = |opcode, unit: u32| Command {
+        opcode,
+        nsid: 1,
+        prp: DATA,
+        words: [3, 0, 0, 0, unit, 0],
+    };
+    let plain: alloc::vec::Vec<u8> = (0..4096).map(|i| (i * 7) as u8).collect();
+    assert!(rig.ram.write(DATA, &plain));
+    rig.submit_keyed(1, 2, command(1, 7), None, 1, area)
+        .unwrap();
+    rig.retire(1, 2);
+    // The disk holds the data unit's ciphertext.
+    assert!(rig.ram.write(DATA, &[0; 4096]));
+    rig.submit(1, 3, 2, 1, DATA, [3, 0, 0, 0, 0, 0]).unwrap();
+    rig.retire(1, 3);
+    let mut expected = plain.clone();
+    crate::inline_key::InlineKey::raw(&raw)
+        .unwrap()
+        .transform(7, &mut expected, true)
+        .unwrap();
+    assert_eq!(rig.bytes(DATA, 4096), expected);
+    // A keyed read decrypts it, with the wrapped or the raw key, but only
+    // as its own data unit.
+    for (tag, mode, area) in [(4, 1, area), (5, 2, raw)] {
+        assert!(rig.ram.write(DATA, &[0; 4096]));
+        rig.submit_keyed(1, tag, command(2, 7), None, mode, area)
+            .unwrap();
+        rig.retire(1, tag);
+        assert_eq!(rig.bytes(DATA, 4096), plain);
+    }
+    rig.submit_keyed(1, 6, command(2, 8), None, 1, area)
+        .unwrap();
+    rig.retire(1, 6);
+    assert_ne!(rig.bytes(DATA, 4096), plain);
+
+    // Keys from another boot, mode 3, a key without a mode, a data unit
+    // without a key and keyed flushes refuse.
+    let next_boot = crate::inline_key::Engine::default();
+    next_boot.provision(zeroize::Zeroizing::new([8; 32]));
+    let refusals: [(Command, u8, [u8; 64], Option<crate::inline_key::Engine>); 5] = [
+        (command(2, 7), 1, area, Some(next_boot)),
+        (command(2, 7), 3, area, None),
+        (command(2, 7), 0, area, None),
+        (command(2, 7), 0, [0; 64], None),
+        (
+            Command {
+                opcode: 0,
+                nsid: 1,
+                prp: 0,
+                words: [0; 6],
+            },
+            1,
+            area,
+            None,
+        ),
+    ];
+    for (command, mode, area, engine) in refusals {
+        let mut refused = Rig::new();
+        refused.ans.inline = engine.unwrap_or_else(|| rig.ans.inline.clone());
+        refused.io_queues();
+        assert!(
+            refused
+                .submit_keyed(1, 0, command, None, mode, area)
+                .is_err()
+        );
+    }
 }
 
 /// A RAM disk with a volatile write cache that counts its flushes.

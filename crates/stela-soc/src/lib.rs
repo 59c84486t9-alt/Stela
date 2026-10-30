@@ -53,6 +53,7 @@ pub mod fuse;
 pub mod gpio;
 pub mod hpm;
 pub mod i2c;
+pub mod inline_key;
 pub mod ipi;
 pub mod lockdown;
 pub mod mcc;

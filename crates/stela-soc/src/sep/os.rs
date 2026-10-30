@@ -136,6 +136,21 @@ impl SepOs {
         Ok(self)
     }
 
+    /// Serve FileVault volume keys, with this start's inline wrapping key,
+    /// drawn from `entropy`, in `engine`, which ANS shares.
+    pub fn with_volume_keys(
+        mut self,
+        engine: crate::inline_key::Engine,
+        entropy: &mut dyn super::Entropy,
+    ) -> Result<Self> {
+        if let Some(services) = self.services.as_mut() {
+            let root = services.xart.store_mut().system_key_root()?;
+            services.keystore =
+                core::mem::take(&mut services.keystore).with_volume_keys(&root, engine, entropy)?;
+        }
+        Ok(self)
+    }
+
     /// Record the booted sepOS's manifest hash for xART manifest commits.
     pub fn with_booted_manifest(mut self, manifest: Option<[u8; 48]>) -> Self {
         if let Some(services) = self.services.as_mut() {

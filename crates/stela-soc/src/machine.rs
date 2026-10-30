@@ -228,6 +228,8 @@ pub struct AppleDevices {
     /// entry given an earlier count, with it, for the stop it causes.
     time_seen: Cell<(u64, &'static str)>,
     time_regression: Cell<Option<[(u64, &'static str); 2]>>,
+    /// The inline key engine the SEP provisions and ANS unwraps keys with.
+    inline_keys: crate::inline_key::Engine,
 }
 
 /// The host polls its USB sessions once a high-speed microframe, in which
@@ -603,6 +605,7 @@ impl AppleDevices {
             pmu_clocks: Vec::new(),
             time_seen: Cell::new((0, "start")),
             time_regression: Cell::new(None),
+            inline_keys: crate::inline_key::Engine::default(),
         }
     }
 
