@@ -26,6 +26,7 @@ use alloc::{collections::BTreeMap, vec::Vec};
 use core::num::{NonZeroU32, NonZeroU64};
 use wire::{Fault, Handle, NegotiateRequest, NegotiateResponse, Operation, Record, Span, Status};
 
+mod commands;
 mod libraries;
 mod pipelines;
 mod queue;
@@ -342,6 +343,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
                 call.reply(&wire::Value { value })
             }
             Operation::Wait => self.wait(&mut call),
+            Operation::Commit => self.commit(&mut call),
         }
     }
 

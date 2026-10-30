@@ -775,4 +775,9 @@ operations! {
     /// Submits ready work and answers the completed serial.
     Poll = 0x0409 => Empty, Value;
     Wait = 0x040a => WaitRequest, WaitResponse;
+    /// Replays a command stream into a command buffer, submits it and
+    /// answers its serial.
+    Commit = 0x040b => commands::CommitRequest, Value;
 }
+
+pub mod commands;

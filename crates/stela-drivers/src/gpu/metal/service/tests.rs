@@ -21,6 +21,7 @@ use crate::gpu::{
 use alloc::{vec, vec::Vec};
 use core::num::NonZeroU64;
 
+mod commands;
 mod pipelines;
 mod queue;
 mod resources;
