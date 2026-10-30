@@ -497,19 +497,8 @@ impl<H: Host> Memory for HostMemory<'_, H> {
         bytes: usize,
         write: bool,
     ) -> Result<(), stela_contracts::dma::DmaError> {
-        if write && bytes != 0 {
-            let last = u64::try_from(bytes - 1)
-                .ok()
-                .and_then(|n| physical.checked_add(n))
-                .ok_or(stela_contracts::dma::DmaError::Memory)?;
-            if self
-                .lock
-                .into_iter()
-                .flatten()
-                .any(|(first, end)| physical <= end && first <= last)
-            {
-                return Err(stela_contracts::dma::DmaError::Memory);
-            }
+        if write {
+            self.unlocked(physical, bytes)?;
         }
         self.host.check_ram_range(physical, bytes, write)
     }
@@ -525,25 +514,43 @@ impl<H: Host> Memory for HostMemory<'_, H> {
         physical: u64,
         data: &[u8],
     ) -> Result<(), stela_contracts::dma::TransferFault> {
-        let refused = || stela_contracts::dma::TransferFault {
-            error: stela_contracts::dma::DmaError::Memory,
-            completed: 0,
-        };
-        if !data.is_empty() {
-            let last = u64::try_from(data.len() - 1)
-                .ok()
-                .and_then(|bytes| physical.checked_add(bytes))
-                .ok_or_else(refused)?;
-            if self
-                .lock
-                .into_iter()
-                .flatten()
-                .any(|(first, end)| physical <= end && first <= last)
-            {
-                return Err(refused());
+        self.unlocked(physical, data.len()).map_err(|error| {
+            stela_contracts::dma::TransferFault {
+                error,
+                completed: 0,
             }
-        }
+        })?;
         self.host.write_ram_progress(physical, data)
+    }
+}
+
+impl<H: Host> HostMemory<'_, H> {
+    /// Whether a write of `bytes` at `physical` stays clear of every range
+    /// the memory controller has locked. Its response to a write inside one
+    /// is not modeled, so such a write refuses, naming the range.
+    fn unlocked(&self, physical: u64, bytes: usize) -> Result<(), stela_contracts::dma::DmaError> {
+        if bytes == 0 {
+            return Ok(());
+        }
+        let last = u64::try_from(bytes - 1)
+            .ok()
+            .and_then(|n| physical.checked_add(n))
+            .ok_or(stela_contracts::dma::DmaError::Memory)?;
+        match self
+            .lock
+            .into_iter()
+            .flatten()
+            .find(|&(first, end)| physical <= end && first <= last)
+        {
+            Some((first, end)) => Err(stela_contracts::dma::DmaError::Unsupported(refuse!(
+                "DMA write into a range the memory controller locked against writes",
+                physical,
+                bytes,
+                first,
+                end
+            ))),
+            None => Ok(()),
+        }
     }
 }
 

@@ -22,6 +22,17 @@ pub(super) fn dma_error(error: DmaError) -> Refusal {
     }
 }
 
+/// [`dma_error`] for a PRP access of `bytes` at `address`: the guest's list
+/// names these addresses, which no register or command shows.
+fn dma_error_at(address: u64, bytes: usize) -> impl FnOnce(DmaError) -> Refusal {
+    move |error| match error {
+        DmaError::Memory => refuse!("ANS DMA target is not guest RAM", address, bytes),
+        error => dma_error(error)
+            .with("address", &address)
+            .with("bytes", &bytes),
+    }
+}
+
 pub(super) struct Prps(Vec<(u64, usize)>);
 
 impl Prps {
@@ -64,7 +75,8 @@ impl Prps {
         let mut entry = second;
         while remaining != 0 {
             let mut pointer = [0; 8];
-            port.read(entry, &mut pointer).map_err(dma_error)?;
+            port.read(entry, &mut pointer)
+                .map_err(dma_error_at(entry, pointer.len()))?;
             let pointer = u64::from_le_bytes(pointer);
             if pointer == 0 || !pointer.is_multiple_of(page) {
                 return Err(refuse!("ANS PRP list contains a null or unaligned page"));
@@ -91,7 +103,7 @@ impl Prps {
         let mut at = 0;
         for &(address, bytes) in &self.0 {
             port.read(address, &mut buffer[at..at + bytes])
-                .map_err(dma_error)?;
+                .map_err(dma_error_at(address, bytes))?;
             at += bytes;
         }
         Ok(())
@@ -101,7 +113,7 @@ impl Prps {
         let mut at = 0;
         for &(address, bytes) in &self.0 {
             port.write(address, &data[at..at + bytes])
-                .map_err(dma_error)?;
+                .map_err(dma_error_at(address, bytes))?;
             at += bytes;
         }
         Ok(())
