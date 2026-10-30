@@ -69,6 +69,8 @@ pub(crate) struct Settings {
     pub target: TargetCpu,
     pub traces: Vec<u64>,
     pub watches: Vec<(u64, u64)>,
+    /// `--profile`: time each engine phase, as the home machine does.
+    pub step_timing: bool,
 }
 
 /// Give each AP the PE its worker binding names, to run on a machine of its
@@ -99,6 +101,7 @@ pub(crate) fn spawn<H: Host>(
             target: settings.target,
             traces: settings.traces.clone(),
             watches: settings.watches.clone(),
+            step_timing: settings.step_timing,
         };
         processor.spawn(Box::new(move |owner| pe.run(owner)), sender, tsc_hz)?;
     }
@@ -121,6 +124,7 @@ struct Pe {
     target: TargetCpu,
     traces: Vec<u64>,
     watches: Vec<(u64, u64)>,
+    step_timing: bool,
 }
 
 impl Pe {
@@ -133,6 +137,7 @@ impl Pe {
             target,
             traces,
             watches,
+            step_timing,
         } = self;
         // This core's driver calls keep the engine's TLB entries.
         let _tagged = super::storage::TaggedRoots::enable();
@@ -147,6 +152,7 @@ impl Pe {
         let before = own();
         let mut machine = Machine::new_at(cpu, owner.host(), devices, profile, target, pe)
             .unwrap_or_else(|error| output::fatal(error));
+        machine.set_step_timing(step_timing);
         let observing = !traces.is_empty() || !watches.is_empty();
         if !traces.is_empty() {
             machine.set_traces(&traces);
