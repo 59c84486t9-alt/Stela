@@ -1,6 +1,7 @@
 //! Capability-checked packed bit operations (Intel SDM Vol. 2).
 use super::{Code, Evex, Gpr, Map, Pp, Rm, Vex};
 use crate::TargetCpu;
+use crate::aarch64::floating::Format;
 use crate::x86_64::isa::{ShiftOpcode as Shift, SimdOpcode as Host};
 
 /// Reverse each byte in `destination`, using `scratch` and RAX for the
@@ -262,6 +263,148 @@ pub(crate) fn byte_dot(
             TargetCpu::Baseline,
         );
     }
+    true
+}
+
+/// AVX-512 conversions between S/D lanes and integers of the same width:
+/// unsigned dwords need F and VL, quadwords DQ as well. SSE2 already
+/// converts signed dwords. The DIT profile keeps its reviewed recipe.
+pub(crate) fn packed_conversion_supported(format: Format, signed: bool, target: TargetCpu) -> bool {
+    let required = match (format, signed) {
+        (Format::Single, false) => TargetCpu::Avx512f.with_avx512vl(),
+        (Format::Double, _) => TargetCpu::Avx512f.with_avx512vl().with_avx512dq(),
+        _ => return false,
+    };
+    target.supports(required) && !target.data_independent_timing()
+}
+
+/// EVEX.128 for a packed conversion; a quadword integer sets W.
+const fn packed_conversion(pp: Pp, w: bool) -> Evex {
+    Evex {
+        map: Map::M0f,
+        pp,
+        w,
+        length: 0,
+        mask: 0,
+        zeroing: false,
+        broadcast: false,
+        scale: 16,
+    }
+}
+
+/// Convert the integer lanes of `xmm` in place to S/D lanes rounded by
+/// MXCSR: VCVTUDQ2PS, VCVTQQ2PD or VCVTUQQ2PD. Inexact results set PE.
+pub(crate) fn packed_from_integer(
+    code: &mut Code,
+    xmm: u8,
+    format: Format,
+    signed: bool,
+    target: TargetCpu,
+) -> bool {
+    if !packed_conversion_supported(format, signed, target) {
+        return false;
+    }
+    let (prefix, opcode) = match (format, signed) {
+        (Format::Single, _) => (packed_conversion(Pp::Pf2, false), 0x7a),
+        (_, true) => (packed_conversion(Pp::Pf3, true), 0xe6),
+        (_, false) => (packed_conversion(Pp::Pf3, true), 0x7a),
+    };
+    code.asm().evex(prefix, opcode, xmm, 0, Rm::Xmm(xmm));
+    true
+}
+
+/// Convert the S/D lanes of `xmm` in place to integers, truncated or rounded
+/// by MXCSR: VCVT(T)PS2UDQ, VCVT(T)PD2QQ or VCVT(T)PD2UQQ. An unrepresentable
+/// result sets IE and PE marks an inexact one, as for the scalar forms.
+pub(crate) fn packed_to_integer(
+    code: &mut Code,
+    xmm: u8,
+    format: Format,
+    signed: bool,
+    truncate: bool,
+    target: TargetCpu,
+) -> bool {
+    if !packed_conversion_supported(format, signed, target) {
+        return false;
+    }
+    let (prefix, opcode) = match (format, signed) {
+        (Format::Single, _) => (packed_conversion(Pp::None, false), 0x79),
+        (_, true) => (packed_conversion(Pp::P66, true), 0x7b),
+        (_, false) => (packed_conversion(Pp::P66, true), 0x79),
+    };
+    code.asm()
+        .evex(prefix, opcode - u8::from(truncate), xmm, 0, Rm::Xmm(xmm));
+    true
+}
+
+/// Scalar unsigned conversions need F. The DIT profile keeps its recipe.
+pub(crate) fn unsigned_scalar_supported(target: TargetCpu) -> bool {
+    target.supports(TargetCpu::Avx512f) && !target.data_independent_timing()
+}
+
+/// EVEX.LIG for a scalar S/D conversion; a 64-bit integer sets W.
+fn scalar_conversion(format: Format, wide: bool) -> Evex {
+    Evex {
+        map: Map::M0f,
+        pp: match format {
+            Format::Single => Pp::Pf3,
+            Format::Double => Pp::Pf2,
+            Format::Half => unreachable!("half conversions use the exact core"),
+        },
+        w: wide,
+        length: 0,
+        mask: 0,
+        zeroing: false,
+        broadcast: false,
+        scale: if format == Format::Single { 4 } else { 8 },
+    }
+}
+
+/// VCVTUSI2SS/SD: the low S/D lane of `xmm` from unsigned `source` (64-bit
+/// when `wide`), rounded by MXCSR; the other lanes of `xmm` are kept.
+pub(crate) fn scalar_from_unsigned(
+    code: &mut Code,
+    xmm: u8,
+    format: Format,
+    wide: bool,
+    source: Gpr,
+    target: TargetCpu,
+) -> bool {
+    if !unsigned_scalar_supported(target) {
+        return false;
+    }
+    code.asm().evex(
+        scalar_conversion(format, wide),
+        0x7b,
+        xmm,
+        xmm,
+        Rm::Reg(source),
+    );
+    true
+}
+
+/// VCVT(T)SS2USI and VCVT(T)SD2USI: unsigned `destination` (64-bit when
+/// `wide`) from the low S/D lane of `xmm`, truncated or rounded by MXCSR.
+/// An unrepresentable result, negative ones included, sets IE.
+pub(crate) fn scalar_to_unsigned(
+    code: &mut Code,
+    destination: Gpr,
+    xmm: u8,
+    format: Format,
+    wide: bool,
+    truncate: bool,
+    target: TargetCpu,
+) -> bool {
+    if !unsigned_scalar_supported(target) {
+        return false;
+    }
+    code.asm().evex(
+        scalar_conversion(format, wide),
+        0x79 - u8::from(truncate),
+        destination as u8,
+        0,
+        Rm::Xmm(xmm),
+    );
     true
 }
 
@@ -736,6 +879,212 @@ mod tests {
             }
         }
         std::println!("BYTE_DOT_EXTENDED_TARGETS={extended}");
+    }
+
+    #[test]
+    fn integer_conversions_check_each_extension_and_match_gnu_encodings() {
+        let quadword = TargetCpu::Avx512f.with_avx512vl().with_avx512dq();
+        for (format, signed, target) in [
+            (Format::Single, true, quadword),
+            (Format::Single, false, TargetCpu::Avx512f),
+            (Format::Double, true, TargetCpu::Avx512f.with_avx512vl()),
+            (
+                Format::Double,
+                false,
+                quadword.with_data_independent_timing(),
+            ),
+        ] {
+            let mut code = Code::new();
+            assert!(!packed_from_integer(&mut code, 0, format, signed, target));
+            assert!(!packed_to_integer(
+                &mut code, 0, format, signed, true, target
+            ));
+            assert!(code.is_empty());
+        }
+        let mut code = Code::new();
+        assert!(!scalar_from_unsigned(
+            &mut code,
+            0,
+            Format::Double,
+            true,
+            Gpr::Rax,
+            TargetCpu::Avx512f.with_data_independent_timing()
+        ));
+        assert!(code.is_empty());
+        let packed = |emit: &dyn Fn(&mut Code) -> bool| {
+            let mut code = Code::new();
+            assert!(emit(&mut code));
+            assert_eq!(code.instructions(), 1);
+            code.into_bytes()
+        };
+        // GNU as, on XMM0 and RAX/EAX.
+        for (format, signed, from, rounded, truncated) in [
+            (Format::Single, false, 0x7f7a, 0x7c79, 0x7c78),
+            (Format::Double, true, 0xfee6, 0xfd7b, 0xfd7a),
+            (Format::Double, false, 0xfe7a, 0xfd79, 0xfd78),
+        ] {
+            let encoding = |fields: u16| {
+                let [pp, opcode] = fields.to_be_bytes();
+                [0x62, 0xf1, pp, 0x08, opcode, 0xc0]
+            };
+            assert_eq!(
+                packed(&|code| packed_from_integer(code, 0, format, signed, quadword)),
+                encoding(from)
+            );
+            for (truncate, expected) in [(false, rounded), (true, truncated)] {
+                assert_eq!(
+                    packed(&|code| packed_to_integer(code, 0, format, signed, truncate, quadword)),
+                    encoding(expected)
+                );
+            }
+        }
+        let target = TargetCpu::Avx512f;
+        assert_eq!(
+            packed(&|code| scalar_from_unsigned(code, 0, Format::Double, true, Gpr::Rax, target)),
+            [0x62, 0xf1, 0xff, 0x08, 0x7b, 0xc0]
+        );
+        assert_eq!(
+            packed(&|code| scalar_from_unsigned(code, 0, Format::Single, false, Gpr::Rax, target)),
+            [0x62, 0xf1, 0x7e, 0x08, 0x7b, 0xc0]
+        );
+        assert_eq!(
+            packed(&|code| scalar_to_unsigned(
+                code,
+                Gpr::Rax,
+                0,
+                Format::Double,
+                true,
+                false,
+                target
+            )),
+            [0x62, 0xf1, 0xff, 0x08, 0x79, 0xc0]
+        );
+        assert_eq!(
+            packed(&|code| scalar_to_unsigned(
+                code,
+                Gpr::Rax,
+                0,
+                Format::Single,
+                false,
+                true,
+                target
+            )),
+            [0x62, 0xf1, 0x7e, 0x08, 0x78, 0xc0]
+        );
+    }
+
+    #[test]
+    fn integer_conversions_match_the_baseline_recipes() {
+        use crate::{GuestAddress, GuestState, context::ExecutionContext};
+        use alloc::vec::Vec;
+        use execution::Native;
+        let candidate = TargetCpu::X86_64_V4;
+        if !TargetCpu::detect().supports(candidate) {
+            return;
+        }
+        let mut words = Vec::new();
+        // SCVTF/UCVTF and FCVT{N,M,P,Z}{S,U} on vectors, with and without
+        // fixed-point bits (Rd = 3, Rn = 1).
+        for q in [0u32, 1] {
+            for (base, double) in [
+                (0x2e21d800u32, false),
+                (0x2e61d800, true),
+                (0x0e61d800, true),
+                (0x2e21a800, false),
+                (0x2e21b800, false),
+                (0x2ea1a800, false),
+                (0x2ea1b800, false),
+                (0x0e61a800, true),
+                (0x0ee1b800, true),
+                (0x2e61a800, true),
+                (0x2e61b800, true),
+                (0x2ee1a800, true),
+                (0x2ee1b800, true),
+                (0x2f3de400, false),
+                (0x2f3dfc00, false),
+                (0x0f7be400, true),
+                (0x2f7bfc00, true),
+            ] {
+                if !double || q == 1 {
+                    words.push(base | q << 30 | 1 << 5 | 3);
+                }
+            }
+        }
+        // UCVTF from X (a W source zero-extends into CVTSI2SS/SD),
+        // FCVT{N,P,M,Z}U to X and W, and the SIMD scalar UCVTF/FCVTZU on D.
+        for word in [
+            0x9e630000u32,
+            0x9e230000,
+            0x9e610000,
+            0x9e690000,
+            0x9e710000,
+            0x9e790000,
+            0x1e390000,
+            0x9e390000,
+            0x1e790000,
+            0x7ee1b800,
+            0x7e61d800,
+        ] {
+            words.push(word | 1 << 5 | 3);
+        }
+        let inputs: [u64; 12] = [
+            0,
+            0x8000_0000_0000_0000,
+            u64::MAX,
+            0x7fff_ffff_ffff_ffff,
+            0x3fe0_0000_0000_0000, // 0.5
+            0xbfe0_0000_0000_0000, // -0.5
+            0x41f0_0000_0000_0000, // 2^32
+            0x43f0_0000_0000_0000, // 2^64
+            0x43ef_ffff_ffff_ffff, // just below 2^64
+            0x4f80_0000_bf00_0000, // 2^32 and -0.5 as singles
+            0x4f7f_ffff_3fc0_0000, // just below 2^32 and 1.5
+            0x0000_0001_cf00_0000, // a subnormal and -2^31
+        ];
+        let mut random = 0x2545f4914f6cdd1d_u64;
+        for word in words {
+            let source: Vec<u8> = [word, 0xd65f03c0]
+                .into_iter()
+                .flat_map(u32::to_le_bytes)
+                .collect();
+            // Ordinary blocks may exit to the numerical runtime.
+            let compile = |target| {
+                crate::testing::block_for(
+                    &source,
+                    GuestAddress(0x1000),
+                    crate::block::BlockProfile::ORDINARY,
+                    target,
+                )
+                .unwrap()
+                .native
+                .x86_64_code
+            };
+            let baseline = compile(TargetCpu::X86_64_V3);
+            let extended = compile(candidate);
+            assert_ne!(baseline, extended, "{word:#010x} uses an AVX-512 form");
+            let [baseline, extended] = [&baseline, &extended].map(|code| Native::new(code));
+            for sample in 0..64 {
+                let mut state = GuestState::default();
+                for vector in &mut state.v {
+                    for limb in vector {
+                        random ^= random << 13;
+                        random ^= random >> 7;
+                        random ^= random << 17;
+                        *limb = if sample < 48 {
+                            inputs[(random % inputs.len() as u64) as usize]
+                        } else {
+                            random
+                        };
+                    }
+                }
+                state.x[1] = state.v[1][0];
+                state.fpcr = (sample as u32 % 4) << 22;
+                let mut expected = state.clone();
+                baseline.run(&mut expected, &mut ExecutionContext::default());
+                extended.run(&mut state, &mut ExecutionContext::default());
+                assert_eq!(state, expected, "{word:#010x} sample={sample}");
+            }
+        }
     }
 
     #[test]

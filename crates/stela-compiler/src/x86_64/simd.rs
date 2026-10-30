@@ -304,15 +304,15 @@ pub(super) fn emit_numerical_split(
             match operand {
                 Operand::Precision(operand) => precision::emit(code, operand, pc),
                 Operand::FromInteger(operand) => {
-                    integer_conversion::from_integer(code, operand, pc)
+                    integer_conversion::from_integer(code, operand, pc, target)
                 }
                 Operand::ToInteger { operand, rounding } => {
-                    integer_conversion::to_integer(code, operand, *rounding, pc)
+                    integer_conversion::to_integer(code, operand, *rounding, pc, target)
                 }
                 Operand::JavaScript {
                     destination,
                     source,
-                } => integer_conversion::javascript(code, *destination, *source, pc),
+                } => integer_conversion::javascript(code, *destination, *source, pc, target),
             }
         }
     }
