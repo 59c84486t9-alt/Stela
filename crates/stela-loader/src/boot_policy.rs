@@ -477,7 +477,7 @@ impl SealedVolume {
 }
 
 /// Name the snapshot the root volume mounts from, as iBoot does for an
-/// installed boot (0x35608): the 26A434 kernel's
+/// installed boot (0x24ae4..0x24b0c): the 26A434 kernel's
 /// `fs_lookup_root_snapshot_name` reads it, and a non-virtual sealed root
 /// without it panics in `apfs_vfsop_mount`.
 pub fn apply_root_snapshot(
@@ -494,7 +494,7 @@ pub fn apply_root_snapshot(
         CHOSEN,
         "root-snapshot-name",
         name,
-        "the snapshot the System volume's apfs_root_to_xid names",
+        "com.apple.os.update- and the root hash, as iBoot builds it",
     )?;
     Ok((writer.decisions, vec![]))
 }
