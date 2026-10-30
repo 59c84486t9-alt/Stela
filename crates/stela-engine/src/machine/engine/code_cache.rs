@@ -196,7 +196,22 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// Release local code owners under pressure before allocating compilation
     /// input and recovery metadata. A ring may return an unused part: advancing
     /// it alone does not release any template or source witness.
+    ///
+    /// Memory another machine or the shared store holds stays low however
+    /// much this one releases, so within one stretch of pressure a machine
+    /// reclaims again only once it holds as many blocks as it did at its
+    /// last reclaim: its growth stays bounded, and it does not discard all
+    /// it has before every block it installs.
     pub(super) fn reclaim_for_memory(&mut self) {
+        if !self.host.memory_low() {
+            self.reclaimed_at = None;
+            return;
+        }
+        let live = self.blocks.len() - self.free_blocks.len();
+        if self.reclaimed_at.is_some_and(|held| live < held) {
+            return;
+        }
+        self.reclaimed_at = Some(live);
         while !self.blocks.is_empty() && self.host.memory_low() {
             let retained = self.fault_recovery.len();
             self.reclaim_code();

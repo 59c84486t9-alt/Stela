@@ -606,6 +606,9 @@ pub struct Machine<H: Host, D: Devices> {
     blocks: table::Table<Block>,
     /// Slots of `blocks` whose code was reclaimed, for new blocks.
     free_blocks: Vec<usize>,
+    /// The blocks this machine held when it last reclaimed code for memory,
+    /// while memory has stayed low since (`reclaim_for_memory`).
+    reclaimed_at: Option<usize>,
     /// The fault recovery tables of the blocks that have entries, by block
     /// index: where their regions keep guest GPRs out of the frame across a
     /// faultable access, which a native fault applies first. Kept apart
@@ -859,6 +862,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             target,
             blocks: table::Table::new(),
             free_blocks: Vec::new(),
+            reclaimed_at: None,
             fault_recovery: BTreeMap::new(),
             native_patches: BTreeMap::new(),
             native_failure: None,

@@ -1982,6 +1982,35 @@ fn memory_pressure_reclaims_before_each_new_compilation() {
 }
 
 #[test]
+fn pressure_this_machine_cannot_relieve_waits_for_it_to_regrow() {
+    const RET: u32 = 0xd65f_03c0;
+    let mut machine = machine(&vec![RET; 5 * FETCH_PAGE as usize / 4 + 1]);
+    let base = machine.cpu.pc;
+    let page = |n: u64| base + n * FETCH_PAGE;
+    for n in 0..2 {
+        assert!(machine.fetch_block(page(n), false).is_ok());
+    }
+    // Pressure that releasing this machine's two blocks does not end.
+    machine.host.memory_low = true;
+    assert!(machine.fetch_block(page(2), false).is_ok());
+    assert_eq!(machine.statistics.code_discards, 1);
+    // One block held: it installs the next without discarding again.
+    assert!(machine.fetch_block(page(3), false).is_ok());
+    assert_eq!(machine.statistics.code_discards, 1);
+    assert_eq!(machine.index.len(), 2);
+    // Two again, as many as at the last reclaim: the next one reclaims.
+    assert!(machine.fetch_block(page(4), false).is_ok());
+    assert_eq!(machine.statistics.code_discards, 2);
+    assert_eq!(machine.index.len(), 1);
+    // Once memory recovers, the next stretch of pressure reclaims at once.
+    machine.host.memory_low = false;
+    assert!(machine.fetch_block(page(0), false).is_ok());
+    machine.host.memory_low = true;
+    assert!(machine.fetch_block(page(1), false).is_ok());
+    assert_eq!(machine.statistics.code_discards, 3);
+}
+
+#[test]
 fn ic_ivau_forgets_its_pages_blocks_and_ic_iallu_every_block() {
     const NOP: u32 = 0xd503_201f;
     const RET: u32 = 0xd65f_03c0;
