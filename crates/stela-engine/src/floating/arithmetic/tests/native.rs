@@ -430,17 +430,21 @@ const HALF_FORMS: [u32; 18] = [
     0x7ec0_1400,
     0x5e40_1c00,
 ];
+/// FDIV H, 4H and 8H, which end their block.
+const HALF_DIVISIONS: [u32; 3] = [0x1ee0_1800, 0x2e40_3c00, 0x6e40_3c00];
 /// FADDP H, and FMUL 8H, FMULX 4H and FMUL H by element with Vm = V2.
 const HALF_FIXED_RIGHT: [u32; 4] = [0x5e30_d800, 0x4f12_9800, 0x2f32_9000, 0x5f32_9800];
 
 /// Run the block; the state must match exact completion, on the inline path
 /// or after a helper exit that left only the prefix's effects.
 fn check_half(mapping: &Mapping, operand: &Operand, state: GuestState) -> bool {
+    // A Half division ends its block before the suffix.
+    let suffix = u64::from(operand.operation != BinaryOperation::Divide);
     let mut expected = state.clone();
     expected.x[8] += 1;
     let prefix = expected.clone();
     complete(&mut expected, operand).unwrap();
-    expected.x[9] += 1;
+    expected.x[9] += suffix;
     let mut actual = state;
     let saved = mxcsr();
     // SAFETY: the owned block contains only non-memory instructions, compiled
@@ -449,13 +453,13 @@ fn check_half(mapping: &Mapping, operand: &Operand, state: GuestState) -> bool {
     assert_eq!(mxcsr(), saved, "MXCSR {operand:?}");
     let inline = exit.kind == ExitKind::Fallthrough as u64;
     if inline {
-        assert_eq!(exit.next_pc, PC + 12, "{operand:?}");
+        assert_eq!(exit.next_pc, PC + 8 + 4 * suffix, "{operand:?}");
     } else {
         assert_eq!(exit.kind, ExitKind::FloatingPoint as u64, "{operand:?}");
         assert_eq!(exit.next_pc, PC + 4, "{operand:?}");
         assert_eq!(actual, prefix, "helper exit {operand:?}");
         complete(&mut actual, operand).unwrap();
-        actual.x[9] += 1;
+        actual.x[9] += suffix;
     }
     assert_eq!(actual, expected, "{operand:?} inline={inline}");
     inline
@@ -467,6 +471,7 @@ fn half_arithmetic_matches_completion_on_each_host_recipe() {
     let mut words = Vec::new();
     for (d, n, m) in [(0, 1, 2), (31, 31, 31)] {
         words.extend(HALF_FORMS.map(|base| base | d | n << 5 | m << 16));
+        words.extend(HALF_DIVISIONS.map(|base| base | d | n << 5 | m << 16));
     }
     words.extend(HALF_FIXED_RIGHT.map(|base| base | 3 | 1 << 5));
     const VALUES: [u64; 10] = [

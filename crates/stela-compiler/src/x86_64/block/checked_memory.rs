@@ -73,10 +73,13 @@ pub(crate) fn emit(
         &mut block.x86_64_code,
         &mut block.source_map,
         terminal,
-        fallthrough,
-        crate::x86_64::NativeSystem::NONE,
-        crate::x86_64::MemoryChecks::DEFAULT,
-        crate::x86_64::Rax::Unknown,
+        super::TerminalContext {
+            fallthrough,
+            native: crate::x86_64::NativeSystem::NONE,
+            checks: crate::x86_64::MemoryChecks::DEFAULT,
+            rax: crate::x86_64::Rax::Unknown,
+            target,
+        },
     );
     if let Some(profile) = profile
         && let Some((_, terminal)) = terminal

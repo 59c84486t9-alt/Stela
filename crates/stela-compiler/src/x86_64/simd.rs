@@ -230,6 +230,21 @@ pub(super) fn greater(code: &mut Code, lane_bytes: u8, unsigned: bool, target: c
     packed(code, Host::Or, 0, 2);
 }
 
+/// Whether [`half_division`] can complete a Half division on `target`.
+pub(super) fn half_division_inline(target: crate::TargetCpu) -> bool {
+    crate::x86_64::asm::vector_extensions::half_supported(target)
+}
+
+/// A Half division on its host instruction, exiting to numerical completion
+/// at `pc` where that cannot produce the guest result.
+pub(super) fn half_division(
+    code: &mut Code,
+    operand: &crate::aarch64::simd::arithmetic::Operand,
+    pc: crate::GuestAddress,
+) {
+    arithmetic::half_division(code, operand, pc);
+}
+
 pub(super) fn numerical_always_exits(operation: &crate::aarch64::FloatingPointOperation) -> bool {
     use crate::aarch64::{
         FloatingPointOperation,

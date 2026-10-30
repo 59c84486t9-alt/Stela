@@ -125,7 +125,7 @@ fn native_opcode(operation: BinaryOperation) -> HalfOpcode {
         BinaryOperation::Multiply
         | BinaryOperation::NegatedMultiply
         | BinaryOperation::MultiplyExtended => HalfOpcode::Multiply,
-        BinaryOperation::Divide => unreachable!("Half division retains its terminal helper"),
+        BinaryOperation::Divide => HalfOpcode::Divide,
     }
 }
 
@@ -153,7 +153,7 @@ fn native_sign(code: &mut Code, operation: BinaryOperation, lanes: u8) {
 /// lane recipe. A normal result of normal inputs is independent of FZ16, AH
 /// and DN, and other status or a result below exponent 2 takes the exact
 /// helper, so x86's tininess rule never decides a guest result.
-fn emit_native(code: &mut Code, operand: &Operand, pc: GuestAddress) {
+pub(in crate::x86_64) fn emit_native(code: &mut Code, operand: &Operand, pc: GuestAddress) {
     test_control(code, FPCR_EXCEPTION_ENABLE_MASK);
     let mut helper = vec![branch(code, Condition::NotZero)];
     prepare_inputs(code, operand);

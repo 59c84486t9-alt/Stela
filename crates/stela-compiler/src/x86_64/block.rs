@@ -345,10 +345,13 @@ fn emit_selected(
         code,
         &mut block.source_map,
         terminal,
-        fallthrough,
-        native,
-        checks,
-        after.rax,
+        TerminalContext {
+            fallthrough,
+            native,
+            checks,
+            rax: after.rax,
+            target,
+        },
     );
     if fault_table {
         fault_recovery = recovery::bind(
@@ -592,6 +595,9 @@ pub(crate) fn successor_exits(
         // System instruction exits at itself, which the stub check below
         // rejects.
         Some(Terminator::System(request)) => (request.next_pc, ExitKind::Fallthrough, false),
+        // So does a Half division completed inline; otherwise the same check
+        // rejects the exit at the instruction.
+        Some(Terminator::FloatingPoint { .. }) => (fallthrough, ExitKind::Fallthrough, false),
         Some(_) => return vec![],
     };
     let candidates = [
@@ -615,15 +621,28 @@ pub(crate) fn successor_exits(
         .collect()
 }
 
-fn emit_terminal(
-    code: &mut Code,
-    source_map: &mut Vec<(GuestAddress, usize)>,
-    terminal: Option<&(GuestAddress, Terminator)>,
+/// What a block's terminal is emitted against.
+struct TerminalContext {
     fallthrough: GuestAddress,
     native: super::NativeSystem,
     checks: super::MemoryChecks,
     rax: super::Rax,
+    target: crate::TargetCpu,
+}
+
+fn emit_terminal(
+    code: &mut Code,
+    source_map: &mut Vec<(GuestAddress, usize)>,
+    terminal: Option<&(GuestAddress, Terminator)>,
+    context: TerminalContext,
 ) {
+    let TerminalContext {
+        fallthrough,
+        native,
+        checks,
+        rax,
+        target,
+    } = context;
     // The terminal's own load of a register RAX already holds.
     let load = |code: &mut Code, register| {
         if rax != super::Rax::Guest(register) {
@@ -633,11 +652,19 @@ fn emit_terminal(
     if let Some((pc, terminal)) = terminal {
         source_map.push((*pc, code.len()));
         match terminal {
-            Terminator::FloatingPoint => {
+            Terminator::FloatingPoint { inline } => {
                 // A numerical terminal is unexecuted. Ordinary profiles put
                 // inline-capable forms in the body; the checked system profile
-                // delegates every numerical form to the runtime service.
-                direct_exit(code, *pc, ExitKind::FloatingPoint);
+                // delegates every numerical form to the runtime service. Half
+                // division ends its block on every host, and completes here
+                // where the host has its instruction.
+                match inline {
+                    Some(operand) if super::simd::half_division_inline(target) => {
+                        super::simd::half_division(code, operand, *pc);
+                        direct_exit(code, fallthrough, ExitKind::Fallthrough);
+                    }
+                    _ => direct_exit(code, *pc, ExitKind::FloatingPoint),
+                }
             }
             Terminator::Clock(request) => {
                 // MRS results and ISB come from the runtime clock service.

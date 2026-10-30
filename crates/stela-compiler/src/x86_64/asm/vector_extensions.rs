@@ -265,9 +265,10 @@ pub(crate) enum HalfOpcode {
     Add = 0x58,
     Multiply = 0x59,
     Subtract = 0x5c,
+    Divide = 0x5e,
 }
 
-/// VADDPH, VMULPH or VSUBPH of the XMM registers `destination` and `source`
+/// VADDPH, VMULPH, VSUBPH or VDIVPH of the XMM registers `destination` and `source`
 /// under MXCSR.RC, in the [`half_writemask`] lanes: the others clear and raise
 /// no status. The instructions ignore MXCSR.DAZ and FTZ.
 pub(crate) fn half_arithmetic(code: &mut Code, opcode: HalfOpcode, destination: u8, source: u8) {

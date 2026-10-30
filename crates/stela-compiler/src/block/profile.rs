@@ -132,7 +132,7 @@ pub(crate) fn terminal_traffic(terminal: &super::Terminator) -> Option<RegisterT
         Terminator::Branch(Operation::BranchCondition { condition, .. }) => {
             traffic.nzcv_frame_loads = u64::from(*condition < 14);
         }
-        Terminator::FloatingPoint => return None,
+        Terminator::FloatingPoint { .. } => return None,
         _ => {}
     }
     Some(traffic)
