@@ -194,9 +194,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 .ram_owner(),
         );
         let memory = ram
-            .try_service()
-            .map_err(|_| refused("canonical read RAM owner failed"))?
-            .ok_or_else(|| refused("canonical read RAM gates unavailable"))?;
+            .service()
+            .map_err(|_| refused("canonical read RAM owner failed"))?;
         let mut memory = device_write::CanonicalWriteMemory::serial(memory, &mut self.host);
         match shape {
             DeviceReadShape::Scalar { bytes } => self

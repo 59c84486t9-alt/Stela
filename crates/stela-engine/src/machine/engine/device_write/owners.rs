@@ -71,13 +71,9 @@ impl sealed::Sealed for WriteOwners<'_> {}
 impl CanonicalDeviceWrite for WriteOwners<'_> {
     fn memory(&mut self) -> Result<CanonicalWriteMemory<'_>, DeviceError> {
         self.validate()?;
-        let memory = self
-            .ram
-            .try_service()
-            .map_err(|_| DeviceError::TransferRefused(refuse!("canonical write RAM owner failed")))?
-            .ok_or_else(|| {
-                DeviceError::TransferRefused(refuse!("canonical write RAM gates unavailable"))
-            })?;
+        let memory = self.ram.service().map_err(|_| {
+            DeviceError::TransferRefused(refuse!("canonical write RAM owner failed"))
+        })?;
         Ok(CanonicalWriteMemory {
             memory,
             host: self.processors.native_host(),

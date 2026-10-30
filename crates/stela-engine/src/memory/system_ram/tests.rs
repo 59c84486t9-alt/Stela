@@ -79,6 +79,24 @@ fn canonical_service_excludes_native_and_mapping_publication_until_drop() {
 }
 
 #[test]
+fn a_waiting_service_starts_once_the_native_holder_returns() {
+    let storage = Storage::new();
+    let ranges = [range(&storage, 0x4000, 0, 128)];
+    // SAFETY: the test's storage backs every range, stays alive with the
+    // registration and has no other writer.
+    let ram = unsafe { model(&ranges, storage) };
+    let native = ram.domain.execution_loan().unwrap();
+    assert!(ram.try_service().unwrap().is_none());
+    let holder = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        drop(native);
+    });
+    let service = ram.service().unwrap();
+    service.validate_current().unwrap();
+    holder.join().unwrap();
+}
+
+#[test]
 fn canonical_service_blocks_real_alias_copyout_and_descriptor_writers() {
     use std::{sync::mpsc, time::Duration};
     let storage = Storage::new();

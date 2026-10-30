@@ -39,4 +39,17 @@ impl RegisteredSystemRam {
             .try_all_writer_service()
             .map(|service| service.map(|service| CanonicalRamService { ram: self, service }))
     }
+
+    /// [`Self::try_service`] for an owner that has stopped every PE: it
+    /// waits out the holders left, which finish without it (another PE's
+    /// monitor or writer gate while it applies its mail, or the native
+    /// slice of one that woke from a wait before it parks).
+    pub fn service(&self) -> Result<CanonicalRamService<'_>, MemoryStatus> {
+        loop {
+            if let Some(service) = self.try_service()? {
+                return Ok(service);
+            }
+            core::hint::spin_loop();
+        }
+    }
 }

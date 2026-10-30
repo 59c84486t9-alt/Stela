@@ -198,7 +198,7 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
             self.host.memory_barrier();
         }
         let unavailable = self.unsupported(RequirementKind::Native(
-            "canonical RAM service is busy or failed before controller effect",
+            "canonical RAM service failed before controller effect",
         ));
         let service = self
             .host
@@ -223,7 +223,7 @@ impl<H: Host, T: NativeTransport> ServiceHost<H, T> {
         inventory
             .require_all_held(&held)
             .map_err(|_| MemoryStatus::Domain)?;
-        let memory = self.ram.try_service()?.ok_or(MemoryStatus::Domain)?;
+        let memory = self.ram.service()?;
         let mut service = HeldRamService {
             ram: Some(memory),
             local: &mut self.local,
