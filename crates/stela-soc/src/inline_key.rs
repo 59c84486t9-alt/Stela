@@ -46,9 +46,13 @@ pub const RAW: u8 = 2;
 pub const KEY_BYTES: usize = 32;
 /// A sealed key: its synthetic IV (tag), then the encrypted key.
 pub const SEALED_BYTES: usize = TAG_BYTES + KEY_BYTES;
+/// A compactly sealed key: an 8-byte synthetic IV, then the encrypted key;
+/// the size and integrity of an RFC 3394 wrapped 256-bit key.
+pub const COMPACT_SEALED_BYTES: usize = COMPACT_TAG_BYTES + KEY_BYTES;
 
 const BLOCK: usize = 16;
 const TAG_BYTES: usize = 16;
+const COMPACT_TAG_BYTES: usize = 8;
 /// "Stela inline key", format 1: AES-128-XTS sealed under the boot's key.
 const HEADER: [u8; 4] = [b'S', b'I', b'K', 1];
 const CARRIED: usize = 16;
@@ -65,13 +69,8 @@ pub fn seal(
     aad: &[u8],
     key: &[u8; KEY_BYTES],
 ) -> [u8; SEALED_BYTES] {
-    let tag = synthetic_iv(wrapping, domain, aad, key);
     let mut sealed = [0; SEALED_BYTES];
-    sealed[..TAG_BYTES].copy_from_slice(&tag);
-    let pad = pad(wrapping, &tag);
-    for ((out, byte), mask) in sealed[TAG_BYTES..].iter_mut().zip(key).zip(pad.iter()) {
-        *out = byte ^ mask;
-    }
+    seal_into(wrapping, domain, aad, key, &mut sealed);
     sealed
 }
 
@@ -82,7 +81,54 @@ pub fn open(
     aad: &[u8],
     sealed: &[u8; SEALED_BYTES],
 ) -> Result<Zeroizing<[u8; KEY_BYTES]>> {
-    let (tag, encrypted) = sealed.split_at(TAG_BYTES);
+    open_from(wrapping, domain, aad, sealed)
+}
+
+/// [`seal`] with an 8-byte synthetic IV, for 40-byte key slots.
+pub fn seal_compact(
+    wrapping: &[u8; 32],
+    domain: &[u8],
+    aad: &[u8],
+    key: &[u8; KEY_BYTES],
+) -> [u8; COMPACT_SEALED_BYTES] {
+    let mut sealed = [0; COMPACT_SEALED_BYTES];
+    seal_into(wrapping, domain, aad, key, &mut sealed);
+    sealed
+}
+
+/// Open what [`seal_compact`] sealed.
+pub fn open_compact(
+    wrapping: &[u8; 32],
+    domain: &[u8],
+    aad: &[u8],
+    sealed: &[u8; COMPACT_SEALED_BYTES],
+) -> Result<Zeroizing<[u8; KEY_BYTES]>> {
+    open_from(wrapping, domain, aad, sealed)
+}
+
+/// Seal into `sealed`, whose length beyond the key is the tag's.
+fn seal_into(
+    wrapping: &[u8; 32],
+    domain: &[u8],
+    aad: &[u8],
+    key: &[u8; KEY_BYTES],
+    sealed: &mut [u8],
+) {
+    let (tag, encrypted) = sealed.split_at_mut(sealed.len() - KEY_BYTES);
+    tag.copy_from_slice(&synthetic_iv(wrapping, domain, aad, key)[..tag.len()]);
+    let pad = pad(wrapping, tag);
+    for ((out, byte), mask) in encrypted.iter_mut().zip(key).zip(pad.iter()) {
+        *out = byte ^ mask;
+    }
+}
+
+fn open_from(
+    wrapping: &[u8; 32],
+    domain: &[u8],
+    aad: &[u8],
+    sealed: &[u8],
+) -> Result<Zeroizing<[u8; KEY_BYTES]>> {
+    let (tag, encrypted) = sealed.split_at(sealed.len() - KEY_BYTES);
     let pad = pad(wrapping, tag);
     let mut key = Zeroizing::new([0; KEY_BYTES]);
     for ((out, byte), mask) in key.iter_mut().zip(encrypted).zip(pad.iter()) {

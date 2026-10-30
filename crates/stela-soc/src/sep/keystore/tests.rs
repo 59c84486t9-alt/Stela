@@ -609,6 +609,31 @@ fn the_environment_is_recorded_and_answered_with_the_result_alone() {
 }
 
 #[test]
+fn a_null_d_key_request_is_acknowledged_with_the_variant_alone() {
+    // Variant 0 and u64 1, without a blob.
+    let mut request = message(2, 0, 1, &[]);
+    request.truncate(request.len() - 4);
+    let digest = digest(&request);
+    request[DIGEST_START..DIGEST_START + DIGEST_BYTES].copy_from_slice(&digest);
+    let (reply, output) = ask(
+        &mut KeyStore::default(),
+        frame(NULL_D_KEY, 3, request.len()),
+        request.clone(),
+    );
+    assert_eq!(reply.unwrap().data >> LENGTH_SHIFT, 88);
+    let parsed = Message::parse(&output).unwrap();
+    assert_eq!(parsed.variant(), 0);
+    assert_eq!(parsed.fields().end(), Ok(()));
+    // Another argument, or a trailing blob, refuses.
+    let (reply, _) = ask(
+        &mut KeyStore::default(),
+        frame(NULL_D_KEY, 3, request.len() + 4),
+        message(2, 0, 1, &[]),
+    );
+    assert!(reply.is_err());
+}
+
+#[test]
 fn decoded_keybags_and_malformed_bodies_never_publish_success_or_change_environment() {
     let mut keystore = KeyStore::default();
     let env = message(2, 0, 1, &environment(3, 4));

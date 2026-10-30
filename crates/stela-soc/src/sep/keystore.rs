@@ -48,7 +48,7 @@
 //! This SEP parses both header versions, so it reports version 2, and it
 //! records the environment, which nothing consumes yet. The command-specific
 //! keybag codecs validate the recovered AP layouts, then explicitly refuse
-//! their unresolved security semantics. Keybags, class, media and wrapped keys need
+//! their unresolved security semantics. Keybags, class and per-file keys need
 //! the keystore lifecycle in docs/research/sep-requirements.md, and no
 //! success is invented for them. The failure answer is the status
 //! [`FAILURE`], Stela's choice of generic failure: the AP sign-extends
@@ -90,6 +90,11 @@ pub const FAILURE: u8 = 0xff;
 
 pub const GET_CAPABILITIES: u8 = 0x4d;
 pub const SET_ENVIRONMENT: u8 = 0x2a;
+/// `effaceable_init` (0x2d258c8) sends NULL_D_KEY (`__ipc_null_d_key`
+/// 0x2d3a618) with variant 0 and u64 1 when `/defaults` has
+/// `no-effaceable-storage`; the reply is the variant alone. This SEP never
+/// keeps keys in effaceable storage, so it acknowledges.
+pub const NULL_D_KEY: u8 = 0x0a;
 
 const LENGTH_BYTES: usize = 4;
 const DIGEST_START: usize = 4;
@@ -202,7 +207,7 @@ impl KeyStore {
         let command = frame.tag;
         if !matches!(
             command,
-            GET_CAPABILITIES | SET_ENVIRONMENT | system_key::PERFORM_OPERATION
+            GET_CAPABILITIES | SET_ENVIRONMENT | NULL_D_KEY | system_key::PERFORM_OPERATION
         ) && !keybag::recognizes(command)
             && !volume_key::recognizes(command)
         {
@@ -285,6 +290,17 @@ impl KeyStore {
             return Err(refuse(refuse!(
                 "SEP keystore startup command argument is not the kernel's"
             )));
+        }
+        if command == NULL_D_KEY {
+            fields.end().map_err(refuse)?;
+            let reply = message.reply(&[]);
+            payload.output(&reply).map_err(refuse)?;
+            return Ok(Frame {
+                tag: command | REPLY,
+                parameter: 0,
+                data: (reply.len() as u32) << LENGTH_SHIFT,
+                ..frame
+            });
         }
         let blob = fields.blob().map_err(refuse)?;
         fields.end().map_err(refuse)?;

@@ -20,7 +20,14 @@
 //!   (`_apfs_keybag_unlock_record_tag` 0x481ed30).
 //! - SET_PROTECTION 0x47 (`__ipc_fv_set_protection` 0x2d5c62c, codec
 //!   0x2d46fa8): handle, parameters, operation, u64, three blobs -> blob.
-//!   APFS commits a new VEK with operation 5 and the wrapped VEK third.
+//!   APFS's `fv_set_protection` arguments x3..x5 are the three blobs. It
+//!   commits a new VEK with operation 5 and the wrapped VEK third
+//!   (`apfs_vek_commit_internal` 0x481f2dc), drops a VEK's state with 6 and
+//!   the VEK third (`apfs_vek_remove_aks_state`, 0x490f484), commits an
+//!   updated wrapped KEK record with 22 and the KEK second (0x4820924),
+//!   retains an unlock record's state with 15 and releases it with 11, the
+//!   KEK second (`apfs_keybag_aks_retain_unlock_record_for_volumes_group`
+//!   0x481fa6c, 0x481fb80).
 //! - GET_BLOB_STATE 0x48 (0x2d471f0): handle, parameters, wrapped VEK -> a
 //!   DER dictionary `_decode_fv_blob_state` (0x2d5f8ec) reads: `kt` type,
 //!   `kid` and `id` (16-byte octet strings), `f` flags, `kv` version, `sr`
@@ -40,9 +47,13 @@
 //! secret; a wrapped VEK carries a system seal under the root, a user seal
 //! under a KEK, or both, with the VEK UUID and its KEK's UUID bound in.
 //! The keybag handle and parameters do not change these keys; they are not
-//! interpreted. Commit keeps no record against replaying an older wrapped
-//! VEK; it checks the VEK and reports that once. Other protection
+//! interpreted. Commits keep no record against replaying an older wrapped
+//! key and retained unlock records do not outlive the sepOS start; each
+//! checks its key and reports that once. Dropping a VEK's or an unlock
+//! record's state releases nothing, as none is held. Other protection
 //! operations, the remaining `fv` commands and other types refuse.
+//! [`media`] serves the container media keys under the same root and
+//! inline engine.
 use super::super::Entropy;
 use super::Fields;
 use super::dictionary::{dictionary, number, tagged};
@@ -66,7 +77,12 @@ const WRAPPED_VEK: u32 = 1;
 const WRAPPED_KEK: u32 = 2;
 /// The only KEK and unwrap type APFS sends.
 const KEK_TYPE: u32 = 2;
+/// Protection operations.
+const RELEASE_UNLOCK_RECORD: u32 = 11;
 const COMMIT: u32 = 5;
+const REMOVE_VEK_STATE: u32 = 6;
+const RETAIN_UNLOCK_RECORD: u32 = 15;
+const COMMIT_KEK: u32 = 22;
 /// The inline key's `cpx` flags: `CP_RAW_KEY_WRAPPEDKEY`.
 const SEP_WRAPPED: u32 = 1;
 /// Blob-state flags.
@@ -93,13 +109,16 @@ const USER_KEY_DOMAIN: &[u8] = b"Stela SEP KEK-derived VEK key v1\0";
 
 const UNINTERPRETED: &str = "SEP volume keys: keybag handle and parameters are not interpreted";
 const UNRECORDED_COMMIT: &str =
-    "SEP volume keys: commit keeps no anti-replay record of superseded wrapped VEKs";
+    "SEP volume keys: commit keeps no anti-replay record of superseded wrapped keys";
+const UNRETAINED: &str = "SEP volume keys: retained unlock records do not outlive the sepOS start";
+
+mod media;
 
 pub(super) fn recognizes(command: u8) -> bool {
     matches!(
         command,
         NEW_VEK | UNWRAP_VEK | NEW_KEK | GET_SIZE | SET_PROTECTION | GET_BLOB_STATE
-    )
+    ) || media::recognizes(command)
 }
 
 /// The volume keys of one sepOS start.
@@ -138,6 +157,9 @@ impl VolumeKeys {
         entropy: &mut dyn Entropy,
         notes: &mut dyn FnMut(String),
     ) -> Result<Vec<u8>> {
+        if media::recognizes(command) {
+            return self.media(command, variant, fields, entropy);
+        }
         let expected = if command == UNWRAP_VEK {
             matches!(variant, 0 | 1)
         } else {
@@ -212,18 +234,38 @@ impl VolumeKeys {
                 let value = fields.lword()?;
                 let first = fields.blob()?;
                 let second = fields.blob()?;
-                let wrapped_vek = fields.blob()?;
+                let third = fields.blob()?;
                 fields.end()?;
-                if operation != COMMIT || value != 0 || !first.is_empty() || !second.is_empty() {
-                    notes(alloc::format!(
-                        "SEP volume keys: protection operation {operation} is not implemented"
-                    ));
-                    return Err(refuse!(
-                        "SEP volume-key protection operation is not implemented"
-                    ));
+                let vek_only = value == 0 && first.is_empty() && second.is_empty();
+                let kek_only = value == 0 && first.is_empty() && third.is_empty();
+                match operation {
+                    COMMIT if vek_only => {
+                        Vek::parse(third)?;
+                        self.report(UNRECORDED_COMMIT, notes);
+                    }
+                    REMOVE_VEK_STATE if vek_only => {
+                        Vek::parse(third)?;
+                    }
+                    COMMIT_KEK if kek_only => {
+                        kek_uuid(second)?;
+                        self.report(UNRECORDED_COMMIT, notes);
+                    }
+                    RETAIN_UNLOCK_RECORD if kek_only => {
+                        kek_uuid(second)?;
+                        self.report(UNRETAINED, notes);
+                    }
+                    RELEASE_UNLOCK_RECORD if kek_only => {
+                        kek_uuid(second)?;
+                    }
+                    _ => {
+                        notes(alloc::format!(
+                            "SEP volume keys: protection operation {operation} is not implemented"
+                        ));
+                        return Err(refuse!(
+                            "SEP volume-key protection operation is not implemented"
+                        ));
+                    }
                 }
-                Vek::parse(wrapped_vek)?;
-                self.report(UNRECORDED_COMMIT, notes);
                 reply.blob(&[]);
             }
             GET_BLOB_STATE => {
@@ -266,11 +308,7 @@ impl VolumeKeys {
     }
 
     fn open_kek(&self, blob: &[u8], secret: &[u8]) -> Result<Kek> {
-        if blob.len() != KEK_BYTES || blob[..4] != KEK_MAGIC || blob[4..8] != KEK_TYPE.to_le_bytes()
-        {
-            return Err(refuse!("SEP volume-key wrapped KEK is not a Stela KEK"));
-        }
-        let uuid = blob[8..KEK_HEADER].try_into().unwrap();
+        let uuid = kek_uuid(blob)?;
         let sealed = blob[KEK_HEADER..].try_into().unwrap();
         let key = open(
             &self.protector(uuid, secret),
@@ -421,6 +459,14 @@ impl Reply {
         self.0.extend_from_slice(bytes);
         self.0.resize(self.0.len().next_multiple_of(4), 0);
     }
+}
+
+/// The UUID of a wrapped KEK in Stela's format; its seal is not opened.
+fn kek_uuid(blob: &[u8]) -> Result<[u8; UUID_BYTES]> {
+    if blob.len() != KEK_BYTES || blob[..4] != KEK_MAGIC || blob[4..8] != KEK_TYPE.to_le_bytes() {
+        return Err(refuse!("SEP volume-key wrapped KEK is not a Stela KEK"));
+    }
+    Ok(blob[8..KEK_HEADER].try_into().unwrap())
 }
 
 fn uuid(bytes: &[u8]) -> Result<[u8; UUID_BYTES]> {

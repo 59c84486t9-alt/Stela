@@ -241,6 +241,111 @@ fn another_machine_or_a_changed_blob_does_not_unlock() {
     assert!(unwrap(&mut keys, 0, b"secret", &bad, &vek).is_err());
 }
 
+fn protect(
+    keys: &mut VolumeKeys,
+    operation: u32,
+    blobs: [&[u8]; 3],
+    notes: &mut Vec<String>,
+) -> Result<Vec<u8>> {
+    let request = Request::new()
+        .word(operation)
+        .lword(0)
+        .blob(blobs[0])
+        .blob(blobs[1])
+        .blob(blobs[2]);
+    send(keys, SET_PROTECTION, 0, request, notes)
+}
+
+#[test]
+fn state_operations_check_their_key_and_report_what_is_not_kept() {
+    let (mut keys, _) = keys(1);
+    let (vek, _) = new_vek(&mut keys, &[], &[]);
+    let kek = new_kek(&mut keys, b"secret");
+    let mut notes = Vec::new();
+    for (operation, blobs) in [
+        (REMOVE_VEK_STATE, [&[][..], &[], &vek]),
+        (COMMIT_KEK, [&[], &kek, &[]]),
+        (RETAIN_UNLOCK_RECORD, [&[], &kek, &[]]),
+        (RELEASE_UNLOCK_RECORD, [&[], &kek, &[]]),
+    ] {
+        let reply = protect(&mut keys, operation, blobs, &mut notes).unwrap();
+        assert_eq!(reply, 0u32.to_le_bytes(), "operation {operation}");
+    }
+    assert_eq!(notes, [UNRECORDED_COMMIT, UNRETAINED]);
+    // A key in the wrong slot, or not a Stela key, refuses.
+    for (operation, blobs) in [
+        (REMOVE_VEK_STATE, [&[][..], &kek, &[]]),
+        (COMMIT_KEK, [&[], &[], &kek]),
+        (RETAIN_UNLOCK_RECORD, [&[], &vek, &[]]),
+        (RELEASE_UNLOCK_RECORD, [&kek, &kek, &[]]),
+    ] {
+        assert!(protect(&mut keys, operation, blobs, &mut notes).is_err());
+    }
+}
+
+fn send_media(keys: &mut VolumeKeys, command: u8, request: Request) -> Result<Vec<u8>> {
+    // Media requests start with u64 1, not a handle and parameters.
+    let mut fields_request = Request::default().lword(1);
+    fields_request.0.0.extend_from_slice(&request.0.0);
+    send(keys, command, 1, fields_request, &mut Vec::new())
+}
+
+/// NEW_MEDIA_KEY's reply: the inline key area and the wrapped key.
+fn new_media_key(keys: &mut VolumeKeys, class: u32) -> (Vec<u8>, Vec<u8>) {
+    let request = Request::default().word(u32::MAX).word(class);
+    let reply = send_media(keys, media::NEW_MEDIA_KEY, request).unwrap();
+    let mut fields = reply_fields(&reply);
+    let area = media_key_fields(&mut fields);
+    let wrapped = fields.blob().unwrap().to_vec();
+    fields.end().unwrap();
+    (area, wrapped)
+}
+
+fn media_key_fields(fields: &mut Fields<'_>) -> Vec<u8> {
+    let area = fields.blob().unwrap().to_vec();
+    assert!(fields.blob().unwrap().is_empty());
+    assert_eq!(fields.word().unwrap(), 1 << 1);
+    area
+}
+
+fn unwrap_media_key(
+    keys: &mut VolumeKeys,
+    wrapped: &[u8],
+    handle: u32,
+    class: u32,
+) -> Result<Vec<u8>> {
+    let request = Request::default().blob(wrapped).word(handle).word(class);
+    let reply = send_media(keys, media::UNWRAP_MEDIA_KEY, request)?;
+    let mut fields = reply_fields(&reply);
+    let area = media_key_fields(&mut fields);
+    fields.end().unwrap();
+    Ok(area)
+}
+
+#[test]
+fn a_media_key_unwraps_to_the_same_inline_key_only_on_its_machine_and_class() {
+    let (mut keys, engine) = keys(1);
+    let (area, wrapped) = new_media_key(&mut keys, 0);
+    assert_eq!(wrapped.len(), 40);
+    let again = unwrap_media_key(&mut keys, &wrapped, u32::MAX, 0).unwrap();
+    assert_eq!(cipher(&engine, &again), cipher(&engine, &area));
+    assert!(unwrap_media_key(&mut keys, &wrapped, u32::MAX, 1).is_err());
+    let (mut other, _) = self::keys(2);
+    assert!(unwrap_media_key(&mut other, &wrapped, u32::MAX, 0).is_err());
+    let mut bad = wrapped.clone();
+    bad[20] ^= 1;
+    assert!(unwrap_media_key(&mut keys, &bad, u32::MAX, 0).is_err());
+    assert!(unwrap_media_key(&mut keys, &wrapped[1..], u32::MAX, 0).is_err());
+    // Keybag classes, another variant or client word refuse.
+    assert!(unwrap_media_key(&mut keys, &wrapped, 3, 0).is_err());
+    let request = Request::default().word(3).word(0);
+    assert!(send_media(&mut keys, media::NEW_MEDIA_KEY, request).is_err());
+    let request = Request::default().lword(2).word(u32::MAX).word(0);
+    assert!(send(&mut keys, media::NEW_MEDIA_KEY, 1, request, &mut Vec::new()).is_err());
+    let request = Request::default().lword(1).word(u32::MAX).word(0);
+    assert!(send(&mut keys, media::NEW_MEDIA_KEY, 0, request, &mut Vec::new()).is_err());
+}
+
 #[test]
 fn unmodeled_operations_and_fields_refuse() {
     let (mut keys, _) = keys(1);

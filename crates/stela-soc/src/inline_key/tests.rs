@@ -135,3 +135,24 @@ fn sealing_binds_its_domain_and_associated_data() {
     // Domain and associated data are length-delimited.
     assert_ne!(sealed, seal(&[1; 32], b"aa", b"ad", &secret));
 }
+
+#[test]
+fn compact_sealing_keeps_an_eight_byte_tag_with_the_same_binding() {
+    let secret = [0x11; KEY_BYTES];
+    let sealed = seal_compact(&[1; 32], b"a", b"aad", &secret);
+    assert_eq!(sealed.len(), 40);
+    assert_eq!(sealed[..8], seal(&[1; 32], b"a", b"aad", &secret)[..8]);
+    assert_eq!(
+        *open_compact(&[1; 32], b"a", b"aad", &sealed).unwrap(),
+        secret
+    );
+    assert!(open_compact(&[1; 32], b"a", b"aae", &sealed).is_err());
+    for index in [0, 7, 8, 39] {
+        let mut bad = sealed;
+        bad[index] ^= 1;
+        assert!(
+            open_compact(&[1; 32], b"a", b"aad", &bad).is_err(),
+            "byte {index}"
+        );
+    }
+}
