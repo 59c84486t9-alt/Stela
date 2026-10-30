@@ -448,23 +448,26 @@ pub(crate) fn byte_dot(
     true
 }
 
-/// TBL and TBX need AVX-512 VBMI with BW and VL. The DIT profile keeps its
-/// reviewed recipe.
-pub(crate) fn byte_table_supported(target: TargetCpu) -> bool {
-    target.supports(
-        TargetCpu::Avx512f
-            .with_avx512vl()
-            .with_avx512bw()
-            .with_avx512vbmi(),
-    ) && !target.data_independent_timing()
+/// TBL and TBX on `lane_bytes` lanes need AVX-512 with VL: BW and VBMI for
+/// bytes, BW for halfwords and F alone for dwords and quadwords. The DIT
+/// profile keeps its reviewed recipe.
+pub(crate) fn table_supported(lane_bytes: u8, target: TargetCpu) -> bool {
+    let halfwords = TargetCpu::Avx512f.with_avx512vl().with_avx512bw();
+    let required = match lane_bytes {
+        1 => halfwords.with_avx512vbmi(),
+        2 => halfwords,
+        4 | 8 => TargetCpu::Avx512f.with_avx512vl(),
+        _ => return false,
+    };
+    target.supports(required) && !target.data_independent_timing()
 }
 
-/// EVEX.128 with opmask `mask`, zeroing the inactive bytes when `zeroing`.
-const fn masked(map: Map, pp: Pp, mask: u8, zeroing: bool) -> Evex {
+/// EVEX.128 with opmask `mask`, zeroing the inactive lanes when `zeroing`.
+const fn masked(map: Map, pp: Pp, w: bool, mask: u8, zeroing: bool) -> Evex {
     Evex {
         map,
         pp,
-        w: false,
+        w,
         length: 0,
         mask,
         zeroing,
@@ -476,30 +479,42 @@ const fn masked(map: Map, pp: Pp, mask: u8, zeroing: bool) -> Evex {
 const IN_RANGE: u8 = 1;
 const UPPER_PAIR: u8 = 2;
 const LESS_THAN: u8 = 1;
-const UPPER_PAIR_INDEX_BIT: u32 = 0x20;
 const TABLE_BYTES: u32 = 16;
 
-/// `value` in every byte of `xmm` through EAX: VPBROADCASTB.
-fn broadcast_byte(code: &mut Code, xmm: u8, value: u32) {
+/// `value` in every `lane_bytes` lane of `xmm` through EAX:
+/// VPBROADCASTB/W/D/Q.
+fn broadcast(code: &mut Code, lane_bytes: u8, xmm: u8, value: u32) {
+    let opcode = match lane_bytes {
+        1 => 0x7a,
+        2 => 0x7b,
+        _ => 0x7c,
+    };
     let mut asm = code.asm();
     asm.mov_imm32(Gpr::Rax, value);
     asm.evex(
-        masked(Map::M0f38, Pp::P66, 0, false),
-        0x7a,
+        masked(Map::M0f38, Pp::P66, lane_bytes == 8, 0, false),
+        opcode,
         xmm,
         0,
         Rm::Reg(Gpr::Rax),
     );
 }
 
-/// Look up each byte of `indices` in the concatenation of `tables`, one to
-/// four 16-byte operands. An index beyond them gives zero, or with
-/// `preserve` leaves the byte already in `result` (TBX). VPCMPUB marks the
-/// in-range indices in K1; VPERMB reads one table, VPERMT2B a pair, and a
-/// second pair is blended in by index bit 5 (VPTESTMB into K2). Clobbers
-/// `scratch`, EAX, K1 and K2.
-pub(crate) fn byte_table(
+/// Look up each `lane_bytes` lane of `indices` in the concatenation of
+/// `tables`, one to four 16-byte operands. An index beyond them gives zero,
+/// or with `preserve` leaves the lane already in `result` (TBX). VPCMPU{B,W,
+/// D,Q} marks the in-range indices in K1; VPERMB or VPERMW reads one table,
+/// VPERMT2{B,W,D,Q} a pair (a lone D or Q table pairs with itself), and a
+/// second pair is blended in by the index bit above the first (VPTESTM into
+/// K2). EVEX.W selects the H and Q forms. Clobbers `scratch`, EAX, K1 and
+/// K2.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the lane size, both operands, tables, merge mode and scratch are independent"
+)]
+pub(crate) fn table(
     code: &mut Code,
+    lane_bytes: u8,
     result: u8,
     indices: u8,
     tables: &[Mem],
@@ -507,26 +522,39 @@ pub(crate) fn byte_table(
     scratch: [u8; 2],
     target: TargetCpu,
 ) -> bool {
-    if !byte_table_supported(target) {
+    if !table_supported(lane_bytes, target) {
         return false;
     }
     assert!(
         (1..=4).contains(&tables.len()),
         "TBL reads one to four tables"
     );
+    let w = matches!(lane_bytes, 2 | 8);
+    let dwords = lane_bytes >= 4;
+    let permute = |mask, zeroing| masked(Map::M0f38, Pp::P66, w, mask, zeroing);
+    let blend = |mask| {
+        masked(
+            Map::M0f,
+            if dwords { Pp::Pf3 } else { Pp::Pf2 },
+            w,
+            mask,
+            false,
+        )
+    };
     let [lookup, other] = scratch;
-    broadcast_byte(code, other, TABLE_BYTES * tables.len() as u32);
+    let lanes = TABLE_BYTES / u32::from(lane_bytes);
+    broadcast(code, lane_bytes, other, lanes * tables.len() as u32);
     code.asm().evex(
-        masked(Map::M0f3a, Pp::P66, 0, false),
-        0x3e,
+        masked(Map::M0f3a, Pp::P66, w, 0, false),
+        if dwords { 0x1e } else { 0x3e },
         IN_RANGE,
         indices,
         Rm::Xmm(other),
     );
     code.asm().data(&[LESS_THAN]);
-    if let [table] = tables {
+    if let ([table], false) = (tables, dwords) {
         code.asm().evex(
-            masked(Map::M0f38, Pp::P66, IN_RANGE, !preserve),
+            permute(IN_RANGE, !preserve),
             0x8d,
             result,
             indices,
@@ -538,41 +566,31 @@ pub(crate) fn byte_table(
     let pair = |code: &mut Code, xmm: u8, low: Mem, high: Mem| {
         Host::LoadUnaligned.emit(code, xmm, low, TargetCpu::Baseline);
         code.asm().evex(
-            masked(Map::M0f38, Pp::P66, IN_RANGE, true),
-            0x7d,
+            permute(IN_RANGE, true),
+            if dwords { 0x7e } else { 0x7d },
             xmm,
             indices,
             high.into(),
         );
     };
-    pair(code, lookup, tables[0], tables[1]);
-    if let [.., third] = &tables[2..] {
-        broadcast_byte(code, other, UPPER_PAIR_INDEX_BIT);
+    pair(code, lookup, tables[0], tables[tables.len().min(2) - 1]);
+    if let Some([.., third]) = tables.get(2..) {
+        broadcast(code, lane_bytes, other, 2 * lanes);
         code.asm().evex(
-            masked(Map::M0f38, Pp::P66, 0, false),
-            0x26,
+            permute(0, false),
+            if dwords { 0x27 } else { 0x26 },
             UPPER_PAIR,
             indices,
             Rm::Xmm(other),
         );
         // Three tables repeat the third; its indices 48..63 are out of range.
         pair(code, other, tables[2], *third);
-        code.asm().evex(
-            masked(Map::M0f, Pp::Pf2, UPPER_PAIR, false),
-            0x6f,
-            lookup,
-            0,
-            Rm::Xmm(other),
-        );
+        code.asm()
+            .evex(blend(UPPER_PAIR), 0x6f, lookup, 0, Rm::Xmm(other));
     }
     if preserve {
-        code.asm().evex(
-            masked(Map::M0f, Pp::Pf2, IN_RANGE, false),
-            0x6f,
-            result,
-            0,
-            Rm::Xmm(lookup),
-        );
+        code.asm()
+            .evex(blend(IN_RANGE), 0x6f, result, 0, Rm::Xmm(lookup));
     }
     true
 }
@@ -1441,37 +1459,76 @@ mod tests {
             .with_avx512vl()
             .with_avx512bw()
             .with_avx512vbmi();
-        let table = Mem::base_disp32(Gpr::Rdi, 0x128);
+        let memory = Mem::base_disp32(Gpr::Rdi, 0x128);
         for target in [
             TargetCpu::Avx512f.with_avx512vl().with_avx512bw(),
             TargetCpu::Avx512f.with_avx512vl().with_avx512vbmi(),
             vbmi.with_data_independent_timing(),
         ] {
             let mut code = Code::new();
-            assert!(!byte_table(
-                &mut code,
-                0,
-                1,
-                &[table],
-                false,
-                [2, 3],
-                target
-            ));
+            assert!(!table_supported(1, target));
+            assert!(!table(&mut code, 1, 0, 1, &[memory], false, [2, 3], target));
             assert!(code.is_empty());
         }
+        let halfwords = TargetCpu::Avx512f.with_avx512vl().with_avx512bw();
+        for (lane_bytes, target) in [
+            (2, TargetCpu::Avx512f.with_avx512vl()),
+            (4, TargetCpu::Avx512f),
+            (8, halfwords.with_data_independent_timing()),
+            (16, vbmi),
+        ] {
+            assert!(!table_supported(lane_bytes, target));
+        }
+        // GNU as: VPERMW on one halfword table, VPERMT2D pairing one dword
+        // table with itself, and TBX over four quadword tables at
+        // [rdi+0x100..0x130]: VPCMPLTUQ, a VPERMT2Q pair per half, VPTESTMQ
+        // of index bit 2 and two VMOVDQU64 blends.
+        let emit = |lane_bytes, tables: &[Mem], preserve| {
+            let mut code = Code::new();
+            assert!(table(
+                &mut code,
+                lane_bytes,
+                0,
+                1,
+                tables,
+                preserve,
+                [2, 3],
+                TargetCpu::X86_64_V4
+            ));
+            code.into_bytes()
+        };
+        assert_eq!(
+            emit(2, &[memory], false),
+            [
+                0xb8, 0x08, 0x00, 0x00, 0x00, 0x62, 0xf2, 0x7d, 0x08, 0x7b, 0xd8, 0x62, 0xf3, 0xf5,
+                0x08, 0x3e, 0xcb, 0x01, 0x62, 0xf2, 0xf5, 0x89, 0x8d, 0x87, 0x28, 0x01, 0x00, 0x00,
+            ]
+        );
+        assert_eq!(
+            emit(4, &[memory], false),
+            [
+                0xb8, 0x04, 0x00, 0x00, 0x00, 0x62, 0xf2, 0x7d, 0x08, 0x7c, 0xd8, 0x62, 0xf3, 0x75,
+                0x08, 0x1e, 0xcb, 0x01, 0xf3, 0x0f, 0x6f, 0x87, 0x28, 0x01, 0x00, 0x00, 0x62, 0xf2,
+                0x75, 0x89, 0x7e, 0x87, 0x28, 0x01, 0x00, 0x00,
+            ]
+        );
+        let tables = [0x100, 0x110, 0x120, 0x130].map(|at| Mem::base_disp32(Gpr::Rdi, at));
+        assert_eq!(
+            emit(8, &tables, true),
+            [
+                0xb8, 0x08, 0x00, 0x00, 0x00, 0x62, 0xf2, 0xfd, 0x08, 0x7c, 0xd8, 0x62, 0xf3, 0xf5,
+                0x08, 0x1e, 0xcb, 0x01, 0xf3, 0x0f, 0x6f, 0x97, 0x00, 0x01, 0x00, 0x00, 0x62, 0xf2,
+                0xf5, 0x89, 0x7e, 0x97, 0x10, 0x01, 0x00, 0x00, 0xb8, 0x04, 0x00, 0x00, 0x00, 0x62,
+                0xf2, 0xfd, 0x08, 0x7c, 0xd8, 0x62, 0xf2, 0xf5, 0x08, 0x27, 0xd3, 0xf3, 0x0f, 0x6f,
+                0x9f, 0x20, 0x01, 0x00, 0x00, 0x62, 0xf2, 0xf5, 0x89, 0x7e, 0x9f, 0x30, 0x01, 0x00,
+                0x00, 0x62, 0xf1, 0xfe, 0x0a, 0x6f, 0xd3, 0x62, 0xf1, 0xfe, 0x09, 0x6f, 0xc2,
+            ]
+        );
         // GNU as: mov eax, 16; vpbroadcastb xmm3, eax; vpcmpltub k1, xmm1,
         // xmm3; vpermb xmm0{k1}{z} (TBL) or xmm0{k1} (TBX), xmm1, [rdi+0x128].
         for (preserve, masking) in [(false, 0x89), (true, 0x09)] {
             let mut code = Code::new();
-            assert!(byte_table(
-                &mut code,
-                0,
-                1,
-                &[table],
-                preserve,
-                [2, 3],
-                vbmi
-            ));
+            assert!(table(&mut code, 1, 0, 1, &[memory], preserve, [2, 3], vbmi));
             assert_eq!(code.instructions(), 4);
             let bytes = code.into_bytes();
             assert_eq!(
@@ -1502,7 +1559,7 @@ mod tests {
             if !host.supports(target) {
                 continue;
             }
-            extended += usize::from(byte_table_supported(target));
+            extended += usize::from(table_supported(1, target));
             for registers in 1..=4u32 {
                 for (destination, first, indices) in [(3u32, 4u32, 2u32), (2, 30, 2), (5, 4, 5)] {
                     for (q, tbx) in [(0u32, false), (1, false), (0, true), (1, true)] {

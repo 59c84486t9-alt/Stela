@@ -1,6 +1,7 @@
 //! Streaming SVE and SME extension recipes (VNNI byte dots, GFNI byte and
-//! AVX-512 quadword shifts, AVX-512 integer conversions), compared with the
-//! reviewed SSE recipes on random Z, P, ZA and selector state.
+//! AVX-512 quadword shifts, AVX-512 integer conversions and table
+//! permutes), compared with the reviewed SSE recipes on random Z, P, ZA and
+//! selector state.
 use super::execution::Native;
 use crate::aarch64::floating::features::NumericalFeatures;
 use crate::aarch64::scalable::{
@@ -110,12 +111,27 @@ enum Values {
     /// signed integers, with non-negative floats in half the samples, under a
     /// random FPCR rounding mode.
     Numbers,
+    /// One B/H/S/D lane width per sample, each lane below 72, 40, 20 or 10,
+    /// or raw bits in a fifth of the samples.
+    Indices,
 }
 
 impl Values {
     fn lane(self, kind: u64, random: u64) -> u64 {
-        if self == Self::Bits {
-            return random;
+        match self {
+            Self::Bits => return random,
+            Self::Indices => {
+                let width = kind % 5;
+                if width == 4 {
+                    return random;
+                }
+                let bound = [72, 40, 20, 10][width as usize];
+                return (0..8 >> width).fold(0, |lane, element| {
+                    let index = (random >> (element * 8) & 0xff) % bound;
+                    lane | index << (element * (8 << width))
+                });
+            }
+            Self::Numbers => {}
         }
         let single = |bits: u64| u64::from((bits as i16 as f32 / 8.0).to_bits());
         let signs = if kind & 1 == 0 { 0 } else { 1 << 63 | 1 << 31 };
@@ -137,7 +153,12 @@ impl Values {
 /// recipe is admitted), on x86-64-v3 and each host-supported candidate;
 /// require `changed` words to emit different code and compare the complete
 /// state after both from `values`.
-fn compare(words: &[u32], candidates: &[TargetCpu], values: Values, changed: impl Fn(u32) -> bool) {
+fn compare(
+    words: &[u32],
+    candidates: &[TargetCpu],
+    values: Values,
+    changed: impl Fn(u32, usize) -> bool,
+) {
     let host = TargetCpu::detect();
     let candidates: Vec<_> = candidates
         .iter()
@@ -159,7 +180,9 @@ fn compare(words: &[u32], candidates: &[TargetCpu], values: Values, changed: imp
         let profile = ScalableProfile::new_with_features(
             length,
             ScalableMode::new(true, true),
-            ScalableFeatures::of(ScalableFeature::Sme).with(ScalableFeature::Sme2),
+            ScalableFeatures::of(ScalableFeature::Sme)
+                .with(ScalableFeature::Sme2)
+                .with(ScalableFeature::Sme2p1),
             ScalableControls::new(length, false),
         )
         .unwrap();
@@ -180,7 +203,7 @@ fn compare(words: &[u32], candidates: &[TargetCpu], values: Values, changed: imp
             let baseline = compile(TargetCpu::X86_64_V3);
             for &candidate in &candidates {
                 let extended = compile(candidate);
-                if changed(word) {
+                if changed(word, svl) {
                     assert_ne!(baseline, extended, "{word:#010x} uses {candidate:?}");
                 }
                 let [baseline, extended] = [&baseline, &extended].map(|code| Native::new(code));
@@ -228,7 +251,7 @@ fn streaming_and_za_byte_dots_match_the_sse_recipes() {
             TargetCpu::X86_64_V4.with_avx512vnni(),
         ],
         Values::Bits,
-        |_| true,
+        |_, _| true,
     );
 }
 
@@ -256,7 +279,7 @@ fn streaming_byte_and_quadword_shifts_match_the_sse_recipes() {
         &SHIFTS,
         &[TargetCpu::X86_64_V4.with_gfni()],
         Values::Bits,
-        |word| EXTENDED_SHIFTS.contains(&word),
+        |word, _| EXTENDED_SHIFTS.contains(&word),
     );
 }
 
@@ -290,7 +313,7 @@ fn streaming_integer_conversions_match_the_sse_recipes() {
         &CONVERSIONS,
         &[TargetCpu::X86_64_V4],
         Values::Numbers,
-        |word| !signed_w.contains(&word),
+        |word, _| !signed_w.contains(&word),
     );
     // F alone has the scalar unsigned forms: from X, and to W or X.
     let scalar_unsigned = [
@@ -305,6 +328,40 @@ fn streaming_integer_conversions_match_the_sse_recipes() {
         &CONVERSIONS,
         &[TargetCpu::X86_64_V3.with_avx512f()],
         Values::Numbers,
-        |word| scalar_unsigned.contains(&word),
+        |word, _| scalar_unsigned.contains(&word),
+    );
+}
+
+/// llvm-mc encodings: TBL of B, H, S and D lanes from one register, then
+/// from two (one pair wrapping Z31 to Z0, one indexing by its destination);
+/// TBX of each lane, one in place; TBLQ on H and D and TBXQ on B and S.
+const TABLES: [u32; 16] = [
+    0x0525_3083,
+    0x0565_3083,
+    0x05a5_3083,
+    0x05e5_3083,
+    0x0526_2883,
+    0x0566_2883,
+    0x05a6_2be3,
+    0x05e3_2883,
+    0x0525_2c83,
+    0x0565_2c83,
+    0x05a5_2c63,
+    0x05e5_2c83,
+    0x4445_f883,
+    0x44c5_f883,
+    0x0525_3483,
+    0x05a5_3483,
+];
+
+#[test]
+fn streaming_table_lookups_match_the_baseline_recipes() {
+    // Two-register tables of SVL 64 exceed the four chunks one permute reads.
+    let two_registers = |word: u32| word & 0xff20_fc00 == 0x0520_2800;
+    compare(
+        &TABLES,
+        &[TargetCpu::X86_64_V4.with_avx512vbmi()],
+        Values::Indices,
+        |word, svl| !two_registers(word) || svl < 64,
     );
 }
