@@ -99,7 +99,9 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             }
             if kind == Some(0) {
                 if let Some(p) = s.profile {
-                    let reports = s.txs.receive(&f.bytes, p.wcid, p.channel.band);
+                    let reports = s
+                        .txs
+                        .receive(&f.bytes, &Self::peer_wcids(s, p), p.channel.band);
                     events.extend(reports.into_iter().map(Event::TxStatus));
                 }
                 continue;

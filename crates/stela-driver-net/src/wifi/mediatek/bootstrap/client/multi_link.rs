@@ -417,6 +417,15 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         })
     }
 
+    /// The AP's WCID on each link of the association whose setup link `p`
+    /// configures, the setup link's first.
+    pub(super) fn peer_wcids(s: &Owned<I, Q, C>, p: Profile) -> Vec<u16> {
+        [p.wcid]
+            .into_iter()
+            .chain(s.links.iter().map(|link| link.profile.wcid))
+            .collect()
+    }
+
     /// Each link's PTK and GTK, the setup link's first, as the station
     /// authorizes its port.
     pub(super) fn link_keys<'a>(
