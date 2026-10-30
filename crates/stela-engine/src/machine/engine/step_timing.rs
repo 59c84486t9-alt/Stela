@@ -40,10 +40,26 @@ impl Phase {
     }
 }
 
-/// The exits [`StepTiming::exits`] counts: each `ExitKind`, then faults.
-pub const EXIT_SLOTS: usize = 14;
-/// [`StepTiming::exits`]' slot for a native fault (a device access, say).
-pub const FAULT_SLOT: usize = EXIT_SLOTS - 1;
+/// The exits [`StepTiming::exits`] counts: each `ExitKind`, then native
+/// faults by cause ([`fault_slot`]).
+pub const EXIT_SLOTS: usize = FAULT_SLOTS + 5;
+/// [`StepTiming::exits`]' first native-fault slot.
+const FAULT_SLOTS: usize = 13;
+
+/// A native fault's slot in [`StepTiming::exits`], by cause: the guest's
+/// translation, a device, a native check, a watched or tag-checked page,
+/// or translation the engine does not implement.
+pub fn fault_slot(cause: &super::FaultCause) -> usize {
+    use super::FaultCause;
+    FAULT_SLOTS
+        + match cause {
+            FaultCause::Guest(_) => 0,
+            FaultCause::Device { .. } => 1,
+            FaultCause::NonCanonical | FaultCause::InvalidOpcode => 2,
+            FaultCause::Watched | FaultCause::TagChecked => 3,
+            FaultCause::Translation(_) => 4,
+        }
+}
 
 /// One completed phase's largest observed profile-clock interval.
 ///
@@ -90,8 +106,8 @@ pub struct StepTiming {
     /// Lifetime maxima since timing was enabled or reset. A zero interval
     /// has no witness. These are held, not subtracted, by [`Self::since`].
     pub lifetime_maxima: [Maximum; Phase::COUNT],
-    /// Exits handled and the ticks handling them, by `ExitKind` value, with
-    /// faults in [`FAULT_SLOT`].
+    /// Exits handled and the ticks handling them, by `ExitKind` value, then
+    /// native faults by cause ([`fault_slot`]).
     pub exits: [(u64, u64); EXIT_SLOTS],
 }
 
@@ -114,6 +130,8 @@ impl StepTiming {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const FAULT_SLOT: usize = FAULT_SLOTS + 1;
 
     #[test]
     fn a_delta_subtracts_each_phase_and_exit() {

@@ -3,8 +3,8 @@
 
 use super::*;
 
-/// Exit kinds by `ExitKind` value, then native faults
-/// (`step_timing::FAULT_SLOT`), as the PROFILE line names them.
+/// Exit kinds by `ExitKind` value, then native faults by cause
+/// (`step_timing::fault_slot`), as the PROFILE line names them.
 pub(super) const EXIT_NAMES: [&str; step_timing::EXIT_SLOTS] = [
     "fallthrough",
     "direct",
@@ -19,7 +19,11 @@ pub(super) const EXIT_NAMES: [&str; step_timing::EXIT_SLOTS] = [
     "scalable",
     "system",
     "amx",
-    "fault",
+    "fault-guest",
+    "fault-device",
+    "fault-check",
+    "fault-watched",
+    "fault-translation",
 ];
 
 /// `--profile`'s heartbeat lines: of `elapsed` ticks, the share inside the

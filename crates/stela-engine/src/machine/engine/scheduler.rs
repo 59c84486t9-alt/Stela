@@ -263,8 +263,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
             NativeExit::Fault(mut fault) => {
                 let at = (entry.0 as u64).wrapping_add(fault.offset as u64);
                 fault.offset = at.wrapping_sub(self.blocks[last].code.0 as u64) as usize;
+                let slot = step_timing::fault_slot(&fault.cause);
                 let handled = self.native_fault(last, fault, retired, btype);
-                self.timing_exit(step_timing::FAULT_SLOT, returned);
+                self.timing_exit(slot, returned);
                 handled
             }
         }
