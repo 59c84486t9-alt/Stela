@@ -1,0 +1,10 @@
+# The kernel headers the StelaGPU kext compiles against: libkern, IOKit,
+# Mach, BSD, the platform expert and the headers xnu ships beside them.
+/libkern/**/*.h
+/iokit/IOKit/**/*.h
+/osfmk/**/*.h
+/bsd/**/*.h
+/pexpert/**/*.h
+/san/**/*.h
+/EXTERNAL_HEADERS/
+/APPLE_LICENSE
