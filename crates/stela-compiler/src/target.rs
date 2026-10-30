@@ -297,6 +297,10 @@ features! {
     Avx512bitalg, with_avx512bitalg, "+avx512bitalg", |cpu| {
         cpu.avx512f() && HostCpuid::bit(cpu.leaf7_ecx, 12)
     };
+    /// AVX-512 VBMI: VPERMB, VPERMI2B, VPERMT2B and VPMULTISHIFTQB.
+    Avx512vbmi, with_avx512vbmi, "+avx512vbmi", |cpu| {
+        cpu.avx512f() && HostCpuid::bit(cpu.leaf7_ecx, 1)
+    };
     /// AVX-512 VNNI: VPDPBUSD and VPDPWSSD.
     Avx512vnni, with_avx512vnni, "+avx512vnni", |cpu| {
         cpu.avx512f() && HostCpuid::bit(cpu.leaf7_ecx, 11)

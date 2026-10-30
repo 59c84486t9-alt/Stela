@@ -1,5 +1,5 @@
 //! Capability-checked packed bit operations (Intel SDM Vol. 2).
-use super::{Code, Evex, Gpr, Map, Pp, Rm, Vex};
+use super::{Code, Evex, Gpr, Map, Mem, Pp, Rm, Vex};
 use crate::TargetCpu;
 use crate::aarch64::floating::Format;
 use crate::x86_64::isa::{ShiftOpcode as Shift, SimdOpcode as Host};
@@ -328,6 +328,135 @@ pub(crate) fn byte_dot(
             sum,
             Rm::Xmm(correction),
             TargetCpu::Baseline,
+        );
+    }
+    true
+}
+
+/// TBL and TBX need AVX-512 VBMI with BW and VL. The DIT profile keeps its
+/// reviewed recipe.
+pub(crate) fn byte_table_supported(target: TargetCpu) -> bool {
+    target.supports(
+        TargetCpu::Avx512f
+            .with_avx512vl()
+            .with_avx512bw()
+            .with_avx512vbmi(),
+    ) && !target.data_independent_timing()
+}
+
+/// EVEX.128 with opmask `mask`, zeroing the inactive bytes when `zeroing`.
+const fn masked(map: Map, pp: Pp, mask: u8, zeroing: bool) -> Evex {
+    Evex {
+        map,
+        pp,
+        w: false,
+        length: 0,
+        mask,
+        zeroing,
+        broadcast: false,
+        scale: 16,
+    }
+}
+
+const IN_RANGE: u8 = 1;
+const UPPER_PAIR: u8 = 2;
+const LESS_THAN: u8 = 1;
+const UPPER_PAIR_INDEX_BIT: u32 = 0x20;
+const TABLE_BYTES: u32 = 16;
+
+/// `value` in every byte of `xmm` through EAX: VPBROADCASTB.
+fn broadcast_byte(code: &mut Code, xmm: u8, value: u32) {
+    let mut asm = code.asm();
+    asm.mov_imm32(Gpr::Rax, value);
+    asm.evex(
+        masked(Map::M0f38, Pp::P66, 0, false),
+        0x7a,
+        xmm,
+        0,
+        Rm::Reg(Gpr::Rax),
+    );
+}
+
+/// Look up each byte of `indices` in the concatenation of `tables`, one to
+/// four 16-byte operands. An index beyond them gives zero, or with
+/// `preserve` leaves the byte already in `result` (TBX). VPCMPUB marks the
+/// in-range indices in K1; VPERMB reads one table, VPERMT2B a pair, and a
+/// second pair is blended in by index bit 5 (VPTESTMB into K2). Clobbers
+/// `scratch`, EAX, K1 and K2.
+pub(crate) fn byte_table(
+    code: &mut Code,
+    result: u8,
+    indices: u8,
+    tables: &[Mem],
+    preserve: bool,
+    scratch: [u8; 2],
+    target: TargetCpu,
+) -> bool {
+    if !byte_table_supported(target) {
+        return false;
+    }
+    assert!(
+        (1..=4).contains(&tables.len()),
+        "TBL reads one to four tables"
+    );
+    let [lookup, other] = scratch;
+    broadcast_byte(code, other, TABLE_BYTES * tables.len() as u32);
+    code.asm().evex(
+        masked(Map::M0f3a, Pp::P66, 0, false),
+        0x3e,
+        IN_RANGE,
+        indices,
+        Rm::Xmm(other),
+    );
+    code.asm().data(&[LESS_THAN]);
+    if let [table] = tables {
+        code.asm().evex(
+            masked(Map::M0f38, Pp::P66, IN_RANGE, !preserve),
+            0x8d,
+            result,
+            indices,
+            (*table).into(),
+        );
+        return true;
+    }
+    let lookup = if preserve { lookup } else { result };
+    let pair = |code: &mut Code, xmm: u8, low: Mem, high: Mem| {
+        Host::LoadUnaligned.emit(code, xmm, low, TargetCpu::Baseline);
+        code.asm().evex(
+            masked(Map::M0f38, Pp::P66, IN_RANGE, true),
+            0x7d,
+            xmm,
+            indices,
+            high.into(),
+        );
+    };
+    pair(code, lookup, tables[0], tables[1]);
+    if let [.., third] = &tables[2..] {
+        broadcast_byte(code, other, UPPER_PAIR_INDEX_BIT);
+        code.asm().evex(
+            masked(Map::M0f38, Pp::P66, 0, false),
+            0x26,
+            UPPER_PAIR,
+            indices,
+            Rm::Xmm(other),
+        );
+        // Three tables repeat the third; its indices 48..63 are out of range.
+        pair(code, other, tables[2], *third);
+        code.asm().evex(
+            masked(Map::M0f, Pp::Pf2, UPPER_PAIR, false),
+            0x6f,
+            lookup,
+            0,
+            Rm::Xmm(other),
+        );
+    }
+    if preserve {
+        code.asm().evex(
+            masked(Map::M0f, Pp::Pf2, IN_RANGE, false),
+            0x6f,
+            result,
+            0,
+            Rm::Xmm(lookup),
         );
     }
     true
@@ -1155,6 +1284,138 @@ mod tests {
                 assert_eq!(state, expected, "{word:#010x} sample={sample}");
             }
         }
+    }
+
+    #[test]
+    fn byte_tables_check_vbmi_state_and_match_gnu_encodings() {
+        let vbmi = TargetCpu::Avx512f
+            .with_avx512vl()
+            .with_avx512bw()
+            .with_avx512vbmi();
+        let table = Mem::base_disp32(Gpr::Rdi, 0x128);
+        for target in [
+            TargetCpu::Avx512f.with_avx512vl().with_avx512bw(),
+            TargetCpu::Avx512f.with_avx512vl().with_avx512vbmi(),
+            vbmi.with_data_independent_timing(),
+        ] {
+            let mut code = Code::new();
+            assert!(!byte_table(
+                &mut code,
+                0,
+                1,
+                &[table],
+                false,
+                [2, 3],
+                target
+            ));
+            assert!(code.is_empty());
+        }
+        // GNU as: mov eax, 16; vpbroadcastb xmm3, eax; vpcmpltub k1, xmm1,
+        // xmm3; vpermb xmm0{k1}{z} (TBL) or xmm0{k1} (TBX), xmm1, [rdi+0x128].
+        for (preserve, masking) in [(false, 0x89), (true, 0x09)] {
+            let mut code = Code::new();
+            assert!(byte_table(
+                &mut code,
+                0,
+                1,
+                &[table],
+                preserve,
+                [2, 3],
+                vbmi
+            ));
+            assert_eq!(code.instructions(), 4);
+            let bytes = code.into_bytes();
+            assert_eq!(
+                bytes[5..],
+                [
+                    0x62, 0xf2, 0x7d, 0x08, 0x7a, 0xd8, 0x62, 0xf3, 0x75, 0x08, 0x3e, 0xcb, 0x01,
+                    0x62, 0xf2, 0x75, masking, 0x8d, 0x87, 0x28, 0x01, 0x00, 0x00,
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn byte_tables_match_the_lane_model() {
+        use crate::{GuestAddress, GuestState, context::ExecutionContext};
+        use alloc::vec::Vec;
+        use execution::Native;
+        let host = TargetCpu::detect();
+        let mut random = 0x853c_49e6_748f_ea9b_u64;
+        let mut next = move || {
+            random ^= random << 13;
+            random ^= random >> 7;
+            random ^= random << 17;
+            random
+        };
+        let mut extended = 0;
+        for target in [TargetCpu::X86_64_V3, TargetCpu::X86_64_V4.with_avx512vbmi()] {
+            if !host.supports(target) {
+                continue;
+            }
+            extended += usize::from(byte_table_supported(target));
+            for registers in 1..=4u32 {
+                for (destination, first, indices) in [(3u32, 4u32, 2u32), (2, 30, 2), (5, 4, 5)] {
+                    for (q, tbx) in [(0u32, false), (1, false), (0, true), (1, true)] {
+                        let word = 0x0e00_0000
+                            | q << 30
+                            | indices << 16
+                            | (registers - 1) << 13
+                            | u32::from(tbx) << 12
+                            | first << 5
+                            | destination;
+                        let source: Vec<u8> = [word, 0xd65f03c0]
+                            .into_iter()
+                            .flat_map(u32::to_le_bytes)
+                            .collect();
+                        let block = crate::testing::leaf_for(&source, GuestAddress(0x1000), target)
+                            .unwrap();
+                        let native = Native::new(&block.x86_64_code);
+                        for sample in 0..32 {
+                            let mut state = GuestState::default();
+                            for vector in &mut state.v {
+                                *vector = [next(), next()];
+                            }
+                            if sample % 2 == 0 {
+                                // Mostly in-range indices, with the bound itself.
+                                let bound = 16 * registers as u64 + 1;
+                                let bytes: Vec<u8> =
+                                    (0..16).map(|_| (next() % bound) as u8).collect();
+                                state.v[indices as usize] = [
+                                    u64::from_le_bytes(bytes[..8].try_into().unwrap()),
+                                    u64::from_le_bytes(bytes[8..].try_into().unwrap()),
+                                ];
+                            }
+                            let byte = |vector: [u64; 2], at: usize| {
+                                (vector[at / 8] >> (at % 8 * 8)) as u8
+                            };
+                            let old = state.v[destination as usize];
+                            let lanes: [u8; 16] = core::array::from_fn(|lane| {
+                                let index = usize::from(byte(state.v[indices as usize], lane));
+                                if lane >= 8 && q == 0 {
+                                    0
+                                } else if index < 16 * registers as usize {
+                                    let table = (first as usize + index / 16) % 32;
+                                    byte(state.v[table], index % 16)
+                                } else if tbx {
+                                    byte(old, lane)
+                                } else {
+                                    0
+                                }
+                            });
+                            let mut expected = state.clone();
+                            expected.v[destination as usize] = [
+                                u64::from_le_bytes(lanes[..8].try_into().unwrap()),
+                                u64::from_le_bytes(lanes[8..].try_into().unwrap()),
+                            ];
+                            native.run(&mut state, &mut ExecutionContext::default());
+                            assert_eq!(state, expected, "{target:?} {word:#010x} sample={sample}");
+                        }
+                    }
+                }
+            }
+        }
+        std::println!("BYTE_TABLE_EXTENDED_TARGETS={extended}");
     }
 
     #[test]
