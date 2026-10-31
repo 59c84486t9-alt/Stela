@@ -9,6 +9,10 @@
 //! to do costs the boot PE one comparison a slice.
 #[cfg(feature = "nvk")]
 pub(super) mod client;
+#[cfg(feature = "nvk")]
+pub(super) mod gate;
+#[cfg(feature = "nvk")]
+mod stack;
 
 use super::{
     host,
@@ -29,6 +33,8 @@ use core::{
     sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, AtomicUsize, Ordering},
 };
 use stela_boot_core::page_window::{self, Cache};
+#[cfg(feature = "nvk")]
+use stela_drivers::gpu::metal::nvidia::PcieLink;
 use stela_drivers::{
     bus::{
         dma::mapping::DmaDomain,
@@ -70,6 +76,11 @@ const ENOMEM: Errno = -12;
 const EOPNOTSUPP: Errno = -95;
 
 const MSI_CAPABILITY: u8 = 5;
+#[cfg(feature = "nvk")]
+const PCIE_CAPABILITY: u8 = 0x10;
+/// `PCI_EXP_LNKSTA`, in the PCIe capability.
+#[cfg(feature = "nvk")]
+const LINK_STATUS: u16 = 0x12;
 #[cfg(feature = "nvk")]
 const REVISION: u16 = 0x08;
 #[cfg(feature = "nvk")]
@@ -404,7 +415,17 @@ impl Platform for Host {
                 minimum_bytes: 1,
             })
             .map(|image| image.bytes())
-            .map_err(|_| ENOENT)
+            .map_err(|_| {
+                if let Some((chip, _)) = name
+                    .strip_prefix("nvidia/")
+                    .and_then(|name| name.split_once('/'))
+                {
+                    self.report(format_args!(
+                        "{name} is missing: `stela setup firmware fetch --gpu {chip}` adds it"
+                    ));
+                }
+                ENOENT
+            })
     }
 
     fn log(&self, level: i32, message: &CStr) {
@@ -557,6 +578,8 @@ pub(super) struct Claimed {
     name: String,
     #[cfg(feature = "nvk")]
     drm: client::DrmDevice,
+    #[cfg(feature = "nvk")]
+    link: Option<PcieLink>,
     /// The BARs' claims, held for the boot.
     _resources: Vec<owned::Resource>,
 }
@@ -628,6 +651,15 @@ fn claim(
             revision: config.read8(REVISION),
         }
     };
+    #[cfg(feature = "nvk")]
+    let link = function
+        .capabilities()
+        .iter()
+        .find(|(_, id)| *id == PCIE_CAPABILITY)
+        .map(|(offset, _)| {
+            let status = function.config().read16(u16::from(*offset) + LINK_STATUS);
+            PcieLink::from_link_status(status)
+        });
     Ok(Claimed {
         device: Device {
             config: SharedConfig(Rc::new(RefCell::new(function))),
@@ -639,6 +671,8 @@ fn claim(
         name: format!("{address}"),
         #[cfg(feature = "nvk")]
         drm,
+        #[cfg(feature = "nvk")]
+        link,
         _resources: resources,
     })
 }
@@ -661,6 +695,14 @@ pub(super) fn claim_all(services: &dyn NativeServices, adapters: &[gpu::Adapter]
     claimed
 }
 
+/// A GPU nouveau bound.
+#[cfg(feature = "nvk")]
+struct Bound {
+    name: String,
+    drm: client::DrmDevice,
+    link: Option<PcieLink>,
+}
+
 /// The first task's work: Linux, then every GPU.
 struct Start {
     owner: *const RawOwner,
@@ -668,7 +710,7 @@ struct Start {
     attached: Vec<Attached<Device>>,
     /// The bound GPUs, by DRM minor.
     #[cfg(feature = "nvk")]
-    bound: Vec<client::DrmDevice>,
+    bound: Vec<Bound>,
     result: Result<(), Errno>,
 }
 
@@ -691,7 +733,11 @@ unsafe extern "C" fn start(context: *mut c_void) {
                 // SAFETY: entered.
                 if unsafe { attached.bound() } {
                     #[cfg(feature = "nvk")]
-                    job.bound.push(claimed.drm);
+                    job.bound.push(Bound {
+                        name: claimed.name,
+                        drm: claimed.drm,
+                        link: claimed.link,
+                    });
                 } else {
                     output::arguments(format_args!(
                         "GPU {}: nouveau did not bind it\n",
@@ -723,10 +769,9 @@ struct Installed {
     /// Clients' mappings with their sizes in pages, by address. For tasks.
     #[cfg(feature = "nvk")]
     mappings: RefCell<BTreeMap<u64, (linux::client::Mapping, usize)>>,
-    /// Mesa's running threads, by task, with their `stela_libc_core`. On the
-    /// boot CPU.
+    /// Mesa's running threads, by the bottom of their stacks. On the boot CPU.
     #[cfg(feature = "nvk")]
-    threads: RefCell<BTreeMap<u64, core::ffi::c_uint>>,
+    threads: RefCell<BTreeMap<u64, client::Running>>,
     owner: Pin<Box<Owner<Host>>>,
     environment: Pin<Box<Environment>>,
     start: Box<Start>,
@@ -888,6 +933,8 @@ pub(super) fn pump() {
     }) {
         output::fatal(format_args!("the host's Linux environment failed: {error}"));
     }
+    #[cfg(feature = "nvk")]
+    gate::interrupted();
 }
 
 /// `ticks` of the host counter, cut short to end at Linux's next deadline.

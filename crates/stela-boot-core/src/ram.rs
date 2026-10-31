@@ -30,6 +30,26 @@ pub fn run(ram: &[RamRange], guest: u64) -> Option<(u64, u64)> {
     Some((range.host.checked_add(offset)?, range.bytes - offset))
 }
 
+/// Calls `action` with each host run behind `bytes` of guest RAM at `guest`, as
+/// (host physical, bytes). False, partway, if part of it is not RAM.
+pub fn runs(
+    ram: &[RamRange],
+    mut guest: u64,
+    mut bytes: u64,
+    mut action: impl FnMut(u64, u64),
+) -> bool {
+    while bytes != 0 {
+        let Some((host, length)) = run(ram, guest) else {
+            return false;
+        };
+        let length = length.min(bytes);
+        action(host, length);
+        guest += length;
+        bytes -= length;
+    }
+    true
+}
+
 /// The immutable map and all host backing remain owned by the caller through
 /// both passes. `action` is infallible and receives only complete admitted
 /// chunks. UAT/DART page-by-page prefix semantics belong to their outer owner.
@@ -93,6 +113,32 @@ fn walk(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_guest_range_is_its_host_runs() {
+        let ram = [
+            RamRange {
+                guest: 0x1000,
+                host: 0x8000,
+                bytes: 0x1000,
+            },
+            RamRange {
+                guest: 0x2000,
+                host: 0x4000,
+                bytes: 0x2000,
+            },
+        ];
+        let mut found = [(0, 0); 2];
+        let mut count = 0;
+        let whole = runs(&ram, 0x1800, 0x1000, |host, bytes| {
+            found[count] = (host, bytes);
+            count += 1;
+        });
+        assert!(whole);
+        assert_eq!(found, [(0x8800, 0x800), (0x4000, 0x800)]);
+        assert!(!runs(&ram, 0x3800, 0x1000, |_, _| {}));
+        assert!(runs(&ram, 0x9000, 0, |_, _| {}));
+    }
 
     #[test]
     fn holes_and_outer_boundaries_refuse_without_read_or_write_prefixes() {

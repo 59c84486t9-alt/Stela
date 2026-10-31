@@ -636,7 +636,12 @@ fn run_guest(boot: Boot<'_>, host: OpenedHost, storage: Storage, processors: Pro
         &full_profile,
         active_workers,
     );
-    let assigned = assign(boot, &mut roster, topology_source.as_ref(), &full_profile);
+    #[cfg_attr(not(feature = "nvk"), allow(unused_mut))]
+    let mut assigned = assign(boot, &mut roster, topology_source.as_ref(), &full_profile);
+    #[cfg(feature = "nvk")]
+    let gpu_gate = assigned
+        .as_mut()
+        .and_then(|assigned| gpu::gate::place(&mut assigned.tree));
     // SAFETY: all raw guest input copies have ended; AP executors are parked,
     // and no guest/device DMA producer has entered. The same loader bytes are
     // for every subsequent native CPU and synchronous device writer.
@@ -713,6 +718,18 @@ fn run_guest(boot: Boot<'_>, host: OpenedHost, storage: Storage, processors: Pro
         loaded_source.as_ref(),
         tree,
     );
+    #[cfg(feature = "nvk")]
+    if let (Some((placement, service)), Some(board)) = (gpu_gate, &board) {
+        // The board's AIC took its dies and inputs from this vector too.
+        let per_die = u32::from(board.aic.layout.max_irq());
+        let irq = stela_contracts::interrupt::AicInput::new(
+            (placement.irq / per_die) as u8,
+            (placement.irq % per_die) as u16,
+        );
+        devices
+            .add_gpu_gate(placement.physical, irq, service)
+            .unwrap_or_else(|error| output::fatal(&error));
+    }
     // This function never returns, so nothing else frees the bundle: guest
     // memory and the devices now hold what they need of it, and the heap's
     // room keeps the code caches from evicting.
@@ -1085,7 +1102,11 @@ fn open_gpus(
         tsc_hz,
     };
     match gpu::open(machine, claimed) {
-        Ok(()) => crate::status::done("started"),
+        Ok(()) => {
+            #[cfg(feature = "nvk")]
+            gpu::gate::open_service();
+            crate::status::done("started");
+        }
         Err(error) => crate::status::warn(&format!("the GPU could not start: {error}")),
     }
 }

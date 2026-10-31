@@ -29,7 +29,7 @@ default = []
 diagnostics = []
 native-profile = ["stela-soc/native-profile", "stela-engine/native-profile"]
 # NVK, NIR and NAK in the image, from `cargo xtask gpu nvk`.
-nvk = ["dep:stela-mesa"]
+nvk = ["dep:stela-mesa", "stela-drivers/metal-linked"]
 
 [dependencies]
 stela-soc-data = { path = "../stela-soc-data", default-features = false }
