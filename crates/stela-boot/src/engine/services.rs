@@ -39,10 +39,8 @@ const MSIX: u8 = 0x11;
 const ATS: u16 = 0xf;
 const PRI: u16 = 0x13;
 const PASID: u16 = 0x1b;
-/// PCIe Device Control's Enable No Snoop, and Device Status's Transactions
-/// Pending (PCIe Base 6.0 7.5.3.4, 7.5.3.5).
+/// PCIe Device Control's Enable No Snoop (PCIe Base 6.0, 7.5.3.4).
 const NO_SNOOP: u16 = 1 << 11;
-const TRANSACTIONS_PENDING: u16 = 1 << 5;
 
 /// Whether a passthrough domain was handed out, which is reported once.
 static PASSTHROUGH_REPORTED: AtomicBool = AtomicBool::new(false);
@@ -156,20 +154,28 @@ impl<'a> Services<'a> {
             .map_err(|_| ServiceError::Refused("configuration space mapping refused"))
     }
 
-    /// Stop the function's DMA and interrupts, as Linux's
+    /// Gate PCI requester DMA and interrupt controls, as Linux's
     /// `pci_clear_master`, `pci_msi_shutdown`, `pci_msix_shutdown` and
     /// `pci_disable_ats`/`pri`/`pasid` do, then wait for its outstanding
     /// requests (`pci_wait_for_pending_transaction`).
-    fn stop(&self, config: &mut OwnedConfig) {
+    fn stop(&self, config: &mut OwnedConfig) -> Result<(), ServiceError> {
         let command = config.read16(COMMAND);
+        let status = config.read16(STATUS);
+        if command == u16::MAX || status == u16::MAX {
+            return Err(ServiceError::Claim(
+                stela_drivers::bus::pci::requester::ClaimError::ReadFailed {
+                    offset: if command == u16::MAX { COMMAND } else { STATUS },
+                },
+            ));
+        }
         config.write16(COMMAND, command & !BUS_MASTER | INTX_DISABLE);
         let mut express = None;
-        if config.read16(STATUS) & CAPABILITY_LIST != 0 {
+        if status & CAPABILITY_LIST != 0 {
             let found: alloc::vec::Vec<_> = config
                 .capabilities()
-                .filter_map(Result::ok)
-                .map(|entry| (entry.offset, entry.id))
-                .collect();
+                .map(|entry| entry.map(|entry| (entry.offset, entry.id)))
+                .collect::<Result<_, _>>()
+                .map_err(|error| ServiceError::Claim(error.into()))?;
             for (offset, id) in found {
                 match id {
                     MSI => {
@@ -192,9 +198,9 @@ impl<'a> Services<'a> {
         if express.is_some() && config.read32(0x100) != u32::MAX {
             let found: alloc::vec::Vec<_> = config
                 .extended_capabilities()
-                .filter_map(Result::ok)
-                .map(|entry| (entry.offset, entry.id))
-                .collect();
+                .map(|entry| entry.map(|entry| (entry.offset, entry.id)))
+                .collect::<Result<_, _>>()
+                .map_err(|error| ServiceError::Claim(error.into()))?;
             for (offset, id) in found {
                 match id {
                     ATS => {
@@ -213,25 +219,22 @@ impl<'a> Services<'a> {
                 }
             }
         }
-        if let Some(offset) = express {
-            // Linux waits up to 60 ms in 1, 2, 4 ... ms steps; one bounded
-            // wait does the same.
-            let start = super::host::rdtsc();
-            let limit = self.tsc_hz / 1000 * 64;
-            while config.read16(offset + 10) & TRANSACTIONS_PENDING != 0
-                && super::host::rdtsc().wrapping_sub(start) < limit
-            {
-                core::hint::spin_loop();
-            }
-        }
+        // A bounded wait must refuse an endpoint that still has requests in
+        // flight. Bus-master gating alone is not completion of those requests.
+        let start = super::host::rdtsc();
+        let limit = (self.tsc_hz / 1000 * 64).max(1);
+        stela_drivers::bus::pci::requester::wait_for_pending_transactions(config, || {
+            super::host::rdtsc().wrapping_sub(start) >= limit
+        })
+        .map_err(ServiceError::Claim)
     }
 }
 
 // SAFETY: each claimed function's or bridge's configuration page and each BAR
 // is mapped once through the owned aperture, which every host processor and engine
 // root reaches; a claimed function is stopped before `from_stopped_pci`
-// checks it. Every domain is the passthrough domain, which is what the
-// requesters have with the remapping units off. The ACPI namespace is
+// checks it. The bound domain keeps its translation/configuration epoch;
+// an unavailable remapper is reported as passthrough. The ACPI namespace is
 // offered only with the i8042's interrupts masked; ring 0 reaches the i8042's
 // and each claimed i801's ports, which nothing else here uses. Firmware
 // memory is the AML provider's own mapping of RAM the map leaves to firmware.
@@ -246,14 +249,46 @@ unsafe impl NativeServices for Services<'_> {
         crate::random::source()
     }
 
-    fn claim_stopped(&self, address: Address) -> Result<StoppedRequester, ServiceError> {
-        let mut config = self.config(address)?;
-        self.stop(&mut config);
-        let function = Function::new(address, config)
+    fn prepare_requester(
+        &self,
+        address: Address,
+    ) -> Result<stela_drivers::bus::pci::requester::preparation::PreparingRequester, ServiceError>
+    {
+        use stela_drivers::bus::pci::requester::{ClaimError, preparation::PreparingRequester};
+        let role = self.remappers.function_role(address);
+        if role != FunctionRole::Physical {
+            return Err(ServiceError::Claim(ClaimError::UnsupportedRole(role)));
+        }
+        let root = self.remappers.preparation(address).map_err(|error| {
+            output::arguments(format_args!("UNSUPPORTED Stela cold requester {address}: original DMA drain unavailable ({error:?})\n"));
+            ServiceError::Refused("cold requester original DMA drain unavailable")
+        })?;
+        let mut function = Function::new(address, self.config(address)?)
             .ok_or(ServiceError::Refused("no function answers at this address"))?;
+        self.stop(function.config())?;
+        // SAFETY: first serialized post-EBS attach through the original owned
+        // configuration and selected root. The platform keeps the initial DMA
+        // backing, excludes prior firmware/IRQ/work and competing PCI writers,
+        // and admits snooped WB DMA. Complete stable inventory supplies role.
+        // PCI containment here grants no endpoint engine stop or payload drain;
+        // the owning driver must produce that receipt with BARs still kept.
+        unsafe { PreparingRequester::new(function, role, root) }
+            .map_err(|rejected| ServiceError::Claim(rejected.error))
+    }
+
+    fn claim_stopped(&self, address: Address) -> Result<StoppedRequester, ServiceError> {
+        let role = self.remappers.function_role(address);
+        if role != FunctionRole::Physical {
+            return Err(ServiceError::Claim(
+                stela_drivers::bus::pci::requester::ClaimError::UnsupportedRole(role),
+            ));
+        }
+        let mut function = Function::new(address, self.config(address)?)
+            .ok_or(ServiceError::Refused("no function answers at this address"))?;
+        self.stop(function.config())?;
         // SAFETY: bus mastering, interrupts and outstanding requests were
-        // stopped above; probe enumerates physical functions only.
-        unsafe { StoppedRequester::from_stopped_pci(function, FunctionRole::Physical) }
+        // stopped above; the complete stable PF/VF inventory supplies role.
+        unsafe { StoppedRequester::from_stopped_pci(function, role) }
             .map_err(|(error, _)| ServiceError::Claim(error))
     }
 
@@ -327,13 +362,37 @@ unsafe impl NativeServices for Services<'_> {
         self.remappers.translates(address)
     }
 
-    fn requester_arrived(&self, address: Address, bridge: Address) -> Result<(), ServiceError> {
-        self.remappers.admit(address, bridge).map_err(|error| {
-            output::arguments(format_args!(
-                "HOST IOMMU requester {address} refused: {error:?}\n"
+    fn dma_subtree_translated(&self, address: Address) -> bool {
+        self.remappers.translates_subtree(address)
+    }
+
+    unsafe fn requesters_arrived(
+        &self,
+        arrivals: stela_drivers::probe::services::ArrivalInventory<'_>,
+    ) -> Result<(), ServiceError> {
+        if arrivals
+            .functions
+            .iter()
+            .any(|address| address.segment != arrivals.bridge.segment)
+            || !self.remappers.observe_arrivals(
+                arrivals.bridge,
+                arrivals.functions,
+                arrivals.read32,
+            )
+        {
+            return Err(ServiceError::Refused(
+                "PCI arrival has no stable complete PF/VF inventory",
             ));
-            ServiceError::Refused("the IOMMU refused the requester that arrived")
-        })
+        }
+        for &address in arrivals.functions {
+            self.remappers.admit(address).map_err(|error| {
+                output::arguments(format_args!(
+                    "HOST IOMMU requester {address} refused: {error:?}\n"
+                ));
+                ServiceError::Refused("the IOMMU refused the requester that arrived")
+            })?;
+        }
+        Ok(())
     }
 
     fn usb4_platform(

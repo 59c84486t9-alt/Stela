@@ -551,6 +551,31 @@ impl<R: Registers> Unit<R> {
         self.lock().state().allowed.binary_search(&rid).is_ok()
     }
 
+    /// Complete earlier translated payload writes before a covered requester
+    /// leaves its initial window/blocked context. This grants no engine,
+    /// IRQ/work or bypass quiescence, and refuses an already attached domain.
+    pub fn drain_initial_requester(&self, rid: u16) -> Result<(), DmaError> {
+        let mut guard = self.lock();
+        let state = guard.state();
+        if state.shutdown
+            || state.poisoned
+            || !state.allowed.contains(&rid)
+            || state.domains.contains_key(&rid)
+        {
+            return Err(DmaError::IommuUnavailable);
+        }
+        if self.cap & CAP_WRITE_DRAIN == 0 {
+            return Err(DmaError::DrainUnavailable);
+        }
+        // VT-d 6.5.4's DW acknowledgement covers this original root's
+        // translated writes; use the same checked completion as live domains.
+        if self.invalidate(TRANSLATION, false).is_err() {
+            state.poisoned = true;
+            return Err(DmaError::InvalidationFailed);
+        }
+        Ok(())
+    }
+
     /// Allow requester `rid`, which arrived below a covered bridge after this
     /// unit was taken. It has no context entry until it attaches, so its
     /// requests fault until then.
@@ -919,8 +944,9 @@ impl Window {
     ) -> Result<Self, VtdError> {
         let mut pages = Vec::new();
         for range in ranges {
-            let start = range.start & !(PAGE as u64 - 1);
-            let end = range.end.next_multiple_of(PAGE as u64);
+            let range = crate::remapping::window_range(range, physical_bits)
+                .ok_or(VtdError::Unsupported)?;
+            let (start, end) = (range.start, range.end);
             if start >= end
                 || end > 1u64 << physical_bits
                 || end > 1u64 << (12 + 9 * u32::from(levels))

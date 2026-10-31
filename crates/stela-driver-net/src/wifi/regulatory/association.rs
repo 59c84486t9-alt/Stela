@@ -55,6 +55,15 @@ impl AssociationOperation<'_> {
     }
 }
 
+/// A completed beacon's link and queues, with the current control-channel
+/// rule. The native owner keeps the receive provenance through publication.
+pub struct EdcaUpdate<'a> {
+    pub context: &'a AssociationContext,
+    pub parameter_set_count: u8,
+    pub observed: &'a [AccessCategory; 4],
+    pub limit: Option<&'a super::database::Wmm>,
+}
+
 /// Current AP queue observation and derived local queues, borrowed only
 /// inside both held providers. Values are inspection inputs, never RX provenance
 /// or completion evidence; the native owner must independently keep those.
@@ -250,11 +259,15 @@ impl<H: HardwarePolicy, O: OsPolicy> Owner<H, O> {
         &mut self,
         admission: AssociationAdmission,
         station: &Station,
-        parameter_set_count: u8,
-        observed: &[AccessCategory; 4],
-        limit: Option<&super::database::Wmm>,
+        update: EdcaUpdate<'_>,
         submit: impl FnOnce(&EdcaOperation<'_>) -> T,
     ) -> Result<T, Error> {
+        let EdcaUpdate {
+            context,
+            parameter_set_count,
+            observed,
+            limit,
+        } = update;
         if admission.owner != self.identity {
             return Err(Error::Stale);
         }
@@ -273,6 +286,22 @@ impl<H: HardwarePolicy, O: OsPolicy> Owner<H, O> {
             return Err(Error::Stale);
         }
         check(&mut hardware, &mut os, station, &association)?;
+        // The admission keeps the complete association. EDCA's policy and
+        // command belong to the exact link that supplied the beacon.
+        let association = if core::ptr::eq(context, association.context) {
+            association
+        } else {
+            let link = station
+                .link_contexts()
+                .iter()
+                .find(|link| core::ptr::eq(link.as_ref(), context))
+                .ok_or(Error::Stale)?;
+            AssociationOperation {
+                context: link,
+                definition: link.definition(),
+                purpose: AssociationUse::Management,
+            }
+        };
         let effective = super::wmm::station(observed, limit).map_err(|_| Error::Mismatch)?;
         let operation = EdcaOperation {
             association,

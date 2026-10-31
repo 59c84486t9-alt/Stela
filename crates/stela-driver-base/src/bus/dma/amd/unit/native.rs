@@ -11,8 +11,9 @@
 //! requesters a window domain that maps given memory one to one
 //! ([`Unit::window`]), which a requester leaves when it attaches.
 //! Faults keep every original owner; they never disable translation into
-//! bypass. Completion stores acknowledge invalidations, not device stop or an
-//! arbitrary posted-payload drain. No DmaDomain implementation is invented.
+//! bypass. Matched invalidations followed by exact completion stores drain
+//! translated payloads through this root path, not endpoint engines, peer
+//! traffic or posted interrupts. The platform supplies the DmaDomain adapter.
 //! Healthy retirement releases internal RAM after engines stop and register
 //! pointers clear. Original PCI/UC mappings have no consuming handback yet;
 //! their registry quarantine remains boot-lifetime, not hotplug reclamation.
@@ -94,6 +95,13 @@ pub enum Error {
     DeviceTable(DeviceTableError),
     Translation(TranslationError),
     Dma(DmaError),
+}
+
+fn invalidation_error(error: Error) -> DmaError {
+    match error {
+        Error::Dma(error) => error,
+        _ => DmaError::InvalidationFailed,
+    }
 }
 
 /// Native context/cache/RAM services, not numeric attestations.
@@ -277,6 +285,7 @@ unsafe impl<P: ColdPlatform> TableHardware for Hardware<P> {
 /// The window domain: one to one page tables shared by the requesters that
 /// have no domain of their own.
 struct Window<P: ColdPlatform> {
+    id: DomainId,
     tree: PageTables<Hardware<P>>,
     requesters: Vec<u16>,
 }
@@ -494,6 +503,7 @@ impl<P: ColdPlatform> Unit<P> {
         }
         drop(_guard);
         self.window = Some(Window {
+            id,
             tree,
             requesters: covered,
         });
@@ -507,10 +517,47 @@ impl<P: ColdPlatform> Unit<P> {
         self.engine.health()
     }
 
-    /// No standalone completion or cache invalidation is promoted into an
-    /// arbitrary payload-drain witness. A native root drain provider is absent.
+    /// Drain the original window/blocked path before a private attachment.
+    /// A private DTE, including one reached through an alias, cannot be
+    /// mistaken for this requester's original cold path.
+    pub fn drain_initial_requester(&self, rid: u16) -> Result<(), DmaError> {
+        if !self.coverage[usize::from(rid)] {
+            return Err(DmaError::IommuUnavailable);
+        }
+        for member in self.group(rid) {
+            let entry = self
+                .table
+                .borrow()
+                .snapshot(member)
+                .map_err(|_| DmaError::InvalidationFailed)?;
+            if entry[0] & 3 == 3
+                && !self.window.as_ref().is_some_and(|window| {
+                    entry[1] as u16 == window.id.value() && window.requesters.contains(&member)
+                })
+            {
+                return Err(DmaError::IommuUnavailable);
+            }
+        }
+        self.drain_posted_writes()
+    }
+
+    /// Complete earlier translated payload transactions through this unit.
+    /// AMD 48882 rev. 3.11 sections 1.3.3 and 2.4.11 require matching
+    /// invalidations to drain fabric transactions before COMPLETION_WAIT.
+    /// IASup is part of this unit's admitted profile. This does not stop
+    /// endpoints or cover bypass, peer traffic, posted MSIs or future DMA.
     pub fn drain_posted_writes(&self) -> Result<(), DmaError> {
-        Err(DmaError::DrainUnavailable)
+        if self.table.borrow().is_poisoned()
+            || self
+                .window
+                .as_ref()
+                .is_some_and(|window| window.tree.is_poisoned())
+        {
+            return Err(DmaError::InvalidationFailed);
+        }
+        self.engine
+            .execute(&[Command::invalidate_all()])
+            .map_err(invalidation_error)
     }
 
     /// # Safety

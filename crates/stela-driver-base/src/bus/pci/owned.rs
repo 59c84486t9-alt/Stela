@@ -162,6 +162,13 @@ impl OwnedConfig {
         binding.matches_mapping(&self.mapping)
     }
 
+    pub(super) fn matches_retention(
+        &self,
+        retained: &ConfigRetention,
+    ) -> Result<bool, MappingError> {
+        retained.matches_mapping(&self.mapping)
+    }
+
     pub(super) fn retain_epoch(&self) -> Result<ConfigRetention, MappingError> {
         Ok(ConfigRetention {
             view: self.mapping.view(0..FUNCTION_BYTES)?,

@@ -433,12 +433,17 @@ pub unsafe fn take_over() -> Result<()> {
     // PAT and MTRRs"). Otherwise a video BAR that the firmware leaves
     // uncached takes one bus write per pixel. Every x86-64 processor has the
     // PAT. No Stela table uses PWT alone except for the framebuffer, and the
-    // firmware's tables, which might, are replaced next. The caches are
+    // firmware's tables, which might, are replaced next. Prepare the shared
+    // page window's WC slot here too, before ActivatedTables records PAT;
+    // a later memory-type observation must not change that owned policy.
+    // The caches are
     // written back on both sides of the change, as SDM vol. 3A "Programming
     // the PAT" orders.
     // SAFETY: ring 0 with interrupts disabled; IA32_PAT is architectural.
     unsafe {
-        let pat = msr::PAT.read() & !PAT_ENTRY_1 | PAT_WRITE_COMBINING;
+        let pat = stela_boot_core::page_window::with_write_combining(
+            msr::PAT.read() & !PAT_ENTRY_1 | PAT_WRITE_COMBINING,
+        );
         asm!("wbinvd", options(nostack, preserves_flags));
         msr::PAT.write(pat);
         asm!("wbinvd", options(nostack, preserves_flags));

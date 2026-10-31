@@ -1,5 +1,6 @@
 //! Requester translation, firmware admission and lifecycle through a synchronous peer.
 extern crate std;
+mod drain;
 mod model;
 use super::*;
 use crate::bus::dma::{amd::ivrs::Ivrs, pages::PageRange};
@@ -15,7 +16,6 @@ fn requester_mapping_lifecycle() {
         None,
         "prime actual blocked DTE cache before attach"
     );
-    assert_eq!(unit.drain_posted_writes(), Err(DmaError::DrainUnavailable));
     // SAFETY: The function comes from this peer's owned PCI fixture. No requester
     // submits DMA or work, and the unit keeps the matching configuration/root epoch.
     let mut requester = unsafe { unit.attach(function(0x20)) }.unwrap();
@@ -31,10 +31,6 @@ fn requester_mapping_lifecycle() {
         .unwrap(),
         4,
         "owning driver configures original retained function after attach"
-    );
-    assert_eq!(
-        requester.drain_posted_writes(),
-        Err(DmaError::DrainUnavailable)
     );
     for (direction, read, write) in [
         (Direction::ToDevice, true, false),

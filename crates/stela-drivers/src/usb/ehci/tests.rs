@@ -58,6 +58,8 @@ struct Shared {
     cpu_sync_fail: bool,
     drained: bool,
     drains: usize,
+    domain_prepared: bool,
+    private_bindings: usize,
     device_syncs: usize,
     cpu_syncs: usize,
     cpu: Option<CpuMapping>,
@@ -131,6 +133,8 @@ impl Shared {
             cpu_sync_fail: false,
             drained: false,
             drains: 0,
+            domain_prepared: false,
+            private_bindings: 0,
             device_syncs: 0,
             cpu_syncs: 0,
             cpu: None,
@@ -544,6 +548,10 @@ unsafe impl DmaDomain for Domain {
         assert_eq!(direction, Direction::Bidirectional);
         let mut m = self.0.lock().unwrap();
         assert!(!m.mapped);
+        assert!(
+            m.domain_prepared,
+            "DMA map before original-path completion and private binding"
+        );
         m.cpu = Some(
             pages
                 .as_single()
@@ -817,6 +825,10 @@ impl Hardware for Access {
         Ok(())
     }
     fn allocate(&mut self, limit: u64) -> Result<Arena, Error> {
+        assert!(
+            self.0.lock().unwrap().domain_prepared,
+            "fresh DMA allocation before cold binding"
+        );
         let pages = Source(self.0.clone()).allocate(
             schedule::ARENA_BYTES,
             4096,
@@ -839,12 +851,30 @@ impl Hardware for Access {
         m.bme = enabled;
         Ok(())
     }
+    fn prepare_dma(&mut self) -> Result<(), Error> {
+        {
+            let m = self.0.lock().unwrap();
+            assert_eq!(m.words[(OP + STS) / 4] & (HALT | ASS | PSS), HALT);
+            assert_eq!(m.words[(OP + INTR) / 4], 0);
+            assert!(!m.bme && !m.mapped);
+        }
+        self.drain()?;
+        let mut m = self.0.lock().unwrap();
+        if !m.domain_prepared {
+            m.private_bindings += 1;
+        }
+        m.domain_prepared = true;
+        Ok(())
+    }
     fn drain(&mut self) -> Result<(), Error> {
         // SAFETY: production caller proves schedule/halt quiescence.
         unsafe {
             Domain(self.0.clone()).drain_posted_writes()?;
         }
         Ok(())
+    }
+    fn domain(&mut self) -> Result<Arc<dyn DmaDomain>, Error> {
+        Ok(Arc::new(Domain(self.0.clone())))
     }
     fn retire(&mut self) -> Result<(), Error> {
         let mut m = self.0.lock().unwrap();
@@ -1667,4 +1697,40 @@ fn inherited_root_disable_requires_ack_and_keeps_uncertain_native_owner() {
     assert_eq!(m.unmapped, 0);
     assert_ne!(m.words[(OP + PORT) / 4] & ENABLE, 0);
     assert!(m.setup_trace.is_empty());
+}
+
+#[test]
+fn cold_attachment_does_not_bind_or_allocate_before_engine_and_old_root_completion() {
+    for failed_halt in [false, true] {
+        let m = Arc::new(Mutex::new(Shared::new()));
+        {
+            let mut state = m.lock().unwrap();
+            if failed_halt {
+                state.words[(OP + STS) / 4] = 0;
+                state.words[(OP + CMD) / 4] = RUN;
+                state.halt_ack = false;
+            } else {
+                state.drain_fail = true;
+            }
+        }
+        let failure = Controller::initialize(Box::new(Access(m.clone())))
+            .err()
+            .unwrap();
+        assert!(failure.is_quarantined());
+        drop(failure);
+        let state = m.lock().unwrap();
+        assert!(!state.domain_prepared && !state.bme);
+        assert_eq!(state.private_bindings, 0);
+        assert_eq!(state.allocations, 0);
+    }
+    let m = Arc::new(Mutex::new(Shared::new()));
+    let mut c = controller(m.clone());
+    assert_eq!(m.lock().unwrap().private_bindings, 1);
+    c.recover().unwrap();
+    assert_eq!(
+        m.lock().unwrap().private_bindings,
+        1,
+        "recovery must retain its bound original domain"
+    );
+    c.shutdown().unwrap();
 }
