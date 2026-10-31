@@ -24,7 +24,7 @@ const PARENT_A: u64 = BASE + 0x4a10;
 const RESERVED: u64 = BASE + 0x4a20;
 const BASE_B: u64 = BASE + 0x4a30;
 
-fn words(values: &[u32]) -> Vec<u8> {
+pub(crate) fn words(values: &[u32]) -> Vec<u8> {
     values
         .iter()
         .flat_map(|value| value.to_le_bytes())
@@ -109,7 +109,7 @@ fn boot_collection() -> Vec<u8> {
         .build()
 }
 
-struct InputSection {
+pub(crate) struct InputSection {
     segment: &'static str,
     name: &'static str,
     flags: u32,
@@ -122,7 +122,12 @@ struct InputSection {
 }
 
 impl InputSection {
-    fn new(segment: &'static str, name: &'static str, flags: u32, data: Vec<u8>) -> Self {
+    pub(crate) fn new(
+        segment: &'static str,
+        name: &'static str,
+        flags: u32,
+        data: Vec<u8>,
+    ) -> Self {
         Self {
             segment,
             name,
@@ -134,7 +139,13 @@ impl InputSection {
         }
     }
 
-    fn relocate(mut self, offset: u32, symbol: u32, kind: u8, length: u8) -> Self {
+    pub(crate) fn zerofill(segment: &'static str, name: &'static str, size: u64) -> Self {
+        let mut section = Self::new(segment, name, macho::S_ZEROFILL, Vec::new());
+        section.size = size;
+        section
+    }
+
+    pub(crate) fn relocate(mut self, offset: u32, symbol: u32, kind: u8, length: u8) -> Self {
         self.relocations.push((offset, symbol, true, kind, length));
         self
     }
@@ -151,14 +162,19 @@ enum Place {
     Undefined { weak: bool },
 }
 
-struct InputSymbol {
+pub(crate) struct InputSymbol {
     name: &'static str,
     external: bool,
-    weak: bool,
+    pub(crate) weak: bool,
     place: Place,
 }
 
-fn defined(name: &'static str, external: bool, section: usize, offset: u64) -> InputSymbol {
+pub(crate) fn defined(
+    name: &'static str,
+    external: bool,
+    section: usize,
+    offset: u64,
+) -> InputSymbol {
     InputSymbol {
         name,
         external,
@@ -167,7 +183,7 @@ fn defined(name: &'static str, external: bool, section: usize, offset: u64) -> I
     }
 }
 
-fn undefined(name: &'static str, weak: bool) -> InputSymbol {
+pub(crate) fn undefined(name: &'static str, weak: bool) -> InputSymbol {
     InputSymbol {
         name,
         external: true,
@@ -178,6 +194,15 @@ fn undefined(name: &'static str, weak: bool) -> InputSymbol {
 
 /// An arm64e `MH_OBJECT` with one unnamed segment holding `sections`.
 fn object_file(sections: &[InputSection], symbols: &[InputSymbol]) -> Vec<u8> {
+    object_file_of(0x8000_0002, sections, symbols)
+}
+
+/// An `MH_OBJECT` of CPU subtype `subtype`.
+pub(crate) fn object_file_of(
+    subtype: u32,
+    sections: &[InputSection],
+    symbols: &[InputSymbol],
+) -> Vec<u8> {
     let commands = 72 + 80 * sections.len() + 24;
     let mut addresses = Vec::new();
     let mut address = 0u64;
@@ -234,7 +259,7 @@ fn object_file(sections: &[InputSection], symbols: &[InputSymbol]) -> Vec<u8> {
     let mut file = words(&[
         macho::MH_MAGIC_64,
         macho::CPU_TYPE_ARM64,
-        0x8000_0002,
+        subtype,
         macho::MH_OBJECT,
         2,
         commands as u32,
@@ -288,7 +313,7 @@ const IOLOG_SYMBOL: u32 = 2;
 const VTABLE_SYMBOL: u32 = 3;
 const MAYBE: u32 = 4;
 
-fn auth(key: u64, diversity: u64) -> Vec<u8> {
+pub(crate) fn auth(key: u64, diversity: u64) -> Vec<u8> {
     (diversity << 32 | 1 << 48 | key << 49 | 1 << 63)
         .to_le_bytes()
         .to_vec()

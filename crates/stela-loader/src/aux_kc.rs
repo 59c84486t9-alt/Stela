@@ -24,8 +24,8 @@ mod commands;
 mod fixups;
 mod prelink;
 mod receipt;
-mod relocatable;
-mod unit;
+pub(crate) mod relocatable;
+pub(crate) mod unit;
 
 use std::collections::BTreeMap;
 use std::iter;
@@ -388,7 +388,7 @@ pub fn link(boot: &[u8], kexts: &[Kext<'_>]) -> Result<Linked> {
 /// The collection segment a kext region lies in.
 /// `value` narrowed to the type of the `field` that holds it, refused when
 /// the collection outgrows that field.
-fn fit<T: TryFrom<V>, V: Copy + stela_contracts::refusal::ToValue>(
+pub(crate) fn fit<T: TryFrom<V>, V: Copy + stela_contracts::refusal::ToValue>(
     value: V,
     field: &'static str,
 ) -> Result<T> {
@@ -466,4 +466,4 @@ fn symbol_table(unit: &Unit<'_>, linkedit: &mut Vec<u8>, base: u64) -> Result<Sy
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

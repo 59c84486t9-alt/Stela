@@ -1,5 +1,5 @@
-//! The arm64e relocatable objects a kext compiles to (`MH_OBJECT`), read
-//! into the sections, symbols and relocations the linker places.
+//! The relocatable objects (`MH_OBJECT`) a kext and the Metal plugin compile
+//! to, read into the sections, symbols and relocations the linkers place.
 use super::fit;
 use crate::{Result, Within};
 use object::{
@@ -98,17 +98,29 @@ pub struct Relocation {
 
 #[derive(Debug)]
 pub struct Object<'a> {
+    /// The header's CPU subtype, ABI bits included.
+    pub subtype: u32,
     pub sections: Vec<Section<'a>>,
     pub symbols: Vec<Symbol>,
+}
+
+impl Object<'_> {
+    pub fn is_arm64e(&self) -> bool {
+        self.subtype & !macho::CPU_SUBTYPE_MASK & 0xff == macho::CPU_SUBTYPE_ARM64E
+    }
 }
 
 pub fn parse(data: &[u8]) -> Result<Object<'_>> {
     let header =
         macho::MachHeader64::<LE>::parse(data, 0).within(|| refuse!("not a 64-bit Mach-O"))?;
+    let subtype = header.cpusubtype(LE);
     require!(
         header.cputype(LE) == macho::CPU_TYPE_ARM64
-            && header.cpusubtype(LE) & !macho::CPU_SUBTYPE_MASK & 0xff == macho::CPU_SUBTYPE_ARM64E,
-        "not an arm64e object"
+            && matches!(
+                subtype & !macho::CPU_SUBTYPE_MASK & 0xff,
+                macho::CPU_SUBTYPE_ARM64_ALL | macho::CPU_SUBTYPE_ARM64E
+            ),
+        "not an arm64 or arm64e object"
     );
     require!(
         header.filetype(LE) == macho::MH_OBJECT,
@@ -131,7 +143,11 @@ pub fn parse(data: &[u8]) -> Result<Object<'_>> {
             }
         }
     }
-    let mut object = Object { sections, symbols };
+    let mut object = Object {
+        subtype,
+        sections,
+        symbols,
+    };
     for (index, raw) in relocations.into_iter().enumerate() {
         object.sections[index].relocations = decode(&object, index, raw)?;
     }
@@ -176,7 +192,7 @@ fn read_symbol(nlist: &macho::Nlist64<LE>, strings: object::StringTable<'_>) -> 
         _ if nlist.n_type() & macho::N_STAB != 0 => Definition::Debug,
         macho::N_UNDF if nlist.n_value(LE) != 0 => {
             return Err(refuse!(
-                "{name} is a common symbol; kexts build with -fno-common",
+                "{name} is a common symbol; objects build with -fno-common",
                 name
             )
             .into());
@@ -263,41 +279,42 @@ fn decode(
             })
         };
         let width = 1usize << info.r_length;
-        let (kind, addend) = match info.r_type {
-            macho::ARM64_RELOC_UNSIGNED => {
-                if let Some((minus_offset, minus)) = pending_minus.take() {
-                    require!(minus_offset == offset, "a subtractor without its pair");
-                    let bytes: u8 = fit(width, "a relocation width")?;
-                    require!(matches!(bytes, 4 | 8), "a {bytes}-byte difference", bytes);
-                    (Kind::Difference { minus, bytes }, in_place(width)?)
-                } else {
-                    require!(width == 8, "a {width}-byte pointer", width);
-                    (Kind::Pointer, in_place(8)?)
+        let (kind, addend) =
+            match info.r_type {
+                macho::ARM64_RELOC_UNSIGNED => {
+                    if let Some((minus_offset, minus)) = pending_minus.take() {
+                        require!(minus_offset == offset, "a subtractor without its pair");
+                        let bytes: u8 = fit(width, "a relocation width")?;
+                        require!(matches!(bytes, 4 | 8), "a {bytes}-byte difference", bytes);
+                        (Kind::Difference { minus, bytes }, in_place(width)?)
+                    } else {
+                        require!(width == 8, "a {width}-byte pointer", width);
+                        (Kind::Pointer, in_place(8)?)
+                    }
                 }
-            }
-            macho::ARM64_RELOC_AUTHENTICATED_POINTER => {
-                require!(width == 8, "a {width}-byte authenticated pointer", width);
-                let raw = in_place(8)? as u64;
-                let kind = Kind::Authenticated {
-                    key: ((raw >> 49) & 3) as u8,
-                    address_diversity: raw >> 48 & 1 != 0,
-                    diversity: (raw >> 32) as u16,
-                };
-                (kind, i64::from(raw as u32 as i32))
-            }
-            macho::ARM64_RELOC_BRANCH26 => (Kind::Branch26, 0),
-            macho::ARM64_RELOC_PAGE21 => (Kind::Page21, 0),
-            macho::ARM64_RELOC_PAGEOFF12 => (Kind::PageOffset12, 0),
-            macho::ARM64_RELOC_GOT_LOAD_PAGE21 => (Kind::GotPage21, 0),
-            macho::ARM64_RELOC_GOT_LOAD_PAGEOFF12 => (Kind::GotPageOffset12, 0),
-            other => return Err(refuse!(
-                "{segment},{section} has relocation type {other}, which a kext's code does not use",
-                segment = section.segment,
-                section = section.name,
-                other
-            )
-            .into()),
-        };
+                macho::ARM64_RELOC_AUTHENTICATED_POINTER => {
+                    require!(width == 8, "a {width}-byte authenticated pointer", width);
+                    let raw = in_place(8)? as u64;
+                    let kind = Kind::Authenticated {
+                        key: ((raw >> 49) & 3) as u8,
+                        address_diversity: raw >> 48 & 1 != 0,
+                        diversity: (raw >> 32) as u16,
+                    };
+                    (kind, i64::from(raw as u32 as i32))
+                }
+                macho::ARM64_RELOC_BRANCH26 => (Kind::Branch26, 0),
+                macho::ARM64_RELOC_PAGE21 => (Kind::Page21, 0),
+                macho::ARM64_RELOC_PAGEOFF12 => (Kind::PageOffset12, 0),
+                macho::ARM64_RELOC_GOT_LOAD_PAGE21 => (Kind::GotPage21, 0),
+                macho::ARM64_RELOC_GOT_LOAD_PAGEOFF12 => (Kind::GotPageOffset12, 0),
+                other => return Err(refuse!(
+                    "{segment},{section} has relocation type {other}, which no linked code uses",
+                    segment = section.segment,
+                    section = section.name,
+                    other
+                )
+                .into()),
+            };
         let addend = match pending_addend.take() {
             Some(extra) => {
                 require!(

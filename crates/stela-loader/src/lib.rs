@@ -48,6 +48,8 @@ pub mod local_policy;
 pub mod lock_regs;
 pub mod mount_interface;
 pub mod nvram;
+#[cfg(feature = "std")]
+pub mod plugin;
 pub mod recovery;
 pub mod root_selection;
 pub mod soc_variant;

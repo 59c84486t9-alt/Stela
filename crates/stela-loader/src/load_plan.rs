@@ -200,6 +200,11 @@ pub fn plan_library(data: &[u8]) -> Result<LoadPlan> {
     Ok(plan_kind(data, macho::MH_DYLIB)?.image)
 }
 
+/// Plan a thin arm64/arm64e bundle, as [`plan_library`] does a library.
+pub fn plan_bundle(data: &[u8]) -> Result<LoadPlan> {
+    Ok(plan_kind(data, macho::MH_BUNDLE)?.image)
+}
+
 /// Plan a thin arm64/arm64e dynamic linker with one thread-entry command.
 /// Nothing is mapped, rebased or run.
 pub fn plan_dynamic_linker(data: &[u8]) -> Result<DynamicLinkerPlan> {
@@ -523,6 +528,8 @@ impl Commands {
             if self.dylib_identity.is_none() {
                 return Err(invalid("MH_DYLIB requires LC_ID_DYLIB"));
             }
+            Ok(None)
+        } else if expected_type == macho::MH_BUNDLE {
             Ok(None)
         } else {
             self.check_thread_entry()?;

@@ -171,7 +171,10 @@ impl<'a> Unit<'a> {
             .iter()
             .enumerate()
             .map(|(index, data)| {
-                relocatable::parse(data).within(|| refuse!("reading object {index}", index))
+                let object =
+                    relocatable::parse(data).within(|| refuse!("reading object {index}", index))?;
+                require!(object.is_arm64e(), "object {index} is not arm64e", index);
+                Ok(object)
             })
             .collect::<Result<Vec<_>>>()
             .within(context)?;
@@ -1012,7 +1015,7 @@ pub fn uuid<'b>(parts: impl IntoIterator<Item = &'b [u8]>) -> [u8; 16] {
 }
 
 /// `B`/`BL` to `target`.
-fn branch(instruction: u32, place: u64, target: u64) -> Result<u32> {
+pub(crate) fn branch(instruction: u32, place: u64, target: u64) -> Result<u32> {
     let delta = target.wrapping_sub(place) as i64;
     require!(
         delta % 4 == 0 && (-(1 << 27)..1 << 27).contains(&delta),
@@ -1024,7 +1027,7 @@ fn branch(instruction: u32, place: u64, target: u64) -> Result<u32> {
 }
 
 /// `ADRP` of `target`'s 4 KiB page.
-fn page(instruction: u32, place: u64, target: u64) -> Result<u32> {
+pub(crate) fn page(instruction: u32, place: u64, target: u64) -> Result<u32> {
     let delta = ((target >> 12) as i64).wrapping_sub((place >> 12) as i64);
     require!(
         (-(1 << 20)..1 << 20).contains(&delta),
@@ -1038,7 +1041,7 @@ fn page(instruction: u32, place: u64, target: u64) -> Result<u32> {
 
 /// The low 12 bits of `target` in an `ADD` or a load or store's scaled
 /// unsigned offset.
-fn page_offset(instruction: u32, target: u64) -> Result<u32> {
+pub(crate) fn page_offset(instruction: u32, target: u64) -> Result<u32> {
     let scale = if instruction & 0x1f00_0000 == 0x1100_0000 {
         0
     } else if instruction & 0x3b00_0000 == 0x3900_0000 {
