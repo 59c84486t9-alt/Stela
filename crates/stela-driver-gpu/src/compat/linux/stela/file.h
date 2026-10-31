@@ -18,14 +18,29 @@ int stela_linux_chrdev_open(dev_t device, unsigned int flags, struct file **file
  * table across its clients. */
 void stela_linux_fd_close(int fd);
 
+/* What a client does by descriptor, as its system calls would: each returns a
+ * descriptor, or the driver's result, or a negative errno. */
+int stela_linux_open(dev_t device, unsigned int flags);
+int stela_linux_fd_dup(int fd);
+long stela_linux_fd_device(int fd);
+long stela_linux_ioctl(int fd, unsigned int request, void *argument);
+
 /* Maps size bytes of file at offset into space at address, through the file's
  * mmap, or returns a negative errno. Pages arrive by the client's faults. */
 int stela_linux_mmap(struct file *file, void *space, unsigned long address, size_t size,
 		     u64 offset, bool writable, struct stela_linux_mapping **mapping);
 void stela_linux_munmap(struct stela_linux_mapping *mapping);
 
+/* stela_linux_mmap of a descriptor, writable, with every page faulted in: a
+ * client that shares Stela's address space has no fault to take first. */
+int stela_linux_map(int fd, void *space, unsigned long address, size_t size, u64 offset,
+		    struct stela_linux_mapping **mapping);
+
 /* Serves a client's fault at address within the mapping, which installs pages
  * through map_user; a VM_FAULT_ result. */
 vm_fault_t stela_linux_fault(struct stela_linux_mapping *mapping, unsigned long address,
 			     bool write);
+
+/* Whether a fault at address put a page back, as drivers answer NOPAGE. */
+bool stela_linux_refault(struct stela_linux_mapping *mapping, unsigned long address, bool write);
 #endif

@@ -90,6 +90,27 @@ int stela_linux_mmap(struct file *file, void *space, unsigned long address, size
 	return 0;
 }
 
+int stela_linux_map(int fd, void *space, unsigned long address, size_t size, u64 offset,
+		    struct stela_linux_mapping **result)
+{
+	struct file *file = fget((unsigned int)fd);
+
+	if (!file)
+		return -EBADF;
+	int error = stela_linux_mmap(file, space, address, size, offset, true, result);
+
+	fput(file);
+	if (error)
+		return error;
+	for (size_t at = 0; at < size; at += PAGE_SIZE) {
+		if (!stela_linux_refault(*result, address + at, true)) {
+			stela_linux_munmap(*result);
+			return -EFAULT;
+		}
+	}
+	return 0;
+}
+
 void vma_set_file(struct vm_area_struct *vma, struct file *file)
 {
 	get_file(file);
@@ -131,6 +152,11 @@ vm_fault_t stela_linux_fault(struct stela_linux_mapping *mapping, unsigned long 
 	};
 
 	return vma->vm_ops->fault(&vmf);
+}
+
+bool stela_linux_refault(struct stela_linux_mapping *mapping, unsigned long address, bool write)
+{
+	return !(stela_linux_fault(mapping, address, write) & VM_FAULT_ERROR);
 }
 
 vm_fault_t vmf_insert_pfn_prot(struct vm_area_struct *vma, unsigned long addr, unsigned long pfn,

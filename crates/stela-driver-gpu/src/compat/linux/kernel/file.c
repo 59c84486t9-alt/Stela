@@ -247,6 +247,47 @@ void stela_linux_fd_close(int fd)
 		fput(file);
 }
 
+int stela_linux_fd_dup(int fd)
+{
+	struct file *file = fget((unsigned int)fd);
+
+	if (!file)
+		return -EBADF;
+	int copy = get_unused_fd_flags(0);
+
+	if (copy < 0)
+		fput(file);
+	else
+		fd_install((unsigned int)copy, file);
+	return copy;
+}
+
+long stela_linux_fd_device(int fd)
+{
+	struct file *file = fget((unsigned int)fd);
+
+	if (!file)
+		return -EBADF;
+	long device = file_inode(file)->i_rdev;
+
+	fput(file);
+	return device;
+}
+
+long stela_linux_ioctl(int fd, unsigned int request, void *argument)
+{
+	struct file *file = fget((unsigned int)fd);
+
+	if (!file)
+		return -EBADF;
+	long result = file->f_op->unlocked_ioctl ?
+			      file->f_op->unlocked_ioctl(file, request, (unsigned long)argument) :
+			      -ENOTTY;
+
+	fput(file);
+	return result;
+}
+
 struct char_devices {
 	struct list_head node;
 	unsigned int major, base, count;
@@ -323,6 +364,22 @@ int stela_linux_chrdev_open(dev_t device, unsigned int flags, struct file **resu
 		return 0;
 	}
 	return -ENXIO;
+}
+
+int stela_linux_open(dev_t device, unsigned int flags)
+{
+	struct file *file;
+	int error = stela_linux_chrdev_open(device, flags, &file);
+
+	if (error)
+		return error;
+	int fd = get_unused_fd_flags(flags);
+
+	if (fd < 0)
+		fput(file);
+	else
+		fd_install((unsigned int)fd, file);
+	return fd;
 }
 
 struct pseudo_fs_context *init_pseudo(struct fs_context *context, unsigned long magic)
@@ -472,6 +529,20 @@ int main(void)
 	assert(!fget(0) && !releases);
 	fput(file);
 	assert(releases == 1);
+
+	/* A client's descriptor, by what its system calls would do. */
+	fd = stela_linux_open(MKDEV(226, 3), 0);
+	assert(fd >= 0 && stela_linux_fd_device(fd) == MKDEV(226, 3));
+	int copy = stela_linux_fd_dup(fd);
+	assert(copy >= 0 && copy != fd);
+	assert(stela_linux_ioctl(fd, 7, NULL) == -ENOTTY);
+	stela_linux_fd_close(fd);
+	assert(releases == 1);
+	stela_linux_fd_close(copy);
+	assert(releases == 2);
+	assert(stela_linux_fd_dup(fd) == -EBADF && stela_linux_fd_device(fd) == -EBADF);
+	assert(stela_linux_ioctl(fd, 7, NULL) == -EBADF);
+	releases = 1;
 	__unregister_chrdev(226, 0, 8, "test");
 
 	struct file *anonymous = anon_inode_getfile("test", &fops, &opens, O_RDWR);

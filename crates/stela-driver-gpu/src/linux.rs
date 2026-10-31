@@ -4,6 +4,7 @@
 use alloc::alloc::{alloc_zeroed, dealloc};
 use core::{alloc::Layout, ffi::c_void, ptr};
 
+pub mod client;
 #[cfg(target_arch = "x86_64")]
 pub mod function;
 pub mod heap;
