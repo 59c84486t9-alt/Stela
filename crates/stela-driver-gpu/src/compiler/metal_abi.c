@@ -35,6 +35,8 @@ nir_def *stela_metal_load_device_value(nir_builder *b, enum stela_air_device_val
       return load_push(b, 32, STELA_METAL_PUSH_AMPLIFICATION);
    case STELA_AIR_VIEW_MAPPING:
       return load_push(b, 32, STELA_METAL_PUSH_VIEW_MAPPING);
+   case STELA_AIR_AMPLIFICATIONS:
+      return load_push(b, 32, STELA_METAL_PUSH_AMPLIFICATIONS);
    case STELA_AIR_LOG_BUFFER:
       return load_push(b, 64, STELA_METAL_PUSH_LOG);
    case STELA_AIR_THREADGROUP_SHAPE:

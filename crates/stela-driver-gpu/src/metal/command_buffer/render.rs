@@ -1548,10 +1548,7 @@ impl CommandBuffer {
     /// constants.
     fn amplified(&mut self, resolver: &mut dyn Resolver, draw: Command) -> Result<()> {
         let views = render(&mut self.encoder)?.amplification.clone();
-        if views.len() == 1 {
-            self.recorder.push(draw);
-            return Ok(());
-        }
+        self.bindings.constants.amplification_count = views.len() as u32;
         for (view, mapping) in views.into_iter().enumerate() {
             self.bindings.constants.amplification_id = view as u32;
             self.bindings.constants.view_mapping = mapping;

@@ -684,6 +684,8 @@ builtin_value(struct translator *t, enum stela_air_builtin builtin)
       return nir_channel(b, t->patch_ids, 0);
    case STELA_AIR_AMPLIFICATION_ID:
       return device_value(t, STELA_AIR_AMPLIFICATION);
+   case STELA_AIR_AMPLIFICATION_COUNT:
+      return device_value(t, STELA_AIR_AMPLIFICATIONS);
    case STELA_AIR_FRONT_FACING:
       return nir_load_front_face(b, 1);
    case STELA_AIR_SAMPLE_ID:
@@ -1431,8 +1433,8 @@ memory_access(struct translator *t, const struct value *address, nir_def *stored
 
 /* The value an atomic `op` of `data` at `pointer` replaces, negated first
  * when `negate`; `expected` makes it a compare-exchange. Atomics act on 32-
- * and 64-bit integers, and exchange and add also on floats. NIR's atomics are
- * device-scope, which refines every Metal scope. */
+ * and 64-bit integers, and on floats exchange, by their bits, and add. NIR's
+ * atomics are device-scope, which refines every Metal scope. */
 static nir_def *
 atomic_old(struct translator *t, LLVMValueRef pointer, nir_atomic_op op, bool negate,
            LLVMTypeRef type, nir_def *data, nir_def *expected, unsigned alignment)
@@ -1440,7 +1442,8 @@ atomic_old(struct translator *t, LLVMValueRef pointer, nir_atomic_op op, bool ne
    unsigned components, bits;
    bool floating = LLVMGetTypeKind(type) == LLVMFloatTypeKind;
    if (!value_shape(type, &components, &bits) || components != 1 ||
-       (floating ? expected || (op != nir_atomic_op_xchg && op != nir_atomic_op_fadd) :
+       (floating ? op != nir_atomic_op_xchg && op != nir_atomic_op_fadd &&
+                      op != nir_atomic_op_cmpxchg :
                    (bits != 32 && bits != 64) || op == nir_atomic_op_fadd)) {
       fail(t, STELA_AIR_TYPE, "unsupported atomic operand type");
       return NULL;

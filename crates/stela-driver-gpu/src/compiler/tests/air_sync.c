@@ -380,6 +380,10 @@ simd_functions_lower_to_subgroup_operations(void)
       "declare i32 @air.quad_prefix_inclusive_product.u.i32(i32)\n"
       "declare i1 @air.simd_all(i1)\n"
       "declare i64 @air.simd_ballot.i64(i1)\n"
+      "declare i16 @air.quad_ballot(i1)\n"
+      "declare i64 @air.simd_active_threads_mask.i64()\n"
+      "declare i16 @air.quad_active_threads_mask()\n"
+      "declare i1 @air.simd_is_helper_thread()\n"
       "declare i1 @air.quad_is_first()\n"
       "declare float @air.simd_shuffle_and_fill_down.f32(float, float, i16, i16)\n"
       "declare i32 @air.quad_shuffle_and_fill_up.u.i32(i32, i32, i16, i16)\n"
@@ -397,6 +401,10 @@ simd_functions_lower_to_subgroup_operations(void)
       "%v = icmp eq i32 %p, 0\n"
       "%all = call i1 @air.simd_all(i1 %v)\n"
       "%ballot = call i64 @air.simd_ballot.i64(i1 %all)\n"
+      "%quad_ballot = call i16 @air.quad_ballot(i1 %all)\n"
+      "%active = call i64 @air.simd_active_threads_mask.i64()\n"
+      "%quad_active = call i16 @air.quad_active_threads_mask()\n"
+      "%helper = call i1 @air.simd_is_helper_thread()\n"
       "%first = call i1 @air.quad_is_first()\n"
       "%hb = bitcast <2 x half> %h to i32\n"
       "%wt = trunc i64 %w to i32\n%bt = trunc i64 %ballot to i32\n"
@@ -415,7 +423,7 @@ simd_functions_lower_to_subgroup_operations(void)
    assert(count(shader, nir_intrinsic_reduce) == 3);
    assert(count(shader, nir_intrinsic_exclusive_scan) == 1);
    assert(count(shader, nir_intrinsic_vote_all) == 1);
-   assert(count(shader, nir_intrinsic_ballot) == 2);
+   assert(count(shader, nir_intrinsic_ballot) == 5);
    ralloc_free(shader);
    const char *refusals[][2] = {
       /* The lane is an i16. */
@@ -424,6 +432,7 @@ simd_functions_lower_to_subgroup_operations(void)
       /* Bitwise functions take integers. */
       {"declare float @air.simd_and.f32(float)\n",
        "%a = call float @air.simd_and.f32(float 1.0)\nret void\n"},
+      {"declare i32 @air.quad_ballot(i1)\n", "%a = call i32 @air.quad_ballot(i1 true)\nret void\n"},
       {"declare i16 @air.simd_ballot.i16(i1)\n",
        "%a = call i16 @air.simd_ballot.i16(i1 true)\nret void\n"},
       /* A fill's delta and modulo are i16s. */

@@ -64,7 +64,7 @@ static const char *kernel_metadata =
 
 static const char *vertex_body =
    "define <4 x float> @vertex(i32 %vertex, i32 %instance, i32 %base_vertex, i32 %base_instance,"
-   " i32 %view) {\n"
+   " i32 %view, i32 %views) {\n"
    "ret <4 x float> zeroinitializer\n}\n";
 
 static const char *vertex_metadata =
@@ -72,12 +72,13 @@ static const char *vertex_metadata =
    "!2 = !{ptr @vertex, !3, !4}\n"
    "!3 = !{!5}\n!5 = !{!\"air.position\", !\"air.arg_type_name\", !\"float4\","
    " !\"air.arg_name\", !\"position\"}\n"
-   "!4 = !{!40, !41, !42, !43, !44}\n"
+   "!4 = !{!40, !41, !42, !43, !44, !45}\n"
    BUILTIN(40, 0, "vertex_id", "uint")
    BUILTIN(41, 1, "instance_id", "uint")
    BUILTIN(42, 2, "base_vertex", "uint")
    BUILTIN(43, 3, "base_instance", "uint")
-   BUILTIN(44, 4, "amplification_id", "uint");
+   BUILTIN(44, 4, "amplification_id", "uint")
+   BUILTIN(45, 5, "amplification_count", "uint");
 
 static const char *fragment_body =
    "define <4 x float> @fragment(i1 %front, i32 %sample, i32 %mask, i32 %primitive, i32 %layer,"
@@ -150,7 +151,7 @@ translate(const char *body, const char *entry_metadata, const char *entry, int s
 
 struct census {
    unsigned intrinsics[nir_num_intrinsics];
-   unsigned grid_loads, amplification_loads, narrowed;
+   unsigned grid_loads, amplification_loads, count_loads, narrowed;
 };
 
 static struct census
@@ -171,6 +172,7 @@ count(nir_shader *shader)
                unsigned base = (unsigned)nir_intrinsic_base(intrinsic);
                census.grid_loads += base == STELA_METAL_PUSH_GRID;
                census.amplification_loads += base == STELA_METAL_PUSH_AMPLIFICATION;
+               census.count_loads += base == STELA_METAL_PUSH_AMPLIFICATIONS;
             }
          }
       }
@@ -247,7 +249,7 @@ vertex_builtins_include_the_bases(void)
    assert(census.intrinsics[nir_intrinsic_load_base_vertex] == 1);
    /* instance_id adds it, and base_instance reads it. */
    assert(census.intrinsics[nir_intrinsic_load_base_instance] == 2);
-   assert(census.amplification_loads == 1);
+   assert(census.amplification_loads == 1 && census.count_loads == 1);
    ralloc_free(shader);
 }
 

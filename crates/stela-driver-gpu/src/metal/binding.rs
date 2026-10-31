@@ -128,19 +128,22 @@ pub struct PushConstants {
     /// That view's `MTLVertexAmplificationViewMapping`: the viewport offset
     /// in the low half, the render target array offset in the high half.
     pub view_mapping: u32,
+    /// The views of the draw (`[[amplification_count]]`), at least one.
+    pub amplification_count: u32,
 }
 
 // Vulkan guarantees 128 bytes of push constants.
 const _: () = assert!(PushConstants::BYTES <= 128);
 
 impl PushConstants {
-    pub const BYTES: u32 = 60;
+    pub const BYTES: u32 = 64;
     pub const TABLES_OFFSET: u32 = 0;
     pub const ARGUMENTS_OFFSET: u32 = 24;
     pub const LOG_OFFSET: u32 = 32;
     pub const GRID_OFFSET: u32 = 40;
     pub const AMPLIFICATION_OFFSET: u32 = 52;
     pub const VIEW_MAPPING_OFFSET: u32 = 56;
+    pub const AMPLIFICATIONS_OFFSET: u32 = 60;
 
     pub fn encode(&self) -> [u8; Self::BYTES as usize] {
         let mut bytes = [0; Self::BYTES as usize];
@@ -154,6 +157,7 @@ impl PushConstants {
         self.grid.iter().for_each(|size| writer.u32(*size));
         writer.u32(self.amplification_id);
         writer.u32(self.view_mapping);
+        writer.u32(self.amplification_count);
         bytes
     }
 }
@@ -764,6 +768,10 @@ mod tests {
                 "STELA_METAL_PUSH_VIEW_MAPPING",
                 PushConstants::VIEW_MAPPING_OFFSET,
             ),
+            (
+                "STELA_METAL_PUSH_AMPLIFICATIONS",
+                PushConstants::AMPLIFICATIONS_OFFSET,
+            ),
             ("STELA_METAL_BUFFERS", MAX_BUFFER_BINDINGS),
             ("STELA_METAL_TEXTURES", MAX_TEXTURE_BINDINGS),
             ("STELA_METAL_SAMPLERS", MAX_SAMPLER_BINDINGS),
@@ -1183,6 +1191,7 @@ mod tests {
             log: 8,
             grid: [4, 5, 6],
             amplification_id: 1,
+            amplification_count: 2,
             view_mapping: 2 << 16 | 1,
         };
         let bytes = constants.encode();
@@ -1192,6 +1201,7 @@ mod tests {
         assert_eq!(bytes[PushConstants::GRID_OFFSET as usize + 8], 6);
         assert_eq!(bytes[PushConstants::AMPLIFICATION_OFFSET as usize], 1);
         assert_eq!(bytes[PushConstants::VIEW_MAPPING_OFFSET as usize + 2], 2);
+        assert_eq!(bytes[PushConstants::AMPLIFICATIONS_OFFSET as usize], 2);
     }
 
     #[test]

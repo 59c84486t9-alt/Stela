@@ -969,6 +969,7 @@ builtin_input(LLVMValueRef kind, const struct stela_air_render *render, unsigned
       {"air.base_instance", STELA_AIR_BASE_INSTANCE, VERTEX | PATCH, 1},
       {"air.patch_id", STELA_AIR_PATCH_ID, PATCH, 1},
       {"air.amplification_id", STELA_AIR_AMPLIFICATION_ID, RENDER, 1},
+      {"air.amplification_count", STELA_AIR_AMPLIFICATION_COUNT, RENDER, 1},
       {"air.front_facing", STELA_AIR_FRONT_FACING, FRAGMENT, 1},
       {"air.sample_id", STELA_AIR_SAMPLE_ID, FRAGMENT, 1},
       {"air.sample_mask_in", STELA_AIR_SAMPLE_MASK_IN, FRAGMENT, 1},

@@ -9,8 +9,9 @@
  *   sample[_compare]  texture, sampler, [i32 1 for depth], coord, [array],
  *                     [compare reference], [i1 offset present, offset],
  *                     i1 lod is level, f32 lod or bias, f32 min lod, i32 access
- *   sample_..._grad   texture, sampler, [i32 1], coord, [array], dPdx, dPdy,
- *                     f32 min lod, [i1, offset], i32 access
+ *   sample_..._grad   texture, sampler, [i32 1], coord, [array],
+ *                     [compare reference], dPdx, dPdy, f32 min lod, [i1, offset],
+ *                     i32 access
  *   read              texture, [i32 1], position, [cube face], [array],
  *                     [sample], [lod], i32 access
  *   write             texture, position, [cube face], [array], texel, [lod],
@@ -56,7 +57,7 @@ static const struct shape {
 };
 
 enum operation {
-   SAMPLE, SAMPLE_COMPARE, SAMPLE_GRAD, READ, WRITE, GATHER, GATHER_COMPARE,
+   SAMPLE, SAMPLE_COMPARE, SAMPLE_GRAD, SAMPLE_COMPARE_GRAD, READ, WRITE, GATHER, GATHER_COMPARE,
    WIDTH, HEIGHT, DEPTH, ARRAY_SIZE, MIP_LEVELS, SAMPLES, CLAMPED_LOD, UNCLAMPED_LOD, FENCE,
    IS_NULL,
 };
@@ -67,7 +68,8 @@ static const struct {
    bool typed;
 } operations[] = {
    [SAMPLE] = {"sample", true}, [SAMPLE_COMPARE] = {"sample_compare", true},
-   [SAMPLE_GRAD] = {"sample", true}, [READ] = {"read", true}, [WRITE] = {"write", true},
+   [SAMPLE_GRAD] = {"sample", true}, [SAMPLE_COMPARE_GRAD] = {"sample_compare", true},
+   [READ] = {"read", true}, [WRITE] = {"write", true},
    [GATHER] = {"gather", true}, [GATHER_COMPARE] = {"gather_compare", true},
    [WIDTH] = {"get_width"}, [HEIGHT] = {"get_height"}, [DEPTH] = {"get_depth"},
    [ARRAY_SIZE] = {"get_array_size"}, [MIP_LEVELS] = {"get_num_mip_levels"},
@@ -166,7 +168,8 @@ named(const struct call *call, enum operation op, bool coherent, const char *nam
       texel = op == GATHER_COMPARE ? ".f32" : overload(texture, op == GATHER);
    char expected[96];
    int length = snprintf(expected, sizeof(expected), "air.%s_%s%s%s%s", operations[op].stem, type,
-                         op == SAMPLE_GRAD ? "_grad" : "", coherent ? ".device_coherent" : "",
+                         op == SAMPLE_GRAD || op == SAMPLE_COMPARE_GRAD ? "_grad" : "",
+                         coherent ? ".device_coherent" : "",
                          texel);
    return length > 0 && (size_t)length == bytes && !memcmp(expected, name, bytes);
 }
@@ -465,7 +468,7 @@ static bool
 sample(struct call *call, enum operation op, nir_def **result)
 {
    const struct shape *shape = call->shape;
-   bool compare = op == SAMPLE_COMPARE;
+   bool compare = op == SAMPLE_COMPARE || op == SAMPLE_COMPARE_GRAD;
    if (call->texture->access != STELA_AIR_TEXTURE_SAMPLE)
       return fail(call, "sampling a texture without sample access");
    if (shape->dim == GLSL_SAMPLER_DIM_MS || shape->dim == GLSL_SAMPLER_DIM_BUF)
@@ -487,7 +490,7 @@ sample(struct call *call, enum operation op, nir_def **result)
    if (compare && !(t.comparator = float_operand(call, 1)))
       return false;
    bool fragment = call->b->shader->info.stage == MESA_SHADER_FRAGMENT;
-   if (op == SAMPLE_GRAD) {
+   if (op == SAMPLE_GRAD || op == SAMPLE_COMPARE_GRAD) {
       t.op = nir_texop_txd;
       if (!(t.ddx = float_operand(call, shape->coords)) ||
           !(t.ddy = float_operand(call, shape->coords)) || !(t.min_lod = float_operand(call, 1)))
@@ -987,13 +990,14 @@ stela_air_texture_call(const struct stela_air_texture_context *context, LLVMValu
       return STELA_AIR_TEXTURE_FAILED;
    }
    bool lowered;
-   *pair = op == SAMPLE || op == SAMPLE_COMPARE || op == SAMPLE_GRAD || op == READ || op == GATHER ||
-           op == GATHER_COMPARE;
+   *pair = op == SAMPLE || op == SAMPLE_COMPARE || op == SAMPLE_GRAD ||
+           op == SAMPLE_COMPARE_GRAD || op == READ || op == GATHER || op == GATHER_COMPARE;
    call.sparse = *pair && reads_residency(inst);
    switch ((enum operation)op) {
    case SAMPLE:
    case SAMPLE_COMPARE:
    case SAMPLE_GRAD:
+   case SAMPLE_COMPARE_GRAD:
       lowered = sample(&call, (enum operation)op, result);
       break;
    case READ:

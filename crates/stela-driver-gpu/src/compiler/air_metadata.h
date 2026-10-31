@@ -206,6 +206,7 @@ enum stela_air_builtin {
    STELA_AIR_PATCH_ID,
    /* Vertex and fragment functions. */
    STELA_AIR_AMPLIFICATION_ID,
+   STELA_AIR_AMPLIFICATION_COUNT,
    /* Fragment functions. */
    STELA_AIR_FRONT_FACING,
    STELA_AIR_SAMPLE_ID,

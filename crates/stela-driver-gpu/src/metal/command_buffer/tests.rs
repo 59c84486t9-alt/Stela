@@ -2510,7 +2510,7 @@ fn generated_layouts_read_the_sequence_at_token_offsets() {
                 8,
                 IndirectToken::PushConstants {
                     offset: 0,
-                    size: 60
+                    size: 64
                 }
             ),
             (72, IndirectToken::IndexBuffer),

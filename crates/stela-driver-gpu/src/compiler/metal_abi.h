@@ -12,13 +12,14 @@
  * Shaders read the push constants with load_push_constant, which the Vulkan
  * driver lowers through its pipeline layout, and everything else from global
  * memory. */
-#define STELA_METAL_PUSH_BYTES 60u
+#define STELA_METAL_PUSH_BYTES 64u
 #define STELA_METAL_PUSH_TABLES 0u
 #define STELA_METAL_PUSH_ARGUMENTS 24u
 #define STELA_METAL_PUSH_LOG 32u
 #define STELA_METAL_PUSH_GRID 40u
 #define STELA_METAL_PUSH_AMPLIFICATION 52u
 #define STELA_METAL_PUSH_VIEW_MAPPING 56u
+#define STELA_METAL_PUSH_AMPLIFICATIONS 60u
 
 #define STELA_METAL_BUFFERS 31u
 #define STELA_METAL_TEXTURES 128u

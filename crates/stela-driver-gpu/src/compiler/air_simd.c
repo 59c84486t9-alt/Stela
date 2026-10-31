@@ -6,8 +6,10 @@
  *   air.<simd|quad>_shuffle_and_fill_<up|down>.<type>(value, fill, i16 delta,
  *                                                    i16 modulo)
  *   air.<simd|quad>_<all|any>(i1) -> i1
- *   air.<simd|quad>_ballot.<i32|i64>(i1)
+ *   air.simd_ballot.<i32|i64>(i1), air.quad_ballot(i1) -> i16
+ *   air.simd_active_threads_mask.<i32|i64>(), air.quad_active_threads_mask() -> i16
  *   air.<simd|quad>_is_first() -> i1
+ *   air.simd_is_helper_thread() -> i1
  *
  * A floating-point type is bare ("f32", "v2f16"); an integer one carries its
  * sign ("u.i32", "s.i16"), which min, max and the widening of narrow
@@ -28,7 +30,7 @@ enum operation {
    SUM, PRODUCT, MIN, MAX, AND, OR, XOR, INCLUSIVE_SUM, INCLUSIVE_PRODUCT, EXCLUSIVE_SUM,
    EXCLUSIVE_PRODUCT,
    /* Votes. */
-   ALL, ANY, BALLOT, IS_FIRST,
+   ALL, ANY, BALLOT, ACTIVE, IS_FIRST, IS_HELPER,
 };
 
 /* Functions of a typed value, after "simd_" or "quad_". */
@@ -54,7 +56,8 @@ static const struct {
    const char *name;
    enum operation operation;
 } votes[] = {
-   {"all", ALL}, {"any", ANY}, {"ballot", BALLOT}, {"is_first", IS_FIRST},
+   {"all", ALL}, {"any", ANY}, {"ballot", BALLOT}, {"active_threads_mask", ACTIVE},
+   {"is_first", IS_FIRST}, {"is_helper_thread", IS_HELPER},
 };
 
 /* The lanes a function spans: the whole SIMD-group, or the caller's quad. */
@@ -246,18 +249,19 @@ static enum stela_air_call_status
 vote(const struct stela_air_call_context *c, LLVMValueRef call, LLVMValueRef callee,
      enum operation operation, bool quad, nir_def **result)
 {
-   bool first = operation == IS_FIRST;
-   if (!stela_air_call_plain(c, call, callee, first ? 0 : 1))
+   bool bare = operation == ACTIVE || operation == IS_FIRST || operation == IS_HELPER;
+   if (!stela_air_call_plain(c, call, callee, bare ? 0 : 1))
       return STELA_AIR_CALL_FAILED;
    LLVMTypeRef type = LLVMTypeOf(call);
    unsigned bits = LLVMGetTypeKind(type) == LLVMIntegerTypeKind ? LLVMGetIntTypeWidth(type) : 0;
-   LLVMTypeRef operand = first ? NULL : LLVMTypeOf(LLVMGetOperand(call, 0));
-   if ((operation == BALLOT ? bits != 32 && bits != 64 : bits != 1) ||
+   LLVMTypeRef operand = bare ? NULL : LLVMTypeOf(LLVMGetOperand(call, 0));
+   bool mask = operation == BALLOT || operation == ACTIVE;
+   if ((mask ? bits != (quad ? 16u : 32u) && (quad || bits != 64) : bits != 1) ||
        (operand && (LLVMGetTypeKind(operand) != LLVMIntegerTypeKind || LLVMGetIntTypeWidth(operand) != 1)))
       return stela_air_call_fail(c, STELA_AIR_TYPE, "unsupported SIMD-group vote types"),
              STELA_AIR_CALL_FAILED;
    nir_builder *b = c->b;
-   nir_def *predicate = first ? nir_imm_true(b) : c->operand(c->translator, LLVMGetOperand(call, 0));
+   nir_def *predicate = bare ? nir_imm_true(b) : c->operand(c->translator, LLVMGetOperand(call, 0));
    if (!predicate)
       return STELA_AIR_CALL_FAILED;
    struct group g = group(b, quad);
@@ -270,7 +274,12 @@ vote(const struct stela_air_call_context *c, LLVMValueRef call, LLVMValueRef cal
       *result = quad ? nir_ine_imm(b, active(b, predicate, &g), 0) : nir_vote_any(b, 1, predicate);
       break;
    case BALLOT:
+   case ACTIVE:
       *result = nir_u2uN(b, active(b, predicate, &g), bits);
+      break;
+   case IS_HELPER:
+      *result = b->shader->info.stage == MESA_SHADER_FRAGMENT ? nir_load_helper_invocation(b, 1) :
+                                                                nir_imm_false(b);
       break;
    default:
       *result = quad ? nir_ieq(b, nir_find_lsb(b, active(b, predicate, &g)), g.index) : nir_elect(b, 1);
@@ -307,9 +316,9 @@ stela_air_simd_call(const struct stela_air_call_context *c, LLVMValueRef call, L
       return STELA_AIR_CALL_OTHER;
    const char *prefix = quad ? "air.quad_" : "air.simd_";
    for (unsigned i = 0; i < ARRAY_SIZE(votes); i++) {
-      /* A ballot is named by the mask it returns. */
+      /* A SIMD-group's masks are named by the type they return. */
       char mask[16] = "";
-      if (votes[i].operation == BALLOT)
+      if (!quad && (votes[i].operation == BALLOT || votes[i].operation == ACTIVE))
          stela_air_call_overload(LLVMTypeOf(call), mask, sizeof(mask));
       snprintf(expected, sizeof(expected), "%s%s%s%s", prefix, votes[i].name, *mask ? "." : "",
                mask);

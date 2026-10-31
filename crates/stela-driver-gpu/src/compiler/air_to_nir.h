@@ -222,6 +222,8 @@ enum stela_air_device_value {
    STELA_AIR_DISPATCH_GRID,
    /* The amplification ID of an amplified draw, as a uint. */
    STELA_AIR_AMPLIFICATION,
+   /* The amplified draw's views as a uint. */
+   STELA_AIR_AMPLIFICATIONS,
    /* That view's mapping as a uint: the viewport offset in the low half, the
     * render target array index offset in the high half. */
    STELA_AIR_VIEW_MAPPING,
