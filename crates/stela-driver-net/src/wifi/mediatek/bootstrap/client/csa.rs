@@ -177,6 +177,8 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             return false;
         }
         match body {
+            [0, 4, ..] | [4 | 9, 4, _, _, _, _, ..]
+                if Self::switch_of_other_link(s, &frame.radio) => {}
             [0, 4, elements @ ..] => {
                 Self::process_channel_switch(s, elements, Source::ProtectedAction, None)
             }

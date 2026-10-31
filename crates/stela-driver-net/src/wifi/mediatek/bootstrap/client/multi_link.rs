@@ -71,7 +71,7 @@ pub(super) struct Link<C: 'static> {
     ptk_removed: Option<Removal>,
     gtk_removed: Option<Removal>,
     interface_removed: Option<Deactivated>,
-    /// The unsupported operations of the link's frames already reported.
+    /// The link's untracked beacons and channel switch already reported.
     reported: [bool; 2],
     /// The link's BSS record, the setup link's AP record naming both links,
     /// the link's AP record and its EDCA, in `mt7925_mac_link_sta_add` order.
@@ -382,36 +382,60 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         )
     }
 
-    /// Whether management or control frame `frame` came on another link,
-    /// whose beacons and management mac80211 tracks per link and this
-    /// driver leaves to the OS: what it leaves is reported to `events` once
-    /// per link.
-    pub(super) fn on_other_link(
+    /// The profile of the link other than the setup link that `radio` heard
+    /// a frame on.
+    pub(super) fn other_link(s: &Owned<I, Q, C>, radio: &wifi::RadioStatus) -> Option<Profile> {
+        let link = s.links.iter().find(|link| {
+            (link.profile.channel.band, link.profile.channel.number) == (radio.band, radio.channel)
+        })?;
+        Some(link.profile)
+    }
+
+    /// Whether `frame` is a beacon of another link, whose tracking mac80211
+    /// does per link and this driver leaves undone: reported to `events` once
+    /// per link. The link's other frames name the MLDs and go the setup
+    /// link's way.
+    pub(super) fn beacon_of_other_link(
         s: &mut Owned<I, Q, C>,
         frame: &Mpdu,
         events: &mut Vec<Event>,
     ) -> bool {
-        let radio = &frame.radio;
-        let Some(link) = s.links.iter_mut().find(|link| {
-            (link.profile.channel.band, link.profile.channel.number) == (radio.band, radio.channel)
-        }) else {
+        if !matches!(frame.header().control & 0x00fc, 0x0080 | 0x0050) {
+            return false;
+        }
+        let Some(link) = Self::link_on(s, &frame.radio) else {
             return false;
         };
-        let (kind, operation) = if matches!(frame.header().control & 0x00fc, 0x0080 | 0x0050) {
-            (
-                0,
+        if !core::mem::replace(&mut link.reported[0], true) {
+            events.push(Event::Unsupported(
                 "MLO link beacon tracking: EDCA, channel switch, bandwidth and beacon loss",
-            )
-        } else {
-            (
-                1,
-                "MLO link management: departures, actions and block ack sessions",
-            )
-        };
-        if !core::mem::replace(&mut link.reported[kind], true) {
-            events.push(Event::Unsupported(operation));
+            ));
         }
         true
+    }
+
+    /// Whether a channel switch announced on `radio` is another link's, which
+    /// stays on its channel until its AP is gone: reported once per link.
+    pub(super) fn switch_of_other_link(s: &mut Owned<I, Q, C>, radio: &wifi::RadioStatus) -> bool {
+        let Some(link) = Self::link_on(s, radio) else {
+            return false;
+        };
+        let first = !core::mem::replace(&mut link.reported[1], true);
+        if first {
+            s.csa.ready.push(Event::Unsupported(
+                "a channel switch of an MLO link other than the setup link",
+            ));
+        }
+        true
+    }
+
+    fn link_on<'a>(
+        s: &'a mut Owned<I, Q, C>,
+        radio: &wifi::RadioStatus,
+    ) -> Option<&'a mut Link<C>> {
+        s.links.iter_mut().find(|link| {
+            (link.profile.channel.band, link.profile.channel.number) == (radio.band, radio.channel)
+        })
     }
 
     /// The PTK and GTK of the link `radio` received on: another link's on

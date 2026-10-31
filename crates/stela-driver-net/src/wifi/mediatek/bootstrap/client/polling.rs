@@ -192,7 +192,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             }
             if modern_data
                 && !frame.header().data_present()
-                && Self::on_other_link(s, &frame, &mut events)
+                && Self::beacon_of_other_link(s, &frame, &mut events)
             {
                 events.push(Event::Raw(f));
                 continue;
