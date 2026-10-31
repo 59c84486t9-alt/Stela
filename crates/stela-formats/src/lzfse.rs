@@ -209,7 +209,7 @@ pub fn decode(src: &[u8], limit: usize) -> Result<Vec<u8>> {
                     .get(start..start + payload)
                     .ok_or(LzfseError::Truncated)?;
                 out.begin_block(raw)?;
-                lzvn(bytes, &mut out)?;
+                lzvn(bytes, &mut out, true)?;
                 at = start + payload;
             }
             COMPRESSED_V1 | COMPRESSED_V2 => {
@@ -687,14 +687,15 @@ pub fn decode_lzvn(src: &[u8], raw_bytes: usize) -> Result<Vec<u8>> {
         block_end: 0,
     };
     out.begin_block(u32::try_from(raw_bytes).map_err(|_| LzfseError::Limit)?)?;
-    lzvn(src, &mut out)?;
+    lzvn(src, &mut out, false)?;
     out.end_block()?;
     Ok(out.bytes)
 }
 
-/// Decode one LZVN block payload, which must end with its end-of-stream
-/// opcode exactly at the end of the payload.
-fn lzvn(src: &[u8], out: &mut Output) -> Result<()> {
+/// Decode one LZVN payload up to its end-of-stream opcode, which a block
+/// must end with exactly, padding included. A decmpfs chunk drops the
+/// padding when its bytes round its stored size.
+fn lzvn(src: &[u8], out: &mut Output, block: bool) -> Result<()> {
     let mut at = 0usize;
     let mut distance = 0usize;
     // Each opcode needs its operands, its literals and one more byte (the
@@ -710,7 +711,7 @@ fn lzvn(src: &[u8], out: &mut Output) -> Result<()> {
         let op = *src.get(at).ok_or(LzfseError::Truncated)?;
         let (operands, literals, length) = match opcode(op) {
             Opcode::EndOfStream => {
-                if src.len() - at != 8 {
+                if block && src.len() - at != 8 {
                     return Err(LzfseError::Malformed("LZVN end of stream"));
                 }
                 return Ok(());
@@ -808,6 +809,9 @@ mod tests {
         assert_eq!(decode_lzvn(&stream, 6).unwrap(), b"abcabc");
         assert!(decode_lzvn(&stream, 7).is_err());
         assert!(decode_lzvn(&stream, 5).is_err());
+        // A decmpfs chunk may stop at the opcode, without the padding.
+        let chunk = [0xe3, b'a', b'b', b'c', 0b00_000_111, 3, 0, 0x06];
+        assert_eq!(decode_lzvn(&chunk, 6).unwrap(), b"abcabc");
     }
 
     #[test]
