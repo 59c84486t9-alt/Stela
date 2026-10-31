@@ -2,7 +2,7 @@
 // Copyright (C) 2005-2014, 2018-2026 Intel Corporation
 // Copyright (C) 2013-2015 Intel Mobile Communications GmbH
 // Copyright (C) 2015-2017 Intel Deutschland GmbH
-//! Pure initial non-QoS new-TX-API command serialization. This is not a
+//! New-TX-API command serialization for non-QoS and QoS frames. This is not a
 //! station/key/regulatory lease, DMA publication or proof of transmission.
 use super::{
     command::{FIRST_TB_BYTES, Tfd},
@@ -12,6 +12,7 @@ use super::{
 use alloc::vec::Vec;
 pub mod queue;
 pub mod response;
+pub mod ring;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
@@ -80,6 +81,7 @@ pub struct Prepared {
     command_and_mac: Vec<u8>,
     payload: Vec<u8>,
     mpdu_bytes: u16,
+    header_bytes: usize,
     host_rate: Option<u32>,
 }
 /// Complete source command/notification consistency for the admitted initial
@@ -125,15 +127,20 @@ impl Prepared {
         parameters: Parameters,
     ) -> Result<Self, Error> {
         rate_format_2(fw, family)?;
-        // Explicit bounded initial profile: full 24-byte non-QoS MAC header,
-        // ordinary ToDS data or management; no fragmentation, MFP, checksum,
-        // aggregation, four-address, HT-control or host-generated crypto bytes.
+        // A 24-byte management or non-QoS header, or a 26-byte QoS one: ordinary
+        // ToDS data or management; no fragmentation, checksum, aggregation,
+        // four-address or HT-control. The firmware adds any IV and MIC.
         if !(24..=4096).contains(&mpdu.len()) {
             return Err(Error::FrameLength);
         }
         let fc = u16::from_le_bytes(mpdu[..2].try_into().unwrap());
-        let data = fc & 0x00fc == 0x0008;
+        let qos = fc & 0x00fc == 0x0088;
+        let data = fc & 0x00fc == 0x0008 || qos;
         let management = fc & 0x000c == 0;
+        let header_bytes = if qos { 26 } else { 24 };
+        if mpdu.len() < header_bytes {
+            return Err(Error::FrameLength);
+        }
         if fc & 3 != 0
             || fc & 0x8000 != 0
             || !(data || management)
@@ -145,9 +152,7 @@ impl Prepared {
         if fc & 0x0400 != 0 || mpdu[22] & 0x0f != 0 {
             return Err(Error::Fragment);
         }
-        if parameters.firmware_encryption != (fc & 0x4000 != 0)
-            || (management && parameters.firmware_encryption)
-        {
+        if parameters.firmware_encryption != (fc & 0x4000 != 0) {
             return Err(Error::Encryption);
         }
         let use_host = parameters.station_authorized.is_none()
@@ -165,22 +170,26 @@ impl Prepared {
         let flags = u16::from(use_host) | if parameters.firmware_encryption { 0 } else { 2 };
         let mut bytes = alloc::vec![0; if family == Family::Ax200 {20} else {28}];
         bytes[..2].copy_from_slice(&(mpdu.len() as u16).to_le_bytes());
+        // `iwl_mvm_tx_csum`: the MAC header's length in words, and the padding
+        // the transport adds after a header of odd words.
+        let offload = (header_bytes as u16 / 2) << 8 | u16::from(qos) << 13;
         if family == Family::Ax200 {
-            bytes[2..4].copy_from_slice(&0x0c00u16.to_le_bytes());
+            bytes[2..4].copy_from_slice(&offload.to_le_bytes());
             bytes[4..8].copy_from_slice(&u32::from(flags).to_le_bytes());
         } else {
             bytes[2..4].copy_from_slice(&flags.to_le_bytes());
-            bytes[4..8].copy_from_slice(&0x0c00u32.to_le_bytes());
+            bytes[4..8].copy_from_slice(&u32::from(offload).to_le_bytes());
         }
         // DRAM security info (8..16) is firmware-owned storage, not an observed
         // PN or host seed. AX210 reserved tail (20..28) stays zero.
         bytes[16..20].copy_from_slice(&rate.unwrap_or(0).to_le_bytes());
-        bytes.extend(&mpdu[..24]);
+        bytes.extend(&mpdu[..header_bytes]);
         Ok(Self {
             family,
             command_and_mac: bytes,
-            payload: mpdu[24..].to_vec(),
+            payload: mpdu[header_bytes..].to_vec(),
             mpdu_bytes: mpdu.len() as u16,
+            header_bytes,
             host_rate: rate,
         })
     }
@@ -204,6 +213,13 @@ impl Prepared {
         let mut command = alloc::vec![0x1c, 0];
         command.extend(sequence.to_le_bytes());
         command.extend(&self.command_and_mac);
+        // `iwl_txq_gen2_build_tx`: TB1 ends on a dword; the device skips the
+        // pad after a QoS header.
+        command.resize(
+            FIRST_TB_BYTES + (command.len() - FIRST_TB_BYTES).next_multiple_of(4),
+            0,
+        );
+        debug_assert!(self.header_bytes <= command.len());
         Ok(Encoded {
             family: self.family,
             queue,

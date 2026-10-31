@@ -69,10 +69,10 @@ struct Guard<'g, 'p, 'a, Q: BootIo, B: BiosIo> {
 // source basic response masks0xf/0x15, long preamble, no associated peer or HT
 // transmit configuration and no data queues. The private legacy-peer owner
 // may additionally program only a finite NON_HT rate bitmap at20MHz. The
-// selected MLD continuation may publish one empty scheduler queue for that
-// station, with invalid TFDs and no frame/rate/association change.
-// This policy still admits no frame publication. SET_LINK/HR2 calibration
-// apply to every such source legacy rate under the same original board/MCC.
+// selected MLD continuation adds that station's scheduler queues and publishes
+// its frames and association configuration, every firmware command and TX
+// descriptor under these same leases. SET_LINK/HR2 calibration apply to every
+// such source legacy rate under the same original board/MCC.
 // Every enabled response/configured rate is checked against the
 // original OS lease at publication; restrictive revocation remains armed until
 // unbind/stop under unsafe begin_binding's service contract.
@@ -132,7 +132,7 @@ pub(super) unsafe fn publish<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy>(
     unsafe { publish_legacy(power, command.id, &command.bytes, 0, source) }
 }
 /// The private legacy peer may additionally configure a finite NON_HT rate
-/// bitmap. This admits no frame or queue publication and no modern rates.
+/// bitmap. This command publishes no frame.
 /// Every source-enabled cold response and configured rate is held under the
 /// same provider pair; the SET_LINK applies to all these rates.
 pub(super) unsafe fn publish_legacy<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy>(

@@ -224,7 +224,7 @@ fn exercise(bytes: &[u8]) {
     unsafe { queue.advance(&source) }.unwrap();
     queue.replenish_completed_receive().unwrap();
     assert_eq!(queue.phase(), Ax200ManagementQueuePhase::WaitingRemove);
-    assert!(!queue.memory.as_ref().unwrap().released());
+    assert!(queue.rings[0].1.uncertain());
     queue = match queue.into_binding() {
         Err(owner) => *owner,
         Ok(_) => panic!("queue escaped before remove"),
@@ -241,7 +241,7 @@ fn exercise(bytes: &[u8]) {
         unsafe { queue.advance(&source) }.unwrap(),
         Ax200ManagementQueuePhase::WaitingStationRemove
     );
-    assert!(queue.memory.as_ref().unwrap().released());
+    assert!(queue.rings.is_empty());
     assert_eq!(native.domain.records.lock().unwrap().live.len(), baseline);
     queue = match queue.into_binding() {
         Err(owner) => *owner,
@@ -397,7 +397,7 @@ fn scheduler_map_invalidation_failure_after_successful_stop_keeps_original_peer_
         boot(&queue.peer.as_ref().unwrap().binding.power.phy.scan).state,
         State::Stopped
     );
-    assert!(queue.memory.as_ref().unwrap().uncertain());
+    assert!(queue.rings[0].1.uncertain());
     let live = native.domain.records.lock().unwrap().live.len();
     assert_eq!(live, 4);
     drop(queue);
@@ -453,7 +453,13 @@ fn missing_scheduler_add_or_remove_ack_freezes_extra_dma_and_parent_through_fail
         // SAFETY: the fixture's `source` hands out fresh exclusive pages for its sole simulated
         // requester domain.
         assert_eq!(unsafe { queue.advance(&source) }, Err(error.clone()));
-        assert!(queue.memory.as_ref().unwrap().uncertain());
+        assert!(
+            queue
+                .memory
+                .as_ref()
+                .is_some_and(|memory| memory.uncertain())
+                || queue.rings[0].1.uncertain()
+        );
         queue = match queue.into_binding() {
             Err(owner) => *owner,
             Ok(_) => panic!("missing scheduler ack released peer"),

@@ -107,7 +107,6 @@ fn bounded_profile_preserves_header_sequence_and_refuses_unrepresented_effects()
     }
     for (fc, error) in [
         (0x109, Error::FrameControl),
-        (0x188, Error::FrameControl),
         (0x308, Error::FrameControl),
         (0x208, Error::FrameControl),
         (0x8108, Error::FrameControl),
@@ -164,10 +163,38 @@ fn bounded_profile_preserves_header_sequence_and_refuses_unrepresented_effects()
         Prepared::prepare(&fw, Family::Ax200, &f, p).unwrap_err(),
         Error::Encryption
     );
-    assert_eq!(
-        Prepared::prepare(&fw, Family::Ax200, &frame(false, true, 24, 0), p).unwrap_err(),
-        Error::Encryption
-    );
+    assert!(Prepared::prepare(&fw, Family::Ax200, &frame(false, true, 24, 0), p).is_ok());
+}
+#[test]
+fn a_qos_header_carries_its_length_and_the_padded_tb1_iwl_txq_gen2_build_tx_maps() {
+    for family in [Family::Ax200, Family::Ax210] {
+        let b = firmware(&rows(family));
+        let fw = Firmware::parse(&b).unwrap();
+        let mut mpdu = alloc::vec![7; 60];
+        mpdu[..2].copy_from_slice(&0x0188u16.to_le_bytes());
+        mpdu[22] = 0;
+        assert_eq!(
+            Prepared::prepare(&fw, family, &mpdu[..25], parameters()).unwrap_err(),
+            Error::FrameLength
+        );
+        let plan = Prepared::prepare(&fw, family, &mpdu, parameters()).unwrap();
+        let offload = if family == Family::Ax200 { 2 } else { 4 };
+        assert_eq!(
+            u16::from_le_bytes(
+                plan.command_and_mac()[offload..offload + 2]
+                    .try_into()
+                    .unwrap()
+            ),
+            0x2d00
+        );
+        assert_eq!(plan.payload(), &mpdu[26..]);
+        let encoded = plan.encode(3, 1).unwrap();
+        assert_eq!(encoded.second_tb().len() % 4, 0);
+        assert_eq!(
+            &encoded.second_tb()[encoded.second_tb().len() - 2..],
+            &[0, 0]
+        );
+    }
 }
 #[test]
 fn source_short_header_full_queue_echo_and_exact_three_dma_ranges() {
