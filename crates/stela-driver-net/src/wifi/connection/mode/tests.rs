@@ -113,6 +113,28 @@ fn an_unrestricted_vht_ap_associates_at_its_80_mhz() {
 }
 
 #[test]
+fn a_country_without_puncturing_leaves_only_whole_channels_usable() {
+    let station = elements(Role::Station, &[12], true, [0; 5], false);
+    let local = Capabilities::parse(Band::Ghz5, Role::Station, &station).unwrap();
+    let whole = ChannelDefinition {
+        control: channel(36),
+        width: Width::Mhz80,
+        center1_mhz: 5210,
+        center2_mhz: None,
+        punctured: 0,
+    };
+    let punctured = ChannelDefinition {
+        punctured: 4,
+        ..whole
+    };
+    let channels = domain(|_| NO_PUNCTURING);
+    assert!(Channels(&channels).usable(&local, &whole, Mode::Vht, DISABLED));
+    assert!(!Channels(&channels).usable(&local, &punctured, Mode::Vht, DISABLED));
+    let channels = domain(|_| 0);
+    assert!(Channels(&channels).usable(&local, &punctured, Mode::Vht, DISABLED));
+}
+
+#[test]
 fn regulatory_flags_downgrade_the_channel_and_vht_to_ht() {
     // No 80 MHz: VHT at 40 MHz is HT.
     assert_eq!(
