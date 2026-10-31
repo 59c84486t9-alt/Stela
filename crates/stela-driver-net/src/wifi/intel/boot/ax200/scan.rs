@@ -26,6 +26,14 @@ pub use phy::{
 pub use wire::Probe;
 static NEXT_CONTEXT: crate::wifi::Identities = crate::wifi::Identities::new();
 const MAX_SCAN_US: u64 = 30_000_000;
+/// `IWL_UCODE_TLV_CAPA_PASSIVE_6GHZ_SCAN`.
+const PASSIVE_SIX_GHZ: u32 = 58;
+/// `IWL_MLD_6GHZ_PASSIVE_SCAN_TIMEOUT` and `_ASSOC_TIMEOUT`: a passive pass
+/// waits this long for the last one, and is free this long after a reset.
+const PASSIVE_SIX_GHZ_REST_US: u64 = 3000 * 1_000_000;
+const PASSIVE_SIX_GHZ_FREE_US: u64 = 60 * 1_000_000;
+/// `IWL_MLD_6GHZ_PASSIVE_SCAN_MIN_CHANS`.
+const PASSIVE_SIX_GHZ_CHANNELS: usize = 4;
 /// `IWL_UCODE_TLV_FLAGS_EBS_SUPPORT`.
 const EBS_SUPPORT: u32 = 1 << 25;
 /// `IWL_UCODE_TLV_CAPA_DS_PARAM_SET_IE_SUPPORT`.
@@ -166,6 +174,9 @@ pub struct Ax200Scan<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> {
     first_error: Option<Ax200ScanError>,
     /// A scan's EBS went wrong, `last_ebs_failed`.
     ebs_failed: bool,
+    /// `last_start_time_jiffies` and `last_6ghz_passive_jiffies`.
+    started_us: u64,
+    last_passive_six_ghz: Option<u64>,
 }
 impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Mac<'a, Q, B, O> {
     /// Attach the same live OS regulatory source to the original unbound MAC.
@@ -208,6 +219,7 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Mac<'a, Q, B, O> {
         let Some(revision) = self.country.selection_revision() else {
             return Err(Box::new(self));
         };
+        let started_us = self.country.board.scan.mcc.setup.options.clock.now_us();
         Ok(Ax200Scan {
             mac: self,
             phase: Ax200ScanPhase::NotStarted,
@@ -231,6 +243,8 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Mac<'a, Q, B, O> {
             abort_requested: false,
             first_error: None,
             ebs_failed: false,
+            started_us,
+            last_passive_six_ghz: None,
         })
     }
 }
@@ -274,6 +288,29 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Scan<'_, Q, B, O> {
             })
             .collect()
     }
+    /// `iwl_mld_scan_6ghz_passive_scan`, whose owner is never associated: a
+    /// wildcard scan of enough channels listens where the device has 6 GHz
+    /// channels and no rule opens any.
+    fn passive_six_ghz(&mut self, request: &protocol::Request) -> bool {
+        let now = self.mac.country.board.scan.mcc.setup.options.clock.now_us();
+        let rested = self
+            .last_passive_six_ghz
+            .is_none_or(|at| now.saturating_sub(at) >= PASSIVE_SIX_GHZ_REST_US);
+        let free = now.saturating_sub(self.started_us) < PASSIVE_SIX_GHZ_FREE_US;
+        if !(rested || free)
+            || request.channels().len() < PASSIVE_SIX_GHZ_CHANNELS
+            || !request.ssids().iter().any(|ssid| ssid.is_empty())
+            || self.channels().iter().any(|ch| ch.band == Band::Ghz6)
+        {
+            return false;
+        }
+        self.mac.country.scan_policy_parts().is_some_and(|parts| {
+            parts.channels.iter().any(|observation| {
+                observation.channel.band == crate::wifi::intel::mcc::channel::Band::Ghz6
+            })
+        })
+    }
+
     /// The same channels with the regulatory flags their firmware
     /// restrictions give them, and the country's word on puncturing.
     pub fn regulated_channels(&mut self) -> Vec<(Channel, u32)> {
@@ -576,6 +613,7 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Scan<'_, Q, B, O> {
         if !(1..=MAX_SCAN_US).contains(&budget_us) {
             return Err(Ax200ScanError::UnsupportedRequest);
         }
+        let passive_six_ghz = self.passive_six_ghz(&request);
         self.mac
             .country
             .check_selection()
@@ -602,6 +640,7 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Scan<'_, Q, B, O> {
                     .firmware
                     .flags()
                     .is_some_and(|flags| flags & EBS_SUPPORT != 0),
+            passive_six_ghz: passive_six_ghz && boot.firmware.supports_capability(PASSIVE_SIX_GHZ),
         };
         // Capture every already-completed RB before admitting a new request.
         // This exclusive owner never rearms inside the loop, so the real fixed
@@ -663,6 +702,7 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Scan<'_, Q, B, O> {
         let scan_ticket = &mut self.scan_ticket;
         let phase = &mut self.phase;
         let command_bytes = &mut self.command_bytes;
+        let last_passive_six_ghz = &mut self.last_passive_six_ghz;
         // SAFETY: exact admission-owned immutable request is encoded inside the
         // original hardware+OS guard pair. Scanner is marked submitted
         // before HCMD descriptor visibility, including an uncertain failure.
@@ -689,6 +729,9 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Scan<'_, Q, B, O> {
                     .map_err(Ax200ScanError::Protocol)?;
                 *phase = Ax200ScanPhase::WaitingStart;
                 *command_bytes = Some(bytes);
+                if abilities.passive_six_ghz {
+                    *last_passive_six_ghz = Some(now);
+                }
                 // SAFETY: same exact request and kept native page contract.
                 guard
                     .submit(wire::REQUEST, command_bytes.as_deref().unwrap(), source)

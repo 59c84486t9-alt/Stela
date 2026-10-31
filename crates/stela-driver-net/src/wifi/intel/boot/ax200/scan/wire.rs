@@ -27,6 +27,9 @@ pub(super) struct Abilities {
     pub(super) fixed_antenna: bool,
     /// `iwl_mld_scan_use_ebs`: it may leave a channel it finds quiet early.
     pub(super) ebs: bool,
+    /// `enable_6ghz_passive`: a scan of 2.4 and 5 GHz also listens on the 6 GHz
+    /// channels no rule opens yet, for what they say of where the device is.
+    pub(super) passive_six_ghz: bool,
 }
 /// Whether a scan's EBS status rules EBS out of later scans.
 pub(super) fn energy_based_failed(status: u8) -> bool {
@@ -110,6 +113,12 @@ const DONT_TOGGLE_ANTENNA: u8 = 1 << 2;
 const UNSOLICITED_PROBE_RESPONSE: u32 = 1 << 24;
 const PSC_NO_LISTEN: u32 = 1 << 25;
 const CHANNEL_FORCE_PASSIVE: u32 = 1 << 26;
+/// `IWL_UMAC_SCAN_GEN_FLAGS_V2_6GHZ_PASSIVE_SCAN`.
+const PASSIVE_SIX_GHZ: u16 = 1 << 13;
+/// The first and the distance between 6 GHz's preferred scanning channels.
+const FIRST_PSC: u16 = 5;
+const PSC_STEP: u16 = 16;
+const PSC_COUNT: usize = 15;
 /// `IEEE80211_RNR_TBTT_PARAMS_PSD_RESERVED`.
 const PSD_RESERVED: i8 = -128;
 const PRIORITY_EXT_6: u32 = 6;
@@ -229,7 +238,13 @@ pub(super) fn encode(
     }
     let ssids = request.ssids();
     let directed = ssids.first().is_some_and(|ssid| !ssid.is_empty());
+    let passive_six_ghz = abilities.passive_six_ghz
+        && !six_ghz
+        && request.channels().len() + PSC_COUNT <= layout.channels;
     let mut flags = PASS_ALL | ADAPTIVE_DWELL;
+    if passive_six_ghz {
+        flags |= PASSIVE_SIX_GHZ;
+    }
     if ssids.is_empty() {
         flags |= FORCE_PASSIVE;
     } else if ssids.len() == 1 && directed {
@@ -267,6 +282,9 @@ pub(super) fn encode(
         for (index, &channel) in request.channels().iter().enumerate() {
             put_channel(&mut bytes, index, channel, bitmap, version);
         }
+        if passive_six_ghz {
+            put_passive_six_ghz(&mut bytes, request.channels().len(), version);
+        }
     }
     bytes[layout.periodic + 2] = 1; // one ordinary iteration, interval/delay zero
     bytes[layout.probe + 2..layout.probe + 4].copy_from_slice(&(HEADER as u16).to_le_bytes());
@@ -303,6 +321,7 @@ pub(super) fn encode_internal(
         hidden_six_ghz: false,
         fixed_antenna: false,
         ebs: false,
+        passive_six_ghz: false,
     };
     let mut bytes = encode(request, version, local, None, abilities)?;
     bytes[4..8].copy_from_slice(&PRIORITY_EXT_4.to_le_bytes());
@@ -343,6 +362,24 @@ fn put_channel(bytes: &mut [u8], index: usize, channel: Channel, flags: u32, ver
     bytes[at..at + 4].copy_from_slice(&flags.to_le_bytes());
     bytes[at + 4] = channel.number as u8;
     bytes[at + 6] = 1;
+}
+
+/// `iwl_mld_scan_cmd_set_chan_params`' passive channels after `count` others.
+fn put_passive_six_ghz(bytes: &mut [u8], count: usize, version: u8) {
+    for index in 0..PSC_COUNT {
+        let number = FIRST_PSC + index as u16 * PSC_STEP;
+        let channel = Channel {
+            band: Band::Ghz6,
+            number,
+            frequency_mhz: 5950 + 5 * number,
+        };
+        let at = count + index;
+        put_channel(bytes, at, channel, 0, version);
+        if version >= BAND_IN_FLAGS {
+            bytes[CHANNELS + 4 + at * CHANNEL_CONFIG_BYTES + 5] = PSD_RESERVED as u8;
+        }
+    }
+    bytes[CHANNELS + 1] = (count + PSC_COUNT) as u8;
 }
 
 /// The short SSIDs and BSSIDs a 6 GHz scan's channels index.
@@ -601,7 +638,37 @@ mod tests {
         hidden_six_ghz: false,
         fixed_antenna: false,
         ebs: false,
+        passive_six_ghz: false,
     };
+
+    #[test]
+    fn a_passive_six_ghz_pass_follows_the_channels_asked_for() {
+        let channel = Channel {
+            band: Band::Ghz2,
+            number: 1,
+            frequency_mhz: 2412,
+        };
+        let request = protocol::Request::new(vec![channel], Vec::new(), Vec::new()).unwrap();
+        let passive = Abilities {
+            passive_six_ghz: true,
+            ..MEASURED
+        };
+        let bytes = encode(&request, 17, LOCAL, None, passive).unwrap();
+        let flags = u16::from_le_bytes([bytes[GENERAL], bytes[GENERAL + 1]]);
+        assert_ne!(flags & PASSIVE_SIX_GHZ, 0);
+        assert_eq!(bytes[CHANNELS + 1], 16);
+        let last = CHANNELS + 4 + 15 * CHANNEL_CONFIG_BYTES;
+        assert_eq!(bytes[last + 4], 229);
+        assert_eq!(bytes[last + 5], PSD_RESERVED as u8);
+        assert_eq!(bytes[last + 6], 1);
+        let word = u32::from_le_bytes(bytes[last..last + 4].try_into().unwrap());
+        assert_eq!(word >> BAND_SHIFT, u32::from(PHY_BAND_6));
+        let bytes = encode(&request, 16, LOCAL, None, passive).unwrap();
+        let last = CHANNELS + 4 + 15 * CHANNEL_CONFIG_BYTES;
+        assert_eq!(bytes[last + 5], PHY_BAND_6);
+        let plain = encode(&request, 17, LOCAL, None, MEASURED).unwrap();
+        assert_eq!(plain[CHANNELS + 1], 1);
+    }
 
     #[test]
     fn a_scan_asks_for_ebs_when_it_may_and_a_failure_stops_it() {
@@ -805,6 +872,7 @@ mod tests {
             hidden_six_ghz: false,
             fixed_antenna: false,
             ebs: false,
+            passive_six_ghz: false,
             ds_parameters: true,
             tpc_report: true,
         };
@@ -814,6 +882,7 @@ mod tests {
             hidden_six_ghz: false,
             fixed_antenna: false,
             ebs: false,
+            passive_six_ghz: false,
             ds_parameters: false,
             tpc_report: false,
         };
