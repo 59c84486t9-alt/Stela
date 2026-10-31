@@ -2270,6 +2270,7 @@ dependencies = [
  "stela-crypto",
  "stela-driver-base",
  "stela-driver-core",
+ "tempfile",
  "triomphe",
  "zeroize",
 ]
