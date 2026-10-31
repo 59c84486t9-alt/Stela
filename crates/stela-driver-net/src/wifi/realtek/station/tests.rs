@@ -82,6 +82,10 @@ struct Air {
     quiet: bool,
     /// The AP takes no frame at all.
     gone: bool,
+    /// The AP's beacons keep its name to themselves.
+    hidden: bool,
+    /// The SSID of each probe.
+    probe_names: Vec<Vec<u8>>,
 }
 
 impl Air {
@@ -112,7 +116,18 @@ impl Air {
                 continue;
             }
             match bytes[0] {
-                0x40 => self.probed.extend(self.tuned.last().map(|tuned| tuned.0)),
+                0x40 => {
+                    let name = bytes[26..26 + usize::from(bytes[25])].to_vec();
+                    self.probed.extend(self.tuned.last().map(|tuned| tuned.0));
+                    let here = self.tuned.last().is_some_and(|t| t.0 == self.channel);
+                    if self.hidden && here && name == SSID {
+                        let mut response = beacon(self.channel as u8);
+                        response[0] = 0x50;
+                        response[4..10].copy_from_slice(&LOCAL);
+                        self.hear(response, false);
+                    }
+                    self.probe_names.push(name);
+                }
                 0xb0 => self.hear(management(0xb0, &[0, 0, 2, 0, 0, 0]), false),
                 0x00 => {
                     let mut body = vec![0x11, 0, 0, 0, 1, 0xc0];
@@ -144,7 +159,12 @@ impl Device for Model {
         assert_eq!(eirp_mbm, 2000);
         air.tuned.push((number, scanning));
         if scanning && number == air.channel {
-            air.hear(beacon(number as u8), false);
+            let mut heard = beacon(number as u8);
+            if air.hidden {
+                heard.drain(38..38 + SSID.len());
+                heard[37] = 0;
+            }
+            air.hear(heard, false);
         }
         Ok(())
     }
@@ -457,6 +477,30 @@ fn a_scan_probes_where_it_may_and_only_listens_where_it_may_not() {
     assert!(air.tuned.contains(&(36, true)) && air.tuned.contains(&(48, true)));
     assert_eq!(air.tuned.last(), Some(&(36, false)));
     assert_eq!(air.beacon_filters.first(), Some(&false));
+}
+
+#[test]
+fn a_network_no_scan_found_is_asked_for_by_name() {
+    let (mut wifi, model) = wifi(&OPEN, 1);
+    model.0.borrow_mut().hidden = true;
+    assert!(run(&mut wifi, &model, |wifi, _| {
+        wifi.radio().station().phase() == Peering::Associated
+    }));
+    let air = model.0.borrow();
+    let first_named = air
+        .probe_names
+        .iter()
+        .position(|name| name == SSID)
+        .unwrap();
+    assert!(first_named > 0, "the first scan keeps the name to itself");
+    assert!(air.probe_names[..first_named].iter().all(Vec::is_empty));
+}
+
+#[test]
+fn a_network_in_plain_sight_is_never_named() {
+    let (_, model) = connected();
+    let air = model.0.borrow();
+    assert!(air.probe_names.iter().all(Vec::is_empty));
 }
 
 #[test]

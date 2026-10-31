@@ -1391,19 +1391,19 @@ impl<D: Device> Rtl8822c<D> {
         }
     }
 
-    fn hear(&mut self, bss: Bss, now: u64) {
-        let observation = Arc::new(NativeBssObservation { bss });
-        match self
+    fn hear(&mut self, mut bss: Bss, now: u64) {
+        let known = self
             .observed
             .iter_mut()
-            .find(|heard| heard.observation.bss().bssid == observation.bss().bssid)
-        {
+            .find(|heard| heard.observation.bss().bssid == bss.bssid);
+        match known {
             Some(heard) => {
-                heard.observation = observation;
+                bss.keep_name_of(heard.observation.bss());
+                heard.observation = Arc::new(NativeBssObservation { bss });
                 heard.at = now;
             }
             None => self.observed.push(Heard {
-                observation,
+                observation: Arc::new(NativeBssObservation { bss }),
                 at: now,
             }),
         }

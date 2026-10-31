@@ -43,6 +43,24 @@ pub struct Bss {
     pub elements: Vec<u8>,
 }
 
+impl Bss {
+    /// `cfg80211`'s `cmp_hidden_bss`: a beacon that keeps the SSID to itself,
+    /// by leaving it out, empty or all zeros.
+    pub fn hides_ssid(&self) -> bool {
+        self.ssid
+            .as_deref()
+            .is_none_or(|ssid| ssid.iter().all(|&byte| byte == 0))
+    }
+
+    /// `cfg80211_update_hidden_bsses` in one record: what a hidden AP's probe
+    /// response named stands through the beacons that follow it.
+    pub fn keep_name_of(&mut self, earlier: &Self) {
+        if self.hides_ssid() && !earlier.hides_ssid() {
+            self.ssid.clone_from(&earlier.ssid);
+        }
+    }
+}
+
 pub(super) fn elements(mut bytes: &[u8]) -> Result<Vec<(u8, &[u8])>, Error> {
     let mut output = Vec::new();
     while !bytes.is_empty() {
