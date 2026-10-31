@@ -412,49 +412,7 @@ fn an_ap_mld_association_names_both_mlds_in_its_records() {
 /// pairs; the link's records and interface leave with the association.
 #[test]
 fn an_ap_mld_association_adds_its_other_link_on_an_interface_of_its_own() {
-    let (mut link, model, _) = mld_association(|bss, request| {
-        let mut elements = bss.elements.clone();
-        let mut rest = &mut elements[..];
-        while !rest.is_empty() {
-            let n = usize::from(rest[1]);
-            let (element, next) = rest.split_at_mut(2 + n);
-            match (element[0], element.get(2)) {
-                (61, _) => element[2] = 52,
-                (192, _) => element[3] = 58,
-                (255, Some(106)) => element[9] = 58,
-                _ => {}
-            }
-            rest = next;
-        }
-        let observation = Arc::new(station::NativeBssObservation {
-            bss: scan::result::Bss {
-                bssid: OTHER,
-                transmitter: OTHER,
-                profile: None,
-                channel: CHANNEL_52,
-                elements: elements.clone(),
-                ..bss.clone()
-            },
-        });
-        let mut answer = vec![0x11, 0, 0, 0];
-        answer.extend_from_slice(&elements);
-        (
-            vec![station::multi_link::Link {
-                link_id: 1,
-                local: OTHER_LINK,
-                observation,
-                request: request.clone(),
-            }],
-            vec![multi_link::Profile {
-                link_id: 1,
-                complete: true,
-                address: Some(OTHER),
-                bss_parameters_change_count: Some(0),
-                body: answer,
-                ..multi_link::Profile::default()
-            }],
-        )
-    });
+    let (mut link, model, _) = two_link_association();
     let before = model.response.lock().unwrap().client_commands.len();
     link.configure().unwrap();
     let commands = model.response.lock().unwrap().client_commands[before..].to_vec();
@@ -605,5 +563,92 @@ fn an_ap_mld_association_adds_its_other_link_on_an_interface_of_its_own() {
             .any(|packet| packet[34] == 1 && packet[57] == 1 && packet[56] == 0)
     );
     assert!(!model.response.lock().unwrap().keys.contains_key(&2));
+    retire(&mut link, &model);
+}
+
+fn two_link_association() -> (TestLink, Model, scan::result::Bss) {
+    mld_association(|bss, request| {
+        let mut elements = bss.elements.clone();
+        let mut rest = &mut elements[..];
+        while !rest.is_empty() {
+            let n = usize::from(rest[1]);
+            let (element, next) = rest.split_at_mut(2 + n);
+            match (element[0], element.get(2)) {
+                (61, _) => element[2] = 52,
+                (192, _) => element[3] = 58,
+                (255, Some(106)) => element[9] = 58,
+                _ => {}
+            }
+            rest = next;
+        }
+        let observation = Arc::new(station::NativeBssObservation {
+            bss: scan::result::Bss {
+                bssid: OTHER,
+                transmitter: OTHER,
+                profile: None,
+                channel: CHANNEL_52,
+                elements: elements.clone(),
+                ..bss.clone()
+            },
+        });
+        let mut answer = vec![0x11, 0, 0, 0];
+        answer.extend_from_slice(&elements);
+        (
+            vec![station::multi_link::Link {
+                link_id: 1,
+                local: OTHER_LINK,
+                observation,
+                request: request.clone(),
+            }],
+            vec![multi_link::Profile {
+                link_id: 1,
+                complete: true,
+                address: Some(OTHER),
+                bss_parameters_change_count: Some(0),
+                body: answer,
+                ..multi_link::Profile::default()
+            }],
+        )
+    })
+}
+
+#[test]
+fn protected_deauthentication_on_second_link_ends_association() {
+    let (mut link, model, _) = two_link_association();
+    link.configure().unwrap();
+    let epoch = link.station().association_epoch().unwrap();
+    link.install_key(true, 0, &[1; 16], ReplaySeed::ZERO)
+        .unwrap();
+    link.install_key(false, 2, &[0x44; 16], ReplaySeed::ZERO)
+        .unwrap();
+    link.install_link_key(1, 1, &[0x46; 16], ReplaySeed::ZERO)
+        .unwrap();
+    drop(drain_notices(&mut link));
+    // SAFETY: this model owns the handshake keys; all prior key users and
+    // notices have drained before the IGTK installation.
+    unsafe { link.install_management_key(epoch, 4, &[0x55; 16], PacketNumber::new(100).unwrap()) }
+        .unwrap();
+    link.authorize_port(epoch).unwrap();
+    assert!(link.carrier());
+
+    let mut deauth = response(0x40c0, &[7, 0]);
+    deauth[4..10].copy_from_slice(&OTHER_LINK.0);
+    deauth[10..16].copy_from_slice(&OTHER.0);
+    deauth[16..22].copy_from_slice(&OTHER.0);
+    let mut bytes = incoming_bytes(&deauth, Some((2, 0, 1)), false);
+    bytes[13] = 52;
+    device_receive(&model.queues[&0xd4520], &bytes, true, 0);
+    link.service().unwrap();
+    assert!(!link.carrier());
+    assert_eq!(link.station().phase(), station::Phase::Disconnecting);
+    assert!(drain_notices(&mut link).iter().any(|notice| matches!(
+        &notice.event,
+        LinkEvent::Controller(Event::ProtectedManagement(rx))
+            if rx.frame().header().control & 0x00fc == 0x00c0 && rx.body() == [7, 0]
+    )));
+    for _ in 0..4 {
+        finish_tx(&model);
+        link.service().unwrap();
+    }
     retire(&mut link, &model);
 }
