@@ -199,7 +199,10 @@ impl Device for Model {
         Ok(())
     }
     fn set_power_save(&mut self, on: bool) -> Result<(), String> {
-        self.0.borrow_mut().sleeps.push(on);
+        let mut air = self.0.borrow_mut();
+        if air.sleeps.last().copied().unwrap_or(false) != on {
+            air.sleeps.push(on);
+        }
         Ok(())
     }
     fn watchdog(&mut self, scanning: bool, stbc: bool) -> Result<Watched, String> {

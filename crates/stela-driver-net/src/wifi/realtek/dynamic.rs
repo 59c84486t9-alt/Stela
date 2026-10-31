@@ -57,8 +57,18 @@ const COVERAGE_MAX: u8 = 0x2a;
 const COVERAGE_MID: u8 = 0x26;
 /// `DIG_CVRG_MIN`, where a scan listens widest.
 pub const MAX_COVERAGE: u8 = 0x1c;
-/// `RTW_LPS_THRESHOLD`.
+/// `RTW_LPS_THRESHOLD`, and what `rtw_watch_dog_work` calls busy.
 const LPS_THRESHOLD: u32 = 50;
+const BUSY_THRESHOLD: u32 = 100;
+
+/// How a watchdog period's frames count.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Traffic {
+    /// `ps_active`.
+    pub sleepless: bool,
+    /// `RTW_FLAG_BUSY_TRAFFIC`.
+    pub busy: bool,
+}
 const RSSI_GAIN_OFFSET: u8 = 15;
 /// `DECLARE_EWMA(rssi, 10, 16)`.
 const AVERAGE_PRECISION: u32 = 10;
@@ -686,16 +696,28 @@ impl Dynamic {
         }
     }
 
-    /// `rtw_watch_dog_work`'s accounts of the period that ended, and whether
-    /// it was too busy for power save.
-    pub fn close_period(&mut self) -> bool {
+    /// `rtw_watch_dog_work`'s accounts of the period that ended.
+    pub fn close_period(&mut self) -> Traffic {
         let tx_frames = core::mem::take(&mut self.tx_frames);
         let rx_frames = core::mem::take(&mut self.rx_frames);
         let tx = core::mem::take(&mut self.tx_bytes) >> MBPS_SHIFT;
         let rx = core::mem::take(&mut self.rx_bytes) >> MBPS_SHIFT;
         average_in(&mut self.tx_throughput, tx, THROUGHPUT_WEIGHT);
         average_in(&mut self.rx_throughput, rx, THROUGHPUT_WEIGHT);
-        tx_frames > LPS_THRESHOLD || rx_frames > LPS_THRESHOLD
+        Traffic {
+            sleepless: tx_frames > LPS_THRESHOLD || rx_frames > LPS_THRESHOLD,
+            busy: tx_frames > BUSY_THRESHOLD || rx_frames > BUSY_THRESHOLD,
+        }
+    }
+
+    /// `stats->tx_throughput` over `rx_throughput`.
+    pub fn transmitting(&self) -> bool {
+        self.tx_throughput > self.rx_throughput
+    }
+
+    /// `dm_info.min_rssi`.
+    pub fn min_rssi(&self) -> u8 {
+        self.min_rssi
     }
 
     /// `rtw_fw_update_wl_phy_info`.

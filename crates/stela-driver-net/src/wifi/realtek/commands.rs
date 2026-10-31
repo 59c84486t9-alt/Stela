@@ -23,6 +23,9 @@ const SCAN_RESULT: u8 = 0x38;
 const RESERVED_PAGES: u32 = 0;
 const POWER_MODE: u32 = 0x20;
 
+/// `C2H_BT_INFO` and `C2H_BT_MP_INFO`.
+const BT_INFO: u8 = 0x09;
+const BT_MP_INFO: u8 = 0x0b;
 /// `C2H_CCX_TX_RPT`.
 const CCX_TX_REPORT: u8 = 0x03;
 /// `C2H_RA_RPT`.
@@ -155,6 +158,10 @@ pub enum Report {
     },
     /// `rtw_fw_scan_result`: how crowded the scan found the air.
     Density(u8),
+    /// `rtw_coex_bt_info_notify`, of `length` bytes.
+    Bluetooth { bytes: [u8; 10], length: u8 },
+    /// `rtw_coex_info_response`.
+    BluetoothAnswer([u8; 8]),
     /// A report a station does not act on, by ID.
     Other(u8),
 }
@@ -179,6 +186,21 @@ impl Report {
                 mac_id: *payload.get(1)?,
             },
             SCAN_RESULT => Self::Density(*payload.first()?),
+            BT_INFO => {
+                let mut bytes = [0; 10];
+                let length = payload.len().min(bytes.len());
+                bytes[..length].copy_from_slice(&payload[..length]);
+                Self::Bluetooth {
+                    bytes,
+                    length: length as u8,
+                }
+            }
+            BT_MP_INFO => {
+                let mut answer = [0; 8];
+                let length = payload.len().min(answer.len());
+                answer[..length].copy_from_slice(&payload[..length]);
+                Self::BluetoothAnswer(answer)
+            }
             _ => Self::Other(id),
         })
     }
@@ -193,6 +215,17 @@ mod tests {
         assert_eq!(media_status(1, true), (0x0001_0101, 0));
         assert_eq!(default_port(0, 1), (0x0001_002c, 0));
         assert_eq!(reserved_pages(1, 3, 2), (0x0301_0000, 2));
+        assert_eq!(
+            Report::parse(&[9, 0, 1, 2, 3, 4, 5, 6, 7]),
+            Some(Report::Bluetooth {
+                bytes: [1, 2, 3, 4, 5, 6, 7, 0, 0, 0],
+                length: 7
+            })
+        );
+        assert_eq!(
+            Report::parse(&[0xb, 0, 1, 0, 0, 2]),
+            Some(Report::BluetoothAnswer([1, 0, 0, 2, 0, 0, 0, 0]))
+        );
         assert_eq!(power_mode(true, 0), (0x0121_0120, 0));
         assert_eq!(power_mode(false, 0), (0x0100_0020, 0xc00));
         let (message, mask) = ra_info(RateInfo {
@@ -244,7 +277,7 @@ mod tests {
                 acknowledged: true
             })
         );
-        assert_eq!(Report::parse(&[0x09, 0, 1]), Some(Report::Other(9)));
+        assert_eq!(Report::parse(&[0x45, 0, 1]), Some(Report::Other(0x45)));
         assert_eq!(Report::parse(&[3, 0, 1]), None);
     }
 }

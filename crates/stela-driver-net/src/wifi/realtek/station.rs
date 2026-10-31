@@ -143,8 +143,16 @@ pub trait Device {
     fn set_templates(&mut self, _templates: &templates::Templates) -> Result<(), String> {
         Ok(())
     }
-    /// `rtw_enter_lps` and `rtw_leave_lps`.
+    /// `rtw_enter_lps` and `rtw_leave_lps`, which each stand for being there.
     fn set_power_save(&mut self, _on: bool) -> Result<(), String> {
+        Ok(())
+    }
+    /// The beacons' interval and DTIM period.
+    fn set_beacon(&mut self, _interval_tu: u16, _dtim_period: u8) -> Result<(), String> {
+        Ok(())
+    }
+    /// A look at the Bluetooth arbiter's timers, at `now`.
+    fn coexist(&mut self, _now: u64) -> Result<(), String> {
         Ok(())
     }
     /// `rtw_watch_dog_work`'s traffic accounts, and unless `scanning` its work
@@ -478,8 +486,6 @@ pub struct Rtl8822c<D: Device> {
     /// A report's number, which the management frame it names may await.
     reporting: Option<u8>,
     port_open: bool,
-    /// `RTW_FLAG_LEISURE_PS`.
-    sleeping: bool,
     watchdog_at: u64,
     /// `rtwdev->watch_dog_cnt`.
     watchdogs: u32,
@@ -524,7 +530,6 @@ impl<D: Device> Rtl8822c<D> {
             report: 0,
             reporting: None,
             port_open: false,
-            sleeping: false,
             watchdog_at,
             watchdogs: 0,
             departing: None,
@@ -730,11 +735,7 @@ impl<D: Device> Rtl8822c<D> {
 
     /// `rtw_enter_lps` and `rtw_leave_lps`.
     fn power_save(&mut self, on: bool) -> Result<(), Error> {
-        if self.sleeping != on {
-            Self::hardware(self.device.set_power_save(on))?;
-            self.sleeping = on;
-        }
-        Ok(())
+        Self::hardware(self.device.set_power_save(on))
     }
 
     /// The width the link to `context` runs at.
@@ -1515,6 +1516,7 @@ impl<D: Device> Rtl8822c<D> {
     fn operate(&mut self) -> Result<(), Error> {
         let now = self.clock.now_us();
         self.take_incoming(now)?;
+        Self::hardware(self.device.coexist(now))?;
         self.watchdog(now)?;
         self.walk(now)?;
         self.release_expired(now);
@@ -1895,6 +1897,8 @@ impl<D: Device> Radio for Rtl8822c<D> {
             context.response().aid & 0x7ff,
             true,
         ))?;
+        let interval = context.beacon().beacon_interval;
+        Self::hardware(self.device.set_beacon(interval, context.dtim_period()))?;
         let wmm = context.negotiated().wmm.is_some();
         let aid = context.response().aid & 0x7ff;
         let band = context.channel().band;

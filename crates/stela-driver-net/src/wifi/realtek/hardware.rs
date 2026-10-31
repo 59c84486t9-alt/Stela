@@ -8,7 +8,7 @@
 use super::{
     bootstrap::{Native, Up},
     calibrate::Calibration,
-    coex::{self, Coex, Link},
+    coex::{Coex, Event, Order, Wifi},
     commands::{self, Report},
     descriptor::Packet,
     download,
@@ -40,9 +40,12 @@ use crate::{
 use alloc::{format, string::String, vec::Vec};
 use core::fmt::Debug;
 
-/// `REG_TCR`'s `BIT_PWRMGT_HWDATA_EN`.
+/// `REG_TCR`'s `BIT_PWRMGT_HWDATA_EN` and `BIT_TCR_UPDATE_TIMIE`.
 const REG_TCR: u32 = 0x604;
 const POWER_BIT_BY_HARDWARE: u32 = 1 << 7;
+const UPDATE_TIM_ELEMENT: u32 = 1 << 5;
+/// `REG_DTIM_COUNTER_ROOT`.
+const REG_DTIM_COUNTER_ROOT: u32 = 0x5a8;
 /// `LEAVE_LPS_TRY_CNT` and its 20 ms.
 const LEAVE_POWER_SAVE_TRIES: u32 = 5;
 const LEAVE_POWER_SAVE_WAIT_US: u64 = 20_000;
@@ -79,6 +82,8 @@ const GAIN_MASKS: [u32; 2] = [0x7f, 0x7f00];
 const REG_CCK_ENABLE: u32 = 0x1c3c;
 const CCK_BLOCK: u32 = 1 << 1;
 const REG_CCK_ALARMS: u32 = 0x1a5c;
+/// The word of `cck_ok_cnt` and `cck_err_cnt`.
+const REG_CCK_FRAMES: u32 = 0x2c04;
 const REG_OFDM_ALARMS: [u32; 5] = [0x2d04, 0x2d08, 0x2d0c, 0x2d10, 0x2d20];
 const REG_ALARM_RESET: u32 = 0x1a2c;
 const CCK_ALARM_RESET: u32 = 3 << 14;
@@ -112,11 +117,13 @@ fn failed<E: Debug>(step: &'static str) -> impl FnOnce(E) -> String {
 }
 
 /// What `definition`'s channels are to the PHY.
+/// The channel number of a frequency.
+fn number(frequency: u32) -> u8 {
+    let base = if frequency < 5000 { 2407 } else { 5000 };
+    ((frequency - base) / 5) as u8
+}
+
 fn geometry(definition: &ChannelDefinition) -> Result<Geometry, String> {
-    let number = |frequency: u32| {
-        let base = if frequency < 5000 { 2407 } else { 5000 };
-        ((frequency - base) / 5) as u8
-    };
     let primary = definition.control.number as u8;
     let center = number(definition.center1_mhz);
     let (width, forty, eighty) = match definition.width {
@@ -155,7 +162,19 @@ pub struct Hardware {
     calibrate: bool,
     calibration: Calibration,
     band: Band,
+    /// `hal.current_channel` and `current_band_width`.
+    channel: (u8, u8),
     connected: bool,
+    /// `RTW_FLAG_SCANNING`, `RTW_FLAG_BUSY_TRAFFIC` and `RTW_FLAG_LEISURE_PS`.
+    scanning: bool,
+    busy: bool,
+    asleep: bool,
+    /// `coex_stat->wl_beacon_interval`.
+    beacon_interval: u16,
+    /// `dm_info.cck_ok_cnt + cck_err_cnt`.
+    cck_frames: u32,
+    /// The clock as the last look at the arbiter read it.
+    now: u64,
     address: Mac,
     bssid: Mac,
     dynamic: Dynamic,
@@ -229,7 +248,14 @@ impl Hardware {
             calibrate: true,
             calibration,
             band: Band::Ghz2,
+            channel: (0, 0),
             connected: false,
+            scanning: false,
+            busy: false,
+            asleep: false,
+            beacon_interval: 0,
+            cck_frames: 0,
+            now: 0,
             address: mac,
             bssid: Mac([0; 6]),
             dynamic,
@@ -240,27 +266,52 @@ impl Hardware {
         })
     }
 
-    /// `rtw_coex_run_coex` for the link as it now stands.
-    fn run_coex(&mut self) -> Result<(), String> {
-        let link = Link {
-            five_ghz: self.band == Band::Ghz5,
+    /// One of rtw88's notifiers of the arbiter, and what it asks for.
+    fn arbitrate(&mut self, event: Event<'_>) -> Result<(), String> {
+        let wifi = Wifi {
             connected: self.connected,
+            scanning: self.scanning,
+            busy: self.busy,
+            transmitting: self.dynamic.transmitting(),
+            rssi: self.dynamic.min_rssi(),
+            cck_frames: self.cck_frames,
+            five_ghz: self.band == Band::Ghz5,
+            channel: self.channel.0,
+            width: self.channel.1,
+            beacon_interval: self.beacon_interval,
+            asleep: self.asleep,
         };
+        let now = self.now;
         let io = self.control.io().map_err(failed("registers"))?;
         // SAFETY: this worker owns the radio, and its frames wait for it.
-        let run = unsafe { self.coex.run(io, &self.report, link) }.map_err(failed("coex"))?;
-        if run.bluetooth_unscheduled {
-            self.limitations.push("Bluetooth's schedule on 2.4 GHz");
+        let run = unsafe { self.coex.notify(io, &self.report, now, wifi, event) }
+            .map_err(failed("coex"))?;
+        self.limitations.extend(run.limitation);
+        for order in run.orders {
+            match order {
+                Order::Command(command) => self
+                    .control
+                    .command(command)
+                    .map_err(failed("coex command"))?,
+                Order::Wake => self.set_power_save(false)?,
+            }
         }
-        self.commands(&run)
+        Ok(())
     }
 
-    fn commands(&mut self, run: &coex::Run) -> Result<(), String> {
-        for &command in &run.commands {
-            self.control
-                .command(command)
-                .map_err(failed("coex command"))?;
+    /// `rtw_leave_lps_core`'s wait for the power bit in frames to clear.
+    fn wait_for_power_save_to_end(&mut self) -> Result<(), String> {
+        let io = self.control.io().map_err(failed("registers"))?;
+        for _ in 0..LEAVE_POWER_SAVE_TRIES {
+            let control = io.read32(REG_TCR).map_err(failed("power save"))?;
+            if control & POWER_BIT_BY_HARDWARE == 0 {
+                return Ok(());
+            }
+            io.delay_us(LEAVE_POWER_SAVE_WAIT_US);
         }
+        set_mask(io, REG_TCR, POWER_BIT_BY_HARDWARE, 0).map_err(failed("power save"))?;
+        self.limitations
+            .push("firmware that did not leave power save in time");
         Ok(())
     }
 
@@ -270,6 +321,8 @@ impl Hardware {
         let io = self.control.io().map_err(failed("registers"))?;
         let cck_enabled = io.read32(REG_CCK_ENABLE).map_err(failed("alarms"))? & CCK_BLOCK != 0;
         let cck = io.read16(REG_CCK_ALARMS).map_err(failed("alarms"))?;
+        let frames = io.read32(REG_CCK_FRAMES).map_err(failed("alarms"))?;
+        self.cck_frames = (frames & 0xffff) + (frames >> 16);
         let mut counts = [0; 5];
         for (count, register) in counts.iter_mut().zip(REG_OFDM_ALARMS) {
             *count = io.read32(register).map_err(failed("alarms"))?;
@@ -457,11 +510,19 @@ impl Device for Hardware {
             .map_err(failed("transmit power"))?;
         self.phy = Some(programmed.into_phy());
         self.calibrate |= !scanning;
-        self.run_coex()
+        let width = match definition.width {
+            Width::Mhz40 => 1,
+            Width::Mhz80 => 2,
+            _ => 0,
+        };
+        self.channel = (number(definition.center1_mhz), width);
+        self.arbitrate(Event::Tuned { scanning })
     }
 
-    /// `rtw_chip_prepare_tx`: `rtw8822c_phy_calibration` once a channel needs it.
+    /// `rtw_ops_mgd_prepare_tx`, with `rtw8822c_phy_calibration` once a channel
+    /// needs it.
     fn prepare_transmit(&mut self) -> Result<(), String> {
+        self.arbitrate(Event::Connecting)?;
         if !core::mem::take(&mut self.calibrate) {
             return Ok(());
         }
@@ -503,12 +564,16 @@ impl Device for Hardware {
         }
         let (cck_bounds, address, bssid) = (self.cck_bounds, self.address, self.bssid);
         let dynamic = &mut self.dynamic;
+        let mut bluetooth = Vec::new();
         self.receive
             .poll(RECEIVE_BUDGET, |packet| {
                 let Some((item, signal)) = incoming(&packet, cck_bounds) else {
                     return;
                 };
                 match &item {
+                    Incoming::Report(
+                        report @ (Report::Bluetooth { .. } | Report::BluetoothAnswer(_)),
+                    ) => bluetooth.push(*report),
                     Incoming::Report(report) => dynamic.reported(report),
                     Incoming::Frame(frame) => dynamic.frame(&frame.bytes, signal, address, bssid),
                 }
@@ -521,6 +586,15 @@ impl Device for Hardware {
         self.transmit
             .reclaim_h2c()
             .map_err(failed("command reclaim"))?;
+        for report in bluetooth {
+            match report {
+                Report::Bluetooth { bytes, length } => {
+                    self.arbitrate(Event::Bluetooth(&bytes[..usize::from(length)]))?;
+                }
+                Report::BluetoothAnswer(answer) => self.arbitrate(Event::Answer(&answer))?,
+                _ => {}
+            }
+        }
         if self.vector {
             // SAFETY: this worker is the handler, between its capture and now.
             unsafe { self.interrupts.enable(false) }.map_err(failed("interrupt"))?;
@@ -552,27 +626,42 @@ impl Device for Hardware {
             .map_err(failed("reserved pages"))
     }
 
-    /// `rtw_enter_lps_core` and `rtw_leave_lps_core`. Whether firmware reports
-    /// the return or not, it clears the bit it set, so this waits on that.
+    /// `rtw_enter_lps` and `rtw_leave_lps`. Whether firmware reports the return
+    /// or not, it clears the bit it set, so this waits on that.
     fn set_power_save(&mut self, on: bool) -> Result<(), String> {
-        self.control
-            .command(commands::power_mode(on, PORT))
-            .map_err(failed("power mode"))?;
-        if on {
+        if on == self.asleep || (on && self.coex.stays_awake()) {
             return Ok(());
         }
-        let io = self.control.io().map_err(failed("registers"))?;
-        for _ in 0..LEAVE_POWER_SAVE_TRIES {
-            let control = io.read32(REG_TCR).map_err(failed("power save"))?;
-            if control & POWER_BIT_BY_HARDWARE == 0 {
-                return Ok(());
-            }
-            io.delay_us(LEAVE_POWER_SAVE_WAIT_US);
+        if on {
+            self.arbitrate(Event::Sleeping(true))?;
+            self.asleep = true;
+            return self
+                .control
+                .command(commands::power_mode(true, PORT))
+                .map_err(failed("power mode"));
         }
-        set_mask(io, REG_TCR, POWER_BIT_BY_HARDWARE, 0).map_err(failed("power save"))?;
-        self.limitations
-            .push("firmware that did not leave power save in time");
-        Ok(())
+        self.asleep = false;
+        self.control
+            .command(commands::power_mode(false, PORT))
+            .map_err(failed("power mode"))?;
+        self.wait_for_power_save_to_end()?;
+        self.arbitrate(Event::Sleeping(false))
+    }
+
+    /// `rtw_ops_bss_info_changed`'s `BSS_CHANGED_BEACON_INT`, and
+    /// `rtw_set_dtim_period`.
+    fn set_beacon(&mut self, interval_tu: u16, dtim_period: u8) -> Result<(), String> {
+        self.beacon_interval = interval_tu;
+        let io = self.control.io().map_err(failed("registers"))?;
+        set_mask(io, REG_TCR, UPDATE_TIM_ELEMENT, 1).map_err(failed("dtim"))?;
+        io.write8(REG_DTIM_COUNTER_ROOT, dtim_period.saturating_sub(1))
+            .map_err(failed("dtim"))
+    }
+
+    /// The arbiter's time, and rtw88's delayed works that came due.
+    fn coexist(&mut self, now: u64) -> Result<(), String> {
+        self.now = now;
+        self.arbitrate(Event::Tick)
     }
 
     /// `rtw_vif_port_config`.
@@ -585,9 +674,16 @@ impl Device for Hardware {
         if self.connected != linked {
             self.dynamic.forget();
         }
+        let changed = self.connected != linked;
         self.bssid = bssid;
         self.connected = linked;
-        self.run_coex()
+        if changed && linked {
+            self.arbitrate(Event::Connected)?;
+        }
+        if changed {
+            self.arbitrate(Event::Media { connected: linked })?;
+        }
+        Ok(())
     }
 
     /// `rtw_ops_configure_filter`'s `FIF_BCN_PRBRESP_PROMISC`.
@@ -630,10 +726,15 @@ impl Device for Hardware {
 
     /// `rtw_phy_dynamic_mechanism`.
     fn watchdog(&mut self, scanning: bool, stbc: bool) -> Result<Watched, String> {
-        let busy = self.dynamic.close_period();
+        let traffic = self.dynamic.close_period();
+        if traffic.busy != core::mem::replace(&mut self.busy, traffic.busy) {
+            self.arbitrate(Event::Traffic)?;
+        }
+        let busy = traffic.sleepless;
         if scanning {
             return Ok(Watched { level: 0, busy });
         }
+        self.arbitrate(Event::Watchdog)?;
         let linked = self.connected;
         self.dynamic.sample(linked);
         if linked {
@@ -687,18 +788,22 @@ impl Device for Hardware {
     /// `rtw_phy_dig_set_max_coverage`, and `rtw_phy_dig_reset` after, each
     /// with `rtw_core_fw_scan_notify`.
     fn scanning(&mut self, scanning: bool) -> Result<(), String> {
-        if !scanning {
+        if scanning {
+            self.arbitrate(Event::ScanStarted)?;
+        } else {
             self.write_gain(self.dynamic.current_gain())?;
         }
+        self.scanning = scanning;
         if self.features & NOTIFY_SCAN != 0 {
             self.control
                 .command(commands::scan(scanning))
                 .map_err(failed("scan notice"))?;
         }
         if scanning {
-            self.write_gain(dynamic::MAX_COVERAGE)?;
+            self.write_gain(dynamic::MAX_COVERAGE)
+        } else {
+            self.arbitrate(Event::ScanEnded)
         }
-        Ok(())
     }
 
     fn signals(&self) -> bool {

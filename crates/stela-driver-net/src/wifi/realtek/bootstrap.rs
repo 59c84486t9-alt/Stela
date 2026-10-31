@@ -6,7 +6,7 @@
 //! before the real start, where this keeps the firmware it booted.
 use super::{
     beacon::{Beacon, FirmwareBand},
-    coex::Coex,
+    coex::{Coex, Order},
     download::Download,
     efuse::{self, Board, Physical},
     features::Report,
@@ -211,8 +211,11 @@ pub unsafe fn bring_up(claim: Claim) -> Result<Up, Error> {
     enable(&mut io).map_err(at("security engine"))?;
     // SAFETY: firmware booted once on this requester, with its mailbox unused.
     let mut control = unsafe { Control::new(io, &report) }.map_err(at("mailbox"))?;
-    for command in run.commands {
-        control.command(command).map_err(at("coex command"))?;
+    for order in run.orders {
+        // A chip starting up has no power save to leave.
+        if let Order::Command(command) = order {
+            control.command(command).map_err(at("coex command"))?;
+        }
     }
     Ok(Up {
         profile,
