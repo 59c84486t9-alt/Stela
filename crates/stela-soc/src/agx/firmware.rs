@@ -43,12 +43,21 @@
 //! event ring ([`super::event`]) and each announced by the 0x42 message on
 //! 0x20; every command that needs the GPU refuses by its type and stays
 //! pending, so no GPU work is retired and no completion is invented.
+//!
+//! Work that stays pending makes no progress, so the kext's progress timer
+//! ends it: `AGXArmFirmware::stopFirmwareForRecoveryInspection` (0x1b57a6c)
+//! sends `0x86 << 48 | generation` on 0x21 and panics unless the firmware's
+//! generation word reads `generation + 1` and it reports itself stopped. The
+//! firmware drops the work it held and follows the stop-state handshake
+//! ([`Stop`]). The words are Known from the kext's readers and writers of
+//! them; that nothing else of the firmware's recovery block matters to a stop
+//! the kext asked for is Inferred.
 
 use super::super::asc::{Firmware, Message as Mail};
 use super::super::rtkit::{Endpoint, RtKit};
 use super::channel;
 use super::event;
-use super::generation::{Family, Layout};
+use super::generation::{Family, Layout, RecoveryWords};
 use super::initdata::{self, Root};
 use super::ring::{self, Kind, Shared};
 use super::signal;
@@ -86,6 +95,8 @@ const TYPE_MASK: u64 = 0x3f;
 const DOORBELL_WORK: u64 = 3;
 /// Firmware-control doorbell.
 const DOORBELL_FWCTL: u64 = 4;
+/// The doorbell that stops the firmware for recovery, naming the generation.
+const DOORBELL_STOP: u64 = 6;
 /// The firmware-control doorbell's low byte that names the device-control
 /// ring (index 4, kind 1).
 const FWCTL_DEVICE_CONTROL: u64 = 0x11;
@@ -191,7 +202,23 @@ pub enum PowerNotice {
 enum Job {
     DeviceControl,
     Work(Pipe, u8),
+    Stop(u64),
 }
+
+/// Where a stopped firmware waits in the kext's recovery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stop {
+    /// Stop state 1, until the kext writes 2.
+    PreRecovery,
+    /// Stop state 3, until the kext writes 0.
+    PostRecovery,
+}
+
+/// The firmware's half of the UAT handoff header SPTM builds in `gfx-handoff`:
+/// the magic it publishes at +8 once it runs. `sptm_uat_unmap_begin` (sptm
+/// 0xfffffff0270c5e5c, `uat.c:2807`) panics unless it reads this value; Public:
+/// Asahi `Handoff::magic_fw`, `PPL_MAGIC`.
+const HANDOFF_MICRO_MAGIC: (u64, u64) = (8, 0x4b1d_0000_0000_0002);
 
 // Every modeled interface's original firmware binds root+a8 to this 0x20-byte
 // shared status object. Startup clears ready/generation, publishes powered,
@@ -514,6 +541,9 @@ pub struct State {
     jobs: VecDeque<Job>,
     active_work: Option<ActiveWork>,
     active_control: Option<ActiveControl>,
+    stop: Option<Stop>,
+    /// The `gfx-handoff` page, until the firmware publishes its magic there.
+    handoff: Option<u64>,
 }
 
 impl State {
@@ -534,6 +564,8 @@ impl State {
             jobs: VecDeque::new(),
             active_work: None,
             active_control: None,
+            stop: None,
+            handoff: None,
         }
     }
 
@@ -559,6 +591,14 @@ impl State {
         let hi = payload >> TYPE_SHIFT;
         if hi & DOORBELL_FLAG == 0 {
             return Err(refuse!("AGX doorbell without its 0x80 type flag"));
+        }
+        if hi == DOORBELL_FLAG | DOORBELL_STOP {
+            // A stop takes the firmware off whatever it held: the kext's
+            // recovery owns those channels from here.
+            self.jobs.retain(|job| matches!(job, Job::DeviceControl));
+            self.active_work = None;
+            self.jobs.push_back(Job::Stop(payload & INIT_VA_BITS));
+            return Ok(());
         }
         // The kext forms (0x80 | type) << 48 | (index & 7) << 2 | kind;
         // nothing else is set.
@@ -595,10 +635,11 @@ impl State {
 
     /// The firmware has a bus-master access to make.
     fn dma_pending(&self) -> bool {
-        (self.initdata_va.is_some() && !self.initdata_checked)
+        (self.initdata_va.is_some() && (!self.initdata_checked || self.handoff.is_some()))
             || !self.jobs.is_empty()
             || self.active_work.is_some()
             || self.active_control.is_some()
+            || self.stop.is_some()
     }
 
     /// Read the root, then run the queued doorbells in order.
@@ -624,24 +665,91 @@ impl State {
             }
             self.initdata_checked = true;
         }
+        if self.initdata_checked
+            && let Some(handoff) = self.handoff
+        {
+            let (offset, magic) = HANDOFF_MICRO_MAGIC;
+            memory.write_physical(handoff + offset, &magic.to_le_bytes())?;
+            self.handoff = None;
+        }
         while let Some(&job) = self.jobs.front() {
             let root = self
                 .root
                 .clone()
                 .ok_or(refuse!("GFX doorbell before the initdata root"))?;
+            if self.stopped(memory, &root)? {
+                return Ok(());
+            }
             let complete = match job {
                 Job::DeviceControl => {
                     self.device_control(memory, &root)?;
                     true
                 }
                 Job::Work(pipe, index) => self.work_ring(memory, &root, pipe, index, outbox)?,
+                Job::Stop(generation) => {
+                    self.stop_for_recovery(memory, &root, generation)?;
+                    true
+                }
             };
             if !complete {
                 return Ok(());
             }
             self.jobs.pop_front();
         }
+        if let Some(root) = self.root.clone() {
+            self.stopped(memory, &root)?;
+        }
         Ok(())
+    }
+
+    /// Report the stop, the generation word last: it is what the kext polls.
+    fn stop_for_recovery(
+        &mut self,
+        memory: &mut dyn Shared,
+        root: &Root,
+        generation: u64,
+    ) -> Result<()> {
+        let words = self.recovery_words()?;
+        memory.write(root.object_928 + words.stopped, &1u32.to_le_bytes())?;
+        memory.write(root.object_928 + words.stop_state, &1u32.to_le_bytes())?;
+        let next = generation + 1;
+        memory.write(root.object_928 + words.generation, &next.to_le_bytes())?;
+        self.stop = Some(Stop::PreRecovery);
+        Ok(())
+    }
+
+    /// Follow the kext through recovery. True while the firmware stays stopped.
+    fn stopped(&mut self, memory: &mut dyn Shared, root: &Root) -> Result<bool> {
+        let Some(stop) = self.stop else {
+            return Ok(false);
+        };
+        let words = self.recovery_words()?;
+        let state = memory.read_u32(root.object_928 + words.stop_state)?;
+        match (stop, state) {
+            (Stop::PreRecovery, 1) | (Stop::PostRecovery, 3) => Ok(true),
+            (Stop::PreRecovery, 2) => {
+                memory.write(root.object_928 + words.stopped, &0u32.to_le_bytes())?;
+                memory.write(root.object_928 + words.stop_state, &3u32.to_le_bytes())?;
+                self.stop = Some(Stop::PostRecovery);
+                Ok(true)
+            }
+            (Stop::PostRecovery, 0) => {
+                self.stop = None;
+                Ok(false)
+            }
+            _ => Err(refuse!(
+                "GFX stop state is not one the kext's recovery writes",
+                state
+            )),
+        }
+    }
+
+    fn recovery_words(&self) -> Result<RecoveryWords> {
+        self.family
+            .model()?
+            .layout
+            .recovery
+            .ok_or(refuse!("the GPU family's recovery words are not recovered"))
     }
 
     /// Consume the device-control ring up to its write index.
@@ -1087,6 +1195,13 @@ impl Coprocessor {
         let mut coprocessor = Self::new(family, build)?;
         coprocessor.power = Some(power);
         Ok(coprocessor)
+    }
+
+    /// Have the firmware publish itself in the UAT handoff at `handoff` as it
+    /// starts.
+    pub fn with_handoff(self, handoff: u64) -> Self {
+        self.protocol.0.borrow_mut().handoff = Some(handoff);
+        self
     }
     #[cfg(test)]
     pub fn protocol(&self) -> &Protocol {

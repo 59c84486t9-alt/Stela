@@ -888,6 +888,70 @@ fn unexecuted_work_refuses_rather_than_completing() {
 }
 
 #[test]
+fn the_firmware_publishes_its_magic_in_the_uat_handoff_as_it_starts() {
+    let handoff = BASE + 0x1_8000;
+    let mut memory = Flat::new(BASE, 0x20000);
+    kext_root(&mut memory);
+    let mut state = State::new(&G14G);
+    state.handoff = Some(handoff);
+    assert!(!state.dma_pending());
+    state
+        .init((MSG_INIT << TYPE_SHIFT) | (ROOT & INIT_VA_BITS))
+        .unwrap();
+    assert!(state.dma_pending());
+    state.dma(&mut memory, &mut Vec::new()).unwrap();
+    assert_eq!(memory.read_u64(handoff + 8), Ok(0x4b1d_0000_0000_0002));
+    assert!(!state.dma_pending());
+}
+
+#[test]
+fn the_stop_drops_held_work_and_follows_the_kexts_recovery() {
+    let (mut state, mut memory) = with_device_control(&[]);
+    let (channel_state, command) = (BASE + 0xd000, BASE + 0x10000);
+    one_3d_entry(&mut memory, channel_state, command);
+    memory.put_u32(command, 1);
+    memory.put_u64(command + 0x14, command + 0x1000);
+    memory.put_u32(command + 0x1c, 0x200);
+    memory.put_u32(command + 0x1000, 7);
+    state.doorbell(work(1, 0)).unwrap();
+    assert!(state.dma(&mut memory, &mut Vec::new()).is_err());
+
+    let object = state.root.as_ref().unwrap().object_928;
+    let words = G14G.model().unwrap().layout.recovery.unwrap();
+    let (generation, stop_state, stopped) = (
+        object + words.generation,
+        object + words.stop_state,
+        object + words.stopped,
+    );
+    state.doorbell(doorbell_payload(DOORBELL_STOP, 41)).unwrap();
+    state.dma(&mut memory, &mut Vec::new()).unwrap();
+    assert_eq!(memory.read_u64(generation), Ok(42));
+    assert_eq!(memory.read_u32(stop_state), Ok(1));
+    assert_eq!(memory.read_u32(stopped), Ok(1));
+
+    // Stopped until the kext says otherwise, and idle again after.
+    state.dma(&mut memory, &mut Vec::new()).unwrap();
+    assert!(state.dma_pending());
+    memory.put_u32(stop_state, 2);
+    state.dma(&mut memory, &mut Vec::new()).unwrap();
+    assert_eq!(memory.read_u32(stop_state), Ok(3));
+    assert_eq!(memory.read_u32(stopped), Ok(0));
+    memory.put_u32(stop_state, 0);
+    state.dma(&mut memory, &mut Vec::new()).unwrap();
+    assert!(!state.dma_pending());
+}
+
+#[test]
+fn a_family_without_recovered_recovery_words_refuses_the_stop() {
+    let (mut state, mut memory) = with_device_control_on(&G14X, &[]).unwrap();
+    state.doorbell(doorbell_payload(DOORBELL_STOP, 0)).unwrap();
+    assert_eq!(
+        state.dma(&mut memory, &mut Vec::new()),
+        Err(refuse!("the GPU family's recovery words are not recovered"))
+    );
+}
+
+#[test]
 fn each_family_reads_its_own_root_and_g13_refuses_dashboard_signals() {
     use stela_soc_data::agx::generation::{G14X, G16X};
     // A G14X firmware refuses the G13G/G13X/G14G root.

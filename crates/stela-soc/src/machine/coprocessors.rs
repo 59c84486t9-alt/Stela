@@ -188,7 +188,8 @@ impl AppleDevices {
             .firmware_power(&placement.sgx)
             .and_then(|power| power.with_asc_wrapper(placement.wrapper.0))?;
         let native_control = power.native_asc_control();
-        let coprocessor = GfxCoprocessor::with_power(placement.gpu.family, power, build)?;
+        let coprocessor = GfxCoprocessor::with_power(placement.gpu.family, power, build)?
+            .with_handoff(placement.handoff);
         let wrapper = Asc::booted(
             Box::new(coprocessor),
             AscLines::from_interrupts(placement.interrupts.map(|n| AicInput::new(0, n))),

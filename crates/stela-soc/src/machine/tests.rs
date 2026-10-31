@@ -1672,6 +1672,7 @@ fn gfx_native_control_cannot_bind_over_another_mounted_bank() {
         sgx: vec![(0x2_0400_0000, 0x400_0000, 0)],
         ttbat: 0x8_0000_0000,
         shared_l2: 0x8_0000_8000,
+        handoff: 0x8_000c_c000,
     };
     // Reject a complete foreign word and a foreign upper half. Declared
     // SGX geometry alone cannot check either physical bus layout.
@@ -1720,6 +1721,7 @@ fn pro_max_and_ultra_gfx_keep_their_sparse_original_banks() {
             sgx: vec![(SGX, 0x100000, 0), (SGX + 0xd00000, info_bytes, 0xd00000)],
             ttbat: 0x100_0000_0000,
             shared_l2: 0x100_0000_8000,
+            handoff: 0x8_000c_c000,
         };
         let mut devices = AppleDevices::new();
         devices
@@ -1763,6 +1765,7 @@ fn gfx_firmware_reads_its_initdata_through_the_uat_the_sgx_mmu_roots() {
         sgx: vec![(SGX, 0x400_0000, 0)],
         ttbat: RAM,
         shared_l2: RAM + 0x8000,
+        handoff: RAM + 0xc000,
     };
     let mut devices = AppleDevices::new();
     devices

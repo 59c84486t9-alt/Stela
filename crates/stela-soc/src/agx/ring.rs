@@ -54,6 +54,11 @@ pub const DESCRIPTOR_BYTES: usize = 0x20;
 pub trait Shared {
     fn read(&mut self, va: u64, buffer: &mut [u8]) -> Result<()>;
     fn write(&mut self, va: u64, data: &[u8]) -> Result<()>;
+    /// A write to RAM by physical address: what the firmware's own mapping of
+    /// a carveout reaches, outside the tables the AP shares with it.
+    fn write_physical(&mut self, physical: u64, data: &[u8]) -> Result<()> {
+        self.write(physical, data)
+    }
 
     fn read_u32(&mut self, va: u64) -> Result<u32> {
         let mut word = [0; 4];
@@ -101,6 +106,16 @@ impl Shared for Port<'_, '_> {
     }
     fn write(&mut self, va: u64, data: &[u8]) -> Result<()> {
         Port::write(self, va, data).map_err(reason)
+    }
+    fn write_physical(&mut self, physical: u64, data: &[u8]) -> Result<()> {
+        if self.memory.write(physical, data) {
+            Ok(())
+        } else {
+            Err(refuse!(
+                "GFX firmware carveout write is not to RAM",
+                physical
+            ))
+        }
     }
     #[cfg(test)]
     fn gpu_read(&mut self, context: usize, va: u64, buffer: &mut [u8]) -> Result<(), DmaError> {

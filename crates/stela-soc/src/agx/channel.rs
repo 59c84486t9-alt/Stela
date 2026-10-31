@@ -298,9 +298,7 @@ impl Kind {
             9 => Kind::SharedEventSignal,
             0xc => Kind::DashboardSignal,
             _ => {
-                return Err(refuse!(
-                    "GFX channel command type is not one the 26A434 kext writes"
-                ));
+                return Err(refuse!("GFX channel command type has no model", word));
             }
         })
     }

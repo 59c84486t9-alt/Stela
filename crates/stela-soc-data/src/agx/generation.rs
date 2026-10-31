@@ -71,6 +71,21 @@ pub struct Layout {
     /// +0x20 object.
     pub riart_u_levels_disabled: u64,
     pub riart_t_disabled: u64,
+    /// The firmware's recovery handshake words, where recovered.
+    pub recovery: Option<RecoveryWords>,
+}
+
+/// The recovery handshake's words in the root's +0xb0 object
+/// (`AGXArmFirmware::isFirmwareStoppedFor*Recovery`, `resumeFirmware*Recovery`
+/// and `stopFirmwareForRecoveryInspection`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecoveryWords {
+    /// The u64 the firmware advances once stopped.
+    pub generation: u64,
+    /// 1 stopped before recovery, 2 resumed, 3 stopped after it, 0 running.
+    pub stop_state: u64,
+    /// Nonzero once stopped (`isFirmwareStoppedForHostRecovery`).
+    pub stopped: u64,
 }
 
 /// The G13G, G13X and G14G interface (`armfw_g14g` handlers 0xffffff8000004b8c,
@@ -84,6 +99,11 @@ const G13_G14G_LAYOUT: Layout = Layout {
     power_counters: 0xca48,
     riart_u_levels_disabled: 0xe30,
     riart_t_disabled: 0xe34,
+    recovery: Some(RecoveryWords {
+        generation: 0x4bf0,
+        stop_state: 0x4c00,
+        stopped: 0x4c10,
+    }),
 };
 
 /// The G14X interface (`armfw_g14s`, `armfw_g14c` and `armfw_g14d`, whose
@@ -101,6 +121,7 @@ const G14X_LAYOUT: Layout = Layout {
     power_counters: 0xcfd8,
     riart_u_levels_disabled: 0x123c,
     riart_t_disabled: 0x1240,
+    recovery: None,
 };
 
 /// The G15G interface (`armfw_g15g` c000: the dispatcher at

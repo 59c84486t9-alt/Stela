@@ -37,6 +37,8 @@ pub struct GfxController {
     /// The shared TTBR1 window's page-directory page (`gfx-shared-l2-region`,
     /// one page, as SPTM's `uat_bootstrap_parse_dt` requires).
     pub shared_l2: u64,
+    /// The UAT handoff page SPTM and the firmware share (`gfx-handoff`).
+    pub handoff: u64,
 }
 
 /// The `sgx` banks of [`GfxController::sgx`] from `reg[0]` and `reg[1]`
@@ -146,6 +148,9 @@ pub(super) fn gfx_controller(
             ));
         }
     };
+    let handoff = u64_property("gfx-handoff-base")
+        .filter(|&base| base != 0)
+        .ok_or(refuse!("sgx gfx-handoff-base is not one nonzero address"))?;
     Ok(Some(GfxController {
         gpu,
         wrapper,
@@ -153,6 +158,7 @@ pub(super) fn gfx_controller(
         sgx: banks,
         ttbat,
         shared_l2,
+        handoff,
     }))
 }
 
@@ -201,6 +207,7 @@ mod tests {
             let ttbat_page = cells(&[0x20_0011]);
             let l2_base = 0x8_0008_8000u64.to_le_bytes();
             let l2_size = 0x4000u64.to_le_bytes();
+            let handoff_base = 0x8_000c_c000u64.to_le_bytes();
             let mut sgx: Vec<(&str, &[u8])> = vec![
                 ("name", &sgx_name),
                 ("reg", &sgx_reg),
@@ -208,6 +215,7 @@ mod tests {
                 ("ttbat-phys-addr-base", &ttbat_page),
                 ("gfx-shared-l2-region-base", &l2_base),
                 ("gfx-shared-l2-region-size", &l2_size),
+                ("gfx-handoff-base", &handoff_base),
             ];
             if sgx_visible {
                 sgx.push(("compatible", &sgx_compatible));
@@ -235,6 +243,7 @@ mod tests {
                 sgx: vec![(0x2_0400_0000, 0x400_0000, 0)],
                 ttbat: 0x8_0004_4000,
                 shared_l2: 0x8_0008_8000,
+                handoff: 0x8_000c_c000,
             })
         );
         assert_eq!(placed(false, false).unwrap(), None);
