@@ -34,8 +34,6 @@ const PASSIVE_SIX_GHZ_REST_US: u64 = 3000 * 1_000_000;
 const PASSIVE_SIX_GHZ_FREE_US: u64 = 60 * 1_000_000;
 /// `IWL_MLD_6GHZ_PASSIVE_SCAN_MIN_CHANS`.
 const PASSIVE_SIX_GHZ_CHANNELS: usize = 4;
-/// `IWL_UCODE_TLV_FLAGS_EBS_SUPPORT`.
-const EBS_SUPPORT: u32 = 1 << 25;
 /// `IWL_UCODE_TLV_CAPA_DS_PARAM_SET_IE_SUPPORT`.
 const DS_PARAMETERS: u32 = 9;
 /// `IWL_UCODE_TLV_CAPA_WFA_TPC_REP_IE_SUPPORT`.
@@ -635,11 +633,7 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Scan<'_, Q, B, O> {
             tpc_report: boot.firmware.supports_capability(TPC_REPORT),
             hidden_six_ghz: boot.firmware.supports_capability(HIDDEN_SIX_GHZ),
             fixed_antenna: boot.firmware.supports_capability(FIXED_ANTENNA),
-            ebs: !self.ebs_failed
-                && boot
-                    .firmware
-                    .flags()
-                    .is_some_and(|flags| flags & EBS_SUPPORT != 0),
+            ebs: wire::energy_based(&boot.firmware, self.ebs_failed),
             passive_six_ghz: passive_six_ghz && boot.firmware.supports_capability(PASSIVE_SIX_GHZ),
         };
         // Capture every already-completed RB before admitting a new request.

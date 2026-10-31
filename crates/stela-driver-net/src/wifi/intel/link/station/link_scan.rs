@@ -33,6 +33,8 @@ pub(super) struct LinkScan {
     pub(super) activated: u64,
     /// When firmware must have let go of a scan told to stop.
     abort: Option<Deadline>,
+    /// A scan's EBS went wrong, `last_ebs_failed`.
+    ebs_failed: bool,
 }
 
 impl Client {
@@ -69,11 +71,12 @@ impl Client {
 
     /// `iwl_mld_handle_scan_complete_notif`: only a whole scan of both
     /// channels chooses.
-    pub(super) fn link_scan_finished(&mut self, status: u8) -> Result<(), Error> {
+    pub(super) fn link_scan_finished(&mut self, status: u8, ebs_failed: bool) -> Result<(), Error> {
         let Some((mut scanner, ticket)) = self.link_scan.running.take() else {
             return Ok(());
         };
         self.link_scan.abort = None;
+        self.link_scan.ebs_failed |= ebs_failed;
         let outcome = if status == COMPLETED {
             Outcome::Completed
         } else {
@@ -148,6 +151,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                     _ if client.emlsr.active => boot::Ax200ScanTraffic::Balanced,
                     traffic => traffic,
                 },
+                client.link_scan.ebs_failed,
             )
             .map_err(Error::Scan)?;
         scanner.submitted(ticket).map_err(protocol)?;

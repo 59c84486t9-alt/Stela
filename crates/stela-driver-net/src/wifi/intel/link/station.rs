@@ -1405,8 +1405,9 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         }
         // After its start, which came first.
         while let Some(end) = queue.take_scan_completion() {
-            self.client
-                .link_scan_finished(end.raw.get(6).copied().unwrap_or(0))?;
+            let field = |at: usize| end.raw.get(at).copied().unwrap_or(0);
+            let ebs_failed = Queue::<Q, B>::energy_based_failed(field(7));
+            self.client.link_scan_finished(field(6), ebs_failed)?;
         }
         Ok(())
     }

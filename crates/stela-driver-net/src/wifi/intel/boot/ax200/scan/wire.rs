@@ -31,6 +31,15 @@ pub(super) struct Abilities {
     /// channels no rule opens yet, for what they say of where the device is.
     pub(super) passive_six_ghz: bool,
 }
+/// `IWL_UCODE_TLV_FLAGS_EBS_SUPPORT`.
+const EBS_SUPPORT: u32 = 1 << 25;
+/// Whether `firmware` may leave a quiet channel early, as `last_failed` says.
+pub(super) fn energy_based(firmware: &Firmware<'_>, last_failed: bool) -> bool {
+    !last_failed
+        && firmware
+            .flags()
+            .is_some_and(|flags| flags & EBS_SUPPORT != 0)
+}
 /// Whether a scan's EBS status rules EBS out of later scans.
 pub(super) fn energy_based_failed(status: u8) -> bool {
     !ENERGY_BASED_FINE.contains(&status)
@@ -314,13 +323,14 @@ pub(super) fn encode_internal(
     local: crate::Mac,
     link: u8,
     traffic: Ax200ScanTraffic,
+    ebs: bool,
 ) -> Result<Vec<u8>, Ax200ScanError> {
     let abilities = Abilities {
         ds_parameters: false,
         tpc_report: false,
         hidden_six_ghz: false,
         fixed_antenna: false,
-        ebs: false,
+        ebs,
         passive_six_ghz: false,
     };
     let mut bytes = encode(request, version, local, None, abilities)?;
@@ -556,7 +566,7 @@ mod tests {
             frequency_mhz: 2412,
         };
         let request = protocol::Request::new(vec![channel], Vec::new(), Vec::new()).unwrap();
-        let bytes = encode_internal(&request, 17, LOCAL, 1, Ax200ScanTraffic::Low).unwrap();
+        let bytes = encode_internal(&request, 17, LOCAL, 1, Ax200ScanTraffic::Low, false).unwrap();
         let flags = u16::from_le_bytes([bytes[GENERAL], bytes[GENERAL + 1]]);
         assert_eq!(
             flags,
@@ -568,15 +578,23 @@ mod tests {
         assert_eq!(bytes[GENERAL + 16..GENERAL + 20], [0; 4]);
         assert_eq!(bytes[GENERAL + 20..GENERAL + 24], 30u32.to_le_bytes());
         assert_eq!(bytes[GENERAL + 24..GENERAL + 28], [0; 4]);
-        let busy = encode_internal(&request, 17, LOCAL, 1, Ax200ScanTraffic::Medium).unwrap();
+        let busy =
+            encode_internal(&request, 17, LOCAL, 1, Ax200ScanTraffic::Medium, false).unwrap();
         assert_eq!(busy[GENERAL + 20..GENERAL + 24], 120u32.to_le_bytes());
-        let full = encode_internal(&request, 17, LOCAL, 1, Ax200ScanTraffic::High).unwrap();
+        let full = encode_internal(&request, 17, LOCAL, 1, Ax200ScanTraffic::High, false).unwrap();
         assert_eq!(full[GENERAL] & FRAGMENTED, FRAGMENTED);
         assert_eq!(full[GENERAL + 34], 3);
         assert_eq!(full[CHANNELS], ENABLE_CHANNEL_ORDER | CHANNEL_FRAGMENTED);
         assert_eq!(full[GENERAL + 12..GENERAL + 16], 44u32.to_le_bytes());
         assert_eq!(full[GENERAL + 20..GENERAL + 24], 95u32.to_le_bytes());
-        let both = encode_internal(&request, 17, LOCAL, 1, Ax200ScanTraffic::Balanced).unwrap();
+        let both =
+            encode_internal(&request, 17, LOCAL, 1, Ax200ScanTraffic::Balanced, false).unwrap();
+        let energy_based =
+            encode_internal(&request, 17, LOCAL, 1, Ax200ScanTraffic::High, true).unwrap();
+        assert_eq!(
+            energy_based[CHANNELS],
+            ENABLE_CHANNEL_ORDER | ENERGY_BASED | CHANNEL_FRAGMENTED
+        );
         assert_eq!(both[GENERAL] & FRAGMENTED, FRAGMENTED);
         assert_eq!(both[GENERAL + 12..GENERAL + 16], 37u32.to_le_bytes());
         assert_eq!(both[GENERAL + 20..GENERAL + 24], 30u32.to_le_bytes());

@@ -116,17 +116,24 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200ManagementQueue<'a,
     }
 
     /// The internal MLO scan of `request`'s channels beside firmware link
-    /// `link`.
+    /// `link`. `ebs_failed` is `last_ebs_failed`.
     pub fn internal_scan(
         &mut self,
         request: &crate::wifi::scan::Request,
         local: crate::Mac,
         link: u8,
         traffic: Ax200ScanTraffic,
+        ebs_failed: bool,
     ) -> Result<(Id, Vec<u8>), Ax200ScanError> {
         let version = scan_wire::validate(self.firmware())?;
-        let bytes = scan_wire::encode_internal(request, version, local, link, traffic)?;
+        let ebs = scan_wire::energy_based(self.firmware(), ebs_failed);
+        let bytes = scan_wire::encode_internal(request, version, local, link, traffic, ebs)?;
         Ok((scan_wire::REQUEST, bytes))
+    }
+
+    /// Whether a scan's EBS status rules EBS out of later scans.
+    pub fn energy_based_failed(status: u8) -> bool {
+        scan_wire::energy_based_failed(status)
     }
 
     /// The running scan's end, once all it heard was taken.
