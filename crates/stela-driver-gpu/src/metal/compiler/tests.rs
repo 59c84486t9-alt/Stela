@@ -16,7 +16,7 @@ use core::{cell::RefCell, ffi::CStr, ptr, slice};
 
 /// A dynamic library of [`fixture`]'s function, with another module.
 fn dynamic_fixture() -> Vec<u8> {
-    container(false, library::Header::DYNAMIC, 0)
+    container(false, Header::DYNAMIC, 0)
 }
 
 /// A compilation the fake service saw.
