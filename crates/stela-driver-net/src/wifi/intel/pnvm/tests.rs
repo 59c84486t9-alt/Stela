@@ -2,6 +2,7 @@ use super::super::identity::Observed;
 use super::*;
 fn profile() -> Profile {
     Profile::select(Observed {
+        silicon: Default::default(),
         vendor: 0x8086,
         device: 0x2725,
         subsystem_vendor: 0x8086,

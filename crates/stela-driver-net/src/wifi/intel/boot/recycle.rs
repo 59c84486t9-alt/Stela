@@ -75,7 +75,7 @@ impl<Q: BootIo> RomBoot<'_, Q> {
         result
     }
     fn replenish_receive_inner(&mut self) -> Result<Replenished, Error> {
-        let stride = if self.profile.family() == Family::Ax210 {
+        let stride = if self.profile.family() >= Family::Ax210 {
             16
         } else {
             8
@@ -162,7 +162,7 @@ impl<Q: BootIo> RomBoot<'_, Q> {
             self.credits += published;
             self.receive_ring.actual = actual;
             fence(Ordering::Release);
-            self.write(0x1c80, u32::from(actual))?;
+            self.ring_receive_doorbell(actual)?;
         }
         Ok(Replenished {
             returned,

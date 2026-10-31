@@ -219,7 +219,7 @@ fn images_admit_only_source_family_descriptor_versions() {
                 ReplayOrTtak::TtakOk(false)
             }
         );
-        assert_eq!(o.radio.phy_data5.is_some(), family == Family::Ax210);
+        assert_eq!(o.radio.phy_data5.is_some(), family >= Family::Ax210);
     }
 }
 #[test]

@@ -81,7 +81,7 @@ impl fmt::Display for AttachError {
 fn receive_entries(family: Family) -> u16 {
     match family {
         Family::Ax200 => 2048,
-        Family::Ax210 => 1024,
+        _ => 1024,
     }
 }
 
@@ -101,6 +101,15 @@ pub unsafe fn attach<Q: BootIo, B: BiosIo>(
 ) -> Result<Station<Q, B>, AttachError> {
     let hardware_revision = io.read32(HW_REV).map_err(AttachError::Register)?;
     let radio_id = io.read32(HW_RF_ID).map_err(AttachError::Register)?;
+    let (family, _) =
+        identity::device(pci.device).ok_or(AttachError::Identity(IdentityError::UnsupportedPci))?;
+    let silicon = power::read_silicon(
+        &mut io,
+        family,
+        identity::bisr_workaround(pci.device),
+        ManagementSession::NotConnected,
+    )
+    .map_err(AttachError::Power)?;
     let profile = Profile::select(Observed {
         vendor: pci.vendor,
         device: pci.device,
@@ -109,9 +118,9 @@ pub unsafe fn attach<Q: BootIo, B: BiosIo>(
         pci_revision: pci.revision,
         hardware_revision,
         radio_id,
+        silicon,
     })
     .map_err(AttachError::Identity)?;
-    let family = profile.family();
     let staged = identity::stage(&profile, inputs.firmware).map_err(|error| match error {
         StageError::Resource { request, error } if error.kind == ErrorKind::Missing => {
             AttachError::NoPinnedFirmware {
@@ -139,7 +148,7 @@ pub unsafe fn attach<Q: BootIo, B: BiosIo>(
         Family::Ax200 => unsafe {
             RomBoot::start(power, staged, inputs.pages, Some(domain), entries)
         },
-        Family::Ax210 => {
+        _ => {
             let step = platform::load_step(inputs.observations.step, firmware)
                 .map_err(|error| AttachError::Step(format!("{error:?}")))?;
             // SAFETY: as above; no CSME session is attached to the function.

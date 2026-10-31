@@ -48,8 +48,13 @@ fn negotiate(fw: &Firmware<'_>) -> Result<(), Error> {
 pub(in crate::wifi::intel) fn management_slots(family: Family) -> u16 {
     if family == Family::Ax200 { 16 } else { 128 }
 }
+/// `TFD_QUEUE_BC_SIZE`s of two-byte entries.
 fn bc_bytes(family: Family) -> usize {
-    if family == Family::Ax200 { 640 } else { 2048 }
+    match family {
+        Family::Ax200 => 640,
+        Family::Ax210 => 2048,
+        Family::Bz | Family::Sc => 8192,
+    }
 }
 fn range(region: Region, bytes: usize, alignment: u64) -> Result<core::ops::Range<u64>, Error> {
     if region.bytes != bytes || region.address & (alignment - 1) != 0 {

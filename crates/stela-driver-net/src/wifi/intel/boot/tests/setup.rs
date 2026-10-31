@@ -6,6 +6,7 @@ use super::*;
 
 pub(super) fn profile() -> Profile {
     Profile::select(Observed {
+        silicon: Default::default(),
         vendor: 0x8086,
         device: 0x2723,
         subsystem_vendor: 0x8086,

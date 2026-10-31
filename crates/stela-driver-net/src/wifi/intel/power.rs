@@ -2,7 +2,7 @@
 // Copyright (C) 2007-2015, 2018-2026 Intel Corporation
 // Copyright (C) 2013-2015 Intel Mobile Communications GmbH
 // Copyright (C) 2016-2017 Intel Deutschland GmbH
-//! AX200/AX210-family ownership, persistence, reset and MAC-clock wake.
+//! Intel Wi-Fi ownership, persistence, reset and MAC-clock wake.
 //! Adapted from pcie/gen1_2/trans.c, iwl-io.c and the pinned MAC configurations.
 //! This leaves interrupts masked. It never starts ROM self-load, authenticates
 //! firmware, calibrates a radio or claims station/carrier readiness.
@@ -38,6 +38,19 @@ const HPM_HIPM_GEN_CFG: u32 = 0xa03458;
 const POWER_GATE: u32 = 1;
 const SLEEP: u32 = 1 << 1;
 const FORCE_ACTIVE: u32 = 1 << 10;
+const MAC_INIT: u32 = 1 << 6;
+const MAC_STATUS: u32 = 1 << 20;
+const BZ_MAC_ACCESS: u32 = 1 << 21;
+const SW_RESET: u32 = 1 << 31;
+const WFPM_CTRL: u32 = 0xa03030;
+const WFPM_AUX_MAC_OWNER: u32 = 0x80000000;
+const WFPM_OTP_CFG1: u32 = 0xa03098;
+const WFPM_RSRCS_REQUEST: u32 = 0xa033f8;
+const WFPM_RSRCS_ACK: u32 = 0xa033fc;
+const CNVR_TOP: u32 = 1 << 6;
+const SD_REG_VER: u32 = 0xa29600;
+const SD_REG_VER_GEN2: u32 = 0xa2b800;
+const CNVI_AUX_MISC_CHIP: u32 = 0xa200b0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AccessError {
@@ -137,19 +150,49 @@ enum State {
     Poisoned,
 }
 
-pub struct Power<C: Csr> {
-    io: C,
-    profile: Profile,
-    state: State,
+/// What `get_crf_id` reads of the silicon behind the function, which
+/// CSR_HW_REV and CSR_HW_RF_ID do not say.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Silicon {
+    pub crf: u32,
+    pub cnv: u32,
+    pub wfpm: u32,
 }
-impl<C: Csr> Power<C> {
-    pub fn new(io: C, profile: Profile) -> Self {
-        Self {
-            io,
-            profile,
-            state: State::Cold,
+
+/// CSR_GP_CNTRL's NIC access bits, which moved on the Bz family.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct NicAccess {
+    pub(super) request: u32,
+    pub(super) mask: u32,
+    pub(super) ready: u32,
+}
+
+impl NicAccess {
+    pub(super) const fn of(family: Family) -> Self {
+        if matches!(family, Family::Bz | Family::Sc) {
+            Self {
+                request: BZ_MAC_ACCESS,
+                mask: MAC_STATUS,
+                ready: MAC_STATUS,
+            }
+        } else {
+            Self {
+                request: MAC_ACCESS,
+                mask: MAC_CLOCK | GOING_TO_SLEEP,
+                ready: MAC_CLOCK,
+            }
         }
     }
+}
+
+/// The registers every step of waking a function touches.
+struct Nic<C: Csr> {
+    io: C,
+    family: Family,
+    bisr: bool,
+}
+
+impl<C: Csr> Nic<C> {
     fn read(&mut self, register: u32) -> Result<u32, Error> {
         let value = self.io.read32(register)?;
         if value == u32::MAX || matches!(value & !0xf, 0xa5a5a5a0 | 0x5a5a5a50) {
@@ -219,7 +262,7 @@ impl<C: Csr> Power<C> {
         })
     }
     fn read_prph(&mut self, address: u32) -> Result<u32, Error> {
-        let mask = if self.profile.family() == Family::Ax210 {
+        let mask = if self.family >= Family::Ax210 {
             0x00ffffff
         } else {
             0x000fffff
@@ -228,7 +271,7 @@ impl<C: Csr> Power<C> {
         self.read(PRPH_RDATA)
     }
     fn write_prph(&mut self, address: u32, value: u32) -> Result<(), Error> {
-        let mask = if self.profile.family() == Family::Ax210 {
+        let mask = if self.family >= Family::Ax210 {
             0x00ffffff
         } else {
             0x000fffff
@@ -236,57 +279,158 @@ impl<C: Csr> Power<C> {
         self.write(PRPH_WADDR, (address & mask) | (3 << 24))?;
         self.write(PRPH_WDATA, value)
     }
-    /// `iwl_set_bits_prph` and `iwl_clear_bits_prph` under NIC access.
-    fn update_prph(&mut self, address: u32, clear: u32, set: u32) -> Result<(), Error> {
-        self.set(GP, MAC_ACCESS)?;
+    /// `__iwl_trans_pcie_grab_nic_access`.
+    fn grab(&mut self) -> Result<(), Error> {
+        let access = NicAccess::of(self.family);
+        self.set(GP, access.request)?;
         self.io.delay_us(2)?;
-        let mut granted = false;
         for _ in 0..1500 {
-            if self.read(GP)? & (MAC_CLOCK | GOING_TO_SLEEP) == MAC_CLOCK {
-                granted = true;
-                break;
+            if self.read(GP)? & access.mask == access.ready {
+                return Ok(());
             }
             self.io.delay_us(10)?;
         }
-        if !granted {
-            return Err(Error::Timeout {
-                register: GP,
-                mask: MAC_CLOCK,
-            });
-        }
+        Err(Error::Timeout {
+            register: GP,
+            mask: access.mask,
+        })
+    }
+    fn release(&mut self) -> Result<(), Error> {
+        let gp = self.read(GP)?;
+        self.write(GP, gp & !NicAccess::of(self.family).request)
+    }
+    /// `iwl_set_bits_prph` and `iwl_clear_bits_prph` under NIC access.
+    fn update_prph(&mut self, address: u32, clear: u32, set: u32) -> Result<(), Error> {
+        self.grab()?;
         let value = self.read_prph(address)?;
         self.write_prph(address, (value & !clear) | set)?;
-        let gp = self.read(GP)?;
-        self.write(GP, gp & !MAC_ACCESS)
+        self.release()
     }
+    /// `iwl_trans_pcie_sw_reset`.
     fn reset(&mut self, management: ManagementSession) -> Result<(), Error> {
-        self.set(RESET, 0x80)?;
-        self.io.delay_us(5000)?;
+        if self.family >= Family::Bz {
+            self.set(GP, SW_RESET)?;
+            self.io.delay_us(10000)?;
+        } else {
+            self.set(RESET, 0x80)?;
+            self.io.delay_us(5000)?;
+        }
         self.ownership(management)
     }
     /// `iwl_pcie_gen1_2_activate_nic`.
     fn activate(&mut self) -> Result<(), Error> {
-        let bisr = self.profile.bisr_workaround();
-        if bisr {
+        if self.bisr {
             self.io.delay_us(2000)?;
         }
-        self.set_checked(GP, 4)?;
-        let wake = self.poll(GP, MAC_CLOCK, 25000);
-        if bisr {
+        let wake = if self.family >= Family::Bz {
+            self.set_checked(GP, BZ_MAC_ACCESS | MAC_INIT)?;
+            self.poll(GP, MAC_STATUS, 25000)
+        } else {
+            self.set_checked(GP, 4)?;
+            self.poll(GP, MAC_CLOCK, 25000)
+        };
+        if self.bisr {
             self.io.delay_us(200)?;
         }
         wake
     }
+    /// `iwl_read_umac_prph_no_grab`: the UMAC's registers sit higher on the
+    /// AX210 family and later.
+    fn umac(&self, address: u32) -> u32 {
+        if self.family >= Family::Ax210 {
+            address + 0x300000
+        } else {
+            address
+        }
+    }
+    /// `get_crf_id`, under the NIC access its caller holds.
+    fn silicon(&mut self) -> Result<Silicon, Error> {
+        if self.family == Family::Sc {
+            let request = self.umac(WFPM_RSRCS_REQUEST);
+            if self.read_prph(request)? & CNVR_TOP == 0 {
+                return Ok(Silicon::default());
+            }
+            let acknowledge = self.umac(WFPM_RSRCS_ACK);
+            for _ in 0..5000 {
+                if self.read_prph(acknowledge)? & CNVR_TOP != 0 {
+                    break;
+                }
+                self.io.delay_us(10)?;
+            }
+        }
+        let control = self.umac(WFPM_CTRL);
+        let value = self.read_prph(control)?;
+        self.write_prph(control, value | WFPM_AUX_MAC_OWNER)?;
+        let version = if self.family >= Family::Ax210 {
+            SD_REG_VER_GEN2
+        } else {
+            SD_REG_VER
+        };
+        let crf = self.read_prph(version)?;
+        let cnv = self.read_prph(CNVI_AUX_MISC_CHIP)?;
+        let otp = self.umac(WFPM_OTP_CFG1);
+        let wfpm = self.read_prph(otp)?;
+        Ok(Silicon { crf, cnv, wfpm })
+    }
+}
+
+impl<C: Csr> Csr for &mut C {
+    fn read32(&mut self, register: u32) -> Result<u32, AccessError> {
+        (**self).read32(register)
+    }
+    fn write32(&mut self, register: u32, value: u32) -> Result<(), AccessError> {
+        (**self).write32(register, value)
+    }
+    fn delay_us(&mut self, microseconds: u32) -> Result<(), AccessError> {
+        (**self).delay_us(microseconds)
+    }
+}
+
+/// `iwl_pci_probe`'s early NIC access: wake the function just far enough to
+/// read what its CSRs do not say. A wake from reset follows for the boot.
+pub fn read_silicon<C: Csr>(
+    io: &mut C,
+    family: Family,
+    bisr: bool,
+    management: ManagementSession,
+) -> Result<Silicon, Error> {
+    let mut nic = Nic { io, family, bisr };
+    nic.ownership(management)?;
+    nic.activate()?;
+    nic.grab()?;
+    let silicon = nic.silicon()?;
+    nic.release()?;
+    Ok(silicon)
+}
+
+pub struct Power<C: Csr> {
+    nic: Nic<C>,
+    profile: Profile,
+    state: State,
+}
+impl<C: Csr> Power<C> {
+    pub fn new(io: C, profile: Profile) -> Self {
+        Self {
+            nic: Nic {
+                io,
+                family: profile.family(),
+                bisr: profile.bisr_workaround(),
+            },
+            profile,
+            state: State::Cold,
+        }
+    }
     /// `iwl_pcie_gen2_force_power_gating`, for an integrated 22000 device
     /// between its reset and its power-up.
     fn force_power_gating(&mut self, management: ManagementSession) -> Result<(), Error> {
-        self.activate()?;
-        self.update_prph(HPM_HIPM_GEN_CFG, 0, FORCE_ACTIVE)?;
-        self.io.delay_us(20)?;
-        self.update_prph(HPM_HIPM_GEN_CFG, 0, POWER_GATE | SLEEP)?;
-        self.io.delay_us(20)?;
-        self.update_prph(HPM_HIPM_GEN_CFG, FORCE_ACTIVE, 0)?;
-        self.reset(management)
+        self.nic.activate()?;
+        self.nic.update_prph(HPM_HIPM_GEN_CFG, 0, FORCE_ACTIVE)?;
+        self.nic.io.delay_us(20)?;
+        self.nic
+            .update_prph(HPM_HIPM_GEN_CFG, 0, POWER_GATE | SLEEP)?;
+        self.nic.io.delay_us(20)?;
+        self.nic.update_prph(HPM_HIPM_GEN_CFG, FORCE_ACTIVE, 0)?;
+        self.nic.reset(management)
     }
     fn clear_persistence(&mut self) -> Result<(), Error> {
         if self.profile.family() != Family::Ax200 {
@@ -294,13 +438,13 @@ impl<C: Csr> Power<C> {
         }
         // AX200's pinned MAC cfg has umac_prph_offset=0. AX210 uses
         // +0x300000, but has no persistence-clear step in this donor routine.
-        let hpm = self.read_prph(0xa03440)?;
+        let hpm = self.nic.read_prph(0xa03440)?;
         if hpm & (1 << 12) != 0 {
-            if self.read_prph(0xa04d00)? & (1 << 12) != 0 {
+            if self.nic.read_prph(0xa04d00)? & (1 << 12) != 0 {
                 return Err(Error::PersistenceProtected);
             }
-            self.write_prph(0xa03440, hpm & !(1 << 12))?;
-            if self.read_prph(0xa03440)? & (1 << 12) != 0 {
+            self.nic.write_prph(0xa03440, hpm & !(1 << 12))?;
+            if self.nic.read_prph(0xa03440)? & (1 << 12) != 0 {
                 return Err(Error::PersistenceProtected);
             }
         }
@@ -308,43 +452,43 @@ impl<C: Csr> Power<C> {
     }
     fn run(&mut self, management: ManagementSession) -> Result<Awake, Error> {
         let observed = self.profile.observed();
-        if self.read(HW_REV)? != observed.hardware_revision
-            || self.read(RF_ID)? != observed.radio_id
+        if self.nic.read(HW_REV)? != observed.hardware_revision
+            || self.nic.read(RF_ID)? != observed.radio_id
         {
             return Err(Error::IdentityChanged);
         }
         // Registration/routing remains inactive. This is not a DMA quiescence
         // proof; the exclusive NativeCsr constructor requires old DMA stopped.
-        self.write(INT_MASK, 0)?;
-        if self.read(INT_MASK)? != 0 {
+        self.nic.write(INT_MASK, 0)?;
+        if self.nic.read(INT_MASK)? != 0 {
             return Err(Error::Rejected {
                 register: INT_MASK,
                 mask: u32::MAX,
             });
         }
-        self.write(INT, u32::MAX)?;
-        self.write(FH_INT, u32::MAX)?;
-        self.ownership(management)?;
+        self.nic.write(INT, u32::MAX)?;
+        self.nic.write(FH_INT, u32::MAX)?;
+        self.nic.ownership(management)?;
         self.clear_persistence()?;
-        self.reset(management)?;
+        self.nic.reset(management)?;
         if self.profile.platform().integrated && self.profile.family() == Family::Ax200 {
             self.force_power_gating(management)?;
         }
-        self.set_checked(CHICKEN, 0x00800000)?;
-        self.set_checked(HPET, 0xffff0000)?;
-        self.set_checked(HW_IF, 0x00080000)?;
-        self.set_checked(GIO, 2)?;
-        self.activate()?;
+        self.nic.set_checked(CHICKEN, 0x00800000)?;
+        self.nic.set_checked(HPET, 0xffff0000)?;
+        self.nic.set_checked(HW_IF, 0x00080000)?;
+        self.nic.set_checked(GIO, 2)?;
+        self.nic.activate()?;
         Ok(Awake {
             family: self.profile.family(),
-            rf_killed: self.read(GP)? & 0x08000000 == 0,
+            rf_killed: self.nic.read(GP)? & 0x08000000 == 0,
         })
     }
     /// Consume only a successful MAC-clock epoch, transferring its exclusive
     /// CSR owner to the firmware/ring transport. This is not radio readiness.
     pub fn into_awake(self) -> Result<(C, Profile, Awake), Error> {
         if let State::Awake(status) = self.state {
-            Ok((self.io, self.profile, status))
+            Ok((self.nic.io, self.profile, status))
         } else {
             Err(Error::State)
         }

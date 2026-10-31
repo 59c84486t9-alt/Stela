@@ -204,7 +204,7 @@ pub(super) fn prepare<'a>(
             pnvm: source,
             pnvm_version,
             reduced_power: reduced_source,
-            transfer: if profile.family() == Family::Ax210 {
+            transfer: if profile.family() >= Family::Ax210 {
                 Transfer::ScratchV2
             } else {
                 Transfer::NotUsedBeforeAx210
@@ -275,6 +275,7 @@ mod tests {
             }
         }
         let profile = Profile::select(Observed {
+            silicon: Default::default(),
             vendor: 0x8086,
             device: 0x2725,
             subsystem_vendor: 0x8086,

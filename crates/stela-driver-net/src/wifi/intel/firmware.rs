@@ -46,6 +46,8 @@ const IML: u32 = 52;
 pub enum Family {
     Ax200,
     Ax210,
+    Bz,
+    Sc,
 }
 
 impl Family {
@@ -55,12 +57,15 @@ impl Family {
         match self {
             Self::Ax200 => "iwlwifi-cc-a0-77.ucode",
             Self::Ax210 => "iwlwifi-ty-a0-gf-a0-89.ucode",
+            Self::Bz => "iwlwifi-gl-c0-fm-c0-c106.ucode",
+            Self::Sc => "iwlwifi-sc-a0-fm-c0-c106.ucode",
         }
     }
     pub fn firmware_api(self) -> u32 {
         match self {
             Self::Ax200 => 77,
             Self::Ax210 => 89,
+            Self::Bz | Self::Sc => 106,
         }
     }
 }

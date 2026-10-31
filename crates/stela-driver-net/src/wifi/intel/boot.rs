@@ -67,6 +67,10 @@ pub use unified::{InitializationPhase, InitializationProgress, InitializedNvm, U
 /// `iwl_pcie_set_ltr`'s ~250 us long-value request.
 const LTR_BOOT_VALUE: u32 = 0x88fa88fa;
 const LTR_LAST_MESSAGE: u32 = 0xdc;
+const FUNC_SCRATCH: u32 = 0x2c;
+const FUNC_SCRATCH_INIT: u32 = 0x01010101;
+const ROM_START: u32 = 1 << 7;
+const HBUS_TARG_WRPTR: u32 = 0x460;
 const MSIX_HW_CAUSES: u32 = 0x2808;
 const IML_CAUSE: u32 = 1 << 1;
 const RECEIVE_BUFFER_BYTES: usize = 4096;
@@ -425,7 +429,7 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
             return Err(Error::FirmwareBinding);
         }
         let family = profile.family();
-        if (family == Family::Ax210) != step.is_some() {
+        if (family >= Family::Ax210) != step.is_some() {
             return Err(Error::Family);
         }
         if product_reset_policy == Some(ProductResetPolicy::ManagedSap) {
@@ -434,7 +438,7 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
         if awake.rf_killed {
             return Err(Error::RfKilled);
         }
-        let maximum = if family == Family::Ax210 { 1024 } else { 2048 };
+        let maximum = if family >= Family::Ax210 { 1024 } else { 2048 };
         if !(16..=maximum).contains(&entries) || !entries.is_power_of_two() {
             return Err(Error::QueueSize);
         }
@@ -452,7 +456,7 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
                     .map(|v| v.notification_version),
             )));
         }
-        if family == Family::Ax210 {
+        if family >= Family::Ax210 {
             let iml = firmware
                 .iml()
                 .ok_or(firmware::Error::Missing("AX210 IML"))?;
@@ -471,7 +475,7 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
         };
         let (free_stride, used_stride, status_bytes, command_entries) = match family {
             Family::Ax200 => (8, 4, 12, 32),
-            Family::Ax210 => (16, 32, 2, 128),
+            _ => (16, receive::used_stride(family), 2, 128),
         };
         let free = allocate(usize::from(entries) * free_stride, Direction::Bidirectional)?;
         let used = allocate(usize::from(entries) * used_stride, Direction::Bidirectional)?;
@@ -637,32 +641,34 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
         Err(Error::Timeout { register })
     }
     fn prph_write(&mut self, address: u32, value: u32) -> Result<(), Error> {
-        self.set(0x24, 8)?;
-        self.io().delay_us(2)?;
-        self.poll_register(0x24, 0x11, 1, 15000)?;
-        let mask = if self.profile.family() == Family::Ax210 {
-            0xffffff
-        } else {
-            0xfffff
-        };
+        let mask = self.grab()?;
         self.write(0x444, (address & mask) | (3 << 24))?;
         self.write(0x44c, value)?;
-        let gp = self.read_register(0x24)?;
-        self.write(0x24, gp & !8)
+        self.release()
     }
-    fn prph_read(&mut self, address: u32) -> Result<u32, Error> {
-        self.set(0x24, 8)?;
+    /// `__iwl_trans_pcie_grab_nic_access`, giving the peripheral address mask.
+    fn grab(&mut self) -> Result<u32, Error> {
+        let family = self.profile.family();
+        let access = power::NicAccess::of(family);
+        self.set(0x24, access.request)?;
         self.io().delay_us(2)?;
-        self.poll_register(0x24, 0x11, 1, 15000)?;
-        let mask = if self.profile.family() == Family::Ax210 {
+        self.poll_register(0x24, access.mask, access.ready, 15000)?;
+        Ok(if family >= Family::Ax210 {
             0xffffff
         } else {
             0xfffff
-        };
+        })
+    }
+    fn release(&mut self) -> Result<(), Error> {
+        let access = power::NicAccess::of(self.profile.family());
+        let gp = self.read_register(0x24)?;
+        self.write(0x24, gp & !access.request)
+    }
+    fn prph_read(&mut self, address: u32) -> Result<u32, Error> {
+        let mask = self.grab()?;
         self.write(0x448, (address & mask) | (3 << 24))?;
         let value = self.read_register(0x450)?;
-        let gp = self.read_register(0x24)?;
-        self.write(0x24, gp & !8)?;
+        self.release()?;
         Ok(value)
     }
     fn publish(&mut self) -> Result<(), Error> {
@@ -678,7 +684,7 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
         // CONFIG_IWLMEI-disabled Linux performs no PLDR coordination. Keep
         // the SB value even when0x80, under this explicit unmanaged
         // ownership mode. Never infer mode or a fictional ACK from that flag.
-        if self.profile.family() == Family::Ax210 {
+        if self.profile.family() >= Family::Ax210 {
             if self.product_reset_policy != Some(ProductResetPolicy::NoIwlmei) {
                 return Err(Error::ManagedSapUnsupported);
             }
@@ -724,7 +730,7 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
         self.state = State::Published;
         fence(Ordering::Release);
         let address = self.context.region().address;
-        let register = if self.profile.family() == Family::Ax210 {
+        let register = if self.profile.family() >= Family::Ax210 {
             0x118
         } else {
             0x40
@@ -755,9 +761,15 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
                 self.write(MSIX_HW_CAUSES, IML_CAUSE)?;
                 true
             }
+            (true, _) => false,
         };
-        let offset = if family == Family::Ax210 { 0x300000 } else { 0 };
-        self.prph_write(0xa05c44 + offset, 1)?;
+        if family >= Family::Bz {
+            self.write(FUNC_SCRATCH, FUNC_SCRATCH_INIT)?;
+            self.set(0x24, ROM_START)?;
+        } else {
+            let offset = if family >= Family::Ax210 { 0x300000 } else { 0 };
+            self.prph_write(0xa05c44 + offset, 1)?;
+        }
         if keep_busy {
             self.spin_for_iml()?;
         }
@@ -804,7 +816,15 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
         self.receive_ring.initial(self.entries, published);
         self.state = State::Restocked;
         fence(Ordering::Release);
-        self.write(0x1c80, u32::from(published))
+        self.ring_receive_doorbell(published)
+    }
+    /// `iwl_pcie_rxq_inc_wr_ptr` for the default queue.
+    pub(super) fn ring_receive_doorbell(&mut self, write: u16) -> Result<(), Error> {
+        if self.profile.family() >= Family::Bz {
+            self.write(HBUS_TARG_WRPTR, u32::from(write))
+        } else {
+            self.write(0x1c80, u32::from(write))
+        }
     }
     fn completed_buffer(&mut self) -> Result<Option<Vec<u8>>, Error> {
         // SAFETY: start checked shared coherent producer polling, kept
@@ -826,7 +846,7 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
         if self.read == closed {
             return Ok(None);
         }
-        let stride = if family == Family::Ax200 { 4 } else { 32 };
+        let stride = receive::used_stride(family);
         let mut descriptor = [0; 32];
         for offset in (0..stride).step_by(4) {
             descriptor[offset..offset + 4].copy_from_slice(
@@ -957,7 +977,7 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
         }
         let mut tables = Vec::new();
         let mut fields = Vec::new();
-        if self.profile.family() == Family::Ax210 {
+        if self.profile.family() >= Family::Ax210 {
             for (offset, chunks) in [(16, &prepared.pnvm), (60, &prepared.reduced_power)] {
                 if chunks.is_empty() {
                     continue;
@@ -1003,7 +1023,7 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
                 }
             }
             fence(Ordering::Release);
-            let offset = if self.profile.family() == Family::Ax210 {
+            let offset = if self.profile.family() >= Family::Ax210 {
                 0x300000
             } else {
                 0

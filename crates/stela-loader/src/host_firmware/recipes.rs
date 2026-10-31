@@ -286,6 +286,31 @@ pub const INTEL_WIFI: &[Recipe] = &[
         55072,
         "65ccc7ed05c0ecb3ea0374b607ecacfdc693df4e5cbf825a4c91f71ce8fa9b7b",
     ),
+    intel_wifi(
+        "intel/iwlwifi/iwlwifi-bz-b0-fm-c0-c106.ucode",
+        2150968,
+        "a0f8fb464c7203a18b28d966f0565835c8744f21ed9e53fc9a1ae9a33ed52cd3",
+    ),
+    intel_wifi(
+        "intel/iwlwifi/iwlwifi-bz-b0-fm-c0.pnvm",
+        295356,
+        "2da92f02418fbde8d8210eb582d9697faa222f8ee2da229e29b8a108ea5c4c5c",
+    ),
+    intel_wifi(
+        "intel/iwlwifi/iwlwifi-gl-c0-fm-c0-c106.ucode",
+        2134660,
+        "39a016632105fb327ba45f084a9d7f3775f3d238c20830ec9825d1773affde4d",
+    ),
+    intel_wifi(
+        "intel/iwlwifi/iwlwifi-gl-c0-fm-c0.pnvm",
+        295036,
+        "f481e3b0403ca43a0a444b01c04fa4d1582868afcb026b1e697905f0039ccfa3",
+    ),
+    intel_wifi(
+        "intel/iwlwifi/iwlwifi-sc-a0-fm-c0-c106.ucode",
+        2226844,
+        "7a4b428edf7dfc5ec1573bc1b8f98804b52e3a469aeec8187cae9aae66b583fd",
+    ),
 ];
 pub const MEDIATEK_WIFI: &[Recipe] = &[
     mediatek_wifi(

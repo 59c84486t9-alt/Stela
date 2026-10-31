@@ -16,6 +16,7 @@ fn pnvm_skus_preserve_payloads_in_both_layouts() {
         "9697e327f8171454b3c19b1ec9449753d5b934d4e91722f469616818a6d477b0"
     );
     let profile = Profile::select(Observed {
+        silicon: Default::default(),
         vendor: 0x8086,
         device: 0x2725,
         subsystem_vendor: 0x8086,
@@ -94,6 +95,7 @@ fn pnvm_and_reduced_power_tables_match_linux_for_both_layouts() {
     );
     let pnvm = pnvm::Pnvm::parse(&bytes).unwrap();
     let profile = Profile::select(Observed {
+        silicon: Default::default(),
         vendor: 0x8086,
         device: 0x2725,
         subsystem_vendor: 0x8086,

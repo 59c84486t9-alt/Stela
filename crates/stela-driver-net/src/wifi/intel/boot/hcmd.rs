@@ -156,7 +156,7 @@ impl Queue {
         source: &dyn PageSource,
         domain: Arc<dyn DmaDomain>,
     ) -> Result<Self, Error> {
-        let slots = if profile.family() == Family::Ax210 {
+        let slots = if profile.family() >= Family::Ax210 {
             128
         } else {
             32
