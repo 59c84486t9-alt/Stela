@@ -29,7 +29,7 @@ use crate::wifi::{
         NO_6GHZ_AFC_CLIENT, NO_6GHZ_VLP_CLIENT, NO_80MHZ, NO_160MHZ, NO_HT40MINUS, NO_HT40PLUS,
         NO_IR,
     },
-    regulatory::{self, Operation, ProbeProfiles, Purpose, TxProfile, Width, database},
+    regulatory::{self, Operation, PowerType, ProbeProfiles, Purpose, TxProfile, Width, database},
     security::{
         Cipher, InstallOutcome, InstallTicket, Integrity, KeyIdentity, KeyScope, KeySlot,
         PacketNumber, ReplaySeed, TransmitSeed,
@@ -44,7 +44,9 @@ use crate::wifi::{
         external,
         fragments::Fragments,
         multi_link::Affiliation,
+        operations::Operations,
         phy::{self, Capabilities, Role},
+        power_envelope::PowerEnvelope,
         wire::six_ghz::Selection,
     },
 };
@@ -465,6 +467,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
     fn operate(&mut self, queue: &mut Queue<Q, B>) -> Result<(), Error> {
         let now = self.clock.now_us();
         if let Some(plan) = self.client.plan.take() {
+            self.limit_six_ghz_power(queue);
             self.arrive(plan, now)?;
         }
         self.take_notifications(queue, now)?;
@@ -509,6 +512,48 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         self.run_steps(queue)?;
         self.send_management(queue)?;
         self.send_data(queue)
+    }
+
+    /// `iwl_mvm_mld_assign_vif_chanctx`: tell firmware what a 6 GHz AP's power
+    /// type and envelopes allow before the first frame to it.
+    fn limit_six_ghz_power(&mut self, queue: &mut Queue<Q, B>) {
+        let Some(bss) = self.selected.as_ref().map(|selected| &selected.bss) else {
+            return;
+        };
+        let wide = self.wide(bss.channel.band);
+        let flags = self
+            .client
+            .channels
+            .iter()
+            .find(|(channel, _)| *channel == bss.channel)
+            .map_or(0, |(_, flags)| *flags);
+        let (Some(_), Ok(operations)) = (
+            queue.firmware().command_version(
+                commands::POWER_CONSTRAINTS.group,
+                commands::POWER_CONSTRAINTS.opcode,
+            ),
+            Operations::parse(&bss.elements),
+        ) else {
+            return;
+        };
+        let six = operations.he.as_ref().and_then(|he| he.six_ghz);
+        let Some(ap_type) = six.and_then(|six| PowerType::of((six[1] & 0x78) >> 3, flags)) else {
+            return;
+        };
+        let mut envelope = PowerEnvelope::parse(&bss.elements);
+        match operations.channel(bss.channel, phy::Mode::He, None) {
+            Ok(ap) => {
+                let widest = if wide {
+                    phy::Width::Mhz160
+                } else {
+                    phy::Width::Mhz80
+                };
+                envelope.fit(&ap, &ap.narrowed_to(widest));
+            }
+            Err(_) => envelope = PowerEnvelope::none(),
+        }
+        let bytes = commands::power_constraints(ap_type, &envelope);
+        self.client.command(commands::POWER_CONSTRAINTS, bytes);
     }
 
     /// The chain is up: start what it was raised for, under session protection.

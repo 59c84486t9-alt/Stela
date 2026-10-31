@@ -75,7 +75,7 @@ pub struct ChannelDefinition {
     pub punctured: u16,
 }
 
-fn mhz(width: Width) -> u32 {
+pub(super) fn mhz(width: Width) -> u32 {
     match width {
         Width::Mhz20 => 20,
         Width::Mhz40 => 40,
@@ -236,6 +236,38 @@ impl ChannelDefinition {
             return Err(Error::Invalid("operating channel geometry/puncture"));
         }
         Ok(())
+    }
+}
+
+impl ChannelDefinition {
+    /// `ieee80211_chandef_downgrade`: the half with the control channel, and
+    /// the primary 80 MHz of 80+80.
+    pub fn downgraded(mut self) -> Self {
+        let (width, shift) = match self.width {
+            Width::Mhz20 => return self,
+            Width::Mhz40 => (Width::Mhz20, 10),
+            Width::Mhz80 => (Width::Mhz40, 20),
+            Width::Mhz80P80 => (Width::Mhz80, 0),
+            Width::Mhz160 => (Width::Mhz80, 40),
+            Width::Mhz320 => (Width::Mhz160, 80),
+        };
+        self.center1_mhz = if u32::from(self.control.frequency_mhz) < self.center1_mhz {
+            self.center1_mhz - shift
+        } else {
+            self.center1_mhz + shift
+        };
+        self.width = width;
+        self.center2_mhz = None;
+        self
+    }
+
+    /// This channel as a station limited to `width` joins it.
+    pub fn narrowed_to(mut self, width: Width) -> Self {
+        while mhz(self.width) > mhz(width) || (self.width == Width::Mhz80P80 && width != self.width)
+        {
+            self = self.downgraded();
+        }
+        self
     }
 }
 

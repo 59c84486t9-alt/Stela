@@ -34,6 +34,7 @@ pub mod data;
 pub mod fragments;
 pub mod operations;
 pub mod phy;
+pub mod power_envelope;
 pub mod wire;
 
 static NEXT_ASSOCIATION: super::Identities = super::Identities::new();

@@ -13,11 +13,13 @@ use crate::{
     Mac,
     wifi::{
         Band,
+        regulatory::PowerType,
         security::{Cipher, management::ManagementCipher},
         station::{
             AssociationContext,
             operations::MuEdcaRecord,
             phy::{AccessCategory, He, Mode, Negotiated, Width},
+            power_envelope::PowerEnvelope,
         },
     },
 };
@@ -61,6 +63,11 @@ pub const SECURITY_KEY: Id = Id {
 pub const SMART_FIFO: Id = Id {
     group: 0,
     opcode: 0xd1,
+    version: 0,
+};
+pub const POWER_CONSTRAINTS: Id = Id {
+    group: 4,
+    opcode: 0x0c,
     version: 0,
 };
 pub const MAC_POWER: Id = Id {
@@ -247,6 +254,26 @@ const fn firmware_category(aci: usize) -> usize {
         1 => 0,
         other => other,
     }
+}
+
+/// `iwl_mvm_send_ap_tx_power_constraint_cmd` for link 0 of a station, with
+/// `iwl_mvm_tpe_sta_cmd_data`'s stricter of the AP's own and client limits.
+pub fn power_constraints(ap_type: PowerType, envelope: &PowerEnvelope) -> Vec<u8> {
+    let mut bytes = alloc::vec![0; 28];
+    bytes[2] = match ap_type {
+        PowerType::LowPowerIndoor => 0,
+        PowerType::StandardPower => 1,
+        PowerType::VeryLowPower => 2,
+    };
+    let (local, client) = (&envelope.max_local[0], &envelope.max_client[0]);
+    for (index, out) in bytes[4..9].iter_mut().enumerate() {
+        *out = local.power[index].min(client.power[index]) as u8;
+    }
+    let (local, client) = (&envelope.psd_local[0], &envelope.psd_client[0]);
+    for (index, out) in bytes[9..25].iter_mut().enumerate() {
+        *out = local.power[index].min(client.power[index]) as u8;
+    }
+    bytes
 }
 
 /// `iwl_mvm_link_changed` for every part but activation.
@@ -746,6 +773,20 @@ pub fn protection(context: &AssociationContext) -> Protection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn power_constraints_take_the_stricter_limit_of_each_width() {
+        let mut envelope = PowerEnvelope::none();
+        envelope.max_local[0].power[0] = 30;
+        envelope.max_client[0].power[0] = 20;
+        envelope.psd_client[0].power[15] = -8;
+        let bytes = power_constraints(PowerType::VeryLowPower, &envelope);
+        assert_eq!(bytes.len(), 28);
+        assert_eq!(bytes[..4], [0, 0, 2, 0]);
+        assert_eq!(bytes[4..6], [20, 127]);
+        assert_eq!(bytes[23..25], [127, 0xf8]);
+        assert_eq!(bytes[25..], [0; 3]);
+    }
 
     #[test]
     fn mandatory_rates_fill_in_below_the_lowest_basic_rate() {
