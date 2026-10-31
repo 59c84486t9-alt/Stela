@@ -214,10 +214,12 @@ pub fn decide(
     }) {
         return Err(Leave::Display(display));
     }
-    if let Some(&held) = reserved
-        .iter()
-        .find(|&&rid| covered.contains(&rid) && !function(rid).is_some_and(Present::usb))
-    {
+    if let Some(&held) = reserved.iter().find(|&&rid| {
+        covered.contains(&rid)
+            && !function(rid).is_some_and(|function| {
+                function.usb() || (function.display() && claimed_displays.contains(&rid))
+            })
+    }) {
         return Err(Leave::Reserved(held));
     }
     Ok(covered)
@@ -490,6 +492,24 @@ mod tests {
         assert_eq!(
             plan(&remapping, 0, &present, &[])[1],
             (0, Err(Leave::Reserved(0x0200)))
+        );
+    }
+
+    #[test]
+    fn a_claimed_display_may_keep_its_reserved_ranges_but_other_classes_may_not() {
+        let present = inventory();
+        let all = remainder(&present, &[]);
+        assert_eq!(
+            decide(&all, &[0x0010], &present, &[0x0010]),
+            Ok(all.clone())
+        );
+        assert_eq!(
+            decide(&all, &[0x0010], &present, &[]),
+            Err(Leave::Display(0x0010))
+        );
+        assert_eq!(
+            decide(&all, &[0x0200], &present, &[0x0010, 0x0200]),
+            Err(Leave::Reserved(0x0200))
         );
     }
 
