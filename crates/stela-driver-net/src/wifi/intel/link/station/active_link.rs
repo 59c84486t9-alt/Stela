@@ -286,6 +286,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                 0
             },
         );
+        let second = second.filter(|_| !client.barred(dormant));
         let load = [
             statistics.load_not_by_us[seat],
             statistics.load_not_by_us[other],

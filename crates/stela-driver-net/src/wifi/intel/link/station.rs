@@ -65,6 +65,7 @@ mod emlsr;
 mod fifos;
 mod grade;
 mod he;
+mod link_changes;
 mod link_scan;
 mod reception;
 mod statistics;
@@ -294,6 +295,8 @@ pub(super) struct Client {
     context: Option<Arc<AssociationContext>>,
     /// The other link an MLD association made.
     dormant: Option<Arc<AssociationContext>>,
+    /// What the AP MLD is doing to its links.
+    changes: link_changes::LinkChanges,
     /// Which of firmware's two sets of link IDs the active link holds.
     seat: u8,
     /// A new look at the links is due.
@@ -349,6 +352,7 @@ impl Client {
             admitted: None,
             context: None,
             dormant: None,
+            changes: link_changes::LinkChanges::default(),
             seat: 0,
             reselect: false,
             link_scan: link_scan::LinkScan::default(),
@@ -415,6 +419,7 @@ impl Client {
         self.admitted = None;
         self.context = None;
         self.dormant = None;
+        self.changes = link_changes::LinkChanges::default();
         self.reselect = false;
         self.link_scan = link_scan::LinkScan::default();
         self.statistics = statistics::Statistics::default();
@@ -470,6 +475,21 @@ impl Client {
                 if links.next().is_some() {
                     self.unsupported("a third MLO link: it stays dormant for good");
                 }
+                let valid = link_changes::link_bit(&context)
+                    | self.dormant.as_deref().map_or(0, link_changes::link_bit);
+                let changes = if valid == 0 {
+                    Some(link_changes::LinkChanges::default())
+                } else {
+                    link_changes::LinkChanges::answered(&response.elements, valid)
+                };
+                let Some(changes) = changes else {
+                    self.admitted = None;
+                    if let Ok(Action::Remove { ticket, failure }) = self.station.disconnect() {
+                        self.depart(ticket, failure);
+                    }
+                    return;
+                };
+                self.changes = changes;
                 self.admitted = Some((ticket, context));
             }
             // Every join here is a modern one, which carries its context.
@@ -642,6 +662,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         self.run_coexistence(queue)?;
         self.run_steps(queue)?;
         self.run_emlsr(queue, now)?;
+        self.run_link_changes(queue, now)?;
         self.run_steps(queue)?;
         self.run_link_scan(queue, now)?;
         self.run_steps(queue)?;

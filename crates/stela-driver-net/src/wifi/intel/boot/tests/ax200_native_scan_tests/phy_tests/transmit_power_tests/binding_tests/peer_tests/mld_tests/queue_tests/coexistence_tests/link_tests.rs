@@ -1935,6 +1935,100 @@ fn miss_beacons(wifi: &mut Station<Model, ClockBios>, device: &mut Device<'_>) {
     assert!(!run(wifi, device, |_, device, _| device.scans.len() > 1));
 }
 
+/// A Reconfiguration element removing `links`, `timer` beacons from now.
+fn removal(links: &[u8], timer: u16) -> Vec<u8> {
+    let mut body = vec![107, 2, 0, 1];
+    for link in links {
+        body.extend([0, 5, *link | 0x40, 0, 3]);
+        body.extend(timer.to_le_bytes());
+    }
+    [&[255, body.len() as u8][..], &body].concat()
+}
+
+/// A mapping of every TID to `links` from `switch_time` on.
+fn mapping(links: u8, switch_time: u16) -> Vec<u8> {
+    let mut element = vec![255, 13, 109, 2 | 0x08 | 0x20, 0xff];
+    element.extend(switch_time.to_le_bytes());
+    element.extend([links; 8]);
+    element
+}
+
+#[test]
+fn a_link_the_ap_removes_gives_way_to_the_other_for_good() {
+    let native = Native::default();
+    let (mut wifi, mut device, _, _) = moved_mld(&native);
+    let announced = device.configuration.len();
+    device.inject(
+        wifi.radio().rom().unwrap(),
+        &announcing_beacon([60, 60], &removal(&[5], 0)),
+    );
+    assert!(
+        lowered(&mut wifi, &mut device, announced),
+        "{:?}",
+        wifi.radio().error()
+    );
+    settle(&mut wifi, &mut device);
+    assert_eq!(wifi.radio().link_count(), 1);
+    assert!(wifi.carrier());
+    let (_, new) = device.configuration[announced..]
+        .iter()
+        .find(|(opcode, bytes)| *opcode == 9 && word(bytes, 0) == 1)
+        .unwrap();
+    assert_eq!(new[166], 3);
+}
+
+#[test]
+fn the_dormant_link_the_ap_removes_just_goes() {
+    let native = Native::default();
+    let (mut wifi, mut device, _, _) = moved_mld(&native);
+    let announced = device.configuration.len();
+    device.inject(
+        wifi.radio().rom().unwrap(),
+        &announcing_beacon([60, 60], &removal(&[3], 0)),
+    );
+    settle(&mut wifi, &mut device);
+    assert_eq!(wifi.radio().link_count(), 1);
+    assert!(links_since(&device, announced).is_empty());
+    assert!(wifi.carrier());
+}
+
+#[test]
+fn removing_every_link_ends_the_association() {
+    let native = Native::default();
+    let (mut wifi, mut device, _, _) = moved_mld(&native);
+    device.inject(
+        wifi.radio().rom().unwrap(),
+        &announcing_beacon([60, 60], &removal(&[3, 5], 0)),
+    );
+    run(&mut wifi, &mut device, |_, _, _| false);
+    assert!(!wifi.carrier());
+}
+
+#[test]
+fn an_advertised_mapping_moves_the_station_off_a_link_it_leaves_out_when_it_comes() {
+    let native = Native::default();
+    let (mut wifi, mut device, _, _) = moved_mld(&native);
+    let announced = device.configuration.len();
+    device.inject(
+        wifi.radio().rom().unwrap(),
+        // Within the time a move is given to be ready.
+        &announcing_beacon([60, 60], &mapping(1 << 3, 90)),
+    );
+    assert!(
+        lowered(&mut wifi, &mut device, announced),
+        "{:?}",
+        wifi.radio().error()
+    );
+    settle(&mut wifi, &mut device);
+    assert_eq!(wifi.radio().link_count(), 2, "it may yet come back");
+    assert!(wifi.carrier());
+    let (_, new) = device.configuration[announced..]
+        .iter()
+        .find(|(opcode, bytes)| *opcode == 9 && word(bytes, 0) == 1)
+        .unwrap();
+    assert_eq!(new[166], 3);
+}
+
 #[test]
 fn an_mld_station_moves_to_its_better_link_and_back_before_it_leaves() {
     let native = Native::default();

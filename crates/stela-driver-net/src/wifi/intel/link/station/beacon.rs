@@ -48,7 +48,7 @@ pub(super) fn switch_failed(mask: u32) -> bool {
 /// What beacons said of one link, over what association said.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct Heard {
-    ap: Mac,
+    pub(super) ap: Mac,
     pub(super) capabilities: u16,
     pub(super) protection: commands::Protection,
     /// The WMM parameter set count and parameters.
@@ -87,7 +87,7 @@ fn fitted(
 
 #[derive(Default)]
 pub(super) struct Tracking {
-    links: Vec<Heard>,
+    pub(super) links: Vec<Heard>,
     /// What the AP announced, and how far the switch has come.
     pub(super) watch: Watch,
     /// A switch firmware started that no announcement explains.
@@ -137,6 +137,11 @@ impl Client {
         };
         let own = multiple_bssid::heard(context.beacon(), elements);
         let elements = own.as_ref().map_or(elements, |own| own.elements.as_slice());
+        if context.affiliation().is_some()
+            && let Some(&timestamp) = bytes.get(24..32).and_then(|stamp| stamp.first_chunk())
+        {
+            self.links_announced(elements, u64::from_le_bytes(timestamp), now);
+        }
         let current = self.link_definition(&context);
         let band = current.control.band;
         let parsed = csa::parse(elements, Frame::Beacon, None, band, context.negotiated());
