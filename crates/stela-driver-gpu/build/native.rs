@@ -513,6 +513,7 @@ impl Linux {
             ("linux_usercopy", "usercopy.c", "STELA_LINUX_USERCOPY_TEST"),
             ("linux_dma", "dma.c", "STELA_LINUX_DMA_TEST"),
             ("linux_pci", "pci.c", "STELA_LINUX_PCI_TEST"),
+            ("linux_pci_host", "pci_host.c", "STELA_LINUX_PCI_HOST_TEST"),
             ("linux_vmalloc", "vmalloc.c", "STELA_LINUX_VMALLOC_TEST"),
             ("linux_refcount", "refcount.c", "STELA_LINUX_REFCOUNT_TEST"),
             (
