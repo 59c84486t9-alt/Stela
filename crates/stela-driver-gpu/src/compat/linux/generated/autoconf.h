@@ -38,6 +38,21 @@
 #define CONFIG_ILLEGAL_POINTER_VALUE 0xdead000000000000
 /* nouveau selects the I2C core for its buses and encoders. */
 #define CONFIG_I2C 1
+#define CONFIG_I2C_ALGOBIT 1
+/* nouveau and what its Kconfig entry selects. */
+#define CONFIG_DRM 1
+#define CONFIG_DRM_NOUVEAU 1
+#define CONFIG_DRM_TTM 1
+#define CONFIG_DRM_TTM_HELPER 1
+#define CONFIG_DRM_EXEC 1
+#define CONFIG_DRM_GPUVM 1
+#define CONFIG_DRM_SCHED 1
+#define CONFIG_DRM_KMS_HELPER 1
+#define CONFIG_DRM_DISPLAY_HELPER 1
+#define CONFIG_DRM_DISPLAY_DP_HELPER 1
+#define CONFIG_DRM_DISPLAY_HDMI_HELPER 1
+#define CONFIG_DMA_SHARED_BUFFER 1
+#define CONFIG_SYNC_FILE 1
 
 /* The drivers' parameter and scheduling defaults, as Linux's Kconfig sets them. */
 #define CONFIG_DRM_XE_FORCE_PROBE ""

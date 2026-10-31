@@ -68,6 +68,25 @@ int kstrtoll(const char *s, unsigned int base, long long *res)
 	return 0;
 }
 
+/* The digits of base at cp, stopping at the first other character. */
+long simple_strtol(const char *cp, char **endp, unsigned int base)
+{
+	bool negative = *cp == '-';
+	unsigned long value = 0;
+
+	if (negative)
+		cp++;
+	if (!base)
+		base = hex_prefix(cp) ? 16 : *cp == '0' ? 8 : 10;
+	if (base == 16 && hex_prefix(cp))
+		cp += 2;
+	for (; digit(*cp) < base; cp++)
+		value = value * base + digit(*cp);
+	if (endp)
+		*endp = (char *)cp;
+	return negative ? -(long)value : (long)value;
+}
+
 int kstrtou16(const char *s, unsigned int base, u16 *res)
 {
 	unsigned long long value;

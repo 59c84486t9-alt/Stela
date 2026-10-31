@@ -76,8 +76,8 @@ static size_t alignment(size_t size)
 
 static bool request_supported(gfp_t flags)
 {
-	gfp_t allowed = GFP_KERNEL | __GFP_ZERO | __GFP_NOWARN | __GFP_NOMEMALLOC |
-		__GFP_NORETRY;
+	gfp_t allowed = GFP_USER | __GFP_HIGH | __GFP_ZERO | __GFP_NOWARN | __GFP_NOMEMALLOC |
+		__GFP_NORETRY | __GFP_RETRY_MAYFAIL;
 	if (!IS_ENABLED(CONFIG_MEMCG))
 		allowed |= __GFP_ACCOUNT;
 	bool quiescent = stela_linux_quiescent();
@@ -157,6 +157,29 @@ void *__kmalloc_node_track_caller_noprof(DECL_KMALLOC_PARAMS(size, b, token),
  (void)node;
  (void)caller;
  return allocate(size, flags, ARCH_KMALLOC_MINALIGN);
+}
+
+/* A fresh object unless the old one already fits, as mm/slub.c; a growing
+ * __GFP_ZERO caller gets zeroes past the old bytes. */
+void *krealloc_node_align_noprof(const void *object, DECL_TOKEN_PARAMS(new_size, token),
+				 unsigned long align, gfp_t flags, int node)
+{
+	(void)node;
+	if (!new_size) {
+		kfree(object);
+		return ZERO_SIZE_PTR;
+	}
+	if (WARN_ON_ONCE(align > ARCH_KMALLOC_MINALIGN))
+		return NULL;
+	size_t old_size = ksize(object);
+	if (new_size <= old_size)
+		return (void *)object;
+	void *fresh = __kmalloc_noprof(PASS_TOKEN_PARAMS(new_size, token), flags);
+	if (fresh && old_size) {
+		memcpy(fresh, object, old_size);
+		kfree(object);
+	}
+	return fresh;
 }
 
 size_t ksize(const void *object)
@@ -259,7 +282,7 @@ static void policy_and_context(void)
 		GFP_KERNEL | __GFP_DMA, GFP_KERNEL | __GFP_DMA32,
 		GFP_KERNEL | __GFP_RECLAIMABLE, GFP_KERNEL | __GFP_MOVABLE,
 		GFP_KERNEL | __GFP_COMP, GFP_KERNEL | __GFP_MEMALLOC,
-		GFP_KERNEL | __GFP_RETRY_MAYFAIL, GFP_KERNEL | __GFP_NOFAIL,
+		GFP_KERNEL | __GFP_NOFAIL,
 		GFP_KERNEL | __GFP_THISNODE,
 		GFP_KERNEL | (__force gfp_t)(1U << 31),
 	};
@@ -350,7 +373,7 @@ static void nonblocking_policy_and_context(void)
 	unsigned int before = refusals;
 	const gfp_t flags[] = {
 		0, GFP_NOWAIT | __GFP_NOWARN | __GFP_NOMEMALLOC | __GFP_NORETRY,
-		GFP_NOWAIT | __GFP_ACCOUNT,
+		GFP_NOWAIT | __GFP_ACCOUNT, GFP_ATOMIC,
 	};
 	for (size_t i = 0; i < ARRAY_SIZE(flags); i++) {
 		void *object = __kmalloc_noprof(128, flags[i]);
@@ -358,7 +381,6 @@ static void nonblocking_policy_and_context(void)
 		kfree(object);
 	}
 	assert(refusals == before);
-	check_refusal(GFP_ATOMIC);
 	check_refusal(GFP_NOWAIT | __GFP_RECLAIMABLE);
 	check_refusal(GFP_NOWAIT | __GFP_MOVABLE);
 	stela_test_heap_try_enable(false);

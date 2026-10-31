@@ -101,6 +101,13 @@ static bool supported(struct device *dev, u64 mask)
 	return !ops->dma_supported || ops->dma_supported(dev, mask);
 }
 
+size_t dma_max_mapping_size(struct device *dev)
+{
+	const struct dma_map_ops *ops = get_dma_ops(dev);
+
+	return ops && ops->max_mapping_size ? ops->max_mapping_size(dev) : SIZE_MAX;
+}
+
 int dma_set_mask(struct device *dev, u64 mask)
 {
 	if (!dev->dma_mask || !supported(dev, mask))

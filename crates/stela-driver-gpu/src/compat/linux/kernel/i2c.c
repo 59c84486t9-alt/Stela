@@ -43,6 +43,12 @@ static void adapter_released(struct device *dev)
 	complete(&to_i2c_adapter(dev)->dev_released);
 }
 
+/* Adapter numbers name no fixed board wiring under Stela. */
+int i2c_add_numbered_adapter(struct i2c_adapter *adapter)
+{
+	return i2c_add_adapter(adapter);
+}
+
 int i2c_add_adapter(struct i2c_adapter *adapter)
 {
 	if (WARN(!adapter->name[0], "an I2C adapter has no name\n"))

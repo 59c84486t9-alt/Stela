@@ -28,6 +28,8 @@ pub mod linux;
 mod c_tests {
     extern crate std;
 
+    // Clippy's build compiles no C, so it lists no programs.
+    #[cfg_attr(clippy, allow(dead_code))]
     fn run(program: &str) {
         let output = std::process::Command::new(program)
             .output()

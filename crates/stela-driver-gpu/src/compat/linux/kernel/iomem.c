@@ -43,6 +43,19 @@ void __iomem *ioremap(phys_addr_t offset, size_t size)
 	return mapping ? (void __iomem *)(mapping + (offset - base)) : NULL;
 }
 
+/* Uncached mappings serve every memremap flag: they order more strictly than
+ * any flag asks. */
+void *memremap(resource_size_t offset, size_t size, unsigned long flags)
+{
+	(void)flags;
+	return (void __force *)ioremap(offset, size);
+}
+
+void memunmap(void *addr)
+{
+	iounmap((void __iomem __force *)addr);
+}
+
 void iounmap(volatile void __iomem *addr)
 {
 	const struct stela_linux_owner *owner = stela_linux_owner();

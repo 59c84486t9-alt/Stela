@@ -75,6 +75,17 @@ static struct {
 static u64 last_generation;
 static bool in_callback;
 
+/* The one memory node the catalog's pages form, for what Linux code reads of
+ * it, and its page counters, which nothing moves. */
+struct pglist_data contig_page_data;
+atomic_long_t vm_node_stat[NR_VM_NODE_STAT_ITEMS];
+DEFINE_STATIC_KEY_MAYBE(CONFIG_INIT_ON_FREE_DEFAULT_ON, init_on_free);
+
+void si_meminfo(struct sysinfo *info)
+{
+	*info = (struct sysinfo){.totalram = catalog.page_count, .mem_unit = PAGE_SIZE};
+}
+
 #ifdef STELA_LINUX_PAGE_TEST
 static size_t metadata_fail_after = NO_INDEX;
 static size_t metadata_live;
@@ -254,6 +265,7 @@ static int register_inventory(
     catalog.free_records = 0;
     catalog.retired = NO_INDEX;
     catalog.next_stack_nonce = 1;
+    atomic_long_set(&contig_page_data.node_zones[ZONE_NORMAL].managed_pages, (long)count);
     last_generation = generation;
     return 0;
 }

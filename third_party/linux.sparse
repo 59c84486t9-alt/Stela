@@ -82,3 +82,14 @@
 /init/init_task.c
 /lib/refcount.c
 /lib/refcount_lock.c
+/drivers/dma-buf/Makefile
+/drivers/dma-buf/dma-fence.c
+/drivers/dma-buf/dma-resv.c
+/drivers/dma-buf/dma-buf.c
+/drivers/dma-buf/dma-buf-mapping.c
+/drivers/dma-buf/sync_file.c
+/drivers/dma-buf/dma-fence-chain.c
+/drivers/dma-buf/dma-fence-array.c
+/drivers/dma-buf/dma-fence-unwrap.c
+/lib/maple_tree.c
+/drivers/video/hdmi.c

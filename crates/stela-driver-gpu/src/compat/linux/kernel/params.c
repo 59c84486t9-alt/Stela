@@ -522,6 +522,9 @@ const struct kernel_param_ops param_ops_int = {.set = param_set_int, .get = para
 const struct kernel_param_ops param_ops_uint = {.set = param_set_uint, .get = param_get_uint};
 const struct kernel_param_ops param_ops_hexint = {.set = param_set_hexint, .get = param_get_hexint};
 const struct kernel_param_ops param_ops_ullong = {.set = param_set_ullong, .get = param_get_ullong};
+/* unsigned long is unsigned long long on Stela's LP64 x86-64. */
+static_assert(sizeof(unsigned long) == sizeof(unsigned long long));
+const struct kernel_param_ops param_ops_ulong = {.set = param_set_ullong, .get = param_get_ullong};
 const struct kernel_param_ops param_ops_charp = {
 	.set = param_set_charp, .get = param_get_charp, .free = param_free_charp,
 };

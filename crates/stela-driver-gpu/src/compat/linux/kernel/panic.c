@@ -6,6 +6,9 @@
 #include <linux/sprintf.h>
 #include <stela/linux.h>
 
+/* Stela's panics never return, so no console is ever left mid-oops. */
+int oops_in_progress;
+
 void vpanic(const char *fmt, va_list args)
 {
 	/* Same bounded message size as the selected printk adapter. Keep storage

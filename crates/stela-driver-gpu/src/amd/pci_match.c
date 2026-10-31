@@ -10,7 +10,7 @@
 
 /* The DRM driver amdgpu_drv.c registers: its probe, power management, error
  * recovery and removal, its ioctls and file operations, and its sysfs
- * attributes. Stela registers no PCI or DRM driver, so none of them runs. */
+ * attributes. Stela registers no amdgpu driver, so none of them runs. */
 STELA_UNSUPPORTED(int, amdgpu_amdkfd_drm_client_create, struct amdgpu_device *)
 STELA_UNSUPPORTED(void, amdgpu_amdkfd_fini, void)
 STELA_UNSUPPORTED(int, amdgpu_bo_list_ioctl, struct drm_device *, void *, struct drm_file *)

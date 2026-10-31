@@ -196,6 +196,26 @@ void *__kvmalloc_node_noprof(DECL_KMALLOC_PARAMS(size, b, token), unsigned long 
 	return __vmalloc_noprof(size, flags);
 }
 
+void *kvrealloc_node_align_noprof(const void *object, DECL_TOKEN_PARAMS(size, token),
+				  unsigned long align, gfp_t flags, int node)
+{
+	if (!is_vmalloc_addr(object)) {
+		void *resized = krealloc_node_align_noprof(object, PASS_TOKEN_PARAMS(size, token),
+							   align, flags | __GFP_NOWARN, node);
+		if (resized)
+			return resized;
+	}
+	void *fresh = __kvmalloc_node_noprof(PASS_KMALLOC_PARAMS(size, NULL, token), align, flags,
+					     node);
+	if (!fresh || !object)
+		return fresh;
+	const struct area *area = area_of(object);
+	size_t old_size = area ? (size_t)area->count << PAGE_SHIFT : ksize(object);
+	memcpy(fresh, object, min(old_size, size));
+	kvfree(object);
+	return fresh;
+}
+
 #ifdef STELA_LINUX_VMALLOC_TEST
 #include <stela/page.h>
 #include <stela/test.h>
@@ -323,6 +343,13 @@ int main(void)
 	vfree(NULL);
 	vfree(zeroed);
 	assert(unmapped == 5);
+
+	/* A slab object keeps its bytes when it grows. */
+	u8 *grown = kvmalloc(16, GFP_KERNEL);
+	grown[15] = 0x5a;
+	u8 *resized = kvrealloc(grown, 32, GFP_KERNEL);
+	assert(resized && !is_vmalloc_addr(resized) && resized[15] == 0x5a);
+	kvfree(resized);
 	stela_linux_exit();
 	printf("Linux vmalloc over the owner's page mappings passed\n");
 	return 0;

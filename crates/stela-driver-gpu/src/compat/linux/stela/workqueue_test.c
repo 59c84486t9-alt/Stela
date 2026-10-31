@@ -14,6 +14,16 @@ void stela_linux_workqueue_test_bind(void *context, int (*start_worker)(void *co
 void stela_linux_workqueue_test_worker(void *context);
 void stela_linux_workqueue_test_main(void *context);
 void stela_linux_i2c_test(void);
+void stela_linux_sync_test(void);
+
+/* The owner's clock, which the sync test moves. */
+s64 stela_linux_test_now = NSEC_PER_SEC;
+
+static s64 now_ns(void *context)
+{
+	(void)context;
+	return stela_linux_test_now;
+}
 
 struct start {
 	void *context;
@@ -56,6 +66,7 @@ static void irq_disable(void *context, unsigned int irq)
 }
 
 static const struct stela_linux_services services = {
+	.now_ns = now_ns,
 	.start_worker = start_worker,
 	.shutdown = shutdown,
 	.irq_enable = irq_enable,
@@ -194,5 +205,6 @@ void stela_linux_workqueue_test_main(void *context)
 	assert(!strcmp(free_irq(7, &hard_runs), "threaded") && line_disables == 1);
 	assert(!strcmp(free_irq(7, &forced), "other") && line_disables == 2);
 	stela_linux_i2c_test();
+	stela_linux_sync_test();
 	stela_linux_exit();
 }

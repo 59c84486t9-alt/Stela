@@ -190,7 +190,7 @@ int main(void)
    apu->registers[DRIVER_SCRATCH_2] = 10 * 1024;
    apu->registers[DRIVER_SCRATCH_0] = 0x100000;
    fails(apu, REGISTERS * 4, &unsupported);
-   assert(!strcmp(unsupported, "memremap"));
+   assert(!strcmp(unsupported, "device memory mappings"));
 
    /* Malformed calls change nothing. */
    const struct stela_amd_discovery_io io = {read32, write32, sleep_ms, NULL};

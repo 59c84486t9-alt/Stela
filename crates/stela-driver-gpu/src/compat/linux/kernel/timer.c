@@ -145,9 +145,12 @@ int timer_shutdown_sync(struct timer_list *timer)
 bool stela_linux_timers_next(unsigned long *expires)
 {
 	(void)stela_linux_owner();
+	bool found = stela_linux_hrtimers_next(expires);
 	if (hlist_empty(&pending))
-		return false;
-	*expires = hlist_entry(pending.first, struct timer_list, entry)->expires;
+		return found;
+	unsigned long first = hlist_entry(pending.first, struct timer_list, entry)->expires;
+	if (!found || time_before(first, *expires))
+		*expires = first;
 	return true;
 }
 
@@ -179,6 +182,7 @@ void stela_linux_timers_run(void)
 		function(timer);
 		stela_linux_atomic_callback_end(&scope);
 	}
+	stela_linux_hrtimers_run();
 }
 
 struct process_timer {

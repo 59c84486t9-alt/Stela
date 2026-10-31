@@ -2,9 +2,13 @@
 /* Linux's PCI core. Stela's own PCI owners enumerate, power and map
  * functions; Linux drivers match against their tables and reach the function
  * through the pci_ops the owner gives its bus. */
+#include <linux/delay.h>
 #include <linux/device.h>
+#include <linux/err.h>
 #include <linux/io.h>
 #include <linux/pci.h>
+#include <linux/slab.h>
+#include <stela/device.h>
 #include <stela/pci.h>
 #include <unsupported.h>
 
@@ -26,10 +30,7 @@ const struct pci_device_id *pci_match_id(const struct pci_device_id *ids, struct
 	return NULL;
 }
 
-/* Driver registration, probe, power management and removal, which Stela's
- * PCI owners perform instead of Linux's drivers. */
-STELA_UNSUPPORTED(int, __pci_register_driver, struct pci_driver *, struct module *, const char *)
-STELA_UNSUPPORTED(void, pci_unregister_driver, struct pci_driver *)
+/* Managed enabling and wake configuration, which no selected driver uses. */
 STELA_UNSUPPORTED(int, pcim_enable_device, struct pci_dev *)
 STELA_UNSUPPORTED(int, pci_wait_for_pending_transaction, struct pci_dev *)
 STELA_UNSUPPORTED(int, pci_wake_from_d3, struct pci_dev *, bool)
@@ -116,19 +117,149 @@ u8 pci_find_capability(struct pci_dev *dev, int cap)
 	return 0;
 }
 
-/* The devices their owners registered, for lookups by address. */
+const struct bus_type pci_bus_type = {.name = "pci"};
+
+/* The devices their owners registered and the drivers bound to them, as
+ * drivers/pci/pci-driver.c matches and probes. */
+struct registered_driver {
+	struct list_head node;
+	struct pci_driver *driver;
+};
+
 static LIST_HEAD(devices);
+static LIST_HEAD(drivers);
+
+static void bind(struct pci_driver *driver, struct pci_dev *dev)
+{
+	const struct pci_device_id *id = pci_match_id(driver->id_table, dev);
+
+	if (dev->driver || !id)
+		return;
+	dev->driver = driver;
+	dev->dev.driver = &driver->driver;
+	int error = driver->probe(dev, id);
+
+	if (!error)
+		return;
+	if (error != -ENODEV)
+		dev_err(&dev->dev, "%s: probe failed: %pe\n", driver->name, ERR_PTR(error));
+	stela_linux_devres_release(&dev->dev);
+	dev->dev.driver = NULL;
+	dev->driver = NULL;
+}
+
+static void unbind(struct pci_dev *dev)
+{
+	struct pci_driver *driver = dev->driver;
+
+	if (!driver)
+		return;
+	if (driver->remove)
+		driver->remove(dev);
+	stela_linux_devres_release(&dev->dev);
+	dev->dev.driver = NULL;
+	dev->driver = NULL;
+}
 
 void stela_linux_pci_add_device(struct pci_dev *dev)
 {
+	struct registered_driver *registered;
+
 	device_initialize(&dev->dev);
+	dev->dev.bus = &pci_bus_type;
 	list_add_tail(&dev->bus_list, &devices);
+	list_for_each_entry(registered, &drivers, node)
+		bind(registered->driver, dev);
 }
 
 void stela_linux_pci_remove_device(struct pci_dev *dev)
 {
+	unbind(dev);
 	list_del(&dev->bus_list);
 	put_device(&dev->dev);
+}
+
+int __pci_register_driver(struct pci_driver *driver, struct module *owner, const char *name)
+{
+	struct registered_driver *registered = kmalloc_obj(*registered);
+	struct pci_dev *dev;
+
+	(void)owner;
+	if (!registered)
+		return -ENOMEM;
+	driver->driver.name = driver->name;
+	driver->driver.mod_name = name;
+	registered->driver = driver;
+	list_add_tail(&registered->node, &drivers);
+	list_for_each_entry(dev, &devices, bus_list)
+		bind(driver, dev);
+	return 0;
+}
+
+void pci_unregister_driver(struct pci_driver *driver)
+{
+	struct registered_driver *registered;
+	struct pci_dev *dev;
+
+	list_for_each_entry(registered, &drivers, node)
+		if (registered->driver == driver) {
+			list_del(&registered->node);
+			kfree(registered);
+			break;
+		}
+	list_for_each_entry(dev, &devices, bus_list)
+		if (dev->driver == driver)
+			unbind(dev);
+}
+
+/* Owners keep their bridges' hotplug slots out of a driver's power cycles. */
+void pci_ignore_hotplug(struct pci_dev *dev)
+{
+	dev->ignore_hotplug = 1;
+}
+
+/* The standard header, which is what a function loses in D3, following
+ * drivers/pci/pci.c. */
+int pci_save_state(struct pci_dev *dev)
+{
+	for (int i = 0; i < 16; i++)
+		pci_read_config_dword(dev, i * 4, &dev->saved_config_space[i]);
+	dev->state_saved = true;
+	return 0;
+}
+
+void pci_restore_state(struct pci_dev *dev)
+{
+	if (!dev->state_saved)
+		return;
+	for (int i = 15; i >= 0; i--)
+		pci_write_config_dword(dev, i * 4, dev->saved_config_space[i]);
+	dev->state_saved = false;
+}
+
+/* The power management capability's D-state, with the settling time D3hot
+ * transitions need. A function without the capability stays in D0. */
+int pci_set_power_state(struct pci_dev *dev, pci_power_t state)
+{
+	u8 pm = pci_find_capability(dev, PCI_CAP_ID_PM);
+	u16 control;
+
+	if (state < PCI_D0 || state > PCI_D3hot)
+		return -EINVAL;
+	if (!pm)
+		return state == PCI_D0 ? 0 : -EIO;
+	pci_read_config_word(dev, pm + PCI_PM_CTRL, &control);
+	u16 current_state = control & PCI_PM_CTRL_STATE_MASK;
+	u16 target = (__force u16)state;
+
+	if (current_state == target)
+		return 0;
+	control = (control & (u16)~PCI_PM_CTRL_STATE_MASK) | target;
+	pci_write_config_word(dev, pm + PCI_PM_CTRL, control);
+	if (current_state == (__force u16)PCI_D3hot || target == (__force u16)PCI_D3hot)
+		msleep(10);
+	dev->current_state = state;
+	return 0;
 }
 
 struct pci_dev *pci_dev_get(struct pci_dev *dev)

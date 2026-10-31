@@ -4,6 +4,7 @@
  * original GPL notices remain with that source; lib/string.c itself is
  * compiled unchanged. */
 #include <linux/ctype.h>
+#include <linux/errno.h>
 #include <linux/string.h>
 
 /* skip_spaces is an exact bounded projection from the pinned original
@@ -32,6 +33,41 @@ char *strreplace(char *string, char old, char replacement)
 		cursor++;
 	}
 	return string;
+}
+
+/* As strcmp, except that one trailing newline on either string is ignored. */
+bool sysfs_streq(const char *s1, const char *s2)
+{
+	while (*s1 && *s1 == *s2) {
+		s1++;
+		s2++;
+	}
+	if (*s1 == *s2)
+		return true;
+	if (!*s1 && *s2 == '\n' && !s2[1])
+		return true;
+	return *s1 == '\n' && !s1[1] && !*s2;
+}
+
+int match_string(const char *const *array, size_t n, const char *string)
+{
+	for (size_t index = 0; index < n; index++) {
+		if (!array[index])
+			break;
+		if (!strcmp(array[index], string))
+			return (int)index;
+	}
+	return -EINVAL;
+}
+
+void memcpy_and_pad(void *dest, size_t dest_len, const void *src, size_t count, int pad)
+{
+	if (dest_len > count) {
+		memcpy(dest, src, count);
+		memset((char *)dest + count, pad, dest_len - count);
+	} else {
+		memcpy(dest, src, dest_len);
+	}
 }
 
 #ifdef STELA_LINUX_STRING_HELPERS_TEST

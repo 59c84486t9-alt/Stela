@@ -262,6 +262,9 @@ static bool quiet(const struct stela_linux_task *task)
 	return quiet_except_usage(task) && refcount_read(&task->linux_task.usage) == 1;
 }
 
+/* Every task's signal_struct: no task belongs to a process (see pid.c). */
+static struct signal_struct no_process;
+
 struct stela_linux_task *stela_linux_task_allocate(void)
 {
 	struct stela_linux_task *task = stela_linux_heap_alloc(sizeof(*task), __alignof__(*task));
@@ -269,6 +272,7 @@ struct stela_linux_task *stela_linux_task_allocate(void)
 		return NULL;
 	task->linux_task.thread_info.task = &task->linux_task;
 	task->linux_task.flags = PF_KTHREAD;
+	task->linux_task.signal = &no_process;
 	/* Equal-priority normal kernel continuations; zero prio would falsely
 	 * describe an RT task when a later separately admitted profile reads it. */
 	task->linux_task.policy = SCHED_NORMAL;
@@ -648,6 +652,12 @@ int __cond_resched(void)
 	if (result || finish_prepared(task, result))
 		__builtin_trap();
 	return 1;
+}
+
+void yield(void)
+{
+	__set_current_state(TASK_RUNNING);
+	schedule();
 }
 
 /* The whole original mutex uses precisely this scheduler boundary. Invalid
