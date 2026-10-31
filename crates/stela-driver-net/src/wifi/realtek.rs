@@ -25,6 +25,7 @@ pub mod hci;
 pub mod identity;
 pub mod interrupt;
 pub mod io;
+pub mod link;
 pub mod phy;
 pub mod power;
 pub mod receive;

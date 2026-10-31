@@ -740,6 +740,7 @@ unsafe fn realtek_wifi(
             .entropy()
             .map_err(|error| (Error::Native(error), None))?,
         vector: false,
+        link_control: 0,
     };
     // SAFETY: forwarded from the caller.
     unsafe { native::realtek_wifi(services, address, completion, inputs) }

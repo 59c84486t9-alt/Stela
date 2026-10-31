@@ -225,6 +225,11 @@ pub fn aspm_control<C: ConfigSpace>(function: &Function<C>) -> u16 {
     link_control(function).map_or(0, |at| function.config.read16(at) & PCIE_ASPM)
 }
 
+/// The function's whole PCIe Link Control register, zero without a link.
+pub fn link_control_word<C: ConfigSpace>(function: &Function<C>) -> u16 {
+    link_control(function).map_or(0, |at| function.config.read16(at))
+}
+
 /// The Current Link Speed field of the function's PCIe Link Status: zero
 /// without a link, as `pcie_capability_read_word` reads a missing register.
 pub fn link_speed<C: ConfigSpace>(function: &Function<C>) -> u8 {

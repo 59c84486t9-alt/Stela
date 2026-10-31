@@ -437,6 +437,7 @@ pub(super) unsafe fn realtek_wifi(
         .bytes()
         .and_then(|bytes| Ok((registers.address(0, bytes)?, bytes)))
         .map_err(|error| refused(ServiceError::Mapping(error)))?;
+    inputs.link_control = crate::bus::pci::link_control_word(&function);
     let config = function.config();
     let (subsystem_vendor, subsystem_device, pci_revision) =
         (config.read16(0x2c), config.read16(0x2e), config.read8(0x08));

@@ -18,6 +18,7 @@ use super::{
     firmware_control::Control,
     interrupt::Controller,
     io::{Bar, Io},
+    link::Link,
     phy::{
         FactorySheet, PhyInitialized,
         channel_power::{Geometry, Limits, Width as ChannelWidth},
@@ -113,6 +114,9 @@ const RECEIVE_BUDGET: usize = 512;
 /// alone; a board's real antennas are not known here.
 const ANTENNA_AND_COMBINING_MBM: i32 = 600 + 301;
 
+/// What the station goes without when config space stops answering the chip.
+const LINK_SILENT: &str = "PCIe link power save, for a config space bridge that did not finish";
+
 fn failed<E: Debug>(step: &'static str) -> impl FnOnce(E) -> String {
     move |error| format!("{step}: {error:?}")
 }
@@ -187,6 +191,7 @@ pub struct Hardware {
     /// `fw->feature`.
     features: u32,
     deep: Deep,
+    link: Link,
     /// The association's frames, for downloading again, and where the last
     /// download left the power gate's info and predistortion pages.
     templates: Option<Templates>,
@@ -223,6 +228,7 @@ impl Hardware {
             mac,
             pages,
             geometry,
+            link,
             ..
         } = up;
         let initial = phy.factory().calibration().initial();
@@ -236,6 +242,10 @@ impl Hardware {
             lck_reference: phy.tracking().lck_reference,
             dfs_region,
         });
+        let mut limitations = Vec::new();
+        if !link.answered() {
+            limitations.push(LINK_SILENT);
+        }
         let io = control.io().map_err(failed("registers"))?;
         write_address(io, REG_MAC_ADDRESS, mac).map_err(failed("address"))?;
         set_mask(io, REG_CR, NET_TYPE_MASK, NET_NO_LINK).map_err(failed("net type"))?;
@@ -275,12 +285,24 @@ impl Hardware {
             cck_bounds,
             features,
             deep: Deep::new(features),
+            link,
             templates: None,
             power_gate_pages: None,
             keys: 0,
             vector,
-            limitations: Vec::new(),
+            limitations,
         })
+    }
+
+    /// `rtw_hci_link_ps`.
+    fn set_link_power(&mut self, on: bool) -> Result<(), String> {
+        let answered = self.link.answered();
+        let io = self.control.io().map_err(failed("registers"))?;
+        self.link.set_l1(io, on).map_err(failed("pcie link"))?;
+        if answered && !self.link.answered() {
+            self.limitations.push(LINK_SILENT);
+        }
+        Ok(())
     }
 
     /// One of rtw88's notifiers of the arbiter, and what it asks for.
@@ -736,6 +758,7 @@ impl Device for Hardware {
                 self.control
                     .command(commands::power_mode(true, PORT))
                     .map_err(failed("power mode"))?;
+                self.set_link_power(true)?;
             }
             return if self.asleep {
                 self.enter_deep()
@@ -748,6 +771,7 @@ impl Device for Hardware {
             return Ok(());
         }
         self.asleep = false;
+        self.set_link_power(false)?;
         self.control
             .command(commands::power_mode(false, PORT))
             .map_err(failed("power mode"))?;

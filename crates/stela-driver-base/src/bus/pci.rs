@@ -22,7 +22,8 @@ pub mod power;
 pub mod regs;
 pub mod requester;
 pub use aspm::{
-    aspm_control, disable_aspm_l1_2_link, disable_aspm_link, link_speed, native as native_aspm,
+    aspm_control, disable_aspm_l1_2_link, disable_aspm_link, link_control_word, link_speed,
+    native as native_aspm,
 };
 pub use capability::{
     Capabilities, Capability, CapabilityError, ExtendedCapabilities, ExtendedCapability, Layout,

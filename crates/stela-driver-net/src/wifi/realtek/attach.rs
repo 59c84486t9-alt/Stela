@@ -34,6 +34,8 @@ pub struct Inputs {
     pub entropy: Arc<dyn Entropy>,
     /// Whether the function's MSI wakes the core that looks for frames.
     pub vector: bool,
+    /// The function's PCIe Link Control, as the platform left it.
+    pub link_control: u16,
 }
 
 /// Why the function did not reach a station. Every owner the device may still
@@ -97,6 +99,7 @@ pub unsafe fn attach(
             domain,
             firmware: inputs.firmware,
             observed,
+            link_control: inputs.link_control,
         })
     }
     .map_err(AttachError::Bootstrap)?;
