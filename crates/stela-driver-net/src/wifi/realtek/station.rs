@@ -10,7 +10,9 @@
 use super::{
     ccmp,
     commands::{self, RateInfo, Report},
-    descriptor::{Packet, QSEL_MANAGEMENT, RATE_1M, RATE_6M, RATE_ID_B, RATE_ID_G, SECURITY_CCMP},
+    descriptor::{
+        Aggregate, Packet, QSEL_MANAGEMENT, RATE_1M, RATE_6M, RATE_ID_B, RATE_ID_G, SECURITY_CCMP,
+    },
     dynamic,
     transmit::Queue,
 };
@@ -36,7 +38,8 @@ use crate::{
         },
         station::{
             Action, AssociationContext, Completion, Join, NativeBssObservation, Phase as Peering,
-            RegulatoryPolicy, Station, Ticket, ba,
+            RegulatoryPolicy, Station, Ticket,
+            ba::{self, tx},
             data::{self, Ingress, Protection, Qos, SequenceOwner, TxClass},
             external,
             multi_link::Affiliation,
@@ -71,6 +74,8 @@ const PAIRWISE_CAM: u8 = 4;
 const CAM_AES: u8 = 4;
 /// `IEEE80211_MIN_AMPDU_BUF`'s window, which `HT_RX_REORDER_BUF_TIMEOUT` serves.
 const RECEIVE_WINDOW: u16 = 64;
+/// mac80211's `max_tx_aggregation_subframes`, which rtw88 leaves alone.
+const TRANSMIT_WINDOW: u16 = 64;
 /// A reorder clock of microseconds, `HT_RX_REORDER_BUF_TIMEOUT` of 100 ms.
 const REORDER_TICKS_PER_SECOND: u32 = 1_000_000;
 /// The frames a TID waits with while its queue is full.
@@ -158,6 +163,7 @@ pub trait Device {
 pub enum Error {
     Hardware(String),
     Station(crate::wifi::station::Error),
+    BlockAck(ba::Error),
     Data(data::Error),
     Key(security::Error),
     Scan(scan::Error),
@@ -428,6 +434,15 @@ pub struct Rtl8822c<D: Device> {
     received: VecDeque<Vec<u8>>,
     /// Data frames waiting for room, each with its queue and descriptor.
     held: VecDeque<(Queue, Packet, Vec<u8>)>,
+    /// Data kept from a TID whose transmit agreement is changing, as
+    /// `ieee80211_agg_stop_txq` keeps it in the TXQ.
+    parked: VecDeque<(u8, Vec<u8>, TxClass)>,
+    /// What transmit agreements have yet to do, in turn.
+    changes: VecDeque<tx::Action>,
+    /// Each TID's agreement in force, `RTW_TXQ_AMPDU`.
+    aggregating: [Option<Arc<tx::Session>>; 8],
+    /// The TIDs an agreement cannot start on, `RTW_TXQ_BLOCK_BA`.
+    unaggregated: [bool; 8],
     admitted: Option<(Ticket, Arc<AssociationContext>)>,
     context: Option<Arc<AssociationContext>>,
     keys: Vec<Key>,
@@ -472,6 +487,10 @@ impl<D: Device> Rtl8822c<D> {
             events: VecDeque::new(),
             received: VecDeque::new(),
             held: VecDeque::new(),
+            parked: VecDeque::new(),
+            changes: VecDeque::new(),
+            aggregating: Default::default(),
+            unaggregated: [false; 8],
             admitted: None,
             context: None,
             keys: Vec::new(),
@@ -548,6 +567,20 @@ impl<D: Device> Rtl8822c<D> {
         self.admitted = None;
         self.outbox.clear();
         self.held.clear();
+        self.parked.clear();
+        self.end_aggregation();
+    }
+
+    /// `ieee80211_sta_tear_down_BA_sessions`, with no frame left to send.
+    fn end_aggregation(&mut self) {
+        for tid in 0..8 {
+            if let Ok(action) = self.station.stop_tx_block_ack(tid, false) {
+                self.changes.push_back(action);
+            }
+        }
+        if self.change_agreements().is_err() {
+            self.unsupported("a transmit agreement that would not end");
+        }
     }
 
     /// `rtw_sta_remove` and `rtw_ops_bss_info_changed` of the disassociation.
@@ -558,6 +591,9 @@ impl<D: Device> Rtl8822c<D> {
         for agreement in &mut self.agreements {
             *agreement = None;
         }
+        self.changes.clear();
+        self.aggregating = Default::default();
+        self.unaggregated = [false; 8];
         Self::hardware(self.device.command(commands::media_status(MAC_ID, false)))?;
         Self::hardware(self.device.set_port(Mac([0; 6]), 0, false))?;
         Self::hardware(self.device.filter_beacons(false))?;
@@ -741,7 +777,171 @@ impl<D: Device> Rtl8822c<D> {
             if !Self::hardware(self.device.transmit(*queue, packet, mpdu))? {
                 return Ok(());
             }
+            let session = packet
+                .aggregate
+                .and(self.aggregating[usize::from(packet.queue)].clone());
             self.held.pop_front();
+            if let Some(session) = session {
+                let now = self.clock.now_us();
+                // SAFETY: this frame just went to the rings under `session`.
+                // A stop under way has revoked it, and that refusal is right.
+                let _ = unsafe { self.station.tx_block_ack_published(&session, now) };
+            }
+        }
+        Ok(())
+    }
+
+    /// `rtw_txq_check_agg` and `rtw_txq_ba_iter` of data just queued on `tid`.
+    fn start_aggregation(&mut self, tid: u8) {
+        let index = usize::from(tid);
+        if self.aggregating[index].is_some() || self.unaggregated[index] {
+            return;
+        }
+        let now = self.clock.now_us();
+        // A PMF association's ADDBA goes under the pairwise key.
+        let started = if !self.station.requires_protected_management() {
+            self.station.begin_tx_block_ack(tid, 0, now)
+        } else if self.keys.iter().any(|key| key.pairwise) {
+            self.station.begin_authenticated_tx_block_ack(tid, 0, now)
+        } else {
+            return;
+        };
+        match started {
+            Ok(action) => self.changes.push_back(action),
+            // `ieee80211_start_tx_ba_session`'s -EINVAL ends the attempts; its
+            // other refusals leave the next frame to ask again.
+            Err(ba::Error::Unsupported | ba::Error::InvalidLimits) => {
+                self.unaggregated[index] = true;
+            }
+            Err(_) => {}
+        }
+    }
+
+    /// mac80211's aggregation work over `rtw_ops_ampdu_action`, in which
+    /// firmware holds no agreement: only a descriptor asks it to aggregate.
+    fn change_agreements(&mut self) -> Result<(), Error> {
+        while let Some(action) = self.changes.pop_front() {
+            let now = self.clock.now_us();
+            let next = match action {
+                tx::Action::Prepare { ticket, session } => {
+                    let tid = session.tid();
+                    // mac80211 numbers a frame as it leaves the TXQ, so nothing
+                    // it stopped has a number. What this numbered goes first.
+                    if self.held.iter().any(|(_, packet, _)| packet.queue == tid) {
+                        self.changes
+                            .push_front(tx::Action::Prepare { ticket, session });
+                        return Ok(());
+                    }
+                    let sequence = self
+                        .context
+                        .as_ref()
+                        .and_then(|context| self.station.next_qos_sequence(context, tid).ok());
+                    // SAFETY: new data of this TID waits in `parked`, none of
+                    // it is held, and `sequence` is the station's own counter.
+                    unsafe {
+                        self.station.complete_tx_block_ack_prepare(
+                            ticket,
+                            Completion::Accepted,
+                            sequence,
+                            now,
+                        )
+                    }
+                }
+                tx::Action::Transmit {
+                    ticket,
+                    session,
+                    bytes,
+                } => {
+                    let result = if self.left
+                        || self
+                            .station
+                            .validate_tx_block_ack_transmit(ticket, &session, &bytes)
+                            .is_err()
+                    {
+                        Completion::RejectedAndIdle
+                    } else if !self.send_agreement_frame(&bytes)? {
+                        self.changes.push_front(tx::Action::Transmit {
+                            ticket,
+                            session,
+                            bytes,
+                        });
+                        return Ok(());
+                    } else {
+                        Completion::Accepted
+                    };
+                    // SAFETY: the frame reached the rings, or never will.
+                    unsafe {
+                        self.station
+                            .complete_tx_block_ack_transmit(ticket, result, now)
+                    }
+                }
+                tx::Action::Program {
+                    ticket,
+                    session,
+                    agreement,
+                } => {
+                    if agreement.is_none() {
+                        let tid = session.tid();
+                        self.aggregating[usize::from(tid)] = None;
+                        for (_, packet, _) in &mut self.held {
+                            if packet.queue == tid {
+                                packet.aggregate = None;
+                            }
+                        }
+                    }
+                    // SAFETY: firmware holds nothing to change. As under
+                    // `IEEE80211_AMPDU_TX_STOP_CONT`, a frame in a ring goes
+                    // out as its descriptor says and later ones go singly.
+                    unsafe {
+                        self.station
+                            .complete_tx_block_ack_program(ticket, Completion::Accepted)
+                    }
+                }
+                tx::Action::Operational { session, .. } => {
+                    let tid = usize::from(session.tid());
+                    self.aggregating[tid] = Some(session);
+                    continue;
+                }
+                tx::Action::ResumeLegacy { .. } | tx::Action::None => continue,
+            }
+            .map_err(Error::BlockAck)?;
+            self.changes.push_front(next);
+        }
+        Ok(())
+    }
+
+    /// `bytes` on the management queue, sealed under PMF. False when no room.
+    fn send_agreement_frame(&mut self, bytes: &[u8]) -> Result<bool, Error> {
+        let context = self.context.clone().ok_or(Error::Refused("no context"))?;
+        let frame = if context.pmf().is_some() {
+            let mut robust = bytes.to_vec();
+            robust[1] |= 0x40;
+            self.seal(&robust)?
+        } else {
+            bytes.to_vec()
+        };
+        let basic = Some(context.negotiated().legacy.basic);
+        let packet = self.management_packet(context.channel().band, &frame, None, basic);
+        Self::hardware(self.device.transmit(Queue::Management, &packet, &frame))
+    }
+
+    /// `ieee80211_agg_start_txq` of each TID no longer changing.
+    fn release_parked(&mut self) -> Result<(), Error> {
+        let mut at = 0;
+        while at < self.parked.len() && self.held.len() < MAX_HELD {
+            let (tid, ..) = self.parked[at];
+            if self.station.tx_block_ack_blocks_data(tid) {
+                at += 1;
+                continue;
+            }
+            let Some((_, ethernet, class)) = self.parked.remove(at) else {
+                break;
+            };
+            match self.send(&ethernet, class) {
+                // mac80211 drops a frame the link can no longer take.
+                Err(Error::Data(_)) => self.unsupported("a data frame its link refused once held"),
+                result => result?,
+            }
         }
         Ok(())
     }
@@ -754,6 +954,15 @@ impl<D: Device> Rtl8822c<D> {
             .ok_or(Error::Refused("no association"))?;
         let context = self.context.clone().ok_or(Error::Refused("no context"))?;
         let tid = data::data_tid(&context, None, None, ethernet);
+        if let Some(tid) = tid
+            && self.station.tx_block_ack_blocks_data(tid)
+        {
+            if self.parked.len() >= MAX_HELD {
+                self.parked.pop_front();
+            }
+            self.parked.push_back((tid, ethernet.to_vec(), class));
+            return Ok(());
+        }
         let mut policy = Admitted(&self.channels);
         let mut keys: Vec<&mut KeySlot> = self.keys.iter_mut().map(|key| &mut key.slot).collect();
         let plan = match tid {
@@ -786,6 +995,12 @@ impl<D: Device> Rtl8822c<D> {
         };
         let queue = tid.map_or(Queue::BestEffort, tid_queue);
         let info = rate_info(&context, false, 0);
+        let aggregate = tid
+            .and_then(|tid| self.aggregating[usize::from(tid)].as_ref())
+            .and(context.negotiated().ht.as_ref())
+            .map(|ht| {
+                Aggregate::from_ht(ht.peer_ampdu_base_exponent | (ht.peer_mpdu_spacing << 2))
+            });
         let packet = Packet {
             size: mpdu.len() as u16,
             multicast: mpdu[4] & 1 != 0,
@@ -796,6 +1011,8 @@ impl<D: Device> Rtl8822c<D> {
             rate: highest_rate(&context),
             width: info.width,
             ldpc: info.ldpc,
+            stbc: u8::from(peer_stbc(&context)),
+            aggregate,
             // `rtw_tx_pkt_info_update`: mac80211 numbers a data frame.
             sequence: u16::from_le_bytes([mpdu[22], mpdu[23]]) >> 4,
             ..Packet::default()
@@ -804,6 +1021,12 @@ impl<D: Device> Rtl8822c<D> {
             self.held.pop_front();
         }
         self.held.push_back((queue, packet, mpdu));
+        if let Some(tid) = tid
+            && class == TxClass::Data
+            && queue != Queue::Voice
+        {
+            self.start_aggregation(tid);
+        }
         Ok(())
     }
 
@@ -1175,9 +1398,8 @@ impl<D: Device> Rtl8822c<D> {
                     self.deliver(frame);
                 }
             }
-            // mac80211 starts transmit agreements on traffic; this has no
-            // rate-control hook for that yet, and frames go singly without one.
-            ba::Action::Tx(_) | ba::Action::None => {}
+            ba::Action::Tx(action) => self.changes.push_back(action),
+            ba::Action::None => {}
         }
     }
 
@@ -1224,7 +1446,22 @@ impl<D: Device> Rtl8822c<D> {
                 self.outbox.push_back((None, bytes));
             }
         }
+        while !self.left
+            && self
+                .station
+                .next_tx_block_ack_deadline()
+                .is_some_and(|deadline| deadline <= now)
+        {
+            match self.station.poll_tx_block_ack(now) {
+                Ok(tx::Action::None) => break,
+                Ok(action) => self.changes.push_back(action),
+                Err(error) => return Err(Error::BlockAck(error)),
+            }
+        }
         self.send_management()?;
+        self.send_data()?;
+        self.change_agreements()?;
+        self.release_parked()?;
         self.send_data()
     }
 }
@@ -1576,6 +1813,9 @@ impl<D: Device> Radio for Rtl8822c<D> {
         if context.negotiated().ht.is_some() {
             self.station
                 .configure_rx_block_ack(RECEIVE_WINDOW, true)
+                .map_err(|_| Error::Refused("Block Ack limits"))?;
+            self.station
+                .configure_tx_block_ack(TRANSMIT_WINDOW)
                 .map_err(|_| Error::Refused("Block Ack limits"))?;
         }
         Ok(())

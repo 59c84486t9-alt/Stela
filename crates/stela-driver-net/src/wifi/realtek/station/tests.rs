@@ -343,6 +343,55 @@ fn connected() -> (Wifi<Model>, Model) {
     (wifi, model)
 }
 
+/// An IPv4 frame to the AP under `tos`.
+fn ip(tos: u8) -> Vec<u8> {
+    let mut ethernet = vec![0; 14];
+    ethernet[..6].copy_from_slice(&AP);
+    ethernet[6..12].copy_from_slice(&LOCAL);
+    ethernet[12..14].copy_from_slice(&[8, 0]);
+    ethernet.extend([0x45, tos]);
+    ethernet.extend([0; 44]);
+    ethernet
+}
+
+/// The Block Ack actions of `kind` the station sent.
+fn actions(air: &Air, kind: u8) -> Vec<&[u8]> {
+    let action =
+        |sent: &&(Queue, Packet, Vec<u8>)| sent.2[0] == 0xd0 && sent.2[24..26] == [3, kind];
+    let frames = air.sent.iter().filter(action);
+    frames.map(|sent| &sent.2[26..]).collect()
+}
+
+/// The dialog and starting sequence of each ADDBA request sent.
+fn requests(air: &Air) -> Vec<(u8, u16)> {
+    let request = |body: &[u8]| (body[0], u16::from_le_bytes([body[5], body[6]]) >> 4);
+    actions(air, 0).into_iter().map(request).collect()
+}
+
+/// The AP's ADDBA response to `dialog` for TID 0, with `status`.
+fn response(dialog: u8, status: u16) -> Vec<u8> {
+    let mut body = vec![3, 1, dialog];
+    body.extend(status.to_le_bytes());
+    body.extend((3u16 | 64 << 6).to_le_bytes());
+    body.extend([0, 0]);
+    management(0xd0, &body)
+}
+
+/// The packets of best-effort data sent.
+fn best_effort(air: &Air) -> Vec<Packet> {
+    let data = |sent: &&(Queue, Packet, Vec<u8>)| sent.0 == Queue::BestEffort;
+    air.sent.iter().filter(data).map(|sent| sent.1).collect()
+}
+
+/// `connected`, with a frame sent singly and an ADDBA request out for TID 0.
+fn asking() -> (Wifi<Model>, Model, u8) {
+    let (mut wifi, model) = connected();
+    wifi.transmit(&ip(0)).unwrap();
+    assert!(run(&mut wifi, &model, |_, air| !requests(air).is_empty()));
+    let dialog = requests(&model.0.borrow())[0].0;
+    (wifi, model, dialog)
+}
+
 /// What the station holds for the network, as each frame's first payload byte.
 fn delivered(wifi: &mut Wifi<Model>) -> Vec<u8> {
     let mut values = Vec::new();
@@ -443,12 +492,7 @@ fn data_leaves_with_its_packet_number_and_waits_out_a_full_queue() {
     let (mut wifi, model) = connected();
     let before = model.0.borrow().sent.len();
     model.0.borrow_mut().full = true;
-    let mut ethernet = vec![0; 14];
-    ethernet[..6].copy_from_slice(&AP);
-    ethernet[6..12].copy_from_slice(&LOCAL);
-    ethernet[12..14].copy_from_slice(&[8, 0]);
-    ethernet.extend([0x45, 0]);
-    ethernet.extend([0; 44]);
+    let ethernet = ip(0xc0);
     wifi.transmit(&ethernet).unwrap();
     wifi.transmit(&ethernet).unwrap();
     wifi.carrier();
@@ -458,7 +502,7 @@ fn data_leaves_with_its_packet_number_and_waits_out_a_full_queue() {
     let air = model.0.borrow();
     let (first, second) = (&air.sent[before], &air.sent[before + 1]);
     for (queue, packet, mpdu) in [first, second] {
-        assert_eq!(*queue, Queue::BestEffort);
+        assert_eq!(*queue, Queue::Voice);
         assert_eq!(packet.security, SECURITY_CCMP);
         assert_eq!(usize::from(packet.size), mpdu.len());
         assert_ne!(mpdu[1] & 0x40, 0);
@@ -558,6 +602,99 @@ fn a_block_ack_agreement_orders_what_it_holds() {
         released.extend(delivered(&mut wifi));
     }
     assert_eq!(released, [0x23]);
+}
+
+#[test]
+fn traffic_opens_an_agreement_and_what_follows_goes_aggregated() {
+    let (mut wifi, model) = connected();
+    model.0.borrow_mut().full = true;
+    wifi.transmit(&ip(0)).unwrap();
+    wifi.transmit(&ip(0)).unwrap();
+    wifi.carrier();
+    model.0.borrow_mut().full = false;
+    assert!(run(&mut wifi, &model, |_, air| !requests(air).is_empty()));
+    let (dialog, start) = requests(&model.0.borrow())[0];
+    {
+        // The ADDBA follows what is numbered, and the second frame waits.
+        let air = model.0.borrow();
+        let frames = best_effort(&air);
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].aggregate, None);
+        assert_eq!(frames[0].stbc, 1);
+        assert_eq!(start, frames[0].sequence + 1);
+    }
+    model.0.borrow_mut().hear(response(dialog, 0), false);
+    assert!(run(&mut wifi, &model, |_, air| best_effort(air).len() == 2));
+    let air = model.0.borrow();
+    let frame = best_effort(&air)[1];
+    assert_eq!(frame.aggregate, Some(Aggregate::from_ht(0x17)));
+    assert_eq!(frame.sequence, start);
+    assert_eq!(requests(&air).len(), 1);
+}
+
+#[test]
+fn a_refused_agreement_leaves_frames_single_and_the_next_asks_again() {
+    let (mut wifi, model, dialog) = asking();
+    wifi.transmit(&ip(0)).unwrap();
+    model.0.borrow_mut().hear(response(dialog, 37), false);
+    assert!(run(&mut wifi, &model, |_, air| requests(air).len() == 2));
+    let air = model.0.borrow();
+    assert_eq!(best_effort(&air).len(), 2);
+    assert_eq!(best_effort(&air)[1].aggregate, None);
+}
+
+#[test]
+fn voice_and_handshakes_stay_out_of_agreements() {
+    let (mut wifi, model) = connected();
+    wifi.transmit(&ip(0xc0)).unwrap();
+    assert!(run(&mut wifi, &model, |_, air| {
+        air.sent
+            .iter()
+            .any(|sent| sent.0 == Queue::Voice && sent.2[0] == 0x88)
+    }));
+    wifi.carrier();
+    assert_eq!(requests(&model.0.borrow()), []);
+}
+
+#[test]
+fn the_ap_ending_an_agreement_sends_frames_singly_again() {
+    let (mut wifi, model, dialog) = asking();
+    model.0.borrow_mut().hear(response(dialog, 0), false);
+    wifi.carrier();
+    wifi.transmit(&ip(0)).unwrap();
+    assert!(run(&mut wifi, &model, |_, air| best_effort(air).len() == 2));
+    assert!(best_effort(&model.0.borrow())[1].aggregate.is_some());
+    // DELBA from the recipient of TID 0.
+    let delete = management(0xd0, &[3, 2, 0, 0, 37, 0]);
+    model.0.borrow_mut().hear(delete, false);
+    wifi.carrier();
+    wifi.transmit(&ip(0)).unwrap();
+    assert!(run(&mut wifi, &model, |_, air| best_effort(air).len() == 3));
+    assert_eq!(best_effort(&model.0.borrow())[2].aggregate, None);
+}
+
+#[test]
+fn an_unanswered_request_ends_in_a_delba_and_frees_its_frames() {
+    let (mut wifi, model, _) = asking();
+    wifi.transmit(&ip(0)).unwrap();
+    assert!(run(&mut wifi, &model, |_, air| best_effort(air).len() == 2));
+    let air = model.0.borrow();
+    assert_eq!(actions(&air, 2).len(), 1);
+    assert_eq!(best_effort(&air)[1].aggregate, None);
+}
+
+#[test]
+fn a_departure_ends_what_agreements_had_begun() {
+    let (mut wifi, model, _) = asking();
+    wifi.transmit(&ip(0)).unwrap();
+    model.0.borrow_mut().hear(management(0xc0, &[1, 0]), false);
+    assert!(run(&mut wifi, &model, |wifi, air| {
+        !air.cleared.is_empty() && wifi.radio().station().phase() == Peering::Associated
+    }));
+    let radio = wifi.radio();
+    assert!(!radio.station.tx_block_ack_blocks_data(0));
+    assert!(radio.parked.is_empty() && radio.changes.is_empty());
+    assert_eq!(actions(&model.0.borrow(), 2).len(), 0);
 }
 
 #[test]
