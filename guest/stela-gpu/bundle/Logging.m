@@ -4,6 +4,8 @@
  * command buffer using the state runs, so they are read once none does, and a
  * state that never rests fills and drops messages, which it reports once.
  * os_log's formats are printf's, with OpenCL's `%vN` before the length.
+ * MTL_LOG_LEVEL and MTL_LOG_BUFFER_SIZE give queues without a state of their
+ * own one, and MTL_LOG_TO_STDERR=1 sends what no handler takes to stderr.
  */
 #include "Bundle.h"
 
@@ -19,6 +21,9 @@ typedef struct {
 typedef struct {
 	uint32_t bytes, level, subsystem, category, format, arguments;
 } StelaLogRecord;
+
+/* What MTL_LOG_BUFFER_SIZE defaults to. */
+#define STELA_LOG_DEFAULT_CAPACITY 1024
 
 /* How `os_log_type_t` values rank as MTLLogLevel. */
 static NSInteger log_level(uint32_t type)
@@ -155,7 +160,7 @@ static NSString *record_string(const char *bytes, size_t length)
 	NSInteger _level;
 	os_unfair_lock _lock;
 	NSUInteger _running;
-	bool _full;
+	bool _full, _standardError;
 }
 
 - (instancetype)initWithBuffer:(StelaGPUBuffer *)buffer level:(NSInteger)level capacity:(NSUInteger)capacity
@@ -168,6 +173,8 @@ static NSString *record_string(const char *bytes, size_t length)
 		_handlers = [NSMutableArray arrayWithCapacity:2];
 		StelaLogBuffer *header = buffer->_contents;
 		header->capacity = (uint32_t)capacity;
+		const char *destination = getenv("MTL_LOG_TO_STDERR");
+		_standardError = destination && !strcmp(destination, "1");
 	}
 	return self;
 }
@@ -208,7 +215,9 @@ static NSString *record_string(const char *bytes, size_t length)
 		void (^handler)(NSString *, NSString *, NSInteger, NSString *) = handlers[index];
 		handler(subsystem, category, level, message);
 	}
-	if (!handlers.count) {
+	if (!handlers.count && _standardError) {
+		dprintf(2, "%s %s: %s\n", subsystem.UTF8String, category.UTF8String, message.UTF8String);
+	} else if (!handlers.count) {
 		NSLog(@"%@ %@: %@", subsystem, category, message);
 	}
 }
@@ -250,11 +259,49 @@ static NSString *record_string(const char *bytes, size_t length)
 
 @end
 
+/* MTL_LOG_LEVEL's value, with or without Metal's prefix. */
+static bool named_level(const char *text, NSInteger *level)
+{
+	static const char *const names[] = {"Debug", "Info", "Notice", "Error", "Fault"};
+	if (!strncmp(text, "MTLLogLevel", strlen("MTLLogLevel"))) {
+		text += strlen("MTLLogLevel");
+	}
+	for (NSInteger index = 0; index < 5; index++) {
+		if (!strcmp(text, names[index])) {
+			*level = MTLLogLevelDebug + index;
+			return true;
+		}
+	}
+	return false;
+}
+
 @implementation StelaGPUDevice (Logging)
+
+- (StelaGPULogState *)environmentLogState
+{
+	const char *name = getenv("MTL_LOG_LEVEL"), *size = getenv("MTL_LOG_BUFFER_SIZE");
+	if (!name && !size) {
+		return nil;
+	}
+	NSInteger level = MTLLogLevelDebug;
+	long capacity = size ? strtol(size, NULL, 0) : STELA_LOG_DEFAULT_CAPACITY;
+	StelaGPULogState *state = !name || named_level(name, &level) ?
+					  [self logStateWithCapacity:capacity level:level error:NULL] :
+					  nil;
+	if (!state) {
+		StelaFailure failure = {.reason = "MTL_LOG_LEVEL or MTL_LOG_BUFFER_SIZE is invalid"};
+		stela_report("shader logging", &failure);
+	}
+	return state;
+}
 
 - (id)newLogStateWithDescriptor:(id)descriptor error:(NSError **)error
 {
-	NSInteger capacity = [descriptor bufferSize];
+	return [self logStateWithCapacity:[descriptor bufferSize] level:(NSInteger)[descriptor level] error:error];
+}
+
+- (StelaGPULogState *)logStateWithCapacity:(NSInteger)capacity level:(NSInteger)level error:(NSError **)error
+{
 	if (capacity < 1024 || capacity > STELA_LOG_MAX_CAPACITY) {
 		if (error) {
 			StelaFailure failure = {.reason = "a log state's buffer is from 1 KiB to 1 GiB"};
@@ -271,7 +318,7 @@ static NSString *record_string(const char *bytes, size_t length)
 		}
 		return nil;
 	}
-	return [[StelaGPULogState alloc] initWithBuffer:buffer level:(NSInteger)[descriptor level] capacity:(NSUInteger)capacity];
+	return [[StelaGPULogState alloc] initWithBuffer:buffer level:level capacity:(NSUInteger)capacity];
 }
 
 @end

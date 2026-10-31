@@ -99,7 +99,9 @@ static NSString *options_line(id options)
 	if ([options preserveInvariance]) {
 		[line appendFormat:@" -fpreserve-invariance"];
 	}
-	if ([options enableLogging]) {
+	/* The environment asks for logging wherever the language has it. */
+	bool environment = getenv("MTL_LOG_LEVEL") || getenv("MTL_LOG_BUFFER_SIZE");
+	if ([options enableLogging] || (environment && language >= (3 << 16 | 2))) {
 		[line appendFormat:@" -fmetal-enable-logging"];
 	}
 	NSDictionary *macros = [options preprocessorMacros];
@@ -116,7 +118,8 @@ static NSString *target_triple(NSUInteger language)
 {
 	NSUInteger major = language >> 16, minor = language & 0xffff;
 	NSUInteger air_major = major < 3 ? major : 2;
-	NSUInteger air_minor = major < 3 ? minor : 5 + 3 * (major - 3) + minor;
+	/* Metal 1.2 is AIR 1.11, and Metal 3.0 AIR 2.5. */
+	NSUInteger air_minor = major == 1 ? 5 + 3 * minor : major == 2 ? minor : 5 + 3 * (major - 3) + minor;
 	char version[32] = {0};
 	size_t size = sizeof(version) - 1;
 	int system_major = 0, system_minor = 0;

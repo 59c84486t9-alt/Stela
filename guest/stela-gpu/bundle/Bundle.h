@@ -402,6 +402,11 @@ NSData *stela_compile_source(NSString *source, id options, NSError **error);
 - (void)commandBufferEnded;
 @end
 
+@interface StelaGPUDevice (Logging)
+- (StelaGPULogState *)environmentLogState;
+- (StelaGPULogState *)logStateWithCapacity:(NSInteger)capacity level:(NSInteger)level error:(NSError **)error;
+@end
+
 @interface StelaGPUQueue : NSObject <MTLCommandQueue> {
 @public
 	StelaGPUDevice *_device;

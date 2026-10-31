@@ -271,6 +271,10 @@ void *memcpy(void *to, const void *from, size_t size);
 void *memset(void *to, int value, size_t size);
 int memcmp(const void *a, const void *b, size_t size);
 size_t strlen(const char *text);
+int strcmp(const char *a, const char *b);
+int strncmp(const char *a, const char *b, size_t size);
+long strtol(const char *text, char **end, int base);
+char *getenv(const char *name);
 int usleep(unsigned int microseconds);
 void abort(void) __attribute__((noreturn));
 int sscanf(const char *text, const char *format, ...);
@@ -282,6 +286,7 @@ int sysctlbyname(const char *name, void *value, size_t *size, void *new_value, s
 #define O_CLOEXEC 0x1000000
 #define EINTR 4
 int snprintf(char *text, size_t size, const char *format, ...);
+int dprintf(int file, const char *format, ...);
 char *strchr(const char *text, int character);
 void *memchr(const void *bytes, int value, size_t length);
 int open(const char *path, int flags, ...);

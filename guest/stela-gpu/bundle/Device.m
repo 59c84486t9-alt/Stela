@@ -580,7 +580,9 @@ LIMIT(sparseTileSizeInBytes, sparse_tile_bytes)
 
 - (id)newCommandQueue
 {
-	return [[StelaGPUQueue alloc] initWithDevice:self];
+	StelaGPUQueue *queue = [[StelaGPUQueue alloc] initWithDevice:self];
+	queue->_logState = [self environmentLogState];
+	return queue;
 }
 
 - (id)newCommandQueueWithMaxCommandBufferCount:(NSUInteger)count
@@ -592,7 +594,10 @@ LIMIT(sparseTileSizeInBytes, sparse_tile_bytes)
 - (id)newCommandQueueWithDescriptor:(id)descriptor
 {
 	StelaGPUQueue *queue = [self newCommandQueue];
-	queue->_logState = [descriptor logState];
+	id logState = [descriptor logState];
+	if (logState) {
+		queue->_logState = logState;
+	}
 	return queue;
 }
 
