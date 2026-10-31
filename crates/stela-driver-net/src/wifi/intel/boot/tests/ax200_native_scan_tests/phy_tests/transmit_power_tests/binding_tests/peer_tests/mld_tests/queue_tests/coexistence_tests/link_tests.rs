@@ -191,6 +191,11 @@ impl Device<'_> {
                 reply(511).to_vec()
             }
             (_, 0x1e) => vec![0; 132],
+            (2, 0) | (0 | 1, 0x25) => shared_memory(
+                self.native
+                    .transmit_fifo
+                    .load(core::sync::atomic::Ordering::Relaxed),
+            ),
             (5, 0x16) => {
                 self.block_acks.push(request.to_vec());
                 u32::from(SESSION).to_le_bytes().to_vec()
@@ -549,6 +554,16 @@ fn placed_at(
         version: 0,
     };
     command_packet(mpdu, 0x8000, &payload)
+}
+
+/// Firmware's report of two LMACs whose FIFOs are each `size` bytes.
+fn shared_memory(size: u32) -> Vec<u8> {
+    let mut payload = vec![0; 260];
+    payload[32..36].copy_from_slice(&2u32.to_le_bytes());
+    for at in (40..100).chain(112..172).step_by(4) {
+        payload[at..at + 4].copy_from_slice(&size.to_le_bytes());
+    }
+    payload
 }
 
 /// Bring the modeled function up for the network "test" until it is ready
@@ -1436,6 +1451,40 @@ fn frames_that_wait_together_leave_as_an_amsdu_the_firmware_allows() {
     // The third keeps its one sequence number after theirs.
     let sequence = |frame: &[u8]| u16::from_le_bytes([frame[22], frame[23]]) >> 4;
     assert_eq!(sequence(&device.air[sent + 1]), sequence(aggregate) + 1);
+    assert_eq!(device.air[sent + 1][24] & 0x80, 0);
+}
+
+#[test]
+fn an_amsdu_stops_short_of_firmwares_fifo() {
+    let native = Native::default();
+    native
+        .transmit_fifo
+        .store(1500 + 256, core::sync::atomic::Ordering::Relaxed);
+    let (mut wifi, mut device) = connect(&native, true);
+    let rates = Id {
+        group: 5,
+        opcode: 0xf7,
+        version: 0,
+    };
+    let mut body = [0; 20];
+    body[4] = 2;
+    body[12..14].copy_from_slice(&2200u16.to_le_bytes());
+    body[16] = 1;
+    device.inject(
+        wifi.radio().rom().unwrap(),
+        &command_packet(rates, 0x8000, &body),
+    );
+    settle(&mut wifi, &mut device);
+    let sent = device.air.len();
+    let ethernet = [&[9; 6][..], &LOCAL, &[8, 0], &[0x45], &[0; 999]].concat();
+    for _ in 0..2 {
+        wifi.transmit(&ethernet).unwrap();
+    }
+    let gone = run(&mut wifi, &mut device, |_, device, _| {
+        device.air.len() >= sent + 2
+    });
+    assert!(gone, "{:?}", wifi.radio().error());
+    assert_eq!(device.air[sent][24] & 0x80, 0);
     assert_eq!(device.air[sent + 1][24] & 0x80, 0);
 }
 

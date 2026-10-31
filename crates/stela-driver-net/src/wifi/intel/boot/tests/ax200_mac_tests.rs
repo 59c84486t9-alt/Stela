@@ -13,6 +13,8 @@ pub(super) struct Native {
     pub(super) revoked: Arc<AtomicBool>,
     /// The firmware leaves its PHYs' receive chains to the host.
     pub(super) host_chains: bool,
+    /// What firmware reports of each of its transmit FIFOs.
+    pub(super) transmit_fifo: core::sync::atomic::AtomicU32,
 }
 impl Default for Native {
     fn default() -> Self {
@@ -24,6 +26,7 @@ impl Default for Native {
             os_drops: Arc::new(AtomicUsize::new(0)),
             revoked: Arc::new(AtomicBool::new(false)),
             host_chains: false,
+            transmit_fifo: core::sync::atomic::AtomicU32::new(0),
         }
     }
 }

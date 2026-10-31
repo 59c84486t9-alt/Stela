@@ -62,6 +62,7 @@ mod beacon;
 mod coexistence;
 mod country;
 mod emlsr;
+mod fifos;
 mod grade;
 mod he;
 mod link_scan;
@@ -163,6 +164,8 @@ enum Then {
     Authorized,
     /// Firmware answered a country update.
     Country,
+    /// Firmware reported its FIFOs.
+    Fifos,
 }
 
 /// A receive Block Ack agreement the firmware is to take up or give up.
@@ -278,6 +281,8 @@ pub(super) struct Client {
     fragments: Fragments,
     /// The longest A-MSDU firmware rate selection allows and its TIDs.
     amsdu: (u32, u32),
+    /// What firmware's FIFOs are, once asked.
+    fifos: Option<fifos::Fifos>,
     held: [VecDeque<Held>; 16],
     /// TIDs with an added or requested queue.
     requested: u16,
@@ -336,6 +341,7 @@ impl Client {
             reception: Reception::new(),
             fragments: Fragments::default(),
             amsdu: (0, 0),
+            fifos: None,
             held: core::array::from_fn(|_| VecDeque::new()),
             requested: 1 << MANAGEMENT_TID,
             session: Session::Off,
@@ -583,6 +589,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         if let Some(plan) = self.client.plan.take() {
             self.limit_six_ghz_power(queue);
             self.translate_addresses(queue);
+            self.read_fifos(queue);
             self.arrive(plan, now)?;
         }
         self.take_notifications(queue, now)?;
@@ -933,6 +940,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                 client.bluetooth.link_changed();
             }
             Then::Country => self.country_answered(queue, &response)?,
+            Then::Fifos => self.fifos_answered(queue, &response),
         }
         Ok(())
     }
@@ -1488,8 +1496,14 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         let room = tid
             .filter(|_| matches!(class, TxClass::Data))
             .and_then(|tid| {
-                let limit =
-                    (client.amsdu.0 as usize).min(commands::max_amsdu(context.negotiated()).into());
+                let fifo = client.fifos.unwrap_or_default().amsdu_limit(
+                    tid,
+                    context.negotiated().mode >= phy::Mode::He,
+                    context.channel().band,
+                    context.affiliation().is_some(),
+                );
+                let limit = (client.amsdu.0.min(fifo) as usize)
+                    .min(commands::max_amsdu(context.negotiated()).into());
                 let tail = client.held[usize::from(tid)].back()?;
                 (client.amsdu.1 & 1 << tid != 0
                     && !tail.control_port
