@@ -53,6 +53,9 @@ use zeroize::Zeroizing;
 /// `IEEE80211_CHANNEL_TIME` and `IEEE80211_PASSIVE_CHANNEL_TIME`.
 const ACTIVE_DWELL_US: u64 = 30_000;
 const PASSIVE_DWELL_US: u64 = 111_000;
+/// How long an interrupt-driven station may sleep past its timers, which are
+/// reorder releases, retries and the keeper's own.
+const TIMER_TICK_US: u64 = 100_000;
 /// `IEEE80211_SCAN_RESULT_EXPIRE`.
 const BSS_EXPIRY_US: u64 = 30_000_000;
 /// rtw88's sole station shares its interface's MAC ID, the first it acquires.
@@ -107,7 +110,12 @@ pub struct CamKey<'a> {
 /// the hardware half of the mac80211 or rtw88 operation it names.
 pub trait Device {
     /// `rtw_set_channel`. While `scanning`, no calibration follows.
-    fn tune(&mut self, definition: &ChannelDefinition, scanning: bool) -> Result<(), String>;
+    fn tune(
+        &mut self,
+        definition: &ChannelDefinition,
+        scanning: bool,
+        eirp_mbm: i32,
+    ) -> Result<(), String>;
     /// `rtw_chip_prepare_tx`: calibrate for the channel a frame will leave on.
     fn prepare_transmit(&mut self) -> Result<(), String>;
     /// `rtw_pci_tx_write_data` and its kick. False asks to try again.
@@ -123,6 +131,14 @@ pub trait Device {
     fn set_edca(&mut self, edca: &[AccessCategory; 4], short_slot: bool) -> Result<(), String>;
     fn write_key(&mut self, key: &CamKey<'_>) -> Result<(), String>;
     fn clear_key(&mut self, entry: u8) -> Result<(), String>;
+    /// Whether an interrupt wakes the core that looks for frames.
+    fn signals(&self) -> bool {
+        false
+    }
+    /// What the hardware does not do yet, each named once or more.
+    fn limitation(&mut self) -> Option<&'static str> {
+        None
+    }
 }
 
 #[derive(Debug)]
@@ -455,6 +471,11 @@ impl<D: Device> Rtl8822c<D> {
         result.map_err(Error::Hardware)
     }
 
+    /// `chan->max_reg_power` of the channel at `frequency_mhz`.
+    fn eirp_mbm(&self, frequency_mhz: u16) -> i32 {
+        self.regulated_power_dbm(frequency_mhz) * 100
+    }
+
     fn unsupported(&mut self, operation: &'static str) {
         if !self.reported.contains(&operation) {
             self.reported.push(operation);
@@ -528,7 +549,8 @@ impl<D: Device> Rtl8822c<D> {
     /// `ieee80211_prep_channel` for the exchange ahead of an association.
     fn approach(&mut self, bss: &Bss) -> Result<(), Error> {
         Self::hardware(self.device.filter_beacons(true))?;
-        Self::hardware(self.device.tune(&twenty(bss.channel), false))?;
+        let eirp_mbm = self.eirp_mbm(bss.channel.frequency_mhz);
+        Self::hardware(self.device.tune(&twenty(bss.channel), false, eirp_mbm))?;
         self.tuned = Some(bss.channel);
         Self::hardware(self.device.set_port(bss.bssid, 0, false))?;
         Self::hardware(self.device.prepare_transmit())
@@ -568,7 +590,8 @@ impl<D: Device> Rtl8822c<D> {
                     PASSIVE_DWELL_US
                 };
         }
-        Self::hardware(self.device.tune(&twenty(channel), true))?;
+        let eirp_mbm = self.eirp_mbm(channel.frequency_mhz);
+        Self::hardware(self.device.tune(&twenty(channel), true, eirp_mbm))?;
         self.tuned = Some(channel);
         for probe in probes {
             let packet = self.management_packet(channel.band, &probe, None, None);
@@ -732,6 +755,9 @@ impl<D: Device> Rtl8822c<D> {
     fn take_incoming(&mut self, now: u64) -> Result<(), Error> {
         let mut incoming = Vec::new();
         Self::hardware(self.device.receive(&mut |item| incoming.push(item)))?;
+        while let Some(limitation) = self.device.limitation() {
+            self.unsupported(limitation);
+        }
         for item in incoming {
             match item {
                 Incoming::Report(Report::Transmitted {
@@ -1208,6 +1234,15 @@ impl<D: Device> Link for Rtl8822c<D> {
     fn carrier(&mut self) -> bool {
         self.port_open
     }
+    /// A station signals once its port is open. Until then the handshake
+    /// polls, as Intel's does.
+    fn signals(&self) -> bool {
+        self.port_open && self.device.signals()
+    }
+    fn due_us(&self) -> Option<u64> {
+        self.signals()
+            .then(|| self.clock.now_us().saturating_add(TIMER_TICK_US))
+    }
     fn transmit(&mut self, frame: &[u8]) -> Result<(), LinkError> {
         if !self.port_open {
             return Err(LinkError::NoCarrier);
@@ -1455,7 +1490,8 @@ impl<D: Device> Radio for Rtl8822c<D> {
             .admitted
             .take()
             .ok_or(Error::Refused("configuration"))?;
-        Self::hardware(self.device.tune(&context.definition(), false))?;
+        let eirp_mbm = self.eirp_mbm(context.channel().frequency_mhz);
+        Self::hardware(self.device.tune(&context.definition(), false, eirp_mbm))?;
         self.tuned = Some(context.channel());
         Self::hardware(self.device.prepare_transmit())?;
         let capabilities = context.beacon().capabilities;

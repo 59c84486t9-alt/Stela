@@ -92,7 +92,6 @@ pub struct Control<I: Io> {
     poisoned: bool,
     published: bool,
     rfk_active: bool,
-    iqk_used: bool,
     clock_last: u64,
 }
 impl<I: Io> Drop for Control<I> {
@@ -134,7 +133,6 @@ impl<I: Io> Control<I> {
             poisoned: true,
             published: false,
             rfk_active: false,
-            iqk_used: false,
             clock_last: 0,
         };
         if profile.chip() != Chip::Rtl8822C || report.profile() != profile {
@@ -351,13 +349,13 @@ impl<I: Io> Control<I> {
     /// calibration signals. Source ready status is not DPK, applied policy or
     /// normal-TX permission. Real command DMA and firmware retirement remain
     /// independently owned through completion or acknowledged stop.
-    pub unsafe fn initial_iqk<R: transmit::Registers>(
+    pub unsafe fn iqk<R: transmit::Registers>(
         &mut self,
         rings: &mut transmit::Rings<R>,
         source: &dyn PageSource,
     ) -> Result<InitialIqkObservation, Error> {
         self.ready()?;
-        if self.rfk_active || self.iqk_used {
+        if self.rfk_active {
             return Err(Error::InvalidState);
         }
         if rings.profile()? != self.profile {
@@ -371,7 +369,6 @@ impl<I: Io> Control<I> {
             if baseline == 0xaa {
                 return Err(Error::StaleIqk);
             }
-            self.iqk_used = true;
             // SAFETY: caller holds real same native rings/control/permission;
             // status was sampled before this exact command publication.
             unsafe { packet.rings.initial_iqk_command(source) }?;

@@ -59,6 +59,7 @@ pub enum Error {
     Ish(input::ish::Error),
     IntelWifi(net::wifi::intel::attach::AttachError),
     MediatekWifi(net::wifi::mediatek::attach::AttachError),
+    RealtekWifi(net::wifi::realtek::attach::AttachError),
     IntelBluetooth(crate::bluetooth::intel_pcie::Error),
     Bcm4377(crate::bluetooth::bcm4377::Error),
     Ehci(usb::ehci::Error),
@@ -80,6 +81,7 @@ impl fmt::Display for Error {
             Self::Ish(error) => write!(f, "Intel ISH: {error:?}"),
             Self::IntelWifi(error) => write!(f, "iwlwifi: {error}"),
             Self::MediatekWifi(error) => write!(f, "mt76: {error}"),
+            Self::RealtekWifi(error) => write!(f, "rtw88: {error}"),
             Self::IntelBluetooth(error) => write!(f, "btintel_pcie: {error}"),
             Self::Bcm4377(error) => write!(f, "hci_bcm4377: {error}"),
             Self::Ehci(error) => write!(f, "EHCI: {error:?}"),
@@ -202,6 +204,7 @@ pub enum Adapter {
     #[cfg(feature = "native-acpi")]
     IntelWifi(Box<native::Located<native::IntelWifi>>),
     MediatekWifi(Box<native::Located<native::MediatekWifi>>),
+    RealtekWifi(Box<native::Located<native::RealtekWifi>>),
 }
 
 impl Adapter {
@@ -219,6 +222,7 @@ impl Adapter {
             #[cfg(feature = "native-acpi")]
             Self::IntelWifi(_) => "iwlwifi",
             Self::MediatekWifi(_) => "mt7925e",
+            Self::RealtekWifi(_) => "rtw88_8822ce",
             Self::UsbVendor(device) => device.driver(),
         }
     }
@@ -238,6 +242,7 @@ impl Adapter {
             #[cfg(feature = "native-acpi")]
             Self::IntelWifi(device) => &device.location,
             Self::MediatekWifi(device) => &device.location,
+            Self::RealtekWifi(device) => &device.location,
         }
     }
 }
@@ -257,6 +262,7 @@ impl Link for Adapter {
             #[cfg(feature = "native-acpi")]
             Self::IntelWifi(device) => device.mac(),
             Self::MediatekWifi(device) => device.mac(),
+            Self::RealtekWifi(device) => device.mac(),
         }
     }
     fn carrier(&mut self) -> bool {
@@ -273,6 +279,7 @@ impl Link for Adapter {
             #[cfg(feature = "native-acpi")]
             Self::IntelWifi(device) => device.carrier(),
             Self::MediatekWifi(device) => device.carrier(),
+            Self::RealtekWifi(device) => device.carrier(),
         }
     }
     fn signals(&self) -> bool {
@@ -289,12 +296,14 @@ impl Link for Adapter {
             #[cfg(feature = "native-acpi")]
             Self::IntelWifi(device) => device.signals(),
             Self::MediatekWifi(device) => device.signals(),
+            Self::RealtekWifi(device) => device.signals(),
         }
     }
     fn due_us(&self) -> Option<u64> {
         match self {
             #[cfg(feature = "native-acpi")]
             Self::IntelWifi(device) => device.due_us(),
+            Self::RealtekWifi(device) => device.due_us(),
             _ => None,
         }
     }
@@ -312,6 +321,7 @@ impl Link for Adapter {
             #[cfg(feature = "native-acpi")]
             Self::IntelWifi(device) => device.transmit(frame),
             Self::MediatekWifi(device) => device.transmit(frame),
+            Self::RealtekWifi(device) => device.transmit(frame),
         }
     }
     fn receive(&mut self) -> Result<Option<Vec<u8>>, LinkError> {
@@ -328,6 +338,7 @@ impl Link for Adapter {
             #[cfg(feature = "native-acpi")]
             Self::IntelWifi(device) => device.receive(),
             Self::MediatekWifi(device) => device.receive(),
+            Self::RealtekWifi(device) => device.receive(),
         }
     }
 }
@@ -694,6 +705,46 @@ unsafe fn mediatek_wifi(
     unsafe { native::mediatek_wifi(services, address, inputs) }
 }
 
+/// Attach the RTL8822C at `address` for `wifi.network`, once the regulatory
+/// database loaded.
+///
+/// # Safety
+/// As for [`intel_wifi`].
+#[allow(
+    clippy::result_large_err,
+    reason = "a failed attach hands back the owners that must outlive the device"
+)]
+unsafe fn realtek_wifi(
+    services: &dyn NativeServices,
+    address: Address,
+    completion: Option<crate::bus::irq::MsiMessage>,
+    wifi: &WifiInputs<'_>,
+    regulatory: &Option<
+        Result<
+            crate::net::wifi::regulatory::database::Database,
+            crate::net::wifi::regulatory::database::LoadError,
+        >,
+    >,
+) -> Result<native::Located<native::RealtekWifi>, native::Failure> {
+    use net::wifi::realtek::attach::{AttachError, Inputs};
+    let Some(Ok(database)) = regulatory else {
+        return Err((Error::RealtekWifi(AttachError::NoRegulatoryDatabase), None));
+    };
+    let inputs = Inputs {
+        firmware: wifi.firmware,
+        pages: services.pages(),
+        clock: wifi.clock,
+        database: database.clone(),
+        network: wifi.network.clone(),
+        entropy: services
+            .entropy()
+            .map_err(|error| (Error::Native(error), None))?,
+        vector: false,
+    };
+    // SAFETY: forwarded from the caller.
+    unsafe { native::realtek_wifi(services, address, completion, inputs) }
+}
+
 /// Attach the Broadcom PCIe Bluetooth function at `address` with its
 /// segment's bridges, for the board SMBIOS names, as `bcm4377_probe_dmi`
 /// selects it.
@@ -1032,6 +1083,30 @@ pub unsafe fn probe_with_provider(
                                         link: link.station,
                                     },
                                 )));
+                            }
+                            Err((error, kept)) => {
+                                devices.failures.push((address, error));
+                                devices.owners.extend(kept);
+                            }
+                        }
+                        continue;
+                    }
+                    native::Kind::RealtekWifi => {
+                        let Some(wifi) = &wifi_inputs else {
+                            continue;
+                        };
+                        // SAFETY: as for tg3 below.
+                        match unsafe {
+                            realtek_wifi(
+                                services,
+                                address,
+                                handoff.completion,
+                                wifi,
+                                &devices.regulatory,
+                            )
+                        } {
+                            Ok(link) => {
+                                devices.nics.push(Adapter::RealtekWifi(Box::new(link)));
                             }
                             Err((error, kept)) => {
                                 devices.failures.push((address, error));

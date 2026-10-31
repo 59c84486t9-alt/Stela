@@ -118,9 +118,15 @@ impl Air {
 struct Model(Rc<RefCell<Air>>);
 
 impl Device for Model {
-    fn tune(&mut self, definition: &ChannelDefinition, scanning: bool) -> Result<(), String> {
+    fn tune(
+        &mut self,
+        definition: &ChannelDefinition,
+        scanning: bool,
+        eirp_mbm: i32,
+    ) -> Result<(), String> {
         let mut air = self.0.borrow_mut();
         let number = definition.control.number;
+        assert_eq!(eirp_mbm, 2000);
         air.tuned.push((number, scanning));
         if scanning && number == air.channel {
             air.hear(beacon(number as u8), false);

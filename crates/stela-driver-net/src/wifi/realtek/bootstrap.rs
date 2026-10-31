@@ -6,6 +6,7 @@
 //! before the real start, where this keeps the firmware it booted.
 use super::{
     beacon::{Beacon, FirmwareBand},
+    coex::Coex,
     download::Download,
     efuse::{self, Board, Physical},
     features::Report,
@@ -91,6 +92,7 @@ pub struct Up {
     pub receive: receive::Ring<Bar>,
     pub transmit: transmit::Rings<Bar>,
     pub phy: PhyInitialized,
+    pub coex: Coex,
     pub report: Report,
     pub board: Board,
     pub physical: Physical,
@@ -187,6 +189,10 @@ pub unsafe fn bring_up(claim: Claim) -> Result<Up, Error> {
         .map_err(at("general info"))?;
     // SAFETY: the same boot's PHY and report, with HCI started.
     unsafe { transmit.phydm_info(pages, &phy, &report) }.map_err(at("phydm info"))?;
+    let mut coex = Coex::new(board.raw());
+    coex.power_on(&mut io).map_err(at("coex power on"))?;
+    // SAFETY: firmware runs, the PHY is loaded and nothing transmits yet.
+    let run = unsafe { coex.init(&mut io, &report) }.map_err(at("coex"))?;
     // rtw_sec_enable_sec_engine, and rtw_core_start's receive filter.
     let enable = |io: &mut Native| -> Result<(), super::io::Error> {
         let control = io.read16(super::registers::REG_CR)?;
@@ -197,7 +203,10 @@ pub unsafe fn bring_up(claim: Claim) -> Result<Up, Error> {
     };
     enable(&mut io).map_err(at("security engine"))?;
     // SAFETY: firmware booted once on this requester, with its mailbox unused.
-    let control = unsafe { Control::new(io, &report) }.map_err(at("mailbox"))?;
+    let mut control = unsafe { Control::new(io, &report) }.map_err(at("mailbox"))?;
+    for command in run.commands {
+        control.command(command).map_err(at("coex command"))?;
+    }
     Ok(Up {
         profile,
         control,
@@ -205,6 +214,7 @@ pub unsafe fn bring_up(claim: Claim) -> Result<Up, Error> {
         receive,
         transmit,
         phy,
+        coex,
         report,
         board,
         physical,
