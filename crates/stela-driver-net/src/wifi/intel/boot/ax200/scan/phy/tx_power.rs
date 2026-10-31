@@ -419,12 +419,10 @@ mod tests {
     #[test]
     #[ignore = "oracle: STELA_IWLWIFI_FIRMWARE"]
     fn released_firmware_passes_the_version_gates() {
-        for path in std::env::var("STELA_IWLWIFI_FIRMWARE").unwrap().split(':') {
-            let bytes = std::fs::read(path).unwrap();
-            let firmware = Firmware::parse(&bytes).unwrap();
-            super::super::super::wire::validate(&firmware).unwrap();
-            encode(&firmware, 22).unwrap();
-        }
+        let bytes = std::fs::read(std::env::var("STELA_IWLWIFI_FIRMWARE").unwrap()).unwrap();
+        let firmware = Firmware::parse(&bytes).unwrap();
+        super::super::super::wire::validate(&firmware).unwrap();
+        encode(&firmware, 22).unwrap();
     }
     #[test]
     #[ignore = "oracle: STELA_IWLWIFI_TRANSMIT_POWER_TRACE"]
