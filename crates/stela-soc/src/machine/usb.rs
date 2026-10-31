@@ -148,11 +148,16 @@ impl AppleDevices {
     /// this machine being the downstream-facing port that sources VBUS: the
     /// HPM reports the attach and the controller's host personality finds
     /// the hub on its USB2 port. The keyboard and pointer sit on the hub's
-    /// first port, and `cables` names the USB Ethernet adapter and mass
-    /// storage devices on the next ones.
+    /// first port, and `cables` names the USB Ethernet adapter, Bluetooth
+    /// controller and mass storage devices on the next ones.
     pub fn attach_input(&mut self, connector: u32, cables: UsbCables) -> Result<()> {
-        let UsbCables { disks, network } = cables;
-        if 1 + usize::from(network.is_some()) + disks.len() > hub::MAX_PORTS {
+        let UsbCables {
+            disks,
+            network,
+            bluetooth,
+        } = cables;
+        let extras = usize::from(network.is_some()) + usize::from(bluetooth);
+        if 1 + extras + disks.len() > hub::MAX_PORTS {
             return Err(refuse!("the native hub has seven ports"));
         }
         let network = network.map(Ecm::new).transpose()?;
@@ -168,6 +173,7 @@ impl AppleDevices {
         let attachments = Attachments {
             input: Peripheral::new(),
             network,
+            bluetooth: bluetooth.then(Hci::new),
             disks,
         };
         master.peripheral = Some(Hub::new(attachments, "0001")?);
@@ -193,6 +199,44 @@ impl AppleDevices {
     pub fn network_deliver(&mut self, frame: &[u8]) -> Result<()> {
         self.usb_network()?.deliver(frame);
         Ok(())
+    }
+
+    fn usb_bluetooth(&mut self) -> Option<&mut Hci> {
+        self.usb_masters
+            .iter_mut()
+            .find_map(|master| master.peripheral.as_mut()?.ports.bluetooth.as_mut())
+    }
+
+    /// An event from the host's Bluetooth controller for the guest's.
+    pub fn bluetooth_event(&mut self, packet: &[u8]) {
+        if let Some(hci) = self.usb_bluetooth() {
+            hci.deliver_event(packet);
+        }
+    }
+
+    /// ACL data from the host's Bluetooth controller for the guest's.
+    pub fn bluetooth_acl(&mut self, packet: &[u8]) {
+        if let Some(hci) = self.usb_bluetooth() {
+            hci.deliver_acl(packet);
+        }
+    }
+
+    /// Whether the guest's Bluetooth controller has room for a packet from
+    /// the host's; false without one.
+    pub fn bluetooth_room(&mut self) -> bool {
+        self.usb_bluetooth().is_some_and(|hci| hci.has_room())
+    }
+
+    /// The next packet the guest sent for the host's Bluetooth controller.
+    pub fn bluetooth_take(&mut self) -> Option<Outbound> {
+        self.usb_bluetooth()?.take()
+    }
+
+    /// Whether the guest configured its Bluetooth controller, and the
+    /// controller's counters; `None` without one.
+    pub fn bluetooth_status(&mut self) -> Option<(bool, UsbBluetoothCounters)> {
+        let hci = self.usb_bluetooth()?;
+        Some((hci.up(), hci.counters()))
     }
 
     /// Whether the guest has its USB Ethernet link up, and the adapter's
@@ -272,7 +316,9 @@ impl AppleDevices {
             .map(|master| {
                 let controller = self.bus.device::<Dwc3>(master.device).expect("USB core");
                 let phy = self.bus.device::<AtcPhy>(master.phy).expect("USB PHY");
+                // Only a port the machine is a device on waits for a host.
                 let why = match controller.unavailable() {
+                    _ if master.peripheral.is_some() => String::new(),
                     Some(why) if !controller.phy_ready() => {
                         format!(" unavailable={why}: {}", phy.usb2_unready().unwrap_or("?"))
                     }
@@ -282,9 +328,14 @@ impl AppleDevices {
                 let host = controller
                     .host_summary()
                     .map_or_else(String::new, |host| format!(" host=[{host}]"));
+                let hub = master
+                    .peripheral
+                    .as_ref()
+                    .map_or_else(String::new, |hub| format!(" hub=[{}]", hub.summary()));
                 format!(
-                    "port={} attached={}{why}{host}",
-                    master.number, master.attached
+                    "port={} attached={}{why}{host}{hub}",
+                    master.number,
+                    master.attached || master.peripheral.is_some()
                 )
             })
             .collect()

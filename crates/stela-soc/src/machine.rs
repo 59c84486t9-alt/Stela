@@ -18,6 +18,7 @@ pub use crate::pmu::RtcEpoch;
 use crate::usb::{
     Function, Speed,
     ecm::Ecm,
+    hci::Hci,
     hid::Peripheral,
     hub::{self, Hub},
     session::Session as UsbSession,
@@ -25,6 +26,7 @@ use crate::usb::{
 };
 pub use crate::usb::{
     ecm::Counters as UsbNetworkCounters,
+    hci::{Counters as UsbBluetoothCounters, Outbound},
     host::{Descriptor as UsbDescriptor, MuxEndpoints},
     mux::{
         Backpressure as MuxBackpressure, State as MuxState, StreamId as MuxStream,
@@ -328,53 +330,53 @@ pub struct UsbCables {
     pub disks: Vec<Box<dyn BlockDevice>>,
     /// A USB Ethernet adapter with this station address.
     pub network: Option<Mac>,
+    /// A USB Bluetooth controller, bridged to one of the host's.
+    pub bluetooth: bool,
 }
 
 impl UsbCables {
     /// The disks the hub has ports for beside the keyboard and pointer and,
-    /// with `network`, the Ethernet adapter.
-    pub const fn disk_ports(network: bool) -> usize {
-        hub::MAX_PORTS - 1 - network as usize
+    /// with `network` and `bluetooth`, the Ethernet adapter and Bluetooth
+    /// controller.
+    pub const fn disk_ports(network: bool, bluetooth: bool) -> usize {
+        hub::MAX_PORTS - 1 - network as usize - bluetooth as usize
     }
 }
 
 /// The functions on the native hub's ports: the keyboard and pointer on
-/// port 1, the Ethernet adapter on port 2 when there is one, then one mass
-/// storage device per host disk.
+/// port 1, then the Ethernet adapter and Bluetooth controller when there are
+/// any, then one mass storage device per host disk.
 struct Attachments {
     input: Peripheral,
     network: Option<Ecm>,
+    bluetooth: Option<Hci>,
     disks: Vec<MassStorage>,
-}
-
-impl Attachments {
-    fn port(&mut self, port: usize) -> &mut dyn Function {
-        let first_disk = 1 + usize::from(self.network.is_some());
-        match (port, &mut self.network) {
-            (0, _) => &mut self.input,
-            (1, Some(network)) => network,
-            (n, _) => &mut self.disks[n - first_disk],
-        }
-    }
 }
 
 impl hub::Ports for Attachments {
     fn count(&self) -> usize {
-        1 + usize::from(self.network.is_some()) + self.disks.len()
+        1 + usize::from(self.network.is_some())
+            + usize::from(self.bluetooth.is_some())
+            + self.disks.len()
     }
     fn speed(&self, port: usize) -> Speed {
         if port == 0 { Speed::Full } else { Speed::High }
     }
     fn function(&mut self, port: usize) -> &mut dyn Function {
-        self.port(port)
+        let input = core::iter::once(&mut self.input as &mut dyn Function);
+        let network = self.network.iter_mut().map(|f| f as &mut dyn Function);
+        let bluetooth = self.bluetooth.iter_mut().map(|f| f as &mut dyn Function);
+        let disks = self.disks.iter_mut().map(|f| f as &mut dyn Function);
+        let mut functions = input.chain(network).chain(bluetooth).chain(disks);
+        functions.nth(port).expect("a port of the hub's count")
     }
     fn function_ref(&self, port: usize) -> &dyn Function {
-        let first_disk = 1 + usize::from(self.network.is_some());
-        match (port, &self.network) {
-            (0, _) => &self.input,
-            (1, Some(network)) => network,
-            (n, _) => &self.disks[n - first_disk],
-        }
+        let input = core::iter::once(&self.input as &dyn Function);
+        let network = self.network.iter().map(|f| f as &dyn Function);
+        let bluetooth = self.bluetooth.iter().map(|f| f as &dyn Function);
+        let disks = self.disks.iter().map(|f| f as &dyn Function);
+        let mut functions = input.chain(network).chain(bluetooth).chain(disks);
+        functions.nth(port).expect("a port of the hub's count")
     }
 }
 

@@ -48,7 +48,8 @@ use super::{
     },
 };
 use crate::Result;
-use alloc::{string::String, vec, vec::Vec};
+use alloc::{format, string::String, vec, vec::Vec};
+use core::fmt::Write;
 use stela_contracts::refuse;
 
 /// The most ports one status-change byte reports.
@@ -229,6 +230,17 @@ impl<P: Ports> Hub<P> {
                 functions: &mut self.ports,
             },
         )
+    }
+
+    /// The configuration and each port's status and change bits, for the
+    /// boot log's heartbeat.
+    pub fn summary(&self) -> String {
+        let mut line = format!("configuration={} ports=[", self.control.configuration());
+        for port in &self.state.ports {
+            let _ = write!(line, " {:#x}/{:#x}", port.status, port.change);
+        }
+        line.push_str(" ]");
+        line
     }
 
     /// Brings each powered port's connection status in line with its cable

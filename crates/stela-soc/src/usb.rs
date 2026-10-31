@@ -2,6 +2,7 @@
 use crate::Result;
 pub mod control;
 pub mod ecm;
+pub mod hci;
 pub mod hid;
 pub mod host;
 pub mod hub;
