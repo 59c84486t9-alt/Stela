@@ -3000,6 +3000,7 @@ fn sep_native_nonzero_routes_read_firmware_and_preflight_owner_capacity() {
             SepProvisioning {
                 security: None,
                 ecid: 0xa5a5_0006,
+                kexts: None,
                 observe: false,
                 state: sep::state::Location::Volatile,
             },
@@ -3156,6 +3157,7 @@ fn sep_rom_accepts_firmware_under_stela_policy_and_reaches_os_active() {
                 SepProvisioning {
                     security: None,
                     ecid: 0xa5a5_0006,
+                    kexts: None,
                     observe: false,
                     state: sep::state::Location::Volatile,
                 },

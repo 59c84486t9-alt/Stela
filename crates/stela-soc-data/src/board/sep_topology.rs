@@ -4,6 +4,7 @@ use super::{Iommu, Node, SEP, SEP_NUB, apertures};
 use crate::Result;
 use stela_contracts::refusal::Within;
 use stela_contracts::refuse;
+use stela_formats::local_policy::Kexts;
 
 /// SEP's DT-placed register banks, four mailbox IRQs, DART stream and optional
 /// iBoot SEPFW source extent. The extent is not proof of firmware acceptance.
@@ -26,6 +27,20 @@ pub struct SepDevice {
     /// set at setup and written by bundle preparation), bound into the SEP
     /// key hierarchy. `None` when `/chosen` does not carry it.
     pub ecid: Option<u64>,
+    /// The kext grant `/chosen/asmb` publishes, which the SEP's macOS
+    /// LocalPolicies carry.
+    pub kexts: Option<Kexts>,
+}
+
+/// The grant in `asmb`, which names its digests only with `lp-smb2` set.
+fn kexts(asmb: &Node<'_>) -> Option<Kexts> {
+    asmb.first_u32("lp-smb2").filter(|&value| value != 0)?;
+    let digest = |name| asmb.property(name)?.try_into().ok();
+    Some(Kexts {
+        approved: digest("lp-auxp")?,
+        collection: digest("lp-auxi")?,
+        receipt: digest("lp-auxr")?,
+    })
 }
 
 /// J473AP `/arm-io/sep` supplies two ranges and four mailbox lines. Its
@@ -144,6 +159,10 @@ pub(super) fn sep_device(
         .as_ref()
         .and_then(|n| n.first_u64("unique-chip-id"))
         .filter(|&value| value != 0);
+    let kexts = chosen
+        .as_ref()
+        .and_then(|node| node.child("asmb"))
+        .and_then(|asmb| kexts(&asmb));
     Ok(Some(SepDevice {
         ranges: [place(first)?, place(second)?],
         irqs,
@@ -155,6 +174,7 @@ pub(super) fn sep_device(
         firmware,
         security,
         ecid,
+        kexts,
     }))
 }
 
@@ -233,6 +253,7 @@ mod tests {
                 firmware: None,
                 security: None,
                 ecid: None,
+                kexts: None,
             })
         );
         assert_eq!(found.darts[0].instances[0].physical, 0x25d2c0000);

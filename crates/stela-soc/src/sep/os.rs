@@ -118,8 +118,13 @@ impl SepOs {
     /// BootPolicy. With `observe`, their traffic is journaled and `scrd` is
     /// also advertised so its kernel client binds; its requests are
     /// recorded and never answered (a diagnostic mode: it checks nothing
-    /// beyond its log).
-    pub fn with_services(mut self, store: Nonces<Box<dyn Backend>>, observe: bool) -> Result<Self> {
+    /// beyond its log). macOS LocalPolicies carry `kexts`.
+    pub fn with_services(
+        mut self,
+        store: Nonces<Box<dyn Backend>>,
+        observe: bool,
+        kexts: Option<stela_formats::local_policy::Kexts>,
+    ) -> Result<Self> {
         let mut services = xart::services().to_vec();
         services.extend([keystore::service(), boot_policy::service()]);
         if observe {
@@ -131,7 +136,7 @@ impl SepOs {
         self.services = Some(Services {
             xart: Xart::new(store),
             keystore,
-            boot_policy: BootPolicy::default(),
+            boot_policy: BootPolicy::new(kexts),
         });
         Ok(self)
     }

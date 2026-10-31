@@ -200,6 +200,7 @@ mod tests {
             splat: None,
             paired: None,
             security: Security::Full,
+            kexts: None,
         };
         let key = PolicyKey::derive(&[7; 32]).unwrap();
         let file = key.sign(&policy);

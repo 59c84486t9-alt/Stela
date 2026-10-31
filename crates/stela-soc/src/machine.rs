@@ -442,6 +442,8 @@ struct SepMaster {
 pub struct SepProvisioning {
     pub security: Option<stela_soc_data::sep::SecurityMode>,
     pub ecid: u64,
+    /// The kext grant its macOS LocalPolicies carry.
+    pub kexts: Option<stela_formats::local_policy::Kexts>,
     /// Observe (`--sep-observe`): advertise and log `sks`/`pnon`/`scrd`.
     pub observe: bool,
     pub state: sep::state::Location,

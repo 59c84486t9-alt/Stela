@@ -33,6 +33,18 @@
 //! The SEP checks the paired policy it is shown is its own for this
 //! nonce update and volume group. A request with an ACM needs authorization
 //! this SEP does not model, so it refuses.
+//!
+//! **Kexts.** A machine provisioned with [`Kexts`] grants them on the macOS
+//! policy of a downgraded boot. restored asks for no such thing: the grant is
+//! Stela's, made by the boot bundle's owner, as `sip0` is.
+//!
+//! **Reading.** libbootpolicy reads a tag by showing the SEP the policy file
+//! (`_input_local_policy`), so these answer from no state of their own: 0x3b
+//! a boolean (B 0x152f4), 0x3c an integer (B 0x1410c), 0x3d a digest (B
+//! 0x12b88). The body is the file's length at 0, the file at 8, and the tag at
+//! 0x4008, 0x4010 bytes in all. A reply carries the value after the reply
+//! header, in 36, 40 and 80 bytes; result 0xe says the policy lacks the tag,
+//! which the caller does not treat as a failure (B 0x14128).
 use super::{HEADER_BYTES, SUCCESS, delivered, nonces::PolicyNonces, not_supported, reply_header};
 use crate::Result;
 use crate::sep::{
@@ -46,12 +58,22 @@ use sha2::{Digest, Sha384};
 use stela_contracts::refuse;
 use stela_formats::{
     der::{self, Cursor},
-    local_policy::{self, DIGEST_BYTES, Policy, Security, UUID_BYTES},
+    local_policy::{self, DIGEST_BYTES, Kexts, Policy, Security, UUID_BYTES},
 };
 
 const CREATE: u32 = 0x4e;
 const CREATE_PAIRED: u32 = 0x52;
 const CREATE_WITH_SPLAT: u32 = 0x55;
+const READ_BOOLEAN: u32 = 0x3b;
+const READ_INTEGER: u32 = 0x3c;
+const READ_DIGEST: u32 = 0x3d;
+/// The result that says a policy lacks a tag.
+const TAG_ABSENT: u32 = 0xe;
+/// A read's fields, from the end of the header.
+const FILE_AT: usize = 8;
+const FILE_BYTES: usize = 0x4000;
+const TAG_AT: usize = FILE_AT + FILE_BYTES;
+const READ_BYTES: usize = TAG_AT + 8;
 
 /// Request and reply field tags.
 const OS_MANIFEST: usize = 1;
@@ -70,7 +92,10 @@ const CONTEXT: u8 = 0x80;
 const LENGTH_BYTES: usize = 4;
 
 pub(super) fn accepts(command: u32) -> bool {
-    matches!(command, CREATE | CREATE_PAIRED | CREATE_WITH_SPLAT)
+    matches!(
+        command,
+        CREATE | CREATE_PAIRED | CREATE_WITH_SPLAT | READ_BOOLEAN | READ_INTEGER | READ_DIGEST
+    )
 }
 
 /// The fields of `bytes` by tag: each once, context-specific and primitive.
@@ -100,7 +125,13 @@ fn integer(bytes: &[u8]) -> Result<u64> {
 }
 
 /// The policy `body`, the request after its header, asks for.
-fn policy(command: u32, body: &[u8], nonce: [u8; DIGEST_BYTES], key: &PolicyKey) -> Result<Policy> {
+fn policy(
+    command: u32,
+    body: &[u8],
+    nonce: [u8; DIGEST_BYTES],
+    key: &PolicyKey,
+    kexts: Option<&Kexts>,
+) -> Result<Policy> {
     let (length, encoded) = body
         .split_first_chunk::<LENGTH_BYTES>()
         .ok_or(refuse!("SEP LocalPolicy request has no DER length"))?;
@@ -158,25 +189,62 @@ fn policy(command: u32, body: &[u8], nonce: [u8; DIGEST_BYTES], key: &PolicyKey)
         splat,
         paired,
         security,
+        kexts: kexts
+            .filter(|_| command != CREATE_PAIRED && security != Security::Full)
+            .cloned(),
     })
 }
 
-/// Sign the policy the request asks for, during the local nonce update.
+/// The value of the tag `body` asks for in the policy file it shows.
+fn read(command: u32, body: &[u8], key: &PolicyKey) -> Result<Option<Vec<u8>>> {
+    if body.len() != READ_BYTES {
+        return Err(refuse!(
+            "SEP LocalPolicy tag read is not libbootpolicy's size"
+        ));
+    }
+    let word = |at: usize| u32::from_le_bytes(body[at..at + 4].try_into().unwrap());
+    let length = word(0) as usize;
+    if length > FILE_BYTES {
+        return Err(refuse!("SEP LocalPolicy tag read shows too long a file"));
+    }
+    let policy = local_policy::verify(&body[FILE_AT..FILE_AT + length], key.public())
+        .map_err(|_| refuse!("SEP LocalPolicy tag read shows a policy that is not this SEP's"))?;
+    let tag = word(TAG_AT).to_be_bytes();
+    Ok(match command {
+        READ_BOOLEAN => policy
+            .boolean_tag(tag)
+            .map(|value| u32::from(value).to_le_bytes().to_vec()),
+        READ_INTEGER => policy
+            .integer_tag(tag)
+            .map(|value| value.to_le_bytes().to_vec()),
+        _ => policy.digest_tag(tag).map(|value| value.to_vec()),
+    })
+}
+
+/// Sign the policy the request asks for, during the local nonce update, or
+/// read a tag of one it shows.
 pub(super) fn request<B: Backend>(
     command: u32,
     frame: Frame,
     payload: &mut dyn Payload,
     store: &Nonces<B>,
     nonces: &PolicyNonces,
+    kexts: Option<&Kexts>,
 ) -> core::result::Result<Frame, Refusal> {
     let unsupported =
         |reason: stela_contracts::Refusal| Refusal::answered(reason, not_supported(frame));
     let mut body = vec![0; frame.data as usize - HEADER_BYTES];
     payload.input(&mut body).map_err(unsupported)?;
     let reply = (|| {
-        let nonce = nonces.proposed_local(store)?;
         let key = PolicyKey::derive(&*store.policy_key_seed()?)?;
-        let file = key.sign(&policy(command, &body, nonce, &key)?);
+        if matches!(command, READ_BOOLEAN | READ_INTEGER | READ_DIGEST) {
+            return Ok(match read(command, &body, &key)? {
+                Some(value) => [&reply_header(SUCCESS)[..], &value].concat(),
+                None => reply_header(TAG_ABSENT).to_vec(),
+            });
+        }
+        let nonce = nonces.proposed_local(store)?;
+        let file = key.sign(&policy(command, &body, nonce, &key, kexts)?);
         let mut encoded = der::encode(CONTEXT | REPLY_POLICY, &file);
         encoded.extend(der::encode(CONTEXT | REPLY_NONCE, &nonce));
         let mut reply: Vec<u8> = reply_header(SUCCESS).to_vec();

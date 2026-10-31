@@ -11,7 +11,9 @@
 //! - `spih` the SHA-384 of the splat (Cryptex1) manifest, when there is one,
 //!   and `prot` the SHA-384 of the paired recoveryOS policy file, on a macOS
 //!   policy;
-//! - `smb0` and `smb1` for Reduced and Permissive Security.
+//! - `smb0` and `smb1` for Reduced and Permissive Security;
+//! - `smb2`, `sip0`, `auxp`, `auxi` and `auxr` for third-party kexts, which
+//!   Stela grants together as [`Kexts`].
 //!
 //! **Trust.** The manifest's signature is Stela's: ECDSA P-384 with SHA-384
 //! over the DER `SET` containing `MANB`, which is what an Image4 signature
@@ -36,6 +38,23 @@ pub const PAYLOAD: [u8; 22] = [
     0x31, 0x2e, 0x30, 0x04, 0x01, 0x00,
 ];
 
+/// The `sip0` of a kext grant, and the only one a policy can carry:
+/// `CSR_ALLOW_UNTRUSTED_KEXTS` and `CSR_ALLOW_UNAPPROVED_KEXTS`, which let a
+/// kext without an Apple certificate load. Nothing else in SIP is relaxed.
+pub const KEXT_SIP_BITS: u16 = 1 | 1 << 9;
+
+/// Third-party kexts a policy admits: `smb2`, `sip0` of [`KEXT_SIP_BITS`] and
+/// the digests of what admits them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Kexts {
+    /// `auxp`: SHA-384 of the approved kexts' list.
+    pub approved: [u8; DIGEST_BYTES],
+    /// `auxi`: SHA-384 of the auxiliary kernel collection.
+    pub collection: [u8; DIGEST_BYTES],
+    /// `auxr`: SHA-384 of the collection's receipt.
+    pub receipt: [u8; DIGEST_BYTES],
+}
+
 /// The boot security a policy grants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Security {
@@ -53,6 +72,7 @@ pub struct Policy {
     pub splat: Option<[u8; DIGEST_BYTES]>,
     pub paired: Option<[u8; DIGEST_BYTES]>,
     pub security: Security,
+    pub kexts: Option<Kexts>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,16 +118,28 @@ impl Policy {
     /// The DER `SET` containing `MANB`, which the signature covers.
     /// Properties and objects go in tag order, as a DER `SET` does.
     pub fn signed(&self) -> Vec<u8> {
-        let mut properties = property(*b"lpnh", OCTET_STRING, &self.nonce);
+        let mut properties = Vec::new();
+        if let Some(kexts) = &self.kexts {
+            properties.extend(property(*b"auxi", OCTET_STRING, &kexts.collection));
+            properties.extend(property(*b"auxp", OCTET_STRING, &kexts.approved));
+            properties.extend(property(*b"auxr", OCTET_STRING, &kexts.receipt));
+        }
+        properties.extend(property(*b"lpnh", OCTET_STRING, &self.nonce));
         properties.extend(property(*b"nsih", OCTET_STRING, &self.next_stage));
         if let Some(paired) = &self.paired {
             properties.extend(property(*b"prot", OCTET_STRING, paired));
+        }
+        if self.kexts.is_some() {
+            properties.extend(property(*b"sip0", INTEGER, &KEXT_SIP_BITS.to_be_bytes()));
         }
         if self.security != Security::Full {
             properties.extend(property(*b"smb0", BOOLEAN, &[0xff]));
         }
         if self.security == Security::Permissive {
             properties.extend(property(*b"smb1", BOOLEAN, &[0xff]));
+        }
+        if self.kexts.is_some() {
+            properties.extend(property(*b"smb2", BOOLEAN, &[0xff]));
         }
         if let Some(splat) = &self.splat {
             properties.extend(property(*b"spih", OCTET_STRING, splat));
@@ -117,6 +149,36 @@ impl Policy {
         let mut objects = der::named(*b"MANP", &der::encode(SET, &properties));
         objects.extend(der::named(*b"lpol", &der::encode(SET, &digest)));
         der::encode(SET, &der::named(*b"MANB", &der::encode(SET, &objects)))
+    }
+
+    /// The boolean property `tag`: absent, as here, is how a policy says no.
+    pub fn boolean_tag(&self, tag: [u8; 4]) -> Option<bool> {
+        match &tag {
+            b"smb0" => self.security != Security::Full,
+            b"smb1" => self.security == Security::Permissive,
+            b"smb2" => self.kexts.is_some(),
+            _ => false,
+        }
+        .then_some(true)
+    }
+
+    /// The integer property `tag`.
+    pub fn integer_tag(&self, tag: [u8; 4]) -> Option<u64> {
+        (tag == *b"sip0" && self.kexts.is_some()).then_some(u64::from(KEXT_SIP_BITS))
+    }
+
+    /// The digest property `tag`.
+    pub fn digest_tag(&self, tag: [u8; 4]) -> Option<&[u8; DIGEST_BYTES]> {
+        match &tag {
+            b"auxi" => self.kexts.as_ref().map(|kexts| &kexts.collection),
+            b"auxp" => self.kexts.as_ref().map(|kexts| &kexts.approved),
+            b"auxr" => self.kexts.as_ref().map(|kexts| &kexts.receipt),
+            b"lpnh" => Some(&self.nonce),
+            b"nsih" => Some(&self.next_stage),
+            b"prot" => self.paired.as_ref(),
+            b"spih" => self.splat.as_ref(),
+            _ => None,
+        }
     }
 
     /// The policy file, given the DER signature over [`Self::signed`].
@@ -204,15 +266,27 @@ fn parse(signed: Element<'_>) -> Result<Policy, Error> {
         splat: None,
         paired: None,
         security: Security::Full,
+        kexts: None,
     };
     let (mut volume, mut next_stage, mut nonce) = (false, false, false);
+    let (mut approved, mut collection, mut receipt) = (None, None, None);
+    let (mut relaxed, mut admitted) = (false, false);
     let mut properties = Cursor(properties.value);
     while !properties.0.is_empty() {
         let (name, mut body) = entry(properties.next_element()?)?;
         match &name {
+            b"auxi" => collection = Some(digest(&mut body)?),
+            b"auxp" => approved = Some(digest(&mut body)?),
+            b"auxr" => receipt = Some(digest(&mut body)?),
             b"lpnh" => (policy.nonce, nonce) = (digest(&mut body)?, true),
             b"nsih" => (policy.next_stage, next_stage) = (digest(&mut body)?, true),
             b"prot" => policy.paired = Some(digest(&mut body)?),
+            b"sip0" => {
+                if body.take(2)?.value != KEXT_SIP_BITS.to_be_bytes() {
+                    return Err(Error::Malformed("sip0 is not the kext flags"));
+                }
+                relaxed = true;
+            }
             b"spih" => policy.splat = Some(digest(&mut body)?),
             b"smb0" => {
                 flag(&mut body)?;
@@ -221,6 +295,10 @@ fn parse(signed: Element<'_>) -> Result<Policy, Error> {
             b"smb1" => {
                 flag(&mut body)?;
                 policy.security = Security::Permissive;
+            }
+            b"smb2" => {
+                flag(&mut body)?;
+                admitted = true;
             }
             b"vuid" => {
                 policy.volume_group = body
@@ -237,6 +315,15 @@ fn parse(signed: Element<'_>) -> Result<Policy, Error> {
     if !(volume && next_stage && nonce) {
         return Err(Error::Malformed("a required property is absent"));
     }
+    policy.kexts = match (approved, collection, receipt, relaxed, admitted) {
+        (None, None, None, false, false) => None,
+        (Some(approved), Some(collection), Some(receipt), true, true) => Some(Kexts {
+            approved,
+            collection,
+            receipt,
+        }),
+        _ => return Err(Error::Malformed("a partial kext grant")),
+    };
     Ok(policy)
 }
 
@@ -266,6 +353,7 @@ pub fn verify(file: &[u8], key: &VerifyingKey) -> Result<Policy, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
     use p384::ecdsa::{SigningKey, signature::Signer};
 
     fn key(byte: u8) -> SigningKey {
@@ -285,7 +373,93 @@ mod tests {
             splat: Some([4; DIGEST_BYTES]),
             paired: Some([5; DIGEST_BYTES]),
             security: Security::Permissive,
+            kexts: None,
         }
+    }
+
+    fn kexts() -> Kexts {
+        Kexts {
+            approved: [6; DIGEST_BYTES],
+            collection: [7; DIGEST_BYTES],
+            receipt: [8; DIGEST_BYTES],
+        }
+    }
+
+    #[test]
+    fn a_kext_grant_reads_back_with_the_kext_flags_alone() {
+        let granted = Policy {
+            kexts: Some(kexts()),
+            ..policy()
+        };
+        let file = sign(&granted, &key(1));
+        assert_eq!(verify(&file, key(1).verifying_key()), Ok(granted.clone()));
+        assert_eq!(granted.boolean_tag(*b"smb2"), Some(true));
+        assert_eq!(granted.integer_tag(*b"sip0"), Some(0x201));
+        assert_eq!(granted.digest_tag(*b"auxi"), Some(&[7; DIGEST_BYTES]));
+        assert_eq!(granted.digest_tag(*b"auxp"), Some(&[6; DIGEST_BYTES]));
+        assert_eq!(granted.digest_tag(*b"auxr"), Some(&[8; DIGEST_BYTES]));
+        assert_eq!(granted.digest_tag(*b"nsih"), Some(&[2; DIGEST_BYTES]));
+        let plain = policy();
+        assert_eq!(plain.boolean_tag(*b"smb2"), None);
+        assert_eq!(plain.boolean_tag(*b"smb1"), Some(true));
+        assert_eq!(plain.integer_tag(*b"sip0"), None);
+        assert_eq!(plain.digest_tag(*b"auxp"), None);
+    }
+
+    /// `policy` with its `MANP` rebuilt from `properties`, signed.
+    fn with_properties(properties: &[([u8; 4], u8, &[u8])]) -> Vec<u8> {
+        let mut encoded = Vec::new();
+        for (name, tag, value) in properties {
+            encoded.extend(property(*name, *tag, value));
+        }
+        let digest = property(*b"DGST", OCTET_STRING, &Sha384::digest(PAYLOAD));
+        let mut objects = der::named(*b"MANP", &der::encode(SET, &encoded));
+        objects.extend(der::named(*b"lpol", &der::encode(SET, &digest)));
+        let signed = der::encode(SET, &der::named(*b"MANB", &der::encode(SET, &objects)));
+        let signature: DerSignature = key(1).sign(&signed);
+        let mut manifest = der::encode(der::IA5_STRING, b"IM4M");
+        manifest.extend(der::encode(INTEGER, &[0]));
+        manifest.extend(signed);
+        manifest.extend(der::encode(OCTET_STRING, signature.as_bytes()));
+        manifest.extend(der::encode(SEQUENCE, &[]));
+        img4::compose(&PAYLOAD, &der::encode(SEQUENCE, &manifest))
+    }
+
+    #[test]
+    fn a_policy_cannot_relax_more_than_the_kext_flags() {
+        let (uuid, digest) = ([1; UUID_BYTES], [2; DIGEST_BYTES]);
+        let base: [([u8; 4], u8, &[u8]); 3] = [
+            (*b"lpnh", OCTET_STRING, &digest),
+            (*b"nsih", OCTET_STRING, &digest),
+            (*b"vuid", OCTET_STRING, &uuid),
+        ];
+        let grant = |bits: &'static [u8], smb2: bool| {
+            let mut properties: Vec<([u8; 4], u8, &[u8])> = vec![
+                (*b"auxi", OCTET_STRING, &digest),
+                (*b"auxp", OCTET_STRING, &digest),
+                (*b"auxr", OCTET_STRING, &digest),
+            ];
+            properties.extend(base);
+            properties.push((*b"sip0", INTEGER, bits));
+            if smb2 {
+                properties.push((*b"smb2", BOOLEAN, &[0xff]));
+            }
+            with_properties(&properties)
+        };
+        let public = key(1);
+        let public = public.verifying_key();
+        assert!(matches!(
+            verify(&grant(&[2, 1], true), public),
+            Ok(Policy { kexts: Some(_), .. })
+        ));
+        assert_eq!(
+            verify(&grant(&[0x7f], true), public),
+            Err(Error::Malformed("sip0 is not the kext flags"))
+        );
+        assert_eq!(
+            verify(&grant(&[2, 1], false), public),
+            Err(Error::Malformed("a partial kext grant"))
+        );
     }
 
     #[test]
