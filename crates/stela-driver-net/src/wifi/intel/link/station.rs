@@ -59,6 +59,7 @@ use zeroize::Zeroizing;
 
 mod active_link;
 mod beacon;
+mod coexistence;
 mod country;
 mod emlsr;
 mod grade;
@@ -309,6 +310,7 @@ pub(super) struct Client {
     reported: Vec<&'static str>,
     /// When the rules' last change comes to bear on the links.
     grace_ends: Option<u64>,
+    bluetooth: coexistence::Bluetooth,
 }
 
 impl Client {
@@ -355,6 +357,7 @@ impl Client {
             left: false,
             reported: Vec::new(),
             grace_ends: None,
+            bluetooth: coexistence::Bluetooth::default(),
         }
     }
 
@@ -406,6 +409,7 @@ impl Client {
         self.link_scan = link_scan::LinkScan::default();
         self.statistics = statistics::Statistics::default();
         self.emlsr = emlsr::Emlsr::default();
+        self.bluetooth.departed();
         self.tracking = beacon::Tracking::default();
         self.ciphers = None;
         self.management_cipher = None;
@@ -623,6 +627,8 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             self.run_steps(queue)?;
         }
         self.run_tracking(queue, now)?;
+        self.run_steps(queue)?;
+        self.run_coexistence(queue)?;
         self.run_steps(queue)?;
         self.run_emlsr(queue, now)?;
         self.run_steps(queue)?;
@@ -915,6 +921,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                 client.port_open = true;
                 let now = self.clock.now_us();
                 client.link_authorized(now);
+                client.bluetooth.link_changed();
             }
             Then::Country => self.country_answered(queue, &response)?,
         }
@@ -951,6 +958,11 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
     ) -> Result<(), Error> {
         let key_index = normalized.key_index();
         let mut frame = normalized.into_frame();
+        if let (Some(signal), Some(ap)) = (frame.radio.signal_dbm, frame.header().transmitter)
+            && self.client.seat_of(ap).is_some()
+        {
+            self.client.bluetooth.heard(i32::from(signal));
+        }
         if self.hear_on_link_scan(&frame) || self.client.beacon_heard(&frame, now) {
             return Ok(());
         }
@@ -1302,6 +1314,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                 beacon::SWITCH_ERROR_NOTIFICATION if word(4).is_some_and(beacon::switch_failed) => {
                     self.client.tracking.drop_connection();
                 }
+                coexistence::PROFILE_NOTIFICATION => self.client.bluetooth.profile(raw),
                 emlsr::BLUETOOTH_NOTIFICATION => {
                     let active = raw.iter().any(|&byte| byte != 0);
                     self.client.bluetooth_changed(active, now);
@@ -1358,7 +1371,9 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         if self.client.waiting.is_some() {
             return Ok(());
         }
+        let on_2ghz = queue.channel().band == Band::Ghz2;
         let antennas = queue.antennas();
+        let antennas = self.client.bluetooth.management_antennas(on_2ghz, antennas);
         while queue.space(MANAGEMENT_TID) != 0 {
             let Some((ticket, bytes)) = self.client.outbox.pop_front() else {
                 break;

@@ -20,7 +20,8 @@ const LONGEST_TIMEOUT: u16 = 10;
 const DEFAULT_SYNC_DELAY: u16 = 0x10ac;
 pub(super) const MODE_NOTIFICATION: (u8, u8) = (0xf3, 5);
 pub(super) const TRANSITION_FAILED_NOTIFICATION: (u8, u8) = (0xf7, 3);
-pub(super) const BLUETOOTH_NOTIFICATION: (u8, u8) = (0xce, 0);
+/// `PROFILE_NOTIF` of `BT_COEX_GROUP`.
+pub(super) const BLUETOOTH_NOTIFICATION: (u8, u8) = (0xff, 9);
 /// `ESR_RECOMMEND_LEAVE`.
 pub(super) const RECOMMEND_LEAVE: u32 = 0;
 /// `IWL_MLD_TPT_COUNT_WINDOW`.

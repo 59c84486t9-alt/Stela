@@ -525,6 +525,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
     /// link leaves its PHY for one on the new channel, and waits to hear the AP.
     fn follow_switch(&mut self, queue: &mut Queue<Q, B>) -> Result<(), Error> {
         let client = &mut self.client;
+        client.bluetooth.link_changed();
         let active = client.tracking.switch.ok_or(Error::Refused("no switch"))?;
         let target = active.announced.definition;
         let seat = client.seat_of(active.ap).ok_or(Error::Refused("no link"))?;

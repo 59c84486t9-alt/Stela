@@ -556,6 +556,31 @@ fn bring_up<'n>(
     raise(native, country, beacons, flags, channel, false)
 }
 
+/// `image` with its PHY SKU allowing the two chains NVM names, and with
+/// `host_chains` a first RLC version, which leaves them to the host.
+fn two_receive_chains(mut image: Vec<u8>, host_chains: bool) -> Vec<u8> {
+    const PHY_SKU: u32 = 20;
+    const COMMAND_VERSIONS: u32 = 48;
+    let mut at = 88;
+    while at < image.len() {
+        let word = |at: usize| u32::from_le_bytes(image[at..at + 4].try_into().unwrap());
+        let (kind, length) = (word(at), word(at + 4) as usize);
+        if kind == PHY_SKU {
+            let sku = word(at + 8) | 3 << 20;
+            image[at + 8..at + 12].copy_from_slice(&sku.to_le_bytes());
+        }
+        if kind == COMMAND_VERSIONS && host_chains {
+            for entry in image[at + 8..at + 8 + length].as_chunks_mut::<4>().0 {
+                if entry[..2] == [8, 5] {
+                    entry[2] = 1;
+                }
+            }
+        }
+        at += 8 + length.next_multiple_of(4);
+    }
+    image
+}
+
 /// [`bring_up`] with an AP that does or does not advertise WMM.
 fn raise<'n>(
     native: &'n Native,
@@ -623,7 +648,17 @@ fn raise_as<'n>(
         &profile(),
         Family::Ax200.firmware_name(),
         &feature(
-            feature(feature(coex_image(2), 30, 63, true), 30, 21, true),
+            feature(
+                feature(
+                    two_receive_chains(coex_image(2), native.host_chains),
+                    30,
+                    63,
+                    true,
+                ),
+                30,
+                21,
+                true,
+            ),
             30,
             46,
             true,
@@ -1059,6 +1094,68 @@ fn a_second_michael_failure_in_a_minute_leaves_the_ap() {
     assert_eq!(farewell[24..26], [14, 0]);
     let report = device.air[device.air.len() - 2].as_slice();
     assert_eq!(eapol(report)[6] & 8, 8, "the AP hears of the second, too");
+}
+
+/// Firmware's word on Bluetooth's activity.
+fn bluetooth(grading: u8) -> Vec<u8> {
+    let mut body = vec![0; 40];
+    body[32] = grading;
+    notify(0, 0xce, &body)
+}
+
+#[test]
+fn firmware_that_keeps_its_chains_leaves_sm_power_save_to_itself() {
+    let native = Native::default();
+    let (mut wifi, mut device) = connect(&native, true);
+    device.inject(wifi.radio().rom().unwrap(), &bluetooth(3));
+    let told = run(&mut wifi, &mut device, |_, device, _| {
+        device.air.iter().any(|frame| frame[24..] == [7, 1, 1])
+    });
+    assert!(!told, "{:?}", wifi.radio().error());
+}
+
+#[test]
+fn bluetooth_gets_its_channel_inhibited_and_a_strong_ap_less_power() {
+    let native = Native::default();
+    let (mut wifi, mut device) = connect(&native, false);
+    let commands = device.commands.len();
+    device.inject(wifi.radio().rom().unwrap(), &bluetooth(3));
+    let told = run(&mut wifi, &mut device, |_, device, _| {
+        device.commands[commands..].iter().any(|c| c.1 == 0x5d)
+    });
+    assert!(told, "{:?}", &device.commands[commands..]);
+    // The model's AP is heard at -44 dBm.
+    let (frame, reorder) = protected(5, 5, 1, 1, false, false);
+    let frame = placed(frame, 3 | 2 << 8 | 1 << 6, None, reorder);
+    device.inject(wifi.radio().rom().unwrap(), &frame);
+    let reduced = run(&mut wifi, &mut device, |_, device, _| {
+        device.commands[commands..].iter().any(|c| c.1 == 0x5c)
+    });
+    assert!(reduced, "{:?}", &device.commands[commands..]);
+}
+
+#[test]
+fn busy_bluetooth_tells_the_ap_of_sm_power_save_and_narrows_the_phy() {
+    let native = Native {
+        host_chains: true,
+        ..Native::default()
+    };
+    let (mut wifi, mut device) = connect(&native, true);
+    let phys = device.commands.iter().filter(|c| c.1 == 8).count();
+    device.inject(wifi.radio().rom().unwrap(), &bluetooth(3));
+    let told = run(&mut wifi, &mut device, |_, device, _| {
+        device.air.iter().any(|frame| frame[24..] == [7, 1, 1])
+    });
+    assert!(told, "{:?}", wifi.radio().error());
+    let narrowed = run(&mut wifi, &mut device, |_, device, _| {
+        device.commands.iter().filter(|c| c.1 == 8).count() > phys
+    });
+    assert!(narrowed, "{:?}", wifi.radio().error());
+    device.inject(wifi.radio().rom().unwrap(), &bluetooth(0));
+    let eased = run(&mut wifi, &mut device, |_, device, _| {
+        device.air.iter().any(|frame| frame[24..] == [7, 1, 0])
+    });
+    assert!(eased, "{:?}", wifi.radio().error());
 }
 
 /// Firmware's report that `country` applies, from `source`.
