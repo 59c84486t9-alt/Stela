@@ -33,11 +33,12 @@ fn write(resource: &mut EmptyResource, offset: u64, value: u64) {
         .unwrap();
 }
 #[test]
-fn perf_counter_configuration_holds_64_bit_words_and_counters_refuse() {
+fn perf_counters_hold_their_writes_and_report_counting_nothing_once() {
     let mut cache = resource(SoftwareImage::zeroed_control_image());
     let mut latch = InterruptLatch::new();
     let mut a = access(&mut latch);
     let word = 5 * STRIDE + 0x18288;
+    assert!(cache.read(word, Width::Double, &mut a).is_err());
     assert_eq!(cache.read(word, Width::Double, &mut a), Ok(0));
     cache
         .write(word, Width::Double, 0x1100_0000_0000_0021, &mut a)
@@ -47,10 +48,15 @@ fn perf_counter_configuration_holds_64_bit_words_and_counters_refuse() {
         Ok(0x1100_0000_0000_0021)
     );
     assert_eq!(cache.read(0x18288, Width::Double, &mut a), Ok(0));
-    for counter in [0x19000, 0x25000] {
-        assert!(cache.read(counter, Width::Double, &mut a).is_err());
+    for (counter, width) in [(0x25000, Width::Double), (0x152004, Width::Word)] {
+        assert_eq!(cache.read(counter, width, &mut a), Ok(0));
+    }
+    for (enable, width) in [(0x1f004, Width::Word), (BROADCAST + 0xa820, Width::Word)] {
+        cache.write(enable, width, 0x21, &mut a).unwrap();
+        assert_eq!(cache.read(enable, width, &mut a), Ok(0x21));
     }
     assert!(cache.read(0x18004, Width::Double, &mut a).is_err());
+    assert!(cache.read(BROADCAST + 0x400, Width::Word, &mut a).is_err());
 }
 #[test]
 fn empty_composite_consumes_reached_lock_state_and_installs_one_source_union() {

@@ -18,8 +18,9 @@
 //! (`SR duration(usec)`, `PD duration(usec)`), +588 bits 0 and 4 enable the
 //! self-refresh and power-down duration counters and bits 8 and 12 clear
 //! them; `_enablePerfCtrl` panics unless a clear bit reads clear within
-//! 20 us, and a clear completes at once. The counters at +4000 count DRAM
-//! events, which no producer supplies, so their reads refuse.
+//! 20 us, and a clear completes at once. The 64-bit counters at +4000 count
+//! DRAM events, which no producer supplies, so they read zero, and the first
+//! such read refuses to report that once.
 use crate::Result;
 use alloc::{rc::Rc, vec::Vec};
 use core::cell::RefCell;
@@ -41,6 +42,7 @@ const DRAIN: u64 = 0xa40;
 const CONFIG_EC8: u64 = 0xec8;
 const CONFIG_ED0: u64 = 0xed0;
 const PERF: core::ops::Range<u64> = 0x580..0x640;
+const COUNTERS: core::ops::Range<u64> = 0x4000..0x4100;
 const DURATION: u64 = 0x588;
 const DURATION_CLEAR: u32 = 1 << 8 | 1 << 12;
 /// The LPDDR5 1x refresh-rate code in both ranks' fields.
@@ -93,6 +95,7 @@ struct State {
     channels: Vec<Channel>,
     lifecycle: LifecycleState,
     serial: u64,
+    counters_reported: bool,
 }
 impl State {
     fn accessible(&self) -> Result<()> {
@@ -156,6 +159,7 @@ impl Controller {
                     .collect(),
                 lifecycle,
                 serial: 0,
+                counters_reported: false,
             })),
         })
     }
@@ -222,6 +226,13 @@ impl Controller {
     }
 }
 
+fn counter(offset: u64, width: Width) -> bool {
+    width == Width::Double
+        && offset.is_multiple_of(8)
+        && offset / CHANNEL_STRIDE < CHANNELS as u64
+        && COUNTERS.contains(&(offset % CHANNEL_STRIDE))
+}
+
 fn locate(offset: u64, width: Width) -> Result<(usize, u64)> {
     if width != Width::Word
         || !offset.is_multiple_of(4)
@@ -270,6 +281,19 @@ impl MmioDevice for Controller {
     }
     fn read(&mut self, offset: u64, width: Width, _: &mut Access<'_>) -> Result<u64, MmioError> {
         let fail = |why: Refusal| refuse(NAME, offset, width, Direction::Read, why);
+        if counter(offset, width) {
+            let mut state = self
+                .state
+                .try_borrow_mut()
+                .map_err(|_| fail(refuse!("native DCS owner is already borrowed")))?;
+            state.accessible().map_err(fail)?;
+            if core::mem::replace(&mut state.counters_reported, true) {
+                return Ok(0);
+            }
+            return Err(fail(refuse!(
+                "DCS performance counters count no DRAM events"
+            )));
+        }
         let (channel, register) = locate(offset, width).map_err(fail)?;
         let state = self
             .state
@@ -410,9 +434,16 @@ mod tests {
             owner.read(base + DURATION, Width::Word, &mut access),
             Ok(0x11)
         );
-        // Other channels keep their own words; the counters refuse.
+        // Other channels keep their own words; the counters read zero and
+        // report that once.
         assert_eq!(owner.read(0x58c, Width::Word, &mut access), Ok(0));
         assert!(owner.read(base + 0x4000, Width::Word, &mut access).is_err());
+        assert!(
+            owner
+                .read(base + 0x4000, Width::Double, &mut access)
+                .is_err()
+        );
+        assert_eq!(owner.read(0x4058, Width::Double, &mut access), Ok(0));
     }
 
     #[test]

@@ -13,11 +13,13 @@
 //! optional bits23:16/30. AP file0x2eff890 masks low7 after a full32 read.
 //!
 //! `_writePerfCtrl` and `_enablePerfCtrl` (file 0x2efe90c, 0x2efeb60) program
-//! each window's AMC performance counter configuration at +18000..+18800
-//! through `_mccWriteReg64` (0x2efe870), with addresses from the driver's
-//! `AMCPerfCounterConfig` table; the words hold their 64-bit writes from a
-//! zero handoff. The counters they select count memory events, which no
-//! producer supplies, so `_mccReadReg64` reads beyond that block refuse.
+//! each window's AMC performance counters through `_mccWriteReg64`
+//! (0x2efe870) and `_mccWriteReg32`, with addresses from the driver's
+//! `AMCPerfCounterConfig` table: blocks +12000..+28000 of every window and two
+//! broadcast enables, at either width. The words hold their writes from a zero
+//! handoff. The counters they select count memory events, which no producer
+//! supplies, so a word never written reads zero, and the first such read
+//! refuses to report that once.
 use super::amcc::{BROADCAST, LOCK_REGISTERS, LockResource, MMIO_BYTES, Placement, STRIDE};
 use crate::Result;
 use crate::pmp::native::cache::publisher;
@@ -49,7 +51,8 @@ const QUOTAS: u64 = 0xa000;
 const OCCUPANCY: u64 = 0xc000;
 const WAY_COUNTS: u32 = (0x1f << 10) | (0x1f << 5);
 const QUOTA_FIELDS: u32 = 0x1ff | (0xff << 16) | (1 << 30);
-const PERF_CONFIG: core::ops::Range<u64> = 0x18000..0x18800;
+const PERF_BLOCK: core::ops::Range<u64> = 0x12000..0x28000;
+const PERF_ENABLES: [u64; 2] = [BROADCAST + 0x410, BROADCAST + 0xa820];
 
 /// Declared original driver configuration, not a readiness or mount token.
 /// The caller must coordinate this selection with the live original
@@ -114,7 +117,8 @@ pub struct EmptyResource {
     progress: Progress,
     quota_identity: publisher::Identity,
     quota_claimed: bool,
-    perf_config: BTreeMap<u64, u64>,
+    perf: BTreeMap<u64, u64>,
+    perf_reported: bool,
 }
 impl EmptyResource {
     /// Construct before admitting cache clients, with a selected
@@ -145,7 +149,8 @@ impl EmptyResource {
             progress: Progress::default(),
             quota_identity: publisher::Identity::new(),
             quota_claimed: false,
-            perf_config: BTreeMap::new(),
+            perf: BTreeMap::new(),
+            perf_reported: false,
         })
     }
     pub fn source(&self) -> &MemoryController {
@@ -330,11 +335,15 @@ fn table(offset: u64, base: u64, count: u64) -> Option<usize> {
     let within = offset.checked_sub(base)?;
     (within < count * 4 && within.is_multiple_of(4)).then_some((within / 4) as usize)
 }
-fn perf_config(offset: u64, width: Width) -> bool {
-    width == Width::Double
-        && offset.is_multiple_of(8)
-        && offset < MMIO_BYTES
-        && PERF_CONFIG.contains(&(offset % STRIDE))
+fn perf_register(offset: u64, width: Width) -> bool {
+    let aligned = match width {
+        Width::Word => offset.is_multiple_of(4),
+        Width::Double => offset.is_multiple_of(8),
+        _ => false,
+    };
+    aligned
+        && (PERF_ENABLES.contains(&offset)
+            || offset < BROADCAST && PERF_BLOCK.contains(&(offset % STRIDE)))
 }
 fn lock_word(offset: u64) -> bool {
     plane(offset).is_some_and(|(_, register)| LOCK_REGISTERS.contains(&register))
@@ -362,9 +371,17 @@ impl MmioDevice for EmptyResource {
     ) -> Result<u64, MmioError> {
         let fail =
             |reason: Refusal| refuse("t8112-empty-cache", offset, width, Direction::Read, reason);
-        if perf_config(offset, width) {
+        if perf_register(offset, width) {
             self.locks.accessible().map_err(fail)?;
-            return Ok(self.perf_config.get(&offset).copied().unwrap_or(0));
+            if let Some(&word) = self.perf.get(&offset) {
+                return Ok(word);
+            }
+            if core::mem::replace(&mut self.perf_reported, true) {
+                return Ok(0);
+            }
+            return Err(fail(refuse!(
+                "T8112 AMC performance counters count no memory events"
+            )));
         }
         self.checked(offset, width).map_err(fail)?;
         if lock_word(offset) {
@@ -381,9 +398,9 @@ impl MmioDevice for EmptyResource {
     ) -> Result<(), MmioError> {
         let fail =
             |reason: Refusal| refuse("t8112-empty-cache", offset, width, Direction::Write, reason);
-        if perf_config(offset, width) {
+        if perf_register(offset, width) {
             self.locks.accessible().map_err(fail)?;
-            self.perf_config.insert(offset, value);
+            self.perf.insert(offset, value);
             return Ok(());
         }
         self.checked(offset, width).map_err(fail)?;
