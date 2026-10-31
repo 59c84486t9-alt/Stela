@@ -14,10 +14,14 @@ use crate::wifi::intel::{
 };
 use crate::wifi::network::{Network, Secret};
 use crate::wifi::sae::{Derivation, Exchange, Frame, H2E_RSNXE, Template};
-use crate::wifi::station::{Phase as Peering, wire::multi_link::Basic};
+use crate::wifi::station::{
+    Phase as Peering,
+    wire::multi_link::{Basic, Profile},
+};
 use crate::wifi::supplicant::{self, tests::Authenticator};
 use crate::{Link, Mac};
 use alloc::{boxed::Box, sync::Arc};
+use core::sync::atomic::AtomicU8;
 use stela_driver_base::entropy::{Entropy, EntropyError};
 use zeroize::Zeroizing;
 
@@ -36,11 +40,13 @@ const WMM: [u8; 26] = [
     0x62, 0x32, 0x2f, 0,
 ];
 
-struct FixedEntropy;
+/// Each read one byte over the last, from 0x5a.
+#[derive(Default)]
+struct FixedEntropy(AtomicU8);
 
 impl Entropy for FixedEntropy {
     fn fill(&self, bytes: &mut [u8]) -> Result<(), EntropyError> {
-        bytes.fill(0x5a);
+        bytes.fill(0x5a + self.0.fetch_add(1, Ordering::Relaxed));
         Ok(())
     }
 }
@@ -87,6 +93,9 @@ struct Device<'n> {
     /// The AP MLD's side of SAE, and the confirm it holds back.
     sae: Option<Exchange>,
     confirm: Option<Frame>,
+    /// A beacon of another AP of the AP MLD, and what the association
+    /// response then carries instead of `elements`.
+    other: Option<(Vec<u8>, Vec<u8>)>,
 }
 
 impl Device<'_> {
@@ -136,7 +145,14 @@ impl Device<'_> {
         }
         let request = &request[..];
         let payload = match (id.group, id.opcode) {
-            _ if id == NvmRequest::GetInformation.id().wire() => nvm_response(),
+            _ if id == NvmRequest::GetInformation.id().wire() => {
+                let mut nvm = nvm_response();
+                if self.other.is_some() {
+                    // Through channel 36, the first of 5 GHz.
+                    nvm[24..28].copy_from_slice(&15u32.to_le_bytes());
+                }
+                nvm
+            }
             (_, 0xc8) => {
                 let country = u16::from_le_bytes([request[0], request[1]]).to_be_bytes();
                 self.countries.push(country);
@@ -150,10 +166,16 @@ impl Device<'_> {
                 payload[20..24].copy_from_slice(&self.channel.to_le_bytes());
                 let second = self.second.unwrap_or(self.channel);
                 payload[24..28].copy_from_slice(&second.to_le_bytes());
+                if self.other.is_some() {
+                    // Channel 36, the first after the 14 of 2.4 GHz.
+                    payload[76..80].copy_from_slice(&OPEN.to_le_bytes());
+                }
                 payload
             }
             (1 | 5, 0x08) => vec![0x9b],
             (_, 0x9f) => vec![0xaa],
+            // A queue changing stations stays as it is.
+            (5, 0x17) if request[0] == 2 => Vec::new(),
             (5, 0x17) if request[0] == 0 => {
                 let queue = 511 - self.queues.len() as u16;
                 let descriptors = u64::from_le_bytes(request[28..36].try_into().unwrap());
@@ -193,6 +215,10 @@ impl Device<'_> {
             if self.second.is_none() || self.scans.len() == 1 {
                 for ssid in self.beacons.clone() {
                     self.inject(rom, &beacon(ssid, self.rsn, self.quality, self.elements));
+                }
+                if let Some((frame, _)) = &self.other {
+                    let frame = frame.clone();
+                    self.inject(rom, &frame);
                 }
             }
             let mut body = [0; 16];
@@ -317,7 +343,10 @@ impl Device<'_> {
                             body.extend(HT);
                             body.extend(WMM);
                         }
-                        body.extend(self.elements);
+                        match &self.other {
+                            Some((_, response)) => body.extend(response),
+                            None => body.extend(self.elements),
+                        }
                         self.inject(rom, &answer(self.receiver, 0x10, &body));
                     }
                     _ => {}
@@ -369,9 +398,101 @@ fn mpdu(frame: Vec<u8>, status: u32) -> Vec<u8> {
     placed(frame, status, None, 127 << 24)
 }
 
+/// A beacon of the AP on the other link of the AP MLD, on channel 36 and
+/// quieter than the setup link's.
+fn other_beacon() -> Vec<u8> {
+    let mut frame = vec![0; 36];
+    frame[..2].copy_from_slice(&0x80u16.to_le_bytes());
+    frame[4..10].fill(0xff);
+    frame[10..16].copy_from_slice(&OTHER);
+    frame[16..22].copy_from_slice(&OTHER);
+    frame[32..34].copy_from_slice(&100u16.to_le_bytes());
+    frame[34] = 0x11;
+    frame.extend([0, 4]);
+    frame.extend(b"test");
+    frame.extend([1, 2, 0x8c, 0x12, 3, 1, 36, 5, 4, 0, 2, 0, 0]);
+    frame.extend(other_elements());
+    frame.extend(
+        Basic {
+            address: Mac(AP_MLD),
+            link_id: Some(5),
+            mld_capabilities: Some(0),
+            ..Basic::default()
+        }
+        .encode(),
+    );
+    placed_at(frame, 3, None, 127 << 24, [60, 70, 36])
+}
+
+/// What the AP says of itself on channel 36.
+fn other_elements() -> Vec<u8> {
+    let mut ht = HT;
+    ht[30] = 36;
+    let mut elements = RSN_SAE.to_vec();
+    elements.extend(ht);
+    elements.extend(WMM);
+    // mac80211 holds a 5 GHz AP without VHT to HT.
+    elements.extend([191, 12, 0, 0, 0, 0, 0xfa, 0xff, 0, 0, 0xfa, 0xff, 0, 0]);
+    elements.extend([192, 5, 0, 0, 0, 0xfa, 0xff]);
+    elements.extend(HE_AP);
+    elements.extend(EHT_AP);
+    elements.extend(H2E_RSNXE);
+    elements
+}
+
+/// What the association response carries with the other link accepted.
+fn other_response() -> Vec<u8> {
+    let mut profile = vec![0x11, 0, 0, 0, 1, 2, 0x8c, 0x12];
+    profile.extend(&other_elements()[RSN_SAE.len()..]);
+    let mut elements = HE_AP.to_vec();
+    elements.extend(EHT_AP);
+    elements.extend(H2E_RSNXE);
+    elements.extend(
+        Basic {
+            address: Mac(AP_MLD),
+            link_id: Some(3),
+            mld_capabilities: Some(0),
+            profiles: vec![Profile {
+                link_id: 5,
+                complete: true,
+                address: Some(Mac(OTHER)),
+                bss_parameters_change_count: Some(0),
+                body: profile,
+                ..Profile::default()
+            }],
+            ..Basic::default()
+        }
+        .encode(),
+    );
+    elements
+}
+
+/// The setup link's AP: its RNR names the other link, and it is nearly full.
+fn linked_ap() -> &'static [u8] {
+    let mut elements = vec![11, 5, 0, 0, 240, 0, 0];
+    elements.extend(mld_ap());
+    let mut rnr = vec![0x00, 16, 0, 36, 0];
+    rnr.extend(OTHER);
+    rnr.extend([0, 0, 0, 0, 0x40, 0, 0, 5, 0]);
+    elements.extend([201, rnr.len() as u8]);
+    elements.extend(rnr);
+    Box::leak(elements.into_boxed_slice())
+}
+
 /// [`mpdu`], as an A-MSDU's record at its index and whether it is the last,
 /// with `reorder` the descriptor's reorder word.
 fn placed(frame: Vec<u8>, status: u32, record: Option<(u8, bool)>, reorder: u32) -> Vec<u8> {
+    placed_at(frame, status, record, reorder, [44, 56, 1])
+}
+
+/// [`placed`], with `heard` the firmware's two energy readings and channel.
+fn placed_at(
+    frame: Vec<u8>,
+    status: u32,
+    record: Option<(u8, bool)>,
+    reorder: u32,
+    heard: [u8; 3],
+) -> Vec<u8> {
     let mut payload = vec![0; 48];
     payload[..2].copy_from_slice(&(frame.len() as u16).to_le_bytes());
     if let Some((index, last)) = record {
@@ -382,7 +503,7 @@ fn placed(frame: Vec<u8>, status: u32, record: Option<(u8, bool)>, reorder: u32)
     payload[12..16].copy_from_slice(&status.to_le_bytes());
     payload[16..20].copy_from_slice(&reorder.to_le_bytes());
     payload[28..32].copy_from_slice(&(3u32 << 14).to_le_bytes());
-    payload[32..35].copy_from_slice(&[44, 56, 1]);
+    payload[32..35].copy_from_slice(&heard);
     payload.extend(frame);
     let mpdu = Id {
         group: 0,
@@ -447,10 +568,12 @@ fn raise_split<'n>(
     let secret = Secret::Psk(Zeroizing::new([0; 32]));
     raise_as(
         native, country, beacons, flags, channel, quality, elements, second, &RSN, None, secret,
+        false,
     )
 }
 
-/// [`raise_split`], with [`Device::rsn`] and a radio standing in for `eht`.
+/// [`raise_split`], with [`Device::rsn`], a radio standing in for `eht` and
+/// whether the AP MLD has [`Device::other`].
 #[expect(clippy::too_many_arguments, reason = "each is a fixture's own knob")]
 fn raise_as<'n>(
     native: &'n Native,
@@ -464,6 +587,7 @@ fn raise_as<'n>(
     rsn: &'static [u8],
     eht: Option<EhtLimits>,
     secret: Secret,
+    other: bool,
 ) -> (Station<Model, ClockBios>, Phase, Device<'n>) {
     let catalog: &'static resources::Catalog = Box::leak(Box::new(catalog_for(
         &profile(),
@@ -510,6 +634,7 @@ fn raise_as<'n>(
         macs: Vec::new(),
         sae: None,
         confirm: None,
+        other: other.then(|| (other_beacon(), other_response())),
     };
     device.inject(&boot, &alive);
     let inputs = Inputs {
@@ -522,14 +647,20 @@ fn raise_as<'n>(
         bios: clock_bios(&native.bios_drops, Some(1)),
         database: regdb(&[
             (*b"00", &[(2_402_000, 2_472_000, 0, 2000)]),
-            (*b"US", &[(2_402_000, 2_472_000, flags, 3000)]),
+            (
+                *b"US",
+                &[
+                    (2_402_000, 2_472_000, flags, 3000),
+                    (5_170_000, 5_250_000, 0, 3000),
+                ],
+            ),
         ]),
         network: Network {
             ssid: b"test".to_vec(),
             secret,
             country,
         },
-        entropy: Arc::new(FixedEntropy),
+        entropy: Arc::new(FixedEntropy::default()),
     };
     // SAFETY: the model owns its pages and nothing else reaches the function.
     let mut wifi = unsafe { crate::wifi::intel::link::Wifi::new(boot, inputs) };
@@ -1231,6 +1362,8 @@ const AP_MLD: [u8; 6] = [2, 10, 11, 12, 13, 14];
 /// The address [`FixedEntropy`] draws for the station's link.
 const LINK: [u8; 6] = [0x5a; 6];
 /// [`RSN`] under SAE with management frame protection required.
+/// The AP on the other link of the AP MLD.
+const OTHER: [u8; 6] = [2, 3, 4, 5, 6, 8];
 const RSN_SAE: [u8; 22] = [
     48, 20, 1, 0, 0, 0x0f, 0xac, 4, 1, 0, 0, 0x0f, 0xac, 4, 1, 0, 0, 0x0f, 0xac, 8, 0xc0, 0,
 ];
@@ -1261,27 +1394,31 @@ fn mld_ap() -> &'static [u8] {
     Box::leak(elements.into_boxed_slice())
 }
 
-#[test]
-fn an_ap_mld_takes_the_station_on_a_link_of_its_own_and_gives_it_back() {
-    let native = Native::default();
+/// The radio and AP MLD of `elements` ready to join over SAE.
+fn raise_mld<'n>(
+    native: &'n Native,
+    elements: &'static [u8],
+    other: bool,
+) -> (Station<Model, ClockBios>, Device<'n>) {
     let eht = EhtLimits {
         stops_at_160: false,
         reduced: false,
         urm: false,
         slow_bus: false,
     };
-    let (mut wifi, phase, mut device) = raise_as(
-        &native,
+    let (wifi, phase, mut device) = raise_as(
+        native,
         Some(*b"US"),
         vec![b"test"],
         0,
         OPEN,
         true,
-        mld_ap(),
+        elements,
         None,
         &RSN_SAE,
         Some(eht),
         Secret::parse(b"password").unwrap(),
+        other,
     );
     assert_eq!(phase, Phase::AuthenticationRequired);
     device.receiver = LINK;
@@ -1302,6 +1439,129 @@ fn an_ap_mld_takes_the_station_on_a_link_of_its_own_and_gives_it_back() {
         )
         .unwrap(),
     );
+    (wifi, device)
+}
+
+#[test]
+fn an_mld_station_moves_to_its_better_link_and_back_before_it_leaves() {
+    let native = Native::default();
+    let (mut wifi, mut device) = raise_mld(&native, linked_ap(), true);
+    let associated = run(&mut wifi, &mut device, |wifi, _, _| {
+        wifi.radio().station().phase() == Peering::Associated
+    });
+    assert!(associated, "{:?}", wifi.radio().error());
+    let request = &device.air[2];
+    let basic = Basic::find(&request[28..]).unwrap().unwrap();
+    let local = basic.profiles[0].address.unwrap();
+    let security = Security::select(&RSN_SAE, true).unwrap();
+    let link = |link_id, local, ap| supplicant::Link {
+        link_id,
+        local,
+        ap,
+        rsn: RSN_SAE.to_vec(),
+        rsnxe: Some(H2E_RSNXE.to_vec()),
+        accepted: true,
+    };
+    let (setup, other) = (link(3, Mac(LINK), Mac(AP)), link(5, local, Mac(OTHER)));
+    let mut ap = Authenticator::between(
+        security.suites(),
+        device.sae.as_ref().unwrap().pmk().unwrap(),
+        Mac(AP_MLD),
+        Mac(LOCAL),
+        security.element(),
+    )
+    .naming_station_mld()
+    .naming_links(core::slice::from_ref(&other));
+    let eapol_key = |body: &[u8]| data(LINK, false, [0x88, 0x8e], body, None);
+    let first = eapol_key(&ap.message_1());
+    device.inject(wifi.radio().rom().unwrap(), &first);
+    let answered = run(&mut wifi, &mut device, |_, device, _| device.air.len() > 3);
+    assert!(answered, "{:?}", wifi.radio().error());
+    ap.message_2(eapol(&device.air[3]));
+    let keys = [
+        supplicant::tests::link_keys(3, 1, 0x50),
+        supplicant::tests::link_keys(5, 1, 0x60),
+    ]
+    .concat();
+    let third = eapol_key(&ap.mld_message_3(&[setup, other], &keys));
+    device.inject(wifi.radio().rom().unwrap(), &third);
+    let authorized = device.configuration.len();
+    let word = |bytes: &[u8], at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+    let moved = run(&mut wifi, &mut device, |_, device, _| {
+        device.configuration[authorized..]
+            .iter()
+            .any(|(opcode, bytes)| *opcode == 9 && word(bytes, 0) == 3)
+    });
+    assert!(
+        moved,
+        "{:?} {:?}",
+        wifi.radio().error(),
+        device.commands.last()
+    );
+    assert!(wifi.carrier(), "the port stays open across the move");
+    // The other link comes up beside the first before the first goes.
+    let links: Vec<(u32, u32, u32)> = device.configuration[authorized..]
+        .iter()
+        .filter(|(opcode, _)| *opcode == 9)
+        .map(|(_, bytes)| (word(bytes, 0), word(bytes, 4), word(bytes, 24)))
+        .collect();
+    let position = |wanted: (u32, u32, u32)| {
+        links
+            .iter()
+            .position(|link| *link == wanted)
+            .unwrap_or_else(|| panic!("{wanted:?} in {links:?}"))
+    };
+    let added = position((1, 1, 0));
+    let quiet = position((2, 0, 1));
+    let active = position((2, 1, 1));
+    let removed = position((3, 0, 0));
+    assert!(
+        added < quiet && quiet < active && active < removed,
+        "{links:?}"
+    );
+    let (_, new) = device.configuration[authorized..]
+        .iter()
+        .find(|(opcode, bytes)| *opcode == 9 && word(bytes, 0) == 1)
+        .unwrap();
+    assert_eq!(new[16..22], local.0);
+    assert_eq!(new[166], 5);
+    let (_, peer) = device.configuration[authorized..]
+        .iter()
+        .rfind(|(opcode, _)| *opcode == 0x0a)
+        .unwrap();
+    assert_eq!(word(peer, 0), 1, "the other firmware station");
+    assert_eq!(peer[8..14], AP_MLD);
+    assert_eq!(peer[16..22], OTHER);
+    // It goes back, and everything of the chain's is where the chain left it.
+    let back = device.configuration.len();
+    wifi.radio_mut().deauthenticate(3).unwrap();
+    let left = run(&mut wifi, &mut device, |wifi, _, _| {
+        wifi.radio().stage() == Standing::Idle
+    });
+    assert!(left, "{:?}", wifi.radio().error());
+    let returned: Vec<&Vec<u8>> = device.configuration[back..]
+        .iter()
+        .filter(|(opcode, bytes)| *opcode == 9 && word(bytes, 0) == 1)
+        .map(|(_, bytes)| bytes)
+        .collect();
+    let [link, cold] = &returned[..] else {
+        panic!("{} links added", returned.len());
+    };
+    assert_eq!(link[16..22], LINK);
+    assert_eq!(link[166], 3);
+    assert_eq!(cold[16..22], LOCAL);
+    assert!(
+        device.configuration[back..]
+            .iter()
+            .any(|(opcode, bytes)| *opcode == 9 && word(bytes, 0) == 3 && word(bytes, 4) == 1),
+        "the other link went"
+    );
+}
+
+#[test]
+fn an_ap_mld_takes_the_station_on_a_link_of_its_own_and_gives_it_back() {
+    let native = Native::default();
+    let (mut wifi, mut device) = raise_mld(&native, mld_ap(), false);
     let associated = run(&mut wifi, &mut device, |wifi, _, _| {
         wifi.radio().station().phase() == Peering::Associated
     });
@@ -1385,7 +1645,7 @@ fn an_ap_mld_takes_the_station_on_a_link_of_its_own_and_gives_it_back() {
         rsnxe: Some(H2E_RSNXE.to_vec()),
         accepted: true,
     };
-    let message = ap.mld_message_3(&link, &supplicant::tests::link_keys(3, 1, 0x50));
+    let message = ap.mld_message_3(&[link], &supplicant::tests::link_keys(3, 1, 0x50));
     let local = data(LINK, false, [0x88, 0x8e], &message, None);
     device.inject(wifi.radio().rom().unwrap(), &local);
     // The link's AP holds the link's group key, which alone opens the port.

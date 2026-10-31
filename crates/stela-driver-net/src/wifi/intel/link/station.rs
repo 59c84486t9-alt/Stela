@@ -47,6 +47,7 @@ use crate::wifi::{
         external,
         fragments::Fragments,
         multi_link::Affiliation,
+        operations::ChannelDefinition,
         operations::Operations,
         phy::{self, Capabilities, Role},
         power_envelope::PowerEnvelope,
@@ -54,7 +55,10 @@ use crate::wifi::{
     },
 };
 use alloc::{borrow::Cow, collections::VecDeque};
+use zeroize::Zeroizing;
 
+mod active_link;
+mod grade;
 mod he;
 mod reception;
 
@@ -193,6 +197,19 @@ struct Key {
     ap: Mac,
     /// Whether firmware holds the key, which a dormant link's does not.
     fitted: bool,
+    /// What a group key gives firmware as its link activates: the key and
+    /// the packet number its AP's frames continue from.
+    material: Option<(Zeroizing<Vec<u8>>, u64)>,
+}
+
+/// One IGTK of a link.
+struct LinkIntegrity {
+    ap: Mac,
+    index: u8,
+    flags: u32,
+    material: Zeroizing<Vec<u8>>,
+    receive: u64,
+    fitted: bool,
 }
 
 /// A data frame waiting for its queue or its queue's room.
@@ -228,8 +245,8 @@ pub(super) struct Client {
     pub(super) regulatory: Option<database::Country>,
     steps: VecDeque<Step>,
     waiting: Option<Waiting>,
-    /// The IGTKs the firmware holds, by index and flags.
-    management_keys: Vec<(u8, u32)>,
+    /// Each link's IGTKs.
+    management_keys: Vec<LinkIntegrity>,
     /// The deauthentication a departure sends before anything goes down.
     farewell: Option<Vec<u8>>,
     /// Until when the departure waits for its deauthentication.
@@ -250,7 +267,14 @@ pub(super) struct Client {
     /// A management exchange's frame awaits its TX response.
     exchange: bool,
     admitted: Option<(Ticket, Arc<AssociationContext>)>,
+    /// The active link's configuration.
     context: Option<Arc<AssociationContext>>,
+    /// The other link an MLD association made.
+    dormant: Option<Arc<AssociationContext>>,
+    /// Which of firmware's two sets of link IDs the active link holds.
+    seat: u8,
+    /// A new look at the links is due.
+    reselect: bool,
     ciphers: Option<(Cipher, Cipher)>,
     management_cipher: Option<ManagementCipher>,
     keys: Vec<Key>,
@@ -291,6 +315,9 @@ impl Client {
             exchange: false,
             admitted: None,
             context: None,
+            dormant: None,
+            seat: 0,
+            reselect: false,
             ciphers: None,
             management_cipher: None,
             keys: Vec::new(),
@@ -347,6 +374,8 @@ impl Client {
         self.exchange = false;
         self.admitted = None;
         self.context = None;
+        self.dormant = None;
+        self.reselect = false;
         self.ciphers = None;
         self.management_cipher = None;
         self.keys.clear();
@@ -387,8 +416,10 @@ impl Client {
                 links,
                 ..
             } => {
-                if !links.is_empty() {
-                    self.unsupported("a second MLO link: the setup link alone stays active");
+                let mut links = links.into_iter();
+                self.dormant = links.next();
+                if links.next().is_some() {
+                    self.unsupported("a third MLO link: it stays dormant for good");
                 }
                 self.admitted = Some((ticket, context));
             }
@@ -535,6 +566,11 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             }
         }
         self.run_steps(queue)?;
+        if self.client.reselect && self.client.idle() && !self.client.leaving {
+            self.client.reselect = false;
+            self.select_link(queue, now)?;
+            self.run_steps(queue)?;
+        }
         self.send_management(queue)?;
         self.send_data(queue)
     }
@@ -632,61 +668,23 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         context: &AssociationContext,
         ticket: Ticket,
     ) -> Result<(), Error> {
-        let station_link = context.affiliation().map_or(
-            StationLink {
-                address: self.address,
-                id: 0,
-            },
-            |link| StationLink {
-                address: link.local,
-                id: link.link_id,
-            },
-        );
         let negotiated = context.negotiated();
         let bss = context.beacon();
-        let band = bss.channel.band;
         let aid = context.response().aid;
         let he = negotiated.he.is_some();
-        let antennas = queue.antennas();
         let definition = context.definition();
         let eht = negotiated.eht.is_some();
-        // `ieee80211_set_chanreq_ap`: wider OFDMA follows the AP's own channel.
-        let wide_ofdma = eht
-            .then(|| {
-                let vht = negotiated
-                    .local()
-                    .vht()
-                    .zip(negotiated.peer().vht())
-                    .map(|(own, ap)| (own.capability, ap.capability));
-                context
-                    .operations()
-                    .channel(bss.channel, phy::Mode::Eht, vht)
-                    .ok()
-            })
-            .flatten();
+        let commands_of_link = self.link_commands(queue, context, self.client.seat, false)?;
         let phy = if definition.width == phy::Width::Mhz20 && !eht {
             Vec::new()
         } else {
             queue
-                .phy_changed(&definition, wide_ofdma.as_ref())
+                .phy_changed(&definition, commands_of_link.wide_ofdma.as_ref())
                 .ok_or(Error::Refused("channel width"))?
         };
         let firmware = queue.firmware();
-        let link_version = firmware
-            .command_version(commands::LINK_CONFIG.group, commands::LINK_CONFIG.opcode)
-            .map_or(1, |version| version.command_version);
         let high_priority = firmware.supports_capability(COEX_HIGH_PRIORITY);
         let fifo_offloaded = firmware.supports_api(SMART_FIFO_OFFLOAD);
-        let peer_version = firmware
-            .command_version(3, 0x0a)
-            .map_or(0, |version| version.command_version);
-        let rate_shape = rate_shape(firmware)?;
-        let explicit_mfp = firmware.supports_capability(EXPLICIT_MFP);
-        let longest = if firmware.supports_capability(CHECKSUM_OFFLOAD) {
-            commands::max_amsdu(negotiated)
-        } else {
-            0
-        };
         let mac = MacState {
             address: self.address,
             he,
@@ -696,38 +694,14 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         };
         let mac_version = version_of(firmware, commands::MAC_CONFIG);
         let power_version = version_of(firmware, commands::MAC_POWER);
-        let rates = commands::rate_config(negotiated, band, antennas, rate_shape, false, longest)
-            .ok_or(Error::Refused("rates"))?;
-        let edca = negotiated.edca();
-        let link = commands::link_config(
-            link_version,
-            LinkState {
-                link: station_link,
-                band,
-                basic_rates: negotiated.legacy.basic,
-                short_preamble: bss.capabilities & (1 << 5) != 0,
-                short_slot: band != Band::Ghz2 || bss.capabilities & (1 << 10) != 0,
-                protection: commands::protection(context),
-                width: negotiated.width,
-                qos: negotiated.wmm.is_some(),
-                edca: &edca,
-                beacon_interval: bss.beacon_interval,
-                dtim_period: context.dtim_period(),
-                he: link_he(context),
-            },
-        );
-        let peer = commands::station_config(
-            peer_version,
-            peer_state(context, explicit_mfp, self.client.port_open),
-        );
         let client = &mut self.client;
         for (id, bytes) in phy {
             client.command(id, bytes);
         }
         client.command(commands::MAC_CONFIG, commands::mac_config(mac_version, mac));
-        client.command(commands::LINK_CONFIG, link);
-        client.command(commands::RATE_CONFIG, rates);
-        client.command(commands::STATION_CONFIG, peer);
+        client.command(commands::LINK_CONFIG, commands_of_link.link);
+        client.command(commands::RATE_CONFIG, commands_of_link.rates);
+        client.command(commands::STATION_CONFIG, commands_of_link.peer);
         client.command(
             commands::MAC_CONFIG,
             commands::mac_config(
@@ -784,7 +758,8 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                 // SAFETY: as above.
                 Step::Queue { tid } => unsafe {
                     let mode = self.client.context.as_ref().map(|c| c.negotiated().mode);
-                    queue.add_queue(*tid, mode.unwrap_or(phy::Mode::Legacy), pages)
+                    let stations = self.client.stations();
+                    queue.add_queue(*tid, mode.unwrap_or(phy::Mode::Legacy), stations, pages)
                 },
                 Step::BlockAck(agreement) => {
                     let (tid, id) = (
@@ -796,13 +771,15 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                             tid,
                             agreement.session.start_sequence(),
                             agreement.session.window(),
+                            self.client.stations(),
                         )
                     } else {
                         let version = queue
                             .firmware()
                             .command_version(5, 0x16)
                             .map_or(1, |version| version.command_version);
-                        commands::remove_block_ack(version, id.unwrap_or(0), tid)
+                        let stations = self.client.stations();
+                        commands::remove_block_ack(version, id.unwrap_or(0), tid, stations)
                     };
                     // SAFETY: as above.
                     unsafe { queue.submit(commands::BLOCK_ACK_ALLOCATION, &bytes, pages) }
@@ -867,7 +844,10 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                     .map_err(Error::Key)?;
                 key.acknowledged = true;
             }
-            Then::Authorized => client.port_open = true,
+            Then::Authorized => {
+                client.port_open = true;
+                client.reselect = true;
+            }
         }
         Ok(())
     }
@@ -1362,9 +1342,12 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         Ok(())
     }
 
-    /// `iwl_mvm_mld_set_key` for the association's data and group keys.
+    /// `iwl_mvm_mld_set_key` for the association's data key, or a group key
+    /// of the link of `ap`. A dormant link's stands installed without
+    /// reaching firmware, as mac80211 holds it back until the link activates.
     fn install(
         &mut self,
+        ap: Mac,
         pairwise: bool,
         index: u8,
         material: &[u8],
@@ -1380,11 +1363,12 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             .station
             .pairwise_peer()
             .ok_or(Error::Refused("no peer"))?;
-        let ap = client
+        let active = client
             .context
             .as_ref()
             .ok_or(Error::Refused("no context"))?
             .bssid();
+        let fitted = pairwise || ap == active;
         let scope = if pairwise {
             KeyScope::Pairwise(peer)
         } else {
@@ -1402,7 +1386,9 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             .begin_install(index, cipher, material, receive, scope, transmit)
             .map_err(Error::Key)?;
         let identity = ticket.identity();
-        let bytes = commands::add_key(index, flags, material, receive.counters()[0])
+        let counter = receive.counters()[0];
+        let stations = client.stations();
+        let bytes = commands::add_key(index, flags, material, counter, stations)
             .ok_or(Error::Refused("key material"))?;
         if let Some(old) = client
             .keys
@@ -1410,20 +1396,30 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             .position(|key| key.pairwise == pairwise && key.index == index && key.ap == ap)
         {
             let old = client.keys.remove(old);
-            client.command(
-                commands::SECURITY_KEY,
-                commands::remove_key(old.index, old.flags),
-            );
+            if old.fitted {
+                client.command(
+                    commands::SECURITY_KEY,
+                    commands::remove_key(old.index, old.flags, stations),
+                );
+            }
+        }
+        if !fitted {
+            slot.complete_install(ticket, InstallOutcome::Accepted)
+                .map_err(Error::Key)?;
         }
         client.keys.push(Key {
             slot,
             pairwise,
             index,
             flags,
-            acknowledged: false,
+            acknowledged: !fitted,
             ap,
-            fitted: true,
+            fitted,
+            material: (!pairwise).then(|| (Zeroizing::new(material.to_vec()), counter)),
         });
+        if !fitted {
+            return Ok(identity);
+        }
         client.steps.push_back(Step::Command {
             id: commands::SECURITY_KEY,
             bytes,
@@ -1460,6 +1456,12 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             }
             self.client.draining = None;
         }
+        // The chain goes down on the IDs it came up with.
+        if self.client.seat != 0 {
+            self.switch_link(queue)?;
+            self.run_steps(queue)?;
+            return Ok(false);
+        }
         if self.client.session != Session::Off {
             self.client.session = Session::Off;
             self.client.command(
@@ -1476,19 +1478,23 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         for (id, tid) in self.client.reception.take_sessions() {
             self.client.command(
                 commands::BLOCK_ACK_ALLOCATION,
-                commands::remove_block_ack(version, id, tid),
+                commands::remove_block_ack(version, id, tid, self.client.stations()),
             );
         }
-        let fitted = core::mem::take(&mut self.client.keys);
-        for key in fitted.into_iter().filter(|key| key.fitted) {
+        let stations = self.client.stations();
+        let keys = core::mem::take(&mut self.client.keys);
+        for key in keys.into_iter().filter(|key| key.fitted) {
             self.client.command(
                 commands::SECURITY_KEY,
-                commands::remove_key(key.index, key.flags),
+                commands::remove_key(key.index, key.flags, stations),
             );
         }
-        for (index, flags) in core::mem::take(&mut self.client.management_keys) {
-            self.client
-                .command(commands::SECURITY_KEY, commands::remove_key(index, flags));
+        let keys = core::mem::take(&mut self.client.management_keys);
+        for key in keys.into_iter().filter(|key| key.fitted) {
+            self.client.command(
+                commands::SECURITY_KEY,
+                commands::remove_key(key.index, key.flags, stations),
+            );
         }
         if !self.client.idle() {
             self.run_steps(queue)?;
@@ -1548,9 +1554,15 @@ fn version_of(firmware: &crate::wifi::intel::firmware::Firmware<'_>, id: command
         .map_or(0, |version| version.command_version)
 }
 
-fn peer_state(context: &AssociationContext, explicit_mfp: bool, authorized: bool) -> PeerState {
+fn peer_state(
+    context: &AssociationContext,
+    explicit_mfp: bool,
+    authorized: bool,
+    seat: u8,
+) -> PeerState {
     let negotiated = context.negotiated();
     PeerState {
+        seat,
         address: context.peer(),
         link: context.bssid(),
         aid: context.response().aid,
@@ -2123,11 +2135,10 @@ impl<Q: BootIo, B: BiosIo> Radio for Wifi<Q, B> {
         material: &[u8],
         receive: ReplaySeed,
     ) -> Result<KeyIdentity, Error> {
-        self.install(pairwise, index, material, receive)
+        let ap = self.client.setup_ap().ok_or(Error::Refused("no peer"))?;
+        self.install(ap, pairwise, index, material, receive)
     }
 
-    /// mac80211 keeps a dormant link's key and tells the driver as the link
-    /// activates, so this one stands installed without reaching firmware.
     fn install_link_key(
         &mut self,
         link_id: u8,
@@ -2135,49 +2146,22 @@ impl<Q: BootIo, B: BiosIo> Radio for Wifi<Q, B> {
         material: &[u8],
         receive: ReplaySeed,
     ) -> Result<(), Error> {
+        let ap = self.client.link_ap(link_id)?;
+        self.install(ap, false, index, material, receive)
+            .map(|_| ())
+    }
+
+    fn install_link_management_key(
+        &mut self,
+        link_id: u8,
+        index: u8,
+        material: &[u8],
+        receive: PacketNumber,
+    ) -> Result<bool, Error> {
         let client = &mut self.client;
-        let (_, cipher) = client.ciphers.ok_or(Error::Refused("no ciphers"))?;
-        let flags = commands::key_flags(cipher, false, false)
-            .ok_or(Error::Unsupported("the cipher on Intel Wi-Fi"))?;
-        let ap = client
-            .station
-            .link_contexts()
-            .iter()
-            .find(|context| {
-                context
-                    .affiliation()
-                    .is_some_and(|link| link.link_id == link_id)
-            })
-            .ok_or(Error::Refused("no such link"))?
-            .bssid();
-        // SAFETY: the counter gives each key of the adapter its own slot.
-        let mut slot = unsafe { KeySlot::new(client.next_slot) }.map_err(Error::Key)?;
-        client.next_slot = client.next_slot.wrapping_add(1);
-        let ticket = slot
-            .begin_install(
-                index,
-                cipher,
-                material,
-                receive,
-                KeyScope::Group(ap),
-                TransmitSeed::RECEIVE_ONLY,
-            )
-            .map_err(Error::Key)?;
-        slot.complete_install(ticket, InstallOutcome::Accepted)
-            .map_err(Error::Key)?;
-        client
-            .keys
-            .retain(|key| key.pairwise || key.index != index || key.ap != ap);
-        client.keys.push(Key {
-            slot,
-            pairwise: false,
-            index,
-            flags,
-            acknowledged: true,
-            ap,
-            fitted: false,
-        });
-        Ok(())
+        let ap = client.link_ap(link_id)?;
+        client.keep_management_key(ap, index, material, receive)?;
+        Ok(true)
     }
 
     unsafe fn install_management_key(
@@ -2191,15 +2175,8 @@ impl<Q: BootIo, B: BiosIo> Radio for Wifi<Q, B> {
         if !client.keys_settled() {
             return Err(Error::Pending);
         }
-        let flags = commands::management_key_flags(
-            client
-                .management_cipher
-                .ok_or(Error::Refused("no management cipher"))?,
-        );
-        let bytes = commands::add_key(index, flags, material, receive.value())
-            .ok_or(Error::Refused("key material"))?;
-        client.command(commands::SECURITY_KEY, bytes);
-        client.management_keys.push((index, flags));
+        let ap = client.setup_ap().ok_or(Error::Refused("no peer"))?;
+        client.keep_management_key(ap, index, material, receive)?;
         Ok(Arc::new(ManagementKey { index }))
     }
 
@@ -2213,14 +2190,8 @@ impl<Q: BootIo, B: BiosIo> Radio for Wifi<Q, B> {
         // SAFETY: forwarded from the keeper.
         let installed = unsafe { self.install_management_key(0, index, material, receive) }?;
         let client = &mut self.client;
-        if let Some(old) = client
-            .management_keys
-            .iter()
-            .position(|key| key.0 == session.index)
-        {
-            let (index, flags) = client.management_keys.remove(old);
-            client.command(commands::SECURITY_KEY, commands::remove_key(index, flags));
-        }
+        let ap = client.setup_ap().ok_or(Error::Refused("no peer"))?;
+        client.forget_management_key(ap, session.index);
         Ok(installed)
     }
 
@@ -2345,8 +2316,10 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             0
         };
         let mac_version = version_of(firmware, commands::MAC_CONFIG);
-        let rates = commands::rate_config(negotiated, band, antennas, rate_shape, true, longest)
-            .ok_or(Error::Refused("rates"))?;
+        let seat = self.client.seat;
+        let rates =
+            commands::rate_config(negotiated, band, antennas, rate_shape, true, longest, seat)
+                .ok_or(Error::Refused("rates"))?;
         let mac = MacState {
             address: self.address,
             he: negotiated.he.is_some(),
@@ -2354,7 +2327,8 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             aid: Some(context.response().aid),
             high_priority: false,
         };
-        let peer = commands::station_config(peer_version, peer_state(context, explicit_mfp, true));
+        let peer =
+            commands::station_config(peer_version, peer_state(context, explicit_mfp, true, seat));
         let client = &mut self.client;
         client.command(commands::BEACON_FILTER, commands::beacon_filter(filter));
         client.command(commands::MAC_CONFIG, commands::mac_config(mac_version, mac));
@@ -2369,6 +2343,74 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
 }
 
 impl Client {
+    /// The setup link's AP.
+    fn setup_ap(&self) -> Option<Mac> {
+        self.station.on_air().next().map(|link| link.ap)
+    }
+
+    /// The AP on the MLD association's link `link_id`.
+    fn link_ap(&self, link_id: u8) -> Result<Mac, Error> {
+        self.station
+            .link_contexts()
+            .iter()
+            .find(|context| {
+                context
+                    .affiliation()
+                    .is_some_and(|link| link.link_id == link_id)
+            })
+            .map(|context| context.bssid())
+            .ok_or(Error::Refused("no such link"))
+    }
+
+    fn forget_management_key(&mut self, ap: Mac, index: u8) {
+        let stations = self.stations();
+        let old = self
+            .management_keys
+            .iter()
+            .position(|key| key.ap == ap && key.index == index);
+        if let Some(old) = old {
+            let old = self.management_keys.remove(old);
+            if old.fitted {
+                self.command(
+                    commands::SECURITY_KEY,
+                    commands::remove_key(old.index, old.flags, stations),
+                );
+            }
+        }
+    }
+
+    /// An IGTK of the link of `ap`, which firmware takes while that link is
+    /// active.
+    fn keep_management_key(
+        &mut self,
+        ap: Mac,
+        index: u8,
+        material: &[u8],
+        receive: PacketNumber,
+    ) -> Result<(), Error> {
+        let flags = commands::management_key_flags(
+            self.management_cipher
+                .ok_or(Error::Refused("no management cipher"))?,
+        );
+        let active = self.context.as_ref().map(|context| context.bssid());
+        let fitted = active == Some(ap);
+        self.forget_management_key(ap, index);
+        if fitted {
+            let bytes = commands::add_key(index, flags, material, receive.value(), self.stations())
+                .ok_or(Error::Refused("key material"))?;
+            self.command(commands::SECURITY_KEY, bytes);
+        }
+        self.management_keys.push(LinkIntegrity {
+            ap,
+            index,
+            flags,
+            material: Zeroizing::new(material.to_vec()),
+            receive: receive.value(),
+            fitted,
+        });
+        Ok(())
+    }
+
     fn port_ready(&self) -> bool {
         self.context.is_some()
     }

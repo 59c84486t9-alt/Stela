@@ -169,10 +169,10 @@ mod tests {
     fn a_peer_receiving_dual_carrier_modulation_gets_it() {
         let shape = commands::RateShape::of(4).unwrap();
         let he = negotiated(Band::Ghz5, Mode::He, Width::Mhz80);
-        let rates = commands::rate_config(&he, Band::Ghz5, 3, shape, true, 0).unwrap();
+        let rates = commands::rate_config(&he, Band::Ghz5, 3, shape, true, 0, 0).unwrap();
         assert_eq!(rates[shape.head + 4] & 8, 8);
         let vht = negotiated(Band::Ghz5, Mode::Vht, Width::Mhz80);
-        let rates = commands::rate_config(&vht, Band::Ghz5, 3, shape, true, 0).unwrap();
+        let rates = commands::rate_config(&vht, Band::Ghz5, 3, shape, true, 0, 0).unwrap();
         assert_eq!(rates[shape.head + 4] & 8, 0);
     }
 

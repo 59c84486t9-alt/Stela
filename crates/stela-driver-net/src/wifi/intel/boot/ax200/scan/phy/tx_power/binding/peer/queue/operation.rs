@@ -65,6 +65,39 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200ManagementQueue<'a,
         )
     }
 
+    /// The commands that give another link the PHY context `seat`.
+    pub fn phy_context(
+        &mut self,
+        seat: u8,
+        definition: &ChannelDefinition,
+        wide_ofdma: Option<&ChannelDefinition>,
+    ) -> Option<Vec<(Id, Vec<u8>)>> {
+        let phy = &mut self.peer().binding.power.phy;
+        let commands = phy.context(seat, definition, wide_ofdma)?;
+        Some(
+            commands
+                .iter()
+                .map(|command| (command.id(), command.bytes().to_vec()))
+                .collect(),
+        )
+    }
+
+    /// The removal of the PHY context `seat` of a link on `definition`.
+    pub fn phy_removal(
+        &mut self,
+        seat: u8,
+        definition: &ChannelDefinition,
+    ) -> Option<(Id, Vec<u8>)> {
+        let phy = &mut self.peer().binding.power.phy;
+        let command = phy.context_removal(seat, definition)?;
+        Some((command.id(), command.bytes().to_vec()))
+    }
+
+    /// The chain's transmit limit for the firmware link `seat`, within `dbm`.
+    pub fn transmit_limit(&mut self, seat: u8, dbm: i32) -> Option<(Id, Vec<u8>)> {
+        self.peer().binding.power.link_limit(seat, dbm)
+    }
+
     /// Publish a firmware command under the leases.
     ///
     /// # Safety
@@ -192,6 +225,7 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200ManagementQueue<'a,
         &mut self,
         tid: u8,
         mode: Mode,
+        stations: u32,
         source: &dyn PageSource,
     ) -> Result<CommandTicket, Ax200ManagementQueueError> {
         let peer = self.peer.as_mut().unwrap();
@@ -220,7 +254,7 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200ManagementQueue<'a,
                 let command = memory
                     .as_ref()
                     .unwrap()
-                    .configuration(1, tid)
+                    .configuration(stations, tid)
                     .map_err(Ax200ManagementQueueError::Queue)?;
                 memory
                     .as_mut()

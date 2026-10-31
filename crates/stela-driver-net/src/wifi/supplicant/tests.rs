@@ -127,12 +127,22 @@ impl Authenticator {
         self
     }
 
-    /// Message 3 of an AP MLD, with `link` its accepted link and `keys` that
-    /// link's.
-    pub(crate) fn mld_message_3(&mut self, link: &Link, keys: &[u8]) -> Vec<u8> {
-        let mut data = link.rsn.clone();
+    /// Message 2 also names the station on `links`.
+    pub(crate) fn naming_links(mut self, links: &[Link]) -> Self {
+        for link in links {
+            let mut body = vec![link.link_id];
+            body.extend_from_slice(&link.local.0);
+            put_kde(&mut self.station_rsn, MLO_LINK_KDE, &body);
+        }
+        self
+    }
+
+    /// Message 3 of an AP MLD, with `links` its accepted links and `keys`
+    /// theirs.
+    pub(crate) fn mld_message_3(&mut self, links: &[Link], keys: &[u8]) -> Vec<u8> {
+        let mut data = links[0].rsn.clone();
         put_kde(&mut data, MAC_ADDRESS_KDE, &self.own.0);
-        data.extend_from_slice(&link_kde(link));
+        data.extend(links.iter().flat_map(link_kde));
         data.extend_from_slice(keys);
         self.signed(PAIRWISE | ACK | MIC | INSTALL | SECURE | ENCRYPTED, &data)
     }

@@ -197,6 +197,16 @@ pub trait Radio: Link {
         material: &[u8],
         receive: ReplaySeed,
     ) -> Result<(), Self::Error>;
+    /// Keep link `link_id`'s IGTK: whether the radio can.
+    fn install_link_management_key(
+        &mut self,
+        _link_id: u8,
+        _index: u8,
+        _material: &[u8],
+        _receive: PacketNumber,
+    ) -> Result<bool, Self::Error> {
+        Ok(false)
+    }
     /// # Safety
     /// The association's authenticated handshake gave the key, and the radio
     /// is polled with its interrupts masked, so no earlier key user remains.
@@ -1224,7 +1234,19 @@ impl<R: Radio> Keeper<R> {
             self.link
                 .install_link_key(link.link_id, key.index, &key.material, key.receive)
                 .map_err(|error| format!("{error}"))?;
-            if link.integrity.is_some() {
+            let kept = match &link.integrity {
+                Some(key) => self
+                    .link
+                    .install_link_management_key(
+                        link.link_id,
+                        key.index,
+                        &key.material,
+                        key.receive,
+                    )
+                    .map_err(|error| format!("{error}"))?,
+                None => true,
+            };
+            if !kept {
                 self.fail(format!(
                     "{} unsupported: MLO link IGTKs; another link's group-addressed \
                      robust management frames reach the OS unverified",

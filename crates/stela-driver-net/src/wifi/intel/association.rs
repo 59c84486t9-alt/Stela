@@ -55,6 +55,16 @@ pub const RATE_CONFIG: Id = Id {
     opcode: 0x0f,
     version: 0,
 };
+pub const STATION_REMOVE: Id = Id {
+    group: 3,
+    opcode: 0x0c,
+    version: 0,
+};
+pub const SCHEDULER: Id = Id {
+    group: 5,
+    opcode: 0x17,
+    version: 0,
+};
 pub const SECURITY_KEY: Id = Id {
     group: 5,
     opcode: 0x18,
@@ -245,6 +255,8 @@ fn protection_flags(protection: Protection, width: Width) -> u32 {
 /// What `LINK_CONFIG_CMD` says of the link once its BSS is known.
 #[derive(Clone, Copy, Debug)]
 pub struct LinkState<'a> {
+    /// The firmware link and PHY of the link.
+    pub seat: u8,
     pub link: StationLink,
     pub band: Band,
     pub basic_rates: u16,
@@ -317,6 +329,8 @@ pub const SPEC_LINK_ID: usize = 166;
 pub fn link_config(version: u8, state: LinkState<'_>) -> Vec<u8> {
     let mut bytes = alloc::vec![0; 208];
     word(&mut bytes, 0, ACTION_MODIFY);
+    word(&mut bytes, 4, u32::from(state.seat));
+    word(&mut bytes, 12, u32::from(state.seat));
     bytes[16..22].copy_from_slice(&state.link.address.0);
     word(&mut bytes, 24, MODIFY_ALL_BUT_ACTIVE);
     bytes[SPEC_LINK_ID] = state.link.id;
@@ -348,6 +362,51 @@ pub fn link_config(version: u8, state: LinkState<'_>) -> Vec<u8> {
     if let Some(he) = state.he {
         link_he(&mut bytes, version, he);
     }
+    bytes
+}
+
+/// `iwl_mld_add_link`: a link no PHY serves yet, under the address firmware
+/// takes only now.
+pub fn add_link(link: StationLink, seat: u8) -> Vec<u8> {
+    let mut bytes = alloc::vec![0; 208];
+    word(&mut bytes, 0, ACTION_ADD);
+    word(&mut bytes, 4, u32::from(seat));
+    word(&mut bytes, 12, u32::MAX);
+    bytes[16..22].copy_from_slice(&link.address.0);
+    bytes[SPEC_LINK_ID] = link.id;
+    bytes
+}
+
+/// `iwl_mld_change_link_in_fw` for `LINK_CONTEXT_MODIFY_ACTIVE` alone of a
+/// link's `configuration`.
+pub fn activation(mut configuration: Vec<u8>, active: bool) -> Vec<u8> {
+    word(&mut configuration, 24, 1);
+    word(&mut configuration, 28, u32::from(active));
+    configuration
+}
+
+/// `iwl_mld_rm_link_from_fw`.
+pub fn remove_link(seat: u8) -> Vec<u8> {
+    let mut bytes = alloc::vec![0; 208];
+    word(&mut bytes, 0, ACTION_REMOVE);
+    word(&mut bytes, 4, u32::from(seat));
+    word(&mut bytes, 12, u32::MAX);
+    bytes
+}
+
+/// `iwl_mld_rm_sta_from_fw`.
+pub fn remove_station(seat: u8) -> Vec<u8> {
+    u32::from(seat).to_le_bytes().to_vec()
+}
+
+/// `iwl_mld_update_sta_txqs` for `tid`'s queue.
+pub fn modify_queue(tid: u8, old: u32, new: u32) -> Vec<u8> {
+    const MODIFY: u32 = 2;
+    let mut bytes = alloc::vec![0; 36];
+    word(&mut bytes, 0, MODIFY);
+    word(&mut bytes, 4, old);
+    word(&mut bytes, 8, u32::from(tid));
+    word(&mut bytes, 12, new);
     bytes
 }
 
@@ -386,6 +445,8 @@ fn link_he(bytes: &mut [u8], version: u8, he: LinkHe) {
 /// What `STA_CONFIG_CMD` says of the AP station.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PeerState {
+    /// The firmware station and link of the AP's link.
+    pub seat: u8,
     /// The AP MLD's address, or the BSS's.
     pub address: Mac,
     /// The AP's address on the link.
@@ -564,9 +625,16 @@ pub fn ampdu_exponent(negotiated: &Negotiated) -> u8 {
 /// `STA_CONFIG_CMD` version.
 pub fn station_config(version: u8, state: PeerState) -> Vec<u8> {
     let mut bytes = alloc::vec![0; station_bytes(version)];
-    if version >= 3 {
-        word(&mut bytes, 4, 1);
-    }
+    word(&mut bytes, 0, u32::from(state.seat));
+    word(
+        &mut bytes,
+        4,
+        if version >= 3 {
+            1 << state.seat
+        } else {
+            u32::from(state.seat)
+        },
+    );
     bytes[8..14].copy_from_slice(&state.address.0);
     bytes[16..22].copy_from_slice(&state.link.0);
     word(&mut bytes, 28, u32::from(state.aid));
@@ -673,13 +741,12 @@ pub fn rate_config(
     shape: RateShape,
     authorized: bool,
     max_mpdu: u16,
+    seat: u8,
 ) -> Option<Vec<u8>> {
     let RateShape { bytes, head, .. } = shape;
     let mut out = alloc::vec![0; bytes];
-    // Version 6 names stations by mask, station 0 by its bit.
-    if head == 8 {
-        out[0] = 1;
-    }
+    // Version 6 names stations by mask.
+    out[0] = if head == 8 { 1 << seat } else { seat };
     half(&mut out, bytes - 4, max_mpdu);
     let width = if authorized {
         width_code(negotiated.width)?
@@ -825,15 +892,21 @@ pub fn management_key_flags(cipher: ManagementCipher) -> u32 {
         }
 }
 
-/// `iwl_mvm_mld_send_key` adding a key for station 0. `receive` is the
+/// `iwl_mvm_mld_send_key` adding a key for `stations`. `receive` is the
 /// packet number the AP's frames continue from.
-pub fn add_key(index: u8, flags: u32, material: &[u8], receive: u64) -> Option<Vec<u8>> {
+pub fn add_key(
+    index: u8,
+    flags: u32,
+    material: &[u8],
+    receive: u64,
+    stations: u32,
+) -> Option<Vec<u8>> {
     if material.len() > 32 {
         return None;
     }
     let mut bytes = alloc::vec![0; 80];
     word(&mut bytes, 0, ACTION_ADD);
-    word(&mut bytes, 4, 1);
+    word(&mut bytes, 4, stations);
     word(&mut bytes, 8, u32::from(index));
     word(&mut bytes, 12, flags);
     bytes[16..16 + material.len()].copy_from_slice(material);
@@ -841,13 +914,10 @@ pub fn add_key(index: u8, flags: u32, material: &[u8], receive: u64) -> Option<V
     Some(bytes)
 }
 
-/// The AP's firmware station, as `iwl_mvm_sta_fw_id_mask` names it.
-const STATION_MASK: u32 = 1;
-
 /// `iwl_rx_baid_cfg_cmd`, for `IWL_RX_BAID_ACTION_ADD`.
-pub fn allocate_block_ack(tid: u8, start: u16, window: u16) -> Vec<u8> {
+pub fn allocate_block_ack(tid: u8, start: u16, window: u16, stations: u32) -> Vec<u8> {
     let mut bytes = alloc::vec![0; 16];
-    word(&mut bytes, 4, STATION_MASK);
+    word(&mut bytes, 4, stations);
     bytes[8] = tid;
     bytes[12..14].copy_from_slice(&start.to_le_bytes());
     bytes[14..16].copy_from_slice(&window.to_le_bytes());
@@ -856,26 +926,48 @@ pub fn allocate_block_ack(tid: u8, start: u16, window: u16) -> Vec<u8> {
 
 /// `iwl_rx_baid_cfg_cmd`, for `IWL_RX_BAID_ACTION_REMOVE`: version 1 names
 /// the session the firmware gave, later ones its station and TID.
-pub fn remove_block_ack(version: u8, id: u8, tid: u8) -> Vec<u8> {
+pub fn remove_block_ack(version: u8, id: u8, tid: u8, stations: u32) -> Vec<u8> {
     const REMOVE: u32 = 2;
     let mut bytes = alloc::vec![0; 16];
     word(&mut bytes, 0, REMOVE);
     if version <= 1 {
         word(&mut bytes, 4, u32::from(id));
     } else {
-        word(&mut bytes, 4, STATION_MASK);
+        word(&mut bytes, 4, stations);
         word(&mut bytes, 8, u32::from(tid));
     }
     bytes
 }
 
+/// `iwl_mld_update_sta_baids` for `tid`'s session.
+pub fn modify_block_ack(tid: u8, old: u32, new: u32) -> Vec<u8> {
+    const MODIFY: u32 = 1;
+    let mut bytes = alloc::vec![0; 16];
+    word(&mut bytes, 0, MODIFY);
+    word(&mut bytes, 4, old);
+    word(&mut bytes, 8, new);
+    word(&mut bytes, 12, u32::from(tid));
+    bytes
+}
+
 /// `__iwl_mvm_sec_key_del`.
-pub fn remove_key(index: u8, flags: u32) -> Vec<u8> {
+pub fn remove_key(index: u8, flags: u32, stations: u32) -> Vec<u8> {
     let mut bytes = alloc::vec![0; 80];
     word(&mut bytes, 0, ACTION_REMOVE);
-    word(&mut bytes, 4, 1);
+    word(&mut bytes, 4, stations);
     word(&mut bytes, 8, u32::from(index));
     word(&mut bytes, 12, flags);
+    bytes
+}
+
+/// `iwl_mld_update_sta_key_iter`.
+pub fn modify_key(index: u8, flags: u32, old: u32, new: u32) -> Vec<u8> {
+    let mut bytes = alloc::vec![0; 80];
+    word(&mut bytes, 0, ACTION_MODIFY);
+    word(&mut bytes, 4, old);
+    word(&mut bytes, 8, new);
+    word(&mut bytes, 12, u32::from(index));
+    word(&mut bytes, 16, flags);
     bytes
 }
 
@@ -972,6 +1064,7 @@ mod tests {
     #[test]
     fn a_peer_is_named_by_its_links_mask_from_version_3() {
         let state = PeerState {
+            seat: 0,
             address: Mac([2, 0, 0, 0, 0, 2]),
             link: Mac([2, 0, 0, 0, 0, 2]),
             aid: 1,
@@ -1067,6 +1160,7 @@ mod tests {
         let bytes = link_config(
             5,
             LinkState {
+                seat: 0,
                 link: StationLink {
                     address: Mac([2; 6]),
                     id: 0,
@@ -1114,11 +1208,11 @@ mod tests {
         assert_eq!(key_flags(Cipher::Gcmp256, false, false), Some(0x55));
         assert_eq!(key_flags(Cipher::Ccmp128, false, true), Some(0x62));
         assert_eq!(key_flags(Cipher::Tkip, true, false), None);
-        let bytes = add_key(1, 0x42, &[9; 16], 5).unwrap();
+        let bytes = add_key(1, 0x42, &[9; 16], 5, 1).unwrap();
         assert_eq!((bytes[0], bytes[4], bytes[8], bytes[12]), (1, 1, 1, 0x42));
         assert_eq!(bytes[16..32], [9; 16]);
         assert_eq!(bytes[64], 5);
-        assert_eq!(add_key(0, 2, &[0; 33], 0), None);
+        assert_eq!(add_key(0, 2, &[0; 33], 0, 1), None);
     }
 
     #[test]
@@ -1263,6 +1357,7 @@ mod tests {
         let bytes = link_config(
             6,
             LinkState {
+                seat: 0,
                 link: StationLink {
                     address: Mac([2; 6]),
                     id: 0,

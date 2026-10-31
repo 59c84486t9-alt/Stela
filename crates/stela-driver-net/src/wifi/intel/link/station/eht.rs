@@ -102,7 +102,8 @@ mod tests {
 
     fn rates(negotiated: &Negotiated, authorized: bool) -> (Vec<u8>, RateShape) {
         let shape = RateShape::of(6).unwrap();
-        let rates = commands::rate_config(negotiated, Band::Ghz6, 3, shape, authorized, 0).unwrap();
+        let rates =
+            commands::rate_config(negotiated, Band::Ghz6, 3, shape, authorized, 0, 0).unwrap();
         (rates, shape)
     }
 

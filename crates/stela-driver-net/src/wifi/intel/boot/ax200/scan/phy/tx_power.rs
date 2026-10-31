@@ -128,6 +128,20 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200TransmitPower<'a, Q
     pub fn response(&self) -> Option<&CommandResponse> {
         self.response.as_ref()
     }
+    /// `iwl_mld_set_tx_power` for the firmware link `seat`, within what the
+    /// chain applied and `dbm`.
+    pub(in crate::wifi::intel::boot) fn link_limit(
+        &self,
+        seat: u8,
+        dbm: i32,
+    ) -> Option<(Id, Vec<u8>)> {
+        let applied = self.applied.as_ref()?;
+        let limit = i32::from(applied.effective_dbm()).min(dbm).max(0) as u16;
+        let mut bytes = self.command_bytes()?.to_vec();
+        bytes[4..8].copy_from_slice(&u32::from(seat).to_le_bytes());
+        bytes[8..10].copy_from_slice(&(limit * 8).to_le_bytes());
+        Some((COMMAND, bytes))
+    }
     pub fn applied_limit(&self) -> Option<&TransmitPowerLimit> {
         self.applied.as_ref()
     }

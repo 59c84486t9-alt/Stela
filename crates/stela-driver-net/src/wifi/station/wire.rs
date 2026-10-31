@@ -339,7 +339,8 @@ impl AssociationRequest {
         }
         setup.validate().map_err(|error| match error {
             super::Error::Wire(error) => error,
-            _ => Error::Invalid("multi-link setup"),
+            super::Error::Unsupported(what) => Error::Unsupported(what),
+            _ => Error::Invalid("multi-link address"),
         })?;
         let element = setup.element(&self.elements);
         let mut at = 0;
