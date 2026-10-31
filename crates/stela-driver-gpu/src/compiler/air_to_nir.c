@@ -3078,6 +3078,21 @@ log_call(struct translator *t, LLVMValueRef inst, LLVMValueRef callee, bool *low
    return true;
 }
 
+/* Whether a barrier's call stays where it is: linked Metal 1 libraries mark it
+ * noduplicate, and others convergent. */
+static bool
+barrier_stays(LLVMValueRef inst, LLVMValueRef callee)
+{
+   static const char *const attributes[] = {"convergent", "noduplicate"};
+   for (unsigned i = 0; i < ARRAY_SIZE(attributes); i++) {
+      unsigned kind = LLVMGetEnumAttributeKindForName(attributes[i], strlen(attributes[i]));
+      if (LLVMGetEnumAttributeAtIndex(callee, LLVMAttributeFunctionIndex, kind) &&
+          LLVMGetCallSiteEnumAttribute(inst, LLVMAttributeFunctionIndex, kind))
+         return true;
+   }
+   return false;
+}
+
 /* AIR's barriers and fences, with memory flags 1 device, 2 threadgroup and 4
  * texture memory. A barrier is (flags, scope), as Apple's compiler emits, or
  * (flags, order, scope); a fence is (flags, order, scope). Orders are C++'s,
@@ -3106,7 +3121,6 @@ synchronization_call(struct translator *t, LLVMValueRef inst, LLVMValueRef calle
          return false;
    }
    unsigned count = LLVMGetNumArgOperands(inst);
-   unsigned convergent = LLVMGetEnumAttributeKindForName("convergent", strlen("convergent"));
    if ((kind == THREADGROUP_BARRIER && !t->options->max_threadgroup_bytes) ||
        !LLVMIsAFunction(callee) || !LLVMIsDeclaration(callee) ||
        LLVMGetFunctionCallConv(callee) != LLVMCCallConv ||
@@ -3115,8 +3129,7 @@ synchronization_call(struct translator *t, LLVMValueRef inst, LLVMValueRef calle
        LLVMIsFunctionVarArg(LLVMGlobalGetValueType(callee)) ||
        LLVMGetCalledFunctionType(inst) != LLVMGlobalGetValueType(callee) ||
        LLVMGetNumOperandBundles(inst) || LLVMGetTypeKind(LLVMTypeOf(inst)) != LLVMVoidTypeKind ||
-       (kind != FENCE && (!LLVMGetEnumAttributeAtIndex(callee, LLVMAttributeFunctionIndex, convergent) ||
-                          !LLVMGetCallSiteEnumAttribute(inst, LLVMAttributeFunctionIndex, convergent))))
+       (kind != FENCE && !barrier_stays(inst, callee)))
       return fail(t, STELA_AIR_INSTRUCTION, "unsupported/unconfigured barrier or fence signature");
    unsigned values[3];
    for (unsigned i = 0; i < count; i++) {
@@ -4676,7 +4689,7 @@ translate(const void *bitcode, size_t size, const char *entry,
    const char *target = LLVMGetTarget(t.module);
    size_t asm_size;
    LLVMGetModuleInlineAsm(t.module, &asm_size);
-   if (strncmp(target, "air64_v", 7) || asm_size ||
+   if (strncmp(target, "air64", 5) || asm_size ||
        LLVMGetFirstGlobalAlias(t.module) ||
        LLVMGetFirstGlobalIFunc(t.module)) {
       fail(&t, STELA_AIR_TARGET, "unsupported target/globals/inline assembly");
@@ -4705,10 +4718,7 @@ translate(const void *bitcode, size_t size, const char *entry,
       goto done;
    /* Linking sets the triple again. */
    target = LLVMGetTarget(t.module);
-   char target_prefix[40];
-   snprintf(target_prefix, sizeof(target_prefix), "air64_v%u%u-apple-", t.metadata.air_major,
-            t.air_minor);
-   if (strncmp(target, target_prefix, strlen(target_prefix))) {
+   if (!stela_air_metadata_target(&t.metadata, target)) {
       fail(&t, STELA_AIR_TARGET, "AIR version and target triple disagree");
       goto done;
    }

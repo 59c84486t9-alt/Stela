@@ -517,6 +517,9 @@ bool stela_air_md_node(struct stela_air_metadata *m, LLVMValueRef node,
                        LLVMValueRef *operands, unsigned *count);
 bool stela_air_named_md(struct stela_air_metadata *m, const char *name,
                         LLVMValueRef *operands, unsigned *count);
+/* Whether a triple names the module's AIR version; linked libraries of AIR 2.0
+ * and older name none. */
+bool stela_air_metadata_target(const struct stela_air_metadata *t, const char *target);
 bool stela_air_metadata_layout(struct stela_air_metadata *m);
 bool stela_air_metadata_validate(struct stela_air_metadata *m);
 /* The module's function constants and, when storage is not NULL, the global

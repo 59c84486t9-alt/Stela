@@ -296,6 +296,15 @@ version_metadata(struct stela_air_metadata *t, const char *name, bool language)
    return true;
 }
 
+bool
+stela_air_metadata_target(const struct stela_air_metadata *t, const char *target)
+{
+   char prefix[40];
+   snprintf(prefix, sizeof(prefix), "air64_v%u%u-apple-", t->air_major, t->air_minor);
+   return !strncmp(target, prefix, strlen(prefix)) ||
+          !strncmp(target, "air64-apple-", strlen("air64-apple-"));
+}
+
 static bool
 module_flags(struct stela_air_metadata *t)
 {
@@ -2617,7 +2626,7 @@ inspect(const void *bitcode, size_t size, const struct stela_air_constants *cons
    const char *target = LLVMGetTarget(m.module);
    size_t assembly;
    LLVMGetModuleInlineAsm(m.module, &assembly);
-   if (strncmp(target, "air64_v", 7) || assembly || LLVMGetFirstGlobalAlias(m.module) ||
+   if (strncmp(target, "air64", 5) || assembly || LLVMGetFirstGlobalAlias(m.module) ||
        LLVMGetFirstGlobalIFunc(m.module)) {
       fail(&m, STELA_AIR_TARGET, "unsupported target/globals/inline assembly");
       goto done;
@@ -2625,9 +2634,7 @@ inspect(const void *bitcode, size_t size, const struct stela_air_constants *cons
    if (!stela_air_metadata_layout(&m) || !stela_air_metadata_validate(&m) ||
        !stela_air_inline_calls(&m, NULL, 0, 0))
       goto done;
-   char prefix[40];
-   snprintf(prefix, sizeof(prefix), "air64_v%u%u-apple-", m.air_major, m.air_minor);
-   if (strncmp(target, prefix, strlen(prefix))) {
+   if (!stela_air_metadata_target(&m, target)) {
       fail(&m, STELA_AIR_TARGET, "AIR version and target triple disagree");
       goto done;
    }

@@ -344,6 +344,10 @@ barriers_and_fences_follow_their_flags(void)
    check_barrier("declare void @air.wg.barrier(i32, i32) convergent\n",
                  "call void @air.wg.barrier(i32 1, i32 1) convergent",
                  SCOPE_WORKGROUP, SCOPE_WORKGROUP, device);
+   /* Linked Metal 1 libraries spell the attribute differently. */
+   check_barrier("declare void @air.wg.barrier(i32, i32) noduplicate\n",
+                 "call void @air.wg.barrier(i32 1, i32 1) noduplicate",
+                 SCOPE_WORKGROUP, SCOPE_WORKGROUP, device);
    const char *simdgroup = "declare void @air.simdgroup.barrier(i32, i32) convergent\n";
    check_barrier(simdgroup, "call void @air.simdgroup.barrier(i32 2, i32 4) convergent",
                  SCOPE_SUBGROUP, SCOPE_SUBGROUP, nir_var_mem_shared);

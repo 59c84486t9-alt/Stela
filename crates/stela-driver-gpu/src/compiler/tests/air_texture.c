@@ -859,7 +859,15 @@ every_metal_version_spells_its_calls(void)
    assert(census.tex[nir_texop_txl] == 1 && census.store);
    ralloc_free(shader);
 
-   /* The triple carries the version. */
+   /* Linking older libraries drops the version from the triple. */
+   shader = spelled("air64-apple-macosx10.12.0", metal1_declarations, metal1_calls,
+                    replace(kernel_metadata, "!20 = !{i32 2, i32 9, i32 0}\n!21 = !{!\"Metal\", i32 4, i32 1",
+                            "!20 = !{i32 1, i32 11, i32 0}\n!21 = !{!\"Metal\", i32 1, i32 2"),
+                    &error);
+   assert(shader);
+   ralloc_free(shader);
+
+   /* The triple otherwise carries the version. */
    assert(!spelled("air64_v29-apple-macosx10.12.0", metal1_declarations, metal1_calls,
                    replace(kernel_metadata, "!20 = !{i32 2, i32 9, i32 0}", "!20 = !{i32 1, i32 11, i32 0}"),
                    &error));
