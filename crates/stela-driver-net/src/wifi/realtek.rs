@@ -12,6 +12,7 @@ pub mod coex;
 pub mod commands;
 pub mod descriptor;
 pub mod download;
+pub mod dynamic;
 pub mod efuse;
 pub mod features;
 pub mod fifo;

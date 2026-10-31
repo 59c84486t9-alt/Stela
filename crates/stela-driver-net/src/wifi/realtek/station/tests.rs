@@ -65,6 +65,10 @@ struct Air {
     cleared: Vec<u8>,
     /// Queues refuse frames while set.
     full: bool,
+    /// Each watchdog run's STBC, and the level it gives.
+    watchdogs: Vec<bool>,
+    level: u8,
+    scans: Vec<bool>,
     /// Management frames lost to the air before the AP hears them.
     losses: usize,
 }
@@ -174,6 +178,15 @@ impl Device for Model {
     }
     fn clear_key(&mut self, entry: u8) -> Result<(), String> {
         self.0.borrow_mut().cleared.push(entry);
+        Ok(())
+    }
+    fn watchdog(&mut self, stbc: bool) -> Result<u8, String> {
+        let mut air = self.0.borrow_mut();
+        air.watchdogs.push(stbc);
+        Ok(air.level)
+    }
+    fn scanning(&mut self, scanning: bool) -> Result<(), String> {
+        self.0.borrow_mut().scans.push(scanning);
         Ok(())
     }
 }
@@ -354,6 +367,34 @@ fn a_scan_probes_where_it_may_and_only_listens_where_it_may_not() {
     assert!(air.tuned.contains(&(36, true)) && air.tuned.contains(&(48, true)));
     assert_eq!(air.tuned.last(), Some(&(36, false)));
     assert_eq!(air.beacon_filters.first(), Some(&false));
+}
+
+#[test]
+fn a_scan_gives_the_gain_up_and_back() {
+    let (mut wifi, model) = wifi(&OPEN, 1);
+    assert!(run(&mut wifi, &model, |_, air| air.scans.len() == 2));
+    assert_eq!(model.0.borrow().scans, [true, false]);
+}
+
+#[test]
+fn the_watchdog_runs_every_two_seconds_and_refreshes_rates_on_each_fourth() {
+    let (mut wifi, model) = connected();
+    model.0.borrow_mut().watchdogs.clear();
+    model.0.borrow_mut().level = 5;
+    let context = wifi.radio().context.clone().unwrap();
+    let refresh = commands::ra_info(rate_info(&context, false, 5));
+    assert_eq!(refresh.0 & (1 << 27), 1 << 27);
+    assert_eq!(refresh.1 & 0xff, 0);
+    for _ in 0..8 {
+        crate::test_clock::advance(CLOCK, WATCHDOG_US);
+        wifi.carrier();
+    }
+    let air = model.0.borrow();
+    assert_eq!(air.watchdogs, [peer_stbc(&context); 8]);
+    assert_eq!(
+        air.commands.iter().filter(|&&sent| sent == refresh).count(),
+        2
+    );
 }
 
 #[test]
