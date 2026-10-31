@@ -36,7 +36,7 @@ use crate::wifi::{
         self, Action, AssociationContext, Completion, Join, NativeBssObservation, Phase as Peering,
         RegulatoryPolicy, Station, Ticket,
         ba::{self, RxSession},
-        data::{self, Ingress, Protection, Qos, SequenceOwner, TxClass},
+        data::{self, Ingress, Protection, Qos, SequenceOwner, TxClass, amsdu},
         external,
         multi_link::Affiliation,
         phy::{Capabilities, McsMaps, Role},
@@ -71,6 +71,15 @@ const TRANSMIT_RESPONSE: (u8, u8) = (0x1c, 0);
 const BAR_FRAME_RELEASE: (u8, u8) = (0xc2, 0);
 const FRAME_RELEASE: (u8, u8) = (0xc3, 0);
 const BLOCK_ACK_NOTIFICATION: (u8, u8) = (0xc5, 0);
+const RATE_NOTIFICATION: (u8, u8) = (0xf7, 5);
+/// `IWL_TLC_NOTIF_FLAG_AMSDU`.
+const RATE_NOTIFICATION_AMSDU: u32 = 2;
+/// `iwl_mvm_tlc_update_notif`: below this an A-MSDU is not worth building.
+const SMALLEST_AMSDU: u32 = 2000;
+/// `IWL_UCODE_TLV_CAPA_CSUM_SUPPORT`, without which mvm offers no A-MSDU.
+const CHECKSUM_OFFLOAD: u32 = 21;
+/// What an MSDU's QoS header and LLC add to its Ethernet frame.
+const SUBFRAME_OVERHEAD: usize = 26 + 8 - 14;
 /// `WLAN_ACTION_BLOCK_ACK`, on an action frame.
 const BLOCK_ACK_CATEGORY: u8 = 3;
 /// `WLAN_REASON_QSTA_TIMEOUT`.
@@ -163,6 +172,7 @@ struct Key {
 struct Held {
     mpdu: Vec<u8>,
     encrypted: bool,
+    control_port: bool,
 }
 
 /// The transport of an installed IGTK.
@@ -191,6 +201,8 @@ pub(super) struct Client {
     events: VecDeque<keeper::Event>,
     received: VecDeque<Vec<u8>>,
     reception: Reception,
+    /// The longest A-MSDU firmware rate selection allows and its TIDs.
+    amsdu: (u32, u32),
     held: [VecDeque<Held>; 16],
     /// TIDs with an added or requested queue.
     requested: u16,
@@ -231,6 +243,7 @@ impl Client {
             events: VecDeque::new(),
             received: VecDeque::new(),
             reception: Reception::new(),
+            amsdu: (0, 0),
             held: core::array::from_fn(|_| VecDeque::new()),
             requested: 1 << MANAGEMENT_TID,
             session: Session::Off,
@@ -285,6 +298,7 @@ impl Client {
         self.steps.clear();
         self.outbox.clear();
         self.reception.clear();
+        self.amsdu = (0, 0);
         self.held.iter_mut().for_each(VecDeque::clear);
         self.requested = 1 << MANAGEMENT_TID;
         self.session = Session::Off;
@@ -520,6 +534,11 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             .map_or(0, |version| version.command_version);
         let rate_bytes = rate_body(firmware)?;
         let explicit_mfp = firmware.supports_capability(EXPLICIT_MFP);
+        let longest = if firmware.supports_capability(CHECKSUM_OFFLOAD) {
+            commands::max_amsdu(negotiated)
+        } else {
+            0
+        };
         let mac = MacState {
             address: local,
             he,
@@ -527,7 +546,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             aid: None,
             high_priority,
         };
-        let rates = commands::rate_config(negotiated, band, antennas, rate_bytes, false)
+        let rates = commands::rate_config(negotiated, band, antennas, rate_bytes, false, longest)
             .ok_or(Error::Refused("rates"))?;
         let edca = negotiated.edca();
         let link = commands::link_config(LinkState {
@@ -964,6 +983,16 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                         }
                     }
                 }
+                RATE_NOTIFICATION
+                    if word(4).is_some_and(|flags| flags & RATE_NOTIFICATION_AMSDU != 0) =>
+                {
+                    let (size, enabled) = (word(12).unwrap_or(0), word(16).unwrap_or(0));
+                    self.client.amsdu = if size < SMALLEST_AMSDU {
+                        (0, 0)
+                    } else {
+                        (size, enabled)
+                    };
+                }
                 SESSION_PROTECTION_NOTIFICATION => {
                     let (status, start) = (word(4).unwrap_or(0), word(8).unwrap_or(0));
                     self.client.session = if status == 1 && start == 1 {
@@ -1084,8 +1113,40 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             .ok_or(Error::Refused("no association"))?;
         let context = client.context.clone().ok_or(Error::Refused("no context"))?;
         let tid = data::data_tid(&context, None, None, ethernet);
+        let room = tid
+            .filter(|_| matches!(class, TxClass::Data))
+            .and_then(|tid| {
+                let limit =
+                    (client.amsdu.0 as usize).min(commands::max_amsdu(context.negotiated()).into());
+                let tail = client.held[usize::from(tid)].back()?;
+                (client.amsdu.1 & 1 << tid != 0
+                    && !tail.control_port
+                    && tail.mpdu.len() + ethernet.len() + SUBFRAME_OVERHEAD <= limit)
+                    .then_some(tid)
+            });
         let mut policy = Admitted(&client.channels);
         let mut keys: Vec<&mut KeySlot> = client.keys.iter_mut().map(|key| &mut key.slot).collect();
+        if let Some(tid) = room {
+            // `ieee80211_amsdu_aggregate`: while a frame waits, the next joins it.
+            let plan = client
+                .station
+                .prepare_qos_subframe_refs(
+                    epoch,
+                    ethernet,
+                    class,
+                    Qos {
+                        context: &context,
+                        tid,
+                    },
+                    &mut keys,
+                    &mut policy,
+                )
+                .map_err(Error::Data)?;
+            if let Some(tail) = client.held[usize::from(tid)].back_mut() {
+                amsdu::append(&mut tail.mpdu, plan.plaintext_mpdu());
+            }
+            return Ok(());
+        }
         let plan = match tid {
             Some(tid) => client.station.prepare_qos_msdu_refs(
                 epoch,
@@ -1115,6 +1176,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         client.held[queue].push_back(Held {
             mpdu: plan.plaintext_mpdu().to_vec(),
             encrypted: matches!(plan.protection(), Protection::Firmware { .. }),
+            control_port: plan.control_port(),
         });
         Ok(())
     }
@@ -1812,7 +1874,12 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             .map_or(0, |version| version.command_version);
         let rate_bytes = rate_body(firmware)?;
         let explicit_mfp = firmware.supports_capability(EXPLICIT_MFP);
-        let rates = commands::rate_config(negotiated, band, antennas, rate_bytes, true)
+        let longest = if firmware.supports_capability(CHECKSUM_OFFLOAD) {
+            commands::max_amsdu(negotiated)
+        } else {
+            0
+        };
+        let rates = commands::rate_config(negotiated, band, antennas, rate_bytes, true, longest)
             .ok_or(Error::Refused("rates"))?;
         let mac = MacState {
             address: self.address,

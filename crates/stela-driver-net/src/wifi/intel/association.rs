@@ -335,17 +335,29 @@ fn width_code(width: Width) -> Option<u8> {
     }
 }
 
+/// `rs_fw_get_max_amsdu_len`: the longest A-MSDU the AP takes. An HT peer's
+/// long form does not apply, because the firmware may put it in an A-MPDU.
+pub fn max_amsdu(negotiated: &Negotiated) -> u16 {
+    match negotiated.max_tx_amsdu {
+        7935 => 4095,
+        bytes => bytes,
+    }
+}
+
 /// `rs_fw_set_supp_rates` and the rest of `iwl_mvm_rs_fw_rate_init`: the
 /// rates firmware rate selection may use for the AP. Until the port opens
-/// `authorized` is false and it stays at 20 MHz.
+/// `authorized` is false and it stays at 20 MHz. `max_mpdu` is what the
+/// firmware may report as an A-MSDU's limit, or zero for none.
 pub fn rate_config(
     negotiated: &Negotiated,
     band: Band,
     antennas: u8,
     bytes: usize,
     authorized: bool,
+    max_mpdu: u16,
 ) -> Option<Vec<u8>> {
     let mut out = alloc::vec![0; bytes];
+    half(&mut out, bytes - 4, max_mpdu);
     let width = if authorized {
         width_code(negotiated.width)?
     } else {

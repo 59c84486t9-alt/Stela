@@ -99,7 +99,7 @@ fn schema_consistency_is_required_before_any_frame_preparation() {
 fn bounded_profile_preserves_header_sequence_and_refuses_unrepresented_effects() {
     let b = firmware(&rows(Family::Ax200));
     let fw = Firmware::parse(&b).unwrap();
-    for len in [0, 1, 23, 4097] {
+    for len in [0, 1, 23, 12289] {
         assert_eq!(
             Prepared::prepare(&fw, Family::Ax200, &alloc::vec![0;len], parameters()).unwrap_err(),
             Error::FrameLength

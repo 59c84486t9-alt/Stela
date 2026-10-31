@@ -355,7 +355,7 @@ fn raise<'n>(
     let catalog: &'static resources::Catalog = Box::leak(Box::new(catalog_for(
         &profile(),
         Family::Ax200.firmware_name(),
-        &feature(coex_image(2), 30, 63, true),
+        &feature(feature(coex_image(2), 30, 63, true), 30, 21, true),
     )));
     let source: &'static Source = Box::leak(Box::new(Source::default()));
     native
@@ -893,4 +893,50 @@ fn block_ack_notifications_alone_free_the_queues() {
         });
         assert!(sent, "{} {:?}", device.air.len(), wifi.radio().error());
     }
+}
+
+#[test]
+fn frames_that_wait_together_leave_as_an_amsdu_the_firmware_allows() {
+    let native = Native::default();
+    let (mut wifi, mut device) = connect(&native, true);
+    let rates = Id {
+        group: 5,
+        opcode: 0xf7,
+        version: 0,
+    };
+    let mut body = [0; 20];
+    body[4] = 2;
+    body[12..14].copy_from_slice(&2200u16.to_le_bytes());
+    body[16] = 1;
+    device.inject(
+        wifi.radio().rom().unwrap(),
+        &command_packet(rates, 0x8000, &body),
+    );
+    settle(&mut wifi, &mut device);
+    let sent = device.air.len();
+    // TID 0 has no queue yet, so all three wait; the third does not fit.
+    let ethernet = [&[9; 6][..], &LOCAL, &[8, 0], &[0x45], &[0; 999]].concat();
+    for _ in 0..3 {
+        wifi.transmit(&ethernet).unwrap();
+    }
+    let gone = run(&mut wifi, &mut device, |_, device, _| {
+        device.air.len() >= sent + 2
+    });
+    assert!(gone, "{:?}", wifi.radio().error());
+    settle(&mut wifi, &mut device);
+    assert_eq!(device.air.len(), sent + 2);
+    let aggregate = &device.air[sent];
+    assert_eq!(aggregate[24] & 0x80, 0x80);
+    assert_eq!(aggregate[16..22], AP);
+    assert_eq!(aggregate[26..32], [9; 6]);
+    assert_eq!(aggregate[32..38], LOCAL);
+    let length: usize = 1000 + 8;
+    assert_eq!(aggregate[38..40], (length as u16).to_be_bytes());
+    let second = 26 + (14 + length).next_multiple_of(4);
+    assert_eq!(aggregate[second..second + 6], [9; 6]);
+    assert_eq!(aggregate.len(), second + 14 + length);
+    // The third keeps its one sequence number after theirs.
+    let sequence = |frame: &[u8]| u16::from_le_bytes([frame[22], frame[23]]) >> 4;
+    assert_eq!(sequence(&device.air[sent + 1]), sequence(aggregate) + 1);
+    assert_eq!(device.air[sent + 1][24] & 0x80, 0);
 }
