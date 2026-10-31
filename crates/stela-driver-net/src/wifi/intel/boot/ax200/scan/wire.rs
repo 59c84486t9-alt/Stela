@@ -2,7 +2,7 @@
 // Copyright (C) 2012-2014, 2018-2026 Intel Corporation
 // Copyright (C) 2013-2015 Intel Mobile Communications GmbH
 // Copyright (C) 2016-2017 Intel Deutschland GmbH
-//! UMAC15 regular, unassociated scan bytes, passive or probing.
+//! UMAC14 to 17 regular, unassociated scan bytes, passive or probing.
 use super::*;
 /// What a probing scan's frames carry and radiate beyond the request's own
 /// elements, which they share.
@@ -50,6 +50,13 @@ const SSIDS: usize = PROBE + PROBE_SEGMENTS + PROBE_BUFFER_BYTES + 4;
 pub(super) const REQUEST_BYTES: usize = SSIDS + DIRECT_SSIDS + SHORT_SSIDS + BSSIDS;
 /// A management header and the wildcard SSID firmware replaces.
 const HEADER: usize = 26;
+/// The first version carrying a channel's band in its flags, not its own byte.
+const BAND_IN_FLAGS: u8 = 17;
+/// `IWL_CHAN_CFG_FLAGS_BAND_POS`.
+const BAND_SHIFT: u32 = 30;
+const PHY_BAND_5: u8 = 0;
+const PHY_BAND_24: u8 = 1;
+const PHY_BAND_6: u8 = 2;
 const FORCE_PASSIVE: u16 = 1 << 11;
 const PASS_ALL: u16 = 1 << 1;
 const USE_ALL_RX_CHAINS: u16 = 1 << 6;
@@ -62,22 +69,32 @@ const FULL_SCAN_BUDGET_TU: u16 = 300;
 const DIRECTED_SCAN_BUDGET_TU: u16 = 100;
 /// `iwl_mvm_add_tpc_report_ie`, whose power firmware inserts.
 const TPC_REPORT: [u8; 9] = [221, 7, 0x00, 0x50, 0xf2, 8, 0, 0, 0];
+/// The request's version, every one Linux fills through
+/// `iwl_mvm_scan_umac_v14_and_above`, whose differences `encode` carries.
 pub(super) fn validate(
     firmware: &crate::wifi::intel::firmware::Firmware<'_>,
-) -> Result<(), Ax200ScanError> {
-    for (id, expected) in [(REQUEST, 15), (ABORT, 1)] {
-        let version = firmware
+) -> Result<u8, Ax200ScanError> {
+    let version = |id: Id| {
+        firmware
             .command_version(id.group, id.opcode)
-            .ok_or(Ax200ScanError::MissingApi(id.opcode))?
-            .command_version;
-        if version != expected {
-            return Err(Ax200ScanError::Version {
-                command: id.opcode,
-                version,
-            });
-        }
+            .map(|v| v.command_version)
+            .ok_or(Ax200ScanError::MissingApi(id.opcode))
+    };
+    let request = version(REQUEST)?;
+    if !(14..=17).contains(&request) {
+        return Err(Ax200ScanError::Version {
+            command: REQUEST.opcode,
+            version: request,
+        });
     }
-    Ok(())
+    let abort = version(ABORT)?;
+    if abort != 1 {
+        return Err(Ax200ScanError::Version {
+            command: ABORT.opcode,
+            version: abort,
+        });
+    }
+    Ok(request)
 }
 /// `iwl_scan_build_ssids`: the firmware's direct SSID table, last first, and
 /// the bitmap of its entries each channel probes.
@@ -115,6 +132,7 @@ fn with_ds_placeholder(elements: &[u8]) -> Vec<u8> {
 /// passive without `probe`, else probing for the request's SSIDs.
 pub(super) fn encode(
     request: &protocol::Request,
+    version: u8,
     local: crate::Mac,
     probe: Option<&Probe>,
     measurement: Measurement,
@@ -184,9 +202,19 @@ pub(super) fn encode(
     bytes[CHANNELS + 2..CHANNELS + 4].copy_from_slice(&[10, 2]);
     for (i, channel) in request.channels().iter().enumerate() {
         let at = CHANNELS + 4 + i * CHANNEL_CONFIG_BYTES;
-        bytes[at..at + 4].copy_from_slice(&bitmap.to_le_bytes());
+        let band = match channel.band {
+            Band::Ghz2 => PHY_BAND_24,
+            Band::Ghz5 => PHY_BAND_5,
+            Band::Ghz6 => PHY_BAND_6,
+        };
+        let flags = if version < BAND_IN_FLAGS {
+            bytes[at + 5] = band;
+            bitmap
+        } else {
+            bitmap | u32::from(band) << BAND_SHIFT
+        };
+        bytes[at..at + 4].copy_from_slice(&flags.to_le_bytes());
         bytes[at + 4] = channel.number as u8;
-        bytes[at + 5] = u8::from(channel.band == Band::Ghz5);
         bytes[at + 6] = 1;
     }
     bytes[PERIODIC + 2] = 1; // one ordinary iteration, interval/delay zero
@@ -255,16 +283,38 @@ mod tests {
     };
 
     #[test]
+    fn each_channel_names_its_band_where_its_version_reads_it() {
+        let request = protocol::Request::new(channels(), vec![vec![]], vec![]).unwrap();
+        let config = |bytes: &[u8], index: usize| {
+            let at = CHANNELS + 4 + index * CHANNEL_CONFIG_BYTES;
+            (
+                u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap()),
+                bytes[at + 4],
+                bytes[at + 5],
+                bytes[at + 6],
+            )
+        };
+        for version in [14, 15, 16] {
+            let bytes = encode(&request, version, LOCAL, Some(&probe()), MEASURED).unwrap();
+            assert_eq!(config(&bytes, 0), (1, 1, PHY_BAND_24, 1));
+            assert_eq!(config(&bytes, 1), (1, 36, PHY_BAND_5, 1));
+        }
+        let bytes = encode(&request, 17, LOCAL, Some(&probe()), MEASURED).unwrap();
+        assert_eq!(config(&bytes, 0), (1 | 1 << 30, 1, 0, 1));
+        assert_eq!(config(&bytes, 1), (1, 36, 0, 1));
+    }
+
+    #[test]
     fn a_wildcard_scan_probes_every_channel_under_its_one_ssid() {
         let request = protocol::Request::new(channels(), vec![vec![]], vec![221, 1, 7]).unwrap();
-        let bytes = encode(&request, LOCAL, Some(&probe()), MEASURED).unwrap();
+        let bytes = encode(&request, 15, LOCAL, Some(&probe()), MEASURED).unwrap();
         assert_eq!(word(&bytes, GENERAL), PASS_ALL | ADAPTIVE_DWELL);
         assert_eq!(word(&bytes, GENERAL + 10), FULL_SCAN_BUDGET_TU);
         for index in 0..2 {
             let at = CHANNELS + 4 + index * CHANNEL_CONFIG_BYTES;
             assert_eq!(bytes[at..at + 4], [1, 0, 0, 0]);
         }
-        assert_eq!(bytes[CHANNELS + 4 + CHANNEL_CONFIG_BYTES + 5], 1);
+        assert_eq!(bytes[CHANNELS + 4 + CHANNEL_CONFIG_BYTES + 5], PHY_BAND_5);
         assert_eq!(bytes[SSIDS..SSIDS + 2], [0, 0]);
         assert_eq!(word(&bytes, PROBE + 2), 26);
         assert_eq!(bytes[FRAME + 24..FRAME + 26], [0, 0]);
@@ -286,13 +336,13 @@ mod tests {
             ds_parameters: true,
             tpc_report: true,
         };
-        let bytes = encode(&request, LOCAL, Some(&probe()), reports).unwrap();
+        let bytes = encode(&request, 15, LOCAL, Some(&probe()), reports).unwrap();
         assert_eq!(segment(&bytes, 4), []);
         let quiet = Measurement {
             ds_parameters: false,
             tpc_report: false,
         };
-        let bytes = encode(&request, LOCAL, Some(&probe()), quiet).unwrap();
+        let bytes = encode(&request, 15, LOCAL, Some(&probe()), quiet).unwrap();
         assert_eq!(segment(&bytes, 1), probe().elements[0]);
         assert_eq!(segment(&bytes, 4), []);
     }
@@ -301,7 +351,7 @@ mod tests {
     fn one_named_network_listens_on_every_chain_within_the_directed_budget() {
         let ssids = vec![b"net".to_vec()];
         let request = protocol::Request::new(channels(), ssids, vec![]).unwrap();
-        let bytes = encode(&request, LOCAL, Some(&probe()), MEASURED).unwrap();
+        let bytes = encode(&request, 15, LOCAL, Some(&probe()), MEASURED).unwrap();
         assert_eq!(
             word(&bytes, GENERAL),
             PASS_ALL | ADAPTIVE_DWELL | USE_ALL_RX_CHAINS
@@ -314,7 +364,7 @@ mod tests {
     fn ssids_fill_the_table_last_first_and_every_channel_names_them() {
         let ssids = vec![b"one".to_vec(), vec![], b"one".to_vec()];
         let request = protocol::Request::new(channels(), ssids, vec![]).unwrap();
-        let bytes = encode(&request, LOCAL, Some(&probe()), MEASURED).unwrap();
+        let bytes = encode(&request, 15, LOCAL, Some(&probe()), MEASURED).unwrap();
         assert_eq!(bytes[SSIDS + 1], 3);
         assert_eq!(bytes[SSIDS + SSID_ENTRY_BYTES + 1], 0);
         assert_eq!(bytes[SSIDS + 2 * SSID_ENTRY_BYTES + 1], 0);
@@ -324,7 +374,7 @@ mod tests {
     #[test]
     fn a_passive_scan_stays_passive_and_names_no_ssid() {
         let request = protocol::Request::new(channels(), vec![], vec![221, 1, 7]).unwrap();
-        let bytes = encode(&request, LOCAL, None, MEASURED).unwrap();
+        let bytes = encode(&request, 15, LOCAL, None, MEASURED).unwrap();
         assert_eq!(
             word(&bytes, GENERAL),
             FORCE_PASSIVE | PASS_ALL | ADAPTIVE_DWELL
@@ -339,10 +389,10 @@ mod tests {
         let active = protocol::Request::new(channels(), vec![vec![]], vec![]).unwrap();
         let passive = protocol::Request::new(channels(), vec![], vec![]).unwrap();
         assert_eq!(
-            encode(&active, LOCAL, None, MEASURED).unwrap_err(),
+            encode(&active, 15, LOCAL, None, MEASURED).unwrap_err(),
             Ax200ScanError::ProbePowerRequired
         );
-        assert!(encode(&passive, LOCAL, Some(&probe()), MEASURED).is_err());
+        assert!(encode(&passive, 15, LOCAL, Some(&probe()), MEASURED).is_err());
     }
 
     #[test]
@@ -351,7 +401,7 @@ mod tests {
         let mut oversized = probe();
         oversized.elements[1] = vec![0; PROBE_BUFFER_BYTES];
         assert_eq!(
-            encode(&request, LOCAL, Some(&oversized), MEASURED).unwrap_err(),
+            encode(&request, 15, LOCAL, Some(&oversized), MEASURED).unwrap_err(),
             Ax200ScanError::UnsupportedRequest
         );
     }

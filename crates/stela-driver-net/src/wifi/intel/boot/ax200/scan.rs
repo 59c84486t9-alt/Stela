@@ -2,7 +2,7 @@
 // Copyright (C) 2012-2014, 2018-2026 Intel Corporation
 // Copyright (C) 2013-2015 Intel Mobile Communications GmbH
 // Copyright (C) 2016-2017 Intel Deutschland GmbH
-//! Original-owner UMAC15 scanning. ACK, scan-complete and retirement
+//! Original-owner UMAC scanning. ACK, scan-complete and retirement
 //! are separate: no UID reuse before cold-unbound request retirement.
 //! The shared native RX owner stays live; whole-device extraction is separate.
 use super::super::hcmd::{CapturedNotification, NotificationPoll};
@@ -548,7 +548,7 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Scan<'_, Q, B, O> {
             .radio
             .initialized
             .boot;
-        wire::validate(&boot.firmware)?;
+        let version = wire::validate(&boot.firmware)?;
         let measurement = wire::Measurement {
             ds_parameters: boot.firmware.supports_capability(DS_PARAMETERS),
             tpc_report: boot.firmware.supports_capability(TPC_REPORT),
@@ -618,7 +618,13 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Scan<'_, Q, B, O> {
         // before HCMD descriptor visibility, including an uncertain failure.
         let result = unsafe {
             owner.publish_scan(admission, |guard, operation| {
-                let bytes = wire::encode(operation.request(), scanner.local(), probe, measurement)?;
+                let bytes = wire::encode(
+                    operation.request(),
+                    version,
+                    scanner.local(),
+                    probe,
+                    measurement,
+                )?;
                 let mut checked = policy::CheckedRequest(operation.request());
                 let now = options.clock.now_us();
                 let ticket = scanner
