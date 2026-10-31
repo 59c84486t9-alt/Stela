@@ -1077,6 +1077,16 @@
   },
   {
     "package": "stela-driver-net",
+    "test": "pinned_c_statistics_declarations_match_complete_packets",
+    "source": "crates/stela-driver-net/src/wifi/intel/link/station/coexistence/statistics/tests.rs",
+    "kind": "oracle",
+    "inputs": [
+      "STELA_IWLWIFI_STATS_ORACLE"
+    ],
+    "reason": "requires complete packets serialized from pinned Linux statistics declarations"
+  },
+  {
+    "package": "stela-driver-net",
     "test": "released_firmware_passes_the_version_gates",
     "source": "crates/stela-driver-net/src/wifi/intel/boot/ax200/scan/phy/tx_power.rs",
     "kind": "oracle",

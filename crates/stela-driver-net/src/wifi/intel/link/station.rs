@@ -996,11 +996,6 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
     ) -> Result<(), Error> {
         let key_index = normalized.key_index();
         let mut frame = normalized.into_frame();
-        if let (Some(signal), Some(ap)) = (frame.radio.signal_dbm, frame.header().transmitter)
-            && self.client.seat_of(ap).is_some()
-        {
-            self.client.bluetooth.heard(i32::from(signal));
-        }
         if self.hear_on_link_scan(&frame) || self.client.beacon_heard(&frame, now) {
             return Ok(());
         }
@@ -1388,11 +1383,30 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                     self.client.tracking.watch.drop_connection();
                 }
                 coexistence::PROFILE_NOTIFICATION => self.client.bluetooth.profile(raw),
+                coexistence::LEGACY_STATISTICS_NOTIFICATION => self.coexistence_statistics(
+                    queue,
+                    raw,
+                    coexistence::StatisticsNotification::Legacy,
+                ),
                 emlsr::BLUETOOTH_NOTIFICATION => {
                     let active = raw.iter().any(|&byte| byte != 0);
                     self.client.bluetooth_changed(active, now);
                 }
                 SCAN_START_NOTIFICATION => self.client.link_scan_started(now),
+                statistics::OPERATIONAL_NOTIFICATION
+                    if matches!(queue.family(), Family::Ax200 | Family::Ax210)
+                        && self
+                            .client
+                            .context
+                            .as_ref()
+                            .is_none_or(|context| context.affiliation().is_none()) =>
+                {
+                    self.coexistence_statistics(
+                        queue,
+                        raw,
+                        coexistence::StatisticsNotification::System,
+                    );
+                }
                 statistics::OPERATIONAL_NOTIFICATION => {
                     let version = queue
                         .firmware()

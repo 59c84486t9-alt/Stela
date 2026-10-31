@@ -667,17 +667,13 @@ fn raise_as<'n>(
     secret: Secret,
     other: bool,
 ) -> (Station<Model, ClockBios>, Phase, Device<'n>) {
+    let image = native.firmware.clone().unwrap_or_else(|| coex_image(2));
     let catalog: &'static resources::Catalog = Box::leak(Box::new(catalog_for(
         &profile(),
         Family::Ax200.firmware_name(),
         &feature(
             feature(
-                feature(
-                    two_receive_chains(coex_image(2), native.host_chains),
-                    30,
-                    63,
-                    true,
-                ),
+                feature(two_receive_chains(image, native.host_chains), 30, 63, true),
                 30,
                 21,
                 true,
@@ -1137,6 +1133,196 @@ fn firmware_that_keeps_its_chains_leaves_sm_power_save_to_itself() {
     assert!(!told, "{:?}", wifi.radio().error());
 }
 
+/// Complete v11 notification for the MAC and beacon-filter energy fields
+/// measured from the pinned C declaration. The fixture has neither the
+/// SYSTEM_STATISTICS command nor NEW_RX_STATS API bit.
+fn legacy_beacon_statistics(mac: u32, energy: u8) -> Vec<u8> {
+    let mut report = vec![0; 760];
+    report[252..256].copy_from_slice(&mac.to_le_bytes());
+    report[584] = energy;
+    notify(0, 0x9d, &report)
+}
+
+#[test]
+fn invalid_or_unrelated_firmware_statistics_cannot_reduce_bluetooth_power() {
+    for fault in 0..4 {
+        let native = Native::default();
+        let (mut wifi, mut device) = connect(&native, false);
+        let commands = device.commands.len();
+        device.inject(wifi.radio().rom().unwrap(), &bluetooth(3));
+        assert!(run(&mut wifi, &mut device, |_, device, _| device.commands
+            [commands..]
+            .iter()
+            .any(|command| command.1 == 0x5d)));
+        let bad = match fault {
+            0 => {
+                let mut report = vec![0; 759];
+                report[584] = 44;
+                notify(0, 0x9d, &report)
+            }
+            1 => legacy_beacon_statistics(1, 44),
+            2 => legacy_beacon_statistics(0, 0),
+            _ => notify(0x10, 0, &[0; 492]),
+        };
+        device.inject(wifi.radio().rom().unwrap(), &bad);
+        assert!(!run(&mut wifi, &mut device, |_, device, _| device.commands
+            [commands..]
+            .iter()
+            .any(|command| command.1 == 0x5c)));
+        assert!(wifi.carrier());
+        device.inject(
+            wifi.radio().rom().unwrap(),
+            &legacy_beacon_statistics(0, 44),
+        );
+        assert!(run(&mut wifi, &mut device, |_, device, _| device.commands
+            [commands..]
+            .iter()
+            .any(|command| command.1 == 0x5c)));
+    }
+}
+
+fn statistics_image(new_statistics: bool, version: u8, system: bool) -> Vec<u8> {
+    let mut image = feature(coex_image(2), 29, 35, new_statistics);
+    let entries = if system {
+        vec![[0x0f, 2, 1, 0xff], [0, 0x10, 0xff, 3]]
+    } else {
+        vec![[0x9d, 0, 0xff, version]]
+    };
+    let mut at = 88;
+    while at < image.len() {
+        let kind = u32::from_le_bytes(image[at..at + 4].try_into().unwrap());
+        let length = u32::from_le_bytes(image[at + 4..at + 8].try_into().unwrap()) as usize;
+        if kind == 48 {
+            let mut versions = image[at + 8..at + 8 + length]
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .filter(|entry| {
+                    !entries
+                        .iter()
+                        .any(|replacement| entry[..2] == replacement[..2])
+                })
+                .flatten()
+                .copied()
+                .collect::<Vec<_>>();
+            for entry in entries {
+                versions.extend_from_slice(&entry);
+            }
+            image[at + 4..at + 8].copy_from_slice(&(versions.len() as u32).to_le_bytes());
+            image.splice(at + 8..at + 8 + length, versions);
+            return image;
+        }
+        at += 8 + length.next_multiple_of(4);
+    }
+    panic!("firmware command-version table");
+}
+
+#[test]
+fn firmware_statistics_negotiate_each_layout_and_drive_bluetooth_hysteresis() {
+    for (new_statistics, version, system) in [
+        (false, 11, false),
+        (true, 13, false),
+        (true, 14, false),
+        (true, 15, false),
+        (false, 255, false),
+        (false, 3, true),
+    ] {
+        let native = Native {
+            firmware: Some(statistics_image(new_statistics, version, system)),
+            ..Native::default()
+        };
+        let (mut wifi, mut device) = connect(&native, false);
+        assert_eq!(device.commands.contains(&(2, 0x0f)), system);
+        let initial = device.commands.len();
+        device.inject(wifi.radio().rom().unwrap(), &bluetooth(3));
+        assert!(run(&mut wifi, &mut device, |_, device, _| device.commands
+            [initial..]
+            .iter()
+            .any(|command| command.1 == 0x5d)));
+        let report = |energy: u32| {
+            let (size, id, at) = if system {
+                (492, None, 4)
+            } else if version == 14 {
+                (196, Some(8), 12)
+            } else if version == 15 {
+                (480, None, 8)
+            } else if new_statistics {
+                (564, Some(120), 404)
+            } else {
+                (760, Some(252), 584)
+            };
+            let mut raw = vec![0; size];
+            if !system && matches!(version, 14 | 15) {
+                raw[..4].copy_from_slice(&[0, version, size as u8, (size >> 8) as u8]);
+            }
+            if let Some(id) = id {
+                raw[id..id + 4].copy_from_slice(&0u32.to_le_bytes());
+            }
+            if !system && !matches!(version, 14 | 15) {
+                raw[at] = energy as u8;
+            } else {
+                raw[at..at + 4].copy_from_slice(&energy.to_le_bytes());
+            }
+            if system {
+                notify(0x10, 0, &raw)
+            } else {
+                notify(0, 0x9d, &raw)
+            }
+        };
+        if system {
+            // The negotiated system API supersedes unilateral legacy reports.
+            device.inject(
+                wifi.radio().rom().unwrap(),
+                &legacy_beacon_statistics(0, 44),
+            );
+            assert!(!run(&mut wifi, &mut device, |_, device, _| device.commands
+                [initial..]
+                .iter()
+                .any(|command| command.1 == 0x5c)));
+        }
+        device.inject(wifi.radio().rom().unwrap(), &report(44));
+        assert!(
+            run(&mut wifi, &mut device, |_, device, _| device.commands
+                [initial..]
+                .iter()
+                .any(|command| command.1 == 0x5c)),
+            "format {version}, system {system}: {:?}",
+            wifi.radio().error()
+        );
+        let reductions = device
+            .commands
+            .iter()
+            .filter(|command| command.1 == 0x5c)
+            .count();
+        device.inject(wifi.radio().rom().unwrap(), &report(0));
+        assert!(!run(&mut wifi, &mut device, |_, device, _| device
+            .commands
+            .iter()
+            .filter(|command| command.1 == 0x5c)
+            .count()
+            > reductions));
+        device.inject(wifi.radio().rom().unwrap(), &report(70));
+        assert!(run(&mut wifi, &mut device, |_, device, _| device
+            .commands
+            .iter()
+            .filter(|command| command.1 == 0x5c)
+            .count()
+            > reductions));
+        assert!(wifi.carrier());
+        if system {
+            assert_eq!(
+                device
+                    .commands
+                    .iter()
+                    .filter(|&&command| command == (2, 0x0f))
+                    .count(),
+                2,
+                "the two initial statistics commands do not repeat"
+            );
+        }
+    }
+}
+
 #[test]
 fn bluetooth_gets_its_channel_inhibited_and_a_strong_ap_less_power() {
     let native = Native::default();
@@ -1147,10 +1333,25 @@ fn bluetooth_gets_its_channel_inhibited_and_a_strong_ap_less_power() {
         device.commands[commands..].iter().any(|c| c.1 == 0x5d)
     });
     assert!(told, "{:?}", &device.commands[commands..]);
-    // The model's AP is heard at -44 dBm.
+    // A strong AP data frame is not the firmware's beacon-filter statistic.
     let (frame, reorder) = protected(5, 5, 1, 1, false, false);
     let frame = placed(frame, 3 | 2 << 8 | 1 << 6, None, reorder);
     device.inject(wifi.radio().rom().unwrap(), &frame);
+    assert!(!run(&mut wifi, &mut device, |_, device, _| device.commands
+        [commands..]
+        .iter()
+        .any(|c| c.1 == 0x5c)));
+    let image = coex_image(2);
+    let firmware = crate::wifi::intel::firmware::Firmware::parse(&image).unwrap();
+    assert!(firmware.command_version(2, 0x0f).is_none());
+    assert!(!firmware.supports_api(35));
+    // AX200's multi-queue API and old statistics API select the complete v11
+    // notification. The original C declaration puts MAC ID at 252 and energy
+    // at 584; zero initialization selects this station's MAC 0.
+    device.inject(
+        wifi.radio().rom().unwrap(),
+        &legacy_beacon_statistics(0, 44),
+    );
     let reduced = run(&mut wifi, &mut device, |_, device, _| {
         device.commands[commands..].iter().any(|c| c.1 == 0x5c)
     });
