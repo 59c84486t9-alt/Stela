@@ -72,8 +72,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
             host: &mut self.host,
             lock: self.devices.memory_lock(),
         };
-        let mut result = self.devices.transfer(self.current, &mut memory, now);
-        if result.is_ok() {
+        let result = self.devices.transfer(self.current, &mut memory, now);
+        if result.is_ok()
+            && let Some(call) = self.devices.take_call(self.current)
+        {
             let mut caller = caller::CallerSpace {
                 controls: self.cpu.controls(self.cpu.regime()),
                 requester: mmu::Requester {
@@ -83,7 +85,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 lock: memory.lock,
                 host: &mut self.host,
             };
-            result = self.devices.serve_call(self.current, &mut caller, now);
+            let outcome = call.run(&mut caller);
+            self.devices.finish_call(outcome);
         }
         let result = match result {
             Ok(()) => Ok(()),

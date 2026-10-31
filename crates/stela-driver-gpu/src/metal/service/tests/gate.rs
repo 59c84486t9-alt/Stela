@@ -1,9 +1,9 @@
-use super::{Memory, Stream, commit, connect, service};
+use super::{Memory, MockBackend, MockCompiler, Stream, commit, connect, service};
 use crate::metal::service::{
-    GuestMemory,
+    GuestMemory, SharedService,
     wire::{self, GateCall, NegotiateRequest, NegotiateResponse, Operation, Span, Status},
 };
-use core::mem::size_of;
+use core::{mem::size_of, num::NonZeroU64};
 use stela_contracts::gate::{CallerFault, CallerMemory, GateService};
 
 impl CallerMemory for Memory {
@@ -97,12 +97,59 @@ fn a_failed_gate_call_reports_its_status_and_reason() {
 fn the_gate_signals_completed_work_once() {
     let mut service = service();
     let connection = connect(&mut service);
-    assert!(!GateService::signaled(&mut service));
+    assert!(!service.signaled());
     commit(&mut service, connection, &Stream::default()).unwrap();
-    assert!(!GateService::signaled(&mut service));
+    assert!(!service.signaled());
     let backend = service.device().backend();
     let timeline = *backend.semaphores.keys().next().unwrap();
     backend.semaphores.insert(timeline, 1);
-    assert!(GateService::signaled(&mut service));
-    assert!(!GateService::signaled(&mut service));
+    assert!(service.signaled());
+    assert!(!service.signaled());
+}
+
+type Shared = SharedService<MockBackend, MockCompiler>;
+
+fn commit_shared(shared: &Shared, connection: NonZeroU64) {
+    commit(
+        &mut shared.try_turn().unwrap(),
+        connection,
+        &Stream::default(),
+    )
+    .unwrap();
+}
+
+/// The GPU finishes what was committed.
+fn complete(shared: &Shared) {
+    let mut turn = shared.try_turn().unwrap();
+    let backend = turn.device().backend();
+    let timeline = *backend.semaphores.keys().next().unwrap();
+    backend.semaphores.insert(timeline, 1);
+}
+
+#[test]
+fn the_shared_service_finds_completed_work_only_after_an_interrupt() {
+    let shared = SharedService::new(service(), || panic!("nothing holds the service"));
+    let connection = connect(&mut shared.try_turn().unwrap());
+    commit_shared(&shared, connection);
+    assert!(!shared.signaled());
+    complete(&shared);
+    assert!(!shared.signaled(), "no interrupt said so");
+    shared.interrupted();
+    assert!(shared.signaled());
+    assert!(!shared.signaled());
+}
+
+#[test]
+fn an_interrupt_during_a_call_is_left_to_that_call() {
+    let shared = SharedService::new(service(), || panic!("nothing waits"));
+    let connection = connect(&mut shared.try_turn().unwrap());
+    commit_shared(&shared, connection);
+    complete(&shared);
+    {
+        let turn = shared.try_turn().unwrap();
+        shared.interrupted();
+        assert!(!shared.signaled());
+        drop(turn);
+    }
+    assert!(shared.signaled());
 }

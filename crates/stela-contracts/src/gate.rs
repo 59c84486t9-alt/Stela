@@ -1,6 +1,7 @@
 //! A call gate: native code a guest thread enters through a device access,
 //! reaching that thread's memory as its own unprivileged loads and stores
 //! would.
+use alloc::sync::Arc;
 use core::num::NonZeroU64;
 
 /// Why the caller's memory refused an access.
@@ -23,21 +24,80 @@ pub trait CallerMemory {
     fn write(&mut self, address: u64, data: &[u8]) -> Result<(), CallerFault>;
 }
 
-/// The native service a gate enters, by connection.
-pub trait GateService {
-    fn connect(&mut self) -> Result<NonZeroU64, &'static str>;
+/// The native service a gate enters, by connection. Calls run on the PEs
+/// that make them, outside the board's lock, so one call's length is no
+/// other PE's; the service orders them itself.
+pub trait GateService: Send + Sync {
+    fn connect(&self) -> Result<NonZeroU64, &'static str>;
     /// Releases what the connection holds; in-flight work completes.
-    fn disconnect(&mut self, connection: NonZeroU64);
+    fn disconnect(&self, connection: NonZeroU64);
     /// Runs the call whose record is at `record` in `caller`, completing
     /// the record; fails only when the record is out of reach.
     fn serve(
-        &mut self,
+        &self,
         connection: NonZeroU64,
         record: u64,
         caller: &mut dyn CallerMemory,
     ) -> Result<(), CallerFault>;
-    /// Whether the GPU completed work since this last answered true.
-    fn signaled(&mut self) -> bool;
+    /// Whether the GPU completed work since this last answered true. Under
+    /// the board's lock, so it answers at once.
+    fn signaled(&self) -> bool;
+}
+
+/// What a store to a gate window asks of the service.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GateRequest {
+    Open,
+    Close(NonZeroU64),
+    Serve {
+        gate: usize,
+        connection: NonZeroU64,
+        record: u64,
+    },
+}
+
+/// A request's result, for the gate to record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GateOutcome {
+    Opened(Option<NonZeroU64>),
+    Closed,
+    Served {
+        gate: usize,
+        connection: NonZeroU64,
+        fault: Option<CallerFault>,
+    },
+}
+
+/// A store's request, taken from the gate to run in that store's own step
+/// outside the board's lock.
+pub struct GateCall {
+    service: Arc<dyn GateService>,
+    request: GateRequest,
+}
+
+impl GateCall {
+    pub fn new(service: Arc<dyn GateService>, request: GateRequest) -> Self {
+        Self { service, request }
+    }
+
+    pub fn run(self, caller: &mut dyn CallerMemory) -> GateOutcome {
+        match self.request {
+            GateRequest::Open => GateOutcome::Opened(self.service.connect().ok()),
+            GateRequest::Close(connection) => {
+                self.service.disconnect(connection);
+                GateOutcome::Closed
+            }
+            GateRequest::Serve {
+                gate,
+                connection,
+                record,
+            } => GateOutcome::Served {
+                gate,
+                connection,
+                fault: self.service.serve(connection, record, caller).err(),
+            },
+        }
+    }
 }
 
 /// Defines a block of 64-bit layout constants and [`LAYOUT`] listing them,

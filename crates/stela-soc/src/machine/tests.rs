@@ -3838,25 +3838,28 @@ fn usb_core_aliases_platform_refusals_and_port_driven_polling() {
 
 #[test]
 fn a_gate_store_is_served_in_its_own_pes_step() {
+    extern crate std;
+
     use core::num::NonZeroU64;
     use stela_contracts::gate::{CallerFault, CallerMemory};
     const GATE: u64 = 0x5_0000_0000;
-    struct Service(Rc<RefCell<Vec<(u64, u64)>>>);
+    #[derive(Default)]
+    struct Service(std::sync::Mutex<Vec<(u64, u64)>>);
     impl stela_contracts::gate::GateService for Service {
-        fn connect(&mut self) -> Result<NonZeroU64, &'static str> {
+        fn connect(&self) -> Result<NonZeroU64, &'static str> {
             Ok(NonZeroU64::MIN)
         }
-        fn disconnect(&mut self, _: NonZeroU64) {}
+        fn disconnect(&self, _: NonZeroU64) {}
         fn serve(
-            &mut self,
+            &self,
             connection: NonZeroU64,
             record: u64,
             _: &mut dyn CallerMemory,
         ) -> Result<(), CallerFault> {
-            self.0.borrow_mut().push((connection.get(), record));
+            self.0.lock().unwrap().push((connection.get(), record));
             Ok(())
         }
-        fn signaled(&mut self) -> bool {
+        fn signaled(&self) -> bool {
             false
         }
     }
@@ -3869,16 +3872,14 @@ fn a_gate_store_is_served_in_its_own_pes_step() {
             Err(CallerFault::Denied { address })
         }
     }
-    let served = Rc::new(RefCell::new(Vec::new()));
+    let service = alloc::sync::Arc::new(Service::default());
     let mut d = AppleDevices::new();
     let irq = AicInput::new(0, 700);
-    d.add_gpu_gate(GATE, irq, Box::new(Service(served.clone())))
-        .unwrap();
-    assert!(
-        d.add_gpu_gate(GATE, irq, Box::new(Service(served.clone())))
-            .is_err()
-    );
+    d.add_gpu_gate(GATE, irq, service.clone()).unwrap();
+    assert!(d.add_gpu_gate(GATE, irq, service.clone()).is_err());
     d.write(0, GATE, 8, 0, 0).unwrap();
+    let outcome = d.take_call(0).unwrap().run(&mut Caller);
+    d.finish_call(outcome);
     let page = d.read(0, GATE + 8, 8, 0).unwrap();
     assert_eq!(page, 1);
     d.write(
@@ -3889,10 +3890,10 @@ fn a_gate_store_is_served_in_its_own_pes_step() {
         0,
     )
     .unwrap();
-    d.serve_call(1, &mut Caller, 0).unwrap();
-    assert!(served.borrow().is_empty());
-    d.serve_call(2, &mut Caller, 0).unwrap();
-    assert_eq!(*served.borrow(), [(1, 0x1234)]);
+    assert!(d.take_call(1).is_none());
+    let outcome = d.take_call(2).unwrap().run(&mut Caller);
+    d.finish_call(outcome);
+    assert_eq!(*service.0.lock().unwrap(), [(1, 0x1234)]);
 }
 
 mod data_integration;

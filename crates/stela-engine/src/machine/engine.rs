@@ -130,7 +130,7 @@ use stela_compiler::{
 };
 pub use stela_contracts::bus::Transition;
 pub use stela_contracts::dma::Memory;
-pub use stela_contracts::gate::{CallerFault, CallerMemory};
+pub use stela_contracts::gate::{CallerFault, CallerMemory, GateCall, GateOutcome};
 pub use stored::{Offer, SharedTranslation, Translations};
 pub use system::FP_TRAPS_WRITABLE;
 use {

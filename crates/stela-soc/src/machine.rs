@@ -1099,19 +1099,20 @@ impl Devices for AppleDevices {
             .min()
     }
 
-    fn serve_call(
-        &mut self,
-        cpu: usize,
-        caller: &mut dyn stela_engine::machine::engine::CallerMemory,
-        _now: u64,
-    ) -> Result<(), DeviceError> {
+    fn take_call(&mut self, cpu: usize) -> Option<stela_engine::machine::engine::GateCall> {
+        self.bus
+            .device_mut::<gpu_gate::Gate>(self.gpu_gate?)
+            .expect("the gate is mapped")
+            .take(cpu)
+    }
+
+    fn finish_call(&mut self, outcome: stela_engine::machine::engine::GateOutcome) {
         if let Some(gate) = self.gpu_gate {
             self.bus
                 .device_mut::<gpu_gate::Gate>(gate)
                 .expect("the gate is mapped")
-                .serve(cpu, caller);
+                .finish(outcome);
         }
-        Ok(())
     }
 
     fn transfer(

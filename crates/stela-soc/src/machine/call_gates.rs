@@ -1,6 +1,7 @@
 //! The StelaGPU call gate's placement on the board.
 
 use super::*;
+use alloc::sync::Arc;
 
 impl AppleDevices {
     /// StelaGPU's call gate over `service`, its window at `physical` and
@@ -9,7 +10,7 @@ impl AppleDevices {
         &mut self,
         physical: u64,
         irq: AicInput,
-        service: Box<dyn stela_contracts::gate::GateService>,
+        service: Arc<dyn stela_contracts::gate::GateService>,
     ) -> Result<(), String> {
         if self.gpu_gate.is_some() {
             return Err("the board has one StelaGPU gate".into());

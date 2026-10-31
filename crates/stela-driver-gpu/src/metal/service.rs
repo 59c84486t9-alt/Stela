@@ -30,6 +30,7 @@ use core::{
     ops::Range,
 };
 use identity::{DeviceEpoch, ObjectHandle, ObjectTable};
+pub use shared::SharedService;
 use wire::{Fault, Handle, NegotiateRequest, NegotiateResponse, Operation, Record, Span, Status};
 
 mod commands;
@@ -41,6 +42,7 @@ mod pipelines;
 mod queue;
 mod reflection;
 mod resources;
+mod shared;
 #[cfg(test)]
 mod tests;
 pub mod wire;
