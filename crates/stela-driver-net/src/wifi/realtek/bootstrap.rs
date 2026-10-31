@@ -11,6 +11,7 @@ use super::{
     efuse::{self, Board, Physical},
     features::Report,
     fifo::Geometry,
+    firmware::Layout,
     firmware_control::Control,
     hci,
     identity::{Observed, Profile},
@@ -94,6 +95,8 @@ pub struct Up {
     pub phy: PhyInitialized,
     pub coex: Coex,
     pub report: Report,
+    /// `fw->feature`.
+    pub features: u32,
     pub board: Board,
     pub physical: Physical,
     pub geometry: Geometry,
@@ -122,6 +125,10 @@ pub unsafe fn bring_up(claim: Claim) -> Result<Up, Error> {
     } = claim;
     let profile = Profile::select(observed).map_err(at("identity"))?;
     let staged = profile.stage(firmware).map_err(at("firmware"))?;
+    let features = match &staged.layout {
+        Layout::Rtw88(image) => image.features(),
+        Layout::Rtw89(_) => 0,
+    };
     let bar = || {
         // SAFETY: the caller's claim; each block reaches registers of its own.
         unsafe { Bar::new(window, bytes, profile, owner.clone()) }
@@ -216,6 +223,7 @@ pub unsafe fn bring_up(claim: Claim) -> Result<Up, Error> {
         phy,
         coex,
         report,
+        features,
         board,
         physical,
         geometry,

@@ -8,8 +8,9 @@
 use super::{
     bootstrap::{Native, Up},
     coex::{self, Coex, Link},
-    commands::Report,
+    commands::{self, Report},
     descriptor::Packet,
+    dynamic::{self, Dynamic, set_mask},
     features,
     firmware_control::Control,
     interrupt::Controller,
@@ -21,7 +22,7 @@ use super::{
     receive::{self, Ring},
     regd,
     registers::{REG_BCN_CTRL, REG_CR},
-    station::{CamKey, Device, Incoming, Received},
+    station::{CamKey, Device, Incoming, MAC_ID, Received},
     transmit::{self, Queue, Rings},
 };
 use crate::{
@@ -61,6 +62,33 @@ const REG_NCTL0: u32 = 0x1b00;
 const SELECT_PATH: u32 = 3 << 1;
 const REG_DPD_CTL1: u32 = 0x1b08;
 const POWER_SAVE: u32 = 1 << 7;
+/// `rtw8822c_dig`: each path's gain within one register.
+const REG_GAIN: u32 = 0x1d70;
+const GAIN_MASKS: [u32; 2] = [0x7f, 0x7f00];
+/// `rtw8822c_false_alarm_statistics`' counters, their resets and clock gate.
+const REG_CCK_ENABLE: u32 = 0x1c3c;
+const CCK_BLOCK: u32 = 1 << 1;
+const REG_CCK_ALARMS: u32 = 0x1a5c;
+const REG_OFDM_ALARMS: [u32; 5] = [0x2d04, 0x2d08, 0x2d0c, 0x2d10, 0x2d20];
+const REG_ALARM_RESET: u32 = 0x1a2c;
+const CCK_ALARM_RESET: u32 = 3 << 14;
+const OFDM_ALARM_RESET: u32 = 3 << 12;
+const REG_RX_BREAK: u32 = 0x1d2c;
+const RX_CLOCK_GATE: u32 = 1 << 31;
+const REG_COUNTER_CONTROL: u32 = 0x1eb4;
+const ALL_COUNTERS_RESET: u32 = 1 << 25;
+/// `RRSR_INIT_2G` and `RRSR_INIT_5G`, the rates a response may use.
+const REG_RRSR: u32 = 0x440;
+/// `FW_FEATURE_NOTIFY_SCAN` and `FW_FEATURE_ADAPTIVITY`.
+const NOTIFY_SCAN: u32 = 1 << 6;
+const ADAPTIVITY: u32 = 1 << 7;
+/// `rtw8822c_edcca_th`: both thresholds, each offset by half their range.
+const REG_EDCCA: u32 = 0x84c;
+const EDCCA_RISING: u32 = 0xff << 16;
+const EDCCA_FALLING: u32 = 0xff << 24;
+const EDCCA_OFFSET: u32 = 0x80;
+const RESPONSE_RATES_2GHZ: u32 = 0x15f;
+const RESPONSE_RATES_5GHZ: u32 = 0x150;
 /// Frames a look at the receive ring takes, which [`Ring::poll`] holds to the
 /// ring's own size.
 const RECEIVE_BUDGET: usize = 512;
@@ -115,6 +143,13 @@ pub struct Hardware {
     calibrate: bool,
     band: Band,
     connected: bool,
+    address: Mac,
+    bssid: Mac,
+    dynamic: Dynamic,
+    /// `dm_info->cck_gi_u_bnd` and `cck_gi_l_bnd`.
+    cck_bounds: [u8; 2],
+    /// `fw->feature`.
+    features: u32,
     /// The MSI reaches the core that looks for frames.
     vector: bool,
     limitations: Vec<&'static str>,
@@ -126,7 +161,12 @@ impl Hardware {
     /// # Safety
     /// `up` comes from [`super::bootstrap::bring_up`] with nothing since, and
     /// `vector` says its function raises an MSI the caller has routed.
-    pub unsafe fn new(up: Up, alpha2: [u8; 2], vector: bool) -> Result<Self, String> {
+    pub unsafe fn new(
+        up: Up,
+        alpha2: [u8; 2],
+        dfs_region: u8,
+        vector: bool,
+    ) -> Result<Self, String> {
         let Up {
             mut control,
             mut interrupts,
@@ -134,11 +174,23 @@ impl Hardware {
             transmit,
             phy,
             report,
+            features,
+            board,
             coex,
             mac,
             pages,
             ..
         } = up;
+        let initial = phy.factory().calibration().initial();
+        let cck_bounds = initial.cck_bounds();
+        let dynamic = Dynamic::new(dynamic::Initial {
+            gains: initial.igi_history(),
+            crystal_cap: initial.crystal_cap(),
+            thermal: board.raw().thermal_raw,
+            power_tracked: board.raw().power_track_raw == 0,
+            lck_reference: phy.tracking().lck_reference,
+            dfs_region,
+        });
         let io = control.io().map_err(failed("registers"))?;
         write_address(io, REG_MAC_ADDRESS, mac).map_err(failed("address"))?;
         set_mask(io, REG_CR, NET_TYPE_MASK, NET_NO_LINK).map_err(failed("net type"))?;
@@ -161,6 +213,11 @@ impl Hardware {
             calibrate: true,
             band: Band::Ghz2,
             connected: false,
+            address: mac,
+            bssid: Mac([0; 6]),
+            dynamic,
+            cck_bounds,
+            features,
             vector,
             limitations: Vec::new(),
         })
@@ -190,6 +247,68 @@ impl Hardware {
         Ok(())
     }
 
+    /// `rtw8822c_false_alarm_statistics`: the total and CCK's own, and a new
+    /// count.
+    fn false_alarms(&mut self) -> Result<(u16, u32), String> {
+        let io = self.control.io().map_err(failed("registers"))?;
+        let cck_enabled = io.read32(REG_CCK_ENABLE).map_err(failed("alarms"))? & CCK_BLOCK != 0;
+        let cck = io.read16(REG_CCK_ALARMS).map_err(failed("alarms"))?;
+        let mut counts = [0; 5];
+        for (count, register) in counts.iter_mut().zip(REG_OFDM_ALARMS) {
+            *count = io.read32(register).map_err(failed("alarms"))?;
+        }
+        let [one, two, three, four, five] = counts;
+        let (low, high) = (|word: u32| word & 0xffff, |word: u32| word >> 16);
+        let total = high(one)
+            + low(two)
+            + high(two)
+            + low(three)
+            + low(four)
+            + high(four)
+            + low(five)
+            + high(five)
+            + if cck_enabled { u32::from(cck) } else { 0 };
+        let mut reset = |register, mask, value| {
+            set_mask(io, register, mask, value).map_err(failed("alarm reset"))
+        };
+        reset(REG_ALARM_RESET, CCK_ALARM_RESET, 0)?;
+        reset(REG_ALARM_RESET, CCK_ALARM_RESET, 2)?;
+        reset(REG_ALARM_RESET, OFDM_ALARM_RESET, 0)?;
+        reset(REG_ALARM_RESET, OFDM_ALARM_RESET, 2)?;
+        reset(REG_RX_BREAK, RX_CLOCK_GATE, 0)?;
+        reset(REG_COUNTER_CONTROL, ALL_COUNTERS_RESET, 1)?;
+        reset(REG_COUNTER_CONTROL, ALL_COUNTERS_RESET, 0)?;
+        reset(REG_RX_BREAK, RX_CLOCK_GATE, 1)?;
+        Ok((total as u16, u32::from(cck)))
+    }
+
+    /// `rtw_fw_adaptivity`, or `rtw8822c_adaptivity` on firmware without it.
+    fn adapt(&mut self) -> Result<(), String> {
+        if self.features & ADAPTIVITY != 0 {
+            let (mode, gain, threshold, density) = self.dynamic.adaptivity();
+            return self
+                .control
+                .command(commands::adaptivity(mode, gain, threshold, density))
+                .map_err(failed("adaptivity"));
+        }
+        let (rising, falling) = self.dynamic.energy_thresholds();
+        let io = self.control.io().map_err(failed("registers"))?;
+        for (mask, threshold) in [(EDCCA_RISING, rising), (EDCCA_FALLING, falling)] {
+            let value = (u32::from(threshold) + EDCCA_OFFSET) & 0xff;
+            set_mask(io, REG_EDCCA, mask, value).map_err(failed("energy threshold"))?;
+        }
+        Ok(())
+    }
+
+    /// `rtw_phy_dig_write`.
+    fn write_gain(&mut self, gain: u8) -> Result<(), String> {
+        let io = self.control.io().map_err(failed("registers"))?;
+        for mask in GAIN_MASKS {
+            set_mask(io, REG_GAIN, mask, u32::from(gain)).map_err(failed("gain"))?;
+        }
+        Ok(())
+    }
+
     /// `rtw8822c_rfk_power_save`.
     fn calibration_power_save(&mut self, on: bool) -> Result<(), String> {
         let io = self.control.io().map_err(failed("registers"))?;
@@ -199,15 +318,6 @@ impl Hardware {
         }
         Ok(())
     }
-}
-
-/// `rtw_write32_mask`.
-fn set_mask(io: &mut Native, register: u32, mask: u32, value: u32) -> Result<(), super::io::Error> {
-    let old = io.read32(register)?;
-    io.write32(
-        register,
-        (old & !mask) | ((value << mask.trailing_zeros()) & mask),
-    )
 }
 
 /// `rtw_vif_write_addr`.
@@ -246,24 +356,34 @@ fn cam_words(key: &CamKey<'_>) -> [u32; 8] {
     words
 }
 
-/// What one `rtw_rx_query_rx_desc` packet gives the station.
-fn incoming(packet: &receive::Packet<'_>) -> Option<Incoming> {
+/// What one `rtw_rx_query_rx_desc` packet gives the station, with the signal it
+/// came in on.
+fn incoming(
+    packet: &receive::Packet<'_>,
+    cck_bounds: [u8; 2],
+) -> Option<(Incoming, Option<dynamic::Signal>)> {
     let facts = &packet.facts;
     if facts.firmware {
-        return Report::parse(packet.payload).map(Incoming::Report);
+        return Report::parse(packet.payload).map(|report| (Incoming::Report(report), None));
     }
     if facts.crc_error {
         return None;
     }
     // IEEE80211_HW_RX_INCLUDES_FCS.
     let length = packet.payload.len().checked_sub(4)?;
-    Some(Incoming::Frame(Received {
+    let signal = if facts.phy_present {
+        dynamic::phy_status(packet.driver_info, cck_bounds, facts.rate_raw)
+    } else {
+        None
+    };
+    let frame = Received {
         bytes: packet.payload[..length].to_vec(),
         tsf: facts.tsf_low,
         decrypted: facts.hardware_decrypted,
         icv_error: facts.icv_error,
-        signal_dbm: None,
-    }))
+        signal_dbm: signal.map(|signal| signal.power_dbm),
+    };
+    Some((Incoming::Frame(frame), signal))
 }
 
 impl Device for Hardware {
@@ -324,7 +444,10 @@ impl Device for Hardware {
             .transmit
             .frame(queue, self.pages, &packet.encode(), mpdu)
         {
-            Ok(()) => Ok(true),
+            Ok(()) => {
+                self.dynamic.sent(mpdu);
+                Ok(true)
+            }
             Err(transmit::Error::Full) => Ok(false),
             Err(error) => Err(format!("transmit: {error:?}")),
         }
@@ -336,11 +459,18 @@ impl Device for Hardware {
         if self.vector {
             self.interrupts.capture().map_err(failed("interrupt"))?;
         }
+        let (cck_bounds, address, bssid) = (self.cck_bounds, self.address, self.bssid);
+        let dynamic = &mut self.dynamic;
         self.receive
             .poll(RECEIVE_BUDGET, |packet| {
-                if let Some(item) = incoming(&packet) {
-                    sink(item);
+                let Some((item, signal)) = incoming(&packet, cck_bounds) else {
+                    return;
+                };
+                match &item {
+                    Incoming::Report(report) => dynamic.reported(report),
+                    Incoming::Frame(frame) => dynamic.frame(&frame.bytes, signal, address, bssid),
                 }
+                sink(item);
             })
             .map_err(failed("receive"))?;
         self.transmit
@@ -367,6 +497,10 @@ impl Device for Hardware {
         set_mask(io, REG_AID, AID_MASK, u32::from(aid)).map_err(failed("aid"))?;
         let net_type = if linked { NET_LINKED } else { NET_NO_LINK };
         set_mask(io, REG_CR, NET_TYPE_MASK, net_type).map_err(failed("net type"))?;
+        if self.connected != linked {
+            self.dynamic.forget();
+        }
+        self.bssid = bssid;
         self.connected = linked;
         self.run_coex()
     }
@@ -407,6 +541,75 @@ impl Device for Hardware {
         io.write32(REG_CAM_WRITE, 0).map_err(failed("cam"))?;
         io.write32(REG_CAM_COMMAND, CAM_WRITE | (u32::from(entry) << 3))
             .map_err(failed("cam"))
+    }
+
+    /// `rtw_phy_dynamic_mechanism` as far as it goes: all but predistortion
+    /// tracking, which waits on its calibration.
+    fn watchdog(&mut self, scanning: bool, stbc: bool) -> Result<u8, String> {
+        self.dynamic.close_period();
+        if scanning {
+            return Ok(0);
+        }
+        let linked = self.connected;
+        self.dynamic.sample(linked);
+        if linked {
+            self.control
+                .command(commands::rssi(MAC_ID, self.dynamic.rssi(), stbc))
+                .map_err(failed("rssi"))?;
+        }
+        let (alarms, cck_alarms) = self.false_alarms()?;
+        if let Some(gain) = self.dynamic.gain(alarms, linked) {
+            self.write_gain(gain)?;
+        }
+        let band = self.band;
+        let io = self.control.io().map_err(failed("registers"))?;
+        if band == Band::Ghz2 {
+            self.dynamic
+                .detect_cck(io, cck_alarms, linked)
+                .map_err(failed("cck detection"))?;
+        }
+        self.control
+            .command(self.dynamic.phy_info())
+            .map_err(failed("phy info"))?;
+        let io = self.control.io().map_err(failed("registers"))?;
+        if linked {
+            let rates = if band == Band::Ghz5 {
+                RESPONSE_RATES_5GHZ
+            } else {
+                RESPONSE_RATES_2GHZ
+            };
+            io.write32(REG_RRSR, rates & self.dynamic.response_rates())
+                .map_err(failed("response rates"))?;
+            self.dynamic
+                .choose_path(io)
+                .map_err(failed("transmit path"))?;
+        }
+        let bluetooth_off = Coex::bluetooth_off(io).map_err(failed("coex"))?;
+        self.dynamic
+            .track_frequency(io, linked, bluetooth_off)
+            .map_err(failed("crystal"))?;
+        // SAFETY: this worker owns the radio and its frames wait for it.
+        unsafe { self.dynamic.track_temperature(io, &self.report, band) }
+            .map_err(failed("temperature"))?;
+        self.adapt()?;
+        Ok(self.dynamic.level())
+    }
+
+    /// `rtw_phy_dig_set_max_coverage`, and `rtw_phy_dig_reset` after, each
+    /// with `rtw_core_fw_scan_notify`.
+    fn scanning(&mut self, scanning: bool) -> Result<(), String> {
+        if !scanning {
+            self.write_gain(self.dynamic.current_gain())?;
+        }
+        if self.features & NOTIFY_SCAN != 0 {
+            self.control
+                .command(commands::scan(scanning))
+                .map_err(failed("scan notice"))?;
+        }
+        if scanning {
+            self.write_gain(dynamic::MAX_COVERAGE)?;
+        }
+        Ok(())
     }
 
     fn signals(&self) -> bool {

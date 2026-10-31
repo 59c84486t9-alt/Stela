@@ -10,6 +10,12 @@ const DEFAULT_PORT: u32 = 0x2c;
 const RA_INFO: u32 = 0x40;
 /// `H2C_CMD_RSSI_MONITOR`.
 const RSSI_MONITOR: u32 = 0x42;
+/// `H2C_CMD_WL_PHY_INFO`, `H2C_CMD_SCAN` and `H2C_CMD_ADAPTIVITY`.
+const WL_PHY_INFO: u32 = 0x58;
+const SCAN: u32 = 0x59;
+const ADAPTIVITY: u32 = 0x5a;
+/// `C2H_SCAN_RESULT`.
+const SCAN_RESULT: u8 = 0x38;
 
 /// `C2H_CCX_TX_RPT`.
 const CCX_TX_REPORT: u8 = 0x03;
@@ -78,6 +84,31 @@ pub fn rssi(mac_id: u8, rssi: u8, stbc: bool) -> (u32, u32) {
     )
 }
 
+/// `rtw_fw_update_wl_phy_info`, for firmware's own decisions.
+pub fn phy_info(tx_mbps: u32, rx_mbps: u32, tx_rate: u8, rx_rate: u8, evm_db: u8) -> (u32, u32) {
+    (
+        WL_PHY_INFO | ((tx_mbps & 0x3ff) << 8) | ((rx_mbps & 0x3ff) << 18),
+        u32::from(tx_rate) | (u32::from(rx_rate) << 8) | (u32::from(evm_db) << 16),
+    )
+}
+
+/// `rtw_fw_scan_notify`.
+pub fn scan(start: bool) -> (u32, u32) {
+    (SCAN | (u32::from(start) << 8), 0)
+}
+
+/// `rtw_fw_adaptivity`, with its `option` of one.
+pub fn adaptivity(mode: u8, gain: u8, threshold: u8, density: u8) -> (u32, u32) {
+    (
+        ADAPTIVITY
+            | (u32::from(mode & 15) << 8)
+            | (1 << 12)
+            | (u32::from(gain) << 16)
+            | (u32::from(threshold) << 24),
+        u32::from(density),
+    )
+}
+
 /// One report in a firmware packet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Report {
@@ -89,6 +120,8 @@ pub enum Report {
         rate: u8,
         short_gi: bool,
     },
+    /// `rtw_fw_scan_result`: how crowded the scan found the air.
+    Density(u8),
     /// A report a station does not act on, by ID.
     Other(u8),
 }
@@ -112,6 +145,7 @@ impl Report {
                 short_gi: payload.first()? & 0x80 != 0,
                 mac_id: *payload.get(1)?,
             },
+            SCAN_RESULT => Self::Density(*payload.first()?),
             _ => Self::Other(id),
         })
     }
