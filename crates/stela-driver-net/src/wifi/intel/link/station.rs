@@ -62,6 +62,7 @@ mod grade;
 mod he;
 mod link_scan;
 mod reception;
+mod statistics;
 
 /// How long a signalling station sleeps at most: the coarse timers it keeps
 /// between frames, its Block Ack sessions' and its connection's, have no
@@ -280,6 +281,7 @@ pub(super) struct Client {
     /// A new look at the links is due.
     reselect: bool,
     link_scan: link_scan::LinkScan,
+    statistics: statistics::Statistics,
     ciphers: Option<(Cipher, Cipher)>,
     management_cipher: Option<ManagementCipher>,
     keys: Vec<Key>,
@@ -324,6 +326,7 @@ impl Client {
             seat: 0,
             reselect: false,
             link_scan: link_scan::LinkScan::default(),
+            statistics: statistics::Statistics::default(),
             ciphers: None,
             management_cipher: None,
             keys: Vec::new(),
@@ -383,6 +386,7 @@ impl Client {
         self.dormant = None;
         self.reselect = false;
         self.link_scan = link_scan::LinkScan::default();
+        self.statistics = statistics::Statistics::default();
         self.ciphers = None;
         self.management_cipher = None;
         self.keys.clear();
@@ -1207,6 +1211,13 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                     self.client.ask_link_scan(now);
                 }
                 SCAN_START_NOTIFICATION => self.client.link_scan_started(now),
+                statistics::OPERATIONAL_NOTIFICATION => {
+                    let version = queue
+                        .firmware()
+                        .command_version(0x10, 0)
+                        .map_or(3, |version| version.notification_version);
+                    self.client.statistics_arrived(raw, version, now);
+                }
                 _ => {}
             }
         }
@@ -1496,6 +1507,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             }
             self.client.draining = None;
         }
+        self.client.stop_statistics();
         // The chain goes down on the IDs it came up with.
         if self.client.seat != 0 {
             self.switch_link(queue)?;

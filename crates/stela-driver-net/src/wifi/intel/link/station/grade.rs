@@ -130,11 +130,13 @@ const BSS_LOAD: u8 = 11;
 const SCALE: u32 = 256;
 
 /// `iwl_mld_get_chan_load`: the BSS Load element's channel utilization, or
-/// the band's default. A station that hears a link it does not use has no
-/// load of its own to take off.
-fn load(band: Band, elements: &[u8]) -> u32 {
+/// the band's default. `by_us` is the percent the station's own frames take
+/// of the element's load; a count past the element's own is ignored.
+fn load(band: Band, elements: &[u8], by_us: u32) -> u32 {
     if let Some([_, _, utilization, _, _]) = crate::wifi::connection::find(elements, BSS_LOAD) {
-        return u32::from(*utilization);
+        let load = u32::from(*utilization);
+        let by_us = by_us * SCALE / 100;
+        return if by_us <= load { load - by_us } else { load };
     }
     let percent = match band {
         Band::Ghz2 => 30,
@@ -144,15 +146,21 @@ fn load(band: Band, elements: &[u8]) -> u32 {
     percent * SCALE / 100
 }
 
+/// Whether `elements` say how loaded the channel is.
+pub(super) fn reports_load(elements: &[u8]) -> bool {
+    crate::wifi::connection::find(elements, BSS_LOAD).is_some_and(|load| load.len() == 5)
+}
+
 /// The grade of a link of `width` with `punctured` subchannels, heard at
-/// `signal` on `band` with `elements`. 80+80 MHz has none, because no Intel
-/// link runs it.
+/// `signal` on `band` with `elements`, `by_us` percent of its air the
+/// station's own. 80+80 MHz has none, because no Intel link runs it.
 pub(super) fn grade(
     band: Band,
     signal: Option<i8>,
     elements: &[u8],
     width: phy::Width,
     punctured: u16,
+    by_us: u32,
 ) -> Option<u32> {
     let table: &[Line] = match width {
         phy::Width::Mhz20 => &GRADES_20,
@@ -173,7 +181,7 @@ pub(super) fn grade(
         .iter()
         .find(|line| signal <= column(line))
         .map_or(top, |line| line.2);
-    let graded = graded * (SCALE - load(band, elements)) / SCALE;
+    let graded = graded * (SCALE - load(band, elements, by_us)) / SCALE;
     // `iwl_mld_apply_puncturing_penalty`.
     let subchannels: u32 = match width {
         phy::Width::Mhz80 => 4,
@@ -195,23 +203,36 @@ mod tests {
     fn a_link_is_graded_by_its_signal_width_load_and_puncturing() {
         use phy::Width::{Mhz20, Mhz80, Mhz80P80};
         // -72 dBm is 155 at 20 MHz in 2.4 GHz, with its default 30% load.
-        assert_eq!(grade(LOW, Some(-72), &[], Mhz20, 0), Some(155 * 180 / 256));
+        assert_eq!(
+            grade(LOW, Some(-72), &[], Mhz20, 0, 0),
+            Some(155 * 180 / 256)
+        );
         // The other bands' column, and their 15% load.
-        assert_eq!(grade(HIGH, Some(-72), &[], Mhz20, 0), Some(172 * 218 / 256));
+        assert_eq!(
+            grade(HIGH, Some(-72), &[], Mhz20, 0, 0),
+            Some(172 * 218 / 256)
+        );
         // Better than the table's last line is the last line.
         assert_eq!(
-            grade(HIGH, Some(-30), &[], Mhz80, 0),
+            grade(HIGH, Some(-30), &[], Mhz80, 0, 0),
             Some(1380 * 218 / 256)
         );
         // No signal is the lowest line.
-        assert_eq!(grade(HIGH, None, &[], Mhz20, 0), Some(9 * 218 / 256));
+        assert_eq!(grade(HIGH, None, &[], Mhz20, 0, 0), Some(9 * 218 / 256));
         // The element replaces the default; a quarter of 80 MHz is punctured.
         let loaded = [11, 5, 0, 0, 128, 0, 0];
-        assert_eq!(grade(HIGH, Some(-30), &loaded, Mhz20, 0), Some(345 / 2));
+        assert_eq!(grade(HIGH, Some(-30), &loaded, Mhz20, 0, 0), Some(345 / 2));
         assert_eq!(
-            grade(HIGH, Some(-30), &loaded, Mhz80, 0b10),
+            grade(HIGH, Some(-30), &loaded, Mhz80, 0b10, 0),
             Some(690 * 3 / 4)
         );
-        assert_eq!(grade(HIGH, Some(-30), &loaded, Mhz80P80, 0), None);
+        assert_eq!(grade(HIGH, Some(-30), &loaded, Mhz80P80, 0, 0), None);
+        // The station's own quarter leaves a quarter for others, unless
+        // firmware counts more of it than the AP does.
+        assert_eq!(
+            grade(HIGH, Some(-30), &loaded, Mhz20, 0, 25),
+            Some(345 * 192 / 256)
+        );
+        assert_eq!(grade(HIGH, Some(-30), &loaded, Mhz20, 0, 90), Some(345 / 2));
     }
 }

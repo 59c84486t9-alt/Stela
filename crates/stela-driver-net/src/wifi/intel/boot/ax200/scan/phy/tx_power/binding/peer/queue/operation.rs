@@ -101,9 +101,10 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200ManagementQueue<'a,
         request: &crate::wifi::scan::Request,
         local: crate::Mac,
         link: u8,
+        traffic: Ax200ScanTraffic,
     ) -> Result<(Id, Vec<u8>), Ax200ScanError> {
         let version = scan_wire::validate(self.firmware())?;
-        let bytes = scan_wire::encode_internal(request, version, local, link)?;
+        let bytes = scan_wire::encode_internal(request, version, local, link, traffic)?;
         Ok((scan_wire::REQUEST, bytes))
     }
 

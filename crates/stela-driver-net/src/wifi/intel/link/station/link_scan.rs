@@ -43,6 +43,9 @@ impl Client {
     /// The port opened on the active link: the join's scan chooses at first.
     pub(super) fn link_authorized(&mut self, now: u64) {
         self.reselect = true;
+        if self.dormant.is_some() {
+            self.watch_statistics();
+        }
         self.link_scan.started = Some(now.saturating_sub(JOIN_SCAN_US));
         self.link_scan.activated = now;
     }
@@ -135,7 +138,12 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         };
         let request = scanner.request().ok_or(Error::Refused("scan"))?;
         let (id, bytes) = queue
-            .internal_scan(request, self.address, client.seat)
+            .internal_scan(
+                request,
+                self.address,
+                client.seat,
+                client.statistics.traffic,
+            )
             .map_err(Error::Scan)?;
         scanner.submitted(ticket).map_err(protocol)?;
         client.link_scan.started = None;

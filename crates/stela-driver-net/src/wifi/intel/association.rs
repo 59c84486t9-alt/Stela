@@ -70,6 +70,11 @@ pub const SECURITY_KEY: Id = Id {
     opcode: 0x18,
     version: 0,
 };
+pub const SYSTEM_STATISTICS: Id = Id {
+    group: 2,
+    opcode: 0x0f,
+    version: 0,
+};
 pub const SMART_FIFO: Id = Id {
     group: 0,
     opcode: 0xd1,
@@ -1004,6 +1009,37 @@ pub fn smart_fifo(negotiated: &Negotiated) -> Vec<u8> {
 
 /// `iwl_mvm_power_build_cmd` for a station whose power management stays off:
 /// the keep-alive a beacon interval and DTIM period need.
+/// `IWL_STATS_CFG_FLG_DISABLE_NTFY_MSK`.
+const STATISTICS_OFF: u32 = 1 << 0;
+/// `IWL_STATS_CFG_FLG_ON_DEMAND_NTFY_MSK`.
+const STATISTICS_ON_DEMAND: u32 = 1 << 1;
+/// `IWL_STATS_NTFY_TYPE_ID_OPER` and `_OPER_PART1`.
+const STATISTICS_OPERATIONAL: u32 = 3;
+/// `PERIODIC_STATS_SECONDS`.
+const STATISTICS_PERIOD_S: u32 = 5;
+
+/// `iwl_mld_send_fw_stats_cmd`.
+fn statistics(flags: u32, seconds: u32, types: u32) -> Vec<u8> {
+    [flags, seconds, types]
+        .iter()
+        .flat_map(|word| word.to_le_bytes())
+        .collect()
+}
+
+/// `iwl_mld_clear_stats_in_fw`: the counters start from here.
+pub fn clear_statistics() -> Vec<u8> {
+    statistics(STATISTICS_ON_DEMAND, 0, STATISTICS_OPERATIONAL)
+}
+
+/// `iwl_mld_request_periodic_fw_stats`.
+pub fn periodic_statistics(enable: bool) -> Vec<u8> {
+    if enable {
+        statistics(0, STATISTICS_PERIOD_S, STATISTICS_OPERATIONAL)
+    } else {
+        statistics(STATISTICS_OFF, 0, 0)
+    }
+}
+
 pub fn power(version: u8, save_power: bool, beacon_interval: u16, dtim_period: u8) -> Vec<u8> {
     let mut bytes = alloc::vec![0; power_bytes(version)];
     half(&mut bytes, 4, u16::from(save_power));

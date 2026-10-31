@@ -179,7 +179,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
 
     /// `iwl_mld_get_link_grade` of `context`'s link as the last scan heard
     /// it: `iwl_mld_set_link_sel_data` ignores what that scan did not see.
-    fn heard_grade(&self, context: &AssociationContext) -> Option<u32> {
+    fn heard_grade(&self, context: &AssociationContext, by_us: u32) -> Option<u32> {
         let since = self.client.link_scan.started?;
         let heard =
             self.client.observed.iter().find(|heard| {
@@ -192,6 +192,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             &bss.elements,
             definition.width,
             definition.punctured,
+            by_us,
         )
     }
 
@@ -201,7 +202,11 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         let (Some(active), Some(dormant)) = (&self.client.context, &self.client.dormant) else {
             return Ok(());
         };
-        match (self.heard_grade(active), self.heard_grade(dormant)) {
+        let by_us = self.client.statistics.load_by_us;
+        match (
+            self.heard_grade(active, by_us),
+            self.heard_grade(dormant, 0),
+        ) {
             (_, None) => Ok(()),
             (Some(active), Some(dormant)) if active >= dormant => Ok(()),
             _ => self.switch_link(queue),
@@ -240,6 +245,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         let now = self.clock.now_us();
         let client = &mut self.client;
         client.link_scan.activated = now;
+        client.statistics.link_moved();
         for (id, bytes) in phy {
             client.command(id, bytes);
         }

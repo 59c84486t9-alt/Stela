@@ -1526,7 +1526,23 @@ fn moved_mld(native: &Native) -> (Station<Model, ClockBios>, Device<'_>, Mac, us
         device.commands.last()
     );
     assert!(wifi.carrier(), "the port stays open across the move");
+    assert!(device.commands.contains(&(2, 0x0f)), "firmware reports");
     (wifi, device, local, authorized)
+}
+
+/// Firmware's report of its link and PHY 1, `air_us` used and the link heard
+/// at `-energy` dBm.
+fn report(stamp: u32, energy: u32, air_us: u32) -> Vec<u8> {
+    let mut body = vec![0; 4 + 4 * 28 + 3 * 88 + 16 * 4];
+    body[..4].copy_from_slice(&stamp.to_le_bytes());
+    body[32..36].copy_from_slice(&energy.to_le_bytes());
+    body[36..40].copy_from_slice(&air_us.to_le_bytes());
+    let statistics = Id {
+        group: 0x10,
+        opcode: 0,
+        version: 0,
+    };
+    command_packet(statistics, 0x8000, &body)
 }
 
 /// Firmware missed nine beacons in a row, and 600 rounds pass.
@@ -1646,6 +1662,38 @@ fn a_station_that_stops_hearing_its_link_listens_to_both_and_takes_the_better() 
     assert_eq!(links[0], (1, 0, 0));
     assert_eq!(links.last(), Some(&(3, 1, 0)), "{links:?}");
     assert!(wifi.carrier());
+}
+
+#[test]
+fn a_fading_link_starts_a_scan_that_keeps_out_of_the_way_of_heavy_traffic() {
+    let native = Native::default();
+    let (mut wifi, mut device, _, _) = moved_mld(&native);
+    device.inject(wifi.radio().rom().unwrap(), &report(1_000_000, 44, 0));
+    let quiet = run(&mut wifi, &mut device, |_, device, _| {
+        device.scans.len() > 1
+    });
+    assert!(!quiet);
+    wifi.radio_mut().end_link_blockout();
+    assert!(
+        !run(&mut wifi, &mut device, |_, device, _| device.scans.len()
+            > 1),
+        "a strong link asks for nothing"
+    );
+    device.inject(wifi.radio().rom().unwrap(), &report(2_000_000, 80, 600_000));
+    assert!(!run(&mut wifi, &mut device, |_, device, _| device
+        .scans
+        .len()
+        > 1));
+    wifi.radio_mut().end_link_blockout();
+    let scanning = run(&mut wifi, &mut device, |_, device, _| {
+        device.scans.len() > 1
+    });
+    assert!(scanning, "{:?}", wifi.radio().error());
+    let scan = &device.scans[1];
+    assert_eq!(scan[8] & 8, 8, "fragmented");
+    assert_eq!(scan[42], 3);
+    assert_eq!(word(scan, 20), 44);
+    assert_eq!(word(scan, 28), 95);
 }
 
 #[test]

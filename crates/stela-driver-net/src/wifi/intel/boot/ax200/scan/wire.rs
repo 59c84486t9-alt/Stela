@@ -87,10 +87,12 @@ const PHY_BAND_24: u8 = 1;
 const PHY_BAND_6: u8 = 2;
 const FORCE_PASSIVE: u16 = 1 << 11;
 const NOTIFY_START: u16 = 1 << 9;
+const FRAGMENTED: u8 = 1 << 3;
 const PASS_ALL: u16 = 1 << 1;
 const USE_ALL_RX_CHAINS: u16 = 1 << 6;
 const ADAPTIVE_DWELL: u16 = 1 << 7;
 const ENABLE_CHANNEL_ORDER: u8 = 1 << 5;
+const CHANNEL_FRAGMENTED: u8 = 1 << 3;
 const PSC_NO_FILTER: u8 = 1 << 6;
 const FLAGS2: usize = GENERAL + 9;
 /// `IWL_UMAC_SCAN_GEN_PARAMS_FLAGS2_DONT_TOGGLE_ANT`.
@@ -102,9 +104,8 @@ const CHANNEL_FORCE_PASSIVE: u32 = 1 << 26;
 const PSD_RESERVED: i8 = -128;
 const PRIORITY_EXT_6: u32 = 6;
 const PRIORITY_EXT_4: u32 = 4;
-/// `scan_timing[IWL_SCAN_TYPE_WILD]`, for a station whose traffic is light.
-const MAX_OUT_OF_SERVICE_TU: u32 = 120;
-const SUSPEND_TU: u32 = 30;
+/// `IWL_SCAN_NUM_OF_FRAGS`.
+const FRAGMENTS: u8 = 3;
 const ACTIVE_DWELL: u8 = 10;
 const PASSIVE_DWELL: u8 = 110;
 const FULL_SCAN_BUDGET_TU: u16 = 300;
@@ -278,12 +279,13 @@ pub(super) fn encode(
 
 /// `iwl_mld_int_mlo_scan_start`: a passive scan beside the association on
 /// firmware link `link`, which leaves that link's channel for what
-/// `scan_timing` allows and says when it starts.
+/// `scan_timing` allows `traffic` and says when it starts.
 pub(super) fn encode_internal(
     request: &protocol::Request,
     version: u8,
     local: crate::Mac,
     link: u8,
+    traffic: Ax200ScanTraffic,
 ) -> Result<Vec<u8>, Ax200ScanError> {
     let abilities = Abilities {
         ds_parameters: false,
@@ -295,8 +297,19 @@ pub(super) fn encode_internal(
     bytes[4..8].copy_from_slice(&PRIORITY_EXT_4.to_le_bytes());
     bytes[GENERAL + 1] |= (NOTIFY_START >> 8) as u8;
     bytes[GENERAL + 3] = link;
-    bytes[GENERAL + 12..GENERAL + 16].copy_from_slice(&MAX_OUT_OF_SERVICE_TU.to_le_bytes());
-    bytes[GENERAL + 20..GENERAL + 24].copy_from_slice(&SUSPEND_TU.to_le_bytes());
+    // `scan_timing`: wild, mild and fragmented.
+    let (out_of_service, suspend) = match traffic {
+        Ax200ScanTraffic::Low => (120u32, 30u32),
+        Ax200ScanTraffic::Medium => (120, 120),
+        Ax200ScanTraffic::High => (44, 95),
+    };
+    if traffic == Ax200ScanTraffic::High {
+        bytes[GENERAL] |= FRAGMENTED;
+        bytes[GENERAL + 34] = FRAGMENTS;
+        bytes[CHANNELS] |= CHANNEL_FRAGMENTED;
+    }
+    bytes[GENERAL + 12..GENERAL + 16].copy_from_slice(&out_of_service.to_le_bytes());
+    bytes[GENERAL + 20..GENERAL + 24].copy_from_slice(&suspend.to_le_bytes());
     Ok(bytes)
 }
 
@@ -494,7 +507,7 @@ mod tests {
             frequency_mhz: 2412,
         };
         let request = protocol::Request::new(vec![channel], Vec::new(), Vec::new()).unwrap();
-        let bytes = encode_internal(&request, 17, LOCAL, 1).unwrap();
+        let bytes = encode_internal(&request, 17, LOCAL, 1, Ax200ScanTraffic::Low).unwrap();
         let flags = u16::from_le_bytes([bytes[GENERAL], bytes[GENERAL + 1]]);
         assert_eq!(
             flags,
@@ -506,6 +519,14 @@ mod tests {
         assert_eq!(bytes[GENERAL + 16..GENERAL + 20], [0; 4]);
         assert_eq!(bytes[GENERAL + 20..GENERAL + 24], 30u32.to_le_bytes());
         assert_eq!(bytes[GENERAL + 24..GENERAL + 28], [0; 4]);
+        let busy = encode_internal(&request, 17, LOCAL, 1, Ax200ScanTraffic::Medium).unwrap();
+        assert_eq!(busy[GENERAL + 20..GENERAL + 24], 120u32.to_le_bytes());
+        let full = encode_internal(&request, 17, LOCAL, 1, Ax200ScanTraffic::High).unwrap();
+        assert_eq!(full[GENERAL] & FRAGMENTED, FRAGMENTED);
+        assert_eq!(full[GENERAL + 34], 3);
+        assert_eq!(full[CHANNELS], ENABLE_CHANNEL_ORDER | CHANNEL_FRAGMENTED);
+        assert_eq!(full[GENERAL + 12..GENERAL + 16], 44u32.to_le_bytes());
+        assert_eq!(full[GENERAL + 20..GENERAL + 24], 95u32.to_le_bytes());
     }
 
     #[test]
