@@ -14,6 +14,7 @@
 //! Every step's firmware command waits for its own acknowledgement; a
 //! failed step keeps every owner the device may still reach.
 use super::{
+    association::StationLink,
     boot::{
         self, Ax200BindingError, Ax200BindingPhase, Ax200BoardPolicy, Ax200BoardPolicyError,
         Ax200BoardPolicyPhase, Ax200Coexistence, Ax200CoexistenceError, Ax200CoexistencePhase,
@@ -163,6 +164,8 @@ enum Stage<Q: BootIo, B: BiosIo> {
 pub struct Selected {
     pub bss: Bss,
     pub rates: u16,
+    /// The setup link of an MLD association.
+    pub affiliation: Option<association::multi_link::Affiliation>,
 }
 
 /// One Intel Wi-Fi function's bring-up.
@@ -185,6 +188,9 @@ pub struct Wifi<Q: BootIo, B: BiosIo> {
     radio: super::identity::Rf,
     /// What limits a radio with EHT, once firmware is up.
     eht: Option<super::identity::EhtLimits>,
+    /// What a test's radio without EHT stands in for.
+    #[cfg(test)]
+    pub(super) assumed_eht: Option<super::identity::EhtLimits>,
     save_power: bool,
     address: Mac,
     error: Option<Error>,
@@ -237,6 +243,8 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             family: boot.family(),
             radio: boot.radio(),
             eht: None,
+            #[cfg(test)]
+            assumed_eht: None,
             stage: Stage::Rom(Box::new(boot)),
             firmware: inputs.firmware,
             observations: inputs.observations,
@@ -488,6 +496,10 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                             self.client.channels = scan.regulated_channels();
                             self.chains = scan.chains();
                             self.eht = scan.eht_limits();
+                            #[cfg(test)]
+                            {
+                                self.eht = self.eht.or(self.assumed_eht);
+                            }
                             Ok(Stage::Scan(Box::new(scan)))
                         }
                         Err(mac) => Err((Error::Refused("scan"), mac as Box<dyn Any>)),
@@ -513,8 +525,15 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                         if let Err(error) = power.replenish_completed_receive() {
                             return Err((Error::Power(error), power));
                         }
+                        let link = self.selected.as_ref().and_then(|selected| {
+                            let affiliation = selected.affiliation?;
+                            Some(StationLink {
+                                address: affiliation.local,
+                                id: affiliation.link_id,
+                            })
+                        });
                         // SAFETY: the same regulatory service and requester remain.
-                        match unsafe { power.begin_mld_link() } {
+                        match unsafe { power.begin_mld_link(link) } {
                             Ok(link) => Ok(Stage::Link(Box::new(link))),
                             Err(power) => Err((Error::Refused("link"), power as Box<dyn Any>)),
                         }
@@ -535,7 +554,10 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                             return Err((Error::Refused("AP station"), link as Box<dyn Any>));
                         };
                         let peer = LegacyPeer {
-                            address: selected.bss.bssid,
+                            address: selected
+                                .affiliation
+                                .map_or(selected.bss.bssid, |link| link.mld.ap),
+                            link: selected.bss.bssid,
                             beacon_interval_tu: selected.bss.beacon_interval,
                             rates: selected.rates,
                         };

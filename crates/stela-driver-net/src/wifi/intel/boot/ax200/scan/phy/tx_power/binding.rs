@@ -5,6 +5,7 @@
 //! Original cold MAC0/PHY0 binding and source mandatory MAC power update.
 //! No associated peer, authentication, transmit queue or data link is created.
 use super::*;
+use crate::wifi::intel::association::{SPEC_LINK_ID, StationLink};
 mod admission;
 mod mld_link;
 mod peer;
@@ -29,6 +30,7 @@ pub enum BindingCommandKind {
     DeactivateLink,
     RemoveLink,
     RestoreInactiveLink,
+    ReplaceLink,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BindingCommand {
@@ -83,6 +85,7 @@ pub struct Ax200Binding<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> {
     responses: Vec<CommandResponse>,
     removing: bool,
     mld: bool,
+    link: Option<StationLink>,
     first_error: Option<Ax200BindingError>,
 }
 impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200TransmitPower<'a, Q, B, O> {
@@ -117,20 +120,27 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200TransmitPower<'a, Q
             responses: Vec::new(),
             removing: false,
             mld: false,
+            link: None,
             first_error: None,
         })
     }
     /// Activate the MLD link0 on this PHY0 and applied power
     /// owner. Legacy BINDING is never substituted for LINK_CONFIG.
+    /// `link` is the station's link of an MLD association, which takes
+    /// link0's place for as long as this owner lives.
     /// # Safety
     /// begin_binding's same-device provider, complete finite response
     /// envelope and restrictive-revocation lifetime contracts apply unchanged.
     /// No external PHY/link/station/queue mutation may race this unique owner.
-    pub unsafe fn begin_mld_link(self) -> Result<Ax200Binding<'a, Q, B, O>, Box<Self>> {
+    pub unsafe fn begin_mld_link(
+        self,
+        link: Option<StationLink>,
+    ) -> Result<Ax200Binding<'a, Q, B, O>, Box<Self>> {
         // SAFETY: the same original provider/publication contract is held;
         // the private protocol selector is checked again before any command.
         unsafe { self.begin_binding() }.map(|mut binding| {
             binding.mld = true;
+            binding.link = link;
             binding
         })
     }

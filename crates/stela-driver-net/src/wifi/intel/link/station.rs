@@ -17,7 +17,9 @@ use crate::wifi::{
     connection::keeper::{self, Advertisement, Peer, Radio, Stage as Standing},
     frame::{MAX_AMPDU_BUF_EHT, Mpdu},
     intel::{
-        association::{self as commands, LinkHe, LinkState, MacState, PeerHe, PeerState},
+        association::{
+            self as commands, LinkHe, LinkState, MacState, PeerHe, PeerState, StationLink,
+        },
         command,
         firmware::Family,
         identity::Rf,
@@ -51,7 +53,7 @@ use crate::wifi::{
         wire::six_ghz::Selection,
     },
 };
-use alloc::collections::VecDeque;
+use alloc::{borrow::Cow, collections::VecDeque};
 
 mod he;
 mod reception;
@@ -376,7 +378,7 @@ impl Client {
                 ..
             } => {
                 if !links.is_empty() {
-                    self.unsupported("MLO links on Intel Wi-Fi");
+                    self.unsupported("a second MLO link: the setup link alone stays active");
                 }
                 self.admitted = Some((ticket, context));
             }
@@ -446,7 +448,12 @@ fn management(local: Mac, ap: Mac, subtype: u16, protected: bool, body: &[u8]) -
 
 impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
     /// Raise the chain for `bss`.
-    fn raise(&mut self, bss: &Bss, plan: Plan) -> Result<(), Error> {
+    fn raise(
+        &mut self,
+        bss: &Bss,
+        affiliation: Option<Affiliation>,
+        plan: Plan,
+    ) -> Result<(), Error> {
         let stage = core::mem::replace(&mut self.stage, Stage::Moving);
         let Stage::Scan(scan) = stage else {
             self.stage = stage;
@@ -455,6 +462,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         self.selected = Some(Selected {
             bss: bss.clone(),
             rates: legacy_rates(&bss.elements, bss.channel.band),
+            affiliation,
         });
         match (*scan).begin_phy_context(bss.channel) {
             Ok(phy) => {
@@ -474,6 +482,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         let now = self.clock.now_us();
         if let Some(plan) = self.client.plan.take() {
             self.limit_six_ghz_power(queue);
+            self.translate_addresses(queue);
             self.arrive(plan, now)?;
         }
         self.take_notifications(queue, now)?;
@@ -560,6 +569,29 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         self.client.command(commands::POWER_CONSTRAINTS, bytes);
     }
 
+    /// `iwl_mld_set_wifi_gen`'s MLD case: firmware translates an MLD's
+    /// addresses only under EHT, which an AP's own capabilities turn on only
+    /// after its association response.
+    fn translate_addresses(&mut self, queue: &mut Queue<Q, B>) {
+        if self
+            .selected
+            .as_ref()
+            .is_none_or(|selected| selected.affiliation.is_none())
+        {
+            return;
+        }
+        let firmware = queue.firmware();
+        let mac = MacState {
+            address: self.address,
+            he: true,
+            eht: true,
+            aid: None,
+            high_priority: firmware.supports_capability(COEX_HIGH_PRIORITY),
+        };
+        let bytes = commands::mac_config(version_of(firmware, commands::MAC_CONFIG), mac);
+        self.client.command(commands::MAC_CONFIG, bytes);
+    }
+
     /// The chain is up: start what it was raised for, under session protection.
     fn arrive(&mut self, plan: Plan, now: u64) -> Result<(), Error> {
         let client = &mut self.client;
@@ -590,7 +622,16 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         context: &AssociationContext,
         ticket: Ticket,
     ) -> Result<(), Error> {
-        let local = self.address;
+        let station_link = context.affiliation().map_or(
+            StationLink {
+                address: self.address,
+                id: 0,
+            },
+            |link| StationLink {
+                address: link.local,
+                id: link.link_id,
+            },
+        );
         let negotiated = context.negotiated();
         let bss = context.beacon();
         let band = bss.channel.band;
@@ -637,7 +678,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             0
         };
         let mac = MacState {
-            address: local,
+            address: self.address,
             he,
             eht,
             aid: None,
@@ -651,7 +692,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         let link = commands::link_config(
             link_version,
             LinkState {
-                address: local,
+                link: station_link,
                 band,
                 basic_rates: negotiated.legacy.basic,
                 short_preamble: bss.capabilities & (1 << 5) != 0,
@@ -850,8 +891,22 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
     ) -> Result<(), Error> {
         let key_index = normalized.key_index();
         let mut frame = normalized.into_frame();
-        let header = frame.header();
         let client = &mut self.client;
+        // The station's data paths take a frame's MLD view themselves.
+        if frame.header().control & 12 == 0
+            && let Some(view) =
+                client
+                    .station
+                    .mld_view(&frame)
+                    .ok()
+                    .and_then(|(view, _)| match view {
+                        Cow::Owned(view) => Some(view),
+                        Cow::Borrowed(_) => None,
+                    })
+        {
+            frame = view;
+        }
+        let header = frame.header();
         let mut policy = Admitted(&client.channels);
         if header.control & 12 == 0 {
             if header.protected() {
@@ -1476,7 +1531,8 @@ fn version_of(firmware: &crate::wifi::intel::firmware::Firmware<'_>, id: command
 fn peer_state(context: &AssociationContext, explicit_mfp: bool, authorized: bool) -> PeerState {
     let negotiated = context.negotiated();
     PeerState {
-        address: context.bssid(),
+        address: context.peer(),
+        link: context.bssid(),
         aid: context.response().aid,
         mfp: explicit_mfp && (context.pmf().is_some() || !authorized),
         mimo: negotiated.rx_nss > 1,
@@ -1821,7 +1877,7 @@ impl<Q: BootIo, B: BiosIo> Radio for Wifi<Q, B> {
             capabilities,
             elements,
             he_source_maps: he::maps(self.chains.0 & self.chains.1 == 3),
-            multi_link: Some(false),
+            multi_link: Some(self.eht.is_some()),
         })
     }
 
@@ -1893,7 +1949,8 @@ impl<Q: BootIo, B: BiosIo> Radio for Wifi<Q, B> {
     fn join(&mut self, handle: usize, join: Join, _: ()) -> Result<(), Error> {
         let observed = self.observed(handle)?;
         let bss = observed.bss().clone();
-        self.raise(&bss, Plan::Join { join, observed })
+        let affiliation = join.request.multi_link().map(|setup| setup.association);
+        self.raise(&bss, affiliation, Plan::Join { join, observed })
     }
 
     fn begin_external_authentication(
@@ -1903,9 +1960,6 @@ impl<Q: BootIo, B: BiosIo> Radio for Wifi<Q, B> {
         multi_link: Option<Affiliation>,
         budget_us: u64,
     ) -> Result<Arc<external::Session>, Error> {
-        if multi_link.is_some() {
-            return Err(Error::Unsupported("MLO on Intel Wi-Fi"));
-        }
         let observed = self.observed(handle)?;
         let bss = observed.bss().clone();
         let now = self.clock.now_us();
@@ -1918,14 +1972,14 @@ impl<Q: BootIo, B: BiosIo> Radio for Wifi<Q, B> {
                     bssid: bss.bssid,
                     channel: bss.channel,
                     ssid: bss.ssid.clone().unwrap_or_default(),
-                    multi_link: None,
+                    multi_link,
                 },
                 now,
                 budget_us,
                 &mut policy,
             )
             .map_err(Error::Station)?;
-        self.raise(&bss, Plan::Exchange)?;
+        self.raise(&bss, multi_link, Plan::Exchange)?;
         Ok(session)
     }
 
@@ -1956,7 +2010,7 @@ impl<Q: BootIo, B: BiosIo> Radio for Wifi<Q, B> {
             .station
             .commit_six_ghz_authentication(session.clone(), now)
             .map_err(Error::Station)?;
-        self.raise(&bss, Plan::Exchange)?;
+        self.raise(&bss, None, Plan::Exchange)?;
         Ok(session)
     }
 
@@ -2028,14 +2082,10 @@ impl<Q: BootIo, B: BiosIo> Radio for Wifi<Q, B> {
         self.install(pairwise, index, material, receive)
     }
 
-    fn install_link_key(
-        &mut self,
-        _: u8,
-        _: u8,
-        _: &[u8],
-        _: ReplaySeed,
-    ) -> Result<KeyIdentity, Error> {
-        Err(Error::Unsupported("MLO on Intel Wi-Fi"))
+    fn install_link_key(&mut self, _: u8, _: u8, _: &[u8], _: ReplaySeed) -> Result<(), Error> {
+        self.client
+            .unsupported("the group key of an MLO link that stays inactive");
+        Ok(())
     }
 
     unsafe fn install_management_key(
@@ -2138,13 +2188,13 @@ impl<Q: BootIo, B: BiosIo> Radio for Wifi<Q, B> {
             );
             return Ok(());
         }
-        if let (Some(ap), true) = (
-            client.station.pairwise_peer(),
+        if let (Ok((local, ap)), true) = (
+            client.station.addresses(),
             matches!(self.stage, Stage::Ready(_)),
         ) {
             let protected = client.station.protected_port_authorized();
             client.farewell = Some(management(
-                self.address,
+                local,
                 ap,
                 0xc0,
                 protected,

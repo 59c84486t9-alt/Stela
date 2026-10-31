@@ -193,7 +193,7 @@ pub trait Radio: Link {
         index: u8,
         material: &[u8],
         receive: ReplaySeed,
-    ) -> Result<KeyIdentity, Self::Error>;
+    ) -> Result<(), Self::Error>;
     /// # Safety
     /// The association's authenticated handshake gave the key, and the radio
     /// is polled with its interrupts masked, so no earlier key user remains.

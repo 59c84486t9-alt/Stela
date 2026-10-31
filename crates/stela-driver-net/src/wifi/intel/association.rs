@@ -245,7 +245,7 @@ fn protection_flags(protection: Protection, width: Width) -> u32 {
 /// What `LINK_CONFIG_CMD` says of the link once its BSS is known.
 #[derive(Clone, Copy, Debug)]
 pub struct LinkState<'a> {
-    pub address: Mac,
+    pub link: StationLink,
     pub band: Band,
     pub basic_rates: u16,
     pub short_preamble: bool,
@@ -302,12 +302,24 @@ pub fn power_constraints(ap_type: PowerType, envelope: &PowerEnvelope) -> Vec<u8
     bytes
 }
 
+/// The station's side of its link: the address, and the link's ID at an AP
+/// MLD, which is zero without one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StationLink {
+    pub address: Mac,
+    pub id: u8,
+}
+
+/// `iwl_link_config_cmd::spec_link_id`.
+pub const SPEC_LINK_ID: usize = 166;
+
 /// `iwl_mvm_link_changed` for every part but activation.
 pub fn link_config(version: u8, state: LinkState<'_>) -> Vec<u8> {
     let mut bytes = alloc::vec![0; 208];
     word(&mut bytes, 0, ACTION_MODIFY);
-    bytes[16..22].copy_from_slice(&state.address.0);
+    bytes[16..22].copy_from_slice(&state.link.address.0);
     word(&mut bytes, 24, MODIFY_ALL_BUT_ACTIVE);
+    bytes[SPEC_LINK_ID] = state.link.id;
     word(&mut bytes, 28, 1);
     let (cck, ofdm) = ack_rates(state.band, hardware_rates(state.band, state.basic_rates));
     word(&mut bytes, 36, cck);
@@ -374,7 +386,10 @@ fn link_he(bytes: &mut [u8], version: u8, he: LinkHe) {
 /// What `STA_CONFIG_CMD` says of the AP station.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PeerState {
+    /// The AP MLD's address, or the BSS's.
     pub address: Mac,
+    /// The AP's address on the link.
+    pub link: Mac,
     pub aid: u16,
     /// Robust frames need the firmware's protection: the association's PMF
     /// and, as `iwl_mvm_mld_cfg_sta` sets it, every station before its port
@@ -553,7 +568,7 @@ pub fn station_config(version: u8, state: PeerState) -> Vec<u8> {
         word(&mut bytes, 4, 1);
     }
     bytes[8..14].copy_from_slice(&state.address.0);
-    bytes[16..22].copy_from_slice(&state.address.0);
+    bytes[16..22].copy_from_slice(&state.link.0);
     word(&mut bytes, 28, u32::from(state.aid));
     word(&mut bytes, 36, u32::from(state.mfp));
     word(&mut bytes, 40, u32::from(state.mimo));
@@ -958,6 +973,7 @@ mod tests {
     fn a_peer_is_named_by_its_links_mask_from_version_3() {
         let state = PeerState {
             address: Mac([2, 0, 0, 0, 0, 2]),
+            link: Mac([2, 0, 0, 0, 0, 2]),
             aid: 1,
             mfp: false,
             mimo: false,
@@ -1051,7 +1067,10 @@ mod tests {
         let bytes = link_config(
             5,
             LinkState {
-                address: Mac([2; 6]),
+                link: StationLink {
+                    address: Mac([2; 6]),
+                    id: 0,
+                },
                 band: Band::Ghz5,
                 basic_rates: 1,
                 short_preamble: false,
@@ -1244,7 +1263,10 @@ mod tests {
         let bytes = link_config(
             6,
             LinkState {
-                address: Mac([2; 6]),
+                link: StationLink {
+                    address: Mac([2; 6]),
+                    id: 0,
+                },
                 band: Band::Ghz5,
                 basic_rates: 1,
                 short_preamble: false,

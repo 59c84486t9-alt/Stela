@@ -305,9 +305,10 @@ impl<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> Ra
         index: u8,
         material: &[u8],
         receive: ReplaySeed,
-    ) -> Result<KeyIdentity, LinkControlError> {
+    ) -> Result<(), LinkControlError> {
         self.link
             .install_link_key(link_id, index, material, receive)
+            .map(|_| ())
     }
 
     unsafe fn install_management_key(

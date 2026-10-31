@@ -52,7 +52,7 @@ fn exercise(bytes: &[u8]) {
     authorize(&policy);
     // SAFETY: this same-device model keeps every source basic response rate
     // and programmed ceiling through native deactivation/reset or stop.
-    let mut link = unsafe { power.begin_mld_link() }.unwrap_or_else(|_| panic!("MLD link"));
+    let mut link = unsafe { power.begin_mld_link(None) }.unwrap_or_else(|_| panic!("MLD link"));
     let at_sync = policy.clone();
     native.domain.records.lock().unwrap().device_sync_hook = Some(Arc::new(move || {
         assert_eq!(at_sync.held.load(Ordering::SeqCst), 1);

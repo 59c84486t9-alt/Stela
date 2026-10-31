@@ -98,6 +98,7 @@ pub(super) fn prepare<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy>(
         .notification_version;
     let station = station(
         owner.peer.address,
+        owner.peer.link,
         version,
         firmware.supports_capability(114),
     );
@@ -159,14 +160,14 @@ pub(super) fn removal() -> [PeerCommand; 2] {
     ]
 }
 
-fn station(address: Mac, version: u8, mfp: bool) -> Vec<u8> {
+fn station(address: Mac, link: Mac, version: u8, mfp: bool) -> Vec<u8> {
     let mut bytes = alloc::vec![0; crate::wifi::intel::association::station_bytes(version)];
     // Source station0 on link0, STATION_TYPE_PEER=0, unassociated AID0.
     if version >= 3 {
         bytes[4] = 1;
     }
     bytes[8..14].copy_from_slice(&address.0);
-    bytes[16..22].copy_from_slice(&address.0);
+    bytes[16..22].copy_from_slice(&link.0);
     bytes[36..40].copy_from_slice(&u32::from(mfp).to_le_bytes());
     // The exact legacy-only peer has NSS1/SMPS_OFF, no QoS/HT/VHT/HE/EHT or BA.
     // get_sta_ampdu_dens therefore returns density0/size0; all autonomous modern
@@ -205,7 +206,8 @@ mod tests {
                 "S" => {
                     assert_eq!(words.len(), 7);
                     assert_eq!(number(4), if number(3) == 0 { 0 } else { -5 });
-                    station(Mac([2, 3, 4, 5, 6, 7]), number(1) as u8, number(2) != 0)
+                    let peer = Mac([2, 3, 4, 5, 6, 7]);
+                    station(peer, peer, number(1) as u8, number(2) != 0)
                 }
                 "T" => {
                     assert_eq!(words.len(), 7);

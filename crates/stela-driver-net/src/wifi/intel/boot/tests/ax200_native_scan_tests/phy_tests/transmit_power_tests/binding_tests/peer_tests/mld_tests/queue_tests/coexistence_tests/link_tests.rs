@@ -7,12 +7,14 @@ use super::*;
 use crate::wifi::connection::keeper::{Radio, Stage as Standing};
 use crate::wifi::connection::security::Security;
 use crate::wifi::intel::{
+    identity::EhtLimits,
     link::{Inputs, Phase, Station},
     nvm::Request as NvmRequest,
     policy::{WORLD, tests::regdb},
 };
 use crate::wifi::network::{Network, Secret};
-use crate::wifi::station::Phase as Peering;
+use crate::wifi::sae::{Derivation, Exchange, Frame, H2E_RSNXE, Template};
+use crate::wifi::station::{Phase as Peering, wire::multi_link::Basic};
 use crate::wifi::supplicant::tests::Authenticator;
 use crate::{Link, Mac};
 use alloc::{boxed::Box, sync::Arc};
@@ -76,6 +78,15 @@ struct Device<'n> {
     /// Whether frames are acknowledged in Block Ack notifications alone, as
     /// the firmware reports those it aggregated.
     aggregating: bool,
+    /// The address the AP answers.
+    receiver: [u8; 6],
+    /// The AP's RSN element.
+    rsn: &'static [u8],
+    /// Each MAC command.
+    macs: Vec<Vec<u8>>,
+    /// The AP MLD's side of SAE, and the confirm it holds back.
+    sae: Option<Exchange>,
+    confirm: Option<Frame>,
 }
 
 impl Device<'_> {
@@ -171,6 +182,9 @@ impl Device<'_> {
             };
             self.inject(rom, &command_packet(complete, 0x8000, &[0x76]));
         }
+        if (id.group, id.opcode) == (3, 8) {
+            self.macs.push(request.to_vec());
+        }
         if id.group == 3 && matches!(id.opcode, 9 | 0x0a) {
             self.configuration.push((id.opcode, request.to_vec()));
         }
@@ -178,7 +192,7 @@ impl Device<'_> {
             self.scans.push(request.to_vec());
             if self.second.is_none() || self.scans.len() == 1 {
                 for ssid in self.beacons.clone() {
-                    self.inject(rom, &beacon(ssid, self.quality, self.elements));
+                    self.inject(rom, &beacon(ssid, self.rsn, self.quality, self.elements));
                 }
             }
             let mut body = [0; 16];
@@ -202,6 +216,35 @@ impl Device<'_> {
             body[8] = 1;
             self.inject(rom, &command_packet(notification, 0x8000, &body));
         }
+    }
+
+    /// Answer the station MLD's SAE `frame`: its commit, or its confirm.
+    fn exchange(&mut self, rom: &RomBoot<'_, Model>, frame: &[u8]) {
+        let field = |at: usize| u16::from_le_bytes([frame[at], frame[at + 1]]);
+        let (transaction, status) = (field(26), field(28));
+        let own = Basic {
+            address: Mac(LOCAL),
+            ..Basic::default()
+        };
+        let data = &frame[30..frame.len() - own.encode().len()];
+        let sae = self.sae.as_mut().unwrap();
+        let reply = if transaction == 1 {
+            self.confirm = sae.receive(1, status, data).unwrap();
+            sae.commit()
+        } else {
+            assert_eq!(sae.receive(2, status, data).unwrap(), None);
+            self.confirm.take().unwrap()
+        };
+        let mut body = [3, 0].to_vec();
+        body.extend(reply.transaction.to_le_bytes());
+        body.extend(reply.status.to_le_bytes());
+        body.extend(reply.data);
+        let ap = Basic {
+            address: Mac(AP_MLD),
+            ..Basic::default()
+        };
+        body.extend(ap.encode());
+        self.inject(rom, &answer(self.receiver, 0xb0, &body));
     }
 
     /// Carry what the queues hold to the AP, answering each frame, as much
@@ -266,15 +309,16 @@ impl Device<'_> {
                     frame.drain(26..28);
                 }
                 match u16::from_le_bytes([frame[0], frame[1]]) & 0xfc {
-                    0xb0 => self.inject(rom, &answer(0xb0, &[0, 0, 2, 0, 0, 0])),
+                    0xb0 if self.sae.is_some() => self.exchange(rom, &frame),
+                    0xb0 => self.inject(rom, &answer(self.receiver, 0xb0, &[0, 0, 2, 0, 0, 0])),
                     0x00 => {
-                        let mut body = vec![1, 0, 0, 0, 1, 0xc0, 1, 2, 0x82, 0x0c];
+                        let mut body = vec![0x11, 0, 0, 0, 1, 0xc0, 1, 2, 0x82, 0x0c];
                         if self.quality {
                             body.extend(HT);
                             body.extend(WMM);
                         }
                         body.extend(self.elements);
-                        self.inject(rom, &answer(0x10, &body));
+                        self.inject(rom, &answer(self.receiver, 0x10, &body));
                     }
                     _ => {}
                 }
@@ -285,10 +329,10 @@ impl Device<'_> {
 }
 
 /// A frame from the AP to the station.
-fn answer(subtype: u16, body: &[u8]) -> Vec<u8> {
+fn answer(receiver: [u8; 6], subtype: u16, body: &[u8]) -> Vec<u8> {
     let mut frame = vec![0; 24];
     frame[..2].copy_from_slice(&subtype.to_le_bytes());
-    frame[4..10].copy_from_slice(&LOCAL);
+    frame[4..10].copy_from_slice(&receiver);
     frame[10..16].copy_from_slice(&AP);
     frame[16..22].copy_from_slice(&AP);
     frame.extend(body);
@@ -300,7 +344,7 @@ const LOCAL: [u8; 6] = [0x02, 0x12, 0x34, 0x56, 0x78, 0x9a];
 
 /// A channel 1 ESS beacon from 02:03:04:05:06:07 carrying `ssid` and the 1
 /// and 6 Mb/s rates.
-fn beacon(ssid: &[u8], quality: bool, elements: &[u8]) -> Vec<u8> {
+fn beacon(ssid: &[u8], rsn: &[u8], quality: bool, elements: &[u8]) -> Vec<u8> {
     let mut frame = vec![0; 36];
     frame[..2].copy_from_slice(&0x80u16.to_le_bytes());
     frame[4..10].fill(0xff);
@@ -311,7 +355,7 @@ fn beacon(ssid: &[u8], quality: bool, elements: &[u8]) -> Vec<u8> {
     frame.extend([0, ssid.len() as u8]);
     frame.extend(ssid);
     frame.extend([1, 2, 0x82, 0x0c, 3, 1, 1, 5, 4, 0, 2, 0, 0]);
-    frame.extend(RSN);
+    frame.extend(rsn);
     if quality {
         frame.extend(HT);
         frame.extend(WMM);
@@ -400,6 +444,27 @@ fn raise_split<'n>(
     elements: &'static [u8],
     second: Option<u32>,
 ) -> (Station<Model, ClockBios>, Phase, Device<'n>) {
+    let secret = Secret::Psk(Zeroizing::new([0; 32]));
+    raise_as(
+        native, country, beacons, flags, channel, quality, elements, second, &RSN, None, secret,
+    )
+}
+
+/// [`raise_split`], with [`Device::rsn`] and a radio standing in for `eht`.
+#[expect(clippy::too_many_arguments, reason = "each is a fixture's own knob")]
+fn raise_as<'n>(
+    native: &'n Native,
+    country: Option<[u8; 2]>,
+    beacons: Vec<&'static [u8]>,
+    flags: u8,
+    channel: u32,
+    quality: bool,
+    elements: &'static [u8],
+    second: Option<u32>,
+    rsn: &'static [u8],
+    eht: Option<EhtLimits>,
+    secret: Secret,
+) -> (Station<Model, ClockBios>, Phase, Device<'n>) {
     let catalog: &'static resources::Catalog = Box::leak(Box::new(catalog_for(
         &profile(),
         Family::Ax200.firmware_name(),
@@ -440,6 +505,11 @@ fn raise_split<'n>(
         scans: Vec::new(),
         second,
         aggregating: false,
+        receiver: LOCAL,
+        rsn,
+        macs: Vec::new(),
+        sae: None,
+        confirm: None,
     };
     device.inject(&boot, &alive);
     let inputs = Inputs {
@@ -456,13 +526,14 @@ fn raise_split<'n>(
         ]),
         network: Network {
             ssid: b"test".to_vec(),
-            secret: Secret::Psk(Zeroizing::new([0; 32])),
+            secret,
             country,
         },
         entropy: Arc::new(FixedEntropy),
     };
     // SAFETY: the model owns its pages and nothing else reaches the function.
     let mut wifi = unsafe { crate::wifi::intel::link::Wifi::new(boot, inputs) };
+    wifi.radio_mut().assumed_eht = eht;
     let mut phase = Phase::Booting;
     for _ in 0..600 {
         wifi.carrier();
@@ -630,7 +701,7 @@ fn agreed<'n>(native: &'n Native) -> (Station<Model, ClockBios>, Device<'n>) {
     body.extend(parameters.to_le_bytes());
     body.extend(0u16.to_le_bytes());
     body.extend((5u16 << 4).to_le_bytes());
-    device.inject(wifi.radio().rom().unwrap(), &answer(0xd0, &body));
+    device.inject(wifi.radio().rom().unwrap(), &answer(LOCAL, 0xd0, &body));
     let accepted = run(&mut wifi, &mut device, |_, device, _| {
         device
             .air
@@ -726,7 +797,7 @@ fn a_station_associates_answers_the_handshake_and_leaves_with_its_ap() {
     let multicast = wifi.receive().unwrap().expect("the group frame");
     assert_eq!(multicast[..6], group);
 
-    let deauthentication = answer(0xc0, &[3, 0]);
+    let deauthentication = answer(LOCAL, 0xc0, &[3, 0]);
     device.inject(wifi.radio().rom().unwrap(), &deauthentication);
     assert!(
         run(&mut wifi, &mut device, |wifi, _, _| {
@@ -902,7 +973,7 @@ fn a_peer_ending_a_session_releases_what_it_held() {
     // DELBA from the initiator of TID 0.
     device.inject(
         wifi.radio().rom().unwrap(),
-        &answer(0xd0, &[3, 2, 0, 0x08, 37, 0]),
+        &answer(LOCAL, 0xd0, &[3, 2, 0, 0x08, 37, 0]),
     );
     settle(&mut wifi, &mut device);
     assert_eq!(delivered(&mut wifi), [0x66, 0x77]);
@@ -918,7 +989,7 @@ fn a_departure_takes_its_sessions_down_without_telling_the_peer() {
     let native = Native::default();
     let (mut wifi, mut device) = agreed(&native);
     let sent = device.air.len();
-    device.inject(wifi.radio().rom().unwrap(), &answer(0xc0, &[3, 0]));
+    device.inject(wifi.radio().rom().unwrap(), &answer(LOCAL, 0xc0, &[3, 0]));
     let left = run(&mut wifi, &mut device, |wifi, _, _| {
         wifi.radio().stage() == Standing::Idle
     });
@@ -1153,4 +1224,172 @@ fn an_he_ap_reaches_the_link_and_the_station_commands() {
     assert_eq!(peer[52], 1, "random access");
     assert_eq!(peer[72..92], [7; 20], "zero nominal padding");
     assert_eq!(peer[92], 1, "HE-HTC");
+}
+
+/// The AP MLD the model's AP is link 3 of.
+const AP_MLD: [u8; 6] = [2, 10, 11, 12, 13, 14];
+/// The address [`FixedEntropy`] draws for the station's link.
+const LINK: [u8; 6] = [0x5a; 6];
+/// [`RSN`] under SAE with management frame protection required.
+const RSN_SAE: [u8; 22] = [
+    48, 20, 1, 0, 0, 0x0f, 0xac, 4, 1, 0, 0, 0x0f, 0xac, 4, 1, 0, 0, 0x0f, 0xac, 8, 0xc0, 0,
+];
+/// An AP's EHT capabilities and operation, one stream at every MCS.
+#[rustfmt::skip]
+const EHT_AP: [u8; 2 + 15 + 2 + 6] = [
+    255, 15, 108,
+    0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0x11, 0x11, 0x11,
+    255, 6, 106, 0, 0x11, 0, 0, 0,
+];
+
+/// [`HE_AP`] and [`EHT_AP`] as link 3 of [`AP_MLD`].
+fn mld_ap() -> &'static [u8] {
+    let mut elements = HE_AP.to_vec();
+    elements.extend(EHT_AP);
+    elements.extend(H2E_RSNXE);
+    elements.extend(
+        Basic {
+            address: Mac(AP_MLD),
+            link_id: Some(3),
+            mld_capabilities: Some(0),
+            ..Basic::default()
+        }
+        .encode(),
+    );
+    Box::leak(elements.into_boxed_slice())
+}
+
+#[test]
+fn an_ap_mld_takes_the_station_on_a_link_of_its_own_and_gives_it_back() {
+    let native = Native::default();
+    let eht = EhtLimits {
+        stops_at_160: false,
+        reduced: false,
+        urm: false,
+        slow_bus: false,
+    };
+    let (mut wifi, phase, mut device) = raise_as(
+        &native,
+        Some(*b"US"),
+        vec![b"test"],
+        0,
+        OPEN,
+        true,
+        mld_ap(),
+        None,
+        &RSN_SAE,
+        Some(eht),
+        Secret::parse(b"password").unwrap(),
+    );
+    assert_eq!(phase, Phase::AuthenticationRequired);
+    device.receiver = LINK;
+    let template = Template::derive(b"test", b"password", None);
+    let mut random = 7;
+    device.sae = Some(
+        Exchange::new(
+            Derivation::HashToElement,
+            b"password",
+            Some(&template),
+            None,
+            Mac(AP_MLD),
+            Mac(LOCAL),
+            &mut || {
+                random += 1;
+                [random; 32]
+            },
+        )
+        .unwrap(),
+    );
+    let associated = run(&mut wifi, &mut device, |wifi, _, _| {
+        wifi.radio().station().phase() == Peering::Associated
+    });
+    assert!(
+        associated,
+        "{:?} {:?}",
+        wifi.radio().station().phase(),
+        wifi.radio().error()
+    );
+    // The cold link leaves and the MLD's takes its place.
+    let added: Vec<&Vec<u8>> = device
+        .configuration
+        .iter()
+        .filter(|(opcode, bytes)| *opcode == 9 && bytes[0] == 1)
+        .map(|(_, bytes)| bytes)
+        .collect();
+    let [cold, link] = &added[..] else {
+        panic!("{} links added", added.len());
+    };
+    assert_eq!(cold[16..22], LOCAL);
+    assert_eq!(link[16..22], LINK);
+    assert_eq!(link[166], 3);
+    // SAE's two frames and the association leave from the link, for the AP's.
+    for frame in &device.air[..3] {
+        assert_eq!(frame[4..10], AP);
+        assert_eq!(frame[10..16], LINK);
+    }
+    let request = &device.air[2];
+    let basic = Basic::find(&request[28..]).unwrap().unwrap();
+    assert_eq!(basic.address, Mac(LOCAL));
+    assert!(
+        device
+            .macs
+            .iter()
+            .any(|mac| mac[24] == 1 && mac[26] | mac[28] == 1),
+        "address translation before the AP's capabilities are known"
+    );
+    assert!(run(&mut wifi, &mut device, |_, device, _| {
+        let last = device
+            .configuration
+            .iter()
+            .rfind(|(opcode, _)| *opcode == 9);
+        last.is_some_and(|(_, link)| link[24..28] != 3u32.to_le_bytes())
+    }));
+    let (_, link) = device
+        .configuration
+        .iter()
+        .rfind(|(opcode, _)| *opcode == 9)
+        .unwrap();
+    assert_eq!(link[16..22], LINK);
+    assert_eq!(link[166], 3);
+    let (_, peer) = device
+        .configuration
+        .iter()
+        .rfind(|(opcode, _)| *opcode == 0x0a)
+        .unwrap();
+    assert_eq!(peer[8..14], AP_MLD);
+    assert_eq!(peer[16..22], AP);
+    // The handshake's frames name the MLDs, which firmware translates.
+    let security = Security::select(&RSN_SAE, true).unwrap();
+    let mut ap = Authenticator::between(
+        security.suites(),
+        device.sae.as_ref().unwrap().pmk().unwrap(),
+        Mac(AP_MLD),
+        Mac(LOCAL),
+        security.element(),
+    );
+    let local = data(LINK, false, [0x88, 0x8e], &ap.message_1(), None);
+    device.inject(wifi.radio().rom().unwrap(), &local);
+    let answered = run(&mut wifi, &mut device, |_, device, _| device.air.len() > 3);
+    assert!(answered, "{:?}", wifi.radio().error());
+    assert_eq!(device.air[3][4..10], AP_MLD);
+    assert_eq!(device.air[3][10..16], LOCAL);
+    let added = device.configuration.len();
+    wifi.radio_mut().deauthenticate(3).unwrap();
+    let left = run(&mut wifi, &mut device, |wifi, _, _| {
+        wifi.radio().stage() == Standing::Idle
+    });
+    assert!(left, "{:?}", wifi.radio().error());
+    let farewell = device.air.last().unwrap();
+    assert_eq!(farewell[0], 0xc0);
+    assert_eq!(farewell[4..10], AP_MLD);
+    assert_eq!(farewell[10..16], LOCAL);
+    // The cold link comes back with the station's own address.
+    let (_, link) = device.configuration[added..]
+        .iter()
+        .rfind(|(opcode, bytes)| *opcode == 9 && bytes[0] == 1)
+        .unwrap();
+    assert_eq!(link[16..22], LOCAL);
+    assert_eq!(link[166], 0);
 }
