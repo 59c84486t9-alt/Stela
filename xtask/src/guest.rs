@@ -34,6 +34,7 @@ pub fn run() -> Result<()> {
     wire::generate(&root.join("crates/stela-driver-gpu/src/metal"), &include)?;
     let component = root.join("guest/stela-gpu");
     let kext = build_kext(&component, &output, &xnu, &include)?;
+    embed_kext(&kext, &output.join("StelaGPU.kext.rs"))?;
     println!("StelaGPU kext: {}", kext.display());
     let bundle = build_bundle(&component, &output, &include)?;
     println!("StelaGPU bundle: {}", bundle.display());
@@ -158,6 +159,30 @@ fn build_kext(component: &Path, output: &Path, xnu: &Path, include: &Path) -> Re
         exec(command.arg("-c").arg(&path).arg("-o").arg(&object))?;
     }
     Ok(bundle)
+}
+
+/// Writes the Rust `stela.efi` includes for `kext`'s `INFO` and `OBJECTS`, as
+/// it links them against each boot's own kernel.
+fn embed_kext(kext: &Path, source: &Path) -> Result<()> {
+    let mut objects: Vec<_> = fs::read_dir(kext)?
+        .map(|entry| Ok(entry?.path()))
+        .collect::<Result<_>>()?;
+    objects.retain(|path| path.extension().is_some_and(|extension| extension == "o"));
+    objects.sort();
+    let includes: String = objects
+        .iter()
+        .map(|path| format!("    include_bytes!({:?}),\n", path.display().to_string()))
+        .collect();
+    let info = kext.join("Info.plist");
+    fs::write(
+        source,
+        format!(
+            "pub static INFO: &[u8] = include_bytes!({:?});\n\
+             pub static OBJECTS: &[&[u8]] = &[\n{includes}];\n",
+            info.display().to_string()
+        ),
+    )?;
+    Ok(())
 }
 
 /// A kext's code generation: Apple clang's `-mkernel` set, which upstream

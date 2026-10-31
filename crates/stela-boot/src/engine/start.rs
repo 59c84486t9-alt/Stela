@@ -26,8 +26,14 @@ fn from_disk(
     } else if let Some(kind) = options.recovery {
         bundle::recovery_from_disk(partition, kind, options.boot_volume, &defaults)
     } else {
+        let kexts = if options.gpu {
+            gpu::kexts()
+        } else {
+            Vec::new()
+        };
         let request = installed::Request {
             volume: options.boot_volume,
+            kexts: &kexts,
             ..installed::Request::default()
         };
         let mut defaults = defaults;
