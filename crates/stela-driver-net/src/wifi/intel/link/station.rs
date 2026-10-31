@@ -58,6 +58,7 @@ use alloc::{borrow::Cow, collections::VecDeque};
 use zeroize::Zeroizing;
 
 mod active_link;
+mod beacon;
 mod emlsr;
 mod grade;
 mod he;
@@ -284,6 +285,7 @@ pub(super) struct Client {
     link_scan: link_scan::LinkScan,
     statistics: statistics::Statistics,
     emlsr: emlsr::Emlsr,
+    tracking: beacon::Tracking,
     /// The radio can run EMLSR.
     pub(super) eml_capable: bool,
     ciphers: Option<(Cipher, Cipher)>,
@@ -332,6 +334,7 @@ impl Client {
             link_scan: link_scan::LinkScan::default(),
             statistics: statistics::Statistics::default(),
             emlsr: emlsr::Emlsr::default(),
+            tracking: beacon::Tracking::default(),
             eml_capable: false,
             ciphers: None,
             management_cipher: None,
@@ -394,6 +397,7 @@ impl Client {
         self.link_scan = link_scan::LinkScan::default();
         self.statistics = statistics::Statistics::default();
         self.emlsr = emlsr::Emlsr::default();
+        self.tracking = beacon::Tracking::default();
         self.ciphers = None;
         self.management_cipher = None;
         self.keys.clear();
@@ -609,6 +613,8 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             self.select_link(queue, now)?;
             self.run_steps(queue)?;
         }
+        self.run_tracking(queue, now)?;
+        self.run_steps(queue)?;
         self.run_emlsr(queue, now)?;
         self.run_steps(queue)?;
         self.run_link_scan(queue, now)?;
@@ -933,7 +939,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
     ) -> Result<(), Error> {
         let key_index = normalized.key_index();
         let mut frame = normalized.into_frame();
-        if self.hear_on_link_scan(&frame) {
+        if self.hear_on_link_scan(&frame) || self.client.beacon_heard(&frame, now) {
             return Ok(());
         }
         let client = &mut self.client;
@@ -1274,6 +1280,12 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                         self.client.act(action);
                     }
                 }
+                beacon::SWITCH_START_NOTIFICATION => {
+                    self.client.switch_started(word(0).unwrap_or(0));
+                }
+                beacon::SWITCH_ERROR_NOTIFICATION if word(4).is_some_and(beacon::switch_failed) => {
+                    self.client.tracking.drop_connection();
+                }
                 emlsr::BLUETOOTH_NOTIFICATION => {
                     let active = raw.iter().any(|&byte| byte != 0);
                     self.client.bluetooth_changed(active, now);
@@ -1311,7 +1323,8 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
 
     /// Management frames, once session protection holds the channel for them.
     fn send_management(&mut self, queue: &mut Queue<Q, B>) -> Result<(), Error> {
-        if self.client.outbox.is_empty() {
+        if self.client.outbox.is_empty() || (self.client.tracking.silent() && !self.client.leaving)
+        {
             return Ok(());
         }
         let associated = self.client.station.phase() == Peering::Associated;
@@ -1358,6 +1371,9 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
 
     /// Data frames onto their TIDs' queues, each adding its queue first.
     fn send_data(&mut self, queue: &mut Queue<Q, B>) -> Result<(), Error> {
+        if self.client.tracking.silent() {
+            return Ok(());
+        }
         let antennas = queue.antennas();
         for tid in 0..16u8 {
             if self.client.held[usize::from(tid)].is_empty() {

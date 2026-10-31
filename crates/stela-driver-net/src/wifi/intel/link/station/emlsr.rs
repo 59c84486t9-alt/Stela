@@ -53,6 +53,7 @@ pub(super) enum Exit {
     Bluetooth,
     ChannelLoad,
     Firmware,
+    ChannelSwitch,
 }
 
 /// What `_iwl_mld_select_links` settled on.

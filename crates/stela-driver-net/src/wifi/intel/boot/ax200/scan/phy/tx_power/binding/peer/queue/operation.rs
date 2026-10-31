@@ -66,6 +66,19 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200ManagementQueue<'a,
         )
     }
 
+    /// `iwl_mld_change_chanctx`: the context `seat` now runs `definition`.
+    pub fn phy_moved(
+        &mut self,
+        seat: u8,
+        definition: &ChannelDefinition,
+        wide_ofdma: Option<&ChannelDefinition>,
+    ) -> Option<(Id, Vec<u8>)> {
+        let phy = &mut self.peer().binding.power.phy;
+        let commands = phy.context(seat, definition, wide_ofdma)?;
+        let moved = commands.last()?;
+        Some((moved.id(), moved.bytes().to_vec()))
+    }
+
     /// The commands that give another link the PHY context `seat`.
     pub fn phy_context(
         &mut self,

@@ -16,7 +16,6 @@ use crate::{
         regulatory::PowerType,
         security::{Cipher, management::ManagementCipher},
         station::{
-            AssociationContext,
             operations::MuEdcaRecord,
             phy::{AccessCategory, Eht, He, Mode, Negotiated, Width},
             power_envelope::PowerEnvelope,
@@ -88,6 +87,16 @@ pub const POWER_CONSTRAINTS: Id = Id {
 pub const MAC_POWER: Id = Id {
     group: 0,
     opcode: 0xa9,
+    version: 0,
+};
+pub const CHANNEL_SWITCH: Id = Id {
+    group: 3,
+    opcode: 0x04,
+    version: 0,
+};
+pub const CANCEL_CHANNEL_SWITCH: Id = Id {
+    group: 3,
+    opcode: 0x06,
     version: 0,
 };
 pub const BEACON_FILTER: Id = Id {
@@ -1058,6 +1067,29 @@ pub fn power(version: u8, save_power: bool, beacon_interval: u16, dtim_period: u
     bytes
 }
 
+/// `iwl_mvm_schedule_client_csa`, adding the switch firmware times or
+/// `modify`ing its count, with `tsf` when the beacon saying so was heard.
+pub fn channel_switch(
+    modify: bool,
+    tsf: u32,
+    count: u8,
+    delayed_beacons: u8,
+    quiet: bool,
+) -> Vec<u8> {
+    let mut bytes = alloc::vec![0; 16];
+    word(&mut bytes, 4, if modify { ACTION_MODIFY } else { 1 });
+    word(&mut bytes, 8, tsf);
+    bytes[12] = count;
+    bytes[13] = delayed_beacons;
+    bytes[14] = u8::from(quiet);
+    bytes
+}
+
+/// `struct iwl_cancel_channel_switch_cmd`.
+pub fn cancel_channel_switch(id: u32) -> Vec<u8> {
+    id.to_le_bytes().to_vec()
+}
+
 /// `IWL_BF_CMD_CONFIG_DEFAULTS` enabling the filter: `bytes` is the firmware's
 /// 44 or 60 byte body.
 pub fn beacon_filter(bytes: usize) -> Vec<u8> {
@@ -1069,8 +1101,7 @@ pub fn beacon_filter(bytes: usize) -> Vec<u8> {
 }
 
 /// What the AP's beacon says of protection, ERP and HT Operation alike.
-pub fn protection(context: &AssociationContext) -> Protection {
-    let elements = &context.beacon().elements;
+pub fn protection(elements: &[u8]) -> Protection {
     Protection {
         erp: crate::wifi::connection::find(elements, 42)
             .and_then(|erp| erp.first())

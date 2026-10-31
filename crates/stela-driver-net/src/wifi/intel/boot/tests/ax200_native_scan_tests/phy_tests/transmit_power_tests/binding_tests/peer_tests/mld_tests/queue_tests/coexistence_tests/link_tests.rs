@@ -422,6 +422,11 @@ fn mpdu(frame: Vec<u8>, status: u32) -> Vec<u8> {
 /// A beacon of the AP on the other link of the AP MLD, on channel 36 and
 /// quieter than the setup link's.
 fn other_beacon(heard: [u8; 2]) -> Vec<u8> {
+    announcing_beacon(heard, &[])
+}
+
+/// [`other_beacon`] with `extra` elements.
+fn announcing_beacon(heard: [u8; 2], extra: &[u8]) -> Vec<u8> {
     let mut frame = vec![0; 36];
     frame[..2].copy_from_slice(&0x80u16.to_le_bytes());
     frame[4..10].fill(0xff);
@@ -442,6 +447,7 @@ fn other_beacon(heard: [u8; 2]) -> Vec<u8> {
         }
         .encode(),
     );
+    frame.extend(extra);
     placed_at(frame, 3, None, 127 << 24, [heard[0], heard[1], 36])
 }
 
@@ -616,7 +622,12 @@ fn raise_as<'n>(
     let catalog: &'static resources::Catalog = Box::leak(Box::new(catalog_for(
         &profile(),
         Family::Ax200.firmware_name(),
-        &feature(feature(coex_image(2), 30, 63, true), 30, 21, true),
+        &feature(
+            feature(feature(coex_image(2), 30, 63, true), 30, 21, true),
+            30,
+            46,
+            true,
+        ),
     )));
     let source: &'static Source = Box::leak(Box::new(Source::default()));
     native
@@ -1847,6 +1858,74 @@ fn a_failed_deactivation_loses_the_connection() {
     let mut body = [0; 8];
     body[0] = 1;
     device.inject(wifi.radio().rom().unwrap(), &notify(3, 0xf7, &body));
+    let lost = run(&mut wifi, &mut device, |_, _, up| !up);
+    assert!(lost, "{:?}", wifi.radio().error());
+}
+
+#[test]
+fn a_quiet_switch_takes_the_link_with_it_and_lasts_until_the_ap_is_heard_again() {
+    let native = Native::default();
+    let (mut wifi, mut device, _, _) = moved_mld(&native);
+    let announced = device.configuration.len();
+    let commands = device.commands.len();
+    // The model has one 5 GHz channel, which a quiet announcement may name.
+    device.inject(
+        wifi.radio().rom().unwrap(),
+        &announcing_beacon([60, 60], &[37, 3, 1, 36, 5]),
+    );
+    run(&mut wifi, &mut device, |_, _, _| false);
+    assert!(wifi.carrier(), "{:?}", wifi.radio().error());
+    assert!(links_since(&device, announced).is_empty());
+    assert_eq!(
+        device.commands[commands..]
+            .iter()
+            .filter(|command| **command == (3, 4))
+            .count(),
+        1,
+        "firmware times the switch"
+    );
+    device.inject(wifi.radio().rom().unwrap(), &notify(3, 0xff, &[1, 0, 0, 0]));
+    assert!(
+        run(&mut wifi, &mut device, |_, device, _| {
+            links_since(device, announced).len() > 2
+        }),
+        "{:?}",
+        wifi.radio().error()
+    );
+    // Down, reconfigured on its new PHY, and up.
+    let links = links_since(&device, announced);
+    assert_eq!(links, [(2, 1, 1), (2, 1, 0xfe), (2, 1, 1)], "{links:?}");
+    assert!(wifi.carrier());
+    assert!(wifi.radio().silent(), "until the AP is heard");
+    device.inject(wifi.radio().rom().unwrap(), &other_beacon([60, 60]));
+    let heard = run(&mut wifi, &mut device, |wifi, _, _| !wifi.radio().silent());
+    assert!(heard, "{:?}", wifi.radio().error());
+}
+
+#[test]
+fn a_switch_firmware_starts_unannounced_is_only_cancelled_by_firmware_that_times_it() {
+    let native = Native::default();
+    let (mut wifi, mut device, _, _) = moved_mld(&native);
+    let commands = device.commands.len();
+    device.inject(wifi.radio().rom().unwrap(), &notify(3, 0xff, &[1, 0, 0, 0]));
+    run(&mut wifi, &mut device, |_, _, _| false);
+    assert!(!device.commands[commands..].contains(&(3, 6)));
+    assert!(wifi.carrier());
+}
+
+#[test]
+fn firmware_saying_a_switch_failed_loses_the_connection() {
+    let native = Native::default();
+    let (mut wifi, mut device, _, _) = moved_mld(&native);
+    device.inject(
+        wifi.radio().rom().unwrap(),
+        &announcing_beacon([60, 60], &[37, 3, 1, 36, 5]),
+    );
+    run(&mut wifi, &mut device, |_, _, _| false);
+    let mut body = [0; 8];
+    body[0] = 1;
+    body[4] = 1;
+    device.inject(wifi.radio().rom().unwrap(), &notify(3, 0xf9, &body));
     let lost = run(&mut wifi, &mut device, |_, _, up| !up);
     assert!(lost, "{:?}", wifi.radio().error());
 }

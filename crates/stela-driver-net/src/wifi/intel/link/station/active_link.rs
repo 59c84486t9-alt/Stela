@@ -144,14 +144,20 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         seat: u8,
         authorized: bool,
     ) -> Result<LinkCommands, Error> {
-        let negotiated = context.negotiated();
+        let heard = self.client.tracking.of(context.bssid());
+        let definition = self.client.link_definition(context);
+        let narrowed = (definition.width != context.negotiated().width).then(|| {
+            let mut narrowed = context.negotiated().clone();
+            narrowed.width = definition.width;
+            narrowed
+        });
+        let negotiated = narrowed.as_ref().unwrap_or(context.negotiated());
         let bss = context.beacon();
         let band = bss.channel.band;
+        let capabilities = heard.map_or(bss.capabilities, |heard| heard.capabilities);
         let antennas = queue.antennas();
         // `ieee80211_set_chanreq_ap`: wider OFDMA follows the AP's own channel.
-        let wide_ofdma = negotiated
-            .eht
-            .is_some()
+        let wide_ofdma = (negotiated.eht.is_some() && definition.control == bss.channel)
             .then(|| {
                 let vht = negotiated
                     .local()
@@ -182,7 +188,13 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             negotiated, band, antennas, rate_shape, authorized, longest, seat,
         )
         .ok_or(Error::Refused("rates"))?;
-        let edca = negotiated.edca();
+        let edca = heard
+            .and_then(|heard| heard.edca)
+            .map_or_else(|| negotiated.edca(), |(_, edca)| edca);
+        let protection = heard.map_or_else(
+            || commands::protection(&bss.elements),
+            |heard| heard.protection,
+        );
         let link = commands::link_config(
             link_version,
             LinkState {
@@ -190,9 +202,9 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                 link: station_link(context, self.address),
                 band,
                 basic_rates: negotiated.legacy.basic,
-                short_preamble: bss.capabilities & (1 << 5) != 0,
-                short_slot: band != Band::Ghz2 || bss.capabilities & (1 << 10) != 0,
-                protection: commands::protection(context),
+                short_preamble: capabilities & (1 << 5) != 0,
+                short_slot: band != Band::Ghz2 || capabilities & (1 << 10) != 0,
+                protection,
                 width: negotiated.width,
                 qos: negotiated.wmm.is_some(),
                 edca: &edca,
@@ -221,7 +233,10 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             self.client.observed.iter().find(|heard| {
                 heard.observation.bss().bssid == context.bssid() && heard.at >= since
             })?;
-        let (bss, definition) = (heard.observation.bss(), context.definition());
+        let (bss, definition) = (
+            heard.observation.bss(),
+            self.client.link_definition(context),
+        );
         let band = bss.channel.band;
         Some(emlsr::Graded {
             grade: grade::grade(
@@ -244,6 +259,10 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         let (Some(active), Some(dormant)) = (&self.client.context, &self.client.dormant) else {
             return Ok(());
         };
+        // `iwl_mld_valid_emlsr_pair`, and mac80211 keeps its links through a switch.
+        if self.client.tracking.moving() {
+            return Ok(());
+        }
         let client = &self.client;
         let (seat, other) = (usize::from(client.seat), usize::from(1 - client.seat));
         let statistics = &client.statistics;
@@ -291,7 +310,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         let both = before | 1 << new;
         let source = self.link_commands(queue, &from, old, authorized)?;
         let target = self.link_commands(queue, &to, new, authorized)?;
-        let definition = to.definition();
+        let definition = client.link_definition(&to);
         let phy = queue
             .phy_context(new, &definition, target.wide_ofdma.as_ref())
             .ok_or(Error::Refused("channel width"))?;
@@ -347,7 +366,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         let authorized = client.port_open;
         let source = self.link_commands(queue, gone, seat, authorized)?;
         let (phy_id, phy_removal) = queue
-            .phy_removal(seat, &gone.definition())
+            .phy_removal(seat, &client.link_definition(gone))
             .ok_or(Error::Refused("channel width"))?;
         let tids = station_queues(queue);
         let power_version = version_of(queue.firmware(), commands::MAC_POWER);
