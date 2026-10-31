@@ -1,0 +1,17 @@
+[package]
+name = "stela-mesa-nv-push"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "MIT"
+
+[lib]
+name = "nv_push_rs"
+path = "../../../third_party/mesa/src/nouveau/headers/nv_push_rs/lib.rs"
+
+[lints.rust]
+warnings = "allow"
+
+[dependencies]
+std = { package = "stela-mesa-std", path = "../std" }
+nvidia_headers = { package = "stela-mesa-nvidia-headers", path = "../nvidia-headers" }

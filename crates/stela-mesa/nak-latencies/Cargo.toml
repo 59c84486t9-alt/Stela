@@ -1,0 +1,16 @@
+[package]
+name = "stela-mesa-nak-latencies"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "MIT"
+
+[lib]
+name = "nak_latencies"
+path = "../../../target/gpu/nvk/build/src/nouveau/compiler/latencies/lib.rs"
+
+[lints.rust]
+warnings = "allow"
+
+[dependencies]
+std = { package = "stela-mesa-std", path = "../std" }

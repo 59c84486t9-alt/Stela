@@ -1,0 +1,17 @@
+[package]
+name = "stela-mesa-compiler"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "MIT"
+
+[lib]
+name = "compiler"
+path = "../../../target/gpu/nvk/build/src/compiler/rust/libcompiler.rlib.p/structured/lib.rs"
+
+[lints.rust]
+warnings = "allow"
+
+[dependencies]
+std = { package = "stela-mesa-std", path = "../std" }
+paste = "1"

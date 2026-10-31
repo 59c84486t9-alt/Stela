@@ -1,0 +1,18 @@
+[package]
+name = "stela-mesa-compiler-proc"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "MIT"
+
+[lib]
+name = "compiler_proc"
+path = "../../../third_party/mesa/src/compiler/rust/proc/lib.rs"
+
+[lints.rust]
+warnings = "allow"
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }

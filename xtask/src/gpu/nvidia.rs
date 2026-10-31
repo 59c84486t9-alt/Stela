@@ -44,16 +44,16 @@ impl Target {
     }
 }
 
-struct Toolchain {
-    clang: PathBuf,
+pub(super) struct Toolchain {
+    pub(super) clang: PathBuf,
     clangxx: PathBuf,
     linker: PathBuf,
     objcopy: PathBuf,
-    archiver: PathBuf,
+    pub(super) archiver: PathBuf,
 }
 
 impl Toolchain {
-    fn discover() -> Result<Self> {
+    pub(super) fn discover() -> Result<Self> {
         let rustc = tools::which("rustc").context("rustc is not in PATH")?;
         let sysroot = capture(Command::new(&rustc).args(["--print", "sysroot"]))?;
         let version = capture(Command::new(&rustc).arg("-vV"))?;

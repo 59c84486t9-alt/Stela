@@ -1,0 +1,650 @@
+//! NVK, NIR and NAK for `stela.efi`.
+//!
+//! Meson configures Mesa natively, which leaves its generated sources and its
+//! compile plan. This task then compiles that plan for the boot image's C
+//! target against `compat/libc`, and archives it where `crates/stela-mesa`
+//! links it. Mesa's Rust builds as ordinary Cargo dependencies of the image,
+//! from sources generated here. Mesa itself stays unpatched: what differs is
+//! the C library, the configuration below and the units in `compat/mesa`.
+use super::{
+    nvidia::Toolchain,
+    support::{NATIVE_TARGET, build_directory, capture, gpu, third_party, tool},
+};
+use crate::tools::{self, exec};
+use anyhow::{Context, Result, ensure};
+use serde_json::Value;
+use std::{
+    collections::BTreeSet,
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+    sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::SystemTime,
+};
+
+/// What NVK needs and nothing else: no window system, no cache on disk and no
+/// host compiler. Its OpenCL kernels are `compat/mesa/nvkcl.c`, so the tools
+/// that would build them are never run.
+const OPTIONS: [&str; 19] = [
+    "-Dvulkan-drivers=nouveau",
+    "-Dgallium-drivers=",
+    "-Dplatforms=",
+    "-Dopengl=false",
+    "-Dgles1=disabled",
+    "-Dgles2=disabled",
+    "-Dglx=disabled",
+    "-Degl=disabled",
+    "-Dgbm=disabled",
+    "-Dllvm=disabled",
+    "-Dzstd=disabled",
+    "-Dshader-cache=disabled",
+    "-Dmesa-clc=system",
+    "-Dprecomp-compiler=system",
+    "-Dvulkan-layers=",
+    "-Dtools=",
+    "-Dvideo-codecs=",
+    "-Dexpat=disabled",
+    "-Dbuildtype=debugoptimized",
+];
+/// Tools the configuration asks for that nothing runs.
+const UNUSED_TOOLS: [&str; 2] = ["mesa_clc", "vtn_bindgen2"];
+/// `.pc` files for what Mesa's configuration requires: libdrm's headers are
+/// vendored and its calls are `compat/mesa/drm.c`; the one user of libelf is
+/// `compat/mesa/nv_cubin.c`.
+const LIBDRM_VERSION: &str = "2.4.133";
+const LIBELF_VERSION: &str = "0.190";
+
+/// Units not built, by a part of their source path: each either has a stand-in
+/// in `compat/mesa`, or needs what the image lacks and nothing here calls it.
+const SKIPPED: [&str; 11] = [
+    "nvkcl",
+    "build_id",
+    "nv_cubin.c",
+    "texcompress_astc",
+    "u_qsort",
+    "os_file_notify",
+    "os_socket",
+    "disk_cache",
+    "mesa_cache_db",
+    "u_debug_stack",
+    "wsi_common_display",
+];
+/// Stela's stand-ins, under `compat/mesa`, built with an NVK unit's flags.
+const STAND_INS: [&str; 5] = ["nvkcl", "build_id", "nv_cubin", "drm", "soft_float"];
+const MODEL_UNIT: &str = "nvk_query_pool.c";
+/// The C library, under `compat/libc`.
+const LIBC: [&str; 4] = ["libc", "stdio", "pthread", "math"];
+
+/// What Meson found on the build host that the C library does not offer, or
+/// that names a path the image does not take. SSE4.1 and BLAKE3's assembly are
+/// host features; the image runs on any x86-64.
+const HOST_DEFINES: [&str; 28] = [
+    "ALLOW_KCMP",
+    "HAS_SCHED_GETAFFINITY",
+    "HAVE_CET_H",
+    "HAVE_COMPRESSION",
+    "HAVE_DIRENT_D_TYPE",
+    "HAVE_DLADDR",
+    "HAVE_DRI2",
+    "HAVE_FLOCK",
+    "HAVE_FMEMOPEN",
+    "HAVE_FUNC_ATTRIBUTE_VISIBILITY",
+    "HAVE_GETRANDOM",
+    "HAVE_ISSIGNALING",
+    "HAVE_LINUX_FUTEX_H",
+    "HAVE_LINUX_UDMABUF_H",
+    "HAVE_MEMFD_CREATE",
+    "HAVE_MKOSTEMP",
+    "HAVE_OPENMP",
+    "HAVE_POSIX_FALLOCATE",
+    "HAVE_PROGRAM_INVOCATION_NAME",
+    "HAVE_PTHREAD_SETAFFINITY",
+    "HAVE_RANDOM_R",
+    "HAVE_RENDERDOC_INTEGRATION=1",
+    "HAVE_STRTOD_L",
+    "HAVE_SYS_INOTIFY_H",
+    "HAVE_SYS_SHM_H",
+    "HAVE_ZLIB",
+    "HAVE___BUILTIN_ADD_OVERFLOW_P",
+    "HAVE___BUILTIN_SUB_OVERFLOW_P",
+];
+const LATE_DEFINES: [&str; 3] = [
+    "USE_SSE41",
+    "VK_USE_PLATFORM_DISPLAY_KHR",
+    "VK_USE_PLATFORM_HEADLESS_EXT",
+];
+const ADDED_DEFINES: [&str; 5] = [
+    "STELA_LIBC",
+    "BLAKE3_NO_SSE2",
+    "BLAKE3_NO_SSE41",
+    "BLAKE3_NO_AVX2",
+    "BLAKE3_NO_AVX512",
+];
+/// Flags of Meson's that do not apply to a freestanding COFF object.
+const HOST_FLAGS: [&str; 9] = [
+    "-g",
+    "-MD",
+    "-pthread",
+    "-fPIC",
+    "-mtls-dialect=gnu2",
+    "-fvisibility=hidden",
+    "-pipe",
+    "-fno-trapping-math",
+    "-D_FORTIFY_SOURCE=2",
+];
+/// The C target's flags: `stela-driver-gpu/build/native.rs`'s, with SSE, which
+/// Mesa uses, in place of its general registers only. A kernel's stacks follow.
+const TARGET_FLAGS: [&str; 15] = [
+    "-mno-stack-arg-probe",
+    "-mno-incremental-linker-compatible",
+    "-fno-stack-protector",
+    "-mno-red-zone",
+    "-msse2",
+    "-nostdinc",
+    "-U_FORTIFY_SOURCE",
+    "-U__CYGWIN__",
+    "-U__unix__",
+    "-D__linux__",
+    "-fno-exceptions",
+    "-ffunction-sections",
+    "-fdata-sections",
+    "-fno-asynchronous-unwind-tables",
+    "-femulated-tls",
+];
+/// Bindgen's C wrappers of the conversions that pass floats to Rust, which the
+/// soft-float versions in `compat/mesa/soft_float.c` replace.
+const FLOAT_WRAPPERS: [&str; 3] = [
+    "_mesa_half_to_float",
+    "_mesa_float_to_float16_rtne",
+    "_mesa_double_to_float16_rtne",
+];
+/// Mesa's Rust, for the check of what crosses its C boundary.
+const RUST_SOURCES: [&str; 5] = [
+    "src/nouveau/compiler/nak",
+    "src/nouveau/nil",
+    "src/compiler/rust",
+    "src/nouveau/rust",
+    "src/nouveau/headers/nv_push_rs",
+];
+
+/// One unit to compile, with what Clang needs.
+struct Unit {
+    output: PathBuf,
+    arguments: Vec<String>,
+}
+
+fn paths(directory: &Path) -> Result<(PathBuf, PathBuf)> {
+    let stubs = directory.join("tools");
+    let local = tools::root().join(".tools/gpu");
+    let path = std::env::join_paths(
+        [
+            stubs.clone(),
+            local.join("generators/bin"),
+            local.join("rust/bin"),
+        ]
+        .into_iter()
+        .chain(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        )),
+    )?;
+    Ok((stubs, path.into()))
+}
+
+fn setup(directory: &Path, build: &Path, path: &Path) -> Result<()> {
+    if build.join("build.ninja").is_file() {
+        return Ok(());
+    }
+    let (stubs, _) = paths(directory)?;
+    fs::create_dir_all(&stubs)?;
+    for name in UNUSED_TOOLS {
+        let stub = stubs.join(name);
+        fs::write(&stub, "#!/bin/sh\nexit 1\n")?;
+        exec(Command::new("chmod").arg("+x").arg(&stub))?;
+    }
+    let packages = directory.join("pkgconfig");
+    fs::create_dir_all(&packages)?;
+    let libdrm = third_party("libdrm");
+    fs::write(
+        packages.join("libdrm.pc"),
+        format!(
+            "Name: libdrm\nDescription: vendored headers\nVersion: {LIBDRM_VERSION}\n\
+             Cflags: -I{0} -I{0}/include/drm\n",
+            libdrm.display()
+        ),
+    )?;
+    fs::write(
+        packages.join("libelf.pc"),
+        format!("Name: libelf\nDescription: unused\nVersion: {LIBELF_VERSION}\nCflags:\n"),
+    )?;
+    exec(
+        Command::new(tool("meson", "generators/bin")?)
+            .arg("setup")
+            .arg(build)
+            .arg(third_party("mesa"))
+            .args(OPTIONS)
+            .env("PATH", path)
+            .env("PKG_CONFIG_PATH", &packages),
+    )
+}
+
+/// Every source Meson generates, and the structured copy of the compiler crate.
+fn generate(build: &Path, path: &Path) -> Result<()> {
+    let ninja = tool("ninja", "generators/bin")?;
+    let mut targets = BTreeSet::new();
+    for rule in ["CUSTOM_COMMAND", "CUSTOM_COMMAND_DEP"] {
+        let listed = capture(
+            Command::new(&ninja)
+                .args(["-t", "targets", "rule", rule])
+                .current_dir(build)
+                .env("PATH", path),
+        )?;
+        targets.extend(listed.lines().map(str::to_owned));
+    }
+    let plan = fs::read_to_string(build.join("build.ninja"))?;
+    targets.extend(plan.lines().filter_map(|line| {
+        let target = line.strip_prefix("build ")?.split(':').next()?;
+        target
+            .contains(".rlib.p/structured/")
+            .then(|| target.to_owned())
+    }));
+    targets.retain(|target| {
+        !target.contains("nvkcl")
+            && ![
+                "all",
+                "test",
+                "benchmark",
+                "clean",
+                "dist",
+                "reconfigure",
+                "PHONY",
+            ]
+            .contains(&target.as_str())
+            && !target.starts_with("meson-")
+            && !target.ends_with("install")
+    });
+    exec(
+        Command::new(&ninja)
+            .args(&targets)
+            .current_dir(build)
+            .env("PATH", path),
+    )
+}
+
+fn resource_directory(clang: &Path) -> Result<String> {
+    Ok(capture(Command::new(clang).arg("-print-resource-dir"))?
+        .trim()
+        .to_owned())
+}
+
+fn include_flags(clang: &Path, libc: &Path) -> Result<Vec<String>> {
+    Ok(vec![
+        format!("--target={NATIVE_TARGET}"),
+        "-isystem".to_owned(),
+        libc.display().to_string(),
+        "-isystem".to_owned(),
+        format!("{}/include", resource_directory(clang)?),
+    ])
+}
+
+/// Bindgen's output against the C library the units compile with: Meson's run
+/// saw the build host's, which lays out its types differently.
+fn bindings(build: &Path, path: &Path, flags: &[String]) -> Result<()> {
+    let plan = fs::read_to_string(build.join("build.ninja"))?;
+    for command in plan
+        .lines()
+        .filter_map(|line| line.strip_prefix(" COMMAND = "))
+    {
+        if !command.contains("/bindgen ") || command.contains("nvidia/hwref") {
+            continue;
+        }
+        let words = shlex::split(&command.replace("$ ", " ")).context("bindgen command")?;
+        let (program, arguments) = words.split_first().context("bindgen command")?;
+        let (ours, theirs) = arguments.split_at(
+            arguments
+                .iter()
+                .position(|word| word == "--")
+                .context("bindgen flags")?
+                + 1,
+        );
+        exec(
+            Command::new(program)
+                .args(ours)
+                .args(flags)
+                .args(["-nostdinc", "-U__CYGWIN__", "-D__linux__", "-U__unix__"])
+                .arg("-DSTELA_LIBC")
+                .args(theirs.iter().filter(|word| *word != "-pthread"))
+                .current_dir(build)
+                .env("PATH", path),
+        )?;
+    }
+    fs::copy(
+        build.join("src/compiler/rust/bindings.rs"),
+        build.join("src/compiler/rust/libcompiler.rlib.p/structured/bindings.rs"),
+    )?;
+    Ok(())
+}
+
+/// Rust's UEFI target is soft-float, so a C function with a float in its
+/// signature that Mesa's Rust calls needs a stand-in in `soft_float.c`.
+fn check_float_crossings(build: &Path) -> Result<()> {
+    let mut crossing = BTreeSet::new();
+    for bindings in [
+        "src/compiler/rust/bindings.rs",
+        "src/nouveau/compiler/nak_bindings.rs",
+        "src/nouveau/nil/nil_bindings.rs",
+    ] {
+        let text = fs::read_to_string(build.join(bindings))?;
+        for signature in text.split("pub fn ").skip(1) {
+            let signature = signature.split(';').next().unwrap_or_default();
+            if signature.contains("f32") || signature.contains("f64") {
+                let name = signature
+                    .split(|c: char| !c.is_alphanumeric() && c != '_')
+                    .next();
+                crossing.extend(name.map(str::to_owned));
+            }
+        }
+    }
+    let mut sources = Vec::new();
+    for root in RUST_SOURCES {
+        collect_rust(&third_party("mesa").join(root), &mut sources)?;
+    }
+    for source in sources {
+        let text = fs::read_to_string(&source)?;
+        for name in &crossing {
+            ensure!(
+                FLOAT_WRAPPERS.contains(&name.as_str()) || !mentions(&text, name),
+                "{} passes a float to C through {name}: add it to soft_float.c",
+                source.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+fn mentions(text: &str, name: &str) -> bool {
+    text.match_indices(name).any(|(at, _)| {
+        let identifier = |c: char| c.is_alphanumeric() || c == '_';
+        !text[..at].ends_with(identifier) && !text[at + name.len()..].starts_with(identifier)
+    })
+}
+
+fn collect_rust(directory: &Path, sources: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in fs::read_dir(directory)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            collect_rust(&path, sources)?;
+        } else if path.extension().is_some_and(|extension| extension == "rs") {
+            sources.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn host_only(flag: &str) -> bool {
+    HOST_FLAGS.contains(&flag)
+        || flag.starts_with("-W")
+        || flag
+            .strip_prefix("-D")
+            .is_some_and(|define| HOST_DEFINES.contains(&define) || LATE_DEFINES.contains(&define))
+}
+
+/// Meson's flags for a unit, for the image's target.
+fn retarget(arguments: &[String], common: &[String]) -> Vec<String> {
+    let mut result = common.to_vec();
+    let mut words = arguments.iter().skip(1);
+    while let Some(word) = words.next() {
+        if matches!(word.as_str(), "-MQ" | "-MF" | "-o") {
+            words.next();
+        } else if !host_only(word) {
+            result.push(word.clone());
+        }
+    }
+    result
+}
+
+fn object_name(output: &str) -> String {
+    output.replace(['/', '.'], "_") + ".o"
+}
+
+/// The units NVK links, with Stela's stand-ins and C library.
+fn units(
+    build: &Path,
+    objects: &Path,
+    ninja: &Path,
+    path: &Path,
+    common: &[String],
+) -> Result<Vec<Unit>> {
+    let linked = capture(
+        Command::new(ninja)
+            .args(["-t", "inputs", "src/nouveau/vulkan/libvulkan_nouveau.so"])
+            .current_dir(build)
+            .env("PATH", path),
+    )?;
+    let linked: BTreeSet<&str> = linked
+        .lines()
+        .filter(|input| input.ends_with(".o"))
+        .collect();
+    let database: Value =
+        serde_json::from_str(&fs::read_to_string(build.join("compile_commands.json"))?)?;
+    let mut units = Vec::new();
+    let mut model = None;
+    for entry in database.as_array().context("compile database")? {
+        let file = entry["file"].as_str().context("unit file")?;
+        let words = shlex::split(entry["command"].as_str().context("unit command")?)
+            .context("unit command")?;
+        let Some(at) = words.iter().position(|word| word == "-o") else {
+            continue;
+        };
+        let output = &words[at + 1];
+        if !linked.contains(output.as_str()) {
+            continue;
+        }
+        if file.ends_with(MODEL_UNIT) {
+            model = Some((file.to_owned(), words.clone()));
+        }
+        if file.ends_with(".S")
+            || SKIPPED
+                .iter()
+                .any(|skip| output.contains(skip) || file.contains(skip))
+        {
+            continue;
+        }
+        ensure!(file.ends_with(".c"), "{file} is not C");
+        let mut arguments = retarget(&words, common);
+        if file.ends_with("rust/bindings.c") {
+            arguments.extend(
+                FLOAT_WRAPPERS
+                    .iter()
+                    .map(|name| format!("-D{name}__extern={name}__hard_float")),
+            );
+        }
+        units.push(Unit {
+            output: objects.join(object_name(output)),
+            arguments,
+        });
+    }
+    let (file, words) = model.context("no model unit")?;
+    let compat = gpu().join("compat");
+    for name in STAND_INS {
+        let source = compat
+            .join("mesa")
+            .join(format!("{name}.c"))
+            .display()
+            .to_string();
+        let words: Vec<_> = words
+            .iter()
+            .map(|word| {
+                if *word == file {
+                    source.clone()
+                } else {
+                    word.clone()
+                }
+            })
+            .collect();
+        units.push(Unit {
+            output: objects.join(format!("stela_{name}.o")),
+            arguments: retarget(&words, common),
+        });
+    }
+    for name in LIBC {
+        let mut arguments = common.to_vec();
+        arguments.extend(["-O2", "-ffreestanding", "-c"].map(str::to_owned));
+        arguments.push(
+            compat
+                .join("libc")
+                .join(format!("{name}.c"))
+                .display()
+                .to_string(),
+        );
+        units.push(Unit {
+            output: objects.join(format!("libc_{name}.o")),
+            arguments,
+        });
+    }
+    Ok(units)
+}
+
+/// Whether anything the last compile read has changed, by its dependency file.
+fn stale(output: &Path, build: &Path) -> bool {
+    let (Ok(built), Ok(depends)) = (
+        fs::metadata(output).and_then(|file| file.modified()),
+        fs::read_to_string(output.with_extension("d")),
+    ) else {
+        return true;
+    };
+    depends
+        .split_whitespace()
+        .skip(1)
+        .filter(|word| *word != "\\")
+        .any(|input| {
+            fs::metadata(build.join(input))
+                .and_then(|file| file.modified())
+                .map_or(true, |modified: SystemTime| modified > built)
+        })
+}
+
+fn compile(clang: &Path, build: &Path, units: &[Unit], jobs: u16) -> Result<()> {
+    let next = AtomicUsize::new(0);
+    let failures = Mutex::new(Vec::new());
+    std::thread::scope(|scope| {
+        for _ in 0..jobs {
+            scope.spawn(|| {
+                while let Some(unit) = units.get(next.fetch_add(1, Ordering::Relaxed)) {
+                    if !stale(&unit.output, build) {
+                        continue;
+                    }
+                    let output = Command::new(clang)
+                        .args(&unit.arguments)
+                        .arg("-w")
+                        .arg("-MD")
+                        .arg("-MF")
+                        .arg(unit.output.with_extension("d"))
+                        .arg("-o")
+                        .arg(&unit.output)
+                        .current_dir(build)
+                        .output();
+                    match output {
+                        Ok(output) if output.status.success() => {}
+                        Ok(output) => failures
+                            .lock()
+                            .unwrap()
+                            .push(String::from_utf8_lossy(&output.stderr).into_owned()),
+                        Err(error) => failures.lock().unwrap().push(error.to_string()),
+                    }
+                }
+            });
+        }
+    });
+    let failures = failures.into_inner().unwrap();
+    ensure!(
+        failures.is_empty(),
+        "{} units failed:\n{}",
+        failures.len(),
+        failures[0]
+    );
+    Ok(())
+}
+
+pub fn build(jobs: u16) -> Result<()> {
+    let toolchain = Toolchain::discover()?;
+    let directory = build_directory("nvk");
+    let build = directory.join("build");
+    let (_, path) = paths(&directory)?;
+    fs::create_dir_all(&directory)?;
+    setup(&directory, &build, &path)?;
+    generate(&build, &path)?;
+    let libc = gpu().join("compat/libc");
+    let includes = include_flags(&toolchain.clang, &libc)?;
+    bindings(&build, &path, &includes)?;
+    check_float_crossings(&build)?;
+
+    let objects = directory.join("objects");
+    fs::create_dir_all(&objects)?;
+    let mut common = includes;
+    common.extend(TARGET_FLAGS.map(str::to_owned));
+    common.extend(ADDED_DEFINES.map(|define| format!("-D{define}")));
+    common.push(format!("-I{}", gpu().join("compat/mesa").display()));
+    let ninja = tool("ninja", "generators/bin")?;
+    let units = units(&build, &objects, &ninja, &path, &common)?;
+    compile(&toolchain.clang, &build, &units, jobs)?;
+
+    let archive = directory.join("libstela-nvk.a");
+    if archive.is_file() {
+        fs::remove_file(&archive)?;
+    }
+    exec(
+        Command::new(&toolchain.archiver)
+            .arg("rcs")
+            .arg(&archive)
+            .args(units.iter().map(|unit| &unit.output)),
+    )?;
+    println!("{} objects in {}", units.len(), archive.display());
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retargeting_keeps_a_units_own_flags_and_drops_the_hosts() {
+        let words = [
+            "cc",
+            "-Iinclude",
+            "-DMESA_DEBUG=0",
+            "-DHAVE_ZLIB",
+            "-Wall",
+            "-MD",
+            "-MQ",
+            "out",
+            "-MF",
+            "out.d",
+            "-fPIC",
+            "-c",
+            "a.c",
+            "-o",
+            "a.o",
+        ]
+        .map(str::to_owned);
+        let common = ["--target=x".to_owned()];
+        assert_eq!(
+            retarget(&words, &common),
+            ["--target=x", "-Iinclude", "-DMESA_DEBUG=0", "-c", "a.c"]
+        );
+    }
+
+    #[test]
+    fn a_mention_is_a_whole_identifier() {
+        assert!(mentions(
+            "x = _mesa_half_to_float(y)",
+            "_mesa_half_to_float"
+        ));
+        assert!(!mentions(
+            "_mesa_half_to_float_slow(y)",
+            "_mesa_half_to_float"
+        ));
+    }
+}

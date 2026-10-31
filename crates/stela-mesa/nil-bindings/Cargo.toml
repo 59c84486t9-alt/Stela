@@ -1,0 +1,16 @@
+[package]
+name = "stela-mesa-nil-bindings"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "MIT"
+
+[lib]
+name = "nil_rs_bindings"
+path = "../../../target/gpu/nvk/build/src/nouveau/nil/nil_bindings.rs"
+
+[lints.rust]
+warnings = "allow"
+
+[dependencies]
+std = { package = "stela-mesa-std", path = "../std" }

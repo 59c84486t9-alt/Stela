@@ -1,0 +1,20 @@
+[package]
+name = "stela-mesa-nak-ir-proc"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "MIT"
+
+[lib]
+name = "nak_ir_proc"
+path = "../../../third_party/mesa/src/nouveau/compiler/nak/ir_proc.rs"
+proc-macro = true
+
+[lints.rust]
+warnings = "allow"
+
+[dependencies]
+compiler_proc = { package = "stela-mesa-compiler-proc", path = "../compiler-proc" }
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }

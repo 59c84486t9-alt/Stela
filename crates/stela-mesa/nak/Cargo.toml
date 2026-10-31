@@ -1,0 +1,25 @@
+[package]
+name = "stela-mesa-nak"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "MIT"
+
+[lib]
+name = "nak_rs"
+path = "../../../third_party/mesa/src/nouveau/compiler/nak/lib.rs"
+
+[lints.rust]
+warnings = "allow"
+
+[dependencies]
+std = { package = "stela-mesa-std", path = "../std" }
+rustc-hash = { package = "stela-mesa-rustc-hash", path = "../rustc-hash" }
+bitview = { package = "stela-mesa-bitview", path = "../bitview" }
+compiler = { package = "stela-mesa-compiler", path = "../compiler" }
+nak_bindings = { package = "stela-mesa-nak-bindings", path = "../nak-bindings" }
+nak_ir_proc = { package = "stela-mesa-nak-ir-proc", path = "../nak-ir-proc" }
+nak_latencies = { package = "stela-mesa-nak-latencies", path = "../nak-latencies" }
+nv_push_rs = { package = "stela-mesa-nv-push", path = "../nv-push" }
+nvidia_headers = { package = "stela-mesa-nvidia-headers", path = "../nvidia-headers" }
+paste = "1"
