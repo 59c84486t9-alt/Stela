@@ -7,10 +7,15 @@
 //! dictionary is a SET of SEQUENCE { UTF8 key, value } pairs in ascending
 //! key order, as the 26A434 restore ramdisk sends it (`o`, `skg`, `skt`),
 //! not DER's encoded-pair order. `o=oskgp`, `skt=1`, `skg=1` requests the SIK.
+//! `skt=7`, `skg=2` requests the local signing key: AMFI's
+//! `AMFIInitializeLocalSigningPublicKey_Thread` (0x2ad5a58) asks for it and
+//! keeps only a 97-byte reply, an uncompressed P-384 point.
 //!
 //! P-256 is Stela's system-identity policy, not a recovered Apple hardware
 //! KDF or an Apple-certified identity. The private scalar is derived
 //! from provisioned machine roots, kept only here and zeroized on drop.
+//! The local signing key is Stela's in the same way; only its public half is
+//! served, as nothing signs with it here.
 //! Key rotation and other key types are separate unsupported operations.
 use super::{
     Fields,
@@ -20,6 +25,7 @@ use crate::Result;
 use alloc::{format, string::String};
 use hmac::{Hmac, Mac};
 use p256::{SecretKey, elliptic_curve::sec1::ToEncodedPoint};
+use sha2::{Digest, Sha384};
 use stela_contracts::refuse;
 use stela_crypto::Sha256;
 use stela_formats::der::{self, Cursor};
@@ -29,6 +35,7 @@ pub(super) const PERFORM_OPERATION: u8 = 0x22;
 /// Decoding the AP format does not check the security semantics of creation.
 pub(super) enum Operation<'a> {
     PublicIdentity,
+    PublicLocalSigning,
     CreateReference {
         kind: u32,
     },
@@ -43,7 +50,7 @@ pub(super) enum Operation<'a> {
 
 #[derive(PartialEq, Eq)]
 enum ParameterOperation {
-    PublicIdentity,
+    PublicKey,
     CreateReference,
     AttestReference,
     SignReference,
@@ -52,17 +59,23 @@ const PUBLIC_HANDLE: u32 = u32::MAX;
 const PUBLIC_OPERATIONS: [u32; 2] = [0, 2];
 const IDENTITY_TYPE: u32 = 1;
 const IDENTITY_GENERATION: u32 = 1;
+const LOCAL_SIGNING_TYPE: u32 = 7;
+const LOCAL_SIGNING_GENERATION: u32 = 2;
 const SCALAR_DOMAIN: &[u8] = b"Stela SEP system identity P-256 v1\0";
+const LOCAL_SIGNING_DOMAIN: &[u8] = b"Stela SEP local signing P-384 v1\0";
 const MAX_SCALAR_ATTEMPTS: u32 = 256;
 const PUBLIC_BYTES: usize = 65;
+const LOCAL_SIGNING_PUBLIC_BYTES: usize = 97;
 
 pub(super) enum PublicQuery {
     Identity,
+    LocalSigning,
 }
 
 pub(super) struct SystemKeys {
     root: Zeroizing<[u8; 32]>,
     identity: Option<(SecretKey, [u8; PUBLIC_BYTES])>,
+    local_signing: Option<[u8; LOCAL_SIGNING_PUBLIC_BYTES]>,
 }
 
 impl SystemKeys {
@@ -70,6 +83,7 @@ impl SystemKeys {
         Self {
             root,
             identity: None,
+            local_signing: None,
         }
     }
 
@@ -80,6 +94,7 @@ impl SystemKeys {
     ) -> Result<alloc::vec::Vec<u8>> {
         match operation {
             Operation::PublicIdentity => Ok(self.public(PublicQuery::Identity)?.to_vec()),
+            Operation::PublicLocalSigning => Ok(self.public(PublicQuery::LocalSigning)?.to_vec()),
             Operation::CreateReference { kind } => ReferenceKey::create(&self.root, kind, entropy),
             Operation::SignReference { blob, digest } => {
                 let reference = ReferenceKey::open(&self.root, blob)?;
@@ -118,6 +133,12 @@ impl SystemKeys {
                 }
                 Ok(&self.identity.as_ref().unwrap().1)
             }
+            PublicQuery::LocalSigning => {
+                if self.local_signing.is_none() {
+                    self.local_signing = Some(local_signing_public(&self.root)?);
+                }
+                Ok(self.local_signing.as_ref().unwrap())
+            }
         }
     }
 }
@@ -138,6 +159,25 @@ fn identity_secret(root: &[u8; 32]) -> Result<SecretKey> {
         }
     }
     Err(refuse!("SEP system identity scalar derivation exhausted"))
+}
+
+fn local_signing_public(root: &[u8; 32]) -> Result<[u8; LOCAL_SIGNING_PUBLIC_BYTES]> {
+    for counter in 0..MAX_SCALAR_ATTEMPTS {
+        let candidate = Zeroizing::new(<[u8; 48]>::from(
+            Sha384::new()
+                .chain_update(LOCAL_SIGNING_DOMAIN)
+                .chain_update(counter.to_be_bytes())
+                .chain_update(root)
+                .finalize(),
+        ));
+        if let Ok(secret) = p384::SecretKey::from_slice(candidate.as_ref()) {
+            let point = secret.public_key().to_encoded_point(false);
+            let mut public = [0; LOCAL_SIGNING_PUBLIC_BYTES];
+            public.copy_from_slice(point.as_bytes());
+            return Ok(public);
+        }
+    }
+    Err(refuse!("SEP local signing scalar derivation exhausted"))
 }
 
 pub(super) fn operation<'a>(variant: u32, fields: &mut Fields<'a>) -> Result<Operation<'a>> {
@@ -161,7 +201,7 @@ pub(super) fn operation<'a>(variant: u32, fields: &mut Fields<'a>) -> Result<Ope
     outer.end()?;
     let mut pairs = Cursor(set.value);
     let mut previous: Option<&[u8]> = None;
-    let (mut operation, mut key_type, mut generation) = (None, false, false);
+    let (mut operation, mut key_type, mut generation) = (None, None, None);
     let (mut reference_class, mut reference_type, mut reference_options) = (None, None, None);
     let mut reference_blob = None;
     let mut digest = None;
@@ -177,7 +217,7 @@ pub(super) fn operation<'a>(variant: u32, fields: &mut Fields<'a>) -> Result<Ope
         match key {
             b"o" => {
                 operation = Some(match entry.take(12)?.value {
-                    b"oskgp" => ParameterOperation::PublicIdentity,
+                    b"oskgp" => ParameterOperation::PublicKey,
                     b"oc" => ParameterOperation::CreateReference,
                     b"osa" => ParameterOperation::AttestReference,
                     b"osgn" => ParameterOperation::SignReference,
@@ -185,17 +225,20 @@ pub(super) fn operation<'a>(variant: u32, fields: &mut Fields<'a>) -> Result<Ope
                 });
             }
             b"skt" => {
-                if key_type || der::unsigned(entry.take(2)?.value)? != [IDENTITY_TYPE as u8] {
+                let value = parameter_number(&mut entry)?;
+                if key_type.is_some() || ![IDENTITY_TYPE, LOCAL_SIGNING_TYPE].contains(&value) {
                     return Err(refuse!("SEP system-key type is not implemented"));
                 }
-                key_type = true;
+                key_type = Some(value);
             }
             b"skg" => {
-                if generation || der::unsigned(entry.take(2)?.value)? != [IDENTITY_GENERATION as u8]
+                let value = parameter_number(&mut entry)?;
+                if generation.is_some()
+                    || ![IDENTITY_GENERATION, LOCAL_SIGNING_GENERATION].contains(&value)
                 {
                     return Err(refuse!("SEP system-key generation is not implemented"));
                 }
-                generation = true;
+                generation = Some(value);
             }
             b"bc" => reference_class = Some(parameter_number(&mut entry)?),
             b"kt" => reference_type = Some(parameter_number(&mut entry)?),
@@ -209,8 +252,8 @@ pub(super) fn operation<'a>(variant: u32, fields: &mut Fields<'a>) -> Result<Ope
     let reference_fields = [reference_class, reference_type, reference_options];
     match operation {
         Some(ParameterOperation::CreateReference) => {
-            if key_type
-                || generation
+            if key_type.is_some()
+                || generation.is_some()
                 || reference_blob.is_some()
                 || digest.is_some()
                 || reference_fields.iter().any(Option::is_none)
@@ -238,8 +281,8 @@ pub(super) fn operation<'a>(variant: u32, fields: &mut Fields<'a>) -> Result<Ope
         }
         Some(ParameterOperation::SignReference) => {
             if transport_operation != 0
-                || key_type
-                || generation
+                || key_type.is_some()
+                || generation.is_some()
                 || reference_fields.iter().any(Option::is_some)
             {
                 return Err(refuse!(
@@ -261,8 +304,8 @@ pub(super) fn operation<'a>(variant: u32, fields: &mut Fields<'a>) -> Result<Ope
                 ));
             }
             if transport_operation != 0
-                || key_type
-                || generation
+                || key_type.is_some()
+                || generation.is_some()
                 || reference_class.is_some()
                 || reference_type.is_some()
                 || reference_options.is_some_and(|v| v != reference_key::OPTIONS)
@@ -275,10 +318,7 @@ pub(super) fn operation<'a>(variant: u32, fields: &mut Fields<'a>) -> Result<Ope
                 reference_blob.ok_or(refuse!("SEP reference-key attestation has no reference"))?;
             Ok(Operation::AttestReference { blob })
         }
-        Some(ParameterOperation::PublicIdentity) => {
-            if !key_type || !generation {
-                return Err(refuse!("SEP system-key dictionary is incomplete"));
-            }
+        Some(ParameterOperation::PublicKey) => {
             if reference_fields.iter().any(Option::is_some)
                 || reference_blob.is_some()
                 || digest.is_some()
@@ -287,7 +327,14 @@ pub(super) fn operation<'a>(variant: u32, fields: &mut Fields<'a>) -> Result<Ope
                     "SEP system-key public query carries reference-key parameters"
                 ));
             }
-            Ok(Operation::PublicIdentity)
+            match (key_type, generation) {
+                (None, _) | (_, None) => Err(refuse!("SEP system-key dictionary is incomplete")),
+                (Some(IDENTITY_TYPE), Some(IDENTITY_GENERATION)) => Ok(Operation::PublicIdentity),
+                (Some(LOCAL_SIGNING_TYPE), Some(LOCAL_SIGNING_GENERATION)) => {
+                    Ok(Operation::PublicLocalSigning)
+                }
+                _ => Err(refuse!("SEP system-key generation is not implemented")),
+            }
         }
         None => Err(refuse!("SEP system-key dictionary is incomplete")),
     }
@@ -458,5 +505,18 @@ mod tests {
         assert_eq!(public, reopened.public(PublicQuery::Identity).unwrap());
         let mut other = SystemKeys::new(Zeroizing::new([2; 32]));
         assert_ne!(public, other.public(PublicQuery::Identity).unwrap());
+    }
+
+    #[test]
+    fn the_local_signing_key_is_a_machine_bound_p384_point() {
+        let root = Zeroizing::new([1; 32]);
+        let mut first = SystemKeys::new(root.clone());
+        let public = first.public(PublicQuery::LocalSigning).unwrap().to_vec();
+        p384::PublicKey::from_sec1_bytes(&public).unwrap();
+        assert_eq!(public.len(), LOCAL_SIGNING_PUBLIC_BYTES);
+        let mut reopened = SystemKeys::new(root);
+        assert_eq!(public, reopened.public(PublicQuery::LocalSigning).unwrap());
+        let mut other = SystemKeys::new(Zeroizing::new([2; 32]));
+        assert_ne!(public, other.public(PublicQuery::LocalSigning).unwrap());
     }
 }
