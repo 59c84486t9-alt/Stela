@@ -14,7 +14,9 @@ pub mod mac;
 // Register names from mt76 `mt792x_regs.h` and `mt7921/regs.h`.
 const MT_PCIE_MAC_INT_ENABLE: u32 = 0x10188;
 const MT_WFDMA0_RST: u32 = 0xd4100;
+const MT_MCU_CMD: u32 = 0xd41f0;
 const MT_MCU2HOST_SW_INT_ENA: u32 = 0xd41f4;
+const MT_WFDMA0_HOST_INT_STA: u32 = 0xd4200;
 const MT_WFDMA0_HOST_INT_ENA: u32 = 0xd4204;
 const MT_WFDMA0_GLO_CFG: u32 = 0xd4208;
 const MT_WFDMA0_RST_DTX_PTR: u32 = 0xd420c;

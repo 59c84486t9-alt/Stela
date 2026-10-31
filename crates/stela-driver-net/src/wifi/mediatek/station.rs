@@ -70,6 +70,14 @@ impl<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> St
     }
 }
 
+#[cfg(test)]
+impl<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> Mt7925<I, Q, C, S> {
+    /// One pass with no keeper behind it, for what the link says after it.
+    pub(crate) fn link_mut(&mut self) -> &mut ManagedLink<I, Q, C, S> {
+        &mut self.link
+    }
+}
+
 impl<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> Link
     for Mt7925<I, Q, C, S>
 {
@@ -81,6 +89,9 @@ impl<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> Li
     }
     fn signals(&self) -> bool {
         self.link.signals()
+    }
+    fn due_us(&self) -> Option<u64> {
+        self.link.due_us()
     }
     fn transmit(&mut self, frame: &[u8]) -> Result<(), LinkError> {
         self.link.transmit(frame)

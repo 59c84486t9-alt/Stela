@@ -379,7 +379,8 @@ pub type MediatekWifi = mediatek::station::Wifi<MediatekOwner>;
 pub(super) unsafe fn mediatek_wifi(
     services: &dyn NativeServices,
     address: Address,
-    inputs: mediatek::attach::Inputs,
+    completion: Option<crate::bus::irq::MsiMessage>,
+    mut inputs: mediatek::attach::Inputs,
 ) -> Result<Located<mediatek::attach::Attached<MediatekOwner>>, Failure> {
     let refused = |error: ServiceError| (Error::Native(error), None);
     let Claimed {
@@ -393,8 +394,15 @@ pub(super) unsafe fn mediatek_wifi(
         .bytes()
         .and_then(|bytes| Ok((registers.address(0, bytes)?, bytes)))
         .map_err(|error| refused(ServiceError::Mapping(error)))?;
-    // mt7925_pci_probe: memory decoding and bus mastering, polled.
+    // mt7925_pci_probe: memory decoding and bus mastering, then one MSI.
     function.enable_polled();
+    inputs.vector = match (completion, function.interrupts().msi) {
+        (Some(message), Some(msi)) => {
+            function.enable_msi(msi, message);
+            true
+        }
+        _ => false,
+    };
     let owner = Arc::new((function, registers));
     let kept = Box::new(owner.clone()) as Box<dyn Any>;
     // SAFETY: the mount claimed the stopped function, mapped its BAR0

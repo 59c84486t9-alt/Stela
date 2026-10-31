@@ -303,6 +303,7 @@ impl Link for Adapter {
         match self {
             #[cfg(feature = "native-acpi")]
             Self::IntelWifi(device) => device.due_us(),
+            Self::MediatekWifi(device) => device.due_us(),
             Self::RealtekWifi(device) => device.due_us(),
             _ => None,
         }
@@ -660,6 +661,7 @@ unsafe fn intel_wifi(
 unsafe fn mediatek_wifi(
     services: &dyn NativeServices,
     address: Address,
+    completion: Option<crate::bus::irq::MsiMessage>,
     wifi: &WifiInputs<'_>,
     regulatory: &Option<
         Result<
@@ -695,6 +697,7 @@ unsafe fn mediatek_wifi(
         firmware: wifi.firmware,
         pages: services.pages(),
         clock: wifi.clock,
+        vector: false,
         aspm,
         database: database.clone(),
         network: wifi.network.clone(),
@@ -702,7 +705,7 @@ unsafe fn mediatek_wifi(
         entropy,
     };
     // SAFETY: forwarded from the caller.
-    unsafe { native::mediatek_wifi(services, address, inputs) }
+    unsafe { native::mediatek_wifi(services, address, completion, inputs) }
 }
 
 /// Attach the RTL8822C at `address` for `wifi.network`, once the regulatory
@@ -1063,6 +1066,7 @@ pub unsafe fn probe_with_provider(
                             mediatek_wifi(
                                 services,
                                 address,
+                                handoff.completion,
                                 wifi,
                                 &devices.regulatory,
                                 &bridges,
@@ -1577,6 +1581,7 @@ mod tests {
             mediatek_wifi(
                 &services,
                 address,
+                None,
                 &WifiInputs {
                     clock: handoff.clock,
                     observations: Default::default(),

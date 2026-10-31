@@ -9,7 +9,13 @@
 //! The platform still supplies the controller and independent drain fences.
 
 use super::*;
-use crate::{Link, LinkError, Mac};
+use crate::{
+    Link, LinkError, Mac,
+    wifi::mediatek::{
+        bootstrap,
+        control::{self, Control},
+    },
+};
 use alloc::{collections::VecDeque, format, vec::IntoIter};
 
 const DATA_FRAMES: usize = 64;
@@ -102,7 +108,15 @@ struct State<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> {
     // One original recoverable RX error deferred by successful packet I/O.
     // The next packet I/O reports it before polling or publishing again.
     deferred_error: Option<LinkControlError>,
+    /// The function raises a vector the caller has routed.
+    vector: bool,
+    /// The device may raise it now.
+    armed: bool,
 }
+/// How long a link that signals sleeps at most: Linux's timers are the
+/// jiffies behind each of these passes.
+const TIMER_TICK_US: u64 = 100_000;
+
 struct ServiceOutcome {
     result: Result<LinkProgress, LinkControlError>,
     soft_rx: bool,
@@ -169,6 +183,8 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
                 released: None,
                 epoch: None,
                 deferred_error: None,
+                vector: false,
+                armed: false,
             })),
         })
     }
@@ -330,6 +346,11 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
         Self::reconcile(s);
         Ok(result?)
     }
+    /// Sleep on the function's vector once the port is open.
+    pub fn with_vector(mut self) -> Self {
+        self.state_mut().vector = true;
+        self
+    }
     /// The OS's power save setting, on by default as Linux's
     /// CONFIG_CFG80211_DEFAULT_PS; it applies while the port is open.
     pub fn set_power_save(&mut self, enabled: bool) {
@@ -372,7 +393,39 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
     /// frontend queues keep their batch and apply backpressure without making
     /// an invented completion or discarding control-port/event bytes.
     pub fn service(&mut self) -> Result<LinkProgress, LinkControlError> {
-        self.service_inner().result
+        Self::capture(self.state_mut())?;
+        let result = self.service_inner().result;
+        let rearmed = Self::rearm(self.state_mut());
+        result.and_then(|progress| rearmed.map(|()| progress))
+    }
+    /// The vector stays quiet through a pass that follows it.
+    fn capture(s: &mut State<I, Q, C, S>) -> Result<(), LinkControlError> {
+        if !s.armed {
+            return Ok(());
+        }
+        let captured = Self::control(s).capture_interrupts();
+        s.armed = captured.is_ok();
+        captured.map_err(Self::control_failed)
+    }
+    /// A pass over, the vector ends the next sleep; with the port shut the
+    /// link polls again.
+    fn rearm(s: &mut State<I, Q, C, S>) -> Result<(), LinkControlError> {
+        let open = s.vector && Self::up(s);
+        let armed = core::mem::replace(&mut s.armed, open);
+        let control = Self::control(s);
+        match (armed, open) {
+            (false, false) => Ok(()),
+            (false, true) => control.open_interrupts(),
+            (true, true) => control.unmask_interrupts(),
+            (true, false) => control.mask_interrupts(),
+        }
+        .map_err(Self::control_failed)
+    }
+    fn control(s: &mut State<I, Q, C, S>) -> &mut Control<I> {
+        &mut s.client.client.state_mut().controller.state_mut().control
+    }
+    fn control_failed(error: control::Error) -> LinkControlError {
+        PolicyError::Client(Error::Bootstrap(bootstrap::Error::Control(error))).into()
     }
     fn service_inner(&mut self) -> ServiceOutcome {
         let now = self.now();
@@ -824,6 +877,23 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> Link for Managed
     }
     fn carrier(&mut self) -> bool {
         Self::up(self.state())
+    }
+    /// Once its port is open; the handshake polls, as on the other radios.
+    fn signals(&self) -> bool {
+        let s = self.state();
+        s.vector && Self::up(s)
+    }
+    /// The timers no signal ends, or at once while a pass found work, as NAPI
+    /// polls until a poll comes back short.
+    fn due_us(&self) -> Option<u64> {
+        let s = self.state();
+        self.signals().then(|| {
+            let idle = s.client.client.rings_empty()
+                && s.pending.is_none()
+                && s.released.is_none()
+                && s.notices.is_empty();
+            self.now() + if idle { TIMER_TICK_US } else { 0 }
+        })
     }
     fn transmit(&mut self, frame: &[u8]) -> Result<(), LinkError> {
         crate::check_frame(frame)?;

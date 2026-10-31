@@ -25,6 +25,13 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         self.poll_inner(now, source, policy, None, None)
     }
 
+    /// Whether the last pass left the receive rings nothing to give, as the
+    /// end of a NAPI poll does.
+    pub(super) fn rings_empty(&self) -> bool {
+        let s = self.state();
+        s.rings_empty && s.pending_rx.is_empty()
+    }
+
     pub(super) fn poll_inner(
         &mut self,
         now: u64,
@@ -63,12 +70,14 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         }
         if s.pending_rx.is_empty() {
             let raw = s.controller.poll_events().map_err(Error::Bootstrap)?;
+            s.rings_empty = raw.is_empty();
             s.pending_rx
                 .extend(raw.into_iter().map(|frame| receive::ReceivedFrame {
                     queue: receive::Queue::Event,
                     frame,
                 }));
             if let Some(f) = s.controller.poll_data().map_err(Error::Bootstrap)? {
+                s.rings_empty = false;
                 s.pending_rx.push_back(receive::ReceivedFrame {
                     queue: receive::Queue::Data,
                     frame: f,
