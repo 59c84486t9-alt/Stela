@@ -384,9 +384,10 @@ pub(in crate::probe) unsafe fn bring_up(
     let clock = handoff.clock;
     let isolated = hosts
         .iter()
-        .copied()
-        .chain(slots.iter().map(|slot| slot.address))
-        .all(|address| services.dma_translated(address));
+        .all(|address| services.dma_translated(*address))
+        && slots
+            .iter()
+            .all(|slot| services.dma_subtree_translated(slot.address));
     for &address in &hosts {
         // SAFETY: as for tg3 in probe; the look found every bridge.
         match unsafe { attach(services, address, &bridges, clock, isolated) } {
@@ -443,10 +444,76 @@ pub(in crate::probe) unsafe fn bring_up(
                 continue;
             }
         };
-        for address in arrivals.functions {
-            if let Err(error) = services.requester_arrived(address, bridge) {
-                devices.failures.push((address, Error::Native(error)));
+        // Observe every present RID in the owned reserved subtree, including
+        // functions adoption cannot place (such as ARI functions above 7).
+        // Omitting such a PF could misclassify another function as physical.
+        // SAFETY: this is the kept original slot bridge, still exclusively owned.
+        let configuration = unsafe {
+            slot.window
+                .config(bridge.bus, bridge.device, bridge.function)
+        };
+        let (first, last) = (configuration.read8(0x19), configuration.read8(0x1a));
+        if first <= bridge.bus
+            || last < first
+            || first < slot.window.start_bus
+            || last > slot.window.end_bus
+        {
+            devices.failures.push((
+                bridge,
+                Error::Native(ServiceError::Refused(
+                    "PCI arrival has no owned downstream bus range",
+                )),
+            ));
+            continue;
+        }
+        let mut functions = Vec::new();
+        for bus in first..=last {
+            for number in 0..=255u16 {
+                let address = Address {
+                    segment: bridge.segment,
+                    bus,
+                    device: (number >> 3) as u8,
+                    function: (number & 7) as u8,
+                };
+                // SAFETY: the original slot owns this complete reserved range;
+                // no child driver has started or configuration writer overlaps.
+                let configuration =
+                    unsafe { slot.window.config(bus, address.device, address.function) };
+                if configuration.read16(0) != u16::MAX {
+                    functions.push(address);
+                }
             }
+        }
+        let mut read32 = |address: Address, offset: u16| {
+            if address.segment != slot.window.segment
+                || !(slot.window.start_bus..=slot.window.end_bus).contains(&address.bus)
+                || (address != bridge && !functions.contains(&address))
+                || address.device >= 32
+                || address.function >= 8
+                || offset > 4092
+                || !offset.is_multiple_of(4)
+            {
+                return None;
+            }
+            // SAFETY: bring_up owns this exact complete adopted subtree and
+            // its original bridge under the same kept mapped ECAM window.
+            let config = unsafe {
+                slot.window
+                    .config(address.bus, address.device, address.function)
+            };
+            Some(config.read32(offset))
+        };
+        // SAFETY: adopt just completed the entire subtree under this owned
+        // slot. No child driver has started; all prior PF/VF assignments and
+        // the bridge's updated routing remain owned throughout observation.
+        if let Err(error) = unsafe {
+            services.requesters_arrived(crate::probe::services::ArrivalInventory {
+                bridge,
+                functions: &functions,
+                read32: &mut read32,
+            })
+        } {
+            devices.failures.push((bridge, Error::Native(error)));
         }
         for address in arrivals.payload_mismatches {
             devices.warnings.push((

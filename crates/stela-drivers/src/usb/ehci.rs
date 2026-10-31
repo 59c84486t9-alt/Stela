@@ -75,6 +75,7 @@ pub enum Error {
     Device(u32),
     Quarantined,
     Dma(DmaError),
+    Preparation(crate::bus::pci::requester::preparation::Error),
     Memory(MemoryError),
     Register,
     Exhausted,

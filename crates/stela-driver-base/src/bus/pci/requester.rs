@@ -15,6 +15,9 @@ use super::{
 };
 use crate::bus::mmio::owned::{Error as MappingError, Mapping};
 
+pub mod preparation;
+pub mod roles;
+
 const PM: u16 = 1;
 const MSI: u16 = 5;
 const PCIX: u16 = 7;

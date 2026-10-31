@@ -231,24 +231,21 @@ pub(super) unsafe fn ehci(
     clock: Clock,
 ) -> Result<(ehci::host::Shared, Arc<dyn DmaDomain>), Failure> {
     let refused = |error: ServiceError| (Error::Native(error), None);
-    let Claimed {
-        function,
-        domain,
-        bars,
-    } = claim(services, address).map_err(refused)?;
+    let mut requester = services.prepare_requester(address).map_err(refused)?;
+    let bars = requester.function_mut().bars();
     let registers = map(services, address, &bars, 0).map_err(refused)?;
     let resources = ehci::NativeResources {
-        pci: function,
+        requester,
         registers,
-        domain: domain.clone(),
         memory: services.pages(),
         clock,
     };
-    // SAFETY: the mount claimed the stopped function, its BAR0 mapped
-    // uncached and its own domain, with its interrupts masked; the caller's
-    // handoff stopped the BIOS owner and the companions.
+    // SAFETY: paired original configuration/root/BAR owners and masked/drained
+    // IRQ/work exclusion from the cold mount grant. The caller owns the BIOS
+    // handoff and companions. EHCI proves engine HALT and consumes the original
+    // root drain receipt before binding the domain or allocating its arena.
     match unsafe { ehci::attach(resources) } {
-        Ok(controller) => Ok((Rc::new(RefCell::new(controller)), domain)),
+        Ok((controller, domain)) => Ok((Rc::new(RefCell::new(controller)), domain)),
         Err(failure) => Err((Error::Ehci(failure.error), Some(Box::new(failure)))),
     }
 }
@@ -1196,6 +1193,23 @@ mod tests {
             device: 0,
             function: 0,
         }
+    }
+
+    #[test]
+    fn ehci_requests_original_preparation_without_a_stopped_or_bound_grant() {
+        let services = Refusing::default();
+        let clock = Clock {
+            ticks_per_microsecond: 1000,
+        };
+        // SAFETY: refusing services transfer no owner or hardware access.
+        let result = unsafe { ehci(&services, address(), clock) };
+        assert!(matches!(
+            result,
+            Err((Error::Native(ServiceError::Unavailable), None))
+        ));
+        assert_eq!(*services.requests.borrow(), [address()]);
+        assert_eq!(*services.preparations.borrow(), [address()]);
+        assert!(services.stopped.borrow().is_empty());
     }
 
     #[test]
