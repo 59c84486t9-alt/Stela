@@ -149,7 +149,11 @@ fn joint_resource_has_one_backing_for_broadcast_policy_and_publications() {
     );
     bus.write(0x28e3d0000, Width::Double, 0x1234, &mut access)
         .unwrap();
-    assert!(bus.read(0x28e3c0000, Width::Double, &mut access).is_err());
+    // A scalar load of the value leaves the entry for what consumes it.
+    assert_eq!(
+        bus.read(0x28e3c0000, Width::Double, &mut access),
+        Ok(0x1234)
+    );
     assert_eq!(
         publication.consume_entry(0, &mut access).unwrap().value,
         0x1234

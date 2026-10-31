@@ -89,6 +89,22 @@ fn initialized_backing_never_invents_readiness_power_ack_or_quota() {
 }
 
 #[test]
+fn the_metadata_load_ends_the_kexts_two_scalar_reads_of_an_entry() {
+    let mut bank = bank();
+    let mut latch = InterruptLatch::new();
+    write(&mut bank, 3, 0x1234, 1 << 54, &mut latch).unwrap();
+    let mut access = Access::new(0, 0, &mut latch);
+    assert_eq!(bank.read(3 * 16, Width::Double, &mut access), Ok(0x1234));
+    assert_eq!(bank.read(IRQ_STATUS, Width::Word, &mut access), Ok(1 << 3));
+    assert_eq!(
+        bank.read(3 * 16 + 8, Width::Double, &mut access),
+        Ok(NEW_DATA)
+    );
+    assert_eq!(bank.read(IRQ_STATUS, Width::Word, &mut access), Ok(0));
+    assert_eq!(bank.read(3 * 16 + 8, Width::Double, &mut access), Ok(0));
+}
+
+#[test]
 fn overwrite_dropped_timestamp_and_consume_are_actual_transport_effects() {
     let mut bank = bank();
     let mut latch = InterruptLatch::new();
@@ -96,8 +112,6 @@ fn overwrite_dropped_timestamp_and_consume_are_actual_transport_effects() {
     write(&mut bank, 3, 0x5678, 1 << 54, &mut latch).unwrap();
     let mut access = Access::new(0, 0, &mut latch);
     assert_eq!(bank.read(IRQ_STATUS, Width::Word, &mut access), Ok(1 << 3));
-    assert!(bank.read(3 * 16, Width::Double, &mut access).is_err());
-    assert!(bank.read(3 * 16 + 8, Width::Double, &mut access).is_err());
     assert_eq!(
         bank.consume_entry(3, &mut access).unwrap(),
         Entry {
