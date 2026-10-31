@@ -194,9 +194,9 @@ impl<Q: BootIo, B: BiosIo> Ax200Mcc<'_, Q, B> {
                         &self.responses.last().unwrap().raw,
                     )
                     .map_err(Ax200MccError::Schema)?;
-                    // AX200 uses the source HR extended (non-UHB) inventory.
+                    let family = self.setup.lari.radio.initialized.boot.family();
                     let channels = profile
-                        .channel_observations(Inventory::Extended)
+                        .channel_observations(Inventory::of(family))
                         .map_err(Ax200MccError::ChannelInventory)?;
                     self.profiles.push(profile);
                     self.channels = channels;

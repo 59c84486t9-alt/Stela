@@ -348,8 +348,18 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo> Ax200Country<'_, Q, B, O> {
                 .map_err(Ax200CountryError::Schema)?;
                 self.profile = Some(profile);
                 let profile = self.profile.as_ref().unwrap();
+                let family = self
+                    .board
+                    .scan
+                    .mcc
+                    .setup
+                    .lari
+                    .radio
+                    .initialized
+                    .boot
+                    .family();
                 self.channels = profile
-                    .channel_observations(Inventory::Extended)
+                    .channel_observations(Inventory::of(family))
                     .map_err(Ax200CountryError::Inventory)?;
                 let requested = self.request.unwrap().country;
                 if profile.country != requested {

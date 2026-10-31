@@ -5,6 +5,7 @@
 //! Pure source MCC channel observations. Neither valid flags nor a decoded
 //! country supply OS/location permission, programmed power or a publication lease.
 use super::{Capabilities, Response};
+use crate::wifi::intel::firmware::Family;
 use alloc::vec::Vec;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -14,6 +15,13 @@ pub enum Inventory {
     Unii9,
 }
 impl Inventory {
+    /// The table `iwl_parse_mcc_info` reads for `family`'s radio.
+    pub const fn of(family: Family) -> Self {
+        match family {
+            Family::Ax200 => Self::Extended,
+            Family::Ax210 => Self::UltraHighBand,
+        }
+    }
     pub const fn channel_count(self) -> usize {
         match self {
             Self::Extended => 51,
@@ -211,6 +219,11 @@ mod tests {
             channels,
             raw: Vec::new(),
         }
+    }
+    #[test]
+    fn each_family_reads_the_table_its_radio_answers_with() {
+        assert_eq!(Inventory::of(Family::Ax200).channel_count(), 51);
+        assert_eq!(Inventory::of(Family::Ax210).channel_count(), 110);
     }
     #[test]
     fn channel_inventory_boundaries_and_no_invented_missing_channels() {
