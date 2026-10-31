@@ -15,6 +15,12 @@
 //! runs on keeps a small cache of free blocks per class ([`Heap::tag_cpu`]),
 //! which it takes from and gives back to without the lock, moving them to
 //! and from the class lists [`BATCH`] at a time under it.
+//!
+//! Small blocks that live for different lengths of time leave holes, and a
+//! long run can hold a fifth of the heap free with no extent of a few MiB, so
+//! the engine keeps the heap's end out of the main bins ([`Heap::reserve_tail`]):
+//! a large request the main bins cannot serve takes it. Linux keeps
+//! `ZONE_MOVABLE` and CMA apart from unmovable allocations for the same reason.
 use core::{
     alloc::{GlobalAlloc, Layout},
     cell::UnsafeCell,
@@ -54,6 +60,9 @@ const FLAGS: usize = FREE | PREVIOUS_FREE;
 /// Bins per power of two.
 const SUB_BITS: u32 = 4;
 const SUBS: usize = 1 << SUB_BITS;
+/// The smallest request the reserve serves while the class lists hold
+/// blocks: what a growing table asks for, which has no smaller form.
+const LARGE_BYTES: usize = 1 << 20;
 /// Blocks smaller than this share the first level, a bin per granule.
 const LINEAR: usize = GRANULE << SUB_BITS;
 /// First levels: the linear one, then one per power of two from [`LINEAR`].
@@ -156,106 +165,20 @@ fn class(layout: Layout) -> Option<usize> {
     (layout.align() <= SMALL_ALIGNMENT && bytes <= SMALLEST << (CLASSES - 1))
         .then(|| (bytes / SMALLEST).trailing_zeros() as usize)
 }
-struct State {
-    /// The heap's extent.
-    start: usize,
-    end: usize,
-    /// Nonempty levels, each level's nonempty bins, and the bins' free
-    /// blocks.
+/// Free blocks by size: the nonempty levels, each level's nonempty bins, and
+/// the bins' blocks.
+struct Bins {
     levels: u64,
     bins: [u16; LEVELS],
     heads: [[*mut Header; SUBS]; LEVELS],
-    /// Free blocks in the bins.
-    extents: usize,
-    small: [*mut Small; CLASSES],
-    ready: bool,
-    total: usize,
-    /// Bytes allocated and not freed, size-class blocks by their class.
-    live: usize,
-    /// Bytes carved from the bins and not released: live blocks and the
-    /// size-class blocks kept for reuse.
-    carved: usize,
-    peak: usize,
-    /// Allocations the bins served.
-    carves: u64,
-    /// Live allocations the bins served: count and bytes by [`large_bucket`].
-    large: [(u64, usize); LARGE_BUCKETS],
 }
 
-impl State {
-    /// Link free `block` into its bin.
-    ///
-    /// # Safety
-    /// The lock is held and `block` is a free block in no bin.
-    unsafe fn insert(&mut self, block: *mut Header) {
-        // SAFETY: the caller's free block, which holds its links.
-        let (level, sub) = bin(unsafe { size(block) });
-        let head = self.heads[level][sub];
-        // SAFETY: as above; `head`, when not null, is a binned free block.
-        unsafe {
-            links(block).write(Links {
-                next: head,
-                previous: ptr::null_mut(),
-            });
-            if !head.is_null() {
-                (*links(head)).previous = block;
-            }
-        }
-        self.heads[level][sub] = block;
-        self.bins[level] |= 1 << sub;
-        self.levels |= 1 << level;
-        self.extents += 1;
-    }
-
-    /// Unlink free `block` from its bin.
-    ///
-    /// # Safety
-    /// The lock is held and `block` is in its bin.
-    unsafe fn remove(&mut self, block: *mut Header) {
-        // SAFETY: the caller's binned free block and its binned neighbours.
-        unsafe {
-            let (level, sub) = bin(size(block));
-            let Links { next, previous } = links(block).read();
-            if !next.is_null() {
-                (*links(next)).previous = previous;
-            }
-            if previous.is_null() {
-                self.heads[level][sub] = next;
-                if next.is_null() {
-                    self.bins[level] &= !(1 << sub);
-                    if self.bins[level] == 0 {
-                        self.levels &= !(1 << level);
-                    }
-                }
-            } else {
-                (*links(previous)).next = next;
-            }
-        }
-        self.extents -= 1;
-    }
-
-    /// Tell the block after `block`, if any, where `block` starts and
-    /// whether it is free.
-    ///
-    /// # Safety
-    /// The lock is held and `block`'s header is current.
-    unsafe fn tell_following(&mut self, block: *mut Header) {
-        // SAFETY: the caller's block; the one after it, inside the heap, is
-        // a block whose header this updates.
-        unsafe {
-            let following = block as usize + size(block);
-            if following < self.end {
-                let following = following as *mut Header;
-                let free = if (*block).size & FREE != 0 {
-                    PREVIOUS_FREE
-                } else {
-                    0
-                };
-                (*following).previous = block as usize;
-                (*following).size = (*following).size & !PREVIOUS_FREE | free;
-            }
-        }
-    }
+impl Bins {
+    const EMPTY: Self = Self {
+        levels: 0,
+        bins: [0; LEVELS],
+        heads: [[ptr::null_mut(); SUBS]; LEVELS],
+    };
 
     /// A free block `fits` accepts: the first of the smallest bin all of
     /// whose blocks hold `need` bytes, else one of `need`'s own bin.
@@ -293,6 +216,139 @@ impl State {
         unsafe { bin_blocks(self.heads[level][sub]) }
             .find(|&block| fits(block))
             .unwrap_or(ptr::null_mut())
+    }
+
+    /// The largest free block's size: it is in the highest nonempty bin.
+    ///
+    /// # Safety
+    /// The lock is held.
+    unsafe fn largest(&self) -> usize {
+        if self.levels == 0 {
+            return 0;
+        }
+        let level = 63 - self.levels.leading_zeros() as usize;
+        let sub = 15 - self.bins[level].leading_zeros() as usize;
+        // SAFETY: the caller's lock.
+        unsafe { bin_blocks(self.heads[level][sub]) }
+            // SAFETY: binned free blocks, read with the lock held.
+            .map(|block| unsafe { size(block) })
+            .max()
+            .unwrap_or(0)
+    }
+}
+
+/// The bins of the blocks below [`State::floor`].
+const MAIN: usize = 0;
+/// The bins of the reserve's blocks.
+const RESERVE: usize = 1;
+
+struct State {
+    /// The heap's extent.
+    start: usize,
+    end: usize,
+    /// Where the reserve starts: the heap's end without one. No block
+    /// crosses it, so the block there may follow a free one.
+    floor: usize,
+    pools: [Bins; 2],
+    /// Free blocks in the bins.
+    extents: usize,
+    small: [*mut Small; CLASSES],
+    ready: bool,
+    total: usize,
+    /// Bytes allocated and not freed, size-class blocks by their class.
+    live: usize,
+    /// Bytes carved from the bins and not released: live blocks and the
+    /// size-class blocks kept for reuse.
+    carved: usize,
+    /// The part of `carved` in the reserve.
+    carved_reserve: usize,
+    peak: usize,
+    /// Allocations the bins served.
+    carves: u64,
+    /// Live allocations the bins served: count and bytes by [`large_bucket`].
+    large: [(u64, usize); LARGE_BUCKETS],
+}
+
+impl State {
+    /// The bins of `block`.
+    fn pool(&mut self, block: *mut Header) -> &mut Bins {
+        &mut self.pools[usize::from(block as usize >= self.floor)]
+    }
+
+    /// Link free `block` into its bin.
+    ///
+    /// # Safety
+    /// The lock is held and `block` is a free block in no bin.
+    unsafe fn insert(&mut self, block: *mut Header) {
+        // SAFETY: the caller's free block, which holds its links.
+        let (level, sub) = bin(unsafe { size(block) });
+        let pool = self.pool(block);
+        let head = pool.heads[level][sub];
+        // SAFETY: as above; `head`, when not null, is a binned free block.
+        unsafe {
+            links(block).write(Links {
+                next: head,
+                previous: ptr::null_mut(),
+            });
+            if !head.is_null() {
+                (*links(head)).previous = block;
+            }
+        }
+        pool.heads[level][sub] = block;
+        pool.bins[level] |= 1 << sub;
+        pool.levels |= 1 << level;
+        self.extents += 1;
+    }
+
+    /// Unlink free `block` from its bin.
+    ///
+    /// # Safety
+    /// The lock is held and `block` is in its bin.
+    unsafe fn remove(&mut self, block: *mut Header) {
+        // SAFETY: the caller's binned free block and its binned neighbours.
+        unsafe {
+            let (level, sub) = bin(size(block));
+            let Links { next, previous } = links(block).read();
+            if !next.is_null() {
+                (*links(next)).previous = previous;
+            }
+            if previous.is_null() {
+                let pool = self.pool(block);
+                pool.heads[level][sub] = next;
+                if next.is_null() {
+                    pool.bins[level] &= !(1 << sub);
+                    if pool.bins[level] == 0 {
+                        pool.levels &= !(1 << level);
+                    }
+                }
+            } else {
+                (*links(previous)).next = next;
+            }
+        }
+        self.extents -= 1;
+    }
+
+    /// Tell the block after `block`, if any, where `block` starts and
+    /// whether it is free.
+    ///
+    /// # Safety
+    /// The lock is held and `block`'s header is current.
+    unsafe fn tell_following(&mut self, block: *mut Header) {
+        // SAFETY: the caller's block; the one after it, inside the heap, is
+        // a block whose header this updates.
+        unsafe {
+            let following = block as usize + size(block);
+            if following < self.end {
+                let following = following as *mut Header;
+                let free = if (*block).size & FREE != 0 {
+                    PREVIOUS_FREE
+                } else {
+                    0
+                };
+                (*following).previous = block as usize;
+                (*following).size = (*following).size & !PREVIOUS_FREE | free;
+            }
+        }
     }
 
     fn count_large(&mut self, bytes: usize, allocated: bool) {
@@ -344,10 +400,12 @@ pub struct Heap {
     /// Cores tagged so far, and whether any is.
     tagged: AtomicUsize,
     any_tagged: AtomicBool,
-    /// `State::live` and `State::total` as the lock last left them, for
-    /// [`Heap::low`] to read without taking it.
+    /// `State::live`, `State::total` and the main bins' bytes and carved
+    /// bytes as the lock last left them, for [`Heap::low`] to read without
+    /// taking it.
     live: AtomicUsize,
     total: AtomicUsize,
+    main: AtomicUsize,
     carved: AtomicUsize,
     waits: AtomicU64,
 }
@@ -384,20 +442,21 @@ impl Heap {
             any_tagged: AtomicBool::new(false),
             live: AtomicUsize::new(0),
             total: AtomicUsize::new(0),
+            main: AtomicUsize::new(0),
             carved: AtomicUsize::new(0),
             waits: AtomicU64::new(0),
             state: UnsafeCell::new(State {
                 start: 0,
                 end: 0,
-                levels: 0,
-                bins: [0; LEVELS],
-                heads: [[ptr::null_mut(); SUBS]; LEVELS],
+                floor: 0,
+                pools: [Bins::EMPTY; 2],
                 extents: 0,
                 small: [ptr::null_mut(); CLASSES],
                 ready: false,
                 total: 0,
                 live: 0,
                 carved: 0,
+                carved_reserve: 0,
                 peak: 0,
                 carves: 0,
                 large: [(0, 0); LARGE_BUCKETS],
@@ -491,10 +550,41 @@ impl Heap {
         }
         state.start = start;
         state.end = end;
+        state.floor = end;
         // SAFETY: the guard and the one free block just written.
         unsafe { state.insert(block) };
         state.ready = true;
         state.total = end - start;
+    }
+
+    /// Keep the last `bytes` of an unused heap out of the main bins, for large
+    /// requests they cannot serve and for what they run out of.
+    ///
+    /// # Panics
+    /// When the heap has been used or holds no more than `bytes`.
+    pub fn reserve_tail(&self, bytes: usize) {
+        let _guard = self.lock();
+        // SAFETY: this live acquire/release guard excludes every metadata
+        // writer and masks local reentry until this state borrow ends.
+        let state = unsafe { &mut *self.state.get() };
+        let block = state.start as *mut Header;
+        let floor = state.end.saturating_sub(bytes) & !(GRANULE - 1);
+        assert!(state.ready && state.carved == 0 && bytes >= MIN_BLOCK);
+        assert!(floor >= state.start + MIN_BLOCK);
+        // SAFETY: the guard; an unused heap is its one free block, which the
+        // new header splits at a granule with a block's room on each side.
+        unsafe {
+            state.remove(block);
+            (*block).size = (floor - state.start) | FREE;
+            state.floor = floor;
+            state.insert(block);
+            let reserve = floor as *mut Header;
+            reserve.write(Header {
+                previous: block as usize,
+                size: (state.end - floor) | FREE | PREVIOUS_FREE,
+            });
+            state.insert(reserve);
+        }
     }
 
     /// Stop managing the heap's end beyond `keep` more bytes of its last
@@ -526,6 +616,7 @@ impl Heap {
             state.remove(block);
             (*block).size = (end - block as usize) | (*block).size & (FREE | PREVIOUS_FREE);
             state.end = end;
+            state.floor = state.floor.min(end);
             state.total -= released.len();
             state.insert(block);
             Some(released)
@@ -632,12 +723,14 @@ impl Heap {
     }
 
     /// Whether more than three quarters of the heap is allocated, as the
-    /// lock and each core's cache last left it, or so nearly all of it is out
-    /// of the bins that a large request may find no block: freed small blocks
-    /// wait in their classes, and what they free between live ones is holes.
+    /// lock and each core's cache last left it, or so nearly all of the main
+    /// bins' bytes are out of them that a large request may find no block:
+    /// freed small blocks wait in their classes, and what they free between
+    /// live ones is holes.
     pub fn low(&self) -> bool {
         let total = self.total.load(Ordering::Relaxed);
-        self.live() > total / 4 * 3 || self.carved.load(Ordering::Relaxed) > total / 16 * 15
+        self.live() > total / 4 * 3
+            || self.carved.load(Ordering::Relaxed) > self.main.load(Ordering::Relaxed) / 16 * 15
     }
 
     /// Bytes allocated and not freed: the class lists' and the caches'.
@@ -833,19 +926,13 @@ impl Heap {
     // The caller keeps the metadata guard; CPU cache counters remain
     // relaxed estimates even while this free-list metadata is exclusively read.
     fn usage_locked(&self, state: &State) -> Usage {
-        // The largest block is in the highest nonempty bin.
-        let largest = if state.levels == 0 {
-            0
-        } else {
-            let level = 63 - state.levels.leading_zeros() as usize;
-            let sub = 15 - state.bins[level].leading_zeros() as usize;
+        let largest = state
+            .pools
+            .iter()
             // SAFETY: the caller's guard.
-            unsafe { bin_blocks(state.heads[level][sub]) }
-                // SAFETY: binned free blocks, read with the guard held.
-                .map(|block| unsafe { size(block) })
-                .max()
-                .unwrap_or(0)
-        };
+            .map(|pool| unsafe { pool.largest() })
+            .max()
+            .unwrap_or(0);
         let live = state.live.saturating_add_signed(self.cached_live());
         Usage {
             total: state.total,
@@ -873,7 +960,12 @@ impl Drop for Guard<'_> {
         let state = unsafe { &*self.heap.state.get() };
         self.heap.live.store(state.live, Ordering::Relaxed);
         self.heap.total.store(state.total, Ordering::Relaxed);
-        self.heap.carved.store(state.carved, Ordering::Relaxed);
+        self.heap
+            .main
+            .store(state.floor - state.start, Ordering::Relaxed);
+        self.heap
+            .carved
+            .store(state.carved - state.carved_reserve, Ordering::Relaxed);
         self.heap.held.store(false, Ordering::Release);
         #[cfg(target_os = "uefi")]
         // SAFETY: this CPU's saved flags; the guard cannot migrate and no
@@ -1060,12 +1152,13 @@ unsafe fn take(state: &mut State, block: *mut Header, user: usize, payload: usiz
     // inside it, and each new block is at least the smallest one.
     unsafe {
         let end = base + size(block);
+        let before = (*block).size & PREVIOUS_FREE;
         let (previous, previous_free) = if head > base {
-            (*block).size = (head - base) | FREE;
+            (*block).size = (head - base) | FREE | before;
             state.insert(block);
             (base, PREVIOUS_FREE)
         } else {
-            ((*block).previous, 0)
+            ((*block).previous, before)
         };
         let mut used_end = user + payload;
         if end - used_end < MIN_BLOCK {
@@ -1088,16 +1181,19 @@ unsafe fn take(state: &mut State, block: *mut Header, user: usize, payload: usiz
             state.tell_following(used);
         }
         state.carved += used_end - head;
+        if head >= state.floor {
+            state.carved_reserve += used_end - head;
+        }
     }
     state.peak = state.peak.max(state.carved);
     user as *mut u8
 }
 
-/// `size` bytes aligned to `alignment` from the bins.
+/// `size` bytes aligned to `alignment` from `pool`'s bins.
 ///
 /// # Safety
 /// The heap's lock is held and `state` is initialized.
-unsafe fn carve(state: &mut State, size: usize, alignment: usize) -> *mut u8 {
+unsafe fn carve(state: &mut State, pool: usize, size: usize, alignment: usize) -> *mut u8 {
     let alignment = alignment.max(GRANULE);
     let Some(payload) = aligned(size.max(1), GRANULE) else {
         return ptr::null_mut();
@@ -1119,7 +1215,7 @@ unsafe fn carve(state: &mut State, size: usize, alignment: usize) -> *mut u8 {
     // SAFETY: binned free blocks, with the caller's guard held.
     let fits = |block| unsafe { fit(block, payload, alignment, 0, usize::MAX) };
     // SAFETY: the caller's guard.
-    let block = unsafe { state.find(need, |block| fits(block).is_some()) };
+    let block = unsafe { state.pools[pool].find(need, |block| fits(block).is_some()) };
     let Some(user) = (!block.is_null()).then(|| fits(block)).flatten() else {
         return ptr::null_mut();
     };
@@ -1130,15 +1226,19 @@ unsafe fn carve(state: &mut State, size: usize, alignment: usize) -> *mut u8 {
     }
 }
 
-/// [`carve`], giving the class lists back to the bins and trying again when
-/// the bins cannot serve it.
+/// [`carve`] from the main bins, then from the reserve for a large request,
+/// giving the class lists back to the bins and trying both when that fails.
 ///
 /// # Safety
 /// The heap's lock is held and `state` is initialized.
 unsafe fn carve_draining(state: &mut State, size: usize, alignment: usize) -> *mut u8 {
     // SAFETY: the caller's guard and initialized state.
-    let block = unsafe { carve(state, size, alignment) };
-    if !block.is_null() || !state.small.iter().any(|head| !head.is_null()) {
+    let mut block = unsafe { carve(state, MAIN, size, alignment) };
+    if block.is_null() && size >= LARGE_BYTES {
+        // SAFETY: as above.
+        block = unsafe { carve(state, RESERVE, size, alignment) };
+    }
+    if !block.is_null() {
         return block;
     }
     for class in 0..CLASSES {
@@ -1154,7 +1254,12 @@ unsafe fn carve_draining(state: &mut State, size: usize, alignment: usize) -> *m
         }
     }
     // SAFETY: as above.
-    unsafe { carve(state, size, alignment) }
+    let block = unsafe { carve(state, MAIN, size, alignment) };
+    if !block.is_null() {
+        return block;
+    }
+    // SAFETY: as above.
+    unsafe { carve(state, RESERVE, size, alignment) }
 }
 
 /// Page selection inside a CPU interval: the lowest payload address that
@@ -1169,9 +1274,9 @@ unsafe fn carve_within(
     allowed: Range<usize>,
 ) -> *mut u8 {
     let chosen = state
-        .heads
+        .pools
         .iter()
-        .flatten()
+        .flat_map(|pool| pool.heads.iter().flatten())
         // SAFETY: the caller's guard.
         .flat_map(|&head| unsafe { bin_blocks(head) })
         .filter_map(|block| {
@@ -1203,20 +1308,27 @@ unsafe fn release(state: &mut State, pointer: *mut u8) {
         let mut block = pointer.sub(HEADER_BYTES).cast::<Header>();
         let mut bytes = size(block);
         state.carved -= bytes;
+        if block as usize >= state.floor {
+            state.carved_reserve -= bytes;
+        }
         let following = block as usize + bytes;
-        if following < state.end && (*(following as *mut Header)).size & FREE != 0 {
+        if following < state.end
+            && following != state.floor
+            && (*(following as *mut Header)).size & FREE != 0
+        {
             let following = following as *mut Header;
             state.remove(following);
             bytes += size(following);
         }
-        if (*block).size & PREVIOUS_FREE != 0 {
+        if (*block).size & PREVIOUS_FREE != 0 && block as usize != state.floor {
             let previous = (*block).previous as *mut Header;
             state.remove(previous);
             bytes += size(previous);
             block = previous;
         }
-        // A free block's predecessor is never free: it would have merged.
-        (*block).size = bytes | FREE;
+        // A free block's predecessor is free only across the floor: it would
+        // have merged.
+        (*block).size = bytes | FREE | (*block).size & PREVIOUS_FREE;
         state.tell_following(block);
         state.insert(block);
     }

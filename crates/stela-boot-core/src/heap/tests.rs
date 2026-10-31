@@ -33,6 +33,62 @@ fn a_heap_whose_bins_are_nearly_empty_is_low_though_little_is_live() {
     assert!(heap.low());
 }
 
+/// An 8 MiB heap whose last `reserve` MiB are its reserve, at the address
+/// this returns.
+fn reserving(heap: &Heap, reserve: usize) -> usize {
+    let layout = Layout::from_size_align(8 << 20, 4096).unwrap();
+    // SAFETY: a nonzero layout; the test leaks this backing.
+    let ram = unsafe { std::alloc::alloc(layout) };
+    // SAFETY: exclusive backing for the test's whole run.
+    unsafe { heap.initialize(ram, layout.size()) };
+    heap.reserve_tail(reserve << 20);
+    ram as usize + ((8 - reserve) << 20)
+}
+
+#[test]
+fn a_large_request_the_holes_cannot_serve_takes_the_reserve() {
+    let heap = Heap::new();
+    let floor = reserving(&heap, 2);
+    let hole = Layout::from_size_align(256 << 10, 16).unwrap();
+    let large = Layout::from_size_align(1 << 20, 16).unwrap();
+    // SAFETY: valid layouts, each block freed once below.
+    unsafe {
+        let blocks: Vec<*mut u8> = (0..23).map(|_| heap.alloc(hole)).collect();
+        assert!(blocks.iter().all(|&block| !block.is_null()));
+        assert!(blocks.iter().all(|&block| (block as usize) < floor));
+        for block in blocks.iter().step_by(2) {
+            heap.dealloc(*block, hole);
+        }
+        let big = heap.alloc(large);
+        assert!(big as usize >= floor);
+        // The holes serve what fits them, not the reserve.
+        let small = heap.alloc(hole);
+        assert!((small as usize) < floor);
+        heap.dealloc(small, hole);
+        heap.dealloc(big, large);
+        for block in blocks.iter().skip(1).step_by(2) {
+            heap.dealloc(*block, hole);
+        }
+    }
+    let usage = heap.usage();
+    assert_eq!((usage.extents, usage.carved), (2, 0));
+    assert_eq!(usage.largest, 6 << 20);
+}
+
+#[test]
+fn a_full_main_part_is_low_and_small_blocks_then_take_the_reserve() {
+    let heap = Heap::new();
+    let floor = reserving(&heap, 2);
+    let layout = Layout::from_size_align(256 << 10, 16).unwrap();
+    let served: Vec<usize> = (0..24)
+        // SAFETY: a valid layout, for blocks the test keeps.
+        .map(|_| unsafe { heap.alloc(layout) } as usize)
+        .collect();
+    assert!(heap.low());
+    assert!(served.iter().all(|&block| block != 0));
+    assert!(served.iter().any(|&block| block >= floor));
+}
+
 #[test]
 fn a_released_tail_leaves_the_heap_serving_from_what_remains() {
     let heap = Heap::new();
