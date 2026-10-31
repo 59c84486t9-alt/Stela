@@ -286,7 +286,7 @@ fn later_channel_failure_and_active_profile_never_publish_a_partial_scan() {
     .unwrap();
     assert!(matches!(
         owner.admit_scan(&six, None),
-        Err(Error::Unsupported)
+        Err(Error::HardwareDenied)
     ));
 }
 #[test]

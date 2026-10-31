@@ -84,22 +84,43 @@ pub struct Prepared {
     header_bytes: usize,
     host_rate: Option<u32>,
 }
-/// Complete source command/notification consistency for the admitted initial
-/// format-2 families. Shared by native TX preparation and RX normalization.
-pub(crate) fn rate_format_2(fw: &Firmware<'_>, family: Family) -> Result<(), Error> {
+/// The `rate_n_flags` encoding a firmware's commands and notifications share.
+/// Legacy rates read alike in both; the second reports a longer MCS.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RateFormat {
+    V2 = 2,
+    V3 = 3,
+}
+
+/// Complete source command/notification consistency for the admitted
+/// families. Shared by native TX preparation and RX normalization.
+pub(crate) fn rate_format(fw: &Firmware<'_>, family: Family) -> Result<RateFormat, Error> {
     let lookup = |group, command| {
         fw.command_version(group, command)
             .ok_or(Error::MissingApi { group, command })
     };
     let tx = lookup(1, 0x1c)?;
-    let expected = if family == Family::Ax200 { 9 } else { 10 };
-    if tx.command_version != expected {
+    let expected = match family {
+        Family::Ax200 => 9..=9,
+        Family::Ax210 => 10..=10,
+        Family::Bz | Family::Sc => 11..=12,
+    };
+    if !expected.contains(&tx.command_version) {
         return Err(Error::CommandVersion(tx.command_version));
     }
-    // Complete source ops.c format2/3 consistency checks. This initial
-    // encoder admits only the source-matched format2 schemas above.
     let tlc = lookup(5, 0xf7)?.notification_version;
     let rx = lookup(0, 0xc1)?.notification_version;
+    // iwlmld reads only format 3, and this firmware has no RX_NO_DATA_NOTIF
+    // for ops.c to check.
+    if family >= Family::Bz {
+        return if tlc >= 4 && rx >= 6 && tx.notification_version >= 9 {
+            Ok(RateFormat::V3)
+        } else {
+            Err(Error::RateVersions)
+        };
+    }
+    // Complete source ops.c format2/3 consistency checks. These families
+    // admit only the source-matched format2 schemas above.
     let checks2 = [
         tx.command_version >= 8,
         tlc >= 3,
@@ -117,7 +138,7 @@ pub(crate) fn rate_format_2(fw: &Firmware<'_>, family: Family) -> Result<(), Err
     if !checks2.iter().all(|v| *v) || checks3.iter().any(|v| *v) {
         return Err(Error::RateVersions);
     }
-    Ok(())
+    Ok(RateFormat::V2)
 }
 impl Prepared {
     pub fn prepare(
@@ -126,7 +147,7 @@ impl Prepared {
         mpdu: &[u8],
         parameters: Parameters,
     ) -> Result<Self, Error> {
-        rate_format_2(fw, family)?;
+        rate_format(fw, family)?;
         // A 24-byte management or non-QoS header, or a 26-byte QoS one: ordinary
         // ToDS data or management; no fragmentation, checksum, four-address or
         // HT-control. The firmware adds any IV and MIC.

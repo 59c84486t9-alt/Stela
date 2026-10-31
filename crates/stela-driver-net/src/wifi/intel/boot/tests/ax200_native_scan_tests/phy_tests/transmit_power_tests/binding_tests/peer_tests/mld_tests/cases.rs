@@ -7,7 +7,7 @@ fn mld_peer_identity_waits_for_config_and_rate_ack_reclamation() {
 
 #[test]
 fn mld_peer_refuses_unqualified_versions_or_rates_before_publication() {
-    for version in [1, 3] {
+    for version in [1, 4] {
         let bytes = mld_image(version);
         let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
         let empty = resources::Catalog::from_handoff(vec![]).unwrap();
@@ -37,13 +37,13 @@ fn mld_peer_refuses_unqualified_versions_or_rates_before_publication() {
         // SAFETY: the original model link/domain and exclusive Source remain
         // while the version or rate refusal is exercised.
         let result = unsafe { peer.advance(&source) };
-        if version == 3 {
+        if version == 4 {
             assert_eq!(
                 result,
                 Err(Ax200LegacyPeerError::Version {
                     group: 3,
                     command: 0x0a,
-                    version: 3
+                    version: 4
                 })
             );
         } else {
@@ -64,7 +64,7 @@ fn mld_peer_refuses_unqualified_versions_or_rates_before_publication() {
         ];
         assert_eq!(
             &state.ops[ops..],
-            if version == 3 {
+            if version == 4 {
                 &[][..]
             } else {
                 &expected_rx[..]

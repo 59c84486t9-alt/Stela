@@ -139,11 +139,12 @@ pub(super) fn prepare(
                 ),
                 5 => (11, 4, 28, table.value.flags & PPAG_V5_MASK),
                 7 => (11, 8, 32, table.value.flags),
+                8 => (12, 8, 32, table.value.flags),
                 _ => return Err(unsupported(BoardCommandKind::Ppag, v)),
             };
-            if v > 3 || table.value.flags != 0 {
+            if (v > 3 || table.value.flags != 0) && ppag_revision_taken(fw, v, table) {
                 let mut bytes = alloc::vec![0; len];
-                if v == 7 {
+                if v >= 7 {
                     bytes[0] = source(table.source);
                     bytes[1] = table.revision;
                 }
@@ -174,6 +175,7 @@ pub(super) fn prepare(
         let sar = &tables.sar.as_ref().unwrap().value;
         let v = version(fw, SAR_COMMAND)?;
         let (bands, offset, len, flags) = match v {
+            11 => (12, 10, 116, Some(112)),
             10 => (11, 10, 108, Some(104)),
             9 => (5, 12, 40, None),
             8 => (11, 16, 120, Some(112)),
@@ -211,6 +213,7 @@ pub(super) fn prepare(
     if sar_enabled && let Some(table) = &tables.geo {
         let v = version(fw, GEO_COMMAND)?;
         let (profiles, bands, has_revision) = match v {
+            6 => (8, 4, true),
             5 => (8, 3, true),
             4 => (8, 2, true),
             3 => (3, 3, true),
@@ -227,7 +230,10 @@ pub(super) fn prepare(
                 bytes[at + 2..at + 4].copy_from_slice(&value.chain_offsets);
             }
         }
-        if has_revision {
+        if v == 6 {
+            bytes[end] = source(table.source);
+            bytes[end + 1] = table.revision;
+        } else if has_revision {
             bytes[end..end + 4].copy_from_slice(&u32::from(table.revision == 1).to_le_bytes());
         }
         commands.push(command(BoardCommandKind::Geo, GEO_COMMAND, bytes));
@@ -296,6 +302,22 @@ pub(super) fn prepare(
         }
     }
     Ok(commands)
+}
+/// `iwl_fw_lookup_cmd_bios_supported_revision`: firmware may name the newest
+/// table a version 7 or 8 command takes. Linux sends nothing for a newer one.
+fn ppag_revision_taken(
+    fw: &Firmware<'_>,
+    version: u8,
+    table: &power::Selected<power::Ppag>,
+) -> bool {
+    let wire = PPAG_COMMAND.wire();
+    let uefi = table.source == ObservationSource::Uefi;
+    let newest = fw.bios_table_revision(wire.group, wire.opcode, uefi);
+    match version {
+        7 => table.revision <= newest.unwrap_or(4),
+        8 => table.revision <= newest.unwrap_or(5),
+        _ => true,
+    }
 }
 fn source(source: ObservationSource) -> u8 {
     match source {

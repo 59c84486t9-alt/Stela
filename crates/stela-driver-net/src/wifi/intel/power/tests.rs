@@ -70,6 +70,9 @@ impl Csr for Model {
             let address = self.registers[&PRPH_RADDR] & 0x00ffffff;
             return Ok(*self.peripheral.get(&address).unwrap_or(&0));
         }
+        if register == GP && self.registers[&GP] & MAC_INIT != 0 {
+            *self.registers.get_mut(&GP).unwrap() |= MAC_STATUS;
+        }
         if register == GP && self.registers[&GP] & 4 != 0 {
             self.clock_reads += 1;
             if self
@@ -117,6 +120,8 @@ impl Csr for Model {
 }
 fn profile(family: Family) -> Profile {
     Profile::select(Observed {
+        link_speed: 3,
+        silicon: Default::default(),
         vendor: 0x8086,
         device: if family == Family::Ax200 {
             0x2723
@@ -152,12 +157,13 @@ fn real_family_ownership_reset_persistence_bisr_and_stable_neighbor_effects() {
             }
         );
         assert_eq!(power.state, State::Awake(awake));
-        assert_eq!(power.io.registers[&INT_MASK], 0);
-        assert_eq!(power.io.registers[&CHICKEN], 0x00800400);
-        assert_eq!(power.io.registers[&HPET], 0xffff1234);
-        assert_eq!(power.io.registers[&GIO], 0x102);
-        assert_eq!(power.io.registers[&HW_IF] & 0x1000, 0x1000);
+        assert_eq!(power.nic.io.registers[&INT_MASK], 0);
+        assert_eq!(power.nic.io.registers[&CHICKEN], 0x00800400);
+        assert_eq!(power.nic.io.registers[&HPET], 0xffff1234);
+        assert_eq!(power.nic.io.registers[&GIO], 0x102);
+        assert_eq!(power.nic.io.registers[&HW_IF] & 0x1000, 0x1000);
         let delays: Vec<_> = power
+            .nic
             .io
             .ops
             .iter()
@@ -171,23 +177,24 @@ fn real_family_ownership_reset_persistence_bisr_and_stable_neighbor_effects() {
             .collect();
         if family == Family::Ax200 {
             assert_eq!(delays, [5000, 2000, 200]);
-            assert_eq!(power.io.peripheral[&0x3440], 0x01230000);
+            assert_eq!(power.nic.io.peripheral[&0x3440], 0x01230000);
         } else {
             assert_eq!(delays, [5000]);
             assert!(
                 !power
+                    .nic
                     .io
                     .ops
                     .iter()
                     .any(|op| matches!(op, Op::Write(PRPH_RADDR | PRPH_WADDR, _)))
             );
         }
-        let before = power.io.ops.len();
+        let before = power.nic.io.ops.len();
         assert_eq!(
             power.wake(ManagementSession::NotConnected),
             Err(Error::State)
         );
-        assert_eq!(before, power.io.ops.len());
+        assert_eq!(before, power.nic.io.ops.len());
         let (io, selected, status) = power.into_awake().unwrap();
         assert_eq!(selected.family(), family);
         assert_eq!(status, awake);
@@ -201,8 +208,8 @@ fn late_ownership_deadlines_management_unknown_and_connected_stay_explicit() {
     model.grant_after = 3;
     let mut power = Power::new(model, profile(family));
     power.wake(ManagementSession::NotConnected).unwrap();
-    assert!(power.io.ops.contains(&Op::Delay(1000)));
-    assert!(power.io.ops.contains(&Op::Delay(200)));
+    assert!(power.nic.io.ops.contains(&Op::Delay(1000)));
+    assert!(power.nic.io.ops.contains(&Op::Delay(200)));
     for (session, expected) in [
         (ManagementSession::Unknown, Error::ManagementUnknown),
         (ManagementSession::Connected, Error::ManagementConnected),
@@ -214,6 +221,7 @@ fn late_ownership_deadlines_management_unknown_and_connected_stay_explicit() {
         assert_eq!(power.state, State::Poisoned);
         assert!(
             !power
+                .nic
                 .io
                 .ops
                 .iter()
@@ -232,6 +240,7 @@ fn late_ownership_deadlines_management_unknown_and_connected_stay_explicit() {
     );
     assert_eq!(
         power
+            .nic
             .io
             .ops
             .iter()
@@ -252,6 +261,7 @@ fn persistence_protection_clock_timeout_rfkill_and_identity_never_invent_ready()
     );
     assert!(
         !power
+            .nic
             .io
             .ops
             .iter()
@@ -267,7 +277,7 @@ fn persistence_protection_clock_timeout_rfkill_and_identity_never_invent_ready()
             mask: 1
         })
     );
-    assert_eq!(power.io.ops.last(), Some(&Op::Delay(200)));
+    assert_eq!(power.nic.io.ops.last(), Some(&Op::Delay(200)));
     let mut model = Model::new(family);
     model.registers.insert(GP, 0);
     let mut power = Power::new(model, profile(family));
@@ -279,7 +289,14 @@ fn persistence_protection_clock_timeout_rfkill_and_identity_never_invent_ready()
         power.wake(ManagementSession::Unknown),
         Err(Error::IdentityChanged)
     );
-    assert!(!power.io.ops.iter().any(|op| matches!(op, Op::Write(..))));
+    assert!(
+        !power
+            .nic
+            .io
+            .ops
+            .iter()
+            .any(|op| matches!(op, Op::Write(..)))
+    );
     let mut model = Model::new(family);
     model.mask_rejected = true;
     let mut power = Power::new(model, profile(family));
@@ -292,6 +309,7 @@ fn persistence_protection_clock_timeout_rfkill_and_identity_never_invent_ready()
     ));
     assert!(
         !power
+            .nic
             .io
             .ops
             .iter()
@@ -303,7 +321,7 @@ fn every_source_operation_failure_and_failed_word_poison_the_epoch() {
     for family in [Family::Ax200, Family::Ax210] {
         let mut baseline = Power::new(Model::new(family), profile(family));
         baseline.wake(ManagementSession::Unknown).unwrap();
-        for (index, op) in baseline.io.ops.iter().enumerate() {
+        for (index, op) in baseline.nic.io.ops.iter().enumerate() {
             let mut model = Model::new(family);
             model.fail = Some(index);
             let mut power = Power::new(model, profile(family));
@@ -312,12 +330,12 @@ fn every_source_operation_failure_and_failed_word_poison_the_epoch() {
                 "failure {family:?} {index} {op:?}"
             );
             assert_eq!(power.state, State::Poisoned);
-            let before = power.io.ops.len();
+            let before = power.nic.io.ops.len();
             assert_eq!(
                 power.wake(ManagementSession::NotConnected),
                 Err(Error::State)
             );
-            assert_eq!(before, power.io.ops.len());
+            assert_eq!(before, power.nic.io.ops.len());
             if matches!(op, Op::Read(_)) {
                 for sentinel_value in [u32::MAX, 0xa5a5a5a5, 0x5a5a5a5a] {
                     let mut model = Model::new(family);
@@ -408,6 +426,7 @@ fn unchanged_linux_ownership_reset_and_clock_effects() {
         };
         assert_eq!(status, expected_result, "case {scenario}");
         let actual: Vec<_> = power
+            .nic
             .io
             .ops
             .iter()
@@ -420,4 +439,102 @@ fn unchanged_linux_ownership_reset_and_clock_effects() {
     }
     assert_eq!(cases, 12);
     assert!(effects > 5000);
+}
+
+#[test]
+fn an_integrated_22000_device_gates_power_between_its_reset_and_power_up() {
+    let mut model = Model::new(Family::Ax200);
+    model.registers.insert(HW_REV, 0x332);
+    let profile = Profile::select(Observed {
+        link_speed: 3,
+        device: 0x06f0,
+        hardware_revision: 0x332,
+        subsystem_device: 0x70,
+        ..profile(Family::Ax200).observed()
+    })
+    .unwrap();
+    let mut power = Power::new(model, profile);
+    power.wake(ManagementSession::NotConnected).unwrap();
+    let ops = &power.nic.io.ops;
+    let written: Vec<u32> = ops
+        .iter()
+        .filter_map(|op| match op {
+            Op::Write(PRPH_WDATA, value) => Some(*value),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        written[written.len() - 3..],
+        [
+            FORCE_ACTIVE,
+            FORCE_ACTIVE | POWER_GATE | SLEEP,
+            POWER_GATE | SLEEP
+        ]
+    );
+    let resets = ops
+        .iter()
+        .filter(|op| matches!(op, Op::Write(RESET, value) if value & 0x80 != 0))
+        .count();
+    assert_eq!(resets, 2);
+    assert!(!ops.contains(&Op::Delay(2000)));
+}
+
+fn wifi_7(model: &mut Model) -> Profile {
+    model.registers.insert(HW_REV, 0x472);
+    model.registers.insert(RF_ID, 0x112200);
+    Profile::select(Observed {
+        link_speed: 3,
+        device: 0x272b,
+        hardware_revision: 0x472,
+        radio_id: 0x112200,
+        subsystem_device: 0x20,
+        ..profile(Family::Ax200).observed()
+    })
+    .unwrap()
+}
+
+#[test]
+fn a_bz_mac_resets_and_wakes_through_gp_control() {
+    let mut model = Model::new(Family::Ax210);
+    let profile = wifi_7(&mut model);
+    let mut power = Power::new(model, profile);
+    let awake = power.wake(ManagementSession::NotConnected).unwrap();
+    assert_eq!(awake.family, Family::Bz);
+    let ops = &power.nic.io.ops;
+    assert!(!ops.iter().any(|op| matches!(op, Op::Write(RESET, _))));
+    assert!(ops.contains(&Op::Delay(10000)));
+    assert!(ops.iter().any(|op| {
+        matches!(op, Op::Write(GP, value) if value & SW_RESET != 0 && value & MAC_INIT == 0)
+    }));
+    assert!(ops.iter().any(|op| {
+        matches!(op, Op::Write(GP, value) if value & (BZ_MAC_ACCESS | MAC_INIT) == BZ_MAC_ACCESS | MAC_INIT)
+    }));
+}
+
+#[test]
+fn the_early_access_reads_what_the_csrs_do_not_say() {
+    let mut model = Model::new(Family::Ax210);
+    model.peripheral.extend([
+        (0xa2b800, 0x0200_0910),
+        (0xa200b0, 0x0100_0900),
+        (0xd03098, 0x10),
+        (0xd03030, 0x0f),
+    ]);
+    let silicon = read_silicon(
+        &mut model,
+        Family::Bz,
+        false,
+        ManagementSession::NotConnected,
+    )
+    .unwrap();
+    assert_eq!(
+        silicon,
+        Silicon {
+            crf: 0x0200_0910,
+            cnv: 0x0100_0900,
+            wfpm: 0x10
+        }
+    );
+    assert_eq!(model.peripheral[&0xd03030], 0x8000_000f);
+    assert_eq!(model.registers[&GP] & BZ_MAC_ACCESS, 0);
 }

@@ -15,17 +15,22 @@ use super::*;
 use crate::wifi::{
     Channel,
     connection::keeper::{self, Advertisement, Peer, Radio, Stage as Standing},
-    frame::{MAX_AMPDU_BUF_HE, Mpdu},
+    frame::{MAX_AMPDU_BUF_EHT, Mpdu},
     intel::{
-        association::{self as commands, LinkState, MacState, PeerState},
+        association::{self as commands, LinkHe, LinkState, MacState, PeerHe, PeerState},
         command,
+        firmware::Family,
+        identity::Rf,
         transmit::{
             LegacyRate, Parameters,
             response::{Response, block_ack_queues},
         },
     },
-    regulatory::channel::{NO_80MHZ, NO_160MHZ, NO_HT40MINUS, NO_HT40PLUS, NO_IR},
-    regulatory::{self, Operation, ProbeProfiles, Purpose, TxProfile, Width, database},
+    regulatory::channel::{
+        NO_6GHZ_AFC_CLIENT, NO_6GHZ_VLP_CLIENT, NO_80MHZ, NO_160MHZ, NO_320MHZ, NO_EHT, NO_HE,
+        NO_HT40MINUS, NO_HT40PLUS, NO_IR,
+    },
+    regulatory::{self, Operation, PowerType, ProbeProfiles, Purpose, TxProfile, Width, database},
     security::{
         Cipher, InstallOutcome, InstallTicket, Integrity, KeyIdentity, KeyScope, KeySlot,
         PacketNumber, ReplaySeed, TransmitSeed,
@@ -40,14 +45,19 @@ use crate::wifi::{
         external,
         fragments::Fragments,
         multi_link::Affiliation,
-        phy::{Capabilities, McsMaps, Role},
+        operations::Operations,
+        phy::{self, Capabilities, Role},
+        power_envelope::PowerEnvelope,
         wire::six_ghz::Selection,
     },
 };
 use alloc::collections::VecDeque;
 
+mod he;
 mod reception;
+use super::super::identity::EhtLimits;
 use reception::{MAX_SESSIONS, Parent, Reception};
+mod eht;
 
 type Queue<Q, B> = Ax200ManagementQueue<'static, Q, B, Regulatory>;
 
@@ -79,6 +89,10 @@ const RATE_NOTIFICATION_AMSDU: u32 = 2;
 const SMALLEST_AMSDU: u32 = 2000;
 /// `IWL_UCODE_TLV_CAPA_CSUM_SUPPORT`, without which mvm offers no A-MSDU.
 const CHECKSUM_OFFLOAD: u32 = 21;
+/// `IEEE80211_HE_MAC_CAP2_ACK_EN`.
+const ACK_ENABLED: u8 = 0x80;
+/// `IEEE80211_HE_MAC_CAP5_OM_CTRL_UL_MU_DATA_DIS_RX`.
+const UPLINK_DATA_DISABLED: u8 = 0x10;
 /// What an MSDU's QoS header and LLC add to its Ethernet frame.
 const SUBFRAME_OVERHEAD: usize = 26 + 8 - 14;
 /// `WLAN_ACTION_BLOCK_ACK`, on an action frame.
@@ -182,10 +196,22 @@ pub struct ManagementKey {
 }
 
 /// The association's state beside the kept chain.
+/// `IEEE80211_SCAN_RESULT_EXPIRE`.
+const BSS_EXPIRY_US: u64 = 30_000_000;
+/// `max_rx_aggregation_subframes`, half of what EHT names until Linux takes
+/// the full window. A session's mode bounds it further.
+const RECEIVE_WINDOW: u16 = MAX_AMPDU_BUF_EHT / 2;
+
+/// A BSS and when it was last heard, a `cfg80211_internal_bss`.
+pub(super) struct Heard {
+    pub(super) observation: Arc<NativeBssObservation>,
+    pub(super) at: u64,
+}
+
 pub(super) struct Client {
     station: Station,
     pub(super) plan: Option<Plan>,
-    pub(super) observed: Vec<Arc<NativeBssObservation>>,
+    pub(super) observed: Vec<Heard>,
     pub(super) channels: Vec<(Channel, u32)>,
     pub(super) regulatory: Option<database::Country>,
     steps: VecDeque<Step>,
@@ -447,6 +473,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
     fn operate(&mut self, queue: &mut Queue<Q, B>) -> Result<(), Error> {
         let now = self.clock.now_us();
         if let Some(plan) = self.client.plan.take() {
+            self.limit_six_ghz_power(queue);
             self.arrive(plan, now)?;
         }
         self.take_notifications(queue, now)?;
@@ -493,6 +520,46 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         self.send_data(queue)
     }
 
+    /// `iwl_mvm_mld_assign_vif_chanctx`: tell firmware what a 6 GHz AP's power
+    /// type and envelopes allow before the first frame to it.
+    fn limit_six_ghz_power(&mut self, queue: &mut Queue<Q, B>) {
+        let Some(bss) = self.selected.as_ref().map(|selected| &selected.bss) else {
+            return;
+        };
+        let widest = self.widest(bss.channel.band);
+        let flags = self
+            .client
+            .channels
+            .iter()
+            .find(|(channel, _)| *channel == bss.channel)
+            .map_or(0, |(_, flags)| *flags);
+        let (Some(_), Ok(operations)) = (
+            queue.firmware().command_version(
+                commands::POWER_CONSTRAINTS.group,
+                commands::POWER_CONSTRAINTS.opcode,
+            ),
+            Operations::parse(&bss.elements),
+        ) else {
+            return;
+        };
+        let six = operations.he.as_ref().and_then(|he| he.six_ghz);
+        let Some(ap_type) = six.and_then(|six| PowerType::of((six[1] & 0x78) >> 3, flags)) else {
+            return;
+        };
+        let mut envelope = PowerEnvelope::parse(&bss.elements);
+        let ap = operations
+            .channel(bss.channel, phy::Mode::Eht, None)
+            .ok()
+            .filter(|_| self.eht.is_some())
+            .map_or_else(|| operations.channel(bss.channel, phy::Mode::He, None), Ok);
+        match ap {
+            Ok(ap) => envelope.fit(&ap, &ap.narrowed_to(widest)),
+            Err(_) => envelope = PowerEnvelope::none(),
+        }
+        let bytes = commands::power_constraints(ap_type, &envelope);
+        self.client.command(commands::POWER_CONSTRAINTS, bytes);
+    }
+
     /// The chain is up: start what it was raised for, under session protection.
     fn arrive(&mut self, plan: Plan, now: u64) -> Result<(), Error> {
         let client = &mut self.client;
@@ -530,13 +597,39 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         let aid = context.response().aid;
         let he = negotiated.he.is_some();
         let antennas = queue.antennas();
+        let definition = context.definition();
+        let eht = negotiated.eht.is_some();
+        // `ieee80211_set_chanreq_ap`: wider OFDMA follows the AP's own channel.
+        let wide_ofdma = eht
+            .then(|| {
+                let vht = negotiated
+                    .local()
+                    .vht()
+                    .zip(negotiated.peer().vht())
+                    .map(|(own, ap)| (own.capability, ap.capability));
+                context
+                    .operations()
+                    .channel(bss.channel, phy::Mode::Eht, vht)
+                    .ok()
+            })
+            .flatten();
+        let phy = if definition.width == phy::Width::Mhz20 && !eht {
+            Vec::new()
+        } else {
+            queue
+                .phy_changed(&definition, wide_ofdma.as_ref())
+                .ok_or(Error::Refused("channel width"))?
+        };
         let firmware = queue.firmware();
+        let link_version = firmware
+            .command_version(commands::LINK_CONFIG.group, commands::LINK_CONFIG.opcode)
+            .map_or(1, |version| version.command_version);
         let high_priority = firmware.supports_capability(COEX_HIGH_PRIORITY);
         let fifo_offloaded = firmware.supports_api(SMART_FIFO_OFFLOAD);
         let peer_version = firmware
             .command_version(3, 0x0a)
             .map_or(0, |version| version.command_version);
-        let rate_bytes = rate_body(firmware)?;
+        let rate_shape = rate_shape(firmware)?;
         let explicit_mfp = firmware.supports_capability(EXPLICIT_MFP);
         let longest = if firmware.supports_capability(CHECKSUM_OFFLOAD) {
             commands::max_amsdu(negotiated)
@@ -546,49 +639,65 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         let mac = MacState {
             address: local,
             he,
-            eht: false,
+            eht,
             aid: None,
             high_priority,
         };
-        let rates = commands::rate_config(negotiated, band, antennas, rate_bytes, false, longest)
+        let mac_version = version_of(firmware, commands::MAC_CONFIG);
+        let power_version = version_of(firmware, commands::MAC_POWER);
+        let rates = commands::rate_config(negotiated, band, antennas, rate_shape, false, longest)
             .ok_or(Error::Refused("rates"))?;
         let edca = negotiated.edca();
-        let link = commands::link_config(LinkState {
-            address: local,
-            bssid: bss.bssid,
-            band,
-            basic_rates: negotiated.legacy.basic,
-            short_preamble: bss.capabilities & (1 << 5) != 0,
-            short_slot: band != Band::Ghz2 || bss.capabilities & (1 << 10) != 0,
-            protection: commands::protection(context),
-            width: negotiated.width,
-            qos: negotiated.wmm.is_some(),
-            edca: &edca,
-            beacon_interval: bss.beacon_interval,
-            dtim_period: context.dtim_period(),
-        });
+        let link = commands::link_config(
+            link_version,
+            LinkState {
+                address: local,
+                band,
+                basic_rates: negotiated.legacy.basic,
+                short_preamble: bss.capabilities & (1 << 5) != 0,
+                short_slot: band != Band::Ghz2 || bss.capabilities & (1 << 10) != 0,
+                protection: commands::protection(context),
+                width: negotiated.width,
+                qos: negotiated.wmm.is_some(),
+                edca: &edca,
+                beacon_interval: bss.beacon_interval,
+                dtim_period: context.dtim_period(),
+                he: link_he(context),
+            },
+        );
         let peer = commands::station_config(
             peer_version,
             peer_state(context, explicit_mfp, self.client.port_open),
         );
         let client = &mut self.client;
-        client.command(commands::MAC_CONFIG, commands::mac_config(mac));
+        for (id, bytes) in phy {
+            client.command(id, bytes);
+        }
+        client.command(commands::MAC_CONFIG, commands::mac_config(mac_version, mac));
         client.command(commands::LINK_CONFIG, link);
         client.command(commands::RATE_CONFIG, rates);
         client.command(commands::STATION_CONFIG, peer);
         client.command(
             commands::MAC_CONFIG,
-            commands::mac_config(MacState {
-                aid: Some(aid),
-                ..mac
-            }),
+            commands::mac_config(
+                mac_version,
+                MacState {
+                    aid: Some(aid),
+                    ..mac
+                },
+            ),
         );
         if !fifo_offloaded {
             client.command(commands::SMART_FIFO, commands::smart_fifo(negotiated));
         }
         client.steps.push_back(Step::Command {
             id: commands::MAC_POWER,
-            bytes: commands::power(self.save_power, bss.beacon_interval, context.dtim_period()),
+            bytes: commands::power(
+                power_version,
+                self.save_power,
+                bss.beacon_interval,
+                context.dtim_period(),
+            ),
             then: Then::Configured(ticket),
         });
         Ok(())
@@ -622,7 +731,10 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                 // the channel, power and rates the chain's leases check.
                 Step::Command { id, bytes, .. } => unsafe { queue.submit(*id, bytes, pages) },
                 // SAFETY: as above.
-                Step::Queue { tid } => unsafe { queue.add_queue(*tid, pages) },
+                Step::Queue { tid } => unsafe {
+                    let mode = self.client.context.as_ref().map(|c| c.negotiated().mode);
+                    queue.add_queue(*tid, mode.unwrap_or(phy::Mode::Legacy), pages)
+                },
                 Step::BlockAck(agreement) => {
                     let (tid, id) = (
                         agreement.session.tid(),
@@ -682,9 +794,8 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                     .map_err(Error::Station)?;
                 if !queue.firmware().supports_capability(BLOCK_ACK_ALLOCATION) {
                     client.unsupported("receive Block Ack on firmware without session allocation");
-                } else if let Err(ba::Error::Station(_) | ba::Error::Stale) = client
-                    .station
-                    .configure_rx_block_ack(MAX_AMPDU_BUF_HE, true)
+                } else if let Err(ba::Error::Station(_) | ba::Error::Stale) =
+                    client.station.configure_rx_block_ack(RECEIVE_WINDOW, true)
                 {
                     client.unsupported("receive Block Ack on this association");
                 }
@@ -1340,21 +1451,26 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         self.client
             .observed
             .get(handle)
-            .cloned()
+            .map(|heard| heard.observation.clone())
             .ok_or(Error::Refused("BSS"))
     }
 }
 
 /// The body of the firmware's `TLC_MNG_CONFIG_CMD` version.
-fn rate_body(firmware: &crate::wifi::intel::firmware::Firmware<'_>) -> Result<usize, Error> {
-    match firmware
+fn rate_shape(
+    firmware: &crate::wifi::intel::firmware::Firmware<'_>,
+) -> Result<commands::RateShape, Error> {
+    firmware
         .command_version(5, 0x0f)
-        .map(|version| version.command_version)
-    {
-        Some(1 | 2) => Ok(24),
-        Some(3 | 4) => Ok(28),
-        _ => Err(Error::Refused("TLC_MNG_CONFIG_CMD version")),
-    }
+        .and_then(|version| commands::RateShape::of(version.command_version))
+        .ok_or(Error::Refused("TLC_MNG_CONFIG_CMD version"))
+}
+
+/// A command's firmware version. Group 0 lists under `LONG_GROUP`.
+fn version_of(firmware: &crate::wifi::intel::firmware::Firmware<'_>, id: command::Id) -> u8 {
+    firmware
+        .command_version(id.group.max(1), id.opcode)
+        .map_or(0, |version| version.command_version)
 }
 
 fn peer_state(context: &AssociationContext, explicit_mfp: bool, authorized: bool) -> PeerState {
@@ -1368,20 +1484,87 @@ fn peer_state(context: &AssociationContext, explicit_mfp: bool, authorized: bool
         ampdu_exponent: commands::ampdu_exponent(negotiated),
         wmm_service_period: negotiated.wmm.as_ref().map(|wmm| wmm.max_service_period),
         uapsd_queues: negotiated.wmm.as_ref().map_or(0, |wmm| wmm.uapsd_queues),
+        he: peer_he(context),
     }
 }
 
+/// The AP's HE capabilities, where HE was negotiated.
+fn ap_he(context: &AssociationContext) -> Option<&phy::He> {
+    let negotiated = context.negotiated();
+    negotiated.he.as_ref()?;
+    negotiated.peer().he()
+}
+
+/// The AP's EHT capabilities, where EHT was negotiated.
+fn ap_eht(context: &AssociationContext) -> Option<&phy::Eht> {
+    let negotiated = context.negotiated();
+    negotiated.eht.as_ref()?;
+    negotiated.peer().eht()
+}
+
+/// `ieee80211_assoc_config_link`'s HE half, for a link.
+fn link_he(context: &AssociationContext) -> Option<LinkHe> {
+    let he = ap_he(context)?;
+    let operations = context.operations();
+    let operation = operations.he.as_ref()?;
+    Some(LinkHe {
+        packet_extension: operation.packet_extension(),
+        uora: operations.uora,
+        mu_edca: operations.mu_edca,
+        color: operation.color(),
+        color_enabled: operation.color_enabled(),
+        rts_threshold: operation.rts_threshold(),
+        uplink_data_disabled: he.mac[5] & UPLINK_DATA_DISABLED != 0,
+    })
+}
+
+/// The HE half of `iwl_mvm_mld_cfg_sta`.
+fn peer_he(context: &AssociationContext) -> Option<PeerHe> {
+    let he = ap_he(context)?;
+    Some(PeerHe {
+        ack_enabled: he.mac[2] & ACK_ENABLED != 0,
+        random_access: context.operations().uora.is_some(),
+        packet_extension: commands::packet_extension(he, ap_eht(context)),
+        control: commands::control_flags(&he.mac),
+    })
+}
+
+/// What a station's capability elements read of the device.
+#[derive(Clone, Copy, Debug)]
+struct Device {
+    family: Family,
+    radio: Rf,
+    /// The transmit and receive antennas.
+    chains: (u32, u32),
+    /// A radio with EHT's limits.
+    eht: Option<EhtLimits>,
+}
+
 /// `iwl_init_ht_hw_capab`, `iwl_init_vht_hw_capab` and mac80211's SMPS-off
-/// HT capabilities for a device of `tx`, `rx` chains.
-fn capability_elements(band: Band, tx: u32, rx: u32, wide: bool) -> Vec<u8> {
-    let mut elements = probe_elements(band, tx, rx, wide);
+/// HT capabilities for a device of `tx`, `rx` chains, as an association names
+/// them.
+fn capability_elements(band: Band, device: Device, widest: phy::Width) -> Vec<u8> {
+    let mut elements = probe_elements(band, device, widest);
+    if device.family == Family::Ax200 {
+        // `iwl_vendor_caps`: Intel's capabilities, with improved HE feedback.
+        elements.extend_from_slice(&[221, 6, 0x00, 0x17, 0x35, 8, 1, 0]);
+    }
     // `ieee80211_add_wmm_info_ie`, without U-APSD.
     elements.extend_from_slice(&[221, 7, 0, 0x50, 0xf2, 2, 0, 1, 0]);
     elements
 }
 
 /// The rates and capabilities a probe names, `ieee80211_build_preq_ies_band`.
-fn probe_elements(band: Band, tx: u32, rx: u32, wide: bool) -> Vec<u8> {
+fn probe_elements(band: Band, device: Device, widest: phy::Width) -> Vec<u8> {
+    let Device {
+        family,
+        radio,
+        chains,
+        eht,
+    } = device;
+    let wide = widest != phy::Width::Mhz80;
+    let two_streams = chains.0 & chains.1 == 3;
+    let (tx, rx) = (chains.0.count_ones(), chains.1.count_ones());
     let mut elements = Vec::new();
     let mut element = |id: u8, body: &[u8]| {
         elements.extend_from_slice(&[id, body.len() as u8]);
@@ -1412,7 +1595,9 @@ fn probe_elements(band: Band, tx: u32, rx: u32, wide: bool) -> Vec<u8> {
     if tx != rx {
         ht[15] |= 2 | ((tx.saturating_sub(1) as u8) << 2);
     }
-    element(45, &ht);
+    if band != Band::Ghz6 {
+        element(45, &ht);
+    }
     if band == Band::Ghz5 {
         let mut vht = [0; 12];
         let capability: u32 = 2 // 11454-byte MPDUs
@@ -1432,16 +1617,50 @@ fn probe_elements(band: Band, tx: u32, rx: u32, wide: bool) -> Vec<u8> {
         vht[8..10].copy_from_slice(&map.to_le_bytes());
         element(191, &vht);
     }
+    elements.extend(he::capability(
+        band,
+        family,
+        radio,
+        two_streams,
+        wide,
+        eht.is_some(),
+    ));
+    if band == Band::Ghz6 {
+        elements.extend(he::six_ghz_capability(tx, rx));
+    }
+    if let Some(limits) = eht {
+        elements.extend(eht::capability(band, limits, two_streams, widest));
+    }
     elements
 }
 
 impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
-    /// Whether a 5 GHz channel takes 160 MHz.
-    fn wide(&self) -> bool {
-        self.client
-            .channels
-            .iter()
-            .any(|(channel, flags)| channel.band == Band::Ghz5 && flags & NO_160MHZ == 0)
+    fn device(&self) -> Device {
+        Device {
+            family: self.family,
+            radio: self.radio,
+            chains: self.chains,
+            eht: self.eht,
+        }
+    }
+
+    /// The widest channel `band` offers this device. 320 MHz is EHT's, and
+    /// 6 GHz's alone.
+    fn widest(&self, band: Band) -> phy::Width {
+        let open = |closed: u32| {
+            self.client
+                .channels
+                .iter()
+                .any(|(channel, flags)| channel.band == band && flags & closed == 0)
+        };
+        let eht = self.eht.is_some_and(EhtLimits::reaches_320);
+        if !open(NO_160MHZ) {
+            phy::Width::Mhz80
+        } else if eht && band == Band::Ghz6 && open(NO_160MHZ | NO_320MHZ) {
+            phy::Width::Mhz320
+        } else {
+            phy::Width::Mhz160
+        }
     }
 
     /// What firmware's probes radiate: its lowest legacy rate of each band,
@@ -1464,6 +1683,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         ProbeProfiles {
             ghz2: profile(Band::Ghz2, regulatory::LegacyRate::Cck1),
             ghz5: profile(Band::Ghz5, regulatory::LegacyRate::Ofdm6),
+            ghz6: profile(Band::Ghz6, regulatory::LegacyRate::Ofdm6),
         }
     }
 
@@ -1474,13 +1694,9 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             .regulatory
             .as_ref()
             .ok_or(Error::Refused("scan"))?;
-        let (tx, rx) = (self.chains.0.count_ones(), self.chains.1.count_ones());
-        let wide = self.wide();
+        let elements = |band| probe_elements(band, self.device(), self.widest(band));
         Ok(boot::Probe {
-            elements: [
-                probe_elements(Band::Ghz2, tx, rx, wide),
-                probe_elements(Band::Ghz5, tx, rx, wide),
-            ],
+            elements: [Band::Ghz2, Band::Ghz5, Band::Ghz6].map(elements),
             profiles: self.probe_profiles(country),
         })
     }
@@ -1577,11 +1793,7 @@ impl<Q: BootIo, B: BiosIo> Radio for Wifi<Q, B> {
                 Operation::Transmit {
                     channel,
                     purpose: Purpose::Probe,
-                    profile: if channel.band == Band::Ghz2 {
-                        profiles.ghz2
-                    } else {
-                        profiles.ghz5
-                    },
+                    profile: profiles.on(channel),
                 },
             )
     }
@@ -1602,17 +1814,13 @@ impl<Q: BootIo, B: BiosIo> Radio for Wifi<Q, B> {
     }
 
     fn advertisement(&self, band: Band) -> Result<Advertisement, Error> {
-        if band == Band::Ghz6 {
-            return Err(Error::Unsupported("6 GHz on Intel Wi-Fi"));
-        }
-        let (tx, rx) = self.chains;
-        let elements = capability_elements(band, tx.count_ones(), rx.count_ones(), self.wide());
+        let elements = capability_elements(band, self.device(), self.widest(band));
         let capabilities = Capabilities::parse(band, Role::Station, &elements)
             .map_err(|_| Error::Refused("advertisement"))?;
         Ok(Advertisement {
             capabilities,
             elements,
-            he_source_maps: [McsMaps { rx: 0, tx: 0 }; 3],
+            he_source_maps: he::maps(self.chains.0 & self.chains.1 == 3),
             multi_link: Some(false),
         })
     }
@@ -1631,7 +1839,11 @@ impl<Q: BootIo, B: BiosIo> Radio for Wifi<Q, B> {
             owner.poll_pre_scan_receive().map_err(Error::Scan)?,
             MpduProgress::Pending | MpduProgress::Backpressure { .. }
         ) {}
-        self.client.observed.clear();
+        // A scan runs in parts, whose results `choose` takes together.
+        let now = self.clock.now_us();
+        self.client
+            .observed
+            .retain(|heard| now.saturating_sub(heard.at) < BSS_EXPIRY_US);
         let started = match probe {
             // SAFETY: `new`'s contract covers the scan's pages.
             Some(probe) => unsafe { owner.start_probing(request, &probe, budget_us, pages) },
@@ -1657,10 +1869,12 @@ impl<Q: BootIo, B: BiosIo> Radio for Wifi<Q, B> {
 
     fn six_ghz_scan(
         &self,
-        _: &scan::Request,
-        _: scan::six_ghz::Options,
+        request: &scan::Request,
+        options: scan::six_ghz::Options,
     ) -> Result<Option<scan::Request>, Error> {
-        Ok(None)
+        let known = self.client.observed.iter();
+        scan::six_ghz::second_part(request, options, known.map(|heard| heard.observation.bss()))
+            .map_err(|error| Error::Scan(boot::Ax200ScanError::Protocol(error)))
     }
 
     fn bss(&self) -> Vec<(usize, &Bss)> {
@@ -1668,7 +1882,7 @@ impl<Q: BootIo, B: BiosIo> Radio for Wifi<Q, B> {
             .observed
             .iter()
             .enumerate()
-            .map(|(handle, observed)| (handle, observed.bss()))
+            .map(|(handle, heard)| (handle, heard.observation.bss()))
             .collect()
     }
 
@@ -1717,12 +1931,33 @@ impl<Q: BootIo, B: BiosIo> Radio for Wifi<Q, B> {
 
     fn begin_six_ghz_external_authentication(
         &mut self,
-        _: usize,
-        _: Selection,
+        handle: usize,
+        selection: Selection,
         _: (),
-        _: u64,
+        budget_us: u64,
     ) -> Result<Arc<external::Session>, Error> {
-        Err(Error::Unsupported("6 GHz on Intel Wi-Fi"))
+        let observed = self.observed(handle)?;
+        let bss = observed.bss().clone();
+        let local = self.advertisement(bss.channel.band)?.capabilities;
+        let now = self.clock.now_us();
+        let client = &mut self.client;
+        if !client
+            .channels
+            .iter()
+            .any(|(known, _)| *known == bss.channel)
+        {
+            return Err(Error::Refused("6 GHz channel"));
+        }
+        let session = client
+            .station
+            .prepare_six_ghz_authentication(observed, selection, local, None, now, budget_us)
+            .map_err(Error::Station)?;
+        client
+            .station
+            .commit_six_ghz_authentication(session.clone(), now)
+            .map_err(Error::Station)?;
+        self.raise(&bss, Plan::Exchange)?;
+        Ok(session)
     }
 
     fn transmit_external_authentication(
@@ -1954,26 +2189,27 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         let peer_version = firmware
             .command_version(3, 0x0a)
             .map_or(0, |version| version.command_version);
-        let rate_bytes = rate_body(firmware)?;
+        let rate_shape = rate_shape(firmware)?;
         let explicit_mfp = firmware.supports_capability(EXPLICIT_MFP);
         let longest = if firmware.supports_capability(CHECKSUM_OFFLOAD) {
             commands::max_amsdu(negotiated)
         } else {
             0
         };
-        let rates = commands::rate_config(negotiated, band, antennas, rate_bytes, true, longest)
+        let mac_version = version_of(firmware, commands::MAC_CONFIG);
+        let rates = commands::rate_config(negotiated, band, antennas, rate_shape, true, longest)
             .ok_or(Error::Refused("rates"))?;
         let mac = MacState {
             address: self.address,
             he: negotiated.he.is_some(),
-            eht: false,
+            eht: negotiated.eht.is_some(),
             aid: Some(context.response().aid),
             high_priority: false,
         };
         let peer = commands::station_config(peer_version, peer_state(context, explicit_mfp, true));
         let client = &mut self.client;
         client.command(commands::BEACON_FILTER, commands::beacon_filter(filter));
-        client.command(commands::MAC_CONFIG, commands::mac_config(mac));
+        client.command(commands::MAC_CONFIG, commands::mac_config(mac_version, mac));
         client.command(commands::STATION_CONFIG, peer);
         client.steps.push_back(Step::Command {
             id: commands::RATE_CONFIG,
@@ -2119,8 +2355,23 @@ pub fn channel_flags(restrictions: &crate::wifi::intel::mcc::channel::Restrictio
     if restrictions.no_160mhz {
         flags |= NO_160MHZ;
     }
+    if restrictions.no_320mhz {
+        flags |= NO_320MHZ;
+    }
+    if restrictions.no_he {
+        flags |= NO_HE;
+    }
+    if restrictions.no_eht {
+        flags |= NO_EHT;
+    }
     if restrictions.no_initiate_radiation {
         flags |= NO_IR;
+    }
+    if restrictions.no_6ghz_vlp_client {
+        flags |= NO_6GHZ_VLP_CLIENT;
+    }
+    if restrictions.no_6ghz_afc_client {
+        flags |= NO_6GHZ_AFC_CLIENT;
     }
     flags
 }

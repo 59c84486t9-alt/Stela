@@ -258,7 +258,7 @@ fn ax200_phy4_rlc2_schema_does_not_bypass_mld_mac_requirement() {
 #[test]
 fn phy_prepublication_denial_and_unknown_schema_have_no_native_effects() {
     for case in 0..6 {
-        let bytes = phy_bytes(if case == 5 { 5 } else { 3 }, Some(2));
+        let bytes = phy_bytes(if case == 5 { 7 } else { 3 }, Some(2));
         let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
         let empty = resources::Catalog::from_handoff(vec![]).unwrap();
         let native = Native::default();
@@ -287,7 +287,7 @@ fn phy_prepublication_denial_and_unknown_schema_have_no_native_effects() {
                 1 => Ax200PhyError::Regulatory(regulatory::Error::OsDenied),
                 2 | 3 => Ax200PhyError::Regulatory(regulatory::Error::OsUnavailable),
                 4 => Ax200PhyError::Country(Ax200CountryError::Revoked),
-                _ => Ax200PhyError::Version(5),
+                _ => Ax200PhyError::Version(7),
             })
         );
         assert_eq!(native.state.lock().unwrap().registers[&0x460], bell);

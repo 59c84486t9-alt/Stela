@@ -2,12 +2,12 @@
 // Copyright (C) 2012-2014, 2018-2026 Intel Corporation
 // Copyright (C) 2013-2015 Intel Mobile Communications GmbH
 // Copyright (C) 2016-2017 Intel Deutschland GmbH
-//! Original-owner UMAC15 scanning. ACK, scan-complete and retirement
+//! Original-owner UMAC scanning. ACK, scan-complete and retirement
 //! are separate: no UID reuse before cold-unbound request retirement.
 //! The shared native RX owner stays live; whole-device extraction is separate.
 use super::super::hcmd::{CapturedNotification, NotificationPoll};
 use super::*;
-use crate::wifi::intel::command::Id;
+use crate::wifi::intel::{command::Id, identity, mcc};
 use crate::wifi::{Band, Channel, regulatory, scan as protocol};
 use regulatory::OsPolicy;
 mod policy;
@@ -30,6 +30,10 @@ const MAX_SCAN_US: u64 = 30_000_000;
 const DS_PARAMETERS: u32 = 9;
 /// `IWL_UCODE_TLV_CAPA_WFA_TPC_REP_IE_SUPPORT`.
 const TPC_REPORT: u32 = 10;
+/// `IWL_UCODE_TLV_CAPA_HIDDEN_6GHZ_SCAN`.
+const HIDDEN_SIX_GHZ: u32 = 59;
+/// `IWL_UCODE_TLV_CAPA_SCAN_DONT_TOGGLE_ANT`.
+const FIXED_ANTENNA: u32 = 111;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Ax200ScanPhase {
     NotStarted,
@@ -248,20 +252,26 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Scan<'_, Q, B, O> {
                 let band = match observation.channel.band {
                     crate::wifi::intel::mcc::channel::Band::Ghz2 => Band::Ghz2,
                     crate::wifi::intel::mcc::channel::Band::Ghz5 => Band::Ghz5,
-                    crate::wifi::intel::mcc::channel::Band::Ghz6 => return None,
+                    crate::wifi::intel::mcc::channel::Band::Ghz6 => Band::Ghz6,
                 };
                 hardware.channel(band, observation.channel.number)
             })
-            .take(protocol::MAX_CHANNELS)
             .collect()
     }
     /// The same channels with the regulatory flags their firmware
-    /// restrictions give them.
+    /// restrictions give them, and the country's word on puncturing.
     pub fn regulated_channels(&mut self) -> Vec<(Channel, u32)> {
         let channels = self.channels();
         let Some(parts) = self.mac.country.scan_policy_parts() else {
             return Vec::new();
         };
+        // `iwl_mld_get_regdomain`: only FM radios answer to this policy.
+        let setup = &mut parts.board.scan.mcc.setup;
+        let whole = setup.lari.radio.initialized.boot.radio() == identity::Rf::Fm
+            && !mcc::puncturing_allowed(
+                setup.lari.bios.puncturing(),
+                parts.selection.country.alpha2(),
+            );
         channels
             .into_iter()
             .filter_map(|channel| {
@@ -270,10 +280,13 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Scan<'_, Q, B, O> {
                         && observation.channel.frequency_mhz == channel.frequency_mhz
                 })?;
                 let restrictions = observed.restrictions;
-                Some((
-                    channel,
-                    crate::wifi::intel::link::channel_flags(&restrictions),
-                ))
+                let flags = crate::wifi::intel::link::channel_flags(&restrictions);
+                let whole = if whole {
+                    regulatory::channel::NO_PUNCTURING
+                } else {
+                    0
+                };
+                Some((channel, flags | whole))
             })
             .collect()
     }
@@ -281,6 +294,20 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Scan<'_, Q, B, O> {
     pub fn chains(&self) -> (u32, u32) {
         let information = &self.mac.initialized_nvm().information;
         (information.tx_chains, information.rx_chains)
+    }
+    /// What limits a radio with EHT.
+    pub fn eht_limits(&self) -> Option<crate::wifi::intel::identity::EhtLimits> {
+        self.mac
+            .country
+            .board
+            .scan
+            .mcc
+            .setup
+            .lari
+            .radio
+            .initialized
+            .boot
+            .eht_limits()
     }
     pub fn command_bytes(&self) -> Option<&[u8]> {
         self.command_bytes.as_deref()
@@ -548,10 +575,12 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Scan<'_, Q, B, O> {
             .radio
             .initialized
             .boot;
-        wire::validate(&boot.firmware)?;
-        let measurement = wire::Measurement {
+        let version = wire::validate(&boot.firmware)?;
+        let abilities = wire::Abilities {
             ds_parameters: boot.firmware.supports_capability(DS_PARAMETERS),
             tpc_report: boot.firmware.supports_capability(TPC_REPORT),
+            hidden_six_ghz: boot.firmware.supports_capability(HIDDEN_SIX_GHZ),
+            fixed_antenna: boot.firmware.supports_capability(FIXED_ANTENNA),
         };
         // Capture every already-completed RB before admitting a new request.
         // This exclusive owner never rearms inside the loop, so the real fixed
@@ -618,7 +647,13 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Scan<'_, Q, B, O> {
         // before HCMD descriptor visibility, including an uncertain failure.
         let result = unsafe {
             owner.publish_scan(admission, |guard, operation| {
-                let bytes = wire::encode(operation.request(), scanner.local(), probe, measurement)?;
+                let bytes = wire::encode(
+                    operation.request(),
+                    version,
+                    scanner.local(),
+                    probe,
+                    abilities,
+                )?;
                 let mut checked = policy::CheckedRequest(operation.request());
                 let now = options.clock.now_us();
                 let ticket = scanner

@@ -17,6 +17,7 @@ fn radio_descriptor_identities_minima_and_collection_bounds_are_exact() {
         ("WPFC", 17, 4096, false),
         ("UefiCnvWlanSarGeoOffsetMapping", 339, 4096, false),
         ("CnvUefiWlanUATS", 339, 4096, false),
+        ("UefiCnvWlanPuncturing", 5, 4096, false),
     ];
     assert_eq!(expected.len(), RADIO_VARIABLE_COUNT);
     let mut observations = Observations::default();
@@ -225,6 +226,8 @@ fn borrowed_permanent_capture_keeps_the_byte_pointer_and_provenance() {
 }
 fn profile(ax210: bool) -> Profile {
     Profile::select(Observed {
+        link_speed: 3,
+        silicon: Default::default(),
         vendor: 0x8086,
         device: if ax210 { 0x2725 } else { 0x2723 },
         subsystem_vendor: 0x8086,

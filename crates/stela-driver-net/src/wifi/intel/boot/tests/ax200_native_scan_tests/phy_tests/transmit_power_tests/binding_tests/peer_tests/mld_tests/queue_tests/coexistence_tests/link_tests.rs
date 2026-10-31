@@ -62,10 +62,17 @@ struct Device<'n> {
     air: Vec<Vec<u8>>,
     /// Whether the AP advertises WMM.
     quality: bool,
+    /// What else the AP's beacons and association response carry.
+    elements: &'static [u8],
+    /// Each link and station command.
+    configuration: Vec<(u8, Vec<u8>)>,
     /// Each receive Block Ack command.
     block_acks: Vec<Vec<u8>>,
     /// Each scan request.
     scans: Vec<Vec<u8>>,
+    /// The second channel's rules, when they differ from the first's, and the
+    /// AP then only heard from the first scan.
+    second: Option<u32>,
     /// Whether frames are acknowledged in Block Ack notifications alone, as
     /// the firmware reports those it aggregated.
     aggregating: bool,
@@ -130,7 +137,8 @@ impl Device<'_> {
                 };
                 let mut payload = mcc_payload(country, request[2], 51);
                 payload[20..24].copy_from_slice(&self.channel.to_le_bytes());
-                payload[24..28].copy_from_slice(&self.channel.to_le_bytes());
+                let second = self.second.unwrap_or(self.channel);
+                payload[24..28].copy_from_slice(&second.to_le_bytes());
                 payload
             }
             (1 | 5, 0x08) => vec![0x9b],
@@ -163,10 +171,15 @@ impl Device<'_> {
             };
             self.inject(rom, &command_packet(complete, 0x8000, &[0x76]));
         }
+        if id.group == 3 && matches!(id.opcode, 9 | 0x0a) {
+            self.configuration.push((id.opcode, request.to_vec()));
+        }
         if (id.group, id.opcode) == (1, 0x0d) {
             self.scans.push(request.to_vec());
-            for ssid in self.beacons.clone() {
-                self.inject(rom, &beacon(ssid, self.quality));
+            if self.second.is_none() || self.scans.len() == 1 {
+                for ssid in self.beacons.clone() {
+                    self.inject(rom, &beacon(ssid, self.quality, self.elements));
+                }
             }
             let mut body = [0; 16];
             body[6] = 1;
@@ -260,6 +273,7 @@ impl Device<'_> {
                             body.extend(HT);
                             body.extend(WMM);
                         }
+                        body.extend(self.elements);
                         self.inject(rom, &answer(0x10, &body));
                     }
                     _ => {}
@@ -286,7 +300,7 @@ const LOCAL: [u8; 6] = [0x02, 0x12, 0x34, 0x56, 0x78, 0x9a];
 
 /// A channel 1 ESS beacon from 02:03:04:05:06:07 carrying `ssid` and the 1
 /// and 6 Mb/s rates.
-fn beacon(ssid: &[u8], quality: bool) -> Vec<u8> {
+fn beacon(ssid: &[u8], quality: bool, elements: &[u8]) -> Vec<u8> {
     let mut frame = vec![0; 36];
     frame[..2].copy_from_slice(&0x80u16.to_le_bytes());
     frame[4..10].fill(0xff);
@@ -302,6 +316,7 @@ fn beacon(ssid: &[u8], quality: bool) -> Vec<u8> {
         frame.extend(HT);
         frame.extend(WMM);
     }
+    frame.extend(elements);
     mpdu(frame, 3)
 }
 
@@ -355,6 +370,36 @@ fn raise<'n>(
     channel: u32,
     quality: bool,
 ) -> (Station<Model, ClockBios>, Phase, Device<'n>) {
+    raise_beside(native, country, beacons, flags, channel, quality, &[])
+}
+
+/// [`raise`], with `elements` on the AP's frames.
+fn raise_beside<'n>(
+    native: &'n Native,
+    country: Option<[u8; 2]>,
+    beacons: Vec<&'static [u8]>,
+    flags: u8,
+    channel: u32,
+    quality: bool,
+    elements: &'static [u8],
+) -> (Station<Model, ClockBios>, Phase, Device<'n>) {
+    raise_split(
+        native, country, beacons, flags, channel, quality, elements, None,
+    )
+}
+
+/// [`raise_beside`], with [`Device::second`].
+#[expect(clippy::too_many_arguments, reason = "each is a fixture's own knob")]
+fn raise_split<'n>(
+    native: &'n Native,
+    country: Option<[u8; 2]>,
+    beacons: Vec<&'static [u8]>,
+    flags: u8,
+    channel: u32,
+    quality: bool,
+    elements: &'static [u8],
+    second: Option<u32>,
+) -> (Station<Model, ClockBios>, Phase, Device<'n>) {
     let catalog: &'static resources::Catalog = Box::leak(Box::new(catalog_for(
         &profile(),
         Family::Ax200.firmware_name(),
@@ -389,8 +434,11 @@ fn raise<'n>(
         queues: Vec::new(),
         air: Vec::new(),
         quality,
+        elements,
+        configuration: Vec::new(),
         block_acks: Vec::new(),
         scans: Vec::new(),
+        second,
         aggregating: false,
     };
     device.inject(&boot, &alive);
@@ -1032,4 +1080,77 @@ fn a_scan_probes_where_a_frame_may_start_and_listens_elsewhere() {
     let scan = &device.scans[0];
     assert_eq!(scan[9] & FORCE_PASSIVE, FORCE_PASSIVE);
     assert_eq!(scan[48], 0);
+}
+
+#[test]
+fn a_network_one_scan_part_heard_outlives_the_parts_after_it() {
+    let native = Native::default();
+    let (_, phase, device) = raise_split(
+        &native,
+        Some(*b"US"),
+        vec![b"test"],
+        0,
+        OPEN,
+        true,
+        &[],
+        Some(OPEN & !8),
+    );
+    assert_eq!(device.scans.len(), 2);
+    assert_eq!(phase, Phase::AuthenticationRequired);
+}
+
+/// An AP's HE capabilities, one stream with its ACK and HTC bits, then its
+/// operation: 3 us packet extension, RTS threshold 5, color 9. Random access
+/// and MU EDCA parameters follow it.
+#[rustfmt::skip]
+const HE_AP: [u8; 2 + 22 + 2 + 7 + 4 + 16] = [
+    255, 22, 35,
+    0x01, 0, 0x80, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0xfe, 0xff, 0xfe, 0xff,
+    255, 7, 36, 0x53, 0, 0, 9, 0xfc, 0xff,
+    255, 2, 37, 0x2b,
+    255, 14, 38, 0,
+    1, 0x95, 3,
+    2, 0xa4, 4,
+    3, 0xb3, 5,
+    4, 0xc2, 6,
+];
+
+#[test]
+fn an_he_ap_reaches_the_link_and_the_station_commands() {
+    let native = Native::default();
+    let (mut wifi, phase, mut device) =
+        raise_beside(&native, Some(*b"US"), vec![b"test"], 0, OPEN, true, &HE_AP);
+    assert_eq!(phase, Phase::AuthenticationRequired);
+    let associated = run(&mut wifi, &mut device, |wifi, _, _| {
+        wifi.radio().station().phase() == Peering::Associated
+    });
+    assert!(associated, "{:?}", wifi.radio().station().phase());
+    assert!(run(&mut wifi, &mut device, |_, device, _| {
+        device.configuration.len() >= 2
+    }));
+    let (_, link) = device
+        .configuration
+        .iter()
+        .rfind(|(opcode, _)| *opcode == 9)
+        .unwrap();
+    assert_eq!(link[100..103], [3, 3, 5], "packet extension and OCW range");
+    // The BE record arrives first and the firmware orders BK first.
+    assert_eq!(link[104..112], [4, 0, 10, 0, 2, 0, 4, 0]);
+    assert_eq!(link[112..120], [5, 0, 9, 0, 1, 0, 3, 0]);
+    assert_eq!(link[146], 5, "the RTS threshold");
+    assert_eq!(link[148], 2, "MU EDCA, with the color enabled");
+    assert_eq!(link[152], 2, "the mask of a firmware that still has one");
+    assert_eq!(link[165], 9);
+    assert_eq!(link[156..162], [0; 6]);
+    let (_, peer) = device
+        .configuration
+        .iter()
+        .rfind(|(opcode, _)| *opcode == 0x0a)
+        .unwrap();
+    assert_eq!(peer[48], 1, "the AP's HE acknowledgements");
+    assert_eq!(peer[52], 1, "random access");
+    assert_eq!(peer[72..92], [7; 20], "zero nominal padding");
+    assert_eq!(peer[92], 1, "HE-HTC");
 }

@@ -184,6 +184,8 @@ mod tests {
 
     fn profile(device: u16) -> Profile {
         Profile::select(Observed {
+            link_speed: 3,
+            silicon: Default::default(),
             vendor: 0x8086,
             device,
             subsystem_vendor: 0x8086,

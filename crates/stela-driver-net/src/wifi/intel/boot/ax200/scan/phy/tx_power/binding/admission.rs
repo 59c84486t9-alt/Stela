@@ -21,8 +21,7 @@ const BASIC_5: [LegacyRate; 3] = [LegacyRate::Ofdm6, LegacyRate::Ofdm12, LegacyR
 fn rates(channel: Channel) -> &'static [LegacyRate] {
     match channel.band {
         Band::Ghz2 => &BASIC_24,
-        Band::Ghz5 => &BASIC_5,
-        Band::Ghz6 => &[],
+        Band::Ghz5 | Band::Ghz6 => &BASIC_5,
     }
 }
 fn cck(rate: LegacyRate) -> bool {
@@ -165,8 +164,7 @@ pub(super) unsafe fn with_legacy_policy<T, Q: BootIo, B: BiosIo, O: CountryIo + 
     let channel = power.phy.channel;
     let allowed = match channel.band {
         Band::Ghz2 => 0xfff,
-        Band::Ghz5 => 0xff0,
-        Band::Ghz6 => 0,
+        Band::Ghz5 | Band::Ghz6 => 0xff0,
     };
     if legacy_mask & !allowed != 0 || rates(channel).is_empty() {
         return Err(Ax200BindingError::Regulatory(

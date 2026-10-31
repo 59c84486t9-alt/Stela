@@ -10,11 +10,14 @@ use crate::{
         mapping::{Direction, DmaDomain},
         memory::PageSource,
     },
-    wifi::intel::{
-        command::{Id, Tfd},
-        context::Region,
-        dma::{self, Chunk},
-        firmware::{Family, Firmware},
+    wifi::{
+        intel::{
+            command::{Id, Tfd},
+            context::Region,
+            dma::{self, Chunk},
+            firmware::{Family, Firmware},
+        },
+        station::phy::Mode,
     },
 };
 use alloc::{sync::Arc, vec};
@@ -48,8 +51,32 @@ fn negotiate(fw: &Firmware<'_>) -> Result<(), Error> {
 pub(in crate::wifi::intel) fn management_slots(family: Family) -> u16 {
     if family == Family::Ax200 { 16 } else { 128 }
 }
+/// A data queue's window for a peer without HE: `IWL_DEFAULT_QUEUE_SIZE`.
+pub(in crate::wifi::intel) const PLAIN_DATA_SLOTS: u16 = 256;
+/// `iwl_mld_get_queue_size`, up to what the family's byte counts reach.
+pub(in crate::wifi::intel) fn data_slots(family: Family, mode: Mode) -> u16 {
+    let wanted = match mode {
+        Mode::Eht => 2048,
+        Mode::He => 1024,
+        Mode::Legacy | Mode::Ht | Mode::Vht => PLAIN_DATA_SLOTS,
+    };
+    wanted.min(most_slots(family))
+}
+/// `max_tfd_queue_size`, bounded by the byte count table's entries.
+const fn most_slots(family: Family) -> u16 {
+    match family {
+        Family::Ax200 => 256,
+        Family::Ax210 => 1024,
+        Family::Bz | Family::Sc => 4096,
+    }
+}
+/// `TFD_QUEUE_BC_SIZE`s of two-byte entries.
 fn bc_bytes(family: Family) -> usize {
-    if family == Family::Ax200 { 640 } else { 2048 }
+    match family {
+        Family::Ax200 => 640,
+        Family::Ax210 => 2048,
+        Family::Bz | Family::Sc => 8192,
+    }
 }
 fn range(region: Region, bytes: usize, alignment: u64) -> Result<core::ops::Range<u64>, Error> {
     if region.bytes != bytes || region.address & (alignment - 1) != 0 {
@@ -67,7 +94,7 @@ fn geometry(
     byte_counts: Region,
     descriptors: Region,
 ) -> Result<(), Error> {
-    let maximum = if family == Family::Ax200 { 256 } else { 1024 };
+    let maximum = usize::from(most_slots(family));
     if !(16..=maximum).contains(&slots) || !slots.is_power_of_two() {
         return Err(Error::Slots);
     }
@@ -289,6 +316,15 @@ mod tests {
         }
     }
     #[test]
+    fn a_peers_mode_sizes_its_queue_up_to_the_family() {
+        assert_eq!(data_slots(Family::Ax200, Mode::He), 256);
+        assert_eq!(data_slots(Family::Ax210, Mode::Vht), 256);
+        assert_eq!(data_slots(Family::Ax210, Mode::He), 1024);
+        assert_eq!(data_slots(Family::Bz, Mode::Eht), 2048);
+        assert_eq!(data_slots(Family::Sc, Mode::He), 1024);
+    }
+
+    #[test]
     fn exact_queue_abi_geometry_failure_flags_and_raw_write_pointer_boundaries() {
         let bytes = firmware(&[[0x17, 5, 3, 2]]);
         let fw = Firmware::parse(&bytes).unwrap();
@@ -335,7 +371,7 @@ mod tests {
                 raw[..2].copy_from_slice(&queue.to_le_bytes());
                 assert_eq!(config.parse_reply(&raw), Err(Error::Queue(queue)));
             }
-            for slots in [0, 1, 8, 15, 17, 127, 129, 2048] {
+            for slots in [0, 1, 8, 15, 17, 127, 129, 8192] {
                 assert!(matches!(
                     Configuration::prepare(&fw, family, parameters(family, slots)),
                     Err(Error::Slots)

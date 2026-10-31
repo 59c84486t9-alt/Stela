@@ -30,6 +30,9 @@ pub const NO_320MHZ: u32 = 1 << 19;
 pub const NO_EHT: u32 = 1 << 20;
 pub const NO_6GHZ_VLP_CLIENT: u32 = 1 << 22;
 pub const NO_6GHZ_AFC_CLIENT: u32 = 1 << 23;
+/// `IEEE80211_HW_DISALLOW_PUNCTURING` here: a driver's country policy, which
+/// cfg80211 keeps no channel flag for. This bit is above all of cfg80211's.
+pub const NO_PUNCTURING: u32 = 1 << 31;
 
 /// A channel's `flags` and `max_reg_power` once its country applied.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

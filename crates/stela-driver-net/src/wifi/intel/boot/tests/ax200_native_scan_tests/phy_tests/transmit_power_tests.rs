@@ -203,7 +203,7 @@ fn exercise_power(bytes: &[u8], requested: u8, effective: u8, length: usize) {
 #[test]
 fn power_denial_and_unknown_abi_have_no_command_effects() {
     for case in 0..5 {
-        let bytes = power_bytes(if case == 4 { 8 } else { 5 }, true, false);
+        let bytes = power_bytes(if case == 4 { 12 } else { 5 }, true, false);
         let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
         let empty = resources::Catalog::from_handoff(vec![]).unwrap();
         let native = Native::default();
@@ -232,7 +232,7 @@ fn power_denial_and_unknown_abi_have_no_command_effects() {
                 0 => Ax200TransmitPowerError::Regulatory(regulatory::Error::OsDenied),
                 1 | 2 => Ax200TransmitPowerError::Regulatory(regulatory::Error::OsUnavailable),
                 3 => Ax200TransmitPowerError::Country(Ax200CountryError::Revoked),
-                _ => Ax200TransmitPowerError::Version(8),
+                _ => Ax200TransmitPowerError::Version(12),
             })
         );
         assert_eq!(source.calls.load(Ordering::Relaxed), allocations);

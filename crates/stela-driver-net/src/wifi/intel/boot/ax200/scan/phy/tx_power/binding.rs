@@ -475,9 +475,6 @@ fn encode(
             version: version.notification_version,
         });
     }
-    if channel.band == Band::Ghz6 {
-        return Err(Ax200BindingError::State);
-    }
     let cdb_binding = firmware.supports_capability(39);
     let mut bytes = alloc::vec![0; if cdb_binding { 28 } else { 24 }];
     bytes[4..8].copy_from_slice(&(if remove { 3u32 } else { 1 }).to_le_bytes());
@@ -485,7 +482,7 @@ fn encode(
     if !remove {
         bytes[8..12].fill(0);
     }
-    if cdb_binding && firmware.supports_capability(40) && channel.band == Band::Ghz5 {
+    if cdb_binding && firmware.supports_capability(40) && channel.band != Band::Ghz2 {
         bytes[24..28].copy_from_slice(&1u32.to_le_bytes());
     }
     Ok(bytes)
@@ -666,12 +663,14 @@ mod tests {
             let binding = encode(&firmware, channel, remove != 0).unwrap();
             assert_eq!(binding.len(), length as usize);
             assert_eq!(binding, decode(words[10]), "{line}");
-            let power =
-                super::super::super::super::super::mac_context::cold_power_bytes(if cam != 0 {
+            let power = super::super::super::super::super::mac_context::cold_power_bytes(
+                2,
+                if cam != 0 {
                     PowerMode::ContinuouslyAwake
                 } else {
                     PowerMode::SavePower
-                });
+                },
+            );
             assert_eq!(power, decode(words[11]), "{line}");
             records += 1;
         }

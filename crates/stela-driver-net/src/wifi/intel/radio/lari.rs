@@ -50,13 +50,29 @@ fn observed(input: Input, observation: Observation) -> Result<Option<Value>, Err
         Observation::Observed(value) => Ok(Some(value)),
     }
 }
+/// `iwl_lari_config_change_cmd` before its BIOS header.
+const WORDS: usize = 11;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Plan {
     schema: u8,
     inputs: Inputs,
-    words: [u32; 9],
+    words: [u32; WORDS],
     extension: Option<[u8; 48]>,
     change: Option<Vec<u8>>,
+}
+/// `iwl_bios_config_hdr`: where the DSM functions came from.
+fn bios_header(inputs: &Inputs) -> [u8; 4] {
+    let table = inputs.dsm.iter().find_map(|observation| match observation {
+        Observation::Observed(value) => Some(value),
+        _ => None,
+    });
+    table.map_or([0; 4], |value| {
+        let source = match value.source {
+            Source::Acpi => 1,
+            Source::Uefi => 2,
+        };
+        [source, value.revision, 0, 0]
+    })
 }
 impl Plan {
     pub fn prepare(firmware: &Firmware<'_>, radio_id: u32, inputs: Inputs) -> Result<Self, Error> {
@@ -69,6 +85,7 @@ impl Plan {
             6 => 24,
             8 => 28,
             12 => 36,
+            13 => 44,
             other => return Err(Error::Version(other)),
         };
         let extension_version = firmware
@@ -91,7 +108,7 @@ impl Plan {
             data[4..8].copy_from_slice(&value.value.to_le_bytes());
             extension = Some(data);
         }
-        let mut words = [0u32; 9];
+        let mut words = [0u32; WORDS];
         let rf = (radio_id >> 12) & 0xfff;
         if matches!(rf, 0x10c | 0x10a | 0x108 | 0x105) && dsm(2)?.is_some_and(|v| v.value == 1) {
             words[0] |= 1 << 3;
@@ -148,14 +165,26 @@ impl Plan {
         if let Some(value) = dsm(12)? {
             words[8] = value.value;
         }
+        if schema >= 13 {
+            if let Some(value) = dsm(13)? {
+                words[9] = value.value;
+            }
+            if let Some(value) = dsm(14)? {
+                words[10] = value.value;
+            }
+        }
         // Exact donor predicate includes fields beyond older payload prefixes.
         // Keep the complete semantic words even when only that prefix sends.
         let change = words.iter().any(|v| *v != 0).then(|| {
-            words
+            let mut data: Vec<u8> = words
                 .iter()
                 .flat_map(|v| v.to_le_bytes())
                 .take(bytes)
-                .collect()
+                .collect();
+            if schema >= 13 {
+                data.extend(bios_header(&inputs));
+            }
+            data
         });
         Ok(Self {
             schema,
@@ -171,7 +200,7 @@ impl Plan {
     pub fn inputs(&self) -> &Inputs {
         &self.inputs
     }
-    pub fn words(&self) -> &[u32; 9] {
+    pub fn words(&self) -> &[u32; WORDS] {
         &self.words
     }
     /// Source extension precedes LARI_CONFIG_CHANGE because change triggers
@@ -207,6 +236,27 @@ mod tests {
     extern crate std;
     use super::*;
     use crate::wifi::intel::{command::Command, firmware::Family};
+    #[test]
+    fn version_13_carries_the_wifi_7_functions_and_where_they_came_from() {
+        let bytes = firmware(Some(13), 0, 0);
+        let fw = Firmware::parse(&bytes).unwrap();
+        let mut inputs = unavailable();
+        let value = |value| {
+            Observation::Observed(Value {
+                value,
+                source: Source::Uefi,
+                revision: 4,
+            })
+        };
+        inputs.dsm[12] = value(3);
+        inputs.dsm[13] = value(5);
+        inputs.dsm[14] = value(7);
+        let plan = Plan::prepare(&fw, 0x112000, inputs).unwrap();
+        let (_, data) = plan.commands().next().unwrap();
+        assert_eq!(data.len(), 48);
+        assert_eq!(data[32..44], [3, 0, 0, 0, 5, 0, 0, 0, 7, 0, 0, 0]);
+        assert_eq!(data[44..], [2, 4, 0, 0]);
+    }
     fn firmware(schema: Option<u8>, extension: u8, caps: u8) -> Vec<u8> {
         let mut b = alloc::vec![0;88];
         b[4..8].copy_from_slice(&0x0a4c5749u32.to_le_bytes());
@@ -348,7 +398,7 @@ mod tests {
             let b = firmware(Some(schema), 1, 15);
             let fw = Firmware::parse(&b).unwrap();
             let result = Plan::prepare(&fw, 0x10a000, scene(9));
-            if [1, 6, 8, 12].contains(&schema) {
+            if [1, 6, 8, 12, 13].contains(&schema) {
                 let plan = result.unwrap();
                 let commands: Vec<_> = plan.commands().collect();
                 assert_eq!((commands[0].0.opcode, commands[1].0.opcode), (8, 1));
@@ -361,6 +411,7 @@ mod tests {
                         6 => 24,
                         8 => 28,
                         12 => 36,
+                        13 => 48,
                         _ => unreachable!(),
                     }
                 );

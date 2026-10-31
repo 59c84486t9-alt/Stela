@@ -21,18 +21,17 @@ impl<'a, Q: BootIo, B: BiosIo> Hardware<'_, 'a, Q, B> {
     }
     pub(super) fn channel(&self, band: Band, number: u16) -> Option<Channel> {
         let information = &self.board.initialized_nvm().information;
-        let sku_bit = match band {
-            Band::Ghz2 => 1,
-            Band::Ghz5 => 2,
-            Band::Ghz6 => return None,
-        };
+        // NVM has no 6 GHz bit: `iwl_init_channel_map` counts it with 5 GHz.
+        let sku_bit = if band == Band::Ghz2 { 1 } else { 2 };
         if information.lar_enabled == 0 || information.mac_sku_flags & sku_bit == 0 {
             return None;
         }
         let observation = self.channels.iter().find(|ch| {
             let matches_band = matches!(
                 (ch.channel.band, band),
-                (channel::Band::Ghz2, Band::Ghz2) | (channel::Band::Ghz5, Band::Ghz5)
+                (channel::Band::Ghz2, Band::Ghz2)
+                    | (channel::Band::Ghz5, Band::Ghz5)
+                    | (channel::Band::Ghz6, Band::Ghz6)
             );
             matches_band
                 && ch.channel.number == number

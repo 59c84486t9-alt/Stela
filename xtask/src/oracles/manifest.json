@@ -1069,6 +1069,16 @@
   },
   {
     "package": "stela-driver-net",
+    "test": "released_firmware_passes_the_version_gates",
+    "source": "crates/stela-driver-net/src/wifi/intel/boot/ax200/scan/phy/tx_power.rs",
+    "kind": "oracle",
+    "inputs": [
+      "STELA_IWLWIFI_FIRMWARE"
+    ],
+    "reason": "requires a released iwlwifi firmware image"
+  },
+  {
+    "package": "stela-driver-net",
     "test": "pinned_linux_phy_context_and_rlc_bytes",
     "source": "crates/stela-driver-net/src/wifi/intel/boot/ax200/scan/phy.rs",
     "kind": "oracle",

@@ -49,6 +49,13 @@ impl HeOperation {
         self.parameters & 0x8000_0000 == 0
     }
 }
+/// `ieee80211_he_mu_edca_param_ac_rec`, for one access category.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MuEdcaRecord {
+    pub aifsn: u8,
+    pub ecw_min_max: u8,
+    pub timer: u8,
+}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EhtOperation {
     pub parameters: u8,
@@ -68,7 +75,7 @@ pub struct ChannelDefinition {
     pub punctured: u16,
 }
 
-fn mhz(width: Width) -> u32 {
+pub(super) fn mhz(width: Width) -> u32 {
     match width {
         Width::Mhz20 => 20,
         Width::Mhz40 => 40,
@@ -179,6 +186,11 @@ impl ChannelDefinition {
             && (self.center2_mhz.is_none() || self.center2_mhz == outer.center2_mhz)
     }
 
+    /// How far the control channel lies above the first center, in MHz.
+    pub fn control_offset_mhz(&self) -> i32 {
+        i32::from(self.control.frequency_mhz) - self.center1_mhz as i32
+    }
+
     /// The width in MHz, an 80+80 MHz definition counting one segment.
     pub fn width_mhz(&self) -> u32 {
         mhz(self.width)
@@ -232,12 +244,48 @@ impl ChannelDefinition {
     }
 }
 
+impl ChannelDefinition {
+    /// `ieee80211_chandef_downgrade`: the half with the control channel, and
+    /// the primary 80 MHz of 80+80.
+    pub fn downgraded(mut self) -> Self {
+        let (width, shift) = match self.width {
+            Width::Mhz20 => return self,
+            Width::Mhz40 => (Width::Mhz20, 10),
+            Width::Mhz80 => (Width::Mhz40, 20),
+            Width::Mhz80P80 => (Width::Mhz80, 0),
+            Width::Mhz160 => (Width::Mhz80, 40),
+            Width::Mhz320 => (Width::Mhz160, 80),
+        };
+        self.center1_mhz = if u32::from(self.control.frequency_mhz) < self.center1_mhz {
+            self.center1_mhz - shift
+        } else {
+            self.center1_mhz + shift
+        };
+        self.width = width;
+        self.center2_mhz = None;
+        self
+    }
+
+    /// This channel as a station limited to `width` joins it.
+    pub fn narrowed_to(mut self, width: Width) -> Self {
+        while mhz(self.width) > mhz(width) || (self.width == Width::Mhz80P80 && width != self.width)
+        {
+            self = self.downgraded();
+        }
+        self
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Operations {
     pub ht: Option<HtOperation>,
     pub vht: Option<VhtOperation>,
     pub he: Option<HeOperation>,
     pub eht: Option<EhtOperation>,
+    /// The UORA parameter set's OCW range.
+    pub uora: Option<u8>,
+    /// The MU EDCA parameter set, by ACI, which is the order it arrives in.
+    pub mu_edca: Option<[MuEdcaRecord; 4]>,
 }
 fn once<T>(slot: &mut Option<T>, value: T) -> Result<(), Error> {
     if slot.replace(value).is_some() {
@@ -261,6 +309,8 @@ impl Operations {
             vht: None,
             he: None,
             eht: None,
+            uora: None,
+            mu_edca: None,
         };
         while !bytes.is_empty() {
             let h = bytes.get(..2).ok_or(Error::Truncated)?;
@@ -297,6 +347,15 @@ impl Operations {
                     Some(36) => once(&mut out.he, HeOperation::parse(&data[1..])?)?,
                     Some(106) => once(&mut out.eht, EhtOperation::parse(&data[1..])?)?,
                     Some(107) => (), // Opaque unselected AP advertisement, no inherited profile.
+                    // `_ieee802_11_parse_elems_full` keeps these only when long enough.
+                    Some(37) if data.len() >= 2 => out.uora = Some(data[1]),
+                    Some(38) if data.len() >= 14 => {
+                        out.mu_edca = Some(core::array::from_fn(|aci| MuEdcaRecord {
+                            aifsn: data[2 + aci * 3],
+                            ecw_min_max: data[3 + aci * 3],
+                            timer: data[4 + aci * 3],
+                        }));
+                    }
                     None => return Err(Error::Truncated),
                     _ => (),
                 },
@@ -528,6 +587,25 @@ mod tests {
     use alloc::{format, vec, vec::Vec};
 
     #[test]
+    fn random_access_and_mu_edca_come_with_their_lengths() {
+        let mut elements = vec![255, 2, 37, 0x2b, 255, 14, 38, 0];
+        elements.extend([1, 0x95, 3, 2, 0xa4, 4, 3, 0xb3, 5, 4, 0xc2, 6]);
+        let operations = Operations::parse(&elements).unwrap();
+        assert_eq!(operations.uora, Some(0x2b));
+        let records = operations.mu_edca.unwrap();
+        assert_eq!(
+            records[3],
+            MuEdcaRecord {
+                aifsn: 4,
+                ecw_min_max: 0xc2,
+                timer: 6
+            }
+        );
+        let short = Operations::parse(&[255, 1, 37, 255, 3, 38, 0, 1]).unwrap();
+        assert_eq!((short.uora, short.mu_edca), (None, None));
+    }
+
+    #[test]
     fn downgrade_keeps_the_control_channel_like_ieee80211_chandef_downgrade() {
         let control = Channel {
             band: Band::Ghz5,
@@ -709,6 +787,8 @@ mod tests {
                                 }),
                                 he: None,
                                 eht: None,
+                                uora: None,
+                                mu_edca: None,
                             };
                             let mut record = [0; 6];
                             if let Ok(def) = ops.channel(control, Mode::Vht, Some((own, peer))) {

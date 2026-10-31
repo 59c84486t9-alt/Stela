@@ -67,8 +67,8 @@ pub struct Ax210Context {
     scratch: [u8; SCRATCH_BYTES],
 }
 impl Ax210Context {
-    /// Normal standalone TY/GF 4KiB-RB profile, without an external FSEQ,
-    /// debug destination, IMR or integrated-only DSBR/URM configuration.
+    /// The normal 4KiB-RB profile, without an external FSEQ or debug
+    /// destination.
     /// The normal MVM transport configuration leaves external-clock flags
     /// zero; ECKV radio init remains a separate firmware operation.
     ///
@@ -84,10 +84,10 @@ impl Ax210Context {
         memory: Memory,
         step: &StepConfiguration<'_>,
     ) -> Result<Self, Error> {
-        if profile.family() != Family::Ax210 {
+        if profile.family() < Family::Ax210 {
             return Err(Error::WrongFamily);
         }
-        firmware.require_family(Family::Ax210)?;
+        firmware.require_family(profile.family())?;
         let plan = firmware.self_load_plan()?;
         let iml = firmware.iml().ok_or(firmware::Error::Missing("IML"))?;
         let entries = usize::from(queues.receive_entries);
@@ -95,7 +95,11 @@ impl Ax210Context {
             return Err(context::Error::QueueSize.into());
         }
         validate(queues.free, entries * 16, 256)?;
-        validate(queues.used, entries * 32, 256)?;
+        validate(
+            queues.used,
+            entries * super::receive::used_stride(profile.family()),
+            256,
+        )?;
         validate(queues.status, 2, 16)?;
         validate(queues.command, 128 * 256, 256)?;
         validate(memory.info, INFO_BYTES, 4096)?;
@@ -159,10 +163,12 @@ impl Ax210Context {
         context[70..72].copy_from_slice(&(entries.ilog2() as u16).to_le_bytes());
         context[96..100].copy_from_slice(&(ADVERTISED_SCRATCH_BYTES as u32).to_le_bytes());
         let mut scratch = [0; SCRATCH_BYTES];
-        scratch[..2].copy_from_slice(&(profile.observed().hardware_revision as u16).to_le_bytes());
+        scratch[..2].copy_from_slice(&(profile.revision() as u16).to_le_bytes());
         scratch[4..6].copy_from_slice(&((SCRATCH_BYTES / 4) as u16).to_le_bytes());
-        // RB_SIZE_4K | MTR_MODE | MTR_FORMAT_256B.
-        scratch[8..12].copy_from_slice(&0x000f_0000u32.to_le_bytes());
+        // RB_SIZE_4K | MTR_MODE | MTR_FORMAT_256B, with IMR_DEBUG_EN where the
+        // MAC configuration asks for it.
+        let control = 0x000f_0000 | u32::from(profile.platform().imr) << 1;
+        scratch[8..12].copy_from_slice(&control.to_le_bytes());
         scratch[48..56].copy_from_slice(&queues.free.address.to_le_bytes());
         let mailboxes = step.mailboxes();
         scratch[76..80].copy_from_slice(&mailboxes[0].to_le_bytes());

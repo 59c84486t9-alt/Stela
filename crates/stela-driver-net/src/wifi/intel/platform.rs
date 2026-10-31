@@ -5,7 +5,7 @@
 //! GetVariable calls and permanent EBS/root-switch storage belong to boot.
 //! Raw length/hash/provenance integrity does not authenticate a vendor signature
 //! or grant redistribution rights, calibration validity or regulatory permission.
-use super::{firmware::Family, identity::Profile};
+use super::identity::Profile;
 use crate::firmware as resources;
 use alloc::{boxed::Box, format, string::String, vec::Vec};
 use stela_crypto::{Sha256, digest::Digest};
@@ -38,6 +38,7 @@ pub enum Variable {
     PhyFilters,
     Sgom,
     Uats,
+    Puncturing,
 }
 #[derive(Clone, Copy, Debug)]
 pub struct VariableDescriptor {
@@ -64,7 +65,7 @@ macro_rules! descriptor {
 /// Sole descriptor table for raw identity, lookup minima and collection bounds.
 /// The 4096-byte native limits preserve a separate BoundExceeded
 /// observation; they are not Linux limits or permission to treat data as absent.
-pub const VARIABLE_DESCRIPTORS: [VariableDescriptor; 16] = [
+pub const VARIABLE_DESCRIPTORS: [VariableDescriptor; 17] = [
     descriptor!(
         OemPnvm,
         "UefiCnvWlanOemSignedPnvm",
@@ -105,6 +106,7 @@ pub const VARIABLE_DESCRIPTORS: [VariableDescriptor; 16] = [
     descriptor!(PhyFilters, "WPFC", WIFI_GUID, 17, 4096),
     descriptor!(Sgom, "UefiCnvWlanSarGeoOffsetMapping", WIFI_GUID, 339, 4096),
     descriptor!(Uats, "CnvUefiWlanUATS", WIFI_GUID, 339, 4096),
+    descriptor!(Puncturing, "UefiCnvWlanPuncturing", WIFI_GUID, 5, 4096),
 ];
 pub const RADIO_VARIABLE_COUNT: usize = VARIABLE_DESCRIPTORS.len() - Variable::Wrds as usize;
 impl Variable {
@@ -559,7 +561,7 @@ pub fn post_alive_plan(profile: &Profile, sku: [u32; 3]) -> PostAlivePlan {
             pnvm_completion_required: false,
         };
     }
-    let external = profile.family() == Family::Ax210;
+    let external = profile.pnvm_request().is_some();
     let pnvm = if sku[2] != 0 {
         PnvmSource::Bios {
             external_fallback: external,

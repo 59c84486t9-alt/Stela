@@ -11,7 +11,7 @@ pub(super) fn exercise_mpdu_observations(
     state: &Arc<Mutex<ModelState>>,
 ) {
     use crate::wifi::intel::command::Id;
-    let ax210 = radio.initialized.boot.profile.family() == Family::Ax210;
+    let ax210 = radio.initialized.boot.profile.family() >= Family::Ax210;
     radio.replenish_completed_receive().unwrap();
     let allocations = source.calls.load(Ordering::Relaxed);
     let maps = domain.records.lock().unwrap().maps;

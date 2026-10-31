@@ -213,6 +213,11 @@ mod tests {
         }
     }
     #[test]
+    fn each_family_reads_the_table_its_radio_answers_with() {
+        assert_eq!(Inventory::Extended.channel_count(), 51);
+        assert_eq!(Inventory::UltraHighBand.channel_count(), 110);
+    }
+    #[test]
     fn channel_inventory_boundaries_and_no_invented_missing_channels() {
         for (inventory, last) in [
             (Inventory::Extended, (50, Band::Ghz5, 181, 5905)),

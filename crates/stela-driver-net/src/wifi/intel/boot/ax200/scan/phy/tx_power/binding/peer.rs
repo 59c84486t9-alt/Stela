@@ -269,8 +269,7 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200LegacyPeer<'a, Q, B
         }
         let allowed = match power.channel().band {
             Band::Ghz2 => 0xfff,
-            Band::Ghz5 => 0xff0,
-            Band::Ghz6 => 0,
+            Band::Ghz5 | Band::Ghz6 => 0xff0,
         };
         if self.peer.address.0 == [0; 6]
             || self.peer.address.is_multicast()
@@ -554,9 +553,19 @@ fn rates(
         .command_version(5, 0x0f)
         .ok_or(Ax200LegacyPeerError::MissingApi)?
         .command_version;
-    let mut bytes = alloc::vec![0;match version {1|2=>24,3|4=>28,_=>return Err(Ax200LegacyPeerError::Version{group:5,command:0x0f,version})}];
-    bytes[6] = antennas;
-    bytes[10..12].copy_from_slice(&mask.to_le_bytes());
+    let shape = crate::wifi::intel::association::RateShape::of(version).ok_or(
+        Ax200LegacyPeerError::Version {
+            group: 5,
+            command: 0x0f,
+            version,
+        },
+    )?;
+    let mut bytes = alloc::vec![0; shape.bytes];
+    if version >= 6 {
+        bytes[0] = 1; // Station 0's bit in the station mask.
+    }
+    bytes[shape.head + 2] = antennas;
+    bytes[shape.head + 6..shape.head + 8].copy_from_slice(&mask.to_le_bytes());
     Ok(bytes)
 }
 fn status(raw: &[u8]) -> Result<(), Ax200LegacyPeerError> {

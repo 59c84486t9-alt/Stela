@@ -323,7 +323,7 @@ fn exercise_completion(actual: bool) {
     assert_eq!(&payload[44..48], &[32, 2, 10, 2]);
     assert_eq!(
         &payload[48..64],
-        &[0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 2, 0, 1, 0]
+        &[0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 2, 1, 1, 0]
     );
     assert!(payload[64..584].iter().all(|byte| *byte == 0));
     assert_eq!(&payload[584..596], &[0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
