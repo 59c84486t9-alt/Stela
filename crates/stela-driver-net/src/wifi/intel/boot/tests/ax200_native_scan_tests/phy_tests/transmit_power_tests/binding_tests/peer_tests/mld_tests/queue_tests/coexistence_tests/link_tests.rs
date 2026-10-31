@@ -2676,6 +2676,25 @@ fn an_open_port_sleeps_on_the_vector_which_each_pass_clears_and_rearms() {
 }
 
 #[test]
+fn only_the_last_restarts_reset_the_function_and_one_without_a_reset_still_boots() {
+    let resets = |spent: usize, no_reset: bool| {
+        let native = Native::default();
+        native.state.lock().unwrap().no_reset = no_reset;
+        let (mut wifi, _device) = connect(&native, false);
+        wifi.radio_mut().spend_restarts(spent);
+        native.state.lock().unwrap().registers.insert(8, 1 << 25);
+        wifi.carrier();
+        assert_eq!(wifi.radio().phase(), Phase::Booting);
+        let state = native.state.lock().unwrap();
+        let resets = state.ops.iter().filter(|op| matches!(op, Op::Reset));
+        (resets.count(), wifi.radio().no_reset())
+    };
+    assert_eq!(resets(2, false), (0, false));
+    assert_eq!(resets(3, false), (1, false));
+    assert_eq!(resets(3, true), (1, true));
+}
+
+#[test]
 fn a_firmware_error_frees_the_function_and_boots_it_for_the_keeper_to_join_again() {
     let native = Native::default();
     let (mut wifi, mut device) = connect(&native, false);

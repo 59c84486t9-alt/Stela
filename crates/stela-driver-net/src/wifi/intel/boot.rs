@@ -28,9 +28,8 @@ use crate::{
     },
     firmware as resources,
 };
-use alloc::{sync::Arc, vec::Vec};
+use alloc::{rc::Rc, sync::Arc, vec::Vec};
 use core::{
-    any::Any,
     ptr::NonNull,
     sync::atomic::{Ordering, fence},
 };
@@ -101,12 +100,19 @@ pub struct ProductResetObservation {
 /// function under the same reservation; clones take turns.
 pub unsafe trait BootIo: Csr + Clone + 'static {
     fn write8(&mut self, register: u32, value: u8) -> Result<(), power::AccessError>;
+    /// Reset the stopped function with its PCI setup kept. Whether it did.
+    fn reset_function(&mut self) -> bool;
+}
+/// What keeps the PCI function behind [`NativeBootIo`].
+pub trait FunctionOwner {
+    /// [`BootIo::reset_function`], the claim and BAR mapping kept throughout.
+    fn reset(&self) -> bool;
 }
 #[derive(Clone)]
 pub struct NativeBootIo {
     registers: Mmio,
     clock: Clock,
-    _owner: Arc<dyn Any>,
+    owner: Rc<dyn FunctionOwner>,
 }
 impl NativeBootIo {
     /// # Safety
@@ -118,7 +124,7 @@ impl NativeBootIo {
     /// the owner's final Drop, including deliberate quarantine on failure.
     pub unsafe fn from_window(
         window: NonNull<[u8; 16384]>,
-        owner: Arc<dyn Any>,
+        owner: Rc<dyn FunctionOwner>,
         clock: Clock,
     ) -> Result<Self, Error> {
         if clock.ticks_per_microsecond == 0 || !(window.as_ptr() as usize).is_multiple_of(4096) {
@@ -128,7 +134,7 @@ impl NativeBootIo {
             // SAFETY: covered by this function's own safety contract.
             registers: unsafe { Mmio::new(window.as_ptr().cast::<u8>() as u64) },
             clock,
-            _owner: owner,
+            owner,
         })
     }
 }
@@ -159,6 +165,9 @@ unsafe impl BootIo for NativeBootIo {
         }
         self.registers.write8(register as usize, value);
         Ok(())
+    }
+    fn reset_function(&mut self) -> bool {
+        self.owner.reset()
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -525,21 +525,28 @@ pub(super) unsafe fn intel_wifi<B: wifi::intel::radio::bios::service::BiosIo>(
             // SAFETY: the claimed function's own MSI-X table, mapped uncached
             // by the mapping `owner` keeps.
             let table = unsafe { crate::bus::mmio::Mmio::new(table.as_ptr() as u64) };
-            function
-                .enable_msix(msix, || {
-                    table.write32(0, message.address as u32);
-                    table.write32(4, (message.address >> 32) as u32);
-                    table.write32(8, message.data);
-                    table.write32(12, 0);
-                    Ok(())
-                })
-                .is_ok()
+            let vector = IntelVector {
+                msix,
+                table,
+                message,
+            };
+            vector.enable(&mut function).then_some(vector)
         }
-        _ => false,
+        _ => None,
     };
-    let pci = Pci { vector, ..pci };
-    let owner: Arc<dyn Any> = Arc::new((function, registers));
-    let kept = |owner: &Arc<dyn Any>| Some(Box::new(owner.clone()) as Box<dyn Any>);
+    let pci = Pci {
+        vector: vector.is_some(),
+        ..pci
+    };
+    let owner: Rc<dyn wifi::intel::boot::FunctionOwner> = Rc::new(IntelOwner {
+        function: RefCell::new(function),
+        _registers: registers,
+        vector,
+        clock: inputs.clock,
+    });
+    let kept = |owner: &Rc<dyn wifi::intel::boot::FunctionOwner>| {
+        Some(Box::new(owner.clone()) as Box<dyn Any>)
+    };
     // SAFETY: the mount claimed the stopped function and mapped its BAR0
     // uncached; `owner` keeps both, and its interrupts are off.
     let io = unsafe {
@@ -554,6 +561,52 @@ pub(super) unsafe fn intel_wifi<B: wifi::intel::radio::bios::service::BiosIo>(
             link,
         }),
         Err(error) => Err((Error::IntelWifi(error), kept(&owner))),
+    }
+}
+
+/// The MSI-X vector an Intel radio's completions arrive on.
+#[cfg(feature = "native-acpi")]
+struct IntelVector {
+    msix: crate::bus::pci::MsiX,
+    table: crate::bus::mmio::Mmio,
+    message: crate::bus::irq::MsiMessage,
+}
+
+#[cfg(feature = "native-acpi")]
+impl IntelVector {
+    fn enable(&self, function: &mut Function<OwnedConfig>) -> bool {
+        function
+            .enable_msix(self.msix, || {
+                self.table.write32(0, self.message.address as u32);
+                self.table.write32(4, (self.message.address >> 32) as u32);
+                self.table.write32(8, self.message.data);
+                self.table.write32(12, 0);
+                Ok(())
+            })
+            .is_ok()
+    }
+}
+
+/// An Intel radio's function, with everything that outlives its users.
+#[cfg(feature = "native-acpi")]
+struct IntelOwner {
+    function: RefCell<Function<OwnedConfig>>,
+    _registers: Mapping,
+    vector: Option<IntelVector>,
+    clock: Clock,
+}
+
+#[cfg(feature = "native-acpi")]
+impl wifi::intel::boot::FunctionOwner for IntelOwner {
+    /// `pci_reset_function`, of its methods the one Intel radios have, with
+    /// the vector back as `pci_restore_state` puts it.
+    fn reset(&self) -> bool {
+        let mut function = self.function.borrow_mut();
+        function.function_level_reset(&self.clock) == Ok(true)
+            && self
+                .vector
+                .as_ref()
+                .is_none_or(|vector| vector.enable(&mut function))
     }
 }
 

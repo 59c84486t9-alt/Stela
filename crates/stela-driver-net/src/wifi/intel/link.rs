@@ -293,6 +293,13 @@ struct Attempts {
 }
 
 impl Attempts {
+    /// `iwl_trans_determine_restart_mode`: past three attempts its list resets
+    /// the function, and a product reset without the BIOS's `_PRR` does the
+    /// same.
+    fn resets(&self) -> bool {
+        self.count > 3
+    }
+
     /// Whether to boot again at `now`, spending an attempt.
     fn allow(&mut self, now: u64) -> bool {
         match self.backoff {
@@ -324,6 +331,8 @@ struct Restart<Q, B> {
     domain: Arc<dyn DmaDomain>,
     entries: u16,
     attempts: Attempts,
+    /// The function turned out to have no reset, which is said once.
+    no_reset: bool,
 }
 
 /// One Intel Wi-Fi function's bring-up.
@@ -410,6 +419,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             domain,
             entries,
             attempts: Attempts::default(),
+            no_reset: false,
         };
         let wifi = Self {
             family: boot.family(),
@@ -463,6 +473,8 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             return false;
         }
         self.stage = Stage::Moving;
+        let no_reset = self.restart.attempts.resets() && !self.restart.io.reset_function();
+        let first = no_reset && !core::mem::replace(&mut self.restart.no_reset, true);
         let restart = &self.restart;
         // SAFETY: the owner that held `io`'s twin stopped, and `new`'s
         // contract holds for what it kept.
@@ -501,7 +513,24 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         self.error = None;
         self.reported = false;
         self.client = station::Client::new(unassigned());
+        if first {
+            self.client
+                .unsupported("a reset of this function: it boots again without one");
+        }
         true
+    }
+
+    /// As many failed boots as the list's `count`, just now.
+    #[cfg(test)]
+    pub(crate) fn spend_restarts(&mut self, count: usize) {
+        self.restart.attempts.count = count;
+        self.restart.attempts.last_us = self.clock.now_us();
+    }
+
+    /// Whether a function reset was asked for and not there.
+    #[cfg(test)]
+    pub(crate) fn no_reset(&self) -> bool {
+        self.restart.no_reset
     }
 
     /// The station address the NVM holds, once read.
@@ -1055,6 +1084,18 @@ mod tests {
             "the list began again"
         );
         assert_eq!(attempts.count, 1);
+    }
+
+    #[test]
+    fn the_fourth_and_fifth_attempts_reset_the_function() {
+        let mut attempts = Attempts::default();
+        let resets: Vec<bool> = (1..=RESTARTS as u64)
+            .map(|second| {
+                attempts.allow(second * 1_000_000);
+                attempts.resets()
+            })
+            .collect();
+        assert_eq!(resets, [false, false, false, true, true]);
     }
 
     #[test]

@@ -376,7 +376,7 @@ impl Client {
     }
 
     /// Report an unsupported operation once and carry on without it.
-    fn unsupported(&mut self, operation: &'static str) {
+    pub(super) fn unsupported(&mut self, operation: &'static str) {
         if !self.reported.contains(&operation) {
             self.reported.push(operation);
             self.events.push_back(keeper::Event::Unsupported(operation));
