@@ -144,7 +144,7 @@ pub fn descriptors(
     address: u32,
     band: FirmwareBand,
 ) -> Result<([u8; 48], [u8; 16]), Error> {
-    if !(8..=MAX_DATA).contains(&data.len()) {
+    if !(1..=MAX_DATA).contains(&data.len()) {
         return Err(Error::InvalidLength);
     }
     address
@@ -160,7 +160,11 @@ pub fn descriptors(
     for (word, value) in [
         (
             0,
-            data.len() as u32 | 48 << 16 | u32::from(data[4] & 1) << 24 | 1 << 26 | 1 << 31,
+            data.len() as u32
+                | 48 << 16
+                | u32::from(data.get(4).is_some_and(|byte| byte & 1 != 0)) << 24
+                | 1 << 26
+                | 1 << 31,
         ),
         (1, 16 << 8 | rate_id << 16),
         (3, 1 << 8 | 1 << 10),

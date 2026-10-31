@@ -13,7 +13,7 @@ use super::{
     descriptor::{
         Aggregate, Packet, QSEL_MANAGEMENT, RATE_1M, RATE_6M, RATE_ID_B, RATE_ID_G, SECURITY_CCMP,
     },
-    dynamic,
+    dynamic, templates,
     transmit::Queue,
 };
 use crate::wifi::security::aggregate::{OrderedGroup, Shape};
@@ -67,7 +67,7 @@ const BSS_EXPIRY_US: u64 = 30_000_000;
 /// rtw88's sole station shares its interface's MAC ID, the first it acquires.
 pub const MAC_ID: u8 = 0;
 /// `rtw_ops_add_interface`'s first port.
-const PORT: u8 = 0;
+pub const PORT: u8 = 0;
 /// `RTW_SEC_DEFAULT_KEY_NUM`: group keys sit at their index, pairwise ones after.
 const PAIRWISE_CAM: u8 = 4;
 /// `RTW_CAM_AES`.
@@ -139,11 +139,18 @@ pub trait Device {
     fn set_edca(&mut self, edca: &[AccessCategory; 4], short_slot: bool) -> Result<(), String>;
     fn write_key(&mut self, key: &CamKey<'_>) -> Result<(), String>;
     fn clear_key(&mut self, entry: u8) -> Result<(), String>;
+    /// `rtw_fw_download_rsvd_page` and `rtw_send_rsvd_page_h2c`.
+    fn set_templates(&mut self, _templates: &templates::Templates) -> Result<(), String> {
+        Ok(())
+    }
+    /// `rtw_enter_lps` and `rtw_leave_lps`.
+    fn set_power_save(&mut self, _on: bool) -> Result<(), String> {
+        Ok(())
+    }
     /// `rtw_watch_dog_work`'s traffic accounts, and unless `scanning` its work
-    /// on the air, for a peer that takes STBC or not. Gives the peer's
-    /// `rssi_level`.
-    fn watchdog(&mut self, _scanning: bool, _stbc: bool) -> Result<u8, String> {
-        Ok(0)
+    /// on the air, for a peer that takes STBC or not.
+    fn watchdog(&mut self, _scanning: bool, _stbc: bool) -> Result<Watched, String> {
+        Ok(Watched::default())
     }
     /// `rtw_core_scan_start` and `rtw_core_scan_complete`'s gain.
     fn scanning(&mut self, _scanning: bool) -> Result<(), String> {
@@ -194,6 +201,15 @@ struct Hop {
     channels: Vec<Channel>,
     next: usize,
     leaves_at: u64,
+}
+
+/// What a run of the watchdog found.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Watched {
+    /// The peer's `rssi_level`.
+    pub level: u8,
+    /// Too many frames for power save.
+    pub busy: bool,
 }
 
 /// One key the CAM holds.
@@ -462,6 +478,8 @@ pub struct Rtl8822c<D: Device> {
     /// A report's number, which the management frame it names may await.
     reporting: Option<u8>,
     port_open: bool,
+    /// `RTW_FLAG_LEISURE_PS`.
+    sleeping: bool,
     watchdog_at: u64,
     /// `rtwdev->watch_dog_cnt`.
     watchdogs: u32,
@@ -506,6 +524,7 @@ impl<D: Device> Rtl8822c<D> {
             report: 0,
             reporting: None,
             port_open: false,
+            sleeping: false,
             watchdog_at,
             watchdogs: 0,
             departing: None,
@@ -592,6 +611,7 @@ impl<D: Device> Rtl8822c<D> {
         for key in core::mem::take(&mut self.keys) {
             Self::hardware(self.device.clear_key(key.entry))?;
         }
+        self.power_save(false)?;
         for agreement in &mut self.agreements {
             *agreement = None;
         }
@@ -681,7 +701,10 @@ impl<D: Device> Rtl8822c<D> {
         self.watchdog_at = now + WATCHDOG_US;
         let scanning = self.hop.is_some();
         let stbc = self.context.as_deref().is_some_and(peer_stbc);
-        let level = Self::hardware(self.device.watchdog(scanning, stbc))?;
+        if !scanning {
+            self.power_save(false)?;
+        }
+        let Watched { level, busy } = Self::hardware(self.device.watchdog(scanning, stbc))?;
         if scanning {
             return Ok(());
         }
@@ -693,6 +716,24 @@ impl<D: Device> Rtl8822c<D> {
             Self::hardware(self.device.command(commands::ra_info(info)))?;
         }
         self.watchdogs = self.watchdogs.wrapping_add(1);
+        // `rtw_recalc_lps`, with `ieee80211_powersave_allowed`.
+        let allowed = self.port_open
+            && self
+                .following
+                .as_ref()
+                .is_some_and(follow::Following::may_sleep);
+        if allowed && !busy {
+            self.power_save(true)?;
+        }
+        Ok(())
+    }
+
+    /// `rtw_enter_lps` and `rtw_leave_lps`.
+    fn power_save(&mut self, on: bool) -> Result<(), Error> {
+        if self.sleeping != on {
+            Self::hardware(self.device.set_power_save(on))?;
+            self.sleeping = on;
+        }
         Ok(())
     }
 
@@ -1688,6 +1729,7 @@ impl<D: Device> Radio for Rtl8822c<D> {
 
     fn begin_scan(&mut self, request: scan::Request, budget_us: u64) -> Result<(), Error> {
         let now = self.clock.now_us();
+        self.power_save(false)?;
         self.observed
             .retain(|heard| now.saturating_sub(heard.at) < BSS_EXPIRY_US);
         let channels = request.channels().to_vec();
@@ -1853,6 +1895,11 @@ impl<D: Device> Radio for Rtl8822c<D> {
             context.response().aid & 0x7ff,
             true,
         ))?;
+        let wmm = context.negotiated().wmm.is_some();
+        let aid = context.response().aid & 0x7ff;
+        let band = context.channel().band;
+        let pages = templates::build(self.address, context.bssid(), aid, wmm, band);
+        Self::hardware(self.device.set_templates(&pages))?;
         Self::hardware(self.device.command(commands::default_port(PORT, MAC_ID)))?;
         self.context = Some(context.clone());
         self.station

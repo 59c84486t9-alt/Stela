@@ -71,6 +71,11 @@ struct Air {
     scans: Vec<bool>,
     /// Management frames lost to the air before the AP hears them.
     losses: usize,
+    /// Each power save request, and the pages each association gave firmware.
+    sleeps: Vec<bool>,
+    templates: Vec<templates::Templates>,
+    /// A watchdog run finds too many frames for power save.
+    busy: bool,
     /// The AP stopped beaconing on its channel.
     quiet: bool,
     /// The AP takes no frame at all.
@@ -189,12 +194,23 @@ impl Device for Model {
         self.0.borrow_mut().cleared.push(entry);
         Ok(())
     }
-    fn watchdog(&mut self, scanning: bool, stbc: bool) -> Result<u8, String> {
+    fn set_templates(&mut self, templates: &templates::Templates) -> Result<(), String> {
+        self.0.borrow_mut().templates.push(templates.clone());
+        Ok(())
+    }
+    fn set_power_save(&mut self, on: bool) -> Result<(), String> {
+        self.0.borrow_mut().sleeps.push(on);
+        Ok(())
+    }
+    fn watchdog(&mut self, scanning: bool, stbc: bool) -> Result<Watched, String> {
         let mut air = self.0.borrow_mut();
         if !scanning {
             air.watchdogs.push(stbc);
         }
-        Ok(air.level)
+        Ok(Watched {
+            level: air.level,
+            busy: air.busy,
+        })
     }
     fn scanning(&mut self, scanning: bool) -> Result<(), String> {
         self.0.borrow_mut().scans.push(scanning);
@@ -619,6 +635,51 @@ fn a_block_ack_agreement_orders_what_it_holds() {
 /// How many nullfuncs the station sent.
 fn nullfuncs(air: &Air) -> usize {
     air.sent.iter().filter(|sent| sent.2[0] == 0x48).count()
+}
+
+#[test]
+fn an_association_leaves_firmware_its_frames() {
+    let (_, model) = connected();
+    let air = model.0.borrow();
+    assert_eq!(air.templates.len(), 1);
+    let pages = &air.templates[0];
+    // The PS-Poll's AID from the association response, in its first bytes.
+    assert_eq!(pages.pages[80 + 48..80 + 52], [0xa4, 0, 1, 0xc0]);
+}
+
+#[test]
+fn a_quiet_link_sleeps_between_watchdogs_and_wakes_for_each() {
+    let (mut wifi, model) = connected();
+    let watch = |wifi: &mut Wifi<Model>| {
+        crate::test_clock::advance(CLOCK, WATCHDOG_US);
+        wifi.carrier();
+        wifi.carrier();
+    };
+    watch(&mut wifi);
+    watch(&mut wifi);
+    assert_eq!(model.0.borrow().sleeps, [true, false, true]);
+    model.0.borrow_mut().busy = true;
+    watch(&mut wifi);
+    assert_eq!(model.0.borrow().sleeps, [true, false, true, false]);
+}
+
+#[test]
+fn a_doubted_link_stays_awake_and_a_departure_wakes_it() {
+    let (mut wifi, model) = connected();
+    crate::test_clock::advance(CLOCK, WATCHDOG_US);
+    wifi.carrier();
+    wifi.carrier();
+    assert_eq!(model.0.borrow().sleeps.last(), Some(&true));
+    model.0.borrow_mut().quiet = true;
+    assert!(run(&mut wifi, &model, |_, air| nullfuncs(air) == 1));
+    assert_eq!(model.0.borrow().sleeps.last(), Some(&false));
+    let (mut wifi, model) = connected();
+    crate::test_clock::advance(CLOCK, WATCHDOG_US);
+    wifi.carrier();
+    wifi.carrier();
+    model.0.borrow_mut().hear(management(0xc0, &[1, 0]), false);
+    assert!(run(&mut wifi, &model, |_, air| air.cleared.len() == 2));
+    assert_eq!(model.0.borrow().sleeps.last(), Some(&false));
 }
 
 #[test]

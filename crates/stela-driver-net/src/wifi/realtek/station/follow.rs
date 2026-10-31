@@ -38,6 +38,8 @@ pub(super) struct Following {
     definition: ChannelDefinition,
     /// The TX report number the nullfunc awaits.
     probing: Option<u8>,
+    /// `have_beacon`.
+    heard_beacon: bool,
 }
 
 impl Following {
@@ -56,6 +58,7 @@ impl Following {
                 .map(|wmm| (wmm.parameter_set_count, wmm.access_categories)),
             definition: context.definition(),
             probing: None,
+            heard_beacon: false,
         }
     }
 
@@ -67,6 +70,11 @@ impl Following {
     /// The AP asked for silence.
     pub(super) fn silent(&self) -> bool {
         self.watch.silent()
+    }
+
+    /// `ieee80211_powersave_allowed`, of what this follows.
+    pub(super) fn may_sleep(&self) -> bool {
+        self.heard_beacon && !self.monitor.probing() && !self.watch.moving()
     }
 
     /// A unicast frame came from the AP.
@@ -95,6 +103,7 @@ impl<D: Device> Rtl8822c<D> {
             return Ok(());
         }
         following.monitor.beacon(now);
+        following.heard_beacon = true;
         let bytes = frame.bytes();
         let (Some(&[low, high]), Some(elements)) = (
             bytes.get(34..36).and_then(|bits| bits.first_chunk()),
@@ -234,6 +243,8 @@ impl<D: Device> Rtl8822c<D> {
             Step::Wait => Ok(()),
             Step::Lost => self.lose(),
             Step::Probe => {
+                // `ieee80211_recalc_ps`: a station in doubt stays awake.
+                self.power_save(false)?;
                 self.probe(&context);
                 Ok(())
             }
@@ -250,6 +261,7 @@ impl<D: Device> Rtl8822c<D> {
 
     /// `rtw_ops_config` of the link's channel, then `rtw_sta_rc_work`.
     fn retune(&mut self, context: &AssociationContext) -> Result<(), Error> {
+        self.power_save(false)?;
         let Some(following) = &self.following else {
             return Ok(());
         };

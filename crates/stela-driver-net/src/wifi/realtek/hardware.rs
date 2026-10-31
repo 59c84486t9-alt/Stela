@@ -11,6 +11,7 @@ use super::{
     coex::{self, Coex, Link},
     commands::{self, Report},
     descriptor::Packet,
+    download,
     dynamic::{self, Dynamic, set_mask},
     features,
     firmware_control::Control,
@@ -23,7 +24,8 @@ use super::{
     receive::{self, Ring},
     regd,
     registers::{REG_BCN_CTRL, REG_CR},
-    station::{CamKey, Device, Incoming, MAC_ID, Received},
+    station::{CamKey, Device, Incoming, MAC_ID, PORT, Received, Watched},
+    templates::Templates,
     transmit::{self, Queue, Rings},
 };
 use crate::{
@@ -37,6 +39,13 @@ use crate::{
 };
 use alloc::{format, string::String, vec::Vec};
 use core::fmt::Debug;
+
+/// `REG_TCR`'s `BIT_PWRMGT_HWDATA_EN`.
+const REG_TCR: u32 = 0x604;
+const POWER_BIT_BY_HARDWARE: u32 = 1 << 7;
+/// `LEAVE_LPS_TRY_CNT` and its 20 ms.
+const LEAVE_POWER_SAVE_TRIES: u32 = 5;
+const LEAVE_POWER_SAVE_WAIT_US: u64 = 20_000;
 
 /// `rtw_vif_port[0]`.
 const REG_MAC_ADDRESS: u32 = 0x610;
@@ -138,6 +147,8 @@ pub struct Hardware {
     coex: Coex,
     report: features::Report,
     pages: &'static dyn PageSource,
+    /// `fifo.rsvd_drv_addr`, which is also `fifo.rsvd_boundary`.
+    boundary: u16,
     /// The 2.4 and 5 GHz factory sheets of the country.
     sheets: (FactorySheet, FactorySheet),
     /// `rtwdev->need_rfk`: the channel changed outside a scan.
@@ -181,6 +192,7 @@ impl Hardware {
             coex,
             mac,
             pages,
+            geometry,
             ..
         } = up;
         let initial = phy.factory().calibration().initial();
@@ -212,6 +224,7 @@ impl Hardware {
             coex,
             report,
             pages,
+            boundary: geometry.boundary(),
             sheets: regd::sheets(alpha2),
             calibrate: true,
             calibration,
@@ -519,6 +532,49 @@ impl Device for Hardware {
         self.control.command(command).map_err(failed("command"))
     }
 
+    /// `rtw_fw_download_rsvd_page`, the dummy again last to give the first
+    /// page its own descriptor, and `rtw_send_rsvd_page_h2c`.
+    fn set_templates(&mut self, templates: &Templates) -> Result<(), String> {
+        let boundary = self.boundary;
+        let io = self.control.io().map_err(failed("registers"))?;
+        for data in [&templates.pages[..], &[0]] {
+            download::write_reserved(io, boundary, boundary, data)
+                .map_err(failed("reserved pages"))?;
+        }
+        let Templates {
+            ps_poll,
+            null,
+            qos_null,
+            ..
+        } = *templates;
+        self.control
+            .command(commands::reserved_pages(ps_poll, null, qos_null))
+            .map_err(failed("reserved pages"))
+    }
+
+    /// `rtw_enter_lps_core` and `rtw_leave_lps_core`. Whether firmware reports
+    /// the return or not, it clears the bit it set, so this waits on that.
+    fn set_power_save(&mut self, on: bool) -> Result<(), String> {
+        self.control
+            .command(commands::power_mode(on, PORT))
+            .map_err(failed("power mode"))?;
+        if on {
+            return Ok(());
+        }
+        let io = self.control.io().map_err(failed("registers"))?;
+        for _ in 0..LEAVE_POWER_SAVE_TRIES {
+            let control = io.read32(REG_TCR).map_err(failed("power save"))?;
+            if control & POWER_BIT_BY_HARDWARE == 0 {
+                return Ok(());
+            }
+            io.delay_us(LEAVE_POWER_SAVE_WAIT_US);
+        }
+        set_mask(io, REG_TCR, POWER_BIT_BY_HARDWARE, 0).map_err(failed("power save"))?;
+        self.limitations
+            .push("firmware that did not leave power save in time");
+        Ok(())
+    }
+
     /// `rtw_vif_port_config`.
     fn set_port(&mut self, bssid: Mac, aid: u16, linked: bool) -> Result<(), String> {
         let io = self.control.io().map_err(failed("registers"))?;
@@ -573,10 +629,10 @@ impl Device for Hardware {
     }
 
     /// `rtw_phy_dynamic_mechanism`.
-    fn watchdog(&mut self, scanning: bool, stbc: bool) -> Result<u8, String> {
-        self.dynamic.close_period();
+    fn watchdog(&mut self, scanning: bool, stbc: bool) -> Result<Watched, String> {
+        let busy = self.dynamic.close_period();
         if scanning {
-            return Ok(0);
+            return Ok(Watched { level: 0, busy });
         }
         let linked = self.connected;
         self.dynamic.sample(linked);
@@ -622,7 +678,10 @@ impl Device for Hardware {
         unsafe { self.dynamic.track_temperature(io, &self.report, band) }
             .map_err(failed("temperature"))?;
         self.adapt()?;
-        Ok(self.dynamic.level())
+        Ok(Watched {
+            level: self.dynamic.level(),
+            busy,
+        })
     }
 
     /// `rtw_phy_dig_set_max_coverage`, and `rtw_phy_dig_reset` after, each

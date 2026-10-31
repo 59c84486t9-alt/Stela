@@ -57,6 +57,8 @@ const COVERAGE_MAX: u8 = 0x2a;
 const COVERAGE_MID: u8 = 0x26;
 /// `DIG_CVRG_MIN`, where a scan listens widest.
 pub const MAX_COVERAGE: u8 = 0x1c;
+/// `RTW_LPS_THRESHOLD`.
+const LPS_THRESHOLD: u32 = 50;
 const RSSI_GAIN_OFFSET: u8 = 15;
 /// `DECLARE_EWMA(rssi, 10, 16)`.
 const AVERAGE_PRECISION: u32 = 10;
@@ -564,6 +566,9 @@ pub struct Dynamic {
     evm_db: u8,
     /// Unicast data bytes this period, and their averaged megabits.
     tx_bytes: u64,
+    /// `stats.tx_cnt` and `stats.rx_cnt`.
+    tx_frames: u32,
+    rx_frames: u32,
     rx_bytes: u64,
     tx_throughput: u64,
     rx_throughput: u64,
@@ -614,6 +619,8 @@ impl Dynamic {
             rx_rate: 0,
             evm_db: 0,
             tx_bytes: 0,
+            tx_frames: 0,
+            rx_frames: 0,
             rx_bytes: 0,
             tx_throughput: 0,
             rx_throughput: 0,
@@ -643,6 +650,7 @@ impl Dynamic {
     pub fn frame(&mut self, bytes: &[u8], signal: Option<Signal>, address: Mac, bssid: Mac) {
         if is_unicast_data(bytes) {
             self.rx_bytes += bytes.len() as u64;
+            self.rx_frames += 1;
         }
         let Some(signal) = signal else {
             return;
@@ -674,15 +682,20 @@ impl Dynamic {
     pub fn sent(&mut self, mpdu: &[u8]) {
         if is_unicast_data(mpdu) {
             self.tx_bytes += mpdu.len() as u64;
+            self.tx_frames += 1;
         }
     }
 
-    /// `rtw_watch_dog_work`'s accounts of the period that ended.
-    pub fn close_period(&mut self) {
+    /// `rtw_watch_dog_work`'s accounts of the period that ended, and whether
+    /// it was too busy for power save.
+    pub fn close_period(&mut self) -> bool {
+        let tx_frames = core::mem::take(&mut self.tx_frames);
+        let rx_frames = core::mem::take(&mut self.rx_frames);
         let tx = core::mem::take(&mut self.tx_bytes) >> MBPS_SHIFT;
         let rx = core::mem::take(&mut self.rx_bytes) >> MBPS_SHIFT;
         average_in(&mut self.tx_throughput, tx, THROUGHPUT_WEIGHT);
         average_in(&mut self.rx_throughput, rx, THROUGHPUT_WEIGHT);
+        tx_frames > LPS_THRESHOLD || rx_frames > LPS_THRESHOLD
     }
 
     /// `rtw_fw_update_wl_phy_info`.

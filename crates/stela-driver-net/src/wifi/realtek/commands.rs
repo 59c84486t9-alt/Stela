@@ -19,6 +19,10 @@ const CALIBRATION: u32 = 0x6d;
 /// `C2H_SCAN_RESULT`.
 const SCAN_RESULT: u8 = 0x38;
 
+/// `H2C_CMD_RSVD_PAGE` and `H2C_CMD_SET_PWR_MODE`.
+const RESERVED_PAGES: u32 = 0;
+const POWER_MODE: u32 = 0x20;
+
 /// `C2H_CCX_TX_RPT`.
 const CCX_TX_REPORT: u8 = 0x03;
 /// `C2H_RA_RPT`.
@@ -26,6 +30,28 @@ const RA_REPORT: u8 = 0x0c;
 /// `C2H_HALMAC`, and its `C2H_CCX_RPT`.
 const HALMAC: u8 = 0xff;
 const HALMAC_CCX_REPORT: u8 = 0x0f;
+
+/// `rtw_send_rsvd_page_h2c`, with no probe response among the pages.
+pub fn reserved_pages(ps_poll: u8, null: u8, qos_null: u8) -> (u32, u32) {
+    (
+        RESERVED_PAGES | (u32::from(ps_poll) << 16) | (u32::from(null) << 24),
+        u32::from(qos_null),
+    )
+}
+
+/// `rtw_fw_set_pwr_mode` as `rtw_enter_lps_core` and `rtw_leave_lps_core` set
+/// it for the station on `port`.
+pub fn power_mode(leisure: bool, port: u8) -> (u32, u32) {
+    let (mode, rlbm, smart, state) = if leisure {
+        (1, 1, 2, 0)
+    } else {
+        (0, 0, 0, 0xc)
+    };
+    (
+        POWER_MODE | (mode << 8) | (rlbm << 16) | (smart << 20) | (1 << 24),
+        (u32::from(port) << 5) | (state << 8),
+    )
+}
 
 /// `rtw_fw_media_status_report`.
 pub fn media_status(mac_id: u8, connected: bool) -> (u32, u32) {
@@ -166,6 +192,9 @@ mod tests {
     fn commands_keep_their_fields_in_rtw88s_bits() {
         assert_eq!(media_status(1, true), (0x0001_0101, 0));
         assert_eq!(default_port(0, 1), (0x0001_002c, 0));
+        assert_eq!(reserved_pages(1, 3, 2), (0x0301_0000, 2));
+        assert_eq!(power_mode(true, 0), (0x0121_0120, 0));
+        assert_eq!(power_mode(false, 0), (0x0100_0020, 0xc00));
         let (message, mask) = ra_info(RateInfo {
             mac_id: 1,
             rate_id: 9,

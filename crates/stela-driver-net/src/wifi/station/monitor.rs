@@ -64,6 +64,11 @@ impl Monitor {
         }
     }
 
+    /// `IEEE80211_STA_CONNECTION_POLL`.
+    pub fn probing(&self) -> bool {
+        self.probe.is_some()
+    }
+
     /// `ieee80211_reset_ap_probe` without its check: nothing is in question.
     pub fn restart(&mut self, now: u64) {
         self.probe = None;
