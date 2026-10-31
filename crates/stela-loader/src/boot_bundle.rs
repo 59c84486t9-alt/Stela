@@ -55,7 +55,7 @@ use patches::*;
 
 /// The revision of the content [`prepare`] writes within its schema; a
 /// bundle of another revision is prepared again (`stela setup update stela`).
-pub const REVISION: u32 = 33;
+pub const REVISION: u32 = 34;
 /// m1n1 `_write_boot_args`: the physical aperture base XNU expects, offset
 /// by `phys_base` modulo 32 MiB.
 const VIRT_BASE: u64 = 0xfffffe0010000000;
@@ -100,6 +100,9 @@ pub struct Input<'a> {
 pub struct Inputs<'a> {
     pub target: Target,
     pub kernel_collection: Input<'a>,
+    /// Kexts linked against `kernel_collection` (`aux_kc`), which SPTM maps
+    /// beside it.
+    pub auxiliary_collection: Option<Input<'a>>,
     pub sptm: Input<'a>,
     pub txm: Input<'a>,
     pub device_tree: Input<'a>,
@@ -193,6 +196,14 @@ const KERNEL_SPLITS: &[Split] = &[
     split("rw", SegmentStart("__PRELINK_INFO"), SegmentEnd("__DATA")),
     split("le", SegmentStart("__LINKEDIT"), ImageEnd),
 ];
+/// An auxiliary collection's writable segments come first, then its
+/// read-only ones with the executable `__TEXT_EXEC` last (`aux_kc`).
+const AUXILIARY_SPLITS: &[Split] = &[
+    split("rw", ImageStart, SegmentStart("__TEXT")),
+    split("ro", SegmentStart("__TEXT"), SegmentStart("__TEXT_EXEC")),
+    split("rx", SegmentStart("__TEXT_EXEC"), SegmentEnd("__TEXT_EXEC")),
+    split("le", SegmentStart("__LINKEDIT"), ImageEnd),
+];
 const SPTM_SPLITS: &[Split] = &[
     split("ro", ImageStart, SegmentStart("__TEXT_EXEC")),
     split("rx", SegmentStart("__TEXT_EXEC"), SegmentEnd("__TEXT_EXEC")),
@@ -222,6 +233,8 @@ const REGION_ORDER: &[&str] = &[
     "TXM-rx",
     "TXM-bx",
     "TrustCache",
+    "AuxKC-ro",
+    "AuxKC-rx",
     "BootKC-rx",
     "BootKC-bx",
     "BootKC-ro",
@@ -235,6 +248,8 @@ const REGION_ORDER: &[&str] = &[
     "TXM-le",
     "BootKC-rw",
     "BootKC-le",
+    "AuxKC-rw",
+    "AuxKC-le",
     // M4 and later, without a CL4 image (`lock_regs::CL4_DUMMY_PAGE`).
     lock_regs::CL4_DUMMY_PAGE,
     "RAMDisk",
@@ -368,6 +383,7 @@ fn sptm_image_span(regions: &[Region]) -> Result<core::ops::Range<u64>> {
 const ABSENT_SECURE_KERNEL: [&str; 3] = ["CL4-entry", "CL4-rx", "CL4-virt"];
 
 const KERNEL_FILE: &str = "kernelcache.img";
+const AUXILIARY_FILE: &str = "auxkc.img";
 const SPTM_FILE: &str = "sptm.img";
 const TXM_FILE: &str = "txm.img";
 /// The bundle file holding the prepared DeviceTree.

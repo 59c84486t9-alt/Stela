@@ -9,7 +9,7 @@ use core::{
     cell::UnsafeCell,
     marker::PhantomData,
     ptr::NonNull,
-    sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering},
 };
 
 #[repr(C, align(64))]
@@ -31,6 +31,8 @@ pub(crate) struct Local {
     shootdown_flushed: AtomicU64,
     worker: UnsafeCell<Option<stela_engine::machine::engine::publication::WorkerId>>,
     declarations: UnsafeCell<Option<stela_engine::NativeCpuOwner>>,
+    /// This processor's place in the order they became active.
+    index: u32,
 }
 
 impl Local {
@@ -50,6 +52,7 @@ impl Local {
             shootdown_flushed: AtomicU64::new(0),
             worker: UnsafeCell::new(None),
             declarations: UnsafeCell::new(None),
+            index: 0,
         }
     }
 }
@@ -264,6 +267,9 @@ pub(crate) unsafe fn configure_xstate(
     Ok(())
 }
 
+/// How many processors have become active.
+static ACTIVE: AtomicU32 = AtomicU32::new(0);
+
 unsafe fn set_base(base: u64) {
     // SAFETY: the executor owns this processor's GS, and its descriptor/IST
     // setup has already finished. The base remains mapped in every root.
@@ -289,6 +295,7 @@ pub(crate) unsafe fn activate(
     );
     local.handler = handler;
     local.entry_tables = tables;
+    local.index = ACTIVE.fetch_add(1, Ordering::Relaxed);
     local.this = local;
     // SAFETY: the descriptor owner pins this private record for the CPU lifetime.
     unsafe { set_base(local as *mut Local as u64) };
@@ -330,6 +337,14 @@ fn current() -> *mut Local {
         asm!("mov {}, gs:[0]", out(reg) pointer, options(readonly, nostack, preserves_flags))
     };
     pointer
+}
+
+/// This processor's index, dense from zero. Once [`activate`] has run on it.
+#[cfg(feature = "nvk")]
+pub(crate) fn processor() -> u32 {
+    // SAFETY: the record is pinned for the processor's life, and `index` is set
+    // before `this`, which `current` reads through.
+    unsafe { (*current()).index }
 }
 
 pub(super) fn state() -> &'static mut State {

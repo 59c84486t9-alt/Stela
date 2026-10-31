@@ -3000,6 +3000,7 @@ fn sep_native_nonzero_routes_read_firmware_and_preflight_owner_capacity() {
             SepProvisioning {
                 security: None,
                 ecid: 0xa5a5_0006,
+                kexts: None,
                 observe: false,
                 state: sep::state::Location::Volatile,
             },
@@ -3156,6 +3157,7 @@ fn sep_rom_accepts_firmware_under_stela_policy_and_reaches_os_active() {
                 SepProvisioning {
                     security: None,
                     ecid: 0xa5a5_0006,
+                    kexts: None,
                     observe: false,
                     state: sep::state::Location::Volatile,
                 },
@@ -3832,6 +3834,77 @@ fn usb_core_aliases_platform_refusals_and_port_driven_polling() {
     assert_eq!(devices.dma_deadline(), Some(0));
     devices.transfer(0, &mut ram, USB_POLL_TICKS).unwrap();
     assert_eq!(devices.dma_deadline(), None);
+}
+
+#[test]
+fn a_gate_store_is_served_in_its_own_pes_step() {
+    extern crate std;
+
+    use core::num::NonZeroU64;
+    use stela_contracts::gate::{CallerFault, CallerMemory};
+    const GATE: u64 = 0x5_0000_0000;
+    #[derive(Default)]
+    struct Service(std::sync::Mutex<Vec<(u64, u64)>>);
+    impl stela_contracts::gate::GateService for Service {
+        fn connect(&self) -> Result<NonZeroU64, &'static str> {
+            Ok(NonZeroU64::MIN)
+        }
+        fn disconnect(&self, _: NonZeroU64) {}
+        fn serve(
+            &self,
+            connection: NonZeroU64,
+            record: u64,
+            _: &mut dyn CallerMemory,
+        ) -> Result<(), CallerFault> {
+            self.0.lock().unwrap().push((connection.get(), record));
+            Ok(())
+        }
+        fn import(
+            &self,
+            _: NonZeroU64,
+            _: &[stela_contracts::gate::MemoryRange],
+            _: NonZeroU64,
+        ) -> Result<NonZeroU64, &'static str> {
+            Err("no memory")
+        }
+        fn retired(&self) -> Option<NonZeroU64> {
+            None
+        }
+        fn signaled(&self) -> bool {
+            false
+        }
+    }
+    struct Caller;
+    impl CallerMemory for Caller {
+        fn read(&mut self, address: u64, _: &mut [u8]) -> Result<(), CallerFault> {
+            Err(CallerFault::Denied { address })
+        }
+        fn write(&mut self, address: u64, _: &[u8]) -> Result<(), CallerFault> {
+            Err(CallerFault::Denied { address })
+        }
+    }
+    let service = alloc::sync::Arc::new(Service::default());
+    let mut d = AppleDevices::new();
+    let irq = AicInput::new(0, 700);
+    d.add_gpu_gate(GATE, irq, service.clone()).unwrap();
+    assert!(d.add_gpu_gate(GATE, irq, service.clone()).is_err());
+    d.write(0, GATE, 8, 0, 0).unwrap();
+    let outcome = d.take_call(0).unwrap().run(&mut Caller);
+    d.finish_call(outcome);
+    let page = d.read(0, GATE + 8, 8, 0).unwrap();
+    assert_eq!(page, 1);
+    d.write(
+        2,
+        GATE + page * stela_contracts::gate::window::PAGE,
+        8,
+        0x1234,
+        0,
+    )
+    .unwrap();
+    assert!(d.take_call(1).is_none());
+    let outcome = d.take_call(2).unwrap().run(&mut Caller);
+    d.finish_call(outcome);
+    assert_eq!(*service.0.lock().unwrap(), [(1, 0x1234)]);
 }
 
 mod data_integration;

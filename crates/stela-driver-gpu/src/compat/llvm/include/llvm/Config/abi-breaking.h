@@ -1,0 +1,6 @@
+/* SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception */
+#ifndef LLVM_ABI_BREAKING_CHECKS_H
+#define LLVM_ABI_BREAKING_CHECKS_H
+#define LLVM_ENABLE_ABI_BREAKING_CHECKS 0
+#define LLVM_ENABLE_REVERSE_ITERATION 0
+#endif

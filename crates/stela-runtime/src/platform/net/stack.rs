@@ -421,7 +421,10 @@ impl<L: Link, C: Clock> Stack<L, C> {
             .map(|probe| probe.until)
             .min()
             .unwrap_or(u64::MAX);
-        let until = deadline.min(timer).min(dad);
+        let until = deadline
+            .min(timer)
+            .min(dad)
+            .min(self.phy.link.due_us().unwrap_or(u64::MAX));
         if until > now
             && let Err(error) = self.clock.sleep(until)
         {

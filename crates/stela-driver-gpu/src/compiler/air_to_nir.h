@@ -30,6 +30,141 @@ typedef nir_def *(*stela_air_bind_buffer)(nir_builder *b,
 typedef bool (*stela_air_bind_ssbo)(const struct stela_air_buffer *buffer,
                                    unsigned *slot, void *data);
 
+/* Resolve a texture argument to the deref of a descriptor of type, which its
+ * accesses need: an image type (nir_var_image) for write and read_write
+ * access, otherwise a texture type (nir_var_uniform). An image holds one mip
+ * level: level is the 32-bit level an access names, which the callback must
+ * keep within the texture, or NULL for the first. It is NULL for texture
+ * types. faces asks for a cube texture's faces as the sampled 2D array type
+ * gives, layer face + 6 * cube, which reads of its texels fetch. Called at
+ * each use, where it must emit straight-line NIR at the cursor. Returning
+ * NULL refuses compilation. */
+typedef nir_deref_instr *(*stela_air_bind_texture)(nir_builder *b,
+                                                   const struct stela_air_texture *texture,
+                                                   const struct glsl_type *type, bool faces,
+                                                   nir_def *level, void *data);
+
+/* Resolve a sampler argument for a use with a texture whose texels are
+ * integers (integer is the border color class), as bind_texture does, to a
+ * deref of glsl_bare_sampler_type(). */
+typedef nir_deref_instr *(*stela_air_bind_sampler)(nir_builder *b,
+                                                   const struct stela_air_sampler *sampler,
+                                                   bool integer, void *data);
+
+/* Resolve a texture or sampler whose 64-bit MTLResourceID an argument buffer
+ * holds, as bind_texture and bind_sampler do: id is that loaded identifier.
+ * The identifier is the application's; an invalid one is undefined, as in
+ * Metal. */
+typedef nir_deref_instr *(*stela_air_bind_texture_id)(nir_builder *b, nir_def *id,
+                                                      const struct glsl_type *type, bool faces,
+                                                      nir_def *level, void *data);
+typedef nir_deref_instr *(*stela_air_bind_sampler_id)(nir_builder *b, nir_def *id, bool integer,
+                                                      void *data);
+
+/* The 64-bit MTLResourceID of an element of a texture array argument, or of
+ * a sampler array argument when texture is NULL, which bind_texture_id or
+ * bind_sampler_id then resolve. element is the 64-bit index an access names;
+ * Metal leaves one past the array undefined, but the callback must not read
+ * past the array for it. Emits straight-line NIR at the cursor; returning
+ * NULL refuses compilation. */
+typedef nir_def *(*stela_air_resource_id)(nir_builder *b, const struct stela_air_texture *texture,
+                                          const struct stela_air_sampler *sampler,
+                                          nir_def *element, void *data);
+
+/* The mip level count of a write or read_write texture argument, or with id
+ * of the one an argument buffer's identifier names (texture is then NULL):
+ * the count of the images bind_texture selects among. */
+typedef nir_def *(*stela_air_texture_levels)(nir_builder *b,
+                                             const struct stela_air_texture *texture,
+                                             nir_def *id, void *data);
+
+/* AIR's indirect command functions (air_commands.c), as Metal's
+ * render_command and compute_command methods. */
+enum stela_air_command_op {
+   STELA_AIR_COMMAND_RESET,
+   STELA_AIR_COMMAND_COPY,
+   STELA_AIR_COMMAND_SET_BARRIER,
+   STELA_AIR_COMMAND_CLEAR_BARRIER,
+   STELA_AIR_COMMAND_PIPELINE,
+   STELA_AIR_COMMAND_BUFFER,
+   STELA_AIR_COMMAND_THREADGROUP_LENGTH,
+   STELA_AIR_COMMAND_STAGE_IN_REGION,
+   STELA_AIR_COMMAND_DRAW,
+   STELA_AIR_COMMAND_DRAW_INDEXED,
+   STELA_AIR_COMMAND_DISPATCH_THREADGROUPS,
+   STELA_AIR_COMMAND_DISPATCH_THREADS,
+};
+/* One call on command `index` (a uint) of the indirect command buffer
+ * whose 64-bit gpuResourceID is `buffer`. Operands are uints unless noted. */
+struct stela_air_command {
+   enum stela_air_command_op op;
+   bool render; /* A render_command's, otherwise a compute_command's. */
+   nir_def *buffer, *index;
+   union {
+      /* COPY: the command it copies. */
+      struct {
+         nir_def *buffer, *index;
+      } source;
+      /* PIPELINE: the pipeline state's 64-bit gpuResourceID. */
+      nir_def *pipeline;
+      /* BUFFER: a 64-bit address bound at slot of a vertex or fragment
+       * function, or of a kernel when stage is zero, with a 64-bit vertex
+       * stride that is ~0 when the call names none. */
+      struct {
+         enum stela_air_stage stage;
+         nir_def *slot, *address, *stride;
+      } binding;
+      /* THREADGROUP_LENGTH. */
+      struct {
+         nir_def *slot, *length;
+      } threadgroup;
+      /* STAGE_IN_REGION: uvec3s. */
+      struct {
+         nir_def *origin, *size;
+      } region;
+      /* DRAW and DRAW_INDEXED: an MTLPrimitiveType, the vertex or index
+       * count and the instance count; a draw's first vertex, an indexed
+       * draw's indices' 64-bit address, their index_bytes and its signed
+       * base vertex; and the base instance. */
+      struct {
+         nir_def *primitive, *count, *instances, *first_vertex, *indices, *base_vertex,
+            *base_instance;
+         unsigned index_bytes;
+      } draw;
+      /* DISPATCH_*: the threadgroups or threads of the grid, and the
+       * threads per threadgroup, as uvec3s. */
+      struct {
+         nir_def *grid, *threads;
+      } dispatch;
+   };
+};
+/* command_buffer::size(): the command count, as a uint, of the indirect
+ * command buffer whose gpuResourceID is buffer. Emits straight-line NIR at
+ * the cursor; returning NULL refuses compilation. */
+typedef nir_def *(*stela_air_command_count)(nir_builder *b, nir_def *buffer, void *data);
+/* The writes that encode a command, which the translator makes: each store
+ * of value at its 64-bit address when its 1-bit valid holds, in order, and
+ * then, when bytes is set and copy_valid holds, a copy of bytes (a uint
+ * multiple of 16) to destination from source, or of zeros without a
+ * source. Addresses are aligned to their values' components, and copies
+ * to 16 bytes. */
+#define STELA_AIR_COMMAND_STORES 6u
+struct stela_air_command_store {
+   nir_def *address, *value, *valid;
+};
+struct stela_air_command_encoding {
+   unsigned store_count;
+   struct stela_air_command_store stores[STELA_AIR_COMMAND_STORES];
+   nir_def *destination, *source, *bytes, *copy_valid;
+};
+/* Encodes command as the writes in *encoding, building straight-line NIR at
+ * the cursor. An invalid buffer or pipeline state is undefined, as in
+ * Metal, but no write may leave the buffer for an index or slot past it.
+ * Returning false refuses compilation. */
+typedef bool (*stela_air_encode_command)(nir_builder *b, const struct stela_air_command *command,
+                                         struct stela_air_command_encoding *encoding,
+                                         void *data);
+
 struct stela_air_threadgroup_view {
    uint64_t size; /* Exact nonempty per-dispatch byte extent, not type_size. */
    unsigned alignment;
@@ -44,6 +179,13 @@ struct stela_air_threadgroup_view {
 typedef bool (*stela_air_bind_threadgroup)(const struct stela_air_buffer *buffer,
                                           struct stela_air_threadgroup_view *view,
                                           void *data);
+
+/* A threadgroup buffer's byte offset, a uint multiple of 16, within the
+ * threadgroup memory that dispatches place buffers in. Emits straight-line
+ * NIR in the entry prelude; returning NULL refuses compilation. */
+typedef nir_def *(*stela_air_threadgroup_offset)(nir_builder *b,
+                                                 const struct stela_air_buffer *buffer,
+                                                 void *data);
 
 struct stela_air_ssbo_view {
    unsigned slot;
@@ -67,13 +209,40 @@ bool stela_air_ssbo_view_valid(const struct stela_air_ssbo_view *view,
 enum stela_air_fp_profile {
    /* Ordinary LLVM environment; private AIR denorm options are not inferred. */
    STELA_AIR_FP_IEEE_DEFAULT = 0,
-   /* Reverse-engineered AIR 2.9 / MSL 4.1 compiler 32023.922 profile: arithmetic
-    * FP32 FTZ inputs/results and RTE, target air64_v29-apple-macosx27.2.0.
-    * The caller must retain independently verified compiler/build provenance;
-    * matching llvm.ident is consistency
-    * metadata, not authentication. This is not a universal AIR declaration. */
-   STELA_AIR_FP_APPLE_32023_922_AIR29_MSL41 = 1,
+   /* Metal's environment: FP32 rounds to nearest even and flushes denormal
+    * inputs and results when the module's compile options disable them
+    * (air.compile.denorms_disable, Metal's default), preserving them
+    * otherwise. */
+   STELA_AIR_FP_METAL = 1,
 };
+
+/* Values the device supplies rather than the stage. */
+enum stela_air_device_value {
+   /* A dispatchThreads grid's threads as a uvec3; zero for threadgroup
+    * dispatches. */
+   STELA_AIR_DISPATCH_GRID,
+   /* The amplification ID of an amplified draw, as a uint. */
+   STELA_AIR_AMPLIFICATION,
+   /* That view's mapping as a uint: the viewport offset in the low half, the
+    * render target array index offset in the high half. */
+   STELA_AIR_VIEW_MAPPING,
+   /* A post-tessellation vertex function's patch ID, instance ID and base
+    * instance as a uvec3. */
+   STELA_AIR_PATCH_IDS,
+   /* A dynamic kernel's threadgroup shape as a uvec3. */
+   STELA_AIR_THREADGROUP_SHAPE,
+};
+typedef nir_def *(*stela_air_load_device_value)(nir_builder *, enum stela_air_device_value,
+                                                void *binding_data);
+
+/* A stage-in attribute at location, as four 32-bit lanes. For a
+ * post-tessellation vertex function, `at` is its STELA_AIR_PATCH_IDS, and
+ * the attribute is that of the patch's control point `point`, or of the
+ * patch when point is NULL; for a kernel, `at` is the thread's position in
+ * the grid and point is NULL. integer says whether the function reads it as
+ * integers. NULL when the stage-in layout does not provide it so. */
+typedef nir_def *(*stela_air_fetch_attribute)(nir_builder *, unsigned location, nir_def *at,
+                                              nir_def *point, bool integer, void *binding_data);
 
 struct stela_air_options {
    unsigned workgroup_size[3]; /* Exact nonzero pipeline specialization. */
@@ -94,11 +263,76 @@ struct stela_air_options {
     * resources/barriers; NAK callers must additionally stay within UINT16_MAX
     * before its original smem_size conversion. No target limit is inferred. */
    unsigned max_threadgroup_bytes;
+   /* A dynamic kernel, whose dispatches shape its threadgroups: its
+    * workgroup_size is (n, 1, 1) for the most threads a threadgroup holds,
+    * STELA_AIR_THREADGROUP_SHAPE supplies the shape, and threads past it
+    * skip the function. Its dispatches may also place its threadgroup
+    * buffers, within dynamic_threadgroup_bytes of threadgroup memory at
+    * the offsets threadgroup_offset gives, instead of bind_threadgroup's
+    * views. */
+   bool dynamic_shape;
+   unsigned dynamic_threadgroup_bytes;
+   stela_air_threadgroup_offset threadgroup_offset;
+   /* Explicit target limits on a thread's private memory (allocas, lowered
+    * to NIR scratch) and on the shader's constant data (initialized constant
+    * globals, lowered to load_constant over nir_shader::constant_data). Zero
+    * refuses that storage. */
+   unsigned max_private_bytes, max_constant_bytes;
+   /* Texture and sampler arguments; zero refuses them. */
+   stela_air_bind_texture bind_texture;
+   stela_air_bind_sampler bind_sampler;
+   /* Textures and samplers in argument buffers; zero refuses them. Argument
+    * buffers hold device addresses, so they require bind_buffer. */
+   stela_air_bind_texture_id bind_texture_id;
+   stela_air_bind_sampler_id bind_sampler_id;
+   /* Texture and sampler array arguments' elements, which also need
+    * bind_texture_id or bind_sampler_id; zero refuses the arrays. */
+   stela_air_resource_id resource_id;
+   /* The samplers of the constexpr sampler states of the input and its
+    * linked modules, which bind_sampler_id resolves; a state with none is
+    * refused. */
+   const struct stela_air_constexpr_sampler *constexpr_samplers;
+   unsigned constexpr_sampler_count;
+   /* Storage textures' level counts; NULL refuses get_num_mip_levels of
+    * them. */
+   stela_air_texture_levels texture_levels;
+   /* Indirect command buffers and pipeline states in argument buffers;
+    * NULL refuses AIR's command functions. */
+   stela_air_command_count command_count;
+   stela_air_encode_command encode_command;
+   /* Device values; NULL refuses the builtins that read them. With it,
+    * kernel threads outside a dispatchThreads grid return before the
+    * function runs, as Metal's smaller edge threadgroups never run them. */
+   stela_air_load_device_value load_device_value;
+   /* Stage-in attributes of kernels and post-tessellation vertex
+    * functions; NULL refuses them. */
+   stela_air_fetch_attribute fetch_attribute;
+   /* Function constant values by index (see air_constants.c). A required
+    * constant without one is refused; values for constants the module does
+    * not declare are ignored. */
+   const struct stela_air_constant_value *constants;
+   unsigned constant_count;
+   /* Modules linked with the input's, compiled as it was and each
+    * specialized with its own constant values, which define its external
+    * functions.
+    * A visible function table's handle i + 1 calls linked_functions[i],
+    * which the input or a module defines; any other handle calls none, and
+    * a call through it returns zero. */
+   const struct stela_air_module *modules;
+   unsigned module_count;
+   const struct stela_air_linked_function *linked_functions;
+   unsigned linked_function_count;
+   /* The pipeline stage's maxCallStackDepth: how deeply calls through
+    * tables nest when they recurse. */
+   unsigned max_call_stack_depth;
 };
 
 /* Additive VS/FS frontend. No runtime/Metal pipeline is constructed. resources
  * supplies the same actual AS2-readonly view/bounds and FP contract as compute;
- * workgroup_size/max_threadgroup_bytes/bind_threadgroup must be zero/NULL here.
+ * workgroup_size/max_threadgroup_bytes/bind_threadgroup must be zero/NULL for
+ * vertex and fragment functions. Object and mesh functions are compute-like
+ * and take them as kernels do: they become task and mesh shaders, which
+ * keep a few bytes of threadgroup memory for their grid or primitive count.
  * AS2 and AS1 are not interchangeable permissions/address spaces. All declared
  * varying identifiers/types must match the explicit shared VS/FS map. Target
  * IO limits are real caller facts, not inferred Metal family advertisement.
@@ -115,6 +349,17 @@ struct stela_air_stage_options {
    struct stela_air_options resources;
    const struct stela_air_varying_slot *varyings;
    unsigned varying_count, max_varying_slots;
+   /* A vertex function of a pipeline that amplifies vertices: it adds its
+    * view's mapping to the render target array and viewport indices it
+    * writes, or writes the offsets alone. */
+   bool amplified;
+   /* An object function, or a mesh function of a pipeline without one: the
+    * stage drawMeshThreads launches. As a kernel's do, its threads outside
+    * the dispatch grid, which load_device_value supplies, skip the function. */
+   bool launched_by_grid;
+   /* Target limits on an object payload's bytes and a mesh function's
+    * vertices and primitives; zero refuses them. */
+   unsigned max_payload_bytes, max_mesh_vertices, max_mesh_primitives;
 };
 nir_shader *stela_air_stage_to_nir(const void *, size_t, const char *entry,
                                   const nir_shader_compiler_options *,

@@ -69,7 +69,16 @@ use stela_boot_core::native_profile as profile;
 use stela_boot_core::ram;
 mod translated;
 pub(crate) use local::context::{RootContext, RootExecution, RootIdentity, RootProcessScope};
+#[cfg(feature = "nvk")]
+pub(crate) use local::processor;
 use local::state;
+
+/// Calls `action` with each host run behind `bytes` of guest RAM at `guest`, as
+/// (host physical, bytes). False, partway, if part of it is not RAM.
+#[cfg(feature = "nvk")]
+pub(crate) fn guest_runs(guest: u64, bytes: u64, action: impl FnMut(u64, u64)) -> bool {
+    ram::runs(&local::state().ram, guest, bytes, action)
+}
 pub(crate) use local::{MmioRoots, Owner as HostOwner};
 pub use ram::RamRange;
 

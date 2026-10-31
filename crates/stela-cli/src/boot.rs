@@ -10,7 +10,9 @@ use stela_formats::payload::Purpose;
 use stela_loader::boot_bundle::{
     self, Input, Inputs, Options, OverlayProperty, RootHash, Source, Target,
 };
-use stela_loader::boot_policy::{OsEnvironment, SealedVolume, SecurityMode, SecurityPolicy};
+use stela_loader::boot_policy::{
+    KextGrant, OsEnvironment, SealedVolume, SecurityMode, SecurityPolicy,
+};
 use stela_loader::handoff::{self, BootCommand as FirmwareBootCommand};
 use stela_loader::im4m;
 use stela_loader::root_selection::Root;
@@ -447,6 +449,13 @@ pub struct Prepare {
     /// the others are taken from the IPSW's restore ramdisk.
     #[arg(long, conflicts_with = "disk")]
     board_firmware: Vec<PathBuf>,
+    /// A kext to link into an auxiliary kernel collection against the boot
+    /// collection: the directory `cargo xtask guest` builds, holding its
+    /// `Info.plist` and arm64e objects (such as `target/guest/StelaGPU.kext`),
+    /// which the installed system keeps in `/Library/Extensions`; repeat for
+    /// each kext.
+    #[arg(long = "kext", conflicts_with = "disk")]
+    kexts: Vec<PathBuf>,
 }
 
 /// The recoveryOS copy `--disk-recovery` boots.
@@ -633,6 +642,72 @@ pub(super) fn boot_args(console: &str, mode: &[&str]) -> String {
 }
 
 impl Prepare {
+    /// The `--kext` bundles linked against `kernel` (`stela_loader::aux_kc`).
+    fn auxiliary_collection(&self, kernel: &[u8]) -> Result<Option<(Decoded, KextGrant)>> {
+        if self.kexts.is_empty() {
+            return Ok(None);
+        }
+        let mut bundles = Vec::with_capacity(self.kexts.len());
+        for directory in &self.kexts {
+            let read = |path: &std::path::Path| {
+                std::fs::read(path).with_context(|| format!("cannot read {}", path.display()))
+            };
+            let name = directory
+                .file_name()
+                .and_then(|name| name.to_str())
+                .with_context(|| format!("{} has no UTF-8 name", directory.display()))?;
+            let mut objects = Vec::new();
+            for entry in std::fs::read_dir(directory)
+                .with_context(|| format!("cannot list {}", directory.display()))?
+            {
+                let path = entry?.path();
+                if path.extension().is_some_and(|extension| extension == "o") {
+                    objects.push(path);
+                }
+            }
+            objects.sort();
+            let objects = objects
+                .iter()
+                .map(|path| read(path))
+                .collect::<Result<Vec<_>>>()?;
+            bundles.push((
+                read(&directory.join("Info.plist"))?,
+                objects,
+                name.to_owned(),
+            ));
+        }
+        let kexts: Vec<_> = bundles
+            .iter()
+            .map(|(info, objects, name)| stela_loader::aux_kc::Kext {
+                info,
+                objects: objects.iter().map(Vec::as_slice).collect(),
+                bundle_path: format!("/Library/Extensions/{name}"),
+            })
+            .collect();
+        let linked = stela_loader::aux_kc::link(kernel, &kexts)?;
+        let grant = linked.grant();
+        let bytes = linked.collection;
+        let digest = stela_formats::sha256(&bytes);
+        let names: Vec<_> = bundles.iter().map(|(_, _, name)| name.as_str()).collect();
+        let decoded = Decoded {
+            source: Source {
+                component: "AuxiliaryKernelCollection".into(),
+                member: names.join(", "),
+                container_sha256: digest.clone(),
+                payload_type: "raw".into(),
+                description: format!(
+                    "{} linked against the boot kernel collection",
+                    names.join(", ")
+                ),
+                decoded_bytes: bytes.len() as u64,
+                decoded_sha256: digest,
+            },
+            bytes,
+            declared_digest: None,
+        };
+        Ok(Some((decoded, grant)))
+    }
+
     fn run(self) -> Result<()> {
         ensure!(
             !self.output.exists(),
@@ -854,6 +929,7 @@ impl Prepare {
                 ))
             })
             .collect::<Result<Vec<_>>>()?;
+        let (auxiliary, kexts) = self.auxiliary_collection(&kernel.bytes)?.unzip();
         // Set below when the images come from the restore ramdisk.
         let sourced: Vec<(String, Decoded)>;
         let ramdisk_component: Decoded;
@@ -868,6 +944,7 @@ impl Prepare {
                 board_id: parse_id(identity.ap_board_id.as_deref())?,
             },
             kernel_collection: input(&kernel),
+            auxiliary_collection: auxiliary.as_ref().map(input),
             sptm: input(&sptm),
             txm: input(&txm),
             device_tree: input(&device_tree),
@@ -888,7 +965,8 @@ impl Prepare {
                 .map(|(name, decoded)| (name.clone(), input(decoded)))
                 .collect(),
         };
-        let options = self.options(inputs.dram_base()?)?;
+        let mut options = self.options(inputs.dram_base()?)?;
+        options.security.kexts = kexts;
         let mut bundle = boot_bundle::prepare(&inputs, &options)?;
         let mut unresolved = vec![];
         // The board the bundle's DeviceTree describes names its images, each
@@ -992,6 +1070,7 @@ impl Prepare {
                 },
                 sip_bits: self.sip_bits,
                 sepfw_load_at_boot: self.sepfw_load_at_boot,
+                kexts: None,
             },
             overlay: self
                 .dt_overlay

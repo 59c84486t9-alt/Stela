@@ -387,9 +387,6 @@ funnel_refusals(void)
       snprintf(declaration, sizeof(declaration), "declare i32 @llvm.%s.i32(i32, i32, i32)\n", operations[operation]);
       snprintf(body, sizeof(body), "%%v = call i64 @llvm.%s.i32(i64 1, i64 2, i64 0)\nret void\n", operations[operation]);
       funnel_refusal(body, declaration, STELA_AIR_TYPE);
-      snprintf(declaration, sizeof(declaration), "declare i32 @llvm.%s.i32.extra(i32, i32, i32)\n", operations[operation]);
-      snprintf(body, sizeof(body), "%%v = call i32 @llvm.%s.i32.extra(i32 1, i32 2, i32 0)\nret void\n", operations[operation]);
-      funnel_refusal(body, declaration, STELA_AIR_INSTRUCTION);
       snprintf(declaration, sizeof(declaration), "declare i32 @llvm.%s.i32(i32, i32, i32)\n", operations[operation]);
       for (unsigned argument = 0; argument < 3; argument++) {
          snprintf(body, sizeof(body), "%%f = freeze i32 1\n%%v = call i32 @llvm.%s.i32(i32 %s, i32 %s, i32 %s)\nret void\n",

@@ -16,6 +16,7 @@ pub use reports::{
 mod amx;
 mod apple_maintenance;
 mod budget;
+mod caller;
 mod chain_control;
 mod clock;
 mod code_cache;
@@ -134,6 +135,7 @@ use stela_compiler::{
 };
 pub use stela_contracts::bus::Transition;
 pub use stela_contracts::dma::Memory;
+pub use stela_contracts::gate::{CallerFault, CallerMemory, GateCall, GateOutcome};
 pub use stored::{Offer, SharedTranslation, Translations};
 pub use system::FP_TRAPS_WRITABLE;
 use {

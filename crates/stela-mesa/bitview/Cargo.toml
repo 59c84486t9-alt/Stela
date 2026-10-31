@@ -1,0 +1,16 @@
+[package]
+name = "stela-mesa-bitview"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "MIT"
+
+[lib]
+name = "bitview"
+path = "../../../third_party/mesa/src/nouveau/rust/bitview/lib.rs"
+
+[lints.rust]
+warnings = "allow"
+
+[dependencies]
+std = { package = "stela-mesa-std", path = "../std" }

@@ -43,6 +43,7 @@ pub mod native_memory;
 pub mod native_profile;
 pub mod native_resources;
 pub mod options;
+pub mod page_window;
 pub mod paging_controls;
 pub mod passthrough;
 pub mod pe;

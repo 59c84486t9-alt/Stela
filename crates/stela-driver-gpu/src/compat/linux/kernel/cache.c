@@ -158,9 +158,9 @@ struct kmem_cache *__kmem_cache_create_args(const char *name, unsigned int objec
 		return creation_failure(flags, "cache creation context", true);
 	if (flags & ~allowed)
 		return creation_failure(flags, "cache creation flags", true);
-	if (options->use_freeptr_offset || options->sheaf_capacity ||
+	if (options->use_freeptr_offset ||
 	    (IS_ENABLED(CONFIG_HARDENED_USERCOPY) && (options->usersize || options->useroffset)))
-		return creation_failure(flags, "cache custom freelist, sheaves or hardened usercopy", true);
+		return creation_failure(flags, "cache custom freelist or hardened usercopy", true);
 	/* With !HARDENED_USERCOPY the public fields are inert, as in the pinned
 	 * slab_common.c. Never claim that configuration implements usercopy checks. */
 	if (!name || !name[0] || !object_size ||
@@ -356,6 +356,92 @@ void kmem_cache_free(struct kmem_cache *cache, void *object)
 		return;
 	}
 	__builtin_trap();
+}
+
+void kmem_cache_free_bulk(struct kmem_cache *cache, size_t size, void **objects)
+{
+	for (size_t i = 0; i < size; i++)
+		kmem_cache_free(cache, objects[i]);
+}
+
+/* Linux's prefilled sheaf: objects allocated while blocking is allowed, which
+ * a later atomic section takes without failing. Each sheaf is as large as its
+ * first request, so a cache's sheaf_capacity is only Linux's sizing hint. */
+struct slab_sheaf {
+	unsigned int capacity;
+	unsigned int size;
+	void *objects[];
+};
+
+static int fill_sheaf(struct kmem_cache *cache, gfp_t gfp, struct slab_sheaf *sheaf,
+		      unsigned int size)
+{
+	while (sheaf->size < size) {
+		void *object = kmem_cache_alloc_noprof(cache, gfp);
+
+		if (!object)
+			return -ENOMEM;
+		sheaf->objects[sheaf->size++] = object;
+	}
+	return 0;
+}
+
+struct slab_sheaf *kmem_cache_prefill_sheaf(struct kmem_cache *cache, gfp_t gfp, unsigned int size)
+{
+	struct slab_sheaf *sheaf;
+
+	if (!gfpflags_allow_blocking(gfp))
+		return NULL;
+	sheaf = allocate_metadata(struct_size(sheaf, objects, size), __alignof__(*sheaf));
+	if (!sheaf)
+		return NULL;
+	*sheaf = (struct slab_sheaf){.capacity = size};
+	if (fill_sheaf(cache, gfp, sheaf, size)) {
+		kmem_cache_return_sheaf(cache, gfp, sheaf);
+		return NULL;
+	}
+	return sheaf;
+}
+
+int kmem_cache_refill_sheaf(struct kmem_cache *cache, gfp_t gfp, struct slab_sheaf **sheafp,
+			    unsigned int size)
+{
+	struct slab_sheaf *sheaf = *sheafp;
+
+	if (size <= sheaf->capacity)
+		return fill_sheaf(cache, gfp, sheaf, size);
+	struct slab_sheaf *larger = kmem_cache_prefill_sheaf(cache, gfp, size);
+
+	if (!larger)
+		return -ENOMEM;
+	kmem_cache_return_sheaf(cache, gfp, sheaf);
+	*sheafp = larger;
+	return 0;
+}
+
+void kmem_cache_return_sheaf(struct kmem_cache *cache, gfp_t gfp, struct slab_sheaf *sheaf)
+{
+	(void)gfp;
+	kmem_cache_free_bulk(cache, sheaf->size, sheaf->objects);
+	free_metadata(sheaf, struct_size(sheaf, objects, sheaf->capacity), __alignof__(*sheaf));
+}
+
+void *kmem_cache_alloc_from_sheaf_noprof(struct kmem_cache *cache, gfp_t gfp,
+					 struct slab_sheaf *sheaf)
+{
+	cache = require_cache(cache);
+	if (!sheaf->size)
+		return NULL;
+	void *object = sheaf->objects[--sheaf->size];
+
+	if (gfp & __GFP_ZERO)
+		memset(object, 0, cache->object_size);
+	return object;
+}
+
+unsigned int kmem_cache_sheaf_size(struct slab_sheaf *sheaf)
+{
+	return sheaf->size;
 }
 
 /* Resolve only actual allocated slots. Constructor bytes, stride padding,
@@ -827,6 +913,31 @@ static void page_and_sg_lifetime(void)
 	check_clean();
 }
 
+static void sheaves(void)
+{
+	struct kmem_cache_args args = {.sheaf_capacity = 32};
+	struct kmem_cache *cache = __kmem_cache_create_args("sheaves", 96, &args, 0);
+	struct slab_sheaf *sheaf = kmem_cache_prefill_sheaf(cache, GFP_KERNEL, 2);
+
+	assert(sheaf && kmem_cache_sheaf_size(sheaf) == 2 && cache->live == 2);
+	assert(!kmem_cache_prefill_sheaf(cache, GFP_NOWAIT, 2));
+	/* Already enough, and more than the sheaf holds. */
+	assert(!kmem_cache_refill_sheaf(cache, GFP_KERNEL, &sheaf, 2));
+	assert(!kmem_cache_refill_sheaf(cache, GFP_KERNEL, &sheaf, 3));
+	assert(kmem_cache_sheaf_size(sheaf) == 3 && cache->live == 3);
+	u8 *zeroed = kmem_cache_alloc_from_sheaf_noprof(cache, __GFP_ZERO, sheaf);
+
+	assert(zeroed && !zeroed[95] && kmem_cache_sheaf_size(sheaf) == 2);
+	void *objects[] = {zeroed, kmem_cache_alloc_from_sheaf_noprof(cache, GFP_NOWAIT, sheaf)};
+
+	assert(objects[1]);
+	kmem_cache_return_sheaf(cache, GFP_KERNEL, sheaf);
+	assert(cache->live == 2);
+	kmem_cache_free_bulk(cache, ARRAY_SIZE(objects), objects);
+	assert(!cache->live);
+	kmem_cache_destroy(cache);
+}
+
 static void reference_after_rcu_detach(void)
 {
 	struct kmem_cache *cache = __kmem_cache_create_args("detached-pin", PAGE_SIZE + 1,
@@ -972,8 +1083,6 @@ static void policy_and_creation(void)
 	}
 	struct kmem_cache_args args = {.use_freeptr_offset = true};
 	assert(!__kmem_cache_create_args("freeptr", 96, &args, 0));
-	args = (struct kmem_cache_args){.sheaf_capacity = 1};
-	assert(!__kmem_cache_create_args("sheaves", 96, &args, 0));
 	args = (struct kmem_cache_args){.align = 3};
 	assert(!__kmem_cache_create_args("bad-align", 96, &args, 0));
 	args = (struct kmem_cache_args){.align = 1U << 31};
@@ -1279,6 +1388,7 @@ int main(void)
 	constructor_and_rcu_reuse();
 	alignment_and_zeroing();
 	page_and_sg_lifetime();
+	sheaves();
 	reference_after_rcu_detach();
 	destroy_and_misuse();
 	capacity_and_failures();

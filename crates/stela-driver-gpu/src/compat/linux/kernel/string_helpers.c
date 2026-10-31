@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Owned common string helpers following Linux
- * cc9de5d4b5ab6459f5774946aa3195ad51236fa8 lib/string.c and
- * lib/string_helpers.c. Their original GPL notices remain with those sources.
- * Existing MIT kernel/string.c is unchanged. */
+ * cc9de5d4b5ab6459f5774946aa3195ad51236fa8 lib/string_helpers.c. Its
+ * original GPL notices remain with that source; lib/string.c itself is
+ * compiled unchanged. */
 #include <linux/ctype.h>
+#include <linux/errno.h>
 #include <linux/string.h>
 
 /* skip_spaces is an exact bounded projection from the pinned original
@@ -23,41 +24,6 @@ char *skip_spaces(const char *str)
 }
 
 
-int strncmp(const char *left, const char *right, size_t count)
-{
-	for (size_t i = 0; i < count; i++) {
-		unsigned char a = (unsigned char)left[i];
-		unsigned char b = (unsigned char)right[i];
-		if (a != b)
-			return a < b ? -1 : 1;
-		if (!a)
-			break;
-	}
-	return 0;
-}
-
-char *strchr(const char *string, int character)
-{
-	for (;;) {
-		if (*string == (char)character)
-			return (char *)string;
-		if (!*string)
-			return NULL;
-		string++;
-	}
-}
-
-char *strnchr(const char *string, size_t count, int character)
-{
-	for (size_t i = 0; i < count; i++) {
-		if (string[i] == (char)character)
-			return (char *)(string + i);
-		if (!string[i])
-			break;
-	}
-	return NULL;
-}
-
 char *strreplace(char *string, char old, char replacement)
 {
 	char *cursor = string;
@@ -67,6 +33,41 @@ char *strreplace(char *string, char old, char replacement)
 		cursor++;
 	}
 	return string;
+}
+
+/* As strcmp, except that one trailing newline on either string is ignored. */
+bool sysfs_streq(const char *s1, const char *s2)
+{
+	while (*s1 && *s1 == *s2) {
+		s1++;
+		s2++;
+	}
+	if (*s1 == *s2)
+		return true;
+	if (!*s1 && *s2 == '\n' && !s2[1])
+		return true;
+	return *s1 == '\n' && !s1[1] && !*s2;
+}
+
+int match_string(const char *const *array, size_t n, const char *string)
+{
+	for (size_t index = 0; index < n; index++) {
+		if (!array[index])
+			break;
+		if (!strcmp(array[index], string))
+			return (int)index;
+	}
+	return -EINVAL;
+}
+
+void memcpy_and_pad(void *dest, size_t dest_len, const void *src, size_t count, int pad)
+{
+	if (dest_len > count) {
+		memcpy(dest, src, count);
+		memset((char *)dest + count, pad, dest_len - count);
+	} else {
+		memcpy(dest, src, dest_len);
+	}
 }
 
 #ifdef STELA_LINUX_STRING_HELPERS_TEST
@@ -107,7 +108,8 @@ static void leading_whitespace(void)
 int main(void)
 {
 	leading_whitespace();
-	/* Exercise the actual implementation, not compiler-folded libc calls. */
+	/* Exercise lib/string.c's implementations, not compiler-folded libc
+	 * calls. */
 	int (*volatile compare)(const char *, const char *, size_t) = strncmp;
 	char *(*volatile find)(const char *, int) = strchr;
 	char *(*volatile bounded_find)(const char *, size_t, int) = strnchr;

@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0
 /* Owned UUID syntax validation following Linux
  * cc9de5d4b5ab6459f5774946aa3195ad51236fa8 lib/uuid.c.
- * No random generation, entropy, UUID parser or namespace service is supplied. */
+ * No UUID parser or namespace service is supplied. */
+#include <linux/random.h>
 #include <linux/uuid.h>
 
 bool uuid_is_valid(const char *uuid)
@@ -18,6 +19,16 @@ bool uuid_is_valid(const char *uuid)
 		}
 	}
 	return true;
+}
+
+const guid_t guid_null;
+
+/* A random (version 4, DCE variant) GUID, as lib/uuid.c generates. */
+void guid_gen(guid_t *guid)
+{
+	get_random_bytes(guid, sizeof(*guid));
+	guid->b[7] = (guid->b[7] & 0x0f) | 0x40;
+	guid->b[8] = (guid->b[8] & 0x3f) | 0x80;
 }
 
 #ifdef STELA_LINUX_UUID_TEST

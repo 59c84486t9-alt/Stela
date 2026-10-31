@@ -18,8 +18,8 @@ stela_air_probe_profile_name(enum stela_air_fp_profile profile)
    switch (profile) {
    case STELA_AIR_FP_IEEE_DEFAULT:
       return "ieee";
-   case STELA_AIR_FP_APPLE_32023_922_AIR29_MSL41:
-      return "apple-32023.922-air2.9-msl4.1";
+   case STELA_AIR_FP_METAL:
+      return "metal";
    default:
       return NULL;
    }
@@ -38,8 +38,8 @@ stela_air_probe_profile(int *argc, char **argv, enum stela_air_fp_profile *profi
       const char *name = argv[*argc - 1];
       if (!strcmp(name, "ieee"))
          *profile = STELA_AIR_FP_IEEE_DEFAULT;
-      else if (!strcmp(name, "apple-32023.922-air2.9-msl4.1"))
-         *profile = STELA_AIR_FP_APPLE_32023_922_AIR29_MSL41;
+      else if (!strcmp(name, "metal"))
+         *profile = STELA_AIR_FP_METAL;
       else
          return false;
       *argc -= 2;

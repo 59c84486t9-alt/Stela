@@ -52,9 +52,10 @@ impl Placement {
     }
 }
 
-/// The three boot images, split into their regions.
+/// The boot images, split into their regions.
 pub(super) struct Images {
     pub(super) kernel: LoadedImage,
+    pub(super) auxiliary: Option<LoadedImage>,
     pub(super) sptm: LoadedImage,
     pub(super) txm: LoadedImage,
 }
@@ -69,6 +70,19 @@ impl Images {
                 inputs.kernel_collection.bytes,
                 KERNEL_SPLITS,
             )?,
+            auxiliary: inputs
+                .auxiliary_collection
+                .as_ref()
+                .map(|input| {
+                    LoadedImage::new(
+                        "AuxKC",
+                        AUXILIARY_FILE,
+                        KernelCollection::parse_auxiliary(input.bytes)?,
+                        input.bytes,
+                        AUXILIARY_SPLITS,
+                    )
+                })
+                .transpose()?,
             sptm: LoadedImage::new(
                 "SPTM",
                 SPTM_FILE,
@@ -91,7 +105,7 @@ impl Images {
         [&self.sptm, &self.txm, &self.kernel]
             .into_iter()
             .map(|image| {
-                let offset = image.collection.entry_offset();
+                let offset = image.collection.entry_offset()?;
                 let (name, range) = image
                     .pieces
                     .iter()
@@ -109,7 +123,7 @@ impl Images {
                     vm_bytes: image.collection.image_bytes(),
                     entry: Entry {
                         image: image.name.into(),
-                        virtual_address: image.collection.thread.pc,
+                        virtual_address: image.collection.entry()?.pc,
                         physical_address: region.guest_pa + (offset - range.start),
                     },
                     fileset_entries: image.collection.fileset_entries.len(),
@@ -463,9 +477,11 @@ pub(super) fn contents(
                 boot_args::BYTES as u64,
                 BOOT_ARGS_REGION_BYTES,
             ),
+            piece if piece.starts_with("AuxKC") && images.auxiliary.is_none() => continue,
             piece => {
                 let image = [&images.kernel, &images.sptm, &images.txm]
                     .into_iter()
+                    .chain(&images.auxiliary)
                     .find(|image| piece.starts_with(image.name))
                     .ok_or_else(|| refuse!("no image provides {piece}", piece))?;
                 let range = image
@@ -606,12 +622,12 @@ pub(super) fn fill_memory_map(
         ),
         (
             "TXM-entry",
-            range_value(images.txm.collection.entry_offset(), 0),
+            range_value(images.txm.collection.entry_offset()?, 0),
         ),
         ("TXM-virt", range_value(0, 0)),
         (
             "BootKC-entry",
-            range_value(images.kernel.collection.entry_offset(), 0),
+            range_value(images.kernel.collection.entry_offset()?, 0),
         ),
         ("BootKC-virt", range_value(0, 0)),
         (
@@ -682,6 +698,9 @@ pub(super) fn files(
         (TRUST_CACHE_FILE.to_owned(), trust_cache),
         (BOOT_ARGS_FILE.to_owned(), boot_args_bytes),
     ];
+    if let Some(auxiliary) = images.auxiliary {
+        files.push((AUXILIARY_FILE.to_owned(), auxiliary.memory));
+    }
     if let Some(manifest) = &inputs.boot_manifest {
         files.push((BOOT_MANIFEST_FILE.to_owned(), manifest.bytes.to_vec()));
     }
@@ -735,13 +754,14 @@ pub(super) fn hash_regions(regions: &mut [Region], files: &[(String, Vec<u8>)]) 
 
 /// Every input's source, in manifest order.
 pub(super) fn sources(inputs: &Inputs, ramdisk_source: Option<Source>) -> Vec<Source> {
-    let mut sources = vec![
-        source_of(&inputs.kernel_collection),
+    let mut sources = vec![source_of(&inputs.kernel_collection)];
+    sources.extend(inputs.auxiliary_collection.iter().map(source_of));
+    sources.extend([
         source_of(&inputs.sptm),
         source_of(&inputs.txm),
         source_of(&inputs.device_tree),
         source_of(&inputs.static_trust_cache),
-    ];
+    ]);
     sources.extend(
         inputs
             .sep_firmware

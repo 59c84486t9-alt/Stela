@@ -4,6 +4,7 @@
 //! The models own every register decision; this adapter only routes accesses
 //! and time, and turns each `MmioError` into an explicit refusal.
 mod buses;
+mod call_gates;
 mod coprocessors;
 mod memory_control;
 mod power;
@@ -87,6 +88,7 @@ use crate::fuse::AonFuses;
 use crate::gpio::Gpio;
 use crate::gpio::Net;
 use crate::gpio::OpenDrain;
+use crate::gpu_gate;
 use crate::hpm::Firmware;
 use crate::hpm::Hpm;
 use crate::hpm::Summary;
@@ -191,6 +193,8 @@ pub struct AppleDevices {
     coprocessors: Vec<(&'static str, DeviceId)>,
     /// The SPI controller holding the NOR die.
     nor: Option<DeviceId>,
+    /// StelaGPU's call gate (`gpu_gate`).
+    gpu_gate: Option<DeviceId>,
     storage_masters: Vec<(DeviceId, DeviceId)>,
     /// The GFX coprocessor's ASC and the `sgx` block whose UAT it masters
     /// memory through.
@@ -439,6 +443,8 @@ struct SepMaster {
 pub struct SepProvisioning {
     pub security: Option<stela_soc_data::sep::SecurityMode>,
     pub ecid: u64,
+    /// The kext grant its macOS LocalPolicies carry.
+    pub kexts: Option<stela_formats::local_policy::Kexts>,
     /// Observe (`--sep-observe`): advertise and log `sks`/`pnon`/`scrd`.
     pub observe: bool,
     pub state: sep::state::Location,
@@ -597,6 +603,7 @@ impl AppleDevices {
             gfx_masters: Vec::new(),
             coprocessors: Vec::new(),
             nor: None,
+            gpu_gate: None,
             sep_masters: Vec::new(),
             dcp_masters: Vec::new(),
             dart_irqs: Vec::new(),
@@ -1097,6 +1104,22 @@ impl Devices for AppleDevices {
                     .filter_map(|&(ans, _)| self.bus.device::<Ans>(ans)?.host_look()),
             )
             .min()
+    }
+
+    fn take_call(&mut self, cpu: usize) -> Option<stela_engine::machine::engine::GateCall> {
+        self.bus
+            .device_mut::<gpu_gate::Gate>(self.gpu_gate?)
+            .expect("the gate is mapped")
+            .take(cpu)
+    }
+
+    fn finish_call(&mut self, outcome: stela_engine::machine::engine::GateOutcome) {
+        if let Some(gate) = self.gpu_gate {
+            self.bus
+                .device_mut::<gpu_gate::Gate>(gate)
+                .expect("the gate is mapped")
+                .finish(outcome);
+        }
     }
 
     fn transfer(

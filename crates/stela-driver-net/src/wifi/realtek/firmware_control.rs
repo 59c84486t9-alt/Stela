@@ -92,7 +92,6 @@ pub struct Control<I: Io> {
     poisoned: bool,
     published: bool,
     rfk_active: bool,
-    iqk_used: bool,
     clock_last: u64,
 }
 impl<I: Io> Drop for Control<I> {
@@ -134,7 +133,6 @@ impl<I: Io> Control<I> {
             poisoned: true,
             published: false,
             rfk_active: false,
-            iqk_used: false,
             clock_last: 0,
         };
         if profile.chip() != Chip::Rtl8822C || report.profile() != profile {
@@ -161,7 +159,9 @@ impl<I: Io> Control<I> {
     pub fn next_mailbox(&self) -> u8 {
         self.next_box
     }
-    fn io(&mut self) -> Result<&mut I, Error> {
+    /// The register interface beside the mailbox, for the PHY and MAC stores
+    /// this owner serializes with its commands.
+    pub fn io(&mut self) -> Result<&mut I, Error> {
         self.io.as_mut().ok_or(Error::InvalidState)
     }
     fn verify(&mut self) -> Result<(), Error> {
@@ -226,7 +226,8 @@ impl<I: Io> Control<I> {
         }
         Err(Error::Clock)
     }
-    fn publish_rfk(&mut self, start: bool) -> Result<Published, Error> {
+    /// `rtw_fw_send_h2c_command`: the next free mailbox takes the command.
+    fn publish(&mut self, message: u32, extension: u32) -> Result<Published, Error> {
         self.verify()?;
         let mailbox = self.next_box;
         // Source atomic budget: 3,000,000 ns minus 100,000+one ns per failed
@@ -247,14 +248,23 @@ impl<I: Io> Control<I> {
         }
         self.published = true;
         self.io()?
-            .write32(REG_HMEBOX0_EX + u32::from(mailbox) * 4, 0)?;
-        self.io()?.write32(
-            REG_HMEBOX0 + u32::from(mailbox) * 4,
-            INFORM_RFK_STATUS | (u32::from(start) << 8),
-        )?;
+            .write32(REG_HMEBOX0_EX + u32::from(mailbox) * 4, extension)?;
+        self.io()?
+            .write32(REG_HMEBOX0 + u32::from(mailbox) * 4, message)?;
         self.next_box = (mailbox + 1) % 4;
         self.verify()?;
         Ok(Published { mailbox })
+    }
+    fn publish_rfk(&mut self, start: bool) -> Result<Published, Error> {
+        self.publish(INFORM_RFK_STATUS | (u32::from(start) << 8), 0)
+    }
+    /// Publish one of [`super::commands`]' mailbox commands. A mailbox that
+    /// stays busy means firmware stopped taking commands, which quarantines.
+    pub fn command(&mut self, (message, extension): (u32, u32)) -> Result<(), Error> {
+        self.ready()?;
+        self.poisoned = true;
+        let result = self.publish(message, extension);
+        self.finish(result).map(|_| ())
     }
     /// Begin source GAPK's RFK handshake from a non-set baseline.
     /// BT IQK must be observed idle; no source timeout-skip fallback is minted.
@@ -339,13 +349,13 @@ impl<I: Io> Control<I> {
     /// calibration signals. Source ready status is not DPK, applied policy or
     /// normal-TX permission. Real command DMA and firmware retirement remain
     /// independently owned through completion or acknowledged stop.
-    pub unsafe fn initial_iqk<R: transmit::Registers>(
+    pub unsafe fn iqk<R: transmit::Registers>(
         &mut self,
         rings: &mut transmit::Rings<R>,
         source: &dyn PageSource,
     ) -> Result<InitialIqkObservation, Error> {
         self.ready()?;
-        if self.rfk_active || self.iqk_used {
+        if self.rfk_active {
             return Err(Error::InvalidState);
         }
         if rings.profile()? != self.profile {
@@ -359,7 +369,6 @@ impl<I: Io> Control<I> {
             if baseline == 0xaa {
                 return Err(Error::StaleIqk);
             }
-            self.iqk_used = true;
             // SAFETY: caller holds real same native rings/control/permission;
             // status was sampled before this exact command publication.
             unsafe { packet.rings.initial_iqk_command(source) }?;

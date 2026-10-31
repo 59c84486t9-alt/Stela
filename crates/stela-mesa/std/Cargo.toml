@@ -1,0 +1,13 @@
+[package]
+name = "stela-mesa-std"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "MIT"
+
+[lib]
+name = "std"
+
+[dependencies]
+hashbrown = { version = "0.14", default-features = false }
+upstream-hash = { package = "rustc-hash", version = "2", default-features = false }

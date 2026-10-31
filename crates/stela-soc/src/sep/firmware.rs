@@ -66,6 +66,8 @@ pub struct SepFirmware {
     state: Option<state::Location>,
     /// The inline key engine sepOS provisions at each start, shared with ANS.
     inline: crate::inline_key::Engine,
+    /// The kext grant sepOS's macOS LocalPolicies carry.
+    kexts: Option<stela_formats::local_policy::Kexts>,
 }
 
 impl SepFirmware {
@@ -85,7 +87,13 @@ impl SepFirmware {
             observe,
             state: Some(state),
             inline: crate::inline_key::Engine::default(),
+            kexts: None,
         }
+    }
+
+    /// Grant `kexts` on the macOS LocalPolicies sepOS creates.
+    pub fn set_kexts(&mut self, kexts: Option<stela_formats::local_policy::Kexts>) {
+        self.kexts = kexts;
     }
 
     /// Provision `engine`, which ANS shares, at each sepOS start.
@@ -236,7 +244,7 @@ impl Firmware for SepFirmware {
             .clone();
         let (store, _) = state::open(location, self.ecid, self.rom.entropy())?;
         let os = SepOs::new(self.security)
-            .with_services(store, self.observe)?
+            .with_services(store, self.observe, self.kexts)?
             .with_volume_keys(self.inline.clone(), self.rom.entropy())?
             .with_booted_manifest(
                 evidence

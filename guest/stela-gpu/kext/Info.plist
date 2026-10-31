@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleExecutable</key>
+	<string>StelaGPU</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.stela.StelaGPU</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>StelaGPU</string>
+	<key>CFBundlePackageType</key>
+	<string>KEXT</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0.0</string>
+	<key>CFBundleVersion</key>
+	<string>1.0.0</string>
+	<key>IOKitPersonalities</key>
+	<dict>
+		<key>StelaGPU</key>
+		<dict>
+			<key>CFBundleIdentifier</key>
+			<string>com.stela.StelaGPU</string>
+			<key>IOClass</key>
+			<string>StelaGPU</string>
+			<key>IONameMatch</key>
+			<string>gpu,stela</string>
+			<key>IOProviderClass</key>
+			<string>AppleARMIODevice</string>
+			<key>IOUserClientClass</key>
+			<string>StelaGPUUserClient</string>
+			<key>MetalPluginClassName</key>
+			<string>StelaGPUDevice</string>
+			<key>MetalPluginName</key>
+			<string>StelaGPU</string>
+		</dict>
+	</dict>
+	<key>OSBundleLibraries</key>
+	<dict>
+		<key>com.apple.iokit.IOGraphicsFamily</key>
+		<string>1.0.0b1</string>
+		<key>com.apple.kpi.iokit</key>
+		<string>8.0.0</string>
+		<key>com.apple.kpi.libkern</key>
+		<string>8.0.0</string>
+		<key>com.apple.kpi.mach</key>
+		<string>8.0.0</string>
+	</dict>
+</dict>
+</plist>

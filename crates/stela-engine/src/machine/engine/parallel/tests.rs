@@ -608,6 +608,32 @@ fn a_broadcast_is_applied_once_every_running_pe_acknowledged_it() {
 }
 
 #[test]
+fn a_host_call_ends_a_run_and_wakes_a_sleeping_pe() {
+    let (hub, kicks) = hub(2);
+    let (attached, control) = Attached::new(&hub, 1, false).unwrap();
+    hub.call_host(1);
+    let interrupted = control.snapshot();
+    assert_ne!(
+        interrupted.interrupt_epoch,
+        interrupted.observed_interrupt_epoch
+    );
+    assert_eq!(kicks.load(Ordering::Relaxed), 0);
+    assert!(hub.take_host_call(1));
+    assert!(!hub.take_host_call(1), "taken once");
+    drop(attached);
+    // A sleep does not start over a call, and a sleeper is woken for one.
+    hub.call_host(1);
+    let mut halted = false;
+    hub.sleep(1, 0, || halted = true);
+    assert!(!halted);
+    assert!(hub.take_host_call(1));
+    hub.inboxes[1].sleeping.store(true, Ordering::SeqCst);
+    hub.call_host(1);
+    assert_eq!(kicks.load(Ordering::Relaxed), 1);
+    hub.inboxes[1].sleeping.store(false, Ordering::SeqCst);
+}
+
+#[test]
 fn a_line_notification_observes_pins_before_the_producer_unlocks() {
     #[derive(Default)]
     struct Latched(Lines);

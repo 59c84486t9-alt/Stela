@@ -11,9 +11,10 @@ use serde::{
 use stela_driver_core::firmware::{Catalog, Provenance, Resource, Target};
 
 /// Native host capability, independent of the guest bundle/options schema.
-/// Revision 1 permits 16 MiB per image, revision 2 permits 64 MiB. Both keep
-/// schema 1, 64 images and 64 MiB aggregate; changing these requires a revision.
-pub const MOUNT_CAPABILITY: [u8; 21] = *b"STELA-HOST-FIRMWARE\0\x02";
+/// Revision 1 permits 16 MiB per image and 64 MiB in all, revision 2 permits
+/// 64 MiB per image, and revision 3 permits 256 MiB in all. Each keeps schema 1
+/// and 64 images; changing these requires a revision.
+pub const MOUNT_CAPABILITY: [u8; 21] = *b"STELA-HOST-FIRMWARE\0\x03";
 pub fn supports_mount(image: &[u8]) -> bool {
     MountLimits::from_image(image).is_some()
 }
@@ -22,6 +23,7 @@ pub fn supports_mount(image: &[u8]) -> bool {
 #[derive(Clone, Copy, Debug)]
 pub struct MountLimits {
     max_image_bytes: usize,
+    max_total_bytes: usize,
 }
 
 impl MountLimits {
@@ -32,7 +34,7 @@ impl MountLimits {
                 continue;
             }
             match marker[20] {
-                1 | 2 => revision = revision.max(marker[20]),
+                1..=3 => revision = revision.max(marker[20]),
                 // Never interpret an unknown mount contract as an older one.
                 _ => return None,
             }
@@ -40,9 +42,15 @@ impl MountLimits {
         match revision {
             1 => Some(Self {
                 max_image_bytes: 16 * 1024 * 1024,
+                max_total_bytes: 64 * 1024 * 1024,
             }),
             2 => Some(Self {
                 max_image_bytes: MAX_IMAGE_BYTES,
+                max_total_bytes: 64 * 1024 * 1024,
+            }),
+            3 => Some(Self {
+                max_image_bytes: MAX_IMAGE_BYTES,
+                max_total_bytes: MAX_TOTAL_BYTES,
             }),
             _ => None,
         }
@@ -63,7 +71,7 @@ impl MountLimits {
             total = total
                 .checked_add(length)
                 .ok_or_else(|| fail("host firmware total overflows its budget"))?;
-            if count > MAX_IMAGES || total > MAX_TOTAL_BYTES {
+            if count > MAX_IMAGES || total > self.max_total_bytes {
                 return Err(fail("host firmware resources exceed the mount budget"));
             }
         }
@@ -76,7 +84,8 @@ pub const DIRECTORY: &str = "EFI/stela/firmware";
 pub const MAX_MANIFEST_BYTES: usize = 128 * 1024;
 pub const MAX_IMAGES: usize = 64;
 pub const MAX_IMAGE_BYTES: usize = 64 * 1024 * 1024;
-pub const MAX_TOTAL_BYTES: usize = 64 * 1024 * 1024;
+/// Room for a GSP-RM image per GPU family, beside every other driver's firmware.
+pub const MAX_TOTAL_BYTES: usize = 256 * 1024 * 1024;
 pub const MAX_LABEL_BYTES: usize = 256;
 pub const MAX_PATH_BYTES: usize = 240;
 
@@ -199,7 +208,7 @@ impl<'a> Manifest<'a> {
             total = total
                 .checked_add(image.length)
                 .filter(|n| *n <= MAX_TOTAL_BYTES)
-                .ok_or_else(|| fail("host firmware total exceeds 64 MiB"))?;
+                .ok_or_else(|| fail("host firmware total exceeds its budget"))?;
             image.digest()?;
             for previous in &manifest.images[..index] {
                 if previous.path == image.path {

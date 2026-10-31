@@ -16,23 +16,37 @@ linux-kernel = ["dep:cc", "dep:stela-c-build", "stela-driver-base/linux-kernel"]
 nvidia-port = ["dep:cc", "dep:stela-c-build"]
 # Native Xe command/page-table support; not an initialized Intel GPU driver.
 intel-port = ["linux-kernel"]
+# nouveau's hardware resource manager (NVKM), compiled unchanged; it reaches
+# no device until the kernel services it imports are supplied.
+nouveau-port = ["linux-kernel"]
 # Native AMD page-entry and BAR support; requires real mapping/GMC owners.
 amd-port = ["linux-kernel"]
 # Hosted AMD encoder build; its C runtime is not yet ported to UEFI.
 amd-commands = ["dep:cc"]
-# Shared Metal library input validation, independent of a physical GPU backend.
-metal = []
+# Stela's Metal device over the internal Vulkan boundary; no Vulkan driver.
+metal = ["dep:stela-contracts"]
+# The Metal device's native backend over a loaded Vulkan driver (NVK).
+metal-vulkan = ["metal", "dep:ash"]
+# The image links the Metal compiler's C (`crates/stela-mesa`).
+metal-linked = ["metal-vulkan"]
 
 [dependencies]
 stela-driver-base = { path = "../stela-driver-base" }
 stela-driver-core = { path = "../stela-driver-core" }
 stela-crypto = { path = "../stela-crypto" }
+# The call gate contract the Metal service is entered through.
+stela-contracts = { path = "../stela-contracts", default-features = false, optional = true }
+# Vulkan bindings for the Metal device's native backend; no loader is linked.
+ash = { version = "0.38", default-features = false, optional = true }
 zeroize = { version = "1.9", default-features = false, features = ["alloc"] }
 triomphe = { version = "=0.1.16", default-features = false }
 
 [dev-dependencies]
 stela-driver-base = { path = "../stela-driver-base", features = ["test-support"] }
+libc = "0.2"
+object = { version = "0.37", default-features = false, features = ["read"] }
 sha2 = { version = "0.10", default-features = false }
+tempfile = "3"
 
 [build-dependencies]
 # Reuse retained shared-input/object/digest versions; no new crate fetch.

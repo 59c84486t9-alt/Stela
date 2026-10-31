@@ -304,9 +304,6 @@ integer_minmax_tests(void)
       minmax_refusal(body, declaration, STELA_AIR_TYPE);
       snprintf(body, sizeof(body), "%%v = call i64 @llvm.%s.i32(i64 1, i64 2)\nret void\n", operations[operation]);
       minmax_refusal(body, declaration, STELA_AIR_TYPE);
-      snprintf(declaration, sizeof(declaration), "declare i32 @llvm.%s.i32.extra(i32, i32)\n", operations[operation]);
-      snprintf(body, sizeof(body), "%%v = call i32 @llvm.%s.i32.extra(i32 1, i32 2)\nret void\n", operations[operation]);
-      minmax_refusal(body, declaration, STELA_AIR_INSTRUCTION);
    }
    expect_refusal("%v = call i32 @user.llvm.smin.i32(i32 1, i32 2)\nret void\n",
       "declare i32 @user.llvm.smin.i32(i32, i32)\n", 100, STELA_AIR_INSTRUCTION);

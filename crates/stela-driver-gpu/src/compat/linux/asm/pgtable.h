@@ -34,6 +34,10 @@
 #define _PAGE_PSE	(_AT(pteval_t, 1) << 7)
 #define _PAGE_NX	(_AT(pteval_t, 1) << 63)
 
+/* Linux's default PAT programs index 1 write-combining and index 2 UC-. */
+#define pgprot_writecombine(prot) __pgprot(pgprot_val(prot) | _PAGE_PWT)
+#define pgprot_noncached(prot) __pgprot(pgprot_val(prot) | _PAGE_PCD)
+
 #define PFN_PTE_SHIFT	PAGE_SHIFT
 /* x86-64's 52 physical address bits. */
 #define PTE_PFN_MASK	(((_AT(pteval_t, 1) << 52) - 1) & PAGE_MASK)

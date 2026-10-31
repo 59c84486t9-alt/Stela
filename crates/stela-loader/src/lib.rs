@@ -14,6 +14,8 @@ use stela_contracts::{refuse, require};
 
 pub mod aic;
 pub mod apple_device_tree;
+#[cfg(feature = "std")]
+pub mod aux_kc;
 pub mod boot_args;
 pub mod boot_bundle;
 pub mod boot_manifests;
@@ -46,9 +48,12 @@ pub mod local_policy;
 pub mod lock_regs;
 pub mod mount_interface;
 pub mod nvram;
+#[cfg(feature = "std")]
+pub mod plugin;
 pub mod recovery;
 pub mod root_selection;
 pub mod soc_variant;
+pub mod stela_gpu;
 mod thread_state;
 pub mod trust_cache;
 pub mod upgrade;

@@ -15,6 +15,8 @@
 #include <stela/linux.h>
 #include <stela/page.h>
 #include <stela/task.h>
+#include <stela/workqueue.h>
+#include "sched/sched.h"
 
 static_assert(CONFIG_THREAD_INFO_IN_TASK == 1);
 static_assert(!IS_ENABLED(CONFIG_SMP));
@@ -260,6 +262,9 @@ static bool quiet(const struct stela_linux_task *task)
 	return quiet_except_usage(task) && refcount_read(&task->linux_task.usage) == 1;
 }
 
+/* Every task's signal_struct: no task belongs to a process (see pid.c). */
+static struct signal_struct no_process;
+
 struct stela_linux_task *stela_linux_task_allocate(void)
 {
 	struct stela_linux_task *task = stela_linux_heap_alloc(sizeof(*task), __alignof__(*task));
@@ -267,6 +272,7 @@ struct stela_linux_task *stela_linux_task_allocate(void)
 		return NULL;
 	task->linux_task.thread_info.task = &task->linux_task;
 	task->linux_task.flags = PF_KTHREAD;
+	task->linux_task.signal = &no_process;
 	/* Equal-priority normal kernel continuations; zero prio would falsely
 	 * describe an RT task when a later separately admitted profile reads it. */
 	task->linux_task.policy = SCHED_NORMAL;
@@ -589,9 +595,13 @@ static int finish_prepared(struct stela_linux_task *task, int result)
 int stela_linux_task_park(bool scheduler_preempt_disabled)
 {
 	struct stela_linux_task *task = current_record();
+	/* As Linux's sched_submit_work, before the switch is prepared. */
+	stela_linux_worker_sleeping(true);
 	int error = prepare(task, scheduler_preempt_disabled ? 1 : 0);
-	if (error)
+	if (error) {
+		stela_linux_worker_sleeping(false);
 		return error;
+	}
 	/* Same selected scheduler effect as try_to_block_task: a signal posted
 	 * by a process PREPARE retirement callback must not be lost. Native IRQ
 	 * views only publish generic pending wake, never mutate Linux sigsets. */
@@ -603,7 +613,9 @@ int stela_linux_task_park(bool scheduler_preempt_disabled)
 	int result = task->scope_ops->park(task->scope);
 	if (result > 1)
 		__builtin_trap();
-	return finish_prepared(task, result);
+	result = finish_prepared(task, result);
+	stela_linux_worker_sleeping(false);
+	return result;
 }
 
 int stela_linux_task_yield(void)
@@ -640,6 +652,12 @@ int __cond_resched(void)
 	if (result || finish_prepared(task, result))
 		__builtin_trap();
 	return 1;
+}
+
+void yield(void)
+{
+	__set_current_state(TASK_RUNNING);
+	schedule();
 }
 
 /* The whole original mutex uses precisely this scheduler boundary. Invalid
@@ -711,6 +729,33 @@ int wake_up_process(struct task_struct *task)
 int wake_up_state(struct task_struct *task, unsigned int state)
 {
 	return wake_state(task, state);
+}
+
+/* Linux's wake core (kernel/sched/core.c). Its flags only hint at the CPU
+ * that runs the woken task. */
+int try_to_wake_up(struct task_struct *task, unsigned int state, int wake_flags)
+{
+	(void)wake_flags;
+	return wake_state(task, state);
+}
+
+int default_wake_function(struct wait_queue_entry *curr, unsigned mode, int wake_flags, void *key)
+{
+	(void)key;
+	return try_to_wake_up(curr->private, mode, wake_flags);
+}
+
+void io_schedule(void)
+{
+	int token = io_schedule_prepare();
+	schedule();
+	io_schedule_finish(token);
+}
+
+/* Linux asks only its own kthreads to stop or park, and Stela creates none. */
+bool kthread_should_stop_or_park(void)
+{
+	return false;
 }
 
 static int wait_signal(unsigned int kind)

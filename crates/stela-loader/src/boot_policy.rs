@@ -21,8 +21,9 @@ use crate::im4m::{Manifest, Value};
 use crate::{Result, Within};
 use alloc::{borrow::ToOwned, format, string::String, vec, vec::Vec};
 use stela_contracts::{refuse, require};
+use stela_formats::local_policy::KEXT_SIP_BITS;
 pub use {
-    stela_formats::boot_bundle::schema::Decision,
+    stela_formats::boot_bundle::schema::Decision, stela_formats::boot_bundle::schema::KextGrant,
     stela_formats::boot_bundle::schema::OsEnvironment,
     stela_formats::boot_bundle::schema::SecurityMode,
     stela_formats::boot_bundle::schema::SecurityPolicy,
@@ -117,6 +118,17 @@ impl Writer<'_> {
         });
         Ok(())
     }
+}
+
+/// The bytes of a grant's hexadecimal digest.
+fn grant_digest(name: &str, value: &str) -> Result<Vec<u8>> {
+    let bytes = hex::decode(value).map_err(|_| refuse!("{name} is not hexadecimal", name))?;
+    require!(
+        bytes.len() == stela_formats::local_policy::DIGEST_BYTES,
+        "{name} is not a SHA-384 digest",
+        name
+    );
+    Ok(bytes)
 }
 
 fn manifest_flag(manifest: &Manifest, name: &str) -> Result<bool> {
@@ -233,7 +245,24 @@ pub fn apply(
         boolean(policy.mode == SecurityMode::Permissive),
         mode,
     )?;
-    writer.set(ASMB, "lp-sip0", integer(policy.sip_bits), "SIP bits")?;
+    let kext_bits = policy.kexts.as_ref().map_or(0, |_| KEXT_SIP_BITS);
+    writer.set(
+        ASMB,
+        "lp-sip0",
+        integer(policy.sip_bits | u64::from(kext_bits)),
+        "SIP bits, with the kext grant's",
+    )?;
+    if let Some(kexts) = &policy.kexts {
+        const SOURCE: &str = "kext grant";
+        writer.set(ASMB, "lp-smb2", boolean(true), SOURCE)?;
+        for (property, digest) in [
+            ("lp-auxp", &kexts.approved),
+            ("lp-auxi", &kexts.collection),
+            ("lp-auxr", &kexts.receipt),
+        ] {
+            writer.set(ASMB, property, grant_digest(property, digest)?, SOURCE)?;
+        }
+    }
     writer.set(
         ASMB,
         "lp-sip1",

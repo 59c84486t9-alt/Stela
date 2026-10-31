@@ -127,6 +127,15 @@ impl Sep {
         self
     }
 
+    /// Grant `kexts` on the macOS LocalPolicies sepOS creates.
+    pub fn with_kexts(mut self, kexts: Option<stela_formats::local_policy::Kexts>) -> Self {
+        self.mailbox
+            .firmware_mut::<firmware::SepFirmware>()
+            .expect("SEP owns its firmware engine")
+            .set_kexts(kexts);
+        self
+    }
+
     /// Drain the `sks`/`pnon`/`scrd` traffic observed this run (`--sep-observe`).
     pub fn observations(&mut self) -> alloc::vec::Vec<alloc::string::String> {
         self.mailbox

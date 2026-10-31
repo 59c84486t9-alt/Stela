@@ -1,0 +1,458 @@
+/*
+ * Queues and command buffers. A command buffer's stream stays here until
+ * commit, when the service replays it; completions arrive in serial order on
+ * the device's queue. What the stream names stays retained until then.
+ */
+#include "Bundle.h"
+
+@implementation StelaGPUQueue {
+	os_unfair_lock _lock;
+	/* Enqueued command buffers, which commit in this order. */
+	NSMutableArray *_enqueued;
+}
+
+- (instancetype)initWithDevice:(StelaGPUDevice *)device
+{
+	self = [super init];
+	if (self) {
+		_device = device;
+		_lock = OS_UNFAIR_LOCK_INIT;
+		_enqueued = [NSMutableArray arrayWithCapacity:16];
+	}
+	return self;
+}
+
+- (id)device
+{
+	return _device;
+}
+
+- (id)commandBuffer
+{
+	return [[StelaGPUCommandBuffer alloc] initWithQueue:self retainsReferences:YES];
+}
+
+- (id)commandBufferWithUnretainedReferences
+{
+	return [[StelaGPUCommandBuffer alloc] initWithQueue:self retainsReferences:NO];
+}
+
+- (id)commandBufferWithDescriptor:(id)descriptor
+{
+	return [[StelaGPUCommandBuffer alloc] initWithQueue:self retainsReferences:[descriptor retainedReferences]];
+}
+
+- (void)insertDebugCaptureBoundary
+{
+}
+
+- (void)enqueue:(StelaGPUCommandBuffer *)buffer
+{
+	os_unfair_lock_lock(&_lock);
+	[_enqueued addObject:buffer];
+	os_unfair_lock_unlock(&_lock);
+}
+
+/* Commits the enqueued command buffers that are ready, from the first. */
+- (void)flush
+{
+	os_unfair_lock_lock(&_lock);
+	while (_enqueued.count) {
+		StelaGPUCommandBuffer *buffer = [_enqueued objectAtIndex:0];
+		if (!buffer->_committed) {
+			break;
+		}
+		[_enqueued removeObjectAtIndex:0];
+		[buffer submit];
+	}
+	os_unfair_lock_unlock(&_lock);
+}
+
+@end
+
+@implementation StelaGPUCommandBuffer {
+	dispatch_group_t _completion;
+	NSMutableArray *_scheduledHandlers, *_completedHandlers;
+	NSError *_error;
+	NSUInteger _status;
+	bool _enqueued;
+	bool _retains;
+}
+
+- (instancetype)initWithQueue:(StelaGPUQueue *)queue retainsReferences:(BOOL)retains
+{
+	self = [super init];
+	if (self) {
+		_queue = queue;
+		_device = queue->_device;
+		_retains = retains;
+		_retained = retains ? [NSMutableArray arrayWithCapacity:64] : nil;
+		_completion = dispatch_group_create();
+		_scheduledHandlers = [NSMutableArray arrayWithCapacity:2];
+		_completedHandlers = [NSMutableArray arrayWithCapacity:2];
+		_status = MTLCommandBufferStatusNotEnqueued;
+		dispatch_group_enter(_completion);
+	}
+	return self;
+}
+
+- (void)dealloc
+{
+	stela_stream_free(&_stream);
+	dispatch_release(_completion);
+}
+
+- (id)device
+{
+	return _device;
+}
+
+- (id)commandQueue
+{
+	return _queue;
+}
+
+- (BOOL)retainedReferences
+{
+	return _retains;
+}
+
+- (NSUInteger)errorOptions
+{
+	return 0;
+}
+
+- (id)logs
+{
+	return nil;
+}
+
+- (NSUInteger)status
+{
+	return _status;
+}
+
+- (NSError *)error
+{
+	return _error;
+}
+
+- (void)use:(id)object
+{
+	if (object) {
+		[_retained addObject:object];
+	}
+}
+
+- (void)enqueue
+{
+	if (!_enqueued) {
+		_enqueued = true;
+		_status = MTLCommandBufferStatusEnqueued;
+		[_queue enqueue:self];
+	}
+}
+
+- (void)commit
+{
+	[self enqueue];
+	_status = MTLCommandBufferStatusCommitted;
+	_committed = true;
+	[_queue flush];
+}
+
+/* Under the queue's lock, so serials follow the order of enqueue. */
+- (void)submit
+{
+	[_device flushIndirect];
+	StelaCommitRequest request = {.commands = stela_span(_stream.bytes, _stream.length)};
+	StelaValue serial = {};
+	StelaFailure failure;
+	StelaSpans spans = {.reads = &request.commands, .read_count = 1};
+	if (STELA_CALL_SPANS(&_device->_gate, Commit, &request, &serial, spans, &failure) != StelaStatusOk) {
+		[_device failed:self with:failure];
+		return;
+	}
+	stela_stream_free(&_stream);
+	_serial = serial.value;
+	[_device track:self];
+}
+
+/* On the device's queue, ahead of completion. */
+- (void)didSchedule
+{
+	_status = MTLCommandBufferStatusScheduled;
+	for (NSUInteger i = 0; i < _scheduledHandlers.count; i++) {
+		((void (^)(id))[_scheduledHandlers objectAtIndex:i])(self);
+	}
+	[_scheduledHandlers removeAllObjects];
+}
+
+- (void)didCompleteWith:(const StelaFailure *)failure
+{
+	[self didSchedule];
+	if (failure) {
+		_error = stela_error(MTLCommandBufferErrorDomain,
+				     failure->status == StelaStatusDeviceLost ? MTLCommandBufferErrorDeviceRemoved
+									      : MTLCommandBufferErrorInternal,
+				     failure);
+	}
+	_status = failure ? MTLCommandBufferStatusError : MTLCommandBufferStatusCompleted;
+	for (NSUInteger i = 0; i < _completedHandlers.count; i++) {
+		((void (^)(id))[_completedHandlers objectAtIndex:i])(self);
+	}
+	[_completedHandlers removeAllObjects];
+	[_retained removeAllObjects];
+	dispatch_group_leave(_completion);
+}
+
+- (void)addScheduledHandler:(void (^)(id))handler
+{
+	[_scheduledHandlers addObject:[handler copy]];
+}
+
+- (void)addCompletedHandler:(void (^)(id))handler
+{
+	[_completedHandlers addObject:[handler copy]];
+}
+
+- (void)waitUntilScheduled
+{
+	[self waitUntilCompleted];
+}
+
+- (void)waitUntilCompleted
+{
+	dispatch_group_wait(_completion, DISPATCH_TIME_FOREVER);
+}
+
+- (CFTimeInterval)kernelStartTime
+{
+	return [self GPUStartTime];
+}
+
+- (CFTimeInterval)kernelEndTime
+{
+	return [self GPUEndTime];
+}
+
+- (StelaCommandBufferTimesResponse)times
+{
+	StelaValue request = {.value = _serial};
+	StelaCommandBufferTimesResponse times = {};
+	STELA_CALL(&_device->_gate, CommandBufferTimes, &request, &times, NULL);
+	return times;
+}
+
+- (CFTimeInterval)GPUStartTime
+{
+	return [_device secondsOfTick:[self times].start];
+}
+
+- (CFTimeInterval)GPUEndTime
+{
+	return [_device secondsOfTick:[self times].end];
+}
+
+- (void)pushDebugGroup:(NSString *)name
+{
+	(void)name;
+}
+
+- (void)popDebugGroup
+{
+}
+
+- (void)presentDrawable:(id)drawable
+{
+	[self use:drawable];
+	[self addScheduledHandler:^(id buffer) {
+		(void)buffer;
+		[drawable present];
+	}];
+}
+
+- (void)presentDrawable:(id)drawable atTime:(CFTimeInterval)time
+{
+	[self addScheduledHandler:^(id buffer) {
+		(void)buffer;
+		[drawable presentAtTime:time];
+	}];
+}
+
+- (void)presentDrawable:(id)drawable afterMinimumDuration:(CFTimeInterval)duration
+{
+	[self addScheduledHandler:^(id buffer) {
+		(void)buffer;
+		[drawable presentAfterMinimumDuration:duration];
+	}];
+}
+
+- (void)encodeSignalEvent:(StelaGPUEvent *)event value:(uint64_t)value
+{
+	[self use:event];
+	StelaEventCommand command = {.event = event->_handle, .value = value};
+	stela_stream_entry(&_stream, StelaCommandBufferCodeSignalEvent, &command, sizeof(command), NULL, 0);
+}
+
+- (void)encodeWaitForEvent:(StelaGPUEvent *)event value:(uint64_t)value
+{
+	[self use:event];
+	StelaEventCommand command = {.event = event->_handle, .value = value};
+	stela_stream_entry(&_stream, StelaCommandBufferCodeWaitForEvent, &command, sizeof(command), NULL, 0);
+}
+
+- (id)blitCommandEncoder
+{
+	StelaGPUBlitEncoder *encoder = [[StelaGPUBlitEncoder alloc] initWithCommandBuffer:self stream:&_stream];
+	stela_stream_entry(&_stream, StelaBlitCodeBegin, NULL, 0, NULL, 0);
+	return encoder;
+}
+
+- (id)blitCommandEncoderWithDescriptor:(id)descriptor
+{
+	StelaGPUBlitEncoder *encoder = [self blitCommandEncoder];
+	[encoder sampleAttachments:[descriptor sampleBufferAttachments]];
+	return encoder;
+}
+
+- (id)computeCommandEncoderWithDispatchType:(NSUInteger)type
+{
+	StelaGPUComputeEncoder *encoder = [[StelaGPUComputeEncoder alloc] initWithCommandBuffer:self stream:&_stream];
+	encoder->_dispatchType = type;
+	StelaBeginCompute begin = {.dispatch_type = type};
+	stela_stream_entry(&_stream, StelaComputeCodeBegin, &begin, sizeof(begin), NULL, 0);
+	return encoder;
+}
+
+- (id)computeCommandEncoder
+{
+	return [self computeCommandEncoderWithDispatchType:MTLDispatchTypeSerial];
+}
+
+- (id)computeCommandEncoderWithDescriptor:(id)descriptor
+{
+	StelaGPUComputeEncoder *encoder = [self computeCommandEncoderWithDispatchType:[descriptor dispatchType]];
+	[encoder sampleAttachments:[descriptor sampleBufferAttachments]];
+	return encoder;
+}
+
+- (id)resourceStateCommandEncoder
+{
+	StelaGPUResourceStateEncoder *encoder = [[StelaGPUResourceStateEncoder alloc] initWithCommandBuffer:self
+												     stream:&_stream];
+	stela_stream_entry(&_stream, StelaResourceStateCodeBegin, NULL, 0, NULL, 0);
+	return encoder;
+}
+
+- (id)resourceStateCommandEncoderWithDescriptor:(id)descriptor
+{
+	StelaGPUResourceStateEncoder *encoder = [self resourceStateCommandEncoder];
+	[encoder sampleAttachments:[descriptor sampleBufferAttachments]];
+	return encoder;
+}
+
+- (id)renderCommandEncoderWithDescriptor:(id)descriptor
+{
+	[self beginRender:descriptor];
+	return [[StelaGPURenderEncoder alloc] initWithCommandBuffer:self stream:&_stream];
+}
+
+- (id)parallelRenderCommandEncoderWithDescriptor:(id)descriptor
+{
+	[self beginRender:descriptor];
+	return [[StelaGPUParallelEncoder alloc] initWithCommandBuffer:self stream:&_stream];
+}
+
+static void pass_attachment(id attachment, StelaPassAttachmentRecord *record)
+{
+	StelaGPUTexture *texture = [attachment texture];
+	StelaGPUTexture *resolve = [attachment resolveTexture];
+	*record = (StelaPassAttachmentRecord){
+		.texture = texture ? texture->_handle : 0,
+		.level = [attachment level],
+		.slice = [attachment slice],
+		.depth_plane = [attachment depthPlane],
+		.resolve_texture = resolve ? resolve->_handle : 0,
+		.resolve_level = [attachment resolveLevel],
+		.resolve_slice = [attachment resolveSlice],
+		.resolve_depth_plane = [attachment resolveDepthPlane],
+		.load_action = [attachment loadAction],
+		.store_action = [attachment storeAction],
+		.store_action_options = [attachment storeActionOptions],
+	};
+}
+
+- (void)beginRender:(id)descriptor
+{
+	StelaBeginRender begin = {};
+	id colors = [descriptor colorAttachments];
+	for (NSUInteger i = 0; i < 8; i++) {
+		id color = [colors objectAtIndexedSubscript:i];
+		pass_attachment(color, &begin.color_attachments[i].attachment);
+		[self use:[color texture]];
+		[self use:[color resolveTexture]];
+		MTLClearColor clear = [color clearColor];
+		memcpy(begin.color_attachments[i].clear_color, &clear, sizeof(clear));
+	}
+	id depth = [descriptor depthAttachment];
+	id stencil = [descriptor stencilAttachment];
+	pass_attachment(depth, &begin.depth_attachment.attachment);
+	pass_attachment(stencil, &begin.stencil_attachment.attachment);
+	[self use:[depth texture]];
+	[self use:[depth resolveTexture]];
+	[self use:[stencil texture]];
+	[self use:[stencil resolveTexture]];
+	begin.depth_attachment.clear_depth = [depth clearDepth];
+	begin.depth_attachment.resolve_filter = [depth depthResolveFilter];
+	begin.stencil_attachment.clear_stencil = [stencil clearStencil];
+	begin.stencil_attachment.resolve_filter = [stencil stencilResolveFilter];
+	StelaGPUBuffer *visibility = [descriptor visibilityResultBuffer];
+	[self use:visibility];
+	begin.visibility_result_buffer = visibility ? visibility->_handle : 0;
+	begin.render_target_array_length = [descriptor renderTargetArrayLength];
+	begin.render_target_width = [descriptor renderTargetWidth];
+	begin.render_target_height = [descriptor renderTargetHeight];
+	begin.default_raster_sample_count = [descriptor defaultRasterSampleCount];
+	begin.tile_memory = [descriptor imageblockSampleLength] != 0 || [descriptor threadgroupMemoryLength] != 0
+			    || [descriptor tileWidth] != 0 || [descriptor tileHeight] != 0;
+	begin.rasterization_rate_map = [descriptor rasterizationRateMap] != nil;
+
+	MTLSamplePosition positions[16];
+	begin.sample_position_count = (uint32_t)[descriptor getSamplePositions:positions count:16];
+	StelaCounterSampleRecord samples[4 * 4];
+	NSUInteger sample_count = 0;
+	id attachments = [descriptor sampleBufferAttachments];
+	for (NSUInteger i = 0; i < 4; i++) {
+		id attachment = [attachments objectAtIndexedSubscript:i];
+		StelaGPUCounterSampleBuffer *buffer = [attachment sampleBuffer];
+		if (!buffer) {
+			continue;
+		}
+		[self use:buffer];
+		const NSUInteger indices[4] = {
+			[attachment startOfVertexSampleIndex],
+			[attachment endOfVertexSampleIndex],
+			[attachment startOfFragmentSampleIndex],
+			[attachment endOfFragmentSampleIndex],
+		};
+		for (NSUInteger boundary = 0; boundary < 4; boundary++) {
+			if (indices[boundary] != MTLCounterDontSample) {
+				samples[sample_count++] = (StelaCounterSampleRecord){
+					.buffer = buffer->_handle,
+					.index = indices[boundary],
+					.boundary = boundary,
+				};
+			}
+		}
+	}
+	begin.counter_sample_count = (uint32_t)sample_count;
+	size_t positions_bytes = begin.sample_position_count * sizeof(positions[0]);
+	uint8_t data[sizeof(positions) + sizeof(samples)];
+	memcpy(data, positions, positions_bytes);
+	memcpy(data + positions_bytes, samples, sample_count * sizeof(samples[0]));
+	stela_stream_entry(&_stream, StelaRenderCodeBegin, &begin, sizeof(begin), data,
+			   positions_bytes + sample_count * sizeof(samples[0]));
+}
+
+@end

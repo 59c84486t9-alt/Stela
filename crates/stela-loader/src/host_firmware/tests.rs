@@ -18,13 +18,19 @@ fn mount_revision_checks_each_image_without_downgrading_unknown_contracts() {
     let mut legacy = MOUNT_CAPABILITY;
     legacy[20] = 1;
     let mut unknown = MOUNT_CAPABILITY;
-    unknown[20] = 3;
+    unknown[20] = 4;
+    let mut small = MOUNT_CAPABILITY;
+    small[20] = 2;
     let current = MountLimits::from_image(&MOUNT_CAPABILITY).unwrap();
     let old = MountLimits::from_image(&legacy).unwrap();
+    let small = MountLimits::from_image(&small).unwrap();
     assert!(old.check_lengths([16 * 1024 * 1024]).is_ok());
     assert!(old.check_lengths([16 * 1024 * 1024 + 1]).is_err());
     assert!(current.check_lengths([MAX_IMAGE_BYTES]).is_ok());
-    assert!(current.check_lengths([MAX_IMAGE_BYTES, 1]).is_err());
+    assert!(small.check_lengths([MAX_IMAGE_BYTES, 1]).is_err());
+    assert!(current.check_lengths([MAX_IMAGE_BYTES, 1]).is_ok());
+    assert!(current.check_lengths([MAX_IMAGE_BYTES; 4]).is_ok());
+    assert!(current.check_lengths([MAX_IMAGE_BYTES; 5]).is_err());
     assert!(current.check_lengths([0]).is_err());
     assert!(current.check_lengths([1; MAX_IMAGES + 1]).is_err());
     // Exact measured GB203 lengths, metadata only; no firmware is embedded.
@@ -32,12 +38,12 @@ fn mount_revision_checks_each_image_without_downgrading_unknown_contracts() {
     assert!(current.check_lengths(lengths).is_ok());
     assert!(old.check_lengths(lengths).is_err());
     assert!(
-        current
+        small
             .check_lengths([63_571_696, 200_812, 199_820, 3_136_536])
             .is_ok()
     );
     assert!(
-        current
+        small
             .check_lengths([63_571_696, 200_812, 199_820, 3_136_537])
             .is_err()
     );

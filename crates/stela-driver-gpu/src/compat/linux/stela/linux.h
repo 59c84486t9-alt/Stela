@@ -45,6 +45,36 @@ struct stela_linux_services {
 	 * state. The caller retains actual IRQ-safe non-migrating serialization;
 	 * this table is not a native execution/interrupt grant. */
 	void (*random_bytes)(void *context, void *bytes, size_t size);
+	/* Start a Linux task that runs stela_linux_workers_run in this owner,
+	 * or return a negative errno when none can start now. The request must
+	 * not run the worker inline. */
+	int (*start_worker)(void *context);
+	/* Power the machine off, without waiting for clean exits if force. */
+	void (*shutdown)(void *context, bool force);
+	/* Map page-aligned device memory uncached, or return NULL; unmapped by
+	 * the address map_device returned. */
+	void *(*map_device)(void *context, u64 physical, size_t size,
+			    bool write_combining);
+	void (*unmap_device)(void *context, void *address);
+	/* Map count write-back pages contiguously, or return NULL. */
+	void *(*map_pages)(void *context, const u64 *physical, size_t count);
+	void (*unmap_pages)(void *context, void *address, size_t count);
+	/* Route a line to the owner's service, which calls stela_linux_irq_run
+	 * when it fires, or return a negative errno; disabling masks it and
+	 * returns only once no new firing can reach the service. */
+	int (*irq_enable)(void *context, unsigned int irq);
+	void (*irq_disable)(void *context, unsigned int irq);
+	/* Copy between the running client's memory and Linux's, returning the
+	 * bytes left uncopied at a fault. */
+	unsigned long (*copy_from_user)(void *context, void *to, const void *from,
+					unsigned long size);
+	unsigned long (*copy_to_user)(void *context, void *to, const void *from,
+				      unsigned long size);
+	/* Install or remove a client's page table entries (see stela/file.h);
+	 * prot holds x86 page table bits, and map_user returns a negative errno. */
+	int (*map_user)(void *context, void *space, unsigned long address, unsigned long pfn,
+			u64 prot);
+	void (*unmap_user)(void *context, void *space, unsigned long address, size_t size);
 };
 
 struct stela_linux_owner {
@@ -54,7 +84,7 @@ struct stela_linux_owner {
 
 /* Private x86-64 C ABI. All producers and consumers rebuild from this header;
  * Rust currently passes owners opaquely rather than mirroring this table. */
-_Static_assert(sizeof(struct stela_linux_services) == 56, "Linux services ABI");
+_Static_assert(sizeof(struct stela_linux_services) == 152, "Linux services ABI");
 _Static_assert(__builtin_offsetof(struct stela_linux_services, random_bytes) == 48,
 	       "Linux random callback ABI");
 _Static_assert(sizeof(struct stela_linux_owner) == 16, "Linux owner ABI");

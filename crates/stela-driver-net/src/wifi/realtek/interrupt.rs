@@ -4,8 +4,8 @@
 //! This device block does not allocate vectors or manufacture an MSI route,
 //! deferred work, packet completion, firmware ACK or DMA-stop acknowledgement.
 use super::{
-    identity::Chip,
-    io::{self, Io},
+    identity::{Chip, Profile},
+    io::{self, Bar, Io},
     registers::*,
 };
 const MASK0: u32 = 0x44fd;
@@ -69,15 +69,57 @@ impl Causes {
         self.owned[0] & (1 << 14) != 0
     }
 }
+/// The registers an interrupt owner reaches.
+///
+/// # Safety
+/// Exclusive selected RTL8822C requester: fresh volatile reads and ordered
+/// stores. Quarantine keeps the requester's claim and mapping for good.
+pub unsafe trait Registers {
+    fn profile(&self) -> Profile;
+    fn read32(&mut self, register: u32) -> Result<u32, io::Error>;
+    fn write32(&mut self, register: u32, value: u32) -> Result<(), io::Error>;
+    fn quarantine(&mut self);
+}
+// SAFETY: `Io` makes the same promises of its own requester.
+unsafe impl<I: Io> Registers for I {
+    fn profile(&self) -> Profile {
+        Io::profile(self)
+    }
+    fn read32(&mut self, register: u32) -> Result<u32, io::Error> {
+        Io::read32(self, register)
+    }
+    fn write32(&mut self, register: u32, value: u32) -> Result<(), io::Error> {
+        Io::write32(self, register, value)
+    }
+    fn quarantine(&mut self) {
+        Io::quarantine(self);
+    }
+}
+// SAFETY: `Bar::new` binds the exclusive requester BAR.
+unsafe impl Registers for Bar {
+    fn profile(&self) -> Profile {
+        Bar::profile(self)
+    }
+    fn read32(&mut self, register: u32) -> Result<u32, io::Error> {
+        Ok(Bar::read32(self, register))
+    }
+    fn write32(&mut self, register: u32, value: u32) -> Result<(), io::Error> {
+        Bar::write32(self, register, value);
+        Ok(())
+    }
+    fn quarantine(&mut self) {
+        self.retain();
+    }
+}
 /// CPU-affine exclusive control I/O; canonical native IRQ routing and worker
 /// ownership remain outside this device register block. No concurrent calls,
 /// reset or direct HIMR/HISR access may bypass this owner. Uncertain Drop keeps
 /// the control/queue/BAR owner through Io::quarantine.
-pub struct Controller<I: Io> {
+pub struct Controller<I: Registers> {
     io: Option<I>,
     state: State,
 }
-impl<I: Io> Controller<I> {
+impl<I: Registers> Controller<I> {
     pub fn new(io: I) -> Result<Self, Error> {
         let mut c = Self {
             io: Some(io),
@@ -191,7 +233,7 @@ impl<I: Io> Controller<I> {
         self.io.take().ok_or(Error::Quarantined)
     }
 }
-impl<I: Io> Drop for Controller<I> {
+impl<I: Registers> Drop for Controller<I> {
     fn drop(&mut self) {
         if let Some(io) = &mut self.io {
             io.quarantine();

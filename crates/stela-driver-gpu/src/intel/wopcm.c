@@ -31,9 +31,8 @@ static void observe(struct stela_xe *dev, u32 addr, u32 value, bool write)
     else if (addr == DMA_GUC_WOPCM_OFFSET.addr) result->raw_offset = value;
     else if (addr == GUC_WOPCM_SIZE.addr) result->raw_size = value;
 }
-/* Diagnostics bits 0..9 are xe_wopcm.c's messages, in source order; Stela
- * runs Linux code with drm.debug's driver category, so its debug messages
- * arrive too. */
+/* Diagnostics bits 0..9 are xe_wopcm.c's messages, in source order, debug
+ * messages included: the attempt runs with drm.debug's driver category. */
 static void log_event(void *context, int level, const char *message)
 {
     static const char *const events[] = {
@@ -128,7 +127,10 @@ int stela_intel_wopcm_prepare(const struct stela_intel_activation_io *io, void *
     stela_linux_enter(&owner);
     prepare(&native, io, context, (enum xe_platform)platform, discrete, metadata.ucode_bytes,
             out);
+    const unsigned long debug = __drm_debug;
+    __drm_debug |= BIT(DRM_UT_DRIVER);
     status = xe_wopcm_init(&native.gt.uc.wopcm);
+    __drm_debug = debug;
     if (!status && native.dev.unsupported) status = -EOPNOTSUPP;
     out->total_bytes = native.gt.uc.wopcm.size;
     out->guc_base = native.gt.uc.wopcm.guc.base;

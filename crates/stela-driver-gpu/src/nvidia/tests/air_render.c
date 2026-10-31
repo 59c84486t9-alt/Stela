@@ -223,7 +223,7 @@ static void frontend_refusals(struct run *run, const nir_shader_compiler_options
     struct stela_air_stage_options valid = {.stage = STELA_AIR_VERTEX,
         .resources = {.max_instructions = 10000, .bind_ssbo = bind_ssbo,
             .ssbo_count = MAX_BINDINGS, .binding_data = run,
-            .fp_profile = STELA_AIR_FP_APPLE_32023_922_AIR29_MSL41},
+            .fp_profile = STELA_AIR_FP_METAL},
         .varyings = run->map, .varying_count = run->varying_count, .max_varying_slots = 32};
     const unsigned calls = run->callbacks, backend = run->backend_calls;
     for (unsigned failure = 0; failure < 7; ++failure) {
@@ -262,7 +262,7 @@ static void compile_target(struct run *run, const struct stela_air_stage_entry *
         struct stela_air_stage_options air = {.stage = stage ? STELA_AIR_FRAGMENT : STELA_AIR_VERTEX,
             .resources = {.max_instructions = 10000, .bind_ssbo = stage ? NULL : bind_ssbo,
                 .ssbo_count = stage ? 0 : MAX_BINDINGS, .binding_data = run,
-                .fp_profile = STELA_AIR_FP_APPLE_32023_922_AIR29_MSL41},
+                .fp_profile = STELA_AIR_FP_METAL},
             .varyings = run->map, .varying_count = run->varying_count, .max_varying_slots = 32};
         struct stela_air_error error;
         nir_shader *nir = stela_air_stage_to_nir(run->bytes, run->size, entry->name, options, &air, &error);
@@ -306,7 +306,7 @@ static void compile_target(struct run *run, const struct stela_air_stage_entry *
         record_bool("depth_feedback", model->depth_feedback);
         record_bool("conservative_underestimate", model->conservative_underestimate);
         record_bool("fs_key_passed", stage);
-        record_uint("fp_profile", STELA_AIR_FP_APPLE_32023_922_AIR29_MSL41);
+        record_uint("fp_profile", STELA_AIR_FP_METAL);
         record_uint("max_instructions", 10000);
         record_uint("max_varying_slots", 32);
         record_uint("sample_info_cb", layout.sample_info_cb);
@@ -422,7 +422,7 @@ static bool vertex(const struct stela_air_inspection *inspection,
     struct run *run = data; run->vs = entry; struct stela_air_error error;
     /* Nested inspection keeps both descriptor/string sets live; neither is
      * retained after this callback, and translated NIR owns its own names. */
-    bool success = stela_air_inspect_stage(run->bytes, run->size, run->fragment,
+    bool success = stela_air_inspect_stage(run->bytes, run->size, NULL, run->fragment,
         STELA_AIR_FRAGMENT, fragment, run, &error);
     run->vs = NULL;
     memset(run->map, 0, sizeof(run->map));
@@ -455,7 +455,7 @@ int main(int argc, char **argv)
     stela_air_probe_input_record(true, run.size, input_hash, run.vertex);
     record_object("facts"); record_str("fragment_entry", run.fragment); record_end();
     glsl_type_singleton_init_or_ref(); struct stela_air_error error;
-    bool success = stela_air_inspect_stage(bytes, run.size, run.vertex, STELA_AIR_VERTEX, vertex, &run, &error);
+    bool success = stela_air_inspect_stage(bytes, run.size, NULL, run.vertex, STELA_AIR_VERTEX, vertex, &run, &error);
     if (!success) fprintf(stderr, "stage inspection failed: %u %s\n", error.kind, error.detail);
     CHECK(success && !run.vs && !run.varying_count);
     glsl_type_singleton_decref(); free(bytes); return 0;

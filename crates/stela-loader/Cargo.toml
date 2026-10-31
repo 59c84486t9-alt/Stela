@@ -12,6 +12,7 @@ std = ["stela-soc-data/std",
     "stela-contracts/std", "stela-formats/std",
     "hex/std",
     "object/std",
+    "dep:plist",
     "serde/std",
     "serde_json/std",
 ]
@@ -23,6 +24,7 @@ stela-formats = { path = "../stela-formats", default-features = false }
 stela-driver-core = { path = "../stela-driver-core" }
 hex = { version = "0.4", default-features = false, features = ["alloc"] }
 object = { version = "0.37", default-features = false, features = ["read"] }
+plist = { version = "1", optional = true }
 serde.workspace = true
 serde_json = { version = "1", default-features = false, features = ["alloc"] }
 stela-crypto = { path = "../stela-crypto" }

@@ -3,6 +3,10 @@
 //! assertions are held. This plain Rust child is not whole-C ASan/UBSan.
 extern crate std;
 use super::*;
+use crate::linux::{
+    owner::{Errno, Owner, Platform, RawOwner},
+    service::Environment,
+};
 use alloc::{boxed::Box, vec::Vec};
 use core::{
     alloc::{GlobalAlloc, Layout},
@@ -12,6 +16,7 @@ use core::{
     sync::atomic::{AtomicPtr, AtomicUsize},
 };
 use std::{alloc::System, sync::Mutex, thread};
+use stela_driver_base::platform::image::NativeReadOnlyImage;
 use stela_driver_base::platform::work::service;
 use stela_driver_base::platform::work::{Cpu, Executor, Kind, Queue, Stack, StackBacking};
 
@@ -155,6 +160,17 @@ unsafe extern "C" {
     fn stela_linux_task_test_service_wait(context: *mut c_void);
     fn stela_linux_task_test_service_cancel(context: *mut c_void);
     fn stela_linux_task_test_clock_service(context: *mut c_void);
+    fn stela_linux_service_test_body(context: *mut c_void);
+    fn stela_linux_timer_test_service(context: *mut c_void);
+    fn stela_linux_timer_test_sleeper(context: *mut c_void);
+    fn stela_linux_workqueue_test_bind(
+        context: *mut c_void,
+        start_worker: unsafe extern "C" fn(*mut c_void) -> i32,
+    );
+    fn stela_linux_workqueue_test_worker(context: *mut c_void);
+    fn stela_linux_workqueue_test_main(context: *mut c_void);
+    /// Linux's tick count, which these tests publish as the platform's tick does.
+    static jiffies_64: AtomicU64;
     fn stela_linux_task_test_runnable_boundary(context: *mut c_void);
     fn stela_linux_task_test_closed_stack();
     fn stela_linux_atomic_callback_prepared_fixture(task: *mut CTask, context: *const TaskContext);
@@ -275,6 +291,11 @@ struct Fixture {
     late: Mutex<Option<WakeHandle<16>>>,
     trees: AtomicU64,
     refused: AtomicBool,
+    timer_clock: Mutex<Option<Arc<dyn service::Clock>>>,
+    timer_batch: Mutex<Option<service::Batch>>,
+    jiffies_origin: Mutex<Option<(u64, u64)>>,
+    sleeper_done: AtomicBool,
+    worker_bindings: Mutex<Vec<Arc<TaskBinding<16>>>>,
 }
 impl Fixture {
     fn new(cpu: Arc<CpuModel>) -> Arc<Self> {
@@ -294,6 +315,11 @@ impl Fixture {
             late: Mutex::new(None),
             trees: AtomicU64::new(0),
             refused: AtomicBool::new(false),
+            timer_clock: Mutex::new(None),
+            timer_batch: Mutex::new(None),
+            jiffies_origin: Mutex::new(None),
+            sleeper_done: AtomicBool::new(false),
+            worker_bindings: Mutex::new(Vec::new()),
         })
     }
     unsafe fn runtime(&self) -> Pin<&Runtime<16>> {
@@ -580,7 +606,22 @@ fn trees_child() {
     clock_service_roundtrip(0);
     clock_service_roundtrip(1);
     clock_service_roundtrip(2);
+    timer_service_roundtrip();
+    // SAFETY: this child borrows no constant Linux names, which classifying
+    // no address as immutable data requires.
+    assert!(unsafe { crate::linux::image::register(alloc::sync::Arc::new(NoImage)) }.is_ok());
+    workqueue_roundtrip();
+    environment_roundtrip();
     stack_catalog_capacity();
+}
+
+struct NoImage;
+
+// SAFETY: no address is classified as immutable data, and none is read.
+unsafe impl NativeReadOnlyImage for NoImage {
+    fn contains(&self, _address: usize) -> bool {
+        false
+    }
 }
 
 unsafe extern "C" fn service_wait(context: *mut c_void) {
@@ -944,6 +985,414 @@ fn clock_service_roundtrip(mode: u64) {
     drop(domain);
     drop(executor);
     assert_eq!(dropped.load(Ordering::Relaxed), 5);
+    assert_eq!(cpu.flags.load(Ordering::Acquire), 0x202);
+    assert_eq!(quarantined(), 0);
+}
+
+#[repr(C)]
+struct TimerServiceCall {
+    context: *mut c_void,
+    begin: unsafe extern "C" fn(*mut c_void) -> bool,
+    finish: unsafe extern "C" fn(*mut c_void, bool, u64),
+    done: unsafe extern "C" fn(*mut c_void) -> bool,
+}
+/// Publish jiffies for the clock's elapsed time as the platform's tick does,
+/// counting at HZ (1000) from the environment's initial value; returns that
+/// initial value and the clock reading it stands for.
+fn publish_jiffies(f: &Fixture) -> (u64, u64) {
+    let clock = f.timer_clock.lock().unwrap().as_ref().unwrap().clone();
+    let now = clock.now_ns().unwrap();
+    // SAFETY: the environment's aligned word, which lives for the process.
+    let word = unsafe { &jiffies_64 };
+    let (initial, origin) = *f
+        .jiffies_origin
+        .lock()
+        .unwrap()
+        .get_or_insert_with(|| (word.load(Ordering::Acquire), now));
+    word.fetch_max(initial + (now - origin) / 1_000_000, Ordering::AcqRel);
+    (initial, origin)
+}
+unsafe extern "C" fn timer_begin(context: *mut c_void) -> bool {
+    // SAFETY: the queue owner keeps the fixture behind `context` through this callback.
+    let f = unsafe { fixture(context) };
+    // SAFETY: the harness keeps the pinned executor through every callback and retirement.
+    let runtime = unsafe { f.runtime() };
+    let domain = f.service_domain.lock().unwrap().as_ref().unwrap().clone();
+    let Some(batch) = domain.begin(runtime).unwrap() else {
+        return false;
+    };
+    publish_jiffies(f);
+    *f.timer_batch.lock().unwrap() = Some(batch);
+    true
+}
+unsafe extern "C" fn timer_finish(context: *mut c_void, armed: bool, expires: u64) {
+    // SAFETY: the queue owner keeps the fixture behind `context` through this callback.
+    let f = unsafe { fixture(context) };
+    // SAFETY: the harness keeps the pinned executor through every callback and retirement.
+    let runtime = unsafe { f.runtime() };
+    let (initial, origin) = publish_jiffies(f);
+    let deadline = armed.then(|| origin + expires.wrapping_sub(initial) * 1_000_000);
+    let batch = f.timer_batch.lock().unwrap().take().unwrap();
+    let domain = f.service_domain.lock().unwrap().as_ref().unwrap().clone();
+    // SAFETY: the service task ran the batch's expired timers, and `deadline`
+    // is the earliest timer still pending.
+    unsafe { domain.finish(runtime, batch, deadline) }.unwrap();
+}
+unsafe extern "C" fn timer_done(context: *mut c_void) -> bool {
+    // SAFETY: the queue owner keeps the fixture behind `context` through this callback.
+    unsafe { fixture(context) }
+        .sleeper_done
+        .load(Ordering::Acquire)
+}
+unsafe extern "C" fn timer_service(context: *mut c_void) {
+    // SAFETY: the queue owner keeps the fixture behind `context` through this callback.
+    let f = unsafe { fixture(context) };
+    // SAFETY: the harness keeps the pinned executor through every callback and retirement.
+    let runtime = unsafe { f.runtime() };
+    let binding = f.binding(2);
+    let domain = f.service_domain.lock().unwrap().as_ref().unwrap().clone();
+    domain.bind_current(runtime).unwrap();
+    let mut call = TimerServiceCall {
+        context,
+        begin: timer_begin,
+        finish: timer_finish,
+        done: timer_done,
+    };
+    // SAFETY: real kept C task/stack and stack-local callback descriptor.
+    unsafe {
+        binding.run_scoped(
+            runtime,
+            stela_linux_timer_test_service,
+            (&mut call as *mut TimerServiceCall).cast(),
+        )
+    }
+    .unwrap();
+    domain.stop_producers().unwrap();
+}
+unsafe extern "C" fn timer_sleeper(context: *mut c_void) {
+    // SAFETY: the queue owner keeps the fixture behind `context` through this callback.
+    let f = unsafe { fixture(context) };
+    let binding = f.binding(0);
+    // SAFETY: shared Runtime/fixture live through complete scoped C body.
+    unsafe { binding.run_scoped(f.runtime(), stela_linux_timer_test_sleeper, context) }.unwrap();
+    f.sleeper_done.store(true, Ordering::Release);
+}
+/// Linux's timers, timed sleeps and waits, with a General task sleeping on
+/// the timers the service task runs.
+fn timer_service_roundtrip() {
+    let cpu = CpuModel::new();
+    let f = Fixture::new(cpu.clone());
+    // SAFETY: the fixture is the queue's owner, and only this test thread produces
+    // work.
+    let queue = unsafe { Queue::<16>::new(cpu.clone(), f.clone()) }.unwrap();
+    let dropped = Arc::new(AtomicU64::new(0));
+    let executor =
+        Executor::new_hosted_service_for_test(queue, stacks_count(&dropped, 16 * 1024, 5)).unwrap();
+    let runtime = executor.runtime();
+    f.runtime.store(
+        runtime.get_ref() as *const Runtime<16> as *mut Runtime<16>,
+        Ordering::Release,
+    );
+    let clock: Arc<dyn service::Clock> = Arc::new(ServiceClock {
+        cpu: cpu.clone(),
+        reads: f.clock_reads.clone(),
+        start: std::time::Instant::now(),
+    });
+    *f.timer_clock.lock().unwrap() = Some(clock.clone());
+    let idle = Arc::new(ServiceIdle {
+        clock: clock.clone(),
+        owner: thread::current(),
+        waits: AtomicU64::new(0),
+    });
+    let domain = service::Domain::new(clock, idle).unwrap();
+    runtime.attach_service_domain(domain.clone()).unwrap();
+    *f.service_domain.lock().unwrap() = Some(domain.clone());
+    let context = Arc::as_ptr(&f) as *mut c_void;
+    // SAFETY: fixture and registered domain keep all code/providers.
+    let service = unsafe { runtime.start_service(timer_service, context) }.unwrap();
+    // SAFETY: the fixture keeps the callback's context until completion.
+    let sleeper = unsafe {
+        runtime
+            .queue()
+            .execute(Kind::General, timer_sleeper, context)
+    }
+    .unwrap();
+    let mut steps = 0;
+    while !(runtime.queue().completed(sleeper).unwrap()
+        && runtime.queue().completed(service).unwrap())
+    {
+        assert!(steps < 100_000, "timed sleeps did not complete");
+        runtime.step_or_idle().unwrap();
+        steps += 1;
+    }
+    // SAFETY: the service job completed; no timer is pending, and its
+    // consumer has no outstanding callback or user.
+    unsafe { domain.retire() }.unwrap();
+    for slot in &f.bindings {
+        let Some(binding) = slot.lock().unwrap().take() else {
+            continue;
+        };
+        // SAFETY: service and sleeper jobs are joined.
+        let retained = unsafe { runtime.detach_binding(binding.context_id().unwrap()) }.unwrap();
+        drop(retained);
+        // SAFETY: the runtime detached this binding and no job or waker still uses it.
+        assert!(unsafe { binding.release_quiescent() }.is_ok());
+    }
+    runtime.queue().close().unwrap();
+    // SAFETY: the queue is closed and this test thread is the only producer.
+    unsafe { runtime.retire() }.unwrap();
+    f.service_domain.lock().unwrap().take();
+    f.timer_clock.lock().unwrap().take();
+    drop(domain);
+    drop(executor);
+    assert_eq!(cpu.flags.load(Ordering::Acquire), 0x202);
+    assert_eq!(quarantined(), 0);
+}
+
+/// What Linux code in [`environment_roundtrip`] needs of its machine.
+#[derive(Default)]
+struct Machine {
+    start: core::cell::OnceCell<std::time::Instant>,
+    environment: AtomicPtr<Environment<16>>,
+}
+
+impl Machine {
+    fn environment(&self) -> Pin<&Environment<16>> {
+        // SAFETY: the test keeps the pinned environment through every task.
+        unsafe { Pin::new_unchecked(&*self.environment.load(Ordering::Acquire)) }
+    }
+}
+
+impl Platform for Machine {
+    fn now_ns(&self) -> i64 {
+        let start = self.start.get_or_init(std::time::Instant::now);
+        start.elapsed().as_nanos() as i64
+    }
+    fn delay_us(&self, minimum: u64, _: u64, atomic: bool) {
+        assert!(!atomic);
+        // SAFETY: Linux's call, on one of the environment's tasks.
+        unsafe { crate::linux::service::sleep_us(minimum) };
+    }
+    fn firmware(&self, _: &core::ffi::CStr) -> Result<&[u8], Errno> {
+        unreachable!();
+    }
+    fn log(&self, _: i32, message: &core::ffi::CStr) {
+        std::eprintln!("{message:?}");
+    }
+    fn warn(&self, file: &core::ffi::CStr, line: i32, _: Option<&core::ffi::CStr>) {
+        panic!("WARN at {file:?}:{line}");
+    }
+    fn unsupported(&self, operation: &core::ffi::CStr) {
+        panic!("unsupported: {operation:?}");
+    }
+    fn random_bytes(&self, _: &mut [u8]) {
+        unreachable!();
+    }
+    fn start_worker(&self) -> Result<(), Errno> {
+        self.environment().start_worker().map(drop).map_err(|_| -11)
+    }
+    fn shutdown(&self, _: bool) {
+        unreachable!();
+    }
+    fn map_device(&self, _: u64, _: usize, _: bool) -> Option<*mut c_void> {
+        unreachable!();
+    }
+    unsafe fn unmap_device(&self, _: *mut c_void) {
+        unreachable!();
+    }
+    fn map_pages(&self, _: &[u64]) -> Option<*mut c_void> {
+        unreachable!();
+    }
+    unsafe fn unmap_pages(&self, _: *mut c_void, _: usize) {
+        unreachable!();
+    }
+    fn irq_enable(&self, irq: u32) -> Result<(), Errno> {
+        assert_eq!(irq, 7);
+        Ok(())
+    }
+    fn irq_disable(&self, irq: u32) {
+        assert_eq!(irq, 7);
+    }
+    unsafe fn copy_from_user(&self, _: *mut u8, _: *const u8, _: usize) -> usize {
+        unreachable!();
+    }
+    unsafe fn copy_to_user(&self, _: *mut u8, _: *const u8, _: usize) -> usize {
+        unreachable!();
+    }
+    fn map_user(&self, _: *mut c_void, _: u64, _: u64, _: u64) -> Result<(), Errno> {
+        unreachable!();
+    }
+    fn unmap_user(&self, _: *mut c_void, _: u64, _: usize) {
+        unreachable!();
+    }
+}
+
+#[repr(C)]
+struct EnvironmentTest {
+    owner: *const RawOwner,
+    context: *mut c_void,
+    raise: unsafe extern "C" fn(*mut c_void, u32),
+}
+
+unsafe extern "C" fn raise_line(context: *mut c_void, line: u32) {
+    // SAFETY: the test's machine, alive through the task.
+    let machine = unsafe { &*context.cast::<Machine>() };
+    machine.environment().raise(line).unwrap();
+}
+
+/// A task sleeping on the service task's timer, a raised line reaching its
+/// handler there, and the work that handler queued reaching a worker task.
+fn environment_roundtrip() {
+    let cpu = CpuModel::new();
+    let f = Fixture::new(cpu.clone());
+    // SAFETY: the fixture is the queue's owner, and only this test thread produces
+    // work.
+    let queue = unsafe { Queue::<16>::new(cpu.clone(), f) }.unwrap();
+    let dropped = Arc::new(AtomicU64::new(0));
+    let executor =
+        Executor::new_hosted_service_for_test(queue, stacks_count(&dropped, 16 * 1024, 5)).unwrap();
+    let runtime = executor.runtime();
+    let clock: Arc<dyn service::Clock> = Arc::new(ServiceClock {
+        cpu: cpu.clone(),
+        reads: Arc::new(AtomicU64::new(0)),
+        start: std::time::Instant::now(),
+    });
+    let idle = Arc::new(ServiceIdle {
+        clock: clock.clone(),
+        owner: thread::current(),
+        waits: AtomicU64::new(0),
+    });
+    let domain = service::Domain::new(clock, idle).unwrap();
+    let owner = Owner::new(Machine::default());
+    // SAFETY: the taskless dispatcher, and this function keeps the owner and
+    // runtime past every task.
+    let environment = unsafe { Environment::new(owner.raw(), runtime, domain) }.unwrap();
+    owner.platform().environment.store(
+        ptr::from_ref(environment.as_ref().get_ref()).cast_mut(),
+        Ordering::Release,
+    );
+    environment.as_ref().start().unwrap();
+    let mut test = EnvironmentTest {
+        owner: owner.raw(),
+        context: ptr::from_ref(owner.platform()).cast_mut().cast(),
+        raise: raise_line,
+    };
+    // SAFETY: the body enters and leaves the owner, and `test` outlives it.
+    let task = unsafe {
+        environment
+            .as_ref()
+            .spawn(stela_linux_service_test_body, (&raw mut test).cast())
+    }
+    .unwrap();
+    let mut steps = 0;
+    while !runtime.queue().completed(task).unwrap() {
+        assert!(steps < 100_000, "the task did not complete");
+        runtime.step_or_idle().unwrap();
+        steps += 1;
+    }
+    environment.stop().unwrap();
+    while !environment.finished().unwrap() {
+        assert!(steps < 100_000, "the service and workers did not stop");
+        runtime.step_or_idle().unwrap();
+        steps += 1;
+    }
+    // SAFETY: every task finished, and this test thread raises no more lines.
+    unsafe { environment.as_ref().retire() }.unwrap();
+    runtime.queue().close().unwrap();
+    // SAFETY: the queue is closed and this test thread is the only producer.
+    unsafe { runtime.retire() }.unwrap();
+    drop(environment);
+    drop(executor);
+    assert_eq!(quarantined(), 0);
+}
+
+/// The binding of the Runtime continuation running this job, made on its
+/// first job.
+fn worker_binding(f: &Fixture) -> Arc<TaskBinding<16>> {
+    // SAFETY: the harness keeps the pinned executor through every callback and retirement.
+    let runtime = unsafe { f.runtime() };
+    let id = runtime.queue().current_id().unwrap();
+    let mut bindings = f.worker_bindings.lock().unwrap();
+    if let Some(binding) = bindings
+        .iter()
+        .find(|binding| binding.context_id().unwrap() == id)
+    {
+        return binding.clone();
+    }
+    // SAFETY: hosted checked process thread before Linux entry.
+    let binding = unsafe { TaskBinding::new() }.unwrap();
+    binding.bind_current(runtime).unwrap();
+    bindings.push(binding.clone());
+    binding
+}
+unsafe extern "C" fn workqueue_worker(context: *mut c_void) {
+    // SAFETY: the queue owner keeps the fixture behind `context` through this callback.
+    let f = unsafe { fixture(context) };
+    let binding = worker_binding(f);
+    // SAFETY: shared Runtime/fixture live through complete scoped C body.
+    unsafe { binding.run_scoped(f.runtime(), stela_linux_workqueue_test_worker, context) }.unwrap();
+}
+/// The owner's start_worker service: a General job running the workers.
+unsafe extern "C" fn start_workqueue_worker(context: *mut c_void) -> i32 {
+    // SAFETY: the queue owner keeps the fixture behind `context` through this callback.
+    let f = unsafe { fixture(context) };
+    // SAFETY: the harness keeps the pinned executor through every callback and retirement.
+    let runtime = unsafe { f.runtime() };
+    // SAFETY: the fixture keeps the callback's context until completion.
+    match unsafe {
+        runtime
+            .queue()
+            .execute(Kind::General, workqueue_worker, context)
+    } {
+        Ok(_) => 0,
+        Err(_) => -11, // EAGAIN
+    }
+}
+unsafe extern "C" fn workqueue_main(context: *mut c_void) {
+    // SAFETY: the queue owner keeps the fixture behind `context` through this callback.
+    let f = unsafe { fixture(context) };
+    let binding = f.binding(0);
+    // SAFETY: shared Runtime/fixture live through complete scoped C body.
+    unsafe { binding.run_scoped(f.runtime(), stela_linux_workqueue_test_main, context) }.unwrap();
+}
+/// Linux's workqueues, with the owner starting each requested worker.
+fn workqueue_roundtrip() {
+    let cpu = CpuModel::new();
+    let f = Fixture::new(cpu.clone());
+    // SAFETY: the fixture is the queue's owner, and only this test thread produces
+    // work.
+    let queue = unsafe { Queue::<16>::new(cpu.clone(), f.clone()) }.unwrap();
+    let dropped = Arc::new(AtomicU64::new(0));
+    let executor = Executor::new_hosted_for_test(queue, stacks(&dropped, 16 * 1024)).unwrap();
+    let runtime = executor.runtime();
+    f.runtime.store(
+        runtime.get_ref() as *const Runtime<16> as *mut Runtime<16>,
+        Ordering::Release,
+    );
+    let context = Arc::as_ptr(&f) as *mut c_void;
+    // SAFETY: the fixture outlives every worker the C owner starts.
+    unsafe { stela_linux_workqueue_test_bind(context, start_workqueue_worker) };
+    // SAFETY: the callbacks are static, never unwind, and take the fixture the queue keeps
+    // until completion.
+    unsafe { runtime.call_foreground(workqueue_main, context, 100_000) }.unwrap();
+    while runtime.step().unwrap() {}
+    let bindings = f
+        .bindings
+        .iter()
+        .filter_map(|slot| slot.lock().unwrap().take())
+        .chain(f.worker_bindings.lock().unwrap().drain(..))
+        .collect::<Vec<_>>();
+    for binding in bindings {
+        // SAFETY: the main job and every worker completed.
+        let retained = unsafe { runtime.detach_binding(binding.context_id().unwrap()) }.unwrap();
+        drop(retained);
+        // SAFETY: the runtime detached this binding and no job or waker still uses it.
+        assert!(unsafe { binding.release_quiescent() }.is_ok());
+    }
+    runtime.queue().close().unwrap();
+    // SAFETY: the queue is closed and this test thread is the only producer.
+    unsafe { runtime.retire() }.unwrap();
+    drop(executor);
     assert_eq!(cpu.flags.load(Ordering::Acquire), 0x202);
     assert_eq!(quarantined(), 0);
 }

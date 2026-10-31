@@ -11,6 +11,8 @@ pub(super) struct Native {
     pub(super) bios_drops: Arc<AtomicUsize>,
     pub(super) os_drops: Arc<AtomicUsize>,
     pub(super) revoked: Arc<AtomicBool>,
+    /// The firmware leaves its PHYs' receive chains to the host.
+    pub(super) host_chains: bool,
 }
 impl Default for Native {
     fn default() -> Self {
@@ -21,6 +23,7 @@ impl Default for Native {
             bios_drops: Arc::new(AtomicUsize::new(0)),
             os_drops: Arc::new(AtomicUsize::new(0)),
             revoked: Arc::new(AtomicBool::new(false)),
+            host_chains: false,
         }
     }
 }

@@ -43,29 +43,40 @@ pub(super) fn prepare<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy>(
             version,
         });
     }
-    let address = mac.initialized_nvm().address.bytes;
+    let link = station_link(binding);
+    let mac = &binding.power.phy.scan.mac;
     let power = mac
         .commands()
         .iter()
         .find(|command| command.kind() == MacCommandKind::Power)
         .ok_or(Ax200BindingError::State)?;
-    binding.commands = alloc::vec![
+    let mut commands = Vec::new();
+    if binding.link.is_some() {
+        let original = mac
+            .commands()
+            .iter()
+            .find(|command| command.kind() == MacCommandKind::AddInactiveLink)
+            .ok_or(Ax200BindingError::State)?;
+        commands.extend(replacement(original.bytes(), link));
+    }
+    commands.extend([
         BindingCommand {
             kind: BindingCommandKind::AttachPhy,
             id: LINK,
-            bytes: encode(address, 0, false)
+            bytes: encode(link, 0, false),
         },
         BindingCommand {
             kind: BindingCommandKind::ActivateLink,
             id: LINK,
-            bytes: encode(address, 3, true)
+            bytes: encode(link, 3, true),
         },
         BindingCommand {
             kind: BindingCommandKind::Power,
             id: power.id(),
-            bytes: power.bytes().to_vec()
-        }
-    ];
+            bytes: power.bytes().to_vec(),
+        },
+    ]);
+    binding.commands = commands;
     // Original AP_TX_POWER_CONSTRAINTS helper returns without a command for
     // every 2.4/5 GHz link; this profile never admits 6 GHz. Cold power remains
     // source cfg.ps=false, no DTIM/peer/BF or other vif/device-PS transition.
@@ -74,7 +85,7 @@ pub(super) fn prepare<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy>(
 pub(super) fn removal<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy>(
     binding: &Ax200Binding<'_, Q, B, O>,
 ) -> Result<Vec<BindingCommand>, Ax200BindingError> {
-    let address = binding.power.phy.scan.mac.initialized_nvm().address.bytes;
+    let link = station_link(binding);
     let power = binding
         .commands
         .iter()
@@ -102,7 +113,7 @@ pub(super) fn removal<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy>(
         BindingCommand {
             kind: BindingCommandKind::DeactivateLink,
             id: LINK,
-            bytes: encode(address, 1, false)
+            bytes: encode(link, 1, false)
         },
         power.clone(),
         BindingCommand {
@@ -117,18 +128,47 @@ pub(super) fn removal<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy>(
         }
     ])
 }
+/// The link this owner activates: an MLD association's, or the cold link0.
+fn station_link<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy>(
+    binding: &Ax200Binding<'_, Q, B, O>,
+) -> StationLink {
+    binding.link.unwrap_or(StationLink {
+        address: crate::Mac(binding.power.phy.scan.mac.initialized_nvm().address.bytes),
+        id: 0,
+    })
+}
+/// `iwl_mld_change_vif_links`: firmware takes a link's address only as the
+/// link is added, so an MLD association's link replaces the cold one.
+fn replacement(original: &[u8], link: StationLink) -> [BindingCommand; 2] {
+    let mut bytes = original.to_vec();
+    bytes[16..22].copy_from_slice(&link.address.0);
+    bytes[SPEC_LINK_ID] = link.id;
+    [
+        BindingCommand {
+            kind: BindingCommandKind::RemoveLink,
+            id: LINK,
+            bytes: remove_link_bytes(original.len()),
+        },
+        BindingCommand {
+            kind: BindingCommandKind::ReplaceLink,
+            id: LINK,
+            bytes,
+        },
+    ]
+}
 fn remove_link_bytes(length: usize) -> Vec<u8> {
     let mut bytes = alloc::vec![0;length];
     bytes[..4].copy_from_slice(&3u32.to_le_bytes());
     bytes[12..16].fill(255);
     bytes
 }
-fn encode(address: [u8; 6], changes: u32, active: bool) -> Vec<u8> {
+fn encode(link: StationLink, changes: u32, active: bool) -> Vec<u8> {
     let mut bytes = alloc::vec![0;208];
     bytes[..4].copy_from_slice(&2u32.to_le_bytes()); // original MODIFY
     // Link0/mac0/PHY0, source listen_lmac0. This source non-MLO legacy
     // 20 MHz station has no BSS/HT/HE/EHT/DTIM/QoS negotiation or session yet.
-    bytes[16..22].copy_from_slice(&address);
+    bytes[16..22].copy_from_slice(&link.address.0);
+    bytes[SPEC_LINK_ID] = link.id;
     bytes[24..28].copy_from_slice(&changes.to_le_bytes());
     bytes[28..32].copy_from_slice(&u32::from(active).to_le_bytes());
     bytes[36..40].copy_from_slice(&0xfu32.to_le_bytes());
@@ -142,6 +182,34 @@ fn encode(address: [u8; 6], changes: u32, active: bool) -> Vec<u8> {
 mod tests {
     extern crate std;
     use super::*;
+    fn cold(address: [u8; 6]) -> StationLink {
+        StationLink {
+            address: crate::Mac(address),
+            id: 0,
+        }
+    }
+    #[test]
+    fn an_mld_link_replaces_the_cold_one_under_its_own_address_and_id() {
+        let mut original = alloc::vec![0; 208];
+        original[0] = 1;
+        original[12..16].fill(255);
+        original[16..22].copy_from_slice(&[2, 0, 0, 0, 0, 1]);
+        let link = StationLink {
+            address: crate::Mac([6, 5, 4, 3, 2, 1]),
+            id: 7,
+        };
+        let [remove, add] = replacement(&original, link);
+        assert_eq!(remove.kind, BindingCommandKind::RemoveLink);
+        assert_eq!(remove.bytes[..4], 3u32.to_le_bytes());
+        assert_eq!(add.kind, BindingCommandKind::ReplaceLink);
+        assert_eq!(add.bytes[..4], 1u32.to_le_bytes());
+        assert_eq!(add.bytes[12..16], [255; 4]);
+        assert_eq!(add.bytes[16..22], [6, 5, 4, 3, 2, 1]);
+        assert_eq!(add.bytes[SPEC_LINK_ID], 7);
+        let modify = encode(link, 3, true);
+        assert_eq!(modify[16..22], [6, 5, 4, 3, 2, 1]);
+        assert_eq!(modify[SPEC_LINK_ID], 7);
+    }
     #[test]
     #[ignore = "oracle: STELA_IWLWIFI_MLD_LINK_TRACE"]
     fn pinned_linux_mld_link_activation_unassign_reset_and_phy_reference_bytes() {
@@ -185,7 +253,7 @@ mod tests {
                         _ => panic!("stage"),
                     };
                     assert_eq!(
-                        encode(address, changes, stage == 1),
+                        encode(cold(address), changes, stage == 1),
                         decode(words[10]),
                         "{line}"
                     );
@@ -211,9 +279,9 @@ mod tests {
                             assert_eq!(number(5), 0x309);
                             assert_eq!(number(6), 208);
                             let bytes = match step {
-                                0 => encode(address, 0, false),
-                                1 => encode(address, 3, true),
-                                3 => encode(address, 1, false),
+                                0 => encode(cold(address), 0, false),
+                                1 => encode(cold(address), 3, true),
+                                3 => encode(cold(address), 1, false),
                                 5 => remove_link_bytes(208),
                                 6 => {
                                     let mut bytes = alloc::vec![0;208];

@@ -121,6 +121,11 @@ pub struct Module {
 pub struct Linux {
     /// Kbuild's generated asm wrappers, in `asm/` and `uapi/asm/`.
     wrappers: PathBuf,
+    /// The kernel-API archive for Cargo's target.
+    pub archive: PathBuf,
+    /// The environment's units whose registrations nouveau's image names.
+    #[cfg(feature = "nouveau-port")]
+    pub captured: Vec<crate::initcalls::Captured>,
     /// What hosted programs running Linux code link: the kernel-API and the
     /// host's platform services.
     pub hosted: Vec<PathBuf>,
@@ -128,6 +133,104 @@ pub struct Linux {
 
 #[cfg(feature = "linux-kernel")]
 const DRM: &str = "../../third_party/linux/drivers/gpu/drm";
+/// DRM's core and the helpers nouveau selects, as Linux's `drm-y`,
+/// `drm_kms_helper-y`, `ttm-y`, `gpu-sched-y` and `drm_display_helper-y`
+/// compose them under Stela's Kconfig.
+#[cfg(any(feature = "nouveau-port", feature = "amd-port"))]
+const DRM_SOURCES: &[&str] = &[
+    "drm_atomic",
+    "drm_atomic_uapi",
+    "drm_auth",
+    "drm_blend",
+    "drm_bridge",
+    "drm_cache",
+    "drm_color_mgmt",
+    "drm_colorop",
+    "drm_connector",
+    "drm_crtc",
+    "drm_displayid",
+    "drm_drv",
+    "drm_dumb_buffers",
+    "drm_edid",
+    "drm_eld",
+    "drm_encoder",
+    "drm_file",
+    "drm_framebuffer",
+    "drm_gem",
+    "drm_ioctl",
+    "drm_lease",
+    "drm_managed",
+    "drm_mode_config",
+    "drm_mode_object",
+    "drm_modes",
+    "drm_modeset_lock",
+    "drm_panel_orientation_quirks",
+    "drm_pci",
+    "drm_plane",
+    "drm_prime",
+    "drm_print",
+    "drm_property",
+    "drm_rect",
+    "drm_syncobj",
+    "drm_sysfs",
+    "drm_vblank",
+    "drm_vblank_work",
+    "drm_writeback",
+    "drm_exec",
+    "drm_gpuvm",
+    "drm_gem_ttm_helper",
+    "drm_atomic_helper",
+    "drm_atomic_state_helper",
+    "drm_bridge_helper",
+    "drm_crtc_helper",
+    "drm_damage_helper",
+    "drm_flip_work",
+    "drm_format_helper",
+    "drm_gem_atomic_helper",
+    "drm_gem_framebuffer_helper",
+    "drm_kms_helper_common",
+    "drm_modeset_helper",
+    "drm_plane_helper",
+    "drm_probe_helper",
+    "drm_self_refresh_helper",
+    "drm_simple_kms_helper",
+    "drm_vblank_helper",
+    "ttm/ttm_tt",
+    "ttm/ttm_bo",
+    "ttm/ttm_bo_util",
+    "ttm/ttm_bo_vm",
+    "ttm/ttm_module",
+    "ttm/ttm_execbuf_util",
+    "ttm/ttm_range_manager",
+    "ttm/ttm_resource",
+    "ttm/ttm_pool",
+    "ttm/ttm_device",
+    "ttm/ttm_sys_manager",
+    "ttm/ttm_backup",
+    "scheduler/sched_main",
+    "scheduler/sched_fence",
+    "scheduler/sched_entity",
+    "scheduler/sched_rq",
+    "display/drm_display_helper_mod",
+    "display/drm_dp_dual_mode_helper",
+    "display/drm_dp_helper",
+    "display/drm_dp_mst_topology",
+    "display/drm_hdmi_helper",
+    "display/drm_scdc_helper",
+];
+
+/// Linux's fences, reservation objects and shared buffers.
+#[cfg(any(feature = "nouveau-port", feature = "amd-port"))]
+const DMA_BUF_SOURCES: &[&str] = &[
+    "dma-buf",
+    "dma-buf-mapping",
+    "dma-fence",
+    "dma-fence-array",
+    "dma-fence-chain",
+    "dma-fence-unwrap",
+    "dma-resv",
+    "sync_file",
+];
 #[cfg(feature = "linux-kernel")]
 const COMPAT: &str = "src/compat/linux";
 #[cfg(feature = "linux-kernel")]
@@ -166,14 +269,20 @@ impl Linux {
         }
         let mut linux = Self {
             wrappers,
+            archive: PathBuf::new(),
             hosted: Vec::new(),
+            #[cfg(feature = "nouveau-port")]
+            captured: Vec::new(),
         };
         let kernel = sources(&format!("{COMPAT}/kernel"));
         let crc_tables = linux_crc::tables();
         // Unchanged shared helpers use Linux's arithmetic types. Stela's
         // extra conversion diagnostics remain confined to its own source.
-        let upstream = [
-            PathBuf::from(format!("{DRM}/drm_fourcc.c")),
+        let upstream = vec![
+            PathBuf::from(format!("{LINUX}/lib/string.c")),
+            PathBuf::from(format!("{LINUX}/lib/hexdump.c")),
+            PathBuf::from(format!("{LINUX}/lib/ratelimit.c")),
+            PathBuf::from(format!("{LINUX}/drivers/i2c/algos/i2c-algo-bit.c")),
             PathBuf::from(format!("{LINUX}/lib/scatterlist.c")),
             PathBuf::from(format!("{LINUX}/lib/find_bit.c")),
             PathBuf::from(format!("{LINUX}/lib/bitmap.c")),
@@ -181,6 +290,7 @@ impl Linux {
             PathBuf::from(format!("{LINUX}/lib/radix-tree.c")),
             PathBuf::from(format!("{LINUX}/lib/xarray.c")),
             PathBuf::from(format!("{LINUX}/lib/rbtree.c")),
+            PathBuf::from(format!("{LINUX}/lib/timerqueue.c")),
             PathBuf::from(format!("{LINUX}/lib/kobject.c")),
             PathBuf::from(format!("{LINUX}/lib/kobject_uevent.c")),
             PathBuf::from(format!("{LINUX}/lib/ctype.c")),
@@ -189,12 +299,45 @@ impl Linux {
             PathBuf::from(format!("{LINUX}/kernel/exec_state.c")),
             PathBuf::from(format!("{LINUX}/kernel/locking/mutex.c")),
             PathBuf::from(format!("{LINUX}/kernel/sched/wait_support.c")),
+            PathBuf::from(format!("{LINUX}/kernel/sched/wait.c")),
+            PathBuf::from(format!("{LINUX}/kernel/sched/swait.c")),
+            PathBuf::from(format!("{LINUX}/kernel/sched/completion.c")),
             PathBuf::from(format!("{LINUX}/kernel/rcuwait_wake.c")),
             PathBuf::from(format!("{LINUX}/kernel/rcu/rcuwait_finish.c")),
             PathBuf::from(format!("{LINUX}/fs/seq_output.c")),
+            PathBuf::from(format!("{LINUX}/lib/maple_tree.c")),
+            PathBuf::from(format!("{LINUX}/drivers/video/hdmi.c")),
+            PathBuf::from(format!("{DRM}/drm_fourcc.c")),
             PathBuf::from(format!("{DRM}/drm_mm.c")),
             PathBuf::from(format!("{DRM}/drm_vma_manager.c")),
         ];
+        let mut hosted_upstream = upstream.clone();
+        #[cfg(any(feature = "nouveau-port", feature = "amd-port"))]
+        let mut upstream = upstream;
+        #[cfg(any(feature = "nouveau-port", feature = "amd-port"))]
+        {
+            upstream.extend(
+                DMA_BUF_SOURCES
+                    .iter()
+                    .map(|source| PathBuf::from(format!("{LINUX}/drivers/dma-buf/{source}.c"))),
+            );
+            upstream.extend(
+                DRM_SOURCES
+                    .iter()
+                    .map(|source| PathBuf::from(format!("{DRM}/{source}.c"))),
+            );
+        }
+        // Hosted programs link what they test, and only amdgpu's reach these.
+        if cfg!(feature = "amd-port") {
+            hosted_upstream.clone_from(&upstream);
+        }
+        // Compiled below, with their registrations captured.
+        #[cfg(feature = "nouveau-port")]
+        upstream.retain(|source| {
+            !crate::initcalls::ENVIRONMENT
+                .iter()
+                .any(|unit| unit.path() == *source)
+        });
         for source in &upstream {
             println!("cargo:rerun-if-changed={}", source.display());
         }
@@ -202,7 +345,20 @@ impl Linux {
         linux.apply(&mut build, None, &[], None);
         let crc_objects = linux_crc::objects(&build, &crc_tables);
         build.objects(crc_objects);
-        linux_archive(&build, "stela-linux", &kernel, &upstream);
+        #[cfg(feature = "nouveau-port")]
+        {
+            let mut captured_build = upstream_build(&build);
+            upstream_warnings(&mut captured_build);
+            for (index, unit) in crate::initcalls::ENVIRONMENT.iter().enumerate() {
+                linux.captured.push(crate::initcalls::compile(
+                    &captured_build,
+                    *unit,
+                    index as u32 + 1,
+                ));
+            }
+            build.objects(linux.captured.iter().map(|unit| unit.object()));
+        }
+        linux.archive = linux_archive(&build, "stela-linux", &kernel, &upstream);
         // A callable target-ABI fixture plus host helpers only. It links the
         // SAME production common archive/Rust heap as the unit binary;
         // never mix duplicate native/hosted common archives. The standalone
@@ -231,6 +387,11 @@ impl Linux {
                     format!("{COMPAT}/stela/atomic_callback_test.c"),
                     format!("{COMPAT}/stela/mutex_test.c"),
                     format!("{COMPAT}/stela/resource_test.c"),
+                    format!("{COMPAT}/stela/service_test.c"),
+                    format!("{COMPAT}/stela/timer_test.c"),
+                    format!("{COMPAT}/stela/workqueue_test.c"),
+                    format!("{COMPAT}/stela/i2c_test.c"),
+                    format!("{COMPAT}/stela/sync_test.c"),
                 ])
                 .objects(helper_objects)
                 .compile("linux-task-fixture");
@@ -248,11 +409,17 @@ impl Linux {
             let crc_objects = linux_crc::objects(&kernel_build, &crc_tables);
             kernel_build.objects(crc_objects);
             linux.hosted = vec![
-                linux_archive(&kernel_build, "linux-hosted", &kernel, &upstream),
+                linux_archive(&kernel_build, "linux-hosted", &kernel, &hosted_upstream),
                 services,
             ];
         }
         linux
+    }
+
+    /// The environment's captured units, for the image that names them.
+    #[cfg(feature = "nouveau-port")]
+    pub fn take_captured(&mut self) -> Vec<crate::initcalls::Captured> {
+        std::mem::take(&mut self.captured)
     }
 
     pub fn tests(&self, tests: &mut Tests) {
@@ -263,14 +430,7 @@ impl Linux {
                 Ok("linux" | "macos")
             )
         {
-            tests.add_rust(
-                "linux_trees",
-                "crate::linux::task::tests::run_trees_child()",
-            );
-            tests.add_rust(
-                "linux_mutex_wait",
-                "crate::linux::task::tests::run_mutex_child()",
-            );
+            tests.rust_children();
         }
         let Some(mut build) = hosted() else {
             return;
@@ -346,6 +506,19 @@ impl Linux {
             ),
             ("linux_printf", "printf.c", "STELA_LINUX_PRINTF_TEST"),
             ("linux_uuid", "uuid.c", "STELA_LINUX_UUID_TEST"),
+            ("linux_kstrtox", "kstrtox.c", "STELA_LINUX_KSTRTOX_TEST"),
+            ("linux_jiffies", "jiffies.c", "STELA_LINUX_JIFFIES_TEST"),
+            ("linux_device", "device.c", "STELA_LINUX_DEVICE_TEST"),
+            ("linux_file", "file.c", "STELA_LINUX_FILE_TEST"),
+            ("linux_mapping", "mapping.c", "STELA_LINUX_MAPPING_TEST"),
+            ("linux_reclaim", "reclaim.c", "STELA_LINUX_RECLAIM_TEST"),
+            ("linux_sort", "sort.c", "STELA_LINUX_SORT_TEST"),
+            ("linux_usercopy", "usercopy.c", "STELA_LINUX_USERCOPY_TEST"),
+            ("linux_dma", "dma.c", "STELA_LINUX_DMA_TEST"),
+            ("linux_pci", "pci.c", "STELA_LINUX_PCI_TEST"),
+            ("linux_pci_host", "pci_host.c", "STELA_LINUX_PCI_HOST_TEST"),
+            ("linux_service", "service.c", "STELA_LINUX_SERVICE_TEST"),
+            ("linux_vmalloc", "vmalloc.c", "STELA_LINUX_VMALLOC_TEST"),
             ("linux_refcount", "refcount.c", "STELA_LINUX_REFCOUNT_TEST"),
             (
                 "linux_const_string",
@@ -455,9 +628,34 @@ fn linux_archive(
     upstream: &[PathBuf],
 ) -> PathBuf {
     check_declarations(build, kernel);
-    check_declarations(build, upstream);
-    let mut upstream_build = build.clone();
-    upstream_build
+    let mut upstream_build = upstream_build(build);
+    check_declarations(&upstream_build, upstream);
+    upstream_warnings(&mut upstream_build);
+    upstream_build.files(upstream);
+    let objects = upstream_build.compile_intermediates();
+    let mut combined = build.clone();
+    combined.objects(&objects);
+    archive(&combined, name, kernel)
+}
+
+/// `build` for unchanged Linux sources.
+#[cfg(feature = "linux-kernel")]
+fn upstream_build(build: &cc::Build) -> cc::Build {
+    let mut build = build.clone();
+    // The scheduler's shared units include its internal header as "sched.h";
+    // Stela's scheduler supplies what they take from it. As Kbuild builds
+    // every profile: Linux relies on the optimizer to drop the calls its
+    // configuration disables.
+    build
+        .flag(format!("-iquote{COMPAT}/kernel/sched"))
+        .opt_level(2);
+    build
+}
+
+/// Linux's own warning profile for unchanged sources, in place of Stela's.
+#[cfg(feature = "linux-kernel")]
+pub fn upstream_warnings(build: &mut cc::Build) {
+    build
         .remove_flag("-Wconversion")
         .remove_flag("-Wsign-conversion")
         // Linux scripts/Makefile.warn disables these outside W=3. Unchanged
@@ -466,12 +664,27 @@ fn linux_archive(
         .flag("-Wno-unused-parameter")
         // Linux's top-level Makefile builds every file with -Wno-pointer-sign:
         // mutex.c passes its unsigned owner word to the long atomic helpers.
-        .flag("-Wno-pointer-sign")
-        .files(upstream);
-    let objects = upstream_build.compile_intermediates();
-    let mut combined = build.clone();
-    combined.objects(&objects);
-    archive(&combined, name, kernel)
+        .flag("-Wno-pointer-sign");
+    // The rest of scripts/Makefile.warn's default (no W=) clang profile.
+    for warning in [
+        "format-security",
+        "trigraphs",
+        "frame-address",
+        "address-of-packed-member",
+        "type-limits",
+        "unused-but-set-variable",
+        "unused-const-variable",
+        "initializer-overrides",
+        "pointer-to-enum-cast",
+        "tautological-constant-out-of-range-compare",
+        "unaligned-access",
+        "enum-compare-conditional",
+        "missing-field-initializers",
+        "shift-negative-value",
+        "enum-enum-conversion",
+    ] {
+        build.flag(format!("-Wno-{warning}"));
+    }
 }
 
 /// Every header in `compat` adds to Linux's: none stands in for one of
@@ -549,9 +762,18 @@ impl Tests {
         self.programs.push((name.replace('-', "_"), program));
     }
 
-    /// A Rust-hosted fixture with its own exact child selector.
-    pub fn add_rust(&mut self, name: &'static str, body: &'static str) {
-        self.rust.push((name, body));
+    /// The Rust-hosted fixtures, each with its own exact child selector.
+    pub fn rust_children(&mut self) {
+        self.rust.extend([
+            (
+                "linux_trees",
+                "crate::linux::task::tests::run_trees_child()",
+            ),
+            (
+                "linux_mutex_wait",
+                "crate::linux::task::tests::run_mutex_child()",
+            ),
+        ]);
     }
 
     /// The Rust tests `src/lib.rs` includes, one per program/child wrapper.
@@ -575,6 +797,12 @@ impl Tests {
 pub fn archive(build: &cc::Build, name: &str, sources: &[PathBuf]) -> PathBuf {
     build.clone().files(sources).compile(name);
     out_dir().join(format!("lib{name}.a"))
+}
+
+/// Rebuild when `path` changes.
+#[cfg(feature = "nouveau-port")]
+pub fn rerun_on(path: &Path) {
+    println!("cargo:rerun-if-changed={}", path.display());
 }
 
 pub fn out_dir() -> PathBuf {

@@ -706,7 +706,7 @@ static void real_input(int argc, char **argv)
 {
    CHECK(argc == 4 || argc == 5); /* --input RAW_AIR ENTRY [qualified FP profile number] */
    struct bytes air = read_file(argv[2]); struct input_facts f = {.name = argv[3]}; struct stela_air_error error;
-   CHECK(stela_air_inspect(air.data, air.size, 256, facts, &f, &error) && f.found);
+   CHECK(stela_air_inspect(air.data, air.size, NULL, 256, facts, &f, &error) && f.found);
    struct bytes bytes = archive(air.data, air.size, f.name, f.air_minor, f.major, f.minor, f.os_major, f.os_minor);
    struct stela_metal_assembly *library = assemble(&bytes); free(air.data); free(bytes.data);
    enum stela_air_fp_profile profile = argc == 5 ? (enum stela_air_fp_profile)strtoul(argv[4], NULL, 10) : STELA_AIR_FP_IEEE_DEFAULT;
@@ -726,7 +726,7 @@ static void source_input(int argc, char **argv)
    struct stela_metal_assembly_error error; struct stela_metal_assembly *library = NULL;
    CHECK(stela_metal_assemble_source(&assembly_options, &config, &request, &compiled, &library, &error) == STELA_METAL_ASSEMBLY_OK);
    struct radeon_info info = model(CHIP_NAVI31, true); struct stela_amd_air_options opts = options(32);
-   opts.fp_profile = STELA_AIR_FP_APPLE_32023_922_AIR29_MSL41;
+   opts.fp_profile = STELA_AIR_FP_METAL;
    expect_owned("original-source-owner", info.family, 32);
    struct stela_amd_air_compilation *owner = compile(&info, library, &opts, STELA_AMD_AIR_OK);
    free(air.data); free(source.data); stela_metal_assembly_destroy(&library);
@@ -755,7 +755,7 @@ static void threadgroup_input(int argc,char **argv)
     struct stela_metal_threadgroup_request request={.size=sizeof(request),.abi=STELA_METAL_THREADGROUP_ABI,
         .count=(uint32_t)(argc-5),.rows=rows};
     struct bytes air=read_file(argv[2]);struct input_facts f={.name=argv[3]};struct stela_air_error air_error;
-    CHECK(stela_air_inspect(air.data,air.size,256,facts,&f,&air_error)&&f.found);
+    CHECK(stela_air_inspect(air.data,air.size, NULL,256,facts,&f,&air_error)&&f.found);
     struct bytes bytes=archive(air.data,air.size,f.name,f.air_minor,f.major,f.minor,f.os_major,f.os_minor);
     struct stela_metal_assembly *library=assemble(&bytes);free(bytes.data);free(air.data);
     for (unsigned i = 0; i < ARRAY_SIZE(stela_amd_targets); i++) {
@@ -819,7 +819,7 @@ static void shared_refusal(int argc, char **argv)
 {
    CHECK(argc == 4);
    struct bytes air = read_file(argv[2]); struct input_facts f = {.name = argv[3]}; struct stela_air_error air_error;
-   CHECK(stela_air_inspect(air.data, air.size, 256, facts, &f, &air_error) && f.found);
+   CHECK(stela_air_inspect(air.data, air.size, NULL, 256, facts, &f, &air_error) && f.found);
    struct bytes bytes = archive(air.data, air.size, f.name, f.air_minor, f.major, f.minor, f.os_major, f.os_minor);
    struct stela_metal_assembly_options opts = stela_metal_assembly_default_options();
    struct stela_metal_assembly_error error; struct stela_metal_assembly *library = NULL;

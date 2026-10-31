@@ -346,7 +346,7 @@ int main(int argc, char **argv)
     }
     /* An input requests one FP32 mode through its profile; the direct NIR
      * fixture covers both. */
-    const unsigned first = input ? profile == STELA_AIR_FP_APPLE_32023_922_AIR29_MSL41 : 0;
+    const unsigned first = input ? profile == STELA_AIR_FP_METAL : 0;
     const unsigned last = input ? first : 1;
     struct intel_device_info device;
     const char *platform;

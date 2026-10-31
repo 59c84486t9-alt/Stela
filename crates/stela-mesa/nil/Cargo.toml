@@ -1,0 +1,20 @@
+[package]
+name = "stela-mesa-nil"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "MIT"
+
+[lib]
+name = "nil"
+path = "../../../third_party/mesa/src/nouveau/nil/lib.rs"
+
+[lints.rust]
+warnings = "allow"
+
+[dependencies]
+std = { package = "stela-mesa-std", path = "../std" }
+bitview = { package = "stela-mesa-bitview", path = "../bitview" }
+nil_rs_bindings = { package = "stela-mesa-nil-bindings", path = "../nil-bindings" }
+nvidia_headers = { package = "stela-mesa-nvidia-headers", path = "../nvidia-headers" }
+paste = "1"

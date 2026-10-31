@@ -34,6 +34,7 @@ use transport::{
 };
 use unified_fixture::exercise_unified_nvm;
 
+#[derive(Clone)]
 struct RadioBios {
     drops: Arc<AtomicUsize>,
     unavailable: bool,

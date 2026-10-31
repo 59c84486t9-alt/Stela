@@ -130,6 +130,9 @@ impl<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> Ra
                 } => keeper::Event::SaeEnded(format!("{failure:?}")),
                 Event::Unsupported(operation) => keeper::Event::Unsupported(operation),
                 Event::ConnectionLost(_) => keeper::Event::ConnectionLost,
+                Event::MichaelMicFailure { group, .. } => {
+                    keeper::Event::MichaelFailure { pairwise: !group }
+                }
                 _ => continue,
             });
         }
@@ -252,6 +255,7 @@ impl<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> Ra
         handle: BssHandle,
         selection: Selection,
         profile: Profile,
+        _: Option<Affiliation>,
         budget_us: u64,
     ) -> Result<Arc<external::Session>, LinkControlError> {
         self.link
@@ -305,9 +309,10 @@ impl<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> Ra
         index: u8,
         material: &[u8],
         receive: ReplaySeed,
-    ) -> Result<KeyIdentity, LinkControlError> {
+    ) -> Result<(), LinkControlError> {
         self.link
             .install_link_key(link_id, index, material, receive)
+            .map(|_| ())
     }
 
     unsafe fn install_management_key(

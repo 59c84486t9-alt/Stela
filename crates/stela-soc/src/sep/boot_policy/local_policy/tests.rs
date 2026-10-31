@@ -198,6 +198,80 @@ fn a_macos_policy_without_a_splat_binds_none() {
     assert_eq!(macos.security, Security::Full);
 }
 
+/// A tag read as libbootpolicy lays it out.
+fn read_request(command: u32, file: &[u8], tag: [u8; 4]) -> Vec<u8> {
+    let mut bytes = header(command);
+    bytes.resize(HEADER_BYTES + READ_BYTES, 0);
+    let body = &mut bytes[HEADER_BYTES..];
+    body[..4].copy_from_slice(&(file.len() as u32).to_le_bytes());
+    body[FILE_AT..FILE_AT + file.len()].copy_from_slice(file);
+    body[TAG_AT..TAG_AT + 4].copy_from_slice(&u32::from_be_bytes(tag).to_le_bytes());
+    bytes
+}
+
+#[test]
+fn a_macos_policy_carries_the_machines_kext_grant_and_reads_it_back() {
+    let kexts = Kexts {
+        approved: [1; DIGEST_BYTES],
+        collection: [2; DIGEST_BYTES],
+        receipt: [3; DIGEST_BYTES],
+    };
+    let mut store = store();
+    let mut boot_policy = BootPolicy::new(Some(kexts));
+    let (paired, _) = begun(&mut boot_policy, &mut store);
+    let request = macos_request(&paired, false, 2);
+    let (reply, output) = ask(&mut boot_policy, &mut store, request);
+    reply.unwrap();
+    let (file, _) = created(&output);
+
+    let mut read = |command, file: &[u8], tag: [u8; 4]| {
+        let request = read_request(command, file, tag);
+        let (reply, output) = ask(&mut boot_policy, &mut store, request);
+        assert_eq!(reply.unwrap().data as usize, output.len());
+        assert_eq!(output[..4], *b"hrPB");
+        let result = u32::from_le_bytes(output[4..8].try_into().unwrap());
+        (result, output[HEADER_BYTES..].to_vec())
+    };
+    assert_eq!(
+        read(READ_BOOLEAN, &file, *b"smb2"),
+        (SUCCESS, vec![1, 0, 0, 0])
+    );
+    assert_eq!(
+        read(READ_INTEGER, &file, *b"sip0"),
+        (SUCCESS, 0x201u64.to_le_bytes().to_vec())
+    );
+    assert_eq!(
+        read(READ_DIGEST, &file, *b"auxp"),
+        (SUCCESS, vec![1; DIGEST_BYTES])
+    );
+    assert_eq!(read(READ_BOOLEAN, &file, *b"love"), (TAG_ABSENT, vec![]));
+    // The paired recoveryOS policy grants nothing.
+    assert_eq!(read(READ_BOOLEAN, &paired, *b"smb2"), (TAG_ABSENT, vec![]));
+    assert_eq!(read(READ_INTEGER, &paired, *b"sip0"), (TAG_ABSENT, vec![]));
+}
+
+#[test]
+fn a_tag_read_refuses_a_policy_of_another_machine() {
+    let mut store = store();
+    let mut boot_policy = BootPolicy::default();
+    let key = PolicyKey::derive(&[1; 32]).unwrap();
+    let foreign = key.sign(&Policy {
+        volume_group: GROUP,
+        next_stage: [1; DIGEST_BYTES],
+        nonce: [2; DIGEST_BYTES],
+        splat: None,
+        paired: None,
+        security: Security::Full,
+        kexts: None,
+    });
+    let request = read_request(READ_DIGEST, &foreign, *b"nsih");
+    refused(&mut boot_policy, &mut store, request);
+    let mut oversized = header(READ_BOOLEAN);
+    oversized.resize(HEADER_BYTES + READ_BYTES, 0);
+    oversized[HEADER_BYTES..HEADER_BYTES + 4].copy_from_slice(&0x4001u32.to_le_bytes());
+    refused(&mut boot_policy, &mut store, oversized);
+}
+
 fn refused(boot_policy: &mut BootPolicy, store: &mut Nonces<Volatile>, input: Vec<u8>) {
     let (reply, output) = ask(boot_policy, store, input);
     let answer = reply.unwrap_err().answer.unwrap();

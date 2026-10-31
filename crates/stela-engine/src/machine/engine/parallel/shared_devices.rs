@@ -1,7 +1,7 @@
 //! The board's devices shared by the PE threads: the locked board and its
 //! device-bus calls.
 
-use super::super::LocalRegisters;
+use super::super::{GateCall, GateOutcome, LocalRegisters};
 use super::*;
 
 pub(super) struct Board<D> {
@@ -581,5 +581,11 @@ impl<D: Devices> Devices for SharedDevices<D> {
         self.changing(Call::Access, cpu, now, |devices, now| {
             devices.transfer(cpu, memory, now)
         })
+    }
+    fn take_call(&mut self, cpu: usize) -> Option<GateCall> {
+        self.with(|devices| devices.take_call(cpu))
+    }
+    fn finish_call(&mut self, outcome: GateOutcome) {
+        self.with(|devices| devices.finish_call(outcome));
     }
 }

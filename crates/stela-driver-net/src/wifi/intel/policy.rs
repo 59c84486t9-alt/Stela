@@ -59,6 +59,15 @@ impl Beacons {
     }
 }
 
+/// The rules of the country firmware reported: the world's when the database
+/// does not know it.
+pub fn reported(database: Database, alpha2: [u8; 2]) -> Result<Country, database::Error> {
+    match database.clone().select(alpha2) {
+        Err(database::Error::Country) => database.select(WORLD),
+        selected => selected,
+    }
+}
+
 /// One adapter's selected country.
 pub struct Regulatory {
     country: Country,
@@ -75,16 +84,10 @@ impl Regulatory {
         firmware: Option<[u8; 2]>,
     ) -> Result<Self, database::Error> {
         let revision = NEXT_REVISION.next().ok_or(database::Error::NoMemory)?;
-        let country = match configured {
-            Some(alpha2) => database.select(alpha2)?,
-            None => match firmware {
-                Some(alpha2) if alpha2 != WORLD => match database.clone().select(alpha2) {
-                    Ok(country) => country,
-                    Err(database::Error::Country) => database.select(WORLD)?,
-                    Err(error) => return Err(error),
-                },
-                _ => database.select(WORLD)?,
-            },
+        let country = match (configured, firmware) {
+            (Some(alpha2), _) => database.select(alpha2)?,
+            (None, Some(alpha2)) => reported(database, alpha2)?,
+            (None, None) => database.select(WORLD)?,
         };
         Ok(Self {
             country,
@@ -132,8 +135,8 @@ pub fn allows(country: &Country, beacons: &Beacons, operation: Operation) -> boo
 }
 
 // SAFETY: the selection is the mount's explicit configuration or the
-// adapter's own reported country, fixed for the adapter's life: its revision
-// stays current and no other selection exists.
+// adapter's own reported country. Later reports reach only this adapter's own
+// chain, so its revision stays current and no other selection exists.
 unsafe impl CountryIo for Regulatory {
     fn country(&mut self) -> Result<SelectedCountry, CountryIoError> {
         Ok(SelectedCountry {
@@ -191,6 +194,15 @@ pub(crate) mod tests {
     /// A wireless-regdb v20 database of `countries`, each a list of rules
     /// whose maximum width is 80 MHz or the whole rule, if narrower.
     pub(crate) fn regdb(countries: &[([u8; 2], &[Rule])]) -> Database {
+        regdb_limited(countries, None)
+    }
+
+    /// [`regdb`] with each WMM access category of each rule held to `limit`,
+    /// four bytes of wireless-regdb's `wmm_ac`.
+    pub(crate) fn regdb_limited(
+        countries: &[([u8; 2], &[Rule])],
+        limit: Option<[u8; 4]>,
+    ) -> Database {
         let mut bytes = Vec::from(*b"RGDB");
         bytes.extend(20u32.to_be_bytes());
         let table = bytes.len();
@@ -207,11 +219,16 @@ pub(crate) mod tests {
                 let at = bytes.len();
                 bytes[pointers + rule * 2..pointers + rule * 2 + 2]
                     .copy_from_slice(&((at / 4) as u16).to_be_bytes());
-                bytes.extend([16, flags]);
+                bytes.extend([if limit.is_some() { 20 } else { 16 }, flags]);
                 bytes.extend(eirp.to_be_bytes());
                 bytes.extend(start.to_be_bytes());
                 bytes.extend(end.to_be_bytes());
                 bytes.extend((end - start).min(80_000).to_be_bytes());
+                if let Some(limit) = limit {
+                    bytes.extend([0, 0]);
+                    bytes.extend((((at + 20) / 4) as u16).to_be_bytes());
+                    bytes.extend(limit.repeat(8));
+                }
             }
         }
         let digest = Sha256::digest(&bytes).into();

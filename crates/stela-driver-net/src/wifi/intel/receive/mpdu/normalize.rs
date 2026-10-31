@@ -209,8 +209,9 @@ pub(crate) fn normalize(
             "protected non-data frame",
         )));
     }
-    if header.protected() && !matches!(metadata.status.cipher_code(), SEC_CCM | SEC_GCM) {
-        return Err(Error::UnsupportedCipher(metadata.status.cipher_code()));
+    let cipher = metadata.status.cipher_code();
+    if header.protected() && !matches!(cipher, SEC_CCM | SEC_GCM | SEC_TKIP | SEC_WEP) {
+        return Err(Error::UnsupportedCipher(cipher));
     }
     let crypto = Crypto::observe(
         metadata.status,
@@ -238,21 +239,27 @@ pub(crate) fn normalize(
         };
         bytes[qos] &= !0x80;
     }
-    let (key_index, pn) = if crypto.iv_bytes == 8 {
-        let (pn, index) = PacketNumber::from_header(
-            bytes
-                .get(header.length..header.length + 8)
-                .ok_or(Error::Length)?,
-        )
-        .map_err(|_| Error::PacketNumber)?;
-        (Some(index), Some(pn))
-    } else {
-        (None, None)
+    let iv = bytes.get(header.length..header.length + usize::from(crypto.iv_bytes));
+    let iv = iv.ok_or(Error::Length)?;
+    let (key_index, pn) = match crypto.iv_bytes {
+        8 => {
+            let parsed = if cipher == SEC_TKIP {
+                PacketNumber::from_tkip_header(iv)
+            } else {
+                PacketNumber::from_header(iv)
+            };
+            let (pn, index) = parsed.map_err(|_| Error::PacketNumber)?;
+            (Some(index), Some(pn))
+        }
+        // WEP keeps its key ID in the top of the IV's last byte, and no number.
+        4 => (Some(iv[3] >> 6), None),
+        _ => (None, None),
     };
     let security = SecurityStatus {
         pn,
         decrypted: crypto.decrypted,
-        mic_stripped: crypto.mic_stripped,
+        mic_stripped: crypto.mic_stripped || crypto.tkip_mic_stripped,
+        tkip_mic_error: crypto.tkip_mic_error,
         // MIC_OK alone cannot bind cipher width, installed key generation,
         // station/association lifetime or software PN state.
         integrity: Integrity::Unknown,
@@ -394,13 +401,30 @@ mod tests {
             normalize(metadata, &raw, 0, Some(RateFormat::V2)),
             Err(Error::CryptoRejected)
         ));
-        for cipher in [0, 1, 3, 4, 6, 7] {
+        for cipher in [0, 4, 6, 7] {
             metadata.status.raw = 3 | (cipher << 8) | (1 << 6);
             assert!(matches!(
                 normalize(metadata, &raw, 0, Some(RateFormat::V2)),
                 Err(Error::UnsupportedCipher(_))
             ));
         }
+        // TKIP's TSC comes in its own order, with firmware's Michael verdict.
+        let mut tkip = raw.clone();
+        tkip[24..32].copy_from_slice(&[0, 0x20, 1, 0x60, 2, 0, 0, 0]);
+        metadata.status.raw = 3 | (3 << 8) | (1 << 5) | (1 << 6) | (1 << 7);
+        let normalized = normalize(metadata, &tkip, 1 << 26, Some(RateFormat::V2)).unwrap();
+        assert_eq!(normalized.key_index, Some(1));
+        assert_eq!(normalized.frame.security.pn.unwrap().value(), 2 << 16 | 1);
+        assert!(normalized.frame.security.mic_stripped);
+        assert!(!normalized.frame.security.tkip_mic_error);
+        metadata.status.raw &= !(1 << 6);
+        let failed = normalize(metadata, &tkip, 1 << 26, Some(RateFormat::V2)).unwrap();
+        assert!(failed.frame.security.tkip_mic_error);
+        // WEP's four-byte IV names a key and no packet number.
+        metadata.status.raw = 3 | (1 << 8) | (1 << 5);
+        let wep = normalize(metadata, &raw, 1 << 26, Some(RateFormat::V2)).unwrap();
+        assert_eq!(wep.key_index, Some(1));
+        assert_eq!(wep.frame.security.pn, None);
         metadata.status.raw = 3 | (5 << 8) | (1 << 6);
         assert!(normalize(metadata, &raw, 0, Some(RateFormat::V2)).is_ok());
         assert!(matches!(

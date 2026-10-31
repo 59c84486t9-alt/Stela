@@ -280,7 +280,7 @@ translate(const struct input *input, const char *entry, enum stela_air_stage sta
 {
    struct stela_air_stage_options o = {
        .stage = stage,
-       .resources = {.max_instructions = 10000, .fp_profile = STELA_AIR_FP_APPLE_32023_922_AIR29_MSL41},
+       .resources = {.max_instructions = 10000, .fp_profile = STELA_AIR_FP_METAL},
        .varyings = map,
        .varying_count = count,
        .max_varying_slots = PARAM_LIMIT};
@@ -362,7 +362,7 @@ resource_negatives(const struct input *input, const struct stela_air_varying_slo
       struct stela_air_stage_options o = {
           .stage = STELA_AIR_VERTEX,
           .resources = {.max_instructions = 10000,
-                        .fp_profile = STELA_AIR_FP_APPLE_32023_922_AIR29_MSL41,
+                        .fp_profile = STELA_AIR_FP_METAL,
                         .bind_ssbo = bind_ssbo,
                         .ssbo_count = abi.resource_count,
                         .binding_data = &abi},
@@ -711,7 +711,7 @@ vertex(const struct stela_air_inspection *inspection, const struct stela_air_sta
    struct input *input = data;
    input->vertex = vs;
    struct stela_air_error error;
-   CHECK(stela_air_inspect_stage(input->bytes, input->size, input->fs_name, STELA_AIR_FRAGMENT, fragment,
+   CHECK(stela_air_inspect_stage(input->bytes, input->size, NULL, input->fs_name, STELA_AIR_FRAGMENT, fragment,
                                  input, &error));
    input->vertex = NULL;
    return true;
@@ -749,11 +749,11 @@ main(int argc, char **argv)
    record_bool("culling", false);
    record_bool("queries", false);
    record_str("resource_abi", "dynamic-RAW-descriptor-SGPR-quartets");
-   record_str("fp_profile", "apple-32023.922-air2.9-msl4.1");
+   record_str("fp_profile", "metal");
    record_end();
    expect_targets();
    struct stela_air_error error;
-   CHECK(stela_air_inspect_stage(input.bytes, input.size, input.vs_name, STELA_AIR_VERTEX, vertex, &input,
+   CHECK(stela_air_inspect_stage(input.bytes, input.size, NULL, input.vs_name, STELA_AIR_VERTEX, vertex, &input,
                                  &error));
    LLVMDisposeMemoryBuffer(buffer);
    glsl_type_singleton_decref();

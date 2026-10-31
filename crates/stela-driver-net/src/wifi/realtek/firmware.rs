@@ -91,6 +91,13 @@ pub struct Rtw88<'a> {
     pub sections: Vec<LegacySection<'a>>,
 }
 impl<'a> Rtw88<'a> {
+    /// `__update_firmware_feature`: the word counts only under its signature.
+    pub fn features(&self) -> u32 {
+        let [a, b, c, d] = [0x0c, 0x0d, 0x0e, 0x0f].map(|at| self.header[at]);
+        let features = u32::from_le_bytes([a, b, c, d]);
+        if features & 1 != 0 { features } else { 0 }
+    }
+
     pub fn parse(data: &'a [u8]) -> Result<Self, ParseError> {
         image_limit(data)?;
         let header: &[u8; LEGACY_HEADER] = bytes(data, 0, LEGACY_HEADER)?.try_into().unwrap();

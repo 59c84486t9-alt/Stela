@@ -676,8 +676,12 @@ enum HostFirmware {
     /// native drivers. The inventory must come from the target PC, not this
     /// setup host.
     Fetch {
-        #[arg(value_name = "REQUIREMENTS")]
-        requirements: PathBuf,
+        #[arg(value_name = "REQUIREMENTS", required_unless_present = "gpu")]
+        requirements: Option<PathBuf>,
+        /// Also keep what the USB holds, and add what nouveau needs for this
+        /// NVIDIA chip, which a boot without it names (`ga104`).
+        #[arg(long, value_name = "CHIP")]
+        gpu: Option<String>,
         #[command(flatten)]
         usb: Usb,
         /// Cache for pinned host firmware images and redistribution notices.
@@ -702,13 +706,14 @@ impl HostFirmware {
             },
             Self::Fetch {
                 requirements,
+                gpu,
                 usb,
                 cache,
                 dry_run,
             } => Request {
                 dry_run,
                 host_firmware_cache: cache,
-                ..usb.request(Action::HostFirmwareFetch(requirements))
+                ..usb.request(Action::HostFirmwareFetch { requirements, gpu })
             },
         }
     }

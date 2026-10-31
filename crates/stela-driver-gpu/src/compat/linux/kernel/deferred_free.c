@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: MIT
 /* Canonical native allocation lookup and actual RCU retirement. No Linux
  * allocator-private slab/page/vmalloc layout is assigned to native storage. */
+#include <linux/mm.h>
 #include <linux/rcupdate.h>
 #include <linux/slab.h>
+#include <linux/vmalloc.h>
 #include <stela/allocation.h>
 #include <stela/linux.h>
 
@@ -18,9 +20,11 @@ bool stela_linux_allocation_range(const void *pointer, size_t bytes,
 
 void kvfree(const void *pointer)
 {
- /* kfree resolves actual canonical raw-heap and opaque-cache allocations.
-  * There is no native vmalloc producer or fabricated page classification. */
- kfree(pointer);
+ /* kfree resolves actual canonical raw-heap and opaque-cache allocations. */
+ if (is_vmalloc_addr(pointer))
+  vfree(pointer);
+ else
+  kfree(pointer);
 }
 
 void kvfree_rcu_cb(struct rcu_head *head)

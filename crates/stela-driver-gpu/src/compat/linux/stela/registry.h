@@ -151,6 +151,9 @@ int stela_linux_registry_status(const struct stela_linux_registry *, size_t,
 int stela_linux_registry_parse_result(const struct stela_linux_registry *, unsigned int, char **);
 int stela_linux_registry_retire(struct stela_linux_registry **,
  const struct stela_linux_registry_retirement *);
+/* Run an image's initcalls as start_kernel does, once per boot. */
+int stela_linux_start(const struct stela_linux_registry_image *,
+ struct stela_linux_registry **);
 
 static_assert(sizeof(void *) == 8 && sizeof(size_t) == 8 && sizeof(long) == 8 && sizeof(int) == 4);
 static_assert(sizeof(initcall_t) == 8 && sizeof(exitcall_t) == 8);

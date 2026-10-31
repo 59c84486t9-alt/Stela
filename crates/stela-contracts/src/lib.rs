@@ -10,6 +10,7 @@ pub mod chip;
 pub mod cpu_features;
 pub mod ctrr;
 pub mod dma;
+pub mod gate;
 pub mod identity;
 pub mod interrupt;
 pub mod pauth;

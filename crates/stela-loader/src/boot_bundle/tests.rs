@@ -186,6 +186,21 @@ fn source(component: &str) -> Source {
     }
 }
 
+/// An auxiliary collection as `aux_kc` lays one out, a page a segment.
+fn auxiliary_collection() -> Vec<u8> {
+    Builder::new(macho::MH_FILESET)
+        .segment("__PRELINK_INFO", PAGE, &page(0))
+        .segment("__DATA", PAGE, &page(1))
+        .segment("__TEXT", PAGE, &page(2))
+        .segment("__PRELINK_TEXT", PAGE, &page(3))
+        .segment("__DATA_CONST", PAGE, &page(4))
+        .segment("__RECEIPT_INFO", PAGE, &page(5))
+        .segment("__TEXT_EXEC", PAGE, &page(6))
+        .segment("__LINKEDIT", PAGE, &page(7))
+        .fileset("com.stela.StelaGPU", BASE + 3 * PAGE)
+        .build()
+}
+
 fn page(fill: u8) -> Vec<u8> {
     vec![fill; PAGE as usize]
 }
@@ -659,6 +674,7 @@ fn unsupported_build_is_refused_before_image_parsing() {
             board_id: Some(0x2e),
         },
         kernel_collection: input(),
+        auxiliary_collection: None,
         sptm: input(),
         txm: input(),
         device_tree: input(),
@@ -716,6 +732,7 @@ fn lays_out_sptm_regions_and_patch_slots() -> Result<()> {
             board_id: Some(0x2e),
         },
         kernel_collection: input(leak(kernel), "KernelCache"),
+        auxiliary_collection: None,
         sptm: input(leak(sptm), "Ap,SecurePageTableMonitor"),
         txm: input(leak(txm), "Ap,TrustedExecutionMonitor"),
         device_tree: input(leak(tree), "DeviceTree"),
@@ -750,6 +767,7 @@ fn lays_out_sptm_regions_and_patch_slots() -> Result<()> {
             mode: boot_policy::SecurityMode::Reduced,
             sip_bits: 0,
             sepfw_load_at_boot: None,
+            kexts: None,
         },
         overlay: vec![OverlayProperty {
             path: "/chosen/lock-regs/amcc".into(),
@@ -779,8 +797,8 @@ fn lays_out_sptm_regions_and_patch_slots() -> Result<()> {
     assert_eq!(
         (REVISION, prepared_digest(&bundle)?),
         (
-            33,
-            "2282554604131299f7c7f3c6587e671ac28afc7d77ff0728ead446e034bb3279".to_owned()
+            34,
+            "57ac5050d33233e3401679fc3a8f4558772e3a0da151469c4086613732bfae43".to_owned()
         )
     );
     let original = bundle
@@ -853,12 +871,9 @@ fn lays_out_sptm_regions_and_patch_slots() -> Result<()> {
     let names: Vec<_> = manifest.regions.iter().map(|r| r.name.as_str()).collect();
     // The manifest's carveout lies below the loaded images.
     let expected: Vec<_> = core::iter::once("BootManifest")
-        .chain(
-            REGION_ORDER
-                .iter()
-                .copied()
-                .filter(|n| !["SEPFW", lock_regs::CL4_DUMMY_PAGE].contains(n)),
-        )
+        .chain(REGION_ORDER.iter().copied().filter(|n| {
+            !["SEPFW", lock_regs::CL4_DUMMY_PAGE].contains(n) && !n.starts_with("AuxKC")
+        }))
         .collect();
     assert_eq!(names, expected);
     // The M1 to M3 hand off no core lock registers.
@@ -1233,7 +1248,7 @@ fn lays_out_sptm_regions_and_patch_slots() -> Result<()> {
             REGION_ORDER
                 .iter()
                 .copied()
-                .filter(|n| *n != lock_regs::CL4_DUMMY_PAGE),
+                .filter(|n| *n != lock_regs::CL4_DUMMY_PAGE && !n.starts_with("AuxKC")),
         )
         .collect();
     assert_eq!(names, expected);
@@ -1260,6 +1275,67 @@ fn lays_out_sptm_regions_and_patch_slots() -> Result<()> {
             .iter()
             .any(|u| u.starts_with("SEPFW"))
     );
+
+    // An auxiliary collection's read-only and executable regions join
+    // SPTM's run before the boot collection's; its writable ones follow
+    // the boot collection's.
+    inputs.auxiliary_collection = Some(input(leak(auxiliary_collection()), "AuxKC"));
+    let linked = prepare(&inputs, &options)?;
+    let names: Vec<_> = linked
+        .manifest
+        .regions
+        .iter()
+        .map(|r| r.name.as_str())
+        .collect();
+    let at = |name: &str| names.iter().position(|n| *n == name).unwrap();
+    assert_eq!(
+        names[at("TrustCache")..=at("BootKC-rx")],
+        ["TrustCache", "AuxKC-ro", "AuxKC-rx", "BootKC-rx"]
+    );
+    assert_eq!(
+        names[at("BootKC-rw")..=at("AuxKC-le")],
+        ["BootKC-rw", "BootKC-le", "AuxKC-rw", "AuxKC-le"]
+    );
+    let region = |name: &str| {
+        linked
+            .manifest
+            .regions
+            .iter()
+            .find(|r| r.name == name)
+            .unwrap()
+    };
+    assert_eq!(
+        region("AuxKC-ro").guest_pa + 4 * PAGE,
+        region("AuxKC-rx").guest_pa
+    );
+    for (name, offset, bytes) in [
+        ("AuxKC-rw", 0, 2 * PAGE),
+        ("AuxKC-ro", 2 * PAGE, 4 * PAGE),
+        ("AuxKC-rx", 6 * PAGE, PAGE),
+        ("AuxKC-le", 7 * PAGE, PAGE),
+    ] {
+        let piece = region(name);
+        assert_eq!(
+            (piece.file.as_str(), piece.file_offset, piece.memory_bytes),
+            (AUXILIARY_FILE, offset, bytes)
+        );
+        assert_eq!(piece.virtual_address, Some(BASE + offset));
+    }
+    let file = |name: &str| &linked.files.iter().find(|(n, _)| n == name).unwrap().1;
+    assert_eq!(file(AUXILIARY_FILE).len() as u64, 8 * PAGE);
+    let tree = DeviceTree::parse(file(DEVICE_TREE_FILE))?;
+    assert_eq!(
+        tree.property(MEMORY_MAP, "AuxKC-rx").unwrap().value,
+        range_value(region("AuxKC-rx").guest_pa, PAGE)
+    );
+    assert!(
+        linked
+            .manifest
+            .sources
+            .iter()
+            .any(|source| source.component == "AuxKC")
+    );
+    inputs.auxiliary_collection = None;
 
     // A manifest for another board is refused.
     let mut other = Inputs { ..inputs };

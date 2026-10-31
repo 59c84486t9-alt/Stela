@@ -427,9 +427,9 @@ enum stela_intel_graphics_status stela_intel_graphics_compile(const struct brw_c
     if (brw && (intel_use_jay(device, MESA_SHADER_VERTEX) || intel_use_jay(device, MESA_SHADER_FRAGMENT)))
         return report(error, STELA_INTEL_GRAPHICS_UNSUPPORTED, "Actual selected JAY stage backend requires its own integration");
     if ((options->vertex_fp_profile != STELA_AIR_FP_IEEE_DEFAULT &&
-         options->vertex_fp_profile != STELA_AIR_FP_APPLE_32023_922_AIR29_MSL41) ||
+         options->vertex_fp_profile != STELA_AIR_FP_METAL) ||
         (options->fragment_fp_profile != STELA_AIR_FP_IEEE_DEFAULT &&
-         options->fragment_fp_profile != STELA_AIR_FP_APPLE_32023_922_AIR29_MSL41))
+         options->fragment_fp_profile != STELA_AIR_FP_METAL))
         return report(error, STELA_INTEL_GRAPHICS_UNSUPPORTED, "Unknown selected-stage FP policy");
     if (!options->max_instructions || !options->max_code_bytes || options->max_code_bytes > MAX_CODE ||
         options->max_varying_slots > 32)

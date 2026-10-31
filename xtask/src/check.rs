@@ -12,6 +12,7 @@ use anyhow::{Context, Result, bail};
 use std::{
     ffi::OsStr,
     io::Write,
+    iter,
     process::{Command, Stdio},
     thread,
 };
@@ -23,6 +24,14 @@ pub const BOOT_TARGET_DIR: &str = "target/boot";
 /// takes the `aes` crate's software backend.
 const BOOT_RUSTFLAGS: &str = "--cfg aes_force_soft --cfg chacha20_backend=\"soft\" --cfg aes_backend=\"soft\" --cfg polyval_backend=\"soft\" --cfg poly1305_backend=\"soft\"";
 const BOOT: [&str; 2] = ["--manifest-path", BOOT_MANIFEST];
+/// What `cargo fmt --all` of the workspace leaves out, each package alone:
+/// `--all` would follow path dependencies into Mesa's generated crates, absent
+/// until `gpu nvk` runs.
+const FORMATTED_APART: [&str; 3] = [
+    BOOT_MANIFEST,
+    "crates/stela-mesa/Cargo.toml",
+    "crates/stela-mesa/std/Cargo.toml",
+];
 /// The other hosts Stela ships for, with the packages Clippy checks there
 /// without linking: macOS compiles installer and native preparation tools,
 /// Windows the installer. The development tasks stay on this host.
@@ -39,12 +48,14 @@ const DENY: [&str; 3] = ["--", "-D", "warnings"];
 pub fn run(fix: bool) -> Result<()> {
     if fix {
         exec(&mut command(["fmt", "--all"]))?;
-        exec(command(["fmt"]).args(BOOT).arg("--all"))?;
+        for manifest in FORMATTED_APART {
+            exec(&mut command(["fmt", "--manifest-path", manifest]))?;
+        }
     }
-    let formatting = [
-        command(["fmt", "--all", "--", "--check"]),
-        command(["fmt", BOOT[0], BOOT[1], "--all", "--", "--check"]),
-    ];
+    let formatting = iter::once(command(["fmt", "--all", "--", "--check"])).chain(
+        FORMATTED_APART
+            .map(|manifest| command(["fmt", "--manifest-path", manifest, "--", "--check"])),
+    );
     let cross = install_targets();
     let mut boot_lane = vec![
         // Cargo caps Clippy lints on dependencies of the boot package.

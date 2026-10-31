@@ -157,6 +157,7 @@ pub(super) fn run<H: Host>(
         if !machine.runs_parallel() || quiet || service::starved(tsc_hz, requested) {
             machine.exclude_host_time(|_| service::serve(true));
         }
+        machine.exclude_host_time(|_| super::gpu::pump());
         service.parts.lap(ServiceParts::SERVICE, host::rdtsc());
 
         // A wall-time service yield may precede even the final block limit.

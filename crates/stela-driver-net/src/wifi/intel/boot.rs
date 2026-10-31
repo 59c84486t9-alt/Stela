@@ -46,10 +46,10 @@ pub use ax200::{
     Ax200ManagementQueueError, Ax200ManagementQueuePhase, Ax200Mcc, Ax200MccError, Ax200MccPhase,
     Ax200Phy, Ax200PhyError, Ax200PhyPhase, Ax200Scan, Ax200ScanConfiguration,
     Ax200ScanConfigurationError, Ax200ScanConfigurationPhase, Ax200ScanError, Ax200ScanPhase,
-    Ax200Setup, Ax200SetupError, Ax200SetupOptions, Ax200SetupPhase, Ax200TransmitPower,
-    Ax200TransmitPowerError, Ax200TransmitPowerPhase, BindingCommand, BindingCommandKind,
-    BoardCommand, BoardCommandKind, CountryIo, CountryIoError, LegacyPeer, MacCommand,
-    MacCommandKind, PeerCommand, PeerCommandKind, PhyCommand, PhyCommandKind, Probe,
+    Ax200ScanTraffic, Ax200Setup, Ax200SetupError, Ax200SetupOptions, Ax200SetupPhase,
+    Ax200TransmitPower, Ax200TransmitPowerError, Ax200TransmitPowerPhase, BindingCommand,
+    BindingCommandKind, BoardCommand, BoardCommandKind, CountryIo, CountryIoError, LegacyPeer,
+    MacCommand, MacCommandKind, PeerCommand, PeerCommandKind, PhyCommand, PhyCommandKind, Probe,
     ScanCompletion, ScanRawReceive, ScanRejectedMpdu, ScanResult, ScanResultProgress,
     ScanRetirement, SelectedCountry, SetupDecisions, TransmitPowerLimit,
 };
@@ -71,7 +71,7 @@ const FUNC_SCRATCH: u32 = 0x2c;
 const FUNC_SCRATCH_INIT: u32 = 0x01010101;
 const ROM_START: u32 = 1 << 7;
 const HBUS_TARG_WRPTR: u32 = 0x460;
-const MSIX_HW_CAUSES: u32 = 0x2808;
+use super::interrupts::{self, HW_CAUSES as MSIX_HW_CAUSES};
 const IML_CAUSE: u32 = 1 << 1;
 const RECEIVE_BUFFER_BYTES: usize = 4096;
 
@@ -97,10 +97,12 @@ pub struct ProductResetObservation {
 /// reservation through final Drop, excluding other firmware/OS/reset/IRQ users.
 /// This is an owned reservation, never a borrowed token. Accesses must use the
 /// device and complete ordered MMIO stores; errors may be uncertain.
-/// Uncertain transport Drop keeps this entire object.
-pub unsafe trait BootIo: Csr + 'static {
+/// Uncertain transport Drop keeps this entire object. A clone reaches the same
+/// function under the same reservation; clones take turns.
+pub unsafe trait BootIo: Csr + Clone + 'static {
     fn write8(&mut self, register: u32, value: u8) -> Result<(), power::AccessError>;
 }
+#[derive(Clone)]
 pub struct NativeBootIo {
     registers: Mmio,
     clock: Clock,
@@ -109,13 +111,13 @@ pub struct NativeBootIo {
 impl NativeBootIo {
     /// # Safety
     /// `window` is the claimed AX200/AX210 function's aligned uncached BAR
-    /// mapping covering all8192 bytes. `owner` keeps that real exclusive PCI
+    /// mapping covering its 16 KiB. `owner` keeps that real exclusive PCI
     /// claim and BAR reservation, with all old DMA/IRQs stopped and drained and
     /// PCI interrupt routes disabled; no unrelated/dummy owner checks.
     /// The clock is calibrated and advancing. The window stays mapped through
     /// the owner's final Drop, including deliberate quarantine on failure.
     pub unsafe fn from_window(
-        window: NonNull<[u8; 8192]>,
+        window: NonNull<[u8; 16384]>,
         owner: Arc<dyn Any>,
         clock: Clock,
     ) -> Result<Self, Error> {
@@ -312,6 +314,7 @@ struct Buffer {
 /// and isolated device DMA mappings. Polling mode never unmasks IRQ sources.
 /// Dropping an active/uncertain epoch quarantines the BAR/requester too.
 pub struct RomBoot<'a, Q: BootIo> {
+    vector: bool,
     io: Option<Q>,
     profile: Profile,
     firmware: Firmware<'a>,
@@ -433,6 +436,7 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
         entries: u16,
         product_reset_policy: Option<ProductResetPolicy>,
     ) -> Result<Self, Error> {
+        let vector = power.vector();
         let (io, profile, awake) = power.into_awake()?;
         let (firmware, image) = staged.into_parts();
         let request = profile.firmware_request();
@@ -572,6 +576,7 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
         };
         let mut boot = Self {
             io: Some(io),
+            vector,
             profile,
             firmware,
             image,
@@ -709,6 +714,9 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
         self.write(0x5c, 2)?;
         self.write(0x5c, 4)?;
         self.write(8, u32::MAX)?;
+        if self.vector {
+            self.route_interrupts()?;
+        }
         // iwl_mvm_nic_config returns immediately on AX210: CSR0 becomes the
         // context-v2 boot control, never the old PHY configuration fields.
         if self.profile.family() == Family::Ax200 {
@@ -786,6 +794,41 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
             self.spin_for_iml()?;
         }
         Ok(())
+    }
+    /// `iwl_pcie_conf_msix_hw` and `_iwl_enable_interrupts`. A cause only
+    /// wakes the core that looks for frames, which finds what it asks for in
+    /// the rings, so nothing here waits for firmware's own state.
+    fn route_interrupts(&mut self) -> Result<(), Error> {
+        let family = self.profile.family();
+        let offset = if family >= Family::Ax210 { 0x300000 } else { 0 };
+        self.prph_write(interrupts::UREG_CHICK + offset, interrupts::MSIX_ENABLE)?;
+        let routes = interrupts::routes(family);
+        for ivar in routes.ivars {
+            self.io().write8(ivar, interrupts::SHARED)?;
+        }
+        self.write(interrupts::FH_MASK, routes.fh_mask)?;
+        self.write(interrupts::HW_MASK, routes.hw_mask)
+    }
+    /// What booting this function again takes of this boot.
+    pub(crate) fn restart_inputs(&self) -> (Q, Profile, Arc<dyn DmaDomain>, u16) {
+        let io = self.io.clone().expect("retained owner");
+        (io, self.profile.clone(), self.domain.clone(), self.entries)
+    }
+    /// `CSR_INT`, and on a function in MSI-X mode the causes it reports
+    /// through instead.
+    fn causes(&mut self) -> Result<u32, Error> {
+        let causes = self.read_register(8)?;
+        self.write(8, causes | !(1 | (1 << 31)))?;
+        if !self.vector {
+            return Ok(causes);
+        }
+        let family = self.profile.family();
+        let reported = interrupts::take(self.io(), family).map_err(Error::Access)?;
+        Ok(causes | reported)
+    }
+    /// Whether the function's first MSI-X vector reaches the host.
+    pub(crate) fn vector(&self) -> bool {
+        self.vector
     }
     /// `iwl_pcie_spin_for_iml`: keep the CPU and device busy for at least
     /// 100 ms or until the image loader finishes. Running out is no failure;
@@ -1072,9 +1115,8 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
         result
     }
     fn poll_pnvm_inner(&mut self) -> Result<PnvmProgress, Error> {
-        let causes = self.read_register(8)?;
-        self.write(8, causes | !(1 | (1 << 31)))?;
-        if causes & ((1 << 29) | (1 << 25)) != 0 {
+        let causes = self.causes()?;
+        if causes & (interrupts::INT_HW_ERR | interrupts::INT_SW_ERR) != 0 {
             return Err(Error::DeviceError(causes));
         }
         if self.read_register(0x24)? & 0x08000000 == 0 {
@@ -1122,9 +1164,8 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
         result
     }
     fn poll_inner(&mut self) -> Result<Option<AliveReport>, Error> {
-        let causes = self.read_register(8)?;
-        self.write(8, causes | !(1 | (1 << 31)))?;
-        if causes & ((1 << 29) | (1 << 25)) != 0 {
+        let causes = self.causes()?;
+        if causes & (interrupts::INT_HW_ERR | interrupts::INT_SW_ERR) != 0 {
             return Err(Error::DeviceError(causes));
         }
         if self.read_register(0x24)? & 0x08000000 == 0 {
@@ -1160,8 +1201,8 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
             self.write(0x24, gp & !4)?;
             self.state = State::Quiescent;
         }
-        // SAFETY: IRQs were never enabled, the exclusive polling owner has no
-        // queued workers and master-disable/reset acknowledged all DMA.
+        // SAFETY: an interrupt only wakes a core, the exclusive polling owner
+        // has no queued workers and master-disable/reset acknowledged all DMA.
         unsafe {
             if !self.images_stopped {
                 self.images.release_after_stop()?;

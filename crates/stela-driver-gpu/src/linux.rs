@@ -4,12 +4,20 @@
 use alloc::alloc::{alloc_zeroed, dealloc};
 use core::{alloc::Layout, ffi::c_void, ptr};
 
+pub mod client;
+#[cfg(target_arch = "x86_64")]
+pub mod function;
 pub mod heap;
 pub mod image;
+#[cfg(feature = "nouveau-port")]
+pub mod nouveau;
+pub mod owner;
 pub mod pages;
 pub mod random;
 #[cfg(target_arch = "x86_64")]
 pub mod resources;
+#[cfg(target_arch = "x86_64")]
+pub mod service;
 #[cfg(target_arch = "x86_64")]
 pub mod task;
 

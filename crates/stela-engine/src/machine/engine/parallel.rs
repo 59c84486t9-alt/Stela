@@ -99,6 +99,8 @@ struct Inbox {
     /// A running core reads its mail at its next return to the engine,
     /// which [`Hub::interrupt`] brings forward to its next chained transfer.
     sleeping: AtomicBool,
+    /// The host needs its core ([`Hub::call_host`]).
+    host_call: AtomicBool,
     /// Its machine left its run loop, for the host's service or a stop, or
     /// compiles: it runs no guest code until it reads its mail again, so a
     /// broadcast need not wait for it, as for one that sleeps.
@@ -255,6 +257,7 @@ impl Hub {
                     pending: AtomicBool::new(false),
                     live: AtomicBool::new(false),
                     sleeping: AtomicBool::new(false),
+                    host_call: AtomicBool::new(false),
                     outside: AtomicBool::new(false),
                     chain: chain_control::Storage::new(),
                     owner: AtomicU64::new(0),
@@ -354,6 +357,7 @@ impl Hub {
         let inbox = &self.inboxes[pe];
         inbox.sleeping.store(true, Ordering::SeqCst);
         if !inbox.pending.load(Ordering::SeqCst)
+            && !inbox.host_call.load(Ordering::SeqCst)
             && inbox.lines.load(Ordering::SeqCst) == epoch
             && !self.service.load(Ordering::SeqCst)
         {
@@ -388,6 +392,21 @@ impl Hub {
                 .inboxes
                 .iter()
                 .any(|inbox| inbox.sleeping.load(Ordering::SeqCst))
+    }
+
+    /// The host has work only PE `pe`'s core can do: its run ends at the next
+    /// chained transfer, or at once if it sleeps. Safe from an interrupt and
+    /// from any core; ordered against [`Self::sleep`] as [`Self::wake`] is.
+    pub fn call_host(&self, pe: usize) {
+        self.inboxes[pe].host_call.store(true, Ordering::SeqCst);
+        self.interrupt(pe);
+        self.wake(pe);
+    }
+
+    /// Whether the host needs PE `pe`'s core; once for each call.
+    pub(super) fn take_host_call(&self, pe: usize) -> bool {
+        let call = &self.inboxes[pe].host_call;
+        call.load(Ordering::Relaxed) && call.swap(false, Ordering::AcqRel)
     }
 
     /// Whether the host's service is due; once for each request.

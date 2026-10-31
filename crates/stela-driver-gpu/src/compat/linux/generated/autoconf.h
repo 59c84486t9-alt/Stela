@@ -7,6 +7,7 @@
 #define CONFIG_64BIT 1
 #define CONFIG_MMU 1
 #define CONFIG_PCI 1
+#define CONFIG_PCI_MSI 1
 #define CONFIG_PRINTK 1
 #define CONFIG_MESSAGE_LOGLEVEL_DEFAULT 4
 #define CONFIG_FW_LOADER 1
@@ -24,12 +25,35 @@
 /* Original task_struct embeds each retained continuation's thread_info. */
 #define CONFIG_THREAD_INFO_IN_TASK 1
 #define CONFIG_ARCH_DMA_ADDR_T_64BIT 1
+/* Each device's owner supplies its dma_map_ops. Stela's arch is coherent, as
+ * x86 is, so no DMA sync hooks are configured. */
+#define CONFIG_HAS_DMA 1
+#define CONFIG_ARCH_HAS_DMA_OPS 1
+#define CONFIG_NEED_DMA_MAP_STATE 1
+#define CONFIG_HAS_IOMEM 1
 #define CONFIG_PHYS_ADDR_T_64BIT 1
 #define CONFIG_NR_CPUS 1
 #define CONFIG_HZ 1000
 #define CONFIG_PAGE_SHIFT 12
 #define CONFIG_PGTABLE_LEVELS 4
 #define CONFIG_ILLEGAL_POINTER_VALUE 0xdead000000000000
+/* nouveau selects the I2C core for its buses and encoders. */
+#define CONFIG_I2C 1
+#define CONFIG_I2C_ALGOBIT 1
+/* nouveau and what its Kconfig entry selects. */
+#define CONFIG_DRM 1
+#define CONFIG_DRM_NOUVEAU 1
+#define CONFIG_DRM_TTM 1
+#define CONFIG_DRM_TTM_HELPER 1
+#define CONFIG_DRM_EXEC 1
+#define CONFIG_DRM_GPUVM 1
+#define CONFIG_DRM_SCHED 1
+#define CONFIG_DRM_KMS_HELPER 1
+#define CONFIG_DRM_DISPLAY_HELPER 1
+#define CONFIG_DRM_DISPLAY_DP_HELPER 1
+#define CONFIG_DRM_DISPLAY_HDMI_HELPER 1
+#define CONFIG_DMA_SHARED_BUFFER 1
+#define CONFIG_SYNC_FILE 1
 
 /* The drivers' parameter and scheduling defaults, as Linux's Kconfig sets them. */
 #define CONFIG_DRM_XE_FORCE_PROBE ""
@@ -49,3 +73,5 @@
 #define CONFIG_DRM_XE_PREEMPT_TIMEOUT 640000
 #define CONFIG_DRM_XE_PREEMPT_TIMEOUT_MAX 10000000
 #define CONFIG_DRM_XE_PREEMPT_TIMEOUT_MIN 1
+#define CONFIG_NOUVEAU_DEBUG 5
+#define CONFIG_NOUVEAU_DEBUG_DEFAULT 3

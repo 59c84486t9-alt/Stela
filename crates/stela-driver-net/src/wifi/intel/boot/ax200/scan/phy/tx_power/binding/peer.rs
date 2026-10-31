@@ -19,7 +19,10 @@ pub use queue::{
 /// Rate bits follow source legacy indices: CCK1..11 bits0..3, OFDM6..54 bits4..11.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LegacyPeer {
+    /// The AP MLD's address, or the BSS's.
     pub address: Mac,
+    /// The AP's address on the link.
+    pub link: Mac,
     pub beacon_interval_tu: u16,
     pub rates: u16,
 }

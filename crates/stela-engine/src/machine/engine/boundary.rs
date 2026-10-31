@@ -1,7 +1,10 @@
 //! The x86 host and the board's device bus the engine runs against.
 
 use super::*;
-use stela_contracts::refuse;
+use stela_contracts::{
+    gate::{GateCall, GateOutcome},
+    refuse,
+};
 
 /// One PE's System registers that take none of the board's locks, as
 /// [`Devices::system_register`] serves them.
@@ -539,6 +542,14 @@ pub trait Devices {
     ) -> Result<(), DeviceError> {
         Ok(())
     }
+    /// The call a device access by PE `cpu` made through a call gate, after
+    /// [`Self::transfer`]. It completes in the access's own step, on the
+    /// address space of the thread that made it, outside the devices' lock.
+    fn take_call(&mut self, _cpu: usize) -> Option<GateCall> {
+        None
+    }
+    /// Record what a [`Self::take_call`] call came to.
+    fn finish_call(&mut self, _outcome: GateOutcome) {}
 }
 
 /// Guest RAM through the host, as device DMA reaches it.

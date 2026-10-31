@@ -84,6 +84,31 @@ pub(super) struct ScanPolicyParts<'s, 'a, Q: BootIo, B: BiosIo, O: CountryIo> {
     pub(super) channels: &'s [ChannelObservation],
 }
 impl<'a, Q: BootIo, B: BiosIo, O: CountryIo> Ax200Country<'a, Q, B, O> {
+    /// A later `MCC_UPDATE_CMD`'s `profile` and the rules of its country take
+    /// the place of the selection's.
+    pub(super) fn adopt(
+        &mut self,
+        country: Country,
+        profile: mcc::Response,
+    ) -> Result<(), mcc::channel::InventoryMismatch> {
+        let inventory = self
+            .board
+            .scan
+            .mcc
+            .setup
+            .lari
+            .radio
+            .initialized
+            .boot
+            .profile
+            .channel_inventory();
+        self.channels = profile.channel_observations(inventory)?;
+        self.profile = Some(profile);
+        if let Some(selection) = &mut self.selection {
+            selection.country = country;
+        }
+        Ok(())
+    }
     pub(super) fn scan_policy_parts(&mut self) -> Option<ScanPolicyParts<'_, 'a, Q, B, O>> {
         if self.phase != Ax200CountryPhase::MacContextRequired || self.first_error.is_some() {
             return None;

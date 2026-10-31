@@ -1,0 +1,14 @@
+[package]
+name = "stela-mesa"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "MIT"
+build = "build.rs"
+
+# A workspace of none: this crate and the ones it names build only for
+# `stela.efi`, from sources `cargo xtask gpu nvk` generates.
+
+[dependencies]
+nak = { package = "stela-mesa-nak", path = "nak" }
+nil = { package = "stela-mesa-nil", path = "nil" }

@@ -51,6 +51,22 @@ int _printk(const char *fmt, ...)
 	return length;
 }
 
+/* Linux defers these past the scheduler's locks to reach its consoles; the
+ * owner's log takes no Linux lock, so they are delivered at once. */
+int vprintk_deferred(const char *fmt, va_list args)
+{
+	return vprintk(fmt, args);
+}
+
+int _printk_deferred(const char *fmt, ...)
+{
+	va_list args;
+	va_start(args, fmt);
+	int length = vprintk_deferred(fmt, args);
+	va_end(args);
+	return length;
+}
+
 const char *dev_driver_string(const struct device *dev)
 {
 	struct device_driver *driver = READ_ONCE(dev->driver);

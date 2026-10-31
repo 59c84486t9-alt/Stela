@@ -820,6 +820,37 @@ impl Devices for PairFaultDevice {
     }
 }
 
+#[test]
+fn a_call_reaches_the_callers_ram_across_pages_outside_locks() {
+    let mut machine = board(&[], pair_fault_device(), Vec::new());
+    let locked = BASE + 0x2000;
+    let mut caller = caller::CallerSpace {
+        controls: machine.cpu.controls(machine.cpu.regime()),
+        requester: mmu::Requester {
+            unprivileged: true,
+            ..machine.cpu.requester()
+        },
+        lock: [Some((locked, locked + 0xf)), None, None, None],
+        host: &mut machine.host,
+    };
+    let straddling = BASE + FETCH_PAGE - 4;
+    caller.write(straddling, &[1, 2, 3, 4, 5, 6, 7, 8]).unwrap();
+    let mut read = [0; 8];
+    caller.read(straddling, &mut read).unwrap();
+    assert_eq!(read, [1, 2, 3, 4, 5, 6, 7, 8]);
+    assert_eq!(
+        caller.write(locked - 4, &[0xa5; 8]),
+        Err(CallerFault::Denied { address: locked })
+    );
+    let mut before = [0; 4];
+    caller.read(locked - 4, &mut before).unwrap();
+    assert_eq!(before, [0; 4]);
+    assert!(matches!(
+        caller.read(u64::MAX - 1, &mut read),
+        Err(CallerFault::Denied { .. } | CallerFault::NotRam { .. })
+    ));
+}
+
 fn pair_fault_device() -> PairFaultDevice {
     PairFaultDevice {
         refused: None,

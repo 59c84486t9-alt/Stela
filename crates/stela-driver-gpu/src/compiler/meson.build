@@ -124,6 +124,22 @@ stela_threadgroup_test = executable(
 )
 test('stela_threadgroup', stela_threadgroup_test, suite : 'stela')
 
+# The Metal device's binding ABI and internal kernels own NIR only.
+stela_metal_abi = static_library(
+  'stela_metal_abi',
+  'metal_abi.c',
+  include_directories : [inc_include, inc_src, inc_gpu],
+  dependencies : [idep_nir, idep_mesautil],
+)
+stela_metal_abi_test = executable(
+  'stela_metal_abi_test',
+  'tests/metal_abi.c',
+  include_directories : [inc_include, inc_src, inc_gpu],
+  dependencies : [idep_nir, idep_mesautil],
+  link_with : stela_metal_abi,
+)
+test('stela_metal_abi', stela_metal_abi_test, suite : 'stela')
+
 if with_amd_llvm
   stela_amd_llvm_float = static_library(
     'stela_amd_llvm_float',
@@ -155,7 +171,8 @@ if stela_air_llvm != ''
   )
   stela_air = static_library(
     'stela_air_to_nir',
-    ['air_to_nir.c', 'air_metadata.c'],
+    ['air_to_nir.c', 'air_metadata.c', 'air_texture.c', 'air_call.c', 'air_math.c', 'air_simd.c',
+     'air_matrix.c', 'air_constants.c', 'air_calls.c', 'air_commands.c'],
     include_directories : [inc_include, inc_src, inc_gpu],
     dependencies : [idep_nir, idep_mesautil, stela_air_llvm_dep],
   )
@@ -187,6 +204,14 @@ if stela_air_llvm != ''
     link_with : [stela_air],
     include_directories : include_directories('.'),
     dependencies : [idep_nir, idep_mesautil, stela_air_llvm_dep],
+  )
+  # The device's compiler service: the AIR frontend over the binding ABI.
+  stela_metal_compiler = static_library(
+    'stela_metal_compiler',
+    'metal_compiler.c',
+    include_directories : [inc_include, inc_src, inc_gpu],
+    dependencies : [idep_stela_air],
+    link_with : [stela_metal_abi],
   )
   stela_threadgroup_nir_test = executable(
     'stela_threadgroup_nir_test',
@@ -242,7 +267,122 @@ if stela_air_llvm != ''
     build_rpath : fs.parent(stela_air_llvm),
   )
   test('stela_air_stage', stela_air_stage_test, suite : 'stela')
+  stela_air_texture_test = executable(
+    'stela_air_texture_test',
+    'tests/air_texture.c',
+    include_directories : [inc_include, inc_src, inc_gpu],
+    dependencies : [idep_stela_air],
+    link_with : stela_metal_abi,
+    build_rpath : fs.parent(stela_air_llvm),
+  )
+  test('stela_air_texture', stela_air_texture_test, suite : 'stela')
+  stela_air_builtins_test = executable(
+    'stela_air_builtins_test',
+    'tests/air_builtins.c',
+    include_directories : [inc_include, inc_src, inc_gpu],
+    dependencies : [idep_stela_air],
+    link_with : stela_metal_abi,
+    build_rpath : fs.parent(stela_air_llvm),
+  )
+  test('stela_air_builtins', stela_air_builtins_test, suite : 'stela')
+  stela_air_render_io_test = executable(
+    'stela_air_render_io_test',
+    'tests/air_render_io.c',
+    include_directories : [inc_include, inc_src, inc_gpu],
+    dependencies : [idep_stela_air],
+    link_with : stela_metal_abi,
+    build_rpath : fs.parent(stela_air_llvm),
+  )
+  test('stela_air_render_io', stela_air_render_io_test, suite : 'stela')
+  stela_air_stage_in_test = executable(
+    'stela_air_stage_in_test',
+    'tests/air_stage_in.c',
+    include_directories : [inc_include, inc_src, inc_gpu],
+    dependencies : [idep_stela_air],
+    build_rpath : fs.parent(stela_air_llvm),
+  )
+  test('stela_air_stage_in', stela_air_stage_in_test, suite : 'stela')
+  stela_air_math_test = executable(
+    'stela_air_math_test',
+    'tests/air_math.c',
+    include_directories : [inc_include, inc_src, inc_gpu],
+    dependencies : stela_air_test_dependencies,
+    link_with : [stela_metal_abi, stela_air_test_links],
+    c_args : stela_air_test_args,
+    build_rpath : fs.parent(stela_air_llvm),
+  )
+  test('stela_air_math', stela_air_math_test, suite : 'stela')
+  stela_air_sync_test = executable(
+    'stela_air_sync_test',
+    'tests/air_sync.c',
+    include_directories : [inc_include, inc_src, inc_gpu],
+    dependencies : stela_air_test_dependencies,
+    link_with : [stela_metal_abi, stela_air_test_links],
+    c_args : stela_air_test_args,
+    build_rpath : fs.parent(stela_air_llvm),
+  )
+  test('stela_air_sync', stela_air_sync_test, suite : 'stela')
+  stela_air_memory_test = executable(
+    'stela_air_memory_test',
+    'tests/air_memory.c',
+    include_directories : [inc_include, inc_src, inc_gpu],
+    dependencies : stela_air_test_dependencies,
+    link_with : [stela_metal_abi, stela_air_test_links],
+    c_args : stela_air_test_args,
+    build_rpath : fs.parent(stela_air_llvm),
+  )
+  test('stela_air_memory', stela_air_memory_test, suite : 'stela')
+  stela_air_argument_buffer_test = executable(
+    'stela_air_argument_buffer_test',
+    'tests/air_argument_buffer.c',
+    include_directories : [inc_include, inc_src, inc_gpu],
+    dependencies : stela_air_test_dependencies,
+    link_with : [stela_metal_abi, stela_air_test_links],
+    c_args : stela_air_test_args,
+    build_rpath : fs.parent(stela_air_llvm),
+  )
+  test('stela_air_argument_buffer', stela_air_argument_buffer_test, suite : 'stela')
+  stela_air_commands_test = executable(
+    'stela_air_commands_test',
+    'tests/air_commands.c',
+    include_directories : [inc_include, inc_src, inc_gpu],
+    dependencies : stela_air_test_dependencies,
+    link_with : [stela_metal_abi, stela_air_test_links],
+    c_args : stela_air_test_args,
+    build_rpath : fs.parent(stela_air_llvm),
+  )
+  test('stela_air_commands', stela_air_commands_test, suite : 'stela')
+  stela_air_mesh_test = executable(
+    'stela_air_mesh_test',
+    'tests/air_mesh.c',
+    include_directories : [inc_include, inc_src, inc_gpu],
+    dependencies : stela_air_test_dependencies,
+    link_with : [stela_metal_abi, stela_air_test_links],
+    c_args : stela_air_test_args,
+    build_rpath : fs.parent(stela_air_llvm),
+  )
+  test('stela_air_mesh', stela_air_mesh_test, suite : 'stela')
+  stela_metal_compiler_test = executable(
+    'stela_metal_compiler_test',
+    'tests/metal_compiler.c',
+    include_directories : [inc_include, inc_src, inc_gpu],
+    dependencies : stela_air_test_dependencies,
+    link_with : [stela_metal_compiler, stela_metal_abi, stela_air_test_links],
+    c_args : stela_air_test_args,
+    build_rpath : fs.parent(stela_air_llvm),
+  )
+  test('stela_metal_compiler', stela_metal_compiler_test, suite : 'stela')
   if with_nvidia
+    # The shader coverage sweep over AIR modules compiled from MSL; a tool,
+    # since its inputs are Apple compiler output.
+    stela_metal_corpus = executable(
+      'stela_metal_corpus',
+      'tests/metal_corpus.c',
+      include_directories : [inc_include, inc_src, inc_gpu],
+      dependencies : stela_air_test_dependencies,
+      link_with : [stela_metal_compiler, stela_metal_abi, stela_air_test_links],
+      build_rpath : fs.parent(stela_air_llvm),
+    )
     stela_nvidia_air_render_test = executable(
       'stela_nvidia_air_render_test',
       '../nvidia/tests/air_render.c',

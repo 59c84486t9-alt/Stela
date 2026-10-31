@@ -158,6 +158,19 @@ impl Wmm {
             parameters: Some(parsed.map(Option::unwrap)),
         })
     }
+
+    /// The AP's EDCA parameters among `elements`, with their set count.
+    pub(in crate::wifi) fn announced(mut elements: &[u8]) -> Option<(u8, [AccessCategory; 4])> {
+        while let [id, length, tail @ ..] = elements {
+            let (data, next) = tail.split_at_checked(usize::from(*length))?;
+            if *id == 221 && data.starts_with(&[0, 0x50, 0xf2, 2]) {
+                let wmm = Self::parse(data, Role::AccessPoint).ok()?;
+                return Some((wmm.qos_info & 15, wmm.parameters?));
+            }
+            elements = next;
+        }
+        None
+    }
 }
 
 /// Complete management-IE observations, parsed in two passes so EHT

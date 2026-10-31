@@ -262,7 +262,7 @@ static bool inspect(struct visit_context *context, uint64_t offset, uint64_t siz
       report(context->error,STELA_METAL_ASSEMBLY_IDENTITY,"Selected AIR is outside the original input"); return false;
    }
    struct stela_air_error error;
-   if (!stela_air_inspect(owner->original.bytes+offset,(size_t)size,owner->inspection_entries,
+   if (!stela_air_inspect(owner->original.bytes+offset,(size_t)size,NULL,owner->inspection_entries,
                           visit_entry,context,&error)) {
       if (!context->error->status) {
          context->error->air_kind = error.kind; context->error->air_instruction = error.instruction;
@@ -608,7 +608,7 @@ static bool inspect_stage(struct stage_context *context)
 {
    struct stela_air_error error;
    struct visit_context *common = &context->common;
-   if (!stela_air_inspect_stage(common->raw.bytes,(size_t)common->raw.length,
+   if (!stela_air_inspect_stage(common->raw.bytes,(size_t)common->raw.length,NULL,
                                 context->name,context->stage,stage_copy,context,&error)) {
       if (!common->error->status) {
          common->error->air_kind=error.kind; common->error->air_instruction=error.instruction;

@@ -183,7 +183,10 @@ enum Action {
     BootLog,
     Configure,
     HostFirmwareInstall(PathBuf),
-    HostFirmwareFetch(PathBuf),
+    HostFirmwareFetch {
+        requirements: Option<PathBuf>,
+        gpu: Option<String>,
+    },
 }
 
 /// One `stela setup` command: its action and the options it was given
@@ -558,14 +561,15 @@ impl Request {
                 }
                 Ok(report)
             }
-            Action::HostFirmwareFetch(inventory) => {
+            Action::HostFirmwareFetch { requirements, gpu } => {
                 let mount_image = host_firmware_mount(environment, &record)?;
                 let cache = self
                     .host_firmware_cache
                     .clone()
                     .unwrap_or_else(|| download_dir().with_file_name("firmware"));
                 firmware::provision(firmware::ProvisionOptions {
-                    inventory: &inventory,
+                    requirements: requirements.as_deref(),
+                    gpu: gpu.as_deref(),
                     destination: &record.esp.join(stela_loader::host_firmware::DIRECTORY),
                     cache: &cache,
                     dry_run: self.dry_run,

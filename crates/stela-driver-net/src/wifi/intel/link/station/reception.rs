@@ -202,6 +202,14 @@ impl Reception {
     }
 
     /// Every session, each as its firmware identity and TID, gone.
+    /// The TIDs firmware holds a session for.
+    pub(super) fn tids(&self) -> Vec<u8> {
+        self.sessions
+            .iter()
+            .map(|session| session.agreement.tid())
+            .collect()
+    }
+
     pub(super) fn take_sessions(&mut self) -> Vec<(u8, u8)> {
         self.sessions
             .drain(..)

@@ -21,6 +21,33 @@ fn profile() -> Profile {
     })
     .unwrap()
 }
+#[test]
+fn the_scu_stays_active_on_approved_gl_systems_alone() {
+    let gl = Profile::select(Observed {
+        link_speed: 4,
+        silicon: Default::default(),
+        vendor: 0x8086,
+        device: 0x272b,
+        subsystem_vendor: 0x8086,
+        subsystem_device: 0x0000,
+        pci_revision: 0,
+        hardware_revision: 0x472,
+        radio_id: 0x0011_2200,
+    })
+    .unwrap();
+    let plain = control_flags(&gl);
+    for vendor in ["Dell Inc.", "Alienware", "  Dell Inc.  "] {
+        assert_eq!(
+            control_flags(&gl.clone().with_system_vendor(vendor)),
+            plain | 1 << 29
+        );
+    }
+    assert_eq!(control_flags(&gl.clone().with_system_vendor("HP")), plain);
+    assert_eq!(
+        control_flags(&profile().with_system_vendor("Dell Inc.")),
+        control_flags(&profile())
+    );
+}
 fn tlv(bytes: &mut Vec<u8>, kind: u32, data: &[u8]) {
     bytes.extend(kind.to_le_bytes());
     bytes.extend((data.len() as u32).to_le_bytes());

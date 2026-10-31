@@ -18,3 +18,7 @@
 	path = third_party/libdrm
 	url = https://gitlab.freedesktop.org/mesa/drm.git
 	shallow = true
+[submodule "xnu"]
+	path = third_party/xnu
+	url = https://github.com/apple-oss-distributions/xnu.git
+	shallow = true

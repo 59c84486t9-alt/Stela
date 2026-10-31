@@ -23,7 +23,7 @@ use crate::{
         Link, LinkError, Mac,
         aqtion::{self, Aqtion, MappedRegisters},
         tg3,
-        wifi::mediatek,
+        wifi::{mediatek, realtek as realtek_wifi},
     },
     storage::nvme,
     usb::ehci,
@@ -75,6 +75,8 @@ pub(super) enum Kind {
     IntelWifi,
     /// A MediaTek Wi-Fi function; only MT7925 attaches.
     MediatekWifi,
+    /// A Realtek Wi-Fi function; only RTL8822C attaches.
+    RealtekWifi,
     /// An Intel PCIe Bluetooth function, as `btintel_pcie_table` lists them.
     IntelBluetooth,
     /// A Broadcom PCIe Bluetooth function, as `bcm4377_devid_table` lists
@@ -106,6 +108,11 @@ impl Kind {
             Some(Self::IntelWifi)
         } else if function.vendor == 0x14c3 && function.class[..2] == [2, 0x80] {
             Some(Self::MediatekWifi)
+        } else if function.vendor == 0x10ec
+            && function.class[..2] == [2, 0x80]
+            && realtek_wifi::identity::RTL8822C_DEVICES.contains(&function.device)
+        {
+            Some(Self::RealtekWifi)
         } else if function.vendor == 0x8086 && intel_pcie::DEVICE_IDS.contains(&function.device) {
             Some(Self::IntelBluetooth)
         } else if function.vendor == 0x14e4
@@ -402,6 +409,72 @@ pub(super) unsafe fn mediatek_wifi(
     }
 }
 
+/// An RTL8822C station on its hardware.
+pub type RealtekWifi = realtek_wifi::station::Wifi<realtek_wifi::hardware::Hardware>;
+
+/// Attach an RTL8822C: `rtw_pci_io_mapping` finds its registers in BAR2.
+///
+/// # Safety
+/// As for [`tg3`].
+#[allow(
+    clippy::result_large_err,
+    reason = "a failed attach hands back the owners that must outlive the device"
+)]
+pub(super) unsafe fn realtek_wifi(
+    services: &dyn NativeServices,
+    address: Address,
+    completion: Option<crate::bus::irq::MsiMessage>,
+    mut inputs: realtek_wifi::attach::Inputs,
+) -> Result<Located<RealtekWifi>, Failure> {
+    let refused = |error: ServiceError| (Error::Native(error), None);
+    let Claimed {
+        mut function,
+        domain,
+        bars,
+    } = claim(services, address).map_err(refused)?;
+    let registers = map(services, address, &bars, 2).map_err(refused)?;
+    let (base, bytes) = registers
+        .bytes()
+        .and_then(|bytes| Ok((registers.address(0, bytes)?, bytes)))
+        .map_err(|error| refused(ServiceError::Mapping(error)))?;
+    inputs.link_control = crate::bus::pci::link_control_word(&function);
+    let config = function.config();
+    let (subsystem_vendor, subsystem_device, pci_revision) =
+        (config.read16(0x2c), config.read16(0x2e), config.read8(0x08));
+    let observed = realtek_wifi::identity::Observed {
+        vendor: function.vendor,
+        device: function.device,
+        subsystem_vendor,
+        subsystem_device,
+        pci_revision,
+        // SAFETY: the BAR just mapped, whose first page holds SYS_CFG1.
+        sys_cfg1: unsafe { crate::bus::mmio::Mmio::new(base.as_ptr() as u64) }.read32(0xf0),
+    };
+    // rtw_pci_setup_resource: memory decoding and bus mastering, then one MSI.
+    function.enable_polled();
+    inputs.vector = match (completion, function.interrupts().msi) {
+        (Some(message), Some(msi)) => {
+            function.enable_msi(msi, message);
+            true
+        }
+        _ => false,
+    };
+    let owner: Arc<dyn Any> = Arc::new((function, registers));
+    let kept = Box::new(owner.clone()) as Box<dyn Any>;
+    // SAFETY: the mount claimed the stopped function, mapped its BAR2 uncached
+    // and supplied an isolating domain; `owner` keeps the function and mapping,
+    // and the device's interrupt masks are off until the station starts.
+    match unsafe {
+        realtek_wifi::attach::attach(base.cast(), bytes, owner, domain, observed, inputs)
+    } {
+        Ok(link) => Ok(Located {
+            location: alloc::format!("{address}"),
+            link,
+        }),
+        Err(error) => Err((Error::RealtekWifi(error), Some(kept))),
+    }
+}
+
 /// Attach an Intel Wi-Fi function: BAR0 holds its CSRs.
 ///
 /// # Safety
@@ -414,6 +487,7 @@ pub(super) unsafe fn mediatek_wifi(
 pub(super) unsafe fn intel_wifi<B: wifi::intel::radio::bios::service::BiosIo>(
     services: &dyn NativeServices,
     address: Address,
+    completion: Option<crate::bus::irq::MsiMessage>,
     inputs: wifi::intel::link::Inputs<B>,
 ) -> Result<Located<wifi::intel::link::Station<wifi::intel::boot::NativeBootIo, B>>, Failure> {
     use wifi::intel::attach::{AttachError, Pci, attach};
@@ -425,7 +499,7 @@ pub(super) unsafe fn intel_wifi<B: wifi::intel::radio::bios::service::BiosIo>(
     } = claim(services, address).map_err(refused)?;
     let registers = map(services, address, &bars, 0).map_err(refused)?;
     let window = registers
-        .address(0, 8192)
+        .address(0, 16384)
         .map_err(|error| refused(ServiceError::Mapping(error)))?;
     let vendor = function.vendor;
     let device = function.device;
@@ -438,9 +512,32 @@ pub(super) unsafe fn intel_wifi<B: wifi::intel::radio::bios::service::BiosIo>(
         subsystem_device: config.read16(0x2e),
         revision: config.read8(0x08),
         link_speed,
+        vector: false,
     };
-    // iwl_pci_probe: memory decoding and bus mastering, polled.
+    // iwl_pci_probe: memory decoding and bus mastering.
     function.enable_polled();
+    // iwl_pcie_set_interrupt_capa: the table lies in BAR0, at CSR_MSIX_BASE.
+    let vector = match (completion, function.interrupts().msix) {
+        (Some(message), Some(msix)) if msix.table_bar == 0 => {
+            let table = registers
+                .address(msix.table_offset as usize, 16)
+                .map_err(|error| refused(ServiceError::Mapping(error)))?;
+            // SAFETY: the claimed function's own MSI-X table, mapped uncached
+            // by the mapping `owner` keeps.
+            let table = unsafe { crate::bus::mmio::Mmio::new(table.as_ptr() as u64) };
+            function
+                .enable_msix(msix, || {
+                    table.write32(0, message.address as u32);
+                    table.write32(4, (message.address >> 32) as u32);
+                    table.write32(8, message.data);
+                    table.write32(12, 0);
+                    Ok(())
+                })
+                .is_ok()
+        }
+        _ => false,
+    };
+    let pci = Pci { vector, ..pci };
     let owner: Arc<dyn Any> = Arc::new((function, registers));
     let kept = |owner: &Arc<dyn Any>| Some(Box::new(owner.clone()) as Box<dyn Any>);
     // SAFETY: the mount claimed the stopped function and mapped its BAR0

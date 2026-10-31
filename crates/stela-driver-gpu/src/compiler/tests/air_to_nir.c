@@ -23,6 +23,22 @@
 #include "air_test_fixture.h"
 #include "air_effect_oracle.h"
 
+/* Whether the linked LLVM parses ir. */
+static bool
+parses(const char *ir)
+{
+   LLVMContextRef context = LLVMContextCreate();
+   LLVMMemoryBufferRef input = LLVMCreateMemoryBufferWithMemoryRangeCopy(ir, strlen(ir), "probe");
+   LLVMModuleRef module = NULL;
+   char *message = NULL;
+   bool parsed = !LLVMParseIRInContext(context, input, &module, &message);
+   LLVMDisposeMessage(message);
+   if (parsed)
+      LLVMDisposeModule(module);
+   LLVMContextDispose(context);
+   return parsed;
+}
+
 static nir_def *
 bind_buffer(nir_builder *b, const struct stela_air_buffer *buffer, void *data)
 {
@@ -1325,9 +1341,11 @@ metadata_refusal(const char *before, const char *after, enum stela_air_error_kin
    LLVMMemoryBufferRef input = stela_air_test_custom_bitcode(stela_air_test_prefix,
       stela_air_test_store_body, metadata, "");
    struct stela_air_error error;
-   CHECK(!translate(input, &test_nir_options, 100, &error));
-   if (error.kind != expected)
-      fprintf(stderr, "metadata refusal wanted %u got %u: %s\n", expected, error.kind, error.detail);
+   nir_shader *nir = translate(input, &test_nir_options, 100, &error);
+   if (nir || error.kind != expected)
+      fprintf(stderr, "metadata refusal of %s wanted %u got %u: %s\n", after, expected, error.kind,
+              error.detail);
+   CHECK(!nir);
    CHECK(error.kind == expected);
    LLVMDisposeMemoryBuffer(input);
    free(metadata);
@@ -1772,8 +1790,7 @@ shared_global_dominance(void)
 static void
 shared_contracts(void)
 {
-   const char *flags[] = {"i32 0, i32 5, i32 1", "i32 1, i32 5, i32 1",
-      "i32 4, i32 5, i32 1", "i32 6, i32 5, i32 1", "i32 2, i32 0, i32 1",
+   const char *flags[] = {"i32 8, i32 5, i32 1", "i32 2, i32 0, i32 1",
       "i32 2, i32 2, i32 1", "i32 2, i32 4, i32 1", "i32 2, i32 5, i32 0",
       "i32 2, i32 5, i32 2", "i32 %tid, i32 5, i32 1"};
    for (unsigned i = 0; i < ARRAY_SIZE(flags); i++) {
@@ -1794,7 +1811,6 @@ shared_contracts(void)
    shared_refusal("call void @air.wg.barrier(i32 2, i32 5, i32 1) convergent [\"deopt\"(i32 1)]\nret void\n",
       shared_declaration, STELA_AIR_INSTRUCTION);
    const char *globals[] = {
-      "@s = internal addrspace(3) global i32 0, align 4\n",
       "@s = internal addrspace(3) global i32 poison, align 4\n",
       "@s = external addrspace(3) global i32\n",
       "@s = internal addrspace(3) constant i32 undef, align 4\n",
@@ -1804,19 +1820,22 @@ shared_contracts(void)
    for (unsigned i = 0; i < ARRAY_SIZE(globals); i++)
       shared_refusal("ret void\n", globals[i], STELA_AIR_TARGET);
    shared_refusal("ret void\n", "@s = internal addrspace(3) global [4294967296 x i32] undef\n", STELA_AIR_LIMIT);
-   shared_refusal("ret void\n", "@s = internal addrspace(3) global {i32,i32} undef\n", STELA_AIR_TYPE);
-   shared_refusal("store atomic i32 1, ptr addrspace(3) @s monotonic, align 4\nret void\n",
+   shared_refusal("ret void\n", "@s = internal addrspace(3) global {i32,ptr} undef\n", STELA_AIR_TYPE);
+   shared_refusal("store atomic i32 1, ptr addrspace(3) @s seq_cst, align 4\nret void\n",
       "@s = internal addrspace(3) global i32 undef, align 4\n", STELA_AIR_MEMORY);
    shared_refusal("store volatile i32 1, ptr addrspace(3) @s, align 4\nret void\n",
       "@s = internal addrspace(3) global i32 undef, align 4\n", STELA_AIR_MEMORY);
    shared_refusal("ret void\n", "@s = internal addrspace(3) global <vscale x 4 x i32> undef\n", STELA_AIR_VERIFY);
-   LLVMMemoryBufferRef old_profile = stela_air_test_bitcode(
+   /* Every AIR version shares threadgroup memory. */
+   LLVMMemoryBufferRef older = stela_air_test_bitcode(
       "call void @air.wg.barrier(i32 2, i32 5, i32 1) convergent\nret void\n", shared_declaration);
-   struct shared_bindings old_bindings = {0};
-   struct stela_air_error old_error;
-   CHECK(!shared_translate(old_profile, &test_nir_options, &old_bindings, 256, &old_error) &&
-         old_error.kind == STELA_AIR_METADATA);
-   LLVMDisposeMemoryBuffer(old_profile);
+   struct shared_bindings older_bindings = {0};
+   struct stela_air_error older_error;
+   nir_shader *older_shader = shared_translate(older, &test_nir_options, &older_bindings, 256,
+                                               &older_error);
+   CHECK(older_shader);
+   ralloc_free(older_shader);
+   LLVMDisposeMemoryBuffer(older);
 
    /* Collective placement remains exact, even in source regions whose caller
     * must guarantee uniform participation. No frontend speculation/hoisting. */
@@ -2155,6 +2174,10 @@ floating_contracts(void)
    const char *attributes[] = {"strictfp", "denormal_fpenv(preservesign)",
                               "\"denormal-fp-math\"=\"ieee\"", "\"rounding-math\"=\"true\""};
    for (unsigned i = 0; i < ARRAY_SIZE(attributes); i++) {
+      /* denormal_fpenv is LLVM 23's, which older parsers reject. */
+      if (!strncmp(attributes[i], "denormal_fpenv", strlen("denormal_fpenv")) &&
+          !parses("define void @f() denormal_fpenv(preservesign) {\nret void\n}\n"))
+         continue;
       char suffix[128];
       snprintf(suffix, sizeof(suffix), ") %s {", attributes[i]);
       char *prefix = replace_once(stela_air_test_prefix, ") {", suffix);
@@ -2167,8 +2190,6 @@ floating_contracts(void)
    const char *unsupported[] = {
       "%v = fdiv float 1.0, 2.0\nret void\n",
       "%v = frem float 1.0, 2.0\nret void\n",
-      "%v = fptosi float 1.0 to i32\nret void\n",
-      "%v = fptoui float 1.0 to i32\nret void\n",
    };
    for (unsigned i = 0; i < ARRAY_SIZE(unsupported); i++) {
       LLVMMemoryBufferRef input = ieee_bitcode(stela_air_test_prefix, unsupported[i]);
@@ -2183,16 +2204,15 @@ floating_contracts(void)
    struct stela_air_error error;
    CHECK(!translate(constrained, &test_nir_options, 100, &error) && error.kind == STELA_AIR_INSTRUCTION);
    LLVMDisposeMemoryBuffer(constrained);
-   expect_refusal("%v = fadd half 1.0, 2.0\nret void\n", "", 100, STELA_AIR_TYPE);
    expect_refusal("%v = fadd double 1.0, 2.0\nret void\n", "", 100, STELA_AIR_TYPE);
    expect_refusal("%v = bitcast i64 1 to double\nret void\n", "", 100, STELA_AIR_TYPE);
-   expect_refusal("%v = bitcast <2 x i16> <i16 1, i16 2> to float\nret void\n", "", 100, STELA_AIR_TYPE);
+   expect_refusal("%v = bitcast <2 x float> zeroinitializer to double\nret void\n", "", 100, STELA_AIR_TYPE);
 }
 
 static void
 qualified_floating_semantics(void)
 {
-   const enum stela_air_fp_profile profile = STELA_AIR_FP_APPLE_32023_922_AIR29_MSL41;
+   const enum stela_air_fp_profile profile = STELA_AIR_FP_METAL;
    const struct {const char *op; uint32_t a, b, result;} arithmetic[] = {
       {"fadd",1,0,0}, {"fadd",0x007fffff,1,0},
       {"fsub",0x00800000,0x007fffff,0x00800000},
@@ -2236,42 +2256,26 @@ qualified_floating_semantics(void)
    CHECK(!translate_profile(input, &test_nir_options, 100, (enum stela_air_fp_profile)99, &error) &&
          error.kind == STELA_AIR_INPUT);
    LLVMDisposeMemoryBuffer(input);
+   /* Metal's environment preserves denormals unless the module disables
+    * them, whichever compiler, AIR and MSL version produced it. */
    input = ieee_bitcode(stela_air_test_prefix, floating_body);
-   CHECK(!translate_profile(input, &test_nir_options, 100, profile, &error) && error.kind == STELA_AIR_METADATA);
+   nir = translate_profile(input, &test_nir_options, 100, profile, &error);
+   CHECK(nir && nir->info.float_controls_execution_mode ==
+      (FLOAT_CONTROLS_DENORM_PRESERVE_FP32 | FLOAT_CONTROLS_ROUNDING_MODE_RTE_FP32));
+   ralloc_free(nir);
    LLVMDisposeMemoryBuffer(input);
-   const char *metadata_variants[] = {
-      "!llvm.ident = !{!11}\n!11 = !{!\"Apple metal version unknown\"}\n",
-      "", /* A matching caller policy cannot replace missing provenance metadata. */
+   const char *idents[] = {
+      "!llvm.ident = !{!11}\n!11 = !{!\"Apple metal version unknown\"}\n", "",
    };
-   char *prefix = replace_once(stela_air_test_prefix, "air64_v28-apple-macosx26.7.0", "air64_v29-apple-macosx27.2.0");
-   char *air = replace_once(stela_air_test_metadata, "i32 2, i32 8, i32 0", "i32 2, i32 9, i32 0");
-   char *metadata = replace_once(air, "i32 4, i32 0, i32 0", "i32 4, i32 1, i32 0");
-   for (unsigned i = 0; i < ARRAY_SIZE(metadata_variants); i++) {
-      input = stela_air_test_custom_bitcode(prefix, floating_body, metadata, metadata_variants[i]);
-      CHECK(!translate_profile(input, &test_nir_options, 100, profile, &error) && error.kind == STELA_AIR_METADATA);
+   for (unsigned i = 0; i < ARRAY_SIZE(idents); i++) {
+      input = stela_air_test_custom_bitcode(stela_air_test_prefix, floating_body, stela_air_test_metadata,
+                                            idents[i]);
+      nir = translate_profile(input, &test_nir_options, 100, profile, &error);
+      CHECK(nir);
+      ralloc_free(nir);
       LLVMDisposeMemoryBuffer(input);
    }
-   const char *ident = "!llvm.ident = !{!11}\n!11 = !{!\"Apple metal version 32023.922 (metalfe-32023.922.4)\"}\n";
-   const char *compile_options[] = {"!air.compile_options = !{!8,!10}", "!air.compile_options = !{!9,!10}"};
-   for (unsigned i = 0; i < ARRAY_SIZE(compile_options); i++) {
-      char *changed = replace_once(metadata, "!air.compile_options = !{!8,!9,!10}", compile_options[i]);
-      input = stela_air_test_custom_bitcode(prefix, floating_body, changed, ident);
-      CHECK(!translate_profile(input, &test_nir_options, 100, profile, &error) && error.kind == STELA_AIR_METADATA);
-      LLVMDisposeMemoryBuffer(input);
-      free(changed);
-   }
-   input = stela_air_test_custom_bitcode(prefix, floating_body, air, ident); /* MSL 4.0. */
-   CHECK(!translate_profile(input, &test_nir_options, 100, profile, &error) && error.kind == STELA_AIR_METADATA);
-   LLVMDisposeMemoryBuffer(input);
-   input = stela_air_test_bitcode(floating_body, ""); /* AIR 2.8. */
-   CHECK(!translate_profile(input, &test_nir_options, 100, profile, &error) && error.kind == STELA_AIR_METADATA);
-   LLVMDisposeMemoryBuffer(input);
-   free(metadata);
-   free(air);
-   free(prefix);
    const char *bad_calls[][2] = {
-      {"%v = call float @air.convert.f.f32.s.i32(i64 1)\nret void\n",
-       "declare float @air.convert.f.f32.s.i32(i64)\n"},
       {"%v = call float @air.convert.f.f32.s.i32(i32 1)\nret void\n",
        "define float @air.convert.f.f32.s.i32(i32 %x) { ret float 0.0 }\n"},
       {"%v = call fastcc float @air.convert.f.f32.s.i32(i32 1)\nret void\n",
@@ -2303,6 +2307,44 @@ module_flag_test(const char *extra, enum stela_air_error_kind expected)
 #include "air_minmax_tests.h"
 #include "air_funnel_tests.h"
 
+/* Kernels build vectors lane by lane and shuffle them; a vector with an
+ * undefined lane is refused where it is used whole. */
+static void
+vector_semantics(void)
+{
+   constant_store("%v = insertelement <4 x i32> poison, i32 7, i32 0\n"
+                  "%s = shufflevector <4 x i32> %v, <4 x i32> poison, <4 x i32> zeroinitializer\n"
+                  "%l = extractelement <4 x i32> %s, i32 3\n"
+                  "store i32 %l, ptr addrspace(1) %out, align 4\nret void\n", 7, 0x100000);
+   constant_store("%s = shufflevector <4 x i32> <i32 1, i32 2, i32 3, i32 4>,"
+                  " <4 x i32> <i32 5, i32 6, i32 7, i32 8>, <3 x i32> <i32 6, i32 1, i32 4>\n"
+                  "%l = extractelement <3 x i32> %s, i32 0\n"
+                  "store i32 %l, ptr addrspace(1) %out, align 4\nret void\n", 7, 0x100000);
+   constant_store("%s = shufflevector <2 x i32> <i32 1, i32 2>, <2 x i32> poison, <2 x i32> <i32 1, i32 poison>\n"
+                  "%l = extractelement <2 x i32> %s, i32 0\n"
+                  "store i32 %l, ptr addrspace(1) %out, align 4\nret void\n", 2, 0x100000);
+   expect_refusal("%s = shufflevector <2 x i32> <i32 1, i32 2>, <2 x i32> poison, <2 x i32> <i32 1, i32 poison>\n"
+                  "store <2 x i32> %s, ptr addrspace(1) %out, align 8\nret void\n", "", 100,
+                  STELA_AIR_INSTRUCTION);
+}
+
+/* A PHI's undefined incoming value takes NIR's undef, which any edge that
+ * observes it may read as anything. */
+static void
+undefined_phi_values(void)
+{
+   nir_shader *nir = translate_body(
+      "entry:\n%c = icmp eq i32 %tid, 0\nbr i1 %c, label %set, label %join\n"
+      "set:\nbr label %join\n"
+      "join:\n%v = phi i32 [7, %set], [undef, %entry]\n"
+      "store i32 %v, ptr addrspace(1) %out, align 4\nret void\n");
+   specialize_invocation(nir, 0);
+   const uint64_t address = 0x100000;
+   const uint32_t value = 7;
+   check_stores(nir, &address, &value, 1);
+   ralloc_free(nir);
+}
+
 static void
 tests(void)
 {
@@ -2324,6 +2366,8 @@ tests(void)
    integer_permutation_tests();
    integer_minmax_tests();
    integer_funnel_tests();
+   vector_semantics();
+   undefined_phi_values();
    conditional_semantics();
    loop_semantics();
    cfg_semantics();
@@ -2343,7 +2387,7 @@ tests(void)
    shared_contracts();
    metadata_refusal("i32 2, i32 8, i32 0", "i32 2, i32 10, i32 0", STELA_AIR_METADATA);
    metadata_refusal("i32 2, i32 8, i32 0", "i32 2, i32 9, i32 0", STELA_AIR_TARGET);
-   metadata_refusal("i32 4, i32 0, i32 0", "i32 4, i32 1, i32 0", STELA_AIR_METADATA);
+   metadata_refusal("i32 4, i32 0, i32 0", "i32 4, i32 2, i32 0", STELA_AIR_METADATA);
    module_flag_test("!llvm.module.flags = !{!11,!12,!13}\n"
       "!11 = !{i32 1, !\"wchar_size\", i32 4}\n"
       "!12 = !{i32 7, !\"frame-pointer\", i32 2}\n"
@@ -2374,12 +2418,12 @@ tests(void)
    free(disabled_fetch);
    metadata_refusal("air.read_write", "air.read", STELA_AIR_MEMORY);
    metadata_refusal("i32 7, i32 1", "i32 7, i32 2", STELA_AIR_METADATA);
-   metadata_refusal("air.thread_position_in_grid", "air.threadgroup_position_in_grid", STELA_AIR_ARGUMENT);
+   metadata_refusal("air.thread_position_in_grid", "air.thread_position_in_universe", STELA_AIR_ARGUMENT);
    metadata_refusal("air.arg_type_align_size\", i32 4", "air.arg_type_align_size\", i32 3", STELA_AIR_METADATA);
    metadata_refusal("air.compile.fast_math_enable", "air.compile.future_semantics", STELA_AIR_METADATA);
    expect_refusal("%v = fadd float 1.0, 2.0\nret void\n", "", 100, STELA_AIR_METADATA);
    expect_refusal("%v = load volatile i32, ptr addrspace(1) %out, align 4\nret void\n", "", 100, STELA_AIR_MEMORY);
-   expect_refusal("%v = load atomic i32, ptr addrspace(1) %out monotonic, align 4\nret void\n", "", 100, STELA_AIR_MEMORY);
+   expect_refusal("%v = load atomic i32, ptr addrspace(1) %out acquire, align 4\nret void\n", "", 100, STELA_AIR_MEMORY);
    expect_refusal("%v = freeze i32 poison\nret void\n", "", 100, STELA_AIR_INSTRUCTION);
    expect_refusal("call void @helper()\nret void\n", "declare void @helper()\n", 100, STELA_AIR_INSTRUCTION);
    expect_refusal("store i32 %later, ptr addrspace(1) %out, align 4\n%later = add i32 %tid, 1\nret void\n", "", 100, STELA_AIR_VERIFY);
@@ -2387,7 +2431,13 @@ tests(void)
    expect_refusal("%v = add i32 undef, 1\nret void\n", "", 100, STELA_AIR_INSTRUCTION);
    expect_refusal("%address = inttoptr i64 1048576 to ptr addrspace(1)\nret void\n", "", 100, STELA_AIR_TYPE);
    expect_refusal("%address = bitcast ptr addrspace(1) null to ptr addrspace(1)\nret void\n", "", 100, STELA_AIR_MEMORY);
-   expect_refusal("%address = getelementptr <8 x i1>, ptr addrspace(1) %out, i32 0, i32 1\nret void\n", "", 100, STELA_AIR_VERIFY);
+   /* LLVM 23's verifier refuses a GEP into a vector of i1, which an older
+    * one leaves to the translator. */
+   input = stela_air_test_bitcode(
+      "%address = getelementptr <8 x i1>, ptr addrspace(1) %out, i32 0, i32 1\nret void\n", "");
+   CHECK(!translate(input, &test_nir_options, 100, &error) &&
+         (error.kind == STELA_AIR_VERIFY || error.kind == STELA_AIR_TYPE));
+   LLVMDisposeMemoryBuffer(input);
    expect_refusal("%address = getelementptr <vscale x 4 x i32>, ptr addrspace(1) %out, i32 1\nret void\n", "", 100, STELA_AIR_TYPE);
    expect_refusal("%address = getelementptr [2 x <vscale x 4 x i32>], ptr addrspace(1) %out, i32 1\nret void\n", "", 100, STELA_AIR_TYPE);
    const struct stela_air_options options = {.workgroup_size = {32, 1, 1}, .max_instructions = 100};
@@ -2540,7 +2590,7 @@ reflection_inspection_case(const char *prefix, const char *body, const char *met
    struct stela_air_error error;
    struct reflection_expectation expected = {complete, used, primitive, components};
    LLVMMemoryBufferRef input = stela_air_test_custom_bitcode(prefix, body, metadata, extra);
-   CHECK(stela_air_inspect(LLVMGetBufferStart(input), LLVMGetBufferSize(input), 8,
+   CHECK(stela_air_inspect(LLVMGetBufferStart(input), LLVMGetBufferSize(input), NULL, 8,
                           inspect_reflection, &expected, &error));
    CHECK(error.kind == STELA_AIR_OK);
    LLVMDisposeMemoryBuffer(input);
@@ -2621,7 +2671,7 @@ shared_reflection_case(const char *extra, bool complete)
    LLVMMemoryBufferRef input = shared_bitcode("ret void\n", false, extra);
    struct reflection_expectation expected = {complete, false, STELA_AIR_UINT, 1};
    struct stela_air_error error;
-   CHECK(stela_air_inspect(LLVMGetBufferStart(input), LLVMGetBufferSize(input), 8,
+   CHECK(stela_air_inspect(LLVMGetBufferStart(input), LLVMGetBufferSize(input), NULL, 8,
                           inspect_reflection, &expected, &error));
    /* A conservative absent-reflection result must not leak its local failure
     * into otherwise successful original LLVM/module inspection. */
@@ -2645,6 +2695,10 @@ shared_reflection_tests(void)
       "@s = internal addrspace(3) global [3 x [4 x <4 x float>]] undef, align 16\n",
       "@s = internal unnamed_addr addrspace(3) global [32 x i32] undef, align 4\n",
       "@s = internal addrspace(3) global i64 undef\n", /* Original ABI alignment. */
+      "@s = internal addrspace(3) global {i32,i32} undef, align 4\n",
+      "@s = internal addrspace(3) global half undef, align 2\n",
+      /* Apple's compiler zeroes atomics, which Metal leaves undefined. */
+      "@s = internal addrspace(3) global [2 x {i32}] zeroinitializer, align 4\n",
    };
    for (unsigned i = 0; i < ARRAY_SIZE(good); i++)
       shared_reflection_case(good[i], true);
@@ -2654,14 +2708,13 @@ shared_reflection_tests(void)
       "@s = external addrspace(3) global i32\n",
       "@s = internal thread_local addrspace(3) global i32 undef, align 4\n",
       "@s = internal addrspace(3) externally_initialized global i32 undef, align 4\n",
-      "@s = internal addrspace(3) global i32 0, align 4\n",
+      "@s = internal addrspace(3) global i32 1, align 4\n",
       "@s = internal addrspace(3) global i32 poison, align 4\n",
       "@s = internal addrspace(3) global i32 undef, section \"unqualified\", align 4\n",
       "@s = internal addrspace(3) global i32 undef, align 4, !custom !77\n!77 = !{!\"unqualified\"}\n",
       "@s = internal addrspace(3) global [0 x i32] undef, align 4\n",
       "@s = internal addrspace(3) global [4294967296 x i32] undef, align 4\n",
-      "@s = internal addrspace(3) global {i32,i32} undef, align 4\n",
-      "@s = internal addrspace(3) global half undef, align 2\n",
+      "@s = internal addrspace(3) global {i32,ptr} undef, align 8\n",
       "@s = internal addrspace(3) global i1 undef, align 1\n",
       "@s = internal addrspace(3) global <8 x i32> undef, align 32\n",
    };
@@ -2685,10 +2738,10 @@ shared_reflection_tests(void)
    }
    shared_reflection_case(globals, false);
    shared_refusal("ret void\n", globals, STELA_AIR_LIMIT);
-   /* Old AIR2.8 unused shared globals still allocate nothing in the executable
-    * path; they cannot gain a new qualified reflection profile by this change. */
+   /* AIR 2.8's unused shared globals reflect as any version's, and allocate
+    * nothing in the executable path. */
    reflection_inspection_case(stela_air_test_prefix, "ret void\n", stela_air_test_metadata,
-                              good[3], false, false, STELA_AIR_UINT, 1);
+                              good[3], true, false, STELA_AIR_UINT, 1);
    LLVMMemoryBufferRef input = stela_air_test_bitcode("ret void\n", good[3]);
    struct shared_bindings bindings = {0}; struct stela_air_error error;
    nir_shader *nir = shared_translate(input, &test_nir_options, &bindings, 0, &error);
@@ -2702,34 +2755,34 @@ inspection_tests(void)
    struct stela_air_error error;
    unsigned calls = 0;
    LLVMMemoryBufferRef input = stela_air_test_bitcode(stela_air_test_store_body, "");
-   CHECK(stela_air_inspect(LLVMGetBufferStart(input), LLVMGetBufferSize(input), 8, inspect_entry, &calls, &error));
+   CHECK(stela_air_inspect(LLVMGetBufferStart(input), LLVMGetBufferSize(input), NULL, 8, inspect_entry, &calls, &error));
    CHECK(calls == 1 && error.kind == STELA_AIR_OK);
-   CHECK(!stela_air_inspect(LLVMGetBufferStart(input), LLVMGetBufferSize(input), 0, inspect_entry, &calls, &error));
+   CHECK(!stela_air_inspect(LLVMGetBufferStart(input), LLVMGetBufferSize(input), NULL, 0, inspect_entry, &calls, &error));
    CHECK(error.kind == STELA_AIR_INPUT && calls == 1);
    LLVMDisposeMemoryBuffer(input);
    char *metadata = replace_once(stela_air_test_metadata, "!air.kernel = !{!2}", "!air.kernel = !{!2, !2}");
    input = stela_air_test_custom_bitcode(stela_air_test_prefix, stela_air_test_store_body, metadata, "");
    calls = 0;
-   CHECK(!stela_air_inspect(LLVMGetBufferStart(input), LLVMGetBufferSize(input), 8, inspect_entry, &calls, &error));
+   CHECK(!stela_air_inspect(LLVMGetBufferStart(input), LLVMGetBufferSize(input), NULL, 8, inspect_entry, &calls, &error));
    CHECK(error.kind == STELA_AIR_METADATA && calls == 0); /* No partial manifest. */
    LLVMDisposeMemoryBuffer(input); free(metadata);
    metadata = replace_once(stela_air_test_metadata, "i32 7, i32 1", "i32 128, i32 1");
    input = stela_air_test_custom_bitcode(stela_air_test_prefix, stela_air_test_store_body, metadata, "");
-   CHECK(!stela_air_inspect(LLVMGetBufferStart(input), LLVMGetBufferSize(input), 8, inspect_entry, &calls, &error));
+   CHECK(!stela_air_inspect(LLVMGetBufferStart(input), LLVMGetBufferSize(input), NULL, 8, inspect_entry, &calls, &error));
    CHECK(error.kind == STELA_AIR_METADATA && calls == 0);
    LLVMDisposeMemoryBuffer(input); free(metadata);
    /* Preserve the original integer shape rule: a scalar or uint3 builtin,
     * never a one-lane LLVM vector masquerading as a scalar argument. */
    char *prefix = replace_once(stela_air_test_prefix, "i32 %tid", "<1 x i32> %tid");
    input = stela_air_test_custom_bitcode(prefix, "ret void\n", stela_air_test_metadata, "");
-   CHECK(!stela_air_inspect(LLVMGetBufferStart(input), LLVMGetBufferSize(input), 8, inspect_entry, &calls, &error));
+   CHECK(!stela_air_inspect(LLVMGetBufferStart(input), LLVMGetBufferSize(input), NULL, 8, inspect_entry, &calls, &error));
    CHECK(error.kind == STELA_AIR_ARGUMENT && calls == 0);
    nir_shader *invalid_shape = translate(input, &test_nir_options, 100, &error);
    CHECK(!invalid_shape && error.kind == STELA_AIR_ARGUMENT);
    LLVMDisposeMemoryBuffer(input); free(prefix);
    /* Inspection is NOT a promise that a body/resource/pipeline can compile. */
    input = stela_air_test_bitcode("call void @unknown()\nret void\n", "declare void @unknown()\n");
-   CHECK(stela_air_inspect(LLVMGetBufferStart(input), LLVMGetBufferSize(input), 8, inspect_entry, &calls, &error));
+   CHECK(stela_air_inspect(LLVMGetBufferStart(input), LLVMGetBufferSize(input), NULL, 8, inspect_entry, &calls, &error));
    CHECK(calls == 1);
    nir_shader *nir = translate(input, &test_nir_options, 100, &error);
    CHECK(!nir && error.kind == STELA_AIR_INSTRUCTION);

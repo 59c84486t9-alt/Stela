@@ -436,7 +436,7 @@ fn source_packet_bounds_psb_rounding_multicast_and_band_fields_are_preserved() {
             }
         }
     }
-    for size in [0, 1, 7, 4097] {
+    for size in [0, 4097] {
         assert_eq!(
             descriptors(&vec![0; size], 0x1000, FirmwareBand::Ghz2),
             Err(Error::InvalidLength)

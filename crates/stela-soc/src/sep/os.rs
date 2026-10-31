@@ -115,7 +115,13 @@ impl SepOs {
     /// the xART pair over the anti-replay store `store`, the keystore,
     /// BootPolicy and the credential manager. With `observe`, their traffic
     /// is journaled (a diagnostic mode: it checks nothing beyond its log).
-    pub fn with_services(mut self, store: Nonces<Box<dyn Backend>>, observe: bool) -> Result<Self> {
+    /// macOS LocalPolicies carry `kexts`.
+    pub fn with_services(
+        mut self,
+        store: Nonces<Box<dyn Backend>>,
+        observe: bool,
+        kexts: Option<stela_formats::local_policy::Kexts>,
+    ) -> Result<Self> {
         let mut services = xart::services().to_vec();
         services.extend([
             keystore::service(),
@@ -130,7 +136,7 @@ impl SepOs {
         self.services = Some(Services {
             xart: Xart::new(store),
             keystore,
-            boot_policy: BootPolicy::default(),
+            boot_policy: BootPolicy::new(kexts),
         });
         Ok(self)
     }

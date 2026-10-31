@@ -910,7 +910,7 @@ static void source_input(int argc,char **argv)
               &error) == STELA_METAL_ASSEMBLY_OK);
     struct context c;context(&c,"skl");
     struct stela_intel_air_options opts = options();
-    opts.fp_profile = STELA_AIR_FP_APPLE_32023_922_AIR29_MSL41;
+    opts.fp_profile = STELA_AIR_FP_METAL;
     struct stela_intel_air_compilation *owner=compile(&c,library,0,&opts,STELA_INTEL_AIR_OK);
     expect_owned("original-source-owner",c.name);validate(&c,library,owner,"original-source-owner");
     free(air.data);free(source.data);stela_metal_assembly_destroy(&library);ralloc_free(c.memory);
@@ -954,7 +954,7 @@ static void threadgroup_input(int argc,char **argv)
     struct bytes air = read_file(argv[2]);
     struct facts f = {.name = argv[3]};
     struct stela_air_error air_error;
-    CHECK(stela_air_inspect(air.data,air.size,256,inspect,&f,&air_error)&&f.found);
+    CHECK(stela_air_inspect(air.data,air.size, NULL,256,inspect,&f,&air_error)&&f.found);
     struct bytes bytes=archive(air.data,air.size,f.name,f.air,f.major,f.minor,f.osmajor,f.osminor);
     struct stela_metal_assembly *library=assemble(&bytes);free(bytes.data);free(air.data);
     /* Gen7.0 refuses byte or misaligned shared access, which an input may use. */
@@ -1051,7 +1051,7 @@ static void shared_refusal(int argc,char **argv)
     struct bytes air = read_file(argv[2]);
     struct facts f = {.name = argv[3]};
     struct stela_air_error inspect_error;
-    CHECK(stela_air_inspect(air.data,air.size,256,inspect,&f,&inspect_error)&&f.found);
+    CHECK(stela_air_inspect(air.data,air.size, NULL,256,inspect,&f,&inspect_error)&&f.found);
     struct bytes bytes=archive(air.data,air.size,f.name,f.air,f.major,f.minor,f.osmajor,f.osminor);
     struct stela_metal_assembly *library=assemble(&bytes);free(bytes.data);free(air.data);
     struct intel_device_info device;const char *name;
@@ -1171,7 +1171,7 @@ int main(int argc,char **argv)
         struct bytes air = read_file(argv[2]);
         struct facts f = {.name = argv[3]};
         struct stela_air_error error;
-        CHECK(stela_air_inspect(air.data,air.size,256,inspect,&f,&error)&&f.found);
+        CHECK(stela_air_inspect(air.data,air.size, NULL,256,inspect,&f,&error)&&f.found);
         struct bytes b=archive(air.data,air.size,f.name,f.air,f.major,f.minor,f.osmajor,f.osminor);
         struct stela_metal_assembly *library=assemble(&b);free(air.data);free(b.data);
         targets(library,

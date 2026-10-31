@@ -64,6 +64,28 @@ unsigned long __msecs_to_jiffies(const unsigned int m)
 	return m > jiffies_to_msecs(MAX_JIFFY_OFFSET) ? MAX_JIFFY_OFFSET : _msecs_to_jiffies(m);
 }
 
+u64 nsecs_to_jiffies64(u64 n)
+{
+	return div_u64(n, NSEC_PER_SEC / HZ);
+}
+
+unsigned long nsecs_to_jiffies(u64 n)
+{
+	return (unsigned long)nsecs_to_jiffies64(n);
+}
+
+struct timespec64 ns_to_timespec64(s64 nsec)
+{
+	s32 remainder;
+	s64 seconds = div_s64_rem(nsec, NSEC_PER_SEC, &remainder);
+
+	if (remainder < 0) {
+		seconds--;
+		remainder += NSEC_PER_SEC;
+	}
+	return (struct timespec64){.tv_sec = seconds, .tv_nsec = remainder};
+}
+
 unsigned long __usecs_to_jiffies(const unsigned int u)
 {
 	return u > jiffies_to_usecs(MAX_JIFFY_OFFSET) ? MAX_JIFFY_OFFSET : _usecs_to_jiffies(u);

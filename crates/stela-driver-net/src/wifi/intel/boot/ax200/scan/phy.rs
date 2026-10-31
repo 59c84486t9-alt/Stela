@@ -5,6 +5,7 @@
 //! Original-owner unbound PHY0 and its complete RX-chain configuration.
 //! No MAC binding, autonomous response, station or data queue is created.
 use super::*;
+use crate::wifi::intel::association::SpatialPowerSave;
 use crate::wifi::station::{operations::ChannelDefinition, phy::Width};
 use regulatory::Operation;
 mod tx_power;
@@ -89,6 +90,7 @@ pub struct Ax200Phy<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> {
     deadline: Option<crate::Deadline>,
     responses: Vec<CommandResponse>,
     removing: bool,
+    spatial: SpatialPowerSave,
     first_error: Option<Ax200PhyError>,
 }
 impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Scan<'a, Q, B, O> {
@@ -117,6 +119,7 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Scan<'a, Q, B, O> {
             deadline: None,
             responses: Vec::new(),
             removing: false,
+            spatial: SpatialPowerSave::Off,
             first_error: None,
         })
     }
@@ -159,6 +162,36 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Phy<'a, Q, B, O> {
     pub fn phy_id_and_color(&self) -> Option<u32> {
         (self.phase == Ax200PhyPhase::BindingRequired).then_some(0)
     }
+    /// Hold the receive chains to `spatial` in the commands to come, unless a
+    /// lone antenna or firmware's own chains (`iwl_mvm_has_rlc_offload`) leave
+    /// nothing to hold.
+    pub(in crate::wifi::intel::boot) fn limit_receive(
+        &mut self,
+        spatial: SpatialPowerSave,
+    ) -> bool {
+        let Some(add) = self.commands.first() else {
+            return false;
+        };
+        let word = u32::from_le_bytes(add.bytes[20..24].try_into().unwrap());
+        let rx = (word >> 1 & 0xf) as u8;
+        if self.commands.len() > 1 || rx.count_ones() < 2 {
+            return false;
+        }
+        self.spatial = spatial;
+        let mode = self
+            .scan
+            .mac
+            .country
+            .board
+            .scan
+            .mcc
+            .setup
+            .options
+            .power_mode;
+        let chains = limited_chains(word, spatial, free_chains(rx, mode));
+        self.commands[0].bytes[20..24].copy_from_slice(&chains.to_le_bytes());
+        true
+    }
     /// `iwl_mvm_phy_ctxt_changed`: the commands that widen the bound context
     /// to `definition`, or none for a width firmware does not take.
     pub(in crate::wifi::intel::boot) fn changed(
@@ -175,6 +208,61 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Phy<'a, Q, B, O> {
         let modified = modified(add, definition, wide_ofdma, version, ultra_high_band)?;
         let chains = self.commands.get(1).cloned();
         Some(core::iter::once(modified).chain(chains).collect())
+    }
+    /// `iwl_mld_phy_fw_action`: the PHY context `seat` of a link on
+    /// `definition`, added and then moved as `iwl_mvm_phy_ctxt_changed` moves
+    /// the first.
+    pub(in crate::wifi::intel::boot) fn context(
+        &mut self,
+        seat: u8,
+        definition: &ChannelDefinition,
+        wide_ofdma: Option<&ChannelDefinition>,
+    ) -> Option<Vec<PhyCommand>> {
+        let chains = self.scan.mac.initialized_nvm().information.rx_chains;
+        let mode = self
+            .scan
+            .mac
+            .country
+            .board
+            .scan
+            .mcc
+            .setup
+            .options
+            .power_mode;
+        let firmware = &self.boot().firmware;
+        let ultra_high_band = firmware.supports_capability(48);
+        let version = firmware
+            .command_version(PHY.wire().group, PHY.opcode)?
+            .command_version;
+        let mut commands = configuration(firmware, chains, definition.control, mode).ok()?;
+        if let Some(add) = commands.first_mut() {
+            let word = u32::from_le_bytes(add.bytes[20..24].try_into().unwrap());
+            let chains = limited_chains(word, self.spatial, word >> 10 & 3);
+            add.bytes[20..24].copy_from_slice(&chains.to_le_bytes());
+        }
+        let moved = modified(
+            commands.first()?,
+            definition,
+            wide_ofdma,
+            version,
+            ultra_high_band,
+        )?;
+        commands.push(moved);
+        for command in &mut commands {
+            command.bytes[..4].copy_from_slice(&u32::from(seat).to_le_bytes());
+        }
+        Some(commands)
+    }
+    /// The removal of the context `seat` of a link on `definition`.
+    pub(in crate::wifi::intel::boot) fn context_removal(
+        &mut self,
+        seat: u8,
+        definition: &ChannelDefinition,
+    ) -> Option<PhyCommand> {
+        let mut command = self.context(seat, definition, None)?.swap_remove(0);
+        command.kind = PhyCommandKind::Remove;
+        command.bytes[4..8].copy_from_slice(&3u32.to_le_bytes());
+        Some(command)
     }
     pub fn take_other_notification(&mut self) -> Option<FirmwareNotification> {
         self.scan.take_other_notification()
@@ -457,11 +545,7 @@ fn configuration(
     if rx == 0 || rx & !7 != 0 {
         return Err(Ax200PhyError::Antennas);
     }
-    let chains = if mode == PowerMode::ContinuouslyAwake && rx.count_ones() > 1 {
-        2
-    } else {
-        1
-    };
+    let chains = free_chains(rx, mode);
     let chain_info = u32::from(rx) << 1 | chains << 10 | chains << 12;
     let rlc = fw
         .command_version(RLC.group, RLC.opcode)
@@ -511,6 +595,26 @@ fn configuration(
         });
     }
     Ok(commands)
+}
+
+/// The chains of a PHY SM power save leaves alone: 2 for diversity while awake.
+fn free_chains(rx: u8, mode: PowerMode) -> u32 {
+    if mode == PowerMode::ContinuouslyAwake && rx.count_ones() > 1 {
+        2
+    } else {
+        1
+    }
+}
+
+/// `iwl_mvm_phy_ctxt_set_rxchain`: the chain word under `spatial`, with `free`
+/// chains when SM power save is off.
+fn limited_chains(word: u32, spatial: SpatialPowerSave, free: u32) -> u32 {
+    let (idle, active) = match spatial {
+        SpatialPowerSave::Off => (free, free),
+        SpatialPowerSave::Dynamic => (1, 2),
+        SpatialPowerSave::Static => (1, 1),
+    };
+    word & 0x3ff | idle << 10 | active << 12
 }
 
 /// `iwl_mvm_get_ctrl_pos`: the two low bits and the extension bit count 20 MHz
@@ -704,6 +808,22 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn sm_power_save_holds_the_chain_counts_and_no_more() {
+        let word = 3 << 1 | 2 << 10 | 2 << 12;
+        assert_eq!(limited_chains(word, SpatialPowerSave::Off, 2), word);
+        assert_eq!(
+            limited_chains(word, SpatialPowerSave::Dynamic, 2),
+            3 << 1 | 1 << 10 | 2 << 12
+        );
+        assert_eq!(
+            limited_chains(word, SpatialPowerSave::Static, 2),
+            3 << 1 | 1 << 10 | 1 << 12
+        );
+        assert_eq!(free_chains(3, PowerMode::ContinuouslyAwake), 2);
+        assert_eq!(free_chains(1, PowerMode::ContinuouslyAwake), 1);
     }
 
     #[test]

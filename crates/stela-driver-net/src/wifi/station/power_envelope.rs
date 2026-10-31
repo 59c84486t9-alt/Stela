@@ -27,6 +27,17 @@ pub struct Eirp {
     count: u8,
 }
 
+impl Eirp {
+    /// The limit at `index` of the widths, in dBm.
+    pub fn limit(&self, index: usize) -> i8 {
+        if index < usize::from(self.count) {
+            self.power[index] / 2
+        } else {
+            i8::MAX
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Psd {
     pub power: [i8; PSD_ENTRIES],
@@ -34,6 +45,41 @@ pub struct Psd {
     count: u8,
     /// The entries for the AP's HE channel, which come first.
     n: u8,
+}
+
+impl Psd {
+    /// `iwl_mld_get_primary_psd`: the limit on the control subchannel of
+    /// `definition`, in dBm/MHz.
+    pub fn primary(&self, definition: &ChannelDefinition) -> i8 {
+        if !self.valid {
+            return i8::MAX;
+        }
+        let start = definition.center1_mhz as i32 - mhz(definition.width) as i32 / 2;
+        let index = (i32::from(definition.control.frequency_mhz) - start - 10) / 20;
+        match usize::try_from(index) {
+            Ok(index) if index < usize::from(self.count) => self.power[index] / 2,
+            _ => i8::MAX,
+        }
+    }
+
+    /// The mean of the limits across `subchannels`, in dBm/MHz.
+    pub fn mean(&self, subchannels: usize) -> i8 {
+        if !self.valid {
+            return i8::MAX;
+        }
+        let count = subchannels.min(usize::from(self.count));
+        let limits = self.power[..count]
+            .iter()
+            .filter(|&&limit| limit != i8::MIN);
+        let (sum, valid) = limits.fold((0, 0), |(sum, valid), &limit| {
+            (sum + i32::from(limit), valid + 1)
+        });
+        if valid == 0 {
+            i8::MAX
+        } else {
+            (sum / valid / 2) as i8
+        }
+    }
 }
 
 const EIRP: Eirp = Eirp {

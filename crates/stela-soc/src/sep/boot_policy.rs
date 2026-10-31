@@ -49,6 +49,7 @@ use super::{
 };
 use crate::Result;
 use stela_contracts::refuse;
+use stela_formats::local_policy::Kexts;
 
 /// Stela's catalog ID for the service.
 pub const ID: u8 = 0x13;
@@ -113,9 +114,18 @@ pub(super) fn not_supported(frame: Frame) -> Answer {
 #[derive(Default)]
 pub struct BootPolicy {
     nonces: nonces::PolicyNonces,
+    kexts: Option<Kexts>,
 }
 
 impl BootPolicy {
+    /// The service of a machine whose macOS policies grant `kexts`.
+    pub fn new(kexts: Option<Kexts>) -> Self {
+        Self {
+            kexts,
+            ..Self::default()
+        }
+    }
+
     /// Read one AP command and write its reply using the same machine store
     /// as xART. A durable or uncertain mutation is never automatically retried
     /// and cannot receive a failure acknowledgement.
@@ -154,7 +164,8 @@ impl BootPolicy {
             return self.nonces.request(word(4), frame, payload, store, entropy);
         }
         if local_policy::accepts(word(4)) {
-            return local_policy::request(word(4), frame, payload, store, &self.nonces);
+            let kexts = self.kexts.as_ref();
+            return local_policy::request(word(4), frame, payload, store, &self.nonces, kexts);
         }
         if word(4) == CURRENT_OS_TYPE && length == HEADER_BYTES {
             return Err(unsupported(refuse!(

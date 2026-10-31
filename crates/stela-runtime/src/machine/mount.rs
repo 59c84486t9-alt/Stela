@@ -496,6 +496,7 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
             SepProvisioning {
                 security: sep.security,
                 ecid,
+                kexts: sep.kexts,
                 observe: sep_observe,
                 state,
             },

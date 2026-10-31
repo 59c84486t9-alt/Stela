@@ -18,6 +18,10 @@
 /lib/kobject.c
 /lib/kobject_uevent.c
 /lib/ctype.c
+/lib/string.c
+/lib/hexdump.c
+/lib/ratelimit.c
+/drivers/i2c/algos/i2c-algo-bit.c
 /lib/bitrev.c
 /lib/find_bit.c
 /lib/find_random_bit.c
@@ -47,6 +51,9 @@
 /kernel/sched/core.c
 /kernel/sched/Makefile
 /kernel/sched/wait_support.c
+/kernel/sched/wait.c
+/kernel/sched/swait.c
+/kernel/sched/completion.c
 /kernel/exit.c
 /kernel/Makefile
 /kernel/rcu/update.c
@@ -75,3 +82,14 @@
 /init/init_task.c
 /lib/refcount.c
 /lib/refcount_lock.c
+/drivers/dma-buf/Makefile
+/drivers/dma-buf/dma-fence.c
+/drivers/dma-buf/dma-resv.c
+/drivers/dma-buf/dma-buf.c
+/drivers/dma-buf/dma-buf-mapping.c
+/drivers/dma-buf/sync_file.c
+/drivers/dma-buf/dma-fence-chain.c
+/drivers/dma-buf/dma-fence-array.c
+/drivers/dma-buf/dma-fence-unwrap.c
+/lib/maple_tree.c
+/drivers/video/hdmi.c

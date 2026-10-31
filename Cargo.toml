@@ -53,7 +53,7 @@ default-members = [
     "crates/stela-tls",
 ]
 # The UEFI application builds for its own target with aborting panics.
-exclude = ["crates/stela-boot", "third_party/smoltcp"]
+exclude = ["crates/stela-boot", "crates/stela-mesa", "third_party/smoltcp"]
 resolver = "2"
 
 [workspace.package]

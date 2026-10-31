@@ -20,6 +20,7 @@ mod boot_image;
 pub(crate) mod bundle;
 mod display;
 pub(crate) mod fdr;
+mod gpu;
 pub(crate) mod host;
 mod input;
 pub(crate) mod install;

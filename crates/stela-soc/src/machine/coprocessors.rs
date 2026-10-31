@@ -311,6 +311,7 @@ impl AppleDevices {
         let SepProvisioning {
             security,
             ecid,
+            kexts,
             observe,
             state,
         } = provisioning;
@@ -328,7 +329,8 @@ impl AppleDevices {
         }
         let device = self.bus.add(Box::new(
             Sep::new(entropy, lines, security, ecid, observe, state)?
-                .with_inline_engine(self.inline_keys.clone()),
+                .with_inline_engine(self.inline_keys.clone())
+                .with_kexts(kexts),
         ));
         self.bus
             .map(device, wrapper.physical, wrapper.bytes, 0)

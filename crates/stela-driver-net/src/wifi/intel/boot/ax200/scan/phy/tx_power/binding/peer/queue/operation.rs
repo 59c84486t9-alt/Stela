@@ -7,12 +7,16 @@
 //! as `iwl_mvm_tvqm_enable_txq` adds it, and TX responses and a removal's
 //! flush reclaim what the device finished.
 use super::*;
+use crate::wifi::intel::boot::ax200::scan::wire as scan_wire;
 use crate::wifi::{
     Channel,
     intel::{
+        association::SpatialPowerSave,
         firmware::Firmware,
+        mcc,
         transmit::{Parameters, Prepared, ring},
     },
+    regulatory::database::Country,
     station::phy::Mode,
 };
 
@@ -65,6 +69,86 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200ManagementQueue<'a,
         )
     }
 
+    /// Whether the PHY's commands to come hold the receive chains to `spatial`.
+    pub fn limit_receive(&mut self, spatial: SpatialPowerSave) -> bool {
+        self.peer().binding.power.phy.limit_receive(spatial)
+    }
+
+    /// `iwl_mld_change_chanctx`: the context `seat` now runs `definition`.
+    pub fn phy_moved(
+        &mut self,
+        seat: u8,
+        definition: &ChannelDefinition,
+        wide_ofdma: Option<&ChannelDefinition>,
+    ) -> Option<(Id, Vec<u8>)> {
+        let phy = &mut self.peer().binding.power.phy;
+        let commands = phy.context(seat, definition, wide_ofdma)?;
+        let moved = commands.last()?;
+        Some((moved.id(), moved.bytes().to_vec()))
+    }
+
+    /// The commands that give another link the PHY context `seat`.
+    pub fn phy_context(
+        &mut self,
+        seat: u8,
+        definition: &ChannelDefinition,
+        wide_ofdma: Option<&ChannelDefinition>,
+    ) -> Option<Vec<(Id, Vec<u8>)>> {
+        let phy = &mut self.peer().binding.power.phy;
+        let commands = phy.context(seat, definition, wide_ofdma)?;
+        Some(
+            commands
+                .iter()
+                .map(|command| (command.id(), command.bytes().to_vec()))
+                .collect(),
+        )
+    }
+
+    /// The removal of the PHY context `seat` of a link on `definition`.
+    pub fn phy_removal(
+        &mut self,
+        seat: u8,
+        definition: &ChannelDefinition,
+    ) -> Option<(Id, Vec<u8>)> {
+        let phy = &mut self.peer().binding.power.phy;
+        let command = phy.context_removal(seat, definition)?;
+        Some((command.id(), command.bytes().to_vec()))
+    }
+
+    /// The internal MLO scan of `request`'s channels beside firmware link
+    /// `link`.
+    pub fn internal_scan(
+        &mut self,
+        request: &crate::wifi::scan::Request,
+        local: crate::Mac,
+        link: u8,
+        traffic: Ax200ScanTraffic,
+    ) -> Result<(Id, Vec<u8>), Ax200ScanError> {
+        let version = scan_wire::validate(self.firmware())?;
+        let bytes = scan_wire::encode_internal(request, version, local, link, traffic)?;
+        Ok((scan_wire::REQUEST, bytes))
+    }
+
+    /// The running scan's end, once all it heard was taken.
+    pub fn take_scan_completion(&mut self) -> Option<FirmwareNotification> {
+        let boot = self.peer().binding.power.phy.boot();
+        let end = (scan_wire::COMPLETE_OPCODE, scan_wire::COMPLETE_GROUP);
+        if boot.hcmd.matching_precedes((0xc1, 0), end) {
+            return None;
+        }
+        boot.take_matching_notification(end.0, end.1)
+    }
+
+    /// The abort of the one scan firmware runs.
+    pub fn scan_abort() -> (Id, Vec<u8>) {
+        (scan_wire::ABORT, alloc::vec![0; 8])
+    }
+
+    /// The chain's transmit limit for the firmware link `seat`, within `dbm`.
+    pub fn transmit_limit(&mut self, seat: u8, dbm: i32) -> Option<(Id, Vec<u8>)> {
+        self.peer().binding.power.link_limit(seat, dbm)
+    }
+
     /// Publish a firmware command under the leases.
     ///
     /// # Safety
@@ -108,6 +192,18 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200ManagementQueue<'a,
     /// The firmware's last country change, which it asks the host to apply.
     pub fn take_country_update(&mut self) -> Option<FirmwareNotification> {
         self.peer().binding.power.phy.boot().take_country_update()
+    }
+
+    /// Take up firmware's later word on the country: the channels it leaves,
+    /// with their flags.
+    pub fn adopt_country(
+        &mut self,
+        country: Country,
+        profile: mcc::Response,
+    ) -> Result<Vec<(Channel, u32)>, mcc::channel::InventoryMismatch> {
+        let scan = &mut self.peer().binding.power.phy.scan;
+        scan.mac.country.adopt(country, profile)?;
+        Ok(scan.regulated_channels())
     }
 
     /// How many frames `tid`'s queue has not finished.
@@ -192,6 +288,7 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200ManagementQueue<'a,
         &mut self,
         tid: u8,
         mode: Mode,
+        stations: u32,
         source: &dyn PageSource,
     ) -> Result<CommandTicket, Ax200ManagementQueueError> {
         let peer = self.peer.as_mut().unwrap();
@@ -220,7 +317,7 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200ManagementQueue<'a,
                 let command = memory
                     .as_ref()
                     .unwrap()
-                    .configuration(1, tid)
+                    .configuration(stations, tid)
                     .map_err(Ax200ManagementQueueError::Queue)?;
                 memory
                     .as_mut()

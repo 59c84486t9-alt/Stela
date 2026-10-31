@@ -1,3 +1,25 @@
-# The C API declarations of Stela's AIR frontend; no LLVM implementation.
-/llvm/include/llvm-c/
+# LLVM as the AIR compiler links it in stela.efi, its build and libc++.
+/llvm/include/
+/llvm/lib/
+!/llvm/lib/Target/*/
+/llvm/utils/TableGen/
+/llvm/cmake/
+/llvm/CMakeLists.txt
 /llvm/LICENSE.TXT
+/llvm/tools/CMakeLists.txt
+/llvm/utils/CMakeLists.txt
+/cmake/
+/third-party/siphash/
+/third-party/LICENSE.TXT
+/libcxx/include/
+/libcxx/src/
+/libcxx/vendor/
+/libcxx/LICENSE.TXT
+/libcxxabi/include/
+/libcxxabi/LICENSE.TXT
+/libc/shared/
+/libc/src/__support/
+/libc/hdr/
+/libc/include/llvm-libc-macros/
+/libc/include/llvm-libc-types/
+/libc/LICENSE.TXT

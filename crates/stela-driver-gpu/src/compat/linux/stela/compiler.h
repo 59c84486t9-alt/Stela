@@ -14,6 +14,9 @@
 #ifndef KBUILD_MODNAME
 #define KBUILD_MODNAME "stela-linux"
 #endif
+#ifndef KBUILD_MODFILE
+#define KBUILD_MODFILE "stela-linux"
+#endif
 
 /* Linux's -fshort-wchar contract also applies to hosted ELF builds; without
  * it, an original L"..." is incompatible with EFI's 16-bit character ABI. */

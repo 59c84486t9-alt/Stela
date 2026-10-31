@@ -4,6 +4,7 @@
 #include "llvm-c/BitWriter.h"
 #include "llvm-c/Core.h"
 #include "llvm-c/IRReader.h"
+#include "util/macros.h"
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -38,7 +39,8 @@ static const char *stela_air_test_metadata =
    "!8 = !{!\"air.compile.denorms_disable\"}\n"
    "!9 = !{!\"air.compile.fast_math_enable\"}\n"
    "!10 = !{!\"air.compile.framebuffer_fetch_enable\"}\n";
-static const char *stela_air_test_store_body =
+/* Not every test stores through it. */
+UNUSED static const char *stela_air_test_store_body =
    "%index = zext i32 %tid to i64\n"
    "%address = getelementptr i32, ptr addrspace(1) %out, i64 %index\n"
    "%input = load i32, ptr addrspace(1) %address, align 4\n"

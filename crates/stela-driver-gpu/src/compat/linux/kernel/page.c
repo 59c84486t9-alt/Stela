@@ -75,6 +75,17 @@ static struct {
 static u64 last_generation;
 static bool in_callback;
 
+/* The one memory node the catalog's pages form, for what Linux code reads of
+ * it, and its page counters, which nothing moves. */
+struct pglist_data contig_page_data;
+atomic_long_t vm_node_stat[NR_VM_NODE_STAT_ITEMS];
+DEFINE_STATIC_KEY_MAYBE(CONFIG_INIT_ON_FREE_DEFAULT_ON, init_on_free);
+
+void si_meminfo(struct sysinfo *info)
+{
+	*info = (struct sysinfo){.totalram = catalog.page_count, .mem_unit = PAGE_SIZE};
+}
+
 #ifdef STELA_LINUX_PAGE_TEST
 static size_t metadata_fail_after = NO_INDEX;
 static size_t metadata_live;
@@ -130,8 +141,13 @@ static void require_catalog(void)
 
 bool stela_linux_page_request_basic(u32 gfp)
 {
+	/* x86-64 has no high memory, Stela no cpusets or NUMA nodes, and how hard
+	 * to reclaim means nothing to an allocator that does not reclaim. TTM's
+	 * and nouveau's allocations carry all of these. */
 	gfp_t allowed = __GFP_ZERO | __GFP_COMP | __GFP_NOWARN | __GFP_NOMEMALLOC |
-		__GFP_DIRECT_RECLAIM | __GFP_KSWAPD_RECLAIM | __GFP_IO | __GFP_FS;
+		__GFP_DIRECT_RECLAIM | __GFP_KSWAPD_RECLAIM | __GFP_IO | __GFP_FS |
+		__GFP_HIGHMEM | __GFP_HARDWALL | __GFP_THISNODE | __GFP_NORETRY |
+		__GFP_RETRY_MAYFAIL;
 	if (!IS_ENABLED(CONFIG_MEMCG))
 		allowed |= __GFP_ACCOUNT;
 	return !(gfp & ~(__force u32)allowed);
@@ -254,6 +270,7 @@ static int register_inventory(
     catalog.free_records = 0;
     catalog.retired = NO_INDEX;
     catalog.next_stack_nonce = 1;
+    atomic_long_set(&contig_page_data.node_zones[ZONE_NORMAL].managed_pages, (long)count);
     last_generation = generation;
     return 0;
 }
@@ -1727,9 +1744,8 @@ static void reclaimable_policy(void)
 		       stela_linux_page_request_blocking(reclaimable));
 	}
 	const gfp_t unsupported[] = {
-		__GFP_MOVABLE, __GFP_DMA, __GFP_DMA32, __GFP_HIGHMEM, __GFP_HIGH,
-		__GFP_MEMALLOC, GFP_ATOMIC, __GFP_NOFAIL, __GFP_RETRY_MAYFAIL,
-		__GFP_NORETRY, __GFP_THISNODE, __GFP_WRITE, __GFP_HARDWALL,
+		__GFP_MOVABLE, __GFP_DMA, __GFP_DMA32, __GFP_HIGH,
+		__GFP_MEMALLOC, GFP_ATOMIC, __GFP_NOFAIL, __GFP_WRITE,
 		(__force gfp_t)(1U << 31),
 	};
 	for (size_t i = 0; i < ARRAY_SIZE(unsupported); i++) {

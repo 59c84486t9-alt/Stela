@@ -104,6 +104,31 @@ impl DmaPages {
         })
     }
 
+    /// A sequence of pages another allocator owns, such as Linux's.
+    ///
+    /// # Safety
+    /// The pages are real RAM with `attribute`, and that allocator keeps them
+    /// pinned for as long as this sequence or a mapping of it is live.
+    pub unsafe fn from_physical(
+        physical: Vec<u64>,
+        shift: u8,
+        attribute: CacheAttribute,
+    ) -> Result<Self, MemoryError> {
+        if physical.is_empty() || physical.len().checked_shl(shift.into()).is_none() {
+            return Err(MemoryError::InvalidSize);
+        }
+        let scatter = Arc::try_new(Scatter {
+            _ranges: Vec::new(),
+            physical,
+            shift,
+            attribute,
+        })
+        .map_err(|_| MemoryError::OutOfMemory)?;
+        Ok(Self {
+            backing: Backing::Scatter(scatter),
+        })
+    }
+
     /// Return the original single allocation when this sequence has one.
     /// Scatter sequences never invent a contiguous CPU view.
     pub fn as_single(&self) -> Option<&PinnedPages> {

@@ -236,7 +236,9 @@ fn register(os: &mut SepOs, service: u8, input: u32, output: u32) {
 
 #[test]
 fn xart_requests_are_answered_after_their_ool_input_is_read() {
-    let mut os = SepOs::new(None).with_services(store(), false).unwrap();
+    let mut os = SepOs::new(None)
+        .with_services(store(), false, None)
+        .unwrap();
     let advertised = map_shared(&mut os, shm(0x1234_4000, 0x20)).unwrap();
     // OS active, then name and capacities for each of xarm, xars, sks,
     // pnon and scrd.
@@ -314,7 +316,9 @@ fn xart_requests_are_answered_after_their_ool_input_is_read() {
 
 #[test]
 fn one_failed_request_does_not_discard_other_transactions_or_their_replies() {
-    let mut os = SepOs::new(None).with_services(store(), false).unwrap();
+    let mut os = SepOs::new(None)
+        .with_services(store(), false, None)
+        .unwrap();
     map_shared(&mut os, shm(0x4000, 4)).unwrap();
     for (tag, opcode, data) in [
         (1, control::SET_OOL_IN_LENGTH, 0x8000),
@@ -370,7 +374,9 @@ fn one_failed_request_does_not_discard_other_transactions_or_their_replies() {
 
 #[test]
 fn an_xart_refusal_is_answered_enotsup_from_the_dma_step() {
-    let mut os = SepOs::new(None).with_services(store(), false).unwrap();
+    let mut os = SepOs::new(None)
+        .with_services(store(), false, None)
+        .unwrap();
     map_shared(&mut os, shm(0x1234_4000, 0x20)).unwrap();
     let commit_hash = xart::XartMessage {
         service: xart::SLAVE_ID,
@@ -422,7 +428,9 @@ fn remap_validates_before_replacing_the_active_layout() {
 
 #[test]
 fn the_keystore_startup_is_answered_through_its_ool_buffers() {
-    let mut os = SepOs::new(None).with_services(store(), false).unwrap();
+    let mut os = SepOs::new(None)
+        .with_services(store(), false, None)
+        .unwrap();
     map_shared(&mut os, shm(0x1234_4000, 0x20)).unwrap();
     register(&mut os, keystore::ID, 0x8000, 0x8000);
     let request = keystore::tests::message(1, 0, 1, &[]);
@@ -452,7 +460,9 @@ fn the_keystore_startup_is_answered_through_its_ool_buffers() {
 
 #[test]
 fn system_identity_uses_the_machine_store_and_registered_dma_buffers() {
-    let mut os = SepOs::new(None).with_services(store(), false).unwrap();
+    let mut os = SepOs::new(None)
+        .with_services(store(), false, None)
+        .unwrap();
     map_shared(&mut os, shm(0x1234_4000, 0x20)).unwrap();
     register(&mut os, keystore::ID, 0x8000, 0x8000);
     let request = keystore::tests::system_request(2, keystore::tests::SIK_QUERY);
@@ -482,7 +492,9 @@ fn system_identity_uses_the_machine_store_and_registered_dma_buffers() {
 
 #[test]
 fn unsupported_system_key_metadata_drains_without_raw_observation() {
-    let mut os = SepOs::new(None).with_services(store(), false).unwrap();
+    let mut os = SepOs::new(None)
+        .with_services(store(), false, None)
+        .unwrap();
     map_shared(&mut os, shm(0x1234_4000, 0x20)).unwrap();
     register(&mut os, keystore::ID, 0x8000, 0x8000);
     let request = keystore::tests::system_request_with_operation(2, 7, keystore::tests::SIK_QUERY);
@@ -510,7 +522,9 @@ fn unsupported_system_key_metadata_drains_without_raw_observation() {
 
 #[test]
 fn recovery_policy_nonce_commands_use_the_registered_buffers_and_shared_store() {
-    let mut os = SepOs::new(None).with_services(store(), false).unwrap();
+    let mut os = SepOs::new(None)
+        .with_services(store(), false, None)
+        .unwrap();
     map_shared(&mut os, shm(0x1234_4000, 0x20)).unwrap();
     register(&mut os, boot_policy::ID, 0x1c000, 0x14000);
     let mut ram = stela_contracts::dma::test_support::Ram::new(0x10_0000, 0x30000);
@@ -619,7 +633,7 @@ impl Payload for UnusedPayload {
 
 #[test]
 fn services_are_advertised_and_journaled() {
-    let mut os = SepOs::new(None).with_services(store(), true).unwrap();
+    let mut os = SepOs::new(None).with_services(store(), true, None).unwrap();
     let advertised = map_shared(&mut os, shm(0x1234_4000, 0x20)).unwrap();
     // OS active, then xarm, xars, sks, pnon and scrd.
     assert_eq!(advertised.len(), 1 + 2 * 5);
@@ -667,7 +681,7 @@ fn services_are_advertised_and_journaled() {
 
 #[test]
 fn refusals_are_answered_and_observed() {
-    let mut os = SepOs::new(None).with_services(store(), true).unwrap();
+    let mut os = SepOs::new(None).with_services(store(), true, None).unwrap();
     map_shared(&mut os, shm(0x1234_4000, 0x20)).unwrap();
     let request = |service, tag| Frame {
         service,

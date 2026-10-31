@@ -281,6 +281,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.schedule_with_deadline(None)
     }
 
+    /// Whether the host called for this PE's core (`Hub::call_host`).
+    fn take_host_call(&self) -> bool {
+        self.parallel
+            .as_ref()
+            .is_some_and(|hub| hub.take_host_call(self.current))
+    }
+
     pub(super) fn schedule_with_deadline(
         &mut self,
         run_deadline: Option<super::budget::Deadline>,
@@ -290,6 +297,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
             self.read_mail()?;
         }
         self.take_starts()?;
+        if self.take_host_call() {
+            return Err(Stop::Waiting);
+        }
         if !self.processor_paused(self.current)
             && self.waiting.is_none()
             && self.statistics.blocks < self.slice_end
@@ -315,6 +325,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
             }
             if self.parallel.is_some() {
                 self.read_mail()?;
+            }
+            if self.take_host_call() {
+                if waited {
+                    self.host.arm_timer(None);
+                }
+                return Err(Stop::Waiting);
             }
             self.observe_writes();
             let now = self.now();

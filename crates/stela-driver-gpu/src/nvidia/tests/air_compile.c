@@ -680,7 +680,7 @@ static void source_input(int argc,char **argv)
     struct stela_metal_assembly_error error;struct stela_metal_assembly *library=NULL;
     CHECK(stela_metal_assemble_source(&assembly_options,&config,&request,&compiled,&library,&error)==STELA_METAL_ASSEMBLY_OK);
     struct nv_device_info device=stela_nvidia_target_device(89, ADA_COMPUTE_A);struct nak_compiler *nak=compiler(&device);
-    struct stela_nvidia_air_options opts=options();opts.fp_profile=STELA_AIR_FP_APPLE_32023_922_AIR29_MSL41;
+    struct stela_nvidia_air_options opts=options();opts.fp_profile=STELA_AIR_FP_METAL;
     struct stela_nvidia_air_compilation *owner=compile(&device,nak,library,0,&opts,STELA_NVIDIA_AIR_OK);
     expect_owned("original-source-owner",device.sm);validate(&device,nak,library,owner,"original-source-owner",false);
     free(air.data);free(source.data);stela_metal_assembly_destroy(&library);nak_compiler_destroy(nak);
@@ -709,7 +709,7 @@ static void threadgroup_input(int argc,char **argv)
     struct stela_metal_threadgroup_request request={.size=sizeof(request),.abi=STELA_METAL_THREADGROUP_ABI,
         .count=(uint32_t)(argc-5),.rows=rows};
     struct bytes air=read_file(argv[2]);struct facts f={.name=argv[3]};struct stela_air_error air_error;
-    CHECK(stela_air_inspect(air.data,air.size,256,inspect,&f,&air_error)&&f.found);
+    CHECK(stela_air_inspect(air.data,air.size, NULL,256,inspect,&f,&air_error)&&f.found);
     struct bytes bytes=archive(air.data,air.size,f.name,f.air,f.major,f.minor,f.osmajor,f.osminor);
     struct stela_metal_assembly *library=assemble(&bytes);free(bytes.data);free(air.data);
     expect_targets("threadgroup");
@@ -760,7 +760,7 @@ static void shared_refusal(int argc,char **argv)
 {
     CHECK(argc==4);
     struct bytes air=read_file(argv[2]);struct facts f={.name=argv[3]};struct stela_air_error inspect_error;
-    CHECK(stela_air_inspect(air.data,air.size,256,inspect,&f,&inspect_error)&&f.found);
+    CHECK(stela_air_inspect(air.data,air.size, NULL,256,inspect,&f,&inspect_error)&&f.found);
     struct bytes bytes=archive(air.data,air.size,f.name,f.air,f.major,f.minor,f.osmajor,f.osminor);
     struct stela_metal_assembly *library=assemble(&bytes);free(bytes.data);free(air.data);
     for(unsigned i=0;i<ARRAY_SIZE(nv_targets);i++) {
@@ -786,7 +786,7 @@ int main(int argc,char **argv)
     else {
         CHECK((argc==4||argc==5)&&!strcmp(argv[1],"--input"));
         struct bytes air=read_file(argv[2]);struct facts f={.name=argv[3]};struct stela_air_error error;
-        CHECK(stela_air_inspect(air.data,air.size,256,inspect,&f,&error)&&f.found);
+        CHECK(stela_air_inspect(air.data,air.size, NULL,256,inspect,&f,&error)&&f.found);
         struct bytes bytes=archive(air.data,air.size,f.name,f.air,f.major,f.minor,f.osmajor,f.osminor);
         struct stela_metal_assembly *library=assemble(&bytes);free(air.data);free(bytes.data);
         targets(library,argc==5?(enum stela_air_fp_profile)strtoul(argv[4],NULL,10):STELA_AIR_FP_IEEE_DEFAULT,"unchanged-original-file",false);

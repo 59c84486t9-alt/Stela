@@ -105,7 +105,7 @@ int main(int argc,char **argv)
 {
     assert(argc==1||(argc==3&&!strcmp(argv[1],"--export")));
     LLVMMemoryBufferRef input=fixture();struct bindings b={0};struct stela_air_error error;
-    assert(stela_air_inspect(LLVMGetBufferStart(input),LLVMGetBufferSize(input),8,inspect,&b,&error));
+    assert(stela_air_inspect(LLVMGetBufferStart(input),LLVMGetBufferSize(input), NULL,8,inspect,&b,&error));
     glsl_type_singleton_init_or_ref();
     for(unsigned tid=0;tid<2;tid++) {
         struct stela_air_options options={.workgroup_size={64,1,1},.max_instructions=4096,.bind_buffer=bind_buffer,

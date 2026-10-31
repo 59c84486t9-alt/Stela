@@ -24,6 +24,7 @@ const DSM_GUID: [u8; 16] = [
 ];
 
 /// The reads of one Intel Wi-Fi function.
+#[derive(Clone)]
 pub struct NativeBios {
     /// The function's ACPI companion; `None` when the namespace has none,
     /// which iwlwifi reads as every method absent.
