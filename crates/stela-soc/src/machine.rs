@@ -31,7 +31,7 @@ pub use crate::usb::{
     },
     session::Log as UsbLog,
 };
-use alloc::{boxed::Box, format, string::String, vec, vec::Vec};
+use alloc::{boxed::Box, format, string::String, sync::Arc, vec, vec::Vec};
 use core::cell::Cell;
 use stela_compiler::aarch64::system::registers::Encoding;
 use stela_contracts::refuse;
@@ -39,6 +39,7 @@ use stela_drivers::{block::BlockDevice, input::Input, net::Mac};
 use stela_engine::machine::engine::ConsumedPair;
 use stela_engine::machine::engine::DeviceError;
 use stela_engine::machine::engine::Devices;
+use stela_engine::machine::engine::LocalRegisters;
 use stela_engine::machine::engine::Memory;
 use stela_engine::machine::engine::Reset;
 use stela_engine::machine::engine::Start;
@@ -954,6 +955,12 @@ impl Devices for AppleDevices {
                     ipi::IpiError::Unsupported(_, reason) => reason,
                 }),
         )
+    }
+
+    fn local_registers(&self, cpu: usize) -> Option<Arc<dyn LocalRegisters>> {
+        let device = self.core_counters.get(cpu).copied().flatten()?;
+        let counters = self.bus.device::<CoreCounters>(device)?;
+        Some(Arc::new(counters.clone()))
     }
 
     fn serves_register(&self, encoding: Encoding) -> bool {

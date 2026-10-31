@@ -123,6 +123,8 @@ pub trait Translations {
     }
     /// A block the engine compiled from a page the store had no entry for.
     fn offer(&mut self, offer: Offer);
+    /// A block for the other PEs alone, which no pack keeps.
+    fn lend(&mut self, _offer: Offer) {}
 }
 
 /// A block compiled anew, and how it was compiled. Emission fields are private;
@@ -241,10 +243,11 @@ impl Offer {
     }
 }
 
-/// The fetch pages kept for their blocks at most; when full, or when the
-/// host's memory runs low, the least recently used quarter is let go. A
-/// page let go is read, hashed and looked up again for its next block,
-/// which only a block not yet installed needs.
+/// The fetch pages kept for their blocks at most; when full, the least
+/// recently used quarter is let go. A page let go is read, hashed and looked
+/// up again for its next block, which only a block not yet installed needs.
+/// Low memory leaves them: the heap rests at the mark it calls low, and these
+/// few MiB are worth more than the time hashing every compile's page costs.
 #[cfg(not(test))]
 pub(super) const KEPT_PAGES: usize = 4096;
 #[cfg(test)]
@@ -303,9 +306,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             }
             let key = Digest::of(bytes.as_slice());
             let record = self.host.translations()?.record(&key);
-            if self.pages.len() >= self.kept_pages
-                || (!self.pages.is_empty() && self.host.memory_low())
-            {
+            if self.pages.len() >= self.kept_pages {
                 self.forget_least_used_pages();
             }
             self.pages.insert(

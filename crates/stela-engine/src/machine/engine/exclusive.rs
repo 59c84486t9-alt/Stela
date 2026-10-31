@@ -22,10 +22,41 @@ use stela_compiler::aarch64::{
 };
 
 impl<H: Host, D: Devices> Machine<H, D> {
+    /// The monitor native code left in the frame becomes the PE's own: its
+    /// granule as RAM holds it now, but for the value the load read.
+    pub(super) fn adopt_native_monitor(&mut self) {
+        let bytes = core::mem::take(&mut self.cpu.state.exclusive_bytes);
+        if bytes == 0 {
+            return;
+        }
+        let address = self.cpu.state.exclusive_address;
+        let controls = self.cpu.controls(self.cpu.regime());
+        let requester = self.cpu.requester();
+        let tables = &mut RamTables(&mut self.host);
+        let Translated::Mapped(translation) =
+            mmu::translate(&controls, address, Access::Read, requester, tables)
+        else {
+            return;
+        };
+        let granule = translation.physical & !(RESERVATION_GRANULE - 1);
+        let mut reservation = Reservation {
+            granule,
+            bytes: [0; RESERVATION_GRANULE as usize],
+        };
+        if self.host.read_ram(granule, &mut reservation.bytes) {
+            let offset = (translation.physical - granule) as usize;
+            let value = self.cpu.state.exclusive_value.to_le_bytes();
+            reservation.bytes[offset..offset + bytes as usize]
+                .copy_from_slice(&value[..bytes as usize]);
+            self.cpu.monitor = Some(reservation);
+        }
+    }
+
     pub(super) fn exclusive(&mut self, operand: Operand) -> Step {
+        self.adopt_native_monitor();
         // Serialized PEs share one host core: the snapshot monitor below
         // observes every other PE's write between slices (`observe_writes`).
-        if self.cpu.has_canonical_memory() && self.serial_hold.is_none() {
+        if self.canonical_memory_serves() {
             return self.shared_exclusive(operand);
         }
         let Operand::Transfer {

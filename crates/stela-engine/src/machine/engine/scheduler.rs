@@ -218,11 +218,15 @@ impl<H: Host, D: Devices> Machine<H, D> {
     pub(super) fn execute(&mut self, index: usize, budget: u64) -> Step {
         let entry = self.blocks[index].code;
         self.chain.begin(index, budget);
+        self.cpu.state.daif = u32::from(self.cpu.pstate.daif);
+        self.mirrors.selected = u64::from(self.cpu.pstate.sp);
         let entered = self.timing_start();
         // SAFETY: installed by this machine since the last discard, for the system-mode block ABI;
         // chained blocks and thunks too.
         let exit = unsafe { self.host.execute(entry, &mut self.cpu.state) };
         let returned = self.timing_charge(step_timing::Phase::Native, entered);
+        self.cpu.pstate.daif = self.cpu.state.daif as u8;
+        self.cpu.pstate.sp = self.mirrors.selected != 0;
         let remaining = self.chain.budget().load(Ordering::Relaxed);
         let (block, retired, hits, linked) = self.chain.completed();
         let chained = linked + hits;
@@ -249,6 +253,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 }
                 if let Some(miss) = self.lookup_miss(last, next_pc, kind, remaining > budget) {
                     self.statistics.lookup_misses[miss] += 1;
+                    self.looking = true;
                 }
                 let exited = self.exit(last, next_pc, kind);
                 if exited.is_ok() {
@@ -310,12 +315,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if self.variants[block.variant.0 as usize].single {
             return None;
         }
-        let entry = &self.targets[chain::lookup_slot(next_pc)];
+        let context = self.chain.contexts()[chain::half(next_pc)];
+        let slot = chain::lookup_slot(next_pc, context);
+        let entry = self.targets.find(slot, next_pc, context);
         Some(if unlinked {
             0
         } else if entry.pc != next_pc {
             1
-        } else if entry.context != self.chain.contexts()[chain::half(next_pc)] {
+        } else if entry.context != context {
             2
         } else if spent {
             3
@@ -347,7 +354,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         };
         if (next_pc ^ block.pc) & !(FETCH_PAGE - 1) != 0 {
             let exit = block.successors[position];
-            let retired = block.instructions;
+            let retired = u32::from(block.instructions);
             if self.redirect_through_lookup(exit.site, retired, Some(exit.target), kind, 0) {
                 self.settle_successor(index, position);
             }
@@ -362,7 +369,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         };
         let exit = block.successors[position];
         let site = exit.site;
-        let retired = block.instructions;
+        let retired = u32::from(block.instructions);
         let entry = self.blocks[target].code.0 as u64;
         let control = self.chain.address();
         let Ok(thunk) = self.host.install(&[0; chain::THUNK_BYTES]) else {
@@ -393,10 +400,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// chain all theirs, and then keep no list.
     fn settle_successor(&mut self, index: usize, position: usize) {
         let successors = &mut self.blocks[index].successors;
-        successors.swap_remove(position);
-        if successors.is_empty() {
-            *successors = Vec::new();
-        }
+        let mut remaining = core::mem::take(successors).into_vec();
+        remaining.swap_remove(position);
+        *successors = remaining.into_boxed_slice();
     }
 
     /// Redirect block `index`'s exit to the target in RAX, which just left
@@ -425,8 +431,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if fixed.unwrap_or(page) != btype {
             return;
         }
-        let retired = block.instructions;
-        if self.redirect_through_lookup(site, retired, None, kind, btype) {
+        let retired = u32::from(block.instructions);
+        if self.redirect_through_lookup(site.get(), retired, None, kind, btype) {
             self.blocks[index].dynamic_site = None;
         }
     }

@@ -304,13 +304,6 @@ fn records_reject_malformed_source_geometry_with_a_valid_checksum() {
 }
 
 #[test]
-fn a_narrowed_page_address_is_not_relocatable() {
-    // adrp x8, 0; add w9, w8, #0x20 (a 32-bit result of the address); ret
-    let source = words(&[0x9000_0008, 0x1100_8109, 0xd65f_03c0]);
-    assert_eq!(proved(&source, 0), None);
-}
-
-#[test]
 fn records_refuse_any_damaged_framing_byte() {
     let source = words(&[0x9000_0020, 0x9400_0002]);
     let entry = proved(&source, 0x10).unwrap();

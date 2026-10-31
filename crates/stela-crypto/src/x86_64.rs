@@ -7,19 +7,52 @@ use core::arch::asm;
 use core::arch::naked_asm;
 #[cfg(target_os = "uefi")]
 use core::arch::x86_64::__cpuid_count;
+#[cfg(target_os = "uefi")]
+use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+
+/// A CPUID answer, asked once: a hypervisor intercepts every CPUID, and a
+/// hash asks at each update.
+#[cfg(target_os = "uefi")]
+struct Feature(AtomicU8);
+
+#[cfg(target_os = "uefi")]
+impl Feature {
+    const fn new() -> Self {
+        Self(AtomicU8::new(0))
+    }
+
+    fn get(&self, ask: impl FnOnce() -> bool) -> bool {
+        match self.0.load(Ordering::Relaxed) {
+            0 => {
+                let present = ask();
+                self.0.store(1 + u8::from(present), Ordering::Relaxed);
+                present
+            }
+            known => known == 2,
+        }
+    }
+}
 
 #[cfg(target_os = "uefi")]
 fn sse_usable() -> bool {
     #[cfg(target_os = "uefi")]
     {
+        // CR4.OSFXSR stays set, and a hypervisor may intercept CR4 reads.
+        static OSFXSR: AtomicBool = AtomicBool::new(false);
         let cr0: u64;
-        let cr4: u64;
         // SAFETY: the UEFI mount runs at CPL0. Observe controls only.
         unsafe {
             asm!("mov {}, cr0", out(reg) cr0, options(nomem, nostack, preserves_flags));
-            asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack, preserves_flags));
         }
-        cr0 & ((1 << 2) | (1 << 3)) == 0 && cr4 & (1 << 9) != 0
+        if !OSFXSR.load(Ordering::Relaxed) {
+            let cr4: u64;
+            // SAFETY: as above.
+            unsafe {
+                asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack, preserves_flags));
+            }
+            OSFXSR.store(cr4 & (1 << 9) != 0, Ordering::Relaxed);
+        }
+        cr0 & ((1 << 2) | (1 << 3)) == 0 && OSFXSR.load(Ordering::Relaxed)
     }
     #[cfg(not(target_os = "uefi"))]
     {
@@ -40,7 +73,8 @@ pub(super) fn aes_usable() -> bool {
     return aes_host::get();
     #[cfg(target_os = "uefi")]
     {
-        __cpuid_count(1, 0).ecx & (1 << 25) != 0 && sse_usable()
+        static AES: Feature = Feature::new();
+        AES.get(|| __cpuid_count(1, 0).ecx & (1 << 25) != 0) && sse_usable()
     }
 }
 pub(super) fn sha_usable() -> bool {
@@ -51,13 +85,12 @@ pub(super) fn sha_usable() -> bool {
     return sha_host::get();
     #[cfg(target_os = "uefi")]
     {
-        if __cpuid_count(0, 0).eax < 7 {
-            return false;
-        }
-        let ecx = __cpuid_count(1, 0).ecx;
-        ecx & ((1 << 9) | (1 << 19)) == (1 << 9) | (1 << 19)
-            && __cpuid_count(7, 0).ebx & (1 << 29) != 0
-            && sse_usable()
+        static SHA: Feature = Feature::new();
+        SHA.get(|| {
+            __cpuid_count(0, 0).eax >= 7
+                && __cpuid_count(1, 0).ecx & ((1 << 9) | (1 << 19)) == (1 << 9) | (1 << 19)
+                && __cpuid_count(7, 0).ebx & (1 << 29) != 0
+        }) && sse_usable()
     }
 }
 

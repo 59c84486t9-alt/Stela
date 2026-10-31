@@ -28,8 +28,8 @@
 use super::chain_control;
 use super::{
     CanonicalDeviceMemory, CanonicalDeviceWrite, ConsumedPair, ConsumedScalar, ConsumedWrite,
-    DeviceError, DeviceReadShape, Devices, Discard, Host, Machine, RequirementKind, Reset,
-    ScalarRead, Start, Step,
+    DeviceError, DeviceReadShape, Devices, Discard, FETCH_PAGE, Fetched, Host, Machine,
+    RequirementKind, Reset, ScalarRead, Start, Step, Variant,
     clock::{ClockStatus, Pace, SharedClock},
     processors::Peer,
     step_timing,
@@ -99,9 +99,9 @@ struct Inbox {
     /// A running core reads its mail at its next return to the engine,
     /// which [`Hub::interrupt`] brings forward to its next chained transfer.
     sleeping: AtomicBool,
-    /// Its machine left its run loop, for the host's service or a stop: it
-    /// runs no guest code until it reads its mail again, so a broadcast
-    /// need not wait for it, as for one that sleeps.
+    /// Its machine left its run loop, for the host's service or a stop, or
+    /// compiles: it runs no guest code until it reads its mail again, so a
+    /// broadcast need not wait for it, as for one that sleeps.
     outside: AtomicBool,
     /// Stable native chaining allocation, kept even between PE owners.
     chain: Arc<chain_control::Storage>,
@@ -194,6 +194,30 @@ pub struct Hub {
     /// ([`Hub::request_service`]).
     service: AtomicBool,
     source_observations: AtomicBool,
+    /// The fetch pages any PE may have compiled from ([`Hub::compiling`]).
+    code_pages: CodePages,
+}
+
+/// Which physical fetch pages any PE may have compiled from, as a filter:
+/// bit `n` covers every page of a frame number congruent to `n`. A PE sets
+/// a page's bit before it reads the page to compile. So a PE that finds it
+/// clear after the guest's writes knows no block holds what they replaced,
+/// and an IC IVAU of data, of pages loaded for the first time, stops there.
+struct CodePages(Box<[AtomicU64]>);
+
+impl CodePages {
+    /// The bits, a power of two: 16 GiB of 16 KiB pages cover it once.
+    const BITS: usize = 1 << 20;
+
+    fn new() -> Self {
+        Self((0..Self::BITS / 64).map(|_| AtomicU64::new(0)).collect())
+    }
+
+    /// The word and bit of the page holding `physical`.
+    fn at(&self, physical: u64) -> (&AtomicU64, u64) {
+        let frame = (physical / FETCH_PAGE) as usize & (Self::BITS - 1);
+        (&self.0[frame / 64], 1 << (frame % 64))
+    }
 }
 
 /// A device access that only the home machine's canonical memory serves.
@@ -257,6 +281,7 @@ impl Hub {
             stopped: AtomicBool::new(false),
             finishing: AtomicBool::new(false),
             service: AtomicBool::new(false),
+            code_pages: CodePages::new(),
             source_observations: AtomicBool::new(false),
         })
     }
@@ -433,6 +458,20 @@ impl Hub {
         posted
     }
 
+    /// A PE is about to read the page holding `physical` to compile it.
+    pub(super) fn compiling(&self, physical: u64) {
+        let (word, bit) = self.code_pages.at(physical);
+        if word.load(Ordering::SeqCst) & bit == 0 {
+            word.fetch_or(bit, Ordering::SeqCst);
+        }
+    }
+
+    /// Whether any PE may have compiled from the page holding `physical`.
+    pub(super) fn has_code(&self, physical: u64) -> bool {
+        let (word, bit) = self.code_pages.at(physical);
+        word.load(Ordering::SeqCst) & bit != 0
+    }
+
     /// Whether every PE in `posted` applied its maintenance, stopped
     /// reading mail, or sleeps or is outside its run loop, from which it
     /// reads its mail before it runs again; the others stay in `posted`,
@@ -440,14 +479,10 @@ impl Hub {
     pub(super) fn applied(&self, posted: &mut Vec<(usize, u64)>) -> bool {
         posted.retain(|&(pe, serial)| {
             let inbox = &self.inboxes[pe];
-            let done = inbox.applied.load(Ordering::Acquire) >= serial
-                || !inbox.live.load(Ordering::Acquire)
-                || inbox.sleeping.load(Ordering::SeqCst)
-                || inbox.outside.load(Ordering::SeqCst);
-            if !done {
-                self.interrupt(pe);
-            }
-            !done
+            inbox.applied.load(Ordering::Acquire) < serial
+                && inbox.live.load(Ordering::Acquire)
+                && !inbox.sleeping.load(Ordering::SeqCst)
+                && !inbox.outside.load(Ordering::SeqCst)
         });
         posted.is_empty()
     }
@@ -777,6 +812,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
         let (attached, control) = Attached::new(&hub, self.current, true)?;
         self.adopt_parallel_control(control);
+        // What native code may complete depends on going parallel.
+        self.forget_derived();
         for peer in &mut self.peers {
             match peer {
                 Peer::Running => {}
@@ -799,7 +836,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             impdef: self.cpu.apple.impdef.cluster_registers(),
         });
         let host = self.host.counter();
-        let pace = Pace::new(self.profile.counter_frequency, hub.pes() as u64);
+        let pace = Pace::new(self.profile.counter_frequency);
         self.clock.seed(&hub.clock, host, pace);
         self.clock
             .attach(Arc::clone(&hub.clock), self.current, self.statistics.blocks);
@@ -817,11 +854,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
         // Every installed thunk embeds the old control address. Retire the
         // whole local arena and lookup table before dropping that allocation.
         self.discard_code(Discard::Control);
-        self.targets
-            .fill(stela_compiler::x86_64::chain::LookupEntry::default());
+        self.targets.clear();
         self.chain = control;
-        self.chain
-            .initialize(self.targets.as_ptr() as u64, contexts);
+        self.chain.initialize(self.targets.address(), contexts);
     }
 
     /// Whether this machine runs one PE of a board whose PEs each run on
@@ -934,6 +969,24 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 .is_some_and(|wait| wait.kind == super::WaitKind::Event && !wait.down)
     }
 
+    /// Compile the block at `pc`, and whether mail reached this PE meanwhile,
+    /// which it reads before it runs anything. A compile takes far longer
+    /// than a maintenance broadcast should wait, and runs no guest code.
+    pub(super) fn compile_aside(
+        &mut self,
+        pc: u64,
+        physical: u64,
+        variant: Variant,
+    ) -> (Result<Fetched, super::Stop>, bool) {
+        let Some(hub) = self.parallel.clone() else {
+            return (self.compile(pc, physical, variant), false);
+        };
+        hub.set_outside(self.current, true);
+        let compiled = self.compile(pc, physical, variant);
+        hub.set_outside(self.current, false);
+        (compiled, hub.pending(self.current))
+    }
+
     /// Halt the host core until an interrupt, or, in parallel, also until
     /// mail or a device line change reaches this PE.
     pub(super) fn sleep(&mut self) {
@@ -955,7 +1008,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     asid: (controls.regime != mmu::Regime::El2)
                         .then(|| mmu::current_asid(&controls)),
                 };
-                self.tlb_maintained(scope.reach(&current), scope.everywhere());
+                self.tlb_maintained(
+                    scope.reach(&current),
+                    scope.everywhere(),
+                    scope.named_asid(),
+                );
             }
             Maintenance::Code(Some(physical)) => {
                 self.invalidate_code_page(physical);
@@ -985,6 +1042,19 @@ impl<H: Host, D: Devices> Machine<H, D> {
             self.complete_maintenance()?;
         }
         Ok(())
+    }
+
+    /// An IC IVAU of the page holding `physical`, for the other PEs: not
+    /// when no PE may have compiled from it, nor again before this PE's
+    /// next DSB, which the writes of what it cleans preceded. A kernel
+    /// cleans a page line by line, and its other lines add nothing.
+    pub(super) fn post_code_page(&mut self, physical: u64) {
+        let page = physical & !(FETCH_PAGE - 1);
+        let needed = self.parallel.as_ref().is_some_and(|hub| hub.has_code(page));
+        if needed && self.code_posted != Some(page) {
+            self.code_posted = Some(page);
+            self.post(Maintenance::Code(Some(page)));
+        }
     }
 
     /// Post `maintenance` to every other running PE, which applies it at
@@ -1021,6 +1091,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// one posted, reading this PE's own mail meanwhile: two PEs may wait
     /// on each other. A start that arrives meanwhile is posted again.
     pub(super) fn complete_maintenance(&mut self) -> Step {
+        self.code_posted = None;
         let Some(hub) = self.parallel.clone() else {
             return Ok(());
         };

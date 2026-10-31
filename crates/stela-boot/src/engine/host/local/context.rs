@@ -30,18 +30,6 @@ fn root() -> u64 {
     }
     value
 }
-fn processor_id() -> u32 {
-    let maximum = core::arch::x86_64::__cpuid(0).eax;
-    for leaf in [0x1f, 0xb] {
-        if maximum >= leaf {
-            let value = core::arch::x86_64::__cpuid_count(leaf, 0);
-            if value.ebx & 0xffff != 0 && value.ecx >> 8 & 0xff != 0 {
-                return value.edx;
-            }
-        }
-    }
-    core::arch::x86_64::__cpuid(1).ebx >> 24
-}
 fn disable() -> u64 {
     let saved;
     // SAFETY: native CPL0 dispatcher. Memory clobber encloses the save.
@@ -68,7 +56,6 @@ pub(crate) struct RootIdentity {
     roots: Arc<MmioRoots>,
     loader_tables: &'static crate::paging::loader::LoaderTables,
     snapshot: Snapshot,
-    id: u32,
     gs: u64,
     gdt: u64,
     idt: u64,
@@ -177,12 +164,10 @@ impl RootIdentity {
         result
     }
     fn affinity(&self) -> Result<(), WorkError> {
-        // BEFORE any GS-local dereference: colliding legacy CPUID IDs on a
-        // different CPU cannot borrow this processor's removable scope.
-        if gs_base() != self.gs
-            || processor_id() != self.id
-            || crate::apic::base_msr() != self.snapshot.apic_base
-        {
+        // BEFORE any GS-local dereference: no other CPU has this GS record,
+        // so none can borrow this processor's removable scope. Each timer
+        // interrupt comes here; CPUID would exit to a hypervisor.
+        if gs_base() != self.gs || crate::apic::base_msr() != self.snapshot.apic_base {
             return Err(WorkError::WrongCpu);
         }
         // SAFETY: immutable architectural observation; original owner kept.
@@ -429,7 +414,7 @@ impl Owner {
         let lease = self.retain_clock_root()?;
         // SAFETY: original physical Owner, IF0, no native frame or ISR.
         let snapshot = unsafe { firmware::observe() }.map_err(unavailable)?;
-        let id = snapshot.apic_id().ok_or(WorkError::Unavailable)?;
+        snapshot.apic_id().ok_or(WorkError::Unavailable)?;
         // SAFETY: processor's installed descriptor set.
         let observed = unsafe { interrupts::observe() };
         if observed.gs != self.local.as_ptr() as u64 || snapshot.cr3 & !ADDRESS != 0 {
@@ -465,7 +450,6 @@ impl Owner {
             }),
             loader_tables: state._loader_tables,
             snapshot,
-            id,
             gs: observed.gs,
             gdt: observed.gdt,
             idt: observed.idt,

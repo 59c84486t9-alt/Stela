@@ -218,6 +218,55 @@ struct Bank {
     used: u64,
 }
 const ROOTS: usize = 2 * VIEWS;
+
+/// Root `view`'s TLB context while PCIDE is set.
+const fn view_context(view: usize) -> u64 {
+    view as u64 + 2
+}
+
+/// What the views' TLB contexts hold. With a context of its own, a change of
+/// view keeps its own translations of the engine, the translated code and
+/// the guest, which no mapping marks global. An invalidation reaches the
+/// other contexts through INVPCID, or else marks them to flush when loaded.
+struct Contexts {
+    /// PCIDE is set ([`tag_views`]). Kept here because a hypervisor may
+    /// intercept every CR4 read, and views change at each exception.
+    tagged: bool,
+    /// May hold what was invalidated since; so is one never loaded.
+    stale: [bool; ROOTS],
+    invpcid: bool,
+}
+
+/// Whether this core's views load in their contexts from now on, as
+/// [`storage::TaggedRoots`] sets or restores PCIDE.
+pub(super) fn tag_views(tagged: bool) {
+    if let Some(state) = local::installed() {
+        state.contexts.tagged = tagged;
+    }
+}
+
+impl Contexts {
+    /// Drop `page`, which root `current` may translate, from every context.
+    fn forget(&mut self, page: u64, current: usize) {
+        invlpg(page);
+        for view in 0..ROOTS {
+            if view == current || self.stale[view] {
+                continue;
+            }
+            if self.invpcid {
+                let descriptor = [view_context(view), page];
+                // SAFETY: a valid single-address INVPCID of a tagged context:
+                // a context is fresh only under PCIDE ([`State::load_view`]).
+                unsafe {
+                    asm!("invpcid {}, [{}]", in(reg) 0u64, in(reg) &descriptor,
+                        options(nostack, preserves_flags))
+                };
+            } else {
+                self.stale[view] = true;
+            }
+        }
+    }
+}
 /// Frames reserved for roots and other permanent tables.
 const PERMANENT_FRAMES: u64 = 64;
 // The current roots and the banks', and the host root.
@@ -286,6 +335,7 @@ pub struct State {
     bank_misses: u64,
     /// Root loads for a change of view (EL, PAN, GXF or tag checks).
     view_switches: u64,
+    contexts: Contexts,
     /// A shadow-map attempt or software-TLB fill may have published guest
     /// translations. Only a complete reset can prove both halves clean again.
     legacy_translations_dirty: bool,
@@ -479,6 +529,11 @@ pub unsafe fn install(config: Config) -> Result<HostOwner> {
             bank_switches: 0,
             bank_misses: 0,
             view_switches: 0,
+            contexts: Contexts {
+                tagged: false,
+                stale: [true; ROOTS],
+                invpcid: crate::native_mmio::shootdown::invpcid(),
+            },
             legacy_translations_dirty: false,
             current: usize::MAX,
             regime: None,
@@ -916,15 +971,31 @@ impl State {
         }
     }
 
-    /// Load the current root again, which flushes the TLB of the guest's
-    /// (non-global) mappings.
-    fn reload(&mut self) {
-        let root = if self.current < ROOTS {
-            self.roots[self.current]
+    /// Load root `view` in its context, which keeps what the context holds
+    /// unless it is stale.
+    fn load_view(&mut self, view: usize) {
+        let root = self.roots[view];
+        if !self.contexts.tagged {
+            return load_root(root);
+        }
+        let stale = core::mem::replace(&mut self.contexts.stale[view], false);
+        let keep = if stale {
+            0
         } else {
-            self.host_root
+            super::storage::KEEP_ENTRIES
         };
-        load_root(root);
+        load_root(root | view_context(view) | keep);
+    }
+
+    /// Flush the TLB of every view: the current root's context now, the
+    /// others' when next loaded.
+    fn reload(&mut self) {
+        self.contexts.stale = [true; ROOTS];
+        if self.current < ROOTS {
+            self.load_view(self.current);
+        } else {
+            load_root(self.host_root);
+        }
     }
 }
 

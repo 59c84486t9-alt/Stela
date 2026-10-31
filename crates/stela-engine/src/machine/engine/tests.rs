@@ -7,7 +7,7 @@ fn architectural_translation_generation_exhaustion_never_reuses_an_old_epoch() {
         Machine::advance_translation_generation,
         Machine::translations_changed,
         Machine::fetch_permissions_changed,
-        |machine| machine.tlb_maintained(mmu::tlbi::Reach::All, mmu::tlbi::Everywhere::All),
+        |machine| machine.tlb_maintained(mmu::tlbi::Reach::All, mmu::tlbi::Everywhere::All, None),
         Machine::table_base_changed,
     ];
     for operation in operations {
@@ -224,7 +224,7 @@ impl Host for FakeHost {
         self.executables.push(mapping);
         Some(entry)
     }
-    unsafe fn execute(&mut self, _: NativeCode, _: &mut GuestState) -> NativeExit {
+    unsafe fn execute(&mut self, _: NativeCode, state: &mut GuestState) -> NativeExit {
         assert!(!self.exits.is_empty(), "unit tests do not run native code");
         if let Some((control, chained)) = self.chained.take() {
             // SAFETY: this fixture names the owner's live control
@@ -242,7 +242,14 @@ impl Host for FakeHost {
             }
         }
         self.now = self.now.wrapping_add(self.execute_ticks);
-        self.exits.remove(0)
+        let mut exit = self.exits.remove(0);
+        // Native code's faults find the pinned registers in host registers.
+        if let NativeExit::Fault(fault) = &mut exit
+            && fault.registers == stela_compiler::block::HostGprSnapshot::legacy([0; 16])
+        {
+            fault.registers = stela_compiler::x86_64::pinned::capture(state);
+        }
+        exit
     }
     fn set_regime(&mut self, regime: &Regime) {
         self.regimes.push(*regime);
@@ -353,6 +360,11 @@ pub(super) fn make_pending<D: Devices>(
 
 pub(super) fn machine(words: &[u32]) -> Machine<FakeHost, NoDevices> {
     board(words, NoDevices, Vec::new())
+}
+
+/// The slot of `pc`'s lookup entry in the contexts `machine` runs in.
+fn target_slot(machine: &Machine<FakeHost, NoDevices>, pc: u64) -> usize {
+    chain::lookup_slot(pc, machine.chain.contexts()[chain::half(pc)])
 }
 
 /// The chip the tests run on, or the M2 where it has the Apple generic
@@ -1264,7 +1276,8 @@ fn pstate_dit_selects_blocks_compiled_for_the_data_independent_timing_target() {
 
 #[test]
 fn sctlr_sa_selects_blocks_with_or_without_the_sp_alignment_check() {
-    const SP_CHECK: [u8; 6] = [0xa8, 15, 0x74, 2, 0x0f, 0x0b];
+    // test bl,15, on SP's host register.
+    const SP_CHECK: [u8; 7] = [0xf6, 0xc3, 15, 0x74, 2, 0x0f, 0x0b];
     // ldr x0, [sp, #8]; svc #0
     let mut machine = machine(&[0xf940_07e0, 0xd400_0001]);
     let has_check = |machine: &Machine<FakeHost, NoDevices>, index: usize| {
@@ -1515,6 +1528,8 @@ fn a_mapped_address_outside_the_native_ranges_runs_its_page_translated() {
     machine.host.translation_helper = Some(HELPER);
     for cause in [FaultCause::InvalidOpcode, FaultCause::NonCanonical] {
         machine.translated_pages.clear();
+        let slot = target_slot(&machine, BASE);
+        machine.targets[slot] = chain::LookupEntry::default();
         let kind = if matches!(cause, FaultCause::InvalidOpcode) {
             stela_compiler::block::RecoverySiteKind::GuestCheck
         } else {
@@ -1982,7 +1997,7 @@ fn a_fetch_that_reclaims_code_looks_up_in_a_new_context() {
     assert_eq!(machine.statistics.code_evictions, 1);
     assert_ne!(machine.chain.contexts(), first);
     assert_eq!(
-        machine.targets[chain::lookup_slot(pc)].context,
+        machine.targets[target_slot(&machine, pc)].context,
         machine.chain.contexts()[chain::half(pc)]
     );
 }
@@ -2359,7 +2374,7 @@ fn returns_and_exits_out_of_the_page_go_through_lookup_thunks() {
     let context = machine.chain.contexts()[half];
     assert_ne!(context, 0);
     for (pc, block) in [(base, 0), (far, 1)] {
-        let entry = machine.targets[chain::lookup_slot(pc)];
+        let entry = machine.targets[target_slot(&machine, pc)];
         let expected = chain::LookupEntry {
             pc,
             context,
@@ -2376,7 +2391,8 @@ fn returns_and_exits_out_of_the_page_go_through_lookup_thunks() {
     machine.step().unwrap();
     let renewed = machine.chain.contexts()[half];
     assert!(renewed > context);
-    // The thunk's entry for `far` names the old context.
+    // The thunk finds `far`'s entry of the old context, whose salt the new
+    // one kept, and it no longer enters: the fetch revalidates it.
     assert_eq!(machine.statistics.lookup_misses, [2, 0, 1, 0, 0]);
     let variant = machine.block_variant(0);
     let el = machine.cpu.pstate.el;
@@ -2445,19 +2461,23 @@ fn lookup_contexts_follow_translation_inputs_and_outlive_a_return_to_them() {
     // An ASIDE1 forgets the lower half's contexts, while no fetch of the
     // upper half was non-global.
     let aside1 = |machine: &mut Machine<FakeHost, NoDevices>| {
-        machine.tlb_maintained(mmu::tlbi::Reach::Nothing, mmu::tlbi::Everywhere::NonGlobal)
+        machine.tlb_maintained(
+            mmu::tlbi::Reach::Nothing,
+            mmu::tlbi::Everywhere::NonGlobal,
+            None,
+        )
     };
     aside1(&mut machine);
     let maintained = machine.contexts(el, variant);
     assert!(maintained[0] != first[0] && maintained[1] == first[1]);
     // A global upper fetch keeps it; the first non-global one forgets
     // the upper half's contexts, whose ASID then selects among them.
-    machine.fetched_through(1, 0x4000, true);
+    machine.fetched_through(1, 0, 0x4000, true);
     assert_eq!(machine.contexts(el, variant), maintained);
-    machine.fetched_through(1, 0x4000, false);
+    machine.fetched_through(1, 0, 0x4000, false);
     let private = machine.contexts(el, variant);
     assert!(private[0] == maintained[0] && private[1] != maintained[1]);
-    machine.fetched_through(1, 0x4000, false);
+    machine.fetched_through(1, 0, 0x4000, false);
     assert_eq!(machine.contexts(el, variant), private);
     msr(&mut machine, MSR_TTBR0_EL1_X0, ttbr0 ^ 1 << 48);
     let asid = machine.contexts(el, variant);
@@ -2469,10 +2489,14 @@ fn lookup_contexts_follow_translation_inputs_and_outlive_a_return_to_them() {
     for change in [
         |machine: &mut Machine<FakeHost, NoDevices>| {
             machine.private_fetches[1] = true;
-            machine.tlb_maintained(mmu::tlbi::Reach::Nothing, mmu::tlbi::Everywhere::NonGlobal)
+            machine.tlb_maintained(
+                mmu::tlbi::Reach::Nothing,
+                mmu::tlbi::Everywhere::NonGlobal,
+                None,
+            )
         },
         |machine: &mut Machine<FakeHost, NoDevices>| {
-            machine.tlb_maintained(mmu::tlbi::Reach::All, mmu::tlbi::Everywhere::All)
+            machine.tlb_maintained(mmu::tlbi::Reach::All, mmu::tlbi::Everywhere::All, None)
         },
         Machine::fetch_permissions_changed,
         Machine::translations_changed,
@@ -2491,10 +2515,11 @@ fn a_tlbi_by_va_drops_the_lookup_entries_of_its_leaf_in_every_context() {
     let variant = machine.current_variant(false, false);
     let contexts = machine.contexts(2, variant);
     const PAGE: u64 = 0x8000;
-    machine.fetch_leaves[0] = 0x4000;
+    machine.fetched_through(0, PAGE, 0x4000, true);
     let pcs = [PAGE - 4, PAGE, PAGE + 0x3ffc, PAGE + 0x4000];
     for (context, pc) in pcs.into_iter().enumerate() {
-        machine.targets[chain::lookup_slot(pc)] = chain::LookupEntry {
+        let slot = target_slot(&machine, pc);
+        machine.targets[slot] = chain::LookupEntry {
             pc,
             context: context as u64 + 1,
             entry: 1,
@@ -2503,18 +2528,52 @@ fn a_tlbi_by_va_drops_the_lookup_entries_of_its_leaf_in_every_context() {
         };
     }
     let tlbi = |machine: &mut Machine<FakeHost, NoDevices>, reach| {
-        machine.tlb_maintained(reach, Everywhere::Addresses(reach))
+        machine.tlb_maintained(reach, Everywhere::Addresses(reach), None)
     };
     tlbi(&mut machine, Reach::Containing(PAGE + 0x10));
-    let kept = pcs.map(|pc| machine.targets[chain::lookup_slot(pc)].pc == pc);
+    let kept = pcs.map(|pc| machine.targets[target_slot(&machine, pc)].pc == pc);
     assert_eq!(kept, [true, false, false, true]);
     assert_eq!(machine.contexts(2, variant), contexts);
+    // A page no fetch came from reaches nothing, whatever its slots hold.
+    tlbi(&mut machine, Reach::Containing(PAGE + 0x4000));
+    assert_eq!(
+        machine.targets[target_slot(&machine, PAGE + 0x4000)].pc,
+        PAGE + 0x4000
+    );
     // A leaf the table could not be scanned for forgets the half's
     // contexts instead; the other half's stay.
     machine.fetch_leaves[0] = 1 << 30;
     tlbi(&mut machine, Reach::Containing(PAGE));
     let forgotten = machine.contexts(2, variant);
     assert!(forgotten[0] != contexts[0] && forgotten[1] == contexts[1]);
+}
+
+#[test]
+fn a_tlbi_drops_the_cached_fetches_of_the_pages_it_reaches_alone() {
+    use mmu::tlbi::{Everywhere, Reach};
+    let mut machine = machine(&[]);
+    const PAGE: u64 = 0x8000;
+    let generation = machine.translation_generation;
+    for page in [PAGE, PAGE + 0x4000] {
+        machine.fetched_through(0, page, 0x4000, true);
+        machine.fetch[(page / FETCH_PAGE) as usize % FETCH_CACHE] = Some(FetchEntry {
+            page,
+            physical: page,
+            guarded: false,
+            el: 0,
+            generation,
+            leaf: 0x4000,
+        });
+    }
+    let held = |machine: &Machine<FakeHost, NoDevices>, page: u64| {
+        machine.fetch[(page / FETCH_PAGE) as usize % FETCH_CACHE].is_some()
+    };
+    let reach = Reach::Containing(PAGE + 0x10);
+    machine.tlb_maintained(reach, Everywhere::Addresses(reach), None);
+    assert!(!held(&machine, PAGE) && held(&machine, PAGE + 0x4000));
+    assert_eq!(machine.translation_generation, generation);
+    machine.tlb_maintained(Reach::All, Everywhere::Addresses(Reach::All), None);
+    assert!(machine.translation_generation > generation);
 }
 
 #[test]
@@ -2535,6 +2594,66 @@ fn dynamic_branches_name_their_exit_and_any_page_independent_btype() {
     ] {
         assert_eq!(dynamic_branch(word), expected, "{word:#x}");
     }
+}
+
+/// A guest's thread switch writes SCTLR's pointer authentication enables,
+/// which reach neither the fetches, the lookups nor the host's shadow.
+#[test]
+fn sctlr_fields_outside_translation_keep_every_translation() {
+    const SCTLR_ENIA: u64 = 1 << 31;
+    const MSR_SCTLR_X0: u32 = 0xd518_1000;
+    let mut machine = machine(&[]);
+    let sctlr = machine.cpu.read(SystemRegister::SCTLR_EL1);
+    machine.cpu.state.x[0] = sctlr ^ SCTLR_ENIA;
+    let variant = machine.current_variant(false, false);
+    let contexts = machine.contexts(1, variant);
+    let generation = machine.translation_generation;
+    let regimes = machine.host.regimes.len();
+    machine.system_instruction(MSR_SCTLR_X0).unwrap();
+    assert_eq!(
+        machine.cpu.read(SystemRegister::SCTLR_EL1),
+        sctlr ^ SCTLR_ENIA
+    );
+    assert_eq!(machine.translation_generation, generation);
+    assert_eq!(machine.contexts(1, variant), contexts);
+    let last = machine.host.regimes[regimes..].last().unwrap();
+    assert_eq!(last.controls.sctlr & SCTLR_ENIA, 0);
+    // M is translation's.
+    machine.cpu.state.x[0] = sctlr ^ 1;
+    machine.system_instruction(MSR_SCTLR_X0).unwrap();
+    assert_ne!(machine.translation_generation, generation);
+}
+
+/// A process's first lookup in a page brings in what lookups of other
+/// processes found around it, and nothing they did not look for.
+#[test]
+fn a_lookup_miss_remembers_the_targets_around_it() {
+    const BR_X0: u32 = 0xd61f_0000;
+    let mut machine = machine(&[BR_X0; 3]);
+    let base = machine.cpu.pc;
+    let exit = || NativeExit::Exit {
+        next_pc: base,
+        kind: ExitKind::Indirect as u64,
+    };
+    machine.host.exits = vec![exit(), exit(), exit(), exit()];
+    for (pc, looking) in [(base, true), (base + 4, true), (base + 8, false)] {
+        machine.cpu.pc = pc;
+        machine.looking = looking;
+        machine.step().unwrap();
+    }
+    machine.targets.clear();
+    machine.remembered_pages.fill((0, 0));
+    machine.cpu.pc = base;
+    machine.looking = true;
+    machine.step().unwrap();
+    let found = |pc| {
+        let context = machine.chain.contexts()[chain::half(pc)];
+        let slot = chain::lookup_slot(pc, context);
+        machine.targets.find(slot, pc, context).pc == pc
+    };
+    assert!(found(base));
+    assert!(found(base + 4));
+    assert!(!found(base + 8));
 }
 
 /// BLR and BR exits are redirected through lookup thunks that set their
@@ -2574,6 +2693,8 @@ fn indirect_branches_go_through_lookups_that_check_the_target() {
     // The same BR X0, now in a guarded page.
     let page = (base / FETCH_PAGE) as usize % FETCH_CACHE;
     machine.fetch[page].as_mut().unwrap().guarded = true;
+    let slot = target_slot(&machine, base + 8);
+    machine.targets[slot] = chain::LookupEntry::default();
     machine.cpu.pc = base + 8;
     machine.cpu.pstate.btype = 0;
     machine.step().unwrap();
@@ -2602,11 +2723,11 @@ fn indirect_branches_go_through_lookups_that_check_the_target() {
     machine.step().unwrap();
     let target = machine.blocks.len() - 1;
     assert_eq!(machine.blocks[target].pc, far);
-    assert_eq!(machine.targets[chain::lookup_slot(far)].targets, 0b1111);
+    assert_eq!(machine.targets[target_slot(&machine, far)].targets, 0b1111);
     let slot = (far / FETCH_PAGE) as usize % FETCH_CACHE;
     machine.fetch[slot].as_mut().unwrap().guarded = true;
     machine.remember_target(far, target);
-    assert_eq!(machine.targets[chain::lookup_slot(far)].targets, 0b0111);
+    assert_eq!(machine.targets[target_slot(&machine, far)].targets, 0b0111);
     // BTI C itself performs no guest memory access. Preserve this
     // original landing-pad program, but an invented Host fault at its
     // first instruction cannot be projected as an ARM data abort.
@@ -2766,7 +2887,7 @@ fn tlbis_reach_their_address_range_or_asid_without_a_regime_change() {
             (Reach::All, Everywhere::All),
         ]
     );
-    assert_eq!(machine.translation_generation, generation + 5);
+    assert_eq!(machine.translation_generation, generation + 3);
     assert_eq!(machine.host.regimes.len(), regimes);
     assert!(machine.native_system.is_some());
     assert_eq!(
@@ -4024,6 +4145,7 @@ fn standard_el2_key_writes_feed_pacga_without_mutating_the_lower_bank() {
         pauth::Keys::from_optional_words([None; 4]).with_generic_words([11, 21]),
         machine.pointer_version().unwrap(),
     )
+    .with_implementation_defined_cipher()
     .generic_code(0, modifier)
     .unwrap();
     assert_eq!(
@@ -4663,7 +4785,7 @@ fn pac_exits_complete_natively_from_the_memo_under_open_tags() {
     let jump = chain::jump(site as u64, installed as u64).unwrap().to_vec();
     assert_eq!(machine.host.patches, [(site, jump)]);
     assert_eq!(
-        block.successors,
+        *block.successors,
         [Successor {
             site: (installed + thunk.next.unwrap()) as u64,
             target: GuestAddress(base + 8),
@@ -4671,7 +4793,7 @@ fn pac_exits_complete_natively_from_the_memo_under_open_tags() {
         }]
     );
     let mut machine = pac_machine();
-    assert_eq!(machine.pointer.tags, [0; 4]);
+    assert_eq!(machine.pointer.tags, [0; x86_64_pointer::TAG_WORDS]);
     machine
         .pointer_result(
             PointerOperation::Sign,
@@ -4722,7 +4844,7 @@ fn xpac_thunks_follow_regime_masks_without_key_enables_and_close_on_changes() {
     assert_eq!(native.host.installed.last(), Some(&thunk.code));
     let installed = native.host.installed.len() * NATIVE_CODE_STRIDE;
     assert_eq!(
-        native.blocks[0].successors,
+        *native.blocks[0].successors,
         [Successor {
             site: (installed + thunk.next.unwrap()) as u64,
             target: GuestAddress(base + 8),
@@ -4817,17 +4939,14 @@ fn pac_returns_go_through_a_lookup_thunk() {
 /// the cell opens on a plain read and closes on any derived change
 /// other than a PSTATE mask, SPSel, TTBR0 or SPRR_PERM write.
 #[test]
-fn guarded_exception_register_cells_follow_entries_and_bank_writes() {
+fn guarded_exception_register_cells_open_on_the_bank() {
     const MRS_SPSR_GL1: u32 = 0xd53e_fa68; // mrs x8, spsr_gl1
     const MSR_ELR_GL1: u32 = 0xd51e_fac9; // msr elr_gl1, x9
     assert_eq!(
         read_word(registers::encodings::SPSR_GL1),
         MRS_SPSR_GL1 & !31
     );
-    assert!(guarded_bank(registers::encodings::ELR_GL1));
-    assert!(guarded_bank(registers::encodings::SPSR_GL12));
-    assert!(!guarded_bank(registers::encodings::GXF_STATUS_EL1));
-    let spsr = GUARDED_MIRRORS[0];
+    let (spsr, elr) = (GUARDED_MIRRORS[0], GUARDED_MIRRORS[2]);
     let mut machine = machine(&[]);
     machine.cpu.pstate.el = 1;
     // Outside the guarded level the read is not plain: no cell opens.
@@ -4836,27 +4955,99 @@ fn guarded_exception_register_cells_follow_entries_and_bank_writes() {
     assert_eq!(machine.mirrors[spsr].readable, 0);
     machine.cpu.pstate.guarded = true;
     machine.system_instruction(MRS_SPSR_GL1).unwrap();
+    assert_eq!(machine.cpu.state.x[8], 0x3c5);
     assert_eq!(
         machine.mirrors[spsr],
         register_read::Cell {
             readable: 1,
-            value: 0x3c5
+            value: &machine.cpu.apple.guarded[0].spsr as *const u64 as u64
         }
     );
-    // An entry writes the bank; the transition reads it into the cell.
-    machine.cpu.apple.guarded[0].spsr = 0x3c4;
-    machine.transitioned(mirror_state(1, true));
-    assert_eq!(machine.mirrors[spsr].value, 0x3c4);
-    // A write of the bank closes its cells in every state.
-    machine.mirrors.banks[mirror_state(2, false)][spsr].readable = 1;
+    // A write goes to the bank and opens the cell native writes go through.
     machine.cpu.state.x[9] = 0x8000;
     machine.system_instruction(MSR_ELR_GL1).unwrap();
     assert_eq!(machine.cpu.apple.guarded[0].elr, 0x8000);
-    assert_eq!(machine.mirrors[spsr].readable, 0);
     assert_eq!(
-        machine.mirrors.banks[mirror_state(2, false)][spsr].readable,
-        0
+        machine.mirrors[elr],
+        register_read::Cell {
+            readable: 1,
+            value: &machine.cpu.apple.guarded[0].elr as *const u64 as u64
+        }
     );
+    // In the guarded level SPSel 1 selects the level's own stack.
+    machine.cpu.pstate.sp = false;
+    machine.system_instruction(0xd500_41bf).unwrap(); // msr spsel, #1
+    assert_eq!(
+        machine.mirrors[STACK_SELECT],
+        register_read::Cell {
+            readable: 1,
+            value: &machine.cpu.apple.guarded[0].sp as *const u64 as u64
+        }
+    );
+}
+
+/// A plain read of a register an exception writes opens a cell on its
+/// storage, through which native code sees each later value.
+#[test]
+fn stored_reads_complete_natively_from_the_live_register() {
+    const ADD: u32 = 0x9100_0400; // add x0, x0, #1
+    const MRS: u32 = 0xd538_4028; // mrs x8, elr_el1
+    const MRS_FPCR: u32 = 0xd53b_4408; // mrs x8, fpcr
+    let mut machine = machine(&[ADD, MRS, ADD]);
+    let base = machine.cpu.pc;
+    machine.host.exits = vec![NativeExit::Exit {
+        next_pc: base + 8,
+        kind: ExitKind::Fallthrough as u64,
+    }];
+    machine.step().unwrap();
+    assert_eq!(machine.stored_reads, [Encoding::new(3, 0, 4, 0, 1)]);
+    let index = MIRRORED.len();
+    let cell = &machine.mirrors[index] as *const register_read::Cell as u64;
+    let thunk = register_read::stored_thunk(GuestAddress(base + 4), 8, cell);
+    assert_eq!(machine.host.installed.last(), Some(&thunk.code));
+    machine.cpu.pstate = Pstate::reset(1);
+    machine.derived_changed();
+    machine
+        .cpu
+        .registers
+        .set(SystemRegister::ELR_EL1, 0, 0x5000);
+    machine.cpu.pc = base + 4;
+    machine.system_instruction(MRS).unwrap();
+    assert_eq!(machine.cpu.state.x[8], 0x5000);
+    let open = machine.mirrors[index];
+    assert_eq!(open.readable, 1);
+    assert_eq!(
+        Some(open.value),
+        machine.cpu.registers.address(SystemRegister::ELR_EL1, 0)
+    );
+    // A stored register's write leaves the cell, which reads it live, and
+    // the first one opens its own, on the same storage.
+    machine.cpu.state.x[9] = 0x6000;
+    machine.system_instruction(0xd518_4029).unwrap(); // msr elr_el1, x9
+    assert_eq!(machine.mirrors[index], open);
+    // SAFETY: the file's storage, read as a thunk reads it.
+    assert_eq!(unsafe { *(open.value as *const u64) }, 0x6000);
+    // SPSel changes no cell: only SP_EL0 follows it, which checks.
+    machine.system_instruction(0xd500_40bf).unwrap(); // msr spsel, #0
+    assert_eq!(machine.mirrors[index], open);
+    machine.system_instruction(0xd500_41bf).unwrap(); // msr spsel, #1
+    assert_eq!(machine.mirrors[index], open);
+    // A trapped read opens nothing.
+    machine.derived_changed();
+    machine.cpu.pstate = Pstate::reset(0);
+    machine.system_instruction(MRS).unwrap();
+    assert_eq!(*machine.mirrors, Mirrors::default());
+    // FPCR completes from the frame: its cell has no storage to name.
+    let mut fp = super::tests::machine(&[ADD, MRS_FPCR, ADD]);
+    fp.host.exits = vec![NativeExit::Exit {
+        next_pc: base + 8,
+        kind: ExitKind::Fallthrough as u64,
+    }];
+    fp.step().unwrap();
+    let cell = &fp.mirrors[index] as *const register_read::Cell as u64;
+    let offset = core::mem::offset_of!(GuestState, fpcr);
+    let thunk = register_read::frame_thunk(GuestAddress(base + 4), 8, cell, offset);
+    assert_eq!(fp.host.installed.last(), Some(&thunk.code));
 }
 
 #[test]
@@ -4892,7 +5083,7 @@ fn mirrored_reads_complete_natively_from_the_open_cell() {
     let jump = chain::jump(site as u64, installed as u64).unwrap().to_vec();
     assert_eq!(machine.host.patches, [(site, jump)]);
     assert_eq!(
-        block.successors,
+        *block.successors,
         [Successor {
             site: (installed + thunk.next.unwrap()) as u64,
             target: GuestAddress(base + 8),
@@ -4900,7 +5091,7 @@ fn mirrored_reads_complete_natively_from_the_open_cell() {
         }]
     );
     // Other System reads keep their exit.
-    let mut other = super::tests::machine(&[ADD, 0xd538_1008]); // mrs x8, sctlr_el1
+    let mut other = super::tests::machine(&[ADD, 0xd538_0008]); // mrs x8, midr_el1
     other.host.exits = machine.host.exits.clone();
     other.host.exits.push(NativeExit::Exit {
         next_pc: base + 8,
@@ -4932,7 +5123,7 @@ fn mirrored_reads_complete_natively_from_the_open_cell() {
     machine.system_instruction(MRS_GXF_STATUS).unwrap();
     assert_eq!(machine.statistics.exceptions, exceptions);
     assert_eq!(machine.mirrors[thread].readable, 1);
-    // A write of the register closes its cells in every state, and no
+    // A write of the register reaches its cells in every state, and no
     // other: the thread pointer is only stored.
     machine.cpu.pc = base + 4;
     machine.system_instruction(MRS).unwrap();
@@ -4941,8 +5132,8 @@ fn mirrored_reads_complete_natively_from_the_open_cell() {
     machine.mirrors.banks[0][thread].readable = 1;
     machine.cpu.state.x[9] = 0x6000;
     machine.system_instruction(MSR).unwrap();
-    assert_eq!(machine.mirrors[thread].readable, 0);
-    assert_eq!(machine.mirrors.banks[0][thread].readable, 0);
+    assert_eq!(machine.mirrors[thread].value, 0x6000);
+    assert_eq!(machine.mirrors.banks[0][thread].value, 0x6000);
     assert_eq!(machine.mirrors[daif].readable, 1);
     machine.derived_changed();
     machine.system_instruction(MRS_DAIF).unwrap();

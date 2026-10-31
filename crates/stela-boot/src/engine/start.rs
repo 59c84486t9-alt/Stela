@@ -64,6 +64,9 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     run_guest(boot, host, storage, processors)
 }
 
+/// The part of the engine heap that holes cannot take from large requests.
+const HEAP_RESERVE_SHARE: usize = 16;
+
 /// What every phase after the host's reads: the loader's handoff,
 /// `stela.cfg` and the validated physical processors.
 #[derive(Clone, Copy)]
@@ -99,6 +102,7 @@ fn start(handoff: u64) -> Started {
     // SAFETY: this reserved heap is unused and its RW+NX physmap is shared by
     // every native root for the complete engine lifetime.
     unsafe { crate::ALLOCATOR.initialize(heap as *mut u8, handoff.heap.bytes as usize) };
+    crate::ALLOCATOR.reserve_tail(handoff.heap.bytes as usize / HEAP_RESERVE_SHARE);
     // SAFETY: this loader-owned private seed is held in the shared physmap,
     // exclusively consumed here before any native service is published.
     if let Err(error) = unsafe { crate::random::initialize(handoff.random_seed) } {

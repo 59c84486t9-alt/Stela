@@ -124,6 +124,12 @@ impl File {
         Self::slot(register, index).map_or(0, |slot| self.values[slot])
     }
 
+    /// Where the value [`Self::get`] reads lies, which native code may read
+    /// while this file lives.
+    pub fn address(&self, register: Register, index: u64) -> Option<u64> {
+        Self::slot(register, index).map(|slot| &self.values[slot] as *const u64 as u64)
+    }
+
     /// Store with the reserved bits forced; an out-of-range index is ignored.
     pub fn set(&mut self, register: Register, index: u64, value: u64) {
         if let Some(slot) = Self::slot(register, index) {

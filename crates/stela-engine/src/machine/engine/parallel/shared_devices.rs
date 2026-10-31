@@ -1,6 +1,7 @@
 //! The board's devices shared by the PE threads: the locked board and its
 //! device-bus calls.
 
+use super::super::LocalRegisters;
 use super::*;
 
 pub(super) struct Board<D> {
@@ -177,6 +178,8 @@ pub struct SharedDevices<D> {
     pub(super) board: Arc<Board<D>>,
     /// The machine that serves resets and DMA.
     pub(super) home: bool,
+    /// Each PE's [`Devices::local_registers`], once asked for.
+    local: Vec<Option<Option<Arc<dyn LocalRegisters>>>>,
 }
 
 impl<D: Devices> SharedDevices<D> {
@@ -209,6 +212,7 @@ impl<D: Devices> SharedDevices<D> {
         Self {
             board: Arc::new(board),
             home: true,
+            local: Vec::new(),
         }
     }
 
@@ -217,6 +221,7 @@ impl<D: Devices> SharedDevices<D> {
         Self {
             board: Arc::clone(&self.board),
             home: false,
+            local: Vec::new(),
         }
     }
 
@@ -260,6 +265,26 @@ impl<D: Devices> SharedDevices<D> {
         let mut devices = self.board.lock(call);
         let now = self.now(now);
         f(&mut devices, now)
+    }
+
+    /// PE `cpu`'s own register, without the devices' lock once it has its
+    /// handle.
+    fn local_register(
+        &mut self,
+        cpu: usize,
+        encoding: Encoding,
+        write: Option<u64>,
+    ) -> Option<u64> {
+        if self.local.len() <= cpu {
+            self.local.resize_with(cpu + 1, || None);
+        }
+        if self.local[cpu].is_none() {
+            self.local[cpu] = Some(self.with(|devices| devices.local_registers(cpu)));
+        }
+        self.local[cpu]
+            .as_ref()?
+            .as_ref()?
+            .register(encoding, write)
     }
 
     /// A call that can change devices: run it, then tell every other PE
@@ -482,6 +507,9 @@ impl<D: Devices> Devices for SharedDevices<D> {
             && self.board.registers[bit / 64] & 1 << (bit % 64) == 0
         {
             return None;
+        }
+        if let Some(value) = self.local_register(cpu, encoding, write) {
+            return Some(Ok(value));
         }
         if write.is_none() {
             return self.at(Call::Register, now, |devices, now| {

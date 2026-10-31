@@ -141,12 +141,7 @@ fn populated_machine_discards_thunks_before_adopting_a_hub_control() {
         machine.blocks.is_empty() && machine.index.is_empty() && machine.fault_recovery.is_empty()
     );
     assert!(machine.host.installed.is_empty());
-    assert!(
-        machine
-            .targets
-            .iter()
-            .all(|entry| *entry == stela_compiler::x86_64::chain::LookupEntry::default())
-    );
+    assert!(machine.targets.is_empty());
     machine.cpu.pc = BASE;
     machine.host.exits = vec![direct(BASE + 12), direct(BASE), direct(BASE + 12)];
     machine.step().unwrap();
@@ -459,6 +454,27 @@ fn a_page_invalidation_the_pe_has_yet_to_read_covers_the_same_page_again() {
     // Every post counts: the PE's acknowledgment of the last one is the
     // one waited for.
     assert_eq!((mail.serial, machine.posted.as_slice()), (5, &[(1, 5)][..]));
+}
+
+#[test]
+fn an_ic_ivau_reaches_other_pes_only_for_compiled_pages_once_per_dsb() {
+    const PAGE: u64 = 0x4000_0000;
+    let (hub, _) = hub(2);
+    let mut machine = first_of_two(&[], &hub);
+    // No PE compiled from it: the IC IVAU of each line stops here.
+    machine.post_code_page(PAGE);
+    assert!(machine.posted.is_empty());
+    // The next lines of a page add nothing to its first one.
+    hub.compiling(PAGE + 0x100);
+    machine.post_code_page(PAGE + 0x40);
+    machine.post_code_page(PAGE + 0x80);
+    assert_eq!(machine.posted, [(1, 1)]);
+    // A DSB ends the run: what follows may have been written since.
+    let mail = hub.take(1).unwrap();
+    hub.acknowledge(1, mail.serial);
+    machine.complete_maintenance().unwrap();
+    machine.post_code_page(PAGE + 0x40);
+    assert_eq!(machine.posted, [(1, 2)]);
 }
 
 #[test]

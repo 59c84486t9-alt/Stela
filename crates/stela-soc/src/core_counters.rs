@@ -30,6 +30,8 @@
 //! So each counter is one value with two views: this model holds it, and
 //! the PE's MRS and MSR of the System register and any PE's 64-bit load or
 //! store of the window word reach the same storage (`Devices::system_register`).
+//! The samplers read them in bursts on every PE, so a PE reaches its own
+//! outside the devices' lock ([`LocalRegisters`]): the storage is atomic.
 //! The counters count only under the samplers' enables and event selectors,
 //! whose events are not documented; the core holds those and reports the
 //! missing counting once (`machine::impdef`), and the counters hold what
@@ -38,7 +40,10 @@
 //! the memory-stall deltas to 48 bits itself, testing bit 47 for overflow,
 //! which a counter that never counts never sets. So each is held as 64 bits
 //! (inference).
+use alloc::sync::Arc;
+use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use stela_compiler::aarch64::system::registers::Encoding;
+use stela_engine::machine::engine::LocalRegisters;
 use stela_soc_data::core_counters::{
     AON, AON_EXTRA, AON_SLOTS, AON_STRIDE, EXTRA_SLOTS, EXTRA_STRIDE, MAX_AON, STALL, STALL_SLOTS,
     STALL_STRIDE,
@@ -62,19 +67,28 @@ enum Counter {
 }
 
 /// The counters of one PE's `cpu-impl-reg`.
+///
+/// A clone reaches the same counters.
 #[derive(Debug, Clone)]
 pub struct CoreCounters {
     layout: Layout,
-    aon: [u64; MAX_AON],
-    stall: [u64; STALL_SLOTS],
+    values: Arc<Values>,
+}
+
+#[derive(Debug)]
+struct Values {
+    aon: [AtomicU64; MAX_AON],
+    stall: [AtomicU64; STALL_SLOTS],
 }
 
 impl CoreCounters {
     pub fn new(layout: Layout) -> Self {
         Self {
             layout,
-            aon: [0; MAX_AON],
-            stall: [0; STALL_SLOTS],
+            values: Arc::new(Values {
+                aon: [const { AtomicU64::new(0) }; MAX_AON],
+                stall: [const { AtomicU64::new(0) }; STALL_SLOTS],
+            }),
         }
     }
 
@@ -124,26 +138,32 @@ impl CoreCounters {
         }
     }
 
-    fn value(&mut self, counter: Counter) -> &mut u64 {
+    fn value(&self, counter: Counter) -> &AtomicU64 {
         match counter {
-            Counter::Aon(n) => &mut self.aon[n],
-            Counter::Stall(k) => &mut self.stall[k],
+            Counter::Aon(n) => &self.values.aon[n],
+            Counter::Stall(k) => &self.values.stall[k],
         }
     }
 
     /// An MRS (`write` `None`) or MSR of `encoding` by the PE whose block
     /// this is: `None` for a register that is no counter of this SoC, else
     /// the value read (0 for a write).
-    pub fn register(&mut self, encoding: Encoding, write: Option<u64>) -> Option<u64> {
+    pub fn register(&self, encoding: Encoding, write: Option<u64>) -> Option<u64> {
         let counter = self.of_register(encoding)?;
         let value = self.value(counter);
         Some(match write {
             Some(written) => {
-                *value = written;
+                value.store(written, Relaxed);
                 0
             }
-            None => *value,
+            None => value.load(Relaxed),
         })
+    }
+}
+
+impl LocalRegisters for CoreCounters {
+    fn register(&self, encoding: Encoding, write: Option<u64>) -> Option<u64> {
+        CoreCounters::register(self, encoding, write)
     }
 }
 
@@ -157,7 +177,7 @@ impl MmioDevice for CoreCounters {
 
     fn read(&mut self, offset: u64, width: Width, _: &mut Access<'_>) -> Result<u64, MmioError> {
         match self.of_offset(offset).filter(|_| width == Width::Double) {
-            Some(counter) => Ok(*self.value(counter)),
+            Some(counter) => Ok(self.value(counter).load(Relaxed)),
             None => Err(refuse(
                 NAME,
                 offset,
@@ -177,7 +197,7 @@ impl MmioDevice for CoreCounters {
     ) -> Result<(), MmioError> {
         match self.of_offset(offset).filter(|_| width == Width::Double) {
             Some(counter) => {
-                *self.value(counter) = value;
+                self.value(counter).store(value, Relaxed);
                 Ok(())
             }
             None => Err(refuse(
@@ -209,7 +229,8 @@ mod tests {
         let mut latch = InterruptLatch::new();
         let mut access = Access::new(1, 0, &mut latch);
         let mut block = CoreCounters::new(layout(0x8112).unwrap());
-        assert_eq!(block.register(AON_1, Some(0x1234_5678)), Some(0));
+        // The handle a PE keeps reaches the same counter.
+        assert_eq!(block.clone().register(AON_1, Some(0x1234_5678)), Some(0));
         assert_eq!(
             block.read(AON + AON_STRIDE, Width::Double, &mut access),
             Ok(0x1234_5678)
@@ -280,7 +301,7 @@ mod tests {
             assert_eq!(block.register(encoding, None), None);
             assert!(block.read(offset, Width::Double, &mut access).is_err());
         }
-        let mut m4 = CoreCounters::new(layout(0x8132).unwrap());
+        let m4 = CoreCounters::new(layout(0x8132).unwrap());
         assert_eq!(m4.register(AON_3, None), Some(0));
     }
 

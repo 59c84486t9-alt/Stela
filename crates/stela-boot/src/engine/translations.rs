@@ -345,6 +345,14 @@ impl Translations for Shared {
             }
         });
     }
+
+    fn lend(&mut self, offer: Offer) {
+        with_boot(|boot| {
+            if let Some(boot) = boot {
+                boot.store.lend(offer);
+            }
+        });
+    }
 }
 
 /// The store the engine uses, if the loader read one or the PEs share one.

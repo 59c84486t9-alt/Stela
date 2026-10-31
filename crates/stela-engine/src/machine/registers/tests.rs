@@ -2,6 +2,20 @@ use super::*;
 use crate::machine::cpu::HCR_TGE;
 use stela_compiler::aarch64::system::registers::decode;
 
+/// A write of an IMPLEMENTATION DEFINED register that only stores.
+const STORED: Changes = Changes {
+    translation: false,
+    controls: false,
+    permissions: false,
+    regime: false,
+    interrupts: false,
+    floating_point: false,
+    stored: false,
+    reads_kept: true,
+    unmodeled: None,
+    irq_steering: None,
+};
+
 fn mrs(rt: u8, encoding: Encoding) -> RegisterAccess {
     decode(
         0xd530_0000
@@ -369,6 +383,7 @@ fn siq_cfg_steers_the_aics_irqs() {
                     cpu.apple_access(msr(5, impdef::SIQ_CFG_EL1), 0),
                     Outcome::Written(Changes {
                         irq_steering: Some(refuses),
+                        reads_kept: true,
                         ..Changes::default()
                     })
                 );
@@ -403,6 +418,7 @@ fn siq_cfg_refusals_preserve_held_state_counts_and_irq_effects() {
                 cpu.apple_access(msr(5, encoding), 0),
                 Outcome::Written(Changes {
                     irq_steering: Some(true),
+                    reads_kept: true,
                     ..Changes::default()
                 })
             );
@@ -460,6 +476,7 @@ fn siq_cfg_privilege_checks_precede_validation_and_xzr_clears() {
             cpu.apple_access(msr(31, encoding), 0),
             Outcome::Written(Changes {
                 irq_steering: Some(false),
+                reads_kept: true,
                 ..Changes::default()
             })
         );
@@ -567,7 +584,7 @@ fn el0_apple_control_afpcr_uses_the_existing_pe_model_without_fp_effects() {
             // XZR writes zero even while X5 holds unsupported controls.
             assert_eq!(
                 cpu.apple_access(msr(31, encoding), 0),
-                Outcome::Written(Changes::default())
+                Outcome::Written(STORED)
             );
             let writes = cpu.apple.impdef.writes.clone();
             for value in [1, 2, 3, 1 << 63] {
@@ -596,7 +613,7 @@ fn el0_apple_control_afpcr_uses_the_existing_pe_model_without_fp_effects() {
         assert!(peer.apple.impdef.writes.is_empty());
         assert_eq!(
             peer.apple_access(msr(31, encoding), 0),
-            Outcome::Written(Changes::default())
+            Outcome::Written(STORED)
         );
         assert_eq!(peer.apple.impdef.writes.get(&key), Some(&1));
         assert_eq!(cpu.apple.impdef.writes.get(&key), Some(&2));
@@ -629,7 +646,7 @@ fn el0_apple_control_afpcr_keeps_el1_tidcp_ordering_and_el2_access() {
         assert!(cpu.apple.impdef.writes.is_empty());
         assert_eq!(
             cpu.apple_access(msr(31, encoding), 0),
-            Outcome::Written(Changes::default())
+            Outcome::Written(STORED)
         );
         cpu.pstate.el = 1;
         cpu.registers.set(Register::HCR_EL2, 0, 0);
@@ -678,7 +695,7 @@ fn el0_apple_control_trace_permissions_remain_explicitly_unqualified() {
         // Original M1/M2 XNU can still clear the register at a
         // context switch. Non-censused chips keep the census inference.
         let expected = if consumed {
-            Outcome::Written(Changes::default())
+            Outcome::Written(STORED)
         } else {
             Outcome::Undefined
         };
@@ -739,7 +756,7 @@ fn objc_prediction_accesses_preserve_state_and_trap_before_writing() {
             }
             assert_eq!(
                 cpu.apple_access(msr(5, encoding), 0),
-                Outcome::Written(Changes::default())
+                Outcome::Written(STORED)
             );
             assert_eq!(cpu.apple_access(mrs(0, encoding), 0), Outcome::Read(value));
             let writes = cpu.apple.impdef.writes.clone();
@@ -772,7 +789,7 @@ fn objc_prediction_accesses_preserve_state_and_trap_before_writing() {
             assert_eq!(cpu.apple_access(mrs(0, encoding), 0), Outcome::Read(value));
             assert_eq!(
                 cpu.apple_access(msr(31, encoding), 0),
-                Outcome::Written(Changes::default())
+                Outcome::Written(STORED)
             );
             assert_eq!(cpu.apple_access(mrs(31, encoding), 0), Outcome::Read(0));
             cpu.pstate.el = 1;

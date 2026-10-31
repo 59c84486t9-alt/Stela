@@ -4,9 +4,13 @@
 use super::*;
 
 impl<H: Host, D: Devices> Machine<H, D> {
-    /// A write of `register`: a [`stored`] one closes only its own cells,
-    /// any other forgets everything derived.
+    /// A write of `register`: a [`stored`] one reaches only its own cells,
+    /// one that [`keeps_reads`] all that derives from it but the cells, and
+    /// any other everything derived.
     pub(super) fn register_written(&mut self, register: SystemRegister) {
+        if keeps_reads(register) {
+            return self.forget_derived();
+        }
         if !stored(register) {
             return self.derived_changed();
         }
@@ -19,8 +23,19 @@ impl<H: Host, D: Devices> Machine<H, D> {
             _ => return,
         };
         if let Some(index) = MIRRORED.iter().position(|&mirrored| mirrored == encoding) {
-            self.mirrors.close(index);
+            if self.cpu.degraded.is_empty() {
+                let value = self.cpu.registers.get(register, 0);
+                self.mirrors.update(index, value);
+            } else {
+                self.mirrors.close(index);
+            }
         }
+    }
+
+    /// The PE's bank of cells ([`Mirrors`]).
+    pub(super) fn mirror_state(&self) -> usize {
+        let pstate = self.cpu.pstate;
+        mirror_state(pstate.el, pstate.guarded)
     }
 
     /// Forget state derived from System registers and PSTATE.
@@ -34,11 +49,15 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
     /// An exception entry or return, GENTER or GEXIT moved the PE from EL
     /// and GXF state `from`: what derives from PSTATE goes, but the mirrored
-    /// reads keep their cells per state ([`Mirrors`]), and an open DAIF
-    /// cell reads the new masks and open GL1 exception register cells what
-    /// the entry wrote.
+    /// reads keep their cells per state ([`Self::cells_moved`]).
     pub(super) fn transitioned(&mut self, from: usize) {
         self.forget_derived();
+        self.cells_moved(from);
+    }
+
+    /// The cells of the PE's state replace those of state `from`: an open
+    /// DAIF cell reads the current masks and an open counter cell the count.
+    pub(super) fn cells_moved(&mut self, from: usize) {
         let pstate = self.cpu.pstate;
         self.mirrors
             .transition(from, mirror_state(pstate.el, pstate.guarded));
@@ -46,7 +65,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if daif.readable != 0 {
             daif.value = daif_register(pstate.daif);
         }
-        for index in GUARDED_MIRRORS {
+        for index in COUNTER_MIRRORS {
             if self.mirrors[index].readable == 0 {
                 continue;
             }
@@ -116,6 +135,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             let enabled = self.key_enabled(block);
             self.pointer.reopen(key, enabled, trapped);
         }
+        self.pointer.reopen_generic(trapped);
         for (data, open) in [false, true].into_iter().zip(stripping) {
             if open {
                 self.pointer.reopen_stripping(data);
@@ -150,10 +170,18 @@ impl<H: Host, D: Devices> Machine<H, D> {
         })
     }
 
+    /// Whether this PE's memory accesses go through its canonical memory:
+    /// a machine held for the parallel PEs keeps it but accesses RAM as
+    /// they do.
+    pub(super) fn canonical_memory_serves(&self) -> bool {
+        self.cpu.has_canonical_memory() && self.serial_hold.is_none()
+    }
+
     pub(super) fn native_system(&mut self) -> NativeSystem {
         *self.native_system.get_or_insert_with(|| NativeSystem {
             zero_block: system::native_zero_block(&self.cpu, &self.profile_missing),
             cache_clean: system::native_cache_clean(&self.cpu),
+            exclusive: self.parallel.is_some(),
         })
     }
 
@@ -179,7 +207,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.watch = watch;
         self.tag_checks = self.cpu.tag_checks();
         let regime = Regime {
-            controls: self.cpu.controls(self.cpu.regime()),
+            controls: self.cpu.translating_controls(self.cpu.regime()),
             requester: self.cpu.requester(),
             watch,
             tag_checks: self.tag_checks,

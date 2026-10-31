@@ -146,6 +146,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             return Err(self.fail_native(index, fault, NativeFailureReason::TrapSiteMismatch));
         }
         let mut staged = self.cpu.state.clone();
+        stela_compiler::x86_64::pinned::settle(&fault.registers, &mut staged);
         let settlement = match FaultRecovery::apply(
             &table,
             fault.offset,
@@ -189,12 +190,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if pc != entry_pc {
             self.cpu.pstate.btype = 0;
         }
-        // A native DC ZVA's first store, or a native DC clean's read of Xt,
-        // faulted with nothing written (a DC ZVA block is in one page): the
-        // engine completes the instruction, reporting Xt as the fault
-        // address with a cache maintenance syndrome and watching the whole
-        // DC ZVA block (Arm `AArch64_DataMemZero`), whatever stopped the
-        // access.
+        // A native DC ZVA's first store, a native DC clean's read of Xt, or
+        // a native exclusive faulted with nothing written (a DC ZVA block is
+        // in one page): the engine completes the instruction, reporting Xt
+        // as the fault address with a cache maintenance syndrome and watching
+        // the whole DC ZVA block (Arm `AArch64_DataMemZero`), or adopting the
+        // monitor the frame holds, whatever stopped the access.
         let (terminal, word) = (
             self.blocks[index].terminal_pc(),
             self.blocks[index].terminal,

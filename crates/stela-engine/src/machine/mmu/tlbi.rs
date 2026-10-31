@@ -355,6 +355,12 @@ impl Scope {
         }
     }
 
+    /// The ASID whose non-global entries this TLBI alone reaches: the VA and
+    /// ASID forms that name one, whose VA forms reach global entries too.
+    pub fn named_asid(self) -> Option<u16> {
+        matches!(self.kind, TlbiKind::VA | TlbiKind::RVA | TlbiKind::ASID).then_some(self.asid)
+    }
+
     /// The canonical VAs a range form names.
     fn overlapping(self) -> Reach {
         Reach::Overlapping {

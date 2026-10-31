@@ -62,6 +62,7 @@ pub mod encodings {
     }
     registers! {
         ACTLR_EL12 = 3, 5, 1, 0, 1;
+        CURRENT_EL = 3, 0, 4, 2, 2;
         MIDR_EL1 = 3, 0, 0, 0, 0;
         MPIDR_EL1 = 3, 0, 0, 0, 5;
         REVIDR_EL1 = 3, 0, 0, 0, 6;
@@ -196,6 +197,9 @@ pub struct Changes {
     /// The write only stored a GL bank register, which nothing derived
     /// reads: the exception entries and returns that use it read it then.
     pub stored: bool,
+    /// No MRS reads or traps differently after the write, so reads complete
+    /// natively as they did: only what else derives from it goes.
+    pub reads_kept: bool,
     /// The write took a value whose effect this machine does not model
     /// (`impdef::Entry::unmodeled_effect`): what is missing, which the
     /// engine reports once.
@@ -485,6 +489,20 @@ impl Cpu {
                 locked == encoding && self.apple.spr_lockdown[0] >> group & 1 != 0
             })
     }
+}
+
+/// Where the current guarded level keeps GL1's register `encoding` of
+/// those a level saves and restores around each call, written and read as
+/// stored.
+pub fn guarded_storage(cpu: &Cpu, encoding: Encoding) -> Option<u64> {
+    let bank = &cpu.apple.guarded[usize::from(cpu.pstate.el.max(1)) - 1];
+    let storage = match encoding {
+        SPSR_GL1 => &bank.spsr,
+        ASPSR_GL1 => &bank.aspsr,
+        ELR_GL1 => &bank.elr,
+        _ => return None,
+    };
+    Some(storage as *const u64 as u64)
 }
 
 fn bank_read(bank: &GuardedBank, encoding: Encoding) -> u64 {
@@ -932,6 +950,7 @@ impl Cpu {
                 unmodeled: entry.unmodeled_effect(value),
                 irq_steering: (entry.encoding == impdef::SIQ_CFG_EL1)
                     .then_some(value & SIQ_CFG_MODE == SIQ_CFG_NO_IRQ),
+                reads_kept: true,
                 ..Changes::default()
             }),
             Err(reason) => Outcome::Refused(Refusal::UnsupportedSetting(reason)),
@@ -1193,7 +1212,10 @@ impl Apple {
                 apple.sprr_perm[index] = value;
                 changes.permissions = true;
             }
-            Self::SprrFields(which) => apple.sprr_fields[which] = value,
+            Self::SprrFields(which) => {
+                apple.sprr_fields[which] = value;
+                changes.reads_kept = true;
+            }
             Self::GxfConfig(level) => {
                 if value & !(GXF_CONFIG_EN | GXF_CONFIG_LOCKS | GXF_CONFIG_EL1_LOCK) != 0 {
                     return refuse("GXF_CONFIG bit without documented or observed meaning");
@@ -1230,9 +1252,18 @@ impl Apple {
                 changes.stored = true;
             }
             Self::TpidrGl(level) => apple.guarded[level].tpidr = value,
-            Self::ApControl(level) => apple.apctl[level] = value,
-            Self::KernelKey(index) => apple.kernel_key[index] = value,
-            Self::PointerKey(register) => apple.pointer_keys.write(register, value),
+            Self::ApControl(level) => {
+                apple.apctl[level] = value;
+                changes.reads_kept = true;
+            }
+            Self::KernelKey(index) => {
+                apple.kernel_key[index] = value;
+                changes.reads_kept = true;
+            }
+            Self::PointerKey(register) => {
+                apple.pointer_keys.write(register, value);
+                changes.reads_kept = true;
+            }
             Self::VmsaLock => {
                 if value & !VMSA_LOCK_KNOWN != 0 {
                     return refuse("VMSA_LOCK_EL1 bit without documented meaning");

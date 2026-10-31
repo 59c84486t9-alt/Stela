@@ -5,21 +5,46 @@ use super::*;
 
 impl<H: Host, D: Devices> Machine<H, D> {
     pub(super) fn fetch_block(&mut self, pc: u64, single: bool) -> Result<Fetched, Stop> {
+        let looking = core::mem::take(&mut self.looking);
+        let context = self.current_variant(single, false);
+        let el = self.cpu.pstate.el | u8::from(self.cpu.pstate.guarded) << 4;
+        let contexts = self.contexts(el, context);
+        self.chain.set_contexts(contexts);
+        // What a lookup thunk would enter, in the context that keeps its
+        // translation current. The engine checks BTYPE against the fetch's
+        // translation, which this leaves uncached.
+        let context_number = contexts[chain::half(pc)];
+        let slot = chain::lookup_slot(pc, context_number);
+        let target = self.targets.find(slot, pc, context_number);
+        if target.pc == pc
+            && target.context == context_number
+            && !single
+            && self.cpu.pstate.btype == 0
+        {
+            return Ok(Fetched::Block(target.block as usize));
+        }
         let physical = match self.fetch_physical(pc) {
             Ok(physical) => physical,
             Err(Ok(exception)) => return Ok(Fetched::Exception(exception)),
             Err(Err(stop)) => return Err(stop),
         };
-        let guarded = self.fetch_guarded(pc);
-        let current = self.current_variant(single, guarded);
-        let variant = self.page_variant(current, physical);
-        let el = self.cpu.pstate.el | u8::from(self.cpu.pstate.guarded) << 4;
-        let context = Variant {
-            guarded_page: false,
-            ..current
+        let current = Variant {
+            guarded_page: self.fetch_guarded(pc),
+            ..context
         };
-        let contexts = self.contexts(el, context);
-        self.chain.set_contexts(contexts);
+        let variant = self.page_variant(current, physical);
+        // The entry of a context forgotten since, whose translation this
+        // fetch confirms: what TLBI ALL leaves of the kernel's text.
+        if target.pc == pc && target.context >= self.code_floor {
+            let block = &self.blocks[target.block as usize];
+            if block.pc == pc
+                && block.physical == physical
+                && self.variants[block.variant.0 as usize] == variant
+            {
+                self.remember_fetch(pc, physical, target.block as usize, looking);
+                return Ok(Fetched::Block(target.block as usize));
+            }
+        }
         let slot = (pc / INSTRUCTION) as usize % JUMP_CACHE;
         if let Some(entry) = self.jump[slot]
             && entry.pc == pc
@@ -27,7 +52,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             && entry.variant == variant
             && entry.generation == self.code_generation
         {
-            self.remember_target(pc, entry.block);
+            self.remember_fetch(pc, physical, entry.block, looking);
             return Ok(Fetched::Block(entry.block));
         }
         let indexed = self
@@ -38,13 +63,23 @@ impl<H: Host, D: Devices> Machine<H, D> {
             None => {
                 let generation = self.code_generation;
                 self.reclaim_for_memory();
-                let compiled = self.compile(pc, physical, variant)?;
+                if let Some(hub) = &self.parallel {
+                    hub.compiling(physical);
+                }
+                let (compiled, mail) = self.compile_aside(pc, physical, variant);
+                let compiled = compiled?;
                 // Compiling may have reclaimed code, whose lookup entries
                 // the old context still names: the thunks look up in a new
                 // one.
                 if self.code_generation != generation {
                     let contexts = self.contexts(el, context);
                     self.chain.set_contexts(contexts);
+                }
+                // What came meanwhile may undo this fetch's translation or
+                // the code it compiled; the block stays for the next one.
+                if mail {
+                    self.read_mail()?;
+                    return self.fetch_block(pc, single);
                 }
                 match compiled {
                     Fetched::Block(index) => index,
@@ -59,34 +94,99 @@ impl<H: Host, D: Devices> Machine<H, D> {
             generation: self.code_generation,
             block: index,
         });
-        self.remember_target(pc, index);
+        self.remember_fetch(pc, physical, index, looking);
         Ok(Fetched::Block(index))
     }
 
+    /// [`Self::remember_target`], and when a lookup thunk was `looking` for
+    /// `pc`, what it would look for around it.
+    fn remember_fetch(&mut self, pc: u64, physical: u64, index: usize, looking: bool) {
+        self.remember_target(pc, index);
+        if looking {
+            self.index.looked_up(physical, index);
+            self.remember_leaf(pc, physical, index);
+        }
+    }
+
+    /// The fetch of `pc` proved the translation of the leaf around it, and
+    /// each process of a system misses on the same library's code in contexts
+    /// of its own. So one miss remembers every block of the leaf a lookup has
+    /// gone looking for, in the variant of block `index`, unless this context
+    /// already did for that page. A block's first lookup still misses.
+    fn remember_leaf(&mut self, pc: u64, physical: u64, index: usize) {
+        let variant = self.blocks[index].variant;
+        if self.variants[variant.0 as usize].single {
+            return;
+        }
+        let page = pc & !(FETCH_PAGE - 1);
+        let Some(fetched) = self.fetch[(page / FETCH_PAGE) as usize % FETCH_CACHE]
+            .filter(|fetched| fetched.page == page)
+        else {
+            return;
+        };
+        let span = fetched.leaf.clamp(FETCH_PAGE, REMEMBERED_SPAN);
+        let context = self.chain.contexts()[chain::half(pc)];
+        let mut slots = core::mem::take(&mut self.remembering);
+        for offset in (0..span).step_by(FETCH_PAGE as usize) {
+            let at = (pc & !(span - 1)) + offset;
+            let frame = (physical & !(span - 1)) + offset;
+            let memo = ((frame / FETCH_PAGE) ^ context) as usize % REMEMBERED_PAGES;
+            if self.remembered_pages[memo] == (frame, context)
+                || self.page_translated(frame) != self.page_translated(physical)
+                || !self.host.fetch_permitted(at)
+            {
+                continue;
+            }
+            self.remembered_pages[memo] = (frame, context);
+            slots.clear();
+            slots.extend(self.index.looked_up_slots(frame));
+            for &slot in &slots {
+                let block = &self.blocks[slot as usize];
+                if block.variant == variant && block.pc & !(FETCH_PAGE - 1) == at {
+                    let pc = block.pc;
+                    self.remember_guarded(pc, slot as usize, fetched.guarded);
+                }
+            }
+        }
+        self.remembering = slots;
+    }
+
     /// Record that a fetch at `pc` runs block `index` in the current
-    /// context, for lookup thunks: not single-instruction blocks, which
-    /// debug checks precede, nor trace points, which the engine records.
-    /// The fetch translated `pc`, so its page's entry is in the fetch cache.
+    /// context, for lookup thunks. The fetch translated `pc`, so its page's
+    /// entry is in the fetch cache.
     pub(super) fn remember_target(&mut self, pc: u64, index: usize) {
+        let page = pc & !(FETCH_PAGE - 1);
+        let guarded = self.fetch[(page / FETCH_PAGE) as usize % FETCH_CACHE]
+            .is_some_and(|fetched| fetched.page == page && fetched.guarded);
+        self.remember_guarded(pc, index, guarded);
+    }
+
+    /// [`Self::remember_target`] in a page `guarded` or not: not for
+    /// single-instruction blocks, which debug checks precede, nor trace
+    /// points, which the engine records.
+    fn remember_guarded(&mut self, pc: u64, index: usize, guarded: bool) {
         let block = &self.blocks[index];
         if self.variants[block.variant.0 as usize].single || self.traces.binary_search(&pc).is_ok()
         {
             return;
         }
         let (entry, first) = (block.code.0 as u64, block.first);
-        let page = pc & !(FETCH_PAGE - 1);
-        let guarded = self.fetch[(page / FETCH_PAGE) as usize % FETCH_CACHE]
-            .is_some_and(|fetched| fetched.page == page && fetched.guarded);
-        let targets = (0..4u8)
-            .filter(|&btype| !guarded || btype == 0 || self.branch_target_accepts(first, btype))
-            .fold(0, |targets, btype| targets | 1 << btype);
-        self.targets[chain::lookup_slot(pc)] = chain::LookupEntry {
+        let targets = match guarded {
+            true => (0..4u8)
+                .filter(|&btype| btype == 0 || self.branch_target_accepts(first, btype))
+                .fold(0, |targets, btype| targets | 1 << btype),
+            false => 0b1111,
+        };
+        let context = self.chain.contexts()[chain::half(pc)];
+        let slot = chain::lookup_slot(pc, context);
+        let target = chain::LookupEntry {
             pc,
-            context: self.chain.contexts()[chain::half(pc)],
+            context,
             entry,
             block: index as u32,
             targets,
         };
+        self.targets.insert(slot, target);
     }
 
     /// Compile the block at `pc`, unless its first instruction is a
@@ -257,21 +357,28 @@ impl<H: Host, D: Devices> Machine<H, D> {
             compiled,
             preparation,
         ));
-        // An offer is kept until the store proves it; with memory low the
-        // block is only compiled, as one the store cannot hold.
+        // An offer is kept until the store proves it. With memory low the
+        // store holds no more for proof, but the other PEs still take the
+        // block: this one retains the emission anyway, and each reuse saves
+        // a compile and a copy.
         if let (Some((key, _)), Some(context)) = (stored, context)
-            && !self.host.memory_low()
+            && let low = self.host.memory_low()
             && let Some(translations) = self.host.translations()
         {
-            translations.offer(Offer {
+            let offer = Offer {
                 key,
                 page,
                 pc,
                 context,
                 emission: emission.clone(),
                 successors,
-            });
-            self.statistics.offered += 1;
+            };
+            if low {
+                translations.lend(offer);
+            } else {
+                translations.offer(offer);
+                self.statistics.offered += 1;
+            }
         }
         self.install(
             pc,
@@ -462,14 +569,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
             pc,
             physical,
             code,
-            instructions: compiled.native().source_map.len() as u32,
+            instructions: compiled.native().source_map.len() as u16,
             variant: id,
-            successors,
-            dynamic_site,
+            successors: successors.into_boxed_slice(),
+            dynamic_site: dynamic_site.and_then(NonZeroU64::new),
             first,
             terminal,
             taken: 0,
-            source_bytes: compiled.source_bytes() as u32,
+            source_bytes: compiled.source_bytes() as u16,
             source_hash: source_hash(&source[..compiled.source_bytes()]),
         };
         let index = match self.free_blocks.pop() {
@@ -551,13 +658,38 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if native[site..] != exit {
             return None;
         }
-        let (index, rt) = mirrored_read(pc, word)?;
-        let cell = &self.mirrors[index] as *const register_read::Cell as u64;
-        let thunk = if COUNT_MIRRORS.contains(&index) {
-            let count = self.clock.native(self.host.tsc_counter()?);
-            register_read::count_thunk(GuestAddress(pc), rt, cell, count)
+        let masks = register_read::MaskWrite::of(word).filter(|_| self.native_system().exclusive);
+        let thunk = if let Some(write) = masks {
+            let cell = &self.mirrors[MASK_WRITES] as *const register_read::Cell as u64;
+            register_read::mask_thunk(write, GuestAddress(pc), cell)
+        } else if let Some(select) = stack_select(word) {
+            let cell = &self.mirrors[STACK_SELECT] as *const register_read::Cell as u64;
+            let current = &self.mirrors.selected as *const u64 as u64;
+            let sp0 = self.cpu.registers.address(SystemRegister::SP_EL0, 0)?;
+            register_read::stack_select_thunk(GuestAddress(pc), select, cell, current, sp0)
+        } else if let Some((index, rt)) = written_register(pc, word) {
+            self.stored_write_thunk(GuestAddress(pc), index, rt)
+        } else if let Some((index, rt)) = guarded_written_register(pc, word) {
+            let cell = &self.mirrors[index] as *const register_read::Cell as u64;
+            let all = register_read::Written {
+                keep: u64::MAX,
+                set: 0,
+            };
+            register_read::stored_write_thunk(GuestAddress(pc), rt, cell, all)
+        } else if let Some((index, rt)) = mirrored_read(pc, word) {
+            let cell = &self.mirrors[index] as *const register_read::Cell as u64;
+            if GUARDED_MIRRORS.contains(&index) {
+                register_read::stored_thunk(GuestAddress(pc), rt, cell)
+            } else if COUNT_MIRRORS.contains(&index) {
+                let count = self.clock.native(self.host.tsc_counter()?);
+                register_read::count_thunk(GuestAddress(pc), rt, cell, count)
+            } else if index == DAIF_MIRROR && self.native_system().exclusive {
+                register_read::mask_read_thunk(GuestAddress(pc), rt, cell)
+            } else {
+                register_read::thunk(GuestAddress(pc), rt, cell)
+            }
         } else {
-            register_read::thunk(GuestAddress(pc), rt, cell)
+            self.stored_read_thunk(pc, mrs_access(pc, word)?)?
         };
         let installed = self.host.install(&thunk.code).ok()?;
         let site = code.0 as u64 + site as u64;
@@ -567,6 +699,72 @@ impl<H: Host, D: Devices> Machine<H, D> {
             site: installed.0 as u64 + next as u64,
             target: GuestAddress(pc + INSTRUCTION),
             kind: ExitKind::Fallthrough,
+        })
+    }
+
+    /// The thunk completing MSR of `WRITTEN[index]` from Xt at `pc`.
+    fn stored_write_thunk(&self, pc: GuestAddress, index: usize, rt: u8) -> x86_64_pointer::Thunk {
+        let (_, register) = WRITTEN[index];
+        let cell = &self.mirrors[written_cell(index)] as *const register_read::Cell as u64;
+        let written = self.register_fixed_bits(register);
+        if register == SystemRegister::FPSR {
+            let offset = core::mem::offset_of!(GuestState, fpsr);
+            return register_read::frame_write_thunk(pc, rt, cell, offset, written);
+        }
+        if register == SystemRegister::SP_EL0 {
+            let selected = &self.mirrors.selected as *const u64 as u64;
+            return register_read::selected_write_thunk(pc, rt, cell, selected, written);
+        }
+        register_read::stored_write_thunk(pc, rt, cell, written)
+    }
+
+    /// The bits of `register` a write takes and those it holds.
+    pub(super) fn register_fixed_bits(&self, register: SystemRegister) -> register_read::Written {
+        let (res0, res1) = (
+            self.cpu.registers.res0(register),
+            self.cpu.registers.res1(register),
+        );
+        register_read::Written {
+            keep: !(res0 | res1),
+            set: res1,
+        }
+    }
+
+    /// The cell of MRS of `encoding`, made if there is room.
+    fn stored_cell(&mut self, encoding: Encoding) -> Option<usize> {
+        let known = self.stored_reads.iter().position(|&read| read == encoding);
+        let cell = known.or_else(|| {
+            (storable(encoding) && self.stored_reads.len() < STORED_CELLS).then(|| {
+                self.stored_reads.push(encoding);
+                self.stored_reads.len() - 1
+            })
+        })?;
+        Some(MIRRORED.len() + cell)
+    }
+
+    /// The thunk completing `access` at `pc` from its stored cell.
+    fn stored_read_thunk(
+        &mut self,
+        pc: u64,
+        access: RegisterAccess,
+    ) -> Option<x86_64_pointer::Thunk> {
+        use registers::encodings::{FPCR, FPSR};
+        let encoding = access.encoding();
+        let index = self.stored_cell(encoding)?;
+        let cell = &self.mirrors[index] as *const register_read::Cell as u64;
+        let (pc, rt) = (GuestAddress(pc), access.rt());
+        if encoding == STACK_ZERO {
+            let selected = &self.mirrors.selected as *const u64 as u64;
+            return Some(register_read::selected_stored_thunk(pc, rt, cell, selected));
+        }
+        Some(match encoding {
+            FPCR => {
+                register_read::frame_thunk(pc, rt, cell, core::mem::offset_of!(GuestState, fpcr))
+            }
+            FPSR => {
+                register_read::frame_thunk(pc, rt, cell, core::mem::offset_of!(GuestState, fpsr))
+            }
+            _ => register_read::stored_thunk(pc, rt, cell),
         })
     }
 
@@ -605,7 +803,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     pub(super) fn exit_word(&mut self, index: usize, pc: u64) -> Result<u32, Stop> {
         let block = &mut self.blocks[index];
         if pc == block.terminal_pc() {
-            block.taken += 1;
+            block.taken = block.taken.saturating_add(1);
             return Ok(block.terminal);
         }
         let word = self.word(index, pc)?;
@@ -618,7 +816,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     pub fn exit_words(&self) -> BTreeMap<u32, u64> {
         let mut words = self.exit_words.clone();
         for block in self.blocks.iter().filter(|block| block.taken != 0) {
-            *words.entry(block.terminal).or_default() += block.taken;
+            *words.entry(block.terminal).or_default() += u64::from(block.taken);
         }
         words
     }

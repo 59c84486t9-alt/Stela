@@ -70,7 +70,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         // translation this machine caches (the fetch translations of every PE
         // and the host's whole shadow) covers any translation scope.
         if !matches!(operation, AppleMaintenance::CoprocessorCacheFlush { .. }) {
-            self.tlb_maintained(Reach::All, Everywhere::All);
+            self.tlb_maintained(Reach::All, Everywhere::All, None);
         }
         self.next()
     }

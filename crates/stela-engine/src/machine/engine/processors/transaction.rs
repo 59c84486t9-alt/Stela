@@ -200,7 +200,7 @@ impl NativeProcessorState<'_> {
         *self.watch = plan.watch;
         *self.tag_checks = cpu.tag_checks();
         self.host.set_regime(&Regime {
-            controls: cpu.controls(cpu.regime()),
+            controls: cpu.translating_controls(cpu.regime()),
             requester: cpu.requester(),
             watch: plan.watch,
             tag_checks: *self.tag_checks,

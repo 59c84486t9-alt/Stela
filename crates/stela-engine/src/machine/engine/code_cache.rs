@@ -3,6 +3,13 @@
 
 use super::*;
 
+/// The word and bit of the page of `pc` in a filter of [`FETCHED_PAGES`] bits.
+fn fetched_page_bit(pc: u64) -> (usize, u64) {
+    let page = pc / FETCH_PAGE;
+    let bit = (page ^ page >> 16) as usize & (FETCHED_PAGES - 1);
+    (bit / 64, 1 << (bit % 64))
+}
+
 impl<H: Host, D: Devices> Machine<H, D> {
     /// Check the next [`STALE_CHECKS`] reachable compiled blocks against
     /// the guest bytes they were compiled from, a sweep that goes on where
@@ -39,14 +46,47 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
     /// The translations of the halves `halves` may have changed with no
     /// control value showing it: their lookup contexts go, so no lookup
-    /// enters a block their entries name.
+    /// enters a block their entries name, nor does a cached fetch outlive
+    /// what [`Self::fetched_through`] learnt of it.
     pub(super) fn forget_spaces(&mut self, halves: core::ops::RangeInclusive<usize>, cause: usize) {
+        self.forget_contexts(halves, cause);
+        self.advance_translation_generation();
+    }
+
+    /// Forget the contexts of `halves` that translate `asid`: what a TLBI of
+    /// one process leaves of the others', which their entries stay good for.
+    /// ASIDs compare by the eight bits every TCR.AS gives them.
+    fn forget_asid(&mut self, halves: core::ops::RangeInclusive<usize>, asid: u16, cause: usize) {
+        for half in halves {
+            self.statistics.lookup_forgets[cause] += 1;
+            self.spaces[half].retain(|space| !same_asid(&space.inputs.0, asid));
+            self.recent[half] = [None; RECENT];
+        }
+        self.advance_translation_generation();
+    }
+
+    /// The live salts of `half`'s contexts that `asid` reaches.
+    fn asid_salts(&self, half: usize, asid: u16) -> u64 {
+        self.spaces[half]
+            .iter()
+            .filter(|space| same_asid(&space.inputs.0, asid))
+            .fold(0, |salts, space| {
+                salts | 1 << (space.number % chain::LOOKUP_SALTS as u64)
+            })
+    }
+
+    /// [`Self::forget_spaces`] for a caller that advances the generation.
+    fn forget_contexts(&mut self, halves: core::ops::RangeInclusive<usize>, cause: usize) {
         for half in halves {
             self.statistics.lookup_forgets[cause] += 1;
             self.spaces[half].clear();
             self.recent[half] = [None; RECENT];
             self.fetch_leaves[half] = 0;
             self.private_fetches[half] = false;
+            self.fetched_pages[half].fill(0);
+            if half == 0 {
+                self.lower_globals = NO_GLOBALS;
+            }
         }
     }
 
@@ -54,41 +94,99 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// upper half's contexts leave out the ASID until a fetch of it is
     /// non-global ([`Self::half_inputs`]): the first such fetch forgets
     /// them, as their entries may name blocks of another ASID's page.
-    pub(super) fn fetched_through(&mut self, half: usize, size: u64, global: bool) {
+    pub(super) fn fetched_through(&mut self, half: usize, pc: u64, size: u64, global: bool) {
         if half == 1 && !global && !self.private_fetches[1] {
             self.forget_spaces(1..=1, 3);
         }
+        let (word, bit) = fetched_page_bit(pc);
+        self.fetched_pages[half][word] |= bit;
         self.fetch_leaves[half] = self.fetch_leaves[half].max(size);
         self.private_fetches[half] |= !global;
+        if half == 0 && global {
+            let (first, last) = self.lower_globals;
+            self.lower_globals = (first.min(pc), last.max(pc.saturating_add(size)));
+        }
+    }
+
+    /// The span of `half` a TLBI of `first..=last` can reach of what it
+    /// fetched: the leaves around them, as large as the largest one a fetch
+    /// of the half translated through, if any page of those was fetched from.
+    fn fetched_span(&self, half: usize, first: u64, last: u64) -> Option<(u64, u64)> {
+        const UPPER: u64 = !0 << 55;
+        let (low, high) = [(0, !UPPER), (UPPER, u64::MAX)][half];
+        let leaf = self.fetch_leaves[half];
+        if leaf == 0 || last < low || first > high {
+            return None;
+        }
+        let mask = leaf.next_power_of_two() - 1;
+        let (first, last) = (first.max(low) & !mask, last.min(high) | mask);
+        let pages = (last - first) / FETCH_PAGE;
+        let fetched = pages >= FETCHED_PAGES as u64
+            || (0..=pages).any(|page| {
+                let (word, bit) = fetched_page_bit(first + page * FETCH_PAGE);
+                self.fetched_pages[half][word] & bit != 0
+            });
+        fetched.then_some((first, last))
+    }
+
+    /// Drop the cached fetches of the pages a TLBI reaches in the current
+    /// translation: all of them if it reaches more than the cache holds.
+    fn forget_fetches(&mut self, reach: mmu::tlbi::Reach) {
+        let (first, last) = match reach {
+            mmu::tlbi::Reach::Nothing => return,
+            mmu::tlbi::Reach::All => return self.advance_translation_generation(),
+            mmu::tlbi::Reach::Containing(address) => (address, address),
+            mmu::tlbi::Reach::Overlapping { first, last } => (first, last),
+        };
+        for half in 0..2 {
+            let Some((first, last)) = self.fetched_span(half, first, last) else {
+                continue;
+            };
+            if (last - first) / FETCH_PAGE >= FETCH_CACHE as u64 {
+                return self.advance_translation_generation();
+            }
+            for page in (first..=last).step_by(FETCH_PAGE as usize) {
+                let slot = (page / FETCH_PAGE) as usize % FETCH_CACHE;
+                if self.fetch[slot].is_some_and(|entry| (first..=last).contains(&entry.page)) {
+                    self.fetch[slot] = None;
+                }
+            }
+        }
     }
 
     /// Drop the lookup entries, of every context, of the PCs a TLBI by VA
-    /// reaches: those in the leaf around each address it names, as large
-    /// as the largest one a fetch of that half translated through. A half
-    /// whose span would cover the table forgets its contexts instead.
-    pub(super) fn forget_lookups(&mut self, reach: mmu::tlbi::Reach) {
+    /// reaches ([`Self::fetched_span`]), or of `asid`'s contexts while no
+    /// global page was fetched in its span of the lower half, which only
+    /// such a page shares. A half whose span would cover the table forgets
+    /// those contexts instead.
+    pub(super) fn forget_lookups(&mut self, reach: mmu::tlbi::Reach, asid: Option<u16>) {
         let (first, last) = match reach {
             mmu::tlbi::Reach::Nothing => return,
             mmu::tlbi::Reach::All => return self.forget_spaces(0..=1, 1),
             mmu::tlbi::Reach::Containing(address) => (address, address),
             mmu::tlbi::Reach::Overlapping { first, last } => (first, last),
         };
-        const UPPER: u64 = !0 << 55;
-        for (half, (low, high)) in [(0, !UPPER), (UPPER, u64::MAX)].into_iter().enumerate() {
-            let leaf = self.fetch_leaves[half];
-            if leaf == 0 || last < low || first > high {
+        for half in 0..2 {
+            let Some((first, last)) = self.fetched_span(half, first, last) else {
+                continue;
+            };
+            let (global_first, global_last) = self.lower_globals;
+            let scoped = asid.filter(|_| half == 0 && (last < global_first || first > global_last));
+            if (last - first) / INSTRUCTION >= (chain::LOOKUP_ENTRIES / 8) as u64 {
+                match scoped {
+                    Some(asid) => self.forget_asid(half..=half, asid, 2),
+                    None => self.forget_spaces(half..=half, 2),
+                }
                 continue;
             }
-            let mask = leaf.next_power_of_two() - 1;
-            let (first, last) = (first.max(low) & !mask, last.min(high) | mask);
-            if (last - first) / INSTRUCTION >= chain::LOOKUP_ENTRIES as u64 {
-                self.forget_spaces(half..=half, 2);
-                continue;
-            }
-            for pc in (first..=last).step_by(INSTRUCTION as usize) {
-                let entry = &mut self.targets[chain::lookup_slot(pc)];
-                if (first..=last).contains(&entry.pc) {
-                    *entry = chain::LookupEntry::default();
+            let salts = match scoped {
+                Some(asid) => self.asid_salts(half, asid),
+                None => self.live_salts(half),
+            };
+            for salt in (0..chain::LOOKUP_SALTS as u64).filter(|salt| salts >> salt & 1 != 0) {
+                for pc in (first..=last).step_by(INSTRUCTION as usize) {
+                    self.targets
+                        .forget(chain::lookup_slot(pc, salt), first..=last);
                 }
             }
         }
@@ -116,7 +214,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// Anything about translation may have changed: every lookup context
     /// goes too, and the whole shadow.
     pub(super) fn translations_changed(&mut self) {
-        self.forget_spaces(0..=1, 3);
+        self.forget_contexts(0..=1, 3);
         self.host.invalidate_translations();
         self.controls_changed();
     }
@@ -126,11 +224,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// transfer enters a block of another page before it has.
     pub fn fetch_permissions_changed(&mut self) {
         self.forget_spaces(0..=1, 3);
-        self.advance_translation_generation();
     }
 
-    /// A TLBI: the fetch translations of every regime go, and the host
-    /// drops what `reach` names of its shadow. Of the lookup table, which
+    /// A TLBI: the fetch translations `reach` names go, and the host drops
+    /// what it names of its shadow. Of the lookup table, which
     /// holds every context's entries, it drops what `everywhere` names: the
     /// entries at its VAs, or the contexts of the halves non-global entries
     /// were fetched through, or every context. No control changed, so the
@@ -139,16 +236,27 @@ impl<H: Host, D: Devices> Machine<H, D> {
         &mut self,
         reach: mmu::tlbi::Reach,
         everywhere: mmu::tlbi::Everywhere,
+        asid: Option<u16>,
     ) {
         match everywhere {
-            mmu::tlbi::Everywhere::Addresses(addresses) => self.forget_lookups(addresses),
-            mmu::tlbi::Everywhere::NonGlobal if !self.private_fetches[1] => {
-                self.forget_spaces(0..=0, 0)
+            mmu::tlbi::Everywhere::Addresses(addresses) => {
+                // Canonical memory's kept TLBs refresh on the generation.
+                if self.canonical_memory_serves() {
+                    self.advance_translation_generation();
+                } else {
+                    self.forget_fetches(reach);
+                }
+                self.forget_lookups(addresses, asid);
             }
-            mmu::tlbi::Everywhere::NonGlobal => self.forget_spaces(0..=1, 0),
+            mmu::tlbi::Everywhere::NonGlobal => {
+                let last = usize::from(self.private_fetches[1]);
+                match asid {
+                    Some(asid) => self.forget_asid(0..=last, asid, 0),
+                    None => self.forget_spaces(0..=last, 0),
+                }
+            }
             mmu::tlbi::Everywhere::All => self.forget_spaces(0..=1, 1),
         }
-        self.advance_translation_generation();
         self.statistics.tlb_maintenance += 1;
         if reach != mmu::tlbi::Reach::All {
             self.statistics.scoped_maintenance += 1;
@@ -239,12 +347,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
         for &slot in &evicted {
             let block = &mut self.blocks[slot];
             if block.taken != 0 {
-                *self.exit_words.entry(block.terminal).or_default() += block.taken;
+                *self.exit_words.entry(block.terminal).or_default() += u64::from(block.taken);
             }
             block.code = NativeCode(0);
             block.taken = 0;
             block.dynamic_site = None;
-            block.successors = Vec::new();
+            block.successors = Box::default();
             self.fault_recovery.remove(&slot);
             self.free_blocks.push(slot);
         }

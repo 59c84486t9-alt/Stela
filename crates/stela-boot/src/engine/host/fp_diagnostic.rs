@@ -1,360 +1,31 @@
-//! Authored native-entry/context/#UD recovery FP validation.
-//! No ARM image is modified, no target is widened and no result is invented
-//! from a copied frame. Run only before production frames/artifacts are lent.
-mod helper;
-
-use super::{BareHost, native_return, state};
+//! Real translated-access helper return and abandonment on owned ARM tables.
+use super::{BareHost, RamRange, load_root, native_return, state};
 use crate::Result;
-use crate::output;
-use core::{arch::global_asm, mem::offset_of, ptr};
+use alloc::vec::Vec;
+use core::{arch::global_asm, mem, mem::offset_of, ptr};
 use stela_compiler::{GuestState, block::BlockExit, context::ExecutionContext};
 use stela_contracts::refuse;
+use stela_drivers::bus::dma::memory::{CacheAttribute, CpuMapping, PageSource, PinnedPages};
 use stela_engine::machine::FaultCause;
 use stela_engine::machine::Host;
 use stela_engine::machine::NativeExit;
+use stela_engine::machine::Regime;
+use stela_engine::machine::engine::Watch;
+use stela_engine::machine::mmu;
 
 const RETURN_RAX: u64 = 0x1234_5678_9abc_def0;
 const RETURN_RDX: u64 = 0x0fed_cba9_8765_4321;
-const EXECUTED: u32 = 0x4650_5253;
-const SEED_MXCSR: u32 = 0x5fa1;
-const SEED_X87_CONTROL: u16 = 0x0b7f;
+const PAGE: usize = 4096;
+const TABLE_BASE: u64 = 0x10_0000;
+const DATA_PHYSICAL: u64 = TABLE_BASE + 4 * PAGE as u64;
+const MAPPED: u64 = 0x4000;
+const MISSING: u64 = 0x8000;
+const VALUE: u64 = 0x7291_3846_55a4_6302;
+const STARTED: u32 = 0x4845_4c50;
+const RETURNED: u32 = 0x5245_5455;
 
 #[repr(C, align(64))]
 struct Image([u8; 512]);
-#[repr(C, align(64))]
-struct Probe {
-    original: Image,
-    expected: Image,
-    returned: Image,
-    result_rax: u64,
-    result_rdx: u64,
-    gpr_errors: u64,
-    fp_errors: u64,
-}
-
-static SEED_VECTOR: [u8; 256] = {
-    let mut seed = [0; 256];
-    let mut index = 0;
-    while index < seed.len() {
-        seed[index] = (index as u8).wrapping_mul(17).wrapping_add(7);
-        index += 1;
-    }
-    seed
-};
-static ZERO: f64 = 0.0;
-static MXCSR: u32 = SEED_MXCSR;
-static X87_CONTROL: u16 = SEED_X87_CONTROL;
-
-global_asm!(
-    r#"
-.global stela_native_fp_probe
-stela_native_fp_probe:
-    push rbp
-    push rbx
-    push r12
-    push r13
-    push r14
-    push r15
-    sub rsp, 56
-    mov [rsp], rdi
-    mov [rsp + 8], rsi
-    mov [rsp + 16], rdx
-    mov [rsp + 24], rcx
-    mov [rsp + 32], r8
-    mov [rsp + 40], rsp
-    fxsave64 [rdi + {original}]
-    fninit
-    fldcw [rip + {x87_control}]
-    ldmxcsr [rip + {mxcsr}]
-    fld1
-    fld1
-    fld1
-    fld1
-    fld1
-    fld1
-    fld1
-    fldz
-    .global stela_native_fp_seed_divide
-stela_native_fp_seed_divide:
-    fdiv qword ptr [rip + {zero}]
-    movdqu xmm0, [rip + {seed} + 0]
-    movdqu xmm1, [rip + {seed} + 16]
-    movdqu xmm2, [rip + {seed} + 32]
-    movdqu xmm3, [rip + {seed} + 48]
-    movdqu xmm4, [rip + {seed} + 64]
-    movdqu xmm5, [rip + {seed} + 80]
-    movdqu xmm6, [rip + {seed} + 96]
-    movdqu xmm7, [rip + {seed} + 112]
-    movdqu xmm8, [rip + {seed} + 128]
-    movdqu xmm9, [rip + {seed} + 144]
-    movdqu xmm10, [rip + {seed} + 160]
-    movdqu xmm11, [rip + {seed} + 176]
-    movdqu xmm12, [rip + {seed} + 192]
-    movdqu xmm13, [rip + {seed} + 208]
-    movdqu xmm14, [rip + {seed} + 224]
-    movdqu xmm15, [rip + {seed} + 240]
-    fxsave64 [rdi + {expected}]
-    // Modern Intel need not update FOP for a masked divide. Seed the
-    // architectural registers through FXRSTOR, then reobserve with FXSAVE.
-    // Expected comparison bytes are that real observation, never a patched
-    // report or a claim that the masked divide had to set these fields.
-    mov word ptr [rdi + {expected} + 6], 0x435
-    lea rax, [rip + stela_native_fp_seed_divide]
-    mov [rdi + {expected} + 8], rax
-    lea rax, [rip + {zero}]
-    mov [rdi + {expected} + 16], rax
-    fxrstor64 [rdi + {expected}]
-    fxsave64 [rdi + {expected}]
-    mov ebp, 0x11111111
-    mov ebx, 0x22222222
-    mov r12d, 0x33333333
-    mov r13d, 0x44444444
-    mov r14d, 0x55555555
-    mov r15d, 0x66666666
-    mov rdi, [rsp + 16]
-    mov rsi, [rsp + 8]
-    cmp qword ptr [rsp + 32], 0
-    jne stela_native_fp_probe_context
-    call {enter}
-    jmp stela_native_fp_probe_returned
-stela_native_fp_probe_context:
-    mov rdx, rsi
-    mov rsi, [rsp + 24]
-    call {enter_context}
-stela_native_fp_probe_returned:
-    mov r10, [rsp]
-    mov [r10 + {result_rax}], rax
-    mov [r10 + {result_rdx}], rdx
-    fxsave64 [r10 + {returned}]
-    // Compare every defined legacy FP/SIMD field before any Rust reentry.
-    // Reserved byte5, FOP[15:11] and each x87 slot's padding are excluded.
-    mov eax, [r10 + {expected}]
-    cmp eax, [r10 + {returned}]
-    jne stela_native_fp_snapshot_bad
-    mov al, [r10 + {expected} + 4]
-    cmp al, [r10 + {returned} + 4]
-    jne stela_native_fp_snapshot_bad
-    movzx eax, word ptr [r10 + {expected} + 6]
-    xor ax, word ptr [r10 + {returned} + 6]
-    test eax, 0x7ff
-    jnz stela_native_fp_snapshot_bad
-    mov rax, [r10 + {expected} + 8]
-    cmp rax, [r10 + {returned} + 8]
-    jne stela_native_fp_snapshot_bad
-    mov rax, [r10 + {expected} + 16]
-    cmp rax, [r10 + {returned} + 16]
-    jne stela_native_fp_snapshot_bad
-    mov rax, [r10 + {expected} + 24]
-    cmp rax, [r10 + {returned} + 24]
-    jne stela_native_fp_snapshot_bad
-    mov rax, [r10 + {expected} + 32]
-    cmp rax, [r10 + {returned} + 32]
-    jne stela_native_fp_snapshot_bad
-    mov ax, [r10 + {expected} + 40]
-    cmp ax, [r10 + {returned} + 40]
-    jne stela_native_fp_snapshot_bad
-    mov rax, [r10 + {expected} + 48]
-    cmp rax, [r10 + {returned} + 48]
-    jne stela_native_fp_snapshot_bad
-    mov ax, [r10 + {expected} + 56]
-    cmp ax, [r10 + {returned} + 56]
-    jne stela_native_fp_snapshot_bad
-    mov rax, [r10 + {expected} + 64]
-    cmp rax, [r10 + {returned} + 64]
-    jne stela_native_fp_snapshot_bad
-    mov ax, [r10 + {expected} + 72]
-    cmp ax, [r10 + {returned} + 72]
-    jne stela_native_fp_snapshot_bad
-    mov rax, [r10 + {expected} + 80]
-    cmp rax, [r10 + {returned} + 80]
-    jne stela_native_fp_snapshot_bad
-    mov ax, [r10 + {expected} + 88]
-    cmp ax, [r10 + {returned} + 88]
-    jne stela_native_fp_snapshot_bad
-    mov rax, [r10 + {expected} + 96]
-    cmp rax, [r10 + {returned} + 96]
-    jne stela_native_fp_snapshot_bad
-    mov ax, [r10 + {expected} + 104]
-    cmp ax, [r10 + {returned} + 104]
-    jne stela_native_fp_snapshot_bad
-    mov rax, [r10 + {expected} + 112]
-    cmp rax, [r10 + {returned} + 112]
-    jne stela_native_fp_snapshot_bad
-    mov ax, [r10 + {expected} + 120]
-    cmp ax, [r10 + {returned} + 120]
-    jne stela_native_fp_snapshot_bad
-    mov rax, [r10 + {expected} + 128]
-    cmp rax, [r10 + {returned} + 128]
-    jne stela_native_fp_snapshot_bad
-    mov ax, [r10 + {expected} + 136]
-    cmp ax, [r10 + {returned} + 136]
-    jne stela_native_fp_snapshot_bad
-    mov rax, [r10 + {expected} + 144]
-    cmp rax, [r10 + {returned} + 144]
-    jne stela_native_fp_snapshot_bad
-    mov ax, [r10 + {expected} + 152]
-    cmp ax, [r10 + {returned} + 152]
-    jne stela_native_fp_snapshot_bad
-    lea rsi, [r10 + {expected} + 160]
-    lea rdi, [r10 + {returned} + 160]
-    mov ecx, 32
-    cld
-    repe cmpsq
-    jne stela_native_fp_snapshot_bad
-    mov qword ptr [r10 + {fp_errors}], 0
-    jmp stela_native_fp_snapshot_checked
-stela_native_fp_snapshot_bad:
-    mov qword ptr [r10 + {fp_errors}], 1
-stela_native_fp_snapshot_checked:
-    xor r9d, r9d
-    cmp rbp, 0x11111111
-    je stela_native_fp_gpr_1
-    or r9d, 1
-stela_native_fp_gpr_1:
-    cmp rbx, 0x22222222
-    je stela_native_fp_gpr_2
-    or r9d, 2
-stela_native_fp_gpr_2:
-    cmp r12, 0x33333333
-    je stela_native_fp_gpr_4
-    or r9d, 4
-stela_native_fp_gpr_4:
-    cmp r13, 0x44444444
-    je stela_native_fp_gpr_8
-    or r9d, 8
-stela_native_fp_gpr_8:
-    cmp r14, 0x55555555
-    je stela_native_fp_gpr_16
-    or r9d, 16
-stela_native_fp_gpr_16:
-    cmp r15, 0x66666666
-    je stela_native_fp_gpr_32
-    or r9d, 32
-stela_native_fp_gpr_32:
-    cmp rsp, [rsp + 40]
-    je stela_native_fp_stack_ok
-    or r9d, 64
-stela_native_fp_stack_ok:
-    mov [r10 + {gpr_errors}], r9
-    fxrstor64 [r10 + {original}]
-    add rsp, 56
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
-    pop rbp
-    ret
-
-// Baseline-only poison bodies are copied intact into this Host's arena.
-// Their only architectural guest-frame mutation records that execution reached
-// the real callee, independently of return-register or FP comparisons.
-.global stela_native_fp_normal
-stela_native_fp_normal:
-    mov dword ptr [rdi + {guest_reserved}], {executed}
-    fninit
-    fldz
-    sub rsp, 16
-    mov dword ptr [rsp], 0x1f80
-    ldmxcsr [rsp]
-    add rsp, 16
-    pxor xmm0, xmm0
-    pxor xmm1, xmm1
-    pxor xmm2, xmm2
-    pxor xmm3, xmm3
-    pxor xmm4, xmm4
-    pxor xmm5, xmm5
-    pxor xmm6, xmm6
-    pxor xmm7, xmm7
-    pxor xmm8, xmm8
-    pxor xmm9, xmm9
-    pxor xmm10, xmm10
-    pxor xmm11, xmm11
-    pxor xmm12, xmm12
-    pxor xmm13, xmm13
-    pxor xmm14, xmm14
-    pxor xmm15, xmm15
-    mov rbp, 0xaaaaaaaabbbbbbbb
-    mov rbx, 0xccccccccdddddddd
-    mov r12, 0xeeeeeeeeffffffff
-    mov r13, 0x1111111122222222
-    mov r14, 0x3333333344444444
-    mov r15, 0x5555555566666666
-    mov rax, {return_rax}
-    mov rdx, {return_rdx}
-    ret
-.global stela_native_fp_normal_end
-stela_native_fp_normal_end:
-.global stela_native_fp_fault
-stela_native_fp_fault:
-    mov dword ptr [rdi + {guest_reserved}], {executed}
-    fninit
-    fldz
-    sub rsp, 16
-    mov dword ptr [rsp], 0x1f80
-    ldmxcsr [rsp]
-    add rsp, 16
-    pxor xmm0, xmm0
-    pxor xmm1, xmm1
-    pxor xmm2, xmm2
-    pxor xmm3, xmm3
-    pxor xmm4, xmm4
-    pxor xmm5, xmm5
-    pxor xmm6, xmm6
-    pxor xmm7, xmm7
-    pxor xmm8, xmm8
-    pxor xmm9, xmm9
-    pxor xmm10, xmm10
-    pxor xmm11, xmm11
-    pxor xmm12, xmm12
-    pxor xmm13, xmm13
-    pxor xmm14, xmm14
-    pxor xmm15, xmm15
-    mov rbp, 0xaaaaaaaabbbbbbbb
-    mov rbx, 0xccccccccdddddddd
-    mov r12, 0xeeeeeeeeffffffff
-    mov r13, 0x1111111122222222
-    mov r14, 0x3333333344444444
-    mov r15, 0x5555555566666666
-    mov rax, {return_rax}
-    mov rdx, {return_rdx}
-    ud2
-.global stela_native_fp_fault_end
-stela_native_fp_fault_end:
-"#,
-    original = const offset_of!(Probe, original),
-    expected = const offset_of!(Probe, expected),
-    returned = const offset_of!(Probe, returned),
-    result_rax = const offset_of!(Probe, result_rax),
-    result_rdx = const offset_of!(Probe, result_rdx),
-    gpr_errors = const offset_of!(Probe, gpr_errors),
-    fp_errors = const offset_of!(Probe, fp_errors),
-    guest_reserved = const offset_of!(GuestState, reserved),
-    executed = const EXECUTED,
-    return_rax = const RETURN_RAX,
-    return_rdx = const RETURN_RDX,
-    seed = sym SEED_VECTOR,
-    zero = sym ZERO,
-    mxcsr = sym MXCSR,
-    x87_control = sym X87_CONTROL,
-    enter = sym super::stela_enter_block,
-    enter_context = sym super::stela_enter_context_block,
-);
-
-unsafe extern "sysv64" {
-    fn stela_native_fp_probe(
-        probe: *mut Probe,
-        code: usize,
-        guest: *mut GuestState,
-        context: *mut ExecutionContext,
-        context_abi: u64,
-    );
-    static stela_native_fp_seed_divide: u8;
-    static stela_native_fp_normal: u8;
-    static stela_native_fp_normal_end: u8;
-    static stela_native_fp_fault: u8;
-    static stela_native_fp_fault_end: u8;
-}
 
 fn same_legacy(left: &Image, right: &Image) -> bool {
     // Compare defined fields, excluding reserved byte5/FOP[15:11] and the
@@ -374,130 +45,497 @@ fn pointer(image: &Image, start: usize) -> u64 {
     u64::from_le_bytes(image.0[start..start + 8].try_into().expect("FXSAVE field"))
 }
 
-/// Native owner startup diagnostic, before guest frames/artifacts are
-/// published. The current physical Host/GS/root, code arena and private stack
-/// remain installed until all four returns complete. Source-only until
-/// a fresh run checks every case and its meaningful FP pointer seed.
+#[repr(C, align(64))]
+struct Observation {
+    expected: Image,
+    returned: Image,
+    expected_registers: [u64; 16],
+    returned_registers: [u64; 16],
+    fp_errors: u64,
+}
+
+// Own the native heap pins/verified WB CPU mapping through the last
+// native/helper frame. The original guest RAM is never read or modified.
+struct GuestScope {
+    _pages: PinnedPages,
+    mapping: CpuMapping,
+    original_ram: Option<Vec<RamRange>>,
+    original_tlb: Option<mmu::translated::Tlb>,
+}
+impl GuestScope {
+    fn new() -> Result<Self> {
+        if state().native
+            || state().recorded.is_some()
+            || state().regime.is_some()
+            || state().current != usize::MAX
+            || state().registered_ram.is_some()
+            || state().legacy_translations_dirty
+            || state().tag_checks != [false; 2]
+        {
+            return Err(refuse!(
+                "helper FP diagnostic requires fresh actual startup ownership"
+            ));
+        }
+        let pages = crate::native_memory::SOURCE
+            .allocate(5 * PAGE, PAGE, CacheAttribute::WriteBack)
+            .map_err(|_| refuse!("helper FP private page reservation unavailable"))?;
+        if pages.page_shift() != 12
+            || pages.physical_pages().len() != 5
+            || !pages
+                .physical_pages()
+                .windows(2)
+                .all(|pair| pair[0].checked_add(PAGE as u64) == Some(pair[1]))
+        {
+            return Err(refuse!("helper FP private page geometry differs"));
+        }
+        let mapping = pages
+            .cpu_mapping(CacheAttribute::WriteBack)
+            .map_err(|_| refuse!("helper FP private CPU mapping unavailable"))?;
+        // Four owned ARM 4KiB tables followed by one data page.
+        // Software walks read them through this same RAM reservation.
+        for level in 0..3 {
+            let table = mapping
+                .address(level * PAGE, 8)
+                .map_err(|_| refuse!("helper FP table bounds"))?;
+            // SAFETY: exclusive aligned zeroed private pinned page; no other
+            // CPU/guest/DMA has access to this authored fixture reservation.
+            unsafe {
+                table
+                    .cast::<u64>()
+                    .as_ptr()
+                    .write_volatile((TABLE_BASE + (level as u64 + 1) * PAGE as u64) | 3);
+            }
+        }
+        let leaf = mapping
+            .address(3 * PAGE + (MAPPED as usize / PAGE) * 8, 8)
+            .map_err(|_| refuse!("helper FP leaf bounds"))?;
+        let data = mapping
+            .address(4 * PAGE, 8)
+            .map_err(|_| refuse!("helper FP data bounds"))?;
+        // SAFETY: same uniquely owned table/data pages; valid privileged RW,
+        // AF-set normal-WB leaf, with both execute-never bits set.
+        unsafe {
+            leaf.cast::<u64>()
+                .as_ptr()
+                .write_volatile(DATA_PHYSICAL | 3 | (1 << 10) | (3 << 8) | (1 << 53) | (1 << 54));
+            data.cast::<u64>().as_ptr().write_volatile(VALUE);
+        }
+        let mut ram = Vec::new();
+        ram.try_reserve_exact(1)
+            .map_err(|_| refuse!("helper FP RAM metadata unavailable"))?;
+        ram.push(RamRange {
+            guest: TABLE_BASE,
+            host: pages.physical_pages()[0],
+            bytes: (5 * PAGE) as u64,
+        });
+        let original_ram = mem::replace(&mut state().ram, ram);
+        let original_tlb = mem::take(&mut state().tlb);
+        Ok(Self {
+            _pages: pages,
+            mapping,
+            original_ram: Some(original_ram),
+            original_tlb: Some(original_tlb),
+        })
+    }
+    fn regime(&self) -> Regime {
+        Regime {
+            controls: mmu::Controls {
+                sctlr: mmu::SCTLR_M | (1 << 2) | (1 << 12),
+                tcr: 16 | (16 << 16) | (2 << 30) | (5 << 32),
+                ttbr0: TABLE_BASE,
+                mair: 0xff,
+                ..mmu::Controls::default()
+            },
+            requester: mmu::Requester {
+                el: 1,
+                pan: false,
+                unprivileged: false,
+                guarded: false,
+            },
+            watch: Watch::default(),
+            tag_checks: [false; 2],
+        }
+    }
+}
+impl Drop for GuestScope {
+    fn drop(&mut self) {
+        // No allocation or pin release can bypass a live native/helper frame.
+        // A failure here is terminal, keeping this stack and backing.
+        assert!(
+            !state().native && super::local::native_frames_idle(),
+            "helper FP private RAM still has a live frame"
+        );
+        let state = state();
+        state.reset_shadow(super::Cause::Invalidated);
+        load_root(state.host_root);
+        state.current = usize::MAX;
+        state.regime = None;
+        state.ram = self
+            .original_ram
+            .take()
+            .expect("actual original RAM retained");
+        state.tlb = self
+            .original_tlb
+            .take()
+            .expect("actual original TLB retained");
+    }
+}
+
+// Copied body is position-independent: every data/label reference stays inside
+// its source extent. The real helper address is supplied through the
+// private GuestState, never identified by an application/call site.
+global_asm!(
+    r#"
+.global stela_helper_fp_body
+stela_helper_fp_body:
+    mov rbp, rdi
+    mov r12, [rbp + {observation_argument}]
+    mov dword ptr [rbp + {guest_reserved}], {started}
+    fninit
+    fldcw [rip + stela_helper_fp_cw]
+    ldmxcsr [rip + stela_helper_fp_mxcsr]
+    fld1
+    fld1
+    fld1
+    fld1
+    fld1
+    fld1
+    fld1
+    fldz
+.global stela_helper_fp_divide
+stela_helper_fp_divide:
+    fdiv qword ptr [rip + stela_helper_fp_zero]
+    movdqu xmm0, [rip + stela_helper_fp_vectors + 0]
+    movdqu xmm1, [rip + stela_helper_fp_vectors + 16]
+    movdqu xmm2, [rip + stela_helper_fp_vectors + 32]
+    movdqu xmm3, [rip + stela_helper_fp_vectors + 48]
+    movdqu xmm4, [rip + stela_helper_fp_vectors + 64]
+    movdqu xmm5, [rip + stela_helper_fp_vectors + 80]
+    movdqu xmm6, [rip + stela_helper_fp_vectors + 96]
+    movdqu xmm7, [rip + stela_helper_fp_vectors + 112]
+    movdqu xmm8, [rip + stela_helper_fp_vectors + 128]
+    movdqu xmm9, [rip + stela_helper_fp_vectors + 144]
+    movdqu xmm10, [rip + stela_helper_fp_vectors + 160]
+    movdqu xmm11, [rip + stela_helper_fp_vectors + 176]
+    movdqu xmm12, [rip + stela_helper_fp_vectors + 192]
+    movdqu xmm13, [rip + stela_helper_fp_vectors + 208]
+    movdqu xmm14, [rip + stela_helper_fp_vectors + 224]
+    movdqu xmm15, [rip + stela_helper_fp_vectors + 240]
+    fxsave64 [r12 + {expected}]
+    mov word ptr [r12 + {expected} + 6], 0x435
+    lea rax, [rip + stela_helper_fp_divide]
+    mov [r12 + {expected} + 8], rax
+    lea rax, [rip + stela_helper_fp_zero]
+    mov [r12 + {expected} + 16], rax
+    fxrstor64 [r12 + {expected}]
+    fxsave64 [r12 + {expected}]
+    mov rbx, 0x1828384858687888
+    mov rdx, 0x1929394959697989
+    mov rsi, 0x1a2a3a4a5a6a7a8a
+    mov r8, 0x1b2b3b4b5b6b7b8b
+    mov r9, 0x1c2c3c4c5c6c7c8c
+    mov r10, 0x1d2d3d4d5d6d7d8d
+    mov r11, 0x1e2e3e4e5e6e7e8e
+    mov r13, 0x1f2f3f4f5f6f7f8f
+    mov r14, 0x2030405060708090
+    mov r15, 0x2131415161718191
+    mov rcx, [rbp + {address_argument}]
+    mov rax, [rbp + {helper_argument}]
+    mov [r12 + {expected_regs} + 0], rax
+    mov [r12 + {expected_regs} + 8], rcx
+    mov [r12 + {expected_regs} + 16], rdx
+    mov [r12 + {expected_regs} + 24], rbx
+    mov [r12 + {expected_regs} + 32], rsp
+    mov [r12 + {expected_regs} + 40], rbp
+    mov [r12 + {expected_regs} + 48], rsi
+    mov [r12 + {expected_regs} + 56], rdi
+    mov [r12 + {expected_regs} + 64], r8
+    mov [r12 + {expected_regs} + 72], r9
+    mov [r12 + {expected_regs} + 80], r10
+    mov [r12 + {expected_regs} + 88], r11
+    mov [r12 + {expected_regs} + 96], r12
+    mov [r12 + {expected_regs} + 104], r13
+    mov [r12 + {expected_regs} + 112], r14
+    mov [r12 + {expected_regs} + 120], r15
+    call qword ptr [rax]
+.global stela_helper_fp_return
+stela_helper_fp_return:
+    .byte 8, 0
+    mov [r12 + {returned_regs} + 0], rax
+    mov [r12 + {returned_regs} + 8], rcx
+    mov [r12 + {returned_regs} + 16], rdx
+    mov [r12 + {returned_regs} + 24], rbx
+    mov [r12 + {returned_regs} + 32], rsp
+    mov [r12 + {returned_regs} + 40], rbp
+    mov [r12 + {returned_regs} + 48], rsi
+    mov [r12 + {returned_regs} + 56], rdi
+    mov [r12 + {returned_regs} + 64], r8
+    mov [r12 + {returned_regs} + 72], r9
+    mov [r12 + {returned_regs} + 80], r10
+    mov [r12 + {returned_regs} + 88], r11
+    mov [r12 + {returned_regs} + 96], r12
+    mov [r12 + {returned_regs} + 104], r13
+    mov [r12 + {returned_regs} + 112], r14
+    mov [r12 + {returned_regs} + 120], r15
+    fxsave64 [r12 + {returned}]
+    mov rcx, [rax]
+    mov [rbp], rcx
+    mov dword ptr [rbp + {guest_reserved}], {done}
+    // Compare defined FP fields before returning through any Rust.
+    mov eax, [r12 + {expected}]
+    cmp eax, [r12 + {returned}]
+    jne stela_helper_fp_bad
+    mov al, [r12 + {expected} + 4]
+    cmp al, [r12 + {returned} + 4]
+    jne stela_helper_fp_bad
+    movzx eax, word ptr [r12 + {expected} + 6]
+    xor ax, word ptr [r12 + {returned} + 6]
+    test eax, 0x7ff
+    jnz stela_helper_fp_bad
+    mov rax, [r12 + {expected} + 8]
+    cmp rax, [r12 + {returned} + 8]
+    jne stela_helper_fp_bad
+    mov rax, [r12 + {expected} + 16]
+    cmp rax, [r12 + {returned} + 16]
+    jne stela_helper_fp_bad
+    mov rax, [r12 + {expected} + 24]
+    cmp rax, [r12 + {returned} + 24]
+    jne stela_helper_fp_bad
+    mov rax, [r12 + {expected} + 32]
+    cmp rax, [r12 + {returned} + 32]
+    jne stela_helper_fp_bad
+    mov ax, [r12 + {expected} + 40]
+    cmp ax, [r12 + {returned} + 40]
+    jne stela_helper_fp_bad
+    mov rax, [r12 + {expected} + 48]
+    cmp rax, [r12 + {returned} + 48]
+    jne stela_helper_fp_bad
+    mov ax, [r12 + {expected} + 56]
+    cmp ax, [r12 + {returned} + 56]
+    jne stela_helper_fp_bad
+    mov rax, [r12 + {expected} + 64]
+    cmp rax, [r12 + {returned} + 64]
+    jne stela_helper_fp_bad
+    mov ax, [r12 + {expected} + 72]
+    cmp ax, [r12 + {returned} + 72]
+    jne stela_helper_fp_bad
+    mov rax, [r12 + {expected} + 80]
+    cmp rax, [r12 + {returned} + 80]
+    jne stela_helper_fp_bad
+    mov ax, [r12 + {expected} + 88]
+    cmp ax, [r12 + {returned} + 88]
+    jne stela_helper_fp_bad
+    mov rax, [r12 + {expected} + 96]
+    cmp rax, [r12 + {returned} + 96]
+    jne stela_helper_fp_bad
+    mov ax, [r12 + {expected} + 104]
+    cmp ax, [r12 + {returned} + 104]
+    jne stela_helper_fp_bad
+    mov rax, [r12 + {expected} + 112]
+    cmp rax, [r12 + {returned} + 112]
+    jne stela_helper_fp_bad
+    mov ax, [r12 + {expected} + 120]
+    cmp ax, [r12 + {returned} + 120]
+    jne stela_helper_fp_bad
+    mov rax, [r12 + {expected} + 128]
+    cmp rax, [r12 + {returned} + 128]
+    jne stela_helper_fp_bad
+    mov ax, [r12 + {expected} + 136]
+    cmp ax, [r12 + {returned} + 136]
+    jne stela_helper_fp_bad
+    mov rax, [r12 + {expected} + 144]
+    cmp rax, [r12 + {returned} + 144]
+    jne stela_helper_fp_bad
+    mov ax, [r12 + {expected} + 152]
+    cmp ax, [r12 + {returned} + 152]
+    jne stela_helper_fp_bad
+    lea rsi, [r12 + {expected} + 160]
+    lea rdi, [r12 + {returned} + 160]
+    mov ecx, 32
+    cld
+    repe cmpsq
+    jne stela_helper_fp_bad
+    mov qword ptr [r12 + {fp_errors}], 0
+    jmp stela_helper_fp_done
+stela_helper_fp_bad:
+    mov qword ptr [r12 + {fp_errors}], 1
+stela_helper_fp_done:
+    mov rax, {return_rax}
+    mov rdx, {return_rdx}
+    ret
+.balign 16
+stela_helper_fp_vectors:
+    .byte 53,82,111,140,169,198,227,0,29,58,87,116,145,174,203,232
+    .byte 5,34,63,92,121,150,179,208,237,10,39,68,97,126,155,184
+    .byte 213,242,15,44,73,102,131,160,189,218,247,20,49,78,107,136
+    .byte 165,194,223,252,25,54,83,112,141,170,199,228,1,30,59,88
+    .byte 117,146,175,204,233,6,35,64,93,122,151,180,209,238,11,40
+    .byte 69,98,127,156,185,214,243,16,45,74,103,132,161,190,219,248
+    .byte 21,50,79,108,137,166,195,224,253,26,55,84,113,142,171,200
+    .byte 229,2,31,60,89,118,147,176,205,234,7,36,65,94,123,152
+    .byte 181,210,239,12,41,70,99,128,157,186,215,244,17,46,75,104
+    .byte 133,162,191,220,249,22,51,80,109,138,167,196,225,254,27,56
+    .byte 85,114,143,172,201,230,3,32,61,90,119,148,177,206,235,8
+    .byte 37,66,95,124,153,182,211,240,13,42,71,100,129,158,187,216
+    .byte 245,18,47,76,105,134,163,192,221,250,23,52,81,110,139,168
+    .byte 197,226,255,28,57,86,115,144,173,202,231,4,33,62,91,120
+    .byte 149,178,207,236,9,38,67,96,125,154,183,212,241,14,43,72
+    .byte 101,130,159,188,217,246,19,48,77,106,135,164,193,222,251,24
+stela_helper_fp_mxcsr:
+    .long 0x7fa1
+stela_helper_fp_cw:
+    .word 0x0b7f
+.global stela_helper_fp_zero
+stela_helper_fp_zero:
+    .quad 0
+.global stela_helper_fp_body_end
+stela_helper_fp_body_end:
+"#,
+    guest_reserved = const offset_of!(GuestState, exclusive_bytes),
+    observation_argument = const offset_of!(GuestState, x) + 8,
+    helper_argument = const offset_of!(GuestState, x) + 16,
+    address_argument = const offset_of!(GuestState, x) + 24,
+    started = const STARTED,
+    done = const RETURNED,
+    expected = const offset_of!(Observation, expected),
+    returned = const offset_of!(Observation, returned),
+    expected_regs = const offset_of!(Observation, expected_registers),
+    returned_regs = const offset_of!(Observation, returned_registers),
+    fp_errors = const offset_of!(Observation, fp_errors),
+    return_rax = const RETURN_RAX,
+    return_rdx = const RETURN_RDX,
+);
+unsafe extern "C" {
+    static stela_helper_fp_body: u8;
+    static stela_helper_fp_body_end: u8;
+    static stela_helper_fp_return: u8;
+    static stela_helper_fp_divide: u8;
+    static stela_helper_fp_zero: u8;
+}
+
 pub(crate) fn check(host: &mut BareHost<'_>) -> Result<()> {
-    let bodies = [
-        (
-            ptr::addr_of!(stela_native_fp_normal),
-            ptr::addr_of!(stela_native_fp_normal_end),
-            false,
-        ),
-        (
-            ptr::addr_of!(stela_native_fp_fault),
-            ptr::addr_of!(stela_native_fp_fault_end),
-            true,
-        ),
-    ];
-    for (start, end, faulting) in bodies {
-        let bytes = (end as usize)
-            .checked_sub(start as usize)
-            .filter(|&bytes| bytes != 0 && bytes < 4096)
-            .ok_or(refuse!("native FP fixture source extent differs"))?;
-        // SAFETY: exact mapped read-only image symbols delimit the authored
-        // body, including only baseline instructions and its true RET/UD2.
-        let body = unsafe { core::slice::from_raw_parts(start, bytes) };
-        let code = host
-            .install(body)
-            .map_err(|_| refuse!("native FP fixture arena full"))?;
+    let scope = GuestScope::new()?;
+    let source = ptr::addr_of!(stela_helper_fp_body) as usize;
+    let bytes = (ptr::addr_of!(stela_helper_fp_body_end) as usize)
+        .checked_sub(source)
+        .filter(|&bytes| bytes != 0 && bytes < 4096)
+        .ok_or(refuse!("helper FP source extent differs"))?;
+    let return_offset = (ptr::addr_of!(stela_helper_fp_return) as usize)
+        .checked_sub(source)
+        .filter(|&offset| offset < bytes)
+        .ok_or(refuse!("helper FP source return differs"))?;
+    // SAFETY: source symbols delimit the exact baseline authored body and its
+    // position-independent literals; original guest inputs are untouched.
+    let code = host
+        .install(unsafe { core::slice::from_raw_parts(source as *const u8, bytes) })
+        .map_err(|_| refuse!("helper FP code arena full"))?;
+    let copied_address = |label: *const u8| -> Result<u64> {
+        let offset = (label as usize)
+            .checked_sub(source)
+            .filter(|&offset| offset < bytes)
+            .ok_or(refuse!("helper FP source label outside body"))?;
+        code.0
+            .checked_add(offset)
+            .map(|address| address as u64)
+            .ok_or(refuse!("helper FP installed label overflow"))
+    };
+    let expected_fip = copied_address(ptr::addr_of!(stela_helper_fp_divide))?;
+    let expected_fdp = copied_address(ptr::addr_of!(stela_helper_fp_zero))?;
+    host.set_regime(&scope.regime());
+    for address in [MAPPED, MISSING] {
         for context_abi in [0, 1] {
-            let mut guest = GuestState::default();
-            let mut context = ExecutionContext::default();
-            let context_before = (
-                context.version,
-                context.bytes,
-                context.memory,
-                context.scalable,
-                context.system,
-            );
-            let mut expected_guest = guest.clone();
-            expected_guest.reserved = EXECUTED;
-            let mut probe = Probe {
-                original: Image([0; 512]),
+            state().tlb.clear();
+            let calls = state().helper_calls;
+            let fills = state().helper_fills;
+            let mut observed = Observation {
                 expected: Image([0; 512]),
                 returned: Image([0; 512]),
-                result_rax: 0,
-                result_rdx: 0,
-                gpr_errors: u64::MAX,
+                expected_registers: [0; 16],
+                returned_registers: [0; 16],
                 fp_errors: u64::MAX,
             };
+            let mut guest = GuestState::default();
+            guest.x[1] = ptr::from_mut(&mut observed) as u64;
+            guest.x[2] = super::translated::slot();
+            guest.x[3] = address;
+            let mut expected = guest.clone();
+            let mut context = ExecutionContext::default();
             if state().native || state().recorded.is_some() {
                 return Err(refuse!(
-                    "native FP fixture entered with a live preceding frame"
+                    "helper FP entered with preceding live native frame"
                 ));
             }
             state().native = true;
             let entered = super::rdtsc();
-            // SAFETY: this startup Host owns the installed code/body,
-            // private GuestState/context/probe and real recovery slot.
-            // The wrapper restores the complete caller legacy state before any
-            // Rust comparison; it uses no wider instruction or control write.
-            unsafe {
-                stela_native_fp_probe(&mut probe, code.0, &mut guest, &mut context, context_abi);
-            }
-            let result = native_return(
-                code,
-                BlockExit {
-                    next_pc: probe.result_rax,
-                    kind: probe.result_rdx,
-                },
-                entered,
-            );
-            let fip = pointer(&probe.expected, 8);
-            let fdp = pointer(&probe.expected, 16);
-            let fop = u16::from_le_bytes([probe.expected.0[6], probe.expected.0[7]]) & 0x7ff;
-            output::arguments(format_args!(
-                "NATIVE FP context={context_abi} fault={faulting} fip={fip:#x} fdp={fdp:#x} fop={fop:#x} gpr={:#x} fp={:#x} rax={:#x} rdx={:#x}\n",
-                probe.gpr_errors, probe.fp_errors, probe.result_rax, probe.result_rdx,
+            // SAFETY: sealed current Host, private pinned ARM tables/data,
+            // frame/context and installed code remain owned through the true
+            // helper/return/recovery. No synthetic TLB fill.
+            let exit: BlockExit = unsafe {
+                if context_abi == 0 {
+                    super::stela_enter_block(&mut guest, code.0)
+                } else {
+                    super::stela_enter_context_block(&mut guest, &mut context, code.0)
+                }
+            };
+            let result = native_return(code, exit, entered);
+            let fip = pointer(&observed.expected, 8);
+            let fdp = pointer(&observed.expected, 16);
+            let fop = u16::from_le_bytes([observed.expected.0[6], observed.expected.0[7]]) & 0x7ff;
+            crate::output::arguments(format_args!(
+                "NATIVE HELPER FP context={context_abi} va={address:#x} helper_fp={:#x} fip={fip:#x} fdp={fdp:#x} fop={fop:#x} calls_before={calls} calls_after={} fills_before={fills} fills_after={}\n",
+                observed.fp_errors,
+                state().helper_calls,
+                state().helper_fills,
             ));
-            if fip != ptr::addr_of!(stela_native_fp_seed_divide) as u64
-                || fdp != ptr::addr_of!(ZERO) as u64
-                || fop != 0x435
-            {
-                return Err(refuse!(
-                    "native FP fixture lacks exact meaningful x87 pointer sentinels"
-                ));
+            if state().helper_calls != calls + 1 || state().helper_fills != fills + 1 {
+                return Err(refuse!("helper FP actual walk differs"));
             }
-            if guest != expected_guest
-                || (
-                    context.version,
-                    context.bytes,
-                    context.memory,
-                    context.scalable,
-                    context.system,
-                ) != context_before
-                || probe.gpr_errors != 0
-                || probe.fp_errors != 0
-                || !same_legacy(&probe.expected, &probe.returned)
-            {
-                return Err(refuse!(
-                    "native FP caller state or real callee execution differs"
-                ));
+            if fip != expected_fip || fdp != expected_fdp || fop != 0x435 {
+                return Err(refuse!("helper FP actual guest register seed differs"));
             }
-            if faulting {
-                if !matches!(result, NativeExit::Fault(fault) if fault.offset == bytes - 2
-                    && fault.cause == FaultCause::InvalidOpcode && !fault.write && fault.address == 0
-                    && fault.registers.get(0) == Some(RETURN_RAX) && fault.registers.get(2) == Some(RETURN_RDX)
-                    && fault.registers.get(7) == Some(ptr::from_mut(&mut guest) as u64)
-                    && (context_abi == 0 || fault.registers.get(6) == Some(ptr::from_mut(&mut context) as u64)))
+            if address == MAPPED {
+                expected.exclusive_bytes = RETURNED;
+                expected.x[0] = VALUE;
+                let data = scope
+                    .mapping
+                    .address(4 * PAGE, 8)
+                    .map_err(|_| refuse!("helper FP data mapping differs"))?;
+                if result
+                    != (NativeExit::Exit {
+                        next_pc: RETURN_RAX,
+                        kind: RETURN_RDX,
+                    })
+                    || observed.fp_errors != 0
+                    || !same_legacy(&observed.expected, &observed.returned)
+                    || observed.returned_registers[0] != data.as_ptr() as u64
+                    || observed.expected_registers[1..] != observed.returned_registers[1..]
                 {
                     return Err(refuse!(
-                        "native FP fixture did not enter actual #UD recovery"
+                        "helper FP real mapped return or full Saved ABI differs"
                     ));
                 }
-            } else if result
-                != (NativeExit::Exit {
-                    next_pc: RETURN_RAX,
-                    kind: RETURN_RDX,
-                })
-            {
-                return Err(refuse!("native FP full native return ABI differs"));
+            } else {
+                expected.exclusive_bytes = STARTED;
+                if !matches!(result, NativeExit::Fault(fault) if fault.offset == return_offset
+                    && fault.cause == FaultCause::NonCanonical && fault.address == MISSING && !fault.write
+                    && observed.expected_registers.iter().enumerate().all(|(index, value)| fault.registers.get(index as u8) == Some(*value)))
+                    || observed.returned_registers != [0; 16]
+                    || observed.fp_errors != u64::MAX
+                {
+                    return Err(refuse!(
+                        "helper FP missing mapping did not abandon exact actual frame"
+                    ));
+                }
+            }
+            if guest != expected {
+                return Err(refuse!(
+                    "helper FP private source execution marker/state differs"
+                ));
             }
         }
     }
+    // Retire every translation while its real pages/mapping stay owned.
+    drop(scope);
     host.discard_code();
-    helper::check(host)?;
     Ok(())
 }

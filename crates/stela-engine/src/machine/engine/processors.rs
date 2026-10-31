@@ -622,6 +622,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         // have written its granule, even back to the same bytes: its
         // store-exclusive fails, as Arm permits of any (`observe_writes`).
         self.cpu.monitor = None;
+        self.cpu.state.exclusive_bytes = 0;
         // The fetch and jump caches and the host's shadow tables follow the
         // incoming PE's translation regime. One that translates alike keeps
         // them: the tables and TLBIs are shared, and what derives from its
@@ -692,6 +693,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// off: its reservation goes with its state, and the board learns of it.
     pub(super) fn power_down(&mut self) {
         self.cpu.monitor = None;
+        self.cpu.state.exclusive_bytes = 0;
         self.device_lines = None;
         self.devices.processor_power(self.current, false);
     }

@@ -15,7 +15,7 @@
 //! guest address in RCX and the access's size and flags in the two bytes
 //! after its CALL, returns past them with the host address in RAX, and
 //! keeps every other register, XMM registers and MXCSR included.
-use super::{FaultCause, Recorded, State, invlpg, layout, resolve, state, tables};
+use super::{Contexts, FaultCause, Recorded, State, layout, resolve, state, tables};
 use core::arch::global_asm;
 use stela_engine::machine::mmu::translated::Lookup;
 
@@ -171,8 +171,9 @@ impl Bounce {
         }
     }
 
-    /// Map host frames `first` and `second` at the slot; its address.
-    fn map(&mut self, first: u64, second: u64) -> u64 {
+    /// Map host frames `first` and `second` at the slot, which every view
+    /// shares and `current` is loaded; its address.
+    fn map(&mut self, first: u64, second: u64, contexts: &mut Contexts, current: usize) -> u64 {
         for (index, frame) in [first, second].into_iter().enumerate() {
             if self.mapped[index] != frame {
                 let entry = layout::physical(self.entries[index]) as *mut u64;
@@ -181,7 +182,7 @@ impl Bounce {
                 unsafe {
                     entry.write_volatile(frame | tables::PRESENT | tables::WRITABLE | tables::NX)
                 };
-                invlpg(self.address + index as u64 * tables::PAGE);
+                contexts.forget(self.address + index as u64 * tables::PAGE, current);
                 self.mapped[index] = frame;
             }
         }
@@ -212,7 +213,8 @@ extern "sysv64" fn translate(saved: &mut Saved) -> u64 {
                     abandon(state, saved, address, write, FaultCause::NonCanonical)
                 };
                 state.bounces += 1;
-                return bounce.map(first, second) + (address & (tables::PAGE - 1));
+                let slot = bounce.map(first, second, &mut state.contexts, state.current);
+                return slot + (address & (tables::PAGE - 1));
             }
             Lookup::Miss { address: missing } => {
                 state.helper_fills += 1;

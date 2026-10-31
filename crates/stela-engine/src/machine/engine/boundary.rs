@@ -3,6 +3,14 @@
 use super::*;
 use stela_contracts::refuse;
 
+/// One PE's System registers that take none of the board's locks, as
+/// [`Devices::system_register`] serves them.
+pub trait LocalRegisters: Send + Sync {
+    /// An MRS (`write` `None`) or MSR of `encoding`: `None` for an encoding
+    /// this does not hold, else the value read (0 for a write).
+    fn register(&self, encoding: Encoding, write: Option<u64>) -> Option<u64>;
+}
+
 /// The x86 machine beneath the engine: guest RAM, native code, shadow
 /// translation, time and waiting.
 pub trait Host {
@@ -466,6 +474,11 @@ pub trait Devices {
         _write: Option<u64>,
         _now: u64,
     ) -> Option<Result<u64, &'static str>> {
+        None
+    }
+    /// PE `cpu`'s handle on the registers [`Self::system_register`] serves
+    /// that no lock need guard, fixed for the board's life.
+    fn local_registers(&self, _cpu: usize) -> Option<Arc<dyn LocalRegisters>> {
         None
     }
     /// Whether [`Self::system_register`] may serve `encoding`, fixed for the

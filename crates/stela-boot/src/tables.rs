@@ -11,6 +11,9 @@ pub const LARGE: u64 = 2 * 1024 * 1024;
 pub const PRESENT: u64 = 1;
 pub const WRITABLE: u64 = 1 << 1;
 const HUGE: u64 = 1 << 7;
+/// Kept across CR3 writes while CR4.PGE is set: only for mappings every
+/// root shares and nothing changes.
+pub const GLOBAL: u64 = 1 << 8;
 pub const NX: u64 = 1 << 63;
 /// PWT and PCD: uncached, for device registers.
 pub const UNCACHED: u64 = 1 << 3 | 1 << 4;
