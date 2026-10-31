@@ -36,11 +36,13 @@
 //! nothing, so the count stops within the lookahead of its last boundary,
 //! whatever stopped it, and resumes from there, the time held becoming lag.
 //! A PE that runs keeps the count at the host's pace unless it runs slower
-//! than [`PACE_BLOCKS_PER_SECOND`]; then the count slows with it. A PE
-//! waiting in WFI or WFE, held in reset or powered down holds nothing. This
-//! is conservative synchronization with bounded lookahead, as parallel
-//! full-system simulators keep their cores' time. Only the count waits: a
-//! PE that is ahead keeps running.
+//! than its share of [`PACE_BLOCKS_PER_SECOND`]; then the count slows with
+//! it, so a guest second always holds that much work, on any host. A PE
+//! waiting in WFI or WFE, held in reset or powered down holds nothing, so an
+//! idle guest's time follows the host's. This is conservative synchronization
+//! with bounded lookahead, as parallel full-system simulators keep their
+//! cores' time, and QEMU's `-icount shift=auto` keeps a guest's. Only the
+//! count waits: a PE that is ahead keeps running.
 //!
 //! The architecture requires a constant counter frequency, not a match
 //! with wall time; time of day drifts behind by the accumulated lag, as on
@@ -60,12 +62,14 @@ use stela_compiler::x86_64::register_read::{Count, CountState};
 /// runs far below 3,000,000 blocks, the ticket spinlock bound at this rate.
 pub(super) const TICKS_PER_BLOCK: u64 = 1;
 
-/// The slowest a running parallel PE may execute blocks while the count
-/// keeps the host's pace, about 5 MIPS: far below any supported host, even
-/// one 20 times slower than today's, yet fast enough that no critical
-/// section XNU bounds by a timeout (125 ms for a ticket spinlock) comes near
-/// it. A slower PE slows the count, so its timeouts still measure its work.
-pub(super) const PACE_BLOCKS_PER_SECOND: u64 = 1_000_000;
+/// The blocks a guest second holds across the PEs at the least, each running
+/// PE its share. A block runs about 75 instructions, so this is about 2,400
+/// MIPS, some tenth of the Mac the guest believes it runs on: timeouts sized
+/// for that Mac, such as the 60 s XNU allows the registry to come to rest
+/// (`IOService.cpp` 6140), keep a margin. A slower PE slows the count, so
+/// timeouts measure the guest's work whatever the host's speed; fewer PEs
+/// each take a larger share, as they do of the work.
+pub(super) const PACE_BLOCKS_PER_SECOND: u64 = 32_000_000;
 
 /// Slice periods ([`QUANTUM_HZ`]) a running PE's horizon may lie past the
 /// present: several, so that only a PE stopped for longer than a few slices
@@ -82,10 +86,10 @@ pub(super) struct Pace {
 }
 
 impl Pace {
-    /// The pace of a counter of `frequency` Hz.
-    pub(super) fn new(frequency: u64) -> Self {
+    /// The pace of a counter of `frequency` Hz over `pes` PEs.
+    pub(super) fn new(frequency: u64, pes: u64) -> Self {
         Self {
-            per_block: (frequency / PACE_BLOCKS_PER_SECOND).max(1),
+            per_block: (frequency * pes / PACE_BLOCKS_PER_SECOND).max(1),
             lookahead: frequency * LOOKAHEAD_SLICES / QUANTUM_HZ,
         }
     }
@@ -632,14 +636,16 @@ mod tests {
     }
 
     #[test]
-    fn a_24_mhz_pace_earns_a_microsecond_a_block_and_looks_ahead_four_slices() {
+    fn a_pace_shares_the_blocks_among_the_pes_and_looks_ahead_four_slices() {
         assert_eq!(
-            Pace::new(24_000_000),
+            Pace::new(24_000_000, 8),
             Pace {
-                per_block: 24,
+                per_block: 6,
                 lookahead: 192_000
             }
         );
+        assert_eq!(Pace::new(24_000_000, 2).per_block, 1);
+        assert_eq!(Pace::new(24_000_000, 64).per_block, 48);
     }
 
     /// Two PEs reading one shared clock, continuing a serialized count of
