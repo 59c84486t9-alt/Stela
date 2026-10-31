@@ -513,6 +513,10 @@ impl<P: Platform> Transport<P> {
         }
         Ok(self.received.drain(..).collect())
     }
+    /// Whether [`Self::send`] can take a packet: it has one owner at a time.
+    pub fn ready(&self) -> bool {
+        self.pending.is_none()
+    }
     pub fn send(&mut self, kind: Kind, bytes: &[u8]) -> Result<TxReceipt> {
         self.active()?;
         if kind == Kind::Event

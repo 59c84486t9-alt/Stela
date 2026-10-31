@@ -590,6 +590,7 @@ fn run_guest(boot: Boot<'_>, host: OpenedHost, storage: Storage, processors: Pro
             HostDevices {
                 host_input,
                 host_usb,
+                host_bluetooth,
                 host_network,
                 usb_disks,
                 guest_network,
@@ -726,6 +727,7 @@ fn run_guest(boot: Boot<'_>, host: OpenedHost, storage: Storage, processors: Pro
             board_flash,
             usb_disks,
             guest_mac: guest_network.as_ref().map(network::GuestNetwork::mac),
+            guest_bluetooth: host_bluetooth.is_some(),
         },
         board.as_ref(),
         &core_locks,
@@ -805,6 +807,7 @@ fn run_guest(boot: Boot<'_>, host: OpenedHost, storage: Storage, processors: Pro
                 restore,
                 host_input,
                 host_usb,
+                host_bluetooth,
                 guest_network,
                 host_nor,
                 host_disks,
@@ -1142,6 +1145,7 @@ struct Placement<'a> {
     board_flash: Option<nor::BoardFlash>,
     usb_disks: Vec<alloc::boxed::Box<dyn stela_drivers::block::BlockDevice>>,
     guest_mac: Option<stela_drivers::net::Mac>,
+    guest_bluetooth: bool,
 }
 
 /// The placed devices, the USB port a restore drives, and whether guest
@@ -1229,6 +1233,7 @@ fn place_devices(
             usb: stela_soc::machine::UsbCables {
                 disks: placement.usb_disks,
                 network: placement.guest_mac,
+                bluetooth: placement.guest_bluetooth,
             },
             scanout,
             firmware: &firmware,
@@ -2026,6 +2031,7 @@ struct HostDevices {
     preboot: Option<alloc::boxed::Box<dyn stela_drivers::block::BlockDevice>>,
     host_input: Option<input::HostInput>,
     host_usb: Option<usb::HostUsb>,
+    host_bluetooth: Option<bluetooth::HostBluetooth>,
     host_network: Option<Result<network::Shared>>,
     usb_disks: Vec<alloc::boxed::Box<dyn stela_drivers::block::BlockDevice>>,
     guest_network: Option<network::GuestNetwork>,
@@ -2054,6 +2060,7 @@ fn start_devices(
     } = wanted;
     let mut fdr_device = None;
     let mut host_usb = None;
+    let mut host_bluetooth = None;
     let (services, medium, preboot, host_input, host_network, usb_disks, guest_network, host_disks) =
         if targets.is_empty()
             && options.install_source.is_none()
@@ -2100,7 +2107,7 @@ fn start_devices(
             let owned_usb = options.usb_storage.clone();
             let owned_wifi = wifi_network(handoff, options);
             let external = options.external_disks.then(|| {
-                stela_soc::machine::UsbCables::disk_ports(options.guest_network)
+                stela_soc::machine::UsbCables::disk_ports(options.guest_network, options.input)
                     .saturating_sub(owned_usb.len())
             });
             let root = handoff.root;
@@ -2156,6 +2163,7 @@ fn start_devices(
                 mut links,
                 gpus,
                 usb,
+                bluetooth: host_controller,
                 usb_disks,
                 disks,
                 power,
@@ -2207,6 +2215,8 @@ fn start_devices(
             }
             fdr_device = fdr;
             host_usb = Some(usb);
+            // The guest's controller hangs off the hub of its keyboard.
+            host_bluetooth = host_controller.filter(|_| options.input);
             // The guest's adapter is its own: the mount's client keeps the
             // first one. Without one the Mac boots with no network, which
             // is reported once.
@@ -2250,6 +2260,7 @@ fn start_devices(
         preboot,
         host_input,
         host_usb,
+        host_bluetooth,
         host_network,
         usb_disks,
         guest_network,

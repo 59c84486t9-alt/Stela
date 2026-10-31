@@ -10,8 +10,8 @@
 //! such lock, and a device that leaves bytes for the host wakes one that
 //! sleeps (`Hub::request_service`). The boot PE serves only once no PE has
 //! for [`STARVED_MILLIS`], or always when the PEs run serialized.
-use super::{host, input, network, nor, output, parallel, power, restore, usb};
-use alloc::{format, string::String};
+use super::{bluetooth, host, input, network, nor, output, parallel, power, restore, usb};
+use alloc::{format, string::String, vec::Vec};
 use core::{
     cell::UnsafeCell,
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
@@ -34,6 +34,7 @@ pub(super) struct Service {
     restore: Option<restore::Experiment>,
     input: Option<input::HostInput>,
     usb: Option<usb::HostUsb>,
+    bluetooth: Option<bluetooth::HostBluetooth>,
     network: Option<network::GuestNetwork>,
     nor: Option<nor::HostNor>,
     power: power::HostPowerControl,
@@ -42,18 +43,23 @@ pub(super) struct Service {
     reported: u64,
 }
 
-/// The host's keyboards and pointers, and the USB controllers new ones
-/// arrive on.
+/// The host's keyboards and pointers, the USB controllers new ones arrive
+/// on, and the Bluetooth controller behind the guest's.
 pub(super) struct Peripherals {
     pub input: Option<input::HostInput>,
     pub usb: Option<usb::HostUsb>,
+    pub bluetooth: Option<bluetooth::HostBluetooth>,
 }
 
 impl Service {
     pub(super) fn new(
         devices: parallel::Board,
         restore: Option<restore::Experiment>,
-        Peripherals { input, usb }: Peripherals,
+        Peripherals {
+            input,
+            usb,
+            bluetooth,
+        }: Peripherals,
         network: Option<network::GuestNetwork>,
         nor: Option<nor::HostNor>,
         power: power::HostPowerControl,
@@ -65,6 +71,7 @@ impl Service {
             restore,
             input,
             usb,
+            bluetooth,
             network,
             nor,
             power,
@@ -99,6 +106,7 @@ impl Service {
             restore,
             input,
             usb,
+            bluetooth,
             network,
             nor,
             power,
@@ -133,6 +141,20 @@ impl Service {
             network.transmit(frames);
             devices.serve(|devices| network.poll(devices));
             lap.part(Part::Network);
+        }
+        if let Some(bluetooth) = bluetooth {
+            let (packets, room, status) = devices.with(bluetooth::HostBluetooth::queued);
+            bluetooth.status(status);
+            bluetooth.transmit(packets);
+            let received = if room {
+                bluetooth.receive()
+            } else {
+                Vec::new()
+            };
+            if !received.is_empty() {
+                devices.serve(|devices| bluetooth::HostBluetooth::deliver(devices, received));
+            }
+            lap.part(Part::Bluetooth);
         }
         if let Some(nor) = nor {
             let dirty = devices.with(nor::HostNor::dirty);
@@ -182,13 +204,22 @@ enum Part {
     Restore,
     Input,
     Network,
+    Bluetooth,
     /// The NOR's stores and the power button.
     Nor,
     Log,
 }
 
-const PARTS: usize = 6;
-const NAMES: [&str; PARTS] = ["read", "restore", "input", "network", "nor", "log"];
+const PARTS: usize = 7;
+const NAMES: [&str; PARTS] = [
+    "read",
+    "restore",
+    "input",
+    "network",
+    "bluetooth",
+    "nor",
+    "log",
+];
 
 /// The longest each part took since the last [`report`], in counter ticks.
 static LONGEST: [AtomicU64; PARTS] = [const { AtomicU64::new(0) }; PARTS];

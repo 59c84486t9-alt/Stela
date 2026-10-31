@@ -754,6 +754,11 @@ pub unsafe fn open(
         fdr,
         inputs,
         links,
+        bluetooth: super::bluetooth::HostBluetooth::first(
+            core::mem::take(&mut devices.bluetooth),
+            core::mem::take(&mut devices.pcie_bluetooth),
+            root,
+        ),
         gpus: core::mem::take(&mut devices.gpus),
         usb,
         usb_disks,
@@ -795,6 +800,7 @@ pub struct Opened {
     pub inputs: Inputs,
     pub links: super::network::Links,
     /// The host's Bluetooth controller, for the guest's.
+    pub bluetooth: Option<super::bluetooth::HostBluetooth>,
     /// The display controllers probe left for their own drivers.
     pub gpus: alloc::vec::Vec<stela_drivers::gpu::Adapter>,
     /// The xHCI controllers' topology owners, polled for hotplug.
