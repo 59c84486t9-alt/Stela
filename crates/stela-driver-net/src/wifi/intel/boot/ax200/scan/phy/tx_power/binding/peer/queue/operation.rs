@@ -21,17 +21,6 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200ManagementQueue<'a,
         self.peer.as_ref().unwrap().binding.power.channel()
     }
 
-    /// Clear what fired the function's vector, ahead of the rings.
-    pub fn acknowledge_interrupts(&mut self) -> Result<(), Ax200ManagementQueueError> {
-        self.peer()
-            .binding
-            .power
-            .phy
-            .boot()
-            .acknowledge_interrupts()
-            .map_err(Ax200ManagementQueueError::Boot)
-    }
-
     pub fn firmware(&mut self) -> &Firmware<'a> {
         &self.peer().binding.power.phy.boot().firmware
     }

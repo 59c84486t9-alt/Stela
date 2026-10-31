@@ -1,6 +1,7 @@
 extern crate std;
 use super::*;
 use alloc::vec;
+#[derive(Clone)]
 struct Model {
     scenario: u32,
 }
@@ -165,6 +166,7 @@ fn locked_uefi_cache_never_fills_missing_functions_from_copied_acpi() {
     assert_eq!(session.observe(lari::Input::Dsm(2)).unwrap(), value);
     assert_eq!(session.reads().len(), reads);
 }
+#[derive(Clone)]
 struct Missing {
     request: Option<Request>,
     variable: Option<Variable>,
@@ -298,6 +300,7 @@ fn unchanged_linux_bios_selection_cache_and_complete_raw_call_order() {
     assert_eq!(rows, 65536);
     assert_eq!(current, Some(4095));
 }
+#[derive(Clone)]
 struct ClockModel(u8);
 // SAFETY: exact raw modeled ECKV namespaces; no native platform permission.
 unsafe impl BiosIo for ClockModel {
@@ -377,6 +380,7 @@ fn clock_selection_requires_source() {
         }
     }
 }
+#[derive(Clone)]
 struct CountryModel(u8);
 // SAFETY: modeled BIOS service reads, never a real location issuer.
 unsafe impl BiosIo for CountryModel {

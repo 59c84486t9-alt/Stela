@@ -70,6 +70,9 @@ pub enum Event {
     Unsupported(&'static str),
     /// The AP or the firmware ended the association.
     ConnectionLost,
+    /// The firmware went with all it held, and the radio may be booting it
+    /// again.
+    FirmwareLost,
 }
 
 /// What the NIC offers on a band.
@@ -510,6 +513,12 @@ impl<R: Radio> Keeper<R> {
                 }
                 Event::ConnectionLost => {
                     self.fail(format!("{}: the AP ended the association", R::NAME));
+                    self.state = State::Leaving {
+                        at: now + RECONNECT_US,
+                    };
+                }
+                // `service` reported why.
+                Event::FirmwareLost => {
                     self.state = State::Leaving {
                         at: now + RECONNECT_US,
                     };

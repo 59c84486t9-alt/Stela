@@ -35,6 +35,7 @@ const ALIVE: u32 = 0;
 const TOP_FATAL_ERR: u32 = 3;
 const HW_ERR: u32 = 29;
 const FH_ERR: u32 = 21;
+const INT: u32 = 8;
 /// `CSR_INT`'s firmware and hardware error bits.
 pub const INT_SW_ERR: u32 = 1 << 25;
 pub const INT_HW_ERR: u32 = 1 << 29;
@@ -45,6 +46,23 @@ fn sw_err(family: Family) -> u32 {
     } else {
         SW_ERR
     }
+}
+
+/// `iwl_pcie_irq_msix_handler`'s and `iwl_pcie_irq_handler`'s look for errors,
+/// ahead of the look at the rings: clear what fired the vector and let it fire
+/// again, so nothing arriving after that look goes unsignalled. Whether the
+/// firmware or NIC died.
+pub fn acknowledge(io: &mut impl Csr, family: Family, vector: bool) -> Result<bool, AccessError> {
+    let fatal = io.read32(INT)? & (INT_SW_ERR | INT_HW_ERR);
+    if fatal != 0 {
+        io.write32(INT, fatal)?;
+    }
+    if !vector {
+        return Ok(fatal != 0);
+    }
+    let causes = take(io, family)?;
+    io.write32(AUTOMASK, 1)?;
+    Ok(fatal != 0 || causes & (INT_SW_ERR | INT_HW_ERR) != 0)
 }
 
 /// Clear the causes of a function in MSI-X mode, which reports through them
@@ -107,6 +125,18 @@ mod tests {
         fn delay_us(&mut self, _: u32) -> Result<(), AccessError> {
             Ok(())
         }
+    }
+
+    #[test]
+    fn only_an_error_ends_the_firmware_and_a_vector_fires_again() {
+        let mut io = BTreeMap::from([(INT, 1 | INT_SW_ERR), (AUTOMASK, 1)]);
+        assert!(acknowledge(&mut io, Family::Ax200, false).unwrap());
+        assert_eq!((io[&INT], io[&AUTOMASK]), (1, 1));
+        assert!(!acknowledge(&mut io, Family::Ax200, false).unwrap());
+        io.insert(FH_CAUSES, 1 << 21);
+        assert!(acknowledge(&mut io, Family::Ax200, true).unwrap());
+        assert_eq!(io[&AUTOMASK], 0, "the model clears what is written");
+        assert!(!acknowledge(&mut io, Family::Ax200, true).unwrap());
     }
 
     #[test]

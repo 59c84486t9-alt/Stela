@@ -1411,3 +1411,36 @@ fn an_open_port_sleeps_on_the_vector_which_each_pass_clears_and_rearms() {
     let state = native.state.lock().unwrap();
     assert_eq!(state.registers.get(&AUTOMASK), Some(&1));
 }
+
+#[test]
+fn a_firmware_error_frees_the_function_and_boots_it_for_the_keeper_to_join_again() {
+    let native = Native::default();
+    let (mut wifi, mut device) = connect(&native, false);
+    let live = native.domain.records.lock().unwrap().live.len();
+    native.state.lock().unwrap().registers.insert(8, 1 << 25);
+    wifi.carrier();
+    assert_eq!(wifi.radio().error(), None);
+    assert_eq!(wifi.radio().phase(), Phase::Booting);
+    assert_eq!(wifi.radio().station().phase(), Peering::Idle);
+    let booted = native.domain.records.lock().unwrap().live.len();
+    assert!(booted < live, "{booted} of {live} mappings live");
+    assert!(!wifi.carrier(), "the port went with its firmware");
+    // ROM answers the second boot as it answered the first.
+    device.entry = 0;
+    device.answered = None;
+    device.queues.clear();
+    event(&native.state, 1);
+    wifi.carrier();
+    let mut alive = rx_packet(1, 0xcafe, 0);
+    set_sku(&mut alive, [0; 3]);
+    device.inject(wifi.radio().rom().unwrap(), &alive);
+    for _ in 0..600 {
+        wifi.carrier();
+        if wifi.radio().stage() == Standing::Idle {
+            assert_eq!(wifi.radio().address(), Mac(LOCAL));
+            return;
+        }
+        device.respond(wifi.radio().rom().unwrap());
+    }
+    panic!("{:?} {:?}", wifi.radio().phase(), wifi.radio().error());
+}

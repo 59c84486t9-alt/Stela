@@ -15,6 +15,7 @@
 //! failed step keeps every owner the device may still reach.
 use super::{
     association::StationLink,
+    attach,
     boot::{
         self, Ax200BindingError, Ax200BindingPhase, Ax200BoardPolicy, Ax200BoardPolicyError,
         Ax200BoardPolicyPhase, Ax200Coexistence, Ax200CoexistenceError, Ax200CoexistencePhase,
@@ -29,13 +30,15 @@ use super::{
         PnvmProgress, RomBoot, ScanResultProgress, UnifiedNvm,
     },
     firmware::Family,
+    identity::Profile,
+    interrupts,
     platform::Observations,
     policy::{Beacons, Regulatory},
     radio::{bios::service::BiosIo, control::PowerMode},
 };
 use crate::{
     Clock, Deadline, Link, LinkError, Mac,
-    bus::dma::memory::PageSource,
+    bus::dma::{mapping::DmaDomain, memory::PageSource},
     firmware::Provider,
     wifi::{
         Band,
@@ -47,12 +50,21 @@ use crate::{
         station::{self as association, Station as Association},
     },
 };
-use alloc::{boxed::Box, format, sync::Arc, vec::Vec};
-use core::{any::Any, fmt};
+use alloc::{boxed::Box, format, string::String, sync::Arc, vec::Vec};
+use core::fmt;
 use stela_driver_base::entropy::Entropy;
 
 mod station;
 pub use station::{ManagementKey, channel_flags};
+
+/// `iwl_trans_determine_restart_mode`'s list of attempts on a function
+/// without TOP reset, each of which boots the function again here.
+const RESTARTS: usize = 5;
+/// iwlwifi's `IWL_TRANS_RESET_OK_TIME`: how long a function goes without an
+/// error for its list to start over.
+const RESTART_OK_US: u64 = 7_000_000;
+/// iwlwifi's `IWL_TRANS_RESET_DELAY`: the wait once the list runs out.
+const RESTART_DELAY_US: u64 = 60_000_000;
 
 /// iwlwifi's `IWL_MVM_UCODE_ALIVE_TIMEOUT`.
 const ALIVE_TIMEOUT_US: u64 = 2_000_000;
@@ -82,6 +94,10 @@ pub enum Error {
     Coexistence(Ax200CoexistenceError),
     /// A step's firmware or host deadline passed.
     Timeout(&'static str),
+    /// The firmware or NIC reported its own death.
+    FirmwareDied,
+    /// Booting the function again failed.
+    Restart(String),
     /// A step refused to start from the state the previous one left.
     Refused(&'static str),
     Station(association::Error),
@@ -90,6 +106,23 @@ pub enum Error {
     /// The firmware has yet to answer what this needs.
     Pending,
     Unsupported(&'static str),
+}
+
+impl Error {
+    /// Whether another boot may help: not what the host itself refused.
+    fn restartable(&self) -> bool {
+        !matches!(
+            self,
+            Self::Refused(_)
+                | Self::Regulatory(_)
+                | Self::Station(_)
+                | Self::Data(_)
+                | Self::Key(_)
+                | Self::Pending
+                | Self::Unsupported(_)
+                | Self::Restart(_)
+        )
+    }
 }
 
 impl fmt::Display for Error {
@@ -154,7 +187,7 @@ enum Stage<Q: BootIo, B: BiosIo> {
     Unbinding(Box<Ax200Phy<'static, Q, B, Regulatory>>),
     /// Owners a failed step left, kept while the device may reach them.
     Failed {
-        _owners: Box<dyn Any>,
+        owner: Box<dyn Kept>,
     },
     Moving,
 }
@@ -166,6 +199,131 @@ pub struct Selected {
     pub rates: u16,
     /// The setup link of an MLD association.
     pub affiliation: Option<association::multi_link::Affiliation>,
+}
+
+/// Whatever owns the function when bring-up fails.
+trait Kept {
+    /// Stop the device under this owner, which then holds nothing the device
+    /// can reach. Whether it stopped.
+    fn stop_function(&mut self) -> bool;
+}
+
+impl Kept for () {
+    fn stop_function(&mut self) -> bool {
+        false
+    }
+}
+
+impl<T: Kept> Kept for Box<T> {
+    fn stop_function(&mut self) -> bool {
+        self.as_mut().stop_function()
+    }
+}
+
+impl<T: Kept, U> Kept for (T, U) {
+    fn stop_function(&mut self) -> bool {
+        self.0.stop_function()
+    }
+}
+
+macro_rules! kept {
+    ($([$($bounds:tt)*] $owner:ty),+ $(,)?) => {$(
+        impl<$($bounds)*> Kept for $owner {
+            fn stop_function(&mut self) -> bool {
+                self.stop().is_ok()
+            }
+        }
+    )+};
+}
+
+kept!(
+    [Q: BootIo] RomBoot<'static, Q>,
+    [Q: BootIo] UnifiedNvm<'static, Q>,
+    [Q: BootIo] ColdRadio<'static, Q>,
+    [Q: BootIo, B: BiosIo] LariRadio<'static, Q, B>,
+    [Q: BootIo, B: BiosIo] Ax200Setup<'static, Q, B>,
+    [Q: BootIo, B: BiosIo] Ax200Mcc<'static, Q, B>,
+    [Q: BootIo, B: BiosIo] Ax200ScanConfiguration<'static, Q, B>,
+    [Q: BootIo, B: BiosIo] Ax200BoardPolicy<'static, Q, B>,
+    [Q: BootIo, B: BiosIo] Country<Q, B>,
+    [Q: BootIo, B: BiosIo] Ax200Mac<'static, Q, B, Regulatory>,
+    [Q: BootIo, B: BiosIo] Ax200Scan<'static, Q, B, Regulatory>,
+    [Q: BootIo, B: BiosIo] Ax200Phy<'static, Q, B, Regulatory>,
+    [Q: BootIo, B: BiosIo] Ax200TransmitPower<'static, Q, B, Regulatory>,
+    [Q: BootIo, B: BiosIo] boot::Ax200Binding<'static, Q, B, Regulatory>,
+    [Q: BootIo, B: BiosIo] Ax200LegacyPeer<'static, Q, B, Regulatory>,
+    [Q: BootIo, B: BiosIo] Ax200ManagementQueue<'static, Q, B, Regulatory>,
+    [Q: BootIo, B: BiosIo] Ax200Coexistence<'static, Q, B, Regulatory>,
+);
+
+impl<Q: BootIo, B: BiosIo> Stage<Q, B> {
+    fn owner(&mut self) -> Option<&mut dyn Kept> {
+        let owner: &mut dyn Kept = match self {
+            Stage::Rom(owner) | Stage::Pnvm(owner) => owner.as_mut(),
+            Stage::Nvm(owner) => owner.as_mut(),
+            Stage::Radio(owner) => owner.as_mut(),
+            Stage::Lari(owner) => owner.as_mut(),
+            Stage::Setup(owner) => owner.as_mut(),
+            Stage::Mcc(owner) => owner.as_mut(),
+            Stage::ScanConfiguration(owner) => owner.as_mut(),
+            Stage::Board(owner) => owner.as_mut(),
+            Stage::Country(owner) => owner.as_mut(),
+            Stage::Mac(owner) => owner.as_mut(),
+            Stage::Scan(owner) => owner.as_mut(),
+            Stage::Phy(owner) | Stage::Unbinding(owner) => owner.as_mut(),
+            Stage::Power(owner) => owner.as_mut(),
+            Stage::Link(owner) | Stage::Unlinking(owner) => owner.as_mut(),
+            Stage::Peer(owner) => owner.as_mut(),
+            Stage::Queue(owner) | Stage::Ready(owner) | Stage::Removing(owner) => owner.as_mut(),
+            Stage::Coexistence(owner) => owner.as_mut(),
+            Stage::Failed { owner } => owner.as_mut(),
+            Stage::Moving => return None,
+        };
+        Some(owner)
+    }
+}
+
+/// `iwl_trans_determine_restart_mode`'s count of a function's attempts.
+#[derive(Default)]
+struct Attempts {
+    count: usize,
+    last_us: u64,
+    /// When the wait after the last of the list ends.
+    backoff: Option<u64>,
+}
+
+impl Attempts {
+    /// Whether to boot again at `now`, spending an attempt.
+    fn allow(&mut self, now: u64) -> bool {
+        match self.backoff {
+            Some(at) if now < at => return false,
+            Some(_) => self.backoff = None,
+            None => {
+                if now.saturating_sub(self.last_us) >= RESTART_OK_US {
+                    self.count = 0;
+                }
+                if self.count >= RESTARTS {
+                    self.backoff = Some(now.saturating_add(RESTART_DELAY_US));
+                    return false;
+                }
+            }
+        }
+        self.count += 1;
+        self.last_us = now;
+        true
+    }
+}
+
+/// What boots the function again once its firmware dies. `io` also reads the
+/// causes every owner above the ROM boot leaves alone.
+struct Restart<Q, B> {
+    io: Q,
+    bios: B,
+    database: Database,
+    profile: Profile,
+    domain: Arc<dyn DmaDomain>,
+    entries: u16,
+    attempts: Attempts,
 }
 
 /// One Intel Wi-Fi function's bring-up.
@@ -198,6 +356,7 @@ pub struct Wifi<Q: BootIo, B: BiosIo> {
     error: Option<Error>,
     /// Whether the link reported the bring-up failure.
     reported: bool,
+    restart: Restart<Q, B>,
 }
 
 /// The legacy rate bits `LegacyPeer` takes for the 500 kb/s rate units of a
@@ -242,6 +401,16 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
     pub unsafe fn new(boot: RomBoot<'static, Q>, inputs: Inputs<B>) -> Station<Q, B> {
         let vector = boot.vector();
         let deadline = inputs.clock.deadline(ALIVE_TIMEOUT_US);
+        let (io, profile, domain, entries) = boot.restart_inputs();
+        let restart = Restart {
+            io,
+            bios: inputs.bios.clone(),
+            database: inputs.database.clone(),
+            profile,
+            domain,
+            entries,
+            attempts: Attempts::default(),
+        };
         let wifi = Self {
             family: boot.family(),
             radio: boot.radio(),
@@ -266,8 +435,73 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             address: Mac::default(),
             error: None,
             reported: false,
+            restart,
         };
         Keeper::keep(wifi, inputs.network, inputs.entropy, inputs.clock)
+    }
+
+    /// Whether the firmware or NIC reported its death since the last pass.
+    /// The ROM boot reads this for itself, ALIVE among it. A register that
+    /// stopped answering says as much.
+    fn died(&mut self) -> bool {
+        !matches!(self.stage, Stage::Rom(_) | Stage::Pnvm(_))
+            && interrupts::acknowledge(&mut self.restart.io, self.family, self.vector)
+                .unwrap_or(true)
+    }
+
+    /// `iwl_trans_restart_wk`, each attempt a reprobe: stop what the failed
+    /// firmware left, free it and boot the function again, for the keeper to
+    /// join from nothing. Whether the function is booting.
+    fn restart(&mut self) -> bool {
+        if !self.error.as_ref().is_some_and(Error::restartable)
+            || !self.restart.attempts.allow(self.clock.now_us())
+            || !self
+                .stage
+                .owner()
+                .is_some_and(|owner| owner.stop_function())
+        {
+            return false;
+        }
+        self.stage = Stage::Moving;
+        let restart = &self.restart;
+        // SAFETY: the owner that held `io`'s twin stopped, and `new`'s
+        // contract holds for what it kept.
+        let boot = unsafe {
+            attach::start(
+                restart.io.clone(),
+                restart.profile.clone(),
+                self.vector,
+                restart.domain.clone(),
+                restart.entries,
+                self.firmware,
+                self.observations,
+                self.pages,
+            )
+        };
+        let boot = match boot {
+            Ok(boot) => boot,
+            Err(error) => {
+                self.error = Some(Error::Restart(format!("{error}")));
+                self.reported = false;
+                self.stage = Stage::Failed {
+                    owner: Box::new(()),
+                };
+                return false;
+            }
+        };
+        self.stage = Stage::Rom(Box::new(boot));
+        self.deadline = Some(self.clock.deadline(ALIVE_TIMEOUT_US));
+        self.bios = Some(self.restart.bios.clone());
+        self.database = Some(self.restart.database.clone());
+        self.beacons = None;
+        self.selected = None;
+        self.eht = None;
+        self.chains = (0, 0);
+        self.address = Mac::default();
+        self.error = None;
+        self.reported = false;
+        self.client = station::Client::new(unassigned());
+        true
     }
 
     /// The station address the NVM holds, once read.
@@ -321,7 +555,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                 Ok(stage) => stage,
                 Err((error, kept)) => {
                     self.error = Some(error);
-                    Stage::Failed { _owners: kept }
+                    Stage::Failed { owner: kept }
                 }
             };
         }
@@ -359,7 +593,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         self.deadline.as_ref().is_some_and(Deadline::passed)
     }
 
-    unsafe fn step(&mut self, stage: Stage<Q, B>) -> Result<Stage<Q, B>, (Error, Box<dyn Any>)> {
+    unsafe fn step(&mut self, stage: Stage<Q, B>) -> Result<Stage<Q, B>, (Error, Box<dyn Kept>)> {
         let pages = self.pages;
         macro_rules! advance {
             ($owner:ident, $variant:ident, $error:ident, $done:expr, $next:expr) => {{
@@ -367,7 +601,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                 match unsafe { $owner.advance(pages) } {
                     Ok(phase) if phase == $done => $next,
                     Ok(_) => Ok(Stage::$variant($owner)),
-                    Err(error) => Err((Error::$error(error), $owner as Box<dyn Any>)),
+                    Err(error) => Err((Error::$error(error), $owner as Box<dyn Kept>)),
                 }
             }};
         }
@@ -419,7 +653,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                         let bios = self
                             .bios
                             .take()
-                            .ok_or((Error::Refused("LARI"), Box::new(()) as Box<dyn Any>))?;
+                            .ok_or((Error::Refused("LARI"), Box::new(()) as Box<dyn Kept>))?;
                         // SAFETY: `bios` reads this function's companion (`new`).
                         match unsafe { radio.begin_lari(bios) } {
                             Ok(lari) => Ok(Stage::Lari(Box::new(lari))),
@@ -437,7 +671,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                     // SAFETY: the handoff clock is calibrated and advances.
                     match unsafe { lari.begin_ax200_setup(options) } {
                         Ok(setup) => Ok(Stage::Setup(Box::new(setup))),
-                        Err(lari) => Err((Error::Refused("setup"), lari as Box<dyn Any>)),
+                        Err(lari) => Err((Error::Refused("setup"), lari as Box<dyn Kept>)),
                     }
                 })
             }
@@ -445,14 +679,14 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                 advance!(setup, Setup, Setup, Ax200SetupPhase::RegulatoryRequired, {
                     match setup.begin_mcc() {
                         Ok(mcc) => Ok(Stage::Mcc(Box::new(mcc))),
-                        Err(setup) => Err((Error::Refused("MCC"), setup as Box<dyn Any>)),
+                        Err(setup) => Err((Error::Refused("MCC"), setup as Box<dyn Kept>)),
                     }
                 })
             }
             Stage::Mcc(mut mcc) => advance!(mcc, Mcc, Mcc, Ax200MccPhase::PolicyRequired, {
                 match mcc.begin_scan_configuration() {
                     Ok(next) => Ok(Stage::ScanConfiguration(Box::new(next))),
-                    Err(mcc) => Err((Error::Refused("scan configuration"), mcc as Box<dyn Any>)),
+                    Err(mcc) => Err((Error::Refused("scan configuration"), mcc as Box<dyn Kept>)),
                 }
             }),
             Stage::ScanConfiguration(mut configuration) => advance!(
@@ -463,7 +697,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                 {
                     match configuration.begin_board_policy() {
                         Ok(board) => Ok(Stage::Board(Box::new(board))),
-                        Err(kept) => Err((Error::Refused("board policy"), kept as Box<dyn Any>)),
+                        Err(kept) => Err((Error::Refused("board policy"), kept as Box<dyn Kept>)),
                     }
                 }
             ),
@@ -483,7 +717,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                     match country.begin_mld_mac_context() {
                         Ok(mac) => Ok(Stage::Mac(Box::new(mac))),
                         Err(country) => {
-                            Err((Error::Refused("MAC context"), country as Box<dyn Any>))
+                            Err((Error::Refused("MAC context"), country as Box<dyn Kept>))
                         }
                     }
                 }
@@ -506,7 +740,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                             }
                             Ok(Stage::Scan(Box::new(scan)))
                         }
-                        Err(mac) => Err((Error::Refused("scan"), mac as Box<dyn Any>)),
+                        Err(mac) => Err((Error::Refused("scan"), mac as Box<dyn Kept>)),
                     }
                 })
             }
@@ -516,7 +750,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                 // The owner floors the request to the country's ceiling.
                 match phy.begin_transmit_power(u8::MAX) {
                     Ok(power) => Ok(Stage::Power(Box::new(power))),
-                    Err(phy) => Err((Error::Refused("transmit power"), phy as Box<dyn Any>)),
+                    Err(phy) => Err((Error::Refused("transmit power"), phy as Box<dyn Kept>)),
                 }
             }),
             Stage::Power(mut power) => {
@@ -539,7 +773,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                         // SAFETY: the same regulatory service and requester remain.
                         match unsafe { power.begin_mld_link(link) } {
                             Ok(link) => Ok(Stage::Link(Box::new(link))),
-                            Err(power) => Err((Error::Refused("link"), power as Box<dyn Any>)),
+                            Err(power) => Err((Error::Refused("link"), power as Box<dyn Kept>)),
                         }
                     }
                 )
@@ -555,7 +789,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                     Ax200BindingPhase::AuthenticationRequired,
                     {
                         let Some(selected) = &self.selected else {
-                            return Err((Error::Refused("AP station"), link as Box<dyn Any>));
+                            return Err((Error::Refused("AP station"), link as Box<dyn Kept>));
                         };
                         let peer = LegacyPeer {
                             address: selected
@@ -568,7 +802,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                         // SAFETY: the rates are the selected AP's own.
                         match unsafe { link.begin_mld_peer(peer) } {
                             Ok(peer) => Ok(Stage::Peer(Box::new(peer))),
-                            Err(link) => Err((Error::Refused("AP station"), link as Box<dyn Any>)),
+                            Err(link) => Err((Error::Refused("AP station"), link as Box<dyn Kept>)),
                         }
                     }
                 )
@@ -587,7 +821,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                         match unsafe { peer.begin_mld_management_queue() } {
                             Ok(queue) => Ok(Stage::Queue(Box::new(queue))),
                             Err(peer) => {
-                                Err((Error::Refused("management queue"), peer as Box<dyn Any>))
+                                Err((Error::Refused("management queue"), peer as Box<dyn Kept>))
                             }
                         }
                     }
@@ -607,7 +841,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                         match unsafe { queue.begin_mld_coexistence() } {
                             Ok(coexistence) => Ok(Stage::Coexistence(Box::new(coexistence))),
                             Err(queue) => {
-                                Err((Error::Refused("coexistence"), queue as Box<dyn Any>))
+                                Err((Error::Refused("coexistence"), queue as Box<dyn Kept>))
                             }
                         }
                     }
@@ -626,7 +860,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                         match coexistence.into_queue() {
                             Ok(queue) => Ok(Stage::Ready(Box::new(queue))),
                             Err(kept) => {
-                                Err((Error::Refused("management frames"), kept as Box<dyn Any>))
+                                Err((Error::Refused("management frames"), kept as Box<dyn Kept>))
                             }
                         }
                     }
@@ -652,10 +886,10 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                             Ok(mut link) => match link.begin_remove() {
                                 Ok(()) => Ok(Stage::Unlinking(Box::new(link))),
                                 Err(error) => {
-                                    Err((Error::Binding(error), Box::new(link) as Box<dyn Any>))
+                                    Err((Error::Binding(error), Box::new(link) as Box<dyn Kept>))
                                 }
                             },
-                            Err(queue) => Err((Error::Refused("link"), queue as Box<dyn Any>)),
+                            Err(queue) => Err((Error::Refused("link"), queue as Box<dyn Kept>)),
                         }
                     }
                 )
@@ -672,9 +906,9 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                     match power.into_phy_context() {
                         Ok(mut phy) => match phy.begin_remove() {
                             Ok(()) => Ok(Stage::Unbinding(Box::new(phy))),
-                            Err(error) => Err((Error::Phy(error), Box::new(phy) as Box<dyn Any>)),
+                            Err(error) => Err((Error::Phy(error), Box::new(phy) as Box<dyn Kept>)),
                         },
-                        Err(power) => Err((Error::Refused("PHY"), power as Box<dyn Any>)),
+                        Err(power) => Err((Error::Refused("PHY"), power as Box<dyn Kept>)),
                     }
                 })
             }
@@ -686,7 +920,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                             self.client.left();
                             Ok(Stage::Scan(Box::new(scan)))
                         }
-                        Err(phy) => Err((Error::Refused("scan"), phy as Box<dyn Any>)),
+                        Err(phy) => Err((Error::Refused("scan"), phy as Box<dyn Kept>)),
                     }
                 })
             }
@@ -703,7 +937,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
     fn country(
         &mut self,
         board: Box<Ax200BoardPolicy<'static, Q, B>>,
-    ) -> Result<Stage<Q, B>, (Error, Box<dyn Any>)> {
+    ) -> Result<Stage<Q, B>, (Error, Box<dyn Kept>)> {
         // `iwl_mvm_init_mcc` leaves the BIOS country, else the current one.
         let firmware = board.profiles().last().map(|profile| profile.country);
         let Some(database) = self.database.take() else {
@@ -718,7 +952,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         // SAFETY: the selection belongs to this function's own adapter.
         match unsafe { board.begin_country(regulatory) } {
             Ok(country) => Ok(Stage::Country(Box::new(country))),
-            Err(kept) => Err((Error::Refused("country"), Box::new(kept) as Box<dyn Any>)),
+            Err(kept) => Err((Error::Refused("country"), Box::new(kept) as Box<dyn Kept>)),
         }
     }
 
@@ -727,7 +961,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
     unsafe fn scan(
         &mut self,
         mut scan: Box<Ax200Scan<'static, Q, B, Regulatory>>,
-    ) -> Result<Stage<Q, B>, (Error, Box<dyn Any>)> {
+    ) -> Result<Stage<Q, B>, (Error, Box<dyn Kept>)> {
         let pages = self.pages;
         if let Err(error) = scan.replenish_completed_receive() {
             return Err((Error::Boot(error), scan));
@@ -790,6 +1024,29 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_function_gets_linux_s_attempts_a_wait_and_a_fresh_list_after_quiet() {
+        let mut attempts = Attempts::default();
+        for second in 1..=RESTARTS as u64 {
+            assert!(attempts.allow(second * 1_000_000), "attempt {second}");
+        }
+        let end = RESTARTS as u64 * 1_000_000;
+        assert!(!attempts.allow(end + 1), "the list ran out");
+        assert!(!attempts.allow(end + RESTART_DELAY_US), "the wait holds");
+        assert!(attempts.allow(end + 1 + RESTART_DELAY_US), "it ended");
+        assert!(
+            !attempts.allow(end + 2 + RESTART_DELAY_US),
+            "the wait again"
+        );
+        let quiet = end + 2 * RESTART_DELAY_US + RESTART_OK_US + 3;
+        assert!(attempts.allow(quiet), "the wait ended");
+        assert!(
+            attempts.allow(quiet + RESTART_OK_US),
+            "the list began again"
+        );
+        assert_eq!(attempts.count, 1);
+    }
 
     #[test]
     fn legacy_rates_read_both_rate_elements_and_drop_cck_at_5_ghz() {

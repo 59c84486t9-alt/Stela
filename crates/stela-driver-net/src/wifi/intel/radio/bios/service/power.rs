@@ -554,6 +554,7 @@ mod tests {
         values.extend(integers([256].repeat(10)));
         assert!(acpi_sar(&package(0, values)).is_none());
     }
+    #[derive(Clone)]
     struct Namespace {
         incomplete: bool,
         uefi_valid: bool,

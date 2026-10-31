@@ -484,9 +484,6 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
 
     /// One service round on the raised chain.
     fn operate(&mut self, queue: &mut Queue<Q, B>) -> Result<(), Error> {
-        if self.vector {
-            queue.acknowledge_interrupts().map_err(Error::Queue)?;
-        }
         let now = self.clock.now_us();
         if let Some(plan) = self.client.plan.take() {
             self.limit_six_ghz_power(queue);
@@ -1810,14 +1807,29 @@ impl<Q: BootIo, B: BiosIo> Radio for Wifi<Q, B> {
     }
 
     fn service(&mut self) -> Result<(), Error> {
-        self.poll();
-        if let Some(error) = &self.error
-            && !self.reported
-        {
-            self.reported = true;
-            return Err(error.clone());
+        if self.error.is_none() && self.died() {
+            self.error = Some(Error::FirmwareDied);
         }
-        self.serve()
+        self.poll();
+        let served = if self.error.is_none() {
+            self.serve()
+        } else {
+            Ok(())
+        };
+        // Firmware that stopped answering is as dead as firmware that says so.
+        if let Err(error @ Error::Timeout(_)) = &served {
+            self.error = Some(error.clone());
+        }
+        let Some(error) = self.error.clone() else {
+            return served;
+        };
+        let restarted = self.restart();
+        if self.reported && !restarted {
+            return Ok(());
+        }
+        self.reported = !restarted;
+        self.client.events.push_back(keeper::Event::FirmwareLost);
+        Err(error)
     }
 
     fn take_event(&mut self) -> Option<keeper::Event> {

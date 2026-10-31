@@ -97,10 +97,12 @@ pub struct ProductResetObservation {
 /// reservation through final Drop, excluding other firmware/OS/reset/IRQ users.
 /// This is an owned reservation, never a borrowed token. Accesses must use the
 /// device and complete ordered MMIO stores; errors may be uncertain.
-/// Uncertain transport Drop keeps this entire object.
-pub unsafe trait BootIo: Csr + 'static {
+/// Uncertain transport Drop keeps this entire object. A clone reaches the same
+/// function under the same reservation; clones take turns.
+pub unsafe trait BootIo: Csr + Clone + 'static {
     fn write8(&mut self, register: u32, value: u8) -> Result<(), power::AccessError>;
 }
+#[derive(Clone)]
 pub struct NativeBootIo {
     registers: Mmio,
     clock: Clock,
@@ -807,16 +809,10 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
         self.write(interrupts::FH_MASK, routes.fh_mask)?;
         self.write(interrupts::HW_MASK, routes.hw_mask)
     }
-    /// `iwl_pcie_irq_msix_handler` for what `poll` does not read from the
-    /// rings: clear the causes the vector fired for, then let it fire again,
-    /// ahead of the look at the rings, so nothing arriving after that look
-    /// goes unsignalled.
-    pub(crate) fn acknowledge_interrupts(&mut self) -> Result<(), Error> {
-        for causes in [interrupts::FH_CAUSES, MSIX_HW_CAUSES] {
-            let set = self.read_register(causes)?;
-            self.write(causes, set)?;
-        }
-        self.write(interrupts::AUTOMASK, 1)
+    /// What booting this function again takes of this boot.
+    pub(crate) fn restart_inputs(&self) -> (Q, Profile, Arc<dyn DmaDomain>, u16) {
+        let io = self.io.clone().expect("retained owner");
+        (io, self.profile.clone(), self.domain.clone(), self.entries)
     }
     /// `CSR_INT`, and on a function in MSI-X mode the causes it reports
     /// through instead.
@@ -1205,8 +1201,8 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
             self.write(0x24, gp & !4)?;
             self.state = State::Quiescent;
         }
-        // SAFETY: IRQs were never enabled, the exclusive polling owner has no
-        // queued workers and master-disable/reset acknowledged all DMA.
+        // SAFETY: an interrupt only wakes a core, the exclusive polling owner
+        // has no queued workers and master-disable/reset acknowledged all DMA.
         unsafe {
             if !self.images_stopped {
                 self.images.release_after_stop()?;
