@@ -81,7 +81,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
         Ok(
             pauth::Context::new_with_version(0, keys, self.pointer_version()?)
-                .with_translation_regime(self.cpu.regime_tcr()),
+                .with_translation_regime(self.cpu.regime_tcr())
+                .with_implementation_defined_cipher(),
         )
     }
 
@@ -285,14 +286,17 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// their key is known enabled and untrapped: each completes as the
     /// general path does (Arm `AddPAC`, `Auth`; a branch authenticates as a
     /// combined form, then links and branches) through
-    /// [`Self::pointer_result`]. `None` leaves forms naming register 31 to
-    /// the general path.
+    /// [`Self::pointer_result`], and PACGA through the same service. `None`
+    /// leaves forms naming register 31 to the general path.
     pub(super) fn register_pointer_authentication(
         &mut self,
         instruction: PointerAuthentication,
     ) -> Option<Step> {
         use PointerAuthenticationModifier as Modifier;
         use PointerAuthenticationOperation as Operation;
+        if let Operation::GenericCode(code) = instruction.operation {
+            return self.generic_pointer_code(code, instruction.next_pc.0);
+        }
         let (operation, key, register, modifier) = match instruction.operation {
             Operation::Sign {
                 key,
@@ -365,6 +369,49 @@ impl<H: Host, D: Devices> Machine<H, D> {
         Some(Ok(()))
     }
 
+    /// PACGA, known untrapped, through the service, which opens the generic
+    /// key's tag word for thunks. `None` leaves an XZR source or destination
+    /// to the general path.
+    fn generic_pointer_code(
+        &mut self,
+        code: stela_compiler::block::pauth_memory::GenericCode,
+        next: u64,
+    ) -> Option<Step> {
+        if code.source == 31 || code.destination == 31 {
+            return None;
+        }
+        if let Err(stop) = self.open_pointers() {
+            return Some(Err(stop));
+        }
+        let data = self.cpu.state.x[usize::from(code.source)];
+        let modifier = match code.modifier {
+            31 => self.cpu.state.sp,
+            register => self.cpu.state.x[usize::from(register)],
+        };
+        let Some(value) = self.pointer.generic_code(data, modifier) else {
+            return Some(Err(self.unsupported(RequirementKind::Native(
+                "PAC generic key unavailable",
+            ))));
+        };
+        self.cpu.pstate.btype = 0;
+        self.cpu.state.x[usize::from(code.destination)] = value;
+        self.cpu.pc = next;
+        Some(Ok(()))
+    }
+
+    /// Open the service with the current keys, version and layout.
+    fn open_pointers(&mut self) -> Result<(), Stop> {
+        if !self.pointer.is_open() {
+            let inputs = PointerInputs {
+                keys: self.pointer_keys(),
+                version: self.pointer_version()?,
+                tcr: self.cpu.regime_tcr(),
+            };
+            self.pointer.open(inputs);
+        }
+        Ok(())
+    }
+
     /// One signing or authentication with the current keys, version and
     /// layout (`pointer::PointerService::result`), the key known enabled
     /// and untrapped.
@@ -375,14 +422,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         pointer: u64,
         modifier: u64,
     ) -> Result<PointerResult, Stop> {
-        if !self.pointer.is_open() {
-            let inputs = PointerInputs {
-                keys: self.pointer_keys(),
-                version: self.pointer_version()?,
-                tcr: self.cpu.regime_tcr(),
-            };
-            self.pointer.open(inputs);
-        }
+        self.open_pointers()?;
         self.pointer
             .result(operation, key, pointer, modifier)
             .ok_or_else(|| {

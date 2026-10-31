@@ -93,7 +93,7 @@ pub(super) struct PointerService {
     /// Each key's tag word for native code: zero until a PAC exit finds the
     /// key enabled and untrapped under the current memo, and again whenever
     /// derived state may have changed.
-    pub(super) tags: [u64; 4],
+    pub(super) tags: [u64; pointer::TAG_WORDS],
     /// Instruction/data XPAC masks, independent of cryptographic key state.
     pub(super) strips: [pointer::strip::Cell; 2],
 }
@@ -107,7 +107,7 @@ impl PointerService {
             generation: 0,
             seen: Vec::new(),
             generations: 0,
-            tags: [0; 4],
+            tags: [0; pointer::TAG_WORDS],
             strips: [pointer::strip::Cell::default(); 2],
         }
     }
@@ -115,7 +115,7 @@ impl PointerService {
     /// Forget the context and close every key, as derived state changed.
     pub(super) fn close(&mut self) {
         self.context = None;
-        self.tags = [0; 4];
+        self.tags = [0; pointer::TAG_WORDS];
         self.strips.iter_mut().for_each(|cell| cell.enabled = 0);
     }
 
@@ -159,6 +159,22 @@ impl PointerService {
                 .is_some_and(|context| context.has_key(key))
         {
             pointer::tag(self.generation, index, 0)
+        } else {
+            0
+        };
+    }
+
+    /// After [`Self::revalidate`], open the generic key's tag word as a
+    /// PACGA exit would: untrapped and present in the context, the memo's
+    /// current tag.
+    pub(super) fn reopen_generic(&mut self, trapped: bool) {
+        let usable = !trapped
+            && self
+                .context
+                .as_ref()
+                .is_some_and(pauth::Context::has_generic_key);
+        self.tags[usize::from(pointer::GENERIC_KEY)] = if usable {
+            pointer::tag(self.generation, pointer::GENERIC_KEY, 0)
         } else {
             0
         };
@@ -209,7 +225,8 @@ impl PointerService {
         }
         self.context = Some(
             pauth::Context::new_with_version(0, keys, inputs.version)
-                .with_translation_regime(inputs.tcr),
+                .with_translation_regime(inputs.tcr)
+                .with_implementation_defined_cipher(),
         );
     }
 
@@ -277,6 +294,22 @@ impl PointerService {
             self.remember(authenticate, key, signed, modifier, Ok((pointer, true)));
         }
         Some(result)
+    }
+
+    /// PACGA with the open context, remembered as [`Self::result`] does,
+    /// the key known untrapped. `None` when the context lacks the key.
+    pub(super) fn generic_code(&mut self, data: u64, modifier: u64) -> Option<u64> {
+        let key = pointer::GENERIC_KEY;
+        let code = self.context.as_ref()?.generic_code(data, modifier).ok()?;
+        let tag = pointer::tag(self.generation, key, 0);
+        self.tags[usize::from(key)] = tag;
+        self.memo[pointer::slot(data, modifier)] = pointer::MemoEntry {
+            pointer: data,
+            modifier,
+            tag: tag | pointer::SIGNED,
+            value: code,
+        };
+        Some(code)
     }
 
     /// The memo generation of `inputs`: the one they had if they are among
@@ -355,6 +388,18 @@ pub(super) extern "sysv64" fn complete(
     // outlives every installed thunk; the engine does not touch it while
     // native code runs.
     let service = unsafe { &mut *(service as *mut PointerService) };
+    if pointer::requests_generic_code(request) {
+        if service.tags[usize::from(pointer::GENERIC_KEY)] == 0 {
+            return pointer::Completion::default();
+        }
+        return service.generic_code(pointer, modifier).map_or_else(
+            pointer::Completion::default,
+            |value| pointer::Completion {
+                completed: 1,
+                value,
+            },
+        );
+    }
     let (key, authenticate, combined) = pointer::requested(request);
     let key = key_of(key);
     if service.tags[usize::from(memo_key(key))] == 0 {
@@ -379,6 +424,63 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_generic_code_opens_its_own_tag_and_completes_for_thunks() {
+        let mut service = Box::new(PointerService::new());
+        let mut input = inputs(pauth::Version::Classic, 25 | 25 << 16);
+        input.keys[4] = Some([7, 9]);
+        service.open(input);
+        let state = service.addresses().2.state;
+        let form = pointer::Form::of(
+            stela_compiler::block::PointerAuthenticationOperation::GenericCode(
+                stela_compiler::block::pauth_memory::GenericCode {
+                    destination: 1,
+                    source: 2,
+                    modifier: 3,
+                },
+            ),
+        )
+        .unwrap();
+        let (data, modifier) = (0x1234, 0x5678);
+        // Closed, the service is not asked.
+        assert_eq!(
+            complete(state, form.request(), data, modifier),
+            pointer::Completion::default()
+        );
+        let code = service.generic_code(data, modifier).unwrap();
+        let tag = pointer::tag(service.generation, pointer::GENERIC_KEY, 0);
+        assert_eq!(service.tags[usize::from(pointer::GENERIC_KEY)], tag);
+        assert_eq!(service.tags[..4], [0; 4]);
+        assert_eq!(
+            service.memo[pointer::slot(data, modifier)],
+            pointer::MemoEntry {
+                pointer: data,
+                modifier,
+                tag: tag | pointer::SIGNED,
+                value: code,
+            }
+        );
+        // Open, a memo miss completes through it.
+        assert_eq!(
+            complete(state, form.request(), data, modifier),
+            pointer::Completion {
+                completed: 1,
+                value: code,
+            }
+        );
+        service.reopen_generic(true);
+        assert_eq!(service.tags, [0; pointer::TAG_WORDS]);
+        service.reopen_generic(false);
+        assert_eq!(service.tags[usize::from(pointer::GENERIC_KEY)], tag);
+        // Without the key nothing opens.
+        input.keys[4] = None;
+        service.close();
+        service.open(input);
+        assert_eq!(service.generic_code(data, modifier), None);
+        service.reopen_generic(false);
+        assert_eq!(service.tags, [0; pointer::TAG_WORDS]);
+    }
+
+    #[test]
     fn absent_keys_never_open_native_tags_or_reuse_a_known_key_generation() {
         let mut service = PointerService::new();
         let mut input = inputs(pauth::Version::Classic, 25 | 25 << 16);
@@ -394,7 +496,7 @@ mod tests {
                 )
                 .is_none()
         );
-        assert_eq!(service.tags, [0; 4]);
+        assert_eq!(service.tags, [0; pointer::TAG_WORDS]);
         let unknown_generation = service.generation;
         input.keys[0] = Some([11, 21]);
         service.close();
@@ -410,7 +512,7 @@ mod tests {
                 .is_some()
         );
         assert_ne!(service.generation, unknown_generation);
-        assert_eq!(service.tags[1..], [0; 3]);
+        assert_eq!(service.tags[1..], [0; pointer::TAG_WORDS - 1]);
         service.close();
         input.keys[0] = None;
         service.open(input);
@@ -425,7 +527,7 @@ mod tests {
                 )
                 .is_none()
         );
-        assert_eq!(service.tags, [0; 4]);
+        assert_eq!(service.tags, [0; pointer::TAG_WORDS]);
     }
 
     #[test]
@@ -449,7 +551,7 @@ mod tests {
                             !service.is_open(),
                             "no cryptographic context or key is needed"
                         );
-                        assert_eq!(service.tags, [0; 4]);
+                        assert_eq!(service.tags, [0; pointer::TAG_WORDS]);
                         let cell = service.strips[usize::from(data)];
                         assert_eq!(cell.enabled, 1);
                         for pointer in [0, u64::MAX, 1 << 55, 1 << 63, 0xdead_1234_5678_abcd] {
@@ -534,7 +636,7 @@ mod tests {
                     };
                     for operand in [base, signed, signed ^ (1 << 50), signed ^ (1 << 62)] {
                         for operation in operations {
-                            native.tags = [0; 4];
+                            native.tags = [0; pointer::TAG_WORDS];
                             let asked = complete(state, request(key, operation), operand, modifier);
                             assert_eq!(asked, pointer::Completion::default(), "a closed key");
                             native.tags[index] = pointer::tag(native.generation, index as u8, 0);
@@ -583,7 +685,7 @@ mod tests {
         assert!(service.generation > generation);
         service.close();
         assert!(!service.is_open());
-        assert_eq!(service.tags, [0; 4]);
+        assert_eq!(service.tags, [0; pointer::TAG_WORDS]);
         assert_eq!(
             service.result(
                 PointerOperation::Sign,
