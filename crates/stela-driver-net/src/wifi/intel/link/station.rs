@@ -87,6 +87,8 @@ const MANAGEMENT_TID: u8 = 15;
 const MISSED_BEACONS: u32 = 19;
 /// `IWL_MVM_MISSED_BEACONS_SINCE_RX_THOLD`.
 const MISSED_BEACONS_SINCE_RECEIVE: u32 = 4;
+/// `IWL_MLD_MISSED_BEACONS_SINCE_RX_THOLD`, on the radios iwlmld drives.
+const MISSED_BEACONS_SINCE_RECEIVE_WIFI_7: u32 = 6;
 /// `IWL_MLD_MISSED_BEACONS_THRESHOLD`.
 const LINK_SCAN_MISSED_BEACONS: u32 = 8;
 /// `MCC_SOURCE_WIFI`.
@@ -1281,14 +1283,18 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                     };
                 }
                 MISSED_BEACONS_LEGACY_NOTIFICATION | MISSED_BEACONS_NOTIFICATION
-                    if word(8).is_some_and(|missed| missed >= MISSED_BEACONS)
-                        && word(4).is_some_and(|missed| missed >= MISSED_BEACONS_SINCE_RECEIVE)
-                        && self.client.station.association_epoch().is_some()
-                        && !self.client.leaving =>
+                    if word(8).is_some_and(|missed| missed >= MISSED_BEACONS) =>
                 {
-                    self.client.events.push_back(keeper::Event::ConnectionLost);
-                    let action = self.client.station.disconnect().map_err(Error::Station)?;
-                    self.client.act(action);
+                    // Data still heard keeps the link, and leaves the rest
+                    // of Linux's reading alone.
+                    if word(4).is_some_and(|missed| missed >= self.missed_since_receive())
+                        && self.client.station.association_epoch().is_some()
+                        && !self.client.leaving
+                    {
+                        self.client.events.push_back(keeper::Event::ConnectionLost);
+                        let action = self.client.station.disconnect().map_err(Error::Station)?;
+                        self.client.act(action);
+                    }
                 }
                 MISSED_BEACONS_LEGACY_NOTIFICATION | MISSED_BEACONS_NOTIFICATION
                     if self.client.emlsr.active =>
@@ -1320,7 +1326,9 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                     }
                 }
                 beacon::SWITCH_START_NOTIFICATION => {
-                    self.client.switch_started(word(0).unwrap_or(0));
+                    let disable_tx = self.radio != Rf::Fm
+                        && !queue.firmware().supports_api(beacon::FIRMWARE_DISABLES_TX);
+                    self.client.switch_started(word(0).unwrap_or(0), disable_tx);
                 }
                 beacon::SWITCH_ERROR_NOTIFICATION if word(4).is_some_and(beacon::switch_failed) => {
                     self.client.tracking.watch.drop_connection();
@@ -1922,6 +1930,15 @@ fn probe_elements(band: Band, device: Device, widest: phy::Width) -> Vec<u8> {
 }
 
 impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
+    /// The beacons missed since anything was heard that lose the link.
+    fn missed_since_receive(&self) -> u32 {
+        if self.radio == Rf::Fm {
+            MISSED_BEACONS_SINCE_RECEIVE_WIFI_7
+        } else {
+            MISSED_BEACONS_SINCE_RECEIVE
+        }
+    }
+
     fn device(&self) -> Device {
         Device {
             family: self.family,

@@ -8,8 +8,8 @@
 //! EDCA and width replaces what association said. A channel switch runs
 //! `ieee80211_sta_process_chanswitch`: firmware times the move and says when
 //! it starts, the link's PHY follows, and silence ends at the AP's first beacon
-//! on the new channel. Frames queued in firmware before a quiet switch stay
-//! firmware's, which `iwl_mvm_csa_client_absent` would disable.
+//! on the new channel. Firmware that leaves it to the host stops sending to
+//! the AP for the move, as `iwl_mvm_csa_client_absent` tells it to.
 use super::*;
 use crate::wifi::intel::firmware::Firmware;
 use crate::wifi::station::{
@@ -29,6 +29,8 @@ const FATAL_SWITCH_ERRORS: u32 = 0b1011;
 /// `IWL_UCODE_TLV_CAPA_CHANNEL_SWITCH_CMD` and `IWL_UCODE_TLV_CAPA_CS_MODIFY`.
 const SWITCH_COMMAND: u32 = 46;
 const SWITCH_MODIFY: u32 = 49;
+/// `IWL_UCODE_TLV_API_NO_HOST_DISABLE_TX`.
+pub(super) const FIRMWARE_DISABLES_TX: u32 = 66;
 /// `IWL_MAX_CSA_BLOCK_TX`, in TU and in microseconds.
 const LONGEST_SILENCE_TU: u32 = 1500;
 const LONGEST_SILENCE_US: u64 = 1_500_000;
@@ -64,6 +66,8 @@ pub(super) struct Tracking {
     pub(super) watch: Watch,
     /// A switch firmware started that no announcement explains.
     cancel: Option<u32>,
+    /// The station firmware was told not to send to.
+    disabled: Option<u8>,
 }
 
 impl Tracking {
@@ -245,14 +249,29 @@ impl Client {
         self.announcement(&context, parsed, source, tsf, now);
     }
 
-    /// Firmware's channel switch started: `iwl_mvm_channel_switch_start_notif`.
-    pub(super) fn switch_started(&mut self, id: u32) {
-        match &mut self.tracking.watch.switch {
-            Some(active) if active.progress == Progress::Scheduled => {
-                active.progress = Progress::Started;
-                active.silence_ends = None;
-            }
-            _ => self.tracking.cancel = Some(id),
+    /// Firmware's channel switch started: `iwl_mvm_channel_switch_start_notif`,
+    /// `disable_tx` if the host has to stop what firmware holds for the AP.
+    pub(super) fn switch_started(&mut self, id: u32, disable_tx: bool) {
+        let Some(active) = self
+            .tracking
+            .watch
+            .switch
+            .as_mut()
+            .filter(|active| active.progress == Progress::Scheduled)
+        else {
+            self.tracking.cancel = Some(id);
+            return;
+        };
+        active.progress = Progress::Started;
+        active.silence_ends = None;
+        let ap = active.ap;
+        if disable_tx {
+            let station = self.seat_of(ap).unwrap_or(self.seat);
+            self.tracking.disabled = Some(station);
+            self.command(
+                commands::STATION_DISABLE_TX,
+                commands::station_disable_tx(station, true),
+            );
         }
     }
 
@@ -360,6 +379,17 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             let action = client.station.disconnect().map_err(Error::Station)?;
             client.act(action);
             return Ok(());
+        }
+        // iwl_mvm_post_channel_switch, past the AP's first beacon there.
+        let moving =
+            client.tracking.watch.switch.is_some_and(|active| {
+                matches!(active.progress, Progress::Started | Progress::Moved)
+            });
+        if !moving && let Some(station) = client.tracking.disabled.take() {
+            client.command(
+                commands::STATION_DISABLE_TX,
+                commands::station_disable_tx(station, false),
+            );
         }
         // A link that left firmware follows without it: `ieee80211_csa_switch_work`.
         if let Some(active) = client.tracking.watch.switch

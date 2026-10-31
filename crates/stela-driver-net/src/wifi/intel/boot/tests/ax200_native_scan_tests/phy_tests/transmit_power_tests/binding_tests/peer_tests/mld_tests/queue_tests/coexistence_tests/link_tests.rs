@@ -2084,6 +2084,17 @@ fn a_quiet_switch_takes_the_link_with_it_and_lasts_until_the_ap_is_heard_again()
         1,
         "firmware times the switch"
     );
+    let disables = |device: &Device<'_>| {
+        device.commands[commands..]
+            .iter()
+            .filter(|command| **command == (3, 0xd))
+            .count()
+    };
+    assert_eq!(
+        disables(&device),
+        0,
+        "firmware keeps sending until the move"
+    );
     device.inject(wifi.radio().rom().unwrap(), &notify(3, 0xff, &[1, 0, 0, 0]));
     assert!(
         run(&mut wifi, &mut device, |_, device, _| {
@@ -2092,6 +2103,7 @@ fn a_quiet_switch_takes_the_link_with_it_and_lasts_until_the_ap_is_heard_again()
         "{:?}",
         wifi.radio().error()
     );
+    assert_eq!(disables(&device), 1, "firmware's held frames stop for it");
     // Down, reconfigured on its new PHY, and up.
     let links = links_since(&device, announced);
     assert_eq!(links, [(2, 1, 1), (2, 1, 0xfe), (2, 1, 1)], "{links:?}");
@@ -2100,6 +2112,25 @@ fn a_quiet_switch_takes_the_link_with_it_and_lasts_until_the_ap_is_heard_again()
     device.inject(wifi.radio().rom().unwrap(), &other_beacon([60, 60]));
     let heard = run(&mut wifi, &mut device, |wifi, _, _| !wifi.radio().silent());
     assert!(heard, "{:?}", wifi.radio().error());
+    let resumed = run(&mut wifi, &mut device, |_, device, _| disables(device) == 2);
+    assert!(resumed, "{:?}", wifi.radio().error());
+}
+
+#[test]
+fn beacons_missed_while_data_is_heard_keep_the_link() {
+    let native = Native::default();
+    let (mut wifi, mut device, _, _) = moved_mld(&native);
+    let missed = |consecutive: u8, since_receive: u8| {
+        let mut body = [0; 20];
+        body[4] = since_receive;
+        body[8] = consecutive;
+        notify(3, 0xf6, &body)
+    };
+    device.inject(wifi.radio().rom().unwrap(), &missed(30, 3));
+    assert!(!run(&mut wifi, &mut device, |_, _, up| !up));
+    device.inject(wifi.radio().rom().unwrap(), &missed(30, 4));
+    let lost = run(&mut wifi, &mut device, |_, _, up| !up);
+    assert!(lost, "{:?}", wifi.radio().error());
 }
 
 #[test]

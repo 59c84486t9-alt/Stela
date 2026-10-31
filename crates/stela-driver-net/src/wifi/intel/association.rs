@@ -99,6 +99,11 @@ pub const CANCEL_CHANNEL_SWITCH: Id = Id {
     opcode: 0x06,
     version: 0,
 };
+pub const STATION_DISABLE_TX: Id = Id {
+    group: 3,
+    opcode: 0x0d,
+    version: 0,
+};
 pub const BEACON_FILTER: Id = Id {
     group: 0,
     opcode: 0xd2,
@@ -1125,6 +1130,14 @@ pub fn channel_switch(
     bytes[12] = count;
     bytes[13] = delayed_beacons;
     bytes[14] = u8::from(quiet);
+    bytes
+}
+
+/// `struct iwl_mvm_sta_disable_tx_cmd`.
+pub fn station_disable_tx(station: u8, disable: bool) -> Vec<u8> {
+    let mut bytes = alloc::vec![0; 8];
+    word(&mut bytes, 0, u32::from(station));
+    word(&mut bytes, 4, u32::from(disable));
     bytes
 }
 
