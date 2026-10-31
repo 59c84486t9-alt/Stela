@@ -1073,6 +1073,59 @@ fn visible_function_tables_hold_handles() {
 }
 
 #[test]
+fn source_libraries_name_their_functions_and_keep_what_they_load_with() {
+    let mut device = device();
+    let air = b"BC\xc0\xde\0\0\0\0";
+    let dependency = device.new_library(fixture(false)).unwrap();
+    let library = device
+        .new_source_library(air, Some("lib/source"), &[dependency])
+        .unwrap();
+    assert_eq!(
+        device.library_function_names(library),
+        Ok(&[String::from("kernel"), String::from("visible")][..])
+    );
+    assert_eq!(
+        device.library_identity(library),
+        Ok((true, Some("lib/source")))
+    );
+
+    // Its functions link what the options named.
+    let kernel = device.new_function(library, "kernel", &[]).unwrap();
+    let pipeline = device
+        .new_compute_pipeline(&ComputePipelineRequest {
+            compute_function: kernel,
+            threadgroup_size_is_multiple_of_thread_execution_width: false,
+            max_total_threads_per_threadgroup: 0,
+            stage_input: None,
+            linked_functions: LinkedFunctions::default(),
+            support_indirect_command_buffers: false,
+            archives: Default::default(),
+        })
+        .unwrap();
+    let dispatch = Specialization {
+        workgroup_size: Some([64, 1, 1]),
+        ..Specialization::default()
+    };
+    device
+        .compute_variant(u64::from(pipeline.0), &dispatch)
+        .unwrap();
+    assert_eq!(
+        device.compiler.compiled.last().unwrap().linking.libraries,
+        [1]
+    );
+
+    // And they load for as long as it does.
+    let kept = device.new_library(fixture(false)).unwrap();
+    let keeper = device.new_source_library(air, None, &[kept]).unwrap();
+    assert_eq!(device.library_identity(keeper), Ok((false, None)));
+    device.destroy_library(kept).unwrap();
+    assert!(device.compiler.libraries[3].is_some());
+    device.destroy_library(keeper).unwrap();
+    assert!(device.compiler.libraries[3].is_none());
+    assert!(device.new_source_library(air, None, &[kept]).is_err());
+}
+
+#[test]
 fn pipelines_keep_their_functions_and_libraries() {
     let mut device = device();
     let library = device.new_library(fixture(false)).unwrap();

@@ -7,8 +7,8 @@ use super::{
         LibraryFunctionNamesRequest, LibraryIdentityRequest, LibraryIdentityResponse,
         LinkedFunctionsRecord, NegotiateRequest, NegotiateResponse, NewBufferRequest,
         NewFunctionRequest, NewImportedBufferRequest, NewLibraryRequest, NewRenderPipelineRequest,
-        Operation, PipelineFlags, Record, RenderTargetsRecord, Span, Status, TessellationRecord,
-        TextureDescriptorRecord, Value,
+        NewSourceLibraryRequest, Operation, PipelineFlags, Record, RenderTargetsRecord, Span,
+        Status, TessellationRecord, TextureDescriptorRecord, Value,
         commands::{CommandBufferCode, CommandHeader, CommitRequest},
     },
 };
@@ -448,6 +448,50 @@ fn calls_carry_exact_records_of_known_operations() {
         outcome(connection.get(), release, &[0; 8], &mut []),
         Status::StaleHandle
     );
+}
+
+#[test]
+fn source_libraries_arrive_as_air() {
+    let mut service = service();
+    let connection = connect(&mut service);
+    let memory = &mut Memory::default();
+    let bytes = crate::metal::library::tests::dynamic(b"lib/stela.metallib\0");
+    let data = memory.put(&bytes);
+    let dependency = call::<_, Handle>(
+        &mut service,
+        connection,
+        Operation::NewLibrary,
+        &NewLibraryRequest { data },
+        memory,
+    )
+    .unwrap()
+    .handle;
+
+    let request = NewSourceLibraryRequest {
+        air: memory.put(b"BC\xc0\xde\0\0\0\0"),
+        install_name: memory.put(b"lib/source"),
+        libraries: memory.put(&dependency.to_le_bytes()),
+    };
+    let library = call::<_, Handle>(
+        &mut service,
+        connection,
+        Operation::NewSourceLibrary,
+        &request,
+        memory,
+    )
+    .unwrap()
+    .handle;
+    let out = memory.put(&[0; 10]);
+    let identity: LibraryIdentityResponse = call(
+        &mut service,
+        connection,
+        Operation::LibraryIdentity,
+        &LibraryIdentityRequest { library, out },
+        memory,
+    )
+    .unwrap();
+    assert_eq!((identity.library_type, identity.length), (1, 10));
+    assert_eq!(memory.read(out).unwrap(), b"lib/source");
 }
 
 #[test]

@@ -164,6 +164,15 @@ records! {
         pub out: Span,
     }
 
+    /// `NewSourceLibrary`: the AIR the source compiled to, the install name
+    /// of a dynamic library, empty for an executable one, and a span of
+    /// handles of the libraries it loads with.
+    pub struct NewSourceLibraryRequest {
+        pub air: Span,
+        pub install_name: Span,
+        pub libraries: Span,
+    }
+
     /// `NewArchive`: the bytes of an archive's file, if it has one.
     pub struct NewArchiveRequest {
         pub data: Span,
@@ -986,6 +995,8 @@ operations! {
     LibraryIdentity = 0x0107 => LibraryIdentityRequest, LibraryIdentityResponse;
     /// The bytes `serializeToURL:` writes.
     LibraryData = 0x0108 => LibraryDataRequest, Length;
+    /// `newLibraryWithSource:options:error:`.
+    NewSourceLibrary = 0x010b => NewSourceLibraryRequest, Handle;
     /// `newBinaryArchiveWithDescriptor:error:`.
     NewArchive = 0x0109 => NewArchiveRequest, Handle;
     /// The bytes `serializeToURL:error:` writes.

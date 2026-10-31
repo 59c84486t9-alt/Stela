@@ -227,6 +227,14 @@ bool stela_metal_reflect_bindings(const void *air, size_t size, const char *entr
                                   uint32_t constant_count, struct stela_metal_bindings *bindings,
                                   struct stela_air_error *error);
 
+/* Calls visit with the name and stage of each function the AIR module lists,
+ * for a library of source, whose container has no list. False after reporting
+ * why, or when visit refuses one. */
+typedef bool (*stela_metal_visit_function)(void *data, const char *name, size_t name_bytes,
+                                           enum stela_metal_function_stage stage);
+bool stela_metal_functions(const void *air, size_t size, stela_metal_visit_function visit,
+                           void *data, struct stela_air_error *error);
+
 #define STELA_METAL_SAMPLER_STATES 256u
 
 /* The constexpr sampler states the AIR module declares, each Apple's

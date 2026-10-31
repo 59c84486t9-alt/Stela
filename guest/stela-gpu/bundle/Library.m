@@ -977,23 +977,45 @@ static BOOL add_failed(NSError **error, NSInteger code, NSError *failure)
 	return library ? [self dynamicLibrary:library error:error] : nil;
 }
 
-/* Only MTLCompilerService compiles source, which drives AGX's own back end. */
 - (id)newLibraryWithSource:(NSString *)source options:(id)options error:(NSError **)error
 {
-	(void)source;
-	(void)options;
-	if (error) {
-		StelaFailure failure = {.reason = "this device compiles no Metal source: use a metallib"};
-		*error = stela_error(MTLLibraryErrorDomain, MTLLibraryErrorUnsupported, &failure);
+	options = options ?: [NSClassFromString(@"MTLCompileOptions") new];
+	NSData *air = stela_compile_source(source, options, error);
+	if (!air) {
+		return nil;
 	}
-	return nil;
+	BOOL dynamic = [options libraryType] == MTLLibraryTypeDynamic;
+	const char *install_name = dynamic ? [options installName].UTF8String : NULL;
+	NSArray *libraries = [options libraries];
+	uint64_t handles[libraries.count + 1];
+	for (NSUInteger i = 0; i < libraries.count; i++) {
+		handles[i] = ((StelaGPULibrary *)libraries[i])->_handle;
+	}
+	StelaNewSourceLibraryRequest request = {
+		.air = stela_span(air.bytes, air.length),
+		.install_name = stela_span(install_name, install_name ? strlen(install_name) : 0),
+		.libraries = stela_span(handles, libraries.count * sizeof(*handles)),
+	};
+	StelaHandle response = {};
+	StelaFailure failure;
+	StelaSpans spans = {.reads = &request.air, .read_count = 3};
+	if (STELA_CALL_SPANS(&_gate, NewSourceLibrary, &request, &response, spans, &failure) != StelaStatusOk) {
+		if (error) {
+			*error = stela_error(MTLLibraryErrorDomain, MTLLibraryErrorInternal, &failure);
+		}
+		return nil;
+	}
+	StelaGPULibrary *library = [[StelaGPULibrary alloc] initWithDevice:self handle:response.handle];
+	return dynamic ? [self dynamicLibrary:library error:error] : library;
 }
 
 - (void)newLibraryWithSource:(NSString *)source options:(id)options completionHandler:(void (^)(id, NSError *))handler
 {
-	NSError *error = nil;
-	id library = [self newLibraryWithSource:source options:options error:&error];
-	handler(library, error);
+	dispatch_async(dispatch_get_global_queue(0, 0), ^{
+		NSError *error = nil;
+		id library = [self newLibraryWithSource:source options:options error:&error];
+		handler(library, error);
+	});
 }
 
 - (id)newArgumentEncoderWithArguments:(NSArray *)arguments

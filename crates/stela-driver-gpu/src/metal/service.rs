@@ -380,6 +380,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             Operation::LibraryFunctionNames => self.library_function_names(&mut call),
             Operation::LibraryIdentity => self.library_identity(&mut call),
             Operation::LibraryData => self.library_data(&mut call),
+            Operation::NewSourceLibrary => self.new_source_library(&mut call),
             Operation::NewArchive => self.new_archive(&mut call),
             Operation::ArchiveData => self.archive_data(&mut call),
             Operation::NewFunction => self.new_function(&mut call),

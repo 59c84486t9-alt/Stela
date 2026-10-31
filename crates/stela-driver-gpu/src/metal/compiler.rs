@@ -52,7 +52,7 @@ use alloc::{
 use core::{
     ffi::{c_char, c_void},
     ptr::{self, NonNull},
-    str,
+    slice, str,
 };
 
 /// The constructs the AIR frontend lowers completely (`metal/README.md`).
@@ -114,6 +114,14 @@ pub struct Service {
     /// `stela_metal_sampler_states`.
     pub sampler_states:
         unsafe extern "C" fn(*const c_void, usize, *mut u64, *mut u32, *mut ffi::AirError) -> bool,
+    /// `stela_metal_functions`.
+    pub functions: unsafe extern "C" fn(
+        *const c_void,
+        usize,
+        ffi::VisitFunction,
+        *mut c_void,
+        *mut ffi::AirError,
+    ) -> bool,
     /// `stela_metal_compile`.
     pub compile: unsafe extern "C" fn(
         *const c_void,
@@ -271,6 +279,49 @@ impl Compiler for AirCompiler {
         self.next_library += 1;
         self.libraries.insert(id, data);
         Ok(id)
+    }
+
+    fn functions(&mut self, air: &[u8]) -> Result<Vec<(String, FunctionType)>> {
+        unsafe extern "C" fn visit(
+            data: *mut c_void,
+            name: *const c_char,
+            name_bytes: usize,
+            stage: u32,
+        ) -> bool {
+            // SAFETY: the data is the list below, and the service's name is
+            // `name_bytes` long for the call.
+            let (list, name) = unsafe {
+                (
+                    &mut *data.cast::<Vec<(String, FunctionType)>>(),
+                    slice::from_raw_parts(name.cast::<u8>(), name_bytes),
+                )
+            };
+            let (Ok(name), Some(stage)) =
+                (str::from_utf8(name), FunctionType::from_raw(stage.into()))
+            else {
+                return false;
+            };
+            list.push((String::from(name), stage));
+            true
+        }
+        let air = Air::parse(air).map_err(|_| Error::Invalid("AIR"))?;
+        let mut functions = Vec::new();
+        let mut error = ffi::AirError::NONE;
+        // SAFETY: the bitcode and the list outlive the call, which writes
+        // the list through `visit` and the error.
+        let listed = unsafe {
+            (self.service.functions)(
+                air.bitcode.as_ptr().cast(),
+                air.bitcode.len(),
+                visit,
+                ptr::from_mut(&mut functions).cast(),
+                &mut error,
+            )
+        };
+        if !listed {
+            return Err(refuse(&mut self.refusal, "the library", &error));
+        }
+        Ok(functions)
     }
 
     fn library_data(&self, library: u64) -> Result<&[u8]> {

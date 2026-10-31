@@ -299,6 +299,82 @@ impl<'a> Library<'a> {
     }
 }
 
+fn tag(out: &mut Vec<u8>, name: &[u8; 4], value: &[u8]) {
+    out.extend_from_slice(name);
+    out.extend_from_slice(&(value.len() as u16).to_le_bytes());
+    out.extend_from_slice(value);
+}
+
+fn name_tag(out: &mut Vec<u8>, name: &str) {
+    tag(out, b"NAME", &[name.as_bytes(), &[0]].concat());
+}
+
+/// A container of one AIR module's `functions`, as the source compiler's
+/// module has none: each entry names the same module, and a dynamic library
+/// has an `install_name`. Each function is a name and its MTLB stage.
+pub fn assemble(
+    air: &[u8],
+    functions: &[(&str, u8)],
+    kind: u8,
+    install_name: Option<&str>,
+) -> Vec<u8> {
+    let digest = Sha256::digest(air);
+    let mut entries = Vec::new();
+    for (function, stage) in functions {
+        let mut entry = alloc::vec![0; 4];
+        name_tag(&mut entry, function);
+        tag(&mut entry, b"TYPE", &[*stage]);
+        tag(&mut entry, b"HASH", &digest);
+        tag(&mut entry, b"MDSZ", &(air.len() as u64).to_le_bytes());
+        tag(&mut entry, b"OFFT", &[0; 24]);
+        tag(&mut entry, b"VERS", &[0; 8]);
+        entry.extend_from_slice(b"ENDT");
+        let size = entry.len() as u32;
+        entry[..4].copy_from_slice(&size.to_le_bytes());
+        entries.extend_from_slice(&entry);
+    }
+    let mut data = alloc::vec![0; HEADER_BYTES];
+    data[..4].copy_from_slice(b"MTLB");
+    data[4..6].copy_from_slice(&0x8001u16.to_le_bytes());
+    data[6..8].copy_from_slice(&2u16.to_le_bytes());
+    data[10] = kind;
+    data[11] = 0x81;
+    data.extend_from_slice(&(functions.len() as u32).to_le_bytes());
+    data.extend_from_slice(&entries);
+    let dynamic_header = install_name.map(|_| {
+        tag(&mut data, b"HDYN", &[0; 16]);
+        data.len() - 16
+    });
+    data.extend_from_slice(b"ENDT");
+    let field = |data: &mut [u8], at: usize, value: usize| {
+        data[at..at + 8].copy_from_slice(&(value as u64).to_le_bytes());
+    };
+    field(&mut data, 24, HEADER_BYTES);
+    field(&mut data, 32, entries.len());
+    for at in [40, 56] {
+        let metadata = data.len();
+        data.extend_from_slice(&8u32.to_le_bytes());
+        data.extend_from_slice(b"ENDT");
+        field(&mut data, at, metadata);
+        field(&mut data, at + 8, 8);
+    }
+    let code = data.len();
+    data.extend_from_slice(air);
+    field(&mut data, 72, code);
+    field(&mut data, 80, air.len());
+    if let (Some(at), Some(install_name)) = (dynamic_header, install_name) {
+        let section = data.len();
+        name_tag(&mut data, install_name);
+        data.extend_from_slice(b"ENDT");
+        let size = data.len() - section;
+        field(&mut data, at, section);
+        field(&mut data, at + 8, size);
+    }
+    let size = data.len();
+    field(&mut data, 16, size);
+    data
+}
+
 /// One NUL-terminated name.
 fn name(value: &[u8], offset: usize) -> Result<&str> {
     let name = value
@@ -510,12 +586,6 @@ pub(crate) mod tests {
     use super::*;
     use alloc::{vec, vec::Vec};
 
-    fn tag(out: &mut Vec<u8>, name: &[u8; 4], value: &[u8]) {
-        out.extend_from_slice(name);
-        out.extend_from_slice(&(value.len() as u16).to_le_bytes());
-        out.extend_from_slice(value);
-    }
-
     fn u64_field(out: &mut [u8], at: usize, value: usize) {
         out[at..at + 8].copy_from_slice(&(value as u64).to_le_bytes());
     }
@@ -641,6 +711,26 @@ pub(crate) mod tests {
         assert_eq!(air.bitcode, b"BC\xc0\xde\0\0\0\0");
         let bitcode_at = function.module_offset + LLVM_WRAPPER_BYTES;
         assert_eq!(air.bitcode.as_ptr(), data[bitcode_at..].as_ptr());
+    }
+
+    #[test]
+    fn assembled_libraries_share_their_module() {
+        let air = b"BC\xc0\xde\0\0\0\0";
+        let data = assemble(air, &[("first", 2), ("second", 4)], 0, None);
+        let library = Library::parse(&data).unwrap();
+        assert_eq!(library.install_name, None);
+        let functions = library.functions();
+        assert_eq!(functions.len(), 2);
+        assert_eq!((functions[0].name, functions[0].kind), ("first", 2));
+        assert_eq!((functions[1].name, functions[1].kind), ("second", 4));
+        for function in functions {
+            assert_eq!(function.air().unwrap().bitcode, air);
+        }
+        let data = assemble(air, &[("first", 2)], Header::DYNAMIC, Some("lib/name"));
+        let library = Library::parse(&data).unwrap();
+        assert_eq!(library.header.kind, Header::DYNAMIC);
+        assert_eq!(library.install_name, Some("lib/name"));
+        assert_eq!(library.functions()[0].air().unwrap().bitcode, air);
     }
 
     #[test]

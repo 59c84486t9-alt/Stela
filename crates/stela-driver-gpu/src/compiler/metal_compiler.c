@@ -322,6 +322,26 @@ inspect_entry(const void *air, size_t size, const char *entry,
                       false;
 }
 
+struct listing {
+   stela_metal_visit_function visit;
+   void *data;
+};
+
+static bool
+list_function(void *data, const char *name, size_t name_bytes, unsigned stage)
+{
+   struct listing *listing = data;
+   return listing->visit(listing->data, name, name_bytes, function_stages[stage]);
+}
+
+bool
+stela_metal_functions(const void *air, size_t size, stela_metal_visit_function visit, void *data,
+                      struct stela_air_error *error)
+{
+   struct listing listing = {visit, data};
+   return stela_air_functions(air, size, list_function, &listing, error);
+}
+
 /* Reflects entry, and selects its stage by the AIR list that names it. */
 static bool
 reflect(const void *air, size_t size, const char *entry,

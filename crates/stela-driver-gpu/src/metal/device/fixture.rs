@@ -3,7 +3,7 @@
 
 use super::{Device, LibraryId};
 use crate::metal::{
-    abi::{DataType, TextureType},
+    abi::{DataType, FunctionType, TextureType},
     capabilities::ShaderFeatures,
     command_buffer::Segment,
     error::{Error, Result},
@@ -463,6 +463,12 @@ impl Compiler for MockCompiler {
     fn add_library(&mut self, data: Vec<u8>) -> Result<u64> {
         self.libraries.push(Some(data));
         Ok(self.libraries.len() as u64 - 1)
+    }
+    fn functions(&mut self, _: &[u8]) -> Result<Vec<(String, FunctionType)>> {
+        Ok(alloc::vec![
+            (String::from("kernel"), FunctionType::Kernel),
+            (String::from("visible"), FunctionType::Visible),
+        ])
     }
     fn library_data(&self, library: u64) -> Result<&[u8]> {
         self.libraries[library as usize]

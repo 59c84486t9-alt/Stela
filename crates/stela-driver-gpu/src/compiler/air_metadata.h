@@ -383,6 +383,12 @@ bool stela_air_inspect_stage(const void *, size_t, const struct stela_air_consta
  * Only the lists are read; inspection validates the rest. */
 bool stela_air_entry_stage(const void *, size_t, const char *entry, unsigned *stage,
                            struct stela_air_error *);
+/* Calls visit with each function the entry lists name and its list, zero for
+ * air.kernel, as stela_air_entry_stage numbers them, until it refuses one. */
+typedef bool (*stela_air_visit_function)(void *, const char *name, size_t name_bytes,
+                                         unsigned stage);
+bool stela_air_functions(const void *, size_t, stela_air_visit_function, void *,
+                         struct stela_air_error *);
 /* A module's constexpr sampler states, AIR_MAX_SAMPLER_STATES at most, as
  * stela_air_metadata_sampler_states lists them. */
 #define AIR_MAX_SAMPLER_STATES AIR_MAX_METADATA_OPERANDS

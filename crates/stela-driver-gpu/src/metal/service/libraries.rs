@@ -5,7 +5,7 @@ use super::{
         self, ArchiveDataRequest, AttributeInfo, ConstantInfo, ConstantRecord, Fault,
         FunctionReflectionRequest, FunctionReflectionResponse, LibraryDataRequest,
         LibraryFunctionNamesRequest, LibraryIdentityRequest, LibraryIdentityResponse,
-        NewArchiveRequest, NewFunctionRequest, NewLibraryRequest,
+        NewArchiveRequest, NewFunctionRequest, NewLibraryRequest, NewSourceLibraryRequest,
     },
 };
 use crate::metal::{
@@ -24,6 +24,24 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         let request: NewLibraryRequest = call.request()?;
         let data = call.memory.read(request.data)?;
         let library = self.device.new_library(data)?;
+        let handle = self.hold(call.connection, Object::Library(library))?;
+        call.reply(&handle)
+    }
+
+    pub(super) fn new_source_library(&mut self, call: &mut Call) -> Result<(), Fault> {
+        let request: NewSourceLibraryRequest = call.request()?;
+        let memory = &mut *call.memory;
+        let air = memory.read(request.air)?;
+        let install_name = (request.install_name.length != 0)
+            .then(|| text(&memory.read(request.install_name)?))
+            .transpose()?;
+        let libraries = wire::read_array::<u64>(&memory.read(request.libraries)?)?
+            .into_iter()
+            .map(|handle| self.object::<LibraryId>(call.connection, handle))
+            .collect::<Result<Vec<_>, Fault>>()?;
+        let library = self
+            .device
+            .new_source_library(&air, install_name.as_deref(), &libraries)?;
         let handle = self.hold(call.connection, Object::Library(library))?;
         call.reply(&handle)
     }

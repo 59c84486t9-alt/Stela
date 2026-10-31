@@ -618,6 +618,37 @@ reflect_specialized(const char *fixture, const char *entry,
 }
 
 static bool
+count_function(void *data, const char *name, size_t name_bytes,
+               enum stela_metal_function_stage stage)
+{
+   (void)stage;
+   *(unsigned *)data += name && name_bytes;
+   return true;
+}
+
+/* The functions a fixture lists, zero when it cannot be listed. */
+static unsigned
+listed_functions(const char *fixture)
+{
+   LLVMMemoryBufferRef input = bitcode(fixture);
+   unsigned count = 0;
+   bool listed = stela_metal_functions(LLVMGetBufferStart(input), LLVMGetBufferSize(input),
+                                       count_function, &count, NULL);
+   LLVMDisposeMemoryBuffer(input);
+   return listed ? count : 0;
+}
+
+static bool
+list_function(void *data, const char *name, size_t name_bytes,
+              enum stela_metal_function_stage stage)
+{
+   (void)name_bytes;
+   assert(!strcmp(name, "vertex") && stage == STELA_METAL_VERTEX);
+   (*(unsigned *)data)++;
+   return true;
+}
+
+static bool
 reflect(const char *fixture, const char *entry, struct stela_metal_reflection *reflection,
         struct stela_air_error *error)
 {
@@ -682,6 +713,18 @@ varying(nir_shader *shader, nir_variable_mode mode, int location)
          return var;
    }
    return NULL;
+}
+
+/* A library of source has no container to list its functions. */
+static void
+modules_list_their_functions(void)
+{
+   LLVMMemoryBufferRef input = bitcode(vertex);
+   unsigned count = 0;
+   assert(stela_metal_functions(LLVMGetBufferStart(input), LLVMGetBufferSize(input), list_function,
+                                &count, NULL));
+   LLVMDisposeMemoryBuffer(input);
+   assert(count == 1);
 }
 
 static void
@@ -1397,6 +1440,7 @@ int
 main(void)
 {
    glsl_type_singleton_init_or_ref();
+   modules_list_their_functions();
    kernels_reflect_and_compile_their_threadgroup_memory();
    dynamic_kernels_take_their_dispatch_shape();
    render_stages_compile_at_their_linked_locations();

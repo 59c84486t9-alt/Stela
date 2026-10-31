@@ -600,6 +600,10 @@ pub trait Compiler {
     /// Forgets a library; its functions can no longer compile.
     fn remove_library(&mut self, library: u64) -> Result<()>;
 
+    /// The functions an AIR module's entry lists name, for a library of
+    /// source, whose compiler makes no container.
+    fn functions(&mut self, air: &[u8]) -> Result<Vec<(String, FunctionType)>>;
+
     /// The bytes [`add_library`](Self::add_library) kept.
     fn library_data(&self, library: u64) -> Result<&[u8]>;
 

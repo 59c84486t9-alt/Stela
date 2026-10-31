@@ -42,7 +42,7 @@ struct NSRange {
 typedef struct NSRange NSRange;
 
 /* Foundation. */
-@class NSError, NSURL;
+@class NSArray, NSError, NSString, NSURL;
 
 __attribute__((objc_root_class)) @interface NSObject
 + (instancetype)alloc;
@@ -52,6 +52,7 @@ __attribute__((objc_root_class)) @interface NSObject
 - (BOOL)conformsToProtocol:(id)protocol;
 - (Class)class;
 - (id)copy;
+- (NSString *)description;
 @end
 
 @interface NSString : NSObject
@@ -59,11 +60,28 @@ __attribute__((objc_root_class)) @interface NSObject
 + (instancetype)stringWithFormat:(NSString *)format, ...;
 - (BOOL)isEqualToString:(NSString *)other;
 - (instancetype)initWithBytes:(const void *)bytes length:(NSUInteger)length encoding:(NSUInteger)encoding;
+- (NSRange)rangeOfCharacterFromSet:(id)set;
+- (NSString *)stringByReplacingOccurrencesOfString:(NSString *)target withString:(NSString *)replacement;
 @property(readonly) const char *UTF8String;
+@property(readonly) NSInteger integerValue;
 @property(readonly) NSUInteger length;
 @end
 
 #define NSUTF8StringEncoding 4
+#define NSNotFound ((NSUInteger)0x7fffffffffffffff)
+
+@interface NSMutableString : NSString
+- (void)appendFormat:(NSString *)format, ...;
+@end
+
+@interface NSCharacterSet : NSObject
++ (instancetype)characterSetWithCharactersInString:(NSString *)characters;
+@end
+
+@interface NSFileManager : NSObject
++ (instancetype)defaultManager;
+- (NSArray *)contentsOfDirectoryAtPath:(NSString *)path error:(NSError **)error;
+@end
 
 @interface NSArray : NSObject
 + (instancetype)array;
@@ -86,6 +104,7 @@ __attribute__((objc_root_class)) @interface NSObject
 				count:(NSUInteger)count;
 - (id)objectForKey:(id)key;
 - (id)objectForKeyedSubscript:(id)key;
+@property(readonly) NSArray *allKeys;
 @property(readonly) NSUInteger count;
 @end
 
@@ -199,6 +218,7 @@ void dispatch_group_leave(dispatch_group_t group);
 long dispatch_group_wait(dispatch_group_t group, uint64_t timeout);
 void dispatch_release(void *object);
 void dispatch_async(dispatch_queue_t queue, void (^block)(void));
+void dispatch_once(long *predicate, void (^block)(void));
 dispatch_data_t dispatch_data_create_map(dispatch_data_t data, const void **buffer, size_t *size);
 
 uint64_t mach_absolute_time(void);
@@ -217,6 +237,13 @@ int memcmp(const void *a, const void *b, size_t size);
 size_t strlen(const char *text);
 int usleep(unsigned int microseconds);
 void abort(void) __attribute__((noreturn));
+int sscanf(const char *text, const char *format, ...);
+int sysctlbyname(const char *name, void *value, size_t *size, void *new_value, size_t new_size);
+
+#define RTLD_NOW 0x2
+#define RTLD_LOCAL 0x4
+void *dlopen(const char *path, int mode);
+void *dlsym(void *library, const char *symbol);
 
 typedef struct {
 	uint32_t opaque;

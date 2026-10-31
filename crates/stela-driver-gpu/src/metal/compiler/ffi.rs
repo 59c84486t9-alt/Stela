@@ -4,6 +4,10 @@ use super::super::capabilities::{MAX_BUFFER_BINDINGS, MAX_SAMPLER_BINDINGS, MAX_
 use alloc::string::String;
 use core::ffi::{c_char, c_void};
 
+/// `stela_metal_visit_function`, whose last argument is a function type.
+pub(super) type VisitFunction =
+    unsafe extern "C" fn(*mut c_void, *const c_char, usize, u32) -> bool;
+
 pub(super) const ATTRIBUTES: usize = 31;
 pub(super) const VARYINGS: usize = 32;
 pub(super) const COLOR_OUTPUTS: usize = 9;

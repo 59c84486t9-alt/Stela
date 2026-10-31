@@ -117,6 +117,14 @@ enum {
 	MTLLibraryTypeDynamic = 1,
 };
 enum {
+	MTLLibraryOptimizationLevelDefault = 0,
+	MTLLibraryOptimizationLevelSize = 1,
+};
+enum {
+	MTLCompileSymbolVisibilityDefault = 0,
+	MTLCompileSymbolVisibilityHidden = 1,
+};
+enum {
 	MTLDynamicLibraryErrorInvalidFile = 1,
 	MTLDynamicLibraryErrorUnsupported = 5,
 };
@@ -250,6 +258,18 @@ STELA_PROTOCOLS(STELA_DECLARE_PROTOCOL)
 - (BOOL)respondsToSelector:(SEL)selector;
 - (id)objectAtIndexedSubscript:(NSUInteger)index;
 - (NSString *)label;
+/* MTLCompileOptions. */
+- (NSUInteger)languageVersion;
+- (NSUInteger)mathMode;
+- (NSUInteger)mathFloatingPointFunctions;
+- (NSUInteger)optimizationLevel;
+- (NSUInteger)compileSymbolVisibility;
+- (NSUInteger)libraryType;
+- (BOOL)preserveInvariance;
+- (BOOL)enableLogging;
+- (NSDictionary *)preprocessorMacros;
+- (NSString *)installName;
+- (NSArray *)libraries;
 /* MTLTextureDescriptor and MTLHeapDescriptor. */
 - (NSUInteger)textureType;
 - (NSUInteger)pixelFormat;

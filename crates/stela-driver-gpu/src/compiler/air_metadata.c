@@ -2714,6 +2714,44 @@ valid_bitcode(const void *bitcode, size_t size)
           !memcmp(bitcode, "BC\xc0\xde", 4);
 }
 
+/* In enum stela_air_stage order after the kernels. */
+static const char *const entry_lists[] = {"air.kernel", "air.vertex", "air.fragment",
+                                          "air.object", "air.mesh", "air.visible"};
+
+bool
+stela_air_functions(const void *bitcode, size_t size, stela_air_visit_function visit, void *data,
+                    struct stela_air_error *error)
+{
+   struct stela_air_error local = {0};
+   struct stela_air_metadata m = {.error = error ? error : &local};
+   *m.error = (struct stela_air_error){0};
+   if (!valid_bitcode(bitcode, size) || !visit)
+      return fail(&m, STELA_AIR_INPUT, "invalid AIR function list query");
+   LLVMContextRef context;
+   if (!parse_module(&m, bitcode, size, &context))
+      return false;
+   bool visited = true;
+   for (unsigned list = 0; visited && list < ARRAY_SIZE(entry_lists); list++) {
+      LLVMValueRef nodes[AIR_MAX_METADATA_OPERANDS];
+      unsigned count;
+      visited = stela_air_named_md(&m, entry_lists[list], nodes, &count);
+      for (unsigned i = 0; visited && i < count; i++) {
+         LLVMValueRef fields[AIR_MAX_METADATA_OPERANDS];
+         unsigned fields_count;
+         visited = stela_air_md_node(&m, nodes[i], fields, &fields_count) && fields_count;
+         if (visited) {
+            size_t name_bytes;
+            const char *name = LLVMGetValueName2(fields[0], &name_bytes);
+            visited = visit(data, name, name_bytes, list);
+         }
+      }
+   }
+   if (!visited && m.error->kind == STELA_AIR_OK)
+      fail(&m, STELA_AIR_METADATA, "a function the module lists");
+   close_module(&m, context);
+   return visited;
+}
+
 bool
 stela_air_entry_stage(const void *bitcode, size_t size, const char *entry, unsigned *stage,
                       struct stela_air_error *error)
@@ -2728,13 +2766,10 @@ stela_air_entry_stage(const void *bitcode, size_t size, const char *entry, unsig
    if (!parse_module(&m, bitcode, size, &context))
       goto done;
    LLVMValueRef fn = LLVMGetNamedFunction(m.module, entry);
-   /* In enum stela_air_stage order after the kernels. */
-   const char *lists[] = {"air.kernel", "air.vertex", "air.fragment", "air.object", "air.mesh",
-                          "air.visible"};
-   for (unsigned list = 0; fn && list < ARRAY_SIZE(lists); list++) {
+   for (unsigned list = 0; fn && list < ARRAY_SIZE(entry_lists); list++) {
       LLVMValueRef nodes[AIR_MAX_METADATA_OPERANDS];
       unsigned count;
-      if (!stela_air_named_md(&m, lists[list], nodes, &count))
+      if (!stela_air_named_md(&m, entry_lists[list], nodes, &count))
          goto done;
       for (unsigned i = 0; i < count; i++) {
          LLVMValueRef fields[AIR_MAX_METADATA_OPERANDS];

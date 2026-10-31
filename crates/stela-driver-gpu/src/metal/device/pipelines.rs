@@ -15,7 +15,7 @@ use crate::metal::{
     abi::{DataType, FunctionType, PrimitiveTopologyClass},
     command_buffer::{ComputePipelineState, IndirectCompute, RenderPipelineState},
     error::{Error, Result, ensure, require},
-    library::{Header, Library},
+    library::{self, Header, Library},
     pipeline::{
         self, ComputePipelineDescriptor, MeshRenderPipelineDescriptor, RenderPipelineDescriptor,
         RenderTargets, StageThreads, TessellatedVertex, TessellationDescriptor,
@@ -36,6 +36,19 @@ use alloc::{string::String, vec::Vec};
 
 /// What a destroyed object's id fails with.
 const DESTROYED: &str = "unknown or destroyed object";
+
+/// A function's `TYPE` in a Metal library.
+fn mtlb_stage(function_type: FunctionType) -> u8 {
+    match function_type {
+        FunctionType::Vertex => 0,
+        FunctionType::Fragment => 1,
+        FunctionType::Kernel => 2,
+        FunctionType::Visible => 4,
+        FunctionType::Intersection => 6,
+        FunctionType::Mesh => 7,
+        FunctionType::Object => 8,
+    }
+}
 
 /// Who uses a library or function: its creator until it destroys the
 /// object, and the functions and pipelines made from it.
@@ -63,6 +76,8 @@ struct LibraryObject {
     names: Vec<String>,
     dynamic: bool,
     install_name: Option<String>,
+    /// `MTLCompileOptions.libraries`, which it keeps.
+    dependencies: Vec<LibraryId>,
     users: Users,
 }
 
@@ -405,6 +420,32 @@ pub struct MeshPipelineRequest {
 }
 
 impl<B: Backend, C: Compiler> Device<B, C> {
+    /// `newLibraryWithSource:` of the AIR the source compiled to.
+    /// `dependencies` are `MTLCompileOptions.libraries`, which load with the
+    /// library for whatever links it.
+    pub fn new_source_library(
+        &mut self,
+        air: &[u8],
+        install_name: Option<&str>,
+        dependencies: &[LibraryId],
+    ) -> Result<LibraryId> {
+        for &id in dependencies {
+            ensure(self.pipelines.libraries.get(id.0)?.users.creator, DESTROYED)?;
+        }
+        let functions = self.compiler.functions(air)?;
+        let stages: Vec<_> = functions
+            .iter()
+            .map(|(name, function_type)| (name.as_str(), mtlb_stage(*function_type)))
+            .collect();
+        let kind = install_name.map_or(0, |_| Header::DYNAMIC);
+        let library = self.new_library(library::assemble(air, &stages, kind, install_name))?;
+        for &id in dependencies {
+            self.pipelines.libraries.get_mut(id.0)?.users.others += 1;
+        }
+        self.pipelines.libraries.get_mut(library.0)?.dependencies = dependencies.to_vec();
+        Ok(library)
+    }
+
     /// `newLibraryWithData:`: keeps a Metal library for its functions.
     pub fn new_library(&mut self, data: Vec<u8>) -> Result<LibraryId> {
         let parsed = Library::parse(&data).map_err(|_| Error::Invalid("Metal library"))?;
@@ -421,6 +462,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             names,
             dynamic,
             install_name,
+            dependencies: Vec::new(),
             users: Users::CREATED,
         });
         Ok(LibraryId(index))
@@ -508,6 +550,10 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         if self.pipelines.libraries.get(id.0)?.users.none() {
             let library = self.pipelines.libraries.remove(id.0)?;
             self.compiler.remove_library(library.library)?;
+            self.release(Kept {
+                libraries: library.dependencies,
+                ..Kept::default()
+            })?;
         }
         Ok(())
     }
@@ -680,8 +726,21 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         let function = self.pipelines.functions.get(id.0)?;
         let library = self.pipelines.library(function.library)?;
         let entry = function.entry.clone();
+        let mut linking = specialization.linking;
+        for &dependency in &self
+            .pipelines
+            .libraries
+            .get(function.library.0)?
+            .dependencies
+        {
+            let dependency = self.pipelines.library(dependency)?;
+            if !linking.libraries.contains(&dependency) {
+                linking.libraries.push(dependency);
+            }
+        }
         let specialization = Specialization {
             constants: function.constants.clone(),
+            linking,
             ..specialization
         };
         let samplers = self

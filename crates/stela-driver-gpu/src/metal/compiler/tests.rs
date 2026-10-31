@@ -364,6 +364,17 @@ unsafe extern "C" fn kernel<const N: usize>(options: *const c_void) -> *mut c_vo
     ptr::without_provenance_mut(0x100 * (N + 1))
 }
 
+unsafe extern "C" fn functions(
+    _: *const c_void,
+    _: usize,
+    visit: ffi::VisitFunction,
+    data: *mut c_void,
+    _: *mut ffi::AirError,
+) -> bool {
+    // SAFETY: the name is valid for the call.
+    unsafe { visit(data, c"kernel".as_ptr(), 6, 3) && visit(data, c"visible".as_ptr(), 7, 5) }
+}
+
 unsafe extern "C" fn release(shader: *mut c_void) {
     FAKE.with_borrow_mut(|fake| fake.released.push(shader.addr()));
 }
@@ -373,6 +384,7 @@ fn service() -> Service {
         reflect,
         reflect_bindings,
         sampler_states,
+        functions,
         compile,
         tessellation_stages,
         accumulate_kernel: kernel::<0>,

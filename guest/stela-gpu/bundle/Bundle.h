@@ -214,6 +214,9 @@ void stela_depth_stencil_record(id descriptor, StelaDepthStencilRecord *record);
 - (NSUInteger)type;
 @end
 
+/* The AIR Metal `source` compiles to under `MTLCompileOptions`. */
+NSData *stela_compile_source(NSString *source, id options, NSError **error);
+
 /* `MTLBinaryArchive`: the service's pipeline cache. */
 @interface StelaGPUBinaryArchive : StelaGPUObject <MTLBinaryArchive>
 @end
