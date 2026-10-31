@@ -238,9 +238,9 @@ fn register(os: &mut SepOs, service: u8, input: u32, output: u32) {
 fn xart_requests_are_answered_after_their_ool_input_is_read() {
     let mut os = SepOs::new(None).with_services(store(), false).unwrap();
     let advertised = map_shared(&mut os, shm(0x1234_4000, 0x20)).unwrap();
-    // OS active, then name and capacities for each of xarm, xars, sks
-    // and pnon.
-    assert_eq!(advertised.len(), 9);
+    // OS active, then name and capacities for each of xarm, xars, sks,
+    // pnon and scrd.
+    assert_eq!(advertised.len(), 11);
     assert_eq!(advertised[1].data, xart::MASTER);
     assert_eq!(advertised[3].data, xart::SLAVE);
     let request = xart::XartMessage {
@@ -621,7 +621,7 @@ impl Payload for UnusedPayload {
 fn services_are_advertised_and_journaled() {
     let mut os = SepOs::new(None).with_services(store(), true).unwrap();
     let advertised = map_shared(&mut os, shm(0x1234_4000, 0x20)).unwrap();
-    // OS active, then xarm, xars, sks, pnon and the observed scrd.
+    // OS active, then xarm, xars, sks, pnon and scrd.
     assert_eq!(advertised.len(), 1 + 2 * 5);
     let names: Vec<u32> = advertised[1..]
         .iter()
@@ -666,8 +666,7 @@ fn services_are_advertised_and_journaled() {
 }
 
 #[test]
-fn refusals_are_answered_but_never_an_observed_scrd_request() {
-    use super::observe;
+fn refusals_are_answered_and_observed() {
     let mut os = SepOs::new(None).with_services(store(), true).unwrap();
     map_shared(&mut os, shm(0x1234_4000, 0x20)).unwrap();
     let request = |service, tag| Frame {
@@ -677,23 +676,27 @@ fn refusals_are_answered_but_never_an_observed_scrd_request() {
         parameter: 0,
         data: 8,
     };
-    for frame in [
-        request(keystore::ID, 1),
-        request(observe::CREDENTIALS_ID, 2),
-    ] {
+    for frame in [request(keystore::ID, 1), request(credentials::ID, 2)] {
         assert!(reply(&mut os, frame).unwrap().is_empty());
     }
     let mut ram = stela_contracts::dma::test_support::Ram::new(0x10_0000, 0x1000);
     // Each DMA step consumes one request. The keystore refusal is
-    // answered with its failure status; scrd is not answered at all.
+    // answered with its failure status, as is scrd.
     let (result, answer) = dma_step(&mut os, &mut ram);
     assert!(result.is_err());
     assert_eq!(answer, [keystore::failure(request(keystore::ID, 1))]);
     assert!(os.dma_pending());
-    assert!(dma(&mut os, &mut ram).unwrap().is_empty());
+    let (result, answer) = dma_step(&mut os, &mut ram);
+    assert!(result.is_err());
+    assert_eq!(answer, [credentials::failure(request(credentials::ID, 2))]);
     assert!(!os.dma_pending());
     let lines = os.observations();
-    assert_eq!(lines.len(), 3);
+    assert_eq!(lines.len(), 5);
+    assert!(
+        lines[4].starts_with("SEP keystore: command 0x01"),
+        "{}",
+        lines[4]
+    );
     assert!(lines[0].starts_with("sks tag=1 op=0"), "{}", lines[0]);
     assert!(lines[0].ends_with("input=unregistered"), "{}", lines[0]);
     let failure = keystore::failure(request(keystore::ID, 1));
@@ -704,8 +707,8 @@ fn refusals_are_answered_but_never_an_observed_scrd_request() {
             failure.tag, failure.opcode, failure.parameter, failure.data
         )
     );
-    // scrd is recorded and never answered, so no answer line follows.
     assert!(lines[2].starts_with("scrd tag=2 op=0"), "{}", lines[2]);
+    assert!(lines[3].starts_with("scrd tag=2 answer"), "{}", lines[3]);
 }
 
 #[test]

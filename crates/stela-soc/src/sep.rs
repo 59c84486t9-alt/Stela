@@ -9,13 +9,14 @@
 //! Stela's own explicit, TSS-free trust policy (recording measured evidence),
 //! then the native sepOS phase maps shared memory and notifies the control
 //! endpoint that the OS is active and answers its control requests. It
-//! advertises the xART pair (`xart`), the keystore (`keystore`) and
-//! BootPolicy (`boot_policy`) services; each answers the requests whose
-//! contract is recovered and refuses the rest rather than fake a reply, and
-//! the other services (scrd, ...) are not advertised. See
+//! advertises the xART pair (`xart`), the keystore (`keystore`), BootPolicy
+//! (`boot_policy`) and credential manager (`credentials`) services; each
+//! answers the requests whose contract is recovered and refuses the rest
+//! rather than fake a reply, and the other services are not advertised. See
 //! `firmware`/`os`/`control` and docs/research/sep.md.
 pub mod boot_policy;
 pub mod control;
+pub mod credentials;
 pub mod endpoint;
 pub mod firmware;
 pub mod image;

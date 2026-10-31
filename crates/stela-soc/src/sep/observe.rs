@@ -5,25 +5,13 @@
 //! services is recorded in the SEP's [`Journal`]: the frame and a bounded
 //! prefix of its OOL input, read by the SEP model, not by recovering sepOS,
 //! and then the frame of the answer it was given, if any.
-//! `sks` and `pnon` are native services ([`super::keystore`],
-//! [`super::boot_policy`]) and are answered as usual after the record; the
-//! journal shows the bodies of the commands they refuse. `scrd`'s contract
-//! is not recovered: observation alone advertises it, so its kernel client
-//! binds and registers OOL buffers, and each request is recorded and never
-//! answered: the kernel client times out on its own and the run goes on to
-//! record the requests that follow (docs/design/runtime.md "Unsupported
-//! operations" names this diagnostic exception). Observation is
-//! off by default, and a run with it on checks nothing beyond its log.
-//!
-//! The `scrd` capacities are Stela's broad diagnostic choice, one to 32 SEP
-//! pages each way, not recovered limits: a client whose registration falls
-//! outside them is refused by length.
-use super::{boot_policy, endpoint::Service, keystore, xart};
+//! The services are the native ones and are answered as usual after the
+//! record; the journal shows the bodies of the commands they refuse.
+//! Observation is off by default, and a run with it on checks nothing beyond
+//! its log.
+use super::{boot_policy, credentials, keystore, xart};
 use alloc::{collections::VecDeque, format, string::String};
 
-/// Stela's catalog ID for `scrd`, after the native services.
-pub const CREDENTIALS_ID: u8 = 0x14;
-const CAPACITIES: [u8; 4] = [1, 0x20, 1, 0x20];
 /// The OOL input prefix each recorded request logs: one 4 KiB page, enough
 /// for a whole LocalPolicy-sized request, since each observation costs a
 /// full boot run.
@@ -31,21 +19,12 @@ pub const INPUT_PREFIX: usize = 4096;
 /// Lines the journal keeps before the host drains it; older ones are counted.
 const JOURNAL_LINES: usize = 512;
 
-/// The services only observation advertises.
-pub fn services() -> [Service; 1] {
-    [Service {
-        id: CREDENTIALS_ID,
-        name: u32::from_be_bytes(*b"scrd"),
-        capacities: CAPACITIES,
-    }]
-}
-
 /// The journaled service's name, if `id` is one.
 pub fn name(id: u8) -> Option<&'static str> {
     match id {
         keystore::ID => Some("sks"),
         boot_policy::ID => Some("pnon"),
-        CREDENTIALS_ID => Some("scrd"),
+        credentials::ID => Some("scrd"),
         xart::SLAVE_ID => Some("xars"),
         xart::MASTER_ID => Some("xarm"),
         _ => None,
@@ -90,15 +69,8 @@ mod tests {
     use alloc::vec::Vec;
 
     #[test]
-    fn the_observed_catalog_is_valid_and_disjoint_from_the_native_services() {
-        let mut all = super::super::xart::services().to_vec();
-        all.extend([keystore::service(), boot_policy::service()]);
-        all.extend(services());
-        assert!(super::super::endpoint::Catalog::new(all).is_ok());
-        let [scrd] = services();
-        assert_eq!(name(scrd.id), Some("scrd"));
-        assert!(scrd.accepts(true, 0x14000, 0x4000));
-        assert!(!scrd.accepts(true, 0x84000, 0x4000));
+    fn every_journaled_service_has_its_name() {
+        assert_eq!(name(credentials::ID), Some("scrd"));
         assert_eq!(
             (name(keystore::ID), name(boot_policy::ID)),
             (Some("sks"), Some("pnon"))

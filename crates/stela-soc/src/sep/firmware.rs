@@ -13,7 +13,7 @@
 //! contract and the trust-policy boundary.
 use super::super::asc::{Firmware, Message};
 use super::{
-    Entropy, SecurityMode, boot_policy, control,
+    Entropy, SecurityMode, boot_policy, control, credentials,
     image::{self, signature},
     keystore,
     message::{self, Frame},
@@ -60,8 +60,7 @@ pub struct SepFirmware {
     security: Option<SecurityMode>,
     /// The machine's `/chosen` `unique-chip-id`, bound into the key hierarchy.
     ecid: u64,
-    /// Observe (`--sep-observe`): journal `sks`/`pnon`/`scrd`, advertise
-    /// `scrd`.
+    /// Observe (`--sep-observe`): journal `sks`/`pnon`/`scrd`.
     observe: bool,
     /// Where sepOS finds its state, until it activates.
     state: Option<state::Location>,
@@ -179,8 +178,8 @@ impl Firmware for SepFirmware {
     /// an `xars` operation with `ENOTSUP`, a keystore request with its
     /// failure status and a BootPolicy command with a transport failure.
     /// These refusals precede any OOL transfer, so none carries reply
-    /// bytes. `scrd`, the master instance and notifications have no error
-    /// reply and stay refused.
+    /// bytes. `scrd` answers `kIOReturnUnsupported`. The master instance and
+    /// notifications have no error reply and stay refused.
     fn error_reply(
         &mut self,
         message: Message,
@@ -203,6 +202,7 @@ impl Firmware for SepFirmware {
                 keystore::failure(frame)
             }
             (Phase::Active(_), boot_policy::ID) => boot_policy::transport_failure(frame),
+            (Phase::Active(_), credentials::ID) => credentials::failure(frame),
             _ => return None,
         };
         Some(alloc::vec![reply.mailbox()])
