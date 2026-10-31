@@ -394,8 +394,19 @@ impl<P: ColdPlatform> Requester<P> {
         }
         .map_err(Error::Dma)
     }
+    /// Drain already translated payloads arriving under this requester's
+    /// original RID and aliases. AMD 48882 rev. 3.11 section 2.4.11.2 makes
+    /// DTE invalidation match outstanding translations for that DeviceID;
+    /// execute waits for the following exact COMPLETION_WAIT store.
+    /// Device stop, IRQ/work retirement and bypass exclusion remain separate.
     pub fn drain_posted_writes(&self) -> Result<(), DmaError> {
-        Err(DmaError::DrainUnavailable)
+        self.live().map_err(invalidation_error)?;
+        for &rid in &self.group {
+            self.engine
+                .execute(&[Command::invalidate_device(rid)])
+                .map_err(invalidation_error)?;
+        }
+        Ok(())
     }
     /// # Safety
     /// This requester is stopped, every mapping was quiescently removed,

@@ -512,6 +512,10 @@ unsafe impl DmaDomain for Domain {
         mappings.swap_remove(index);
         Ok(())
     }
+    unsafe fn drain_posted_writes(&self) -> Result<(), DmaError> {
+        let inner = self.inner()?;
+        inner.requester.drain_posted_writes()
+    }
     unsafe fn sync_for_device(
         &self,
         mapping: DomainMapping,
