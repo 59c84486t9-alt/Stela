@@ -89,6 +89,30 @@ pub struct TxProfile {
     pub max_eirp_mbm: i32,
 }
 
+/// What one scan's probes radiate in each band, as firmware that builds its own
+/// probes chooses a rate per band.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProbeProfiles {
+    pub ghz2: TxProfile,
+    pub ghz5: TxProfile,
+}
+
+impl ProbeProfiles {
+    pub const fn uniform(profile: TxProfile) -> Self {
+        Self {
+            ghz2: profile,
+            ghz5: profile,
+        }
+    }
+
+    const fn on(self, channel: Channel) -> TxProfile {
+        match channel.band {
+            Band::Ghz2 => self.ghz2,
+            Band::Ghz5 | Band::Ghz6 => self.ghz5,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Operation {
     Receive(Channel),

@@ -125,6 +125,26 @@ impl<Q: BootIo> RomBoot<'_, Q> {
         }
     }
 }
+impl<Q: BootIo> RomBoot<'_, Q> {
+    /// The next MPDU, past every other notification on the way to it: those
+    /// wait in the notification queue, whose limit ends this.
+    pub(super) fn poll_mpdu(&mut self) -> Result<MpduProgress, Error> {
+        loop {
+            if let Some(captured) = self.hcmd.take_matching(0xc1, 0) {
+                return self.decode_captured_mpdu(captured);
+            }
+            match self.poll_one_notification_buffer()? {
+                NotificationPoll::Pending => return Ok(MpduProgress::Pending),
+                NotificationPoll::Processed => {}
+                NotificationPoll::Backpressure => {
+                    return Ok(MpduProgress::Backpressure {
+                        notifications: self.hcmd.notification_count(),
+                    });
+                }
+            }
+        }
+    }
+}
 impl<Q: BootIo> ColdRadio<'_, Q> {
     /// Poll raw observations from the owned initial queue 0. This can
     /// diagnose firmware traffic while PlatformConfigurationRequired remains
@@ -137,22 +157,6 @@ impl<Q: BootIo> ColdRadio<'_, Q> {
         {
             return Err(Error::State);
         }
-        let boot = &mut self.initialized.boot;
-        if let Some(captured) = boot.hcmd.take_matching(0xc1, 0) {
-            return boot.decode_captured_mpdu(captured);
-        }
-        if matches!(
-            boot.poll_one_notification_buffer()?,
-            NotificationPoll::Backpressure
-        ) {
-            return Ok(MpduProgress::Backpressure {
-                notifications: boot.hcmd.notification_count(),
-            });
-        }
-        if let Some(captured) = boot.hcmd.take_matching(0xc1, 0) {
-            boot.decode_captured_mpdu(captured)
-        } else {
-            Ok(MpduProgress::Pending)
-        }
+        self.initialized.boot.poll_mpdu()
     }
 }

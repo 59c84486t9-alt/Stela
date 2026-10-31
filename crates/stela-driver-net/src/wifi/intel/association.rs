@@ -22,6 +22,11 @@ use crate::{
 };
 use alloc::vec::Vec;
 
+pub const BLOCK_ACK_ALLOCATION: Id = Id {
+    group: 5,
+    opcode: 0x16,
+    version: 0,
+};
 pub const SESSION_PROTECTION: Id = Id {
     group: 3,
     opcode: 5,
@@ -330,17 +335,29 @@ fn width_code(width: Width) -> Option<u8> {
     }
 }
 
+/// `rs_fw_get_max_amsdu_len`: the longest A-MSDU the AP takes. An HT peer's
+/// long form does not apply, because the firmware may put it in an A-MPDU.
+pub fn max_amsdu(negotiated: &Negotiated) -> u16 {
+    match negotiated.max_tx_amsdu {
+        7935 => 4095,
+        bytes => bytes,
+    }
+}
+
 /// `rs_fw_set_supp_rates` and the rest of `iwl_mvm_rs_fw_rate_init`: the
 /// rates firmware rate selection may use for the AP. Until the port opens
-/// `authorized` is false and it stays at 20 MHz.
+/// `authorized` is false and it stays at 20 MHz. `max_mpdu` is what the
+/// firmware may report as an A-MSDU's limit, or zero for none.
 pub fn rate_config(
     negotiated: &Negotiated,
     band: Band,
     antennas: u8,
     bytes: usize,
     authorized: bool,
+    max_mpdu: u16,
 ) -> Option<Vec<u8>> {
     let mut out = alloc::vec![0; bytes];
+    half(&mut out, bytes - 4, max_mpdu);
     let width = if authorized {
         width_code(negotiated.width)?
     } else {
@@ -468,6 +485,34 @@ pub fn add_key(index: u8, flags: u32, material: &[u8], receive: u64) -> Option<V
     bytes[16..16 + material.len()].copy_from_slice(material);
     bytes[64..72].copy_from_slice(&receive.to_le_bytes());
     Some(bytes)
+}
+
+/// The AP's firmware station, as `iwl_mvm_sta_fw_id_mask` names it.
+const STATION_MASK: u32 = 1;
+
+/// `iwl_rx_baid_cfg_cmd`, for `IWL_RX_BAID_ACTION_ADD`.
+pub fn allocate_block_ack(tid: u8, start: u16, window: u16) -> Vec<u8> {
+    let mut bytes = alloc::vec![0; 16];
+    word(&mut bytes, 4, STATION_MASK);
+    bytes[8] = tid;
+    bytes[12..14].copy_from_slice(&start.to_le_bytes());
+    bytes[14..16].copy_from_slice(&window.to_le_bytes());
+    bytes
+}
+
+/// `iwl_rx_baid_cfg_cmd`, for `IWL_RX_BAID_ACTION_REMOVE`: version 1 names
+/// the session the firmware gave, later ones its station and TID.
+pub fn remove_block_ack(version: u8, id: u8, tid: u8) -> Vec<u8> {
+    const REMOVE: u32 = 2;
+    let mut bytes = alloc::vec![0; 16];
+    word(&mut bytes, 0, REMOVE);
+    if version <= 1 {
+        word(&mut bytes, 4, u32::from(id));
+    } else {
+        word(&mut bytes, 4, STATION_MASK);
+        word(&mut bytes, 8, u32::from(tid));
+    }
+    bytes
 }
 
 /// `__iwl_mvm_sec_key_del`.

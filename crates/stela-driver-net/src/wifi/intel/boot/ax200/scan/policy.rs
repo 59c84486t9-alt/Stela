@@ -50,12 +50,20 @@ impl<'a, Q: BootIo, B: BiosIo> Hardware<'_, 'a, Q, B> {
             .rule(u32::from(channel.frequency_mhz) * 1000, 20_000)?;
         Some(channel)
     }
+    /// Whether the firmware's own channel list lets a frame start here.
+    fn initiates(&self, channel: Channel) -> bool {
+        self.channels.iter().any(|ch| {
+            ch.channel.number == channel.number
+                && ch.channel.frequency_mhz == channel.frequency_mhz
+                && !ch.restrictions.no_initiate_radiation
+        })
+    }
 }
 // SAFETY: private construction borrows the unique fully ACKed original native
 // MAC/board/MCC owner and its Country selection, never public receipts.
 // Its exclusive mutable borrow serializes controlled reset/programming through
-// the HCMD handoff. Only forced-passive receive is admitted; every TX
-// operation (including autonomous association/ACK) is refused. The kept OS
+// the HCMD handoff. Receive and firmware-built scan probes are admitted; every
+// other TX operation (including autonomous association/ACK) is refused. The kept OS
 // attachment must coordinate post-publication revocation with this native owner
 // or hardware enforcement, as required by unsafe begin_scan.
 unsafe impl<'p, 'a, Q: BootIo, B: BiosIo> HardwarePolicy for Hardware<'p, 'a, Q, B> {
@@ -87,6 +95,14 @@ impl<Q: BootIo, B: BiosIo> HardwareLease for Guard<'_, '_, '_, Q, B> {
         match operation {
             regulatory::Operation::Receive(ch) => {
                 self.owner.channel(ch.band, ch.number) == Some(ch)
+            }
+            regulatory::Operation::Transmit {
+                channel,
+                purpose: regulatory::Purpose::Probe,
+                ..
+            } => {
+                self.owner.channel(channel.band, channel.number) == Some(channel)
+                    && self.owner.initiates(channel)
             }
             regulatory::Operation::Transmit { .. } => false,
         }
@@ -140,8 +156,8 @@ impl protocol::Policy for CheckedRequest<'_> {
     fn allow_receive(&mut self, channel: Channel) -> bool {
         self.0.channels().contains(&channel)
     }
-    fn allow_probe(&mut self, _: Channel) -> bool {
-        false
+    fn allow_probe(&mut self, channel: Channel) -> bool {
+        self.0.active() && self.0.channels().contains(&channel)
     }
     fn lookup_channel(&mut self, band: Band, number: u16) -> Option<Channel> {
         self.0

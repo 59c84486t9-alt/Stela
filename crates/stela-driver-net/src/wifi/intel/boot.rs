@@ -49,9 +49,9 @@ pub use ax200::{
     Ax200Setup, Ax200SetupError, Ax200SetupOptions, Ax200SetupPhase, Ax200TransmitPower,
     Ax200TransmitPowerError, Ax200TransmitPowerPhase, BindingCommand, BindingCommandKind,
     BoardCommand, BoardCommandKind, CountryIo, CountryIoError, LegacyPeer, MacCommand,
-    MacCommandKind, PeerCommand, PeerCommandKind, PhyCommand, PhyCommandKind, ScanCompletion,
-    ScanRawReceive, ScanRejectedMpdu, ScanResult, ScanResultProgress, ScanRetirement,
-    SelectedCountry, SetupDecisions, TransmitPowerLimit,
+    MacCommandKind, PeerCommand, PeerCommandKind, PhyCommand, PhyCommandKind, Probe,
+    ScanCompletion, ScanRawReceive, ScanRejectedMpdu, ScanResult, ScanResultProgress,
+    ScanRetirement, SelectedCountry, SetupDecisions, TransmitPowerLimit,
 };
 mod lari;
 pub use lari::{LariError, LariPhase, LariRadio};

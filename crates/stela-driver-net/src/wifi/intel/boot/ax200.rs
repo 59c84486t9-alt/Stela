@@ -31,7 +31,7 @@ pub use scan::{
     Ax200ManagementQueue, Ax200ManagementQueueError, Ax200ManagementQueuePhase, Ax200Phy,
     Ax200PhyError, Ax200PhyPhase, Ax200Scan, Ax200ScanError, Ax200ScanPhase, Ax200TransmitPower,
     Ax200TransmitPowerError, Ax200TransmitPowerPhase, BindingCommand, BindingCommandKind,
-    LegacyPeer, PeerCommand, PeerCommandKind, PhyCommand, PhyCommandKind, ScanCompletion,
+    LegacyPeer, PeerCommand, PeerCommandKind, PhyCommand, PhyCommandKind, Probe, ScanCompletion,
     ScanRawReceive, ScanRejectedMpdu, ScanResult, ScanResultProgress, ScanRetirement,
     TransmitPowerLimit,
 };

@@ -19,6 +19,8 @@ use crate::{
 use alloc::{sync::Arc, vec, vec::Vec};
 use core::borrow::{Borrow, BorrowMut};
 
+pub mod amsdu;
+
 const EAPOL: u16 = 0x888e;
 const PAE_GROUP: Mac = Mac([1, 0x80, 0xc2, 0, 0, 3]);
 const RFC1042: [u8; 6] = [0xaa, 0xaa, 3, 0, 0, 0];
@@ -513,6 +515,30 @@ impl Station {
         keys: &mut [K],
         policy: &mut impl RegulatoryPolicy,
     ) -> Result<TxPlan, Error> {
+        let mut plan = self.prepare_qos_subframe_refs(epoch, ethernet, class, qos, keys, policy)?;
+        let Qos { context, tid } = qos;
+        let sequence = self.allocate_qos_sequence(context, tid).map_err(|e| {
+            if e == super::Error::Busy {
+                Error::Busy
+            } else {
+                Error::Stale
+            }
+        })?;
+        plan.plaintext[22..24].copy_from_slice(&(sequence << 4).to_le_bytes());
+        Ok(plan)
+    }
+
+    /// [`Self::prepare_qos_msdu_refs`] without a sequence number: an MSDU that
+    /// joins an A-MSDU travels under the number of the frame it joins.
+    pub fn prepare_qos_subframe_refs<K: BorrowMut<KeySlot>>(
+        &mut self,
+        epoch: u64,
+        ethernet: &[u8],
+        class: TxClass,
+        qos: Qos<'_>,
+        keys: &mut [K],
+        policy: &mut impl RegulatoryPolicy,
+    ) -> Result<TxPlan, Error> {
         let Qos { context, tid } = qos;
         self.validate_association_context(context)
             .map_err(|_| Error::Stale)?;
@@ -526,14 +552,6 @@ impl Station {
         // Insert before the IV/PN reserve, if any. The body remains
         // plaintext and the existing selected original key owns cipher work.
         plan.plaintext.splice(24..24, [tid, 0]);
-        let sequence = self.allocate_qos_sequence(context, tid).map_err(|e| {
-            if e == super::Error::Busy {
-                Error::Busy
-            } else {
-                Error::Stale
-            }
-        })?;
-        plan.plaintext[22..24].copy_from_slice(&(sequence << 4).to_le_bytes());
         plan.qos = Some((tid, context.clone()));
         Ok(plan)
     }

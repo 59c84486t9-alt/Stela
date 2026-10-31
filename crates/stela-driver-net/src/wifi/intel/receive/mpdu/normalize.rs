@@ -13,7 +13,7 @@ use super::{
     SEC_TKIP, SEC_UNKNOWN, SEC_WEP, Status,
 };
 use crate::wifi::{
-    Band, RadioStatus, RawRate, Timestamp,
+    Amsdu, Band, RadioStatus, RawRate, Timestamp,
     frame::{self, Header, Mpdu},
     intel::{
         firmware::{Family, Firmware},
@@ -201,13 +201,8 @@ pub(crate) fn normalize(
     }
     let header = Header::parse(raw).map_err(Error::Frame)?;
     let management = header.control & 12 == 0;
-    // Initial station security has no reorder/PN-sharing or MFP owner. Keep
-    // those explicit instead of inventing an AMPDU reference from its toggle.
-    if metadata.mac.ampdu()
-        || metadata.mac.amsdu()
-        || header.amsdu
-        || metadata.reorder.ba_id.is_some()
-    {
+    // Only QoS data can be an A-MSDU's record.
+    if metadata.mac.amsdu() && header.tid.is_none() {
         return Err(Error::Aggregation);
     }
     if header.protected() && !header.data_present() && !management {
@@ -222,17 +217,28 @@ pub(crate) fn normalize(
         metadata.status,
         header.protected(),
         management,
-        false,
+        metadata.mac.ampdu(),
         false,
         packet_flags & (1 << 26) != 0,
     )?;
-    let bytes = copy_bytes(
+    let mut bytes = copy_bytes(
         raw,
         header.length,
         usize::from(crypto.iv_bytes),
         metadata.mac.padding_bytes(),
         metadata.mac.mic_crc_tail_bytes(),
     )?;
+    // The hardware took the A-MSDU apart, consumed each subframe header and
+    // copied the MAC header to every record, A-MSDU bit included. Each record
+    // is now one MSDU, so that bit no longer describes it.
+    if metadata.mac.amsdu() {
+        let qos = if header.control & 0x0300 == 0x0300 {
+            30
+        } else {
+            24
+        };
+        bytes[qos] &= !0x80;
+    }
     let (key_index, pn) = if crypto.iv_bytes == 8 {
         let (pn, index) = PacketNumber::from_header(
             bytes
@@ -259,6 +265,13 @@ pub(crate) fn normalize(
     };
     let mut frame = Mpdu::new(bytes, radio(metadata)?, security).map_err(Error::Frame)?;
     frame.fcs_error = metadata.status.failed_fcs_or_overrun();
+    if metadata.mac.amsdu() {
+        frame.aggregation.amsdu = Some(Amsdu {
+            index: u16::from(metadata.mac.amsdu_index()),
+            first: metadata.mac.amsdu_index() == 0,
+            last: metadata.mac.amsdu_last(),
+        });
+    }
     frame.raw_status = [
         metadata.status.raw(),
         metadata.reorder.raw,
@@ -413,20 +426,35 @@ mod tests {
                 "protected non-data frame"
             )))
         ));
-        for (ampdu, amsdu, baid) in [
-            (true, false, false),
-            (false, true, false),
-            (false, false, true),
-        ] {
-            let mut m = metadata;
-            m.mac.phy_info = if ampdu { 0x20 } else { 0 };
-            m.mac.flags2 |= if amsdu { 0x40 } else { 0 };
-            m.reorder.ba_id = baid.then_some(1);
-            assert!(matches!(
-                normalize(m, &raw, 0, true),
-                Err(Error::Aggregation)
-            ));
-        }
+        let mut record = metadata;
+        record.mac.flags2 |= 0x40;
+        assert!(matches!(
+            normalize(record, &raw, 0, true),
+            Err(Error::Aggregation)
+        ));
+    }
+    #[test]
+    fn an_amsdu_record_loses_the_bit_and_keeps_its_place() {
+        let mut raw = vec![0; 26];
+        raw[..2].copy_from_slice(&0x0288u16.to_le_bytes());
+        raw[24] = 0x85;
+        raw.extend([0xaa, 0xaa, 3, 0, 0, 0, 8, 0, 1]);
+        let mut record = metadata();
+        record.status.raw = 3;
+        record.mac.flags1 = 0;
+        record.mac.flags2 = 0x40;
+        record.mac.amsdu_info = 0x82;
+        let frame = normalize(record, &raw, 0, true).unwrap().frame;
+        assert!(!frame.header().amsdu);
+        assert_eq!(frame.header().tid, Some(5));
+        assert_eq!(
+            frame.aggregation.amsdu,
+            Some(crate::wifi::Amsdu {
+                index: 2,
+                first: false,
+                last: true
+            })
+        );
     }
     #[test]
     fn plaintext_management_and_radio_boundaries_are_explicit() {

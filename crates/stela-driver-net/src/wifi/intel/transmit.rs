@@ -128,9 +128,9 @@ impl Prepared {
     ) -> Result<Self, Error> {
         rate_format_2(fw, family)?;
         // A 24-byte management or non-QoS header, or a 26-byte QoS one: ordinary
-        // ToDS data or management; no fragmentation, checksum, aggregation,
-        // four-address or HT-control. The firmware adds any IV and MIC.
-        if !(24..=4096).contains(&mpdu.len()) {
+        // ToDS data or management; no fragmentation, checksum, four-address or
+        // HT-control. The firmware adds any IV and MIC.
+        if !(24..=ring::BUFFER_BYTES).contains(&mpdu.len()) {
             return Err(Error::FrameLength);
         }
         let fc = u16::from_le_bytes(mpdu[..2].try_into().unwrap());
@@ -170,9 +170,11 @@ impl Prepared {
         let flags = u16::from(use_host) | if parameters.firmware_encryption { 0 } else { 2 };
         let mut bytes = alloc::vec![0; if family == Family::Ax200 {20} else {28}];
         bytes[..2].copy_from_slice(&(mpdu.len() as u16).to_le_bytes());
-        // `iwl_mvm_tx_csum`: the MAC header's length in words, and the padding
-        // the transport adds after a header of odd words.
-        let offload = (header_bytes as u16 / 2) << 8 | u16::from(qos) << 13;
+        // `iwl_mvm_tx_csum`: the MAC header's length in words, the padding the
+        // transport adds after a header of odd words, and whether it is an A-MSDU.
+        let offload = (header_bytes as u16 / 2) << 8
+            | u16::from(qos) << 13
+            | u16::from(qos && mpdu[24] & 0x80 != 0) << 14;
         if family == Family::Ax200 {
             bytes[2..4].copy_from_slice(&offload.to_le_bytes());
             bytes[4..8].copy_from_slice(&u32::from(flags).to_le_bytes());
