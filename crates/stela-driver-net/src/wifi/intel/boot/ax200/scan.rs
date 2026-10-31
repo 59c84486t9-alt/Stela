@@ -354,26 +354,7 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Scan<'_, Q, B, O> {
             .radio
             .initialized
             .boot;
-        if let Some(captured) = boot.hcmd.take_matching(0xc1, 0) {
-            return boot
-                .decode_captured_mpdu(captured)
-                .map_err(Ax200ScanError::Boot);
-        }
-        if matches!(
-            boot.poll_one_notification_buffer()
-                .map_err(Ax200ScanError::Boot)?,
-            NotificationPoll::Backpressure
-        ) {
-            return Ok(MpduProgress::Backpressure {
-                notifications: boot.hcmd.notification_count(),
-            });
-        }
-        if let Some(captured) = boot.hcmd.take_matching(0xc1, 0) {
-            boot.decode_captured_mpdu(captured)
-                .map_err(Ax200ScanError::Boot)
-        } else {
-            Ok(MpduProgress::Pending)
-        }
+        boot.poll_mpdu().map_err(Ax200ScanError::Boot)
     }
     /// Consume queued scan MPDUs in RX order before the matching real
     /// completion. No invented raw packet/current-ticket restoration path.
