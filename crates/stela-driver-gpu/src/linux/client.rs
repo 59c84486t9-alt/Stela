@@ -34,6 +34,27 @@ unsafe extern "C" {
     ) -> c_int;
     fn stela_linux_munmap(mapping: *mut c_void);
     fn stela_linux_refault(mapping: *mut c_void, address: u64, write: bool) -> bool;
+    fn stela_linux_wait(word: *const c_uint, value: c_uint, nanoseconds: u64);
+    fn stela_linux_wake();
+}
+
+/// Sleep while `word` holds `value`, for at most `nanoseconds`, or with no limit
+/// at `u64::MAX`.
+///
+/// # Safety
+/// See the module.
+pub unsafe fn wait(word: *const c_uint, value: c_uint, nanoseconds: u64) {
+    // SAFETY: the module's contract.
+    unsafe { stela_linux_wait(word, value, nanoseconds) };
+}
+
+/// Wake every [`wait`] to look at its word again.
+///
+/// # Safety
+/// See the module.
+pub unsafe fn wake() {
+    // SAFETY: the module's contract.
+    unsafe { stela_linux_wake() };
 }
 
 /// Open DRM's character device `minor`, for a descriptor or a negative errno.

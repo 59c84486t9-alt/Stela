@@ -24,6 +24,11 @@ int stela_linux_open(dev_t device, unsigned int flags);
 int stela_linux_fd_dup(int fd);
 long stela_linux_fd_device(int fd);
 long stela_linux_ioctl(int fd, unsigned int request, void *argument);
+/* Sleep while *word holds value, for at most `nanoseconds` (U64_MAX: no limit).
+ * A client's thread is a Linux task, whose lock holders can run only if it does. */
+void stela_linux_wait(const volatile unsigned int *word, unsigned int value, u64 nanoseconds);
+/* Wake every sleeper of stela_linux_wait, to look at its word again. */
+void stela_linux_wake(void);
 
 /* Maps size bytes of file at offset into space at address, through the file's
  * mmap, or returns a negative errno. Pages arrive by the client's faults. */

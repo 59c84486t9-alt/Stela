@@ -13,9 +13,19 @@ void stela_libc_log(const char *text, size_t size);
 _Noreturn void stela_libc_fatal(const char *message);
 /* Monotonic nanoseconds. */
 uint64_t stela_libc_now_ns(void);
-/* This host processor, below STELA_LIBC_CORES. */
+/* This host processor or Mesa thread, below STELA_LIBC_CORES. */
 unsigned int stela_libc_core(void);
-#define STELA_LIBC_CORES 256
+#define STELA_LIBC_PROCESSORS 256
+#define STELA_LIBC_THREADS 16
+#define STELA_LIBC_CORES (STELA_LIBC_PROCESSORS + STELA_LIBC_THREADS)
+/* Run body(argument) as a thread on its own stack, with stela_libc_core()
+ * answering core for it; 0 or a negative errno. */
+int stela_libc_thread_start(void (*body)(void *), void *argument, unsigned int core);
+/* Wait while *word holds value, until the deadline in stela_libc_now_ns()'s
+ * nanoseconds; UINT64_MAX is no deadline. It may return early. */
+void stela_libc_wait(const volatile unsigned int *word, unsigned int value, uint64_t deadline);
+/* Tell whoever waits on a word that was changed. */
+void stela_libc_wake(const volatile unsigned int *word);
 
 /* What a process does with DRM's files, on Linux's own descriptors. Each runs
  * in the Linux environment and returns a negative errno on failure. */

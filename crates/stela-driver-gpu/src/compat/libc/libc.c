@@ -721,6 +721,9 @@ static uint64_t nanoseconds(const struct timespec *time)
 	return (uint64_t)time->tv_sec * 1000000000 + (uint64_t)time->tv_nsec;
 }
 
+/* What a sleep waits on. */
+static const unsigned int never_changes;
+
 int clock_nanosleep(clockid_t clock, int flags, const struct timespec *time,
 		    struct timespec *remaining)
 {
@@ -730,7 +733,7 @@ int clock_nanosleep(clockid_t clock, int flags, const struct timespec *time,
 	if (!(flags & TIMER_ABSTIME))
 		until += stela_libc_now_ns();
 	while (stela_libc_now_ns() < until)
-		__builtin_ia32_pause();
+		stela_libc_wait(&never_changes, 0, until);
 	return 0;
 }
 
@@ -759,7 +762,7 @@ int sched_getcpu(void)
 
 int sched_yield(void)
 {
-	__builtin_ia32_pause();
+	stela_libc_wait(&never_changes, 0, stela_libc_now_ns());
 	return 0;
 }
 
@@ -1160,7 +1163,7 @@ static void *tls_values[STELA_LIBC_CORES][TLS_VARIABLES];
 static size_t tls_count;
 static volatile int tls_lock;
 
-/* The C library's threads are host processors, so this is per processor. */
+/* A value per thread, and every caller of Mesa on a host processor is one. */
 void *__emutls_get_address(struct emutls_control *control)
 {
 	size_t index = __atomic_load_n(&control->index, __ATOMIC_ACQUIRE);

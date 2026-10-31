@@ -17,7 +17,9 @@
 #include <linux/mount.h>
 #include <linux/pseudo_fs.h>
 #include <linux/shmem_fs.h>
+#include <linux/jiffies.h>
 #include <linux/slab.h>
+#include <linux/wait.h>
 #include <linux/workqueue.h>
 #include <stela/file.h>
 #include <unsupported.h>
@@ -272,6 +274,22 @@ long stela_linux_fd_device(int fd)
 
 	fput(file);
 	return device;
+}
+
+static DECLARE_WAIT_QUEUE_HEAD(stela_linux_waiters);
+
+void stela_linux_wait(const volatile unsigned int *word, unsigned int value, u64 nanoseconds)
+{
+	if (nanoseconds == U64_MAX)
+		wait_event(stela_linux_waiters, READ_ONCE(*word) != value);
+	else
+		wait_event_timeout(stela_linux_waiters, READ_ONCE(*word) != value,
+				   nsecs_to_jiffies64(nanoseconds) + 1);
+}
+
+void stela_linux_wake(void)
+{
+	wake_up_all(&stela_linux_waiters);
 }
 
 long stela_linux_ioctl(int fd, unsigned int request, void *argument)

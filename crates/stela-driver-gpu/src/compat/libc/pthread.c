@@ -1,12 +1,23 @@
 // SPDX-License-Identifier: MIT
-/* Mesa's threads are the host processors that call it, one for each PE in the
- * GPU's gate, so a lock spins and a condition waits for another processor.
- * Nothing can start a thread. */
+/* A caller of Mesa is a host processor, one for each PE in the GPU's gate, and a
+ * thread Mesa starts is a task of the Linux environment on the boot CPU. Each
+ * waits its own way in stela_libc_wait: a processor spins, and a task sleeps. */
 #include <errno.h>
 #include <pthread.h>
 #include <setjmp.h>
 #include <stdlib.h>
 #include <stela/host.h>
+
+/* Wait while the 32-bit word at `word` holds `value`. */
+static void wait_while(const volatile void *word, int value, uint64_t deadline)
+{
+	stela_libc_wait((const volatile unsigned int *)word, (unsigned int)value, deadline);
+}
+
+static void wake(const volatile void *word)
+{
+	stela_libc_wake((const volatile unsigned int *)word);
+}
 
 pthread_t pthread_self(void)
 {
@@ -74,7 +85,7 @@ int pthread_mutex_trylock(pthread_mutex_t *mutex)
 int pthread_mutex_lock(pthread_mutex_t *mutex)
 {
 	while (pthread_mutex_trylock(mutex))
-		__builtin_ia32_pause();
+		wait_while(&mutex->locked, 1, UINT64_MAX);
 	return 0;
 }
 
@@ -84,7 +95,7 @@ int pthread_mutex_timedlock(pthread_mutex_t *mutex, const struct timespec *deadl
 	while (pthread_mutex_trylock(mutex)) {
 		if (stela_libc_now_ns() >= until)
 			return ETIMEDOUT;
-		__builtin_ia32_pause();
+		wait_while(&mutex->locked, 1, until);
 	}
 	return 0;
 }
@@ -95,6 +106,7 @@ int pthread_mutex_unlock(pthread_mutex_t *mutex)
 		return 0;
 	mutex->owner = 0;
 	__atomic_store_n(&mutex->locked, 0, __ATOMIC_RELEASE);
+	wake(&mutex->locked);
 	return 0;
 }
 
@@ -144,7 +156,7 @@ int pthread_cond_timedwait(pthread_cond_t *cond, pthread_mutex_t *mutex,
 			result = ETIMEDOUT;
 			break;
 		}
-		__builtin_ia32_pause();
+		wait_while(&cond->generation, (int)generation, until);
 	}
 	pthread_mutex_lock(mutex);
 	return result;
@@ -158,6 +170,7 @@ int pthread_cond_wait(pthread_cond_t *cond, pthread_mutex_t *mutex)
 int pthread_cond_broadcast(pthread_cond_t *cond)
 {
 	__atomic_add_fetch(&cond->generation, 1, __ATOMIC_RELEASE);
+	wake(&cond->generation);
 	return 0;
 }
 
@@ -174,10 +187,11 @@ int pthread_once(pthread_once_t *once, void (*function)(void))
 					__ATOMIC_ACQUIRE)) {
 		function();
 		__atomic_store_n(&once->state, DONE, __ATOMIC_RELEASE);
+		wake(&once->state);
 		return 0;
 	}
 	while (__atomic_load_n(&once->state, __ATOMIC_ACQUIRE) != DONE)
-		__builtin_ia32_pause();
+		wait_while(&once->state, RUNNING, UINT64_MAX);
 	return 0;
 }
 
@@ -201,18 +215,19 @@ int pthread_rwlock_rdlock(pthread_rwlock_t *lock)
 		if (state >= 0 && __atomic_compare_exchange_n(&lock->state, &state, state + 1, 0,
 							      __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
 			return 0;
-		__builtin_ia32_pause();
+		if (state < 0)
+			wait_while(&lock->state, state, UINT64_MAX);
 	}
 }
 
 int pthread_rwlock_wrlock(pthread_rwlock_t *lock)
 {
 	for (;;) {
-		int free = 0;
-		if (__atomic_compare_exchange_n(&lock->state, &free, -1, 0, __ATOMIC_ACQUIRE,
+		int state = 0;
+		if (__atomic_compare_exchange_n(&lock->state, &state, -1, 0, __ATOMIC_ACQUIRE,
 						__ATOMIC_RELAXED))
 			return 0;
-		__builtin_ia32_pause();
+		wait_while(&lock->state, state, UINT64_MAX);
 	}
 }
 
@@ -222,6 +237,7 @@ int pthread_rwlock_unlock(pthread_rwlock_t *lock)
 		__atomic_store_n(&lock->state, 0, __ATOMIC_RELEASE);
 	else
 		__atomic_sub_fetch(&lock->state, 1, __ATOMIC_RELEASE);
+	wake(&lock->state);
 	return 0;
 }
 
@@ -246,10 +262,11 @@ int pthread_barrier_wait(pthread_barrier_t *barrier)
 	if (__atomic_add_fetch(&barrier->arrived, 1, __ATOMIC_ACQ_REL) == barrier->count) {
 		__atomic_store_n(&barrier->arrived, 0, __ATOMIC_RELAXED);
 		__atomic_add_fetch(&barrier->generation, 1, __ATOMIC_RELEASE);
+		wake(&barrier->generation);
 		return PTHREAD_BARRIER_SERIAL_THREAD;
 	}
 	while (__atomic_load_n(&barrier->generation, __ATOMIC_ACQUIRE) == generation)
-		__builtin_ia32_pause();
+		wait_while(&barrier->generation, (int)generation, UINT64_MAX);
 	return 0;
 }
 
@@ -303,14 +320,39 @@ int pthread_attr_setdetachstate(pthread_attr_t *attr, int state)
 	return 0;
 }
 
+struct thread {
+	void *(*body)(void *);
+	void *argument, *result;
+	volatile unsigned int finished;
+};
+
+static struct thread threads[STELA_LIBC_THREADS];
+static unsigned int thread_count;
+
+static void thread_main(void *context)
+{
+	struct thread *thread = context;
+
+	thread->result = thread->body(thread->argument);
+	__atomic_store_n(&thread->finished, 1, __ATOMIC_RELEASE);
+	wake(&thread->finished);
+}
+
 int pthread_create(pthread_t *thread, const pthread_attr_t *attr, void *(*body)(void *),
 		   void *argument)
 {
-	(void)thread;
 	(void)attr;
-	(void)body;
-	(void)argument;
-	return EAGAIN;
+	unsigned int index = __atomic_fetch_add(&thread_count, 1, __ATOMIC_RELAXED);
+	if (index >= STELA_LIBC_THREADS)
+		return EAGAIN;
+	threads[index].body = body;
+	threads[index].argument = argument;
+	unsigned int core = STELA_LIBC_PROCESSORS + index;
+	int error = stela_libc_thread_start(thread_main, &threads[index], core);
+	if (error)
+		return -error;
+	*thread = core + 1;
+	return 0;
 }
 
 int pthread_setcanceltype(int type, int *old)
@@ -328,9 +370,14 @@ int pthread_cancel(pthread_t thread)
 
 int pthread_join(pthread_t thread, void **result)
 {
-	(void)thread;
-	(void)result;
-	return EINVAL;
+	if (thread <= STELA_LIBC_PROCESSORS || thread > STELA_LIBC_CORES)
+		return EINVAL;
+	struct thread *joined = &threads[thread - STELA_LIBC_PROCESSORS - 1];
+	while (!__atomic_load_n(&joined->finished, __ATOMIC_ACQUIRE))
+		wait_while(&joined->finished, 0, UINT64_MAX);
+	if (result)
+		*result = joined->result;
+	return 0;
 }
 
 int pthread_detach(pthread_t thread)

@@ -723,6 +723,10 @@ struct Installed {
     /// Clients' mappings with their sizes in pages, by address. For tasks.
     #[cfg(feature = "nvk")]
     mappings: RefCell<BTreeMap<u64, (linux::client::Mapping, usize)>>,
+    /// Mesa's running threads, by task, with their `stela_libc_core`. On the
+    /// boot CPU.
+    #[cfg(feature = "nvk")]
+    threads: RefCell<BTreeMap<u64, core::ffi::c_uint>>,
     owner: Pin<Box<Owner<Host>>>,
     environment: Pin<Box<Environment>>,
     start: Box<Start>,
@@ -848,6 +852,8 @@ pub(super) fn open(machine: Machine, claimed: Vec<Claimed>) -> Result<(), kernel
         tsc_hz,
         #[cfg(feature = "nvk")]
         mappings: RefCell::new(BTreeMap::new()),
+        #[cfg(feature = "nvk")]
+        threads: RefCell::new(BTreeMap::new()),
         owner,
         environment,
         start: job,

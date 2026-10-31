@@ -6,14 +6,22 @@
 //! round trip, not a core. Each call runs as a Linux task, since an ioctl may
 //! sleep on the GPU. On the boot CPU itself there is no one to wait for, so the
 //! caller runs the environment until its call is done.
+//!
+//! A thread Mesa starts is a Linux task too, as Linux's own kthreads are, so it
+//! makes its calls in place and sleeps in Linux. Everything that waits in the C
+//! library comes through `stela_libc_wait`: a PE spins; the boot CPU runs the
+//! environment, as what it waits for may need it; a thread sleeps.
 use super::{BOOT_CPU, Installed, PAGE, environment_error, installed, nanoseconds};
 use crate::{engine::host, output};
-use alloc::alloc::{Layout, alloc, dealloc};
+use alloc::{
+    alloc::{Layout, alloc, dealloc},
+    boxed::Box,
+};
 use core::{
     cell::Cell,
     ffi::{CStr, c_char, c_int, c_long, c_uint, c_ulong, c_void},
     hint, ptr, slice, str,
-    sync::atomic::{AtomicBool, AtomicI64, AtomicPtr, Ordering},
+    sync::atomic::{AtomicBool, AtomicI64, AtomicPtr, AtomicUsize, Ordering, fence},
 };
 use stela_drivers::{
     gpu::linux::{client, owner::Entered},
@@ -23,6 +31,7 @@ use stela_drivers::{
 const ENODEV: i64 = -19;
 const EFAULT: i64 = -14;
 const ENOMEM: i64 = -12;
+const EAGAIN: i64 = -11;
 
 /// `struct stela_libc_drm_device`.
 #[repr(C)]
@@ -60,6 +69,44 @@ enum Operation {
         address: u64,
         write: bool,
     },
+    Thread(*mut Thread),
+    Wake,
+}
+
+/// A thread for its task to run.
+struct Thread {
+    body: unsafe extern "C" fn(*mut c_void),
+    argument: *mut c_void,
+    core: c_uint,
+}
+
+/// Threads asleep in `stela_libc_wait`.
+static SLEEPING: AtomicUsize = AtomicUsize::new(0);
+
+unsafe extern "C" fn run_thread(context: *mut c_void) {
+    // SAFETY: `perform` gave this task the box.
+    let thread = unsafe { Box::from_raw(context.cast::<Thread>()) };
+    let gpu = installed().expect("threads start in a running environment");
+    let id = match gpu.work.current_id() {
+        Ok(id) => id,
+        Err(error) => output::fatal(format_args!("a Mesa thread has no task: {error}")),
+    };
+    gpu.threads.borrow_mut().insert(id, thread.core);
+    // SAFETY: the C library's thread, on a task of its own.
+    unsafe { (thread.body)(thread.argument) };
+    gpu.threads.borrow_mut().remove(&id);
+}
+
+/// The Mesa thread running here, by its `stela_libc_core`.
+fn current_thread(gpu: &Installed) -> Option<c_uint> {
+    if host::processor() != BOOT_CPU.load(Ordering::Relaxed) {
+        return None;
+    }
+    let threads = gpu.threads.borrow();
+    if threads.is_empty() {
+        return None;
+    }
+    threads.get(&gpu.work.current_id().ok()?).copied()
 }
 
 /// A posted call, on its caller's stack until `done`.
@@ -141,6 +188,19 @@ unsafe fn perform(gpu: &Installed, operation: Operation) -> i64 {
                 }
                 0
             }
+            Operation::Thread(thread) => {
+                match gpu.environment.as_ref().spawn(run_thread, thread.cast()) {
+                    Ok(_) => 0,
+                    Err(_) => {
+                        drop(Box::from_raw(thread));
+                        EAGAIN
+                    }
+                }
+            }
+            Operation::Wake => {
+                client::wake();
+                0
+            }
         }
     }
 }
@@ -193,6 +253,12 @@ fn submit(operation: Operation) -> i64 {
     let Some(gpu) = installed() else {
         return ENODEV;
     };
+    if current_thread(gpu).is_some() {
+        // SAFETY: a task of the environment, as in `serve`.
+        let _entered = unsafe { Entered::new(gpu.owner.raw()) };
+        // SAFETY: entered, on a task, and the caller keeps what the call names.
+        return unsafe { perform(gpu, operation) };
+    }
     let request = Request {
         operation,
         next: Cell::new(ptr::null()),
@@ -273,7 +339,55 @@ extern "C" fn stela_libc_now_ns() -> u64 {
 
 #[unsafe(no_mangle)]
 extern "C" fn stela_libc_core() -> c_uint {
-    host::processor()
+    installed()
+        .and_then(current_thread)
+        .unwrap_or_else(host::processor)
+}
+
+#[unsafe(no_mangle)]
+unsafe extern "C" fn stela_libc_thread_start(
+    body: unsafe extern "C" fn(*mut c_void),
+    argument: *mut c_void,
+    core: c_uint,
+) -> c_int {
+    let thread = Box::into_raw(Box::new(Thread {
+        body,
+        argument,
+        core,
+    }));
+    submit(Operation::Thread(thread)) as c_int
+}
+
+#[unsafe(no_mangle)]
+unsafe extern "C" fn stela_libc_wait(word: *const c_uint, value: c_uint, deadline: u64) {
+    let Some(gpu) = installed() else {
+        return hint::spin_loop();
+    };
+    if current_thread(gpu).is_none() {
+        if host::processor() == BOOT_CPU.load(Ordering::Relaxed) {
+            super::pump();
+        }
+        return hint::spin_loop();
+    }
+    SLEEPING.fetch_add(1, Ordering::SeqCst);
+    let left = match deadline {
+        u64::MAX => u64::MAX,
+        _ => deadline.saturating_sub(nanoseconds(host::rdtsc(), gpu.tsc_hz)),
+    };
+    // SAFETY: a task of the environment, as in `serve`.
+    let _entered = unsafe { Entered::new(gpu.owner.raw()) };
+    // SAFETY: entered, on a task, and the C library's word outlives its wait.
+    unsafe { client::wait(word, value, left) };
+    SLEEPING.fetch_sub(1, Ordering::SeqCst);
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn stela_libc_wake(_word: *const c_uint) {
+    // Against a sleeper's count before it reads the word.
+    fence(Ordering::SeqCst);
+    if SLEEPING.load(Ordering::SeqCst) != 0 {
+        submit(Operation::Wake);
+    }
 }
 
 #[unsafe(no_mangle)]
