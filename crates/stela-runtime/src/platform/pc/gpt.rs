@@ -369,7 +369,7 @@ impl<D: BlockDevice> BlockDevice for PartitionDevice<D> {
     }
 
     fn discard(&mut self, lba: u64, blocks: u64) -> Result<(), BlockError> {
-        let command = Command::Discard { lba, blocks }.within(&self.identity, self.first_lba)?;
+        let command = Command::discard(lba, blocks).within(&self.identity, self.first_lba)?;
         self.disk.execute(command).map(drop)
     }
 

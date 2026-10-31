@@ -3,8 +3,8 @@
 use crate::{
     Clock, Deadline, Handoff,
     block::{
-        BlockDevice, BlockError, Command, Features, Finished, Identity, Transport, WriteZeroes,
-        ascii,
+        BlockDevice, BlockError, Command, DiscardLimits, Extent, Features, Finished, Identity,
+        Transport, WriteZeroes, ascii,
     },
     bus::{
         dma::{DmaAllocator, DmaBuffer},
@@ -154,7 +154,8 @@ impl VirtioBlk {
             write_cache: accepted & FEATURE_FLUSH != 0,
             fua: false,
             max_transfer: BOUNCE_BYTES,
-            discard: (accepted & FEATURE_DISCARD != 0).then(|| blocks(CONFIG_MAX_DISCARD)),
+            discard: (accepted & FEATURE_DISCARD != 0)
+                .then(|| DiscardLimits::single(blocks(CONFIG_MAX_DISCARD))),
             write_zeroes: (accepted & FEATURE_WRITE_ZEROES != 0).then(|| WriteZeroes {
                 blocks: blocks(CONFIG_MAX_WRITE_ZEROES),
                 unmap: device.read8(CONFIG_WRITE_ZEROES_UNMAP) != 0,
@@ -361,8 +362,11 @@ impl VirtioBlk {
                 (REQUEST_OUT, sector, part, false)
             }
             Command::Flush if done == 0 => (REQUEST_FLUSH, 0, 0, false),
-            Command::Discard { lba, blocks } if done == 0 => {
-                self.stage(*lba, *blocks, 0)?;
+            Command::Discard { extents } if done == 0 => {
+                let &[Extent { lba, blocks }] = extents.as_slice() else {
+                    return Err(BlockError::Unsupported("one discard segment a command"));
+                };
+                self.stage(lba, blocks, 0)?;
                 (REQUEST_DISCARD, 0, SEGMENT_BYTES, false)
             }
             Command::WriteZeroes { lba, blocks, unmap } if done == 0 => {

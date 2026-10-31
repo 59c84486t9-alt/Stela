@@ -137,7 +137,9 @@ impl AhciDisk {
             write_cache: found.flush.is_some(),
             fua: false,
             max_transfer: BOUNCE_BYTES,
-            discard: found.trim.then_some(TRIM_RANGES * TRIM_RANGE_SECTORS),
+            discard: found
+                .trim
+                .then_some(DiscardLimits::single(TRIM_RANGES * TRIM_RANGE_SECTORS)),
             write_zeroes: None,
         };
         disk.transfer = found.transfer;

@@ -243,12 +243,27 @@ pub struct Features {
     pub fua: bool,
     /// The most bytes one command moves; 0 for no limit.
     pub max_transfer: usize,
-    /// Discard (NVMe Deallocate, ATA TRIM, SCSI UNMAP): the most blocks one
-    /// command takes.
-    pub discard: Option<u64>,
+    /// Discard (NVMe Deallocate, ATA TRIM, SCSI UNMAP), when the device
+    /// takes it.
+    pub discard: Option<DiscardLimits>,
     /// Write Zeroes: the most blocks one command takes, and whether the
     /// device deallocates the blocks it zeroes when allowed to.
     pub write_zeroes: Option<WriteZeroes>,
+}
+
+/// What one discard command takes: the most blocks in a range, 0 for no
+/// limit, and the most ranges, as Linux's `max_discard_segments`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DiscardLimits {
+    pub blocks: u64,
+    pub ranges: usize,
+}
+
+impl DiscardLimits {
+    /// One range of up to `blocks` a command.
+    pub const fn single(blocks: u64) -> Self {
+        Self { blocks, ranges: 1 }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -257,7 +272,26 @@ pub struct WriteZeroes {
     pub unmap: bool,
 }
 
+/// A run of blocks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Extent {
+    pub lba: u64,
+    pub blocks: u64,
+}
+
 impl Identity {
+    /// Check that `blocks` blocks from `lba` lie on the device.
+    fn check_extent(&self, lba: u64, blocks: u64) -> Result<(), BlockError> {
+        if lba.checked_add(blocks).is_none_or(|end| end > self.blocks) {
+            return Err(BlockError::OutOfRange {
+                lba,
+                blocks,
+                capacity: self.blocks,
+            });
+        }
+        Ok(())
+    }
+
     pub fn bytes(&self) -> u64 {
         self.blocks * u64::from(self.block_size)
     }
@@ -311,8 +345,7 @@ pub enum Request {
     /// Let the device deallocate the blocks; what they then read is
     /// unspecified. A device without discard refuses it.
     Discard {
-        lba: u64,
-        blocks: u64,
+        extents: Vec<Extent>,
     },
     /// Zero the blocks; `unmap` lets a device that can deallocate them.
     WriteZeroes {
@@ -337,9 +370,9 @@ pub enum Command {
     },
     /// The device's cache flush.
     Flush,
+    /// As many ranges as [`DiscardLimits::ranges`] allows.
     Discard {
-        lba: u64,
-        blocks: u64,
+        extents: Vec<Extent>,
     },
     WriteZeroes {
         lba: u64,
@@ -399,13 +432,23 @@ pub struct Stats {
 }
 
 impl Command {
+    /// A discard of one range.
+    pub fn discard(lba: u64, blocks: u64) -> Self {
+        Self::Discard {
+            extents: alloc::vec![Extent { lba, blocks }],
+        }
+    }
+
     /// What the accounting counts `self` as, and the bytes it moves.
     fn accounted(&self, block: usize) -> (Direction, u64) {
         match self {
             Self::Read { bytes, .. } => (Direction::Read, *bytes as u64),
             Self::Write { data, .. } => (Direction::Write, data.len() as u64),
             Self::Flush => (Direction::Flush, 0),
-            Self::Discard { blocks, .. } => (Direction::Discard, blocks * block as u64),
+            Self::Discard { extents } => (
+                Direction::Discard,
+                extents.iter().map(|extent| extent.blocks).sum::<u64>() * block as u64,
+            ),
             Self::WriteZeroes { blocks, unmap, .. } => (
                 if *unmap {
                     Direction::Discard
@@ -443,15 +486,16 @@ impl Command {
                 }
             }
             Self::Flush => Self::Flush,
-            Self::Discard { lba, blocks } => {
-                identity.check_write(
-                    lba,
-                    span(blocks).ok_or_else(|| range(identity, lba, blocks))?,
-                )?;
-                Self::Discard {
-                    lba: first + lba,
-                    blocks,
+            Self::Discard { mut extents } => {
+                for extent in &mut extents {
+                    let Extent { lba, blocks } = *extent;
+                    identity.check_write(
+                        lba,
+                        span(blocks).ok_or_else(|| range(identity, lba, blocks))?,
+                    )?;
+                    extent.lba = first + lba;
                 }
+                Self::Discard { extents }
             }
             Self::WriteZeroes { lba, blocks, unmap } => {
                 identity.check_write(
@@ -488,6 +532,8 @@ struct Plan {
     block: usize,
     piece: usize,
     done: u64,
+    /// The discard extent `done` counts in.
+    extent: usize,
     written: bool,
     flushed: bool,
 }
@@ -501,24 +547,22 @@ impl Plan {
             Request::Write { lba, data, .. } => {
                 identity.check_write(*lba, data.len())?;
             }
-            Request::Discard { lba, blocks } | Request::WriteZeroes { lba, blocks, .. } => {
-                if matches!(request, Request::Discard { .. }) && identity.features.discard.is_none()
-                {
+            Request::Discard { extents } => {
+                if identity.features.discard.is_none() {
                     return Err(BlockError::Unsupported("the device takes no discard"));
                 }
                 if identity.read_only {
                     return Err(BlockError::ReadOnly);
                 }
-                if lba
-                    .checked_add(*blocks)
-                    .is_none_or(|end| end > identity.blocks)
-                {
-                    return Err(BlockError::OutOfRange {
-                        lba: *lba,
-                        blocks: *blocks,
-                        capacity: identity.blocks,
-                    });
+                for &Extent { lba, blocks } in extents {
+                    identity.check_extent(lba, blocks)?;
                 }
+            }
+            Request::WriteZeroes { lba, blocks, .. } => {
+                if identity.read_only {
+                    return Err(BlockError::ReadOnly);
+                }
+                identity.check_extent(*lba, *blocks)?;
             }
             Request::Flush => {}
         }
@@ -533,6 +577,7 @@ impl Plan {
             block,
             piece,
             done: 0,
+            extent: 0,
             written: false,
             flushed: false,
         })
@@ -594,15 +639,29 @@ impl Iterator for Plan {
                 self.flushed = true;
                 Command::Flush
             }
-            Request::Discard { lba, blocks } => {
-                if self.done >= *blocks {
+            Request::Discard { extents } => {
+                let limits = self.features.discard.expect("validated discard");
+                let mut part = Vec::new();
+                while part.len() < limits.ranges.max(1)
+                    && let Some(&Extent { lba, blocks }) = extents.get(self.extent)
+                {
+                    let count = limit(limits.blocks).min(blocks - self.done);
+                    if count != 0 {
+                        part.push(Extent {
+                            lba: lba + self.done,
+                            blocks: count,
+                        });
+                    }
+                    self.done += count;
+                    if self.done == blocks {
+                        self.done = 0;
+                        self.extent += 1;
+                    }
+                }
+                if part.is_empty() {
                     return None;
                 }
-                let blocks = limit(self.features.discard.expect("validated discard"))
-                    .min(*blocks - self.done);
-                let lba = *lba + self.done;
-                self.done += blocks;
-                Command::Discard { lba, blocks }
+                Command::Discard { extents: part }
             }
             Request::WriteZeroes { lba, blocks, unmap } => {
                 if self.done >= *blocks {
@@ -868,7 +927,10 @@ pub trait BlockDevice {
             }
             .map(|()| None),
             Command::Flush => self.flush_cache().map(|()| None),
-            Command::Discard { lba, blocks } => self.discard(lba, blocks).map(|()| None),
+            Command::Discard { extents } => extents
+                .iter()
+                .try_for_each(|extent| self.discard(extent.lba, extent.blocks))
+                .map(|()| None),
             Command::WriteZeroes { lba, blocks, unmap } => {
                 self.write_zeroes(lba, blocks, unmap).map(|()| None)
             }

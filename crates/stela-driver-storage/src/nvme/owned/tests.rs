@@ -1121,7 +1121,13 @@ fn nvm_limits_cap_deallocate_and_write_zeroes_like_nvme_init_non_mdts_limits() {
     // Before NVMe 1.2: UINT_MAX sectors and the largest transfer.
     let attached = f.attach().unwrap();
     let features = attached.namespaces[0].identity().features;
-    assert_eq!(features.discard, Some(u64::from(u32::MAX)));
+    assert_eq!(
+        features.discard,
+        Some(DiscardLimits {
+            blocks: u64::from(u32::MAX),
+            ranges: 256,
+        })
+    );
     let transfer = (MAX_COMMAND_BYTES / 512) as u64;
     assert_eq!(features.max_transfer, BOUNCE_BYTES);
     assert_eq!(features.write_zeroes.unwrap().blocks, transfer);
@@ -1137,7 +1143,13 @@ fn nvm_limits_cap_deallocate_and_write_zeroes_like_nvme_init_non_mdts_limits() {
     }
     let attached = f.attach().unwrap();
     let features = attached.namespaces[0].identity().features;
-    assert_eq!(features.discard, Some(100));
+    assert_eq!(
+        features.discard,
+        Some(DiscardLimits {
+            blocks: 100,
+            ranges: 256,
+        })
+    );
     assert_eq!(features.write_zeroes.unwrap().blocks, 16);
     drop(attached);
     // A refused Identify keeps the defaults.

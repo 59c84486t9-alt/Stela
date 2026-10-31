@@ -220,18 +220,22 @@ impl Controller {
                 words[0] = u32::from(IO_FLUSH);
                 Ok(words)
             }
-            Command::Discard { lba, blocks } => {
-                // One range: context attributes, length, starting LBA.
-                let count = u32::try_from(*blocks)
-                    .map_err(|_| BlockError::Unsupported("an NVMe range past 2^32 blocks"))?;
+            Command::Discard { extents } => {
                 let (bounce, _) = self.slot(tag);
-                bounce.write(0, 0u32);
-                bounce.write(4, count);
-                bounce.write(8, *lba);
+                // Each range: context attributes, length, starting LBA.
+                for (index, extent) in extents.iter().enumerate() {
+                    let count = u32::try_from(extent.blocks)
+                        .map_err(|_| BlockError::Unsupported("an NVMe range past 2^32 blocks"))?;
+                    let range = index * RANGE_BYTES;
+                    bounce.write(range, 0u32);
+                    bounce.write(range + 4, count);
+                    bounce.write(range + 8, extent.lba);
+                }
                 let address = bounce.address()?;
                 words[0] = u32::from(IO_DATASET_MANAGEMENT);
                 words[6] = address as u32;
                 words[7] = (address >> 32) as u32;
+                words[10] = extents.len() as u32 - 1;
                 words[11] = ATTRIBUTE_DEALLOCATE;
                 Ok(words)
             }

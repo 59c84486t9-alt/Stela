@@ -546,7 +546,7 @@ impl BlockDevice for Window {
     }
 
     fn discard(&mut self, lba: u64, blocks: u64) -> Result<(), BlockError> {
-        self.run(Command::Discard { lba, blocks })
+        self.run(Command::discard(lba, blocks))
     }
 
     fn write_zeroes(&mut self, lba: u64, blocks: u64, unmap: bool) -> Result<(), BlockError> {

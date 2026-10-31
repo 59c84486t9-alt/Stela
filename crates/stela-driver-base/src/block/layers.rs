@@ -101,7 +101,7 @@ impl BlockDevice for Runs {
     }
 
     fn discard(&mut self, lba: u64, blocks: u64) -> Result<(), BlockError> {
-        self.each(lba, blocks, |lba, blocks| Command::Discard { lba, blocks })
+        self.each(lba, blocks, Command::discard)
     }
 
     fn write_zeroes(&mut self, lba: u64, blocks: u64, unmap: bool) -> Result<(), BlockError> {
@@ -303,7 +303,7 @@ impl Volatile {
                 block_size: Self::BLOCK,
                 read_only: false,
                 features: Features {
-                    discard: Some(0),
+                    discard: Some(DiscardLimits::single(0)),
                     write_zeroes: Some(WriteZeroes {
                         blocks: 0,
                         unmap: true,
