@@ -353,6 +353,23 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 Self::action_guarded(s, action, now, source, policy, guard.as_deref_mut())?;
             } else if s.phase == Phase::Associated {
                 Self::validate_pmf_data(s)?;
+                if frame.header().fragmented() {
+                    // ieee80211_rx_h_defragment: the station has the MSDU with
+                    // the last fragment, and refuses what it replays.
+                    let (ptk, gtk) =
+                        Self::receiving(&mut s.ptk, &mut s.gtk, &mut s.links, &frame.radio)?;
+                    let slot = frame.security.key.map(|_| ptk.slot_mut());
+                    if let Some(whole) = s.fragments.add(&frame, slot, now)
+                        && let Ok(ingress) = s.station.receive_msdu_refs(
+                            epoch,
+                            &whole,
+                            &mut [ptk.slot_mut(), gtk.slot_mut()],
+                        )
+                    {
+                        events.push(Event::Ingress(ingress));
+                    }
+                    continue;
+                }
                 if modern_data
                     && (frame.header().protected()
                         || frame.header().amsdu

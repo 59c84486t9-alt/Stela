@@ -416,11 +416,41 @@ fn rate(rxv: &[u32; 4], band: Band) -> Result<RxRate, Error> {
     Ok(rate)
 }
 impl Decoded<'_> {
+    /// A fragment mac80211 can put back together: in the clear, or under the
+    /// CCMP whose header `mt7925_mac_fill_rx` restores for it.
+    pub fn rejoinable_fragment(&self) -> bool {
+        self.fragment
+            && self.amsdu.is_none()
+            && (!self.security.decrypted || matches!(self.security.mode, 4 | 10))
+    }
+
+    /// `mt76_insert_ccmp_hdr` on a [`Self::rejoinable_fragment`]: a fragment's
+    /// packet number is checked against the last, so its header comes back.
+    pub fn normalize_fragment(&self, header_bytes: usize) -> Result<Vec<u8>, Error> {
+        if !self.rejoinable_fragment() {
+            return Err(Error::UnsupportedFragment);
+        }
+        if !(10..=62).contains(&header_bytes)
+            || !header_bytes.is_multiple_of(2)
+            || header_bytes > self.payload.len()
+        {
+            return Err(Error::InvalidHeaderLength);
+        }
+        let mut frame = self.payload.to_vec();
+        if let Some([pn5, pn4, pn3, pn2, pn1, pn0]) = self.security.packet_number_be {
+            let key = 0x20 | self.security.key_index << 6;
+            let header = [pn0, pn1, 0, key, pn2, pn3, pn4, pn5];
+            frame.splice(header_bytes..header_bytes, header);
+        }
+        Ok(frame)
+    }
+
     /// `header_bytes` must come from the shared 802.11 header parser
     /// over this payload, not RXD's translated-header hint. It is independently
     /// bounded here before removing exactly the source A-MSDU two-byte pad.
-    /// This does not reorder A-MSDU/AMPDU, reinsert fragment crypto headers,
-    /// authenticate security metadata or associate it with an installed key.
+    /// This does not reorder A-MSDU/AMPDU, reinsert fragment crypto headers
+    /// (`normalize_fragment` does), authenticate security metadata or
+    /// associate it with an installed key.
     pub fn normalize(&self, header_bytes: usize) -> Result<Vec<u8>, Error> {
         if self.fragment {
             return Err(Error::UnsupportedFragment);
