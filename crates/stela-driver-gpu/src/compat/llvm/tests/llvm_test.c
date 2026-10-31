@@ -4,6 +4,7 @@
  * builds and runs it. */
 #include "llvm-c/Analysis.h"
 #include "llvm-c/BitReader.h"
+#include "llvm-c/BitWriter.h"
 #include "llvm-c/Core.h"
 #include "llvm-c/Error.h"
 #include "llvm-c/Linker.h"
@@ -173,6 +174,14 @@ int test(void)
 	LLVMSetLinkage(unused, LLVMInternalLinkage);
 	CHECK(run(module, "globalopt"));
 	CHECK(!LLVMGetNamedGlobal(module, "unused"));
+
+	/* Stitching writes bitcode that compiles like any other. */
+	LLVMMemoryBufferRef written = LLVMWriteBitcodeToMemoryBuffer(module);
+	LLVMModuleRef reread = NULL;
+	CHECK(written && !LLVMParseBitcodeInContext2(context, written, &reread));
+	CHECK(reread && LLVMGetNamedFunction(reread, "pick"));
+	LLVMDisposeModule(reread);
+	LLVMDisposeMemoryBuffer(written);
 	CHECK(valid(module));
 
 	CHECK(!run(module, "instcombine"));

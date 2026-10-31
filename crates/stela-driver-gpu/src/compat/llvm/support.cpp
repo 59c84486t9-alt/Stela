@@ -4,6 +4,8 @@
 // reads no profiles and parses no assembly. Each entry stands for a unit that
 // would pull in a file format or a code generator the compiler never runs.
 #include "llvm/IR/Module.h"
+#include "llvm/MC/TargetRegistry.h"
+#include "llvm/Object/IRSymtab.h"
 #include "llvm/Object/ModuleSymbolTable.h"
 #include "llvm/ProfileData/InstrProfReader.h"
 #include "llvm/Support/CrashRecoveryContext.h"
@@ -87,6 +89,21 @@ void ModuleSymbolTable::CollectAsmSymvers(const Module &module,
 {
 	if (!module.getModuleInlineAsm().empty())
 		report_fatal_error("module assembly in AIR");
+}
+
+/* The bitcode writer's symbol table serves linkers of bitcode files, and LLVM
+ * writes a module without one when this declines. */
+Error irsymtab::build(ArrayRef<Module *>, SmallVector<char, 0> &, StringTableBuilder &,
+		      BumpPtrAllocator &)
+{
+	return createStringError(errc::not_supported, "the image writes no symbol tables");
+}
+
+/* The writer asks this only of a module with assembly. */
+const Target *TargetRegistry::lookupTarget(const Triple &, std::string &error)
+{
+	error = "the image has no targets";
+	return nullptr;
 }
 
 Expected<std::unique_ptr<InstrProfReader>>
