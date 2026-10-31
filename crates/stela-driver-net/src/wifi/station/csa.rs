@@ -9,6 +9,7 @@
 
 use super::operations::{ChannelDefinition, HtOperation, Operations, VhtOperation, frequency};
 use super::phy::{Error, Mode, Negotiated, Width};
+use super::power_envelope::PowerEnvelope;
 use crate::Mac;
 use crate::wifi::{Band, Channel};
 
@@ -25,6 +26,8 @@ pub struct ChannelSwitch {
     pub ap: ChannelDefinition,
     /// Max Channel Switch Time in TUs, zero when absent.
     pub max_switch_time: u32,
+    /// What the new channel limits, unfitted, `csa_tpe`.
+    pub envelope: PowerEnvelope,
 }
 
 /// The frame the elements came from: an action frame carries the Wide
@@ -55,6 +58,7 @@ struct Elements<'a> {
     wide: Option<&'a [u8]>,
     indication: Option<&'a [u8]>,
     max_switch_time: Option<&'a [u8]>,
+    envelope: Option<&'a [u8]>,
 }
 
 /// `ieee80211_bandwidth_indication_size_ok`: parameters, the EHT operation
@@ -91,6 +95,9 @@ impl<'a> Elements<'a> {
                     194 if wide.is_none() => wide = Some(sub),
                     255 if bandwidth.is_none() && sub.first() == Some(&135) => {
                         bandwidth = Some(&sub[1..])
+                    }
+                    255 if e.envelope.is_none() && sub.first() == Some(&195) => {
+                        e.envelope = Some(&sub[1..])
                     }
                     _ => {}
                 });
@@ -416,6 +423,9 @@ pub fn parse(
         max_switch_time: e
             .max_switch_time
             .map_or(0, |t| u32::from_le_bytes([t[0], t[1], t[2], 0])),
+        envelope: e
+            .envelope
+            .map_or_else(PowerEnvelope::none, PowerEnvelope::single),
     }))
 }
 
@@ -662,6 +672,14 @@ mod tests {
             punctured: 0,
         };
         assert_eq!(switch.definition, eighty);
+        assert_eq!(switch.envelope, PowerEnvelope::none());
+        let mut wrapper = Vec::new();
+        ie(&mut wrapper, 255, &[195, 0, 40]);
+        ie(&mut e, 196, &wrapper);
+        let limited = parse(&e, Frame::Beacon, None, Band::Ghz5, &n)
+            .unwrap()
+            .unwrap();
+        assert_eq!(limited.envelope.max_local[0].limit(0), 20);
         // The wrapper is a beacon's: an action frame ignores it, leaving
         // the secondary channel offset's 40 MHz.
         let switch = parse(&e, Frame::Action, None, Band::Ghz5, &n)
@@ -737,6 +755,7 @@ mod watching {
             definition,
             ap: definition,
             max_switch_time: 0,
+            envelope: PowerEnvelope::none(),
         }
     }
 

@@ -644,17 +644,19 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         let Some(selected) = &self.selected else {
             return;
         };
-        if let Some(bytes) = self.six_ghz_power(queue, &selected.bss, 0) {
+        if let Some(bytes) = self.six_ghz_power(queue, &selected.bss, 0, None) {
             self.client.command(commands::POWER_CONSTRAINTS, bytes);
         }
     }
 
-    /// What firmware's link `seat` hears of `bss`, an AP on 6 GHz.
+    /// What firmware's link `seat` hears of `bss`, an AP on 6 GHz, whose
+    /// `envelope` is what its elements limit unless a later word replaced it.
     pub(super) fn six_ghz_power(
         &self,
         queue: &mut Queue<Q, B>,
         bss: &Bss,
         seat: u8,
+        envelope: Option<PowerEnvelope>,
     ) -> Option<Vec<u8>> {
         let widest = self.widest(bss.channel.band);
         let flags = self
@@ -670,16 +672,19 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         let operations = Operations::parse(&bss.elements).ok()?;
         let six = operations.he.as_ref().and_then(|he| he.six_ghz);
         let ap_type = PowerType::of((six?[1] & 0x78) >> 3, flags)?;
-        let mut envelope = PowerEnvelope::parse(&bss.elements);
-        let ap = operations
-            .channel(bss.channel, phy::Mode::Eht, None)
-            .ok()
-            .filter(|_| self.eht.is_some())
-            .map_or_else(|| operations.channel(bss.channel, phy::Mode::He, None), Ok);
-        match ap {
-            Ok(ap) => envelope.fit(&ap, &ap.narrowed_to(widest)),
-            Err(_) => envelope = PowerEnvelope::none(),
-        }
+        let envelope = envelope.unwrap_or_else(|| {
+            let mut envelope = PowerEnvelope::parse(&bss.elements);
+            let ap = operations
+                .channel(bss.channel, phy::Mode::Eht, None)
+                .ok()
+                .filter(|_| self.eht.is_some())
+                .map_or_else(|| operations.channel(bss.channel, phy::Mode::He, None), Ok);
+            match ap {
+                Ok(ap) => envelope.fit(&ap, &ap.narrowed_to(widest)),
+                Err(_) => envelope = PowerEnvelope::none(),
+            }
+            envelope
+        });
         Some(commands::power_constraints(seat, ap_type, &envelope))
     }
 

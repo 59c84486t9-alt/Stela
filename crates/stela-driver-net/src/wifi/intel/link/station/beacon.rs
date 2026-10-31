@@ -56,10 +56,33 @@ pub(super) struct Heard {
     /// The MU EDCA set in force and its count, once the beacon holds one.
     pub(super) mu_edca: Option<(u8, [MuEdcaRecord; 4])>,
     pub(super) definition: ChannelDefinition,
+    /// What the AP limits, fitted to the link.
+    envelope: PowerEnvelope,
     /// The link's firmware state lags behind.
     stale: bool,
     /// So does its PHY.
     moved: bool,
+    /// So does what firmware knows of `envelope`.
+    limited: bool,
+}
+
+/// What `elements` limit on the `used` part of the AP's channel, as
+/// `ieee80211_config_bw` keeps it.
+fn fitted(
+    elements: &[u8],
+    control: Channel,
+    mode: phy::Mode,
+    used: &ChannelDefinition,
+) -> PowerEnvelope {
+    let ap = Operations::parse(elements)
+        .ok()
+        .and_then(|operations| operations.channel(control, mode, None).ok());
+    let Some(ap) = ap else {
+        return PowerEnvelope::none();
+    };
+    let mut envelope = PowerEnvelope::parse(elements);
+    envelope.fit(&ap, used);
+    envelope
 }
 
 #[derive(Default)]
@@ -136,8 +159,15 @@ impl Client {
                     operations.mu_edca_count.zip(operations.mu_edca)
                 },
                 definition: current,
+                envelope: fitted(
+                    &context.beacon().elements,
+                    current.control,
+                    negotiated.mode,
+                    &current,
+                ),
                 stale: false,
                 moved: false,
+                limited: false,
             });
         }
         let moving = self.tracking.watch.moving();
@@ -149,6 +179,12 @@ impl Client {
         let Some(heard) = self.tracking.links.iter_mut().find(|heard| heard.ap == ap) else {
             return true;
         };
+        if band == Band::Ghz6 && !moving {
+            let mode = context.negotiated().mode;
+            let envelope = fitted(elements, current.control, mode, &current);
+            heard.limited |= envelope != heard.envelope;
+            heard.envelope = envelope;
+        }
         let capabilities = match &own {
             Some(own) => own.capabilities,
             None if context.beacon().profile.is_some() => heard.capabilities,
@@ -442,16 +478,41 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             Some(Progress::Started) => return self.follow_switch(queue),
             _ => {}
         }
-        let stale = self
-            .client
-            .tracking
-            .links
-            .iter()
-            .find(|heard| heard.stale && self.client.seat_of(heard.ap).is_some());
-        match stale.copied() {
-            Some(heard) => self.update_link(queue, heard),
+        let lagging = self.client.tracking.links.iter().find(|heard| {
+            (heard.stale || heard.limited) && self.client.seat_of(heard.ap).is_some()
+        });
+        match lagging.copied() {
+            Some(heard) if heard.stale => self.update_link(queue, heard),
+            Some(heard) => self.update_power(queue, heard),
             None => Ok(()),
         }
+    }
+
+    /// `BSS_CHANGED_TPE`, as `iwl_mld_send_ap_tx_power_constraint_cmd` tells
+    /// firmware.
+    fn update_power(&mut self, queue: &mut Queue<Q, B>, heard: Heard) -> Result<(), Error> {
+        let client = &self.client;
+        let seat = client.seat_of(heard.ap).ok_or(Error::Refused("no link"))?;
+        let mut bss = client
+            .context_at(seat)
+            .ok_or(Error::Refused("no context"))?
+            .beacon()
+            .clone();
+        bss.channel = heard.definition.control;
+        let constraints = self.six_ghz_power(queue, &bss, seat, Some(heard.envelope));
+        let client = &mut self.client;
+        if let Some(bytes) = constraints {
+            client.command(commands::POWER_CONSTRAINTS, bytes);
+        }
+        if let Some(heard) = client
+            .tracking
+            .links
+            .iter_mut()
+            .find(|tracked| tracked.ap == heard.ap)
+        {
+            heard.limited = false;
+        }
+        Ok(())
     }
 
     /// `ieee80211_link_change_chanreq` and `ieee80211_link_info_change_notify`:
@@ -514,9 +575,14 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             .iter_mut()
             .find(|heard| heard.ap == active.ap)
             .ok_or(Error::Refused("no beacon"))?;
+        // Applied at once on the new channel, until its beacons say.
+        let mut envelope = active.announced.envelope;
+        envelope.fit(&active.announced.ap, &target);
         heard.definition = target;
+        heard.envelope = envelope;
         heard.stale = false;
         heard.moved = false;
+        heard.limited = false;
         let authorized = client.port_open;
         let link = self.link_commands(queue, &context, seat, authorized)?;
         let (removal_id, removal) = queue
@@ -531,7 +597,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             .ok_or(Error::Refused("transmit power"))?;
         let mut bss = context.beacon().clone();
         bss.channel = target.control;
-        let constraints = self.six_ghz_power(queue, &bss, seat);
+        let constraints = self.six_ghz_power(queue, &bss, seat, Some(envelope));
         let client = &mut self.client;
         client.command(
             commands::LINK_CONFIG,

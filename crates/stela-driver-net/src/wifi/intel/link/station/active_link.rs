@@ -328,7 +328,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         let (power_id, power_limit) = queue
             .transmit_limit(new, dbm)
             .ok_or(Error::Refused("transmit power"))?;
-        let constraints = self.six_ghz_power(queue, to.beacon(), new);
+        let constraints = self.six_ghz_power(queue, to.beacon(), new, None);
         let tids = station_queues(queue);
         let now = self.clock.now_us();
         let client = &mut self.client;
