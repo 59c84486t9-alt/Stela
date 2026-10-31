@@ -63,14 +63,16 @@ use stela_compiler::x86_64::register_read::{Count, CountState};
 pub(super) const TICKS_PER_BLOCK: u64 = 1;
 
 /// The slowest a running parallel PE may execute blocks while the count
-/// keeps the host's pace, about 150 MIPS. A slower PE slows the count, so
+/// keeps the host's pace, about 300 MIPS. A slower PE slows the count, so
 /// its timeouts still measure its work: the 60 s XNU allows the registry to
-/// come to rest (`IOService.cpp` 6140) held some 34 G instructions of launching
-/// driver extensions in a 26A434 boot, 570 MIPS across the four or so PEs
-/// that run. The slowest PE that runs sets the count and every guest sleep
-/// lasts as much longer, so a floor much above this makes a boot's timed
-/// waits take several times their length.
-pub(super) const PACE_BLOCKS_PER_SECOND: u64 = 2_000_000;
+/// come to rest (`IOService.cpp` 6140), from watchdogd's early wait until the
+/// driver extensions launch, needs some 50 G instructions in a 26A434 boot.
+/// At half this floor 48 G ran in that window without finishing, on a host
+/// other work slowed; this one gives it about twice what it needs. The
+/// slowest PE that runs sets the count and every guest sleep lasts as much
+/// longer, so a floor much above this makes a boot's timed waits take several
+/// times their length.
+pub(super) const PACE_BLOCKS_PER_SECOND: u64 = 4_000_000;
 
 /// Slice periods ([`QUANTUM_HZ`]) a running PE's horizon may lie past the
 /// present: several, so that only a PE stopped for longer than a few slices
@@ -637,11 +639,11 @@ mod tests {
     }
 
     #[test]
-    fn a_24_mhz_pace_earns_half_a_microsecond_a_block_and_looks_ahead_four_slices() {
+    fn a_24_mhz_pace_earns_a_quarter_microsecond_a_block_and_looks_ahead_four_slices() {
         assert_eq!(
             Pace::new(24_000_000),
             Pace {
-                per_block: 12,
+                per_block: 6,
                 lookahead: 192_000
             }
         );
