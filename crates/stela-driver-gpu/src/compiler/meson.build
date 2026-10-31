@@ -171,7 +171,8 @@ if stela_air_llvm != ''
   )
   stela_air = static_library(
     'stela_air_to_nir',
-    ['air_to_nir.c', 'air_metadata.c', 'air_texture.c', 'air_call.c', 'air_math.c', 'air_simd.c',
+    ['air_to_nir.c', 'air_metadata.c', 'air_texture.c', 'air_call.c', 'air_math.c',
+     'air_precise.c', 'air_simd.c',
      'air_matrix.c', 'air_constants.c', 'air_calls.c', 'air_commands.c', 'air_log.c',
      'air_stitch.c'],
     include_directories : [inc_include, inc_src, inc_gpu],
@@ -313,6 +314,14 @@ if stela_air_llvm != ''
     build_rpath : fs.parent(stela_air_llvm),
   )
   test('stela_air_math', stela_air_math_test, suite : 'stela')
+  stela_air_precise_test = executable(
+    'stela_air_precise_test',
+    'tests/air_precise.c',
+    include_directories : [inc_include, inc_src, inc_gpu],
+    dependencies : [idep_stela_air],
+    build_rpath : fs.parent(stela_air_llvm),
+  )
+  test('stela_air_precise', stela_air_precise_test, suite : 'stela')
   stela_air_sync_test = executable(
     'stela_air_sync_test',
     'tests/air_sync.c',

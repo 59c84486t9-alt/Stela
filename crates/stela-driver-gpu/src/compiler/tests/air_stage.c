@@ -833,8 +833,6 @@ arithmetic_and_lane_semantics(void)
       CHECK(divisions_seen == 1);
       fold(nir); uint32_t result[4] = {divisions[i].result,0,0,0}; outputs(nir, NULL, result);
       ralloc_free(nir); LLVMDisposeMemoryBuffer(raw);
-      char *precise = fragment_body("{\n %q = fdiv float 1.0, 2.0\n %out = insertelement <4 x float> zeroinitializer, float %q, i32 0\n ret <4 x float> %out\n}", "");
-      refusal(precise, "test_fragment", STELA_AIR_FRAGMENT, &o, STELA_AIR_INSTRUCTION); free(precise);
    }
    const uint32_t integers[] = {16777217, UINT32_MAX, 2147483649u, 0};
    const uint32_t float_bits[] = {0x4b800000, 0x4f800000, 0x4f000000, 0};

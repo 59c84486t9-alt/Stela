@@ -385,11 +385,13 @@ stela_air_metadata_validate(struct stela_air_metadata *t)
       if (!stela_air_md_node(t, nodes[i], fields, &fields_count) || fields_count != 1 ||
           !(stela_air_md_string(fields[0], "air.compile.denorms_disable") ||
             stela_air_md_string(fields[0], "air.compile.fast_math_enable") ||
+            stela_air_md_string(fields[0], "air.compile.fast_math_disable") ||
             stela_air_md_string(fields[0], "air.compile.framebuffer_fetch_enable") ||
             stela_air_md_string(fields[0], "air.compile.framebuffer_fetch_disable")))
          return fail(t, STELA_AIR_METADATA, "unsupported AIR compile option");
       unsigned bit = stela_air_md_string(fields[0], "air.compile.denorms_disable") ? 1 :
-                     stela_air_md_string(fields[0], "air.compile.fast_math_enable") ? 2 : 4;
+                     stela_air_md_string(fields[0], "air.compile.fast_math_enable") ||
+                     stela_air_md_string(fields[0], "air.compile.fast_math_disable") ? 2 : 4;
       if (seen & bit)
          return fail(t, STELA_AIR_METADATA, "duplicate/conflicting AIR compile option");
       seen |= bit;

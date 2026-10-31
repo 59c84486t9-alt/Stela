@@ -2185,16 +2185,6 @@ floating_contracts(void)
       LLVMDisposeMemoryBuffer(input);
       free(prefix);
    }
-   const char *unsupported[] = {
-      "%v = fdiv float 1.0, 2.0\nret void\n",
-      "%v = frem float 1.0, 2.0\nret void\n",
-   };
-   for (unsigned i = 0; i < ARRAY_SIZE(unsupported); i++) {
-      LLVMMemoryBufferRef input = ieee_bitcode(stela_air_test_prefix, unsupported[i]);
-      struct stela_air_error error;
-      CHECK(!translate(input, &test_nir_options, 100, &error) && error.kind == STELA_AIR_INSTRUCTION);
-      LLVMDisposeMemoryBuffer(input);
-   }
    LLVMMemoryBufferRef constrained = ieee_bitcode_extra(stela_air_test_prefix,
       "%v = call float @llvm.experimental.constrained.fadd.f32(float 1.0, float 2.0, "
       "metadata !\"round.tonearest\", metadata !\"fpexcept.ignore\")\nret void\n",

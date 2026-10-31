@@ -7,6 +7,7 @@
 #include "air_constants.h"
 #include "air_math.h"
 #include "air_matrix.h"
+#include "air_precise.h"
 #include "air_simd.h"
 #include "air_texture.h"
 #include "llvm-c/Analysis.h"
@@ -3538,6 +3539,20 @@ freeze(struct translator *t, LLVMValueRef inst)
    return put_value(t, inst, nir_vec(&t->b, lanes, v->components), 0);
 }
 
+/* An FDiv or FRem at Metal's precise accuracy. */
+static bool
+precise_division(struct translator *t, LLVMValueRef inst, LLVMOpcode op)
+{
+   nir_def *a = get_value(t, LLVMGetOperand(inst, 0)), *c = get_value(t, LLVMGetOperand(inst, 1));
+   if (!a || !c || !fp_environment(t))
+      return false;
+   bool narrow = a->bit_size == 16;
+   stela_air_precise_function *function = op == LLVMFDiv ? stela_air_precise_divide : stela_air_precise_fmod;
+   nir_def *value = stela_air_precise(&t->b, function, narrow ? nir_f2f32(&t->b, a) : a,
+                                      narrow ? nir_f2f32(&t->b, c) : c);
+   return put_value(t, inst, narrow ? nir_f2f16(&t->b, value) : value, 0);
+}
+
 static bool
 instruction(struct translator *t, LLVMValueRef inst)
 {
@@ -3752,7 +3767,7 @@ instruction(struct translator *t, LLVMValueRef inst)
       return fp_conversion(t, inst, op);
    /* NIR divides at Vulkan's 2.5 ULP, which only fast math permits. */
    if ((op == LLVMFDiv || op == LLVMFRem) && LLVMGetFastMathFlags(inst) != LLVMFastMathAll)
-      return fail(t, STELA_AIR_INSTRUCTION, "precise/partially relaxed FP division is unqualified");
+      return precise_division(t, inst, op);
    if (op == LLVMFAdd || op == LLVMFSub || op == LLVMFMul || op == LLVMFDiv || op == LLVMFRem ||
        op == LLVMFCmp) {
       if (!fp_environment(t))

@@ -89,6 +89,7 @@ const AIR: [&str; 15] = [
     "air_constants",
     "air_log",
     "air_math",
+    "air_precise",
     "air_matrix",
     "air_metadata",
     "air_simd",
