@@ -17,10 +17,14 @@ struct stela_linux_service_call {
 	bool (*begin)(void *context);
 	/* The next line raised since the batch began, or a negative value. */
 	int (*next_irq)(void *context);
+	/* Nonblocking process leaves, on this real service task in the owner. */
+	void (*drain)(void *context);
 	/* Finish it, with the clock reading to run again at (as above). */
 	void (*finish)(void *context, s64 deadline);
 	bool (*done)(void *context);
 };
+
+_Static_assert(sizeof(struct stela_linux_service_call) == 56, "Linux service call ABI");
 
 /* The body of a service task, entered in call's owner until call is done. */
 void stela_linux_service_loop(const struct stela_linux_service_call *call);

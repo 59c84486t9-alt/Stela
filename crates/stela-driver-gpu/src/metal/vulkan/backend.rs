@@ -86,6 +86,17 @@ pub enum Object {
 pub trait Backend {
     fn physical_device(&self) -> &PhysicalDevice;
 
+    /// Acknowledges that no queued GPU operation can still access this
+    /// backend's resources. The owner has closed admission and observed all
+    /// accepted submission serials complete before calling. Failure provides
+    /// no evidence of idleness; resources and native roots must stay owned.
+    /// This does not acknowledge PCI reset/removal or DMA-domain invalidation.
+    fn acknowledge_idle(&mut self) -> Result<()> {
+        Err(crate::metal::error::Error::Unsupported(
+            "GPU idle acknowledgement",
+        ))
+    }
+
     fn allocate_memory(
         &mut self,
         size: u64,

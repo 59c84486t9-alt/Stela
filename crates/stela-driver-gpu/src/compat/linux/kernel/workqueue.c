@@ -42,13 +42,22 @@ struct worker {
 	struct work_struct *work;
 	struct workqueue_struct *wq;
 	unsigned long seq;
-	bool sleeping;
+	bool sleeping, highpri;
 };
 
 static LIST_HEAD(every_queue);
 static LIST_HEAD(workers);
 /* Workers requested but not yet running. */
 static unsigned int starting;
+/* The two NORMAL nice pools have independent runnable/start accounting. */
+static unsigned int pool_starting[2];
+struct task_request {
+	struct list_head node;
+	void (*run)(void *);
+	void *context;
+};
+static LIST_HEAD(task_requests);
+static unsigned int dedicated_starting;
 static unsigned long last_seq;
 /* Woken whenever a run ends or a pending item is cancelled. */
 static DECLARE_WAIT_QUEUE_HEAD(work_done);
@@ -106,22 +115,51 @@ static struct worker *runner(struct work_struct *work)
 	return NULL;
 }
 
-static bool runnable_worker(void)
+static bool runnable_worker(bool highpri)
 {
 	struct worker *worker;
 	list_for_each_entry(worker, &workers, node)
-		if (!worker->sleeping)
+		if (!worker->sleeping && worker->highpri == highpri)
 			return true;
-	return starting;
+	return pool_starting[highpri] != 0;
+}
+
+int stela_linux_start_task(void (*run)(void *), void *context)
+{
+	if (!run)
+		return -EINVAL;
+	const struct stela_linux_owner *owner = stela_linux_owner();
+	if (!owner->services->start_worker)
+		return -EOPNOTSUPP;
+	struct task_request *request = kzalloc_obj(*request);
+	if (!request)
+		return -ENOMEM;
+	request->run = run;
+	request->context = context;
+	list_add_tail(&request->node, &task_requests);
+	starting++;
+	dedicated_starting++;
+	int error = owner->services->start_worker(owner->context, STELA_WORKER_DEDICATED);
+	if (error) {
+		/* The native producer promises no inline execution and no accepted
+		 * job on refusal, so the request is still uniquely ours. */
+		starting--;
+		dedicated_starting--;
+		list_del(&request->node);
+		kfree(request);
+	}
+	return error;
 }
 
 /* The first pending item a worker may take: from a workqueue under its
  * concurrency limit, and not already running elsewhere. An ordered
  * workqueue's later items wait behind its first. */
-static struct work_struct *next_work(struct workqueue_struct **wq_out)
+static struct work_struct *next_work(struct workqueue_struct **wq_out, bool highpri)
 {
 	struct workqueue_struct *wq;
 	list_for_each_entry(wq, &every_queue, node) {
+		if (!!(wq->flags & WQ_HIGHPRI) != highpri)
+			continue;
 		if (wq->active >= wq->max_active)
 			continue;
 		struct work_struct *work;
@@ -140,17 +178,24 @@ static struct work_struct *next_work(struct workqueue_struct **wq_out)
 /* Keep a worker runnable while there is work it may take. */
 static void kick(void)
 {
-	struct workqueue_struct *wq;
-	if (runnable_worker() || !next_work(&wq))
-		return;
 	const struct stela_linux_owner *owner = stela_linux_owner();
-	if (!owner->services->start_worker) {
-		stela_linux_unsupported("workqueue workers");
-		return;
+	/* High-priority work gets its own nice -20 worker even when an ordinary
+	 * worker is runnable or parked. Neither pool borrows the other's rank. */
+	for (int pool = 1; pool >= 0; pool--) {
+		bool highpri = pool != 0;
+		struct workqueue_struct *wq;
+		if (runnable_worker(highpri) || !next_work(&wq, highpri))
+			continue;
+		if (!owner->services->start_worker) {
+			stela_linux_unsupported("workqueue workers");
+			return;
+		}
+		/* A refusal leaves pending work explicit for a later worker. */
+		if (!owner->services->start_worker(owner->context, highpri ? STELA_WORKER_HIGHPRI : STELA_WORKER_NORMAL)) {
+			starting++;
+			pool_starting[highpri]++;
+		}
 	}
-	/* A refusal leaves the work to the next worker that runs. */
-	if (!owner->services->start_worker(owner->context))
-		starting++;
 }
 
 static void enqueue(struct workqueue_struct *wq, struct work_struct *work)
@@ -343,17 +388,36 @@ struct work_struct *current_work(void)
 	return worker ? worker->work : NULL;
 }
 
-void stela_linux_workers_run(void)
+void stela_linux_workers_run(unsigned int kind)
 {
 	struct worker self = {.task = current};
 	if (WARN_ON_ONCE(worker_of(current)))
 		return;
 	if (starting)
 		starting--;
+	if (kind == STELA_WORKER_DEDICATED) {
+		if (WARN_ON_ONCE(list_empty(&task_requests)))
+			return;
+		struct task_request *request = list_first_entry(&task_requests, struct task_request, node);
+		void (*run)(void *) = request->run;
+		void *context = request->context;
+		list_del(&request->node);
+		dedicated_starting--;
+		kfree(request);
+		run(context);
+		kick();
+		return;
+	}
+	if (WARN_ON_ONCE(kind != STELA_WORKER_NORMAL && kind != STELA_WORKER_HIGHPRI))
+		return;
+	self.highpri = kind == STELA_WORKER_HIGHPRI;
+	if (pool_starting[self.highpri])
+		pool_starting[self.highpri]--;
+	set_user_nice(current, self.highpri ? MIN_NICE : 0);
 	list_add_tail(&self.node, &workers);
 	struct workqueue_struct *wq;
 	struct work_struct *work;
-	while ((work = next_work(&wq))) {
+	while ((work = next_work(&wq, self.highpri))) {
 		list_del_init(&work->entry);
 		clear_bit(WORK_STRUCT_PENDING_BIT, work_data_bits(work));
 		self.work = work;
@@ -367,6 +431,7 @@ void stela_linux_workers_run(void)
 		wake_up_all(&work_done);
 	}
 	list_del(&self.node);
+	set_user_nice(current, 0);
 	kick();
 }
 

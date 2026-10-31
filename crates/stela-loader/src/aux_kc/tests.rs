@@ -396,11 +396,34 @@ const INFO: &[u8] = br#"<?xml version="1.0" encoding="UTF-8"?>
 <key>OSBundleLibraries</key><dict><key>com.apple.kpi.iokit</key><string>8.0.0</string></dict>
 </dict></plist>"#;
 
+#[test]
+fn companion_code_trust_cache_has_exact_provenance_and_unique_hashes() {
+    assert!(Linked::trust_cache(&[]).unwrap().is_none());
+    let mut first = kext(vec![]);
+    assert!(Linked::trust_cache(&[kext(vec![])]).unwrap().is_none());
+    first.trusted_code = vec![[2; 20], [1; 20]];
+    let mut second = kext(vec![]);
+    second.trusted_code = vec![[1; 20]];
+    let (source, bytes) = Linked::trust_cache(&[first, second]).unwrap().unwrap();
+    assert_eq!(
+        bytes,
+        crate::trust_cache::module(&[[1; 20], [2; 20]]).unwrap()
+    );
+    assert_eq!(source.decoded_bytes, bytes.len() as u64);
+    assert_eq!(source.decoded_sha256, stela_formats::sha256(&bytes));
+    assert_eq!(source.container_sha256, source.decoded_sha256);
+    assert_eq!(source.payload_type, "raw");
+    let static_cache = crate::trust_cache::module(&[[3; 20]]).unwrap();
+    let region = crate::trust_cache::compose(&[&static_cache, &bytes]).unwrap();
+    assert_eq!(u32::from_le_bytes(region[..4].try_into().unwrap()), 2);
+}
+
 fn kext(objects: Vec<&[u8]>) -> Kext<'_> {
     Kext {
         info: INFO,
         objects,
         bundle_path: "/Library/Extensions/Test.kext".into(),
+        trusted_code: Vec::new(),
     }
 }
 
@@ -796,6 +819,7 @@ fn refuses_what_it_cannot_link() {
         info: foreign,
         objects: vec![&twice],
         bundle_path: "/Library/Extensions/Test.kext".into(),
+        trusted_code: Vec::new(),
     };
     let error = link(&boot, &[kext]).unwrap_err();
     assert!(

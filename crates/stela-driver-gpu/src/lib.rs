@@ -96,7 +96,7 @@ impl Adapter {
     /// Every discovered adapter remains unbound until a real port exists.
     pub fn unavailable_reason(&self) -> &'static str {
         match self.vendor {
-            Vendor::Nvidia => "NVIDIA open kernel modules are not ported to Stela",
+            Vendor::Nvidia => "NVIDIA requires nouveau/GSP binding and an NVK-enabled image",
             Vendor::Amd => "AMDGPU is not ported to Stela",
             Vendor::Intel => "Intel i915/xe are not ported to Stela",
             Vendor::Other(_) => "no Stela GPU backend for this PCI vendor",

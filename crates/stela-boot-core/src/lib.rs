@@ -56,6 +56,7 @@ pub mod remapping;
 pub mod requester;
 pub mod root_transition;
 pub mod screen;
+pub mod shutdown;
 pub mod source_health;
 pub mod storage;
 pub mod topology;

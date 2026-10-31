@@ -16,6 +16,13 @@ struct stela_linux_task_context {
 	size_t stack_start, stack_end, guard_start, guard_end, stack_pointer;
 };
 
+struct stela_linux_task_rank {
+	u32 policy, realtime;
+	s32 effective;
+	s32 nice;
+};
+_Static_assert(sizeof(struct stela_linux_task_rank) == 16, "Linux task rank ABI");
+
 struct stela_linux_task_ops {
 	/* Actual CPU/IRQ/RSP/current ticket validation, bounded and allocation-
 	 * free. The retained binding/code outlive this attached task. */
@@ -26,7 +33,14 @@ struct stela_linux_task_ops {
 	/* Immutable real Runtime reservation; never caller-controlled task flags.
 	 * Used only after first waker publication and target generation validation. */
 	bool (*service_reserved)(void *binding);
+	/* Same-queue retained task's original PI/policy commit, or its private
+	 * exit normalization. Records are copied synchronously; no C pointer is
+	 * stored by Runtime. Update must succeed before C commits its fields. */
+	int (*rank)(void *binding, u64 expected_sequence,
+		    const struct stela_linux_task_rank *before,
+		    const struct stela_linux_task_rank *after, bool head);
 };
+_Static_assert(sizeof(struct stela_linux_task_ops) == 32, "Linux task callbacks ABI");
 
 struct stela_linux_task_scope_ops {
 	/* Retained shared Runtime borrow on this actual stack. No unwind or
@@ -80,7 +94,8 @@ int stela_linux_task_scope_end(struct stela_linux_task *task);
 /* Internal prepared transition hooks. The selected original mutex scheduler
  * adapter owns the sole preempt level; count==1 alone does not distinguish
  * that level from an outer RCU reader. Generic schedule enters at count0 and
- * never borrows the normal-mutex level or a private RT wait kind. */
+ * never borrows the normal-mutex level. Non-PREEMPT_RT mutex waits use this
+ * process boundary after their distinct pre-schedule worker preparation. */
 int stela_linux_task_park(bool scheduler_preempt_disabled);
 int stela_linux_task_yield(void);
 struct task_struct *stela_linux_current(void);

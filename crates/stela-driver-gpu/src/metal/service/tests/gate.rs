@@ -231,3 +231,79 @@ fn an_interrupt_during_a_call_is_left_to_that_call() {
     }
     assert!(shared.signaled());
 }
+
+#[test]
+fn interrupt_completion_queries_use_the_services_stack() {
+    use core::sync::atomic::{AtomicUsize, Ordering};
+    static RUNS: AtomicUsize = AtomicUsize::new(0);
+    let host = ServiceHost {
+        run: |stack, call| {
+            assert_eq!(stack, HOST.stack);
+            RUNS.fetch_add(1, Ordering::Relaxed);
+            call();
+        },
+        ..HOST
+    };
+    let shared = SharedService::new(service(), host);
+    assert_eq!(RUNS.load(Ordering::Relaxed), 0);
+    shared.interrupted();
+    assert_eq!(RUNS.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn a_calls_device_loss_signals_waiters_without_an_interrupt() {
+    let shared = SharedService::new(service(), HOST);
+    {
+        let mut turn = shared.try_turn().unwrap();
+        turn.device().mark_lost();
+    }
+    assert!(shared.signaled());
+    drop(shared.try_turn().unwrap());
+    assert!(!shared.signaled());
+}
+
+#[test]
+fn device_loss_is_latched_and_wakes_waiters_only_once() {
+    use super::{
+        call,
+        wire::{Empty, Operation, Status, Value},
+    };
+    let mut service = service();
+    let connection = connect(&mut service);
+    let token = NonZeroU64::new(17).unwrap();
+    service
+        .import(
+            connection,
+            &[stela_contracts::gate::MemoryRange {
+                address: 0x8_0000_0000,
+                bytes: 4096,
+            }],
+            token,
+        )
+        .unwrap();
+    commit(&mut service, connection, &Stream::default()).unwrap();
+    service.device().backend().semaphore_error = Some(crate::metal::error::Error::DeviceLost);
+    assert!(service.signaled());
+    assert!(service.device().is_lost());
+    assert!(!service.signaled());
+    // The backend's injected error was one-shot. Later successful queries
+    // must not make this device's old identities usable again.
+    assert_eq!(service.connect().unwrap_err().status, Status::DeviceLost);
+    let mut memory = Memory::default();
+    let response: Result<Value, _> = call(
+        &mut service,
+        connection,
+        Operation::Poll,
+        &Empty {},
+        &mut memory,
+    );
+    assert_eq!(response.unwrap_err().status, Status::DeviceLost);
+    let result = commit(&mut service, connection, &Stream::default());
+    assert_eq!(result.unwrap_err().status, Status::DeviceLost);
+    service.disconnect(connection).unwrap();
+    assert_eq!(
+        service.retired(),
+        None,
+        "loss is not DMA retirement acknowledgement"
+    );
+}

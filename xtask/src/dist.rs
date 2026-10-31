@@ -5,9 +5,9 @@
 use crate::tools::{cargo, exec, root};
 use anyhow::Result;
 
-pub fn run() -> Result<()> {
+pub fn run(nvk: bool) -> Result<()> {
     crate::gpu::fetch::fetch(false)?;
-    let efi = crate::boot::build(true)?;
+    let efi = crate::boot::build(true, nvk)?;
     exec(
         cargo()
             .args(["build", "--release", "--locked", "-p", "stela-cli"])

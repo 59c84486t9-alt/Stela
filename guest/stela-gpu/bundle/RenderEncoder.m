@@ -635,6 +635,14 @@ patchIndexBufferOffset:(NSUInteger)patchOffset
 
 @implementation StelaGPUChildEncoder
 
+- (void)dealloc
+{
+	if (_stream) {
+		stela_stream_free(_stream);
+		free(_stream);
+	}
+}
+
 - (void)endEncoding
 {
 }

@@ -107,15 +107,18 @@ fn destruction_waits_for_submitted_work() {
         .unwrap();
     assert_eq!(device.current_allocated_size(), 4096);
     let reference = device.buffer(buffer).unwrap();
+    let (memory, _, _) = device.buffer_memory(buffer).unwrap();
     assert_eq!(reference.length, 4096);
     let serial = submit(&mut device);
     device.destroy_buffer(buffer).unwrap();
-    assert_eq!(device.current_allocated_size(), 0);
+    assert_eq!(device.current_allocated_size(), 4096);
     assert!(
         device.backend().destroyed.is_empty(),
         "the GPU may still read it"
     );
     complete(&mut device, serial);
+    assert_eq!(device.current_allocated_size(), 0);
+    assert!(device.backend().destroyed.contains(&Object::Memory(memory)));
     assert!(
         device
             .backend()
@@ -137,6 +140,30 @@ fn destruction_waits_for_submitted_work() {
         "nothing pending: destroyed at once"
     );
     assert!(device.buffer_memory(idle).is_err());
+    assert_eq!(device.current_allocated_size(), 0);
+}
+
+#[test]
+fn allocations_are_charged_until_their_own_retirement_serial() {
+    let mut device = device();
+    let first = device
+        .new_buffer(4096, options(StorageMode::Shared))
+        .unwrap();
+    let second = device
+        .new_buffer(8192, options(StorageMode::Shared))
+        .unwrap();
+    let first_serial = submit(&mut device);
+    device.destroy_buffer(first).unwrap();
+    let second_serial = submit(&mut device);
+    device.destroy_buffer(second).unwrap();
+    assert_eq!(device.current_allocated_size(), 12288);
+    complete(&mut device, first_serial);
+    assert_eq!(device.current_allocated_size(), 8192);
+    complete(&mut device, second_serial);
+    assert_eq!(device.current_allocated_size(), 0);
+    // Polling a completed serial must not release the charge a second time.
+    assert_eq!(device.poll(), Ok(second_serial));
+    assert_eq!(device.current_allocated_size(), 0);
 }
 
 #[test]
@@ -414,12 +441,17 @@ fn automatic_heaps_place_and_alias_resources() {
         device.destroy_heap(heap),
         Err(Error::Invalid("resources still live in the heap"))
     );
+    assert_eq!(device.current_allocated_size(), 1 << 20);
+    let serial = submit(&mut device);
     for buffer in [a, b, c] {
         device.destroy_buffer(buffer).unwrap();
     }
     device.destroy_texture(texture).unwrap();
     assert_eq!(device.heap_usage(heap, 1).unwrap().0, 0);
+    assert_eq!(device.current_allocated_size(), 1 << 20);
     device.destroy_heap(heap).unwrap();
+    assert_eq!(device.current_allocated_size(), 1 << 20);
+    complete(&mut device, serial);
     assert_eq!(device.current_allocated_size(), 0);
 }
 
@@ -2284,6 +2316,7 @@ fn imported_memory_stays_until_the_gpu_is_done_with_it() {
         bytes: 8192,
     }];
     let memory = device.import_memory(&ranges, token).unwrap();
+    assert_eq!(device.current_allocated_size(), 8192);
     assert_eq!(device.backend().imports.len(), 1);
     assert_eq!(
         device.new_imported_buffer(memory, 8192, options(StorageMode::Private)),
@@ -2297,6 +2330,82 @@ fn imported_memory_stays_until_the_gpu_is_done_with_it() {
         .new_imported_buffer(memory, 8192, options(StorageMode::Shared))
         .unwrap();
     assert_eq!(device.current_allocated_size(), 8192);
+    let serial = submit(&mut device);
     device.destroy_buffer(buffer).unwrap();
+    assert_eq!(device.current_allocated_size(), 8192);
+    assert_eq!(device.retired(), None);
+    assert_eq!(device.backend().imports.len(), 1);
+    complete(&mut device, serial);
     assert_eq!(device.current_allocated_size(), 0);
+    assert!(device.backend().imports.is_empty());
+    assert_eq!(device.retired(), Some(token));
+    assert_eq!(device.retired(), None);
+}
+
+#[test]
+fn imported_heap_allocations_are_counted_once_through_retirement() {
+    let mut device = device();
+    let token = core::num::NonZeroU64::new(10).unwrap();
+    let ranges = [stela_contracts::gate::MemoryRange {
+        address: 0x8_0000_0000,
+        bytes: 1 << 20,
+    }];
+    let memory = device.import_memory(&ranges, token).unwrap();
+    let heap = device
+        .new_imported_heap(
+            memory,
+            &HeapDescriptor {
+                size: 1 << 20,
+                options: options(StorageMode::Shared),
+                heap_type: HeapType::Automatic,
+                sparse_page_size: SparsePageSize::Size64,
+            },
+        )
+        .unwrap();
+    let buffer = device
+        .new_heap_buffer(heap, 4096, options(StorageMode::Shared), None)
+        .unwrap();
+    assert_eq!(device.current_allocated_size(), 1 << 20);
+    let serial = submit(&mut device);
+    device.destroy_buffer(buffer).unwrap();
+    device.destroy_heap(heap).unwrap();
+    assert_eq!(device.current_allocated_size(), 1 << 20);
+    assert_eq!(device.retired(), None);
+    complete(&mut device, serial);
+    assert_eq!(device.current_allocated_size(), 0);
+    assert_eq!(device.retired(), Some(token));
+    assert_eq!(device.retired(), None);
+}
+
+#[test]
+fn device_loss_keeps_in_flight_imports_pinned_and_charged() {
+    let mut device = device();
+    let ranges = [stela_contracts::gate::MemoryRange {
+        address: 0x8_0000_0000,
+        bytes: 8192,
+    }];
+    let memory = device
+        .import_memory(&ranges, core::num::NonZeroU64::new(11).unwrap())
+        .unwrap();
+    let buffer = device
+        .new_imported_buffer(memory, 8192, options(StorageMode::Shared))
+        .unwrap();
+    let unclaimed = device
+        .import_memory(&ranges, core::num::NonZeroU64::new(12).unwrap())
+        .unwrap();
+    let serial = submit(&mut device);
+    device.destroy_buffer(buffer).unwrap();
+    device.backend().semaphore_error = Some(Error::DeviceLost);
+    assert_eq!(device.poll(), Err(Error::DeviceLost));
+    assert!(device.is_lost());
+    device.release_import(unclaimed).unwrap();
+    // A later backend value cannot establish completion after device loss.
+    device.backend().semaphore_error = None;
+    let timeline = device.timeline;
+    device.backend().complete(timeline, serial);
+    assert_eq!(device.poll(), Err(Error::DeviceLost));
+    assert_eq!(device.current_allocated_size(), 16384);
+    assert_eq!(device.backend().imports.len(), 2);
+    assert!(device.backend().destroyed.is_empty());
+    assert_eq!(device.retired(), None);
 }

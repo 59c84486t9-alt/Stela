@@ -47,8 +47,9 @@ struct stela_linux_services {
 	void (*random_bytes)(void *context, void *bytes, size_t size);
 	/* Start a Linux task that runs stela_linux_workers_run in this owner,
 	 * or return a negative errno when none can start now. The request must
-	 * not run the worker inline. */
-	int (*start_worker)(void *context);
+	 * not run the worker inline. kind is stela_linux_worker_kind from
+	 * stela/workqueue.h and must reach that worker unchanged. */
+	int (*start_worker)(void *context, unsigned int kind);
 	/* Power the machine off, without waiting for clean exits if force. */
 	void (*shutdown)(void *context, bool force);
 	/* Map page-aligned device memory uncached, or return NULL; unmapped by

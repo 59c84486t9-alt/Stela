@@ -145,9 +145,15 @@ pub fn run(command: Command) -> Result<()> {
         }),
         Command::Nvidia { jobs, target } => nvidia::build(jobs, target),
         // `stela.efi` carries the kext it links against each boot's kernel.
-        Command::Nvk { jobs } => nvk::build(jobs).and_then(|()| crate::guest::run()),
+        Command::Nvk { jobs } => build_nvk(jobs),
         Command::Llvm { jobs, test } => llvm::build(&nvidia::Toolchain::discover()?, jobs, test),
     }
+}
+
+/// Prepare the complete native rendering archive and its guest components.
+pub fn build_nvk(jobs: u16) -> Result<()> {
+    nvk::build(jobs)?;
+    crate::guest::run()
 }
 
 #[cfg(test)]

@@ -39,6 +39,7 @@ mod gate;
 pub mod identity;
 mod indirect;
 mod libraries;
+mod lifecycle;
 mod pipelines;
 mod queue;
 mod reflection;
@@ -255,6 +256,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
     /// Opens a connection for the task the gate authenticated; it must
     /// negotiate before any other operation.
     pub fn connect(&mut self) -> Result<NonZeroU64, Fault> {
+        self.device.ensure_admission()?;
         let id = self.next_connection;
         self.next_connection = id.checked_add(1).ok_or(Fault::new(
             Status::OutOfMemory,
@@ -298,9 +300,23 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         token: NonZeroU64,
     ) -> Result<NonZeroU64, Fault> {
         self.connection(connection)?;
+        self.device.ensure_admission()?;
+        let held = self.connections.get_mut(&connection).ok_or(Fault::CLOSED)?;
+        let made = held.made.checked_add(1).ok_or(Fault::new(
+            Status::OutOfMemory,
+            "object creation identifiers are exhausted",
+        ))?;
+        // Import failure leaves the descriptor with the caller. Reserve real
+        // publication storage first: a failed insertion after import would
+        // otherwise also queue a retirement token for that same descriptor.
+        let reserved = held.objects.reserve(connection, self.epoch)?;
         let memory = self.device.import_memory(ranges, token)?;
-        let handle = self.hold(connection, Object::Memory(memory))?;
-        NonZeroU64::new(handle.handle).ok_or(Fault::STALE)
+        let handle = reserved.insert(Entry {
+            object: Object::Memory(memory),
+            made,
+        });
+        held.made = made;
+        Ok(NonZeroU64::new(handle.encode()).expect("live generations are nonzero"))
     }
 
     /// The token of imported memory the GPU no longer reaches.
@@ -335,8 +351,13 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         response: &mut [u8],
         memory: &mut dyn GuestMemory,
     ) -> Outcome {
-        self.dispatch(connection, operation, request, response, memory)
-            .into()
+        let outcome: Outcome = self
+            .dispatch(connection, operation, request, response, memory)
+            .into();
+        if outcome.status == Status::DeviceLost {
+            self.device.mark_lost();
+        }
+        outcome
     }
 
     fn dispatch(
@@ -362,6 +383,10 @@ impl<B: Backend, C: Compiler> Service<B, C> {
                 "the connection has not negotiated",
             ));
         }
+        if self.device.is_lost() && operation != Operation::Release {
+            return Err(Error::DeviceLost.into());
+        }
+        self.admit_quiescing(operation)?;
         let mut call = Call {
             connection,
             request,
@@ -492,7 +517,10 @@ impl<B: Backend, C: Compiler> Service<B, C> {
     fn hold(&mut self, connection: NonZeroU64, object: Object) -> Result<Handle, Fault> {
         let epoch = self.epoch;
         let held = self.connection(connection).and_then(|held| {
-            held.made += 1;
+            held.made = held.made.checked_add(1).ok_or(Fault::new(
+                Status::OutOfMemory,
+                "object creation identifiers are exhausted",
+            ))?;
             let entry = Entry {
                 object,
                 made: held.made,

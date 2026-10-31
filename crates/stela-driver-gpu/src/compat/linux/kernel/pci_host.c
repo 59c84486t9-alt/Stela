@@ -7,13 +7,24 @@
 #include <linux/pci.h>
 #include <linux/scatterlist.h>
 #include <linux/slab.h>
+#include <stela/linux.h>
 #include <stela/pci.h>
 
 struct host_function {
 	struct stela_linux_pci_function function;
+	const struct stela_linux_owner *owner;
 	struct pci_bus bus;
 	struct pci_dev dev;
+	struct host_function *quarantined_next;
 };
+
+static u64 quarantined_functions;
+static struct host_function *quarantined_hosts;
+
+u64 stela_linux_pci_quarantined_functions(void)
+{
+	return __atomic_load_n(&quarantined_functions, __ATOMIC_RELAXED);
+}
 
 static const struct stela_linux_pci_function *of_bus(const struct pci_bus *bus)
 {
@@ -153,7 +164,21 @@ void pci_disable_msi(struct pci_dev *dev)
 
 static void release(struct device *dev)
 {
-	kfree(container_of(to_pci_dev(dev), struct host_function, dev));
+	struct host_function *host = container_of(to_pci_dev(dev), struct host_function, dev);
+	if (stela_linux_owner() != host->owner || !stela_linux_quiescent()) {
+		/* The serialized owner admits only one writer. Preserve the original
+		 * C allocation and every callback/root in its context; final Rust
+		 * destruction and native deallocation need process context. */
+		host->quarantined_next = quarantined_hosts;
+		quarantined_hosts = host;
+		u64 count = __atomic_load_n(&quarantined_functions, __ATOMIC_RELAXED);
+		if (count != ~(u64)0)
+			__atomic_store_n(&quarantined_functions, count + 1, __ATOMIC_RELAXED);
+		return;
+	}
+	if (host->function.release_context)
+		host->function.release_context(host->function.context);
+	kfree(host);
 }
 
 struct pci_dev *stela_linux_pci_attach(const struct stela_linux_pci_function *function)
@@ -163,6 +188,7 @@ struct pci_dev *stela_linux_pci_attach(const struct stela_linux_pci_function *fu
 	if (!host)
 		return NULL;
 	host->function = *function;
+	host->owner = stela_linux_owner();
 	host->bus.sysdata = &host->function;
 	host->bus.ops = &config_ops;
 	host->bus.number = (unsigned char)function->bus;
@@ -204,7 +230,7 @@ struct pci_dev *stela_linux_pci_attach(const struct stela_linux_pci_function *fu
 }
 
 #ifdef STELA_LINUX_PCI_HOST_TEST
-#include <stela/linux.h>
+#include <linux/bottom_half.h>
 #include <stela/page_test.h>
 #include <stela/test.h>
 
@@ -215,6 +241,13 @@ static u8 config[256];
 static unsigned int mapped, fail_map_after = ~0U;
 static int msi_error;
 static bool on_message;
+static unsigned int context_releases;
+
+static void test_release_context(void *context)
+{
+	assert(context == config && stela_linux_quiescent());
+	context_releases++;
+}
 
 static int test_read(void *context, int where, int size, u32 *value)
 {
@@ -278,6 +311,7 @@ int main(void)
 		.dma_map = test_map, .dma_unmap = test_unmap,
 		.enable_msi = test_enable_msi, .disable_msi = test_disable_msi,
 		.dma_limit = DMA_BIT_MASK(40), .bus = 3, .devfn = PCI_DEVFN(1, 0), .irq = 9,
+		.release_context = test_release_context,
 	};
 	function.regions[0] = (struct stela_linux_pci_region){BASE, 0x1000000, IORESOURCE_MEM};
 	struct pci_dev *dev = stela_linux_pci_attach(&function);
@@ -338,7 +372,42 @@ int main(void)
 	pci_disable_msi(dev);
 	assert(!on_message && !dev->msi_enabled);
 
+	/* Removal owns only registration's reference. An escaped pci_dev keeps
+	 * the copied callback table and its original context until its last put. */
+	assert(pci_dev_get(dev) == dev);
+	stela_linux_pci_remove_device(dev);
+	assert(!context_releases);
+	assert(!pci_read_config_dword(dev, PCI_VENDOR_ID, &value) && value == 0x2d0710de);
+	assert(!pci_write_config_dword(dev, PCI_COMMAND, PCI_COMMAND_MASTER));
+	assert(!pci_read_config_dword(dev, PCI_COMMAND, &value) && value == PCI_COMMAND_MASTER);
 	pci_dev_put(dev);
+	assert(context_releases == 1);
+	/* A legacy caller can still retain ownership without a release callback. */
+	function.release_context = NULL;
+	dev = stela_linux_pci_attach(&function);
+	assert(dev);
+	stela_linux_pci_remove_device(dev);
+	assert(context_releases == 1);
+	/* An atomic final put cannot destroy the host or callback context. */
+	function.release_context = test_release_context;
+	dev = stela_linux_pci_attach(&function);
+	assert(dev);
+	u64 before = stela_linux_pci_quarantined_functions();
+	local_bh_disable();
+	stela_linux_pci_remove_device(dev);
+	local_bh_enable();
+	assert(context_releases == 1 && stela_linux_pci_quarantined_functions() == before + 1);
+	/* Quiescence under another platform does not authorize destruction of
+	 * this function's callback roots through that platform's services. */
+	dev = stela_linux_pci_attach(&function);
+	assert(dev && pci_dev_get(dev) == dev);
+	stela_linux_pci_remove_device(dev);
+	const struct stela_linux_services other_services = {0};
+	const struct stela_linux_owner other_owner = {.services = &other_services};
+	stela_linux_exit();
+	stela_linux_enter(&other_owner);
+	pci_dev_put(dev);
+	assert(context_releases == 1 && stela_linux_pci_quarantined_functions() == before + 2);
 	stela_linux_exit();
 	printf("Linux host functions passed\n");
 	return 0;

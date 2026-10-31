@@ -109,6 +109,7 @@ uint64_t stela_libc_now_ns(void)
 }
 
 unsigned int current_core;
+int thread_start_error;
 
 unsigned int stela_libc_core(void)
 {
@@ -118,6 +119,8 @@ unsigned int stela_libc_core(void)
 /* One host processor: a thread runs through at its start. */
 int stela_libc_thread_start(void (*body)(void *), void *argument, unsigned int core)
 {
+	if (thread_start_error)
+		return thread_start_error;
 	unsigned int caller = current_core;
 	current_core = core;
 	body(argument);
@@ -184,11 +187,15 @@ void *stela_libc_drm_mmap(int fd, uint64_t offset, size_t size)
 	return (void *)-ENODEV;
 }
 
+/* Inject the real host ABI's recognized-mapping result without freeing the
+ * test's allocator backing, which lets the fixture detect an incorrect free. */
+void *drm_unmap_address;
+int drm_unmap_result;
+
 int stela_libc_drm_munmap(void *address, size_t size)
 {
-	(void)address;
 	(void)size;
-	return 0;
+	return address == drm_unmap_address ? drm_unmap_result : 0;
 }
 
 unsigned int stela_libc_drm_devices(void)

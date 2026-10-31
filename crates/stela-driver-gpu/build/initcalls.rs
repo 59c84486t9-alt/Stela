@@ -34,7 +34,12 @@ impl Unit {
 }
 
 /// The environment's units that register anything nouveau needs run.
-pub const ENVIRONMENT: [Unit; 5] = [
+pub const ENVIRONMENT: [Unit; 6] = [
+    Unit {
+        source: "kernel/locking/rtmutex_api",
+        module: "rtmutex",
+        file: "kernel/locking/rtmutex",
+    },
     Unit {
         source: "drivers/dma-buf/dma-buf",
         module: "dma_buf",
@@ -194,7 +199,11 @@ pub fn image(captured: &[Captured]) -> PathBuf {
         .iter()
         .map(|unit| format!("{} {}\n", unit.unit.module, unit.unit.source))
         .collect::<String>();
-    fs::write(&cohort, listing).expect("write the initcall units");
+    // The cohort is a watched integrity input. Preserve its timestamp when
+    // unchanged, or Cargo would invalidate this build as soon as it finishes.
+    if fs::read(&cohort).ok().as_deref() != Some(listing.as_bytes()) {
+        fs::write(&cohort, listing).expect("write the initcall units");
+    }
     let mut groups: Vec<Group> = Vec::new();
     for unit in captured {
         let name = token(unit.unit.module);

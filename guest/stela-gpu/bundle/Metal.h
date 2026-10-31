@@ -109,6 +109,14 @@ enum {
 	MTLCommandBufferErrorNotPermitted = 7,
 };
 enum {
+	MTLCommandBufferErrorOptionEncoderExecutionStatus = 1 << 0,
+	MTLCommandEncoderErrorStateUnknown = 0,
+	MTLCommandEncoderErrorStateCompleted = 1,
+	MTLCommandEncoderErrorStateAffected = 2,
+	MTLCommandEncoderErrorStatePending = 3,
+	MTLCommandEncoderErrorStateFaulted = 4,
+};
+enum {
 	MTLLibraryErrorUnsupported = 1,
 	MTLLibraryErrorInternal = 2,
 	MTLLibraryErrorCompileFailure = 3,
@@ -273,6 +281,8 @@ enum {
 	X(MTLComputePipelineState)                                                                 \
 	X(MTLCommandQueue)                                                                         \
 	X(MTLCommandBuffer)                                                                        \
+	X(MTLCommandBufferEncoderInfo)                                                             \
+	X(MTLLogContainer)                                                                         \
 	X(MTLCommandEncoder)                                                                       \
 	X(MTLBlitCommandEncoder)                                                                   \
 	X(MTLComputeCommandEncoder)                                                                \
@@ -409,6 +419,16 @@ __attribute__((ns_returns_retained)) NSArray *MTLCopyAllDevices(void);
 - (id)functions;
 - (id)privateFunctions;
 - (id)binaryFunctions;
+- (void)setBinaryFunctions:(id)functions;
+- (void)setLinkedFunctions:(id)functions;
+- (void)setVertexLinkedFunctions:(id)functions;
+- (void)setFragmentLinkedFunctions:(id)functions;
+- (BOOL)supportAddingBinaryFunctions;
+- (BOOL)supportAddingVertexBinaryFunctions;
+- (BOOL)supportAddingFragmentBinaryFunctions;
+- (id)vertexAdditionalBinaryFunctions;
+- (id)fragmentAdditionalBinaryFunctions;
+- (id)tileAdditionalBinaryFunctions;
 - (id)vertexPreloadedLibraries;
 - (id)fragmentPreloadedLibraries;
 - (id)preloadedLibraries;
@@ -516,6 +536,7 @@ __attribute__((ns_returns_retained)) NSArray *MTLCopyAllDevices(void);
 /* MTLCommandQueueDescriptor and MTLCommandBufferDescriptor. */
 - (NSUInteger)maxCommandBufferCount;
 - (BOOL)retainedReferences;
+- (NSUInteger)errorOptions;
 /* MTLVisibleFunctionTableDescriptor. */
 - (NSUInteger)functionCount;
 /* NSBundle. */
@@ -533,6 +554,7 @@ extern NSString *const MTLLogStateErrorDomain;
 extern NSString *const MTLDynamicLibraryDomain;
 extern NSString *const MTLBinaryArchiveDomain;
 extern NSString *const MTLCommandBufferErrorDomain;
+extern NSString *const MTLCommandBufferEncoderInfoErrorKey;
 extern NSString *const MTLCounterErrorDomain;
 extern NSString *const MTLCommonCounterSetTimestamp;
 extern NSString *const MTLCommonCounterSetStatistic;

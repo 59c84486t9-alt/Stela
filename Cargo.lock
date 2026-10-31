@@ -2168,6 +2168,7 @@ dependencies = [
  "stela-drivers",
  "stela-engine",
  "stela-formats",
+ "stela-gpu-maintenance",
  "stela-loader",
  "stela-runtime",
  "stela-soc",
@@ -2354,6 +2355,23 @@ dependencies = [
  "sha2",
  "stela-contracts",
  "stela-crypto",
+]
+
+[[package]]
+name = "stela-gpu-maintenance"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "hex",
+ "libc",
+ "plist",
+ "serde",
+ "serde_json",
+ "sha2",
+ "stela-formats",
+ "stela-loader",
+ "tempfile",
 ]
 
 [[package]]

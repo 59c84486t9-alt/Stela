@@ -133,6 +133,37 @@ pub struct ObjectTable<T> {
     closed: bool,
 }
 
+/// Exclusive publication capacity, acquired before creating an external owner.
+/// Dropping it publishes nothing and consumes no generation. The mutable table
+/// borrow excludes every change between allocation preflight and publication.
+pub struct ObjectReservation<'a, T> {
+    table: &'a mut ObjectTable<T>,
+}
+
+impl<T> ObjectReservation<'_, T> {
+    /// Publishes into the already reserved slot without allocation or failure.
+    pub fn insert(self, value: T) -> ObjectHandle {
+        let table = self.table;
+        let (index, generation) = if let Some(index) = table.free {
+            let slot = &mut table.slots[index as usize];
+            let generation = slot.generation.expect("free slots have a generation");
+            table.free = slot.next_free.take();
+            slot.value = Some(value);
+            (index, generation)
+        } else {
+            let index = table.slots.len() as u32;
+            table.slots.push(Slot {
+                generation: Some(Generation::FIRST),
+                value: Some(value),
+                next_free: None,
+            });
+            (index, Generation::FIRST)
+        };
+        table.live += 1;
+        ObjectHandle::new(index, generation)
+    }
+}
+
 impl<T> ObjectTable<T> {
     /// Creates empty ownership storage without allocating or admitting a GPU.
     /// The registered dispatcher supplies the scope and a bounded slot ceiling.
@@ -183,6 +214,34 @@ impl<T> ObjectTable<T> {
         })
     }
 
+    /// Validates scope and reserves actual storage before an external owner is
+    /// created. No table operation can consume this capacity while borrowed.
+    pub fn reserve(
+        &mut self,
+        connection: NonZeroU64,
+        epoch: DeviceEpoch,
+    ) -> Result<ObjectReservation<'_, T>, TableError> {
+        self.reserve_with(connection, epoch, |slots| {
+            slots.try_reserve(1).map_err(|_| TableError::OutOfMemory)
+        })
+    }
+
+    fn reserve_with(
+        &mut self,
+        connection: NonZeroU64,
+        epoch: DeviceEpoch,
+        reserve: impl FnOnce(&mut Vec<Slot<T>>) -> Result<(), TableError>,
+    ) -> Result<ObjectReservation<'_, T>, TableError> {
+        self.check_scope(connection, epoch)?;
+        if self.free.is_none() {
+            if self.slots.len() >= self.max_slots.get() as usize {
+                return Err(TableError::Full);
+            }
+            reserve(&mut self.slots)?;
+        }
+        Ok(ObjectReservation { table: self })
+    }
+
     fn insert_with(
         &mut self,
         connection: NonZeroU64,
@@ -190,36 +249,10 @@ impl<T> ObjectTable<T> {
         value: T,
         reserve: impl FnOnce(&mut Vec<Slot<T>>) -> Result<(), TableError>,
     ) -> Result<ObjectHandle, InsertError<T>> {
-        if let Err(error) = self.check_scope(connection, epoch) {
-            return Err(InsertError { error, value });
+        match self.reserve_with(connection, epoch, reserve) {
+            Ok(reservation) => Ok(reservation.insert(value)),
+            Err(error) => Err(InsertError { error, value }),
         }
-        let (index, generation) = if let Some(index) = self.free {
-            let slot = &mut self.slots[index as usize];
-            // Only removal links a vacant, nonexhausted slot into this list.
-            let generation = slot.generation.unwrap();
-            self.free = slot.next_free.take();
-            slot.value = Some(value);
-            (index, generation)
-        } else {
-            if self.slots.len() >= self.max_slots.get() as usize {
-                return Err(InsertError {
-                    error: TableError::Full,
-                    value,
-                });
-            }
-            if let Err(error) = reserve(&mut self.slots) {
-                return Err(InsertError { error, value });
-            }
-            let index = self.slots.len() as u32;
-            self.slots.push(Slot {
-                generation: Some(Generation::FIRST),
-                value: Some(value),
-                next_free: None,
-            });
-            (index, Generation::FIRST)
-        };
-        self.live += 1;
-        Ok(ObjectHandle::new(index, generation))
     }
 
     pub fn get(
@@ -542,5 +575,43 @@ mod tests {
             table.get(connection, epoch, third),
             Err(TableError::StaleHandle)
         );
+    }
+
+    #[test]
+    fn cancelled_reservations_preserve_slot_and_generation() {
+        let (connection, epoch) = scope();
+        let mut table = table(1);
+        {
+            let _reserved = table.reserve(connection, epoch).unwrap();
+        }
+        assert!(table.is_empty());
+        let first = table.reserve(connection, epoch).unwrap().insert(17);
+        assert_eq!(first.generation(), Generation::FIRST);
+        table.remove(connection, epoch, first).unwrap();
+        {
+            let _reserved = table.reserve(connection, epoch).unwrap();
+        }
+        let reused = table.reserve(connection, epoch).unwrap().insert(29);
+        assert_eq!(reused.slot(), first.slot());
+        assert_eq!(reused.generation(), first.generation().next().unwrap());
+    }
+
+    #[test]
+    fn exhausted_slot_refuses_reservation_without_allocation() {
+        let (connection, epoch) = scope();
+        let mut table = table(1);
+        let initial = table.insert(connection, epoch, 17).unwrap();
+        let last = Generation(NonZeroU32::MAX);
+        table.slots[initial.slot() as usize].generation = Some(last);
+        table
+            .remove(connection, epoch, ObjectHandle::new(initial.slot(), last))
+            .unwrap();
+        assert!(table.is_empty());
+        assert!(matches!(
+            table.reserve_with(connection, epoch, |_| {
+                panic!("exhausted capacity attempted to allocate")
+            }),
+            Err(TableError::Full)
+        ));
     }
 }

@@ -2,6 +2,8 @@
 /* Linux's workqueues on the existing fixture's real Runtime tasks: the owner
  * starts each requested worker as a General job. */
 #include <linux/interrupt.h>
+#include <linux/err.h>
+#include <linux/kthread.h>
 #include <linux/reboot.h>
 #include <linux/sched.h>
 #include <linux/workqueue.h>
@@ -10,8 +12,8 @@
 #include <stela/test.h>
 #include <stela/workqueue.h>
 
-void stela_linux_workqueue_test_bind(void *context, int (*start_worker)(void *context));
-void stela_linux_workqueue_test_worker(void *context);
+void stela_linux_workqueue_test_bind(void *context, int (*start_worker)(void *context, unsigned int kind));
+void stela_linux_workqueue_test_worker(void *context, unsigned int kind);
 void stela_linux_workqueue_test_main(void *context);
 void stela_linux_i2c_test(void);
 void stela_linux_sync_test(void);
@@ -27,17 +29,51 @@ static s64 now_ns(void *context)
 
 struct start {
 	void *context;
-	int (*start_worker)(void *context);
+	int (*start_worker)(void *context, unsigned int kind);
 };
 
 static struct start start;
 static unsigned int started;
+static struct kthread_worker *dedicated;
+static struct kthread_work dedicated_work, dedicated_cancelled;
+static unsigned int dedicated_runs;
 
-static int start_worker(void *context)
+static void run_dedicated(struct kthread_work *work)
+{
+	assert(work == &dedicated_work && current == dedicated->task);
+	assert(!current_work() && !kthread_should_stop());
+	if (++dedicated_runs == 1)
+		assert(kthread_queue_work(dedicated, work));
+}
+
+static void forbidden_dedicated(struct kthread_work *work)
+{
+	(void)work;
+	assert(false);
+}
+
+static void dedicated_identity_and_join(void)
+{
+	dedicated = kthread_create_worker(0, "stela-dedicated");
+	assert(!IS_ERR(dedicated) && dedicated->task && dedicated->task != current);
+	kthread_init_work(&dedicated_work, run_dedicated);
+	kthread_init_work(&dedicated_cancelled, forbidden_dedicated);
+	assert(kthread_queue_work(dedicated, &dedicated_cancelled));
+	assert(kthread_cancel_work_sync(&dedicated_cancelled));
+	assert(kthread_queue_work(dedicated, &dedicated_work));
+	kthread_flush_worker(dedicated);
+	/* A requeue from the running item follows the first flush boundary. */
+	kthread_flush_worker(dedicated);
+	assert(dedicated_runs == 2);
+	kthread_destroy_worker(dedicated);
+}
+
+static void dedicated_exhaustion_preserves_both_workqueue_pools(void);
+static int start_worker(void *context, unsigned int kind)
 {
 	(void)context;
 	started++;
-	return start.start_worker(start.context);
+	return start.start_worker(start.context, kind);
 }
 
 static bool forced;
@@ -74,16 +110,18 @@ static const struct stela_linux_services services = {
 };
 static const struct stela_linux_owner owner = {.services = &services};
 
-void stela_linux_workqueue_test_bind(void *context, int (*start_worker_fn)(void *context))
+const struct stela_linux_owner *stela_linux_workqueue_test_owner(void) { return &owner; }
+
+void stela_linux_workqueue_test_bind(void *context, int (*start_worker_fn)(void *context, unsigned int kind))
 {
 	start = (struct start){.context = context, .start_worker = start_worker_fn};
 }
 
-void stela_linux_workqueue_test_worker(void *context)
+void stela_linux_workqueue_test_worker(void *context, unsigned int kind)
 {
 	(void)context;
 	stela_linux_enter(&owner);
-	stela_linux_workers_run();
+	stela_linux_workers_run(kind);
 	stela_linux_exit();
 }
 
@@ -132,6 +170,68 @@ static void run_later(struct work_struct *work)
 	later_done = true;
 }
 
+static struct work_struct nice_ordinary, nice_highpri;
+static struct task_struct *nice_ordinary_task;
+static bool nice_highpri_done;
+
+static void run_nice_highpri(struct work_struct *work)
+{
+	assert(work == &nice_highpri && current != nice_ordinary_task);
+	assert(current->policy == SCHED_NORMAL && task_nice(current) == MIN_NICE);
+	assert(current->normal_prio == NICE_TO_PRIO(MIN_NICE));
+	nice_highpri_done = true;
+}
+
+static void run_nice_ordinary(struct work_struct *work)
+{
+	assert(work == &nice_ordinary);
+	assert(current->policy == SCHED_NORMAL && !task_nice(current));
+	nice_ordinary_task = current;
+	assert(queue_work(system_highpri_wq, &nice_highpri));
+	/* A sleeping ordinary worker must not prevent the independent nice -20
+	 * pool from acquiring a real task and completing this dependency. */
+	assert(flush_work(&nice_highpri) && nice_highpri_done);
+	assert(current == nice_ordinary_task && !task_nice(current));
+}
+
+static void highpri_normal_nice_and_independent_pool(void)
+{
+	INIT_WORK(&nice_ordinary, run_nice_ordinary);
+	INIT_WORK(&nice_highpri, run_nice_highpri);
+	assert(schedule_work(&nice_ordinary));
+	assert(flush_work(&nice_ordinary) && nice_highpri_done);
+}
+
+/* Native pool profile: eight General continuations, four permanently
+ * reserved for the two nice pools. The main owner occupies one of the other
+ * four, so exactly three dedicated workers can be retained simultaneously. */
+static void dedicated_exhaustion_preserves_both_workqueue_pools(void)
+{
+	struct kthread_worker *held[8];
+	unsigned int count = 0;
+	for (;;) {
+		struct kthread_worker *next = kthread_create_worker(0, "stela-capacity");
+		if (IS_ERR(next)) {
+			assert(PTR_ERR(next) == -ENOMEM || PTR_ERR(next) == -ENOSPC);
+			break;
+		}
+		assert(count < ARRAY_SIZE(held));
+		held[count++] = next;
+	}
+	assert(count == 3);
+	/* These execute with all dedicated credits occupied, including a normal
+	 * callback waiting on its separately scheduled high-priority dependency. */
+	nice_highpri_done = false;
+	highpri_normal_nice_and_independent_pool();
+	for (unsigned int slot = 0; slot < count; slot++)
+		kthread_destroy_worker(held[slot]);
+	for (unsigned int pass = 0; pass < 3; pass++) {
+		struct kthread_worker *recreated = kthread_create_worker(0, "stela-recreated");
+		assert(!IS_ERR(recreated) && recreated->task != current);
+		kthread_destroy_worker(recreated);
+	}
+}
+
 static unsigned int hard_runs, other_runs, thread_runs;
 
 static irqreturn_t hard_handler(int irq, void *dev_id)
@@ -152,6 +252,7 @@ static irqreturn_t other_handler(int irq, void *dev_id)
 static irqreturn_t thread_handler(int irq, void *dev_id)
 {
 	assert(irq == 7 && dev_id == &hard_runs && !in_interrupt());
+	assert(current->policy == SCHED_NORMAL && task_nice(current) == MIN_NICE);
 	thread_runs++;
 	return IRQ_HANDLED;
 }
@@ -187,6 +288,7 @@ void stela_linux_workqueue_test_main(void *context)
 	destroy_workqueue(ordered);
 	destroy_workqueue(wq);
 
+	highpri_normal_nice_and_independent_pool();
 	orderly_poweroff(true);
 	flush_workqueue(system_wq);
 	assert(forced);
@@ -205,6 +307,8 @@ void stela_linux_workqueue_test_main(void *context)
 	assert(!strcmp(free_irq(7, &hard_runs), "threaded") && line_disables == 1);
 	assert(!strcmp(free_irq(7, &forced), "other") && line_disables == 2);
 	stela_linux_i2c_test();
+	dedicated_identity_and_join();
+	dedicated_exhaustion_preserves_both_workqueue_pools();
 	stela_linux_sync_test();
 	stela_linux_exit();
 }

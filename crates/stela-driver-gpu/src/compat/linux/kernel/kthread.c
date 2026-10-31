@@ -1,22 +1,27 @@
 // SPDX-License-Identifier: MIT
 /* Linux's kthread workers, with the interface of Linux
  * cc9de5d4b5ab6459f5774946aa3195ad51236fa8 kernel/kthread.c. A worker's items
- * run in order on an ordered workqueue, whose tasks the owner starts. It has
- * no task of its own: worker->task is its creator, which Linux's callers only
- * wake and prioritize. */
+ * run in order on their own retained task, which the native owner starts.
+ * The published task reference remains valid through stop and join. */
 #include <linux/completion.h>
 #include <linux/err.h>
 #include <linux/kthread.h>
 #include <linux/sched.h>
+#include <linux/sched/task.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/workqueue.h>
+#include <linux/wait_bit.h>
+#include <stela/workqueue.h>
 
 struct stela_worker {
 	struct kthread_worker worker;
-	struct workqueue_struct *queue;
-	struct work_struct pump;
+	struct list_head node;
+	char name[TASK_COMM_LEN];
+	bool stopping, done;
 };
+
+static LIST_HEAD(kthreads);
 
 static struct stela_worker *stela_worker(struct kthread_worker *worker)
 {
@@ -24,13 +29,28 @@ static struct stela_worker *stela_worker(struct kthread_worker *worker)
 }
 
 /* Items run with the lock released; each may queue more. */
-static void run_items(struct work_struct *pump)
+static void run_items(void *context)
 {
-	struct kthread_worker *worker = &container_of(pump, struct stela_worker, pump)->worker;
+	struct stela_worker *thread = context;
+	struct kthread_worker *worker = &thread->worker;
 	unsigned long flags;
+	strscpy(current->comm, thread->name, sizeof(current->comm));
+	get_task_struct(current);
+	WRITE_ONCE(worker->task, current);
+	wake_up_var(&worker->task);
 
 	raw_spin_lock_irqsave(&worker->lock, flags);
-	while (!list_empty(&worker->work_list)) {
+	for (;;) {
+		if (list_empty(&worker->work_list)) {
+			if (thread->stopping)
+				break;
+			set_current_state(TASK_INTERRUPTIBLE);
+			raw_spin_unlock_irqrestore(&worker->lock, flags);
+			schedule();
+			raw_spin_lock_irqsave(&worker->lock, flags);
+			continue;
+		}
+		__set_current_state(TASK_RUNNING);
 		struct kthread_work *work =
 			list_first_entry(&worker->work_list, struct kthread_work, node);
 
@@ -42,30 +62,38 @@ static void run_items(struct work_struct *pump)
 		worker->current_work = NULL;
 	}
 	raw_spin_unlock_irqrestore(&worker->lock, flags);
+	__set_current_state(TASK_RUNNING);
+	list_del_init(&thread->node);
+	/* No callback, yield or context access follows this acknowledgement.
+	 * The native wrapper exits its owner using its own retained storage. */
+	WRITE_ONCE(thread->done, true);
+	wake_up_var(&thread->done);
 }
 
 struct kthread_worker *kthread_create_worker_on_node(unsigned int flags, int node,
 						     const char namefmt[], ...)
 {
 	(void)node;
+	if (flags & ~(unsigned int)KTW_FREEZABLE)
+		return ERR_PTR(-EINVAL);
 	struct stela_worker *worker = kzalloc_obj(*worker);
-	char name[32];
 	va_list arguments;
 
 	if (!worker)
 		return ERR_PTR(-ENOMEM);
 	va_start(arguments, namefmt);
-	vsnprintf(name, sizeof(name), namefmt, arguments);
+	vsnprintf(worker->name, sizeof(worker->name), namefmt, arguments);
 	va_end(arguments);
 	__kthread_init_worker(&worker->worker, "stela", NULL);
 	worker->worker.flags = flags;
-	worker->worker.task = current;
-	INIT_WORK(&worker->pump, run_items);
-	worker->queue = alloc_ordered_workqueue("%s", 0, name);
-	if (!worker->queue) {
+	list_add_tail(&worker->node, &kthreads);
+	int error = stela_linux_start_task(run_items, worker);
+	if (error) {
+		list_del(&worker->node);
 		kfree(worker);
-		return ERR_PTR(-ENOMEM);
+		return ERR_PTR(error);
 	}
+	wait_var_event(&worker->worker.task, READ_ONCE(worker->worker.task));
 	return &worker->worker;
 }
 
@@ -85,7 +113,7 @@ static void insert(struct kthread_worker *worker, struct kthread_work *work, str
 {
 	list_add_tail(&work->node, pos);
 	work->worker = worker;
-	queue_work(stela_worker(worker)->queue, &stela_worker(worker)->pump);
+	wake_up_process(worker->task);
 }
 
 bool kthread_queue_work(struct kthread_worker *worker, struct kthread_work *work)
@@ -94,7 +122,7 @@ bool kthread_queue_work(struct kthread_worker *worker, struct kthread_work *work
 	bool queued = false;
 
 	raw_spin_lock_irqsave(&worker->lock, flags);
-	if (list_empty(&work->node) && !work->canceling) {
+	if (list_empty(&work->node) && !work->canceling && !stela_worker(worker)->stopping) {
 		insert(worker, work, &worker->work_list);
 		queued = true;
 	}
@@ -177,14 +205,28 @@ bool kthread_cancel_work_sync(struct kthread_work *work)
 
 void kthread_destroy_worker(struct kthread_worker *worker)
 {
+	if (WARN_ON_ONCE(current == worker->task))
+		return;
 	kthread_flush_worker(worker);
 	WARN_ON(!list_empty(&worker->work_list));
-	destroy_workqueue(stela_worker(worker)->queue);
-	kfree(stela_worker(worker));
+	struct stela_worker *thread = stela_worker(worker);
+	unsigned long flags;
+	raw_spin_lock_irqsave(&worker->lock, flags);
+	thread->stopping = true;
+	wake_up_process(worker->task);
+	put_task_struct(worker->task);
+	raw_spin_unlock_irqrestore(&worker->lock, flags);
+	wait_var_event(&thread->done, READ_ONCE(thread->done));
+	kfree(thread);
 }
 
-/* Stela's tasks have no priorities. */
-void sched_set_fifo(struct task_struct *p)
+bool kthread_should_stop(void)
 {
-	(void)p;
+	struct stela_worker *thread;
+	list_for_each_entry(thread, &kthreads, node)
+		if (thread->worker.task == current)
+			return thread->stopping;
+	return false;
 }
+
+bool kthread_should_stop_or_park(void) { return kthread_should_stop(); }

@@ -13,6 +13,7 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
 };
+use stela_loader::{aux_kc::TRUSTED_CODE_FILE, trust_cache::CodeHash};
 
 pub mod sdk;
 pub mod wire;
@@ -21,6 +22,8 @@ pub mod wire;
 const TARGET: &str = "arm64e-apple-macos27.0";
 /// What the Metal plugin's `Info.plist` and signature identify it as.
 const BUNDLE_IDENTIFIER: &str = "com.stela.StelaGPU.Metal";
+/// The Metal plugin's executable in its bundle.
+const BUNDLE_EXECUTABLE: &str = "Contents/MacOS/StelaGPU";
 /// The Metal plugin's slices: Metal loads it into processes of either.
 const BUNDLE_TARGETS: [(&str, &str); 2] = [("arm64", "arm64-apple-macos27.0"), ("arm64e", TARGET)];
 
@@ -33,11 +36,14 @@ pub fn run() -> Result<()> {
     sdk::generate(&xnu, &include)?;
     wire::generate(&root.join("crates/stela-driver-gpu/src/metal"), &include)?;
     let component = root.join("guest/stela-gpu");
-    let kext = build_kext(&component, &output, &xnu, &include)?;
-    embed_kext(&kext, &output.join("StelaGPU.kext.rs"))?;
-    println!("StelaGPU kext: {}", kext.display());
     let bundle = build_bundle(&component, &output, &include)?;
     println!("StelaGPU bundle: {}", bundle.display());
+    let kext = build_kext(&component, &output, &xnu, &include)?;
+    let code = stela_loader::plugin::code_hashes(&fs::read(bundle.join(BUNDLE_EXECUTABLE))?)?;
+    fs::write(kext.join(TRUSTED_CODE_FILE), code.concat())?;
+    embed_kext(&kext, &code, &output.join("StelaGPU.kext.rs"))?;
+    stela_cli::gpu::Payload::write(&output)?;
+    println!("StelaGPU kext: {}", kext.display());
     Ok(())
 }
 
@@ -102,7 +108,7 @@ fn build_bundle(component: &Path, output: &Path, include: &Path) -> Result<PathB
     let contents = bundle.join("Contents");
     fs::create_dir_all(contents.join("MacOS"))?;
     fs::copy(source.join("Info.plist"), contents.join("Info.plist"))?;
-    fs::write(contents.join("MacOS/StelaGPU"), executable)?;
+    fs::write(bundle.join(BUNDLE_EXECUTABLE), executable)?;
     Ok(bundle)
 }
 
@@ -162,8 +168,9 @@ fn build_kext(component: &Path, output: &Path, xnu: &Path, include: &Path) -> Re
 }
 
 /// Writes the Rust `stela.efi` includes for `kext`'s `INFO` and `OBJECTS`, as
-/// it links them against each boot's own kernel.
-fn embed_kext(kext: &Path, source: &Path) -> Result<()> {
+/// it links them against each boot's own kernel, and `TRUSTED_CODE`, `code`
+/// as that boot's trust cache lists it.
+fn embed_kext(kext: &Path, code: &[CodeHash], source: &Path) -> Result<()> {
     let mut objects: Vec<_> = fs::read_dir(kext)?
         .map(|entry| Ok(entry?.path()))
         .collect::<Result<_>>()?;
@@ -178,7 +185,8 @@ fn embed_kext(kext: &Path, source: &Path) -> Result<()> {
         source,
         format!(
             "pub static INFO: &[u8] = include_bytes!({:?});\n\
-             pub static OBJECTS: &[&[u8]] = &[\n{includes}];\n",
+             pub static OBJECTS: &[&[u8]] = &[\n{includes}];\n\
+             pub static TRUSTED_CODE: &[[u8; 20]] = &{code:?};\n",
             info.display().to_string()
         ),
     )?;

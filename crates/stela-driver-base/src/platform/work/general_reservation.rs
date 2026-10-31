@@ -80,6 +80,146 @@ impl Eligibility {
     }
 }
 impl<const N: usize> Runtime<N> {
+    /// Constructor capacity for simultaneous General jobs with this geometry,
+    /// bounded by both owned stacks and their permitted admission slots.
+    pub fn general_capacity(&self, requirement: StackRequirement) -> Result<usize, WorkError> {
+        self.queue.process()?;
+        let slots = self
+            .layout
+            .admission(Lane::General, N)?
+            .into_iter()
+            .flatten()
+            .count();
+        // SAFETY: immutable constructor geometry, on the runtime process CPU.
+        Ok(unsafe { &*self.tasks.get() }
+            .iter()
+            .filter(|task| {
+                task.lane == Lane::General
+                    && stack_requirement::compatible(
+                        Some(requirement),
+                        stack_requirement::Geometry::of(&task.stack),
+                    )
+            })
+            .count()
+            .min(slots))
+    }
+    /// Assign work to a real idle compatible General continuation immediately.
+    /// Kept bindings are reusable only when their exact retained objects appear
+    /// in `reusable_bindings`; unrelated foreign continuation state is excluded.
+    /// Unlike queue admission, success guarantees a stack even for a task that
+    /// may remain parked indefinitely. This works on the process CPU from its
+    /// dispatcher or a running task, and never invokes the callback inline.
+    ///
+    /// # Safety
+    /// As for [`Queue::execute`]. The body fits `requirement` and correctly
+    /// enters/reuses any supplied binding before accessing its foreign state.
+    pub unsafe fn execute_idle_general(
+        self: Pin<&Self>,
+        requirement: StackRequirement,
+        callback: Callback,
+        context: *mut c_void,
+        reusable_bindings: &[&dyn SwitchBinding],
+    ) -> Result<Ticket, WorkError> {
+        // SAFETY: forwards the caller's callback, geometry and binding contract.
+        unsafe {
+            self.execute_idle_general_with_headroom(
+                requirement,
+                callback,
+                context,
+                reusable_bindings,
+                0,
+            )
+        }
+    }
+    /// As `execute_idle_general`, while leaving at least `minimum_idle`
+    /// compatible reusable idle continuations and free admission slots for
+    /// other declared producers.
+    ///
+    /// # Safety
+    /// The callback, geometry and binding contract is `execute_idle_general`'s.
+    pub unsafe fn execute_idle_general_with_headroom(
+        self: Pin<&Self>,
+        requirement: StackRequirement,
+        callback: Callback,
+        context: *mut c_void,
+        reusable_bindings: &[&dyn SwitchBinding],
+        minimum_idle: usize,
+    ) -> Result<Ticket, WorkError> {
+        self.queue.process()?;
+        let flags = self.queue.cpu.save_disable()?;
+        let result = (|| {
+            let mut guard = self.queue.lock()?;
+            let state = guard.state();
+            if self.retired.get()
+                || state.closed
+                || state.poisoned
+                || self.queue.abandoned.load(Ordering::Acquire)
+            {
+                return Err(WorkError::Closed);
+            }
+            let mut free_slots = state
+                .layout
+                .admission(Lane::General, N)?
+                .into_iter()
+                .flatten()
+                .filter(|slot| state.jobs[*slot].is_none() && state.reservations[*slot] == 0);
+            let slot = free_slots.next().ok_or(WorkError::Full)?;
+            if free_slots.count() < minimum_idle {
+                return Err(WorkError::Full);
+            }
+            // SAFETY: process CPU at IF0; every other continuation is stopped.
+            let count = unsafe { (*self.tasks.get()).len() };
+            let mut idle = (0..count).filter(|index| {
+                // SAFETY: immutable constructor-owned entry, bounded above.
+                let task = unsafe { &*self.task(*index) };
+                task.lane == Lane::General
+                    && task.state == TaskState::Idle
+                    && task.job.is_none()
+                    && !task.draining
+                    && task.signal.sequence.load(Ordering::Acquire) == 0
+                    && task.binding.as_ref().is_none_or(|binding| {
+                        reusable_bindings
+                            .iter()
+                            .any(|allowed| core::ptr::addr_eq(Arc::as_ref(binding), *allowed))
+                    })
+                    && stack_requirement::compatible(
+                        Some(requirement),
+                        stack_requirement::Geometry::of(&task.stack),
+                    )
+            });
+            let worker = idle.next().ok_or(WorkError::Full)?;
+            if idle.count() < minimum_idle {
+                return Err(WorkError::Full);
+            }
+            let sequence = state.next;
+            let next = sequence.checked_add(1).ok_or(WorkError::Exhausted)?;
+            // SAFETY: exact idle entry selected above while all frames are stopped.
+            let task = unsafe { &mut *self.task(worker) };
+            state.scheduling.insert(task.id, sequence, false)?;
+            let job = Job {
+                callback,
+                context: context as usize,
+                lane: Lane::General,
+                sequence,
+                running: true,
+                requirement: Some(requirement),
+            };
+            state.next = next;
+            state.jobs[slot] = Some(job);
+            task.job = Some((slot, job));
+            task.flags = flags;
+            task.state = TaskState::Ready;
+            task.signal.pending.store(false, Ordering::Relaxed);
+            task.signal.sequence.store(sequence, Ordering::Release);
+            Ok(Ticket {
+                queue: self.queue.id,
+                sequence,
+            })
+        })();
+        // SAFETY: all borrows end before restoring exactly the incoming flags.
+        unsafe { self.queue.cpu.restore(flags) };
+        result
+    }
     /// Reserve one idle, unbound compatible General worker and one
     /// ordinary job slot. This publishes no callback, ticket, C task or current.
     /// All mutations follow real scope/current checks. Incoming IF is restored

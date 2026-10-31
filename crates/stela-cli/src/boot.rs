@@ -7,6 +7,7 @@ use anyhow::{Context, Result, bail, ensure};
 use clap::{Args, Subcommand};
 use std::{fs::OpenOptions, io::Write, path::PathBuf};
 use stela_formats::payload::Purpose;
+use stela_loader::aux_kc::{Linked, TRUSTED_CODE_FILE};
 use stela_loader::boot_bundle::{
     self, Input, Inputs, Options, OverlayProperty, RootHash, Source, Target,
 };
@@ -16,6 +17,7 @@ use stela_loader::boot_policy::{
 use stela_loader::handoff::{self, BootCommand as FirmwareBootCommand};
 use stela_loader::im4m;
 use stela_loader::root_selection::Root;
+use stela_loader::trust_cache::CodeHash;
 
 mod board_firmware;
 mod disk;
@@ -641,17 +643,23 @@ pub(super) fn boot_args(console: &str, mode: &[&str]) -> String {
     line
 }
 
-/// A `--kext` directory's `Info.plist`, objects and name.
-type KextBundle = (Vec<u8>, Vec<Vec<u8>>, String);
+/// A `--kext` directory's `Info.plist`, objects, name and trusted code.
+struct KextBundle {
+    info: Vec<u8>,
+    objects: Vec<Vec<u8>>,
+    name: String,
+    trusted_code: Vec<CodeHash>,
+}
 
 /// `bundles` as the linker takes them.
 fn kexts(bundles: &[KextBundle]) -> Vec<stela_loader::aux_kc::Kext<'_>> {
     bundles
         .iter()
-        .map(|(info, objects, name)| stela_loader::aux_kc::Kext {
-            info,
-            objects: objects.iter().map(Vec::as_slice).collect(),
-            bundle_path: format!("/Library/Extensions/{name}"),
+        .map(|bundle| stela_loader::aux_kc::Kext {
+            info: &bundle.info,
+            objects: bundle.objects.iter().map(Vec::as_slice).collect(),
+            bundle_path: format!("/Library/Extensions/{}", bundle.name),
+            trusted_code: bundle.trusted_code.clone(),
         })
         .collect()
 }
@@ -682,24 +690,45 @@ impl Prepare {
                 .iter()
                 .map(|path| read(path))
                 .collect::<Result<Vec<_>>>()?;
-            bundles.push((
-                read(&directory.join("Info.plist"))?,
+            let trusted = directory.join(TRUSTED_CODE_FILE);
+            let trusted_code = match std::fs::read(&trusted) {
+                Ok(bytes) => stela_loader::trust_cache::code_hashes(&bytes)
+                    .with_context(|| format!("{}: invalid trusted code", trusted.display()))?,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("cannot read {}", trusted.display()));
+                }
+            };
+            bundles.push(KextBundle {
+                info: read(&directory.join("Info.plist"))?,
                 objects,
-                name.to_owned(),
-            ));
+                name: name.to_owned(),
+                trusted_code,
+            });
         }
         Ok(bundles)
     }
 
+    /// The trust cache module of the code the `--kext` bundles install.
+    fn kext_code(kexts: &[stela_loader::aux_kc::Kext<'_>]) -> Result<Option<Decoded>> {
+        Ok(Linked::trust_cache(kexts)?.map(|(source, bytes)| Decoded {
+            source,
+            bytes,
+            declared_digest: None,
+        }))
+    }
+
     /// The `--kext` bundles linked against `kernel` (`stela_loader::aux_kc`).
-    fn auxiliary_collection(&self, kernel: &[u8]) -> Result<Option<(Decoded, KextGrant)>> {
-        if self.kexts.is_empty() {
+    fn auxiliary_collection(
+        kernel: &[u8],
+        kexts: &[stela_loader::aux_kc::Kext<'_>],
+    ) -> Result<Option<(Decoded, KextGrant)>> {
+        if kexts.is_empty() {
             return Ok(None);
         }
-        let bundles = self.kext_bundles()?;
-        let kexts = kexts(&bundles);
-        let linked = stela_loader::aux_kc::link(kernel, &kexts)?;
-        let source = linked.source(&kexts);
+        let linked = stela_loader::aux_kc::link(kernel, kexts)?;
+        let source = linked.source(kexts);
         let grant = linked.grant();
         let bytes = linked.collection;
         let declared_digest = None;
@@ -934,7 +963,10 @@ impl Prepare {
                 ))
             })
             .collect::<Result<Vec<_>>>()?;
-        let (auxiliary, kexts) = self.auxiliary_collection(&kernel.bytes)?.unzip();
+        let bundles = self.kext_bundles()?;
+        let extensions = kexts(&bundles);
+        let (auxiliary, kexts) = Self::auxiliary_collection(&kernel.bytes, &extensions)?.unzip();
+        let kext_code = Self::kext_code(&extensions)?;
         // Set below when the images come from the restore ramdisk.
         let sourced: Vec<(String, Decoded)>;
         let ramdisk_component: Decoded;
@@ -957,7 +989,11 @@ impl Prepare {
             sep_firmware: sep.as_ref().map(input),
             boot_manifest: boot_manifest.as_ref().map(input),
             cryptex1_manifest: cryptex1_manifest.as_ref().map(input),
-            extra_trust_caches: cryptex_trust_caches.iter().map(input).collect(),
+            extra_trust_caches: cryptex_trust_caches
+                .iter()
+                .chain(&kext_code)
+                .map(input)
+                .collect(),
             ramdisk: ramdisk.as_ref().map(input),
             root_hash: root_hash.as_ref().map(|(volume, decoded)| RootHash {
                 volume: *volume,

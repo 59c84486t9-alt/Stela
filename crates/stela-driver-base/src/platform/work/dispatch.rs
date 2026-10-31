@@ -45,6 +45,7 @@ impl<const N: usize> Runtime<N> {
             return Err(WorkError::Busy);
         }
         let index = self.current.get();
+        let now = self.queue.scheduling_now()?;
         let flags = self.queue.cpu.save_disable()?;
         let view = self.context_view(index, true);
         let admission = {
@@ -66,11 +67,17 @@ impl<const N: usize> Runtime<N> {
                 // Pure bounded preflight before foreign leave commits. Native
                 // IRQ delivery is excluded; exhaustion after a hook's explicit
                 // generic peer wake remains a terminal transition failure.
-                self.queue.lock()?.state().scheduling.can_suspend(
-                    ContextId(view.context_id),
-                    view.sequence,
-                    reason,
-                )?;
+                {
+                    let mut guard = self.queue.lock()?;
+                    guard.state().scheduling.can_suspend(
+                        ContextId(view.context_id),
+                        view.sequence,
+                        reason,
+                    )?;
+                    // Charge before a foreign leave hook can wake a sleeper;
+                    // its placement must observe the current CPU service floor.
+                    guard.state().scheduling.account(now)?;
+                }
                 if let Some(binding) = binding {
                     // SAFETY: transactional prepared commit only, no lock/alloc/drop/switch.
                     unsafe { binding.leave(&view, reason)? };
@@ -178,6 +185,7 @@ impl<const N: usize> Runtime<N> {
         } else {
             false
         };
+        let now = self.queue.scheduling_now()?;
         let flags = self.queue.cpu.save_disable()?;
         // SAFETY: the task list's length never changes after construction.
         let count = unsafe { (*self.tasks.get()).len() };
@@ -311,6 +319,7 @@ impl<const N: usize> Runtime<N> {
             self.queue.lock()?.state().scheduling.running(
                 task.id,
                 task.job.ok_or(WorkError::CorruptContext)?.1.sequence,
+                now,
             )
         })();
         if let Err(error) = running {

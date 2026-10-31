@@ -1,6 +1,8 @@
 use super::*;
 use alloc::{vec, vec::Vec};
 
+mod scanout;
+
 fn mode(width: u16, height: u16, kind: u32) -> ModeInfo {
     ModeInfo {
         hdisplay: width,
@@ -18,10 +20,15 @@ struct Card {
     set: Option<(ModeInfo, u32)>,
     /// Requests to answer `EBUSY` before a flip succeeds.
     busy: u32,
+    flip_error: Option<i64>,
     relaxed: u32,
     flips: Vec<u32>,
     next: u32,
     memory: Vec<Vec<u8>>,
+    pitches: Vec<u32>,
+    invalid_buffer: Option<(u32, u64)>,
+    resource_changes: usize,
+    mode_changes: usize,
 }
 
 impl Card {
@@ -31,10 +38,15 @@ impl Card {
             possible_crtcs: 0b10,
             set: None,
             busy: 0,
+            flip_error: None,
             relaxed: 0,
             flips: Vec::new(),
             next: 100,
             memory: Vec::new(),
+            pitches: Vec::new(),
+            invalid_buffer: None,
+            resource_changes: 0,
+            mode_changes: 0,
         }
     }
 
@@ -44,7 +56,9 @@ impl Card {
     }
 }
 
-impl Drm for &mut Card {
+// SAFETY: each mapping owns a separate Vec whose allocation stays put in
+// `memory` until the card is dropped, after the borrowing display.
+unsafe impl Drm for &mut Card {
     fn control(&mut self, request: u32, argument: *mut c_void) -> i64 {
         // SAFETY: each arm reads the record its request carries.
         unsafe {
@@ -61,6 +75,10 @@ impl Drm for &mut Card {
                     }
                     resources.crtc_count = 2;
                     resources.connector_count = 2;
+                    if resources.crtcs != 0 && self.resource_changes != 0 {
+                        self.resource_changes -= 1;
+                        resources.connector_count = 3;
+                    }
                 }
                 GET_CONNECTOR => {
                     let connector = &mut *argument.cast::<Connector>();
@@ -80,6 +98,10 @@ impl Drm for &mut Card {
                     );
                     connector.mode_count = modes.len() as u32;
                     connector.encoder_count = 1;
+                    if connected && connector.modes != 0 && self.mode_changes != 0 {
+                        self.mode_changes -= 1;
+                        connector.mode_count += 1;
+                    }
                 }
                 GET_ENCODER => {
                     let encoder = &mut *argument.cast::<Encoder>();
@@ -88,8 +110,16 @@ impl Drm for &mut Card {
                 }
                 CREATE_DUMB => {
                     let dumb = &mut *argument.cast::<CreateDumb>();
-                    dumb.pitch = dumb.width * BYTES_PER_PIXEL + 16;
+                    dumb.pitch = self
+                        .pitches
+                        .get(self.memory.len())
+                        .copied()
+                        .unwrap_or(dumb.width * BYTES_PER_PIXEL + 16);
                     dumb.size = u64::from(dumb.pitch) * u64::from(dumb.height);
+                    if let Some((pitch, size)) = self.invalid_buffer {
+                        dumb.pitch = pitch;
+                        dumb.size = size;
+                    }
                     dumb.handle = self.id();
                 }
                 ADD_FB2 => {
@@ -106,6 +136,9 @@ impl Drm for &mut Card {
                     self.set = Some((crtc.mode, crtc.framebuffer));
                 }
                 PAGE_FLIP => {
+                    if let Some(error) = self.flip_error.take() {
+                        return error;
+                    }
                     if self.busy != 0 {
                         self.busy -= 1;
                         return BUSY;
@@ -119,7 +152,7 @@ impl Drm for &mut Card {
     }
 
     fn map(&mut self, _: u64, bytes: usize) -> Option<NonNull<u8>> {
-        self.memory.push(vec![0; bytes]);
+        self.memory.push(vec![0xa5; bytes]);
         NonNull::new(self.memory.last_mut()?.as_mut_ptr())
     }
 

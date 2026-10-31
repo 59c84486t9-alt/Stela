@@ -5,6 +5,13 @@
  */
 #include "Bundle.h"
 
+static CFTimeInterval host_time(void)
+{
+	mach_timebase_info_data_t timebase;
+	mach_timebase_info(&timebase);
+	return (double)mach_absolute_time() * timebase.numer / timebase.denom / 1e9;
+}
+
 @implementation StelaGPUQueue {
 	os_unfair_lock _lock;
 	/* Enqueued command buffers, which commit in this order. */
@@ -56,9 +63,11 @@
 
 - (id)commandBufferWithDescriptor:(id)descriptor
 {
-	return [[StelaGPUCommandBuffer alloc] initWithQueue:self
+	StelaGPUCommandBuffer *buffer = [[StelaGPUCommandBuffer alloc] initWithQueue:self
 					  retainsReferences:[descriptor retainedReferences]
 						   logState:[descriptor logState] ?: _logState];
+	buffer.errorOptions = [descriptor errorOptions];
+	return buffer;
 }
 
 - (void)insertDebugCaptureBoundary
@@ -90,10 +99,15 @@
 @end
 
 @implementation StelaGPUCommandBuffer {
+	dispatch_group_t _scheduling;
 	dispatch_group_t _completion;
 	NSMutableArray *_scheduledHandlers, *_completedHandlers;
 	NSError *_error;
-	NSUInteger _status;
+	_Atomic(NSUInteger) _status;
+	NSUInteger _errorOptions;
+	NSMutableArray *_encoderInfos;
+	os_unfair_lock _referencesLock;
+	CFTimeInterval _kernelStart, _kernelEnd;
 	bool _enqueued;
 	bool _retains;
 }
@@ -107,7 +121,9 @@
 		_queue = queue;
 		_device = queue->_device;
 		_retains = retains;
+		_referencesLock = OS_UNFAIR_LOCK_INIT;
 		_retained = retains ? [NSMutableArray arrayWithCapacity:64] : nil;
+		_scheduling = dispatch_group_create();
 		_completion = dispatch_group_create();
 		_scheduledHandlers = [NSMutableArray arrayWithCapacity:2];
 		_completedHandlers = [NSMutableArray arrayWithCapacity:2];
@@ -117,6 +133,7 @@
 			StelaHandle buffer = {.handle = [logState bufferHandle]};
 			stela_stream_entry(&_stream, StelaCommandBufferCodeLogBuffer, &buffer, sizeof(buffer), NULL, 0);
 		}
+		dispatch_group_enter(_scheduling);
 		dispatch_group_enter(_completion);
 	}
 	return self;
@@ -125,6 +142,7 @@
 - (void)dealloc
 {
 	stela_stream_free(&_stream);
+	dispatch_release(_scheduling);
 	dispatch_release(_completion);
 }
 
@@ -145,12 +163,34 @@
 
 - (NSUInteger)errorOptions
 {
-	return 0;
+	return _errorOptions;
+}
+
+- (void)setErrorOptions:(NSUInteger)options
+{
+	_errorOptions = options;
+	_encoderInfos = options & MTLCommandBufferErrorOptionEncoderExecutionStatus
+			? [NSMutableArray arrayWithCapacity:4]
+			: nil;
+}
+
+- (StelaGPUEncoderInfo *)recordEncoder
+{
+	if (!_encoderInfos) {
+		return nil;
+	}
+	StelaGPUEncoderInfo *info = [StelaGPUEncoderInfo new];
+	info.label = @"";
+	info.debugSignposts = [NSArray array];
+	os_unfair_lock_lock(&_referencesLock);
+	[_encoderInfos addObject:info];
+	os_unfair_lock_unlock(&_referencesLock);
+	return info;
 }
 
 - (id)logs
 {
-	return nil;
+	return stela_empty_logs();
 }
 
 - (NSUInteger)status
@@ -166,7 +206,10 @@
 - (void)use:(id)object
 {
 	if (object) {
+		/* Parallel render encoders share this command buffer's references. */
+		os_unfair_lock_lock(&_referencesLock);
 		[_retained addObject:object];
+		os_unfair_lock_unlock(&_referencesLock);
 	}
 }
 
@@ -190,6 +233,7 @@
 /* Under the queue's lock, so serials follow the order of enqueue. */
 - (void)submit
 {
+	_kernelStart = host_time();
 	[_logState commandBufferStarted];
 	[_device flushIndirect];
 	StelaCommitRequest request = {.commands = stela_span(_stream.bytes, _stream.length)};
@@ -197,32 +241,36 @@
 	StelaFailure failure;
 	StelaSpans spans = {.reads = &request.commands, .read_count = 1};
 	if (STELA_CALL_SPANS(&_device->_gate, Commit, &request, &serial, spans, &failure) != StelaStatusOk) {
+		_kernelEnd = host_time();
 		[_device failed:self with:failure];
 		return;
 	}
 	stela_stream_free(&_stream);
 	_serial = serial.value;
+	_kernelEnd = host_time();
 	[_device track:self];
 }
 
 /* On the device's queue, ahead of completion. */
 - (void)didSchedule
 {
+	/* A completion notification can beat the device's queued scheduling callback. */
+	if (_status >= MTLCommandBufferStatusScheduled) {
+		return;
+	}
 	_status = MTLCommandBufferStatusScheduled;
 	for (NSUInteger i = 0; i < _scheduledHandlers.count; i++) {
 		((void (^)(id))[_scheduledHandlers objectAtIndex:i])(self);
 	}
 	[_scheduledHandlers removeAllObjects];
+	dispatch_group_leave(_scheduling);
 }
 
 - (void)didCompleteWith:(const StelaFailure *)failure
 {
 	[self didSchedule];
 	if (failure) {
-		_error = stela_error(MTLCommandBufferErrorDomain,
-				     failure->status == StelaStatusDeviceLost ? MTLCommandBufferErrorDeviceRemoved
-									      : MTLCommandBufferErrorInternal,
-				     failure);
+		_error = stela_command_error(failure, _encoderInfos, _serial != 0);
 	}
 	_status = failure ? MTLCommandBufferStatusError : MTLCommandBufferStatusCompleted;
 	[_logState commandBufferEnded];
@@ -230,7 +278,9 @@
 		((void (^)(id))[_completedHandlers objectAtIndex:i])(self);
 	}
 	[_completedHandlers removeAllObjects];
+	os_unfair_lock_lock(&_referencesLock);
 	[_retained removeAllObjects];
+	os_unfair_lock_unlock(&_referencesLock);
 	dispatch_group_leave(_completion);
 }
 
@@ -255,7 +305,7 @@
 
 - (void)waitUntilScheduled
 {
-	[self waitUntilCompleted];
+	dispatch_group_wait(_scheduling, DISPATCH_TIME_FOREVER);
 }
 
 - (void)waitUntilCompleted
@@ -265,12 +315,12 @@
 
 - (CFTimeInterval)kernelStartTime
 {
-	return [self GPUStartTime];
+	return _status >= MTLCommandBufferStatusScheduled ? _kernelStart : 0;
 }
 
 - (CFTimeInterval)kernelEndTime
 {
-	return [self GPUEndTime];
+	return _status >= MTLCommandBufferStatusScheduled ? _kernelEnd : 0;
 }
 
 - (StelaCommandBufferTimesResponse)times

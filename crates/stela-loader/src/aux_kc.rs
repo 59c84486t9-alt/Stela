@@ -38,11 +38,16 @@ use stela_contracts::{refuse, require};
 use crate::boot_bundle::Source;
 use crate::boot_policy::KextGrant;
 use crate::kernel_collection::PAGE_BYTES;
+use crate::trust_cache::{self, CodeHash};
 use boot::BootCollection;
 use commands::{Commands, SectionCommand, SegmentCommand};
 use prelink::{Entry, Placement};
 use sha2::{Digest, Sha384};
 use unit::{Region, Unit};
+
+/// The file of a built kext's directory listing `Kext::trusted_code`, its
+/// hashes one after another.
+pub const TRUSTED_CODE_FILE: &str = "TrustedCode";
 
 /// A kext to link into the collection.
 pub struct Kext<'a> {
@@ -53,6 +58,20 @@ pub struct Kext<'a> {
     /// The bundle's path in the installed system, where the kernel expects
     /// to find it.
     pub bundle_path: String,
+    /// The code the kext installs, which the boot's trust cache must list.
+    pub trusted_code: Vec<CodeHash>,
+}
+
+impl Kext<'_> {
+    /// Source identity shared by the prelinked and on-disk executables.
+    /// Placement and the boot collection do not change this UUID.
+    pub fn uuid(&self) -> [u8; 16] {
+        unit::uuid(
+            [self.info, self.bundle_path.as_bytes()]
+                .into_iter()
+                .chain(self.objects.iter().copied()),
+        )
+    }
 }
 
 /// The collection's segments by index, in address order.
@@ -120,6 +139,30 @@ impl Linked {
             decoded_bytes: self.collection.len() as u64,
             decoded_sha256: digest,
         }
+    }
+
+    /// The trust cache module of the code `kexts` install, with what a
+    /// bundle's manifest says it is; none when they install no code.
+    pub fn trust_cache(kexts: &[Kext<'_>]) -> Result<Option<(Source, Vec<u8>)>> {
+        let hashes: Vec<CodeHash> = kexts
+            .iter()
+            .flat_map(|kext| kext.trusted_code.iter().copied())
+            .collect();
+        if hashes.is_empty() {
+            return Ok(None);
+        }
+        let module = trust_cache::module(&hashes)?;
+        let digest = stela_formats::sha256(&module);
+        let source = Source {
+            component: "KextCodeTrustCache".into(),
+            description: "the code the auxiliary collection's kexts install".into(),
+            member: "trust cache".into(),
+            container_sha256: digest.clone(),
+            payload_type: "raw".into(),
+            decoded_bytes: module.len() as u64,
+            decoded_sha256: digest,
+        };
+        Ok(Some((source, module)))
     }
 
     /// The LocalPolicy grant admitting this collection. A receipt lists the

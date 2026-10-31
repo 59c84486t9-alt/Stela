@@ -12,6 +12,7 @@ use crate::aux_kc::{
     relocatable::{self, Definition, Kind, Object, Target},
     unit::{branch, page, page_offset, uuid},
 };
+use crate::trust_cache::CodeHash;
 use crate::{Result, Within};
 use object::{LittleEndian as LE, macho};
 use sha2::{Digest, Sha256};
@@ -1154,6 +1155,110 @@ fn sign(file: &[u8], identifier: &str, text_bytes: u64) -> Vec<u8> {
     word(&mut blob, 20);
     blob.extend_from_slice(&directory);
     blob
+}
+
+/// Each slice's CDHash in a fat plugin [`link`] wrote: the truncated SHA-256
+/// of its code directory, which a trust cache lists.
+pub fn code_hashes(file: &[u8]) -> Result<Vec<CodeHash>> {
+    use object::read::macho::{FatArch, MachHeader, MachOFatFile32};
+
+    let fat = MachOFatFile32::parse(file).within(|| refuse!("the plugin is not a fat file"))?;
+    require!(!fat.arches().is_empty(), "the plugin has no slices");
+    fat.arches()
+        .iter()
+        .map(|arch| {
+            let slice = arch.data(file)?;
+            let header = macho::MachHeader64::<LE>::parse(slice, 0)?;
+            require!(
+                header.cputype(LE) == arch.cputype()
+                    && header.cpusubtype(LE) == arch.cpusubtype()
+                    && header.filetype(LE) == macho::MH_BUNDLE,
+                "a plugin slice disagrees with its fat header"
+            );
+            let mut commands = header.load_commands(LE, slice, 0)?;
+            let mut signature = None;
+            while let Some(command) = commands.next()? {
+                if command.cmd() == macho::LC_CODE_SIGNATURE {
+                    require!(signature.is_none(), "a plugin slice has two signatures");
+                    let data: &macho::LinkeditDataCommand<LE> = command.data()?;
+                    signature = Some((
+                        data.dataoff.get(LE) as usize,
+                        data.datasize.get(LE) as usize,
+                    ));
+                }
+            }
+            let (offset, bytes) = signature.ok_or(refuse!("a plugin slice is unsigned"))?;
+            let signed = slice
+                .get(..offset)
+                .ok_or(refuse!("a plugin signature offset exceeds its slice"))?;
+            let blob = slice
+                .get(offset..)
+                .filter(|blob| blob.len() == bytes)
+                .ok_or(refuse!("a plugin signature exceeds its slice"))?;
+            code_hash(signed, blob)
+        })
+        .collect()
+}
+
+/// Validate the SHA-256 signature layout this linker writes before trusting
+/// its directory. Every range stays inside its containing slice or blob.
+fn code_hash(signed: &[u8], blob: &[u8]) -> Result<CodeHash> {
+    fn word(bytes: &[u8], at: usize) -> Result<usize> {
+        let value = bytes
+            .get(at..)
+            .and_then(|tail| tail.get(..4))
+            .ok_or(refuse!("a plugin signature is truncated"))?;
+        Ok(u32::from_be_bytes(value.try_into().unwrap()) as usize)
+    }
+    require!(
+        word(blob, 0)? == CSMAGIC_EMBEDDED_SIGNATURE as usize
+            && word(blob, 4)? == blob.len()
+            && word(blob, 8)? == 1
+            && word(blob, 12)? == 0
+            && word(blob, 16)? == 20,
+        "a plugin slice's signature is malformed"
+    );
+    let directory = blob
+        .get(20..)
+        .ok_or(refuse!("a plugin signature has no directory"))?;
+    require!(
+        directory.len() >= CODE_DIRECTORY_BYTES
+            && word(directory, 0)? == CSMAGIC_CODEDIRECTORY as usize
+            && word(directory, 4)? == directory.len()
+            && word(directory, 8)? == CS_SUPPORTSEXECSEG as usize
+            && word(directory, 24)? == 0
+            && word(directory, 32)? == signed.len()
+            && directory[36..40] == [HASH_BYTES as u8, CS_HASHTYPE_SHA256, 0, HASH_PAGE_SHIFT],
+        "a plugin slice's code directory is malformed or unsupported"
+    );
+    let start = word(directory, 16)?;
+    let identifier = word(directory, 20)?;
+    let hashes = directory
+        .get(start..)
+        .filter(|_| start >= CODE_DIRECTORY_BYTES)
+        .ok_or(refuse!("a plugin's code hashes exceed its directory"))?;
+    require!(
+        identifier == CODE_DIRECTORY_BYTES
+            && directory
+                .get(identifier..start)
+                .is_some_and(|name| name.last() == Some(&0))
+            && hashes.len().is_multiple_of(HASH_BYTES)
+            && hashes.len() / HASH_BYTES == word(directory, 28)?
+            && word(directory, 28)? == signed.len().div_ceil(HASH_PAGE as usize),
+        "a plugin's code hash table is malformed"
+    );
+    for (page, hash) in signed
+        .chunks(HASH_PAGE as usize)
+        .zip(hashes.as_chunks::<HASH_BYTES>().0)
+    {
+        require!(
+            Sha256::digest(page).as_slice() == hash,
+            "a plugin's signed page has changed"
+        );
+    }
+    let mut hash = CodeHash::default();
+    hash.copy_from_slice(&Sha256::digest(directory)[..size_of::<CodeHash>()]);
+    Ok(hash)
 }
 
 /// Links each slice's objects and joins the slices into one fat file, whose

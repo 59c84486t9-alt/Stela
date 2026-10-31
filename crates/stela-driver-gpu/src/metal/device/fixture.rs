@@ -43,6 +43,9 @@ use stela_contracts::gate::MemoryRange;
 
 #[derive(Default)]
 pub(crate) struct MockBackend {
+    pub(crate) idle_calls: usize,
+    pub(crate) idle_error: Option<Error>,
+    pub(crate) semaphore_error: Option<Error>,
     pub(crate) physical: Option<PhysicalDevice>,
     pub(crate) next: u64,
     pub(crate) destroyed: Vec<Object>,
@@ -97,6 +100,11 @@ impl MockBackend {
 }
 
 impl Backend for MockBackend {
+    fn acknowledge_idle(&mut self) -> Result<()> {
+        self.idle_calls += 1;
+        self.idle_error.map_or(Ok(()), Err)
+    }
+
     fn physical_device(&self) -> &PhysicalDevice {
         self.physical.as_ref().unwrap()
     }
@@ -293,6 +301,9 @@ impl Backend for MockBackend {
         Ok(self.queries_ready)
     }
     fn semaphore_value(&mut self, semaphore: Semaphore) -> Result<u64> {
+        if let Some(error) = self.semaphore_error.take() {
+            return Err(error);
+        }
         Ok(self.semaphores[&semaphore.0])
     }
     fn signal_semaphore(&mut self, semaphore: Semaphore, value: u64) -> Result<()> {

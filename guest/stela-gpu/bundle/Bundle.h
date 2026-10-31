@@ -324,6 +324,7 @@ NSData *stela_compile_source(NSString *source, id options, NSError **error);
 
 @interface StelaGPURenderPipeline : StelaGPUObject <MTLRenderPipelineState> {
 @public
+	id _descriptor;
 	uint64_t _resourceID;
 	NSUInteger _maxTotalThreadsPerObjectThreadgroup, _maxTotalThreadsPerMeshThreadgroup;
 	NSUInteger _objectThreadExecutionWidth, _meshThreadExecutionWidth;
@@ -333,6 +334,7 @@ NSData *stela_compile_source(NSString *source, id options, NSError **error);
 
 @interface StelaGPUComputePipeline : StelaGPUObject <MTLComputePipelineState> {
 @public
+	id _descriptor;
 	uint64_t _resourceID;
 	NSUInteger _maxTotalThreadsPerThreadgroup, _threadExecutionWidth;
 	NSUInteger _staticThreadgroupMemoryLength;
@@ -418,6 +420,16 @@ NSData *stela_compile_source(NSString *source, id options, NSError **error);
 - (void)flush;
 @end
 
+/* Error records use only execution state known at the service boundary. */
+@interface StelaGPUEncoderInfo : NSObject <MTLCommandBufferEncoderInfo>
+@property(copy) NSString *label;
+@property(copy) NSArray *debugSignposts;
+@property NSInteger errorState;
+@end
+
+NSError *stela_command_error(const StelaFailure *failure, NSArray *encoders, BOOL submitted);
+id stela_empty_logs(void);
+
 @interface StelaGPUCommandBuffer : NSObject <MTLCommandBuffer> {
 @public
 	StelaGPUDevice *_device;
@@ -426,14 +438,16 @@ NSData *stela_compile_source(NSString *source, id options, NSError **error);
 	NSMutableArray *_retained;
 	StelaGPULogState *_logState;
 	uint64_t _serial;
-	bool _committed;
+	_Atomic(bool) _committed;
 }
 @property(copy) NSString *label;
+@property NSUInteger errorOptions;
 - (instancetype)initWithQueue:(StelaGPUQueue *)queue
 	    retainsReferences:(BOOL)retains
 		     logState:(StelaGPULogState *)logState;
 /* Keeps `object` until the command buffer completes, unless it retains none. */
 - (void)use:(id)object;
+- (StelaGPUEncoderInfo *)recordEncoder;
 - (void)submit;
 /* On the device's queue, ahead of completion. */
 - (void)didSchedule;

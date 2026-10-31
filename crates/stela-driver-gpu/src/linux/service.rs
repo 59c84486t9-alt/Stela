@@ -6,7 +6,10 @@
 //! An interrupt only records its line ([`Environment::raise`]); the handlers
 //! run on the service task, which sleeps until a line is raised or the next
 //! timer is due (`compat/linux/kernel/service.c`).
-use super::{owner::RawOwner, task::TaskBinding};
+use super::{
+    owner::{RawOwner, WorkerKind},
+    task::TaskBinding,
+};
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::{
     cell::UnsafeCell,
@@ -17,7 +20,7 @@ use core::{
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use stela_driver_base::platform::work::{
-    Callback, Kind, Runtime, Ticket, WorkError,
+    Callback, Runtime, SwitchBinding, Ticket, WorkError,
     service::{Batch, Domain, RaisedWork},
 };
 
@@ -28,13 +31,14 @@ struct Call {
     context: *mut c_void,
     begin: unsafe extern "C" fn(*mut c_void) -> bool,
     next_irq: unsafe extern "C" fn(*mut c_void) -> c_int,
+    drain: unsafe extern "C" fn(*mut c_void),
     finish: unsafe extern "C" fn(*mut c_void, i64),
     done: unsafe extern "C" fn(*mut c_void) -> bool,
 }
 
 unsafe extern "C" {
     fn stela_linux_service_loop(call: *mut c_void);
-    fn stela_linux_worker_main(owner: *mut c_void);
+    fn stela_linux_worker_main(call: *mut c_void);
     fn stela_linux_sleep_us(minimum: u64);
 }
 
@@ -80,6 +84,36 @@ struct Job<const N: usize> {
     context: *mut c_void,
 }
 
+#[derive(Clone, Copy)]
+enum TaskKind {
+    Owner,
+    Service,
+    Worker(WorkerKind),
+}
+#[repr(C)]
+struct WorkerCall {
+    owner: *const RawOwner,
+    kind: u32,
+}
+unsafe extern "C" fn worker(context: *mut c_void) {
+    // SAFETY: start_worker transferred this box to this callback.
+    let mut call = unsafe { Box::from_raw(context.cast::<WorkerCall>()) };
+    // SAFETY: the environment keeps owner and call through every suspension.
+    unsafe { stela_linux_worker_main((&raw mut *call).cast()) };
+}
+
+const DEFERRED_CAPACITY: usize = 32;
+#[derive(Clone, Copy)]
+struct Deferred {
+    body: Callback,
+    context: *mut c_void,
+}
+struct DeferredQueue {
+    entries: [Option<Deferred>; DEFERRED_CAPACITY],
+    head: usize,
+    len: usize,
+}
+
 pub struct Environment<const N: usize> {
     owner: *const RawOwner,
     runtime: NonNull<Runtime<N>>,
@@ -89,11 +123,13 @@ pub struct Environment<const N: usize> {
     /// The batch the service task is delivering.
     batch: UnsafeCell<Option<Batch>>,
     stopping: AtomicBool,
+    service_started: AtomicBool,
+    deferred: UnsafeCell<DeferredQueue>,
     /// One per continuation that ran a task, as a continuation keeps its
     /// binding across jobs. Only tasks of this CPU touch it, between switches.
     bindings: UnsafeCell<Vec<Arc<TaskBinding<N>>>>,
     /// Every task not yet seen finished. Touched as `bindings` is.
-    tickets: UnsafeCell<Vec<Ticket>>,
+    tickets: UnsafeCell<Vec<(Ticket, TaskKind)>>,
     _pin: PhantomPinned,
 }
 
@@ -103,12 +139,20 @@ impl<const N: usize> Environment<N> {
     /// # Safety
     /// On the runtime's CPU, in its dispatcher. `owner` is entered by the
     /// tasks here, and it and `runtime` outlive them; the result stays alive
-    /// until [`Self::retire`].
+    /// until [`Self::retire`]. Other producers explicitly requesting Linux-size
+    /// General stacks must honor this environment's two-per-pool headroom;
+    /// default ordinary work in the native mixed profile uses different stacks.
     pub unsafe fn new(
         owner: *const RawOwner,
         runtime: Pin<&Runtime<N>>,
         domain: Arc<Domain<N>>,
     ) -> Result<Pin<Box<Self>>, WorkError> {
+        // Four reserved pool continuations (two per nice class), plus at
+        // least one owner/dedicated continuation. Smaller profiles refuse
+        // rather than silently promising workqueue progress they cannot supply.
+        if runtime.general_capacity(super::task::stack_requirement()?)? < 5 {
+            return Err(WorkError::Unavailable);
+        }
         runtime.attach_service_domain(domain.clone())?;
         Ok(Box::pin(Self {
             owner,
@@ -118,6 +162,12 @@ impl<const N: usize> Environment<N> {
             lines: Lines([const { AtomicU64::new(0) }; LINES as usize / 64]),
             batch: UnsafeCell::new(None),
             stopping: AtomicBool::new(false),
+            service_started: AtomicBool::new(false),
+            deferred: UnsafeCell::new(DeferredQueue {
+                entries: [None; DEFERRED_CAPACITY],
+                head: 0,
+                len: 0,
+            }),
             bindings: UnsafeCell::new(Vec::new()),
             tickets: UnsafeCell::new(Vec::new()),
             _pin: PhantomPinned,
@@ -135,7 +185,8 @@ impl<const N: usize> Environment<N> {
         // SAFETY: `new`'s caller keeps `self` until the task has finished.
         let ticket = unsafe { self.runtime().start_service(service::<N>, context) }?;
         // SAFETY: tasks of this CPU, and nothing here switches.
-        unsafe { &mut *self.tickets.get() }.push(ticket);
+        unsafe { &mut *self.tickets.get() }.push((ticket, TaskKind::Service));
+        self.service_started.store(true, Ordering::Release);
         Ok(())
     }
 
@@ -145,7 +196,7 @@ impl<const N: usize> Environment<N> {
         let mut result = Ok(());
         // SAFETY: tasks of this CPU, and nothing here switches.
         let tickets = unsafe { &mut *self.tickets.get() };
-        tickets.retain(|ticket| match queue.completed(*ticket) {
+        tickets.retain(|(ticket, _)| match queue.completed(*ticket) {
             Ok(completed) => !completed,
             Err(error) => {
                 result = Err(error);
@@ -165,30 +216,121 @@ impl<const N: usize> Environment<N> {
         body: Callback,
         context: *mut c_void,
     ) -> Result<Ticket, WorkError> {
+        // SAFETY: the public spawn contract is passed unchanged to admission.
+        unsafe { self.spawn_kind(body, context, TaskKind::Owner) }
+    }
+    unsafe fn spawn_kind(
+        self: Pin<&Self>,
+        body: Callback,
+        context: *mut c_void,
+        kind: TaskKind,
+    ) -> Result<Ticket, WorkError> {
         self.finished()?;
+        let requirement = super::task::stack_requirement()?;
+        // Accepted live jobs include pending startups and every persistent
+        // worker. Protect each pool's deficit before admitting another class.
+        let mut occupied = [0usize; 2];
+        // SAFETY: this CPU owns the list; no switch spans this bounded read.
+        for (_, task) in unsafe { &*self.tickets.get() } {
+            match task {
+                TaskKind::Worker(WorkerKind::Normal) => occupied[0] += 1,
+                TaskKind::Worker(WorkerKind::HighPriority) => occupied[1] += 1,
+                _ => {}
+            }
+        }
+        let deficits = [
+            2usize.saturating_sub(occupied[0]),
+            2usize.saturating_sub(occupied[1]),
+        ];
+        let headroom = match kind {
+            TaskKind::Worker(WorkerKind::Normal) => deficits[1],
+            TaskKind::Worker(WorkerKind::HighPriority) => deficits[0],
+            _ => deficits[0] + deficits[1],
+        };
         let job = Box::into_raw(Box::new(Job {
             environment: self.get_ref(),
             body,
             context,
         }));
-        let queue = self.runtime().get_ref().queue();
+        // SAFETY: this CPU owns the list, and no switch spans the borrowed views.
+        let reusable: Vec<&dyn SwitchBinding> = unsafe { &*self.bindings.get() }
+            .iter()
+            .map(|binding| binding.as_ref() as &dyn SwitchBinding)
+            .collect();
         // SAFETY: a box the job owns, and `new`'s caller keeps `self` until
         // every task has finished. A refused job never runs.
-        let ticket =
-            unsafe { queue.execute(Kind::General, task::<N>, job.cast()) }.inspect_err(|_| {
-                // SAFETY: refused, so still this function's.
-                drop(unsafe { Box::from_raw(job) });
-            })?;
+        let ticket = unsafe {
+            self.runtime().execute_idle_general_with_headroom(
+                requirement,
+                task::<N>,
+                job.cast(),
+                &reusable,
+                headroom,
+            )
+        }
+        .inspect_err(|_| {
+            // SAFETY: refused, so still this function's.
+            drop(unsafe { Box::from_raw(job) });
+        })?;
         // SAFETY: tasks of this CPU, and nothing here switches.
-        unsafe { &mut *self.tickets.get() }.push(ticket);
+        unsafe { &mut *self.tickets.get() }.push((ticket, kind));
         Ok(ticket)
     }
 
     /// Start a task running Linux's workers, the owner's `start_worker`.
-    pub fn start_worker(self: Pin<&Self>) -> Result<Ticket, WorkError> {
-        // SAFETY: the worker's body enters and leaves the owner it is given,
-        // which `new`'s caller keeps.
-        unsafe { self.spawn(stela_linux_worker_main, self.owner.cast_mut().cast()) }
+    pub fn start_worker(self: Pin<&Self>, kind: WorkerKind) -> Result<Ticket, WorkError> {
+        let call = Box::into_raw(Box::new(WorkerCall {
+            owner: self.owner,
+            kind: kind as u32,
+        }));
+        // SAFETY: the callback owns this box; the environment retains the owner.
+        unsafe { self.spawn_kind(worker, call.cast(), TaskKind::Worker(kind)) }.inspect_err(|_| {
+            // SAFETY: refusal admitted no callback, so the box remains ours.
+            drop(unsafe { Box::from_raw(call) });
+        })
+    }
+
+    /// Queue a bounded nonblocking process callback on the retained service
+    /// continuation. It consumes no General task or workqueue pool credit and
+    /// never executes inline. Full leaves ownership with the caller for retry.
+    ///
+    /// # Safety
+    /// Called on the runtime process CPU (dispatcher or task). Keep callback,
+    /// context and reachable resources until delivery or environment retirement.
+    /// The callback runs already entered in this environment's owner, in normal
+    /// process context. It must return promptly without sleeping, switching,
+    /// entering/exiting an owner, or escaping the callback scope. No allocation
+    /// or borrowing of the queue spans callback execution. An error accepts none.
+    pub unsafe fn defer_service(
+        self: Pin<&Self>,
+        body: Callback,
+        context: *mut c_void,
+    ) -> Result<(), WorkError> {
+        // Checks the real process CPU before accessing affine queue metadata.
+        self.runtime()
+            .general_capacity(super::task::stack_requirement()?)?;
+        if self.stopping.load(Ordering::Acquire) {
+            return Err(WorkError::Closed);
+        }
+        if !self.service_started.load(Ordering::Acquire) {
+            return Err(WorkError::Unavailable);
+        }
+        // SAFETY: same process CPU; no switch/callback while this borrow exists.
+        let pending = unsafe { &mut *self.deferred.get() };
+        if pending.len == DEFERRED_CAPACITY {
+            return Err(WorkError::Full);
+        }
+        let tail = (pending.head + pending.len) % DEFERRED_CAPACITY;
+        pending.entries[tail] = Some(Deferred { body, context });
+        pending.len += 1;
+        // RaisedWork performs bounded publication/notification, never inline
+        // delivery or switching. On refusal the just-appended entry is ours.
+        if let Err(error) = self.raised.raise() {
+            pending.entries[tail] = None;
+            pending.len -= 1;
+            return Err(error);
+        }
+        Ok(())
     }
 
     /// Record that `line`, below [`LINES`], fired. Safe in an interrupt.
@@ -227,6 +369,10 @@ impl<const N: usize> Environment<N> {
     /// [`Self::stop`] was called and [`Self::finished`] answered true, with
     /// nothing left to raise a line. On the runtime's CPU, in its dispatcher.
     pub unsafe fn retire(self: Pin<&Self>) -> Result<(), WorkError> {
+        // SAFETY: the caller proves the process CPU and completed service.
+        if unsafe { (*self.deferred.get()).len } != 0 {
+            return Err(WorkError::Pending);
+        }
         // SAFETY: the caller's contract; no timer or producer remains.
         unsafe { self.domain.retire() }?;
         // SAFETY: as above, so no task is using the list.
@@ -268,6 +414,34 @@ unsafe extern "C" fn next_irq<const N: usize>(context: *mut c_void) -> c_int {
     this.lines.take().map_or(-1, |line| line as c_int)
 }
 
+unsafe extern "C" fn drain<const N: usize>(context: *mut c_void) {
+    // SAFETY: the service call retains this environment through the callback.
+    let this = unsafe { environment::<N>(context) };
+    // Bound one batch even if a callback posts more leaves. Requeues retain a
+    // raised epoch for the next original service pass.
+    for _ in 0..DEFERRED_CAPACITY {
+        let next = {
+            // SAFETY: only this process CPU mutates this affine queue; the
+            // borrow ends before invoking any foreign callback.
+            let pending = unsafe { &mut *this.deferred.get() };
+            if pending.len == 0 {
+                None
+            } else {
+                let head = pending.head;
+                pending.head = (head + 1) % DEFERRED_CAPACITY;
+                pending.len -= 1;
+                pending.entries[head].take()
+            }
+        };
+        let Some(next) = next else {
+            break;
+        };
+        // SAFETY: defer_service retained the nonblocking leaf/code/context.
+        // C owns the entered process callback guard, never an IRQ scope.
+        unsafe { (next.body)(next.context) };
+    }
+}
+
 unsafe extern "C" fn finish<const N: usize>(context: *mut c_void, deadline: i64) {
     // SAFETY: the service call's context.
     let this = unsafe { environment::<N>(context) };
@@ -298,6 +472,7 @@ unsafe extern "C" fn service<const N: usize>(context: *mut c_void) {
         context,
         begin: begin::<N>,
         next_irq: next_irq::<N>,
+        drain: drain::<N>,
         finish: finish::<N>,
         done: done::<N>,
     };
