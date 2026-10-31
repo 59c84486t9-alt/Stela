@@ -13,7 +13,7 @@
 //! from a faulting access, nor stale buffer data to one, to later
 //! speculative instructions ([`forwards_no_faulting_data`]). Native guest
 //! accesses then fault through the shadow tables, an address a mispredicted
-//! range check lets through is masked into an unmapped entry
+//! range check lets through is masked into the guest's lower range
 //! (`x86_64::RangeCheck`), and [`fence`] keeps each of the engine's
 //! own guest reads behind the translation that allows it.
 use core::{
