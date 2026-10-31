@@ -491,9 +491,15 @@ fn an_ap_mld_association_adds_its_other_link_on_an_interface_of_its_own() {
     }
     link.authorize_port(epoch).unwrap();
     assert!(link.carrier());
-    // Link 1's beacons go to the OS as they came, what this leaves untracked
-    // reported once a link; an unprotected action frame goes nowhere.
+    // Link 1's beacons reach the OS intact; unfinished channel tracking
+    // is reported once. An unprotected robust action goes nowhere.
     let mut beacon = response(0x80, &[0; 12]);
+    beacon.extend_from_slice(
+        &link.state().client.client.state().links[0]
+            .context
+            .beacon()
+            .elements,
+    );
     beacon[4..10].copy_from_slice(&Mac::BROADCAST.0);
     let mut action = response(0xd0, &[3, 0]);
     action[4..10].copy_from_slice(&OTHER_LINK.0);
@@ -513,10 +519,7 @@ fn an_ap_mld_association_adds_its_other_link_on_an_interface_of_its_own() {
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(
-        reported,
-        ["MLO link beacon tracking: EDCA, channel switch, bandwidth and beacon loss"]
-    );
+    assert_eq!(reported, ["MLO link beacon channel switches"]);
     assert!(link.carrier());
     // The AP MLD's protected ADDBA request for TID 0 on the setup link starts
     // a session on both links' AP WCIDs, as mt7925_mcu_uni_rx_ba programs it.
@@ -614,22 +617,7 @@ fn two_link_association() -> (TestLink, Model, scan::result::Bss) {
 
 #[test]
 fn protected_deauthentication_on_second_link_ends_association() {
-    let (mut link, model, _) = two_link_association();
-    link.configure().unwrap();
-    let epoch = link.station().association_epoch().unwrap();
-    link.install_key(true, 0, &[1; 16], ReplaySeed::ZERO)
-        .unwrap();
-    link.install_key(false, 2, &[0x44; 16], ReplaySeed::ZERO)
-        .unwrap();
-    link.install_link_key(1, 1, &[0x46; 16], ReplaySeed::ZERO)
-        .unwrap();
-    drop(drain_notices(&mut link));
-    // SAFETY: this model owns the handshake keys; all prior key users and
-    // notices have drained before the IGTK installation.
-    unsafe { link.install_management_key(epoch, 4, &[0x55; 16], PacketNumber::new(100).unwrap()) }
-        .unwrap();
-    link.authorize_port(epoch).unwrap();
-    assert!(link.carrier());
+    let (mut link, model) = authorized_two_link_association();
 
     let mut deauth = response(0x40c0, &[7, 0]);
     deauth[4..10].copy_from_slice(&OTHER_LINK.0);
@@ -650,5 +638,198 @@ fn protected_deauthentication_on_second_link_ends_association() {
         finish_tx(&model);
         link.service().unwrap();
     }
+    retire(&mut link, &model);
+}
+
+fn authorized_two_link_association() -> (TestLink, Model) {
+    let (mut link, model, _) = two_link_association();
+    link.configure().unwrap();
+    let epoch = link.station().association_epoch().unwrap();
+    link.install_key(true, 0, &[1; 16], ReplaySeed::ZERO)
+        .unwrap();
+    link.install_key(false, 2, &[0x44; 16], ReplaySeed::ZERO)
+        .unwrap();
+    link.install_link_key(1, 1, &[0x46; 16], ReplaySeed::ZERO)
+        .unwrap();
+    drop(drain_notices(&mut link));
+    // SAFETY: this model owns the handshake keys; all prior key users and
+    // notices have drained before the IGTK installation.
+    unsafe { link.install_management_key(epoch, 4, &[0x55; 16], PacketNumber::new(100).unwrap()) }
+        .unwrap();
+    link.authorize_port(epoch).unwrap();
+    assert!(link.carrier());
+    (link, model)
+}
+
+fn other_link_beacon(link: &TestLink, count: u8) -> Vec<u8> {
+    let mut elements = link.state().client.client.state().links[0]
+        .context
+        .beacon()
+        .elements
+        .clone();
+    let mut at = 0;
+    while at < elements.len() {
+        let n = usize::from(elements[at + 1]);
+        if elements[at] == 221 && elements[at + 2..at + 6] == [0, 0x50, 0xf2, 2] {
+            elements[at + 8] = (elements[at + 8] & 0xf0) | count;
+            elements[at + 12..at + 14].copy_from_slice(&100u16.to_le_bytes());
+            break;
+        }
+        at += 2 + n;
+    }
+    let mut body = vec![0; 8];
+    body.extend_from_slice(&100u16.to_le_bytes());
+    body.extend_from_slice(&0x11u16.to_le_bytes());
+    body.extend_from_slice(&elements);
+    let mut frame = response(0x80, &body);
+    frame[4..10].copy_from_slice(&Mac::BROADCAST.0);
+    frame[10..16].copy_from_slice(&OTHER.0);
+    frame[16..22].copy_from_slice(&OTHER.0);
+    let mut bytes = incoming_bytes(&frame, None, false);
+    bytes[13] = 52;
+    bytes
+}
+
+#[test]
+fn second_link_beacon_updates_only_its_edca() {
+    let (mut link, model) = authorized_two_link_association();
+    let setup = *link.applied_edca().unwrap();
+    let epoch = link.station().association_epoch();
+    let before = model.response.lock().unwrap().client_commands.len();
+    let beacon = other_link_beacon(&link, 1);
+    device_receive(&model.queues[&0xd4520], &beacon, true, 0);
+    link.service().unwrap();
+    assert!(!link.pending_edca());
+    let state = link.state().client.client.state();
+    let applied = state.links[0].applied_edca.unwrap();
+    assert_eq!(applied.parameter_set_count, 1);
+    assert_eq!(link.applied_edca(), Some(&setup));
+    assert_eq!(link.station().association_epoch(), epoch);
+    assert!(link.carrier());
+    let commands = model.response.lock().unwrap().client_commands[before..].to_vec();
+    let updates = commands
+        .iter()
+        .filter(|packet| packet[34] == 4)
+        .collect::<Vec<_>>();
+    assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0][48], 1);
+    // Equality is the firmware/mac80211 rule, including the count's wrap.
+    device_receive(&model.queues[&0xd4520], &beacon, true, 0);
+    link.service().unwrap();
+    assert_eq!(
+        model.response.lock().unwrap().client_commands[before..]
+            .iter()
+            .filter(|packet| packet[34] == 4)
+            .count(),
+        1
+    );
+    for count in [15, 0] {
+        let beacon = other_link_beacon(&link, count);
+        device_receive(&model.queues[&0xd4520], &beacon, true, 0);
+        link.service().unwrap();
+        assert_eq!(
+            link.state().client.client.state().links[0]
+                .applied_edca
+                .unwrap()
+                .parameter_set_count,
+            count
+        );
+    }
+    depart(&mut link, &model);
+    retire(&mut link, &model);
+}
+
+#[test]
+fn second_link_edca_failure_quarantines_without_claiming_application() {
+    let (mut link, model) = authorized_two_link_association();
+    let applied = link.state().client.client.state().links[0].applied_edca;
+    let beacon = other_link_beacon(&link, 1);
+    model.response.lock().unwrap().edca_status = Some(0xbad);
+    device_receive(&model.queues[&0xd4520], &beacon, true, 0);
+    assert!(link.service().is_err());
+    assert!(!link.carrier());
+    assert_eq!(link.phase(), Phase::Quarantined);
+    assert!(link.pending_edca());
+    assert_eq!(
+        link.state().client.client.state().links[0].applied_edca,
+        applied
+    );
+    drop(link);
+    assert_eq!(model.drops.load(Ordering::Relaxed), 0);
+    assert!(!model.memory.lock().unwrap().mappings.is_empty());
+}
+
+#[test]
+fn second_link_beacon_narrows_only_its_channel() {
+    use crate::wifi::station::phy::Width;
+    let (mut link, model) = authorized_two_link_association();
+    let setup = link.state().client.client.state().channel;
+    assert_ne!(
+        link.state().client.client.state().links[0].channel.width,
+        Width::Mhz20
+    );
+    let before = model.response.lock().unwrap().client_commands.len();
+    let mut beacon = other_link_beacon(&link, 0);
+    let mut at = 32 + 36;
+    while at + 2 < beacon.len() {
+        let n = usize::from(beacon[at + 1]);
+        match beacon[at] {
+            61 => beacon[at + 3] &= !7,
+            192 => beacon[at + 2] = 0,
+            255 if beacon[at + 2] == 106 => beacon[at + 8..at + 10].copy_from_slice(&[0, 52]),
+            _ => {}
+        }
+        at += 2 + n;
+    }
+    device_receive(&model.queues[&0xd4520], &beacon, true, 0);
+    link.service().unwrap();
+    let state = link.state().client.client.state();
+    assert_eq!(state.channel, setup);
+    assert_eq!(state.links[0].channel.width, Width::Mhz20);
+    assert_eq!(state.links[0].channel.control, CHANNEL_52);
+    assert_eq!(link.state().client.client.pending_channel(), None);
+    assert!(link.carrier());
+    let commands = model.response.lock().unwrap().client_commands[before..].to_vec();
+    let updates = commands
+        .iter()
+        .filter(|packet| packet[34] == 2 && packet.get(52..54) == Some(&[2, 0]))
+        .collect::<Vec<_>>();
+    assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0][48], 1);
+    assert_eq!(updates[0][59], 0);
+    depart(&mut link, &model);
+    retire(&mut link, &model);
+}
+
+#[test]
+fn invalid_second_link_beacon_does_not_suppress_the_valid_beacons_gap_report() {
+    let (mut link, model) = authorized_two_link_association();
+    let beacon = other_link_beacon(&link, 1);
+    let mut wrong_peer = beacon.clone();
+    wrong_peer[32 + 10] ^= 4;
+    device_receive(&model.queues[&0xd4520], &wrong_peer, true, 0);
+    assert!(link.service().is_err());
+    drop(drain_notices(&mut link));
+    device_receive(&model.queues[&0xd4520], &beacon, true, 0);
+    link.service().unwrap();
+    let notices = drain_notices(&mut link);
+    assert_eq!(
+        notices
+            .iter()
+            .filter(|notice| matches!(
+                notice.event,
+                LinkEvent::Controller(Event::Unsupported("MLO link beacon channel switches"))
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        link.state().client.client.state().links[0]
+            .applied_edca
+            .unwrap()
+            .parameter_set_count,
+        1
+    );
+    depart(&mut link, &model);
     retire(&mut link, &model);
 }

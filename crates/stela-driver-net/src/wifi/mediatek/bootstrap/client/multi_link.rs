@@ -63,15 +63,21 @@ pub(super) struct Link<C: 'static> {
     pub(super) link_id: u8,
     pub(super) profile: Profile,
     wire: wire::modern::Configuration,
+    pub(super) context: Arc<AssociationContext>,
+    pub(super) edca: Option<edca::Observed<C>>,
+    pub(super) channel: ChannelDefinition,
+    pub(super) channel_change: Option<Option<ChannelDefinition>>,
+    pub(super) applied_edca: Option<edca::AppliedEdca>,
+    prepared_edca: [station::phy::AccessCategory; 4],
     interface: Interface<Arc<C>>,
     /// The MLDs' PTK, kept on this link's AP WCID as on every link's.
-    ptk: HardwareKey<Arc<C>>,
+    pub(super) ptk: HardwareKey<Arc<C>>,
     /// The GTK of this link's AP.
-    gtk: HardwareKey<Arc<C>>,
+    pub(super) gtk: HardwareKey<Arc<C>>,
     ptk_removed: Option<Removal>,
     gtk_removed: Option<Removal>,
     interface_removed: Option<Deactivated>,
-    /// The link's untracked beacons and channel switch already reported.
+    /// The link's unfinished channel tracking and action switch already reported.
     reported: [bool; 2],
     /// The link's BSS record, the setup link's AP record naming both links,
     /// the link's AP record and its EDCA, in `mt7925_mac_link_sta_add` order.
@@ -257,6 +263,12 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             links.push(Link {
                 link_id: affiliation.link_id,
                 profile,
+                prepared_edca: context.negotiated().edca(),
+                channel: context.definition(),
+                channel_change: None,
+                context,
+                edca: None,
+                applied_edca: None,
                 wire,
                 interface,
                 ptk,
@@ -325,6 +337,37 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             }
             Self::command_parts(roc.controller, replies, *command, body)?;
         }
+        link.applied_edca = Some(edca::AppliedEdca {
+            parameter_set_count: link
+                .context
+                .negotiated()
+                .wmm
+                .as_ref()
+                .map_or(0, |wmm| wmm.parameter_set_count),
+            access_categories: link.prepared_edca,
+        });
+        Ok(())
+    }
+
+    pub(super) fn restrict_link_edca(
+        &mut self,
+        link_id: u8,
+        effective: &[station::phy::AccessCategory; 4],
+    ) -> Result<(), Error> {
+        let s = self.state_mut();
+        if s.phase != Phase::AwaitingModernAdmission {
+            return Err(Error::WrongPhase);
+        }
+        let link = s
+            .links
+            .iter_mut()
+            .find(|link| link.link_id == link_id)
+            .ok_or(Error::WrongProfile)?;
+        link.commands[3].1 = link
+            .wire
+            .edca_restricted_request(link.profile, effective)
+            .map_err(Error::Codec)?;
+        link.prepared_edca = *effective;
         Ok(())
     }
 
@@ -391,27 +434,27 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         Some(link.profile)
     }
 
-    /// Whether `frame` is a beacon of another link, whose tracking mac80211
-    /// does per link and this driver leaves undone: reported to `events` once
-    /// per link. The link's other frames name the MLDs and go the setup
-    /// link's way.
+    /// Track another link's completed WMM and bandwidth beacon under its
+    /// own context. Channel-switch tracking remains reported once per link.
+    /// Other unicast frames name the MLDs and follow the setup-link path.
     pub(super) fn beacon_of_other_link(
         s: &mut Owned<I, Q, C>,
-        frame: &Mpdu,
+        frame: Mpdu,
         events: &mut Vec<Event>,
-    ) -> bool {
-        if !matches!(frame.header().control & 0x00fc, 0x0080 | 0x0050) {
-            return false;
+    ) -> Result<(), Error> {
+        let index = s
+            .links
+            .iter()
+            .position(|link| {
+                (link.profile.channel.band, link.profile.channel.number)
+                    == (frame.radio.band, frame.radio.channel)
+            })
+            .ok_or(Error::WrongProfile)?;
+        Self::observe_link_beacon(s, frame)?;
+        if !core::mem::replace(&mut s.links[index].reported[0], true) {
+            events.push(Event::Unsupported("MLO link beacon channel switches"));
         }
-        let Some(link) = Self::link_on(s, &frame.radio) else {
-            return false;
-        };
-        if !core::mem::replace(&mut link.reported[0], true) {
-            events.push(Event::Unsupported(
-                "MLO link beacon tracking: EDCA, channel switch, bandwidth and beacon loss",
-            ));
-        }
-        true
+        Ok(())
     }
 
     /// Whether a channel switch announced on `radio` is another link's, which
