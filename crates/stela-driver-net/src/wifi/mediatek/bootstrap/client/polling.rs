@@ -174,6 +174,9 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                     // queue relaxation eligible after uncertain current input.
                     if modern_data {
                         s.edca = None;
+                        for link in &mut s.links {
+                            link.edca = None;
+                        }
                     }
                     return Err(error);
                 }
@@ -191,9 +194,10 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 continue;
             }
             if modern_data
-                && !frame.header().data_present()
-                && Self::beacon_of_other_link(s, &frame, &mut events)
+                && matches!(frame.header().control & 0x00fc, 0x0080 | 0x0050)
+                && Self::other_link(s, &frame.radio).is_some()
             {
+                Self::beacon_of_other_link(s, frame, &mut events)?;
                 events.push(Event::Raw(f));
                 continue;
             }

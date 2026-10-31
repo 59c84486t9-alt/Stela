@@ -30,6 +30,8 @@ struct Model {
     /// hardware knows it by.
     links: RefCell<Vec<(Arc<AssociationContext>, Channel)>>,
     log: RefCell<Vec<&'static str>>,
+    edca_channels: RefCell<Vec<Channel>>,
+    deny_edca: Cell<bool>,
 }
 impl Model {
     fn knows(&self, context: &AssociationContext) -> bool {
@@ -79,6 +81,15 @@ impl Drop for OsGuard {
     }
 }
 impl reg::HardwareLease for HardwareGuard {
+    fn allows_edca(&mut self, op: &reg::EdcaOperation<'_>) -> bool {
+        assert!(self.0.hw_held.get() && self.0.os_held.get());
+        self.0
+            .edca_channels
+            .borrow_mut()
+            .push(op.association().channel());
+        !self.0.deny_edca.get() && self.0.knows(op.association().context())
+    }
+
     fn context(&self) -> reg::NativeContext {
         self.0.native.get()
     }
@@ -99,6 +110,15 @@ impl reg::HardwareLease for HardwareGuard {
     }
 }
 impl reg::OsLease for OsGuard {
+    fn allows_edca(&mut self, op: &reg::EdcaOperation<'_>) -> bool {
+        assert!(self.0.hw_held.get() && self.0.os_held.get());
+        self.0
+            .edca_channels
+            .borrow_mut()
+            .push(op.association().channel());
+        !self.0.deny_edca.get() && self.0.knows(op.association().context())
+    }
+
     fn revision(&self) -> u64 {
         self.0.revision.get()
     }
@@ -185,6 +205,8 @@ fn model(
         context: Arc::clone(&c),
         links: RefCell::new(Vec::new()),
         log: RefCell::new(Vec::new()),
+        edca_channels: RefCell::new(Vec::new()),
+        deny_edca: Cell::new(false),
     });
     let owner = reg::Owner::new(Hardware(Rc::clone(&model)), Os(Rc::clone(&model))).unwrap();
     (station, c, owner, model)
@@ -651,4 +673,126 @@ fn every_link_of_an_mld_association_is_admitted_on_its_own_channel() {
             .unwrap_err(),
         reg::Error::HardwareDenied
     );
+}
+
+#[test]
+fn mld_edca_checks_the_observed_link_under_both_held_providers() {
+    use crate::wifi::station::multi_link::tests::{
+        answer, associate_station, association_response,
+    };
+    let (station, action) = associate_station(association_response(vec![answer(0)]));
+    let Action::Configure {
+        context: Some(c),
+        links,
+        ..
+    } = action
+    else {
+        panic!("configuration");
+    };
+    let link = links[0].clone();
+    let (mut station, c, mut owner, model) = model(station, c);
+    model
+        .links
+        .borrow_mut()
+        .push((link.clone(), link.channel()));
+    station
+        .complete_configuration(c.ticket(), Completion::Accepted, 12)
+        .unwrap();
+    let observed = link.negotiated().edca();
+    let rule = reg::database::Wmm {
+        client: [reg::database::WmmAc {
+            cw_min: 31,
+            cw_max: 1023,
+            aifsn: 8,
+            cot_us: 32,
+        }; 4],
+        ap: [reg::database::WmmAc {
+            cw_min: 31,
+            cw_max: 1023,
+            aifsn: 8,
+            cot_us: 32,
+        }; 4],
+    };
+    let admission = owner
+        .admit_association(&station, c.clone(), Use::Management)
+        .unwrap();
+    // SAFETY: this serialized model has no native radio or DMA effects.
+    unsafe {
+        owner.publish_edca(
+            admission,
+            &station,
+            reg::EdcaUpdate {
+                context: &link,
+                parameter_set_count: 1,
+                observed: &observed,
+                limit: Some(&rule),
+            },
+            |operation| {
+                assert!(core::ptr::eq(
+                    operation.association().context(),
+                    link.as_ref()
+                ));
+                assert_eq!(
+                    operation.effective(),
+                    &reg::wmm::station(&observed, Some(&rule)).unwrap()
+                );
+                assert!(!model.revoke());
+            },
+        )
+    }
+    .unwrap();
+    assert_eq!(
+        *model.edca_channels.borrow(),
+        [link.channel(), link.channel()]
+    );
+    assert_ne!(link.channel(), c.channel());
+    model.deny_edca.set(true);
+    let admission = owner
+        .admit_association(&station, c.clone(), Use::Management)
+        .unwrap();
+    assert_eq!(
+        // SAFETY: denial must prevent any publication effect.
+        unsafe {
+            owner.publish_edca::<()>(
+                admission,
+                &station,
+                reg::EdcaUpdate {
+                    context: &link,
+                    parameter_set_count: 2,
+                    observed: &observed,
+                    limit: Some(&rule),
+                },
+                |_| panic!("denied link EDCA published"),
+            )
+        }
+        .unwrap_err(),
+        reg::Error::HardwareDenied
+    );
+    model.deny_edca.set(false);
+    let (_, foreign) = associate_station(association_response(vec![answer(0)]));
+    let Action::Configure { links: foreign, .. } = foreign else {
+        panic!("foreign association");
+    };
+    let admission = owner
+        .admit_association(&station, c, Use::Management)
+        .unwrap();
+    assert_eq!(
+        // SAFETY: a foreign association's link must never publish.
+        unsafe {
+            owner.publish_edca::<()>(
+                admission,
+                &station,
+                reg::EdcaUpdate {
+                    context: &foreign[0],
+                    parameter_set_count: 2,
+                    observed: &observed,
+                    limit: Some(&rule),
+                },
+                |_| panic!("foreign link EDCA published"),
+            )
+        }
+        .unwrap_err(),
+        reg::Error::Stale
+    );
+    assert!(!model.hw_held.get() && !model.os_held.get());
 }

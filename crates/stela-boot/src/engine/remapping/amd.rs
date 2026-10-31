@@ -6,7 +6,7 @@ use super::CLAIMED_DISPLAYS;
 use crate::Result;
 use crate::{native_mmio, output};
 use alloc::{boxed::Box, format, sync::Arc, vec, vec::Vec};
-use core::{cell::RefCell, ops::Range, ptr::NonNull};
+use core::{cell::RefCell, mem::ManuallyDrop, ops::Range, ptr::NonNull};
 use stela_boot_core::remapping::{self, Present};
 use stela_contracts::refuse;
 use stela_drivers::{
@@ -140,14 +140,13 @@ unsafe impl PageBacking for Borrowed {
     }
 }
 
-fn borrowed(range: &Range<u64>) -> Option<DmaPages> {
-    let start = range.start & !(PAGE - 1);
-    let end = range.end.next_multiple_of(PAGE);
-    let pages: Vec<u64> = (start..end).step_by(PAGE as usize).collect();
-    let bytes = pages.len() * PAGE as usize;
-    if pages.is_empty() {
-        return None;
-    }
+fn borrowed(range: &Range<u64>, physical_bits: u8) -> Option<DmaPages> {
+    let range = remapping::window_range(range, physical_bits)?;
+    let count = usize::try_from((range.end - range.start) / PAGE).ok()?;
+    let bytes = count.checked_mul(PAGE as usize)?;
+    let mut pages = Vec::new();
+    pages.try_reserve_exact(count).ok()?;
+    pages.extend(range.step_by(PAGE as usize));
     PinnedPages::new(Box::new(Borrowed { pages }), bytes, PAGE as usize)
         .ok()
         .map(DmaPages::from)
@@ -367,8 +366,12 @@ pub(super) unsafe fn take(
                 .filter(|(rid, _)| requesters.contains(rid))
                 .map(|(_, range)| range.clone()),
         );
-        let Some(ranges) = window.iter().map(borrowed).collect::<Option<Vec<_>>>() else {
-            left(&"an empty window range");
+        let Some(ranges) = window
+            .iter()
+            .map(|range| borrowed(range, physical_bits))
+            .collect::<Option<Vec<_>>>()
+        else {
+            left(&"a DMA window range is empty, out of bounds or cannot be allocated");
             continue;
         };
         // SAFETY: forwarded: the requesters DMA only to the drivers' region
@@ -413,11 +416,11 @@ impl Taken {
         // mastering it enables after mapping through this domain.
         let requester = unsafe { unit.attach_binding(binding) }?;
         Ok(Arc::new(Domain {
-            inner: RefCell::new(Inner {
+            inner: ManuallyDrop::new(RefCell::new(Inner {
                 requester,
                 mappings: Vec::new(),
                 next: 1,
-            }),
+            })),
         }))
     }
 }
@@ -430,11 +433,23 @@ struct Inner {
 
 /// A requester's own AMD-Vi domain, reached from the boot processor alone.
 struct Domain {
-    inner: RefCell<Inner>,
+    inner: ManuallyDrop<RefCell<Inner>>,
 }
 
-// SAFETY: every method checks it runs on the boot processor outside an
-// interrupt handler before it touches the process-local requester.
+impl Drop for Domain {
+    fn drop(&mut self) {
+        if on_boot_processor() {
+            // SAFETY: the owner processor, outside interrupts, has exclusive
+            // final access. Off-owner release keeps the process-local Rc
+            // graph intact rather than racing its owner's reference counts.
+            unsafe { ManuallyDrop::drop(&mut self.inner) };
+        }
+    }
+}
+
+// SAFETY: methods and final release touch the process-local requester only
+// on the boot processor outside an interrupt handler; other final releases
+// retain the complete graph without accessing its non-atomic owners.
 unsafe impl Send for Domain {}
 // SAFETY: as above.
 unsafe impl Sync for Domain {}
@@ -496,6 +511,10 @@ unsafe impl DmaDomain for Domain {
         unsafe { requester.unmap(&mappings[index].1) }.map_err(failed)?;
         mappings.swap_remove(index);
         Ok(())
+    }
+    unsafe fn drain_posted_writes(&self) -> Result<(), DmaError> {
+        let inner = self.inner()?;
+        inner.requester.drain_posted_writes()
     }
     unsafe fn sync_for_device(
         &self,

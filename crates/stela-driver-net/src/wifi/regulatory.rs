@@ -27,7 +27,9 @@ pub use scan::{ScanAdmission, ScanOperation};
 pub mod channel;
 pub mod database;
 pub mod wmm;
-pub use association::{AssociationAdmission, AssociationOperation, AssociationUse, EdcaOperation};
+pub use association::{
+    AssociationAdmission, AssociationOperation, AssociationUse, EdcaOperation, EdcaUpdate,
+};
 pub(crate) use association::{AssociationOwner, NativeManagementUse};
 
 static NEXT_OWNER: super::Identities = super::Identities::new();

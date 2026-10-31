@@ -51,20 +51,16 @@ pub(super) struct Remappers {
     amd: Vec<amd::Taken>,
 }
 
-/// Every function on `window`'s buses, each bus scanned as a root so a
-/// host bridge's bus the firmware did not describe is still covered.
+/// Every present function, grouped by PCI segment across the platform's
+/// validated ECAM windows, so each remapping unit sees its entire scope.
 ///
 /// # Safety
-/// The current root maps `window`'s configuration space uncached.
-unsafe fn inventory(window: &EcamWindow) -> Vec<Present> {
-    let roots: Vec<u8> = (window.start_bus..=window.end_bus).collect();
-    remapping::enumerate(&roots, |rid, offset| {
-        let bus = (rid >> 8) as u8;
-        if !(window.start_bus..=window.end_bus).contains(&bus) {
-            return None;
-        }
+/// The current root maps every window's configuration space uncached.
+unsafe fn inventory(windows: &[EcamWindow]) -> Vec<(u16, Vec<Present>)> {
+    remapping::enumerate_segments(windows, |window, rid, offset| {
         let address = window.base + (u64::from(rid) << 12) + u64::from(offset);
-        // SAFETY: an aligned dword of the mapped configuration space.
+        // SAFETY: enumerate_segments selects the validated window containing
+        // this requester, and offset names an aligned configuration dword.
         let value = unsafe { (address as *const u32).read_volatile() };
         (value != u32::MAX).then_some(value)
     })
@@ -117,11 +113,8 @@ impl Remappers {
             if dmar.is_none() && ivrs.is_none() {
                 return remappers;
             }
-            let inventories: Vec<(u16, Vec<Present>)> = ecam
-                .iter()
-                // SAFETY: the loader root maps each window.
-                .map(|window| (window.segment, unsafe { inventory(window) }))
-                .collect();
+            // SAFETY: the loader root maps every validated ECAM window.
+            let inventories = unsafe { inventory(ecam) };
             (dmar, ivrs, inventories)
         };
         if let Some(ivrs) = ivrs {

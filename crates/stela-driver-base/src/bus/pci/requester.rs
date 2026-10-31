@@ -194,6 +194,36 @@ impl From<CapabilityError> for ClaimError {
     }
 }
 
+/// Wait for PCIe outstanding transactions to finish before changing DMA
+/// ownership. `expired` uses the caller's retained clock/deadline. An idle
+/// status is only a configuration observation; engine, IRQ and worker
+/// quiescence remain the stopped requester's independent producer obligations.
+pub fn wait_for_pending_transactions<C: ConfigSpace>(
+    config: &C,
+    mut expired: impl FnMut() -> bool,
+) -> Result<(), ClaimError> {
+    let mut express = None;
+    for entry in config.capabilities() {
+        let entry = entry?;
+        if u16::from(entry.id) == PCIE && express.replace(entry.offset).is_some() {
+            return Err(ClaimError::MalformedCapability {
+                offset: entry.offset,
+            });
+        }
+    }
+    let Some(express) = express else {
+        return Ok(());
+    };
+    let status = express + 10;
+    while read16(config, status)? & (1 << 5) != 0 {
+        if expired() {
+            return Err(ClaimError::Active { offset: status });
+        }
+        core::hint::spin_loop();
+    }
+    Ok(())
+}
+
 fn standard<C: ConfigSpace>(config: &C, status: u16) -> Result<(), ClaimError> {
     if status & regs::STATUS_CAP_LIST == 0 {
         return Ok(());
@@ -238,6 +268,7 @@ fn standard<C: ConfigSpace>(config: &C, status: u16) -> Result<(), ClaimError> {
                     return Err(ClaimError::UnsupportedPcieType(kind));
                 }
                 inactive(config, offset + 8, 1 << 11)?;
+                inactive(config, offset + 10, 1 << 5)?;
             }
             VENDOR => {}
             _ => {

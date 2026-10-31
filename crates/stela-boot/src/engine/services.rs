@@ -39,10 +39,8 @@ const MSIX: u8 = 0x11;
 const ATS: u16 = 0xf;
 const PRI: u16 = 0x13;
 const PASID: u16 = 0x1b;
-/// PCIe Device Control's Enable No Snoop, and Device Status's Transactions
-/// Pending (PCIe Base 6.0 7.5.3.4, 7.5.3.5).
+/// PCIe Device Control's Enable No Snoop (PCIe Base 6.0, 7.5.3.4).
 const NO_SNOOP: u16 = 1 << 11;
-const TRANSACTIONS_PENDING: u16 = 1 << 5;
 
 /// Whether a passthrough domain was handed out, which is reported once.
 static PASSTHROUGH_REPORTED: AtomicBool = AtomicBool::new(false);
@@ -160,7 +158,7 @@ impl<'a> Services<'a> {
     /// `pci_clear_master`, `pci_msi_shutdown`, `pci_msix_shutdown` and
     /// `pci_disable_ats`/`pri`/`pasid` do, then wait for its outstanding
     /// requests (`pci_wait_for_pending_transaction`).
-    fn stop(&self, config: &mut OwnedConfig) {
+    fn stop(&self, config: &mut OwnedConfig) -> Result<(), ServiceError> {
         let command = config.read16(COMMAND);
         config.write16(COMMAND, command & !BUS_MASTER | INTX_DISABLE);
         let mut express = None;
@@ -213,25 +211,22 @@ impl<'a> Services<'a> {
                 }
             }
         }
-        if let Some(offset) = express {
-            // Linux waits up to 60 ms in 1, 2, 4 ... ms steps; one bounded
-            // wait does the same.
-            let start = super::host::rdtsc();
-            let limit = self.tsc_hz / 1000 * 64;
-            while config.read16(offset + 10) & TRANSACTIONS_PENDING != 0
-                && super::host::rdtsc().wrapping_sub(start) < limit
-            {
-                core::hint::spin_loop();
-            }
-        }
+        // A bounded wait must refuse an endpoint that still has requests in
+        // flight. Bus-master gating alone is not completion of those requests.
+        let start = super::host::rdtsc();
+        let limit = (self.tsc_hz / 1000 * 64).max(1);
+        stela_drivers::bus::pci::requester::wait_for_pending_transactions(config, || {
+            super::host::rdtsc().wrapping_sub(start) >= limit
+        })
+        .map_err(ServiceError::Claim)
     }
 }
 
 // SAFETY: each claimed function's or bridge's configuration page and each BAR
 // is mapped once through the owned aperture, which every host processor and engine
 // root reaches; a claimed function is stopped before `from_stopped_pci`
-// checks it. Every domain is the passthrough domain, which is what the
-// requesters have with the remapping units off. The ACPI namespace is
+// checks it. The bound domain keeps its translation/configuration epoch;
+// an unavailable remapper is reported as passthrough. The ACPI namespace is
 // offered only with the i8042's interrupts masked; ring 0 reaches the i8042's
 // and each claimed i801's ports, which nothing else here uses. Firmware
 // memory is the AML provider's own mapping of RAM the map leaves to firmware.
@@ -248,7 +243,7 @@ unsafe impl NativeServices for Services<'_> {
 
     fn claim_stopped(&self, address: Address) -> Result<StoppedRequester, ServiceError> {
         let mut config = self.config(address)?;
-        self.stop(&mut config);
+        self.stop(&mut config)?;
         let function = Function::new(address, config)
             .ok_or(ServiceError::Refused("no function answers at this address"))?;
         // SAFETY: bus mastering, interrupts and outstanding requests were

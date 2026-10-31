@@ -988,6 +988,20 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
         self.client
             .restrict_prepared_edca(&effective)
             .map_err(PolicyError::Client)?;
+        for link in self.client.station().link_contexts().to_vec() {
+            let rule = self
+                .country
+                .rule(u32::from(link.channel().frequency_mhz) * 1000, 20_000)
+                .ok_or(PolicyError::RestrictionMismatch)?;
+            let effective = reg::wmm::station(&link.negotiated().edca(), rule.wmm.as_ref())
+                .map_err(|_| PolicyError::RestrictionMismatch)?;
+            self.client
+                .restrict_link_edca(
+                    link.affiliation().ok_or(PolicyError::Bss)?.link_id,
+                    &effective,
+                )
+                .map_err(PolicyError::Client)?;
+        }
         let admission = self
             .authority
             .admit_association(
@@ -1161,12 +1175,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
             .modern_context()
             .ok_or(PolicyError::Bss)?
             .clone();
-        let channel = self
-            .client
-            .station()
-            .operating_definition()
-            .ok_or(PolicyError::Bss)?
-            .control;
+        let channel = self.client.pending_edca_channel().ok_or(PolicyError::Bss)?;
         let rule = self
             .country
             .rule(u32::from(channel.frequency_mhz) * 1000, 20_000)

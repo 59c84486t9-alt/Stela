@@ -136,6 +136,7 @@ struct State {
     dte_cache: BTreeMap<u16, [u64; 2]>,
     translations: BTreeMap<(u16, u64), Translation>,
     fail_outer_guard: bool,
+    posted: Vec<(u16, u16, u64, u32)>,
 }
 type Translation = Option<(u64, bool, bool)>;
 type Image = (Vec<u64>, Vec<(u64, Vec<u8>)>);
@@ -324,7 +325,35 @@ fn word(state: &State, physical: u64) -> u64 {
     // SAFETY: independently decoded bounded peer PA, synchronous read.
     u64::from_le(unsafe { pointer(state, physical, 8).cast::<u64>().read_volatile() })
 }
+fn finish_posted(state: &mut State, mut matches: impl FnMut(u16, u16) -> bool) {
+    for (rid, domain, physical, value) in core::mem::take(&mut state.posted) {
+        if matches(rid, domain) {
+            // SAFETY: this pending transaction keeps its original checked
+            // payload PA; the synchronous peer is its only writer.
+            unsafe {
+                pointer(state, physical, 4)
+                    .cast::<u32>()
+                    .write_volatile(value.to_le())
+            };
+        } else {
+            state.posted.push((rid, domain, physical, value));
+        }
+    }
+}
 impl Peer {
+    pub(super) fn post_write(&self, rid: u16, address: u64, value: u32) {
+        let (physical, _, write) = self.walk(rid, address).expect("translated pending write");
+        assert!(write && physical.is_multiple_of(4));
+        let mut state = self.state.lock().unwrap();
+        let domain = state.dte_cache[&rid][1] as u16;
+        pointer(&state, physical, 4);
+        state.posted.push((rid, domain, physical, value));
+    }
+    pub(super) fn payload_word(&self, physical: u64) -> u32 {
+        let state = self.state.lock().unwrap();
+        // SAFETY: bounded checked model payload, with no concurrent writer.
+        u32::from_le(unsafe { pointer(&state, physical, 4).cast::<u32>().read_volatile() })
+    }
     fn tick(&self) {
         let mut state = self.state.lock().unwrap();
         assert!(
@@ -380,18 +409,21 @@ impl Peer {
                 2 => {
                     assert_eq!(command[2..], [0, 0]);
                     assert_eq!(command[0] >> 16, 0);
+                    finish_posted(&mut state, |rid, _| rid == command[0] as u16);
                     state.dte_cache.remove(&(command[0] as u16));
                 }
                 3 => {
                     assert_eq!(command[0], 0);
                     assert_ne!(command[1] & 0xffff, 0);
                     assert_eq!([command[2], command[3]], [0xffff_f003, 0x7fff_ffff]);
+                    finish_posted(&mut state, |_, domain| domain == command[1] as u16);
                     state
                         .translations
                         .retain(|(domain, _), _| *domain != command[1] as u16);
                 }
                 8 => {
                     assert_eq!(command, [0, 8 << 28, 0, 0]);
+                    finish_posted(&mut state, |_, _| true);
                     state.dte_cache.clear();
                     state.translations.clear();
                 }
@@ -673,6 +705,7 @@ pub(super) fn inputs_hardware(
             dte_cache: BTreeMap::new(),
             translations: BTreeMap::new(),
             fail_outer_guard: false,
+            posted: Vec::new(),
         })),
     };
     (inspection, Platform { peer: peer.clone() }, peer, bytes)

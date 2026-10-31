@@ -358,6 +358,21 @@ pub const MEDIATEK_WIFI: &[Recipe] = &[
     ),
 ];
 
+const REALTEK_WIFI_LICENSE: Artifact = Artifact {
+    source: LINUX_FIRMWARE,
+    revision: WIFI_FIRMWARE_REVISION,
+    member: "LICENSES/LICENCE.rtlwifi_firmware.txt",
+    length: 2115,
+    sha256: "a61351665b4f264f6c631364f85b907d8f8f41f8b369533ef4021765f9f3b62e",
+};
+
+pub const REALTEK_WIFI: &[Recipe] = &[wifi(
+    "rtw88/rtw8822c_fw.bin",
+    202600,
+    "3deecb31210986d98cdbfb000391e08d602a6eee4ffc883969faa2b907ab03ba",
+    &REALTEK_WIFI_LICENSE,
+)];
+
 const REGULATORY_LICENSE: Artifact = Artifact {
     source: WIRELESS_REGDB,
     revision: WIRELESS_REGDB_RELEASE,
@@ -620,6 +635,42 @@ fn select_mediatek_wifi(request: &Request) -> Option<&'static Recipe> {
         .find(|recipe| recipe.image.member == request.name)
 }
 
+/// Match the observed production RTL8822C identity emitted by the driver's
+/// `Profile::stage`; retain the complete PCI and SYS_CFG1 values in its request.
+fn select_realtek_wifi(request: &Request) -> Option<&'static Recipe> {
+    let pci: Vec<_> = request.target.hardware.split(':').collect();
+    if pci.len() != 8
+        || pci[0] != "pci"
+        || pci[1] != "10ec"
+        || !matches!(pci[2], "c822" | "c82f")
+        || pci[3] != "subsys"
+        || !hex_field(pci[4], 4)
+        || !hex_field(pci[5], 4)
+        || pci[6] != "rev"
+        || !hex_field(pci[7], 2)
+    {
+        return None;
+    }
+    let (syscfg, cut) = request
+        .target
+        .revision
+        .strip_prefix("syscfg1-")?
+        .split_once(":cut-")?;
+    if !hex_field(syscfg, 8) || !hex_field(cut, 2) {
+        return None;
+    }
+    let syscfg = u32::from_str_radix(syscfg, 16).ok()?;
+    if syscfg == u32::MAX
+        || syscfg & (1 << 23) != 0
+        || (syscfg >> 12) & 15 != u32::from_str_radix(cut, 16).ok()?
+    {
+        return None;
+    }
+    REALTEK_WIFI
+        .iter()
+        .find(|recipe| recipe.image.member == request.name)
+}
+
 fn hex_field(value: &str, digits: usize) -> bool {
     value.len() == digits
         && value
@@ -712,6 +763,7 @@ impl Plan {
                 "wifi-regulatory" => select_regulatory(request),
                 "wifi-intel" => select_intel_wifi(request),
                 "wifi-mt792x" => select_mediatek_wifi(request),
+                "realtek-wifi" => select_realtek_wifi(request),
                 "nouveau" => select_gsp(request),
                 _ => None,
             }.ok_or_else(|| fail("no pinned recipe for the exact observed firmware driver/hardware/revision/name"))?;
@@ -1030,6 +1082,58 @@ mod tests {
             ),
         ] {
             assert!(Plan::select(&wifi_inventory(driver, name, hardware)).is_err());
+        }
+    }
+
+    #[test]
+    fn rtl8822c_recipe_keeps_observed_consumer_and_redistribution_notice() {
+        for device in ["c822", "c82f"] {
+            let mut request = wifi_inventory(
+                "realtek-wifi",
+                "rtw88/rtw8822c_fw.bin",
+                &format!("pci:10ec:{device}:subsys:1a3b:3750:rev:01"),
+            )
+            .requests()[0]
+                .clone();
+            request.target.revision = "syscfg1-00003000:cut-03".into();
+            let mut observed = Inventory::default();
+            observed.observe(request.view()).unwrap();
+            let plan = Plan::select(&observed).unwrap();
+            let selected = &plan.selections()[0];
+            assert_eq!(selected.request, observed.requests()[0]);
+            assert_eq!(selected.recipe.image.source, LINUX_FIRMWARE);
+            assert_eq!(selected.recipe.image.revision, WIFI_FIRMWARE_REVISION);
+            assert_eq!(selected.recipe.image.length, 202600);
+            assert_eq!(
+                selected.recipe.license.member,
+                "LICENSES/LICENCE.rtlwifi_firmware.txt"
+            );
+            assert_eq!(plan.artifacts().len(), 2);
+            for (field, value) in [
+                ("driver", "wifi-intel"),
+                ("hardware", "pci:8086:c822:subsys:1a3b:3750:rev:01"),
+                ("hardware", "pci:10ec:b852:subsys:1a3b:3750:rev:01"),
+                ("hardware", "pci:10ec:c822:subsys:1a3b:3750:rev:zz"),
+                ("revision", "observed"),
+                ("revision", "syscfg1-00003000:cut-02"),
+                ("revision", "syscfg1-00803000:cut-03"),
+                ("revision", "syscfg1-ffffffff:cut-0f"),
+                ("name", "rtw89/rtw8852b_fw-2.bin"),
+                ("board", "unbound-board"),
+            ] {
+                let mut request = observed.requests()[0].clone();
+                match field {
+                    "driver" => request.target.driver = value.into(),
+                    "hardware" => request.target.hardware = value.into(),
+                    "revision" => request.target.revision = value.into(),
+                    "name" => request.name = value.into(),
+                    "board" => request.target.board = Some(value.into()),
+                    _ => unreachable!(),
+                }
+                let mut changed = Inventory::default();
+                changed.observe(request.view()).unwrap();
+                assert!(Plan::select(&changed).is_err(), "{field}: {value}");
+            }
         }
     }
 

@@ -1348,3 +1348,16 @@ fn failed_map_quarantines_the_domain_and_keeps_pins() {
     assert_eq!(source.released.load(Ordering::Relaxed), 0);
     assert_eq!(released.load(Ordering::Relaxed), 0);
 }
+
+#[test]
+fn invalid_window_geometry_never_publishes_a_hardware_root() {
+    for range in [0..u64::MAX, u64::MAX - 4096..u64::MAX, 0x8000..0x8000] {
+        let registers = ModelRegisters::new();
+        let source = source();
+        // SAFETY: the registers and page allocator are this test's exclusive
+        // software models; the invalid range must cause no hardware writes.
+        let result = unsafe { Unit::take_over(registers.clone(), source, &[8], 48, &[range]) };
+        assert!(matches!(result, Err(VtdError::Unsupported)));
+        assert!(registers.0.lock().unwrap().writes.is_empty());
+    }
+}

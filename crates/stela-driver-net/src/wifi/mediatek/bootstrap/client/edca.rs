@@ -36,7 +36,17 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         self.state().modern.as_ref()?.applied_edca.as_ref()
     }
     pub fn pending_edca(&self) -> bool {
-        self.state().edca.is_some()
+        Self::pending_edca_observation(self.state()).is_some()
+    }
+
+    fn pending_edca_observation(s: &Owned<I, Q, C>) -> Option<&Observed<C>> {
+        s.edca
+            .as_ref()
+            .or_else(|| s.links.iter().find_map(|link| link.edca.as_ref()))
+    }
+
+    pub(super) fn pending_edca_channel(&self) -> Option<wifi::Channel> {
+        Self::pending_edca_observation(self.state()).map(|observed| observed.profile.channel)
     }
 
     pub(super) fn observe_edca(s: &mut Owned<I, Q, C>, frame: Mpdu) -> Result<(), Error> {
@@ -98,7 +108,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             None if joined.beacon().profile.is_some() => None,
             None => Some(u16::from_le_bytes([frame.bytes()[34], frame.bytes()[35]])),
         };
-        let mut elements = own.as_ref().map_or(sent, |own| own.elements.as_slice());
+        let elements = own.as_ref().map_or(sent, |own| own.elements.as_slice());
         // mac80211 processes a beacon's channel switch elements first.
         if subtype == 0x0080 {
             Self::process_channel_switch(s, elements, csa::Source::Beacon, None);
@@ -126,47 +136,14 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             Ok(definition) if definition.within(&operating) => Some(Some(definition)),
             _ => Some(None),
         };
-        if elements.len() > 2300 {
-            return Err(Error::WrongProfile);
-        }
-        let mut observed = None;
-        while !elements.is_empty() {
-            let n = usize::from(*elements.get(1).ok_or(Error::WrongProfile)?);
-            let data = elements.get(2..2 + n).ok_or(Error::WrongProfile)?;
-            // MU-EDCA requires its own current count and firmware semantics.
-            if elements[0] == 255 && data.first() == Some(&38) {
-                return Err(Error::Unsupported);
-            }
-            if elements[0] == 221 && data.get(..4) == Some(&[0, 0x50, 0xf2, 2]) {
-                if observed.is_some() {
-                    return Err(Error::WrongProfile);
-                }
-                observed =
-                    Some(Wmm::parse(data, Role::AccessPoint).map_err(|_| Error::WrongProfile)?);
-            }
-            elements = &elements[2 + n..];
-        }
-        let Some(observed) = observed else {
+        let Some((count, parameters)) = parameters(
+            elements,
+            modern.context().negotiated(),
+            modern.applied_edca.as_ref().ok_or(Error::WrongPhase)?,
+        )?
+        else {
             return Ok(());
         };
-        let parameters = observed.parameters.ok_or(Error::Unsupported)?;
-        let negotiated = modern.context().negotiated();
-        negotiated.wmm.as_ref().ok_or(Error::Unsupported)?;
-        let original_ap = negotiated.peer().wmm().ok_or(Error::Unsupported)?;
-        // U-APSD continues to use the immutable association. Admission
-        // control is host-side: data TIDs follow the applied flags, as
-        // `ieee80211_sta_wmm_params` updates `wmm_acm`.
-        if observed.qos_info & 0x80 != original_ap.qos_info & 0x80
-            || parameters.iter().any(|ac| ac.ecw_min == 0)
-        {
-            return Err(Error::Unsupported);
-        }
-        let count = observed.qos_info & 15;
-        let applied = modern.applied_edca.as_ref().ok_or(Error::WrongPhase)?;
-        // Pinned source uses equality, not ordering:15 ->0 is a real update.
-        if count == applied.parameter_set_count {
-            return Ok(());
-        }
         s.edca = Some(Observed {
             resource: s.controller.state().resource.clone(),
             context: modern.context().clone(),
@@ -183,10 +160,81 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         Ok(())
     }
 
+    pub(super) fn observe_link_beacon(s: &mut Owned<I, Q, C>, frame: Mpdu) -> Result<(), Error> {
+        let link = s
+            .links
+            .iter_mut()
+            .find(|link| {
+                (link.profile.channel.band, link.profile.channel.number)
+                    == (frame.radio.band, frame.radio.channel)
+            })
+            .ok_or(Error::WrongProfile)?;
+        link.edca = None;
+        let h = frame.header();
+        let p = link.profile;
+        let subtype = h.control & 0x00fc;
+        if frame.radio.frequency_mhz != p.channel.frequency_mhz
+            || h.transmitter != Some(p.peer)
+            || frame.bytes().get(16..22) != Some(p.peer.0.as_slice())
+            || frame.fcs_error
+            || frame.monitor_only
+            || h.protected()
+            || h.fragmented()
+            || h.control & 0x0300 != 0
+            || h.length != 24
+            || frame.aggregation != wifi::Aggregation::default()
+            || !matches!(subtype, 0x0080 | 0x0050)
+            || (subtype == 0x0080 && h.receiver != crate::Mac::BROADCAST)
+            || (subtype == 0x0050 && h.receiver != p.interface.address)
+        {
+            return Err(Error::WrongProfile);
+        }
+        if !s
+            .station
+            .link_contexts()
+            .iter()
+            .any(|context| Arc::ptr_eq(context, &link.context))
+        {
+            return Err(Error::Station(station::Error::Stale));
+        }
+        let elements = frame.bytes().get(36..).ok_or(Error::WrongProfile)?;
+        let operating = link.context.definition();
+        link.channel_change = match link.context.beacon_definition(elements, operating.control) {
+            Ok(definition) if definition == link.channel => None,
+            Ok(definition) if definition.within(&operating) => Some(Some(definition)),
+            _ => Some(None),
+        };
+        let Some((count, parameters)) = parameters(
+            elements,
+            link.context.negotiated(),
+            link.applied_edca.as_ref().ok_or(Error::WrongPhase)?,
+        )?
+        else {
+            return Ok(());
+        };
+        link.edca = Some(Observed {
+            resource: s.controller.state().resource.clone(),
+            context: link.context.clone(),
+            profile: p,
+            association: s.station.association_epoch().ok_or(Error::WrongPhase)?,
+            peer_generation: s.peer_generation,
+            ptk: link.ptk.slot().installed(),
+            gtk: link.gtk.slot().installed(),
+            seen: s.controller.state().control.clock.now_us(),
+            count,
+            parameters,
+            _frame: frame,
+        });
+        Ok(())
+    }
+
     /// Whether a beacon changed the channel: `Some(false)` when the change
     /// leaves the associated channel.
     pub fn pending_channel(&self) -> Option<bool> {
-        self.state().channel_change.map(|change| change.is_some())
+        let s = self.state();
+        s.channel_change
+            .or_else(|| s.links.iter().find_map(|link| link.channel_change))
+            .map(|change| change.is_some())
     }
 
     /// mac80211 `ieee80211_link_change_chanreq` to `mt7925_change_chanctx`:
@@ -203,14 +251,31 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         admission: wifi::regulatory::AssociationAdmission,
     ) -> Result<(), Error> {
         let s = self.state_mut();
-        let Some(Some(definition)) = s.channel_change else {
-            return Err(Error::WrongPhase);
-        };
         if s.phase != Phase::Associated {
             return Err(Error::WrongPhase);
         }
         Self::command_ready(s)?;
-        let profile = s.profile.ok_or(Error::WrongPhase)?;
+        let (pending, current, profile) = if s.channel_change.is_some() {
+            (
+                &mut s.channel_change,
+                None,
+                s.profile.ok_or(Error::WrongPhase)?,
+            )
+        } else {
+            let link = s
+                .links
+                .iter_mut()
+                .find(|link| link.channel_change.is_some())
+                .ok_or(Error::WrongPhase)?;
+            (
+                &mut link.channel_change,
+                Some(&mut link.channel),
+                link.profile,
+            )
+        };
+        let Some(Some(definition)) = *pending else {
+            return Err(Error::WrongPhase);
+        };
         let body = profile.channel_request(&definition).map_err(Error::Codec)?;
         s.replies.try_reserve(1).map_err(|_| Error::NoMemory)?;
         let phase = &mut s.phase;
@@ -231,8 +296,11 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             )
         }
         .map_err(Error::Regulatory)??;
-        s.channel = Some(definition);
-        s.channel_change = None;
+        *pending = None;
+        match current {
+            Some(channel) => *channel = definition,
+            None => s.channel = Some(definition),
+        }
         Ok(())
     }
 
@@ -415,21 +483,47 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         if s.phase != Phase::Associated {
             return Err(Error::WrongPhase);
         }
-        if s.modern
-            .as_ref()
-            .is_none_or(|m| !Arc::ptr_eq(m.context(), &observed.context))
+        let (profile, context, ptk, gtk) = if let Some(link) = s
+            .links
+            .iter()
+            .find(|link| Arc::ptr_eq(&link.context, &observed.context))
+        {
+            if !s
+                .station
+                .link_contexts()
+                .iter()
+                .any(|context| Arc::ptr_eq(context, &link.context))
+            {
+                return Err(Error::Station(station::Error::Stale));
+            }
+            (
+                link.profile,
+                &link.context,
+                Some(&link.ptk),
+                Some(&link.gtk),
+            )
+        } else {
+            let modern = s.modern.as_ref().ok_or(Error::WrongPhase)?;
+            s.station
+                .validate_association_context(modern.context())
+                .map_err(Error::Station)?;
+            (
+                s.profile.ok_or(Error::WrongProfile)?,
+                modern.context(),
+                s.ptk.as_ref(),
+                s.gtk.as_ref(),
+            )
+        };
+        if !Arc::ptr_eq(context, &observed.context)
             || !Arc::ptr_eq(&observed.resource, &s.controller.state().resource)
-            || s.profile != Some(observed.profile)
+            || profile != observed.profile
             || s.station.association_epoch() != Some(observed.association)
             || s.peer_generation != observed.peer_generation
-            || s.ptk.as_ref().and_then(|key| key.slot().installed()) != observed.ptk
-            || s.gtk.as_ref().and_then(|key| key.slot().installed()) != observed.gtk
+            || ptk.and_then(|key| key.slot().installed()) != observed.ptk
+            || gtk.and_then(|key| key.slot().installed()) != observed.gtk
         {
             return Err(Error::Station(station::Error::Stale));
         }
-        s.station
-            .validate_association_context(&observed.context)
-            .map_err(Error::Station)?;
         if s.controller
             .state()
             .control
@@ -467,12 +561,25 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         limit: Option<&wifi::regulatory::database::Wmm>,
     ) -> Result<(), Error> {
         let s = self.state_mut();
-        let observed = s.edca.as_ref().ok_or(Error::WrongPhase)?;
+        let observed = Self::pending_edca_observation(s).ok_or(Error::WrongPhase)?;
         Self::validate_edca(s, observed)?;
         Self::command_ready(s)?;
         s.replies.try_reserve(1).map_err(|_| Error::NoMemory)?;
         let clock = s.controller.state().control.clock;
-        let observed = s.edca.as_ref().unwrap();
+        let (pending, applied) = if s.edca.is_some() {
+            (
+                &mut s.edca,
+                &mut s.modern.as_mut().ok_or(Error::WrongPhase)?.applied_edca,
+            )
+        } else {
+            let link = s
+                .links
+                .iter_mut()
+                .find(|link| link.edca.is_some())
+                .ok_or(Error::WrongPhase)?;
+            (&mut link.edca, &mut link.applied_edca)
+        };
+        let observed = pending.as_ref().unwrap();
         let phase = &mut s.phase;
         let controller = &mut s.controller;
         let replies = &mut s.replies;
@@ -481,9 +588,12 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             authority.publish_edca(
                 admission,
                 &s.station,
-                observed.count,
-                &observed.parameters,
-                limit,
+                wifi::regulatory::EdcaUpdate {
+                    context: &observed.context,
+                    parameter_set_count: observed.count,
+                    observed: &observed.parameters,
+                    limit,
+                },
                 |operation| {
                     if clock
                         .now_us()
@@ -516,9 +626,55 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             )
         }
         .map_err(Error::Regulatory)??;
-        s.modern.as_mut().unwrap().applied_edca = Some(result);
-        s.edca = None;
+        *applied = Some(result);
+        *pending = None;
         s.phase = Phase::Associated;
         Ok(())
     }
+}
+
+fn parameters(
+    mut elements: &[u8],
+    negotiated: &station::phy::Negotiated,
+    applied: &AppliedEdca,
+) -> Result<Option<(u8, [AccessCategory; 4])>, Error> {
+    if elements.len() > 2300 {
+        return Err(Error::WrongProfile);
+    }
+    let mut observed = None;
+    while !elements.is_empty() {
+        let n = usize::from(*elements.get(1).ok_or(Error::WrongProfile)?);
+        let data = elements.get(2..2 + n).ok_or(Error::WrongProfile)?;
+        // MU-EDCA requires its own current count and firmware semantics.
+        if elements[0] == 255 && data.first() == Some(&38) {
+            return Err(Error::Unsupported);
+        }
+        if elements[0] == 221 && data.get(..4) == Some(&[0, 0x50, 0xf2, 2]) {
+            if observed.is_some() {
+                return Err(Error::WrongProfile);
+            }
+            observed = Some(Wmm::parse(data, Role::AccessPoint).map_err(|_| Error::WrongProfile)?);
+        }
+        elements = &elements[2 + n..];
+    }
+    let Some(observed) = observed else {
+        return Ok(None);
+    };
+    let parameters = observed.parameters.ok_or(Error::Unsupported)?;
+    negotiated.wmm.as_ref().ok_or(Error::Unsupported)?;
+    let original_ap = negotiated.peer().wmm().ok_or(Error::Unsupported)?;
+    // U-APSD continues to use the immutable association. Admission
+    // control is host-side: data TIDs follow the applied flags, as
+    // `ieee80211_sta_wmm_params` updates `wmm_acm`.
+    if observed.qos_info & 0x80 != original_ap.qos_info & 0x80
+        || parameters.iter().any(|ac| ac.ecw_min == 0)
+    {
+        return Err(Error::Unsupported);
+    }
+    let count = observed.qos_info & 15;
+    // Pinned source uses equality, not ordering:15 ->0 is a real update.
+    if count == applied.parameter_set_count {
+        return Ok(None);
+    }
+    Ok(Some((count, parameters)))
 }

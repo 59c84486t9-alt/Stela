@@ -173,7 +173,13 @@ pub fn parse(table: &[u8]) -> Result<Remapping, DmarError> {
                     return Err(DmarError::InvalidStructure);
                 }
                 let (base, limit) = (quad(entry, 8), quad(entry, 16));
-                if !base.is_multiple_of(4096) || limit < base || limit & 0xfff != 0xfff {
+                if !base.is_multiple_of(4096)
+                    || limit < base
+                    || limit & 0xfff != 0xfff
+                    || limit
+                        .checked_add(1)
+                        .is_none_or(|end| physical_bits < 64 && end > 1u64 << physical_bits)
+                {
                     return Err(DmarError::InvalidStructure);
                 }
                 remapping.reserved.push(Rmrr {
@@ -402,6 +408,29 @@ mod tests {
         broken.extend(0x1000u64.to_le_bytes());
         broken.extend(0x1000u64.to_le_bytes());
         assert_eq!(parse(&seal(broken)), Err(DmarError::InvalidStructure));
+    }
+
+    #[test]
+    fn reserved_ranges_require_a_representable_end_within_the_host_width() {
+        for (bits, limit, valid) in [
+            (48, u64::MAX, false),
+            (64, u64::MAX, false),
+            (48, (1u64 << 48) + 4095, false),
+            (48, (1u64 << 48) - 1, true),
+        ] {
+            let mut table = fixture();
+            table[36] = bits - 1;
+            table.extend([1, 0, 32, 0, 0, 0, 0, 0]);
+            table.extend((limit & !4095).to_le_bytes());
+            table.extend(limit.to_le_bytes());
+            table.extend([1, 8, 0, 0, 0, 0, 0x14, 0]);
+            let result = parse(&seal(table));
+            if valid {
+                assert_eq!(result.unwrap().reserved[0].limit, limit);
+            } else {
+                assert_eq!(result, Err(DmarError::InvalidStructure));
+            }
+        }
     }
 
     #[test]
