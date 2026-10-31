@@ -71,6 +71,10 @@ struct Air {
     scans: Vec<bool>,
     /// Management frames lost to the air before the AP hears them.
     losses: usize,
+    /// The AP stopped beaconing on its channel.
+    quiet: bool,
+    /// The AP takes no frame at all.
+    gone: bool,
 }
 
 impl Air {
@@ -93,7 +97,7 @@ impl Air {
                 self.incoming
                     .push_back(Incoming::Report(Report::Transmitted {
                         number,
-                        acknowledged: !lost,
+                        acknowledged: !lost && !self.gone,
                     }));
             }
             if lost {
@@ -150,7 +154,12 @@ impl Device for Model {
         Ok(true)
     }
     fn receive(&mut self, sink: &mut dyn FnMut(Incoming)) -> Result<(), String> {
-        self.0.borrow_mut().incoming.drain(..).for_each(sink);
+        let mut air = self.0.borrow_mut();
+        if !air.quiet && air.tuned.last() == Some(&(air.channel, false)) {
+            let beacon = beacon(air.channel as u8);
+            air.hear(beacon, false);
+        }
+        air.incoming.drain(..).for_each(sink);
         Ok(())
     }
     fn command(&mut self, command: (u32, u32)) -> Result<(), String> {
@@ -229,6 +238,9 @@ fn beacon(channel: u8) -> Vec<u8> {
     frame.extend(RSN);
     if channel < 14 {
         frame.extend(HT);
+        // HT Operation's primary channel.
+        let at = frame.len() - 22;
+        frame[at] = channel;
         frame.extend(WMM);
     }
     frame
@@ -433,7 +445,7 @@ fn the_watchdog_runs_every_two_seconds_and_refreshes_rates_on_each_fourth() {
     model.0.borrow_mut().watchdogs.clear();
     model.0.borrow_mut().level = 5;
     let context = wifi.radio().context.clone().unwrap();
-    let refresh = commands::ra_info(rate_info(&context, false, 5));
+    let refresh = commands::ra_info(rate_info(&context, context.negotiated().width, false, 5));
     assert_eq!(refresh.0 & (1 << 27), 1 << 27);
     assert_eq!(refresh.1 & 0xff, 0);
     for _ in 0..8 {
@@ -602,6 +614,124 @@ fn a_block_ack_agreement_orders_what_it_holds() {
         released.extend(delivered(&mut wifi));
     }
     assert_eq!(released, [0x23]);
+}
+
+/// How many nullfuncs the station sent.
+fn nullfuncs(air: &Air) -> usize {
+    air.sent.iter().filter(|sent| sent.2[0] == 0x48).count()
+}
+
+#[test]
+fn an_ap_gone_silent_is_probed_and_given_up_on() {
+    let (mut wifi, model) = connected();
+    model.0.borrow_mut().quiet = true;
+    model.0.borrow_mut().gone = true;
+    assert!(run(&mut wifi, &model, |wifi, _| {
+        wifi.radio().station().phase() != Peering::Associated
+    }));
+    let air = model.0.borrow();
+    assert_eq!(nullfuncs(&air), 2);
+    let probe = air.sent.iter().find(|sent| sent.2[0] == 0x48).unwrap();
+    assert_eq!(probe.0, Queue::Voice);
+    assert_eq!(probe.2[1], 1);
+    assert_eq!(probe.2[4..10], AP);
+    assert!(probe.1.report.is_some());
+}
+
+#[test]
+fn an_ap_that_only_stopped_beaconing_answers_the_probe() {
+    let (mut wifi, model) = connected();
+    model.0.borrow_mut().quiet = true;
+    assert!(run(&mut wifi, &model, |_, air| nullfuncs(air) == 3));
+    assert!(wifi.radio().station().phase() == Peering::Associated);
+}
+
+#[test]
+fn half_a_minute_unheard_asks_the_ap_even_with_its_beacons_coming() {
+    let (mut wifi, model) = connected();
+    crate::test_clock::advance(CLOCK, 31_000_000);
+    wifi.carrier();
+    assert_eq!(nullfuncs(&model.0.borrow()), 1);
+}
+
+#[test]
+fn a_new_wmm_set_and_slot_reach_the_hardware() {
+    let (mut wifi, model) = connected();
+    let mut changed = beacon(1);
+    let at = changed.len() - WMM.len();
+    changed[at + 8] = 1;
+    changed[at + 11] = 0xa5;
+    changed[35] |= 4;
+    model.0.borrow_mut().quiet = true;
+    model.0.borrow_mut().hear(changed, false);
+    wifi.carrier();
+    let air = model.0.borrow();
+    assert_eq!(air.edca.len(), 2);
+    let (edca, short_slot) = air.edca[1];
+    assert_eq!(edca[0].ecw_min, 5);
+    assert!(short_slot);
+}
+
+/// `beacon(1)` announcing channel `to` in `count` beacons, with silence.
+fn announcing(to: u8, count: u8) -> Vec<u8> {
+    let mut frame = beacon(1);
+    frame.extend([37, 3, 1, to, count]);
+    frame
+}
+
+#[test]
+fn a_beacon_moves_the_link_in_silence_until_a_beacon_is_heard_there() {
+    let (mut wifi, model) = connected();
+    let commands = model.0.borrow().commands.len();
+    model.0.borrow_mut().hear(announcing(6, 3), false);
+    wifi.carrier();
+    wifi.transmit(&ip(0xc0)).unwrap();
+    wifi.carrier();
+    let voice = |air: &Air| {
+        air.sent
+            .iter()
+            .filter(|sent| sent.0 == Queue::Voice)
+            .count()
+    };
+    let quiet = voice(&model.0.borrow());
+    assert_eq!(model.0.borrow().tuned.last(), Some(&(1, false)));
+    // Two beacon intervals away, and the AP's withdrawal cannot stop it.
+    crate::test_clock::advance(CLOCK, 2 * 100 * 1024);
+    wifi.carrier();
+    assert_eq!(model.0.borrow().tuned.last(), Some(&(6, false)));
+    assert!(
+        model.0.borrow().commands[commands..]
+            .iter()
+            .any(|sent| sent.0 & 0xff == 0x40)
+    );
+    assert_eq!(voice(&model.0.borrow()), quiet);
+    model.0.borrow_mut().channel = 6;
+    wifi.carrier();
+    wifi.carrier();
+    assert_eq!(voice(&model.0.borrow()), quiet + 1);
+    assert!(wifi.radio().station().phase() == Peering::Associated);
+}
+
+#[test]
+fn a_switch_to_a_barred_channel_ends_the_association_unannounced() {
+    let (mut wifi, model) = connected();
+    let sent = model.0.borrow().sent.len();
+    model.0.borrow_mut().hear(announcing(14, 3), false);
+    assert!(run(&mut wifi, &model, |wifi, _| {
+        wifi.radio().station().phase() != Peering::Associated
+    }));
+    let air = model.0.borrow();
+    assert!(air.sent[sent..].iter().all(|frame| frame.2[0] != 0xc0));
+}
+
+#[test]
+fn a_moved_link_that_hears_nothing_is_given_up_on() {
+    let (mut wifi, model) = connected();
+    model.0.borrow_mut().hear(announcing(6, 1), false);
+    model.0.borrow_mut().gone = true;
+    assert!(run(&mut wifi, &model, |wifi, _| {
+        wifi.radio().station().phase() != Peering::Associated
+    }));
 }
 
 #[test]

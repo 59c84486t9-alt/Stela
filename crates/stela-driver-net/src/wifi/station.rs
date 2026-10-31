@@ -25,6 +25,7 @@ mod aggregate;
 mod context;
 pub mod csa;
 pub mod external;
+pub mod monitor;
 pub mod multi_link;
 mod sequence;
 pub use context::{AssociationContext, NativeBssObservation};
