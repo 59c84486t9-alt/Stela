@@ -20,7 +20,10 @@ const H2C_COUNT: usize = 128;
 const DESCRIPTOR: usize = 16;
 const PACKET: usize = 48 + 32;
 /// One frame's page: its packet descriptor, then the MPDU.
-const FRAME: usize = 4096;
+const FRAME: usize = 8192;
+/// The longest MPDU a buffer holds behind its descriptor, which an HT peer's
+/// long A-MSDU fits and a VHT peer's longest is held to.
+pub const MAX_FRAME: usize = FRAME - 48;
 /// The pages a quiet queue keeps mapped for the next burst.
 const SPARE: usize = 64;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -112,8 +112,6 @@ const CHECKSUM_OFFLOAD: u32 = 21;
 const ACK_ENABLED: u8 = 0x80;
 /// `IEEE80211_HE_MAC_CAP5_OM_CTRL_UL_MU_DATA_DIS_RX`.
 const UPLINK_DATA_DISABLED: u8 = 0x10;
-/// What an MSDU's QoS header and LLC add to its Ethernet frame.
-const SUBFRAME_OVERHEAD: usize = 26 + 8 - 14;
 /// `WLAN_ACTION_BLOCK_ACK`, on an action frame.
 const BLOCK_ACK_CATEGORY: u8 = 3;
 /// `WLAN_REASON_QSTA_TIMEOUT`.
@@ -1462,7 +1460,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                 let tail = client.held[usize::from(tid)].back()?;
                 (client.amsdu.1 & 1 << tid != 0
                     && !tail.control_port
-                    && tail.mpdu.len() + ethernet.len() + SUBFRAME_OVERHEAD <= limit)
+                    && tail.mpdu.len() + ethernet.len() + amsdu::SUBFRAME_OVERHEAD <= limit)
                     .then_some(tid)
             });
         let mut policy = Admitted(&client.channels);
@@ -1484,7 +1482,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                 )
                 .map_err(Error::Data)?;
             if let Some(tail) = client.held[usize::from(tid)].back_mut() {
-                amsdu::append(&mut tail.mpdu, plan.plaintext_mpdu());
+                amsdu::append(&mut tail.mpdu, plan.plaintext_mpdu(), 0);
             }
             return Ok(());
         }

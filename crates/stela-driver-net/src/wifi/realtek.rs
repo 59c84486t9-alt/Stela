@@ -6,6 +6,7 @@
 //! hardware references, not a Linux kernel interface.
 pub mod attach;
 pub mod beacon;
+pub mod bit_rate;
 pub mod bootstrap;
 pub mod calibrate;
 pub mod ccmp;

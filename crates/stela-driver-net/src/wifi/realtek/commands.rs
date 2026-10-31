@@ -178,6 +178,8 @@ pub enum Report {
         mac_id: u8,
         rate: u8,
         short_gi: bool,
+        /// The width it was sent on, which older firmware leaves out.
+        width: Option<u8>,
     },
     /// `rtw_fw_scan_result`: how crowded the scan found the air.
     Density(u8),
@@ -209,6 +211,7 @@ impl Report {
                 rate: payload.first()? & 0x7f,
                 short_gi: payload.first()? & 0x80 != 0,
                 mac_id: *payload.get(1)?,
+                width: payload.get(6).copied(),
             },
             SCAN_RESULT => Self::Density(*payload.first()?),
             BT_INFO => {

@@ -260,13 +260,11 @@ fn beacon(channel: u8) -> Vec<u8> {
     frame.extend(rates(u16::from(channel)));
     frame.extend([3, 1, channel, 5, 4, 0, 2, 0, 0]);
     frame.extend(RSN);
-    if channel < 14 {
-        frame.extend(HT);
-        // HT Operation's primary channel.
-        let at = frame.len() - 22;
-        frame[at] = channel;
-        frame.extend(WMM);
-    }
+    frame.extend(HT);
+    // HT Operation's primary channel.
+    let at = frame.len() - 22;
+    frame[at] = channel;
+    frame.extend(WMM);
     frame
 }
 
@@ -349,7 +347,12 @@ const OPEN: [(u32, u32, u8, u16); 1] = [(2_402_000, 2_472_000, 0, 2000)];
 
 /// Join the model's AP on channel 1 through its handshake to an open port.
 fn connected() -> (Wifi<Model>, Model) {
-    let (mut wifi, model) = wifi(&OPEN, 1);
+    connected_on(&OPEN, 1)
+}
+
+/// Join the model's AP on `channel` through its handshake to an open port.
+fn connected_on(rules: &[(u32, u32, u8, u16)], channel: u16) -> (Wifi<Model>, Model) {
+    let (mut wifi, model) = wifi(rules, channel);
     assert!(run(&mut wifi, &model, |wifi, _| {
         wifi.radio().station().phase() == Peering::Associated
     }));
@@ -521,6 +524,57 @@ fn a_lost_authentication_goes_again() {
     let air = model.0.borrow();
     let tries = air.sent.iter().filter(|sent| sent.2[0] == 0xb0).count();
     assert_eq!(tries, 2);
+}
+
+/// Two frames of data that waited for the rings on 5 GHz, as sent.
+fn waited_on_five_ghz(before_sending: impl FnOnce(&mut Air)) -> Vec<Vec<u8>> {
+    let rules = [(5_170_000, 5_250_000, 0, 2000)];
+    let (mut wifi, model) = connected_on(&rules, 36);
+    let before = model.0.borrow().sent.len();
+    before_sending(&mut model.0.borrow_mut());
+    wifi.carrier();
+    model.0.borrow_mut().full = true;
+    let ethernet = ip(0xc0);
+    wifi.transmit(&ethernet).unwrap();
+    wifi.transmit(&ethernet).unwrap();
+    wifi.carrier();
+    model.0.borrow_mut().full = false;
+    run(&mut wifi, &model, |_, air| air.sent.len() > before);
+    for _ in 0..4 {
+        wifi.carrier();
+    }
+    let air = model.0.borrow();
+    let sent = air.sent[before..].iter();
+    sent.map(|(_, _, mpdu)| mpdu.clone()).collect()
+}
+
+#[test]
+fn data_waiting_together_on_five_ghz_leaves_as_one_amsdu() {
+    let sent = waited_on_five_ghz(|_| ());
+    let [mpdu] = &sent[..] else {
+        panic!("{} frames", sent.len());
+    };
+    assert_eq!(mpdu[24] & 0x80, 0x80);
+    assert_eq!(mpdu[26 + 3] & 0x20, 0x20, "under the head's IV");
+    assert_eq!(
+        mpdu[26 + 8 + 12..26 + 8 + 14],
+        [0, 54],
+        "LLC and the IP frame"
+    );
+}
+
+#[test]
+fn a_slow_rate_keeps_frames_apart() {
+    let sent = waited_on_five_ghz(|air| {
+        air.incoming.push_back(Incoming::Report(Report::Rate {
+            mac_id: MAC_ID,
+            rate: 4,
+            short_gi: false,
+            width: None,
+        }));
+    });
+    assert_eq!(sent.len(), 2);
+    assert!(sent.iter().all(|mpdu| mpdu[24] & 0x80 == 0));
 }
 
 #[test]
