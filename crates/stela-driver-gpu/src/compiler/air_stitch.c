@@ -63,7 +63,7 @@ load_source(struct stela_air_metadata *m, LLVMContextRef context,
       unsigned field_count, input_count;
       if (!stela_air_md_node(m, nodes[i], fields, &field_count))
          return false;
-      if (field_count != 3 || fields[0] != source->function)
+      if (field_count < 3 || fields[0] != source->function)
          continue;
       source->outputs = fields[1];
       if (!stela_air_md_node(m, fields[2], source->inputs, &input_count))

@@ -314,6 +314,60 @@ stela_air_inline_calls(struct stela_air_metadata *m, LLVMValueRef entry,
    return !recursive || unroll(m, entry, max_call_stack_depth, max_instructions);
 }
 
+/* Apple's compiler declares a visible function another module defines as
+ * NAME.MTL_VISIBLE_FN_REF, and lists the NAME it means. Under that name the
+ * linker resolves it as it does any declaration. */
+static bool
+name_references(struct stela_air_metadata *m)
+{
+   LLVMValueRef nodes[AIR_MAX_METADATA_OPERANDS];
+   unsigned count;
+   if (!stela_air_named_md(m, "air.visible_function_references", nodes, &count))
+      return false;
+   for (unsigned i = 0; i < count; i++) {
+      LLVMValueRef fields[AIR_MAX_METADATA_OPERANDS];
+      unsigned field_count, length;
+      if (!stela_air_md_node(m, nodes[i], fields, &field_count))
+         return false;
+      if (field_count != 3 || !stela_air_md_string(fields[0], "air.visible_function_reference") ||
+          !fields[1] || !LLVMIsAFunction(fields[1]) || !fields[2] || !LLVMIsAMDString(fields[2]))
+         return fail(m, STELA_AIR_METADATA, "invalid visible function reference");
+      const char *name = LLVMGetMDString(fields[2], &length);
+      LLVMValueRef defined = LLVMGetNamedFunctionWithLength(m->module, name, length);
+      if (!defined) {
+         LLVMSetValueName2(fields[1], name, length);
+      } else if (defined != fields[1]) {
+         LLVMReplaceAllUsesWith(fields[1], defined);
+         LLVMDeleteFunction(fields[1]);
+      }
+   }
+   return true;
+}
+
+/* Nothing calls an entry point, so libraries may share their names. */
+static bool
+hide_entry_points(struct stela_air_metadata *m)
+{
+   static const char *const stages[] = {"air.kernel", "air.vertex", "air.fragment", "air.object",
+                                        "air.mesh"};
+   for (unsigned stage = 0; stage < ARRAY_SIZE(stages); stage++) {
+      LLVMValueRef nodes[AIR_MAX_METADATA_OPERANDS];
+      unsigned count;
+      if (!stela_air_named_md(m, stages[stage], nodes, &count))
+         return false;
+      for (unsigned i = 0; i < count; i++) {
+         LLVMValueRef fields[AIR_MAX_METADATA_OPERANDS];
+         unsigned field_count;
+         if (!stela_air_md_node(m, nodes[i], fields, &field_count))
+            return false;
+         if (!field_count || !fields[0] || !LLVMIsAFunction(fields[0]))
+            return fail(m, STELA_AIR_METADATA, "invalid entry point");
+         LLVMSetLinkage(fields[0], LLVMInternalLinkage);
+      }
+   }
+   return true;
+}
+
 /* Whether module is valid AIR compiled as m's module was, after
  * specializing its function constants with values. */
 static bool
@@ -334,6 +388,8 @@ prepared(struct stela_air_metadata *m, LLVMModuleRef module,
        linked.fast_math != m->fast_math || linked.ident_bytes != m->ident_bytes ||
        (m->ident_bytes && memcmp(linked.ident, m->ident, m->ident_bytes)))
       return fail(m, STELA_AIR_INPUT, "a linked module was compiled differently");
+   if (!name_references(&linked) || !hide_entry_points(&linked))
+      return fail(m, error.kind, error.detail);
    if (!LLVMGetNamedMetadataNumOperands(module, "air.function_constants"))
       return true;
    if (!values)
@@ -350,6 +406,8 @@ stela_air_link_modules(struct stela_air_metadata *m, const struct stela_air_modu
 {
    if (count && !modules)
       return fail(m, STELA_AIR_INPUT, "invalid linked modules");
+   if (!name_references(m))
+      return false;
    LLVMContextRef context = LLVMGetModuleContext(m->module);
    for (unsigned i = 0; i < count; i++) {
       const struct stela_air_module *linked = &modules[i];

@@ -350,7 +350,7 @@ stela_air_metadata_validate(struct stela_air_metadata *t)
                                "air.kernel", "air.vertex", "air.fragment", "air.object",
                                "air.mesh", "air.visible", "llvm.ident", "llvm.module.flags",
                                "air.function_constants", "air.source_file_name",
-                               "air.sampler_states"};
+                               "air.sampler_states", "air.visible_function_references"};
       bool found = false;
       for (unsigned i = 0; i < ARRAY_SIZE(allowed); i++)
          found |= size == strlen(allowed[i]) && !memcmp(name, allowed[i], size);

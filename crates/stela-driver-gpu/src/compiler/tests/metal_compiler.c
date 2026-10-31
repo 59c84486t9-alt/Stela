@@ -312,7 +312,8 @@ static const char *calls =
    "store i32 %v, ptr addrspace(1) %data, align 4\nret void\n}\n"
    "!air.kernel = !{!2, !5}\n!air.visible = !{!6}\n"
    "!2 = !{ptr @calls, !3, !4}\n!3 = !{}\n!4 = !{!40, !41}\n!5 = !{ptr @recurses, !3, !4}\n"
-   "!6 = !{ptr @doubled, !7, !8}\n!7 = !{!70}\n!8 = !{!80}\n"
+   "!6 = !{ptr @doubled, !7, !8, !9}\n!7 = !{!70}\n!8 = !{!80}\n"
+   "!9 = !{!\"air.stitching_info\"}\n"
    "!40 = !{i32 0, !\"air.buffer\", !\"air.location_index\", i32 0, i32 1, !\"air.read_write\","
    " !\"air.address_space\", i32 1, !\"air.arg_type_size\", i32 4, !\"air.arg_type_align_size\","
    " i32 4, !\"air.arg_type_name\", !\"int\", !\"air.arg_name\", !\"data\"}\n"
@@ -1232,12 +1233,14 @@ os_log_appends_self_contained_records(void)
 }
 
 static const char *stitching_kernel =
-   "declare i32 @quadrupled(i32)\n"
+   "declare i32 @quadrupled.MTL_VISIBLE_FN_REF(i32) section \"air.externally_defined\"\n"
    "define void @stitches(ptr addrspace(1) %data, i32 %tid) {\n"
-   "%v = call i32 @quadrupled(i32 %tid)\n"
+   "%v = call i32 @quadrupled.MTL_VISIBLE_FN_REF(i32 %tid)\n"
    "store i32 %v, ptr addrspace(1) %data, align 4\nret void\n}\n"
-   "!air.kernel = !{!2}\n"
+   "!air.kernel = !{!2}\n!air.visible_function_references = !{!5}\n"
    "!2 = !{ptr @stitches, !3, !4}\n!3 = !{}\n!4 = !{!40, !41}\n"
+   "!5 = !{!\"air.visible_function_reference\", ptr @quadrupled.MTL_VISIBLE_FN_REF,"
+   " !\"quadrupled\"}\n"
    "!40 = !{i32 0, !\"air.buffer\", !\"air.location_index\", i32 0, i32 1, !\"air.read_write\","
    " !\"air.address_space\", i32 1, !\"air.arg_type_size\", i32 4, !\"air.arg_type_align_size\","
    " i32 4, !\"air.arg_type_name\", !\"int\", !\"air.arg_name\", !\"data\"}\n"
@@ -1385,6 +1388,12 @@ linked_functions_resolve_tables_and_externals(void)
    /* A table's pointer that escapes its calls. */
    assert(!compile_linked(escaping, "tables", &linked, 1, functions, 3, &error));
    assert(error.kind == STELA_AIR_INSTRUCTION && strstr(error.detail, "only called"));
+   /* A library's kernel of the kernel's name is its own. */
+   const char *sharing[] = {linked, "define void @tables() {\nret void\n}\n!air.kernel = !{!0}\n"
+                                    "!0 = !{ptr @tables, !1, !1}\n!1 = !{}\n"};
+   shader = compile_linked(tables, "tables", sharing, 2, functions, 3, &error);
+   assert(shader);
+   stela_metal_release(shader);
    /* A library that defines the kernel's own function again. */
    const char *twice[] = {linked, "define i32 @doubled(i32 %x) {\nret i32 %x\n}\n!air.visible = !{}\n"};
    assert(!compile_linked(tables, "tables", twice, 2, functions, 3, &error));
