@@ -48,7 +48,7 @@ use alloc::{
     sync::Arc,
     vec::Vec,
 };
-use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use stela_compiler::aarch64::system::registers::Encoding;
 use stela_contracts::refuse;
 
@@ -64,6 +64,45 @@ pub use profile::{BroadcastCounts, BroadcastKind, BroadcastProfile};
 /// in the engine costs it one return through its interrupt handler.
 pub trait Kick: Send + Sync {
     fn kick(&self, pe: usize);
+}
+
+/// A PE that may use any context's translations ([`Inbox::translating`]).
+const ANY_CONTEXT: u32 = u32::MAX;
+
+/// [`Inbox::translating`] of a regime's ASID.
+fn context_word(regime: mmu::Regime, asid: u16) -> u32 {
+    (regime as u32) << 16 | u32::from(asid)
+}
+
+/// The lower half's addresses a PE may hold global translations of, only
+/// ever widened. A TLBI by ASID removes those too, so it is not private
+/// ([`tlbi::Private`]) there.
+#[derive(Debug)]
+pub struct GlobalSpan {
+    first: AtomicU64,
+    last: AtomicU64,
+}
+
+impl GlobalSpan {
+    fn new() -> Self {
+        Self {
+            first: AtomicU64::new(u64::MAX),
+            last: AtomicU64::new(0),
+        }
+    }
+
+    /// Take in `first..=last` before using a translation there. When that
+    /// widens the span, a broadcast may have passed the PE by while it
+    /// walked, so it walks again: the caller's walk could predate the TLBI.
+    pub fn widen(&self, first: u64, last: u64) -> bool {
+        let lower = self.first.fetch_min(first, Ordering::SeqCst);
+        let upper = self.last.fetch_max(last, Ordering::SeqCst);
+        first < lower || last > upper
+    }
+
+    fn overlaps(&self, first: u64, last: u64) -> bool {
+        self.first.load(Ordering::SeqCst) <= last && self.last.load(Ordering::SeqCst) >= first
+    }
 }
 
 /// Maintenance one PE broadcasts to the others.
@@ -119,11 +158,28 @@ struct Inbox {
     applied: AtomicU64,
     /// Device lines changed since the machine last read them.
     lines: AtomicU64,
+    /// The regime and ASID ([`context_word`]) of the only non-global
+    /// translations it may use before it reads its mail.
+    translating: AtomicU32,
+    lower_globals: Arc<GlobalSpan>,
     /// Its machine's counts, as it last published them ([`Hub::publish`]).
     counts: Mutex<Counts>,
     source: observation::Slot,
     broadcasts: profile::Slot,
     mail: Mutex<Mail>,
+}
+
+impl Inbox {
+    /// Whether this PE may use a translation a TLBI private to one context
+    /// removes.
+    fn may_use(&self, private: tlbi::Private) -> bool {
+        let translating = self.translating.load(Ordering::SeqCst);
+        translating == ANY_CONTEXT
+            || translating == context_word(private.regime, private.asid)
+            || private
+                .addresses
+                .is_some_and(|(first, last)| self.lower_globals.overlaps(first, last))
+    }
 }
 
 /// What one PE's machine has done, for reports on how the PEs run together:
@@ -258,6 +314,8 @@ impl Hub {
                     live: AtomicBool::new(false),
                     sleeping: AtomicBool::new(false),
                     host_call: AtomicBool::new(false),
+                    translating: AtomicU32::new(ANY_CONTEXT),
+                    lower_globals: Arc::new(GlobalSpan::new()),
                     outside: AtomicBool::new(false),
                     chain: chain_control::Storage::new(),
                     owner: AtomicU64::new(0),
@@ -329,10 +387,15 @@ impl Hub {
     }
 
     fn post(&self, pe: usize, write: impl FnOnce(&mut Mail)) {
+        self.leave(pe, write);
+        self.interrupt(pe);
+    }
+
+    /// Leave mail for PE `pe` to find at its next read.
+    fn leave(&self, pe: usize, write: impl FnOnce(&mut Mail)) {
         let inbox = &self.inboxes[pe];
         write(&mut inbox.mail.lock().unwrap_or_else(|e| e.into_inner()));
         inbox.pending.store(true, Ordering::SeqCst);
-        self.interrupt(pe);
     }
 
     /// Publish interruption after its source; every next chain gate compares
@@ -453,12 +516,21 @@ impl Hub {
     /// that sleep; the serials to wait for. An instruction cache
     /// invalidation the PE has yet to read already covers the same page
     /// again, as IC IVAU of each line of a page posts it.
+    ///
+    /// A PE that translates another context than a TLBI's is neither
+    /// interrupted nor waited for: nothing it can use is stale, and the
+    /// mail left first is read before it uses that context, which it
+    /// publishes first ([`Machine::publish_translating`]).
     pub(super) fn broadcast(&self, from: usize, maintenance: Maintenance) -> Vec<(usize, u64)> {
+        let private = match maintenance {
+            Maintenance::Tlb(scope) => scope.private(),
+            _ => None,
+        };
         let mut posted = Vec::new();
         for pe in self.others(from) {
             let inbox = &self.inboxes[pe];
             let mut serial = 0;
-            self.post(pe, |mail| {
+            self.leave(pe, |mail| {
                 mail.serial += 1;
                 serial = mail.serial;
                 let covered = match maintenance {
@@ -472,7 +544,10 @@ impl Hub {
                 }
             });
             inbox.posted.store(serial, Ordering::Release);
-            posted.push((pe, serial));
+            if private.is_none_or(|private| inbox.may_use(private)) {
+                self.interrupt(pe);
+                posted.push((pe, serial));
+            }
         }
         posted
     }
@@ -861,6 +936,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             .attach(Arc::clone(&hub.clock), self.current, self.statistics.blocks);
         hub.home.store(self.current, Ordering::Relaxed);
         self.share_kept_pages(hub.pes());
+        self.share_lower_globals(&hub);
         self.idle_skip = false;
         hub.set_live(self.current, true);
         self.attached = Some(attached);
@@ -916,6 +992,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.cpu.core_locks = core_locks;
         self.cpu.memory_lock = self.devices.memory_lock();
         self.share_kept_pages(hub.pes());
+        self.share_lower_globals(&hub);
         hub.set_live(self.current, true);
         self.attached = Some(attached);
         self.parallel = Some(hub);
@@ -1053,6 +1130,34 @@ impl<H: Host, D: Devices> Machine<H, D> {
         Ok(())
     }
 
+    /// Publish the context `controls` translate, before this PE's walks
+    /// use it and before it next reads its mail ([`Hub::broadcast`]).
+    pub(super) fn publish_translating(&self, controls: &mmu::Controls) {
+        let Some(hub) = &self.parallel else {
+            return;
+        };
+        let translating = &hub.inboxes[self.current].translating;
+        let word = context_word(controls.regime, mmu::current_asid(controls));
+        if translating.load(Ordering::Relaxed) != word {
+            translating.store(word, Ordering::SeqCst);
+        }
+    }
+
+    /// See [`GlobalSpan::widen`]: whether the leaf holding `address` widened
+    /// this PE's span.
+    pub(super) fn widen_lower_globals(&self, address: u64, size: u64) -> bool {
+        self.parallel.as_ref().is_some_and(|hub| {
+            let (first, last) = mmu::shadow::leaf(address, size);
+            hub.inboxes[self.current].lower_globals.widen(first, last)
+        })
+    }
+
+    /// Give the host what it keeps this PE's span in.
+    fn share_lower_globals(&mut self, hub: &Hub) {
+        self.host
+            .share_lower_globals(Arc::clone(&hub.inboxes[self.current].lower_globals));
+    }
+
     /// Send the CPU power changes this PE made to every other PE's machine,
     /// and wait until each running one has applied them.
     pub(super) fn forward_power(&mut self) -> Step {
@@ -1111,6 +1216,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// on each other. A start that arrives meanwhile is posted again.
     pub(super) fn complete_maintenance(&mut self) -> Step {
         self.code_posted = None;
+        self.mirrors.close_code_page();
         let Some(hub) = self.parallel.clone() else {
             return Ok(());
         };

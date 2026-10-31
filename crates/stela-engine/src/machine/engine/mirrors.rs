@@ -51,9 +51,11 @@ pub(super) const MRS_READ: u32 = 1 << 21;
 /// The registers read other than [`MIRRORED`] ones that get a cell of their
 /// own the first time code naming them is installed
 /// ([`Machine::stored_cell`]), which reads the register's live storage: the
-/// ones a kernel reads around each exception and thread switch, and FPCR and
-/// FPSR. When there are more, the rest take System exits.
-pub(super) const STORED_CELLS: usize = 32;
+/// ones a kernel reads around each exception and thread switch, FPCR and
+/// FPSR, and the core counters a sampler reads in bursts
+/// ([`Devices::register_storage`]). When there are more, the rest take System
+/// exits.
+pub(super) const STORED_CELLS: usize = 64;
 
 /// The cells of the [`MIRRORED`] registers, in its order, and the
 /// [`STORED_CELLS`]: native code reads `cells`, the running PE's at its EL
@@ -77,7 +79,13 @@ pub(super) struct Mirrors {
 /// its `value` is the address of the stack SPSel 1 selects there.
 pub(super) const STACK_SELECT: usize = MASK_WRITES + 1 + WRITTEN.len();
 
-const CELLS: usize = STACK_SELECT + 1;
+/// The cell of IC IVAU (`x86_64::register_read::code_page_thunk`), open
+/// from one's completion until something could make another do more: code
+/// compiled, a translation changed or the DSB that ends the kernel's run of
+/// lines. Its `value` is an address in the page.
+pub(super) const CODE_PAGE: usize = STACK_SELECT + 1;
+
+const CELLS: usize = CODE_PAGE + 1;
 
 /// The cell of the mask writes (`x86_64::register_read::mask_thunk`), open
 /// once one completed plainly in the state.
@@ -135,6 +143,19 @@ impl Mirrors {
                 cells[index].value = value;
             }
         }
+    }
+
+    /// IC IVAU of `address` completed: its page's lines need no other.
+    pub(super) fn open_code_page(&mut self, address: u64) {
+        self[CODE_PAGE] = register_read::Cell {
+            readable: 1,
+            value: address,
+        };
+    }
+
+    /// Another IC IVAU of the page could do more.
+    pub(super) fn close_code_page(&mut self) {
+        self.close(CODE_PAGE);
     }
 
     /// Close the cells of one register in every state.
@@ -227,9 +248,9 @@ pub(super) fn reads_storage(register: SystemRegister) -> bool {
         )
 }
 
-/// Whether MRS of `encoding` can have a stored cell: not the ID space, whose
-/// reads are few, nor the IMPLEMENTATION DEFINED one, which Apple's state
-/// answers.
+/// Whether MRS of `encoding` can have a stored cell of its own storage: not
+/// the ID space, whose reads are few, nor the IMPLEMENTATION DEFINED one,
+/// which Apple's state answers.
 pub(super) fn storable(encoding: Encoding) -> bool {
     !(encoding.op0() == 3 && matches!(encoding.crn(), 0 | 11 | 15))
 }
@@ -372,6 +393,12 @@ pub(super) fn stack_select(word: u32) -> Option<bool> {
         0xd500_41bf => Some(true),
         _ => None,
     }
+}
+
+/// Xt of the IC IVAU `word`, if it is one.
+pub(super) fn code_page_invalidation(word: u32) -> Option<u8> {
+    const IC_IVAU: u32 = 0xd50b_7520;
+    (word & !31 == IC_IVAU).then_some((word & 31) as u8)
 }
 
 /// The MRS `word` at `pc`, if it reads to a register.

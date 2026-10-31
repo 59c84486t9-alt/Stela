@@ -50,8 +50,8 @@ pub use clock::ClockStatus;
 pub use monitor::{MonitorEvent, MonitorKind, MonitorLocation};
 pub use native_timing::{NativeInstructionSample, NativeTimingPhase, NativeTimingWork};
 pub use parallel::{
-    BroadcastCounts, BroadcastKind, BroadcastProfile, Call, Counts, Hub, Kick, MaterializedSource,
-    ParallelAdmissionError, SharedDevices, SourceObservation, SourcePhase,
+    BroadcastCounts, BroadcastKind, BroadcastProfile, Call, Counts, GlobalSpan, Hub, Kick,
+    MaterializedSource, ParallelAdmissionError, SharedDevices, SourceObservation, SourcePhase,
 };
 pub use stela_contracts::dma::{DmaError, TransferFault};
 mod pointer;
@@ -110,6 +110,7 @@ pub use shared_memory::{
 pub use shared_memory::{NativeDataTlbStatistics, NativeSourceStatistics};
 #[cfg(test)]
 use stela_compiler::x86_64::chain::ChainControl;
+use stela_compiler::x86_64::chain::ExitWord;
 use stela_compiler::{
     GuestAddress, GuestState, Lifter, TargetCpu,
     aarch64::{
@@ -170,12 +171,6 @@ const HOST_REFUSED_FETCH_LEVEL: i8 = 3;
 /// ID_AA64PFR0_EL1.CSV3, FEAT_CSV3's field.
 const CSV3_SHIFT: u32 = 60;
 const JUMP_CACHE: usize = 4096;
-/// The physical pages and contexts [`Machine::remembered_pages`] holds, a
-/// power of two.
-const REMEMBERED_PAGES: usize = 4096;
-/// How much of a leaf around a looked up PC [`Machine::remember_leaf`] covers:
-/// the 16 KiB page of an Apple guest, whatever larger block holds it.
-const REMEMBERED_SPAN: u64 = 16 * 1024;
 /// The most blocks one native run chains into, which bounds how late the
 /// engine sees a timer or device deadline pass (tens of microseconds of
 /// guest code; every System register write and device access exits
@@ -512,7 +507,7 @@ pub struct StaleCode {
 struct Successor {
     site: u64,
     target: GuestAddress,
-    kind: ExitKind,
+    word: ExitWord,
 }
 
 #[derive(Clone, Copy)]
@@ -522,10 +517,13 @@ struct FetchEntry {
     /// FEAT_BTI's guarded page (Arm `InGuardedPage`).
     guarded: bool,
     el: u8,
-    generation: u64,
-    /// The bytes of the leaf the page was translated through.
-    leaf: u64,
+    epoch: FetchEpoch,
 }
+
+/// What a half's cached fetches and lookup contexts last as long as: the
+/// translation generation, and the table generation of a half that TTBR0
+/// selects ([`Machine::fetch_epoch`]).
+type FetchEpoch = (u64, u64);
 
 #[derive(Clone, Copy)]
 struct JumpEntry {
@@ -558,7 +556,7 @@ struct Space {
 struct Recent {
     el: u8,
     variant: Variant,
-    generations: (u64, u64),
+    generations: (FetchEpoch, u64),
     number: u64,
 }
 
@@ -687,14 +685,10 @@ pub struct Machine<H: Host, D: Devices> {
     preparations: BTreeMap<Variant, Arc<Preparation>>,
     fetch: Vec<Option<FetchEntry>>,
     jump: Vec<Option<JumpEntry>>,
-    /// A lookup thunk found no entry for the next fetch's PC.
-    looking: bool,
-    /// The (page, context) pairs [`Machine::remember_leaf`] covered.
-    remembered_pages: Vec<(u64, u64)>,
-    /// A page's blocks, while [`Machine::remember_leaf`] walks them.
-    remembering: Vec<u32>,
     /// Advances when cached fetch translations become stale.
     translation_generation: u64,
+    /// TTBR0 writes: the kernel's fetches outlive a process switch.
+    table_generation: u64,
     /// Advances when installed code is discarded.
     code_generation: u64,
     /// The blocks fetches ran, by PC and context, for lookup thunks
@@ -960,10 +954,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
             preparations: BTreeMap::new(),
             fetch: vec![None; FETCH_CACHE],
             jump: vec![None; JUMP_CACHE],
-            looking: false,
-            remembered_pages: vec![(0, 0); REMEMBERED_PAGES],
-            remembering: Vec::new(),
             translation_generation: 1,
+            table_generation: 1,
             code_generation: 1,
             targets: chain::LookupTable::new(),
             spaces: [Vec::new(), Vec::new()],

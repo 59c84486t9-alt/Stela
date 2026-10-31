@@ -442,7 +442,10 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
             }
             Operation::Ic { scope, operand } => {
                 self.code = if scope == CacheScope::PoU {
-                    Code::Page(self.check_maintenance(operand, false)?)
+                    Code::Page {
+                        address: operand,
+                        physical: self.check_maintenance(operand, false)?,
+                    }
                 } else {
                     Code::All
                 };

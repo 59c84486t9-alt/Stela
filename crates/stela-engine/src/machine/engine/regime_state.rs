@@ -212,6 +212,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             watch,
             tag_checks: self.tag_checks,
         };
+        self.publish_translating(&regime.controls);
         self.host.set_regime(&regime);
         let context = PredictionContext::of(&self.cpu);
         if self.prediction_context != Some(context) {

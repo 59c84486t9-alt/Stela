@@ -104,7 +104,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// the guarded level, the variant, the code generation and the half's
     /// translation inputs ([`Space`]). Lookup entries name it.
     pub(super) fn context(&mut self, el: u8, variant: Variant, half: usize) -> u64 {
-        let generations = (self.translation_generation, self.code_generation);
+        let generations = (self.fetch_epoch(half), self.code_generation);
         if self.floor_generation != generations.1 {
             self.floor_generation = generations.1;
             self.code_floor = self.next_context << chain::LOOKUP_SALT_BITS;
@@ -262,7 +262,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if let Some(entry) = self.fetch[slot]
             && entry.page == page
             && entry.el == el
-            && entry.generation == self.translation_generation
+            && entry.epoch == self.fetch_epoch(chain::half(pc))
         {
             return Ok(entry.physical | (pc & (FETCH_PAGE - 1)));
         }
@@ -283,6 +283,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
             }
             Translated::Mapped(translation) => {
                 let half = chain::half(pc);
+                if half == 0 && translation.global && self.widen_lower_globals(pc, translation.size)
+                {
+                    return self.fetch_physical(pc);
+                }
                 self.fetched_through(half, pc, translation.size, translation.global);
                 let physical = translation.physical & !(FETCH_PAGE - 1);
                 self.fetch[slot] = Some(FetchEntry {
@@ -290,8 +294,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     physical,
                     guarded: translation.guarded,
                     el,
-                    generation: self.translation_generation,
-                    leaf: translation.size,
+                    epoch: self.fetch_epoch(half),
                 });
                 Ok(translation.physical)
             }

@@ -38,10 +38,31 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
     /// An architectural cache epoch must never wrap back to an old permission.
     pub(super) fn advance_translation_generation(&mut self) {
+        self.mirrors.close_code_page();
         self.translation_generation = self
             .translation_generation
             .checked_add(1)
             .expect("architectural translation generation exhausted");
+    }
+
+    /// What TTBR0 or its ASID selects may have changed.
+    fn advance_table_generation(&mut self) {
+        self.mirrors.close_code_page();
+        self.table_generation = self
+            .table_generation
+            .checked_add(1)
+            .expect("architectural table generation exhausted");
+    }
+
+    /// What `half`'s cached fetches and contexts last as long as: TTBR0
+    /// selects the lower half's, and the upper half's once a fetch of it was
+    /// non-global, by its ASID ([`Self::half_inputs`]).
+    pub(super) fn fetch_epoch(&self, half: usize) -> FetchEpoch {
+        let table = half == 0 || self.private_fetches[1];
+        (
+            self.translation_generation,
+            if table { self.table_generation } else { 0 },
+        )
     }
 
     /// The translations of the halves `halves` may have changed with no
@@ -56,13 +77,18 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// Forget the contexts of `halves` that translate `asid`: what a TLBI of
     /// one process leaves of the others', which their entries stay good for.
     /// ASIDs compare by the eight bits every TCR.AS gives them.
-    fn forget_asid(&mut self, halves: core::ops::RangeInclusive<usize>, asid: u16, cause: usize) {
+    pub(super) fn forget_asid(
+        &mut self,
+        halves: core::ops::RangeInclusive<usize>,
+        asid: u16,
+        cause: usize,
+    ) {
         for half in halves {
             self.statistics.lookup_forgets[cause] += 1;
             self.spaces[half].retain(|space| !same_asid(&space.inputs.0, asid));
             self.recent[half] = [None; RECENT];
         }
-        self.advance_translation_generation();
+        self.advance_table_generation();
     }
 
     /// The live salts of `half`'s contexts that `asid` reaches.
@@ -157,7 +183,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// Drop the lookup entries, of every context, of the PCs a TLBI by VA
     /// reaches ([`Self::fetched_span`]), or of `asid`'s contexts while no
     /// global page was fetched in its span of the lower half, which only
-    /// such a page shares. A half whose span would cover the table forgets
+    /// such a page shares. A half whose probes would cover the table forgets
     /// those contexts instead.
     pub(super) fn forget_lookups(&mut self, reach: mmu::tlbi::Reach, asid: Option<u16>) {
         let (first, last) = match reach {
@@ -172,17 +198,18 @@ impl<H: Host, D: Devices> Machine<H, D> {
             };
             let (global_first, global_last) = self.lower_globals;
             let scoped = asid.filter(|_| half == 0 && (last < global_first || first > global_last));
-            if (last - first) / INSTRUCTION >= (chain::LOOKUP_ENTRIES / 8) as u64 {
+            let salts = match scoped {
+                Some(asid) => self.asid_salts(half, asid),
+                None => self.live_salts(half),
+            };
+            let pcs = (last - first) / INSTRUCTION + 1;
+            if pcs.saturating_mul(salts.count_ones().into()) >= (chain::LOOKUP_ENTRIES / 8) as u64 {
                 match scoped {
                     Some(asid) => self.forget_asid(half..=half, asid, 2),
                     None => self.forget_spaces(half..=half, 2),
                 }
                 continue;
             }
-            let salts = match scoped {
-                Some(asid) => self.asid_salts(half, asid),
-                None => self.live_salts(half),
-            };
             for salt in (0..chain::LOOKUP_SALTS as u64).filter(|salt| salts >> salt & 1 != 0) {
                 for pc in (first..=last).step_by(INSTRUCTION as usize) {
                     self.targets
@@ -238,6 +265,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         everywhere: mmu::tlbi::Everywhere,
         asid: Option<u16>,
     ) {
+        self.mirrors.close_code_page();
         match everywhere {
             mmu::tlbi::Everywhere::Addresses(addresses) => {
                 // Canonical memory's kept TLBs refresh on the generation.
@@ -269,7 +297,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// ([`Host::set_regime`]), which keeps the upper half's shadow. Lookup
     /// contexts are keyed by its value, as by every control's.
     pub(super) fn table_base_changed(&mut self) {
-        self.advance_translation_generation();
+        self.advance_table_generation();
         self.statistics.table_base_changes += 1;
         self.sync_host_regime();
     }

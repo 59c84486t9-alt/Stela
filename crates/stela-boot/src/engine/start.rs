@@ -1024,7 +1024,7 @@ fn start_machine(boot: Boot<'_>, parts: MachineParts) -> ! {
         machine
             .enter_parallel(hub)
             .unwrap_or_else(|error| output::fatal(error));
-        translations::share(parallel::SHARED_CODE_BYTES);
+        translations::share(handoff.heap.bytes as usize / parallel::SHARED_CODE_SHARE);
         parallel::spawn(
             &machine,
             &worker_bindings,

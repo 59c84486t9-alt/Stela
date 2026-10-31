@@ -384,6 +384,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                         == self.cpu.state.x[usize::from(access.rt())]
                 })
                 .and_then(|(register, index)| self.cpu.registers.address(register, index))
+                .or_else(|| self.devices.register_storage(self.current, encoding))
         };
         if let (Ok(()), true, Some(value)) = (&step, self.position() == before, value) {
             self.mirrors[MIRRORED.len() + cell] = register_read::Cell { readable: 1, value };

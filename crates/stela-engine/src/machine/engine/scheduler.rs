@@ -244,7 +244,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let btype = (chained > 0).then_some((block >> chain::BLOCK_BTYPE_SHIFT) as u8);
         match exit {
             NativeExit::Exit { next_pc, kind } => {
-                self.cpu.retired = self.cpu.retired.wrapping_add(retired);
+                let (kind, skipped) = ExitWord::split(kind);
+                self.cpu.retired = self
+                    .cpu
+                    .retired
+                    .wrapping_add(retired)
+                    .wrapping_sub(u64::from(skipped));
                 if let Some(btype) = btype {
                     self.cpu.pstate.btype = btype;
                 }
@@ -253,7 +258,6 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 }
                 if let Some(miss) = self.lookup_miss(last, next_pc, kind, remaining > budget) {
                     self.statistics.lookup_misses[miss] += 1;
-                    self.looking = true;
                 }
                 let exited = self.exit(last, next_pc, kind);
                 if exited.is_ok() {
@@ -262,7 +266,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                         Ok(kind @ (ExitKind::Fallthrough | ExitKind::Direct | ExitKind::Call))
                             if btype == 0 =>
                         {
-                            self.link(last, next_pc, kind);
+                            self.link(last, next_pc, ExitWord { kind, skipped });
                         }
                         Ok(ExitKind::Return | ExitKind::Indirect | ExitKind::Call) => {
                             self.link_dynamic(last, btype);
@@ -297,7 +301,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     ) -> Option<usize> {
         let block = &self.blocks[index];
         let kind = ExitKind::try_from(kind).ok()?;
-        let unlinked = if dynamic_branch(block.terminal).is_some() {
+        let unlinked = if dynamic_branch(block.terminal).is_some() && kind != ExitKind::Direct {
             block.dynamic_site.is_some()
         } else if (next_pc ^ block.pc) & !(FETCH_PAGE - 1) != 0
             && matches!(
@@ -308,7 +312,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             block
                 .successors
                 .iter()
-                .any(|exit| exit.target.0 == next_pc && exit.kind == kind)
+                .any(|exit| exit.target.0 == next_pc && exit.word.kind == kind)
         } else {
             return None;
         };
@@ -338,7 +342,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// exit, and every System register write, exception and device access
     /// that changes what the next fetch checks returns to the engine. An
     /// exit out of the page goes through a lookup thunk instead.
-    pub(super) fn link(&mut self, index: usize, next_pc: u64, kind: ExitKind) {
+    pub(super) fn link(&mut self, index: usize, next_pc: u64, word: impl Into<ExitWord>) {
+        let word = word.into();
         let block = &self.blocks[index];
         if self.variants[block.variant.0 as usize].single
             || self.traces.binary_search(&next_pc).is_ok()
@@ -348,14 +353,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let Some(position) = block
             .successors
             .iter()
-            .position(|exit| exit.target.0 == next_pc && exit.kind == kind)
+            .position(|exit| exit.target.0 == next_pc && exit.word == word)
         else {
             return;
         };
+        let retired = u32::from(block.instructions) - u32::from(word.skipped);
         if (next_pc ^ block.pc) & !(FETCH_PAGE - 1) != 0 {
             let exit = block.successors[position];
-            let retired = u32::from(block.instructions);
-            if self.redirect_through_lookup(exit.site, retired, Some(exit.target), kind, 0) {
+            if self.redirect_through_lookup(exit.site, retired, Some(exit.target), word, 0) {
                 self.settle_successor(index, position);
             }
             return;
@@ -369,7 +374,6 @@ impl<H: Host, D: Devices> Machine<H, D> {
         };
         let exit = block.successors[position];
         let site = exit.site;
-        let retired = u32::from(block.instructions);
         let entry = self.blocks[target].code.0 as u64;
         let control = self.chain.address();
         let Ok(thunk) = self.host.install(&[0; chain::THUNK_BYTES]) else {
@@ -384,7 +388,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 target as u32,
                 entry,
                 exit.target,
-                exit.kind,
+                word,
             ),
             chain::jump(site, at),
         ) else {
@@ -432,12 +436,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
             return;
         }
         let retired = u32::from(block.instructions);
-        if self.redirect_through_lookup(site.get(), retired, None, kind, btype) {
+        if self.redirect_through_lookup(site.get(), retired, None, kind.into(), btype) {
             self.blocks[index].dynamic_site = None;
         }
     }
 
-    /// Install a lookup thunk for the exit of `kind` at host address `site`
+    /// Install a lookup thunk for the exit of `word` at host address `site`
     /// (to `target`, or the target in RAX) by a branch that sets `btype`,
     /// and jump there from the exit.
     pub(super) fn redirect_through_lookup(
@@ -445,11 +449,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
         site: u64,
         retired: u32,
         target: Option<GuestAddress>,
-        kind: ExitKind,
+        word: ExitWord,
         btype: u8,
     ) -> bool {
         let control = self.chain.address();
-        let Some(code) = chain::lookup_thunk(control, retired, target, kind, btype) else {
+        let Some(code) = chain::lookup_thunk(control, retired, target, word, btype) else {
             return false;
         };
         let Ok(thunk) = self.host.install(&code) else {

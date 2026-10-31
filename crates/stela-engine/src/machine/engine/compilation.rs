@@ -5,7 +5,6 @@ use super::*;
 
 impl<H: Host, D: Devices> Machine<H, D> {
     pub(super) fn fetch_block(&mut self, pc: u64, single: bool) -> Result<Fetched, Stop> {
-        let looking = core::mem::take(&mut self.looking);
         let context = self.current_variant(single, false);
         let el = self.cpu.pstate.el | u8::from(self.cpu.pstate.guarded) << 4;
         let contexts = self.contexts(el, context);
@@ -41,7 +40,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 && block.physical == physical
                 && self.variants[block.variant.0 as usize] == variant
             {
-                self.remember_fetch(pc, physical, target.block as usize, looking);
+                self.remember_target(pc, target.block as usize);
                 return Ok(Fetched::Block(target.block as usize));
             }
         }
@@ -52,7 +51,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             && entry.variant == variant
             && entry.generation == self.code_generation
         {
-            self.remember_fetch(pc, physical, entry.block, looking);
+            self.remember_target(pc, entry.block);
             return Ok(Fetched::Block(entry.block));
         }
         let indexed = self
@@ -94,83 +93,25 @@ impl<H: Host, D: Devices> Machine<H, D> {
             generation: self.code_generation,
             block: index,
         });
-        self.remember_fetch(pc, physical, index, looking);
-        Ok(Fetched::Block(index))
-    }
-
-    /// [`Self::remember_target`], and when a lookup thunk was `looking` for
-    /// `pc`, what it would look for around it.
-    fn remember_fetch(&mut self, pc: u64, physical: u64, index: usize, looking: bool) {
         self.remember_target(pc, index);
-        if looking {
-            self.index.looked_up(physical, index);
-            self.remember_leaf(pc, physical, index);
-        }
-    }
-
-    /// The fetch of `pc` proved the translation of the leaf around it, and
-    /// each process of a system misses on the same library's code in contexts
-    /// of its own. So one miss remembers every block of the leaf a lookup has
-    /// gone looking for, in the variant of block `index`, unless this context
-    /// already did for that page. A block's first lookup still misses.
-    fn remember_leaf(&mut self, pc: u64, physical: u64, index: usize) {
-        let variant = self.blocks[index].variant;
-        if self.variants[variant.0 as usize].single {
-            return;
-        }
-        let page = pc & !(FETCH_PAGE - 1);
-        let Some(fetched) = self.fetch[(page / FETCH_PAGE) as usize % FETCH_CACHE]
-            .filter(|fetched| fetched.page == page)
-        else {
-            return;
-        };
-        let span = fetched.leaf.clamp(FETCH_PAGE, REMEMBERED_SPAN);
-        let context = self.chain.contexts()[chain::half(pc)];
-        let mut slots = core::mem::take(&mut self.remembering);
-        for offset in (0..span).step_by(FETCH_PAGE as usize) {
-            let at = (pc & !(span - 1)) + offset;
-            let frame = (physical & !(span - 1)) + offset;
-            let memo = ((frame / FETCH_PAGE) ^ context) as usize % REMEMBERED_PAGES;
-            if self.remembered_pages[memo] == (frame, context)
-                || self.page_translated(frame) != self.page_translated(physical)
-                || !self.host.fetch_permitted(at)
-            {
-                continue;
-            }
-            self.remembered_pages[memo] = (frame, context);
-            slots.clear();
-            slots.extend(self.index.looked_up_slots(frame));
-            for &slot in &slots {
-                let block = &self.blocks[slot as usize];
-                if block.variant == variant && block.pc & !(FETCH_PAGE - 1) == at {
-                    let pc = block.pc;
-                    self.remember_guarded(pc, slot as usize, fetched.guarded);
-                }
-            }
-        }
-        self.remembering = slots;
+        Ok(Fetched::Block(index))
     }
 
     /// Record that a fetch at `pc` runs block `index` in the current
     /// context, for lookup thunks. The fetch translated `pc`, so its page's
     /// entry is in the fetch cache.
-    pub(super) fn remember_target(&mut self, pc: u64, index: usize) {
-        let page = pc & !(FETCH_PAGE - 1);
-        let guarded = self.fetch[(page / FETCH_PAGE) as usize % FETCH_CACHE]
-            .is_some_and(|fetched| fetched.page == page && fetched.guarded);
-        self.remember_guarded(pc, index, guarded);
-    }
-
-    /// [`Self::remember_target`] in a page `guarded` or not: not for
-    /// single-instruction blocks, which debug checks precede, nor trace
+    /// Not for single-instruction blocks, which debug checks precede, nor trace
     /// points, which the engine records.
-    fn remember_guarded(&mut self, pc: u64, index: usize, guarded: bool) {
+    pub(super) fn remember_target(&mut self, pc: u64, index: usize) {
         let block = &self.blocks[index];
         if self.variants[block.variant.0 as usize].single || self.traces.binary_search(&pc).is_ok()
         {
             return;
         }
         let (entry, first) = (block.code.0 as u64, block.first);
+        let page = pc & !(FETCH_PAGE - 1);
+        let guarded = self.fetch[(page / FETCH_PAGE) as usize % FETCH_CACHE]
+            .is_some_and(|fetched| fetched.page == page && fetched.guarded);
         let targets = match guarded {
             true => (0..4u8)
                 .filter(|&btype| btype == 0 || self.branch_target_accepts(first, btype))
@@ -534,12 +475,21 @@ impl<H: Host, D: Devices> Machine<H, D> {
             .map(|exit| Successor {
                 site: code.0 as u64 + exit.offset as u64,
                 target: exit.target,
-                kind: exit.kind,
+                word: exit.word(),
             })
             .collect();
         // RET, BR and BLR end the code with their exit to the target in
-        // RAX; the PAC thunk of a RETA*, BRA* or BLRA* has one too.
+        // RAX; the PAC thunk of a RETA*, BRA* or BLRA* has one too. Only
+        // side exits follow a terminal's.
         let code_bytes = &compiled.native().x86_64_code;
+        let terminal_end = compiled
+            .direct_exits()
+            .iter()
+            .filter(|exit| exit.skipped != 0)
+            .map(|exit| exit.offset)
+            .min()
+            .unwrap_or(code_bytes.len());
+        let code_bytes = &code_bytes[..terminal_end];
         let mut dynamic_site = (!single
             && terminal & 0xff9f_fc1f == 0xd61f_0000
             && dynamic_branch(terminal)
@@ -548,18 +498,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let first = self.admit(u32::from_le_bytes(source[..4].try_into().expect("a word")));
         if !single {
             let (successor, dynamic) = self
-                .complete_pointer_natively(
-                    code,
-                    &compiled.native().x86_64_code,
-                    terminal_pc,
-                    terminal,
-                )
+                .complete_pointer_natively(code, code_bytes, terminal_pc, terminal)
                 .unwrap_or_default();
             successors.extend(successor);
             dynamic_site = dynamic_site.or(dynamic);
             successors.extend(self.complete_mirrored_read_natively(
                 code,
-                &compiled.native().x86_64_code,
+                code_bytes,
                 terminal_pc,
                 terminal,
             ));
@@ -588,6 +533,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         };
         self.fault_recovery.insert(index, compiled.installed());
         self.index.insert(&self.blocks, index);
+        self.mirrors.close_code_page();
         Ok(Fetched::Block(index))
     }
 
@@ -633,7 +579,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let successor = thunk.next.map(|next| Successor {
             site: installed.0 as u64 + next as u64,
             target: GuestAddress(pc + INSTRUCTION),
-            kind: ExitKind::Fallthrough,
+            word: ExitKind::Fallthrough.into(),
         });
         let dynamic = thunk
             .dynamic
@@ -662,6 +608,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let thunk = if let Some(write) = masks {
             let cell = &self.mirrors[MASK_WRITES] as *const register_read::Cell as u64;
             register_read::mask_thunk(write, GuestAddress(pc), cell)
+        } else if let Some(rt) = code_page_invalidation(word).filter(|&rt| rt != ZERO_REGISTER) {
+            let cell = &self.mirrors[CODE_PAGE] as *const register_read::Cell as u64;
+            register_read::code_page_thunk(GuestAddress(pc), rt, cell)
         } else if let Some(select) = stack_select(word) {
             let cell = &self.mirrors[STACK_SELECT] as *const register_read::Cell as u64;
             let current = &self.mirrors.selected as *const u64 as u64;
@@ -698,7 +647,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         thunk.next.map(|next| Successor {
             site: installed.0 as u64 + next as u64,
             target: GuestAddress(pc + INSTRUCTION),
-            kind: ExitKind::Fallthrough,
+            word: ExitKind::Fallthrough.into(),
         })
     }
 
@@ -734,7 +683,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
     fn stored_cell(&mut self, encoding: Encoding) -> Option<usize> {
         let known = self.stored_reads.iter().position(|&read| read == encoding);
         let cell = known.or_else(|| {
-            (storable(encoding) && self.stored_reads.len() < STORED_CELLS).then(|| {
+            let storable = storable(encoding)
+                || self
+                    .devices
+                    .register_storage(self.current, encoding)
+                    .is_some();
+            (storable && self.stored_reads.len() < STORED_CELLS).then(|| {
                 self.stored_reads.push(encoding);
                 self.stored_reads.len() - 1
             })
@@ -872,7 +826,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 | ExitKind::Return,
             ) => {
                 // The block's last instruction is the branch that ends it.
-                self.cpu.retired += u64::from(self.blocks[index].instructions);
+                // What a side exit skipped has come off `retired` already.
+                self.cpu.retired = self
+                    .cpu
+                    .retired
+                    .wrapping_add(u64::from(self.blocks[index].instructions));
                 self.cpu.pstate.btype = self.native_branch_type(index, kind)?;
                 self.cpu.pc = next_pc;
                 Ok(())

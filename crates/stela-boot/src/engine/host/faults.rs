@@ -224,6 +224,15 @@ pub(crate) fn page_fault(
     let root = state.roots[state.current];
     let virtual_page = address & !(PAGE - 1);
     let half = if address >> 63 == 0 { LOWER } else { UPPER };
+    if half == LOWER
+        && translation.global
+        && state.lower_globals.as_ref().is_some_and(|span| {
+            let (first, last) = shadow::leaf(address, translation.size);
+            span.widen(first, last)
+        })
+    {
+        return;
+    }
     state.pool.half = half;
     // A failed allocation can already have installed intermediate tables.
     state.legacy_translations_dirty = true;

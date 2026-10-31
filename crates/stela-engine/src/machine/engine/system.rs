@@ -457,8 +457,11 @@ fn reach(cpu: &Cpu, tlbi: &Tlbi) -> (Reach, tlbi::Everywhere, Option<u16>, Optio
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Code {
     Unchanged,
-    /// IC IVAU: the page holding this physical address.
-    Page(u64),
+    /// IC IVAU of `address`, in the page holding `physical`.
+    Page {
+        address: u64,
+        physical: u64,
+    },
     /// IC IALLU and IC IALLUIS.
     All,
 }
@@ -871,10 +874,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
         match code {
             Code::Unchanged => {}
-            Code::Page(physical) => {
+            Code::Page { address, physical } => {
                 self.invalidate_code_page(physical);
                 self.host.code_invalidated(Some(physical));
                 self.post_code_page(physical);
+                self.mirrors.open_code_page(address);
             }
             Code::All => {
                 self.discard_code(Discard::Maintenance);

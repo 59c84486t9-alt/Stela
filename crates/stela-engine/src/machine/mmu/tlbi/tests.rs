@@ -42,6 +42,37 @@ fn page(address: u64) -> Entry {
     }
 }
 
+#[test]
+fn only_a_lower_half_tlbi_with_an_asid_is_private() {
+    const ASID_7: u64 = 7 << 48;
+    let scope = |kind, regime, operand| {
+        Scope::new(&tlbi(kind, regime, TlbiLevel::Any, operand), HOST).private()
+    };
+    assert_eq!(
+        scope(TlbiKind::ASID, Named::EL10, ASID_7),
+        Some(Private {
+            regime: Regime::El20,
+            asid: 7,
+            addresses: None,
+        })
+    );
+    assert_eq!(
+        scope(TlbiKind::VA, Named::EL10, ASID_7 | 0x1234),
+        Some(Private {
+            regime: Regime::El20,
+            asid: 7,
+            addresses: Some((0x123_4000, 0x123_4000)),
+        })
+    );
+    let upper = ASID_7 | (VA_OPERAND & !0xfff);
+    assert_eq!(scope(TlbiKind::VA, Named::EL10, upper), None);
+    assert_eq!(scope(TlbiKind::VAA, Named::EL10, 0x1234), None);
+    assert_eq!(scope(TlbiKind::VMALL, Named::EL10, 0), None);
+    let el2 = tlbi(TlbiKind::VA, Named::EL2, TlbiLevel::Any, 0x1234);
+    let context = Context { e2h: false, ..HOST };
+    assert_eq!(Scope::new(&el2, context).private(), None);
+}
+
 fn covers(tlbi: Tlbi, context: Context, entry: Entry) -> bool {
     Scope::new(&tlbi, context).covers(&entry)
 }

@@ -36,6 +36,7 @@ use stela_engine::machine::NativeCode;
 use stela_engine::machine::NativeExit;
 use stela_engine::machine::NativeFault;
 use stela_engine::machine::Regime;
+use stela_engine::machine::engine::GlobalSpan;
 use stela_engine::machine::engine::installed_code::InstalledCodeCache;
 use stela_engine::machine::mmu;
 use stela_engine::machine::mmu::Access;
@@ -391,6 +392,8 @@ pub struct State {
     last_controls: Option<(mmu::Controls, mmu::Controls)>,
     /// The leaves each half was filled from.
     extents: [Extents; 2],
+    /// The span of global lower-half leaves other PEs' broadcasts read.
+    lower_globals: Option<Arc<GlobalSpan>>,
     /// The lower halves of other TTBR0 contexts.
     kept: Kept,
     /// The lower half's root entries any root may hold, by index: a switch
@@ -576,6 +579,7 @@ pub unsafe fn install(config: Config) -> Result<HostOwner> {
             control_fields: [0; FIELDS],
             last_controls: None,
             extents: [Extents::new(), Extents::new()],
+            lower_globals: None,
             kept: Kept::new(),
             lower_used: [0; ROOT_ENTRIES / 64],
             lower_switches: 0,

@@ -267,24 +267,16 @@ impl<D: Devices> SharedDevices<D> {
         f(&mut devices, now)
     }
 
-    /// PE `cpu`'s own register, without the devices' lock once it has its
+    /// PE `cpu`'s own registers, without the devices' lock once it has its
     /// handle.
-    fn local_register(
-        &mut self,
-        cpu: usize,
-        encoding: Encoding,
-        write: Option<u64>,
-    ) -> Option<u64> {
+    fn local_registers_of(&mut self, cpu: usize) -> Option<&Arc<dyn LocalRegisters>> {
         if self.local.len() <= cpu {
             self.local.resize_with(cpu + 1, || None);
         }
         if self.local[cpu].is_none() {
             self.local[cpu] = Some(self.with(|devices| devices.local_registers(cpu)));
         }
-        self.local[cpu]
-            .as_ref()?
-            .as_ref()?
-            .register(encoding, write)
+        self.local[cpu].as_ref()?.as_ref()
     }
 
     /// A call that can change devices: run it, then tell every other PE
@@ -508,7 +500,10 @@ impl<D: Devices> Devices for SharedDevices<D> {
         {
             return None;
         }
-        if let Some(value) = self.local_register(cpu, encoding, write) {
+        if let Some(value) = self
+            .local_registers_of(cpu)
+            .and_then(|local| local.register(encoding, write))
+        {
             return Some(Ok(value));
         }
         if write.is_none() {
@@ -558,6 +553,9 @@ impl<D: Devices> Devices for SharedDevices<D> {
     }
     fn memory_lock(&self) -> mmu::MemoryLocks {
         self.with(|devices| devices.memory_lock())
+    }
+    fn register_storage(&mut self, cpu: usize, encoding: Encoding) -> Option<u64> {
+        self.local_registers_of(cpu)?.storage(encoding)
     }
     fn serves_register(&self, encoding: Encoding) -> bool {
         register_bit(encoding)

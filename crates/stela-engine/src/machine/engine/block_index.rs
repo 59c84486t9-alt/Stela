@@ -3,8 +3,6 @@
 //! bytes here, and forgetting a page forgets its blocks at once. Each fetch
 //! a lookup misses comes here, so a direct-mapped cache of pages answers
 //! most without walking the ordered map, which sweeps keep their place in.
-//! Which blocks lookups went looking for is kept here too, as finding them
-//! in the blocks would read each block of a page.
 use super::{Block, FETCH_PAGE, VariantId, table::Table};
 use alloc::{boxed::Box, collections::BTreeMap, vec, vec::Vec};
 
@@ -22,9 +20,6 @@ const NO_FRAME: u64 = 1;
 #[derive(Clone, Copy)]
 struct Entry {
     offset: u16,
-    /// A lookup thunk went looking for it, as it will again in each new
-    /// context ([`Machine::remember_leaf`](super::Machine)).
-    looked_up: bool,
     slot: u32,
 }
 
@@ -96,33 +91,6 @@ impl BlockIndex {
             .find(|&slot| blocks[slot].pc == pc && blocks[slot].variant == variant)
     }
 
-    /// Note that a lookup went looking for the block in `slot` at `physical`.
-    pub(super) fn looked_up(&mut self, physical: u64, slot: usize) {
-        let (frame, offset) = split(physical);
-        if let Some(page) = self.page(frame) {
-            let entries = &mut self.entries[page];
-            let start = entries.partition_point(|entry| entry.offset < offset);
-            for entry in entries[start..]
-                .iter_mut()
-                .take_while(|entry| entry.offset == offset)
-                .filter(|entry| entry.slot == slot as u32)
-            {
-                entry.looked_up = true;
-            }
-        }
-    }
-
-    /// The slots of the blocks of the page at `frame` lookups went looking
-    /// for.
-    pub(super) fn looked_up_slots(&self, frame: u64) -> impl Iterator<Item = u32> + '_ {
-        self.page(frame).into_iter().flat_map(|page| {
-            self.entries[page]
-                .iter()
-                .filter(|entry| entry.looked_up)
-                .map(|entry| entry.slot)
-        })
-    }
-
     /// Find the block in `slot` by its key, in place of any block of the key.
     pub(super) fn insert(&mut self, blocks: &Table<Block>, slot: usize) {
         let block = &blocks[slot];
@@ -153,7 +121,6 @@ impl BlockIndex {
                 start,
                 Entry {
                     offset,
-                    looked_up: false,
                     slot: slot as u32,
                 },
             ),

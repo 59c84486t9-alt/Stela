@@ -335,6 +335,12 @@ impl Host for BareHost<'_> {
         Some(code.0)
     }
 
+    fn share_lower_globals(&mut self, span: Arc<GlobalSpan>) {
+        let state = state();
+        state.lower_globals = Some(span);
+        state.reset_lower();
+    }
+
     fn set_regime(&mut self, regime: &Regime) {
         let state = state();
         if let Some(current) = state.regime

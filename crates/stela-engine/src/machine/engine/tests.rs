@@ -3,12 +3,11 @@ use crate::machine::exception::Pstate;
 
 #[test]
 fn architectural_translation_generation_exhaustion_never_reuses_an_old_epoch() {
-    let operations: [fn(&mut Machine<FakeHost, NoDevices>); 5] = [
+    let operations: [fn(&mut Machine<FakeHost, NoDevices>); 4] = [
         Machine::advance_translation_generation,
         Machine::translations_changed,
         Machine::fetch_permissions_changed,
         |machine| machine.tlb_maintained(mmu::tlbi::Reach::All, mmu::tlbi::Everywhere::All, None),
-        Machine::table_base_changed,
     ];
     for operation in operations {
         let mut machine = board_on(stela_contracts::Chip::AppleM1, &[], NoDevices, Vec::new());
@@ -19,6 +18,26 @@ fn architectural_translation_generation_exhaustion_never_reuses_an_old_epoch() {
         );
         assert_eq!(machine.translation_generation, u64::MAX);
     }
+}
+
+/// A process switch leaves the kernel's cached fetches, until a fetch of
+/// the upper half turns out to depend on the ASID.
+#[test]
+fn a_ttbr0_write_ends_only_the_fetches_it_can_change() {
+    let mut machine = board_on(stela_contracts::Chip::AppleM1, &[], NoDevices, Vec::new());
+    let (lower, upper) = (machine.fetch_epoch(0), machine.fetch_epoch(1));
+    machine.table_base_changed();
+    assert_ne!(machine.fetch_epoch(0), lower);
+    assert_eq!(machine.fetch_epoch(1), upper);
+    machine.private_fetches[1] = true;
+    let upper = machine.fetch_epoch(1);
+    machine.table_base_changed();
+    assert_ne!(machine.fetch_epoch(1), upper);
+    machine.table_generation = u64::MAX;
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| machine.table_base_changed()))
+            .is_err()
+    );
 }
 
 pub(super) const NATIVE_CODE_STRIDE: usize = 1 << 20;
@@ -2167,6 +2186,32 @@ fn pressure_this_machine_cannot_relieve_waits_for_it_to_regrow() {
     assert_eq!(machine.statistics.code_discards.iter().sum::<u64>(), 3);
 }
 
+/// The rest of a page's IC IVAUs complete natively until something could
+/// make one do more than the first did.
+#[test]
+fn ic_ivau_opens_its_page_until_code_is_compiled_or_a_dsb_completes_it() {
+    const RET: u32 = 0xd65f_03c0;
+    const IC_IVAU_X0: u32 = 0xd50b_7520;
+    let mut machine = machine(&[RET]);
+    let base = machine.cpu.pc;
+    let open = register_read::Cell {
+        readable: 1,
+        value: base + 0x40,
+    };
+    machine.cpu.state.x[0] = base + 0x40;
+    machine.system_instruction(IC_IVAU_X0).unwrap();
+    assert_eq!(machine.mirrors[CODE_PAGE], open);
+    assert!(matches!(
+        machine.fetch_block(base, false),
+        Ok(Fetched::Block(_))
+    ));
+    assert_eq!(machine.mirrors[CODE_PAGE], register_read::Cell::default());
+    machine.system_instruction(IC_IVAU_X0).unwrap();
+    assert_eq!(machine.mirrors[CODE_PAGE], open);
+    machine.complete_maintenance().unwrap();
+    assert_eq!(machine.mirrors[CODE_PAGE], register_read::Cell::default());
+}
+
 #[test]
 fn ic_ivau_forgets_its_pages_blocks_and_ic_iallu_every_block() {
     const NOP: u32 = 0xd503_201f;
@@ -2196,6 +2241,64 @@ fn ic_ivau_forgets_its_pages_blocks_and_ic_iallu_every_block() {
     machine.system_instruction(IC_IALLU).unwrap();
     assert!(machine.index.is_empty());
     assert_eq!(machine.statistics.code_discards.iter().sum::<u64>(), 1);
+}
+
+/// A side exit retires what ran of its block, in the engine and in the
+/// thunk that chains it.
+#[test]
+fn side_exits_retire_the_instructions_that_ran() {
+    const ADD: u32 = 0x9100_0400; // add x0, x0, #1
+    const CBZ: u32 = 0xb400_0061; // cbz x1, +12
+    const BACK: u32 = 0x17ff_fffc; // b -16
+    let mut machine = machine(&[CBZ, ADD, ADD, ADD, BACK]);
+    let base = machine.cpu.pc;
+    let word = ExitWord {
+        kind: ExitKind::Direct,
+        skipped: 4,
+    };
+    let side = NativeExit::Exit {
+        next_pc: base + 12,
+        kind: u64::from(word.encoded()),
+    };
+    let back = NativeExit::Exit {
+        next_pc: base,
+        kind: ExitKind::Direct as u64,
+    };
+    machine.host.exits = vec![side, back, side];
+    let retired = machine.cpu.retired;
+    machine.step().unwrap();
+    assert_eq!(machine.cpu.pc, base + 12);
+    assert_eq!(machine.cpu.retired, retired + 1);
+    assert_eq!(machine.blocks[0].instructions, 5);
+    assert_eq!(machine.statistics.exit_kinds[ExitKind::Direct as usize], 1);
+    machine.step().unwrap();
+    assert_eq!(machine.cpu.retired, retired + 3);
+    let exit = *machine.blocks[0]
+        .successors
+        .iter()
+        .find(|exit| exit.word == word)
+        .unwrap();
+    machine.step().unwrap();
+    let control = machine.chain.address();
+    let (at, thunk) = &machine.host.patches[machine.host.patches.len() - 2];
+    let entry = machine.blocks[1].code.0 as u64;
+    assert_eq!(
+        Some(thunk.clone()),
+        chain::thunk(
+            *at as u64,
+            control,
+            1,
+            1,
+            entry,
+            GuestAddress(base + 12),
+            word
+        )
+    );
+    let jump = chain::jump(exit.site, *at as u64).unwrap().to_vec();
+    assert_eq!(
+        machine.host.patches[machine.host.patches.len() - 1],
+        (exit.site as usize, jump)
+    );
 }
 
 /// Two blocks that branch to each other in one page: each direct exit
@@ -2433,6 +2536,29 @@ fn returns_and_exits_out_of_the_page_go_through_lookup_thunks() {
     assert_eq!(machine.context(el, variant, half), renewed);
 }
 
+/// A TLBI of one process's ASID leaves the contexts of the others, and the
+/// kernel's, which it cannot reach.
+#[test]
+fn a_tlbi_by_asid_forgets_only_that_asids_contexts() {
+    const MSR_TTBR0_EL1_X0: u32 = 0xd518_2000;
+    let mut machine = machine(&[]);
+    let variant = machine.current_variant(false, false);
+    let el = machine.cpu.pstate.el;
+    let ttbr0 = machine.cpu.read(SystemRegister::TTBR0_EL1);
+    let contexts = |machine: &mut Machine<FakeHost, NoDevices>, asid: u64| {
+        machine.cpu.state.x[0] = ttbr0 & !(0xffff << 48) | asid << 48;
+        machine.system_instruction(MSR_TTBR0_EL1_X0).unwrap();
+        machine.contexts(el, variant)
+    };
+    let (five, six) = (contexts(&mut machine, 5), contexts(&mut machine, 6));
+    let upper = machine.fetch_epoch(1);
+    machine.forget_asid(0..=0, 5, 0);
+    assert_eq!(machine.fetch_epoch(1), upper);
+    assert_eq!(contexts(&mut machine, 6), six);
+    let renewed = contexts(&mut machine, 5);
+    assert!(renewed[0] != five[0] && renewed[1] == five[1]);
+}
+
 #[test]
 fn lookup_contexts_follow_translation_inputs_and_outlive_a_return_to_them() {
     const MSR_TTBR0_EL1_X0: u32 = 0xd518_2000;
@@ -2585,6 +2711,7 @@ fn a_tlbi_drops_the_cached_fetches_of_the_pages_it_reaches_alone() {
     let mut machine = machine(&[]);
     const PAGE: u64 = 0x8000;
     let generation = machine.translation_generation;
+    let epoch = machine.fetch_epoch(0);
     for page in [PAGE, PAGE + 0x4000] {
         machine.fetched_through(0, page, 0x4000, true);
         machine.fetch[(page / FETCH_PAGE) as usize % FETCH_CACHE] = Some(FetchEntry {
@@ -2592,8 +2719,7 @@ fn a_tlbi_drops_the_cached_fetches_of_the_pages_it_reaches_alone() {
             physical: page,
             guarded: false,
             el: 0,
-            generation,
-            leaf: 0x4000,
+            epoch,
         });
     }
     let held = |machine: &Machine<FakeHost, NoDevices>, page: u64| {
@@ -2653,38 +2779,6 @@ fn sctlr_fields_outside_translation_keep_every_translation() {
     machine.cpu.state.x[0] = sctlr ^ 1;
     machine.system_instruction(MSR_SCTLR_X0).unwrap();
     assert_ne!(machine.translation_generation, generation);
-}
-
-/// A process's first lookup in a page brings in what lookups of other
-/// processes found around it, and nothing they did not look for.
-#[test]
-fn a_lookup_miss_remembers_the_targets_around_it() {
-    const BR_X0: u32 = 0xd61f_0000;
-    let mut machine = machine(&[BR_X0; 3]);
-    let base = machine.cpu.pc;
-    let exit = || NativeExit::Exit {
-        next_pc: base,
-        kind: ExitKind::Indirect as u64,
-    };
-    machine.host.exits = vec![exit(), exit(), exit(), exit()];
-    for (pc, looking) in [(base, true), (base + 4, true), (base + 8, false)] {
-        machine.cpu.pc = pc;
-        machine.looking = looking;
-        machine.step().unwrap();
-    }
-    machine.targets.clear();
-    machine.remembered_pages.fill((0, 0));
-    machine.cpu.pc = base;
-    machine.looking = true;
-    machine.step().unwrap();
-    let found = |pc| {
-        let context = machine.chain.contexts()[chain::half(pc)];
-        let slot = chain::lookup_slot(pc, context);
-        machine.targets.find(slot, pc, context).pc == pc
-    };
-    assert!(found(base));
-    assert!(found(base + 4));
-    assert!(!found(base + 8));
 }
 
 /// BLR and BR exits are redirected through lookup thunks that set their
@@ -2837,7 +2931,7 @@ fn translation_controls_reach_the_host_as_its_regime() {
     const MSR_TCR_EL1_X0: u32 = 0xd518_2040;
     let mut machine = machine(&[]);
     let before = *machine.host.regimes.last().unwrap();
-    let generation = machine.translation_generation;
+    let tables = machine.table_generation;
     machine.cpu.state.x[0] = 0x1_0000_8000_4000;
     machine.system_instruction(MSR_TTBR0_EL1_X0).unwrap();
     assert_eq!(machine.host.invalidations, 0);
@@ -2850,7 +2944,7 @@ fn translation_controls_reach_the_host_as_its_regime() {
         },
         after.controls
     );
-    assert!(machine.translation_generation > generation);
+    assert!(machine.table_generation > tables);
     assert_eq!(
         (
             machine.statistics.table_base_changes,
@@ -2888,7 +2982,7 @@ fn tlbis_reach_their_address_range_or_asid_without_a_regime_change() {
     let mut machine = machine(&[]);
     let regimes = machine.host.regimes.len();
     machine.native_system();
-    let generation = machine.translation_generation;
+    let (generation, tables) = (machine.translation_generation, machine.table_generation);
     let high = 0xffff_fe00_0123_4000_u64;
     machine.cpu.state.x[0] = 3 << 48 | (high & ((1 << 56) - 1)) >> 12;
     machine.system_instruction(TLBI_VAE1_X0).unwrap();
@@ -2918,7 +3012,8 @@ fn tlbis_reach_their_address_range_or_asid_without_a_regime_change() {
             (Reach::All, Everywhere::All),
         ]
     );
-    assert_eq!(machine.translation_generation, generation + 3);
+    assert_eq!(machine.translation_generation, generation + 1);
+    assert_eq!(machine.table_generation, tables + 2);
     assert_eq!(machine.host.regimes.len(), regimes);
     assert!(machine.native_system.is_some());
     assert_eq!(
@@ -4820,7 +4915,7 @@ fn pac_exits_complete_natively_from_the_memo_under_open_tags() {
         [Successor {
             site: (installed + thunk.next.unwrap()) as u64,
             target: GuestAddress(base + 8),
-            kind: ExitKind::Fallthrough,
+            word: ExitKind::Fallthrough.into(),
         }]
     );
     let mut machine = pac_machine();
@@ -4879,7 +4974,7 @@ fn xpac_thunks_follow_regime_masks_without_key_enables_and_close_on_changes() {
         [Successor {
             site: (installed + thunk.next.unwrap()) as u64,
             target: GuestAddress(base + 8),
-            kind: ExitKind::Fallthrough,
+            word: ExitKind::Fallthrough.into(),
         }]
     );
     let mut machine = pac_machine();
@@ -5118,7 +5213,7 @@ fn mirrored_reads_complete_natively_from_the_open_cell() {
         [Successor {
             site: (installed + thunk.next.unwrap()) as u64,
             target: GuestAddress(base + 8),
-            kind: ExitKind::Fallthrough,
+            word: ExitKind::Fallthrough.into(),
         }]
     );
     // Other System reads keep their exit.
@@ -5216,11 +5311,12 @@ fn mirrored_reads_complete_natively_from_the_open_cell() {
     machine.system_instruction(MSR_SPRR_CONFIG).unwrap();
     machine.system_instruction(MRS).unwrap();
     for (msr, value) in [(MSR_TTBR0, 0x8000), (MSR_SPRR_PERM, 0x22)] {
-        let (generation, regimes) = (machine.translation_generation, machine.host.regimes.len());
+        let epoch = machine.fetch_epoch(0);
+        let regimes = machine.host.regimes.len();
         let controls = machine.cpu.controls(machine.cpu.regime());
         machine.cpu.state.x[9] = value;
         machine.system_instruction(msr).unwrap();
-        assert!(machine.translation_generation > generation);
+        assert_ne!(machine.fetch_epoch(0), epoch);
         let regime = machine.host.regimes[regimes..].last().unwrap();
         assert_ne!(regime.controls, controls);
         assert_eq!(machine.mirrors[thread].readable, 1);
