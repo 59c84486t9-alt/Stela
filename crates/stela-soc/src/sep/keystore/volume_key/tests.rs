@@ -427,6 +427,113 @@ fn a_per_file_key_unwraps_to_the_same_inline_key_only_under_its_volume_class_key
     assert!(unwrap_file_key(&mut keys, &VOLUME, 4, &wrapped).is_err());
 }
 
+/// A NEW_KEY for a scalable key: its five blobs.
+fn new_scalable(keys: &mut VolumeKeys, class: u32, ephemeral: &[u8]) -> Result<[Vec<u8>; 5]> {
+    let request = file_request(&VOLUME, class)
+        .word(0x102)
+        .blob(&[0; 28])
+        .blob(ephemeral);
+    let reply = send_file_key(keys, file_key::NEW_KEY, request, &mut Vec::new())?;
+    let mut fields = reply_fields(&reply);
+    let blobs = core::array::from_fn(|_| fields.blob().unwrap().to_vec());
+    assert_eq!(fields.word().unwrap(), 1 << 1);
+    assert_eq!(fields.word().unwrap(), class);
+    fields.end().unwrap();
+    Ok(blobs)
+}
+
+/// An UNWRAP_KEY variant 2: its key, IV key and ephemeral key.
+fn unwrap_scalable(
+    keys: &mut VolumeKeys,
+    class: u32,
+    [ek, ekwk, ephemeral]: [&[u8]; 3],
+    flags: u32,
+) -> Result<[Vec<u8>; 3]> {
+    let request = file_request(&VOLUME, class)
+        .blob(ek)
+        .blob(ekwk)
+        .blob(ephemeral)
+        .word(flags);
+    let reply = send(keys, file_key::UNWRAP_KEY, 2, request, &mut Vec::new())?;
+    let mut fields = reply_fields(&reply);
+    let blobs = core::array::from_fn(|_| fields.blob().unwrap().to_vec());
+    assert_eq!(fields.word().unwrap(), 1 << 1);
+    fields.end().unwrap();
+    Ok(blobs)
+}
+
+#[test]
+fn a_scalable_key_unwraps_through_its_ekwk_and_its_ephemeral_key() {
+    let (mut keys, engine) = keys(1);
+    let (vek, _) = new_vek(&mut keys, &[], &[]);
+    assert!(new_scalable(&mut keys, 4, &[]).is_err());
+    load_class_keys(&mut keys, &vek);
+    let [area, iv, ephemeral, ek, ekwk] = new_scalable(&mut keys, 4, &[]).unwrap();
+    assert_eq!(iv.len(), 16);
+    assert_eq!(ekwk.len(), file_key::WRAPPED_BYTES);
+    assert!(ekwk.len() <= 168 && ek.len() <= 168 && ephemeral.len() <= 64);
+    assert_eq!(ek.len(), file_key::WRAPPED_EK_BYTES);
+    // The wrapped EKWK under its class gives the ephemeral key, and the key
+    // too when the wrapped EK comes with it.
+    let [no_key, no_iv, opened] = unwrap_scalable(&mut keys, 4, [&[], &ekwk, &[]], 0x103).unwrap();
+    assert!(no_key.is_empty() && no_iv.is_empty());
+    assert_eq!(opened, ephemeral);
+    let [again, same_iv, _] = unwrap_scalable(&mut keys, 4, [&ek, &ekwk, &[]], 0x102).unwrap();
+    assert_eq!(cipher(&engine, &again), cipher(&engine, &area));
+    assert_eq!(same_iv, iv);
+    // So does the ephemeral key, with no class.
+    let [again, _, none] = unwrap_scalable(&mut keys, 0, [&ek, &[], &ephemeral], 0x102).unwrap();
+    assert_eq!(cipher(&engine, &again), cipher(&engine, &area));
+    assert!(none.is_empty());
+    // The EKWK wraps more EKs, in the wrapped key's place.
+    let [other, _, no_ephemeral, other_ek, none] = new_scalable(&mut keys, 0, &ephemeral).unwrap();
+    assert!(none.is_empty() && no_ephemeral.is_empty());
+    assert_ne!(cipher(&engine, &other), cipher(&engine, &area));
+    let [again, ..] = unwrap_scalable(&mut keys, 0, [&other_ek, &[], &ephemeral], 0x102).unwrap();
+    assert_eq!(cipher(&engine, &again), cipher(&engine, &other));
+    // Nothing else opens them.
+    assert!(unwrap_scalable(&mut keys, 3, [&ek, &ekwk, &[]], 0x102).is_err());
+    let [_, _, foreign, ..] = new_scalable(&mut keys, 4, &[]).unwrap();
+    assert!(unwrap_scalable(&mut keys, 0, [&ek, &[], &foreign], 0x102).is_err());
+    assert!(unwrap_scalable(&mut keys, 0, [&ek, &[], &ek], 0x102).is_err());
+    assert!(new_scalable(&mut keys, 4, &ephemeral).is_err());
+    assert!(new_scalable(&mut keys, 0, &[]).is_err());
+}
+
+/// A keychain command on `blob` under `class`; its reply's fields.
+fn keychain(keys: &mut VolumeKeys, command: u8, class: u32, blob: &[u8]) -> Result<Vec<u8>> {
+    let mut request = Reply::default();
+    request.lword(0x9e40_bd95_86a2_5553);
+    request.word(-6i32 as u32);
+    request.word(class);
+    request.blob(blob);
+    request.word(0x5a);
+    let mut fields = reply_fields(&request.0);
+    keys.request(command, 0, &mut fields, &mut entropy(), &mut |_| {})
+}
+
+#[test]
+fn a_keychain_key_opens_under_the_class_that_wrapped_it() {
+    let (mut keys, _) = keys(1);
+    let key = [7; 32];
+    let reply = keychain(&mut keys, keychain::KC_WRAP, 11, &key).unwrap();
+    let mut fields = reply_fields(&reply);
+    let wrapped = fields.blob().unwrap().to_vec();
+    assert_eq!(wrapped.len(), 40);
+    assert_ne!(&wrapped[8..], key);
+    assert_eq!(fields.word().unwrap(), 0x5a);
+    fields.end().unwrap();
+    let reply = keychain(&mut keys, keychain::KC_UNWRAP, 11, &wrapped).unwrap();
+    let mut fields = reply_fields(&reply);
+    assert_eq!(fields.blob().unwrap(), key);
+    assert!(fields.blob().unwrap().is_empty());
+    assert_eq!(fields.word().unwrap(), 0x5a);
+    fields.end().unwrap();
+    assert!(keychain(&mut keys, keychain::KC_UNWRAP, 7, &wrapped).is_err());
+    assert!(keychain(&mut keys, keychain::KC_WRAP, 11, &key[1..]).is_err());
+    assert!(keychain(&mut keys, keychain::KC_UNWRAP, 11, &wrapped[1..]).is_err());
+}
+
 #[test]
 fn a_class_check_succeeds_without_a_key_once_its_volume_class_keys_load() {
     let (mut keys, _) = keys(1);

@@ -105,6 +105,17 @@ pub const GET_DEVICE_STATE: u8 = 0x19;
 /// a u32 in variant 1 and no reply fields. This SEP keeps nothing per client,
 /// so it acknowledges.
 pub const CLIENT_TERMINATE: u8 = 0x1b;
+/// CLIENT_TERMINATE's reply fields, which `client_terminate` passes to
+/// `handle_device_state_return`: two u64s of state and the keybag they
+/// belong to, -1 as the kernel starts it, for none.
+const TERMINATED: [u8; 20] = {
+    let mut fields = [0; 20];
+    fields[16] = 0xff;
+    fields[17] = 0xff;
+    fields[18] = 0xff;
+    fields[19] = 0xff;
+    fields
+};
 /// `ss`: never locked and no passcode, from the keybag state flags
 /// `keybag_state_no_pin` (bit 1) and `keybag_state_been_unlocked` (bit 3).
 const UNLOCKED_WITHOUT_PASSCODE: u8 = 0b1010;
@@ -392,12 +403,9 @@ impl KeyStore {
                     "SEP keystore client termination variant is not modeled"
                 )));
             }
-            for _ in 0..3 {
-                fields.lword().map_err(refuse)?;
-            }
-            fields.word().map_err(refuse)?;
+            fields.lword().map_err(refuse)?;
             fields.end().map_err(refuse)?;
-            let reply = message.reply(&[]);
+            let reply = message.reply(&TERMINATED);
             payload.output(&reply).map_err(refuse)?;
             return Ok(Frame {
                 tag: command | REPLY,
