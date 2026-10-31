@@ -22,7 +22,7 @@ pub enum MpduProgress {
 pub struct ObservedMpdu {
     captured: CapturedNotification,
     metadata: Metadata,
-    rate_format_2: bool,
+    rate_format: Option<super::super::transmit::RateFormat>,
     descriptor_bytes: usize,
     mpdu_bytes: usize,
 }
@@ -54,7 +54,7 @@ impl ObservedMpdu {
             self.metadata,
             self.raw_mpdu(),
             self.packet_flags(),
-            self.rate_format_2,
+            self.rate_format,
         )?;
         Ok(NormalizedMpdu {
             _epoch: self.captured.epoch.clone(),
@@ -112,11 +112,11 @@ impl<Q: BootIo> RomBoot<'_, Q> {
                 Ok(MpduProgress::Observed(ObservedMpdu {
                     captured,
                     metadata,
-                    rate_format_2: super::super::transmit::rate_format_2(
+                    rate_format: super::super::transmit::rate_format(
                         &self.firmware,
                         self.profile.family(),
                     )
-                    .is_ok(),
+                    .ok(),
                     descriptor_bytes,
                     mpdu_bytes,
                 }))

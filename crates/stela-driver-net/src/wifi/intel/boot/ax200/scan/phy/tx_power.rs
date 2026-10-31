@@ -382,7 +382,11 @@ fn encode(
 mod tests {
     extern crate std;
     use super::*;
-    use crate::wifi::intel::firmware::Firmware;
+    use crate::wifi::intel::{
+        association,
+        firmware::{Family, Firmware},
+        transmit,
+    };
     fn image(version: u8, reduced: bool, ack: bool) -> Vec<u8> {
         let mut bytes = alloc::vec![0; 88];
         bytes[4..8].copy_from_slice(&0x0a4c_5749u32.to_le_bytes());
@@ -438,6 +442,28 @@ mod tests {
         let firmware = Firmware::parse(&bytes).unwrap();
         super::super::super::wire::validate(&firmware).unwrap();
         encode(&firmware, 22).unwrap();
+        let channel = Channel {
+            band: Band::Ghz2,
+            number: 1,
+            frequency_mhz: 2412,
+        };
+        super::super::configuration(&firmware, 3, channel, PowerMode::ContinuouslyAwake).unwrap();
+        crate::wifi::intel::mcc::Response::layout(&firmware).unwrap();
+        assert!(
+            [Family::Ax200, Family::Ax210, Family::Bz]
+                .into_iter()
+                .any(|family| transmit::rate_format(&firmware, family).is_ok())
+        );
+        let version = |group, command| {
+            firmware
+                .command_version(group, command)
+                .map_or(0, |version| version.command_version)
+        };
+        assert!(association::RateShape::of(version(5, 0x0f)).is_some());
+        assert!(version(3, 8) <= 4, "MAC_CONFIG");
+        assert!(version(3, 9) <= 8, "LINK_CONFIG");
+        assert!(version(3, 0x0a) <= 3, "STA_CONFIG");
+        assert!(version(1, 0xa9) <= 3, "MAC_PM_POWER_TABLE");
     }
     #[test]
     #[ignore = "oracle: STELA_IWLWIFI_TRANSMIT_POWER_TRACE"]

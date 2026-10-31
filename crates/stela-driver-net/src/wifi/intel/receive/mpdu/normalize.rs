@@ -12,6 +12,7 @@ use super::{
     Band as RawBand, Metadata, Observation, ReplayOrTtak, SEC_CCM, SEC_EXT_ENC, SEC_GCM, SEC_NONE,
     SEC_TKIP, SEC_UNKNOWN, SEC_WEP, Status,
 };
+use crate::wifi::intel::transmit::RateFormat;
 use crate::wifi::{
     Amsdu, Band, RadioStatus, RawRate, Timestamp,
     frame::{self, Header, Mpdu},
@@ -140,7 +141,7 @@ fn copy_bytes(
     Ok(bytes)
 }
 
-fn radio(metadata: Metadata) -> Result<RadioStatus, Error> {
+fn radio(metadata: Metadata, format: RateFormat) -> Result<RadioStatus, Error> {
     let raw = metadata.radio;
     let band = match raw.band {
         RawBand::Explicit(0) | RawBand::ChannelInferred { five_ghz: true } => Band::Ghz5,
@@ -179,7 +180,7 @@ fn radio(metadata: Metadata) -> Result<RadioStatus, Error> {
             None,
         ],
         rate: RawRate {
-            layout: 2,
+            layout: format as u16,
             words: [raw.raw_rate, 0, 0, 0],
         },
         rx_rate: None,
@@ -194,11 +195,9 @@ pub(crate) fn normalize(
     metadata: Metadata,
     raw: &[u8],
     packet_flags: u32,
-    rate_format_2: bool,
+    format: Option<RateFormat>,
 ) -> Result<Normalized, Error> {
-    if !rate_format_2 {
-        return Err(Error::RateFormat);
-    }
+    let format = format.ok_or(Error::RateFormat)?;
     let header = Header::parse(raw).map_err(Error::Frame)?;
     let management = header.control & 12 == 0;
     // Only QoS data can be an A-MSDU's record.
@@ -263,7 +262,7 @@ pub(crate) fn normalize(
         },
         ..SecurityStatus::default()
     };
-    let mut frame = Mpdu::new(bytes, radio(metadata)?, security).map_err(Error::Frame)?;
+    let mut frame = Mpdu::new(bytes, radio(metadata, format)?, security).map_err(Error::Frame)?;
     frame.fcs_error = metadata.status.failed_fcs_or_overrun();
     if metadata.mac.amsdu() {
         frame.aggregation.amsdu = Some(Amsdu {
@@ -293,7 +292,7 @@ impl Observation<'_> {
             self.metadata(),
             self.raw_mpdu(),
             self.packet_flags,
-            transmit::rate_format_2(fw, family).is_ok(),
+            transmit::rate_format(fw, family).ok(),
         )
     }
 }
@@ -356,7 +355,7 @@ mod tests {
     fn normalized_crypto_observations_never_manufacture_key_or_integrity() {
         let mut metadata = metadata();
         let raw = protected_frame();
-        let normalized = normalize(metadata, &raw, 1 << 26, true).unwrap();
+        let normalized = normalize(metadata, &raw, 1 << 26, Some(RateFormat::V2)).unwrap();
         assert_eq!(
             &normalized.frame.bytes()[24..32],
             &[1, 0, 0, 0x60, 0, 0, 0, 0]
@@ -383,7 +382,7 @@ mod tests {
         assert!(!normalized.frame.fcs_error);
         metadata.status.raw |= 0x80;
         assert_eq!(
-            normalize(metadata, &raw, 0, true)
+            normalize(metadata, &raw, 0, Some(RateFormat::V2))
                 .unwrap()
                 .frame
                 .security
@@ -392,36 +391,36 @@ mod tests {
         );
         metadata.status.raw &= !(1 << 6);
         assert!(matches!(
-            normalize(metadata, &raw, 0, true),
+            normalize(metadata, &raw, 0, Some(RateFormat::V2)),
             Err(Error::CryptoRejected)
         ));
         for cipher in [0, 1, 3, 4, 6, 7] {
             metadata.status.raw = 3 | (cipher << 8) | (1 << 6);
             assert!(matches!(
-                normalize(metadata, &raw, 0, true),
+                normalize(metadata, &raw, 0, Some(RateFormat::V2)),
                 Err(Error::UnsupportedCipher(_))
             ));
         }
         metadata.status.raw = 3 | (5 << 8) | (1 << 6);
-        assert!(normalize(metadata, &raw, 0, true).is_ok());
+        assert!(normalize(metadata, &raw, 0, Some(RateFormat::V2)).is_ok());
         assert!(matches!(
-            normalize(metadata, &raw, 0, false),
+            normalize(metadata, &raw, 0, None),
             Err(Error::RateFormat)
         ));
         for length in 0..42 {
             // header + IV + pad + reported tail
-            assert!(normalize(metadata, &raw[..length], 0, true).is_err());
+            assert!(normalize(metadata, &raw[..length], 0, Some(RateFormat::V2)).is_err());
         }
         // Like mac80211, the reserved CCMP header byte is not read.
         let mut reserved = raw.clone();
         reserved[26] = 1;
-        let normalized = normalize(metadata, &reserved, 0, true).unwrap();
+        let normalized = normalize(metadata, &reserved, 0, Some(RateFormat::V2)).unwrap();
         assert_eq!(normalized.frame.security.pn.unwrap().value(), 1);
         let mut control = raw.clone();
         control[..2].copy_from_slice(&0x40c4u16.to_le_bytes());
         control[10..18].copy_from_slice(&[1, 0, 0, 0x20, 0, 0, 0, 0]);
         assert!(matches!(
-            normalize(metadata, &control, 0, true),
+            normalize(metadata, &control, 0, Some(RateFormat::V2)),
             Err(Error::Frame(frame::Error::Unsupported(
                 "protected non-data frame"
             )))
@@ -429,7 +428,7 @@ mod tests {
         let mut record = metadata;
         record.mac.flags2 |= 0x40;
         assert!(matches!(
-            normalize(record, &raw, 0, true),
+            normalize(record, &raw, 0, Some(RateFormat::V2)),
             Err(Error::Aggregation)
         ));
     }
@@ -444,7 +443,9 @@ mod tests {
         record.mac.flags1 = 0;
         record.mac.flags2 = 0x40;
         record.mac.amsdu_info = 0x82;
-        let frame = normalize(record, &raw, 0, true).unwrap().frame;
+        let frame = normalize(record, &raw, 0, Some(RateFormat::V2))
+            .unwrap()
+            .frame;
         assert!(!frame.header().amsdu);
         assert_eq!(frame.header().tid, Some(5));
         assert_eq!(
@@ -464,17 +465,22 @@ mod tests {
         m.mac.flags2 = 0;
         let mut bytes = vec![0; 24];
         bytes[..2].copy_from_slice(&0x80u16.to_le_bytes());
-        let plain = normalize(m, &bytes, 0, true).unwrap();
+        let plain = normalize(m, &bytes, 0, Some(RateFormat::V2)).unwrap();
         assert_eq!(plain.frame.bytes(), bytes);
         assert!(!plain.frame.security.decrypted);
         assert_eq!(plain.frame.security.key, None);
         m.status.raw |= 6 << 8;
         assert!(matches!(
-            normalize(m, &bytes, 0, true),
+            normalize(m, &bytes, 0, Some(RateFormat::V2)),
             Err(Error::ManagementProtection)
         ));
         m.status.raw = 0;
-        assert!(normalize(m, &bytes, 0, true).unwrap().frame.fcs_error);
+        assert!(
+            normalize(m, &bytes, 0, Some(RateFormat::V2))
+                .unwrap()
+                .frame
+                .fcs_error
+        );
         for (band, channel, frequency) in [
             (1, 14, 2484),
             (0, 36, 5180),
@@ -485,7 +491,7 @@ mod tests {
             m.radio.band = RawBand::Explicit(band);
             m.radio.channel = channel;
             assert_eq!(
-                normalize(m, &bytes, 0, true)
+                normalize(m, &bytes, 0, Some(RateFormat::V2))
                     .unwrap()
                     .frame
                     .radio
@@ -496,19 +502,22 @@ mod tests {
         for (band, channel) in [(3, 1), (1, 0), (1, 15), (2, 254)] {
             m.radio.band = RawBand::Explicit(band);
             m.radio.channel = channel;
-            assert!(normalize(m, &bytes, 0, true).is_err());
+            assert!(normalize(m, &bytes, 0, Some(RateFormat::V2)).is_err());
         }
         m.radio.band = RawBand::ChannelInferred { five_ghz: true };
         m.radio.channel = 36;
         m.radio.energy = [0, 255];
         m.radio.timestamp = super::super::Timestamp::Overloaded { low: 12, high: 34 };
-        let radio = normalize(m, &bytes, 0, true).unwrap().frame.radio;
+        let radio = normalize(m, &bytes, 0, Some(RateFormat::V2))
+            .unwrap()
+            .frame
+            .radio;
         assert_eq!(radio.signal_dbm, None);
         assert_eq!(radio.tsf, None); // GP2 and overloaded words never become TSF
         for n in 1..=128 {
             m.radio.energy = [n, 0];
             assert_eq!(
-                super::radio(m).unwrap().signal_dbm,
+                super::radio(m, RateFormat::V2).unwrap().signal_dbm,
                 Some(-(i16::from(n)) as i8)
             );
         }

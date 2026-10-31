@@ -27,6 +27,25 @@ fn buffer(payload: &[u8]) -> Vec<u8> {
     b
 }
 #[test]
+fn wifi_7_descriptors_keep_their_layout_through_three_versions() {
+    let mut descriptor = alloc::vec![0; 65];
+    descriptor[..2].copy_from_slice(&1u16.to_le_bytes());
+    descriptor[64] = 0xab;
+    let raw = buffer(&descriptor);
+    for family in [Family::Bz, Family::Sc] {
+        for version in 0..=255 {
+            let b = firmware(Some(version), false);
+            let fw = Firmware::parse(&b).unwrap();
+            let observed = Observation::parse_raw(&fw, family, &raw[..73]);
+            if (6..=8).contains(&version) {
+                assert_eq!(observed.unwrap().raw_mpdu(), [0xab]);
+            } else {
+                assert_eq!(observed, Err(Error::Version(Some(version))));
+            }
+        }
+    }
+}
+#[test]
 fn every_descriptor_truncation_declared_overflow_and_raw_identity_are_checked() {
     for family in [Family::Ax200, Family::Ax210] {
         let version = if family == Family::Ax200 { 4 } else { 5 };
