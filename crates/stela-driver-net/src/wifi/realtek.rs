@@ -7,6 +7,7 @@
 pub mod attach;
 pub mod beacon;
 pub mod bootstrap;
+pub mod calibrate;
 pub mod ccmp;
 pub mod coex;
 pub mod commands;

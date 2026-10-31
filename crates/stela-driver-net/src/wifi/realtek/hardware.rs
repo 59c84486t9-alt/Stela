@@ -7,6 +7,7 @@
 //! [`Rtl8822c`]: super::station::Rtl8822c
 use super::{
     bootstrap::{Native, Up},
+    calibrate::Calibration,
     coex::{self, Coex, Link},
     commands::{self, Report},
     descriptor::Packet,
@@ -141,6 +142,7 @@ pub struct Hardware {
     sheets: (FactorySheet, FactorySheet),
     /// `rtwdev->need_rfk`: the channel changed outside a scan.
     calibrate: bool,
+    calibration: Calibration,
     band: Band,
     connected: bool,
     address: Mac,
@@ -183,6 +185,7 @@ impl Hardware {
         } = up;
         let initial = phy.factory().calibration().initial();
         let cck_bounds = initial.cck_bounds();
+        let calibration = Calibration::new(board.raw().power_track_raw);
         let dynamic = Dynamic::new(dynamic::Initial {
             gains: initial.igi_history(),
             crystal_cap: initial.crystal_cap(),
@@ -211,6 +214,7 @@ impl Hardware {
             pages,
             sheets: regd::sheets(alpha2),
             calibrate: true,
+            calibration,
             band: Band::Ghz2,
             connected: false,
             address: mac,
@@ -307,6 +311,23 @@ impl Hardware {
             set_mask(io, REG_GAIN, mask, u32::from(gain)).map_err(failed("gain"))?;
         }
         Ok(())
+    }
+
+    /// `rtw8822c_rfk_handshake`.
+    fn calibration_handshake(&mut self, starting: bool) -> Result<(), String> {
+        if starting {
+            let io = self.control.io().map_err(failed("registers"))?;
+            self.calibration
+                .await_bluetooth(io)
+                .map_err(failed("bluetooth calibration"))?;
+        }
+        self.control
+            .command(commands::calibration(starting))
+            .map_err(failed("calibration notice"))?;
+        let io = self.control.io().map_err(failed("registers"))?;
+        self.calibration
+            .await_firmware(io)
+            .map_err(failed("calibration handshake"))
     }
 
     /// `rtw8822c_rfk_power_save`.
@@ -432,10 +453,18 @@ impl Device for Hardware {
             return Ok(());
         }
         self.calibration_power_save(false)?;
+        self.calibration_handshake(true)?;
+        let io = self.control.io().map_err(failed("registers"))?;
         // SAFETY: the only worker owns the radio and its frames wait for it.
+        unsafe { self.calibration.even_gains(io, &self.report) }.map_err(failed("gains"))?;
+        self.calibration_handshake(false)?;
+        // SAFETY: as above.
         unsafe { self.control.iqk(&mut self.transmit, self.pages) }.map_err(failed("iqk"))?;
-        self.limitations
-            .push("gain and predistortion calibration on an RTL8822C");
+        let io = self.control.io().map_err(failed("registers"))?;
+        // SAFETY: as above.
+        unsafe { self.calibration.predistort(io, &self.report) }
+            .map_err(failed("predistortion"))?;
+        self.limitations.extend(self.calibration.take_shortfalls());
         self.calibration_power_save(true)
     }
 
@@ -543,8 +572,7 @@ impl Device for Hardware {
             .map_err(failed("cam"))
     }
 
-    /// `rtw_phy_dynamic_mechanism` as far as it goes: all but predistortion
-    /// tracking, which waits on its calibration.
+    /// `rtw_phy_dynamic_mechanism`.
     fn watchdog(&mut self, scanning: bool, stbc: bool) -> Result<u8, String> {
         self.dynamic.close_period();
         if scanning {
@@ -589,6 +617,8 @@ impl Device for Hardware {
             .track_frequency(io, linked, bluetooth_off)
             .map_err(failed("crystal"))?;
         // SAFETY: this worker owns the radio and its frames wait for it.
+        unsafe { self.calibration.track(io, &self.report) }.map_err(failed("predistortion"))?;
+        // SAFETY: as above.
         unsafe { self.dynamic.track_temperature(io, &self.report, band) }
             .map_err(failed("temperature"))?;
         self.adapt()?;

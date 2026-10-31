@@ -14,6 +14,8 @@ const RSSI_MONITOR: u32 = 0x42;
 const WL_PHY_INFO: u32 = 0x58;
 const SCAN: u32 = 0x59;
 const ADAPTIVITY: u32 = 0x5a;
+/// `H2C_CMD_WIFI_CALIBRATION`.
+const CALIBRATION: u32 = 0x6d;
 /// `C2H_SCAN_RESULT`.
 const SCAN_RESULT: u8 = 0x38;
 
@@ -90,6 +92,11 @@ pub fn phy_info(tx_mbps: u32, rx_mbps: u32, tx_rate: u8, rx_rate: u8, evm_db: u8
         WL_PHY_INFO | ((tx_mbps & 0x3ff) << 8) | ((rx_mbps & 0x3ff) << 18),
         u32::from(tx_rate) | (u32::from(rx_rate) << 8) | (u32::from(evm_db) << 16),
     )
+}
+
+/// `rtw_fw_inform_rfk_status`, which tells Bluetooth too.
+pub fn calibration(start: bool) -> (u32, u32) {
+    (CALIBRATION | (u32::from(start) << 8), 0)
 }
 
 /// `rtw_fw_scan_notify`.

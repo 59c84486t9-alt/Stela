@@ -204,14 +204,24 @@ impl Coex {
         Err(Error::ArbiterBusy)
     }
 
-    /// `rtw_coex_write_indirect_reg`.
-    fn arbiter_write<I: Io>(io: &mut I, address: u32, mask: u32, value: u32) -> Result<(), Error> {
+    /// `rtw_coex_read_indirect_reg`.
+    pub(super) fn arbiter_read<I: Io>(io: &mut I, address: u32) -> Result<u32, Error> {
         Self::arbiter_ready(io)?;
         io.write32(
             REG_WL2LTECOEX_INDIRECT_ACCESS_CTRL_V1,
             0x800f_0000 | address,
         )?;
-        let old = io.read32(REG_WL2LTECOEX_INDIRECT_ACCESS_READ_DATA_V1)?;
+        Ok(io.read32(REG_WL2LTECOEX_INDIRECT_ACCESS_READ_DATA_V1)?)
+    }
+
+    /// `rtw_coex_write_indirect_reg`.
+    pub(super) fn arbiter_write<I: Io>(
+        io: &mut I,
+        address: u32,
+        mask: u32,
+        value: u32,
+    ) -> Result<(), Error> {
+        let old = Self::arbiter_read(io, address)?;
         let new = (old & !mask) | ((value << mask.trailing_zeros()) & mask);
         Self::arbiter_ready(io)?;
         io.write32(REG_WL2LTECOEX_INDIRECT_ACCESS_WRITE_DATA_V1, new)?;
