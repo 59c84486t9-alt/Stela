@@ -9,9 +9,12 @@
 //! `ieee80211_sta_process_chanswitch`: firmware times the move and says when
 //! it starts, the link's PHY follows, and silence ends at the AP's first beacon
 //! on the new channel. Firmware that leaves it to the host stops sending to
-//! the AP for the move, as `iwl_mvm_csa_client_absent` tells it to.
+//! the AP for the move, as `iwl_mvm_csa_client_absent` tells it to. A
+//! nontransmitted BSS reads its share of its transmitter's beacons, and an EMA
+//! AP's beacon without that share says only what they all inherit.
 use super::*;
 use crate::wifi::intel::firmware::Firmware;
+use crate::wifi::scan::multiple_bssid;
 use crate::wifi::station::{
     csa::{
         self, Announced, Announcement, ChannelSwitch, Frame, Progress, Refusal, Source, Switch,
@@ -90,16 +93,17 @@ impl Client {
         if header.control & 0xfc != 0x80 || self.station.phase() != Peering::Associated {
             return false;
         }
-        let Some(ap) = header.transmitter else {
+        let Some(sender) = header.transmitter else {
             return false;
         };
         let Some(context) = self
-            .seat_of(ap)
+            .seat_of(sender)
             .and_then(|seat| self.context_at(seat))
             .cloned()
         else {
             return false;
         };
+        let ap = context.bssid();
         let bytes = frame.bytes();
         let (Some(&[tsf0, tsf1, tsf2, tsf3]), Some(&[low, high]), Some(elements)) = (
             bytes.get(24..28).and_then(|tsf| tsf.first_chunk()),
@@ -108,6 +112,8 @@ impl Client {
         ) else {
             return true;
         };
+        let own = multiple_bssid::heard(context.beacon(), elements);
+        let elements = own.as_ref().map_or(elements, |own| own.elements.as_slice());
         let current = self.link_definition(&context);
         let band = current.control.band;
         let parsed = csa::parse(elements, Frame::Beacon, None, band, context.negotiated());
@@ -143,7 +149,11 @@ impl Client {
         let Some(heard) = self.tracking.links.iter_mut().find(|heard| heard.ap == ap) else {
             return true;
         };
-        let capabilities = u16::from_le_bytes([low, high]);
+        let capabilities = match &own {
+            Some(own) => own.capabilities,
+            None if context.beacon().profile.is_some() => heard.capabilities,
+            None => u16::from_le_bytes([low, high]),
+        };
         let protection = commands::protection(elements);
         heard.stale |= capabilities != heard.capabilities || protection != heard.protection;
         heard.capabilities = capabilities;

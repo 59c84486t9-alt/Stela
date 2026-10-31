@@ -45,7 +45,7 @@ use crate::{
         connection::keeper::Keeper,
         network::Network,
         regulatory::database::{self, Database},
-        scan::{self, result::Bss},
+        scan::{self, multiple_bssid, result::Bss},
         security,
         station::{self as association, Station as Association},
     },
@@ -975,6 +975,9 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                     Ok(ScanResultProgress::Observed(result)) => {
                         if let Ok(bss) = result.result() {
                             self.observe(bss);
+                            for nontransmitted in multiple_bssid::nontransmitted(bss) {
+                                self.observe(&nontransmitted);
+                            }
                         }
                     }
                     Ok(ScanResultProgress::Rejected(_)) => {}

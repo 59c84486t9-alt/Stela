@@ -328,6 +328,8 @@ pub struct LinkState<'a> {
     pub beacon_interval: u16,
     pub dtim_period: u8,
     pub he: Option<LinkHe>,
+    /// The transmitter and BSSID index of a nontransmitted BSS.
+    pub nontransmitted: Option<(Mac, u8)>,
 }
 
 /// What a link says of an HE AP.
@@ -384,6 +386,8 @@ pub struct StationLink {
 
 /// `iwl_link_config_cmd::spec_link_id`.
 pub const SPEC_LINK_ID: usize = 166;
+/// `ref_bssid_addr`, which `bssid_index` follows past two reserved bytes.
+const REFERENCE_BSSID: usize = 156;
 
 /// `iwl_mvm_link_changed` for every part but activation.
 pub fn link_config(version: u8, state: LinkState<'_>) -> Vec<u8> {
@@ -421,6 +425,10 @@ pub fn link_config(version: u8, state: LinkState<'_>) -> Vec<u8> {
     word(&mut bytes, 140, interval * u32::from(state.dtim_period));
     if let Some(he) = state.he {
         link_he(&mut bytes, version, he);
+    }
+    if let Some((transmitter, index)) = state.nontransmitted {
+        bytes[REFERENCE_BSSID..REFERENCE_BSSID + 6].copy_from_slice(&transmitter.0);
+        bytes[REFERENCE_BSSID + 8] = index;
     }
     bytes
 }
@@ -1345,6 +1353,7 @@ mod tests {
                 edca: &edca,
                 beacon_interval: 100,
                 dtim_period: 3,
+                nontransmitted: None,
                 he: None,
             },
         );
@@ -1550,6 +1559,7 @@ mod tests {
                 edca: &edca,
                 beacon_interval: 100,
                 dtim_period: 1,
+                nontransmitted: None,
                 he: Some(LinkHe {
                     packet_extension: 0,
                     uora: None,

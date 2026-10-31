@@ -392,6 +392,10 @@ fn answer(receiver: [u8; 6], subtype: u16, body: &[u8]) -> Vec<u8> {
 /// The station address `nvm_response` holds.
 const LOCAL: [u8; 6] = [0x02, 0x12, 0x34, 0x56, 0x78, 0x9a];
 
+/// The transmitter of the Multiple BSSID set whose second BSS the model's AP
+/// is, for a [`beacon`] whose `elements` start with the set.
+const TRANSMITTER: [u8; 6] = [2, 3, 4, 5, 6, 6];
+
 /// A channel 1 ESS beacon from 02:03:04:05:06:07 carrying `ssid` and the 1
 /// and 6 Mb/s rates.
 fn beacon(ssid: &[u8], rsn: &[u8], quality: bool, elements: &[u8]) -> Vec<u8> {
@@ -411,6 +415,10 @@ fn beacon(ssid: &[u8], rsn: &[u8], quality: bool, elements: &[u8]) -> Vec<u8> {
         frame.extend(WMM);
     }
     frame.extend(elements);
+    if elements.first() == Some(&71) {
+        frame[10..16].copy_from_slice(&TRANSMITTER);
+        frame[16..22].copy_from_slice(&TRANSMITTER);
+    }
     mpdu(frame, 3)
 }
 
@@ -1591,6 +1599,71 @@ fn an_he_ap_reaches_the_link_and_the_station_commands() {
     assert_eq!(peer[52], 1, "random access");
     assert_eq!(peer[72..92], [7; 20], "zero nominal padding");
     assert_eq!(peer[92], 1, "HE-HTC");
+}
+
+/// A Multiple BSSID set naming the network the model's AP joins as index 1,
+/// with `extra` in its profile, and what makes [`HE_AP`] a set member.
+fn multiple_bssid(extra: &[u8]) -> Vec<u8> {
+    let mut profile = vec![83, 2, 0x31, 0, 85, 3, 1, 3, 2, 0, 4];
+    profile.extend(b"test");
+    profile.extend(extra);
+    let mut set = vec![71, profile.len() as u8 + 3, 3, 0, profile.len() as u8];
+    set.extend(profile);
+    set.extend(HE_AP);
+    set
+}
+
+#[test]
+fn a_nontransmitted_bss_joins_on_its_profile_and_names_its_transmitter() {
+    let native = Native::default();
+    let elements: &'static [u8] = Vec::leak(multiple_bssid(&[]));
+    let (mut wifi, phase, mut device) =
+        raise_beside(&native, Some(*b"US"), vec![b"top"], 0, OPEN, true, elements);
+    assert_eq!(phase, Phase::AuthenticationRequired);
+    let associated = run(&mut wifi, &mut device, |wifi, _, _| {
+        wifi.radio().station().phase() == Peering::Associated
+    });
+    assert!(associated, "{:?}", wifi.radio().station().phase());
+    assert_eq!(device.air[0][4..10], AP, "the profile's own address");
+    assert_eq!(device.air[1][28..34], [0, 4, b't', b'e', b's', b't']);
+    assert!(run(&mut wifi, &mut device, |_, device, _| {
+        device.configuration.len() >= 2
+    }));
+    let (_, link) = device
+        .configuration
+        .iter()
+        .rfind(|(opcode, _)| *opcode == 9)
+        .unwrap();
+    assert_eq!(link[156..162], TRANSMITTER);
+    assert_eq!(link[164], 1);
+    assert_eq!(word(link, 140), 300, "the profile's DTIM period");
+}
+
+#[test]
+fn a_nontransmitted_bss_hears_its_transmitter_announce_a_quiet_switch() {
+    let native = Native::default();
+    let elements: &'static [u8] = Vec::leak(multiple_bssid(&[]));
+    let (mut wifi, _, mut device) =
+        raise_beside(&native, Some(*b"US"), vec![b"top"], 0, OPEN, true, elements);
+    let associated = run(&mut wifi, &mut device, |wifi, _, _| {
+        wifi.radio().station().phase() == Peering::Associated
+    });
+    assert!(associated, "{:?}", wifi.radio().station().phase());
+    settle(&mut wifi, &mut device);
+    let commands = device.commands.len();
+    // The switch element is the set's, which every member inherits.
+    let announcement: &[u8] = &[37, 3, 1, 2, 5];
+    let mut with = elements.to_vec();
+    with.extend(announcement);
+    device.inject(
+        wifi.radio().rom().unwrap(),
+        &beacon(b"top", &RSN, true, &with),
+    );
+    let timed = run(&mut wifi, &mut device, |_, device, _| {
+        device.commands[commands..].contains(&(3, 4))
+    });
+    assert!(timed, "{:?}", wifi.radio().error());
+    assert!(wifi.radio().silent());
 }
 
 /// The AP MLD the model's AP is link 3 of.
