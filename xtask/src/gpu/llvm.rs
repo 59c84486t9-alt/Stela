@@ -49,7 +49,7 @@ const LIBRARIES: [&str; 11] = [
     "ProfileData",
 ];
 /// The passes the AIR compiler runs, by source, with the C API's data layouts.
-const UNITS: [&str; 8] = [
+const UNITS: [&str; 9] = [
     "Target/Target.cpp",
     "TargetParser/AMDGPUTargetParser.cpp",
     "TargetParser/ARMTargetParser.cpp",
@@ -57,6 +57,7 @@ const UNITS: [&str; 8] = [
     "TargetParser/Triple.cpp",
     "Transforms/IPO/AlwaysInliner.cpp",
     "Transforms/IPO/GlobalOpt.cpp",
+    "Transforms/Scalar/DCE.cpp",
     "Transforms/Scalar/SCCP.cpp",
 ];
 /// libc++'s out-of-line code, under `libcxx/src`.

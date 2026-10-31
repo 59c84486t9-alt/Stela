@@ -28,6 +28,7 @@
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/IPO/AlwaysInliner.h"
+#include "llvm/Transforms/Scalar/DCE.h"
 #include "llvm/Transforms/IPO/GlobalOpt.h"
 #include "llvm/Transforms/Scalar/SCCP.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
@@ -152,9 +153,10 @@ LLVMErrorRef LLVMRunPassesOnFunction(LLVMValueRef function, const char *passes,
 	StringRef pipeline(passes);
 	if (pipeline == "lower-switch") {
 		manager.addPass(LowerSwitchPass());
-	} else if (pipeline == "sccp,unreachableblockelim") {
+	} else if (pipeline == "sccp,unreachableblockelim,dce") {
 		manager.addPass(SCCPPass());
 		manager.addPass(UnreachableBlocks());
+		manager.addPass(DCEPass());
 	} else {
 		return unknown(pipeline);
 	}

@@ -143,7 +143,7 @@ int test(void)
 
 	LLVMValueRef decided = add_decided(context, module, "decided");
 	CHECK(LLVMCountBasicBlocks(decided) == 3);
-	CHECK(run_on(decided, "sccp,unreachableblockelim"));
+	CHECK(run_on(decided, "sccp,unreachableblockelim,dce"));
 	CHECK(LLVMCountBasicBlocks(decided) < 3);
 	CHECK(valid(module));
 
