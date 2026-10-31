@@ -323,7 +323,7 @@ pub(super) struct Module {
 
 /// `stela_air_stitch_source`.
 #[repr(C)]
-pub(super) struct StitchSource {
+pub struct StitchSource {
     pub(super) bitcode: *const c_void,
     pub(super) size: usize,
     pub(super) name: *const c_char,
@@ -331,7 +331,7 @@ pub(super) struct StitchSource {
 
 /// `stela_air_stitch_node`.
 #[repr(C)]
-pub(super) struct StitchNode {
+pub struct StitchNode {
     pub(super) function: u32,
     pub(super) input: u32,
     pub(super) arguments: *const u32,
@@ -340,7 +340,7 @@ pub(super) struct StitchNode {
 
 /// `stela_air_stitch_graph`.
 #[repr(C)]
-pub(super) struct StitchGraph {
+pub struct StitchGraph {
     pub(super) name: *const c_char,
     pub(super) nodes: *const StitchNode,
     pub(super) node_count: u32,
