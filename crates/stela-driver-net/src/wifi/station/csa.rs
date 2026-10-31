@@ -268,6 +268,7 @@ fn ht_vht(d: &ChannelDefinition, negotiated: &Negotiated) -> Option<ChannelDefin
         eht: None,
         uora: None,
         mu_edca: None,
+        mu_edca_count: None,
     };
     let caps = negotiated
         .local()

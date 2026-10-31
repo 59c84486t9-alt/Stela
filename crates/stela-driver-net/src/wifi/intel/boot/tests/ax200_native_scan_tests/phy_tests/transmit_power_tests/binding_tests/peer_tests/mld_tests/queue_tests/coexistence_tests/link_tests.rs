@@ -2122,6 +2122,27 @@ fn an_action_frame_announces_a_switch_as_a_beacon_does() {
 }
 
 #[test]
+fn a_new_mu_edca_count_reaches_the_link_once_and_so_does_its_loss() {
+    const MU_EDCA: [u8; 16] = [
+        255, 14, 38, 1, 2, 0xa4, 8, 2, 0xa4, 8, 2, 0xa4, 8, 2, 0xa4, 8,
+    ];
+    let native = Native::default();
+    let (mut wifi, mut device, _, _) = moved_mld(&native);
+    device.inject(wifi.radio().rom().unwrap(), &other_beacon([60, 60]));
+    settle(&mut wifi, &mut device);
+    for (beacon, updates) in [
+        (announcing_beacon([60, 60], &MU_EDCA), 1),
+        (announcing_beacon([60, 60], &MU_EDCA), 0),
+        (other_beacon([60, 60]), 1),
+    ] {
+        let from = device.configuration.len();
+        device.inject(wifi.radio().rom().unwrap(), &beacon);
+        settle(&mut wifi, &mut device);
+        assert_eq!(links_since(&device, from).len(), updates);
+    }
+}
+
+#[test]
 fn a_switch_firmware_starts_unannounced_is_only_cancelled_by_firmware_that_times_it() {
     let native = Native::default();
     let (mut wifi, mut device, _, _) = moved_mld(&native);

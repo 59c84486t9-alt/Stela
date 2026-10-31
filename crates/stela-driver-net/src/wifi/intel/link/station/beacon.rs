@@ -14,7 +14,7 @@ use super::*;
 use crate::wifi::intel::firmware::Firmware;
 use crate::wifi::station::{
     csa::{self, ChannelSwitch, Frame, Refusal},
-    operations::ChannelDefinition,
+    operations::{ChannelDefinition, MuEdcaRecord, Operations},
     phy::{AccessCategory, Role, Wmm},
 };
 
@@ -53,6 +53,8 @@ pub(super) struct Heard {
     pub(super) protection: commands::Protection,
     /// The WMM parameter set count and parameters.
     pub(super) edca: Option<(u8, [AccessCategory; 4])>,
+    /// The MU EDCA set in force and its count, once the beacon holds one.
+    pub(super) mu_edca: Option<(u8, [MuEdcaRecord; 4])>,
     pub(super) definition: ChannelDefinition,
     /// The link's firmware state lags behind.
     stale: bool,
@@ -271,6 +273,10 @@ impl Client {
                     .wmm
                     .as_ref()
                     .map(|wmm| (wmm.parameter_set_count, wmm.access_categories)),
+                mu_edca: {
+                    let operations = context.operations();
+                    operations.mu_edca_count.zip(operations.mu_edca)
+                },
                 definition: current,
                 stale: false,
                 moved: false,
@@ -290,11 +296,17 @@ impl Client {
         heard.stale |= capabilities != heard.capabilities || protection != heard.protection;
         heard.capabilities = capabilities;
         heard.protection = protection;
-        // ieee80211_sta_wmm_params: the count differs, and 15 to 0 counts.
+        // ieee80211_sta_wmm_params: a count differs, and 15 to 0 counts. A set
+        // of MU EDCA that goes away differs too.
+        let mu_edca = Operations::parse(elements).map_or(heard.mu_edca, |operations| {
+            operations.mu_edca_count.zip(operations.mu_edca)
+        });
+        let mu_edca_count = |set: Option<(u8, [MuEdcaRecord; 4])>| set.map(|(count, _)| count);
         if let (Some((count, _)), Some(new)) = (heard.edca, wmm_parameters(elements))
-            && new.0 != count
+            && (new.0 != count || mu_edca_count(mu_edca) != mu_edca_count(heard.mu_edca))
         {
             heard.edca = Some(new);
+            heard.mu_edca = mu_edca;
             heard.stale = true;
         }
         if let Some(Ok(definition)) = width

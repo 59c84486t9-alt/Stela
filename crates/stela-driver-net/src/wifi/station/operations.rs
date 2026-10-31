@@ -286,6 +286,8 @@ pub struct Operations {
     pub uora: Option<u8>,
     /// The MU EDCA parameter set, by ACI, which is the order it arrives in.
     pub mu_edca: Option<[MuEdcaRecord; 4]>,
+    /// The count of that set, in `mu_qos_info`.
+    pub mu_edca_count: Option<u8>,
 }
 fn once<T>(slot: &mut Option<T>, value: T) -> Result<(), Error> {
     if slot.replace(value).is_some() {
@@ -311,6 +313,7 @@ impl Operations {
             eht: None,
             uora: None,
             mu_edca: None,
+            mu_edca_count: None,
         };
         while !bytes.is_empty() {
             let h = bytes.get(..2).ok_or(Error::Truncated)?;
@@ -350,6 +353,7 @@ impl Operations {
                     // `_ieee802_11_parse_elems_full` keeps these only when long enough.
                     Some(37) if data.len() >= 2 => out.uora = Some(data[1]),
                     Some(38) if data.len() >= 14 => {
+                        out.mu_edca_count = Some(data[1] & 0x0f);
                         out.mu_edca = Some(core::array::from_fn(|aci| MuEdcaRecord {
                             aifsn: data[2 + aci * 3],
                             ecw_min_max: data[3 + aci * 3],
@@ -789,6 +793,7 @@ mod tests {
                                 eht: None,
                                 uora: None,
                                 mu_edca: None,
+                                mu_edca_count: None,
                             };
                             let mut record = [0; 6];
                             if let Ok(def) = ops.channel(control, Mode::Vht, Some((own, peer))) {
