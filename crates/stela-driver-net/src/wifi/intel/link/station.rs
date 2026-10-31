@@ -2112,7 +2112,8 @@ impl<Q: BootIo, B: BiosIo> Radio for Wifi<Q, B> {
 
     fn service(&mut self) -> Result<(), Error> {
         if self.error.is_none() && self.died() {
-            self.error = Some(Error::FirmwareDied);
+            let log = self.tables.read(&self.restart.io, self.family);
+            self.error = Some(Error::FirmwareDied(log));
         }
         self.poll();
         let served = if self.error.is_none() {

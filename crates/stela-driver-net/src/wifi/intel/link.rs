@@ -29,6 +29,7 @@ use super::{
         InitializationProgress, LariError, LariPhase, LariRadio, LegacyPeer, MpduProgress,
         PnvmProgress, RomBoot, ScanResultProgress, UnifiedNvm,
     },
+    error_log::Tables,
     firmware::Family,
     identity::Profile,
     interrupts,
@@ -94,8 +95,8 @@ pub enum Error {
     Coexistence(Ax200CoexistenceError),
     /// A step's firmware or host deadline passed.
     Timeout(&'static str),
-    /// The firmware or NIC reported its own death.
-    FirmwareDied,
+    /// The firmware or NIC reported its own death, in the words of its logs.
+    FirmwareDied(String),
     /// Booting the function again failed.
     Restart(String),
     /// A step refused to start from the state the previous one left.
@@ -365,6 +366,8 @@ pub struct Wifi<Q: BootIo, B: BiosIo> {
     error: Option<Error>,
     /// Whether the link reported the bring-up failure.
     reported: bool,
+    /// Where this firmware keeps its error logs.
+    tables: Tables,
     restart: Restart<Q, B>,
 }
 
@@ -445,6 +448,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             address: Mac::default(),
             error: None,
             reported: false,
+            tables: Tables::default(),
             restart,
         };
         Keeper::keep(wifi, inputs.network, inputs.entropy, inputs.clock)
@@ -636,7 +640,8 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         }
         match stage {
             Stage::Rom(mut boot) => match boot.poll() {
-                Ok(Some(_alive)) => {
+                Ok(Some(alive)) => {
+                    self.tables = Tables::of(&alive);
                     // SAFETY: forwarded from `poll`.
                     match unsafe { boot.begin_pnvm(self.firmware, self.observations, pages) } {
                         Ok(PnvmProgress::Skipped | PnvmProgress::Observed) => Ok(self.nvm(*boot)),

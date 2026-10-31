@@ -15,6 +15,7 @@ pub mod command;
 pub mod context;
 pub mod context_v2;
 pub mod dma;
+pub mod error_log;
 pub mod firmware;
 pub mod identity;
 pub mod interrupts;
