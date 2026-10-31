@@ -665,7 +665,15 @@ pub fn prepare<R: ReadAt>(
     let inputs = Inputs {
         target: Target {
             product_type,
-            device_class: format!("{}ap", target_type.to_ascii_lowercase()),
+            // The model the install personalized this system for, which a
+            // development restore changes.
+            device_class: cryptex1_manifest
+                .as_ref()
+                .and_then(|ticket| preboot::cryptex1_ticket_model(&ticket.source.member))
+                .map_or_else(
+                    || format!("{}ap", target_type.to_ascii_lowercase()),
+                    String::from,
+                ),
             product_version,
             product_build,
             variant: INSTALLED_SYSTEM.into(),

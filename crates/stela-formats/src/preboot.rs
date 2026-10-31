@@ -354,6 +354,15 @@ fn cryptex1_ticket_name<'a>(
     names.find(|name| name.starts_with("apticket.") && name.ends_with(&suffix))
 }
 
+/// The hardware model a Cryptex1 ticket at `path` was written for, lower case:
+/// restored names `apticket.<model>[.<ECID>].im4m` after `HW.target`, and
+/// libignition finds them by the booted system's.
+pub fn cryptex1_ticket_model(path: &str) -> Option<&str> {
+    let name = path.rsplit('/').next()?;
+    let name = name.strip_prefix("apticket.")?.strip_suffix(".im4m")?;
+    name.split('.').next()
+}
+
 /// The machine's personalized Cryptex1 manifest and its path, from the volume
 /// group's `cryptex1/current`; `None` when the group has none.
 pub fn cryptex1_ticket<R: ReadAt>(
@@ -511,6 +520,15 @@ mod tests {
             Some("apticket.j473dev.DA7FA23C25CEFC4E.im4m")
         );
         assert_eq!(cryptex1_ticket_name(names.into_iter(), 2), None);
+        assert_eq!(
+            cryptex1_ticket_model("group/cryptex1/current/apticket.j473dev.DA7FA23C25CEFC4E.im4m"),
+            Some("j473dev")
+        );
+        assert_eq!(
+            cryptex1_ticket_model("apticket.j473ap.im4m"),
+            Some("j473ap")
+        );
+        assert_eq!(cryptex1_ticket_model("os.dmg"), None);
     }
 
     #[test]

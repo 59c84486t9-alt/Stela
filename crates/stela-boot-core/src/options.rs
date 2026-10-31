@@ -241,6 +241,9 @@ pub struct System {
     /// failures while allowing the erase restore to continue
     /// (`--development-restore`), a degraded mode.
     pub development_restore: bool,
+    /// The disk's system was installed by a development restore, so it boots
+    /// as the same development board; set from its bundle, not a flag.
+    pub development_board: bool,
     /// Answer device accesses no model implements and list them
     /// (`--survey`): research runs only.
     pub survey: bool,
@@ -357,6 +360,7 @@ impl Default for System {
             verify_on_read: false,
             update_restore: false,
             development_restore: false,
+            development_board: false,
             survey: false,
             idle_skip: false,
             input: false,

@@ -308,6 +308,16 @@ fn open_host(
         .preboot
         .take()
         .map(|partition| from_disk(partition, options));
+    // A system boots as the board it was installed on: libignition finds its
+    // Cryptex1 tickets by that board's model.
+    if built.is_some() {
+        let files = &handoff.files[..handoff.file_count];
+        options.development_board = bundle::development_board(files, built.as_deref())
+            .unwrap_or_else(|error| {
+                output::arguments(format_args!("bundle refusal: {error}\n"));
+                output::fatal("the boot bundle's board could not be read")
+            });
+    }
     // A bundle runs at the DRAM base it was prepared for, its SoC's.
     if options.bundle && !options.dram_explicit {
         let files = &handoff.files[..handoff.file_count];
@@ -1228,15 +1238,21 @@ fn assign<'s>(
             )
             .unwrap_or_else(|error| output::fatal(&error))
     });
-    if options.development_restore {
+    if options.development_restore || options.development_board {
         let assigned = assigned.as_mut().unwrap_or_else(|| {
-            output::fatal("--development-restore needs a selected original Apple board")
+            output::fatal("a development board needs a selected original Apple board")
         });
-        let target = development_restore_hardware_model(&mut assigned.tree)
+        let target = development_hardware_model(&mut assigned.tree)
             .unwrap_or_else(|error| output::fatal(&error));
-        output::arguments(format_args!(
-            "DEVELOPMENT RESTORE hw-model={target} FDR failures remain logged and unprovisioned\n"
-        ));
+        if options.development_restore {
+            output::arguments(format_args!(
+                "DEVELOPMENT RESTORE hw-model={target} FDR failures remain logged and unprovisioned\n"
+            ));
+        } else {
+            output::arguments(format_args!(
+                "DEVELOPMENT BOARD hw-model={target}, as the disk's system was installed\n"
+            ));
+        }
     }
     assigned
 }
