@@ -254,7 +254,11 @@ pub struct Profile {
     revision: u32,
     firmware: &'static str,
     pnvm: Option<&'static str>,
+    scu_force_active: bool,
 }
+
+/// The system vendors `dmi_force_scu_active_approved_list` names.
+const SCU_FORCE_ACTIVE_VENDORS: [&str; 2] = ["Dell Inc.", "Alienware"];
 
 /// The Killer subdevices pcie/drv.c lists after BE202's bandwidth limit, which
 /// have that subdevice bit and are their own products.
@@ -355,7 +359,22 @@ impl Profile {
             revision,
             firmware,
             pnvm,
+            scu_force_active: false,
         })
+    }
+
+    /// The SMBIOS system vendor, whose substring `dmi_check_system` matches
+    /// to approve a GL MAC's SCU staying active.
+    pub fn with_system_vendor(mut self, vendor: &str) -> Self {
+        self.scu_force_active = (self.observed.hardware_revision & 0xfff0) >> 4 == MAC_GL
+            && SCU_FORCE_ACTIVE_VENDORS
+                .iter()
+                .any(|approved| vendor.contains(approved));
+        self
+    }
+    /// Whether the boot context tells firmware to hold the SCU active.
+    pub fn scu_force_active(&self) -> bool {
+        self.scu_force_active
     }
 
     pub fn observed(&self) -> Observed {

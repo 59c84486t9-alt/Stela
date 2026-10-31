@@ -21,6 +21,8 @@ pub const SCRATCH_BYTES: usize = 1724;
 /// bytes, despite the context header comment describing the field as dwords.
 pub const ADVERTISED_SCRATCH_BYTES: usize = 1660;
 pub const INFO_BYTES: usize = 4096;
+/// `IWL_PRPH_SCRATCH_SCU_FORCE_ACTIVE`.
+const SCU_FORCE_ACTIVE: u32 = 1 << 29;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Queues {
@@ -165,10 +167,7 @@ impl Ax210Context {
         let mut scratch = [0; SCRATCH_BYTES];
         scratch[..2].copy_from_slice(&(profile.revision() as u16).to_le_bytes());
         scratch[4..6].copy_from_slice(&((SCRATCH_BYTES / 4) as u16).to_le_bytes());
-        // RB_SIZE_4K | MTR_MODE | MTR_FORMAT_256B, with IMR_DEBUG_EN where the
-        // MAC configuration asks for it.
-        let control = 0x000f_0000 | u32::from(profile.platform().imr) << 1;
-        scratch[8..12].copy_from_slice(&control.to_le_bytes());
+        scratch[8..12].copy_from_slice(&control_flags(profile).to_le_bytes());
         scratch[48..56].copy_from_slice(&queues.free.address.to_le_bytes());
         let mailboxes = step.mailboxes();
         scratch[76..80].copy_from_slice(&mailboxes[0].to_le_bytes());
@@ -187,6 +186,17 @@ impl Ax210Context {
     pub fn scratch(&self) -> &[u8; SCRATCH_BYTES] {
         &self.scratch
     }
+}
+
+/// RB_SIZE_4K | MTR_MODE | MTR_FORMAT_256B, with IMR_DEBUG_EN where the MAC
+/// configuration asks for it and the SCU held active where it is approved.
+fn control_flags(profile: &Profile) -> u32 {
+    let scu = if profile.scu_force_active() {
+        SCU_FORCE_ACTIVE
+    } else {
+        0
+    };
+    0x000f_0000 | u32::from(profile.platform().imr) << 1 | scu
 }
 
 #[cfg(test)]

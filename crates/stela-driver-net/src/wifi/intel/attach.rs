@@ -13,7 +13,7 @@ use super::{
     link::{Inputs, Station, Wifi},
     platform,
     power::{self, ManagementSession, Power},
-    radio::bios::service::BiosIo,
+    radio::bios::service::{BiosIo, DmiIdentity},
 };
 use crate::{
     bus::dma::mapping::DmaDomain,
@@ -99,7 +99,7 @@ pub unsafe fn attach<Q: BootIo, B: BiosIo>(
     mut io: Q,
     pci: Pci,
     domain: Arc<dyn DmaDomain>,
-    inputs: Inputs<B>,
+    mut inputs: Inputs<B>,
 ) -> Result<Station<Q, B>, AttachError> {
     let hardware_revision = io.read32(HW_REV).map_err(AttachError::Register)?;
     let radio_id = io.read32(HW_RF_ID).map_err(AttachError::Register)?;
@@ -112,7 +112,7 @@ pub unsafe fn attach<Q: BootIo, B: BiosIo>(
         ManagementSession::NotConnected,
     )
     .map_err(AttachError::Power)?;
-    let profile = Profile::select(Observed {
+    let mut profile = Profile::select(Observed {
         vendor: pci.vendor,
         device: pci.device,
         subsystem_vendor: pci.subsystem_vendor,
@@ -124,6 +124,14 @@ pub unsafe fn attach<Q: BootIo, B: BiosIo>(
         silicon,
     })
     .map_err(AttachError::Identity)?;
+    // A system without an SMBIOS identity is on no vendor's list.
+    if let Ok(DmiIdentity {
+        system_vendor: Some(vendor),
+        ..
+    }) = inputs.bios.dmi_identity()
+    {
+        profile = profile.with_system_vendor(&vendor);
+    }
     let staged = identity::stage(&profile, inputs.firmware).map_err(|error| match error {
         StageError::Resource { request, error } if error.kind == ErrorKind::Missing => {
             AttachError::NoPinnedFirmware {
