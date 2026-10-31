@@ -2103,6 +2103,25 @@ fn a_quiet_switch_takes_the_link_with_it_and_lasts_until_the_ap_is_heard_again()
 }
 
 #[test]
+fn an_action_frame_announces_a_switch_as_a_beacon_does() {
+    let native = Native::default();
+    let (mut wifi, mut device) = connect(&native, false);
+    let commands = device.commands.len();
+    // Unprotected, it says nothing to firmware.
+    let public = answer(LOCAL, 0xd0, &[4, 4, 1, 81, 2, 5]);
+    device.inject(wifi.radio().rom().unwrap(), &public);
+    let quiet = run(&mut wifi, &mut device, |wifi, _, _| wifi.radio().silent());
+    assert!(quiet, "{:?}", wifi.radio().error());
+    assert!(!device.commands[commands..].contains(&(3, 4)));
+    let spectrum = answer(LOCAL, 0xd0, &[0, 4, 37, 3, 1, 2, 5]);
+    device.inject(wifi.radio().rom().unwrap(), &spectrum);
+    let timed = run(&mut wifi, &mut device, |_, device, _| {
+        device.commands[commands..].contains(&(3, 4))
+    });
+    assert!(timed, "{:?}", wifi.radio().error());
+}
+
+#[test]
 fn a_switch_firmware_starts_unannounced_is_only_cancelled_by_firmware_that_times_it() {
     let native = Native::default();
     let (mut wifi, mut device, _, _) = moved_mld(&native);

@@ -1007,6 +1007,16 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             let Some(epoch) = client.station.association_epoch() else {
                 return Ok(());
             };
+            // `ieee80211_drop_unencrypted_mgmt`: only Public's is not robust.
+            if header.control & 0xfc == 0xd0
+                && let Some(body) = frame.bytes().get(header.length..)
+                && (body.first() == Some(&4)
+                    || matches!(body.first(), Some(0 | 9))
+                        && !client.station.requires_protected_management())
+            {
+                client.switch_action(&frame, body, now);
+                return Ok(());
+            }
             if header.control & 0xfc == 0xd0
                 && frame.bytes().get(header.length) == Some(&BLOCK_ACK_CATEGORY)
             {
@@ -1152,6 +1162,9 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                 {
                     client.block_ack(action);
                 }
+            }
+            0xd0 if matches!(body.first(), Some(0 | 9)) => {
+                client.switch_action(&frame, body, now);
             }
             0xd0 if body.len() >= 4 && body[..2] == [8, 0] => {
                 let response = [8, 1, body[2], body[3]];
