@@ -713,7 +713,10 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                 // the channel, power and rates the chain's leases check.
                 Step::Command { id, bytes, .. } => unsafe { queue.submit(*id, bytes, pages) },
                 // SAFETY: as above.
-                Step::Queue { tid } => unsafe { queue.add_queue(*tid, pages) },
+                Step::Queue { tid } => unsafe {
+                    let mode = self.client.context.as_ref().map(|c| c.negotiated().mode);
+                    queue.add_queue(*tid, mode.unwrap_or(phy::Mode::Legacy), pages)
+                },
                 Step::BlockAck(agreement) => {
                     let (tid, id) = (
                         agreement.session.tid(),

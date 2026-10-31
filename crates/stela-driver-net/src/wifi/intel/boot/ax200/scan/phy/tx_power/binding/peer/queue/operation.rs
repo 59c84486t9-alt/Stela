@@ -13,10 +13,8 @@ use crate::wifi::{
         firmware::Firmware,
         transmit::{Parameters, Prepared, ring},
     },
+    station::phy::Mode,
 };
-
-/// `IWL_DEFAULT_QUEUE_SIZE`.
-const DATA_SLOTS: u16 = 256;
 
 impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200ManagementQueue<'a, Q, B, O> {
     pub fn channel(&self) -> Channel {
@@ -175,13 +173,16 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200ManagementQueue<'a,
             .map(|(tid, _)| *tid)
     }
 
-    /// Prepare `tid`'s queue and ask the firmware's scheduler for it.
+    /// Prepare `tid`'s queue for a peer in `mode` and ask the firmware's
+    /// scheduler for it, halving as `iwl_txq_dyn_alloc` does what memory
+    /// cannot back, down to the size every peer gets.
     ///
     /// # Safety
     /// As [`Self::submit`].
     pub unsafe fn add_queue(
         &mut self,
         tid: u8,
+        mode: Mode,
         source: &dyn PageSource,
     ) -> Result<CommandTicket, Ax200ManagementQueueError> {
         let peer = self.peer.as_mut().unwrap();
@@ -192,16 +193,21 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200ManagementQueue<'a,
         // initialization and the command that publishes its addresses.
         unsafe {
             admission::with_legacy_policy(&mut peer.binding.power, rates, |boot| {
-                *memory = Some(
-                    NativeMemory::prepare(
+                let family = boot.profile.family();
+                let mut slots = wire::data_slots(family, mode);
+                *memory = Some(loop {
+                    let prepared = NativeMemory::prepare(
                         &boot.firmware,
-                        boot.profile.family(),
-                        DATA_SLOTS,
+                        family,
+                        slots,
                         source,
                         boot.domain.clone(),
-                    )
-                    .map_err(Ax200ManagementQueueError::Queue)?,
-                );
+                    );
+                    match prepared {
+                        Err(wire::Error::Dma(_)) if slots > wire::PLAIN_DATA_SLOTS => slots /= 2,
+                        prepared => break prepared.map_err(Ax200ManagementQueueError::Queue)?,
+                    }
+                });
                 let command = memory
                     .as_ref()
                     .unwrap()
