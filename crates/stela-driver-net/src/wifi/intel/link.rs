@@ -211,8 +211,7 @@ pub fn legacy_rates(elements: &[u8], band: Band) -> u16 {
     }
     match band {
         Band::Ghz2 => mask,
-        Band::Ghz5 => mask & 0xff0,
-        Band::Ghz6 => 0,
+        Band::Ghz5 | Band::Ghz6 => mask & 0xff0,
     }
 }
 

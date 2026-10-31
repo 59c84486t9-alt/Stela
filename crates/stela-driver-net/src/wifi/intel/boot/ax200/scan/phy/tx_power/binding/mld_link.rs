@@ -43,9 +43,6 @@ pub(super) fn prepare<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy>(
             version,
         });
     }
-    if binding.power.channel().band == Band::Ghz6 {
-        return Err(Ax200BindingError::State);
-    }
     let address = mac.initialized_nvm().address.bytes;
     let power = mac
         .commands()

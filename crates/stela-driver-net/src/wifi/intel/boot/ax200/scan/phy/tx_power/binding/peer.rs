@@ -269,8 +269,7 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200LegacyPeer<'a, Q, B
         }
         let allowed = match power.channel().band {
             Band::Ghz2 => 0xfff,
-            Band::Ghz5 => 0xff0,
-            Band::Ghz6 => 0,
+            Band::Ghz5 | Band::Ghz6 => 0xff0,
         };
         if self.peer.address.0 == [0; 6]
             || self.peer.address.is_multicast()

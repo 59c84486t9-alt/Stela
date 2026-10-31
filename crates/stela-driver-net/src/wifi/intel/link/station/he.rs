@@ -111,6 +111,15 @@ mod tests {
     }
 
     #[test]
+    fn six_ghz_names_he_and_its_own_band_capabilities_alone() {
+        let elements = super::super::capability_elements(Band::Ghz6, Family::Ax210, (3, 3), true);
+        let capabilities = Capabilities::parse(Band::Ghz6, Role::Station, &elements).unwrap();
+        assert_eq!(capabilities.he_6ghz(), Some(0x6bd));
+        assert!(capabilities.ht().is_none() && capabilities.vht().is_none());
+        assert_eq!(six_ghz_capability(1, 1)[3..], 0x36bdu16.to_le_bytes());
+    }
+
+    #[test]
     fn the_band_sets_its_widths_and_its_ampdu_extension() {
         let low = capability(Band::Ghz2, Family::Ax210, true, true);
         assert_eq!(low[3..9], [0x01, 0x78, 0x20, 0x9a, 0xc0, 0xab]);

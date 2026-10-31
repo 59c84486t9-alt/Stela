@@ -126,7 +126,7 @@ pub(super) fn channel_inhibition(
     ];
     let mask = match channel.band {
         Band::Ghz2 if (1..=14).contains(&channel.number) => MASKS[usize::from(channel.number)],
-        Band::Ghz5 => 0,
+        Band::Ghz5 | Band::Ghz6 => 0,
         _ => return Err(CoexistenceError::Channel),
     };
     let mut bytes = [0; 24];

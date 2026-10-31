@@ -1477,7 +1477,9 @@ fn probe_elements(band: Band, family: Family, chains: (u32, u32), wide: bool) ->
     if tx != rx {
         ht[15] |= 2 | ((tx.saturating_sub(1) as u8) << 2);
     }
-    element(45, &ht);
+    if band != Band::Ghz6 {
+        element(45, &ht);
+    }
     if band == Band::Ghz5 {
         let mut vht = [0; 12];
         let capability: u32 = 2 // 11454-byte MPDUs
@@ -1664,9 +1666,6 @@ impl<Q: BootIo, B: BiosIo> Radio for Wifi<Q, B> {
     }
 
     fn advertisement(&self, band: Band) -> Result<Advertisement, Error> {
-        if band == Band::Ghz6 {
-            return Err(Error::Unsupported("6 GHz on Intel Wi-Fi"));
-        }
         let elements = capability_elements(band, self.family, self.chains, self.wide(band));
         let capabilities = Capabilities::parse(band, Role::Station, &elements)
             .map_err(|_| Error::Refused("advertisement"))?;
@@ -1784,12 +1783,33 @@ impl<Q: BootIo, B: BiosIo> Radio for Wifi<Q, B> {
 
     fn begin_six_ghz_external_authentication(
         &mut self,
-        _: usize,
-        _: Selection,
+        handle: usize,
+        selection: Selection,
         _: (),
-        _: u64,
+        budget_us: u64,
     ) -> Result<Arc<external::Session>, Error> {
-        Err(Error::Unsupported("6 GHz on Intel Wi-Fi"))
+        let observed = self.observed(handle)?;
+        let bss = observed.bss().clone();
+        let local = self.advertisement(bss.channel.band)?.capabilities;
+        let now = self.clock.now_us();
+        let client = &mut self.client;
+        if !client
+            .channels
+            .iter()
+            .any(|(known, _)| *known == bss.channel)
+        {
+            return Err(Error::Refused("6 GHz channel"));
+        }
+        let session = client
+            .station
+            .prepare_six_ghz_authentication(observed, selection, local, None, now, budget_us)
+            .map_err(Error::Station)?;
+        client
+            .station
+            .commit_six_ghz_authentication(session.clone(), now)
+            .map_err(Error::Station)?;
+        self.raise(&bss, Plan::Exchange)?;
+        Ok(session)
     }
 
     fn transmit_external_authentication(
