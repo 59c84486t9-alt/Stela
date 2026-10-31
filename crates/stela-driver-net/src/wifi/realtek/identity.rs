@@ -24,6 +24,9 @@ pub struct Observed {
     pub sys_cfg1: u32,
 }
 
+/// `rtw_8822ce_id_table`.
+pub const RTL8822C_DEVICES: [u16; 2] = [0xc822, 0xc82f];
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Profile {
     observed: Observed,
@@ -56,7 +59,7 @@ impl Profile {
             return Err(IdentityError::UnsupportedPci);
         }
         let chip = match observed.device {
-            0xc822 | 0xc82f => Chip::Rtl8822C,
+            device if RTL8822C_DEVICES.contains(&device) => Chip::Rtl8822C,
             0xb852 | 0xb85b => Chip::Rtl8852B,
             _ => return Err(IdentityError::UnsupportedPci),
         };

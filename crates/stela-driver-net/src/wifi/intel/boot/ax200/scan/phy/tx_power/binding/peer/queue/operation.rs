@@ -11,6 +11,7 @@ use crate::wifi::intel::boot::ax200::scan::wire as scan_wire;
 use crate::wifi::{
     Channel,
     intel::{
+        association::SpatialPowerSave,
         firmware::Firmware,
         mcc,
         transmit::{Parameters, Prepared, ring},
@@ -66,6 +67,11 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200ManagementQueue<'a,
                 .map(|command| (command.id(), command.bytes().to_vec()))
                 .collect(),
         )
+    }
+
+    /// Whether the PHY's commands to come hold the receive chains to `spatial`.
+    pub fn limit_receive(&mut self, spatial: SpatialPowerSave) -> bool {
+        self.peer().binding.power.phy.limit_receive(spatial)
     }
 
     /// `iwl_mld_change_chanctx`: the context `seat` now runs `definition`.

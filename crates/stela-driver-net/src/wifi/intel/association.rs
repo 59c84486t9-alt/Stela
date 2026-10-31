@@ -164,6 +164,26 @@ pub struct MacState {
     pub protected_twt: bool,
 }
 
+/// What SM power save keeps of a station's receive chains.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SpatialPowerSave {
+    #[default]
+    Off,
+    Dynamic,
+    Static,
+}
+
+impl SpatialPowerSave {
+    /// `WLAN_HT_SMPS_CONTROL_*`.
+    pub const fn control(self) -> u8 {
+        match self {
+            Self::Off => 0,
+            Self::Static => 1,
+            Self::Dynamic => 3,
+        }
+    }
+}
+
 /// `iwl_mac_config_cmd`: version 4 can name NAN addresses.
 pub fn mac_bytes(version: u8) -> usize {
     if version >= 4 { 56 } else { 52 }

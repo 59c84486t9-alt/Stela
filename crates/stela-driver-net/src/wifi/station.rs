@@ -234,6 +234,28 @@ impl Station {
         })
     }
 
+    /// `ieee80211_send_smps_action`: an HT action frame telling `context`'s AP
+    /// of `control`.
+    pub fn spatial_power_save(
+        &mut self,
+        context: &AssociationContext,
+        control: u8,
+    ) -> Result<Vec<u8>, Error> {
+        self.validate_association_context(context)?;
+        if self.phase != Phase::Associated {
+            return Err(Error::NotAssociated);
+        }
+        let ap = context.bssid();
+        let mut frame = alloc::vec![0xd0, 0, 0, 0];
+        frame.extend_from_slice(&ap.0);
+        frame.extend_from_slice(&self.local.0);
+        frame.extend_from_slice(&ap.0);
+        frame.extend_from_slice(&(self.sequence << 4).to_le_bytes());
+        frame.extend_from_slice(&[7, 1, control]);
+        self.sequence = next_sequence(self.sequence);
+        Ok(frame)
+    }
+
     pub const fn phase(&self) -> Phase {
         self.phase
     }

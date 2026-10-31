@@ -85,6 +85,47 @@ pub unsafe trait Io {
     fn quarantine(&mut self);
 }
 
+// SAFETY: forwards to the interface it borrows, with that interface's promises.
+unsafe impl<I: Io> Io for &mut I {
+    fn profile(&self) -> Profile {
+        (**self).profile()
+    }
+    fn read8(&mut self, register: u32) -> Result<u8, Error> {
+        (**self).read8(register)
+    }
+    fn read16(&mut self, register: u32) -> Result<u16, Error> {
+        (**self).read16(register)
+    }
+    fn read32(&mut self, register: u32) -> Result<u32, Error> {
+        (**self).read32(register)
+    }
+    fn write8(&mut self, register: u32, value: u8) -> Result<(), Error> {
+        (**self).write8(register, value)
+    }
+    fn write16(&mut self, register: u32, value: u16) -> Result<(), Error> {
+        (**self).write16(register, value)
+    }
+    fn write32(&mut self, register: u32, value: u32) -> Result<(), Error> {
+        (**self).write32(register, value)
+    }
+    fn delay_us(&mut self, microseconds: u64) {
+        (**self).delay_us(microseconds);
+    }
+    fn now_us(&mut self) -> Result<u64, Error> {
+        (**self).now_us()
+    }
+    fn submit_beacon(&mut self, data: &[u8]) -> Result<(), Error> {
+        (**self).submit_beacon(data)
+    }
+    unsafe fn beacon_consumed(&mut self) -> Result<(), Error> {
+        // SAFETY: the caller's completion proof, for the same interface.
+        unsafe { (**self).beacon_consumed() }
+    }
+    fn quarantine(&mut self) {
+        (**self).quarantine();
+    }
+}
+
 /// Real volatile MMIO and the native beacon queue. The BAR owner is held
 /// with the queue on any uncertain download; dropping this adapter cannot
 /// unmap memory still accessible to a quarantined device.
@@ -288,6 +329,10 @@ impl Bar {
     }
     pub fn profile(&self) -> Profile {
         self.profile
+    }
+    /// Keep the claim and mapping for good: the device may still reach them.
+    pub(super) fn retain(&self) {
+        core::mem::forget(self._owner.clone());
     }
     pub(super) fn read8(&self, register: u32) -> u8 {
         self.mmio.read8(register as usize)

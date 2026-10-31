@@ -60,6 +60,10 @@ unsafe impl Registers for Io {
             Ok(())
         }
     }
+    fn publish(&mut self, q: Queue, producer: u16) -> Result<(), Error> {
+        self.device.lock().unwrap().indices[index(q)].0 = producer;
+        Ok(())
+    }
     fn publish_h2c(&mut self, producer: u16) -> Result<(), Error> {
         let mut d = self.device.lock().unwrap();
         let m = self.memory.lock().unwrap();
@@ -123,6 +127,43 @@ fn install_profile(
     }
 }
 #[test]
+fn frames_take_their_queue_and_come_back_as_the_device_reads_them() {
+    let memory = Arc::new(Mutex::new(Model::default()));
+    let device = Arc::new(Mutex::new(Device::default()));
+    let mut rings = install(&memory, &device).unwrap();
+    let queue = Queue::Management;
+    for _ in 0..127 {
+        rings.frame(queue, &Source, &[0; 48], &[0; 100]).unwrap();
+    }
+    assert_eq!(
+        rings.frame(queue, &Source, &[0; 48], &[0; 100]),
+        Err(Error::Full)
+    );
+    assert!(!rings.quarantined());
+    device.lock().unwrap().indices[index(queue)].1 = 3;
+    assert_eq!(rings.reclaim_frames(), Ok(3));
+    assert_eq!(rings.spare.len(), 3);
+    rings.frame(queue, &Source, &[0; 48], &[0; 100]).unwrap();
+    assert_eq!(rings.spare.len(), 2);
+    assert_eq!(
+        rings.frame(Queue::H2c, &Source, &[0; 48], &[]),
+        Err(Error::UnsupportedLayout)
+    );
+    device.lock().unwrap().indices[index(queue)].1 = 1;
+    assert_eq!(rings.reclaim_frames(), Err(Error::CompletionBeyondPending));
+    assert!(rings.quarantined());
+}
+
+#[test]
+fn a_frames_two_buffers_are_the_descriptor_and_the_mpdu_behind_it() {
+    let descriptor = frame_descriptor(0x1000, 81);
+    assert_eq!(descriptor[..4], [48, 0, 2, 0]);
+    assert_eq!(descriptor[4..8], 0x1000u32.to_le_bytes());
+    assert_eq!(descriptor[8..10], [81, 0]);
+    assert_eq!(descriptor[12..], 0x1030u32.to_le_bytes());
+}
+
+#[test]
 fn phydm_and_iqk_complete_on_fresh_status() {
     use super::super::firmware_control::{Control, tests::bus};
     let (phy, report) = super::super::phy::control_fixture();
@@ -143,7 +184,7 @@ fn phydm_and_iqk_complete_on_fresh_status() {
     fw.lock().unwrap().iqk_after = Some(16);
     // SAFETY: the model device, its pages and its domain belong to this test alone; no other
     // driver, worker or DMA touches them.
-    let observed = unsafe { control.initial_iqk(&mut rings, &Source) }.unwrap();
+    let observed = unsafe { control.iqk(&mut rings, &Source) }.unwrap();
     assert_eq!(observed.baseline(), 0);
     assert_eq!(observed.status(), 0xaa);
     assert_eq!(rings.pending(), 3);
@@ -158,12 +199,6 @@ fn phydm_and_iqk_complete_on_fresh_status() {
     drop(d);
     assert_eq!(fw.lock().unwrap().get(REG_IQKSTAT, 1), 0);
     assert_eq!(fw.lock().unwrap().now, 320000);
-    assert_eq!(
-        // SAFETY: the model device, its pages and its domain belong to this test alone; no
-        // other driver, worker or DMA touches them.
-        unsafe { control.initial_iqk(&mut rings, &Source) }.unwrap_err(),
-        super::super::firmware_control::Error::InvalidState
-    );
     // The DMA consumer may release these mappings, independently
     // of firmware execution or the observed IQK status.
     let producer = device.lock().unwrap().indices[6].0;
@@ -200,7 +235,7 @@ fn stale_iqk_zero_publication_timeout_unwind_and_packet_failure_quarantine_both_
         // SAFETY: the model device, its pages and its domain belong to this test alone; no
         // other driver, worker or DMA touches them.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
-            control.initial_iqk(&mut rings, &Source)
+            control.iqk(&mut rings, &Source)
         }));
         if mode == 0 {
             assert_eq!(result.unwrap().unwrap_err(), FwError::StaleIqk);
@@ -257,7 +292,7 @@ fn every_iqk_control_failure_late_reset_and_regressed_clock_keep_both_owners() {
         }
         // SAFETY: the model device, its pages and its domain belong to this test alone; no
         // other driver, worker or DMA touches them.
-        let result = unsafe { control.initial_iqk(&mut rings, &Source) };
+        let result = unsafe { control.iqk(&mut rings, &Source) };
         if fault == 0 {
             result.unwrap();
             total = fw.lock().unwrap().calls;
@@ -304,7 +339,7 @@ fn every_iqk_control_failure_late_reset_and_regressed_clock_keep_both_owners() {
         }
         // SAFETY: the model device, its pages and its domain belong to this test alone; no
         // other driver, worker or DMA touches them.
-        assert!(unsafe { control.initial_iqk(&mut rings, &Source) }.is_err());
+        assert!(unsafe { control.iqk(&mut rings, &Source) }.is_err());
         assert!(control.quarantined());
         assert!(rings.quarantined());
         if mode < 2 {
@@ -364,7 +399,7 @@ fn full_phydm_iqk_packets_and_iqk_ready_deadlines_match_unchanged_source() {
         }
         // SAFETY: the model device, its pages and its domain belong to this test alone; no
         // other driver, worker or DMA touches them.
-        let result = unsafe { control.initial_iqk(&mut rings, &Source) };
+        let result = unsafe { control.iqk(&mut rings, &Source) };
         assert_eq!(result.is_ok(), h[0] <= 16, "IQK {}", h[0]);
         if h[0] > 16 {
             assert_eq!(result.unwrap_err(), FwError::Timeout { register: 0x2d9c });

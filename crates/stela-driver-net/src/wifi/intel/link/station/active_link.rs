@@ -196,6 +196,12 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             || commands::protection(&bss.elements),
             |heard| heard.protection,
         );
+        let he = link_he(context).map(|he| LinkHe {
+            mu_edca: heard.map_or(he.mu_edca, |heard| {
+                heard.mu_edca.map(|(_, records)| records)
+            }),
+            ..he
+        });
         let link = commands::link_config(
             link_version,
             LinkState {
@@ -211,7 +217,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                 edca: &edca,
                 beacon_interval: bss.beacon_interval,
                 dtim_period: context.dtim_period(),
-                he: link_he(context),
+                he,
             },
         );
         let peer = commands::station_config(

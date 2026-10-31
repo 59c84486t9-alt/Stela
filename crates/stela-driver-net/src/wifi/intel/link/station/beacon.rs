@@ -14,9 +14,17 @@ use super::*;
 use crate::wifi::intel::firmware::Firmware;
 use crate::wifi::station::{
     csa::{self, ChannelSwitch, Frame, Refusal},
-    operations::ChannelDefinition,
+    operations::{ChannelDefinition, MuEdcaRecord, Operations},
     phy::{AccessCategory, Role, Wmm},
 };
+
+/// Where an announcement came from, `ieee80211_csa_source`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Source {
+    Beacon,
+    Protected,
+    Unprotected,
+}
 
 pub(super) const SWITCH_START_NOTIFICATION: (u8, u8) = (0xff, 3);
 pub(super) const SWITCH_ERROR_NOTIFICATION: (u8, u8) = (0xf9, 3);
@@ -45,6 +53,8 @@ pub(super) struct Heard {
     pub(super) protection: commands::Protection,
     /// The WMM parameter set count and parameters.
     pub(super) edca: Option<(u8, [AccessCategory; 4])>,
+    /// The MU EDCA set in force and its count, once the beacon holds one.
+    pub(super) mu_edca: Option<(u8, [MuEdcaRecord; 4])>,
     pub(super) definition: ChannelDefinition,
     /// The link's firmware state lags behind.
     stale: bool,
@@ -132,12 +142,13 @@ impl Tracking {
         self.dropped = true;
     }
 
-    /// The part of `ieee80211_sta_process_chanswitch` a beacon of `ap`
+    /// The part of `ieee80211_sta_process_chanswitch` an announcement of `ap`
     /// settles, with the link on `current`.
     fn announced(
         &mut self,
         ap: Mac,
         parsed: Result<Option<ChannelSwitch>, Refusal>,
+        source: Source,
         current: &ChannelDefinition,
     ) -> Announced {
         if self.switch.is_some_and(|active| active.ap != ap) {
@@ -145,6 +156,8 @@ impl Tracking {
         }
         let switch = match parsed {
             Ok(switch) => switch,
+            // An unprotected frame is not trusted to disconnect.
+            Err(_) if source == Source::Unprotected => return Announced::Nothing,
             Err(refusal) => {
                 self.dropped = true;
                 self.blocked_tx = refusal.block_tx;
@@ -152,6 +165,9 @@ impl Tracking {
             }
         };
         if let Some(active) = &self.switch {
+            if source != Source::Beacon {
+                return Announced::Nothing;
+            }
             if active.progress == Progress::Moved {
                 // ieee80211_chswitch_post_beacon; a switch still announced
                 // afterwards is a new one.
@@ -170,12 +186,17 @@ impl Tracking {
             self.blocked_tx = false;
             return Announced::Nothing;
         };
+        // It only quiets the station until a beacon confirms or refutes it.
+        if source == Source::Unprotected {
+            self.blocked_tx |= switch.block_tx;
+            return Announced::Nothing;
+        }
         if switch.definition.control.band != current.control.band {
             self.dropped = true;
             self.blocked_tx = switch.block_tx;
             return Announced::Nothing;
         }
-        if switch.definition == *current && !switch.block_tx {
+        if switch.definition == *current && (!switch.block_tx || source != Source::Beacon) {
             return Announced::Nothing;
         }
         Announced::Begin(switch)
@@ -238,37 +259,9 @@ impl Client {
         let current = self.link_definition(&context);
         let band = current.control.band;
         let parsed = csa::parse(elements, Frame::Beacon, None, band, context.negotiated());
-        match self.tracking.announced(ap, parsed, &current) {
-            Announced::Nothing => {}
-            Announced::Begin(switch) => {
-                let known = self
-                    .channels
-                    .iter()
-                    .any(|(channel, _)| *channel == switch.definition.control);
-                if !known {
-                    self.tracking.drop_connection();
-                    self.tracking.blocked_tx = switch.block_tx;
-                    return true;
-                }
-                let interval = u64::from(context.beacon().beacon_interval);
-                let beacons = u64::from(switch.count.max(1) - 1);
-                self.tracking.blocked_tx = switch.block_tx;
-                self.tracking.switch = Some(Switch {
-                    ap,
-                    announced: switch,
-                    progress: Progress::Announced,
-                    tsf: u32::from_le_bytes([tsf0, tsf1, tsf2, tsf3]),
-                    due: now + beacons * interval * TU_US,
-                    silence_ends: None,
-                    recount: None,
-                    misbehaved: false,
-                });
-            }
-            Announced::Recount(switch) => {
-                if let Some(active) = &mut self.tracking.switch {
-                    active.recount = Some(switch);
-                }
-            }
+        let tsf = u32::from_le_bytes([tsf0, tsf1, tsf2, tsf3]);
+        if self.announcement(&context, parsed, Source::Beacon, tsf, now) {
+            return true;
         }
         if !self.tracking.links.iter().any(|heard| heard.ap == ap) {
             let negotiated = context.negotiated();
@@ -280,6 +273,10 @@ impl Client {
                     .wmm
                     .as_ref()
                     .map(|wmm| (wmm.parameter_set_count, wmm.access_categories)),
+                mu_edca: {
+                    let operations = context.operations();
+                    operations.mu_edca_count.zip(operations.mu_edca)
+                },
                 definition: current,
                 stale: false,
                 moved: false,
@@ -299,11 +296,17 @@ impl Client {
         heard.stale |= capabilities != heard.capabilities || protection != heard.protection;
         heard.capabilities = capabilities;
         heard.protection = protection;
-        // ieee80211_sta_wmm_params: the count differs, and 15 to 0 counts.
+        // ieee80211_sta_wmm_params: a count differs, and 15 to 0 counts. A set
+        // of MU EDCA that goes away differs too.
+        let mu_edca = Operations::parse(elements).map_or(heard.mu_edca, |operations| {
+            operations.mu_edca_count.zip(operations.mu_edca)
+        });
+        let mu_edca_count = |set: Option<(u8, [MuEdcaRecord; 4])>| set.map(|(count, _)| count);
         if let (Some((count, _)), Some(new)) = (heard.edca, wmm_parameters(elements))
-            && new.0 != count
+            && (new.0 != count || mu_edca_count(mu_edca) != mu_edca_count(heard.mu_edca))
         {
             heard.edca = Some(new);
+            heard.mu_edca = mu_edca;
             heard.stale = true;
         }
         if let Some(Ok(definition)) = width
@@ -314,6 +317,86 @@ impl Client {
             heard.moved = true;
         }
         true
+    }
+
+    /// What `ieee80211_sta_process_chanswitch` makes of an announcement on
+    /// `context`'s link heard at `tsf`, and whether it gave the link up.
+    fn announcement(
+        &mut self,
+        context: &AssociationContext,
+        parsed: Result<Option<ChannelSwitch>, Refusal>,
+        source: Source,
+        tsf: u32,
+        now: u64,
+    ) -> bool {
+        let ap = context.bssid();
+        let current = self.link_definition(context);
+        match self.tracking.announced(ap, parsed, source, &current) {
+            Announced::Nothing => {}
+            Announced::Begin(switch) => {
+                let known = self
+                    .channels
+                    .iter()
+                    .any(|(channel, _)| *channel == switch.definition.control);
+                if !known {
+                    self.tracking.drop_connection();
+                    self.tracking.blocked_tx = switch.block_tx;
+                    return true;
+                }
+                let interval = u64::from(context.beacon().beacon_interval);
+                let beacons = u64::from(switch.count.max(1) - 1);
+                self.tracking.blocked_tx = switch.block_tx;
+                self.tracking.switch = Some(Switch {
+                    ap,
+                    announced: switch,
+                    progress: Progress::Announced,
+                    tsf,
+                    due: now + beacons * interval * TU_US,
+                    silence_ends: None,
+                    recount: None,
+                    misbehaved: false,
+                });
+            }
+            Announced::Recount(switch) => {
+                if let Some(active) = &mut self.tracking.switch {
+                    active.recount = Some(switch);
+                }
+            }
+        }
+        false
+    }
+
+    /// A Spectrum Management or (Protected Dual of) Public action frame from
+    /// `ap`, as `ieee80211_sta_rx_queued_mgmt` takes it.
+    pub(super) fn switch_action(&mut self, frame: &Mpdu, body: &[u8], now: u64) {
+        let Some(ap) = frame.header().transmitter else {
+            return;
+        };
+        let tsf = match frame.radio.tsf {
+            Some(crate::wifi::Timestamp::Full64(tsf)) => tsf as u32,
+            _ => 0,
+        };
+        let (elements, extended, source) = match body {
+            [0, 4, elements @ ..] => (elements, None, Source::Protected),
+            [9, 4, a, b, c, d, elements @ ..] => {
+                (elements, Some([*a, *b, *c, *d]), Source::Protected)
+            }
+            [4, 4, a, b, c, d, elements @ ..] => {
+                (elements, Some([*a, *b, *c, *d]), Source::Unprotected)
+            }
+            _ => return,
+        };
+        let Some(context) = self
+            .seat_of(ap)
+            .and_then(|seat| self.context_at(seat))
+            .cloned()
+        else {
+            return;
+        };
+        let band = self.link_definition(&context).control.band;
+        let negotiated = context.negotiated();
+        let parsed = csa::parse(elements, Frame::Action, extended, band, negotiated);
+        self.announcement(&context, parsed, source, tsf, now);
     }
 
     /// Firmware's channel switch started: `iwl_mvm_channel_switch_start_notif`.
@@ -525,6 +608,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
     /// link leaves its PHY for one on the new channel, and waits to hear the AP.
     fn follow_switch(&mut self, queue: &mut Queue<Q, B>) -> Result<(), Error> {
         let client = &mut self.client;
+        client.bluetooth.link_changed();
         let active = client.tracking.switch.ok_or(Error::Refused("no switch"))?;
         let target = active.announced.definition;
         let seat = client.seat_of(active.ap).ok_or(Error::Refused("no link"))?;
@@ -621,6 +705,51 @@ mod tests {
         }
     }
 
+    #[test]
+    fn an_unprotected_announcement_only_quiets_until_a_beacon_answers() {
+        let current = definition(Band::Ghz5, 36, 5180);
+        let mut tracking = Tracking::default();
+        let target = switch(definition(Band::Ghz5, 40, 5200), true, 5);
+        assert_eq!(
+            tracking.announced(AP, Ok(Some(target)), Source::Unprotected, &current),
+            Announced::Nothing
+        );
+        assert!(tracking.silent());
+        assert_eq!(
+            tracking.announced(AP, Ok(None), Source::Beacon, &current),
+            Announced::Nothing
+        );
+        assert!(!tracking.silent());
+        let refusal = Refusal {
+            block_tx: true,
+            error: phy::Error::Unsupported("test"),
+        };
+        tracking.announced(AP, Err(refusal), Source::Unprotected, &current);
+        assert!(!tracking.dropped, "it may not end the association");
+    }
+
+    #[test]
+    fn a_protected_announcement_begins_and_never_recounts() {
+        let current = definition(Band::Ghz5, 36, 5180);
+        let mut tracking = Tracking::default();
+        let target = switch(definition(Band::Ghz5, 40, 5200), false, 5);
+        assert_eq!(
+            tracking.announced(AP, Ok(Some(target)), Source::Protected, &current),
+            Announced::Begin(target)
+        );
+        let mut running = running(target, Progress::Scheduled);
+        assert_eq!(
+            running.announced(AP, Ok(Some(target)), Source::Protected, &current),
+            Announced::Nothing
+        );
+        let same = switch(current, true, 5);
+        assert_eq!(
+            Tracking::default().announced(AP, Ok(Some(same)), Source::Protected, &current),
+            Announced::Nothing,
+            "only a beacon quiets the channel the link is on"
+        );
+    }
+
     fn running(announced: ChannelSwitch, progress: Progress) -> Tracking {
         Tracking {
             blocked_tx: announced.block_tx,
@@ -648,17 +777,32 @@ mod tests {
         let target = definition(Band::Ghz5, 40, 5200);
         let mut tracking = Tracking::default();
         assert_eq!(
-            tracking.announced(AP, Ok(Some(switch(target, false, 5))), &current),
+            tracking.announced(
+                AP,
+                Ok(Some(switch(target, false, 5))),
+                Source::Beacon,
+                &current
+            ),
             Announced::Begin(switch(target, false, 5))
         );
         let mut tracking = running(switch(target, false, 5), Progress::Scheduled);
         assert_eq!(
-            tracking.announced(AP, Ok(Some(switch(target, false, 4))), &current),
+            tracking.announced(
+                AP,
+                Ok(Some(switch(target, false, 4))),
+                Source::Beacon,
+                &current
+            ),
             Announced::Recount(switch(target, false, 4))
         );
         let other = Mac([2, 0, 0, 0, 0, 4]);
         assert_eq!(
-            tracking.announced(other, Ok(Some(switch(target, false, 4))), &current),
+            tracking.announced(
+                other,
+                Ok(Some(switch(target, false, 4))),
+                Source::Beacon,
+                &current
+            ),
             Announced::Nothing,
             "one link at a time"
         );
@@ -671,12 +815,15 @@ mod tests {
         let mut withdrawn = running(switch(target, true, 5), Progress::Scheduled);
         assert!(withdrawn.silent());
         assert_eq!(
-            withdrawn.announced(AP, Ok(None), &current),
+            withdrawn.announced(AP, Ok(None), Source::Beacon, &current),
             Announced::Nothing
         );
         assert!(!withdrawn.silent() && !withdrawn.moving());
         let mut heard = running(switch(target, true, 1), Progress::Moved);
-        assert_eq!(heard.announced(AP, Ok(None), &target), Announced::Nothing);
+        assert_eq!(
+            heard.announced(AP, Ok(None), Source::Beacon, &target),
+            Announced::Nothing
+        );
         assert!(!heard.silent() && !heard.moving());
     }
 
@@ -685,14 +832,19 @@ mod tests {
         let current = definition(Band::Ghz5, here().0, here().1);
         let target = definition(Band::Ghz2, 1, 2412);
         let mut tracking = Tracking::default();
-        tracking.announced(AP, Ok(Some(switch(target, true, 5))), &current);
+        tracking.announced(
+            AP,
+            Ok(Some(switch(target, true, 5))),
+            Source::Beacon,
+            &current,
+        );
         assert!(tracking.dropped && tracking.silent());
         let mut tracking = Tracking::default();
         let refusal = Refusal {
             block_tx: false,
             error: phy::Error::Unsupported("test"),
         };
-        tracking.announced(AP, Err(refusal), &current);
+        tracking.announced(AP, Err(refusal), Source::Beacon, &current);
         assert!(tracking.dropped && !tracking.silent());
     }
 
@@ -701,11 +853,21 @@ mod tests {
         let current = definition(Band::Ghz5, here().0, here().1);
         let mut tracking = Tracking::default();
         assert_eq!(
-            tracking.announced(AP, Ok(Some(switch(current, false, 5))), &current),
+            tracking.announced(
+                AP,
+                Ok(Some(switch(current, false, 5))),
+                Source::Beacon,
+                &current
+            ),
             Announced::Nothing
         );
         assert_eq!(
-            tracking.announced(AP, Ok(Some(switch(current, true, 5))), &current),
+            tracking.announced(
+                AP,
+                Ok(Some(switch(current, true, 5))),
+                Source::Beacon,
+                &current
+            ),
             Announced::Begin(switch(current, true, 5))
         );
     }
