@@ -31,6 +31,7 @@ pub use context::{AssociationContext, NativeBssObservation};
 use multi_link::Affiliation;
 pub mod ba;
 pub mod data;
+pub mod fragments;
 pub mod operations;
 pub mod phy;
 pub mod wire;

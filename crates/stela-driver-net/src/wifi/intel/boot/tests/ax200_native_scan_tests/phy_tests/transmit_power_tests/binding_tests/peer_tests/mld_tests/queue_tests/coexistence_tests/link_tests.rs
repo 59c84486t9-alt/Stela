@@ -940,3 +940,71 @@ fn frames_that_wait_together_leave_as_an_amsdu_the_firmware_allows() {
     assert_eq!(sequence(&device.air[sent + 1]), sequence(aggregate) + 1);
     assert_eq!(device.air[sent + 1][24] & 0x80, 0);
 }
+
+/// A protected frame's fragment `index` of sequence 5, under packet number
+/// `number`, carrying `body` straight after its header.
+fn fragment(index: u8, more: bool, number: u8, body: &[u8]) -> Vec<u8> {
+    let mut frame = vec![0; 26];
+    frame[0] = 0x88;
+    frame[1] = 0x42 | u8::from(more) << 2;
+    frame[4..10].copy_from_slice(&LOCAL);
+    frame[10..16].copy_from_slice(&AP);
+    frame[16..22].copy_from_slice(&AP);
+    frame[22..24].copy_from_slice(&(5u16 << 4 | u16::from(index)).to_le_bytes());
+    frame.extend([number, 0, 0, 0x20, 0, 0, 0, 0]);
+    frame.extend(body);
+    mpdu(frame, 3 | 2 << 8 | 1 << 6)
+}
+
+fn first_body() -> Vec<u8> {
+    [&[0xaa, 0xaa, 3, 0, 0, 0, 8, 0][..], &[0x11; 40]].concat()
+}
+
+#[test]
+fn fragments_under_consecutive_packet_numbers_become_one_msdu() {
+    let native = Native::default();
+    let (mut wifi, mut device) = connect(&native, true);
+    device.inject(
+        wifi.radio().rom().unwrap(),
+        &fragment(0, true, 1, &first_body()),
+    );
+    device.inject(
+        wifi.radio().rom().unwrap(),
+        &fragment(1, true, 2, &[0x22; 20]),
+    );
+    settle(&mut wifi, &mut device);
+    assert_eq!(wifi.receive().unwrap(), None);
+    device.inject(
+        wifi.radio().rom().unwrap(),
+        &fragment(2, false, 3, &[0x33; 10]),
+    );
+    settle(&mut wifi, &mut device);
+    let ethernet = wifi.receive().unwrap().expect("the whole MSDU");
+    assert_eq!(ethernet[12..14], [8, 0]);
+    assert_eq!(ethernet.len(), 14 + 40 + 20 + 10);
+    assert_eq!(ethernet[14], 0x11);
+    assert_eq!(ethernet[14 + 40], 0x22);
+    assert_eq!(ethernet[14 + 60], 0x33);
+}
+
+#[test]
+fn a_fragment_out_of_its_place_or_its_packet_numbers_is_dropped() {
+    let native = Native::default();
+    let (mut wifi, mut device) = connect(&native, true);
+    // With nothing before it.
+    device.inject(
+        wifi.radio().rom().unwrap(),
+        &fragment(1, false, 1, &[0x22; 20]),
+    );
+    // A packet number skipped.
+    device.inject(
+        wifi.radio().rom().unwrap(),
+        &fragment(0, true, 2, &first_body()),
+    );
+    device.inject(
+        wifi.radio().rom().unwrap(),
+        &fragment(1, false, 4, &[0x22; 20]),
+    );
+    settle(&mut wifi, &mut device);
+    assert_eq!(wifi.receive().unwrap(), None);
+}

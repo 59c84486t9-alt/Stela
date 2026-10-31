@@ -91,9 +91,11 @@ impl Reception {
         })
     }
 
-    /// `iwl_mvm_is_dup`, for a whole MPDU.
+    /// `iwl_mvm_is_dup`, for a whole MPDU. A fragment is its own frame here, so
+    /// the fragment number stays in what is compared, as in `seq_ctrl`.
     pub(super) fn repeats(&mut self, parent: &Parent) -> bool {
-        let header = parent.members[0].header();
+        let head = &parent.members[0];
+        let header = head.header();
         if header.receiver.is_multicast() {
             return false;
         }
@@ -102,8 +104,9 @@ impl Reception {
             Some(tid) => usize::from(tid),
             None => usize::from(QOS_TIDS),
         };
-        let repeated = header.control & RETRY != 0 && self.seen[slot] == header.sequence;
-        self.seen[slot] = header.sequence;
+        let control = Some(u16::from_le_bytes([head.bytes()[22], head.bytes()[23]]));
+        let repeated = header.control & RETRY != 0 && self.seen[slot] == control;
+        self.seen[slot] = control;
         repeated
     }
 

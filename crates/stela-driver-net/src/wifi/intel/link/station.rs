@@ -38,6 +38,7 @@ use crate::wifi::{
         ba::{self, RxSession},
         data::{self, Ingress, Protection, Qos, SequenceOwner, TxClass, amsdu},
         external,
+        fragments::Fragments,
         multi_link::Affiliation,
         phy::{Capabilities, McsMaps, Role},
         wire::six_ghz::Selection,
@@ -201,6 +202,7 @@ pub(super) struct Client {
     events: VecDeque<keeper::Event>,
     received: VecDeque<Vec<u8>>,
     reception: Reception,
+    fragments: Fragments,
     /// The longest A-MSDU firmware rate selection allows and its TIDs.
     amsdu: (u32, u32),
     held: [VecDeque<Held>; 16],
@@ -243,6 +245,7 @@ impl Client {
             events: VecDeque::new(),
             received: VecDeque::new(),
             reception: Reception::new(),
+            fragments: Fragments::default(),
             amsdu: (0, 0),
             held: core::array::from_fn(|_| VecDeque::new()),
             requested: 1 << MANAGEMENT_TID,
@@ -298,6 +301,7 @@ impl Client {
         self.steps.clear();
         self.outbox.clear();
         self.reception.clear();
+        self.fragments.clear();
         self.amsdu = (0, 0);
         self.held.iter_mut().for_each(VecDeque::clear);
         self.requested = 1 << MANAGEMENT_TID;
@@ -790,10 +794,6 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         if header.control & 12 != 8 || !client.port_ready() || !header.data_present() {
             return Ok(());
         }
-        if header.fragmented() {
-            client.unsupported("a fragmented frame");
-            return Ok(());
-        }
         if header.protected() {
             // The firmware decrypted the frame under the key of this index,
             // which only this client installed.
@@ -813,6 +813,10 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             return Ok(());
         };
         if client.reception.repeats(&parent) {
+            return Ok(());
+        }
+        if parent.members[0].header().fragmented() {
+            client.reassemble(&parent.members[0], now);
             return Ok(());
         }
         let mut ready = Vec::new();
@@ -1946,6 +1950,22 @@ impl Client {
         let mut ready = Vec::new();
         self.reception.release(id, tid, through, &mut ready);
         self.deliver_all(ready);
+    }
+
+    /// `frame`, one fragment; the station has the MSDU with the last of them.
+    fn reassemble(&mut self, frame: &Mpdu, now: u64) {
+        let key = frame.security.key;
+        let slot = self
+            .keys
+            .iter_mut()
+            .map(|key| &mut key.slot)
+            .find(|slot| key.is_some() && slot.installed() == key);
+        if let Some(whole) = self.fragments.add(frame, slot, now) {
+            self.deliver(Parent {
+                members: alloc::vec![whole],
+                shape: Shape::WholeMpdu,
+            });
+        }
     }
 
     fn deliver_all(&mut self, ready: Vec<Parent>) {
