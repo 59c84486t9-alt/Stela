@@ -148,6 +148,8 @@ pub struct HostPowerControl {
     button: bool,
     /// The guest refused the button once; reported once.
     refused: bool,
+    /// The host's button was pressed before, which the next press holds.
+    pressed_before: bool,
 }
 
 impl HostPowerControl {
@@ -168,6 +170,7 @@ impl HostPowerControl {
             disks,
             button: false,
             refused: false,
+            pressed_before: false,
         };
         control.button = control.arm_button();
         control
@@ -211,11 +214,18 @@ impl HostPowerControl {
     }
 
     /// Give the guest a press and a release of its power button, for a
-    /// press of the host's ([`Self::pressed`]).
+    /// press of the host's ([`Self::pressed`]). A host button has no hold a
+    /// PC reports, so a second press is one: the Mac turns off however the
+    /// guest fares, and the run's translations are kept as at any power-off.
     pub fn press(&mut self, devices: &mut AppleDevices) {
-        let result = devices
-            .power_button(true)
-            .and_then(|()| devices.power_button(false));
+        let result = if core::mem::replace(&mut self.pressed_before, true) {
+            output::arguments(format_args!("POWER host button held\n"));
+            devices.power_button_held()
+        } else {
+            devices
+                .power_button(true)
+                .and_then(|()| devices.power_button(false))
+        };
         if let Err(error) = result
             && !core::mem::replace(&mut self.refused, true)
         {

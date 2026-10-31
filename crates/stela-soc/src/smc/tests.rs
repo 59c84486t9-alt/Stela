@@ -32,6 +32,15 @@ fn send(smc: &mut Smc, payload: u64) -> u64 {
 }
 
 #[test]
+fn a_held_power_button_turns_the_machine_off_whatever_the_ap_does() {
+    let (mut smc, _sram) = smc();
+    smc.power_button_held();
+    let off = smc.take_transition().unwrap();
+    assert_eq!((off.device, off.transition), ("smc", Transition::PowerOff));
+    assert!(smc.take_transition().is_none());
+}
+
+#[test]
 fn rtc_key_requires_owner_and_publication_without_reply_or_sram_fabrication() {
     use crate::pmu::{RtcClock, RtcEpoch};
     let (mut smc, sram) = smc();

@@ -551,6 +551,15 @@ impl Smc {
         false
     }
 
+    /// The power button held until the SMC cuts power, whatever the AP does.
+    pub fn power_button_held(&mut self) {
+        self.transition = Some(TransitionRequest {
+            device: NAME,
+            transition: Transition::PowerOff,
+            reason: "power button held: system power-off",
+        });
+    }
+
     fn reply(request: u64, result: u8, size: usize, data: u32) -> u64 {
         u64::from(result) | (request & 0xff00) | (size as u64) << 16 | u64::from(data) << 32
     }

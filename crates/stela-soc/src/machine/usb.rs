@@ -243,6 +243,12 @@ impl AppleDevices {
         Ok(())
     }
 
+    /// The board's power button held: the machine turns off ([`Smc::power_button_held`]).
+    pub fn power_button_held(&mut self) -> Result<()> {
+        self.smc()?.power_button_held();
+        Ok(())
+    }
+
     pub fn usb_client(&mut self, id: UsbId) -> Result<UsbClient<'_>> {
         let master = self
             .usb_masters
