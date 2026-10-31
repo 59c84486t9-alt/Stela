@@ -965,6 +965,7 @@ impl Prepare {
                 snapshot: None,
             }),
             pivot_root_hash: None,
+            firmware_version: None,
             board_firmware: board_firmware
                 .iter()
                 .map(|(name, decoded)| (name.clone(), input(decoded)))

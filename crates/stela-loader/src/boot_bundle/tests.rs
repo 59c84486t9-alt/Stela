@@ -687,6 +687,7 @@ fn unsupported_build_is_refused_before_image_parsing() {
         ramdisk: None,
         root_hash: None,
         pivot_root_hash: None,
+        firmware_version: None,
     };
     let options = Options::default();
     let borrowed = prepare(&inputs, &options).err().unwrap();
@@ -748,6 +749,7 @@ fn lays_out_sptm_regions_and_patch_slots() -> Result<()> {
         ramdisk: Some(input(leak(vec![0x5a; 100]), "RestoreRamDisk")),
         root_hash: None,
         pivot_root_hash: None,
+        firmware_version: None,
     };
     let options = Options {
         dram_base: 0x8_0000_0000,
@@ -797,8 +799,8 @@ fn lays_out_sptm_regions_and_patch_slots() -> Result<()> {
     assert_eq!(
         (REVISION, prepared_digest(&bundle)?),
         (
-            34,
-            "57ac5050d33233e3401679fc3a8f4558772e3a0da151469c4086613732bfae43".to_owned()
+            35,
+            "bc204d9f21be77c04702696ad04180ba5e655d378b824333a3244e628608f17d".to_owned()
         )
     );
     let original = bundle

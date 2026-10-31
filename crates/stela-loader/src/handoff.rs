@@ -265,22 +265,8 @@ pub fn apply_identity(
         return Ok((decisions, gaps));
     };
     require!(ecid != 0, "a machine ECID is nonzero");
-    let mut fill = |name: &str, value: Vec<u8>, source: String| -> Result<()> {
-        let Some(slot) = tree.property(CHOSEN, name) else {
-            return Ok(());
-        };
-        require!(
-            slot.value.len() >= value.len(),
-            "{CHOSEN} {name} is {value_len} bytes; iBoot writes {value_len2}",
-            CHOSEN,
-            name,
-            value_len = slot.value.len(),
-            value_len2 = value.len()
-        );
-        let mut bytes = slot.value.clone();
-        bytes[..value.len()].copy_from_slice(&value);
-        decisions.push(decision(CHOSEN, name, &bytes, source));
-        tree.set_property(CHOSEN, name, bytes)
+    let mut fill = |name: &str, value: Vec<u8>, source: String| {
+        fill_slot(tree, &mut decisions, name, value, source)
     };
     let ecid_bytes = ecid.to_le_bytes().to_vec();
     fill(
@@ -308,13 +294,76 @@ pub fn apply_identity(
     Ok((decisions, gaps))
 }
 
+/// Write `value` over the start of the template's `/chosen` slot, if it has one.
+fn fill_slot(
+    tree: &mut DeviceTree,
+    decisions: &mut Vec<Decision>,
+    name: &str,
+    value: Vec<u8>,
+    source: String,
+) -> Result<()> {
+    let Some(slot) = tree.property(CHOSEN, name) else {
+        return Ok(());
+    };
+    require!(
+        slot.value.len() >= value.len(),
+        "{CHOSEN} {name} is {value_len} bytes; iBoot writes {value_len2}",
+        CHOSEN,
+        name,
+        value_len = slot.value.len(),
+        value_len2 = value.len()
+    );
+    let mut bytes = slot.value.clone();
+    bytes[..value.len()].copy_from_slice(&value);
+    decisions.push(decision(CHOSEN, name, &bytes, source));
+    tree.set_property(CHOSEN, name, bytes)
+}
+
+/// The version rows, which the kernel prints and keeps for panic reports.
+/// iBoot writes its own build (the string behind 0x7acac, which its IM4P
+/// description repeats) into the `firmware-version` slot (0x23bec) and as a
+/// new `iboot-stage-two-tag` (0x23d60); the stage-one rows (0x23cd4) come from
+/// LLB's keyed `ver1`. A restore leaves both stages on one build, so `build`
+/// answers for each.
+pub fn apply_firmware_version(
+    tree: &mut DeviceTree,
+    build: Option<&str>,
+) -> Result<(Vec<Decision>, Vec<String>)> {
+    let (mut decisions, mut gaps) = (vec![], vec![]);
+    let Some(build) = build else {
+        gaps.push(
+            "/chosen firmware-version, system-firmware-version, iboot-stage-one-tag, \
+             iboot-stage-two-tag: this boot's objects name no iBoot image"
+                .into(),
+        );
+        return Ok((decisions, gaps));
+    };
+    require!(!build.is_empty(), "an iBoot image names its build");
+    let mut value = build.as_bytes().to_vec();
+    value.push(0);
+    fill_slot(
+        tree,
+        &mut decisions,
+        "firmware-version",
+        value.clone(),
+        "the boot set's iBoot image".into(),
+    )?;
+    for (name, source) in [
+        ("iboot-stage-two-tag", "the boot set's iBoot image"),
+        ("system-firmware-version", "LLB, restored with that iBoot"),
+        ("iboot-stage-one-tag", "LLB, restored with that iBoot"),
+    ] {
+        decisions.push(decision(CHOSEN, name, &value, source.into()));
+        tree.set_property(CHOSEN, name, value.clone())?;
+    }
+    Ok((decisions, gaps))
+}
+
 /// Rows iBoot writes that Stela cannot produce yet, each with its reason.
 fn unproduced(tree: &DeviceTree) -> Vec<String> {
     let mut gaps = vec![
         "/chosen dram-vendor, dram-vendor-id, dram-type: no DRAM identity model".into(),
-        "/chosen firmware-version, system-firmware-version, iboot-stage-one-tag, \
-         iboot-stage-one-variant, iboot-stage-two-tag: iBoot's own versions; Stela is not iBoot"
-            .into(),
+        "/chosen iboot-stage-one-variant: LLB's keyed `var1`, which no boot object names".into(),
         "/chosen boot-nonce: no AP nonce model (iBoot derives it from NVRAM \
          com.apple.System.boot-nonce)"
             .into(),
@@ -642,6 +691,33 @@ mod tests {
         assert!(gaps[0].contains("no machine ECID"));
         assert_eq!(value_of(&tree, "unique-chip-id"), vec![0; 8]);
         assert!(apply_identity(&mut tree, Some(0), Some(0x8112)).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn the_boot_sets_iboot_build_fills_the_version_rows_or_names_the_gap() -> Result<()> {
+        let mut tree = tree();
+        tree.ensure_child(ROOT, "chosen")?;
+        tree.set_property(CHOSEN, "firmware-version", vec![0; 256])?;
+        let (decisions, gaps) = apply_firmware_version(&mut tree, None)?;
+        assert!(decisions.is_empty());
+        assert!(gaps[0].contains("no iBoot image"));
+        assert_eq!(value_of(&tree, "firmware-version"), vec![0; 256]);
+
+        let (decisions, gaps) = apply_firmware_version(&mut tree, Some("mBoot-20457.1.29"))?;
+        assert!(gaps.is_empty());
+        assert_eq!(decisions.len(), 4);
+        let slot = value_of(&tree, "firmware-version");
+        assert_eq!(slot.len(), 256);
+        assert_eq!(&slot[..17], b"mBoot-20457.1.29\0");
+        for name in [
+            "system-firmware-version",
+            "iboot-stage-one-tag",
+            "iboot-stage-two-tag",
+        ] {
+            assert_eq!(value_of(&tree, name), b"mBoot-20457.1.29\0");
+        }
+        assert!(apply_firmware_version(&mut tree, Some("")).is_err());
         Ok(())
     }
 

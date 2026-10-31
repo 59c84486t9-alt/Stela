@@ -480,6 +480,16 @@ impl<R: ReadAt> Reader<'_, R> {
         Ok((decoded, parts.manifest.map(<[u8]>::to_vec)))
     }
 
+    /// The build the boot set's iBoot names itself with.
+    fn iboot_build(&mut self) -> Result<Option<String>> {
+        let Some(object) = self.set.object(b"ibot")?.cloned() else {
+            return Ok(None);
+        };
+        let file = self.file(&object)?;
+        let parts = img4::parse(&file).within(|| refuse!("{path}", path = object.path))?;
+        Ok(Some(crate::im4p::parse(parts.payload)?.description))
+    }
+
     /// An object kept as its encoded `IM4P`: the SEP firmware, the root hash.
     fn opaque(&mut self, kind: &[u8; 4]) -> Result<Option<Decoded>> {
         let Some(object) = self.set.object(kind)?.cloned() else {
@@ -572,6 +582,7 @@ pub fn prepare<R: ReadAt>(
     let (trust_cache, _) = reader.decode(b"bstc", COMPONENT_LIMIT)?;
     let sep = reader.opaque(SEP_FIRMWARE_TYPE)?;
     let root_hash = reader.opaque(b"csys")?;
+    let firmware_version = reader.iboot_build()?;
     let version = reader.system_version()?;
     let tree = DeviceTree::parse(&device_tree.bytes)?;
     let product_type = root_string(&tree, "model")?;
@@ -628,6 +639,7 @@ pub fn prepare<R: ReadAt>(
             snapshot: None,
         }),
         pivot_root_hash: None,
+        firmware_version: firmware_version.as_deref(),
     };
     let directory = set.directory();
     let mut options = options.placed_at(inputs.dram_base()?);

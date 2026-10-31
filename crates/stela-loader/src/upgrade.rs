@@ -530,6 +530,7 @@ pub fn prepare<R: ReadAt>(
         ramdisk: None,
         root_hash: None,
         pivot_root_hash: None,
+        firmware_version: None,
         // As for the installed system: the engine reads the board's flash.
         board_firmware: Vec::new(),
     };

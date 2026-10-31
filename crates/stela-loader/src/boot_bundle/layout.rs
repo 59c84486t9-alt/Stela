@@ -262,6 +262,8 @@ impl Shaped {
         self.record(applied);
         let applied = handoff::apply_boot_command(&mut self.tree, options.boot_command)?;
         self.record(applied);
+        let applied = handoff::apply_firmware_version(&mut self.tree, inputs.firmware_version)?;
+        self.record(applied);
         let applied = handoff::apply_identity(&mut self.tree, options.ecid, inputs.target.chip_id)?;
         self.record(applied);
         match &options.root {

@@ -55,7 +55,7 @@ use patches::*;
 
 /// The revision of the content [`prepare`] writes within its schema; a
 /// bundle of another revision is prepared again (`stela setup update stela`).
-pub const REVISION: u32 = 34;
+pub const REVISION: u32 = 35;
 /// m1n1 `_write_boot_args`: the physical aperture base XNU expects, offset
 /// by `phys_base` modulo 32 MiB.
 const VIRT_BASE: u64 = 0xfffffe0010000000;
@@ -128,6 +128,9 @@ pub struct Inputs<'a> {
     /// is given (0xc158334..0xc15836c), and APFS's
     /// `handle_basesystem_rootmount` panics without this record.
     pub pivot_root_hash: Option<Input<'a>>,
+    /// The build the boot set's iBoot image names, for `/chosen`'s version
+    /// rows; `None` where the boot's objects hold no iBoot.
+    pub firmware_version: Option<&'a str>,
     /// Firmware images the board's own devices run, copied unchanged as
     /// bundle files named by their guest file names (such as
     /// `USB-C_HPM,47.bin`); device models read their identity from them.

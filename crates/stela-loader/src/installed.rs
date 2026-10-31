@@ -484,6 +484,16 @@ impl<R: ReadAt> Disk<'_, R> {
         Ok((decoded, parts.manifest.map(<[u8]>::to_vec)))
     }
 
+    /// The build the boot set's iBoot names itself with.
+    fn iboot_build(&mut self) -> Result<Option<String>> {
+        let Some(object) = self.set.object(b"ibot")?.cloned() else {
+            return Ok(None);
+        };
+        let file = self.read(&object)?;
+        let parts = img4::parse(&file).within(|| refuse!("{path}", path = object.path))?;
+        Ok(Some(crate::im4p::parse(parts.payload)?.description))
+    }
+
     /// An optional object kept as its encoded payload, as the SEP firmware is.
     fn opaque(&mut self, kind: &[u8; 4]) -> Result<Option<Decoded>> {
         let Some(object) = self.set.object(kind)?.cloned() else {
@@ -648,6 +658,7 @@ pub fn prepare<R: ReadAt>(
     // The evidence already required this object and checked its signature.
     let root_hash = disk.opaque(ROOT_HASH_TYPE)?;
     let pivot_root_hash = disk.opaque(BASE_SYSTEM_ROOT_HASH_TYPE)?;
+    let firmware_version = disk.iboot_build()?;
     let cryptex1_manifest = options
         .ecid
         .map(|ecid| disk.cryptex1_manifest(ecid))
@@ -719,6 +730,7 @@ pub fn prepare<R: ReadAt>(
                 .map(preboot::root_snapshot_name),
         }),
         pivot_root_hash: pivot_root_hash.as_ref().map(Decoded::input),
+        firmware_version: firmware_version.as_deref(),
     };
     let mut options = options.placed_at(inputs.dram_base()?);
     options.security.kexts = kexts;
