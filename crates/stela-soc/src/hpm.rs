@@ -18,9 +18,11 @@
 //! 1 plug, 8 status, 10 data status, 11 PD status). Masks preserve events and
 //! clears are W1C. A 4CC written to CMD1 completes before the write returns:
 //! CMD1 reads zero again, the documented completion. `SSPS` (active power
-//! states 0 and 2), `USBd`, `USBw` and `ABRT` record their effect; sleep and
-//! every other command refuse rather than fake a firmware effect. The bus
-//! manager's summary at address 0x6b is `Summary`.
+//! states 0 and 2, and sleep, 3, which the driver sets before system sleep and
+//! which changes nothing else because the die keeps raising its events),
+//! `USBd`, `USBw` and `ABRT` record their effect; every other command refuses
+//! rather than fake a firmware effect. The bus manager's summary at address
+//! 0x6b is `Summary`.
 
 use crate::Result;
 use alloc::vec::Vec;
@@ -61,8 +63,8 @@ const MAX_DATA: usize = 64;
 const APPLE_STATUS_BYTES: usize = 18;
 /// Configured registers wider than the leading bytes their record stores.
 const REGISTER_WIDTHS: [(u8, usize); 1] = [(0x47, 49)];
-/// Active with a cable and active unplugged; 3 is sleep.
-const ACTIVE_POWER_STATES: [u8; 2] = [0, 2];
+/// Active with a cable, active unplugged and sleep.
+const POWER_STATES: [u8; 3] = [0, 2, 3];
 const PLUG_EVENT: u16 = 1 << 1;
 const STATUS_EVENT: u16 = 1 << 8;
 const POWER_EVENT: u16 = 1 << 9;
@@ -466,8 +468,8 @@ impl Hpm {
     fn execute(&mut self, command: [u8; 4]) -> Result<()> {
         let argument = self.data[0];
         match &command {
-            b"SSPS" if ACTIVE_POWER_STATES.contains(&argument) => self.power_state = argument,
-            b"SSPS" => return Err(refuse!("HPM sleep or unknown power state is not modeled")),
+            b"SSPS" if POWER_STATES.contains(&argument) => self.power_state = argument,
+            b"SSPS" => return Err(refuse!("HPM power state is not modeled")),
             b"USBd" if argument <= 1 => self.usb_detection = argument == 1,
             b"USBw" if [0, 1, 9, 0x11, 0x80].contains(&argument) => self.remote_wake = argument,
             b"ABRT" => {}
@@ -840,13 +842,16 @@ mod tests {
         write(&mut h, COMMAND, b"USBd");
         assert!(h.usb_detection);
         write(&mut h, COMMAND, b"ABRT");
-        for (argument, command) in [(3, b"SSPS"), (2, b"USBd"), (0, b"GAID")] {
+        for (argument, command) in [(4, b"SSPS"), (2, b"USBd"), (0, b"GAID")] {
             write(&mut h, DATA, &[argument]);
             let frame = [&[COMMAND, 4][..], command].concat();
             assert!(h.transfer(&frame, &mut [], true).is_err());
         }
         assert_eq!(read(&mut h, POWER_STATE, 1), [2]);
         assert!(h.usb_detection);
+        write(&mut h, DATA, &[3]);
+        write(&mut h, COMMAND, b"SSPS");
+        assert_eq!(read(&mut h, POWER_STATE, 1), [3]);
     }
     #[test]
     fn the_manager_summary_reports_each_alerting_die_active_low() {
