@@ -71,7 +71,7 @@ const FUNC_SCRATCH: u32 = 0x2c;
 const FUNC_SCRATCH_INIT: u32 = 0x01010101;
 const ROM_START: u32 = 1 << 7;
 const HBUS_TARG_WRPTR: u32 = 0x460;
-const MSIX_HW_CAUSES: u32 = 0x2808;
+use super::interrupts::{self, HW_CAUSES as MSIX_HW_CAUSES};
 const IML_CAUSE: u32 = 1 << 1;
 const RECEIVE_BUFFER_BYTES: usize = 4096;
 
@@ -109,13 +109,13 @@ pub struct NativeBootIo {
 impl NativeBootIo {
     /// # Safety
     /// `window` is the claimed AX200/AX210 function's aligned uncached BAR
-    /// mapping covering all8192 bytes. `owner` keeps that real exclusive PCI
+    /// mapping covering its 16 KiB. `owner` keeps that real exclusive PCI
     /// claim and BAR reservation, with all old DMA/IRQs stopped and drained and
     /// PCI interrupt routes disabled; no unrelated/dummy owner checks.
     /// The clock is calibrated and advancing. The window stays mapped through
     /// the owner's final Drop, including deliberate quarantine on failure.
     pub unsafe fn from_window(
-        window: NonNull<[u8; 8192]>,
+        window: NonNull<[u8; 16384]>,
         owner: Arc<dyn Any>,
         clock: Clock,
     ) -> Result<Self, Error> {
@@ -312,6 +312,7 @@ struct Buffer {
 /// and isolated device DMA mappings. Polling mode never unmasks IRQ sources.
 /// Dropping an active/uncertain epoch quarantines the BAR/requester too.
 pub struct RomBoot<'a, Q: BootIo> {
+    vector: bool,
     io: Option<Q>,
     profile: Profile,
     firmware: Firmware<'a>,
@@ -433,6 +434,7 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
         entries: u16,
         product_reset_policy: Option<ProductResetPolicy>,
     ) -> Result<Self, Error> {
+        let vector = power.vector();
         let (io, profile, awake) = power.into_awake()?;
         let (firmware, image) = staged.into_parts();
         let request = profile.firmware_request();
@@ -572,6 +574,7 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
         };
         let mut boot = Self {
             io: Some(io),
+            vector,
             profile,
             firmware,
             image,
@@ -709,6 +712,9 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
         self.write(0x5c, 2)?;
         self.write(0x5c, 4)?;
         self.write(8, u32::MAX)?;
+        if self.vector {
+            self.route_interrupts()?;
+        }
         // iwl_mvm_nic_config returns immediately on AX210: CSR0 becomes the
         // context-v2 boot control, never the old PHY configuration fields.
         if self.profile.family() == Family::Ax200 {
@@ -786,6 +792,35 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
             self.spin_for_iml()?;
         }
         Ok(())
+    }
+    /// `iwl_pcie_conf_msix_hw` and `_iwl_enable_interrupts`. A cause only
+    /// wakes the core that looks for frames, which finds what it asks for in
+    /// the rings, so nothing here waits for firmware's own state.
+    fn route_interrupts(&mut self) -> Result<(), Error> {
+        let family = self.profile.family();
+        let offset = if family >= Family::Ax210 { 0x300000 } else { 0 };
+        self.prph_write(interrupts::UREG_CHICK + offset, interrupts::MSIX_ENABLE)?;
+        let routes = interrupts::routes(family);
+        for ivar in routes.ivars {
+            self.io().write8(ivar, interrupts::SHARED)?;
+        }
+        self.write(interrupts::FH_MASK, routes.fh_mask)?;
+        self.write(interrupts::HW_MASK, routes.hw_mask)
+    }
+    /// `iwl_pcie_irq_msix_handler` for what `poll` does not read from the
+    /// rings: clear the causes the vector fired for, then let it fire again,
+    /// ahead of the look at the rings, so nothing arriving after that look
+    /// goes unsignalled.
+    pub(crate) fn acknowledge_interrupts(&mut self) -> Result<(), Error> {
+        for causes in [interrupts::FH_CAUSES, MSIX_HW_CAUSES] {
+            let set = self.read_register(causes)?;
+            self.write(causes, set)?;
+        }
+        self.write(interrupts::AUTOMASK, 1)
+    }
+    /// Whether the function's first MSI-X vector reaches the host.
+    pub(crate) fn vector(&self) -> bool {
+        self.vector
     }
     /// `iwl_pcie_spin_for_iml`: keep the CPU and device busy for at least
     /// 100 ms or until the image loader finishes. Running out is no failure;

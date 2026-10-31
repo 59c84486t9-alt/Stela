@@ -414,6 +414,7 @@ pub(super) unsafe fn mediatek_wifi(
 pub(super) unsafe fn intel_wifi<B: wifi::intel::radio::bios::service::BiosIo>(
     services: &dyn NativeServices,
     address: Address,
+    completion: Option<crate::bus::irq::MsiMessage>,
     inputs: wifi::intel::link::Inputs<B>,
 ) -> Result<Located<wifi::intel::link::Station<wifi::intel::boot::NativeBootIo, B>>, Failure> {
     use wifi::intel::attach::{AttachError, Pci, attach};
@@ -425,7 +426,7 @@ pub(super) unsafe fn intel_wifi<B: wifi::intel::radio::bios::service::BiosIo>(
     } = claim(services, address).map_err(refused)?;
     let registers = map(services, address, &bars, 0).map_err(refused)?;
     let window = registers
-        .address(0, 8192)
+        .address(0, 16384)
         .map_err(|error| refused(ServiceError::Mapping(error)))?;
     let vendor = function.vendor;
     let device = function.device;
@@ -438,9 +439,32 @@ pub(super) unsafe fn intel_wifi<B: wifi::intel::radio::bios::service::BiosIo>(
         subsystem_device: config.read16(0x2e),
         revision: config.read8(0x08),
         link_speed,
+        vector: false,
     };
-    // iwl_pci_probe: memory decoding and bus mastering, polled.
+    // iwl_pci_probe: memory decoding and bus mastering.
     function.enable_polled();
+    // iwl_pcie_set_interrupt_capa: the table lies in BAR0, at CSR_MSIX_BASE.
+    let vector = match (completion, function.interrupts().msix) {
+        (Some(message), Some(msix)) if msix.table_bar == 0 => {
+            let table = registers
+                .address(msix.table_offset as usize, 16)
+                .map_err(|error| refused(ServiceError::Mapping(error)))?;
+            // SAFETY: the claimed function's own MSI-X table, mapped uncached
+            // by the mapping `owner` keeps.
+            let table = unsafe { crate::bus::mmio::Mmio::new(table.as_ptr() as u64) };
+            function
+                .enable_msix(msix, || {
+                    table.write32(0, message.address as u32);
+                    table.write32(4, (message.address >> 32) as u32);
+                    table.write32(8, message.data);
+                    table.write32(12, 0);
+                    Ok(())
+                })
+                .is_ok()
+        }
+        _ => false,
+    };
+    let pci = Pci { vector, ..pci };
     let owner: Arc<dyn Any> = Arc::new((function, registers));
     let kept = |owner: &Arc<dyn Any>| Some(Box::new(owner.clone()) as Box<dyn Any>);
     // SAFETY: the mount claimed the stopped function and mapped its BAR0

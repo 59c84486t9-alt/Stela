@@ -186,6 +186,8 @@ pub struct Wifi<Q: BootIo, B: BiosIo> {
     chains: (u32, u32),
     family: Family,
     radio: super::identity::Rf,
+    /// Whether the function's first MSI-X vector reaches the host.
+    pub(super) vector: bool,
     /// What limits a radio with EHT, once firmware is up.
     eht: Option<super::identity::EhtLimits>,
     /// What a test's radio without EHT stands in for.
@@ -238,10 +240,12 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
     /// submits to or resets the function, and `bios` reads this function's
     /// own ACPI companion and the boot's captured variables.
     pub unsafe fn new(boot: RomBoot<'static, Q>, inputs: Inputs<B>) -> Station<Q, B> {
+        let vector = boot.vector();
         let deadline = inputs.clock.deadline(ALIVE_TIMEOUT_US);
         let wifi = Self {
             family: boot.family(),
             radio: boot.radio(),
+            vector,
             eht: None,
             #[cfg(test)]
             assumed_eht: None,

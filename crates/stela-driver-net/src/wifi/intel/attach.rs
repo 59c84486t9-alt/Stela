@@ -37,6 +37,9 @@ pub struct Pci {
     pub revision: u8,
     /// PCI_EXP_LNKSTA's current speed.
     pub link_speed: u8,
+    /// Whether the function's first MSI-X vector wakes the core that looks
+    /// for its frames.
+    pub vector: bool,
 }
 
 /// Why the function did not reach ROM boot.
@@ -149,6 +152,9 @@ pub unsafe fn attach<Q: BootIo, B: BiosIo>(
         },
     })?;
     let mut power = Power::new(io, profile);
+    if pci.vector {
+        power = power.with_vector();
+    }
     power
         .wake(ManagementSession::NotConnected)
         .map_err(AttachError::Power)?;

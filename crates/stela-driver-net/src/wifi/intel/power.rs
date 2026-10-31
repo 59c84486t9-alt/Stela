@@ -407,6 +407,7 @@ pub struct Power<C: Csr> {
     nic: Nic<C>,
     profile: Profile,
     state: State,
+    vector: bool,
 }
 impl<C: Csr> Power<C> {
     pub fn new(io: C, profile: Profile) -> Self {
@@ -418,6 +419,7 @@ impl<C: Csr> Power<C> {
             },
             profile,
             state: State::Cold,
+            vector: false,
         }
     }
     /// `iwl_pcie_gen2_force_power_gating`, for an integrated 22000 device
@@ -486,6 +488,14 @@ impl<C: Csr> Power<C> {
     }
     /// Consume only a successful MAC-clock epoch, transferring its exclusive
     /// CSR owner to the firmware/ring transport. This is not radio readiness.
+    /// The function's first MSI-X vector reaches the host.
+    pub fn with_vector(mut self) -> Self {
+        self.vector = true;
+        self
+    }
+    pub fn vector(&self) -> bool {
+        self.vector
+    }
     pub fn into_awake(self) -> Result<(C, Profile, Awake), Error> {
         if let State::Awake(status) = self.state {
             Ok((self.nic.io, self.profile, status))

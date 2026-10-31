@@ -1355,6 +1355,9 @@ impl<R: Radio> Link for Keeper<R> {
     fn signals(&self) -> bool {
         self.link.signals()
     }
+    fn due_us(&self) -> Option<u64> {
+        self.link.due_us()
+    }
     fn transmit(&mut self, frame: &[u8]) -> Result<(), LinkError> {
         self.link.transmit(frame)
     }

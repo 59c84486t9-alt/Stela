@@ -57,6 +57,11 @@ use alloc::{borrow::Cow, collections::VecDeque};
 
 mod he;
 mod reception;
+
+/// How long a signalling station sleeps at most: the coarse timers it keeps
+/// between frames, its Block Ack sessions' and its connection's, have no
+/// firmware signal of their own.
+const TIMER_TICK_US: u64 = 100_000;
 use super::super::identity::EhtLimits;
 use reception::{MAX_SESSIONS, Parent, Reception};
 mod eht;
@@ -479,6 +484,9 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
 
     /// One service round on the raised chain.
     fn operate(&mut self, queue: &mut Queue<Q, B>) -> Result<(), Error> {
+        if self.vector {
+            queue.acknowledge_interrupts().map_err(Error::Queue)?;
+        }
         let now = self.clock.now_us();
         if let Some(plan) = self.client.plan.take() {
             self.limit_six_ghz_power(queue);
@@ -1765,6 +1773,15 @@ impl<Q: BootIo, B: BiosIo> Link for Wifi<Q, B> {
     }
     fn carrier(&mut self) -> bool {
         self.client.port_open
+    }
+    /// A station signals once its port is open. Until then the handshake's
+    /// timers run on a caller that keeps polling.
+    fn signals(&self) -> bool {
+        self.vector && self.client.port_open
+    }
+    fn due_us(&self) -> Option<u64> {
+        self.signals()
+            .then(|| self.clock.now_us().saturating_add(TIMER_TICK_US))
     }
     fn transmit(&mut self, frame: &[u8]) -> Result<(), LinkError> {
         if !self.client.port_open {

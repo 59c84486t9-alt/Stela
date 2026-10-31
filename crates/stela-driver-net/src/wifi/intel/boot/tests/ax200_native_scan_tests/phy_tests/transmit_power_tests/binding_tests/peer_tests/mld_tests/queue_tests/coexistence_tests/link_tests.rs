@@ -1393,3 +1393,21 @@ fn an_ap_mld_takes_the_station_on_a_link_of_its_own_and_gives_it_back() {
     assert_eq!(link[16..22], LOCAL);
     assert_eq!(link[166], 0);
 }
+
+#[test]
+fn an_open_port_sleeps_on_the_vector_which_each_pass_clears_and_rearms() {
+    const CAUSES: u32 = 0x2800;
+    const AUTOMASK: u32 = 0x2810;
+    let native = Native::default();
+    let (mut wifi, mut device) = connect(&native, false);
+    assert!(!wifi.signals(), "no vector reached this function");
+    assert_eq!(wifi.due_us(), None);
+    wifi.radio_mut().vector = true;
+    assert!(wifi.signals());
+    assert!(wifi.due_us().is_some());
+    native.state.lock().unwrap().registers.insert(CAUSES, 1);
+    wifi.carrier();
+    run(&mut wifi, &mut device, |_, _, _| false);
+    let state = native.state.lock().unwrap();
+    assert_eq!(state.registers.get(&AUTOMASK), Some(&1));
+}
