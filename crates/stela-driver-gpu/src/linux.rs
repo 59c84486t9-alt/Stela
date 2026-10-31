@@ -8,9 +8,9 @@ pub mod client;
 #[cfg(target_arch = "x86_64")]
 pub mod function;
 pub mod heap;
+pub mod image;
 #[cfg(feature = "nouveau-port")]
 pub mod nouveau;
-pub mod image;
 pub mod owner;
 pub mod pages;
 pub mod random;

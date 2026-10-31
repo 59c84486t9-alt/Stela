@@ -13,9 +13,9 @@ pub use alloc_crate::{alloc, borrow, boxed, fmt, format, rc, slice, str, string,
 pub use core::{
     any, array, ascii, assert, assert_eq, assert_ne, cell, char, clone, cmp, column, compile_error,
     concat, convert, debug_assert, debug_assert_eq, debug_assert_ne, default, f32, f64, file,
-    format_args, future, hint, i8, i16, i32, i64, i128, include, include_bytes, include_str, isize,
+    format_args, future, hint, i128, i16, i32, i64, i8, include, include_bytes, include_str, isize,
     iter, line, marker, matches, mem, module_path, num, ops, option, option_env, pin, ptr, result,
-    stringify, task, time, todo, u8, u16, u32, u64, u128, unimplemented, unreachable, usize, write,
+    stringify, task, time, todo, u128, u16, u32, u64, u8, unimplemented, unreachable, usize, write,
     writeln,
 };
 

@@ -10,8 +10,8 @@ use core::{
     ops::{Deref, DerefMut, Index},
 };
 pub use owned::{
-    BTreeMap, BTreeSet, BinaryHeap, LinkedList, VecDeque, binary_heap, btree_map, btree_set,
-    vec_deque,
+    binary_heap, btree_map, btree_set, vec_deque, BTreeMap, BTreeSet, BinaryHeap, LinkedList,
+    VecDeque,
 };
 
 pub mod hash_map {
