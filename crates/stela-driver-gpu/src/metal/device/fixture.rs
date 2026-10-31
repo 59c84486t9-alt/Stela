@@ -439,6 +439,11 @@ impl Compiler for MockCompiler {
         self.libraries.push(Some(data));
         Ok(self.libraries.len() as u64 - 1)
     }
+    fn library_data(&self, library: u64) -> Result<&[u8]> {
+        self.libraries[library as usize]
+            .as_deref()
+            .ok_or(Error::Invalid("unknown library"))
+    }
     fn remove_library(&mut self, library: u64) -> Result<()> {
         self.libraries[library as usize]
             .take()

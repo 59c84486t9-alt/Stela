@@ -3,8 +3,8 @@ use super::{
     Call, Object, Service,
     wire::{
         self, AttributeInfo, ConstantInfo, ConstantRecord, Fault, FunctionReflectionRequest,
-        FunctionReflectionResponse, LibraryFunctionNamesRequest, NewFunctionRequest,
-        NewLibraryRequest,
+        FunctionReflectionResponse, LibraryDataRequest, LibraryFunctionNamesRequest,
+        LibraryIdentityRequest, LibraryIdentityResponse, NewFunctionRequest, NewLibraryRequest,
     },
 };
 use crate::metal::{
@@ -36,6 +36,25 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             names.push(0);
         }
         call.reply_data(request.out, &names)
+    }
+
+    pub(super) fn library_identity(&mut self, call: &mut Call) -> Result<(), Fault> {
+        let request: LibraryIdentityRequest = call.request()?;
+        let library = self.object::<LibraryId>(call.connection, request.library)?;
+        let (dynamic, install_name) = self.device.library_identity(library)?;
+        let install_name = install_name.unwrap_or_default().as_bytes();
+        call.write_fitting(request.out, install_name)?;
+        call.reply(&LibraryIdentityResponse {
+            // `MTLLibraryType`.
+            library_type: dynamic.into(),
+            length: install_name.len() as u64,
+        })
+    }
+
+    pub(super) fn library_data(&mut self, call: &mut Call) -> Result<(), Fault> {
+        let request: LibraryDataRequest = call.request()?;
+        let library = self.object::<LibraryId>(call.connection, request.library)?;
+        call.reply_data(request.out, self.device.library_data(library)?)
     }
 
     pub(super) fn new_function(&mut self, call: &mut Call) -> Result<(), Fault> {

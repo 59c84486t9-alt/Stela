@@ -113,6 +113,14 @@ enum {
 	MTLLibraryErrorFileNotFound = 6,
 };
 enum {
+	MTLLibraryTypeExecutable = 0,
+	MTLLibraryTypeDynamic = 1,
+};
+enum {
+	MTLDynamicLibraryErrorInvalidFile = 1,
+	MTLDynamicLibraryErrorUnsupported = 5,
+};
+enum {
 	MTLPipelineOptionNone = 0,
 	MTLPipelineOptionArgumentInfo = 1 << 0,
 	MTLPipelineOptionBindingInfo = 1 << 0,
@@ -224,7 +232,8 @@ enum {
 	X(MTLTextureBinding)                                                                       \
 	X(MTLThreadgroupBinding)                                                                   \
 	X(MTLObjectPayloadBinding)                                                                 \
-	X(MTLDrawable)
+	X(MTLDrawable)                                                                             \
+	X(MTLDynamicLibrary)
 
 #define STELA_DECLARE_PROTOCOL(name) @protocol name @end
 STELA_PROTOCOLS(STELA_DECLARE_PROTOCOL)
@@ -425,6 +434,7 @@ STELA_PROTOCOLS(STELA_DECLARE_PROTOCOL)
 @end
 
 extern NSString *const MTLLibraryErrorDomain;
+extern NSString *const MTLDynamicLibraryDomain;
 extern NSString *const MTLCommandBufferErrorDomain;
 extern NSString *const MTLCounterErrorDomain;
 extern NSString *const MTLCommonCounterSetTimestamp;

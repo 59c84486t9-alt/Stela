@@ -663,14 +663,55 @@ typedef struct {
 	return list;
 }
 
+/* What the library says of itself, once: a library's bytes never change. */
+- (void)identify
+{
+	if (_identified) {
+		return;
+	}
+	StelaLibraryIdentityRequest request = {.library = _handle};
+	StelaLibraryIdentityResponse response = {};
+	char *name = read_variable(&_device->_gate, StelaOperationLibraryIdentity, &request, sizeof(request),
+				   &request.out, &response, sizeof(response), &response.length);
+	if (name) {
+		_type = response.library_type;
+		_installName = response.length ? [[NSString alloc] initWithBytes:name
+									  length:response.length
+									encoding:NSUTF8StringEncoding]
+					       : nil;
+		free(name);
+	}
+	_identified = YES;
+}
+
 - (NSUInteger)type
 {
-	return 0;
+	[self identify];
+	return _type;
 }
 
 - (NSString *)installName
 {
-	return nil;
+	[self identify];
+	return _installName;
+}
+
+/* `MTLDynamicLibrary`: a dynamic library is the library it was made from. */
+- (BOOL)serializeToURL:(NSURL *)url error:(NSError **)error
+{
+	StelaLibraryDataRequest request = {.library = _handle};
+	StelaLength response = {};
+	void *bytes = read_variable(&_device->_gate, StelaOperationLibraryData, &request, sizeof(request), &request.out,
+				    &response, sizeof(response), &response.length);
+	if (!bytes) {
+		if (error) {
+			StelaFailure failure = {.reason = "the library's bytes"};
+			*error = stela_error(MTLDynamicLibraryDomain, MTLDynamicLibraryErrorUnsupported, &failure);
+		}
+		return NO;
+	}
+	NSData *data = [NSData dataWithBytesNoCopy:bytes length:response.length freeWhenDone:YES];
+	return [data writeToURL:url options:NSDataWritingAtomic error:error];
 }
 
 - (id)newFunctionWithName:(NSString *)name constantValues:(id)values error:(NSError **)error
@@ -808,6 +849,37 @@ typedef struct {
 - (id)newDefaultLibrary
 {
 	return [self newDefaultLibraryWithBundle:[NSBundle mainBundle] error:NULL];
+}
+
+- (id)dynamicLibrary:(StelaGPULibrary *)library error:(NSError **)error
+{
+	if (!(_capabilities->flags & StelaFlags_DYNAMIC_LIBRARIES)) {
+		if (error) {
+			StelaFailure failure = {.reason = "this device loads no dynamic libraries"};
+			*error = stela_error(MTLDynamicLibraryDomain, MTLDynamicLibraryErrorUnsupported, &failure);
+		}
+		return nil;
+	}
+	if ([library type] != MTLLibraryTypeDynamic) {
+		if (error) {
+			StelaFailure failure = {.reason = "the library is not a dynamic library"};
+			*error = stela_error(MTLDynamicLibraryDomain, MTLDynamicLibraryErrorInvalidFile, &failure);
+		}
+		return nil;
+	}
+	return library;
+}
+
+- (id)newDynamicLibrary:(StelaGPULibrary *)library error:(NSError **)error
+{
+	return [self dynamicLibrary:library error:error];
+}
+
+- (id)newDynamicLibraryWithURL:(NSURL *)url error:(NSError **)error
+{
+	NSData *data = [NSData dataWithContentsOfURL:url options:0 error:error];
+	StelaGPULibrary *library = data ? [self libraryWithBytes:data.bytes length:data.length error:error] : nil;
+	return library ? [self dynamicLibrary:library error:error] : nil;
 }
 
 /* Only MTLCompilerService compiles source, which drives AGX's own back end. */

@@ -600,6 +600,9 @@ pub trait Compiler {
     /// Forgets a library; its functions can no longer compile.
     fn remove_library(&mut self, library: u64) -> Result<()>;
 
+    /// The bytes [`add_library`](Self::add_library) kept.
+    fn library_data(&self, library: u64) -> Result<&[u8]>;
+
     /// Reflects `entry` of `library` without compiling it.
     fn reflect(
         &mut self,

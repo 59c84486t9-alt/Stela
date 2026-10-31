@@ -273,6 +273,13 @@ impl Compiler for AirCompiler {
         Ok(id)
     }
 
+    fn library_data(&self, library: u64) -> Result<&[u8]> {
+        self.libraries
+            .get(&library)
+            .map(Vec::as_slice)
+            .ok_or(Error::Invalid("unknown library"))
+    }
+
     fn remove_library(&mut self, library: u64) -> Result<()> {
         self.libraries
             .remove(&library)

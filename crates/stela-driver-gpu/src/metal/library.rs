@@ -203,6 +203,9 @@ pub struct Library<'a> {
     pub header: Header,
     functions: Vec<Function<'a>>,
     pub header_extensions: Option<Tags<'a>>,
+    /// A dynamic library's install name, in the section its `HDYN` tag
+    /// locates.
+    pub install_name: Option<&'a str>,
 }
 
 impl<'a> Library<'a> {
@@ -287,12 +290,44 @@ impl<'a> Library<'a> {
             header,
             functions,
             header_extensions,
+            install_name: install_name(data, header_extensions)?,
         })
     }
 
     pub fn functions(&self) -> &[Function<'a>] {
         &self.functions
     }
+}
+
+/// One NUL-terminated name.
+fn name(value: &[u8], offset: usize) -> Result<&str> {
+    let name = value
+        .strip_suffix(&[0])
+        .filter(|name| !name.is_empty() && !name.contains(&0))
+        .ok_or_else(|| error(offset, ErrorKind::Name))?;
+    str::from_utf8(name).map_err(|_| error(offset, ErrorKind::Name))
+}
+
+/// The `NAME` of the tagged section an `HDYN` tag locates by offset and size.
+fn install_name<'a>(data: &'a [u8], extensions: Option<Tags<'a>>) -> Result<Option<&'a str>> {
+    for tag in extensions.into_iter().flatten() {
+        let tag = tag?;
+        if tag.name != *b"HDYN" {
+            continue;
+        }
+        if tag.value.len() != 16 {
+            return Err(error(tag.offset, ErrorKind::TagSize));
+        }
+        let offset = host_size(u64_at(tag.value, 0)?, tag.offset)?;
+        let size = host_size(u64_at(tag.value, 8)?, tag.offset)?;
+        for tag in Tags::checked(bytes(data, offset, size)?, offset)? {
+            let tag = tag?;
+            if tag.name == *b"NAME" {
+                return name(tag.value, tag.offset).map(Some);
+            }
+        }
+    }
+    Ok(None)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -344,12 +379,7 @@ impl<'a> Function<'a> {
         let required = |value: Option<&'a [u8]>, tag| {
             value.ok_or_else(|| error(offset, ErrorKind::MissingTag(tag)))
         };
-        let name = required(name, *b"NAME")?;
-        let name = name
-            .strip_suffix(&[0])
-            .filter(|name| !name.is_empty() && !name.contains(&0))
-            .ok_or_else(|| error(offset, ErrorKind::Name))?;
-        let name = str::from_utf8(name).map_err(|_| error(offset, ErrorKind::Name))?;
+        let name = self::name(required(name, *b"NAME")?, offset)?;
         let exact = |value: &'a [u8], size| {
             if value.len() == size {
                 Ok(value)
@@ -498,6 +528,20 @@ pub(crate) mod tests {
 
     /// A library of `kind` whose module's wrapper names `cpu_type`.
     pub(crate) fn container(duplicate: bool, kind: u8, cpu_type: u32) -> Vec<u8> {
+        container_named(duplicate, kind, cpu_type, None)
+    }
+
+    /// A dynamic library of the given install name tag value.
+    pub(crate) fn dynamic(install_name: &[u8]) -> Vec<u8> {
+        container_named(false, Header::DYNAMIC, u32::MAX, Some(install_name))
+    }
+
+    fn container_named(
+        duplicate: bool,
+        kind: u8,
+        cpu_type: u32,
+        install_name: Option<&[u8]>,
+    ) -> Vec<u8> {
         let mut module = vec![];
         for word in [LLVM_WRAPPER_MAGIC, 0, 20, 8, cpu_type] {
             module.extend_from_slice(&word.to_le_bytes());
@@ -532,6 +576,10 @@ pub(crate) mod tests {
         data.extend_from_slice(&entry);
         // Header extension is not part of the four principal section spans.
         tag(&mut data, b"UUID", &[0x42; 16]);
+        let dynamic_header = install_name.map(|_| {
+            tag(&mut data, b"HDYN", &[0; 16]);
+            data.len() - 16
+        });
         data.extend_from_slice(b"ENDT");
         let public = data.len();
         data.extend_from_slice(&8u32.to_le_bytes());
@@ -547,6 +595,14 @@ pub(crate) mod tests {
         data.extend_from_slice(&module);
         u64_field(&mut data, 72, code);
         u64_field(&mut data, 80, module.len());
+        if let (Some(field), Some(name)) = (dynamic_header, install_name) {
+            let section = data.len();
+            tag(&mut data, b"NAME", name);
+            data.extend_from_slice(b"ENDT");
+            let size = data.len() - section;
+            u64_field(&mut data, field, section);
+            u64_field(&mut data, field + 8, size);
+        }
         let file_size = data.len();
         u64_field(&mut data, 16, file_size);
         data
@@ -585,6 +641,40 @@ pub(crate) mod tests {
         assert_eq!(air.bitcode, b"BC\xc0\xde\0\0\0\0");
         let bitcode_at = function.module_offset + LLVM_WRAPPER_BYTES;
         assert_eq!(air.bitcode.as_ptr(), data[bitcode_at..].as_ptr());
+    }
+
+    #[test]
+    fn dynamic_libraries_name_themselves() {
+        let data = dynamic(b"@executable_path/stela.metallib\0");
+        let library = Library::parse(&data).unwrap();
+        assert_eq!(library.header.kind, Header::DYNAMIC);
+        assert_eq!(
+            library.install_name,
+            Some("@executable_path/stela.metallib")
+        );
+        assert_eq!(Library::parse(&fixture(false)).unwrap().install_name, None);
+        for name in [&b"unterminated"[..], b"\0", b"in\0side\0", b"\xff\0"] {
+            let data = dynamic(name);
+            assert_eq!(Library::parse(&data).unwrap_err().kind, ErrorKind::Name);
+        }
+    }
+
+    #[test]
+    fn a_dynamic_header_stays_in_the_file() {
+        let base = dynamic(b"name\0");
+        let library = Library::parse(&base).unwrap();
+        let tag = library
+            .header_extensions
+            .unwrap()
+            .find(|tag| tag.as_ref().unwrap().name == *b"HDYN")
+            .unwrap()
+            .unwrap();
+        for field in [6, 14] {
+            let mut data = base.clone();
+            data[tag.offset + field..tag.offset + field + 8]
+                .copy_from_slice(&u64::MAX.to_le_bytes());
+            assert!(Library::parse(&data).is_err(), "field {field}");
+        }
     }
 
     #[test]

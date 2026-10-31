@@ -186,7 +186,13 @@ void stela_depth_stencil_record(id descriptor, StelaDepthStencilRecord *record);
 @interface StelaGPUEvent : StelaGPUObject <MTLSharedEvent>
 @end
 
-@interface StelaGPULibrary : StelaGPUObject <MTLLibrary>
+@interface StelaGPULibrary : StelaGPUObject <MTLLibrary, MTLDynamicLibrary> {
+@public
+	BOOL _identified;
+	NSUInteger _type;
+	NSString *_installName;
+}
+- (NSUInteger)type;
 @end
 
 /* `MTLVertexAttribute` and `MTLAttribute`. */

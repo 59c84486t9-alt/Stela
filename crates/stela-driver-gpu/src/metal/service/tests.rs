@@ -3,11 +3,12 @@ use super::{
     identity::DeviceEpoch,
     wire::{
         self, BufferResponse, ColorAttachmentRecord, ConstantInfo, ConstantRecord, Empty, Fault,
-        FunctionReflectionRequest, FunctionReflectionResponse, Handle, Length,
-        LibraryFunctionNamesRequest, LinkedFunctionsRecord, NegotiateRequest, NegotiateResponse,
-        NewBufferRequest, NewFunctionRequest, NewImportedBufferRequest, NewLibraryRequest,
-        NewRenderPipelineRequest, Operation, PipelineFlags, Record, RenderTargetsRecord, Span,
-        Status, TessellationRecord, TextureDescriptorRecord, Value,
+        FunctionReflectionRequest, FunctionReflectionResponse, Handle, Length, LibraryDataRequest,
+        LibraryFunctionNamesRequest, LibraryIdentityRequest, LibraryIdentityResponse,
+        LinkedFunctionsRecord, NegotiateRequest, NegotiateResponse, NewBufferRequest,
+        NewFunctionRequest, NewImportedBufferRequest, NewLibraryRequest, NewRenderPipelineRequest,
+        Operation, PipelineFlags, Record, RenderTargetsRecord, Span, Status, TessellationRecord,
+        TextureDescriptorRecord, Value,
         commands::{CommandBufferCode, CommandHeader, CommitRequest},
     },
 };
@@ -446,6 +447,48 @@ fn calls_carry_exact_records_of_known_operations() {
         outcome(connection.get(), release, &[0; 8], &mut []),
         Status::StaleHandle
     );
+}
+
+#[test]
+fn dynamic_libraries_name_themselves_and_read_back() {
+    let mut service = service();
+    let connection = connect(&mut service);
+    let memory = &mut Memory::default();
+    let bytes = crate::metal::library::tests::dynamic(b"lib/stela.metallib\0");
+    let data = memory.put(&bytes);
+    let library = call::<_, Handle>(
+        &mut service,
+        connection,
+        Operation::NewLibrary,
+        &NewLibraryRequest { data },
+        memory,
+    )
+    .unwrap()
+    .handle;
+
+    let out = memory.put(&[0xee; 20]);
+    let identity: LibraryIdentityResponse = call(
+        &mut service,
+        connection,
+        Operation::LibraryIdentity,
+        &LibraryIdentityRequest { library, out },
+        memory,
+    )
+    .unwrap();
+    assert_eq!((identity.library_type, identity.length), (1, 18));
+    assert_eq!(memory.read(out).unwrap(), b"lib/stela.metallib\xee\xee");
+
+    let out = memory.put(&vec![0; bytes.len()]);
+    let length: Length = call(
+        &mut service,
+        connection,
+        Operation::LibraryData,
+        &LibraryDataRequest { library, out },
+        memory,
+    )
+    .unwrap();
+    assert_eq!(length.length, bytes.len() as u64);
+    assert_eq!(memory.read(out).unwrap(), bytes);
 }
 
 #[test]

@@ -103,10 +103,16 @@ __attribute__((objc_root_class)) @interface NSObject
 + (instancetype)errorWithDomain:(NSString *)domain code:(NSInteger)code userInfo:(NSDictionary *)information;
 @end
 
+enum {
+	NSDataWritingAtomic = 1,
+};
+
 @interface NSData : NSObject
 + (instancetype)dataWithBytes:(const void *)bytes length:(NSUInteger)length;
++ (instancetype)dataWithBytesNoCopy:(void *)bytes length:(NSUInteger)length freeWhenDone:(BOOL)free;
 + (instancetype)dataWithContentsOfURL:(NSURL *)url options:(NSUInteger)options error:(NSError **)error;
 + (instancetype)dataWithContentsOfFile:(NSString *)path options:(NSUInteger)options error:(NSError **)error;
+- (BOOL)writeToURL:(NSURL *)url options:(NSUInteger)options error:(NSError **)error;
 @property(readonly) const void *bytes;
 @property(readonly) NSUInteger length;
 @end

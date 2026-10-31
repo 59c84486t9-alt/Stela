@@ -164,6 +164,24 @@ records! {
         pub out: Span,
     }
 
+    /// `LibraryIdentity`: the span receiving the library's install name.
+    pub struct LibraryIdentityRequest {
+        pub library: u64,
+        pub out: Span,
+    }
+
+    /// `MTLLibraryType` and the length of the install name, zero for none.
+    pub struct LibraryIdentityResponse {
+        pub library_type: u64,
+        pub length: u64,
+    }
+
+    /// `LibraryData`: the span receiving the library's bytes.
+    pub struct LibraryDataRequest {
+        pub library: u64,
+        pub out: Span,
+    }
+
     /// `NewFunction`: the function's name and its `ConstantRecord`s.
     pub struct NewFunctionRequest {
         pub library: u64,
@@ -937,6 +955,10 @@ operations! {
     NewLibrary = 0x0101 => NewLibraryRequest, Handle;
     /// `functionNames`.
     LibraryFunctionNames = 0x0102 => LibraryFunctionNamesRequest, Length;
+    /// `type` and `installName`.
+    LibraryIdentity = 0x0107 => LibraryIdentityRequest, LibraryIdentityResponse;
+    /// The bytes `serializeToURL:` writes.
+    LibraryData = 0x0108 => LibraryDataRequest, Length;
     /// `newFunctionWithName:constantValues:`.
     NewFunction = 0x0103 => NewFunctionRequest, Handle;
     /// What `MTLFunction` reports of the function.

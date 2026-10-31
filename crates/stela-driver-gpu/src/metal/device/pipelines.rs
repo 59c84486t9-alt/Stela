@@ -13,7 +13,7 @@ use crate::metal::{
     abi::{DataType, FunctionType, PrimitiveTopologyClass},
     command_buffer::{ComputePipelineState, IndirectCompute, RenderPipelineState},
     error::{Error, Result, ensure, require},
-    library::Library,
+    library::{Header, Library},
     pipeline::{
         self, ComputePipelineDescriptor, MeshRenderPipelineDescriptor, RenderPipelineDescriptor,
         RenderTargets, StageThreads, TessellatedVertex, TessellationDescriptor,
@@ -59,6 +59,8 @@ impl Users {
 struct LibraryObject {
     library: u64,
     names: Vec<String>,
+    dynamic: bool,
+    install_name: Option<String>,
     users: Users,
 }
 
@@ -319,16 +321,20 @@ pub struct MeshPipelineRequest {
 impl<B: Backend, C: Compiler> Device<B, C> {
     /// `newLibraryWithData:`: keeps a Metal library for its functions.
     pub fn new_library(&mut self, data: Vec<u8>) -> Result<LibraryId> {
-        let names = Library::parse(&data)
-            .map_err(|_| Error::Invalid("Metal library"))?
+        let parsed = Library::parse(&data).map_err(|_| Error::Invalid("Metal library"))?;
+        let names = parsed
             .functions()
             .iter()
             .map(|function| String::from(function.name))
             .collect();
+        let dynamic = parsed.header.kind == Header::DYNAMIC;
+        let install_name = parsed.install_name.map(String::from);
         let library = self.compiler.add_library(data)?;
         let index = self.pipelines.libraries.insert(LibraryObject {
             library,
             names,
+            dynamic,
+            install_name,
             users: Users::CREATED,
         });
         Ok(LibraryId(index))
@@ -337,6 +343,17 @@ impl<B: Backend, C: Compiler> Device<B, C> {
     /// `functionNames`.
     pub fn library_function_names(&self, id: LibraryId) -> Result<&[String]> {
         Ok(&self.pipelines.libraries.get(id.0)?.names)
+    }
+
+    /// `type` and `installName`.
+    pub fn library_identity(&self, id: LibraryId) -> Result<(bool, Option<&str>)> {
+        let library = self.pipelines.libraries.get(id.0)?;
+        Ok((library.dynamic, library.install_name.as_deref()))
+    }
+
+    /// The library's bytes, which `serializeToURL:` writes.
+    pub fn library_data(&self, id: LibraryId) -> Result<&[u8]> {
+        self.compiler.library_data(self.pipelines.library(id)?)
     }
 
     /// Ends the creator's use of a library, which goes with the last
