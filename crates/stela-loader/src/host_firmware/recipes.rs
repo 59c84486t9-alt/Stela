@@ -11,6 +11,9 @@ pub const REALTEK_RELEASE: &str = "20250917";
 pub const REALTEK_REVISION: &str = "add225168d0d1ba4c174d5eb15272b53de01ad5a";
 pub const INTEL_RSA_REVISION: &str = "711d3297bac870af42088a467459a0634c1970ca";
 pub const WIFI_FIRMWARE_REVISION: &str = "59f9fc2ef8d1e312d2a613d4e1ffad2ff31a0a01";
+pub const GSP_REVISION: &str = "1987bb2044a6c2d68c39d01c360bdbe17f1eb60c";
+/// The GSP-RM release nouveau's newest interface takes.
+const GSP_RELEASE: &str = "570.144";
 /// wireless-regdb, the source of the regulatory database every Wi-Fi
 /// adapter's scans and transmissions answer to.
 pub const WIRELESS_REGDB: &str =
@@ -72,6 +75,7 @@ enum Consumer {
     Realtek { mask: u16, value: u16 },
     IntelRsa,
     Wifi,
+    Nouveau,
 }
 
 const fn realtek(
@@ -366,6 +370,189 @@ pub const REGULATORY: &[Recipe] = &[Recipe {
     consumer: Consumer::Wifi,
 }];
 
+const GSP_LICENSE: Artifact = Artifact {
+    source: LINUX_FIRMWARE,
+    revision: GSP_REVISION,
+    member: "LICENSES/LICENCE.nvidia",
+    length: 6212,
+    sha256: "bc5225a57f49c5249dcf238e4ae6437811677a2a8a7f579c3d839e058653ee44",
+};
+
+const fn gsp(member: &'static str, length: usize, sha256: &'static str) -> Recipe {
+    Recipe {
+        image: Artifact {
+            source: LINUX_FIRMWARE,
+            revision: GSP_REVISION,
+            member,
+            length,
+            sha256,
+        },
+        license: &GSP_LICENSE,
+        consumer: Consumer::Nouveau,
+    }
+}
+
+/// Every GSP-RM file linux-firmware holds for [`GSP_RELEASE`].
+pub const GSP: &[Recipe] = &[
+    gsp(
+        "nvidia/ad102/gsp/booter_load-570.144.bin",
+        57720,
+        "8b293e19b637c5e22c87a2428d1c71bb13e0904e8a88ac6b3c6c1f2679c6e37a",
+    ),
+    gsp(
+        "nvidia/ad102/gsp/booter_unload-570.144.bin",
+        41592,
+        "975b85a14ded8e430d30f000c3c1afdd55c15dee04f35ff9dfd876acd7e67186",
+    ),
+    gsp(
+        "nvidia/ad102/gsp/bootloader-570.144.bin",
+        36972,
+        "65ab2e6b6e0fca95365c4deac79a34582abcfeb15b6ae234138f22e7183118a8",
+    ),
+    gsp(
+        "nvidia/ad102/gsp/scrubber-570.144.bin",
+        8312,
+        "c397358e5c4258dab070966589c7b172eb00771fd15d0bb74b8e22f327c1909b",
+    ),
+    gsp(
+        "nvidia/ga100/gsp/booter_load-570.144.bin",
+        60664,
+        "46bafe32b2d1f59713fc8369b5e59e7267d7da4413ad6486aef69d50daa764cd",
+    ),
+    gsp(
+        "nvidia/ga100/gsp/booter_unload-570.144.bin",
+        40440,
+        "33bea24690c3880a82b47b1a67cbd3cb48707d1c9c26a5db40df6e9682de4da6",
+    ),
+    gsp(
+        "nvidia/ga100/gsp/bootloader-570.144.bin",
+        4196,
+        "e7670009c98791b8030953ab1d22ecdbf3e073744d928fa15f6267de4eceaad3",
+    ),
+    gsp(
+        "nvidia/ga102/gsp/booter_load-570.144.bin",
+        61304,
+        "4497e3eff7e95c774b8a569d17b27c08c9650158d10b229d2be81cdcad9a085b",
+    ),
+    gsp(
+        "nvidia/ga102/gsp/booter_unload-570.144.bin",
+        41080,
+        "8e63db5b78d7d3e349f20a2d11099c3d7109081393cb09ffc0a28133324ae009",
+    ),
+    gsp(
+        "nvidia/ga102/gsp/bootloader-570.144.bin",
+        24684,
+        "82428f532240727e95bb3083fbaaba9b2cc7b937314323f2d546ce7245f27fad",
+    ),
+    gsp(
+        "nvidia/ga102/gsp/gsp-570.144.bin",
+        63571696,
+        "a8c3ebeed280323aedb51c061f321e73379cce7a9ae643a33dd03915df027f7f",
+    ),
+    gsp(
+        "nvidia/gb100/gsp/bootloader-570.144.bin",
+        200812,
+        "daebc2235c9756f2418c2116815a4bb94fc330506f5af60d883e4a740d397062",
+    ),
+    gsp(
+        "nvidia/gb100/gsp/fmc-570.144.bin",
+        198028,
+        "bc7497c2d8116cceec2fe5638081d60b8f9c0e3dceb0b57dc93950c84909ce21",
+    ),
+    gsp(
+        "nvidia/gb202/gsp/bootloader-570.144.bin",
+        200812,
+        "d40b48e431d1707dc77af3605db358ed7a32ebfc2830eb74de2eddb4d3025071",
+    ),
+    gsp(
+        "nvidia/gb202/gsp/fmc-570.144.bin",
+        199820,
+        "cb59a35c1d4bd1274d7267fd10243c29f843ff41c851b9cbd59f5af2ddd7fece",
+    ),
+    gsp(
+        "nvidia/gh100/gsp/bootloader-570.144.bin",
+        168044,
+        "2176e42f05729ac4dd93ed6cd1b4c6c5650b6aa79c115dfcd9f26a71c1d8d82e",
+    ),
+    gsp(
+        "nvidia/gh100/gsp/fmc-570.144.bin",
+        166600,
+        "f3ce25f3897c860e4cdde183ebf09b254d94a5d8191d666c12afb33cc7121107",
+    ),
+    gsp(
+        "nvidia/tu102/gsp/booter_load-570.144.bin",
+        59272,
+        "7bb181f544a942299bbf4642da6d9bb58bfed8459725094e2ace56647cd3ec8c",
+    ),
+    gsp(
+        "nvidia/tu102/gsp/booter_unload-570.144.bin",
+        39304,
+        "5c7f1aa37d045cc20bb81584a830e8dfa4483f1cd63943de83a58c4be19a1782",
+    ),
+    gsp(
+        "nvidia/tu102/gsp/bootloader-570.144.bin",
+        4196,
+        "12e987b636c2f00fa40f42fd95097515c0817b158119c584049a37faf38f8f96",
+    ),
+    gsp(
+        "nvidia/tu102/gsp/gen_bootloader-570.144.bin",
+        816,
+        "b37776a511b4a00901e4e3ac568db917086d3bf439f85bc9b3e4adc7338a0aff",
+    ),
+    gsp(
+        "nvidia/tu102/gsp/gsp-570.144.bin",
+        28542040,
+        "3052aee2872182a14d8d7c069e3a14fe4642405894b24692c4aca4101dfb1809",
+    ),
+    gsp(
+        "nvidia/tu116/gsp/booter_load-570.144.bin",
+        59016,
+        "9bd01804b4b91d92904e7735b025e07a3c935bc6fb92e3833e85c297546025b9",
+    ),
+    gsp(
+        "nvidia/tu116/gsp/booter_unload-570.144.bin",
+        39048,
+        "bf4a2b778722dde57850839bb9f7651ae29592ce85d6df4160d2d228ff430156",
+    ),
+];
+
+/// The chip whose `gsp` directory linux-firmware's `WHENCE` links `chip`'s to.
+fn gsp_directory(chip: &str) -> Option<&'static str> {
+    Some(match chip {
+        "tu102" | "tu104" | "tu106" => "tu102",
+        "tu116" | "tu117" => "tu116",
+        "ga100" => "ga100",
+        "ga102" | "ga103" | "ga104" | "ga106" | "ga107" => "ga102",
+        "ad102" | "ad103" | "ad104" | "ad106" | "ad107" => "ad102",
+        "gh100" => "gh100",
+        "gb100" | "gb102" => "gb100",
+        "gb202" | "gb203" | "gb205" | "gb206" | "gb207" => "gb202",
+        _ => return None,
+    })
+}
+
+/// nouveau's request for a chip's GSP-RM file, through `WHENCE`'s links: the
+/// firmware itself runs on families of chips, and only the signed booters
+/// differ between them.
+fn select_gsp(request: &Request) -> Option<&'static Recipe> {
+    if request.target.hardware != "nvidia" || request.target.revision != "linux-firmware" {
+        return None;
+    }
+    let (chip, file) = request.name.strip_prefix("nvidia/")?.split_once("/gsp/")?;
+    let directory = gsp_directory(chip)?;
+    let (kind, release) = file.strip_suffix(".bin")?.split_once('-')?;
+    if release != GSP_RELEASE {
+        return None;
+    }
+    let owner = match (directory, kind) {
+        ("tu116" | "ga100", "gen_bootloader" | "gsp") | ("tu116", "bootloader") => "tu102",
+        ("ad102" | "gh100" | "gb100" | "gb202", "gsp") => "ga102",
+        _ => directory,
+    };
+    let member = format!("nvidia/{owner}/gsp/{file}");
+    GSP.iter().find(|recipe| recipe.image.member == member)
+}
+
 /// The drivers' request for the version-20 database
 /// (`stela_drivers::net::wifi::regulatory::database::REQUIREMENT`).
 fn select_regulatory(request: &Request) -> Option<&'static Recipe> {
@@ -487,6 +674,7 @@ impl Plan {
                 "wifi-regulatory" => select_regulatory(request),
                 "wifi-intel" => select_intel_wifi(request),
                 "wifi-mt792x" => select_mediatek_wifi(request),
+                "nouveau" => select_gsp(request),
                 _ => None,
             }.ok_or_else(|| fail("no pinned recipe for the exact observed firmware driver/hardware/revision/name"))?;
             if request.minimum_bytes > recipe.image.length {
@@ -497,7 +685,7 @@ impl Plan {
             total = total
                 .checked_add(recipe.image.length)
                 .filter(|n| *n <= MAX_TOTAL_BYTES)
-                .ok_or_else(|| fail("planned host firmware exceeds 64 MiB"))?;
+                .ok_or_else(|| fail("planned host firmware exceeds its budget"))?;
             selections.push(Selection {
                 request: request.clone(),
                 recipe,
@@ -619,6 +807,80 @@ mod tests {
             assert!(Plan::select(&inventory(name, hardware, revision, board)).is_err());
         }
         assert!(LICENSE.verify(b"changed license").is_err());
+    }
+
+    fn gsp_member(name: &str) -> Option<&'static str> {
+        let request = serde_json::json!({"schema":1,"complete":true,"requirements":[{
+            "name":name,"target":{"driver":"nouveau","hardware":"nvidia",
+            "revision":"linux-firmware","board":null},"minimum_bytes":1}]});
+        let inventory = Inventory::parse(&serde_json::to_vec(&request).unwrap()).unwrap();
+        Plan::select(&inventory)
+            .ok()
+            .map(|plan| plan.selections[0].recipe.image.member)
+    }
+
+    #[test]
+    fn a_chips_gsp_file_follows_linux_firmwares_links() {
+        for (name, member) in [
+            (
+                "nvidia/ga104/gsp/gsp-570.144.bin",
+                "nvidia/ga102/gsp/gsp-570.144.bin",
+            ),
+            (
+                "nvidia/ad103/gsp/gsp-570.144.bin",
+                "nvidia/ga102/gsp/gsp-570.144.bin",
+            ),
+            (
+                "nvidia/ad106/gsp/booter_load-570.144.bin",
+                "nvidia/ad102/gsp/booter_load-570.144.bin",
+            ),
+            (
+                "nvidia/tu117/gsp/gsp-570.144.bin",
+                "nvidia/tu102/gsp/gsp-570.144.bin",
+            ),
+            (
+                "nvidia/tu117/gsp/booter_unload-570.144.bin",
+                "nvidia/tu116/gsp/booter_unload-570.144.bin",
+            ),
+            (
+                "nvidia/gb207/gsp/fmc-570.144.bin",
+                "nvidia/gb202/gsp/fmc-570.144.bin",
+            ),
+        ] {
+            assert_eq!(gsp_member(name), Some(member), "{name}");
+        }
+        for name in [
+            "nvidia/ga104/gsp/gsp-535.113.01.bin",
+            "nvidia/gk104/gsp/gsp-570.144.bin",
+            "nvidia/ga102/gsp/fmc-570.144.bin",
+            "nvidia/ga102/acr/bl-570.144.bin",
+        ] {
+            assert_eq!(gsp_member(name), None, "{name}");
+        }
+    }
+
+    #[test]
+    fn every_chip_finds_each_file_nouveau_boots_it_with() {
+        let booters = [
+            "tu102", "tu104", "tu106", "tu116", "tu117", "ga100", "ga102",
+        ]
+        .into_iter()
+        .chain(["ga103", "ga104", "ga106", "ga107", "ad102", "ad103"])
+        .chain(["ad104", "ad106", "ad107"]);
+        for chip in booters {
+            for kind in ["booter_load", "booter_unload", "bootloader", "gsp"] {
+                let name = format!("nvidia/{chip}/gsp/{kind}-570.144.bin");
+                assert!(gsp_member(&name).is_some(), "{name}");
+            }
+        }
+        for chip in [
+            "gh100", "gb100", "gb102", "gb202", "gb203", "gb205", "gb206", "gb207",
+        ] {
+            for kind in ["fmc", "bootloader", "gsp"] {
+                let name = format!("nvidia/{chip}/gsp/{kind}-570.144.bin");
+                assert!(gsp_member(&name).is_some(), "{name}");
+            }
+        }
     }
 
     #[test]
