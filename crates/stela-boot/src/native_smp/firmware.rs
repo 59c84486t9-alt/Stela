@@ -244,6 +244,10 @@ pub(crate) unsafe fn observe() -> Result<Snapshot, Error> {
             snapshot.apic_base = msr::APIC_BASE.read();
         }
         if basic.edx & (1 << 16) != 0 {
+            // Before anything records PAT: every processor's stays the same.
+            msr::PAT.write(stela_boot_core::page_window::with_write_combining(
+                msr::PAT.read(),
+            ));
             snapshot.pat = msr::PAT.read();
             snapshot.pat_valid = true;
         }

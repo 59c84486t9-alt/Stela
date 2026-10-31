@@ -8,6 +8,7 @@ mod capture;
 mod ecam;
 mod shared;
 pub(crate) mod shootdown;
+mod window;
 use ecam::RootWindow;
 #[cfg(feature = "diagnostics")]
 pub(crate) mod diagnostic;
@@ -20,6 +21,7 @@ pub(crate) use platform::{QualifiedRam, RootPublication, ScopedSource};
 pub(crate) use shared::{
     IoapicRegisters, IoapicUnit, NativeExclusiveHpet, NativeHpetMapping, PROCESSORS, Source,
 };
+pub(crate) use window::Window;
 
 use stela_drivers::bus::mmio::owned::Error;
 const PAGE: u64 = 4096;

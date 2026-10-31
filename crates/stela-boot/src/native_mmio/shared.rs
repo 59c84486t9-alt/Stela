@@ -375,6 +375,7 @@ pub(crate) struct Source {
     identity: Arc<RootIdentity>,
     platform: Arc<Platform>,
     authority: Authority,
+    window: Option<super::Window>,
     /// Each claimed ECAM bus, by its window and bus.
     buses: core::cell::RefCell<Vec<Bus>>,
     ioapics: core::cell::RefCell<Vec<(crate::native_irq::madt::Unit, Arc<IoapicUnit>)>>,
@@ -492,10 +493,13 @@ impl Source {
         // SAFETY: the inventory holds every root's and the guest RAM's
         // aliases; the leaf table is owned and shared by every root.
         let authority = unsafe { Authority::activate(platform.clone(), space, aliases) }?;
+        // SAFETY: this boot's capture, checked above.
+        let window = unsafe { super::Window::new(wire, snapshot.pat, tsc_hz) };
         Ok(Self {
             identity,
             platform,
             authority,
+            window,
             buses: core::cell::RefCell::new(Vec::new()),
             ioapics: core::cell::RefCell::new(Vec::new()),
         })
@@ -503,6 +507,11 @@ impl Source {
 
     pub(crate) fn authority(&self) -> &Authority {
         &self.authority
+    }
+
+    /// The page window, on a processor whose PAT offers write-combining.
+    pub(crate) fn window(&self) -> Option<&super::Window> {
+        self.window.as_ref()
     }
 
     fn reserve(&self, span: PhysicalSpan, kind: ResourceKind) -> Result<Resource, Error> {
