@@ -919,7 +919,10 @@ pub const TABLE: &[Row] = &[
     ),
     // ID_AA64MMFR0_EL1
     fixed(ID_AA64MMFR0_EL1, 0, 0b0101, "48-bit physical addresses"),
-    fixed(ID_AA64MMFR0_EL1, 4, 0b0010, "16-bit ASIDs"),
+    // SPTM 26A434 programs TCR.AS clear (`__text+0xb70c`), refuses an ASID whose
+    // low byte is 0 (`__text+0x445f4`) and takes 16384 from the device tree's
+    // `pmap-max-asids`; XNU reserves those ASIDs only while this field is 0.
+    fixed(ID_AA64MMFR0_EL1, 4, 0, "8-bit ASIDs"),
     fixed(ID_AA64MMFR0_EL1, 20, 1, "16 KiB stage-1 granule"),
     row(
         ID_AA64MMFR0_EL1,

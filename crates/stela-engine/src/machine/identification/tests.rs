@@ -408,7 +408,7 @@ fn fixed_and_engine_fields() {
     // double lock.
     let chip = crate::machine::test_chip();
     assert_eq!(value(ID_AA64PFR0_EL1) & 0xffff, 0x0011);
-    assert_eq!(value(ID_AA64MMFR0_EL1) & 0xffff_ffff, 0x0f10_0025);
+    assert_eq!(value(ID_AA64MMFR0_EL1) & 0xffff_ffff, 0x0f10_0005);
     assert_eq!(
         value(ID_AA64MMFR1_EL1) >> 20 & 0xf,
         if has(chip, "FEAT_PAN3") { 3 } else { 2 }
