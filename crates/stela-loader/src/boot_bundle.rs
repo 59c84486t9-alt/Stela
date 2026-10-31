@@ -107,7 +107,8 @@ pub struct Inputs<'a> {
     pub txm: Input<'a>,
     pub device_tree: Input<'a>,
     pub static_trust_cache: Input<'a>,
-    /// Copied unchanged: SEP firmware stays an encrypted IM4P.
+    /// Copied unchanged: SEP firmware stays encrypted, an `IM4P` or, read
+    /// from an installed system, the `IMG4` `seputil` delivers.
     pub sep_firmware: Option<Input<'a>>,
     /// The identity's global (non-personalized) IM4M for the boot objects.
     pub boot_manifest: Option<Input<'a>>,
@@ -121,6 +122,12 @@ pub struct Inputs<'a> {
     /// The sealed volume the boot roots from, and its root-hash `IM4P` when
     /// one is available; `None` when it roots from no sealed volume.
     pub root_hash: Option<RootHash<'a>>,
+    /// The BaseSystem's root-hash `IM4P` when the root is another volume. The
+    /// 26A434 kernel's `bsd_init` pivots an arm64 volume-group root through
+    /// the Recovery volume's BaseSystem image unless `-s` or `-nobsdmgroot`
+    /// is given (0xc158334..0xc15836c), and APFS's
+    /// `handle_basesystem_rootmount` panics without this record.
+    pub pivot_root_hash: Option<Input<'a>>,
     /// Firmware images the board's own devices run, copied unchanged as
     /// bundle files named by their guest file names (such as
     /// `USB-C_HPM,47.bin`); device models read their identity from them.
@@ -141,10 +148,11 @@ impl Inputs<'_> {
     }
 }
 
-/// A sealed root volume and its root-hash `IM4P`.
+/// A sealed root volume, its root-hash `IM4P` and the snapshot it roots from.
 pub struct RootHash<'a> {
     pub volume: SealedVolume,
     pub im4p: Option<Input<'a>>,
+    pub snapshot: Option<String>,
 }
 
 pub struct Bundle {

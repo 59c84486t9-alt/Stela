@@ -39,9 +39,11 @@
 //!   DER dictionary `_decode_fv_blob_state` (0x2d5f8ec) reads: `kt` type,
 //!   `kid` and `id` (16-byte octet strings), `f` flags, `kv` version, `sr`
 //!   (up to eight reserved octets) and optional counters. Flags bit 2 means
-//!   the VEK is system-protected and bit 3 user-protected
-//!   (`_apfs_vek_get_aks_state` 0x482e554 reports an unencrypted volume as
-//!   system-protected only).
+//!   the VEK is user-protected and bit 3 system-protected
+//!   (`_apfs_vek_get_aks_state` 0x482e554, whose results
+//!   `setDictionaryForVolume` publishes as `VEKUserProtected` and
+//!   `VEKSystemProtected`). `handle_is_vol_locked` reads the second as a
+//!   volume that can be unlocked during mount, and calls any other locked.
 //!
 //! The inline key's flags bit 0 is `CP_RAW_KEY_WRAPPEDKEY`
 //! (`_cst_from_fvkey` 0x481bee4 passes it to `cpx_set_is_sep_wrapped_key`):
@@ -58,8 +60,10 @@
 //! key and retained unlock records do not outlive the sepOS start; each
 //! checks its key and reports that once. Loading class keys opens the VEK
 //! as an unwrap does, which checks the secret and KEK, and keeps the
-//! volume's class keys for [`file_key`] until the sepOS restarts or the
-//! VEK's state is dropped; the sealed-System bit is not interpreted, which
+//! volume's class keys for [`file_key`] until the sepOS restarts, the VEK's
+//! state is dropped or they are unloaded with 19 and the VEK third, as APFS
+//! does on unmount (`apfs_keybag_unload_class_keys` 0x481e660, call
+//! 0x481e808); the sealed-System bit is not interpreted, which
 //! it reports once. Dropping an unlock record's state releases nothing, as
 //! none is held. Other protection operations, the remaining `fv` commands
 //! and other types refuse. [`media`] serves the container media keys under
@@ -93,14 +97,18 @@ const COMMIT: u32 = 5;
 const REMOVE_VEK_STATE: u32 = 6;
 const RETAIN_UNLOCK_RECORD: u32 = 15;
 const LOAD_CLASS_KEYS: u32 = 18;
+const UNLOAD_CLASS_KEYS: u32 = 19;
 const COMMIT_KEK: u32 = 22;
 /// LOAD_CLASS_KEYS's u64: the volume group's System volume is sealed.
 const SEALED_SYSTEM: u64 = 1 << 2;
 /// The inline key's `cpx` flags: `CP_RAW_KEY_WRAPPEDKEY`.
 const SEP_WRAPPED: u32 = 1;
-/// Blob-state flags.
-pub(super) const SYSTEM_PROTECTED: u32 = 1 << 2;
-pub(super) const USER_PROTECTED: u32 = 1 << 3;
+/// Blob-state flags: `VEKUserProtected`, `VEKSystemProtected`.
+pub(super) const USER_PROTECTED: u32 = 1 << 2;
+pub(super) const SYSTEM_PROTECTED: u32 = 1 << 3;
+/// A wrapped VEK's flags: the seals it carries.
+const SYSTEM_SEAL: u32 = 1 << 2;
+const USER_SEAL: u32 = 1 << 3;
 
 const UUID_BYTES: usize = 16;
 const KEK_MAGIC: [u8; 4] = *b"SKK1";
@@ -266,7 +274,7 @@ impl VolumeKeys {
                         Vek::parse(third)?;
                         self.report(UNRECORDED_COMMIT, notes);
                     }
-                    REMOVE_VEK_STATE if vek_only => {
+                    REMOVE_VEK_STATE | UNLOAD_CLASS_KEYS if vek_only => {
                         let volume = Vek::parse(third)?.volume();
                         self.class_keys.retain(|keys| keys.volume() != volume);
                     }
@@ -361,7 +369,7 @@ impl VolumeKeys {
         system: Option<&[u8; KEY_BYTES]>,
         user: Option<([u8; UUID_BYTES], &[u8; KEY_BYTES], &[u8; KEY_BYTES])>,
     ) -> Vec<u8> {
-        let flags = system.map_or(0, |_| SYSTEM_PROTECTED) | user.map_or(0, |_| USER_PROTECTED);
+        let flags = system.map_or(0, |_| SYSTEM_SEAL) | user.map_or(0, |_| USER_SEAL);
         let mut blob = VEK_MAGIC.to_vec();
         blob.extend_from_slice(&flags.to_le_bytes());
         blob.extend_from_slice(&uuid);
@@ -393,7 +401,7 @@ impl VolumeKeys {
         let vek = Vek::parse(blob)?;
         let header = &blob[..VEK_HEADER];
         if wrapped_kek.is_empty() {
-            if !secret.is_empty() || vek.flags & SYSTEM_PROTECTED == 0 {
+            if !secret.is_empty() || vek.flags & SYSTEM_SEAL == 0 {
                 return Err(refuse!(
                     "SEP volume-key VEK is not system-protected for an unlock without a KEK"
                 ));
@@ -402,7 +410,7 @@ impl VolumeKeys {
             return open(&system_key, SYSTEM_VEK_DOMAIN, header, vek.system);
         }
         let kek = self.open_kek(wrapped_kek, secret)?;
-        if vek.flags & USER_PROTECTED == 0 || kek.uuid != vek.kek {
+        if vek.flags & USER_SEAL == 0 || kek.uuid != vek.kek {
             return Err(refuse!(
                 "SEP volume-key VEK is not protected by the supplied KEK"
             ));
@@ -443,10 +451,10 @@ impl<'a> Vek<'a> {
             present == seal.iter().any(|&b| b != 0)
                 && uuid.is_none_or(|uuid| present == (uuid != [0; UUID_BYTES]))
         };
-        if flags & !(SYSTEM_PROTECTED | USER_PROTECTED) != 0
+        if flags & !(SYSTEM_SEAL | USER_SEAL) != 0
             || flags == 0
-            || !sealed(flags & SYSTEM_PROTECTED != 0, system, None)
-            || !sealed(flags & USER_PROTECTED != 0, user, Some(kek))
+            || !sealed(flags & SYSTEM_SEAL != 0, system, None)
+            || !sealed(flags & USER_SEAL != 0, user, Some(kek))
         {
             return Err(refuse!(
                 "SEP volume-key wrapped VEK flags disagree with its seals"
@@ -467,8 +475,12 @@ impl<'a> Vek<'a> {
 
     /// Its blob state, the dictionary `_decode_fv_blob_state` reads.
     fn state(&self) -> Vec<u8> {
+        let protection = [(SYSTEM_SEAL, SYSTEM_PROTECTED), (USER_SEAL, USER_PROTECTED)]
+            .into_iter()
+            .filter(|(seal, _)| self.flags & seal != 0)
+            .fold(0, |flags, (_, protected)| flags | protected);
         dictionary(&[
-            (b"f", number(self.flags as u8)),
+            (b"f", number(protection as u8)),
             (b"id", tagged(4, &self.kek)),
             (b"kid", tagged(4, self.uuid)),
             (b"kt", number(WRAPPED_VEK as u8)),

@@ -768,3 +768,14 @@ fn identify_strings_lose_padding_and_terminators() {
     assert_eq!(ascii(b"QEMU\0junk"), "QEMU");
     assert_eq!(ascii(b"a\x01b"), "a?b");
 }
+
+#[test]
+fn only_a_write_zeroes_that_stores_zeros_counts_as_written() {
+    let zeroes = |unmap| Command::WriteZeroes {
+        lba: 0,
+        blocks: 8,
+        unmap,
+    };
+    assert_eq!(zeroes(false).accounted(512), (Direction::Write, 4096));
+    assert_eq!(zeroes(true).accounted(512), (Direction::Discard, 4096));
+}

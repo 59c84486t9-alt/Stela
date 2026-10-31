@@ -20,6 +20,8 @@ serde_json = { version = "1", default-features = false, features = ["alloc"] }
 # SHA-384 and SHA-512 for signatures and APFS; SHA-1/SHA-256 are stela-crypto's.
 sha2 = { version = "0.10", default-features = false }
 crypto-bigint = { version = "0.5", default-features = false }
+# LocalPolicy signatures.
+p384 = { version = "0.13", default-features = false, features = ["arithmetic", "ecdsa"] }
 hex = { version = "0.4", default-features = false, features = ["alloc"] }
 miniz_oxide = { version = "0.9", default-features = false, features = ["with-alloc"] }
 

@@ -218,14 +218,25 @@ fn extended_fields(blob: &[u8]) -> Result<Vec<(u8, &[u8])>> {
 
 impl Volume {
     pub(crate) fn open<R: ReadAt>(device: &mut Device<R>, paddr: u64) -> Result<Self> {
+        let block = Self::superblock(device, paddr)?;
+        let omap = Omap::open(device, u64_at(&block, 128)?)?;
+        Self::parse(&block, paddr, omap)
+    }
+
+    fn superblock<R: ReadAt>(device: &mut Device<R>, paddr: u64) -> Result<Vec<u8>> {
         let block = device.read_object(paddr)?;
-        let header = Header::parse(&block)?;
-        if header.object_type() != OBJECT_TYPE_FS || block.get(32..36) != Some(APFS_MAGIC) {
+        if Header::parse(&block)?.object_type() != OBJECT_TYPE_FS
+            || block.get(32..36) != Some(APFS_MAGIC)
+        {
             return Err(ApfsError::Malformed("not a volume superblock"));
         }
-        let fs_flags = u64_at(&block, 264)?;
-        let incompatible_features = u64_at(&block, 56)?;
-        let omap = Omap::open(device, u64_at(&block, 128)?)?;
+        Ok(block)
+    }
+
+    fn parse(block: &[u8], paddr: u64, omap: Omap) -> Result<Self> {
+        let header = Header::parse(block)?;
+        let fs_flags = u64_at(block, 264)?;
+        let incompatible_features = u64_at(block, 56)?;
         Ok(Self {
             paddr,
             xid: header.xid,
@@ -234,22 +245,22 @@ impl Volume {
                     .get(704..960)
                     .ok_or(ApfsError::Malformed("volume name"))?,
             )?,
-            role: u16_at(&block, 964)?,
-            uuid: uuid_at(&block, 240)?,
-            volume_group: uuid_at(&block, 1008)?,
+            role: u16_at(block, 964)?,
+            uuid: uuid_at(block, 240)?,
+            volume_group: uuid_at(block, 1008)?,
             incompatible_features,
             fs_flags,
             encrypted: fs_flags & APFS_FS_UNENCRYPTED == 0,
             sealed: incompatible_features & APFS_INCOMPAT_SEALED_VOLUME != 0,
-            root_to_xid: u64_at(&block, 968)?,
+            root_to_xid: u64_at(block, 968)?,
             omap,
-            root_tree_type: u32_at(&block, 116)?,
-            root_tree_oid: u64_at(&block, 136)?,
-            snapshot_tree_type: u32_at(&block, 124)?,
-            snapshot_tree_oid: u64_at(&block, 152)?,
-            fext_tree_type: u32_at(&block, 1040)?,
-            fext_tree_oid: u64_at(&block, 1032)?,
-            integrity_meta_oid: u64_at(&block, 1024)?,
+            root_tree_type: u32_at(block, 116)?,
+            root_tree_oid: u64_at(block, 136)?,
+            snapshot_tree_type: u32_at(block, 124)?,
+            snapshot_tree_oid: u64_at(block, 152)?,
+            fext_tree_type: u32_at(block, 1040)?,
+            fext_tree_oid: u64_at(block, 1032)?,
+            integrity_meta_oid: u64_at(block, 1024)?,
         })
     }
 
@@ -701,9 +712,12 @@ impl Volume {
         self.snapshot(device, &snapshot)?.seal(device)
     }
 
-    /// The volume as it was when `snapshot` was taken.
+    /// The volume as it was when `snapshot` was taken. The superblock it
+    /// preserves names the object map of that moment, whose block the volume
+    /// has since rewritten; the live map keeps every snapshot's mappings.
     pub fn snapshot<R: ReadAt>(&self, device: &mut Device<R>, snapshot: &Snapshot) -> Result<Self> {
-        let mut volume = Self::open(device, snapshot.superblock)?;
+        let block = Self::superblock(device, snapshot.superblock)?;
+        let mut volume = Self::parse(&block, snapshot.superblock, self.omap.clone())?;
         volume.xid = snapshot.xid;
         Ok(volume)
     }
@@ -787,6 +801,26 @@ mod tests {
             volume.lookup(&mut container.device, "empty", true),
             Err(ApfsError::Encrypted)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn a_snapshot_reads_through_the_live_object_map() -> Result<()> {
+        let mut container = Container::open(fixture(), 0)?;
+        let volume = container.volume_with_role(APFS_VOL_ROLE_PREBOOT)?;
+        // The volume has since rewritten the object map its superblock names.
+        let block = container.device.read_object(volume.paddr)?;
+        let omap = u64_at(&block, 128)? as usize * container.device.block_size as usize;
+        container.device.source.0[omap..omap + 4096].fill(0);
+        let snapshot = Snapshot {
+            name: "old".into(),
+            xid: volume.xid,
+            superblock: volume.paddr,
+        };
+        let device = &mut container.device;
+        let old = volume.snapshot(device, &snapshot)?;
+        let raw = old.lookup(device, "pattern.bin", true)?;
+        assert_eq!(old.read(device, &raw)?, pattern(300_000));
         Ok(())
     }
 

@@ -4197,7 +4197,7 @@
   },
   {
     "package": "stela-soc",
-    "test": "original_recovery_nonce_builders_select_the_recovered_commands_and_buffer_sizes",
+    "test": "original_nonce_builders_select_the_recovered_commands_and_buffer_sizes",
     "source": "crates/stela-soc/src/sep/boot_policy/nonces/tests.rs",
     "kind": "oracle",
     "inputs": [

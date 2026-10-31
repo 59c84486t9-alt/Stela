@@ -133,7 +133,8 @@ impl core::ops::DerefMut for Options {
 }
 
 /// Present the selected board through restored's original development-board
-/// predicate. MobileGestalt's `HWModelStr` (`HW.target` in restored's log) is
+/// predicate, and boot a system so installed as the same board, whose Cryptex1
+/// tickets carry the model. MobileGestalt's `HWModelStr` (`HW.target` in restored's log) is
 /// the first string of the root `compatible` list. Keep the original hardware
 /// model as its second string so platform matching still sees it, and keep the
 /// root `target-sub-type` consistent with the development identity.
@@ -145,7 +146,7 @@ impl core::ops::DerefMut for Options {
 /// final three characters. The product model already has its own root property,
 /// so omit its duplicate from `compatible` if the new development alias needs
 /// that space. Preserve the original board and platform compatibility strings.
-fn development_restore_hardware_model(tree: &mut DeviceTree) -> Result<String> {
+fn development_hardware_model(tree: &mut DeviceTree) -> Result<String> {
     let value = tree
         .property("/", "target-sub-type")
         .filter(|property| !property.placeholder)

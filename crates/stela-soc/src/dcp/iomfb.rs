@@ -789,7 +789,7 @@ fn bool_reply(ok: bool) -> Vec<u8> {
 /// Answer a stateless query for the fixed `mode`, or refuse it by name. The
 /// output must be exactly the length the AP's header allocated (the
 /// interface's size); a mismatch refuses rather than truncates.
-pub fn answer(code: &[u8; 4], _input: &[u8], output: u32, mode: Mode) -> Result<Vec<u8>> {
+pub fn answer(code: &[u8; 4], input: &[u8], output: u32, mode: Mode) -> Result<Vec<u8>> {
     let out = output as usize;
     let sized = |bytes: Vec<u8>| -> Result<Vec<u8>> {
         if bytes.len() == out {
@@ -855,6 +855,17 @@ pub fn answer(code: &[u8; 4], _input: &[u8], output: u32, mode: Mode) -> Result<
         // once AppleClamshellState exists): false, the pipe's byte +0x2ba8,
         // which nothing sets (restore 0x2c01d0, normal 0x2c2fb4).
         b"A489" => sized(bool_reply(false)),
+        // remove_gain_maps (0x3d7a6a8): this monitor creates no gain map, so
+        // the client's record state in the first eight bytes returns as it
+        // came, valid byte +5 included, with success in the word at +8, which
+        // the AP returns.
+        b"A480" => {
+            let mut bytes = input.to_vec();
+            if let Some(result) = bytes.get_mut(8..12) {
+                result.copy_from_slice(&IO_RETURN_SUCCESS.to_le_bytes());
+            }
+            sized(bytes)
+        }
         _ => Err(refuse!(
             "DCP method is not modeled for the one fixed monitor"
         )),

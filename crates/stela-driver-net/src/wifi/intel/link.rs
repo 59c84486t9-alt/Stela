@@ -6,10 +6,10 @@
 //! step at a time: ROM boot to ALIVE, PNVM, unified NVM, the cold radio
 //! prefix, LARI, setup, MCC, scan configuration, board power policy, the
 //! country, the MLD MAC context (`iwl_mvm_up` and `iwl_mvm_mac_add_interface`),
-//! then a passive scan for the configured network and, for the strongest
-//! beacon carrying its SSID, the PHY context, transmit power, link, AP
-//! station, its management queue and Bluetooth coexistence
-//! (`iwl_mvm_mld_assign_vif_chanctx`, `iwl_mvm_mld_add_sta`).
+//! then scans and, for the network the connection keeper chooses, the PHY
+//! context, transmit power, link, AP station, its management queue and
+//! Bluetooth coexistence (`iwl_mvm_mld_assign_vif_chanctx`,
+//! `iwl_mvm_mld_add_sta`), and the same chain back down when it leaves.
 //!
 //! Every step's firmware command waits for its own acknowledgement; a
 //! failed step keeps every owner the device may still reach.
@@ -29,7 +29,7 @@ use super::{
     },
     platform::Observations,
     policy::{Beacons, Regulatory},
-    radio::bios::service::BiosIo,
+    radio::{bios::service::BiosIo, control::PowerMode},
 };
 use crate::{
     Clock, Deadline, Link, LinkError, Mac,
@@ -37,20 +37,25 @@ use crate::{
     firmware::Provider,
     wifi::{
         Band,
+        connection::keeper::Keeper,
         network::Network,
         regulatory::database::{self, Database},
-        scan::{self as protocol, result::Bss},
+        scan::{self, result::Bss},
+        security,
+        station::{self as association, Station as Association},
     },
 };
 use alloc::{boxed::Box, format, sync::Arc, vec::Vec};
-use core::any::Any;
+use core::{any::Any, fmt};
+use stela_driver_base::entropy::Entropy;
+
+mod station;
+pub use station::{ManagementKey, channel_flags};
 
 /// iwlwifi's `IWL_MVM_UCODE_ALIVE_TIMEOUT`.
 const ALIVE_TIMEOUT_US: u64 = 2_000_000;
 /// iwlwifi's `MVM_UCODE_PNVM_TIMEOUT`.
 const PNVM_TIMEOUT_US: u64 = 250_000;
-/// The scan budget, the most a single UMAC request may run.
-const SCAN_BUDGET_US: u64 = 30_000_000;
 
 type Country<Q, B> = Ax200Country<'static, Q, B, Regulatory>;
 
@@ -77,6 +82,18 @@ pub enum Error {
     Timeout(&'static str),
     /// A step refused to start from the state the previous one left.
     Refused(&'static str),
+    Station(association::Error),
+    Data(association::data::Error),
+    Key(security::Error),
+    /// The firmware has yet to answer what this needs.
+    Pending,
+    Unsupported(&'static str),
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "iwlwifi: {self:?}")
+    }
 }
 
 /// Where bring-up is.
@@ -101,7 +118,11 @@ pub struct Inputs<B> {
     pub bios: B,
     pub database: Database,
     pub network: Network,
+    pub entropy: Arc<dyn Entropy>,
 }
+
+/// One Intel function kept connected to its network.
+pub type Station<Q, B> = Keeper<Wifi<Q, B>>;
 
 enum Stage<Q: BootIo, B: BiosIo> {
     Rom(Box<RomBoot<'static, Q>>),
@@ -123,6 +144,12 @@ enum Stage<Q: BootIo, B: BiosIo> {
     Queue(Box<Ax200ManagementQueue<'static, Q, B, Regulatory>>),
     Coexistence(Box<Ax200Coexistence<'static, Q, B, Regulatory>>),
     Ready(Box<Ax200ManagementQueue<'static, Q, B, Regulatory>>),
+    /// The association's way down: the station and its queues,
+    Removing(Box<Ax200ManagementQueue<'static, Q, B, Regulatory>>),
+    /// the link,
+    Unlinking(Box<boot::Ax200Binding<'static, Q, B, Regulatory>>),
+    /// and the PHY.
+    Unbinding(Box<Ax200Phy<'static, Q, B, Regulatory>>),
     /// Owners a failed step left, kept while the device may reach them.
     Failed {
         _owners: Box<dyn Any>,
@@ -148,10 +175,12 @@ pub struct Wifi<Q: BootIo, B: BiosIo> {
     database: Option<Database>,
     network: Network,
     deadline: Option<Deadline>,
-    scanning: bool,
     beacons: Option<Arc<Beacons>>,
-    candidate: Option<Selected>,
     selected: Option<Selected>,
+    client: station::Client,
+    /// The transmit and receive antennas.
+    chains: (u32, u32),
+    save_power: bool,
     address: Mac,
     error: Option<Error>,
     /// Whether the link reported the bring-up failure.
@@ -185,6 +214,11 @@ pub fn legacy_rates(elements: &[u8], band: Band) -> u16 {
     }
 }
 
+/// The station before the NVM names its address.
+fn unassigned() -> Association {
+    Association::new(Mac([2, 0, 0, 0, 0, 1])).expect("a locally administered unicast address")
+}
+
 impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
     /// Take over a ROM boot `RomBoot::start` or `start_ax210` published.
     ///
@@ -193,9 +227,9 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
     /// gives fresh exclusive pages of its requester's domain, nothing else
     /// submits to or resets the function, and `bios` reads this function's
     /// own ACPI companion and the boot's captured variables.
-    pub unsafe fn new(boot: RomBoot<'static, Q>, inputs: Inputs<B>) -> Self {
+    pub unsafe fn new(boot: RomBoot<'static, Q>, inputs: Inputs<B>) -> Station<Q, B> {
         let deadline = inputs.clock.deadline(ALIVE_TIMEOUT_US);
-        Self {
+        let wifi = Self {
             stage: Stage::Rom(Box::new(boot)),
             firmware: inputs.firmware,
             observations: inputs.observations,
@@ -203,16 +237,18 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             clock: inputs.clock,
             bios: Some(inputs.bios),
             database: Some(inputs.database),
-            network: inputs.network,
+            network: inputs.network.clone(),
             deadline: Some(deadline),
-            scanning: false,
             beacons: None,
-            candidate: None,
             selected: None,
+            client: station::Client::new(unassigned()),
+            chains: (0, 0),
+            save_power: false,
             address: Mac::default(),
             error: None,
             reported: false,
-        }
+        };
+        Keeper::keep(wifi, inputs.network, inputs.entropy, inputs.clock)
     }
 
     /// The station address the NVM holds, once read.
@@ -248,7 +284,10 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             | Stage::Link(_)
             | Stage::Peer(_)
             | Stage::Queue(_)
-            | Stage::Coexistence(_) => Phase::Joining,
+            | Stage::Coexistence(_)
+            | Stage::Removing(_)
+            | Stage::Unlinking(_)
+            | Stage::Unbinding(_) => Phase::Joining,
             Stage::Ready(_) => Phase::AuthenticationRequired,
             Stage::Failed { .. } | Stage::Moving => Phase::Failed,
         }
@@ -289,7 +328,9 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             Stage::Power(owner) => owner.rom(),
             Stage::Link(owner) => owner.rom(),
             Stage::Peer(owner) => owner.rom(),
-            Stage::Queue(owner) | Stage::Ready(owner) => owner.rom(),
+            Stage::Queue(owner) | Stage::Ready(owner) | Stage::Removing(owner) => owner.rom(),
+            Stage::Unlinking(owner) => owner.rom(),
+            Stage::Unbinding(owner) => owner.rom(),
             Stage::Coexistence(owner) => owner.rom(),
             Stage::Failed { .. } | Stage::Moving => None,
         }
@@ -339,6 +380,10 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                 match unsafe { nvm.advance(pages) } {
                     Ok(InitializationProgress::Observed) => {
                         self.address = Mac(nvm.receipt().map_or([0; 6], |r| r.address.bytes));
+                        match Association::new(self.address) {
+                            Ok(peer) => self.client = station::Client::new(peer),
+                            Err(error) => return Err((Error::Station(error), nvm)),
+                        }
                         match nvm.begin_radio() {
                             Ok(radio) => Ok(Stage::Radio(Box::new(radio))),
                             Err(nvm) => Err((Error::Refused("cold radio"), nvm)),
@@ -368,8 +413,10 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             }
             Stage::Lari(mut lari) => {
                 advance!(lari, Lari, Lari, LariPhase::RxQueueConfigurationRequired, {
+                    let options = Ax200SetupOptions::new(self.clock);
+                    self.save_power = options.power_mode == PowerMode::SavePower;
                     // SAFETY: the handoff clock is calibrated and advances.
-                    match unsafe { lari.begin_ax200_setup(Ax200SetupOptions::new(self.clock)) } {
+                    match unsafe { lari.begin_ax200_setup(options) } {
                         Ok(setup) => Ok(Stage::Setup(Box::new(setup))),
                         Err(lari) => Err((Error::Refused("setup"), lari as Box<dyn Any>)),
                     }
@@ -430,7 +477,11 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                     // SAFETY: `Regulatory` is both the country's selection and
                     // the lease, and no other path publishes to this function.
                     match unsafe { mac.begin_scan() } {
-                        Ok(scan) => Ok(Stage::Scan(Box::new(scan))),
+                        Ok(mut scan) => {
+                            self.client.channels = scan.regulated_channels();
+                            self.chains = scan.chains();
+                            Ok(Stage::Scan(Box::new(scan)))
+                        }
                         Err(mac) => Err((Error::Refused("scan"), mac as Box<dyn Any>)),
                     }
                 })
@@ -553,6 +604,58 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                 }
                 Ok(Stage::Ready(queue))
             }
+            Stage::Removing(mut queue) => {
+                if let Err(error) = queue.replenish_completed_receive() {
+                    return Err((Error::Queue(error), queue));
+                }
+                advance!(
+                    queue,
+                    Removing,
+                    Queue,
+                    Ax200ManagementQueuePhase::Removed,
+                    {
+                        match (*queue).into_binding() {
+                            Ok(mut link) => match link.begin_remove() {
+                                Ok(()) => Ok(Stage::Unlinking(Box::new(link))),
+                                Err(error) => {
+                                    Err((Error::Binding(error), Box::new(link) as Box<dyn Any>))
+                                }
+                            },
+                            Err(queue) => Err((Error::Refused("link"), queue as Box<dyn Any>)),
+                        }
+                    }
+                )
+            }
+            Stage::Unlinking(mut link) => {
+                if let Err(error) = link.replenish_completed_receive() {
+                    return Err((Error::Binding(error), link));
+                }
+                advance!(link, Unlinking, Binding, Ax200BindingPhase::Unbound, {
+                    let power = match (*link).into_transmit_power() {
+                        Ok(power) => power,
+                        Err(link) => return Err((Error::Refused("power"), link)),
+                    };
+                    match power.into_phy_context() {
+                        Ok(mut phy) => match phy.begin_remove() {
+                            Ok(()) => Ok(Stage::Unbinding(Box::new(phy))),
+                            Err(error) => Err((Error::Phy(error), Box::new(phy) as Box<dyn Any>)),
+                        },
+                        Err(power) => Err((Error::Refused("PHY"), power as Box<dyn Any>)),
+                    }
+                })
+            }
+            Stage::Unbinding(mut phy) => {
+                advance!(phy, Unbinding, Phy, Ax200PhyPhase::Removed, {
+                    match (*phy).into_scan() {
+                        Ok(scan) => {
+                            self.selected = None;
+                            self.client.left();
+                            Ok(Stage::Scan(Box::new(scan)))
+                        }
+                        Err(phy) => Err((Error::Refused("scan"), phy as Box<dyn Any>)),
+                    }
+                })
+            }
             failed @ Stage::Failed { .. } => Ok(failed),
             Stage::Moving => Err((Error::Refused("bring-up"), Box::new(()))),
         }
@@ -577,6 +680,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             Err(error) => return Err((Error::Regulatory(error), board)),
         };
         self.beacons = Some(regulatory.beacons());
+        self.client.regulatory = Some(regulatory.country().clone());
         // SAFETY: the selection belongs to this function's own adapter.
         match unsafe { board.begin_country(regulatory) } {
             Ok(country) => Ok(Stage::Country(Box::new(country))),
@@ -584,10 +688,8 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         }
     }
 
-    /// One scan step: start a passive scan of every channel the country's
-    /// rules and the firmware allow, keep the strongest beacon carrying the
-    /// network's SSID, retire the scan once complete, and scan again until
-    /// one is found.
+    /// One scan step: hear the running scan's beacons. The keeper starts and
+    /// retires scans.
     unsafe fn scan(
         &mut self,
         mut scan: Box<Ax200Scan<'static, Q, B, Regulatory>>,
@@ -597,129 +699,54 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             return Err((Error::Boot(error), scan));
         }
         while scan.take_other_notification().is_some() {}
-        match scan.phase() {
-            Ax200ScanPhase::NotStarted if !self.scanning => {
-                if let Some(selected) = self.candidate.take() {
-                    self.selected = Some(selected.clone());
-                    return match (*scan).begin_phy_context(selected.bss.channel) {
-                        Ok(phy) => Ok(Stage::Phy(Box::new(phy))),
-                        Err(scan) => Err((Error::Refused("PHY context"), scan as Box<dyn Any>)),
-                    };
-                }
-                loop {
-                    match scan.poll_pre_scan_receive() {
-                        Ok(MpduProgress::Pending) => break,
-                        Ok(_) => {}
-                        Err(error) => return Err((Error::Scan(error), scan)),
-                    }
-                }
-                let request = match protocol::Request::new(scan.channels(), Vec::new(), Vec::new())
-                {
-                    Ok(request) => request,
-                    Err(error) => {
-                        return Err((Error::Scan(Ax200ScanError::Protocol(error)), scan));
-                    }
-                };
-                // SAFETY: forwarded from `poll`.
-                match unsafe { scan.start(request, SCAN_BUDGET_US, pages) } {
-                    Ok(_) => {
-                        self.scanning = true;
-                        Ok(Stage::Scan(scan))
-                    }
-                    Err(error) => Err((Error::Scan(error), scan)),
-                }
-            }
-            Ax200ScanPhase::DrainRequired => {
-                loop {
-                    match scan.poll_retiring_receive() {
-                        Ok(None) => break,
-                        Ok(Some(_)) => {}
-                        Err(error) => return Err((Error::Scan(error), scan)),
-                    }
-                }
-                match scan.retire() {
-                    Ok(_) => {
-                        self.scanning = false;
-                        Ok(Stage::Scan(scan))
-                    }
-                    Err(error) => Err((Error::Scan(error), scan)),
-                }
-            }
-            _ => {
-                if matches!(scan.phase(), Ax200ScanPhase::Scanning) {
-                    loop {
-                        match scan.poll_result() {
-                            Ok(ScanResultProgress::Observed(result)) => {
-                                if let Ok(bss) = result.result() {
-                                    self.consider(bss);
-                                }
-                            }
-                            Ok(ScanResultProgress::Rejected(_)) => {}
-                            Ok(
-                                ScanResultProgress::Pending
-                                | ScanResultProgress::Backpressure { .. },
-                            ) => {
-                                break;
-                            }
-                            Err(error) => return Err((Error::Scan(error), scan)),
+        if matches!(scan.phase(), Ax200ScanPhase::Scanning) {
+            loop {
+                match scan.poll_result() {
+                    Ok(ScanResultProgress::Observed(result)) => {
+                        if let Ok(bss) = result.result() {
+                            self.observe(bss);
                         }
                     }
-                }
-                // SAFETY: forwarded from `poll`.
-                match unsafe { scan.advance(pages) } {
-                    Ok(_) => Ok(Stage::Scan(scan)),
-                    Err(error) => Err((Error::Scan(error), scan)),
+                    Ok(ScanResultProgress::Rejected(_)) => {}
+                    Ok(ScanResultProgress::Pending | ScanResultProgress::Backpressure { .. }) => {
+                        break;
+                    }
+                    Err(error) => return Err((Error::Scan(error), scan)),
                 }
             }
         }
+        if matches!(
+            scan.phase(),
+            Ax200ScanPhase::NotStarted | Ax200ScanPhase::DrainRequired
+        ) {
+            return Ok(Stage::Scan(scan));
+        }
+        // SAFETY: forwarded from `poll`.
+        match unsafe { scan.advance(pages) } {
+            Ok(_) => Ok(Stage::Scan(scan)),
+            Err(error) => Err((Error::Scan(error), scan)),
+        }
     }
 
-    /// Keep `bss` when it carries the network's SSID, has a legacy rate this
-    /// band transmits and is stronger than the network found so far.
-    fn consider(&mut self, bss: &Bss) {
+    /// Keep `bss`, the latest of each BSS: a scan's beacons replace its
+    /// earlier ones, as `cfg80211_bss_update` does.
+    fn observe(&mut self, bss: &Bss) {
         // `cfg80211_inform_single_bss_data` hints every ESS beacon's channel.
         if bss.capabilities & 1 != 0
             && let Some(beacons) = &self.beacons
         {
             beacons.heard(bss.channel);
         }
-        if bss.ssid.as_deref() != Some(self.network.ssid.as_slice()) {
-            return;
+        let observed = Arc::new(association::NativeBssObservation { bss: bss.clone() });
+        match self
+            .client
+            .observed
+            .iter_mut()
+            .find(|known| known.bss().bssid == bss.bssid)
+        {
+            Some(known) => *known = observed,
+            None => self.client.observed.push(observed),
         }
-        let rates = legacy_rates(&bss.elements, bss.channel.band);
-        if rates == 0 {
-            return;
-        }
-        let stronger = self.candidate.as_ref().is_none_or(|current| {
-            bss.signal_dbm.unwrap_or(i8::MIN) > current.bss.signal_dbm.unwrap_or(i8::MIN)
-        });
-        if stronger {
-            self.candidate = Some(Selected {
-                bss: bss.clone(),
-                rates,
-            });
-        }
-    }
-}
-
-/// Polling the link advances bring-up; frames flow once the port is open.
-impl<Q: BootIo, B: BiosIo> Link for Wifi<Q, B> {
-    fn mac(&self) -> Mac {
-        self.address
-    }
-    fn carrier(&mut self) -> bool {
-        self.poll();
-        false
-    }
-    fn transmit(&mut self, _: &[u8]) -> Result<(), LinkError> {
-        Err(LinkError::NoCarrier)
-    }
-    fn receive(&mut self) -> Result<Option<Vec<u8>>, LinkError> {
-        if self.poll() == Phase::Failed && !self.reported {
-            self.reported = true;
-            return Err(LinkError::Adapter(format!("iwlwifi: {:?}", self.error)));
-        }
-        Ok(None)
     }
 }
 

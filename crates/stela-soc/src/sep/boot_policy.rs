@@ -27,13 +27,18 @@
 //! answered by exactly 36 bytes with the type in byte 32, named by
 //! libbootpolicy's type table (+0x404a0..+0x408ad).
 //!
-//! RecoveryOS policy nonce commands have the recovered zero-body request
-//! and digest reply shapes ([`nonces`]). They bind to the same durable store
-//! as xART. The SEP is not given the booted OS, so the current OS type is
-//! not supported. LocalPolicy signing, authenticated/owner-bearing bodies,
-//! macOS/remote nonce transactions and tags remain explicit refusals; a
-//! successful nonce transaction does not establish policy authentication.
+//! Local and recoveryOS policy nonce commands have the recovered zero-body
+//! request and digest reply shapes ([`nonces`]). They bind to the same
+//! durable store as xART. A LocalPolicy created during a local nonce update
+//! is signed with the machine's key ([`local_policy`]). The SEP is not given
+//! the booted OS, so the current OS type is not supported.
+//! Authenticated/owner-bearing bodies, remote nonce transactions, SIP flags
+//! and tags remain explicit refusals; restored logs the last two as
+//! "Choosing not to fail". The remote nonce opens `create_production_ucrt`,
+//! whose failure restored logs as "proceeding anyways", and which skips the
+//! default LocalPolicy ([`local_policy`]).
 //! A frame or header outside the envelope gets a transport failure.
+mod local_policy;
 mod nonces;
 use super::{
     Entropy,
@@ -107,7 +112,7 @@ pub(super) fn not_supported(frame: Frame) -> Answer {
 
 #[derive(Default)]
 pub struct BootPolicy {
-    recovery_nonce: nonces::RecoveryNonce,
+    nonces: nonces::PolicyNonces,
 }
 
 impl BootPolicy {
@@ -146,9 +151,10 @@ impl BootPolicy {
         let unsupported =
             |reason: stela_contracts::Refusal| Refusal::answered(reason, not_supported(frame));
         if nonces::accepts(word(4)) {
-            return self
-                .recovery_nonce
-                .request(word(4), frame, payload, store, entropy);
+            return self.nonces.request(word(4), frame, payload, store, entropy);
+        }
+        if local_policy::accepts(word(4)) {
+            return local_policy::request(word(4), frame, payload, store, &self.nonces);
         }
         if word(4) == CURRENT_OS_TYPE && length == HEADER_BYTES {
             return Err(unsupported(refuse!(

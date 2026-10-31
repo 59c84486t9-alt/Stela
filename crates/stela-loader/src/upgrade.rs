@@ -529,6 +529,8 @@ pub fn prepare<R: ReadAt>(
         extra_trust_caches: extra,
         ramdisk: None,
         root_hash: None,
+        pivot_root_hash: None,
+        // As for the installed system: the engine reads the board's flash.
         board_firmware: Vec::new(),
     };
     let mut options = options.placed_at(inputs.dram_base()?);

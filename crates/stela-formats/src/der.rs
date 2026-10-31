@@ -1,5 +1,6 @@
 //! Bounded DER cursor for firmware, certificates, and signed containers.
 //! X.690 definite, minimal lengths/tags; no BER normalization before hashing.
+use alloc::{vec, vec::Vec};
 
 /// A structural DER failure, including the offending field when available.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,6 +90,14 @@ pub struct Element<'a> {
 }
 
 pub struct Cursor<'a>(pub &'a [u8]);
+
+/// Universal class tags.
+pub const BOOLEAN: u8 = 0x01;
+pub const INTEGER: u8 = 0x02;
+pub const OCTET_STRING: u8 = 0x04;
+pub const IA5_STRING: u8 = 0x16;
+pub const SEQUENCE: u8 = 0x30;
+pub const SET: u8 = 0x31;
 
 impl<'a> Cursor<'a> {
     pub fn next_element(&mut self) -> Result<Element<'a>, Error> {
@@ -193,6 +202,41 @@ pub fn sequence(bytes: &[u8]) -> Result<Cursor<'_>, Error> {
     Ok(Cursor(element.value))
 }
 
+/// The element of one-byte tag `tag` around `contents`.
+pub fn encode(tag: u8, contents: &[u8]) -> Vec<u8> {
+    let mut out = vec![tag];
+    match contents.len() {
+        length @ 0..0x80 => out.push(length as u8),
+        length => {
+            let digits = (length as u64).to_be_bytes();
+            let skip = digits.iter().take_while(|&&b| b == 0).count();
+            out.push(0x80 | (8 - skip) as u8);
+            out.extend_from_slice(&digits[skip..]);
+        }
+    }
+    out.extend_from_slice(contents);
+    out
+}
+
+/// An Image4 named entry: the private constructed tag `name` around
+/// `SEQUENCE { IA5String name, value }`.
+pub fn named(name: [u8; 4], value: &[u8]) -> Vec<u8> {
+    let number = u32::from_be_bytes(name);
+    let mut out = vec![0xff];
+    for shift in [28, 21, 14, 7] {
+        if number >> shift != 0 {
+            out.push(0x80 | (number >> shift) as u8 & 0x7f);
+        }
+    }
+    out.push(number as u8 & 0x7f);
+    let mut body = encode(IA5_STRING, &name);
+    body.extend_from_slice(value);
+    let entry = encode(SEQUENCE, &body);
+    // `encode` leaves its one-byte tag first; the name's tag replaces it.
+    out.extend_from_slice(&encode(0, &entry)[1..]);
+    out
+}
+
 pub fn unsigned(bytes: &[u8]) -> Result<&[u8], Error> {
     let first = *bytes.first().ok_or(Error::EmptyInteger)?;
     if first & 128 != 0 {
@@ -237,5 +281,25 @@ mod tests {
         assert_eq!(unsigned(b"\0\x80"), Ok(b"\x80".as_slice()));
         assert!(Cursor(b"\x10\0").take(16).is_err());
         assert!(Cursor(b"\x22\0").take(2).is_err());
+    }
+
+    #[test]
+    fn what_the_writer_encodes_the_cursor_reads_back() {
+        let long = [7; 300];
+        let encoded = encode(OCTET_STRING, &long);
+        assert_eq!(encoded[..4], [4, 0x82, 1, 44]);
+        let element = Cursor(&encoded).take(4).unwrap();
+        assert_eq!(element.value, long);
+        let entry = named(*b"MANP", &encode(BOOLEAN, &[0xff]));
+        let mut cursor = Cursor(&entry);
+        let element = cursor.next_element().unwrap();
+        cursor.end().unwrap();
+        assert_eq!(element.class, 3);
+        assert!(element.constructed);
+        assert_eq!(element.tag, u32::from_be_bytes(*b"MANP"));
+        let mut body = sequence(element.value).unwrap();
+        assert_eq!(body.take(22).unwrap().value, b"MANP");
+        assert_eq!(body.take(1).unwrap().value, [0xff]);
+        body.end().unwrap();
     }
 }

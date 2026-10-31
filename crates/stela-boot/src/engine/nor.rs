@@ -1,7 +1,8 @@
 //! The machine-state partition (`--nor SERIAL:GUID`): the guest's NOR flash
 //! image in its first [`CAPACITY`] bytes, so NVRAM survives reboots, then the
 //! SEP's roots and anti-replay store ([`sep_state`]), then, when the
-//! partition holds it, the boot log ([`boot_log`]). The image is loaded
+//! partition holds them, the boot log ([`boot_log`]) and the board devices'
+//! flash ([`board_flash`]). The image is loaded
 //! before the bundle, which hands the kernel its newest valid bank; every
 //! sector a committed program or erase changes is stored durably by the
 //! host's service, the guest not waiting, and at the stop, as is the
@@ -15,7 +16,7 @@ use alloc::{boxed::Box, collections::BTreeMap, format, vec::Vec};
 use stela_contracts::refuse;
 use stela_drivers::block::{BlockDevice, BlockError, Shared, Submission};
 use {
-    stela_formats::boot_bundle::Nvram, stela_runtime::pc::boot_log,
+    stela_formats::boot_bundle::Nvram, stela_runtime::pc::board_flash, stela_runtime::pc::boot_log,
     stela_runtime::pc::machine_state, stela_soc::machine::AppleDevices,
     stela_soc::machine::nor::persist, stela_soc::machine::sep_state, stela_soc_data::nor::CAPACITY,
     stela_soc_data::nor::Image,
@@ -50,9 +51,11 @@ pub struct HostNor {
 
 impl HostNor {
     /// Load the partition's image, initializing a blank one, the bank iBoot
-    /// hands off, and where the SEP keeps its state. A partition too small
-    /// for both refuses.
-    pub fn open(device: Box<dyn BlockDevice>) -> (Self, Image, Nvram, sep_state::Location) {
+    /// hands off, where the SEP keeps its state, and the board devices'
+    /// flash. A partition too small for the first two refuses.
+    pub fn open(
+        device: Box<dyn BlockDevice>,
+    ) -> (Self, Image, Nvram, sep_state::Location, Option<BoardFlash>) {
         let block = u64::from(device.identity().block_size);
         let available = device.identity().blocks.saturating_mul(block);
         let needed = CAPACITY as u64 + stela_formats::machine_state::SEP_BYTES;
@@ -82,6 +85,7 @@ impl HostNor {
         }
         output::arguments(format_args!("NOR persistent fresh={fresh} bank={bank}\n"));
         open_log(&disk, block, available);
+        let board_flash = BoardFlash::open(&disk, block, available);
         (
             Self {
                 device,
@@ -91,6 +95,7 @@ impl HostNor {
             image,
             Nvram { bank, proxy },
             sep_state::Location::Partition { disk, first },
+            board_flash,
         )
     }
 
@@ -151,6 +156,73 @@ impl HostNor {
                     output::fatal("a NOR sector could not be stored");
                 }
             }
+        }
+    }
+}
+
+/// The board devices' flash on the machine-state partition.
+pub struct BoardFlash {
+    device: Box<dyn BlockDevice>,
+    flash: board_flash::Flash,
+}
+
+impl BoardFlash {
+    /// The region after the boot log, when the partition holds it and its
+    /// device reads; otherwise say why there is none. Invalid contents read
+    /// as blank: the images they held come back with the next bundle that
+    /// carries them.
+    fn open(disk: &Shared, block: u64, available: u64) -> Option<Self> {
+        if available < board_flash::PARTITION_BYTES {
+            output::arguments(format_args!(
+                "BOARD FLASH off: the machine-state partition holds {available:#x} bytes; the flash needs {:#x}\n",
+                board_flash::PARTITION_BYTES
+            ));
+            return None;
+        }
+        let window = disk.window(board_flash::OFFSET / block, board_flash::BYTES / block);
+        let mut device: Box<dyn BlockDevice> = match window {
+            Ok(window) => Box::new(window),
+            Err(error) => {
+                output::arguments(format_args!("BOARD FLASH off: {error}\n"));
+                return None;
+            }
+        };
+        let flash = match board_flash::Flash::read(&mut *device) {
+            Ok(flash) => flash,
+            Err(error @ board_flash::Error::Device(_)) => {
+                output::arguments(format_args!("BOARD FLASH off: {error}\n"));
+                return None;
+            }
+            Err(error) => {
+                output::arguments(format_args!("BOARD FLASH invalid: {error}\n"));
+                board_flash::Flash::default()
+            }
+        };
+        for (name, bytes) in flash.images() {
+            output::arguments(format_args!("BOARD FLASH {name} bytes={}\n", bytes.len()));
+        }
+        Some(Self { device, flash })
+    }
+
+    pub fn image(&self, name: &str) -> Option<&[u8]> {
+        self.flash.image(name)
+    }
+
+    /// Keep the images the boot bundle carries, for the boots whose bundle
+    /// does not. A failure costs those boots their devices, which refuse by
+    /// name, not this one.
+    pub fn keep(&mut self, images: &[(alloc::string::String, &[u8])]) {
+        match self.flash.keep(&mut *self.device, images) {
+            Ok(false) => {}
+            Ok(true) => {
+                for (name, bytes) in images {
+                    output::arguments(format_args!(
+                        "BOARD FLASH kept {name} bytes={}\n",
+                        bytes.len()
+                    ));
+                }
+            }
+            Err(error) => output::arguments(format_args!("BOARD FLASH refusal: {error}\n")),
         }
     }
 }

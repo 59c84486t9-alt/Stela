@@ -51,7 +51,13 @@ impl NegotiatedHt {
         Self {
             capability,
             peer_rx_mcs: ht_rx(local, peer),
-            local_rx_mcs: ht_rx(peer, local),
+            // A peer that leaves its TX set undefined may send anything the
+            // station receives.
+            local_rx_mcs: if peer.tx_params & 1 != 0 {
+                ht_rx(peer, local)
+            } else {
+                local.rx_mcs
+            },
             peer_ampdu_base_exponent: peer.ampdu_exponent,
             peer_mpdu_spacing: peer.mpdu_spacing,
             peer_tx_params: peer.tx_params,
@@ -529,5 +535,25 @@ impl Negotiated {
     }
     pub fn legacy20_compatible(&self) -> bool {
         self.mode == Mode::Legacy && self.width == Width::Mhz20 && self.wmm.is_none()
+    }
+}
+
+#[cfg(test)]
+mod ht_tests {
+    use super::*;
+
+    #[test]
+    fn a_peer_without_a_defined_tx_set_may_send_what_the_station_receives() {
+        let mut raw = [0; 26];
+        raw[3] = 0xff;
+        raw[15] = 1;
+        let local = Ht::parse(&raw).unwrap();
+        raw[15] = 0;
+        let peer = Ht::parse(&raw).unwrap();
+        let negotiated = NegotiatedHt::between(&local, &peer);
+        assert_eq!(negotiated.local_rx_mcs, local.rx_mcs);
+        // What the station sends stays within its own defined set.
+        assert_eq!(negotiated.peer_rx_mcs[0], 0xff);
+        assert_eq!(NegotiatedHt::between(&peer, &local).peer_rx_mcs, [0; 10]);
     }
 }

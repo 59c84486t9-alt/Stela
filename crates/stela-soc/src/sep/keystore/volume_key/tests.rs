@@ -421,6 +421,10 @@ fn a_per_file_key_unwraps_to_the_same_inline_key_only_under_its_volume_class_key
     load_class_keys(&mut keys, &vek);
     let again = unwrap_file_key(&mut keys, &VOLUME, 4, &wrapped).unwrap();
     assert_eq!(cipher(&engine, &again), cipher(&engine, &area));
+    // So does the unmount's unload.
+    let blobs = [&[][..], &[], &vek];
+    protect(&mut keys, UNLOAD_CLASS_KEYS, blobs, &mut Vec::new()).unwrap();
+    assert!(unwrap_file_key(&mut keys, &VOLUME, 4, &wrapped).is_err());
 }
 
 #[test]

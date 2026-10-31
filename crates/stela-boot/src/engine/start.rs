@@ -308,6 +308,16 @@ fn open_host(
         .preboot
         .take()
         .map(|partition| from_disk(partition, options));
+    // A system boots as the board it was installed on: libignition finds its
+    // Cryptex1 tickets by that board's model.
+    if built.is_some() {
+        let files = &handoff.files[..handoff.file_count];
+        options.development_board = bundle::development_board(files, built.as_deref())
+            .unwrap_or_else(|error| {
+                output::arguments(format_args!("bundle refusal: {error}\n"));
+                output::fatal("the boot bundle's board could not be read")
+            });
+    }
     // A bundle runs at the DRAM base it was prepared for, its SoC's.
     if options.bundle && !options.dram_explicit {
         let files = &handoff.files[..handoff.file_count];
@@ -379,6 +389,7 @@ struct Storage {
     nor_image: Option<stela_soc_data::nor::Image>,
     nvram: Option<stela_formats::boot_bundle::Nvram>,
     sep_state: Option<stela_soc::machine::sep_state::Location>,
+    board_flash: Option<nor::BoardFlash>,
 }
 
 /// Open the guest's storage, the restore source and the machine state from
@@ -475,11 +486,15 @@ fn open_storage(handoff: &'static Handoff, options: &Options, host: &mut OpenedH
         crate::status::done("");
         opened
     });
-    let (host_nor, nor_image, nvram, sep_state) = match nor {
-        Some((host_nor, image, nvram, sep_state)) => {
-            (Some(host_nor), Some(image), Some(nvram), Some(sep_state))
-        }
-        None => (None, None, None, None),
+    let (host_nor, nor_image, nvram, sep_state, board_flash) = match nor {
+        Some((host_nor, image, nvram, sep_state, board_flash)) => (
+            Some(host_nor),
+            Some(image),
+            Some(nvram),
+            Some(sep_state),
+            board_flash,
+        ),
+        None => (None, None, None, None, None),
     };
     Storage {
         backing,
@@ -488,6 +503,7 @@ fn open_storage(handoff: &'static Handoff, options: &Options, host: &mut OpenedH
         nor_image,
         nvram,
         sep_state,
+        board_flash,
     }
 }
 
@@ -578,6 +594,7 @@ fn run_guest(boot: Boot<'_>, host: OpenedHost, storage: Storage, processors: Pro
         nor_image,
         nvram,
         sep_state,
+        board_flash,
     } = storage;
     let Processors { executors, sender } = processors;
     let mut roster = topology::AssignedRoster::new(
@@ -686,6 +703,7 @@ fn run_guest(boot: Boot<'_>, host: OpenedHost, storage: Storage, processors: Pro
             read_only_region,
             backing,
             sep_state,
+            board_flash,
             usb_disks,
             guest_mac: guest_network.as_ref().map(network::GuestNetwork::mac),
         },
@@ -1022,6 +1040,7 @@ struct Placement<'a> {
     read_only_region: Option<(u64, u64)>,
     backing: Option<alloc::boxed::Box<dyn stela_drivers::block::BlockDevice>>,
     sep_state: Option<stela_soc::machine::sep_state::Location>,
+    board_flash: Option<nor::BoardFlash>,
     usb_disks: Vec<alloc::boxed::Box<dyn stela_drivers::block::BlockDevice>>,
     guest_mac: Option<stela_drivers::net::Mac>,
 }
@@ -1051,12 +1070,17 @@ fn place_devices(
         native_processors,
     } = boot;
     let Placement {
-        built, entry, now, ..
+        built,
+        entry,
+        now,
+        mut board_flash,
+        ..
     } = placement;
     let reset = options.bundle.then_some(entry);
-    // Board device firmware images travel in the bundle by guest file name.
+    // Board device firmware images travel in the bundle by guest file name;
+    // a bundle built from an installed disk finds them in the board's flash.
     let files = &handoff.files[..handoff.file_count];
-    let firmware = |name: &str| -> Option<&[u8]> {
+    let carried = |name: &str| -> Option<&[u8]> {
         match built {
             Some(built) => built
                 .iter()
@@ -1067,6 +1091,10 @@ fn place_devices(
                 .find(|file| file.name() == name)
                 .map(bundle::contents),
         }
+    };
+    let flash = board_flash.as_ref();
+    let firmware = |name: &str| -> Option<&[u8]> {
+        carried(name).or_else(|| flash.and_then(|flash| flash.image(name)))
     };
     let scanout = handoff.screen.map(|screen| {
         let screen = screen.relocated(layout::physical(screen.base as u64) as usize);
@@ -1112,6 +1140,17 @@ fn place_devices(
             output::fatal("the board devices could not be placed")
         }
     };
+    if let (Some(flash), Some(board)) = (&mut board_flash, board) {
+        let images: Vec<_> = board
+            .firmware_files()
+            .into_iter()
+            .filter_map(|name| {
+                let bytes = carried(&name)?;
+                Some((name, bytes))
+            })
+            .collect();
+        flash.keep(&images);
+    }
     if cacheless_memory
         && let (Some(board), Some(intake), Some(tree)) = (board, loaded_source, tree)
     {
@@ -1199,15 +1238,21 @@ fn assign<'s>(
             )
             .unwrap_or_else(|error| output::fatal(&error))
     });
-    if options.development_restore {
+    if options.development_restore || options.development_board {
         let assigned = assigned.as_mut().unwrap_or_else(|| {
-            output::fatal("--development-restore needs a selected original Apple board")
+            output::fatal("a development board needs a selected original Apple board")
         });
-        let target = development_restore_hardware_model(&mut assigned.tree)
+        let target = development_hardware_model(&mut assigned.tree)
             .unwrap_or_else(|error| output::fatal(&error));
-        output::arguments(format_args!(
-            "DEVELOPMENT RESTORE hw-model={target} FDR failures remain logged and unprovisioned\n"
-        ));
+        if options.development_restore {
+            output::arguments(format_args!(
+                "DEVELOPMENT RESTORE hw-model={target} FDR failures remain logged and unprovisioned\n"
+            ));
+        } else {
+            output::arguments(format_args!(
+                "DEVELOPMENT BOARD hw-model={target}, as the disk's system was installed\n"
+            ));
+        }
     }
     assigned
 }

@@ -506,6 +506,13 @@ pub fn dram_base(files: &[File], built: Option<&[(String, Vec<u8>)]>) -> Result<
     Ok(manifest(files, built)?.options.dram_base)
 }
 
+/// Whether the bundle's system was personalized for a development board.
+pub fn development_board(files: &[File], built: Option<&[(String, Vec<u8>)]>) -> Result<bool> {
+    Ok(manifest(files, built)?
+        .target
+        .is_some_and(|target| target.device_class.ends_with("dev")))
+}
+
 /// The guest's DRAM: `backed` bytes of host RAM from `base`, within the
 /// `installed` bytes the Mac reports.
 #[derive(Debug, Clone, Copy)]

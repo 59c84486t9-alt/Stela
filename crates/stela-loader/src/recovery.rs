@@ -620,11 +620,14 @@ pub fn prepare<R: ReadAt>(
         extra_trust_caches: Vec::new(),
         // The BaseSystem image stays on the disk; imageboot attaches it.
         ramdisk: None,
+        // As for the installed system: the engine reads the board's flash.
         board_firmware: Vec::new(),
         root_hash: Some(RootHash {
             volume: SealedVolume::BaseSystem,
             im4p: root_hash.as_ref().map(Decoded::input),
+            snapshot: None,
         }),
+        pivot_root_hash: None,
     };
     let directory = set.directory();
     let mut options = options.placed_at(inputs.dram_base()?);

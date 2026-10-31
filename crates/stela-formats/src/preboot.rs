@@ -17,13 +17,13 @@
 //! directories alike (`stela_loader::recovery`).
 use crate::{
     apfs::{
-        ApfsError, Container, FileKind, Volume,
+        ApfsError, Container, FileKind, ISC_PARTITION_TYPE, Volume,
         btree::Seal,
-        uuid_text,
+        typed_partitions, uuid_text,
         volume::{APFS_VOL_ROLE_PREBOOT, APFS_VOL_ROLE_SYSTEM, Inode},
     },
     img4,
-    payload::ReadAt,
+    payload::{ReadAt, gpt},
 };
 use alloc::{format, string::String, vec, vec::Vec};
 
@@ -35,6 +35,18 @@ pub const OBJECT_DIRECTORIES: [&str; 2] = [
 /// `System/Library/CoreServices/SystemVersion.plist` under the volume
 /// group's Preboot directory (asahi-installer `src/osenum.py`).
 pub const SYSTEM_VERSION: &str = "System/Library/CoreServices/SystemVersion.plist";
+/// The same under the volume group's Cryptex1 (26A434 `ramrod_splat_install`
+/// copies the System volume's there), where a system with one keeps it and
+/// [`SYSTEM_VERSION`] does not exist: an update of the Cryptex1 replaces it,
+/// so it names the version that runs.
+pub const CRYPTEX_SYSTEM_VERSION: &str = "cryptex1/current/SystemVersion.plist";
+/// Where the volume group keeps its active Cryptex1.
+const CRYPTEX_CURRENT: &str = "cryptex1/current";
+/// The SEP firmware on the iBootSystemContainer's iSCPreboot volume, which
+/// `seputil` loads at boot.
+const SEP_FIRMWARE: &str = "SFR/current/sep-firmware.img4";
+/// The largest SEP firmware this reads.
+const SEP_FIRMWARE_LIMIT: u64 = 64 * 1024 * 1024;
 /// A SHA-384 in hexadecimal.
 const BOOT_HASH_CHARACTERS: usize = 96;
 const PEEK_BYTES: usize = 64;
@@ -332,6 +344,87 @@ pub fn local_policies<R: ReadAt>(
     Ok(policies)
 }
 
+/// The one of `names` that is the Cryptex1 ticket personalized for `ecid`,
+/// `apticket.<board>.<ECID>.im4m`.
+fn cryptex1_ticket_name<'a>(
+    mut names: impl Iterator<Item = &'a str>,
+    ecid: u64,
+) -> Option<&'a str> {
+    let suffix = format!(".{ecid:016X}.im4m");
+    names.find(|name| name.starts_with("apticket.") && name.ends_with(&suffix))
+}
+
+/// The hardware model a Cryptex1 ticket at `path` was written for, lower case:
+/// restored names `apticket.<model>[.<ECID>].im4m` after `HW.target`, and
+/// libignition finds them by the booted system's.
+pub fn cryptex1_ticket_model(path: &str) -> Option<&str> {
+    let name = path.rsplit('/').next()?;
+    let name = name.strip_prefix("apticket.")?.strip_suffix(".im4m")?;
+    name.split('.').next()
+}
+
+/// The machine's personalized Cryptex1 manifest and its path, from the volume
+/// group's `cryptex1/current`; `None` when the group has none.
+pub fn cryptex1_ticket<R: ReadAt>(
+    container: &mut Container<R>,
+    preboot: &Volume,
+    group: &str,
+    ecid: u64,
+) -> Result<Option<(String, Vec<u8>)>> {
+    let path = format!("{group}/{CRYPTEX_CURRENT}");
+    let device = &mut container.device;
+    let Ok(directory) = preboot.lookup(device, &path, true) else {
+        return Ok(None);
+    };
+    let entries = preboot.entries(device, directory.oid)?;
+    let regular = entries
+        .iter()
+        .filter(|entry| entry.kind == FileKind::Regular)
+        .map(|entry| entry.name.as_str());
+    let Some(name) = cryptex1_ticket_name(regular, ecid) else {
+        return Ok(None);
+    };
+    let path = format!("{path}/{name}");
+    let inode = preboot.lookup(device, &path, true)?;
+    if inode.size > LOCAL_POLICY_LIMIT {
+        return Err(PrebootError::Object(format!(
+            "{path} is larger than a manifest"
+        )));
+    }
+    let bytes = preboot.read(device, &inode)?;
+    Ok(Some((path, bytes)))
+}
+
+/// The SEP firmware image of the machine's iBootSystemContainer, with its
+/// path; `None` when `source` has no such partition or it has no image.
+pub fn sep_firmware<R: ReadAt>(source: &mut R) -> Result<Option<(String, Vec<u8>)>> {
+    let isc = gpt::Guid::parse(ISC_PARTITION_TYPE).expect("constant GUID");
+    let partitions = typed_partitions(&mut *source, isc)?.unwrap_or_default();
+    for (offset, _) in partitions {
+        let mut container = Container::open(&mut *source, offset)?;
+        let preboot = container.volume_with_role(APFS_VOL_ROLE_PREBOOT)?;
+        let device = &mut container.device;
+        let Ok(inode) = preboot.lookup(device, SEP_FIRMWARE, true) else {
+            continue;
+        };
+        if inode.size > SEP_FIRMWARE_LIMIT {
+            return Err(PrebootError::Object(format!(
+                "{SEP_FIRMWARE} is larger than SEP firmware"
+            )));
+        }
+        let path = format!("{}/{SEP_FIRMWARE}", preboot.name);
+        return Ok(Some((path, preboot.read(device, &inode)?)));
+    }
+    Ok(None)
+}
+
+/// The name of the snapshot a sealed System volume roots from: iBoot builds
+/// it from the root hash, in uppercase hexadecimal (26A434 J473 0x3582c).
+/// `root_hash` is that hash in hexadecimal.
+pub fn root_snapshot_name(root_hash: &str) -> String {
+    format!("com.apple.os.update-{}", root_hash.to_ascii_uppercase())
+}
+
 /// The seal of the file system the volume group's System volume roots from
 /// (`apfs_root_to_xid`); `None` when it is not sealed.
 pub fn system_seal<R: ReadAt>(container: &mut Container<R>, group: &str) -> Result<Option<Seal>> {
@@ -412,6 +505,38 @@ mod tests {
         );
         assert_eq!(active_text(&hash.as_bytes()[..94]), None);
         assert_eq!(active_text(&[0xff; 96]), None);
+    }
+
+    #[test]
+    fn the_cryptex1_ticket_is_the_one_personalized_for_the_machine() {
+        let names = [
+            "apticket.j473dev.im4m",
+            "apticket.j473dev.DA7FA23C25CEFC4E.im4m",
+            "apticket.j473dev.0000000000000001.im4m",
+            "os.dmg",
+        ];
+        assert_eq!(
+            cryptex1_ticket_name(names.into_iter(), 0xfedc_ba98_7654_3210),
+            Some("apticket.j473dev.DA7FA23C25CEFC4E.im4m")
+        );
+        assert_eq!(cryptex1_ticket_name(names.into_iter(), 2), None);
+        assert_eq!(
+            cryptex1_ticket_model("group/cryptex1/current/apticket.j473dev.DA7FA23C25CEFC4E.im4m"),
+            Some("j473dev")
+        );
+        assert_eq!(
+            cryptex1_ticket_model("apticket.j473ap.im4m"),
+            Some("j473ap")
+        );
+        assert_eq!(cryptex1_ticket_model("os.dmg"), None);
+    }
+
+    #[test]
+    fn the_root_snapshot_is_named_for_the_root_hash_as_on_an_installed_disk() {
+        assert_eq!(
+            root_snapshot_name("9a91edbd"),
+            "com.apple.os.update-9A91EDBD"
+        );
     }
 
     #[test]

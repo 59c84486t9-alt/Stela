@@ -31,8 +31,9 @@
 //! payload type; each is split into its payload, decoded unchanged, and its
 //! personalized manifest. The kernel collection's manifest is the boot
 //! manifest. The product version and build come from the volume group's
-//! `SystemVersion.plist` on Preboot, the model and board name from the
-//! DeviceTree, and chip and board identifiers from the boot manifest.
+//! `SystemVersion.plist` on Preboot, its Cryptex1's when it has one, the model
+//! and board name from the DeviceTree, and chip and board identifiers from
+//! the boot manifest.
 use crate::{Error, Result, Within};
 use crate::{
     apple_device_tree::DeviceTree,
@@ -46,10 +47,16 @@ use crate::{
 use alloc::{format, string::String, vec::Vec};
 use stela_contracts::{refuse, require};
 use {
-    stela_formats::apfs, stela_formats::apfs::Container, stela_formats::apfs::Volume,
-    stela_formats::apfs::btree::Hash, stela_formats::img4, stela_formats::payload::ReadAt,
-    stela_formats::preboot, stela_formats::preboot::BootSet,
-    stela_formats::preboot::SYSTEM_VERSION, stela_formats::sha256,
+    stela_formats::apfs,
+    stela_formats::apfs::Container,
+    stela_formats::apfs::Volume,
+    stela_formats::apfs::btree::Hash,
+    stela_formats::img4,
+    stela_formats::payload::ReadAt,
+    stela_formats::preboot,
+    stela_formats::preboot::BootSet,
+    stela_formats::preboot::{CRYPTEX_SYSTEM_VERSION, SYSTEM_VERSION},
+    stela_formats::sha256,
 };
 
 /// The variant recorded for a bundle read from an installed system.
@@ -59,6 +66,8 @@ pub const COMPONENT_LIMIT: u64 = 64 * 1024 * 1024;
 const SEP_FIRMWARE_TYPE: &[u8; 4] = b"sepi";
 /// The System volume's root hash, as an Image4 object.
 const ROOT_HASH_TYPE: &[u8; 4] = b"isys";
+/// The BaseSystem's root hash, as an Image4 object.
+const BASE_SYSTEM_ROOT_HASH_TYPE: &[u8; 4] = b"csys";
 const ROOT_HASH_RECORD_VERSION: u32 = 2;
 /// The record's header: version, reserved, hash type and hash length.
 const ROOT_HASH_HEADER_BYTES: usize = 16;
@@ -412,7 +421,7 @@ pub struct Installed {
     pub evidence: Evidence,
 }
 
-struct Decoded {
+pub struct Decoded {
     bytes: Vec<u8>,
     source: Source,
 }
@@ -480,14 +489,36 @@ impl<R: ReadAt> Disk<'_, R> {
         }))
     }
 
+    /// The machine's personalized Cryptex1 manifest.
+    fn cryptex1_manifest(&mut self, ecid: u64) -> Result<Option<Decoded>> {
+        let ticket =
+            preboot::cryptex1_ticket(self.container, &self.preboot, &self.set.volume_group, ecid)
+                .within(|| refuse!("the Cryptex1 manifest"))?;
+        Ok(ticket.map(|(path, bytes)| Decoded {
+            source: Source {
+                component: "Cryptex1 manifest".into(),
+                member: path,
+                container_sha256: sha256(&bytes),
+                payload_type: "im4m".into(),
+                description: "the personalized Cryptex1 manifest".into(),
+                decoded_bytes: bytes.len() as u64,
+                decoded_sha256: sha256(&bytes),
+            },
+            bytes,
+        }))
+    }
+
     /// `ProductVersion` and `ProductBuildVersion` of the volume group.
     fn system_version(&mut self) -> Result<(String, String)> {
-        let path = format!("{}/{SYSTEM_VERSION}", self.set.volume_group);
+        let group = &self.set.volume_group;
         let device = &mut self.container.device;
-        let inode = self
-            .preboot
-            .lookup(device, &path, true)
-            .within(|| refuse!("{path}", path))?;
+        let mut path = format!("{group}/{CRYPTEX_SYSTEM_VERSION}");
+        let mut found = self.preboot.lookup(device, &path, true);
+        if matches!(found, Err(apfs::ApfsError::NotFound(_))) {
+            path = format!("{group}/{SYSTEM_VERSION}");
+            found = self.preboot.lookup(device, &path, true);
+        }
+        let inode = found.within(|| refuse!("{path}", path))?;
         let bytes = self
             .preboot
             .read(device, &inode)
@@ -573,6 +604,7 @@ pub fn prepare<R: ReadAt>(
     container: &mut Container<R>,
     request: &Request,
     options: &Options,
+    sep_firmware: Option<&Decoded>,
 ) -> Result<Installed> {
     let model = request.model;
     let (preboot, set, evidence) = select(container, request)?;
@@ -586,9 +618,25 @@ pub fn prepare<R: ReadAt>(
     let (txm, _) = disk.decode(b"trxm", COMPONENT_LIMIT)?;
     let (device_tree, _) = disk.decode(b"dtre", COMPONENT_LIMIT)?;
     let (trust_cache, _) = disk.decode(b"trst", COMPONENT_LIMIT)?;
-    let sep = disk.opaque(SEP_FIRMWARE_TYPE)?;
+    // The root pivots through BaseSystem (`Inputs::pivot_root_hash`), whose
+    // code, the dyld shared cache among it, this trust cache lists.
+    let base_system_trust_cache = disk
+        .set
+        .object(b"bstc")?
+        .is_some()
+        .then(|| disk.decode(b"bstc", COMPONENT_LIMIT))
+        .transpose()?
+        .map(|(decoded, _)| decoded);
+    let boot_set_sep = disk.opaque(SEP_FIRMWARE_TYPE)?;
+    let sep = boot_set_sep.as_ref().or(sep_firmware);
     // The evidence already required this object and checked its signature.
     let root_hash = disk.opaque(ROOT_HASH_TYPE)?;
+    let pivot_root_hash = disk.opaque(BASE_SYSTEM_ROOT_HASH_TYPE)?;
+    let cryptex1_manifest = options
+        .ecid
+        .map(|ecid| disk.cryptex1_manifest(ecid))
+        .transpose()?
+        .flatten();
     let (product_version, product_build) = disk.system_version()?;
     let tree = DeviceTree::parse(&device_tree.bytes)?;
     let product_type = root_string(&tree, "model")?;
@@ -617,7 +665,15 @@ pub fn prepare<R: ReadAt>(
     let inputs = Inputs {
         target: Target {
             product_type,
-            device_class: format!("{}ap", target_type.to_ascii_lowercase()),
+            // The model the install personalized this system for, which a
+            // development restore changes.
+            device_class: cryptex1_manifest
+                .as_ref()
+                .and_then(|ticket| preboot::cryptex1_ticket_model(&ticket.source.member))
+                .map_or_else(
+                    || format!("{}ap", target_type.to_ascii_lowercase()),
+                    String::from,
+                ),
             product_version,
             product_build,
             variant: INSTALLED_SYSTEM.into(),
@@ -630,17 +686,22 @@ pub fn prepare<R: ReadAt>(
         txm: txm.input(),
         device_tree: device_tree.input(),
         static_trust_cache: trust_cache.input(),
-        sep_firmware: sep.as_ref().map(Decoded::input),
+        sep_firmware: sep.map(Decoded::input),
         boot_manifest: boot_manifest.as_ref().map(Decoded::input),
-        cryptex1_manifest: None,
-        extra_trust_caches: Vec::new(),
+        cryptex1_manifest: cryptex1_manifest.as_ref().map(Decoded::input),
+        extra_trust_caches: base_system_trust_cache.iter().map(Decoded::input).collect(),
         ramdisk: None,
-        // Board device firmware is not yet read from the System volume.
+        // The installed volumes hold none: the engine reads the board's flash.
         board_firmware: Vec::new(),
         root_hash: Some(RootHash {
             volume: SealedVolume::System,
             im4p: root_hash.as_ref().map(Decoded::input),
+            snapshot: evidence
+                .root_hash
+                .as_deref()
+                .map(preboot::root_snapshot_name),
         }),
+        pivot_root_hash: pivot_root_hash.as_ref().map(Decoded::input),
     };
     let mut options = options.placed_at(inputs.dram_base()?);
     options.boot_command = Some(crate::handoff::installed_command(
@@ -705,12 +766,28 @@ pub fn prepare_disk<R: ReadAt>(
             partition = uuid_text(&volume.partition)
         );
     }
+    let sep_firmware = preboot::sep_firmware(&mut *source)
+        .within(|| refuse!("the SEP firmware"))?
+        .map(|(path, bytes)| Decoded {
+            source: Source {
+                component: "SEP firmware".into(),
+                member: path,
+                container_sha256: sha256(&bytes),
+                payload_type: "img4".into(),
+                description: "the iBootSystemContainer's SEP firmware".into(),
+                decoded_bytes: bytes.len() as u64,
+                decoded_sha256: sha256(&bytes),
+            },
+            bytes,
+        });
     let mut found = Vec::new();
     let mut failures = Vec::new();
     for (offset, _) in partitions {
         let result = Container::open(&mut *source, offset)
             .map_err(Error::from)
-            .and_then(|mut container| prepare(&mut container, request, options));
+            .and_then(|mut container| {
+                prepare(&mut container, request, options, sep_firmware.as_ref())
+            });
         match result {
             Ok(installed) => found.push((offset, installed)),
             Err(error) => failures.push(format!("container at {offset:#x}: {error:#}")),

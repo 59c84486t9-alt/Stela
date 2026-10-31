@@ -411,6 +411,21 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
             .take_matching(command, group)
             .map(CapturedNotification::into_diagnostics)
     }
+    /// The firmware's last country change, which it asks the host to apply.
+    pub(in crate::wifi::intel::boot) fn take_country_update(
+        &mut self,
+    ) -> Option<FirmwareNotification> {
+        self.hcmd
+            .take_matching(0xc9, 0)
+            .map(CapturedNotification::into_diagnostics)
+    }
+    /// Tell the device a frame queue's new write pointer.
+    pub(in crate::wifi::intel::boot) fn write_queue_pointer(
+        &mut self,
+        value: u32,
+    ) -> Result<(), Error> {
+        self.write(crate::wifi::intel::transmit::ring::WRITE_POINTER, value)
+    }
     pub fn poll_command(&mut self, ticket: &CommandTicket) -> Result<CommandProgress, Error> {
         if self.state != State::PnvmObserved
             || self
