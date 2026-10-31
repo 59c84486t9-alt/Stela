@@ -8,6 +8,8 @@
 //! to 4 KiB with at most 16-byte alignment are therefore rounded up to a
 //! power-of-two size class and, once freed, kept on that class's LIFO list
 //! for the next allocation of the class instead of returning to the bins.
+//! When the bins cannot serve a request, the class lists return to them, so
+//! blocks of one size never starve a request of another.
 //!
 //! Every PE on a core of its own allocates at once, so each core the engine
 //! runs on keeps a small cache of free blocks per class ([`Heap::tag_cpu`]),
@@ -672,7 +674,7 @@ impl Heap {
                 let block = if head.is_null() {
                     // SAFETY: the initialized heap is exclusively guarded;
                     // this class supplies its nonzero extent and alignment.
-                    unsafe { carve(state, SMALLEST << class, SMALL_ALIGNMENT) }
+                    unsafe { carve_draining(state, SMALLEST << class, SMALL_ALIGNMENT) }
                 } else {
                     // SAFETY: the guarded class head is a complete free Small
                     // node previously published by matching deallocation.
@@ -882,7 +884,7 @@ unsafe fn allocate_locked(state: &mut State, layout: Layout) -> *mut u8 {
     let Some(class) = class(layout) else {
         // SAFETY: this helper keeps the initialized state guard and
         // GlobalAlloc's layout supplies the payload size and alignment.
-        let block = unsafe { carve(state, layout.size(), layout.align()) };
+        let block = unsafe { carve_draining(state, layout.size(), layout.align()) };
         if !block.is_null() {
             state.live += layout.size();
             state.count_large(layout.size(), true);
@@ -892,7 +894,7 @@ unsafe fn allocate_locked(state: &mut State, layout: Layout) -> *mut u8 {
     let head = state.small[class];
     let block = if head.is_null() {
         // SAFETY: guarded initialized state and a validated nonzero class.
-        unsafe { carve(state, SMALLEST << class, SMALL_ALIGNMENT) }
+        unsafe { carve_draining(state, SMALLEST << class, SMALL_ALIGNMENT) }
     } else {
         // SAFETY: a block of this class that `dealloc` linked and
         // nothing else owns.
@@ -1085,6 +1087,33 @@ unsafe fn carve(state: &mut State, size: usize, alignment: usize) -> *mut u8 {
         state.remove(block);
         take(state, block, user, payload)
     }
+}
+
+/// [`carve`], giving the class lists back to the bins and trying again when
+/// the bins cannot serve it.
+///
+/// # Safety
+/// The heap's lock is held and `state` is initialized.
+unsafe fn carve_draining(state: &mut State, size: usize, alignment: usize) -> *mut u8 {
+    // SAFETY: the caller's guard and initialized state.
+    let block = unsafe { carve(state, size, alignment) };
+    if !block.is_null() || !state.small.iter().any(|head| !head.is_null()) {
+        return block;
+    }
+    for class in 0..CLASSES {
+        let mut head = core::mem::replace(&mut state.small[class], ptr::null_mut());
+        while !head.is_null() {
+            // SAFETY: a freed block `carve` made for this class, which only
+            // this list owned.
+            unsafe {
+                let next = (*head).next;
+                release(state, head.cast());
+                head = next;
+            }
+        }
+    }
+    // SAFETY: as above.
+    unsafe { carve(state, size, alignment) }
 }
 
 /// Page selection inside a CPU interval: the lowest payload address that
