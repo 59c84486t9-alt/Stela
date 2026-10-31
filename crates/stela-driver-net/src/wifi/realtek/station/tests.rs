@@ -76,6 +76,8 @@ struct Air {
     templates: Vec<templates::Templates>,
     /// A watchdog run finds too many frames for power save.
     busy: bool,
+    /// What Bluetooth changes of the stream count.
+    stream_changes: Vec<bool>,
     /// The AP stopped beaconing on its channel.
     quiet: bool,
     /// The AP takes no frame at all.
@@ -193,6 +195,9 @@ impl Device for Model {
     fn clear_key(&mut self, entry: u8) -> Result<(), String> {
         self.0.borrow_mut().cleared.push(entry);
         Ok(())
+    }
+    fn stream_change(&mut self) -> Option<bool> {
+        self.0.borrow_mut().stream_changes.pop()
     }
     fn set_templates(&mut self, templates: &templates::Templates) -> Result<(), String> {
         self.0.borrow_mut().templates.push(templates.clone());
@@ -638,6 +643,18 @@ fn a_block_ack_agreement_orders_what_it_holds() {
 /// How many nullfuncs the station sent.
 fn nullfuncs(air: &Air) -> usize {
     air.sent.iter().filter(|sent| sent.2[0] == 0x48).count()
+}
+
+#[test]
+fn a_change_of_streams_is_told_to_the_ap() {
+    let (mut wifi, model) = connected();
+    model.0.borrow_mut().stream_changes.push(true);
+    let action = |air: &Air| {
+        air.sent
+            .iter()
+            .any(|(_, _, frame)| frame[0] == 0xd0 && frame[24..] == [7, 1, 1])
+    };
+    assert!(run(&mut wifi, &model, |_, air| action(air)));
 }
 
 #[test]

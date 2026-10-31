@@ -16,6 +16,87 @@ const INFO_HID: u8 = 1 << 5;
 const INFO_A2DP: u8 = 1 << 6;
 const INFO_FTP: u8 = 1 << 7;
 
+/// `COEX_BT_GAMEHID_CNT`.
+const HID_TRAFFIC: u32 = 800;
+/// `COEX_BT_HIDINFO_LIST` and `COEX_BT_HIDINFO_A`.
+pub(super) const HID_LIST: u8 = 0;
+pub(super) const HID_DEVICE: u8 = 1;
+/// `COEX_BT_HIDINFO_NOTCON` and `COEX_BT_BLE_HANDLE_THRS`.
+const HANDLE_NOT_CONNECTED: u8 = 0xff;
+const HANDLE_LOW_ENERGY: u8 = 0x10;
+/// `COEX_BT_HIDINFO_MTK`, and the names of `coex_bt_hidinfo_ps` and
+/// `coex_bt_hidinfo_xb`.
+const VENDOR_MEDIATEK: u8 = 0x46;
+const GAME_NAMES: [[u8; 3]; 2] = [[0x57, 0x69, 0x72], [0x58, 0x62, 0x6f]];
+
+/// A `rtw_coex_hid`.
+#[derive(Clone, Copy, Debug, Default)]
+struct HidDevice {
+    handle: u8,
+    vendor: u8,
+    name: [u8; 3],
+    complete: bool,
+}
+
+impl HidDevice {
+    fn classic(&self) -> bool {
+        self.handle != 0 && self.handle != HANDLE_NOT_CONNECTED && self.handle < HANDLE_LOW_ENERGY
+    }
+
+    /// What of `rtw_coex_bt_hid_info_notify` says a game is on the end of it.
+    fn game(&self) -> bool {
+        self.complete
+            && self.classic()
+            && self.vendor == VENDOR_MEDIATEK
+            && GAME_NAMES.contains(&self.name)
+    }
+}
+
+/// `hid_handle_list` and `hid_info`.
+#[derive(Debug, Default)]
+pub(super) struct HidDevices {
+    list: [u8; 8],
+    devices: [HidDevice; 4],
+}
+
+impl HidDevices {
+    /// `rtw_coex_bt_hid_info_notify` of what firmware sent. None means
+    /// nothing changed; otherwise whether a game controller is connected.
+    pub fn report(&mut self, bytes: [u8; 8]) -> Option<bool> {
+        match bytes[2] {
+            HID_LIST => {
+                if bytes == self.list {
+                    return None;
+                }
+                self.list = bytes;
+                self.devices = Default::default();
+                for (device, &handle) in self.devices.iter_mut().zip(&bytes[4..]) {
+                    if handle != HANDLE_NOT_CONNECTED {
+                        device.handle = handle;
+                    }
+                }
+            }
+            HID_DEVICE => {
+                if let Some(device) = self.devices.iter_mut().find(|d| d.handle == bytes[3]) {
+                    device.vendor = bytes[4];
+                    device.name = [bytes[5], bytes[6], bytes[7]];
+                    device.complete = true;
+                }
+            }
+            _ => {}
+        }
+        Some(self.devices.iter().any(HidDevice::game))
+    }
+
+    /// The handles rtw88 still asks about.
+    pub fn unknown(&self) -> impl Iterator<Item = u8> + '_ {
+        self.devices
+            .iter()
+            .filter(|device| device.classic() && !device.complete)
+            .map(|device| device.handle)
+    }
+}
+
 /// `coex_bt_status`.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) enum Status {
@@ -98,6 +179,8 @@ pub(super) struct Bluetooth {
     pub hid_pairs: u8,
     /// `bt_418_hid_exist`: a controller polled every 4.18 ms.
     pub hid_418: bool,
+    /// `bt_game_hid_exist`.
+    pub game_controller: bool,
     /// `bt_rssi`.
     rssi: u8,
     /// `coex_dm->bt_rssi_state`, each `COEX_RSSI_HIGH`.
@@ -204,6 +287,11 @@ impl Bluetooth {
         self.scan_type = 0;
     }
 
+    /// `rtw_coex_query_bt_hid_list`'s gate: a controller could be there.
+    pub fn may_hold_a_controller(&self, high_priority: u32) -> bool {
+        self.hid || (self.info[0] & INFO_CONNECTION != 0 && high_priority > HID_TRAFFIC)
+    }
+
     /// `bt_ble_scan_type` as `BT_MP_INFO_OP_SCAN_TYPE` answers.
     pub fn scan_answer(&mut self, kind: u8) {
         self.scan_type = kind;
@@ -227,6 +315,30 @@ mod tests {
         assert_eq!(bluetooth.rssi, 40);
         assert_eq!(bluetooth.rssi_high, [true, true, true, true]);
         assert_eq!(bluetooth.report(&report), None, "nothing new");
+    }
+
+    #[test]
+    fn a_controller_is_a_classic_link_of_a_known_vendor_and_name() {
+        let mut devices = HidDevices::default();
+        assert_eq!(devices.report([0, 6, 0, 2, 3, 0x20, 0xff, 0]), Some(false));
+        assert_eq!(devices.unknown().collect::<alloc::vec::Vec<_>>(), [3]);
+        assert_eq!(devices.report([0, 6, 0, 2, 3, 0x20, 0xff, 0]), None);
+        assert_eq!(
+            devices.report([0, 6, 1, 3, 0x46, 1, 2, 3]),
+            Some(false),
+            "another device of the vendor"
+        );
+        assert_eq!(
+            devices.report([0, 6, 1, 3, 0x46, 0x58, 0x62, 0x6f]),
+            Some(true)
+        );
+        assert_eq!(devices.unknown().count(), 0);
+        assert_eq!(
+            devices.report([0, 6, 1, 0x20, 0x46, 0x57, 0x69, 0x72]),
+            Some(true),
+            "a Low Energy handle is not asked about or counted"
+        );
+        assert_eq!(devices.report([0, 6, 0, 0, 0, 0, 0, 1]), Some(false));
     }
 
     #[test]

@@ -23,9 +23,10 @@ const SCAN_RESULT: u8 = 0x38;
 const RESERVED_PAGES: u32 = 0;
 const POWER_MODE: u32 = 0x20;
 
-/// `C2H_BT_INFO` and `C2H_BT_MP_INFO`.
+/// `C2H_BT_INFO`, `C2H_BT_MP_INFO` and `C2H_BT_HID_INFO`.
 const BT_INFO: u8 = 0x09;
 const BT_MP_INFO: u8 = 0x0b;
+const BT_HID_INFO: u8 = 0x45;
 /// `C2H_CCX_TX_RPT`.
 const CCX_TX_REPORT: u8 = 0x03;
 /// `C2H_RA_RPT`.
@@ -145,6 +146,14 @@ pub fn adaptivity(mode: u8, gain: u8, threshold: u8, density: u8) -> (u32, u32) 
     )
 }
 
+/// What fits of a report's `payload`, the rest of it zero.
+fn first_bytes(payload: &[u8]) -> [u8; 8] {
+    let mut bytes = [0; 8];
+    let length = payload.len().min(bytes.len());
+    bytes[..length].copy_from_slice(&payload[..length]);
+    bytes
+}
+
 /// One report in a firmware packet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Report {
@@ -162,6 +171,8 @@ pub enum Report {
     Bluetooth { bytes: [u8; 10], length: u8 },
     /// `rtw_coex_info_response`.
     BluetoothAnswer([u8; 8]),
+    /// `rtw_coex_bt_hid_info_notify`.
+    BluetoothHid([u8; 8]),
     /// A report a station does not act on, by ID.
     Other(u8),
 }
@@ -195,12 +206,8 @@ impl Report {
                     length: length as u8,
                 }
             }
-            BT_MP_INFO => {
-                let mut answer = [0; 8];
-                let length = payload.len().min(answer.len());
-                answer[..length].copy_from_slice(&payload[..length]);
-                Self::BluetoothAnswer(answer)
-            }
+            BT_MP_INFO => Self::BluetoothAnswer(first_bytes(payload)),
+            BT_HID_INFO => Self::BluetoothHid(first_bytes(payload)),
             _ => Self::Other(id),
         })
     }
@@ -277,7 +284,7 @@ mod tests {
                 acknowledged: true
             })
         );
-        assert_eq!(Report::parse(&[0x45, 0, 1]), Some(Report::Other(0x45)));
+        assert_eq!(Report::parse(&[0x46, 0, 1]), Some(Report::Other(0x46)));
         assert_eq!(Report::parse(&[3, 0, 1]), None);
     }
 }

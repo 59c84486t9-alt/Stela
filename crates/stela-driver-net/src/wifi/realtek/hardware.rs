@@ -37,7 +37,7 @@ use crate::{
         phy::{AccessCategory, Width},
     },
 };
-use alloc::{format, string::String, vec::Vec};
+use alloc::{collections::VecDeque, format, string::String, vec::Vec};
 use core::fmt::Debug;
 
 /// `REG_TCR`'s `BIT_PWRMGT_HWDATA_EN` and `BIT_TCR_UPDATE_TIMIE`.
@@ -169,6 +169,9 @@ pub struct Hardware {
     scanning: bool,
     busy: bool,
     asleep: bool,
+    /// `hal.txrx_1ss`, and each change of it the AP has not heard of.
+    single_stream: bool,
+    stream_changes: VecDeque<bool>,
     /// `coex_stat->wl_beacon_interval`.
     beacon_interval: u16,
     /// `dm_info.cck_ok_cnt + cck_err_cnt`.
@@ -253,6 +256,8 @@ impl Hardware {
             scanning: false,
             busy: false,
             asleep: false,
+            single_stream: false,
+            stream_changes: VecDeque::new(),
             beacon_interval: 0,
             cck_frames: 0,
             now: 0,
@@ -286,7 +291,6 @@ impl Hardware {
         // SAFETY: this worker owns the radio, and its frames wait for it.
         let run = unsafe { self.coex.notify(io, &self.report, now, wifi, event) }
             .map_err(failed("coex"))?;
-        self.limitations.extend(run.limitation);
         for order in run.orders {
             match order {
                 Order::Command(command) => self
@@ -294,6 +298,13 @@ impl Hardware {
                     .command(command)
                     .map_err(failed("coex command"))?,
                 Order::Wake => self.set_power_save(false)?,
+                Order::SingleStream(single) if single != self.single_stream => {
+                    self.single_stream = single;
+                    let io = self.control.io().map_err(failed("registers"))?;
+                    Dynamic::set_paths(io, single).map_err(failed("paths"))?;
+                    self.stream_changes.push_back(single);
+                }
+                Order::SingleStream(_) => {}
             }
         }
         Ok(())
@@ -572,7 +583,9 @@ impl Device for Hardware {
                 };
                 match &item {
                     Incoming::Report(
-                        report @ (Report::Bluetooth { .. } | Report::BluetoothAnswer(_)),
+                        report @ (Report::Bluetooth { .. }
+                        | Report::BluetoothAnswer(_)
+                        | Report::BluetoothHid(_)),
                     ) => bluetooth.push(*report),
                     Incoming::Report(report) => dynamic.reported(report),
                     Incoming::Frame(frame) => dynamic.frame(&frame.bytes, signal, address, bssid),
@@ -592,6 +605,7 @@ impl Device for Hardware {
                     self.arbitrate(Event::Bluetooth(&bytes[..usize::from(length)]))?;
                 }
                 Report::BluetoothAnswer(answer) => self.arbitrate(Event::Answer(&answer))?,
+                Report::BluetoothHid(bytes) => self.arbitrate(Event::BluetoothHid(bytes))?,
                 _ => {}
             }
         }
@@ -656,6 +670,10 @@ impl Device for Hardware {
         set_mask(io, REG_TCR, UPDATE_TIM_ELEMENT, 1).map_err(failed("dtim"))?;
         io.write8(REG_DTIM_COUNTER_ROOT, dtim_period.saturating_sub(1))
             .map_err(failed("dtim"))
+    }
+
+    fn stream_change(&mut self) -> Option<bool> {
+        self.stream_changes.pop_front()
     }
 
     /// The arbiter's time, and rtw88's delayed works that came due.
@@ -757,7 +775,9 @@ impl Device for Hardware {
             .command(self.dynamic.phy_info())
             .map_err(failed("phy info"))?;
         let io = self.control.io().map_err(failed("registers"))?;
-        if linked {
+        // rtw88 would put the second transmit path back here; a game
+        // controller holds it, so one path has none to choose from.
+        if linked && !self.single_stream {
             let rates = if band == Band::Ghz5 {
                 RESPONSE_RATES_5GHZ
             } else {

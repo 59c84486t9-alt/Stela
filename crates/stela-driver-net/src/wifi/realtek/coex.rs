@@ -14,7 +14,7 @@ mod tables;
 
 use self::{
     actions::{Phase, Plan},
-    bluetooth::{Bluetooth, Changes, Status, rssi_high},
+    bluetooth::{Bluetooth, Changes, HID_DEVICE, HID_LIST, HidDevices, Status, rssi_high},
     tables::*,
 };
 use super::{
@@ -122,6 +122,7 @@ const COMMAND_IGNORE_WLAN: u32 = 0x63;
 const COMMAND_CHANNEL_INFO: u32 = 0x66;
 const COMMAND_QUERY_BT_MP: u32 = 0x67;
 const COMMAND_BT_WIFI_CONTROL: u32 = 0x69;
+const COMMAND_QUERY_HID: u32 = 0x73;
 const CONTROL_TOGGLE_TABLE_B: u8 = 0x7;
 const CONTROL_TDMA_SLOT: u8 = 0xb;
 const CONTROL_LEAK_AP: u8 = 0xc;
@@ -185,6 +186,8 @@ impl From<rf::Error> for Error {
 enum Mode {
     TwoGhz,
     FiveGhz,
+    /// `COEX_WLINK_2GFREE`: one antenna each, for a game controller.
+    Free,
 }
 
 /// What the Wi-Fi side is doing, which `rtw_coex_run_coex` schedules around.
@@ -237,6 +240,8 @@ pub enum Event<'a> {
     Watchdog,
     /// `rtw_coex_bt_info_notify`.
     Bluetooth(&'a [u8]),
+    /// `rtw_coex_bt_hid_info_notify`.
+    BluetoothHid([u8; 8]),
     /// `rtw_coex_info_response`.
     Answer(&'a [u8]),
     /// Time passed: rtw88's delayed works.
@@ -258,6 +263,8 @@ enum Reason {
     Bluetooth,
     /// `COEX_RSN_LPS`.
     Sleep,
+    /// `COEX_RSN_2GMEDIA`.
+    Media,
     /// Any other.
     Status,
 }
@@ -269,14 +276,14 @@ pub enum Order {
     Command((u32, u32)),
     /// `rtw_leave_lps`.
     Wake,
+    /// `rtw_set_txrx_1ss`.
+    SingleStream(bool),
 }
 
 /// What a step of the arbiter leaves undone.
 #[derive(Debug, Default, Eq, PartialEq)]
 pub struct Run {
     pub orders: Vec<Order>,
-    /// What this arbiter does not yet do that the moment called for.
-    pub limitation: Option<&'static str>,
 }
 
 /// What waits in the firmware's answer: `rtw_coex_info_request`.
@@ -318,6 +325,8 @@ fn due(timer: &mut Option<u64>, now: u64) -> bool {
 /// `coex_stat`'s Bluetooth counters, from `rtw_coex_monitor_bt_ctr`.
 #[derive(Debug, Default)]
 struct Counters {
+    high_tx: u32,
+    high_rx: u32,
     low_tx: u32,
     low_rx: u32,
     /// `bt_ctr_ok`.
@@ -363,6 +372,14 @@ fn tdma(para: [u8; 5]) -> (u32, u32) {
 fn query(operation: u8, parameter: u8) -> (u32, u32) {
     (
         COMMAND_QUERY_BT_MP | (u32::from(operation) << 16) | (u32::from(parameter) << 24),
+        0,
+    )
+}
+
+/// `rtw_fw_coex_query_hid_info`.
+fn query_hid(kind: u8, data: u8) -> (u32, u32) {
+    (
+        COMMAND_QUERY_HID | (u32::from(kind) << 8) | (u32::from(data) << 16),
         0,
     )
 }
@@ -421,12 +438,17 @@ pub struct Coex {
     /// `bt_iqk_state`.
     calibration: u8,
     bluetooth: Bluetooth,
+    hid: HidDevices,
     counters: Counters,
     timers: Timers,
     /// What the mailbox holds and what waits behind it, with when to stop
     /// waiting for an answer.
     asked: Option<(Request, u64)>,
     requests: VecDeque<Request>,
+    /// `coex_stat->wl_coex_mode`.
+    mode: Option<Mode>,
+    /// `coex_stat->wl_mimo_ps`.
+    single_stream: bool,
     /// `coex_stat->gnt_workaround_state`.
     workaround: Option<Mode>,
     /// `coex_dm->cur_ant_pos_type`.
@@ -492,10 +514,13 @@ impl Coex {
             inquiry_remains: false,
             calibration: 0,
             bluetooth: Bluetooth::default(),
+            hid: HidDevices::default(),
             counters: Counters::default(),
             timers: Timers::default(),
             asked: None,
             requests: VecDeque::new(),
+            mode: None,
+            single_stream: false,
             workaround: None,
             phase: None,
             bluetooth_power: 0,
@@ -766,11 +791,11 @@ impl Coex {
     }
 
     /// `rtw8822c_coex_cfg_gnt_fix`.
-    fn gnt_fix<I: Io>(&mut self, step: &mut Step<'_, I>, mode: Mode) -> Result<(), Error> {
-        if self.workaround == Some(mode) {
+    fn gnt_fix<I: Io>(&mut self, step: &mut Step<'_, I>) -> Result<(), Error> {
+        if self.workaround == self.mode {
             return Ok(());
         }
-        self.workaround = Some(mode);
+        self.workaround = self.mode;
         let mut rf_1 = if (self.version == 0 && self.five_ghz) || self.freerun {
             0x40021
         } else {
@@ -785,11 +810,19 @@ impl Coex {
             rf.write(Path::B, RF_MODOPT, RF_MASK, rf_1)?;
         }
         let io = &mut *step.io;
-        Self::write8_set(io, REG_ANAPAR + 2, ANAPAR_BTPS)?;
-        Self::write8_clear(io, REG_RSTB_SEL + 1, DAC_OFF_ENABLE)?;
-        Self::write8_set(io, REG_RSTB_SEL + 3, DAC_OFF_ENABLE)?;
+        let free = self.mode == Some(Mode::Free);
+        if free {
+            Self::write8_clear(io, REG_ANAPAR + 2, ANAPAR_BTPS)?;
+        } else {
+            Self::write8_set(io, REG_ANAPAR + 2, ANAPAR_BTPS)?;
+            Self::write8_clear(io, REG_RSTB_SEL + 1, DAC_OFF_ENABLE)?;
+            Self::write8_set(io, REG_RSTB_SEL + 3, DAC_OFF_ENABLE)?;
+        }
         Self::write8_set(io, REG_IGN_GNTBT4, IGNORE_GNT_BT)?;
-        if mode == Mode::FiveGhz || self.five_ghz || !self.shared {
+        if free {
+            Self::write8_set(io, REG_IGN_GNT_BT1, IGNORE_GNT_BT)?;
+            Self::write8_set(io, REG_NOMASK_TXBT, NOMASK_TXBT)
+        } else if self.mode == Some(Mode::FiveGhz) || self.five_ghz || !self.shared {
             if self.version >= 3 {
                 Self::write8_clear(io, REG_IGN_GNT_BT1, IGNORE_GNT_BT)?;
                 Self::write8_set(io, REG_NOMASK_TXBT, NOMASK_TXBT)
@@ -940,7 +973,8 @@ impl Coex {
     /// `rtw_coex_set_tdma`, from `rtw_coex_power_save_state` of a schedule
     /// firmware keeps only awake or of none.
     fn set_tdma<I>(&mut self, step: &mut Step<'_, I>, para: [u8; 5]) {
-        self.stays_awake = para[0] & (1 << 4) != 0 && para[0] & (1 << 5) == 0;
+        self.stays_awake =
+            (para[0] & (1 << 4) != 0 && para[0] & (1 << 5) == 0) || self.mode == Some(Mode::Free);
         if step.wifi.asleep {
             if self.stays_awake {
                 step.command(tdma([0; 5]));
@@ -988,11 +1022,12 @@ impl Coex {
     }
 
     /// `rtw_coex_update_wl_ch_info`, with no 5 GHz hop map: a shared antenna
-    /// leaves Bluetooth all of 2.4 GHz, and a separate one has it skip the
+    /// leaves Bluetooth all of 2.4 GHz, and one of its own has it skip the
     /// channel.
     fn channel_info<I>(&self, step: &mut Step<'_, I>, connected: bool) {
         let (mut link, mut channel, mut width) = (0, 0, 0);
-        if connected && step.wifi.channel != 0 && !(self.shared && step.wifi.channel <= 14) {
+        let leaves_all = self.shared && self.mode != Some(Mode::Free);
+        if connected && step.wifi.channel != 0 && !(leaves_all && step.wifi.channel <= 14) {
             channel = step.wifi.channel;
             width = step.wifi.width;
             if channel <= 14 {
@@ -1061,7 +1096,7 @@ impl Coex {
         self.five_ghz = match step.reason {
             Reason::FiveGhz => true,
             Reason::Scanning | Reason::Connecting | Reason::TwoGhz => false,
-            _ => wifi.five_ghz,
+            Reason::Bluetooth | Reason::Sleep | Reason::Media | Reason::Status => wifi.five_ghz,
         };
         Ok(())
     }
@@ -1118,6 +1153,9 @@ impl Coex {
 
     /// What `plan` settles, in the order rtw88's actions take it.
     fn enact<I: Io>(&mut self, step: &mut Step<'_, I>, plan: Plan) -> Result<(), Error> {
+        if plan.free {
+            self.mode = Some(Mode::Free);
+        }
         if plan.freerun {
             self.freerun = true;
             self.channel_info(step, true);
@@ -1144,26 +1182,61 @@ impl Coex {
             return Ok(());
         }
         self.freerun = false;
-        let mode = if self.five_ghz {
+        if self.five_ghz {
             // rtw_coex_action_wl_under5g.
+            self.mode = Some(if self.bluetooth.game_controller && self.linkscan {
+                Mode::Free
+            } else {
+                Mode::FiveGhz
+            });
             self.set_path(step.io, true, Phase::FiveGhz)?;
             self.set_rf(step, RECEIVE_RF[0])?;
             self.scoreboard(step.io, SCORE_FIX_2M, false)?;
             let case = if self.shared { 0 } else { 100 };
             self.table(step, false, case)?;
             self.tdma(step, false, case, false)?;
-            Mode::FiveGhz
         } else {
+            self.mode = Some(Mode::TwoGhz);
             self.enact(step, self.plan())?;
-            Mode::TwoGhz
-        };
-        self.gnt_fix(step, mode)?;
-        let idle = self.bluetooth.status == Status::NotConnectedIdle;
-        self.limit_transmissions(step.io, !self.five_ghz && !idle)?;
-        if self.bluetooth.hid {
-            step.run.limitation = Some("telling a Bluetooth game controller from other input");
         }
-        Ok(())
+        let free = self.mode == Some(Mode::Free);
+        self.set_single_stream(step, free && reason == Reason::Media, free);
+        self.gnt_fix(step)?;
+        let idle = self.bluetooth.status == Status::NotConnectedIdle;
+        self.limit_transmissions(step.io, !self.five_ghz && !idle)
+    }
+
+    /// `rtw_coex_mimo_ps`.
+    fn set_single_stream<I>(&mut self, step: &mut Step<'_, I>, force: bool, single: bool) {
+        if force || single != self.single_stream {
+            self.single_stream = single;
+            step.run.orders.push(Order::SingleStream(single));
+            self.channel_info(step, step.wifi.connected);
+        }
+    }
+
+    /// `rtw_coex_bt_hid_info_notify`.
+    fn hid_report<I: Io>(&mut self, step: &mut Step<'_, I>, bytes: [u8; 8]) -> Result<(), Error> {
+        let Some(game) = self.hid.report(bytes) else {
+            return Ok(());
+        };
+        if game == self.bluetooth.game_controller {
+            return Ok(());
+        }
+        self.bluetooth.game_controller = game;
+        self.run_coex(step, Reason::Status)
+    }
+
+    /// `rtw_coex_query_bt_hid_list`.
+    fn query_hid_devices<I>(&self, step: &mut Step<'_, I>) {
+        let high_priority = self.counters.high_tx + self.counters.high_rx;
+        if !self.bluetooth.may_hold_a_controller(high_priority) {
+            return;
+        }
+        step.command(query_hid(HID_LIST, 0));
+        for handle in self.hid.unknown() {
+            step.command(query_hid(HID_DEVICE, handle));
+        }
     }
 
     /// `rtw_coex_scan_notify` of a start on 2.4 GHz.
@@ -1262,6 +1335,8 @@ impl Coex {
         io.write8(REG_BT_COEX_ENH_INTR_CTRL, COUNT_BLUETOOTH)?;
         let (high_tx, high_rx) = (high & 0xffff, high >> 16);
         let (low_tx, low_rx) = (low & 0xffff, low >> 16);
+        self.counters.high_tx = high_tx;
+        self.counters.high_rx = high_rx;
         self.counters.low_tx = low_tx;
         self.counters.low_rx = low_rx;
         let saturated = high_rx > 60000 && high_tx == 60000 && low_rx > 60000 && low_tx == 60000;
@@ -1371,7 +1446,7 @@ impl Coex {
                 self.scoreboard(step.io, SCORE_ACTIVE, true)?;
                 self.set_path(step.io, true, Phase::TwoGhz)?;
                 Self::priority(step.io, PRIORITY_RX_CCK, true)?;
-                self.run_coex(&mut step, Reason::Status)?;
+                self.run_coex(&mut step, Reason::Media)?;
                 self.channel_info(&mut step, true);
             }
             Event::Media { connected: false } => {
@@ -1397,9 +1472,11 @@ impl Coex {
             Event::Watchdog => {
                 if !self.sleeping || self.stays_awake {
                     self.read_counters(step.io)?;
+                    self.query_hid_devices(&mut step);
                 }
             }
             Event::Bluetooth(bytes) => self.bluetooth_report(&mut step, bytes)?,
+            Event::BluetoothHid(bytes) => self.hid_report(&mut step, bytes)?,
             Event::Answer(payload) => self.answered(&mut step, payload),
             Event::Tick => self.tick(&mut step)?,
         }
@@ -1562,7 +1639,7 @@ mod tests {
             .iter()
             .filter_map(|order| match order {
                 Order::Command(command) => Some(*command),
-                Order::Wake => None,
+                _ => None,
             })
             .collect()
     }
@@ -1827,6 +1904,34 @@ mod tests {
         assert!(rig.coex.reenabling);
         rig.tick_to(rig.now + 15 * SECOND_US);
         assert!(!rig.coex.reenabling);
+    }
+
+    #[test]
+    fn a_game_controller_takes_an_antenna_of_its_own() {
+        let mut rig = Rig::new(true);
+        rig.bluetooth(1 | 0x20, 0, 0);
+        rig.bus
+            .write32(REG_BT_ACT_STATISTICS, 500 | (500 << 16))
+            .unwrap();
+        let run = rig.event(Event::Watchdog);
+        assert_eq!(commands(&run), [query_hid(HID_LIST, 0)]);
+        rig.event(Event::BluetoothHid([0, 6, 0, 1, 3, 0xff, 0xff, 0xff]));
+        let run = rig.event(Event::Watchdog);
+        assert!(commands(&run).contains(&query_hid(HID_DEVICE, 3)));
+        let run = rig.event(Event::BluetoothHid([0, 6, 1, 3, 0x46, 0x58, 0x62, 0x6f]));
+        assert!(run.orders.contains(&Order::SingleStream(true)));
+        assert_eq!(rig.bus.word(REG_BT_COEX_TABLE1), SHARED_TABLES[33].wifi);
+        assert_eq!(rig.coex.mode, Some(Mode::Free));
+        assert_eq!(rig.bus.get(REG_NOMASK_TXBT) & NOMASK_TXBT, NOMASK_TXBT);
+        // Bluetooth now hops around the channel, shared antenna or not.
+        let info = (
+            COMMAND_CHANNEL_INFO | (1 << 8) | (6 << 16) | (0x24 << 24),
+            0,
+        );
+        assert!(commands(&run).contains(&info));
+        let run = rig.event(Event::BluetoothHid([0, 6, 0, 0, 0, 0, 0, 1]));
+        assert!(run.orders.contains(&Order::SingleStream(false)));
+        assert_eq!(rig.coex.mode, Some(Mode::TwoGhz));
     }
 
     #[test]

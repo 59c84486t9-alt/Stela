@@ -30,6 +30,8 @@ pub(super) struct Plan {
     pub toggle: Option<u8>,
     /// `rtw_coex_action_freerun`.
     pub freerun: bool,
+    /// `COEX_WLINK_2GFREE`.
+    pub free: bool,
 }
 
 /// The normal `wl_rf_para_rx[0]`.
@@ -45,6 +47,7 @@ impl Plan {
             four_slot: false,
             toggle: None,
             freerun: false,
+            free: false,
         }
     }
 
@@ -62,6 +65,13 @@ impl Plan {
         self.toggle = toggle;
         self
     }
+
+    /// `COEX_WLINK_2GFREE` at `rf`.
+    fn free(mut self, rf: RfLevels) -> Self {
+        self.free = true;
+        self.rf = rf;
+        self
+    }
 }
 
 impl Coex {
@@ -77,6 +87,9 @@ impl Coex {
         }
         if self.sleeping && !self.stays_awake {
             return self.action_native_sleep();
+        }
+        if bluetooth.game_controller && self.connected {
+            return self.action_game_controller();
         }
         if bluetooth.certification {
             return self.action_wifi_only();
@@ -124,11 +137,45 @@ impl Coex {
 
     /// `rtw_coex_action_wl_native_lps`.
     fn action_native_sleep(&self) -> Plan {
-        if self.shared {
+        let plan = if self.shared {
             Plan::new(28, 0)
         } else {
             Plan::new(100, 100)
+        };
+        if self.bluetooth.game_controller {
+            plan.free(self.free_rf())
+        } else {
+            plan
         }
+    }
+
+    /// `wl_rf_para_tx[6]` or `wl_rf_para_rx[5]`, for a controller's sake.
+    fn free_rf(&self) -> RfLevels {
+        if self.transmitting {
+            TRANSMIT_RF[6]
+        } else {
+            RECEIVE_RF[5]
+        }
+    }
+
+    /// `rtw_coex_action_bt_game_hid`.
+    fn action_game_controller(&self) -> Plan {
+        let bluetooth = &self.bluetooth;
+        if !self.shared {
+            return Plan::new(121, if self.rssi_high[1] { 112 } else { 113 });
+        }
+        let table = if bluetooth.certification {
+            2
+        } else if self.linkscan || bluetooth.hid {
+            33
+        } else if bluetooth.setting_up || bluetooth.inquiring {
+            0
+        } else if bluetooth.a2dp {
+            34
+        } else {
+            33
+        };
+        Plan::new(table, 0).free(self.free_rf())
     }
 
     /// `rtw_coex_action_bt_relink`.

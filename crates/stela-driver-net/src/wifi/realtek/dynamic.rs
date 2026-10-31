@@ -802,6 +802,46 @@ impl Dynamic {
         Ok(())
     }
 
+    /// `rtw8822c_config_trx_mode` for path A alone, or both.
+    pub fn set_paths<I: Io>(io: &mut I, single: bool) -> Result<(), io::Error> {
+        let both = u32::from(!single);
+        let second_path = if single { 0x11111 } else { 0x33312 };
+        let paths = if single { 1 } else { 3 };
+        for (register, mask, value) in [
+            (0x1800, 0xfffff, 0x33312),
+            (0x4100, 0xfffff, second_path),
+            (0x1a2c, 0x00060000, both),
+            (0x1a2c, 0x00600000, both),
+            (0x1a04, 0x0f000000, both),
+            (0x1d30, 0x300, both),
+            (0x1d30, 0x600000, both),
+            (0xc44, 1 << 17, both),
+            (0xc54, 1 << 20, both),
+            (0xc38, 1 << 24, both),
+            (0x824, 0x0f000000, paths),
+            (0x824, 0x000f0000, paths),
+            (0x1a04, 0xf0000000, 8),
+        ] {
+            set_mask(io, register, mask, value)?;
+        }
+        reset_baseband(io)?;
+        let (antennas, legacy_mask, legacy) = if single {
+            (0x11, 0xff, 0)
+        } else {
+            (0x31, 0xffff, 0x0400)
+        };
+        set_mask(io, 0x820, 0xff, antennas)?;
+        set_mask(io, 0x1e2c, legacy_mask, legacy)?;
+        reset_baseband(io)?;
+        reset_baseband(io)?;
+        // rtw8822c_toggle_igi.
+        let gain = mask_of(io, 0x1d70, 0x7f)?;
+        set_mask(io, 0x1d70, 0x7f, gain - 2)?;
+        set_mask(io, 0x1d70, 0x7f00, gain - 2)?;
+        set_mask(io, 0x1d70, 0x7f, gain)?;
+        set_mask(io, 0x1d70, 0x7f00, gain)
+    }
+
     /// `rtw_phy_tx_path_div_select`: one stream leaves by the stronger path.
     pub fn choose_path<I: Io>(&mut self, io: &mut I) -> Result<(), io::Error> {
         let mean = |path: usize| match self.path_counts[path] {
@@ -1417,6 +1457,22 @@ mod tests {
             dynamic.gain(0, false);
         }
         assert_eq!(dynamic.current_gain(), MAX_COVERAGE);
+    }
+
+    #[test]
+    fn one_stream_stands_on_path_a_and_two_come_back() {
+        let mut bus = Bus(BTreeMap::new());
+        bus.write32(0x1d70, 0x2020).unwrap();
+        Dynamic::set_paths(&mut bus, true).unwrap();
+        assert_eq!(bus.get(0x4100) & 0xfffff, 0x11111);
+        assert_eq!(bus.get(0x820) & 0xff, 0x11);
+        assert_eq!(bus.get(0x824), 0x0101_0000);
+        assert_eq!(bus.get(0x1d70), 0x2020, "the gain toggled back");
+        Dynamic::set_paths(&mut bus, false).unwrap();
+        assert_eq!(bus.get(0x4100) & 0xfffff, 0x33312);
+        assert_eq!(bus.get(0x820) & 0xff, 0x31);
+        assert_eq!(bus.get(0x1e2c) & 0xffff, 0x0400);
+        assert_eq!(bus.get(0x824), 0x0303_0000);
     }
 
     #[test]

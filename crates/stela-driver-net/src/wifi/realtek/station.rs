@@ -72,6 +72,9 @@ pub const PORT: u8 = 0;
 const PAIRWISE_CAM: u8 = 4;
 /// `RTW_CAM_AES`.
 const CAM_AES: u8 = 4;
+/// `WLAN_HT_SMPS_CONTROL_DISABLED` and `WLAN_HT_SMPS_CONTROL_STATIC`.
+const SMPS_DISABLED: u8 = 0;
+const SMPS_STATIC: u8 = 1;
 /// `IEEE80211_MIN_AMPDU_BUF`'s window, which `HT_RX_REORDER_BUF_TIMEOUT` serves.
 const RECEIVE_WINDOW: u16 = 64;
 /// mac80211's `max_tx_aggregation_subframes`, which rtw88 leaves alone.
@@ -150,6 +153,10 @@ pub trait Device {
     /// The beacons' interval and DTIM period.
     fn set_beacon(&mut self, _interval_tu: u16, _dtim_period: u8) -> Result<(), String> {
         Ok(())
+    }
+    /// `rtw_vif_smps_iter`: the next change to one stream or back to two.
+    fn stream_change(&mut self) -> Option<bool> {
+        None
     }
     /// A look at the Bluetooth arbiter's timers, at `now`.
     fn coexist(&mut self, _now: u64) -> Result<(), String> {
@@ -729,6 +736,23 @@ impl<D: Device> Rtl8822c<D> {
                 .is_some_and(follow::Following::may_sleep);
         if allowed && !busy {
             self.power_save(true)?;
+        }
+        Ok(())
+    }
+
+    /// `ieee80211_request_smps` of each change the radio made.
+    fn announce_streams(&mut self) -> Result<(), Error> {
+        while let Some(single) = self.device.stream_change() {
+            if let Some(context) = &self.context
+                && context.negotiated().ht.is_some()
+            {
+                let control = if single { SMPS_STATIC } else { SMPS_DISABLED };
+                let frame = self
+                    .station
+                    .spatial_power_save(context, control)
+                    .map_err(Error::Station)?;
+                self.outbox.push_back((None, frame));
+            }
         }
         Ok(())
     }
@@ -1517,6 +1541,7 @@ impl<D: Device> Rtl8822c<D> {
         let now = self.clock.now_us();
         self.take_incoming(now)?;
         Self::hardware(self.device.coexist(now))?;
+        self.announce_streams()?;
         self.watchdog(now)?;
         self.walk(now)?;
         self.release_expired(now);
