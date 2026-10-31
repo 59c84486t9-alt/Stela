@@ -165,6 +165,11 @@ impl LocalRegisters for CoreCounters {
     fn register(&self, encoding: Encoding, write: Option<u64>) -> Option<u64> {
         CoreCounters::register(self, encoding, write)
     }
+
+    fn storage(&self, encoding: Encoding) -> Option<u64> {
+        let counter = self.of_register(encoding)?;
+        Some(self.value(counter).as_ptr() as u64)
+    }
 }
 
 impl MmioDevice for CoreCounters {
@@ -229,8 +234,12 @@ mod tests {
         let mut latch = InterruptLatch::new();
         let mut access = Access::new(1, 0, &mut latch);
         let mut block = CoreCounters::new(layout(0x8112).unwrap());
-        // The handle a PE keeps reaches the same counter.
+        // The handle a PE keeps reaches the same counter, as does a read of
+        // its storage.
         assert_eq!(block.clone().register(AON_1, Some(0x1234_5678)), Some(0));
+        let storage = LocalRegisters::storage(&block, AON_1).unwrap() as *const u64;
+        // SAFETY: the address of a live counter's aligned word.
+        assert_eq!(unsafe { storage.read() }, 0x1234_5678);
         assert_eq!(
             block.read(AON + AON_STRIDE, Width::Double, &mut access),
             Ok(0x1234_5678)

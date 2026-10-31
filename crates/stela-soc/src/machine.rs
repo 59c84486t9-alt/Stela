@@ -774,6 +774,40 @@ fn reset_reason(access: &Access<'_>) -> Option<Reset> {
     })
 }
 
+/// What a PE reaches of the board's registers outside the devices' lock.
+struct PeRegisters {
+    counters: Option<CoreCounters>,
+    ipi_status: Option<Arc<core::sync::atomic::AtomicU64>>,
+}
+
+impl PeRegisters {
+    fn ipi_status(&self, encoding: Encoding) -> Option<&core::sync::atomic::AtomicU64> {
+        let status = stela_engine::machine::fast_ipi::Register::Status;
+        (encoding == status.encoding())
+            .then_some(self.ipi_status.as_deref())
+            .flatten()
+    }
+}
+
+impl LocalRegisters for PeRegisters {
+    fn register(&self, encoding: Encoding, write: Option<u64>) -> Option<u64> {
+        self.counters
+            .as_ref()
+            .and_then(|counters| LocalRegisters::register(counters, encoding, write))
+            .or_else(|| {
+                let status = self.ipi_status(encoding).filter(|_| write.is_none())?;
+                Some(status.load(core::sync::atomic::Ordering::Relaxed))
+            })
+    }
+
+    fn storage(&self, encoding: Encoding) -> Option<u64> {
+        self.counters
+            .as_ref()
+            .and_then(|counters| counters.storage(encoding))
+            .or_else(|| Some(self.ipi_status(encoding)?.as_ptr() as u64))
+    }
+}
+
 impl Devices for AppleDevices {
     fn pc_sample_target(&self, physical: u64, bytes: u8) -> Option<usize> {
         self.pc_samplers
@@ -965,9 +999,15 @@ impl Devices for AppleDevices {
     }
 
     fn local_registers(&self, cpu: usize) -> Option<Arc<dyn LocalRegisters>> {
-        let device = self.core_counters.get(cpu).copied().flatten()?;
-        let counters = self.bus.device::<CoreCounters>(device)?;
-        Some(Arc::new(counters.clone()))
+        let device = self.core_counters.get(cpu).copied().flatten();
+        let counters = device.and_then(|device| self.bus.device::<CoreCounters>(device));
+        let ipi_status = self.ipi.as_ref().and_then(|ipi| ipi.status(cpu));
+        (counters.is_some() || ipi_status.is_some()).then(|| {
+            Arc::new(PeRegisters {
+                counters: counters.cloned(),
+                ipi_status,
+            }) as Arc<dyn LocalRegisters>
+        })
     }
 
     fn serves_register(&self, encoding: Encoding) -> bool {
