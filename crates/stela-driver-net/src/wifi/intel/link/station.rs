@@ -136,6 +136,7 @@ enum Then {
     Key {
         pairwise: bool,
         index: u8,
+        ap: Mac,
         ticket: Box<InstallTicket>,
     },
     /// The port's commands finished: firmware rate selection may widen.
@@ -188,6 +189,10 @@ struct Key {
     index: u8,
     flags: u32,
     acknowledged: bool,
+    /// The AP on the link the key belongs to.
+    ap: Mac,
+    /// Whether firmware holds the key, which a dormant link's does not.
+    fitted: bool,
 }
 
 /// A data frame waiting for its queue or its queue's room.
@@ -849,12 +854,13 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             Then::Key {
                 pairwise,
                 index,
+                ap,
                 ticket,
             } => {
                 let key = client
                     .keys
                     .iter_mut()
-                    .find(|key| key.pairwise == pairwise && key.index == index)
+                    .find(|key| key.pairwise == pairwise && key.index == index && key.ap == ap)
                     .ok_or(Error::Refused("key"))?;
                 key.slot
                     .complete_install(*ticket, InstallOutcome::Accepted)
@@ -1374,10 +1380,15 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             .station
             .pairwise_peer()
             .ok_or(Error::Refused("no peer"))?;
+        let ap = client
+            .context
+            .as_ref()
+            .ok_or(Error::Refused("no context"))?
+            .bssid();
         let scope = if pairwise {
             KeyScope::Pairwise(peer)
         } else {
-            KeyScope::Group(peer)
+            KeyScope::Group(ap)
         };
         // SAFETY: the counter gives each key of the adapter its own slot.
         let mut slot = unsafe { KeySlot::new(client.next_slot) }.map_err(Error::Key)?;
@@ -1396,7 +1407,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         if let Some(old) = client
             .keys
             .iter()
-            .position(|key| key.pairwise == pairwise && key.index == index)
+            .position(|key| key.pairwise == pairwise && key.index == index && key.ap == ap)
         {
             let old = client.keys.remove(old);
             client.command(
@@ -1410,6 +1421,8 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             index,
             flags,
             acknowledged: false,
+            ap,
+            fitted: true,
         });
         client.steps.push_back(Step::Command {
             id: commands::SECURITY_KEY,
@@ -1417,6 +1430,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             then: Then::Key {
                 pairwise,
                 index,
+                ap,
                 ticket: Box::new(ticket),
             },
         });
@@ -1465,7 +1479,8 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                 commands::remove_block_ack(version, id, tid),
             );
         }
-        for key in core::mem::take(&mut self.client.keys) {
+        let fitted = core::mem::take(&mut self.client.keys);
+        for key in fitted.into_iter().filter(|key| key.fitted) {
             self.client.command(
                 commands::SECURITY_KEY,
                 commands::remove_key(key.index, key.flags),
@@ -2111,9 +2126,57 @@ impl<Q: BootIo, B: BiosIo> Radio for Wifi<Q, B> {
         self.install(pairwise, index, material, receive)
     }
 
-    fn install_link_key(&mut self, _: u8, _: u8, _: &[u8], _: ReplaySeed) -> Result<(), Error> {
-        self.client
-            .unsupported("the group key of an MLO link that stays inactive");
+    /// mac80211 keeps a dormant link's key and tells the driver as the link
+    /// activates, so this one stands installed without reaching firmware.
+    fn install_link_key(
+        &mut self,
+        link_id: u8,
+        index: u8,
+        material: &[u8],
+        receive: ReplaySeed,
+    ) -> Result<(), Error> {
+        let client = &mut self.client;
+        let (_, cipher) = client.ciphers.ok_or(Error::Refused("no ciphers"))?;
+        let flags = commands::key_flags(cipher, false, false)
+            .ok_or(Error::Unsupported("the cipher on Intel Wi-Fi"))?;
+        let ap = client
+            .station
+            .link_contexts()
+            .iter()
+            .find(|context| {
+                context
+                    .affiliation()
+                    .is_some_and(|link| link.link_id == link_id)
+            })
+            .ok_or(Error::Refused("no such link"))?
+            .bssid();
+        // SAFETY: the counter gives each key of the adapter its own slot.
+        let mut slot = unsafe { KeySlot::new(client.next_slot) }.map_err(Error::Key)?;
+        client.next_slot = client.next_slot.wrapping_add(1);
+        let ticket = slot
+            .begin_install(
+                index,
+                cipher,
+                material,
+                receive,
+                KeyScope::Group(ap),
+                TransmitSeed::RECEIVE_ONLY,
+            )
+            .map_err(Error::Key)?;
+        slot.complete_install(ticket, InstallOutcome::Accepted)
+            .map_err(Error::Key)?;
+        client
+            .keys
+            .retain(|key| key.pairwise || key.index != index || key.ap != ap);
+        client.keys.push(Key {
+            slot,
+            pairwise: false,
+            index,
+            flags,
+            acknowledged: true,
+            ap,
+            fitted: false,
+        });
         Ok(())
     }
 
@@ -2172,13 +2235,19 @@ impl<Q: BootIo, B: BiosIo> Radio for Wifi<Q, B> {
             .iter()
             .find(|key| key.pairwise)
             .ok_or(Error::Refused("no pairwise key"))?;
-        let gtk = client
-            .keys
-            .iter()
-            .rev()
-            .find(|key| !key.pairwise)
-            .ok_or(Error::Refused("no group key"))?;
-        let links = [(&ptk.slot, &gtk.slot)];
+        let links = client
+            .station
+            .on_air()
+            .map(|link| {
+                let gtk = client
+                    .keys
+                    .iter()
+                    .rev()
+                    .find(|key| !key.pairwise && key.ap == link.ap)
+                    .ok_or(Error::Refused("no group key"))?;
+                Ok((&ptk.slot, &gtk.slot))
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
         if client.station.requires_protected_management() {
             client
                 .station

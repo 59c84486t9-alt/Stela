@@ -15,7 +15,7 @@ use crate::wifi::intel::{
 use crate::wifi::network::{Network, Secret};
 use crate::wifi::sae::{Derivation, Exchange, Frame, H2E_RSNXE, Template};
 use crate::wifi::station::{Phase as Peering, wire::multi_link::Basic};
-use crate::wifi::supplicant::tests::Authenticator;
+use crate::wifi::supplicant::{self, tests::Authenticator};
 use crate::{Link, Mac};
 use alloc::{boxed::Box, sync::Arc};
 use stela_driver_base::entropy::{Entropy, EntropyError};
@@ -1368,13 +1368,34 @@ fn an_ap_mld_takes_the_station_on_a_link_of_its_own_and_gives_it_back() {
         Mac(AP_MLD),
         Mac(LOCAL),
         security.element(),
-    );
+    )
+    .naming_station_mld();
     let local = data(LINK, false, [0x88, 0x8e], &ap.message_1(), None);
     device.inject(wifi.radio().rom().unwrap(), &local);
     let answered = run(&mut wifi, &mut device, |_, device, _| device.air.len() > 3);
     assert!(answered, "{:?}", wifi.radio().error());
     assert_eq!(device.air[3][4..10], AP_MLD);
     assert_eq!(device.air[3][10..16], LOCAL);
+    ap.message_2(eapol(&device.air[3]));
+    let link = supplicant::Link {
+        link_id: 3,
+        local: Mac(LINK),
+        ap: Mac(AP),
+        rsn: RSN_SAE.to_vec(),
+        rsnxe: Some(H2E_RSNXE.to_vec()),
+        accepted: true,
+    };
+    let message = ap.mld_message_3(&link, &supplicant::tests::link_keys(3, 1, 0x50));
+    let local = data(LINK, false, [0x88, 0x8e], &message, None);
+    device.inject(wifi.radio().rom().unwrap(), &local);
+    // The link's AP holds the link's group key, which alone opens the port.
+    let up = run(&mut wifi, &mut device, |_, _, up| up);
+    assert!(
+        up,
+        "{:?} {:?}",
+        wifi.radio().error(),
+        device.commands.last()
+    );
     let added = device.configuration.len();
     wifi.radio_mut().deauthenticate(3).unwrap();
     let left = run(&mut wifi, &mut device, |wifi, _, _| {

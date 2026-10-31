@@ -121,6 +121,22 @@ impl Authenticator {
         }
     }
 
+    /// The same authenticator as an AP MLD's: message 2 names the station MLD.
+    pub(crate) fn naming_station_mld(mut self) -> Self {
+        put_kde(&mut self.station_rsn, MAC_ADDRESS_KDE, &self.station.0);
+        self
+    }
+
+    /// Message 3 of an AP MLD, with `link` its accepted link and `keys` that
+    /// link's.
+    pub(crate) fn mld_message_3(&mut self, link: &Link, keys: &[u8]) -> Vec<u8> {
+        let mut data = link.rsn.clone();
+        put_kde(&mut data, MAC_ADDRESS_KDE, &self.own.0);
+        data.extend_from_slice(&link_kde(link));
+        data.extend_from_slice(keys);
+        self.signed(PAIRWISE | ACK | MIC | INSTALL | SECURE | ENCRYPTED, &data)
+    }
+
     pub(crate) fn message_1(&mut self) -> Vec<u8> {
         self.replay += 1;
         build(
@@ -424,7 +440,7 @@ fn link_kde(link: &Link) -> Vec<u8> {
 }
 
 /// An MLO GTK KDE of `link_id` with PN 3, and its MLO IGTK KDE with IPN 9.
-fn link_keys(link_id: u8, index: u8, fill: u8) -> Vec<u8> {
+pub(crate) fn link_keys(link_id: u8, index: u8, fill: u8) -> Vec<u8> {
     let mut gtk = vec![index | link_id << 4, 3, 0, 0, 0, 0, 0];
     gtk.extend_from_slice(&[fill; 16]);
     let mut igtk = vec![4, 0, 9, 0, 0, 0, 0, 0, link_id << 4];
