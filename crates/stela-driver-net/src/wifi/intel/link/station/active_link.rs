@@ -382,10 +382,12 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         let power_version = version_of(queue.firmware(), commands::MAC_POWER);
         let client = &mut self.client;
         if active {
-            client.command(
-                commands::LINK_CONFIG,
-                commands::activation(source.link, false),
-            );
+            let deactivation = if client.going_quiet(gone) {
+                commands::silent_deactivation(source.link)
+            } else {
+                commands::activation(source.link, false)
+            };
+            client.command(commands::LINK_CONFIG, deactivation);
         }
         client.drop_group_keys(gone.bssid(), before);
         client.move_resources(&tids, before | after, after);

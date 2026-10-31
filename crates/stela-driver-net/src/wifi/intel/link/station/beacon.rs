@@ -321,6 +321,14 @@ impl Client {
         }
     }
 
+    /// `silent_deactivation`: `link` is going quiet for a switch.
+    pub(super) fn going_quiet(&self, link: &AssociationContext) -> bool {
+        self.tracking.watch.switch.is_some_and(|active| {
+            active.announced.block_tx
+                && (active.ap == link.bssid() || active.ap == link.beacon().transmitter)
+        })
+    }
+
     /// `iwl_mvm_pre_channel_switch` and `iwl_mld_pre_channel_switch`. The
     /// newest firmware times a switch by itself.
     fn schedule_switch(&mut self, firmware: &Firmware<'_>, now: u64) {

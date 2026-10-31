@@ -2116,6 +2116,7 @@ fn a_fading_link_ends_emlsr_and_the_other_stays() {
     );
     let links = links_since(&device, exit);
     assert!(links.contains(&(3, 0, 0)), "{links:?}");
+    assert_eq!(leaving_block_tx(&device, exit), 0);
     assert!(wifi.carrier());
     assert!(!wifi.radio().emlsr_active());
 }
@@ -2170,6 +2171,34 @@ fn a_failed_deactivation_loses_the_connection() {
     device.inject(wifi.radio().rom().unwrap(), &notify(3, 0xf7, &body));
     let lost = run(&mut wifi, &mut device, |_, _, up| !up);
     assert!(lost, "{:?}", wifi.radio().error());
+}
+
+/// `block_tx` of the deactivation after `exit`.
+fn leaving_block_tx(device: &Device<'_>, exit: usize) -> u8 {
+    device.configuration[exit..]
+        .iter()
+        .find(|(opcode, bytes)| {
+            *opcode == 9 && word(bytes, 0) == 2 && word(bytes, 24) == 1 && word(bytes, 28) == 0
+        })
+        .unwrap()
+        .1[32]
+}
+
+#[test]
+fn firmware_sends_nothing_on_an_emlsr_link_a_quiet_switch_takes() {
+    let native = Native::default();
+    let (mut wifi, mut device, _) = emlsr_mld(&native);
+    let exit = device.configuration.len();
+    device.inject(
+        wifi.radio().rom().unwrap(),
+        &announcing_beacon([60, 60], &[37, 3, 1, 36, 5]),
+    );
+    assert!(
+        lowered(&mut wifi, &mut device, exit),
+        "{:?}",
+        wifi.radio().error()
+    );
+    assert_eq!(leaving_block_tx(&device, exit), 1);
 }
 
 #[test]
