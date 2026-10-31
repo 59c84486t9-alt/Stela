@@ -6,7 +6,7 @@ use super::CLAIMED_DISPLAYS;
 use crate::Result;
 use crate::{native_mmio, output};
 use alloc::{boxed::Box, format, sync::Arc, vec, vec::Vec};
-use core::{cell::RefCell, ops::Range, ptr::NonNull};
+use core::{cell::RefCell, mem::ManuallyDrop, ops::Range, ptr::NonNull};
 use stela_boot_core::remapping::{self, Present};
 use stela_contracts::refuse;
 use stela_drivers::{
@@ -416,11 +416,11 @@ impl Taken {
         // mastering it enables after mapping through this domain.
         let requester = unsafe { unit.attach_binding(binding) }?;
         Ok(Arc::new(Domain {
-            inner: RefCell::new(Inner {
+            inner: ManuallyDrop::new(RefCell::new(Inner {
                 requester,
                 mappings: Vec::new(),
                 next: 1,
-            }),
+            })),
         }))
     }
 }
@@ -433,11 +433,23 @@ struct Inner {
 
 /// A requester's own AMD-Vi domain, reached from the boot processor alone.
 struct Domain {
-    inner: RefCell<Inner>,
+    inner: ManuallyDrop<RefCell<Inner>>,
 }
 
-// SAFETY: every method checks it runs on the boot processor outside an
-// interrupt handler before it touches the process-local requester.
+impl Drop for Domain {
+    fn drop(&mut self) {
+        if on_boot_processor() {
+            // SAFETY: the owner processor, outside interrupts, has exclusive
+            // final access. Off-owner release keeps the process-local Rc
+            // graph intact rather than racing its owner's reference counts.
+            unsafe { ManuallyDrop::drop(&mut self.inner) };
+        }
+    }
+}
+
+// SAFETY: methods and final release touch the process-local requester only
+// on the boot processor outside an interrupt handler; other final releases
+// retain the complete graph without accessing its non-atomic owners.
 unsafe impl Send for Domain {}
 // SAFETY: as above.
 unsafe impl Sync for Domain {}
