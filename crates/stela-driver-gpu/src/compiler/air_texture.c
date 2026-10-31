@@ -58,6 +58,7 @@ static const struct shape {
 enum operation {
    SAMPLE, SAMPLE_COMPARE, SAMPLE_GRAD, READ, WRITE, GATHER, GATHER_COMPARE,
    WIDTH, HEIGHT, DEPTH, ARRAY_SIZE, MIP_LEVELS, SAMPLES, CLAMPED_LOD, UNCLAMPED_LOD, FENCE,
+   IS_NULL,
 };
 
 /* Each operation's name stem, and whether its name ends in the texel type. */
@@ -71,7 +72,7 @@ static const struct {
    [WIDTH] = {"get_width"}, [HEIGHT] = {"get_height"}, [DEPTH] = {"get_depth"},
    [ARRAY_SIZE] = {"get_array_size"}, [MIP_LEVELS] = {"get_num_mip_levels"},
    [SAMPLES] = {"get_num_samples"}, [CLAMPED_LOD] = {"calculate_clamped_lod"},
-   [UNCLAMPED_LOD] = {"calculate_unclamped_lod"}, [FENCE] = {"fence"},
+   [UNCLAMPED_LOD] = {"calculate_unclamped_lod"}, [FENCE] = {"fence"}, [IS_NULL] = {"is_null"},
 };
 
 struct call {
@@ -721,7 +722,9 @@ write_texel(struct call *call)
 static const struct {
    const char *stem;
    nir_atomic_op op, signed_op;
-   bool negate;
+   /* A load adds nothing, and a store takes its texel ahead of its position
+    * and answers nothing. */
+   bool negate, load, store;
 } atomics[] = {
    {"fetch_add", nir_atomic_op_iadd, nir_atomic_op_iadd},
    {"fetch_sub", nir_atomic_op_iadd, nir_atomic_op_iadd, true},
@@ -732,6 +735,8 @@ static const struct {
    {"fetch_max", nir_atomic_op_umax, nir_atomic_op_imax},
    {"exchange", nir_atomic_op_xchg, nir_atomic_op_xchg},
    {"compare_exchange_weak", nir_atomic_op_cmpxchg, nir_atomic_op_cmpxchg},
+   {"load", nir_atomic_op_iadd, nir_atomic_op_iadd, .load = true},
+   {"store", nir_atomic_op_xchg, nir_atomic_op_xchg, .store = true},
 };
 
 /* The index in atomics of a texture atomic's name, and its sign; or -1. */
@@ -759,15 +764,19 @@ atomic(struct call *call, unsigned index, bool is_signed, nir_def **result)
    const struct shape *shape = call->shape;
    const struct stela_air_texture *texture = call->texture;
    bool exchange = atomics[index].op == nir_atomic_op_cmpxchg;
+   bool load = atomics[index].load, store = atomics[index].store;
    if (texture->access != STELA_AIR_TEXTURE_READ_WRITE || texture->depth ||
        (texture->primitive != STELA_AIR_INT && texture->primitive != STELA_AIR_UINT) ||
        shape->dim == GLSL_SAMPLER_DIM_CUBE || shape->dim == GLSL_SAMPLER_DIM_MS)
       return fail(call, "texture atomics act on read-write 32-bit integer textures, not cube or multisample");
-   if (!type_is(LLVMTypeOf(call->inst), exchange ? 1 : 4, LLVMIntegerTypeKind, exchange ? 1 : 32))
+   LLVMTypeRef type = LLVMTypeOf(call->inst);
+   if (store ? LLVMGetTypeKind(type) != LLVMVoidTypeKind :
+               !type_is(type, exchange ? 1 : 4, LLVMIntegerTypeKind, exchange ? 1 : 32))
       return fail(call, "texture atomic has an unexpected result type");
    nir_deref_instr *deref = texture_deref(call, NULL);
    if (!deref)
       return false;
+   nir_def *data = store ? operand(call, 4, LLVMIntegerTypeKind, 32) : NULL;
    nir_def *position = operand(call, shape->positions, LLVMIntegerTypeKind, 32);
    nir_def *layer = position && shape->array ? uint_operand(call) : NULL;
    if (!position || (shape->array && !layer))
@@ -775,8 +784,9 @@ atomic(struct call *call, unsigned index, bool is_signed, nir_def **result)
    LLVMValueRef expected = exchange ? take(call) : NULL;
    if (exchange && (!expected || LLVMGetTypeKind(LLVMTypeOf(expected)) != LLVMPointerTypeKind))
       return fail(call, "texture compare-exchange takes its expected texel through a pointer");
-   nir_def *data = operand(call, 4, LLVMIntegerTypeKind, 32);
-   if (!data || !expect(call, 32, 0, "atomic order") ||
+   if (!load && !store)
+      data = operand(call, 4, LLVMIntegerTypeKind, 32);
+   if ((!load && !data) || !expect(call, 32, 0, "atomic order") ||
        (exchange && !expect(call, 32, 0, "atomic order")) ||
        !expect(call, 32, texture->access, "access operand") || !finished(call))
       return false;
@@ -784,7 +794,7 @@ atomic(struct call *call, unsigned index, bool is_signed, nir_def **result)
    nir_def *coord = image_coord(call, position, NULL, layer);
    enum pipe_format format = texture->primitive == STELA_AIR_INT ? PIPE_FORMAT_R32_SINT :
                                                                    PIPE_FORMAT_R32_UINT;
-   data = nir_channel(b, data, 0);
+   data = load ? nir_imm_int(b, 0) : nir_channel(b, data, 0);
    if (exchange) {
       nir_def *compare = call->c->load_word(call->c->translator, expected);
       if (!compare)
@@ -807,7 +817,8 @@ atomic(struct call *call, unsigned index, bool is_signed, nir_def **result)
                                          .atomic_op = is_signed ? atomics[index].signed_op :
                                                                   atomics[index].op);
    nir_def *zero = nir_imm_int(b, 0);
-   *result = nir_vec4(b, old, zero, zero, nir_imm_int(b, 1));
+   if (!store)
+      *result = nir_vec4(b, old, zero, zero, nir_imm_int(b, 1));
    return true;
 }
 
@@ -868,6 +879,19 @@ query(struct call *call, enum operation op, nir_def **result)
       *result = emit(call, &t);
    }
    return true;
+}
+
+static bool
+is_null(struct call *call, nir_def **result)
+{
+   const struct stela_air_options *options = call->c->options;
+   if (!options->texture_null)
+      return fail(call, "testing for a null texture");
+   if (!finished(call))
+      return false;
+   *result = options->texture_null(call->b, call->texture_id ? NULL : call->texture,
+                                   call->texture_id, options->binding_data);
+   return *result || fail(call, "texture %u is unbound", call->texture->index);
 }
 
 static bool
@@ -988,6 +1012,9 @@ stela_air_texture_call(const struct stela_air_texture_context *context, LLVMValu
       break;
    case FENCE:
       lowered = fence(&call);
+      break;
+   case IS_NULL:
+      lowered = is_null(&call, result);
       break;
    default:
       lowered = query(&call, (enum operation)op, result);

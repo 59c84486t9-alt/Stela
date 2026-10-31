@@ -250,10 +250,6 @@ patch_functions_refuse_what_they_cannot_read(void)
    text = change(quad, "air.instance_id", "air.vertex_id");
    refuse(text, true, STELA_AIR_ARGUMENT);
    free(text);
-   /* A member marked unused is never read. */
-   text = change(quad, "!\"uv\"}\n!41", "!\"uv\", !\"air.arg_unused\"}\n!41");
-   refuse(text, true, STELA_AIR_INSTRUCTION);
-   free(text);
    /* Every attribute has its own location. */
    text = change(quad, "i32 2, i32 1,", "i32 1, i32 1,");
    refuse(text, true, STELA_AIR_ARGUMENT);

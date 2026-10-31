@@ -49,7 +49,7 @@ struct value {
    bool offset_known;
    uint64_t offset, steps;
    /* Partial values have no vector def until every lane is defined. Missing
-    * lanes are tracked symbolically, never replaced with zero/undef. */
+    * lanes are tracked symbolically and read undefined (whole_value). */
    nir_def *lanes[4];
    unsigned components, bits, aggregate_count;
    struct value **elements;
@@ -384,13 +384,28 @@ compute_like(const struct translator *t)
           t->stage_options->stage == STELA_AIR_MESH;
 }
 
+/* A value as a vector, or NULL for an aggregate. LLVM lets a lane poison or
+ * undef hold anything, so each use reads a partial value's as undefined;
+ * building the vector per use keeps its lanes dominating it. */
+static nir_def *
+whole_value(struct translator *t, const struct value *v)
+{
+   if (v->def || !v->components)
+      return v->def;
+   nir_def *lanes[4];
+   for (unsigned i = 0; i < v->components; i++)
+      lanes[i] = v->lanes[i] ? v->lanes[i] : nir_undef(&t->b, 1, v->bits);
+   return nir_vec(&t->b, lanes, v->components);
+}
+
 static nir_def *
 get_value(struct translator *t, LLVMValueRef llvm)
 {
    struct value *value = find_value(t, llvm);
    if (value) {
-      if (!value->def) fail(t, STELA_AIR_INSTRUCTION, "undefined/poison/aggregate reaches scalar-vector use");
-      return value->def;
+      nir_def *def = whole_value(t, value);
+      if (!def) fail(t, STELA_AIR_INSTRUCTION, "aggregate reaches scalar-vector use");
+      return def;
    }
    if (LLVMIsAGlobalVariable(llvm))
       return module_global(t, llvm);
@@ -401,6 +416,10 @@ get_value(struct translator *t, LLVMValueRef llvm)
       fail(t, STELA_AIR_TYPE, "unsupported AIR operand type");
       return NULL;
    }
+   /* Folding a function constant's select leaves undef in ordinary uses,
+    * after LLVM's own optimizers have run. */
+   if (LLVMIsUndef(llvm))
+      return nir_undef(&t->b, components, bits);
    if (LLVMIsAConstantAggregateZero(llvm))
       return nir_imm_zero(&t->b, components, bits);
    if (components == 1 && LLVMIsAConstantInt(llvm))
@@ -424,7 +443,7 @@ get_value(struct translator *t, LLVMValueRef llvm)
       }
       return nir_vec(&t->b, elements, components);
    }
-   fail(t, STELA_AIR_INSTRUCTION, "undefined/poison/forward/constant-expression operand");
+   fail(t, STELA_AIR_INSTRUCTION, "forward/constant-expression operand");
    return NULL;
 }
 
@@ -1632,9 +1651,22 @@ aggregate_value(struct translator *t, LLVMValueRef llvm)
       if (v->aggregate_count) return v;
       fail(t, STELA_AIR_TYPE, "nonaggregate render value"); return NULL;
    }
-   unsigned count = aggregate_count(LLVMTypeOf(llvm));
-   if (!count || (!LLVMIsUndef(llvm) && !LLVMIsPoison(llvm))) {
+   LLVMTypeRef type = LLVMTypeOf(llvm);
+   unsigned count = aggregate_count(type);
+   if (!count || !LLVMIsAConstant(llvm)) {
       fail(t, STELA_AIR_TYPE, "unsupported/forward render aggregate"); return NULL;
+   }
+   if (!LLVMIsUndef(llvm)) {
+      /* Constants are rematerialized at each use, as partial_value's are. */
+      struct value *v = new_aggregate(t, count, NULL);
+      for (unsigned i = 0; v && i < count; i++) {
+         LLVMValueRef element = LLVMGetAggregateElement(llvm, i);
+         v->elements[i] = aggregate_count(LLVMTypeOf(element)) ? aggregate_value(t, element) :
+                                                                 partial_value(t, element);
+         if (!v->elements[i])
+            return NULL;
+      }
+      return v;
    }
    v = new_aggregate(t, count, NULL);
    if (v && !_mesa_hash_table_insert(t->values, llvm, v)) {
@@ -1689,8 +1721,11 @@ aggregate_instruction(struct translator *t, LLVMValueRef inst, LLVMOpcode op)
       if (leaf && leaf->aggregate_count)
          return _mesa_hash_table_insert(t->values, inst, leaf) != NULL ||
             fail(t, STELA_AIR_ALLOCATION, "aggregate extraction map failed");
-      return (leaf && leaf->def && put_value(t, inst, leaf->def, 0)) ||
-         fail(t, STELA_AIR_INSTRUCTION, "undefined/poison aggregate leaf escapes");
+      unsigned components, bits;
+      if (!value_shape(LLVMTypeOf(inst), &components, &bits))
+         return fail(t, STELA_AIR_TYPE, "unsupported aggregate leaf type");
+      nir_def *def = leaf ? whole_value(t, leaf) : nir_undef(&t->b, components, bits);
+      return put_value(t, inst, def, 0);
    }
    LLVMValueRef inserted = LLVMGetOperand(inst, 1);
    struct value *leaf = aggregate_count(LLVMTypeOf(inserted)) ? aggregate_value(t, inserted) :
@@ -1715,8 +1750,7 @@ vector_instruction(struct translator *t, LLVMValueRef inst, LLVMOpcode op)
       unsigned channel = LLVMConstIntGetZExtValue(index);
       if (op == LLVMExtractElement) {
          nir_def *lane = value_lane(t, a, channel);
-         return (lane && put_value(t, inst, lane, 0)) ||
-            fail(t, STELA_AIR_INSTRUCTION, "undefined/poison extracted lane escapes");
+         return put_value(t, inst, lane ? lane : nir_undef(&t->b, 1, a->bits), 0);
       }
       nir_def *lane = get_value(t, LLVMGetOperand(inst, 1));
       if (!lane) return false;
@@ -2162,6 +2196,7 @@ stage_arguments(struct translator *t, LLVMValueRef fn)
    }
    for (unsigned i = 0; i < t->render.entry.output_count; i++) {
       const struct stela_air_stage_io *io = &t->render.outputs[i];
+      if (io->absent) continue;
       if (!(t->outputs[i] = stage_variable(t, io, true))) return false;
       if (io->semantic == STELA_AIR_LAYER) t->layer = t->outputs[i];
       if (io->semantic == STELA_AIR_VIEWPORT) t->viewport = t->outputs[i];
@@ -2193,28 +2228,36 @@ stage_return(struct translator *t, LLVMValueRef inst)
    for (unsigned i = 0; i < t->render.entry.output_count; i++) {
       const struct stela_air_stage_io *io = &t->render.outputs[i];
       const struct value *leaf = aggregate ? aggregate->elements[i] : NULL;
+      /* An output the function leaves undefined holds anything, so it stays
+       * unwritten. */
       if (io->semantic == STELA_AIR_CLIP_DISTANCE) {
-         /* The one clip-distance output: every distance is defined. */
-         for (unsigned j = 0; leaf && j < io->clip_distances; j++) {
-            clip[j] = leaf->elements[j] ? leaf->elements[j]->def : NULL;
-            if (!clip[j]) leaf = NULL;
+         for (unsigned j = 0; j < io->clip_distances; j++) {
+            const struct value *distance = leaf ? leaf->elements[j] : NULL;
+            clip[j] = distance ? whole_value(t, distance) : NULL;
          }
-         values[i] = leaf ? clip[0] : NULL;
-      } else {
-         values[i] = aggregate ? (leaf ? leaf->def : NULL) : get_value(t, returned);
+         values[i] = NULL;
+      } else if (aggregate) {
+         values[i] = leaf ? whole_value(t, leaf) : NULL;
+      } else if (!(values[i] = get_value(t, returned))) {
+         return false;
       }
-      if (!values[i]) return fail(t, STELA_AIR_INSTRUCTION, "undefined/poison render output leaf/lane");
    }
    /* Validate ALL leaves before emitting any output effect. */
    nir_def *layer = NULL, *viewport = NULL;
    for (unsigned i = 0; i < t->render.entry.output_count; i++) {
       const struct stela_air_stage_io *io = &t->render.outputs[i];
+      if (io->absent)
+         continue;
       if (io->semantic == STELA_AIR_CLIP_DISTANCE) {
          nir_deref_instr *array = nir_build_deref_var(&t->b, t->outputs[i]);
-         for (unsigned j = 0; j < io->clip_distances; j++)
-            nir_store_deref(&t->b, nir_build_deref_array_imm(&t->b, array, j), clip[j], 1);
+         for (unsigned j = 0; j < io->clip_distances; j++) {
+            if (clip[j])
+               nir_store_deref(&t->b, nir_build_deref_array_imm(&t->b, array, j), clip[j], 1);
+         }
          continue;
       }
+      if (!values[i])
+         continue;
       nir_def *value = stage_widen(&t->b, values[i], io->primitive);
       if (t->stage_options->amplified && t->outputs[i] == t->layer)
          layer = value;
@@ -3470,6 +3513,22 @@ mesh_call(struct translator *t, LLVMValueRef inst, LLVMValueRef callee, const ch
                      io->clip_distances, value, BITFIELD_MASK(value->num_components));
 }
 
+/* A freeze holds one value for all its uses, so a lane with none takes zero. */
+static bool
+freeze(struct translator *t, LLVMValueRef inst)
+{
+   struct value *v = partial_value(t, LLVMGetOperand(inst, 0));
+   if (!v)
+      return false;
+   nir_def *lanes[4];
+   for (unsigned i = 0; i < v->components; i++) {
+      lanes[i] = value_lane(t, v, i);
+      if (!lanes[i])
+         lanes[i] = nir_imm_intN_t(&t->b, 0, v->bits);
+   }
+   return put_value(t, inst, nir_vec(&t->b, lanes, v->components), 0);
+}
+
 static bool
 instruction(struct translator *t, LLVMValueRef inst)
 {
@@ -3485,6 +3544,8 @@ instruction(struct translator *t, LLVMValueRef inst)
    }
    if (op == LLVMAtomicRMW || op == LLVMAtomicCmpXchg)
       return atomic_instruction(t, inst, op);
+   if (op == LLVMFreeze)
+      return freeze(t, inst);
    if (op == LLVMAlloca)
       return private_allocation(t, inst) != NULL;
    if (op == LLVMLoad && LLVMGetTypeKind(LLVMTypeOf(inst)) == LLVMPointerTypeKind)
@@ -3807,10 +3868,15 @@ instruction(struct translator *t, LLVMValueRef inst)
    }
    /* The remaining arithmetic is integer-only. Flags restricting defined
     * LLVM inputs (nuw/nsw/exact) need no extra NIR operation on those inputs;
-    * direct poison/undef, freeze and all remaining opcodes are refused. LLVM
+    * all remaining opcodes are refused. LLVM
     * divisor-zero and signed MIN/-1 (including srem) inputs are undefined;
     * no result or trap contract is invented for those cases. */
    nir_def *a = NULL, *b = NULL, *def = NULL;
+   /* A select of something undefined may as well always choose the other. */
+   if (op == LLVMSelect && LLVMIsUndef(LLVMGetOperand(inst, 1)))
+      return put_value(t, inst, get_value(t, LLVMGetOperand(inst, 2)), 0);
+   if (op == LLVMSelect && LLVMIsUndef(LLVMGetOperand(inst, 2)))
+      return put_value(t, inst, get_value(t, LLVMGetOperand(inst, 1)), 0);
    switch (op) {
    case LLVMAdd: case LLVMSub: case LLVMMul:
    case LLVMUDiv: case LLVMSDiv: case LLVMURem: case LLVMSRem:
@@ -4426,12 +4492,12 @@ cfg_emit(struct translator *t)
             for (unsigned leaf = 0; leaf < leaves; leaf++) {
                nir_def *def = target->aggregate_count ? target->elements[leaf]->def : target->def;
                /* An undefined incoming value may be any value, as NIR's undef is. */
-               nir_def *value = aggregate ?
-                  (aggregate->elements[leaf] ? aggregate->elements[leaf]->def : NULL) :
-                  LLVMIsUndef(incoming) || LLVMIsPoison(incoming) ?
+               const struct value *element = aggregate ? aggregate->elements[leaf] : NULL;
+               nir_def *value = element ? whole_value(t, element) :
+                  aggregate || LLVMIsUndef(incoming) ?
                   nir_undef(&t->b, def->num_components, def->bit_size) : get_value(t, incoming);
                if (!value)
-                  return fail(t, STELA_AIR_INSTRUCTION, "undefined/poison aggregate PHI leaf/lane");
+                  return false;
                if (value->num_components != def->num_components || value->bit_size != def->bit_size)
                   return fail(t, STELA_AIR_TYPE, "PHI incoming leaf shape mismatch");
                nir_phi_instr *phi = nir_instr_as_phi(nir_def_instr(def));

@@ -264,21 +264,6 @@ integer_minmax_tests(void)
             types[i], operations[operation], suffixes[i], types[i], types[i]);
          minmax_refusal(body, declaration, STELA_AIR_TYPE);
       }
-      const char *bad[] = {"poison", "undef"};
-      for (unsigned i = 0; i < ARRAY_SIZE(bad); i++) {
-         for (unsigned argument = 0; argument < 2; argument++) {
-            char body[256], declaration[128];
-            snprintf(body, sizeof(body), "%%v = call i32 @llvm.%s.i32(i32 %s, i32 %s)\nret void\n",
-               operations[operation], argument ? "7" : bad[i], argument ? bad[i] : "7");
-            snprintf(declaration, sizeof(declaration), "declare i32 @llvm.%s.i32(i32, i32)\n", operations[operation]);
-            expect_refusal(body, declaration, 100, STELA_AIR_INSTRUCTION);
-         }
-         char body[384], declaration[192];
-         snprintf(body, sizeof(body), "%%v = call <2 x i32> @llvm.%s.v2i32(<2 x i32> <i32 1, i32 %s>, <2 x i32> zeroinitializer)\nret void\n",
-            operations[operation], bad[i]);
-         snprintf(declaration, sizeof(declaration), "declare <2 x i32> @llvm.%s.v2i32(<2 x i32>, <2 x i32>)\n", operations[operation]);
-         expect_refusal(body, declaration, 100, STELA_AIR_INSTRUCTION);
-      }
       char body[512], declaration[256];
       snprintf(body, sizeof(body), "%%v = call fastcc i32 @llvm.%s.i32(i32 1, i32 2)\nret void\n", operations[operation]);
       snprintf(declaration, sizeof(declaration), "declare fastcc i32 @llvm.%s.i32(i32, i32)\n", operations[operation]);
@@ -307,8 +292,6 @@ integer_minmax_tests(void)
    }
    expect_refusal("%v = call i32 @user.llvm.smin.i32(i32 1, i32 2)\nret void\n",
       "declare i32 @user.llvm.smin.i32(i32, i32)\n", 100, STELA_AIR_INSTRUCTION);
-   expect_refusal("%a = freeze i32 1\n%v = call i32 @llvm.umax.i32(i32 %a, i32 2)\nret void\n",
-      "declare i32 @llvm.umax.i32(i32, i32)\n", 100, STELA_AIR_INSTRUCTION);
 }
 
 #endif

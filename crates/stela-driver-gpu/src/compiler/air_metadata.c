@@ -1250,9 +1250,12 @@ argument_field(struct stela_air_metadata *m, struct stela_air_kernel *kernel, LL
          has_space |= number == &field->buffer.address_space;
          has_size |= number == &buffer_size;
       } else if (stela_air_md_string(key, "air.struct_type_info")) {
-         if (field->kind != STELA_AIR_FIELD_ARGUMENTS || info || f == count)
+         /* A buffer's layout is the pointee's own business. */
+         if ((field->kind != STELA_AIR_FIELD_ARGUMENTS && !buffer) || info || f == count)
             return fail(m, STELA_AIR_METADATA, "invalid argument buffer field structure");
-         info = operands[f++];
+         if (field->kind == STELA_AIR_FIELD_ARGUMENTS)
+            info = operands[f];
+         f++;
       } else if (stela_air_md_string(key, "air.arg_type_name") ||
                  stela_air_md_string(key, "air.arg_name")) {
          if (f == count || !operands[f] || !LLVMIsAMDString(operands[f]))
@@ -2295,6 +2298,13 @@ stela_air_metadata_stage(struct stela_air_metadata *m, LLVMValueRef fn,
       unsigned n;
       if (!stela_air_md_node(m, nodes[i], fields, &n) || n < 3)
          return fail(m, STELA_AIR_METADATA, "invalid stage output descriptor");
+      if (stela_air_md_string(fields[0], "air.function_constant")) {
+         bool known;
+         if (n < 5 || !argument_predicate(m, fields[1], &known, &io->absent))
+            return fail(m, STELA_AIR_METADATA, "invalid function constant output predicate");
+         memmove(fields, &fields[2], (n - 2) * sizeof(*fields));
+         n -= 2;
+      }
       unsigned f = 1;
       bool vertex = stage == STELA_AIR_VERTEX, fragment = stage == STELA_AIR_FRAGMENT;
       if (vertex && stela_air_md_string(fields[0], "air.position")) {

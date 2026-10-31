@@ -145,6 +145,8 @@ static const char *constants =
    " [{ i32, ptr, ptr } { i32 65535, ptr @init, ptr null }]\n"                              \
    "declare i1 @air.is_function_constant_defined(ptr addrspace(2))\n"                       \
    "declare i32 @air.unknown(i32)\n"                                                        \
+   "declare float @air.convert.f.f32.s.i32(i32)\n"                                          \
+   "declare i32 @air.convert.s.i32.f.f32(float)\n"                                          \
    "define void @derived(ptr addrspace(1) %data) {\n"                                       \
    "%v = load i32, ptr addrspace(2) @twice_width, align 4\n"                                \
    "store i32 %v, ptr addrspace(1) %data, align 4\n"                                        \
@@ -165,6 +167,10 @@ static const char *constants =
    "!50 = !{ptr addrspace(2) @width, !\"int\", !\"width\", i32 0}\n"
 
 static const char *derived = DERIVED("%x = shl nsw i32 %w, 1\n");
+/* The same through AIR's conversions, as `int(float(width) * 2)`. */
+static const char *converted = DERIVED("%f = call float @air.convert.f.f32.s.i32(i32 %w)\n"
+                                       "%d = fmul fast float %f, 2.000000e+00\n"
+                                       "%x = call i32 @air.convert.s.i32.f.f32(float %d)\n");
 /* A constructor that calls an AIR function, which no constant folds. */
 static const char *called = DERIVED("%x = call i32 @air.unknown(i32 %w)\n");
 
@@ -225,9 +231,71 @@ static const char *conditional =
    CONDITIONAL("br i1 %on, label %tinted, label %untinted\n", "bool");
 /* One reading tint whatever use_tint is. */
 static const char *unguarded = CONDITIONAL("br label %tinted\n", "bool");
+/* One whose read Apple's compiler hoists ahead of what decides it. */
+static const char *hoisted =
+   CONDITIONAL("%h = load i32, ptr addrspace(1) %tint, align 4\n"
+               "%s = select i1 %on, i32 %h, i32 undef\n"
+               "store i32 %s, ptr addrspace(1) %data, align 4\n"
+               "br i1 %on, label %tinted, label %untinted\n", "bool");
 /* One whose predicate is not a bool. */
 static const char *mistyped =
    CONDITIONAL("br i1 %on, label %tinted, label %untinted\n", "int");
+
+/* A position and a varying only a true function constant keeps. */
+static const char *optional_output =
+   "@fog = internal addrspace(2) global i8 undef, align 1\n"
+   "@fog.init = linkonce_odr hidden addrspace(2) externally_initialized constant i8 undef,"
+   " section \"air.fc_initializer\", align 1\n"
+   "@fogged = internal addrspace(2) global i8 0, align 1\n"
+   "@llvm.global_ctors = appending global [1 x { i32, ptr, ptr }]"
+   " [{ i32, ptr, ptr } { i32 65535, ptr @init, ptr null }]\n"
+   "@llvm.compiler.used = appending global [1 x ptr] [ptr addrspacecast (ptr addrspace(2) @fogged"
+   " to ptr)], section \"llvm.metadata\"\n"
+   "declare i8 @air.normalize_function_constant_predicate.i8(i8)\n"
+   "define <{ <4 x float>, float }> @optional(<4 x float> %p) {\n"
+   "%a = insertvalue <{ <4 x float>, float }> undef, <4 x float> %p, 0\n"
+   "%b = insertvalue <{ <4 x float>, float }> %a, float 1.0, 1\n"
+   "ret <{ <4 x float>, float }> %b\n}\n"
+   "define internal void @init() section \"air.static_init\" {\n"
+   "%v = load i8, ptr addrspace(2) @fog.init, align 1\n"
+   "store i8 %v, ptr addrspace(2) @fog, align 1\n"
+   "%t = call i8 @air.normalize_function_constant_predicate.i8(i8 %v)\n"
+   "store i8 %t, ptr addrspace(2) @fogged, align 1\n"
+   "ret void\n}\n"
+   "!air.vertex = !{!2}\n"
+   "!2 = !{ptr @optional, !3, !4}\n!3 = !{!30, !31}\n!4 = !{!40}\n"
+   "!30 = !{!\"air.position\", !\"air.arg_type_name\", !\"float4\", !\"air.arg_name\", !\"p\"}\n"
+   "!31 = !{!\"air.function_constant\", !32, !\"air.vertex_output\", !\"generated(f)\","
+   " !\"air.arg_type_name\", !\"float\", !\"air.arg_name\", !\"f\"}\n"
+   "!32 = !{ptr addrspace(2) @fogged, !\"bool\", !\"fog\"}\n"
+   "!40 = !{i32 0, !\"air.vertex_input\", !\"air.location_index\", i32 0, i32 1,"
+   " !\"air.arg_type_name\", !\"float4\", !\"air.arg_name\", !\"in\"}\n"
+   "!air.function_constants = !{!50}\n"
+   "!50 = !{ptr addrspace(2) @fog.init, !\"bool\", !\"fog\", i32 0}\n";
+
+/* Lanes Apple's compiler leaves poison in a splat, and a value it freezes. */
+static const char *undefined_lanes =
+   "define void @lanes(ptr addrspace(1) %data, i32 %tid) {\n"
+   "%f = uitofp i32 %tid to float\n"
+   "%a = insertelement <4 x float> poison, float %f, i64 0\n"
+   "%s = shufflevector <4 x float> %a, <4 x float> undef, <4 x i32> <i32 0, i32 0, i32 0, i32 poison>\n"
+   "%m = fmul fast <4 x float> %s, %s\n"
+   "store <4 x float> %m, ptr addrspace(1) %data, align 16\n"
+   "%n = extractelement <4 x float> %s, i64 3\n"
+   "%g = freeze <4 x float> %s\n"
+   "%x = extractelement <4 x float> %g, i64 3\n"
+   "%y = fadd fast float %n, %x\n"
+   "%c = icmp eq i32 %tid, 0\n"
+   "%z = select i1 %c, float undef, float %y\n"
+   "store float %z, ptr addrspace(1) %data, align 4\n"
+   "ret void\n}\n"
+   "!air.kernel = !{!2}\n"
+   "!2 = !{ptr @lanes, !3, !4}\n!3 = !{}\n!4 = !{!40, !41}\n"
+   "!40 = !{i32 0, !\"air.buffer\", !\"air.location_index\", i32 0, i32 1, !\"air.read_write\","
+   " !\"air.address_space\", i32 1, !\"air.arg_type_size\", i32 16, !\"air.arg_type_align_size\","
+   " i32 16, !\"air.arg_type_name\", !\"float4\", !\"air.arg_name\", !\"data\"}\n"
+   "!41 = !{i32 1, !\"air.thread_position_in_grid\", !\"air.arg_type_name\", !\"uint\","
+   " !\"air.arg_name\", !\"tid\"}\n";
 
 /* Texture and sampler array arguments, which a function reflects slot by
  * slot, reading the width of the second texture. */
@@ -996,6 +1064,10 @@ derived_constants_are_constructed_from_their_function_constants(void)
    assert(shader && stores_constant(shader, 10) && !shader->constant_data_size);
    stela_metal_release(shader);
 
+   shader = compile(converted, "derived", &specialization, &error);
+   assert(shader && stores_constant(shader, 10));
+   stela_metal_release(shader);
+
    /* Without width, its definedness test selects eight. */
    specialization.constant_count = 0;
    shader = compile(derived, "derived", &specialization, &error);
@@ -1035,6 +1107,10 @@ function_constants_select_arguments(void)
       assert(shader);
       stela_metal_release(shader);
 
+      shader = compile(hoisted, "conditional", &specialization, &error);
+      assert(shader);
+      stela_metal_release(shader);
+
       /* A function that reads an absent argument is refused. */
       shader = compile(unguarded, "conditional", &specialization, &error);
       assert(on ? shader != NULL :
@@ -1044,6 +1120,43 @@ function_constants_select_arguments(void)
    }
    assert(!reflect(mistyped, "conditional", &reflection, &error) &&
           error.kind == STELA_AIR_METADATA && strstr(error.detail, "predicate"));
+}
+
+/* An output a false function constant makes absent is not one. */
+static void
+function_constants_select_outputs(void)
+{
+   struct stela_metal_reflection reflection;
+   struct stela_air_error error;
+   for (uint8_t on = 0; on < 2; on++) {
+      const struct stela_air_constant_value value = {0, &on, sizeof(on)};
+      assert(reflect_specialized(optional_output, "optional", &value, 1, &reflection, &error));
+      const struct stela_metal_linked_varying varying = {"generated(f)", 12, 0};
+      const struct stela_metal_specialization specialization = {
+         .constants = &value, .constant_count = 1, .varyings = &varying, .varying_count = 1,
+      };
+      nir_shader *shader = compile(optional_output, "optional", &specialization, &error);
+      if (!shader)
+         fprintf(stderr, "optional: %u %s\n", error.kind, error.detail);
+      assert(shader);
+      unsigned outputs = 0;
+      nir_foreach_shader_out_variable(variable, shader)
+         outputs++;
+      assert(outputs == 1u + on);
+      stela_metal_release(shader);
+   }
+}
+
+static void
+undefined_lanes_read_as_anything(void)
+{
+   const struct stela_metal_specialization specialization = {.workgroup_size = {64, 1, 1}};
+   struct stela_air_error error;
+   nir_shader *shader = compile(undefined_lanes, "lanes", &specialization, &error);
+   if (!shader)
+      fprintf(stderr, "lanes: %u %s\n", error.kind, error.detail);
+   assert(shader);
+   stela_metal_release(shader);
 }
 
 static void
@@ -1627,6 +1740,8 @@ main(void)
    mesh_stages_compile_with_their_launch();
    function_constants_reflect_and_specialize();
    derived_constants_are_constructed_from_their_function_constants();
+   function_constants_select_outputs();
+   undefined_lanes_read_as_anything();
    function_constants_select_arguments();
    arrays_reflect_each_slot();
    bindings_reflect_their_structures();

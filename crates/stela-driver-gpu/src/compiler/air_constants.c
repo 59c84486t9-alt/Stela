@@ -214,6 +214,64 @@ plain(LLVMValueRef value, unsigned depth)
    return LLVMIsAConstantArray(value) || LLVMIsAConstantStruct(value) || LLVMIsAConstantVector(value);
 }
 
+/* AIR's conversions of the clone (air_math.c), as the casts the global
+ * optimizer evaluates. */
+static void
+cast_conversions(LLVMModuleRef clone)
+{
+   static const char prefix[] = "air.convert.";
+   const size_t prefix_bytes = strlen(prefix);
+   LLVMBuilderRef builder = LLVMCreateBuilderInContext(LLVMGetModuleContext(clone));
+   for (LLVMValueRef fn = LLVMGetFirstFunction(clone); fn; fn = LLVMGetNextFunction(fn)) {
+      size_t bytes;
+      const char *name = LLVMGetValueName2(fn, &bytes);
+      if (bytes <= prefix_bytes || memcmp(name, prefix, prefix_bytes))
+         continue;
+      /* <to kind>.<to type>.<from kind>.<from type> */
+      const char *to_type = strchr(name + prefix_bytes, '.');
+      const char *from_kind = to_type ? strchr(to_type + 1, '.') : NULL;
+      if (!from_kind)
+         continue;
+      bool to_signed = name[prefix_bytes] == 's', from_signed = from_kind[1] == 's';
+      for (LLVMUseRef use = LLVMGetFirstUse(fn), next; use; use = next) {
+         next = LLVMGetNextUse(use);
+         LLVMValueRef call = LLVMGetUser(use);
+         if (!LLVMIsACallInst(call) || LLVMGetNumArgOperands(call) != 1)
+            continue;
+         LLVMPositionBuilderBefore(builder, call);
+         LLVMValueRef from = LLVMGetOperand(call, 0);
+         LLVMTypeRef type = LLVMTypeOf(call);
+         LLVMTypeRef to_scalar = LLVMGetTypeKind(type) == LLVMVectorTypeKind ?
+                                    LLVMGetElementType(type) : type;
+         LLVMTypeRef from_type = LLVMTypeOf(from);
+         LLVMTypeRef from_scalar = LLVMGetTypeKind(from_type) == LLVMVectorTypeKind ?
+                                      LLVMGetElementType(from_type) : from_type;
+         bool to_int = LLVMGetTypeKind(to_scalar) == LLVMIntegerTypeKind;
+         bool from_int = LLVMGetTypeKind(from_scalar) == LLVMIntegerTypeKind;
+         /* True converting to a bool, from any nonzero value. */
+         bool to_bool = to_int && LLVMGetIntTypeWidth(to_scalar) == 1;
+         LLVMValueRef zero = LLVMConstNull(from_type), cast;
+         if (to_bool && from_int)
+            cast = LLVMBuildICmp(builder, LLVMIntNE, from, zero, "");
+         else if (to_bool)
+            cast = LLVMBuildFCmp(builder, LLVMRealUNE, from, zero, "");
+         else if (to_int && from_int)
+            cast = LLVMBuildIntCast2(builder, from, type, from_signed, "");
+         else if (to_int)
+            cast = to_signed ? LLVMBuildFPToSI(builder, from, type, "") :
+                               LLVMBuildFPToUI(builder, from, type, "");
+         else if (from_int)
+            cast = from_signed ? LLVMBuildSIToFP(builder, from, type, "") :
+                                 LLVMBuildUIToFP(builder, from, type, "");
+         else
+            cast = LLVMBuildFPCast(builder, from, type, "");
+         LLVMReplaceAllUsesWith(call, cast);
+         LLVMInstructionEraseFromParent(call);
+      }
+   }
+   LLVMDisposeBuilder(builder);
+}
+
 /* Whether the global optimizer left no constructor in the clone. */
 static bool
 constructed(LLVMModuleRef clone)
@@ -252,6 +310,7 @@ stela_air_construct_constants(struct stela_air_metadata *m)
       copies[count++] = copy;
       LLVMSetLinkage(copy, LLVMExternalLinkage);
    }
+   cast_conversions(clone);
    LLVMPassBuilderOptionsRef options = evaluated ? LLVMCreatePassBuilderOptions() : NULL;
    LLVMErrorRef error = options ? LLVMRunPasses(clone, "globalopt", NULL, options) : NULL;
    if (options)
@@ -295,9 +354,10 @@ stela_air_fold_constants(struct stela_air_metadata *m, LLVMValueRef fn)
    LLVMPassBuilderOptionsRef options = LLVMCreatePassBuilderOptions();
    if (!options)
       return fail(m, STELA_AIR_ALLOCATION, "LLVM pass options allocation failed");
-   /* SCCP folds the loads of constant data and the branches they decide,
-    * leaving the paths those disable unreachable. */
-   LLVMErrorRef error = LLVMRunPassesOnFunction(fn, "sccp,unreachableblockelim", NULL, options);
+   /* SCCP folds the loads of constant data and the branches and selects they
+    * decide, leaving the paths those disable unreachable and what only they
+    * read dead, such as an absent argument's load hoisted out of a branch. */
+   LLVMErrorRef error = LLVMRunPassesOnFunction(fn, "sccp,unreachableblockelim,dce", NULL, options);
    LLVMDisposePassBuilderOptions(options);
    if (error) {
       LLVMDisposeErrorMessage(LLVMGetErrorMessage(error));

@@ -323,7 +323,7 @@ struct stela_air_stage_io {
    enum stela_air_sampling sampling;
    enum stela_air_depth_qualifier depth; /* Only DEPTH. */
    bool used, invariant;
-   bool absent; /* An argument whose [[function_constant]] is false. */
+   bool absent; /* An argument or output whose [[function_constant]] is false. */
    bool argument_buffer; /* Only STAGE_BUFFER: an air.indirect_buffer. */
    /* A VARYING the function interpolates itself, an interpolant<T, P>: its
     * argument is an opaque pointer the air.interpolate_* calls read, and it

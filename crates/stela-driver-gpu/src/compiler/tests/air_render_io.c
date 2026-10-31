@@ -300,13 +300,21 @@ vertex_functions_write_clip_distances(void)
           shader->info.clip_distance_array_size == 2);
    ralloc_free(shader);
 
+   /* Constant distances are a constant aggregate, and undefined ones hold
+    * anything. */
+   const char *arrays[] = {"[2 x float] [float 1.0, float 2.0], 1", "[2 x float] undef, 1"};
+   for (unsigned i = 0; i < ARRAY_SIZE(arrays); i++) {
+      char *text = change(clip_vertex, "[2 x float] %c1, 1", arrays[i]);
+      shader = translate(text, STELA_AIR_VERTEX, false, &error);
+      assert(shader);
+      ralloc_free(shader);
+      free(text);
+   }
+
    const struct {
       const char *old, *replacement;
       enum stela_air_error_kind kind;
    } cases[] = {
-      /* Every distance is written. */
-      {"%a3 = insertvalue " CLIP_RESULT " %a2, [2 x float] %c1, 1\n",
-       "%a3 = insertvalue " CLIP_RESULT " %a1, [2 x float] undef, 1\n", STELA_AIR_INSTRUCTION},
       {"i32 2, !\"air.arg_type_name\"", "i32 9, !\"air.arg_type_name\"", STELA_AIR_ARGUMENT},
       {"i32 2, !\"air.arg_type_name\"", "i32 3, !\"air.arg_type_name\"", STELA_AIR_TYPE},
    };

@@ -218,9 +218,13 @@ nir_deref_instr *stela_metal_bind_texture(nir_builder *b, const struct stela_air
                                           const struct glsl_type *type, bool faces,
                                           nir_def *level, void *stage);
 
-/* stela_air_texture_levels: the count the texture's MTLResourceID carries. */
+/* stela_air_texture_query: the count the texture's MTLResourceID carries. */
 nir_def *stela_metal_texture_levels(nir_builder *b, const struct stela_air_texture *texture,
                                     nir_def *id, void *stage);
+
+/* stela_air_texture_query: whether the texture's MTLResourceID is the null one. */
+nir_def *stela_metal_texture_null(nir_builder *b, const struct stela_air_texture *texture,
+                                  nir_def *id, void *stage);
 
 /* stela_air_bind_sampler likewise, of the sampler's float- or integer-border
  * descriptor. */

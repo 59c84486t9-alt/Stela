@@ -194,6 +194,7 @@ options(struct stela_metal_stage *stage, bool compute)
       .bind_texture = stela_metal_bind_texture, .bind_sampler = stela_metal_bind_sampler,
       .bind_texture_id = stela_metal_bind_texture_id, .bind_sampler_id = stela_metal_bind_sampler_id,
       .resource_id = stela_metal_resource_id, .texture_levels = stela_metal_texture_levels,
+      .texture_null = stela_metal_texture_null,
       .max_private_bytes = 64,
    };
 }
@@ -645,6 +646,11 @@ static const char *atomic_body =
    " <2 x i32>, i32, <4 x i32>, i32, i32)\n"
    "declare i1 @air.atomic_compare_exchange_weak_explicit_texture_2d.u.v4i32(ptr addrspace(1),"
    " <2 x i32>, ptr, <4 x i32>, i32, i32, i32)\n"
+   "declare <4 x i32> @air.atomic_load_explicit_texture_2d.u.v4i32(ptr addrspace(1), <2 x i32>,"
+   " i32, i32)\n"
+   "declare void @air.atomic_store_explicit_texture_2d.u.v4i32(ptr addrspace(1), <4 x i32>,"
+   " <2 x i32>, i32, i32)\n"
+   "declare i1 @air.is_null_texture_2d(ptr addrspace(1))\n"
    "define void @kernel(ptr addrspace(1) %t, ptr addrspace(1) %a, ptr addrspace(1) %out) {\n"
    "%e = alloca <4 x i32>, align 16\n"
    "%add = call <4 x i32> @air.atomic_fetch_add_explicit_texture_2d.u.v4i32(ptr addrspace(1) %t,"
@@ -656,11 +662,20 @@ static const char *atomic_body =
    "store <4 x i32> <i32 7, i32 0, i32 0, i32 0>, ptr %e, align 16\n"
    "%ok = call i1 @air.atomic_compare_exchange_weak_explicit_texture_2d.u.v4i32(ptr addrspace(1) %t,"
    " <2 x i32> <i32 1, i32 2>, ptr %e, <4 x i32> <i32 9, i32 0, i32 0, i32 0>, i32 0, i32 0, i32 3)\n"
+   "%load = call <4 x i32> @air.atomic_load_explicit_texture_2d.u.v4i32(ptr addrspace(1) %t,"
+   " <2 x i32> <i32 1, i32 2>, i32 0, i32 3)\n"
+   "call void @air.atomic_store_explicit_texture_2d.u.v4i32(ptr addrspace(1) %t,"
+   " <4 x i32> <i32 3, i32 0, i32 0, i32 0>, <2 x i32> <i32 1, i32 2>, i32 0, i32 3)\n"
+   "%null = call i1 @air.is_null_texture_2d(ptr addrspace(1) %t)\n"
    "%x = extractelement <4 x i32> %add, i32 0\n"
    "%y = extractelement <4 x i32> %min, i32 0\n"
+   "%l = extractelement <4 x i32> %load, i32 0\n"
    "%s = add i32 %x, %y\n"
    "%w = zext i1 %ok to i32\n"
-   "%r = add i32 %s, %w\n"
+   "%n = zext i1 %null to i32\n"
+   "%m = add i32 %l, %n\n"
+   "%q = add i32 %s, %w\n"
+   "%r = add i32 %q, %m\n"
    "store i32 %r, ptr addrspace(1) %out, align 4\n"
    "ret void\n}\n";
 
@@ -707,12 +722,13 @@ kernels_take_texture_atomics(void)
    if (!shader)
       fprintf(stderr, "texture atomics: %u %s\n", error.kind, error.detail);
    assert(shader);
-   nir_intrinsic_instr *atomics[4];
-   assert(image_atomics(shader, atomics, ARRAY_SIZE(atomics)) == 4);
+   nir_intrinsic_instr *atomics[6];
+   assert(image_atomics(shader, atomics, ARRAY_SIZE(atomics)) == 6);
    const nir_atomic_op ops[] = {nir_atomic_op_iadd, nir_atomic_op_iadd, nir_atomic_op_imin,
-                                nir_atomic_op_cmpxchg};
+                                nir_atomic_op_cmpxchg, nir_atomic_op_iadd, nir_atomic_op_xchg};
    const enum pipe_format formats[] = {PIPE_FORMAT_R32_UINT, PIPE_FORMAT_R32_UINT,
-                                       PIPE_FORMAT_R32_SINT, PIPE_FORMAT_R32_UINT};
+                                       PIPE_FORMAT_R32_SINT, PIPE_FORMAT_R32_UINT,
+                                       PIPE_FORMAT_R32_UINT, PIPE_FORMAT_R32_UINT};
    for (unsigned i = 0; i < ARRAY_SIZE(atomics); i++) {
       assert(nir_intrinsic_atomic_op(atomics[i]) == ops[i]);
       assert(nir_intrinsic_format(atomics[i]) == formats[i]);

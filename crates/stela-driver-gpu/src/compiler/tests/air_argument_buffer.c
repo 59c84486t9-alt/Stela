@@ -98,8 +98,10 @@ static const char *kernel_metadata =
    " !\"Inner\", !\"air.arg_name\", !\"inner\"}\n"
    "!37 = !{i32 0, i32 8, i32 0, !\"uint*\", !\"counts\", !\"air.indirect_argument\", !38}\n"
    "!38 = !{i32 0, !\"air.buffer\", !\"air.location_index\", i32 0, i32 1, !\"air.read_write\","
-   " !\"air.address_space\", i32 1, !\"air.arg_type_size\", i32 4, !\"air.arg_type_align_size\", i32 4,"
-   " !\"air.arg_type_name\", !\"uint\", !\"air.arg_name\", !\"counts\"}\n"
+   " !\"air.address_space\", i32 1, !\"air.struct_type_info\", !39, !\"air.arg_type_size\", i32 4,"
+   " !\"air.arg_type_align_size\", i32 4, !\"air.arg_type_name\", !\"Counts\","
+   " !\"air.arg_name\", !\"counts\"}\n"
+   "!39 = !{i32 0, i32 4, i32 0, !\"uint\", !\"count\"}\n"
    "!20 = !{i32 2, i32 9, i32 0}\n!21 = !{!\"Metal\", i32 4, i32 1, i32 0}\n";
 
 /* A fragment function that samples a material's texture with its sampler. */

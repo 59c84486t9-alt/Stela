@@ -164,15 +164,30 @@ nir_deref_instr *stela_metal_bind_texture(nir_builder *b, const struct stela_air
       level, stage);
 }
 
+/* The MTLResourceID a texture query names, or NULL for a bad binding. */
+static nir_def *
+queried_id(nir_builder *b, const struct stela_air_texture *texture, nir_def *id, void *stage)
+{
+   if (id)
+      return id;
+   if (texture->index >= STELA_METAL_TEXTURES)
+      return NULL;
+   return table_id(b, stage, STELA_METAL_TABLE_TEXTURES + 8u * texture->index);
+}
+
 nir_def *stela_metal_texture_levels(nir_builder *b, const struct stela_air_texture *texture,
                                     nir_def *id, void *stage)
 {
-   if (!id) {
-      if (texture->index >= STELA_METAL_TEXTURES)
-         return NULL;
-      id = table_id(b, stage, STELA_METAL_TABLE_TEXTURES + 8u * texture->index);
-   }
-   return nir_iadd_imm(b, nir_ushr_imm(b, id_half(b, id, true), STELA_METAL_LEVEL_SHIFT), 1);
+   id = queried_id(b, texture, id, stage);
+   return id ? nir_iadd_imm(b, nir_ushr_imm(b, id_half(b, id, true), STELA_METAL_LEVEL_SHIFT), 1) :
+               NULL;
+}
+
+nir_def *stela_metal_texture_null(nir_builder *b, const struct stela_air_texture *texture,
+                                  nir_def *id, void *stage)
+{
+   id = queried_id(b, texture, id, stage);
+   return id ? nir_ieq_imm(b, id, 0) : NULL;
 }
 
 nir_deref_instr *stela_metal_bind_sampler(nir_builder *b, const struct stela_air_sampler *sampler,

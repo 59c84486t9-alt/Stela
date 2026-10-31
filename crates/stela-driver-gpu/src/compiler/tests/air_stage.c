@@ -336,7 +336,6 @@ static void run(LLVMMemoryBufferRef raw,const char *vsname,const char *fsname,bo
       const struct {const char *old,*replacement;enum stela_air_error_kind error;} cases[]={
          {"i32 2,!\"air.struct_type_info\"","i32 1,!\"air.struct_type_info\"",STELA_AIR_ARGUMENT},
          {"!\"air.read\",!\"air.address_space\"","!\"air.write\",!\"air.address_space\"",STELA_AIR_ARGUMENT},
-         {"<float 1.0,float 0.5,float 0.25,float 0.0>","<float 1.0,float poison,float 0.25,float 0.0>",STELA_AIR_INSTRUCTION},
          {"e-p:64:64-i32:32", "e-p:64:64-p2:32:32-i32:32", STELA_AIR_TARGET},
          {"getelementptr %Input", "getelementptr <vscale x 4 x float>", STELA_AIR_TYPE},
       };
@@ -594,7 +593,8 @@ aggregate_phi_semantics(void)
    }
    LLVMDisposeMemoryBuffer(raw);
 
-   /* Keep missing/poison leaves and unsupported aggregate shapes explicit. */
+   /* A leaf an edge leaves undefined holds anything; unsupported aggregate
+    * shapes stay explicit. */
    const char *unreachable = "{\nentry:\n br label %live\n"
       "dead:\n br label %join\n"
       "live:\n %a0 = insertvalue " STAGE_PAIR " undef, <4 x float> <float 1.0,float 2.0,float 3.0,float 4.0>, 0\n"
@@ -615,14 +615,13 @@ aggregate_phi_semantics(void)
       "b:\n %b0 = insertvalue " STAGE_PAIR " undef, <4 x float> <float 5.0,float 6.0,float 7.0,float 8.0>, 0\n"
       " %b1 = insertvalue " STAGE_PAIR " %b0, <4 x float> <float 9.0,float 10.0,float 11.0,float 12.0>, 1\n br label %join\n"
       "join:\n %selected = phi " STAGE_PAIR " [%a0,%a],[%b1,%b]\n ret " STAGE_PAIR " %selected\n}";
-   text = vertex_body(partial);
-   refusal(text, "test_vertex", STELA_AIR_VERTEX, &o, STELA_AIR_INSTRUCTION);
-   free(text);
+   text = vertex_body(partial); raw = bitcode(text); free(text);
+   ralloc_free(translate(raw, "test_vertex", &o)); LLVMDisposeMemoryBuffer(raw);
    text = vertex_body(nested);
    char *bad = change(text, "float -0.0,float 0x7FF8000020000000,float 0.0,float 4.0",
       "float -0.0,float poison,float 0.0,float 4.0");
-   refusal(bad, "test_vertex", STELA_AIR_VERTEX, &o, STELA_AIR_INSTRUCTION);
-   free(bad); free(text);
+   raw = bitcode(bad); free(bad); free(text);
+   ralloc_free(translate(raw, "test_vertex", &o)); LLVMDisposeMemoryBuffer(raw);
    const char *unsupported[] = {"{<4 x float>,<4 x float>}", "<{double,<4 x float>}>", "<{<{float}>,<4 x float>}>"};
    for (unsigned i = 0; i < ARRAY_SIZE(unsupported); i++) {
       char body[1024];
@@ -633,9 +632,8 @@ aggregate_phi_semantics(void)
       free(text);
    }
    const char *constant = "{\nentry:\n br label %join\njoin:\n %bad = phi " STAGE_PAIR " [zeroinitializer,%entry]\n ret " STAGE_PAIR " %bad\n}";
-   text = vertex_body(constant);
-   refusal(text, "test_vertex", STELA_AIR_VERTEX, &o, STELA_AIR_TYPE);
-   free(text);
+   text = vertex_body(constant); raw = bitcode(text); free(text);
+   ralloc_free(translate(raw, "test_vertex", &o)); LLVMDisposeMemoryBuffer(raw);
    puts("Packed aggregate PHIs: nested edges, cyclic swaps, exact FP32 bits, guarded predecessors and explicit missing/unsupported leaf refusals");
 }
 static void
@@ -915,8 +913,6 @@ arithmetic_and_lane_semantics(void)
    specialize(guarded, 0, terminating_input, 16, 0, 0, true);
    outputs(guarded, NULL, terminating_output);
    ralloc_free(guarded); LLVMDisposeMemoryBuffer(raw);
-   text = fragment_body("{\n %bad = shufflevector <4 x float> poison, <4 x float> %color, <4 x i32> <i32 0,i32 5,i32 6,i32 7>\n ret <4 x float> %bad\n}", "");
-   refusal(text, "test_fragment", STELA_AIR_FRAGMENT, &o, STELA_AIR_INSTRUCTION); free(text);
    puts("Stage FP32 fastdivision rounding/FTZ/zero and uint2/3/4conversion boundaries; both conditional PHI paths, masked/escaping poison passed");
 }
 

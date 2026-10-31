@@ -231,14 +231,6 @@ integer_count_tests(void)
                   types[i], ops[op], suffixes[i], types[i], op ? ", i1" : "");
          expect_refusal(body, decl, 100, STELA_AIR_TYPE);
       }
-      const char *bad_values[] = {"poison", "undef"};
-      for (unsigned i = 0; i < ARRAY_SIZE(bad_values); i++) {
-         char body[256], decl[128];
-         snprintf(body, sizeof(body), "%%v = call i32 @llvm.%s.i32(i32 %s%s)\nret void\n",
-                  ops[op], bad_values[i], op ? ", i1 false" : "");
-         snprintf(decl, sizeof(decl), "declare i32 @llvm.%s.i32(i32%s)\n", ops[op], op ? ", i1" : "");
-         expect_refusal(body, decl, 100, STELA_AIR_INSTRUCTION);
-      }
    }
    count_refusal("%flag = icmp eq i32 %tid, 0\n%v = call i32 @llvm.ctlz.i32(i32 1, i1 %flag)\nret void\n",
                   "declare i32 @llvm.ctlz.i32(i32, i1)\n", STELA_AIR_INSTRUCTION);
@@ -266,8 +258,6 @@ integer_count_tests(void)
                   "declare i32 @llvm.ctpop.i32(i16)\n", STELA_AIR_TYPE);
    expect_refusal("%v = call i32 @user.llvm.ctpop.i32(i32 1)\nret void\n",
                   "declare i32 @user.llvm.ctpop.i32(i32)\n", 100, STELA_AIR_INSTRUCTION);
-   expect_refusal("%v = freeze i32 1\n%c = call i32 @llvm.ctpop.i32(i32 %v)\nret void\n",
-                  "declare i32 @llvm.ctpop.i32(i32)\n", 100, STELA_AIR_INSTRUCTION);
 }
 
 #endif
