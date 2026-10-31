@@ -372,8 +372,9 @@ pub struct Run {
     usb_storage_disk: Vec<PathBuf>,
     /// Feed the guest's keyboard and pointer from USB HID devices the mount
     /// drives itself: a `qemu-xhci` with `usb-kbd`, `usb-tablet` and
-    /// `usb-mouse`, and the mount's `--input`.
-    #[arg(long, conflicts_with_all = ["module", "usb_image", "payload"])]
+    /// `usb-mouse`, and the mount's `--input`. A `--usb-image` boot's mount
+    /// takes `--input` from the stick's options instead.
+    #[arg(long, conflicts_with_all = ["module", "payload"])]
     usb_input: bool,
     /// Give the mount its host network adapter as a USB CDC-ECM device on
     /// the `qemu-xhci` (`usb-net`), on a LAN peer of its own
