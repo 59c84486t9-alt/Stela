@@ -167,6 +167,12 @@ static long double round_with(long double x, unsigned short mode)
 	return x;
 }
 
+static long double round_as_set(long double x)
+{
+	__asm__("frndint" : "+t"(x));
+	return x;
+}
+
 #define ROUND_DOWN 0x400
 #define ROUND_UP 0x800
 #define ROUND_ZERO 0xc00
@@ -179,8 +185,8 @@ long double floorl(long double x)
 ONE(floor, round_with(v, ROUND_DOWN))
 ONE(ceil, round_with(v, ROUND_UP))
 ONE(trunc, round_with(v, ROUND_ZERO))
-ONE(rint, round_with(v, 0))
-ONE(nearbyint, round_with(v, 0))
+ONE(rint, round_as_set(v))
+ONE(nearbyint, round_as_set(v))
 ONE(round, v < 0 ? -round_with(0.5L - v, ROUND_DOWN) : round_with(v + 0.5L, ROUND_DOWN))
 ONE(fabs, v < 0 ? -v : v == 0 ? 0 : v)
 
@@ -383,6 +389,7 @@ static void write_mxcsr(unsigned int value)
 /* FE_ rounding modes are x87's, two bits lower than MXCSR's field. */
 #define ROUND_SHIFT 3
 #define ROUND_MASK 0x6000
+#define FE_MASK 0xc00
 
 int fegetenv(fenv_t *environment)
 {
@@ -390,9 +397,19 @@ int fegetenv(fenv_t *environment)
 	return 0;
 }
 
+/* The elementary functions round on the x87 unit, so it follows MXCSR. */
+static void follow_mxcsr(void)
+{
+	unsigned short control;
+	__asm__("fnstcw %0" : "=m"(control));
+	control = (unsigned short)((control & ~FE_MASK) | (read_mxcsr() & ROUND_MASK) >> ROUND_SHIFT);
+	__asm__("fldcw %0" : : "m"(control));
+}
+
 int fesetenv(const fenv_t *environment)
 {
 	write_mxcsr(*environment);
+	follow_mxcsr();
 	return 0;
 }
 
@@ -417,6 +434,7 @@ int fegetround(void)
 int fesetround(int mode)
 {
 	write_mxcsr((read_mxcsr() & ~(unsigned int)ROUND_MASK) | (unsigned int)mode << ROUND_SHIFT);
+	follow_mxcsr();
 	return 0;
 }
 

@@ -154,6 +154,20 @@ const TARGET_FLAGS: [&str; 15] = [
     "-fno-asynchronous-unwind-tables",
     "-femulated-tls",
 ];
+/// The C library's own test, on the build host.
+const LIBC_TEST_FLAGS: [&str; 11] = [
+    "--target=x86_64-unknown-linux-gnu",
+    "-O1",
+    "-msse2",
+    "-nostdinc",
+    "-ffreestanding",
+    "-fno-builtin",
+    "-fno-stack-protector",
+    "-femulated-tls",
+    "-fno-pic",
+    "-Wall",
+    "-Werror",
+];
 /// Bindgen's C wrappers of the conversions that pass floats to Rust, which the
 /// soft-float versions in `compat/mesa/soft_float.c` replace.
 const FLOAT_WRAPPERS: [&str; 3] = [
@@ -602,7 +616,41 @@ pub fn build(jobs: u16) -> Result<()> {
             .args(units.iter().map(|unit| &unit.output)),
     )?;
     println!("{} objects in {}", units.len(), archive.display());
-    Ok(())
+    test_libc(&toolchain, &directory)
+}
+
+/// Builds `compat/libc/tests/libc_test.c` with the C library as a static Linux
+/// program, and runs it.
+fn test_libc(toolchain: &Toolchain, directory: &Path) -> Result<()> {
+    let libc = gpu().join("compat/libc");
+    let output = directory.join("libc-test");
+    fs::create_dir_all(&output)?;
+    let resource = format!("{}/include", resource_directory(&toolchain.clang)?);
+    let mut objects = Vec::new();
+    for unit in LIBC.into_iter().chain(["tests/libc_test"]) {
+        let object = output.join(format!("{}.o", unit.replace('/', "-")));
+        exec(
+            Command::new(&toolchain.clang)
+                .args(LIBC_TEST_FLAGS)
+                .arg("-isystem")
+                .arg(&libc)
+                .arg("-isystem")
+                .arg(&resource)
+                .arg("-c")
+                .arg(libc.join(format!("{unit}.c")))
+                .arg("-o")
+                .arg(&object),
+        )?;
+        objects.push(object);
+    }
+    let program = output.join("libc_test");
+    exec(
+        Command::new(&toolchain.linker)
+            .args(["-static", "-o"])
+            .arg(&program)
+            .args(&objects),
+    )?;
+    exec(&mut Command::new(&program)).context("the C library's test failed")
 }
 
 #[cfg(test)]

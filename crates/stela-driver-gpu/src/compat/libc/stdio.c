@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 /* Formatted output into memory, and the two streams that reach the host's log.
  * A memory stream is the only file that can be opened. */
+#include <ctype.h>
 #include <errno.h>
 #include <limits.h>
 #include <math.h>
@@ -587,12 +588,24 @@ void perror(const char *prefix)
 }
 
 /* What Mesa scans is unsigned numbers and words between literal text. */
+static const char *skip_space(const char *text)
+{
+	while (isspace((unsigned char)*text))
+		text++;
+	return text;
+}
+
 int sscanf(const char *input, const char *format, ...)
 {
 	va_list arguments;
 	va_start(arguments, format);
+	const char *start = input;
 	int matched = 0;
 	for (; *format; format++) {
+		if (isspace((unsigned char)*format)) {
+			input = skip_space(input);
+			continue;
+		}
 		if (*format != '%') {
 			if (*input != *format)
 				break;
@@ -600,21 +613,50 @@ int sscanf(const char *input, const char *format, ...)
 			continue;
 		}
 		format++;
+		size_t width = SIZE_MAX;
+		if (isdigit((unsigned char)*format))
+			width = strtoul(format, (char **)&format, 10);
 		bool wide = false;
 		while (*format == 'l' || *format == 'z' || *format == 'h') {
 			wide = *format != 'h';
 			format++;
 		}
 		char *end;
+		if (*format == 'n') {
+			*va_arg(arguments, int *) = (int)(input - start);
+			continue;
+		}
+		if (*format == 'c') {
+			if (!*input)
+				break;
+			*va_arg(arguments, char *) = *input++;
+			matched++;
+			continue;
+		}
+		input = skip_space(input);
 		if (*format == 's') {
+			if (!*input)
+				break;
 			char *out = va_arg(arguments, char *);
-			while (*input && *input != ' ' && *input != '\n')
+			while (*input && !isspace((unsigned char)*input) && width--)
 				*out++ = *input++;
 			*out = 0;
 			matched++;
 			continue;
 		}
-		int base = *format == 'x' ? 16 : *format == 'i' ? 0 : 10;
+		if (*format == 'f' || *format == 'g' || *format == 'e') {
+			double value = strtod(input, &end);
+			if (end == input)
+				break;
+			input = end;
+			if (wide)
+				*va_arg(arguments, double *) = value;
+			else
+				*va_arg(arguments, float *) = (float)value;
+			matched++;
+			continue;
+		}
+		int base = *format == 'x' ? 16 : *format == 'o' ? 8 : *format == 'i' ? 0 : 10;
 		unsigned long long value = strtoull(input, &end, base);
 		if (end == input)
 			break;

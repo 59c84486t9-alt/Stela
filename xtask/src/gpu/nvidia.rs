@@ -47,7 +47,7 @@ impl Target {
 pub(super) struct Toolchain {
     pub(super) clang: PathBuf,
     clangxx: PathBuf,
-    linker: PathBuf,
+    pub(super) linker: PathBuf,
     objcopy: PathBuf,
     pub(super) archiver: PathBuf,
 }
