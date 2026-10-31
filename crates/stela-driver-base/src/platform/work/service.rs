@@ -380,7 +380,16 @@ impl<const N: usize> Domain<N> {
     pub fn new(clock: Arc<dyn Clock>, idle: Arc<dyn Idle>) -> Result<Arc<Self>, WorkError> {
         let mut deadlines = Deadlines::new(clock.clone(), idle)?;
         deadlines.start_irq_ticks()?;
-        Ok(Arc::new(Self {
+        Ok(Self::over(clock, deadlines))
+    }
+    /// A domain that wakes only for raised work and its timer: no IRQ work
+    /// runs on it, and a CPU that runs guest code has no tick to spare.
+    pub fn tickless(clock: Arc<dyn Clock>, idle: Arc<dyn Idle>) -> Result<Arc<Self>, WorkError> {
+        let deadlines = Deadlines::new(clock.clone(), idle)?;
+        Ok(Self::over(clock, deadlines))
+    }
+    fn over(clock: Arc<dyn Clock>, deadlines: Deadlines) -> Arc<Self> {
+        Arc::new(Self {
             clock: ManuallyDrop::new(clock),
             deadlines: ManuallyDrop::new(UnsafeCell::new(deadlines)),
             wake: ManuallyDrop::new(UnsafeCell::new(None)),
@@ -388,7 +397,7 @@ impl<const N: usize> Domain<N> {
             bound: AtomicBool::new(false),
             stopping: AtomicBool::new(false),
             retired: AtomicBool::new(false),
-        }))
+        })
     }
     fn process(&self) -> Result<(), WorkError> {
         self.clock.cpu().check_cpu()?;
@@ -455,6 +464,12 @@ impl<const N: usize> Domain<N> {
         self.process()?;
         // SAFETY: same checked CPU; provider call cannot reenter or switch.
         unsafe { &mut *self.deadlines.get() }.set_timer(deadline)
+    }
+    /// When the service is next due with nothing raised.
+    pub fn next_deadline(&self) -> Result<Option<u64>, WorkError> {
+        self.process()?;
+        // SAFETY: as in `set_timer`.
+        unsafe { &*self.deadlines.get() }.next_deadline()
     }
     pub fn begin(&self, runtime: Pin<&Runtime<N>>) -> Result<Option<Batch>, WorkError> {
         self.current(runtime)?;
