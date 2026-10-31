@@ -182,3 +182,43 @@ fn requester_drain_completes_alias_writes_and_leaves_other_domains_pending() {
     // SAFETY: every covered requester and all model transactions have retired.
     unsafe { unit.retire() }.unwrap();
 }
+
+#[test]
+fn initial_window_drain_rejects_private_contexts_including_aliases() {
+    let (mut unit, peer) = unit_with_entries(&[0x42, 0x20, 0, 0, 0, 0x21, 0, 0]);
+    let pages = peer.pages(4096);
+    let physical = pages.physical_pages()[0];
+    // SAFETY: original isolated cold peer; this pin is the only window target
+    // and remains owned by the unit until its acknowledged retirement.
+    unsafe { unit.window(&[0x20], vec![pages.into()]) }.unwrap();
+    peer.post_write(0x21, physical, 0x98765432);
+    assert_eq!(peer.payload_word(physical), 0);
+    unit.drain_initial_requester(0x20).unwrap();
+    assert_eq!(peer.payload_word(physical), 0x98765432);
+    let before = peer.commands();
+    assert_eq!(
+        unit.drain_initial_requester(0x28),
+        Err(DmaError::IommuUnavailable)
+    );
+    assert_eq!(peer.commands(), before);
+    // SAFETY: prior payload completed above; this peer has no IRQ/work users
+    // and no producer can restart while attachment replaces the original DTE.
+    let mut requester = unsafe { unit.attach(function(0x20)) }.unwrap();
+    let before = peer.commands();
+    for rid in [0x20, 0x21] {
+        assert_eq!(
+            unit.drain_initial_requester(rid),
+            Err(DmaError::IommuUnavailable)
+        );
+    }
+    assert_eq!(
+        peer.commands(),
+        before,
+        "private aliases must not use an old-root receipt"
+    );
+    // SAFETY: no mappings or producers exist in the fresh private domain.
+    unsafe { requester.detach() }.unwrap();
+    drop(requester);
+    // SAFETY: every covered requester and earlier window transaction retired.
+    unsafe { unit.retire() }.unwrap();
+}

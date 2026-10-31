@@ -31,6 +31,7 @@ pub(in crate::usb) fn block(error: ehci::Error) -> BlockError {
             BlockError::Unsupported("EHCI device no longer attached")
         }
         ehci::Error::Quarantined => BlockError::Unsupported("EHCI controller quarantined"),
+        ehci::Error::Preparation(_) => BlockError::Protocol("EHCI requester preparation failed"),
         ehci::Error::Busy => BlockError::Protocol("EHCI transfer while another is in flight"),
         ehci::Error::Memory(_) | ehci::Error::Exhausted => BlockError::NoDmaMemory,
         ehci::Error::Dma(_) => BlockError::Protocol("EHCI DMA mapping failure"),

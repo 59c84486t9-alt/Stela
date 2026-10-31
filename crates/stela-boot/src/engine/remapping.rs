@@ -11,6 +11,7 @@
 //! are a policy input: none yet, so a unit whose scope holds a display
 //! controller is left untranslated until a display driver claims it.
 mod amd;
+mod preparation;
 
 use super::storage::RestoreRoot;
 use crate::{

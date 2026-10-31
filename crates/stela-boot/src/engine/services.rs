@@ -249,6 +249,33 @@ unsafe impl NativeServices for Services<'_> {
         crate::random::source()
     }
 
+    fn prepare_requester(
+        &self,
+        address: Address,
+    ) -> Result<stela_drivers::bus::pci::requester::preparation::PreparingRequester, ServiceError>
+    {
+        use stela_drivers::bus::pci::requester::{ClaimError, preparation::PreparingRequester};
+        let role = self.remappers.function_role(address);
+        if role != FunctionRole::Physical {
+            return Err(ServiceError::Claim(ClaimError::UnsupportedRole(role)));
+        }
+        let root = self.remappers.preparation(address).map_err(|error| {
+            output::arguments(format_args!("UNSUPPORTED Stela cold requester {address}: original DMA drain unavailable ({error:?})\n"));
+            ServiceError::Refused("cold requester original DMA drain unavailable")
+        })?;
+        let mut function = Function::new(address, self.config(address)?)
+            .ok_or(ServiceError::Refused("no function answers at this address"))?;
+        self.stop(function.config())?;
+        // SAFETY: first serialized post-EBS attach through the original owned
+        // configuration and selected root. The platform keeps the initial DMA
+        // backing, excludes prior firmware/IRQ/work and competing PCI writers,
+        // and admits snooped WB DMA. Complete stable inventory supplies role.
+        // PCI containment here grants no endpoint engine stop or payload drain;
+        // the owning driver must produce that receipt with BARs still kept.
+        unsafe { PreparingRequester::new(function, role, root) }
+            .map_err(|rejected| ServiceError::Claim(rejected.error))
+    }
+
     fn claim_stopped(&self, address: Address) -> Result<StoppedRequester, ServiceError> {
         let role = self.remappers.function_role(address);
         if role != FunctionRole::Physical {

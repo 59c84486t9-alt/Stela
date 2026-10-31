@@ -1361,3 +1361,64 @@ fn invalid_window_geometry_never_publishes_a_hardware_root() {
         assert!(registers.0.lock().unwrap().writes.is_empty());
     }
 }
+
+#[test]
+fn initial_root_drain_precedes_private_attachment_and_requires_write_drain() {
+    for supported in [false, true] {
+        let registers = ModelRegisters::new();
+        if !supported {
+            *registers.0.lock().unwrap().values.get_mut(&CAP).unwrap() &= !CAP_WRITE_DRAIN;
+        }
+        // SAFETY: isolated, exclusive model unit and idle original requesters.
+        let unit = unsafe {
+            Unit::take_over(
+                registers.clone(),
+                source(),
+                &[8],
+                48,
+                core::slice::from_ref(&(0x800000..0x801000)),
+            )
+        }
+        .unwrap();
+        let before = registers.0.lock().unwrap().writes.len();
+        assert_eq!(
+            unit.drain_initial_requester(9),
+            Err(DmaError::IommuUnavailable)
+        );
+        assert_eq!(registers.0.lock().unwrap().writes.len(), before);
+        if supported {
+            let pin = pages(PAGE, 12, 0x800000, Arc::new(AtomicU64::new(0)));
+            let cpu = pin.cpu_mapping(CacheAttribute::WriteBack).unwrap();
+            let pointer = cpu.address(0, 4).unwrap().as_ptr().cast::<u32>();
+            registers
+                .0
+                .lock()
+                .unwrap()
+                .pending_payload
+                .push((pointer as usize, 0x76543210));
+            unit.drain_initial_requester(8).unwrap();
+            // SAFETY: owned aligned model word, pending writer completed above.
+            assert_eq!(u32::from_le(unsafe { pointer.read_volatile() }), 0x76543210);
+            assert!(registers.0.lock().unwrap().pending_payload.is_empty());
+            // SAFETY: the model has no more DMA, IRQ or worker producers.
+            let domain = unsafe { unit.attach_requester(stopped_claim(8)) }.unwrap();
+            let before = registers.0.lock().unwrap().writes.len();
+            assert_eq!(
+                unit.drain_initial_requester(8),
+                Err(DmaError::IommuUnavailable)
+            );
+            assert_eq!(registers.0.lock().unwrap().writes.len(), before);
+            // SAFETY: no model mappings or request producers remain.
+            drop(unsafe { domain.detach() }.unwrap());
+            drop(domain);
+        } else {
+            assert_eq!(
+                unit.drain_initial_requester(8),
+                Err(DmaError::DrainUnavailable)
+            );
+            assert_eq!(registers.0.lock().unwrap().writes.len(), before);
+        }
+        // SAFETY: every modeled requester and pending transfer has retired.
+        unsafe { unit.shut_down() }.unwrap();
+    }
+}

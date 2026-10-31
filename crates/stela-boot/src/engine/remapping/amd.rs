@@ -5,7 +5,7 @@
 use super::CLAIMED_DISPLAYS;
 use crate::Result;
 use crate::{native_mmio, output};
-use alloc::{boxed::Box, format, sync::Arc, vec, vec::Vec};
+use alloc::{boxed::Box, format, rc::Rc, sync::Arc, vec, vec::Vec};
 use core::{cell::RefCell, mem::ManuallyDrop, ops::Range, ptr::NonNull};
 use stela_boot_core::remapping::{self, Present};
 use stela_contracts::refuse;
@@ -168,7 +168,7 @@ fn named(scope: MemoryScope, segment: u16, present: &[Present]) -> Vec<u16> {
 }
 
 pub(super) struct Taken {
-    unit: RefCell<Unit<Platform>>,
+    unit: Rc<RefCell<Unit<Platform>>>,
     segment: u16,
     requesters: RefCell<Vec<u16>>,
 }
@@ -385,7 +385,7 @@ pub(super) unsafe fn take(
             requesters.len()
         ));
         taken.push(Taken {
-            unit: RefCell::new(unit),
+            unit: Rc::new(RefCell::new(unit)),
             segment: id.segment,
             requesters: RefCell::new(requesters),
         });
@@ -418,23 +418,80 @@ impl Taken {
         Ok(())
     }
 
+    /// Keep the original unit/window graph through vendor cold preparation.
+    pub(super) fn preparation(
+        &self,
+        address: Address,
+    ) -> Result<Box<dyn stela_drivers::bus::pci::requester::preparation::Root>, DmaError> {
+        let rid = super::requester(address);
+        if !on_boot_processor() || !self.covers(address.segment, rid) {
+            return Err(DmaError::IommuUnavailable);
+        }
+        Ok(Box::new(ColdRoot {
+            address,
+            unit: self.unit.clone(),
+        }))
+    }
+
     /// A domain of its own for `binding`'s requester.
     pub(super) fn domain(&self, binding: RequesterBinding) -> Result<Arc<dyn DmaDomain>, Error> {
-        let mut unit = self.unit.try_borrow_mut().map_err(|_| Error::Busy)?;
-        // SAFETY: the driver's binding of its stopped function, whose bus
-        // mastering it enables after mapping through this domain.
-        let requester = unsafe { unit.attach_binding(binding) }?;
-        Ok(Arc::new(Domain {
-            inner: ManuallyDrop::new(RefCell::new(Inner {
-                requester,
-                mappings: Vec::new(),
-                next: 1,
-            })),
-        }))
+        attach_domain(&self.unit, binding)
+    }
+}
+
+fn attach_domain(
+    unit: &Rc<RefCell<Unit<Platform>>>,
+    binding: RequesterBinding,
+) -> Result<Arc<dyn DmaDomain>, Error> {
+    if !on_boot_processor() {
+        return Err(Error::Dma(DmaError::IommuUnavailable));
+    }
+    let original = unit.clone();
+    let mut unit = unit.try_borrow_mut().map_err(|_| Error::Busy)?;
+    // SAFETY: the caller owns the paired stopped binding and completed the
+    // original root drain before changing its DTE; routing remains frozen.
+    let requester = unsafe { unit.attach_binding(binding) }?;
+    Ok(Arc::new(Domain {
+        inner: ManuallyDrop::new(RefCell::new(Inner {
+            _unit: original,
+            requester,
+            mappings: Vec::new(),
+            next: 1,
+        })),
+    }))
+}
+
+struct ColdRoot {
+    address: Address,
+    unit: Rc<RefCell<Unit<Platform>>>,
+}
+// SAFETY: the paired original IVRS unit/window and DMA backing are retained.
+// It is process-local and every operation checks BSP/non-IRQ execution. The
+// consuming receipt supplies independent endpoint/IRQ/work/bypass retirement;
+// failure retains hardware resources through the unit's native owners.
+unsafe impl stela_drivers::bus::pci::requester::preparation::Root for ColdRoot {
+    fn drain(&self) -> Result<(), DmaError> {
+        if !on_boot_processor() {
+            return Err(DmaError::IommuUnavailable);
+        }
+        let unit = self
+            .unit
+            .try_borrow()
+            .map_err(|_| DmaError::IommuUnavailable)?;
+        unit.drain_initial_requester(super::requester(self.address))
+    }
+    unsafe fn bind(&self, binding: RequesterBinding) -> Result<Arc<dyn DmaDomain>, DmaError> {
+        if !on_boot_processor() || binding.address() != self.address {
+            return Err(DmaError::IommuUnavailable);
+        }
+        // The Root contract supplies this exact paired stopped receipt,
+        // completed original-path drain and unchanged routing/config epoch.
+        attach_domain(&self.unit, binding).map_err(failed)
     }
 }
 
 struct Inner {
+    _unit: Rc<RefCell<Unit<Platform>>>,
     requester: Requester<Platform>,
     mappings: Vec<(DomainMapping, Mapping)>,
     next: u64,

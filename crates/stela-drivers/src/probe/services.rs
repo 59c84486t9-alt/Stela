@@ -8,7 +8,9 @@ use crate::bus::{
     pci::{
         Address, Bar, Function,
         owned::OwnedConfig,
-        requester::{ClaimError, RequesterBinding, StoppedRequester},
+        requester::{
+            ClaimError, RequesterBinding, StoppedRequester, preparation::PreparingRequester,
+        },
     },
     thunderbolt::manager::Platform,
 };
@@ -52,8 +54,8 @@ impl fmt::Display for ServiceError {
 /// pages and the ACPI namespace.
 ///
 /// # Safety
-/// Implementations transfer ownership: each claimed requester is the unique
-/// owner of its function's configuration space, with its engines, DMA and
+/// Implementations transfer ownership: each [`claim_stopped`](Self::claim_stopped)
+/// requester is the unique owner of its configuration, with engines, DMA and
 /// interrupts stopped and drained, as [`StoppedRequester::from_stopped_pci`]
 /// requires. Each bridge is the unique owner of its configuration space,
 /// left forwarding. Each mapping covers exactly the requested BAR, uncached and
@@ -69,6 +71,13 @@ impl fmt::Display for ServiceError {
 /// RAM through: writable, live in every such context for the program, and
 /// never aliased by a Rust reference.
 pub unsafe trait NativeServices {
+    /// Keep the original configuration and root path for the owning driver's
+    /// cold vendor preparation. PCI controls are gated, but no engine stop,
+    /// posted-write completion or private domain is granted. The first attach
+    /// has no Stela IRQ/work users; the platform excludes prior firmware and
+    /// conflicting reset/configuration/routing owners throughout preparation.
+    fn prepare_requester(&self, address: Address) -> Result<PreparingRequester, ServiceError>;
+
     /// Claim the function at `address` as a stopped requester through an owned
     /// mapping of its configuration space.
     fn claim_stopped(&self, address: Address) -> Result<StoppedRequester, ServiceError>;
@@ -236,6 +245,8 @@ pub(crate) mod tests {
     #[derive(Default)]
     pub(crate) struct Refusing {
         pub(crate) requests: RefCell<Vec<Address>>,
+        pub(crate) preparations: RefCell<Vec<Address>>,
+        pub(crate) stopped: RefCell<Vec<Address>>,
     }
 
     struct NoPages;
@@ -252,8 +263,14 @@ pub(crate) mod tests {
 
     // SAFETY: every request is refused; no owner is transferred.
     unsafe impl NativeServices for Refusing {
+        fn prepare_requester(&self, address: Address) -> Result<PreparingRequester, ServiceError> {
+            self.requests.borrow_mut().push(address);
+            self.preparations.borrow_mut().push(address);
+            Err(ServiceError::Unavailable)
+        }
         fn claim_stopped(&self, address: Address) -> Result<StoppedRequester, ServiceError> {
             self.requests.borrow_mut().push(address);
+            self.stopped.borrow_mut().push(address);
             Err(ServiceError::Unavailable)
         }
         fn bridge(&self, address: Address) -> Result<Function<OwnedConfig>, ServiceError> {

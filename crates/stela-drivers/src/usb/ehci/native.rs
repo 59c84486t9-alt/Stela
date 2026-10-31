@@ -5,18 +5,22 @@ use crate::{
     bus::{
         dma::{mapping::DmaDomain, memory::PageSource},
         mmio::owned::{Mapping, Protection},
-        pci::{ConfigSpace, Function, owned::OwnedConfig, power::Timer},
+        pci::{
+            ConfigSpace, Function, owned::OwnedConfig, power::Timer,
+            requester::preparation::PreparingRequester,
+        },
     },
 };
 use alloc::sync::Arc;
+mod requester;
 mod time;
+use requester::Requester;
 
-/// Original exclusively reserved configuration/BAR owners and the real domain
-/// and RAM allocator. Construction alone authorizes no hardware operation.
+/// Original requester/root/BAR owners and the RAM allocator. Construction
+/// grants no engine stop, root drain, private domain or DMA allocation.
 pub struct NativeResources {
-    pub pci: Function<OwnedConfig>,
+    pub requester: PreparingRequester,
     pub registers: Mapping,
-    pub domain: Arc<dyn DmaDomain>,
     pub memory: &'static dyn PageSource,
     pub clock: Clock,
 }
@@ -29,12 +33,12 @@ pub struct NativeResources {
 /// exclusive D0, reset, removal, bridge-routing and assignment ownership for
 /// their complete lifetime. The BAR is this function's real BAR0;
 /// numeric geometry alone is insufficient. No other firmware/driver accessor
-/// may use this controller. The real requester domain is already bound and
-/// isolated, BME is initially clear, and no uncontrolled DMA engine exists.
-/// This domain keeps the previous requester/root translation path;
-/// if assignment changed, its producer must already have stopped and drained
-/// every old DMA route with original pins/owners kept before rebinding.
-/// The new domain cannot certify retirement through a different old domain.
+/// may use this controller. BME is initially clear; the requester keeps its
+/// original root and DMA backing without a private-domain grant. Initialization
+/// stops both vendor engines, drains that original path and consumes the
+/// current-epoch receipt before private binding or allocating a fresh arena.
+/// If assignment changed, every older route must already be retired by its
+/// original owner; a new root cannot certify a different old path.
 /// Companion controllers and their port/reset ownership must be stopped and
 /// exclusively coordinated before CONFIGFLAG routes roots to EHCI. The clock
 /// must be calibrated, monotonic and advancing in this context. All operations
@@ -43,11 +47,28 @@ pub struct NativeResources {
 /// acknowledges prior posted IRQ delivery, and stops/drains every prior IRQ,
 /// deferred callback and firmware accessor before attachment and until release.
 /// USBINTR0 or BMEclear alone cannot establish those IRQ/callback facts.
-pub unsafe fn attach(resources: NativeResources) -> Result<Controller, Failure> {
-    Controller::initialize(Box::new(Native {
+pub unsafe fn attach(
+    resources: NativeResources,
+) -> Result<(Controller, Arc<dyn DmaDomain>), Failure> {
+    let mut controller = Controller::initialize(Box::new(Native {
         elapsed: time::Elapsed::new(Clock::ticks()),
-        resources: Some(resources),
-    }))
+        resources: Some(Resources {
+            requester: Requester::Preparing(resources.requester),
+            registers: resources.registers,
+            memory: resources.memory,
+            clock: resources.clock,
+        }),
+    }))?;
+    match controller.hw().domain() {
+        Ok(domain) => Ok((controller, domain)),
+        Err(error) => {
+            controller.state = State::Failed;
+            Err(Failure {
+                error,
+                retained: Box::new(controller),
+            })
+        }
+    }
 }
 
 pub struct Failure {
@@ -77,15 +98,23 @@ pub(super) trait Hardware {
     fn delay_us(&mut self, us: u64) -> Result<(), Error>;
     fn allocate(&mut self, limit: u64) -> Result<Arena, Error>;
     fn bus_master(&mut self, enabled: bool) -> Result<(), Error>;
+    fn prepare_dma(&mut self) -> Result<(), Error>;
     fn drain(&mut self) -> Result<(), Error>;
     fn retire(&mut self) -> Result<(), Error>;
+    fn domain(&mut self) -> Result<Arc<dyn DmaDomain>, Error>;
+}
+struct Resources {
+    requester: Requester,
+    registers: Mapping,
+    memory: &'static dyn PageSource,
+    clock: Clock,
 }
 struct Native {
-    resources: Option<NativeResources>,
+    resources: Option<Resources>,
     elapsed: time::Elapsed,
 }
 impl Native {
-    fn r(&mut self) -> &mut NativeResources {
+    fn r(&mut self) -> &mut Resources {
         self.resources.as_mut().expect("retained native owner")
     }
     fn registers(&self) -> Result<&Mapping, Error> {
@@ -95,7 +124,7 @@ impl Native {
 impl Hardware for Native {
     fn validate(&mut self) -> Result<(), Error> {
         let r = self.r();
-        if r.pci.class != CLASS {
+        if r.requester.function()?.class != CLASS {
             return Err(Error::Invalid);
         }
         // The shared native timer checks duration multiplication before effects
@@ -106,12 +135,12 @@ impl Hardware for Native {
         {
             return Err(Error::Register);
         }
-        let bar = r.pci.config().read32(0x10);
+        let bar = r.requester.function()?.config().read32(0x10);
         if bar & 1 != 0 || bar & 6 == 2 || bar & 6 == 6 {
             return Err(Error::Unsupported("EHCI BAR format"));
         }
         let upper = if bar & 6 == 4 {
-            u64::from(r.pci.config().read32(0x14)) << 32
+            u64::from(r.requester.function()?.config().read32(0x14)) << 32
         } else {
             0
         };
@@ -123,12 +152,15 @@ impl Hardware for Native {
         {
             return Err(Error::Register);
         }
-        let command = r.pci.config().read16(4);
+        let command = r.requester.function()?.config().read16(4);
         if command & 4 != 0 {
             return Err(Error::Unsupported("EHCI initially uncontained requester"));
         }
-        r.pci.config().write16(4, command | 2 | 0x400); // memory decode + INTx disabled, BME stays clear
-        if r.pci.config().read16(4) & 0x406 != 0x402 {
+        r.requester
+            .function()?
+            .config()
+            .write16(4, command | 2 | 0x400); // memory decode + INTx disabled, BME stays clear
+        if r.requester.function()?.config().read16(4) & 0x406 != 0x402 {
             return Err(Error::Register);
         }
         self.registers()?
@@ -152,13 +184,17 @@ impl Hardware for Native {
         if offset > 252 || !offset.is_multiple_of(4) {
             return Err(Error::Register);
         }
-        Ok(self.r().pci.config().read32(offset))
+        Ok(self.r().requester.function()?.config().read32(offset))
     }
     fn config_write(&mut self, offset: u16, value: u32) -> Result<(), Error> {
         if offset > 252 || !offset.is_multiple_of(4) {
             return Err(Error::Register);
         }
-        self.r().pci.config().write32(offset, value);
+        self.r()
+            .requester
+            .function()?
+            .config()
+            .write32(offset, value);
         Ok(())
     }
     fn config_os_owned(&mut self, offset: u16) -> Result<(), Error> {
@@ -166,7 +202,11 @@ impl Hardware for Native {
             return Err(Error::Register);
         }
         // Narrow semaphore write preserves BIOS ownership and capability bytes.
-        self.r().pci.config().write8(offset + 3, 1);
+        self.r()
+            .requester
+            .function()?
+            .config()
+            .write8(offset + 3, 1);
         Ok(())
     }
     fn bytes(&self) -> usize {
@@ -191,11 +231,16 @@ impl Hardware for Native {
             .memory
             .allocate(schedule::ARENA_BYTES, 4096, CacheAttribute::WriteBack)?;
         let cpu = pages.cpu_mapping(CacheAttribute::WriteBack)?;
-        let dma = DmaMapping::map(r.domain.clone(), pages, Direction::Bidirectional, limit)?;
+        let dma = DmaMapping::map(
+            r.requester.domain()?,
+            pages,
+            Direction::Bidirectional,
+            limit,
+        )?;
         Arena::new(cpu, dma)
     }
     fn bus_master(&mut self, enabled: bool) -> Result<(), Error> {
-        let config = self.r().pci.config();
+        let config = self.r().requester.function()?.config();
         let old = config.read16(4);
         config.write16(4, if enabled { old | 6 | 0x400 } else { old & !4 });
         if (config.read16(4) & 4 != 0) != enabled {
@@ -203,21 +248,33 @@ impl Hardware for Native {
         }
         Ok(())
     }
+    fn prepare_dma(&mut self) -> Result<(), Error> {
+        // SAFETY: initialize_inner acknowledged full HALT/ASS0/PSS0 with
+        // device IRQs masked and original BAR/config/root owners kept. Its
+        // first-attach grant excludes prior firmware/IRQ/work/bypass users.
+        unsafe { self.r().requester.bind() }
+    }
     fn drain(&mut self) -> Result<(), Error> {
-        // SAFETY: caller observed ASS0/PSS0 or full HALT for both engines.
-        unsafe {
-            self.r().domain.drain_posted_writes()?;
-        }
-        Ok(())
+        // SAFETY: the caller observed schedule stop or full HALT. This is the
+        // same already bound domain that owns every current EHCI DMA lease.
+        unsafe { self.r().requester.domain()?.drain_posted_writes() }.map_err(Error::Dma)
     }
     fn retire(&mut self) -> Result<(), Error> {
+        self.r().requester.domain()?;
         // SAFETY: Controller::shutdown has stopped engines, BME and DMA,
         // drained the domain and removed its arena mapping; no callbacks exist.
         unsafe { self.r().registers.retire() }.map_err(|_| Error::Register)?;
         let resources = self.resources.take().ok_or(Error::Register)?;
-        let mut configuration = resources.pci.into_config().into_mapping();
+        let mut configuration = resources
+            .requester
+            .into_function()?
+            .into_config()
+            .into_mapping();
         // SAFETY: same exclusive stopped owner, all register views retired.
         unsafe { configuration.retire() }.map_err(|_| Error::Register)
+    }
+    fn domain(&mut self) -> Result<Arc<dyn DmaDomain>, Error> {
+        self.r().requester.domain()
     }
 }
 
@@ -282,7 +339,7 @@ impl Controller {
         self.wait(self.operational + STS, HALT | ASS | PSS, HALT, HALT_US)?;
         // Initial BMEclear/reset alone cannot retire old posted writes before
         // the allocator/domain reuses RAM or IOVAs for this fresh arena.
-        self.hw().drain()?;
+        self.hw().prepare_dma()?;
         self.put(CMD, RESET)?;
         self.wait(self.operational + CMD, RESET, 0, RESET_US)?;
         if self.op(STS)? & HALT == 0 {

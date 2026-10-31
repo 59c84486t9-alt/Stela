@@ -285,6 +285,7 @@ unsafe impl<P: ColdPlatform> TableHardware for Hardware<P> {
 /// The window domain: one to one page tables shared by the requesters that
 /// have no domain of their own.
 struct Window<P: ColdPlatform> {
+    id: DomainId,
     tree: PageTables<Hardware<P>>,
     requesters: Vec<u16>,
 }
@@ -502,6 +503,7 @@ impl<P: ColdPlatform> Unit<P> {
         }
         drop(_guard);
         self.window = Some(Window {
+            id,
             tree,
             requesters: covered,
         });
@@ -513,6 +515,30 @@ impl<P: ColdPlatform> Unit<P> {
     pub fn check_health(&self) -> Result<(), Error> {
         let _guard = self.engine.resources.platform.enter().map_err(Error::Dma)?;
         self.engine.health()
+    }
+
+    /// Drain the original window/blocked path before a private attachment.
+    /// A private DTE, including one reached through an alias, cannot be
+    /// mistaken for this requester's original cold path.
+    pub fn drain_initial_requester(&self, rid: u16) -> Result<(), DmaError> {
+        if !self.coverage[usize::from(rid)] {
+            return Err(DmaError::IommuUnavailable);
+        }
+        for member in self.group(rid) {
+            let entry = self
+                .table
+                .borrow()
+                .snapshot(member)
+                .map_err(|_| DmaError::InvalidationFailed)?;
+            if entry[0] & 3 == 3
+                && !self.window.as_ref().is_some_and(|window| {
+                    entry[1] as u16 == window.id.value() && window.requesters.contains(&member)
+                })
+            {
+                return Err(DmaError::IommuUnavailable);
+            }
+        }
+        self.drain_posted_writes()
     }
 
     /// Complete earlier translated payload transactions through this unit.
