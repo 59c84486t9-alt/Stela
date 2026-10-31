@@ -105,6 +105,22 @@ fn bounded_requests<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<Re
     deserializer.deserialize_seq(Requests)
 }
 
+impl From<Requirement<'_>> for Request {
+    fn from(request: Requirement<'_>) -> Self {
+        let target = request.target;
+        Self {
+            name: request.name.into(),
+            target: Identity {
+                driver: target.driver.into(),
+                hardware: target.hardware.into(),
+                revision: target.revision.into(),
+                board: target.board.map(Into::into),
+            },
+            minimum_bytes: request.minimum_bytes,
+        }
+    }
+}
+
 impl Default for Inventory {
     fn default() -> Self {
         Self {
@@ -151,7 +167,8 @@ impl Inventory {
         Ok(bytes)
     }
 
-    fn observe(&mut self, request: Requirement<'_>) -> Result<(), Error> {
+    /// Adds `request`, or raises the size an existing one needs.
+    pub fn observe(&mut self, request: Requirement<'_>) -> Result<(), Error> {
         validate(request)?;
         if let Some(existing) = self.requirements.iter_mut().find(|existing| {
             let view = existing.view();

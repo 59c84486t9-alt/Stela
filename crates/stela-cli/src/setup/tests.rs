@@ -3277,7 +3277,10 @@ fn firmware_action_checks_capability_and_dry_run() {
     let before = snapshot(&f.esp);
     assert!(
         rerun(&f, |c| {
-            c.action = Action::HostFirmwareFetch(inventory.clone());
+            c.action = Action::HostFirmwareFetch {
+                requirements: Some(inventory.clone()),
+                gpu: None,
+            };
             c.dry_run = true;
         })
         .unwrap_err()
@@ -3299,7 +3302,10 @@ fn firmware_action_checks_capability_and_dry_run() {
     let before = snapshot(&f.esp);
     let cache = f._dir.path().join("firmware-cache");
     let report = rerun(&f, |c| {
-        c.action = Action::HostFirmwareFetch(inventory.clone());
+        c.action = Action::HostFirmwareFetch {
+            requirements: Some(inventory.clone()),
+            gpu: None,
+        };
         c.host_firmware_cache = Some(cache.clone());
         c.dry_run = true;
     })

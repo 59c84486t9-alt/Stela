@@ -5,6 +5,7 @@ use super::{
     requirements::{Inventory, Request},
 };
 use alloc::{format, vec::Vec};
+use stela_driver_core::firmware::{Requirement, Target};
 
 pub const LINUX_FIRMWARE: &str = "https://gitlab.com/kernel-firmware/linux-firmware";
 pub const REALTEK_RELEASE: &str = "20250917";
@@ -14,6 +15,14 @@ pub const WIFI_FIRMWARE_REVISION: &str = "59f9fc2ef8d1e312d2a613d4e1ffad2ff31a0a
 pub const GSP_REVISION: &str = "1987bb2044a6c2d68c39d01c360bdbe17f1eb60c";
 /// The GSP-RM release nouveau's newest interface takes.
 const GSP_RELEASE: &str = "570.144";
+/// The files of a release, of which each chip family has some.
+const GSP_KINDS: [&str; 5] = [
+    "booter_load",
+    "booter_unload",
+    "bootloader",
+    "gen_bootloader",
+    "gsp",
+];
 /// wireless-regdb, the source of the regulatory database every Wi-Fi
 /// adapter's scans and transmissions answer to.
 pub const WIRELESS_REGDB: &str =
@@ -553,6 +562,35 @@ fn select_gsp(request: &Request) -> Option<&'static Recipe> {
     GSP.iter().find(|recipe| recipe.image.member == member)
 }
 
+/// Requires the GSP-RM files nouveau asks for on `chip`, named as it names
+/// chips: `tu104`, `ga104`, `ad104`.
+pub fn require_gsp(inventory: &mut Inventory, chip: &str) -> Result<(), Error> {
+    let target = Target {
+        driver: "nouveau",
+        hardware: "nvidia",
+        revision: "linux-firmware",
+        board: None,
+    };
+    let mut found = false;
+    for kind in GSP_KINDS {
+        let name = format!("nvidia/{chip}/gsp/{kind}-{GSP_RELEASE}.bin");
+        let request = Requirement {
+            name: &name,
+            target,
+            minimum_bytes: 1,
+        };
+        if select_gsp(&Request::from(request)).is_some() {
+            inventory.observe(request)?;
+            found = true;
+        }
+    }
+    if found {
+        Ok(())
+    } else {
+        Err(Error(format!("{chip} is no chip nouveau runs GSP-RM on")))
+    }
+}
+
 /// The drivers' request for the version-20 database
 /// (`stela_drivers::net::wifi::regulatory::database::REQUIREMENT`).
 fn select_regulatory(request: &Request) -> Option<&'static Recipe> {
@@ -817,6 +855,31 @@ mod tests {
         Plan::select(&inventory)
             .ok()
             .map(|plan| plan.selections[0].recipe.image.member)
+    }
+
+    #[test]
+    fn a_chip_requires_the_gsp_files_of_its_family() {
+        let names = |chip| {
+            let mut inventory = Inventory::default();
+            require_gsp(&mut inventory, chip).unwrap();
+            let requests = inventory.requests().iter();
+            requests
+                .map(|request| request.name.clone())
+                .collect::<Vec<_>>()
+        };
+        for name in names("tu104") {
+            assert!(gsp_member(&name).is_some(), "{name}");
+            assert!(name.starts_with("nvidia/tu104/gsp/"), "{name}");
+        }
+        assert!(names("tu104").iter().any(|name| name.contains("/gsp-")));
+        assert!(
+            names("ad104")
+                .iter()
+                .any(|name| name.contains("/booter_load-"))
+        );
+        let mut inventory = Inventory::default();
+        assert!(require_gsp(&mut inventory, "gp104").is_err());
+        assert!(inventory.requests().is_empty());
     }
 
     #[test]

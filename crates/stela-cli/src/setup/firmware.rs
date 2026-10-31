@@ -8,9 +8,10 @@ use std::{
     path::Path,
     time::Duration,
 };
+use stela_drivers::firmware::{Requirement, Target};
 use stela_loader::host_firmware::{
     self, MAX_MANIFEST_BYTES,
-    recipes::{Artifact, Plan},
+    recipes::{self, Artifact, Plan},
     requirements::Inventory,
 };
 
@@ -96,7 +97,9 @@ fn cached(client: &Client, directory: &Path, artifact: &Artifact) -> Result<Vec<
 
 /// Firmware inputs, cache and destination for one provisioning request.
 pub(super) struct ProvisionOptions<'a> {
-    pub(super) inventory: &'a Path,
+    pub(super) requirements: Option<&'a Path>,
+    /// A chip to add nouveau's files for, to what the destination holds.
+    pub(super) gpu: Option<&'a str>,
     pub(super) destination: &'a Path,
     pub(super) cache: &'a Path,
     pub(super) dry_run: bool,
@@ -105,21 +108,17 @@ pub(super) struct ProvisionOptions<'a> {
 
 pub(super) fn provision(options: ProvisionOptions<'_>) -> Result<String> {
     let ProvisionOptions {
-        inventory,
+        requirements,
+        gpu,
         destination,
         cache,
         dry_run,
         mount_image,
     } = options;
-    let inventory = read_inventory(inventory)?;
-    let plan = Plan::select(&inventory)?;
-    host_firmware::MountLimits::from_image(mount_image)
-        .context("stela.efi has no supported host firmware mount capability")?
-        .check_lengths(
-            plan.selections()
-                .iter()
-                .map(|selection| selection.recipe.image.length),
-        )?;
+    let mut inventory = match requirements {
+        Some(path) => read_inventory(path)?,
+        None => Inventory::default(),
+    };
     let previous = destination.join("manifest.json");
     if previous.try_exists()? {
         let mut bytes = Vec::new();
@@ -127,6 +126,20 @@ pub(super) fn provision(options: ProvisionOptions<'_>) -> Result<String> {
             .take(MAX_MANIFEST_BYTES as u64 + 1)
             .read_to_end(&mut bytes)?;
         let previous = host_firmware::Manifest::parse(&bytes)?;
+        if gpu.is_some() {
+            for image in &previous.images {
+                inventory.observe(Requirement {
+                    name: image.name,
+                    target: Target {
+                        driver: image.target.driver,
+                        hardware: image.target.hardware,
+                        revision: image.target.revision,
+                        board: image.target.board,
+                    },
+                    minimum_bytes: 1,
+                })?;
+            }
+        }
         for image in &previous.images {
             ensure!(
                 inventory
@@ -142,6 +155,17 @@ pub(super) fn provision(options: ProvisionOptions<'_>) -> Result<String> {
             );
         }
     }
+    if let Some(chip) = gpu {
+        recipes::require_gsp(&mut inventory, chip)?;
+    }
+    let plan = Plan::select(&inventory)?;
+    host_firmware::MountLimits::from_image(mount_image)
+        .context("stela.efi has no supported host firmware mount capability")?
+        .check_lengths(
+            plan.selections()
+                .iter()
+                .map(|selection| selection.recipe.image.length),
+        )?;
     let mut report = format!(
         "Host firmware: {} exact observed bindings, {} pinned image/license artifacts\n",
         plan.selections().len(),
@@ -213,7 +237,8 @@ mod tests {
         let cache = dir.path().join("cache");
         let destination = dir.path().join("destination");
         let text = provision(ProvisionOptions {
-            inventory: &inventory,
+            requirements: Some(&inventory),
+            gpu: None,
             destination: &destination,
             cache: &cache,
             dry_run: true,
@@ -230,7 +255,8 @@ mod tests {
         .unwrap();
         assert!(
             provision(ProvisionOptions {
-                inventory: &inventory,
+                requirements: Some(&inventory),
+                gpu: None,
                 destination: &destination,
                 cache: &cache,
                 dry_run: true,
@@ -294,6 +320,38 @@ mod tests {
     }
 
     #[test]
+    fn a_gpu_joins_what_is_installed() {
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir.path().join("firmware");
+        fs::create_dir_all(&destination).unwrap();
+        let manifest = serde_json::json!({"schema":1,"images":[{
+            "name":"rtl_nic/rtl8168e-3.fw", "path":"rtl/one.bin",
+            "target":{"driver":"realtek","hardware":"10ec:8168","revision":"xid-2c8","board":null},
+            "provenance":{"source":"synthetic-fixture","revision":"v1","member":"one.bin","license":"CC0-1.0"},
+            "length":3,"sha256":"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"}]});
+        fs::write(
+            destination.join("manifest.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        let provision = |gpu| {
+            provision(ProvisionOptions {
+                requirements: None,
+                gpu,
+                destination: &destination,
+                cache: &dir.path().join("cache"),
+                dry_run: true,
+                mount_image: &host_firmware::MOUNT_CAPABILITY,
+            })
+        };
+        let report = provision(Some("tu104")).unwrap();
+        assert!(report.contains("rtl_nic/rtl8168e-3.fw"));
+        assert!(report.contains("nvidia/tu104/gsp/gsp-570.144.bin"));
+        assert!(provision(None).is_err(), "nothing covers what is installed");
+        assert!(provision(Some("gp104")).is_err());
+    }
+
+    #[test]
     #[ignore = "oracle: STELA_FIRMWARE_TEST_OUTPUT"]
     fn vendor_provisioning_binds_pins_and_notices() {
         let output = std::path::PathBuf::from(
@@ -320,7 +378,8 @@ mod tests {
         let destination = output.join("firmware");
         let cache = output.join("cache");
         let report = provision(ProvisionOptions {
-            inventory: &inventory,
+            requirements: Some(&inventory),
+            gpu: None,
             destination: &destination,
             cache: &cache,
             dry_run: false,
@@ -368,7 +427,8 @@ mod tests {
             (8, 22876)
         );
         let again = provision(ProvisionOptions {
-            inventory: &inventory,
+            requirements: Some(&inventory),
+            gpu: None,
             destination: &destination,
             cache: &cache,
             dry_run: false,
