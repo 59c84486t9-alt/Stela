@@ -363,7 +363,9 @@ pub struct Run {
     /// Give the guest its USB Ethernet adapter: a second `virtio-net-pci`
     /// on a LAN peer of its own (logged to `guest-network.log`), which the
     /// mount bridges to the guest's CDC-ECM adapter: adds `--guest-network`.
-    #[arg(long, conflicts_with_all = ["module", "usb_image", "payload"])]
+    /// A `--usb-image` boot takes `--guest-network` from the stick's options
+    /// instead.
+    #[arg(long, conflicts_with_all = ["module", "payload"])]
     guest_network: bool,
     /// Attach a raw disk over NVMe, preserving writes, that the guest sees
     /// whole as a USB mass storage device behind its native hub; repeat for
