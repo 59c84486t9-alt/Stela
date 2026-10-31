@@ -419,6 +419,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         if client.leaving || client.station.phase() != Peering::Associated {
             return Ok(());
         }
+        client.check_links_usable(now);
         let silence_over = client
             .tracking
             .switch

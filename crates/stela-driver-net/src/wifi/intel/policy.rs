@@ -59,6 +59,15 @@ impl Beacons {
     }
 }
 
+/// The rules of the country firmware reported: the world's when the database
+/// does not know it.
+pub fn reported(database: Database, alpha2: [u8; 2]) -> Result<Country, database::Error> {
+    match database.clone().select(alpha2) {
+        Err(database::Error::Country) => database.select(WORLD),
+        selected => selected,
+    }
+}
+
 /// One adapter's selected country.
 pub struct Regulatory {
     country: Country,
@@ -75,16 +84,10 @@ impl Regulatory {
         firmware: Option<[u8; 2]>,
     ) -> Result<Self, database::Error> {
         let revision = NEXT_REVISION.next().ok_or(database::Error::NoMemory)?;
-        let country = match configured {
-            Some(alpha2) => database.select(alpha2)?,
-            None => match firmware {
-                Some(alpha2) if alpha2 != WORLD => match database.clone().select(alpha2) {
-                    Ok(country) => country,
-                    Err(database::Error::Country) => database.select(WORLD)?,
-                    Err(error) => return Err(error),
-                },
-                _ => database.select(WORLD)?,
-            },
+        let country = match (configured, firmware) {
+            (Some(alpha2), _) => database.select(alpha2)?,
+            (None, Some(alpha2)) => reported(database, alpha2)?,
+            (None, None) => database.select(WORLD)?,
         };
         Ok(Self {
             country,
@@ -132,8 +135,8 @@ pub fn allows(country: &Country, beacons: &Beacons, operation: Operation) -> boo
 }
 
 // SAFETY: the selection is the mount's explicit configuration or the
-// adapter's own reported country, fixed for the adapter's life: its revision
-// stays current and no other selection exists.
+// adapter's own reported country. Later reports reach only this adapter's own
+// chain, so its revision stays current and no other selection exists.
 unsafe impl CountryIo for Regulatory {
     fn country(&mut self) -> Result<SelectedCountry, CountryIoError> {
         Ok(SelectedCountry {

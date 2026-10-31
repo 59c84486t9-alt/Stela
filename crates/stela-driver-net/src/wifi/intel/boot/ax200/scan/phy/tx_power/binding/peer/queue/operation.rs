@@ -12,8 +12,10 @@ use crate::wifi::{
     Channel,
     intel::{
         firmware::Firmware,
+        mcc,
         transmit::{Parameters, Prepared, ring},
     },
+    regulatory::database::Country,
     station::phy::Mode,
 };
 
@@ -184,6 +186,18 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200ManagementQueue<'a,
     /// The firmware's last country change, which it asks the host to apply.
     pub fn take_country_update(&mut self) -> Option<FirmwareNotification> {
         self.peer().binding.power.phy.boot().take_country_update()
+    }
+
+    /// Take up firmware's later word on the country: the channels it leaves,
+    /// with their flags.
+    pub fn adopt_country(
+        &mut self,
+        country: Country,
+        profile: mcc::Response,
+    ) -> Result<Vec<(Channel, u32)>, mcc::channel::InventoryMismatch> {
+        let scan = &mut self.peer().binding.power.phy.scan;
+        scan.mac.country.adopt(country, profile)?;
+        Ok(scan.regulated_channels())
     }
 
     /// How many frames `tid`'s queue has not finished.

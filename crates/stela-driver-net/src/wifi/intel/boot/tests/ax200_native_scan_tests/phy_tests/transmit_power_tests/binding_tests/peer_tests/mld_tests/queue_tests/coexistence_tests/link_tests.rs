@@ -773,8 +773,16 @@ fn eapol(frame: &[u8]) -> &[u8] {
 
 /// Join the model's AP through its handshake to an open port.
 fn connect<'n>(native: &'n Native, quality: bool) -> (Station<Model, ClockBios>, Device<'n>) {
-    let (mut wifi, phase, mut device) =
-        raise(native, Some(*b"US"), vec![b"test"], 0, OPEN, quality);
+    connect_in(native, Some(*b"US"), quality)
+}
+
+/// [`connect`] under a configured `country`.
+fn connect_in<'n>(
+    native: &'n Native,
+    country: Option<[u8; 2]>,
+    quality: bool,
+) -> (Station<Model, ClockBios>, Device<'n>) {
+    let (mut wifi, phase, mut device) = raise(native, country, vec![b"test"], 0, OPEN, quality);
     assert_eq!(phase, Phase::AuthenticationRequired);
     let associated = run(&mut wifi, &mut device, |wifi, _, _| {
         wifi.radio().station().phase() == Peering::Associated
@@ -1014,6 +1022,64 @@ fn a_country_the_air_tells_an_associated_station_changes_nothing() {
     wifi.transmit(&ethernet).unwrap();
     let sent = run(&mut wifi, &mut device, |_, device, _| device.air.len() > 4);
     assert!(sent, "{:?}", wifi.radio().error());
+}
+
+/// Firmware's report that `country` applies, from `source`.
+fn country_update(country: [u8; 2], source: u8) -> Vec<u8> {
+    let update = Id {
+        group: 0,
+        opcode: 0xc9,
+        version: 0,
+    };
+    command_packet(update, 0x8000, &[country[1], country[0], source, 0])
+}
+
+#[test]
+fn a_platform_country_replaces_the_rules_an_associated_station_keeps_to() {
+    let native = Native::default();
+    let (mut wifi, mut device) = connect_in(&native, None, false);
+    assert_eq!(wifi.radio().rules(), Some(WORLD));
+    device.inject(wifi.radio().rom().unwrap(), &country_update(*b"US", 1));
+    let taken = run(&mut wifi, &mut device, |wifi, _, _| {
+        wifi.radio().rules() == Some(*b"US")
+    });
+    assert!(taken, "{:?}", wifi.radio().error());
+    assert_eq!(device.countries.last(), Some(b"US"));
+    // The channel stays, so the rules' minute changes nothing.
+    wifi.radio_mut().end_country_grace();
+    let left = run(&mut wifi, &mut device, |_, _, up| !up);
+    assert!(!left, "{:?}", wifi.radio().error());
+}
+
+#[test]
+fn a_link_the_new_rules_bar_goes_after_the_rules_minute() {
+    let native = Native::default();
+    let (mut wifi, mut device) = connect_in(&native, None, false);
+    device.channel = 0;
+    device.second = Some(0);
+    device.inject(wifi.radio().rom().unwrap(), &country_update(*b"US", 1));
+    let taken = run(&mut wifi, &mut device, |wifi, _, _| {
+        wifi.radio().rules() == Some(*b"US")
+    });
+    assert!(taken, "{:?}", wifi.radio().error());
+    assert!(wifi.carrier(), "the minute has not passed");
+    wifi.radio_mut().end_country_grace();
+    let left = run(&mut wifi, &mut device, |_, _, up| !up);
+    assert!(left, "{:?}", wifi.radio().error());
+}
+
+#[test]
+fn a_configured_country_stands_against_firmwares_report() {
+    let native = Native::default();
+    let (mut wifi, mut device) = connect(&native, false);
+    let asked = device.countries.len();
+    device.inject(wifi.radio().rom().unwrap(), &country_update(WORLD, 1));
+    let ethernet = [&[9; 6][..], &LOCAL, &[8, 0], &[0xab; 46]].concat();
+    wifi.transmit(&ethernet).unwrap();
+    let sent = run(&mut wifi, &mut device, |_, device, _| device.air.len() > 4);
+    assert!(sent, "{:?}", wifi.radio().error());
+    assert_eq!(device.countries.len(), asked);
+    assert_eq!(wifi.radio().rules(), Some(*b"US"));
 }
 
 #[test]

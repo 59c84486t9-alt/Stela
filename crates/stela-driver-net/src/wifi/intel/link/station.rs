@@ -59,6 +59,7 @@ use zeroize::Zeroizing;
 
 mod active_link;
 mod beacon;
+mod country;
 mod emlsr;
 mod grade;
 mod he;
@@ -88,7 +89,6 @@ const MISSED_BEACONS_SINCE_RECEIVE: u32 = 4;
 /// `IWL_MLD_MISSED_BEACONS_THRESHOLD`.
 const LINK_SCAN_MISSED_BEACONS: u32 = 8;
 /// `MCC_SOURCE_WIFI`.
-const COUNTRY_FROM_WIFI: u8 = 5;
 /// How long a departure's frame may take to reach the air before the queues
 /// flush it, as `ieee80211_flush_queues` waits for it.
 const DEPARTURE_DRAIN_US: u64 = 200_000;
@@ -154,6 +154,8 @@ enum Then {
     },
     /// The port's commands finished: firmware rate selection may widen.
     Authorized,
+    /// Firmware answered a country update.
+    Country,
 }
 
 /// A receive Block Ack agreement the firmware is to take up or give up.
@@ -303,6 +305,8 @@ pub(super) struct Client {
     /// The way down finished: the keeper retires the peer.
     left: bool,
     reported: Vec<&'static str>,
+    /// When the rules' last change comes to bear on the links.
+    grace_ends: Option<u64>,
 }
 
 impl Client {
@@ -348,6 +352,7 @@ impl Client {
             leaving: false,
             left: false,
             reported: Vec::new(),
+            grace_ends: None,
         }
     }
 
@@ -907,6 +912,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                 let now = self.clock.now_us();
                 client.link_authorized(now);
             }
+            Then::Country => self.country_answered(queue, &response)?,
         }
         Ok(())
     }
@@ -1144,13 +1150,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
     /// Firmware notifications beside the frames.
     fn take_notifications(&mut self, queue: &mut Queue<Q, B>, now: u64) -> Result<(), Error> {
         while let Some(update) = queue.take_country_update() {
-            // `iwl_mvm_rx_chub_update_mcc` ignores what the air tells an
-            // associated station. Anything else keeps the applied rules.
-            let associated = self.client.station.association_epoch().is_some();
-            if !(associated && update.raw.get(2) == Some(&COUNTRY_FROM_WIFI)) {
-                self.client
-                    .unsupported("a firmware country update: the applied rules stay");
-            }
+            self.country_update(&update.raw);
         }
         while let Some(notification) = queue.take_other_notification() {
             let raw = &notification.raw;
