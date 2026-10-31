@@ -705,3 +705,97 @@ impl Address {
         }
     }
 }
+
+/// A function a reset empties, silent for `silence` reads after one.
+struct Resettable {
+    words: [u32; 32],
+    silence: u32,
+    busy: core::cell::Cell<u32>,
+    resets: u32,
+}
+
+impl ConfigSpace for Resettable {
+    fn read32(&self, offset: u16) -> u32 {
+        if offset == 0 && self.busy.get() != 0 {
+            self.busy.set(self.busy.get() - 1);
+            return u32::MAX;
+        }
+        self.words[usize::from(offset / 4)]
+    }
+
+    fn write32(&mut self, offset: u16, value: u32) {
+        self.words[usize::from(offset / 4)] = value;
+        if offset == 0x48 && value & 1 << 15 != 0 {
+            self.words[0x48 / 4] = 0;
+            self.words[1] = 0x0010_0000;
+            self.words[4] = 0;
+            self.words[0x50 / 4] = 0;
+            self.words[0x68 / 4] = 0;
+            self.words[0x70 / 4] = 0;
+            self.busy.set(self.silence);
+            self.resets += 1;
+        }
+    }
+}
+
+fn resettable(capabilities: u32, silence: u32) -> Function<Resettable> {
+    let mut words = [0; 32];
+    words[0] = 0x1234_8086;
+    words[1] = 0x0010_0006;
+    words[4] = 0xfe00_0000;
+    words[0x34 / 4] = 0x40;
+    words[0x40 / 4] = 0x0002_0010;
+    words[0x44 / 4] = capabilities;
+    words[0x48 / 4] = 0x0020_2810;
+    words[0x50 / 4] = 0x0143;
+    words[0x68 / 4] = 0x0400;
+    words[0x70 / 4] = 3;
+    Function {
+        address: Address::default_for_tests(),
+        vendor: 0x8086,
+        device: 0x1234,
+        class: [2, 0x80, 0],
+        config: Resettable {
+            words,
+            silence,
+            busy: core::cell::Cell::new(0),
+            resets: 0,
+        },
+    }
+}
+
+#[test]
+fn a_function_reset_waits_for_requests_and_the_function_and_puts_its_setup_back() {
+    let mut function = resettable(1 << 28, 2);
+    let mut waits = Vec::new();
+    let reset = function.function_level_reset_with(|microseconds| {
+        waits.push(microseconds);
+        Ok(())
+    });
+    assert_eq!(reset, Ok(true));
+    // A request stands through all its waits, and the function stays silent
+    // through two.
+    assert_eq!(waits, [100_000, 200_000, 400_000, 100_000, 1_000, 2_000]);
+    let config = &function.config;
+    assert_eq!(config.resets, 1);
+    assert_eq!(config.words[1] & 0xffff, 6);
+    assert_eq!(config.words[4], 0xfe00_0000);
+    assert_eq!(config.words[0x48 / 4] & 0xffff, 0x2810);
+    assert_eq!(config.words[0x50 / 4], 0x0143);
+    assert_eq!(config.words[0x68 / 4], 0x0400);
+    assert_eq!(config.words[0x70 / 4], 3);
+}
+
+#[test]
+fn a_function_without_a_reset_is_left_alone_and_one_that_stays_silent_is_an_error() {
+    let mut function = resettable(0, 0);
+    assert_eq!(function.function_level_reset_with(|_| Ok(())), Ok(false));
+    assert_eq!(function.config.resets, 0);
+    let mut function = resettable(1 << 28, u32::MAX);
+    assert_eq!(
+        function.function_level_reset_with(|_| Ok(())),
+        Err(BlockError::Unsupported(
+            "PCI function did not return from its reset"
+        ))
+    );
+}
