@@ -263,10 +263,10 @@
 {
 }
 
+/* No fence reaches the window server, so a frame presents once the GPU finished it. */
 - (void)presentDrawable:(id)drawable
 {
-	[self use:drawable];
-	[self addScheduledHandler:^(id buffer) {
+	[self addCompletedHandler:^(id buffer) {
 		(void)buffer;
 		[drawable present];
 	}];
@@ -274,7 +274,7 @@
 
 - (void)presentDrawable:(id)drawable atTime:(CFTimeInterval)time
 {
-	[self addScheduledHandler:^(id buffer) {
+	[self addCompletedHandler:^(id buffer) {
 		(void)buffer;
 		[drawable presentAtTime:time];
 	}];
@@ -282,7 +282,7 @@
 
 - (void)presentDrawable:(id)drawable afterMinimumDuration:(CFTimeInterval)duration
 {
-	[self addScheduledHandler:^(id buffer) {
+	[self addCompletedHandler:^(id buffer) {
 		(void)buffer;
 		[drawable presentAfterMinimumDuration:duration];
 	}];
