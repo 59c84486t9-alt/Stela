@@ -202,8 +202,8 @@ fn streaming_scalar_fp_runs_as_a_block_and_zeroes_the_upper_z_bits_it_writes() {
     let Ok(Fetched::Block(index)) = machine.fetch_block(BASE, false) else {
         panic!("an ordinary block")
     };
-    let map = &machine.blocks[index].source_map;
-    assert_eq!((map[0].0, map[1].0), (BASE, BASE + 4));
+    let block = &machine.blocks[index];
+    assert_eq!((block.pc, block.instructions), (BASE, 2));
 }
 
 #[test]

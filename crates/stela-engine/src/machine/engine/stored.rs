@@ -6,6 +6,7 @@
 //! translation's) is installed as it is. A block compiled anew is offered
 //! back, with what the host needs to compile it again at the probe
 //! addresses (`translations::prove`).
+use super::recovery::StoredOrigin;
 use super::{Devices, FETCH_PAGE, Host, Machine, Preparation, Variant};
 use crate::translations::{Digest, PAGE_BYTES, Record};
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
@@ -254,6 +255,8 @@ pub(super) struct StoredPage {
     pub(super) key: Digest,
     pub(super) bytes: Box<[u8; PAGE_BYTES]>,
     pub(super) record: Option<Arc<Record>>,
+    /// The latest installed block's, which the next of this page shares.
+    origin: Option<Arc<StoredOrigin>>,
     /// `Machine::page_uses` at its last use.
     used: u64,
 }
@@ -311,6 +314,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     key,
                     bytes,
                     record,
+                    origin: None,
                     used: 0,
                 },
             );
@@ -319,6 +323,58 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let page = self.pages.get_mut(&frame)?;
         page.used = self.page_uses;
         Some(page)
+    }
+
+    /// What a block of the record `key`, in the fetch page at `physical`
+    /// and virtual `page`, keeps of it.
+    pub(super) fn stored_origin(
+        &mut self,
+        physical: u64,
+        page: u64,
+        key: Digest,
+        context: Digest,
+        preparation: &Arc<Preparation>,
+    ) -> Arc<StoredOrigin> {
+        let kept = self.pages.get_mut(&(physical & !(FETCH_PAGE - 1)));
+        match kept {
+            Some(StoredPage {
+                origin: Some(origin),
+                ..
+            }) if origin.page == page
+                && origin.context == context
+                && Arc::ptr_eq(&origin.preparation, preparation) =>
+            {
+                origin.clone()
+            }
+            kept => {
+                let origin = Arc::new(StoredOrigin {
+                    key,
+                    context,
+                    page,
+                    preparation: preparation.clone(),
+                });
+                if let Some(kept) = kept {
+                    kept.origin = Some(origin.clone());
+                }
+                origin
+            }
+        }
+    }
+
+    /// The record `key`, from the page at `physical` if it is still kept,
+    /// else decoded again from the pack.
+    pub(super) fn stored_record(&mut self, physical: u64, key: &Digest) -> Option<Arc<Record>> {
+        let frame = physical & !(FETCH_PAGE - 1);
+        if let Some(StoredPage {
+            key: kept,
+            record: Some(record),
+            ..
+        }) = self.pages.get(&frame)
+            && kept == key
+        {
+            return Some(record.clone());
+        }
+        self.host.translations()?.record(key)
     }
 
     /// Keep `KEPT_PAGES` across `machines` machines, which each keep their

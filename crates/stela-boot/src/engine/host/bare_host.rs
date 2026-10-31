@@ -188,7 +188,9 @@ impl Host for BareHost<'_> {
             );
         }
         serialize_code();
-        state.installed_ranges[state.code_unit as usize].push((offset, end));
+        let unit = state.code_unit * code_unit_bytes(state);
+        state.installed_ranges[state.code_unit as usize]
+            .push(((offset - unit) as u32, (end - unit) as u32));
         state.code_used = end;
         state.code_peak = state.code_peak.max(end);
         #[cfg(feature = "native-profile")]

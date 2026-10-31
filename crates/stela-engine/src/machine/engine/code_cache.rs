@@ -9,14 +9,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// the last call stopped: a diagnostic of code changed without the IC
     /// maintenance that would discard its blocks, bounded per call.
     pub fn stale_code(&mut self) -> StaleCode {
-        use core::ops::Bound::{Excluded, Unbounded};
         let mut report = StaleCode::default();
         let mut bytes = Vec::new();
-        let from = self.stale_cursor.map_or(Unbounded, Excluded);
         let mut last = None;
-        for (&key, &index) in self.index.range((from, Unbounded)).take(STALE_CHECKS) {
+        for (cursor, index) in self.index.sweep(self.stale_cursor).take(STALE_CHECKS) {
             let block = &self.blocks[index];
-            bytes.resize(block.source_bytes, 0);
+            bytes.resize(block.source_bytes as usize, 0);
             report.blocks += 1;
             if self.host.read_ram(block.physical, &mut bytes)
                 && source_hash(&bytes) != block.source_hash
@@ -24,7 +22,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 report.stale += 1;
                 report.first.get_or_insert((block.pc, block.physical));
             }
-            last = Some(key);
+            last = Some(cursor);
         }
         // A sweep that reached the last block starts over next time.
         self.stale_cursor = last.filter(|_| report.blocks == STALE_CHECKS);
@@ -173,11 +171,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// stays installed until the next full discard.
     pub(super) fn invalidate_code_page(&mut self, physical: u64) {
         self.pages.remove(&(physical & !(FETCH_PAGE - 1)));
-        let Some(keys) = self.code_pages.remove(&(physical & !(FETCH_PAGE - 1))) else {
+        if !self.index.forget_page(physical & !(FETCH_PAGE - 1)) {
             return;
-        };
-        for key in keys {
-            self.index.remove(&key);
         }
         // The jump cache holds no generation per page.
         self.code_generation += 1;
@@ -234,23 +229,21 @@ impl<H: Host, D: Devices> Machine<H, D> {
             .collect();
         for &slot in &evicted {
             let block = &self.blocks[slot];
-            if self.index.get(&(block.pc, block.physical, block.variant)) != Some(&slot) {
-                continue;
-            }
-            let page = block.physical & !(FETCH_PAGE - 1);
-            for key in self.code_pages.remove(&page).unwrap_or_default() {
-                self.index.remove(&key);
+            let found = self
+                .index
+                .get(&self.blocks, block.pc, block.physical, block.variant);
+            if found == Some(slot) {
+                self.index.forget_page(block.physical & !(FETCH_PAGE - 1));
             }
         }
         for &slot in &evicted {
             let block = &mut self.blocks[slot];
             if block.taken != 0 {
-                *self.exit_words.entry(block.terminal.1).or_default() += block.taken;
+                *self.exit_words.entry(block.terminal).or_default() += block.taken;
             }
             block.code = NativeCode(0);
             block.taken = 0;
             block.dynamic_site = None;
-            block.source_map = Vec::new();
             block.successors = Vec::new();
             self.fault_recovery.remove(&slot);
             self.free_blocks.push(slot);
@@ -272,7 +265,6 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.free_blocks.clear();
         self.fault_recovery.clear();
         self.index.clear();
-        self.code_pages.clear();
         self.pages.clear();
         self.scalable_leaves.clear();
         self.code_generation += 1;

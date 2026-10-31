@@ -32,9 +32,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
         let indexed = self
             .known_variant(variant)
-            .and_then(|id| self.index.get(&(pc, physical, id)));
+            .and_then(|id| self.index.get(&self.blocks, pc, physical, id));
         let index = match indexed {
-            Some(&index) => index,
+            Some(index) => index,
             None => {
                 let generation = self.code_generation;
                 self.reclaim_for_memory();
@@ -165,13 +165,19 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     return Ok(None);
                 }
                 self.statistics.stored += 1;
+                let origin = self.stored_origin(physical, page, *key, *context, &preparation);
                 return self
                     .install(
                         pc,
                         physical,
                         variant,
                         &source,
-                        recovery::Template::stored(compiled, input, preparation.clone()),
+                        recovery::Template::stored(
+                            compiled,
+                            input,
+                            preparation.clone(),
+                            Some((origin, offset as u16)),
+                        ),
                     )
                     .map(Some);
             }
@@ -456,19 +462,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
             pc,
             physical,
             code,
-            source_map: compiled
-                .native()
-                .source_map
-                .iter()
-                .map(|(guest, offset)| (guest.0, *offset))
-                .collect(),
+            instructions: compiled.native().source_map.len() as u32,
             variant: id,
             successors,
             dynamic_site,
             first,
-            terminal: (terminal_pc, terminal),
+            terminal,
             taken: 0,
-            source_bytes: compiled.source_bytes(),
+            source_bytes: compiled.source_bytes() as u32,
             source_hash: source_hash(&source[..compiled.source_bytes()]),
         };
         let index = match self.free_blocks.pop() {
@@ -479,11 +480,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             None => self.blocks.push(block),
         };
         self.fault_recovery.insert(index, compiled.installed());
-        self.index.insert((pc, physical, id), index);
-        self.code_pages
-            .entry(physical & !(FETCH_PAGE - 1))
-            .or_default()
-            .push((pc, physical, id));
+        self.index.insert(&self.blocks, index);
         Ok(Fetched::Block(index))
     }
 
@@ -607,9 +604,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// the block's last instruction, as it was compiled, or one it reads.
     pub(super) fn exit_word(&mut self, index: usize, pc: u64) -> Result<u32, Stop> {
         let block = &mut self.blocks[index];
-        if pc == block.terminal.0 {
+        if pc == block.terminal_pc() {
             block.taken += 1;
-            return Ok(block.terminal.1);
+            return Ok(block.terminal);
         }
         let word = self.word(index, pc)?;
         *self.exit_words.entry(word).or_default() += 1;
@@ -621,7 +618,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     pub fn exit_words(&self) -> BTreeMap<u32, u64> {
         let mut words = self.exit_words.clone();
         for block in self.blocks.iter().filter(|block| block.taken != 0) {
-            *words.entry(block.terminal.1).or_default() += block.taken;
+            *words.entry(block.terminal).or_default() += block.taken;
         }
         words
     }
@@ -645,8 +642,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// block's last is kept as it was compiled; others are read again.
     pub(super) fn word(&mut self, index: usize, pc: u64) -> Result<u32, Stop> {
         let block = &self.blocks[index];
-        if pc == block.terminal.0 {
-            return Ok(block.terminal.1);
+        if pc == block.terminal_pc() {
+            return Ok(block.terminal);
         }
         let physical = block.physical + (pc - block.pc);
         let mut bytes = [0; 4];
@@ -677,7 +674,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 | ExitKind::Return,
             ) => {
                 // The block's last instruction is the branch that ends it.
-                self.cpu.retired += self.blocks[index].source_map.len() as u64;
+                self.cpu.retired += u64::from(self.blocks[index].instructions);
                 self.cpu.pstate.btype = self.native_branch_type(index, kind)?;
                 self.cpu.pc = next_pc;
                 Ok(())

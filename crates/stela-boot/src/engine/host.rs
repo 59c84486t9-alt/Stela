@@ -300,9 +300,9 @@ pub struct State {
     /// installed last.
     code_unit: u64,
     code_used: u64,
-    /// Successful initialized installs in each arena unit. These
-    /// metadata ranges require this State's backing/root/CPU owner.
-    installed_ranges: [Vec<(u64, u64)>; CODE_UNITS as usize],
+    /// Successful initialized installs in each arena unit, from its start.
+    /// These metadata ranges require this State's backing/root/CPU owner.
+    installed_ranges: [Vec<(u32, u32)>; CODE_UNITS as usize],
     /// The furthest the arena's code has reached: what the run needed of it
     /// until it first filled and new code reclaimed the oldest.
     code_peak: u64,
@@ -733,10 +733,12 @@ impl State {
         let Some(ranges) = self.installed_ranges.get((offset / unit) as usize) else {
             return false;
         };
-        let index = ranges.partition_point(|&(_, finish)| finish <= offset);
+        let base = offset / unit * unit;
+        let (offset, end) = (offset - base, end - base);
+        let index = ranges.partition_point(|&(_, finish)| u64::from(finish) <= offset);
         ranges
             .get(index)
-            .is_some_and(|&(start, finish)| start <= offset && end <= finish)
+            .is_some_and(|&(start, finish)| u64::from(start) <= offset && end <= u64::from(finish))
     }
 
     fn host_physical(&self, guest: u64) -> Option<u64> {

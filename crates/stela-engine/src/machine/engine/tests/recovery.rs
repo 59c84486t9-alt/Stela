@@ -19,8 +19,8 @@ fn fixture() -> (Machine<FakeHost, NoDevices>, usize, usize) {
         .fault_recovery
         .get_mut(&index)
         .unwrap()
-        .test_rows_mut()
-        .iter()
+        .test_rows()
+        .into_iter()
         .find(|row| row.site.kind() == RecoverySiteKind::GuestAccess)
         .unwrap()
         .start;
@@ -179,8 +179,8 @@ fn chained_load_case(branch: u32, btype: u8, landing_pad: bool) {
         .fault_recovery
         .get_mut(&target)
         .unwrap()
-        .test_rows_mut()
-        .iter()
+        .test_rows()
+        .into_iter()
         .find(|row| {
             row.site.kind() == RecoverySiteKind::GuestAccess
                 && row.retirement.instruction_pc().0 == operand_pc
@@ -249,8 +249,8 @@ fn load_before_native_terminal_adapters_keeps_checked_fault_plan() {
             .fault_recovery
             .get_mut(&index)
             .unwrap()
-            .test_rows_mut()
-            .iter()
+            .test_rows()
+            .into_iter()
             .find(|row| row.site.kind() == RecoverySiteKind::GuestAccess)
             .unwrap()
             .start;
@@ -269,8 +269,8 @@ fn translated_fixture() -> (Machine<FakeHost, NoDevices>, usize, usize) {
     };
     let owner = machine.fault_recovery.get_mut(&index).unwrap();
     let row = owner
-        .test_rows_mut()
-        .iter()
+        .test_rows()
+        .into_iter()
         .find(|row| row.site.kind() == RecoverySiteKind::TranslatedHelper)
         .unwrap();
     let offset = row.start;

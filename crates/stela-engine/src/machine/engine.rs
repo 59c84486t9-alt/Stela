@@ -57,6 +57,7 @@ pub use device_read::{CanonicalDeviceMemory, ConsumedScalar, DeviceReadRequest, 
 pub use device_write::{
     CanonicalDeviceWrite, CanonicalWriteMemory, ConsumedWrite, DeviceWriteRequest, DeviceWriteShape,
 };
+mod block_index;
 mod processors;
 mod recovery;
 mod scalable;
@@ -407,8 +408,8 @@ struct Block {
     pc: u64,
     physical: u64,
     code: NativeCode,
-    /// Guest PC and native offset of every instruction, ascending.
-    source_map: Vec<(u64, usize)>,
+    /// The guest instructions it retires.
+    instructions: u32,
     variant: VariantId,
     /// Direct exits to static successors not yet chained, its own and its
     /// PAC thunk's.
@@ -419,13 +420,20 @@ struct Block {
     dynamic_site: Option<u64>,
     /// Its first instruction, for the Branch Target check of a branch to it.
     first: u32,
-    /// The PC and word of its last instruction, where it exits to the engine.
-    terminal: (u64, u32),
+    /// The word of its last instruction, where it exits to the engine.
+    terminal: u32,
     /// Exits to the engine at `terminal`.
     taken: u64,
     /// The guest bytes it was compiled from, for [`Machine::stale_code`].
-    source_bytes: usize,
+    source_bytes: u32,
     source_hash: u64,
+}
+
+impl Block {
+    /// The PC of its last instruction.
+    fn terminal_pc(&self) -> u64 {
+        self.pc + u64::from(self.source_bytes) - INSTRUCTION
+    }
 }
 
 /// The bytes a block of `variant` at `pc` may be compiled from: one
@@ -630,18 +638,16 @@ pub struct Machine<H: Host, D: Devices> {
     /// index: where their regions keep guest GPRs out of the frame across a
     /// faultable access, which a native fault applies first. Kept apart
     /// from [`Block`], whose fields every exit reads.
-    fault_recovery: BTreeMap<usize, recovery::CodeRecovery>,
+    fault_recovery: recovery::Owners,
     native_failure: Option<recovery::CapturedFailure>,
     /// Every variant a block was compiled for, once: what a [`VariantId`]
     /// names.
     variants: Vec<Variant>,
     /// Blocks by PC, PA and variant.
-    index: BTreeMap<(u64, u64, VariantId), usize>,
-    /// The `index` keys of the blocks compiled from each physical page.
-    code_pages: BTreeMap<u64, Vec<(u64, u64, VariantId)>>,
+    index: block_index::BlockIndex,
     /// The last block [`Machine::stale_code`] checked, where its sweep goes
     /// on; `None` to start over.
-    stale_cursor: Option<(u64, u64, VariantId)>,
+    stale_cursor: Option<block_index::Cursor>,
     /// The fetch pages read for the translation store, by physical page,
     /// until their code is invalidated or they are the least recently used
     /// ([`stored`]), and the count of their uses so far.
@@ -888,11 +894,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
             free_blocks: Vec::new(),
             reclaimed_at: None,
             memory_release_blocks: MEMORY_RELEASE_BLOCKS,
-            fault_recovery: BTreeMap::new(),
+            fault_recovery: recovery::Owners::new(),
             native_failure: None,
             variants: Vec::new(),
-            index: BTreeMap::new(),
-            code_pages: BTreeMap::new(),
+            index: block_index::BlockIndex::new(),
             stale_cursor: None,
             pages: BTreeMap::new(),
             kept_pages: stored::KEPT_PAGES,

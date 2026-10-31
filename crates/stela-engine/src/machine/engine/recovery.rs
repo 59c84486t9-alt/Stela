@@ -1,11 +1,11 @@
 //! Invocation-kept source/profile and installed native recovery owners.
 use super::stored::Emission;
-use super::{NativeCode, NativeFault, Preparation};
-use crate::translations::StoredBlock;
+use super::{NativeCode, NativeFault, Preparation, table::Table};
+use crate::translations::{Digest, Record, StoredBlock};
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use stela_compiler::NativeBlock;
 use stela_compiler::block::{
-    CompiledBlock, FaultRecovery, RecoveryQualificationError, RecoveryTemplate,
+    CompiledBlock, FaultRecovery, PackedRecovery, RecoveryQualificationError, RecoveryTemplate,
     UnqualifiedFaultRecovery,
 };
 use stela_compiler::x86_64::chain::DirectExit;
@@ -17,26 +17,95 @@ pub(super) struct Template {
     emission: Arc<Emission>,
     /// A stored record's portable rows, which carry no minted permission.
     pending: Option<Box<[UnqualifiedFaultRecovery]>>,
+    /// Where those rows stay once installed, at this page offset.
+    origin: Option<(Arc<StoredOrigin>, u16)>,
+}
+
+/// Where a stored block's record lies: everything but the page offset of its
+/// entry, shared by the blocks of a page. The pack outlives every machine,
+/// so a block keeps this and not a copy of its entry.
+pub(super) struct StoredOrigin {
+    pub(super) key: Digest,
+    pub(super) context: Digest,
+    pub(super) page: u64,
+    pub(super) preparation: Arc<Preparation>,
 }
 
 /// An installed block's recovery owner: its code's length and the rows that
 /// locate guest state at each faultable site of it.
 pub(super) struct CodeRecovery {
-    code_bytes: usize,
+    code_bytes: u32,
     rows: Rows,
     #[cfg(test)]
     qualification_attempts: usize,
 }
 
 enum Rows {
-    Qualified(Box<[FaultRecovery]>),
-    /// A stored record's template and portable rows, which its first fault
-    /// emits again to qualify: replaced by the minted rows, never kept
-    /// beside them.
+    Qualified(PackedRecovery),
+    /// A stored record's entry, whose template and portable rows its first
+    /// fault reads and emits again to qualify: replaced by the minted rows.
+    Stored {
+        origin: Arc<StoredOrigin>,
+        offset: u16,
+    },
+    /// A template and portable rows in hand, as a record's entry gives them.
+    #[cfg(test)]
     Pending {
         template: Arc<Emission>,
         rows: Box<[UnqualifiedFaultRecovery]>,
     },
+}
+
+/// The installed blocks' recovery owners, by block slot.
+pub(super) struct Owners {
+    slots: Table<Option<CodeRecovery>>,
+}
+
+impl Owners {
+    pub(super) const fn new() -> Self {
+        Self {
+            slots: Table::new(),
+        }
+    }
+
+    pub(super) fn get(&self, slot: &usize) -> Option<&CodeRecovery> {
+        (*slot < self.slots.len())
+            .then(|| self.slots[*slot].as_ref())
+            .flatten()
+    }
+
+    pub(super) fn get_mut(&mut self, slot: &usize) -> Option<&mut CodeRecovery> {
+        (*slot < self.slots.len())
+            .then(|| self.slots[*slot].as_mut())
+            .flatten()
+    }
+
+    pub(super) fn insert(&mut self, slot: usize, owner: CodeRecovery) {
+        while self.slots.len() <= slot {
+            self.slots.push(None);
+        }
+        self.slots[slot] = Some(owner);
+    }
+
+    pub(super) fn remove(&mut self, slot: &usize) -> Option<CodeRecovery> {
+        (*slot < self.slots.len())
+            .then(|| self.slots[*slot].take())
+            .flatten()
+    }
+
+    pub(super) fn clear(&mut self) {
+        self.slots.clear();
+    }
+
+    #[cfg(test)]
+    pub(super) fn len(&self) -> usize {
+        self.slots.iter().flatten().count()
+    }
+
+    #[cfg(test)]
+    pub(super) fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 /// A terminal native implementation failure. Captured data and code owners stay
@@ -68,13 +137,18 @@ pub(super) struct CapturedFailure {
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NativeFailureReason {
-    CanonicalDomain { pe: usize, retired_before: u64 },
+    CanonicalDomain {
+        pe: usize,
+        retired_before: u64,
+    },
     UnknownCode,
     CodeExtent,
     InternalSite,
     TrapSiteMismatch,
     Position,
     Qualification(RecoveryQualificationError),
+    /// The pack no longer gives a stored block's entry.
+    StoredRecord,
     Recovery(stela_compiler::block::FaultRecoveryError),
 }
 
@@ -85,12 +159,14 @@ impl Template {
         Self {
             emission,
             pending: None,
+            origin: None,
         }
     }
     pub(super) fn stored(
         template: StoredBlock,
         input: Vec<u8>,
         preparation: Arc<Preparation>,
+        origin: Option<(Arc<StoredOrigin>, u16)>,
     ) -> Self {
         let block = CompiledBlock {
             native: template.native,
@@ -101,6 +177,7 @@ impl Template {
         Self {
             emission: Arc::new(Emission::new(input, block, preparation)),
             pending: Some(template.fault_recovery.into_boxed_slice()),
+            origin,
         }
     }
 
@@ -146,20 +223,18 @@ impl Template {
         source.get(..self.emission.input.len()) == Some(self.emission.input.as_slice())
     }
 
-    /// The owner of the installed template: its rows, moved when no one
-    /// else shares the emission. Only a stored record keeps its template,
-    /// until its first fault qualifies the rows.
+    /// The owner of the installed template: its rows, packed, or for a stored
+    /// record where they are, until its first fault qualifies them.
     pub(super) fn installed(self) -> CodeRecovery {
-        let code_bytes = self.emission.block.native.x86_64_code.len();
-        let rows = match self.pending {
-            Some(rows) => Rows::Pending {
+        let code_bytes = self.emission.block.native.x86_64_code.len() as u32;
+        let rows = match (self.origin, self.pending) {
+            (Some((origin, offset)), _) => Rows::Stored { origin, offset },
+            #[cfg(test)]
+            (None, Some(rows)) => Rows::Pending {
                 template: self.emission,
                 rows,
             },
-            None => Rows::Qualified(match Arc::try_unwrap(self.emission) {
-                Ok(emission) => emission.block.fault_recovery.into_boxed_slice(),
-                Err(shared) => shared.block.fault_recovery.as_slice().into(),
-            }),
+            _ => Rows::Qualified(PackedRecovery::new(&self.emission.block.fault_recovery)),
         };
         CodeRecovery {
             code_bytes,
@@ -173,7 +248,7 @@ impl Template {
 impl CodeRecovery {
     /// The installed code's length.
     pub(super) fn code_bytes(&self) -> usize {
-        self.code_bytes
+        self.code_bytes as usize
     }
 
     /// Make the owner a stored record's: `template`'s, whose rows are this
@@ -183,25 +258,49 @@ impl CodeRecovery {
         let rows = self.test_portable_rows().into_boxed_slice();
         self.rows = Rows::Pending { template, rows };
     }
+    /// The rows of an actual emitted plan.
     #[cfg(test)]
-    pub(super) fn test_rows_mut(&mut self) -> &mut [FaultRecovery] {
-        match &mut self.rows {
-            Rows::Qualified(rows) => rows,
-            Rows::Pending { .. } => panic!("actual emitted plan"),
+    pub(super) fn test_rows(&self) -> Vec<FaultRecovery> {
+        match &self.rows {
+            Rows::Qualified(rows) => rows.rows(),
+            _ => panic!("actual emitted plan"),
+        }
+    }
+    /// Change the rows of an actual emitted plan.
+    #[cfg(test)]
+    pub(super) fn test_edit_rows<T>(&mut self, edit: impl FnOnce(&mut [FaultRecovery]) -> T) -> T {
+        let Rows::Qualified(packed) = &mut self.rows else {
+            panic!("actual emitted plan");
+        };
+        let mut rows = packed.rows();
+        let result = edit(&mut rows);
+        *packed = PackedRecovery::new(&rows);
+        result
+    }
+    #[cfg(test)]
+    pub(super) fn test_packed_bytes(&self) -> usize {
+        match &self.rows {
+            Rows::Qualified(packed) => packed.bytes(),
+            _ => panic!("actual emitted plan"),
         }
     }
     #[cfg(test)]
     pub(super) fn test_portable_rows(&self) -> Vec<UnqualifiedFaultRecovery> {
         match &self.rows {
             Rows::Pending { rows, .. } => rows.to_vec(),
-            Rows::Qualified(rows) => rows.iter().map(UnqualifiedFaultRecovery::from).collect(),
+            Rows::Stored { .. } => panic!("explicitly pending fixture"),
+            Rows::Qualified(rows) => rows
+                .rows()
+                .iter()
+                .map(UnqualifiedFaultRecovery::from)
+                .collect(),
         }
     }
     #[cfg(test)]
     pub(super) fn test_pending_rows_mut(&mut self) -> &mut [UnqualifiedFaultRecovery] {
         match &mut self.rows {
             Rows::Pending { rows, .. } => rows,
-            Rows::Qualified(_) => panic!("explicitly pending fixture"),
+            _ => panic!("explicitly pending fixture"),
         }
     }
     #[cfg(test)]
@@ -214,13 +313,50 @@ impl CodeRecovery {
         *rows = pushed.into_boxed_slice();
     }
 
+    /// The key of the record whose entry this owner's rows still are.
+    pub(super) fn stored_key(&self) -> Option<Digest> {
+        match &self.rows {
+            Rows::Stored { origin, .. } => Some(origin.key),
+            _ => None,
+        }
+    }
+
     /// The rows, qualifying a stored record's on its first fault at `pc`, the
-    /// block's entry: in the dispatcher, before any guest projection.
-    pub(super) fn qualify(&mut self, pc: u64) -> Result<&[FaultRecovery], NativeFailureReason> {
+    /// block's entry: in the dispatcher, before any guest projection. `record`
+    /// is the one [`Self::stored_key`] names.
+    pub(super) fn qualify(
+        &mut self,
+        pc: u64,
+        record: Option<&Record>,
+    ) -> Result<Vec<FaultRecovery>, NativeFailureReason> {
         #[cfg(test)]
-        if matches!(self.rows, Rows::Pending { .. }) {
+        if !matches!(self.rows, Rows::Qualified(_)) {
             self.qualification_attempts += 1;
         }
+        if let Rows::Stored { origin, offset } = &self.rows {
+            let entry = record
+                .and_then(|record| record.find(*offset, &origin.context))
+                .ok_or(NativeFailureReason::StoredRecord)?;
+            let stored = entry
+                .rebase(origin.page, &entry.input)
+                .ok_or(NativeFailureReason::StoredRecord)?;
+            let block = origin
+                .preparation
+                .qualify_recovery(
+                    &entry.input,
+                    pc,
+                    RecoveryTemplate {
+                        code: &stored.native.x86_64_code,
+                        source_map: &stored.native.source_map,
+                        source_bytes: stored.source_bytes,
+                        direct_exits: &stored.direct_exits,
+                        recovery: &stored.fault_recovery,
+                    },
+                )
+                .map_err(NativeFailureReason::Qualification)?;
+            self.rows = Rows::Qualified(PackedRecovery::new(&block.fault_recovery));
+        }
+        #[cfg(test)]
         if let Rows::Pending { template, rows } = &self.rows {
             let block = template
                 .preparation
@@ -236,12 +372,12 @@ impl CodeRecovery {
                     },
                 )
                 .map_err(NativeFailureReason::Qualification)?;
-            self.rows = Rows::Qualified(block.fault_recovery.into_boxed_slice());
+            self.rows = Rows::Qualified(PackedRecovery::new(&block.fault_recovery));
         }
         let Rows::Qualified(rows) = &self.rows else {
             unreachable!("qualified above");
         };
-        Ok(rows)
+        Ok(rows.rows())
     }
 }
 
