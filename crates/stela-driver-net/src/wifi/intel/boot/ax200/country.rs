@@ -6,10 +6,7 @@
 //! This keeps the pinned database; it issues no channel/TX/association grant.
 use super::*;
 use crate::wifi::{
-    intel::mcc::{
-        self,
-        channel::{Inventory, Observation as ChannelObservation},
-    },
+    intel::mcc::{self, channel::Observation as ChannelObservation},
     regulatory::database::Country,
 };
 use core::mem::ManuallyDrop;
@@ -348,7 +345,7 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo> Ax200Country<'_, Q, B, O> {
                 .map_err(Ax200CountryError::Schema)?;
                 self.profile = Some(profile);
                 let profile = self.profile.as_ref().unwrap();
-                let family = self
+                let inventory = self
                     .board
                     .scan
                     .mcc
@@ -357,9 +354,10 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo> Ax200Country<'_, Q, B, O> {
                     .radio
                     .initialized
                     .boot
-                    .family();
+                    .profile
+                    .channel_inventory();
                 self.channels = profile
-                    .channel_observations(Inventory::of(family))
+                    .channel_observations(inventory)
                     .map_err(Ax200CountryError::Inventory)?;
                 let requested = self.request.unwrap().country;
                 if profile.country != requested {

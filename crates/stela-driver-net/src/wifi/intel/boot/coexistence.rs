@@ -138,10 +138,7 @@ pub(super) fn channel_inhibition(
 mod tests {
     extern crate std;
     use super::*;
-    use crate::wifi::intel::{
-        command::Id,
-        firmware::{Family, Firmware},
-    };
+    use crate::wifi::intel::{command::Id, firmware::Firmware};
     use crate::wifi::{Band, Channel};
     use alloc::vec::Vec;
     #[test]
@@ -218,7 +215,7 @@ mod tests {
                     };
                     let plan = crate::wifi::intel::radio::InitialPlan::prepare(
                         &firmware,
-                        Family::Ax200,
+                        crate::wifi::intel::identity::Platform::AX200,
                         &information,
                     )
                     .unwrap();

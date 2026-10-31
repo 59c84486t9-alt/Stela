@@ -2,7 +2,7 @@
 // Copyright (C) 2007-2015, 2018-2026 Intel Corporation
 // Copyright (C) 2013-2015 Intel Mobile Communications GmbH
 // Copyright (C) 2016-2017 Intel Deutschland GmbH
-//! Standalone AX200/AX210 ownership, persistence, reset and MAC-clock wake.
+//! AX200/AX210-family ownership, persistence, reset and MAC-clock wake.
 //! Adapted from pcie/gen1_2/trans.c, iwl-io.c and the pinned MAC configurations.
 //! This leaves interrupts masked. It never starts ROM self-load, authenticates
 //! firmware, calibrates a radio or claims station/carrier readiness.
@@ -31,6 +31,13 @@ const PRPH_WDATA: u32 = 0x44c;
 const PRPH_RDATA: u32 = 0x450;
 const OWN: u32 = 0x00400000;
 const WAKE_ME: u32 = 0x08000000;
+const MAC_CLOCK: u32 = 1;
+const MAC_ACCESS: u32 = 8;
+const GOING_TO_SLEEP: u32 = 0x10;
+const HPM_HIPM_GEN_CFG: u32 = 0xa03458;
+const POWER_GATE: u32 = 1;
+const SLEEP: u32 = 1 << 1;
+const FORCE_ACTIVE: u32 = 1 << 10;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AccessError {
@@ -229,6 +236,58 @@ impl<C: Csr> Power<C> {
         self.write(PRPH_WADDR, (address & mask) | (3 << 24))?;
         self.write(PRPH_WDATA, value)
     }
+    /// `iwl_set_bits_prph` and `iwl_clear_bits_prph` under NIC access.
+    fn update_prph(&mut self, address: u32, clear: u32, set: u32) -> Result<(), Error> {
+        self.set(GP, MAC_ACCESS)?;
+        self.io.delay_us(2)?;
+        let mut granted = false;
+        for _ in 0..1500 {
+            if self.read(GP)? & (MAC_CLOCK | GOING_TO_SLEEP) == MAC_CLOCK {
+                granted = true;
+                break;
+            }
+            self.io.delay_us(10)?;
+        }
+        if !granted {
+            return Err(Error::Timeout {
+                register: GP,
+                mask: MAC_CLOCK,
+            });
+        }
+        let value = self.read_prph(address)?;
+        self.write_prph(address, (value & !clear) | set)?;
+        let gp = self.read(GP)?;
+        self.write(GP, gp & !MAC_ACCESS)
+    }
+    fn reset(&mut self, management: ManagementSession) -> Result<(), Error> {
+        self.set(RESET, 0x80)?;
+        self.io.delay_us(5000)?;
+        self.ownership(management)
+    }
+    /// `iwl_pcie_gen1_2_activate_nic`.
+    fn activate(&mut self) -> Result<(), Error> {
+        let bisr = self.profile.bisr_workaround();
+        if bisr {
+            self.io.delay_us(2000)?;
+        }
+        self.set_checked(GP, 4)?;
+        let wake = self.poll(GP, MAC_CLOCK, 25000);
+        if bisr {
+            self.io.delay_us(200)?;
+        }
+        wake
+    }
+    /// `iwl_pcie_gen2_force_power_gating`, for an integrated 22000 device
+    /// between its reset and its power-up.
+    fn force_power_gating(&mut self, management: ManagementSession) -> Result<(), Error> {
+        self.activate()?;
+        self.update_prph(HPM_HIPM_GEN_CFG, 0, FORCE_ACTIVE)?;
+        self.io.delay_us(20)?;
+        self.update_prph(HPM_HIPM_GEN_CFG, 0, POWER_GATE | SLEEP)?;
+        self.io.delay_us(20)?;
+        self.update_prph(HPM_HIPM_GEN_CFG, FORCE_ACTIVE, 0)?;
+        self.reset(management)
+    }
     fn clear_persistence(&mut self) -> Result<(), Error> {
         if self.profile.family() != Family::Ax200 {
             return Ok(());
@@ -267,23 +326,15 @@ impl<C: Csr> Power<C> {
         self.write(FH_INT, u32::MAX)?;
         self.ownership(management)?;
         self.clear_persistence()?;
-        self.set(RESET, 0x80)?;
-        self.io.delay_us(5000)?;
-        self.ownership(management)?;
+        self.reset(management)?;
+        if self.profile.platform().integrated && self.profile.family() == Family::Ax200 {
+            self.force_power_gating(management)?;
+        }
         self.set_checked(CHICKEN, 0x00800000)?;
         self.set_checked(HPET, 0xffff0000)?;
         self.set_checked(HW_IF, 0x00080000)?;
         self.set_checked(GIO, 2)?;
-        let bisr = self.profile.family() == Family::Ax200;
-        if bisr {
-            self.io.delay_us(2000)?;
-        }
-        self.set_checked(GP, 4)?;
-        let wake = self.poll(GP, 1, 25000);
-        if bisr {
-            self.io.delay_us(200)?;
-        }
-        wake?;
+        self.activate()?;
         Ok(Awake {
             family: self.profile.family(),
             rf_killed: self.read(GP)? & 0x08000000 == 0,

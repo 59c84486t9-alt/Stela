@@ -48,6 +48,8 @@ pub enum Family {
 }
 
 impl Family {
+    /// The standalone device's image, for tests over a released firmware.
+    #[cfg(test)]
     pub fn firmware_name(self) -> &'static str {
         match self {
             Self::Ax200 => "iwlwifi-cc-a0-77.ucode",
