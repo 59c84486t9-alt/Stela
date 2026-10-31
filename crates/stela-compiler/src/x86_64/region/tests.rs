@@ -1085,63 +1085,6 @@ fn fault_tables_keep_dirty_values_across_accesses() {
     }
 }
 
-/// An X-base doubleword store keeps the shared page-crossing recipe:
-/// the value in R10, which it overwrites, is written back first and
-/// named by no fault table entry, and the data staged in RCX, which its
-/// crossing path shifts, is not kept as a copy.
-#[test]
-fn crossing_stores_keep_the_shared_split() {
-    let mut instructions: Vec<_> = (3..8u8)
-        .map(|guest| {
-            instruction(
-                u64::from(guest - 3),
-                add(Register::X(guest), Register::X(guest)),
-            )
-        })
-        .collect();
-    instructions.push(instruction(
-        5,
-        store(DOUBLEWORD_LOAD_BYTES, Register::X(12), Register::X(2), 3),
-    ));
-    instructions.push(instruction(6, add(Register::X(13), Register::X(12))));
-    for guest in 3..8u8 {
-        let index = instructions.len() as u64;
-        instructions.push(instruction(
-            index,
-            add(Register::X(guest), Register::X(guest)),
-        ));
-    }
-    let (recipe, _) = super::super::memory_store::crossing_store(DOUBLEWORD_LOAD_BYTES).unwrap();
-    let contains = |code: &[u8], bytes: &[u8]| code.windows(bytes.len()).any(|w| w == bytes);
-    for fault_table in [false, true] {
-        let region = emit_clean_load_prefix_with(
-            &instructions,
-            super::super::MemoryChecks::DEFAULT,
-            fault_table,
-            None,
-        )
-        .unwrap();
-        assert_eq!(region.consumed_instructions, instructions.len());
-        assert!(contains(&region.code, &recipe));
-        for entry in &region.fault_recovery {
-            for binding in &entry.bindings {
-                let crate::block::RecoverySource::HostRegister(host) = binding.source else {
-                    panic!("ordinary memory recovery uses host GPRs");
-                };
-                assert!(![HostGpr::Rcx as u8, HostGpr::R10 as u8].contains(&host));
-            }
-        }
-        // `mov rax, [rdi+0x60]`: X12 is read again from the frame.
-        let reload = [0x48, 0x8b, 0x47, 0x60];
-        let store_at = region
-            .code
-            .windows(recipe.len())
-            .position(|window| window == &recipe[..])
-            .unwrap();
-        assert!(contains(&region.code[store_at..], &reload));
-    }
-}
-
 /// With a fault table, a store whose data is dirty in a register the
 /// access does not clobber, R8 among them, takes it from there: its
 /// frame slot is stale. Only a value written back first is read from
@@ -1288,10 +1231,10 @@ fn stores_settle_first_and_reuse_resident_values() {
     assert!(admits_ordinary(&region, &baseline));
 }
 
-/// Single stores are selected with or without their page-crossing
-/// split; pairs only through a checked, aligned SP; writeback never.
+/// Single stores are selected; pairs only through a checked, aligned SP;
+/// writeback never.
 #[test]
-fn stores_are_selected_with_their_split_and_pairs_only_aligned() {
+fn stores_are_selected_and_pairs_only_aligned() {
     let selected = |operation, stack_alignment| {
         analysis::clean_access_effects(&operation, stack_alignment).is_some()
     };
@@ -1376,34 +1319,11 @@ fn shared_store_recipes_reject_any_change() {
                     mode: AddressMode::Offset,
                 },
             );
-            // An X base splits every H/W/X store; the checked SP's
-            // aligned offset never does.
-            let crossing = |bytes| bytes != BYTE_LOAD_BYTES && base != Register::Sp;
             let ends = |raw: &[u8], bytes| {
-                recipes::ordinary_store_ends(
-                    raw,
-                    bytes,
-                    slot(base).unwrap(),
-                    slot(data),
-                    -16,
-                    crossing(bytes),
-                )
+                recipes::ordinary_store_ends(raw, bytes, slot(base).unwrap(), slot(data), -16)
             };
             let (selected, _) = ends(&raw, bytes).unwrap();
             assert_eq!(selected.last(), Some(&raw.len()));
-            if bytes != BYTE_LOAD_BYTES {
-                assert!(
-                    recipes::ordinary_store_ends(
-                        &raw,
-                        bytes,
-                        slot(base).unwrap(),
-                        slot(data),
-                        -16,
-                        !crossing(bytes),
-                    )
-                    .is_none()
-                );
-            }
             for index in 0..raw.len() {
                 let mut changed = raw.as_slice().to_vec();
                 changed[index] ^= 1;
@@ -1730,25 +1650,14 @@ fn copied_store_recipes_preserve_the_shared_bytes_and_instruction_count() {
                 .unwrap();
                 assert_eq!(region.consumed_instructions, 1);
                 // Independently counted shared recipes: base+LEA+data plus
-                // one byte store, or the complete guard/split/fast paths.
-                // SP adds three alignment-check instructions and needs no split.
-                let expected_count = if base == Register::Sp {
-                    7
-                } else {
-                    match bytes {
-                        1 => 4,
-                        2 => 12,
-                        4 => 16,
-                        8 => 24,
-                        _ => unreachable!(),
-                    }
-                };
+                // one store. SP adds three alignment-check instructions.
+                let expected_count = if base == Register::Sp { 7 } else { 4 };
                 assert_eq!(baseline.instructions(), expected_count);
                 assert_eq!(region.code, baseline, "{bytes} bytes {base:?} {data:?}");
                 assert_eq!(
                     region.code.instructions(),
                     baseline.instructions(),
-                    "cost count must retain every instruction in the crossing recipe"
+                    "cost count must retain every instruction in the recipe"
                 );
             }
         }

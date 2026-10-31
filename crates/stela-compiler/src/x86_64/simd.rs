@@ -603,11 +603,9 @@ pub(super) fn emit_after(
                 bytes,
                 access,
             );
-            let aligned = checks.stack_alignment
-                && super::memory_store::aligned_immediate(base, displacement, mode, bytes);
             if load {
-                memory::wide_transfer(code, true, bytes, 0, 0, aligned);
-                memory::wide_transfer(code, true, bytes, 1, bytes, aligned);
+                memory::wide_transfer(code, true, bytes, 0, 0);
+                memory::wide_transfer(code, true, bytes, 1, bytes);
                 // Neither guest destination changes if either load faults.
                 // Duplicate destinations were declined by the decoder.
                 commit(code, vectors[0], 0);
@@ -617,11 +615,11 @@ pub(super) fn emit_after(
                 // registers are allowed.
                 read_vector(code, vectors[0], 0);
                 read_vector(code, vectors[1], 1);
-                memory::wide_transfer(code, false, bytes, 0, 0, aligned);
-                memory::wide_transfer(code, false, bytes, 1, bytes, aligned);
+                memory::wide_transfer(code, false, bytes, 0, 0);
+                memory::wide_transfer(code, false, bytes, 1, bytes);
             }
-            // Split private-RAM stores may expose the first completed element
-            // if the second faults. Base writeback requires both to complete.
+            // The first element stays written if the second faults. Base
+            // writeback requires both to complete.
             memory_writeback(code, base, mode);
         }
         Operand::MoveImmediate {
@@ -660,15 +658,7 @@ pub(super) fn emit_after(
                 bytes,
                 access,
             );
-            memory::transfer(
-                code,
-                load,
-                bytes,
-                vector,
-                checks.stack_alignment
-                    && super::memory_store::aligned_immediate(base, displacement, mode, bytes),
-                xmm0 == Some(vector),
-            );
+            memory::transfer(code, load, bytes, vector, xmm0 == Some(vector));
             // RDX keeps the potential writeback across all SSE/GPR staging.
             memory_writeback(code, base, mode);
         }

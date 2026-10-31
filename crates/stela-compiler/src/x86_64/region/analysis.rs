@@ -195,8 +195,8 @@ pub fn clean_load_effects(operation: &Operation) -> Option<Effects> {
 }
 
 /// [`clean_load_effects`], and the stores the shared emitter makes one host
-/// store per element, with or without its page-crossing split: byte,
-/// halfword, word and doubleword stores with an X-register or SP base, and,
+/// store per element: byte, halfword, word and doubleword stores with an
+/// X-register or SP base, and,
 /// under SCTLR_ELx.SA (`stack_alignment`), W and X pairs through SP whose
 /// offset is a multiple of the element size, which the checked SP
 /// alignment keeps within a page (`memory_store::aligned_immediate`). None

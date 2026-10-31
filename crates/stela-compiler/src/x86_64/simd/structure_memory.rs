@@ -105,7 +105,7 @@ pub(super) fn emit(
         packed(code, operand, target);
         let complete_jump = code.asm().jmp().offset();
         patch_jump(code, crossing_jump);
-        ordered(code, operand, aligned_sp);
+        ordered(code, operand);
         patch_jump(code, complete_jump);
     }
     if operand.post_index != PostIndex::None {
@@ -122,10 +122,10 @@ fn packed(code: &mut Code, operand: &Operand, target: TargetCpu) {
 
 /// Source-width accesses and immediate successful assignments. RDX/RDI survive;
 /// RAX advances through the footprint, RCX/R10/XMM0 are scratch.
-fn ordered(code: &mut Code, operand: &Operand, aligned_sp: bool) {
+fn ordered(code: &mut Code, operand: &Operand) {
     let count = operand.transferred_bytes() / operand.element_bytes;
     for (ordinal, access) in operand.accesses().enumerate() {
-        transfer_access(code, operand, access, 0, false, aligned_sp);
+        transfer_access(code, operand, access, 0, false);
         if ordinal + 1 != usize::from(count) {
             code.asm()
                 .alu_imm8(Alu::Add, Size::Qword, Gpr::Rax, operand.element_bytes as i8);
@@ -137,7 +137,7 @@ fn ordered(code: &mut Code, operand: &Operand, aligned_sp: bool) {
 /// displacements without per-element store guards.
 fn ordered_in_granule(code: &mut Code, operand: &Operand) {
     for access in operand.accesses() {
-        transfer_access(code, operand, access, access.byte_offset, true, false);
+        transfer_access(code, operand, access, access.byte_offset, true);
     }
 }
 
@@ -147,7 +147,6 @@ fn transfer_access(
     access: Access,
     displacement: u8,
     in_granule: bool,
-    aligned_sp: bool,
 ) {
     match (operand.direction, access.commit) {
         (Direction::Load, LoadCommit::Lane { index, clear_upper }) => {
@@ -186,7 +185,6 @@ fn transfer_access(
                     operand.element_bytes,
                     0,
                     super::super::memory_store::Source::Rcx,
-                    aligned_sp,
                 );
             }
         }

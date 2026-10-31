@@ -19,7 +19,7 @@ const SUFFIX: u32 = 0x9100_04c6; // add x6,x6,#1
 const VECTOR: [u64; 2] = [0xfedc_ba98_7654_3210, 0x0123_4567_89ab_cdef];
 
 /// First transfer and a later transfer that reuses the same input. Pairs
-/// exercise both XMM sources; scalar cases control the byte-prefix path.
+/// exercise both XMM sources.
 fn cases() -> Vec<(&'static str, Vec<u32>, Vec<u8>, u64)> {
     let vector = VECTOR
         .into_iter()
@@ -227,14 +227,19 @@ fn fault_continuation_keeps_pc_and_writeback() -> Result<()> {
                     1,
                     "fault retirement {name} split {split}"
                 );
+                // A pair's elements are separate stores; a store crossing
+                // the page writes nothing before its fault.
+                let element = first.len() / 2;
+                let pair = name.starts_with("stp") || name.starts_with("stnp");
+                let written = if pair && split >= element { element } else { 0 };
                 let mut partial = vec![0xa5; first.len()];
-                partial[..split].copy_from_slice(&first[..split]);
+                partial[..written].copy_from_slice(&first[..written]);
                 assert_eq!(
                     data.read(address, first.len()).unwrap(),
                     partial,
                     "fault prefix {name} split {split}"
                 );
-                assert_memory(&data, &[(address, &first[..split])], name);
+                assert_memory(&data, &[(address, &first[..written])], name);
                 // Repair changes only this fixture's backing. Resume through
                 // the shared CPU ELR/SPSR primitive without adding a guest
                 // handler instruction to the sequence under test.

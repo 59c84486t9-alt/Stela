@@ -319,13 +319,11 @@ impl Emitter<'_> {
     }
 
     /// A store whose shared recipe is one host store per element
-    /// ([`analysis::clean_access_effects`]), or for an H/W/X store the
-    /// emitter cannot prove within a page, its page-crossing split, which
-    /// overwrites R10 and on the crossing path shifts RCX. Every dirty value
-    /// settles first, or is in the fault table, so a fault finds the frame
-    /// exact. A resident base or data value supplies its register without a
-    /// frame reload; a data value staged from the frame stays in RCX (R8
-    /// for a pair's second element) as a clean copy, unless split.
+    /// ([`analysis::clean_access_effects`]). Every dirty value settles first,
+    /// or is in the fault table, so a fault finds the frame exact. A resident
+    /// base or data value supplies its register without a frame reload; a
+    /// data value staged from the frame stays in RCX (R8 for a pair's second
+    /// element) as a clean copy.
     fn clean_store(
         &mut self,
         bytes: u8,
@@ -335,11 +333,6 @@ impl Emitter<'_> {
         mode: AddressMode,
     ) -> Result<(), RegionError> {
         const STAGING: [HostGpr; 2] = [HostGpr::Rcx, HostGpr::R8];
-        // As `memory` selects `memory_store::emit`'s fast path.
-        let crossing = data.len() == 1
-            && bytes != BYTE_LOAD_BYTES
-            && !(self.checks.stack_alignment
-                && super::memory_store::aligned_immediate(base, displacement, mode, bytes));
         let (raw, recipe) = if let &[first, second] = data {
             memory_recipe::pair_recipe(
                 self.memory_checks(),
@@ -407,8 +400,7 @@ impl Emitter<'_> {
         }
         self.finish_access(access_start, live, &[]);
         for (index, &register) in data.iter().enumerate() {
-            if !crossing
-                && cached_data[index].is_none()
+            if cached_data[index].is_none()
                 && !data[..index].contains(&register)
                 && slot(register).is_some_and(|guest| {
                     !self

@@ -174,11 +174,7 @@ pub(super) fn scalar(
         data,
         address: location,
     } = operand;
-    let ImmediateAddress {
-        base,
-        displacement,
-        mode,
-    } = location;
+    let ImmediateAddress { base, mode, .. } = location;
     let access = Access::of(transfer == MemoryTransfer::Store, bytes.into());
     address(code, checks, location, bytes, access, recipe.as_deref_mut());
     match transfer {
@@ -195,16 +191,9 @@ pub(super) fn scalar(
                 },
                 mask(Gpr::Rcx),
             );
-            let aligned = checks.stack_alignment
-                && memory_store::aligned_immediate(base, displacement, mode, bytes);
             let start = code.checkpoint();
-            memory_store::emit(code, bytes, 0, memory_store::Source::Rcx, aligned);
-            let clobbers = if bytes > 1 && !aligned {
-                mask(Gpr::Rcx) | mask(Gpr::R10)
-            } else {
-                0
-            };
-            mark(&mut recipe, code, start, Kind::Store, clobbers);
+            memory_store::emit(code, bytes, 0, memory_store::Source::Rcx);
+            mark(&mut recipe, code, start, Kind::Store, 0);
         }
         MemoryTransfer::Load { signed, width } => {
             let size = Size::of(width == Width::X64);
@@ -260,11 +249,7 @@ pub(super) fn pair(
         data,
         address: location,
     } = operand;
-    let ImmediateAddress {
-        base,
-        displacement,
-        mode,
-    } = location;
+    let ImmediateAddress { base, mode, .. } = location;
     let access = Access::of(transfer == MemoryTransfer::Store, 2 * u16::from(bytes));
     address(code, checks, location, bytes, access, recipe.as_deref_mut());
     match transfer {
@@ -296,20 +281,13 @@ pub(super) fn pair(
                 },
                 mask(Gpr::R8),
             );
-            let aligned = checks.stack_alignment
-                && memory_store::aligned_immediate(base, displacement, mode, bytes);
             for (element, source) in [
                 (0, memory_store::Source::Rcx),
                 (1, memory_store::Source::R8),
             ] {
                 let start = code.checkpoint();
-                memory_store::emit(code, bytes, element * bytes, source, aligned);
-                let clobbers = if bytes > 1 && !aligned {
-                    mask(Gpr::Rcx) | mask(Gpr::R10)
-                } else {
-                    0
-                };
-                mark(&mut recipe, code, start, Kind::Store, clobbers);
+                memory_store::emit(code, bytes, element * bytes, source);
+                mark(&mut recipe, code, start, Kind::Store, 0);
             }
         }
         MemoryTransfer::Load { signed, width } => {

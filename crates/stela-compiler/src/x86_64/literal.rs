@@ -39,7 +39,7 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, checks: super::MemoryChec
             store(code, destination);
         }
         Transfer::Simd { destination, bytes } => {
-            simd::memory::transfer(code, true, bytes, destination, false, false);
+            simd::memory::transfer(code, true, bytes, destination, false);
         }
     }
 }
