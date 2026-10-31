@@ -309,9 +309,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
         self.clock
             .end_slice(|| self.host.counter(), self.statistics.blocks);
-        if self.waiting.is_some() || self.processor_paused(self.current) {
+        let paused = self.processor_paused(self.current);
+        if paused || self.waiting.is_some() && !self.polls_monitor() {
             // Waiting or paused, the PE has nothing for the count to wait on,
-            // including while it serves the host.
+            // including while it serves the host. One polling a monitor may
+            // be handed a lock, and goes on holding the count.
             self.clock.wait(|| self.host.counter());
         }
         let mut waited = false;
@@ -396,6 +398,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 return Err(Stop::Waiting);
             };
             if self.polls_monitor() {
+                self.clock.poll(|| self.host.counter());
                 core::hint::spin_loop();
                 // The whole pass is the poll's.
                 self.statistics.spin_ticks += self.host.counter().wrapping_sub(pass);

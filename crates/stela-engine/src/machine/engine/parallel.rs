@@ -624,7 +624,8 @@ impl Hub {
         self.inboxes[pe].lines.load(Ordering::Acquire)
     }
 
-    fn lines_changed(&self, pe: usize) {
+    fn lines_changed(&self, pe: usize, now: u64) {
+        self.clock.hold_woken(pe, now);
         self.inboxes[pe].lines.fetch_add(1, Ordering::SeqCst);
         self.interrupt(pe);
         self.wake(pe);

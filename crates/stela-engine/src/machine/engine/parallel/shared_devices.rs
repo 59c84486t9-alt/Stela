@@ -318,7 +318,7 @@ impl<D: Devices> SharedDevices<D> {
             self.board.publish_pins(pe, pins);
             if lines != seen[pe] {
                 seen[pe] = lines;
-                self.board.hub.lines_changed(pe);
+                self.board.hub.lines_changed(pe, now);
             }
         }
     }

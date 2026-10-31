@@ -39,7 +39,11 @@
 //! than [`PACE_BLOCKS_PER_SECOND`]; then the count slows with it, so a guest
 //! second always holds that much work per running PE, on any host. A PE
 //! waiting in WFI or WFE, held in reset or powered down holds nothing, so an
-//! idle guest's time follows the host's. This is conservative synchronization
+//! idle guest's time follows the host's. A PE polling a monitor in WFE is
+//! the exception: it spins on a lock, which FIFO ticket locks hand to it, so
+//! it holds the count while it polls, and a host that stops it stops the
+//! count. So does a PE an interrupt line changed for, until it has looked:
+//! whoever sent the interrupt may time the answer. This is conservative synchronization
 //! with bounded lookahead, as parallel full-system simulators keep their
 //! cores' time, and QEMU's `-icount shift=auto` keeps a guest's. Only the
 //! count waits: a PE that is ahead keeps running.
@@ -122,6 +126,8 @@ pub struct SharedClock {
 enum Progress {
     /// Ran this many blocks, or starts running after a wait.
     Ran(u64),
+    /// Polled a monitor: it could run at once, so it keeps a whole lookahead.
+    Polls,
     /// Waits, or stopped running guest code.
     Waits,
 }
@@ -193,6 +199,22 @@ impl SharedClock {
         self.host_deadline(count)
     }
 
+    /// PE `pe` may have a reason to wake as of `count`: a waiting PE holds
+    /// the count as a running one does until it next looks. The count's
+    /// ceiling follows at the next publication, whose running PE this leaves
+    /// behind the lookahead at most.
+    pub(super) fn hold_woken(&self, pe: usize, count: u64) {
+        if self.horizons[pe].load(Ordering::Relaxed) != UNBOUNDED {
+            return;
+        }
+        let sequence = self.lock();
+        if self.horizons[pe].load(Ordering::Relaxed) == UNBOUNDED {
+            let lookahead = self.lookahead.load(Ordering::Relaxed);
+            self.horizons[pe].store(count.saturating_add(lookahead), Ordering::Relaxed);
+        }
+        self.unlock(sequence);
+    }
+
     /// Record PE `pe`'s `progress`. A count held at a lower horizon becomes
     /// lag, so the count continues from where it was held when it rises.
     fn publish(&self, pe: usize, progress: Progress, counter: &mut impl Counter) {
@@ -205,6 +227,7 @@ impl SharedClock {
         let previous = self.horizons[pe].load(Ordering::Relaxed);
         let horizon = match progress {
             Progress::Waits => UNBOUNDED,
+            Progress::Polls => lookahead,
             Progress::Ran(_) if previous == UNBOUNDED => lookahead,
             Progress::Ran(blocks) => previous
                 .saturating_add(blocks.saturating_mul(self.per_block.load(Ordering::Relaxed)))
@@ -301,6 +324,8 @@ struct Attachment {
     blocks: u64,
     /// Whether its last publication was a wait.
     waiting: bool,
+    /// The host count at which a poll next needs publishing.
+    next_poll: u64,
 }
 
 #[derive(Debug)]
@@ -353,6 +378,7 @@ impl Clock {
             pe,
             blocks,
             waiting: true,
+            next_poll: 0,
         });
     }
 
@@ -485,11 +511,26 @@ impl Clock {
     /// longer holds the count.
     pub(super) fn wait(&mut self, mut counter: impl Counter) {
         if let Some(attachment) = &mut self.shared
-            && !attachment.waiting
+            && (!attachment.waiting
+                || attachment.clock.horizons[attachment.pe].load(Ordering::Relaxed) != UNBOUNDED)
         {
             attachment.waiting = true;
             let (clock, pe) = (Arc::clone(&attachment.clock), attachment.pe);
             clock.publish(pe, Progress::Waits, &mut counter);
+        }
+    }
+
+    /// The running PE polls a monitor. Half a lookahead apart, so that a
+    /// lock's waiters do not contend for the clock's sequence.
+    pub(super) fn poll(&mut self, mut counter: impl Counter) {
+        if let Some(attachment) = &mut self.shared {
+            let host = counter();
+            if !attachment.waiting && host >= attachment.next_poll {
+                let (clock, pe) = (Arc::clone(&attachment.clock), attachment.pe);
+                let period = clock.lookahead.load(Ordering::Relaxed) / 2;
+                attachment.next_poll = host.saturating_add(period);
+                clock.publish(pe, Progress::Polls, &mut counter);
+            }
         }
     }
 
@@ -725,6 +766,44 @@ mod tests {
         assert_eq!(first.host_deadline(1245), 5155);
         assert_eq!(first.wake_at(1245, 5150), 5155);
         assert_eq!(second.read(|| 5300), 1250);
+    }
+
+    #[test]
+    fn a_woken_pe_holds_the_count_until_it_has_looked() {
+        let (shared, mut first, mut second) = pair();
+        first.start_slice(|| 1000, 0, 1);
+        second.start_slice(|| 1000, 0, 1);
+        second.wait(|| 1000);
+        first.end_slice(|| 1050, 10_000);
+        // An interrupt for the waiter: the host stops it before it looks.
+        shared.hold_woken(1, 1050);
+        first.end_slice(|| 1060, 20_000);
+        assert_eq!(first.read(|| 4000), 1150);
+        // It looks and finds nothing to do: the count catches up to the host
+        // from where it was held.
+        second.wait(|| 4000);
+        first.end_slice(|| 4000, 30_000);
+        assert_eq!(first.read(|| 4010), 1160);
+    }
+
+    #[test]
+    fn a_pe_polling_a_monitor_holds_the_count_until_the_host_stops_it() {
+        let (shared, mut first, mut second) = pair();
+        first.start_slice(|| 1000, 0, 1);
+        second.start_slice(|| 1000, 0, 1);
+        first.poll(|| 1040);
+        second.end_slice(|| 1040, 10_000);
+        // Polls publish half a lookahead apart, each a lookahead ahead.
+        first.poll(|| 1060);
+        assert_eq!(shared.status(|| 1140).holder, Some((0, 1140)));
+        first.poll(|| 1090);
+        second.end_slice(|| 1120, 20_000);
+        assert_eq!(second.read(|| 1120), 1120);
+        // Stopped by the host, the poller holds the count like a running PE.
+        assert_eq!(second.read(|| 4000), 1190);
+        assert_eq!(shared.status(|| 4000).holder, Some((0, 1190)));
+        first.poll(|| 5000);
+        assert_eq!(second.read(|| 5020), 1210);
     }
 
     #[test]
