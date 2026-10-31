@@ -10,6 +10,7 @@ use super::{
     calibrate::Calibration,
     coex::{Coex, Event, Order, Wifi},
     commands::{self, Report},
+    deep::Deep,
     descriptor::Packet,
     download,
     dynamic::{self, Dynamic, set_mask},
@@ -25,7 +26,7 @@ use super::{
     regd,
     registers::{REG_BCN_CTRL, REG_CR},
     station::{CamKey, Device, Incoming, MAC_ID, PORT, Received, Watched},
-    templates::Templates,
+    templates::{self, Templates},
     transmit::{self, Queue, Rings},
 };
 use crate::{
@@ -185,6 +186,13 @@ pub struct Hardware {
     cck_bounds: [u8; 2],
     /// `fw->feature`.
     features: u32,
+    deep: Deep,
+    /// The association's frames, for downloading again, and where the last
+    /// download left the power gate's info and predistortion pages.
+    templates: Option<Templates>,
+    power_gate_pages: Option<(u8, u8)>,
+    /// `sec->cam_map`.
+    keys: u32,
     /// The MSI reaches the core that looks for frames.
     vector: bool,
     limitations: Vec<&'static str>,
@@ -266,6 +274,10 @@ impl Hardware {
             dynamic,
             cck_bounds,
             features,
+            deep: Deep::new(features),
+            templates: None,
+            power_gate_pages: None,
+            keys: 0,
             vector,
             limitations: Vec::new(),
         })
@@ -273,6 +285,7 @@ impl Hardware {
 
     /// One of rtw88's notifiers of the arbiter, and what it asks for.
     fn arbitrate(&mut self, event: Event<'_>) -> Result<(), String> {
+        self.rouse()?;
         let wifi = Wifi {
             connected: self.connected,
             scanning: self.scanning,
@@ -306,6 +319,88 @@ impl Hardware {
                 }
                 Order::SingleStream(_) => {}
             }
+        }
+        Ok(())
+    }
+
+    /// `rtw_leave_lps_deep`, ahead of anything past the bus's own registers.
+    /// Deep power save comes back with the watchdog's next `rtw_enter_lps`.
+    fn rouse(&mut self) -> Result<(), String> {
+        if !self.deep.active() {
+            return Ok(());
+        }
+        let io = self.control.io().map_err(failed("registers"))?;
+        let answered = self.deep.leave(io).map_err(failed("deep power save"))?;
+        self.report_silence(answered);
+        Ok(())
+    }
+
+    /// `__rtw_enter_lps_deep`. A frame still with the device, or firmware that
+    /// cannot be told where its pages are, leaves leisure power save standing.
+    fn enter_deep(&mut self) -> Result<(), String> {
+        if !self.deep.available() || self.deep.active() {
+            return Ok(());
+        }
+        if self.deep.gates_power() {
+            let Some((info, predistortion)) = self.power_gate_pages else {
+                return Ok(());
+            };
+            self.control
+                .command(commands::power_gate_pages(
+                    info,
+                    predistortion,
+                    self.keys != 0,
+                ))
+                .map_err(failed("power gate"))?;
+        }
+        if !self.deep.transmit_wakes() && self.transmit.frames_pending() {
+            return Ok(());
+        }
+        let io = self.control.io().map_err(failed("registers"))?;
+        let answered = self.deep.enter(io).map_err(failed("deep power save"))?;
+        self.report_silence(answered);
+        Ok(())
+    }
+
+    fn report_silence(&mut self, answered: bool) {
+        if !answered {
+            self.limitations
+                .push("firmware that did not answer a deep power save request");
+        }
+    }
+
+    /// `rtw_fw_download_rsvd_page`, the dummy again last to give the first
+    /// page its own descriptor, and `rtw_send_rsvd_page_h2c`.
+    fn download_templates(&mut self) -> Result<(), String> {
+        let predistortion = self.calibration.power_gate_page();
+        let info = templates::power_gate_info(self.keys);
+        let Some(pages) = self
+            .templates
+            .as_ref()
+            .map(|templates| templates.pages(&predistortion, &info))
+        else {
+            return Ok(());
+        };
+        let boundary = self.boundary;
+        let io = self.control.io().map_err(failed("registers"))?;
+        for data in [&pages.data[..], &[0]] {
+            download::write_reserved(io, boundary, boundary, data)
+                .map_err(failed("reserved pages"))?;
+        }
+        self.power_gate_pages = Some((pages.info, pages.predistortion));
+        self.control
+            .command(commands::reserved_pages(
+                pages.ps_poll,
+                pages.null,
+                pages.qos_null,
+            ))
+            .map_err(failed("reserved pages"))
+    }
+
+    /// `rtw_ops_set_key`'s last step: a power gate restores keys from the pages.
+    fn save_keys(&mut self) -> Result<(), String> {
+        if self.deep.gates_power() {
+            self.download_templates()?;
         }
         Ok(())
     }
@@ -492,6 +587,7 @@ impl Device for Hardware {
         scanning: bool,
         eirp_mbm: i32,
     ) -> Result<(), String> {
+        self.rouse()?;
         let geometry = geometry(definition)?;
         let phy = self.phy.take().ok_or("the PHY failed a channel change")?;
         let band = definition.control.band;
@@ -554,6 +650,9 @@ impl Device for Hardware {
     }
 
     fn transmit(&mut self, queue: Queue, packet: &Packet, mpdu: &[u8]) -> Result<bool, String> {
+        if !self.deep.transmit_wakes() {
+            self.rouse()?;
+        }
         match self
             .transmit
             .frame(queue, self.pages, &packet.encode(), mpdu)
@@ -617,42 +716,36 @@ impl Device for Hardware {
     }
 
     fn command(&mut self, command: (u32, u32)) -> Result<(), String> {
+        self.rouse()?;
         self.control.command(command).map_err(failed("command"))
     }
 
-    /// `rtw_fw_download_rsvd_page`, the dummy again last to give the first
-    /// page its own descriptor, and `rtw_send_rsvd_page_h2c`.
     fn set_templates(&mut self, templates: &Templates) -> Result<(), String> {
-        let boundary = self.boundary;
-        let io = self.control.io().map_err(failed("registers"))?;
-        for data in [&templates.pages[..], &[0]] {
-            download::write_reserved(io, boundary, boundary, data)
-                .map_err(failed("reserved pages"))?;
-        }
-        let Templates {
-            ps_poll,
-            null,
-            qos_null,
-            ..
-        } = *templates;
-        self.control
-            .command(commands::reserved_pages(ps_poll, null, qos_null))
-            .map_err(failed("reserved pages"))
+        self.rouse()?;
+        self.templates = Some(templates.clone());
+        self.download_templates()
     }
 
     /// `rtw_enter_lps` and `rtw_leave_lps`. Whether firmware reports the return
     /// or not, it clears the bit it set, so this waits on that.
     fn set_power_save(&mut self, on: bool) -> Result<(), String> {
-        if on == self.asleep || (on && self.coex.stays_awake()) {
-            return Ok(());
-        }
         if on {
-            self.arbitrate(Event::Sleeping(true))?;
-            self.asleep = true;
-            return self
-                .control
-                .command(commands::power_mode(true, PORT))
-                .map_err(failed("power mode"));
+            if !self.asleep && !self.coex.stays_awake() {
+                self.arbitrate(Event::Sleeping(true))?;
+                self.asleep = true;
+                self.control
+                    .command(commands::power_mode(true, PORT))
+                    .map_err(failed("power mode"))?;
+            }
+            return if self.asleep {
+                self.enter_deep()
+            } else {
+                Ok(())
+            };
+        }
+        self.rouse()?;
+        if !self.asleep {
+            return Ok(());
         }
         self.asleep = false;
         self.control
@@ -665,6 +758,7 @@ impl Device for Hardware {
     /// `rtw_ops_bss_info_changed`'s `BSS_CHANGED_BEACON_INT`, and
     /// `rtw_set_dtim_period`.
     fn set_beacon(&mut self, interval_tu: u16, dtim_period: u8) -> Result<(), String> {
+        self.rouse()?;
         self.beacon_interval = interval_tu;
         let io = self.control.io().map_err(failed("registers"))?;
         set_mask(io, REG_TCR, UPDATE_TIM_ELEMENT, 1).map_err(failed("dtim"))?;
@@ -679,11 +773,19 @@ impl Device for Hardware {
     /// The arbiter's time, and rtw88's delayed works that came due.
     fn coexist(&mut self, now: u64) -> Result<(), String> {
         self.now = now;
+        if self.deep.active() && !self.coex.deadline_passed(now) {
+            return Ok(());
+        }
         self.arbitrate(Event::Tick)
     }
 
     /// `rtw_vif_port_config`.
     fn set_port(&mut self, bssid: Mac, aid: u16, linked: bool) -> Result<(), String> {
+        self.rouse()?;
+        if !linked {
+            self.templates = None;
+            self.power_gate_pages = None;
+        }
         let io = self.control.io().map_err(failed("registers"))?;
         write_address(io, REG_BSSID, bssid).map_err(failed("bssid"))?;
         set_mask(io, REG_AID, AID_MASK, u32::from(aid)).map_err(failed("aid"))?;
@@ -706,11 +808,13 @@ impl Device for Hardware {
 
     /// `rtw_ops_configure_filter`'s `FIF_BCN_PRBRESP_PROMISC`.
     fn filter_beacons(&mut self, own_only: bool) -> Result<(), String> {
+        self.rouse()?;
         let io = self.control.io().map_err(failed("registers"))?;
         set_mask(io, REG_RCR, OWN_BEACONS, u32::from(own_only)).map_err(failed("receive filter"))
     }
 
     fn set_edca(&mut self, edca: &[AccessCategory; 4], short_slot: bool) -> Result<(), String> {
+        self.rouse()?;
         let band = self.band;
         let io = self.control.io().map_err(failed("registers"))?;
         for category in edca {
@@ -722,6 +826,7 @@ impl Device for Hardware {
     }
 
     fn write_key(&mut self, key: &CamKey<'_>) -> Result<(), String> {
+        self.rouse()?;
         let words = cam_words(key);
         let address = u32::from(key.entry) << 3;
         let io = self.control.io().map_err(failed("registers"))?;
@@ -731,15 +836,19 @@ impl Device for Hardware {
             io.write32(REG_CAM_COMMAND, CAM_WRITE | (address + at as u32))
                 .map_err(failed("cam"))?;
         }
-        Ok(())
+        self.keys |= 1 << (key.entry & 31);
+        self.save_keys()
     }
 
     /// `rtw_sec_clear_cam`.
     fn clear_key(&mut self, entry: u8) -> Result<(), String> {
+        self.rouse()?;
         let io = self.control.io().map_err(failed("registers"))?;
         io.write32(REG_CAM_WRITE, 0).map_err(failed("cam"))?;
         io.write32(REG_CAM_COMMAND, CAM_WRITE | (u32::from(entry) << 3))
-            .map_err(failed("cam"))
+            .map_err(failed("cam"))?;
+        self.keys &= !(1 << (entry & 31));
+        self.save_keys()
     }
 
     /// `rtw_phy_dynamic_mechanism`.
@@ -808,6 +917,7 @@ impl Device for Hardware {
     /// `rtw_phy_dig_set_max_coverage`, and `rtw_phy_dig_reset` after, each
     /// with `rtw_core_fw_scan_notify`.
     fn scanning(&mut self, scanning: bool) -> Result<(), String> {
+        self.rouse()?;
         if scanning {
             self.arbitrate(Event::ScanStarted)?;
         } else {

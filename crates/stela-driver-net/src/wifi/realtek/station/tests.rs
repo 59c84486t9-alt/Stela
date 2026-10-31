@@ -662,9 +662,9 @@ fn an_association_leaves_firmware_its_frames() {
     let (_, model) = connected();
     let air = model.0.borrow();
     assert_eq!(air.templates.len(), 1);
-    let pages = &air.templates[0];
+    let pages = air.templates[0].pages(&[0; 169], &[0; 16]);
     // The PS-Poll's AID from the association response, in its first bytes.
-    assert_eq!(pages.pages[80 + 48..80 + 52], [0xa4, 0, 1, 0xc0]);
+    assert_eq!(pages.data[80 + 48..80 + 52], [0xa4, 0, 1, 0xc0]);
 }
 
 #[test]

@@ -2,7 +2,8 @@
 // Copyright(c) 2018-2019 Realtek Corporation
 //! The frames firmware sends for a station by itself, as `rtw_build_rsvd_page`
 //! lays them out: a dummy where a beacon would go, then a PS-Poll, a QoS null
-//! and a null, each on its own page behind its descriptor.
+//! and a null, and what a power gate would lose, each on its own page behind
+//! its descriptor.
 use super::descriptor::{Packet, QSEL_MANAGEMENT, RATE_1M, RATE_6M, RATE_ID_B, RATE_ID_G};
 use crate::{Mac, wifi::Band};
 use alloc::{vec, vec::Vec};
@@ -16,13 +17,25 @@ const MAX_PAGES: usize = 16;
 /// What page 0 is: one byte, behind the descriptor the queue writes.
 const DUMMY: usize = 1;
 
-/// The pages for firmware, and where each frame's page is.
+/// `MAX_PG_CAM_BACKUP_NUM`.
+const SAVED_KEYS: usize = 8;
+
+/// A station's frames, ready for what a power gate needs beside them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Templates {
-    pub pages: Vec<u8>,
+    frames: [Vec<u8>; 3],
+    band: Band,
+}
+
+/// The pages for firmware, and where each part's page is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Pages {
+    pub data: Vec<u8>,
     pub ps_poll: u8,
     pub qos_null: u8,
     pub null: u8,
+    pub predistortion: u8,
+    pub info: u8,
 }
 
 /// `rtw_tx_rsvd_page_pkt_info_update` of `frame`.
@@ -72,38 +85,67 @@ fn null(local: Mac, bssid: Mac, qos: bool) -> Vec<u8> {
     frame
 }
 
-/// `rtw_build_rsvd_page` for an association of `local` to `bssid` as `aid`,
-/// over WMM or not, on `band`.
+/// The frames of an association of `local` to `bssid` as `aid`, over WMM or
+/// not, on `band`.
 pub fn build(local: Mac, bssid: Mac, aid: u16, wmm: bool, band: Band) -> Templates {
-    let frames = [
-        ps_poll(local, bssid, aid),
-        null(local, bssid, wmm),
-        null(local, bssid, false),
-    ];
-    let mut packets: [Vec<u8>; 3] = Default::default();
-    let mut locations = [0u8; 3];
-    let mut page = (DUMMY + DESCRIPTOR).div_ceil(PAGE);
-    for ((packet, location), frame) in packets.iter_mut().zip(&mut locations).zip(&frames) {
-        packet.extend(descriptor(band, frame).encode());
-        packet.extend(frame);
-        *location = page as u8;
-        page += packet.len().div_ceil(PAGE);
-    }
-    debug_assert!(page <= MAX_PAGES);
-    // The queue's own descriptor takes the head of page 0, and the rest of the
-    // pages follow what is left of it.
-    let margin = PAGE - DESCRIPTOR;
-    let mut pages = vec![0; (page - 1) * PAGE + margin];
-    for (packet, location) in packets.iter().zip(locations) {
-        let at = margin + PAGE * (usize::from(location) - 1);
-        pages[at..at + packet.len()].copy_from_slice(packet);
-    }
-    let [ps_poll, qos_null, null] = locations;
     Templates {
-        pages,
-        ps_poll,
-        qos_null,
-        null,
+        frames: [
+            ps_poll(local, bssid, aid),
+            null(local, bssid, wmm),
+            null(local, bssid, false),
+        ],
+        band,
+    }
+}
+
+/// `rtw_lps_pg_info_get`: `struct rtw_lps_pg_info_hdr` of the key entries set
+/// in `keys`, for the one station on MAC ID 0.
+pub fn power_gate_info(keys: u32) -> [u8; 8 + SAVED_KEYS] {
+    let mut info = [0; 8 + SAVED_KEYS];
+    let entries = (0..32u8).filter(|entry| keys >> entry & 1 != 0);
+    let mut count = 0;
+    for (slot, entry) in info[8..].iter_mut().zip(entries) {
+        *slot = entry;
+        count += 1;
+    }
+    info[4] = count;
+    info[5] = MAX_PAGES as u8;
+    info
+}
+
+impl Templates {
+    /// `rtw_build_rsvd_page` of the frames, then the `predistortion` and `info`
+    /// a power gate restores from.
+    pub fn pages(&self, predistortion: &[u8], info: &[u8]) -> Pages {
+        let [poll, qos, plain] = &self.frames;
+        let parts: [&[u8]; 5] = [poll, qos, plain, predistortion, info];
+        let mut packets: [Vec<u8>; 5] = Default::default();
+        let mut locations = [0u8; 5];
+        let mut page = (DUMMY + DESCRIPTOR).div_ceil(PAGE);
+        for ((packet, location), part) in packets.iter_mut().zip(&mut locations).zip(parts) {
+            packet.extend(descriptor(self.band, part).encode());
+            packet.extend(part);
+            *location = page as u8;
+            page += packet.len().div_ceil(PAGE);
+        }
+        debug_assert!(page <= MAX_PAGES);
+        // The queue's own descriptor takes the head of page 0, and the rest of
+        // the pages follow what is left of it.
+        let margin = PAGE - DESCRIPTOR;
+        let mut data = vec![0; (page - 1) * PAGE + margin];
+        for (packet, location) in packets.iter().zip(locations) {
+            let at = margin + PAGE * (usize::from(location) - 1);
+            data[at..at + packet.len()].copy_from_slice(packet);
+        }
+        let [ps_poll, qos_null, null, predistortion, info] = locations;
+        Pages {
+            data,
+            ps_poll,
+            qos_null,
+            null,
+            predistortion,
+            info,
+        }
     }
 }
 
@@ -116,29 +158,47 @@ mod tests {
 
     #[test]
     fn each_frame_has_a_page_past_the_dummy() {
-        let built = build(LOCAL, AP, 5, true, Band::Ghz2);
+        let built = build(LOCAL, AP, 5, true, Band::Ghz2).pages(&[3; 169], &[9; 16]);
         assert_eq!(
             (built.ps_poll, built.qos_null, built.null),
             (1, 2, 3),
             "PS-Poll, QoS null and null, as rtw_add_rsvd_page_sta orders them"
         );
-        assert_eq!(built.pages.len(), 3 * PAGE + 80);
+        assert_eq!(
+            (built.predistortion, built.info),
+            (4, 6),
+            "what a power gate loses comes last, and predistortion takes two"
+        );
+        assert_eq!(built.data.len(), 6 * PAGE + 80);
         let at = |page: usize| 80 + PAGE * (page - 1) + DESCRIPTOR;
-        let poll = &built.pages[at(1)..at(1) + 16];
+        assert_eq!(built.data[at(4)..at(4) + 169], [3; 169]);
+        assert_eq!(built.data[at(6)..at(6) + 16], [9; 16]);
+        let poll = &built.data[at(1)..at(1) + 16];
         assert_eq!(poll[..4], [0xa4, 0, 5, 0xc0]);
         assert_eq!(poll[4..10], AP.0);
         assert_eq!(poll[10..16], LOCAL.0);
-        let qos = &built.pages[at(2)..at(2) + 26];
+        let qos = &built.data[at(2)..at(2) + 26];
         assert_eq!(qos[..2], [0xc8, 1]);
         assert_eq!(qos[24..26], [7, 0]);
-        assert_eq!(built.pages[at(3)..at(3) + 2], [0x48, 1]);
+        assert_eq!(built.data[at(3)..at(3) + 2], [0x48, 1]);
     }
 
     #[test]
     fn a_peer_without_wmm_gets_a_plain_null_for_the_qos_one() {
-        let built = build(LOCAL, AP, 1, false, Band::Ghz5);
+        let built = build(LOCAL, AP, 1, false, Band::Ghz5).pages(&[0; 169], &[0; 16]);
         let at = 80 + PAGE + DESCRIPTOR;
-        assert_eq!(built.pages[at..at + 2], [0x48, 1]);
+        assert_eq!(built.data[at..at + 2], [0x48, 1]);
+    }
+
+    #[test]
+    fn a_power_gate_keeps_the_first_eight_keys() {
+        let info = power_gate_info(0b1011);
+        assert_eq!(info[4], 3);
+        assert_eq!(info[5], 16, "rsvd_drv_pg_num");
+        assert_eq!(info[8..12], [0, 1, 3, 0]);
+        let info = power_gate_info(u32::MAX);
+        assert_eq!(info[4], 8);
+        assert_eq!(info[8..], [0, 1, 2, 3, 4, 5, 6, 7]);
     }
 
     #[test]

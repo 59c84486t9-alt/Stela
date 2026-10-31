@@ -542,6 +542,26 @@ impl Coex {
         self.stays_awake
     }
 
+    /// Whether [`Event::Tick`] at `now` would find anything to do.
+    pub fn deadline_passed(&self, now: u64) -> bool {
+        let timers = &self.timers;
+        let passed = |at: Option<u64>| at.is_some_and(|at| at <= now);
+        self.asked
+            .as_ref()
+            .is_some_and(|(_, deadline)| *deadline <= now)
+            || [
+                timers.relink,
+                timers.reenable,
+                timers.defreeze,
+                timers.wifi_remains,
+                timers.inquiry_remains,
+                timers.connecting,
+                timers.multi_link_remains,
+            ]
+            .into_iter()
+            .any(passed)
+    }
+
     /// `coex_stat->bt_disabled`, as `rtw_coex_monitor_bt_enable` reads it.
     pub fn bluetooth_off<I: Io>(io: &mut I) -> Result<bool, Error> {
         Ok(io.read16(REG_WIFI_BT_INFO)? & SCORE_ON == 0)
@@ -1642,6 +1662,15 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn a_tick_counts_as_work_only_past_a_deadline() {
+        let mut coex = Coex::of(0x20, 1);
+        assert!(!coex.deadline_passed(u64::MAX));
+        coex.timers.connecting = Some(100);
+        assert!(!coex.deadline_passed(99));
+        assert!(coex.deadline_passed(100));
     }
 
     #[test]

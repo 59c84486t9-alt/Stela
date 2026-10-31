@@ -11,6 +11,7 @@ pub mod calibrate;
 pub mod ccmp;
 pub mod coex;
 pub mod commands;
+pub mod deep;
 pub mod descriptor;
 pub mod download;
 pub mod dynamic;

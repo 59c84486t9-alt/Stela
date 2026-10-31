@@ -425,6 +425,9 @@ struct Gapk {
     channel: u32,
 }
 
+/// `sizeof(struct rtw_lps_pg_dpk_hdr)`.
+const POWER_GATE_PAGE: usize = 169;
+
 /// `rtw_dpk_info`.
 #[derive(Debug)]
 struct Dpk {
@@ -455,6 +458,24 @@ pub struct Calibration {
 }
 
 impl Calibration {
+    /// `rtw_lps_pg_dpk_get`: `struct rtw_lps_pg_dpk_hdr`, the predistortion a
+    /// power gate has firmware restore.
+    pub fn power_gate_page(&self) -> [u8; POWER_GATE_PAGE] {
+        let dpk = &self.dpk;
+        let mut page = [0; POWER_GATE_PAGE];
+        page[0] = u8::from(dpk.ok[0]) | (u8::from(dpk.ok[1]) << 1);
+        page[2..4].copy_from_slice(&dpk.txagc);
+        for (slot, gs) in page[4..8].as_chunks_mut().0.iter_mut().zip(dpk.gs) {
+            *slot = (gs as u16).to_le_bytes();
+        }
+        let coefficients = dpk.coefficients.iter().flatten();
+        for (slot, word) in page[8..168].as_chunks_mut().0.iter_mut().zip(coefficients) {
+            *slot = word.to_le_bytes();
+        }
+        page[168] = dpk.channel as u8;
+        page
+    }
+
     pub fn new(power_track: u8) -> Self {
         Self {
             gapk: Gapk {
@@ -1358,6 +1379,24 @@ mod tests {
         registers::{FW_READY, REG_MCUFW_CTRL, REG_RF_CTRL, REG_SYS_CFG1, REG_SYS_FUNC_EN},
     };
     use alloc::collections::BTreeMap;
+
+    #[test]
+    fn a_power_gate_keeps_each_paths_predistortion() {
+        let mut calibration = Calibration::new(0);
+        calibration.dpk.ok = [false, true];
+        calibration.dpk.channel = 36;
+        calibration.dpk.txagc = [0x11, 0x22];
+        calibration.dpk.gs = [0x5b, 0x1_0067];
+        calibration.dpk.coefficients[0][0] = 0x0403_0201;
+        calibration.dpk.coefficients[1][19] = 0x0807_0605;
+        let page = calibration.power_gate_page();
+        assert_eq!(page[..2], [2, 0], "a bitmap of the paths");
+        assert_eq!(page[2..4], [0x11, 0x22]);
+        assert_eq!(page[4..8], [0x5b, 0, 0x67, 0]);
+        assert_eq!(page[8..12], [1, 2, 3, 4]);
+        assert_eq!(page[164..168], [5, 6, 7, 8]);
+        assert_eq!(page[168], 36);
+    }
 
     /// The arbiter's control, always ready here.
     const REG_ARBITER: u32 = 0x1700;

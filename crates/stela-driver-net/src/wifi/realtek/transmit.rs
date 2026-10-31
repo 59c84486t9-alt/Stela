@@ -299,6 +299,15 @@ impl<R: Registers> Rings<R> {
     pub fn pending(&self) -> usize {
         distance(self.read, self.write)
     }
+    /// A frame still with the device, `rtw_pci_deep_ps_enter`'s bar to it. The
+    /// firmware's own queue does not count.
+    pub fn frames_pending(&self) -> bool {
+        QUEUES
+            .iter()
+            .filter(|&&queue| queue != Queue::H2c)
+            .map(|queue| &self.frames[queue.index()])
+            .any(|frames| frames.read != frames.write)
+    }
     /// Queue source general-info packet; success is publication only. Geometry
     /// must belong to the exact profile. No firmware ACK is invented.
     pub fn general_info(
