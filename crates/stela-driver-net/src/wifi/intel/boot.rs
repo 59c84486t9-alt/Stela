@@ -342,6 +342,10 @@ struct Ax210Memory<'a> {
 /// consumers can name `RomBoot` and choose its explicit family constructor.
 pub type Ax200Boot<'a, Q> = RomBoot<'a, Q>;
 impl<'a, Q: BootIo> RomBoot<'a, Q> {
+    /// The device family this boot runs.
+    pub fn family(&self) -> Family {
+        self.profile.family()
+    }
     /// Start the standalone AX200 context protocol.
     /// # Safety
     /// PCI Memory Space is enabled and bus mastering has been enabled only

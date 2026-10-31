@@ -17,8 +17,9 @@ use crate::wifi::{
     connection::keeper::{self, Advertisement, Peer, Radio, Stage as Standing},
     frame::{MAX_AMPDU_BUF_HE, Mpdu},
     intel::{
-        association::{self as commands, LinkState, MacState, PeerState},
+        association::{self as commands, LinkHe, LinkState, MacState, PeerHe, PeerState},
         command,
+        firmware::Family,
         transmit::{
             LegacyRate, Parameters,
             response::{Response, block_ack_queues},
@@ -40,12 +41,13 @@ use crate::wifi::{
         external,
         fragments::Fragments,
         multi_link::Affiliation,
-        phy::{Capabilities, McsMaps, Role},
+        phy::{self, Capabilities, Role},
         wire::six_ghz::Selection,
     },
 };
 use alloc::collections::VecDeque;
 
+mod he;
 mod reception;
 use reception::{MAX_SESSIONS, Parent, Reception};
 
@@ -79,6 +81,10 @@ const RATE_NOTIFICATION_AMSDU: u32 = 2;
 const SMALLEST_AMSDU: u32 = 2000;
 /// `IWL_UCODE_TLV_CAPA_CSUM_SUPPORT`, without which mvm offers no A-MSDU.
 const CHECKSUM_OFFLOAD: u32 = 21;
+/// `IEEE80211_HE_MAC_CAP2_ACK_EN`.
+const ACK_ENABLED: u8 = 0x80;
+/// `IEEE80211_HE_MAC_CAP5_OM_CTRL_UL_MU_DATA_DIS_RX`.
+const UPLINK_DATA_DISABLED: u8 = 0x10;
 /// What an MSDU's QoS header and LLC add to its Ethernet frame.
 const SUBFRAME_OVERHEAD: usize = 26 + 8 - 14;
 /// `WLAN_ACTION_BLOCK_ACK`, on an action frame.
@@ -531,6 +537,9 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         let he = negotiated.he.is_some();
         let antennas = queue.antennas();
         let firmware = queue.firmware();
+        let link_version = firmware
+            .command_version(commands::LINK_CONFIG.group, commands::LINK_CONFIG.opcode)
+            .map_or(1, |version| version.command_version);
         let high_priority = firmware.supports_capability(COEX_HIGH_PRIORITY);
         let fifo_offloaded = firmware.supports_api(SMART_FIFO_OFFLOAD);
         let peer_version = firmware
@@ -553,20 +562,23 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         let rates = commands::rate_config(negotiated, band, antennas, rate_bytes, false, longest)
             .ok_or(Error::Refused("rates"))?;
         let edca = negotiated.edca();
-        let link = commands::link_config(LinkState {
-            address: local,
-            bssid: bss.bssid,
-            band,
-            basic_rates: negotiated.legacy.basic,
-            short_preamble: bss.capabilities & (1 << 5) != 0,
-            short_slot: band != Band::Ghz2 || bss.capabilities & (1 << 10) != 0,
-            protection: commands::protection(context),
-            width: negotiated.width,
-            qos: negotiated.wmm.is_some(),
-            edca: &edca,
-            beacon_interval: bss.beacon_interval,
-            dtim_period: context.dtim_period(),
-        });
+        let link = commands::link_config(
+            link_version,
+            LinkState {
+                address: local,
+                band,
+                basic_rates: negotiated.legacy.basic,
+                short_preamble: bss.capabilities & (1 << 5) != 0,
+                short_slot: band != Band::Ghz2 || bss.capabilities & (1 << 10) != 0,
+                protection: commands::protection(context),
+                width: negotiated.width,
+                qos: negotiated.wmm.is_some(),
+                edca: &edca,
+                beacon_interval: bss.beacon_interval,
+                dtim_period: context.dtim_period(),
+                he: link_he(context),
+            },
+        );
         let peer = commands::station_config(
             peer_version,
             peer_state(context, explicit_mfp, self.client.port_open),
@@ -1368,20 +1380,61 @@ fn peer_state(context: &AssociationContext, explicit_mfp: bool, authorized: bool
         ampdu_exponent: commands::ampdu_exponent(negotiated),
         wmm_service_period: negotiated.wmm.as_ref().map(|wmm| wmm.max_service_period),
         uapsd_queues: negotiated.wmm.as_ref().map_or(0, |wmm| wmm.uapsd_queues),
+        he: peer_he(context),
     }
 }
 
+/// The AP's HE capabilities, where HE was negotiated.
+fn ap_he(context: &AssociationContext) -> Option<&phy::He> {
+    let negotiated = context.negotiated();
+    negotiated.he.as_ref()?;
+    negotiated.peer().he()
+}
+
+/// `ieee80211_assoc_config_link`'s HE half, for a link.
+fn link_he(context: &AssociationContext) -> Option<LinkHe> {
+    let he = ap_he(context)?;
+    let operations = context.operations();
+    let operation = operations.he.as_ref()?;
+    Some(LinkHe {
+        packet_extension: operation.packet_extension(),
+        uora: operations.uora,
+        mu_edca: operations.mu_edca,
+        color: operation.color(),
+        color_enabled: operation.color_enabled(),
+        rts_threshold: operation.rts_threshold(),
+        uplink_data_disabled: he.mac[5] & UPLINK_DATA_DISABLED != 0,
+    })
+}
+
+/// The HE half of `iwl_mvm_mld_cfg_sta`.
+fn peer_he(context: &AssociationContext) -> Option<PeerHe> {
+    let he = ap_he(context)?;
+    Some(PeerHe {
+        ack_enabled: he.mac[2] & ACK_ENABLED != 0,
+        random_access: context.operations().uora.is_some(),
+        packet_extension: commands::packet_extension(he),
+        control: commands::control_flags(&he.mac),
+    })
+}
+
 /// `iwl_init_ht_hw_capab`, `iwl_init_vht_hw_capab` and mac80211's SMPS-off
-/// HT capabilities for a device of `tx`, `rx` chains.
-fn capability_elements(band: Band, tx: u32, rx: u32, wide: bool) -> Vec<u8> {
-    let mut elements = probe_elements(band, tx, rx, wide);
+/// HT capabilities for a device of `tx`, `rx` chains, as an association names
+/// them.
+fn capability_elements(band: Band, family: Family, chains: (u32, u32), wide: bool) -> Vec<u8> {
+    let mut elements = probe_elements(band, family, chains, wide);
+    if family == Family::Ax200 {
+        // `iwl_vendor_caps`: Intel's capabilities, with improved HE feedback.
+        elements.extend_from_slice(&[221, 6, 0x00, 0x17, 0x35, 8, 1, 0]);
+    }
     // `ieee80211_add_wmm_info_ie`, without U-APSD.
     elements.extend_from_slice(&[221, 7, 0, 0x50, 0xf2, 2, 0, 1, 0]);
     elements
 }
 
 /// The rates and capabilities a probe names, `ieee80211_build_preq_ies_band`.
-fn probe_elements(band: Band, tx: u32, rx: u32, wide: bool) -> Vec<u8> {
+fn probe_elements(band: Band, family: Family, chains: (u32, u32), wide: bool) -> Vec<u8> {
+    let (tx, rx) = (chains.0.count_ones(), chains.1.count_ones());
     let mut elements = Vec::new();
     let mut element = |id: u8, body: &[u8]| {
         elements.extend_from_slice(&[id, body.len() as u8]);
@@ -1432,6 +1485,7 @@ fn probe_elements(band: Band, tx: u32, rx: u32, wide: bool) -> Vec<u8> {
         vht[8..10].copy_from_slice(&map.to_le_bytes());
         element(191, &vht);
     }
+    elements.extend(he::capability(band, family, chains.0 & chains.1 == 3, wide));
     elements
 }
 
@@ -1474,12 +1528,11 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             .regulatory
             .as_ref()
             .ok_or(Error::Refused("scan"))?;
-        let (tx, rx) = (self.chains.0.count_ones(), self.chains.1.count_ones());
-        let wide = self.wide();
+        let (family, chains, wide) = (self.family, self.chains, self.wide());
         Ok(boot::Probe {
             elements: [
-                probe_elements(Band::Ghz2, tx, rx, wide),
-                probe_elements(Band::Ghz5, tx, rx, wide),
+                probe_elements(Band::Ghz2, family, chains, wide),
+                probe_elements(Band::Ghz5, family, chains, wide),
             ],
             profiles: self.probe_profiles(country),
         })
@@ -1605,14 +1658,13 @@ impl<Q: BootIo, B: BiosIo> Radio for Wifi<Q, B> {
         if band == Band::Ghz6 {
             return Err(Error::Unsupported("6 GHz on Intel Wi-Fi"));
         }
-        let (tx, rx) = self.chains;
-        let elements = capability_elements(band, tx.count_ones(), rx.count_ones(), self.wide());
+        let elements = capability_elements(band, self.family, self.chains, self.wide());
         let capabilities = Capabilities::parse(band, Role::Station, &elements)
             .map_err(|_| Error::Refused("advertisement"))?;
         Ok(Advertisement {
             capabilities,
             elements,
-            he_source_maps: [McsMaps { rx: 0, tx: 0 }; 3],
+            he_source_maps: he::maps(self.chains.0 & self.chains.1 == 3),
             multi_link: Some(false),
         })
     }

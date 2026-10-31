@@ -27,6 +27,7 @@ use super::{
         InitializationProgress, LariError, LariPhase, LariRadio, LegacyPeer, MpduProgress,
         PnvmProgress, RomBoot, ScanResultProgress, UnifiedNvm,
     },
+    firmware::Family,
     platform::Observations,
     policy::{Beacons, Regulatory},
     radio::{bios::service::BiosIo, control::PowerMode},
@@ -180,6 +181,7 @@ pub struct Wifi<Q: BootIo, B: BiosIo> {
     client: station::Client,
     /// The transmit and receive antennas.
     chains: (u32, u32),
+    family: Family,
     save_power: bool,
     address: Mac,
     error: Option<Error>,
@@ -230,6 +232,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
     pub unsafe fn new(boot: RomBoot<'static, Q>, inputs: Inputs<B>) -> Station<Q, B> {
         let deadline = inputs.clock.deadline(ALIVE_TIMEOUT_US);
         let wifi = Self {
+            family: boot.family(),
             stage: Stage::Rom(Box::new(boot)),
             firmware: inputs.firmware,
             observations: inputs.observations,

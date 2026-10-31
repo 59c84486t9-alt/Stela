@@ -16,7 +16,8 @@ use crate::{
         security::{Cipher, management::ManagementCipher},
         station::{
             AssociationContext,
-            phy::{AccessCategory, Mode, Negotiated, Width},
+            operations::MuEdcaRecord,
+            phy::{AccessCategory, He, Mode, Negotiated, Width},
         },
     },
 };
@@ -212,7 +213,6 @@ fn protection_flags(protection: Protection, width: Width) -> u32 {
 #[derive(Clone, Copy, Debug)]
 pub struct LinkState<'a> {
     pub address: Mac,
-    pub bssid: Mac,
     pub band: Band,
     pub basic_rates: u16,
     pub short_preamble: bool,
@@ -223,10 +223,34 @@ pub struct LinkState<'a> {
     pub edca: &'a [AccessCategory; 4],
     pub beacon_interval: u16,
     pub dtim_period: u8,
+    pub he: Option<LinkHe>,
+}
+
+/// What a link says of an HE AP.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LinkHe {
+    pub packet_extension: u8,
+    /// The OCW range, where the AP runs random access.
+    pub uora: Option<u8>,
+    pub mu_edca: Option<[MuEdcaRecord; 4]>,
+    pub color: u8,
+    pub color_enabled: bool,
+    pub rts_threshold: u16,
+    /// `IEEE80211_HE_MAC_CAP5_OM_CTRL_UL_MU_DATA_DIS_RX`.
+    pub uplink_data_disabled: bool,
+}
+
+/// `iwl_mvm_mac80211_ac_to_ucode_ac`: the firmware orders them BK, BE.
+const fn firmware_category(aci: usize) -> usize {
+    match aci {
+        0 => 1,
+        1 => 0,
+        other => other,
+    }
 }
 
 /// `iwl_mvm_link_changed` for every part but activation.
-pub fn link_config(state: LinkState<'_>) -> Vec<u8> {
+pub fn link_config(version: u8, state: LinkState<'_>) -> Vec<u8> {
     let mut bytes = alloc::vec![0; 208];
     word(&mut bytes, 0, ACTION_MODIFY);
     bytes[16..22].copy_from_slice(&state.address.0);
@@ -245,12 +269,7 @@ pub fn link_config(state: LinkState<'_>) -> Vec<u8> {
     let flags = u32::from(state.qos) | u32::from(state.width != Width::Mhz20) << 1;
     word(&mut bytes, 56, flags);
     for category in state.edca {
-        // `iwl_mvm_mac80211_ac_to_ucode_ac`: the firmware orders them BK, BE.
-        let ac = match category.aci {
-            0 => 1,
-            1 => 0,
-            other => usize::from(other),
-        };
+        let ac = firmware_category(usize::from(category.aci));
         let at = 60 + ac * 8;
         half(&mut bytes, at, (1 << category.ecw_min) - 1);
         half(&mut bytes, at + 2, (1 << category.ecw_max) - 1);
@@ -261,8 +280,42 @@ pub fn link_config(state: LinkState<'_>) -> Vec<u8> {
     let interval = u32::from(state.beacon_interval);
     word(&mut bytes, 136, interval);
     word(&mut bytes, 140, interval * u32::from(state.dtim_period));
-    bytes[156..162].copy_from_slice(&state.bssid.0);
+    if let Some(he) = state.he {
+        link_he(&mut bytes, version, he);
+    }
     bytes
+}
+
+/// The HE half of `iwl_mvm_link_changed`.
+fn link_he(bytes: &mut [u8], version: u8, he: LinkHe) {
+    const COLOR_DISABLED: u32 = 1;
+    const MU_EDCA: u32 = 2;
+    bytes[100] = he.packet_extension;
+    if let Some(range) = he.uora {
+        bytes[101] = range & 7;
+        bytes[102] = (range >> 3) & 7;
+    }
+    bytes[167] = u8::from(he.uplink_data_disabled);
+    let mut flags = 0;
+    if let Some(records) = he.mu_edca {
+        flags |= MU_EDCA;
+        for (aci, record) in records.into_iter().enumerate() {
+            let at = 104 + firmware_category(aci) * 8;
+            half(bytes, at, u16::from(record.ecw_min_max & 0xf));
+            half(bytes, at + 2, u16::from(record.ecw_min_max >> 4));
+            half(bytes, at + 4, u16::from(record.aifsn & 0xf));
+            half(bytes, at + 6, u16::from(record.timer));
+        }
+    }
+    bytes[165] = he.color;
+    if !he.color_enabled {
+        flags |= COLOR_DISABLED;
+    }
+    half(bytes, 146, he.rts_threshold);
+    word(bytes, 148, flags);
+    if version < 6 {
+        word(bytes, 152, flags);
+    }
 }
 
 /// What `STA_CONFIG_CMD` says of the AP station.
@@ -279,6 +332,98 @@ pub struct PeerState {
     pub ampdu_exponent: u8,
     pub wmm_service_period: Option<u8>,
     pub uapsd_queues: u8,
+    pub he: Option<PeerHe>,
+}
+
+/// What `STA_CONFIG_CMD` says of an HE AP.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PeerHe {
+    pub ack_enabled: bool,
+    pub random_access: bool,
+    pub packet_extension: [u8; PACKET_EXTENSION_BYTES],
+    pub control: u32,
+}
+
+/// `iwl_he_pkt_ext_v2`: two thresholds for two streams at five widths.
+const PACKET_EXTENSION_BYTES: usize = 20;
+const STREAMS: usize = 2;
+const WIDTHS: usize = 5;
+/// `IWL_HE_PKT_EXT_NONE`.
+const EXTENSION_NONE: u8 = 7;
+/// `IWL_HE_PKT_EXT_BPSK`.
+const EXTENSION_BPSK: u8 = 0;
+
+/// `iwl_mvm_he_get_ppe_val`: three bits at `position`, which may straddle a byte.
+fn threshold(ppe: &[u8], position: usize) -> u8 {
+    let byte = |index: usize| u16::from(ppe.get(index).copied().unwrap_or(0));
+    let pair = byte(position / 8) | byte(position / 8 + 1) << 8;
+    ((pair >> (position % 8)) & 7) as u8
+}
+
+/// `iwl_mvm_set_sta_pkt_ext` for an HE AP: its PPE thresholds, or else what its
+/// nominal padding implies.
+pub fn packet_extension(he: &He) -> [u8; PACKET_EXTENSION_BYTES] {
+    const THRESHOLDS_PRESENT: u8 = 0x80;
+    const PADDING_RESERVED: u8 = 3;
+    let mut table = [EXTENSION_NONE; PACKET_EXTENSION_BYTES];
+    if he.phy[6] & THRESHOLDS_PRESENT != 0 {
+        let ppe = he.ppe.as_slice();
+        let header = ppe.first().copied().unwrap_or(0);
+        let streams = (usize::from(header & 7) + 1).min(STREAMS);
+        let widths = (header >> 3) & 0xf;
+        let mut position = 7;
+        for stream in 0..streams {
+            for width in 0..WIDTHS {
+                if widths >> width & 1 == 0 {
+                    continue;
+                }
+                let at = (stream * WIDTHS + width) * 2;
+                table[at + 1] = threshold(ppe, position);
+                table[at] = threshold(ppe, position + 3);
+                position += 6;
+            }
+        }
+        return table;
+    }
+    let (low, high) = match he.phy[9] >> 6 {
+        0 => (EXTENSION_NONE, EXTENSION_NONE),
+        1 => (EXTENSION_BPSK, EXTENSION_NONE),
+        2 => (EXTENSION_NONE, EXTENSION_BPSK),
+        PADDING_RESERVED.. => return table,
+    };
+    for pair in table.as_chunks_mut::<2>().0 {
+        *pair = [low, high];
+    }
+    table
+}
+
+/// `iwl_mvm_get_sta_htc_flags`.
+pub fn control_flags(mac: &[u8; 6]) -> u32 {
+    const SUPPORT: u32 = 1;
+    const LINK_ADAPTATION_UNSOLICITED: u32 = 2 << 1;
+    const LINK_ADAPTATION_BOTH: u32 = 3 << 1;
+    const BUFFER_STATUS: u32 = 1 << 4;
+    const OPERATING_MODE: u32 = 1 << 5;
+    const BANDWIDTH_QUERY: u32 = 1 << 6;
+    let mut flags = 0;
+    if mac[0] & 1 != 0 {
+        flags |= SUPPORT;
+    }
+    match (mac[2] & 1) << 1 | mac[1] >> 7 {
+        2 => flags |= LINK_ADAPTATION_UNSOLICITED,
+        3 => flags |= LINK_ADAPTATION_BOTH,
+        _ => {}
+    }
+    if mac[2] & 8 != 0 {
+        flags |= BUFFER_STATUS;
+    }
+    if mac[3] & 2 != 0 {
+        flags |= OPERATING_MODE;
+    }
+    if mac[4] & 4 != 0 {
+        flags |= BANDWIDTH_QUERY;
+    }
+    flags
 }
 
 /// `iwl_mvm_get_sta_ampdu_dens`' size: the base exponent and the HE extension,
@@ -311,6 +456,12 @@ pub fn station_config(version: u8, state: PeerState) -> Vec<u8> {
             },
         );
         word(&mut bytes, 68, u32::from(state.uapsd_queues));
+    }
+    if let Some(he) = state.he {
+        word(&mut bytes, 48, u32::from(he.ack_enabled));
+        word(&mut bytes, 52, u32::from(he.random_access));
+        bytes[72..92].copy_from_slice(&he.packet_extension);
+        word(&mut bytes, 92, he.control);
     }
     bytes
 }
@@ -646,23 +797,26 @@ mod tests {
             ecw_max: 10,
             txop_32us: aci as u16,
         });
-        let bytes = link_config(LinkState {
-            address: Mac([2; 6]),
-            bssid: Mac([4; 6]),
-            band: Band::Ghz5,
-            basic_rates: 1,
-            short_preamble: false,
-            short_slot: true,
-            protection: Protection {
-                erp: true,
-                ht_mode: 1,
+        let bytes = link_config(
+            5,
+            LinkState {
+                address: Mac([2; 6]),
+                band: Band::Ghz5,
+                basic_rates: 1,
+                short_preamble: false,
+                short_slot: true,
+                protection: Protection {
+                    erp: true,
+                    ht_mode: 1,
+                },
+                width: Width::Mhz40,
+                qos: true,
+                edca: &edca,
+                beacon_interval: 100,
+                dtim_period: 3,
+                he: None,
             },
-            width: Width::Mhz40,
-            qos: true,
-            edca: &edca,
-            beacon_interval: 100,
-            dtim_period: 3,
-        });
+        );
         assert_eq!(bytes[24], 0xfe);
         assert_eq!(bytes[36], 0);
         assert_eq!(bytes[40], 0b10101);
@@ -677,7 +831,11 @@ mod tests {
             64
         );
         assert_eq!(u32::from_le_bytes(bytes[140..144].try_into().unwrap()), 300);
-        assert_eq!(bytes[156..162], [4; 6]);
+        assert_eq!(
+            bytes[156..162],
+            [0; 6],
+            "only a nontransmitted BSS names one"
+        );
     }
 
     #[test]
@@ -708,5 +866,104 @@ mod tests {
             (bytes[0], bytes[8], bytes[24], bytes[36], bytes[40]),
             (5, 72, 1, 6, 1)
         );
+    }
+
+    /// `he`, an AP's HE capabilities with these MAC and PHY bytes and `ppe`.
+    fn ap(mac: [u8; 6], phy: [u8; 11], ppe: &[u8]) -> crate::wifi::station::phy::Capabilities {
+        let mut elements = alloc::vec![1, 1, 0x8c, 255, 0, 35];
+        elements.extend(mac);
+        elements.extend(phy);
+        elements.extend([0xfa, 0xff, 0xfa, 0xff]);
+        elements.extend(ppe);
+        elements[4] = (elements.len() - 5) as u8;
+        crate::wifi::station::phy::Capabilities::parse(
+            Band::Ghz5,
+            crate::wifi::station::phy::Role::AccessPoint,
+            &elements,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn ppe_thresholds_fill_the_widths_their_bitmap_names() {
+        // Two streams at widths two and three, as Intel's own thresholds:
+        // PPET16 of 0 and PPET8 of 7, which take bits across bytes.
+        let mut phy = [0; 11];
+        phy[6] = 0x80;
+        let capabilities = ap([0; 6], phy, &[0x61, 0x1c, 0xc7, 0x71]);
+        let table = packet_extension(capabilities.he().unwrap());
+        assert_eq!(table[..4], [7; 4], "narrower widths stay unset");
+        assert_eq!(table[4..8], [7, 0, 7, 0]);
+        assert_eq!(table[8..10], [7, 7]);
+        assert_eq!(table[10..14], [7; 4]);
+        assert_eq!(table[14..18], [7, 0, 7, 0]);
+    }
+
+    #[test]
+    fn a_nominal_padding_stands_in_for_absent_thresholds() {
+        let padded = |value: u8| {
+            let mut phy = [0; 11];
+            phy[9] = value << 6;
+            packet_extension(ap([0; 6], phy, &[]).he().unwrap())
+        };
+        assert_eq!(padded(0), [7; 20]);
+        assert_eq!(padded(1)[..2], [EXTENSION_BPSK, EXTENSION_NONE]);
+        assert_eq!(padded(2)[18..], [EXTENSION_NONE, EXTENSION_BPSK]);
+        assert_eq!(padded(3), [7; 20], "reserved");
+    }
+
+    #[test]
+    fn control_flags_follow_the_peer_mac_capabilities() {
+        assert_eq!(control_flags(&[0; 6]), 0);
+        assert_eq!(control_flags(&[1, 0, 0, 0, 0, 0]), 1);
+        assert_eq!(control_flags(&[0, 0, 1, 0, 0, 0]), 2 << 1);
+        assert_eq!(control_flags(&[0, 0x80, 1, 0, 0, 0]), 3 << 1);
+        assert_eq!(control_flags(&[0, 0x80, 0, 0, 0, 0]), 0, "no feedback");
+        assert_eq!(control_flags(&[0, 0, 8, 2, 4, 0]), 0x70);
+    }
+
+    #[test]
+    fn a_disabled_color_is_kept_and_newer_links_have_no_mask() {
+        let edca = [AccessCategory {
+            aci: 0,
+            admission_control: false,
+            aifsn: 2,
+            ecw_min: 4,
+            ecw_max: 10,
+            txop_32us: 0,
+        }; 4];
+        let bytes = link_config(
+            6,
+            LinkState {
+                address: Mac([2; 6]),
+                band: Band::Ghz5,
+                basic_rates: 1,
+                short_preamble: false,
+                short_slot: true,
+                protection: Protection {
+                    erp: false,
+                    ht_mode: 0,
+                },
+                width: Width::Mhz20,
+                qos: true,
+                edca: &edca,
+                beacon_interval: 100,
+                dtim_period: 1,
+                he: Some(LinkHe {
+                    packet_extension: 0,
+                    uora: None,
+                    mu_edca: None,
+                    color: 3,
+                    color_enabled: false,
+                    rts_threshold: 1023,
+                    uplink_data_disabled: true,
+                }),
+            },
+        );
+        assert_eq!(bytes[148], 1);
+        assert_eq!(bytes[152], 0);
+        assert_eq!(bytes[165], 3);
+        assert_eq!(bytes[167], 1);
+        assert_eq!(bytes[146..148], 1023u16.to_le_bytes());
     }
 }
