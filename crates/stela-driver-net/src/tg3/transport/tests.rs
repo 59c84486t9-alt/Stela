@@ -863,3 +863,5 @@ fn every_core_reset_wait_failure_prevents_completion_and_keeps_original_epoch() 
         }
     }
 }
+
+mod cold;

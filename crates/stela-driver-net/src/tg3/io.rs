@@ -134,3 +134,6 @@ unsafe impl<C: ConfigSpace> Registers for Mmio<C> {
         self.ape.write(at, value)
     }
 }
+
+mod cold;
+pub use cold::{BindFailure, Bound, Cold};

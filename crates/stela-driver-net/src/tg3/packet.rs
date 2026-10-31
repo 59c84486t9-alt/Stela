@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! Single-queue BCM5720/5761/5762 A0 copper Ethernet backend.
 use super::{Delay, Error, Hardware, ReceiveFilter, Registers};
+use crate::bus::pci::requester::preparation::Attachment;
 use crate::{
     HEADER, Link, LinkError, MAX_FRAME, MIN_FRAME, Mac,
     bus::dma::{
@@ -9,7 +10,7 @@ use crate::{
     },
     check_frame,
 };
-use alloc::{format, sync::Arc, vec::Vec};
+use alloc::{boxed::Box, format, sync::Arc, vec::Vec};
 mod memory;
 use super::geometry::Geometry;
 #[cfg(test)]
@@ -33,6 +34,7 @@ pub struct Packet<R: Registers, D: Delay> {
     hardware: Hardware<R, D>,
     memory: Option<Memory>,
     domain: Arc<dyn DmaDomain>,
+    attachment: Option<Box<dyn Attachment>>,
     mac: Mac,
     board: Option<super::transport::board::Board>,
     carrier_up: bool,
@@ -83,6 +85,7 @@ impl<R: Registers, D: Delay> Packet<R, D> {
             hardware,
             memory: None,
             domain,
+            attachment: None,
             mac: Mac::default(),
             board: None,
             carrier_up: false,
@@ -132,6 +135,35 @@ impl<R: Registers, D: Delay> Packet<R, D> {
             }
         }
     }
+    /// Attach through the unique control produced by cold original-root
+    /// finalization. Retirement detaches it after every DMA mapping retires.
+    /// # Safety
+    /// All `attach` requirements hold, and `attachment` is paired with this
+    /// exact original hardware/configuration epoch. The inherited interrupt
+    /// exclusions remain held through detach; this backend installs no IRQs.
+    #[expect(
+        clippy::result_large_err,
+        reason = "attach errors retain the complete original hardware and attachment"
+    )]
+    pub unsafe fn attach_bound(
+        hardware: Hardware<R, D>,
+        pages: &dyn PageSource,
+        attachment: Box<dyn Attachment>,
+    ) -> Result<Self, (Error, Self)> {
+        // SAFETY: the caller supplies the same original stopped hardware,
+        // IRQ/work exclusion and unique attachment. Keep it through all errors.
+        match unsafe { Self::attach(hardware, pages, attachment.domain()) } {
+            Ok(mut packet) => {
+                packet.attachment = Some(attachment);
+                Ok(packet)
+            }
+            Err((error, mut packet)) => {
+                packet.attachment = Some(attachment);
+                Err((error, packet))
+            }
+        }
+    }
+
     /// Program an acknowledged hardware receive policy in this live epoch.
     /// Already completed frames are not retracted. On error, the uncertain
     /// original epoch is held and packet publication remains fenced.
@@ -268,11 +300,20 @@ impl<R: Registers, D: Delay> Packet<R, D> {
             if let Some(memory) = &mut self.memory {
                 memory.retire()?;
             }
+            if let Some(attachment) = &mut self.attachment {
+                // SAFETY: stop observed vendor engine/BME retirement and the
+                // original-root payload drain, every mapping is now unmapped,
+                // and inherited IRQ/work exclusions remain held by the owner.
+                unsafe {
+                    attachment.detach()?;
+                }
+            }
             Ok(())
         });
         match result {
             Ok(()) => {
                 self.memory.take();
+                self.attachment.take();
                 Ok(self.hardware.release_registers())
             }
             Err(error) => {

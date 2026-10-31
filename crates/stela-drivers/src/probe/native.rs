@@ -255,7 +255,7 @@ pub(super) unsafe fn ehci(
 /// # Safety
 /// [`NativeServices`]' contract holds for `services`, and `clock` is the
 /// handoff's calibrated clock.
-#[allow(
+#[expect(
     clippy::result_large_err,
     reason = "a failed attach hands back the owners that must outlive the device"
 )]
@@ -265,9 +265,10 @@ pub(super) unsafe fn tg3(
     clock: Clock,
 ) -> Result<Located<Tg3>, Failure> {
     let refused = |error: ServiceError| (Error::Native(error), None);
-    let claimed = claim(services, address).map_err(refused)?;
-    let mac = map(services, address, &claimed.bars, 0).map_err(refused)?;
-    let ape = map(services, address, &claimed.bars, 2).map_err(refused)?;
+    let mut requester = services.prepare_requester(address).map_err(refused)?;
+    let bars = requester.function_mut().bars();
+    let mac = map(services, address, &bars, 0).map_err(refused)?;
+    let ape = map(services, address, &bars, 2).map_err(refused)?;
     let window = |mapping: &Mapping| {
         let bytes = mapping.bytes()?;
         Ok((mapping.address(0, bytes)?, bytes))
@@ -276,30 +277,40 @@ pub(super) unsafe fn tg3(
         .and_then(|mac| Ok((mac, window(&ape)?)))
         .map_err(|error| refused(ServiceError::Mapping(error)))?;
     let windows: Arc<dyn Any> = Arc::new((mac, ape));
-    // SAFETY: the mount claimed the stopped function and mapped exactly its
-    // BAR0 and BAR2 uncached, and `windows` keeps both mappings alive.
+    // SAFETY: original preparation keeps configuration/root/inherited backing
+    // and prior IRQ/work exclusions. Both UC mappings belong to that function.
     let registers = unsafe {
-        tg3::io::Mmio::from_owned_windows(
-            claimed.function,
-            mac_window,
-            mac_bytes,
-            ape_window,
-            ape_bytes,
-            windows,
+        tg3::io::Cold::from_owned_windows(
+            requester, mac_window, mac_bytes, ape_window, ape_bytes, windows,
         )
     }
-    .map_err(|(error, function, windows)| {
+    .map_err(|(error, requester, windows)| {
         (
             Error::Tg3(error),
-            Some(Box::new((function, windows)) as Box<dyn Any>),
+            Some(Box::new((requester, windows)) as Box<dyn Any>),
         )
     })?;
-    // SAFETY: the registers satisfy their ownership contract and `clock` is
-    // the calibrated handoff clock.
+    // SAFETY: the cold registers meet their exclusive native ownership
+    // contract, and this is the handoff's calibrated clock/context.
     let hardware = unsafe { tg3::Hardware::new(registers, clock) };
-    // SAFETY: the mount's domain isolates this requester and its pages are
-    // kept; the function was stopped when claimed.
-    match unsafe { tg3::Packet::attach(hardware, services.pages(), claimed.domain) } {
+    let registers = hardware.quiesce_cold().map_err(|(error, hardware)| {
+        (Error::Tg3(error), Some(Box::new(hardware) as Box<dyn Any>))
+    })?;
+    // SAFETY: quiesce_cold acknowledged this original function's vendor
+    // engines and BME stop. No IRQ/work or competing config/reset owner exists.
+    // Binding first drains the old root while all original windows stay kept.
+    let bound = unsafe { registers.bind() }.map_err(|failure| {
+        (
+            Error::Tg3(tg3::Error::Preparation(failure.error)),
+            Some(Box::new(failure) as Box<dyn Any>),
+        )
+    })?;
+    // SAFETY: finalization preserved these exact register owners and supplies
+    // their isolated domain/unique attachment. No DMA allocation occurred yet.
+    let hardware = unsafe { tg3::Hardware::new(bound.registers, clock) };
+    // SAFETY: original-root drain and current-epoch binding completed; IRQ/work
+    // exclusions stay held. Packet retirement unmaps rings before detaching.
+    match unsafe { tg3::Packet::attach_bound(hardware, services.pages(), bound.attachment) } {
         Ok(link) => Ok(Located {
             location: alloc::format!("{address}"),
             link,
@@ -1224,6 +1235,8 @@ mod tests {
             tg3,
             Err((Error::Native(ServiceError::Unavailable), None))
         ));
+        assert_eq!(*services.preparations.borrow(), [address()]);
+        assert!(services.stopped.borrow().is_empty());
         // SAFETY: as above.
         let aqtion = unsafe { aqtion(&services, address(), clock) };
         assert!(matches!(

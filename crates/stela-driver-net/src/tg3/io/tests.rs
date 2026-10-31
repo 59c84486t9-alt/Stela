@@ -195,3 +195,5 @@ fn failed_window_can_retry_with_same_originals_and_bounded_volatile_accesses() {
     assert_eq!(counts.config_drops.load(Ordering::Relaxed), 1);
     assert_eq!(counts.mapping_drops.load(Ordering::Relaxed), 1);
 }
+
+mod cold;
