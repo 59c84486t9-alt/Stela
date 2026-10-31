@@ -378,6 +378,18 @@ records! {
         pub options: u64,
     }
 
+    /// What crosses between processes for a shared object: see
+    /// [`sharing`](super::sharing).
+    pub struct ShareToken {
+        pub token: [u64; 2],
+    }
+
+    /// Shares an event or texture under `token`, unless it has one already.
+    pub struct ShareObjectRequest {
+        pub handle: u64,
+        pub token: [u64; 2],
+    }
+
     /// `didModifyRange:`.
     pub struct BufferRangeRequest {
         pub buffer: u64,
@@ -1064,6 +1076,12 @@ operations! {
     Commit = 0x040b => commands::CommitRequest, Value;
     /// The GPU times of the completed command buffer with a serial.
     CommandBufferTimes = 0x040c => Value, CommandBufferTimesResponse;
+    /// `newSharedEventHandle` and `newSharedTextureHandle`.
+    ShareObject = 0x040d => ShareObjectRequest, ShareToken;
+    /// `newSharedEventWithHandle:`.
+    OpenSharedEvent = 0x040e => ShareToken, Handle;
+    /// `newSharedTextureWithHandle:`.
+    OpenSharedTexture = 0x040f => ShareToken, TextureResponse;
     NewIndirectCommandBuffer = 0x0501 => NewIndirectRequest, Handle;
     /// `gpuResourceID`, which makes the buffer GPU-resident.
     IndirectResourceId = 0x0502 => Handle, Value;

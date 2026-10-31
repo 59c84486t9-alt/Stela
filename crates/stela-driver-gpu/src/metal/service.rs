@@ -44,6 +44,7 @@ mod queue;
 mod reflection;
 mod resources;
 mod shared;
+mod sharing;
 #[cfg(test)]
 mod tests;
 pub mod wire;
@@ -94,7 +95,7 @@ pub trait GuestMemory {
 }
 
 /// A device object a connection holds.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum Object {
     Memory(MemoryId),
     Buffer(BufferId),
@@ -227,6 +228,7 @@ pub struct Service<B: Backend, C: Compiler> {
     epoch: DeviceEpoch,
     connections: BTreeMap<NonZeroU64, Connection>,
     next_connection: NonZeroU64,
+    shares: sharing::Shares,
     /// The completed serial the gate last signaled; `u64::MAX` once it
     /// signaled the device's loss.
     signaled: u64,
@@ -241,6 +243,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             epoch,
             connections: BTreeMap::new(),
             next_connection: NonZeroU64::MIN,
+            shares: sharing::Shares::default(),
             signaled: 0,
         }
     }
@@ -419,6 +422,9 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             Operation::EventSignaledValue => self.event_signaled_value(&mut call),
             Operation::SetEventSignaledValue => self.set_event_signaled_value(&mut call),
             Operation::WaitEvent => self.wait_event(&mut call),
+            Operation::ShareObject => self.share_object(&mut call),
+            Operation::OpenSharedEvent => self.open_shared_event(&mut call),
+            Operation::OpenSharedTexture => self.open_shared_texture(&mut call),
             Operation::NewCounterBuffer => self.new_counter_buffer(&mut call),
             Operation::ResolveCounters => self.resolve_counters(&mut call),
             Operation::SampleTimestamps => {
@@ -532,7 +538,11 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         Ok(())
     }
 
+    /// Gives up a handle's hold of `object`, destroying it with the last.
     fn destroy(&mut self, object: Object) -> Result<(), Error> {
+        if self.shares.release(object) {
+            return Ok(());
+        }
         let device = &mut self.device;
         match object {
             Object::Memory(id) => device.release_import(id),
@@ -548,6 +558,8 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             Object::Event(id) => device.destroy_event(id),
             Object::CounterBuffer(id) => device.destroy_counter_sample_buffer(id),
             Object::IndirectCommandBuffer(id) => device.destroy_indirect_command_buffer(id),
-        }
+        }?;
+        self.shares.forget(object);
+        Ok(())
     }
 }

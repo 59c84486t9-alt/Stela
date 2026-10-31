@@ -70,7 +70,7 @@ impl IndirectPipeline {
 }
 
 /// Names an indirect command buffer on its device.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct IndirectCommandBufferId(pub u32);
 
 /// `MTLIndirectCommandBufferDescriptor`.

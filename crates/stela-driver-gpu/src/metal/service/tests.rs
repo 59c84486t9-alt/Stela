@@ -40,6 +40,7 @@ mod pipelines;
 mod queue;
 mod reflection;
 mod resources;
+mod sharing;
 
 type TestService = Service<MockBackend, MockCompiler>;
 

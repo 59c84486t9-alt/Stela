@@ -267,6 +267,15 @@ enum {
 #define STELA_DECLARE_PROTOCOL(name) @protocol name @end
 STELA_PROTOCOLS(STELA_DECLARE_PROTOCOL)
 
+/* What crosses between processes for a shared object. */
+@interface MTLSharedEventHandle : NSObject
+@end
+
+@interface MTLSharedTextureHandle : NSObject
+@end
+
+__attribute__((ns_returns_retained)) NSArray *MTLCopyAllDevices(void);
+
 /* The accessors of Metal's descriptors. */
 @interface NSObject (StelaDescriptors)
 - (BOOL)respondsToSelector:(SEL)selector;
@@ -298,6 +307,7 @@ STELA_PROTOCOLS(STELA_DECLARE_PROTOCOL)
 - (NSUInteger)sampleCount;
 - (NSUInteger)arrayLength;
 - (NSUInteger)resourceOptions;
+- (NSUInteger)storageMode;
 - (NSUInteger)usage;
 - (MTLTextureSwizzleChannels)swizzle;
 - (NSUInteger)size;

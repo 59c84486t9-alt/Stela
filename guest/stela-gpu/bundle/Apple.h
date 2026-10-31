@@ -51,6 +51,8 @@ __attribute__((objc_root_class)) @interface NSObject
 - (void)dealloc;
 - (BOOL)conformsToProtocol:(id)protocol;
 - (Class)class;
++ (Class)class;
+- (BOOL)isKindOfClass:(Class)type;
 - (id)copy;
 - (NSString *)description;
 @end
@@ -153,6 +155,13 @@ enum {
 @property(readonly) void *mutableBytes;
 @end
 
+@interface NSCoder : NSObject
+- (void)encodeBytes:(const uint8_t *)bytes length:(NSUInteger)length forKey:(NSString *)key;
+- (const uint8_t *)decodeBytesForKey:(NSString *)key returnedLength:(NSUInteger *)length;
+- (void)encodeObject:(id)object forKey:(NSString *)key;
+- (id)decodeObjectOfClass:(Class)type forKey:(NSString *)key;
+@end
+
 @interface NSBundle : NSObject
 + (instancetype)mainBundle;
 @end
@@ -187,6 +196,7 @@ extern mach_port_t mach_task_self_;
 typedef void (*IOAsyncCallback1)(void *reference, int result, void *argument);
 typedef void (*IOAsyncCallback)(void *reference, int result, void **arguments, uint32_t count);
 
+void arc4random_buf(void *bytes, size_t length);
 kern_return_t mach_vm_allocate(task_t task, mach_vm_address_t *address, mach_vm_size_t size, int flags);
 kern_return_t mach_vm_deallocate(task_t task, mach_vm_address_t address, mach_vm_size_t size);
 kern_return_t IOServiceOpen(io_service_t service, task_t owner, uint32_t type, io_connect_t *connect);

@@ -20,7 +20,6 @@
 
 #define STITCHING "this device links no stitched function graphs"
 #define IO "this device has no Metal I/O queues"
-#define SHARED "objects cross no processes here: their handles are per task"
 #define RAY_TRACING "this device has no acceleration structures"
 
 @implementation StelaGPUDevice (Refused)
@@ -107,24 +106,6 @@
 - (id)newIOCommandQueueWithDescriptor:(id)descriptor error:(NSError **)error
 {
 	REFUSE_ERROR(MTLIOErrorDomain, MTLIOErrorInternal, IO);
-	return nil;
-}
-
-- (id)newSharedTextureWithDescriptor:(id)descriptor
-{
-	REFUSE("newSharedTextureWithDescriptor:", SHARED);
-	return nil;
-}
-
-- (id)newSharedTextureWithHandle:(id)handle
-{
-	REFUSE("newSharedTextureWithHandle:", SHARED);
-	return nil;
-}
-
-- (id)newSharedEventWithHandle:(id)handle
-{
-	REFUSE("newSharedEventWithHandle:", SHARED);
 	return nil;
 }
 

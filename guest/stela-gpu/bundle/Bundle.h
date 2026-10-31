@@ -83,6 +83,7 @@ void stela_depth_stencil_record(id descriptor, StelaDepthStencilRecord *record);
 	StelaBlock *_capabilities;
 }
 - (instancetype)initWithAcceleratorPort:(io_service_t)port;
+- (uint64_t)registryID;
 /* `length` bytes of new memory at *contents wired for the GPU; 0 on failure. */
 - (uint64_t)importLength:(uint64_t)length contents:(void **)contents failure:(StelaFailure *)failure;
 /* Wires the task's memory at `address`; 0 on failure. */
@@ -98,6 +99,10 @@ void stela_depth_stencil_record(id descriptor, StelaDepthStencilRecord *record);
 - (void)noteIndirect:(StelaGPUIndirectCommandBuffer *)buffer;
 - (void)forgetIndirect:(StelaGPUIndirectCommandBuffer *)buffer;
 - (void)flushIndirect;
+@end
+
+@interface StelaGPUDevice (Resources)
+- (id)newTextureWithDescriptor:(id)descriptor;
 @end
 
 @interface StelaGPUDevice (Pipelines)
@@ -162,11 +167,15 @@ void stela_depth_stencil_record(id descriptor, StelaDepthStencilRecord *record);
 	NSUInteger _bufferOffset, _bufferBytesPerRow, _firstMipmapInTail, _tailSizeInBytes;
 	NSUInteger _parentLevel, _parentSlice;
 	MTLTextureSwizzleChannels _swizzle;
-	BOOL _sparse;
+	BOOL _sparse, _shareable;
 	id _buffer, _parent;
 	IOSurfaceRef _surface;
 	NSUInteger _surfacePlane;
+	StelaTextureDescriptorRecord _record;
 }
+- (instancetype)initWithDevice:(StelaGPUDevice *)device
+		      response:(const StelaTextureResponse *)response
+			record:(const StelaTextureDescriptorRecord *)record;
 - (instancetype)initWithDevice:(StelaGPUDevice *)device
 		      response:(const StelaTextureResponse *)response
 		    descriptor:(id)descriptor;
