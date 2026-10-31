@@ -75,6 +75,7 @@ fn observed(bssid: Mac, channel: Channel, elements: Vec<u8>) -> Arc<NativeBssObs
     let bss = Bss {
         bssid,
         transmitter: bssid,
+        profile: None,
         capabilities: 0x11,
         channel,
         elements,

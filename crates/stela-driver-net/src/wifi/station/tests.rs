@@ -228,6 +228,7 @@ pub(crate) fn beacon(j: &Join) -> Bss {
         kind: Kind::Beacon,
         bssid: AP,
         transmitter: AP,
+        profile: None,
         timestamp: 100,
         beacon_interval: 100,
         capabilities: 1,
@@ -1564,13 +1565,23 @@ fn transmitted_bssid_ignores_opaque_nested_profiles_and_keeps_outer_facts() {
 }
 
 #[test]
-fn transmitted_bssid_keeps_outer_bounds_and_refuses_profile_selection() {
+fn a_bssid_index_sets_the_dtim_and_a_stranger_cannot_transmit_for_a_bss() {
     let j = modern_join();
     let mut bss = beacon(&j);
     bss.elements.extend_from_slice(&[71, 5, 1]);
     assert!(configuration(&mut Station::new(LOCAL).unwrap(), j.clone(), bss).is_err());
     let mut bss = beacon(&j);
     ie(&mut bss.elements, 85, &[1, 9, 8]);
+    let mut station = Station::new(LOCAL).unwrap();
+    let Action::Configure {
+        context: Some(c), ..
+    } = configuration(&mut station, j.clone(), bss).unwrap()
+    else {
+        panic!("modern context")
+    };
+    assert_eq!((c.dtim_count(), c.dtim_period()), (8, 9));
+    let mut bss = beacon(&j);
+    ie(&mut bss.elements, 85, &[1, 0, 0]);
     assert!(matches!(
         configuration(&mut Station::new(LOCAL).unwrap(), j.clone(), bss),
         Err(Error::Unsupported(_))

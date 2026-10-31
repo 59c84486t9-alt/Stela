@@ -24,8 +24,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
             .checked_sub(observed.seen)
             .is_none_or(|age| age > BSS_EXPIRE_US)
             || observed.bss.channel != profile.channel
-            || observed.bss.bssid != profile.peer
-            || observed.bss.transmitter != profile.peer
+            || !observed.bss.answers_for(profile.peer)
         {
             return Err(PolicyError::Bss);
         }

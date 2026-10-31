@@ -114,8 +114,7 @@ impl AssociationContext {
             .modern()
             .ok_or(Error::Unsupported("missing modern selection"))?;
         if beacon.kind != Kind::Beacon
-            || beacon.bssid != join.bssid
-            || beacon.transmitter != join.bssid
+            || !beacon.answers_for(join.bssid)
             || beacon.channel != join.channel
             || beacon.beacon_interval == 0
             || response.aid == 0
@@ -138,11 +137,11 @@ impl AssociationContext {
                 .map_err(Error::Wire)?;
         }
         let mut tim = None;
+        let mut profile = None;
         for (id, b) in ies(&beacon.elements)? {
-            // Outer71 is an unselected, opaque advertisement on this exact
-            // transmitted-BSSID path. Outer85 requires profile DTIM handling.
-            if id == 85 {
-                return Err(Error::Unsupported("nontransmitted BSSID index"));
+            // ieee80211_get_dtim: a nontransmitted profile's stand.
+            if id == 85 && b.len() >= 3 {
+                profile = Some((b[2], b[1]));
             }
             if id == 5 {
                 if tim.is_some() || b.len() < 4 || b[1] == 0 || b[0] >= b[1] {
@@ -151,8 +150,12 @@ impl AssociationContext {
                 tim = Some((b[0], b[1]));
             }
         }
-        let (dtim_count, dtim_period) =
-            tim.ok_or(Error::Unsupported("actual beacon DTIM required"))?;
+        let (dtim_count, dtim_period) = profile
+            .or(tim)
+            .ok_or(Error::Unsupported("actual beacon DTIM required"))?;
+        if dtim_period == 0 || dtim_count >= dtim_period {
+            return Err(Error::Unsupported("beacon TIM/DTIM"));
+        }
         let actual_ssid = ies(join.request.elements())?
             .into_iter()
             .find(|(id, _)| *id == 0)

@@ -436,9 +436,9 @@ fn non_inheritance(outer: &[u16], inner: &[u16]) -> Vec<u8> {
     out
 }
 
-/// `cfg80211_is_element_inherited`: whether a per-STA profile whose
-/// Non-Inheritance element is `refused` takes the outer element `id`.
-fn inherited(id: u8, body: &[u8], refused: Option<&[u8]>) -> bool {
+/// `cfg80211_is_element_inherited`: whether a profile whose Non-Inheritance
+/// element is `refused` takes the outer element `id`.
+pub(crate) fn inherited(id: u8, body: &[u8], refused: Option<&[u8]>) -> bool {
     // WLAN_EID_MULTIPLE_BSSID and a multi-link element are never inherited.
     if id == 71 || (id == EXTENSION && body.first() == Some(&MULTI_LINK)) {
         return false;
@@ -446,20 +446,24 @@ fn inherited(id: u8, body: &[u8], refused: Option<&[u8]>) -> bool {
     let Some(refused) = refused else {
         return true;
     };
-    let (list, extension) = if id == EXTENSION {
-        let Some(&ext) = body.first() else {
-            return true;
-        };
-        let skip = 1 + usize::from(refused.first().copied().unwrap_or(0));
-        (refused.get(skip..), ext)
-    } else {
-        (Some(refused), id)
+    // Both lists' lengths are mandatory, and a short element refuses nothing.
+    let Some((&count, rest)) = refused.split_first() else {
+        return true;
     };
-    list.and_then(|list| {
-        let count = usize::from(*list.first()?);
-        list.get(1..1 + count)
-    })
-    .is_none_or(|ids| !ids.contains(&extension))
+    let (ids, rest) = rest
+        .split_at_checked(usize::from(count))
+        .unwrap_or((&[], &[]));
+    let Some((&count, rest)) = rest.split_first() else {
+        return true;
+    };
+    let Some(extensions) = rest.get(..usize::from(count)) else {
+        return true;
+    };
+    if id == EXTENSION {
+        body.first().is_none_or(|ext| !extensions.contains(ext))
+    } else {
+        !ids.contains(&id)
+    }
 }
 
 /// The elements a per-STA profile's `elements` stand for in a frame whose

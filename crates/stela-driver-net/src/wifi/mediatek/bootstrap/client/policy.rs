@@ -158,6 +158,7 @@ fn copy_bss(b: &scan::result::Bss) -> Result<scan::result::Bss, PolicyError> {
         signal_dbm: b.signal_dbm,
         ssid: b.ssid.as_deref().map(copy).transpose()?,
         elements: copy(&b.elements)?,
+        profile: b.profile,
     })
 }
 fn channel(band: Band, n: u16) -> Option<Channel> {

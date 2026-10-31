@@ -25,8 +25,7 @@ impl Preauthentication {
             || profile.aid != 0
             || profile.cipher != 0
             || profile.channel != bss.channel
-            || bss.bssid != profile.peer
-            || bss.transmitter != profile.peer
+            || !bss.answers_for(profile.peer)
             || profile.beacon_interval != bss.beacon_interval
             || bss.capabilities & 0x10 == 0
             || bss.observed.band != Band::Ghz6
