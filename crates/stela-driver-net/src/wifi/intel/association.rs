@@ -99,6 +99,11 @@ pub const CANCEL_CHANNEL_SWITCH: Id = Id {
     opcode: 0x06,
     version: 0,
 };
+pub const STATION_DISABLE_TX: Id = Id {
+    group: 3,
+    opcode: 0x0d,
+    version: 0,
+};
 pub const BEACON_FILTER: Id = Id {
     group: 0,
     opcode: 0xd2,
@@ -323,6 +328,8 @@ pub struct LinkState<'a> {
     pub beacon_interval: u16,
     pub dtim_period: u8,
     pub he: Option<LinkHe>,
+    /// The transmitter and BSSID index of a nontransmitted BSS.
+    pub nontransmitted: Option<(Mac, u8)>,
 }
 
 /// What a link says of an HE AP.
@@ -379,6 +386,8 @@ pub struct StationLink {
 
 /// `iwl_link_config_cmd::spec_link_id`.
 pub const SPEC_LINK_ID: usize = 166;
+/// `ref_bssid_addr`, which `bssid_index` follows past two reserved bytes.
+const REFERENCE_BSSID: usize = 156;
 
 /// `iwl_mvm_link_changed` for every part but activation.
 pub fn link_config(version: u8, state: LinkState<'_>) -> Vec<u8> {
@@ -416,6 +425,10 @@ pub fn link_config(version: u8, state: LinkState<'_>) -> Vec<u8> {
     word(&mut bytes, 140, interval * u32::from(state.dtim_period));
     if let Some(he) = state.he {
         link_he(&mut bytes, version, he);
+    }
+    if let Some((transmitter, index)) = state.nontransmitted {
+        bytes[REFERENCE_BSSID..REFERENCE_BSSID + 6].copy_from_slice(&transmitter.0);
+        bytes[REFERENCE_BSSID + 8] = index;
     }
     bytes
 }
@@ -1128,6 +1141,14 @@ pub fn channel_switch(
     bytes
 }
 
+/// `struct iwl_mvm_sta_disable_tx_cmd`.
+pub fn station_disable_tx(station: u8, disable: bool) -> Vec<u8> {
+    let mut bytes = alloc::vec![0; 8];
+    word(&mut bytes, 0, u32::from(station));
+    word(&mut bytes, 4, u32::from(disable));
+    bytes
+}
+
 /// `struct iwl_cancel_channel_switch_cmd`.
 pub fn cancel_channel_switch(id: u32) -> Vec<u8> {
     id.to_le_bytes().to_vec()
@@ -1332,6 +1353,7 @@ mod tests {
                 edca: &edca,
                 beacon_interval: 100,
                 dtim_period: 3,
+                nontransmitted: None,
                 he: None,
             },
         );
@@ -1537,6 +1559,7 @@ mod tests {
                 edca: &edca,
                 beacon_interval: 100,
                 dtim_period: 1,
+                nontransmitted: None,
                 he: Some(LinkHe {
                     packet_extension: 0,
                     uora: None,

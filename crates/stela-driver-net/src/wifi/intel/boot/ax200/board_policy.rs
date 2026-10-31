@@ -16,6 +16,7 @@ pub enum BoardCommandKind {
     Geo,
     Sgom,
     Tas,
+    ApTypes,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BoardCommand {
@@ -157,7 +158,10 @@ impl<Q: BootIo, B: BiosIo> Ax200BoardPolicy<'_, Q, B> {
         } else {
             None
         };
-        self.commands = commands::prepare(fw, tables, identity.as_ref())?;
+        let boot = &self.scan.mcc.setup.lari.radio.initialized.boot;
+        let six_ghz =
+            boot.family() >= Family::Ax210 && boot.radio() != crate::wifi::intel::identity::Rf::Hr;
+        self.commands = commands::prepare(fw, tables, identity.as_ref(), six_ghz)?;
         Ok(())
     }
     /// Apply cold source policy through ACK/reclaim in this exact epoch.

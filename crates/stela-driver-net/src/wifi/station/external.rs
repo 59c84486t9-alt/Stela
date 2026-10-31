@@ -284,7 +284,7 @@ impl Station {
             || bss.bssid.0 == [0; 6]
             || bss.bssid == address
             || bss.bssid == self.local
-            || bss.transmitter != bss.bssid
+            || !bss.answers_for(bss.bssid)
         {
             return Err(Error::InvalidAddress);
         }

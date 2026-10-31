@@ -193,15 +193,18 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                     .scanner
                     .observe(s.scan_ticket.unwrap(), &frame, policy)
                     .map_err(Error::Scan)?;
-                s.pmf_observations
-                    .try_reserve(1)
-                    .map_err(|_| Error::NoMemory)?;
-                if s.pmf_observations.len() == pmf::MAX_OBSERVATIONS {
-                    s.pmf_observations.remove(0);
+                let nontransmitted = scan::multiple_bssid::nontransmitted(&bss);
+                for bss in core::iter::once(bss).chain(nontransmitted) {
+                    s.pmf_observations
+                        .try_reserve(1)
+                        .map_err(|_| Error::NoMemory)?;
+                    if s.pmf_observations.len() == pmf::MAX_OBSERVATIONS {
+                        s.pmf_observations.remove(0);
+                    }
+                    s.pmf_observations
+                        .push(Arc::new(PmfBssObservation { bss: bss.clone() }));
+                    events.push(Event::Bss(bss));
                 }
-                s.pmf_observations
-                    .push(Arc::new(PmfBssObservation { bss: bss.clone() }));
-                events.push(Event::Bss(bss));
                 continue;
             }
             if s.station.phase() == station::Phase::ExternalAuthenticating {
@@ -350,6 +353,23 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 Self::action_guarded(s, action, now, source, policy, guard.as_deref_mut())?;
             } else if s.phase == Phase::Associated {
                 Self::validate_pmf_data(s)?;
+                if frame.header().fragmented() {
+                    // ieee80211_rx_h_defragment: the station has the MSDU with
+                    // the last fragment, and refuses what it replays.
+                    let (ptk, gtk) =
+                        Self::receiving(&mut s.ptk, &mut s.gtk, &mut s.links, &frame.radio)?;
+                    let slot = frame.security.key.map(|_| ptk.slot_mut());
+                    if let Some(whole) = s.fragments.add(&frame, slot, now)
+                        && let Ok(ingress) = s.station.receive_msdu_refs(
+                            epoch,
+                            &whole,
+                            &mut [ptk.slot_mut(), gtk.slot_mut()],
+                        )
+                    {
+                        events.push(Event::Ingress(ingress));
+                    }
+                    continue;
+                }
                 if modern_data
                     && (frame.header().protected()
                         || frame.header().amsdu

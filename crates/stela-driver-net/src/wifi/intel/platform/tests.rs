@@ -17,6 +17,7 @@ fn radio_descriptor_identities_minima_and_collection_bounds_are_exact() {
         ("WPFC", 17, 4096, false),
         ("UefiCnvWlanSarGeoOffsetMapping", 339, 4096, false),
         ("CnvUefiWlanUATS", 339, 4096, false),
+        ("CnvUefiWlanUNEB", 339, 4096, false),
         ("UefiCnvWlanPuncturing", 5, 4096, false),
     ];
     assert_eq!(expected.len(), RADIO_VARIABLE_COUNT);

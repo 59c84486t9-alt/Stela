@@ -430,6 +430,7 @@ fn an_ap_mld_association_adds_its_other_link_on_an_interface_of_its_own() {
             bss: scan::result::Bss {
                 bssid: OTHER,
                 transmitter: OTHER,
+                profile: None,
                 channel: CHANNEL_52,
                 elements: elements.clone(),
                 ..bss.clone()

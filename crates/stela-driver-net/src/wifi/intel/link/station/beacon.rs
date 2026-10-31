@@ -8,10 +8,13 @@
 //! EDCA and width replaces what association said. A channel switch runs
 //! `ieee80211_sta_process_chanswitch`: firmware times the move and says when
 //! it starts, the link's PHY follows, and silence ends at the AP's first beacon
-//! on the new channel. Frames queued in firmware before a quiet switch stay
-//! firmware's, which `iwl_mvm_csa_client_absent` would disable.
+//! on the new channel. Firmware that leaves it to the host stops sending to
+//! the AP for the move, as `iwl_mvm_csa_client_absent` tells it to. A
+//! nontransmitted BSS reads its share of its transmitter's beacons, and an EMA
+//! AP's beacon without that share says only what they all inherit.
 use super::*;
 use crate::wifi::intel::firmware::Firmware;
+use crate::wifi::scan::multiple_bssid;
 use crate::wifi::station::{
     csa::{
         self, Announced, Announcement, ChannelSwitch, Frame, Progress, Refusal, Source, Switch,
@@ -29,6 +32,8 @@ const FATAL_SWITCH_ERRORS: u32 = 0b1011;
 /// `IWL_UCODE_TLV_CAPA_CHANNEL_SWITCH_CMD` and `IWL_UCODE_TLV_CAPA_CS_MODIFY`.
 const SWITCH_COMMAND: u32 = 46;
 const SWITCH_MODIFY: u32 = 49;
+/// `IWL_UCODE_TLV_API_NO_HOST_DISABLE_TX`.
+pub(super) const FIRMWARE_DISABLES_TX: u32 = 66;
 /// `IWL_MAX_CSA_BLOCK_TX`, in TU and in microseconds.
 const LONGEST_SILENCE_TU: u32 = 1500;
 const LONGEST_SILENCE_US: u64 = 1_500_000;
@@ -51,10 +56,33 @@ pub(super) struct Heard {
     /// The MU EDCA set in force and its count, once the beacon holds one.
     pub(super) mu_edca: Option<(u8, [MuEdcaRecord; 4])>,
     pub(super) definition: ChannelDefinition,
+    /// What the AP limits, fitted to the link.
+    envelope: PowerEnvelope,
     /// The link's firmware state lags behind.
     stale: bool,
     /// So does its PHY.
     moved: bool,
+    /// So does what firmware knows of `envelope`.
+    limited: bool,
+}
+
+/// What `elements` limit on the `used` part of the AP's channel, as
+/// `ieee80211_config_bw` keeps it.
+fn fitted(
+    elements: &[u8],
+    control: Channel,
+    mode: phy::Mode,
+    used: &ChannelDefinition,
+) -> PowerEnvelope {
+    let ap = Operations::parse(elements)
+        .ok()
+        .and_then(|operations| operations.channel(control, mode, None).ok());
+    let Some(ap) = ap else {
+        return PowerEnvelope::none();
+    };
+    let mut envelope = PowerEnvelope::parse(elements);
+    envelope.fit(&ap, used);
+    envelope
 }
 
 #[derive(Default)]
@@ -64,6 +92,8 @@ pub(super) struct Tracking {
     pub(super) watch: Watch,
     /// A switch firmware started that no announcement explains.
     cancel: Option<u32>,
+    /// The station firmware was told not to send to.
+    disabled: Option<u8>,
 }
 
 impl Tracking {
@@ -86,16 +116,17 @@ impl Client {
         if header.control & 0xfc != 0x80 || self.station.phase() != Peering::Associated {
             return false;
         }
-        let Some(ap) = header.transmitter else {
+        let Some(sender) = header.transmitter else {
             return false;
         };
         let Some(context) = self
-            .seat_of(ap)
+            .seat_of(sender)
             .and_then(|seat| self.context_at(seat))
             .cloned()
         else {
             return false;
         };
+        let ap = context.bssid();
         let bytes = frame.bytes();
         let (Some(&[tsf0, tsf1, tsf2, tsf3]), Some(&[low, high]), Some(elements)) = (
             bytes.get(24..28).and_then(|tsf| tsf.first_chunk()),
@@ -104,6 +135,8 @@ impl Client {
         ) else {
             return true;
         };
+        let own = multiple_bssid::heard(context.beacon(), elements);
+        let elements = own.as_ref().map_or(elements, |own| own.elements.as_slice());
         let current = self.link_definition(&context);
         let band = current.control.band;
         let parsed = csa::parse(elements, Frame::Beacon, None, band, context.negotiated());
@@ -126,8 +159,15 @@ impl Client {
                     operations.mu_edca_count.zip(operations.mu_edca)
                 },
                 definition: current,
+                envelope: fitted(
+                    &context.beacon().elements,
+                    current.control,
+                    negotiated.mode,
+                    &current,
+                ),
                 stale: false,
                 moved: false,
+                limited: false,
             });
         }
         let moving = self.tracking.watch.moving();
@@ -139,7 +179,17 @@ impl Client {
         let Some(heard) = self.tracking.links.iter_mut().find(|heard| heard.ap == ap) else {
             return true;
         };
-        let capabilities = u16::from_le_bytes([low, high]);
+        if band == Band::Ghz6 && !moving {
+            let mode = context.negotiated().mode;
+            let envelope = fitted(elements, current.control, mode, &current);
+            heard.limited |= envelope != heard.envelope;
+            heard.envelope = envelope;
+        }
+        let capabilities = match &own {
+            Some(own) => own.capabilities,
+            None if context.beacon().profile.is_some() => heard.capabilities,
+            None => u16::from_le_bytes([low, high]),
+        };
         let protection = commands::protection(elements);
         heard.stale |= capabilities != heard.capabilities || protection != heard.protection;
         heard.capabilities = capabilities;
@@ -245,14 +295,29 @@ impl Client {
         self.announcement(&context, parsed, source, tsf, now);
     }
 
-    /// Firmware's channel switch started: `iwl_mvm_channel_switch_start_notif`.
-    pub(super) fn switch_started(&mut self, id: u32) {
-        match &mut self.tracking.watch.switch {
-            Some(active) if active.progress == Progress::Scheduled => {
-                active.progress = Progress::Started;
-                active.silence_ends = None;
-            }
-            _ => self.tracking.cancel = Some(id),
+    /// Firmware's channel switch started: `iwl_mvm_channel_switch_start_notif`,
+    /// `disable_tx` if the host has to stop what firmware holds for the AP.
+    pub(super) fn switch_started(&mut self, id: u32, disable_tx: bool) {
+        let Some(active) = self
+            .tracking
+            .watch
+            .switch
+            .as_mut()
+            .filter(|active| active.progress == Progress::Scheduled)
+        else {
+            self.tracking.cancel = Some(id);
+            return;
+        };
+        active.progress = Progress::Started;
+        active.silence_ends = None;
+        let ap = active.ap;
+        if disable_tx {
+            let station = self.seat_of(ap).unwrap_or(self.seat);
+            self.tracking.disabled = Some(station);
+            self.command(
+                commands::STATION_DISABLE_TX,
+                commands::station_disable_tx(station, true),
+            );
         }
     }
 
@@ -361,6 +426,17 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             client.act(action);
             return Ok(());
         }
+        // iwl_mvm_post_channel_switch, past the AP's first beacon there.
+        let moving =
+            client.tracking.watch.switch.is_some_and(|active| {
+                matches!(active.progress, Progress::Started | Progress::Moved)
+            });
+        if !moving && let Some(station) = client.tracking.disabled.take() {
+            client.command(
+                commands::STATION_DISABLE_TX,
+                commands::station_disable_tx(station, false),
+            );
+        }
         // A link that left firmware follows without it: `ieee80211_csa_switch_work`.
         if let Some(active) = client.tracking.watch.switch
             && client.seat_of(active.ap).is_none()
@@ -402,16 +478,41 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             Some(Progress::Started) => return self.follow_switch(queue),
             _ => {}
         }
-        let stale = self
-            .client
-            .tracking
-            .links
-            .iter()
-            .find(|heard| heard.stale && self.client.seat_of(heard.ap).is_some());
-        match stale.copied() {
-            Some(heard) => self.update_link(queue, heard),
+        let lagging = self.client.tracking.links.iter().find(|heard| {
+            (heard.stale || heard.limited) && self.client.seat_of(heard.ap).is_some()
+        });
+        match lagging.copied() {
+            Some(heard) if heard.stale => self.update_link(queue, heard),
+            Some(heard) => self.update_power(queue, heard),
             None => Ok(()),
         }
+    }
+
+    /// `BSS_CHANGED_TPE`, as `iwl_mld_send_ap_tx_power_constraint_cmd` tells
+    /// firmware.
+    fn update_power(&mut self, queue: &mut Queue<Q, B>, heard: Heard) -> Result<(), Error> {
+        let client = &self.client;
+        let seat = client.seat_of(heard.ap).ok_or(Error::Refused("no link"))?;
+        let mut bss = client
+            .context_at(seat)
+            .ok_or(Error::Refused("no context"))?
+            .beacon()
+            .clone();
+        bss.channel = heard.definition.control;
+        let constraints = self.six_ghz_power(queue, &bss, seat, Some(heard.envelope));
+        let client = &mut self.client;
+        if let Some(bytes) = constraints {
+            client.command(commands::POWER_CONSTRAINTS, bytes);
+        }
+        if let Some(heard) = client
+            .tracking
+            .links
+            .iter_mut()
+            .find(|tracked| tracked.ap == heard.ap)
+        {
+            heard.limited = false;
+        }
+        Ok(())
     }
 
     /// `ieee80211_link_change_chanreq` and `ieee80211_link_info_change_notify`:
@@ -474,9 +575,14 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             .iter_mut()
             .find(|heard| heard.ap == active.ap)
             .ok_or(Error::Refused("no beacon"))?;
+        // Applied at once on the new channel, until its beacons say.
+        let mut envelope = active.announced.envelope;
+        envelope.fit(&active.announced.ap, &target);
         heard.definition = target;
+        heard.envelope = envelope;
         heard.stale = false;
         heard.moved = false;
+        heard.limited = false;
         let authorized = client.port_open;
         let link = self.link_commands(queue, &context, seat, authorized)?;
         let (removal_id, removal) = queue
@@ -491,7 +597,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             .ok_or(Error::Refused("transmit power"))?;
         let mut bss = context.beacon().clone();
         bss.channel = target.control;
-        let constraints = self.six_ghz_power(queue, &bss, seat);
+        let constraints = self.six_ghz_power(queue, &bss, seat, Some(envelope));
         let client = &mut self.client;
         client.command(
             commands::LINK_CONFIG,

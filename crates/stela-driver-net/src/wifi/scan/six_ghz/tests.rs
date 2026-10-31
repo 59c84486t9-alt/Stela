@@ -51,6 +51,7 @@ fn bss(bssid: Mac, channel: Channel, elements: Vec<u8>) -> result::Bss {
         kind: result::Kind::Beacon,
         bssid,
         transmitter: bssid,
+        profile: None,
         timestamp: 0,
         beacon_interval: 100,
         capabilities: 0x11,

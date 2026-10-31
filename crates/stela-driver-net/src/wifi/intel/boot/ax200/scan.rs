@@ -26,6 +26,8 @@ pub use phy::{
 pub use wire::Probe;
 static NEXT_CONTEXT: crate::wifi::Identities = crate::wifi::Identities::new();
 const MAX_SCAN_US: u64 = 30_000_000;
+/// `IWL_UCODE_TLV_FLAGS_EBS_SUPPORT`.
+const EBS_SUPPORT: u32 = 1 << 25;
 /// `IWL_UCODE_TLV_CAPA_DS_PARAM_SET_IE_SUPPORT`.
 const DS_PARAMETERS: u32 = 9;
 /// `IWL_UCODE_TLV_CAPA_WFA_TPC_REP_IE_SUPPORT`.
@@ -162,6 +164,8 @@ pub struct Ax200Scan<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> {
     rejected_completion: Option<CapturedNotification>,
     abort_requested: bool,
     first_error: Option<Ax200ScanError>,
+    /// A scan's EBS went wrong, `last_ebs_failed`.
+    ebs_failed: bool,
 }
 impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Mac<'a, Q, B, O> {
     /// Attach the same live OS regulatory source to the original unbound MAC.
@@ -226,6 +230,7 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Mac<'a, Q, B, O> {
             rejected_completion: None,
             abort_requested: false,
             first_error: None,
+            ebs_failed: false,
         })
     }
 }
@@ -592,6 +597,11 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Scan<'_, Q, B, O> {
             tpc_report: boot.firmware.supports_capability(TPC_REPORT),
             hidden_six_ghz: boot.firmware.supports_capability(HIDDEN_SIX_GHZ),
             fixed_antenna: boot.firmware.supports_capability(FIXED_ANTENNA),
+            ebs: !self.ebs_failed
+                && boot
+                    .firmware
+                    .flags()
+                    .is_some_and(|flags| flags & EBS_SUPPORT != 0),
         };
         // Capture every already-completed RB before admitting a new request.
         // This exclusive owner never rearms inside the loop, so the real fixed
@@ -772,7 +782,9 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Scan<'_, Q, B, O> {
         })();
         match result {
             Ok(outcome) => {
-                self.completion = Some(ScanCompletion { captured, outcome });
+                let completion = ScanCompletion { captured, outcome };
+                self.ebs_failed |= wire::energy_based_failed(completion.ebs_status());
+                self.completion = Some(completion);
                 Ok(())
             }
             Err(error) => {

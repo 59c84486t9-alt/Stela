@@ -83,10 +83,16 @@ type Queue<Q, B> = Ax200ManagementQueue<'static, Q, B, Regulatory>;
 const MAX_HELD: usize = 64;
 /// The TID the management queue answers to, which non-QoS data shares.
 const MANAGEMENT_TID: u8 = 15;
+/// `he_if_types_ext_capa_sta` and iwlmld's `ext_capa_base`: extended channel
+/// switching, Multiple BSSID, operating mode notifications and the largest
+/// count of MSDUs in an A-MSDU.
+const EXTENDED_CAPABILITIES: [u8; 9] = [4, 0, 0x40, 0, 0, 0, 0, 0xc0, 1];
 /// `IWL_MVM_MISSED_BEACONS_THRESHOLD_LONG`.
 const MISSED_BEACONS: u32 = 19;
 /// `IWL_MVM_MISSED_BEACONS_SINCE_RX_THOLD`.
 const MISSED_BEACONS_SINCE_RECEIVE: u32 = 4;
+/// `IWL_MLD_MISSED_BEACONS_SINCE_RX_THOLD`, on the radios iwlmld drives.
+const MISSED_BEACONS_SINCE_RECEIVE_WIFI_7: u32 = 6;
 /// `IWL_MLD_MISSED_BEACONS_THRESHOLD`.
 const LINK_SCAN_MISSED_BEACONS: u32 = 8;
 /// `MCC_SOURCE_WIFI`.
@@ -642,17 +648,19 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         let Some(selected) = &self.selected else {
             return;
         };
-        if let Some(bytes) = self.six_ghz_power(queue, &selected.bss, 0) {
+        if let Some(bytes) = self.six_ghz_power(queue, &selected.bss, 0, None) {
             self.client.command(commands::POWER_CONSTRAINTS, bytes);
         }
     }
 
-    /// What firmware's link `seat` hears of `bss`, an AP on 6 GHz.
+    /// What firmware's link `seat` hears of `bss`, an AP on 6 GHz, whose
+    /// `envelope` is what its elements limit unless a later word replaced it.
     pub(super) fn six_ghz_power(
         &self,
         queue: &mut Queue<Q, B>,
         bss: &Bss,
         seat: u8,
+        envelope: Option<PowerEnvelope>,
     ) -> Option<Vec<u8>> {
         let widest = self.widest(bss.channel.band);
         let flags = self
@@ -668,16 +676,19 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         let operations = Operations::parse(&bss.elements).ok()?;
         let six = operations.he.as_ref().and_then(|he| he.six_ghz);
         let ap_type = PowerType::of((six?[1] & 0x78) >> 3, flags)?;
-        let mut envelope = PowerEnvelope::parse(&bss.elements);
-        let ap = operations
-            .channel(bss.channel, phy::Mode::Eht, None)
-            .ok()
-            .filter(|_| self.eht.is_some())
-            .map_or_else(|| operations.channel(bss.channel, phy::Mode::He, None), Ok);
-        match ap {
-            Ok(ap) => envelope.fit(&ap, &ap.narrowed_to(widest)),
-            Err(_) => envelope = PowerEnvelope::none(),
-        }
+        let envelope = envelope.unwrap_or_else(|| {
+            let mut envelope = PowerEnvelope::parse(&bss.elements);
+            let ap = operations
+                .channel(bss.channel, phy::Mode::Eht, None)
+                .ok()
+                .filter(|_| self.eht.is_some())
+                .map_or_else(|| operations.channel(bss.channel, phy::Mode::He, None), Ok);
+            match ap {
+                Ok(ap) => envelope.fit(&ap, &ap.narrowed_to(widest)),
+                Err(_) => envelope = PowerEnvelope::none(),
+            }
+            envelope
+        });
         Some(commands::power_constraints(seat, ap_type, &envelope))
     }
 
@@ -983,7 +994,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         let mut policy = Admitted(&client.channels);
         if header.control & 12 == 0 {
             if header.protected() {
-                return self.protected_management(frame, now);
+                return self.protected_management(frame, key_index, now);
             }
             if client.station.phase() == Peering::ExternalAuthenticating {
                 let session = client
@@ -1129,18 +1140,35 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         }
     }
 
-    /// A protected management frame the firmware decrypted: its departure
-    /// ends the association, and an SA Query is answered, as
+    /// A protected management frame the firmware decrypted, under packet
+    /// numbers `ieee80211_crypto_ccmp_decrypt` keeps apart from data's: its
+    /// departure ends the association, and an SA Query is answered, as
     /// `ieee80211_process_sa_query_req` does.
-    fn protected_management(&mut self, frame: Mpdu, now: u64) -> Result<(), Error> {
+    fn protected_management(
+        &mut self,
+        mut frame: Mpdu,
+        key_index: Option<u8>,
+        now: u64,
+    ) -> Result<(), Error> {
+        let local = self.address;
         let client = &mut self.client;
         let Some(epoch) = client.station.association_epoch() else {
             return Ok(());
         };
-        let header = frame.header();
-        let Some(body) = frame.bytes().get(header.length + 8..) else {
+        let Some(key) = client
+            .keys
+            .iter_mut()
+            .find(|key| key.pairwise && key.fitted && Some(key.index) == key_index)
+        else {
             return Ok(());
         };
+        frame.security.key = key.slot.installed();
+        frame.security.integrity = Integrity::Verified;
+        let Ok(authenticated) = key.slot.authorize_unicast_management(&frame, local) else {
+            return Ok(());
+        };
+        let header = frame.header();
+        let body = authenticated.body();
         match header.control & 0xfc {
             0xa0 | 0xc0 => {
                 let action = client
@@ -1169,7 +1197,6 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                 let Some(ap) = header.transmitter else {
                     return Ok(());
                 };
-                let local = self.address;
                 client
                     .outbox
                     .push_back((None, management(local, ap, 0xd0, true, &response)));
@@ -1281,14 +1308,18 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                     };
                 }
                 MISSED_BEACONS_LEGACY_NOTIFICATION | MISSED_BEACONS_NOTIFICATION
-                    if word(8).is_some_and(|missed| missed >= MISSED_BEACONS)
-                        && word(4).is_some_and(|missed| missed >= MISSED_BEACONS_SINCE_RECEIVE)
-                        && self.client.station.association_epoch().is_some()
-                        && !self.client.leaving =>
+                    if word(8).is_some_and(|missed| missed >= MISSED_BEACONS) =>
                 {
-                    self.client.events.push_back(keeper::Event::ConnectionLost);
-                    let action = self.client.station.disconnect().map_err(Error::Station)?;
-                    self.client.act(action);
+                    // Data still heard keeps the link, and leaves the rest
+                    // of Linux's reading alone.
+                    if word(4).is_some_and(|missed| missed >= self.missed_since_receive())
+                        && self.client.station.association_epoch().is_some()
+                        && !self.client.leaving
+                    {
+                        self.client.events.push_back(keeper::Event::ConnectionLost);
+                        let action = self.client.station.disconnect().map_err(Error::Station)?;
+                        self.client.act(action);
+                    }
                 }
                 MISSED_BEACONS_LEGACY_NOTIFICATION | MISSED_BEACONS_NOTIFICATION
                     if self.client.emlsr.active =>
@@ -1320,7 +1351,9 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                     }
                 }
                 beacon::SWITCH_START_NOTIFICATION => {
-                    self.client.switch_started(word(0).unwrap_or(0));
+                    let disable_tx = self.radio != Rf::Fm
+                        && !queue.firmware().supports_api(beacon::FIRMWARE_DISABLES_TX);
+                    self.client.switch_started(word(0).unwrap_or(0), disable_tx);
                 }
                 beacon::SWITCH_ERROR_NOTIFICATION if word(4).is_some_and(beacon::switch_failed) => {
                     self.client.tracking.watch.drop_connection();
@@ -1885,6 +1918,7 @@ fn probe_elements(band: Band, device: Device, widest: phy::Width) -> Vec<u8> {
     if band != Band::Ghz6 {
         element(45, &ht);
     }
+    element(127, &EXTENDED_CAPABILITIES);
     if band == Band::Ghz5 {
         let mut vht = [0; 12];
         let capability: u32 = 2 // 11454-byte MPDUs
@@ -1922,6 +1956,15 @@ fn probe_elements(band: Band, device: Device, widest: phy::Width) -> Vec<u8> {
 }
 
 impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
+    /// The beacons missed since anything was heard that lose the link.
+    fn missed_since_receive(&self) -> u32 {
+        if self.radio == Rf::Fm {
+            MISSED_BEACONS_SINCE_RECEIVE_WIFI_7
+        } else {
+            MISSED_BEACONS_SINCE_RECEIVE
+        }
+    }
+
     fn device(&self) -> Device {
         Device {
             family: self.family,

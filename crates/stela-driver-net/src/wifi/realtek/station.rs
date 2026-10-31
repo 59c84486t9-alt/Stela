@@ -19,6 +19,7 @@ use crate::wifi::security::{
     aggregate::{OrderedGroup, Shape},
     michael,
 };
+use crate::wifi::station::fragments::Fragments;
 use crate::{
     Clock, Link, LinkError, Mac,
     wifi::{
@@ -299,6 +300,8 @@ fn capability_elements(band: Band) -> Vec<u8> {
     // IEEE80211_HT_MCS_TX_DEFINED.
     elements.extend_from_slice(&[1, 0, 0, 0]);
     elements.extend_from_slice(&[0; 7]);
+    // mac80211's `ext_capa`: operating mode notifications.
+    elements.extend_from_slice(&[127, 8, 0, 0, 0, 0, 0, 0, 0, 0x40]);
     if band == Band::Ghz5 {
         // MPDU 11454, SGI 80, RX LDPC, TX STBC, one RX STBC stream, HTC-VHT,
         // the largest A-MPDU.
@@ -559,6 +562,7 @@ pub struct Rtl8822c<D: Device> {
     tuned: Option<Channel>,
     /// The frames each TID's Block Ack agreement holds in order.
     agreements: [Option<Reorder<Mpdu>>; 8],
+    fragments: Fragments,
     /// The next TX report number, `tx_report.sn`.
     report: u8,
     /// A report's number, which the management frame it names may await.
@@ -608,6 +612,7 @@ impl<D: Device> Rtl8822c<D> {
             integrity: None,
             tuned: None,
             agreements: Default::default(),
+            fragments: Fragments::default(),
             report: 0,
             reporting: None,
             port_open: false,
@@ -701,6 +706,7 @@ impl<D: Device> Rtl8822c<D> {
         for agreement in &mut self.agreements {
             *agreement = None;
         }
+        self.fragments.clear();
         self.changes.clear();
         self.aggregating = Default::default();
         self.unaggregated = [false; 8];
@@ -1396,11 +1402,28 @@ impl<D: Device> Rtl8822c<D> {
             }
             frame.security.key = Some(key);
         }
+        if header.fragmented() {
+            self.reassemble(&frame, now);
+            return Ok(());
+        }
         self.order(frame, now);
         Ok(())
     }
 
     /// `ieee80211_sta_manage_reorder_buf` for a frame under an agreement.
+    /// `frame`, one fragment; the station has the MSDU with the last of them.
+    fn reassemble(&mut self, frame: &Mpdu, now: u64) {
+        let key = frame.security.key;
+        let slot = self
+            .keys
+            .iter_mut()
+            .map(|key| &mut key.slot)
+            .find(|slot| key.is_some() && slot.installed() == key);
+        if let Some(whole) = self.fragments.add(frame, slot, now) {
+            self.deliver(whole);
+        }
+    }
+
     fn order(&mut self, frame: Mpdu, now: u64) {
         let header = frame.header();
         let agreement = header
@@ -1572,21 +1595,45 @@ impl<D: Device> Rtl8822c<D> {
         Ok(())
     }
 
-    fn protected_management(&mut self, frame: Mpdu, now: u64) -> Result<(), Error> {
+    fn protected_management(&mut self, mut frame: Mpdu, now: u64) -> Result<(), Error> {
+        let local = self.address;
         let Some(epoch) = self.station.association_epoch() else {
             return Ok(());
         };
-        // mac80211 decrypts in software what hardware did not, which the
-        // unicast path has no key to here; such a frame cannot be trusted.
-        if !frame.security.decrypted {
-            self.unsupported("a protected management frame hardware did not decrypt");
-            return Ok(());
-        }
         let header = *frame.header();
-        let Some(body) = frame.bytes().get(header.length + 8..) else {
+        let Some(key) = self.keys.iter_mut().find(|key| key.pairwise) else {
             return Ok(());
         };
-        let body = body.get(..body.len().saturating_sub(8)).unwrap_or(&[]);
+        // mac80211 decrypts in software what hardware did not.
+        if !frame.security.decrypted {
+            let number = frame
+                .bytes()
+                .get(header.length..)
+                .and_then(|iv| PacketNumber::from_header(iv).ok());
+            let material: Option<&[u8; 16]> = key.material[..].try_into().ok();
+            let (Some((number, _)), Some(material)) = (number, material) else {
+                return Ok(());
+            };
+            let Some(opened) = ccmp::open(material, frame.bytes(), number) else {
+                return Ok(());
+            };
+            let security = SecurityStatus {
+                decrypted: true,
+                integrity: Integrity::Verified,
+                ..SecurityStatus::default()
+            };
+            let Ok(clear) = Mpdu::new(opened, frame.radio.clone(), security) else {
+                return Ok(());
+            };
+            frame = clear;
+        }
+        frame.security.key = key.slot.installed();
+        // Under packet numbers `ieee80211_crypto_ccmp_decrypt` keeps apart
+        // from data's.
+        let Ok(authenticated) = key.slot.authorize_unicast_management(&frame, local) else {
+            return Ok(());
+        };
+        let body = authenticated.body();
         match header.control & 0xfc {
             0xa0 | 0xc0 => {
                 let action = self

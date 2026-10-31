@@ -767,6 +767,96 @@ fn received_data_passes_its_replay_and_integrity_checks() {
     assert_eq!(delivered(&mut wifi), [0x45]);
 }
 
+/// Fragment `number` of frame `sequence` under the pairwise key at packet
+/// number `pn`, with `more` to follow.
+fn fragment(sequence: u16, number: u8, more: bool, pn: u8, payload: &[u8]) -> Vec<u8> {
+    let mut frame = data(LOCAL, sequence, [8, 0], &[], Some((0, pn)));
+    frame.truncate(34);
+    frame.extend_from_slice(payload);
+    frame.extend([0; 8]);
+    frame[1] |= u8::from(more) << 2;
+    frame[22] |= number;
+    frame
+}
+
+#[test]
+fn fragments_under_consecutive_numbers_make_one_frame() {
+    let (mut wifi, model) = connected();
+    let first = [&[0xaa, 0xaa, 3, 0, 0, 0, 8, 0][..], &[0x45; 4]].concat();
+    model
+        .0
+        .borrow_mut()
+        .hear(fragment(30, 0, true, 1, &first), true);
+    model
+        .0
+        .borrow_mut()
+        .hear(fragment(30, 1, false, 2, &[0x46; 4]), true);
+    wifi.carrier();
+    let ethernet = wifi.receive().unwrap().unwrap();
+    assert_eq!(
+        ethernet[14..],
+        [0x45, 0x45, 0x45, 0x45, 0x46, 0x46, 0x46, 0x46]
+    );
+    assert_eq!(wifi.receive().unwrap(), None);
+}
+
+#[test]
+fn fragments_that_skip_a_number_are_dropped() {
+    let (mut wifi, model) = connected();
+    let first = [&[0xaa, 0xaa, 3, 0, 0, 0, 8, 0][..], &[0x45; 4]].concat();
+    model
+        .0
+        .borrow_mut()
+        .hear(fragment(31, 0, true, 5, &first), true);
+    model
+        .0
+        .borrow_mut()
+        .hear(fragment(31, 1, false, 7, &[0x46; 4]), true);
+    wifi.carrier();
+    assert_eq!(delivered(&mut wifi), []);
+}
+
+/// An SA Query request at packet number `number`, opened as hardware leaves
+/// it, its MIC in place.
+fn sa_query(number: u8) -> Vec<u8> {
+    let mut frame = management(0xd0, &[number, 0, 0, 0x20, 0, 0, 0, 0, 8, 0, 1, 2]);
+    frame[1] = 0x40;
+    frame.extend([0; 8]);
+    frame
+}
+
+/// How many SA Query answers the station sent.
+fn query_answers(air: &Air) -> usize {
+    air.sent.iter().filter(|sent| sent.2[0] == 0xd0).count()
+}
+
+#[test]
+fn a_protected_management_frame_is_taken_once_under_its_packet_number() {
+    let (mut wifi, model) = connected();
+    model.0.borrow_mut().hear(sa_query(5), true);
+    assert!(run(&mut wifi, &model, |_, air| query_answers(air) == 1));
+    model.0.borrow_mut().hear(sa_query(5), true);
+    assert!(!run(&mut wifi, &model, |_, air| query_answers(air) > 1));
+    model.0.borrow_mut().hear(sa_query(6), true);
+    assert!(run(&mut wifi, &model, |_, air| query_answers(air) == 2));
+}
+
+#[test]
+fn a_protected_management_frame_hardware_left_sealed_opens_under_the_key() {
+    let (mut wifi, model) = connected();
+    let key = model.0.borrow().keys.iter().find(|key| !key.3).unwrap().4;
+    let sealed = |key: &[u8; 16], number: u8| {
+        let frame = sa_query(number);
+        let iv: &[u8; 8] = frame[24..32].try_into().unwrap();
+        let pn = PacketNumber::new(number.into()).unwrap();
+        ccmp::seal(key, &frame[..24], iv, pn, &frame[32..36])
+    };
+    model.0.borrow_mut().hear(sealed(&[0; 16], 5), false);
+    assert!(!run(&mut wifi, &model, |_, air| query_answers(air) > 0));
+    model.0.borrow_mut().hear(sealed(&key, 5), false);
+    assert!(run(&mut wifi, &model, |_, air| query_answers(air) == 1));
+}
+
 #[test]
 fn an_a_msdu_gives_up_each_of_its_frames() {
     let (mut wifi, model) = connected();

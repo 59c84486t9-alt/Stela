@@ -111,6 +111,7 @@ pub(in super::super) fn modern_inputs_cipher(
         kind: scan::result::Kind::Beacon,
         bssid: AP,
         transmitter: AP,
+        profile: None,
         timestamp: 42,
         beacon_interval: 100,
         capabilities: 0x11,

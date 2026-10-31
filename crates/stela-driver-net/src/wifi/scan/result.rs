@@ -21,6 +21,14 @@ pub enum Kind {
     ProbeResponse,
 }
 
+/// Where a nontransmitted BSS sits in its Multiple BSSID set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Profile {
+    /// `max_bssid_indicator`: the set holds two to this power of BSSes.
+    pub indicator: u8,
+    pub index: u8,
+}
+
 #[derive(Clone, Debug)]
 pub struct Bss {
     pub ticket: Ticket,
@@ -41,9 +49,17 @@ pub struct Bss {
     /// Complete received TLVs, including unknown/advanced ones. Retention does
     /// not declare the native association/driver capable of those modes.
     pub elements: Vec<u8>,
+    /// Set for a BSS `transmitter`'s frames name but do not come from.
+    pub profile: Option<Profile>,
 }
 
 impl Bss {
+    /// Whether this is the record of `bssid`, heard from it or from the
+    /// transmitter of its set.
+    pub fn answers_for(&self, bssid: Mac) -> bool {
+        self.bssid == bssid && (self.transmitter == bssid || self.profile.is_some())
+    }
+
     /// `cfg80211`'s `cmp_hidden_bss`: a beacon that keeps the SSID to itself,
     /// by leaving it out, empty or all zeros.
     pub fn hides_ssid(&self) -> bool {
@@ -222,6 +238,7 @@ pub(super) fn parse(
         },
         ssid,
         elements: ies.to_vec(),
+        profile: None,
     })
 }
 

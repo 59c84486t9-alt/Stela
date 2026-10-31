@@ -245,7 +245,7 @@ pub struct CountryMap<'a> {
     raw: &'a [u8],
 }
 impl<'a> CountryMap<'a> {
-    /// SGOM and UATS share this packed revision 1 prefix, while their
+    /// SGOM, UATS and UNEB share this packed revision 1 prefix, while their
     /// consumers and prerequisites remain separate.
     pub fn parse(raw: &'a [u8]) -> Result<Self, Error> {
         prefix(raw, 339, 1)?;

@@ -240,6 +240,27 @@ fn receive_profiles_stay_explicit_and_keep_fcs() {
             decode(chip, &bytes).unwrap().normalize(24),
             Err(Error::UnsupportedFragment)
         );
+        assert_eq!(
+            decode(chip, &bytes)
+                .unwrap()
+                .normalize_fragment(24)
+                .unwrap()
+                .len(),
+            64,
+            "in the clear, nothing goes back"
+        );
+        let mut bytes = packet(chip, 1, 4, 0, 0);
+        let r2 = word(&bytes, 8).unwrap() | (1 << 27);
+        put(&mut bytes, 8, r2);
+        let decoded = decode(chip, &bytes).unwrap();
+        let [pn5, pn4, pn3, pn2, pn1, pn0] = decoded.security.packet_number_be.unwrap();
+        let fragment = decoded.normalize_fragment(24).unwrap();
+        assert_eq!(fragment[24..32], [pn0, pn1, 0, 0xa0, pn2, pn3, pn4, pn5]);
+        assert_eq!(fragment.len(), 72);
+        let mut bytes = packet(chip, 1, 2, 0, 0);
+        let r2 = word(&bytes, 8).unwrap() | (1 << 27);
+        put(&mut bytes, 8, r2);
+        assert!(!decode(chip, &bytes).unwrap().rejoinable_fragment());
         let mut bytes = packet(chip, 0, 0, 0, 0);
         let at = if chip == Chip::Mt7925 { 12 } else { 4 };
         let word = word(&bytes, at).unwrap() | (1 << if chip == Chip::Mt7925 { 24 } else { 27 });
