@@ -482,7 +482,8 @@ pub fn control_flags(mac: &[u8; 6]) -> u32 {
 /// `iwl_mvm_get_sta_ampdu_dens`' size: the base exponent and the HE extension,
 /// bounded by the firmware's 4 MB.
 pub fn ampdu_exponent(negotiated: &Negotiated) -> u8 {
-    const LIMIT_4M: u8 = 7;
+    /// `STA_FLG_MAX_AGG_SIZE_4M`, 8 KB being zero.
+    const LIMIT_4M: u8 = 9;
     let extension = negotiated.he.as_ref().map_or(0, |he| (he.mac[3] >> 3) & 3);
     (negotiated.peer_ampdu_base_exponent + extension).min(LIMIT_4M)
 }
@@ -643,7 +644,11 @@ pub fn rate_config(
     let ldpc = ht_cap & 1 != 0
         || vht_cap & 0x10 != 0
         || he.as_ref().is_some_and(|he| he.phy[1] & 0x20 != 0);
-    let flags = u16::from(stbc && antennas.count_ones() > 1) | u16::from(ldpc) << 1;
+    // Dual carrier modulation needs the peer to receive it; every admitted
+    // device can send it.
+    let dcm = he.as_ref().is_some_and(|he| he.phy[3] & 0x18 != 0);
+    let flags =
+        u16::from(stbc && antennas.count_ones() > 1) | u16::from(ldpc) << 1 | u16::from(dcm) << 3;
     half(&mut out, head + 4, flags);
     half(
         &mut out,

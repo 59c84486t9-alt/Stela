@@ -110,7 +110,10 @@ pub(super) fn capability(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wifi::station::phy::{Capabilities, Role};
+    use crate::wifi::{
+        intel::association as commands,
+        station::phy::{Capabilities, Mode, Negotiated, Role, Width},
+    };
 
     fn parsed(band: Band, family: Family, two_streams: bool, wide: bool) -> Capabilities {
         let mut elements = if band == Band::Ghz2 {
@@ -125,6 +128,39 @@ mod tests {
         };
         elements.extend(capability(band, family, radio, two_streams, wide));
         Capabilities::parse(band, Role::Station, &elements).unwrap()
+    }
+
+    fn negotiated(band: Band, mode: Mode, width: Width) -> Negotiated {
+        let own = || super::super::probe_elements(band, Family::Ax210, Rf::Gf, (3, 3), true);
+        let mut station = own();
+        station.extend([221, 7, 0, 0x50, 0xf2, 2, 0, 1, 0]);
+        let mut ap = own();
+        ap.extend([221, 24, 0, 0x50, 0xf2, 2, 1, 1, 0x80, 0]);
+        for category in 0..4 {
+            ap.extend([category << 5 | 3, 0xa4, 0, 0]);
+        }
+        let parsed = |role, elements: &[u8]| Capabilities::parse(band, role, elements).unwrap();
+        let station = parsed(Role::Station, &station);
+        Negotiated::between(&station, &parsed(Role::AccessPoint, &ap), mode, width).unwrap()
+    }
+
+    #[test]
+    fn a_peer_takes_a_megabyte_and_more_of_aggregate() {
+        let wide = negotiated(Band::Ghz5, Mode::He, Width::Mhz80);
+        assert_eq!(commands::ampdu_exponent(&wide), 8, "2 MB");
+        let narrow = negotiated(Band::Ghz2, Mode::He, Width::Mhz20);
+        assert_eq!(commands::ampdu_exponent(&narrow), 6, "512 KB");
+    }
+
+    #[test]
+    fn a_peer_receiving_dual_carrier_modulation_gets_it() {
+        let shape = commands::RateShape::of(4).unwrap();
+        let he = negotiated(Band::Ghz5, Mode::He, Width::Mhz80);
+        let rates = commands::rate_config(&he, Band::Ghz5, 3, shape, true, 0).unwrap();
+        assert_eq!(rates[shape.head + 4] & 8, 8);
+        let vht = negotiated(Band::Ghz5, Mode::Vht, Width::Mhz80);
+        let rates = commands::rate_config(&vht, Band::Ghz5, 3, shape, true, 0).unwrap();
+        assert_eq!(rates[shape.head + 4] & 8, 0);
     }
 
     #[test]

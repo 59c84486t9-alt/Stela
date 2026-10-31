@@ -27,8 +27,8 @@ use crate::wifi::{
         },
     },
     regulatory::channel::{
-        NO_6GHZ_AFC_CLIENT, NO_6GHZ_VLP_CLIENT, NO_80MHZ, NO_160MHZ, NO_HT40MINUS, NO_HT40PLUS,
-        NO_IR,
+        NO_6GHZ_AFC_CLIENT, NO_6GHZ_VLP_CLIENT, NO_80MHZ, NO_160MHZ, NO_320MHZ, NO_EHT, NO_HE,
+        NO_HT40MINUS, NO_HT40PLUS, NO_IR,
     },
     regulatory::{self, Operation, PowerType, ProbeProfiles, Purpose, TxProfile, Width, database},
     security::{
@@ -2298,6 +2298,15 @@ pub fn channel_flags(restrictions: &crate::wifi::intel::mcc::channel::Restrictio
     }
     if restrictions.no_160mhz {
         flags |= NO_160MHZ;
+    }
+    if restrictions.no_320mhz {
+        flags |= NO_320MHZ;
+    }
+    if restrictions.no_he {
+        flags |= NO_HE;
+    }
+    if restrictions.no_eht {
+        flags |= NO_EHT;
     }
     if restrictions.no_initiate_radiation {
         flags |= NO_IR;
