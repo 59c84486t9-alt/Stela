@@ -10,6 +10,8 @@
 #[cfg(feature = "nvk")]
 pub(super) mod client;
 #[cfg(feature = "nvk")]
+pub(super) mod display;
+#[cfg(feature = "nvk")]
 pub(super) mod gate;
 #[cfg(feature = "nvk")]
 mod stack;

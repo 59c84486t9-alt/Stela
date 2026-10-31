@@ -54,7 +54,7 @@ fn run(stack: u64, body: &mut dyn FnMut()) {
     unsafe { stack::on_stack(stack, body) };
 }
 
-fn relax() {
+pub(super) fn relax() {
     if host::processor() == BOOT_CPU.load(Ordering::Relaxed) {
         pump();
     }

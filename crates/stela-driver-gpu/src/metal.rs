@@ -23,6 +23,7 @@ pub mod error;
 pub mod hazard;
 pub mod heap;
 pub mod indirect;
+pub mod kms;
 pub mod library;
 #[cfg(feature = "metal-vulkan")]
 pub mod native;

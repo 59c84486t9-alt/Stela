@@ -1070,6 +1070,7 @@ fn open_gpus(
     firmware: &Option<alloc::sync::Arc<stela_drivers::firmware::Catalog>>,
     tsc_hz: u64,
     adapters: Vec<stela_drivers::gpu::Adapter>,
+    #[cfg_attr(not(feature = "nvk"), allow(unused_variables))] screen: (usize, usize),
 ) {
     let Some(window) = mmio.and_then(|mmio| mmio.window()) else {
         crate::status::warn("this PC cannot map a GPU's memory, so it is left unused");
@@ -1107,7 +1108,10 @@ fn open_gpus(
     match gpu::open(machine, claimed) {
         Ok(()) => {
             #[cfg(feature = "nvk")]
-            gpu::gate::open_service();
+            {
+                gpu::display::take(screen);
+                gpu::gate::open_service();
+            }
             crate::status::done("started");
         }
         Err(error) => crate::status::warn(&format!("the GPU could not start: {error}")),
@@ -1178,11 +1182,17 @@ fn place_devices(
     let firmware = |name: &str| -> Option<&[u8]> {
         carried(name).or_else(|| flash.and_then(|flash| flash.image(name)))
     };
-    let scanout = handoff.screen.map(|screen| {
-        let screen = screen.relocated(layout::physical(screen.base as u64) as usize);
-        alloc::boxed::Box::new(display::GopScanout::new(screen))
-            as alloc::boxed::Box<dyn stela_soc::machine::Scanout>
-    });
+    let firmware_scanout = || {
+        handoff.screen.map(|screen| {
+            let screen = screen.relocated(layout::physical(screen.base as u64) as usize);
+            alloc::boxed::Box::new(display::GopScanout::new(screen))
+                as alloc::boxed::Box<dyn stela_soc::machine::Scanout>
+        })
+    };
+    #[cfg(feature = "nvk")]
+    let scanout = gpu::display::scanout().or_else(firmware_scanout);
+    #[cfg(not(feature = "nvk"))]
+    let scanout = firmware_scanout();
     let programmed = mount::memory_locks(placement.read_only_region, core_locks);
     let memory = board.and_then(|board| memory_resources(board, canonical_ram, programmed));
     let cacheless_memory = memory.is_some();
@@ -2156,6 +2166,7 @@ fn start_devices(
                     host_firmware,
                     tsc_hz,
                     gpus,
+                    handoff.screen.map_or((0, 0), |screen| screen.resolution()),
                 );
             }
             disks.profile_callbacks(options.profile);
