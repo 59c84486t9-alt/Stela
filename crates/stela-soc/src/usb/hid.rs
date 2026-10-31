@@ -31,8 +31,10 @@
 //!
 //! Each input change queues one report. Queues are bounded; when one is
 //! full the newest report replaces its last entry, so the final state
-//! always reaches the host. A nonzero SET_IDLE rate repeats the current
-//! report at that rate while nothing changes (HID 1.11 7.2.4).
+//! always reaches the host. The device reports changes alone: a nonzero
+//! SET_IDLE rate STALLs, which HID 1.11 7.2.4 lets a device do for a rate it
+//! does not keep, as repeating an unchanged report tells the host nothing
+//! and wakes its driver every time.
 use super::{BusPeer, Function, Reply, Token, control::Stall};
 use crate::Result;
 use alloc::{collections::VecDeque, vec::Vec};
@@ -60,11 +62,6 @@ const ROLLOVER: usize = 6;
 const ERROR_ROLLOVER: u8 = 1;
 /// Keys held at once that the device tracks.
 const MAX_HELD: usize = 32;
-/// The idle rate's unit, 4 ms, in 24 MHz system counts.
-const IDLE_UNIT: u64 = 96_000;
-/// HID 1.11 7.2.4's recommended keyboard default, 500 ms; pointers report
-/// only on change.
-const KEYBOARD_IDLE: u8 = 125;
 
 const GET_STATUS: u8 = 0;
 const CLEAR_FEATURE: u8 = 1;
@@ -217,21 +214,16 @@ fn string(text: &str) -> Vec<u8> {
 #[derive(Clone)]
 struct Interface {
     protocol: u8,
-    idle: u8,
     halted: bool,
     queue: VecDeque<Vec<u8>>,
-    /// The system count the last report went out at.
-    sent: u64,
 }
 
 impl Interface {
-    fn new(idle: u8) -> Self {
+    fn new() -> Self {
         Self {
             protocol: REPORT_PROTOCOL,
-            idle,
             halted: false,
             queue: VecDeque::new(),
-            sent: 0,
         }
     }
 
@@ -274,7 +266,6 @@ pub struct Peripheral {
     /// The LEDs the host last set: Num, Caps, Scroll, Compose, Kana lock
     /// as bits 0..4.
     leds: u8,
-    now: u64,
     modifiers: u8,
     held: Vec<u8>,
     buttons: u8,
@@ -283,13 +274,9 @@ pub struct Peripheral {
     mouse_buttons: u8,
 }
 
-/// Each interface's idle rate after configuration.
+/// The interfaces after configuration.
 fn interfaces() -> [Interface; INTERFACES] {
-    [
-        Interface::new(KEYBOARD_IDLE),
-        Interface::new(0),
-        Interface::new(0),
-    ]
+    core::array::from_fn(|_| Interface::new())
 }
 
 impl Default for Peripheral {
@@ -306,7 +293,6 @@ impl Peripheral {
             control: Control::Idle,
             interfaces: interfaces(),
             leds: 0,
-            now: 0,
             modifiers: 0,
             held: Vec::new(),
             buttons: 0,
@@ -503,11 +489,6 @@ impl Peripheral {
         matches!(interface, KEYBOARD | MOUSE)
     }
 
-    fn idle_due(&self, interface: usize) -> Option<u64> {
-        let i = &self.interfaces[interface];
-        (i.idle != 0).then(|| i.sent.saturating_add(u64::from(i.idle) * IDLE_UNIT))
-    }
-
     /// Evaluates a request whose data stage, if any, is complete. `Err`
     /// is a request error: the device STALLs the rest of the transfer.
     fn request(&mut self, setup: [u8; 8], data: &[u8]) -> Result<Outcome, Stall> {
@@ -585,15 +566,8 @@ impl Peripheral {
                 self.leds = data[0] & 0x1f;
                 Ok(Outcome::Done(None))
             }
-            (0xa1, GET_IDLE) if interface < INTERFACES && value == 0 => {
-                reply(&[self.interfaces[interface].idle])
-            }
-            (0x21, SET_IDLE) if interface < INTERFACES && value as u8 == 0 => {
-                let i = &mut self.interfaces[interface];
-                i.idle = (value >> 8) as u8;
-                i.sent = self.now;
-                Ok(Outcome::Done(None))
-            }
+            (0xa1, GET_IDLE) if interface < INTERFACES && value == 0 => reply(&[0]),
+            (0x21, SET_IDLE) if interface < INTERFACES && value == 0 => Ok(Outcome::Done(None)),
             (0xa1, GET_PROTOCOL) if Self::boot(interface) && value == 0 => {
                 reply(&[self.interfaces[interface].protocol])
             }
@@ -695,15 +669,12 @@ impl Peripheral {
         if self.interfaces[n].halted {
             return Reply::Stall;
         }
-        let report = match self.interfaces[n].queue.pop_front() {
-            Some(report) => report,
-            None if self.idle_due(n).is_some_and(|due| self.now >= due) => self.current(n),
-            None => return Reply::Nak,
+        let Some(report) = self.interfaces[n].queue.pop_front() else {
+            return Reply::Nak;
         };
         let report = self.report(n, report);
         let length = report.len().min(buffer.len());
         buffer[..length].copy_from_slice(&report[..length]);
-        self.interfaces[n].sent = self.now;
         Reply::Ack(length)
     }
 
@@ -754,20 +725,14 @@ impl BusPeer for Peripheral {
 }
 
 impl Function for Peripheral {
-    fn set_time(&mut self, now: u64) {
-        self.now = now;
-    }
+    fn set_time(&mut self, _: u64) {}
 
     fn ready_at(&self, endpoint: u8) -> Option<u64> {
         let n = Self::interface_of(endpoint)?;
         if self.configuration == 0 || self.interfaces[n].halted {
             return None;
         }
-        if self.interfaces[n].queue.is_empty() {
-            self.idle_due(n)
-        } else {
-            Some(0)
-        }
+        (!self.interfaces[n].queue.is_empty()).then_some(0)
     }
 }
 

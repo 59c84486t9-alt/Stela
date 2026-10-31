@@ -230,14 +230,16 @@ fn class_requests_set_leds_protocol_idle_and_halt() {
     assert!(control(&mut p, setup(0x21, SET_PROTOCOL, 0, 1, 0), &[]).is_err());
     let report = control(&mut p, setup(0xa1, GET_REPORT, 0x100, 1, 7), &[]).unwrap();
     assert_eq!(report.len(), POINTER_REPORT);
-    // A 40 ms idle rate repeats the unchanged report.
-    p.set_time(1000);
-    control(&mut p, setup(0x21, SET_IDLE, 10 << 8, 0, 0), &[]).unwrap();
-    assert_eq!(p.ready_at(0x81), Some(1000 + 10 * IDLE_UNIT));
+    // Only an indefinite idle rate is kept: an unchanged report never repeats.
+    assert!(control(&mut p, setup(0x21, SET_IDLE, 6 << 8, 0, 0), &[]).is_err());
+    control(&mut p, setup(0x21, SET_IDLE, 0, 0, 0), &[]).unwrap();
+    assert_eq!(
+        control(&mut p, setup(0xa1, GET_IDLE, 0, 0, 1), &[]).unwrap(),
+        [0]
+    );
+    assert_eq!(p.ready_at(0x81), None);
     let mut buffer = [0; 8];
     assert_eq!(p.packet(0x81, Token::In, &mut buffer), Ok(Reply::Nak));
-    p.set_time(1000 + 10 * IDLE_UNIT);
-    assert_eq!(p.packet(0x81, Token::In, &mut buffer), Ok(Reply::Ack(8)));
     // Halt and clear.
     control(&mut p, setup(0x02, SET_FEATURE, 0, 0x81, 0), &[]).unwrap();
     assert_eq!(p.packet(0x81, Token::In, &mut buffer), Ok(Reply::Stall));
