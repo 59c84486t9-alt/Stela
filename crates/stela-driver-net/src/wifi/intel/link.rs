@@ -334,6 +334,11 @@ struct Restart<Q, B> {
     attempts: Attempts,
     /// The function turned out to have no reset, which is said once.
     no_reset: bool,
+    /// `request_top_reset`: the block shared with Bluetooth failed, for which
+    /// the list's early reprobes are no use. Stela admits no MAC with a TOP
+    /// reset of its own, so it takes the function reset of a product reset
+    /// without `_PRR`.
+    top_failed: bool,
 }
 
 /// One Intel Wi-Fi function's bring-up.
@@ -352,7 +357,7 @@ pub struct Wifi<Q: BootIo, B: BiosIo> {
     client: station::Client,
     /// The transmit and receive antennas.
     chains: (u32, u32),
-    family: Family,
+    pub(crate) family: Family,
     radio: super::identity::Rf,
     /// Whether the function's first MSI-X vector reaches the host.
     pub(super) vector: bool,
@@ -423,6 +428,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             entries,
             attempts: Attempts::default(),
             no_reset: false,
+            top_failed: false,
         };
         let wifi = Self {
             family: boot.family(),
@@ -458,9 +464,15 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
     /// The ROM boot reads this for itself, ALIVE among it. A register that
     /// stopped answering says as much.
     fn died(&mut self) -> bool {
-        !matches!(self.stage, Stage::Rom(_) | Stage::Pnvm(_))
-            && interrupts::acknowledge(&mut self.restart.io, self.family, self.vector)
-                .unwrap_or(true)
+        if matches!(self.stage, Stage::Rom(_) | Stage::Pnvm(_)) {
+            return false;
+        }
+        let Ok(fatal) = interrupts::acknowledge(&mut self.restart.io, self.family, self.vector)
+        else {
+            return true;
+        };
+        self.restart.top_failed |= fatal & interrupts::INT_TOP_FATAL != 0;
+        fatal != 0
     }
 
     /// `iwl_trans_restart_wk`, each attempt a reprobe: stop what the failed
@@ -477,7 +489,8 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             return false;
         }
         self.stage = Stage::Moving;
-        let no_reset = self.restart.attempts.resets() && !self.restart.io.reset_function();
+        let reset = self.restart.attempts.resets() || core::mem::take(&mut self.restart.top_failed);
+        let no_reset = reset && !self.restart.io.reset_function();
         let first = no_reset && !core::mem::replace(&mut self.restart.no_reset, true);
         let restart = &self.restart;
         // SAFETY: the owner that held `io`'s twin stopped, and `new`'s

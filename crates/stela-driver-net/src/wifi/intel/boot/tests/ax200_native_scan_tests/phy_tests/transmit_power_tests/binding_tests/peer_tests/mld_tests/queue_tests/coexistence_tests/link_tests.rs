@@ -2689,6 +2689,27 @@ fn only_the_last_restarts_reset_the_function_and_one_without_a_reset_still_boots
         let resets = state.ops.iter().filter(|op| matches!(op, Op::Reset));
         (resets.count(), wifi.radio().no_reset())
     };
+    let top_fatal = {
+        let native = Native::default();
+        let (mut wifi, _device) = connect(&native, false);
+        wifi.radio_mut().vector = true;
+        wifi.radio_mut().family = crate::wifi::intel::firmware::Family::Bz;
+        native
+            .state
+            .lock()
+            .unwrap()
+            .registers
+            .insert(0x2808, 1 << 3);
+        wifi.carrier();
+        assert_eq!(wifi.radio().phase(), Phase::Booting);
+        let state = native.state.lock().unwrap();
+        state
+            .ops
+            .iter()
+            .filter(|op| matches!(op, Op::Reset))
+            .count()
+    };
+    assert_eq!(top_fatal, 1, "a TOP fatal error waits for no list");
     assert_eq!(resets(2, false), (0, false));
     assert_eq!(resets(3, false), (1, false));
     assert_eq!(resets(3, true), (1, true));
