@@ -13,6 +13,7 @@
 //! itself passes its function in `claimed_displays`, and the unit is taken.
 use alloc::vec::Vec;
 use core::ops::Range;
+use stela_drivers::bus::pci::EcamWindow;
 
 /// The 4 KiB page span a DMA window needs, within the host's supported
 /// physical-address width. This describes geometry, not permission to map it.
@@ -99,6 +100,37 @@ pub fn enumerate(roots: &[u8], mut read32: impl FnMut(u16, u16) -> Option<u32>) 
     }
     found.sort_unstable_by_key(|function| function.rid);
     found
+}
+
+/// Inventory each PCI segment across all of its ECAM windows before choosing
+/// remapping units. `windows` are the platform's validated, non-overlapping
+/// windows; the callback reads only the selected window's configuration space.
+/// The result describes topology and grants no device or DMA ownership.
+pub fn enumerate_segments(
+    windows: &[EcamWindow],
+    mut read32: impl FnMut(&EcamWindow, u16, u16) -> Option<u32>,
+) -> Vec<(u16, Vec<Present>)> {
+    let mut segments: Vec<_> = windows.iter().map(|window| window.segment).collect();
+    segments.sort_unstable();
+    segments.dedup();
+    segments
+        .into_iter()
+        .map(|segment| {
+            let roots: Vec<_> = windows
+                .iter()
+                .filter(|window| window.segment == segment)
+                .flat_map(|window| window.start_bus..=window.end_bus)
+                .collect();
+            let present = enumerate(&roots, |rid, offset| {
+                let bus = (rid >> 8) as u8;
+                let window = windows.iter().find(|window| {
+                    window.segment == segment && (window.start_bus..=window.end_bus).contains(&bus)
+                })?;
+                read32(window, rid, offset)
+            });
+            (segment, present)
+        })
+        .collect()
 }
 
 /// A device scope: an endpoint, or a bridge and every function behind it,
@@ -330,6 +362,68 @@ mod tests {
         assert!(found[1].display());
         assert!(found[2].usb());
         assert_eq!(found[4].bridge, Some((1, 2)));
+    }
+
+    #[test]
+    fn disjoint_ecam_windows_share_one_complete_segment_inventory() {
+        use crate::dmar::{Drhd, Remapping};
+        let windows = [
+            EcamWindow {
+                base: 0x8000_0000,
+                segment: 0,
+                start_bus: 1,
+                end_bus: 1,
+            },
+            EcamWindow {
+                base: 0x9000_0000,
+                segment: 0,
+                start_bus: 7,
+                end_bus: 7,
+            },
+            EcamWindow {
+                base: 0xa000_0000,
+                segment: 3,
+                start_bus: 1,
+                end_bus: 1,
+            },
+        ];
+        let first = space(&[(0x0100, [1, 8, 2], false, None)]);
+        let second = space(&[(0x0700, [2, 0, 0], false, None)]);
+        let other = space(&[(0x0100, [0x0c, 3, 0x30], false, None)]);
+        let inventories = enumerate_segments(&windows, |window, rid, offset| {
+            assert!((window.start_bus..=window.end_bus).contains(&((rid >> 8) as u8)));
+            let config = match window.base {
+                0x8000_0000 => &first,
+                0x9000_0000 => &second,
+                0xa000_0000 => &other,
+                _ => panic!("foreign ECAM window"),
+            };
+            config.get(&(rid, offset)).copied()
+        });
+        assert_eq!(inventories.len(), 2);
+        assert_eq!(inventories[0].0, 0);
+        assert_eq!(
+            inventories[0].1.iter().map(|f| f.rid).collect::<Vec<_>>(),
+            [0x0100, 0x0700]
+        );
+        assert_eq!(inventories[1].0, 3);
+        assert_eq!(inventories[1].1[0].rid, 0x0100);
+        assert!(inventories[1].1[0].usb());
+        let remapping = Remapping {
+            physical_bits: 39,
+            units: vec![Drhd {
+                base: 0xfed9_0000,
+                bytes: 4096,
+                segment: 0,
+                include_all: true,
+                scopes: vec![],
+            }],
+            reserved: vec![],
+        };
+        assert_eq!(
+            plan(&remapping, 0, &inventories[0].1, &[]),
+            [(0, Ok(vec![0x0100, 0x0700]))]
+        );
     }
 
     #[test]
