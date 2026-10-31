@@ -755,6 +755,13 @@ unsafe extern "C" fn start(context: *mut c_void) {
 }
 
 /// The running environment.
+#[cfg_attr(
+    not(feature = "nvk"),
+    allow(
+        dead_code,
+        reason = "held for the boot; only Mesa's client reads these"
+    )
+)]
 struct Installed {
     work: &'static KernelWork,
     time: Arc<dyn Clock>,
