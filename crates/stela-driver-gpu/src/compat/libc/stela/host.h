@@ -2,8 +2,10 @@
 /* What the C library needs of the host, which Rust supplies (`mesa::libc`). */
 #ifndef STELA_LIBC_HOST_H
 #define STELA_LIBC_HOST_H
+#include <sys/cdefs.h>
 #include <stddef.h>
 #include <stdint.h>
+__BEGIN_DECLS
 
 /* Allocation from the host's heap, of exactly the size and alignment given back. */
 void *stela_libc_allocate(size_t size, size_t alignment);
@@ -47,4 +49,5 @@ struct stela_libc_drm_device {
 	uint8_t bus, slot, function, revision;
 };
 void stela_libc_drm_device(unsigned int index, struct stela_libc_drm_device *device);
+__END_DECLS
 #endif

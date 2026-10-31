@@ -1,8 +1,10 @@
 /* SPDX-License-Identifier: MIT */
 #ifndef STELA_LIBC_STRING_H
 #define STELA_LIBC_STRING_H
+#include <sys/cdefs.h>
 #include <stddef.h>
 #include <strings.h>
+__BEGIN_DECLS
 void *memcpy(void *to, const void *from, size_t size);
 void *memmove(void *to, const void *from, size_t size);
 void *memset(void *to, int value, size_t size);
@@ -29,4 +31,6 @@ char *strpbrk(const char *text, const char *accept);
 char *strtok(char *text, const char *delimiters);
 char *strtok_r(char *text, const char *delimiters, char **state);
 char *strerror(int error);
+int strerror_r(int error, char *buffer, size_t size);
+__END_DECLS
 #endif

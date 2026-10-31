@@ -73,10 +73,33 @@ const SKIPPED: [&str; 11] = [
     "wsi_common_display",
 ];
 /// Stela's stand-ins, under `compat/mesa`, built with an NVK unit's flags.
-const STAND_INS: [&str; 5] = ["nvkcl", "build_id", "nv_cubin", "drm", "soft_float"];
+const STAND_INS: [&str; 6] = [
+    "nvkcl",
+    "build_id",
+    "nv_cubin",
+    "drm",
+    "soft_float",
+    "nir_options",
+];
+/// The Metal compiler service, under `compiler`, built with an NVK unit's flags.
+const AIR: [&str; 13] = [
+    "air_call",
+    "air_calls",
+    "air_commands",
+    "air_constants",
+    "air_math",
+    "air_matrix",
+    "air_metadata",
+    "air_simd",
+    "air_texture",
+    "air_to_nir",
+    "metal_abi",
+    "metal_compiler",
+    "threadgroup",
+];
 const MODEL_UNIT: &str = "nvk_query_pool.c";
 /// The C library, under `compat/libc`.
-const LIBC: [&str; 4] = ["libc", "stdio", "pthread", "math"];
+pub(super) const LIBC: [&str; 6] = ["libc", "stdio", "pthread", "math", "system", "wchar"];
 
 /// What Meson found on the build host that the C library does not offer, or
 /// that names a path the image does not take. SSE4.1 and BLAKE3's assembly are
@@ -137,7 +160,7 @@ const HOST_FLAGS: [&str; 9] = [
 ];
 /// The C target's flags: `stela-driver-gpu/build/native.rs`'s, with SSE, which
 /// Mesa uses, in place of its general registers only. A kernel's stacks follow.
-const TARGET_FLAGS: [&str; 15] = [
+pub(super) const TARGET_FLAGS: [&str; 15] = [
     "-mno-stack-arg-probe",
     "-mno-incremental-linker-compatible",
     "-fno-stack-protector",
@@ -155,7 +178,7 @@ const TARGET_FLAGS: [&str; 15] = [
     "-femulated-tls",
 ];
 /// The C library's own test, on the build host.
-const LIBC_TEST_FLAGS: [&str; 11] = [
+pub(super) const LIBC_TEST_FLAGS: [&str; 11] = [
     "--target=x86_64-unknown-linux-gnu",
     "-O1",
     "-msse2",
@@ -185,9 +208,9 @@ const RUST_SOURCES: [&str; 5] = [
 ];
 
 /// One unit to compile, with what Clang needs.
-struct Unit {
-    output: PathBuf,
-    arguments: Vec<String>,
+pub(super) struct Unit {
+    pub(super) output: PathBuf,
+    pub(super) arguments: Vec<String>,
 }
 
 fn paths(directory: &Path) -> Result<(PathBuf, PathBuf)> {
@@ -287,7 +310,7 @@ fn generate(build: &Path, path: &Path) -> Result<()> {
     )
 }
 
-fn resource_directory(clang: &Path) -> Result<String> {
+pub(super) fn resource_directory(clang: &Path) -> Result<String> {
     Ok(capture(Command::new(clang).arg("-print-resource-dir"))?
         .trim()
         .to_owned())
@@ -482,26 +505,39 @@ fn units(
     }
     let (file, words) = model.context("no model unit")?;
     let compat = gpu().join("compat");
-    for name in STAND_INS {
-        let source = compat
-            .join("mesa")
-            .join(format!("{name}.c"))
-            .display()
-            .to_string();
+    let model_unit = |source: &Path, name: &str, added: &[String]| {
         let words: Vec<_> = words
             .iter()
             .map(|word| {
                 if *word == file {
-                    source.clone()
+                    source.display().to_string()
                 } else {
                     word.clone()
                 }
             })
             .collect();
-        units.push(Unit {
+        let mut arguments = retarget(&words, common);
+        arguments.extend_from_slice(added);
+        Unit {
             output: objects.join(format!("stela_{name}.o")),
-            arguments: retarget(&words, common),
-        });
+            arguments,
+        }
+    };
+    for name in STAND_INS {
+        let source = compat.join("mesa").join(format!("{name}.c"));
+        units.push(model_unit(&source, name, &[]));
+    }
+    let compiler = gpu().join("compiler");
+    let added = [
+        compiler.clone(),
+        compiler.join("llvm/include"),
+        third_party("llvm").join("llvm/include"),
+        gpu(),
+    ]
+    .map(|include| format!("-I{}", include.display()));
+    for name in AIR {
+        let source = compiler.join(format!("{name}.c"));
+        units.push(model_unit(&source, name, &added));
     }
     for name in LIBC {
         let mut arguments = common.to_vec();
@@ -540,7 +576,7 @@ fn stale(output: &Path, build: &Path) -> bool {
         })
 }
 
-fn compile(clang: &Path, build: &Path, units: &[Unit], jobs: u16) -> Result<()> {
+pub(super) fn compile(clang: &Path, build: &Path, units: &[Unit], jobs: u16) -> Result<()> {
     let next = AtomicUsize::new(0);
     let failures = Mutex::new(Vec::new());
     std::thread::scope(|scope| {
@@ -560,14 +596,17 @@ fn compile(clang: &Path, build: &Path, units: &[Unit], jobs: u16) -> Result<()> 
                         .arg(&unit.output)
                         .current_dir(build)
                         .output();
-                    match output {
-                        Ok(output) if output.status.success() => {}
-                        Ok(output) => failures
-                            .lock()
-                            .unwrap()
-                            .push(String::from_utf8_lossy(&output.stderr).into_owned()),
-                        Err(error) => failures.lock().unwrap().push(error.to_string()),
-                    }
+                    let report = match output {
+                        Ok(output) if output.status.success() => continue,
+                        Ok(output) => String::from_utf8_lossy(&output.stderr).into_owned(),
+                        Err(error) => error.to_string(),
+                    };
+                    let error = report.lines().find(|line| line.contains("error:"));
+                    failures.lock().unwrap().push(format!(
+                        "{}: {}",
+                        unit.output.display(),
+                        error.unwrap_or(&report)
+                    ));
                 }
             });
         }
@@ -577,8 +616,40 @@ fn compile(clang: &Path, build: &Path, units: &[Unit], jobs: u16) -> Result<()> 
         failures.is_empty(),
         "{} units failed:\n{}",
         failures.len(),
-        failures[0]
+        failures.join("\n"),
     );
+    Ok(())
+}
+
+/// Moves the static constructors of a COFF `object` between the bounds
+/// `compat/llvm/runtime.cpp` walks: the linker sorts a section's parts by what
+/// follows its `$`, and a plain `.ctors` would come before the first bound.
+/// False if there are none.
+fn rename_constructors(object: &mut [u8]) -> Option<bool> {
+    let field = |at: usize| Some(u16::from_le_bytes(object.get(at..at + 2)?.try_into().ok()?));
+    let sections = usize::from(field(2)?);
+    let table = 20 + usize::from(field(16)?);
+    let headers = object.get_mut(table..table + sections * 40)?;
+    let mut renamed = false;
+    for header in headers.as_chunks_mut::<40>().0 {
+        if header.starts_with(b".ctors\0\0") {
+            header[..8].copy_from_slice(b".ctors$m");
+            renamed = true;
+        }
+    }
+    Some(renamed)
+}
+
+/// [`rename_constructors`] for every unit.
+pub(super) fn gather_constructors(units: &[Unit]) -> Result<()> {
+    for unit in units {
+        let mut object = fs::read(&unit.output)?;
+        let renamed = rename_constructors(&mut object)
+            .with_context(|| format!("{} is no COFF object", unit.output.display()))?;
+        if renamed {
+            fs::write(&unit.output, object)?;
+        }
+    }
     Ok(())
 }
 
@@ -588,6 +659,7 @@ pub fn build(jobs: u16) -> Result<()> {
     let build = directory.join("build");
     let (_, path) = paths(&directory)?;
     fs::create_dir_all(&directory)?;
+    super::llvm::build(&toolchain, jobs, false)?;
     setup(&directory, &build, &path)?;
     generate(&build, &path)?;
     let libc = gpu().join("compat/libc");
@@ -605,6 +677,7 @@ pub fn build(jobs: u16) -> Result<()> {
     let units = units(&build, &objects, &ninja, &path, &common)?;
     compile(&toolchain.clang, &build, &units, jobs)?;
 
+    gather_constructors(&units)?;
     let archive = directory.join("libstela-nvk.a");
     if archive.is_file() {
         fs::remove_file(&archive)?;
@@ -627,7 +700,7 @@ fn test_libc(toolchain: &Toolchain, directory: &Path) -> Result<()> {
     fs::create_dir_all(&output)?;
     let resource = format!("{}/include", resource_directory(&toolchain.clang)?);
     let mut objects = Vec::new();
-    for unit in LIBC.into_iter().chain(["tests/libc_test"]) {
+    for unit in LIBC.into_iter().chain(["tests/host", "tests/libc_test"]) {
         let object = output.join(format!("{}.o", unit.replace('/', "-")));
         exec(
             Command::new(&toolchain.clang)
@@ -656,6 +729,20 @@ fn test_libc(toolchain: &Toolchain, directory: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn constructors_move_between_the_bounds() {
+        let mut object = vec![0; 20 + 2 + 2 * 40];
+        object[2] = 2;
+        object[16] = 2;
+        object[22..28].copy_from_slice(b".text\0");
+        object[62..68].copy_from_slice(b".ctors");
+        assert_eq!(rename_constructors(&mut object), Some(true));
+        assert_eq!(&object[62..70], b".ctors$m");
+        assert_eq!(rename_constructors(&mut object), Some(false));
+        assert_eq!(&object[22..28], b".text\0");
+        assert_eq!(rename_constructors(&mut object[..30]), None);
+    }
 
     #[test]
     fn retargeting_keeps_a_units_own_flags_and_drops_the_hosts() {

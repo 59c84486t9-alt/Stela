@@ -1,7 +1,10 @@
 /* SPDX-License-Identifier: MIT */
+#include <sys/cdefs.h>
 #undef assert
+__BEGIN_DECLS
 _Noreturn void __assert_fail(const char *condition, const char *file, unsigned int line,
 			     const char *function);
+__END_DECLS
 #ifdef NDEBUG
 #define assert(condition) ((void)0)
 #else

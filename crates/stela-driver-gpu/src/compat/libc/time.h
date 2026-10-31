@@ -1,7 +1,9 @@
 /* SPDX-License-Identifier: MIT */
 #ifndef STELA_LIBC_TIME_H
 #define STELA_LIBC_TIME_H
+#include <sys/cdefs.h>
 #include <sys/types.h>
+__BEGIN_DECLS
 typedef int clockid_t;
 struct timespec {
 	time_t tv_sec;
@@ -24,5 +26,7 @@ int timespec_get(struct timespec *time, int base);
 time_t time(time_t *result);
 struct tm *localtime_r(const time_t *time, struct tm *result);
 struct tm *localtime(const time_t *time);
+struct tm *gmtime_r(const time_t *time, struct tm *result);
 size_t strftime(char *buffer, size_t size, const char *format, const struct tm *time);
+__END_DECLS
 #endif

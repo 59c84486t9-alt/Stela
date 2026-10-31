@@ -1,9 +1,11 @@
 /* SPDX-License-Identifier: MIT */
 #ifndef STELA_LIBC_PTHREAD_H
 #define STELA_LIBC_PTHREAD_H
+#include <sys/cdefs.h>
 #include <sched.h>
 #include <sys/types.h>
 #include <time.h>
+__BEGIN_DECLS
 typedef unsigned long pthread_t;
 typedef struct {
 	int kind;
@@ -99,4 +101,5 @@ int pthread_join(pthread_t thread, void **result);
 int pthread_detach(pthread_t thread);
 _Noreturn void pthread_exit(void *result);
 int pthread_setname_np(pthread_t thread, const char *name);
+__END_DECLS
 #endif

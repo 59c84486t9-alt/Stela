@@ -1,0 +1,17 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+// `setprecision` for the string streams of `sstream`.
+#ifndef STELA_LLVM_IOMANIP
+#define STELA_LLVM_IOMANIP
+#include_next <iomanip>
+#include <sstream>
+#if defined(_LIBCPP_VERSION) && !_LIBCPP_HAS_LOCALIZATION
+_LIBCPP_BEGIN_NAMESPACE_STD
+
+inline __stela_precision setprecision(int digits)
+{
+	return {digits};
+}
+
+_LIBCPP_END_NAMESPACE_STD
+#endif
+#endif

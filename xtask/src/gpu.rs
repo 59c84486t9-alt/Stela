@@ -5,6 +5,7 @@ use clap::{Subcommand, ValueEnum};
 use std::path::PathBuf;
 
 pub mod fetch;
+mod llvm;
 mod mesa;
 mod nvidia;
 mod nvk;
@@ -106,6 +107,15 @@ pub enum Command {
         #[arg(long, default_value_t = 8, value_parser = clap::value_parser!(u16).range(1..))]
         jobs: u16,
     },
+    /// Compile LLVM and libc++ for `stela.efi`, which `nvk` also does.
+    Llvm {
+        /// Maximum parallel native compiler processes.
+        #[arg(long, default_value_t = 8, value_parser = clap::value_parser!(u16).range(1..))]
+        jobs: u16,
+        /// Also compile it for this machine and run what AIR does on it.
+        #[arg(long)]
+        test: bool,
+    },
 }
 
 pub fn run(command: Command) -> Result<()> {
@@ -135,6 +145,7 @@ pub fn run(command: Command) -> Result<()> {
         }),
         Command::Nvidia { jobs, target } => nvidia::build(jobs, target),
         Command::Nvk { jobs } => nvk::build(jobs),
+        Command::Llvm { jobs, test } => llvm::build(&nvidia::Toolchain::discover()?, jobs, test),
     }
 }
 

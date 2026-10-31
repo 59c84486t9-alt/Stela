@@ -1,212 +1,23 @@
 // SPDX-License-Identifier: MIT
-/* The C library against the C standard's answers, as a static Linux program
- * with only this file for a host: `cargo xtask gpu nvk` builds and runs it. */
+/* The C library against the C standard's answers, as a static Linux program:
+ * `cargo xtask gpu nvk` builds and runs it. */
+#include <dirent.h>
 #include <errno.h>
 #include <fenv.h>
 #include <math.h>
+#include <poll.h>
 #include <pthread.h>
+#include <pwd.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <wchar.h>
 #include <time.h>
+#include <unistd.h>
 #include <stela/host.h>
-
-static long linux_call(long number, long a, long b, long c)
-{
-	long result;
-	__asm__ volatile("syscall" : "=a"(result) : "a"(number), "D"(a), "S"(b), "d"(c)
-			 : "rcx", "r11", "memory");
-	return result;
-}
-
-#define LINUX_WRITE 1
-#define LINUX_CLOCK_GETTIME 228
-#define LINUX_EXIT 231
-#define MONOTONIC 1
-
-static void leave(int status)
-{
-	linux_call(LINUX_EXIT, status, 0, 0);
-	__builtin_trap();
-}
-
-void *memcpy(void *destination, const void *source, size_t size)
-{
-	__asm__ volatile("rep movsb" : "+D"(destination), "+S"(source), "+c"(size) : : "memory");
-	return destination;
-}
-
-void *memset(void *destination, int value, size_t size)
-{
-	unsigned char *bytes = destination;
-	while (size--)
-		*bytes++ = (unsigned char)value;
-	return destination;
-}
-
-void *memmove(void *destination, const void *source, size_t size)
-{
-	unsigned char *to = destination;
-	const unsigned char *from = source;
-	if (to < from) {
-		while (size--)
-			*to++ = *from++;
-	} else {
-		while (size--)
-			to[size] = from[size];
-	}
-	return destination;
-}
-
-int memcmp(const void *a, const void *b, size_t size)
-{
-	const unsigned char *left = a, *right = b;
-	for (size_t at = 0; at < size; at++) {
-		if (left[at] != right[at])
-			return left[at] - right[at];
-	}
-	return 0;
-}
-
-static _Alignas(4096) unsigned char arena[1 << 24];
-static size_t arena_used;
-static size_t live_blocks;
-
-void *stela_libc_allocate(size_t size, size_t alignment)
-{
-	size_t start = (arena_used + alignment - 1) & ~(alignment - 1);
-	if (start + size > sizeof(arena))
-		return NULL;
-	arena_used = start + size;
-	live_blocks++;
-	return arena + start;
-}
-
-void stela_libc_release(void *pointer, size_t size, size_t alignment)
-{
-	(void)pointer;
-	(void)size;
-	(void)alignment;
-	live_blocks--;
-}
-
-void stela_libc_log(const char *text, size_t size)
-{
-	linux_call(LINUX_WRITE, 2, (long)text, (long)size);
-}
-
-_Noreturn void stela_libc_fatal(const char *message)
-{
-	stela_libc_log(message, strlen(message));
-	leave(2);
-	__builtin_unreachable();
-}
-
-uint64_t stela_libc_now_ns(void)
-{
-	struct {
-		long seconds, nanoseconds;
-	} time;
-	linux_call(LINUX_CLOCK_GETTIME, MONOTONIC, (long)&time, 0);
-	return (uint64_t)time.seconds * 1000000000 + (uint64_t)time.nanoseconds;
-}
-
-static unsigned int current_core;
-
-unsigned int stela_libc_core(void)
-{
-	return current_core;
-}
-
-/* One host processor: a thread runs through at its start. */
-int stela_libc_thread_start(void (*body)(void *), void *argument, unsigned int core)
-{
-	unsigned int caller = current_core;
-	current_core = core;
-	body(argument);
-	current_core = caller;
-	return 0;
-}
-
-static unsigned int waits, wakes;
-/* What a wait changes, as another processor would. */
-static volatile unsigned int *waited_word;
-static unsigned int waited_value;
-
-void stela_libc_wait(const volatile unsigned int *word, unsigned int value, uint64_t deadline)
-{
-	(void)deadline;
-	waits++;
-	if (word == waited_word)
-		*waited_word = waited_value;
-	(void)value;
-}
-
-void stela_libc_wake(const volatile unsigned int *word)
-{
-	(void)word;
-	wakes++;
-}
-
-int stela_libc_drm_open(unsigned int minor)
-{
-	(void)minor;
-	return -ENODEV;
-}
-
-int stela_libc_drm_close(int fd)
-{
-	(void)fd;
-	return -ENODEV;
-}
-
-int stela_libc_drm_dup(int fd)
-{
-	(void)fd;
-	return -ENODEV;
-}
-
-long stela_libc_drm_rdev(int fd)
-{
-	(void)fd;
-	return -ENODEV;
-}
-
-int stela_libc_drm_ioctl(int fd, unsigned long request, void *argument)
-{
-	(void)fd;
-	(void)request;
-	(void)argument;
-	return -ENODEV;
-}
-
-void *stela_libc_drm_mmap(int fd, uint64_t offset, size_t size)
-{
-	(void)fd;
-	(void)offset;
-	(void)size;
-	return (void *)-ENODEV;
-}
-
-int stela_libc_drm_munmap(void *address, size_t size)
-{
-	(void)address;
-	(void)size;
-	return 0;
-}
-
-unsigned int stela_libc_drm_devices(void)
-{
-	return 0;
-}
-
-void stela_libc_drm_device(unsigned int index, struct stela_libc_drm_device *device)
-{
-	(void)index;
-	(void)device;
-}
+#include "host.h"
 
 static int failures;
 
@@ -343,6 +154,9 @@ static void test_strings(void)
 	CHECK(!strtok_r(NULL, ",", &rest));
 	free(copy);
 	CHECK(strerror(ENOMEM)[0]);
+	char text[32];
+	CHECK(strerror_r(ENOMEM, text, sizeof(text)) == 0 && !strcmp(text, strerror(ENOMEM)));
+	CHECK(strerror_r(ENOMEM, text, 1) == ERANGE);
 }
 
 static void test_allocation(void)
@@ -366,6 +180,50 @@ static void test_allocation(void)
 	free(pointer);
 	CHECK(live_blocks == before);
 	free(NULL);
+}
+
+static void test_refusals(void)
+{
+	struct pollfd file = { .fd = 0, .events = POLLIN };
+	errno = 0;
+	CHECK(poll(&file, 1, 0) == -1);
+	CHECK(errno == ENOSYS);
+}
+
+static void test_division(void)
+{
+	div_t small = div(-7, 2);
+	CHECK(small.quot == -3 && small.rem == -1);
+	ldiv_t wide = ldiv(7L, -2L);
+	CHECK(wide.quot == -3 && wide.rem == 1);
+	lldiv_t widest = lldiv(1LL << 40, 3);
+	CHECK(widest.quot == 366503875925LL && widest.rem == 1);
+}
+
+static void test_system(void)
+{
+	char path[16];
+	errno = 0;
+	CHECK(chdir("/") == -1 && errno == ENOSYS);
+	CHECK(getcwd(path, sizeof(path)) == NULL);
+	CHECK(opendir("/") == NULL);
+	struct passwd entry, *found = &entry;
+	CHECK(getpwuid_r(0, &entry, path, sizeof(path), &found) == 0 && found == NULL);
+}
+
+static void test_wide(void)
+{
+	static const wchar_t number[] = L"-42 rest";
+	wchar_t *end;
+	CHECK(wcstol(number, &end, 10) == -42 && end == number + 3);
+	CHECK(wcstoull(L"0x10", NULL, 16) == 16);
+	CHECK(close_to(wcstod(L"2.5", NULL), 2.5));
+	CHECK(wcslen(number) == 8);
+	CHECK(wmemchr(number, L'r', 8) == number + 4 && !wmemchr(number, L'z', 8));
+	CHECK(wmemcmp(L"ab", L"ac", 2) < 0 && wmemcmp(L"ab", L"ab", 2) == 0);
+	wchar_t text[8];
+	CHECK(swprintf(text, 8, L"%d", 123) == 3 && !wmemcmp(text, L"123", 4));
+	CHECK(swprintf(text, 2, L"%d", 123) == -1);
 }
 
 static void test_math(void)
@@ -405,6 +263,10 @@ static void test_math(void)
 	CHECK(powf(2.0f, 3.0f) == 8.0f);
 	CHECK(sqrtf(16.0f) == 4.0f);
 	CHECK(isnan(sqrt(-1.0)));
+	CHECK(logb(8.0) == 3.0 && logb(0.75) == -1.0 && isinf(logb(0.0)));
+	CHECK(fabs(erf(0.5) - 0.5204998778130465) < 1e-15);
+	CHECK(fabs(erf(3.0) - 0.9999779095030014) < 1e-15);
+	CHECK(erf(-3.0) == -erf(3.0) && erf(100.0) == 1.0);
 	CHECK(fesetround(FE_UPWARD) == 0);
 	CHECK(fegetround() == FE_UPWARD);
 	CHECK(lrint(2.1) == 3);
@@ -537,19 +399,21 @@ static void test_threads(void)
 	current_core = 0;
 }
 
-__asm__(".globl _start\n_start:\n\tand $-16, %rsp\n\tcall run\n");
-
-__attribute__((used)) static void run(void)
+int test(void)
 {
 	test_formatting();
 	test_parsing();
 	test_sorting();
 	test_strings();
 	test_allocation();
+	test_refusals();
+	test_division();
+	test_system();
+	test_wide();
 	test_math();
 	test_time();
 	test_threads();
 	if (failures)
 		fprintf(stderr, "%d of the C library's checks failed\n", failures);
-	leave(failures != 0);
+	return failures != 0;
 }

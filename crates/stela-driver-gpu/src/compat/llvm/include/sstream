@@ -1,0 +1,65 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+// LLVM formats text with string streams in helpers for its printers, which
+// libc++ without locales only forward-declares. These hold the text themselves;
+// what they cannot format fails to compile.
+#ifndef STELA_LLVM_SSTREAM
+#define STELA_LLVM_SSTREAM
+#include_next <sstream>
+#if defined(_LIBCPP_VERSION) && !_LIBCPP_HAS_LOCALIZATION
+#include <stdio.h>
+#include <string>
+#include <string_view>
+#include <type_traits>
+
+_LIBCPP_BEGIN_NAMESPACE_STD
+
+/* What `setprecision` gives a stream. */
+struct __stela_precision {
+	int digits;
+};
+
+template <class _CharT, class _Traits, class _Allocator, class _Stream>
+class __stela_text_stream {
+public:
+	basic_string<_CharT, _Traits, _Allocator> str() const
+	{
+		return text;
+	}
+
+	template <class _Value>
+	_Stream &operator<<(const _Value &value)
+	{
+		if constexpr (is_same_v<_Value, __stela_precision>) {
+			digits = value.digits;
+		} else if constexpr (is_same_v<_Value, _CharT>) {
+			text.push_back(value);
+		} else if constexpr (is_convertible_v<const _Value &, basic_string_view<_CharT, _Traits>>) {
+			text.append(basic_string_view<_CharT, _Traits>(value));
+		} else if constexpr (is_floating_point_v<_Value>) {
+			char formatted[64];
+			snprintf(formatted, sizeof(formatted), "%.*g", digits, static_cast<double>(value));
+			text.append(formatted);
+		} else {
+			text.append(to_string(value));
+		}
+		return static_cast<_Stream &>(*this);
+	}
+
+private:
+	basic_string<_CharT, _Traits, _Allocator> text;
+	int digits = 6;
+};
+
+template <class _CharT, class _Traits, class _Allocator>
+class basic_ostringstream
+	: public __stela_text_stream<_CharT, _Traits, _Allocator,
+				     basic_ostringstream<_CharT, _Traits, _Allocator>> {};
+
+template <class _CharT, class _Traits, class _Allocator>
+class basic_stringstream
+	: public __stela_text_stream<_CharT, _Traits, _Allocator,
+				     basic_stringstream<_CharT, _Traits, _Allocator>> {};
+
+_LIBCPP_END_NAMESPACE_STD
+#endif
+#endif

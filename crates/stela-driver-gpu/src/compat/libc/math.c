@@ -230,6 +230,49 @@ long long llroundf(float x)
 	return (long long)roundf(x);
 }
 
+double logb(double x)
+{
+	if (x == 0)
+		return -HUGE_VAL;
+	if (isinf(x))
+		return HUGE_VAL;
+	if (isnan(x))
+		return x;
+	int exponent;
+	frexp(x, &exponent);
+	return exponent - 1;
+}
+
+/* Maclaurin's series near zero, a continued fraction of erfc beyond it. */
+double erf(double x)
+{
+	if (isnan(x))
+		return x;
+	double magnitude = fabs(x);
+	long double result;
+	if (magnitude < 2.5) {
+		long double square = (long double)magnitude * magnitude;
+		long double term = magnitude;
+		long double sum = term;
+		for (int n = 1; n < 80; n++) {
+			term *= -square / n;
+			sum += term / (2 * n + 1);
+		}
+		result = sum * 1.128379167095512573896158903121545172L;
+	} else if (magnitude >= 6) {
+		result = 1;
+	} else {
+		long double fraction = 0;
+		for (int n = 60; n > 0; n--) {
+			fraction = (n / 2.0L) / (magnitude + fraction);
+		}
+		long double square = (long double)magnitude * magnitude;
+		result = 1 - x87_exp2(-square * 1.442695040888963407359924681001892137L)
+				     * 0.564189583547756286948079451560772586L / (magnitude + fraction);
+	}
+	return x < 0 ? -(double)result : (double)result;
+}
+
 double copysign(double x, double y)
 {
 	return __builtin_copysign(x, y);

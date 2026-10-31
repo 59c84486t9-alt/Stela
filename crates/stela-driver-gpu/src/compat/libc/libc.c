@@ -361,6 +361,12 @@ double strtod(const char *text, char **end)
 	return (double)(sign * (exponent < 0 ? value / scale : value * scale));
 }
 
+/* To a double's precision: nothing in the image parses long doubles. */
+long double strtold(const char *text, char **end)
+{
+	return strtod(text, end);
+}
+
 float strtof(const char *text, char **end)
 {
 	return (float)strtod(text, end);
@@ -440,6 +446,21 @@ long labs(long value)
 	return value < 0 ? -value : value;
 }
 
+div_t div(int number, int divisor)
+{
+	return (div_t){ number / divisor, number % divisor };
+}
+
+ldiv_t ldiv(long number, long divisor)
+{
+	return (ldiv_t){ number / divisor, number % divisor };
+}
+
+lldiv_t lldiv(long long number, long long divisor)
+{
+	return (lldiv_t){ number / divisor, number % divisor };
+}
+
 long long llabs(long long value)
 {
 	return value < 0 ? -value : value;
@@ -472,45 +493,6 @@ void *memmem(const void *haystack, size_t haystack_size, const void *needle, siz
 	return NULL;
 }
 
-void *memchr(const void *from, int value, size_t size)
-{
-	const unsigned char *at = from;
-	for (; size; at++, size--) {
-		if (*at == (unsigned char)value)
-			return (void *)at;
-	}
-	return NULL;
-}
-
-size_t strlen(const char *text)
-{
-	const char *at = text;
-	while (*at)
-		at++;
-	return (size_t)(at - text);
-}
-
-size_t strnlen(const char *text, size_t limit)
-{
-	size_t size = 0;
-	while (size < limit && text[size])
-		size++;
-	return size;
-}
-
-char *stpcpy(char *to, const char *from)
-{
-	while ((*to = *from++))
-		to++;
-	return to;
-}
-
-char *strcpy(char *to, const char *from)
-{
-	stpcpy(to, from);
-	return to;
-}
-
 char *strncpy(char *to, const char *from, size_t size)
 {
 	size_t at = 0;
@@ -518,75 +500,6 @@ char *strncpy(char *to, const char *from, size_t size)
 		to[at] = from[at];
 	memset(to + at, 0, size - at);
 	return to;
-}
-
-char *strcat(char *to, const char *from)
-{
-	strcpy(to + strlen(to), from);
-	return to;
-}
-
-char *strncat(char *to, const char *from, size_t size)
-{
-	char *end = to + strlen(to);
-	size_t length = strnlen(from, size);
-	memcpy(end, from, length);
-	end[length] = 0;
-	return to;
-}
-
-int strcmp(const char *a, const char *b)
-{
-	for (; *a && *a == *b; a++, b++)
-		;
-	return (unsigned char)*a - (unsigned char)*b;
-}
-
-int strncmp(const char *a, const char *b, size_t size)
-{
-	for (; size && *a && *a == *b; a++, b++, size--)
-		;
-	return size ? (unsigned char)*a - (unsigned char)*b : 0;
-}
-
-int strcasecmp(const char *a, const char *b)
-{
-	for (; *a && tolower((unsigned char)*a) == tolower((unsigned char)*b); a++, b++)
-		;
-	return tolower((unsigned char)*a) - tolower((unsigned char)*b);
-}
-
-int strncasecmp(const char *a, const char *b, size_t size)
-{
-	for (; size && *a && tolower((unsigned char)*a) == tolower((unsigned char)*b);
-	     a++, b++, size--)
-		;
-	return size ? tolower((unsigned char)*a) - tolower((unsigned char)*b) : 0;
-}
-
-char *strchr(const char *text, int c)
-{
-	for (;; text++) {
-		if (*text == (char)c)
-			return (char *)text;
-		if (!*text)
-			return NULL;
-	}
-}
-
-char *strrchr(const char *text, int c)
-{
-	const char *found = NULL;
-	do {
-		if (*text == (char)c)
-			found = text;
-	} while (*text++);
-	return (char *)found;
-}
-
-char *strstr(const char *text, const char *needle)
-{
-	return memmem(text, strlen(text), needle, strlen(needle));
 }
 
 char *strndup(const char *text, size_t limit)
@@ -603,28 +516,6 @@ char *strndup(const char *text, size_t limit)
 char *strdup(const char *text)
 {
 	return strndup(text, SIZE_MAX);
-}
-
-size_t strspn(const char *text, const char *accept)
-{
-	size_t size = 0;
-	while (text[size] && strchr(accept, text[size]))
-		size++;
-	return size;
-}
-
-size_t strcspn(const char *text, const char *reject)
-{
-	size_t size = 0;
-	while (text[size] && !strchr(reject, text[size]))
-		size++;
-	return size;
-}
-
-char *strpbrk(const char *text, const char *accept)
-{
-	text += strcspn(text, accept);
-	return *text ? (char *)text : NULL;
 }
 
 char *strtok_r(char *text, const char *delimiters, char **state)
@@ -652,6 +543,16 @@ char *strerror(int error)
 {
 	(void)error;
 	return (char *)"host error";
+}
+
+int strerror_r(int error, char *buffer, size_t size)
+{
+	const char *text = strerror(error);
+	size_t length = strlen(text);
+	if (length >= size)
+		return ERANGE;
+	memcpy(buffer, text, length + 1);
+	return 0;
 }
 
 int clock_gettime(clockid_t clock, struct timespec *time)
@@ -1062,12 +963,15 @@ int flock(int fd, int operation)
 }
 
 /* Nothing but render nodes polls, and their events are never waited on. */
+/* Mesa polls only sync files and window systems, which nothing here has: an
+ * answer of "nothing ready" would have its caller wait for good. */
 int poll(struct pollfd *fds, nfds_t count, int timeout)
 {
 	(void)fds;
 	(void)count;
 	(void)timeout;
-	return 0;
+	errno = ENOSYS;
+	return -1;
 }
 
 int regcomp(regex_t *regex, const char *pattern, int flags)

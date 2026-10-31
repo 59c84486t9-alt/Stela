@@ -1,6 +1,8 @@
 /* SPDX-License-Identifier: MIT */
 #ifndef STELA_LIBC_MATH_H
 #define STELA_LIBC_MATH_H
+#include <sys/cdefs.h>
+__BEGIN_DECLS
 #define M_E 2.7182818284590452354
 #define M_LOG2E 1.4426950408889634074
 #define M_LOG10E 0.43429448190325182765
@@ -17,6 +19,8 @@
 #define HUGE_VALF __builtin_huge_valf()
 #define INFINITY __builtin_inff()
 #define NAN __builtin_nanf("")
+#define FP_ILOGB0 (-2147483647 - 1)
+#define FP_ILOGBNAN (-2147483647 - 1)
 #define FP_NAN 0
 #define FP_INFINITE 1
 #define FP_ZERO 2
@@ -49,6 +53,8 @@ float fmaf(float x, float y, float z);
 double frexp(double x, int *exponent);
 float frexpf(float x, int *exponent);
 double ldexp(double x, int exponent);
+double logb(double x);
+double erf(double x);
 float ldexpf(float x, int exponent);
 double scalbn(double x, int exponent);
 float scalbnf(float x, int exponent);
@@ -62,4 +68,5 @@ long lround(double x);
 long lroundf(float x);
 long long llround(double x);
 long long llroundf(float x);
+__END_DECLS
 #endif

@@ -1,6 +1,8 @@
 /* SPDX-License-Identifier: MIT */
 #ifndef STELA_LIBC_ERRNO_H
 #define STELA_LIBC_ERRNO_H
+#include <sys/cdefs.h>
+__BEGIN_DECLS
 int *__errno_location(void);
 #define errno (*__errno_location())
 #define EPERM 1
@@ -33,4 +35,5 @@ int *__errno_location(void);
 #define ETIME 62
 #define ETIMEDOUT 110
 #define ECANCELED 125
+__END_DECLS
 #endif
