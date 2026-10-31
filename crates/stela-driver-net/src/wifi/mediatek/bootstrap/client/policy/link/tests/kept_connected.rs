@@ -70,7 +70,8 @@ fn the_station_scans_joins_and_opens_the_port_after_the_4_way_handshake() {
         client,
         Provider(Arc::new(AtomicUsize::new(0)), Default::default()),
     )
-    .unwrap();
+    .unwrap()
+    .with_vector();
     let network = Network {
         ssid: b"x".to_vec(),
         secret: Secret::parse(b"correct horse battery").unwrap(),
@@ -120,10 +121,33 @@ fn the_station_scans_joins_and_opens_the_port_after_the_4_way_handshake() {
     let rsn = crate::wifi::connection::find(&bss.elements, 48).unwrap();
     let mut whole = vec![48, rsn.len() as u8];
     whole.extend_from_slice(rsn);
+    assert!(!station.signals(), "the handshake polls");
     eapol(&model, &ap.message_3(&whole));
     assert!(station.carrier());
     // Message 4: pairwise, MIC and secure.
     ap.signed_reply(&sent_eapol(&model), 0x308);
+    assert!(station.signals());
+    // A pass that found nothing sleeps on the vector, with a tick for timers.
+    for _ in 0..4 {
+        station.carrier();
+    }
+    let enable = || model.bar.0.lock().unwrap().values[&0xd4204];
+    assert_eq!(enable(), 0x2e07_fff5);
+    let clock = crate::Clock {
+        ticks_per_microsecond: 1,
+    };
+    let before = clock.now_us();
+    assert!(station.due_us().unwrap() >= before + 100_000);
+    // A frame raises it: the vector stays off through a pass that takes it,
+    // and one more follows at once.
+    model.bar.0.lock().unwrap().values.insert(0xd4200, 1 << 2);
+    eapol(&model, &ap.message_1());
+    station.radio_mut().link_mut().service().unwrap();
+    let log = model.bar.0.lock().unwrap().log.clone();
+    assert!(log.contains(&(1, 0xd4204, 0)));
+    assert!(log.contains(&(1, 0xd4200, 1 << 2)));
+    assert_eq!(enable(), 0x2e07_fff5);
+    assert!(station.due_us().unwrap() <= clock.now_us());
 }
 
 /// The station's last transmitted SAE frame: its transaction, status and

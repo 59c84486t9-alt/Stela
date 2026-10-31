@@ -62,8 +62,10 @@ mod beacon;
 mod coexistence;
 mod country;
 mod emlsr;
+mod fifos;
 mod grade;
 mod he;
+mod link_changes;
 mod link_scan;
 mod reception;
 mod statistics;
@@ -163,6 +165,8 @@ enum Then {
     Authorized,
     /// Firmware answered a country update.
     Country,
+    /// Firmware reported its FIFOs.
+    Fifos,
 }
 
 /// A receive Block Ack agreement the firmware is to take up or give up.
@@ -278,6 +282,8 @@ pub(super) struct Client {
     fragments: Fragments,
     /// The longest A-MSDU firmware rate selection allows and its TIDs.
     amsdu: (u32, u32),
+    /// What firmware's FIFOs are, once asked.
+    fifos: Option<fifos::Fifos>,
     held: [VecDeque<Held>; 16],
     /// TIDs with an added or requested queue.
     requested: u16,
@@ -289,6 +295,8 @@ pub(super) struct Client {
     context: Option<Arc<AssociationContext>>,
     /// The other link an MLD association made.
     dormant: Option<Arc<AssociationContext>>,
+    /// What the AP MLD is doing to its links.
+    changes: link_changes::LinkChanges,
     /// Which of firmware's two sets of link IDs the active link holds.
     seat: u8,
     /// A new look at the links is due.
@@ -336,6 +344,7 @@ impl Client {
             reception: Reception::new(),
             fragments: Fragments::default(),
             amsdu: (0, 0),
+            fifos: None,
             held: core::array::from_fn(|_| VecDeque::new()),
             requested: 1 << MANAGEMENT_TID,
             session: Session::Off,
@@ -343,6 +352,7 @@ impl Client {
             admitted: None,
             context: None,
             dormant: None,
+            changes: link_changes::LinkChanges::default(),
             seat: 0,
             reselect: false,
             link_scan: link_scan::LinkScan::default(),
@@ -366,7 +376,7 @@ impl Client {
     }
 
     /// Report an unsupported operation once and carry on without it.
-    fn unsupported(&mut self, operation: &'static str) {
+    pub(super) fn unsupported(&mut self, operation: &'static str) {
         if !self.reported.contains(&operation) {
             self.reported.push(operation);
             self.events.push_back(keeper::Event::Unsupported(operation));
@@ -409,6 +419,7 @@ impl Client {
         self.admitted = None;
         self.context = None;
         self.dormant = None;
+        self.changes = link_changes::LinkChanges::default();
         self.reselect = false;
         self.link_scan = link_scan::LinkScan::default();
         self.statistics = statistics::Statistics::default();
@@ -464,6 +475,21 @@ impl Client {
                 if links.next().is_some() {
                     self.unsupported("a third MLO link: it stays dormant for good");
                 }
+                let valid = link_changes::link_bit(&context)
+                    | self.dormant.as_deref().map_or(0, link_changes::link_bit);
+                let changes = if valid == 0 {
+                    Some(link_changes::LinkChanges::default())
+                } else {
+                    link_changes::LinkChanges::answered(&response.elements, valid)
+                };
+                let Some(changes) = changes else {
+                    self.admitted = None;
+                    if let Ok(Action::Remove { ticket, failure }) = self.station.disconnect() {
+                        self.depart(ticket, failure);
+                    }
+                    return;
+                };
+                self.changes = changes;
                 self.admitted = Some((ticket, context));
             }
             // Every join here is a modern one, which carries its context.
@@ -583,6 +609,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         if let Some(plan) = self.client.plan.take() {
             self.limit_six_ghz_power(queue);
             self.translate_addresses(queue);
+            self.read_fifos(queue);
             self.arrive(plan, now)?;
         }
         self.take_notifications(queue, now)?;
@@ -635,6 +662,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         self.run_coexistence(queue)?;
         self.run_steps(queue)?;
         self.run_emlsr(queue, now)?;
+        self.run_link_changes(queue, now)?;
         self.run_steps(queue)?;
         self.run_link_scan(queue, now)?;
         self.run_steps(queue)?;
@@ -933,6 +961,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                 client.bluetooth.link_changed();
             }
             Then::Country => self.country_answered(queue, &response)?,
+            Then::Fifos => self.fifos_answered(queue, &response),
         }
         Ok(())
     }
@@ -1376,8 +1405,9 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         }
         // After its start, which came first.
         while let Some(end) = queue.take_scan_completion() {
-            self.client
-                .link_scan_finished(end.raw.get(6).copied().unwrap_or(0))?;
+            let field = |at: usize| end.raw.get(at).copied().unwrap_or(0);
+            let ebs_failed = Queue::<Q, B>::energy_based_failed(field(7));
+            self.client.link_scan_finished(field(6), ebs_failed)?;
         }
         Ok(())
     }
@@ -1488,8 +1518,14 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         let room = tid
             .filter(|_| matches!(class, TxClass::Data))
             .and_then(|tid| {
-                let limit =
-                    (client.amsdu.0 as usize).min(commands::max_amsdu(context.negotiated()).into());
+                let fifo = client.fifos.unwrap_or_default().amsdu_limit(
+                    tid,
+                    context.negotiated().mode >= phy::Mode::He,
+                    context.channel().band,
+                    context.affiliation().is_some(),
+                );
+                let limit = (client.amsdu.0.min(fifo) as usize)
+                    .min(commands::max_amsdu(context.negotiated()).into());
                 let tail = client.held[usize::from(tid)].back()?;
                 (client.amsdu.1 & 1 << tid != 0
                     && !tail.control_port
@@ -2077,7 +2113,8 @@ impl<Q: BootIo, B: BiosIo> Radio for Wifi<Q, B> {
 
     fn service(&mut self) -> Result<(), Error> {
         if self.error.is_none() && self.died() {
-            self.error = Some(Error::FirmwareDied);
+            let log = self.tables.read(&self.restart.io, self.family);
+            self.error = Some(Error::FirmwareDied(log));
         }
         self.poll();
         let served = if self.error.is_none() {

@@ -39,6 +39,13 @@ pub(super) struct State {
     pub(super) ready: Vec<Event>,
 }
 
+impl State {
+    /// The association goes at the next look at the switch's state.
+    pub(super) fn drop_connection(&mut self) {
+        self.dropped = true;
+    }
+}
+
 /// What the owning policy does next for an announced channel switch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChannelSwitchStep {
@@ -170,6 +177,8 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             return false;
         }
         match body {
+            [0, 4, ..] | [4 | 9, 4, _, _, _, _, ..]
+                if Self::switch_of_other_link(s, &frame.radio) => {}
             [0, 4, elements @ ..] => {
                 Self::process_channel_switch(s, elements, Source::ProtectedAction, None)
             }

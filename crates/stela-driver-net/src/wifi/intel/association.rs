@@ -39,6 +39,8 @@ pub const MAC_CONFIG: Id = Id {
     opcode: 8,
     version: 0,
 };
+/// Where `iwl_link_config_cmd` holds `block_tx`.
+const BLOCK_TX: usize = 32;
 pub const LINK_CONFIG: Id = Id {
     group: 3,
     opcode: 9,
@@ -451,6 +453,15 @@ pub fn activation(mut configuration: Vec<u8>, active: bool) -> Vec<u8> {
     word(&mut configuration, 24, 1);
     word(&mut configuration, 28, u32::from(active));
     configuration
+}
+
+/// [`activation`] off under `block_tx`: firmware may not have heard of the
+/// quiet switch another link announced, and must send nothing as this link
+/// leaves.
+pub fn silent_deactivation(configuration: Vec<u8>) -> Vec<u8> {
+    let mut bytes = activation(configuration, false);
+    bytes[BLOCK_TX] = 1;
+    bytes
 }
 
 /// `iwl_mld_rm_link_from_fw`.

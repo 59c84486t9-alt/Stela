@@ -88,6 +88,24 @@ const EXPRESS_ROOT_PORT: u16 = 4;
 const EXPRESS_DOWNSTREAM: u16 = 6;
 const EXPRESS_DEVICE_CONTROL_2: u16 = 0x28;
 const ARI_FORWARDING: u16 = 1 << 5;
+/// What `pcie_flr` and `pci_save_pcie_state` read and write of the same
+/// capability.
+const EXPRESS_DEVICE_CAPABILITIES: u16 = 4;
+const EXPRESS_FLR_CAPABLE: u32 = 1 << 28;
+const EXPRESS_DEVICE_CONTROL: u16 = 8;
+const EXPRESS_INITIATE_FLR: u16 = 1 << 15;
+const EXPRESS_DEVICE_STATUS: u16 = 0xa;
+const EXPRESS_TRANSACTIONS_PENDING: u16 = 1 << 5;
+const EXPRESS_LINK_CONTROL: u16 = 0x10;
+const EXPRESS_LINK_CONTROL_2: u16 = 0x30;
+/// What a reset restores of the header after its command register.
+const HEADER_REST: u16 = 0x0c;
+const HEADER_REST_WORDS: usize = 13;
+/// `pcie_flr`'s wait after starting a reset, the first wait of
+/// `pci_wait_for_pending` and `PCIE_RESET_READY_POLL_MS`.
+const FLR_WAIT_US: u64 = 100_000;
+const FLR_READY_POLL_US: u64 = 1_000;
+const FLR_READY_US: u64 = 60_000_000;
 /// The ARI extended capability's ID.
 const EXTENDED_ARI: u16 = 0x0e;
 /// The Vendor ID a function still initializing answers with Configuration
@@ -600,6 +618,87 @@ impl<C: ConfigSpace> Function<C> {
             }
         }
         Ok(())
+    }
+
+    /// Reset this function alone, as Linux's `pcie_flr` inside
+    /// `pci_dev_save_and_disable` and `pci_dev_restore`: requests stopped,
+    /// their completions waited for, the reset, then the header, device and
+    /// link controls back as they were. MSI and MSI-X come back off: the
+    /// caller enables them again and rewrites a table in its BAR. False when
+    /// the function has no such reset, having touched nothing. The caller's
+    /// own use of the function has ended; this sleeps at least 100 ms.
+    pub fn function_level_reset(&mut self, clock: &Clock) -> Result<bool, BlockError> {
+        self.function_level_reset_with(|microseconds| {
+            clock.try_delay(microseconds).map_err(|_| {
+                BlockError::Unsupported("PCI function reset requires calibrated timing")
+            })
+        })
+    }
+
+    fn function_level_reset_with(
+        &mut self,
+        mut delay: impl FnMut(u64) -> Result<(), BlockError>,
+    ) -> Result<bool, BlockError> {
+        let Some((offset, _)) = self
+            .capabilities()
+            .into_iter()
+            .find(|&(_, id)| id == CAPABILITY_EXPRESS)
+        else {
+            return Ok(false);
+        };
+        let express = u16::from(offset);
+        let capabilities = self.config.read32(express + EXPRESS_DEVICE_CAPABILITIES);
+        if capabilities & EXPRESS_FLR_CAPABLE == 0 {
+            return Ok(false);
+        }
+        let header: [u32; HEADER_REST_WORDS] =
+            core::array::from_fn(|word| self.config.read32(HEADER_REST + word as u16 * 4));
+        let command = self.config.read16(regs::COMMAND);
+        let controls = [
+            EXPRESS_DEVICE_CONTROL,
+            EXPRESS_LINK_CONTROL,
+            EXPRESS_DEVICE_CONTROL_2,
+            EXPRESS_LINK_CONTROL_2,
+        ]
+        .map(|control| (express + control, self.config.read16(express + control)));
+        self.config
+            .write16(regs::COMMAND, regs::COMMAND_INTX_DISABLE);
+        // `pci_wait_for_pending_transaction`; a request that never completes
+        // does not stop the reset, whose job is to end it.
+        for attempt in 0..3 {
+            let status = self.config.read16(express + EXPRESS_DEVICE_STATUS);
+            if status & EXPRESS_TRANSACTIONS_PENDING == 0 {
+                break;
+            }
+            delay(FLR_WAIT_US << attempt)?;
+        }
+        let control = express + EXPRESS_DEVICE_CONTROL;
+        self.config
+            .write16(control, self.config.read16(control) | EXPRESS_INITIATE_FLR);
+        delay(FLR_WAIT_US)?;
+        let mut poll = FLR_READY_POLL_US;
+        let mut waited = 0;
+        while matches!(
+            self.config.read16(regs::VENDOR_ID),
+            0xffff | VENDOR_NOT_READY
+        ) {
+            if waited >= FLR_READY_US {
+                return Err(BlockError::Unsupported(
+                    "PCI function did not return from its reset",
+                ));
+            }
+            delay(poll)?;
+            waited += poll;
+            poll *= 2;
+        }
+        for (word, value) in header.into_iter().enumerate() {
+            self.config.write32(HEADER_REST + word as u16 * 4, value);
+        }
+        for (control, value) in controls {
+            self.config.write16(control, value);
+        }
+        self.config.write16(regs::COMMAND, command);
+        Ok(true)
     }
 
     /// Offsets and IDs of the capability list, up to its first malformed

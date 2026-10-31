@@ -3,11 +3,11 @@
 //! Polling WFDMA enablement from mt792x_dma.c. Installation of every queue,
 //! its exact descriptor format and coherent DMA ownership precede this.
 use super::{
-    BUSY, BarIo, Control, DISABLE, Error, MT_MCU2HOST_SW_INT_ENA, MT_PCIE_MAC_INT_ENABLE,
-    MT_UWFDMA0_GLO_CFG_EXT1, MT_WFDMA_DUMMY_CR, MT_WFDMA_NEED_REINIT, MT_WFDMA0_GLO_CFG,
-    MT_WFDMA0_HOST_INT_ENA, MT_WFDMA0_INT_RX_PRI, MT_WFDMA0_INT_TX_PRI, MT_WFDMA0_PRI_DLY_INT_CFG0,
-    MT_WFDMA0_RST_DRX_PTR, MT_WFDMA0_RST_DTX_PTR, MT_WFDMA0_RX_RING0_EXT_CTRL,
-    MT_WFDMA0_TX_RING0_EXT_CTRL,
+    BUSY, BarIo, Control, DISABLE, Error, MT_MCU_CMD, MT_MCU2HOST_SW_INT_ENA,
+    MT_PCIE_MAC_INT_ENABLE, MT_UWFDMA0_GLO_CFG_EXT1, MT_WFDMA_DUMMY_CR, MT_WFDMA_NEED_REINIT,
+    MT_WFDMA0_GLO_CFG, MT_WFDMA0_HOST_INT_ENA, MT_WFDMA0_HOST_INT_STA, MT_WFDMA0_INT_RX_PRI,
+    MT_WFDMA0_INT_TX_PRI, MT_WFDMA0_PRI_DLY_INT_CFG0, MT_WFDMA0_RST_DRX_PTR, MT_WFDMA0_RST_DTX_PTR,
+    MT_WFDMA0_RX_RING0_EXT_CTRL, MT_WFDMA0_TX_RING0_EXT_CTRL,
 };
 use crate::wifi::mediatek::identity::Chip;
 
@@ -21,6 +21,12 @@ const CONFIG: u32 = (1 << 6)
     | (1 << 15)
     | (1 << 21);
 const ENABLE: u32 = 1 | (1 << 2);
+/// `MT_INT_MCU_CMD` and `MT_MCU_CMD_WAKE_RX_PCIE`.
+const MCU_CMD: u32 = 1 << 29;
+const WAKE_RX: u32 = 1;
+/// MT7925's `irq_map`: `all_complete_mask`, its data and event receive rings
+/// and the MCU's own cause.
+const INTERRUPTS: u32 = 7 << 25 | 0x7fff << 4 | 1 << 2 | 1 | MCU_CMD;
 const IRQ_MASKS: [u32; 3] = [
     MT_WFDMA0_HOST_INT_ENA,
     MT_PCIE_MAC_INT_ENABLE,
@@ -44,6 +50,44 @@ impl<I: BarIo> Control<I> {
             }
             self.verify_masks()
         })();
+        self.finish(result)
+    }
+    /// `mt7925_pci_probe`'s and `mt792x_dma_enable`'s enables, which Stela
+    /// leaves until a link has something to sleep on.
+    pub fn open_interrupts(&mut self) -> Result<(), Error> {
+        self.guard(true)?;
+        let result = (|| {
+            self.registers.write32(MT_PCIE_MAC_INT_ENABLE, 0xff)?;
+            self.modify(MT_MCU2HOST_SW_INT_ENA, 0, WAKE_RX)?;
+            self.registers.write32(MT_WFDMA0_HOST_INT_ENA, INTERRUPTS)?;
+            Ok(())
+        })();
+        self.finish(result)
+    }
+    /// `mt792x_irq_tasklet` up to its polls: the vector stays quiet and what
+    /// raised it is acknowledged before the rings are read, so anything later
+    /// raises it again once [`Self::unmask_interrupts`] has run.
+    pub fn capture_interrupts(&mut self) -> Result<(), Error> {
+        self.guard(true)?;
+        let result = (|| {
+            self.registers.write32(MT_WFDMA0_HOST_INT_ENA, 0)?;
+            let causes = self.read_control(MT_WFDMA0_HOST_INT_STA)? & INTERRUPTS;
+            self.registers.write32(MT_WFDMA0_HOST_INT_STA, causes)?;
+            if causes & MCU_CMD != 0 {
+                let software = self.read_control(MT_MCU_CMD)?;
+                self.registers.write32(MT_MCU_CMD, software)?;
+            }
+            Ok(())
+        })();
+        self.finish(result)
+    }
+    /// `mt76_connac_irq_enable` as a poll completes.
+    pub fn unmask_interrupts(&mut self) -> Result<(), Error> {
+        self.guard(true)?;
+        let result = self
+            .registers
+            .write32(MT_WFDMA0_HOST_INT_ENA, INTERRUPTS)
+            .map_err(Error::from);
         self.finish(result)
     }
     fn verify_masks(&mut self) -> Result<(), Error> {
@@ -154,8 +198,9 @@ impl<I: BarIo> Control<I> {
                 self.modify(MT_WFDMA0_INT_TX_PRI, 0, 0x7f00)?;
             }
             self.modify(MT_WFDMA_DUMMY_CR, 0, MT_WFDMA_NEED_REINIT)?;
-            // Linux enables IRQs here. Stela's serialized polling path keeps
-            // the sources masked and verifies them after final writes.
+            // Linux enables IRQs here. Stela polls until a link opens its
+            // port, keeping the sources masked and verifying them after final
+            // writes.
             self.verify_masks()?;
             let actual = self.read_control(MT_WFDMA0_GLO_CFG)?;
             if actual & (CONFIG | ENABLE) != CONFIG | ENABLE {

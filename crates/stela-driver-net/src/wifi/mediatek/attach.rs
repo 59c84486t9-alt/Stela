@@ -39,6 +39,8 @@ pub struct Inputs {
     pub firmware: &'static dyn Provider,
     pub pages: &'static dyn PageSource,
     pub clock: Clock,
+    /// Whether `owner`'s function raises an MSI the caller has routed.
+    pub vector: bool,
     /// `mt76_pci_aspm_supported`: whether the function's link enables ASPM.
     pub aspm: bool,
     /// regulatory.db, whose country the network names, or the world domain
@@ -194,6 +196,11 @@ pub unsafe fn attach<C: Send + Sync + 'static>(
         .map_err(|error| AttachError::Policy(error.error))?;
     let link =
         ManagedLink::new(managed, inputs.pages).map_err(|error| AttachError::Link(error.error))?;
+    let link = if inputs.vector {
+        link.with_vector()
+    } else {
+        link
+    };
     Ok(Attached {
         station: Station::new(
             link,

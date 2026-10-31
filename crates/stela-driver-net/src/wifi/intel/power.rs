@@ -26,6 +26,8 @@ const CHICKEN: u32 = 0x100;
 const HPET: u32 = 0x240;
 const LINK_PWR: u32 = 0x250;
 const PRPH_WADDR: u32 = 0x444;
+const MEM_RADDR: u32 = 0x40c;
+const MEM_RDATA: u32 = 0x41c;
 const PRPH_RADDR: u32 = 0x448;
 const PRPH_WDATA: u32 = 0x44c;
 const PRPH_RDATA: u32 = 0x450;
@@ -185,6 +187,33 @@ impl NicAccess {
     }
 }
 
+/// `iwl_trans_is_hw_error_value`: what a register or SRAM word reads as while
+/// the device is in no state to answer.
+pub(super) fn is_hardware_error(value: u32) -> bool {
+    matches!(value & !0xf, 0xa5a5a5a0 | 0x5a5a5a50)
+}
+
+/// `iwl_trans_pcie_read_mem`: `N` words of device memory from `address`.
+pub(super) fn read_memory<C: Csr, const N: usize>(
+    io: C,
+    family: Family,
+    address: u32,
+) -> Result<[u32; N], Error> {
+    let mut nic = Nic {
+        io,
+        family,
+        bisr: false,
+    };
+    nic.grab()?;
+    nic.write(MEM_RADDR, address)?;
+    let mut words = [0; N];
+    for word in &mut words {
+        *word = nic.io.read32(MEM_RDATA)?;
+    }
+    nic.release()?;
+    Ok(words)
+}
+
 /// The registers every step of waking a function touches.
 struct Nic<C: Csr> {
     io: C,
@@ -195,7 +224,7 @@ struct Nic<C: Csr> {
 impl<C: Csr> Nic<C> {
     fn read(&mut self, register: u32) -> Result<u32, Error> {
         let value = self.io.read32(register)?;
-        if value == u32::MAX || matches!(value & !0xf, 0xa5a5a5a0 | 0x5a5a5a50) {
+        if value == u32::MAX || is_hardware_error(value) {
             return Err(Error::FailedRead { register, value });
         }
         Ok(value)
