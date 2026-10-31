@@ -29,6 +29,24 @@ pub enum Outcome {
     Failed,
     Flushed,
 }
+/// Each queue and how far it was acknowledged, from an
+/// `iwl_compressed_ba_notif` body: `iwl_mvm_rx_ba_notif`'s reclaim list.
+pub fn block_ack_queues(body: &[u8]) -> Result<impl Iterator<Item = (u16, u16)> + '_, Error> {
+    const HEADER: usize = 32;
+    const ENTRY: usize = 8;
+    let count = body.get(28..30).ok_or(Error::Length)?;
+    let count = usize::from(u16::from_le_bytes([count[0], count[1]]));
+    let entries = body
+        .get(HEADER..HEADER + count * ENTRY)
+        .ok_or(Error::Length)?;
+    Ok(entries.as_chunks::<ENTRY>().0.iter().map(|entry| {
+        (
+            u16::from_le_bytes([entry[0], entry[1]]),
+            u16::from_le_bytes([entry[2], entry[3]]),
+        )
+    }))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Response<'a> {
     raw: &'a [u8],

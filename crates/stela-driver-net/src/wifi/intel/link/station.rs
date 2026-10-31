@@ -15,21 +15,27 @@ use super::*;
 use crate::wifi::{
     Channel,
     connection::keeper::{self, Advertisement, Peer, Radio, Stage as Standing},
-    frame::Mpdu,
+    frame::{MAX_AMPDU_BUF_HE, Mpdu},
     intel::{
         association::{self as commands, LinkState, MacState, PeerState},
         command,
-        transmit::{LegacyRate, Parameters, response::Response},
+        transmit::{
+            LegacyRate, Parameters,
+            response::{Response, block_ack_queues},
+        },
     },
     regulatory::channel::{NO_80MHZ, NO_160MHZ, NO_HT40MINUS, NO_HT40PLUS},
     regulatory::database,
     security::{
         Cipher, InstallOutcome, InstallTicket, Integrity, KeyIdentity, KeyScope, KeySlot,
-        PacketNumber, ReplaySeed, TransmitSeed, management::ManagementCipher,
+        PacketNumber, ReplaySeed, TransmitSeed,
+        aggregate::{OrderedGroup, Shape},
+        management::ManagementCipher,
     },
     station::{
         self, Action, AssociationContext, Completion, Join, NativeBssObservation, Phase as Peering,
         RegulatoryPolicy, Station, Ticket,
+        ba::{self, RxSession},
         data::{self, Ingress, Protection, Qos, SequenceOwner, TxClass},
         external,
         multi_link::Affiliation,
@@ -38,6 +44,9 @@ use crate::wifi::{
     },
 };
 use alloc::collections::VecDeque;
+
+mod reception;
+use reception::{MAX_SESSIONS, Parent, Reception};
 
 type Queue<Q, B> = Ax200ManagementQueue<'static, Q, B, Regulatory>;
 
@@ -59,6 +68,16 @@ const SESSION_PROTECTION_NOTIFICATION: (u8, u8) = (0xfb, 3);
 const MISSED_BEACONS_LEGACY_NOTIFICATION: (u8, u8) = (0xa2, 0);
 const MISSED_BEACONS_NOTIFICATION: (u8, u8) = (0xf6, 3);
 const TRANSMIT_RESPONSE: (u8, u8) = (0x1c, 0);
+const BAR_FRAME_RELEASE: (u8, u8) = (0xc2, 0);
+const FRAME_RELEASE: (u8, u8) = (0xc3, 0);
+const BLOCK_ACK_NOTIFICATION: (u8, u8) = (0xc5, 0);
+/// `WLAN_ACTION_BLOCK_ACK`, on an action frame.
+const BLOCK_ACK_CATEGORY: u8 = 3;
+/// `WLAN_REASON_QSTA_TIMEOUT`.
+const SESSION_TIMED_OUT: u16 = 39;
+/// `IWL_UCODE_TLV_CAPA_BAID_ML_SUPPORT`, which every firmware of the
+/// families here has: their command tables have no `ADD_STA`.
+const BLOCK_ACK_ALLOCATION: u32 = 63;
 /// `IWL_UCODE_TLV_CAPA_STA_EXP_MFP_SUPPORT`.
 const EXPLICIT_MFP: u32 = 114;
 /// `IWL_UCODE_TLV_CAPA_COEX_HIGH_PRIO`.
@@ -92,6 +111,13 @@ enum Then {
     Authorized,
 }
 
+/// A receive Block Ack agreement the firmware is to take up or give up.
+struct Agreement {
+    ticket: Ticket,
+    session: Arc<RxSession>,
+    enable: bool,
+}
+
 /// One firmware step.
 enum Step {
     Command {
@@ -100,7 +126,10 @@ enum Step {
         then: Then,
     },
     /// `tid`'s queue, from fresh memory.
-    Queue { tid: u8 },
+    Queue {
+        tid: u8,
+    },
+    BlockAck(Agreement),
 }
 
 /// A step the firmware has.
@@ -161,6 +190,7 @@ pub(super) struct Client {
     outbox: VecDeque<(Option<Ticket>, Vec<u8>)>,
     events: VecDeque<keeper::Event>,
     received: VecDeque<Vec<u8>>,
+    reception: Reception,
     held: [VecDeque<Held>; 16],
     /// TIDs with an added or requested queue.
     requested: u16,
@@ -200,6 +230,7 @@ impl Client {
             outbox: VecDeque::new(),
             events: VecDeque::new(),
             received: VecDeque::new(),
+            reception: Reception::new(),
             held: core::array::from_fn(|_| VecDeque::new()),
             requested: 1 << MANAGEMENT_TID,
             session: Session::Off,
@@ -253,6 +284,7 @@ impl Client {
     fn reset(&mut self) {
         self.steps.clear();
         self.outbox.clear();
+        self.reception.clear();
         self.held.iter_mut().for_each(VecDeque::clear);
         self.requested = 1 << MANAGEMENT_TID;
         self.session = Session::Off;
@@ -406,6 +438,16 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             self.take_notifications(queue, now)?;
         }
         let client = &mut self.client;
+        for tid in client.reception.expired(now) {
+            // `tid_rx_timer_expired`, once for an agreement still in force.
+            if client.station.active_rx_block_ack(tid).is_some()
+                && let Ok(action) = client
+                    .station
+                    .stop_rx_block_ack(tid, Some(SESSION_TIMED_OUT))
+            {
+                client.block_ack(action);
+            }
+        }
         let mut policy = Admitted(&client.channels);
         if !client.leaving
             && let Some(action) = client
@@ -558,6 +600,27 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                 Step::Command { id, bytes, .. } => unsafe { queue.submit(*id, bytes, pages) },
                 // SAFETY: as above.
                 Step::Queue { tid } => unsafe { queue.add_queue(*tid, pages) },
+                Step::BlockAck(agreement) => {
+                    let (tid, id) = (
+                        agreement.session.tid(),
+                        self.client.reception.session(agreement.session.tid()),
+                    );
+                    let bytes = if agreement.enable {
+                        commands::allocate_block_ack(
+                            tid,
+                            agreement.session.start_sequence(),
+                            agreement.session.window(),
+                        )
+                    } else {
+                        let version = queue
+                            .firmware()
+                            .command_version(5, 0x16)
+                            .map_or(1, |version| version.command_version);
+                        commands::remove_block_ack(version, id.unwrap_or(0), tid)
+                    };
+                    // SAFETY: as above.
+                    unsafe { queue.submit(commands::BLOCK_ACK_ALLOCATION, &bytes, pages) }
+                }
             }
             .map_err(Error::Queue)?;
             self.client.waiting = Some(Waiting {
@@ -580,6 +643,10 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                 queue.queue_added(tid, &response).map_err(Error::Queue)?;
                 Then::Nothing
             }
+            Step::BlockAck(agreement) => {
+                self.block_ack_answered(agreement, &response);
+                Then::Nothing
+            }
         };
         let client = &mut self.client;
         match then {
@@ -590,6 +657,14 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                     .station
                     .complete_configuration(ticket, Completion::Accepted, now)
                     .map_err(Error::Station)?;
+                if !queue.firmware().supports_capability(BLOCK_ACK_ALLOCATION) {
+                    client.unsupported("receive Block Ack on firmware without session allocation");
+                } else if let Err(ba::Error::Station(_) | ba::Error::Stale) = client
+                    .station
+                    .configure_rx_block_ack(MAX_AMPDU_BUF_HE, true)
+                {
+                    client.unsupported("receive Block Ack on this association");
+                }
             }
             Then::Key {
                 pairwise,
@@ -620,7 +695,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                 MpduProgress::Observed(observed) => match observed.normalize() {
                     // mac80211 drops a frame the station cannot use; the
                     // exchange it answers retries or times out.
-                    Ok(normalized) => match self.frame(normalized, now) {
+                    Ok(normalized) => match self.frame(normalized, &observed.metadata(), now) {
                         Err(Error::Station(_)) => {
                             self.client
                                 .unsupported("a management frame the station refuses");
@@ -633,7 +708,12 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         }
     }
 
-    fn frame(&mut self, normalized: boot::NormalizedMpdu, now: u64) -> Result<(), Error> {
+    fn frame(
+        &mut self,
+        normalized: boot::NormalizedMpdu,
+        metadata: &crate::wifi::intel::receive::mpdu::Metadata,
+        now: u64,
+    ) -> Result<(), Error> {
         let key_index = normalized.key_index();
         let mut frame = normalized.into_frame();
         let header = frame.header();
@@ -641,7 +721,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         let mut policy = Admitted(&client.channels);
         if header.control & 12 == 0 {
             if header.protected() {
-                return self.protected_management(frame);
+                return self.protected_management(frame, now);
             }
             if client.station.phase() == Peering::ExternalAuthenticating {
                 let session = client
@@ -663,6 +743,16 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             let Some(epoch) = client.station.association_epoch() else {
                 return Ok(());
             };
+            if header.control & 0xfc == 0xd0
+                && frame.bytes().get(header.length) == Some(&BLOCK_ACK_CATEGORY)
+            {
+                // mac80211 drops an agreement it cannot take; the peer then
+                // sends without one.
+                if let Ok(action) = client.station.receive_block_ack(epoch, &frame, now) {
+                    client.block_ack(action);
+                }
+                return Ok(());
+            }
             // A PMF association takes a departure only under its keys.
             if client.station.requires_protected_management()
                 && matches!(header.control & 0xfc, 0xa0 | 0xc0)
@@ -678,12 +768,13 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             client.act(action);
             return Ok(());
         }
-        if header.control & 12 != 8 || !client.port_ready() {
+        if header.control & 12 != 8 || !client.port_ready() || !header.data_present() {
             return Ok(());
         }
-        let Some(epoch) = client.station.association_epoch() else {
+        if header.fragmented() {
+            client.unsupported("a fragmented frame");
             return Ok(());
-        };
+        }
         if header.protected() {
             // The firmware decrypted the frame under the key of this index,
             // which only this client installed.
@@ -699,26 +790,58 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             frame.security.key = Some(key);
             frame.security.integrity = Integrity::Verified;
         }
-        let mut keys: Vec<&mut KeySlot> = client.keys.iter_mut().map(|key| &mut key.slot).collect();
-        let ingress = client
-            .station
-            .receive_msdu_refs(epoch, &frame, &mut keys)
-            .map_err(Error::Data);
-        match ingress {
-            Ok(Ingress::Data(ethernet)) => client.received.push_back(ethernet),
-            Ok(Ingress::ControlPort { ethernet, .. }) => {
-                client.events.push_back(keeper::Event::Eapol(ethernet));
-            }
-            // mac80211 drops what its replay and port checks refuse.
-            Err(_) => {}
+        let Some(parent) = client.reception.gather(frame) else {
+            return Ok(());
+        };
+        if client.reception.repeats(&parent) {
+            return Ok(());
         }
+        let mut ready = Vec::new();
+        client.reception.order(parent, metadata, now, &mut ready);
+        client.deliver_all(ready);
         Ok(())
+    }
+
+    /// The firmware answered `agreement`: its session and reorder buffer exist
+    /// or are gone, and the station's agreement goes on from there.
+    fn block_ack_answered(&mut self, agreement: Agreement, response: &boot::CommandResponse) {
+        let now = self.clock.now_us();
+        let client = &mut self.client;
+        let Agreement {
+            ticket,
+            session,
+            enable,
+        } = agreement;
+        let completion = if enable {
+            let id = response
+                .raw
+                .get(..4)
+                .map(|bytes| u32::from_le_bytes(bytes.try_into().unwrap()))
+                .filter(|id| *id < MAX_SESSIONS);
+            if id.is_some_and(|id| client.reception.open(id as u8, session, now)) {
+                Completion::Accepted
+            } else {
+                client.unsupported("a Block Ack session the firmware or memory refused");
+                Completion::RejectedAndIdle
+            }
+        } else {
+            let mut ready = Vec::new();
+            client.reception.close(session.tid(), &mut ready);
+            client.deliver_all(ready);
+            Completion::Accepted
+        };
+        // SAFETY: the firmware answered this ticket's command, and the reorder
+        // buffer exists, or is drained, to match. A departure may have
+        // outrun it; `leave` then removes what this opened.
+        if let Ok(action) = unsafe { client.station.complete_rx_block_ack(ticket, completion) } {
+            client.block_ack(action);
+        }
     }
 
     /// A protected management frame the firmware decrypted: its departure
     /// ends the association, and an SA Query is answered, as
     /// `ieee80211_process_sa_query_req` does.
-    fn protected_management(&mut self, frame: Mpdu) -> Result<(), Error> {
+    fn protected_management(&mut self, frame: Mpdu, now: u64) -> Result<(), Error> {
         let client = &mut self.client;
         let Some(epoch) = client.station.association_epoch() else {
             return Ok(());
@@ -735,6 +858,17 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                     .map_err(Error::Station)?;
                 client.events.push_back(keeper::Event::ConnectionLost);
                 client.act(action);
+            }
+            0xd0 if body.first() == Some(&BLOCK_ACK_CATEGORY) => {
+                let Some(context) = client.context.clone() else {
+                    return Ok(());
+                };
+                if let Ok(action) = client
+                    .station
+                    .receive_authenticated_block_ack(&context, &frame, body, now)
+                {
+                    client.block_ack(action);
+                }
             }
             0xd0 if body.len() >= 4 && body[..2] == [8, 0] => {
                 let response = [8, 1, body[2], body[3]];
@@ -801,6 +935,33 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                             .station
                             .management_status(acked, now)
                             .map_err(Error::Station)?;
+                    }
+                }
+                FRAME_RELEASE if raw.len() >= 4 => {
+                    let through = u16::from_le_bytes([raw[2], raw[3]]) & 0xfff;
+                    self.client.release(raw[0], None, through);
+                }
+                BAR_FRAME_RELEASE => {
+                    // `iwl_bar_frame_release`.
+                    let (Some(station), Some(information)) = (word(0), word(4)) else {
+                        continue;
+                    };
+                    self.client.release(
+                        (information >> 24 & 0x3f) as u8,
+                        Some((station & 0xf) as u8),
+                        (information & 0xfff) as u16,
+                    );
+                }
+                BLOCK_ACK_NOTIFICATION => {
+                    let Ok(queues) = block_ack_queues(raw) else {
+                        self.client.unsupported("a short Block Ack notification");
+                        continue;
+                    };
+                    for (queue_id, next) in queues {
+                        if queue.reclaim(queue_id, next).is_err() {
+                            self.client
+                                .unsupported("a Block Ack past what is in flight");
+                        }
                     }
                 }
                 SESSION_PROTECTION_NOTIFICATION => {
@@ -1053,6 +1214,18 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             self.client.command(
                 commands::SESSION_PROTECTION,
                 commands::protect_session(true),
+            );
+        }
+        // `ieee80211_sta_tear_down_BA_sessions`: nothing tells a peer that is
+        // going, and nothing can use what the buffers held.
+        let version = queue
+            .firmware()
+            .command_version(5, 0x16)
+            .map_or(1, |version| version.command_version);
+        for (id, tid) in self.client.reception.take_sessions() {
+            self.client.command(
+                commands::BLOCK_ACK_ALLOCATION,
+                commands::remove_block_ack(version, id, tid),
             );
         }
         for key in core::mem::take(&mut self.client.keys) {
@@ -1665,6 +1838,103 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
 impl Client {
     fn port_ready(&self) -> bool {
         self.context.is_some()
+    }
+
+    /// A step of the station's Block Ack agreements.
+    fn block_ack(&mut self, action: ba::Action) {
+        match action {
+            ba::Action::Program {
+                ticket,
+                session,
+                enable,
+            } => self.steps.push_back(Step::BlockAck(Agreement {
+                ticket,
+                session,
+                enable,
+            })),
+            ba::Action::Transmit {
+                context, mut bytes, ..
+            } => {
+                // Block Ack action frames are robust.
+                if context.pmf().is_some() {
+                    bytes[1] |= 0x40;
+                }
+                self.outbox.push_back((None, bytes));
+            }
+            ba::Action::Bar {
+                session,
+                start_sequence,
+            } => {
+                if let Some(id) = self.reception.session(session.tid()) {
+                    self.release(id, Some(session.tid()), start_sequence);
+                }
+            }
+            // The firmware runs transmit agreements itself, as
+            // `TX_AMPDU_SETUP_IN_HW` tells mac80211.
+            ba::Action::Tx(_) | ba::Action::None => {}
+        }
+    }
+
+    fn release(&mut self, id: u8, tid: Option<u8>, through: u16) {
+        let mut ready = Vec::new();
+        self.reception.release(id, tid, through, &mut ready);
+        self.deliver_all(ready);
+    }
+
+    fn deliver_all(&mut self, ready: Vec<Parent>) {
+        for parent in ready {
+            self.deliver(parent);
+        }
+    }
+
+    /// `parent`, its turn come, to the station. mac80211 drops what its
+    /// replay and port checks refuse.
+    fn deliver(&mut self, parent: Parent) {
+        let Parent { members, shape } = parent;
+        let ingress = if shape == Shape::WholeMpdu && !members[0].header().amsdu {
+            let Some(epoch) = self.station.association_epoch() else {
+                return;
+            };
+            let mut keys: Vec<&mut KeySlot> =
+                self.keys.iter_mut().map(|key| &mut key.slot).collect();
+            match self
+                .station
+                .receive_msdu_refs(epoch, &members[0], &mut keys)
+            {
+                Ok(ingress) => alloc::vec![ingress],
+                Err(_) => return,
+            }
+        } else {
+            let Some(context) = self.context.clone() else {
+                return;
+            };
+            let key = members[0].security.key;
+            // SAFETY: `Reception` gathered every record of this MPDU in the
+            // order the receive queue gave them and after any reorder release.
+            // `depart` and `reset` drop what they hold for an older association.
+            let group = unsafe { OrderedGroup::new(context, members, shape, ()) };
+            let slot = self
+                .keys
+                .iter_mut()
+                .map(|key| &mut key.slot)
+                .find(|slot| key.is_some() && slot.installed() == key);
+            let Ok(received) = self.station.receive_ordered_group(&group, slot) else {
+                return;
+            };
+            let keys: Vec<&KeySlot> = self.keys.iter().map(|key| &key.slot).collect();
+            match self.station.receive_group_refs(&received, &keys) {
+                Ok(ingress) => ingress,
+                Err(_) => return,
+            }
+        };
+        for ingress in ingress {
+            match ingress {
+                Ingress::Data(ethernet) => self.received.push_back(ethernet),
+                Ingress::ControlPort { ethernet, .. } => {
+                    self.events.push_back(keeper::Event::Eapol(ethernet));
+                }
+            }
+        }
     }
 }
 

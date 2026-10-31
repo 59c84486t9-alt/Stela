@@ -22,6 +22,11 @@ use crate::{
 };
 use alloc::vec::Vec;
 
+pub const BLOCK_ACK_ALLOCATION: Id = Id {
+    group: 5,
+    opcode: 0x16,
+    version: 0,
+};
 pub const SESSION_PROTECTION: Id = Id {
     group: 3,
     opcode: 5,
@@ -468,6 +473,34 @@ pub fn add_key(index: u8, flags: u32, material: &[u8], receive: u64) -> Option<V
     bytes[16..16 + material.len()].copy_from_slice(material);
     bytes[64..72].copy_from_slice(&receive.to_le_bytes());
     Some(bytes)
+}
+
+/// The AP's firmware station, as `iwl_mvm_sta_fw_id_mask` names it.
+const STATION_MASK: u32 = 1;
+
+/// `iwl_rx_baid_cfg_cmd`, for `IWL_RX_BAID_ACTION_ADD`.
+pub fn allocate_block_ack(tid: u8, start: u16, window: u16) -> Vec<u8> {
+    let mut bytes = alloc::vec![0; 16];
+    word(&mut bytes, 4, STATION_MASK);
+    bytes[8] = tid;
+    bytes[12..14].copy_from_slice(&start.to_le_bytes());
+    bytes[14..16].copy_from_slice(&window.to_le_bytes());
+    bytes
+}
+
+/// `iwl_rx_baid_cfg_cmd`, for `IWL_RX_BAID_ACTION_REMOVE`: version 1 names
+/// the session the firmware gave, later ones its station and TID.
+pub fn remove_block_ack(version: u8, id: u8, tid: u8) -> Vec<u8> {
+    const REMOVE: u32 = 2;
+    let mut bytes = alloc::vec![0; 16];
+    word(&mut bytes, 0, REMOVE);
+    if version <= 1 {
+        word(&mut bytes, 4, u32::from(id));
+    } else {
+        word(&mut bytes, 4, STATION_MASK);
+        word(&mut bytes, 8, u32::from(tid));
+    }
+    bytes
 }
 
 /// `__iwl_mvm_sec_key_del`.
