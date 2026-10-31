@@ -40,6 +40,18 @@ static const uint8_t PATTERN_16[][2] = {{9, 9},	 {7, 5},  {5, 10}, {12, 7}, {3, 
 
 static void completed(void *reference, int result, void *count);
 
+/* The tiles a pixel span covers, or lies across whole for an inward mode. */
+static void tile_span(NSUInteger start, NSUInteger length, NSUInteger tile, NSUInteger mode, NSUInteger *first,
+		      NSUInteger *count)
+{
+	NSUInteger end = start + length;
+	BOOL inward = mode == MTLSparseTextureRegionAlignmentModeInward;
+	NSUInteger low = (inward ? start + tile - 1 : start) / tile;
+	NSUInteger high = (inward ? end : end + tile - 1) / tile;
+	*first = low;
+	*count = high > low ? high - low : 0;
+}
+
 @implementation StelaGPUDevice {
 	io_service_t _port;
 	id _acceleratorService;
@@ -54,6 +66,7 @@ static void completed(void *reference, int result, void *count);
 	/* A moment both clocks read: the GPU's in ticks, the CPU's in seconds. */
 	uint64_t _anchorTick;
 	double _anchorSeconds;
+	BOOL _shouldMaximizeConcurrentCompilation;
 }
 
 - (instancetype)initWithAcceleratorPort:(io_service_t)port
@@ -403,6 +416,50 @@ LIMIT(sparseTileSizeInBytes, sparse_tile_bytes)
 	return [self sparseTileSizeWithTextureType:type pixelFormat:format sampleCount:count];
 }
 
+- (void)convertSparsePixelRegions:(const MTLRegion[])pixels
+		    toTileRegions:(MTLRegion[])tiles
+		     withTileSize:(MTLSize)tile
+		    alignmentMode:(NSUInteger)mode
+		       numRegions:(NSUInteger)count
+{
+	for (NSUInteger i = 0; i < count; i++) {
+		MTLOrigin origin = pixels[i].origin;
+		MTLSize size = pixels[i].size;
+		tile_span(origin.x, size.width, tile.width, mode, &tiles[i].origin.x, &tiles[i].size.width);
+		tile_span(origin.y, size.height, tile.height, mode, &tiles[i].origin.y, &tiles[i].size.height);
+		tile_span(origin.z, size.depth, tile.depth, mode, &tiles[i].origin.z, &tiles[i].size.depth);
+	}
+}
+
+- (void)convertSparseTileRegions:(const MTLRegion[])tiles
+		   toPixelRegions:(MTLRegion[])pixels
+		     withTileSize:(MTLSize)tile
+		       numRegions:(NSUInteger)count
+{
+	for (NSUInteger i = 0; i < count; i++) {
+		MTLOrigin origin = tiles[i].origin;
+		MTLSize size = tiles[i].size;
+		pixels[i].origin = (MTLOrigin){origin.x * tile.width, origin.y * tile.height, origin.z * tile.depth};
+		pixels[i].size = (MTLSize){size.width * tile.width, size.height * tile.height, size.depth * tile.depth};
+	}
+}
+
+- (BOOL)shouldMaximizeConcurrentCompilation
+{
+	return _shouldMaximizeConcurrentCompilation;
+}
+
+- (void)setShouldMaximizeConcurrentCompilation:(BOOL)maximize
+{
+	_shouldMaximizeConcurrentCompilation = maximize;
+}
+
+/* The service takes one call at a time. */
+- (NSUInteger)maximumConcurrentCompilationTaskCount
+{
+	return 1;
+}
+
 - (StelaFormatAlignmentsResponse)alignmentsOfFormat:(NSUInteger)format
 {
 	StelaPixelFormatRequest request = {.pixel_format = format};
@@ -554,24 +611,6 @@ LIMIT(sparseTileSizeInBytes, sparse_tile_bytes)
 	state.label = [descriptor label];
 	stela_depth_stencil_record(descriptor, &state->_record);
 	return state;
-}
-
-- (id)newRasterizationRateMapWithDescriptor:(id)descriptor
-{
-	(void)descriptor;
-	return nil;
-}
-
-- (id)newAccelerationStructureWithSize:(NSUInteger)size
-{
-	(void)size;
-	return nil;
-}
-
-- (id)newAccelerationStructureWithDescriptor:(id)descriptor
-{
-	(void)descriptor;
-	return nil;
 }
 
 @end

@@ -91,6 +91,16 @@ __attribute__((objc_root_class)) @interface NSObject
 @property(readonly) NSUInteger count;
 @end
 
+@interface NSMutableSet : NSObject
++ (instancetype)setWithCapacity:(NSUInteger)capacity;
+- (void)addObject:(id)object;
+- (void)removeObject:(id)object;
+- (void)removeAllObjects;
+- (BOOL)containsObject:(id)object;
+@property(readonly) NSArray *allObjects;
+@property(readonly) NSUInteger count;
+@end
+
 @interface NSMutableArray : NSArray
 + (instancetype)arrayWithCapacity:(NSUInteger)capacity;
 - (void)addObject:(id)object;

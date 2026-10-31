@@ -524,6 +524,20 @@ typedef struct {
 
 @end
 
+/* The encoder of the argument buffer a reflected buffer binding points to. */
+static id encoder_of_binding(StelaGPUDevice *device, StelaGPUBinding *binding)
+{
+	StelaGPUType *structure = binding->_typeInfo ? binding->_typeInfo->_element : nil;
+	if (!structure) {
+		return nil;
+	}
+	StelaGPUArgumentEncoder *encoder = [[StelaGPUArgumentEncoder alloc] initWithDevice:device
+									     encodedLength:binding.bufferDataSize
+										 alignment:binding.bufferAlignment];
+	[encoder addType:structure offset:0 index:0];
+	return encoder;
+}
+
 @implementation StelaGPUFunction
 
 - (instancetype)initWithLibrary:(StelaGPULibrary *)library handle:(uint64_t)handle name:(NSString *)name
@@ -619,18 +633,9 @@ typedef struct {
 	NSArray *bindings = [StelaGPUReflection bindingsOfFunction:self];
 	for (NSUInteger i = 0; i < bindings.count; i++) {
 		StelaGPUBinding *binding = [bindings objectAtIndex:i];
-		if (binding.type != MTLBindingTypeBuffer || binding.index != index || !binding->_typeInfo) {
-			continue;
+		if (binding.type == MTLBindingTypeBuffer && binding.index == index) {
+			return encoder_of_binding(_device, binding);
 		}
-		StelaGPUType *structure = binding->_typeInfo->_element;
-		if (!structure) {
-			break;
-		}
-		StelaGPUArgumentEncoder *encoder = [[StelaGPUArgumentEncoder alloc] initWithDevice:_device
-										     encodedLength:binding.bufferDataSize
-											 alignment:binding.bufferAlignment];
-		[encoder addType:structure offset:0 index:0];
-		return encoder;
 	}
 	return nil;
 }
@@ -1016,6 +1021,11 @@ static BOOL add_failed(NSError **error, NSInteger code, NSError *failure)
 		id library = [self newLibraryWithSource:source options:options error:&error];
 		handler(library, error);
 	});
+}
+
+- (id)newArgumentEncoderWithBufferBinding:(StelaGPUBinding *)binding
+{
+	return encoder_of_binding(self, binding);
 }
 
 - (id)newArgumentEncoderWithArguments:(NSArray *)arguments

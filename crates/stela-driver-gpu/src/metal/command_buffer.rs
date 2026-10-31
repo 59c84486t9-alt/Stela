@@ -122,12 +122,13 @@ pub trait Resolver: ChunkSource {
     ) -> Result<ResourceId>;
 
     /// The mesh pipeline variant for the object and mesh threadgroup sizes
-    /// of a draw, compiled on first use.
+    /// and object threadgroup memory of a draw, compiled on first use.
     fn mesh_pipeline(
         &mut self,
         state: &RenderPipelineState,
         object: [u32; 3],
         mesh: [u32; 3],
+        object_lengths: &[(u32, u64)],
     ) -> Result<Pipeline>;
 
     /// A reset query pool of `query_type` and its query count; pipeline

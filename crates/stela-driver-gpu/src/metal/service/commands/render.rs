@@ -26,9 +26,10 @@ use crate::metal::{
                 CounterSampleRecord, DepthBias, DrawIndexed, DrawIndexedIndirect, DrawIndirect,
                 DrawMesh, DrawMeshIndirect, DrawPatches, DrawPatchesIndirect, DrawPrimitives,
                 FactorBuffer, FactorScale, Mode, PassAttachmentRecord, PassBoundaryCode,
-                RenderBarrier, RenderCode, ScissorRecord, SetPipeline, StageBuffer,
-                StageBufferOffset, StageBytes, StageSampler, StageTexture, StencilReference,
-                VertexBufferStride, ViewMappingRecord, ViewportRecord, VisibilityMode,
+                RenderBarrier, RenderCode, ScissorRecord, SetPipeline, SetThreadgroupMemory,
+                StageBuffer, StageBufferOffset, StageBytes, StageSampler, StageTexture,
+                StencilReference, VertexBufferStride, ViewMappingRecord, ViewportRecord,
+                VisibilityMode,
             },
         },
     },
@@ -168,6 +169,10 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             RenderCode::SetDepthStencilState => {
                 let state = depth_stencil_state(&payload.record()?)?;
                 commands.set_depth_stencil_state(Some(&state))?;
+            }
+            RenderCode::SetObjectThreadgroupMemory => {
+                let SetThreadgroupMemory { length, index } = payload.record()?;
+                commands.set_object_threadgroup_memory_length(length, binding(index)?)?;
             }
             RenderCode::SetStencilReference => {
                 let StencilReference { front, back } = payload.record()?;

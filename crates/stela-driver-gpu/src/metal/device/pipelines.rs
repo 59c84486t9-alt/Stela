@@ -240,9 +240,9 @@ struct MeshFunctions {
     varyings: Vec<Varying>,
 }
 
-/// Threads per object and per mesh threadgroup, which mesh variants are
-/// compiled for.
-type MeshShape = ([u32; 3], [u32; 3]);
+/// Threads per object and per mesh threadgroup and the object stage's
+/// threadgroup memory lengths, which mesh variants are compiled for.
+type MeshShape = ([u32; 3], [u32; 3], Vec<(u32, u64)>);
 
 #[derive(Debug)]
 struct ComputeObject {
@@ -1040,7 +1040,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         let threads = render.state.plan.mesh;
         if let Some(threads) = threads.filter(|_| sources.compiles_at_creation()) {
             let (object, mesh) = threads.smallest();
-            if let Err(error) = self.mesh_variant(u64::from(index), object, mesh) {
+            if let Err(error) = self.mesh_variant(u64::from(index), object, mesh, &[]) {
                 self.destroy_render_pipeline(id)?;
                 return Err(error);
             }
@@ -1059,10 +1059,11 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         id: u64,
         object_threads: [u32; 3],
         mesh_threads: [u32; 3],
+        object_lengths: &[(u32, u64)],
     ) -> Result<Pipeline> {
         let index = u32::try_from(id).map_err(|_| Error::Invalid("unknown pipeline"))?;
         let render = self.pipelines.render.get(index)?;
-        let key = (object_threads, mesh_threads);
+        let key = (object_threads, mesh_threads, object_lengths.to_vec());
         if let Some((_, pipeline)) = render.variants.iter().find(|(known, _)| *known == key) {
             return Ok(*pipeline);
         }
@@ -1090,13 +1091,14 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         // The first stage is the one mesh draws launch; the mesh function
         // links to the fragment function.
         let [object_linking, mesh_linking] = linkings;
-        for (function, threads, stage, varyings, linking) in [
+        for (function, threads, stage, varyings, linking, threadgroup_lengths) in [
             (
                 object,
                 object_threads,
                 Stage::Object,
                 Vec::new(),
                 object_linking,
+                object_lengths.to_vec(),
             ),
             (
                 Some(mesh),
@@ -1104,6 +1106,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 Stage::Mesh,
                 varyings,
                 mesh_linking,
+                Vec::new(),
             ),
         ] {
             let Some(function) = function else { continue };
@@ -1112,6 +1115,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 varyings,
                 launched_by_grid: stage == Stage::Object || object.is_none(),
                 linking,
+                threadgroup_lengths,
                 ..Specialization::default()
             };
             match self.compile(function, specialization) {

@@ -204,6 +204,8 @@ pub(super) struct RenderState {
     /// Indices of this pass's `BeginRendering` commands in the segment.
     begins: Vec<usize>,
     pub(super) pipeline: Option<RenderPipelineState>,
+    /// `setObjectThreadgroupMemoryLength:atIndex:` lengths, by index.
+    pub(super) object_threadgroup_lengths: Vec<(u32, u64)>,
     pub(super) vertex_buffers: [Option<VertexBinding>; 31],
     bound_vertex_buffers: [Option<VertexBuffer>; 31],
     index_buffer: Option<(Buffer, u64, IndexType)>,
@@ -292,6 +294,7 @@ impl CommandBuffer {
             pass,
             begins: alloc::vec![begin],
             pipeline: None,
+            object_threadgroup_lengths: Vec::new(),
             vertex_buffers: [None; 31],
             bound_vertex_buffers: [None; 31],
             index_buffer: None,
@@ -792,6 +795,15 @@ impl CommandBuffer {
         render(&mut self.encoder)?.raster.depth_stencil = state;
         self.recorder
             .push(Command::SetDepthStencil(depth_stencil(&state)));
+        Ok(())
+    }
+
+    /// `setObjectThreadgroupMemoryLength:atIndex:`.
+    pub fn set_object_threadgroup_memory_length(&mut self, length: u64, index: u32) -> Result<()> {
+        let lengths = &mut render(&mut self.encoder)?.object_threadgroup_lengths;
+        lengths.retain(|&(slot, _)| slot != index);
+        lengths.push((index, length));
+        lengths.sort_unstable();
         Ok(())
     }
 
@@ -1481,7 +1493,12 @@ impl CommandBuffer {
             !mesh_threads.contains(&0),
             "mesh threadgroups have at least one thread",
         )?;
-        let pipeline = resolver.mesh_pipeline(state, object_threads, mesh_threads)?;
+        let pipeline = resolver.mesh_pipeline(
+            state,
+            object_threads,
+            mesh_threads,
+            &render.object_threadgroup_lengths,
+        )?;
         self.recorder.push(Command::BindPipeline {
             bind_point: PipelineBindPoint::Graphics,
             pipeline,

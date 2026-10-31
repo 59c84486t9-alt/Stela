@@ -756,6 +756,8 @@ void stela_depth_stencil_record(id descriptor, StelaDepthStencilRecord *record)
 
 - (id)newSharedEventHandle
 {
+	StelaFailure failure = {.reason = "objects cross no processes here: their handles are per task"};
+	stela_report("newSharedEventHandle", &failure);
 	return nil;
 }
 

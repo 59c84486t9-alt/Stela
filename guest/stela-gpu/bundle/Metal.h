@@ -23,6 +23,9 @@ typedef struct {
 	NSUInteger size, align;
 } MTLSizeAndAlign;
 typedef struct {
+	NSUInteger accelerationStructureSize, buildScratchBufferSize, refitScratchBufferSize;
+} MTLAccelerationStructureSizes;
+typedef struct {
 	double red, green, blue, alpha;
 } MTLClearColor;
 typedef struct {
@@ -115,6 +118,16 @@ enum {
 enum {
 	MTLLibraryTypeExecutable = 0,
 	MTLLibraryTypeDynamic = 1,
+};
+enum {
+	MTLIOErrorInternal = 2,
+};
+enum {
+	MTLLogStateErrorInvalid = 2,
+};
+enum {
+	MTLSparseTextureRegionAlignmentModeOutward = 0,
+	MTLSparseTextureRegionAlignmentModeInward = 1,
 };
 enum {
 	MTLLibraryOptimizationLevelDefault = 0,
@@ -248,7 +261,8 @@ enum {
 	X(MTLObjectPayloadBinding)                                                                 \
 	X(MTLDrawable)                                                                             \
 	X(MTLDynamicLibrary)                                                                       \
-	X(MTLBinaryArchive)
+	X(MTLBinaryArchive)                                                                        \
+	X(MTLResidencySet)
 
 #define STELA_DECLARE_PROTOCOL(name) @protocol name @end
 STELA_PROTOCOLS(STELA_DECLARE_PROTOCOL)
@@ -258,6 +272,10 @@ STELA_PROTOCOLS(STELA_DECLARE_PROTOCOL)
 - (BOOL)respondsToSelector:(SEL)selector;
 - (id)objectAtIndexedSubscript:(NSUInteger)index;
 - (NSString *)label;
+/* MTLResidencySetDescriptor. */
+- (NSUInteger)initialCapacity;
+/* MTLAllocation. */
+- (NSUInteger)allocatedSize;
 /* MTLCompileOptions. */
 - (NSUInteger)languageVersion;
 - (NSUInteger)mathMode;
@@ -463,6 +481,8 @@ STELA_PROTOCOLS(STELA_DECLARE_PROTOCOL)
 @end
 
 extern NSString *const MTLLibraryErrorDomain;
+extern NSString *const MTLIOErrorDomain;
+extern NSString *const MTLLogStateErrorDomain;
 extern NSString *const MTLDynamicLibraryDomain;
 extern NSString *const MTLBinaryArchiveDomain;
 extern NSString *const MTLCommandBufferErrorDomain;

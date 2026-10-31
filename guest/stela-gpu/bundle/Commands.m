@@ -27,6 +27,23 @@
 	return _device;
 }
 
+/* Everything a task holds is resident: `Residency.m`. */
+- (void)addResidencySet:(id)set
+{
+}
+
+- (void)addResidencySets:(const id __unsafe_unretained[])sets count:(NSUInteger)count
+{
+}
+
+- (void)removeResidencySet:(id)set
+{
+}
+
+- (void)removeResidencySets:(const id __unsafe_unretained[])sets count:(NSUInteger)count
+{
+}
+
 - (id)commandBuffer
 {
 	return [[StelaGPUCommandBuffer alloc] initWithQueue:self retainsReferences:YES];
@@ -209,6 +226,15 @@
 - (void)addScheduledHandler:(void (^)(id))handler
 {
 	[_scheduledHandlers addObject:[handler copy]];
+}
+
+/* Everything a task holds is resident: `Residency.m`. */
+- (void)useResidencySet:(id)set
+{
+}
+
+- (void)useResidencySets:(const id __unsafe_unretained[])sets count:(NSUInteger)count
+{
 }
 
 - (void)addCompletedHandler:(void (^)(id))handler

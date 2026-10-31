@@ -61,6 +61,8 @@ struct MockResolver {
     chunks: u64,
     compiled: Vec<Specialization>,
     pools: u64,
+    /// The object threadgroup memory of the last mesh draw.
+    object_lengths: Vec<(u32, u64)>,
     /// Pipeline states by id, for indirect commands.
     render_states: Vec<RenderPipelineState>,
     compute_states: Vec<ComputePipelineState>,
@@ -110,7 +112,9 @@ impl Resolver for MockResolver {
         _: &RenderPipelineState,
         _: [u32; 3],
         _: [u32; 3],
+        object_lengths: &[(u32, u64)],
     ) -> Result<Pipeline> {
+        self.object_lengths = object_lengths.to_vec();
         Ok(Pipeline(900))
     }
 
@@ -605,8 +609,18 @@ fn mesh_thread_draws_cover_the_grid_with_the_first_stage() {
             .unwrap();
         commands.set_render_pipeline_state(&state).unwrap();
         commands
+            .set_object_threadgroup_memory_length(64, 2)
+            .unwrap();
+        commands
+            .set_object_threadgroup_memory_length(16, 0)
+            .unwrap();
+        commands
+            .set_object_threadgroup_memory_length(32, 2)
+            .unwrap();
+        commands
             .draw_mesh_threads(&mut resolver, [100, 1, 1], [32, 1, 1], [8, 1, 1])
             .unwrap();
+        assert_eq!(resolver.object_lengths, [(0, 16), (2, 32)]);
         commands.end_encoding(&mut resolver).unwrap();
         let recording = commit(commands, &mut resolver, (Semaphore(1), 1));
         assert!(

@@ -1504,7 +1504,7 @@ fn compute_and_mesh_variants_compile_per_shape() {
     let compiled = device.compiler.compiled.len();
     let id = device.new_mesh_render_pipeline(&request).unwrap();
     let first = device
-        .mesh_variant(u64::from(id.0), [32, 1, 1], [64, 1, 1])
+        .mesh_variant(u64::from(id.0), [32, 1, 1], [64, 1, 1], &[])
         .unwrap();
     let linked = [("user(color)", false), ("user(normal)", true)];
     let stages: Vec<_> = device.compiler.compiled[compiled..]
@@ -1528,9 +1528,19 @@ fn compute_and_mesh_variants_compile_per_shape() {
         "the fragment, then the object function the draw launches and the mesh function"
     );
     let again = device
-        .mesh_variant(u64::from(id.0), [32, 1, 1], [64, 1, 1])
+        .mesh_variant(u64::from(id.0), [32, 1, 1], [64, 1, 1], &[])
         .unwrap();
     assert_eq!(first, again);
+    let sized = device
+        .mesh_variant(u64::from(id.0), [32, 1, 1], [64, 1, 1], &[(0, 256)])
+        .unwrap();
+    assert_ne!(first, sized, "threadgroup memory is part of a variant");
+    let object = &device.compiler.compiled[device.compiler.compiled.len() - 2];
+    assert_eq!(object.threadgroup_lengths, [(0, 256)]);
+    assert_eq!(
+        device.compiler.compiled.last().unwrap().threadgroup_lengths,
+        []
+    );
     let stages: Vec<_> = device
         .backend()
         .graphics
@@ -1544,7 +1554,7 @@ fn compute_and_mesh_variants_compile_per_shape() {
     assert_eq!(stages, [S::TASK, S::MESH, S::FRAGMENT]);
     assert!(
         device
-            .mesh_variant(u64::from(id.0), [32, 1, 1], [4096, 1, 1])
+            .mesh_variant(u64::from(id.0), [32, 1, 1], [4096, 1, 1], &[])
             .is_err(),
         "beyond the mesh limit"
     );
