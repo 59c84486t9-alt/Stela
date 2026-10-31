@@ -520,7 +520,12 @@ fn page_target(adrp: u32, place: u64) -> u64 {
 fn links_a_kext_against_the_boot_collection() -> Result<()> {
     let boot = boot_collection();
     let object = kext_object();
-    let file = link(&boot, &[kext(vec![&object])])?.collection;
+    let kexts = [kext(vec![&object])];
+    let linked = link(&boot, &kexts)?;
+    let source = linked.source(&kexts);
+    assert_eq!(source.member, "Test.kext");
+    assert_eq!(source.decoded_bytes, linked.collection.len() as u64);
+    let file = linked.collection;
 
     let collection = sections(&file, 0);
     let order: Vec<_> = SEGMENTS

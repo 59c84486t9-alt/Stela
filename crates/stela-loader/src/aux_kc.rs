@@ -34,6 +34,7 @@ use crate::Result;
 use ::object::macho;
 use stela_contracts::{refuse, require};
 
+use crate::boot_bundle::Source;
 use crate::boot_policy::KextGrant;
 use crate::kernel_collection::PAGE_BYTES;
 use boot::BootCollection;
@@ -101,6 +102,25 @@ pub struct Linked {
 }
 
 impl Linked {
+    /// What a bundle's manifest says this collection is, linked from `kexts`.
+    pub fn source(&self, kexts: &[Kext<'_>]) -> Source {
+        let names: Vec<_> = kexts
+            .iter()
+            .filter_map(|kext| kext.bundle_path.rsplit('/').next())
+            .collect();
+        let names = names.join(", ");
+        let digest = stela_formats::sha256(&self.collection);
+        Source {
+            component: "AuxiliaryKernelCollection".into(),
+            description: format!("{names} linked against the boot kernel collection"),
+            member: names,
+            container_sha256: digest.clone(),
+            payload_type: "raw".into(),
+            decoded_bytes: self.collection.len() as u64,
+            decoded_sha256: digest,
+        }
+    }
+
     /// The LocalPolicy grant admitting this collection. A receipt lists the
     /// kexts it holds, so it is also Stela's list of those approved.
     pub fn grant(&self) -> KextGrant {

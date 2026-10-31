@@ -454,7 +454,7 @@ pub struct Prepare {
     /// `Info.plist` and arm64e objects (such as `target/guest/StelaGPU.kext`),
     /// which the installed system keeps in `/Library/Extensions`; repeat for
     /// each kext.
-    #[arg(long = "kext", conflicts_with = "disk")]
+    #[arg(long = "kext", conflicts_with_all = ["upgrade", "disk_recovery"])]
     kexts: Vec<PathBuf>,
 }
 
@@ -641,12 +641,24 @@ pub(super) fn boot_args(console: &str, mode: &[&str]) -> String {
     line
 }
 
+/// A `--kext` directory's `Info.plist`, objects and name.
+type KextBundle = (Vec<u8>, Vec<Vec<u8>>, String);
+
+/// `bundles` as the linker takes them.
+fn kexts(bundles: &[KextBundle]) -> Vec<stela_loader::aux_kc::Kext<'_>> {
+    bundles
+        .iter()
+        .map(|(info, objects, name)| stela_loader::aux_kc::Kext {
+            info,
+            objects: objects.iter().map(Vec::as_slice).collect(),
+            bundle_path: format!("/Library/Extensions/{name}"),
+        })
+        .collect()
+}
+
 impl Prepare {
-    /// The `--kext` bundles linked against `kernel` (`stela_loader::aux_kc`).
-    fn auxiliary_collection(&self, kernel: &[u8]) -> Result<Option<(Decoded, KextGrant)>> {
-        if self.kexts.is_empty() {
-            return Ok(None);
-        }
+    /// The `--kext` bundles' contents.
+    fn kext_bundles(&self) -> Result<Vec<KextBundle>> {
         let mut bundles = Vec::with_capacity(self.kexts.len());
         for directory in &self.kexts {
             let read = |path: &std::path::Path| {
@@ -676,36 +688,29 @@ impl Prepare {
                 name.to_owned(),
             ));
         }
-        let kexts: Vec<_> = bundles
-            .iter()
-            .map(|(info, objects, name)| stela_loader::aux_kc::Kext {
-                info,
-                objects: objects.iter().map(Vec::as_slice).collect(),
-                bundle_path: format!("/Library/Extensions/{name}"),
-            })
-            .collect();
+        Ok(bundles)
+    }
+
+    /// The `--kext` bundles linked against `kernel` (`stela_loader::aux_kc`).
+    fn auxiliary_collection(&self, kernel: &[u8]) -> Result<Option<(Decoded, KextGrant)>> {
+        if self.kexts.is_empty() {
+            return Ok(None);
+        }
+        let bundles = self.kext_bundles()?;
+        let kexts = kexts(&bundles);
         let linked = stela_loader::aux_kc::link(kernel, &kexts)?;
+        let source = linked.source(&kexts);
         let grant = linked.grant();
         let bytes = linked.collection;
-        let digest = stela_formats::sha256(&bytes);
-        let names: Vec<_> = bundles.iter().map(|(_, _, name)| name.as_str()).collect();
-        let decoded = Decoded {
-            source: Source {
-                component: "AuxiliaryKernelCollection".into(),
-                member: names.join(", "),
-                container_sha256: digest.clone(),
-                payload_type: "raw".into(),
-                description: format!(
-                    "{} linked against the boot kernel collection",
-                    names.join(", ")
-                ),
-                decoded_bytes: bytes.len() as u64,
-                decoded_sha256: digest,
+        let declared_digest = None;
+        Ok(Some((
+            Decoded {
+                source,
+                bytes,
+                declared_digest,
             },
-            bytes,
-            declared_digest: None,
-        };
-        Ok(Some((decoded, grant)))
+            grant,
+        )))
     }
 
     fn run(self) -> Result<()> {
