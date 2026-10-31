@@ -1061,7 +1061,8 @@ fn start_machine(boot: Boot<'_>, parts: MachineParts) -> ! {
 }
 
 /// Claim the GPUs from probe and start them in the host's Linux environment.
-/// A GPU that cannot start is reported, and the Mac boots without it.
+/// A GPU that cannot start is reported, and the Mac boots without it; whether
+/// any started is the answer.
 fn open_gpus(
     work: &'static kernel_work::KernelWork,
     mmio: Option<&'static crate::native_mmio::Source>,
@@ -1070,13 +1071,12 @@ fn open_gpus(
     firmware: &Option<alloc::sync::Arc<stela_drivers::firmware::Catalog>>,
     tsc_hz: u64,
     adapters: Vec<stela_drivers::gpu::Adapter>,
-    #[cfg_attr(not(feature = "nvk"), allow(unused_variables))] screen: (usize, usize),
-) {
+) -> bool {
     let Some(window) = mmio.and_then(|mmio| mmio.window()) else {
         crate::status::warn("this PC cannot map a GPU's memory, so it is left unused");
-        return;
+        return false;
     };
-    let Some(mmio) = mmio else { return };
+    let Some(mmio) = mmio else { return false };
     crate::status::begin("Starting the GPU");
     let claimed = work.call_owned(60_000_000, move || {
         let services = services::Services::new(mmio, remappers, None, heap, tsc_hz, Vec::new());
@@ -1091,11 +1091,11 @@ fn open_gpus(
         Ok((claimed, Some(random))) if !claimed.is_empty() => (claimed, random),
         Ok(_) => {
             crate::status::warn("no GPU to start");
-            return;
+            return false;
         }
         Err(error) => {
             crate::status::warn(&format!("the GPU could not be claimed: {error}"));
-            return;
+            return false;
         }
     };
     let machine = gpu::Machine {
@@ -1107,14 +1107,13 @@ fn open_gpus(
     };
     match gpu::open(machine, claimed) {
         Ok(()) => {
-            #[cfg(feature = "nvk")]
-            {
-                gpu::display::take(screen);
-                gpu::gate::open_service();
-            }
             crate::status::done("started");
+            true
         }
-        Err(error) => crate::status::warn(&format!("the GPU could not start: {error}")),
+        Err(error) => {
+            crate::status::warn(&format!("the GPU could not start: {error}"));
+            false
+        }
     }
 }
 
@@ -2157,8 +2156,8 @@ fn start_devices(
             if let Some(acpi) = host_acpi {
                 acpi.retain_power(power);
             }
-            if options.gpu {
-                open_gpus(
+            if options.gpu
+                && open_gpus(
                     work,
                     mmio,
                     remappers,
@@ -2166,8 +2165,9 @@ fn start_devices(
                     host_firmware,
                     tsc_hz,
                     gpus,
-                    handoff.screen.map_or((0, 0), |screen| screen.resolution()),
-                );
+                )
+            {
+                gpu::serve(handoff.screen.map_or((0, 0), |screen| screen.resolution()));
             }
             disks.profile_callbacks(options.profile);
             let count = |count: usize, one: &str, many: &str| {

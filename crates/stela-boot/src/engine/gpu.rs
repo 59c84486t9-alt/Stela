@@ -806,6 +806,18 @@ fn environment_error(error: WorkError) -> kernel_work::Error {
     kernel_work::Error::Work(error)
 }
 
+/// Takes the display for the GPUs [`open`] bound, in the firmware's `screen`
+/// size if it can, and opens their Metal services.
+pub(super) fn serve(
+    #[cfg_attr(not(feature = "nvk"), allow(unused_variables))] screen: (usize, usize),
+) {
+    #[cfg(feature = "nvk")]
+    {
+        display::take(screen);
+        gate::open_service();
+    }
+}
+
 /// Bring Linux up over `claimed`, and return once nouveau has bound them or
 /// failed, as the guest should not start with a half-started GPU beneath it.
 pub(super) fn open(machine: Machine, claimed: Vec<Claimed>) -> Result<(), kernel_work::Error> {

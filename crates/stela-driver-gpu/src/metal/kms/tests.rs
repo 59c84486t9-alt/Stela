@@ -157,10 +157,11 @@ fn the_firmwares_size_wins_then_the_preferred_mode() {
 fn the_connected_output_runs_on_a_controller_it_can_reach() {
     let modes = vec![mode(4, 2, PREFERRED)];
     let mut card = Card::new(modes.clone());
-    let display = Display::take(&mut card, (4, 2)).unwrap();
-    assert_eq!(display.size(), (4, 2));
-    let front = display.buffers[0].framebuffer;
-    drop(display);
+    let front = {
+        let display = Display::take(&mut card, (4, 2)).unwrap();
+        assert_eq!(display.size(), (4, 2));
+        display.buffers[0].framebuffer
+    };
     assert_eq!(card.set, Some((modes[0], front)));
 }
 
