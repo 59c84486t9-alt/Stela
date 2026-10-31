@@ -155,6 +155,10 @@ const APPLE_BFH_PARAMS: u8 = 0xd1;
 const APPLE_IDENTIFY_STORAGE: u8 = 0xc8;
 const APPLE_TUNNEL: u8 = 0xd8;
 const FLUSH: u8 = 0;
+/// `AppleNVMeRequest::BuildCommandReprioritize` (0x3debbec): the namespace in
+/// CDW1, then an in-flight I/O's LBA in CDW12..13, its block count in CDW14
+/// and its new priority tier in CDW15.
+const REPRIORITIZE: u8 = 0x81;
 /// CDW12 bit 30 of a read or write.
 const FORCE_UNIT_ACCESS: u32 = 1 << 30;
 /// Feature 06h, Volatile Write Cache: bit 0 enables it.
@@ -242,7 +246,7 @@ impl Command {
                 READ => Ok(1),
                 // The range list is read by the device, like write data.
                 WRITE | COMPARE | DATASET_MANAGEMENT => Ok(2),
-                FLUSH => Ok(0),
+                FLUSH | REPRIORITIZE => Ok(0),
                 _ => Err(refuse!("ANS I/O opcode is not modeled")),
             }
         }
@@ -763,6 +767,14 @@ impl Ans {
                 return Err(refuse!("ANS Flush fields are not modeled"));
             }
             return self.host(key, vec![Request::Flush], Wait::Flush, port);
+        }
+        if cmd.opcode() == REPRIORITIZE {
+            // The medium serves I/O in arrival order, without tiers, so there
+            // is no queue position for the new priority to change.
+            if cmd.long(24) != 0 || cmd.long(32) != 0 || cmd.long(40) != 0 {
+                return Err(refuse!("ANS Reprioritize fields are not modeled"));
+            }
+            return Ok(Executed::Done(Outcome::status(SUCCESS)));
         }
         if cmd.opcode() == DATASET_MANAGEMENT {
             return self.dataset_management(cmd, port).map(Executed::Done);

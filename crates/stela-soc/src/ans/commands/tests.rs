@@ -396,6 +396,43 @@ fn tunable_table_tunnel_records_its_buffer_and_refuses_other_shapes() {
 }
 
 #[test]
+fn a_reprioritize_succeeds_with_no_queue_to_change() {
+    let records = [Description {
+        id: 1,
+        kind: 1,
+        blocks: 0,
+    }];
+    let mut ans = Ans::new(Box::new(RamDisk::new("", 12, 4096)), &records, None).unwrap();
+    let mut memory = Ram::new(0x1000, 0x1000);
+    let mut latch = InterruptLatch::new();
+    let mut access = Access::new(0, 0, &mut latch);
+    let mut port = Port {
+        iommu: &mut Physical,
+        stream: 0,
+        memory: &mut memory,
+        access: &mut access,
+    };
+    let mut command = Command([0; 64]);
+    command.0[0] = REPRIORITIZE;
+    command.0[4] = 1;
+    command.0[48..56].copy_from_slice(&0x75_cd6fu64.to_le_bytes());
+    command.0[56] = 211;
+    command.0[60] = 1;
+    let mut sart = Sart::new(Bounds::Exclusive);
+    assert_eq!(
+        ans.execute(1, &command, None, &mut port, &mut sart)
+            .unwrap()
+            .status,
+        SUCCESS
+    );
+    command.0[40] = 1;
+    assert!(
+        ans.execute(1, &command, None, &mut port, &mut sart)
+            .is_err()
+    );
+}
+
+#[test]
 fn same_layout_format_erases_data_and_preserves_fixed_auxiliary_namespaces() {
     let records = [(1, 1, 0), (2, 8, 3), (3, 13, 2)].map(|(id, kind, blocks)| Description {
         id,
