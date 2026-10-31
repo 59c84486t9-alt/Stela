@@ -41,6 +41,18 @@ pub struct Report {
     raw: [u8; LENGTH],
     capabilities: Capabilities,
 }
+#[cfg(test)]
+impl Report {
+    /// What a two-path radio on `profile` reports.
+    pub(crate) fn of_two_paths(profile: Profile) -> Self {
+        let raw = [0; LENGTH];
+        Self {
+            profile,
+            raw,
+            capabilities: decode(1 << 27, &raw),
+        }
+    }
+}
 impl Report {
     pub fn profile(&self) -> Profile {
         self.profile
