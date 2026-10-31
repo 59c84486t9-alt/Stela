@@ -7,8 +7,8 @@ use super::{
         self, AttributeRecord, ColorAttachmentRecord, ComputePipelineResponse, Empty, Fault,
         FunctionHandleRequest, FunctionHandleResponse, LayoutRecord, LinkedFunctionsRecord,
         NewComputePipelineRequest, NewFunctionTableRequest, NewMeshPipelineRequest,
-        NewRenderPipelineRequest, PipelineFlags, RenderPipelineResponse, RenderTargetsRecord,
-        SetFunctionsRequest, Status, TessellationRecord,
+        NewRenderPipelineRequest, PipelineArchivesRecord, PipelineFlags, RenderPipelineResponse,
+        RenderTargetsRecord, SetFunctionsRequest, Status, TessellationRecord,
     },
 };
 use crate::metal::{
@@ -18,10 +18,10 @@ use crate::metal::{
         TessellationFactorStepFunction, TessellationPartitionMode, Winding,
     },
     device::{
-        BufferId, FunctionId, LibraryId, RenderPipelineId,
+        ArchiveId, BufferId, FunctionId, LibraryId, RenderPipelineId,
         pipelines::{
             ComputePipelineRequest, FunctionHandle, LinkedFunctions, MeshPipelineRequest,
-            RenderPipelineRequest,
+            PipelineArchives, RenderPipelineRequest,
         },
     },
     pipeline::{ColorAttachmentDescriptor, RenderTargets, StageThreads, TessellationDescriptor},
@@ -68,6 +68,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             )?,
             support_indirect_command_buffers: flags
                 .contains(PipelineFlags::INDIRECT_COMMAND_BUFFERS),
+            archives: self.archives(connection, &mut *memory, &request.archives)?,
         };
         let pipeline = self.device.new_render_pipeline(&pipeline)?;
         self.adopt_render_pipeline(call, pipeline)
@@ -112,6 +113,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
                 &mut *memory,
                 &request.fragment_linked_functions,
             )?,
+            archives: self.archives(connection, &mut *memory, &request.archives)?,
         };
         let pipeline = self.device.new_mesh_render_pipeline(&pipeline)?;
         self.adopt_render_pipeline(call, pipeline)
@@ -137,6 +139,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             )?,
             support_indirect_command_buffers: flags
                 .contains(PipelineFlags::INDIRECT_COMMAND_BUFFERS),
+            archives: self.archives(connection, &mut *call.memory, &request.archives)?,
         };
         let pipeline = self.device.new_compute_pipeline(&pipeline)?;
         let object = Object::ComputePipeline(pipeline);
@@ -238,6 +241,25 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         (handle != 0)
             .then(|| self.object(connection, handle))
             .transpose()
+    }
+
+    fn archives(
+        &self,
+        connection: NonZeroU64,
+        memory: &mut dyn GuestMemory,
+        record: &PipelineArchivesRecord,
+    ) -> Result<PipelineArchives, Fault> {
+        let searched: Vec<u64> = wire::read_array(&memory.read(record.searched)?)?;
+        Ok(PipelineArchives {
+            searched: searched
+                .into_iter()
+                .map(|handle| self.object::<ArchiveId>(connection, handle))
+                .collect::<Result<_, _>>()?,
+            required: record.required != 0,
+            added_to: (record.added_to != 0)
+                .then(|| self.object(connection, record.added_to))
+                .transpose()?,
+        })
     }
 
     fn linked(

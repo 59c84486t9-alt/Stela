@@ -14,6 +14,8 @@ pub enum Error {
     OutOfMemory,
     /// The GPU was lost or removed; every pending command fails.
     DeviceLost,
+    /// No binary archive the creation may read holds the pipeline.
+    NotArchived,
 }
 
 pub type Result<T> = core::result::Result<T, Error>;

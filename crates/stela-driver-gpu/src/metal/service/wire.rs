@@ -164,6 +164,17 @@ records! {
         pub out: Span,
     }
 
+    /// `NewArchive`: the bytes of an archive's file, if it has one.
+    pub struct NewArchiveRequest {
+        pub data: Span,
+    }
+
+    /// `ArchiveData`: the span receiving the archive's bytes.
+    pub struct ArchiveDataRequest {
+        pub archive: u64,
+        pub out: Span,
+    }
+
     /// `LibraryIdentity`: the span receiving the library's install name.
     pub struct LibraryIdentityRequest {
         pub library: u64,
@@ -600,6 +611,16 @@ records! {
         pub reserved: u32,
     }
 
+    /// A descriptor's `binaryArchives`, a span of handles, and what its
+    /// request does with them.
+    pub struct PipelineArchivesRecord {
+        pub searched: Span,
+        /// The archive `add…FunctionsWithDescriptor:` compiles into, or zero.
+        pub added_to: u64,
+        /// `MTLPipelineOptionFailOnBinaryArchiveMiss`.
+        pub required: u64,
+    }
+
     /// `MTLLinkedFunctions` and the stage's call stack depth: spans of
     /// function and library handles.
     pub struct LinkedFunctionsRecord {
@@ -621,6 +642,7 @@ records! {
         pub tessellation: TessellationRecord,
         pub vertex_linked_functions: LinkedFunctionsRecord,
         pub fragment_linked_functions: LinkedFunctionsRecord,
+        pub archives: PipelineArchivesRecord,
         /// `PipelineFlags`.
         pub flags: u64,
     }
@@ -644,6 +666,7 @@ records! {
         pub object_linked_functions: LinkedFunctionsRecord,
         pub mesh_linked_functions: LinkedFunctionsRecord,
         pub fragment_linked_functions: LinkedFunctionsRecord,
+        pub archives: PipelineArchivesRecord,
     }
 
     /// A new render pipeline and its `gpuResourceID`, zero when indirect
@@ -665,6 +688,7 @@ records! {
         pub max_total_threads_per_threadgroup: u64,
         pub stage_input: StageInputRecord,
         pub linked_functions: LinkedFunctionsRecord,
+        pub archives: PipelineArchivesRecord,
         /// `PipelineFlags`.
         pub flags: u64,
     }
@@ -900,6 +924,9 @@ impl From<Error> for Fault {
             Error::Unsupported(capability) => Self::new(Status::Unsupported, capability),
             Error::OutOfMemory => Self::new(Status::OutOfMemory, "out of memory"),
             Error::DeviceLost => Self::new(Status::DeviceLost, "the device was lost"),
+            Error::NotArchived => {
+                Self::new(Status::Invalid, "no binary archive holds the pipeline")
+            }
         }
     }
 }
@@ -959,6 +986,10 @@ operations! {
     LibraryIdentity = 0x0107 => LibraryIdentityRequest, LibraryIdentityResponse;
     /// The bytes `serializeToURL:` writes.
     LibraryData = 0x0108 => LibraryDataRequest, Length;
+    /// `newBinaryArchiveWithDescriptor:error:`.
+    NewArchive = 0x0109 => NewArchiveRequest, Handle;
+    /// The bytes `serializeToURL:error:` writes.
+    ArchiveData = 0x010a => ArchiveDataRequest, Length;
     /// `newFunctionWithName:constantValues:`.
     NewFunction = 0x0103 => NewFunctionRequest, Handle;
     /// What `MTLFunction` reports of the function.

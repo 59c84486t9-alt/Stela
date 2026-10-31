@@ -237,7 +237,7 @@ static void *read_variable(StelaGate *gate, uint32_t operation, void *request, s
 		uint32_t status = stela_gate_call(gate, operation, request, request_bytes, response,
 						  response_bytes, spans, &failure);
 		if (status != StelaStatusOk) {
-			stela_report("reflection", &failure);
+			stela_report("a service answer", &failure);
 			free(bytes);
 			return NULL;
 		}
@@ -794,7 +794,102 @@ typedef struct {
 
 @end
 
+/* An archive's failure, in its domain, from a pipeline's. */
+static BOOL add_failed(NSError **error, NSInteger code, NSError *failure)
+{
+	if (error) {
+		*error = [NSError errorWithDomain:MTLBinaryArchiveDomain code:code userInfo:failure.userInfo];
+	}
+	return NO;
+}
+
+@implementation StelaGPUBinaryArchive
+
+- (BOOL)addComputePipelineFunctionsWithDescriptor:(id)descriptor error:(NSError **)error
+{
+	NSError *failure = nil;
+	id pipeline = [_device computePipeline:descriptor options:0 reflection:NULL archive:_handle error:&failure];
+	return pipeline ? YES : add_failed(error, MTLBinaryArchiveErrorCompilationFailure, failure);
+}
+
+- (BOOL)addRenderPipelineFunctionsWithDescriptor:(id)descriptor error:(NSError **)error
+{
+	NSError *failure = nil;
+	id pipeline = [_device renderPipeline:descriptor options:0 reflection:NULL archive:_handle error:&failure];
+	return pipeline ? YES : add_failed(error, MTLBinaryArchiveErrorCompilationFailure, failure);
+}
+
+- (BOOL)addMeshRenderPipelineFunctionsWithDescriptor:(id)descriptor error:(NSError **)error
+{
+	NSError *failure = nil;
+	id pipeline = [_device meshPipeline:descriptor options:0 reflection:NULL archive:_handle error:&failure];
+	return pipeline ? YES : add_failed(error, MTLBinaryArchiveErrorCompilationFailure, failure);
+}
+
+/* Tile shading is an Apple family's, and no such family answers here. */
+- (BOOL)addTileRenderPipelineFunctionsWithDescriptor:(id)descriptor error:(NSError **)error
+{
+	(void)descriptor;
+	if (error) {
+		StelaFailure failure = {.reason = "this device has no tile shading"};
+		*error = stela_error(MTLBinaryArchiveDomain, MTLBinaryArchiveErrorUnexpectedElement, &failure);
+	}
+	return NO;
+}
+
+/* A visible function compiles into the stages linking it: only its pipelines are kept. */
+- (BOOL)addFunctionWithDescriptor:(id)descriptor library:(StelaGPULibrary *)library error:(NSError **)error
+{
+	NSError *failure = nil;
+	id function = [library newFunctionWithDescriptor:descriptor error:&failure];
+	return function ? YES : add_failed(error, MTLBinaryArchiveErrorUnexpectedElement, failure);
+}
+
+- (BOOL)serializeToURL:(NSURL *)url error:(NSError **)error
+{
+	StelaArchiveDataRequest request = {.archive = _handle};
+	StelaLength response = {};
+	void *bytes = read_variable(&_device->_gate, StelaOperationArchiveData, &request, sizeof(request), &request.out,
+				    &response, sizeof(response), &response.length);
+	if (!bytes) {
+		if (error) {
+			StelaFailure failure = {.reason = "the archive's bytes"};
+			*error = stela_error(MTLBinaryArchiveDomain, MTLBinaryArchiveErrorInternalError, &failure);
+		}
+		return NO;
+	}
+	NSData *data = [NSData dataWithBytesNoCopy:bytes length:response.length freeWhenDone:YES];
+	return [data writeToURL:url options:NSDataWritingAtomic error:error];
+}
+
+@end
+
 @implementation StelaGPUDevice (Libraries)
+
+- (id)newBinaryArchiveWithDescriptor:(id)descriptor error:(NSError **)error
+{
+	NSURL *url = [descriptor url];
+	NSData *data = nil;
+	if (url) {
+		NSError *failure = nil;
+		data = [NSData dataWithContentsOfURL:url options:0 error:&failure];
+		if (!data) {
+			add_failed(error, MTLBinaryArchiveErrorInvalidFile, failure);
+			return nil;
+		}
+	}
+	StelaNewArchiveRequest request = {.data = stela_span(data.bytes, data.length)};
+	StelaHandle response = {};
+	StelaFailure failure;
+	StelaSpans spans = {.reads = &request.data, .read_count = 1};
+	if (STELA_CALL_SPANS(&_gate, NewArchive, &request, &response, spans, &failure) != StelaStatusOk) {
+		if (error) {
+			*error = stela_error(MTLBinaryArchiveDomain, MTLBinaryArchiveErrorInternalError, &failure);
+		}
+		return nil;
+	}
+	return [[StelaGPUBinaryArchive alloc] initWithDevice:self handle:response.handle];
+}
 
 - (id)libraryWithBytes:(const void *)bytes length:(NSUInteger)length error:(NSError **)error
 {

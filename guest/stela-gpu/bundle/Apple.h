@@ -101,6 +101,7 @@ __attribute__((objc_root_class)) @interface NSObject
 
 @interface NSError : NSObject
 + (instancetype)errorWithDomain:(NSString *)domain code:(NSInteger)code userInfo:(NSDictionary *)information;
+@property(readonly) NSDictionary *userInfo;
 @end
 
 enum {

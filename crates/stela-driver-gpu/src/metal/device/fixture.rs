@@ -25,8 +25,8 @@ use crate::metal::{
             Buffer, BufferInfo, BufferView, BufferViewInfo, ComputePipelineInfo, ExecutionSet,
             GraphicsPipelineInfo, Image, ImageInfo, ImageView, ImageViewInfo,
             IndirectCommandsLayout, IndirectCommandsLayoutInfo, Memory, MemoryRequest, Pipeline,
-            QueryPool, QueryPoolInfo, Sampler, SamplerInfo, Semaphore, ShaderCode,
-            SparseImageRequirements,
+            PipelineCache, PipelineSource, QueryPool, QueryPoolInfo, Sampler, SamplerInfo,
+            Semaphore, ShaderCode, SparseImageRequirements,
         },
         physical::PhysicalDevice,
     },
@@ -48,6 +48,8 @@ pub(crate) struct MockBackend {
     pub(crate) descriptors: Vec<(u32, Descriptor)>,
     pub(crate) graphics: Vec<GraphicsPipelineInfo>,
     pub(crate) compute: Vec<ComputePipelineInfo>,
+    /// The pipelines each pipeline cache holds.
+    pub(crate) caches: BTreeMap<u64, u8>,
     pub(crate) submissions: Vec<Vec<Segment>>,
     pub(crate) writes: Vec<(Memory, u64, Vec<u8>)>,
     pub(crate) invalidated: Vec<(Memory, u64, u64)>,
@@ -72,6 +74,19 @@ impl MockBackend {
     fn id(&mut self) -> u64 {
         self.next += 1;
         self.next
+    }
+
+    /// Finds or keeps a pipeline in the cache of `source`.
+    fn source(&mut self, source: PipelineSource) -> Result<()> {
+        match source {
+            PipelineSource::Compiled => {}
+            PipelineSource::Cached(cache) => *self.caches.get_mut(&cache.0).unwrap() += 1,
+            PipelineSource::Archived(cache) if self.caches[&cache.0] == 0 => {
+                return Err(Error::NotArchived);
+            }
+            PipelineSource::Archived(_) => {}
+        }
+        Ok(())
     }
 
     /// Completes everything submitted so far.
@@ -170,11 +185,21 @@ impl Backend for MockBackend {
     fn create_sampler(&mut self, _: &SamplerInfo) -> Result<Sampler> {
         Ok(Sampler(self.id()))
     }
+    fn create_pipeline_cache(&mut self, data: &[u8]) -> Result<PipelineCache> {
+        let id = self.id();
+        self.caches.insert(id, data.first().copied().unwrap_or(0));
+        Ok(PipelineCache(id))
+    }
+    fn pipeline_cache_data(&mut self, cache: PipelineCache) -> Result<Vec<u8>> {
+        Ok(alloc::vec![self.caches[&cache.0]])
+    }
     fn create_graphics_pipeline(&mut self, info: &GraphicsPipelineInfo) -> Result<Pipeline> {
+        self.source(info.source)?;
         self.graphics.push(info.clone());
         Ok(Pipeline(self.id()))
     }
     fn create_compute_pipeline(&mut self, info: &ComputePipelineInfo) -> Result<Pipeline> {
+        self.source(info.source)?;
         self.compute.push(*info);
         Ok(Pipeline(self.id()))
     }

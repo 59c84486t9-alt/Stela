@@ -93,6 +93,8 @@ ids! {
     HeapId;
     MemoryId;
     LibraryId;
+    /// `MTLBinaryArchive`.
+    ArchiveId;
     FunctionId;
     RenderPipelineId;
     ComputePipelineId;

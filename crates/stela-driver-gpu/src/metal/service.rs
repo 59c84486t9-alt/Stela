@@ -16,8 +16,8 @@
 use super::{
     command_buffer::blit::Region,
     device::{
-        BufferId, ComputePipelineId, CounterBufferId, Device, EventId, FunctionId, HeapId,
-        LibraryId, MemoryId, RenderPipelineId, SamplerId, TextureId,
+        ArchiveId, BufferId, ComputePipelineId, CounterBufferId, Device, EventId, FunctionId,
+        HeapId, LibraryId, MemoryId, RenderPipelineId, SamplerId, TextureId,
     },
     error::Error,
     indirect::IndirectCommandBufferId,
@@ -102,6 +102,7 @@ enum Object {
     Sampler(SamplerId),
     Heap(HeapId),
     Library(LibraryId),
+    Archive(ArchiveId),
     Function(FunctionId),
     RenderPipeline(RenderPipelineId),
     ComputePipeline(ComputePipelineId),
@@ -135,6 +136,7 @@ kinds! {
     Sampler(SamplerId);
     Heap(HeapId);
     Library(LibraryId);
+    Archive(ArchiveId);
     Function(FunctionId);
     RenderPipeline(RenderPipelineId);
     ComputePipeline(ComputePipelineId);
@@ -378,6 +380,8 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             Operation::LibraryFunctionNames => self.library_function_names(&mut call),
             Operation::LibraryIdentity => self.library_identity(&mut call),
             Operation::LibraryData => self.library_data(&mut call),
+            Operation::NewArchive => self.new_archive(&mut call),
+            Operation::ArchiveData => self.archive_data(&mut call),
             Operation::NewFunction => self.new_function(&mut call),
             Operation::FunctionReflection => self.function_reflection(&mut call),
             Operation::FunctionBindings => self.function_bindings(&mut call),
@@ -536,6 +540,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             Object::Sampler(id) => device.destroy_sampler(id),
             Object::Heap(id) => device.destroy_heap(id),
             Object::Library(id) => device.destroy_library(id),
+            Object::Archive(id) => device.destroy_archive(id),
             Object::Function(id) => device.destroy_function(id),
             Object::RenderPipeline(id) => device.destroy_render_pipeline(id),
             Object::ComputePipeline(id) => device.destroy_compute_pipeline(id),

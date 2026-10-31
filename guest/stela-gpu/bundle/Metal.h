@@ -121,6 +121,12 @@ enum {
 	MTLDynamicLibraryErrorUnsupported = 5,
 };
 enum {
+	MTLBinaryArchiveErrorInvalidFile = 1,
+	MTLBinaryArchiveErrorUnexpectedElement = 2,
+	MTLBinaryArchiveErrorCompilationFailure = 3,
+	MTLBinaryArchiveErrorInternalError = 4,
+};
+enum {
 	MTLPipelineOptionNone = 0,
 	MTLPipelineOptionArgumentInfo = 1 << 0,
 	MTLPipelineOptionBindingInfo = 1 << 0,
@@ -233,7 +239,8 @@ enum {
 	X(MTLThreadgroupBinding)                                                                   \
 	X(MTLObjectPayloadBinding)                                                                 \
 	X(MTLDrawable)                                                                             \
-	X(MTLDynamicLibrary)
+	X(MTLDynamicLibrary)                                                                       \
+	X(MTLBinaryArchive)
 
 #define STELA_DECLARE_PROTOCOL(name) @protocol name @end
 STELA_PROTOCOLS(STELA_DECLARE_PROTOCOL)
@@ -320,6 +327,8 @@ STELA_PROTOCOLS(STELA_DECLARE_PROTOCOL)
 - (id)vertexPreloadedLibraries;
 - (id)fragmentPreloadedLibraries;
 - (id)preloadedLibraries;
+- (id)binaryArchives;
+- (id)url;
 - (NSUInteger)maxVertexCallStackDepth;
 - (NSUInteger)maxFragmentCallStackDepth;
 - (NSUInteger)maxCallStackDepth;
@@ -435,6 +444,7 @@ STELA_PROTOCOLS(STELA_DECLARE_PROTOCOL)
 
 extern NSString *const MTLLibraryErrorDomain;
 extern NSString *const MTLDynamicLibraryDomain;
+extern NSString *const MTLBinaryArchiveDomain;
 extern NSString *const MTLCommandBufferErrorDomain;
 extern NSString *const MTLCounterErrorDomain;
 extern NSString *const MTLCommonCounterSetTimestamp;

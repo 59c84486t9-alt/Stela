@@ -206,6 +206,7 @@ fn render_pipeline_request(vertex: u64, fragment: u64) -> NewRenderPipelineReque
         },
         vertex_linked_functions: LinkedFunctionsRecord::default(),
         fragment_linked_functions: LinkedFunctionsRecord::default(),
+        archives: Default::default(),
         flags: PipelineFlags::EMPTY.bits(),
     }
 }

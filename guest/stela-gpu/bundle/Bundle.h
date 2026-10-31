@@ -100,6 +100,25 @@ void stela_depth_stencil_record(id descriptor, StelaDepthStencilRecord *record);
 - (void)flushIndirect;
 @end
 
+@interface StelaGPUDevice (Pipelines)
+/* A pipeline of `descriptor`; a nonzero `archive` is the one it compiles into. */
+- (id)renderPipeline:(id)descriptor
+	     options:(NSUInteger)options
+	  reflection:(id *)reflection
+	     archive:(uint64_t)archive
+	       error:(NSError **)error;
+- (id)meshPipeline:(id)descriptor
+	   options:(NSUInteger)options
+	reflection:(id *)reflection
+	   archive:(uint64_t)archive
+	     error:(NSError **)error;
+- (id)computePipeline:(id)descriptor
+	      options:(NSUInteger)options
+	   reflection:(id *)reflection
+	      archive:(uint64_t)archive
+		error:(NSError **)error;
+@end
+
 /* What holds a service handle. */
 @interface StelaGPUObject : NSObject {
 @public
@@ -193,6 +212,10 @@ void stela_depth_stencil_record(id descriptor, StelaDepthStencilRecord *record);
 	NSString *_installName;
 }
 - (NSUInteger)type;
+@end
+
+/* `MTLBinaryArchive`: the service's pipeline cache. */
+@interface StelaGPUBinaryArchive : StelaGPUObject <MTLBinaryArchive>
 @end
 
 /* `MTLVertexAttribute` and `MTLAttribute`. */

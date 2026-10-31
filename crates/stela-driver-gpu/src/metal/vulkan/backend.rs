@@ -15,12 +15,13 @@ use super::{
     object::{
         Buffer, BufferInfo, BufferView, BufferViewInfo, ComputePipelineInfo, ExecutionSet,
         GraphicsPipelineInfo, Image, ImageInfo, ImageView, ImageViewInfo, IndirectCommandsLayout,
-        IndirectCommandsLayoutInfo, Memory, MemoryRequest, Pipeline, QueryPool, QueryPoolInfo,
-        Sampler, SamplerInfo, Semaphore, SparseImageRequirements,
+        IndirectCommandsLayoutInfo, Memory, MemoryRequest, Pipeline, PipelineCache, QueryPool,
+        QueryPoolInfo, Sampler, SamplerInfo, Semaphore, SparseImageRequirements,
     },
     physical::{Features, PhysicalDevice},
 };
 use crate::metal::{binding::HeapArray, command_buffer::Segment, error::Result};
+use alloc::vec::Vec;
 use core::num::NonZeroU64;
 use stela_contracts::gate::MemoryRange;
 
@@ -74,6 +75,7 @@ pub enum Object {
     BufferView(BufferView),
     Sampler(Sampler),
     Pipeline(Pipeline),
+    PipelineCache(PipelineCache),
     QueryPool(QueryPool),
     Semaphore(Semaphore),
     Memory(Memory),
@@ -132,6 +134,11 @@ pub trait Backend {
     fn create_sampler(&mut self, info: &SamplerInfo) -> Result<Sampler>;
     fn create_graphics_pipeline(&mut self, info: &GraphicsPipelineInfo) -> Result<Pipeline>;
     fn create_compute_pipeline(&mut self, info: &ComputePipelineInfo) -> Result<Pipeline>;
+    /// A pipeline cache of `data`, an earlier one's bytes. Bytes of another
+    /// device or driver, or of nothing, leave it empty.
+    fn create_pipeline_cache(&mut self, data: &[u8]) -> Result<PipelineCache>;
+    /// The bytes of `cache`.
+    fn pipeline_cache_data(&mut self, cache: PipelineCache) -> Result<Vec<u8>>;
     fn create_query_pool(&mut self, info: &QueryPoolInfo) -> Result<QueryPool>;
     fn create_semaphore(&mut self, initial: u64) -> Result<Semaphore>;
     /// `vkCreateIndirectCommandsLayoutEXT`; only with

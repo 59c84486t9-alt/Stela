@@ -2,15 +2,16 @@
 use super::{
     Call, Object, Service,
     wire::{
-        self, AttributeInfo, ConstantInfo, ConstantRecord, Fault, FunctionReflectionRequest,
-        FunctionReflectionResponse, LibraryDataRequest, LibraryFunctionNamesRequest,
-        LibraryIdentityRequest, LibraryIdentityResponse, NewFunctionRequest, NewLibraryRequest,
+        self, ArchiveDataRequest, AttributeInfo, ConstantInfo, ConstantRecord, Fault,
+        FunctionReflectionRequest, FunctionReflectionResponse, LibraryDataRequest,
+        LibraryFunctionNamesRequest, LibraryIdentityRequest, LibraryIdentityResponse,
+        NewArchiveRequest, NewFunctionRequest, NewLibraryRequest,
     },
 };
 use crate::metal::{
     abi::DataType,
     device::{
-        FunctionId, LibraryId,
+        ArchiveId, FunctionId, LibraryId,
         pipelines::{ConstantKey, ConstantValue},
     },
     shader::{Compiler, PatchDomain, Reflection},
@@ -55,6 +56,21 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         let request: LibraryDataRequest = call.request()?;
         let library = self.object::<LibraryId>(call.connection, request.library)?;
         call.reply_data(request.out, self.device.library_data(library)?)
+    }
+
+    pub(super) fn new_archive(&mut self, call: &mut Call) -> Result<(), Fault> {
+        let request: NewArchiveRequest = call.request()?;
+        let data = call.memory.read(request.data)?;
+        let archive = self.device.new_archive(&data)?;
+        let handle = self.hold(call.connection, Object::Archive(archive))?;
+        call.reply(&handle)
+    }
+
+    pub(super) fn archive_data(&mut self, call: &mut Call) -> Result<(), Fault> {
+        let request: ArchiveDataRequest = call.request()?;
+        let archive = self.object::<ArchiveId>(call.connection, request.archive)?;
+        let data = self.device.archive_data(archive)?;
+        call.reply_data(request.out, &data)
     }
 
     pub(super) fn new_function(&mut self, call: &mut Call) -> Result<(), Fault> {
