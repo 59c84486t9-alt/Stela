@@ -60,6 +60,7 @@ use zeroize::Zeroizing;
 mod active_link;
 mod grade;
 mod he;
+mod link_scan;
 mod reception;
 
 /// How long a signalling station sleeps at most: the coarse timers it keeps
@@ -81,12 +82,15 @@ const MANAGEMENT_TID: u8 = 15;
 const MISSED_BEACONS: u32 = 19;
 /// `IWL_MVM_MISSED_BEACONS_SINCE_RX_THOLD`.
 const MISSED_BEACONS_SINCE_RECEIVE: u32 = 4;
+/// `IWL_MLD_MISSED_BEACONS_THRESHOLD`.
+const LINK_SCAN_MISSED_BEACONS: u32 = 8;
 /// `MCC_SOURCE_WIFI`.
 const COUNTRY_FROM_WIFI: u8 = 5;
 /// How long a departure's frame may take to reach the air before the queues
 /// flush it, as `ieee80211_flush_queues` waits for it.
 const DEPARTURE_DRAIN_US: u64 = 200_000;
 const SESSION_PROTECTION_NOTIFICATION: (u8, u8) = (0xfb, 3);
+const SCAN_START_NOTIFICATION: (u8, u8) = (0xb2, 0);
 const MISSED_BEACONS_LEGACY_NOTIFICATION: (u8, u8) = (0xa2, 0);
 const MISSED_BEACONS_NOTIFICATION: (u8, u8) = (0xf6, 3);
 const TRANSMIT_RESPONSE: (u8, u8) = (0x1c, 0);
@@ -275,6 +279,7 @@ pub(super) struct Client {
     seat: u8,
     /// A new look at the links is due.
     reselect: bool,
+    link_scan: link_scan::LinkScan,
     ciphers: Option<(Cipher, Cipher)>,
     management_cipher: Option<ManagementCipher>,
     keys: Vec<Key>,
@@ -318,6 +323,7 @@ impl Client {
             dormant: None,
             seat: 0,
             reselect: false,
+            link_scan: link_scan::LinkScan::default(),
             ciphers: None,
             management_cipher: None,
             keys: Vec::new(),
@@ -376,6 +382,7 @@ impl Client {
         self.context = None;
         self.dormant = None;
         self.reselect = false;
+        self.link_scan = link_scan::LinkScan::default();
         self.ciphers = None;
         self.management_cipher = None;
         self.keys.clear();
@@ -445,6 +452,22 @@ impl RegulatoryPolicy for Admitted<'_> {
     }
     fn allow_data_tx(&mut self, channel: Channel) -> bool {
         self.allow_management_tx(channel)
+    }
+}
+
+/// The channels an association's scan listens on: it sends nothing there.
+impl scan::Policy for Admitted<'_> {
+    fn allow_receive(&mut self, channel: Channel) -> bool {
+        self.0.iter().any(|&(allowed, _)| allowed == channel)
+    }
+    fn allow_probe(&mut self, _: Channel) -> bool {
+        false
+    }
+    fn lookup_channel(&mut self, band: Band, number: u16) -> Option<Channel> {
+        self.0
+            .iter()
+            .map(|&(channel, _)| channel)
+            .find(|channel| channel.band == band && channel.number == number)
     }
 }
 
@@ -568,9 +591,11 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         self.run_steps(queue)?;
         if self.client.reselect && self.client.idle() && !self.client.leaving {
             self.client.reselect = false;
-            self.select_link(queue, now)?;
+            self.select_link(queue)?;
             self.run_steps(queue)?;
         }
+        self.run_link_scan(queue, now)?;
+        self.run_steps(queue)?;
         self.send_management(queue)?;
         self.send_data(queue)
     }
@@ -846,7 +871,8 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             }
             Then::Authorized => {
                 client.port_open = true;
-                client.reselect = true;
+                let now = self.clock.now_us();
+                client.link_authorized(now);
             }
         }
         Ok(())
@@ -882,6 +908,9 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
     ) -> Result<(), Error> {
         let key_index = normalized.key_index();
         let mut frame = normalized.into_frame();
+        if self.hear_on_link_scan(&frame) {
+            return Ok(());
+        }
         let client = &mut self.client;
         // The station's data paths take a frame's MLD view themselves.
         if frame.header().control & 12 == 0
@@ -1172,8 +1201,19 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                     let action = self.client.station.disconnect().map_err(Error::Station)?;
                     self.client.act(action);
                 }
+                MISSED_BEACONS_LEGACY_NOTIFICATION | MISSED_BEACONS_NOTIFICATION
+                    if word(4).is_some_and(|missed| missed > LINK_SCAN_MISSED_BEACONS) =>
+                {
+                    self.client.ask_link_scan(now);
+                }
+                SCAN_START_NOTIFICATION => self.client.link_scan_started(now),
                 _ => {}
             }
+        }
+        // After its start, which came first.
+        while let Some(end) = queue.take_scan_completion() {
+            self.client
+                .link_scan_finished(end.raw.get(6).copied().unwrap_or(0))?;
         }
         Ok(())
     }
@@ -1435,7 +1475,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
 
     /// The chain's way down, once its last commands finished.
     pub(super) fn leave(&mut self, queue: &mut Queue<Q, B>) -> Result<bool, Error> {
-        if !self.client.leaving || !self.client.idle() {
+        if !self.client.leaving || !self.client.idle() || self.client.link_scanning() {
             return Ok(false);
         }
         if let Some(frame) = self.client.farewell.take() {

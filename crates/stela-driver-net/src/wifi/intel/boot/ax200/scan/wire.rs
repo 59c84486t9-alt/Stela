@@ -86,6 +86,7 @@ const PHY_BAND_5: u8 = 0;
 const PHY_BAND_24: u8 = 1;
 const PHY_BAND_6: u8 = 2;
 const FORCE_PASSIVE: u16 = 1 << 11;
+const NOTIFY_START: u16 = 1 << 9;
 const PASS_ALL: u16 = 1 << 1;
 const USE_ALL_RX_CHAINS: u16 = 1 << 6;
 const ADAPTIVE_DWELL: u16 = 1 << 7;
@@ -100,6 +101,10 @@ const CHANNEL_FORCE_PASSIVE: u32 = 1 << 26;
 /// `IEEE80211_RNR_TBTT_PARAMS_PSD_RESERVED`.
 const PSD_RESERVED: i8 = -128;
 const PRIORITY_EXT_6: u32 = 6;
+const PRIORITY_EXT_4: u32 = 4;
+/// `scan_timing[IWL_SCAN_TYPE_WILD]`, for a station whose traffic is light.
+const MAX_OUT_OF_SERVICE_TU: u32 = 120;
+const SUSPEND_TU: u32 = 30;
 const ACTIVE_DWELL: u8 = 10;
 const PASSIVE_DWELL: u8 = 110;
 const FULL_SCAN_BUDGET_TU: u16 = 300;
@@ -268,6 +273,30 @@ pub(super) fn encode(
         bytes[frame + offset..frame + offset + part.len()].copy_from_slice(part);
         offset += part.len();
     }
+    Ok(bytes)
+}
+
+/// `iwl_mld_int_mlo_scan_start`: a passive scan beside the association on
+/// firmware link `link`, which leaves that link's channel for what
+/// `scan_timing` allows and says when it starts.
+pub(super) fn encode_internal(
+    request: &protocol::Request,
+    version: u8,
+    local: crate::Mac,
+    link: u8,
+) -> Result<Vec<u8>, Ax200ScanError> {
+    let abilities = Abilities {
+        ds_parameters: false,
+        tpc_report: false,
+        hidden_six_ghz: false,
+        fixed_antenna: false,
+    };
+    let mut bytes = encode(request, version, local, None, abilities)?;
+    bytes[4..8].copy_from_slice(&PRIORITY_EXT_4.to_le_bytes());
+    bytes[GENERAL + 1] |= (NOTIFY_START >> 8) as u8;
+    bytes[GENERAL + 3] = link;
+    bytes[GENERAL + 12..GENERAL + 16].copy_from_slice(&MAX_OUT_OF_SERVICE_TU.to_le_bytes());
+    bytes[GENERAL + 20..GENERAL + 24].copy_from_slice(&SUSPEND_TU.to_le_bytes());
     Ok(bytes)
 }
 
@@ -456,6 +485,28 @@ mod tests {
     const PROBE: usize = LAYOUT.probe;
     const SSIDS: usize = LAYOUT.ssids;
     const FRAME: usize = PROBE + PROBE_SEGMENTS;
+
+    #[test]
+    fn an_internal_scan_listens_beside_its_link_within_linux_s_times() {
+        let channel = Channel {
+            band: Band::Ghz2,
+            number: 1,
+            frequency_mhz: 2412,
+        };
+        let request = protocol::Request::new(vec![channel], Vec::new(), Vec::new()).unwrap();
+        let bytes = encode_internal(&request, 17, LOCAL, 1).unwrap();
+        let flags = u16::from_le_bytes([bytes[GENERAL], bytes[GENERAL + 1]]);
+        assert_eq!(
+            flags,
+            PASS_ALL | ADAPTIVE_DWELL | FORCE_PASSIVE | NOTIFY_START
+        );
+        assert_eq!(bytes[4..8], 4u32.to_le_bytes());
+        assert_eq!(bytes[GENERAL + 3], 1);
+        assert_eq!(bytes[GENERAL + 12..GENERAL + 16], 120u32.to_le_bytes());
+        assert_eq!(bytes[GENERAL + 16..GENERAL + 20], [0; 4]);
+        assert_eq!(bytes[GENERAL + 20..GENERAL + 24], 30u32.to_le_bytes());
+        assert_eq!(bytes[GENERAL + 24..GENERAL + 28], [0; 4]);
+    }
 
     #[test]
     fn version_18_has_room_for_one_more_channel() {

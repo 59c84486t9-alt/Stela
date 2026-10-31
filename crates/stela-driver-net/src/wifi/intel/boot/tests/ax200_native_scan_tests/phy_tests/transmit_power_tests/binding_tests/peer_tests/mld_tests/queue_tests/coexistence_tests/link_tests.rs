@@ -96,6 +96,8 @@ struct Device<'n> {
     /// A beacon of another AP of the AP MLD, and what the association
     /// response then carries instead of `elements`.
     other: Option<(Vec<u8>, Vec<u8>)>,
+    /// A scan of an association's links runs until it is told to stop.
+    holds_link_scan: bool,
 }
 
 impl Device<'_> {
@@ -212,6 +214,15 @@ impl Device<'_> {
         }
         if (id.group, id.opcode) == (1, 0x0d) {
             self.scans.push(request.to_vec());
+            let beside = self.other.is_some() && self.scans.len() > 1;
+            if beside {
+                let started = Id {
+                    group: 0,
+                    opcode: 0xb2,
+                    version: 0,
+                };
+                self.inject(rom, &command_packet(started, 0x8000, &[0; 8]));
+            }
             if self.second.is_none() || self.scans.len() == 1 {
                 for ssid in self.beacons.clone() {
                     self.inject(rom, &beacon(ssid, self.rsn, self.quality, self.elements));
@@ -221,15 +232,12 @@ impl Device<'_> {
                     self.inject(rom, &frame);
                 }
             }
-            let mut body = [0; 16];
-            body[6] = 1;
-            body[7] = 3;
-            let done = Id {
-                group: 0,
-                opcode: 0x0f,
-                version: 0,
-            };
-            self.inject(rom, &command_packet(done, 0x8000, &body));
+            if !(beside && self.holds_link_scan) {
+                self.finish_scan(rom, 1);
+            }
+        }
+        if (id.group, id.opcode) == (1, 0x0e) {
+            self.finish_scan(rom, 2);
         }
         if (id.group, id.opcode) == (3, 5) && request[4] == 1 {
             let notification = Id {
@@ -242,6 +250,19 @@ impl Device<'_> {
             body[8] = 1;
             self.inject(rom, &command_packet(notification, 0x8000, &body));
         }
+    }
+
+    /// The scan ended with `status`.
+    fn finish_scan(&mut self, rom: &RomBoot<'_, Model>, status: u8) {
+        let mut body = [0; 16];
+        body[6] = status;
+        body[7] = 3;
+        let done = Id {
+            group: 0,
+            opcode: 0x0f,
+            version: 0,
+        };
+        self.inject(rom, &command_packet(done, 0x8000, &body));
     }
 
     /// Answer the station MLD's SAE `frame`: its commit, or its confirm.
@@ -400,7 +421,7 @@ fn mpdu(frame: Vec<u8>, status: u32) -> Vec<u8> {
 
 /// A beacon of the AP on the other link of the AP MLD, on channel 36 and
 /// quieter than the setup link's.
-fn other_beacon() -> Vec<u8> {
+fn other_beacon(heard: [u8; 2]) -> Vec<u8> {
     let mut frame = vec![0; 36];
     frame[..2].copy_from_slice(&0x80u16.to_le_bytes());
     frame[4..10].fill(0xff);
@@ -421,7 +442,7 @@ fn other_beacon() -> Vec<u8> {
         }
         .encode(),
     );
-    placed_at(frame, 3, None, 127 << 24, [60, 70, 36])
+    placed_at(frame, 3, None, 127 << 24, [heard[0], heard[1], 36])
 }
 
 /// What the AP says of itself on channel 36.
@@ -467,9 +488,10 @@ fn other_response() -> Vec<u8> {
     elements
 }
 
-/// The setup link's AP: its RNR names the other link, and it is nearly full.
-fn linked_ap() -> &'static [u8] {
-    let mut elements = vec![11, 5, 0, 0, 240, 0, 0];
+/// The setup link's AP with `load` of its channel taken: its RNR names the
+/// other link.
+fn linked_ap(load: u8) -> &'static [u8] {
+    let mut elements = vec![11, 5, 0, 0, load, 0, 0];
     elements.extend(mld_ap());
     let mut rnr = vec![0x00, 16, 0, 36, 0];
     rnr.extend(OTHER);
@@ -634,7 +656,8 @@ fn raise_as<'n>(
         macs: Vec::new(),
         sae: None,
         confirm: None,
-        other: other.then(|| (other_beacon(), other_response())),
+        other: other.then(|| (other_beacon([60, 70]), other_response())),
+        holds_link_scan: false,
     };
     device.inject(&boot, &alive);
     let inputs = Inputs {
@@ -1442,10 +1465,15 @@ fn raise_mld<'n>(
     (wifi, device)
 }
 
-#[test]
-fn an_mld_station_moves_to_its_better_link_and_back_before_it_leaves() {
-    let native = Native::default();
-    let (mut wifi, mut device) = raise_mld(&native, linked_ap(), true);
+/// The little-endian word of `bytes` at `at`.
+fn word(bytes: &[u8], at: usize) -> u32 {
+    u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap())
+}
+
+/// An MLD station with its port open, moved to the other link, its address
+/// there, and how many link and station commands came before the port.
+fn moved_mld(native: &Native) -> (Station<Model, ClockBios>, Device<'_>, Mac, usize) {
+    let (mut wifi, mut device) = raise_mld(native, linked_ap(240), true);
     let associated = run(&mut wifi, &mut device, |wifi, _, _| {
         wifi.radio().station().phase() == Peering::Associated
     });
@@ -1486,7 +1514,6 @@ fn an_mld_station_moves_to_its_better_link_and_back_before_it_leaves() {
     let third = eapol_key(&ap.mld_message_3(&[setup, other], &keys));
     device.inject(wifi.radio().rom().unwrap(), &third);
     let authorized = device.configuration.len();
-    let word = |bytes: &[u8], at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
     let moved = run(&mut wifi, &mut device, |_, device, _| {
         device.configuration[authorized..]
             .iter()
@@ -1499,6 +1526,30 @@ fn an_mld_station_moves_to_its_better_link_and_back_before_it_leaves() {
         device.commands.last()
     );
     assert!(wifi.carrier(), "the port stays open across the move");
+    (wifi, device, local, authorized)
+}
+
+/// Firmware missed nine beacons in a row, and 600 rounds pass.
+fn miss_beacons(wifi: &mut Station<Model, ClockBios>, device: &mut Device<'_>) {
+    let missed = Id {
+        group: 3,
+        opcode: 0xf6,
+        version: 0,
+    };
+    let mut body = [0; 20];
+    body[4] = 9;
+    body[8] = 9;
+    device.inject(
+        wifi.radio().rom().unwrap(),
+        &command_packet(missed, 0x8000, &body),
+    );
+    assert!(!run(wifi, device, |_, device, _| device.scans.len() > 1));
+}
+
+#[test]
+fn an_mld_station_moves_to_its_better_link_and_back_before_it_leaves() {
+    let native = Native::default();
+    let (mut wifi, mut device, local, authorized) = moved_mld(&native);
     // The other link comes up beside the first before the first goes.
     let links: Vec<(u32, u32, u32)> = device.configuration[authorized..]
         .iter()
@@ -1555,6 +1606,70 @@ fn an_mld_station_moves_to_its_better_link_and_back_before_it_leaves() {
             .iter()
             .any(|(opcode, bytes)| *opcode == 9 && word(bytes, 0) == 3 && word(bytes, 4) == 1),
         "the other link went"
+    );
+}
+
+#[test]
+fn a_station_that_stops_hearing_its_link_listens_to_both_and_takes_the_better() {
+    let native = Native::default();
+    let (mut wifi, mut device, _, _) = moved_mld(&native);
+    miss_beacons(&mut wifi, &mut device);
+    assert_eq!(device.scans.len(), 1, "a link just activated stays 5 s");
+    device.other.as_mut().unwrap().0 = other_beacon([90, 90]);
+    device.elements = linked_ap(0);
+    let back = device.configuration.len();
+    wifi.radio_mut().end_link_blockout();
+    let moved = run(&mut wifi, &mut device, |_, device, _| {
+        device.configuration[back..]
+            .iter()
+            .any(|(opcode, bytes)| *opcode == 9 && word(bytes, 0) == 3)
+    });
+    assert!(
+        moved,
+        "{:?} {:?}",
+        wifi.radio().error(),
+        device.commands.last()
+    );
+    // A passive look from the firmware link in use, at both links' channels.
+    let scan = &device.scans[1];
+    assert_eq!(scan[8] & 2, 2, "whatever it hears");
+    assert_eq!(scan[9] & 0x0a, 0x0a, "passive, and saying when it starts");
+    assert_eq!(scan[11], 1);
+    assert_eq!(scan[45], 2);
+    assert_eq!((scan[52], scan[60]), (36, 1));
+    // The setup link is back beside the other before the other goes.
+    let links: Vec<(u32, u32, u32)> = device.configuration[back..]
+        .iter()
+        .filter(|(opcode, _)| *opcode == 9)
+        .map(|(_, bytes)| (word(bytes, 0), word(bytes, 4), word(bytes, 24)))
+        .collect();
+    assert_eq!(links[0], (1, 0, 0));
+    assert_eq!(links.last(), Some(&(3, 1, 0)), "{links:?}");
+    assert!(wifi.carrier());
+}
+
+#[test]
+fn leaving_stops_a_scan_of_the_links_and_waits_for_firmware_to_let_it_go() {
+    let native = Native::default();
+    let (mut wifi, mut device, _, _) = moved_mld(&native);
+    device.holds_link_scan = true;
+    miss_beacons(&mut wifi, &mut device);
+    wifi.radio_mut().end_link_blockout();
+    let scanning = run(&mut wifi, &mut device, |_, device, _| {
+        device.scans.len() > 1
+    });
+    assert!(scanning, "{:?}", wifi.radio().error());
+    let links = device.configuration.len();
+    wifi.radio_mut().deauthenticate(3).unwrap();
+    let left = run(&mut wifi, &mut device, |wifi, _, _| {
+        wifi.radio().stage() == Standing::Idle
+    });
+    assert!(left, "{:?}", wifi.radio().error());
+    assert!(device.commands.contains(&(1, 0x0e)));
+    assert!(
+        device.configuration[links..]
+            .iter()
+            .any(|(opcode, _)| *opcode == 9)
     );
 }
 

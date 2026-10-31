@@ -7,6 +7,7 @@
 //! as `iwl_mvm_tvqm_enable_txq` adds it, and TX responses and a removal's
 //! flush reclaim what the device finished.
 use super::*;
+use crate::wifi::intel::boot::ax200::scan::wire as scan_wire;
 use crate::wifi::{
     Channel,
     intel::{
@@ -91,6 +92,34 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200ManagementQueue<'a,
         let phy = &mut self.peer().binding.power.phy;
         let command = phy.context_removal(seat, definition)?;
         Some((command.id(), command.bytes().to_vec()))
+    }
+
+    /// The internal MLO scan of `request`'s channels beside firmware link
+    /// `link`.
+    pub fn internal_scan(
+        &mut self,
+        request: &crate::wifi::scan::Request,
+        local: crate::Mac,
+        link: u8,
+    ) -> Result<(Id, Vec<u8>), Ax200ScanError> {
+        let version = scan_wire::validate(self.firmware())?;
+        let bytes = scan_wire::encode_internal(request, version, local, link)?;
+        Ok((scan_wire::REQUEST, bytes))
+    }
+
+    /// The running scan's end, once all it heard was taken.
+    pub fn take_scan_completion(&mut self) -> Option<FirmwareNotification> {
+        let boot = self.peer().binding.power.phy.boot();
+        let end = (scan_wire::COMPLETE_OPCODE, scan_wire::COMPLETE_GROUP);
+        if boot.hcmd.matching_precedes((0xc1, 0), end) {
+            return None;
+        }
+        boot.take_matching_notification(end.0, end.1)
+    }
+
+    /// The abort of the one scan firmware runs.
+    pub fn scan_abort() -> (Id, Vec<u8>) {
+        (scan_wire::ABORT, alloc::vec![0; 8])
     }
 
     /// The chain's transmit limit for the firmware link `seat`, within `dbm`.

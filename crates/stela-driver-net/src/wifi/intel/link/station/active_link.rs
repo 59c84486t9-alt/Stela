@@ -12,10 +12,6 @@ use super::*;
 
 /// The IDs the link the chain did not raise holds.
 const FIRST: u8 = 0;
-/// How long a heard BSS counts: `iwl_mld_set_link_sel_data` ignores what the
-/// scan before last saw, and Linux runs its scans 5 s apart.
-const FRESH_US: u64 = 5_000_000;
-
 /// What firmware keeps of one link.
 pub(super) struct LinkCommands {
     pub(super) wide_ofdma: Option<ChannelDefinition>,
@@ -182,12 +178,13 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
     }
 
     /// `iwl_mld_get_link_grade` of `context`'s link as the last scan heard
-    /// it.
-    fn heard_grade(&self, context: &AssociationContext, now: u64) -> Option<u32> {
-        let heard = self.client.observed.iter().find(|heard| {
-            heard.observation.bss().bssid == context.bssid()
-                && now.saturating_sub(heard.at) <= FRESH_US
-        })?;
+    /// it: `iwl_mld_set_link_sel_data` ignores what that scan did not see.
+    fn heard_grade(&self, context: &AssociationContext) -> Option<u32> {
+        let since = self.client.link_scan.started?;
+        let heard =
+            self.client.observed.iter().find(|heard| {
+                heard.observation.bss().bssid == context.bssid() && heard.at >= since
+            })?;
         let (bss, definition) = (heard.observation.bss(), context.definition());
         grade::grade(
             bss.channel.band,
@@ -200,14 +197,11 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
 
     /// `_iwl_mld_select_links` for one active link, the best of those the last
     /// scan heard.
-    pub(super) fn select_link(&mut self, queue: &mut Queue<Q, B>, now: u64) -> Result<(), Error> {
+    pub(super) fn select_link(&mut self, queue: &mut Queue<Q, B>) -> Result<(), Error> {
         let (Some(active), Some(dormant)) = (&self.client.context, &self.client.dormant) else {
             return Ok(());
         };
-        match (
-            self.heard_grade(active, now),
-            self.heard_grade(dormant, now),
-        ) {
+        match (self.heard_grade(active), self.heard_grade(dormant)) {
             (_, None) => Ok(()),
             (Some(active), Some(dormant)) if active >= dormant => Ok(()),
             _ => self.switch_link(queue),
@@ -243,7 +237,9 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             .filter(|&tid| queue.has_queue(tid))
             .collect();
         let power_version = version_of(queue.firmware(), commands::MAC_POWER);
+        let now = self.clock.now_us();
         let client = &mut self.client;
+        client.link_scan.activated = now;
         for (id, bytes) in phy {
             client.command(id, bytes);
         }
