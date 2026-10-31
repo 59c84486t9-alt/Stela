@@ -15,7 +15,10 @@ use crate::wifi::{
         mcu::{client::MldLink, key::Context as KeyContext},
     },
     security::KeySlot,
-    station::AssociationContext,
+    station::{
+        AssociationContext,
+        wire::link_changes::{mappings, removals},
+    },
 };
 use alloc::borrow::Cow;
 use station::multi_link::Affiliation;
@@ -37,6 +40,20 @@ pub(super) struct LinkKey<'a> {
     pub(super) index: u8,
     pub(super) material: &'a [u8],
     pub(super) seed: ReplaySeed,
+}
+
+/// Whether `elements` take any of `links` from the association, which goes
+/// on in mac80211 but ends here: the links stay up together until it does, and
+/// the next join leaves out what the AP no longer offers.
+fn taking_a_link(links: u16, elements: &[u8]) -> bool {
+    let removed = removals(elements)
+        .is_some_and(|removed| removed.iter().any(|&(link, _)| links & 1 << link != 0));
+    let barred = mappings(elements).map_or(true, |mappings| {
+        mappings
+            .iter()
+            .any(|mapping| mapping.switch_time != 0 && links & !mapping.links != 0)
+    });
+    removed || barred
 }
 
 /// Another link of an AP MLD association, as `mt7925_mac_link_bss_add` and
@@ -559,6 +576,28 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         Ok(())
     }
 
+    /// A beacon of the association of `setup` took one of its links: report it
+    /// once and let the association go.
+    pub(super) fn follow_links(
+        s: &mut Owned<I, Q, C>,
+        setup: &AssociationContext,
+        elements: &[u8],
+    ) {
+        let Some(affiliation) = setup.affiliation() else {
+            return;
+        };
+        let links = s
+            .links
+            .iter()
+            .fold(1 << affiliation.link_id, |links, link| {
+                links | 1 << link.link_id
+            });
+        if taking_a_link(links, elements) {
+            s.link_taken = true;
+            s.csa.drop_connection();
+        }
+    }
+
     /// `mt7925_change_vif_links` restoring the single-link station once the
     /// association's peers retired.
     pub(super) fn unbind_links(s: &mut Owned<I, Q, C>) -> Result<(), Error> {
@@ -571,5 +610,36 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             .map_err(|e| Error::Bootstrap(super::super::Error::Interface(e)))?;
         s.phase = Phase::Idle;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_link_of_ours_going_ends_the_association_and_a_stranger_does_not() {
+        let links = 1 << 3 | 1 << 5;
+        let removing = |link: u8| vec![255, 9, 107, 2, 0, 1, 0, 3, link, 0, 1];
+        assert!(taking_a_link(links, &removing(5)));
+        assert!(!taking_a_link(links, &removing(6)));
+        assert!(!taking_a_link(links, &[]));
+    }
+
+    #[test]
+    fn a_mapping_ends_the_association_only_when_it_comes_and_leaves_a_link_out() {
+        let links = 1 << 3 | 1 << 5;
+        let mapped = |control: u8, to: u8| {
+            let mut element = vec![255, 13, 109, control, 0xff, 9, 0];
+            element.extend([to; 8]);
+            element
+        };
+        assert!(taking_a_link(links, &mapped(2 | 0x08 | 0x20, 1 << 3)));
+        assert!(!taking_a_link(
+            links,
+            &mapped(2 | 0x08 | 0x20, 1 << 3 | 1 << 5)
+        ));
+        // Refused outright, as mac80211 disconnects on it.
+        assert!(taking_a_link(links, &mapped(0x08 | 0x20, 1 << 3)));
     }
 }

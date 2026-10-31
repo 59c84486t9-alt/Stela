@@ -287,6 +287,8 @@ struct Owned<I: BarIo, Q: QueueIo, C: 'static> {
     single_link: Option<Context>,
     /// An AP MLD association's other links.
     links: Vec<multi_link::Link<C>>,
+    /// A beacon took one of the association's links.
+    link_taken: bool,
 }
 /// On uncertain/live Drop keep the entire controller, station, real key
 /// material history and resources. No new owner may reset their PN.
@@ -382,6 +384,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 six_ghz: None,
                 single_link: None,
                 links: Vec::new(),
+                link_taken: false,
             })),
         })
     }

@@ -102,6 +102,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         // mac80211 processes a beacon's channel switch elements first.
         if subtype == 0x0080 {
             Self::process_channel_switch(s, elements, csa::Source::Beacon, None);
+            Self::follow_links(s, &joined, elements);
         }
         let modern = s.modern.as_ref().ok_or(Error::WrongPhase)?;
         // mac80211 `ieee80211_handle_bss_capability`: on 2.4 GHz the slot
