@@ -594,6 +594,14 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         let aid = context.response().aid;
         let he = negotiated.he.is_some();
         let antennas = queue.antennas();
+        let definition = context.definition();
+        let phy = if definition.width == phy::Width::Mhz20 {
+            Vec::new()
+        } else {
+            queue
+                .phy_changed(&definition)
+                .ok_or(Error::Refused("channel width"))?
+        };
         let firmware = queue.firmware();
         let link_version = firmware
             .command_version(commands::LINK_CONFIG.group, commands::LINK_CONFIG.opcode)
@@ -642,6 +650,9 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             peer_state(context, explicit_mfp, self.client.port_open),
         );
         let client = &mut self.client;
+        for (id, bytes) in phy {
+            client.command(id, bytes);
+        }
         client.command(commands::MAC_CONFIG, commands::mac_config(mac));
         client.command(commands::LINK_CONFIG, link);
         client.command(commands::RATE_CONFIG, rates);

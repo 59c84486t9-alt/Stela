@@ -5,6 +5,7 @@
 //! Original-owner unbound PHY0 and its complete RX-chain configuration.
 //! No MAC binding, autonomous response, station or data queue is created.
 use super::*;
+use crate::wifi::station::{operations::ChannelDefinition, phy::Width};
 use regulatory::Operation;
 mod tx_power;
 pub use tx_power::{
@@ -30,6 +31,7 @@ const RLC: Id = Id {
 pub enum PhyCommandKind {
     Add,
     ReceiveChains,
+    Modify,
     Remove,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -150,6 +152,18 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Phy<'a, Q, B, O> {
     /// allocated unbound PHY. This never grants association or transmission.
     pub fn phy_id_and_color(&self) -> Option<u32> {
         (self.phase == Ax200PhyPhase::BindingRequired).then_some(0)
+    }
+    /// `iwl_mvm_phy_ctxt_changed`: the commands that widen the bound context
+    /// to `definition`, or none for a width firmware does not take.
+    pub(in crate::wifi::intel::boot) fn changed(
+        &mut self,
+        definition: &ChannelDefinition,
+    ) -> Option<Vec<PhyCommand>> {
+        let ultra_high_band = self.boot().firmware.supports_capability(48);
+        let add = self.commands.first()?;
+        let modified = modified(add, definition, ultra_high_band)?;
+        let chains = self.commands.get(1).cloned();
+        Some(core::iter::once(modified).chain(chains).collect())
     }
     pub fn take_other_notification(&mut self) -> Option<FirmwareNotification> {
         self.scan.take_other_notification()
@@ -484,12 +498,104 @@ fn configuration(
     Ok(commands)
 }
 
+/// `iwl_mvm_get_ctrl_pos`: the two low bits and the extension bit count 20 MHz
+/// steps from the nearest edge of the center, the above bit its side.
+fn control_position(offset_mhz: i32) -> u8 {
+    if offset_mhz == 0 {
+        return 0;
+    }
+    let steps = ((offset_mhz.unsigned_abs() - 10) / 20) as u8;
+    (steps & 3) | ((steps & 4) << 1) | (u8::from(offset_mhz > 0) * 4)
+}
+
+/// `iwl_mvm_phy_ctxt_cmd_data`: `add` moved to `definition`'s width. 80+80 MHz
+/// has no firmware width and no Intel capability offers it.
+fn modified(
+    add: &PhyCommand,
+    definition: &ChannelDefinition,
+    ultra_high_band: bool,
+) -> Option<PhyCommand> {
+    let width = match definition.width {
+        Width::Mhz20 => 0,
+        Width::Mhz40 => 1,
+        Width::Mhz80 => 2,
+        Width::Mhz160 => 3,
+        Width::Mhz320 => 4,
+        Width::Mhz80P80 => return None,
+    };
+    let mut bytes = add.bytes;
+    bytes[4..8].copy_from_slice(&2u32.to_le_bytes());
+    let at = if ultra_high_band { 13 } else { 10 };
+    bytes[at] = width;
+    bytes[at + 1] = control_position(definition.control_offset_mhz());
+    Some(PhyCommand {
+        kind: PhyCommandKind::Modify,
+        id: PHY,
+        bytes,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     extern crate std;
 
     use super::*;
     use crate::wifi::intel::firmware::Firmware;
+
+    #[test]
+    fn a_wide_channel_names_the_control_channels_place_in_it() {
+        for (offset, position) in [
+            (0, 0),
+            (-10, 0),
+            (10, 4),
+            (-30, 1),
+            (30, 5),
+            (-70, 3),
+            (70, 7),
+            (-90, 8),
+            (90, 12),
+            (-150, 11),
+            (150, 15),
+        ] {
+            assert_eq!(control_position(offset), position, "{offset}");
+        }
+    }
+
+    #[test]
+    fn a_modified_context_keeps_what_it_was_added_with() {
+        let bytes = image(4, 2, true, false, 3);
+        let firmware = Firmware::parse(&bytes).unwrap();
+        let channel = Channel {
+            number: 36,
+            frequency_mhz: 5180,
+            band: Band::Ghz5,
+        };
+        let commands = configuration(&firmware, 3, channel, PowerMode::ContinuouslyAwake).unwrap();
+        let definition = ChannelDefinition {
+            control: channel,
+            width: Width::Mhz80,
+            center1_mhz: 5210,
+            center2_mhz: None,
+            punctured: 0,
+        };
+        let command = modified(&commands[0], &definition, true).unwrap();
+        assert_eq!(command.kind, PhyCommandKind::Modify);
+        assert_eq!(command.bytes[4], 2);
+        assert_eq!(command.bytes[8], 36);
+        assert_eq!(command.bytes[12..15], [0, 2, 1]);
+        assert_eq!(command.bytes[16..], commands[0].bytes[16..]);
+        // Without the capability a channel info is four bytes shorter.
+        assert_eq!(
+            modified(&commands[0], &definition, false).unwrap().bytes[10..12],
+            [2, 1]
+        );
+        let unsupported = ChannelDefinition {
+            width: Width::Mhz80P80,
+            center2_mhz: Some(5530),
+            ..definition
+        };
+        assert!(modified(&commands[0], &unsupported, true).is_none());
+    }
 
     fn image(version: u8, rlc: u8, uhb: bool, cdb: bool, antennas: u8) -> Vec<u8> {
         let mut bytes = alloc::vec![0; 88];
