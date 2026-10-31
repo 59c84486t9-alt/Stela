@@ -620,9 +620,21 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
     /// `iwl_mvm_mld_assign_vif_chanctx`: tell firmware what a 6 GHz AP's power
     /// type and envelopes allow before the first frame to it.
     fn limit_six_ghz_power(&mut self, queue: &mut Queue<Q, B>) {
-        let Some(bss) = self.selected.as_ref().map(|selected| &selected.bss) else {
+        let Some(selected) = &self.selected else {
             return;
         };
+        if let Some(bytes) = self.six_ghz_power(queue, &selected.bss, 0) {
+            self.client.command(commands::POWER_CONSTRAINTS, bytes);
+        }
+    }
+
+    /// What firmware's link `seat` hears of `bss`, an AP on 6 GHz.
+    pub(super) fn six_ghz_power(
+        &self,
+        queue: &mut Queue<Q, B>,
+        bss: &Bss,
+        seat: u8,
+    ) -> Option<Vec<u8>> {
         let widest = self.widest(bss.channel.band);
         let flags = self
             .client
@@ -630,19 +642,13 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             .iter()
             .find(|(channel, _)| *channel == bss.channel)
             .map_or(0, |(_, flags)| *flags);
-        let (Some(_), Ok(operations)) = (
-            queue.firmware().command_version(
-                commands::POWER_CONSTRAINTS.group,
-                commands::POWER_CONSTRAINTS.opcode,
-            ),
-            Operations::parse(&bss.elements),
-        ) else {
-            return;
-        };
+        queue.firmware().command_version(
+            commands::POWER_CONSTRAINTS.group,
+            commands::POWER_CONSTRAINTS.opcode,
+        )?;
+        let operations = Operations::parse(&bss.elements).ok()?;
         let six = operations.he.as_ref().and_then(|he| he.six_ghz);
-        let Some(ap_type) = six.and_then(|six| PowerType::of((six[1] & 0x78) >> 3, flags)) else {
-            return;
-        };
+        let ap_type = PowerType::of((six?[1] & 0x78) >> 3, flags)?;
         let mut envelope = PowerEnvelope::parse(&bss.elements);
         let ap = operations
             .channel(bss.channel, phy::Mode::Eht, None)
@@ -653,8 +659,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             Ok(ap) => envelope.fit(&ap, &ap.narrowed_to(widest)),
             Err(_) => envelope = PowerEnvelope::none(),
         }
-        let bytes = commands::power_constraints(ap_type, &envelope);
-        self.client.command(commands::POWER_CONSTRAINTS, bytes);
+        Some(commands::power_constraints(seat, ap_type, &envelope))
     }
 
     /// `iwl_mld_set_wifi_gen`'s MLD case: firmware translates an MLD's
@@ -2029,6 +2034,10 @@ impl<Q: BootIo, B: BiosIo> Radio for Wifi<Q, B> {
             )
     }
 
+    fn six_ghz_links(&self) -> bool {
+        true
+    }
+
     fn eml_capabilities(&self) -> u16 {
         if self.client.eml_capable {
             emlsr::CAPABILITIES
@@ -2171,6 +2180,7 @@ impl<Q: BootIo, B: BiosIo> Radio for Wifi<Q, B> {
         handle: usize,
         selection: Selection,
         _: (),
+        multi_link: Option<Affiliation>,
         budget_us: u64,
     ) -> Result<Arc<external::Session>, Error> {
         let observed = self.observed(handle)?;
@@ -2187,13 +2197,13 @@ impl<Q: BootIo, B: BiosIo> Radio for Wifi<Q, B> {
         }
         let session = client
             .station
-            .prepare_six_ghz_authentication(observed, selection, local, None, now, budget_us)
+            .prepare_six_ghz_authentication(observed, selection, local, multi_link, now, budget_us)
             .map_err(Error::Station)?;
         client
             .station
             .commit_six_ghz_authentication(session.clone(), now)
             .map_err(Error::Station)?;
-        self.raise(&bss, None, Plan::Exchange)?;
+        self.raise(&bss, multi_link, Plan::Exchange)?;
         Ok(session)
     }
 

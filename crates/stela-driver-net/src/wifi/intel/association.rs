@@ -305,10 +305,11 @@ const fn firmware_category(aci: usize) -> usize {
     }
 }
 
-/// `iwl_mvm_send_ap_tx_power_constraint_cmd` for link 0 of a station, with
+/// `iwl_mvm_send_ap_tx_power_constraint_cmd` for a station's `link`, with
 /// `iwl_mvm_tpe_sta_cmd_data`'s stricter of the AP's own and client limits.
-pub fn power_constraints(ap_type: PowerType, envelope: &PowerEnvelope) -> Vec<u8> {
+pub fn power_constraints(link: u8, ap_type: PowerType, envelope: &PowerEnvelope) -> Vec<u8> {
     let mut bytes = alloc::vec![0; 28];
+    bytes[0] = link;
     bytes[2] = match ap_type {
         PowerType::LowPowerIndoor => 0,
         PowerType::StandardPower => 1,
@@ -1151,9 +1152,9 @@ mod tests {
         envelope.max_local[0].power[0] = 30;
         envelope.max_client[0].power[0] = 20;
         envelope.psd_client[0].power[15] = -8;
-        let bytes = power_constraints(PowerType::VeryLowPower, &envelope);
+        let bytes = power_constraints(1, PowerType::VeryLowPower, &envelope);
         assert_eq!(bytes.len(), 28);
-        assert_eq!(bytes[..4], [0, 0, 2, 0]);
+        assert_eq!(bytes[..4], [1, 0, 2, 0]);
         assert_eq!(bytes[4..6], [20, 127]);
         assert_eq!(bytes[23..25], [127, 0xf8]);
         assert_eq!(bytes[25..], [0; 3]);

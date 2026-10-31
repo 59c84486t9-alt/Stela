@@ -127,6 +127,10 @@ pub trait Radio: Link {
     fn probes(&self, channel: Channel) -> bool;
     /// The Supported Channels of `band`, which a spectrum-managed request names.
     fn supported_channels(&self, band: Band) -> &'static [u8];
+    /// Whether a multi-link association may use a 6 GHz link.
+    fn six_ghz_links(&self) -> bool {
+        false
+    }
     /// `eml_capabilities` of `struct wiphy_iftype_ext_capab`.
     fn eml_capabilities(&self) -> u16 {
         0
@@ -167,6 +171,7 @@ pub trait Radio: Link {
         handle: Self::Handle,
         selection: Selection,
         profile: Self::Profile,
+        multi_link: Option<Affiliation>,
         budget_us: u64,
     ) -> Result<Arc<external::Session>, Self::Error>;
     fn transmit_external_authentication(
@@ -768,6 +773,7 @@ impl<R: Radio> Keeper<R> {
                 handle,
                 selection,
                 profile,
+                links.as_ref().map(|links| links.affiliation),
                 SAE_BUDGET_US,
             )
         } else {
@@ -812,9 +818,10 @@ impl<R: Radio> Keeper<R> {
     }
 
     /// `ieee80211_mgd_assoc` for an AP MLD: when the NIC reports MLO and
-    /// `bss`, on 2.4 or 5 GHz, is a link of an AP MLD that `request`
-    /// associates with as EHT with PMF, the station takes a random address on
-    /// it and requests one more link as `mt76_select_links` picks it.
+    /// `bss` is a link of an AP MLD that `request` associates with as EHT
+    /// with PMF, on 6 GHz only for a radio with `six_ghz_links`: the station
+    /// takes a random address on it and requests one more link as
+    /// `mt76_select_links` picks it.
     fn links(
         &self,
         bss: &Bss,
@@ -828,21 +835,24 @@ impl<R: Radio> Keeper<R> {
             .advertisement(bss.channel.band)
             .map_err(|error| format!("{error}"))?
             .multi_link;
-        if bss.channel.band == Band::Ghz6
+        let six_ghz = self.link.six_ghz_links();
+        if (bss.channel.band == Band::Ghz6 && !six_ghz)
             || multi_link != Some(true)
             || request.pmf().is_none()
             || request.modern().map(|modern| modern.mode()) != Some(Mode::Eht)
         {
             return Ok(None);
         }
-        // The links run on 2.4 and 5 GHz channels that may transmit.
+        // The links run on channels that may transmit, and on 6 GHz under a
+        // power type the channel allows.
         let usable = |other: &Bss| {
-            other.channel.band != Band::Ghz6
-                && self
-                    .link
-                    .channels(other.channel.band)
+            let channels = self.link.channels(other.channel.band);
+            match other.channel.band {
+                Band::Ghz6 => six_ghz && power_type_usable(other, &channels),
+                _ => channels
                     .iter()
-                    .any(|&(channel, _)| channel == other.channel)
+                    .any(|&(channel, _)| channel == other.channel),
+            }
         };
         let observed = self.link.bss();
         let other = other_link(bss, ap, &observed, usable)

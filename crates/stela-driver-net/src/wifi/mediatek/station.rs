@@ -252,6 +252,7 @@ impl<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> Ra
         handle: BssHandle,
         selection: Selection,
         profile: Profile,
+        _: Option<Affiliation>,
         budget_us: u64,
     ) -> Result<Arc<external::Session>, LinkControlError> {
         self.link

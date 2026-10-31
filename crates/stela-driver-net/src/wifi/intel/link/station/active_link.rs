@@ -226,7 +226,8 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         Some(emlsr::Graded {
             grade: grade::grade(
                 band,
-                bss.signal_dbm,
+                bss.signal_dbm
+                    .map(|signal| grade::data_signal(signal, &bss.elements, &definition)),
                 &bss.elements,
                 definition.width,
                 definition.punctured,
@@ -298,6 +299,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         let (power_id, power_limit) = queue
             .transmit_limit(new, dbm)
             .ok_or(Error::Refused("transmit power"))?;
+        let constraints = self.six_ghz_power(queue, to.beacon(), new);
         let tids = station_queues(queue);
         let now = self.clock.now_us();
         let client = &mut self.client;
@@ -319,6 +321,9 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         client.command(commands::STATION_CONFIG, target.peer);
         client.command(commands::RATE_CONFIG, target.rates);
         client.command(power_id, power_limit);
+        if let Some(bytes) = constraints {
+            client.command(commands::POWER_CONSTRAINTS, bytes);
+        }
         client.move_resources(&tids, before, both);
         client.command(
             commands::LINK_CONFIG,

@@ -3,6 +3,7 @@
 //! `iwl_mld_get_link_grade`: what a link is worth from its signal, width,
 //! load and puncturing.
 use super::*;
+use crate::wifi::station::operations::mhz;
 
 /// A signal in the 2.4 GHz and other bands' columns, and its grade.
 type Line = (i8, i8, u32);
@@ -126,8 +127,90 @@ const GRADES_320: [Line; 23] = same([
 
 /// `WLAN_EID_QBSS_LOAD`.
 const BSS_LOAD: u8 = 11;
+/// `IEEE80211_HE_6GHZ_OPER_CTRL_DUP_BEACON`.
+const DUPLICATE_BEACON: u8 = 4;
+/// `IEEE80211_6GHZ_CTRL_REG_VLP_AP`.
+const VERY_LOW_POWER: u8 = 2;
+/// How far `iwl_mld_get_link_grade` trusts a 6 GHz beacon to understate data.
+const DEFAULT_GAIN: i8 = 4;
 /// `SCALE_FACTOR`, against which a channel's load runs.
 pub(super) const SCALE: u32 = 256;
+
+/// `iwl_mld_get_dup_beacon_rssi_adjust`: an AP that duplicates its beacons
+/// across `width` is that much louder in data.
+fn duplicate_beacon_gain(control: u8, width: phy::Width) -> i8 {
+    if control & DUPLICATE_BEACON == 0 {
+        return 0;
+    }
+    match width {
+        phy::Width::Mhz40 => 3,
+        phy::Width::Mhz80 => 6,
+        phy::Width::Mhz160 => 9,
+        phy::Width::Mhz320 => 12,
+        phy::Width::Mhz20 | phy::Width::Mhz80P80 => 0,
+    }
+}
+
+/// `iwl_mld_get_psd_eirp_rssi_adjust`: how much more an AP limited by
+/// `envelope` may send across all of `definition` than on 20 MHz.
+fn envelope_gain(envelope: &PowerEnvelope, definition: &ChannelDefinition, very_low: bool) -> i8 {
+    let width = mhz(definition.width);
+    let index = match width {
+        20 => 0,
+        40 => 1,
+        80 => 2,
+        160 => 3,
+        320 => 4,
+        _ => return 0,
+    };
+    let ap = if very_low { 14 } else { 23 };
+    let (psd_local, psd_client) = (&envelope.psd_local[0], &envelope.psd_client[0]);
+    let (eirp_local, eirp_client) = (&envelope.max_local[0], &envelope.max_client[0]);
+    let psd_narrow = psd_local
+        .primary(definition)
+        .min(psd_client.primary(definition));
+    let eirp_narrow = eirp_local.limit(0).min(eirp_client.limit(0));
+    let subchannels = (width / 20) as usize;
+    let psd_wide = psd_local
+        .mean(subchannels)
+        .min(psd_client.mean(subchannels));
+    let eirp_wide = eirp_local.limit(index).min(eirp_client.limit(index));
+    let narrow = ap.min(eirp_narrow).min(psd_narrow);
+    // 10 log10(subchannels), as 3 for each doubling.
+    let boost = 3 * subchannels.ilog2() as i8;
+    let wide = ap.min(eirp_wide).min(psd_wide.saturating_add(boost));
+    wide.saturating_sub(narrow).max(0)
+}
+
+/// `iwl_mld_get_link_grade`: on 6 GHz the signal of an AP's beacons, heard at
+/// `signal` with `elements`, is below that of its data on `definition`.
+pub(super) fn data_signal(signal: i8, elements: &[u8], definition: &ChannelDefinition) -> i8 {
+    if definition.control.band != Band::Ghz6 || signal == 0 {
+        return signal;
+    }
+    let operations = Operations::parse(elements).ok();
+    let operations = operations.as_ref();
+    let control = operations
+        .and_then(|operations| operations.he.as_ref()?.six_ghz)
+        .map(|six| six[1]);
+    let mut gain = duplicate_beacon_gain(control.unwrap_or(0), definition.width);
+    if gain == 0 {
+        let channel = definition.control;
+        let ap = operations.and_then(|operations| {
+            let eht = operations.channel(channel, phy::Mode::Eht, None);
+            eht.or_else(|_| operations.channel(channel, phy::Mode::He, None))
+                .ok()
+        });
+        let mut envelope = PowerEnvelope::parse(elements);
+        match ap {
+            Some(ap) => envelope.fit(&ap, definition),
+            None => envelope = PowerEnvelope::none(),
+        }
+        let very_low = control.is_some_and(|control| (control & 0x78) >> 3 == VERY_LOW_POWER);
+        gain = envelope_gain(&envelope, definition, very_low);
+    }
+    signal.saturating_add(if gain == 0 { DEFAULT_GAIN } else { gain })
+}
 
 /// `iwl_mld_get_chan_load`: the BSS Load element's channel utilization, or
 /// the band's default. `by_us` is the percent the station's own frames take
@@ -202,6 +285,46 @@ mod tests {
 
     const LOW: Band = Band::Ghz2;
     const HIGH: Band = Band::Ghz5;
+
+    /// An HE operation with 6 GHz information of `control`, 80 MHz at
+    /// channel 7.
+    fn six_ghz(control: u8) -> Vec<u8> {
+        alloc::vec![255, 12, 36, 0, 0, 2, 0, 0xfc, 0xff, 1, 2 | control, 7, 0, 6]
+    }
+
+    fn eighty(band: Band) -> ChannelDefinition {
+        ChannelDefinition {
+            control: Channel {
+                band,
+                number: 1,
+                frequency_mhz: 5955,
+            },
+            width: phy::Width::Mhz80,
+            center1_mhz: 5985,
+            center2_mhz: None,
+            punctured: 0,
+        }
+    }
+
+    #[test]
+    fn a_6_ghz_beacon_understates_data_by_its_duplicates_or_its_envelope() {
+        let definition = eighty(Band::Ghz6);
+        assert_eq!(data_signal(-60, &[], &definition), -56, "the default");
+        assert_eq!(data_signal(0, &[], &definition), 0, "no measurement");
+        assert_eq!(data_signal(-60, &[], &eighty(HIGH)), -60);
+        assert_eq!(
+            data_signal(-60, &six_ghz(DUPLICATE_BEACON), &definition),
+            -54
+        );
+        // 10 dBm/MHz on each of four subchannels gives 6 dB more over 80 MHz.
+        let mut limited = six_ghz(0);
+        limited.extend([195, 5, 3 | 1 << 3, 20, 20, 20, 20]);
+        assert_eq!(data_signal(-60, &limited, &definition), -54);
+        // A very low power AP has no more than 14 dBm to spread.
+        let mut low = six_ghz(VERY_LOW_POWER << 3);
+        low.extend([195, 5, 3 | 1 << 3, 24, 24, 24, 24]);
+        assert_eq!(data_signal(-60, &low, &definition), -58);
+    }
 
     #[test]
     fn a_link_is_graded_by_its_signal_width_load_and_puncturing() {
