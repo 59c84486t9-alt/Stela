@@ -12,6 +12,20 @@
 //! `device_rmrr_is_relaxable`). A display driver that maps those regions
 //! itself passes its function in `claimed_displays`, and the unit is taken.
 use alloc::vec::Vec;
+use core::ops::Range;
+
+/// The 4 KiB page span a DMA window needs, within the host's supported
+/// physical-address width. This describes geometry, not permission to map it.
+pub fn window_range(range: &Range<u64>, physical_bits: u8) -> Option<Range<u64>> {
+    if !(32..=52).contains(&physical_bits) || range.start >= range.end {
+        return None;
+    }
+    let end = range.end.checked_next_multiple_of(4096)?;
+    if end > 1u64 << physical_bits {
+        return None;
+    }
+    Some((range.start & !4095)..end)
+}
 
 /// One present PCI function: its requester ID, class code and, for a
 /// PCI-to-PCI bridge, its secondary and subordinate buses.
@@ -278,6 +292,31 @@ mod tests {
             (0x0200, [1, 8, 2], false, None),
         ]);
         enumerate(&[0], |rid, offset| space.get(&(rid, offset)).copied())
+    }
+
+    #[test]
+    fn window_geometry_rejects_empty_overflow_and_out_of_width_ranges() {
+        assert_eq!(
+            window_range(&(0x12345..0x12346), 48),
+            Some(0x12000..0x13000)
+        );
+        let limit = 1u64 << 52;
+        assert_eq!(
+            window_range(&(limit - 1..limit), 52),
+            Some(limit - 4096..limit)
+        );
+        for range in [
+            0..0,
+            0x1000..0x1000,
+            0..u64::MAX,
+            u64::MAX - 4096..u64::MAX,
+            limit..limit + 1,
+        ] {
+            assert_eq!(window_range(&range, 52), None);
+        }
+        for bits in [0, 31, 53, 64] {
+            assert_eq!(window_range(&(0x1000..0x2000), bits), None);
+        }
     }
 
     #[test]

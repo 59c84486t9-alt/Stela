@@ -919,8 +919,9 @@ impl Window {
     ) -> Result<Self, VtdError> {
         let mut pages = Vec::new();
         for range in ranges {
-            let start = range.start & !(PAGE as u64 - 1);
-            let end = range.end.next_multiple_of(PAGE as u64);
+            let range = crate::remapping::window_range(range, physical_bits)
+                .ok_or(VtdError::Unsupported)?;
+            let (start, end) = (range.start, range.end);
             if start >= end
                 || end > 1u64 << physical_bits
                 || end > 1u64 << (12 + 9 * u32::from(levels))

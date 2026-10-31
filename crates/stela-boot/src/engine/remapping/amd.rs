@@ -140,14 +140,13 @@ unsafe impl PageBacking for Borrowed {
     }
 }
 
-fn borrowed(range: &Range<u64>) -> Option<DmaPages> {
-    let start = range.start & !(PAGE - 1);
-    let end = range.end.next_multiple_of(PAGE);
-    let pages: Vec<u64> = (start..end).step_by(PAGE as usize).collect();
-    let bytes = pages.len() * PAGE as usize;
-    if pages.is_empty() {
-        return None;
-    }
+fn borrowed(range: &Range<u64>, physical_bits: u8) -> Option<DmaPages> {
+    let range = remapping::window_range(range, physical_bits)?;
+    let count = usize::try_from((range.end - range.start) / PAGE).ok()?;
+    let bytes = count.checked_mul(PAGE as usize)?;
+    let mut pages = Vec::new();
+    pages.try_reserve_exact(count).ok()?;
+    pages.extend(range.step_by(PAGE as usize));
     PinnedPages::new(Box::new(Borrowed { pages }), bytes, PAGE as usize)
         .ok()
         .map(DmaPages::from)
@@ -367,8 +366,12 @@ pub(super) unsafe fn take(
                 .filter(|(rid, _)| requesters.contains(rid))
                 .map(|(_, range)| range.clone()),
         );
-        let Some(ranges) = window.iter().map(borrowed).collect::<Option<Vec<_>>>() else {
-            left(&"an empty window range");
+        let Some(ranges) = window
+            .iter()
+            .map(|range| borrowed(range, physical_bits))
+            .collect::<Option<Vec<_>>>()
+        else {
+            left(&"a DMA window range is empty, out of bounds or cannot be allocated");
             continue;
         };
         // SAFETY: forwarded: the requesters DMA only to the drivers' region
