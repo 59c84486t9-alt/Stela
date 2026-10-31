@@ -643,8 +643,12 @@ fn linux_archive(
 fn upstream_build(build: &cc::Build) -> cc::Build {
     let mut build = build.clone();
     // The scheduler's shared units include its internal header as "sched.h";
-    // Stela's scheduler supplies what they take from it.
-    build.flag(format!("-iquote{COMPAT}/kernel/sched"));
+    // Stela's scheduler supplies what they take from it. As Kbuild builds
+    // every profile: Linux relies on the optimizer to drop the calls its
+    // configuration disables.
+    build
+        .flag(format!("-iquote{COMPAT}/kernel/sched"))
+        .opt_level(2);
     build
 }
 

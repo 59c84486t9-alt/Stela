@@ -59,10 +59,6 @@ const OPEN: &[(&str, &[&str])] = &[
         "HDMI audio",
         &["device_link_add", "platform_device_unregister"],
     ),
-    (
-        "debugfs",
-        &["seq_lseek", "seq_read", "single_open", "single_release"],
-    ),
 ];
 
 /// The unit of nouveau's own `module_init`.
