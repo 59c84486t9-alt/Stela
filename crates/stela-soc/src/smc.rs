@@ -126,9 +126,18 @@
 //!
 //! ADC sensors. `aDC#` is the number of PMU ADC channels the SMC exports
 //! as `AppleARMPMUSensor`s: `AppleSMC::start` (file 0x2da7c80..0x2da7d58)
-//! reads it (4 bytes) and creates one sensor per index from the `aDC?`
-//! keys. The emulated SMC measures no ADC channels, so it reads 0 and
-//! AppleSMC creates none.
+//! reads it (4 bytes) and creates one sensor per index. `_createSensor`
+//! (file 0x2da84fc) writes the index to `aDC?` and reads back the channel's
+//! key, as a little-endian value: `T` for temperature, `P` for the PMU, the
+//! index character and `d` make `PMU tdev<n>`. A channel with a key of its
+//! own reads it (`_sensorCallback`, 8 bytes); `AppleARMPMUTempSensor::
+//! copyEvent` passes the low word on as an IOFixed temperature. The kernel's
+//! gPTP manager will not start without its board's sensor
+//! (`IOTimeSyncgPTPManager::start`, `TemperatureSensorName`, `PMU tdev8` on
+//! J473), and clocksyncd serves no client without the manager, so the SMC
+//! exports the eight device channels. It measures nothing: they all read
+//! [`BOARD_TEMPERATURE`], a fixed value, not a thermal model. The other
+//! channels (`tdie`, `tcal`, the rails) stay unexported.
 //!
 //! The table holds those keys, `#KEY`, the `NTAP` notification-enable
 //! flag, and the PMU GPIO keys the DeviceTree's `pKW4` platform functions
@@ -139,8 +148,8 @@
 //! read the latch for the pin's level. Any other key answers KEY_NOT_FOUND,
 //! as an SMC without it does; a key is added only with its established
 //! size and meaning, never a guessed value. The type codes of `MBSE`,
-//! `NESN`, `MBSW`, `MESS`, `D1Vn` and `aDC#` are inferred from their sizes
-//! and uses; no client reads them. The 26A434 J473AP census of every key
+//! `NESN`, `MBSW`, `MESS`, `D1Vn`, `aDC#`, `aDC?` and `TP<n>d` are inferred
+//! from their sizes and uses; no client reads them. The 26A434 J473AP census of every key
 //! the kernel's SMC clients and the restore ramdisk use, with the reason
 //! each absent key stays absent, is in docs/research/desktop-requirements.md
 //! (SMC key census).
@@ -201,6 +210,23 @@ const WAKE_SOURCES: u32 = code(b"MBSW");
 const SHUTDOWN_CAUSE: u32 = code(b"MESS");
 const PORT_CONTROLLER_LOCK: u32 = code(b"D1Vn");
 const ADC_SENSOR_COUNT: u32 = code(b"aDC#");
+const ADC_SENSOR: u32 = code(b"aDC?");
+
+/// The PMU's device temperature channels, `tdev1` to `tdev8`, by index.
+const ADC_SENSORS: [u32; 8] = [
+    code(b"TP1d"),
+    code(b"TP2d"),
+    code(b"TP3d"),
+    code(b"TP4d"),
+    code(b"TP5d"),
+    code(b"TP6d"),
+    code(b"TP7d"),
+    code(b"TP8d"),
+];
+
+/// What every exported temperature channel reads: 35 °C as an `ioft`, 16
+/// fraction bits (see the module comment).
+const BOARD_TEMPERATURE: i64 = 35 << 16;
 
 /// `D1Vn` values (see the module comment).
 const LOCK_RELEASED: u8 = 0;
@@ -322,8 +348,9 @@ impl Key {
 }
 
 /// The SMC's own keys, with their initial values (see the module comment).
-fn own_keys() -> [(u32, Key); 8] {
-    [
+fn own_keys() -> Vec<(u32, Key)> {
+    let adc_sensor_count = (ADC_SENSORS.len() as u32).to_le_bytes().to_vec();
+    let mut keys = vec![
         // The notification enable: AppleSMC::_smcInitNotifications and
         // Linux macsmc write the one-byte flag 1.
         (NOTIFICATIONS, Key::new(b"flag", READABLE | WRITABLE, 1)),
@@ -337,9 +364,24 @@ fn own_keys() -> [(u32, Key); 8] {
             PORT_CONTROLLER_LOCK,
             Key::new(b"flag", READABLE | WRITABLE, 1),
         ),
-        // No ADC channels.
-        (ADC_SENSOR_COUNT, Key::new(b"ui32", READABLE, 4)),
-    ]
+        (
+            ADC_SENSOR_COUNT,
+            Key {
+                value: adc_sensor_count,
+                ..Key::new(b"ui32", READABLE, 4)
+            },
+        ),
+        // Reads the key of the channel last written.
+        (ADC_SENSOR, Key::new(b"ui32", READABLE | WRITABLE, 4)),
+    ];
+    keys.extend(ADC_SENSORS.map(|name| {
+        let key = Key {
+            value: BOARD_TEMPERATURE.to_le_bytes().to_vec(),
+            ..Key::new(b"ioft", READABLE, 8)
+        };
+        (name, key)
+    }));
+    keys
 }
 
 use stela_soc_data::smc::WakeBits;
@@ -622,8 +664,15 @@ impl Smc {
         if size != key.value.len() {
             return Ok(SIZE_MISMATCH);
         }
-        let value = self.sram.get(size);
+        let mut value = self.sram.get(size);
         match name {
+            ADC_SENSOR => {
+                let channel = u32::from_le_bytes(value[..].try_into().expect("aDC? is four bytes"));
+                let Some(sensor) = ADC_SENSORS.get(channel as usize) else {
+                    return Ok(BAD_ARGUMENT);
+                };
+                value = sensor.to_le_bytes().to_vec();
+            }
             SYSTEM_EVENT => self.system_event(u32::from_le_bytes(
                 value[..].try_into().expect("MBSE is four bytes"),
             ))?,
