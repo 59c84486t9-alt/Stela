@@ -6,6 +6,10 @@
  * its gate page into the client's task, which then calls the native GPU
  * service with no kernel crossing. The gate's interrupt reports completed
  * GPU work; the kext counts it and notifies each client that asked.
+ *
+ * What a CPU reaches of a GPU's memory is the task's own: the kext wires the
+ * pages and names them to the gate, whose control page only the kernel maps,
+ * and they stay wired until the GPU no longer reaches them.
  */
 #pragma once
 
@@ -33,8 +37,15 @@ public:
 	IODeviceMemory *copyGateMemory(uint64_t page);
 	/* How many completion interrupts the gate has raised. */
 	uint64_t completions() const;
+	/*
+	 * Wires `length` bytes of the task at `address` and gives them to the
+	 * connection of gate page `page`, answering the handle, 0 on failure.
+	 */
+	uint64_t importMemory(uint64_t page, task_t task, mach_vm_address_t address, mach_vm_size_t length);
 
 private:
+	/* Unwires what the gate says the GPU no longer reaches. */
+	void retireMemory();
 	/* Maps the gate's control page and takes its interrupt. */
 	bool attachGate(IOService *provider);
 	static void interruptOccurred(OSObject *owner, IOInterruptEventSource *source, int count);
@@ -69,6 +80,7 @@ public:
 private:
 	static const IOExternalMethodDispatch methods[];
 	static IOReturn notifyCompletion(OSObject *target, void *reference, IOExternalMethodArguments *arguments);
+	static IOReturn importMemory(OSObject *target, void *reference, IOExternalMethodArguments *arguments);
 	/* With `lock` held: sends and releases the armed notification once `now` passes it. */
 	void deliver(uint64_t now);
 	/* Releases the armed notification unsent. */

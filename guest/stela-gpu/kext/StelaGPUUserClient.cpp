@@ -15,6 +15,13 @@ const IOExternalMethodDispatch StelaGPUUserClient::methods[kStelaGPUSelectorCoun
 		.checkScalarOutputCount = 0,
 		.checkStructureOutputSize = 0,
 	},
+	{
+		.function = &StelaGPUUserClient::importMemory,
+		.checkScalarInputCount = 2,
+		.checkStructureInputSize = 0,
+		.checkScalarOutputCount = 1,
+		.checkStructureOutputSize = 0,
+	},
 };
 
 /*
@@ -150,6 +157,23 @@ StelaGPUUserClient::notifyCompletion(OSObject *target, void *, IOExternalMethodA
 	// The count is read after arming, so a completion in between is never missed.
 	self->deliver(self->gpu->completions());
 	IOLockUnlock(self->lock);
+	return kIOReturnSuccess;
+}
+
+/* Runs on the calling thread, whose task the memory is. */
+IOReturn
+StelaGPUUserClient::importMemory(OSObject *target, void *, IOExternalMethodArguments *arguments)
+{
+	auto self = static_cast<StelaGPUUserClient *>(target);
+	if (self->gate == 0) {
+		return kIOReturnNotOpen;
+	}
+	uint64_t handle = self->gpu->importMemory(self->gate, current_task(), arguments->scalarInput[0],
+	    arguments->scalarInput[1]);
+	if (handle == 0) {
+		return kIOReturnNoMemory;
+	}
+	arguments->scalarOutput[0] = handle;
 	return kIOReturnSuccess;
 }
 

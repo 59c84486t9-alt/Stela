@@ -1,0 +1,873 @@
+/*
+ * Libraries, functions and what they reflect. Metal's own reflection classes
+ * have no public initializers, so these answer the same selectors themselves.
+ */
+#include "Bundle.h"
+
+static NSString *text_at(const uint8_t *bytes, uint32_t offset, uint32_t length)
+{
+	return [[NSString alloc] initWithBytes:bytes + offset length:length encoding:NSUTF8StringEncoding];
+}
+
+/* An `MTLDataType`'s packed bytes, of the scalars and vectors constants can be. */
+static NSUInteger data_type_bytes(NSUInteger type)
+{
+	static const struct {
+		NSUInteger first, element;
+	} kinds[] = {
+		{MTLDataTypeFloat, 4}, {MTLDataTypeHalf, 2},  {MTLDataTypeInt, 4},
+		{MTLDataTypeUInt, 4},  {MTLDataTypeShort, 2}, {MTLDataTypeUShort, 2},
+		{MTLDataTypeChar, 1},  {MTLDataTypeUChar, 1}, {MTLDataTypeBool, 1},
+		{MTLDataTypeLong, 8},  {MTLDataTypeULong, 8},
+	};
+	for (size_t i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++) {
+		if (type >= kinds[i].first && type < kinds[i].first + 4) {
+			return (type - kinds[i].first + 1) * kinds[i].element;
+		}
+	}
+	return 0;
+}
+
+/* The constant values an MTLFunctionConstantValues was given. */
+@interface StelaGPUConstant : NSObject {
+@public
+	NSUInteger _type, _index;
+}
+@property(copy) NSString *name;
+@property(copy) NSData *value;
+@end
+
+@implementation StelaGPUConstant
+@end
+
+/*
+ * MTLFunctionConstantValues has no public getters, so its public setters note
+ * what they are given in an object of the instance's own.
+ */
+static const void *const CONSTANTS = &CONSTANTS;
+
+static NSMutableArray *constants_of(id values)
+{
+	NSMutableArray *constants = objc_getAssociatedObject(values, CONSTANTS);
+	if (!constants) {
+		constants = [NSMutableArray arrayWithCapacity:4];
+		objc_setAssociatedObject(values, CONSTANTS, constants, OBJC_ASSOCIATION_RETAIN);
+	}
+	return constants;
+}
+
+static void note_constant(id values, const void *value, NSUInteger type, NSUInteger index, NSString *name)
+{
+	StelaGPUConstant *constant = [StelaGPUConstant new];
+	constant->_type = type;
+	constant->_index = index;
+	constant.name = name;
+	constant.value = [NSData dataWithBytes:value length:data_type_bytes(type)];
+	[constants_of(values) addObject:constant];
+}
+
+static void hook(Class class, SEL selector, id block)
+{
+	Method method = class_getInstanceMethod(class, selector);
+	if (method) {
+		method_setImplementation(method, imp_implementationWithBlock(block));
+	}
+}
+
+@interface StelaGPUConstantHooks : NSObject
+@end
+
+@implementation StelaGPUConstantHooks
+
++ (void)load
+{
+	Class class = [[NSClassFromString(@"MTLFunctionConstantValues") new] class];
+	IMP atIndex = method_getImplementation(class_getInstanceMethod(class, @selector(setConstantValue:type:atIndex:)));
+	IMP withName = method_getImplementation(class_getInstanceMethod(class, @selector(setConstantValue:type:withName:)));
+	IMP inRange = method_getImplementation(class_getInstanceMethod(class, @selector(setConstantValues:type:withRange:)));
+	IMP reset = method_getImplementation(class_getInstanceMethod(class, @selector(reset)));
+	hook(class, @selector(setConstantValue:type:atIndex:),
+	     ^(id self, const void *value, NSUInteger type, NSUInteger index) {
+		     note_constant(self, value, type, index, nil);
+		     ((void (*)(id, SEL, const void *, NSUInteger, NSUInteger))atIndex)(
+			     self, @selector(setConstantValue:type:atIndex:), value, type, index);
+	     });
+	hook(class, @selector(setConstantValue:type:withName:), ^(id self, const void *value, NSUInteger type, NSString *name) {
+		note_constant(self, value, type, 0, name);
+		((void (*)(id, SEL, const void *, NSUInteger, NSString *))withName)(
+			self, @selector(setConstantValue:type:withName:), value, type, name);
+	});
+	hook(class, @selector(setConstantValues:type:withRange:), ^(id self, const void *values, NSUInteger type, NSRange range) {
+		NSUInteger stride = data_type_bytes(type);
+		/* Three-lane vectors keep a fourth lane's room in an array. */
+		if (stride == 3 || stride == 6 || stride == 12 || stride == 24) {
+			stride = stride / 3 * 4;
+		}
+		for (NSUInteger i = 0; i < range.length; i++) {
+			note_constant(self, (const uint8_t *)values + i * stride, type, range.location + i, nil);
+		}
+		((void (*)(id, SEL, const void *, NSUInteger, NSRange))inRange)(
+			self, @selector(setConstantValues:type:withRange:), values, type, range);
+	});
+	hook(class, @selector(reset), ^(id self) {
+		[constants_of(self) removeAllObjects];
+		((void (*)(id, SEL))reset)(self, @selector(reset));
+	});
+}
+
+@end
+
+@implementation StelaGPUAttribute
+@end
+
+@implementation StelaGPUFunctionConstant
+@end
+
+@implementation StelaGPUType
+
+- (NSUInteger)dataType
+{
+	return _dataType;
+}
+
+- (id)memberByName:(NSString *)name
+{
+	for (NSUInteger i = 0; i < _members.count; i++) {
+		StelaGPUMember *member = [_members objectAtIndex:i];
+		if ([member.name isEqualToString:name]) {
+			return member;
+		}
+	}
+	return nil;
+}
+
+- (id)elementArrayType
+{
+	return _element->_dataType == MTLDataTypeArray ? _element : nil;
+}
+
+- (id)elementStructType
+{
+	return _element->_dataType == MTLDataTypeStruct ? _element : nil;
+}
+
+- (id)elementPointerType
+{
+	return _element->_dataType == MTLDataTypePointer ? _element : nil;
+}
+
+- (id)elementTextureReferenceType
+{
+	return _element->_dataType == MTLDataTypeTexture ? _element : nil;
+}
+
+- (id)elementIndirectCommandBufferType
+{
+	return nil;
+}
+
+@end
+
+@implementation StelaGPUMember
+
+- (id)structType
+{
+	return _type && _type->_dataType == MTLDataTypeStruct ? _type : nil;
+}
+
+- (id)arrayType
+{
+	return _type && _type->_dataType == MTLDataTypeArray ? _type : nil;
+}
+
+- (id)pointerType
+{
+	return _type && _type->_dataType == MTLDataTypePointer ? _type : nil;
+}
+
+- (id)textureReferenceType
+{
+	return _type && _type->_dataType == MTLDataTypeTexture ? _type : nil;
+}
+
+- (id)tensorReferenceType
+{
+	return nil;
+}
+
+@end
+
+@implementation StelaGPUBinding
+
+- (BOOL)isUsed
+{
+	return _used;
+}
+
+- (BOOL)isArgument
+{
+	return !_used;
+}
+
+- (id)bufferStructType
+{
+	return _typeInfo ? _typeInfo->_element : nil;
+}
+
+- (id)bufferPointerType
+{
+	return _typeInfo;
+}
+
+@end
+
+/* Runs a call whose answer's length is variable until its buffer held it. */
+static void *read_variable(StelaGate *gate, uint32_t operation, void *request, size_t request_bytes, StelaSpan *out,
+			   void *response, size_t response_bytes, const uint64_t *length)
+{
+	size_t capacity = 16 * 1024;
+	for (;;) {
+		void *bytes = calloc(1, capacity);
+		if (!bytes) {
+			return NULL;
+		}
+		*out = stela_span(bytes, capacity);
+		StelaSpans spans = {.writes = out, .write_count = 1};
+		StelaFailure failure;
+		uint32_t status = stela_gate_call(gate, operation, request, request_bytes, response,
+						  response_bytes, spans, &failure);
+		if (status != StelaStatusOk) {
+			stela_report("reflection", &failure);
+			free(bytes);
+			return NULL;
+		}
+		if (*length <= capacity) {
+			return bytes;
+		}
+		capacity = *length;
+		free(bytes);
+	}
+}
+
+@implementation StelaGPUReflection
+
+static StelaGPUType *type_at(NSArray *types, uint32_t index)
+{
+	return index == STELA_NO_TYPE ? nil : [types objectAtIndex:index];
+}
+
++ (NSArray *)bindingsOfFunction:(StelaGPUFunction *)function
+{
+	StelaFunctionBindingsRequest request = {.function = function->_handle};
+	StelaFunctionBindingsResponse response = {};
+	const uint8_t *bytes = read_variable(&function->_device->_gate, StelaOperationFunctionBindings, &request,
+					     sizeof(request), &request.out, &response, sizeof(response),
+					     &response.length);
+	if (!bytes) {
+		return [NSArray array];
+	}
+	const StelaBindingInfo *bindings = (const void *)bytes;
+	const StelaTypeInfo *types = (const void *)(bindings + response.binding_count);
+	const StelaMemberInfo *members = (const void *)(types + response.type_count);
+
+	/* Each type comes after its element and members. */
+	NSMutableArray *objects = [NSMutableArray arrayWithCapacity:response.type_count + 1];
+	for (uint32_t i = 0; i < response.type_count; i++) {
+		const StelaTypeInfo *info = &types[i];
+		StelaGPUType *type = [StelaGPUType new];
+		type->_dataType = info->data_type;
+		type.elementType = info->element_data_type;
+		type->_element = type_at(objects, info->element);
+		type.arrayLength = info->length;
+		type.stride = info->stride;
+		type.argumentIndexStride = info->argument_index_stride;
+		type.access = info->access;
+		type.alignment = info->alignment;
+		type.dataSize = info->data_size;
+		type.elementIsArgumentBuffer = info->element_is_argument_buffer != 0;
+		type.textureType = info->texture_type;
+		type.textureDataType = info->element_data_type;
+		type.isDepthTexture = info->depth != 0;
+		NSMutableArray *list = [NSMutableArray arrayWithCapacity:info->member_count];
+		for (uint32_t j = 0; j < info->member_count; j++) {
+			const StelaMemberInfo *record = &members[info->first_member + j];
+			StelaGPUMember *member = [StelaGPUMember new];
+			member.name = text_at(bytes, record->name, record->name_length);
+			member.dataType = record->data_type;
+			member.offset = record->offset;
+			member.argumentIndex = record->argument_index;
+			member->_type = type_at(objects, record->ty);
+			[list addObject:member];
+		}
+		type->_members = list;
+		[objects addObject:type];
+	}
+
+	NSMutableArray *list = [NSMutableArray arrayWithCapacity:response.binding_count];
+	for (uint32_t i = 0; i < response.binding_count; i++) {
+		const StelaBindingInfo *info = &bindings[i];
+		StelaGPUBinding *binding = [StelaGPUBinding new];
+		binding.name = text_at(bytes, info->name, info->name_length);
+		binding.type = info->binding_type;
+		binding.access = info->access;
+		binding.index = info->index;
+		binding->_used = info->used != 0;
+		binding.arrayLength = info->array_length;
+		binding.bufferAlignment = info->alignment;
+		binding.threadgroupMemoryAlignment = info->alignment;
+		binding.objectPayloadAlignment = info->alignment;
+		binding.bufferDataSize = info->data_size;
+		binding.threadgroupMemoryDataSize = info->data_size;
+		binding.objectPayloadDataSize = info->data_size;
+		binding->_typeInfo = type_at(objects, info->ty);
+		binding.bufferDataType = binding->_typeInfo ? binding->_typeInfo.elementType : MTLDataTypeNone;
+		binding.textureType = binding->_typeInfo ? binding->_typeInfo.textureType : 0;
+		binding.textureDataType = binding->_typeInfo ? binding->_typeInfo.textureDataType : MTLDataTypeNone;
+		binding.isDepthTexture = binding->_typeInfo ? binding->_typeInfo.isDepthTexture : NO;
+		[list addObject:binding];
+	}
+	free((void *)bytes);
+	return list;
+}
+
+@end
+
+/* Argument encoders: an index's offset, and how far an array's elements stride. */
+typedef struct {
+	NSUInteger index, offset;
+} StelaArgumentSlot;
+
+@implementation StelaGPUArgumentEncoder {
+	StelaGPUDevice *_device;
+	NSMutableData *_slotBytes;
+	uint8_t *_base;
+	id _buffer;
+	NSMutableDictionary *_nested;
+}
+
+- (instancetype)initWithDevice:(StelaGPUDevice *)device
+		encodedLength:(NSUInteger)length
+		    alignment:(NSUInteger)alignment
+{
+	self = [super init];
+	if (self) {
+		_device = device;
+		_encodedLength = length;
+		_alignment = alignment;
+		_slotBytes = [NSMutableData dataWithLength:0];
+		_nested = [NSMutableDictionary dictionary];
+	}
+	return self;
+}
+
+- (id)device
+{
+	return _device;
+}
+
+- (void)addSlotAt:(NSUInteger)index offset:(NSUInteger)offset
+{
+	StelaArgumentSlot slot = {index, offset};
+	[_slotBytes appendBytes:&slot length:sizeof(slot)];
+}
+
+/* Adds the arguments of `type`, at `offset` from `index`. */
+- (void)addType:(StelaGPUType *)type offset:(NSUInteger)offset index:(NSUInteger)index
+{
+	if (type->_dataType == MTLDataTypeArray) {
+		for (NSUInteger i = 0; i < type.arrayLength; i++) {
+			NSUInteger at = offset + i * type.stride;
+			NSUInteger slot = index + i * type.argumentIndexStride;
+			if (type->_element) {
+				[self addType:type->_element offset:at index:slot];
+			} else {
+				[self addSlotAt:slot offset:at];
+			}
+		}
+		return;
+	}
+	if (type->_dataType != MTLDataTypeStruct) {
+		[self addSlotAt:index offset:offset];
+		return;
+	}
+	for (NSUInteger i = 0; i < type->_members.count; i++) {
+		StelaGPUMember *member = [type->_members objectAtIndex:i];
+		if (member->_type) {
+			[self addType:member->_type offset:offset + member.offset index:index + member.argumentIndex];
+		} else {
+			[self addSlotAt:index + member.argumentIndex offset:offset + member.offset];
+		}
+	}
+}
+
+- (uint8_t *)slot:(NSUInteger)index
+{
+	const StelaArgumentSlot *slots = _slotBytes.bytes;
+	NSUInteger count = _slotBytes.length / sizeof(*slots);
+	for (NSUInteger i = 0; i < count; i++) {
+		if (slots[i].index == index) {
+			return _base + slots[i].offset;
+		}
+	}
+	return NULL;
+}
+
+- (void)store:(uint64_t)value atIndex:(NSUInteger)index
+{
+	uint8_t *at = [self slot:index];
+	if (at) {
+		memcpy(at, &value, sizeof(value));
+	}
+}
+
+- (void)setArgumentBuffer:(StelaGPUBuffer *)buffer offset:(NSUInteger)offset
+{
+	_buffer = buffer;
+	_base = (uint8_t *)buffer->_contents + offset;
+}
+
+- (void)setArgumentBuffer:(StelaGPUBuffer *)buffer startOffset:(NSUInteger)offset arrayElement:(NSUInteger)element
+{
+	[self setArgumentBuffer:buffer offset:offset + element * _encodedLength];
+}
+
+- (void)setBuffer:(StelaGPUBuffer *)buffer offset:(NSUInteger)offset atIndex:(NSUInteger)index
+{
+	[self store:buffer ? buffer->_gpuAddress + offset : 0 atIndex:index];
+}
+
+- (void)setBuffers:(const id __unsafe_unretained[])buffers
+	   offsets:(const NSUInteger[])offsets
+	 withRange:(NSRange)range
+{
+	for (NSUInteger i = 0; i < range.length; i++) {
+		[self setBuffer:buffers[i] offset:offsets[i] atIndex:range.location + i];
+	}
+}
+
+- (void)setTexture:(StelaGPUTexture *)texture atIndex:(NSUInteger)index
+{
+	[self store:texture ? texture->_resourceID : 0 atIndex:index];
+}
+
+- (void)setTextures:(const id __unsafe_unretained[])textures withRange:(NSRange)range
+{
+	for (NSUInteger i = 0; i < range.length; i++) {
+		[self setTexture:textures[i] atIndex:range.location + i];
+	}
+}
+
+- (void)setSamplerState:(StelaGPUSampler *)sampler atIndex:(NSUInteger)index
+{
+	[self store:sampler ? sampler->_resourceID : 0 atIndex:index];
+}
+
+- (void)setSamplerStates:(const id __unsafe_unretained[])samplers withRange:(NSRange)range
+{
+	for (NSUInteger i = 0; i < range.length; i++) {
+		[self setSamplerState:samplers[i] atIndex:range.location + i];
+	}
+}
+
+- (void)setRenderPipelineState:(StelaGPURenderPipeline *)pipeline atIndex:(NSUInteger)index
+{
+	[self store:pipeline ? pipeline->_resourceID : 0 atIndex:index];
+}
+
+- (void)setRenderPipelineStates:(const id __unsafe_unretained[])pipelines withRange:(NSRange)range
+{
+	for (NSUInteger i = 0; i < range.length; i++) {
+		[self setRenderPipelineState:pipelines[i] atIndex:range.location + i];
+	}
+}
+
+- (void)setComputePipelineState:(StelaGPUComputePipeline *)pipeline atIndex:(NSUInteger)index
+{
+	[self store:pipeline ? pipeline->_resourceID : 0 atIndex:index];
+}
+
+- (void)setComputePipelineStates:(const id __unsafe_unretained[])pipelines withRange:(NSRange)range
+{
+	for (NSUInteger i = 0; i < range.length; i++) {
+		[self setComputePipelineState:pipelines[i] atIndex:range.location + i];
+	}
+}
+
+- (void)setIndirectCommandBuffer:(StelaGPUIndirectCommandBuffer *)buffer atIndex:(NSUInteger)index
+{
+	[self store:buffer ? buffer->_resourceID : 0 atIndex:index];
+}
+
+- (void)setIndirectCommandBuffers:(const id __unsafe_unretained[])buffers withRange:(NSRange)range
+{
+	for (NSUInteger i = 0; i < range.length; i++) {
+		[self setIndirectCommandBuffer:buffers[i] atIndex:range.location + i];
+	}
+}
+
+- (void)setVisibleFunctionTable:(StelaGPUFunctionTable *)table atBufferIndex:(NSUInteger)index
+{
+	[self store:table ? table->_gpuAddress : 0 atIndex:index];
+}
+
+- (void)setVisibleFunctionTables:(const id __unsafe_unretained[])tables withBufferRange:(NSRange)range
+{
+	for (NSUInteger i = 0; i < range.length; i++) {
+		[self setVisibleFunctionTable:tables[i] atBufferIndex:range.location + i];
+	}
+}
+
+- (void *)constantDataAtIndex:(NSUInteger)index
+{
+	return [self slot:index];
+}
+
+@end
+
+@implementation StelaGPUFunction
+
+- (instancetype)initWithLibrary:(StelaGPULibrary *)library handle:(uint64_t)handle name:(NSString *)name
+{
+	self = [super initWithDevice:library->_device handle:handle];
+	if (!self) {
+		return nil;
+	}
+	_library = library;
+	_name = [name copy];
+	StelaFunctionReflectionRequest request = {.function = handle};
+	StelaFunctionReflectionResponse response = {};
+	const uint8_t *bytes = read_variable(&_device->_gate, StelaOperationFunctionReflection, &request,
+					     sizeof(request), &request.out, &response, sizeof(response),
+					     &response.length);
+	if (!bytes) {
+		return nil;
+	}
+	_functionType = response.function_type;
+	_patchType = response.patch_type;
+	_patchControlPointCount = response.patch_control_points ? (NSInteger)response.patch_control_points : -1;
+
+	const StelaConstantInfo *constants = (const void *)bytes;
+	const StelaAttributeInfo *attributes = (const void *)(constants + response.constant_count);
+	NSMutableDictionary *dictionary = [NSMutableDictionary dictionary];
+	for (uint32_t i = 0; i < response.constant_count; i++) {
+		StelaGPUFunctionConstant *constant = [StelaGPUFunctionConstant new];
+		constant.name = text_at(bytes, constants[i].name, constants[i].name_length);
+		constant.type = constants[i].data_type;
+		constant.index = constants[i].index;
+		constant.required = constants[i].required != 0;
+		[dictionary setObject:constant forKey:constant.name];
+	}
+	_constants = dictionary;
+	NSMutableArray *list = [NSMutableArray arrayWithCapacity:response.attribute_count];
+	for (uint32_t i = 0; i < response.attribute_count; i++) {
+		StelaGPUAttribute *attribute = [StelaGPUAttribute new];
+		attribute.name = text_at(bytes, attributes[i].name, attributes[i].name_length);
+		attribute.attributeType = attributes[i].data_type;
+		attribute.attributeIndex = attributes[i].index;
+		attribute.active = attributes[i].active != 0;
+		attribute.patchData = _patchType != 0;
+		attribute.patchControlPointData = attributes[i].patch_control_point != 0;
+		[list addObject:attribute];
+	}
+	_attributes = list;
+	free((void *)bytes);
+	return self;
+}
+
+- (NSString *)name
+{
+	return _name;
+}
+
+- (NSUInteger)functionType
+{
+	return _functionType;
+}
+
+- (NSUInteger)patchType
+{
+	return _patchType;
+}
+
+- (NSInteger)patchControlPointCount
+{
+	return _patchControlPointCount;
+}
+
+- (NSArray *)vertexAttributes
+{
+	return _functionType == MTLFunctionTypeVertex ? _attributes : nil;
+}
+
+- (NSArray *)stageInputAttributes
+{
+	return _functionType == MTLFunctionTypeKernel ? _attributes : nil;
+}
+
+- (NSDictionary *)functionConstantsDictionary
+{
+	return _constants;
+}
+
+- (NSUInteger)options
+{
+	return 0;
+}
+
+- (id)newArgumentEncoderWithBufferIndex:(NSUInteger)index
+{
+	NSArray *bindings = [StelaGPUReflection bindingsOfFunction:self];
+	for (NSUInteger i = 0; i < bindings.count; i++) {
+		StelaGPUBinding *binding = [bindings objectAtIndex:i];
+		if (binding.type != MTLBindingTypeBuffer || binding.index != index || !binding->_typeInfo) {
+			continue;
+		}
+		StelaGPUType *structure = binding->_typeInfo->_element;
+		if (!structure) {
+			break;
+		}
+		StelaGPUArgumentEncoder *encoder = [[StelaGPUArgumentEncoder alloc] initWithDevice:_device
+										     encodedLength:binding.bufferDataSize
+											 alignment:binding.bufferAlignment];
+		[encoder addType:structure offset:0 index:0];
+		return encoder;
+	}
+	return nil;
+}
+
+- (id)newArgumentEncoderWithBufferIndex:(NSUInteger)index reflection:(id *)reflection
+{
+	if (reflection) {
+		*reflection = nil;
+	}
+	return [self newArgumentEncoderWithBufferIndex:index];
+}
+
+@end
+
+@implementation StelaGPULibrary
+
+- (NSArray *)functionNames
+{
+	StelaLibraryFunctionNamesRequest request = {.library = _handle};
+	StelaLength response = {};
+	const char *names = read_variable(&_device->_gate, StelaOperationLibraryFunctionNames, &request,
+					  sizeof(request), &request.out, &response, sizeof(response), &response.length);
+	NSMutableArray *list = [NSMutableArray arrayWithCapacity:8];
+	if (names) {
+		for (size_t at = 0; at < response.length; at += strlen(names + at) + 1) {
+			[list addObject:[NSString stringWithUTF8String:names + at]];
+		}
+		free((void *)names);
+	}
+	return list;
+}
+
+- (NSUInteger)type
+{
+	return 0;
+}
+
+- (NSString *)installName
+{
+	return nil;
+}
+
+- (id)newFunctionWithName:(NSString *)name constantValues:(id)values error:(NSError **)error
+{
+	NSArray *constants = values ? [constants_of(values) copy] : [NSArray array];
+	NSUInteger count = constants.count;
+	StelaConstantRecord *records = calloc(count + 1, sizeof(*records));
+	StelaSpan *spans = calloc(2 * count + 2, sizeof(*spans));
+	const char *utf8 = name.UTF8String;
+	size_t used = 0;
+	spans[used++] = stela_span(utf8, strlen(utf8));
+	for (NSUInteger i = 0; i < count; i++) {
+		StelaGPUConstant *constant = [constants objectAtIndex:i];
+		const char *key = constant.name.UTF8String;
+		records[i] = (StelaConstantRecord){
+			.data_type = constant->_type,
+			.index = constant->_index,
+			.name = key ? stela_span(key, strlen(key)) : stela_span(NULL, 0),
+			.value = stela_span(constant.value.bytes, constant.value.length),
+		};
+		spans[used++] = records[i].name;
+		spans[used++] = records[i].value;
+	}
+	StelaNewFunctionRequest request = {
+		.library = _handle,
+		.name = spans[0],
+		.constants = stela_span(records, count * sizeof(*records)),
+	};
+	spans[used++] = request.constants;
+	StelaHandle response = {};
+	StelaFailure failure;
+	StelaSpans touched = {.reads = spans, .read_count = used};
+	uint32_t status = STELA_CALL_SPANS(&_device->_gate, NewFunction, &request, &response, touched, &failure);
+	free(spans);
+	free(records);
+	if (status != StelaStatusOk) {
+		if (error) {
+			*error = stela_error(MTLLibraryErrorDomain, MTLLibraryErrorFunctionNotFound, &failure);
+		}
+		return nil;
+	}
+	return [[StelaGPUFunction alloc] initWithLibrary:self handle:response.handle name:name];
+}
+
+- (id)newFunctionWithName:(NSString *)name
+{
+	return [self newFunctionWithName:name constantValues:nil error:NULL];
+}
+
+- (void)newFunctionWithName:(NSString *)name
+	     constantValues:(id)values
+	  completionHandler:(void (^)(id, NSError *))handler
+{
+	dispatch_async(dispatch_get_global_queue(0, 0), ^{
+		NSError *error = nil;
+		id function = [self newFunctionWithName:name constantValues:values error:&error];
+		handler(function, error);
+	});
+}
+
+- (id)newFunctionWithDescriptor:(id)descriptor error:(NSError **)error
+{
+	return [self newFunctionWithName:[descriptor name] constantValues:[descriptor constantValues] error:error];
+}
+
+- (void)newFunctionWithDescriptor:(id)descriptor completionHandler:(void (^)(id, NSError *))handler
+{
+	[self newFunctionWithName:[descriptor name] constantValues:[descriptor constantValues] completionHandler:handler];
+}
+
+- (id)newIntersectionFunctionWithDescriptor:(id)descriptor error:(NSError **)error
+{
+	if (error) {
+		StelaFailure failure = {.reason = "intersection functions"};
+		*error = stela_error(MTLLibraryErrorDomain, MTLLibraryErrorUnsupported, &failure);
+	}
+	(void)descriptor;
+	return nil;
+}
+
+@end
+
+@implementation StelaGPUDevice (Libraries)
+
+- (id)libraryWithBytes:(const void *)bytes length:(NSUInteger)length error:(NSError **)error
+{
+	StelaNewLibraryRequest request = {.data = stela_span(bytes, length)};
+	StelaHandle response = {};
+	StelaFailure failure;
+	StelaSpans spans = {.reads = &request.data, .read_count = 1};
+	if (STELA_CALL_SPANS(&_gate, NewLibrary, &request, &response, spans, &failure) != StelaStatusOk) {
+		if (error) {
+			*error = stela_error(MTLLibraryErrorDomain, MTLLibraryErrorInternal, &failure);
+		}
+		return nil;
+	}
+	return [[StelaGPULibrary alloc] initWithDevice:self handle:response.handle];
+}
+
+- (id)newLibraryWithData:(dispatch_data_t)data error:(NSError **)error
+{
+	const void *bytes = NULL;
+	size_t size = 0;
+	dispatch_data_t map = dispatch_data_create_map(data, &bytes, &size);
+	id library = [self libraryWithBytes:bytes length:size error:error];
+	dispatch_release(map);
+	return library;
+}
+
+- (id)newLibraryWithURL:(NSURL *)url error:(NSError **)error
+{
+	NSData *data = [NSData dataWithContentsOfURL:url options:0 error:error];
+	return data ? [self libraryWithBytes:data.bytes length:data.length error:error] : nil;
+}
+
+- (id)newLibraryWithFile:(NSString *)path error:(NSError **)error
+{
+	NSData *data = [NSData dataWithContentsOfFile:path options:0 error:error];
+	return data ? [self libraryWithBytes:data.bytes length:data.length error:error] : nil;
+}
+
+- (id)newDefaultLibraryWithBundle:(id)bundle error:(NSError **)error
+{
+	NSURL *url = [bundle URLForResource:@"default" withExtension:@"metallib"];
+	if (!url) {
+		if (error) {
+			StelaFailure failure = {.reason = "the bundle has no default.metallib"};
+			*error = stela_error(MTLLibraryErrorDomain, MTLLibraryErrorFileNotFound, &failure);
+		}
+		return nil;
+	}
+	return [self newLibraryWithURL:url error:error];
+}
+
+- (id)newDefaultLibrary
+{
+	return [self newDefaultLibraryWithBundle:[NSBundle mainBundle] error:NULL];
+}
+
+/* Only MTLCompilerService compiles source, which drives AGX's own back end. */
+- (id)newLibraryWithSource:(NSString *)source options:(id)options error:(NSError **)error
+{
+	(void)source;
+	(void)options;
+	if (error) {
+		StelaFailure failure = {.reason = "this device compiles no Metal source: use a metallib"};
+		*error = stela_error(MTLLibraryErrorDomain, MTLLibraryErrorUnsupported, &failure);
+	}
+	return nil;
+}
+
+- (void)newLibraryWithSource:(NSString *)source options:(id)options completionHandler:(void (^)(id, NSError *))handler
+{
+	NSError *error = nil;
+	id library = [self newLibraryWithSource:source options:options error:&error];
+	handler(library, error);
+}
+
+- (id)newArgumentEncoderWithArguments:(NSArray *)arguments
+{
+	NSUInteger count = arguments.count;
+	StelaArgumentRecord *records = calloc(count, sizeof(*records));
+	uint32_t *offsets = calloc(count, sizeof(*offsets));
+	for (NSUInteger i = 0; i < count; i++) {
+		id argument = [arguments objectAtIndex:i];
+		records[i] = (StelaArgumentRecord){
+			.data_type = [argument dataType],
+			.index = (uint32_t)[argument index],
+			.array_length = (uint32_t)[argument arrayLength],
+			.constant_block_alignment = (uint32_t)[argument constantBlockAlignment],
+		};
+	}
+	StelaArgumentLayoutRequest request = {
+		.arguments = stela_span(records, count * sizeof(*records)),
+		.out = stela_span(offsets, count * sizeof(*offsets)),
+	};
+	StelaArgumentLayoutResponse response = {};
+	StelaFailure failure;
+	StelaSpans spans = {.reads = &request.arguments, .read_count = 1, .writes = &request.out, .write_count = 1};
+	StelaGPUArgumentEncoder *encoder = nil;
+	if (STELA_CALL_SPANS(&_gate, ArgumentLayout, &request, &response, spans, &failure) != StelaStatusOk) {
+		stela_report("an argument encoder's layout", &failure);
+	} else {
+		encoder = [[StelaGPUArgumentEncoder alloc] initWithDevice:self
+							    encodedLength:response.encoded_length
+								alignment:response.alignment];
+		for (NSUInteger i = 0; i < count; i++) {
+			/* Every array element of an argument buffer is a pointer or a resource ID. */
+			NSUInteger length = records[i].array_length ? records[i].array_length : 1;
+			for (NSUInteger j = 0; j < length; j++) {
+				[encoder addSlotAt:records[i].index + j offset:offsets[i] + j * sizeof(uint64_t)];
+			}
+		}
+	}
+	free(records);
+	free(offsets);
+	return encoder;
+}
+
+@end

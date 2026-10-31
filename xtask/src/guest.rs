@@ -2,10 +2,10 @@
 //! host's clang against xnu's open-source headers: no macOS SDK.
 //!
 //! The StelaGPU kext compiles to relocatable objects beside its
-//! `Info.plist` in `target/guest/StelaGPU.kext`. No released `ld64.lld`
-//! links arm64e's authenticated pointers, and a kext's final link is
-//! against one boot kernel collection anyway, so `stela-loader`'s auxiliary
-//! collection linker takes the objects from there.
+//! `Info.plist` in `target/guest/StelaGPU.kext`, whose final link is against
+//! one boot kernel collection. The Metal plugin links here, into
+//! `target/guest/StelaGPU.bundle`. No released `ld64.lld` links arm64e's
+//! authenticated pointers, so `stela-loader` links both.
 use crate::tools::{self, exec};
 use anyhow::{Context, Result, ensure};
 use std::{
@@ -15,9 +15,14 @@ use std::{
 };
 
 pub mod sdk;
+pub mod wire;
 
 /// The macOS the guest components target, as clang's `-target` names it.
 const TARGET: &str = "arm64e-apple-macos27.0";
+/// What the Metal plugin's `Info.plist` and signature identify it as.
+const BUNDLE_IDENTIFIER: &str = "com.stela.StelaGPU.Metal";
+/// The Metal plugin's slices: Metal loads it into processes of either.
+const BUNDLE_TARGETS: [(&str, &str); 2] = [("arm64", "arm64-apple-macos27.0"), ("arm64e", TARGET)];
 
 /// Builds every guest component.
 pub fn run() -> Result<()> {
@@ -26,11 +31,98 @@ pub fn run() -> Result<()> {
     let output = root.join("target/guest");
     let include = output.join("include");
     sdk::generate(&xnu, &include)?;
+    wire::generate(&root.join("crates/stela-driver-gpu/src/metal"), &include)?;
     let component = root.join("guest/stela-gpu");
     let kext = build_kext(&component, &output, &xnu, &include)?;
     println!("StelaGPU kext: {}", kext.display());
+    let bundle = build_bundle(&component, &output, &include)?;
+    println!("StelaGPU bundle: {}", bundle.display());
     Ok(())
 }
+
+/// Compiles each source of `<component>/bundle` once per slice, under
+/// `<output>/StelaGPU.objects`, and links the slices into
+/// `<output>/StelaGPU.bundle`.
+fn build_bundle(component: &Path, output: &Path, include: &Path) -> Result<PathBuf> {
+    let source = component.join("bundle");
+    let objects = output.join("StelaGPU.objects");
+    let bundle = output.join("StelaGPU.bundle");
+    for directory in [&objects, &bundle] {
+        if directory.exists() {
+            fs::remove_dir_all(directory)?;
+        }
+    }
+    let clang = tools::which("clang").context("install clang 21 or newer")?;
+    let resources = Command::new(&clang).arg("-print-resource-dir").output()?;
+    ensure!(
+        resources.status.success(),
+        "clang names no resource directory"
+    );
+    let resources = PathBuf::from(String::from_utf8(resources.stdout)?.trim());
+    let mut sources = Vec::new();
+    for entry in fs::read_dir(&source)? {
+        let path = entry?.path();
+        if path.extension().is_some_and(|extension| extension == "m") {
+            sources.push(path);
+        }
+    }
+    sources.sort();
+    let mut slices = Vec::new();
+    for (architecture, target) in BUNDLE_TARGETS {
+        let directory = objects.join(architecture);
+        fs::create_dir_all(&directory)?;
+        let mut compiled = Vec::with_capacity(sources.len());
+        for path in &sources {
+            let object = directory
+                .join(path.file_stem().unwrap())
+                .with_extension("o");
+            let mut command = Command::new(&clang);
+            command
+                .args(BUNDLE_FLAGS)
+                .arg(format!("--target={target}"))
+                .arg("-isystem")
+                .arg(resources.join("include"))
+                .arg("-I")
+                .arg(&source)
+                .arg("-I")
+                .arg(component.join("include"))
+                .arg("-I")
+                .arg(include);
+            exec(command.arg("-c").arg(path).arg("-o").arg(&object))?;
+            compiled.push(fs::read(&object)?);
+        }
+        slices.push(compiled);
+    }
+    let slices: Vec<Vec<&[u8]>> = slices
+        .iter()
+        .map(|slice| slice.iter().map(Vec::as_slice).collect())
+        .collect();
+    let executable = stela_loader::plugin::link(BUNDLE_IDENTIFIER, &slices)?;
+    let contents = bundle.join("Contents");
+    fs::create_dir_all(contents.join("MacOS"))?;
+    fs::copy(source.join("Info.plist"), contents.join("Info.plist"))?;
+    fs::write(contents.join("MacOS/StelaGPU"), executable)?;
+    Ok(bundle)
+}
+
+/// Objective-C against the bundle's own declarations of macOS: no SDK.
+const BUNDLE_FLAGS: &[&str] = &[
+    "-xobjective-c",
+    "-std=gnu17",
+    "-O2",
+    "-Wall",
+    "-Wextra",
+    "-Werror",
+    "-Wno-unused-parameter",
+    "-Wno-objc-protocol-method-implementation",
+    "-fobjc-arc",
+    "-fblocks",
+    "-fobjc-runtime=macosx-27.0",
+    "-fno-common",
+    "-fno-unwind-tables",
+    "-fno-asynchronous-unwind-tables",
+    "-nostdinc",
+];
 
 /// Compiles each source of `<component>/kext` into `<output>/StelaGPU.kext`
 /// beside its `Info.plist`.

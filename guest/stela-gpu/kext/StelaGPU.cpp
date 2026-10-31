@@ -107,6 +107,57 @@ StelaGPU::copyGateMemory(uint64_t page)
 	return IODeviceMemory::withSubRange(window, page * STELA_GATE_PAGE, STELA_GATE_PAGE);
 }
 
+/*
+ * The prepared descriptor of imported memory stands for its token: only the
+ * gate sees a token, and it answers only those the kext gave it.
+ */
+uint64_t
+StelaGPU::importMemory(uint64_t page, task_t task, mach_vm_address_t address, mach_vm_size_t length)
+{
+	IOMemoryDescriptor *memory = IOMemoryDescriptor::withAddressRange(address, length, kIODirectionOutIn, task);
+	if (!memory) {
+		return 0;
+	}
+	if (memory->prepare() != kIOReturnSuccess) {
+		memory->release();
+		return 0;
+	}
+	IOLockLock(lock);
+	for (IOByteCount offset = 0; offset < length;) {
+		IOByteCount bytes = 0;
+		addr64_t physical = memory->getPhysicalSegment(offset, &bytes, kIOMemoryMapperNone);
+		write(STELA_GATE_IMPORT_ADDRESS, physical);
+		write(STELA_GATE_IMPORT_BYTES, bytes);
+		offset += bytes;
+	}
+	write(STELA_GATE_IMPORT_TOKEN, reinterpret_cast<uint64_t>(memory));
+	write(STELA_GATE_IMPORT, page);
+	uint64_t handle = read(STELA_GATE_IMPORTED);
+	IOLockUnlock(lock);
+	if (handle == 0) {
+		memory->complete();
+		memory->release();
+	}
+	return handle;
+}
+
+void
+StelaGPU::retireMemory()
+{
+	for (;;) {
+		IOLockLock(lock);
+		write(STELA_GATE_RETIRE, 1);
+		uint64_t token = read(STELA_GATE_RETIRED);
+		IOLockUnlock(lock);
+		if (token == 0) {
+			return;
+		}
+		auto memory = reinterpret_cast<IOMemoryDescriptor *>(token);
+		memory->complete();
+		memory->release();
+	}
+}
+
 uint64_t
 StelaGPU::completions() const
 {
@@ -122,6 +173,7 @@ StelaGPU::interruptOccurred(OSObject *owner, IOInterruptEventSource *, int)
 {
 	auto gpu = static_cast<StelaGPU *>(owner);
 	gpu->write(STELA_GATE_ACK, 1);
+	gpu->retireMemory();
 	uint64_t now = __atomic_add_fetch(&gpu->completionCount, 1, __ATOMIC_ACQ_REL);
 	gpu->applyToClients([](IOService *client, void *context) {
 		if (auto user = OSDynamicCast(StelaGPUUserClient, client)) {

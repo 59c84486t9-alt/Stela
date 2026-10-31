@@ -26,5 +26,13 @@ enum {
 	 * client; arming again replaces it.
 	 */
 	kStelaGPUNotifyCompletion = 0,
+	/*
+	 * Scalar input a page-aligned address and length of the task's memory,
+	 * which the kext wires; scalar output the memory's handle, which goes in
+	 * a buffer or heap call through the gate, or in Release. The memory
+	 * stays wired, whatever becomes of the task's mapping, until the GPU no
+	 * longer reaches it.
+	 */
+	kStelaGPUImportMemory = 1,
 	kStelaGPUSelectorCount,
 };
