@@ -120,7 +120,23 @@ enum {
 	MTLLibraryTypeDynamic = 1,
 };
 enum {
+	MTLIOErrorURLInvalid = 1,
 	MTLIOErrorInternal = 2,
+};
+enum {
+	MTLIOPriorityHigh = 0,
+	MTLIOPriorityNormal = 1,
+	MTLIOPriorityLow = 2,
+};
+enum {
+	MTLIOCommandQueueTypeConcurrent = 0,
+	MTLIOCommandQueueTypeSerial = 1,
+};
+enum {
+	MTLIOStatusPending = 0,
+	MTLIOStatusCancelled = 1,
+	MTLIOStatusError = 2,
+	MTLIOStatusComplete = 3,
 };
 enum {
 	MTLLogStateErrorInvalid = 2,
@@ -233,6 +249,9 @@ enum {
 	X(MTLFence)                                                                                \
 	X(MTLEvent)                                                                                \
 	X(MTLSharedEvent)                                                                          \
+	X(MTLIOFileHandle)                                                                         \
+	X(MTLIOCommandQueue)                                                                       \
+	X(MTLIOCommandBuffer)                                                                      \
 	X(MTLLibrary)                                                                              \
 	X(MTLFunction)                                                                             \
 	X(MTLFunctionHandle)                                                                       \
@@ -313,6 +332,9 @@ __attribute__((ns_returns_retained)) NSArray *MTLCopyAllDevices(void);
 - (NSUInteger)size;
 - (NSUInteger)type;
 - (NSUInteger)sparsePageSize;
+/* MTLIOCommandQueueDescriptor. */
+- (NSUInteger)maxCommandBufferCount;
+- (NSInteger)priority;
 /* MTLSamplerDescriptor. */
 - (NSUInteger)minFilter;
 - (NSUInteger)magFilter;

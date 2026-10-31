@@ -19,7 +19,6 @@
 	} while (0)
 
 #define STITCHING "this device links no stitched function graphs"
-#define IO "this device has no Metal I/O queues"
 #define RAY_TRACING "this device has no acceleration structures"
 
 @implementation StelaGPUDevice (Refused)
@@ -77,36 +76,6 @@
 	NSError *error = nil;
 	id library = [self newLibraryWithStitchedDescriptor:descriptor error:&error];
 	handler(library, error);
-}
-
-- (id)newIOHandleWithURL:(NSURL *)url error:(NSError **)error
-{
-	REFUSE_ERROR(MTLIOErrorDomain, MTLIOErrorInternal, IO);
-	return nil;
-}
-
-- (id)newIOHandleWithURL:(NSURL *)url compressionMethod:(NSInteger)method error:(NSError **)error
-{
-	REFUSE_ERROR(MTLIOErrorDomain, MTLIOErrorInternal, IO);
-	return nil;
-}
-
-- (id)newIOFileHandleWithURL:(NSURL *)url error:(NSError **)error
-{
-	REFUSE_ERROR(MTLIOErrorDomain, MTLIOErrorInternal, IO);
-	return nil;
-}
-
-- (id)newIOFileHandleWithURL:(NSURL *)url compressionMethod:(NSInteger)method error:(NSError **)error
-{
-	REFUSE_ERROR(MTLIOErrorDomain, MTLIOErrorInternal, IO);
-	return nil;
-}
-
-- (id)newIOCommandQueueWithDescriptor:(id)descriptor error:(NSError **)error
-{
-	REFUSE_ERROR(MTLIOErrorDomain, MTLIOErrorInternal, IO);
-	return nil;
 }
 
 @end

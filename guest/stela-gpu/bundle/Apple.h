@@ -230,7 +230,20 @@ size_t IOSurfaceGetBytesPerRowOfPlane(IOSurfaceRef surface, size_t plane);
 size_t IOSurfaceGetAllocSize(IOSurfaceRef surface);
 
 #define DISPATCH_TIME_FOREVER (~0ull)
+typedef struct dispatch_queue_attr_s *dispatch_queue_attr_t;
+typedef struct dispatch_semaphore_s *dispatch_semaphore_t;
+extern struct dispatch_queue_attr_s _dispatch_queue_attr_concurrent;
+#define DISPATCH_QUEUE_CONCURRENT (&_dispatch_queue_attr_concurrent)
+#define QOS_CLASS_USER_INITIATED 0x19
+#define QOS_CLASS_DEFAULT 0x15
+#define QOS_CLASS_UTILITY 0x11
 dispatch_queue_t dispatch_queue_create(const char *label, const void *attributes);
+dispatch_queue_attr_t dispatch_queue_attr_make_with_qos_class(dispatch_queue_attr_t attributes, unsigned qos,
+							      int priority);
+dispatch_semaphore_t dispatch_semaphore_create(long value);
+long dispatch_semaphore_wait(dispatch_semaphore_t semaphore, uint64_t timeout);
+long dispatch_semaphore_signal(dispatch_semaphore_t semaphore);
+void dispatch_barrier_async(dispatch_queue_t queue, void (^block)(void));
 dispatch_queue_t dispatch_get_global_queue(long priority, unsigned long flags);
 dispatch_group_t dispatch_group_create(void);
 void dispatch_group_enter(dispatch_group_t group);
@@ -262,6 +275,14 @@ int sysctlbyname(const char *name, void *value, size_t *size, void *new_value, s
 
 #define RTLD_NOW 0x2
 #define RTLD_LOCAL 0x4
+#define O_RDONLY 0
+#define O_CLOEXEC 0x1000000
+#define EINTR 4
+int open(const char *path, int flags, ...);
+int close(int file);
+long pread(int file, void *bytes, size_t length, long long offset);
+int *__error(void);
+
 void *dlopen(const char *path, int mode);
 void *dlsym(void *library, const char *symbol);
 
