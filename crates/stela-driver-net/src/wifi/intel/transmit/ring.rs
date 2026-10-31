@@ -17,8 +17,9 @@ use crate::{
 };
 use alloc::{sync::Arc, vec::Vec};
 
-/// One frame's mapped remainder: TB1, then the payload.
-const BUFFER_BYTES: usize = 4096;
+/// One frame's mapped remainder: TB1, then the payload. This holds the longest
+/// A-MSDU any peer can take, 11454 bytes.
+pub(super) const BUFFER_BYTES: usize = 12288;
 /// `HBUS_TARG_WRPTR`.
 pub(in crate::wifi::intel) const WRITE_POINTER: u32 = 0x460;
 
@@ -352,7 +353,7 @@ mod tests {
         // SAFETY: as above.
         unsafe { ring.reclaim(16) }.unwrap();
         // SAFETY: as above.
-        let long = unsafe { ring.publish(&frame(&fw, Family::Ax210, 4096), &source) };
+        let long = unsafe { ring.publish(&frame(&fw, Family::Ax210, 12288), &source) };
         assert!(matches!(long, Err(Error::FrameLength)));
         assert_eq!(ring.used(), 0);
     }

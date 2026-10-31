@@ -248,6 +248,35 @@ fn size_class_reuse_preserves_other_live_bytes() {
 }
 
 #[test]
+fn the_class_lists_return_to_the_bins_when_a_request_needs_them() {
+    let mut ram = backing();
+    let heap = Heap::new();
+    // SAFETY: exclusive test backing, kept through every exact free.
+    unsafe { heap.initialize(ram.0.as_mut_ptr(), ram.0.len()) };
+    let small = Layout::from_size_align(64, 16).unwrap();
+    let mut blocks = Vec::new();
+    loop {
+        // SAFETY: a nonzero layout on an initialized heap.
+        let block = unsafe { heap.try_allocate(small) };
+        if block.is_null() {
+            break;
+        }
+        blocks.push(block);
+    }
+    for block in blocks.drain(..) {
+        // SAFETY: each is a live allocation of `small`.
+        unsafe { heap.dealloc(block, small) };
+    }
+    // Every byte sits on the class list; the bins alone have no room.
+    let large = Layout::from_size_align(ram.0.len() / 2, 16).unwrap();
+    // SAFETY: a nonzero layout on an initialized heap.
+    let block = unsafe { heap.try_allocate(large) };
+    assert!(!block.is_null());
+    // SAFETY: the live allocation just made.
+    unsafe { heap.dealloc(block, large) };
+}
+
+#[test]
 fn a_release_between_free_neighbours_merges_all_three() {
     let heap = Heap::new();
     let mut ram = backing();

@@ -92,7 +92,7 @@ impl<Q: BootIo> ColdRadio<'_, Q> {
             // epoch. Preflight every prefix schema before any new MMIO/DMA.
             self.plan = Some(InitialPlan::prepare(
                 &self.initialized.boot.firmware,
-                self.initialized.boot.profile.family(),
+                self.initialized.boot.profile.platform(),
                 &self.initialized_nvm().information,
             )?);
         }

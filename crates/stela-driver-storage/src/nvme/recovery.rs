@@ -327,6 +327,7 @@ impl Controller {
         }
         let page = self.bounce.bytes();
         self.limits.write_zeroes = page[NVM_WRITE_ZEROES_LIMIT];
+        self.limits.deallocate_ranges = page[NVM_DEALLOCATE_RANGES];
         self.limits.deallocate = le32(page, NVM_DEALLOCATE_RANGE_LIMIT);
     }
 

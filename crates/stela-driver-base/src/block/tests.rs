@@ -298,6 +298,12 @@ fn adjoining_waiting_commands_reach_the_device_as_one() {
     assert_eq!(stats.deepest, 1);
 }
 
+fn discard(lba: u64, blocks: u64) -> Request {
+    Request::Discard {
+        extents: vec![Extent { lba, blocks }],
+    }
+}
+
 fn cached(fua: bool, max_transfer: usize) -> Identity {
     let mut identity = RamDisk::new("p", 64, 512).identity;
     identity.features = Features {
@@ -393,7 +399,7 @@ fn the_block_layer_sends_only_the_flushes_a_device_needs() {
             }
         ]
     );
-    let discard = Request::Discard { lba: 0, blocks: 1 };
+    let discard = discard(0, 1);
     assert!(discard.plan(&uncached).is_err());
 }
 
@@ -425,7 +431,7 @@ fn a_submission_runs_its_writes_together_and_its_flush_after_them() {
 #[test]
 fn range_plans_keep_chunk_sizes_and_unmap_permissions() {
     let mut identity = cached(false, 1024);
-    identity.features.discard = Some(2);
+    identity.features.discard = Some(DiscardLimits::single(2));
     identity.features.write_zeroes = Some(WriteZeroes {
         blocks: 3,
         unmap: false,
@@ -437,8 +443,8 @@ fn range_plans_keep_chunk_sizes_and_unmap_permissions() {
             .collect::<Vec<_>>()
     };
     assert_eq!(
-        commands(Request::Discard { lba: 4, blocks: 7 }, &identity),
-        [(4, 2), (6, 2), (8, 2), (10, 1)].map(|(lba, blocks)| Command::Discard { lba, blocks })
+        commands(discard(4, 7), &identity),
+        [(4, 2), (6, 2), (8, 2), (10, 1)].map(|(lba, blocks)| Command::discard(lba, blocks))
     );
     for allowed in [false, true] {
         identity.features.write_zeroes.as_mut().unwrap().unmap = allowed;
@@ -460,10 +466,34 @@ fn range_plans_keep_chunk_sizes_and_unmap_permissions() {
             );
         }
     }
-    identity.features.discard = Some(0);
+    identity.features.discard = Some(DiscardLimits::single(0));
+    assert_eq!(commands(discard(4, 7), &identity), [Command::discard(4, 7)]);
+    // Ranges fill each command in order, cut at the limit on a range.
+    identity.features.discard = Some(DiscardLimits {
+        blocks: 3,
+        ranges: 2,
+    });
+    let extents = |ranges: &[(u64, u64)]| {
+        ranges
+            .iter()
+            .map(|&(lba, blocks)| Extent { lba, blocks })
+            .collect::<Vec<_>>()
+    };
     assert_eq!(
-        commands(Request::Discard { lba: 4, blocks: 7 }, &identity),
-        [Command::Discard { lba: 4, blocks: 7 }]
+        commands(
+            Request::Discard {
+                extents: extents(&[(0, 5), (9, 0), (20, 1), (30, 1)]),
+            },
+            &identity,
+        ),
+        [
+            Command::Discard {
+                extents: extents(&[(0, 3), (3, 2)]),
+            },
+            Command::Discard {
+                extents: extents(&[(20, 1), (30, 1)]),
+            },
+        ]
     );
     identity.features.write_zeroes.as_mut().unwrap().blocks = 0;
     assert_eq!(
@@ -486,14 +516,14 @@ fn range_plans_keep_chunk_sizes_and_unmap_permissions() {
 #[test]
 fn batch_preflight_rejects_later_invalid_requests() {
     let mut identity = cached(false, 512);
-    identity.features.discard = Some(2);
+    identity.features.discard = Some(DiscardLimits::single(2));
     for invalid in [
         Request::Write {
             lba: 0,
             data: vec![0; 1],
             durable: false,
         },
-        Request::Discard { lba: 63, blocks: 2 },
+        discard(63, 2),
         Request::WriteZeroes {
             lba: 1,
             blocks: u64::MAX,
@@ -531,7 +561,7 @@ fn batch_preflight_rejects_later_invalid_requests() {
     identity.read_only = false;
     identity.features.discard = None;
     assert!(matches!(
-        Submission::new(Request::Discard { lba: 0, blocks: 1 }, &identity),
+        Submission::new(discard(0, 1), &identity),
         Err(BlockError::Unsupported(_))
     ));
 }

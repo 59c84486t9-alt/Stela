@@ -9,8 +9,8 @@
 use crate::{
     Clock, Deadline, Handoff,
     block::{
-        BlockDevice, BlockError, Command, Features, Finished, Identity, Sense, SenseCompletion,
-        Transport, ascii,
+        BlockDevice, BlockError, Command, DiscardLimits, Extent, Features, Finished, Identity,
+        Sense, SenseCompletion, Transport, ascii,
     },
     bus::{
         dma::{DmaAllocator, DmaBuffer},

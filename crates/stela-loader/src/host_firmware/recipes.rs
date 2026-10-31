@@ -10,10 +10,12 @@ pub const LINUX_FIRMWARE: &str = "https://gitlab.com/kernel-firmware/linux-firmw
 pub const REALTEK_RELEASE: &str = "20250917";
 pub const REALTEK_REVISION: &str = "add225168d0d1ba4c174d5eb15272b53de01ad5a";
 pub const INTEL_RSA_REVISION: &str = "711d3297bac870af42088a467459a0634c1970ca";
+pub const WIFI_FIRMWARE_REVISION: &str = "59f9fc2ef8d1e312d2a613d4e1ffad2ff31a0a01";
 /// wireless-regdb, the source of the regulatory database every Wi-Fi
 /// adapter's scans and transmissions answer to.
 pub const WIRELESS_REGDB: &str =
     "https://git.kernel.org/pub/scm/linux/kernel/git/wens/wireless-regdb.git";
+pub const WIRELESS_REGDB_RELEASE: &str = "master-2026-09-03";
 const KERNEL_ORG_GIT: &str = "https://git.kernel.org/";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -69,6 +71,7 @@ pub struct Recipe {
 enum Consumer {
     Realtek { mask: u16, value: u16 },
     IntelRsa,
+    Wifi,
 }
 
 const fn realtek(
@@ -185,9 +188,158 @@ pub const INTEL_RSA: &[Recipe] = &[
     },
 ];
 
+const WIFI_FIRMWARE_LICENSE: Artifact = Artifact {
+    source: LINUX_FIRMWARE,
+    revision: WIFI_FIRMWARE_REVISION,
+    member: "LICENSES/LICENCE.iwlwifi_firmware",
+    length: 2046,
+    sha256: "16d5040c7cf851fc693b7542e20870935b99802533ea1bfd231c377a2305e5c5",
+};
+const MEDIATEK_LICENSE: Artifact = Artifact {
+    source: LINUX_FIRMWARE,
+    revision: WIFI_FIRMWARE_REVISION,
+    member: "LICENSES/LICENCE.mediatek",
+    length: 561,
+    sha256: "a90d3f66704d85889945fec5525ea77622549da83aced1aac99828383f8f1805",
+};
+
+const fn wifi(
+    member: &'static str,
+    length: usize,
+    sha256: &'static str,
+    license: &'static Artifact,
+) -> Recipe {
+    Recipe {
+        image: Artifact {
+            source: LINUX_FIRMWARE,
+            revision: WIFI_FIRMWARE_REVISION,
+            member,
+            length,
+            sha256,
+        },
+        license,
+        consumer: Consumer::Wifi,
+    }
+}
+const fn intel_wifi(member: &'static str, length: usize, sha256: &'static str) -> Recipe {
+    wifi(member, length, sha256, &WIFI_FIRMWARE_LICENSE)
+}
+const fn mediatek_wifi(member: &'static str, length: usize, sha256: &'static str) -> Recipe {
+    wifi(member, length, sha256, &MEDIATEK_LICENSE)
+}
+
+/// Each image the Intel driver asks for, with the PNVM beside it. The driver
+/// names a bare file, as `iwlwifi` does.
+pub const INTEL_WIFI: &[Recipe] = &[
+    intel_wifi(
+        "intel/iwlwifi/iwlwifi-cc-a0-77.ucode",
+        1368100,
+        "1866a58a1daee56b120362122d5f7548b443b53d33f2558a7e4407d58fd27dab",
+    ),
+    intel_wifi(
+        "intel/iwlwifi/iwlwifi-Qu-b0-hr-b0-77.ucode",
+        1406576,
+        "df005896aafdf5eb9c427033781890a58c7ab97a8dc1e1ea6b8df4eefc033a9d",
+    ),
+    intel_wifi(
+        "intel/iwlwifi/iwlwifi-Qu-c0-hr-b0-77.ucode",
+        1406592,
+        "a250e179666288396e19ff15c307edfe8f089341c8713a22b457b7304fc1a6fe",
+    ),
+    intel_wifi(
+        "intel/iwlwifi/iwlwifi-QuZ-a0-hr-b0-77.ucode",
+        1406720,
+        "39d79587dd035bc84172b6bcf6de81217560088b0ceb06304d5121ba56db8d83",
+    ),
+    intel_wifi(
+        "intel/iwlwifi/iwlwifi-so-a0-hr-b0-89.ucode",
+        1527004,
+        "6c4a1b2b4720865ee954a055b5aac19377187b142e1b7c5567524c61445bde20",
+    ),
+    intel_wifi(
+        "intel/iwlwifi/iwlwifi-ty-a0-gf-a0-89.ucode",
+        1679080,
+        "792478ef7752595525379a5068e2d47e310a2c344636b7df866c54746ced1dc0",
+    ),
+    intel_wifi(
+        "intel/iwlwifi/iwlwifi-ty-a0-gf-a0.pnvm",
+        55020,
+        "9697e327f8171454b3c19b1ec9449753d5b934d4e91722f469616818a6d477b0",
+    ),
+    intel_wifi(
+        "intel/iwlwifi/iwlwifi-so-a0-gf-a0-89.ucode",
+        1737012,
+        "fae8230ebd1426dfb7d5b5594fdd89e346af5144080659d010b8d2a2fd2f7d4a",
+    ),
+    intel_wifi(
+        "intel/iwlwifi/iwlwifi-so-a0-gf-a0.pnvm",
+        55152,
+        "78abe08cf33bc209b96a887c7e3db8855a1d9650edacf849c4fa0d4596bcfac5",
+    ),
+    intel_wifi(
+        "intel/iwlwifi/iwlwifi-ma-b0-gf-a0-89.ucode",
+        1752976,
+        "83c358a33c66bd41f753ee8e0e4fff5c9741694a397ac13a61e851e6bcf5dd6b",
+    ),
+    intel_wifi(
+        "intel/iwlwifi/iwlwifi-ma-b0-gf-a0.pnvm",
+        55072,
+        "65ccc7ed05c0ecb3ea0374b607ecacfdc693df4e5cbf825a4c91f71ce8fa9b7b",
+    ),
+];
+pub const MEDIATEK_WIFI: &[Recipe] = &[
+    mediatek_wifi(
+        "mediatek/WIFI_MT7961_patch_mcu_1_2_hdr.bin",
+        92192,
+        "a276c06c2b772adb50b86639d33c82824ff4c21d617feb78caea74c040b873f6",
+    ),
+    mediatek_wifi(
+        "mediatek/WIFI_RAM_CODE_MT7961_1.bin",
+        792036,
+        "b94217a951518a9c14095765f367bc5dd7698f2dc033941d6f18fc2ebd6a2ab9",
+    ),
+    mediatek_wifi(
+        "mediatek/WIFI_MT7922_patch_mcu_1_1_hdr.bin",
+        137632,
+        "7fc9075d6d54b31e0539734614ca971fa52caf41b642a3000c8a4501591a4d98",
+    ),
+    mediatek_wifi(
+        "mediatek/WIFI_RAM_CODE_MT7922_1.bin",
+        1231252,
+        "d100e5e04c324fc8da6302112d1e0b4fac952286447d2419eabcd8fb0a1f5b93",
+    ),
+    mediatek_wifi(
+        "mediatek/mt7925/WIFI_MT7925_PATCH_MCU_1_1_hdr.bin",
+        188192,
+        "67ff85f1a39d1a100a51abd8e2a26edd2f198d7052514b6b8981948b231e5016",
+    ),
+    mediatek_wifi(
+        "mediatek/mt7925/WIFI_RAM_CODE_MT7925_1_1.bin",
+        1390712,
+        "329c0e27f780550789e4eba47452731b1723f69f9e67f525d0e50bf3cd2978ac",
+    ),
+];
+
+const REGULATORY_LICENSE: Artifact = Artifact {
+    source: WIRELESS_REGDB,
+    revision: WIRELESS_REGDB_RELEASE,
+    member: "LICENSE",
+    length: 880,
+    sha256: "678b0df753c86198fc496d1f1033429bbd57f101472132ee7eaaf9f5e0a7fae1",
+};
 /// Pinned wireless-regdb releases of `regulatory.db`, each with its ISC
 /// LICENSE, from [`WIRELESS_REGDB`].
-pub const REGULATORY: &[Recipe] = &[];
+pub const REGULATORY: &[Recipe] = &[Recipe {
+    image: Artifact {
+        source: WIRELESS_REGDB,
+        revision: WIRELESS_REGDB_RELEASE,
+        member: "regulatory.db",
+        length: 6348,
+        sha256: "7e236caecd939c8ec98be4870bf30422f28ffef2565a38aaaa2d9ddabd0c2641",
+    },
+    license: &REGULATORY_LICENSE,
+    consumer: Consumer::Wifi,
+}];
 
 /// The drivers' request for the version-20 database
 /// (`stela_drivers::net::wifi::regulatory::database::REQUIREMENT`).
@@ -196,6 +348,24 @@ fn select_regulatory(request: &Request) -> Option<&'static Recipe> {
         return None;
     }
     REGULATORY
+        .iter()
+        .find(|recipe| recipe.image.member == request.name)
+}
+
+fn select_intel_wifi(request: &Request) -> Option<&'static Recipe> {
+    if !request.target.hardware.starts_with("pci:8086:") {
+        return None;
+    }
+    INTEL_WIFI.iter().find(|recipe| {
+        recipe.image.member.strip_prefix("intel/iwlwifi/") == Some(request.name.as_str())
+    })
+}
+
+fn select_mediatek_wifi(request: &Request) -> Option<&'static Recipe> {
+    if !request.target.hardware.starts_with("pci:14c3:") {
+        return None;
+    }
+    MEDIATEK_WIFI
         .iter()
         .find(|recipe| recipe.image.member == request.name)
 }
@@ -281,15 +451,17 @@ impl Plan {
                     "no pinned recipe for the exact observed host firmware target",
                 ));
             }
-            if target.driver == "wifi-regulatory" && select_regulatory(request).is_none() {
-                return Err(fail(
-                    "--wifi needs wireless-regdb's regulatory.db, and this build pins no release of it",
-                ));
+            // Boot reads these from UEFI variables itself; nothing downloaded
+            // stands in for them.
+            if target.driver == "wifi-intel" && target.hardware.starts_with("uefi:") {
+                continue;
             }
             let recipe = match target.driver.as_str() {
                 "realtek" => select_realtek(request),
                 "intel-bluetooth-usb-rsa" => select_intel_rsa(request),
                 "wifi-regulatory" => select_regulatory(request),
+                "wifi-intel" => select_intel_wifi(request),
+                "wifi-mt792x" => select_mediatek_wifi(request),
                 _ => None,
             }.ok_or_else(|| fail("no pinned recipe for the exact observed firmware driver/hardware/revision/name"))?;
             if request.minimum_bytes > recipe.image.length {
@@ -425,7 +597,7 @@ mod tests {
     }
 
     #[test]
-    fn kernel_org_artifacts_use_cgit_plain_urls_and_an_unpinned_regdb_is_refused() {
+    fn kernel_org_artifacts_use_cgit_plain_urls_and_the_regdb_is_pinned() {
         let artifact = Artifact {
             source: WIRELESS_REGDB,
             revision: "master-2025-01-01",
@@ -445,12 +617,80 @@ mod tests {
             "name":"regulatory.db", "target":{"driver":"wifi-regulatory","hardware":"wireless-regdb","revision":"v20","board":null},"minimum_bytes":8
         }]});
         let inventory = Inventory::parse(&serde_json::to_vec(&value).unwrap()).unwrap();
+        let plan = Plan::select(&inventory).unwrap();
         assert_eq!(
-            Plan::select(&inventory).is_ok(),
-            REGULATORY
-                .iter()
-                .any(|recipe| recipe.image.member == "regulatory.db")
+            plan.selections[0].recipe.image.url(),
+            format!("{WIRELESS_REGDB}/plain/regulatory.db?h={WIRELESS_REGDB_RELEASE}")
         );
+    }
+
+    fn wifi_inventory(driver: &str, name: &str, hardware: &str) -> Inventory {
+        let value = serde_json::json!({"schema":1,"complete":true,"requirements":[{
+            "name":name, "target":{"driver":driver,"hardware":hardware,"revision":"observed","board":null},"minimum_bytes":12
+        }]});
+        Inventory::parse(&serde_json::to_vec(&value).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn wifi_images_are_pinned_by_the_name_each_driver_asks_for() {
+        for (driver, name, hardware, member) in [
+            (
+                "wifi-intel",
+                "iwlwifi-ty-a0-gf-a0.pnvm",
+                "pci:8086:2725:8086:0084",
+                "intel/iwlwifi/iwlwifi-ty-a0-gf-a0.pnvm",
+            ),
+            (
+                "wifi-intel",
+                "iwlwifi-Qu-c0-hr-b0-77.ucode",
+                "pci:8086:a0f0:8086:0070",
+                "intel/iwlwifi/iwlwifi-Qu-c0-hr-b0-77.ucode",
+            ),
+            (
+                "wifi-mt792x",
+                "mediatek/mt7925/WIFI_RAM_CODE_MT7925_1_1.bin",
+                "pci:14c3:7925:subsys:14c3:7925:rev:00",
+                "mediatek/mt7925/WIFI_RAM_CODE_MT7925_1_1.bin",
+            ),
+        ] {
+            let plan = Plan::select(&wifi_inventory(driver, name, hardware)).unwrap();
+            assert_eq!(plan.selections[0].recipe.image.member, member);
+            assert_eq!(plan.selections[0].request.name, name);
+            assert_eq!(plan.artifacts().len(), 2);
+        }
+    }
+
+    #[test]
+    fn wifi_recipes_refuse_another_vendor_or_an_unpinned_image() {
+        for (driver, name, hardware) in [
+            (
+                "wifi-intel",
+                "iwlwifi-ty-a0-gf-a0-89.ucode",
+                "pci:14c3:7925",
+            ),
+            (
+                "wifi-intel",
+                "iwlwifi-ty-a0-gf-a0-88.ucode",
+                "pci:8086:2725",
+            ),
+            (
+                "wifi-mt792x",
+                "mediatek/WIFI_RAM_CODE_MT7922_1.bin",
+                "pci:8086:2725",
+            ),
+        ] {
+            assert!(Plan::select(&wifi_inventory(driver, name, hardware)).is_err());
+        }
+    }
+
+    #[test]
+    fn intel_uefi_variables_need_no_download() {
+        let inventory = wifi_inventory(
+            "wifi-intel",
+            "uefi/UefiCnvWlanOemSignedPnvm",
+            "uefi:92daaf2f-c02b-455b-b2ec-f5a3594f4aea",
+        );
+        assert!(Plan::select(&inventory).unwrap().selections.is_empty());
     }
 
     #[test]

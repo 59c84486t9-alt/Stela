@@ -1,21 +1,138 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 // Copyright (C) 2015-2017 Intel Deutschland GmbH
 // Copyright (C) 2018-2026 Intel Corporation
-//! Exact standalone PCIe AX200/AX210 firmware selection from cfg/{22000,ax210}.c,
-//! pcie/drv.c and iwl_drv_get_fwname_pre at the pinned Linux source revision.
+//! Exact PCIe AX200/AX201/AX210/AX211 firmware selection from
+//! cfg/{22000,ax210,rf-hr,rf-gf}.c, pcie/drv.c and iwl_drv_get_fwname_pre at
+//! the pinned Linux source revision.
 //! These are observed identity records, not permission to program PCI or DMA.
-use super::firmware::{self, Family, Firmware};
+use super::{
+    firmware::{self, Family, Firmware},
+    mcc::channel::Inventory,
+};
 use crate::firmware as resources;
 use alloc::{boxed::Box, format, string::String};
 
 const INTEL: u16 = 0x8086;
 const AX200: u16 = 0x2723;
 const AX210: u16 = 0x2725;
+const MAC_QU: u32 = 0x33;
 const MAC_CC: u32 = 0x34;
+const MAC_QUZ: u32 = 0x35;
+const MAC_SO: u32 = 0x37;
 const MAC_TY: u32 = 0x42;
+const MAC_SOF: u32 = 0x43;
+const MAC_MA: u32 = 0x44;
 const RF_HR2: u32 = 0x10a;
 const RF_GF: u32 = 0x10d;
 const CDB: u32 = 1 << 28;
+/// `IWL_SUBDEVICE_BW_LIM`, which makes an integrated HR2 an 80 MHz AX203.
+const BANDWIDTH_LIMITED: u16 = 0x0200;
+/// The subdevice of AX231, whose radio configuration is not GF's.
+const AX231: u16 = 0x0294;
+const STEP_B: u32 = 1;
+const STEP_C: u32 = 2;
+
+/// What a device's `iwl_mac_cfg` says of the platform around its MAC.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Platform {
+    pub integrated: bool,
+    /// `xtal_latency`, in microseconds.
+    pub xtal_latency: u32,
+    pub low_latency_xtal: bool,
+    /// `ltr_delay`, which `SOC_FLAGS_LTR_APPLY_DELAY` encodes the same way.
+    pub ltr_delay: u32,
+    /// `imr_enabled`.
+    pub imr: bool,
+}
+
+impl Platform {
+    pub const AX200: Self = Self::discrete(0);
+    pub const AX210: Self = Self::discrete(500);
+    const LTR_200US: u32 = 1;
+    const LTR_2500US: u32 = 2;
+    const LTR_1820US: u32 = 3;
+
+    const fn discrete(xtal_latency: u32) -> Self {
+        Self {
+            integrated: false,
+            xtal_latency,
+            low_latency_xtal: false,
+            ltr_delay: 0,
+            imr: false,
+        }
+    }
+    const fn integrated(xtal_latency: u32, ltr_delay: u32) -> Self {
+        Self {
+            integrated: true,
+            xtal_latency,
+            low_latency_xtal: false,
+            ltr_delay,
+            imr: false,
+        }
+    }
+    const fn long_latency() -> Self {
+        Self {
+            low_latency_xtal: true,
+            ..Self::integrated(12000, Self::LTR_2500US)
+        }
+    }
+    /// `iwl_set_soc_latency`'s flags, for firmware with UMAC scan version 2
+    /// or later as every admitted image has.
+    pub const fn soc_flags(self) -> u32 {
+        !self.integrated as u32 | (self.low_latency_xtal as u32) << 1 | self.ltr_delay << 2
+    }
+}
+
+/// `iwl_hw_card_ids` for the admitted families.
+const fn device(id: u16) -> Option<(Family, Platform)> {
+    Some(match id {
+        AX200 => (Family::Ax200, Platform::AX200),
+        AX210 => (Family::Ax210, Platform::AX210),
+        0x02f0 | 0x06f0 => (
+            Family::Ax200,
+            Platform::integrated(500, Platform::LTR_200US),
+        ),
+        0x34f0 | 0x3df0 | 0x4df0 => (
+            Family::Ax200,
+            Platform::integrated(1820, Platform::LTR_1820US),
+        ),
+        0x43f0 | 0xa0f0 => (Family::Ax200, Platform::long_latency()),
+        0x7af0 | 0x7f70 => (
+            Family::Ax210,
+            Platform::integrated(500, Platform::LTR_200US),
+        ),
+        0x51f0 | 0x54f0 => (Family::Ax210, Platform::long_latency()),
+        0x7a70 | 0x51f1 => (
+            Family::Ax210,
+            Platform {
+                imr: true,
+                ..Platform::long_latency()
+            },
+        ),
+        0x2729 | 0x7e40 => (Family::Ax210, Platform::integrated(0, 0)),
+        _ => return None,
+    })
+}
+
+/// `iwl_drv_get_fwname_pre` at the API `cfg/` asks for, with the PNVM Linux
+/// finds beside the image.
+fn images(mac: u32, step: u32, radio: u32) -> Option<(&'static str, Option<&'static str>)> {
+    const TY: &str = "iwlwifi-ty-a0-gf-a0.pnvm";
+    const SO: &str = "iwlwifi-so-a0-gf-a0.pnvm";
+    const MA: &str = "iwlwifi-ma-b0-gf-a0.pnvm";
+    Some(match (mac, step, radio) {
+        (MAC_CC, _, RF_HR2) => ("iwlwifi-cc-a0-77.ucode", None),
+        (MAC_QU, STEP_B, RF_HR2) => ("iwlwifi-Qu-b0-hr-b0-77.ucode", None),
+        (MAC_QU, STEP_C, RF_HR2) => ("iwlwifi-Qu-c0-hr-b0-77.ucode", None),
+        (MAC_QUZ, _, RF_HR2) => ("iwlwifi-QuZ-a0-hr-b0-77.ucode", None),
+        (MAC_SO | MAC_SOF, _, RF_HR2) => ("iwlwifi-so-a0-hr-b0-89.ucode", None),
+        (MAC_MA, STEP_B, RF_HR2) => ("iwlwifi-ma-b0-hr-b0-89.ucode", None),
+        (MAC_TY, _, RF_GF) => ("iwlwifi-ty-a0-gf-a0-89.ucode", Some(TY)),
+        (MAC_SO | MAC_SOF, _, RF_GF) => ("iwlwifi-so-a0-gf-a0-89.ucode", Some(SO)),
+        (MAC_MA, STEP_B, RF_GF) => ("iwlwifi-ma-b0-gf-a0-89.ucode", Some(MA)),
+        _ => return None,
+    })
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Observed {
@@ -35,6 +152,8 @@ pub enum IdentityError {
     FailedRead,
     UnsupportedMac(u32),
     UnsupportedRadio(u32),
+    /// No firmware is released for this MAC step.
+    UnsupportedStep(u32),
     BlankRadioRequiresOtp,
 }
 
@@ -42,13 +161,18 @@ pub enum IdentityError {
 pub struct Profile {
     observed: Observed,
     family: Family,
+    platform: Platform,
+    radio: u32,
+    firmware: &'static str,
+    pnvm: Option<&'static str>,
 }
 
 impl Profile {
     pub fn select(observed: Observed) -> Result<Self, IdentityError> {
-        if observed.vendor != INTEL || !matches!(observed.device, AX200 | AX210) {
+        if observed.vendor != INTEL {
             return Err(IdentityError::UnsupportedPci);
         }
+        let (family, platform) = device(observed.device).ok_or(IdentityError::UnsupportedPci)?;
         if observed.hardware_revision == u32::MAX || observed.radio_id == u32::MAX {
             return Err(IdentityError::FailedRead);
         }
@@ -59,19 +183,41 @@ impl Profile {
         }
         let mac = (observed.hardware_revision & 0xfff0) >> 4;
         let radio = (observed.radio_id & 0x00ff_f000) >> 12;
-        let (family, expected_mac, expected_radio) = match observed.device {
-            AX200 => (Family::Ax200, MAC_CC, RF_HR2),
-            _ => (Family::Ax210, MAC_TY, RF_GF),
+        let macs: &[u32] = match observed.device {
+            AX200 => &[MAC_CC],
+            AX210 => &[MAC_TY],
+            _ if family == Family::Ax200 => &[MAC_QU, MAC_QUZ],
+            _ => &[MAC_SO, MAC_SOF, MAC_MA],
         };
-        if mac != expected_mac {
+        if !macs.contains(&mac) {
             return Err(IdentityError::UnsupportedMac(mac));
         }
-        if radio != expected_radio || (family == Family::Ax210 && observed.radio_id & CDB != 0) {
-            // TY + GF CDB chooses a distinct gf4 image, not gf-a0. It needs
-            // its own complete firmware/transport profile before admission.
+        let fitted = match radio {
+            RF_HR2 => mac != MAC_TY,
+            RF_GF => family == Family::Ax210,
+            _ => false,
+        };
+        let another_product = platform.integrated
+            && match radio {
+                RF_HR2 => observed.subsystem_device & BANDWIDTH_LIMITED != 0,
+                _ => observed.subsystem_device == AX231,
+            };
+        if !fitted || another_product || observed.radio_id & CDB != 0 {
+            // A CDB radio chooses a distinct gf4 image, and AX203 and AX231
+            // their own configurations. Each needs its own complete profile
+            // before admission.
             return Err(IdentityError::UnsupportedRadio(observed.radio_id));
         }
-        Ok(Self { observed, family })
+        let (firmware, pnvm) = images(mac, observed.hardware_revision & 0xf, radio)
+            .ok_or(IdentityError::UnsupportedStep(observed.hardware_revision))?;
+        Ok(Self {
+            observed,
+            family,
+            platform,
+            radio,
+            firmware,
+            pnvm,
+        })
     }
 
     pub fn observed(&self) -> Observed {
@@ -80,11 +226,27 @@ impl Profile {
     pub fn family(&self) -> Family {
         self.family
     }
+    pub fn platform(&self) -> Platform {
+        self.platform
+    }
+    /// `bisr_workaround`, set for the standalone AX200 alone.
+    pub fn bisr_workaround(&self) -> bool {
+        self.observed.device == AX200
+    }
+    /// The channel table this radio answers with: `uhb_supported` belongs to
+    /// the radio, so an HR radio on an AX210-family MAC has no 6 GHz rows.
+    pub fn channel_inventory(&self) -> Inventory {
+        if self.radio == RF_GF {
+            Inventory::UltraHighBand
+        } else {
+            Inventory::Extended
+        }
+    }
     pub fn firmware_request(&self) -> Request {
-        self.request(self.family.firmware_name())
+        self.request(self.firmware)
     }
     pub fn pnvm_request(&self) -> Option<Request> {
-        (self.family == Family::Ax210).then(|| self.request("iwlwifi-ty-a0-gf-a0.pnvm"))
+        self.pnvm.map(|name| self.request(name))
     }
     fn request(&self, name: &'static str) -> Request {
         let o = self.observed;
@@ -252,12 +414,142 @@ mod tests {
             Profile::select(o),
             Err(IdentityError::UnsupportedRadio(_))
         ));
-        for device in [0x06f0, 0x43f0, 0x272b, 0x24fd] {
+        for device in [0x272b, 0x24fd] {
             assert_eq!(
                 Profile::select(observed(device)).unwrap_err(),
                 IdentityError::UnsupportedPci
             );
         }
+    }
+
+    fn integrated(device: u16, revision: u32, radio: u32, subsystem: u16) -> Observed {
+        Observed {
+            device,
+            hardware_revision: revision,
+            radio_id: radio << 12,
+            subsystem_device: subsystem,
+            ..observed(AX200)
+        }
+    }
+
+    #[test]
+    fn integrated_devices_name_their_mac_steps_image_and_platform() {
+        for (device, revision, radio, ucode, pnvm, flags, latency) in [
+            (
+                0x06f0,
+                0x331,
+                RF_HR2,
+                "iwlwifi-Qu-b0-hr-b0-77.ucode",
+                None,
+                4,
+                500,
+            ),
+            (
+                0x02f0,
+                0x332,
+                RF_HR2,
+                "iwlwifi-Qu-c0-hr-b0-77.ucode",
+                None,
+                4,
+                500,
+            ),
+            (
+                0x34f0,
+                0x354,
+                RF_HR2,
+                "iwlwifi-QuZ-a0-hr-b0-77.ucode",
+                None,
+                12,
+                1820,
+            ),
+            (
+                0xa0f0,
+                0x332,
+                RF_HR2,
+                "iwlwifi-Qu-c0-hr-b0-77.ucode",
+                None,
+                10,
+                12000,
+            ),
+            (
+                0x7af0,
+                0x370,
+                RF_HR2,
+                "iwlwifi-so-a0-hr-b0-89.ucode",
+                None,
+                4,
+                500,
+            ),
+            (
+                0x51f0,
+                0x370,
+                RF_GF,
+                "iwlwifi-so-a0-gf-a0-89.ucode",
+                Some("iwlwifi-so-a0-gf-a0.pnvm"),
+                10,
+                12000,
+            ),
+            (
+                0x7e40,
+                0x441,
+                RF_GF,
+                "iwlwifi-ma-b0-gf-a0-89.ucode",
+                Some("iwlwifi-ma-b0-gf-a0.pnvm"),
+                0,
+                0,
+            ),
+        ] {
+            let profile = Profile::select(integrated(device, revision, radio, 0x0070)).unwrap();
+            assert_eq!(profile.firmware_request().name, ucode);
+            assert_eq!(profile.pnvm_request().map(|request| request.name), pnvm);
+            assert_eq!(profile.platform().soc_flags(), flags);
+            assert_eq!(profile.platform().xtal_latency, latency);
+            assert!(!profile.bisr_workaround());
+        }
+        assert!(
+            Profile::select(integrated(0x7a70, 0x370, RF_GF, 0x0090))
+                .unwrap()
+                .platform()
+                .imr
+        );
+    }
+
+    #[test]
+    fn a_radios_inventory_follows_the_radio_and_not_the_family() {
+        let hr = Profile::select(integrated(0x7af0, 0x370, RF_HR2, 0x0070)).unwrap();
+        let gf = Profile::select(integrated(0x7af0, 0x370, RF_GF, 0x0070)).unwrap();
+        assert_eq!(hr.family(), gf.family());
+        assert_eq!(hr.channel_inventory(), Inventory::Extended);
+        assert_eq!(gf.channel_inventory(), Inventory::UltraHighBand);
+    }
+
+    #[test]
+    fn products_without_a_profile_are_refused_by_name_of_what_differs() {
+        let unsupported = |o: Observed| Profile::select(o).unwrap_err();
+        assert!(matches!(
+            unsupported(integrated(0x06f0, 0x332, RF_GF, 0x0070)),
+            IdentityError::UnsupportedRadio(_)
+        ));
+        assert!(matches!(
+            unsupported(integrated(0x06f0, 0x332, RF_HR2, 0x0274)),
+            IdentityError::UnsupportedRadio(_)
+        ));
+        assert!(matches!(
+            unsupported(integrated(0x7af0, 0x370, RF_GF, AX231)),
+            IdentityError::UnsupportedRadio(_)
+        ));
+        assert_eq!(
+            unsupported(integrated(0x06f0, 0x340, RF_HR2, 0x0070)),
+            IdentityError::UnsupportedMac(MAC_CC)
+        );
+        assert_eq!(
+            unsupported(integrated(0x06f0, 0x330, RF_HR2, 0x0070)),
+            IdentityError::UnsupportedStep(0x330)
+        );
+        assert_eq!(
+            unsupported(integrated(0x7e40, 0x440, RF_GF, 0x0070)),
+            IdentityError::UnsupportedStep(0x440)
+        );
     }
 
     struct Observing<'a> {

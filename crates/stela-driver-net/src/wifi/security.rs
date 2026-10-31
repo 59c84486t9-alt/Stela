@@ -469,6 +469,26 @@ impl KeySlot {
         Ok(checked)
     }
 
+    /// One verified fragment's plaintext and packet number, for
+    /// `station::fragments`. Each fragment before the last spends its packet
+    /// number here, as mac80211's per-fragment decryption does. The last spends
+    /// its own with the whole MSDU, which `authorize` then checks.
+    pub(in crate::wifi) fn fragment_payload<'a>(
+        &mut self,
+        mpdu: &'a Mpdu,
+        last: bool,
+    ) -> Result<(&'a [u8], PacketNumber), Error> {
+        let key = self.installed().ok_or(Error::NoInstalledKey)?;
+        if !mpdu.header().protected() {
+            return Err(Error::NotProtected);
+        }
+        let (start, end, pn) = self.checked_payload(mpdu, key, None)?;
+        if !last {
+            self.commit_receive(data_replay_queue(mpdu), pn)?;
+        }
+        Ok((&mpdu.bytes()[start..end], pn))
+    }
+
     // Only the complete-owned group gate may permit aggregate framing or
     // supply an authenticated parent's PN for an absent member group1.
     fn checked_mpdu<'a>(

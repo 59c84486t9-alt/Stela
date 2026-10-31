@@ -187,8 +187,7 @@ fn check_store_data(
     }
 }
 
-/// The exact shared store of one element staged in RCX to [RAX], without
-/// the page-crossing split.
+/// The exact shared store of one element staged in RCX to [RAX].
 fn single_store(bytes: u8) -> Option<&'static [u8]> {
     const OPERAND_SIZE: u8 = 0x66;
     const MOV_BYTE_STORE: u8 = 0x88;
@@ -202,40 +201,26 @@ fn single_store(bytes: u8) -> Option<&'static [u8]> {
 }
 
 /// Inspect the exact shared store: address, the data's frame load (or
-/// zero) into RCX, and one host store, or with `crossing` the page-crossing
-/// store recipe (`memory_store::crossing_store`), keeping its emitted
-/// instruction boundaries. Branches stay within that recipe. Also returns the
-/// index of the staged data's segment in the ends.
+/// zero) into RCX, and one host store, keeping its emitted instruction
+/// boundaries. Also returns the index of the staged data's segment in the
+/// ends.
 pub fn ordinary_store_ends(
     code: &[u8],
     bytes: u8,
     base: usize,
     data: Option<usize>,
     displacement: i32,
-    crossing: bool,
 ) -> Option<(Vec<usize>, usize)> {
     let mut ends = ordinary_address_ends(code, base, displacement)?;
     let data_segment = ends.len();
     let data_end = check_store_data(code, *ends.last()?, data, false)?;
     ends.push(data_end);
-    let recipe;
-    let crossing_ends;
-    let store = if crossing {
-        (recipe, crossing_ends) = crate::x86_64::memory_store::crossing_store(bytes)?;
-        &recipe[..]
-    } else {
-        crossing_ends = Vec::new();
-        single_store(bytes)?
-    };
+    let store = single_store(bytes)?;
     let end = data_end + store.len();
     if code.get(data_end..end)? != store {
         return None;
     }
-    if crossing {
-        ends.extend(crossing_ends.into_iter().map(|offset| data_end + offset));
-    } else {
-        ends.push(end);
-    }
+    ends.push(end);
     (code.len() == end).then_some((ends, data_segment))
 }
 

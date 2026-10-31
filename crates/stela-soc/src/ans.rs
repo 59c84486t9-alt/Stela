@@ -374,20 +374,26 @@ impl Ans {
     }
 
     /// Whether a transfer at counter `now` would advance a command: one
-    /// waits to execute or to complete, or host transfers run and one has
-    /// completed or it is time to look for their completions.
+    /// waits to execute or to complete, or host work runs and has completed
+    /// or it is time to look for it.
     pub fn pending(&self, now: u64) -> bool {
         self.executing()
             && (self.shutdown
                 || !self.pending.is_empty()
                 || !self.completed.is_empty()
-                || (!self.inflight.is_empty() && (now >= self.look || self.medium.device.posted())))
+                || (self.host_work() && (now >= self.look || self.medium.device.posted())))
+    }
+
+    /// Whether the host disk runs anything: a command's transfers or its
+    /// background discards.
+    fn host_work(&self) -> bool {
+        !self.inflight.is_empty() || self.medium.device.discarding()
     }
 
     /// When to look for the running host transfers, if any run: at once
     /// when one has completed.
     pub fn host_look(&self) -> Option<u64> {
-        if self.inflight.is_empty() {
+        if !self.host_work() {
             return None;
         }
         Some(if self.medium.device.posted() {
@@ -813,7 +819,7 @@ impl Ans {
                 }
             }
         }
-        if !self.inflight.is_empty() {
+        if self.host_work() {
             self.look = self.medium.device.next_look(now);
         }
         // Completions publish in the order their commands completed, each

@@ -13,8 +13,8 @@ use crate::bytes::le32;
 use crate::{
     Clock, Handoff,
     block::{
-        BlockDevice, BlockError, Command, Features, Finished, Identity, Transport, WriteZeroes,
-        ascii,
+        BlockDevice, BlockError, Command, DiscardLimits, Features, Finished, Identity, Transport,
+        WriteZeroes, ascii,
     },
     bus::{dma::DmaAllocator, pci::Function},
     registers,
@@ -138,9 +138,13 @@ const IDENTIFY_ACTIVE_NAMESPACES: u32 = 2;
 const IDENTIFY_DESCRIPTORS: u32 = 3;
 /// The I/O command set's Identify Controller, here for CSI 0 (NVM).
 const IDENTIFY_COMMAND_SET_CONTROLLER: u32 = 6;
-/// Its WZSL and DMRSL (NVM Command Set 1.1 Figure 112).
+/// Its WZSL, DMRL and DMRSL (NVM Command Set 1.1 Figure 112).
 const NVM_WRITE_ZEROES_LIMIT: usize = 1;
+const NVM_DEALLOCATE_RANGES: usize = 3;
 const NVM_DEALLOCATE_RANGE_LIMIT: usize = 4;
+/// The ranges one Dataset Management command takes, and each range's bytes.
+const MAX_DEALLOCATE_RANGES: usize = 256;
+const RANGE_BYTES: usize = 16;
 /// The command-set-independent Identify Namespace and its NSTAT.NRDY.
 const IDENTIFY_INDEPENDENT_NAMESPACE: u32 = 8;
 const INDEPENDENT_STATUS: usize = 14;
@@ -625,6 +629,8 @@ struct Limits {
     write_zeroes: u8,
     /// DMRSL: the most blocks one Deallocate range takes; 0 for none.
     deallocate: u32,
+    /// DMRL: the most ranges one Deallocate takes; 0 for none.
+    deallocate_ranges: u8,
     refused: bool,
 }
 
@@ -957,7 +963,8 @@ struct TransferLimits {
 
 /// A namespace's features, as Linux `nvme_update_disk_info` sets them:
 /// FUA with a volatile write cache; Deallocate as discard with Dataset
-/// Management, one range of up to DMRSL blocks, or else `UINT_MAX` sectors;
+/// Management, up to DMRL ranges or else 256, each of up to DMRSL blocks or
+/// else `UINT_MAX` sectors;
 /// and Write Zeroes up to WZSL, or else the controller's command range
 /// (`nvme_init_non_mdts_limits`), which may deallocate where the namespace
 /// reads deallocated blocks as zeros and says Write Zeroes deallocates
@@ -984,13 +991,17 @@ fn features(
         write_cache,
         fua: write_cache,
         max_transfer: transfer.data,
-        discard: (commands & COMMANDS_DATASET_MANAGEMENT != 0).then_some(
-            if deallocate != 0 && deallocate <= sectors {
+        discard: (commands & COMMANDS_DATASET_MANAGEMENT != 0).then_some(DiscardLimits {
+            blocks: if deallocate != 0 && deallocate <= sectors {
                 deallocate
             } else {
                 sectors
             },
-        ),
+            ranges: match limits.deallocate_ranges {
+                0 => MAX_DEALLOCATE_RANGES,
+                ranges => usize::from(ranges).min(MAX_DEALLOCATE_RANGES),
+            },
+        }),
         write_zeroes: (commands & COMMANDS_WRITE_ZEROES != 0).then_some(WriteZeroes {
             blocks: (zeroes >> block_shift).min(1 << 16),
             unmap: format.deallocate & 0x7 == 1 && format.deallocate & 1 << 3 != 0,
@@ -1176,7 +1187,7 @@ impl BlockDevice for Namespace {
     }
 
     fn discard(&mut self, lba: u64, blocks: u64) -> Result<(), BlockError> {
-        self.command(Command::Discard { lba, blocks }).map(drop)
+        self.command(Command::discard(lba, blocks)).map(drop)
     }
 
     fn write_zeroes(&mut self, lba: u64, blocks: u64, unmap: bool) -> Result<(), BlockError> {

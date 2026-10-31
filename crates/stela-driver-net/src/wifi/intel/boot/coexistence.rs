@@ -126,7 +126,7 @@ pub(super) fn channel_inhibition(
     ];
     let mask = match channel.band {
         Band::Ghz2 if (1..=14).contains(&channel.number) => MASKS[usize::from(channel.number)],
-        Band::Ghz5 => 0,
+        Band::Ghz5 | Band::Ghz6 => 0,
         _ => return Err(CoexistenceError::Channel),
     };
     let mut bytes = [0; 24];
@@ -138,10 +138,7 @@ pub(super) fn channel_inhibition(
 mod tests {
     extern crate std;
     use super::*;
-    use crate::wifi::intel::{
-        command::Id,
-        firmware::{Family, Firmware},
-    };
+    use crate::wifi::intel::{command::Id, firmware::Firmware};
     use crate::wifi::{Band, Channel};
     use alloc::vec::Vec;
     #[test]
@@ -218,7 +215,7 @@ mod tests {
                     };
                     let plan = crate::wifi::intel::radio::InitialPlan::prepare(
                         &firmware,
-                        Family::Ax200,
+                        crate::wifi::intel::identity::Platform::AX200,
                         &information,
                     )
                     .unwrap();

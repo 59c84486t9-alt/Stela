@@ -21,18 +21,17 @@ impl<'a, Q: BootIo, B: BiosIo> Hardware<'_, 'a, Q, B> {
     }
     pub(super) fn channel(&self, band: Band, number: u16) -> Option<Channel> {
         let information = &self.board.initialized_nvm().information;
-        let sku_bit = match band {
-            Band::Ghz2 => 1,
-            Band::Ghz5 => 2,
-            Band::Ghz6 => return None,
-        };
+        // NVM has no 6 GHz bit: `iwl_init_channel_map` counts it with 5 GHz.
+        let sku_bit = if band == Band::Ghz2 { 1 } else { 2 };
         if information.lar_enabled == 0 || information.mac_sku_flags & sku_bit == 0 {
             return None;
         }
         let observation = self.channels.iter().find(|ch| {
             let matches_band = matches!(
                 (ch.channel.band, band),
-                (channel::Band::Ghz2, Band::Ghz2) | (channel::Band::Ghz5, Band::Ghz5)
+                (channel::Band::Ghz2, Band::Ghz2)
+                    | (channel::Band::Ghz5, Band::Ghz5)
+                    | (channel::Band::Ghz6, Band::Ghz6)
             );
             matches_band
                 && ch.channel.number == number
@@ -50,12 +49,20 @@ impl<'a, Q: BootIo, B: BiosIo> Hardware<'_, 'a, Q, B> {
             .rule(u32::from(channel.frequency_mhz) * 1000, 20_000)?;
         Some(channel)
     }
+    /// Whether the firmware's own channel list lets a frame start here.
+    fn initiates(&self, channel: Channel) -> bool {
+        self.channels.iter().any(|ch| {
+            ch.channel.number == channel.number
+                && ch.channel.frequency_mhz == channel.frequency_mhz
+                && !ch.restrictions.no_initiate_radiation
+        })
+    }
 }
 // SAFETY: private construction borrows the unique fully ACKed original native
 // MAC/board/MCC owner and its Country selection, never public receipts.
 // Its exclusive mutable borrow serializes controlled reset/programming through
-// the HCMD handoff. Only forced-passive receive is admitted; every TX
-// operation (including autonomous association/ACK) is refused. The kept OS
+// the HCMD handoff. Receive and firmware-built scan probes are admitted; every
+// other TX operation (including autonomous association/ACK) is refused. The kept OS
 // attachment must coordinate post-publication revocation with this native owner
 // or hardware enforcement, as required by unsafe begin_scan.
 unsafe impl<'p, 'a, Q: BootIo, B: BiosIo> HardwarePolicy for Hardware<'p, 'a, Q, B> {
@@ -87,6 +94,14 @@ impl<Q: BootIo, B: BiosIo> HardwareLease for Guard<'_, '_, '_, Q, B> {
         match operation {
             regulatory::Operation::Receive(ch) => {
                 self.owner.channel(ch.band, ch.number) == Some(ch)
+            }
+            regulatory::Operation::Transmit {
+                channel,
+                purpose: regulatory::Purpose::Probe,
+                ..
+            } => {
+                self.owner.channel(channel.band, channel.number) == Some(channel)
+                    && self.owner.initiates(channel)
             }
             regulatory::Operation::Transmit { .. } => false,
         }
@@ -140,8 +155,8 @@ impl protocol::Policy for CheckedRequest<'_> {
     fn allow_receive(&mut self, channel: Channel) -> bool {
         self.0.channels().contains(&channel)
     }
-    fn allow_probe(&mut self, _: Channel) -> bool {
-        false
+    fn allow_probe(&mut self, channel: Channel) -> bool {
+        self.0.active() && self.0.channels().contains(&channel)
     }
     fn lookup_channel(&mut self, band: Band, number: u16) -> Option<Channel> {
         self.0

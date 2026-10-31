@@ -1,7 +1,7 @@
 use super::*;
 use crate::wifi::{
     Band, Channel,
-    regulatory::{HardwareLease, HardwarePolicy, LegacyRate, OsPolicy, Width},
+    regulatory::{HardwareLease, HardwarePolicy, LegacyRate, OsPolicy, TxProfile, Width},
 };
 use alloc::{rc::Rc, vec, vec::Vec};
 use core::cell::{Cell, RefCell};
@@ -27,6 +27,7 @@ const PROFILE: TxProfile = TxProfile {
     short_preamble: false,
     max_eirp_mbm: 1700,
 };
+const PROFILES: ProbeProfiles = ProbeProfiles::uniform(PROFILE);
 #[derive(Clone)]
 struct Model {
     native: Rc<Cell<NativeContext>>,
@@ -159,7 +160,7 @@ fn exact_request_and_every_channel_share_one_pair_of_guards_through_native_resul
         let mut owner = owner(&model);
         let request = request(active);
         let admission = owner
-            .admit_scan(&request, active.then_some(PROFILE))
+            .admit_scan(&request, active.then_some(PROFILES))
             .unwrap();
         assert!(!core::ptr::eq(admission.operation().request(), &request));
         assert_eq!(
@@ -183,7 +184,7 @@ fn exact_request_and_every_channel_share_one_pair_of_guards_through_native_resul
                 assert!(model.hardware_held.get() && model.os_held.get());
                 assert_eq!(operation.request().channels(), request.channels());
                 assert_eq!(operation.request().ssids(), request.ssids());
-                assert_eq!(operation.probe_profile(), active.then_some(PROFILE));
+                assert_eq!(operation.probe_profiles(), active.then_some(PROFILES));
                 model.events.borrow_mut().push("publish");
                 Err::<(), _>(0x91u32)
             })
@@ -256,7 +257,7 @@ fn later_channel_failure_and_active_profile_never_publish_a_partial_scan() {
     let mut owner = owner(&model);
     let passive = request(false);
     assert!(matches!(
-        owner.admit_scan(&passive, Some(PROFILE)),
+        owner.admit_scan(&passive, Some(PROFILES)),
         Err(Error::Mismatch)
     ));
     let request = request(true);
@@ -267,7 +268,7 @@ fn later_channel_failure_and_active_profile_never_publish_a_partial_scan() {
     let mut wrong = PROFILE;
     wrong.max_eirp_mbm += 1;
     assert!(matches!(
-        owner.admit_scan(&request, Some(wrong)),
+        owner.admit_scan(&request, Some(ProbeProfiles::uniform(wrong))),
         Err(Error::HardwareDenied)
     ));
     let six = Request::new(
@@ -285,7 +286,7 @@ fn later_channel_failure_and_active_profile_never_publish_a_partial_scan() {
     .unwrap();
     assert!(matches!(
         owner.admit_scan(&six, None),
-        Err(Error::Unsupported)
+        Err(Error::HardwareDenied)
     ));
 }
 #[test]

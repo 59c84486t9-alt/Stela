@@ -472,7 +472,14 @@ fn reused_tag_requires_its_new_submission_to_be_fetched() {
 fn deallocate_and_write_zeroes_carry_their_ranges() {
     let mut fixture = Fixture::new();
     let disk = &mut fixture.disk;
-    let discard = disk.start(Command::Discard { lba: 9, blocks: 3 }).unwrap();
+    let discard = disk
+        .start(Command::Discard {
+            extents: vec![
+                crate::block::Extent { lba: 9, blocks: 3 },
+                crate::block::Extent { lba: 40, blocks: 2 },
+            ],
+        })
+        .unwrap();
     let zeroes = disk
         .start(Command::WriteZeroes {
             lba: 20,
@@ -489,10 +496,13 @@ fn deallocate_and_write_zeroes_carry_their_ranges() {
         word(&controller, 0, 0) & 0xff,
         u32::from(IO_DATASET_MANAGEMENT)
     );
+    assert_eq!(word(&controller, 0, 10), 1);
     assert_eq!(word(&controller, 0, 11), ATTRIBUTE_DEALLOCATE);
-    let range = controller.slot(discard as usize).0.bytes()[..16].to_vec();
+    let range = controller.slot(discard as usize).0.bytes()[..32].to_vec();
     assert_eq!(range[4..8], 3u32.to_le_bytes());
     assert_eq!(range[8..16], 9u64.to_le_bytes());
+    assert_eq!(range[20..24], 2u32.to_le_bytes());
+    assert_eq!(range[24..32], 40u64.to_le_bytes());
     assert_eq!(word(&controller, 1, 0) & 0xff, u32::from(IO_WRITE_ZEROES));
     assert_eq!(word(&controller, 1, 10), 20);
     assert_eq!(word(&controller, 1, 12), 3 | DEALLOCATE);

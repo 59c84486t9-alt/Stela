@@ -95,6 +95,19 @@ pub const SET_ENVIRONMENT: u8 = 0x2a;
 /// `no-effaceable-storage`; the reply is the variant alone. This SEP never
 /// keeps keys in effaceable storage, so it acknowledges.
 pub const NULL_D_KEY: u8 = 0x0a;
+/// `get_device_state` (0x2d21fe8) sends GET_DEVICE_STATE
+/// (`__ipc_get_device_state` 0x2d59b34, `_v1` 0x2d59c24, codec 0x2d40a28):
+/// u64 session, u32 handle, then u32 0, or a blob and a u32 in variant 1.
+/// The reply is a blob, the DER dictionary `decode_extended_state`
+/// (0x2d5f570) reads.
+pub const GET_DEVICE_STATE: u8 = 0x19;
+/// `__ipc_client_terminate_v1` (0x2d59e14, codec 0x2d40e88): three u64s and
+/// a u32 in variant 1 and no reply fields. This SEP keeps nothing per client,
+/// so it acknowledges.
+pub const CLIENT_TERMINATE: u8 = 0x1b;
+/// `ss`: never locked and no passcode, from the keybag state flags
+/// `keybag_state_no_pin` (bit 1) and `keybag_state_been_unlocked` (bit 3).
+const UNLOCKED_WITHOUT_PASSCODE: u8 = 0b1010;
 
 const LENGTH_BYTES: usize = 4;
 const DIGEST_START: usize = 4;
@@ -150,6 +163,8 @@ pub struct KeyStore {
     diagnostics: Journal,
     /// Commands already reported as unimplemented.
     unimplemented: Vec<u8>,
+    /// Whether the unmodeled lock states were reported.
+    state_reported: bool,
 }
 
 impl KeyStore {
@@ -158,6 +173,43 @@ impl KeyStore {
             system_keys: Some(system_key::SystemKeys::new(root)),
             ..Self::default()
         }
+    }
+
+    /// The state dictionary of a keybag: none is ever locked, as
+    /// [`volume_key`] keeps every class available, and no passcode exists.
+    /// Handles are not interpreted. Reported once.
+    fn device_state(&mut self, variant: u32, fields: &mut Fields<'_>) -> Result<Vec<u8>> {
+        let _session = fields.lword()?;
+        let _handle = fields.word()?;
+        match variant {
+            0 => {}
+            1 => {
+                let _options = fields.blob()?;
+            }
+            _ => return Err(refuse!("SEP keystore device state variant is not modeled")),
+        }
+        let _flags = fields.word()?;
+        fields.end()?;
+        if !self.state_reported {
+            self.state_reported = true;
+            self.diagnostics.record(alloc::string::String::from(
+                "SEP keystore: every keybag reports unlocked without a passcode",
+            ));
+        }
+        let zero = || dictionary::number(0);
+        Ok(dictionary::dictionary(&[
+            (b"sas", zero()),
+            (b"sb", zero()),
+            (b"sbo", zero()),
+            (b"sfa", zero()),
+            (b"sfao", zero()),
+            (b"sgpe", zero()),
+            (b"sgs", zero()),
+            (b"sls", zero()),
+            (b"sms", zero()),
+            (b"srcd", zero()),
+            (b"ss", dictionary::number(UNLOCKED_WITHOUT_PASSCODE)),
+        ]))
     }
 
     /// Name an unimplemented command in the diagnostics, once per command.
@@ -217,7 +269,12 @@ impl KeyStore {
         let command = frame.tag;
         if !matches!(
             command,
-            GET_CAPABILITIES | SET_ENVIRONMENT | NULL_D_KEY | system_key::PERFORM_OPERATION
+            GET_CAPABILITIES
+                | SET_ENVIRONMENT
+                | NULL_D_KEY
+                | GET_DEVICE_STATE
+                | CLIENT_TERMINATE
+                | system_key::PERFORM_OPERATION
         ) && !keybag::recognizes(command)
             && !volume_key::recognizes(command)
         {
@@ -280,6 +337,42 @@ impl KeyStore {
                 )
                 .map_err(refuse)?;
             let reply = message.reply(&reply_fields);
+            payload.output(&reply).map_err(refuse)?;
+            return Ok(Frame {
+                tag: command | REPLY,
+                parameter: 0,
+                data: (reply.len() as u32) << LENGTH_SHIFT,
+                ..frame
+            });
+        }
+        if command == GET_DEVICE_STATE {
+            let state = self
+                .device_state(message.variant(), &mut fields)
+                .map_err(refuse)?;
+            let mut reply_fields = (state.len() as u32).to_le_bytes().to_vec();
+            reply_fields.extend_from_slice(&state);
+            reply_fields.resize(reply_fields.len().next_multiple_of(4), 0);
+            let reply = message.reply(&reply_fields);
+            payload.output(&reply).map_err(refuse)?;
+            return Ok(Frame {
+                tag: command | REPLY,
+                parameter: 0,
+                data: (reply.len() as u32) << LENGTH_SHIFT,
+                ..frame
+            });
+        }
+        if command == CLIENT_TERMINATE {
+            if message.variant() != 1 {
+                return Err(refuse(refuse!(
+                    "SEP keystore client termination variant is not modeled"
+                )));
+            }
+            for _ in 0..3 {
+                fields.lword().map_err(refuse)?;
+            }
+            fields.word().map_err(refuse)?;
+            fields.end().map_err(refuse)?;
+            let reply = message.reply(&[]);
             payload.output(&reply).map_err(refuse)?;
             return Ok(Frame {
                 tag: command | REPLY,

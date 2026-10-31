@@ -421,3 +421,40 @@ fn unchanged_linux_ownership_reset_and_clock_effects() {
     assert_eq!(cases, 12);
     assert!(effects > 5000);
 }
+
+#[test]
+fn an_integrated_22000_device_gates_power_between_its_reset_and_power_up() {
+    let mut model = Model::new(Family::Ax200);
+    model.registers.insert(HW_REV, 0x332);
+    let profile = Profile::select(Observed {
+        device: 0x06f0,
+        hardware_revision: 0x332,
+        subsystem_device: 0x70,
+        ..profile(Family::Ax200).observed()
+    })
+    .unwrap();
+    let mut power = Power::new(model, profile);
+    power.wake(ManagementSession::NotConnected).unwrap();
+    let ops = &power.io.ops;
+    let written: Vec<u32> = ops
+        .iter()
+        .filter_map(|op| match op {
+            Op::Write(PRPH_WDATA, value) => Some(*value),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        written[written.len() - 3..],
+        [
+            FORCE_ACTIVE,
+            FORCE_ACTIVE | POWER_GATE | SLEEP,
+            POWER_GATE | SLEEP
+        ]
+    );
+    let resets = ops
+        .iter()
+        .filter(|op| matches!(op, Op::Write(RESET, value) if value & 0x80 != 0))
+        .count();
+    assert_eq!(resets, 2);
+    assert!(!ops.contains(&Op::Delay(2000)));
+}

@@ -42,7 +42,7 @@ pub(super) fn exercise_cold_radio(actual: bool) {
         let init = drive_nvm(boot, &source, &domain, &state);
         let expected = InitialPlan::prepare(
             &init.boot.firmware,
-            profile.family(),
+            profile.platform(),
             &init.receipt().unwrap().information,
         )
         .unwrap();

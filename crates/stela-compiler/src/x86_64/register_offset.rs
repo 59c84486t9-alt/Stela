@@ -14,7 +14,7 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, checks: super::MemoryChec
         operand.bytes,
         operand.transfer == MemoryTransfer::Store,
     );
-    transfer(code, operand, checks);
+    transfer(code, operand);
 }
 
 /// A decoded base, index extension and scale.
@@ -116,23 +116,11 @@ pub(crate) fn index_add(code: &mut Code, index: Register, extend: IndexExtend, s
     );
 }
 
-fn transfer(code: &mut Code, operand: &Operand, checks: super::MemoryChecks) {
+fn transfer(code: &mut Code, operand: &Operand) {
     match operand.transfer {
         MemoryTransfer::Store => {
             right_operand(code, operand.data, Width::X64, Shift::Lsl, 0);
-            memory_store::emit(
-                code,
-                operand.bytes,
-                0,
-                memory_store::Source::Rcx,
-                checks.stack_alignment
-                    && memory_store::aligned_register_offset(
-                        operand.base,
-                        operand.index,
-                        operand.shift,
-                        operand.bytes,
-                    ),
-            );
+            memory_store::emit(code, operand.bytes, 0, memory_store::Source::Rcx);
         }
         MemoryTransfer::Load { signed, width } => {
             let size = Size::of(width == Width::X64);

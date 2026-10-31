@@ -4,8 +4,8 @@
 //! one original hardware lease and then one OS lease remain held. This issues
 //! no completion, cancellation or retirement proof for firmware-owned work.
 use super::{
-    Error, HardwarePolicy, NativeContext, Operation, OsLease, OsPolicy, Owner, Purpose, TxProfile,
-    check,
+    Error, HardwarePolicy, NativeContext, Operation, OsLease, OsPolicy, Owner, ProbeProfiles,
+    Purpose, check,
 };
 use crate::wifi::{
     Channel,
@@ -18,13 +18,13 @@ use alloc::vec::Vec;
 #[derive(Clone, Copy, Debug)]
 pub struct ScanOperation<'a> {
     request: &'a Request,
-    probe: Option<TxProfile>,
+    probe: Option<ProbeProfiles>,
 }
 impl<'a> ScanOperation<'a> {
     pub fn request(self) -> &'a Request {
         self.request
     }
-    pub fn probe_profile(self) -> Option<TxProfile> {
+    pub fn probe_profiles(self) -> Option<ProbeProfiles> {
         self.probe
     }
 }
@@ -44,7 +44,7 @@ pub struct ScanAdmission {
     native: NativeContext,
     os_revision: u64,
     request: Request,
-    probe: Option<TxProfile>,
+    probe: Option<ProbeProfiles>,
 }
 impl ScanAdmission {
     pub fn operation(&self) -> ScanOperation<'_> {
@@ -104,7 +104,7 @@ fn check_request(
                 Operation::Transmit {
                     channel,
                     purpose: Purpose::Probe,
-                    profile: operation.probe.ok_or(Error::Unsupported)?,
+                    profile: operation.probe.ok_or(Error::Unsupported)?.on(channel),
                 },
             )?;
         }
@@ -117,7 +117,7 @@ impl<H: HardwarePolicy, O: OsPolicy> Owner<H, O> {
     pub fn admit_scan(
         &mut self,
         request: &Request,
-        probe: Option<TxProfile>,
+        probe: Option<ProbeProfiles>,
     ) -> Result<ScanAdmission, Error> {
         let request = snapshot(request)?;
         let operation = ScanOperation {

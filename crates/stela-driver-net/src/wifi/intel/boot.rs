@@ -49,9 +49,9 @@ pub use ax200::{
     Ax200Setup, Ax200SetupError, Ax200SetupOptions, Ax200SetupPhase, Ax200TransmitPower,
     Ax200TransmitPowerError, Ax200TransmitPowerPhase, BindingCommand, BindingCommandKind,
     BoardCommand, BoardCommandKind, CountryIo, CountryIoError, LegacyPeer, MacCommand,
-    MacCommandKind, PeerCommand, PeerCommandKind, PhyCommand, PhyCommandKind, ScanCompletion,
-    ScanRawReceive, ScanRejectedMpdu, ScanResult, ScanResultProgress, ScanRetirement,
-    SelectedCountry, SetupDecisions, TransmitPowerLimit,
+    MacCommandKind, PeerCommand, PeerCommandKind, PhyCommand, PhyCommandKind, Probe,
+    ScanCompletion, ScanRawReceive, ScanRejectedMpdu, ScanResult, ScanResultProgress,
+    ScanRetirement, SelectedCountry, SetupDecisions, TransmitPowerLimit,
 };
 mod lari;
 pub use lari::{LariError, LariPhase, LariRadio};
@@ -64,6 +64,11 @@ pub use rx::{MpduProgress, NormalizedMpdu, ObservedMpdu, RejectedMpdu};
 mod unified;
 pub use hcmd::{CommandProgress, CommandResponse, CommandTicket, FirmwareNotification};
 pub use unified::{InitializationPhase, InitializationProgress, InitializedNvm, UnifiedNvm};
+/// `iwl_pcie_set_ltr`'s ~250 us long-value request.
+const LTR_BOOT_VALUE: u32 = 0x88fa88fa;
+const LTR_LAST_MESSAGE: u32 = 0xdc;
+const MSIX_HW_CAUSES: u32 = 0x2808;
+const IML_CAUSE: u32 = 1 << 1;
 const RECEIVE_BUFFER_BYTES: usize = 4096;
 
 /// Declared platform integration mode, never inferred from an SB flag.
@@ -342,6 +347,10 @@ struct Ax210Memory<'a> {
 /// consumers can name `RomBoot` and choose its explicit family constructor.
 pub type Ax200Boot<'a, Q> = RomBoot<'a, Q>;
 impl<'a, Q: BootIo> RomBoot<'a, Q> {
+    /// The device family this boot runs.
+    pub fn family(&self) -> Family {
+        self.profile.family()
+    }
     /// Start the standalone AX200 context protocol.
     /// # Safety
     /// PCI Memory Space is enabled and bus mastering has been enabled only
@@ -725,13 +734,43 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
             self.write(0x128, iml.bytes as u32)?;
             self.set(0, 2)?; // CSR_AUTO_FUNC_BOOT_ENA
         }
-        self.write(0xd4, 0x88fa88fa)?;
-        let offset = if self.profile.family() == Family::Ax210 {
-            0x300000
-        } else {
-            0
+        // `iwl_pcie_set_ltr`: ROM leaves LTR unset, and an integrated AX210
+        // device keeps it out of the host's reach.
+        let family = self.profile.family();
+        let keep_busy = match (self.profile.platform().integrated, family) {
+            (false, _) => {
+                self.write(0xd4, LTR_BOOT_VALUE)?;
+                false
+            }
+            (true, Family::Ax200) => {
+                self.prph_write(0xa0348c, 0xf)?;
+                self.prph_write(0xa03480, LTR_BOOT_VALUE)?;
+                false
+            }
+            (true, Family::Ax210) => {
+                self.write(MSIX_HW_CAUSES, IML_CAUSE)?;
+                true
+            }
         };
-        self.prph_write(0xa05c44 + offset, 1)
+        let offset = if family == Family::Ax210 { 0x300000 } else { 0 };
+        self.prph_write(0xa05c44 + offset, 1)?;
+        if keep_busy {
+            self.spin_for_iml()?;
+        }
+        Ok(())
+    }
+    /// `iwl_pcie_spin_for_iml`: keep the CPU and device busy for at least
+    /// 100 ms or until the image loader finishes. Running out is no failure;
+    /// ALIVE decides whether the boot worked.
+    fn spin_for_iml(&mut self) -> Result<(), Error> {
+        for _ in 0..100_000 {
+            if self.read_register(MSIX_HW_CAUSES)? & IML_CAUSE != 0 {
+                break;
+            }
+            self.read_register(LTR_LAST_MESSAGE)?;
+            self.io().delay_us(1)?;
+        }
+        Ok(())
     }
     fn restock(&mut self) -> Result<(), Error> {
         for (index, buffer) in self.buffers.iter_mut().enumerate() {

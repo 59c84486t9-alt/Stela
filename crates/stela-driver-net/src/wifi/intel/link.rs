@@ -27,6 +27,7 @@ use super::{
         InitializationProgress, LariError, LariPhase, LariRadio, LegacyPeer, MpduProgress,
         PnvmProgress, RomBoot, ScanResultProgress, UnifiedNvm,
     },
+    firmware::Family,
     platform::Observations,
     policy::{Beacons, Regulatory},
     radio::{bios::service::BiosIo, control::PowerMode},
@@ -180,6 +181,7 @@ pub struct Wifi<Q: BootIo, B: BiosIo> {
     client: station::Client,
     /// The transmit and receive antennas.
     chains: (u32, u32),
+    family: Family,
     save_power: bool,
     address: Mac,
     error: Option<Error>,
@@ -209,8 +211,7 @@ pub fn legacy_rates(elements: &[u8], band: Band) -> u16 {
     }
     match band {
         Band::Ghz2 => mask,
-        Band::Ghz5 => mask & 0xff0,
-        Band::Ghz6 => 0,
+        Band::Ghz5 | Band::Ghz6 => mask & 0xff0,
     }
 }
 
@@ -230,6 +231,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
     pub unsafe fn new(boot: RomBoot<'static, Q>, inputs: Inputs<B>) -> Station<Q, B> {
         let deadline = inputs.clock.deadline(ALIVE_TIMEOUT_US);
         let wifi = Self {
+            family: boot.family(),
             stage: Stage::Rom(Box::new(boot)),
             firmware: inputs.firmware,
             observations: inputs.observations,
@@ -737,15 +739,18 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         {
             beacons.heard(bss.channel);
         }
-        let observed = Arc::new(association::NativeBssObservation { bss: bss.clone() });
+        let heard = station::Heard {
+            observation: Arc::new(association::NativeBssObservation { bss: bss.clone() }),
+            at: self.clock.now_us(),
+        };
         match self
             .client
             .observed
             .iter_mut()
-            .find(|known| known.bss().bssid == bss.bssid)
+            .find(|known| known.observation.bss().bssid == bss.bssid)
         {
-            Some(known) => *known = observed,
-            None => self.client.observed.push(observed),
+            Some(known) => *known = heard,
+            None => self.client.observed.push(heard),
         }
     }
 }

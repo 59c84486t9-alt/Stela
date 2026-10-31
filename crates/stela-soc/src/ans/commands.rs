@@ -177,8 +177,8 @@ const RANGE_BYTES: usize = 16;
 const ONCS: u16 = 1 | (1 << 2);
 /// DLFEAT (Identify namespace byte 33) 001b: a deallocated block reads as
 /// zeros, which [`super::namespace::Medium::deallocate`] provides and the
-/// host keeps past a restart where its Write Zeroes deallocates
-/// ([`super::host::HostDisk::deallocates_zeroed`]); 000b otherwise.
+/// host keeps past a flushed restart where it reads deallocated blocks as
+/// zeros ([`super::host::HostDisk::deallocates_zeroed`]); 000b otherwise.
 const DLFEAT_READ_ZEROS: u8 = 1;
 
 /// CDW0 bits 11:10 (byte 1 bits 3:2): the inline crypto mode
@@ -306,8 +306,6 @@ pub(super) enum Wait {
         blocks: u64,
     },
     Flush,
-    /// The host's blocks deallocated, or zeroed.
-    Deallocate,
 }
 
 /// The host's bytes of a read: none for one whose blocks are all erased.
@@ -727,7 +725,7 @@ impl Ans {
             return self.host(key, vec![Request::Flush], Wait::Flush, port);
         }
         if cmd.opcode() == DATASET_MANAGEMENT {
-            return self.dataset_management(key, cmd, port);
+            return self.dataset_management(cmd, port).map(Executed::Done);
         }
         let controls = cmd.word(48);
         // CDW13 carries hints the controller may ignore, from
@@ -867,8 +865,7 @@ impl Ans {
                 }
                 block_result(result.map(drop))
             }
-            (Wait::Flush | Wait::Deallocate, Some(result)) => block_result(result.map(drop)),
-            (Wait::Deallocate, None) => Outcome::status(SUCCESS),
+            (Wait::Flush, Some(result)) => block_result(result.map(drop)),
             _ => return Err(refuse!("ANS host transfer result differs from its command")),
         })
     }
@@ -877,16 +874,11 @@ impl Ans {
     /// takes effect, so an out-of-range entry fails the whole command (LBA
     /// Out of Range) with nothing deallocated. Integral-dataset hints (IDR,
     /// IDW) and context attributes carry no modeled effect and refuse. The
-    /// blocks read as zeros at once; the host's blocks are zeroed with
-    /// deallocation where its Write Zeroes deallocates, so they stay zeros,
-    /// else discarded where it takes discard, which lets an SSD erase them
-    /// ahead of its next write, under `key`.
-    fn dataset_management(
-        &mut self,
-        key: u32,
-        cmd: &Command,
-        port: &mut Port<'_, '_>,
-    ) -> Result<Executed> {
+    /// blocks read as zeros at once, so the command completes at once and
+    /// the host disk deallocates them in the background
+    /// ([`super::host::Discards`]), which lets an SSD erase them ahead of
+    /// its next write.
+    fn dataset_management(&mut self, cmd: &Command, port: &mut Port<'_, '_>) -> Result<Outcome> {
         let count = cmd.word(40);
         if count & !0xff != 0 || cmd.word(44) != DEALLOCATE || !cmd.zero_words(48) {
             return Err(refuse!(
@@ -911,13 +903,10 @@ impl Ans {
                 .checked_add(blocks)
                 .is_some_and(|end| end <= self.medium.namespace(cmd.nsid()).unwrap().blocks);
             if !fits {
-                return Ok(Executed::Done(Outcome::status(LBA_RANGE)));
+                return Ok(Outcome::status(LBA_RANGE));
             }
             extents.push((lba, blocks));
         }
-        let zeroed = self.medium.device.deallocates_zeroed();
-        let discard = self.medium.device.identity().features.discard.is_some();
-        let mut requests = vec![];
         for (lba, blocks) in extents {
             self.medium
                 .deallocate(cmd.nsid(), lba, blocks)
@@ -926,20 +915,11 @@ impl Ans {
                 .medium
                 .host_extent(cmd.nsid(), lba, blocks)
                 .expect("a checked range");
-            if blocks == 0 {
-                continue;
-            }
-            if zeroed {
-                requests.push(Request::WriteZeroes {
-                    lba,
-                    blocks,
-                    unmap: true,
-                });
-            } else if discard {
-                requests.push(Request::Discard { lba, blocks });
+            if blocks != 0 {
+                self.medium.device.discard(lba, blocks);
             }
         }
-        self.host(key, requests, Wait::Deallocate, port)
+        Ok(Outcome::status(SUCCESS))
     }
 
     fn verify_namespaces(&mut self, cmd: &Command, port: &mut Port<'_, '_>) -> Result<Outcome> {

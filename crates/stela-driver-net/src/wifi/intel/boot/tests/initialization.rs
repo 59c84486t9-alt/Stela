@@ -149,7 +149,7 @@ pub(super) fn drive_cold_prefix<'a>(
 ) -> (ColdRadio<'a, Model>, u16, u16) {
     let expected = crate::wifi::intel::radio::InitialPlan::prepare(
         &init.boot.firmware,
-        init.boot.profile.family(),
+        init.boot.profile.platform(),
         &init.receipt().unwrap().information,
     )
     .unwrap();

@@ -219,6 +219,7 @@ impl PowerStates {
                 let valid = match (path, note) {
                     ("/defaults", "serial-device") => node.property("serial-device").is_none(),
                     ("/", "secure-root-prefix") => node.property("secure-root-prefix").is_none(),
+                    (_, "acio-parent") => node.property("acio-parent").is_none(),
                     (_, "+no-pmu") => node.property("no-pmu").is_some(),
                     (_, "+gptbat-ready") => node.property("gptbat-ready").is_some(),
                     _ => false,

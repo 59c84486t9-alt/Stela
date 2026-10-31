@@ -83,7 +83,6 @@ fn replicate(
                 operand.element_bytes,
                 RESULT_XMM,
                 displacement,
-                true,
             ),
             _ => unreachable!("decoded replicate element width"),
         }

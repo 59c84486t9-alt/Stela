@@ -75,7 +75,7 @@ pub(super) fn exercise_lari_bios(actual: bool) {
         // Resume the original owner, without copying its initialization.
         let expected = crate::wifi::intel::radio::InitialPlan::prepare(
             &cold.initialized.boot.firmware,
-            profile.family(),
+            profile.platform(),
             &cold.initialized_nvm().information,
         )
         .unwrap();

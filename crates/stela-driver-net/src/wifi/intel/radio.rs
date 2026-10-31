@@ -5,11 +5,7 @@
 //! Source cold post-NVM setup prefix: unassociated Smart FIFO, TX antennas,
 //! normal BT coexistence and standalone SOC latency. These pure commands stop
 //! before BIOS LARI configuration; they supply no radio/scan/TX readiness.
-use super::{
-    command::Id,
-    firmware::{Family, Firmware},
-    nvm::Information,
-};
+use super::{command::Id, firmware::Firmware, identity::Platform, nvm::Information};
 use alloc::vec::Vec;
 pub mod bios;
 pub mod control;
@@ -58,7 +54,7 @@ pub struct InitialPlan {
 impl InitialPlan {
     pub fn prepare(
         firmware: &Firmware<'_>,
-        family: Family,
+        platform: Platform,
         nvm: &Information,
     ) -> Result<Self, Error> {
         let mut tx_antennas = ((firmware.phy_sku().ok_or(Error::MissingPhySku)? >> 16) & 0xf) as u8;
@@ -121,14 +117,8 @@ impl InitialPlan {
             bt,
         )?;
         if firmware.supports_capability(37) {
-            // Standalone cfg/22000.c::iwl_ax200_mac_cfg has omitted
-            // (zero) latency. cfg/ax210.c::iwl_ty_mac_cfg explicitly sets500.
-            let latency: u32 = match family {
-                Family::Ax200 => 0,
-                Family::Ax210 => 500,
-            };
-            let mut soc = 1u32.to_le_bytes().to_vec(); // DISCRETE only; no integrated delay/low-latency flag.
-            soc.extend(latency.to_le_bytes());
+            let mut soc = platform.soc_flags().to_le_bytes().to_vec();
+            soc.extend(platform.xtal_latency.to_le_bytes());
             out.push(
                 firmware,
                 Stage::SocLatency,
@@ -227,10 +217,10 @@ mod tests {
     fn cold_prefix_order_offload_exact_header_versions_and_standalone_latencies() {
         for offload in [false, true] {
             for soc in [false, true] {
-                for family in [Family::Ax200, Family::Ax210] {
+                for platform in [Platform::AX200, Platform::AX210] {
                     let b = image(Some(0x330018), offload, true, soc);
                     let fw = Firmware::parse(&b).unwrap();
-                    let plan = InitialPlan::prepare(&fw, family, &nvm(1)).unwrap();
+                    let plan = InitialPlan::prepare(&fw, platform, &nvm(1)).unwrap();
                     assert_eq!(plan.tx_antennas(), 1);
                     assert_eq!(plan.smart_fifo_offloaded(), offload);
                     let mut expected = Vec::new();
@@ -259,8 +249,8 @@ mod tests {
                                     0,
                                     0,
                                     0,
-                                    if family == Family::Ax210 { 0xf4 } else { 0 },
-                                    if family == Family::Ax210 { 1 } else { 0 },
+                                    if platform == Platform::AX210 { 0xf4 } else { 0 },
+                                    if platform == Platform::AX210 { 1 } else { 0 },
                                     0,
                                     0
                                 ]
@@ -276,23 +266,23 @@ mod tests {
         let b = image(None, false, true, true);
         let fw = Firmware::parse(&b).unwrap();
         assert_eq!(
-            InitialPlan::prepare(&fw, Family::Ax200, &nvm(3)),
+            InitialPlan::prepare(&fw, Platform::AX200, &nvm(3)),
             Err(Error::MissingPhySku)
         );
         let b = image(Some(0x330018), false, true, true);
         let fw = Firmware::parse(&b).unwrap();
         assert_eq!(
-            InitialPlan::prepare(&fw, Family::Ax200, &nvm(4)),
+            InitialPlan::prepare(&fw, Platform::AX200, &nvm(4)),
             Err(Error::NoTxAntennas)
         );
         assert_eq!(
-            InitialPlan::prepare(&fw, Family::Ax200, &nvm(0))
+            InitialPlan::prepare(&fw, Platform::AX200, &nvm(0))
                 .unwrap()
                 .tx_antennas(),
             3
         );
         assert_eq!(
-            InitialPlan::prepare(&fw, Family::Ax200, &nvm(0x100))
+            InitialPlan::prepare(&fw, Platform::AX200, &nvm(0x100))
                 .unwrap()
                 .tx_antennas(),
             3
@@ -309,7 +299,7 @@ mod tests {
                 let mut bytes = b.clone();
                 bytes[table + row * 4 + 2] = version;
                 let fw = Firmware::parse(&bytes).unwrap();
-                let result = InitialPlan::prepare(&fw, Family::Ax200, &nvm(3));
+                let result = InitialPlan::prepare(&fw, Platform::AX200, &nvm(3));
                 if supported.contains(&version) {
                     assert!(result.is_ok());
                 } else {
@@ -326,7 +316,7 @@ mod tests {
             bytes[table + row * 4] = 0xff;
             let fw = Firmware::parse(&bytes).unwrap();
             assert_eq!(
-                InitialPlan::prepare(&fw, Family::Ax200, &nvm(3)),
+                InitialPlan::prepare(&fw, Platform::AX200, &nvm(3)),
                 Err(Error::MissingApi(stage))
             );
         }
@@ -335,16 +325,20 @@ mod tests {
     #[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
     fn images_use_source_cold_prefix_schemas_and_distinct_smart_fifo_policy() {
         let root = std::env::var("STELA_IWLWIFI_IMAGES").unwrap();
-        for family in [Family::Ax200, Family::Ax210] {
+        use crate::wifi::intel::firmware::Family;
+        for (family, platform) in [
+            (Family::Ax200, Platform::AX200),
+            (Family::Ax210, Platform::AX210),
+        ] {
             let bytes =
                 std::fs::read(std::path::Path::new(&root).join(family.firmware_name())).unwrap();
             let fw = Firmware::parse(&bytes).unwrap();
-            let plan = InitialPlan::prepare(&fw, family, &nvm(3)).unwrap();
+            let plan = InitialPlan::prepare(&fw, platform, &nvm(3)).unwrap();
             assert_eq!(plan.tx_antennas(), 3);
-            assert_eq!(plan.smart_fifo_offloaded(), family == Family::Ax210);
+            assert_eq!(plan.smart_fifo_offloaded(), platform == Platform::AX210);
             assert_eq!(
                 plan.commands().len(),
-                if family == Family::Ax200 { 4 } else { 3 }
+                if platform == Platform::AX200 { 4 } else { 3 }
             );
             assert_eq!(plan.commands().last().unwrap().stage(), Stage::SocLatency);
         }
@@ -364,12 +358,12 @@ mod tests {
         let (mut tx, mut bt, mut soc, mut sf) = (0, 0, 0, 0);
         for line in core::str::from_utf8(&bytes).unwrap().lines() {
             let f: Vec<_> = line.split_whitespace().collect();
-            let (phy, nvm_chain, mplut, family, stage, payload) = match f[0] {
+            let (phy, nvm_chain, mplut, platform, stage, payload) = match f[0] {
                 "tx" => (
                     f[1].parse::<u32>().unwrap() << 16,
                     f[2].parse().unwrap(),
                     false,
-                    Family::Ax200,
+                    Platform::AX200,
                     Stage::TxAntennas,
                     f[4],
                 ),
@@ -377,7 +371,7 @@ mod tests {
                     3 << 16,
                     3,
                     f[1] == "1",
-                    Family::Ax200,
+                    Platform::AX200,
                     Stage::BluetoothCoexistence,
                     f[2],
                 ),
@@ -386,19 +380,19 @@ mod tests {
                     3,
                     false,
                     if f[1] == "0" {
-                        Family::Ax200
+                        Platform::AX200
                     } else {
-                        Family::Ax210
+                        Platform::AX210
                     },
                     Stage::SocLatency,
                     f[2],
                 ),
-                "sf" => (3 << 16, 3, false, Family::Ax200, Stage::SmartFifo, f[1]),
+                "sf" => (3 << 16, 3, false, Platform::AX200, Stage::SmartFifo, f[1]),
                 _ => panic!("unknown row"),
             };
             let b = image(Some(phy), false, mplut, true);
             let fw = Firmware::parse(&b).unwrap();
-            let plan = InitialPlan::prepare(&fw, family, &nvm(nvm_chain));
+            let plan = InitialPlan::prepare(&fw, platform, &nvm(nvm_chain));
             if f[0] == "tx" {
                 tx += 1;
                 if f[3] == "0" {

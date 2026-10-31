@@ -5,7 +5,7 @@
 //! GetVariable calls and permanent EBS/root-switch storage belong to boot.
 //! Raw length/hash/provenance integrity does not authenticate a vendor signature
 //! or grant redistribution rights, calibration validity or regulatory permission.
-use super::{firmware::Family, identity::Profile};
+use super::identity::Profile;
 use crate::firmware as resources;
 use alloc::{boxed::Box, format, string::String, vec::Vec};
 use stela_crypto::{Sha256, digest::Digest};
@@ -559,7 +559,7 @@ pub fn post_alive_plan(profile: &Profile, sku: [u32; 3]) -> PostAlivePlan {
             pnvm_completion_required: false,
         };
     }
-    let external = profile.family() == Family::Ax210;
+    let external = profile.pnvm_request().is_some();
     let pnvm = if sku[2] != 0 {
         PnvmSource::Bios {
             external_fallback: external,

@@ -68,7 +68,6 @@ pub enum Ax200PhyError {
     Version(u8),
     MissingPhySku,
     Antennas,
-    UnsupportedBand,
     Deadline(PhyCommandKind),
     State,
 }
@@ -444,12 +443,14 @@ fn configuration(
         .map_or(0, |v| v.command_version);
     let mut bytes = [0; 32];
     bytes[4..8].copy_from_slice(&1u32.to_le_bytes());
-    if channel.band == Band::Ghz6 {
-        return Err(Ax200PhyError::UnsupportedBand);
-    }
     // The source capability selects channel-info geometry independently
     // of PHY command version. PHY3/4 always keeps its full 32-byte size.
-    let band = u8::from(channel.band == Band::Ghz2);
+    // `iwl_mvm_phy_band_from_nl80211`.
+    let band = match channel.band {
+        Band::Ghz2 => 1,
+        Band::Ghz5 => 0,
+        Band::Ghz6 => 2,
+    };
     if fw.supports_capability(48) {
         bytes[8..12].copy_from_slice(&u32::from(channel.number).to_le_bytes());
         bytes[12] = band;
@@ -460,7 +461,7 @@ fn configuration(
             .try_into()
             .map_err(|_| Ax200PhyError::State)?;
     }
-    if fw.supports_capability(40) && channel.band == Band::Ghz5 {
+    if fw.supports_capability(40) && channel.band != Band::Ghz2 {
         bytes[16..20].copy_from_slice(&1u32.to_le_bytes());
     }
     if rlc < 2 {
@@ -540,7 +541,7 @@ mod tests {
     }
 
     #[test]
-    fn phy_unknown_versions_zero_or_unrepresentable_rx_chains_and_six_ghz_refuse() {
+    fn phy_unknown_versions_and_zero_or_unrepresentable_rx_chains_refuse() {
         let channel = Channel {
             band: Band::Ghz2,
             number: 1,
@@ -570,21 +571,27 @@ mod tests {
                 Err(Ax200PhyError::Antennas)
             );
         }
-        let bytes = image(3, 2, true, false, 3);
+    }
+
+    #[test]
+    fn a_6_ghz_context_names_its_band_on_the_high_band_mac() {
+        let bytes = image(3, 2, true, true, 3);
         let channel = Channel {
             band: Band::Ghz6,
-            number: 1,
-            frequency_mhz: 5955,
+            number: 37,
+            frequency_mhz: 6135,
         };
-        assert_eq!(
-            configuration(
-                &Firmware::parse(&bytes).unwrap(),
-                3,
-                channel,
-                PowerMode::ContinuouslyAwake
-            ),
-            Err(Ax200PhyError::UnsupportedBand)
-        );
+        let commands = configuration(
+            &Firmware::parse(&bytes).unwrap(),
+            3,
+            channel,
+            PowerMode::ContinuouslyAwake,
+        )
+        .unwrap();
+        let add = commands[0].bytes();
+        assert_eq!(add[8..12], 37u32.to_le_bytes());
+        assert_eq!(add[12], 2);
+        assert_eq!(add[16..20], 1u32.to_le_bytes());
     }
 
     #[test]

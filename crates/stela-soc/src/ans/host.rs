@@ -14,8 +14,19 @@
 //! while no transfer runs. A disk that runs nothing queued executes each
 //! command on the calling PE. One poll admits at most 64 commands, so larger
 //! transfers keep their partial progress until later polls.
-use alloc::{boxed::Box, format, string::String, vec::Vec};
-use stela_drivers::block::{BlockDevice, BlockError, Finished, Identity, Request, Submission};
+//!
+//! A mounting APFS deallocates tens of thousands of ranges, which already
+//! read as zeros ([`super::namespace::Medium::deallocate`]), so a Deallocate
+//! completes at once and the disk hears of them in the background, as
+//! Linux's `fstrim` tells it in batches: [`Discards`] keeps them merged and
+//! sends a batch while no guest transfer runs. Discards never reorder past
+//! writes. A write takes its blocks back from those waiting and waits out a
+//! batch it overlaps, and a flush waits for all of them where the guest was
+//! told deallocated blocks stay zeros, as a controller's cache holds them.
+use alloc::{boxed::Box, collections::BTreeMap, format, string::String, vec::Vec};
+use stela_drivers::block::{
+    BlockDevice, BlockError, Extent, Finished, Identity, Request, Submission,
+};
 
 /// The latency assumed before any transfer completed: 100 us of the 24 MHz
 /// counter.
@@ -26,6 +37,87 @@ const SHORTEST_POLL: u64 = 240;
 /// finds a lost completion: 1 ms.
 const LOST_SIGNAL: u64 = 24_000;
 
+/// The commands of one background discard batch.
+const DISCARD_COMMANDS: usize = 8;
+
+/// Deallocated blocks the disk has not heard of.
+#[derive(Default)]
+struct Discards {
+    /// Merged runs of host blocks: each one's first block and its end.
+    waiting: BTreeMap<u64, u64>,
+    /// The batch on the disk and its runs.
+    running: Option<(Submission, Vec<Extent>)>,
+    /// Transfers waiting for discards: each one's key, when it was
+    /// submitted and its requests.
+    held: Vec<(u32, u64, Vec<Request>)>,
+    /// Why the disk refused a batch. Discards are hints, so it hears no
+    /// more; a flush has nothing to wait for.
+    failed: Option<BlockError>,
+}
+
+impl Discards {
+    /// Merge `start..end` into the waiting runs.
+    fn add(&mut self, mut start: u64, mut end: u64) {
+        if let Some((&first, &last)) = self.waiting.range(..=start).next_back()
+            && last >= start
+        {
+            start = first;
+            end = end.max(last);
+        }
+        while let Some((&first, &last)) = self.waiting.range(start..=end).next() {
+            end = end.max(last);
+            self.waiting.remove(&first);
+        }
+        self.waiting.insert(start, end);
+    }
+
+    /// A write takes `start..end` back from the waiting runs. Whether it
+    /// overlaps the running batch, which it must wait out.
+    fn written(&mut self, start: u64, end: u64) -> bool {
+        let before = self
+            .waiting
+            .range(..start)
+            .next_back()
+            .filter(|&(_, &last)| last > start)
+            .map(|(&first, _)| first);
+        if let Some(first) = before {
+            let last = self.waiting.insert(first, start).expect("a waiting run");
+            if last > end {
+                self.waiting.insert(end, last);
+            }
+        }
+        while let Some((&first, &last)) = self.waiting.range(start..end).next() {
+            self.waiting.remove(&first);
+            if last > end {
+                self.waiting.insert(end, last);
+            }
+        }
+        self.running.as_ref().is_some_and(|(_, extents)| {
+            extents
+                .iter()
+                .any(|extent| extent.lba < end && extent.lba + extent.blocks > start)
+        })
+    }
+
+    /// Up to `most` waiting runs for the disk, first blocks first.
+    fn batch(&mut self, most: usize) -> Vec<Extent> {
+        let mut extents = Vec::new();
+        while extents.len() < most
+            && let Some((lba, end)) = self.waiting.pop_first()
+        {
+            extents.push(Extent {
+                lba,
+                blocks: end - lba,
+            });
+        }
+        extents
+    }
+
+    fn outstanding(&self) -> bool {
+        !self.waiting.is_empty() || self.running.is_some()
+    }
+}
+
 pub(super) struct HostDisk {
     device: Box<dyn BlockDevice>,
     /// The running transfers: each one's key, when it was submitted in
@@ -33,6 +125,7 @@ pub(super) struct HostDisk {
     running: Vec<(u32, u64, Submission)>,
     /// What a transfer took, a moving average in counter ticks.
     latency: u64,
+    discards: Discards,
 }
 
 impl HostDisk {
@@ -41,6 +134,7 @@ impl HostDisk {
             device,
             running: Vec::new(),
             latency: FIRST_LATENCY,
+            discards: Discards::default(),
         }
     }
 
@@ -76,6 +170,39 @@ impl HostDisk {
         self.device.flush()
     }
 
+    /// Tell the disk to deallocate `blocks` blocks from `lba`, in the
+    /// background, if it takes that and has not refused it.
+    pub(super) fn discard(&mut self, lba: u64, blocks: u64) {
+        if self.identity().features.discard.is_some() && self.discards.failed.is_none() {
+            self.discards.add(lba, lba + blocks);
+        }
+    }
+
+    /// Whether background discards remain: they need [`Self::poll`] though
+    /// no command waits for them.
+    pub(super) fn discarding(&self) -> bool {
+        self.discards.outstanding()
+    }
+
+    /// Whether `requests` must wait for discards. Their writes take their
+    /// blocks back whatever the answer.
+    fn held(&mut self, requests: &[Request]) -> bool {
+        let block = u64::from(self.identity().block_size);
+        let zeros = self.deallocates_zeroed();
+        requests.iter().fold(false, |held, request| {
+            held | match request {
+                Request::Write { lba, data, .. } => self
+                    .discards
+                    .written(*lba, *lba + data.len() as u64 / block),
+                Request::WriteZeroes { lba, blocks, .. } => {
+                    self.discards.written(*lba, *lba + *blocks)
+                }
+                Request::Flush => zeros && self.discards.outstanding(),
+                _ => false,
+            }
+        })
+    }
+
     /// Submit `requests`, one after another, under `key` at counter `now`:
     /// their result if the first poll finishes them, else `None` until
     /// [`Self::poll`] gives it. Synchronous providers can also yield after
@@ -86,6 +213,10 @@ impl HostDisk {
         requests: Vec<Request>,
         now: u64,
     ) -> Option<Finished> {
+        if self.held(&requests) {
+            self.discards.held.push((key, now, requests));
+            return None;
+        }
         let mut submission = match Submission::batch(requests, self.device.identity()) {
             Ok(submission) => submission,
             Err(error) => return Some(Err(error)),
@@ -112,13 +243,55 @@ impl HostDisk {
             self.latency = (self.latency * 7 + took) / 8;
             done.push((key, finished));
         }
+        self.advance_discards(&mut done);
         done
+    }
+
+    /// Reap the running discard batch, start the next while no guest
+    /// transfer runs, and resubmit what no longer waits for one.
+    fn advance_discards(&mut self, done: &mut Vec<(u32, Finished)>) {
+        if self.discards.running.is_none()
+            && self.running.is_empty()
+            && let Some(limits) = self.identity().features.discard
+        {
+            let extents = self.discards.batch(limits.ranges.max(1) * DISCARD_COMMANDS);
+            if !extents.is_empty() {
+                let request = Request::Discard {
+                    extents: extents.clone(),
+                };
+                match Submission::new(request, self.device.identity()) {
+                    Ok(submission) => self.discards.running = Some((submission, extents)),
+                    Err(error) => self.refuse_discards(error),
+                }
+            }
+        }
+        if let Some((submission, _)) = &mut self.discards.running {
+            let Some(result) = submission.poll(&mut *self.device) else {
+                return;
+            };
+            self.discards.running = None;
+            if let Err(error) = result {
+                self.refuse_discards(error);
+            }
+        }
+        for (key, started, requests) in core::mem::take(&mut self.discards.held) {
+            if let Some(finished) = self.submit(key, requests, started) {
+                done.push((key, finished));
+            }
+        }
+    }
+
+    /// The disk refused a discard: name why ([`Self::diagnostic`]) and
+    /// send no more.
+    fn refuse_discards(&mut self, error: BlockError) {
+        self.discards.failed = Some(error);
+        self.discards.waiting.clear();
     }
 
     /// Whether a running transfer's completion is posted, ready for
     /// [`Self::poll`]; a look at memory alone.
     pub(super) fn posted(&self) -> bool {
-        !self.running.is_empty() && self.device.posted()
+        (!self.running.is_empty() || self.discards.running.is_some()) && self.device.posted()
     }
 
     /// The running transfers at counter `now`, oldest first, each as
@@ -137,12 +310,20 @@ impl HostDisk {
             .collect::<Vec<_>>()
             .join(",");
         format!(
-            "running={} oldest=[{oldest}] latency={} room={} posted={} signals={}",
+            "running={} oldest=[{oldest}] latency={} room={} posted={} signals={} \
+             discards={}+{} held={} refused={:?}",
             self.running.len(),
             self.latency,
             self.device.room(),
             self.device.posted(),
             self.device.signals(),
+            self.discards.waiting.len(),
+            self.discards
+                .running
+                .as_ref()
+                .map_or(0, |(_, runs)| runs.len()),
+            self.discards.held.len(),
+            self.discards.failed,
         )
     }
 
@@ -168,3 +349,6 @@ impl HostDisk {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -73,8 +73,7 @@ pub(super) fn prepare<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy>(
     }
     let allowed = match power.channel().band {
         Band::Ghz2 => 0xfff,
-        Band::Ghz5 => 0xff0,
-        Band::Ghz6 => 0,
+        Band::Ghz5 | Band::Ghz6 => 0xff0,
     };
     if owner.peer.address.0 == [0; 6]
         || owner.peer.address.is_multicast()

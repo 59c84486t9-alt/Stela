@@ -350,10 +350,12 @@ fn encode(
         .command_version(COMMAND.wire().group, COMMAND.opcode)
         .ok_or(Ax200TransmitPowerError::MissingApi)?
         .command_version;
-    if !(3..=5).contains(&version) {
+    if !matches!(version, 3..=5 | 8) {
         return Err(Ax200TransmitPowerError::Version(version));
     }
-    let length = if firmware.supports_api(45) {
+    let length = if version == 8 {
+        120
+    } else if firmware.supports_api(45) {
         44
     } else if firmware.supports_capability(84) {
         40
@@ -404,6 +406,23 @@ mod tests {
                 .chain(command[10..].iter())
                 .all(|v| *v == 0)
         );
+    }
+    #[test]
+    fn version_8_is_the_whole_command_with_the_same_limit() {
+        let bytes = image(8, true, true);
+        let command = encode(&Firmware::parse(&bytes).unwrap(), 22).unwrap();
+        assert_eq!(command.len(), 120);
+        assert_eq!(&command[8..10], &[176, 0]);
+    }
+    /// A model firmware declares only what its test expects, so real images are
+    /// the one check of what a gate admits.
+    #[test]
+    #[ignore = "oracle: STELA_IWLWIFI_FIRMWARE"]
+    fn released_firmware_passes_the_version_gates() {
+        let bytes = std::fs::read(std::env::var("STELA_IWLWIFI_FIRMWARE").unwrap()).unwrap();
+        let firmware = Firmware::parse(&bytes).unwrap();
+        super::super::super::wire::validate(&firmware).unwrap();
+        encode(&firmware, 22).unwrap();
     }
     #[test]
     #[ignore = "oracle: STELA_IWLWIFI_TRANSMIT_POWER_TRACE"]

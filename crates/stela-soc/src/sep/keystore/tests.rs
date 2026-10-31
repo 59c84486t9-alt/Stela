@@ -633,6 +633,83 @@ fn a_null_d_key_request_is_acknowledged_with_the_variant_alone() {
     assert!(reply.is_err());
 }
 
+/// A request of `variant` with `fields` after its variant word.
+fn request_with(variant: u32, fields: &[u8]) -> Vec<u8> {
+    let mut request = message(2, 0, 1, &[]);
+    let body = Message::parse(&request).unwrap().body;
+    request.truncate(body);
+    request.extend_from_slice(&variant.to_le_bytes());
+    request.extend_from_slice(fields);
+    let hash = digest(&request);
+    request[DIGEST_START..DIGEST_START + DIGEST_BYTES].copy_from_slice(&hash);
+    request
+}
+
+#[test]
+fn device_state_says_unlocked_without_a_passcode_in_both_variants() {
+    let head = |rest: &[u8]| {
+        let mut fields = 1u64.to_le_bytes().to_vec();
+        fields.extend_from_slice(&u32::MAX.to_le_bytes());
+        fields.extend_from_slice(rest);
+        fields
+    };
+    let mut keystore = KeyStore::default();
+    for (variant, fields) in [
+        (0, head(&[0; 4])),
+        (1, head(&[0; 8])), // An empty blob and the u32.
+    ] {
+        let request = request_with(variant, &fields);
+        let (reply, output) = ask(
+            &mut keystore,
+            frame(GET_DEVICE_STATE, 3, request.len()),
+            request,
+        );
+        reply.unwrap();
+        let parsed = Message::parse(&output).unwrap();
+        assert_eq!(parsed.variant(), variant);
+        let mut fields = parsed.fields();
+        let state = fields.blob().unwrap();
+        fields.end().unwrap();
+        // The state, after every key below `ss`: SET, SEQUENCE, "ss", 10.
+        assert_eq!(state[0], 0x31);
+        assert_eq!(state[state.len() - 9..], *b"\x30\x07\x0c\x02ss\x02\x01\x0a");
+    }
+    assert_eq!(
+        keystore.diagnostics().collect::<Vec<_>>(),
+        ["SEP keystore: every keybag reports unlocked without a passcode"]
+    );
+    let unknown = request_with(2, &head(&[0; 4]));
+    let (reply, _) = ask(
+        &mut keystore,
+        frame(GET_DEVICE_STATE, 4, unknown.len()),
+        unknown,
+    );
+    assert!(reply.is_err());
+}
+
+#[test]
+fn a_client_terminating_is_acknowledged_with_the_variant_alone() {
+    let mut fields = [7u64, 8, 9].map(u64::to_le_bytes).concat();
+    fields.extend_from_slice(&5u32.to_le_bytes());
+    let request = request_with(1, &fields);
+    let (reply, output) = ask(
+        &mut KeyStore::default(),
+        frame(CLIENT_TERMINATE, 3, request.len()),
+        request,
+    );
+    reply.unwrap();
+    let parsed = Message::parse(&output).unwrap();
+    assert_eq!(parsed.variant(), 1);
+    assert_eq!(parsed.fields().end(), Ok(()));
+    let request = request_with(0, &fields);
+    let (reply, _) = ask(
+        &mut KeyStore::default(),
+        frame(CLIENT_TERMINATE, 3, request.len()),
+        request,
+    );
+    assert!(reply.is_err());
+}
+
 #[test]
 fn an_unimplemented_command_is_named_once() {
     let mut keystore = KeyStore::default();

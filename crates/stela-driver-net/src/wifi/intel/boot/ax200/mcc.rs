@@ -5,10 +5,7 @@
 //! AX200 MCC query and BIOS selection, keeping the original requester.
 //! Returned profiles remain observations until fully applied radio/OS policy.
 use super::*;
-use crate::wifi::intel::mcc::{
-    self,
-    channel::{Inventory, Observation as ChannelObservation},
-};
+use crate::wifi::intel::mcc::{self, channel::Observation as ChannelObservation};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Ax200MccPhase {
@@ -194,9 +191,16 @@ impl<Q: BootIo, B: BiosIo> Ax200Mcc<'_, Q, B> {
                         &self.responses.last().unwrap().raw,
                     )
                     .map_err(Ax200MccError::Schema)?;
-                    // AX200 uses the source HR extended (non-UHB) inventory.
+                    let inventory = self
+                        .setup
+                        .lari
+                        .radio
+                        .initialized
+                        .boot
+                        .profile
+                        .channel_inventory();
                     let channels = profile
-                        .channel_observations(Inventory::Extended)
+                        .channel_observations(inventory)
                         .map_err(Ax200MccError::ChannelInventory)?;
                     self.profiles.push(profile);
                     self.channels = channels;

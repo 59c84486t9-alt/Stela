@@ -9,6 +9,7 @@ use super::firmware::{Family, Firmware};
 use crate::bytes::{le16, le32, le64};
 use core::ops::Range;
 pub mod mpdu;
+pub mod reorder;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {

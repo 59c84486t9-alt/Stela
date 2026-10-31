@@ -599,7 +599,12 @@ impl AhciDisk {
                 Some(command) => self.prepare((command, 0), 0, 0, 0, false)?,
                 None => return Ok(None),
             },
-            Command::Discard { lba, blocks } if done == 0 => self.trim(*lba, *blocks, slot)?,
+            Command::Discard { extents } if done == 0 => {
+                let &[Extent { lba, blocks }] = extents.as_slice() else {
+                    return Err(BlockError::Unsupported("one TRIM range a command"));
+                };
+                self.trim(lba, blocks, slot)?
+            }
             Command::Write { fua: true, .. } => {
                 return Err(BlockError::Unsupported(
                     "the device takes no Force Unit Access",

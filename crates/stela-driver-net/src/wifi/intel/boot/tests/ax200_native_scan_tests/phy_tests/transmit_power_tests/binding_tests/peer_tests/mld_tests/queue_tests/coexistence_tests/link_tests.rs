@@ -62,6 +62,20 @@ struct Device<'n> {
     air: Vec<Vec<u8>>,
     /// Whether the AP advertises WMM.
     quality: bool,
+    /// What else the AP's beacons and association response carry.
+    elements: &'static [u8],
+    /// Each link and station command.
+    configuration: Vec<(u8, Vec<u8>)>,
+    /// Each receive Block Ack command.
+    block_acks: Vec<Vec<u8>>,
+    /// Each scan request.
+    scans: Vec<Vec<u8>>,
+    /// The second channel's rules, when they differ from the first's, and the
+    /// AP then only heard from the first scan.
+    second: Option<u32>,
+    /// Whether frames are acknowledged in Block Ack notifications alone, as
+    /// the firmware reports those it aggregated.
+    aggregating: bool,
 }
 
 impl Device<'_> {
@@ -123,7 +137,8 @@ impl Device<'_> {
                 };
                 let mut payload = mcc_payload(country, request[2], 51);
                 payload[20..24].copy_from_slice(&self.channel.to_le_bytes());
-                payload[24..28].copy_from_slice(&self.channel.to_le_bytes());
+                let second = self.second.unwrap_or(self.channel);
+                payload[24..28].copy_from_slice(&second.to_le_bytes());
                 payload
             }
             (1 | 5, 0x08) => vec![0x9b],
@@ -141,6 +156,10 @@ impl Device<'_> {
                 reply(511).to_vec()
             }
             (_, 0x1e) => vec![0; 132],
+            (5, 0x16) => {
+                self.block_acks.push(request.to_vec());
+                u32::from(SESSION).to_le_bytes().to_vec()
+            }
             _ => Vec::new(),
         };
         self.inject(rom, &command_packet(id, sequence, &payload));
@@ -152,9 +171,15 @@ impl Device<'_> {
             };
             self.inject(rom, &command_packet(complete, 0x8000, &[0x76]));
         }
+        if id.group == 3 && matches!(id.opcode, 9 | 0x0a) {
+            self.configuration.push((id.opcode, request.to_vec()));
+        }
         if (id.group, id.opcode) == (1, 0x0d) {
-            for ssid in self.beacons.clone() {
-                self.inject(rom, &beacon(ssid, self.quality));
+            self.scans.push(request.to_vec());
+            if self.second.is_none() || self.scans.len() == 1 {
+                for ssid in self.beacons.clone() {
+                    self.inject(rom, &beacon(ssid, self.quality, self.elements));
+                }
             }
             let mut body = [0; 16];
             body[6] = 1;
@@ -179,10 +204,16 @@ impl Device<'_> {
         }
     }
 
-    /// Carry what the queues hold to the AP, answering each frame.
+    /// Carry what the queues hold to the AP, answering each frame, as much
+    /// as the receive buffers keep up with.
     fn transmit(&mut self, rom: &RomBoot<'_, Model>) {
+        let mut room = 4;
         for at in 0..self.queues.len() {
             loop {
+                if room == 0 {
+                    return;
+                }
+                room -= 1;
                 let (_, queue, descriptors, index) = self.queues[at];
                 let tfd = device_read(
                     &self.native.domain,
@@ -194,7 +225,8 @@ impl Device<'_> {
                 if tfd[0] < 2 {
                     break;
                 }
-                self.queues[at].3 += 1;
+                let next = (index + 1) % 256;
+                self.queues[at].3 = next;
                 let mut bytes = Vec::new();
                 for tb in 0..usize::from(tfd[0]) {
                     let at = 2 + tb * 10;
@@ -202,18 +234,31 @@ impl Device<'_> {
                     let address = u64::from_le_bytes(tfd[at + 2..at + 10].try_into().unwrap());
                     bytes.extend(device_read(&self.native.domain, address, 0, length));
                 }
-                let mut response = vec![0; 56];
-                response[0] = 1;
-                response[36..38].copy_from_slice(&queue.to_le_bytes());
-                response[40] = 1;
-                response[44..48].copy_from_slice(&u32::from(index + 1).to_le_bytes());
-                let done = Id {
-                    group: 0,
-                    opcode: 0x1c,
-                    version: 0,
-                };
-                let sequence = (queue & 31) << 8 | index;
-                self.inject(rom, &command_packet(done, sequence, &response));
+                if self.aggregating {
+                    let mut body = vec![0; 40];
+                    body[28] = 1;
+                    body[32..34].copy_from_slice(&queue.to_le_bytes());
+                    body[34..36].copy_from_slice(&next.to_le_bytes());
+                    let acknowledged = Id {
+                        group: 0,
+                        opcode: 0xc5,
+                        version: 0,
+                    };
+                    self.inject(rom, &command_packet(acknowledged, 0x8000, &body));
+                } else {
+                    let mut response = vec![0; 56];
+                    response[0] = 1;
+                    response[36..38].copy_from_slice(&queue.to_le_bytes());
+                    response[40] = 1;
+                    response[44..48].copy_from_slice(&u32::from(next).to_le_bytes());
+                    let done = Id {
+                        group: 0,
+                        opcode: 0x1c,
+                        version: 0,
+                    };
+                    let sequence = (queue & 31) << 8 | index;
+                    self.inject(rom, &command_packet(done, sequence, &response));
+                }
                 // The command header, then the 20-byte body's rest.
                 let mut frame = bytes[24..].to_vec();
                 if frame[0] & 0x88 == 0x88 {
@@ -228,6 +273,7 @@ impl Device<'_> {
                             body.extend(HT);
                             body.extend(WMM);
                         }
+                        body.extend(self.elements);
                         self.inject(rom, &answer(0x10, &body));
                     }
                     _ => {}
@@ -254,7 +300,7 @@ const LOCAL: [u8; 6] = [0x02, 0x12, 0x34, 0x56, 0x78, 0x9a];
 
 /// A channel 1 ESS beacon from 02:03:04:05:06:07 carrying `ssid` and the 1
 /// and 6 Mb/s rates.
-fn beacon(ssid: &[u8], quality: bool) -> Vec<u8> {
+fn beacon(ssid: &[u8], quality: bool, elements: &[u8]) -> Vec<u8> {
     let mut frame = vec![0; 36];
     frame[..2].copy_from_slice(&0x80u16.to_le_bytes());
     frame[4..10].fill(0xff);
@@ -270,16 +316,27 @@ fn beacon(ssid: &[u8], quality: bool) -> Vec<u8> {
         frame.extend(HT);
         frame.extend(WMM);
     }
+    frame.extend(elements);
     mpdu(frame, 3)
 }
 
 /// `frame` as the firmware's RX packet, at `status` and the beacon's signal.
 fn mpdu(frame: Vec<u8>, status: u32) -> Vec<u8> {
+    placed(frame, status, None, 127 << 24)
+}
+
+/// [`mpdu`], as an A-MSDU's record at its index and whether it is the last,
+/// with `reorder` the descriptor's reorder word.
+fn placed(frame: Vec<u8>, status: u32, record: Option<(u8, bool)>, reorder: u32) -> Vec<u8> {
     let mut payload = vec![0; 48];
     payload[..2].copy_from_slice(&(frame.len() as u16).to_le_bytes());
+    if let Some((index, last)) = record {
+        payload[3] = 0x40;
+        payload[4] = index | u8::from(last) << 7;
+    }
     payload[7] = 1 << 6;
     payload[12..16].copy_from_slice(&status.to_le_bytes());
-    payload[16..20].copy_from_slice(&(127u32 << 24).to_le_bytes());
+    payload[16..20].copy_from_slice(&reorder.to_le_bytes());
     payload[28..32].copy_from_slice(&(3u32 << 14).to_le_bytes());
     payload[32..35].copy_from_slice(&[44, 56, 1]);
     payload.extend(frame);
@@ -313,10 +370,40 @@ fn raise<'n>(
     channel: u32,
     quality: bool,
 ) -> (Station<Model, ClockBios>, Phase, Device<'n>) {
+    raise_beside(native, country, beacons, flags, channel, quality, &[])
+}
+
+/// [`raise`], with `elements` on the AP's frames.
+fn raise_beside<'n>(
+    native: &'n Native,
+    country: Option<[u8; 2]>,
+    beacons: Vec<&'static [u8]>,
+    flags: u8,
+    channel: u32,
+    quality: bool,
+    elements: &'static [u8],
+) -> (Station<Model, ClockBios>, Phase, Device<'n>) {
+    raise_split(
+        native, country, beacons, flags, channel, quality, elements, None,
+    )
+}
+
+/// [`raise_beside`], with [`Device::second`].
+#[expect(clippy::too_many_arguments, reason = "each is a fixture's own knob")]
+fn raise_split<'n>(
+    native: &'n Native,
+    country: Option<[u8; 2]>,
+    beacons: Vec<&'static [u8]>,
+    flags: u8,
+    channel: u32,
+    quality: bool,
+    elements: &'static [u8],
+    second: Option<u32>,
+) -> (Station<Model, ClockBios>, Phase, Device<'n>) {
     let catalog: &'static resources::Catalog = Box::leak(Box::new(catalog_for(
         &profile(),
         Family::Ax200.firmware_name(),
-        &coex_image(2),
+        &feature(feature(coex_image(2), 30, 63, true), 30, 21, true),
     )));
     let source: &'static Source = Box::leak(Box::new(Source::default()));
     native
@@ -347,6 +434,12 @@ fn raise<'n>(
         queues: Vec::new(),
         air: Vec::new(),
         quality,
+        elements,
+        configuration: Vec::new(),
+        block_acks: Vec::new(),
+        scans: Vec::new(),
+        second,
+        aggregating: false,
     };
     device.inject(&boot, &alive);
     let inputs = Inputs {
@@ -481,6 +574,72 @@ fn connect<'n>(native: &'n Native, quality: bool) -> (Station<Model, ClockBios>,
 
 /// A valid channel that allows initiated radiation.
 const OPEN: u32 = 0x0f09;
+/// The session the model's firmware allocates.
+const SESSION: u8 = 3;
+
+/// A TID 0 frame of a Block Ack session under the pairwise key, at `sequence`
+/// with the window at `next`, carrying `value` under packet number `number`.
+fn session_frame(sequence: u16, next: u16, number: u8, value: u8) -> Vec<u8> {
+    let (frame, reorder) = protected(sequence, next, number, value, false, false);
+    placed(frame, 3 | 2 << 8 | 1 << 6, None, reorder)
+}
+
+fn protected(
+    sequence: u16,
+    next: u16,
+    number: u8,
+    value: u8,
+    record: bool,
+    retry: bool,
+) -> (Vec<u8>, u32) {
+    let mut frame = vec![0; 26];
+    frame[0] = 0x88;
+    frame[1] = 0x42 | u8::from(retry) << 3;
+    frame[4..10].copy_from_slice(&LOCAL);
+    frame[10..16].copy_from_slice(&AP);
+    frame[16..22].copy_from_slice(&AP);
+    frame[21] = value;
+    frame[22..24].copy_from_slice(&(sequence << 4).to_le_bytes());
+    frame[24] = u8::from(record) << 7;
+    frame.extend([number, 0, 0, 0x20, 0, 0, 0, 0]);
+    frame.extend([0xaa, 0xaa, 3, 0, 0, 0, 8, 0]);
+    frame.extend([value; 46]);
+    let reorder = u32::from(next) | u32::from(sequence) << 12 | u32::from(SESSION) << 24;
+    (frame, reorder)
+}
+
+/// What the station now holds for the network, as payload values.
+fn delivered(wifi: &mut Station<Model, ClockBios>) -> Vec<u8> {
+    let mut values = Vec::new();
+    while let Some(ethernet) = wifi.receive().unwrap() {
+        values.push(ethernet[14]);
+    }
+    values
+}
+
+/// Serve the air until nothing more can come of what it holds.
+fn settle(wifi: &mut Station<Model, ClockBios>, device: &mut Device<'_>) {
+    run(wifi, device, |_, _, _| false);
+}
+
+/// Connect to a WMM AP and agree on TID 0's session from sequence 5.
+fn agreed<'n>(native: &'n Native) -> (Station<Model, ClockBios>, Device<'n>) {
+    let (mut wifi, mut device) = connect(native, true);
+    let parameters: u16 = 3 | 8 << 6;
+    let mut body = vec![3, 0, 9];
+    body.extend(parameters.to_le_bytes());
+    body.extend(0u16.to_le_bytes());
+    body.extend((5u16 << 4).to_le_bytes());
+    device.inject(wifi.radio().rom().unwrap(), &answer(0xd0, &body));
+    let accepted = run(&mut wifi, &mut device, |_, device, _| {
+        device
+            .air
+            .last()
+            .is_some_and(|frame| frame[0] == 0xd0 && frame[24..26] == [3, 1])
+    });
+    assert!(accepted, "{:?} {:?}", wifi.radio().error(), device.commands);
+    (wifi, device)
+}
 
 #[test]
 fn bring_up_scans_for_the_network_and_readies_its_station() {
@@ -634,4 +793,364 @@ fn a_wmm_ap_gets_each_class_on_its_tids_queue() {
     assert_eq!(device.air[4][0], 0x88);
     assert_eq!(device.air[4][24], 0);
     assert_eq!(device.queues.len(), queues + 1);
+}
+
+#[test]
+fn a_block_ack_session_is_agreed_with_the_firmware_first() {
+    let native = Native::default();
+    let (_, device) = agreed(&native);
+    let command = &device.block_acks[0];
+    assert_eq!(command[..4], [0, 0, 0, 0]);
+    assert_eq!(command[4], 1);
+    assert_eq!(command[8], 0);
+    assert_eq!(command[12..14], 5u16.to_le_bytes());
+    assert_eq!(command[14..16], 8u16.to_le_bytes());
+    let response = device.air.last().unwrap();
+    // The dialog, success, and the window with A-MSDU permission.
+    assert_eq!(response[26], 9);
+    assert_eq!(response[27..29], [0, 0]);
+    let parameters = u16::from_le_bytes([response[29], response[30]]);
+    assert_eq!(parameters >> 6, 8);
+    assert_eq!(parameters & 1, 1);
+}
+
+#[test]
+fn a_session_gives_the_station_its_frames_in_order() {
+    let native = Native::default();
+    let (mut wifi, mut device) = agreed(&native);
+    device.inject(wifi.radio().rom().unwrap(), &session_frame(6, 5, 2, 0x66));
+    settle(&mut wifi, &mut device);
+    assert_eq!(delivered(&mut wifi), []);
+    device.inject(wifi.radio().rom().unwrap(), &session_frame(5, 7, 1, 0x55));
+    settle(&mut wifi, &mut device);
+    assert_eq!(delivered(&mut wifi), [0x55, 0x66]);
+    // The firmware gives up on 7.
+    device.inject(wifi.radio().rom().unwrap(), &session_frame(8, 7, 3, 0x88));
+    settle(&mut wifi, &mut device);
+    assert_eq!(delivered(&mut wifi), []);
+    let release = Id {
+        group: 0,
+        opcode: 0xc3,
+        version: 0,
+    };
+    device.inject(
+        wifi.radio().rom().unwrap(),
+        &command_packet(release, 0x8000, &[SESSION, 0, 9, 0]),
+    );
+    settle(&mut wifi, &mut device);
+    assert_eq!(delivered(&mut wifi), [0x88]);
+}
+
+#[test]
+fn a_firmware_split_amsdu_reaches_the_station_whole_under_one_packet_number() {
+    let native = Native::default();
+    let (mut wifi, mut device) = connect(&native, true);
+    let status = 3 | 2 << 8 | 1 << 6;
+    for (index, value, last) in [(0, 0x11, false), (1, 0x22, false), (2, 0x33, true)] {
+        let (frame, _) = protected(5, 6, 1, value, true, false);
+        device.inject(
+            wifi.radio().rom().unwrap(),
+            &placed(frame, status, Some((index, last)), 127 << 24),
+        );
+    }
+    settle(&mut wifi, &mut device);
+    let mut sources = Vec::new();
+    while let Some(ethernet) = wifi.receive().unwrap() {
+        assert_eq!(ethernet[..6], LOCAL);
+        sources.push(ethernet[11]);
+    }
+    assert_eq!(sources, [0x11, 0x22, 0x33]);
+    // The same MPDU retried, and one that replays its packet number, go.
+    let (frame, _) = protected(5, 6, 1, 0x44, false, true);
+    device.inject(
+        wifi.radio().rom().unwrap(),
+        &placed(frame, status, None, 127 << 24),
+    );
+    let (frame, _) = protected(6, 7, 1, 0x55, false, false);
+    device.inject(
+        wifi.radio().rom().unwrap(),
+        &placed(frame, status, None, 127 << 24),
+    );
+    settle(&mut wifi, &mut device);
+    assert_eq!(delivered(&mut wifi), []);
+}
+
+#[test]
+fn an_amsdu_missing_a_record_is_lost_whole() {
+    let native = Native::default();
+    let (mut wifi, mut device) = connect(&native, true);
+    let status = 3 | 2 << 8 | 1 << 6;
+    for (index, last) in [(0, false), (2, true)] {
+        let (frame, _) = protected(5, 6, 1, 0x11, true, false);
+        device.inject(
+            wifi.radio().rom().unwrap(),
+            &placed(frame, status, Some((index, last)), 127 << 24),
+        );
+    }
+    settle(&mut wifi, &mut device);
+    assert_eq!(delivered(&mut wifi), []);
+}
+
+#[test]
+fn a_peer_ending_a_session_releases_what_it_held() {
+    let native = Native::default();
+    let (mut wifi, mut device) = agreed(&native);
+    device.inject(wifi.radio().rom().unwrap(), &session_frame(7, 5, 3, 0x77));
+    device.inject(wifi.radio().rom().unwrap(), &session_frame(6, 5, 2, 0x66));
+    settle(&mut wifi, &mut device);
+    assert_eq!(delivered(&mut wifi), []);
+    // DELBA from the initiator of TID 0.
+    device.inject(
+        wifi.radio().rom().unwrap(),
+        &answer(0xd0, &[3, 2, 0, 0x08, 37, 0]),
+    );
+    settle(&mut wifi, &mut device);
+    assert_eq!(delivered(&mut wifi), [0x66, 0x77]);
+    let removal = device.block_acks.last().unwrap();
+    assert_eq!(removal[..4], 2u32.to_le_bytes());
+    // This firmware's command version names the session.
+    assert_eq!(removal[4], SESSION);
+    assert!(wifi.radio().station().active_rx_block_ack(0).is_none());
+}
+
+#[test]
+fn a_departure_takes_its_sessions_down_without_telling_the_peer() {
+    let native = Native::default();
+    let (mut wifi, mut device) = agreed(&native);
+    let sent = device.air.len();
+    device.inject(wifi.radio().rom().unwrap(), &answer(0xc0, &[3, 0]));
+    let left = run(&mut wifi, &mut device, |wifi, _, _| {
+        wifi.radio().stage() == Standing::Idle
+    });
+    assert!(left, "{:?}", wifi.radio().error());
+    assert_eq!(device.block_acks.len(), 2);
+    assert_eq!(device.block_acks[1][..4], 2u32.to_le_bytes());
+    assert!(!device.air[sent..].iter().any(|frame| frame[0] == 0xd0));
+}
+
+#[test]
+fn block_ack_notifications_alone_free_the_queues() {
+    let native = Native::default();
+    let (mut wifi, mut device) = connect(&native, true);
+    device.aggregating = true;
+    let ethernet = [&[9; 6][..], &LOCAL, &[8, 0], &[0x45], &[0; 45]].concat();
+    // More than the ring holds.
+    for _ in 0..6 {
+        let goal = device.air.len() + 60;
+        for _ in 0..60 {
+            wifi.transmit(&ethernet).unwrap();
+        }
+        let sent = run(&mut wifi, &mut device, |_, device, _| {
+            device.air.len() >= goal
+        });
+        assert!(sent, "{} {:?}", device.air.len(), wifi.radio().error());
+    }
+}
+
+#[test]
+fn frames_that_wait_together_leave_as_an_amsdu_the_firmware_allows() {
+    let native = Native::default();
+    let (mut wifi, mut device) = connect(&native, true);
+    let rates = Id {
+        group: 5,
+        opcode: 0xf7,
+        version: 0,
+    };
+    let mut body = [0; 20];
+    body[4] = 2;
+    body[12..14].copy_from_slice(&2200u16.to_le_bytes());
+    body[16] = 1;
+    device.inject(
+        wifi.radio().rom().unwrap(),
+        &command_packet(rates, 0x8000, &body),
+    );
+    settle(&mut wifi, &mut device);
+    let sent = device.air.len();
+    // TID 0 has no queue yet, so all three wait; the third does not fit.
+    let ethernet = [&[9; 6][..], &LOCAL, &[8, 0], &[0x45], &[0; 999]].concat();
+    for _ in 0..3 {
+        wifi.transmit(&ethernet).unwrap();
+    }
+    let gone = run(&mut wifi, &mut device, |_, device, _| {
+        device.air.len() >= sent + 2
+    });
+    assert!(gone, "{:?}", wifi.radio().error());
+    settle(&mut wifi, &mut device);
+    assert_eq!(device.air.len(), sent + 2);
+    let aggregate = &device.air[sent];
+    assert_eq!(aggregate[24] & 0x80, 0x80);
+    assert_eq!(aggregate[16..22], AP);
+    assert_eq!(aggregate[26..32], [9; 6]);
+    assert_eq!(aggregate[32..38], LOCAL);
+    let length: usize = 1000 + 8;
+    assert_eq!(aggregate[38..40], (length as u16).to_be_bytes());
+    let second = 26 + (14 + length).next_multiple_of(4);
+    assert_eq!(aggregate[second..second + 6], [9; 6]);
+    assert_eq!(aggregate.len(), second + 14 + length);
+    // The third keeps its one sequence number after theirs.
+    let sequence = |frame: &[u8]| u16::from_le_bytes([frame[22], frame[23]]) >> 4;
+    assert_eq!(sequence(&device.air[sent + 1]), sequence(aggregate) + 1);
+    assert_eq!(device.air[sent + 1][24] & 0x80, 0);
+}
+
+/// A protected frame's fragment `index` of sequence 5, under packet number
+/// `number`, carrying `body` straight after its header.
+fn fragment(index: u8, more: bool, number: u8, body: &[u8]) -> Vec<u8> {
+    let mut frame = vec![0; 26];
+    frame[0] = 0x88;
+    frame[1] = 0x42 | u8::from(more) << 2;
+    frame[4..10].copy_from_slice(&LOCAL);
+    frame[10..16].copy_from_slice(&AP);
+    frame[16..22].copy_from_slice(&AP);
+    frame[22..24].copy_from_slice(&(5u16 << 4 | u16::from(index)).to_le_bytes());
+    frame.extend([number, 0, 0, 0x20, 0, 0, 0, 0]);
+    frame.extend(body);
+    mpdu(frame, 3 | 2 << 8 | 1 << 6)
+}
+
+fn first_body() -> Vec<u8> {
+    [&[0xaa, 0xaa, 3, 0, 0, 0, 8, 0][..], &[0x11; 40]].concat()
+}
+
+#[test]
+fn fragments_under_consecutive_packet_numbers_become_one_msdu() {
+    let native = Native::default();
+    let (mut wifi, mut device) = connect(&native, true);
+    device.inject(
+        wifi.radio().rom().unwrap(),
+        &fragment(0, true, 1, &first_body()),
+    );
+    device.inject(
+        wifi.radio().rom().unwrap(),
+        &fragment(1, true, 2, &[0x22; 20]),
+    );
+    settle(&mut wifi, &mut device);
+    assert_eq!(wifi.receive().unwrap(), None);
+    device.inject(
+        wifi.radio().rom().unwrap(),
+        &fragment(2, false, 3, &[0x33; 10]),
+    );
+    settle(&mut wifi, &mut device);
+    let ethernet = wifi.receive().unwrap().expect("the whole MSDU");
+    assert_eq!(ethernet[12..14], [8, 0]);
+    assert_eq!(ethernet.len(), 14 + 40 + 20 + 10);
+    assert_eq!(ethernet[14], 0x11);
+    assert_eq!(ethernet[14 + 40], 0x22);
+    assert_eq!(ethernet[14 + 60], 0x33);
+}
+
+#[test]
+fn a_fragment_out_of_its_place_or_its_packet_numbers_is_dropped() {
+    let native = Native::default();
+    let (mut wifi, mut device) = connect(&native, true);
+    // With nothing before it.
+    device.inject(
+        wifi.radio().rom().unwrap(),
+        &fragment(1, false, 1, &[0x22; 20]),
+    );
+    // A packet number skipped.
+    device.inject(
+        wifi.radio().rom().unwrap(),
+        &fragment(0, true, 2, &first_body()),
+    );
+    device.inject(
+        wifi.radio().rom().unwrap(),
+        &fragment(1, false, 4, &[0x22; 20]),
+    );
+    settle(&mut wifi, &mut device);
+    assert_eq!(wifi.receive().unwrap(), None);
+}
+
+#[test]
+fn a_scan_probes_where_a_frame_may_start_and_listens_elsewhere() {
+    const FORCE_PASSIVE: u8 = 8;
+    let native = Native::default();
+    let (_, phase, device) = raise(&native, Some(*b"US"), vec![b"test"], 0, OPEN, true);
+    assert_eq!(phase, Phase::AuthenticationRequired);
+    let scan = &device.scans[0];
+    assert_eq!(scan[9] & FORCE_PASSIVE, 0);
+    assert_eq!(scan[48], 1, "the channel probes the wildcard SSID");
+    let band = u16::from_le_bytes([scan[602], scan[603]]);
+    assert!(usize::from(band) > 26, "rates, DS parameters and HT");
+
+    let native = Native::default();
+    let silent = OPEN & !8;
+    let (_, phase, device) = raise(&native, Some(*b"US"), vec![b"test"], 0, silent, true);
+    assert_eq!(phase, Phase::AuthenticationRequired);
+    let scan = &device.scans[0];
+    assert_eq!(scan[9] & FORCE_PASSIVE, FORCE_PASSIVE);
+    assert_eq!(scan[48], 0);
+}
+
+#[test]
+fn a_network_one_scan_part_heard_outlives_the_parts_after_it() {
+    let native = Native::default();
+    let (_, phase, device) = raise_split(
+        &native,
+        Some(*b"US"),
+        vec![b"test"],
+        0,
+        OPEN,
+        true,
+        &[],
+        Some(OPEN & !8),
+    );
+    assert_eq!(device.scans.len(), 2);
+    assert_eq!(phase, Phase::AuthenticationRequired);
+}
+
+/// An AP's HE capabilities, one stream with its ACK and HTC bits, then its
+/// operation: 3 us packet extension, RTS threshold 5, color 9. Random access
+/// and MU EDCA parameters follow it.
+#[rustfmt::skip]
+const HE_AP: [u8; 2 + 22 + 2 + 7 + 4 + 16] = [
+    255, 22, 35,
+    0x01, 0, 0x80, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0xfe, 0xff, 0xfe, 0xff,
+    255, 7, 36, 0x53, 0, 0, 9, 0xfc, 0xff,
+    255, 2, 37, 0x2b,
+    255, 14, 38, 0,
+    1, 0x95, 3,
+    2, 0xa4, 4,
+    3, 0xb3, 5,
+    4, 0xc2, 6,
+];
+
+#[test]
+fn an_he_ap_reaches_the_link_and_the_station_commands() {
+    let native = Native::default();
+    let (mut wifi, phase, mut device) =
+        raise_beside(&native, Some(*b"US"), vec![b"test"], 0, OPEN, true, &HE_AP);
+    assert_eq!(phase, Phase::AuthenticationRequired);
+    let associated = run(&mut wifi, &mut device, |wifi, _, _| {
+        wifi.radio().station().phase() == Peering::Associated
+    });
+    assert!(associated, "{:?}", wifi.radio().station().phase());
+    assert!(run(&mut wifi, &mut device, |_, device, _| {
+        device.configuration.len() >= 2
+    }));
+    let (_, link) = device
+        .configuration
+        .iter()
+        .rfind(|(opcode, _)| *opcode == 9)
+        .unwrap();
+    assert_eq!(link[100..103], [3, 3, 5], "packet extension and OCW range");
+    // The BE record arrives first and the firmware orders BK first.
+    assert_eq!(link[104..112], [4, 0, 10, 0, 2, 0, 4, 0]);
+    assert_eq!(link[112..120], [5, 0, 9, 0, 1, 0, 3, 0]);
+    assert_eq!(link[146], 5, "the RTS threshold");
+    assert_eq!(link[148], 2, "MU EDCA, with the color enabled");
+    assert_eq!(link[152], 2, "the mask of a firmware that still has one");
+    assert_eq!(link[165], 9);
+    assert_eq!(link[156..162], [0; 6]);
+    let (_, peer) = device
+        .configuration
+        .iter()
+        .rfind(|(opcode, _)| *opcode == 0x0a)
+        .unwrap();
+    assert_eq!(peer[48], 1, "the AP's HE acknowledgements");
+    assert_eq!(peer[52], 1, "random access");
+    assert_eq!(peer[72..92], [7; 20], "zero nominal padding");
+    assert_eq!(peer[92], 1, "HE-HTC");
 }

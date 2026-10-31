@@ -197,6 +197,41 @@ fn complete_split_parent_consumes_one_pn_and_preserves_absent_member_observation
 }
 
 #[test]
+fn deaggregated_records_are_plain_msdus_of_one_parent_under_one_pn() {
+    let (s, c) = current(true);
+    let (mut slot, k) = install(KeyScope::Pairwise(AP), &[1; 16]);
+    let records = |amsdu: bool, count: u8| -> Vec<Mpdu> {
+        (0..count)
+            .map(|i| {
+                let mut f = frame(Some(k), Some(5), Some(3), 7, amsdu, LOCAL, i + 1);
+                f.aggregation.amsdu = Some(Amsdu {
+                    index: u16::from(i),
+                    first: i == 0,
+                    last: i + 1 == count,
+                });
+                f
+            })
+            .collect()
+    };
+    let (group, _) = owned(&c, records(false, 2), Shape::DeaggregatedAmsdu);
+    let received = s.receive_ordered_group(&group, Some(&mut slot)).unwrap();
+    let members: Vec<_> = received.members().collect();
+    assert_eq!(members.len(), 2);
+    // An RFC 1042 header opens the record, with no subframe header before it.
+    assert_eq!(members[0].payload()[..6], [0xaa, 0xaa, 3, 0, 0, 0]);
+    assert!(matches!(
+        s.receive_ordered_group(&group, Some(&mut slot)),
+        Err(GroupError::Security(security::Error::Replay))
+    ));
+    // A bit the backend left set says the record still has subframes.
+    let (group, _) = owned(&c, records(true, 2), Shape::DeaggregatedAmsdu);
+    assert!(matches!(
+        s.receive_ordered_group(&group, Some(&mut slot)),
+        Err(GroupError::Invalid(_))
+    ));
+}
+
+#[test]
 fn open_split_and_single_whole_amsdu_never_invent_key_pn_or_first_flag() {
     let (s, c) = current(false);
     let (group, _) = owned(&c, split(None, 0, 0, 2), Shape::HardwareSplitAmsdu);
