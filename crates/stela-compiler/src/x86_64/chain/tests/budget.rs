@@ -72,7 +72,7 @@ fn direct(mapping: &Mapping, control: u64, policy: Interruption) -> Vec<u8> {
             block: 3,
             entry: mapping.address(),
             target: TARGET,
-            kind: ExitKind::Direct,
+            kind: ExitKind::Direct.into(),
         },
         policy,
     )
@@ -290,7 +290,7 @@ fn rendezvous_backedge(native: &Mapping, control: u64, gate: u64, policy: Interr
             block: 3,
             entry: native.address(),
             target: TARGET,
-            kind: ExitKind::Direct,
+            kind: ExitKind::Direct.into(),
         },
         policy,
     )

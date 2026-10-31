@@ -129,6 +129,9 @@ fn after(operation: &Operation, aligned: bool) -> bool {
         | Operation::Ordered(_)
         | Operation::Prefetch(_)
         | Operation::Synchronization(_)
+        | Operation::BranchCondition { .. }
+        | Operation::BranchZero { .. }
+        | Operation::BranchBit { .. }
         | Operation::Nop => aligned,
         Operation::Simd(_) => aligned,
         _ => false,

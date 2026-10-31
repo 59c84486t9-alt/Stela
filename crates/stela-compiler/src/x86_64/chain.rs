@@ -70,6 +70,48 @@ pub struct DirectExit {
     pub offset: usize,
     pub target: GuestAddress,
     pub kind: ExitKind,
+    /// The block's instructions it leaves unrun ([`ExitWord`]).
+    pub skipped: u16,
+}
+
+impl DirectExit {
+    pub fn word(&self) -> ExitWord {
+        ExitWord {
+            kind: self.kind,
+            skipped: self.skipped,
+        }
+    }
+}
+
+/// What a block's exit returns in RDX: its [`ExitKind`] and, for the side
+/// exit of a branch the block runs past, how many of the block's instructions
+/// that exit left unrun.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExitWord {
+    pub kind: ExitKind,
+    pub skipped: u16,
+}
+
+impl ExitWord {
+    const KIND_BITS: u32 = 8;
+
+    pub const fn encoded(self) -> u32 {
+        self.kind as u32 | (self.skipped as u32) << Self::KIND_BITS
+    }
+
+    /// The kind and the skipped instructions of a word from RDX.
+    pub const fn split(word: u64) -> (u64, u16) {
+        (
+            word & ((1 << Self::KIND_BITS) - 1),
+            (word >> Self::KIND_BITS) as u16,
+        )
+    }
+}
+
+impl From<ExitKind> for ExitWord {
+    fn from(kind: ExitKind) -> Self {
+        Self { kind, skipped: 0 }
+    }
 }
 
 /// The engine's chaining state, which thunks address absolutely.
@@ -318,7 +360,7 @@ struct ThunkPlan {
     block: u32,
     entry: u64,
     target: GuestAddress,
-    kind: ExitKind,
+    kind: ExitWord,
 }
 
 const _: () = assert!(core::mem::size_of::<LookupEntry>() == 32);
@@ -329,7 +371,7 @@ const ENTRY_BLOCK: i32 = core::mem::offset_of!(LookupEntry, block) as i32;
 const ENTRY_TARGETS: i32 = core::mem::offset_of!(LookupEntry, targets) as i32;
 
 /// A direct exit to `target` with `kind`, as every block emits it.
-pub fn direct_exit(target: GuestAddress, kind: ExitKind) -> [u8; DIRECT_EXIT_BYTES] {
+pub fn direct_exit(target: GuestAddress, kind: impl Into<ExitWord>) -> [u8; DIRECT_EXIT_BYTES] {
     let mut code = Code::new();
     super::block::direct_exit_with(&mut code.asm(), target, kind);
     code.try_into().expect("a direct exit's length")
@@ -347,7 +389,7 @@ pub fn thunk(
     block: u32,
     entry: u64,
     target: GuestAddress,
-    kind: ExitKind,
+    kind: impl Into<ExitWord>,
 ) -> Option<Vec<u8>> {
     thunk_with_policy(
         ThunkPlan {
@@ -357,7 +399,7 @@ pub fn thunk(
             block,
             entry,
             target,
-            kind,
+            kind: kind.into(),
         },
         Interruption::Epoch,
     )
@@ -403,7 +445,7 @@ pub fn lookup_thunk(
     control: u64,
     retired: u32,
     target: Option<GuestAddress>,
-    kind: ExitKind,
+    kind: impl Into<ExitWord>,
     btype: u8,
 ) -> Option<Vec<u8>> {
     lookup_with_policy(control, retired, target, kind, btype, Interruption::Epoch)
@@ -412,7 +454,7 @@ fn lookup_with_policy(
     control: u64,
     retired: u32,
     target: Option<GuestAddress>,
-    kind: ExitKind,
+    kind: impl Into<ExitWord>,
     btype: u8,
     policy: Interruption,
 ) -> Option<Vec<u8>> {

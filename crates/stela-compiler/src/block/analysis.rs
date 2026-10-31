@@ -114,6 +114,11 @@ pub(super) fn analyze_parsed(parsed: &ParsedBlock) -> BlockAnalysis {
     let mut thread_register_instruction = None;
     let mut amx_instruction = None;
     let mut add = |kind, target| successors.push(StaticSuccessor { kind, target });
+    for instruction in &parsed.instructions {
+        if let Some(target) = instruction.operation.conditional_target() {
+            add(SuccessorKind::ConditionalTarget, target);
+        }
+    }
     match parsed.terminal.as_ref().map(|(_, terminal)| terminal) {
         None => add(SuccessorKind::Fallthrough, parsed.next_pc),
         Some(Terminator::Branch(Operation::Branch { target })) => {
@@ -229,6 +234,9 @@ pub(super) fn analyze_parsed(parsed: &ParsedBlock) -> BlockAnalysis {
     }
 }
 
+/// The forward conditional branches one system-mode block runs past.
+const MAX_SIDE_EXITS: usize = 4;
+
 pub(super) fn parse(
     source: &[u8],
     base: GuestAddress,
@@ -253,6 +261,7 @@ pub(super) fn parse(
     let mut instructions = vec![];
     let mut terminal = None;
     let mut source_bytes = 0;
+    let mut side_exits = 0;
     let mut next_pc = base;
     for bytes in source.as_chunks::<4>().0 {
         let pc = next_pc;
@@ -435,6 +444,22 @@ pub(super) fn parse(
                 terminal = Some((pc, Terminator::FloatingPoint { inline }));
                 break;
             }
+        }
+        // Code lays its likely path out straight ahead, so a block runs past
+        // a forward conditional branch and leaves by a side exit when it is
+        // taken. A branch back is likely taken, and ends the block.
+        if side_exits < MAX_SIDE_EXITS
+            && source_bytes < source.len()
+            && profile.has(Features::FULL_SYSTEM)
+            && profile.checked_memory().is_none()
+            && instruction
+                .operation
+                .conditional_target()
+                .is_some_and(|target| target.0 > pc.0)
+        {
+            side_exits += 1;
+            instructions.push(instruction);
+            continue;
         }
         if matches!(
             instruction.operation,

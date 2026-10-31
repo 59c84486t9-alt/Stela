@@ -35,6 +35,10 @@
 //! one that comes later stops native code as ever. It also clobbers RCX and
 //! RDX, as a [`mask_read_thunk`] reads the masks from the frame.
 //!
+//! A [`code_page_thunk`] completes IC IVAU of the page the cell's `value`
+//! names, which a kernel cleans line by line: the first line's invalidation
+//! was the whole page's. It also clobbers RCX.
+//!
 //! A [`count_thunk`] reads a count instead: the system count a clock
 //! publishes in a [`CountState`] at the host's TSC, through the reader's
 //! [`Count`], less the cell's `value`. It also clobbers RCX and RDX, which
@@ -56,6 +60,8 @@ pub struct Cell {
 }
 
 const VALUE: i8 = core::mem::offset_of!(Cell, value) as i8;
+/// Bits of an address within the page a [`code_page_thunk`] compares.
+const CODE_PAGE_BITS: u8 = 12;
 const _: () = assert!(core::mem::offset_of!(Cell, readable) == 0);
 
 /// A clock's count as every reader computes it: at host count `host`
@@ -196,6 +202,18 @@ pub fn stored_write_thunk(pc: GuestAddress, rt: u8, cell: u64, written: Written)
     written.apply(&mut asm, rt);
     asm.mov_store(Size::Qword, Mem::base(Gpr::Rcx, 0), Gpr::Rax);
     finish(code, miss, pc)
+}
+
+/// The thunk completing `IC IVAU, Xt` at `pc` of an address in the page the
+/// `value` of the cell at `cell` names, else exiting at `pc`.
+pub fn code_page_thunk(pc: GuestAddress, rt: u8, cell: u64) -> Thunk {
+    let (mut code, miss) = open(cell);
+    let mut asm = Asm::new(&mut code);
+    asm.mov_load(Size::Qword, Gpr::Rcx, Mem::base_disp8(Gpr::Rax, VALUE));
+    asm.alu_load(Alu::Xor, Size::Qword, Gpr::Rcx, register(rt));
+    asm.shift_imm(ShiftOp::Shr, Size::Qword, Gpr::Rcx, CODE_PAGE_BITS);
+    let other = asm.jcc(Cond::Ne);
+    finish_unless(code, [miss, other], pc)
 }
 
 /// [`stored_write_thunk`] of a write that is plain only while the word at
@@ -628,6 +646,30 @@ mod tests {
         let before = state.x;
         assert_eq!(run(&thunk(pc, 31, address as u64).code, &mut state), next);
         assert_eq!(state.x, before);
+    }
+
+    /// IC IVAU of the cell's page completes; of another, or with the cell
+    /// closed, it exits.
+    #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
+    #[test]
+    fn the_code_page_thunk_completes_only_in_the_open_cells_page() {
+        use crate::GuestState;
+        let open = Cell {
+            readable: 1,
+            value: 0xffff_fe00_1234_5040,
+        };
+        let closed = Cell::default();
+        let mut state = GuestState::default();
+        for (cell, xt, exit) in [
+            (&open, 0xffff_fe00_1234_5fc0, NEXT),
+            (&open, 0xffff_fe00_1234_6000, MISS),
+            (&closed, 0xffff_fe00_1234_5fc0, MISS),
+        ] {
+            state.x[19] = xt;
+            let thunk = code_page_thunk(PC, 19, cell as *const Cell as u64);
+            assert_eq!(run(&thunk.code, &mut state), exit);
+            assert_eq!(state.x[19], xt);
+        }
     }
 
     #[test]

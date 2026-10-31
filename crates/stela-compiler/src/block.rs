@@ -603,7 +603,8 @@ impl CompilationPlan {
                 )
             };
             let direct_exits = crate::x86_64::block::successor_exits(
-                &native.x86_64_code,
+                &native,
+                &parsed.instructions,
                 parsed.terminal.as_ref(),
                 parsed.next_pc,
             );

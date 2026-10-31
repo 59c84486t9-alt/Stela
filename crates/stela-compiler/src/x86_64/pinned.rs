@@ -845,6 +845,58 @@ mod tests {
         word
     }
 
+    /// A block runs past forward conditional branches; a taken one leaves
+    /// by a side exit, with the instructions it skipped in its exit.
+    #[test]
+    fn a_block_runs_past_forward_branches_and_leaves_by_side_exits() {
+        use crate::{
+            GuestAddress, Options, TargetCpu,
+            block::{BlockProfile, ExitKind, Features},
+        };
+        const BASE: GuestAddress = GuestAddress(0x4000_0000);
+        const WORDS: [u32; 5] = [
+            0xb400_0080, // cbz x0, +16
+            0x9100_0421, // add x1, x1, #1
+            0xb500_0081, // cbnz x1, +16
+            0x9100_0442, // add x2, x2, #1
+            0x17ff_fffc, // b -16
+        ];
+        let source: alloc::vec::Vec<u8> =
+            WORDS.iter().flat_map(|word| word.to_le_bytes()).collect();
+        let options = Options::new(
+            BlockProfile::new(Features::SYSTEM_MODE),
+            TargetCpu::detect(),
+        );
+        let block = crate::compile(&source, BASE, &options).unwrap();
+        assert_eq!(block.source_bytes, source.len());
+        let exits: alloc::vec::Vec<_> = block
+            .direct_exits
+            .iter()
+            .map(|exit| (exit.target.0 - BASE.0, exit.kind, exit.skipped))
+            .collect();
+        assert_eq!(
+            exits,
+            [
+                (0, ExitKind::Direct, 0),
+                (0x10, ExitKind::Direct, 4),
+                (0x18, ExitKind::Direct, 2),
+            ]
+        );
+        let code = entered(&block.native.x86_64_code);
+        for (x0, x1, next, expected) in [
+            (0, 7, BASE.0 + 0x10, [7, 5]),
+            (1, 7, BASE.0 + 0x18, [8, 5]),
+            (1, u64::MAX, BASE.0, [0, 6]),
+        ] {
+            let mut state = GuestState::default();
+            state.x[0] = x0;
+            state.x[1] = x1;
+            state.x[2] = 5;
+            assert_eq!(crate::x86_64::native::run(&code, &mut state), next);
+            assert_eq!([state.x[1], state.x[2]], expected);
+        }
+    }
+
     /// Every form against the frame code, as a block runs it in the engine.
     #[test]
     fn every_form_computes_what_frame_code_computes() {
