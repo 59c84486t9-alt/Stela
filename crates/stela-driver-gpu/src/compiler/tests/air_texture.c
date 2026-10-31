@@ -518,6 +518,15 @@ constexpr_samplers_bind_their_samplers(void)
           nir_src_as_uint(half->src[0].src) == id);
    ralloc_free(shader);
 
+   /* Before Metal 3.2 the state is one word with its top bit set. */
+   char older[8192];
+   snprintf(older, sizeof(older), "%s%s",
+            "@__air_sampler_state = internal addrspace(2) constant i64 -9188470239253757879, align 8\n",
+            replace(kernel_body, "ptr addrspace(2) %smp, <2", "ptr addrspace(2) @__air_sampler_state, <2"));
+   shader = kernel_with(older, metadata, &o, &error);
+   assert(shader);
+   ralloc_free(shader);
+
    /* A state the options give no sampler. */
    refuse(body, metadata, STELA_AIR_ARGUMENT, "has no sampler");
    /* A state whose second word is not zero. */

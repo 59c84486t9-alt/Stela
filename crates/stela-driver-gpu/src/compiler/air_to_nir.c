@@ -3107,9 +3107,10 @@ synchronization_call(struct translator *t, LLVMValueRef inst, LLVMValueRef calle
       values[i] = LLVMConstIntGetZExtValue(operand);
    }
    unsigned flags = values[0], order = count == 3 ? values[1] : 5, scope = values[count - 1];
+   /* Simdgroup barriers name their scope 1 before Metal 3.2. */
    if (flags & ~7u || (kind == FENCE ? order != 0 && order != 5 : order != 5) ||
        (kind == FENCE ? scope != 1 && scope != 2 && scope != 4 :
-                        scope != (kind == THREADGROUP_BARRIER ? 1u : 4u)))
+        kind == THREADGROUP_BARRIER ? scope != 1 : scope != 1 && scope != 4))
       return fail(t, STELA_AIR_INSTRUCTION, "unsupported barrier or fence memory flags/order/scope");
    nir_variable_mode modes = (flags & 1 ? nir_var_mem_ssbo | nir_var_mem_global : 0) |
                              (flags & 2 ? nir_var_mem_shared : 0) | (flags & 4 ? nir_var_image : 0);

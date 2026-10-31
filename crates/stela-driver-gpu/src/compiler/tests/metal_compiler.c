@@ -241,6 +241,32 @@ static const char *hoisted =
 static const char *mistyped =
    CONDITIONAL("br i1 %on, label %tinted, label %untinted\n", "int");
 
+/* A kernel as Metal 2.4 records one, in a Debug build: its buffer leaves its
+ * address space to its type, and its simdgroup barrier has the older scope. */
+static const char *older_kernel =
+   "declare void @air.simdgroup.barrier(i32, i32) convergent\n"
+   "define void @older(ptr addrspace(1) %data, i32 %tid) !dbg !62 {\n"
+   "call void @air.simdgroup.barrier(i32 0, i32 1) convergent, !dbg !63\n"
+   "store i32 %tid, ptr addrspace(1) %data, align 4, !dbg !63\n"
+   "ret void, !dbg !63\n}\n"
+   "!air.kernel = !{!2}\n"
+   "!2 = !{ptr @older, !3, !4}\n!3 = !{}\n!4 = !{!40, !41}\n"
+   "!40 = !{i32 0, !\"air.buffer\", !\"air.location_index\", i32 0, i32 1, !\"air.read_write\","
+   " !\"air.arg_type_size\", i32 4, !\"air.arg_type_align_size\", i32 4,"
+   " !\"air.arg_type_name\", !\"uint\", !\"air.arg_name\", !\"data\"}\n"
+   "!41 = !{i32 1, !\"air.thread_position_in_grid\", !\"air.arg_type_name\", !\"uint\","
+   " !\"air.arg_name\", !\"tid\"}\n"
+   "!llvm.dbg.cu = !{!60}\n!llvm.module.flags = !{!64, !67}\n!llvm_utils.workingdir = !{!68}\n"
+   "!60 = distinct !DICompileUnit(language: DW_LANG_C_plus_plus_14, file: !61,"
+   " emissionKind: LineTablesOnly)\n"
+   "!61 = !DIFile(filename: \"a.metal\", directory: \"/\")\n"
+   "!62 = distinct !DISubprogram(name: \"older\", scope: !61, file: !61, line: 1,"
+   " type: !65, unit: !60, spFlags: DISPFlagDefinition)\n"
+   "!63 = !DILocation(line: 2, scope: !62)\n"
+   "!64 = !{i32 2, !\"Debug Info Version\", i32 3}\n"
+   "!65 = !DISubroutineType(types: !66)\n!66 = !{}\n"
+   "!67 = !{i32 7, !\"Dwarf Version\", i32 4}\n!68 = !{!\"/\"}\n";
+
 /* A position and a varying only a true function constant keeps. */
 static const char *optional_output =
    "@fog = internal addrspace(2) global i8 undef, align 1\n"
@@ -1148,6 +1174,18 @@ function_constants_select_outputs(void)
 }
 
 static void
+older_kernels_compile(void)
+{
+   const struct stela_metal_specialization specialization = {.workgroup_size = {64, 1, 1}};
+   struct stela_air_error error;
+   nir_shader *shader = compile(older_kernel, "older", &specialization, &error);
+   if (!shader)
+      fprintf(stderr, "older: %u %s\n", error.kind, error.detail);
+   assert(shader);
+   stela_metal_release(shader);
+}
+
+static void
 undefined_lanes_read_as_anything(void)
 {
    const struct stela_metal_specialization specialization = {.workgroup_size = {64, 1, 1}};
@@ -1741,6 +1779,7 @@ main(void)
    function_constants_reflect_and_specialize();
    derived_constants_are_constructed_from_their_function_constants();
    function_constants_select_outputs();
+   older_kernels_compile();
    undefined_lanes_read_as_anything();
    function_constants_select_arguments();
    arrays_reflect_each_slot();

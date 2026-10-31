@@ -5,6 +5,7 @@
 #include "air_constants.h"
 #include "llvm-c/Analysis.h"
 #include "llvm-c/BitReader.h"
+#include "llvm-c/DebugInfo.h"
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -316,6 +317,9 @@ module_flags(struct stela_air_metadata *t)
          if (stela_air_md_string(fields[1], keys[key]))
             break;
       }
+      if (stela_air_md_string(fields[1], "Dwarf Version") ||
+          stela_air_md_string(fields[1], "Debug Info Version"))
+         continue;
       if (key == ARRAY_SIZE(keys) || (seen & (1u << key)))
          return fail(t, STELA_AIR_METADATA, "unsupported/duplicate module flag");
       seen |= 1u << key;
@@ -340,6 +344,8 @@ module_flags(struct stela_air_metadata *t)
 bool
 stela_air_metadata_validate(struct stela_air_metadata *t)
 {
+   /* Debug info says nothing a function does, and Xcode's Debug builds carry it. */
+   LLVMStripModuleDebugInfo(t->module);
    for (LLVMNamedMDNodeRef node = LLVMGetFirstNamedMetadata(t->module); node;
         node = LLVMGetNextNamedMetadata(node)) {
       size_t size;
@@ -348,10 +354,11 @@ stela_air_metadata_validate(struct stela_air_metadata *t)
        * stage, and names its source file. */
       const char *allowed[] = {"air.version", "air.language_version", "air.compile_options",
                                "air.kernel", "air.vertex", "air.fragment", "air.object",
-                               "air.mesh", "air.visible", "llvm.ident", "llvm.module.flags",
-                               "air.function_constants", "air.source_file_name",
+                               "air.mesh", "air.visible", "air.function_constants",
+                               "air.source_file_name",
                                "air.sampler_states", "air.visible_function_references"};
-      bool found = false;
+      /* Tools' own notes, such as a build's sources, are no part of AIR. */
+      bool found = size < 4 || memcmp(name, "air.", 4);
       for (unsigned i = 0; i < ARRAY_SIZE(allowed); i++)
          found |= size == strlen(allowed[i]) && !memcmp(name, allowed[i], size);
       if (!found)
@@ -828,8 +835,15 @@ sampler_state(LLVMValueRef global, uint64_t *state)
    LLVMLinkage linkage = initializer ? LLVMGetLinkage(global) : LLVMExternalLinkage;
    if (!type || LLVMGetPointerAddressSpace(LLVMTypeOf(global)) != 2 ||
        !LLVMIsGlobalConstant(global) || LLVMIsThreadLocal(global) ||
-       (linkage != LLVMInternalLinkage && linkage != LLVMPrivateLinkage) ||
-       LLVMGetTypeKind(type) != LLVMArrayTypeKind || LLVMGetArrayLength2(type) != 2 ||
+       (linkage != LLVMInternalLinkage && linkage != LLVMPrivateLinkage))
+      return false;
+   /* Before Metal 3.2 it is an i64 of the same word with its top bit set. */
+   if (LLVMGetTypeKind(type) == LLVMIntegerTypeKind && LLVMGetIntTypeWidth(type) == 64 &&
+       LLVMIsAConstantInt(initializer)) {
+      *state = LLVMConstIntGetZExtValue(initializer) & ~(1ull << 63);
+      return true;
+   }
+   if (LLVMGetTypeKind(type) != LLVMArrayTypeKind || LLVMGetArrayLength2(type) != 2 ||
        LLVMGetTypeKind(LLVMGetElementType(type)) != LLVMIntegerTypeKind ||
        LLVMGetIntTypeWidth(LLVMGetElementType(type)) != 64)
       return false;
@@ -1300,7 +1314,11 @@ argument_field(struct stela_air_metadata *m, struct stela_air_kernel *kernel, LL
    desc->argument = argument;
    desc->index = index;
    desc->access = access;
-   if (!has_access || !has_space || desc->address_space < 1 || desc->address_space > 2 ||
+   /* Before Metal 3.0 no field names its address space, which only its access
+    * can tell, and both are the same memory. */
+   if (!has_space)
+      desc->address_space = access == STELA_AIR_READ ? 2 : 1;
+   if (!has_access || desc->address_space < 1 || desc->address_space > 2 ||
        (desc->address_space == 2 && access != STELA_AIR_READ) ||
        (desc->type_alignment & (desc->type_alignment - 1)))
       return fail(m, STELA_AIR_ARGUMENT, "unsupported buffer in an argument buffer");
@@ -1953,9 +1971,10 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
          type_components = 0;
       } else if (buffer) {
          LLVMTypeRef type = LLVMTypeOf(param);
-         /* A visible function table is device memory its type implies. */
-         if (table && !has_as) {
-            desc.address_space = 1;
+         /* A visible function table is device memory its type implies, and
+          * before Metal 3.0 every buffer's type says. */
+         if (!has_as && LLVMGetTypeKind(type) == LLVMPointerTypeKind) {
+            desc.address_space = LLVMGetPointerAddressSpace(type);
             has_as = true;
          }
          /* Device and constant buffers share the buffer indices; render

@@ -353,7 +353,7 @@ barriers_and_fences_follow_their_flags(void)
       {threadgroup, "call void @air.wg.barrier(i32 8, i32 5, i32 1) convergent"},
       {threadgroup, "call void @air.wg.barrier(i32 2, i32 0, i32 1) convergent"},
       {threadgroup, "call void @air.wg.barrier(i32 2, i32 5, i32 2) convergent"},
-      {simdgroup, "call void @air.simdgroup.barrier(i32 2, i32 1) convergent"},
+      {simdgroup, "call void @air.simdgroup.barrier(i32 2, i32 2) convergent"},
       {"declare void @air.wg.barrier(i32, i32, i32)\n", "call void @air.wg.barrier(i32 2, i32 5, i32 1)"},
       {fence, "call void @air.atomic.fence(i32 1, i32 2, i32 2)"},
       {fence, "call void @air.atomic.fence(i32 1, i32 5, i32 0)"},
