@@ -2,9 +2,18 @@
 
 use super::*;
 
+/// The APCTL bit that keeps the keys on above EL0 whatever SCTLR says. SPTM
+/// 26A434 sets it at boot (`__text+0xb790`), and its context switch for a
+/// process without JOP keys then clears SCTLR's enables (`__text+0x4a264`)
+/// with signed returns of its own and the kernel's still to come, so those
+/// enables can govern only EL0. SPTM clears the bit on entry, setting all
+/// four enables instead (`__text+0x20e0`).
+const APCTL_KERNEL_KEYS: u64 = 1 << 4;
+
 impl<H: Host, D: Devices> Machine<H, D> {
-    /// Whether the current regime's SCTLR enables a PAC key (EnIA 31, EnIB 30,
-    /// EnDA 27, EnDB 13).
+    /// Whether a PAC key is on at the current EL: the current regime's SCTLR
+    /// enables it (EnIA 31, EnIB 30, EnDA 27, EnDB 13), or above EL0 APCTL
+    /// does.
     pub(super) fn key_enabled(&self, key: PointerAuthenticationKey) -> bool {
         let bit = match key {
             PointerAuthenticationKey::Ia => 31,
@@ -12,7 +21,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
             PointerAuthenticationKey::Da => 27,
             PointerAuthenticationKey::Db => 13,
         };
-        self.cpu.regime_sctlr() & (1 << bit) != 0
+        let control = match self.cpu.pstate.el {
+            1 => self.cpu.apple.apctl[0],
+            2 => self.cpu.apple.apctl[1],
+            _ => 0,
+        };
+        self.cpu.regime_sctlr() & (1 << bit) != 0 || control & APCTL_KERNEL_KEYS != 0
     }
 
     /// The PAC keys as (low, high) words in APIA, APIB, APDA, APDB, APGA order.

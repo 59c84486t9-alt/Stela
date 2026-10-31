@@ -4299,6 +4299,30 @@ fn pac_uses_the_guest_keys_regime_layout_and_sctlr_enables() {
 }
 
 #[test]
+fn apctl_keeps_the_keys_on_above_el0_when_sctlr_clears_them() {
+    const PACIBSP: u32 = 0xd503_237f;
+    let mut machine = pac_machine();
+    let sctlr = machine.cpu.read(SystemRegister::SCTLR_EL1);
+    machine
+        .cpu
+        .registers
+        .set(SystemRegister::SCTLR_EL1, 0, sctlr & !(1 << 30));
+    let pointer = 0xffff_ff80_0000_4000_u64;
+    machine.cpu.state.sp = 0xffff_ff80_0001_0000;
+    machine.cpu.apple.apctl[0] = 1 << 4;
+    machine.derived_changed();
+    machine.cpu.state.x[30] = pointer;
+    machine.system_instruction_for_test(PACIBSP);
+    assert_ne!(machine.cpu.state.x[30], pointer);
+    // SCTLR alone still governs EL0.
+    machine.cpu.pstate.el = 0;
+    machine.derived_changed();
+    machine.cpu.state.x[30] = pointer;
+    machine.system_instruction_for_test(PACIBSP);
+    assert_eq!(machine.cpu.state.x[30], pointer);
+}
+
+#[test]
 fn pac_follows_the_chips_version() {
     const PACIBSP: u32 = 0xd503_237f;
     const AUTIBSP: u32 = 0xd503_23ff;
