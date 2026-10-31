@@ -192,8 +192,8 @@ pub struct AppleDevices {
     coprocessors: Vec<(&'static str, DeviceId)>,
     /// The SPI controller holding the NOR die.
     nor: Option<DeviceId>,
-    /// StelaGPU's call gate (`gpu_gate`).
-    gpu_gate: Option<DeviceId>,
+    /// StelaGPU's call gates (`gpu_gate`), a GPU's each.
+    gpu_gates: Vec<DeviceId>,
     storage_masters: Vec<(DeviceId, DeviceId)>,
     /// The GFX coprocessor's ASC and the `sgx` block whose UAT it masters
     /// memory through.
@@ -602,7 +602,7 @@ impl AppleDevices {
             gfx_masters: Vec::new(),
             coprocessors: Vec::new(),
             nor: None,
-            gpu_gate: None,
+            gpu_gates: Vec::new(),
             sep_masters: Vec::new(),
             dcp_masters: Vec::new(),
             dart_irqs: Vec::new(),
@@ -1100,19 +1100,19 @@ impl Devices for AppleDevices {
     }
 
     fn take_call(&mut self, cpu: usize) -> Option<stela_engine::machine::engine::GateCall> {
-        self.bus
-            .device_mut::<gpu_gate::Gate>(self.gpu_gate?)
-            .expect("the gate is mapped")
-            .take(cpu)
-    }
-
-    fn finish_call(&mut self, outcome: stela_engine::machine::engine::GateOutcome) {
-        if let Some(gate) = self.gpu_gate {
+        self.gpu_gates.iter().find_map(|&gate| {
             self.bus
                 .device_mut::<gpu_gate::Gate>(gate)
                 .expect("the gate is mapped")
-                .finish(outcome);
-        }
+                .take(cpu)
+        })
+    }
+
+    fn finish_call(&mut self, outcome: stela_engine::machine::engine::GateOutcome) {
+        self.bus
+            .device_mut::<gpu_gate::Gate>(self.gpu_gates[outcome.window])
+            .expect("the gate is mapped")
+            .finish(outcome.answer);
     }
 
     fn transfer(

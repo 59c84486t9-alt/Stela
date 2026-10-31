@@ -639,9 +639,10 @@ fn run_guest(boot: Boot<'_>, host: OpenedHost, storage: Storage, processors: Pro
     #[cfg_attr(not(feature = "nvk"), allow(unused_mut))]
     let mut assigned = assign(boot, &mut roster, topology_source.as_ref(), &full_profile);
     #[cfg(feature = "nvk")]
-    let gpu_gate = assigned
+    let gpu_gates = assigned
         .as_mut()
-        .and_then(|assigned| gpu::gate::place(&mut assigned.tree));
+        .map(|assigned| gpu::gate::place(&mut assigned.tree))
+        .unwrap_or_default();
     // SAFETY: all raw guest input copies have ended; AP executors are parked,
     // and no guest/device DMA producer has entered. The same loader bytes are
     // for every subsequent native CPU and synchronous device writer.
@@ -719,16 +720,18 @@ fn run_guest(boot: Boot<'_>, host: OpenedHost, storage: Storage, processors: Pro
         tree,
     );
     #[cfg(feature = "nvk")]
-    if let (Some((placement, service)), Some(board)) = (gpu_gate, &board) {
-        // The board's AIC took its dies and inputs from this vector too.
-        let per_die = u32::from(board.aic.layout.max_irq());
-        let irq = stela_contracts::interrupt::AicInput::new(
-            (placement.irq / per_die) as u8,
-            (placement.irq % per_die) as u16,
-        );
-        devices
-            .add_gpu_gate(placement.physical, irq, service)
-            .unwrap_or_else(|error| output::fatal(&error));
+    if let Some(board) = &board {
+        for (placement, service) in gpu_gates {
+            // The board's AIC took its dies and inputs from this vector too.
+            let per_die = u32::from(board.aic.layout.max_irq());
+            let irq = stela_contracts::interrupt::AicInput::new(
+                (placement.irq / per_die) as u8,
+                (placement.irq % per_die) as u16,
+            );
+            devices
+                .add_gpu_gate(placement.physical, irq, service)
+                .unwrap_or_else(|error| output::fatal(&error));
+        }
     }
     // This function never returns, so nothing else frees the bundle: guest
     // memory and the devices now hold what they need of it, and the heap's

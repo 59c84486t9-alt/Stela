@@ -79,9 +79,16 @@ pub enum GateRequest {
     Retire,
 }
 
-/// A request's result, for the gate to record.
+/// A request's result, for the gate at `window` of the board to record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GateOutcome {
+pub struct GateOutcome {
+    pub window: usize,
+    pub answer: GateAnswer,
+}
+
+/// What a request came to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GateAnswer {
     Opened(Option<NonZeroU64>),
     Closed,
     Served {
@@ -96,27 +103,32 @@ pub enum GateOutcome {
 /// A store's request, taken from the gate to run in that store's own step
 /// outside the board's lock.
 pub struct GateCall {
+    window: usize,
     service: Arc<dyn GateService>,
     request: GateRequest,
 }
 
 impl GateCall {
-    pub fn new(service: Arc<dyn GateService>, request: GateRequest) -> Self {
-        Self { service, request }
+    pub fn new(window: usize, service: Arc<dyn GateService>, request: GateRequest) -> Self {
+        Self {
+            window,
+            service,
+            request,
+        }
     }
 
     pub fn run(self, caller: &mut dyn CallerMemory) -> GateOutcome {
-        match self.request {
-            GateRequest::Open => GateOutcome::Opened(self.service.connect().ok()),
+        let answer = match self.request {
+            GateRequest::Open => GateAnswer::Opened(self.service.connect().ok()),
             GateRequest::Close(connection) => {
                 self.service.disconnect(connection);
-                GateOutcome::Closed
+                GateAnswer::Closed
             }
             GateRequest::Serve {
                 gate,
                 connection,
                 record,
-            } => GateOutcome::Served {
+            } => GateAnswer::Served {
                 gate,
                 connection,
                 fault: self.service.serve(connection, record, caller).err(),
@@ -125,8 +137,12 @@ impl GateCall {
                 connection,
                 ranges,
                 token,
-            } => GateOutcome::Imported(self.service.import(connection, &ranges, token).ok()),
-            GateRequest::Retire => GateOutcome::Retired(self.service.retired()),
+            } => GateAnswer::Imported(self.service.import(connection, &ranges, token).ok()),
+            GateRequest::Retire => GateAnswer::Retired(self.service.retired()),
+        };
+        GateOutcome {
+            window: self.window,
+            answer,
         }
     }
 }
@@ -141,7 +157,7 @@ macro_rules! layout {
     };
 }
 
-/// The StelaGPU gate window at `/arm-io/stela-gpu`, as the runtime models
+/// A StelaGPU gate window at `/arm-io/stela-gpu<n>`, as the runtime models
 /// it and the StelaGPU kext drives it.
 ///
 /// Page 0 is the kext's control page. Page `n` (1 to [`CONNECTIONS`]) is

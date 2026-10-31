@@ -5,7 +5,7 @@
 //! it waits for may need that PE: on the CPU that runs the kernel, waiting
 //! without running it would never end. Each call runs through the platform's
 //! `run`, as a compile needs more stack than a PE keeps; the lock makes one
-//! such stack enough.
+//! such stack enough for a device.
 //!
 //! The gate asks about completed work under the board's lock, where a Vulkan
 //! call would hold up every PE, so [`GateService::signaled`] only reads a
@@ -36,9 +36,11 @@ pub struct SharedService<B: Backend, C: Compiler> {
 pub struct ServiceHost {
     /// Waits a moment for the turn's holder.
     pub relax: fn(),
+    /// What `run` takes first: this service's stack.
+    pub stack: u64,
     /// Calls its argument on a stack a compile fits on. Only a turn's holder
     /// comes here.
-    pub run: fn(&mut dyn FnMut()),
+    pub run: fn(u64, &mut dyn FnMut()),
 }
 
 // SAFETY: the lock gives one PE at a time the service, which `Send` lets move
@@ -109,7 +111,7 @@ impl<B: Backend, C: Compiler> SharedService<B, C> {
     fn call<R>(&self, call: impl FnOnce(&mut Service<B, C>) -> R) -> R {
         let mut turn = self.turn();
         let (mut call, mut result) = (Some(call), None);
-        (self.host.run)(&mut || {
+        (self.host.run)(self.host.stack, &mut || {
             if let Some(call) = call.take() {
                 result = Some(call(&mut turn));
             }
