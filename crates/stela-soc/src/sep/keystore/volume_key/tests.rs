@@ -361,7 +361,7 @@ fn new_file_key(keys: &mut VolumeKeys, volume: &[u8], class: u32) -> Result<(Vec
     let reply = send_file_key(keys, file_key::NEW_KEY, request, &mut Vec::new())?;
     let mut fields = reply_fields(&reply);
     let area = fields.blob().unwrap().to_vec();
-    assert!(fields.blob().unwrap().is_empty());
+    assert_eq!(fields.blob().unwrap().len(), 16);
     assert!(fields.blob().unwrap().is_empty());
     let wrapped = fields.blob().unwrap().to_vec();
     assert!(fields.blob().unwrap().is_empty());
@@ -381,7 +381,7 @@ fn unwrap_file_key(
     let reply = send_file_key(keys, file_key::UNWRAP_KEY, request, &mut Vec::new())?;
     let mut fields = reply_fields(&reply);
     let area = fields.blob().unwrap().to_vec();
-    assert!(fields.blob().unwrap().is_empty());
+    assert_eq!(fields.blob().unwrap().len(), 16);
     assert_eq!(fields.word().unwrap(), 1 << 1);
     fields.end().unwrap();
     Ok(area)

@@ -29,10 +29,13 @@
 //! (0x2d51f28, 0x2d26354). Other request types send other variants
 //! (`rewrap_data_with_opts`, unwrap variants 0 and 2), which refuse.
 //!
-//! **Keys.** The key is the inline engine's wrapped form, as for a VEK;
-//! there is no IV key. Loading a volume's class keys (protection operation
-//! 18) keeps a class root derived from its VEK until the sepOS restarts or
-//! the VEK's state is dropped; each class key derives from it. A wrapped key
+//! **Keys.** The key is the inline engine's wrapped form, as for a VEK. The
+//! IV key is 16 bytes derived from the key, so an unwrap returns what the new
+//! key did: `_return_ek` (0x491b02c, `new_skey`'s path) panics on any other
+//! length and gives it to `cpx`; the inline engine takes its tweak from the
+//! command and never uses it. Loading a volume's class keys (protection
+//! operation 18) keeps a class root derived from its VEK until the sepOS
+//! restarts or the VEK's state is dropped; each class key derives from it. A wrapped key
 //! is Stela's format: magic, class and volume UUID, then the key sealed
 //! under that class key, so it opens only on its machine, volume and class
 //! once the volume's class keys are loaded. The volume comes from the
@@ -76,6 +79,9 @@ pub(super) const WRAPPED_BYTES: usize = HEADER + SEALED_BYTES;
 const CLASS_ROOT_DOMAIN: &[u8] = b"Stela SEP class keys v1\0";
 const CLASS_KEY_DOMAIN: &[u8] = b"Stela SEP class key v1\0";
 const FILE_KEY_DOMAIN: &[u8] = b"Stela SEP per-file key v1\0";
+const IV_KEY_DOMAIN: &[u8] = b"Stela SEP per-file IV key v1\0";
+/// `iv_key_len`, the only length `_return_ek` accepts.
+const IV_KEY_BYTES: usize = 16;
 
 pub(super) const UNINTERPRETED: &str = "SEP per-file keys: keybag handles, personas, \
      file-system contexts and request flag bit 8 are not interpreted, and no class is ever locked";
@@ -186,10 +192,10 @@ impl VolumeKeys {
             .ok_or(refuse!("SEP per-file key volume has no loaded class keys"))
     }
 
-    /// The key, its absent IV key.
+    /// The key and its IV key.
     fn key_reply(&self, reply: &mut Reply, key: &[u8; KEY_BYTES]) -> Result<()> {
         reply.blob(&self.engine.wrap(key)?);
-        reply.blob(&[]);
+        reply.blob(&derive(key, IV_KEY_DOMAIN, &[])[..IV_KEY_BYTES]);
         Ok(())
     }
 }
