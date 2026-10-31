@@ -773,3 +773,55 @@ fn hardware_width_bounds_payload() {
     drop(unit);
     assert_eq!(peer.live_ram(), 0);
 }
+
+#[test]
+fn detached_binding_releases_configuration_while_old_requester_and_tree_clones_remain() {
+    use crate::bus::pci::requester::{FunctionRole, StoppedRequester};
+    let (mut unit, peer) = model::unit();
+    let mut function = model::function(0x20);
+    function.config().write16(4, 0x400);
+    // SAFETY: complete synchronous physical fixture; all engines/IRQ/work are absent.
+    let stopped = unsafe { StoppedRequester::from_stopped_pci(function, FunctionRole::Physical) }
+        .unwrap_or_else(|(error, _)| panic!("{error:?}"));
+    let (stopped, binding) = stopped
+        .into_dma_binding()
+        .unwrap_or_else(|(error, _)| panic!("{error:?}"));
+    // SAFETY: same owned stopped fixture and original completed root; no real DMA exists.
+    let mut requester = unsafe { unit.attach_binding(binding) }.unwrap();
+    let mut configuration = stopped.into_function().into_config().into_mapping();
+    // SAFETY: isolated RAM fixture; active binding must refuse before any retirement.
+    let retired = unsafe { configuration.retire() };
+    assert_eq!(retired, Err(crate::bus::mmio::owned::Error::Busy));
+    // SAFETY: no mapping, DMA/IRQ/work producer or bypass exists in this fixture.
+    unsafe { requester.detach() }.unwrap();
+    // SAFETY: actual modeled DTE block/invalidation completed; all shared owner
+    // clones must have released the same configuration binding cell.
+    unsafe { configuration.retire() }.unwrap();
+
+    let mut replacement = model::function(0x20);
+    replacement.config().write16(4, 0x400);
+    // SAFETY: new complete synchronous fixture epoch, independently stopped.
+    let stopped =
+        unsafe { StoppedRequester::from_stopped_pci(replacement, FunctionRole::Physical) }
+            .unwrap_or_else(|(error, _)| panic!("{error:?}"));
+    let (stopped, binding) = stopped
+        .into_dma_binding()
+        .unwrap_or_else(|(error, _)| panic!("{error:?}"));
+    // SAFETY: previous DTE/domain was explicitly detached; this is the new original owner.
+    let mut replacement = unsafe { unit.attach_binding(binding) }.unwrap();
+    let before = peer.commands();
+    assert!(matches!(
+        requester.map(peer.pages(4096).into(), Direction::Bidirectional, u64::MAX),
+        Err(Error::Poisoned)
+    ));
+    assert_eq!(
+        peer.commands(),
+        before,
+        "stale owner cannot touch a replacement generation"
+    );
+    // SAFETY: replacement fixture has no maps or engine/IRQ/work producers.
+    unsafe { replacement.detach() }.unwrap();
+    let mut configuration = stopped.into_function().into_config().into_mapping();
+    // SAFETY: exact replacement detached before configuration retirement.
+    unsafe { configuration.retire() }.unwrap();
+}

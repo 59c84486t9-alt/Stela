@@ -742,6 +742,15 @@ fn contexts_separate_same_iova_and_reject_cross_domain_or_stale_tokens() {
     )
     .unwrap();
     assert_eq!(c.address(), Ok(address));
+    assert!(matches!(
+        DmaMapping::map(
+            first.clone(),
+            pages(PAGE, 12, 0x1110_0000, Arc::new(AtomicU64::new(0))),
+            Direction::Bidirectional,
+            u64::MAX
+        ),
+        Err(DmaError::Unmapped)
+    ));
     assert_eq!(
         // SAFETY: the model device is stopped and `token` names a mapping this test made.
         unsafe { first.sync_for_device(token, 0..PAGE, Direction::Bidirectional) },

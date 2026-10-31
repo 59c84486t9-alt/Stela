@@ -435,14 +435,14 @@ impl Taken {
 
     /// A domain of its own for `binding`'s requester.
     pub(super) fn domain(&self, binding: RequesterBinding) -> Result<Arc<dyn DmaDomain>, Error> {
-        attach_domain(&self.unit, binding)
+        attach_domain(&self.unit, binding).map(|domain| domain as Arc<dyn DmaDomain>)
     }
 }
 
 fn attach_domain(
     unit: &Rc<RefCell<Unit<Platform>>>,
     binding: RequesterBinding,
-) -> Result<Arc<dyn DmaDomain>, Error> {
+) -> Result<Arc<Domain>, Error> {
     if !on_boot_processor() {
         return Err(Error::Dma(DmaError::IommuUnavailable));
     }
@@ -480,13 +480,42 @@ unsafe impl stela_drivers::bus::pci::requester::preparation::Root for ColdRoot {
             .map_err(|_| DmaError::IommuUnavailable)?;
         unit.drain_initial_requester(super::requester(self.address))
     }
-    unsafe fn bind(&self, binding: RequesterBinding) -> Result<Arc<dyn DmaDomain>, DmaError> {
+    unsafe fn bind(
+        &self,
+        binding: RequesterBinding,
+    ) -> Result<Box<dyn stela_drivers::bus::pci::requester::preparation::Attachment>, DmaError>
+    {
         if !on_boot_processor() || binding.address() != self.address {
             return Err(DmaError::IommuUnavailable);
         }
         // The Root contract supplies this exact paired stopped receipt,
         // completed original-path drain and unchanged routing/config epoch.
-        attach_domain(&self.unit, binding).map_err(failed)
+        let domain = attach_domain(&self.unit, binding).map_err(failed)?;
+        Ok(Box::new(Attachment { domain }))
+    }
+}
+
+struct Attachment {
+    domain: Arc<Domain>,
+}
+// SAFETY: the original process-local requester and full unit/window graph
+// remain in this exact domain. Current owner/context guards precede access.
+// Backend detach blocks all aliases, completes invalidation and releases the
+// shared configuration binding only after success. Retired requesters reject
+// all later methods; failure/Drop keeps uncertain trees and their binding.
+unsafe impl stela_drivers::bus::pci::requester::preparation::Attachment for Attachment {
+    fn domain(&self) -> Arc<dyn DmaDomain> {
+        self.domain.clone()
+    }
+    unsafe fn detach(&mut self) -> Result<(), DmaError> {
+        let mut inner = self.domain.inner()?;
+        if !inner.mappings.is_empty() {
+            return Err(DmaError::MappingFailed);
+        }
+        // SAFETY: paired driver supplies halt and payload/IRQ/work drainage
+        // under the retained root/epoch. Both mapping inventories refuse live
+        // leases before DTE effects; wrapper inventory is empty above.
+        unsafe { inner.requester.detach() }.map_err(failed)
     }
 }
 
