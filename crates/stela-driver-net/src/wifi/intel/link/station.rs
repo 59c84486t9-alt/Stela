@@ -24,8 +24,8 @@ use crate::wifi::{
             response::{Response, block_ack_queues},
         },
     },
-    regulatory::channel::{NO_80MHZ, NO_160MHZ, NO_HT40MINUS, NO_HT40PLUS},
-    regulatory::database,
+    regulatory::channel::{NO_80MHZ, NO_160MHZ, NO_HT40MINUS, NO_HT40PLUS, NO_IR},
+    regulatory::{self, Operation, ProbeProfiles, Purpose, TxProfile, Width, database},
     security::{
         Cipher, InstallOutcome, InstallTicket, Integrity, KeyIdentity, KeyScope, KeySlot,
         PacketNumber, ReplaySeed, TransmitSeed,
@@ -1374,6 +1374,14 @@ fn peer_state(context: &AssociationContext, explicit_mfp: bool, authorized: bool
 /// `iwl_init_ht_hw_capab`, `iwl_init_vht_hw_capab` and mac80211's SMPS-off
 /// HT capabilities for a device of `tx`, `rx` chains.
 fn capability_elements(band: Band, tx: u32, rx: u32, wide: bool) -> Vec<u8> {
+    let mut elements = probe_elements(band, tx, rx, wide);
+    // `ieee80211_add_wmm_info_ie`, without U-APSD.
+    elements.extend_from_slice(&[221, 7, 0, 0x50, 0xf2, 2, 0, 1, 0]);
+    elements
+}
+
+/// The rates and capabilities a probe names, `ieee80211_build_preq_ies_band`.
+fn probe_elements(band: Band, tx: u32, rx: u32, wide: bool) -> Vec<u8> {
     let mut elements = Vec::new();
     let mut element = |id: u8, body: &[u8]| {
         elements.extend_from_slice(&[id, body.len() as u8]);
@@ -1424,9 +1432,58 @@ fn capability_elements(band: Band, tx: u32, rx: u32, wide: bool) -> Vec<u8> {
         vht[8..10].copy_from_slice(&map.to_le_bytes());
         element(191, &vht);
     }
-    // `ieee80211_add_wmm_info_ie`, without U-APSD.
-    element(221, &[0, 0x50, 0xf2, 2, 0, 1, 0]);
     elements
+}
+
+impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
+    /// Whether a 5 GHz channel takes 160 MHz.
+    fn wide(&self) -> bool {
+        self.client
+            .channels
+            .iter()
+            .any(|(channel, flags)| channel.band == Band::Ghz5 && flags & NO_160MHZ == 0)
+    }
+
+    /// What firmware's probes radiate: its lowest legacy rate of each band,
+    /// which `iwl_mvm_scan_rate_n_flags` shows, under the limit of the country
+    /// programmed into it, so no higher than that of the strictest channel.
+    fn probe_profiles(&self, country: &database::Country) -> ProbeProfiles {
+        let profile = |band, rate| TxProfile {
+            width: Width::Legacy20,
+            rate,
+            short_preamble: false,
+            max_eirp_mbm: self
+                .client
+                .channels
+                .iter()
+                .filter(|(channel, _)| channel.band == band)
+                .map(|(channel, _)| country.channel(channel.frequency_mhz).max_reg_dbm * 100)
+                .min()
+                .unwrap_or(0),
+        };
+        ProbeProfiles {
+            ghz2: profile(Band::Ghz2, regulatory::LegacyRate::Cck1),
+            ghz5: profile(Band::Ghz5, regulatory::LegacyRate::Ofdm6),
+        }
+    }
+
+    /// The probes of a scan this adapter runs now.
+    fn probe(&self) -> Result<boot::Probe, Error> {
+        let country = self
+            .client
+            .regulatory
+            .as_ref()
+            .ok_or(Error::Refused("scan"))?;
+        let (tx, rx) = (self.chains.0.count_ones(), self.chains.1.count_ones());
+        let wide = self.wide();
+        Ok(boot::Probe {
+            elements: [
+                probe_elements(Band::Ghz2, tx, rx, wide),
+                probe_elements(Band::Ghz5, tx, rx, wide),
+            ],
+            profiles: self.probe_profiles(country),
+        })
+    }
 }
 
 /// Polling the link serves the station; frames flow once its port is open.
@@ -1504,9 +1561,29 @@ impl<Q: BootIo, B: BiosIo> Radio for Wifi<Q, B> {
             .collect()
     }
 
-    /// Scans listen until the firmware scan request builds its probes.
-    fn probes(&self, _: Channel) -> bool {
-        false
+    /// A channel the firmware and the country let a frame start on.
+    fn probes(&self, channel: Channel) -> bool {
+        let (Some(country), Some(beacons)) = (&self.client.regulatory, &self.beacons) else {
+            return false;
+        };
+        let profiles = self.probe_profiles(country);
+        self.client
+            .channels
+            .iter()
+            .any(|&(known, flags)| known == channel && flags & NO_IR == 0)
+            && crate::wifi::intel::policy::allows(
+                country,
+                beacons,
+                Operation::Transmit {
+                    channel,
+                    purpose: Purpose::Probe,
+                    profile: if channel.band == Band::Ghz2 {
+                        profiles.ghz2
+                    } else {
+                        profiles.ghz5
+                    },
+                },
+            )
     }
 
     fn supported_channels(&self, band: Band) -> &'static [u8] {
@@ -1529,12 +1606,7 @@ impl<Q: BootIo, B: BiosIo> Radio for Wifi<Q, B> {
             return Err(Error::Unsupported("6 GHz on Intel Wi-Fi"));
         }
         let (tx, rx) = self.chains;
-        let wide = self
-            .client
-            .channels
-            .iter()
-            .any(|(channel, flags)| channel.band == Band::Ghz5 && flags & NO_160MHZ == 0);
-        let elements = capability_elements(band, tx.count_ones(), rx.count_ones(), wide);
+        let elements = capability_elements(band, tx.count_ones(), rx.count_ones(), self.wide());
         let capabilities = Capabilities::parse(band, Role::Station, &elements)
             .map_err(|_| Error::Refused("advertisement"))?;
         Ok(Advertisement {
@@ -1550,6 +1622,7 @@ impl<Q: BootIo, B: BiosIo> Radio for Wifi<Q, B> {
     }
 
     fn begin_scan(&mut self, request: scan::Request, budget_us: u64) -> Result<(), Error> {
+        let probe = request.active().then(|| self.probe()).transpose()?;
         let pages = self.pages;
         let Stage::Scan(owner) = &mut self.stage else {
             return Err(Error::Refused("scan"));
@@ -1559,8 +1632,13 @@ impl<Q: BootIo, B: BiosIo> Radio for Wifi<Q, B> {
             MpduProgress::Pending | MpduProgress::Backpressure { .. }
         ) {}
         self.client.observed.clear();
-        // SAFETY: `new`'s contract covers the scan's pages.
-        unsafe { owner.start(request, budget_us, pages) }.map_err(Error::Scan)?;
+        let started = match probe {
+            // SAFETY: `new`'s contract covers the scan's pages.
+            Some(probe) => unsafe { owner.start_probing(request, &probe, budget_us, pages) },
+            // SAFETY: as above.
+            None => unsafe { owner.start(request, budget_us, pages) },
+        };
+        started.map_err(Error::Scan)?;
         Ok(())
     }
 
@@ -2025,21 +2103,24 @@ impl Client {
     }
 }
 
-/// The regulatory flags `ieee80211_determine_chan_mode` reads, from the
-/// firmware's channel restrictions.
-pub fn channel_flags(no_plus: bool, no_minus: bool, no_80: bool, no_160: bool) -> u32 {
+/// The regulatory flags of the firmware's channel restrictions:
+/// `ieee80211_determine_chan_mode` reads them, and a probe needs `NO_IR` clear.
+pub fn channel_flags(restrictions: &crate::wifi::intel::mcc::channel::Restrictions) -> u32 {
     let mut flags = 0;
-    if no_plus {
+    if restrictions.no_ht40_plus {
         flags |= NO_HT40PLUS;
     }
-    if no_minus {
+    if restrictions.no_ht40_minus {
         flags |= NO_HT40MINUS;
     }
-    if no_80 {
+    if restrictions.no_80mhz {
         flags |= NO_80MHZ;
     }
-    if no_160 {
+    if restrictions.no_160mhz {
         flags |= NO_160MHZ;
+    }
+    if restrictions.no_initiate_radiation {
+        flags |= NO_IR;
     }
     flags
 }

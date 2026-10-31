@@ -2,7 +2,7 @@
 // Copyright (C) 2012-2014, 2018-2026 Intel Corporation
 // Copyright (C) 2013-2015 Intel Mobile Communications GmbH
 // Copyright (C) 2016-2017 Intel Deutschland GmbH
-//! Original-owner UMAC15 passive scanning. ACK, scan-complete and retirement
+//! Original-owner UMAC15 scanning. ACK, scan-complete and retirement
 //! are separate: no UID reuse before cold-unbound request retirement.
 //! The shared native RX owner stays live; whole-device extraction is separate.
 use super::super::hcmd::{CapturedNotification, NotificationPoll};
@@ -23,8 +23,13 @@ pub use phy::{
     Ax200TransmitPowerPhase, BindingCommand, BindingCommandKind, LegacyPeer, PeerCommand,
     PeerCommandKind, PhyCommand, PhyCommandKind, TransmitPowerLimit,
 };
+pub use wire::Probe;
 static NEXT_CONTEXT: crate::wifi::Identities = crate::wifi::Identities::new();
 const MAX_SCAN_US: u64 = 30_000_000;
+/// `IWL_UCODE_TLV_CAPA_DS_PARAM_SET_IE_SUPPORT`.
+const DS_PARAMETERS: u32 = 9;
+/// `IWL_UCODE_TLV_CAPA_WFA_TPC_REP_IE_SUPPORT`.
+const TPC_REPORT: u32 = 10;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Ax200ScanPhase {
     NotStarted,
@@ -222,7 +227,7 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Scan<'_, Q, B, O> {
     pub fn request(&self) -> Option<&protocol::Request> {
         self.scanner.request()
     }
-    /// The channels a passive scan may cover, in the firmware's MCC order:
+    /// The channels a scan may cover, in the firmware's MCC order:
     /// valid in its channel list, enabled by the NVM SKU and covered by the
     /// selected country's 20 MHz rules, at most one request's worth.
     pub fn channels(&mut self) -> Vec<Channel> {
@@ -267,12 +272,7 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Scan<'_, Q, B, O> {
                 let restrictions = observed.restrictions;
                 Some((
                     channel,
-                    crate::wifi::intel::link::channel_flags(
-                        restrictions.no_ht40_plus,
-                        restrictions.no_ht40_minus,
-                        restrictions.no_80mhz,
-                        restrictions.no_160mhz,
-                    ),
+                    crate::wifi::intel::link::channel_flags(&restrictions),
                 ))
             })
             .collect()
@@ -466,8 +466,8 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Scan<'_, Q, B, O> {
         }
     }
     /// Publish one exact forced-passive request under the native and OS
-    /// leases. Active requests await per-rate/probe power validation.
-    /// A failed admission/allocation does not mark the protocol submitted.
+    /// leases. A failed admission/allocation does not mark the protocol
+    /// submitted.
     /// # Safety
     /// `source` supplies fresh exclusive coherent pages for this native
     /// requester/domain under RomBoot's complete publication contract.
@@ -477,8 +477,31 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Scan<'_, Q, B, O> {
         budget_us: u64,
         source: &dyn PageSource,
     ) -> Result<Ax200ScanPhase, Ax200ScanError> {
+        // SAFETY: forwarded.
+        unsafe { self.publish(request, None, budget_us, source) }
+    }
+    /// As `start`, for a request that probes as `probe` describes.
+    /// # Safety
+    /// As `start`.
+    pub unsafe fn start_probing(
+        &mut self,
+        request: protocol::Request,
+        probe: &Probe,
+        budget_us: u64,
+        source: &dyn PageSource,
+    ) -> Result<Ax200ScanPhase, Ax200ScanError> {
+        // SAFETY: forwarded.
+        unsafe { self.publish(request, Some(probe), budget_us, source) }
+    }
+    unsafe fn publish(
+        &mut self,
+        request: protocol::Request,
+        probe: Option<&Probe>,
+        budget_us: u64,
+        source: &dyn PageSource,
+    ) -> Result<Ax200ScanPhase, Ax200ScanError> {
         // SAFETY: original requester/domain publication contract.
-        let result = unsafe { self.start_inner(request, budget_us, source) };
+        let result = unsafe { self.start_inner(request, probe, budget_us, source) };
         // Pure admission/encoding failure remains unsubmitted and retryable;
         // native I/O/visibility failure preserves the first real error.
         if let Err(error @ Ax200ScanError::Boot(_)) = &result {
@@ -490,6 +513,7 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Scan<'_, Q, B, O> {
     unsafe fn start_inner(
         &mut self,
         request: protocol::Request,
+        probe: Option<&Probe>,
         budget_us: u64,
         source: &dyn PageSource,
     ) -> Result<Ax200ScanPhase, Ax200ScanError> {
@@ -503,7 +527,7 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Scan<'_, Q, B, O> {
         if let Some(error) = self.first_error.as_ref() {
             return Err(error.clone());
         }
-        if request.active() {
+        if request.active() && probe.is_none() {
             return Err(Ax200ScanError::ProbePowerRequired);
         }
         if !(1..=MAX_SCAN_US).contains(&budget_us) {
@@ -525,6 +549,10 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Scan<'_, Q, B, O> {
             .initialized
             .boot;
         wire::validate(&boot.firmware)?;
+        let measurement = wire::Measurement {
+            ds_parameters: boot.firmware.supports_capability(DS_PARAMETERS),
+            tpc_report: boot.firmware.supports_capability(TPC_REPORT),
+        };
         // Capture every already-completed RB before admitting a new request.
         // This exclusive owner never rearms inside the loop, so the real fixed
         // pool bounds it. Backpressure cannot hide an old MCC/scan/MPDU event
@@ -579,7 +607,7 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Scan<'_, Q, B, O> {
         };
         let mut owner = regulatory::Owner::new(hardware, os).map_err(Ax200ScanError::Regulatory)?;
         let admission = owner
-            .admit_scan(&request, None)
+            .admit_scan(&request, probe.map(|probe| probe.profiles))
             .map_err(Ax200ScanError::Regulatory)?;
         let scanner = &mut self.scanner;
         let scan_ticket = &mut self.scan_ticket;
@@ -590,7 +618,7 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Scan<'_, Q, B, O> {
         // before HCMD descriptor visibility, including an uncertain failure.
         let result = unsafe {
             owner.publish_scan(admission, |guard, operation| {
-                let bytes = wire::passive(operation.request(), scanner.local())?;
+                let bytes = wire::encode(operation.request(), scanner.local(), probe, measurement)?;
                 let mut checked = policy::CheckedRequest(operation.request());
                 let now = options.clock.now_us();
                 let ticket = scanner

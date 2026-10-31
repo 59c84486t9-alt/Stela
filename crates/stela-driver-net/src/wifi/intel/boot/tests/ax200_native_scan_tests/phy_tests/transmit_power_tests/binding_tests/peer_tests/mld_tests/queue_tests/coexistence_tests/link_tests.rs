@@ -64,6 +64,8 @@ struct Device<'n> {
     quality: bool,
     /// Each receive Block Ack command.
     block_acks: Vec<Vec<u8>>,
+    /// Each scan request.
+    scans: Vec<Vec<u8>>,
     /// Whether frames are acknowledged in Block Ack notifications alone, as
     /// the firmware reports those it aggregated.
     aggregating: bool,
@@ -162,6 +164,7 @@ impl Device<'_> {
             self.inject(rom, &command_packet(complete, 0x8000, &[0x76]));
         }
         if (id.group, id.opcode) == (1, 0x0d) {
+            self.scans.push(request.to_vec());
             for ssid in self.beacons.clone() {
                 self.inject(rom, &beacon(ssid, self.quality));
             }
@@ -387,6 +390,7 @@ fn raise<'n>(
         air: Vec::new(),
         quality,
         block_acks: Vec::new(),
+        scans: Vec::new(),
         aggregating: false,
     };
     device.inject(&boot, &alive);
@@ -1007,4 +1011,25 @@ fn a_fragment_out_of_its_place_or_its_packet_numbers_is_dropped() {
     );
     settle(&mut wifi, &mut device);
     assert_eq!(wifi.receive().unwrap(), None);
+}
+
+#[test]
+fn a_scan_probes_where_a_frame_may_start_and_listens_elsewhere() {
+    const FORCE_PASSIVE: u8 = 8;
+    let native = Native::default();
+    let (_, phase, device) = raise(&native, Some(*b"US"), vec![b"test"], 0, OPEN, true);
+    assert_eq!(phase, Phase::AuthenticationRequired);
+    let scan = &device.scans[0];
+    assert_eq!(scan[9] & FORCE_PASSIVE, 0);
+    assert_eq!(scan[48], 1, "the channel probes the wildcard SSID");
+    let band = u16::from_le_bytes([scan[602], scan[603]]);
+    assert!(usize::from(band) > 26, "rates, DS parameters and HT");
+
+    let native = Native::default();
+    let silent = OPEN & !8;
+    let (_, phase, device) = raise(&native, Some(*b"US"), vec![b"test"], 0, silent, true);
+    assert_eq!(phase, Phase::AuthenticationRequired);
+    let scan = &device.scans[0];
+    assert_eq!(scan[9] & FORCE_PASSIVE, FORCE_PASSIVE);
+    assert_eq!(scan[48], 0);
 }
