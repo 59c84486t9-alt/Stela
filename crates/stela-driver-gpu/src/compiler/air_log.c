@@ -12,7 +12,8 @@
  * padded to a word, and the arguments, each lane a float, a 32-bit integer or a
  * 64-bit one at word alignment. The buffer starts with the next record's offset
  * and the capacity, which a record past it leaves untouched but for the offset.
- * C's promotions make a float a double; the function has no doubles, so such a
+ * Calls that find the offset past the capacity reserve nothing, so running
+ * invocations bound how far it goes and it cannot wrap. C's promotions make a float a double; the function has no doubles, so such a
  * conversion is left to the call that uses it. */
 #define STELA_AIR_METADATA_INTERNAL
 #include "air_log.h"
@@ -156,10 +157,11 @@ argument_shape(LLVMValueRef value, LLVMValueRef *stored, bool *wide, unsigned *l
       return LLVMIsAFPExtInst(value) || LLVMIsAConstantFP(value);
    }
    *stored = value;
-   *wide = LLVMGetTypeKind(element) == LLVMIntegerTypeKind && LLVMGetIntTypeWidth(element) == 64;
-   return LLVMGetTypeKind(element) == LLVMIntegerTypeKind ||
-          LLVMGetTypeKind(element) == LLVMFloatTypeKind ||
-          LLVMGetTypeKind(element) == LLVMHalfTypeKind;
+   LLVMTypeKind kind = LLVMGetTypeKind(element);
+   *wide = kind == LLVMPointerTypeKind ||
+           (kind == LLVMIntegerTypeKind && LLVMGetIntTypeWidth(element) == 64);
+   return kind == LLVMIntegerTypeKind || kind == LLVMPointerTypeKind ||
+          kind == LLVMFloatTypeKind || kind == LLVMHalfTypeKind;
 }
 
 static bool
@@ -176,10 +178,11 @@ put_argument(const struct stela_air_log_context *context, struct record *record,
    nir_def *value = context->call.operand(context->call.translator, stored);
    if (!value)
       return false;
-   bool integer = LLVMGetTypeKind(element) == LLVMIntegerTypeKind;
+   LLVMTypeKind kind = LLVMGetTypeKind(element);
+   bool floating = kind == LLVMFloatTypeKind || kind == LLVMHalfTypeKind;
    for (unsigned lane = 0; lane < lanes; lane++) {
       nir_def *channel = nir_channel(b, value, lane);
-      if (!integer)
+      if (floating)
          put(record, nir_f2f32(b, channel));
       else
          put(record, channel->bit_size < 32 ? nir_i2i32(b, channel) : channel);
@@ -231,13 +234,16 @@ stela_air_log_call(const struct stela_air_log_context *context, LLVMValueRef cal
    nir_def *logs = nir_ine(b, buffer, nir_imm_int64(b, 0));
    if (c->fragment)
       logs = nir_iand(b, logs, nir_inot(b, nir_load_helper_invocation(b, 1)));
-   nir_block *logging[3], *fitting[3];
+   nir_block *logging[3], *reserving[3], *fitting[3];
    if (!context->guard_begin(c->translator, logs, logging))
+      return STELA_AIR_CALL_FAILED;
+   nir_def *capacity = nir_load_global(b, 1, 32, nir_iadd_imm(b, buffer, LOG_CAPACITY_OFFSET),
+                                       .align_mul = 4);
+   nir_def *reached = nir_load_global(b, 1, 32, buffer, .align_mul = 4);
+   if (!context->guard_begin(c->translator, nir_uge(b, capacity, reached), reserving))
       return STELA_AIR_CALL_FAILED;
    nir_def *offset = nir_global_atomic(b, 32, buffer, nir_imm_int(b, total),
                                        .atomic_op = nir_atomic_op_iadd);
-   nir_def *capacity = nir_load_global(b, 1, 32, nir_iadd_imm(b, buffer, LOG_CAPACITY_OFFSET),
-                                       .align_mul = 4);
    nir_def *start = nir_u2u64(b, offset);
    nir_def *fits = nir_uge(b, nir_u2u64(b, capacity), nir_iadd_imm(b, start, total));
    if (!context->guard_begin(c->translator, fits, fitting))
@@ -260,6 +266,7 @@ stela_air_log_call(const struct stela_air_log_context *context, LLVMValueRef cal
          return STELA_AIR_CALL_FAILED;
    }
    context->guard_end(c->translator, fitting);
+   context->guard_end(c->translator, reserving);
    context->guard_end(c->translator, logging);
    return STELA_AIR_CALL_LOWERED;
 }

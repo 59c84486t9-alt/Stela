@@ -175,11 +175,13 @@ stela_air_metadata_constructors(LLVMModuleRef module)
    return list;
 }
 
+/* An os_log looks like one, but its strings are read while compiling. */
 bool
 stela_air_metadata_constructed(LLVMValueRef global)
 {
    return LLVMGetPointerAddressSpace(LLVMTypeOf(global)) == 2 && !LLVMIsGlobalConstant(global) &&
-          LLVMGetLinkage(global) == LLVMInternalLinkage && LLVMGetInitializer(global);
+          LLVMGetLinkage(global) == LLVMInternalLinkage && LLVMGetInitializer(global) &&
+          !stela_air_log_only(global);
 }
 
 /* Threadgroup memory is an internal AS3 global, undefined or zeroed as

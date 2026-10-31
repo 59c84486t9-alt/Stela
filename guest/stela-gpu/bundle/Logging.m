@@ -7,6 +7,10 @@
  */
 #include "Bundle.h"
 
+/* Far enough under the offset's range that running invocations cannot wrap it
+ * past a full buffer. */
+#define STELA_LOG_MAX_CAPACITY (1l << 30)
+
 /* The words of `air_log.c`. */
 typedef struct {
 	uint32_t next, capacity, reserved[2];
@@ -91,18 +95,23 @@ static size_t append_conversion(NSMutableData *out, const char *format, size_t b
 			lanes = lanes * 10 + (unsigned)(format[at] - '0');
 		}
 	}
-	/* Records widen a vector's lanes to 32 bits, and OpenCL's `hl` is those. */
-	bool vector = lanes != 1, narrow = false;
+	size_t size = length;
 	while (at < bytes && strchr("hl", format[at]) && length < sizeof(spec) - 1) {
-		narrow |= format[at] == 'h';
-		if (!vector || !narrow) {
-			spec[length++] = format[at];
-		}
-		at++;
+		spec[length++] = format[at++];
 	}
 	if (at >= bytes || length >= sizeof(spec) - 1) {
 		[out appendBytes:format length:bytes];
 		return bytes;
+	}
+	/* Metal's compiler refuses the others, but a library need not be its. */
+	if (!strchr("diouxXcpfFeEgGaA", format[at])) {
+		[out appendBytes:format length:at + 1];
+		return at + 1;
+	}
+	/* Records widen a vector's lanes to 32 bits: OpenCL's `hl` is those, and
+	 * a float's size says nothing more. `h` and `hh` still size an integer. */
+	if (lanes != 1 && (strchr("fFeEgGaA", format[at]) || (length == size + 2 && spec[size + 1] == 'l'))) {
+		length = size;
 	}
 	spec[length++] = format[at++];
 	spec[length] = 0;
@@ -217,6 +226,9 @@ static NSString *record_string(const char *bytes, size_t length)
 	bool dropped = header->next > header->capacity;
 	NSData *records = [NSData dataWithBytes:header + 1 length:next];
 	NSArray *handlers = [_handlers copy];
+	/* A record that did not fit leaves the rest unwritten, which reads as an
+	 * end only when cleared. */
+	memset(header + 1, 0, next);
 	header->next = 0;
 	os_unfair_lock_unlock(&_lock);
 
@@ -243,9 +255,9 @@ static NSString *record_string(const char *bytes, size_t length)
 - (id)newLogStateWithDescriptor:(id)descriptor error:(NSError **)error
 {
 	NSInteger capacity = [descriptor bufferSize];
-	if (capacity < 1024) {
+	if (capacity < 1024 || capacity > STELA_LOG_MAX_CAPACITY) {
 		if (error) {
-			StelaFailure failure = {.reason = "a log state's buffer is at least 1024 bytes"};
+			StelaFailure failure = {.reason = "a log state's buffer is from 1 KiB to 1 GiB"};
 			*error = stela_error(MTLLogStateErrorDomain, MTLLogStateErrorInvalidSize, &failure);
 		}
 		return nil;

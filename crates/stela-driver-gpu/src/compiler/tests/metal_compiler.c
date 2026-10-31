@@ -1159,10 +1159,12 @@ defined_functions_inline_into_their_callers(void)
 static const char *logging =
    "@sub = private addrspace(2) constant [4 x i8] c\"sub\\00\"\n"
    "@cat = private addrspace(2) constant [4 x i8] c\"cat\\00\"\n"
+   "@ptr = private addrspace(2) constant [3 x i8] c\"%p\\00\"\n"
    "@fmt = private addrspace(2) constant [13 x i8] c\"hi %d %f %ld\\00\"\n"
    "%log = type { ptr addrspace(2), ptr addrspace(2) }\n"
    "@log = internal addrspace(2) global %log { ptr addrspace(2) @sub, ptr addrspace(2) @cat }\n"
    "@default = external addrspace(2) global %log\n"
+   "@llvm.global_ctors = appending global [0 x { i32, ptr, ptr }] zeroinitializer\n"
    "declare void @llvm.va_start.p0(ptr)\ndeclare void @llvm.va_end.p0(ptr)\n"
    "declare void @air.os_log(ptr addrspace(2), ptr addrspace(2), i32, ptr addrspace(2), ptr, i64)\n"
    "define linkonce_odr void @log_error(ptr addrspace(2) %o, ptr addrspace(2) %f, i64 %n, ...) {\n"
@@ -1180,6 +1182,8 @@ static const char *logging =
    " ptr addrspace(2) @fmt, i64 20, i32 %tid, double %d, i64 %w)\n"
    "call void (ptr addrspace(2), ptr addrspace(2), i64, ...) @log_error(ptr addrspace(2) @default,"
    " ptr addrspace(2) @fmt, i64 4, i32 %tid)\n"
+   "call void (ptr addrspace(2), ptr addrspace(2), i64, ...) @log_error(ptr addrspace(2) @default,"
+   " ptr addrspace(2) @ptr, i64 8, ptr addrspace(1) %data)\n"
    "ret void\n}\n"
    "define void @promotes(ptr addrspace(1) %data, i32 %tid) {\n"
    "%t = uitofp i32 %tid to float\n%d = fpext float %t to double\n"
@@ -1217,9 +1221,11 @@ os_log_appends_self_contained_records(void)
    assert(reflect(logging, "logs", &reflection, &error));
    nir_shader *shader = compile(logging, "logs", &specialization, &error);
    assert(shader);
-   /* Each call reserves its record and writes at least its six words. */
-   assert(count_intrinsic(shader, nir_intrinsic_global_atomic) >= 2);
-   assert(count_intrinsic(shader, nir_intrinsic_store_global) >= 12);
+   /* Each call reads whether the buffer is past its capacity, reserves its
+    * record and writes at least its six words. */
+   assert(count_intrinsic(shader, nir_intrinsic_load_global) >= 6);
+   assert(count_intrinsic(shader, nir_intrinsic_global_atomic) >= 3);
+   assert(count_intrinsic(shader, nir_intrinsic_store_global) >= 18);
    stela_metal_release(shader);
    /* A double any other instruction reads is no promotion. */
    assert(!compile(logging, "promotes", &specialization, &error));
