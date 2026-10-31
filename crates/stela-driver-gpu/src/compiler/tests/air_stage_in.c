@@ -8,6 +8,7 @@
 #include "util/ralloc.h"
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #ifdef NDEBUG
 #error "These tests require active assertions"
@@ -193,6 +194,25 @@ patch_metadata_reflects_control_points_and_patch_inputs(void)
    LLVMDisposeMemoryBuffer(input);
 }
 
+/* A patch that declares no control points leaves its size to the draw. */
+static void
+uncounted_patches_refuse_their_size(void)
+{
+   const char *count = ", !\"air.patch_control_point\", i32 4";
+   const char *at = strstr(quad, count);
+   assert(at);
+   char *text = malloc(strlen(quad) + 1);
+   assert(text);
+   memcpy(text, quad, (size_t)(at - quad));
+   strcpy(text + (at - quad), at + strlen(count));
+   struct stela_air_error error = {0};
+   assert(!translate(text, true, &error));
+   if (error.kind != STELA_AIR_INSTRUCTION)
+      fprintf(stderr, "uncounted patch: %u %s\n", error.kind, error.detail);
+   assert(error.kind == STELA_AIR_INSTRUCTION && strstr(error.detail, "no control points"));
+   free(text);
+}
+
 static unsigned
 intrinsics(nir_shader *shader, nir_intrinsic_op op)
 {
@@ -355,6 +375,7 @@ main(void)
    patch_metadata_reflects_control_points_and_patch_inputs();
    patch_functions_become_evaluation_shaders();
    patch_functions_refuse_what_they_cannot_read();
+   uncounted_patches_refuse_their_size();
    kernels_fetch_their_stage_in_at_their_position();
    printf("AIR stage-in tests passed\n");
    return 0;

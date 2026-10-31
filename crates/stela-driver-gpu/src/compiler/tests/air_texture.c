@@ -823,6 +823,26 @@ spelled(const char *triple, const char *declarations, const char *body, const ch
    return shader;
 }
 
+static const char *lod_declaration =
+   "declare float @air.calculate_clamped_lod_texture_2d(ptr addrspace(1), ptr addrspace(2),"
+   " <2 x float>, i32)\n";
+
+static const char *kernel_lod = SPELLED(
+   "%x = call float @air.calculate_clamped_lod_texture_2d(ptr addrspace(1) %src,"
+   " ptr addrspace(2) %smp, <2 x float> <float 0.5, float 0.25>, i32 0)\n");
+
+static void
+kernels_calculate_levels_over_their_quadgroups(void)
+{
+   struct stela_air_error error = {0};
+   nir_shader *shader = spelled("air64_v29-apple-macosx27.2.0", lod_declaration, kernel_lod,
+                                kernel_metadata, &error);
+   assert(shader && count(shader).tex[nir_texop_lod] == 1);
+   assert(shader->info.derivative_group == DERIVATIVE_GROUP_LINEAR);
+   assert(nir_shader_supports_implicit_lod(shader));
+   ralloc_free(shader);
+}
+
 static void
 every_metal_version_spells_its_calls(void)
 {
@@ -888,6 +908,7 @@ main(void)
    unsupported_texture_uses_are_refused();
    kernels_take_texture_atomics();
    every_metal_version_spells_its_calls();
+   kernels_calculate_levels_over_their_quadgroups();
    glsl_type_singleton_decref();
    puts("AIR textures: sample/level/offset, write, read_write array read, size queries, "
         "implicit-derivative fragment sampling, depth compare, gather, storage levels, arrays, atomics, "

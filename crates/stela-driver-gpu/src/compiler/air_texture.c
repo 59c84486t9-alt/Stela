@@ -953,8 +953,13 @@ static bool
 lod(struct call *call, enum operation op, nir_def **result)
 {
    const struct shape *shape = call->shape;
-   if (call->b->shader->info.stage != MESA_SHADER_FRAGMENT)
-      return fail(call, "calculating a level of detail outside a fragment function");
+   /* A kernel's neighbors are its quadgroup, four consecutive threads, which
+    * a threadgroup's last may leave short of neighbors to difference. */
+   shader_info *info = &call->b->shader->info;
+   if (mesa_shader_stage_uses_workgroup(info->stage))
+      info->derivative_group = DERIVATIVE_GROUP_LINEAR;
+   else if (info->stage != MESA_SHADER_FRAGMENT)
+      return fail(call, "calculating a level of detail without neighboring threads");
    if (call->texture->access != STELA_AIR_TEXTURE_SAMPLE ||
        shape->dim == GLSL_SAMPLER_DIM_MS || shape->dim == GLSL_SAMPLER_DIM_BUF)
       return fail(call, "calculating a level of detail of a texture that is not sampled");
