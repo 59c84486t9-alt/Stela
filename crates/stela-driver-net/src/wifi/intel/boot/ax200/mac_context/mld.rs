@@ -14,7 +14,6 @@ const LINK: Id = Id {
     opcode: 9,
     version: 0,
 };
-const MAC_BYTES: usize = 52;
 const LINK_BYTES: usize = 208;
 pub(super) fn prepare<Q: BootIo, B: BiosIo, O: CountryIo>(
     mac: &mut Ax200Mac<'_, Q, B, O>,
@@ -25,9 +24,9 @@ pub(super) fn prepare<Q: BootIo, B: BiosIo, O: CountryIo>(
         return Err(Ax200MacError::MissingApi(MacCommandKind::Add));
     }
     for (kind, id, default, maximum) in [
-        (MacCommandKind::Add, MAC, Some(1), 3),
+        (MacCommandKind::Add, MAC, Some(1), 4),
         (MacCommandKind::AddInactiveLink, LINK, Some(1), 8),
-        (MacCommandKind::Power, MAC_POWER, None, 2),
+        (MacCommandKind::Power, MAC_POWER, None, 3),
         (MacCommandKind::DisableBeaconFilter, BEACON_FILTER, None, 4),
     ] {
         let version = firmware
@@ -65,11 +64,13 @@ pub(super) fn prepare<Q: BootIo, B: BiosIo, O: CountryIo>(
         return Err(Ax200MacError::State);
     }
     let address = mac.initialized_nvm().address.bytes;
+    let (mac_version, power_version) = (mac_version(firmware), power_version(firmware));
+    let power_mode = mac.country.board.scan.mcc.setup.options.power_mode;
     mac.commands = alloc::vec![
         MacCommand {
             kind: MacCommandKind::Add,
             id: MAC,
-            bytes: mac_bytes(address, false)
+            bytes: mac_bytes(mac_version, address, false)
         },
         MacCommand {
             kind: MacCommandKind::DisableBeaconFilter,
@@ -84,10 +85,20 @@ pub(super) fn prepare<Q: BootIo, B: BiosIo, O: CountryIo>(
         MacCommand {
             kind: MacCommandKind::Power,
             id: MAC_POWER,
-            bytes: cold_power_bytes(mac.country.board.scan.mcc.setup.options.power_mode)
+            bytes: cold_power_bytes(power_version, power_mode)
         }
     ];
     Ok(())
+}
+fn mac_version(firmware: &Firmware<'_>) -> u8 {
+    firmware
+        .command_version(MAC.wire().group, MAC.opcode)
+        .map_or(1, |version| version.command_version)
+}
+fn power_version(firmware: &Firmware<'_>) -> u8 {
+    firmware
+        .command_version(1, MAC_POWER.opcode)
+        .map_or(1, |version| version.command_version)
 }
 pub(super) fn removal<Q: BootIo, B: BiosIo, O: CountryIo>(
     mac: &Ax200Mac<'_, Q, B, O>,
@@ -95,11 +106,23 @@ pub(super) fn removal<Q: BootIo, B: BiosIo, O: CountryIo>(
     // Source removes this cold vif's power contribution first. An unactivated
     // link has no phy_ctxt, so disable_link's active-change is a source no-op;
     // the REMOVE remains mandatory, before MAC removal.
+    let options = mac.country.board.scan.mcc.setup.options;
+    let firmware = &mac
+        .country
+        .board
+        .scan
+        .mcc
+        .setup
+        .lari
+        .radio
+        .initialized
+        .boot
+        .firmware;
     alloc::vec![
         MacCommand {
             kind: MacCommandKind::Power,
             id: MAC_POWER,
-            bytes: cold_power_bytes(mac.country.board.scan.mcc.setup.options.power_mode)
+            bytes: cold_power_bytes(power_version(firmware), options.power_mode)
         },
         MacCommand {
             kind: MacCommandKind::RemoveInactiveLink,
@@ -109,12 +132,12 @@ pub(super) fn removal<Q: BootIo, B: BiosIo, O: CountryIo>(
         MacCommand {
             kind: MacCommandKind::Remove,
             id: MAC,
-            bytes: mac_bytes([0; 6], true)
+            bytes: mac_bytes(mac_version(firmware), [0; 6], true)
         }
     ]
 }
-fn mac_bytes(address: [u8; 6], remove: bool) -> Vec<u8> {
-    let mut bytes = alloc::vec![0;MAC_BYTES];
+fn mac_bytes(version: u8, address: [u8; 6], remove: bool) -> Vec<u8> {
+    let mut bytes = alloc::vec![0; crate::wifi::intel::association::mac_bytes(version)];
     bytes[4..8].copy_from_slice(&(if remove { ACTION_REMOVE } else { ACTION_ADD }).to_le_bytes());
     if !remove {
         bytes[8..12].copy_from_slice(&MAC_TYPE_BSS_STATION.to_le_bytes());
@@ -166,7 +189,7 @@ mod tests {
                 .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
                 .collect();
             let encoded = match words[0] {
-                "M" => mac_bytes(address, remove),
+                "M" => mac_bytes(3, address, remove),
                 "L" => link_bytes(address, remove),
                 _ => panic!("source record"),
             };

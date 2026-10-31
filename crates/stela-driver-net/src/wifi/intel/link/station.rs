@@ -611,7 +611,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         let peer_version = firmware
             .command_version(3, 0x0a)
             .map_or(0, |version| version.command_version);
-        let rate_bytes = rate_body(firmware)?;
+        let rate_shape = rate_shape(firmware)?;
         let explicit_mfp = firmware.supports_capability(EXPLICIT_MFP);
         let longest = if firmware.supports_capability(CHECKSUM_OFFLOAD) {
             commands::max_amsdu(negotiated)
@@ -625,7 +625,9 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             aid: None,
             high_priority,
         };
-        let rates = commands::rate_config(negotiated, band, antennas, rate_bytes, false, longest)
+        let mac_version = version_of(firmware, commands::MAC_CONFIG);
+        let power_version = version_of(firmware, commands::MAC_POWER);
+        let rates = commands::rate_config(negotiated, band, antennas, rate_shape, false, longest)
             .ok_or(Error::Refused("rates"))?;
         let edca = negotiated.edca();
         let link = commands::link_config(
@@ -653,23 +655,31 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         for (id, bytes) in phy {
             client.command(id, bytes);
         }
-        client.command(commands::MAC_CONFIG, commands::mac_config(mac));
+        client.command(commands::MAC_CONFIG, commands::mac_config(mac_version, mac));
         client.command(commands::LINK_CONFIG, link);
         client.command(commands::RATE_CONFIG, rates);
         client.command(commands::STATION_CONFIG, peer);
         client.command(
             commands::MAC_CONFIG,
-            commands::mac_config(MacState {
-                aid: Some(aid),
-                ..mac
-            }),
+            commands::mac_config(
+                mac_version,
+                MacState {
+                    aid: Some(aid),
+                    ..mac
+                },
+            ),
         );
         if !fifo_offloaded {
             client.command(commands::SMART_FIFO, commands::smart_fifo(negotiated));
         }
         client.steps.push_back(Step::Command {
             id: commands::MAC_POWER,
-            bytes: commands::power(self.save_power, bss.beacon_interval, context.dtim_period()),
+            bytes: commands::power(
+                power_version,
+                self.save_power,
+                bss.beacon_interval,
+                context.dtim_period(),
+            ),
             then: Then::Configured(ticket),
         });
         Ok(())
@@ -1427,15 +1437,20 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
 }
 
 /// The body of the firmware's `TLC_MNG_CONFIG_CMD` version.
-fn rate_body(firmware: &crate::wifi::intel::firmware::Firmware<'_>) -> Result<usize, Error> {
-    match firmware
+fn rate_shape(
+    firmware: &crate::wifi::intel::firmware::Firmware<'_>,
+) -> Result<commands::RateShape, Error> {
+    firmware
         .command_version(5, 0x0f)
-        .map(|version| version.command_version)
-    {
-        Some(1 | 2) => Ok(24),
-        Some(3 | 4) => Ok(28),
-        _ => Err(Error::Refused("TLC_MNG_CONFIG_CMD version")),
-    }
+        .and_then(|version| commands::RateShape::of(version.command_version))
+        .ok_or(Error::Refused("TLC_MNG_CONFIG_CMD version"))
+}
+
+/// A command's firmware version. Group 0 lists under `LONG_GROUP`.
+fn version_of(firmware: &crate::wifi::intel::firmware::Firmware<'_>, id: command::Id) -> u8 {
+    firmware
+        .command_version(id.group.max(1), id.opcode)
+        .map_or(0, |version| version.command_version)
 }
 
 fn peer_state(context: &AssociationContext, explicit_mfp: bool, authorized: bool) -> PeerState {
@@ -2118,14 +2133,15 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         let peer_version = firmware
             .command_version(3, 0x0a)
             .map_or(0, |version| version.command_version);
-        let rate_bytes = rate_body(firmware)?;
+        let rate_shape = rate_shape(firmware)?;
         let explicit_mfp = firmware.supports_capability(EXPLICIT_MFP);
         let longest = if firmware.supports_capability(CHECKSUM_OFFLOAD) {
             commands::max_amsdu(negotiated)
         } else {
             0
         };
-        let rates = commands::rate_config(negotiated, band, antennas, rate_bytes, true, longest)
+        let mac_version = version_of(firmware, commands::MAC_CONFIG);
+        let rates = commands::rate_config(negotiated, band, antennas, rate_shape, true, longest)
             .ok_or(Error::Refused("rates"))?;
         let mac = MacState {
             address: self.address,
@@ -2137,7 +2153,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         let peer = commands::station_config(peer_version, peer_state(context, explicit_mfp, true));
         let client = &mut self.client;
         client.command(commands::BEACON_FILTER, commands::beacon_filter(filter));
-        client.command(commands::MAC_CONFIG, commands::mac_config(mac));
+        client.command(commands::MAC_CONFIG, commands::mac_config(mac_version, mac));
         client.command(commands::STATION_CONFIG, peer);
         client.steps.push_back(Step::Command {
             id: commands::RATE_CONFIG,

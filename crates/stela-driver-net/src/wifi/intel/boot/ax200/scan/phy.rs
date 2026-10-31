@@ -26,6 +26,12 @@ const RLC: Id = Id {
     opcode: 8,
     version: 2,
 };
+/// The first PHY context versions with a secondary control channel and a
+/// puncturing mask.
+const SECONDARY_CONTROL: u8 = 5;
+const PUNCTURING: u8 = 6;
+/// `IWL_PHY_CTRL_POS_ABOVE`.
+const CONTROL_ABOVE: u8 = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PhyCommandKind {
@@ -159,9 +165,13 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Phy<'a, Q, B, O> {
         &mut self,
         definition: &ChannelDefinition,
     ) -> Option<Vec<PhyCommand>> {
-        let ultra_high_band = self.boot().firmware.supports_capability(48);
+        let firmware = &self.boot().firmware;
+        let ultra_high_band = firmware.supports_capability(48);
+        let version = firmware
+            .command_version(PHY.wire().group, PHY.opcode)?
+            .command_version;
         let add = self.commands.first()?;
-        let modified = modified(add, definition, ultra_high_band)?;
+        let modified = modified(add, definition, version, ultra_high_band)?;
         let chains = self.commands.get(1).cloned();
         Some(core::iter::once(modified).chain(chains).collect())
     }
@@ -433,7 +443,7 @@ fn configuration(
         .command_version(PHY.wire().group, PHY.opcode)
         .ok_or(Ax200PhyError::MissingApi)?
         .command_version;
-    if !matches!(version, 3 | 4) {
+    if !(3..=6).contains(&version) {
         return Err(Ax200PhyError::Version(version));
     }
     // Cold owner has no SISO diversity override, bound interfaces, SMPS
@@ -481,11 +491,15 @@ fn configuration(
     if rlc < 2 {
         bytes[20..24].copy_from_slice(&chain_info.to_le_bytes());
     }
+    if version >= SECONDARY_CONTROL {
+        bytes[28] = CONTROL_ABOVE;
+    }
     commands.push(PhyCommand {
         kind: PhyCommandKind::Add,
         id: PHY,
         bytes,
     });
+    // `iwl_mld_phy_fw_action`: later firmware keeps the chains itself.
     if rlc == 2 {
         let mut bytes = [0; 32];
         bytes[4..8].copy_from_slice(&chain_info.to_le_bytes());
@@ -505,7 +519,7 @@ fn control_position(offset_mhz: i32) -> u8 {
         return 0;
     }
     let steps = ((offset_mhz.unsigned_abs() - 10) / 20) as u8;
-    (steps & 3) | ((steps & 4) << 1) | (u8::from(offset_mhz > 0) * 4)
+    (steps & 3) | ((steps & 4) << 1) | (u8::from(offset_mhz > 0) * CONTROL_ABOVE)
 }
 
 /// `iwl_mvm_phy_ctxt_cmd_data`: `add` moved to `definition`'s width. 80+80 MHz
@@ -513,6 +527,7 @@ fn control_position(offset_mhz: i32) -> u8 {
 fn modified(
     add: &PhyCommand,
     definition: &ChannelDefinition,
+    version: u8,
     ultra_high_band: bool,
 ) -> Option<PhyCommand> {
     let width = match definition.width {
@@ -526,8 +541,15 @@ fn modified(
     let mut bytes = add.bytes;
     bytes[4..8].copy_from_slice(&2u32.to_le_bytes());
     let at = if ultra_high_band { 13 } else { 10 };
+    let position = control_position(definition.control_offset_mhz());
     bytes[at] = width;
-    bytes[at + 1] = control_position(definition.control_offset_mhz());
+    bytes[at + 1] = position;
+    if version >= PUNCTURING {
+        bytes[22..24].copy_from_slice(&definition.punctured.to_le_bytes());
+    }
+    if version >= SECONDARY_CONTROL {
+        bytes[28] = position ^ CONTROL_ABOVE;
+    }
     Some(PhyCommand {
         kind: PhyCommandKind::Modify,
         id: PHY,
@@ -578,7 +600,7 @@ mod tests {
             center2_mhz: None,
             punctured: 0,
         };
-        let command = modified(&commands[0], &definition, true).unwrap();
+        let command = modified(&commands[0], &definition, 4, true).unwrap();
         assert_eq!(command.kind, PhyCommandKind::Modify);
         assert_eq!(command.bytes[4], 2);
         assert_eq!(command.bytes[8], 36);
@@ -586,7 +608,7 @@ mod tests {
         assert_eq!(command.bytes[16..], commands[0].bytes[16..]);
         // Without the capability a channel info is four bytes shorter.
         assert_eq!(
-            modified(&commands[0], &definition, false).unwrap().bytes[10..12],
+            modified(&commands[0], &definition, 4, false).unwrap().bytes[10..12],
             [2, 1]
         );
         let unsupported = ChannelDefinition {
@@ -594,7 +616,32 @@ mod tests {
             center2_mhz: Some(5530),
             ..definition
         };
-        assert!(modified(&commands[0], &unsupported, true).is_none());
+        assert!(modified(&commands[0], &unsupported, 4, true).is_none());
+    }
+
+    #[test]
+    fn later_versions_name_a_secondary_control_channel_and_puncturing() {
+        let bytes = image(6, 3, true, false, 3);
+        let firmware = Firmware::parse(&bytes).unwrap();
+        let channel = Channel {
+            number: 36,
+            frequency_mhz: 5180,
+            band: Band::Ghz5,
+        };
+        let commands = configuration(&firmware, 3, channel, PowerMode::ContinuouslyAwake).unwrap();
+        assert_eq!(commands.len(), 1, "firmware keeps the chains itself");
+        assert_eq!(commands[0].bytes[20..24], [0; 4]);
+        assert_eq!(commands[0].bytes[28], 4);
+        let definition = ChannelDefinition {
+            control: channel,
+            width: Width::Mhz80,
+            center1_mhz: 5210,
+            center2_mhz: None,
+            punctured: 4,
+        };
+        let command = modified(&commands[0], &definition, 6, true).unwrap();
+        assert_eq!(command.bytes[22..24], [4, 0]);
+        assert_eq!(command.bytes[28], 5);
     }
 
     fn image(version: u8, rlc: u8, uhb: bool, cdb: bool, antennas: u8) -> Vec<u8> {
@@ -653,7 +700,7 @@ mod tests {
             number: 1,
             frequency_mhz: 2412,
         };
-        for version in [0, 1, 2, 5, 255] {
+        for version in [0, 1, 2, 7, 255] {
             let bytes = image(version, 2, false, false, 3);
             assert_eq!(
                 configuration(

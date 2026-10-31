@@ -132,9 +132,30 @@ pub struct MacState {
     pub high_priority: bool,
 }
 
-/// `iwl_mvm_mld_mac_ctxt_cmd_sta` modifying MAC 0.
-pub fn mac_config(state: MacState) -> Vec<u8> {
-    let mut bytes = alloc::vec![0; 52];
+/// `iwl_mac_config_cmd`: version 4 can name NAN addresses.
+pub fn mac_bytes(version: u8) -> usize {
+    if version >= 4 { 56 } else { 52 }
+}
+
+/// `iwl_mac_power_cmd`: version 3 keeps the first 20 of `_v2`'s 40 bytes, and a
+/// station without power management or uAPSD leaves zero what it moved.
+pub fn power_bytes(version: u8) -> usize {
+    if version >= 3 { 20 } else { 40 }
+}
+
+/// `iwl_sta_cfg_cmd`: each later version names more of the peer.
+pub fn station_bytes(version: u8) -> usize {
+    match version {
+        0 | 1 => 96,
+        2 => 104,
+        _ => 112,
+    }
+}
+
+/// `iwl_mvm_mld_mac_ctxt_cmd_sta` modifying MAC 0. `version` is the firmware's
+/// `MAC_CONFIG_CMD` version.
+pub fn mac_config(version: u8, state: MacState) -> Vec<u8> {
+    let mut bytes = alloc::vec![0; mac_bytes(version)];
     word(&mut bytes, 4, ACTION_MODIFY);
     word(&mut bytes, 8, MAC_TYPE_BSS_STATION);
     bytes[12..18].copy_from_slice(&state.address.0);
@@ -144,8 +165,13 @@ pub fn mac_config(state: MacState) -> Vec<u8> {
         ACCEPT_BEACON
     };
     word(&mut bytes, 20, ACCEPT_GROUP | beacons);
-    half(&mut bytes, 24, u16::from(state.he));
-    word(&mut bytes, 28, u32::from(state.eht));
+    if version == 2 {
+        half(&mut bytes, 24, u16::from(state.he));
+        word(&mut bytes, 28, u32::from(state.eht));
+    } else {
+        bytes[24] = u8::from(state.he);
+        bytes[26] = u8::from(state.eht);
+    }
     word(&mut bytes, 32, 1);
     if let Some(aid) = state.aid {
         word(&mut bytes, 36, 1);
@@ -464,7 +490,10 @@ pub fn ampdu_exponent(negotiated: &Negotiated) -> u8 {
 /// `iwl_mvm_mld_cfg_sta` for station 0 on link 0. `version` is the firmware's
 /// `STA_CONFIG_CMD` version.
 pub fn station_config(version: u8, state: PeerState) -> Vec<u8> {
-    let mut bytes = alloc::vec![0; if version <= 1 { 96 } else { 104 }];
+    let mut bytes = alloc::vec![0; station_bytes(version)];
+    if version >= 3 {
+        word(&mut bytes, 4, 1);
+    }
     bytes[8..14].copy_from_slice(&state.address.0);
     bytes[16..22].copy_from_slice(&state.address.0);
     word(&mut bytes, 28, u32::from(state.aid));
@@ -522,6 +551,44 @@ pub fn max_amsdu(negotiated: &Negotiated) -> u16 {
     }
 }
 
+/// How a `TLC_MNG_CONFIG_CMD` version lays out what `rate_config` fills.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RateShape {
+    pub bytes: usize,
+    /// Where `max_ch_width` lies.
+    pub head: usize,
+    /// Width classes per stream.
+    classes: usize,
+    /// One class's rate bitmap.
+    rate_bytes: usize,
+}
+
+impl RateShape {
+    pub fn of(version: u8) -> Option<Self> {
+        match version {
+            1 | 2 => Some(Self {
+                bytes: 24,
+                head: 4,
+                classes: 2,
+                rate_bytes: 2,
+            }),
+            3 | 4 => Some(Self {
+                bytes: 28,
+                head: 4,
+                classes: 3,
+                rate_bytes: 2,
+            }),
+            6 => Some(Self {
+                bytes: 52,
+                head: 8,
+                classes: 4,
+                rate_bytes: 4,
+            }),
+            _ => None,
+        }
+    }
+}
+
 /// `rs_fw_set_supp_rates` and the rest of `iwl_mvm_rs_fw_rate_init`: the
 /// rates firmware rate selection may use for the AP. Until the port opens
 /// `authorized` is false and it stays at 20 MHz. `max_mpdu` is what the
@@ -530,33 +597,38 @@ pub fn rate_config(
     negotiated: &Negotiated,
     band: Band,
     antennas: u8,
-    bytes: usize,
+    shape: RateShape,
     authorized: bool,
     max_mpdu: u16,
 ) -> Option<Vec<u8>> {
+    let RateShape { bytes, head, .. } = shape;
     let mut out = alloc::vec![0; bytes];
+    // Version 6 names stations by mask, station 0 by its bit.
+    if head == 8 {
+        out[0] = 1;
+    }
     half(&mut out, bytes - 4, max_mpdu);
     let width = if authorized {
         width_code(negotiated.width)?
     } else {
         0
     };
-    out[4] = width;
-    out[5] = match negotiated.mode {
+    out[head] = width;
+    out[head + 1] = match negotiated.mode {
         Mode::Legacy => 0,
         Mode::Ht => 1,
         Mode::Vht => 2,
         Mode::He => 3,
         Mode::Eht => return None,
     };
-    out[6] = antennas;
+    out[head + 2] = antennas;
     let (ht, vht, he) = (&negotiated.ht, &negotiated.vht, &negotiated.he);
     if he.is_none() {
         // rs_fw_sgi_cw_support: an HE station's guard intervals are the
         // firmware's own.
         let ht_cap = ht.as_ref().map_or(0, |ht| ht.capability);
         let vht_cap = vht.as_ref().map_or(0, |vht| vht.capability);
-        out[7] = u8::from(ht_cap & 0x20 != 0)
+        out[head + 3] = u8::from(ht_cap & 0x20 != 0)
             | u8::from(ht_cap & 0x40 != 0) << 1
             | u8::from(vht_cap & 0x20 != 0) << 2
             | u8::from(vht_cap & 0x40 != 0) << 3;
@@ -572,16 +644,17 @@ pub fn rate_config(
         || vht_cap & 0x10 != 0
         || he.as_ref().is_some_and(|he| he.phy[1] & 0x20 != 0);
     let flags = u16::from(stbc && antennas.count_ones() > 1) | u16::from(ldpc) << 1;
-    half(&mut out, 8, flags);
+    half(&mut out, head + 4, flags);
     half(
         &mut out,
-        10,
+        head + 6,
         hardware_rates(band, negotiated.legacy.supported),
     );
     // Each stream's rates, per width class of the command's version.
-    let classes = (bytes - 16) / 4;
-    let mut set =
-        |nss: usize, wide: usize, bits: u16| half(&mut out, 12 + (nss * classes + wide) * 2, bits);
+    let mut set = |nss: usize, wide: usize, bits: u16| {
+        let at = head + 8 + (nss * shape.classes + wide) * shape.rate_bytes;
+        half(&mut out, at, bits);
+    };
     match negotiated.mode {
         Mode::Legacy | Mode::Eht => {}
         Mode::Ht => {
@@ -736,8 +809,8 @@ pub fn smart_fifo(negotiated: &Negotiated) -> Vec<u8> {
 
 /// `iwl_mvm_power_build_cmd` for a station whose power management stays off:
 /// the keep-alive a beacon interval and DTIM period need.
-pub fn power(save_power: bool, beacon_interval: u16, dtim_period: u8) -> Vec<u8> {
-    let mut bytes = alloc::vec![0; 40];
+pub fn power(version: u8, save_power: bool, beacon_interval: u16, dtim_period: u8) -> Vec<u8> {
+    let mut bytes = alloc::vec![0; power_bytes(version)];
     half(&mut bytes, 4, u16::from(save_power));
     let beacons = 3 * u32::from(dtim_period) * u32::from(beacon_interval);
     let keep_alive = (beacons * TU_US)
@@ -773,6 +846,55 @@ pub fn protection(context: &AssociationContext) -> Protection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wifi_7_firmware_reads_its_support_as_bytes_in_a_longer_command() {
+        let state = MacState {
+            address: Mac([2, 0, 0, 0, 0, 1]),
+            he: true,
+            eht: true,
+            aid: Some(7),
+            high_priority: false,
+        };
+        let bytes = mac_config(4, state);
+        assert_eq!(bytes.len(), 56);
+        assert_eq!(bytes[24..28], [1, 0, 1, 0]);
+        assert_eq!(bytes[28..32], [0; 4]);
+        assert_eq!(bytes[40..42], [7, 0]);
+        let older = mac_config(2, state);
+        assert_eq!(older.len(), 52);
+        assert_eq!(older[24..32], [1, 0, 0, 0, 1, 0, 0, 0]);
+    }
+
+    #[test]
+    fn a_peer_is_named_by_its_links_mask_from_version_3() {
+        let state = PeerState {
+            address: Mac([2, 0, 0, 0, 0, 2]),
+            aid: 1,
+            mfp: false,
+            mimo: false,
+            ampdu_spacing: 0,
+            ampdu_exponent: 0,
+            wmm_service_period: None,
+            uapsd_queues: 0,
+            he: None,
+        };
+        let bytes = station_config(3, state);
+        assert_eq!(bytes.len(), 112);
+        assert_eq!(bytes[4..8], [1, 0, 0, 0]);
+        let older = station_config(2, state);
+        assert_eq!(older.len(), 104);
+        assert_eq!(older[4..8], [0; 4]);
+    }
+
+    #[test]
+    fn a_rate_command_has_its_versions_shape() {
+        let shape = |version| RateShape::of(version).map(|shape| (shape.bytes, shape.head));
+        assert_eq!(shape(2), Some((24, 4)));
+        assert_eq!(shape(4), Some((28, 4)));
+        assert_eq!(shape(6), Some((52, 8)));
+        assert_eq!(shape(5), None);
+    }
 
     #[test]
     fn power_constraints_take_the_stricter_limit_of_each_width() {
@@ -816,14 +938,14 @@ mod tests {
             aid: None,
             high_priority: true,
         };
-        let bytes = mac_config(state);
+        let bytes = mac_config(2, state);
         assert_eq!(bytes[4], 2);
         assert_eq!(bytes[20], 0b1100);
         assert_eq!(bytes[24], 1);
         assert_eq!(bytes[44], 1 << 5);
         state.aid = Some(7);
         state.high_priority = false;
-        let bytes = mac_config(state);
+        let bytes = mac_config(2, state);
         assert_eq!(bytes[20], 0b100);
         assert_eq!((bytes[36], bytes[40], bytes[44]), (1, 7, 0));
     }
@@ -894,9 +1016,10 @@ mod tests {
 
     #[test]
     fn the_keep_alive_covers_three_dtim_periods() {
-        let quick = power(false, 100, 1);
+        let quick = power(2, false, 100, 1);
         assert_eq!(u16::from_le_bytes([quick[6], quick[7]]), 25);
-        let slow = power(false, 1000, 10);
+        let slow = power(3, false, 1000, 10);
+        assert_eq!(slow.len(), 20);
         assert_eq!(u16::from_le_bytes([slow[6], slow[7]]), 31);
     }
 

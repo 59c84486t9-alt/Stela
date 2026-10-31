@@ -253,11 +253,11 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Coexistence<'a, Q, 
                 ))
             })?;
         let firmware = &self.boot().firmware;
+        // Firmware without the command keeps Bluetooth from the channel itself.
+        let inhibition = firmware.command_version(1, 0x5d);
         if !firmware.supports_capability(110)
             || firmware.supports_capability(40)
-            || !firmware
-                .command_version(1, 0x5d)
-                .is_some_and(|v| v.command_version == 2 && v.notification_version == 0)
+            || inhibition.is_some_and(|v| v.command_version != 2 || v.notification_version != 0)
             || firmware
                 .command_version(1, 0xce)
                 .is_some_and(|v| !matches!(v.notification_version, 4 | 5))
@@ -270,6 +270,10 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Coexistence<'a, Q, 
             .coexistence
             .check()
             .map_err(Ax200CoexistenceError::Coexistence)?;
+        if inhibition.is_none() {
+            self.phase = Ax200CoexistencePhase::ManagementFramesRequired;
+            return Ok(self.phase);
+        }
         let channel = self.queue.peer().binding.power.channel();
         let ci = channel_inhibition(channel).map_err(Ax200CoexistenceError::Coexistence)?;
         if self.boot().coexistence.applied_ci == ci {
