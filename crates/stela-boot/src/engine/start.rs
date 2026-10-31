@@ -956,6 +956,7 @@ fn start_machine(boot: Boot<'_>, parts: MachineParts) -> ! {
     // Profile observations copy only the owners' last materialized images;
     // they are stale diagnostics, not coherent source-state receipts.
     hub.set_source_observations(options.profile);
+    gpu::set_hub(hub.clone(), boot_processor);
     let devices = parallel::Board::new(devices, hub.clone());
     let settings = parallel::Settings {
         profile: profile.clone(),
@@ -1029,11 +1030,61 @@ fn start_machine(boot: Boot<'_>, parts: MachineParts) -> ! {
             } else {
                 machine.run_serialized_with_budget(parallel::RunBudget {
                     blocks: limit,
-                    host_ticks: Some(host::COUNTER_HZ / WAIT_POLLS_PER_SECOND),
+                    host_ticks: Some(gpu::slice(host::COUNTER_HZ / WAIT_POLLS_PER_SECOND)),
                 })
             }
         }
     })
+}
+
+/// Claim the GPUs from probe and start them in the host's Linux environment.
+/// A GPU that cannot start is reported, and the Mac boots without it.
+fn open_gpus(
+    work: &'static kernel_work::KernelWork,
+    mmio: Option<&'static crate::native_mmio::Source>,
+    remappers: &'static remapping::Remappers,
+    heap: core::ops::Range<u64>,
+    firmware: &Option<alloc::sync::Arc<stela_drivers::firmware::Catalog>>,
+    tsc_hz: u64,
+    adapters: Vec<stela_drivers::gpu::Adapter>,
+) {
+    let Some(window) = mmio.and_then(|mmio| mmio.window()) else {
+        crate::status::warn("this PC cannot map a GPU's memory, so it is left unused");
+        return;
+    };
+    let Some(mmio) = mmio else { return };
+    crate::status::begin("Starting the GPU");
+    let claimed = work.call_owned(60_000_000, move || {
+        let services = services::Services::new(mmio, remappers, None, heap, tsc_hz, Vec::new());
+        let random = stela_drivers::probe::NativeServices::entropy(&services)
+            .ok()
+            .and_then(|entropy| {
+                stela_drivers::gpu::linux::random::Seeded::from_entropy(&*entropy).ok()
+            });
+        (gpu::claim_all(&services, &adapters), random)
+    });
+    let (claimed, random) = match claimed {
+        Ok((claimed, Some(random))) if !claimed.is_empty() => (claimed, random),
+        Ok(_) => {
+            crate::status::warn("no GPU to start");
+            return;
+        }
+        Err(error) => {
+            crate::status::warn(&format!("the GPU could not be claimed: {error}"));
+            return;
+        }
+    };
+    let machine = gpu::Machine {
+        work,
+        window,
+        firmware: firmware.clone(),
+        random,
+        tsc_hz,
+    };
+    match gpu::open(machine, claimed) {
+        Ok(()) => crate::status::done("started"),
+        Err(error) => crate::status::warn(&format!("the GPU could not start: {error}")),
+    }
 }
 
 /// What the board's devices are placed from besides the board itself.
@@ -2003,6 +2054,7 @@ fn start_devices(
             });
             let root = handoff.root;
             let heap = handoff.heap.physical..handoff.heap.physical + handoff.heap.bytes;
+            let heap_range = heap.clone();
             let tsc_hz = handoff.tsc_hz;
             let host_clock = storage_handoff.clock;
             let captures = handoff.storage.captures;
@@ -2051,6 +2103,7 @@ fn start_devices(
                 fdr,
                 inputs,
                 mut links,
+                gpus,
                 usb,
                 usb_disks,
                 disks,
@@ -2065,6 +2118,17 @@ fn start_devices(
                 });
             if let Some(acpi) = host_acpi {
                 acpi.retain_power(power);
+            }
+            if options.gpu {
+                open_gpus(
+                    work,
+                    mmio,
+                    remappers,
+                    heap_range,
+                    host_firmware,
+                    tsc_hz,
+                    gpus,
+                );
             }
             disks.profile_callbacks(options.profile);
             let count = |count: usize, one: &str, many: &str| {

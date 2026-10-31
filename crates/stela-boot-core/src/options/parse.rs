@@ -122,6 +122,7 @@ impl ParseState<'_> {
             "--development-restore" => options.development_restore = true,
             "--idle-skip" => options.idle_skip = true,
             "--input" => options.input = true,
+            "--gpu" => options.gpu = true,
             "--tss" => options.tss = true,
             "--usb-storage" => {
                 let serial = value().ok_or(Error::MissingUsbStorage)?;

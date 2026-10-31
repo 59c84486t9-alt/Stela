@@ -15,6 +15,7 @@ use core::{
     cell::{Cell, UnsafeCell},
     ffi::c_void,
     ops::Range,
+    pin::Pin,
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use stela_boot_core::guarded_stacks::mappings;
@@ -23,7 +24,7 @@ use stela_drivers::{
     bus::dma::memory::MemoryError,
     platform::work::{self, Cpu, Executor, Queue, Stack, StackBacking, WorkError},
 };
-const SLOTS: usize = 64;
+pub(super) const SLOTS: usize = 64;
 mod firmware;
 #[cfg(feature = "diagnostics")]
 mod pages;
@@ -172,6 +173,8 @@ unsafe impl Cpu for NativeCpu {
 pub(super) struct KernelWork {
     executor: Executor<SLOTS>,
     _cpu: Arc<NativeCpu>,
+    /// The queue's own view of `_cpu`, which a service domain must share.
+    cpu: Arc<dyn Cpu>,
     foreground: Arc<firmware::Foreground>,
     root: u64,
     busy: Cell<bool>,
@@ -370,10 +373,11 @@ impl KernelWork {
                 .map_err(Error::Work)?,
             );
         }
+        let shared: Arc<dyn Cpu> = cpu.clone();
         // SAFETY: real kept source/root/code ownership; callbacks cannot
         // outlive this boot, and no producer is published by construction.
         let queue =
-            unsafe { Queue::<SLOTS>::new(cpu.clone(), reservation) }.map_err(Error::Work)?;
+            unsafe { Queue::<SLOTS>::new(shared.clone(), reservation) }.map_err(Error::Work)?;
         let executor = if plan.mixed() {
             Executor::new_with_profile(
                 queue,
@@ -390,6 +394,7 @@ impl KernelWork {
         let result = Self {
             executor,
             _cpu: cpu,
+            cpu: shared,
             foreground,
             root: handoff.root,
             busy: Cell::new(false),
@@ -472,6 +477,28 @@ impl KernelWork {
         self.busy.set(false);
         Ok(result)
     }
+    /// The CPU the runtime runs on.
+    pub(super) fn cpu(&self) -> Arc<dyn Cpu> {
+        self.cpu.clone()
+    }
+
+    /// Run `body` in the dispatcher, on the loader's root under the host
+    /// drivers' lock, from anywhere the boot PE's run loop is: unlike
+    /// [`Self::call_owned`], this also serves the run, whose tagged guest
+    /// roots only the entered root's checks accept.
+    pub(super) fn dispatch<T>(
+        &self,
+        body: impl FnOnce(Pin<&work::Runtime<SLOTS>>) -> T,
+    ) -> Result<T, Error> {
+        // SAFETY: the loader root on this physical BSP, with no native or IRQ
+        // frame, which the checks below refuse.
+        let _root = unsafe { RestoreRoot::enter(self.root) };
+        let identity = &self._cpu.reservation.identity;
+        identity.check_clock_root().map_err(Error::Work)?;
+        identity.check_dispatch().map_err(Error::Work)?;
+        Ok(body(self.executor.runtime()))
+    }
+
     /// Continuation identity; dispatcher/IRQ/foreign-root callers refuse.
     pub(super) fn current_id(&self) -> Result<u64, Error> {
         self.executor

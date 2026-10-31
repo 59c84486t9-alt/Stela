@@ -715,6 +715,7 @@ pub unsafe fn open(
         fdr,
         inputs,
         links,
+        gpus: core::mem::take(&mut devices.gpus),
         usb,
         usb_disks,
         disks: host_disks,
@@ -754,6 +755,8 @@ pub struct Opened {
     pub fdr: Option<Box<dyn BlockDevice>>,
     pub inputs: Inputs,
     pub links: super::network::Links,
+    /// The display controllers probe left for their own drivers.
+    pub gpus: alloc::vec::Vec<stela_drivers::gpu::Adapter>,
     /// The xHCI controllers' topology owners, polled for hotplug.
     pub usb: super::usb::HostUsb,
     /// Whole disks for the guest's USB mass storage, in option order.

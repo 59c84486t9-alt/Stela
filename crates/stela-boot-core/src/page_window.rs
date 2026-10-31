@@ -20,6 +20,7 @@ const OFFSET: u64 = 0x10_0000_0000;
 const PRESENT: u64 = 1;
 const WRITABLE: u64 = 1 << 1;
 const WRITE_THROUGH: u64 = 1 << 3;
+const CACHE_DISABLE: u64 = 1 << 4;
 /// PAT's selector bit in a 4 KiB leaf.
 const PAT: u64 = 1 << 7;
 const ACCESSED_DIRTY: u64 = 0x60;
@@ -44,6 +45,7 @@ pub fn with_write_combining(pat: u64) -> u64 {
 pub enum Cache {
     WriteBack,
     WriteCombining,
+    Uncached,
 }
 
 /// The leaf that maps `physical`, writable and never executable.
@@ -52,8 +54,22 @@ pub fn leaf(physical: u64, cache: Cache) -> u64 {
         Cache::WriteBack => 0,
         // PAT, PCD and PWT of 1, 0 and 1 select PAT entry 5.
         Cache::WriteCombining => PAT | WRITE_THROUGH,
+        // Of 0, 1 and 1, entry 3, which firmware leaves uncached.
+        Cache::Uncached => CACHE_DISABLE | WRITE_THROUGH,
     };
     physical | PRESENT | WRITABLE | NO_EXECUTE | ACCESSED_DIRTY | attribute
+}
+
+/// The cache attribute of a page Linux's page protection `prot` asks for, in
+/// the PWT and PCD bits its `pgprot_writecombine` and `pgprot_noncached` set.
+pub fn cache_of(prot: u64) -> Cache {
+    if prot & CACHE_DISABLE != 0 {
+        Cache::Uncached
+    } else if prot & WRITE_THROUGH != 0 {
+        Cache::WriteCombining
+    } else {
+        Cache::WriteBack
+    }
 }
 
 /// A window address's index in its directory-pointer, directory and page
@@ -129,20 +145,35 @@ mod tests {
         // The reset value: WB, WT, UC-, UC twice over.
         let reset = 0x0007_0406_0007_0406;
         assert_eq!(with_write_combining(reset), 0x0007_0106_0007_0406);
-        assert_eq!(with_write_combining(with_write_combining(reset)), 0x0007_0106_0007_0406);
+        assert_eq!(
+            with_write_combining(with_write_combining(reset)),
+            0x0007_0106_0007_0406
+        );
     }
 
     #[test]
     fn leaves_select_their_pat_entry() {
         let index = |leaf: u64| (leaf >> 3 & 1) | (leaf >> 4 & 1) << 1 | (leaf >> 7 & 1) << 2;
         assert_eq!(index(leaf(0x1000, Cache::WriteBack)), 0);
+        assert_eq!(index(leaf(0x1000, Cache::Uncached)), 3);
         assert_eq!(
             index(leaf(0x1000, Cache::WriteCombining)),
             u64::from(WRITE_COMBINING_INDEX)
         );
         let value = leaf(0x7000, Cache::WriteBack);
         assert_eq!(value & 0x000f_ffff_ffff_f000, 0x7000);
-        assert_eq!(value & (PRESENT | WRITABLE | NO_EXECUTE), PRESENT | WRITABLE | NO_EXECUTE);
+        assert_eq!(
+            value & (PRESENT | WRITABLE | NO_EXECUTE),
+            PRESENT | WRITABLE | NO_EXECUTE
+        );
+    }
+
+    #[test]
+    fn linux_protections_choose_the_cache() {
+        assert_eq!(cache_of(0), Cache::WriteBack);
+        assert_eq!(cache_of(WRITE_THROUGH), Cache::WriteCombining);
+        assert_eq!(cache_of(CACHE_DISABLE), Cache::Uncached);
+        assert_eq!(cache_of(CACHE_DISABLE | WRITE_THROUGH), Cache::Uncached);
     }
 
     #[test]
@@ -151,7 +182,10 @@ mod tests {
         assert_eq!(window.start, 0xffff_8000_0000_0000 + 64 * GIB);
         assert_eq!(window.end, 0xffff_8080_0000_0000);
         assert_eq!(indices(window.start)[0], 64);
-        assert_eq!(indices(window.start + (GIB + 2 * (1 << 21) + 5 * PAGE)), [65, 2, 5]);
+        assert_eq!(
+            indices(window.start + (GIB + 2 * (1 << 21) + 5 * PAGE)),
+            [65, 2, 5]
+        );
     }
 
     #[test]

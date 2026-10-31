@@ -19,6 +19,7 @@ mod aml;
 mod boot_image;
 pub(crate) mod bundle;
 mod display;
+mod gpu;
 pub(crate) mod fdr;
 pub(crate) mod host;
 mod input;
