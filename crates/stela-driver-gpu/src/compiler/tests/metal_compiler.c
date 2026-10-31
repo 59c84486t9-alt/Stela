@@ -267,6 +267,34 @@ static const char *older_kernel =
    "!65 = !DISubroutineType(types: !66)\n!66 = !{}\n"
    "!67 = !{i32 7, !\"Dwarf Version\", i32 4}\n!68 = !{!\"/\"}\n";
 
+/* A kernel as -O0 records one, keeping its values in memory, its matrices in
+ * aggregates and its switch to be lowered. */
+static const char *unoptimized_kernel =
+   "define void @unoptimized(ptr addrspace(1) %data, i32 %tid) noinline optnone {\n"
+   "entry:\n"
+   "%slot = alloca i32, align 4\n"
+   "store i32 %tid, ptr %slot, align 4\n"
+   "%id = load i32, ptr %slot, align 4\n"
+   "%first = insertvalue {[2 x <2 x float>]} poison, <2 x float> zeroinitializer, 0, 0\n"
+   "%second = insertvalue {[2 x <2 x float>]} %first, <2 x float> <float 1.0, float 2.0>, 0, 1\n"
+   "%rows = extractvalue {[2 x <2 x float>]} %second, 0\n"
+   "%row = extractvalue [2 x <2 x float>] %rows, 1\n"
+   "%lane = extractelement <2 x float> %row, i32 %id\n"
+   "%written = insertelement <2 x float> %row, float %lane, i32 %id\n"
+   "switch i32 %id, label %done [i32 1, label %one]\n"
+   "one:\n"
+   "store <2 x float> %written, ptr addrspace(1) %data, align 8\n"
+   "br label %done\n"
+   "done:\n"
+   "ret void\n}\n"
+   "!air.kernel = !{!2}\n"
+   "!2 = !{ptr @unoptimized, !3, !4}\n!3 = !{}\n!4 = !{!40, !41}\n"
+   "!40 = !{i32 0, !\"air.buffer\", !\"air.location_index\", i32 0, i32 1, !\"air.read_write\","
+   " !\"air.arg_type_size\", i32 8, !\"air.arg_type_align_size\", i32 8,"
+   " !\"air.arg_type_name\", !\"float2\", !\"air.arg_name\", !\"data\"}\n"
+   "!41 = !{i32 1, !\"air.thread_position_in_grid\", !\"air.arg_type_name\", !\"uint\","
+   " !\"air.arg_name\", !\"tid\"}\n";
+
 /* A position and a varying only a true function constant keeps. */
 static const char *optional_output =
    "@fog = internal addrspace(2) global i8 undef, align 1\n"
@@ -1186,6 +1214,18 @@ older_kernels_compile(void)
 }
 
 static void
+unoptimized_kernels_compile(void)
+{
+   const struct stela_metal_specialization specialization = {.workgroup_size = {64, 1, 1}};
+   struct stela_air_error error;
+   nir_shader *shader = compile(unoptimized_kernel, "unoptimized", &specialization, &error);
+   if (!shader)
+      fprintf(stderr, "unoptimized: %u %s\n", error.kind, error.detail);
+   assert(shader && !shader->scratch_size);
+   stela_metal_release(shader);
+}
+
+static void
 undefined_lanes_read_as_anything(void)
 {
    const struct stela_metal_specialization specialization = {.workgroup_size = {64, 1, 1}};
@@ -1780,6 +1820,7 @@ main(void)
    derived_constants_are_constructed_from_their_function_constants();
    function_constants_select_outputs();
    older_kernels_compile();
+   unoptimized_kernels_compile();
    undefined_lanes_read_as_anything();
    function_constants_select_arguments();
    arrays_reflect_each_slot();

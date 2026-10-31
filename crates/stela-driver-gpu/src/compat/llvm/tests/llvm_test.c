@@ -115,6 +115,20 @@ static LLVMValueRef add_decided(LLVMContextRef context, LLVMModuleRef module, co
 	return function;
 }
 
+static LLVMValueRef add_kept(LLVMContextRef context, LLVMModuleRef module, const char *name)
+{
+	LLVMTypeRef word = LLVMInt32TypeInContext(context);
+	LLVMValueRef function = LLVMAddFunction(module, name, LLVMFunctionType(word, &word, 1, 0));
+	LLVMBasicBlockRef entry = LLVMAppendBasicBlockInContext(context, function, "entry");
+	LLVMBuilderRef builder = LLVMCreateBuilderInContext(context);
+	LLVMPositionBuilderAtEnd(builder, entry);
+	LLVMValueRef slot = LLVMBuildAlloca(builder, word, "slot");
+	LLVMBuildStore(builder, LLVMGetParam(function, 0), slot);
+	LLVMBuildRet(builder, LLVMBuildLoad2(builder, word, slot, "kept"));
+	LLVMDisposeBuilder(builder);
+	return function;
+}
+
 int test(void)
 {
 	LLVMContextRef context = LLVMContextCreate();
@@ -145,6 +159,12 @@ int test(void)
 	CHECK(LLVMCountBasicBlocks(decided) == 3);
 	CHECK(run_on(decided, "sccp,unreachableblockelim,dce"));
 	CHECK(LLVMCountBasicBlocks(decided) < 3);
+	CHECK(valid(module));
+
+	LLVMValueRef kept = add_kept(context, module, "kept");
+	CHECK(count(module, LLVMAlloca) == 1);
+	CHECK(run_on(kept, "sroa"));
+	CHECK(count(module, LLVMAlloca) == 0);
 	CHECK(valid(module));
 
 	LLVMTypeRef word = LLVMInt32TypeInContext(context);

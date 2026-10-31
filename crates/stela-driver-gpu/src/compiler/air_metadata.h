@@ -495,6 +495,7 @@ struct stela_air_metadata {
    bool render; /* Additive decoder mode; legacy compute remains false. */
    bool framebuffer_fetch_present, framebuffer_fetch_enabled;
    bool denorms_disable, fast_math;
+   bool unoptimized; /* A function was built to stay as written. */
    /* The module's one llvm.ident string, which qualified profiles name, or
     * NULL; captured by validation, before linking adds others. */
    const char *ident;

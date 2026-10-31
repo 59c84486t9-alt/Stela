@@ -28,9 +28,10 @@
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/IPO/AlwaysInliner.h"
-#include "llvm/Transforms/Scalar/DCE.h"
 #include "llvm/Transforms/IPO/GlobalOpt.h"
+#include "llvm/Transforms/Scalar/DCE.h"
 #include "llvm/Transforms/Scalar/SCCP.h"
+#include "llvm/Transforms/Scalar/SROA.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "llvm/Transforms/Utils/LowerSwitch.h"
 #include <string.h>
@@ -153,6 +154,8 @@ LLVMErrorRef LLVMRunPassesOnFunction(LLVMValueRef function, const char *passes,
 	StringRef pipeline(passes);
 	if (pipeline == "lower-switch") {
 		manager.addPass(LowerSwitchPass());
+	} else if (pipeline == "sroa") {
+		manager.addPass(SROAPass(SROAOptions::PreserveCFG));
 	} else if (pipeline == "sccp,unreachableblockelim,dce") {
 		manager.addPass(SCCPPass());
 		manager.addPass(UnreachableBlocks());
