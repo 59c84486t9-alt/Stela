@@ -115,6 +115,7 @@ const MAC_TYPE_BSS_STATION: u32 = 5;
 const ACCEPT_GROUP: u32 = 1 << 2;
 const ACCEPT_BEACON: u32 = 1 << 3;
 const COEX_HIGH_PRIORITY: u32 = 1 << 5;
+const PROTECTED_TWT_SUPPORTED: u32 = 1 << 3;
 /// `LINK_CONTEXT_MODIFY_ALL` without `LINK_CONTEXT_MODIFY_ACTIVE`.
 const MODIFY_ALL_BUT_ACTIVE: u32 = 0xfe;
 /// `iwl_mvm_protect_assoc`'s 900 ms in `MSEC_TO_TU` time units.
@@ -159,6 +160,8 @@ pub struct MacState {
     pub high_priority: bool,
     /// The AP MLD's EMLSR transition timeout and medium sync delay.
     pub emlsr: Option<(u8, u16)>,
+    /// `bss_conf->twt_protected`.
+    pub protected_twt: bool,
 }
 
 /// `iwl_mac_config_cmd`: version 4 can name NAN addresses.
@@ -210,9 +213,17 @@ pub fn mac_config(version: u8, state: MacState) -> Vec<u8> {
             bytes[38..40].copy_from_slice(&delay.to_le_bytes());
         }
     }
-    if state.high_priority {
-        word(&mut bytes, 44, COEX_HIGH_PRIORITY);
-    }
+    let coexistence = if state.high_priority {
+        COEX_HIGH_PRIORITY
+    } else {
+        0
+    };
+    let twt = if state.protected_twt {
+        PROTECTED_TWT_SUPPORTED
+    } else {
+        0
+    };
+    word(&mut bytes, 44, coexistence | twt);
     bytes
 }
 
@@ -1124,9 +1135,33 @@ pub fn protection(elements: &[u8]) -> Protection {
     }
 }
 
+/// `WLAN_RSNX_CAPA_PROTECTED_TWT` in the RSNXE of an association response.
+pub fn twt_protected(elements: &[u8]) -> bool {
+    crate::wifi::connection::find(elements, 244)
+        .and_then(|rsnx| rsnx.first())
+        .is_some_and(|capabilities| capabilities & 1 << 4 != 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn protected_twt_follows_the_rsnxe_into_the_data_policy() {
+        assert!(twt_protected(&[244, 1, 0x20 | 1 << 4]));
+        assert!(!twt_protected(&[244, 1, 0x20]));
+        assert!(!twt_protected(&[48, 1, 1 << 4]));
+        let state = MacState {
+            address: Mac([2, 0, 0, 0, 0, 1]),
+            he: true,
+            eht: false,
+            aid: Some(7),
+            high_priority: true,
+            emlsr: None,
+            protected_twt: true,
+        };
+        assert_eq!(mac_config(2, state)[44], 1 << 5 | 1 << 3);
+    }
 
     #[test]
     fn wifi_7_firmware_reads_its_support_as_bytes_in_a_longer_command() {
@@ -1137,6 +1172,7 @@ mod tests {
             aid: Some(7),
             high_priority: false,
             emlsr: None,
+            protected_twt: false,
         };
         let bytes = mac_config(4, state);
         assert_eq!(bytes[37..40], [0; 3]);
@@ -1231,6 +1267,7 @@ mod tests {
             aid: None,
             high_priority: true,
             emlsr: None,
+            protected_twt: false,
         };
         let bytes = mac_config(2, state);
         assert_eq!(bytes[4], 2);

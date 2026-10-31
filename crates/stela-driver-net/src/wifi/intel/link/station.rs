@@ -122,6 +122,8 @@ const SESSION_TIMED_OUT: u16 = 39;
 const BLOCK_ACK_ALLOCATION: u32 = 63;
 /// `IWL_UCODE_TLV_CAPA_STA_EXP_MFP_SUPPORT`.
 const EXPLICIT_MFP: u32 = 114;
+/// `IWL_UCODE_TLV_CAPA_PROTECTED_TWT`.
+const PROTECTED_TWT: u32 = 56;
 /// `MICHAEL_MIC_LEN`.
 const MICHAEL_MIC_BYTES: usize = 8;
 /// `IWL_UCODE_TLV_CAPA_COEX_HIGH_PRIO`.
@@ -694,6 +696,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             aid: None,
             high_priority: firmware.supports_capability(COEX_HIGH_PRIORITY),
             emlsr: None,
+            protected_twt: false,
         };
         let bytes = commands::mac_config(version_of(firmware, commands::MAC_CONFIG), mac);
         self.client.command(commands::MAC_CONFIG, bytes);
@@ -753,6 +756,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             aid: None,
             high_priority,
             emlsr: None,
+            protected_twt: protected_twt(firmware, context),
         };
         let mac_version = version_of(firmware, commands::MAC_CONFIG);
         let power_version = version_of(firmware, commands::MAC_POWER);
@@ -1795,6 +1799,16 @@ fn capability_elements(band: Band, device: Device, widest: phy::Width) -> Vec<u8
     elements
 }
 
+/// `bss_conf->twt_protected`: `ieee80211_assoc_config_link` reads the response.
+fn protected_twt(
+    firmware: &crate::wifi::intel::firmware::Firmware<'_>,
+    context: &AssociationContext,
+) -> bool {
+    context.negotiated().he.is_some()
+        && firmware.supports_capability(PROTECTED_TWT)
+        && commands::twt_protected(&context.response().elements)
+}
+
 /// The rates and capabilities a probe names, `ieee80211_build_preq_ies_band`.
 fn probe_elements(band: Band, device: Device, widest: phy::Width) -> Vec<u8> {
     let Device {
@@ -2493,6 +2507,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             aid: Some(context.response().aid),
             high_priority: false,
             emlsr: self.client.emlsr.transition(),
+            protected_twt: protected_twt(firmware, context),
         };
         let peer =
             commands::station_config(peer_version, peer_state(context, explicit_mfp, true, seat));
