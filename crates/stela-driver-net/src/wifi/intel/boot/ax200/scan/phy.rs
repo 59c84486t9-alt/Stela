@@ -164,6 +164,7 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Phy<'a, Q, B, O> {
     pub(in crate::wifi::intel::boot) fn changed(
         &mut self,
         definition: &ChannelDefinition,
+        wide_ofdma: Option<&ChannelDefinition>,
     ) -> Option<Vec<PhyCommand>> {
         let firmware = &self.boot().firmware;
         let ultra_high_band = firmware.supports_capability(48);
@@ -171,7 +172,7 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Phy<'a, Q, B, O> {
             .command_version(PHY.wire().group, PHY.opcode)?
             .command_version;
         let add = self.commands.first()?;
-        let modified = modified(add, definition, version, ultra_high_band)?;
+        let modified = modified(add, definition, wide_ofdma, version, ultra_high_band)?;
         let chains = self.commands.get(1).cloned();
         Some(core::iter::once(modified).chain(chains).collect())
     }
@@ -524,20 +525,26 @@ fn control_position(offset_mhz: i32) -> u8 {
 
 /// `iwl_mvm_phy_ctxt_cmd_data`: `add` moved to `definition`'s width. 80+80 MHz
 /// has no firmware width and no Intel capability offers it.
+/// `iwl_mld_nl80211_width_to_fw`.
+fn width_code(width: Width) -> Option<u8> {
+    match width {
+        Width::Mhz20 => Some(0),
+        Width::Mhz40 => Some(1),
+        Width::Mhz80 => Some(2),
+        Width::Mhz160 => Some(3),
+        Width::Mhz320 => Some(4),
+        Width::Mhz80P80 => None,
+    }
+}
+
 fn modified(
     add: &PhyCommand,
     definition: &ChannelDefinition,
+    wide_ofdma: Option<&ChannelDefinition>,
     version: u8,
     ultra_high_band: bool,
 ) -> Option<PhyCommand> {
-    let width = match definition.width {
-        Width::Mhz20 => 0,
-        Width::Mhz40 => 1,
-        Width::Mhz80 => 2,
-        Width::Mhz160 => 3,
-        Width::Mhz320 => 4,
-        Width::Mhz80P80 => return None,
-    };
+    let width = width_code(definition.width)?;
     let mut bytes = add.bytes;
     bytes[4..8].copy_from_slice(&2u32.to_le_bytes());
     let at = if ultra_high_band { 13 } else { 10 };
@@ -549,6 +556,10 @@ fn modified(
     }
     if version >= SECONDARY_CONTROL {
         bytes[28] = position ^ CONTROL_ABOVE;
+        if let Some(ap) = wide_ofdma {
+            bytes[20] = width_code(ap.width)?;
+            bytes[21] = control_position(ap.control_offset_mhz());
+        }
     }
     Some(PhyCommand {
         kind: PhyCommandKind::Modify,
@@ -600,7 +611,7 @@ mod tests {
             center2_mhz: None,
             punctured: 0,
         };
-        let command = modified(&commands[0], &definition, 4, true).unwrap();
+        let command = modified(&commands[0], &definition, None, 4, true).unwrap();
         assert_eq!(command.kind, PhyCommandKind::Modify);
         assert_eq!(command.bytes[4], 2);
         assert_eq!(command.bytes[8], 36);
@@ -608,7 +619,9 @@ mod tests {
         assert_eq!(command.bytes[16..], commands[0].bytes[16..]);
         // Without the capability a channel info is four bytes shorter.
         assert_eq!(
-            modified(&commands[0], &definition, 4, false).unwrap().bytes[10..12],
+            modified(&commands[0], &definition, None, 4, false)
+                .unwrap()
+                .bytes[10..12],
             [2, 1]
         );
         let unsupported = ChannelDefinition {
@@ -616,7 +629,7 @@ mod tests {
             center2_mhz: Some(5530),
             ..definition
         };
-        assert!(modified(&commands[0], &unsupported, 4, true).is_none());
+        assert!(modified(&commands[0], &unsupported, None, 4, true).is_none());
     }
 
     #[test]
@@ -639,7 +652,7 @@ mod tests {
             center2_mhz: None,
             punctured: 4,
         };
-        let command = modified(&commands[0], &definition, 6, true).unwrap();
+        let command = modified(&commands[0], &definition, None, 6, true).unwrap();
         assert_eq!(command.bytes[22..24], [4, 0]);
         assert_eq!(command.bytes[28], 5);
     }

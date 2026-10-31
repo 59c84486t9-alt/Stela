@@ -35,6 +35,9 @@ const BZ_SUBDEVICES: [u16; 35] = [
     0x1791, 0x1792, 0x4090, 0x40c4, 0x40e0, 0x4110, 0x4314, 0x1775, 0x1776, 0x1735, 0x1736,
 ];
 const BZ_LISTED: u16 = 0xa840;
+/// The BE1730x, the one Killer product `iwl_rf_fm_160mhz` holds to 160 MHz.
+const KILLER_1730: u16 = 0x1730;
+const KILLER_1731: u16 = 0x1731;
 const RF_HR2: u32 = 0x10a;
 const RF_GF: u32 = 0x10d;
 const RF_FM: u32 = 0x112;
@@ -46,6 +49,10 @@ const CRF_GF: u32 = 0x410;
 const CRF_FM: u32 = 0x910;
 /// CNVI_AUX_MISC_CHIP_PROD_TYPE_BZ_U.
 const BZ_U: u32 = 0x930;
+/// `PCI_EXP_LNKSTA_CLS_8_0GB`.
+const SPEED_8GT: u8 = 3;
+/// `IWL_PNVM_REDUCED_CAP_BIT` of ALIVE's first SKU word.
+const REDUCED_CAPABILITY: u32 = 1 << 25;
 /// `IWL_SUBDEVICE_BW_LIM`, which makes an integrated HR2 an 80 MHz AX203.
 const BANDWIDTH_LIMITED: u16 = 0x0200;
 /// The subdevice of AX231, whose radio configuration is not GF's.
@@ -61,6 +68,26 @@ pub enum Rf {
     Hr,
     Gf,
     Fm,
+}
+
+/// What `iwl_nvm_fixup_sband_iftd` reads of a device whose radio has EHT.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EhtLimits {
+    /// `bw_limit` of `iwl_rf_fm_160mhz`.
+    pub stops_at_160: bool,
+    /// `reduced_cap_sku`, which also drops 320 MHz and MCS 12 and 13.
+    pub reduced: bool,
+    /// `step_urm`: the STEP has no MCS above 9 at 320 MHz.
+    pub urm: bool,
+    /// `slow_pcie`: a discrete link under 8 GT/s cannot carry two streams of
+    /// MCS above 9 at 320 MHz.
+    pub slow_bus: bool,
+}
+
+impl EhtLimits {
+    pub const fn reaches_320(self) -> bool {
+        !self.stops_at_160 && !self.reduced
+    }
 }
 
 /// What a device's `iwl_mac_cfg` says of the platform around its MAC.
@@ -199,6 +226,8 @@ pub struct Observed {
     pub subsystem_vendor: u16,
     pub subsystem_device: u16,
     pub pci_revision: u8,
+    /// PCI_EXP_LNKSTA's current speed, or zero without PCI Express.
+    pub link_speed: u8,
     /// CSR_HW_REV and CSR_HW_RF_ID values, before normalization.
     pub hardware_revision: u32,
     pub radio_id: u32,
@@ -225,6 +254,15 @@ pub struct Profile {
     revision: u32,
     firmware: &'static str,
     pnvm: Option<&'static str>,
+}
+
+/// The Killer subdevices pcie/drv.c lists after BE202's bandwidth limit, which
+/// have that subdevice bit and are their own products.
+const fn killer(device: u16, subdevice: u16) -> bool {
+    matches!(
+        subdevice,
+        KILLER_1730 | KILLER_1731 | 0x1771 | 0x1772 | 0x1791 | 0x1792
+    ) || (device == BE200 && matches!(subdevice, 0x1773 | 0x1774))
 }
 
 /// CSR_HW_RF_ID, or `map_crf_id`'s reading of the silicon on a blank OTP.
@@ -278,7 +316,7 @@ impl Profile {
         let another_product = match radio {
             RF_HR2 => platform.integrated && limited,
             RF_GF => platform.integrated && observed.subsystem_device == AX231,
-            _ => limited,
+            _ => limited && !killer(observed.device, observed.subsystem_device),
         };
         if !fitted || another_product || radio_id & CDB != 0 {
             // A CDB radio chooses a distinct gf4 image or is BE401, and AX203,
@@ -331,6 +369,16 @@ impl Profile {
     }
     pub fn radio(&self) -> Rf {
         self.radio
+    }
+    /// A radio with EHT's limits. `sku` is ALIVE's, whose word Linux reads
+    /// while matching a PNVM section, and `urm` is the STEP's state.
+    pub fn eht_limits(&self, sku: [u32; 3], urm: bool) -> Option<EhtLimits> {
+        (self.radio == Rf::Fm).then_some(EhtLimits {
+            stops_at_160: matches!(self.observed.subsystem_device, KILLER_1730 | KILLER_1731),
+            reduced: sku[0] & REDUCED_CAPABILITY != 0,
+            urm,
+            slow_bus: !self.platform.integrated && self.observed.link_speed < SPEED_8GT,
+        })
     }
     /// CSR_HW_REV with the step `get_crf_id` found, as firmware is told it.
     pub fn revision(&self) -> u32 {
@@ -464,6 +512,7 @@ mod tests {
 
     fn observed(device: u16) -> Observed {
         Observed {
+            link_speed: 3,
             vendor: INTEL,
             device,
             subsystem_vendor: INTEL,
@@ -677,6 +726,50 @@ mod tests {
             .unwrap_err(),
             IdentityError::UnsupportedPci
         );
+    }
+
+    #[test]
+    fn killer_subdevices_are_their_own_products_despite_the_limit_bit() {
+        let radio = RF_FM << 12 | STEP_C << 8;
+        let be200 = |subsystem_device| Observed {
+            radio_id: radio,
+            subsystem_device,
+            ..integrated(BE200, 0x472, RF_FM, 0x0020)
+        };
+        for subdevice in [0x1771, 0x1772, 0x1773, 0x1774, 0x1791, 0x1792] {
+            let limits = Profile::select(be200(subdevice))
+                .unwrap()
+                .eht_limits([0; 3], false)
+                .unwrap();
+            assert!(limits.reaches_320(), "{subdevice:x}");
+        }
+        for subdevice in [KILLER_1730, KILLER_1731] {
+            let profile = Profile::select(be200(subdevice)).unwrap();
+            assert!(profile.eht_limits([0; 3], false).unwrap().stops_at_160);
+        }
+        assert!(Profile::select(be200(0x1775)).is_err(), "named BE202");
+    }
+
+    #[test]
+    fn a_wifi_7_device_reports_what_limits_it() {
+        let radio = RF_FM << 12 | STEP_C << 8;
+        let slow = Observed {
+            radio_id: radio,
+            link_speed: 2,
+            ..integrated(BE200, 0x472, RF_FM, 0x0020)
+        };
+        let profile = Profile::select(slow).unwrap();
+        let limits = profile.eht_limits([1 << 25, 0, 0], true).unwrap();
+        assert!(limits.reduced && limits.urm);
+        assert!(limits.slow_bus, "a discrete link at 5 GT/s");
+        let fast = Profile::select(Observed {
+            link_speed: 3,
+            ..slow
+        })
+        .unwrap();
+        assert!(!fast.eht_limits([0; 3], false).unwrap().slow_bus);
+        let wifi_6 = Profile::select(observed(AX210)).unwrap();
+        assert_eq!(wifi_6.eht_limits([0; 3], false), None);
     }
 
     #[test]

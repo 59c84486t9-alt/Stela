@@ -321,6 +321,8 @@ pub struct RomBoot<'a, Q: BootIo> {
     domain: Arc<dyn DmaDomain>,
     platform: Option<PlatformPhase<'a>>,
     alive_sku: Option<[u32; 3]>,
+    /// `step_urm`, which the STEP says once firmware runs.
+    step_urm: bool,
     sb_configuration: Option<u32>,
     product_reset_policy: Option<ProductResetPolicy>,
     context: Chunk,
@@ -349,6 +351,11 @@ struct Ax210Memory<'a> {
 }
 /// Compatibility name for the original AX200 `start` constructor. New family
 /// consumers can name `RomBoot` and choose its explicit family constructor.
+/// `CNVI_PMU_STEP_FLOW_BZ`, `CNVI_PMU_STEP_FLOW_SC` and what `step_urm` reads.
+const STEP_FLOW_BZ: u32 = 0xa2_d588;
+const STEP_FLOW_SC: u32 = 0xa2_d688;
+const STEP_FORCE_URM: u32 = 1 << 2;
+
 pub type Ax200Boot<'a, Q> = RomBoot<'a, Q>;
 impl<'a, Q: BootIo> RomBoot<'a, Q> {
     /// The device family this boot runs.
@@ -358,6 +365,10 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
     /// The radio beside this boot's MAC.
     pub fn radio(&self) -> super::identity::Rf {
         self.profile.radio()
+    }
+    /// What limits a radio with EHT, from ALIVE on.
+    pub fn eht_limits(&self) -> Option<super::identity::EhtLimits> {
+        self.profile.eht_limits(self.alive_sku?, self.step_urm)
     }
     /// Start the standalone AX200 context protocol.
     /// # Safety
@@ -569,6 +580,7 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
             domain,
             platform: None,
             alive_sku: None,
+            step_urm: false,
             sb_configuration: None,
             product_reset_policy,
             context,
@@ -916,6 +928,11 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
                 }
                 self.alive_sku = Some(report.sku);
                 self.state = State::Alive;
+                self.step_urm = match self.profile.family() {
+                    Family::Ax200 | Family::Ax210 => false,
+                    Family::Bz => self.prph_read(STEP_FLOW_BZ)? & STEP_FORCE_URM != 0,
+                    Family::Sc => self.prph_read(STEP_FLOW_SC)? & STEP_FORCE_URM != 0,
+                };
                 observed = Some(report);
             }
             if observed.is_some() {

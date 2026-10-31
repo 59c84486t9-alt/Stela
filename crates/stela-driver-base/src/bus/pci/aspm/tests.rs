@@ -125,6 +125,16 @@ fn a_root_bus_endpoint_disables_its_own_link_control() {
 }
 
 #[test]
+fn link_speed_reads_the_status_or_zero_without_a_link() {
+    let writes = Writes::default();
+    let mut endpoint = device(address(0, 8, 0), None, &writes);
+    endpoint.config.words[20] = 0x0043_0000;
+    assert_eq!(link_speed(&endpoint), 3);
+    endpoint.config.words[16] = (1 | 9 << 4) << 16 | u32::from(CAPABILITY_PCIE);
+    assert_eq!(link_speed(&endpoint), 0);
+}
+
+#[test]
 fn aspm_control_reads_the_link_or_zero_without_one() {
     let writes = Writes::default();
     let mut endpoint = device(address(0, 8, 0), None, &writes);

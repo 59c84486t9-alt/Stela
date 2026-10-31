@@ -35,6 +35,8 @@ pub struct Pci {
     pub subsystem_vendor: u16,
     pub subsystem_device: u16,
     pub revision: u8,
+    /// PCI_EXP_LNKSTA's current speed.
+    pub link_speed: u8,
 }
 
 /// Why the function did not reach ROM boot.
@@ -116,6 +118,7 @@ pub unsafe fn attach<Q: BootIo, B: BiosIo>(
         subsystem_vendor: pci.subsystem_vendor,
         subsystem_device: pci.subsystem_device,
         pci_revision: pci.revision,
+        link_speed: pci.link_speed,
         hardware_revision,
         radio_id,
         silicon,

@@ -46,8 +46,17 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200ManagementQueue<'a,
 
     /// `iwl_mvm_phy_ctxt_changed`: the commands that move the PHY context to
     /// the channel `definition` association negotiated.
-    pub fn phy_changed(&mut self, definition: &ChannelDefinition) -> Option<Vec<(Id, Vec<u8>)>> {
-        let commands = self.peer().binding.power.phy.changed(definition)?;
+    pub fn phy_changed(
+        &mut self,
+        definition: &ChannelDefinition,
+        wide_ofdma: Option<&ChannelDefinition>,
+    ) -> Option<Vec<(Id, Vec<u8>)>> {
+        let commands = self
+            .peer()
+            .binding
+            .power
+            .phy
+            .changed(definition, wide_ofdma)?;
         Some(
             commands
                 .iter()

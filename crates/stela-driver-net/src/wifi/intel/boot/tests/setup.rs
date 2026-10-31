@@ -6,6 +6,7 @@ use super::*;
 
 pub(super) fn profile() -> Profile {
     Profile::select(Observed {
+        link_speed: 3,
         silicon: Default::default(),
         vendor: 0x8086,
         device: 0x2723,

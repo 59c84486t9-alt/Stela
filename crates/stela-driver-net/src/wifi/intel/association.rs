@@ -18,7 +18,7 @@ use crate::{
         station::{
             AssociationContext,
             operations::MuEdcaRecord,
-            phy::{AccessCategory, He, Mode, Negotiated, Width},
+            phy::{AccessCategory, Eht, He, Mode, Negotiated, Width},
             power_envelope::PowerEnvelope,
         },
     },
@@ -406,6 +406,9 @@ const EXTENSION_NONE: u8 = 7;
 /// `IWL_HE_PKT_EXT_BPSK`.
 const EXTENSION_BPSK: u8 = 0;
 
+/// `IWL_HE_PKT_EXT_4096QAM`.
+const EXTENSION_4096QAM: u8 = 6;
+
 /// `iwl_mvm_he_get_ppe_val`: three bits at `position`, which may straddle a byte.
 fn threshold(ppe: &[u8], position: usize) -> u8 {
     let byte = |index: usize| u16::from(ppe.get(index).copied().unwrap_or(0));
@@ -413,39 +416,89 @@ fn threshold(ppe: &[u8], position: usize) -> u8 {
     ((pair >> (position % 8)) & 7) as u8
 }
 
-/// `iwl_mvm_set_sta_pkt_ext` for an HE AP: its PPE thresholds, or else what its
-/// nominal padding implies.
-pub fn packet_extension(he: &He) -> [u8; PACKET_EXTENSION_BYTES] {
-    const THRESHOLDS_PRESENT: u8 = 0x80;
-    const PADDING_RESERVED: u8 = 3;
-    let mut table = [EXTENSION_NONE; PACKET_EXTENSION_BYTES];
-    if he.phy[6] & THRESHOLDS_PRESENT != 0 {
-        let ppe = he.ppe.as_slice();
-        let header = ppe.first().copied().unwrap_or(0);
-        let streams = (usize::from(header & 7) + 1).min(STREAMS);
-        let widths = (header >> 3) & 0xf;
-        let mut position = 7;
-        for stream in 0..streams {
-            for width in 0..WIDTHS {
-                if widths >> width & 1 == 0 {
-                    continue;
-                }
-                let at = (stream * WIDTHS + width) * 2;
-                table[at + 1] = threshold(ppe, position);
-                table[at] = threshold(ppe, position + 3);
+/// `iwl_mld_parse_ppe`: a table's thresholds, from `position` in `ppe`. EHT
+/// lets a width without its own keep the last width's; HE leaves it unset.
+fn parsed_thresholds(
+    table: &mut [u8; PACKET_EXTENSION_BYTES],
+    ppe: &[u8],
+    (streams, widths): (usize, u8),
+    mut position: usize,
+    inherit: bool,
+) {
+    for stream in 0..streams.min(STREAMS) {
+        let (mut low, mut high) = (EXTENSION_NONE, EXTENSION_NONE);
+        for width in 0..WIDTHS {
+            if widths >> width & 1 != 0 {
+                high = threshold(ppe, position);
+                low = threshold(ppe, position + 3);
                 position += 6;
+            } else if !inherit {
+                continue;
             }
+            let at = (stream * WIDTHS + width) * 2;
+            table[at..at + 2].copy_from_slice(&[low, high]);
         }
-        return table;
     }
-    let (low, high) = match he.phy[9] >> 6 {
+}
+
+/// HE's own thresholds: a seven-bit header of streams and widths.
+fn he_thresholds(table: &mut [u8; PACKET_EXTENSION_BYTES], he: &He, inherit: bool) {
+    let ppe = he.ppe.as_slice();
+    let header = ppe.first().copied().unwrap_or(0);
+    let shape = (usize::from(header & 7) + 1, (header >> 3) & 0xf);
+    parsed_thresholds(table, ppe, shape, 7, inherit);
+}
+
+/// `iwl_mld_set_pkt_ext_from_nominal_padding`, whose cases EHT and HE share.
+fn padded_thresholds(table: &mut [u8; PACKET_EXTENSION_BYTES], padding: u8) {
+    let (low, high) = match padding {
         0 => (EXTENSION_NONE, EXTENSION_NONE),
         1 => (EXTENSION_BPSK, EXTENSION_NONE),
-        2 => (EXTENSION_NONE, EXTENSION_BPSK),
-        PADDING_RESERVED.. => return table,
+        _ => (EXTENSION_NONE, EXTENSION_BPSK),
     };
     for pair in table.as_chunks_mut::<2>().0 {
         *pair = [low, high];
+    }
+}
+
+/// `iwl_mld_fill_pkt_ext` for an AP: EHT's thresholds, then HE's with the
+/// padding MCS 12 and 13 need, then what the nominal padding implies. The EHT
+/// header's nine bits name five widths; Linux reads only its first byte, which
+/// loses 320 MHz's own thresholds.
+pub fn packet_extension(he: &He, eht: Option<&Eht>) -> [u8; PACKET_EXTENSION_BYTES] {
+    const EHT_THRESHOLDS: u8 = 0x08;
+    const HE_THRESHOLDS: u8 = 0x80;
+    const PADDING_8US: u8 = 1;
+    const PADDING_RESERVED: u8 = 3;
+    let mut table = [EXTENSION_NONE; PACKET_EXTENSION_BYTES];
+    let Some(eht) = eht else {
+        if he.phy[6] & HE_THRESHOLDS != 0 {
+            he_thresholds(&mut table, he, false);
+        } else if he.phy[9] >> 6 != PADDING_RESERVED {
+            padded_thresholds(&mut table, he.phy[9] >> 6);
+        }
+        return table;
+    };
+    let padding = (eht.phy[5] >> 4) & 3;
+    if eht.phy[5] & EHT_THRESHOLDS != 0 {
+        let ppe = eht.ppe.as_slice();
+        let header = u16::from_le_bytes([
+            ppe.first().copied().unwrap_or(0),
+            ppe.get(1).copied().unwrap_or(0),
+        ]);
+        let shape = (usize::from(header & 0xf) + 1, ((header >> 4) & 0x1f) as u8);
+        parsed_thresholds(&mut table, ppe, shape, 9, true);
+    } else if he.phy[6] & HE_THRESHOLDS != 0 {
+        he_thresholds(&mut table, he, true);
+        for pair in table.as_chunks_mut::<2>().0 {
+            if padding > PADDING_8US && pair[1] == EXTENSION_NONE {
+                pair[1] = EXTENSION_4096QAM;
+            } else if padding == PADDING_8US && *pair == [EXTENSION_NONE; 2] {
+                pair[0] = EXTENSION_4096QAM;
+            }
+        }
+    } else {
+        padded_thresholds(&mut table, padding);
     }
     table
 }
@@ -479,13 +532,17 @@ pub fn control_flags(mac: &[u8; 6]) -> u32 {
     flags
 }
 
-/// `iwl_mvm_get_sta_ampdu_dens`' size: the base exponent and the HE extension,
-/// bounded by the firmware's 4 MB.
+/// `iwl_mld_fill_ampdu_size_and_dens`' size: the base exponent and the HE and
+/// EHT extensions, bounded by the firmware's 4 MB.
 pub fn ampdu_exponent(negotiated: &Negotiated) -> u8 {
     /// `STA_FLG_MAX_AGG_SIZE_4M`, 8 KB being zero.
     const LIMIT_4M: u8 = 9;
-    let extension = negotiated.he.as_ref().map_or(0, |he| (he.mac[3] >> 3) & 3);
-    (negotiated.peer_ampdu_base_exponent + extension).min(LIMIT_4M)
+    let he = negotiated.he.as_ref().map_or(0, |he| (he.mac[3] >> 3) & 3);
+    let eht = match negotiated.eht {
+        Some(_) => negotiated.peer().eht().map_or(0, |eht| eht.mac[1] & 1),
+        None => 0,
+    };
+    (negotiated.peer_ampdu_base_exponent + he + eht).min(LIMIT_4M)
 }
 
 /// `iwl_mvm_mld_cfg_sta` for station 0 on link 0. `version` is the firmware's
@@ -559,9 +616,9 @@ pub struct RateShape {
     /// Where `max_ch_width` lies.
     pub head: usize,
     /// Width classes per stream.
-    classes: usize,
+    pub classes: usize,
     /// One class's rate bitmap.
-    rate_bytes: usize,
+    pub rate_bytes: usize,
 }
 
 impl RateShape {
@@ -620,7 +677,7 @@ pub fn rate_config(
         Mode::Ht => 1,
         Mode::Vht => 2,
         Mode::He => 3,
-        Mode::Eht => return None,
+        Mode::Eht => 4,
     };
     out[head + 2] = antennas;
     let (ht, vht, he) = (&negotiated.ht, &negotiated.vht, &negotiated.he);
@@ -645,10 +702,16 @@ pub fn rate_config(
         || vht_cap & 0x10 != 0
         || he.as_ref().is_some_and(|he| he.phy[1] & 0x20 != 0);
     // Dual carrier modulation needs the peer to receive it; every admitted
-    // device can send it.
+    // device can send it. The extra LTF needs both ends.
     let dcm = he.as_ref().is_some_and(|he| he.phy[3] & 0x18 != 0);
-    let flags =
-        u16::from(stbc && antennas.count_ones() > 1) | u16::from(ldpc) << 1 | u16::from(dcm) << 3;
+    let extra_ltf = negotiated.mode == Mode::Eht
+        && [negotiated.local(), negotiated.peer()]
+            .iter()
+            .all(|side| side.eht().is_some_and(|eht| eht.phy[5] & 0x40 != 0));
+    let flags = u16::from(stbc && antennas.count_ones() > 1)
+        | u16::from(ldpc) << 1
+        | u16::from(dcm) << 3
+        | u16::from(extra_ltf) << 6;
     half(&mut out, head + 4, flags);
     half(
         &mut out,
@@ -661,7 +724,7 @@ pub fn rate_config(
         half(&mut out, at, bits);
     };
     match negotiated.mode {
-        Mode::Legacy | Mode::Eht => {}
+        Mode::Legacy => {}
         Mode::Ht => {
             let mcs = ht.as_ref()?.peer_rx_mcs;
             set(0, 0, u16::from(mcs[0]));
@@ -687,6 +750,26 @@ pub fn rate_config(
                 set(nss, 0, mcs_bits(he.mcs_80.rx, nss, [7, 9, 11]));
                 if let Some(wide) = he.mcs_160 {
                     set(nss, 1, mcs_bits(wide.rx, nss, [7, 9, 11]));
+                }
+            }
+        }
+        Mode::Eht => {
+            // `iwl_mld_fill_eht_rates`: 80 MHz's class always, then those the
+            // width reaches. A range's low nibble is what the device sends
+            // and the peer receives.
+            const RANGES: [u16; 4] = [0xff, 0x300, 0xc00, 0x3000];
+            let common = &negotiated.eht.as_ref()?.common;
+            let classes = usize::from(width.max(2) - 1).min(shape.classes);
+            let maps = [common.bw80, common.bw160, common.bw320];
+            for (class, map) in maps.into_iter().enumerate().take(classes) {
+                let Some(map) = map else { continue };
+                for nss in 0..2 {
+                    let bits = RANGES
+                        .into_iter()
+                        .zip(map)
+                        .filter(|&(_, streams)| usize::from(streams & 15) > nss)
+                        .fold(0, |bits, (range, _)| bits | range);
+                    set(nss, class, bits);
                 }
             }
         }
@@ -1060,7 +1143,7 @@ mod tests {
         let mut phy = [0; 11];
         phy[6] = 0x80;
         let capabilities = ap([0; 6], phy, &[0x61, 0x1c, 0xc7, 0x71]);
-        let table = packet_extension(capabilities.he().unwrap());
+        let table = packet_extension(capabilities.he().unwrap(), None);
         assert_eq!(table[..4], [7; 4], "narrower widths stay unset");
         assert_eq!(table[4..8], [7, 0, 7, 0]);
         assert_eq!(table[8..10], [7, 7]);
@@ -1073,12 +1156,69 @@ mod tests {
         let padded = |value: u8| {
             let mut phy = [0; 11];
             phy[9] = value << 6;
-            packet_extension(ap([0; 6], phy, &[]).he().unwrap())
+            packet_extension(ap([0; 6], phy, &[]).he().unwrap(), None)
         };
         assert_eq!(padded(0), [7; 20]);
         assert_eq!(padded(1)[..2], [EXTENSION_BPSK, EXTENSION_NONE]);
         assert_eq!(padded(2)[18..], [EXTENSION_NONE, EXTENSION_BPSK]);
         assert_eq!(padded(3), [7; 20], "reserved");
+    }
+
+    fn eht(phy5: u8, ppe: &[u8]) -> Eht {
+        let mut elements = alloc::vec![1, 1, 0x8c];
+        elements.extend([255, 22, 35]);
+        elements.extend([0; 17]);
+        elements.extend([0xfa, 0xff, 0xfa, 0xff]);
+        let mut element = alloc::vec![108, 0, 0];
+        element.extend([0, 0, 0, 0, 0, phy5, 0, 0, 0]);
+        element.extend([0x22; 3]);
+        element.extend(ppe);
+        elements.extend([255, element.len() as u8]);
+        elements.extend(element);
+        crate::wifi::station::phy::Capabilities::parse(
+            Band::Ghz5,
+            crate::wifi::station::phy::Role::AccessPoint,
+            &elements,
+        )
+        .unwrap()
+        .eht()
+        .unwrap()
+        .clone()
+    }
+
+    #[test]
+    fn eht_thresholds_pass_to_the_widths_without_their_own() {
+        // One stream, widths 0 and 2 of the nine-bit header, then 320 MHz's
+        // bit from its second byte. Each pair reads PPET16 then PPET8.
+        let header: u16 = 0x150;
+        let mut bits: u64 = u64::from(header);
+        for (at, value) in [(9, 1), (12, 2), (15, 3), (18, 4), (21, 5), (24, 6)] {
+            bits |= value << at;
+        }
+        let ppe = &bits.to_le_bytes()[..4];
+        let he = ap([0; 6], [0; 11], &[]);
+        let table = packet_extension(he.he().unwrap(), Some(&eht(0x08, ppe)));
+        assert_eq!(table[..2], [2, 1]);
+        assert_eq!(table[2..4], [2, 1], "inherited");
+        assert_eq!(table[4..6], [4, 3]);
+        assert_eq!(table[6..8], [4, 3], "inherited");
+        assert_eq!(table[8..10], [6, 5], "320 MHz's own");
+        assert_eq!(table[10..], [7; 10], "a second stream stays unset");
+    }
+
+    #[test]
+    fn eht_padding_tops_up_he_thresholds_and_stands_in_for_absent_ones() {
+        let mut phy = [0; 11];
+        phy[6] = 0x80;
+        let he = ap([0; 6], phy, &[0x61, 0x1c, 0xc7, 0x71]);
+        let table = packet_extension(he.he().unwrap(), Some(&eht(2 << 4, &[])));
+        assert_eq!(table[..2], [7, 6], "no threshold of its own");
+        assert_eq!(table[4..6], [7, 0], "kept");
+        let table = packet_extension(he.he().unwrap(), Some(&eht(1 << 4, &[])));
+        assert_eq!(table[..2], [6, 7]);
+        let plain = ap([0; 6], [0; 11], &[]);
+        let table = packet_extension(plain.he().unwrap(), Some(&eht(3 << 4, &[])));
+        assert_eq!(table[18..], [EXTENSION_NONE, EXTENSION_BPSK]);
     }
 
     #[test]

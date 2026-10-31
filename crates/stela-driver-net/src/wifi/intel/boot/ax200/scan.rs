@@ -285,6 +285,20 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Scan<'_, Q, B, O> {
         let information = &self.mac.initialized_nvm().information;
         (information.tx_chains, information.rx_chains)
     }
+    /// What limits a radio with EHT.
+    pub fn eht_limits(&self) -> Option<crate::wifi::intel::identity::EhtLimits> {
+        self.mac
+            .country
+            .board
+            .scan
+            .mcc
+            .setup
+            .lari
+            .radio
+            .initialized
+            .boot
+            .eht_limits()
+    }
     pub fn command_bytes(&self) -> Option<&[u8]> {
         self.command_bytes.as_deref()
     }

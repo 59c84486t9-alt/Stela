@@ -225,6 +225,7 @@ fn borrowed_permanent_capture_keeps_the_byte_pointer_and_provenance() {
 }
 fn profile(ax210: bool) -> Profile {
     Profile::select(Observed {
+        link_speed: 3,
         silicon: Default::default(),
         vendor: 0x8086,
         device: if ax210 { 0x2725 } else { 0x2723 },

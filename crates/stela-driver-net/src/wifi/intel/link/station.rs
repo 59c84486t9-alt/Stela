@@ -15,7 +15,7 @@ use super::*;
 use crate::wifi::{
     Channel,
     connection::keeper::{self, Advertisement, Peer, Radio, Stage as Standing},
-    frame::{MAX_AMPDU_BUF_HE, Mpdu},
+    frame::{MAX_AMPDU_BUF_EHT, Mpdu},
     intel::{
         association::{self as commands, LinkHe, LinkState, MacState, PeerHe, PeerState},
         command,
@@ -55,7 +55,9 @@ use alloc::collections::VecDeque;
 
 mod he;
 mod reception;
+use super::super::identity::EhtLimits;
 use reception::{MAX_SESSIONS, Parent, Reception};
+mod eht;
 
 type Queue<Q, B> = Ax200ManagementQueue<'static, Q, B, Regulatory>;
 
@@ -196,6 +198,9 @@ pub struct ManagementKey {
 /// The association's state beside the kept chain.
 /// `IEEE80211_SCAN_RESULT_EXPIRE`.
 const BSS_EXPIRY_US: u64 = 30_000_000;
+/// `max_rx_aggregation_subframes`, half of what EHT names until Linux takes
+/// the full window. A session's mode bounds it further.
+const RECEIVE_WINDOW: u16 = MAX_AMPDU_BUF_EHT / 2;
 
 /// A BSS and when it was last heard, a `cfg80211_internal_bss`.
 pub(super) struct Heard {
@@ -521,7 +526,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         let Some(bss) = self.selected.as_ref().map(|selected| &selected.bss) else {
             return;
         };
-        let wide = self.wide(bss.channel.band);
+        let widest = self.widest(bss.channel.band);
         let flags = self
             .client
             .channels
@@ -542,15 +547,13 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             return;
         };
         let mut envelope = PowerEnvelope::parse(&bss.elements);
-        match operations.channel(bss.channel, phy::Mode::He, None) {
-            Ok(ap) => {
-                let widest = if wide {
-                    phy::Width::Mhz160
-                } else {
-                    phy::Width::Mhz80
-                };
-                envelope.fit(&ap, &ap.narrowed_to(widest));
-            }
+        let ap = operations
+            .channel(bss.channel, phy::Mode::Eht, None)
+            .ok()
+            .filter(|_| self.eht.is_some())
+            .map_or_else(|| operations.channel(bss.channel, phy::Mode::He, None), Ok);
+        match ap {
+            Ok(ap) => envelope.fit(&ap, &ap.narrowed_to(widest)),
             Err(_) => envelope = PowerEnvelope::none(),
         }
         let bytes = commands::power_constraints(ap_type, &envelope);
@@ -595,11 +598,26 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         let he = negotiated.he.is_some();
         let antennas = queue.antennas();
         let definition = context.definition();
-        let phy = if definition.width == phy::Width::Mhz20 {
+        let eht = negotiated.eht.is_some();
+        // `ieee80211_set_chanreq_ap`: wider OFDMA follows the AP's own channel.
+        let wide_ofdma = eht
+            .then(|| {
+                let vht = negotiated
+                    .local()
+                    .vht()
+                    .zip(negotiated.peer().vht())
+                    .map(|(own, ap)| (own.capability, ap.capability));
+                context
+                    .operations()
+                    .channel(bss.channel, phy::Mode::Eht, vht)
+                    .ok()
+            })
+            .flatten();
+        let phy = if definition.width == phy::Width::Mhz20 && !eht {
             Vec::new()
         } else {
             queue
-                .phy_changed(&definition)
+                .phy_changed(&definition, wide_ofdma.as_ref())
                 .ok_or(Error::Refused("channel width"))?
         };
         let firmware = queue.firmware();
@@ -621,7 +639,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         let mac = MacState {
             address: local,
             he,
-            eht: false,
+            eht,
             aid: None,
             high_priority,
         };
@@ -776,9 +794,8 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                     .map_err(Error::Station)?;
                 if !queue.firmware().supports_capability(BLOCK_ACK_ALLOCATION) {
                     client.unsupported("receive Block Ack on firmware without session allocation");
-                } else if let Err(ba::Error::Station(_) | ba::Error::Stale) = client
-                    .station
-                    .configure_rx_block_ack(MAX_AMPDU_BUF_HE, true)
+                } else if let Err(ba::Error::Station(_) | ba::Error::Stale) =
+                    client.station.configure_rx_block_ack(RECEIVE_WINDOW, true)
                 {
                     client.unsupported("receive Block Ack on this association");
                 }
@@ -1478,6 +1495,13 @@ fn ap_he(context: &AssociationContext) -> Option<&phy::He> {
     negotiated.peer().he()
 }
 
+/// The AP's EHT capabilities, where EHT was negotiated.
+fn ap_eht(context: &AssociationContext) -> Option<&phy::Eht> {
+    let negotiated = context.negotiated();
+    negotiated.eht.as_ref()?;
+    negotiated.peer().eht()
+}
+
 /// `ieee80211_assoc_config_link`'s HE half, for a link.
 fn link_he(context: &AssociationContext) -> Option<LinkHe> {
     let he = ap_he(context)?;
@@ -1500,23 +1524,28 @@ fn peer_he(context: &AssociationContext) -> Option<PeerHe> {
     Some(PeerHe {
         ack_enabled: he.mac[2] & ACK_ENABLED != 0,
         random_access: context.operations().uora.is_some(),
-        packet_extension: commands::packet_extension(he),
+        packet_extension: commands::packet_extension(he, ap_eht(context)),
         control: commands::control_flags(&he.mac),
     })
+}
+
+/// What a station's capability elements read of the device.
+#[derive(Clone, Copy, Debug)]
+struct Device {
+    family: Family,
+    radio: Rf,
+    /// The transmit and receive antennas.
+    chains: (u32, u32),
+    /// A radio with EHT's limits.
+    eht: Option<EhtLimits>,
 }
 
 /// `iwl_init_ht_hw_capab`, `iwl_init_vht_hw_capab` and mac80211's SMPS-off
 /// HT capabilities for a device of `tx`, `rx` chains, as an association names
 /// them.
-fn capability_elements(
-    band: Band,
-    family: Family,
-    radio: Rf,
-    chains: (u32, u32),
-    wide: bool,
-) -> Vec<u8> {
-    let mut elements = probe_elements(band, family, radio, chains, wide);
-    if family == Family::Ax200 {
+fn capability_elements(band: Band, device: Device, widest: phy::Width) -> Vec<u8> {
+    let mut elements = probe_elements(band, device, widest);
+    if device.family == Family::Ax200 {
         // `iwl_vendor_caps`: Intel's capabilities, with improved HE feedback.
         elements.extend_from_slice(&[221, 6, 0x00, 0x17, 0x35, 8, 1, 0]);
     }
@@ -1526,13 +1555,15 @@ fn capability_elements(
 }
 
 /// The rates and capabilities a probe names, `ieee80211_build_preq_ies_band`.
-fn probe_elements(
-    band: Band,
-    family: Family,
-    radio: Rf,
-    chains: (u32, u32),
-    wide: bool,
-) -> Vec<u8> {
+fn probe_elements(band: Band, device: Device, widest: phy::Width) -> Vec<u8> {
+    let Device {
+        family,
+        radio,
+        chains,
+        eht,
+    } = device;
+    let wide = widest != phy::Width::Mhz80;
+    let two_streams = chains.0 & chains.1 == 3;
     let (tx, rx) = (chains.0.count_ones(), chains.1.count_ones());
     let mut elements = Vec::new();
     let mut element = |id: u8, body: &[u8]| {
@@ -1590,22 +1621,46 @@ fn probe_elements(
         band,
         family,
         radio,
-        chains.0 & chains.1 == 3,
+        two_streams,
         wide,
+        eht.is_some(),
     ));
     if band == Band::Ghz6 {
         elements.extend(he::six_ghz_capability(tx, rx));
+    }
+    if let Some(limits) = eht {
+        elements.extend(eht::capability(band, limits, two_streams, widest));
     }
     elements
 }
 
 impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
-    /// Whether a channel of `band` takes 160 MHz.
-    fn wide(&self, band: Band) -> bool {
-        self.client
-            .channels
-            .iter()
-            .any(|(channel, flags)| channel.band == band && flags & NO_160MHZ == 0)
+    fn device(&self) -> Device {
+        Device {
+            family: self.family,
+            radio: self.radio,
+            chains: self.chains,
+            eht: self.eht,
+        }
+    }
+
+    /// The widest channel `band` offers this device. 320 MHz is EHT's, and
+    /// 6 GHz's alone.
+    fn widest(&self, band: Band) -> phy::Width {
+        let open = |closed: u32| {
+            self.client
+                .channels
+                .iter()
+                .any(|(channel, flags)| channel.band == band && flags & closed == 0)
+        };
+        let eht = self.eht.is_some_and(EhtLimits::reaches_320);
+        if !open(NO_160MHZ) {
+            phy::Width::Mhz80
+        } else if eht && band == Band::Ghz6 && open(NO_160MHZ | NO_320MHZ) {
+            phy::Width::Mhz320
+        } else {
+            phy::Width::Mhz160
+        }
     }
 
     /// What firmware's probes radiate: its lowest legacy rate of each band,
@@ -1639,8 +1694,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             .regulatory
             .as_ref()
             .ok_or(Error::Refused("scan"))?;
-        let elements =
-            |band| probe_elements(band, self.family, self.radio, self.chains, self.wide(band));
+        let elements = |band| probe_elements(band, self.device(), self.widest(band));
         Ok(boot::Probe {
             elements: [Band::Ghz2, Band::Ghz5, Band::Ghz6].map(elements),
             profiles: self.probe_profiles(country),
@@ -1760,8 +1814,7 @@ impl<Q: BootIo, B: BiosIo> Radio for Wifi<Q, B> {
     }
 
     fn advertisement(&self, band: Band) -> Result<Advertisement, Error> {
-        let elements =
-            capability_elements(band, self.family, self.radio, self.chains, self.wide(band));
+        let elements = capability_elements(band, self.device(), self.widest(band));
         let capabilities = Capabilities::parse(band, Role::Station, &elements)
             .map_err(|_| Error::Refused("advertisement"))?;
         Ok(Advertisement {
@@ -2149,7 +2202,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         let mac = MacState {
             address: self.address,
             he: negotiated.he.is_some(),
-            eht: false,
+            eht: negotiated.eht.is_some(),
             aid: Some(context.response().aid),
             high_priority: false,
         };

@@ -120,6 +120,7 @@ impl Csr for Model {
 }
 fn profile(family: Family) -> Profile {
     Profile::select(Observed {
+        link_speed: 3,
         silicon: Default::default(),
         vendor: 0x8086,
         device: if family == Family::Ax200 {
@@ -445,6 +446,7 @@ fn an_integrated_22000_device_gates_power_between_its_reset_and_power_up() {
     let mut model = Model::new(Family::Ax200);
     model.registers.insert(HW_REV, 0x332);
     let profile = Profile::select(Observed {
+        link_speed: 3,
         device: 0x06f0,
         hardware_revision: 0x332,
         subsystem_device: 0x70,
@@ -481,6 +483,7 @@ fn wifi_7(model: &mut Model) -> Profile {
     model.registers.insert(HW_REV, 0x472);
     model.registers.insert(RF_ID, 0x112200);
     Profile::select(Observed {
+        link_speed: 3,
         device: 0x272b,
         hardware_revision: 0x472,
         radio_id: 0x112200,
