@@ -1044,8 +1044,7 @@ void stela_depth_stencil_record(id descriptor, StelaDepthStencilRecord *record)
 	StelaGPUCounterSampleBuffer *buffer = [[StelaGPUCounterSampleBuffer alloc] initWithDevice:self
 											   handle:response.handle];
 	buffer->_sampleCount = request.sample_count;
-	/* A statistic sample is one value per statistic; a timestamp is one. */
-	buffer->_valuesPerSample = 1;
+	buffer->_valuesPerSample = set->_code == StelaCounterSetCodeStatistic ? STELA_STATISTIC_SAMPLE_VALUES : 1;
 	buffer.label = [descriptor label];
 	return buffer;
 }

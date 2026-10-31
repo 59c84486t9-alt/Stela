@@ -818,6 +818,13 @@ option_set! {
 
 /// The offset of a resource the heap places itself.
 pub const AUTOMATIC: u64 = u64::MAX;
+/// `ResolveCounters`' 64-bit values per sample of the statistic counter set; a
+/// timestamp sample is one.
+pub const STATISTIC_SAMPLE_VALUES: u64 = 8;
+const _: () = assert!(
+    STATISTIC_SAMPLE_VALUES * size_of::<u64>() as u64
+        == crate::metal::command_buffer::counters::STATISTIC_SAMPLE_BYTES
+);
 
 /// A binding, member or element without a `TypeInfo`: a datum.
 pub const NO_TYPE: u32 = u32::MAX;
