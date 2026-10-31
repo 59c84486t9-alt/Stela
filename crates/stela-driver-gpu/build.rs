@@ -46,7 +46,7 @@ fn main() {
         return;
     }
     #[cfg(feature = "linux-kernel")]
-    let (mut linux, mut tests) = (native::Linux::new(), native::Tests::default());
+    let (linux, mut tests) = (native::Linux::new(), native::Tests::default());
     #[cfg(feature = "linux-kernel")]
     linux.tests(&mut tests);
     #[cfg(feature = "amd-port")]
@@ -57,6 +57,8 @@ fn main() {
     nvidia::port();
     #[cfg(feature = "intel-port")]
     intel::port(&linux, &mut tests);
+    #[cfg(feature = "nouveau-port")]
+    let mut linux = linux;
     #[cfg(feature = "nouveau-port")]
     nouveau::port(&mut linux);
     #[cfg(feature = "linux-kernel")]

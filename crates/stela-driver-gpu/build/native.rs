@@ -136,7 +136,7 @@ const DRM: &str = "../../third_party/linux/drivers/gpu/drm";
 /// DRM's core and the helpers nouveau selects, as Linux's `drm-y`,
 /// `drm_kms_helper-y`, `ttm-y`, `gpu-sched-y` and `drm_display_helper-y`
 /// compose them under Stela's Kconfig.
-#[cfg(feature = "linux-kernel")]
+#[cfg(any(feature = "nouveau-port", feature = "amd-port"))]
 const DRM_SOURCES: &[&str] = &[
     "drm_atomic",
     "drm_atomic_uapi",
@@ -220,7 +220,7 @@ const DRM_SOURCES: &[&str] = &[
 ];
 
 /// Linux's fences, reservation objects and shared buffers.
-#[cfg(feature = "linux-kernel")]
+#[cfg(any(feature = "nouveau-port", feature = "amd-port"))]
 const DMA_BUF_SOURCES: &[&str] = &[
     "dma-buf",
     "dma-buf-mapping",
@@ -278,7 +278,7 @@ impl Linux {
         let crc_tables = linux_crc::tables();
         // Unchanged shared helpers use Linux's arithmetic types. Stela's
         // extra conversion diagnostics remain confined to its own source.
-        let mut upstream = vec![
+        let upstream = vec![
             PathBuf::from(format!("{LINUX}/lib/string.c")),
             PathBuf::from(format!("{LINUX}/lib/hexdump.c")),
             PathBuf::from(format!("{LINUX}/lib/ratelimit.c")),
@@ -312,6 +312,8 @@ impl Linux {
             PathBuf::from(format!("{DRM}/drm_vma_manager.c")),
         ];
         let mut hosted_upstream = upstream.clone();
+        #[cfg(any(feature = "nouveau-port", feature = "amd-port"))]
+        let mut upstream = upstream;
         #[cfg(any(feature = "nouveau-port", feature = "amd-port"))]
         {
             upstream.extend(
