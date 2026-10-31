@@ -713,6 +713,10 @@ fn run_guest(boot: Boot<'_>, host: OpenedHost, storage: Storage, processors: Pro
         loaded_source.as_ref(),
         tree,
     );
+    // This function never returns, so nothing else frees the bundle: guest
+    // memory and the devices now hold what they need of it, and the heap's
+    // room keeps the code caches from evicting.
+    drop(built);
     let processor_power = connect_processor_power(
         &mut devices,
         topology_source.as_ref(),
