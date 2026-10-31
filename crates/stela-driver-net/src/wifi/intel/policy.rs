@@ -194,6 +194,15 @@ pub(crate) mod tests {
     /// A wireless-regdb v20 database of `countries`, each a list of rules
     /// whose maximum width is 80 MHz or the whole rule, if narrower.
     pub(crate) fn regdb(countries: &[([u8; 2], &[Rule])]) -> Database {
+        regdb_limited(countries, None)
+    }
+
+    /// [`regdb`] with each WMM access category of each rule held to `limit`,
+    /// four bytes of wireless-regdb's `wmm_ac`.
+    pub(crate) fn regdb_limited(
+        countries: &[([u8; 2], &[Rule])],
+        limit: Option<[u8; 4]>,
+    ) -> Database {
         let mut bytes = Vec::from(*b"RGDB");
         bytes.extend(20u32.to_be_bytes());
         let table = bytes.len();
@@ -210,11 +219,16 @@ pub(crate) mod tests {
                 let at = bytes.len();
                 bytes[pointers + rule * 2..pointers + rule * 2 + 2]
                     .copy_from_slice(&((at / 4) as u16).to_be_bytes());
-                bytes.extend([16, flags]);
+                bytes.extend([if limit.is_some() { 20 } else { 16 }, flags]);
                 bytes.extend(eirp.to_be_bytes());
                 bytes.extend(start.to_be_bytes());
                 bytes.extend(end.to_be_bytes());
                 bytes.extend((end - start).min(80_000).to_be_bytes());
+                if let Some(limit) = limit {
+                    bytes.extend([0, 0]);
+                    bytes.extend((((at + 20) / 4) as u16).to_be_bytes());
+                    bytes.extend(limit.repeat(8));
+                }
             }
         }
         let digest = Sha256::digest(&bytes).into();

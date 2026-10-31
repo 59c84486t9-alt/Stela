@@ -191,6 +191,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         let edca = heard
             .and_then(|heard| heard.edca)
             .map_or_else(|| negotiated.edca(), |(_, edca)| edca);
+        let edca = country::limited_edca(self.client.regulatory.as_ref(), &definition, edca);
         let protection = heard.map_or_else(
             || commands::protection(&bss.elements),
             |heard| heard.protection,

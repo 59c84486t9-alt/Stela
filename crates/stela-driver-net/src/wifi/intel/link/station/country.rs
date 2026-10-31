@@ -6,12 +6,14 @@
 //! `iwl_mld_handle_update_mcc`: firmware says the country it now sees, the
 //! host asks it for that country's channels, and what comes back replaces the
 //! rules, with `reg_check_channels`' minute before a link they bar goes.
+//! `ieee80211_regulatory_limit_wmm_params` holds a link's queues to its rules.
 use super::*;
 use crate::wifi::{
     intel::{mcc, policy},
+    regulatory::wmm,
     station::{
         operations::{ChannelDefinition, mhz},
-        phy::Width,
+        phy::{AccessCategory, Width},
     },
 };
 
@@ -48,6 +50,21 @@ fn usable(channels: &[(Channel, u32)], definition: &ChannelDefinition) -> bool {
             definition.punctured >> index & 1 != 0
                 || flags(first + index * 20).is_some_and(|flags| flags & closed == 0)
         })
+}
+
+/// `edca` under the rule of `definition`'s control channel. Parameters that
+/// contradict themselves stay the AP's, which `ieee80211_sta_wmm_params`
+/// settled before.
+pub(super) fn limited_edca(
+    country: Option<&database::Country>,
+    definition: &ChannelDefinition,
+    edca: [AccessCategory; 4],
+) -> [AccessCategory; 4] {
+    let center = u32::from(definition.control.frequency_mhz) * 1000;
+    let limit = country
+        .and_then(|country| country.rule(center, 20_000))
+        .and_then(|rule| rule.wmm.as_ref());
+    wmm::station(&edca, limit).unwrap_or(edca)
 }
 
 impl Client {
@@ -147,7 +164,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wifi::Band;
+    use crate::wifi::{Band, intel::policy::tests::regdb_limited};
 
     fn channel(frequency_mhz: u16) -> Channel {
         Channel {
@@ -166,6 +183,36 @@ mod tests {
             center2_mhz: None,
             punctured,
         }
+    }
+
+    #[test]
+    fn a_countrys_wmm_rule_holds_the_queues_the_ap_set() {
+        // CWmin 31, CWmax 1023, AIFSN 7 and 2 ms of channel occupancy.
+        let database = regdb_limited(
+            &[(*b"DE", &[(5_170_000, 5_250_000, 0, 2000)])],
+            Some([0x5a, 7, 0, 2]),
+        );
+        let country = database.select(*b"DE").unwrap();
+        let edca = [0, 1, 2, 3].map(|aci| AccessCategory {
+            aci,
+            admission_control: false,
+            aifsn: 2 + aci,
+            ecw_min: 4,
+            ecw_max: 11,
+            txop_32us: 94,
+        });
+        let limited = limited_edca(Some(&country), &eighty(0), edca);
+        assert_eq!(limited[0].aifsn, 7);
+        assert_eq!(limited[0].ecw_min, 5);
+        assert_eq!(limited[0].ecw_max, 11, "what the AP set above the rule");
+        assert_eq!(limited[0].txop_32us, 62);
+        assert_eq!(limited_edca(None, &eighty(0), edca), edca);
+        let elsewhere = ChannelDefinition {
+            control: channel(5745),
+            center1_mhz: 5745,
+            ..eighty(0)
+        };
+        assert_eq!(limited_edca(Some(&country), &elsewhere, edca), edca);
     }
 
     #[test]
