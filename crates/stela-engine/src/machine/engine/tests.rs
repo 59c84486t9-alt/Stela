@@ -2552,7 +2552,7 @@ fn a_tlbi_by_asid_forgets_only_that_asids_contexts() {
     };
     let (five, six) = (contexts(&mut machine, 5), contexts(&mut machine, 6));
     let upper = machine.fetch_epoch(1);
-    machine.forget_asid(0..=0, 5, 0);
+    machine.forget_asid(0..=0, 5);
     assert_eq!(machine.fetch_epoch(1), upper);
     assert_eq!(contexts(&mut machine, 6), six);
     let renewed = contexts(&mut machine, 5);
@@ -2697,12 +2697,86 @@ fn a_tlbi_by_va_drops_the_lookup_entries_of_its_leaf_in_every_context() {
         machine.targets[target_slot(&machine, PAGE + 0x4000)].pc,
         PAGE + 0x4000
     );
-    // A leaf the table could not be scanned for forgets the half's
-    // contexts instead; the other half's stay.
-    machine.fetch_leaves[0] = 1 << 30;
+    // Another leaf of a size fetched from before reaches nothing, however
+    // near it lies; the leaf holding a TLBI's address reaches all its PCs.
+    const LEAF: u64 = 0x20_0000;
+    machine.fetched_through(0, LEAF + 0x1000, LEAF, true);
+    let (near, inside) = (2 * LEAF - 4, 2 * LEAF);
+    for pc in [near, inside] {
+        let slot = target_slot(&machine, pc);
+        machine.targets[slot] = chain::LookupEntry {
+            pc,
+            context: 1,
+            entry: 1,
+            block: 0,
+            targets: 1,
+        };
+    }
+    tlbi(&mut machine, Reach::Containing(3 * LEAF));
+    assert_eq!(machine.targets[target_slot(&machine, near)].pc, near);
+    tlbi(&mut machine, Reach::Containing(LEAF + 0x8000));
+    assert_eq!(machine.targets[target_slot(&machine, near)].pc, 0);
+    assert_eq!(machine.targets[target_slot(&machine, inside)].pc, inside);
+    // A leaf too wide to clear slot by slot scans the table, and no context
+    // goes with it.
+    machine.fetched_through(0, 0, 1 << 30, true);
+    let scans = machine.statistics.lookup_forgets[2];
     tlbi(&mut machine, Reach::Containing(PAGE));
-    let forgotten = machine.contexts(2, variant);
-    assert!(forgotten[0] != contexts[0] && forgotten[1] == contexts[1]);
+    assert_eq!(machine.targets[target_slot(&machine, inside)].pc, 0);
+    assert_eq!(machine.statistics.lookup_forgets[2], scans + 1);
+    assert_eq!(machine.contexts(2, variant), contexts);
+}
+
+/// A TLBI by VA of one process leaves the other processes' entries of the
+/// same VAs, by probe or by table scan, unless a global page shares them.
+#[test]
+fn a_tlbi_by_va_and_asid_leaves_the_entries_of_other_asids() {
+    use mmu::tlbi::{Everywhere, Reach};
+    const MSR_TTBR0_EL1_X0: u32 = 0xd518_2000;
+    const PC: u64 = 0x8000;
+    let mut machine = machine(&[]);
+    let variant = machine.current_variant(false, false);
+    let el = machine.cpu.pstate.el;
+    let ttbr0 = machine.cpu.read(SystemRegister::TTBR0_EL1);
+    let mut context = |asid: u64| {
+        machine.cpu.state.x[0] = ttbr0 & !(0xffff << 48) | asid << 48;
+        machine.system_instruction(MSR_TTBR0_EL1_X0).unwrap();
+        machine.contexts(el, variant)[0]
+    };
+    let (five, six) = (context(5), context(6));
+    let fill = |machine: &mut Machine<FakeHost, NoDevices>| {
+        for context in [five, six] {
+            machine.targets[chain::lookup_slot(PC, context)] = chain::LookupEntry {
+                pc: PC,
+                context,
+                entry: 1,
+                block: 0,
+                targets: 1,
+            };
+        }
+    };
+    let held = |machine: &Machine<FakeHost, NoDevices>| {
+        [five, six].map(|context| machine.targets[chain::lookup_slot(PC, context)].pc == PC)
+    };
+    let tlbi = |machine: &mut Machine<FakeHost, NoDevices>| {
+        let reach = Reach::Containing(PC);
+        machine.tlb_maintained(reach, Everywhere::Addresses(reach), Some(5));
+    };
+    machine.fetched_through(0, PC, 0x4000, false);
+    fill(&mut machine);
+    tlbi(&mut machine);
+    assert_eq!(held(&machine), [false, true]);
+    // A span too wide to probe scans the table, as narrowly.
+    machine.fetched_through(0, 0, 1 << 40, false);
+    fill(&mut machine);
+    tlbi(&mut machine);
+    assert_eq!(held(&machine), [false, true]);
+    assert_eq!(machine.statistics.lookup_forgets[2], 1);
+    // A global page in the span is every process's.
+    machine.fetched_through(0, PC, 0x4000, true);
+    fill(&mut machine);
+    tlbi(&mut machine);
+    assert_eq!(held(&machine), [false, false]);
 }
 
 #[test]

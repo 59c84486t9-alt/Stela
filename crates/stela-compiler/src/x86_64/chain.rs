@@ -168,6 +168,13 @@ pub struct LookupEntry {
     pub targets: u32,
 }
 
+impl LookupEntry {
+    /// Whether this is an entry of `pcs` in a context of `salts`.
+    fn reached(&self, pcs: &core::ops::RangeInclusive<u64>, salts: u64) -> bool {
+        pcs.contains(&self.pc) && salts >> (self.context % LOOKUP_SALTS as u64) & 1 != 0
+    }
+}
+
 /// The entries of one set, a cache line, which a thunk probes from the
 /// target's slot to the slot beside it.
 #[repr(C, align(64))]
@@ -229,10 +236,21 @@ impl LookupTable {
         self[slot] = entry;
     }
 
-    /// Forget what `slot`'s set holds of the PCs in `pcs`.
-    pub fn forget(&mut self, slot: usize, pcs: core::ops::RangeInclusive<u64>) {
+    /// Forget the entries of the PCs in `pcs` in the contexts of `salts`, a
+    /// mask of salt numbers.
+    pub fn forget_range(&mut self, pcs: core::ops::RangeInclusive<u64>, salts: u64) {
+        for entry in self.0.iter_mut().flat_map(|set| &mut set.0) {
+            if entry.reached(&pcs, salts) {
+                *entry = LookupEntry::default();
+            }
+        }
+    }
+
+    /// Forget what `slot`'s set holds of the PCs in `pcs` in the contexts of
+    /// `salts`.
+    pub fn forget(&mut self, slot: usize, pcs: core::ops::RangeInclusive<u64>, salts: u64) {
         for slot in [slot, neighbour(slot)] {
-            if pcs.contains(&self[slot].pc) {
+            if self[slot].reached(&pcs, salts) {
                 self[slot] = LookupEntry::default();
             }
         }

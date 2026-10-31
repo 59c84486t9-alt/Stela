@@ -3,11 +3,15 @@
 
 use super::*;
 
-/// The word and bit of the page of `pc` in a filter of [`FETCHED_PAGES`] bits.
-fn fetched_page_bit(pc: u64) -> (usize, u64) {
-    let page = pc / FETCH_PAGE;
-    let bit = (page ^ page >> 16) as usize & (FETCHED_PAGES - 1);
-    (bit / 64, 1 << (bit % 64))
+/// The word and bit of the two positions of the leaf of `size` bytes at
+/// `base` in a filter of [`FETCHED_LEAVES`] bits. A base's low bits are clear,
+/// so the size's exponent keeps leaves of one base apart.
+fn fetched_leaf_bits(base: u64, size: u64) -> [(usize, u64); 2] {
+    let hash = (base | u64::from(size.trailing_zeros())).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    [hash >> 40, hash >> 16].map(|bits| {
+        let bit = bits as usize & (FETCHED_LEAVES - 1);
+        (bit / 64, 1 << (bit % 64))
+    })
 }
 
 impl<H: Host, D: Devices> Machine<H, D> {
@@ -77,14 +81,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// Forget the contexts of `halves` that translate `asid`: what a TLBI of
     /// one process leaves of the others', which their entries stay good for.
     /// ASIDs compare by the eight bits every TCR.AS gives them.
-    pub(super) fn forget_asid(
-        &mut self,
-        halves: core::ops::RangeInclusive<usize>,
-        asid: u16,
-        cause: usize,
-    ) {
+    pub(super) fn forget_asid(&mut self, halves: core::ops::RangeInclusive<usize>, asid: u16) {
         for half in halves {
-            self.statistics.lookup_forgets[cause] += 1;
+            self.statistics.lookup_forgets[0] += 1;
             self.spaces[half].retain(|space| !same_asid(&space.inputs.0, asid));
             self.recent[half] = [None; RECENT];
         }
@@ -107,9 +106,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
             self.statistics.lookup_forgets[cause] += 1;
             self.spaces[half].clear();
             self.recent[half] = [None; RECENT];
-            self.fetch_leaves[half] = 0;
+            self.fetched_sizes[half] = 0;
             self.private_fetches[half] = false;
-            self.fetched_pages[half].fill(0);
+            self.fetched_leaves[half].fill(0);
             if half == 0 {
                 self.lower_globals = NO_GLOBALS;
             }
@@ -124,9 +123,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if half == 1 && !global && !self.private_fetches[1] {
             self.forget_spaces(1..=1, 3);
         }
-        let (word, bit) = fetched_page_bit(pc);
-        self.fetched_pages[half][word] |= bit;
-        self.fetch_leaves[half] = self.fetch_leaves[half].max(size);
+        let leaf = size.next_power_of_two();
+        for (word, bit) in fetched_leaf_bits(pc & !(leaf - 1), leaf) {
+            self.fetched_leaves[half][word] |= bit;
+        }
+        self.fetched_sizes[half] |= leaf;
         self.private_fetches[half] |= !global;
         if half == 0 && global {
             let (first, last) = self.lower_globals;
@@ -134,25 +135,40 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
     }
 
+    /// Whether a fetch of `half` translated through the leaf of `size` bytes
+    /// at `base`, or through one that shares its filter bits.
+    fn leaf_fetched(&self, half: usize, base: u64, size: u64) -> bool {
+        fetched_leaf_bits(base, size)
+            .iter()
+            .all(|&(word, bit)| self.fetched_leaves[half][word] & bit != 0)
+    }
+
     /// The span of `half` a TLBI of `first..=last` can reach of what it
-    /// fetched: the leaves around them, as large as the largest one a fetch
-    /// of the half translated through, if any page of those was fetched from.
+    /// fetched: the leaves around them that fetches translated through, at
+    /// each size such leaves had.
     fn fetched_span(&self, half: usize, first: u64, last: u64) -> Option<(u64, u64)> {
         const UPPER: u64 = !0 << 55;
         let (low, high) = [(0, !UPPER), (UPPER, u64::MAX)][half];
-        let leaf = self.fetch_leaves[half];
-        if leaf == 0 || last < low || first > high {
+        if last < low || first > high {
             return None;
         }
-        let mask = leaf.next_power_of_two() - 1;
-        let (first, last) = (first.max(low) & !mask, last.min(high) | mask);
-        let pages = (last - first) / FETCH_PAGE;
-        let fetched = pages >= FETCHED_PAGES as u64
-            || (0..=pages).any(|page| {
-                let (word, bit) = fetched_page_bit(first + page * FETCH_PAGE);
-                self.fetched_pages[half][word] & bit != 0
-            });
-        fetched.then_some((first, last))
+        let (first, last) = (first.max(low), last.min(high));
+        let mut span: Option<(u64, u64)> = None;
+        let mut sizes = self.fetched_sizes[half];
+        while sizes != 0 {
+            let size = sizes.isolate_lowest_one();
+            sizes &= sizes - 1;
+            let (start, end) = (first & !(size - 1), last | (size - 1));
+            let leaves = (end - start) / size;
+            let fetched = leaves >= SCANNED_LEAVES
+                || (0..=leaves).any(|leaf| self.leaf_fetched(half, start + leaf * size, size));
+            if fetched {
+                span = Some(span.map_or((start, end), |(lowest, highest)| {
+                    (lowest.min(start), highest.max(end))
+                }));
+            }
+        }
+        span
     }
 
     /// Drop the cached fetches of the pages a TLBI reaches in the current
@@ -180,11 +196,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
     }
 
-    /// Drop the lookup entries, of every context, of the PCs a TLBI by VA
-    /// reaches ([`Self::fetched_span`]), or of `asid`'s contexts while no
-    /// global page was fetched in its span of the lower half, which only
-    /// such a page shares. A half whose probes would cover the table forgets
-    /// those contexts instead.
+    /// Drop the lookup entries of the PCs a TLBI by VA reaches
+    /// ([`Self::fetched_span`]): those of every context, or of `asid`'s alone
+    /// while no global page was fetched in its span of the lower half, which
+    /// only such a page shares. A process's exit reaches the shared libraries
+    /// this way, which every other process's entries still hold good for.
+    /// Probes that would cover the table scan it instead.
+    /// Contexts stay: the hot PCs of one that went would each cost an exit on
+    /// every PE that runs them, far more than a scan.
     pub(super) fn forget_lookups(&mut self, reach: mmu::tlbi::Reach, asid: Option<u16>) {
         let (first, last) = match reach {
             mmu::tlbi::Reach::Nothing => return,
@@ -198,22 +217,25 @@ impl<H: Host, D: Devices> Machine<H, D> {
             };
             let (global_first, global_last) = self.lower_globals;
             let scoped = asid.filter(|_| half == 0 && (last < global_first || first > global_last));
-            let salts = match scoped {
-                Some(asid) => self.asid_salts(half, asid),
-                None => self.live_salts(half),
-            };
-            let pcs = (last - first) / INSTRUCTION + 1;
-            if pcs.saturating_mul(salts.count_ones().into()) >= (chain::LOOKUP_ENTRIES / 8) as u64 {
-                match scoped {
-                    Some(asid) => self.forget_asid(half..=half, asid, 2),
-                    None => self.forget_spaces(half..=half, 2),
+            let (salts, reached) = match scoped {
+                Some(asid) => {
+                    let salts = self.asid_salts(half, asid);
+                    (salts, salts)
                 }
+                None => (self.live_salts(half), u64::MAX),
+            };
+            // Two consecutive PCs from an even one share a set.
+            let sets = (last - first) / (2 * INSTRUCTION) + 1;
+            if sets.saturating_mul(salts.count_ones().into()) >= (chain::LOOKUP_ENTRIES / 2) as u64
+            {
+                self.statistics.lookup_forgets[2] += 1;
+                self.targets.forget_range(first..=last, reached);
                 continue;
             }
             for salt in (0..chain::LOOKUP_SALTS as u64).filter(|salt| salts >> salt & 1 != 0) {
-                for pc in (first..=last).step_by(INSTRUCTION as usize) {
+                for pc in (first..=last).step_by(2 * INSTRUCTION as usize) {
                     self.targets
-                        .forget(chain::lookup_slot(pc, salt), first..=last);
+                        .forget(chain::lookup_slot(pc, salt), first..=last, reached);
                 }
             }
         }
@@ -279,7 +301,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             mmu::tlbi::Everywhere::NonGlobal => {
                 let last = usize::from(self.private_fetches[1]);
                 match asid {
-                    Some(asid) => self.forget_asid(0..=last, asid, 0),
+                    Some(asid) => self.forget_asid(0..=last, asid),
                     None => self.forget_spaces(0..=last, 0),
                 }
             }

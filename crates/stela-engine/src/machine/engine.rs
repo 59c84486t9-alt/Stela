@@ -163,8 +163,11 @@ const MAX_BLOCK_BYTES: u64 = block::MAX_BLOCK_INSTRUCTIONS as u64 * INSTRUCTION;
 /// most blocks end within them, and the rest compile from the whole window.
 const FIRST_WINDOW_BYTES: usize = 32 * INSTRUCTION as usize;
 const FETCH_CACHE: usize = 1024;
-/// Bits in each half's filter of the pages fetched from.
-const FETCHED_PAGES: usize = 1 << 16;
+/// Bits in each half's filter of the leaves fetched through.
+const FETCHED_LEAVES: usize = 1 << 21;
+/// The leaves of one size a TLBI is checked against one by one; one that
+/// reaches more counts as reaching what was fetched.
+const SCANNED_LEAVES: u64 = 1 << 16;
 /// The level a fetch the host refuses (`Host::fetch_permitted`) reports its
 /// permission fault at: the host refuses whole pages, a level 3 leaf's.
 const HOST_REFUSED_FETCH_LEVEL: i8 = 3;
@@ -699,18 +702,18 @@ pub struct Machine<H: Host, D: Devices> {
     spaces: [Vec<Space>; 2],
     /// Each half's recent contexts, most recent first.
     recent: [[Option<Recent>; RECENT]; 2],
-    /// The largest leaf a fetch of each half translated through since its
-    /// contexts were last forgotten, 0 for none, and whether one was
-    /// non-global: what a TLBI by VA or ASID reaches of its lookup entries.
-    fetch_leaves: [u64; 2],
+    /// The leaf sizes a fetch of each half translated through since its
+    /// contexts were last forgotten, a bit per power of two, and whether one
+    /// was non-global: what a TLBI by VA or ASID reaches of its lookup entries.
+    fetched_sizes: [u64; 2],
     private_fetches: [bool; 2],
     /// The first and last addresses of the lower half fetched through a
     /// global page since its contexts were last forgotten, or [`NO_GLOBALS`].
     lower_globals: (u64, u64),
-    /// A filter of the pages each half fetched from since its contexts were
-    /// last forgotten: a TLBI of any other page reaches no lookup entry and
-    /// no cached fetch, as most by far do not.
-    fetched_pages: [Vec<u64>; 2],
+    /// A filter of the leaves each half fetched through since its contexts
+    /// were last forgotten: a TLBI of any other leaf reaches no lookup entry
+    /// and no cached fetch, as most by far do not.
+    fetched_leaves: [Vec<u64>; 2],
     /// The registers of the stored cells, in the order of the cells.
     stored_reads: Vec<Encoding>,
     /// The page this PE posted an IC IVAU of since its last DSB.
@@ -960,10 +963,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
             targets: chain::LookupTable::new(),
             spaces: [Vec::new(), Vec::new()],
             recent: [[None; RECENT]; 2],
-            fetch_leaves: [0; 2],
+            fetched_sizes: [0; 2],
             private_fetches: [false; 2],
             lower_globals: NO_GLOBALS,
-            fetched_pages: [vec![0; FETCHED_PAGES / 64], vec![0; FETCHED_PAGES / 64]],
+            fetched_leaves: [vec![0; FETCHED_LEAVES / 64], vec![0; FETCHED_LEAVES / 64]],
             stored_reads: Vec::new(),
             code_posted: None,
             plain_read: None,

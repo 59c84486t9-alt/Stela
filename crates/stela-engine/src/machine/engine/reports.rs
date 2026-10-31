@@ -367,11 +367,11 @@ pub struct Statistics {
     /// installed yet, the target's table slot named another PC, or another
     /// context, the chain budget was spent, or the entry refused the BTYPE.
     pub lookup_misses: [u64; 5],
-    /// Halves whose lookup contexts were forgotten, by cause: an ASIDE1, a
-    /// TLBI of everything, a TLBI by VA through a leaf too large to clear
-    /// entry by entry, and any other change (an unscoped translation
-    /// change, the host's fetch permissions, the upper half's first
-    /// non-global fetch).
+    /// Forgotten lookup entries: halves whose contexts went for an ASIDE1 or
+    /// a TLBI of everything, scans of the table for a TLBI by VA too wide to
+    /// clear slot by slot, and halves whose contexts went for any other
+    /// change (an unscoped translation change, the host's fetch permissions,
+    /// the upper half's first non-global fetch).
     pub lookup_forgets: [u64; 4],
     pub compiled: u64,
     /// Counter ticks spent analyzing and compiling `compiled`.

@@ -271,8 +271,8 @@ impl ExitsSeen {
             let separator = if index == 0 { " misses=" } else { "," };
             output::arguments(format_args!("{separator}{}", now - last));
         }
-        // Halves forgotten by an ASIDE1, a TLBI of everything, a TLBI by VA
-        // through a large leaf, anything else.
+        // Halves forgotten by an ASIDE1, a TLBI of everything, table scans
+        // for a wide TLBI by VA, halves forgotten by anything else.
         for (index, (now, last)) in forgets.iter().zip(&self.forgets).enumerate() {
             let separator = if index == 0 { " forgets=" } else { "," };
             output::arguments(format_args!("{separator}{}", now - last));
