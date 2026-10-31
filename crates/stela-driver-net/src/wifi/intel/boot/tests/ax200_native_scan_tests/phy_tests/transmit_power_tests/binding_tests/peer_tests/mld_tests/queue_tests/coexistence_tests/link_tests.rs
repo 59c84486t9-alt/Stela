@@ -70,6 +70,9 @@ struct Device<'n> {
     block_acks: Vec<Vec<u8>>,
     /// Each scan request.
     scans: Vec<Vec<u8>>,
+    /// The second channel's rules, when they differ from the first's, and the
+    /// AP then only heard from the first scan.
+    second: Option<u32>,
     /// Whether frames are acknowledged in Block Ack notifications alone, as
     /// the firmware reports those it aggregated.
     aggregating: bool,
@@ -134,7 +137,8 @@ impl Device<'_> {
                 };
                 let mut payload = mcc_payload(country, request[2], 51);
                 payload[20..24].copy_from_slice(&self.channel.to_le_bytes());
-                payload[24..28].copy_from_slice(&self.channel.to_le_bytes());
+                let second = self.second.unwrap_or(self.channel);
+                payload[24..28].copy_from_slice(&second.to_le_bytes());
                 payload
             }
             (1 | 5, 0x08) => vec![0x9b],
@@ -172,8 +176,10 @@ impl Device<'_> {
         }
         if (id.group, id.opcode) == (1, 0x0d) {
             self.scans.push(request.to_vec());
-            for ssid in self.beacons.clone() {
-                self.inject(rom, &beacon(ssid, self.quality, self.elements));
+            if self.second.is_none() || self.scans.len() == 1 {
+                for ssid in self.beacons.clone() {
+                    self.inject(rom, &beacon(ssid, self.quality, self.elements));
+                }
             }
             let mut body = [0; 16];
             body[6] = 1;
@@ -377,6 +383,23 @@ fn raise_beside<'n>(
     quality: bool,
     elements: &'static [u8],
 ) -> (Station<Model, ClockBios>, Phase, Device<'n>) {
+    raise_split(
+        native, country, beacons, flags, channel, quality, elements, None,
+    )
+}
+
+/// [`raise_beside`], with [`Device::second`].
+#[expect(clippy::too_many_arguments, reason = "each is a fixture's own knob")]
+fn raise_split<'n>(
+    native: &'n Native,
+    country: Option<[u8; 2]>,
+    beacons: Vec<&'static [u8]>,
+    flags: u8,
+    channel: u32,
+    quality: bool,
+    elements: &'static [u8],
+    second: Option<u32>,
+) -> (Station<Model, ClockBios>, Phase, Device<'n>) {
     let catalog: &'static resources::Catalog = Box::leak(Box::new(catalog_for(
         &profile(),
         Family::Ax200.firmware_name(),
@@ -415,6 +438,7 @@ fn raise_beside<'n>(
         configuration: Vec::new(),
         block_acks: Vec::new(),
         scans: Vec::new(),
+        second,
         aggregating: false,
     };
     device.inject(&boot, &alive);
@@ -1056,6 +1080,23 @@ fn a_scan_probes_where_a_frame_may_start_and_listens_elsewhere() {
     let scan = &device.scans[0];
     assert_eq!(scan[9] & FORCE_PASSIVE, FORCE_PASSIVE);
     assert_eq!(scan[48], 0);
+}
+
+#[test]
+fn a_network_one_scan_part_heard_outlives_the_parts_after_it() {
+    let native = Native::default();
+    let (_, phase, device) = raise_split(
+        &native,
+        Some(*b"US"),
+        vec![b"test"],
+        0,
+        OPEN,
+        true,
+        &[],
+        Some(OPEN & !8),
+    );
+    assert_eq!(device.scans.len(), 2);
+    assert_eq!(phase, Phase::AuthenticationRequired);
 }
 
 /// An AP's HE capabilities, one stream with its ACK and HTC bits, then its

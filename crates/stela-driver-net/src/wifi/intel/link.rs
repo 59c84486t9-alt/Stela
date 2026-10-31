@@ -740,15 +740,18 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         {
             beacons.heard(bss.channel);
         }
-        let observed = Arc::new(association::NativeBssObservation { bss: bss.clone() });
+        let heard = station::Heard {
+            observation: Arc::new(association::NativeBssObservation { bss: bss.clone() }),
+            at: self.clock.now_us(),
+        };
         match self
             .client
             .observed
             .iter_mut()
-            .find(|known| known.bss().bssid == bss.bssid)
+            .find(|known| known.observation.bss().bssid == bss.bssid)
         {
-            Some(known) => *known = observed,
-            None => self.client.observed.push(observed),
+            Some(known) => *known = heard,
+            None => self.client.observed.push(heard),
         }
     }
 }

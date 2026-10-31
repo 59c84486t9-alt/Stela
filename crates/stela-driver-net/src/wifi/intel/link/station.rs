@@ -188,10 +188,19 @@ pub struct ManagementKey {
 }
 
 /// The association's state beside the kept chain.
+/// `IEEE80211_SCAN_RESULT_EXPIRE`.
+const BSS_EXPIRY_US: u64 = 30_000_000;
+
+/// A BSS and when it was last heard, a `cfg80211_internal_bss`.
+pub(super) struct Heard {
+    pub(super) observation: Arc<NativeBssObservation>,
+    pub(super) at: u64,
+}
+
 pub(super) struct Client {
     station: Station,
     pub(super) plan: Option<Plan>,
-    pub(super) observed: Vec<Arc<NativeBssObservation>>,
+    pub(super) observed: Vec<Heard>,
     pub(super) channels: Vec<(Channel, u32)>,
     pub(super) regulatory: Option<database::Country>,
     steps: VecDeque<Step>,
@@ -1352,7 +1361,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         self.client
             .observed
             .get(handle)
-            .cloned()
+            .map(|heard| heard.observation.clone())
             .ok_or(Error::Refused("BSS"))
     }
 }
@@ -1683,7 +1692,11 @@ impl<Q: BootIo, B: BiosIo> Radio for Wifi<Q, B> {
             owner.poll_pre_scan_receive().map_err(Error::Scan)?,
             MpduProgress::Pending | MpduProgress::Backpressure { .. }
         ) {}
-        self.client.observed.clear();
+        // A scan runs in parts, whose results `choose` takes together.
+        let now = self.clock.now_us();
+        self.client
+            .observed
+            .retain(|heard| now.saturating_sub(heard.at) < BSS_EXPIRY_US);
         let started = match probe {
             // SAFETY: `new`'s contract covers the scan's pages.
             Some(probe) => unsafe { owner.start_probing(request, &probe, budget_us, pages) },
@@ -1720,7 +1733,7 @@ impl<Q: BootIo, B: BiosIo> Radio for Wifi<Q, B> {
             .observed
             .iter()
             .enumerate()
-            .map(|(handle, observed)| (handle, observed.bss()))
+            .map(|(handle, heard)| (handle, heard.observation.bss()))
             .collect()
     }
 
