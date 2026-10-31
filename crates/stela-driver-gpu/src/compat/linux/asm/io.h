@@ -8,6 +8,8 @@
 
 void __iomem *ioremap(phys_addr_t offset, size_t size);
 #define ioremap ioremap
+void __iomem *ioremap_wc(phys_addr_t offset, size_t size);
+#define ioremap_wc ioremap_wc
 void iounmap(volatile void __iomem *addr);
 #define iounmap iounmap
 

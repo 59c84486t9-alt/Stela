@@ -7,6 +7,8 @@ use core::{alloc::Layout, ffi::c_void, ptr};
 #[cfg(target_arch = "x86_64")]
 pub mod function;
 pub mod heap;
+#[cfg(feature = "nouveau-port")]
+pub mod nouveau;
 pub mod image;
 pub mod owner;
 pub mod pages;

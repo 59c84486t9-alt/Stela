@@ -282,6 +282,8 @@ int main(void)
 	function.regions[0] = (struct stela_linux_pci_region){BASE, 0x1000000, IORESOURCE_MEM};
 	struct pci_dev *dev = stela_linux_pci_attach(&function);
 
+	assert(dev && !stela_linux_pci_bound(dev));
+
 	assert(dev && dev->vendor == 0x10de && dev->device == 0x2d07);
 	assert(dev->subsystem_vendor == 0x1043 && dev->subsystem_device == 0x8721);
 	assert(dev->class == 0x030000 && dev->revision == 0xa1 && dev->irq == 9);

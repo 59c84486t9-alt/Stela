@@ -1194,7 +1194,7 @@ impl Platform for Machine {
     fn shutdown(&self, _: bool) {
         unreachable!();
     }
-    fn map_device(&self, _: u64, _: usize) -> Option<*mut c_void> {
+    fn map_device(&self, _: u64, _: usize, _: bool) -> Option<*mut c_void> {
         unreachable!();
     }
     unsafe fn unmap_device(&self, _: *mut c_void) {

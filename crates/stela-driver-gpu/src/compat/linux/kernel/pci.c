@@ -172,6 +172,11 @@ void stela_linux_pci_add_device(struct pci_dev *dev)
 		bind(registered->driver, dev);
 }
 
+bool stela_linux_pci_bound(const struct pci_dev *device)
+{
+	return device->dev.driver;
+}
+
 void stela_linux_pci_remove_device(struct pci_dev *dev)
 {
 	unbind(dev);
@@ -442,9 +447,11 @@ static int write_config(struct pci_bus *bus, unsigned int devfn, int where, int 
 
 static struct pci_ops ops = {.read = read_config, .write = write_config};
 
-static void *map_device(void *context, u64 physical, size_t size)
+static void *map_device(void *context, u64 physical, size_t size,
+			bool write_combining)
 {
 	(void)context;
+	(void)write_combining;
 	assert(physical == 0xc0000000 && size == sizeof(rom_window));
 	return rom_window;
 }

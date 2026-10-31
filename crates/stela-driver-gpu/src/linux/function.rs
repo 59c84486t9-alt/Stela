@@ -56,6 +56,53 @@ pub struct Placement {
     pub regions: [Region; BARS],
 }
 
+/// A function's MSI capability (PCI Local Bus 3.0 6.8.1), one message at most.
+#[derive(Clone, Copy)]
+pub struct Msi {
+    capability: u16,
+}
+
+impl Msi {
+    const CONTROL: u16 = 2;
+    const ADDRESS: u16 = 4;
+    const ENABLE: u16 = 1;
+    const MULTIPLE: u16 = 7 << 4;
+    const WIDE: u16 = 1 << 7;
+
+    /// The capability at `capability`.
+    pub const fn at(capability: u16) -> Self {
+        Self { capability }
+    }
+
+    fn control<C: ConfigSpace>(self, config: &C) -> u16 {
+        config.read16(self.capability + Self::CONTROL)
+    }
+
+    /// Stop the function sending it.
+    pub fn disable<C: ConfigSpace>(self, config: &mut C) {
+        let control = self.control(config) & !Self::ENABLE;
+        config.write16(self.capability + Self::CONTROL, control);
+    }
+
+    /// Set the one message, disabled.
+    pub fn program<C: ConfigSpace>(self, config: &mut C, address: u64, data: u16) {
+        self.disable(config);
+        let wide = self.control(config) & Self::WIDE != 0;
+        let at = self.capability + Self::ADDRESS;
+        config.write32(at, address as u32);
+        if wide {
+            config.write32(at + 4, (address >> 32) as u32);
+        }
+        config.write16(at + if wide { 8 } else { 4 }, data);
+    }
+
+    /// Let the function send it.
+    pub fn enable<C: ConfigSpace>(self, config: &mut C) {
+        let control = self.control(config) & !Self::MULTIPLE | Self::ENABLE;
+        config.write16(self.capability + Self::CONTROL, control);
+    }
+}
+
 /// `struct stela_linux_pci_function`.
 #[repr(C)]
 struct RawFunction {
@@ -77,6 +124,7 @@ const _: () = assert!(size_of::<RawFunction>() == 224);
 
 unsafe extern "C" {
     fn stela_linux_pci_attach(function: *const RawFunction) -> *mut c_void;
+    fn stela_linux_pci_bound(device: *const c_void) -> bool;
     fn stela_linux_pci_remove_device(device: *mut c_void);
     fn stela_linux_unsupported(operation: *const c_char);
 }
@@ -266,6 +314,15 @@ impl<H: Host> Attached<H> {
     pub fn device(&self) -> *mut c_void {
         self.device.as_ptr()
     }
+
+    /// Whether a driver took the function.
+    ///
+    /// # Safety
+    /// In an entered Linux owner.
+    pub unsafe fn bound(&self) -> bool {
+        // SAFETY: the caller's contract, over this function's live device.
+        unsafe { stela_linux_pci_bound(self.device.as_ptr()) }
+    }
 }
 
 impl<H> Drop for Attached<H> {
@@ -284,6 +341,46 @@ mod tests {
     use core::ops::Range;
     use core::sync::atomic::{AtomicU64, Ordering};
     use stela_driver_base::bus::dma::mapping::DmaError;
+
+    /// A function's configuration space as plain memory.
+    struct Config([u8; 256]);
+
+    impl ConfigSpace for Config {
+        fn read32(&self, offset: u16) -> u32 {
+            let at = usize::from(offset);
+            u32::from_le_bytes(self.0[at..at + 4].try_into().unwrap())
+        }
+        fn write32(&mut self, offset: u16, value: u32) {
+            let at = usize::from(offset);
+            self.0[at..at + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        fn write16(&mut self, offset: u16, value: u16) {
+            let at = usize::from(offset);
+            self.0[at..at + 2].copy_from_slice(&value.to_le_bytes());
+        }
+        fn write8(&mut self, offset: u16, value: u8) {
+            self.0[usize::from(offset)] = value;
+        }
+    }
+
+    #[test]
+    fn msi_programs_its_one_message_by_width() {
+        const CAPABILITY: u16 = 0x60;
+        for (width, data_at) in [(1 << 7, 0x6c), (0, 0x68)] {
+            let mut config = Config([0; 256]);
+            // Enabled, with a previous owner's multiple-message setting.
+            config.write16(CAPABILITY + 2, width | 1 | 2 << 4);
+            let msi = Msi::at(CAPABILITY);
+            msi.program(&mut config, 0x1_fee0_1000, 0x51);
+            assert_eq!(config.read16(CAPABILITY + 2), width | 2 << 4);
+            assert_eq!(config.read32(CAPABILITY + 4), 0xfee0_1000);
+            assert_eq!(config.read16(data_at), 0x51);
+            msi.enable(&mut config);
+            assert_eq!(config.read16(CAPABILITY + 2), width | 1);
+            msi.disable(&mut config);
+            assert_eq!(config.read16(CAPABILITY + 2), width);
+        }
+    }
 
     #[derive(Default)]
     struct Identity {

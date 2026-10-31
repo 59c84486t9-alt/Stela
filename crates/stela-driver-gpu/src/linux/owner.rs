@@ -7,6 +7,7 @@
 use alloc::boxed::Box;
 use core::{
     ffi::{CStr, c_char, c_int, c_uint, c_void},
+    marker::PhantomData,
     pin::Pin,
     ptr, slice,
 };
@@ -36,8 +37,9 @@ pub trait Platform {
     fn start_worker(&self) -> Result<(), Errno>;
     /// Power the machine off.
     fn shutdown(&self, force: bool);
-    /// Map page-aligned device memory uncached.
-    fn map_device(&self, physical: u64, size: usize) -> Option<*mut c_void>;
+    /// Map page-aligned device memory uncached, or write-combining where its
+    /// stores may merge.
+    fn map_device(&self, physical: u64, size: usize, write_combining: bool) -> Option<*mut c_void>;
     /// # Safety
     /// `address` came from [`Self::map_device`] and nothing uses it any more.
     unsafe fn unmap_device(&self, address: *mut c_void);
@@ -77,7 +79,7 @@ struct Services {
     random_bytes: unsafe extern "C" fn(*mut c_void, *mut c_void, usize),
     start_worker: unsafe extern "C" fn(*mut c_void) -> c_int,
     shutdown: unsafe extern "C" fn(*mut c_void, bool),
-    map_device: unsafe extern "C" fn(*mut c_void, u64, usize) -> *mut c_void,
+    map_device: unsafe extern "C" fn(*mut c_void, u64, usize, bool) -> *mut c_void,
     unmap_device: unsafe extern "C" fn(*mut c_void, *mut c_void),
     map_pages: unsafe extern "C" fn(*mut c_void, *const u64, usize) -> *mut c_void,
     unmap_pages: unsafe extern "C" fn(*mut c_void, *mut c_void, usize),
@@ -213,10 +215,11 @@ mod trampolines {
         context: *mut c_void,
         physical: u64,
         size: usize,
+        write_combining: bool,
     ) -> *mut c_void {
         // SAFETY: see the module.
         unsafe { platform::<P>(context) }
-            .map_device(physical, size)
+            .map_device(physical, size, write_combining)
             .unwrap_or(ptr::null_mut())
     }
 
@@ -310,6 +313,32 @@ pub struct Owner<P: Platform> {
     raw: RawOwner,
     platform: P,
     _pin: core::marker::PhantomPinned,
+}
+
+unsafe extern "C" {
+    fn stela_linux_enter(owner: *const RawOwner);
+    fn stela_linux_exit();
+}
+
+/// Linux code may run until this drops. Tasks stay entered across their
+/// switches, so one entry lasts as long as its task's work.
+pub struct Entered(PhantomData<*mut ()>);
+
+impl Entered {
+    /// # Safety
+    /// On a task of the owner's environment, with `owner` alive past the drop.
+    pub unsafe fn new(owner: *const RawOwner) -> Self {
+        // SAFETY: the caller's contract.
+        unsafe { stela_linux_enter(owner) };
+        Self(PhantomData)
+    }
+}
+
+impl Drop for Entered {
+    fn drop(&mut self) {
+        // SAFETY: `new` entered, on this task.
+        unsafe { stela_linux_exit() };
+    }
 }
 
 impl<P: Platform> Owner<P> {
@@ -418,8 +447,13 @@ mod tests {
         fn shutdown(&self, force: bool) {
             self.note(std::format!("shutdown {force}"));
         }
-        fn map_device(&self, physical: u64, size: usize) -> Option<*mut c_void> {
-            (size != 0).then_some(physical as *mut c_void)
+        fn map_device(
+            &self,
+            physical: u64,
+            size: usize,
+            write_combining: bool,
+        ) -> Option<*mut c_void> {
+            (size != 0).then_some((physical | u64::from(write_combining)) as *mut c_void)
         }
         unsafe fn unmap_device(&self, address: *mut c_void) {
             self.note(std::format!("unmap device {:#x}", address as usize));
@@ -488,8 +522,9 @@ mod tests {
             assert_eq!((s.start_worker)(context), -11);
             (s.shutdown)(context, false);
 
-            assert_eq!((s.map_device)(context, 0x1000, 0), ptr::null_mut());
-            let device = (s.map_device)(context, 0x1000, 4096);
+            assert_eq!((s.map_device)(context, 0x1000, 0, false), ptr::null_mut());
+            assert_eq!((s.map_device)(context, 0x1000, 4096, true) as usize, 0x1001);
+            let device = (s.map_device)(context, 0x1000, 4096, false);
             assert_eq!(device as usize, 0x1000);
             (s.unmap_device)(context, device);
             assert_eq!((s.map_pages)(context, [].as_ptr(), 0), ptr::null_mut());

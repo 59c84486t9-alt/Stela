@@ -29,7 +29,7 @@ void memset_io(volatile void __iomem *addr, int val, size_t count)
 }
 
 /* Device memory is mapped by its device's owner, in whole pages. */
-void __iomem *ioremap(phys_addr_t offset, size_t size)
+static void __iomem *map(phys_addr_t offset, size_t size, bool write_combining)
 {
 	const struct stela_linux_owner *owner = stela_linux_owner();
 
@@ -39,8 +39,19 @@ void __iomem *ioremap(phys_addr_t offset, size_t size)
 	}
 	phys_addr_t base = offset & PAGE_MASK;
 	u8 *mapping = owner->services->map_device(owner->context, base,
-						  PAGE_ALIGN(offset + size) - base);
+						  PAGE_ALIGN(offset + size) - base,
+						  write_combining);
 	return mapping ? (void __iomem *)(mapping + (offset - base)) : NULL;
+}
+
+void __iomem *ioremap(phys_addr_t offset, size_t size)
+{
+	return map(offset, size, false);
+}
+
+void __iomem *ioremap_wc(phys_addr_t offset, size_t size)
+{
+	return map(offset, size, true);
 }
 
 /* Uncached mappings serve every memremap flag: they order more strictly than

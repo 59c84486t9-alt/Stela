@@ -141,6 +141,10 @@ pub fn port(linux: &mut Linux) {
         .compile("stela-nouveau-nvkm");
     let archive = native::out_dir().join("libstela-nouveau-nvkm.a");
     check_imports(&archive, &linux.archive);
+    // Hosted programs test the environment and link no driver.
+    if env::var("CARGO_CFG_TARGET_OS").is_ok_and(|os| os == "uefi") {
+        println!("cargo:rustc-link-lib=static=stela-nouveau-nvkm");
+    }
 }
 
 /// Compare the services the composites reach when linked, directly or through

@@ -53,7 +53,8 @@ struct stela_linux_services {
 	void (*shutdown)(void *context, bool force);
 	/* Map page-aligned device memory uncached, or return NULL; unmapped by
 	 * the address map_device returned. */
-	void *(*map_device)(void *context, u64 physical, size_t size);
+	void *(*map_device)(void *context, u64 physical, size_t size,
+			    bool write_combining);
 	void (*unmap_device)(void *context, void *address);
 	/* Map count write-back pages contiguously, or return NULL. */
 	void *(*map_pages)(void *context, const u64 *physical, size_t count);
