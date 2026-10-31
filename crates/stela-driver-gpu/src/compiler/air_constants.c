@@ -349,14 +349,16 @@ stela_air_construct_constants(struct stela_air_metadata *m)
 bool
 stela_air_fold_constants(struct stela_air_metadata *m, LLVMValueRef fn)
 {
-   if (!LLVMGetNamedMetadataNumOperands(m->module, "air.function_constants"))
+   if (!m->unoptimized && !LLVMGetNamedMetadataNumOperands(m->module, "air.function_constants"))
       return true;
    LLVMPassBuilderOptionsRef options = LLVMCreatePassBuilderOptions();
    if (!options)
       return fail(m, STELA_AIR_ALLOCATION, "LLVM pass options allocation failed");
    /* SCCP folds the loads of constant data and the branches and selects they
     * decide, leaving the paths those disable unreachable and what only they
-    * read dead, such as an absent argument's load hoisted out of a branch. */
+    * read dead, such as an absent argument's load hoisted out of a branch.
+    * Unoptimized code also leaves what must be constant computed, such as a
+    * barrier's memory flags. */
    LLVMErrorRef error = LLVMRunPassesOnFunction(fn, "sccp,unreachableblockelim,dce", NULL, options);
    LLVMDisposePassBuilderOptions(options);
    if (error) {

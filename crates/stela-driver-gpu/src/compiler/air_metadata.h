@@ -84,8 +84,8 @@ struct stela_air_buffer {
    enum stela_air_buffer_access access;
    unsigned type_size; /* Zero when the input omits this optional reflection. */
    unsigned type_alignment;
-   /* An air.visible_function_table: device memory of 64-bit function
-    * handles, read only. */
+   /* An air.visible_function_table: read-only device memory of its 64-bit
+    * entry count, then that many function handles. */
    bool function_table;
 };
 
@@ -371,8 +371,9 @@ struct stela_air_stage_entry {
     * air.discard_fragment. */
    uint64_t threadgroup_bytes;
    bool discards;
-   /* A fragment function's [[early_fragment_tests]]. */
-   bool early_fragment_tests;
+   /* A fragment function's [[early_fragment_tests]], and a [[sample_mask]]
+    * input's post_depth_coverage. */
+   bool early_fragment_tests, post_depth_coverage;
 };
 typedef bool (*stela_air_visit_stage)(const struct stela_air_inspection *,
                                      const struct stela_air_stage_entry *, void *);
@@ -491,7 +492,7 @@ struct stela_air_metadata {
    LLVMModuleRef module;
    LLVMTargetDataRef layout;
    struct stela_air_error *error;
-   unsigned air_minor, language_major, language_minor;
+   unsigned air_major, air_minor, language_major, language_minor;
    unsigned max_device_buffers, max_threadgroup_buffers, max_constant_buffers;
    bool render; /* Additive decoder mode; legacy compute remains false. */
    bool framebuffer_fetch_present, framebuffer_fetch_enabled;

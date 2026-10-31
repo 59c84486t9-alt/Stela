@@ -242,6 +242,13 @@ air_atomics_follow_their_names(void)
       "%f = call i32 @air.atomic.local.and.u.i32(ptr addrspace(3) %p, i32 %d, i32 0, i32 1, i1 true)\n"
       "store i32 %f, ptr addrspace(1) %out, align 4\nret void\n",
       expected, ARRAY_SIZE(expected));
+   /* Metal 1 has no volatility. */
+   const nir_atomic_op added[] = {nir_atomic_op_iadd};
+   expect_atomics(
+      "declare i32 @air.atomic.global.add.u.i32(ptr addrspace(1), i32, i32, i32)\n",
+      "%a = call i32 @air.atomic.global.add.u.i32(ptr addrspace(1) %out, i32 1, i32 0, i32 2)\n"
+      "store i32 %a, ptr addrspace(1) %out, align 4\nret void\n",
+      added, ARRAY_SIZE(added));
    /* Loads and stores are coherent accesses; a compare-exchange compares
     * and receives through its thread pointer; 64-bit min and max return
     * nothing. */

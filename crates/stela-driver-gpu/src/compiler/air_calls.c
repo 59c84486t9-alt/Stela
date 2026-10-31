@@ -385,7 +385,8 @@ prepared(struct stela_air_metadata *m, LLVMModuleRef module,
       return fail(m, STELA_AIR_INPUT, "a linked module is not valid AIR");
    if (strcmp(LLVMGetTarget(module), LLVMGetTarget(m->module)) ||
        strcmp(LLVMGetDataLayoutStr(module), LLVMGetDataLayoutStr(m->module)) ||
-       linked.air_minor != m->air_minor || linked.language_major != m->language_major ||
+       linked.air_major != m->air_major || linked.air_minor != m->air_minor ||
+       linked.language_major != m->language_major ||
        linked.language_minor != m->language_minor || linked.denorms_disable != m->denorms_disable ||
        linked.fast_math != m->fast_math || linked.ident_bytes != m->ident_bytes ||
        (m->ident_bytes && memcmp(linked.ident, m->ident, m->ident_bytes)))
@@ -582,12 +583,47 @@ resolve(struct dispatching *d, const struct stela_air_linked_function *functions
    return true;
 }
 
+/* Lowers each table's size to a load of its first word. */
+static bool
+table_sizes(struct stela_air_metadata *m)
+{
+   LLVMValueRef size = LLVMGetNamedFunction(m->module, "air.get_size_visible_function_table");
+   if (!size || !LLVMGetFirstUse(size))
+      return true;
+   LLVMContextRef context = LLVMGetModuleContext(m->module);
+   LLVMTypeRef word = LLVMInt32TypeInContext(context), table = LLVMPointerTypeInContext(context, 1);
+   if (!LLVMIsDeclaration(size) || LLVMGlobalGetValueType(size) != LLVMFunctionType(word, &table, 1, false))
+      return fail(m, STELA_AIR_TYPE, "unsupported air.get_size_visible_function_table");
+   LLVMBuilderRef builder = LLVMCreateBuilderInContext(context);
+   if (!builder)
+      return fail(m, STELA_AIR_ALLOCATION, "function table size allocation failed");
+   LLVMUseRef use;
+   bool lowered = true;
+   while (lowered && (use = LLVMGetFirstUse(size))) {
+      LLVMValueRef call = LLVMGetUser(use);
+      lowered = LLVMIsACallInst(call) && LLVMGetCalledValue(call) == size;
+      if (!lowered) {
+         fail(m, STELA_AIR_INSTRUCTION, "air.get_size_visible_function_table is only called");
+         break;
+      }
+      LLVMPositionBuilderBefore(builder, call);
+      LLVMValueRef entries = LLVMBuildLoad2(builder, word, LLVMGetOperand(call, 0), "");
+      LLVMSetAlignment(entries, 8);
+      LLVMReplaceAllUsesWith(call, entries);
+      LLVMInstructionEraseFromParent(call);
+   }
+   LLVMDisposeBuilder(builder);
+   return lowered;
+}
+
 bool
 stela_air_dispatch_tables(struct stela_air_metadata *m,
                           const struct stela_air_linked_function *functions, unsigned count)
 {
    if (count && !functions)
       return fail(m, STELA_AIR_INPUT, "invalid linked functions");
+   if (!table_sizes(m))
+      return false;
    LLVMValueRef get = LLVMGetNamedFunction(m->module, "air.get_function_pointer_visible_function_table");
    if (!get || !LLVMGetFirstUse(get))
       return true;
@@ -615,9 +651,10 @@ stela_air_dispatch_tables(struct stela_air_metadata *m,
          dispatched = fail(m, STELA_AIR_INSTRUCTION, "air.get_function_pointer_visible_function_table is only called");
          break;
       }
-      /* The handle of the table's element. */
+      /* The handle of the table's element, after its count. */
       LLVMPositionBuilderBefore(builder, call);
       LLVMValueRef index = LLVMBuildZExt(builder, LLVMGetOperand(call, 1), handle, "");
+      index = LLVMBuildAdd(builder, index, LLVMConstInt(handle, 1, false), "");
       LLVMValueRef slot = LLVMBuildGEP2(builder, handle, LLVMGetOperand(call, 0), &index, 1, "");
       LLVMValueRef id = LLVMBuildLoad2(builder, handle, slot, "");
       LLVMSetAlignment(id, 8);

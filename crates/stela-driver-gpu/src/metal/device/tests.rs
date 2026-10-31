@@ -1098,7 +1098,7 @@ fn visible_function_tables_hold_handles() {
     assert!(device.new_visible_function_table(0).is_err());
     let table = device.new_visible_function_table(4).unwrap();
     let (memory, offset, length) = device.buffer_memory(table).unwrap();
-    assert_eq!(length, 32);
+    assert_eq!(length, 40);
     device
         .set_visible_functions(table, 2, &[Some(FunctionHandle(3)), None])
         .unwrap();
@@ -1106,16 +1106,16 @@ fn visible_function_tables_hold_handles() {
         device.set_visible_functions(table, 3, &[None, None]),
         Err(Error::Invalid("functions past the table's end"))
     );
-    let mut bytes = [0xff; 32];
+    let mut bytes = [0xff; 40];
     device
         .backend()
         .read_memory(memory, offset, &mut bytes)
         .unwrap();
-    let handles: Vec<u64> = bytes
+    let words: Vec<u64> = bytes
         .chunks(8)
         .map(|word| u64::from_le_bytes(word.try_into().unwrap()))
         .collect();
-    assert_eq!(handles, [0, 0, 3, 0], "tables start with no functions");
+    assert_eq!(words, [4, 0, 0, 3, 0], "a count, then no functions");
 }
 
 #[test]

@@ -444,6 +444,14 @@ get_value(struct translator *t, LLVMValueRef llvm)
       }
       return nir_vec(&t->b, elements, components);
    }
+   /* Unoptimized code keeps the casts of constants. */
+   if (LLVMIsAConstantExpr(llvm) && LLVMGetConstOpcode(llvm) == LLVMBitCast) {
+      LLVMValueRef from = LLVMGetOperand(llvm, 0);
+      bool lone = LLVMGetTypeKind(LLVMTypeOf(from)) == LLVMVectorTypeKind &&
+                  LLVMGetVectorSize(LLVMTypeOf(from)) == 1;
+      nir_def *source = get_value(t, lone ? LLVMGetAggregateElement(from, 0) : from);
+      return source ? nir_bitcast_vector(&t->b, source, bits) : NULL;
+   }
    fail(t, STELA_AIR_INSTRUCTION, "forward/constant-expression operand");
    return NULL;
 }
@@ -2241,7 +2249,8 @@ stage_return(struct translator *t, LLVMValueRef inst)
        * unwritten. */
       if (io->semantic == STELA_AIR_CLIP_DISTANCE) {
          for (unsigned j = 0; j < io->clip_distances; j++) {
-            const struct value *distance = leaf ? leaf->elements[j] : NULL;
+            /* A lone distance need not be an array. */
+            const struct value *distance = leaf && leaf->aggregate_count ? leaf->elements[j] : leaf;
             clip[j] = distance ? whole_value(t, distance) : NULL;
          }
          values[i] = NULL;
@@ -2908,11 +2917,12 @@ air_atomic_call(struct translator *t, LLVMValueRef inst, LLVMValueRef callee, co
          form = i;
    }
    /* Then the orders, a compare-exchange's success and failure, the scope
-    * and the volatility. */
-   unsigned operands = forms[form].operands, count = operands + (form == COMPARE ? 4 : 3);
+    * and, from Metal 2, the volatility. */
+   unsigned operands = forms[form].operands, scope = operands + (form == COMPARE ? 2 : 1);
+   unsigned count = LLVMGetNumArgOperands(inst);
    if (!LLVMIsAFunction(callee) || !LLVMIsDeclaration(callee) ||
        LLVMGetFunctionCallConv(callee) != LLVMCCallConv ||
-       LLVMGetInstructionCallConv(inst) != LLVMCCallConv || LLVMGetNumArgOperands(inst) != count ||
+       LLVMGetInstructionCallConv(inst) != LLVMCCallConv || (count != scope + 1 && count != scope + 2) ||
        LLVMCountParams(callee) != count || LLVMIsFunctionVarArg(LLVMGlobalGetValueType(callee)) ||
        LLVMGetCalledFunctionType(inst) != LLVMGlobalGetValueType(callee) ||
        LLVMGetNumOperandBundles(inst))
@@ -2929,9 +2939,9 @@ air_atomic_call(struct translator *t, LLVMValueRef inst, LLVMValueRef callee, co
    for (unsigned i = operands; i < count; i++) {
       LLVMValueRef value = LLVMGetOperand(inst, i);
       if (!LLVMIsAConstantInt(value) ||
-          LLVMGetIntTypeWidth(LLVMTypeOf(value)) != (i == count - 1 ? 1u : 32u))
+          LLVMGetIntTypeWidth(LLVMTypeOf(value)) != (i > scope ? 1u : 32u))
          return fail(t, STELA_AIR_INSTRUCTION, "AIR atomic order, scope and volatility must be constants");
-      if (i < count - 2 && LLVMConstIntGetZExtValue(value))
+      if (i < scope && LLVMConstIntGetZExtValue(value))
          return fail(t, STELA_AIR_MEMORY, "only relaxed AIR atomics are supported");
    }
    char overload[16], expected[64];
@@ -3354,8 +3364,8 @@ argument_load(struct translator *t, LLVMValueRef inst)
  * mesh, in DXMT's AIR forms: the handle, then indices, then the value. */
 enum mesh_setter {
    MESH_POSITION, MESH_POINT_SIZE, MESH_CLIP_DISTANCE, MESH_VERTEX_DATA, MESH_PRIMITIVE_DATA,
-   MESH_LAYER, MESH_VIEWPORT, MESH_PRIMITIVE_ID, MESH_CULLED, MESH_INDEX, MESH_PRIMITIVE_COUNT,
-   MESH_GRID,
+   MESH_LAYER, MESH_VIEWPORT, MESH_PRIMITIVE_ID, MESH_CULLED, MESH_INDEX, MESH_INDICES,
+   MESH_PRIMITIVE_COUNT, MESH_GRID,
 };
 
 static const struct {
@@ -3374,6 +3384,7 @@ static const struct {
    [MESH_PRIMITIVE_ID] = {"air.set_primitive_id_mesh", 3, false, STELA_AIR_MESH_PRIMITIVE_ID},
    [MESH_CULLED] = {"air.set_primitive_culled_mesh", 3, false, STELA_AIR_PRIMITIVE_CULLED},
    [MESH_INDEX] = {"air.set_index_mesh", 3},
+   [MESH_INDICES] = {"air.set_indices_mesh", 3, true},
    [MESH_PRIMITIVE_COUNT] = {"air.set_primitive_count_mesh", 2},
    [MESH_GRID] = {"air.set_threadgroups_per_grid_mesh_properties", 2},
 };
@@ -3504,6 +3515,14 @@ mesh_call(struct translator *t, LLVMValueRef inst, LLVMValueRef callee, const ch
       if (value->num_components != 1 || value->bit_size != 8)
          return fail(t, STELA_AIR_TYPE, "a mesh index is an 8-bit vertex");
       return mesh_index(t, values[1], value);
+   case MESH_INDICES:
+      if (value->bit_size != 8)
+         return fail(t, STELA_AIR_TYPE, "mesh indices are 8-bit vertices");
+      for (unsigned c = 0; c < value->num_components; c++) {
+         if (!mesh_index(t, nir_iadd_imm(b, values[1], c), nir_channel(b, value, c)))
+            return false;
+      }
+      return true;
    default:
       break;
    }
@@ -3572,6 +3591,8 @@ instruction(struct translator *t, LLVMValueRef inst)
       return freeze(t, inst);
    if (op == LLVMAlloca)
       return private_allocation(t, inst) != NULL;
+   if (stela_air_read_sampler(inst))
+      return true;
    if (op == LLVMLoad && LLVMGetTypeKind(LLVMTypeOf(inst)) == LLVMPointerTypeKind)
       return argument_load(t, inst);
    if (op == LLVMInsertValue || op == LLVMExtractValue)
@@ -3689,6 +3710,12 @@ instruction(struct translator *t, LLVMValueRef inst)
       }
       size_t name_length = 0;
       const char *name = LLVMGetValueName2(callee, &name_length);
+      if (stela_air_call_named(name, name_length, "air.get_num_patch_control_points")) {
+         unsigned points = t->render.entry.patch_control_points;
+         if (!points)
+            return fail(t, STELA_AIR_INSTRUCTION, "the size of a patch that declares no control points");
+         return put_value(t, inst, nir_imm_int(&t->b, points), 0);
+      }
       bool lowered;
       if (!control_point_call(t, inst, callee, &lowered))
          return false;
@@ -4261,7 +4288,7 @@ pointer_provenance(struct translator *t)
          if (LLVMGetTypeKind(LLVMTypeOf(inst)) != LLVMPointerTypeKind)
             continue;
          LLVMOpcode op = LLVMGetInstructionOpcode(inst);
-         if (op == LLVMAlloca || op == LLVMLoad)
+         if (op == LLVMAlloca || op == LLVMLoad || stela_air_read_sampler(inst))
             continue; /* Roots, like arguments and globals. */
          if (op != LLVMPHI && op != LLVMGetElementPtr && op != LLVMBitCast)
             return fail(t, STELA_AIR_TYPE, "unsupported pointer provenance producer");
@@ -4679,7 +4706,8 @@ translate(const void *bitcode, size_t size, const char *entry,
    /* Linking sets the triple again. */
    target = LLVMGetTarget(t.module);
    char target_prefix[40];
-   snprintf(target_prefix, sizeof(target_prefix), "air64_v2%u-apple-macosx", t.air_minor);
+   snprintf(target_prefix, sizeof(target_prefix), "air64_v%u%u-apple-", t.metadata.air_major,
+            t.air_minor);
    if (strncmp(target, target_prefix, strlen(target_prefix))) {
       fail(&t, STELA_AIR_TARGET, "AIR version and target triple disagree");
       goto done;
@@ -4716,6 +4744,8 @@ translate(const void *bitcode, size_t size, const char *entry,
                                                                               TESS_PRIMITIVE_TRIANGLES;
    if (stage && stage->stage == STELA_AIR_FRAGMENT)
       t.b.shader->info.fs.early_fragment_tests = t.render.entry.early_fragment_tests;
+   if (stage && stage->stage == STELA_AIR_FRAGMENT)
+      t.b.shader->info.fs.post_depth_coverage = t.render.entry.post_depth_coverage;
    t.b.fp_math_ctrl = nir_fp_no_fast_math;
    if (options->fp_profile != STELA_AIR_FP_IEEE_DEFAULT && !fp_environment(&t))
       goto done;

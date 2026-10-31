@@ -275,6 +275,8 @@ static const char *unoptimized_kernel =
    "%slot = alloca i32, align 4\n"
    "store i32 %tid, ptr %slot, align 4\n"
    "%id = load i32, ptr %slot, align 4\n"
+   "%flags = or i32 1, 2\n"
+   "call void @air.wg.barrier(i32 %flags, i32 1) convergent\n"
    "%first = insertvalue {[2 x <2 x float>]} poison, <2 x float> zeroinitializer, 0, 0\n"
    "%second = insertvalue {[2 x <2 x float>]} %first, <2 x float> <float 1.0, float 2.0>, 0, 1\n"
    "%rows = extractvalue {[2 x <2 x float>]} %second, 0\n"
@@ -284,9 +286,11 @@ static const char *unoptimized_kernel =
    "switch i32 %id, label %done [i32 1, label %one]\n"
    "one:\n"
    "store <2 x float> %written, ptr addrspace(1) %data, align 8\n"
+   "store <2 x i16> bitcast (<1 x float> splat (float 1.0) to <2 x i16>), ptr addrspace(1) %data, align 4\n"
    "br label %done\n"
    "done:\n"
    "ret void\n}\n"
+   "declare void @air.wg.barrier(i32, i32) convergent\n"
    "!air.kernel = !{!2}\n"
    "!2 = !{ptr @unoptimized, !3, !4}\n!3 = !{}\n!4 = !{!40, !41}\n"
    "!40 = !{i32 0, !\"air.buffer\", !\"air.location_index\", i32 0, i32 1, !\"air.read_write\","
@@ -449,6 +453,7 @@ static const char *calls =
  * table can name. */
 #define TABLES(call)                                                                        \
    "declare ptr @air.get_function_pointer_visible_function_table(ptr addrspace(1), i32)\n"  \
+   "declare i32 @air.get_size_visible_function_table(ptr addrspace(1))\n"                  \
    "declare i32 @external(i32)\n"                                                         \
    "define i32 @doubled(i32 %x) {\n%y = shl i32 %x, 1\nret i32 %y\n}\n"                     \
    "define void @tables(ptr addrspace(1) %table, ptr addrspace(1) %data, i32 %tid) {\n"     \
@@ -477,6 +482,10 @@ static const char *tables = TABLES("%v = call i32 %f(i32 %tid)\n");
 /* A call through a bitcast of the pointer to its own type, as Apple's
  * compiler emits it. */
 static const char *recast = TABLES("%g = bitcast ptr %f to ptr\n%v = call i32 %g(i32 %tid)\n");
+/* A call with the table's size. */
+static const char *sized =
+   TABLES("%n = call i32 @air.get_size_visible_function_table(ptr addrspace(1) %table)\n"
+          "%v = call i32 %f(i32 %n)\n");
 /* A table's pointer used as other than a callee. */
 static const char *escaping = TABLES("%v = ptrtoint ptr %f to i32\n");
 /* The library linked with it: the external function and two visible
@@ -1568,6 +1577,9 @@ linked_functions_resolve_tables_and_externals(void)
    shader = compile_linked(recast, "tables", &linked, 1, functions, 3, &error);
    assert(shader);
    stela_metal_release(shader);
+   shader = compile_linked(sized, "tables", &linked, 1, functions, 3, &error);
+   assert(shader);
+   stela_metal_release(shader);
 
    /* Without the library, the external function is unresolved. */
    assert(!compile_linked(tables, "tables", NULL, 0, functions, 1, &error));
@@ -1725,7 +1737,8 @@ recursion_result(const char *function, uint32_t depth, struct stela_air_error *e
    put64(push + STELA_METAL_PUSH_TABLES, BASE + TABLE);
    put64(memory + TABLE + STELA_METAL_TABLE_BUFFER_ADDRESSES, BASE + FUNCTIONS);
    put64(memory + TABLE + STELA_METAL_TABLE_BUFFER_ADDRESSES + 8, BASE + DATA);
-   put64(memory + FUNCTIONS, 1);
+   put64(memory + FUNCTIONS, 2);
+   put64(memory + FUNCTIONS + 8, 1);
    put32(memory + DATA, 3);
    const struct air_effect_environment environment = {
       .base = BASE, .bytes = memory, .size = sizeof(memory), .push = push,

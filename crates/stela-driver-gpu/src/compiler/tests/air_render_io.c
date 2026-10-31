@@ -287,6 +287,23 @@ static const char *clip_vertex =
    "!40 = !{i32 0, !\"air.vertex_input\", !\"air.location_index\", i32 0, i32 1,"
    " !\"air.arg_type_name\", !\"float4\", !\"air.arg_name\", !\"p\"}\n";
 
+#define LONE_RESULT "<{ <4 x float>, float }>"
+
+/* A vertex function writing one clip distance, which is not an array. */
+static const char *lone_clip =
+   "define " LONE_RESULT " @vertex(<4 x float> %p) {\n"
+   "%x = extractelement <4 x float> %p, i32 0\n"
+   "%a0 = insertvalue " LONE_RESULT " undef, <4 x float> %p, 0\n"
+   "%a1 = insertvalue " LONE_RESULT " %a0, float %x, 1\n"
+   "ret " LONE_RESULT " %a1\n}\n"
+   "!air.vertex = !{!2}\n"
+   "!2 = !{ptr @vertex, !3, !4}\n!3 = !{!30, !31}\n"
+   "!30 = !{!\"air.position\", !\"air.arg_type_name\", !\"float4\", !\"air.arg_name\", !\"position\"}\n"
+   "!31 = !{!\"air.clip_distance\", !\"air.arg_type_name\", !\"float\", !\"air.arg_name\", !\"d\"}\n"
+   "!4 = !{!40}\n"
+   "!40 = !{i32 0, !\"air.vertex_input\", !\"air.location_index\", i32 0, i32 1,"
+   " !\"air.arg_type_name\", !\"float4\", !\"air.arg_name\", !\"p\"}\n";
+
 static void
 vertex_functions_write_clip_distances(void)
 {
@@ -298,6 +315,31 @@ vertex_functions_write_clip_distances(void)
    nir_variable *clip = variable(shader, nir_var_shader_out, VARYING_SLOT_CLIP_DIST0, 0);
    assert(clip && clip->data.compact && glsl_get_length(clip->type) == 2 &&
           shader->info.clip_distance_array_size == 2);
+   ralloc_free(shader);
+
+   /* Before Metal 2.4 only the type gives the size, and Metal 2.2 leaves a
+    * name on what it generates. */
+   char *typed_only = change(clip_vertex, "!\"air.clip_distance_array_size\", i32 2, ", "");
+   char *generated = change(typed_only, "!\"air.location_index\", i32 0, i32 1,",
+                      "!\"air.location_index\", i32 0, i32 1, !\"generated(__air_placeholder__)\",");
+   free(typed_only);
+   shader = translate(generated, STELA_AIR_VERTEX, false, &error);
+   free(generated);
+   assert(shader && shader->info.clip_distance_array_size == 2);
+   ralloc_free(shader);
+
+   /* Metal 1 writes the array in its type name. */
+   char *named = change(clip_vertex, "!\"air.clip_distance_array_size\", i32 2, !\"air.arg_type_name\", !\"float\"",
+                        "!\"air.arg_type_name\", !\"float [2]\"");
+   shader = translate(named, STELA_AIR_VERTEX, false, &error);
+   free(named);
+   assert(shader && shader->info.clip_distance_array_size == 2);
+   ralloc_free(shader);
+
+   shader = translate(lone_clip, STELA_AIR_VERTEX, false, &error);
+   if (!shader)
+      fprintf(stderr, "lone clip distance: %u %s\n", error.kind, error.detail);
+   assert(shader && shader->info.clip_distance_array_size == 1);
    ralloc_free(shader);
 
    /* Constant distances are a constant aggregate, and undefined ones hold
@@ -424,6 +466,13 @@ fragment_functions_interpolate_and_write_targets(void)
    free(dual);
    assert(shader && variable(shader, nir_var_shader_out, FRAG_RESULT_DATA0, 1));
    ralloc_free(shader);
+
+   /* Metal 1's attachments have no index. */
+   char *plain = change(fragment, "!\"air.render_target\", i32 1, i32 0", "!\"air.render_target\", i32 1");
+   shader = translate(plain, STELA_AIR_FRAGMENT, false, &error);
+   free(plain);
+   assert(shader && variable(shader, nir_var_shader_out, FRAG_RESULT_DATA1, 0));
+   ralloc_free(shader);
 }
 
 /* The intrinsics of the shader's entry point. */
@@ -501,6 +550,14 @@ static const char *early =
    "!40 = !{i32 0, !\"air.position\", !\"air.center\", !\"air.no_perspective\","
    " !\"air.arg_type_name\", !\"float4\", !\"air.arg_name\", !\"position\", !\"air.arg_unused\"}\n";
 
+/* A fragment function whose coverage excludes what the depth test rejects. */
+static const char *coverage =
+   "define void @fragment(i32 %mask) {\nret void\n}\n"
+   "!air.fragment = !{!2}\n"
+   "!2 = !{ptr @fragment, !3, !4}\n!3 = !{}\n!4 = !{!40}\n"
+   "!40 = !{i32 0, !\"air.sample_mask_in\", !\"air.post_depth_coverage\", !\"air.arg_type_name\","
+   " !\"uint\", !\"air.arg_name\", !\"mask\"}\n";
+
 /* A vertex function rasterization is disabled for. */
 static const char *unrasterized =
    "define void @vertex(i32 %id) {\nret void\n}\n"
@@ -517,6 +574,11 @@ void_functions_write_nothing(void)
       fprintf(stderr, "early: %u %s\n", error.kind, error.detail);
    assert(shader && shader->info.fs.early_fragment_tests);
    assert(!variable(shader, nir_var_shader_out, FRAG_RESULT_DATA0, 0));
+   ralloc_free(shader);
+   shader = translate(coverage, STELA_AIR_FRAGMENT, false, &error);
+   if (!shader)
+      fprintf(stderr, "coverage: %u %s\n", error.kind, error.detail);
+   assert(shader && shader->info.fs.post_depth_coverage);
    ralloc_free(shader);
    shader = translate(unrasterized, STELA_AIR_VERTEX, false, &error);
    assert(shader && !variable(shader, nir_var_shader_out, VARYING_SLOT_POS, 0));

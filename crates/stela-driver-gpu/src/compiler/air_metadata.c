@@ -279,15 +279,17 @@ version_metadata(struct stela_air_metadata *t, const char *name, bool language)
        !stela_air_md_uint(fields[base + 2], &patch) || patch != 0)
       return fail(t, STELA_AIR_METADATA, "invalid %s", name);
    /* Every Metal language version, and the AIR versions their compilers
-    * emit; LLVM upgrades the typed pointers of older AIR as it reads it. */
+    * emit, 1.11 being Metal 1.2's; LLVM upgrades the typed pointers of older
+    * AIR as it reads it. */
    bool supported = language ?
       ((major == 1 && minor <= 2) || (major == 2 && minor <= 4) || (major == 3 && minor <= 2) ||
-       (major == 4 && minor <= 1)) : (major == 2 && minor <= 9);
+       (major == 4 && minor <= 1)) : ((major == 1 && minor <= 11) || (major == 2 && minor <= 9));
    if (!supported)
       return fail(t, STELA_AIR_METADATA, "unsupported %s %u.%u.%u", name, major, minor, patch);
-   if (!language)
+   if (!language) {
+      t->air_major = major;
       t->air_minor = minor;
-   else {
+   } else {
       t->language_major = major;
       t->language_minor = minor;
    }
@@ -1013,6 +1015,12 @@ output_reflection(struct stela_air_metadata *m, const LLVMValueRef *fields, unsi
              !metadata_text(m, fields[f], &io->type_name, &io->type_name_bytes))
             return fail(m, STELA_AIR_METADATA, "invalid output type name");
          io->primitive = primitive_type(fields[f++], &io->components);
+         /* Metal 1 writes the array of clip distances in its type name. */
+         if (io->semantic == STELA_AIR_CLIP_DISTANCE && io->type_name_bytes > strlen("float [") &&
+             !memcmp(io->type_name, "float [", strlen("float ["))) {
+            io->primitive = STELA_AIR_FLOAT;
+            io->components = 1;
+         }
       } else if (stela_air_md_string(key, "air.arg_name")) {
          if (io->name || f == n || !metadata_text(m, fields[f++], &io->name, &io->name_bytes))
             return fail(m, STELA_AIR_METADATA, "invalid output name");
@@ -1033,6 +1041,15 @@ output_reflection(struct stela_air_metadata *m, const LLVMValueRef *fields, unsi
       } else return fail(m, STELA_AIR_METADATA, "unsupported output metadata");
    }
    return true;
+}
+
+/* A name Metal before 2.3 leaves on inputs it generated, which says nothing. */
+static bool
+tool_generated(LLVMValueRef key)
+{
+   unsigned length = 0;
+   const char *text = key && LLVMIsAMDString(key) ? LLVMGetMDString(key, &length) : NULL;
+   return text && length > strlen("generated(") && !memcmp(text, "generated(", strlen("generated("));
 }
 
 /* A clip distance output's air.clip_distance_array_size at fields[*f]. */
@@ -1435,6 +1452,13 @@ structure_fields(struct stela_air_metadata *m, struct stela_air_kernel *kernel, 
       *field = (struct stela_air_field){0};
       if (!argument_field(m, kernel, member[6], argument, depth, id_base, field, &id))
          return false;
+      /* An array of pointers sizes and locates its element once. */
+      if (elements > 1 && field->count == 1) {
+         if (size > extent / elements)
+            return fail(m, STELA_AIR_TYPE, "argument buffer members overlap or exceed the buffer");
+         field->count = elements;
+         size *= elements;
+      }
       *ids = MAX2(*ids, id - id_base + field->count);
       field->offset = base + offset;
       field->size = size;
@@ -1650,7 +1674,7 @@ control_point_input(struct stela_air_metadata *m, struct stela_air_render *r,
             named = true;
          } else if (!member->unused && stela_air_md_string(key, "air.arg_unused")) {
             member->unused = true;
-         } else {
+         } else if (!tool_generated(key)) {
             return fail(m, STELA_AIR_METADATA, "unsupported patch control point member metadata");
          }
       }
@@ -1933,7 +1957,10 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
          } else if (varying && stela_air_md_string(key, "air.interpolation_function")) {
             if (io->interpolant) return fail(t, STELA_AIR_METADATA, "duplicate interpolant qualifier");
             io->interpolant = true;
-         } else {
+         } else if (builtin == STELA_AIR_SAMPLE_MASK_IN &&
+                    stela_air_md_string(key, "air.post_depth_coverage")) {
+            render->entry.post_depth_coverage = true;
+         } else if (!tool_generated(key)) {
             unsigned length;
             const char *text = md_text(key, &length);
             return fail(t, STELA_AIR_METADATA, "unsupported argument metadata %.*s at %u",
@@ -2342,14 +2369,25 @@ stela_air_metadata_stage(struct stela_air_metadata *m, LLVMValueRef fn,
          io->semantic = STELA_AIR_VIEWPORT;
       } else if (vertex && stela_air_md_string(fields[0], "air.clip_distance")) {
          io->semantic = STELA_AIR_CLIP_DISTANCE;
-         if (!clip_distance_size(m, fields, &f, n, io))
-            return false;
+         /* Before Metal 2.4 only the type gives the size. */
+         LLVMTypeRef type = aggregate ? LLVMStructGetTypeAtIndex(result, i) : result;
+         LLVMTypeKind kind = LLVMGetTypeKind(type);
+         io->clip_distances = kind == LLVMArrayTypeKind ? LLVMGetArrayLength2(type) :
+                              kind == LLVMFloatTypeKind;
+         if (f < n && stela_air_md_string(fields[f], "air.clip_distance_array_size") ?
+                !clip_distance_size(m, fields, &f, n, io) :
+                !io->clip_distances || io->clip_distances > AIR_MAX_CLIP_DISTANCES)
+            return fail(m, STELA_AIR_ARGUMENT, "clip distances need an array size of 1 to %u",
+                        AIR_MAX_CLIP_DISTANCES);
       } else if (fragment && stela_air_md_string(fields[0], "air.render_target")) {
          io->semantic = STELA_AIR_RENDER_TARGET;
-         /* Dual-source blending writes index 1 of attachment 0. */
-         if (n < 5 || !stela_air_md_uint(fields[f++], &io->location) ||
-             io->location >= AIR_MAX_RENDER_TARGETS || !stela_air_md_uint(fields[f++], &io->index) ||
-             io->index > 1 || (io->index && io->location))
+         if (n < 4 || !stela_air_md_uint(fields[f++], &io->location) ||
+             io->location >= AIR_MAX_RENDER_TARGETS)
+            return fail(m, STELA_AIR_ARGUMENT, "unsupported attachment/dual-source output");
+         /* Dual-source blending writes index 1 of attachment 0. Metal 1 has
+          * no index. */
+         f += stela_air_md_uint(fields[f], &io->index);
+         if (io->index > 1 || (io->index && io->location))
             return fail(m, STELA_AIR_ARGUMENT, "unsupported attachment/dual-source output");
       } else if (fragment && stela_air_md_string(fields[0], "air.depth")) {
          io->semantic = STELA_AIR_DEPTH;
@@ -2362,10 +2400,12 @@ stela_air_metadata_stage(struct stela_air_metadata *m, LLVMValueRef fn,
          return false;
       LLVMTypeRef leaf = aggregate ? LLVMStructGetTypeAtIndex(result, i) : result;
       bool type = output_type(io);
-      if (type && io->semantic == STELA_AIR_CLIP_DISTANCE) {
-         type = LLVMGetTypeKind(leaf) == LLVMArrayTypeKind &&
-                LLVMGetArrayLength2(leaf) == io->clip_distances;
-         leaf = type ? LLVMGetElementType(leaf) : leaf;
+      if (type && io->semantic == STELA_AIR_CLIP_DISTANCE &&
+          LLVMGetTypeKind(leaf) == LLVMArrayTypeKind) {
+         type = LLVMGetArrayLength2(leaf) == io->clip_distances;
+         leaf = LLVMGetElementType(leaf);
+      } else if (io->semantic == STELA_AIR_CLIP_DISTANCE) {
+         type = type && io->clip_distances == 1;
       }
       if (!type || !stage_type_matches(leaf, io->primitive, io->components))
          return fail(m, STELA_AIR_TYPE, "unsupported render output type");
@@ -2586,7 +2626,7 @@ inspect(const void *bitcode, size_t size, const struct stela_air_constants *cons
        !stela_air_inline_calls(&m, NULL, 0, 0))
       goto done;
    char prefix[40];
-   snprintf(prefix, sizeof(prefix), "air64_v2%u-apple-macosx", m.air_minor);
+   snprintf(prefix, sizeof(prefix), "air64_v%u%u-apple-", m.air_major, m.air_minor);
    if (strncmp(target, prefix, strlen(prefix))) {
       fail(&m, STELA_AIR_TARGET, "AIR version and target triple disagree");
       goto done;

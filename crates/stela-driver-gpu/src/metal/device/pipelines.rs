@@ -1376,18 +1376,20 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             .and_then(|linked| linked.handle(function)))
     }
 
-    /// `newVisibleFunctionTableWithDescriptor:`: a shared buffer of `count`
-    /// function handles, each calling no function. It binds as the buffer
-    /// at a table argument's index, and its address is its
-    /// `gpuResourceID`.
+    /// `newVisibleFunctionTableWithDescriptor:`: a shared buffer of `count`,
+    /// which shaders read as the table's size, then `count` function
+    /// handles, each calling no function. It binds as the buffer at a table
+    /// argument's index, and its address is its `gpuResourceID`.
     pub fn new_visible_function_table(&mut self, count: u64) -> Result<BufferId> {
         const INVALID: Error = Error::Invalid("visible function table size");
         let bytes = count
-            .checked_mul(8)
-            .filter(|&bytes| bytes != 0)
+            .checked_add(1)
+            .and_then(|words| words.checked_mul(8))
+            .filter(|_| count != 0)
             .ok_or(INVALID)?;
-        let zeros = alloc::vec![0; usize::try_from(bytes).map_err(|_| INVALID)?];
-        self.new_shared_buffer(&zeros)
+        let mut contents = alloc::vec![0; usize::try_from(bytes).map_err(|_| INVALID)?];
+        contents[..8].copy_from_slice(&count.to_le_bytes());
+        self.new_shared_buffer(&contents)
     }
 
     /// `setFunction:atIndex:` and `setFunctions:withRange:`: writes
@@ -1399,7 +1401,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         handles: &[Option<FunctionHandle>],
     ) -> Result<()> {
         let (memory, offset, length) = self.buffer_memory(table)?;
-        let start = index.checked_mul(8);
+        let start = index.checked_add(1).and_then(|word| word.checked_mul(8));
         let end = start.and_then(|start| start.checked_add(handles.len() as u64 * 8));
         ensure(
             end.is_some_and(|end| end <= length),
@@ -1410,7 +1412,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             .flat_map(|handle| handle.map_or(0, |handle| handle.0).to_le_bytes())
             .collect();
         self.backend
-            .write_memory(memory, offset + index * 8, &bytes)
+            .write_memory(memory, offset + (index + 1) * 8, &bytes)
     }
 
     /// Resolves a stage's linked functions, which must be visible

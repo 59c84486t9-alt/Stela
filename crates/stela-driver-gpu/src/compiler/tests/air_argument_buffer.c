@@ -444,6 +444,19 @@ inlined_structures_are_fields_of_their_buffer(void)
            replaced(inlined_metadata, "!\"air.indirect_argument\", i32 1,",
                     "!\"air.indirect_argument\", !\"pair\","),
            STELA_AIR_METADATA);
+
+   /* An array of pointers records one element's size and location. */
+   char *pointers = strdup(replaced(inlined_metadata, "i32 40, i32 8, i32 0", "i32 40, i32 8, i32 4"));
+   refused(inlined_body, pointers, STELA_AIR_TYPE);
+   char *sized = strdup(replaced(pointers, "!\"air.buffer_size\", i32 48", "!\"air.buffer_size\", i32 72"));
+   shader = kernel(inlined_body, replaced(sized, "!\"air.arg_type_size\", i32 48", "!\"air.arg_type_size\", i32 72"),
+                   &error);
+   if (!shader)
+      fprintf(stderr, "pointers: %u %s\n", error.kind, error.detail);
+   assert(shader);
+   ralloc_free(shader);
+   free(sized);
+   free(pointers);
 }
 
 static bool

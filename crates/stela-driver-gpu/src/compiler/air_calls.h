@@ -17,10 +17,11 @@ bool stela_air_defined_function(LLVMValueRef fn);
 bool stela_air_link_modules(struct stela_air_metadata *m, const struct stela_air_module *modules,
                             unsigned count);
 
-/* Lowers air.get_function_pointer_visible_function_table to a load of the
- * table's handle, and each call through the pointer to a dispatcher that
- * calls the linked function of that handle with the call's type: handle
- * i + 1 calls functions[i]. */
+/* Lowers air.get_size_visible_function_table to a load of the table's count,
+ * air.get_function_pointer_visible_function_table to a load of the table's
+ * handle, and each call through the pointer to a dispatcher that calls the
+ * linked function of that handle with the call's type: handle i + 1 calls
+ * functions[i]. */
 bool stela_air_dispatch_tables(struct stela_air_metadata *m,
                                const struct stela_air_linked_function *functions, unsigned count);
 
