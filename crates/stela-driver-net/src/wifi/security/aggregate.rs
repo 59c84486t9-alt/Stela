@@ -16,10 +16,14 @@ use alloc::{sync::Arc, vec::Vec};
 /// An original whole A-MSDU can arrive in one record, including a real single
 /// subframe. A hardware split parent has multiple raw 802.11 records. Neither
 /// shape is already Ethernet, or permission inferred from a first/last flag.
+/// A deaggregated parent went further: hardware consumed each subframe header,
+/// so every record is one plain MSDU under the parent's header, whose A-MSDU
+/// bit the backend cleared as `iwl_mvm_rx_mpdu_mq` does. One record is enough.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Shape {
     WholeMpdu,
     HardwareSplitAmsdu,
+    DeaggregatedAmsdu,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -121,11 +125,11 @@ impl<C> OrderedGroup<C> {
             {
                 return Err(Error::Invalid("different MPDU parent"));
             }
-            if self.shape == Shape::HardwareSplitAmsdu {
+            if self.shape != Shape::WholeMpdu {
                 let Some(a) = member.aggregation.amsdu else {
                     return Err(Error::Invalid("missing split observation"));
                 };
-                if !h.amsdu
+                if h.amsdu != (self.shape == Shape::HardwareSplitAmsdu)
                     || a.index != index as u16
                     || a.first != (index == 0)
                     || a.last != (index + 1 == self.members.len())
@@ -212,7 +216,8 @@ impl<'a, C> Candidate<'a, C> {
     }
     fn payloads(&self, spans: &[(usize, usize)]) -> Result<(), Error> {
         let head = &self.group.members[0];
-        if !head.header().amsdu {
+        let deaggregated = self.group.shape == Shape::DeaggregatedAmsdu;
+        if !head.header().amsdu && !deaggregated {
             return Ok(());
         }
         if head.header().receiver.is_multicast() {
@@ -226,7 +231,8 @@ impl<'a, C> Candidate<'a, C> {
             return Err(Error::Invalid("local A-MSDU receive bound"));
         }
         let (start, end) = spans[0];
-        if head.bytes()[start..end].get(..6) == Some(&[0xaa, 0xaa, 3, 0, 0, 0]) {
+        // Without a subframe header, an RFC 1042 header is what is expected.
+        if !deaggregated && head.bytes()[start..end].get(..6) == Some(&[0xaa, 0xaa, 3, 0, 0, 0]) {
             return Err(Error::Invalid("A-MSDU first-subframe injection"));
         }
         Ok(())
