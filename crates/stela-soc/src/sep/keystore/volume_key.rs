@@ -144,6 +144,7 @@ pub(super) fn recognizes(command: u8) -> bool {
         command,
         NEW_VEK | UNWRAP_VEK | NEW_KEK | GET_SIZE | SET_PROTECTION | GET_BLOB_STATE
     ) || media::recognizes(command)
+        || command == file_key::REWRAP
         || file_key::recognizes(command)
         || keychain::recognizes(command)
 }
@@ -188,7 +189,10 @@ impl VolumeKeys {
         notes: &mut dyn FnMut(String),
     ) -> Result<Vec<u8>> {
         if media::recognizes(command) {
-            return self.media(command, variant, fields, entropy);
+            return self.media(command, variant, fields, entropy, notes);
+        }
+        if command == file_key::REWRAP {
+            return self.rewrap(variant, fields, notes);
         }
         if file_key::recognizes(command) {
             return self.file_key(command, variant, fields, entropy, notes);

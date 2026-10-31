@@ -681,14 +681,72 @@ fn a_media_key_unwraps_to_the_same_inline_key_only_on_its_machine_and_class() {
     bad[20] ^= 1;
     assert!(unwrap_media_key(&mut keys, &bad, u32::MAX, 0).is_err());
     assert!(unwrap_media_key(&mut keys, &wrapped[1..], u32::MAX, 0).is_err());
-    // Keybag classes, another variant or client word refuse.
-    assert!(unwrap_media_key(&mut keys, &wrapped, 3, 0).is_err());
-    let request = Request::default().word(3).word(0);
-    assert!(send_media(&mut keys, media::NEW_MEDIA_KEY, request).is_err());
+    // Another variant or client word refuses.
     let request = Request::default().lword(2).word(u32::MAX).word(0);
     assert!(send(&mut keys, media::NEW_MEDIA_KEY, 1, request, &mut Vec::new()).is_err());
     let request = Request::default().lword(1).word(u32::MAX).word(0);
     assert!(send(&mut keys, media::NEW_MEDIA_KEY, 0, request, &mut Vec::new()).is_err());
+}
+
+/// A REWRAP request with no file-system contexts.
+fn rewrap(
+    keys: &mut VolumeKeys,
+    parameters: &[u8],
+    (old, new): (u32, u32),
+    wrapped: &[u8],
+    flags: u32,
+) -> Result<Vec<u8>> {
+    let request = Request::default()
+        .lword(1)
+        .blob(&[])
+        .blob(parameters)
+        .word(u32::MAX - 4)
+        .word(u32::MAX - 4)
+        .word(old)
+        .word(new)
+        .blob(&[])
+        .blob(&[])
+        .blob(wrapped)
+        .word(flags)
+        .blob(&[0; 28])
+        .blob(&[]);
+    let reply = send(keys, file_key::REWRAP, 3, request, &mut Vec::new())?;
+    let mut fields = reply_fields(&reply);
+    let rewrapped = fields.blob().unwrap().to_vec();
+    assert_eq!(fields.word().unwrap(), new);
+    fields.end().unwrap();
+    Ok(rewrapped)
+}
+
+#[test]
+fn a_media_key_migrates_to_a_keybag_class_and_opens_with_its_handle() {
+    let (mut keys, engine) = keys(1);
+    let (area, wrapped) = new_media_key(&mut keys, 0);
+    assert!(rewrap(&mut keys, &[], (1, 14), &wrapped, 0x40).is_err());
+    assert!(rewrap(&mut keys, &[], (0, 0), &wrapped, 0x40).is_err());
+    let migrated = rewrap(&mut keys, &[], (0, 14), &wrapped, 0x40).unwrap();
+    assert_eq!(migrated.len(), wrapped.len());
+    let again = unwrap_media_key(&mut keys, &migrated, u32::MAX - 4, 14).unwrap();
+    assert_eq!(cipher(&engine, &again), cipher(&engine, &area));
+    assert!(unwrap_media_key(&mut keys, &migrated, u32::MAX, 0).is_err());
+    assert!(rewrap(&mut keys, &[], (0, 14), &wrapped, 0x80).is_err());
+}
+
+#[test]
+fn a_per_file_key_rewraps_to_another_class_of_its_volume() {
+    let (mut keys, engine) = keys(1);
+    let (vek, _) = new_vek(&mut keys, &[], &[]);
+    load_class_keys(&mut keys, &vek);
+    let (area, wrapped) = new_file_key(&mut keys, &VOLUME, 4).unwrap();
+    let parameters = parameters(&VOLUME);
+    assert!(rewrap(&mut keys, &parameters, (3, 2), &wrapped, 0).is_err());
+    let moved = rewrap(&mut keys, &parameters, (4, 2), &wrapped, 0).unwrap();
+    let again = unwrap_file_key(&mut keys, &VOLUME, 2, &moved).unwrap();
+    assert_eq!(cipher(&engine, &again), cipher(&engine, &area));
+    assert!(unwrap_file_key(&mut keys, &VOLUME, 4, &moved).is_err());
+    let moved = rewrap(&mut keys, &parameters, (2, 3), &moved, 1 << 9).unwrap();
+    assert!(unwrap_file_key(&mut keys, &VOLUME, 3, &moved).is_ok());
+    assert!(rewrap(&mut keys, &[], (3, 2), &moved, 0).is_err());
 }
 
 #[test]

@@ -26,8 +26,15 @@
 //! The request flags are 2 for a new key and 0x102 for an unwrap, with bit
 //! 0 set when the caller takes no key. The reply flags' bit 1 becomes the raw
 //! key's `CP_RAW_KEY_WRAPPEDKEY` (0x2d51f28, 0x2d26354). Other request types
-//! send other variants (`rewrap_data_with_opts`, unwrap variant 0), which
-//! refuse.
+//! send other variants (unwrap variant 0), which refuse.
+//!
+//! **Rewrap.** REWRAP 0x0f (`__ipc_rewrap_pfk_data_v3` 0x2d591e0, codec
+//! 0x2d3efdc), variant 3 from `rewrap_data_with_opts` (0x2d51bf8): u64, an
+//! empty blob, parameters, two handles, the old and new classes, two empty
+//! blobs, wrapped key, flags, two file-system contexts -> wrapped key, class.
+//! `fs_rewrap_key` (0x2d22f50) sends flags 0, `fs_rewrap_ekwk` (0x2d50820)
+//! 0x200 and `fs_migrate_media_key_to_class` (0x2d4ffa0) 0x40, the last with
+//! no parameters: the key stays and its wrapping moves to the new class.
 //!
 //! **Scalable keys.** APFS gives a file an EK, its file key, wrapped by an
 //! EKWK, wrapped under the protection class (`new_skey` 0x491a7d0), with
@@ -72,11 +79,13 @@ use stela_contracts::refuse;
 use zeroize::Zeroizing;
 
 pub(super) const UNWRAP_KEY: u8 = 0x09;
+pub(super) const REWRAP: u8 = 0x0f;
 pub(super) const NEW_KEY: u8 = 0x10;
 
 const NEW_KEY_VARIANT: u32 = 2;
 const UNWRAP_KEY_VARIANT: u32 = 1;
 const UNWRAP_SCALABLE_VARIANT: u32 = 2;
+const REWRAP_VARIANT: u32 = 3;
 /// The u64 `new_key` and `unwrap_data` send first.
 const CLIENT: u64 = 1;
 /// Request flags: the caller takes no key; it wants a SEP-wrapped key; the
@@ -84,6 +93,9 @@ const CLIENT: u64 = 1;
 const NO_KEY: u32 = 1;
 const WRAPPED_KEY: u32 = 1 << 1;
 const SCALABLE: u32 = 1 << 8;
+/// Rewrap flags: `fs_migrate_media_key_to_class`'s and `fs_rewrap_ekwk`'s.
+const REWRAP_MEDIA_KEY: u32 = 1 << 6;
+const REWRAP_EKWK: u32 = 1 << 9;
 /// `check_class`'s request flags.
 const CHECK_CLASS: u32 = 0;
 /// Reply flags: the key is SEP-wrapped.
@@ -222,6 +234,49 @@ impl VolumeKeys {
             self.key_reply(&mut reply, &key)?;
             reply.word(SEP_WRAPPED);
         }
+        self.report(UNINTERPRETED, notes);
+        Ok(reply.0)
+    }
+
+    /// Move a wrapped key from class `old` to class `new`.
+    pub(super) fn rewrap(
+        &mut self,
+        variant: u32,
+        fields: &mut Fields<'_>,
+        notes: &mut dyn FnMut(String),
+    ) -> Result<Vec<u8>> {
+        if variant != REWRAP_VARIANT {
+            return Err(refuse!("SEP rewrap command variant is not modeled"));
+        }
+        if fields.lword()? != CLIENT {
+            return Err(refuse!(
+                "SEP rewrap request does not start with the kernel's u64"
+            ));
+        }
+        let first = fields.blob()?.len();
+        let parameters = fields.blob()?;
+        let (_handle, _new_handle) = (fields.word()?, fields.word()?);
+        let (old, new) = (fields.word()?, fields.word()?);
+        if first != 0 || !fields.blob()?.is_empty() || !fields.blob()?.is_empty() {
+            return Err(refuse!("SEP rewrap request's other keys are not modeled"));
+        }
+        let wrapped = fields.blob()?;
+        let request = fields.word()?;
+        let (_context, _new_context) = (fields.blob()?, fields.blob()?);
+        fields.end()?;
+        if new == 0 {
+            return Err(refuse!("SEP rewrap names no new class"));
+        }
+        let mut reply = Reply::default();
+        match request {
+            REWRAP_MEDIA_KEY => reply.blob(&self.rewrap_media_key(old, new, wrapped)?),
+            0 | REWRAP_EKWK => {
+                let classes = self.class_keys(volume(parameters)?)?;
+                reply.blob(&wrap(classes, new, &*unwrap(classes, old, wrapped)?));
+            }
+            _ => return Err(refuse!("SEP rewrap flags are not modeled")),
+        }
+        reply.word(new);
         self.report(UNINTERPRETED, notes);
         Ok(reply.0)
     }
