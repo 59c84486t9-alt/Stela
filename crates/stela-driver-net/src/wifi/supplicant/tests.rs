@@ -299,6 +299,24 @@ fn four_way_and_group_handshakes_install_the_authenticators_keys() {
 }
 
 #[test]
+fn a_michael_report_counts_up_under_the_ptks_mic() {
+    let (mut ap, mut station) = begun(suites(Akm::Psk));
+    assert_eq!(station.michael_report(false), None, "no PTK yet");
+    let step = station.receive(&ap.message_3(&RSN), &mut random).unwrap();
+    assert!(step.pairwise.is_some());
+    let kck = *ap.ptk.as_ref().unwrap().kck();
+    for (replay, pairwise) in [(0, false), (1, true)] {
+        let report = station.michael_report(pairwise).unwrap();
+        let key = Frame::parse(&report).unwrap();
+        assert_eq!(key.replay, replay);
+        let kind = if pairwise { PAIRWISE } else { 0 };
+        let info = REQUEST | ERROR | MIC | SECURE | kind;
+        assert_eq!(key.info & !VERSION, info);
+        key.verify(Akm::Psk, &kck).unwrap();
+    }
+}
+
+#[test]
 fn a_pmf_message_3_yields_its_igtk_and_a_tkip_gtk_swaps_its_michael_keys() {
     let suites = Suites {
         group: Cipher::Tkip,

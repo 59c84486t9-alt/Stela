@@ -1040,13 +1040,18 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                 .iter()
                 .filter(|key| key.pairwise != multicast && Some(key.index) == key_index)
                 .filter(|key| key.fitted && (!multicast || link.is_none_or(|ap| key.ap == ap)))
-                .find_map(|key| key.slot.installed());
-            let Some(key) = installed else {
+                .find_map(|key| Some((key.slot.installed()?, key.slot.replays(&frame))));
+            let Some((key, replayed)) = installed else {
                 return Ok(());
             };
             // Firmware's Michael check failed: nothing of it is the AP's.
             if frame.security.tkip_mic_error {
-                client.unsupported("TKIP countermeasures after a Michael failure");
+                if !replayed {
+                    let pairwise = !multicast;
+                    client
+                        .events
+                        .push_back(keeper::Event::MichaelFailure { pairwise });
+                }
                 return Ok(());
             }
             frame.security.key = Some(key);

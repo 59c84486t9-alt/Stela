@@ -130,6 +130,9 @@ impl<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> Ra
                 } => keeper::Event::SaeEnded(format!("{failure:?}")),
                 Event::Unsupported(operation) => keeper::Event::Unsupported(operation),
                 Event::ConnectionLost(_) => keeper::Event::ConnectionLost,
+                Event::MichaelMicFailure { group, .. } => {
+                    keeper::Event::MichaelFailure { pairwise: !group }
+                }
                 _ => continue,
             });
         }

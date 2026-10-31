@@ -73,6 +73,8 @@ pub enum Event {
     /// The firmware went with all it held, and the radio may be booting it
     /// again.
     FirmwareLost,
+    /// A TKIP frame failed its Michael MIC, `cfg80211_michael_mic_failure`.
+    MichaelFailure { pairwise: bool },
 }
 
 /// What the NIC offers on a band.
@@ -435,6 +437,11 @@ enum State<H, M> {
     },
 }
 
+/// `WLAN_REASON_MICHAEL_MIC_FAILURE`.
+const MICHAEL_FAILURE: u16 = 14;
+/// How near two Michael failures start countermeasures, and how long they last.
+const COUNTERMEASURES_US: u64 = 60_000_000;
+
 /// A radio kept connected to one network.
 pub struct Keeper<R: Radio> {
     link: R,
@@ -448,6 +455,8 @@ pub struct Keeper<R: Radio> {
     /// The latest failure, which `receive` reports once.
     failure: Option<String>,
     reported: Option<String>,
+    /// wpa_supplicant's `last_michael_mic_error`.
+    michael_failed: Option<u64>,
 }
 
 impl<R: Radio> Keeper<R> {
@@ -465,6 +474,7 @@ impl<R: Radio> Keeper<R> {
             failures: 0,
             failure: None,
             reported: None,
+            michael_failed: None,
         }
     }
 
@@ -536,6 +546,7 @@ impl<R: Radio> Keeper<R> {
                         at: now + RECONNECT_US,
                     };
                 }
+                Event::MichaelFailure { pairwise } => self.michael_failure(pairwise, now),
                 // `service` reported why.
                 Event::FirmwareLost => {
                     self.state = State::Leaving {
@@ -1213,6 +1224,36 @@ impl<R: Radio> Keeper<R> {
         };
         if let Err(message) = self.apply(step, bssid, ptk) {
             self.failed(now, message);
+        }
+    }
+
+    /// `wpa_supplicant_event_michael_mic_failure`: the AP hears of each
+    /// failure, and a second within a minute leaves it for a minute.
+    fn michael_failure(&mut self, pairwise: bool, now: u64) {
+        let State::Connected {
+            supplicant,
+            bssid,
+            ptk,
+            ..
+        } = &mut self.state
+        else {
+            return;
+        };
+        let (bssid, ptk) = (*bssid, *ptk);
+        let step = Step {
+            reply: supplicant.michael_report(pairwise),
+            ..Step::default()
+        };
+        if let Err(message) = self.apply(step, bssid, Some(ptk)) {
+            return self.failed(now, message);
+        }
+        let last = self.michael_failed.replace(now);
+        if last.is_some_and(|last| now < last + COUNTERMEASURES_US) {
+            self.fail(format!("{}: TKIP countermeasures started", R::NAME));
+            let _ = self.link.deauthenticate(MICHAEL_FAILURE);
+            self.state = State::Leaving {
+                at: now + COUNTERMEASURES_US,
+            };
         }
     }
 

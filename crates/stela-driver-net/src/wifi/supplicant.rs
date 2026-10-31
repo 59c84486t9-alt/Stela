@@ -721,6 +721,8 @@ pub struct Supplicant {
     ptk: Option<Ptk>,
     /// The links of a multi-link association.
     multi_link: Option<MultiLink>,
+    /// The Key Replay Counter of the next EAPOL-Key request.
+    request_counter: u64,
 }
 
 impl Supplicant {
@@ -755,6 +757,7 @@ impl Supplicant {
             tentative: None,
             ptk: None,
             multi_link: None,
+            request_counter: 0,
         })
     }
 
@@ -878,6 +881,23 @@ impl Supplicant {
     /// Whether a 4-way handshake finished.
     pub fn established(&self) -> bool {
         self.ptk.is_some()
+    }
+
+    /// `wpa_sm_key_request` with the error bit: tells the authenticator of a
+    /// failed Michael MIC, once a PTK protects the telling.
+    pub fn michael_report(&mut self, pairwise: bool) -> Option<Vec<u8>> {
+        let ptk = self.ptk.as_ref()?;
+        let kind = if pairwise { PAIRWISE } else { 0 };
+        let report = build(
+            self.suites.akm,
+            REQUEST | ERROR | MIC | SECURE | kind,
+            self.request_counter,
+            &[0; NONCE],
+            &[],
+            Some(ptk.kck()),
+        );
+        self.request_counter += 1;
+        Some(report)
     }
 
     /// Take one EAPOL frame from the authenticator. `random` gives the

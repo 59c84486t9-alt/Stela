@@ -1024,6 +1024,43 @@ fn a_country_the_air_tells_an_associated_station_changes_nothing() {
     assert!(sent, "{:?}", wifi.radio().error());
 }
 
+/// A TKIP frame under packet number `number` that firmware decrypted, with an
+/// ICV that holds and a Michael MIC that does not.
+fn michael_failure(number: u8) -> Vec<u8> {
+    let (mut frame, _) = protected(5, 5, number, 1, false, false);
+    frame[26..30].copy_from_slice(&[0, 0x20, number, 0x20]);
+    placed(frame, 3 | 3 << 8 | 1 << 5 | 1 << 7, None, 0)
+}
+
+#[test]
+fn a_second_michael_failure_in_a_minute_leaves_the_ap() {
+    let native = Native::default();
+    let (mut wifi, mut device) = connect(&native, false);
+    // A packet number the key already took tells of nothing.
+    device.inject(wifi.radio().rom().unwrap(), &michael_failure(0));
+    settle(&mut wifi, &mut device);
+    assert_eq!(device.air.len(), 4);
+    device.inject(wifi.radio().rom().unwrap(), &michael_failure(1));
+    let told = run(&mut wifi, &mut device, |_, device, _| device.air.len() > 4);
+    assert!(told, "{:?}", wifi.radio().error());
+    // Key Information: a request with its error bit, of the pairwise key.
+    let info = u16::from_be_bytes(eapol(&device.air[4])[5..7].try_into().unwrap());
+    assert_eq!(
+        info & (1 << 11 | 1 << 10 | 1 << 3),
+        1 << 11 | 1 << 10 | 1 << 3
+    );
+    assert!(wifi.carrier());
+    device.inject(wifi.radio().rom().unwrap(), &michael_failure(2));
+    let left = run(&mut wifi, &mut device, |_, device, _| {
+        device.air.iter().any(|frame| frame[0] == 0xc0)
+    });
+    assert!(left, "{:?}", wifi.radio().error());
+    let farewell = device.air.last().unwrap();
+    assert_eq!(farewell[24..26], [14, 0]);
+    let report = device.air[device.air.len() - 2].as_slice();
+    assert_eq!(eapol(report)[6] & 8, 8, "the AP hears of the second, too");
+}
+
 /// Firmware's report that `country` applies, from `source`.
 fn country_update(country: [u8; 2], source: u8) -> Vec<u8> {
     let update = Id {
