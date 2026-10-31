@@ -19,7 +19,7 @@ use crate::{
             security::{self, Security},
         },
         network::{Network, Secret},
-        regulatory::{PowerType, database::Country},
+        regulatory::PowerType,
         sae::{self, Derivation, Exchange},
         scan::{self, result::Bss},
         security::{KeyIdentity, PacketNumber, ReplaySeed},
@@ -124,6 +124,8 @@ pub trait Radio: Link {
     fn probes(&self, channel: Channel) -> bool;
     /// The Supported Channels of `band`, which a spectrum-managed request names.
     fn supported_channels(&self, band: Band) -> &'static [u8];
+    /// The country's power limit at `frequency_mhz`.
+    fn regulated_power_dbm(&self, frequency_mhz: u16) -> i32;
     fn advertisement(&self, band: Band) -> Result<Advertisement, Self::Error>;
     fn profile(&self, peer: Peer) -> Result<Self::Profile, Self::Error>;
 
@@ -414,7 +416,6 @@ enum State<H, M> {
 /// A radio kept connected to one network.
 pub struct Keeper<R: Radio> {
     link: R,
-    country: Country,
     network: Network,
     pmk: Zeroizing<[u8; 32]>,
     entropy: Arc<dyn Entropy>,
@@ -428,19 +429,12 @@ pub struct Keeper<R: Radio> {
 }
 
 impl<R: Radio> Keeper<R> {
-    /// Keep `link` connected to `network` in `country`; `entropy` gives each
-    /// handshake's SNonce.
-    pub fn keep(
-        link: R,
-        country: Country,
-        network: Network,
-        entropy: Arc<dyn Entropy>,
-        clock: Clock,
-    ) -> Self {
+    /// Keep `link` connected to `network`; `entropy` gives each handshake's
+    /// SNonce.
+    pub fn keep(link: R, network: Network, entropy: Arc<dyn Entropy>, clock: Clock) -> Self {
         let pmk = network.secret.pmk(&network.ssid);
         Self {
             link,
-            country,
             network,
             pmk,
             entropy,
@@ -450,6 +444,18 @@ impl<R: Radio> Keeper<R> {
             failure: None,
             reported: None,
         }
+    }
+
+    /// The radio, for device models.
+    #[cfg(test)]
+    pub(crate) fn radio(&self) -> &R {
+        &self.link
+    }
+
+    /// The radio, for device models.
+    #[cfg(test)]
+    pub(crate) fn radio_mut(&mut self) -> &mut R {
+        &mut self.link
     }
 
     fn fail(&mut self, message: String) {
@@ -519,7 +525,7 @@ impl<R: Radio> Keeper<R> {
     fn advance(&mut self, now: u64) {
         let stage = self.link.stage();
         match &self.state {
-            State::Waiting { at } if now >= *at => self.scan(now),
+            State::Waiting { at } if now >= *at && stage == Stage::Idle => self.scan(now),
             State::Scanning(_) if stage == Stage::Scanned => self.scanned(now),
             State::Authenticating(authenticating)
                 if authenticating.exchange.accepted()
@@ -1006,9 +1012,9 @@ impl<R: Radio> Keeper<R> {
         )
         .map_err(|refusal| format!("{}: {refusal:?}", R::NAME))?;
         let spectrum = connection::spectrum_management(bss.capabilities).then(|| {
-            let regulated = self.country.channel(bss.channel.frequency_mhz);
+            let power = self.link.regulated_power_dbm(bss.channel.frequency_mhz);
             (
-                regulated.max_reg_dbm.clamp(0, 127) as i8,
+                power.clamp(0, 127) as i8,
                 self.link.supported_channels(band),
             )
         });
@@ -1259,7 +1265,13 @@ impl<R: Radio> Keeper<R> {
                 self.link
                     .install_management_key(epoch, key.index, &key.material, key.receive)
             } {
-                Ok(session) => Some(session),
+                Ok(session) => {
+                    // The port may yet wait for the key's firmware answer.
+                    if let State::Handshake { management, .. } = &mut self.state {
+                        *management = Some(session);
+                    }
+                    true
+                }
                 Err(error) if R::deferred(&error) => {
                     if let State::Handshake { integrity, .. } = &mut self.state {
                         *integrity = Some(key);
@@ -1268,15 +1280,16 @@ impl<R: Radio> Keeper<R> {
                 }
                 Err(error) => return Err(format!("{error}")),
             },
-            None => None,
+            None => false,
         };
-        if installed.is_none() && !protected && self.link.station().requires_protected_management()
-        {
+        if !installed && !protected && self.link.station().requires_protected_management() {
             return Ok(());
         }
-        self.link
-            .authorize_port(epoch)
-            .map_err(|error| format!("{error}"))?;
+        match self.link.authorize_port(epoch) {
+            Ok(()) => {}
+            Err(error) if R::deferred(&error) => return Ok(()),
+            Err(error) => return Err(format!("{error}")),
+        }
         let State::Handshake {
             supplicant,
             bssid,
@@ -1290,7 +1303,7 @@ impl<R: Radio> Keeper<R> {
             supplicant,
             bssid,
             ptk,
-            management: installed.or(management),
+            management,
             integrity: None,
         };
         self.failures = 0;

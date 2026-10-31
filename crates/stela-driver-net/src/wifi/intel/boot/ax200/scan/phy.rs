@@ -224,6 +224,16 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Phy<'a, Q, B, O> {
         self.removing = true;
         Ok(())
     }
+    /// Return the scan owner once the firmware removed the PHY.
+    pub fn into_scan(self) -> Result<Ax200Scan<'a, Q, B, O>, Box<Self>> {
+        if self.phase != Ax200PhyPhase::Removed
+            || self.first_error.is_some()
+            || self.ticket.is_some()
+        {
+            return Err(Box::new(self));
+        }
+        Ok(self.scan)
+    }
     fn capture_idle_receive(&mut self) -> Result<(), Ax200PhyError> {
         let boot = self.boot();
         let mut quiet = false;

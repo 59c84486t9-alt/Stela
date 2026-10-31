@@ -348,7 +348,7 @@ pub(super) unsafe fn aqtion(
 /// An Intel AX200/AX210 adapter over its owned BAR0, reading its ACPI
 /// companion.
 #[cfg(feature = "native-acpi")]
-pub type IntelWifi = wifi::intel::link::Wifi<
+pub type IntelWifi = wifi::intel::link::Station<
     wifi::intel::boot::NativeBootIo,
     wifi::intel::radio::bios::service::native::NativeBios,
 >;
@@ -415,7 +415,7 @@ pub(super) unsafe fn intel_wifi<B: wifi::intel::radio::bios::service::BiosIo>(
     services: &dyn NativeServices,
     address: Address,
     inputs: wifi::intel::link::Inputs<B>,
-) -> Result<Located<wifi::intel::link::Wifi<wifi::intel::boot::NativeBootIo, B>>, Failure> {
+) -> Result<Located<wifi::intel::link::Station<wifi::intel::boot::NativeBootIo, B>>, Failure> {
     use wifi::intel::attach::{AttachError, Pci, attach};
     let refused = |error: ServiceError| (Error::Native(error), None);
     let Claimed {

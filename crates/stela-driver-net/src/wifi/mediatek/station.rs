@@ -43,6 +43,7 @@ pub type Station<I, Q, C, S> = Keeper<Mt7925<I, Q, C, S>>;
 pub struct Mt7925<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> {
     link: ManagedLink<I, Q, C, S>,
     interface: Context,
+    country: Country,
 }
 
 impl<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> Station<I, Q, C, S> {
@@ -56,7 +57,16 @@ impl<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> St
         entropy: Arc<dyn Entropy>,
         clock: Clock,
     ) -> Self {
-        Keeper::keep(Mt7925 { link, interface }, country, network, entropy, clock)
+        Keeper::keep(
+            Mt7925 {
+                link,
+                interface,
+                country,
+            },
+            network,
+            entropy,
+            clock,
+        )
     }
 }
 
@@ -150,6 +160,10 @@ impl<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> Ra
 
     fn supported_channels(&self, band: Band) -> &'static [u8] {
         regd::channels(band)
+    }
+
+    fn regulated_power_dbm(&self, frequency_mhz: u16) -> i32 {
+        self.country.channel(frequency_mhz).max_reg_dbm
     }
 
     fn advertisement(&self, band: Band) -> Result<Advertisement, LinkControlError> {

@@ -42,6 +42,9 @@ impl NormalizedMpdu {
     pub fn key_index(&self) -> Option<u8> {
         self.normalized.key_index
     }
+    pub fn into_frame(self) -> crate::wifi::frame::Mpdu {
+        self.normalized.frame
+    }
 }
 impl ObservedMpdu {
     /// Normalize the immutable completed RX bytes using the kept

@@ -603,6 +603,9 @@ unsafe fn intel_wifi(
             bios,
             database: database.clone(),
             network: network.clone(),
+            entropy: services
+                .entropy()
+                .map_err(|error| (Error::Native(error), None))?,
         };
         // SAFETY: forwarded from the caller.
         unsafe { native::intel_wifi(services, address, inputs) }

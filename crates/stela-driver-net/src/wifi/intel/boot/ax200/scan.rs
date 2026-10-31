@@ -250,6 +250,38 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Scan<'_, Q, B, O> {
             .take(protocol::MAX_CHANNELS)
             .collect()
     }
+    /// The same channels with the regulatory flags their firmware
+    /// restrictions give them.
+    pub fn regulated_channels(&mut self) -> Vec<(Channel, u32)> {
+        let channels = self.channels();
+        let Some(parts) = self.mac.country.scan_policy_parts() else {
+            return Vec::new();
+        };
+        channels
+            .into_iter()
+            .filter_map(|channel| {
+                let observed = parts.channels.iter().find(|observation| {
+                    observation.channel.number == channel.number
+                        && observation.channel.frequency_mhz == channel.frequency_mhz
+                })?;
+                let restrictions = observed.restrictions;
+                Some((
+                    channel,
+                    crate::wifi::intel::link::channel_flags(
+                        restrictions.no_ht40_plus,
+                        restrictions.no_ht40_minus,
+                        restrictions.no_80mhz,
+                        restrictions.no_160mhz,
+                    ),
+                ))
+            })
+            .collect()
+    }
+    /// The transmit and receive antennas the firmware and NVM both give.
+    pub fn chains(&self) -> (u32, u32) {
+        let information = &self.mac.initialized_nvm().information;
+        (information.tx_chains, information.rx_chains)
+    }
     pub fn command_bytes(&self) -> Option<&[u8]> {
         self.command_bytes.as_deref()
     }
