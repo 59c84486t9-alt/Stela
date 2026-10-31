@@ -818,6 +818,18 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
         }
         self.write(interrupts::AUTOMASK, 1)
     }
+    /// `CSR_INT`, and on a function in MSI-X mode the causes it reports
+    /// through instead.
+    fn causes(&mut self) -> Result<u32, Error> {
+        let causes = self.read_register(8)?;
+        self.write(8, causes | !(1 | (1 << 31)))?;
+        if !self.vector {
+            return Ok(causes);
+        }
+        let family = self.profile.family();
+        let reported = interrupts::take(self.io(), family).map_err(Error::Access)?;
+        Ok(causes | reported)
+    }
     /// Whether the function's first MSI-X vector reaches the host.
     pub(crate) fn vector(&self) -> bool {
         self.vector
@@ -1107,9 +1119,8 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
         result
     }
     fn poll_pnvm_inner(&mut self) -> Result<PnvmProgress, Error> {
-        let causes = self.read_register(8)?;
-        self.write(8, causes | !(1 | (1 << 31)))?;
-        if causes & ((1 << 29) | (1 << 25)) != 0 {
+        let causes = self.causes()?;
+        if causes & (interrupts::INT_HW_ERR | interrupts::INT_SW_ERR) != 0 {
             return Err(Error::DeviceError(causes));
         }
         if self.read_register(0x24)? & 0x08000000 == 0 {
@@ -1157,9 +1168,8 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
         result
     }
     fn poll_inner(&mut self) -> Result<Option<AliveReport>, Error> {
-        let causes = self.read_register(8)?;
-        self.write(8, causes | !(1 | (1 << 31)))?;
-        if causes & ((1 << 29) | (1 << 25)) != 0 {
+        let causes = self.causes()?;
+        if causes & (interrupts::INT_HW_ERR | interrupts::INT_SW_ERR) != 0 {
             return Err(Error::DeviceError(causes));
         }
         if self.read_register(0x24)? & 0x08000000 == 0 {
