@@ -448,6 +448,11 @@ impl Coex {
     }
 
     /// `rtw_coex_power_off_setting`.
+    /// `coex_stat->bt_disabled`, as `rtw_coex_monitor_bt_enable` reads it.
+    pub fn bluetooth_off<I: Io>(io: &mut I) -> Result<bool, Error> {
+        Ok(io.read16(REG_WIFI_BT_INFO)? & SCORE_ON == 0)
+    }
+
     pub fn power_off<I: Io>(&mut self, io: &mut I) -> Result<(), Error> {
         self.scoreboard(io, SCORE_ALL, false)?;
         io.write16(REG_WIFI_BT_INFO, BT_INTERRUPT_ENABLE)?;

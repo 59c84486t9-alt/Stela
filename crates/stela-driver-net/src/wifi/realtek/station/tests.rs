@@ -180,9 +180,11 @@ impl Device for Model {
         self.0.borrow_mut().cleared.push(entry);
         Ok(())
     }
-    fn watchdog(&mut self, stbc: bool) -> Result<u8, String> {
+    fn watchdog(&mut self, scanning: bool, stbc: bool) -> Result<u8, String> {
         let mut air = self.0.borrow_mut();
-        air.watchdogs.push(stbc);
+        if !scanning {
+            air.watchdogs.push(stbc);
+        }
         Ok(air.level)
     }
     fn scanning(&mut self, scanning: bool) -> Result<(), String> {

@@ -85,6 +85,7 @@ pub unsafe fn attach(
         .database
         .select(alpha2)
         .map_err(|error| AttachError::Country(alpha2, error))?;
+    let dfs_region = country.dfs_region();
     // SAFETY: forwarded from the caller.
     let up = unsafe {
         bootstrap::bring_up(Claim {
@@ -101,8 +102,8 @@ pub unsafe fn attach(
     .map_err(AttachError::Bootstrap)?;
     let address = up.mac;
     // SAFETY: straight from bring-up, with the caller's MSI.
-    let hardware =
-        unsafe { Hardware::new(up, alpha2, inputs.vector) }.map_err(AttachError::Hardware)?;
+    let hardware = unsafe { Hardware::new(up, alpha2, dfs_region, inputs.vector) }
+        .map_err(AttachError::Hardware)?;
     let radio =
         Rtl8822c::new(hardware, address, country, inputs.clock).map_err(AttachError::Station)?;
     Ok(radio.keep(inputs.network, inputs.entropy))

@@ -134,9 +134,10 @@ pub trait Device {
     fn set_edca(&mut self, edca: &[AccessCategory; 4], short_slot: bool) -> Result<(), String>;
     fn write_key(&mut self, key: &CamKey<'_>) -> Result<(), String>;
     fn clear_key(&mut self, entry: u8) -> Result<(), String>;
-    /// `rtw_watch_dog_work`'s work on the air, for a peer that takes STBC or
-    /// not. Gives the peer's `rssi_level`.
-    fn watchdog(&mut self, _stbc: bool) -> Result<u8, String> {
+    /// `rtw_watch_dog_work`'s traffic accounts, and unless `scanning` its work
+    /// on the air, for a peer that takes STBC or not. Gives the peer's
+    /// `rssi_level`.
+    fn watchdog(&mut self, _scanning: bool, _stbc: bool) -> Result<u8, String> {
         Ok(0)
     }
     /// `rtw_core_scan_start` and `rtw_core_scan_complete`'s gain.
@@ -631,17 +632,18 @@ impl<D: Device> Rtl8822c<D> {
         Ok(())
     }
 
-    /// `rtw_watch_dog_work`, which leaves a scanning radio alone.
+    /// `rtw_watch_dog_work`.
     fn watchdog(&mut self, now: u64) -> Result<(), Error> {
         if now < self.watchdog_at {
             return Ok(());
         }
         self.watchdog_at = now + WATCHDOG_US;
-        if self.hop.is_some() {
+        let scanning = self.hop.is_some();
+        let stbc = self.context.as_deref().is_some_and(peer_stbc);
+        let level = Self::hardware(self.device.watchdog(scanning, stbc))?;
+        if scanning {
             return Ok(());
         }
-        let stbc = self.context.as_deref().is_some_and(peer_stbc);
-        let level = Self::hardware(self.device.watchdog(stbc))?;
         // `rtw_phy_ra_info_update`.
         if self.watchdogs & 3 == 0
             && let Some(context) = &self.context
