@@ -437,11 +437,15 @@ pub fn write() {
     // the heap still has room for the layout and the write.
     let started = output::now();
     let planned = store.plan(bound, || !crate::ALLOCATOR.low());
+    let heap = crate::ALLOCATOR.usage();
     output::arguments(format_args!(
-        "TRANSLATIONS planned records={} bytes={} ms={}\n",
+        "TRANSLATIONS planned records={} bytes={} ms={} live={} carved={} total={}\n",
         planned.layout.records(),
         planned.layout.bytes(),
-        output::millis_since(started)
+        output::millis_since(started),
+        heap.live,
+        heap.carved,
+        heap.total
     ));
     let started = output::now();
     let mut volume = match Fat32::open(Bytes::new(partition)) {
