@@ -15,7 +15,10 @@ use super::{
     dynamic, templates,
     transmit::{self, Queue},
 };
-use crate::wifi::security::aggregate::{OrderedGroup, Shape};
+use crate::wifi::security::{
+    aggregate::{OrderedGroup, Shape},
+    michael,
+};
 use crate::{
     Clock, Link, LinkError, Mac,
     wifi::{
@@ -69,7 +72,8 @@ pub const MAC_ID: u8 = 0;
 pub const PORT: u8 = 0;
 /// `RTW_SEC_DEFAULT_KEY_NUM`: group keys sit at their index, pairwise ones after.
 const PAIRWISE_CAM: u8 = 4;
-/// `RTW_CAM_AES`.
+/// `RTW_CAM_TKIP` and `RTW_CAM_AES`.
+const CAM_TKIP: u8 = 2;
 const CAM_AES: u8 = 4;
 /// `WLAN_HT_SMPS_CONTROL_DISABLED` and `WLAN_HT_SMPS_CONTROL_STATIC`.
 const SMPS_DISABLED: u8 = 0;
@@ -84,6 +88,10 @@ const REORDER_TICKS_PER_SECOND: u32 = 1_000_000;
 const MAX_HELD: usize = 256;
 /// A CCMP header, the IV a frame carries behind its MAC header.
 const IV_BYTES: usize = 8;
+/// `IEEE80211_TKIP_ICV_LEN`, and where a TKIP key keeps the Michael key for
+/// what it receives, `NL80211_TKIP_DATA_OFFSET_RX_MIC_KEY`.
+const ICV_BYTES: usize = 4;
+const RECEIVE_MICHAEL_KEY: usize = 24;
 /// `ieee80211_add_wmm_info_ie`, without U-APSD.
 const WMM_ELEMENT: [u8; 9] = [221, 7, 0, 0x50, 0xf2, 2, 0, 1, 0];
 /// `WLAN_CATEGORY_BACK`.
@@ -337,6 +345,57 @@ fn width_code(width: Width) -> u8 {
         Width::Mhz80 => 2,
         Width::Mhz40 => 1,
         _ => 0,
+    }
+}
+
+/// What `ieee80211_crypto_tkip_decrypt` and `ieee80211_rx_h_michael_mic_verify`
+/// make of a TKIP frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Michael {
+    Intact,
+    /// A frame this key already took, or no TKIP frame at all: dropped, with
+    /// no verdict on Michael.
+    Dropped,
+    Failed,
+}
+
+/// Check `frame`, decrypted with `IV` and trailer in place, under `key`.
+/// Michael covers an MSDU, so fragments never reach here.
+fn check_michael(frame: &mut Mpdu, key: &Key) -> Michael {
+    let header = *frame.header();
+    let bytes = frame.bytes();
+    let body = header.length + IV_BYTES;
+    let Some(end) = bytes.len().checked_sub(ICV_BYTES + michael::MIC_BYTES) else {
+        return Michael::Dropped;
+    };
+    let Some(Ok((number, _))) = bytes
+        .get(header.length..)
+        .map(PacketNumber::from_tkip_header)
+    else {
+        return Michael::Dropped;
+    };
+    if end < body {
+        return Michael::Dropped;
+    }
+    let source = bytes[16..22].try_into().unwrap_or([0; 6]);
+    let stored = bytes[end..end + michael::MIC_BYTES].to_vec();
+    let mut mic_key = [0; michael::MIC_BYTES];
+    mic_key.copy_from_slice(&key.material[RECEIVE_MICHAEL_KEY..]);
+    let priority = header.tid.unwrap_or(0);
+    let computed = michael::michael(
+        &mic_key,
+        &header.receiver.0,
+        &source,
+        priority,
+        &bytes[body..end],
+    );
+    frame.security.pn = Some(number);
+    if key.slot.replays(frame) {
+        Michael::Dropped
+    } else if computed == stored[..] {
+        Michael::Intact
+    } else {
+        Michael::Failed
     }
 }
 
@@ -1304,16 +1363,36 @@ impl<D: Device> Rtl8822c<D> {
         if header.protected() {
             let multicast = header.receiver.is_multicast();
             let index = frame.bytes().get(header.length + 3).map(|byte| byte >> 6);
-            let key = self
+            let held = self
                 .keys
                 .iter()
-                .filter(|key| key.pairwise != multicast && Some(key.index) == index)
-                .find_map(|key| key.slot.installed());
-            let Some(key) = key else {
+                .position(|key| key.pairwise != multicast && Some(key.index) == index);
+            let Some(held) = held else {
+                return Ok(());
+            };
+            let Some(key) = self.keys[held].slot.installed() else {
                 return Ok(());
             };
             if frame.security.icv_error {
                 return Ok(());
+            }
+            if self.keys[held].material.len() == Cipher::Tkip.key_length()
+                && frame.security.decrypted
+            {
+                if header.fragmented() {
+                    self.unsupported("a fragmented TKIP frame");
+                    return Ok(());
+                }
+                match check_michael(&mut frame, &self.keys[held]) {
+                    Michael::Intact => {}
+                    Michael::Dropped => return Ok(()),
+                    Michael::Failed => {
+                        let pairwise = !multicast;
+                        self.events
+                            .push_back(keeper::Event::MichaelFailure { pairwise });
+                        return Ok(());
+                    }
+                }
             }
             frame.security.key = Some(key);
         }
@@ -2045,9 +2124,19 @@ impl<D: Device> Radio for Rtl8822c<D> {
         material: &[u8],
         receive: ReplaySeed,
     ) -> Result<KeyIdentity, Error> {
-        let bytes: &[u8; 16] = material
-            .try_into()
-            .map_err(|_| Error::Unsupported("a key other than CCMP-128 on an RTL8822C"))?;
+        // rtw88 takes TKIP as `RTW_CAM_TKIP` and leaves Michael to mac80211.
+        let (cipher, kind) = if material.len() == Cipher::Ccmp128.key_length() {
+            (Cipher::Ccmp128, CAM_AES)
+        } else if !pairwise && material.len() == Cipher::Tkip.key_length() {
+            (Cipher::Tkip, CAM_TKIP)
+        } else {
+            return Err(Error::Unsupported(
+                "a key other than CCMP-128 or a TKIP group key on an RTL8822C",
+            ));
+        };
+        let temporal = material
+            .first_chunk::<16>()
+            .ok_or(Error::Refused("key material"))?;
         let peer = self
             .station
             .pairwise_peer()
@@ -2066,17 +2155,17 @@ impl<D: Device> Radio for Rtl8822c<D> {
         let mut slot = unsafe { KeySlot::new(self.next_slot) }.map_err(Error::Key)?;
         self.next_slot = self.next_slot.wrapping_add(1);
         let ticket = slot
-            .begin_install(index, Cipher::Ccmp128, material, receive, scope, transmit)
+            .begin_install(index, cipher, material, receive, scope, transmit)
             .map_err(Error::Key)?;
         let identity = ticket.identity();
         let entry = if pairwise { PAIRWISE_CAM } else { index };
         Self::hardware(self.device.write_key(&CamKey {
             entry,
             index,
-            kind: CAM_AES,
+            kind,
             group: !pairwise,
             peer: if pairwise { peer } else { Mac::BROADCAST },
-            material: bytes,
+            material: temporal,
         }))?;
         slot.complete_install(ticket, InstallOutcome::Accepted)
             .map_err(Error::Key)?;
