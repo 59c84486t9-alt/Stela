@@ -13,7 +13,7 @@ use super::{
     descriptor::{
         Aggregate, Packet, QSEL_MANAGEMENT, RATE_1M, RATE_6M, RATE_ID_B, RATE_ID_G, SECURITY_CCMP,
     },
-    dynamic,
+    dynamic, templates,
     transmit::Queue,
 };
 use crate::wifi::security::aggregate::{OrderedGroup, Shape};
@@ -67,11 +67,14 @@ const BSS_EXPIRY_US: u64 = 30_000_000;
 /// rtw88's sole station shares its interface's MAC ID, the first it acquires.
 pub const MAC_ID: u8 = 0;
 /// `rtw_ops_add_interface`'s first port.
-const PORT: u8 = 0;
+pub const PORT: u8 = 0;
 /// `RTW_SEC_DEFAULT_KEY_NUM`: group keys sit at their index, pairwise ones after.
 const PAIRWISE_CAM: u8 = 4;
 /// `RTW_CAM_AES`.
 const CAM_AES: u8 = 4;
+/// `WLAN_HT_SMPS_CONTROL_DISABLED` and `WLAN_HT_SMPS_CONTROL_STATIC`.
+const SMPS_DISABLED: u8 = 0;
+const SMPS_STATIC: u8 = 1;
 /// `IEEE80211_MIN_AMPDU_BUF`'s window, which `HT_RX_REORDER_BUF_TIMEOUT` serves.
 const RECEIVE_WINDOW: u16 = 64;
 /// mac80211's `max_tx_aggregation_subframes`, which rtw88 leaves alone.
@@ -139,11 +142,30 @@ pub trait Device {
     fn set_edca(&mut self, edca: &[AccessCategory; 4], short_slot: bool) -> Result<(), String>;
     fn write_key(&mut self, key: &CamKey<'_>) -> Result<(), String>;
     fn clear_key(&mut self, entry: u8) -> Result<(), String>;
+    /// `rtw_fw_download_rsvd_page` and `rtw_send_rsvd_page_h2c`.
+    fn set_templates(&mut self, _templates: &templates::Templates) -> Result<(), String> {
+        Ok(())
+    }
+    /// `rtw_enter_lps` and `rtw_leave_lps`, which each stand for being there.
+    fn set_power_save(&mut self, _on: bool) -> Result<(), String> {
+        Ok(())
+    }
+    /// The beacons' interval and DTIM period.
+    fn set_beacon(&mut self, _interval_tu: u16, _dtim_period: u8) -> Result<(), String> {
+        Ok(())
+    }
+    /// `rtw_vif_smps_iter`: the next change to one stream or back to two.
+    fn stream_change(&mut self) -> Option<bool> {
+        None
+    }
+    /// A look at the Bluetooth arbiter's timers, at `now`.
+    fn coexist(&mut self, _now: u64) -> Result<(), String> {
+        Ok(())
+    }
     /// `rtw_watch_dog_work`'s traffic accounts, and unless `scanning` its work
-    /// on the air, for a peer that takes STBC or not. Gives the peer's
-    /// `rssi_level`.
-    fn watchdog(&mut self, _scanning: bool, _stbc: bool) -> Result<u8, String> {
-        Ok(0)
+    /// on the air, for a peer that takes STBC or not.
+    fn watchdog(&mut self, _scanning: bool, _stbc: bool) -> Result<Watched, String> {
+        Ok(Watched::default())
     }
     /// `rtw_core_scan_start` and `rtw_core_scan_complete`'s gain.
     fn scanning(&mut self, _scanning: bool) -> Result<(), String> {
@@ -194,6 +216,15 @@ struct Hop {
     channels: Vec<Channel>,
     next: usize,
     leaves_at: u64,
+}
+
+/// What a run of the watchdog found.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Watched {
+    /// The peer's `rssi_level`.
+    pub level: u8,
+    /// Too many frames for power save.
+    pub busy: bool,
 }
 
 /// One key the CAM holds.
@@ -297,8 +328,9 @@ fn probe_request(local: Mac, ssid: &[u8], band: Band, extra: &[u8]) -> Vec<u8> {
     bytes
 }
 
-/// `rtw_update_sta_info`'s rate ID and what it tells firmware of the peer.
-fn rate_info(context: &AssociationContext, initial: bool, level: u8) -> RateInfo {
+/// `rtw_update_sta_info`'s rate ID and what it tells firmware of the peer, on
+/// a link `width` wide.
+fn rate_info(context: &AssociationContext, width: Width, initial: bool, level: u8) -> RateInfo {
     let negotiated = context.negotiated();
     let band = context.channel().band;
     let ht = negotiated.ht.as_ref();
@@ -322,7 +354,7 @@ fn rate_info(context: &AssociationContext, initial: bool, level: u8) -> RateInfo
     }
     let cck_only = band == Band::Ghz2 && vht.is_none() && ht.is_none() && legacy <= 0xf;
     let mask = dynamic::rates_at_level(mask, level, cck_only);
-    let width = match negotiated.width {
+    let width = match width {
         Width::Mhz80 => 2,
         Width::Mhz40 => 1,
         _ => 0,
@@ -431,6 +463,8 @@ pub struct Rtl8822c<D: Device> {
     observed: Vec<Heard>,
     outbox: VecDeque<(Option<Ticket>, Vec<u8>)>,
     events: VecDeque<keeper::Event>,
+    /// What beacons said of the AP since association.
+    following: Option<follow::Following>,
     received: VecDeque<Vec<u8>>,
     /// Data frames waiting for room, each with its queue and descriptor.
     held: VecDeque<(Queue, Packet, Vec<u8>)>,
@@ -485,6 +519,7 @@ impl<D: Device> Rtl8822c<D> {
             observed: Vec::new(),
             outbox: VecDeque::new(),
             events: VecDeque::new(),
+            following: None,
             received: VecDeque::new(),
             held: VecDeque::new(),
             parked: VecDeque::new(),
@@ -588,6 +623,7 @@ impl<D: Device> Rtl8822c<D> {
         for key in core::mem::take(&mut self.keys) {
             Self::hardware(self.device.clear_key(key.entry))?;
         }
+        self.power_save(false)?;
         for agreement in &mut self.agreements {
             *agreement = None;
         }
@@ -598,6 +634,7 @@ impl<D: Device> Rtl8822c<D> {
         Self::hardware(self.device.set_port(Mac([0; 6]), 0, false))?;
         Self::hardware(self.device.filter_beacons(false))?;
         self.context = None;
+        self.following = None;
         self.integrity = None;
         self.management_cipher = None;
         self.departing = None;
@@ -676,7 +713,10 @@ impl<D: Device> Rtl8822c<D> {
         self.watchdog_at = now + WATCHDOG_US;
         let scanning = self.hop.is_some();
         let stbc = self.context.as_deref().is_some_and(peer_stbc);
-        let level = Self::hardware(self.device.watchdog(scanning, stbc))?;
+        if !scanning {
+            self.power_save(false)?;
+        }
+        let Watched { level, busy } = Self::hardware(self.device.watchdog(scanning, stbc))?;
         if scanning {
             return Ok(());
         }
@@ -684,11 +724,56 @@ impl<D: Device> Rtl8822c<D> {
         if self.watchdogs & 3 == 0
             && let Some(context) = &self.context
         {
-            let info = rate_info(context, false, level);
+            let info = rate_info(context, self.width(context), false, level);
             Self::hardware(self.device.command(commands::ra_info(info)))?;
         }
         self.watchdogs = self.watchdogs.wrapping_add(1);
+        // `rtw_recalc_lps`, with `ieee80211_powersave_allowed`.
+        let allowed = self.port_open
+            && self
+                .following
+                .as_ref()
+                .is_some_and(follow::Following::may_sleep);
+        if allowed && !busy {
+            self.power_save(true)?;
+        }
         Ok(())
+    }
+
+    /// `ieee80211_request_smps` of each change the radio made.
+    fn announce_streams(&mut self) -> Result<(), Error> {
+        while let Some(single) = self.device.stream_change() {
+            if let Some(context) = &self.context
+                && context.negotiated().ht.is_some()
+            {
+                let control = if single { SMPS_STATIC } else { SMPS_DISABLED };
+                let frame = self
+                    .station
+                    .spatial_power_save(context, control)
+                    .map_err(Error::Station)?;
+                self.outbox.push_back((None, frame));
+            }
+        }
+        Ok(())
+    }
+
+    /// `rtw_enter_lps` and `rtw_leave_lps`.
+    fn power_save(&mut self, on: bool) -> Result<(), Error> {
+        Self::hardware(self.device.set_power_save(on))
+    }
+
+    /// The width the link to `context` runs at.
+    fn width(&self, context: &AssociationContext) -> Width {
+        self.following
+            .as_ref()
+            .map_or(context.negotiated().width, follow::Following::width)
+    }
+
+    /// The AP asked for silence, `ieee80211_vif_block_queues_csa`.
+    fn silent(&self) -> bool {
+        self.following
+            .as_ref()
+            .is_some_and(follow::Following::silent)
     }
 
     /// `rtw_tx_mgmt_pkt_info_update` of `bytes`, at the BSS's lowest basic rate.
@@ -723,6 +808,9 @@ impl<D: Device> Rtl8822c<D> {
 
     fn send_management(&mut self) -> Result<(), Error> {
         while let Some((ticket, bytes)) = self.outbox.front().cloned() {
+            if self.silent() {
+                return Ok(());
+            }
             let band = self.tuned.map_or(Band::Ghz2, |channel| channel.band);
             let basic = self.context.as_ref().map(|c| c.negotiated().legacy.basic);
             let report = ticket.is_some().then_some(self.report);
@@ -773,7 +861,9 @@ impl<D: Device> Rtl8822c<D> {
     }
 
     fn send_data(&mut self) -> Result<(), Error> {
-        while let Some((queue, packet, mpdu)) = self.held.front() {
+        while !self.silent()
+            && let Some((queue, packet, mpdu)) = self.held.front()
+        {
             if !Self::hardware(self.device.transmit(*queue, packet, mpdu))? {
                 return Ok(());
             }
@@ -859,7 +949,7 @@ impl<D: Device> Rtl8822c<D> {
                             .is_err()
                     {
                         Completion::RejectedAndIdle
-                    } else if !self.send_agreement_frame(&bytes)? {
+                    } else if self.silent() || !self.send_agreement_frame(&bytes)? {
                         self.changes.push_front(tx::Action::Transmit {
                             ticket,
                             session,
@@ -994,7 +1084,7 @@ impl<D: Device> Rtl8822c<D> {
             Protection::Firmware { .. } => return Err(Error::Refused("a firmware key")),
         };
         let queue = tid.map_or(Queue::BestEffort, tid_queue);
-        let info = rate_info(&context, false, 0);
+        let info = rate_info(&context, self.width(&context), false, 0);
         let aggregate = tid
             .and_then(|tid| self.aggregating[usize::from(tid)].as_ref())
             .and(context.negotiated().ht.as_ref())
@@ -1048,6 +1138,9 @@ impl<D: Device> Rtl8822c<D> {
                             .management_status(acknowledged, now)
                             .map_err(Error::Station)?;
                     }
+                    if let Some(following) = &mut self.following {
+                        following.reported(number, acknowledged, now);
+                    }
                 }
                 Incoming::Report(_) => {}
                 Incoming::Frame(frame) => {
@@ -1100,6 +1193,12 @@ impl<D: Device> Rtl8822c<D> {
 
     fn frame(&mut self, mut frame: Mpdu, now: u64) -> Result<(), Error> {
         let header = *frame.header();
+        if let (Some(following), Some(context)) = (&mut self.following, &self.context)
+            && header.transmitter == Some(context.bssid())
+            && !header.receiver.is_multicast()
+        {
+            following.heard(now);
+        }
         // A beacon or probe response heard during a scan.
         if let Some(hop) = &self.hop
             && matches!(header.control & 0xfc, 0x80 | 0x50)
@@ -1227,6 +1326,12 @@ impl<D: Device> Rtl8822c<D> {
 
     fn management_frame(&mut self, frame: Mpdu, now: u64) -> Result<(), Error> {
         let header = *frame.header();
+        // What is heard outside a scan matters only of the associated AP.
+        match header.control & 0xfc {
+            0x80 => return self.beacon_heard(&frame, now),
+            0x50 => return Ok(()),
+            _ => {}
+        }
         let mut policy = Admitted(&self.channels);
         if header.protected() {
             return self.protected_management(frame, now);
@@ -1250,6 +1355,16 @@ impl<D: Device> Rtl8822c<D> {
         let Some(epoch) = self.station.association_epoch() else {
             return Ok(());
         };
+        // `ieee80211_drop_unencrypted_mgmt`: only Public's is not robust.
+        if header.control & 0xfc == 0xd0
+            && let Some(body) = frame.bytes().get(header.length..)
+            && (body.first() == Some(&4)
+                || matches!(body.first(), Some(0 | 9))
+                    && !self.station.requires_protected_management())
+        {
+            self.switch_action(body, now);
+            return Ok(());
+        }
         if header.control & 0xfc == 0xd0
             && frame.bytes().get(header.length) == Some(&BLOCK_ACK_CATEGORY)
         {
@@ -1328,6 +1443,7 @@ impl<D: Device> Rtl8822c<D> {
                     self.block_ack(action);
                 }
             }
+            0xd0 if matches!(body.first(), Some(0 | 9)) => self.switch_action(body, now),
             0xd0 if body.len() >= 4 && body[..2] == [8, 0] => {
                 let response = [8, 1, body[2], body[3]];
                 let Some(ap) = header.transmitter else {
@@ -1424,6 +1540,8 @@ impl<D: Device> Rtl8822c<D> {
     fn operate(&mut self) -> Result<(), Error> {
         let now = self.clock.now_us();
         self.take_incoming(now)?;
+        Self::hardware(self.device.coexist(now))?;
+        self.announce_streams()?;
         self.watchdog(now)?;
         self.walk(now)?;
         self.release_expired(now);
@@ -1458,6 +1576,7 @@ impl<D: Device> Rtl8822c<D> {
                 Err(error) => return Err(Error::BlockAck(error)),
             }
         }
+        self.follow(now)?;
         self.send_management()?;
         self.send_data()?;
         self.change_agreements()?;
@@ -1637,6 +1756,7 @@ impl<D: Device> Radio for Rtl8822c<D> {
 
     fn begin_scan(&mut self, request: scan::Request, budget_us: u64) -> Result<(), Error> {
         let now = self.clock.now_us();
+        self.power_save(false)?;
         self.observed
             .retain(|heard| now.saturating_sub(heard.at) < BSS_EXPIRY_US);
         let channels = request.channels().to_vec();
@@ -1788,23 +1908,27 @@ impl<D: Device> Radio for Rtl8822c<D> {
         Self::hardware(self.device.tune(&context.definition(), false, eirp_mbm))?;
         self.tuned = Some(context.channel());
         Self::hardware(self.device.prepare_transmit())?;
-        let capabilities = context.beacon().capabilities;
+        let slot = follow::short_slot(context.channel().band, context.beacon().capabilities);
         if let Some(wmm) = &context.negotiated().wmm {
-            Self::hardware(
-                self.device
-                    .set_edca(&wmm.access_categories, capabilities & (1 << 10) != 0),
-            )?;
+            Self::hardware(self.device.set_edca(&wmm.access_categories, slot))?;
         }
-        Self::hardware(
-            self.device
-                .command(commands::ra_info(rate_info(&context, true, 0))),
-        )?;
+        let following = follow::Following::new(&context, self.clock.now_us());
+        let info = rate_info(&context, following.width(), true, 0);
+        self.following = Some(following);
+        Self::hardware(self.device.command(commands::ra_info(info)))?;
         Self::hardware(self.device.command(commands::media_status(MAC_ID, true)))?;
         Self::hardware(self.device.set_port(
             context.bssid(),
             context.response().aid & 0x7ff,
             true,
         ))?;
+        let interval = context.beacon().beacon_interval;
+        Self::hardware(self.device.set_beacon(interval, context.dtim_period()))?;
+        let wmm = context.negotiated().wmm.is_some();
+        let aid = context.response().aid & 0x7ff;
+        let band = context.channel().band;
+        let pages = templates::build(self.address, context.bssid(), aid, wmm, band);
+        Self::hardware(self.device.set_templates(&pages))?;
         Self::hardware(self.device.command(commands::default_port(PORT, MAC_ID)))?;
         self.context = Some(context.clone());
         self.station
@@ -1971,5 +2095,6 @@ impl<D: Device> Radio for Rtl8822c<D> {
     }
 }
 
+mod follow;
 #[cfg(test)]
 mod tests;

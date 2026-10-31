@@ -79,7 +79,7 @@ impl Client {
             .filter_map(|seat| self.context_at(seat))
             .any(|link| !usable(&self.channels, &self.link_definition(link)));
         if barred {
-            self.tracking.drop_connection();
+            self.tracking.watch.drop_connection();
         }
     }
 }

@@ -31,4 +31,5 @@ pub mod regd;
 pub mod registers;
 pub mod rf;
 pub mod station;
+pub mod templates;
 pub mod transmit;

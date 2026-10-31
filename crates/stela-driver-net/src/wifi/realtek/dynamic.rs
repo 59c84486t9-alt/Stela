@@ -57,6 +57,18 @@ const COVERAGE_MAX: u8 = 0x2a;
 const COVERAGE_MID: u8 = 0x26;
 /// `DIG_CVRG_MIN`, where a scan listens widest.
 pub const MAX_COVERAGE: u8 = 0x1c;
+/// `RTW_LPS_THRESHOLD`, and what `rtw_watch_dog_work` calls busy.
+const LPS_THRESHOLD: u32 = 50;
+const BUSY_THRESHOLD: u32 = 100;
+
+/// How a watchdog period's frames count.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Traffic {
+    /// `ps_active`.
+    pub sleepless: bool,
+    /// `RTW_FLAG_BUSY_TRAFFIC`.
+    pub busy: bool,
+}
 const RSSI_GAIN_OFFSET: u8 = 15;
 /// `DECLARE_EWMA(rssi, 10, 16)`.
 const AVERAGE_PRECISION: u32 = 10;
@@ -564,6 +576,9 @@ pub struct Dynamic {
     evm_db: u8,
     /// Unicast data bytes this period, and their averaged megabits.
     tx_bytes: u64,
+    /// `stats.tx_cnt` and `stats.rx_cnt`.
+    tx_frames: u32,
+    rx_frames: u32,
     rx_bytes: u64,
     tx_throughput: u64,
     rx_throughput: u64,
@@ -614,6 +629,8 @@ impl Dynamic {
             rx_rate: 0,
             evm_db: 0,
             tx_bytes: 0,
+            tx_frames: 0,
+            rx_frames: 0,
             rx_bytes: 0,
             tx_throughput: 0,
             rx_throughput: 0,
@@ -643,6 +660,7 @@ impl Dynamic {
     pub fn frame(&mut self, bytes: &[u8], signal: Option<Signal>, address: Mac, bssid: Mac) {
         if is_unicast_data(bytes) {
             self.rx_bytes += bytes.len() as u64;
+            self.rx_frames += 1;
         }
         let Some(signal) = signal else {
             return;
@@ -674,15 +692,32 @@ impl Dynamic {
     pub fn sent(&mut self, mpdu: &[u8]) {
         if is_unicast_data(mpdu) {
             self.tx_bytes += mpdu.len() as u64;
+            self.tx_frames += 1;
         }
     }
 
     /// `rtw_watch_dog_work`'s accounts of the period that ended.
-    pub fn close_period(&mut self) {
+    pub fn close_period(&mut self) -> Traffic {
+        let tx_frames = core::mem::take(&mut self.tx_frames);
+        let rx_frames = core::mem::take(&mut self.rx_frames);
         let tx = core::mem::take(&mut self.tx_bytes) >> MBPS_SHIFT;
         let rx = core::mem::take(&mut self.rx_bytes) >> MBPS_SHIFT;
         average_in(&mut self.tx_throughput, tx, THROUGHPUT_WEIGHT);
         average_in(&mut self.rx_throughput, rx, THROUGHPUT_WEIGHT);
+        Traffic {
+            sleepless: tx_frames > LPS_THRESHOLD || rx_frames > LPS_THRESHOLD,
+            busy: tx_frames > BUSY_THRESHOLD || rx_frames > BUSY_THRESHOLD,
+        }
+    }
+
+    /// `stats->tx_throughput` over `rx_throughput`.
+    pub fn transmitting(&self) -> bool {
+        self.tx_throughput > self.rx_throughput
+    }
+
+    /// `dm_info.min_rssi`.
+    pub fn min_rssi(&self) -> u8 {
+        self.min_rssi
     }
 
     /// `rtw_fw_update_wl_phy_info`.
@@ -765,6 +800,46 @@ impl Dynamic {
         set_mask(io, sense_at, sense, carrier)?;
         self.cck_levels[width][paths] = new;
         Ok(())
+    }
+
+    /// `rtw8822c_config_trx_mode` for path A alone, or both.
+    pub fn set_paths<I: Io>(io: &mut I, single: bool) -> Result<(), io::Error> {
+        let both = u32::from(!single);
+        let second_path = if single { 0x11111 } else { 0x33312 };
+        let paths = if single { 1 } else { 3 };
+        for (register, mask, value) in [
+            (0x1800, 0xfffff, 0x33312),
+            (0x4100, 0xfffff, second_path),
+            (0x1a2c, 0x00060000, both),
+            (0x1a2c, 0x00600000, both),
+            (0x1a04, 0x0f000000, both),
+            (0x1d30, 0x300, both),
+            (0x1d30, 0x600000, both),
+            (0xc44, 1 << 17, both),
+            (0xc54, 1 << 20, both),
+            (0xc38, 1 << 24, both),
+            (0x824, 0x0f000000, paths),
+            (0x824, 0x000f0000, paths),
+            (0x1a04, 0xf0000000, 8),
+        ] {
+            set_mask(io, register, mask, value)?;
+        }
+        reset_baseband(io)?;
+        let (antennas, legacy_mask, legacy) = if single {
+            (0x11, 0xff, 0)
+        } else {
+            (0x31, 0xffff, 0x0400)
+        };
+        set_mask(io, 0x820, 0xff, antennas)?;
+        set_mask(io, 0x1e2c, legacy_mask, legacy)?;
+        reset_baseband(io)?;
+        reset_baseband(io)?;
+        // rtw8822c_toggle_igi.
+        let gain = mask_of(io, 0x1d70, 0x7f)?;
+        set_mask(io, 0x1d70, 0x7f, gain - 2)?;
+        set_mask(io, 0x1d70, 0x7f00, gain - 2)?;
+        set_mask(io, 0x1d70, 0x7f, gain)?;
+        set_mask(io, 0x1d70, 0x7f00, gain)
     }
 
     /// `rtw_phy_tx_path_div_select`: one stream leaves by the stronger path.
@@ -1382,6 +1457,22 @@ mod tests {
             dynamic.gain(0, false);
         }
         assert_eq!(dynamic.current_gain(), MAX_COVERAGE);
+    }
+
+    #[test]
+    fn one_stream_stands_on_path_a_and_two_come_back() {
+        let mut bus = Bus(BTreeMap::new());
+        bus.write32(0x1d70, 0x2020).unwrap();
+        Dynamic::set_paths(&mut bus, true).unwrap();
+        assert_eq!(bus.get(0x4100) & 0xfffff, 0x11111);
+        assert_eq!(bus.get(0x820) & 0xff, 0x11);
+        assert_eq!(bus.get(0x824), 0x0101_0000);
+        assert_eq!(bus.get(0x1d70), 0x2020, "the gain toggled back");
+        Dynamic::set_paths(&mut bus, false).unwrap();
+        assert_eq!(bus.get(0x4100) & 0xfffff, 0x33312);
+        assert_eq!(bus.get(0x820) & 0xff, 0x31);
+        assert_eq!(bus.get(0x1e2c) & 0xffff, 0x0400);
+        assert_eq!(bus.get(0x824), 0x0303_0000);
     }
 
     #[test]

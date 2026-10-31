@@ -19,6 +19,14 @@ const CALIBRATION: u32 = 0x6d;
 /// `C2H_SCAN_RESULT`.
 const SCAN_RESULT: u8 = 0x38;
 
+/// `H2C_CMD_RSVD_PAGE` and `H2C_CMD_SET_PWR_MODE`.
+const RESERVED_PAGES: u32 = 0;
+const POWER_MODE: u32 = 0x20;
+
+/// `C2H_BT_INFO`, `C2H_BT_MP_INFO` and `C2H_BT_HID_INFO`.
+const BT_INFO: u8 = 0x09;
+const BT_MP_INFO: u8 = 0x0b;
+const BT_HID_INFO: u8 = 0x45;
 /// `C2H_CCX_TX_RPT`.
 const CCX_TX_REPORT: u8 = 0x03;
 /// `C2H_RA_RPT`.
@@ -26,6 +34,28 @@ const RA_REPORT: u8 = 0x0c;
 /// `C2H_HALMAC`, and its `C2H_CCX_RPT`.
 const HALMAC: u8 = 0xff;
 const HALMAC_CCX_REPORT: u8 = 0x0f;
+
+/// `rtw_send_rsvd_page_h2c`, with no probe response among the pages.
+pub fn reserved_pages(ps_poll: u8, null: u8, qos_null: u8) -> (u32, u32) {
+    (
+        RESERVED_PAGES | (u32::from(ps_poll) << 16) | (u32::from(null) << 24),
+        u32::from(qos_null),
+    )
+}
+
+/// `rtw_fw_set_pwr_mode` as `rtw_enter_lps_core` and `rtw_leave_lps_core` set
+/// it for the station on `port`.
+pub fn power_mode(leisure: bool, port: u8) -> (u32, u32) {
+    let (mode, rlbm, smart, state) = if leisure {
+        (1, 1, 2, 0)
+    } else {
+        (0, 0, 0, 0xc)
+    };
+    (
+        POWER_MODE | (mode << 8) | (rlbm << 16) | (smart << 20) | (1 << 24),
+        (u32::from(port) << 5) | (state << 8),
+    )
+}
 
 /// `rtw_fw_media_status_report`.
 pub fn media_status(mac_id: u8, connected: bool) -> (u32, u32) {
@@ -116,6 +146,14 @@ pub fn adaptivity(mode: u8, gain: u8, threshold: u8, density: u8) -> (u32, u32) 
     )
 }
 
+/// What fits of a report's `payload`, the rest of it zero.
+fn first_bytes(payload: &[u8]) -> [u8; 8] {
+    let mut bytes = [0; 8];
+    let length = payload.len().min(bytes.len());
+    bytes[..length].copy_from_slice(&payload[..length]);
+    bytes
+}
+
 /// One report in a firmware packet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Report {
@@ -129,6 +167,12 @@ pub enum Report {
     },
     /// `rtw_fw_scan_result`: how crowded the scan found the air.
     Density(u8),
+    /// `rtw_coex_bt_info_notify`, of `length` bytes.
+    Bluetooth { bytes: [u8; 10], length: u8 },
+    /// `rtw_coex_info_response`.
+    BluetoothAnswer([u8; 8]),
+    /// `rtw_coex_bt_hid_info_notify`.
+    BluetoothHid([u8; 8]),
     /// A report a station does not act on, by ID.
     Other(u8),
 }
@@ -153,6 +197,17 @@ impl Report {
                 mac_id: *payload.get(1)?,
             },
             SCAN_RESULT => Self::Density(*payload.first()?),
+            BT_INFO => {
+                let mut bytes = [0; 10];
+                let length = payload.len().min(bytes.len());
+                bytes[..length].copy_from_slice(&payload[..length]);
+                Self::Bluetooth {
+                    bytes,
+                    length: length as u8,
+                }
+            }
+            BT_MP_INFO => Self::BluetoothAnswer(first_bytes(payload)),
+            BT_HID_INFO => Self::BluetoothHid(first_bytes(payload)),
             _ => Self::Other(id),
         })
     }
@@ -166,6 +221,20 @@ mod tests {
     fn commands_keep_their_fields_in_rtw88s_bits() {
         assert_eq!(media_status(1, true), (0x0001_0101, 0));
         assert_eq!(default_port(0, 1), (0x0001_002c, 0));
+        assert_eq!(reserved_pages(1, 3, 2), (0x0301_0000, 2));
+        assert_eq!(
+            Report::parse(&[9, 0, 1, 2, 3, 4, 5, 6, 7]),
+            Some(Report::Bluetooth {
+                bytes: [1, 2, 3, 4, 5, 6, 7, 0, 0, 0],
+                length: 7
+            })
+        );
+        assert_eq!(
+            Report::parse(&[0xb, 0, 1, 0, 0, 2]),
+            Some(Report::BluetoothAnswer([1, 0, 0, 2, 0, 0, 0, 0]))
+        );
+        assert_eq!(power_mode(true, 0), (0x0121_0120, 0));
+        assert_eq!(power_mode(false, 0), (0x0100_0020, 0xc00));
         let (message, mask) = ra_info(RateInfo {
             mac_id: 1,
             rate_id: 9,
@@ -215,7 +284,7 @@ mod tests {
                 acknowledged: true
             })
         );
-        assert_eq!(Report::parse(&[0x09, 0, 1]), Some(Report::Other(9)));
+        assert_eq!(Report::parse(&[0x46, 0, 1]), Some(Report::Other(0x46)));
         assert_eq!(Report::parse(&[3, 0, 1]), None);
     }
 }

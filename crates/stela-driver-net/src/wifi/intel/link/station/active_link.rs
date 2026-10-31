@@ -267,7 +267,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             return Ok(());
         };
         // `iwl_mld_valid_emlsr_pair`, and mac80211 keeps its links through a switch.
-        if self.client.tracking.moving() {
+        if self.client.tracking.watch.moving() {
             return Ok(());
         }
         let client = &self.client;

@@ -18,6 +18,56 @@ const BCN_VALID: u16 = 1 << 15;
 const MAX_POLLS: usize = 1000;
 const CHUNK: usize = 4096;
 
+fn poll<I: Io>(io: &mut I, register: u32, mask: u32, target: u32) -> Result<(), Error> {
+    for _ in 0..MAX_POLLS {
+        let value = io.read32(register)?;
+        // Removed/unmapped devices must not satisfy all-set ready masks.
+        if value == u32::MAX {
+            return Err(Error::Register);
+        }
+        if value & mask == target {
+            return Ok(());
+        }
+        io.delay_us(10);
+    }
+    Err(Error::Timeout { register, mask })
+}
+
+/// `rtw_fw_write_data_rsvd_page` of `data` at page `head`, with the beacon
+/// queue's head left at `boundary`.
+pub fn write_reserved<I: Io>(
+    io: &mut I,
+    head: u16,
+    boundary: u16,
+    data: &[u8],
+) -> Result<(), Error> {
+    let beacon = io.read8(REG_BCN_CTRL)?;
+    io.write16(REG_FIFOPAGE_CTRL_2, head | BCN_VALID)?;
+    let cr = io.read8(REG_CR + 1)?;
+    io.write8(REG_CR + 1, cr | 1)?;
+    io.write8(REG_BCN_CTRL, (beacon & !8) | 16)?;
+    let txq = io.read8(REG_FWHW_TXQ_CTRL + 2)?;
+    io.write8(REG_FWHW_TXQ_CTRL + 2, txq & !64)?;
+    let result = io.submit_beacon(data).and_then(|()| {
+        poll(
+            io,
+            REG_FIFOPAGE_CTRL_2,
+            u32::from(BCN_VALID),
+            u32::from(BCN_VALID),
+        )?;
+        // SAFETY: cleared BCN_VALID before this exact payload,
+        // then observed its new hardware event under exclusive I/O.
+        unsafe { io.beacon_consumed() }
+    });
+    // Restore even for queue/valid-bit failure. An error in restoration is
+    // itself uncertain; outer start quarantines all remaining resources.
+    io.write16(REG_FIFOPAGE_CTRL_2, boundary | BCN_VALID)?;
+    io.write8(REG_BCN_CTRL, beacon)?;
+    io.write8(REG_FWHW_TXQ_CTRL + 2, txq)?;
+    io.write8(REG_CR + 1, cr)?;
+    result
+}
+
 #[derive(Debug)]
 pub enum StartError {
     Hardware(Error),
@@ -161,18 +211,7 @@ impl<I: Io> Download<I> {
         self.io.write8(register, (value & !clear) | set)
     }
     fn poll(&mut self, register: u32, mask: u32, target: u32) -> Result<(), Error> {
-        for _ in 0..MAX_POLLS {
-            let value = self.io.read32(register)?;
-            // Removed/unmapped devices must not satisfy all-set ready masks.
-            if value == u32::MAX {
-                return Err(Error::Register);
-            }
-            if value & mask == target {
-                return Ok(());
-            }
-            self.io.delay_us(10);
-        }
-        Err(Error::Timeout { register, mask })
+        poll(&mut self.io, register, mask, target)
     }
     fn cpu(&mut self, enabled: bool) -> Result<(), Error> {
         if enabled {
@@ -245,31 +284,7 @@ impl<I: Io> Download<I> {
         }
     }
     fn reserved_page(&mut self, data: &[u8]) -> Result<(), Error> {
-        let beacon = self.io.read8(REG_BCN_CTRL)?;
-        self.io.write16(REG_FIFOPAGE_CTRL_2, BCN_VALID)?;
-        let cr = self.io.read8(REG_CR + 1)?;
-        self.io.write8(REG_CR + 1, cr | 1)?;
-        self.io.write8(REG_BCN_CTRL, (beacon & !8) | 16)?;
-        let txq = self.io.read8(REG_FWHW_TXQ_CTRL + 2)?;
-        self.io.write8(REG_FWHW_TXQ_CTRL + 2, txq & !64)?;
-        let result = self.io.submit_beacon(data).and_then(|()| {
-            self.poll(
-                REG_FIFOPAGE_CTRL_2,
-                u32::from(BCN_VALID),
-                u32::from(BCN_VALID),
-            )?;
-            // SAFETY: cleared BCN_VALID before this exact payload,
-            // then observed its new hardware event under exclusive I/O.
-            unsafe { self.io.beacon_consumed() }
-        });
-        // Restore even for queue/valid-bit failure. An error in restoration is
-        // itself uncertain; outer start quarantines all remaining resources.
-        self.io
-            .write16(REG_FIFOPAGE_CTRL_2, self.boundary | BCN_VALID)?;
-        self.io.write8(REG_BCN_CTRL, beacon)?;
-        self.io.write8(REG_FWHW_TXQ_CTRL + 2, txq)?;
-        self.io.write8(REG_CR + 1, cr)?;
-        result
+        write_reserved(&mut self.io, 0, self.boundary, data)
     }
     fn region(&mut self, destination: u32, data: &[u8]) -> Result<(), Error> {
         let control = self.io.read32(REG_DDMA_CH0CTRL)?;

@@ -32,6 +32,10 @@ pub struct Packet {
     pub report: Option<u8>,
     pub fixed_rate: bool,
     pub rts: bool,
+    /// `nav_use_hdr`: the frame's own duration field holds its AID.
+    pub navigation_from_header: bool,
+    /// `bt_null`: firmware sends this to tell the AP it left for Bluetooth.
+    pub bluetooth_null: bool,
     pub rate: u8,
     pub width: u8,
     pub ldpc: bool,
@@ -77,10 +81,12 @@ impl Packet {
             | bit(self.queue == QSEL_HIGH, 29);
         words[2] = bit(self.aggregate.is_some(), 12)
             | bit(self.report.is_some(), 19)
-            | (u32::from(density & 7) << 20);
+            | (u32::from(density & 7) << 20)
+            | bit(self.bluetooth_null, 23);
         words[3] = bit(self.fixed_rate, 8)
             | bit(self.fixed_rate, 10)
             | bit(self.rts, 12)
+            | bit(self.navigation_from_header, 15)
             | (u32::from(factor & 0x1f) << 17);
         words[4] = u32::from(self.rate & 0x7f);
         words[5] =
