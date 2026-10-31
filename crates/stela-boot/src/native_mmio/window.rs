@@ -130,6 +130,11 @@ impl Window {
         Some(unsafe { leaves.add(page) })
     }
 
+    /// Whether `address` is one this window may map.
+    pub(crate) fn contains(&self, address: u64) -> bool {
+        page_window::span(layout::window()).contains(&address)
+    }
+
     /// `count` free pages' addresses, mapping nothing yet.
     pub(crate) fn reserve(&self, count: usize) -> Option<u64> {
         self.lock().state().free.take(count as u64)

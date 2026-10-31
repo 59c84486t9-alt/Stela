@@ -278,7 +278,7 @@ dependencies = [
  "defmt-parser",
  "proc-macro2",
  "quote",
- "syn",
+ "syn 3.0.8",
 ]
 
 [[package]]
@@ -452,6 +452,12 @@ dependencies = [
 
 [[package]]
 name = "hashbrown"
+version = "0.14.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e5274423e17b7c9fc20b6e7e208532f9b19825d82dfd615708b70edd83df41f1"
+
+[[package]]
+name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
@@ -503,7 +509,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cc4e190f5d26ca7051642629da2c52fc03bde85a03197c99408dcd291734c855"
 dependencies = [
  "equivalent",
- "hashbrown",
+ "hashbrown 0.17.1",
 ]
 
 [[package]]
@@ -624,6 +630,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "paste"
+version = "1.0.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
+
+[[package]]
 name = "plist"
 version = "1.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -700,7 +712,7 @@ checksum = "1c8d9ca532f185d5d4db7a7c9d51420b452168ea1c2b913953281bd6fe1fcbd0"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 3.0.8",
 ]
 
 [[package]]
@@ -762,6 +774,12 @@ dependencies = [
  "untrusted",
  "windows-sys 0.52.0",
 ]
+
+[[package]]
+name = "rustc-hash"
+version = "2.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6b1e7f9a428571be2dc5bc0505c13fb6bf936822b894ec87abf8a08a4e51742d"
 
 [[package]]
 name = "rustc_apfloat"
@@ -859,7 +877,7 @@ checksum = "e7a5d71263a5a7d47b41f6b3f06ba276f10cc18b0931f1799f710578e2309348"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 3.0.8",
 ]
 
 [[package]]
@@ -950,6 +968,7 @@ dependencies = [
  "stela-engine",
  "stela-formats",
  "stela-loader",
+ "stela-mesa",
  "stela-runtime",
  "stela-soc",
  "stela-soc-data",
@@ -1142,6 +1161,128 @@ dependencies = [
 ]
 
 [[package]]
+name = "stela-mesa"
+version = "0.0.0"
+dependencies = [
+ "stela-mesa-nak",
+ "stela-mesa-nil",
+]
+
+[[package]]
+name = "stela-mesa-bitview"
+version = "0.0.0"
+dependencies = [
+ "stela-mesa-std",
+]
+
+[[package]]
+name = "stela-mesa-compiler"
+version = "0.0.0"
+dependencies = [
+ "paste",
+ "stela-mesa-std",
+]
+
+[[package]]
+name = "stela-mesa-compiler-proc"
+version = "0.0.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "stela-mesa-nak"
+version = "0.0.0"
+dependencies = [
+ "paste",
+ "stela-mesa-bitview",
+ "stela-mesa-compiler",
+ "stela-mesa-nak-bindings",
+ "stela-mesa-nak-ir-proc",
+ "stela-mesa-nak-latencies",
+ "stela-mesa-nv-push",
+ "stela-mesa-nvidia-headers",
+ "stela-mesa-rustc-hash",
+ "stela-mesa-std",
+]
+
+[[package]]
+name = "stela-mesa-nak-bindings"
+version = "0.0.0"
+dependencies = [
+ "stela-mesa-compiler",
+ "stela-mesa-std",
+]
+
+[[package]]
+name = "stela-mesa-nak-ir-proc"
+version = "0.0.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "stela-mesa-compiler-proc",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "stela-mesa-nak-latencies"
+version = "0.0.0"
+dependencies = [
+ "stela-mesa-std",
+]
+
+[[package]]
+name = "stela-mesa-nil"
+version = "0.0.0"
+dependencies = [
+ "paste",
+ "stela-mesa-bitview",
+ "stela-mesa-nil-bindings",
+ "stela-mesa-nvidia-headers",
+ "stela-mesa-std",
+]
+
+[[package]]
+name = "stela-mesa-nil-bindings"
+version = "0.0.0"
+dependencies = [
+ "stela-mesa-std",
+]
+
+[[package]]
+name = "stela-mesa-nv-push"
+version = "0.0.0"
+dependencies = [
+ "stela-mesa-nvidia-headers",
+ "stela-mesa-std",
+]
+
+[[package]]
+name = "stela-mesa-nvidia-headers"
+version = "0.0.0"
+dependencies = [
+ "stela-mesa-std",
+]
+
+[[package]]
+name = "stela-mesa-rustc-hash"
+version = "0.0.0"
+dependencies = [
+ "rustc-hash",
+ "stela-mesa-std",
+]
+
+[[package]]
+name = "stela-mesa-std"
+version = "0.0.0"
+dependencies = [
+ "hashbrown 0.14.5",
+ "rustc-hash",
+]
+
+[[package]]
 name = "stela-runtime"
 version = "0.1.0"
 dependencies = [
@@ -1219,6 +1360,17 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "syn"
+version = "2.0.119"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "872831b642d1a07999a962a351ed35b955ea2cfc8f3862091e2a240a84f17297"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "unicode-ident",
+]
+
+[[package]]
+name = "syn"
 version = "3.0.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "01016da373cd8f7ef12624f796309f5c31ba8d646dd08856c02cd741d823c622"
@@ -1258,7 +1410,7 @@ checksum = "fe5197923287db20a58125f0bc85c062f7f2c892de97b18c356f9efb14b28524"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 3.0.8",
 ]
 
 [[package]]
@@ -1336,7 +1488,7 @@ checksum = "643efa8b64be89780bc498b290fab04337c7c4d171cc82cce2e133a74616dcc4"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 3.0.8",
 ]
 
 [[package]]

@@ -7,6 +7,9 @@
 //! (`Hub::call_host`); the run loop then runs what is ready ([`pump`]) and the
 //! guest goes on. Nothing reserves a core, and a Linux environment with nothing
 //! to do costs the boot PE one comparison a slice.
+#[cfg(feature = "nvk")]
+pub(super) mod client;
+
 use super::{
     host,
     kernel_work::{self, KernelWork, SLOTS},
@@ -67,6 +70,10 @@ const ENOMEM: Errno = -12;
 const EOPNOTSUPP: Errno = -95;
 
 const MSI_CAPABILITY: u8 = 5;
+#[cfg(feature = "nvk")]
+const REVISION: u16 = 0x08;
+#[cfg(feature = "nvk")]
+const SUBSYSTEM_ID: u16 = 0x2c;
 /// Linux's `IORESOURCE_*` bits of a memory BAR.
 const RESOURCE_MEMORY: u64 = 0x200;
 const RESOURCE_PREFETCHABLE: u64 = 0x2000;
@@ -111,6 +118,9 @@ unsafe impl Clock for Time {
 /// Who runs PE work on the boot CPU, once the PEs run.
 static HUB: AtomicPtr<Hub> = AtomicPtr::new(ptr::null_mut());
 static BOOT_PE: AtomicUsize = AtomicUsize::new(0);
+/// The processor the environment runs on.
+#[cfg(feature = "nvk")]
+static BOOT_CPU: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 /// End the boot PE's slices for Linux, through `hub`.
 pub(super) fn set_hub(hub: Arc<Hub>, pe: usize) {
@@ -545,6 +555,8 @@ pub(super) struct Claimed {
     placement: Placement,
     bars: Vec<Range<u64>>,
     name: String,
+    #[cfg(feature = "nvk")]
+    drm: client::DrmDevice,
     /// The BARs' claims, held for the boot.
     _resources: Vec<owned::Resource>,
 }
@@ -600,6 +612,22 @@ fn claim(
                 | if wide { RESOURCE_WIDE } else { 0 },
         };
     }
+    #[cfg(feature = "nvk")]
+    let drm = {
+        let config = function.config();
+        let (identity, subsystem) = (config.read32(0), config.read32(SUBSYSTEM_ID));
+        client::DrmDevice {
+            segment: address.segment,
+            vendor: identity as u16,
+            device: (identity >> 16) as u16,
+            subsystem_vendor: subsystem as u16,
+            subsystem_device: (subsystem >> 16) as u16,
+            bus: address.bus,
+            slot: address.device,
+            function: address.function,
+            revision: config.read8(REVISION),
+        }
+    };
     Ok(Claimed {
         device: Device {
             config: SharedConfig(Rc::new(RefCell::new(function))),
@@ -609,6 +637,8 @@ fn claim(
         placement,
         bars,
         name: format!("{address}"),
+        #[cfg(feature = "nvk")]
+        drm,
         _resources: resources,
     })
 }
@@ -636,6 +666,9 @@ struct Start {
     owner: *const RawOwner,
     claimed: Vec<Claimed>,
     attached: Vec<Attached<Device>>,
+    /// The bound GPUs, by DRM minor.
+    #[cfg(feature = "nvk")]
+    bound: Vec<client::DrmDevice>,
     result: Result<(), Errno>,
 }
 
@@ -656,7 +689,10 @@ unsafe extern "C" fn start(context: *mut c_void) {
         match attached {
             Ok(attached) => {
                 // SAFETY: entered.
-                if !unsafe { attached.bound() } {
+                if unsafe { attached.bound() } {
+                    #[cfg(feature = "nvk")]
+                    job.bound.push(claimed.drm);
+                } else {
                     output::arguments(format_args!(
                         "GPU {}: nouveau did not bind it\n",
                         claimed.name
@@ -680,9 +716,16 @@ struct Installed {
     domain: Arc<Domain<SLOTS>>,
     /// When the service is next due, in the clock's nanoseconds.
     next: AtomicU64,
-    _owner: Pin<Box<Owner<Host>>>,
-    _environment: Pin<Box<Environment>>,
-    _start: Box<Start>,
+    #[cfg(feature = "nvk")]
+    window: &'static Window,
+    #[cfg(feature = "nvk")]
+    tsc_hz: u64,
+    /// Clients' mappings with their sizes in pages, by address. For tasks.
+    #[cfg(feature = "nvk")]
+    mappings: RefCell<BTreeMap<u64, (linux::client::Mapping, usize)>>,
+    owner: Pin<Box<Owner<Host>>>,
+    environment: Pin<Box<Environment>>,
+    start: Box<Start>,
 }
 
 static INSTALLED: AtomicPtr<Installed> = AtomicPtr::new(ptr::null_mut());
@@ -752,6 +795,8 @@ pub(super) fn open(machine: Machine, claimed: Vec<Claimed>) -> Result<(), kernel
         owner: owner.raw(),
         claimed,
         attached: Vec::new(),
+        #[cfg(feature = "nvk")]
+        bound: Vec::new(),
         result: Ok(()),
     });
     let context = (&raw mut *job).cast();
@@ -763,6 +808,8 @@ pub(super) fn open(machine: Machine, claimed: Vec<Claimed>) -> Result<(), kernel
         let catalog = native_memory::linux_pages().map_err(|_| kernel_work::Error::Inventory)?;
         core::mem::forget(catalog);
     }
+    #[cfg(feature = "nvk")]
+    BOOT_CPU.store(host::processor(), Ordering::Relaxed);
     let deadline = host::rdtsc() + START_SECONDS * tsc_hz;
     let opened = work.dispatch(|runtime| {
         // SAFETY: in the dispatcher; the owner and runtime last for the boot.
@@ -795,9 +842,15 @@ pub(super) fn open(machine: Machine, claimed: Vec<Claimed>) -> Result<(), kernel
         events,
         domain,
         next: AtomicU64::new(next),
-        _owner: owner,
-        _environment: environment,
-        _start: job,
+        #[cfg(feature = "nvk")]
+        window,
+        #[cfg(feature = "nvk")]
+        tsc_hz,
+        #[cfg(feature = "nvk")]
+        mappings: RefCell::new(BTreeMap::new()),
+        owner,
+        environment,
+        start: job,
     });
     INSTALLED.store(Box::into_raw(installed), Ordering::Release);
     Ok(())
@@ -816,6 +869,8 @@ pub(super) fn pump() {
         return;
     }
     let ran = gpu.work.dispatch(|runtime| {
+        #[cfg(feature = "nvk")]
+        client::start(gpu)?;
         while runtime.step()? {}
         Ok::<_, WorkError>(())
     });

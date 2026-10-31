@@ -70,6 +70,8 @@ use stela_boot_core::ram;
 mod translated;
 pub(crate) use local::context::{RootContext, RootExecution, RootIdentity, RootProcessScope};
 use local::state;
+#[cfg(feature = "nvk")]
+pub(crate) use local::processor;
 pub(crate) use local::{MmioRoots, Owner as HostOwner};
 pub use ram::RamRange;
 

@@ -208,11 +208,15 @@ pub(crate) fn page_fault(
     address: u64,
     saved: &super::super::interrupts::SavedState<'_>,
 ) {
+    let write = frame.error & 2 != 0;
+    #[cfg(feature = "nvk")]
+    if super::super::gpu::client::serve_fault(address, write) {
+        return;
+    }
     let state = state();
     if !in_code(state, frame.rip) {
         super::super::interrupts::fatal(frame);
     }
-    let write = frame.error & 2 != 0;
     let Some(regime) = state.regime else {
         super::super::interrupts::fatal(frame);
     };
