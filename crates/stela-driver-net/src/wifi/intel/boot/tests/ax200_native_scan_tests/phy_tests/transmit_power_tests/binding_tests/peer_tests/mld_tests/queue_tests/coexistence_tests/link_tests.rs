@@ -1626,6 +1626,9 @@ fn a_nontransmitted_bss_joins_on_its_profile_and_names_its_transmitter() {
     assert!(associated, "{:?}", wifi.radio().station().phase());
     assert_eq!(device.air[0][4..10], AP, "the profile's own address");
     assert_eq!(device.air[1][28..34], [0, 4, b't', b'e', b's', b't']);
+    let extended = [127, 9, 4, 0, 0x40, 0, 0, 0, 0, 0xc0, 1];
+    let request = &device.air[1];
+    assert!(request.windows(extended.len()).any(|at| at == extended));
     assert!(run(&mut wifi, &mut device, |_, device, _| {
         device.configuration.len() >= 2
     }));

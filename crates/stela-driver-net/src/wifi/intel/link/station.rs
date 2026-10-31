@@ -83,6 +83,10 @@ type Queue<Q, B> = Ax200ManagementQueue<'static, Q, B, Regulatory>;
 const MAX_HELD: usize = 64;
 /// The TID the management queue answers to, which non-QoS data shares.
 const MANAGEMENT_TID: u8 = 15;
+/// `he_if_types_ext_capa_sta` and iwlmld's `ext_capa_base`: extended channel
+/// switching, Multiple BSSID, operating mode notifications and the largest
+/// count of MSDUs in an A-MSDU.
+const EXTENDED_CAPABILITIES: [u8; 9] = [4, 0, 0x40, 0, 0, 0, 0, 0xc0, 1];
 /// `IWL_MVM_MISSED_BEACONS_THRESHOLD_LONG`.
 const MISSED_BEACONS: u32 = 19;
 /// `IWL_MVM_MISSED_BEACONS_SINCE_RX_THOLD`.
@@ -1898,6 +1902,7 @@ fn probe_elements(band: Band, device: Device, widest: phy::Width) -> Vec<u8> {
     if band != Band::Ghz6 {
         element(45, &ht);
     }
+    element(127, &EXTENDED_CAPABILITIES);
     if band == Band::Ghz5 {
         let mut vht = [0; 12];
         let capability: u32 = 2 // 11454-byte MPDUs

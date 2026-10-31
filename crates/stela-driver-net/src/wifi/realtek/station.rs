@@ -299,6 +299,8 @@ fn capability_elements(band: Band) -> Vec<u8> {
     // IEEE80211_HT_MCS_TX_DEFINED.
     elements.extend_from_slice(&[1, 0, 0, 0]);
     elements.extend_from_slice(&[0; 7]);
+    // mac80211's `ext_capa`: operating mode notifications.
+    elements.extend_from_slice(&[127, 8, 0, 0, 0, 0, 0, 0, 0, 0x40]);
     if band == Band::Ghz5 {
         // MPDU 11454, SGI 80, RX LDPC, TX STBC, one RX STBC stream, HTC-VHT,
         // the largest A-MPDU.

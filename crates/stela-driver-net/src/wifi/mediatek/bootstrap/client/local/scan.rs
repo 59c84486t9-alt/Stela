@@ -108,6 +108,7 @@ pub(in crate::wifi::mediatek::bootstrap::client) fn with_extra(
 ) -> Result<Vec<u8>, LocalError> {
     validate_extra(extra)?;
     let generated = elements(advertisement, selection)?;
+    let replaced = names_extended_capabilities(extra);
     let mut out = Vec::new();
     out.try_reserve_exact(generated.len() + extra.len())
         .map_err(|_| LocalError::NoMemory)?;
@@ -119,11 +120,11 @@ pub(in crate::wifi::mediatek::bootstrap::client) fn with_extra(
             let family = match rest[0] {
                 1 => 0,
                 50 => 1,
-                45 => 2,
+                45 | 127 => 2,
                 191 => 3,
                 _ => 4,
             };
-            if family == stage {
+            if family == stage && !(rest[0] == 127 && replaced) {
                 out.extend_from_slice(&rest[..length]);
             }
             rest = &rest[length..];
@@ -157,6 +158,18 @@ pub(in crate::wifi::mediatek::bootstrap::client) fn with_extra(
     }
     out.extend_from_slice(&extra[offset..]);
     Ok(out)
+}
+
+/// The OS's Extended Capabilities stand for the device's, as wpa_supplicant's
+/// are the only ones in a mac80211 probe.
+fn names_extended_capabilities(mut extra: &[u8]) -> bool {
+    while let [id, length, tail @ ..] = extra {
+        if *id == 127 {
+            return true;
+        }
+        extra = &tail[usize::from(*length)..];
+    }
+    false
 }
 
 fn validate_extra(mut extra: &[u8]) -> Result<(), LocalError> {
@@ -268,8 +281,9 @@ mod tests {
         assert_eq!(composed[rates_end + 261], 50);
         // Extcaps after unknown200 must stay in the common tail.
         assert_eq!(&composed[composed.len() - 5..], &[200, 0, 127, 1, 0]);
+        // The metadata's Extended Capabilities replace the device's ten bytes.
         let original = elements(&actual, selected()).unwrap();
-        assert_eq!(composed.len(), original.len() + extra.len());
+        assert_eq!(composed.len(), original.len() - 10 + extra.len());
     }
 
     #[test]

@@ -118,7 +118,12 @@ fn custom_metadata_reaches_all_three_native_band_commands_without_phy_substituti
             .filter(|ie| !metadata.contains(ie))
             .cloned()
             .collect();
-        assert_eq!(without_metadata, parsed(&originals[index]));
+        // The metadata's Extended Capabilities replace the device's.
+        let generated: Vec<_> = parsed(&originals[index])
+            .into_iter()
+            .filter(|ie| ie.0 != 127)
+            .collect();
+        assert_eq!(without_metadata, generated);
         // Explicit source prefix placement and intentional common-tail retention.
         let position = |id, payload: &[u8]| {
             ies.iter()
