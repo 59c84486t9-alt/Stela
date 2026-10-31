@@ -25,6 +25,12 @@ pub(super) struct Abilities {
     pub(super) hidden_six_ghz: bool,
     /// It keeps one antenna through a 6 GHz scan.
     pub(super) fixed_antenna: bool,
+    /// `iwl_mld_scan_use_ebs`: it may leave a channel it finds quiet early.
+    pub(super) ebs: bool,
+}
+/// Whether a scan's EBS status rules EBS out of later scans.
+pub(super) fn energy_based_failed(status: u8) -> bool {
+    !ENERGY_BASED_FINE.contains(&status)
 }
 pub(super) const REQUEST: Id = Id {
     group: 1,
@@ -92,6 +98,10 @@ const PASS_ALL: u16 = 1 << 1;
 const USE_ALL_RX_CHAINS: u16 = 1 << 6;
 const ADAPTIVE_DWELL: u16 = 1 << 7;
 const ENABLE_CHANNEL_ORDER: u8 = 1 << 5;
+/// `IWL_SCAN_CHANNEL_FLAG_EBS`, `_EBS_ACCURATE` and `_CACHE_ADD`.
+const ENERGY_BASED: u8 = 7;
+/// `IWL_SCAN_EBS_SUCCESS` and `IWL_SCAN_EBS_INACTIVE`.
+const ENERGY_BASED_FINE: [u8; 2] = [0, 3];
 const CHANNEL_FRAGMENTED: u8 = 1 << 3;
 const PSC_NO_FILTER: u8 = 1 << 6;
 const FLAGS2: usize = GENERAL + 9;
@@ -251,7 +261,7 @@ pub(super) fn encode(
     } else {
         let table = layout.ssids..layout.ssids + DIRECT_SSIDS;
         let bitmap = direct_ssids(&mut bytes[table], ssids);
-        bytes[CHANNELS] = ENABLE_CHANNEL_ORDER;
+        bytes[CHANNELS] = ENABLE_CHANNEL_ORDER | if abilities.ebs { ENERGY_BASED } else { 0 };
         bytes[CHANNELS + 1] = request.channels().len() as u8;
         bytes[CHANNELS + 2..CHANNELS + 4].copy_from_slice(&[10, 2]);
         for (index, &channel) in request.channels().iter().enumerate() {
@@ -292,6 +302,7 @@ pub(super) fn encode_internal(
         tpc_report: false,
         hidden_six_ghz: false,
         fixed_antenna: false,
+        ebs: false,
     };
     let mut bytes = encode(request, version, local, None, abilities)?;
     bytes[4..8].copy_from_slice(&PRIORITY_EXT_4.to_le_bytes());
@@ -589,7 +600,28 @@ mod tests {
         tpc_report: false,
         hidden_six_ghz: false,
         fixed_antenna: false,
+        ebs: false,
     };
+
+    #[test]
+    fn a_scan_asks_for_ebs_when_it_may_and_a_failure_stops_it() {
+        let channel = Channel {
+            band: Band::Ghz2,
+            number: 1,
+            frequency_mhz: 2412,
+        };
+        let request = protocol::Request::new(vec![channel], Vec::new(), Vec::new()).unwrap();
+        let bytes = encode(&request, 17, LOCAL, None, MEASURED).unwrap();
+        assert_eq!(bytes[CHANNELS], ENABLE_CHANNEL_ORDER);
+        let energy_based = Abilities {
+            ebs: true,
+            ..MEASURED
+        };
+        let bytes = encode(&request, 17, LOCAL, None, energy_based).unwrap();
+        assert_eq!(bytes[CHANNELS], ENABLE_CHANNEL_ORDER | ENERGY_BASED);
+        assert!(!energy_based_failed(0) && !energy_based_failed(3));
+        assert!(energy_based_failed(1) && energy_based_failed(2));
+    }
 
     const SIX_1: Channel = Channel {
         band: Band::Ghz6,
@@ -772,6 +804,7 @@ mod tests {
         let reports = Abilities {
             hidden_six_ghz: false,
             fixed_antenna: false,
+            ebs: false,
             ds_parameters: true,
             tpc_report: true,
         };
@@ -780,6 +813,7 @@ mod tests {
         let quiet = Abilities {
             hidden_six_ghz: false,
             fixed_antenna: false,
+            ebs: false,
             ds_parameters: false,
             tpc_report: false,
         };
