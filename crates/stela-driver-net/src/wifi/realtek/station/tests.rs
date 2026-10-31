@@ -767,6 +767,55 @@ fn received_data_passes_its_replay_and_integrity_checks() {
     assert_eq!(delivered(&mut wifi), [0x45]);
 }
 
+/// Fragment `number` of frame `sequence` under the pairwise key at packet
+/// number `pn`, with `more` to follow.
+fn fragment(sequence: u16, number: u8, more: bool, pn: u8, payload: &[u8]) -> Vec<u8> {
+    let mut frame = data(LOCAL, sequence, [8, 0], &[], Some((0, pn)));
+    frame.truncate(34);
+    frame.extend_from_slice(payload);
+    frame.extend([0; 8]);
+    frame[1] |= u8::from(more) << 2;
+    frame[22] |= number;
+    frame
+}
+
+#[test]
+fn fragments_under_consecutive_numbers_make_one_frame() {
+    let (mut wifi, model) = connected();
+    let first = [&[0xaa, 0xaa, 3, 0, 0, 0, 8, 0][..], &[0x45; 4]].concat();
+    model
+        .0
+        .borrow_mut()
+        .hear(fragment(30, 0, true, 1, &first), true);
+    model
+        .0
+        .borrow_mut()
+        .hear(fragment(30, 1, false, 2, &[0x46; 4]), true);
+    wifi.carrier();
+    let ethernet = wifi.receive().unwrap().unwrap();
+    assert_eq!(
+        ethernet[14..],
+        [0x45, 0x45, 0x45, 0x45, 0x46, 0x46, 0x46, 0x46]
+    );
+    assert_eq!(wifi.receive().unwrap(), None);
+}
+
+#[test]
+fn fragments_that_skip_a_number_are_dropped() {
+    let (mut wifi, model) = connected();
+    let first = [&[0xaa, 0xaa, 3, 0, 0, 0, 8, 0][..], &[0x45; 4]].concat();
+    model
+        .0
+        .borrow_mut()
+        .hear(fragment(31, 0, true, 5, &first), true);
+    model
+        .0
+        .borrow_mut()
+        .hear(fragment(31, 1, false, 7, &[0x46; 4]), true);
+    wifi.carrier();
+    assert_eq!(delivered(&mut wifi), []);
+}
+
 #[test]
 fn an_a_msdu_gives_up_each_of_its_frames() {
     let (mut wifi, model) = connected();

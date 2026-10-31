@@ -19,6 +19,7 @@ use crate::wifi::security::{
     aggregate::{OrderedGroup, Shape},
     michael,
 };
+use crate::wifi::station::fragments::Fragments;
 use crate::{
     Clock, Link, LinkError, Mac,
     wifi::{
@@ -561,6 +562,7 @@ pub struct Rtl8822c<D: Device> {
     tuned: Option<Channel>,
     /// The frames each TID's Block Ack agreement holds in order.
     agreements: [Option<Reorder<Mpdu>>; 8],
+    fragments: Fragments,
     /// The next TX report number, `tx_report.sn`.
     report: u8,
     /// A report's number, which the management frame it names may await.
@@ -610,6 +612,7 @@ impl<D: Device> Rtl8822c<D> {
             integrity: None,
             tuned: None,
             agreements: Default::default(),
+            fragments: Fragments::default(),
             report: 0,
             reporting: None,
             port_open: false,
@@ -703,6 +706,7 @@ impl<D: Device> Rtl8822c<D> {
         for agreement in &mut self.agreements {
             *agreement = None;
         }
+        self.fragments.clear();
         self.changes.clear();
         self.aggregating = Default::default();
         self.unaggregated = [false; 8];
@@ -1398,11 +1402,28 @@ impl<D: Device> Rtl8822c<D> {
             }
             frame.security.key = Some(key);
         }
+        if header.fragmented() {
+            self.reassemble(&frame, now);
+            return Ok(());
+        }
         self.order(frame, now);
         Ok(())
     }
 
     /// `ieee80211_sta_manage_reorder_buf` for a frame under an agreement.
+    /// `frame`, one fragment; the station has the MSDU with the last of them.
+    fn reassemble(&mut self, frame: &Mpdu, now: u64) {
+        let key = frame.security.key;
+        let slot = self
+            .keys
+            .iter_mut()
+            .map(|key| &mut key.slot)
+            .find(|slot| key.is_some() && slot.installed() == key);
+        if let Some(whole) = self.fragments.add(frame, slot, now) {
+            self.deliver(whole);
+        }
+    }
+
     fn order(&mut self, frame: Mpdu, now: u64) {
         let header = frame.header();
         let agreement = header
