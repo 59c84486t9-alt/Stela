@@ -1600,16 +1600,33 @@ impl<D: Device> Rtl8822c<D> {
         let Some(epoch) = self.station.association_epoch() else {
             return Ok(());
         };
-        // mac80211 decrypts in software what hardware did not, which the
-        // unicast path has no key to here; such a frame cannot be trusted.
-        if !frame.security.decrypted {
-            self.unsupported("a protected management frame hardware did not decrypt");
-            return Ok(());
-        }
         let header = *frame.header();
         let Some(key) = self.keys.iter_mut().find(|key| key.pairwise) else {
             return Ok(());
         };
+        // mac80211 decrypts in software what hardware did not.
+        if !frame.security.decrypted {
+            let number = frame
+                .bytes()
+                .get(header.length..)
+                .and_then(|iv| PacketNumber::from_header(iv).ok());
+            let material: Option<&[u8; 16]> = key.material[..].try_into().ok();
+            let (Some((number, _)), Some(material)) = (number, material) else {
+                return Ok(());
+            };
+            let Some(opened) = ccmp::open(material, frame.bytes(), number) else {
+                return Ok(());
+            };
+            let security = SecurityStatus {
+                decrypted: true,
+                integrity: Integrity::Verified,
+                ..SecurityStatus::default()
+            };
+            let Ok(clear) = Mpdu::new(opened, frame.radio.clone(), security) else {
+                return Ok(());
+            };
+            frame = clear;
+        }
         frame.security.key = key.slot.installed();
         // Under packet numbers `ieee80211_crypto_ccmp_decrypt` keeps apart
         // from data's.

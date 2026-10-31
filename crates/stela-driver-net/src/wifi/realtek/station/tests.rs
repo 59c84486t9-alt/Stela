@@ -842,6 +842,22 @@ fn a_protected_management_frame_is_taken_once_under_its_packet_number() {
 }
 
 #[test]
+fn a_protected_management_frame_hardware_left_sealed_opens_under_the_key() {
+    let (mut wifi, model) = connected();
+    let key = model.0.borrow().keys.iter().find(|key| !key.3).unwrap().4;
+    let sealed = |key: &[u8; 16], number: u8| {
+        let frame = sa_query(number);
+        let iv: &[u8; 8] = frame[24..32].try_into().unwrap();
+        let pn = PacketNumber::new(number.into()).unwrap();
+        ccmp::seal(key, &frame[..24], iv, pn, &frame[32..36])
+    };
+    model.0.borrow_mut().hear(sealed(&[0; 16], 5), false);
+    assert!(!run(&mut wifi, &model, |_, air| query_answers(air) > 0));
+    model.0.borrow_mut().hear(sealed(&key, 5), false);
+    assert!(run(&mut wifi, &model, |_, air| query_answers(air) == 1));
+}
+
+#[test]
 fn an_a_msdu_gives_up_each_of_its_frames() {
     let (mut wifi, model) = connected();
     let mut frame = data(LOCAL, 20, [8, 0], &[], Some((0, 1)));
