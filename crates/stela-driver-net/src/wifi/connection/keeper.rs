@@ -209,7 +209,11 @@ pub trait Radio: Link {
         receive: ReplaySeed,
     ) -> Result<(), Self::Error>;
     /// Keep link `link_id`'s IGTK: whether the radio can.
-    fn install_link_management_key(
+    ///
+    /// # Safety
+    /// As install_management_key, including peer retirement before replacing a
+    /// live index and independent old hardware/RX/IRQ/work/key-user drainage.
+    unsafe fn install_link_management_key(
         &mut self,
         _link_id: u8,
         _index: u8,
@@ -420,6 +424,8 @@ enum State<H, M> {
         ptk: Option<KeyIdentity>,
         /// Message 3's IGTK until the link has drained the frames before it.
         integrity: Option<IntegrityKey>,
+        /// Secondary-link IGTKs waiting for earlier frames and key users.
+        link_integrity: Vec<(u8, IntegrityKey)>,
         /// The protected-management transport of the IGTK message 3 gave.
         management: Option<M>,
     },
@@ -430,6 +436,8 @@ enum State<H, M> {
         management: Option<M>,
         /// A rekeyed IGTK the link had no room to rotate in yet.
         integrity: Option<IntegrityKey>,
+        /// Secondary-link IGTKs waiting for earlier frames and key users.
+        link_integrity: Vec<(u8, IntegrityKey)>,
     },
     /// Leave the association, then scan once `at` passes.
     Leaving {
@@ -1192,6 +1200,7 @@ impl<R: Radio> Keeper<R> {
                     mic_failed: false,
                     ptk: None,
                     integrity: None,
+                    link_integrity: Vec::new(),
                     management: None,
                 }
             }
@@ -1300,24 +1309,21 @@ impl<R: Radio> Keeper<R> {
             self.link
                 .install_link_key(link.link_id, key.index, &key.material, key.receive)
                 .map_err(|error| format!("{error}"))?;
-            let kept = match &link.integrity {
-                Some(key) => self
-                    .link
-                    .install_link_management_key(
-                        link.link_id,
-                        key.index,
-                        &key.material,
-                        key.receive,
-                    )
-                    .map_err(|error| format!("{error}"))?,
-                None => true,
-            };
-            if !kept {
-                self.fail(format!(
-                    "{} unsupported: MLO link IGTKs; another link's group-addressed \
-                     robust management frames reach the OS unverified",
-                    R::NAME
-                ));
+            if let Some(key) = link.integrity {
+                let pending = match &mut self.state {
+                    State::Handshake { link_integrity, .. }
+                    | State::Connected { link_integrity, .. } => link_integrity,
+                    _ => return Err(format!("{}: link keys outside the handshake", R::NAME)),
+                };
+                // A retransmitted authenticated KDE replaces only a pending,
+                // unsubmitted update for the same link and management index.
+                if let Some(position) = pending
+                    .iter()
+                    .position(|(id, old)| *id == link.link_id && old.index == key.index)
+                {
+                    pending.remove(position);
+                }
+                pending.push((link.link_id, key));
             }
         }
         match &mut self.state {
@@ -1336,9 +1342,48 @@ impl<R: Radio> Keeper<R> {
         self.complete()
     }
 
+    /// Keep secondary IGTKs pending across native TX/notices and key commands,
+    /// just as the setup link's IGTK waits for message 4 to drain.
+    fn complete_link_management_keys(&mut self) -> Result<bool, String> {
+        loop {
+            let pending = match &mut self.state {
+                State::Handshake { link_integrity, .. }
+                | State::Connected { link_integrity, .. } => link_integrity,
+                _ => return Ok(true),
+            };
+            let Some((link_id, key)) = pending.first() else {
+                return Ok(true);
+            };
+            // SAFETY: the authenticated handshake supplied this link's KDE.
+            // The sole polled radio owner serializes key publication with all
+            // prior hardware/RX/IRQ/work and deferred users; a busy native
+            // queue preserves the key here until the driver reports retirement.
+            match unsafe {
+                self.link.install_link_management_key(
+                    *link_id,
+                    key.index,
+                    &key.material,
+                    key.receive,
+                )
+            } {
+                Ok(kept) => {
+                    pending.remove(0);
+                    if !kept {
+                        self.fail(format!("{} unsupported: MLO link IGTKs; another link's group-addressed robust management frames reach the OS unverified", R::NAME));
+                    }
+                }
+                Err(error) if R::deferred(&error) => return Ok(false),
+                Err(error) => return Err(format!("{error}")),
+            }
+        }
+    }
+
     /// Install message 3's IGTK once the link drained the frames before it,
     /// message 4 among them, then open the port.
     fn complete(&mut self) -> Result<(), String> {
+        if !self.complete_link_management_keys()? {
+            return Ok(());
+        }
         let State::Handshake {
             ptk: Some(ptk),
             integrity,
@@ -1402,6 +1447,7 @@ impl<R: Radio> Keeper<R> {
             ptk,
             management,
             integrity: None,
+            link_integrity: Vec::new(),
         };
         self.failures = 0;
         Ok(())
@@ -1468,4 +1514,4 @@ impl<R: Radio> Link for Keeper<R> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

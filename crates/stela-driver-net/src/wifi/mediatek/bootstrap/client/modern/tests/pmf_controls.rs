@@ -285,18 +285,28 @@ pub(in crate::wifi::mediatek::bootstrap::client) fn inputs_akm(
     driver: &Native,
     akm: u8,
 ) -> (Join, scan::result::Bss) {
+    inputs_akm_cipher(driver, akm, 6)
+}
+
+pub(in crate::wifi::mediatek::bootstrap::client) fn inputs_akm_cipher(
+    driver: &Native,
+    akm: u8,
+    management: u8,
+) -> (Join, scan::result::Bss) {
     let (mut join, mut bss) = modern_inputs(driver);
     let local = driver.local_advertisement(Band::Ghz5).unwrap();
+    let mut selected = rsn(akm);
+    *selected.last_mut().unwrap() = management;
     join.request = AssociationRequest::new_modern_with_local_pmf(
         0x11,
         10,
-        replace_rsn(join.request.elements(), &rsn(akm)),
+        replace_rsn(join.request.elements(), &selected),
         local.capabilities().clone(),
         Mode::Eht,
         Width::Mhz80,
     )
     .unwrap();
-    bss.elements = replace_rsn(&bss.elements, &rsn(akm));
+    bss.elements = replace_rsn(&bss.elements, &selected);
     (join, bss)
 }
 fn observe(

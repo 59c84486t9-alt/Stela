@@ -55,6 +55,35 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
         .map_err(PolicyError::Client)
     }
 
+    /// Install or rotate a secondary link's IGTK from the authenticated MLO KDE.
+    ///
+    /// # Safety
+    /// Inherit install_management_key's independent hardware/RX/IRQ/work/user
+    /// drain and authentic input duties. Same-index replacement additionally
+    /// requires peer retirement of the old material.
+    pub unsafe fn install_link_management_key(
+        &mut self,
+        link_id: u8,
+        index: u8,
+        material: &[u8],
+        receive: PacketNumber,
+    ) -> Result<(), PolicyError> {
+        let admission = self.management_admission()?;
+        // SAFETY: same privately retained requester and policy authority;
+        // caller supplies the authenticated key, peer retirement and drain.
+        unsafe {
+            self.client.install_link_management_key_modern(
+                &mut self.authority,
+                admission,
+                link_id,
+                index,
+                material,
+                receive,
+            )
+        }
+        .map_err(PolicyError::Client)
+    }
+
     /// Consume the original authenticated observation under current native and
     /// OS regulatory guards. The OS supplies all negotiated PMF/MLME and
     /// SA Query policy; further deferred effects must revalidate independently.

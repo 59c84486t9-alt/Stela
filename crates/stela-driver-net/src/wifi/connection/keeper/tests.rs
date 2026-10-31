@@ -109,3 +109,53 @@ fn a_keyed_link_carries_its_aps_whole_rsn_element_and_rsnxe() {
         )
     );
 }
+
+/// Drive the generic keeper over a vendor's owned model while the last
+/// handshake reply is in flight. The caller observes the real native key and
+/// supplies its descriptor/TX-free/IRQ/work retirement, rather than a counter
+/// that pretends to be a drain.
+pub(crate) fn assert_secondary_key_waits_for_retirement<R: Radio>(
+    mut keeper: Keeper<R>,
+    ptk: KeyIdentity,
+    management: R::Management,
+    key: IntegrityKey,
+    retire: impl FnOnce(&mut R),
+    mut has_key: impl FnMut(&mut R) -> bool,
+) -> Keeper<R> {
+    let supplicant = Supplicant::new(
+        supplicant::Suites {
+            akm: Akm::Psk,
+            pairwise: crate::wifi::security::Cipher::Ccmp128,
+            group: crate::wifi::security::Cipher::Ccmp128,
+            management: Some(crate::wifi::security::management::ManagementCipher::Cmac128),
+        },
+        Zeroizing::new([0; 32]),
+        keeper.link.mac(),
+        AP_MLD,
+        vec![],
+        vec![],
+    )
+    .unwrap();
+    keeper.state = State::Handshake {
+        supplicant: Box::new(supplicant),
+        bssid: AP_MLD,
+        deadline: u64::MAX,
+        mic_failed: false,
+        ptk: Some(ptk),
+        integrity: None,
+        link_integrity: vec![(1, key)],
+        management: Some(management),
+    };
+    keeper.complete().unwrap();
+    assert!(
+        matches!(&keeper.state, State::Handshake { link_integrity, .. } if link_integrity.len()==1)
+    );
+    assert!(!has_key(&mut keeper.link));
+    assert!(!keeper.link.carrier());
+    retire(&mut keeper.link);
+    keeper.complete().unwrap();
+    assert!(matches!(keeper.state, State::Connected { .. }));
+    assert!(has_key(&mut keeper.link));
+    assert!(keeper.link.carrier());
+    keeper
+}

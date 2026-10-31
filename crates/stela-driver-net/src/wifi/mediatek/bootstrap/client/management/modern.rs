@@ -181,7 +181,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         consume: impl FnOnce(&Mpdu, &[u8], PacketNumber) -> T,
     ) -> Result<T, Error> {
         let s = self.state();
-        Self::validate_management(s, &received.session)?;
+        Self::validate_received_management(s, &received)?;
         if s.modern.is_none() {
             return Err(Error::WrongPhase);
         }

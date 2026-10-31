@@ -201,16 +201,31 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             return Ok(Receive::Done);
         };
         let (local, peer) = Self::association_addresses(s, p);
+        let group_link = h
+            .receiver
+            .is_multicast()
+            .then(|| Self::other_link(s, &frame.radio))
+            .flatten();
+        let peer = if h.receiver.is_multicast() {
+            group_link.unwrap_or(p).peer
+        } else {
+            peer
+        };
         let ap = h.transmitter == Some(peer);
         if !ap && !matches!(category, SPECTRUM_MANAGEMENT | PUBLIC | SELF_PROTECTED) {
             return Ok(Receive::Done);
         }
-        let negotiated = s
-            .modern
-            .as_ref()
-            .ok_or(Error::WrongPhase)?
-            .context()
-            .negotiated();
+        let context = match group_link {
+            Some(profile) => {
+                &s.links
+                    .iter()
+                    .find(|link| link.profile == profile)
+                    .ok_or(Error::WrongProfile)?
+                    .context
+            }
+            None => s.modern.as_ref().ok_or(Error::WrongPhase)?.context(),
+        };
+        let negotiated = context.negotiated();
         let verdict = kernel(
             bytes,
             ap,

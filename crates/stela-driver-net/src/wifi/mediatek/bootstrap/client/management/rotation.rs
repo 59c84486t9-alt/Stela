@@ -5,7 +5,7 @@ use super::*;
 use wifi::regulatory::{AssociationAdmission, AssociationUse, HardwarePolicy, OsPolicy, Owner};
 
 impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
-    unsafe fn rotate_management_parts(
+    pub(super) unsafe fn rotate_management_parts(
         controller: &mut Controller<I, Q, C>,
         phase: &mut Phase,
         key: &mut HardwareKey<Arc<C>>,

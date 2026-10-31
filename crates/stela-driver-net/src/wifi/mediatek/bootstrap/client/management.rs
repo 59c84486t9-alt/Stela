@@ -7,12 +7,14 @@
 //! authenticated observations never disconnect, open a port or admit 6GHz.
 
 use super::*;
+use alloc::boxed::Box;
 use core::any::Any;
 use mailbox::key::bip;
 use wifi::security::NonceOwner;
 
 mod block_ack;
 mod modern;
+mod multi_link;
 mod rotation;
 
 /// Transport namespace. No public constructor, Clone or mutable
@@ -65,6 +67,7 @@ pub struct Received {
     body: Vec<u8>,
     pn: PacketNumber,
     group: bool,
+    link: Option<Box<multi_link::ReceivedLink>>,
 }
 impl Received {
     pub fn session(&self) -> &Arc<Session> {
@@ -78,6 +81,11 @@ impl Received {
     }
     pub const fn packet_number(&self) -> PacketNumber {
         self.pn
+    }
+    /// The affiliated AP link on which this frame completed, when it was
+    /// received on a link other than the setup link.
+    pub fn link_id(&self) -> Option<u8> {
+        self.link.as_ref().map(|link| link.link_id())
     }
     pub const fn group(&self) -> bool {
         self.group
@@ -331,7 +339,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         received: Received,
         consume: impl FnOnce(&Mpdu, &[u8], PacketNumber) -> T,
     ) -> Result<T, Error> {
-        Self::validate_management(self.state(), &received.session)?;
+        Self::validate_received_management(self.state(), &received)?;
         if self.state().modern.is_some() {
             return Err(Error::ModernAdmissionRequired);
         }
@@ -382,7 +390,6 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         let d = rx::decode(Chip::Mt7925, raw).map_err(Error::Rx)?;
         let h = frame.header();
         let group = h.receiver.is_multicast();
-        // A link's PTK is the MLDs', but its IGTK reaches only the setup link.
         let other = Self::other_link(s, &frame.radio);
         let on = other.unwrap_or(p);
         if (
@@ -391,7 +398,6 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             frame.radio.frequency_mhz,
         ) != (on.channel.band, on.channel.number, on.channel.frequency_mhz)
             || d.wcid != on.wcid
-            || group && other.is_some()
             || d.unicast_to_me == group
             || h.control & 12 != 0
             || d.security.icv_error
@@ -399,6 +405,9 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         {
             return Err(Error::WrongProfile);
         }
+        let link = other
+            .map(|profile| Self::received_link(s, profile).map(Box::new))
+            .transpose()?;
         // An MLD association's unicast frame names the MLDs before its PTK,
         // the MLDs', checks it.
         let frame = Self::translated(s, &frame).into_owned();
@@ -427,6 +436,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             body,
             pn,
             group,
+            link,
         })
     }
 }

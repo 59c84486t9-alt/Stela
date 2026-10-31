@@ -223,6 +223,16 @@ fn mld_association(
         &AssociationRequest,
     ) -> (Vec<station::multi_link::Link>, Vec<multi_link::Profile>),
 ) -> (TestLink, Model, scan::result::Bss) {
+    mld_association_with_cipher(6, links)
+}
+
+fn mld_association_with_cipher(
+    cipher: u8,
+    links: impl FnOnce(
+        &scan::result::Bss,
+        &AssociationRequest,
+    ) -> (Vec<station::multi_link::Link>, Vec<multi_link::Profile>),
+) -> (TestLink, Model, scan::result::Bss) {
     let to_link = |subtype, body: &[u8]| {
         let mut frame = response(subtype, body);
         frame[4..10].copy_from_slice(&SETUP_LINK.0);
@@ -237,7 +247,10 @@ fn mld_association(
         local: SETUP_LINK,
     };
     let (client, model) = setup_modern();
-    let (mut join, bss) = inputs_akm(&client, 8);
+    let (mut join, bss) =
+        crate::wifi::mediatek::bootstrap::client::modern::tests::pmf_controls::inputs_akm_cipher(
+            &client, 8, cipher,
+        );
     let (requested, profiles) = links(&bss, &join.request);
     join.request = join
         .request
@@ -570,7 +583,11 @@ fn an_ap_mld_association_adds_its_other_link_on_an_interface_of_its_own() {
 }
 
 fn two_link_association() -> (TestLink, Model, scan::result::Bss) {
-    mld_association(|bss, request| {
+    two_link_association_with_cipher(6)
+}
+
+fn two_link_association_with_cipher(cipher: u8) -> (TestLink, Model, scan::result::Bss) {
+    mld_association_with_cipher(cipher, |bss, request| {
         let mut elements = bss.elements.clone();
         let mut rest = &mut elements[..];
         while !rest.is_empty() {
@@ -642,6 +659,14 @@ fn protected_deauthentication_on_second_link_ends_association() {
 }
 
 fn authorized_two_link_association() -> (TestLink, Model) {
+    let (mut link, model) = keyed_two_link_association();
+    link.authorize_port(link.station().association_epoch().unwrap())
+        .unwrap();
+    assert!(link.carrier());
+    (link, model)
+}
+
+fn keyed_two_link_association() -> (TestLink, Model) {
     let (mut link, model, _) = two_link_association();
     link.configure().unwrap();
     let epoch = link.station().association_epoch().unwrap();
@@ -656,8 +681,6 @@ fn authorized_two_link_association() -> (TestLink, Model) {
     // notices have drained before the IGTK installation.
     unsafe { link.install_management_key(epoch, 4, &[0x55; 16], PacketNumber::new(100).unwrap()) }
         .unwrap();
-    link.authorize_port(epoch).unwrap();
-    assert!(link.carrier());
     (link, model)
 }
 
@@ -833,3 +856,5 @@ fn invalid_second_link_beacon_does_not_suppress_the_valid_beacons_gap_report() {
     depart(&mut link, &model);
     retire(&mut link, &model);
 }
+
+mod link_keys;

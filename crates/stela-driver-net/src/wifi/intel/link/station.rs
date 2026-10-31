@@ -2443,7 +2443,7 @@ impl<Q: BootIo, B: BiosIo> Radio for Wifi<Q, B> {
             .map(|_| ())
     }
 
-    fn install_link_management_key(
+    unsafe fn install_link_management_key(
         &mut self,
         link_id: u8,
         index: u8,
