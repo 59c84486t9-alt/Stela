@@ -454,3 +454,80 @@ fn translation_features_require_inactive_controls_and_stopped_pri() {
         );
     }
 }
+
+#[test]
+fn pcie_pending_transactions_refuse_a_stopped_claim_and_bounded_wait() {
+    let mut function = endpoint();
+    cap(&mut function, 0x40, PCIE, 0);
+    function.config().write16(0x42, 2);
+    function.config().write16(0x4a, 1 << 5);
+    let mut checks = 0;
+    assert_eq!(
+        wait_for_pending_transactions(&*function.config(), || {
+            checks += 1;
+            checks >= 4
+        }),
+        Err(ClaimError::Active { offset: 0x4a })
+    );
+    assert_eq!(
+        validate_stopped(&mut function),
+        Err(ClaimError::Active { offset: 0x4a })
+    );
+    function.config().write16(0x4a, u16::MAX);
+    assert_eq!(
+        wait_for_pending_transactions(&*function.config(), || true),
+        Err(ClaimError::ReadFailed { offset: 0x4a })
+    );
+    function.config().write16(0x4a, 0);
+    assert_eq!(validate_stopped(&mut function), Ok(()));
+    assert_eq!(
+        wait_for_pending_transactions(&*function.config(), || panic!("idle status needs no wait")),
+        Ok(())
+    );
+}
+
+#[test]
+fn pcie_pending_wait_observes_completion_before_admitting_the_requester() {
+    struct Completing {
+        config: Config,
+        pending: Cell<u8>,
+    }
+    impl ConfigSpace for Completing {
+        fn read32(&self, offset: u16) -> u32 {
+            let word = self.config.read32(offset);
+            if offset != 0x48 {
+                return word;
+            }
+            let pending = self.pending.get();
+            self.pending.set(pending.saturating_sub(1));
+            if pending != 0 {
+                word | (1 << 21)
+            } else {
+                word & !(1 << 21)
+            }
+        }
+        fn write32(&mut self, offset: u16, value: u32) {
+            self.config.write32(offset, value);
+        }
+    }
+    let mut function = endpoint();
+    cap(&mut function, 0x40, PCIE, 0);
+    function.config().write16(0x42, 2);
+    let mut function = Function::new(
+        ADDRESS,
+        Completing {
+            config: function.into_config(),
+            pending: Cell::new(2),
+        },
+    )
+    .unwrap();
+    let mut checks = 0;
+    assert_eq!(
+        wait_for_pending_transactions(&*function.config(), || {
+            checks += 1;
+            checks >= 4
+        }),
+        Ok(())
+    );
+    assert_eq!(validate_stopped(&mut function), Ok(()));
+}
