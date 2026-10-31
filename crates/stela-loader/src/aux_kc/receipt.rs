@@ -22,8 +22,9 @@
 //! A kext linked from objects has no code signature, so no CD hash or team
 //! ID: its objects' truncated SHA-256 names its code, as a code directory
 //! hash would, and the team ID stays empty, as an ad hoc signature's does.
-use super::{Kext, unit::Unit};
+use super::{Kext, plist::Value, unit::Unit};
 use crate::Result;
+use alloc::{vec, vec::Vec};
 use sha2::{Digest, Sha256};
 use stela_contracts::{refuse, require};
 
@@ -44,7 +45,7 @@ pub fn encode<'a>(
         let version = unit
             .info
             .get("CFBundleVersion")
-            .and_then(plist::Value::as_string)
+            .and_then(Value::as_string)
             .ok_or(refuse!("Info.plist has no CFBundleVersion"))?;
         let mut code = Sha256::new();
         kext.objects.iter().for_each(|object| code.update(object));

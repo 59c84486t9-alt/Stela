@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use ::object::{
     LittleEndian as LE, macho,
     read::macho::{MachHeader, Nlist, Section as _, Segment as _},
@@ -659,7 +657,7 @@ fn links_a_kext_against_the_boot_collection() -> Result<()> {
     let info = &collection["__PRELINK_INFO,__info"];
     let xml = read(&file, info, 0, info.size as usize);
     assert_eq!(xml.last(), Some(&0));
-    let root = plist::Value::from_reader_xml(&xml[..xml.len() - 1])?;
+    let root = ::plist::Value::from_reader_xml(&xml[..xml.len() - 1])?;
     let root = root.as_dictionary().unwrap();
     assert_eq!(root["_BootKCID"].as_data(), Some(&BOOT_UUID[..]));
     let prelinked = root["_PrelinkInfoDictionary"].as_array().unwrap()[0]

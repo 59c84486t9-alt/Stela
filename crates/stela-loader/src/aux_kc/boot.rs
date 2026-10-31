@@ -1,6 +1,6 @@
 //! The boot kernel collection an auxiliary collection links against: its
 //! identity, its base and the symbols each of its fileset entries defines.
-use std::collections::HashMap;
+use alloc::{borrow::ToOwned, collections::BTreeMap, format, string::String, vec::Vec};
 
 use super::fit;
 use crate::{Result, Within};
@@ -93,7 +93,7 @@ impl<'a> BootCollection<'a> {
 
     /// The external symbols `entry` defines, by name, at their unslid
     /// addresses.
-    pub fn exports(&self, entry: &str) -> Result<HashMap<String, u64>> {
+    pub fn exports(&self, entry: &str) -> Result<BTreeMap<String, u64>> {
         let offset = self
             .collection
             .fileset_entry(entry)
@@ -102,7 +102,7 @@ impl<'a> BootCollection<'a> {
         let header = macho::MachHeader64::<LE>::parse(self.data, offset)
             .within(|| refuse!("{entry}'s Mach-O header", entry))?;
         let mut commands = header.load_commands(LE, self.data, offset)?;
-        let mut exports = HashMap::new();
+        let mut exports = BTreeMap::new();
         while let Some(command) = commands.next()? {
             let Some(symtab) = command.symtab()? else {
                 continue;

@@ -1,16 +1,23 @@
 //! One kext being linked: its objects' sections merged into the kext's
 //! segments, its references resolved against itself and the boot
 //! collection, and its relocations applied once the collection is laid out.
-use std::collections::{BTreeMap, HashMap, HashSet};
-use std::ops::Range;
+use alloc::{
+    borrow::ToOwned,
+    collections::{BTreeMap, BTreeSet},
+    format,
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
+use core::ops::Range;
 
 use super::fit;
 use crate::{Result, Within};
 use object::macho;
-use plist::Dictionary;
 use sha2::{Digest, Sha256};
 use stela_contracts::{refuse, require};
 
+use super::plist::{self, Dictionary};
 use super::{
     Kext,
     boot::{BootCollection, KERNEL},
@@ -133,9 +140,9 @@ pub struct Unit<'a> {
     placements: Vec<Vec<Option<(usize, u64)>>>,
     pub sections: Vec<Section>,
     /// The definition each external name binds to: (object, symbol).
-    globals: HashMap<String, (usize, usize)>,
+    globals: BTreeMap<String, (usize, usize)>,
     /// What the boot collection's entries this kext links against define.
-    imports: HashMap<String, u64>,
+    imports: BTreeMap<String, u64>,
     /// `__got` slots, by what they hold.
     got: Vec<Value>,
     /// Boot-collection functions branched to, each through an
@@ -145,7 +152,7 @@ pub struct Unit<'a> {
     stub_sections: Option<(usize, usize)>,
     /// Vtable slots bound to the superclass's entry rather than the symbol
     /// the object names, by (object, section, relocation offset).
-    inherited: HashMap<(usize, usize, u64), Value>,
+    inherited: BTreeMap<(usize, usize, u64), Value>,
     /// Each region's addresses, assigned by the collection's layout; the
     /// `__TEXT` region starts with the kext's Mach-O header.
     pub ranges: [Range<u64>; 4],
@@ -153,13 +160,9 @@ pub struct Unit<'a> {
 
 impl<'a> Unit<'a> {
     pub fn new(kext: &'a Kext<'a>, boot: &BootCollection<'_>) -> Result<Self> {
-        let info = plist::Value::from_reader_xml(kext.info)
-            .map_err(|error| refuse!("cannot read Info.plist", %error))?
+        let info = plist::parse(kext.info)?
             .into_dictionary()
             .ok_or(refuse!("Info.plist is not a dictionary"))?;
-        for (key, value) in &info {
-            prelink::check(key, value)?;
-        }
         let identifier = info
             .get("CFBundleIdentifier")
             .and_then(plist::Value::as_string)
@@ -188,12 +191,12 @@ impl<'a> Unit<'a> {
             objects,
             placements: Vec::new(),
             sections: Vec::new(),
-            globals: HashMap::new(),
+            globals: BTreeMap::new(),
             got: Vec::new(),
             stubs: Vec::new(),
             got_section: None,
             stub_sections: None,
-            inherited: HashMap::new(),
+            inherited: BTreeMap::new(),
             ranges: Default::default(),
         };
         unit.place().within(context)?;
@@ -692,7 +695,7 @@ impl<'a> Unit<'a> {
     /// kext was built for a newer kernel, and is refused.
     fn inherit(&mut self, boot: &BootCollection<'_>) -> Result<()> {
         let vtables = self.vtables();
-        let mut done = HashSet::new();
+        let mut done = BTreeSet::new();
         let mut names: Vec<&String> = vtables.keys().collect();
         names.sort();
         for name in names {
@@ -703,8 +706,8 @@ impl<'a> Unit<'a> {
 
     /// The kext's vtables by name, each ending at the next symbol in its
     /// section.
-    fn vtables(&self) -> HashMap<String, Vtable> {
-        let mut vtables = HashMap::new();
+    fn vtables(&self) -> BTreeMap<String, Vtable> {
+        let mut vtables = BTreeMap::new();
         for (object_index, object) in self.objects.iter().enumerate() {
             for (index, symbol) in object.symbols.iter().enumerate() {
                 let Definition::Section { section, address } = symbol.definition else {
@@ -750,9 +753,9 @@ impl<'a> Unit<'a> {
     fn inherit_vtable(
         &mut self,
         name: &str,
-        vtables: &HashMap<String, Vtable>,
+        vtables: &BTreeMap<String, Vtable>,
         boot: &BootCollection<'_>,
-        done: &mut HashSet<String>,
+        done: &mut BTreeSet<String>,
     ) -> Result<()> {
         if !done.insert(name.to_owned()) {
             return Ok(());
@@ -944,7 +947,7 @@ impl<'a> Unit<'a> {
 /// The symbols the boot-collection entries a kext lists in
 /// `OSBundleLibraries` define; every `com.apple.kpi.*` interface is the
 /// kernel's.
-fn imports(info: &Dictionary, boot: &BootCollection<'_>) -> Result<HashMap<String, u64>> {
+fn imports(info: &Dictionary, boot: &BootCollection<'_>) -> Result<BTreeMap<String, u64>> {
     let libraries = info
         .get("OSBundleLibraries")
         .and_then(plist::Value::as_dictionary)
@@ -966,7 +969,7 @@ fn imports(info: &Dictionary, boot: &BootCollection<'_>) -> Result<HashMap<Strin
     // The kernel's definitions come first, then each library's in name order.
     entries.sort_by_key(|&entry| (entry != KERNEL, entry));
     entries.dedup();
-    let mut imports = HashMap::new();
+    let mut imports = BTreeMap::new();
     for entry in entries {
         for (name, address) in boot.exports(entry)? {
             imports.entry(name).or_insert(address);

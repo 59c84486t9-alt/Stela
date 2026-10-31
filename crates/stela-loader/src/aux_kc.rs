@@ -22,13 +22,14 @@
 mod boot;
 mod commands;
 mod fixups;
+mod plist;
 mod prelink;
 mod receipt;
 pub(crate) mod relocatable;
 pub(crate) mod unit;
 
-use std::collections::BTreeMap;
-use std::iter;
+use alloc::{collections::BTreeMap, format, string::String, vec, vec::Vec};
+use core::iter;
 
 use crate::Result;
 use ::object::macho;

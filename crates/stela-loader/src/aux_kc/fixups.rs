@@ -5,7 +5,7 @@
 //! `xnu-12377.121.6`: each pointer is
 //! `target:30 cacheLevel:2 diversity:16 addrDiv:1 key:2 next:12 isAuth:1`,
 //! `next` counting 4-byte strides to the following pointer in its page.
-use std::collections::BTreeMap;
+use alloc::{collections::BTreeMap, vec, vec::Vec};
 
 use super::fit;
 use crate::Result;

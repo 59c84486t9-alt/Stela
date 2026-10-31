@@ -1,9 +1,9 @@
 //! The collection's `__PRELINK_INFO,__info`: the XML property list XNU's
 //! `OSKext` reads each kext's identity and placement from. Keys follow XNU
 //! `libkern/libkern/prelink.h` at `xnu-12377.121.6`.
+use super::plist::{self, Dictionary, Value};
 use crate::Result;
-use plist::{Dictionary, Value};
-use stela_contracts::refuse;
+use alloc::{vec, vec::Vec};
 
 /// Where a kext lies in the collection, at unslid addresses.
 #[derive(Debug, Clone, Copy)]
@@ -55,28 +55,9 @@ pub fn info(entries: &[Entry<'_>], collection: [u8; 16], boot: [u8; 16]) -> Resu
     root.insert("_PrelinkInfoDictionary".into(), Value::Array(kexts));
     root.insert("_PrelinkKCID".into(), Value::Data(collection.to_vec()));
     root.insert("_BootKCID".into(), Value::Data(boot.to_vec()));
-    let mut xml = Vec::new();
-    plist::to_writer_xml(&mut xml, &Value::Dictionary(root))
-        .map_err(|error| refuse!("cannot write the prelink information", %error))?;
+    let mut xml = plist::write(&Value::Dictionary(root));
     xml.push(0);
     Ok(xml)
-}
-
-/// Refuses values `OSUnserializeXML` has no form for.
-pub fn check(name: &str, value: &Value) -> Result<()> {
-    match value {
-        Value::Array(values) => values.iter().try_for_each(|value| check(name, value)),
-        Value::Dictionary(dictionary) => dictionary
-            .iter()
-            .try_for_each(|(key, value)| check(key, value)),
-        Value::Boolean(_) | Value::Data(_) | Value::Integer(_) | Value::String(_) => Ok(()),
-        _ => Err(refuse!(
-            "Info.plist key {name} holds a value the kernel cannot read: {value}",
-            name,
-            ?value
-        )
-        .into()),
-    }
 }
 
 #[cfg(test)]
@@ -101,7 +82,7 @@ mod tests {
         };
         let xml = info(&[entry], [1; 16], [2; 16])?;
         assert_eq!(xml.last(), Some(&0));
-        let root = Value::from_reader_xml(&xml[..xml.len() - 1])?;
+        let root = ::plist::Value::from_reader_xml(&xml[..xml.len() - 1])?;
         let root = root.as_dictionary().unwrap();
         assert_eq!(root["_PrelinkKCID"].as_data(), Some(&[1; 16][..]));
         assert_eq!(root["_BootKCID"].as_data(), Some(&[2; 16][..]));
@@ -128,12 +109,5 @@ mod tests {
         };
         assert!(info(&[widest], [1; 16], [2; 16])?.len() >= xml.len());
         Ok(())
-    }
-
-    #[test]
-    fn refuses_dates_and_reals() {
-        let nested = Value::Array(vec![Value::Real(1.5)]);
-        assert!(check("Root", &nested).is_err());
-        assert!(check("Root", &Value::String("ok".into())).is_ok());
     }
 }

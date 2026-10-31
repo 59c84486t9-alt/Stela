@@ -34,7 +34,6 @@
 //! `SystemVersion.plist` on Preboot, its Cryptex1's when it has one, the model
 //! and board name from the DeviceTree, and chip and board identifiers from
 //! the boot manifest.
-#[cfg(feature = "std")]
 use crate::aux_kc::{self, Kext};
 use crate::{Error, Result, Within};
 use crate::{
@@ -103,13 +102,11 @@ pub struct Request<'a> {
     /// Verifies LocalPolicy signatures; the SEP model's.
     pub authority: Option<&'a dyn PolicyAuthority>,
     /// Kexts to link against the system's boot collection (`aux_kc`).
-    #[cfg(feature = "std")]
     pub kexts: &'a [Kext<'a>],
 }
 
 /// The collection of `request`'s kexts, linked against `kernel`, and what
 /// admits it.
-#[cfg(feature = "std")]
 fn auxiliary_collection(kernel: &[u8], request: &Request) -> Result<Option<(Decoded, KextGrant)>> {
     if request.kexts.is_empty() {
         return Ok(None);
@@ -119,11 +116,6 @@ fn auxiliary_collection(kernel: &[u8], request: &Request) -> Result<Option<(Deco
     let grant = linked.grant();
     let bytes = linked.collection;
     Ok(Some((Decoded { source, bytes }, grant)))
-}
-
-#[cfg(not(feature = "std"))]
-fn auxiliary_collection(_: &[u8], _: &Request) -> Result<Option<(Decoded, KextGrant)>> {
-    Ok(None)
 }
 
 /// The hash type and hash of a root-hash record: an `isys` object's payload,
