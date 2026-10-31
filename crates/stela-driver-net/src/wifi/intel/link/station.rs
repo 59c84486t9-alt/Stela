@@ -122,6 +122,8 @@ const SESSION_TIMED_OUT: u16 = 39;
 const BLOCK_ACK_ALLOCATION: u32 = 63;
 /// `IWL_UCODE_TLV_CAPA_STA_EXP_MFP_SUPPORT`.
 const EXPLICIT_MFP: u32 = 114;
+/// `MICHAEL_MIC_LEN`.
+const MICHAEL_MIC_BYTES: usize = 8;
 /// `IWL_UCODE_TLV_CAPA_COEX_HIGH_PRIO`.
 const COEX_HIGH_PRIORITY: u32 = 61;
 /// `IWL_UCODE_TLV_API_SMART_FIFO_OFFLOAD`.
@@ -1032,6 +1034,11 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             let Some(key) = installed else {
                 return Ok(());
             };
+            // Firmware's Michael check failed: nothing of it is the AP's.
+            if frame.security.tkip_mic_error {
+                client.unsupported("TKIP countermeasures after a Michael failure");
+                return Ok(());
+            }
             frame.security.key = Some(key);
             frame.security.integrity = Integrity::Verified;
         }
@@ -1469,9 +1476,15 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         if client.held[queue].len() >= MAX_HELD {
             client.held[queue].pop_front();
         }
+        let encrypted = matches!(plan.protection(), Protection::Firmware { .. });
+        let mut mpdu = plan.plaintext_mpdu().to_vec();
+        // `IEEE80211_KEY_FLAG_PUT_MIC_SPACE`: firmware writes Michael's MIC.
+        if encrypted && matches!(client.ciphers, Some((Cipher::Tkip, _))) {
+            mpdu.resize(mpdu.len() + MICHAEL_MIC_BYTES, 0);
+        }
         client.held[queue].push_back(Held {
-            mpdu: plan.plaintext_mpdu().to_vec(),
-            encrypted: matches!(plan.protection(), Protection::Firmware { .. }),
+            mpdu,
+            encrypted,
             control_port: plan.control_port(),
         });
         Ok(())

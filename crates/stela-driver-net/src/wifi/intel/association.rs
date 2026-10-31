@@ -107,6 +107,9 @@ pub const BEACON_FILTER: Id = Id {
 
 const ACTION_ADD: u32 = 1;
 const ACTION_MODIFY: u32 = 2;
+/// `IWL_SEC_KEY_FLAG_CIPHER_MASK` and `IWL_SEC_KEY_FLAG_CIPHER_TKIP`.
+const KEY_CIPHER_MASK: u32 = 7;
+const KEY_CIPHER_TKIP: u32 = 3;
 const ACTION_REMOVE: u32 = 3;
 const MAC_TYPE_BSS_STATION: u32 = 5;
 const ACCEPT_GROUP: u32 = 1 << 2;
@@ -882,17 +885,20 @@ pub fn rate_config(
 
 /// `iwl_mvm_get_sec_flags` for a data or group key.
 pub fn key_flags(cipher: Cipher, pairwise: bool, management: bool) -> Option<u32> {
+    const WEP: u32 = 1;
     const CCMP: u32 = 2;
     const GCMP: u32 = 5;
     const KEY_SIZE: u32 = 0x10;
     const MFP: u32 = 0x20;
     const MCAST: u32 = 0x40;
     let suite = match cipher {
+        Cipher::Wep40 => WEP,
+        Cipher::Wep104 => WEP | KEY_SIZE,
+        Cipher::Tkip => KEY_CIPHER_TKIP,
         Cipher::Ccmp128 => CCMP,
         Cipher::Ccmp256 => CCMP | KEY_SIZE,
         Cipher::Gcmp128 => GCMP,
         Cipher::Gcmp256 => GCMP | KEY_SIZE,
-        Cipher::Tkip | Cipher::Wep40 | Cipher::Wep104 => return None,
     };
     Some(suite | if pairwise { 0 } else { MCAST } | if management { MFP } else { 0 })
 }
@@ -931,6 +937,12 @@ pub fn add_key(
     word(&mut bytes, 8, u32::from(index));
     word(&mut bytes, 12, flags);
     bytes[16..16 + material.len()].copy_from_slice(material);
+    if flags & KEY_CIPHER_MASK == KEY_CIPHER_TKIP {
+        // `NL80211_TKIP_DATA_OFFSET_TX_MIC_KEY` and its RX key after it.
+        let (transmit, receive) = material.get(16..32)?.split_at(8);
+        bytes[48..56].copy_from_slice(receive);
+        bytes[56..64].copy_from_slice(transmit);
+    }
     bytes[64..72].copy_from_slice(&receive.to_le_bytes());
     Some(bytes)
 }
@@ -1292,7 +1304,15 @@ mod tests {
         assert_eq!(key_flags(Cipher::Ccmp128, true, false), Some(2));
         assert_eq!(key_flags(Cipher::Gcmp256, false, false), Some(0x55));
         assert_eq!(key_flags(Cipher::Ccmp128, false, true), Some(0x62));
-        assert_eq!(key_flags(Cipher::Tkip, true, false), None);
+        assert_eq!(key_flags(Cipher::Tkip, true, false), Some(3));
+        assert_eq!(key_flags(Cipher::Tkip, false, false), Some(0x43));
+        assert_eq!(key_flags(Cipher::Wep40, true, false), Some(1));
+        assert_eq!(key_flags(Cipher::Wep104, true, false), Some(0x11));
+        let material: Vec<u8> = (0..32).collect();
+        let tkip = add_key(1, 3, &material, 0, 1).unwrap();
+        assert_eq!(tkip[48..56], material[24..32], "firmware's RX Michael key");
+        assert_eq!(tkip[56..64], material[16..24]);
+        assert_eq!(add_key(1, 3, &material[..16], 0, 1), None);
         let bytes = add_key(1, 0x42, &[9; 16], 5, 1).unwrap();
         assert_eq!((bytes[0], bytes[4], bytes[8], bytes[12]), (1, 1, 1, 0x42));
         assert_eq!(bytes[16..32], [9; 16]);
