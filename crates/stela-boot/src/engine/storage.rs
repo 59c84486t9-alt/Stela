@@ -186,14 +186,18 @@ impl RestoreRoot {
         // owner while IF0 excludes its own IRQ/reentrant root transition.
         let gs = unsafe { crate::cpu::msr::GS_BASE.read() };
         HOST_DRIVERS_GS.store(gs, Ordering::Release);
-        // A context says so without a read of CR4, which a hypervisor may
-        // intercept: disks are polled here thousands of times a second.
-        let tagged = previous & CONTEXT != 0 || {
-            let cr4: u64;
-            // SAFETY: CPL0 control register read.
-            unsafe { asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack, preserves_flags)) };
-            cr4 & PCIDE != 0
-        };
+        // A context or the host's state says so without a read of CR4, which
+        // a hypervisor may intercept: disks are polled here thousands of times
+        // a second.
+        let tagged = previous & CONTEXT != 0
+            || super::host::views_tagged().unwrap_or_else(|| {
+                let cr4: u64;
+                // SAFETY: CPL0 control register read.
+                unsafe {
+                    asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack, preserves_flags))
+                };
+                cr4 & PCIDE != 0
+            });
         // Tagged, entering flushes the loader's context alone.
         let root = if tagged {
             root & !CONTEXT | LOADER_CONTEXT
@@ -238,6 +242,10 @@ impl Drop for RestoreRoot {
 struct Service {
     inner: Box<dyn BlockDevice>,
     root: u64,
+    /// Commands started and not yet finished. With none no completion can be
+    /// posted, and a look at the disk need not change roots, which without
+    /// PCIDs flushes this core's TLB.
+    running: u32,
 }
 impl BlockDevice for Service {
     fn identity(&self) -> &Identity {
@@ -282,14 +290,21 @@ impl BlockDevice for Service {
     fn start(&mut self, command: Command) -> Result<u32, BlockError> {
         // SAFETY: as in read().
         let _root = unsafe { RestoreRoot::enter(self.root) };
-        self.inner.start(command)
+        let started = self.inner.start(command);
+        self.running += u32::from(started.is_ok());
+        started
     }
     fn finish(&mut self, tag: u32) -> Option<Finished> {
         // SAFETY: as in read().
         let _root = unsafe { RestoreRoot::enter(self.root) };
-        self.inner.finish(tag)
+        let finished = self.inner.finish(tag);
+        self.running = self.running.saturating_sub(u32::from(finished.is_some()));
+        finished
     }
     fn posted(&self) -> bool {
+        if self.running == 0 {
+            return false;
+        }
         // SAFETY: as in read().
         let _root = unsafe { RestoreRoot::enter(self.root) };
         self.inner.posted()
@@ -663,6 +678,7 @@ pub unsafe fn open(
         Box::new(Service {
             inner: Box::new(partition),
             root,
+            running: 0,
         })
     };
     let (mut store_partition, mut log_partition) = (None, None);
@@ -725,6 +741,7 @@ pub unsafe fn open(
             Box::new(Service {
                 inner: Box::new(disk),
                 root,
+                running: 0,
             }) as Box<dyn BlockDevice>
         })
         .collect();
@@ -777,6 +794,7 @@ pub struct Opened {
     pub fdr: Option<Box<dyn BlockDevice>>,
     pub inputs: Inputs,
     pub links: super::network::Links,
+    /// The host's Bluetooth controller, for the guest's.
     /// The display controllers probe left for their own drivers.
     pub gpus: alloc::vec::Vec<stela_drivers::gpu::Adapter>,
     /// The xHCI controllers' topology owners, polled for hotplug.

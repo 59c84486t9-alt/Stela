@@ -255,6 +255,12 @@ pub(super) fn tag_views(tagged: bool) {
     }
 }
 
+/// Whether this core runs with PCIDE set, as far as its [`Contexts`] know,
+/// which a read of CR4 would ask a hypervisor.
+pub(super) fn views_tagged() -> Option<bool> {
+    local::installed().map(|state| state.contexts.tagged)
+}
+
 impl Contexts {
     /// Drop `page`, which root `current` may translate, from every context.
     fn forget(&mut self, page: u64, current: usize) {
