@@ -16,6 +16,23 @@ use core::{
     cell::UnsafeCell,
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
+use stela_boot_core::shutdown::{Mode as Shutdown, Requests as ShutdownRequests};
+
+static SHUTDOWN: ShutdownRequests = ShutdownRequests::new();
+
+/// Queue a native driver's power request without reentering host services
+/// from a Linux callback. Installation of the service does not clear it.
+pub(super) fn request_shutdown(force: bool) {
+    SHUTDOWN.request(if force {
+        Shutdown::Forced
+    } else {
+        Shutdown::Orderly
+    });
+}
+
+pub(super) fn shutdown_pending() -> bool {
+    SHUTDOWN.pending()
+}
 
 /// How long the host may go unserved before the boot PE serves it: a PE's
 /// wait returns to its run loop at least this often
@@ -101,6 +118,18 @@ impl Service {
     /// to a later service once an interrupt comes for it (`boot` serves them
     /// whole).
     fn serve(&mut self, boot: bool) {
+        if let Some(mode) = SHUTDOWN.take(boot) {
+            output::arguments(format_args!("POWER native shutdown: {mode:?}\n"));
+            match mode {
+                Shutdown::Forced => {
+                    self.stop();
+                    self.power.power_off();
+                }
+                Shutdown::Orderly => self
+                    .devices
+                    .serve(|devices| self.power.request_shutdown(devices)),
+            }
+        }
         let Self {
             devices,
             restore,
@@ -283,6 +312,11 @@ pub(super) fn install(service: Service) {
 /// Serve the host unless another core is serving it; `boot` when the boot
 /// PE serves it.
 pub(super) fn serve(boot: bool) {
+    // Give the boot processor the next turn when it must perform a native
+    // shutdown; an AP may not consume that request or enter firmware for it.
+    if !boot && SHUTDOWN.pending() {
+        return;
+    }
     // An interrupt from now on is one the waiting PE should take instead.
     if !boot {
         host::clear_interrupted();
@@ -303,6 +337,9 @@ pub(super) fn serve(boot: bool) {
 /// Whether no PE has served the host for [`STARVED_MILLIS`], or for
 /// [`REQUESTED_MILLIS`] with a device's request `requested`.
 pub(super) fn starved(tsc_hz: u64, requested: bool) -> bool {
+    if SHUTDOWN.pending() {
+        return true;
+    }
     let millis = if requested {
         REQUESTED_MILLIS
     } else {

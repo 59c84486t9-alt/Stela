@@ -103,6 +103,9 @@ const AIR: [&str; 16] = [
 const MODEL_UNIT: &str = "nvk_query_pool.c";
 /// The C library, under `compat/libc`.
 pub(super) const LIBC: [&str; 6] = ["libc", "stdio", "pthread", "math", "system", "wchar"];
+/// Original LLVM units behind `compat/libc/regex.h`, also present in the
+/// freestanding LLVM archive. The libc-only test links these directly.
+const REGEX: [&str; 5] = ["regcomp", "regexec", "regfree", "regerror", "regstrlcpy"];
 
 /// What Meson found on the build host that the C library does not offer, or
 /// that names a path the image does not take. SSE4.1 and BLAKE3's assembly are
@@ -714,6 +717,27 @@ fn test_libc(toolchain: &Toolchain, directory: &Path) -> Result<()> {
                 .arg(&resource)
                 .arg("-c")
                 .arg(libc.join(format!("{unit}.c")))
+                .arg("-o")
+                .arg(&object),
+        )?;
+        objects.push(object);
+    }
+    for unit in REGEX {
+        let source = third_party("llvm").join(format!("llvm/lib/Support/{unit}.c"));
+        let object = output.join(format!("{unit}.o"));
+        exec(
+            Command::new(&toolchain.clang)
+                .args(LIBC_TEST_FLAGS)
+                .arg("-isystem")
+                .arg(&libc)
+                .arg("-isystem")
+                .arg(&resource)
+                .arg("-I")
+                .arg(gpu().join("compat/llvm/include"))
+                .arg("-I")
+                .arg(third_party("llvm").join("llvm/include"))
+                .arg("-c")
+                .arg(source)
                 .arg("-o")
                 .arg(&object),
         )?;

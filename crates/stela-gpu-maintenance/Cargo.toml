@@ -1,0 +1,25 @@
+[package]
+name = "stela-gpu-maintenance"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+stela-loader.workspace = true
+stela-formats = { workspace = true, default-features = false }
+anyhow.workspace = true
+clap.workspace = true
+serde = { workspace = true, features = ["std"] }
+serde_json.workspace = true
+sha2.workspace = true
+hex.workspace = true
+plist = "1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

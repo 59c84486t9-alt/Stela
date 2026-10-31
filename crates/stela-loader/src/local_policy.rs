@@ -101,10 +101,20 @@ impl LocalPolicy {
             Err(_) => file.to_vec(),
         };
         let parsed = im4m::parse(&manifest).within(|| refuse!("LocalPolicy {path}", path))?;
-        let properties = parsed
-            .object(POLICY_OBJECT)
-            .map(|o| o.properties.clone())
-            .unwrap_or_else(|| parsed.properties.clone());
+        // LocalPolicy puts its grants in MANP and the payload digest in
+        // lpol. Older inputs can put policy fields in lpol itself. Preserve
+        // both namespaces, but never let one shadow a permission in the other.
+        let mut properties = parsed.properties.clone();
+        if let Some(object) = parsed.object(POLICY_OBJECT) {
+            for property in &object.properties {
+                require!(
+                    !properties.iter().any(|other| other.name == property.name),
+                    "LocalPolicy repeats property {name} across MANP and lpol",
+                    name = property.name
+                );
+                properties.push(property.clone());
+            }
+        }
         let nsih = data(&properties, "nsih", SHA384_BYTES)?.map(hex::encode_upper);
         let volume_group = data(&properties, "vuid", UUID_BYTES)?
             .map(|bytes| bytes.try_into().expect("checked length"));
@@ -178,5 +188,19 @@ mod tests {
         let error = format!("{:#}", parsed.verify(&Unverified).unwrap_err());
         assert!(error.contains("SEP"), "{error}");
         assert!(!parsed.verified);
+    }
+
+    #[test]
+    fn manifest_wide_policy_fields_survive_an_lpol_payload_digest() {
+        let next = entry("nsih", &der(&[0x04], &[0xab; 48]));
+        let volume = entry("vuid", &der(&[0x04], &[0x11; 16]));
+        let digest = entry("DGST", &der(&[0x04], &[0xcd; 48]));
+        let object = entry(POLICY_OBJECT, &der(&[0x31], &digest));
+        let file = manifest(&[next.clone(), volume], &[object]);
+        let parsed = LocalPolicy::parse("policy", &file).unwrap();
+        assert_eq!(parsed.nsih, Some("AB".repeat(48)));
+        assert_eq!(parsed.volume_group, Some([0x11; 16]));
+        let duplicate = entry(POLICY_OBJECT, &der(&[0x31], &next));
+        assert!(LocalPolicy::parse("policy", &manifest(&[next], &[duplicate])).is_err());
     }
 }

@@ -38,6 +38,8 @@ const XRGB8888: u32 = u32::from_le_bytes(*b"XR24");
 const BYTES_PER_PIXEL: u32 = 4;
 /// `EBUSY`, as a negative result.
 const BUSY: i64 = -16;
+/// Hotplug may change a list between its size query and its data query.
+const ENUMERATION_ATTEMPTS: usize = 8;
 
 /// `struct drm_mode_card_res`.
 #[derive(Clone, Copy, Debug, Default)]
@@ -173,10 +175,24 @@ pub enum Error {
     Request(i64),
     /// A buffer could not be mapped.
     Map,
+    /// Hotplug kept changing the connector or controller lists.
+    Changed,
+    /// A returned scanout allocation cannot hold the selected mode.
+    InvalidBuffer,
+    /// A frame must contain every pixel of the selected mode exactly once.
+    FrameSize { expected: usize, actual: usize },
+    /// Storage for the mode or resource lists could not be allocated.
+    Allocation,
 }
 
 /// A DRM primary node of the bound GPU.
-pub trait Drm {
+///
+/// # Safety
+/// Successful mappings must be writable for the requested extent and stay
+/// mapped at the same address while this node's display uses them. Distinct
+/// dumb buffers must not alias. Ioctls must honor the UAPI's pointer/count
+/// bounds and report the allocation's actual pitch and size.
+pub unsafe trait Drm {
     /// The ioctl `request` on `argument`: zero or a negative errno.
     fn control(&mut self, request: u32, argument: *mut c_void) -> i64;
     /// Maps `bytes` at `offset`, what `MAP_DUMB` answered.
@@ -190,6 +206,7 @@ pub trait Drm {
 struct Buffer {
     framebuffer: u32,
     pixels: NonNull<u8>,
+    pitch: usize,
 }
 
 /// The output a [`Display`] runs.
@@ -199,7 +216,6 @@ pub struct Display<D> {
     crtc: u32,
     width: u32,
     height: u32,
-    pitch: usize,
     /// What the engine reads, then the one the next frame fills.
     /// The newest frame, the one before it and the one that shows neither.
     buffers: [Buffer; 3],
@@ -218,8 +234,13 @@ fn call<D: Drm, T>(drm: &mut D, request: u32, argument: &mut T) -> Result<(), Er
 
 /// A list a second `control` fills, which Linux does only whole, once the
 /// first says how long it is.
-fn list<T: Copy + Default>(count: u32) -> Vec<T> {
-    alloc::vec![T::default(); count as usize]
+fn list<T: Copy + Default>(count: u32) -> Result<Vec<T>, Error> {
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(count as usize)
+        .map_err(|_| Error::Allocation)?;
+    values.resize(count as usize, T::default());
+    Ok(values)
 }
 
 /// A connector: its state, its modes and its encoders.
@@ -230,27 +251,37 @@ struct Output {
 }
 
 fn output<D: Drm>(drm: &mut D, id: u32) -> Result<Output, Error> {
-    let mut sized = Connector {
-        id,
-        ..Connector::default()
-    };
-    call(drm, GET_CONNECTOR, &mut sized)?;
-    let mut modes = list::<ModeInfo>(sized.mode_count);
-    let mut encoders = list::<u32>(sized.encoder_count);
-    let mut described = Connector {
-        id,
-        modes: modes.as_mut_ptr() as u64,
-        mode_count: modes.len() as u32,
-        encoders: encoders.as_mut_ptr() as u64,
-        encoder_count: encoders.len() as u32,
-        ..Connector::default()
-    };
-    call(drm, GET_CONNECTOR, &mut described)?;
-    Ok(Output {
-        connected: described.connection == CONNECTED,
-        modes,
-        encoders,
-    })
+    for _ in 0..ENUMERATION_ATTEMPTS {
+        let mut sized = Connector {
+            id,
+            ..Connector::default()
+        };
+        call(drm, GET_CONNECTOR, &mut sized)?;
+        let mut modes = list::<ModeInfo>(sized.mode_count)?;
+        let mut encoders = list::<u32>(sized.encoder_count)?;
+        let mut described = Connector {
+            id,
+            modes: modes.as_mut_ptr() as u64,
+            mode_count: modes.len() as u32,
+            encoders: encoders.as_mut_ptr() as u64,
+            encoder_count: encoders.len() as u32,
+            ..Connector::default()
+        };
+        call(drm, GET_CONNECTOR, &mut described)?;
+        if described.mode_count as usize > modes.len()
+            || described.encoder_count as usize > encoders.len()
+        {
+            continue;
+        }
+        modes.truncate(described.mode_count as usize);
+        encoders.truncate(described.encoder_count as usize);
+        return Ok(Output {
+            connected: described.connection == CONNECTED,
+            modes,
+            encoders,
+        });
+    }
+    Err(Error::Changed)
 }
 
 /// The first of `crtcs` one of `encoders` can drive.
@@ -263,6 +294,7 @@ fn controller<D: Drm>(drm: &mut D, encoders: &[u32], crtcs: &[u32]) -> Result<Op
         call(drm, GET_ENCODER, &mut encoder)?;
         let reachable = crtcs
             .iter()
+            .take(u32::BITS as usize)
             .enumerate()
             .find(|(index, _)| encoder.possible_crtcs >> index & 1 != 0);
         if let Some((_, &crtc)) = reachable {
@@ -284,7 +316,7 @@ fn choose(modes: &[ModeInfo], wanted: (u32, u32)) -> Option<ModeInfo> {
 }
 
 /// One buffer of the mode's size, with its framebuffer and mapping.
-fn buffer<D: Drm>(drm: &mut D, width: u32, height: u32) -> Result<(Buffer, u32), Error> {
+fn buffer<D: Drm>(drm: &mut D, width: u32, height: u32) -> Result<Buffer, Error> {
     let mut dumb = CreateDumb {
         width,
         height,
@@ -292,6 +324,17 @@ fn buffer<D: Drm>(drm: &mut D, width: u32, height: u32) -> Result<(Buffer, u32),
         ..CreateDumb::default()
     };
     call(drm, CREATE_DUMB, &mut dumb)?;
+    let row = width
+        .checked_mul(BYTES_PER_PIXEL)
+        .ok_or(Error::InvalidBuffer)?;
+    let bytes = usize::try_from(dumb.size).map_err(|_| Error::InvalidBuffer)?;
+    if width == 0
+        || height == 0
+        || dumb.pitch < row
+        || dumb.size < u64::from(dumb.pitch) * u64::from(height)
+    {
+        return Err(Error::InvalidBuffer);
+    }
     let mut framebuffer = FramebufferCommand {
         width,
         height,
@@ -306,32 +349,48 @@ fn buffer<D: Drm>(drm: &mut D, width: u32, height: u32) -> Result<(Buffer, u32),
         ..MapDumb::default()
     };
     call(drm, MAP_DUMB, &mut map)?;
-    let pixels = drm.map(map.offset, dumb.size as usize).ok_or(Error::Map)?;
-    Ok((
-        Buffer {
-            framebuffer: framebuffer.id,
-            pixels,
-        },
-        dumb.pitch,
-    ))
+    let pixels = drm.map(map.offset, bytes).ok_or(Error::Map)?;
+    // SAFETY: the Drm mapping contract covers `bytes` writable bytes; the
+    // buffer has not been given to the display engine yet.
+    unsafe { ptr::write_bytes(pixels.as_ptr(), 0, bytes) };
+    Ok(Buffer {
+        framebuffer: framebuffer.id,
+        pixels,
+        pitch: dumb.pitch as usize,
+    })
 }
 
-impl<D: Drm> Display<D> {
-    /// Takes the first connected output of `drm`, showing a black frame in
-    /// the mode of `wanted` pixels if it has one, as the firmware's did.
-    pub fn take(mut drm: D, wanted: (u32, u32)) -> Result<Self, Error> {
-        let mut resources = CardResources::default();
-        call(&mut drm, GET_RESOURCES, &mut resources)?;
-        let mut crtcs = list::<u32>(resources.crtc_count);
-        let mut connectors = list::<u32>(resources.connector_count);
-        let mut lists = CardResources {
+fn resources<D: Drm>(drm: &mut D) -> Result<(Vec<u32>, Vec<u32>), Error> {
+    for _ in 0..ENUMERATION_ATTEMPTS {
+        let mut sized = CardResources::default();
+        call(drm, GET_RESOURCES, &mut sized)?;
+        let mut crtcs = list::<u32>(sized.crtc_count)?;
+        let mut connectors = list::<u32>(sized.connector_count)?;
+        let mut described = CardResources {
             crtcs: crtcs.as_mut_ptr() as u64,
             crtc_count: crtcs.len() as u32,
             connectors: connectors.as_mut_ptr() as u64,
             connector_count: connectors.len() as u32,
             ..CardResources::default()
         };
-        call(&mut drm, GET_RESOURCES, &mut lists)?;
+        call(drm, GET_RESOURCES, &mut described)?;
+        if described.crtc_count as usize > crtcs.len()
+            || described.connector_count as usize > connectors.len()
+        {
+            continue;
+        }
+        crtcs.truncate(described.crtc_count as usize);
+        connectors.truncate(described.connector_count as usize);
+        return Ok((crtcs, connectors));
+    }
+    Err(Error::Changed)
+}
+
+impl<D: Drm> Display<D> {
+    /// Takes the first connected output of `drm`, showing a black frame in
+    /// the mode of `wanted` pixels if it has one, as the firmware's did.
+    pub fn take(mut drm: D, wanted: (u32, u32)) -> Result<Self, Error> {
+        let (crtcs, connectors) = resources(&mut drm)?;
         for &id in &connectors {
             let found = output(&mut drm, id)?;
             let Some(mode) = choose(&found.modes, wanted).filter(|_| found.connected) else {
@@ -346,9 +405,9 @@ impl<D: Drm> Display<D> {
 
     fn run(mut drm: D, crtc: u32, connector: u32, mode: ModeInfo) -> Result<Self, Error> {
         let (width, height) = (u32::from(mode.hdisplay), u32::from(mode.vdisplay));
-        let (front, pitch) = buffer(&mut drm, width, height)?;
-        let (back, _) = buffer(&mut drm, width, height)?;
-        let (spare, _) = buffer(&mut drm, width, height)?;
+        let front = buffer(&mut drm, width, height)?;
+        let back = buffer(&mut drm, width, height)?;
+        let spare = buffer(&mut drm, width, height)?;
         let mut connectors = connector;
         let mut set = Crtc {
             connectors: ptr::from_mut(&mut connectors) as u64,
@@ -365,7 +424,6 @@ impl<D: Drm> Display<D> {
             crtc,
             width,
             height,
-            pitch: pitch as usize,
             buffers: [front, back, spare],
         })
     }
@@ -378,14 +436,22 @@ impl<D: Drm> Display<D> {
     /// The buffer on screen and the bytes between its rows, for what draws
     /// before the first frame.
     pub fn front(&self) -> (NonNull<u8>, usize) {
-        (self.buffers[0].pixels, self.pitch)
+        (self.buffers[0].pixels, self.buffers[0].pitch)
     }
 
     /// Shows `rows`, blue-low pixels of [`Self::size`] top to bottom, at the
     /// next vertical blank.
     pub fn present(&mut self, rows: &[u8]) -> Result<(), Error> {
         let row = self.width as usize * BYTES_PER_PIXEL as usize;
+        let expected = row * self.height as usize;
+        if rows.len() != expected {
+            return Err(Error::FrameSize {
+                expected,
+                actual: rows.len(),
+            });
+        }
         let target = self.buffers[2].pixels.as_ptr();
+        let pitch = self.buffers[2].pitch;
         for (y, line) in rows
             .chunks_exact(row)
             .take(self.height as usize)
@@ -395,7 +461,7 @@ impl<D: Drm> Display<D> {
             // `pitch` apart and hold `row` bytes, and the engine reads
             // another buffer.
             unsafe {
-                ptr::copy_nonoverlapping(line.as_ptr(), target.add(y * self.pitch), row);
+                ptr::copy_nonoverlapping(line.as_ptr(), target.add(y * pitch), row);
             }
         }
         let mut flip = PageFlip {

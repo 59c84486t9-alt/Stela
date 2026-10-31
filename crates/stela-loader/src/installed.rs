@@ -34,7 +34,7 @@
 //! `SystemVersion.plist` on Preboot, its Cryptex1's when it has one, the model
 //! and board name from the DeviceTree, and chip and board identifiers from
 //! the boot manifest.
-use crate::aux_kc::{self, Kext};
+use crate::aux_kc::{self, Kext, Linked};
 use crate::{Error, Result, Within};
 use crate::{
     apple_device_tree::DeviceTree,
@@ -690,6 +690,8 @@ pub fn prepare<R: ReadAt>(
         bytes,
     });
     let (auxiliary, kexts) = auxiliary_collection(&kernel.bytes, request)?.unzip();
+    let kext_code =
+        Linked::trust_cache(request.kexts)?.map(|(source, bytes)| Decoded { source, bytes });
     let inputs = Inputs {
         target: Target {
             product_type,
@@ -717,7 +719,11 @@ pub fn prepare<R: ReadAt>(
         sep_firmware: sep.map(Decoded::input),
         boot_manifest: boot_manifest.as_ref().map(Decoded::input),
         cryptex1_manifest: cryptex1_manifest.as_ref().map(Decoded::input),
-        extra_trust_caches: base_system_trust_cache.iter().map(Decoded::input).collect(),
+        extra_trust_caches: base_system_trust_cache
+            .iter()
+            .chain(&kext_code)
+            .map(Decoded::input)
+            .collect(),
         ramdisk: None,
         // The installed volumes hold none: the engine reads the board's flash.
         board_firmware: Vec::new(),

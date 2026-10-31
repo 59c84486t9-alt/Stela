@@ -11,10 +11,10 @@ typedef struct {
 	int kind;
 } pthread_mutexattr_t;
 typedef struct {
-	int unused;
+	clockid_t clock;
 } pthread_condattr_t;
 typedef struct {
-	int unused;
+	int detachstate;
 } pthread_attr_t;
 typedef struct {
 	volatile int locked;
@@ -24,6 +24,7 @@ typedef struct {
 } pthread_mutex_t;
 typedef struct {
 	volatile unsigned int generation;
+	clockid_t clock;
 } pthread_cond_t;
 typedef struct {
 	volatile int state;
@@ -44,7 +45,7 @@ typedef struct {
 	int unused;
 } pthread_barrierattr_t;
 #define PTHREAD_MUTEX_INITIALIZER {0, 0, 0, 0}
-#define PTHREAD_COND_INITIALIZER {0}
+#define PTHREAD_COND_INITIALIZER {0, CLOCK_REALTIME}
 #define PTHREAD_ONCE_INIT {0}
 #define PTHREAD_RWLOCK_INITIALIZER {0}
 #define PTHREAD_BARRIER_SERIAL_THREAD -1
@@ -52,6 +53,7 @@ typedef struct {
 #define PTHREAD_MUTEX_RECURSIVE 1
 #define PTHREAD_CREATE_JOINABLE 0
 #define PTHREAD_CREATE_DETACHED 1
+#define PTHREAD_DESTRUCTOR_ITERATIONS 4
 int pthread_mutexattr_init(pthread_mutexattr_t *attr);
 int pthread_mutexattr_settype(pthread_mutexattr_t *attr, int kind);
 int pthread_mutexattr_destroy(pthread_mutexattr_t *attr);
@@ -87,6 +89,7 @@ int pthread_barrier_destroy(pthread_barrier_t *barrier);
 int pthread_barrier_wait(pthread_barrier_t *barrier);
 int pthread_getcpuclockid(pthread_t thread, clockid_t *clock);
 #define PTHREAD_CANCEL_ASYNCHRONOUS 1
+#define PTHREAD_CANCEL_DEFERRED 0
 int pthread_setcanceltype(int type, int *old);
 int pthread_cancel(pthread_t thread);
 pthread_t pthread_self(void);
@@ -94,7 +97,7 @@ int pthread_equal(pthread_t a, pthread_t b);
 int pthread_attr_init(pthread_attr_t *attr);
 int pthread_attr_destroy(pthread_attr_t *attr);
 int pthread_attr_setdetachstate(pthread_attr_t *attr, int state);
-/* Refused: PEs run Mesa, and nothing here can schedule another thread. */
+/* The native environment schedules these on Linux tasks. */
 int pthread_create(pthread_t *thread, const pthread_attr_t *attr, void *(*body)(void *),
 		   void *argument);
 int pthread_join(pthread_t thread, void **result);

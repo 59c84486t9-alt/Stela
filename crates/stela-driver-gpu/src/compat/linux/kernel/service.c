@@ -9,6 +9,7 @@
 #include <linux/limits.h>
 #include <linux/typecheck.h>
 #include <linux/sched.h>
+#include <stela/atomic_callback.h>
 #include <stela/irq.h>
 #include <stela/linux.h>
 #include <stela/service.h>
@@ -62,6 +63,10 @@ void stela_linux_service_loop(const struct stela_linux_service_call *call)
 			schedule();
 			continue;
 		}
+		struct stela_linux_atomic_callback leaf;
+		stela_linux_atomic_process_leaf_begin(&leaf);
+		call->drain(call->context);
+		stela_linux_atomic_process_leaf_end(&leaf);
 		for (int irq; (irq = call->next_irq(call->context)) >= 0;)
 			stela_linux_irq_run((unsigned int)irq);
 		call->finish(call->context, stela_linux_service_run());
@@ -77,10 +82,11 @@ void stela_linux_sleep_us(u64 minimum)
 	schedule_hrtimeout(&expires, HRTIMER_MODE_REL);
 }
 
-void stela_linux_worker_main(void *owner)
+void stela_linux_worker_main(void *context)
 {
-	stela_linux_enter(owner);
-	stela_linux_workers_run();
+	const struct stela_linux_worker_call *call = context;
+	stela_linux_enter(call->owner);
+	stela_linux_workers_run(call->kind);
 	stela_linux_exit();
 }
 

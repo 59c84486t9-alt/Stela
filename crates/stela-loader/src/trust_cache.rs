@@ -9,11 +9,26 @@
 use crate::Result;
 use alloc::{string::String, vec, vec::Vec};
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use stela_contracts::{refuse, require};
 
 const HEADER_BYTES: usize = 4 + 16 + 4;
 /// Module placement inside the composed region.
 const MODULE_ALIGNMENT: usize = 16;
+/// `CS_HASHTYPE_SHA256`, the hash a signature's CDHash truncates.
+const HASH_TYPE_SHA256: u8 = 2;
+
+/// A code directory's identity in a trust cache.
+pub type CodeHash = [u8; 20];
+
+/// Read the complete hash list a kext's `TrustedCode` file carries.
+pub fn code_hashes(bytes: &[u8]) -> Result<Vec<CodeHash>> {
+    require!(
+        bytes.len().is_multiple_of(size_of::<CodeHash>()),
+        "trusted code hash list ends in a partial hash"
+    );
+    Ok(bytes.as_chunks::<{ size_of::<CodeHash>() }>().0.to_vec())
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ModuleSummary {
@@ -60,6 +75,28 @@ pub fn inspect_module(module: &[u8]) -> Result<ModuleSummary> {
         entries,
         bytes: module.len(),
     })
+}
+
+/// A version 2 module, the version Apple's boot modules use, trusting
+/// `hashes` with no launch constraint. Lookups search a module's entries, so
+/// they are sorted, and the UUID is their digest.
+pub fn module(hashes: &[CodeHash]) -> Result<Vec<u8>> {
+    let mut hashes = hashes.to_vec();
+    hashes.sort_unstable();
+    hashes.dedup();
+    let count = u32::try_from(hashes.len()).map_err(|_| refuse!("too many trusted code hashes"))?;
+    let mut digest = Sha256::new();
+    for hash in &hashes {
+        digest.update(hash);
+    }
+    let mut out = 2u32.to_le_bytes().to_vec();
+    out.extend_from_slice(&digest.finalize()[..16]);
+    out.extend_from_slice(&count.to_le_bytes());
+    for hash in &hashes {
+        out.extend_from_slice(hash);
+        out.extend_from_slice(&[HASH_TYPE_SHA256, 0, 0, 0]);
+    }
+    Ok(out)
 }
 
 /// Compose the boot trust cache region; the first module is the static one.
@@ -118,6 +155,32 @@ mod tests {
         assert_eq!(offsets[1] % MODULE_ALIGNMENT, 0);
         assert_eq!(&region[offsets[1]..], second.as_slice());
         assert_eq!(inspect_module(&first)?.entries, 3);
+        Ok(())
+    }
+
+    #[test]
+    fn a_built_module_is_sorted_and_exact() -> Result<()> {
+        let built = super::module(&[[2; 20], [1; 20], [2; 20]])?;
+        let summary = inspect_module(&built)?;
+        assert_eq!((summary.version, summary.entries), (2, 2));
+        assert_eq!(built[HEADER_BYTES..HEADER_BYTES + 20], [1; 20]);
+        assert_eq!(built[HEADER_BYTES + 20], HASH_TYPE_SHA256);
+        assert_eq!(built[HEADER_BYTES + 24..HEADER_BYTES + 44], [2; 20]);
+        assert_eq!(built, super::module(&[[1; 20], [2; 20]])?);
+        assert_ne!(built[4..20], super::module(&[[1; 20]])?[4..20]);
+        Ok(())
+    }
+
+    #[test]
+    fn trusted_code_requires_whole_hashes() -> Result<()> {
+        assert!(code_hashes(&[])?.is_empty());
+        assert_eq!(
+            code_hashes(&[[1; 20], [2; 20]].concat())?,
+            [[1; 20], [2; 20]]
+        );
+        for size in [1, 19, 21, 39, 41] {
+            assert!(code_hashes(&vec![0; size]).is_err());
+        }
         Ok(())
     }
 

@@ -17,6 +17,7 @@ use crate::metal::{
     shader::Compiler,
     vulkan::{backend::Backend, physical::PciBusInfo},
 };
+#[cfg(feature = "metal-vulkan")]
 use alloc::boxed::Box;
 
 /// The GPU the platform hands the Metal device.

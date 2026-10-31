@@ -158,6 +158,9 @@ pub(super) fn run<H: Host>(
             machine.exclude_host_time(|_| service::serve(true));
         }
         machine.exclude_host_time(|_| super::gpu::pump());
+        if service::shutdown_pending() {
+            machine.exclude_host_time(|_| service::serve(true));
+        }
         service.parts.lap(ServiceParts::SERVICE, host::rdtsc());
 
         // A wall-time service yield may precede even the final block limit.

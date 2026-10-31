@@ -129,6 +129,9 @@ pub enum Command {
         /// Include authored hardware fixtures in the mount.
         #[arg(long)]
         diagnostics: bool,
+        /// Build and include NVIDIA/NVK rendering and the guest components.
+        #[arg(long)]
+        nvk: bool,
     },
     /// Boot `stela.efi` with an ARM image in x86 QEMU.
     Run(Box<Run>),
@@ -507,10 +510,15 @@ pub fn run(command: Command) -> Result<ExitCode> {
         Command::Build {
             release,
             diagnostics,
+            nvk,
         } => {
+            if nvk {
+                crate::gpu::fetch::fetch(false)?;
+                crate::gpu::build_nvk(8)?;
+            }
             println!(
                 "{}",
-                build_with_diagnostics(release, diagnostics)?.display()
+                build_with_diagnostics(release, diagnostics, nvk)?.display()
             );
             Ok(ExitCode::SUCCESS)
         }
@@ -518,16 +526,22 @@ pub fn run(command: Command) -> Result<ExitCode> {
     }
 }
 
-pub fn build(release: bool) -> Result<PathBuf> {
-    build_with_diagnostics(release, false)
+pub fn build(release: bool, nvk: bool) -> Result<PathBuf> {
+    if nvk {
+        crate::gpu::build_nvk(8)?;
+    }
+    build_with_diagnostics(release, false, nvk)
 }
 
-fn build_with_diagnostics(release: bool, diagnostics: bool) -> Result<PathBuf> {
+fn build_with_diagnostics(release: bool, diagnostics: bool, nvk: bool) -> Result<PathBuf> {
     let mut command = cargo();
     command.args(["build", "--locked", "--manifest-path", BOOT_MANIFEST]);
     command.args(["--target", BOOT_TARGET, "--target-dir", BOOT_TARGET_DIR]);
     if diagnostics {
         command.args(["--features", "diagnostics"]);
+    }
+    if nvk {
+        command.args(["--features", "nvk"]);
     }
     if release {
         command.arg("--release");
@@ -688,7 +702,7 @@ fn launch(arguments: Run) -> Result<ExitCode> {
     let attached = storage_disks(&arguments.storage_disk, &arguments.storage_serial)?;
     let image = match &arguments.image {
         Some(image) => image.clone(),
-        None => build_with_diagnostics(true, true)?,
+        None => build_with_diagnostics(true, true, false)?,
     };
     let paths = storage::Paths::new(arguments.output.clone());
     if paths.output.exists() {

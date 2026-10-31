@@ -346,6 +346,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
     /// `commit`: submits the command buffer and returns its serial. A
     /// command buffer that cannot be submitted is discarded.
     pub fn commit(&mut self, mut commands: CommandBuffer) -> Result<u64> {
+        self.ensure_admission()?;
         let serial = self.submitted + 1;
         let completion = (self.timeline, serial);
         let finished = self
@@ -579,11 +580,26 @@ impl<B: Backend, C: Compiler> Device<B, C> {
     /// Submits ready held work, retires completed command buffers and
     /// returns the completed serial.
     pub fn poll(&mut self) -> Result<u64> {
+        let result = self.poll_inner();
+        if result == Err(Error::DeviceLost) {
+            self.mark_lost();
+        }
+        result
+    }
+
+    fn poll_inner(&mut self) -> Result<u64> {
         self.advance()?;
         if self.lost {
             return Err(Error::DeviceLost);
         }
-        let completed = self.backend.semaphore_value(self.timeline)?;
+        let completed = self
+            .backend
+            .semaphore_value(self.timeline)
+            .inspect_err(|error| {
+                if *error == Error::DeviceLost {
+                    self.lost = true;
+                }
+            })?;
         self.retire(completed)?;
         Ok(completed)
     }
@@ -627,11 +643,12 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         }
         let (ready, waiting): (Vec<_>, Vec<_>) = core::mem::take(&mut self.deferred)
             .into_iter()
-            .partition(|(serial, _)| *serial <= completed);
+            .partition(|(serial, _, _)| *serial <= completed);
         self.deferred = waiting;
-        ready
-            .into_iter()
-            .for_each(|(_, object)| self.backend.destroy(object));
+        for (_, object, allocated) in ready {
+            self.backend.destroy(object);
+            self.allocated -= allocated;
+        }
         self.descriptors.retire(completed);
         self.execution_sets.retire(completed);
         outcome
@@ -675,6 +692,9 @@ impl<B: Backend, C: Compiler> Device<B, C> {
     /// `waitUntilSignaledValue:timeoutMS:`. Held work may signal the event,
     /// so it is submitted first; `timeout` bounds each wait.
     pub fn wait_event(&mut self, id: EventId, value: u64, timeout: u64) -> Result<bool> {
+        if self.lost {
+            return Err(Error::DeviceLost);
+        }
         let semaphore = self.event_semaphore(id)?;
         if self.backend.semaphore_value(semaphore)? >= value {
             return Ok(true);

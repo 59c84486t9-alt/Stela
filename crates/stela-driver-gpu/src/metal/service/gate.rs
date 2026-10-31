@@ -85,7 +85,15 @@ impl<B: Backend, C: Compiler> Service<B, C> {
     /// Command buffers completed, or the device was lost, since this last
     /// answered true; either wakes the frontend's waiters.
     pub fn signaled(&mut self) -> bool {
-        let reached = self.device.poll().unwrap_or(u64::MAX);
+        let reached = match self.device.poll() {
+            Ok(completed) => completed,
+            Err(_) => {
+                // A completion query that cannot be trusted must fail every
+                // waiter consistently, rather than merely waking it once.
+                self.device.mark_lost();
+                u64::MAX
+            }
+        };
         let signaled = reached > self.signaled;
         self.signaled = self.signaled.max(reached);
         signaled

@@ -34,6 +34,7 @@ impl<const N: usize> Runtime<N> {
         // register performs only immutable CPU/queue identity checks; no clock,
         // idle/event provider, C callback or inline switch is invoked here.
         domain.register(self)?;
+        scheduling.state().scheduling.clock = Some(domain.scheduling_clock());
         scheduling.state().scheduling.enabled = true;
         drop(scheduling);
         // SAFETY: first publication before jobs; no callback/drop/borrow crosses it.

@@ -33,11 +33,25 @@ struct stela_linux_pci_function {
 	u64 dma_limit;
 	unsigned int bus, devfn, irq;
 	struct stela_linux_pci_region regions[PCI_STD_NUM_BARS];
+	/* Optional ownership transfer: successful attach keeps context through
+	 * the final device reference, including references beyond removal.
+	 * Called exactly once at quiescent process release in the attach owner.
+	 * Nonquiescent or other-owner final release quarantines host/context;
+	 * no destructor is invoked from atomic or private RCU callback context. */
+	void (*release_context)(void *context);
 };
 
-_Static_assert(sizeof(struct stela_linux_pci_function) == 224, "Linux PCI function ABI");
+_Static_assert(sizeof(struct stela_linux_pci_function) == 232, "Linux PCI function ABI");
+_Static_assert(__builtin_offsetof(struct stela_linux_pci_function, release_context) == 224,
+	       "Linux PCI context release ABI");
 
 /* Present function to Linux, which binds any driver matching it; NULL when out
- * of memory. stela_linux_pci_remove_device takes it away. */
+ * of memory, without taking context ownership. Removal unregisters the device
+ * and drops the registration reference; other references keep callbacks live.
+ * The attach owner/platform and callback code must outlive every escaped
+ * device reference or quarantined final release. */
 struct pci_dev *stela_linux_pci_attach(const struct stela_linux_pci_function *function);
+/* Cumulative final releases quarantined outside the original process owner.
+ * Atomic observation only; no reset or deferred reclamation is implied. */
+u64 stela_linux_pci_quarantined_functions(void);
 #endif

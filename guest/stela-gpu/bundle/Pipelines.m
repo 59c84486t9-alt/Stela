@@ -7,6 +7,25 @@ typedef struct {
 	size_t count;
 } HandleList;
 
+static NSArray *append_functions(NSArray *source, NSArray *additional)
+{
+	NSMutableArray *all = [NSMutableArray arrayWithCapacity:source.count + additional.count];
+	for (NSUInteger i = 0; i < source.count; i++) {
+		[all addObject:source[i]];
+	}
+	for (NSUInteger i = 0; i < additional.count; i++) {
+		[all addObject:additional[i]];
+	}
+	return all;
+}
+
+static id additional_functions(id linked, NSArray *functions)
+{
+	id copy = linked ? [linked copy] : [NSClassFromString(@"MTLLinkedFunctions") new];
+	[copy setBinaryFunctions:append_functions([linked binaryFunctions], functions)];
+	return copy;
+}
+
 static StelaSpan handle_list(NSArray *objects, StelaSpan *spans, size_t *used, uint64_t **storage)
 {
 	NSUInteger count = objects.count;
@@ -33,8 +52,10 @@ typedef struct {
 static void linked_functions(Linked *linked, id functions, NSArray *libraries, NSUInteger depth,
 			     StelaLinkedFunctionsRecord *record)
 {
+	/* Both lists name AIR functions; the backend compiles them into the stage. */
+	NSArray *visible = append_functions([functions functions], [functions binaryFunctions]);
 	*record = (StelaLinkedFunctionsRecord){
-		.functions = handle_list([functions functions], linked->spans, &linked->used, linked->storage),
+		.functions = handle_list(visible, linked->spans, &linked->used, linked->storage),
 		.private_functions = handle_list([functions privateFunctions], linked->spans, &linked->used, linked->storage),
 		.libraries = handle_list(libraries, linked->spans, &linked->used, linked->storage),
 		.max_call_stack_depth = depth,
@@ -112,6 +133,16 @@ static NSError *pipeline_error(const StelaFailure *failure)
 	return stela_error(MTLLibraryErrorDomain, failure->status == StelaStatusUnsupported ? MTLLibraryErrorUnsupported
 											    : MTLLibraryErrorCompileFailure,
 			   failure);
+}
+
+static id binary_functions_error(NSError **error, const char *reason)
+{
+	StelaFailure failure = {.status = StelaStatusInvalid};
+	snprintf(failure.reason, sizeof(failure.reason), "%s", reason);
+	if (error) {
+		*error = pipeline_error(&failure);
+	}
+	return nil;
 }
 
 @implementation StelaGPURenderReflection
@@ -278,6 +309,23 @@ static id function_table(StelaGPUDevice *device, id descriptor)
 	return nil;
 }
 
+- (id)newRenderPipelineStateWithAdditionalBinaryFunctions:(id)functions error:(NSError **)error
+{
+	NSArray *vertex = [functions vertexAdditionalBinaryFunctions];
+	NSArray *fragment = [functions fragmentAdditionalBinaryFunctions];
+	if ([[functions tileAdditionalBinaryFunctions] count]) {
+		return binary_functions_error(error, "this device has no tile shading");
+	}
+	if (!_descriptor || (vertex.count && ![_descriptor supportAddingVertexBinaryFunctions])
+	    || (fragment.count && ![_descriptor supportAddingFragmentBinaryFunctions])) {
+		return binary_functions_error(error, "the pipeline descriptor did not enable adding binary functions");
+	}
+	id descriptor = [_descriptor copy];
+	[descriptor setVertexLinkedFunctions:additional_functions([_descriptor vertexLinkedFunctions], vertex)];
+	[descriptor setFragmentLinkedFunctions:additional_functions([_descriptor fragmentLinkedFunctions], fragment)];
+	return [_device renderPipeline:descriptor options:0 reflection:NULL archive:0 error:error];
+}
+
 @end
 
 @implementation StelaGPUComputePipeline
@@ -331,12 +379,12 @@ static id function_table(StelaGPUDevice *device, id descriptor)
 
 - (id)newComputePipelineStateWithAdditionalBinaryFunctions:(NSArray *)functions error:(NSError **)error
 {
-	(void)functions;
-	if (error) {
-		StelaFailure failure = {.status = StelaStatusUnsupported, .reason = "binary functions"};
-		*error = pipeline_error(&failure);
+	if (!_descriptor) {
+		return binary_functions_error(error, "the pipeline descriptor did not enable adding binary functions");
 	}
-	return nil;
+	id descriptor = [_descriptor copy];
+	[descriptor setLinkedFunctions:additional_functions([_descriptor linkedFunctions], functions)];
+	return [_device computePipeline:descriptor options:0 reflection:NULL archive:0 error:error];
 }
 
 @end
@@ -344,7 +392,7 @@ static id function_table(StelaGPUDevice *device, id descriptor)
 @implementation StelaGPUDevice (Pipelines)
 
 static id render_pipeline(StelaGPUDevice *device, const StelaRenderPipelineResponse *response, id descriptor,
-			  BOOL indirect)
+			  BOOL indirect, BOOL mesh)
 {
 	StelaGPURenderPipeline *pipeline = [[StelaGPURenderPipeline alloc] initWithDevice:device
 										   handle:response->handle];
@@ -354,6 +402,11 @@ static id render_pipeline(StelaGPUDevice *device, const StelaRenderPipelineRespo
 	pipeline->_objectThreadExecutionWidth = response->object_thread_execution_width;
 	pipeline->_meshThreadExecutionWidth = response->mesh_thread_execution_width;
 	pipeline->_supportIndirectCommandBuffers = indirect;
+	if (!mesh && ([descriptor supportAddingVertexBinaryFunctions] || [descriptor supportAddingFragmentBinaryFunctions])) {
+		pipeline->_descriptor = [descriptor copy];
+		[pipeline->_descriptor setVertexLinkedFunctions:[[descriptor vertexLinkedFunctions] copy]];
+		[pipeline->_descriptor setFragmentLinkedFunctions:[[descriptor fragmentLinkedFunctions] copy]];
+	}
 	pipeline.label = [descriptor label];
 	return pipeline;
 }
@@ -423,7 +476,7 @@ static id render_pipeline(StelaGPUDevice *device, const StelaRenderPipelineRespo
 		}
 		*reflection = gathered;
 	}
-	return render_pipeline(self, &response, descriptor, indirect);
+	return render_pipeline(self, &response, descriptor, indirect, NO);
 }
 
 - (id)newRenderPipelineStateWithDescriptor:(id)descriptor error:(NSError **)error
@@ -517,7 +570,7 @@ static id render_pipeline(StelaGPUDevice *device, const StelaRenderPipelineRespo
 		}
 		*reflection = gathered;
 	}
-	return render_pipeline(self, &response, descriptor, indirect);
+	return render_pipeline(self, &response, descriptor, indirect, YES);
 }
 
 - (void)newRenderPipelineStateWithMeshDescriptor:(id)descriptor
@@ -611,6 +664,10 @@ static id render_pipeline(StelaGPUDevice *device, const StelaRenderPipelineRespo
 	pipeline->_threadExecutionWidth = response.thread_execution_width;
 	pipeline->_staticThreadgroupMemoryLength = response.static_threadgroup_memory_length;
 	pipeline->_supportIndirectCommandBuffers = indirect;
+	if ([descriptor supportAddingBinaryFunctions]) {
+		pipeline->_descriptor = [descriptor copy];
+		[pipeline->_descriptor setLinkedFunctions:[[descriptor linkedFunctions] copy]];
+	}
 	pipeline.label = [descriptor label];
 	return pipeline;
 }

@@ -10,6 +10,8 @@
 #include <linux/sched.h>
 #include <linux/srcu.h>
 #include <linux/workqueue.h>
+#include <stela/atomic_callback.h>
+#include <stela/linux.h>
 #include <stela/test.h>
 #include <stela/timer.h>
 
@@ -196,23 +198,53 @@ static void hrtimers(void)
 }
 
 static DECLARE_COMPLETION(deferred_ran);
+static unsigned int deferred_calls;
+static bool deferred_requeue;
 
 static void deferred(struct irq_work *work)
 {
 	assert(irq_work_is_busy(work) && !irq_work_is_pending(work));
+	assert(atomic_read(&work->node.a_flags) & CSD_TYPE_IRQ_WORK);
+	assert(in_hardirq() && irqs_disabled() && !in_task());
+	assert(stela_linux_atomic_callback_active() && !stela_linux_quiescent());
+	deferred_calls++;
+	if (deferred_requeue && deferred_calls < 3) {
+		assert(irq_work_queue_on(work, 0));
+		assert(irq_work_is_pending(work) && !irq_work_queue(work));
+		return;
+	}
 	complete(&deferred_ran);
 }
 
 static void irq_works(void)
 {
-	static struct irq_work work;
+	/* Synchronization must finish every final runner access before this
+	 * real task's stack storage leaves scope. */
+	struct irq_work work;
 
+	assert(IS_ENABLED(CONFIG_IRQ_WORK) && !arch_irq_work_has_interrupt());
+	assert(!irq_work_needs_cpu());
 	init_irq_work(&work, deferred);
 	assert(irq_work_queue(&work) && !irq_work_queue(&work));
+	assert(irq_work_needs_cpu());
+	irq_work_run();
+	irq_work_tick();
+	arch_irq_work_raise();
+	assert(!deferred_calls && irq_work_needs_cpu());
 	wait_for_completion(&deferred_ran);
-	/* A running work may be queued again. */
+	irq_work_sync(&work);
+	assert(deferred_calls == 1 && !irq_work_is_busy(&work));
+	/* Reuse after synchronization, then requeue from inside the callback:
+	 * BUSY must survive the earlier callback's final compare/exchange. */
+	deferred_calls = 0;
+	deferred_requeue = true;
 	assert(irq_work_queue(&work));
+	irq_work_sync(&work);
 	wait_for_completion(&deferred_ran);
+	assert(deferred_calls == 3 && !irq_work_is_busy(&work) && !irq_work_is_pending(&work));
+	assert(!irq_work_needs_cpu());
+	assert(in_task() && !irqs_disabled() && stela_linux_quiescent());
+	assert(!stela_linux_atomic_callback_active());
 }
 
 void stela_linux_sync_test(void)

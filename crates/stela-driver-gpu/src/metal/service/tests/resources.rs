@@ -24,6 +24,8 @@ use crate::metal::{
 use core::num::NonZeroU64;
 use stela_contracts::gate::MemoryRange;
 
+mod imports;
+
 fn release(service: &mut TestService, connection: NonZeroU64, handle: u64) -> Status {
     status(call::<_, Empty>(
         service,

@@ -377,6 +377,9 @@ unsafe impl<const N: usize> Send for Domain<N> {}
 // SAFETY: same serialized CPU rule; no mutable borrow crosses delivery.
 unsafe impl<const N: usize> Sync for Domain<N> {}
 impl<const N: usize> Domain<N> {
+    pub(super) fn scheduling_clock(&self) -> Arc<dyn Clock> {
+        Arc::clone(&self.clock)
+    }
     pub fn new(clock: Arc<dyn Clock>, idle: Arc<dyn Idle>) -> Result<Arc<Self>, WorkError> {
         let mut deadlines = Deadlines::new(clock.clone(), idle)?;
         deadlines.start_irq_ticks()?;

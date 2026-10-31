@@ -1,9 +1,10 @@
 //! AES ciphers with RustCrypto's block API and a zeroizing hardware schedule.
+#[cfg(target_arch = "x86_64")]
+use ::aes::cipher::{BlockBackend, ParBlocksSizeUser, consts::U8, inout::InOut};
 use ::aes::cipher::{
-    BlockBackend, BlockCipher, BlockClosure, BlockDecrypt, BlockEncrypt, BlockSizeUser, Key,
-    KeyInit, KeySizeUser, ParBlocksSizeUser,
-    consts::{U8, U16, U24, U32},
-    inout::InOut,
+    BlockCipher, BlockClosure, BlockDecrypt, BlockEncrypt, BlockSizeUser, Key, KeyInit,
+    KeySizeUser,
+    consts::{U16, U24, U32},
 };
 #[cfg(target_arch = "x86_64")]
 use zeroize::Zeroizing;

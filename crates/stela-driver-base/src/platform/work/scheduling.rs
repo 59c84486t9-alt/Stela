@@ -1,8 +1,10 @@
 //! Cooperative NORMAL/FIFO ordering for the optional kernel domain.
-//! No native preemption, RR quantum, DEADLINE or alternate NORMAL base is
-//! inferred from an integer rank. Original Linux PI commits use a captured
-//! job handle; default Runtime dispatch stays round-robin.
+//! NORMAL nice uses Linux weights over measured running nanoseconds at
+//! cooperative boundaries; no native preemption, CFS timeslice, RR quantum or
+//! DEADLINE scheduling is inferred from an integer rank. Original Linux PI
+//! commits use a captured job handle; default Runtime dispatch stays round-robin.
 use super::{ContextId, LeaveReason, WakeHandle, WorkError};
+use alloc::sync::Arc;
 use core::sync::atomic::Ordering;
 
 const NORMAL: u8 = 120;
@@ -11,12 +13,15 @@ const MIDDLE: u64 = 1 << 63;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BasePolicy {
     Normal,
+    NormalNice(i8),
     Fifo(u8),
 }
 impl BasePolicy {
     pub fn priority(self) -> Result<u8, WorkError> {
         match self {
             Self::Normal => Ok(NORMAL),
+            Self::NormalNice(nice @ -20..=19) => Ok((120i16 + i16::from(nice)) as u8),
+            Self::NormalNice(_) => Err(WorkError::Unavailable),
             Self::Fifo(q @ 1..=99) => Ok(99 - q),
             Self::Fifo(_) => Err(WorkError::Unavailable),
         }
@@ -35,7 +40,7 @@ impl Snapshot {
     };
     fn validate(self) -> Result<(), WorkError> {
         let base = self.base.priority()?;
-        if (self.effective > 98 && self.effective != NORMAL) || self.effective > base {
+        if self.effective == 99 || self.effective > base {
             return Err(WorkError::Unavailable);
         }
         Ok(())
@@ -56,12 +61,19 @@ struct Row {
     rank: Snapshot,
     state: State,
     order: u64,
+    virtual_ns: u128,
+    started_ns: u64,
 }
 /// At most32 continuation records, embedded in the Queue.
 /// Only its existing IRQ-save lock accesses this state; no task/C pointer,
-/// provider callback, allocation or ref release is stored or invoked here.
+/// provider callback, allocation or final ref release is invoked here. The
+/// clock root is cloned under the lock and sampled only outside switch hooks.
 pub(super) struct Board {
     pub(super) enabled: bool,
+    pub(super) clock: Option<Arc<dyn super::service::Clock>>,
+    fair_normal: bool,
+    min_virtual_ns: u128,
+    normal_history: [(u64, u128); super::MAX_CONTINUATIONS],
     rows: [Option<Row>; super::MAX_CONTINUATIONS],
     head: u64,
     tail: u64,
@@ -70,10 +82,54 @@ impl Board {
     pub(super) fn new() -> Self {
         Self {
             enabled: false,
+            clock: None,
+            fair_normal: false,
+            min_virtual_ns: 0,
+            normal_history: [(0, 0); super::MAX_CONTINUATIONS],
             rows: [None; super::MAX_CONTINUATIONS],
             head: MIDDLE,
             tail: MIDDLE,
         }
+    }
+    fn normal_floor(&mut self) -> u128 {
+        if let Some(floor) = self
+            .rows
+            .iter()
+            .flatten()
+            .filter(|row| row.rank.effective >= 100 && row.state != State::Blocked)
+            .map(|row| row.virtual_ns)
+            .min()
+        {
+            self.min_virtual_ns = self.min_virtual_ns.max(floor);
+        }
+        self.min_virtual_ns
+    }
+    pub(super) fn account(&mut self, now: u64) -> Result<(), WorkError> {
+        // Original Linux sched_prio_to_weight for nice -20..19.
+        const WEIGHTS: [u32; 40] = [
+            88761, 71755, 56483, 46273, 36291, 29154, 23254, 18705, 14949, 11916, 9548, 7620, 6100,
+            4904, 3906, 3121, 2501, 1991, 1586, 1277, 1024, 820, 655, 526, 423, 335, 272, 215, 172,
+            137, 110, 87, 70, 56, 45, 36, 29, 23, 18, 15,
+        ];
+        for row in self
+            .rows
+            .iter_mut()
+            .flatten()
+            .filter(|row| row.state == State::Running)
+        {
+            let elapsed = now
+                .checked_sub(row.started_ns)
+                .ok_or(WorkError::CorruptContext)?;
+            if row.rank.effective >= 100 {
+                let base = row.rank.base.priority()?;
+                let weight = WEIGHTS[usize::from(base - 100)];
+                // Fixed point keeps short segments from losing their charge.
+                row.virtual_ns += (u128::from(elapsed) << 32) * 1024 / u128::from(weight);
+            }
+            row.started_ns = now;
+        }
+        self.normal_floor();
+        Ok(())
     }
     fn index(&self, id: ContextId, sequence: u64) -> Result<usize, WorkError> {
         self.rows
@@ -109,7 +165,19 @@ impl Board {
             .iter()
             .position(Option::is_none)
             .ok_or(WorkError::Full)?;
+        let history = self
+            .normal_history
+            .iter()
+            .position(|(context, _)| *context == id.get())
+            .or_else(|| {
+                self.normal_history
+                    .iter()
+                    .position(|(context, _)| *context == 0)
+            })
+            .ok_or(WorkError::Full)?;
+        let virtual_ns = self.normal_history[history].1.max(self.normal_floor());
         let order = self.order(false)?;
+        self.normal_history[history] = (id.get(), virtual_ns);
         self.rows[slot] = Some(Row {
             id,
             sequence,
@@ -117,6 +185,8 @@ impl Board {
             rank: Snapshot::NORMAL,
             state: State::Ready,
             order,
+            virtual_ns,
+            started_ns: 0,
         });
         Ok(())
     }
@@ -127,13 +197,20 @@ impl Board {
         let slot = self.index(id, sequence)?;
         if self.rows[slot].as_ref().unwrap().state == State::Blocked {
             let order = self.order(false)?;
+            let floor = self.normal_floor();
             let row = self.rows[slot].as_mut().unwrap();
+            row.virtual_ns = row.virtual_ns.max(floor);
             row.order = order;
             row.state = State::Ready;
         }
         Ok(())
     }
-    pub(super) fn running(&mut self, id: ContextId, sequence: u64) -> Result<(), WorkError> {
+    pub(super) fn running(
+        &mut self,
+        id: ContextId,
+        sequence: u64,
+        now: u64,
+    ) -> Result<(), WorkError> {
         if !self.enabled {
             return Ok(());
         }
@@ -143,6 +220,7 @@ impl Board {
             return Err(WorkError::CorruptContext);
         }
         row.state = State::Running;
+        row.started_ns = now;
         Ok(())
     }
     pub(super) fn can_suspend(
@@ -190,6 +268,7 @@ impl Board {
         } else {
             State::Ready
         };
+        self.normal_floor();
         Ok(())
     }
     pub(super) fn remove(&mut self, id: ContextId, sequence: u64) -> Result<(), WorkError> {
@@ -201,7 +280,16 @@ impl Board {
         if row.rank != Snapshot::NORMAL || row.state != State::Running {
             return Err(WorkError::Busy);
         }
+        // Physical continuations keep scheduler service debt across jobs, just
+        // as their Linux task metadata survives an idle worker's completion.
+        let history = self
+            .normal_history
+            .iter_mut()
+            .find(|(context, _)| *context == id.get())
+            .ok_or(WorkError::CorruptContext)?;
+        history.1 = row.virtual_ns;
         self.rows[slot] = None;
+        self.normal_floor();
         Ok(())
     }
     pub(super) fn snapshot(&self, id: ContextId, sequence: u64) -> Result<Snapshot, WorkError> {
@@ -217,6 +305,7 @@ impl Board {
         before: Snapshot,
         after: Snapshot,
         head: bool,
+        now: Option<u64>,
     ) -> Result<(), WorkError> {
         after.validate()?;
         let slot = self.index(id, sequence)?;
@@ -231,6 +320,10 @@ impl Board {
         if head && !(before.effective < after.effective && after.effective < 100) {
             return Err(WorkError::Unavailable);
         }
+        if let Some(now) = now {
+            self.account(now)?;
+        }
+        self.fair_normal |= matches!(after.base, BasePolicy::NormalNice(nice) if nice != 0);
         let changed = before.effective != after.effective;
         let order = if changed && row.state != State::Blocked {
             Some(self.order(head)?)
@@ -242,6 +335,7 @@ impl Board {
             row.order = order;
         }
         row.rank = after;
+        self.normal_floor();
         Ok(())
     }
     /// Both candidates are eligible Runtime tasks. Equal NORMAL keeps
@@ -255,6 +349,10 @@ impl Board {
         let b = self.rows[self.index(selected.0, selected.1)?].unwrap();
         if a.state != State::Ready || b.state != State::Ready {
             return Err(WorkError::CorruptContext);
+        }
+        if self.fair_normal && a.rank.effective >= 100 && b.rank.effective >= 100 {
+            return Ok(a.virtual_ns < b.virtual_ns
+                || (a.virtual_ns == b.virtual_ns && a.rank.effective < b.rank.effective));
         }
         Ok(a.rank.effective < b.rank.effective
             || (a.rank.effective == b.rank.effective
@@ -271,6 +369,17 @@ impl Board {
 #[derive(Clone)]
 pub struct SchedulingHandle<const N: usize> {
     pub(super) wake: WakeHandle<N>,
+}
+
+impl<const N: usize> WakeHandle<N> {
+    /// Capture the scheduling view of this retained job. Unlike renewing a
+    /// wake handle, this may name another task on the same checked queue: PI
+    /// updates the owner of a lock while its waiter is running.
+    pub fn scheduling_handle(&self) -> Result<SchedulingHandle<N>, WorkError> {
+        let handle = SchedulingHandle { wake: self.clone() };
+        handle.snapshot()?;
+        Ok(handle)
+    }
 }
 impl<const N: usize> SchedulingHandle<N> {
     fn live(&self) -> Result<(), WorkError> {
@@ -301,14 +410,139 @@ impl<const N: usize> SchedulingHandle<N> {
         head: bool,
     ) -> Result<(), WorkError> {
         self.live()?;
+        // Completion already sampled and charged in process context before
+        // the IF0 binding hook. That hook may only normalize primitive ranks.
+        let now = if self.wake.queue.completing.load(Ordering::Acquire) {
+            None
+        } else {
+            Some(self.wake.queue.scheduling_now()?)
+        };
         self.wake.queue.lock()?.state().scheduling.update(
             self.wake.id,
             self.wake.sequence,
             before,
             after,
             head,
+            now,
         )?;
         self.wake.queue.inspection.store(true, Ordering::Release);
         Ok(())
+    }
+}
+
+impl<const N: usize> super::Queue<N> {
+    pub(super) fn scheduling_now(&self) -> Result<u64, WorkError> {
+        let clock = self.lock()?.state().scheduling.clock.clone();
+        clock.map_or(Ok(0), |clock| clock.now_ns())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn idle_normal_set_keeps_a_monotonic_virtual_service_floor() {
+        let mut board = Board::new();
+        board.enabled = true;
+        board.insert(ContextId(1), 1, false).unwrap();
+        board.running(ContextId(1), 1, 0).unwrap();
+        board.account(1_000_000).unwrap();
+        board
+            .suspend(ContextId(1), 1, LeaveReason::Blocked)
+            .unwrap();
+        let floor = board.min_virtual_ns;
+        assert!(floor > 0);
+        board.insert(ContextId(2), 2, false).unwrap();
+        let fresh = board.rows[board.index(ContextId(2), 2).unwrap()].unwrap();
+        assert_eq!(fresh.virtual_ns, floor);
+        board.wake(ContextId(1), 1).unwrap();
+        assert_eq!(
+            board.rows[board.index(ContextId(1), 1).unwrap()]
+                .unwrap()
+                .virtual_ns,
+            floor
+        );
+    }
+    #[test]
+    fn completed_worker_keeps_cpu_debt_when_its_stack_is_recreated() {
+        let mut board = Board::new();
+        board.enabled = true;
+        let high = ContextId(1);
+        let ordinary = ContextId(2);
+        board.insert(high, 1, false).unwrap();
+        board.insert(ordinary, 2, false).unwrap();
+        let nice = Snapshot {
+            base: BasePolicy::NormalNice(-20),
+            effective: 100,
+        };
+        board
+            .update(high, 1, Snapshot::NORMAL, nice, false, Some(0))
+            .unwrap();
+        board.running(high, 1, 0).unwrap();
+        board
+            .update(high, 1, nice, Snapshot::NORMAL, false, Some(88_761))
+            .unwrap();
+        board.remove(high, 1).unwrap();
+        board.insert(high, 3, false).unwrap();
+        board
+            .update(high, 3, Snapshot::NORMAL, nice, false, Some(88_761))
+            .unwrap();
+        assert!(board.precedes((ordinary, 2), (high, 3)).unwrap());
+    }
+    #[test]
+    fn normal_nice_measures_elapsed_cpu_and_does_not_starve_ordinary_work() {
+        let mut board = Board::new();
+        board.enabled = true;
+        let high = ContextId(1);
+        let ordinary = ContextId(2);
+        board.insert(high, 1, false).unwrap();
+        board.insert(ordinary, 2, false).unwrap();
+        let nice = Snapshot {
+            base: BasePolicy::NormalNice(-20),
+            effective: 100,
+        };
+        board
+            .update(high, 1, Snapshot::NORMAL, nice, false, Some(0))
+            .unwrap();
+        assert!(board.precedes((high, 1), (ordinary, 2)).unwrap());
+        // One long highpri run incurs the same weighted debt as many short
+        // yields: weighting counts nanoseconds, not the number of boundaries.
+        board.running(high, 1, 0).unwrap();
+        board.account(88_761).unwrap();
+        board.suspend(high, 1, LeaveReason::Yield).unwrap();
+        assert!(board.precedes((ordinary, 2), (high, 1)).unwrap());
+        board.running(ordinary, 2, 88_761).unwrap();
+        board.account(89_785).unwrap();
+        board.suspend(ordinary, 2, LeaveReason::Yield).unwrap();
+        let a = board.rows[board.index(high, 1).unwrap()].unwrap();
+        let b = board.rows[board.index(ordinary, 2).unwrap()].unwrap();
+        assert_eq!(a.virtual_ns, b.virtual_ns);
+        // FIFO donation still outranks either NORMAL nice base; deboost restores
+        // the same accumulated NORMAL service rather than granting a free run.
+        let boosted = Snapshot {
+            base: nice.base,
+            effective: 10,
+        };
+        board
+            .update(high, 1, nice, boosted, false, Some(89_785))
+            .unwrap();
+        assert!(board.precedes((high, 1), (ordinary, 2)).unwrap());
+        board
+            .update(high, 1, boosted, nice, false, Some(89_785))
+            .unwrap();
+        assert_eq!(
+            board.rows[board.index(high, 1).unwrap()]
+                .unwrap()
+                .virtual_ns,
+            a.virtual_ns
+        );
+        assert_eq!(
+            BasePolicy::NormalNice(-21).priority(),
+            Err(WorkError::Unavailable)
+        );
+        assert_eq!(
+            BasePolicy::NormalNice(20).priority(),
+            Err(WorkError::Unavailable)
+        );
     }
 }

@@ -1,8 +1,9 @@
 //! Linux task metadata on kept cooperative continuations.
 //!
 //! This binds original C task_struct/current and the entered service lease.
-//! The shared normal/WW mutex adapter supplies wake/signal/I/O effects.
-//! Native producers and the distinct RT-mutex/I2C extension remain unadmitted.
+//! The normal/WW and original RT mutex adapters supply wake/signal/I/O effects.
+//! NORMAL nice, FIFO and inherited ranks commit against retained job identities
+//! on the same checked queue; native IRQ delivery remains the service's owner.
 use alloc::sync::Arc;
 use core::{
     cell::UnsafeCell,
@@ -12,15 +13,46 @@ use core::{
     ptr::NonNull,
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
+use stela_driver_base::platform::work::scheduling::{BasePolicy, Snapshot};
 use stela_driver_base::platform::work::{
     ContextId, LeaveReason, ParkOutcome, Runtime, SwitchBinding, TaskContext, WakeHandle, WorkError,
 };
+
+#[repr(C)]
+struct Rank {
+    policy: u32,
+    realtime: u32,
+    effective: i32,
+    nice: i32,
+}
+
+impl Rank {
+    fn snapshot(&self) -> Result<Snapshot, WorkError> {
+        let base = match (self.policy, self.realtime) {
+            (0, 0) if self.nice == 0 => BasePolicy::Normal,
+            (0, 0) if (-20..=19).contains(&self.nice) => BasePolicy::NormalNice(self.nice as i8),
+            (1, priority @ 1..=99) => BasePolicy::Fifo(priority as u8),
+            _ => return Err(WorkError::Unavailable),
+        };
+        if !(-20..=19).contains(&self.nice) {
+            return Err(WorkError::Unavailable);
+        }
+        Ok(Snapshot {
+            base,
+            effective: self
+                .effective
+                .try_into()
+                .map_err(|_| WorkError::Unavailable)?,
+        })
+    }
+}
 
 #[repr(C)]
 struct TaskOps {
     is_current: unsafe extern "C" fn(*mut c_void, *const TaskContext) -> bool,
     wake_target: unsafe extern "C" fn(*mut c_void, u64) -> i32,
     service_reserved: unsafe extern "C" fn(*mut c_void) -> bool,
+    rank: unsafe extern "C" fn(*mut c_void, u64, *const Rank, *const Rank, bool) -> i32,
 }
 #[repr(C)]
 struct ScopeOps {
@@ -116,6 +148,7 @@ impl<const N: usize> TaskBinding<N> {
         is_current: Self::current,
         wake_target: Self::wake_target,
         service_reserved: Self::service_reserved,
+        rank: Self::rank,
     };
     const SCOPE_OPS: ScopeOps = ScopeOps {
         park: Self::park,
@@ -228,6 +261,45 @@ impl<const N: usize> TaskBinding<N> {
         // An invalid role provider cannot silently authorize signal mutation.
         // SAFETY: fail closed before the C caller's first signal/ref effect.
         unsafe { core::arch::asm!("ud2", options(noreturn)) };
+    }
+
+    unsafe extern "C" fn rank(
+        binding: *mut c_void,
+        expected: u64,
+        before: *const Rank,
+        after: *const Rank,
+        head: bool,
+    ) -> i32 {
+        // SAFETY: C retains this binding through its validated task generation;
+        // no switch or final drop can occur while its PI lock is held.
+        let this = unsafe { &*binding.cast::<Self>() };
+        if !this.published.load(Ordering::Acquire)
+            || this.detached.load(Ordering::Acquire)
+            || expected == 0
+        {
+            return -116;
+        }
+        // SAFETY: initial publication and every new-job arrive initialize the
+        // target before C can use its same-CPU, serialized task metadata.
+        let target = unsafe { (*this.target.get()).assume_init_ref() };
+        if target.sequence() != expected || before.is_null() || after.is_null() {
+            return -116;
+        }
+        let result = (|| {
+            let handle = target.scheduling_handle()?;
+            // SAFETY: the live C call provides two initialized, immutable
+            // primitive records; their borrows end before returning to C.
+            let (before, after) = unsafe { ((&*before).snapshot()?, (&*after).snapshot()?) };
+            // SAFETY: C owns the original task's serialized priority/PI-lock
+            // mutation and commits matching C fields before releasing it.
+            unsafe { handle.update(before, after, head) }
+        })();
+        match result {
+            Ok(()) => 0,
+            Err(WorkError::Closed) => -116,
+            Err(WorkError::Unavailable) => -95,
+            Err(_) => -1,
+        }
     }
 
     fn validate(&self, context: &TaskContext) -> Result<(), WorkError> {

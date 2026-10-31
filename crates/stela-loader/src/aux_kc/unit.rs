@@ -180,13 +180,12 @@ impl<'a> Unit<'a> {
             })
             .collect::<Result<Vec<_>>>()
             .within(context)?;
-        let parts = [kext.info, kext.bundle_path.as_bytes()];
         let mut unit = Self {
             imports: imports(&info, boot).within(context)?,
             identifier: identifier.clone(),
             info,
             bundle_path: &kext.bundle_path,
-            uuid: uuid(parts.into_iter().chain(kext.objects.iter().copied())),
+            uuid: kext.uuid(),
             objects,
             placements: Vec::new(),
             sections: Vec::new(),

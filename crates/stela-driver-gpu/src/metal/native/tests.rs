@@ -16,6 +16,8 @@ use crate::metal::{
 use alloc::vec;
 use ash::vk;
 
+mod lifecycle;
+
 fn memory() -> crate::metal::vulkan::physical::Memory {
     nvk(Chip::find(0x1b3).unwrap(), 16 << 30).memory
 }
@@ -235,7 +237,9 @@ fn mesh_pipelines_have_no_vertex_input() {
         assert!(rendering.depth_attachment_format == vk::Format::D32_SFLOAT);
         // SAFETY: the stage array has two entries.
         let stage = unsafe { &*create.p_stages };
-        assert_eq!(stage.p_name, objects::ENTRY_POINT.as_ptr());
+        // SAFETY: the stage's entry point is a live, NUL-terminated C string.
+        let entry = unsafe { core::ffi::CStr::from_ptr(stage.p_name) };
+        assert_eq!(entry, objects::ENTRY_POINT);
         assert!(stage.module == vk::ShaderModule::null());
         // SAFETY: the builder chained the stage's NIR.
         let nir = unsafe { &*stage.p_next.cast::<objects::NirStage>() };

@@ -36,6 +36,7 @@ use stela_contracts::gate::MemoryRange;
 mod commands;
 mod gate;
 mod indirect;
+mod lifecycle;
 mod pipelines;
 mod queue;
 mod reflection;

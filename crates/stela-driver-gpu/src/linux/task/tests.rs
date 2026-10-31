@@ -165,9 +165,8 @@ unsafe extern "C" {
     fn stela_linux_timer_test_sleeper(context: *mut c_void);
     fn stela_linux_workqueue_test_bind(
         context: *mut c_void,
-        start_worker: unsafe extern "C" fn(*mut c_void) -> i32,
+        start_worker: unsafe extern "C" fn(*mut c_void, u32) -> i32,
     );
-    fn stela_linux_workqueue_test_worker(context: *mut c_void);
     fn stela_linux_workqueue_test_main(context: *mut c_void);
     /// Linux's tick count, which these tests publish as the platform's tick does.
     static jiffies_64: AtomicU64;
@@ -188,16 +187,17 @@ unsafe extern "C" {
 struct MappedStack {
     base: usize,
     bytes: usize,
+    usable: Range<usize>,
     dropped: Arc<AtomicU64>,
 }
 // SAFETY: real exclusive OS mapping, PROT_NONE guard, kept through every
 // switched frame. Hosted test only; this is no native root/IRQ/provider grant.
 unsafe impl StackBacking for MappedStack {
     fn bounds(&self) -> Range<usize> {
-        self.base + 4096..self.base + self.bytes
+        self.usable.clone()
     }
     fn guard(&self) -> Range<usize> {
-        self.base..self.base + 4096
+        self.usable.start - 4096..self.usable.start
     }
 }
 impl Drop for MappedStack {
@@ -217,15 +217,24 @@ fn stacks_count(dropped: &Arc<AtomicU64>, usable: usize, count: usize) -> Vec<St
             let anonymous = 0x1000;
             #[cfg(not(target_os = "macos"))]
             let anonymous = 0x20;
-            let bytes = usable + 4096;
+            // The compiled Linux stack contract requires THREAD_ALIGN=16K,
+            // independently of the OS mmap page alignment.
+            let bytes = usable + 4096 + 16 * 1024;
             // SAFETY: OS-owned anonymous RW memory; no preexisting frames.
             let base = unsafe { mmap(ptr::null_mut(), bytes, 3, 2 | anonymous, -1, 0) };
             assert_ne!(base as usize, usize::MAX);
-            // SAFETY: first page of this owned mapping becomes unmapped.
-            assert_eq!(unsafe { mprotect(base, 4096, 0) }, 0);
+            let start = (base as usize + 4096 + 16 * 1024 - 1) & !(16 * 1024 - 1);
+            // SAFETY: the page preceding aligned usable storage lies within
+            // this larger owned mapping and becomes its real stack guard.
+            assert_eq!(
+                // SAFETY: this checked page lies in the larger owned mapping above.
+                unsafe { mprotect((start - 4096) as *mut c_void, 4096, 0) },
+                0
+            );
             Stack::new(Box::new(MappedStack {
                 base: base as usize,
                 bytes,
+                usable: start..start + usable,
                 dropped: dropped.clone(),
             }))
             .unwrap()
@@ -1188,8 +1197,11 @@ impl Platform for Machine {
     fn random_bytes(&self, _: &mut [u8]) {
         unreachable!();
     }
-    fn start_worker(&self) -> Result<(), Errno> {
-        self.environment().start_worker().map(drop).map_err(|_| -11)
+    fn start_worker(&self, kind: crate::linux::owner::WorkerKind) -> Result<(), Errno> {
+        self.environment()
+            .start_worker(kind)
+            .map(drop)
+            .map_err(|_| -11)
     }
     fn shutdown(&self, _: bool) {
         unreachable!();
@@ -1240,6 +1252,39 @@ unsafe extern "C" fn raise_line(context: *mut c_void, line: u32) {
     machine.environment().raise(line).unwrap();
 }
 
+struct ServicePressure {
+    owner: *const RawOwner,
+    runtime: *const Runtime<16>,
+    word: core::sync::atomic::AtomicU32,
+    started: AtomicBool,
+    delivered: AtomicUsize,
+}
+unsafe extern "C" fn pressure_wait(context: *mut c_void) {
+    // SAFETY: environment_roundtrip keeps this storage and owner through join.
+    let pressure = unsafe { &*context.cast::<ServicePressure>() };
+    // SAFETY: this is a real retained General task of the owner's environment.
+    let _entered = unsafe { crate::linux::owner::Entered::new(pressure.owner) };
+    pressure.started.store(true, Ordering::Release);
+    // SAFETY: the word is retained through the original Linux wait and wake.
+    unsafe { crate::linux::client::wait(pressure.word.as_ptr(), 0, u64::MAX) };
+}
+unsafe extern "C" fn pressure_leaf(context: *mut c_void) {
+    // SAFETY: environment_roundtrip keeps this storage through all deliveries.
+    let pressure = unsafe { &*context.cast::<ServicePressure>() };
+    // SAFETY: the pinned runtime outlives this actual service callback.
+    let runtime = unsafe { Pin::new_unchecked(&*pressure.runtime) };
+    assert!(runtime.service_current().unwrap());
+    unsafe extern "C" {
+        fn stela_linux_service_test_leaf_context();
+    }
+    // SAFETY: this service leaf has a real entered process task and callback guard.
+    unsafe { stela_linux_service_test_leaf_context() };
+    pressure.word.store(1, Ordering::Release);
+    // SAFETY: already entered in the service owner; original wake is nonblocking.
+    unsafe { crate::linux::client::wake() };
+    pressure.delivered.fetch_add(1, Ordering::Relaxed);
+}
+
 /// A task sleeping on the service task's timer, a raised line reaching its
 /// handler there, and the work that handler queued reaching a worker task.
 fn environment_roundtrip() {
@@ -1250,7 +1295,7 @@ fn environment_roundtrip() {
     let queue = unsafe { Queue::<16>::new(cpu.clone(), f) }.unwrap();
     let dropped = Arc::new(AtomicU64::new(0));
     let executor =
-        Executor::new_hosted_service_for_test(queue, stacks_count(&dropped, 16 * 1024, 5)).unwrap();
+        Executor::new_hosted_service_for_test(queue, stacks_count(&dropped, 16 * 1024, 8)).unwrap();
     let runtime = executor.runtime();
     let clock: Arc<dyn service::Clock> = Arc::new(ServiceClock {
         cpu: cpu.clone(),
@@ -1290,6 +1335,53 @@ fn environment_roundtrip() {
         runtime.step_or_idle().unwrap();
         steps += 1;
     }
+    let mut pressure = ServicePressure {
+        owner: owner.raw(),
+        runtime: runtime.get_ref(),
+        word: core::sync::atomic::AtomicU32::new(0),
+        started: AtomicBool::new(false),
+        delivered: AtomicUsize::new(0),
+    };
+    let pressure_context = (&raw mut pressure).cast();
+    // With five General stacks, the four pool credits leave one Owner credit.
+    // SAFETY: pressure storage and owner remain live until this task joins.
+    let sleeper = unsafe { environment.as_ref().spawn(pressure_wait, pressure_context) }.unwrap();
+    while !pressure.started.load(Ordering::Acquire) {
+        runtime.step_or_idle().unwrap();
+    }
+    assert!(!runtime.queue().completed(sleeper).unwrap());
+    assert_eq!(
+        // SAFETY: refusal transfers no callback/context; the same storage is kept.
+        unsafe { environment.as_ref().spawn(pressure_wait, pressure_context) },
+        Err(WorkError::Full)
+    );
+    for _ in 0..32 {
+        // SAFETY: this bounded wake leaf cannot sleep and pressure storage stays live.
+        unsafe {
+            environment
+                .as_ref()
+                .defer_service(pressure_leaf, pressure_context)
+        }
+        .unwrap();
+    }
+    assert_eq!(
+        pressure.delivered.load(Ordering::Relaxed),
+        0,
+        "no inline leaf delivery"
+    );
+    assert_eq!(
+        // SAFETY: a full leaf queue accepts no callback/context.
+        unsafe {
+            environment
+                .as_ref()
+                .defer_service(pressure_leaf, pressure_context)
+        },
+        Err(WorkError::Full)
+    );
+    while !runtime.queue().completed(sleeper).unwrap() {
+        runtime.step_or_idle().unwrap();
+    }
+    assert_eq!(pressure.delivered.load(Ordering::Relaxed), 32);
     environment.stop().unwrap();
     while !environment.finished().unwrap() {
         assert!(steps < 100_000, "the service and workers did not stop");
@@ -1306,54 +1398,31 @@ fn environment_roundtrip() {
     assert_eq!(quarantined(), 0);
 }
 
-/// The binding of the Runtime continuation running this job, made on its
-/// first job.
-fn worker_binding(f: &Fixture) -> Arc<TaskBinding<16>> {
-    // SAFETY: the harness keeps the pinned executor through every callback and retirement.
-    let runtime = unsafe { f.runtime() };
-    let id = runtime.queue().current_id().unwrap();
-    let mut bindings = f.worker_bindings.lock().unwrap();
-    if let Some(binding) = bindings
-        .iter()
-        .find(|binding| binding.context_id().unwrap() == id)
-    {
-        return binding.clone();
-    }
-    // SAFETY: hosted checked process thread before Linux entry.
-    let binding = unsafe { TaskBinding::new() }.unwrap();
-    binding.bind_current(runtime).unwrap();
-    bindings.push(binding.clone());
-    binding
+static WORKQUEUE_ENVIRONMENT: AtomicPtr<Environment<16>> = AtomicPtr::new(ptr::null_mut());
+/// C's producer uses the same real Environment admission as the native driver.
+unsafe extern "C" fn start_workqueue_worker(_: *mut c_void, kind: u32) -> i32 {
+    let Ok(kind) = crate::linux::owner::WorkerKind::try_from(kind) else {
+        return -22;
+    };
+    // SAFETY: workqueue_roundtrip publishes this pinned environment until all
+    // C producers and workers join; this is the same checked process CPU.
+    let environment =
+        unsafe { Pin::new_unchecked(&*WORKQUEUE_ENVIRONMENT.load(Ordering::Acquire)) };
+    environment.start_worker(kind).map_or(-12, |_| 0)
 }
-unsafe extern "C" fn workqueue_worker(context: *mut c_void) {
-    // SAFETY: the queue owner keeps the fixture behind `context` through this callback.
+
+unsafe extern "C" fn workqueue_register_service(context: *mut c_void) {
+    // SAFETY: the queue owner retains this fixture through service join.
     let f = unsafe { fixture(context) };
-    let binding = worker_binding(f);
-    // SAFETY: shared Runtime/fixture live through complete scoped C body.
-    unsafe { binding.run_scoped(f.runtime(), stela_linux_workqueue_test_worker, context) }.unwrap();
-}
-/// The owner's start_worker service: a General job running the workers.
-unsafe extern "C" fn start_workqueue_worker(context: *mut c_void) -> i32 {
-    // SAFETY: the queue owner keeps the fixture behind `context` through this callback.
-    let f = unsafe { fixture(context) };
-    // SAFETY: the harness keeps the pinned executor through every callback and retirement.
-    let runtime = unsafe { f.runtime() };
-    // SAFETY: the fixture keeps the callback's context until completion.
-    match unsafe {
-        runtime
-            .queue()
-            .execute(Kind::General, workqueue_worker, context)
-    } {
-        Ok(_) => 0,
-        Err(_) => -11, // EAGAIN
-    }
-}
-unsafe extern "C" fn workqueue_main(context: *mut c_void) {
-    // SAFETY: the queue owner keeps the fixture behind `context` through this callback.
-    let f = unsafe { fixture(context) };
-    let binding = f.binding(0);
-    // SAFETY: shared Runtime/fixture live through complete scoped C body.
-    unsafe { binding.run_scoped(f.runtime(), stela_linux_workqueue_test_main, context) }.unwrap();
+    let _binding = f.binding(2);
+    // SAFETY: the pinned test executor outlives the reserved callback.
+    f.service_domain
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .bind_current(unsafe { f.runtime() })
+        .unwrap();
 }
 /// Linux's workqueues, with the owner starting each requested worker.
 fn workqueue_roundtrip() {
@@ -1363,19 +1432,64 @@ fn workqueue_roundtrip() {
     // work.
     let queue = unsafe { Queue::<16>::new(cpu.clone(), f.clone()) }.unwrap();
     let dropped = Arc::new(AtomicU64::new(0));
-    let executor = Executor::new_hosted_for_test(queue, stacks(&dropped, 16 * 1024)).unwrap();
+    let executor =
+        Executor::new_hosted_service_for_test(queue, stacks_count(&dropped, 16 * 1024, 11))
+            .unwrap();
     let runtime = executor.runtime();
     f.runtime.store(
         runtime.get_ref() as *const Runtime<16> as *mut Runtime<16>,
         Ordering::Release,
     );
     let context = Arc::as_ptr(&f) as *mut c_void;
+    let clock: Arc<dyn service::Clock> = Arc::new(ServiceClock {
+        cpu: cpu.clone(),
+        reads: f.clock_reads.clone(),
+        start: std::time::Instant::now(),
+    });
+    let idle = Arc::new(ServiceIdle {
+        clock: clock.clone(),
+        owner: thread::current(),
+        waits: AtomicU64::new(0),
+    });
+    let domain = service::Domain::tickless(clock, idle).unwrap();
+    unsafe extern "C" {
+        fn stela_linux_workqueue_test_owner() -> *const RawOwner;
+    }
+    // SAFETY: static C fixture owner and pinned runtime/domain outlive all jobs.
+    let environment =
+        unsafe { Environment::new(stela_linux_workqueue_test_owner(), runtime, domain.clone()) }
+            .unwrap();
+    WORKQUEUE_ENVIRONMENT.store(
+        ptr::from_ref(environment.as_ref().get_ref()).cast_mut(),
+        Ordering::Release,
+    );
+    *f.service_domain.lock().unwrap() = Some(domain.clone());
+    // SAFETY: no original C service producers are installed by this fixture;
+    // its reserved registration and all context backing are kept until join.
+    let registered = unsafe { runtime.start_service(workqueue_register_service, context) }.unwrap();
+    runtime.drain(10000).unwrap();
+    assert!(runtime.queue().completed(registered).unwrap());
     // SAFETY: the fixture outlives every worker the C owner starts.
     unsafe { stela_linux_workqueue_test_bind(context, start_workqueue_worker) };
     // SAFETY: the callbacks are static, never unwind, and take the fixture the queue keeps
     // until completion.
-    unsafe { runtime.call_foreground(workqueue_main, context, 100_000) }.unwrap();
-    while runtime.step().unwrap() {}
+    let main = unsafe {
+        environment
+            .as_ref()
+            .spawn(stela_linux_workqueue_test_main, context)
+    }
+    .unwrap();
+    runtime.drain(100_000).unwrap();
+    assert!(runtime.queue().completed(main).unwrap());
+    assert!(environment.finished().unwrap());
+    domain.stop_producers().unwrap();
+    // The fixture's registration-only service has already joined. stop still
+    // records the terminal flag; its wake correctly refuses the closed domain.
+    assert_eq!(environment.stop(), Err(WorkError::Closed));
+    // SAFETY: every C task/worker finished and no original producer remains.
+    unsafe { environment.as_ref().retire() }.unwrap();
+    WORKQUEUE_ENVIRONMENT.store(ptr::null_mut(), Ordering::Release);
+    f.service_domain.lock().unwrap().take();
     let bindings = f
         .bindings
         .iter()
@@ -1570,6 +1684,7 @@ struct MutexCall {
 }
 unsafe extern "C" {
     fn stela_linux_mutex_test_run(context: *mut c_void);
+    fn stela_linux_rt_mutex_test_run(context: *mut c_void);
 }
 struct MutexRole {
     fixture: alloc::sync::Weak<MutexFixture>,
@@ -1579,7 +1694,7 @@ struct MutexRole {
 struct MutexFixture {
     cpu: Arc<CpuModel>,
     runtime: AtomicPtr<Runtime<16>>,
-    bindings: [Mutex<Option<Arc<TaskBinding<16>>>>; 4],
+    bindings: [Mutex<Option<Arc<TaskBinding<16>>>>; 5],
     targets: [Mutex<Option<TargetTask<16>>>; 5],
     jobs: [Box<MutexRole>; 5],
     completed: AtomicU64,
@@ -1675,7 +1790,14 @@ unsafe extern "C" fn mutex_checkpoint(context: *mut c_void, event: u32) {
             if job.scenario == 0 {
                 f.enqueue(2);
                 f.enqueue(3);
+            } else if job.scenario == 11 {
+                f.enqueue(2);
             }
+        }
+        9 => {
+            assert_eq!(job.scenario, 12);
+            f.enqueue(2);
+            f.enqueue(3);
         }
         2..=4 => {
             let target = f.target(1);
@@ -1757,7 +1879,11 @@ unsafe extern "C" fn mutex_role(context: *mut c_void) {
     unsafe {
         binding.run_scoped(
             runtime,
-            stela_linux_mutex_test_run,
+            if job.scenario >= 11 {
+                stela_linux_rt_mutex_test_run
+            } else {
+                stela_linux_mutex_test_run
+            },
             ptr::from_mut(&mut call).cast(),
         )
     }
@@ -1796,7 +1922,10 @@ fn exact_mutex_child(selector: &str) {
 pub(crate) fn run_mutex_child() {
     exact_mutex_child("linux::task::tests::mutex_child");
     exact_mutex_child("linux::task::tests::mutex_quarantine_child");
+    exact_mutex_child("linux::task::tests::rt_mutex::rt_mutex_child");
 }
+
+mod rt_mutex;
 
 #[test]
 #[ignore = "isolation: child"]

@@ -460,17 +460,21 @@ impl Platform for Host {
         self.random.borrow_mut().fill(bytes);
     }
 
-    fn start_worker(&self) -> Result<(), Errno> {
+    fn start_worker(
+        &self,
+        kind: stela_drivers::gpu::linux::owner::WorkerKind,
+    ) -> Result<(), Errno> {
         self.environment()
-            .start_worker()
+            .start_worker(kind)
             .map(|_| ())
-            .map_err(|_| EAGAIN)
+            .map_err(|error| match error {
+                WorkError::Full => -12,
+                _ => EAGAIN,
+            })
     }
 
     fn shutdown(&self, force: bool) {
-        self.report(format_args!(
-            "left running: a request to power off (force={force})"
-        ));
+        super::service::request_shutdown(force);
     }
 
     fn map_device(&self, physical: u64, size: usize, write_combining: bool) -> Option<*mut c_void> {
@@ -690,6 +694,18 @@ fn claim(
 /// Claim every NVIDIA adapter, each reported if it cannot be. In a foreground
 /// continuation, with probe finished.
 pub(super) fn claim_all(services: &dyn NativeServices, adapters: &[gpu::Adapter]) -> Vec<Claimed> {
+    if !cfg!(feature = "nvk") {
+        for adapter in adapters
+            .iter()
+            .filter(|adapter| adapter.vendor == gpu::Vendor::Nvidia)
+        {
+            output::arguments(format_args!(
+                "GPU {} left with firmware: build the image with `cargo xtask boot build --nvk`\n",
+                adapter.address
+            ));
+        }
+        return Vec::new();
+    }
     let nvidia = adapters
         .iter()
         .filter(|adapter| adapter.vendor == gpu::Vendor::Nvidia);
@@ -821,6 +837,7 @@ pub(super) fn kexts() -> Vec<stela_loader::aux_kc::Kext<'static>> {
         info: kext::INFO,
         objects: kext::OBJECTS.to_vec(),
         bundle_path: "/Library/Extensions/StelaGPU.kext".into(),
+        trusted_code: kext::TRUSTED_CODE.to_vec(),
     }];
     #[cfg(not(feature = "nvk"))]
     Vec::new()
@@ -840,7 +857,7 @@ pub(super) fn serve(
 
 /// Bring Linux up over `claimed`, and return once nouveau has bound them or
 /// failed, as the guest should not start with a half-started GPU beneath it.
-pub(super) fn open(machine: Machine, claimed: Vec<Claimed>) -> Result<(), kernel_work::Error> {
+pub(super) fn open(machine: Machine, claimed: Vec<Claimed>) -> Result<(), Error> {
     let Machine {
         work,
         window,
@@ -905,27 +922,62 @@ pub(super) fn open(machine: Machine, claimed: Vec<Claimed>) -> Result<(), kernel
         // SAFETY: in the dispatcher; the owner and runtime last for the boot.
         let environment = unsafe { Environment::new(owner.raw(), runtime, domain.clone()) }?;
         owner.platform().environment.set(addr_of!(*environment));
-        environment.as_ref().start()?;
-        // SAFETY: `start` enters the owner itself, and the job is kept.
-        let ticket = unsafe { environment.as_ref().spawn(start, context) }?;
-        let queue = runtime.get_ref().queue();
-        while !queue.completed(ticket)? && host::rdtsc() < deadline {
-            runtime.step_or_idle()?;
+        let started = (|| {
+            environment.as_ref().start()?;
+            // SAFETY: `start` enters the owner itself, and the job is kept.
+            let ticket = unsafe { environment.as_ref().spawn(start, context) }?;
+            let queue = runtime.get_ref().queue();
+            while !queue.completed(ticket)? && host::rdtsc() < deadline {
+                runtime.step_or_idle()?;
+            }
+            queue.completed(ticket)
+        })();
+        match started {
+            Ok(finished) => Ok((environment, finished)),
+            Err(error) => {
+                // A failed dispatch cannot prove its native tasks stopped.
+                // Their environment, owner and callback job must stay live.
+                core::mem::forget(environment);
+                Err(error)
+            }
         }
-        Ok((environment, queue.completed(ticket)?))
-    })?;
-    let (environment, finished) = opened.map_err(environment_error)?;
+    });
+    let started = opened
+        .map_err(Error::Environment)
+        .and_then(|started| started.map_err(|error| Error::Environment(environment_error(error))));
+    let (environment, finished) = match started {
+        Ok(started) => started,
+        Err(error) => {
+            core::mem::forget(owner);
+            core::mem::forget(job);
+            return Err(error);
+        }
+    };
+    let mut result = Ok(());
     if !finished {
         // It goes on between the guest's slices.
         crate::status::warn("the GPUs are still starting");
+        result = Err(Error::Timeout);
     } else if let Err(error) = job.result {
         output::arguments(format_args!("Linux stopped starting: errno {}\n", -error));
         crate::status::warn("Linux could not start, so the GPUs are unavailable");
+        result = Err(Error::Init(error));
     }
-    let next = domain
-        .next_deadline()
-        .map_err(environment_error)?
-        .unwrap_or(u64::MAX);
+    #[cfg(feature = "nvk")]
+    if finished && result.is_ok() && job.bound.is_empty() {
+        result = Err(Error::NoDevices);
+    }
+    let next = match domain.next_deadline() {
+        Ok(deadline) => deadline.unwrap_or(u64::MAX),
+        Err(error) => {
+            // The tasks have started; preserve all objects their callbacks
+            // borrow even when the clock can no longer schedule their work.
+            core::mem::forget(environment);
+            core::mem::forget(owner);
+            core::mem::forget(job);
+            return Err(Error::Environment(environment_error(error)));
+        }
+    };
     let installed = Box::new(Installed {
         work,
         time,
@@ -945,7 +997,37 @@ pub(super) fn open(machine: Machine, claimed: Vec<Claimed>) -> Result<(), kernel
         start: job,
     });
     INSTALLED.store(Box::into_raw(installed), Ordering::Release);
-    Ok(())
+    result
+}
+
+/// Startup failures distinguish the work environment from driver admission.
+#[derive(Debug)]
+pub(super) enum Error {
+    Environment(kernel_work::Error),
+    Init(Errno),
+    Timeout,
+    #[cfg(feature = "nvk")]
+    NoDevices,
+}
+
+impl From<kernel_work::Error> for Error {
+    fn from(error: kernel_work::Error) -> Self {
+        Self::Environment(error)
+    }
+}
+
+impl core::fmt::Display for Error {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Environment(error) => write!(f, "Linux environment: {error}"),
+            Self::Init(error) => write!(f, "Linux initialization failed: errno {}", -error),
+            Self::Timeout => {
+                f.write_str("GPU startup exceeded its deadline; native owners remain held")
+            }
+            #[cfg(feature = "nvk")]
+            Self::NoDevices => f.write_str("nouveau bound no NVIDIA GPUs"),
+        }
+    }
 }
 
 /// Run what is ready in the environment, between the boot PE's slices.
@@ -963,7 +1045,12 @@ pub(super) fn pump() {
     let ran = gpu.work.dispatch(|runtime| {
         #[cfg(feature = "nvk")]
         client::start(gpu)?;
-        while runtime.step()? {}
+        while runtime.step()? {
+            if super::service::shutdown_pending() {
+                gpu.events.pending.store(true, Ordering::Release);
+                break;
+            }
+        }
         Ok::<_, WorkError>(())
     });
     if let Err(error) = ran.and_then(|ran| {

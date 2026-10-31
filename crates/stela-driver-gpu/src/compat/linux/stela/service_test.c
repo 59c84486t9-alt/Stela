@@ -5,6 +5,7 @@
 #include <linux/delay.h>
 #include <linux/interrupt.h>
 #include <linux/workqueue.h>
+#include <stela/atomic_callback.h>
 #include <stela/linux.h>
 #include <stela/test.h>
 
@@ -15,6 +16,14 @@ struct service_test {
 	void *context;
 	void (*raise)(void *context, unsigned int line);
 };
+
+void stela_linux_service_test_leaf_context(void);
+void stela_linux_service_test_leaf_context(void)
+{
+	assert(stela_linux_atomic_callback_active());
+	assert(!in_interrupt() && !preempt_count() && !irqs_disabled());
+	assert(stela_linux_owner());
+}
 
 void stela_linux_service_test_body(void *context);
 

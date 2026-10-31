@@ -22,6 +22,7 @@ mod execution_sets;
 #[cfg(test)]
 pub(crate) mod fixture;
 pub mod indirect;
+pub mod lifecycle;
 pub mod pipelines;
 pub mod queue;
 pub mod resources;
@@ -113,8 +114,10 @@ pub struct Device<B: Backend, C: Compiler> {
     completed: u64,
     /// A submission failed; nothing pending will complete.
     lost: bool,
-    /// Objects waiting for a serial to complete, in serial order.
-    deferred: Vec<(u64, Object)>,
+    quiesce: Option<lifecycle::QuiesceStatus>,
+    /// Objects waiting for a serial to complete, with the allocation bytes
+    /// charged until their backend memory is destroyed.
+    deferred: Vec<(u64, Object, u64)>,
     allocated: u64,
     resources: resources::Resources,
     pipelines: pipelines::Pipelines,
@@ -154,6 +157,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             submitted: 0,
             completed: 0,
             lost: false,
+            quiesce: None,
             deferred: Vec::new(),
             allocated: 0,
             resources: resources::Resources::default(),
@@ -173,7 +177,17 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         &mut self.backend
     }
 
-    /// `currentAllocatedSize`.
+    /// A lost device cannot resume under its old object identities. Keep
+    /// in-flight imports pinned until the native owner proves DMA has stopped.
+    pub fn mark_lost(&mut self) {
+        self.lost = true;
+    }
+
+    pub fn is_lost(&self) -> bool {
+        self.lost
+    }
+
+    /// `currentAllocatedSize`, including allocations pending GPU completion.
     pub fn current_allocated_size(&self) -> u64 {
         self.allocated
     }
@@ -188,10 +202,15 @@ impl<B: Backend, C: Compiler> Device<B, C> {
     /// Destroys `object` once every command buffer submitted so far
     /// completes.
     fn defer(&mut self, object: Object) {
-        if self.submitted <= self.completed {
+        self.defer_allocation(object, 0);
+    }
+
+    fn defer_allocation(&mut self, object: Object, allocated: u64) {
+        if !self.lost && self.submitted <= self.completed {
             self.backend.destroy(object);
+            self.allocated -= allocated;
         } else {
-            self.deferred.push((self.submitted, object));
+            self.deferred.push((self.submitted, object, allocated));
         }
     }
 
@@ -208,8 +227,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
     }
 
     fn release_memory(&mut self, memory: Memory, bytes: u64) {
-        self.allocated -= bytes;
-        self.defer(Object::Memory(memory));
+        self.defer_allocation(Object::Memory(memory), bytes);
     }
 }
 

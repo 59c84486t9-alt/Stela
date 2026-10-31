@@ -277,6 +277,8 @@ pub struct Queue<const N: usize> {
     state: ManuallyDrop<UnsafeCell<State<N>>>,
     held: AtomicBool,
     inspection: AtomicBool,
+    #[cfg(target_arch = "x86_64")]
+    completing: AtomicBool,
     retired: AtomicBool,
 }
 // SAFETY: same-CPU IRQ-save exclusion protects all state; foreign CPUs fail
@@ -347,6 +349,8 @@ impl<const N: usize> Queue<N> {
             })),
             held: AtomicBool::new(false),
             inspection: AtomicBool::new(false),
+            #[cfg(target_arch = "x86_64")]
+            completing: AtomicBool::new(false),
             retired: AtomicBool::new(false),
         }))
     }
@@ -1074,10 +1078,20 @@ unsafe extern "sysv64" fn entry<const N: usize>(pointer: usize, index: usize) ->
             quarantine();
             executor.queue.cpu.fatal(WorkError::Pending);
         }
+        let now = executor
+            .queue
+            .scheduling_now()
+            .unwrap_or_else(|error| executor.queue.cpu.fatal(error));
         let _flags = match executor.queue.cpu.save_disable() {
             Ok(f) => f,
             Err(e) => executor.queue.cpu.fatal(e),
         };
+        executor
+            .queue
+            .lock()
+            .and_then(|mut guard| guard.state().scheduling.account(now))
+            .unwrap_or_else(|error| executor.queue.cpu.fatal(error));
+        executor.queue.completing.store(true, Ordering::Release);
         let view = executor.context_view(index, true);
         // SAFETY: completing task on its own stack at IF0.
         if let Some(binding) = unsafe { &(*executor.task(index)).binding } {
@@ -1087,6 +1101,7 @@ unsafe extern "sysv64" fn entry<const N: usize>(pointer: usize, index: usize) ->
                 executor.queue.cpu.fatal(error);
             }
         }
+        executor.queue.completing.store(false, Ordering::Release);
         let removed = (|| {
             executor
                 .queue

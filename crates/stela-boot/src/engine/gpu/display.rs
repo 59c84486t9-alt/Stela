@@ -6,7 +6,7 @@
 use super::{client, gate};
 use crate::console::{self, Framebuffer};
 use crate::{Result, output};
-use alloc::boxed::Box;
+use alloc::{boxed::Box, format};
 use core::{cell::UnsafeCell, ffi::c_int, ffi::c_void, ptr::NonNull};
 use stela_contracts::refuse;
 use stela_drivers::gpu::metal::kms::{Display, Drm};
@@ -15,7 +15,9 @@ use stela_soc::machine::{Scanout, ScanoutFormat, ScanoutMode};
 /// A GPU's primary node, the DRM master.
 struct Node(c_int);
 
-impl Drm for Node {
+// SAFETY: Linux's DRM ioctls honor their UAPI bounds. `client::map` retains
+// each mapping for the boot, and different dumb objects have distinct backing.
+unsafe impl Drm for Node {
     fn control(&mut self, request: u32, argument: *mut c_void) -> i64 {
         client::control(self.0, request, argument)
     }
@@ -44,12 +46,15 @@ impl Scanout for KmsScanout {
 
     fn present(&mut self, rows: &[u8]) -> Result<()> {
         console::release();
-        self.0
-            .present(rows)
-            .map_err(|_| refuse!("the GPU's display refused a frame"))?;
+        let presented = self.0.present(rows);
         // A stop's reason shows on the buffer that does.
         console::parked_on(screen(&self.0));
-        Ok(())
+        presented.map_err(|error| {
+            refuse!(
+                "the GPU's display refused a frame: {error}",
+                error = format!("{error:?}")
+            )
+        })
     }
 }
 

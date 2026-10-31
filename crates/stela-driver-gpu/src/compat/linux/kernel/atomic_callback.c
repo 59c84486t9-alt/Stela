@@ -13,7 +13,7 @@ static_assert(IS_ENABLED(CONFIG_PREEMPT_COUNT));
 static_assert(!IS_ENABLED(CONFIG_DEBUG_LOCK_ALLOC));
 static_assert(!IS_ENABLED(CONFIG_TRACE_IRQFLAGS));
 
-enum callback_kind { CALLBACK_HARD, CALLBACK_SOFT, CALLBACK_DISPATCH, CALLBACK_BH };
+enum callback_kind { CALLBACK_HARD, CALLBACK_SOFT, CALLBACK_DISPATCH, CALLBACK_BH, CALLBACK_PROCESS };
 struct callback_state {
 	const struct stela_linux_atomic_callback *scope;
 	struct task_struct *task;
@@ -85,9 +85,14 @@ void stela_linux_atomic_callback_bh_begin(struct stela_linux_atomic_callback *sc
 	begin(scope, CALLBACK_BH);
 }
 
+void stela_linux_atomic_process_leaf_begin(struct stela_linux_atomic_callback *scope)
+{
+	begin(scope, CALLBACK_PROCESS);
+}
+
 static void end(struct stela_linux_atomic_callback *scope, unsigned int release_kind)
 {
-	unsigned int kind = active.kind == CALLBACK_DISPATCH ? 1U : active.kind == CALLBACK_BH ? 2U : 0U;
+	unsigned int kind = active.kind == CALLBACK_DISPATCH ? 1U : active.kind == CALLBACK_BH ? 2U : active.kind == CALLBACK_PROCESS ? 3U : 0U;
 	if (!scope || active.scope != scope ||
 	    kind != release_kind ||
 	    stela_linux_current() != active.task)
@@ -125,4 +130,9 @@ void stela_linux_atomic_softirq_dispatch_end(struct stela_linux_atomic_callback 
 void stela_linux_atomic_callback_bh_end(struct stela_linux_atomic_callback *scope)
 {
 	end(scope, 2);
+}
+
+void stela_linux_atomic_process_leaf_end(struct stela_linux_atomic_callback *scope)
+{
+	end(scope, 3);
 }
