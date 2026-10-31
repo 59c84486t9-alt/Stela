@@ -95,6 +95,7 @@ pub struct TxProfile {
 pub struct ProbeProfiles {
     pub ghz2: TxProfile,
     pub ghz5: TxProfile,
+    pub ghz6: TxProfile,
 }
 
 impl ProbeProfiles {
@@ -102,13 +103,15 @@ impl ProbeProfiles {
         Self {
             ghz2: profile,
             ghz5: profile,
+            ghz6: profile,
         }
     }
 
-    const fn on(self, channel: Channel) -> TxProfile {
+    pub const fn on(self, channel: Channel) -> TxProfile {
         match channel.band {
             Band::Ghz2 => self.ghz2,
-            Band::Ghz5 | Band::Ghz6 => self.ghz5,
+            Band::Ghz5 => self.ghz5,
+            Band::Ghz6 => self.ghz6,
         }
     }
 }
@@ -132,9 +135,6 @@ impl Operation {
 
     fn validate(self) -> Result<(), Error> {
         let channel = self.channel();
-        if channel.band == Band::Ghz6 {
-            return Err(Error::Unsupported);
-        }
         if let Self::Transmit { profile, .. } = self
             && ((profile.rate.cck() && channel.band != Band::Ghz2)
                 || (profile.short_preamble

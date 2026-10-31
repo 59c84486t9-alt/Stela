@@ -30,6 +30,10 @@ const MAX_SCAN_US: u64 = 30_000_000;
 const DS_PARAMETERS: u32 = 9;
 /// `IWL_UCODE_TLV_CAPA_WFA_TPC_REP_IE_SUPPORT`.
 const TPC_REPORT: u32 = 10;
+/// `IWL_UCODE_TLV_CAPA_HIDDEN_6GHZ_SCAN`.
+const HIDDEN_SIX_GHZ: u32 = 59;
+/// `IWL_UCODE_TLV_CAPA_SCAN_DONT_TOGGLE_ANT`.
+const FIXED_ANTENNA: u32 = 111;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Ax200ScanPhase {
     NotStarted,
@@ -248,11 +252,10 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Scan<'_, Q, B, O> {
                 let band = match observation.channel.band {
                     crate::wifi::intel::mcc::channel::Band::Ghz2 => Band::Ghz2,
                     crate::wifi::intel::mcc::channel::Band::Ghz5 => Band::Ghz5,
-                    crate::wifi::intel::mcc::channel::Band::Ghz6 => return None,
+                    crate::wifi::intel::mcc::channel::Band::Ghz6 => Band::Ghz6,
                 };
                 hardware.channel(band, observation.channel.number)
             })
-            .take(protocol::MAX_CHANNELS)
             .collect()
     }
     /// The same channels with the regulatory flags their firmware
@@ -549,9 +552,11 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Scan<'_, Q, B, O> {
             .initialized
             .boot;
         let version = wire::validate(&boot.firmware)?;
-        let measurement = wire::Measurement {
+        let abilities = wire::Abilities {
             ds_parameters: boot.firmware.supports_capability(DS_PARAMETERS),
             tpc_report: boot.firmware.supports_capability(TPC_REPORT),
+            hidden_six_ghz: boot.firmware.supports_capability(HIDDEN_SIX_GHZ),
+            fixed_antenna: boot.firmware.supports_capability(FIXED_ANTENNA),
         };
         // Capture every already-completed RB before admitting a new request.
         // This exclusive owner never rearms inside the loop, so the real fixed
@@ -623,7 +628,7 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Scan<'_, Q, B, O> {
                     version,
                     scanner.local(),
                     probe,
-                    measurement,
+                    abilities,
                 )?;
                 let mut checked = policy::CheckedRequest(operation.request());
                 let now = options.clock.now_us();

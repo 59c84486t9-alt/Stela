@@ -10,6 +10,7 @@ use alloc::vec::Vec;
 
 const EXTENSION: u8 = 255;
 const HE_CAPABILITIES: u8 = 35;
+const HE_6GHZ_CAPABILITIES: u8 = 59;
 /// PPET16 at 0 and PPET8 at 7, for two streams.
 const THRESHOLDS: [u8; 4] = [0x61, 0x1c, 0xc7, 0x71];
 /// Every MCS of one stream, or of two.
@@ -28,6 +29,20 @@ pub(super) fn maps(two_streams: bool) -> [McsMaps; 3] {
             tx: NO_STREAMS,
         },
     ]
+}
+
+/// The HE 6 GHz Band Capabilities `iwl_init_he_6ghz_capa` derives from a
+/// station's HT and VHT ones, with spatial multiplexing power save off as
+/// `ieee80211_put_he_6ghz_cap` writes it.
+pub(super) fn six_ghz_capability(tx: u32, rx: u32) -> [u8; 5] {
+    let capability: u16 = 5 // 4 us A-MPDU spacing
+        | 7 << 3 // 1 MB A-MPDUs
+        | 2 << 6 // 11454-byte MPDUs
+        | 3 << 9 // SMPS off
+        | u16::from(rx == 1) << 12
+        | u16::from(tx == 1) << 13;
+    let [low, high] = capability.to_le_bytes();
+    [EXTENSION, 3, HE_6GHZ_CAPABILITIES, low, high]
 }
 
 /// The element for `band`. `two_streams` is both directions having both

@@ -25,7 +25,10 @@ use crate::wifi::{
             response::{Response, block_ack_queues},
         },
     },
-    regulatory::channel::{NO_80MHZ, NO_160MHZ, NO_HT40MINUS, NO_HT40PLUS, NO_IR},
+    regulatory::channel::{
+        NO_6GHZ_AFC_CLIENT, NO_6GHZ_VLP_CLIENT, NO_80MHZ, NO_160MHZ, NO_HT40MINUS, NO_HT40PLUS,
+        NO_IR,
+    },
     regulatory::{self, Operation, ProbeProfiles, Purpose, TxProfile, Width, database},
     security::{
         Cipher, InstallOutcome, InstallTicket, Integrity, KeyIdentity, KeyScope, KeySlot,
@@ -1495,16 +1498,19 @@ fn probe_elements(band: Band, family: Family, chains: (u32, u32), wide: bool) ->
         element(191, &vht);
     }
     elements.extend(he::capability(band, family, chains.0 & chains.1 == 3, wide));
+    if band == Band::Ghz6 {
+        elements.extend(he::six_ghz_capability(tx, rx));
+    }
     elements
 }
 
 impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
-    /// Whether a 5 GHz channel takes 160 MHz.
-    fn wide(&self) -> bool {
+    /// Whether a channel of `band` takes 160 MHz.
+    fn wide(&self, band: Band) -> bool {
         self.client
             .channels
             .iter()
-            .any(|(channel, flags)| channel.band == Band::Ghz5 && flags & NO_160MHZ == 0)
+            .any(|(channel, flags)| channel.band == band && flags & NO_160MHZ == 0)
     }
 
     /// What firmware's probes radiate: its lowest legacy rate of each band,
@@ -1527,6 +1533,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         ProbeProfiles {
             ghz2: profile(Band::Ghz2, regulatory::LegacyRate::Cck1),
             ghz5: profile(Band::Ghz5, regulatory::LegacyRate::Ofdm6),
+            ghz6: profile(Band::Ghz6, regulatory::LegacyRate::Ofdm6),
         }
     }
 
@@ -1537,12 +1544,9 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             .regulatory
             .as_ref()
             .ok_or(Error::Refused("scan"))?;
-        let (family, chains, wide) = (self.family, self.chains, self.wide());
+        let elements = |band| probe_elements(band, self.family, self.chains, self.wide(band));
         Ok(boot::Probe {
-            elements: [
-                probe_elements(Band::Ghz2, family, chains, wide),
-                probe_elements(Band::Ghz5, family, chains, wide),
-            ],
+            elements: [Band::Ghz2, Band::Ghz5, Band::Ghz6].map(elements),
             profiles: self.probe_profiles(country),
         })
     }
@@ -1639,11 +1643,7 @@ impl<Q: BootIo, B: BiosIo> Radio for Wifi<Q, B> {
                 Operation::Transmit {
                     channel,
                     purpose: Purpose::Probe,
-                    profile: if channel.band == Band::Ghz2 {
-                        profiles.ghz2
-                    } else {
-                        profiles.ghz5
-                    },
+                    profile: profiles.on(channel),
                 },
             )
     }
@@ -1667,7 +1667,7 @@ impl<Q: BootIo, B: BiosIo> Radio for Wifi<Q, B> {
         if band == Band::Ghz6 {
             return Err(Error::Unsupported("6 GHz on Intel Wi-Fi"));
         }
-        let elements = capability_elements(band, self.family, self.chains, self.wide());
+        let elements = capability_elements(band, self.family, self.chains, self.wide(band));
         let capabilities = Capabilities::parse(band, Role::Station, &elements)
             .map_err(|_| Error::Refused("advertisement"))?;
         Ok(Advertisement {
@@ -1722,10 +1722,12 @@ impl<Q: BootIo, B: BiosIo> Radio for Wifi<Q, B> {
 
     fn six_ghz_scan(
         &self,
-        _: &scan::Request,
-        _: scan::six_ghz::Options,
+        request: &scan::Request,
+        options: scan::six_ghz::Options,
     ) -> Result<Option<scan::Request>, Error> {
-        Ok(None)
+        let known = self.client.observed.iter();
+        scan::six_ghz::second_part(request, options, known.map(|heard| heard.observation.bss()))
+            .map_err(|error| Error::Scan(boot::Ax200ScanError::Protocol(error)))
     }
 
     fn bss(&self) -> Vec<(usize, &Bss)> {
@@ -2186,6 +2188,12 @@ pub fn channel_flags(restrictions: &crate::wifi::intel::mcc::channel::Restrictio
     }
     if restrictions.no_initiate_radiation {
         flags |= NO_IR;
+    }
+    if restrictions.no_6ghz_vlp_client {
+        flags |= NO_6GHZ_VLP_CLIENT;
+    }
+    if restrictions.no_6ghz_afc_client {
+        flags |= NO_6GHZ_AFC_CLIENT;
     }
     flags
 }
