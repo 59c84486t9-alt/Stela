@@ -2,7 +2,7 @@
 //! to, read into the sections, symbols and relocations the linkers place.
 use super::fit;
 use crate::{Result, Within};
-use alloc::{borrow::ToOwned, format, string::String, vec::Vec};
+use alloc::{borrow::ToOwned, string::String, vec::Vec};
 use object::{
     LittleEndian as LE, macho,
     read::macho::{MachHeader, Nlist, Section as _, Segment as _},

@@ -1,6 +1,6 @@
 //! The boot kernel collection an auxiliary collection links against: its
 //! identity, its base and the symbols each of its fileset entries defines.
-use alloc::{borrow::ToOwned, collections::BTreeMap, format, string::String, vec::Vec};
+use alloc::{borrow::ToOwned, collections::BTreeMap, string::String};
 
 use super::fit;
 use crate::{Result, Within};

@@ -5,7 +5,7 @@ use alloc::{
     borrow::ToOwned,
     collections::{BTreeMap, BTreeSet},
     format,
-    string::{String, ToString},
+    string::String,
     vec,
     vec::Vec,
 };
@@ -22,7 +22,6 @@ use super::{
     Kext,
     boot::{BootCollection, KERNEL},
     fixups::{Level, Pointer, Signature},
-    prelink,
     relocatable::{self, Definition, Kind, Object, Target},
 };
 

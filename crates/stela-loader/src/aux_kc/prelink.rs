@@ -3,7 +3,7 @@
 //! `libkern/libkern/prelink.h` at `xnu-12377.121.6`.
 use super::plist::{self, Dictionary, Value};
 use crate::Result;
-use alloc::{vec, vec::Vec};
+use alloc::vec::Vec;
 
 /// Where a kext lies in the collection, at unslid addresses.
 #[derive(Debug, Clone, Copy)]
