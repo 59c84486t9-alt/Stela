@@ -180,7 +180,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         value: u64,
         now: u64,
     ) -> Result<ConsumedWrite, DeviceError> {
-        self.device_transfer(now)?;
+        self.settle_devices(now);
         let ram = Arc::clone(
             self.cpu
                 .canonical_memory
@@ -297,9 +297,7 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
             return Err(terminal);
         }
         let now = self.now();
-        self.device_transfer(now).map_err(|error| {
-            self.unsupported(RequirementKind::DeviceAdvance(alloc::format!("{error:?}")))
-        })?;
+        self.settle_devices(now);
         let Some((_, access, _, _, _)) = write.recovered.access() else {
             return Err(terminal);
         };

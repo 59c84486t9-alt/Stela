@@ -41,7 +41,11 @@ pub(super) fn native_fault_site_in_entry<D: Devices>(
     let Ok(Fetched::Block(index)) = machine.fetch_block(entry, false) else {
         panic!("actual compiled native block");
     };
-    let rows = machine.fault_recovery[&index].test_portable_rows();
+    let rows = machine
+        .fault_recovery
+        .get(&index)
+        .unwrap()
+        .test_portable_rows();
     let row = rows
         .iter()
         .find(|row| row.retirement.instruction_pc().0 == pc && row.site == kind)
@@ -955,10 +959,18 @@ fn device_pair_store_faults_drop_the_refused_member_and_keep_the_rest() {
             assert_eq!(reports.len(), 1);
             let requirement = reports.remove(0);
             let failed_address = DEVICE + failed_element as u64 * 8;
-            assert_eq!(requirement.address, Some(failed_address));
-            assert!(
-                matches!(requirement.kind, RequirementKind::Device { physical, write: true, .. } if physical == failed_address)
-            );
+            if service_failure {
+                // A device's refused work is not the access that found it due.
+                assert!(matches!(
+                    requirement.kind,
+                    RequirementKind::DeviceAdvance(_)
+                ));
+            } else {
+                assert_eq!(requirement.address, Some(failed_address));
+                assert!(
+                    matches!(requirement.kind, RequirementKind::Device { physical, write: true, .. } if physical == failed_address)
+                );
+            }
             // The pair completes with its writeback. A refused member is
             // dropped; a member whose service failed keeps its store and
             // the DMA it committed.
@@ -1088,7 +1100,7 @@ fn host_breakpoints_end_blocks_and_stop_before_their_instruction() {
     let Ok(Fetched::Block(index)) = machine.fetch_block(BASE, false) else {
         panic!("block")
     };
-    assert_eq!(machine.blocks[index].source_map.len(), 2);
+    assert_eq!(machine.blocks[index].instructions, 2);
     machine.cpu.pc = BASE + 8;
     assert!(matches!(machine.step(), Err(Stop::Breakpoint(pc)) if pc == BASE + 8));
     assert_eq!(machine.cpu.state.x[0], 0);
@@ -1104,7 +1116,7 @@ fn trace_points_end_blocks_and_record_each_entry_without_stopping() {
     let Ok(Fetched::Block(index)) = machine.fetch_block(BASE, false) else {
         panic!("block")
     };
-    assert_eq!(machine.blocks[index].source_map.len(), 2);
+    assert_eq!(machine.blocks[index].instructions, 2);
     machine.cpu.pc = BASE + 8;
     machine.cpu.state.x[0] = 7;
     machine.step().unwrap();
@@ -1136,16 +1148,18 @@ fn unavailable_extended_fault_state_cannot_partially_recover_or_retire() {
     let retired = machine.cpu.retired;
     // Corrupt a real, minted operand row to exercise atomic capture refusal;
     // no test-only constructor invents a guest site at internal code.
-    let row = machine
+    let offset = machine
         .fault_recovery
         .get_mut(&index)
         .unwrap()
-        .test_rows_mut()
-        .iter_mut()
-        .find(|row| row.site.kind() == RecoverySiteKind::GuestAccess)
-        .unwrap();
-    row.bindings = vec![RecoveryBinding::gpr(0, 0), RecoveryBinding::gpr(1, 16)];
-    let offset = row.start;
+        .test_edit_rows(|rows| {
+            let row = rows
+                .iter_mut()
+                .find(|row| row.site.kind() == RecoverySiteKind::GuestAccess)
+                .unwrap();
+            row.bindings = vec![RecoveryBinding::gpr(0, 0), RecoveryBinding::gpr(1, 16)];
+            row.start
+        });
     let stopped = machine.native_fault(
         index,
         NativeFault {
@@ -1187,7 +1201,7 @@ fn compiles_blocks_through_the_page_and_reports_unsupported_words() {
     let Ok(Fetched::Block(index)) = machine.fetch_block(BASE, false) else {
         panic!("block")
     };
-    assert_eq!(machine.blocks[index].source_map.len(), 2);
+    assert_eq!(machine.blocks[index].instructions, 2);
     assert_eq!(machine.statistics.compiled, 1);
     assert!(matches!(machine.fetch_block(BASE, false), Ok(Fetched::Block(i)) if i == index));
     assert_eq!(machine.statistics.compiled, 1, "cached");
@@ -1197,14 +1211,14 @@ fn compiles_blocks_through_the_page_and_reports_unsupported_words() {
     let Ok(Fetched::Block(index)) = machine.fetch_block(BASE, false) else {
         panic!("block with UDF")
     };
-    assert_eq!(machine.blocks[index].source_map.len(), 2);
+    assert_eq!(machine.blocks[index].instructions, 2);
     // On the M4, whose SME has it in streaming mode, the block ends
     // before it, and the engine applies its access checks on its own.
     let mut machine = machine_on(stela_contracts::Chip::AppleM4, &[0x9100_0400, 0x04a0_0000]);
     let Ok(Fetched::Block(index)) = machine.fetch_block(BASE, false) else {
         panic!("prefix block")
     };
-    assert_eq!(machine.blocks[index].source_map.len(), 1);
+    assert_eq!(machine.blocks[index].instructions, 1);
     assert!(matches!(
         machine.fetch_block(BASE + 4, false),
         Ok(Fetched::Checked(0x04a0_0000))
@@ -1941,7 +1955,9 @@ fn a_full_arena_reclaims_its_oldest_part_and_forgets_those_pages() {
     // 3 needed the first part back, whose reclaim forgot pages 0 and 1
     // whole, page 0's block in the second part too, and whose slots
     // took the next blocks.
-    let left: Vec<u64> = machine.index.keys().map(|&(pc, ..)| pc).collect();
+    let left: Vec<u64> = (machine.index.sweep(None))
+        .map(|(_, slot)| machine.blocks[slot].pc)
+        .collect();
     assert_eq!(left, [page(1) + 8, page(2), page(3)]);
     assert_eq!(machine.statistics.code_evictions, 1);
     assert_eq!(machine.statistics.code_discards.iter().sum::<u64>(), 0);
@@ -1995,7 +2011,7 @@ fn pressure_reclaims_metadata_when_the_next_arena_part_is_empty() {
     machine.host.memory_low = true;
     assert!(machine.fetch_block(base + FETCH_PAGE, false).is_ok());
     assert_eq!(machine.fault_recovery.len(), 1);
-    assert!(!machine.index.keys().any(|&(pc, ..)| pc == base));
+    assert!(!(machine.index.sweep(None)).any(|(_, slot)| machine.blocks[slot].pc == base));
     assert_ne!(machine.code_generation, old_generation);
     // A cached hit adds no compilation scratch and keeps its owner.
     let discarded = machine.statistics.code_discards.iter().sum::<u64>();
@@ -2037,7 +2053,9 @@ fn pressure_releases_the_oldest_arena_part_and_keeps_newer_code() {
     }
     machine.host.memory_low = true;
     assert!(machine.fetch_block(page(3), false).is_ok());
-    let mut left: Vec<u64> = machine.index.keys().map(|&(pc, ..)| pc).collect();
+    let mut left: Vec<u64> = (machine.index.sweep(None))
+        .map(|(_, slot)| machine.blocks[slot].pc)
+        .collect();
     left.sort_unstable();
     assert_eq!(left, [page(2), page(3)]);
     assert_eq!(machine.statistics.code_discards.iter().sum::<u64>(), 0);
@@ -2052,7 +2070,9 @@ fn a_block_installed_while_memory_runs_low_discards_the_others_first() {
     assert!(machine.fetch_block(base, false).is_ok());
     machine.host.memory_low = true;
     assert!(machine.fetch_block(base + FETCH_PAGE, false).is_ok());
-    let left: Vec<u64> = machine.index.keys().map(|&(pc, ..)| pc).collect();
+    let left: Vec<u64> = (machine.index.sweep(None))
+        .map(|(_, slot)| machine.blocks[slot].pc)
+        .collect();
     assert_eq!(left, [base + FETCH_PAGE]);
     assert_eq!(machine.statistics.code_discards.iter().sum::<u64>(), 1);
 }
@@ -2121,12 +2141,14 @@ fn ic_ivau_forgets_its_pages_blocks_and_ic_iallu_every_block() {
     assert_eq!(machine.index.len(), 2);
     machine.cpu.state.x[0] = base + 0x40;
     machine.system_instruction(IC_IVAU_X0).unwrap();
-    let left: Vec<u64> = machine.index.keys().map(|&(pc, ..)| pc).collect();
+    let left: Vec<u64> = (machine.index.sweep(None))
+        .map(|(_, slot)| machine.blocks[slot].pc)
+        .collect();
     assert_eq!(left, [base + FETCH_PAGE]);
     assert_eq!(machine.statistics.code_invalidations, 1);
     assert_eq!(machine.statistics.code_discards.iter().sum::<u64>(), 0);
     machine.system_instruction(IC_IALLU).unwrap();
-    assert!(machine.index.is_empty() && machine.code_pages.is_empty());
+    assert!(machine.index.is_empty());
     assert_eq!(machine.statistics.code_discards.iter().sum::<u64>(), 1);
 }
 

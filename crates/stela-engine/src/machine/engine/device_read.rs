@@ -185,7 +185,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 "canonical device read requires its actual recovered-frame memory continuation",
             ));
         }
-        self.device_transfer(now)?;
+        self.settle_devices(now);
         let ram = Arc::clone(
             self.cpu
                 .canonical_memory
@@ -319,9 +319,7 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
         // All synchronous modeled copyout completes BEFORE freezing RAM. No
         // callback may start another RAM transfer while this guard exists.
         let now = self.now();
-        self.device_transfer(now).map_err(|error| {
-            self.unsupported(RequirementKind::DeviceAdvance(alloc::format!("{error:?}")))
-        })?;
+        self.settle_devices(now);
         let Some((_, access, _, _, _)) = read.recovered.access() else {
             return Err(terminal);
         };
