@@ -10,7 +10,9 @@ use stela_formats::payload::Purpose;
 use stela_loader::boot_bundle::{
     self, Input, Inputs, Options, OverlayProperty, RootHash, Source, Target,
 };
-use stela_loader::boot_policy::{OsEnvironment, SealedVolume, SecurityMode, SecurityPolicy};
+use stela_loader::boot_policy::{
+    KextGrant, OsEnvironment, SealedVolume, SecurityMode, SecurityPolicy,
+};
 use stela_loader::handoff::{self, BootCommand as FirmwareBootCommand};
 use stela_loader::im4m;
 use stela_loader::root_selection::Root;
@@ -641,7 +643,7 @@ pub(super) fn boot_args(console: &str, mode: &[&str]) -> String {
 
 impl Prepare {
     /// The `--kext` bundles linked against `kernel` (`stela_loader::aux_kc`).
-    fn auxiliary_collection(&self, kernel: &[u8]) -> Result<Option<Decoded>> {
+    fn auxiliary_collection(&self, kernel: &[u8]) -> Result<Option<(Decoded, KextGrant)>> {
         if self.kexts.is_empty() {
             return Ok(None);
         }
@@ -682,10 +684,12 @@ impl Prepare {
                 bundle_path: format!("/Library/Extensions/{name}"),
             })
             .collect();
-        let bytes = stela_loader::aux_kc::link(kernel, &kexts)?;
+        let linked = stela_loader::aux_kc::link(kernel, &kexts)?;
+        let grant = linked.grant();
+        let bytes = linked.collection;
         let digest = stela_formats::sha256(&bytes);
         let names: Vec<_> = bundles.iter().map(|(_, _, name)| name.as_str()).collect();
-        Ok(Some(Decoded {
+        let decoded = Decoded {
             source: Source {
                 component: "AuxiliaryKernelCollection".into(),
                 member: names.join(", "),
@@ -700,7 +704,8 @@ impl Prepare {
             },
             bytes,
             declared_digest: None,
-        }))
+        };
+        Ok(Some((decoded, grant)))
     }
 
     fn run(self) -> Result<()> {
@@ -924,7 +929,7 @@ impl Prepare {
                 ))
             })
             .collect::<Result<Vec<_>>>()?;
-        let auxiliary = self.auxiliary_collection(&kernel.bytes)?;
+        let (auxiliary, kexts) = self.auxiliary_collection(&kernel.bytes)?.unzip();
         // Set below when the images come from the restore ramdisk.
         let sourced: Vec<(String, Decoded)>;
         let ramdisk_component: Decoded;
@@ -960,7 +965,8 @@ impl Prepare {
                 .map(|(name, decoded)| (name.clone(), input(decoded)))
                 .collect(),
         };
-        let options = self.options(inputs.dram_base()?)?;
+        let mut options = self.options(inputs.dram_base()?)?;
+        options.security.kexts = kexts;
         let mut bundle = boot_bundle::prepare(&inputs, &options)?;
         let mut unresolved = vec![];
         // The board the bundle's DeviceTree describes names its images, each
@@ -1064,6 +1070,7 @@ impl Prepare {
                 },
                 sip_bits: self.sip_bits,
                 sepfw_load_at_boot: self.sepfw_load_at_boot,
+                kexts: None,
             },
             overlay: self
                 .dt_overlay

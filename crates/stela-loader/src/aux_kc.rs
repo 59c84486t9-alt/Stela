@@ -34,10 +34,12 @@ use crate::Result;
 use ::object::macho;
 use stela_contracts::{refuse, require};
 
+use crate::boot_policy::KextGrant;
 use crate::kernel_collection::PAGE_BYTES;
 use boot::BootCollection;
 use commands::{Commands, SectionCommand, SegmentCommand};
 use prelink::{Entry, Placement};
+use sha2::{Digest, Sha384};
 use unit::{Region, Unit};
 
 /// A kext to link into the collection.
@@ -91,9 +93,29 @@ struct Symbols {
     string_bytes: u32,
 }
 
+/// A linked auxiliary collection and the receipt inside it.
+#[derive(Debug)]
+pub struct Linked {
+    pub collection: Vec<u8>,
+    pub receipt: Vec<u8>,
+}
+
+impl Linked {
+    /// The LocalPolicy grant admitting this collection. A receipt lists the
+    /// kexts it holds, so it is also Stela's list of those approved.
+    pub fn grant(&self) -> KextGrant {
+        let digest = |bytes: &[u8]| hex::encode(Sha384::digest(bytes));
+        KextGrant {
+            approved: digest(&self.receipt),
+            collection: digest(&self.collection),
+            receipt: digest(&self.receipt),
+        }
+    }
+}
+
 /// Links `kexts` against the boot collection `boot` into an auxiliary
 /// collection.
-pub fn link(boot: &[u8], kexts: &[Kext<'_>]) -> Result<Vec<u8>> {
+pub fn link(boot: &[u8], kexts: &[Kext<'_>]) -> Result<Linked> {
     require!(
         !kexts.is_empty(),
         "an auxiliary collection holds at least one kext"
@@ -357,7 +379,10 @@ pub fn link(boot: &[u8], kexts: &[Kext<'_>]) -> Result<Vec<u8>> {
         file[to..to + size].copy_from_slice(&image[from..from + size]);
     }
     file[linkedit_start..].copy_from_slice(&linkedit);
-    Ok(file)
+    Ok(Linked {
+        collection: file,
+        receipt,
+    })
 }
 
 /// The collection segment a kext region lies in.

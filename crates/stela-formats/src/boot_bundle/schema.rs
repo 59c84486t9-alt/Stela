@@ -102,6 +102,17 @@ pub struct SecurityPolicy {
     pub sip_bits: u64,
     /// Overrides the template's `/chosen sepfw-load-at-boot`.
     pub sepfw_load_at_boot: Option<bool>,
+    /// The auxiliary kernel collection this boot admits.
+    pub kexts: Option<KextGrant>,
+}
+
+/// What a LocalPolicy's kext grant (`local_policy::Kexts`) names, as
+/// hexadecimal SHA-384 digests.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KextGrant {
+    pub approved: String,
+    pub collection: String,
+    pub receipt: String,
 }
 
 /// Reduced Security with SIP enabled.
@@ -111,6 +122,7 @@ impl Default for SecurityPolicy {
             mode: SecurityMode::Reduced,
             sip_bits: 0,
             sepfw_load_at_boot: None,
+            kexts: None,
         }
     }
 }

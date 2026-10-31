@@ -52,6 +52,40 @@ fn boot_manifest() -> Manifest {
 }
 
 #[test]
+fn a_kext_grant_relaxes_only_the_kext_flags_and_names_its_digests() -> Result<()> {
+    let digest = |byte: u8| hex::encode([byte; 48]);
+    let mut tree = tree();
+    let policy = SecurityPolicy {
+        sip_bits: 0x10,
+        kexts: Some(KextGrant {
+            approved: digest(1),
+            collection: digest(2),
+            receipt: digest(3),
+        }),
+        ..SecurityPolicy::default()
+    };
+    apply(&mut tree, &policy, None, None)?;
+    let value = |name: &str| tree.property(ASMB, name).unwrap().value.clone();
+    assert_eq!(value("lp-sip0"), integer(0x211));
+    assert_eq!(value("lp-smb2"), boolean(true));
+    assert_eq!(value("lp-auxp"), [1; 48]);
+    assert_eq!(value("lp-auxi"), [2; 48]);
+    assert_eq!(value("lp-auxr"), [3; 48]);
+
+    let mut tree = self::tree();
+    let refused = SecurityPolicy {
+        kexts: Some(KextGrant {
+            approved: "ab".into(),
+            collection: digest(2),
+            receipt: digest(3),
+        }),
+        ..SecurityPolicy::default()
+    };
+    assert!(apply(&mut tree, &refused, None, None).is_err());
+    Ok(())
+}
+
+#[test]
 fn reduced_security_is_expressed_as_device_tree_data() -> Result<()> {
     let mut tree = tree();
     let boot = boot_manifest();
@@ -60,6 +94,7 @@ fn reduced_security_is_expressed_as_device_tree_data() -> Result<()> {
         mode: SecurityMode::Reduced,
         sip_bits: 0,
         sepfw_load_at_boot: Some(false),
+        kexts: None,
     };
     let (decisions, unresolved) = apply(&mut tree, &policy, Some(&boot), Some(&cryptex))?;
     assert!(unresolved.is_empty());
@@ -130,6 +165,7 @@ fn a_development_chip_leaves_its_unit_fuses_and_epoch_unresolved() -> Result<()>
         mode: SecurityMode::Reduced,
         sip_bits: 0,
         sepfw_load_at_boot: None,
+        kexts: None,
     };
     let (_, unresolved) = apply(&mut tree, &policy, Some(&development), None)?;
     assert!(unresolved.iter().any(|gap| gap.contains("chip-epoch")));
@@ -274,6 +310,7 @@ fn missing_manifests_stay_visible_and_permissive_sets_smb1() -> Result<()> {
         mode: SecurityMode::Permissive,
         sip_bits: 0x7f,
         sepfw_load_at_boot: None,
+        kexts: None,
     };
     let (_, unresolved) = apply(&mut tree, &policy, None, None)?;
     assert_eq!(unresolved.len(), 2);

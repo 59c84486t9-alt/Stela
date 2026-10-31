@@ -495,7 +495,7 @@ fn page_target(adrp: u32, place: u64) -> u64 {
 fn links_a_kext_against_the_boot_collection() -> Result<()> {
     let boot = boot_collection();
     let object = kext_object();
-    let file = link(&boot, &[kext(vec![&object])])?;
+    let file = link(&boot, &[kext(vec![&object])])?.collection;
 
     let collection = sections(&file, 0);
     let order: Vec<_> = SEGMENTS
@@ -679,7 +679,7 @@ fn links_a_kext_against_the_boot_collection() -> Result<()> {
     );
 
     assert_eq!(
-        link(&boot, &[kext(vec![&object])])?,
+        link(&boot, &[kext(vec![&object])])?.collection,
         file,
         "linking is deterministic"
     );
@@ -709,7 +709,7 @@ fn a_strong_definition_overrides_weak_ones() -> Result<()> {
         &[InputSection::new("__DATA", "__data", 0, vec![0; 8])],
         &[defined("_shared", true, 0, 0)],
     );
-    let file = link(&boot_collection(), &[kext(vec![&weak, &strong])])?;
+    let file = link(&boot_collection(), &[kext(vec![&weak, &strong])])?.collection;
     let entry_offset = {
         let collection = sections(&file, 0);
         collection["__PRELINK_TEXT"].offset
@@ -812,7 +812,7 @@ fn child_object(last: &'static str) -> Vec<u8> {
 #[test]
 fn inherited_vtable_slots_take_the_kernel_superclass_entries() -> Result<()> {
     let object = child_object("__ZN4Base10_RESERVED0Ev");
-    let file = link(&boot_collection(), &[kext(vec![&object])])?;
+    let file = link(&boot_collection(), &[kext(vec![&object])])?.collection;
     let entry_offset = sections(&file, 0)["__PRELINK_TEXT"].offset;
     let bundle = sections(&file, entry_offset);
     let vtable = bundle["__DATA_CONST,__const"].address;

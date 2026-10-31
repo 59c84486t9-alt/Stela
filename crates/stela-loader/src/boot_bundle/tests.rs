@@ -767,6 +767,7 @@ fn lays_out_sptm_regions_and_patch_slots() -> Result<()> {
             mode: boot_policy::SecurityMode::Reduced,
             sip_bits: 0,
             sepfw_load_at_boot: None,
+            kexts: None,
         },
         overlay: vec![OverlayProperty {
             path: "/chosen/lock-regs/amcc".into(),
