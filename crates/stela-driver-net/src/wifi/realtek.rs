@@ -6,6 +6,7 @@
 //! references, not a Linux kernel interface.
 pub mod beacon;
 pub mod bootstrap;
+pub mod ccmp;
 pub mod commands;
 pub mod descriptor;
 pub mod download;
@@ -23,4 +24,5 @@ pub mod power;
 pub mod receive;
 pub mod registers;
 pub mod rf;
+pub mod station;
 pub mod transmit;
