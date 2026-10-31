@@ -1154,6 +1154,98 @@ defined_functions_inline_into_their_callers(void)
           error.kind == STELA_AIR_INSTRUCTION && strstr(error.detail, "recursive"));
 }
 
+static const char *stitching_kernel =
+   "declare i32 @quadrupled(i32)\n"
+   "define void @stitches(ptr addrspace(1) %data, i32 %tid) {\n"
+   "%v = call i32 @quadrupled(i32 %tid)\n"
+   "store i32 %v, ptr addrspace(1) %data, align 4\nret void\n}\n"
+   "!air.kernel = !{!2}\n"
+   "!2 = !{ptr @stitches, !3, !4}\n!3 = !{}\n!4 = !{!40, !41}\n"
+   "!40 = !{i32 0, !\"air.buffer\", !\"air.location_index\", i32 0, i32 1, !\"air.read_write\","
+   " !\"air.address_space\", i32 1, !\"air.arg_type_size\", i32 4, !\"air.arg_type_align_size\","
+   " i32 4, !\"air.arg_type_name\", !\"int\", !\"air.arg_name\", !\"data\"}\n"
+   "!41 = !{i32 1, !\"air.thread_position_in_grid\", !\"air.arg_type_name\", !\"uint\","
+   " !\"air.arg_name\", !\"tid\"}\n";
+
+/* Keeps the bitcode of LLVM's wrapper for a Darwin target, as `metal/library.rs`
+ * reads it from a library. */
+static void
+keep_stitched(void *data, const void *bytes, size_t size)
+{
+   uint32_t wrapper[5];
+   assert(size >= sizeof(wrapper));
+   memcpy(wrapper, bytes, sizeof(wrapper));
+   assert(wrapper[0] == 0x0b17c0de && wrapper[2] + wrapper[3] <= size);
+   *(LLVMMemoryBufferRef *)data = LLVMCreateMemoryBufferWithMemoryRangeCopy(
+      (const char *)bytes + wrapper[2], wrapper[3], "stitched");
+}
+
+static bool
+visible_quadrupled(void *data, const char *name, size_t name_bytes,
+                   enum stela_metal_function_stage stage)
+{
+   assert(name_bytes == 10 && !memcmp(name, "quadrupled", 10) && stage == STELA_METAL_VISIBLE);
+   (*(unsigned *)data)++;
+   return true;
+}
+
+/* quadrupled(x) = doubled(doubled(x)) is a visible function of its own module,
+ * which a pipeline links with the module it calls. */
+static void
+stitched_functions_call_their_nodes_in_order(void)
+{
+   LLVMMemoryBufferRef source = bitcode(calls);
+   struct stela_air_stitch_source sources[] = {
+      {LLVMGetBufferStart(source), LLVMGetBufferSize(source), "doubled"},
+      {LLVMGetBufferStart(source), LLVMGetBufferSize(source), "calls"},
+   };
+   const uint32_t first = 0, second = 1;
+   const struct stela_air_stitch_node nodes[] = {
+      {.function = STELA_AIR_STITCH_INPUT},
+      {.function = 0, .arguments = &first, .argument_count = 1},
+      {.function = 0, .arguments = &second, .argument_count = 1},
+   };
+   const struct stela_air_stitch_graph graph = {"quadrupled", nodes, 3, 2};
+   struct stela_air_error error;
+   LLVMMemoryBufferRef stitched = NULL;
+   assert(stela_metal_stitch(sources, 1, &graph, 1, keep_stitched, &stitched, &error));
+
+   unsigned listed = 0;
+   assert(stela_metal_functions(LLVMGetBufferStart(stitched), LLVMGetBufferSize(stitched),
+                                visible_quadrupled, &listed, &error));
+   assert(listed == 1);
+
+   const struct stela_air_module modules[] = {
+      {LLVMGetBufferStart(stitched), LLVMGetBufferSize(stitched)},
+      {LLVMGetBufferStart(source), LLVMGetBufferSize(source)},
+   };
+   const struct stela_metal_specialization specialization = {
+      .workgroup_size = {64, 1, 1}, .modules = modules, .module_count = 2,
+   };
+   nir_shader *shader = compile(stitching_kernel, "stitches", &specialization, &error);
+   assert(shader);
+   stela_metal_release(shader);
+
+   /* Without the module it calls, the function is undefined. */
+   const struct stela_metal_specialization unlinked = {
+      .workgroup_size = {64, 1, 1}, .modules = modules, .module_count = 1,
+   };
+   assert(!compile(stitching_kernel, "stitches", &unlinked, &error));
+
+   /* Only visible functions stitch, with as many arguments as they take. */
+   assert(!stela_metal_stitch(&sources[1], 1, &graph, 1, keep_stitched, &stitched, &error) &&
+          strstr(error.detail, "not visible"));
+   const struct stela_air_stitch_node calling_nothing[] = {
+      {.function = 0, .argument_count = 0},
+   };
+   const struct stela_air_stitch_graph short_call = {"short", calling_nothing, 1,
+                                                     STELA_AIR_STITCH_NO_OUTPUT};
+   assert(!stela_metal_stitch(sources, 1, &short_call, 1, keep_stitched, &stitched, &error) &&
+          strstr(error.detail, "number of arguments"));
+   LLVMDisposeMemoryBuffer(stitched);
+   LLVMDisposeMemoryBuffer(source);
+}
+
 /* compile() with the modules and linked functions of a pipeline. */
 static nir_shader *
 compile_linked(const char *fixture, const char *entry, const char *const *modules,
@@ -1453,6 +1545,7 @@ main(void)
    arrays_reflect_each_slot();
    bindings_reflect_their_structures();
    defined_functions_inline_into_their_callers();
+   stitched_functions_call_their_nodes_in_order();
    linked_functions_resolve_tables_and_externals();
    recursion_unrolls_to_the_call_stack_depth();
    linked_modules_specialize_their_function_constants();

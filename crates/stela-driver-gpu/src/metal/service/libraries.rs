@@ -6,6 +6,7 @@ use super::{
         FunctionReflectionRequest, FunctionReflectionResponse, LibraryDataRequest,
         LibraryFunctionNamesRequest, LibraryIdentityRequest, LibraryIdentityResponse,
         NewArchiveRequest, NewFunctionRequest, NewLibraryRequest, NewSourceLibraryRequest,
+        NewStitchedLibraryRequest,
     },
 };
 use crate::metal::{
@@ -15,6 +16,7 @@ use crate::metal::{
         pipelines::{ConstantKey, ConstantValue},
     },
     shader::{Compiler, PatchDomain, Reflection},
+    stitching,
     vulkan::backend::Backend,
 };
 use alloc::{string::String, vec::Vec};
@@ -42,6 +44,19 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         let library = self
             .device
             .new_source_library(&air, install_name.as_deref(), &libraries)?;
+        let handle = self.hold(call.connection, Object::Library(library))?;
+        call.reply(&handle)
+    }
+
+    pub(super) fn new_stitched_library(&mut self, call: &mut Call) -> Result<(), Fault> {
+        let request: NewStitchedLibraryRequest = call.request()?;
+        let memory = &mut *call.memory;
+        let functions = wire::read_array::<u64>(&memory.read(request.functions)?)?
+            .into_iter()
+            .map(|handle| self.object::<FunctionId>(call.connection, handle))
+            .collect::<Result<Vec<_>, Fault>>()?;
+        let graphs = stitching::decode(&memory.read(request.graphs)?, functions.len())?;
+        let library = self.device.new_stitched_library(&functions, &graphs)?;
         let handle = self.hold(call.connection, Object::Library(library))?;
         call.reply(&handle)
     }

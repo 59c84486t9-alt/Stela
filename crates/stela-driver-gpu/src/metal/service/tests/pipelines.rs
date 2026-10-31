@@ -5,8 +5,9 @@ use super::{
 use crate::metal::service::wire::{
     ArchiveDataRequest, BufferResponse, ComputePipelineResponse, Empty, FunctionHandleRequest,
     FunctionHandleResponse, Handle, Length, LinkedFunctionsRecord, NewArchiveRequest,
-    NewComputePipelineRequest, NewFunctionTableRequest, NewRenderPipelineRequest, Operation,
-    PipelineArchivesRecord, RenderPipelineResponse, SetFunctionsRequest, Span, Status,
+    NewComputePipelineRequest, NewFunctionTableRequest, NewRenderPipelineRequest,
+    NewStitchedLibraryRequest, Operation, PipelineArchivesRecord, RenderPipelineResponse,
+    SetFunctionsRequest, Span, Status,
 };
 use core::num::NonZeroU64;
 
@@ -221,6 +222,45 @@ fn compute_pipelines_link_functions_and_answer_their_handles() {
         Err(Status::StaleHandle)
     );
     assert_eq!(release(&mut service, pipeline.handle), Status::Ok);
+}
+
+#[test]
+fn stitched_libraries_take_visible_functions() {
+    let mut service = service();
+    let connection = connect(&mut service);
+    let memory = &mut Memory::default();
+    let library = new_library(&mut service, connection, memory);
+    let mut function = |library, name| {
+        new_function(&mut service, connection, library, name, &[], memory)
+            .unwrap()
+            .handle
+    };
+    let (kernel, visible) = (function(library, "kernel"), function(library, "visible"));
+    // `f(a) = visible(a)`.
+    let words = [1u32, 2, 2, 0x66, 0, 0, 1, 1, 0];
+    let graphs: alloc::vec::Vec<u8> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+    let graphs = memory.put(&graphs);
+    let mut stitched = |functions: &[u64], memory: &mut Memory| {
+        let request = NewStitchedLibraryRequest {
+            functions: memory.records(functions),
+            graphs,
+        };
+        call::<_, Handle>(
+            &mut service,
+            connection,
+            Operation::NewStitchedLibrary,
+            &request,
+            memory,
+        )
+    };
+    assert_eq!(status(stitched(&[kernel], memory)), Status::Invalid);
+    let stitched = stitched(&[visible], memory).unwrap().handle;
+
+    let function = new_function(&mut service, connection, stitched, "visible", &[], memory)
+        .unwrap()
+        .handle;
+    let linked = linked(memory, &[function]);
+    compute_pipeline(&mut service, connection, kernel, linked, 0, memory).unwrap();
 }
 
 #[test]

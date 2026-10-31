@@ -25,6 +25,7 @@ use crate::metal::{
         CompiledShader, Compiler, Interface, LinkedFunction, Linking, Reflection, Specialization,
         Stage, Tessellation, TessellationStages, Varying,
     },
+    stitching::StitchedGraph,
     vertex::{StageInputDescriptor, VertexDescriptor},
     vulkan::{
         ShaderStages,
@@ -76,8 +77,12 @@ struct LibraryObject {
     names: Vec<String>,
     dynamic: bool,
     install_name: Option<String>,
-    /// `MTLCompileOptions.libraries`, which it keeps.
+    /// `MTLCompileOptions.libraries` and a stitched library's functions'
+    /// libraries, which it keeps.
     dependencies: Vec<LibraryId>,
+    /// What a pipeline linking its functions links too: stitched functions'
+    /// calls stay declarations.
+    stitched: Vec<LinkedFunction>,
     users: Users,
 }
 
@@ -446,6 +451,45 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         Ok(library)
     }
 
+    /// `newLibraryWithStitchedDescriptor:error:`: a library of `graphs`, whose
+    /// calls index `functions`.
+    pub fn new_stitched_library(
+        &mut self,
+        functions: &[FunctionId],
+        graphs: &[StitchedGraph],
+    ) -> Result<LibraryId> {
+        let mut libraries = Vec::with_capacity(functions.len());
+        let mut stitched = Vec::with_capacity(functions.len());
+        for &id in functions {
+            let function = self.pipelines.functions.get(id.0)?;
+            ensure(
+                matches!(function.reflection, Reflection::Visible { .. }),
+                "stitched functions are visible functions",
+            )?;
+            let mut constants = function.constants.clone();
+            constants.sort_unstable_by_key(|&(index, _)| index);
+            stitched.push(LinkedFunction {
+                library: self.pipelines.library(function.library)?,
+                entry: function.entry.clone(),
+                constants,
+            });
+            libraries.push(function.library);
+        }
+        let sources: Vec<_> = stitched
+            .iter()
+            .map(|function| (function.library, function.entry.as_str()))
+            .collect();
+        let air = self.compiler.stitch(&sources, graphs)?;
+        // A stitched function's own stitched functions link with it.
+        for id in &libraries {
+            let below = &self.pipelines.libraries.get(id.0)?.stitched;
+            stitched.extend_from_slice(below);
+        }
+        let library = self.new_source_library(&air, None, &libraries)?;
+        self.pipelines.libraries.get_mut(library.0)?.stitched = stitched;
+        Ok(library)
+    }
+
     /// `newLibraryWithData:`: keeps a Metal library for its functions.
     pub fn new_library(&mut self, data: Vec<u8>) -> Result<LibraryId> {
         let parsed = Library::parse(&data).map_err(|_| Error::Invalid("Metal library"))?;
@@ -463,6 +507,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             dynamic,
             install_name,
             dependencies: Vec::new(),
+            stitched: Vec::new(),
             users: Users::CREATED,
         });
         Ok(LibraryId(index))
@@ -1413,11 +1458,17 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 })
                 .collect()
         };
+        let mut private_functions = entries(&linked.private_functions)?;
+        for &id in functions() {
+            let library = self.pipelines.functions.get(id.0)?.library;
+            let stitched = &self.pipelines.libraries.get(library.0)?.stitched;
+            private_functions.extend_from_slice(stitched);
+        }
         Ok(Linked {
             functions: linked.functions.clone(),
             linking: Linking {
                 functions: entries(&linked.functions)?,
-                private_functions: entries(&linked.private_functions)?,
+                private_functions,
                 libraries: linked
                     .libraries
                     .iter()

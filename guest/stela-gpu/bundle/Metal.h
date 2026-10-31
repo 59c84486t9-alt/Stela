@@ -120,6 +120,9 @@ enum {
 	MTLLibraryTypeDynamic = 1,
 };
 enum {
+	MTLStitchedLibraryOptionFailOnBinaryArchiveMiss = 1,
+};
+enum {
 	MTLIOErrorURLInvalid = 1,
 	MTLIOErrorInternal = 2,
 };

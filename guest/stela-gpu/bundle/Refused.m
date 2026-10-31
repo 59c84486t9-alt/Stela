@@ -18,7 +18,6 @@
 		}                                                                                  \
 	} while (0)
 
-#define STITCHING "this device links no stitched function graphs"
 #define RAY_TRACING "this device has no acceleration structures"
 
 @implementation StelaGPUDevice (Refused)
@@ -63,19 +62,6 @@
 {
 	REFUSE_ERROR(MTLLogStateErrorDomain, MTLLogStateErrorInvalid, "this device has no shader logging");
 	return nil;
-}
-
-- (id)newLibraryWithStitchedDescriptor:(id)descriptor error:(NSError **)error
-{
-	REFUSE_ERROR(MTLLibraryErrorDomain, MTLLibraryErrorUnsupported, STITCHING);
-	return nil;
-}
-
-- (void)newLibraryWithStitchedDescriptor:(id)descriptor completionHandler:(void (^)(id, NSError *))handler
-{
-	NSError *error = nil;
-	id library = [self newLibraryWithStitchedDescriptor:descriptor error:&error];
-	handler(library, error);
 }
 
 @end

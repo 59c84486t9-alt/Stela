@@ -389,6 +389,32 @@ typedef bool (*stela_air_visit_function)(void *, const char *name, size_t name_b
                                          unsigned stage);
 bool stela_air_functions(const void *, size_t, stela_air_visit_function, void *,
                          struct stela_air_error *);
+/* A visible function a stitched function calls, and the module defining it. */
+struct stela_air_stitch_source {
+   const void *bitcode;
+   size_t size;
+   const char *name;
+};
+#define STELA_AIR_STITCH_INPUT UINT32_MAX
+#define STELA_AIR_STITCH_NO_OUTPUT UINT32_MAX
+/* A node of a stitched function: an input, argument `input` of the function,
+ * or a call of source `function` on the values of earlier nodes. */
+struct stela_air_stitch_node {
+   uint32_t function, input;
+   const uint32_t *arguments;
+   uint32_t argument_count;
+};
+struct stela_air_stitch_graph {
+   const char *name;
+   const struct stela_air_stitch_node *nodes;
+   uint32_t node_count;
+   uint32_t output; /* The node whose result it returns. */
+};
+/* Calls visit with the bitcode of a module of the graphs: air_stitch.c. */
+typedef void (*stela_air_visit_bytes)(void *, const void *, size_t);
+bool stela_air_stitch(const struct stela_air_stitch_source *, unsigned,
+                      const struct stela_air_stitch_graph *, unsigned, stela_air_visit_bytes,
+                      void *, struct stela_air_error *);
 /* A module's constexpr sampler states, AIR_MAX_SAMPLER_STATES at most, as
  * stela_air_metadata_sampler_states lists them. */
 #define AIR_MAX_SAMPLER_STATES AIR_MAX_METADATA_OPERANDS

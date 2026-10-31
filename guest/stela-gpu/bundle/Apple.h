@@ -90,6 +90,7 @@ __attribute__((objc_root_class)) @interface NSObject
 + (instancetype)arrayWithObjects:(const id __unsafe_unretained[])objects count:(NSUInteger)count;
 - (id)objectAtIndexedSubscript:(NSUInteger)index;
 - (id)objectAtIndex:(NSUInteger)index;
+- (NSUInteger)indexOfObjectIdenticalTo:(id)object;
 @property(readonly) NSUInteger count;
 @end
 
@@ -107,6 +108,7 @@ __attribute__((objc_root_class)) @interface NSObject
 + (instancetype)arrayWithCapacity:(NSUInteger)capacity;
 - (void)addObject:(id)object;
 - (void)removeObjectAtIndex:(NSUInteger)index;
+- (void)removeLastObject;
 - (void)removeAllObjects;
 @end
 
@@ -197,6 +199,7 @@ typedef void (*IOAsyncCallback1)(void *reference, int result, void *argument);
 typedef void (*IOAsyncCallback)(void *reference, int result, void **arguments, uint32_t count);
 
 void arc4random_buf(void *bytes, size_t length);
+size_t strlcpy(char *to, const char *from, size_t size);
 kern_return_t mach_vm_allocate(task_t task, mach_vm_address_t *address, mach_vm_size_t size, int flags);
 kern_return_t mach_vm_deallocate(task_t task, mach_vm_address_t address, mach_vm_size_t size);
 kern_return_t IOServiceOpen(io_service_t service, task_t owner, uint32_t type, io_connect_t *connect);

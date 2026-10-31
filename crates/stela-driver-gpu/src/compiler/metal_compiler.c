@@ -342,6 +342,14 @@ stela_metal_functions(const void *air, size_t size, stela_metal_visit_function v
    return stela_air_functions(air, size, list_function, &listing, error);
 }
 
+bool
+stela_metal_stitch(const struct stela_air_stitch_source *sources, uint32_t source_count,
+                   const struct stela_air_stitch_graph *graphs, uint32_t graph_count,
+                   stela_air_visit_bytes visit, void *data, struct stela_air_error *error)
+{
+   return stela_air_stitch(sources, source_count, graphs, graph_count, visit, data, error);
+}
+
 /* Reflects entry, and selects its stage by the AIR list that names it. */
 static bool
 reflect(const void *air, size_t size, const char *entry,

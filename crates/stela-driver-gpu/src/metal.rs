@@ -37,6 +37,7 @@ pub mod sampler;
 pub mod service;
 pub mod shader;
 pub mod sparse;
+pub mod stitching;
 pub mod upload;
 pub mod vertex;
 pub mod vulkan;

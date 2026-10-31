@@ -934,6 +934,52 @@ fn mesh_pipelines_answer_for_binary_archives_at_creation() {
 }
 
 #[test]
+fn a_stitched_function_links_what_it_calls() {
+    let mut device = device();
+    let kernel = device.new_function(LIBRARY, "kernel", &[]).unwrap();
+    let visible = device.new_function(LIBRARY, "visible", &[]).unwrap();
+    assert_eq!(
+        device.new_stitched_library(&[kernel], &[]),
+        Err(Error::Invalid("stitched functions are visible functions"))
+    );
+    let library = device.new_stitched_library(&[visible], &[]).unwrap();
+    let stitched = device.new_function(library, "visible", &[]).unwrap();
+    // A second stitch of the first links what the first calls too.
+    let library = device.new_stitched_library(&[stitched], &[]).unwrap();
+    let outer = device.new_function(library, "visible", &[]).unwrap();
+    device.destroy_function(visible).unwrap();
+    device.destroy_function(stitched).unwrap();
+
+    let request = ComputePipelineRequest {
+        compute_function: kernel,
+        threadgroup_size_is_multiple_of_thread_execution_width: false,
+        max_total_threads_per_threadgroup: 0,
+        stage_input: None,
+        linked_functions: LinkedFunctions {
+            functions: alloc::vec![outer],
+            max_call_stack_depth: 1,
+            ..LinkedFunctions::default()
+        },
+        support_indirect_command_buffers: false,
+        archives: Default::default(),
+    };
+    let pipeline = device.new_compute_pipeline(&request).unwrap();
+    let dispatch = Specialization {
+        workgroup_size: Some([64, 1, 1]),
+        ..Specialization::default()
+    };
+    device
+        .compute_variant(u64::from(pipeline.0), &dispatch)
+        .unwrap();
+    let linking = &device.compiler.compiled.last().unwrap().linking;
+    let libraries = |functions: &[LinkedFunction]| -> Vec<u64> {
+        functions.iter().map(|function| function.library).collect()
+    };
+    assert_eq!(libraries(&linking.functions), [2]);
+    assert_eq!(libraries(&linking.private_functions), [1, 0]);
+}
+
+#[test]
 fn stages_link_visible_functions_and_name_them_by_handle() {
     let mut device = device();
     let kernel = device.new_function(LIBRARY, "kernel", &[]).unwrap();

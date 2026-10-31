@@ -173,6 +173,13 @@ records! {
         pub libraries: Span,
     }
 
+    /// `newLibraryWithStitchedDescriptor:error:`: the handles of its
+    /// `functions` as `u64`s, and its graphs as `metal/stitching.rs` reads them.
+    pub struct NewStitchedLibraryRequest {
+        pub functions: Span,
+        pub graphs: Span,
+    }
+
     /// `NewArchive`: the bytes of an archive's file, if it has one.
     pub struct NewArchiveRequest {
         pub data: Span,
@@ -1009,6 +1016,7 @@ operations! {
     LibraryData = 0x0108 => LibraryDataRequest, Length;
     /// `newLibraryWithSource:options:error:`.
     NewSourceLibrary = 0x010b => NewSourceLibraryRequest, Handle;
+    NewStitchedLibrary = 0x010c => NewStitchedLibraryRequest, Handle;
     /// `newBinaryArchiveWithDescriptor:error:`.
     NewArchive = 0x0109 => NewArchiveRequest, Handle;
     /// The bytes `serializeToURL:error:` writes.

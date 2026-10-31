@@ -18,6 +18,7 @@ use crate::metal::{
         PatchDomain, Provenance, Reflection, Scalar, Specialization, Stage, Tessellation,
         TessellationStages, Varying, tests::interface,
     },
+    stitching::StitchedGraph,
     vulkan::{
         backend::{Backend, BufferAllocation, Descriptor, Object, Requirements},
         command::BufferImageCopy,
@@ -469,6 +470,9 @@ impl Compiler for MockCompiler {
             (String::from("kernel"), FunctionType::Kernel),
             (String::from("visible"), FunctionType::Visible),
         ])
+    }
+    fn stitch(&mut self, _: &[(u64, &str)], _: &[StitchedGraph]) -> Result<Vec<u8>> {
+        Ok(b"BC\xc0\xde\0\0\0\0".to_vec())
     }
     fn library_data(&self, library: u64) -> Result<&[u8]> {
         self.libraries[library as usize]

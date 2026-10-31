@@ -235,6 +235,12 @@ typedef bool (*stela_metal_visit_function)(void *data, const char *name, size_t 
 bool stela_metal_functions(const void *air, size_t size, stela_metal_visit_function visit,
                            void *data, struct stela_air_error *error);
 
+/* Calls visit with the AIR of a module of stitched functions, whose calls
+ * stay declarations a pipeline links. False after reporting why. */
+bool stela_metal_stitch(const struct stela_air_stitch_source *sources, uint32_t source_count,
+                        const struct stela_air_stitch_graph *graphs, uint32_t graph_count,
+                        stela_air_visit_bytes visit, void *data, struct stela_air_error *error);
+
 #define STELA_METAL_SAMPLER_STATES 256u
 
 /* The constexpr sampler states the AIR module declares, each Apple's

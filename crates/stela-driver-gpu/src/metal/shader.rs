@@ -18,6 +18,7 @@ use super::{
     error::{Result, ensure},
     pixel_format::Numeric,
     reflection::Binding,
+    stitching::StitchedGraph,
     vertex::{StageInputDescriptor, VertexDescriptor},
     vulkan::{ShaderStages, object::ShaderCode},
 };
@@ -603,6 +604,10 @@ pub trait Compiler {
     /// The functions an AIR module's entry lists name, for a library of
     /// source, whose compiler makes no container.
     fn functions(&mut self, air: &[u8]) -> Result<Vec<(String, FunctionType)>>;
+
+    /// A module of `graphs`, whose calls index `sources`: a library and a
+    /// function of it. The calls stay declarations a pipeline links.
+    fn stitch(&mut self, sources: &[(u64, &str)], graphs: &[StitchedGraph]) -> Result<Vec<u8>>;
 
     /// The bytes [`add_library`](Self::add_library) kept.
     fn library_data(&self, library: u64) -> Result<&[u8]>;

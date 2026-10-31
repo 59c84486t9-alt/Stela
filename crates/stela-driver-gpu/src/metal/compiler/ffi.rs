@@ -321,6 +321,35 @@ pub(super) struct Module {
     pub constant_count: u32,
 }
 
+/// `stela_air_stitch_source`.
+#[repr(C)]
+pub(super) struct StitchSource {
+    pub(super) bitcode: *const c_void,
+    pub(super) size: usize,
+    pub(super) name: *const c_char,
+}
+
+/// `stela_air_stitch_node`.
+#[repr(C)]
+pub(super) struct StitchNode {
+    pub(super) function: u32,
+    pub(super) input: u32,
+    pub(super) arguments: *const u32,
+    pub(super) argument_count: u32,
+}
+
+/// `stela_air_stitch_graph`.
+#[repr(C)]
+pub(super) struct StitchGraph {
+    pub(super) name: *const c_char,
+    pub(super) nodes: *const StitchNode,
+    pub(super) node_count: u32,
+    pub(super) output: u32,
+}
+
+/// `stela_air_visit_bytes`.
+pub(super) type VisitBytes = unsafe extern "C" fn(*mut c_void, *const c_void, usize);
+
 /// `struct stela_air_linked_function`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
