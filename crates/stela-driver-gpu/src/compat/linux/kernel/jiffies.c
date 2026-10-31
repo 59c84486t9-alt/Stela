@@ -1,9 +1,7 @@
 // SPDX-License-Identifier: MIT
 /* Linux's tick count. As x86's linker script does, jiffies names
- * jiffies_64's low word, which on LP64 is all of it. The platform's timer
- * interrupt advances the word at HZ once its owner binds it to the clock, as
- * Linux's tick does, without running Linux code; until then it holds
- * INITIAL_JIFFIES. */
+ * jiffies_64's low word, which on LP64 is all of it. Service passes advance it
+ * (kernel/service.c); until the first it holds INITIAL_JIFFIES. */
 #include <linux/jiffies.h>
 
 u64 jiffies_64 __cacheline_aligned_in_smp = INITIAL_JIFFIES;

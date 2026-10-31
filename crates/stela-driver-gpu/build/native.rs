@@ -385,6 +385,7 @@ impl Linux {
                     format!("{COMPAT}/stela/atomic_callback_test.c"),
                     format!("{COMPAT}/stela/mutex_test.c"),
                     format!("{COMPAT}/stela/resource_test.c"),
+                    format!("{COMPAT}/stela/service_test.c"),
                     format!("{COMPAT}/stela/timer_test.c"),
                     format!("{COMPAT}/stela/workqueue_test.c"),
                     format!("{COMPAT}/stela/i2c_test.c"),
@@ -514,6 +515,7 @@ impl Linux {
             ("linux_dma", "dma.c", "STELA_LINUX_DMA_TEST"),
             ("linux_pci", "pci.c", "STELA_LINUX_PCI_TEST"),
             ("linux_pci_host", "pci_host.c", "STELA_LINUX_PCI_HOST_TEST"),
+            ("linux_service", "service.c", "STELA_LINUX_SERVICE_TEST"),
             ("linux_vmalloc", "vmalloc.c", "STELA_LINUX_VMALLOC_TEST"),
             ("linux_refcount", "refcount.c", "STELA_LINUX_REFCOUNT_TEST"),
             (

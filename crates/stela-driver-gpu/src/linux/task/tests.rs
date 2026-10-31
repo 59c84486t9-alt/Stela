@@ -3,6 +3,10 @@
 //! assertions are held. This plain Rust child is not whole-C ASan/UBSan.
 extern crate std;
 use super::*;
+use crate::linux::{
+    owner::{Errno, Owner, Platform, RawOwner},
+    service::Environment,
+};
 use alloc::{boxed::Box, vec::Vec};
 use core::{
     alloc::{GlobalAlloc, Layout},
@@ -156,6 +160,7 @@ unsafe extern "C" {
     fn stela_linux_task_test_service_wait(context: *mut c_void);
     fn stela_linux_task_test_service_cancel(context: *mut c_void);
     fn stela_linux_task_test_clock_service(context: *mut c_void);
+    fn stela_linux_service_test_body(context: *mut c_void);
     fn stela_linux_timer_test_service(context: *mut c_void);
     fn stela_linux_timer_test_sleeper(context: *mut c_void);
     fn stela_linux_workqueue_test_bind(
@@ -606,6 +611,7 @@ fn trees_child() {
     // no address as immutable data requires.
     assert!(unsafe { crate::linux::image::register(alloc::sync::Arc::new(NoImage)) }.is_ok());
     workqueue_roundtrip();
+    environment_roundtrip();
     stack_catalog_capacity();
 }
 
@@ -1140,6 +1146,163 @@ fn timer_service_roundtrip() {
     drop(domain);
     drop(executor);
     assert_eq!(cpu.flags.load(Ordering::Acquire), 0x202);
+    assert_eq!(quarantined(), 0);
+}
+
+/// What Linux code in [`environment_roundtrip`] needs of its machine.
+#[derive(Default)]
+struct Machine {
+    start: core::cell::OnceCell<std::time::Instant>,
+    environment: AtomicPtr<Environment<16>>,
+}
+
+impl Machine {
+    fn environment(&self) -> Pin<&Environment<16>> {
+        // SAFETY: the test keeps the pinned environment through every task.
+        unsafe { Pin::new_unchecked(&*self.environment.load(Ordering::Acquire)) }
+    }
+}
+
+impl Platform for Machine {
+    fn now_ns(&self) -> i64 {
+        let start = self.start.get_or_init(std::time::Instant::now);
+        start.elapsed().as_nanos() as i64
+    }
+    fn delay_us(&self, minimum: u64, _: u64, atomic: bool) {
+        assert!(!atomic);
+        // SAFETY: Linux's call, on one of the environment's tasks.
+        unsafe { crate::linux::service::sleep_us(minimum) };
+    }
+    fn firmware(&self, _: &core::ffi::CStr) -> Result<&[u8], Errno> {
+        unreachable!();
+    }
+    fn log(&self, _: i32, message: &core::ffi::CStr) {
+        std::eprintln!("{message:?}");
+    }
+    fn warn(&self, file: &core::ffi::CStr, line: i32, _: Option<&core::ffi::CStr>) {
+        panic!("WARN at {file:?}:{line}");
+    }
+    fn unsupported(&self, operation: &core::ffi::CStr) {
+        panic!("unsupported: {operation:?}");
+    }
+    fn random_bytes(&self, _: &mut [u8]) {
+        unreachable!();
+    }
+    fn start_worker(&self) -> Result<(), Errno> {
+        self.environment().start_worker().map(drop).map_err(|_| -11)
+    }
+    fn shutdown(&self, _: bool) {
+        unreachable!();
+    }
+    fn map_device(&self, _: u64, _: usize) -> Option<*mut c_void> {
+        unreachable!();
+    }
+    unsafe fn unmap_device(&self, _: *mut c_void) {
+        unreachable!();
+    }
+    fn map_pages(&self, _: &[u64]) -> Option<*mut c_void> {
+        unreachable!();
+    }
+    unsafe fn unmap_pages(&self, _: *mut c_void, _: usize) {
+        unreachable!();
+    }
+    fn irq_enable(&self, irq: u32) -> Result<(), Errno> {
+        assert_eq!(irq, 7);
+        Ok(())
+    }
+    fn irq_disable(&self, irq: u32) {
+        assert_eq!(irq, 7);
+    }
+    unsafe fn copy_from_user(&self, _: *mut u8, _: *const u8, _: usize) -> usize {
+        unreachable!();
+    }
+    unsafe fn copy_to_user(&self, _: *mut u8, _: *const u8, _: usize) -> usize {
+        unreachable!();
+    }
+    fn map_user(&self, _: *mut c_void, _: u64, _: u64, _: u64) -> Result<(), Errno> {
+        unreachable!();
+    }
+    fn unmap_user(&self, _: *mut c_void, _: u64, _: usize) {
+        unreachable!();
+    }
+}
+
+#[repr(C)]
+struct EnvironmentTest {
+    owner: *const RawOwner,
+    context: *mut c_void,
+    raise: unsafe extern "C" fn(*mut c_void, u32),
+}
+
+unsafe extern "C" fn raise_line(context: *mut c_void, line: u32) {
+    // SAFETY: the test's machine, alive through the task.
+    let machine = unsafe { &*context.cast::<Machine>() };
+    machine.environment().raise(line).unwrap();
+}
+
+/// A task sleeping on the service task's timer, a raised line reaching its
+/// handler there, and the work that handler queued reaching a worker task.
+fn environment_roundtrip() {
+    let cpu = CpuModel::new();
+    let f = Fixture::new(cpu.clone());
+    // SAFETY: the fixture is the queue's owner, and only this test thread produces
+    // work.
+    let queue = unsafe { Queue::<16>::new(cpu.clone(), f) }.unwrap();
+    let dropped = Arc::new(AtomicU64::new(0));
+    let executor =
+        Executor::new_hosted_service_for_test(queue, stacks_count(&dropped, 16 * 1024, 5)).unwrap();
+    let runtime = executor.runtime();
+    let clock: Arc<dyn service::Clock> = Arc::new(ServiceClock {
+        cpu: cpu.clone(),
+        reads: Arc::new(AtomicU64::new(0)),
+        start: std::time::Instant::now(),
+    });
+    let idle = Arc::new(ServiceIdle {
+        clock: clock.clone(),
+        owner: thread::current(),
+        waits: AtomicU64::new(0),
+    });
+    let domain = service::Domain::new(clock, idle).unwrap();
+    let owner = Owner::new(Machine::default());
+    // SAFETY: the taskless dispatcher, and this function keeps the owner and
+    // runtime past every task.
+    let environment = unsafe { Environment::new(owner.raw(), runtime, domain) }.unwrap();
+    owner.platform().environment.store(
+        ptr::from_ref(environment.as_ref().get_ref()).cast_mut(),
+        Ordering::Release,
+    );
+    environment.as_ref().start().unwrap();
+    let mut test = EnvironmentTest {
+        owner: owner.raw(),
+        context: ptr::from_ref(owner.platform()).cast_mut().cast(),
+        raise: raise_line,
+    };
+    // SAFETY: the body enters and leaves the owner, and `test` outlives it.
+    let task = unsafe {
+        environment
+            .as_ref()
+            .spawn(stela_linux_service_test_body, (&raw mut test).cast())
+    }
+    .unwrap();
+    let mut steps = 0;
+    while !runtime.queue().completed(task).unwrap() {
+        assert!(steps < 100_000, "the task did not complete");
+        runtime.step_or_idle().unwrap();
+        steps += 1;
+    }
+    environment.stop().unwrap();
+    while !environment.finished().unwrap() {
+        assert!(steps < 100_000, "the service and workers did not stop");
+        runtime.step_or_idle().unwrap();
+        steps += 1;
+    }
+    // SAFETY: every task finished, and this test thread raises no more lines.
+    unsafe { environment.as_ref().retire() }.unwrap();
+    runtime.queue().close().unwrap();
+    // SAFETY: the queue is closed and this test thread is the only producer.
+    unsafe { runtime.retire() }.unwrap();
+    drop(environment);
+    drop(executor);
     assert_eq!(quarantined(), 0);
 }
 
