@@ -39,7 +39,7 @@ const CHECKSUM_BYTES: usize = DIGEST_BYTES;
 pub const MAX_RECORDS: usize = 1 << 22;
 /// The most memory the blocks waiting for proof take; later blocks are
 /// counted as dropped.
-const MAX_PENDING_BYTES: usize = 64 << 20;
+const MAX_PENDING_BYTES: usize = 16 << 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PackError {
