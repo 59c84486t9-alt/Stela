@@ -193,15 +193,18 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                     .scanner
                     .observe(s.scan_ticket.unwrap(), &frame, policy)
                     .map_err(Error::Scan)?;
-                s.pmf_observations
-                    .try_reserve(1)
-                    .map_err(|_| Error::NoMemory)?;
-                if s.pmf_observations.len() == pmf::MAX_OBSERVATIONS {
-                    s.pmf_observations.remove(0);
+                let nontransmitted = scan::multiple_bssid::nontransmitted(&bss);
+                for bss in core::iter::once(bss).chain(nontransmitted) {
+                    s.pmf_observations
+                        .try_reserve(1)
+                        .map_err(|_| Error::NoMemory)?;
+                    if s.pmf_observations.len() == pmf::MAX_OBSERVATIONS {
+                        s.pmf_observations.remove(0);
+                    }
+                    s.pmf_observations
+                        .push(Arc::new(PmfBssObservation { bss: bss.clone() }));
+                    events.push(Event::Bss(bss));
                 }
-                s.pmf_observations
-                    .push(Arc::new(PmfBssObservation { bss: bss.clone() }));
-                events.push(Event::Bss(bss));
                 continue;
             }
             if s.station.phase() == station::Phase::ExternalAuthenticating {
