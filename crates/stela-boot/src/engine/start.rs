@@ -16,11 +16,13 @@ fn from_disk(
     // The kernel's text on the screen and on the debug UART, which the
     // boot log records, as setup's bundles have it. A panic's stackshot
     // waits for every PE to answer: 10 s at 24 MHz, not XNU's 1.44 ms, which
-    // is too short for PEs that answer at their next exit.
+    // is too short for PEs that answer at their next exit. System sleep is
+    // not modeled, so `noidle` stops the idle timer that would ask for it.
     let defaults = boot_bundle::Options {
         ecid: options.ecid,
         boot_command: options.boot_command,
-        boot_args: "-v serial=3 serial-device-name=uart0 ml-timeout-debug-ack=240000000".into(),
+        boot_args: "-v serial=3 serial-device-name=uart0 ml-timeout-debug-ack=240000000 noidle=1"
+            .into(),
         ..boot_bundle::Options::default()
     };
     let result = if options.upgrade {
