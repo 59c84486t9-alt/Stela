@@ -1224,29 +1224,14 @@ impl Firmware for Coprocessor {
         self.rtkit.start(outbox)
     }
     fn receive(&mut self, message: Mail, outbox: &mut Vec<Mail>) -> Result<()> {
-        if message.endpoint == 0
-            && message.payload >> 52 & 0xf == 6
-            && matches!(message.payload & !(0xf << 52), 0x201 | 0x202 | 0)
-        {
-            if self.protocol.with(State::dma_pending) {
-                return Err(refuse!(
-                    "GFX IOP sleep with owned initdata or queued channel work"
-                ));
-            }
-            if self.protocol.with(|state| state.initdata_va.is_some()) {
-                // Original native power callbacks depend on the AP hardware
-                // config, update shared powered/generation words and restore
-                // GPU registers. A bare management ACK cannot stand for them.
-                return Err(if self.power.is_some() {
-                    refuse!(
-                        "GFX initialized IOP sleep requires complete config-derived native callbacks"
-                    )
-                } else {
-                    refuse!(
-                        "GFX initialized IOP sleep requires native power callbacks and GPU restore semantics"
-                    )
-                });
-            }
+        if is_iop_sleep(message) && self.protocol.with(|state| state.initdata_va.is_some()) {
+            // Original native power callbacks depend on the AP hardware
+            // config, update shared powered/generation words and restore GPU
+            // registers. None of that runs: `error_reply` acknowledges the
+            // request once the firmware owns no work.
+            return Err(refuse!(
+                "GFX initialized IOP sleep runs no native power callbacks"
+            ));
         }
         if matches!(message.endpoint, MESSAGE_ENDPOINT | DOORBELL_ENDPOINT)
             && !matches!(
@@ -1266,6 +1251,33 @@ impl Firmware for Coprocessor {
     fn dma(&mut self, port: &mut Port<'_, '_>, outbox: &mut Vec<Mail>) -> Result<()> {
         self.protocol.0.borrow_mut().dma(port, outbox)
     }
+    /// The degraded answer to an initialized IOP sleep: the management ACK
+    /// with the firmware's state kept, without the native callbacks. Work the
+    /// firmware holds goes as it does at a stop, because sleep ends its claim
+    /// on those channels; a start or a stop still in progress stays unanswered.
+    fn error_reply(&mut self, message: Mail, _reason: &Refusal) -> Option<Vec<Mail>> {
+        if !is_iop_sleep(message) {
+            return None;
+        }
+        {
+            let mut state = self.protocol.0.borrow_mut();
+            state.jobs.retain(|job| !matches!(job, Job::Work(..)));
+            state.active_work = None;
+            if state.dma_pending() {
+                return None;
+            }
+        }
+        let mut replies = Vec::new();
+        self.rtkit.receive(message, &mut replies).ok()?;
+        Some(replies)
+    }
+}
+
+/// A management request for one of the IOP's sleep states.
+fn is_iop_sleep(message: Mail) -> bool {
+    message.endpoint == 0
+        && message.payload >> 52 & 0xf == 6
+        && matches!(message.payload & !(0xf << 52), 0x201 | 0x202 | 0)
 }
 
 /// The 0x20 message endpoint.

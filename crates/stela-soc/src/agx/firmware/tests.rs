@@ -63,34 +63,21 @@ fn native_power_constructor_keeps_the_concrete_family_and_callback_refusal() {
         assert!(
             Coprocessor::with_power(other, power.clone(), stela_formats::builds::DEFAULT).is_err()
         );
-        // A truthful target binding alone is not enough to acknowledge
-        // unimplemented config-dependent callback effects.
+        // A truthful target binding alone does not run the unimplemented
+        // config-dependent callback effects.
         firmware.protocol.0.borrow_mut().initdata_va = Some(ROOT);
         let mut outbox = Vec::new();
-        assert!(
-            firmware
-                .receive(
-                    Mail {
-                        endpoint: 0,
-                        payload: 6 << 52 | 0x201
-                    },
-                    &mut outbox
-                )
-                .unwrap_err()
-                .to_string()
-                .contains("owned initdata")
-        );
+        let sleep = Mail {
+            endpoint: 0,
+            payload: 6 << 52 | 0x201,
+        };
+        let reason = firmware.receive(sleep, &mut outbox).unwrap_err();
+        assert_eq!(firmware.error_reply(sleep, &reason), None);
         firmware.protocol.0.borrow_mut().initdata_checked = true;
         assert_eq!(
-            firmware.receive(
-                Mail {
-                    endpoint: 0,
-                    payload: 6 << 52 | 0x201
-                },
-                &mut outbox
-            ),
+            firmware.receive(sleep, &mut outbox),
             Err(refuse!(
-                "GFX initialized IOP sleep requires complete config-derived native callbacks"
+                "GFX initialized IOP sleep runs no native power callbacks"
             ))
         );
         assert!(outbox.is_empty());
@@ -123,7 +110,7 @@ fn native_power_constructor_keeps_the_concrete_family_and_callback_refusal() {
 }
 
 #[test]
-fn native_power_refusal_is_atomic_before_and_after_startup_for_every_modeled_family() {
+fn initialized_sleep_waits_for_startup_then_acknowledges_with_state_kept_on_every_family() {
     for family in [&G13G, &G13X, &G14G, &G14X, &G15G] {
         for sleep in [0, 0x201, 0x202] {
             let mut firmware = booted_gfx(family);
@@ -185,9 +172,18 @@ fn native_power_refusal_is_atomic_before_and_after_startup_for_every_modeled_fam
                         .unwrap();
                 }
                 let bytes = memory.bytes.clone();
-                assert!(firmware.receive(power(sleep), &mut outbox).is_err());
+                let reason = firmware.receive(power(sleep), &mut outbox).unwrap_err();
                 assert!(outbox.is_empty());
-                assert_eq!(firmware.rtkit.iop_power(), 0x220);
+                let ack = Mail {
+                    endpoint: 0,
+                    payload: 7 << 52 | sleep,
+                };
+                assert_eq!(
+                    firmware.error_reply(power(sleep), &reason),
+                    initialized.then(|| alloc::vec![ack])
+                );
+                let state = if initialized { sleep } else { 0x220 };
+                assert_eq!(firmware.rtkit.iop_power(), state);
                 assert_eq!(memory.bytes, bytes);
                 assert_eq!(firmware.dma_pending(), !initialized);
                 // A repeated wake has no native transition or generation.
