@@ -9,6 +9,8 @@ use sha2::{Digest, Sha256};
 
 fn profile() -> Profile {
     Profile::select(Observed {
+        link_speed: 3,
+        silicon: Default::default(),
         vendor: 0x8086,
         device: 0x2725,
         subsystem_vendor: 0x8086,

@@ -3,6 +3,9 @@ use crate::aarch64::system::synchronization::{
     Operation as Synchronization, Requirement, Scope, WaitKind,
 };
 
+/// The upper half's first address on a four-level host.
+const UPPER_HALF: u64 = 0xffff_8000_0000_0000;
+
 /// The capture runs on the host after 64-bit additions and subtractions
 /// of edge values, with RDX holding other bits, and packs Arm's NZCV.
 #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
@@ -312,7 +315,7 @@ fn the_guest_range_check_passes_exactly_the_native_ranges() {
         let (check, rest) = full.split_at(ends[4]);
         let (trap, mask) = rest.split_at(ends[5] - ends[4]);
         assert_eq!(trap, [0x0f, 0x0b]);
-        assert_eq!(full.len(), if range.bias == 1 { 30 } else { 31 });
+        assert_eq!(full.len(), if range.bias == 1 { 20 } else { 21 });
         // mov rax,rdi; the check with `xor eax,eax` (a failure, also two
         // bytes, whose flags the mask then leaves alone) where its UD2
         // is; the mask; ret. Then the same with the branch replaced by a
@@ -344,9 +347,10 @@ fn the_guest_range_check_passes_exactly_the_native_ranges() {
                 let expected = if result == address {
                     address
                 } else {
-                    range.masked
+                    check_value(range, address)
                 };
                 assert_eq!(masked(address), expected, "{address:#x}");
+                assert!(result == address || expected < 1 << 32);
                 result == address
             };
             let mut edges = vec![
@@ -371,12 +375,11 @@ fn the_guest_range_check_passes_exactly_the_native_ranges() {
                 0x0f00_0000_0000_1234,
             ];
             if slices.is_some() {
-                edges.extend([upper - 1, upper, range.masked, upper - (1 << 35)]);
+                edges.extend([upper - 1, upper, upper - (1 << 40), upper - (1 << 35)]);
             }
             for address in edges {
                 assert_eq!(passes(address), native(address), "{range:?} {address:#x}");
             }
-            assert!(!native(range.masked) && !five(range.masked) || slices.is_some());
             let mut seed = 0x9e37_79b9_7f4a_7c15u64;
             for _ in 0..4096 {
                 seed = seed
@@ -476,42 +479,47 @@ fn translated_checks_call_the_helper_outside_the_native_ranges() {
             1 << 47,
             UPPER_HALF,
             upper - 1,
-            range.masked,
+            upper - (1 << 40),
             0x0040_0000_0000_0000,
         ] {
             let native = address < 1 << 47 || address >= upper;
             let expected = if native { address } else { called(address) };
             assert_eq!(run(entry, address), expected, "{address:#x}");
-            let masked = if native { address } else { range.masked };
+            let masked = if native {
+                address
+            } else {
+                check_value(range, address)
+            };
             assert_eq!(run(speculated, address), masked, "{address:#x}");
         }
         assert_eq!(munmap(page, PAGE), 0);
     }
 }
 
-/// A four-level placement's masked address lies in its guard, which no
-/// access extent leaves, and its fields fit the encoding.
+/// What a failed check leaves in ECX, which the mask takes.
+fn check_value(range: RangeCheck, address: u64) -> u64 {
+    u64::from(((address as i64 >> range.shift) as u32).wrapping_add(u32::from(range.bias)))
+}
+
+/// A four-level placement's fields fit the encoding.
 #[test]
-fn four_level_checks_mask_into_the_guard_below_the_upper_range() {
+fn four_level_checks_fit_their_encoding() {
     for slices in 2..HALF_SLICES {
         let range = RangeCheck::four_level(slices);
-        let upper = UPPER_HALF + (u64::from(slices) << SLICE_SHIFT);
         assert!(range.valid());
-        assert!(range.masked >= upper - (1 << SLICE_SHIFT) && range.masked < upper);
-        assert!(upper - range.masked >= 1 << 35);
         let mut code = Code::new();
         range.emit(&mut code);
         // A bias of 1 (63 slices) is INC, as five-level paging's.
         let ends = if slices == HALF_SLICES - 1 {
-            [3, 7, 9, 12, 14, 16, 26, 30]
+            [3, 7, 9, 12, 14, 16, 20]
         } else {
-            [3, 7, 10, 13, 15, 17, 27, 31]
+            [3, 7, 10, 13, 15, 17, 21]
         };
-        assert_eq!(RangeCheck::at(&code), Some((ends[7], &ends[..])));
+        assert_eq!(RangeCheck::at(&code), Some((ends[6], &ends[..])));
     }
     assert_eq!(
         RangeCheck::at(&RangeCheck::FIVE_LEVEL.code()).unwrap().1,
-        [3, 7, 9, 12, 14, 16, 26, 30]
+        [3, 7, 9, 12, 14, 16, 20]
     );
     let refused = MemoryChecks::DEFAULT.with_range(RangeCheck::four_level(2));
     assert_eq!(refused.range.bias, 62);

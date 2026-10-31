@@ -35,6 +35,7 @@ use super::{
     Entropy, SecurityMode,
     boot_policy::{self, BootPolicy},
     control::{self, Request, Status},
+    credentials,
     endpoint::Catalog,
     keystore::{self, KeyStore},
     message::{self, Frame},
@@ -74,10 +75,7 @@ pub struct SepOs {
     /// Application-service requests awaiting the DMA step, in arrival order.
     pending: VecDeque<Frame>,
     /// When observing (`--sep-observe`), the recorded `sks`/`pnon`/`scrd`
-    /// traffic; `scrd` is then advertised and its requests never answered,
-    /// so the kernel client takes its own timeout path and the run records
-    /// the requests that follow: a diagnostic exception to the error-reply
-    /// rule (docs/design/runtime.md "Unsupported operations").
+    /// traffic.
     observe: Option<Journal>,
 }
 
@@ -114,11 +112,10 @@ impl SepOs {
     }
 
     /// The SEP's native services, advertised once OS active is reported:
-    /// the xART pair over the anti-replay store `store`, the keystore and
-    /// BootPolicy. With `observe`, their traffic is journaled and `scrd` is
-    /// also advertised so its kernel client binds; its requests are
-    /// recorded and never answered (a diagnostic mode: it checks nothing
-    /// beyond its log). macOS LocalPolicies carry `kexts`.
+    /// the xART pair over the anti-replay store `store`, the keystore,
+    /// BootPolicy and the credential manager. With `observe`, their traffic
+    /// is journaled (a diagnostic mode: it checks nothing beyond its log).
+    /// macOS LocalPolicies carry `kexts`.
     pub fn with_services(
         mut self,
         store: Nonces<Box<dyn Backend>>,
@@ -126,9 +123,12 @@ impl SepOs {
         kexts: Option<stela_formats::local_policy::Kexts>,
     ) -> Result<Self> {
         let mut services = xart::services().to_vec();
-        services.extend([keystore::service(), boot_policy::service()]);
+        services.extend([
+            keystore::service(),
+            boot_policy::service(),
+            credentials::service(),
+        ]);
         if observe {
-            services.extend(observe::services());
             self.observe = Some(Journal::default());
         }
         self.catalog = Catalog::new(services)?;
@@ -197,8 +197,7 @@ impl SepOs {
 
     /// Answer the queued application-service requests through `port`. A
     /// refusal or DMA fault returns its reason instead of the reply, after
-    /// queueing its failure answer; an observed `scrd` request is recorded
-    /// and gets none.
+    /// queueing its failure answer.
     pub fn dma(
         &mut self,
         port: &mut Port<'_, '_>,
@@ -238,10 +237,6 @@ impl SepOs {
             // OOL input.
             self.record(name, frame, &mut *port);
         }
-        if frame.service == observe::CREDENTIALS_ID {
-            // Observation never answers scrd.
-            return Ok(());
-        }
         let services = self
             .services
             .as_mut()
@@ -254,6 +249,7 @@ impl SepOs {
         let result = match frame.service {
             xart::MASTER_ID | xart::SLAVE_ID => services.xart.request(frame, &mut payload, entropy),
             keystore::ID => services.keystore.request(frame, &mut payload, entropy),
+            credentials::ID => Err(credentials::request(frame, &mut payload)),
             boot_policy::ID => services
                 .xart
                 .policy_store_mut()

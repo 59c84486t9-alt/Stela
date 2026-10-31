@@ -663,12 +663,14 @@ mod tests {
             let binding = encode(&firmware, channel, remove != 0).unwrap();
             assert_eq!(binding.len(), length as usize);
             assert_eq!(binding, decode(words[10]), "{line}");
-            let power =
-                super::super::super::super::super::mac_context::cold_power_bytes(if cam != 0 {
+            let power = super::super::super::super::super::mac_context::cold_power_bytes(
+                2,
+                if cam != 0 {
                     PowerMode::ContinuouslyAwake
                 } else {
                     PowerMode::SavePower
-                });
+                },
+            );
             assert_eq!(power, decode(words[11]), "{line}");
             records += 1;
         }

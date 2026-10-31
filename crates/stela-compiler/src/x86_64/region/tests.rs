@@ -1697,9 +1697,9 @@ fn translated_range_data_has_no_instruction_cost() {
         checks.translation_helper,
         super::super::Access::of(false, 8),
     );
-    // Five test instructions, MOV/MOFFS/CALL/JMP, and two mask instructions.
+    // Five test instructions, MOV/MOFFS/CALL/JMP, and the mask.
     // The two descriptor bytes following CALL contribute no instruction.
-    assert_eq!(check.instructions(), 11);
+    assert_eq!(check.instructions(), 10);
     let mut baseline = Code::new();
     for input in &instructions {
         super::super::emit_instruction(
@@ -1712,10 +1712,10 @@ fn translated_range_data_has_no_instruction_cost() {
     }
     let region =
         emit_clean_load_prefix_with(&instructions, checks, false, Some(&[true, true])).unwrap();
-    assert_eq!(baseline.instructions(), 30);
+    assert_eq!(baseline.instructions(), 28);
     // Two translated checks contain data after CALL, not two extra instructions.
-    assert_eq!(region.code.instructions(), 29);
-    assert_eq!(region.stats.native_instructions, 29);
+    assert_eq!(region.code.instructions(), 27);
+    assert_eq!(region.stats.native_instructions, 27);
     assert!(region.code.len() < baseline.len());
     assert!(admits_ordinary(&region, &baseline));
     std::eprintln!(

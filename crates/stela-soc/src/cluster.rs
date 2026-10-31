@@ -15,10 +15,26 @@
 //!   every `0x40` bytes (m1n1 `cpufreq.c` reads its T8112 slots there).
 //!   `AppleT8110PMGR::getDVMRMaxWeight` takes a state's DVMR weight type
 //!   from word 1 bits 41:38, and the DPE power expressions take its
-//!   voltage code from word 0 bits 63:56. The boot firmware builds the
-//!   table from the die's calibration, which an emulated die does not
-//!   have: every word reads 0, the lowest voltage code and DVMR weight
-//!   type 0, until software writes it, and then holds what it wrote.
+//!   voltage code from word 0 bits 63:56. `AppleT8110PMGR::getFANEIndex`
+//!   (0xfffffe0009fa1954) reads a P-cluster state's three ANE frequency
+//!   indices from word 2 bits 33:29, 38:34 and 43:39, and an E-cluster
+//!   state has none. `ApplePMGR::_initPerfDomainInfo` publishes the ANE
+//!   domain's clocks as `ANEFrequencies`, and `CLPC::init` looks each index
+//!   up there (0xfffffe0009f4c048), failing on one past its end. Of a state's
+//!   clocks it keeps the first only when a `_dvmrWeightMapPacc` row up to the
+//!   state's weight type names the ANE: type 4 at the least, and type 15 is
+//!   the one `_getDVMRMinActiveState` skips as no limit. `initDriver` requires
+//!   a limited state among the first sixteen. CLPC keeps the states
+//!   whose first clock is not 0 and, finding none, indexes its table with -1;
+//!   it fails when the first clock falls under the range of a curve through
+//!   them, or when they are all one clock and the range is empty. The boot
+//!   firmware builds the table from the die's calibration, which an emulated
+//!   die does not have: every word reads 0, the lowest voltage code and DVMR
+//!   weight type 0, until software writes it, and then holds what it wrote.
+//!   Only the P cluster's states do not: an emulated die has no voltage droop
+//!   to limit them, so they read type 15 up to the sixteenth, and from there
+//!   type 10, the highest with a row of its own; their first ANE index rises
+//!   through `board::ANE_CLOCKS_MHZ`. There is no ANE behind them.
 //!
 //! ACC counters (`get/setCPUPerfCounter`, kernel file 0x2fa009c/0x2fa01c4,
 //! T8112 P override 0x2fa4c38/0x2fa4ad8) are paired full64 banks at +20400
@@ -85,6 +101,16 @@ const DVMR: core::ops::Range<u64> = 0x206a8..0x20700;
 /// The performance-state table and its slot size.
 pub const PSTATE_OFFSET: u64 = 0x78000;
 pub const PSTATE_BYTES: u64 = 0x40;
+/// The state word that holds a state's DVMR weight type, its field, the type
+/// of a state with no limit and of a limited one, and the first limited state.
+const PSTATE_WEIGHT: u64 = 0x8;
+const WEIGHT_TYPE_SHIFT: u32 = 38;
+const WEIGHT_TYPE_UNLIMITED: u64 = 15;
+const WEIGHT_TYPE_LIMITED: u64 = 10;
+const FIRST_LIMITED_STATE: u64 = 15;
+/// The state word that holds a P-cluster state's ANE indices.
+const PSTATE_ANE: u64 = 0x10;
+const ANE_INDEX_SHIFT: u32 = 29;
 
 /// One cluster's registers: the DVMR tables the boot firmware programmed,
 /// as `(offset, value)`, and `pstates` performance-state slots.
@@ -120,6 +146,25 @@ impl Cluster {
             counters: Vec::new(),
             mapped: false,
         })
+    }
+
+    /// A P cluster's states: only the last have a DVMR limit, and each names
+    /// one of `clocks` ANE clocks, rising.
+    pub fn with_ane_states(mut self, clocks: usize) -> Self {
+        for state in 0..self.pstates {
+            let slot = PSTATE_OFFSET + state * PSTATE_BYTES;
+            let index = state * clocks as u64 / self.pstates;
+            let weight = if state < FIRST_LIMITED_STATE {
+                WEIGHT_TYPE_UNLIMITED
+            } else {
+                WEIGHT_TYPE_LIMITED
+            };
+            self.registers
+                .set(slot + PSTATE_WEIGHT, weight << WEIGHT_TYPE_SHIFT);
+            self.registers
+                .set(slot + PSTATE_ANE, index << ANE_INDEX_SHIFT);
+        }
+        self
     }
 
     /// Extend only the DT-selected event counters and the hardware's state
@@ -341,6 +386,23 @@ mod tests {
                 .read(MAP_BASE, Width::Double, &mut access)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn a_p_clusters_last_states_are_limited_and_all_name_rising_ane_clocks() {
+        let mut c = Cluster::new(&[], 17).unwrap().with_ane_states(2);
+        let mut latch = InterruptLatch::new();
+        let mut a = Access::new(0, 0, &mut latch);
+        let word = |state: u64| PSTATE_OFFSET + state * PSTATE_BYTES + PSTATE_ANE;
+        let index = |value: u64| (value >> ANE_INDEX_SHIFT) & 0x1f;
+        let mut read = |state| index(c.read(word(state), Width::Double, &mut a).unwrap());
+        let indices: Vec<u64> = (0..17).map(&mut read).collect();
+        assert!(indices.is_sorted());
+        assert_eq!((indices[0], indices[16]), (0, 1));
+        let weight = |state: u64| PSTATE_OFFSET + state * PSTATE_BYTES + PSTATE_WEIGHT;
+        let mut read = |state| c.read(weight(state), Width::Double, &mut a).unwrap();
+        assert_eq!((read(14) >> WEIGHT_TYPE_SHIFT) & 0xf, 15);
+        assert_eq!((read(15) >> WEIGHT_TYPE_SHIFT) & 0xf, 10);
     }
 
     #[test]

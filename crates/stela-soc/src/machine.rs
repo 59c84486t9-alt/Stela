@@ -1124,14 +1124,45 @@ impl Devices for AppleDevices {
         self.observe_time(now, "transfer");
         self.publish_rtc_time(now)?;
         self.settle_lifecycle(cpu, now);
+        // A master's refused work stops only that master: the others and the
+        // devices' timers go on, and the first refusal is what is reported.
+        let results = [
+            self.transfer_pmp(cpu, memory, now),
+            self.transfer_aes(cpu, memory, now),
+            self.transfer_storage(cpu, memory, now),
+            self.transfer_gfx(cpu, memory, now),
+            self.transfer_sep(cpu, memory, now),
+            self.transfer_dcp(cpu, memory, now),
+            self.transfer_usb(cpu, memory, now),
+        ];
+        let settled = self.settle(cpu, now, None);
+        results.into_iter().find(Result::is_err).unwrap_or(settled)
+    }
+}
+
+impl AppleDevices {
+    fn transfer_pmp(
+        &mut self,
+        cpu: usize,
+        memory: &mut dyn Memory,
+        now: u64,
+    ) -> Result<(), DeviceError> {
         // SAFETY: the persistent native binding admits only the canonical
         // execution path. Its held cohort/fenced Host sessions and
         // exclusive synchronous device owner remain live through this step.
         unsafe {
             self.service_native_pmp_services(cpu, now)?;
             self.service_native_pmp_dma(cpu, memory, now)?;
-            self.service_native_pmp_services(cpu, now)?;
+            self.service_native_pmp_services(cpu, now)
         }
+    }
+
+    fn transfer_aes(
+        &mut self,
+        cpu: usize,
+        memory: &mut dyn Memory,
+        now: u64,
+    ) -> Result<(), DeviceError> {
         for master in &self.masters {
             let (aes, dart) = self
                 .bus
@@ -1149,6 +1180,15 @@ impl Devices for AppleDevices {
             };
             aes.run(&mut port).map_err(describe_transfer)?;
         }
+        Ok(())
+    }
+
+    fn transfer_storage(
+        &mut self,
+        cpu: usize,
+        memory: &mut dyn Memory,
+        now: u64,
+    ) -> Result<(), DeviceError> {
         for &(ans, sart) in &self.storage_masters {
             let (ans, sart) = self
                 .bus
@@ -1173,6 +1213,15 @@ impl Devices for AppleDevices {
                     other => other,
                 })?;
         }
+        Ok(())
+    }
+
+    fn transfer_gfx(
+        &mut self,
+        cpu: usize,
+        memory: &mut dyn Memory,
+        now: u64,
+    ) -> Result<(), DeviceError> {
         for &(asc, block) in &self.gfx_masters {
             let (asc, block) = self
                 .bus
@@ -1230,6 +1279,15 @@ impl Devices for AppleDevices {
                 ));
             }
         }
+        Ok(())
+    }
+
+    fn transfer_sep(
+        &mut self,
+        cpu: usize,
+        memory: &mut dyn Memory,
+        now: u64,
+    ) -> Result<(), DeviceError> {
         for master in &self.sep_masters {
             let (sep, dart) = self
                 .bus
@@ -1247,6 +1305,15 @@ impl Devices for AppleDevices {
             };
             sep.transfer(&mut port).map_err(describe_transfer)?;
         }
+        Ok(())
+    }
+
+    fn transfer_dcp(
+        &mut self,
+        cpu: usize,
+        memory: &mut dyn Memory,
+        now: u64,
+    ) -> Result<(), DeviceError> {
         for master in &self.dcp_masters {
             let presenting = self
                 .bus
@@ -1297,6 +1364,15 @@ impl Devices for AppleDevices {
                 DeviceError::TransferRefused(refuse!("DCPEXT link DMA").because(reason))
             })?;
         }
+        Ok(())
+    }
+
+    fn transfer_usb(
+        &mut self,
+        cpu: usize,
+        memory: &mut dyn Memory,
+        now: u64,
+    ) -> Result<(), DeviceError> {
         for master in &mut self.usb_masters {
             let (controller, dart) = self
                 .bus
@@ -1379,7 +1455,7 @@ impl Devices for AppleDevices {
             }
             master.phy_changed = false;
         }
-        self.settle(cpu, now, None)
+        Ok(())
     }
 }
 

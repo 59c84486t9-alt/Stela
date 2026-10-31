@@ -1,17 +1,21 @@
-//! Positive evidence for hiding the unsupported original CLPC class.
+//! Positive evidence for hiding an original CLPC class the machine does not
+//! model. [`CLPC`] stays visible.
 use crate::Result;
 use alloc::{format, string::String, vec::Vec};
 use stela_contracts::refuse;
 use stela_loader::apple_device_tree::{DeviceTree, Node};
+use stela_soc_data::board::CLPC;
 
 fn class(node: &Node) -> bool {
     node.properties
         .iter()
         .filter(|p| p.name() == "compatible")
         .any(|p| {
-            p.value
-                .split(|byte| *byte == 0)
-                .any(|token| token.starts_with(b"clpc,") && token.len() > b"clpc,".len())
+            p.value.split(|byte| *byte == 0).any(|token| {
+                token.starts_with(b"clpc,")
+                    && token.len() > b"clpc,".len()
+                    && token != CLPC.as_bytes()
+            })
         })
 }
 
@@ -95,7 +99,7 @@ mod tests {
             root: Node::named("device-tree").unwrap(),
         };
         tree.ensure_child("/", "arbitrary").unwrap();
-        tree.set_property("/arbitrary", "compatible", b"clpc,t8112\0".to_vec())
+        tree.set_property("/arbitrary", "compatible", b"clpc,t6000\0".to_vec())
             .unwrap();
         tree
     }
@@ -121,6 +125,19 @@ mod tests {
             .set_property("/arbitrary", "compatible", b"clpc,t6050\0".to_vec())
             .unwrap();
         assert!(validate_live(&prepared, &hidden).is_err());
+    }
+
+    #[test]
+    fn the_modeled_clpc_stays_visible_without_evidence() {
+        let mut original = tree();
+        original
+            .set_property("/arbitrary", "compatible", b"clpc,t8112\0".to_vec())
+            .unwrap();
+        assert!(
+            verify(&original, &original, &[], 0x8112, 0x28)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

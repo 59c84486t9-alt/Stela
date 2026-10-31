@@ -415,7 +415,7 @@ fn system_mode_blocks_check_every_access_against_the_guest_ranges() {
         while cursor < code.len() {
             match crate::x86_64::RangeCheck::at(&code[cursor..]) {
                 Some((bytes, ends)) => {
-                    assert_eq!(ends.len(), 12, "a translated check");
+                    assert_eq!(ends.len(), 11, "a translated check");
                     let call = &code[cursor + ends[5]..cursor + ends[7]];
                     assert_eq!(call[..2], [0x48, 0xa1]);
                     assert_eq!(call[2..10], SLOT.to_le_bytes());

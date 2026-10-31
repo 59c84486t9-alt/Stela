@@ -4,6 +4,7 @@
 // Copyright (C) 2016-2017 Intel Deutschland GmbH
 //! API7 single-frame firmware TX observations. Parsing does not correlate an
 //! owned submitted frame, release DMA or grant an OS completion/ACK receipt.
+use super::RateFormat;
 use crate::wifi::{
     RawRate,
     intel::{
@@ -71,7 +72,7 @@ impl<'a> Response<'a> {
         Self::parse_raw(fw, family, packet.raw())
     }
     pub fn parse_raw(fw: &Firmware<'_>, family: Family, raw: &'a [u8]) -> Result<Self, Error> {
-        Self::check(fw, family)?;
+        let format = Self::check(fw, family)?;
         if raw.len() < 8
             || (u32::from_le_bytes(raw[..4].try_into().unwrap()) & 0x3fff) as usize + 4 != raw.len()
             || raw[4..6] != [0x1c, 0]
@@ -79,7 +80,7 @@ impl<'a> Response<'a> {
             return Err(Error::Packet);
         }
         let sequence = u16::from_le_bytes([raw[6], raw[7]]);
-        Self::parse_body(family, sequence, raw, &raw[8..])
+        Self::parse_body(family, format, sequence, raw, &raw[8..])
     }
     /// The response of a retained notification: `body` without its header.
     pub fn parse_notification(
@@ -88,20 +89,19 @@ impl<'a> Response<'a> {
         sequence: u16,
         body: &'a [u8],
     ) -> Result<Self, Error> {
-        Self::check(fw, family)?;
-        Self::parse_body(family, sequence, body, body)
+        let format = Self::check(fw, family)?;
+        Self::parse_body(family, format, sequence, body, body)
     }
-    fn check(fw: &Firmware<'_>, family: Family) -> Result<(), Error> {
-        if fw.command_version(1, 0x1c).map(|v| v.notification_version) != Some(7) {
+    fn check(fw: &Firmware<'_>, family: Family) -> Result<RateFormat, Error> {
+        let version = fw.command_version(1, 0x1c).map(|v| v.notification_version);
+        if !matches!(version, Some(7 | 9)) {
             return Err(Error::Version);
         }
-        if super::rate_format_2(fw, family).is_err() {
-            return Err(Error::RateFormat);
-        }
-        Ok(())
+        super::rate_format(fw, family).map_err(|_| Error::RateFormat)
     }
     fn parse_body(
         family: Family,
+        format: RateFormat,
         sequence: u16,
         raw: &'a [u8],
         d: &'a [u8],
@@ -139,7 +139,7 @@ impl<'a> Response<'a> {
             },
             attempts: u16::from(d[3]) + 1,
             rate: RawRate {
-                layout: 2,
+                layout: format as u16,
                 words: [w(4), 0, 0, 0],
             },
             reported_mac_sequence: h(28),

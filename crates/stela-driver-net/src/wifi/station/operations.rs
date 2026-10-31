@@ -186,6 +186,11 @@ impl ChannelDefinition {
             && (self.center2_mhz.is_none() || self.center2_mhz == outer.center2_mhz)
     }
 
+    /// How far the control channel lies above the first center, in MHz.
+    pub fn control_offset_mhz(&self) -> i32 {
+        i32::from(self.control.frequency_mhz) - self.center1_mhz as i32
+    }
+
     /// The width in MHz, an 80+80 MHz definition counting one segment.
     pub fn width_mhz(&self) -> u32 {
         mhz(self.width)

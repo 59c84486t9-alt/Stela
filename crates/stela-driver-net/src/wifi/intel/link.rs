@@ -182,6 +182,9 @@ pub struct Wifi<Q: BootIo, B: BiosIo> {
     /// The transmit and receive antennas.
     chains: (u32, u32),
     family: Family,
+    radio: super::identity::Rf,
+    /// What limits a radio with EHT, once firmware is up.
+    eht: Option<super::identity::EhtLimits>,
     save_power: bool,
     address: Mac,
     error: Option<Error>,
@@ -232,6 +235,8 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         let deadline = inputs.clock.deadline(ALIVE_TIMEOUT_US);
         let wifi = Self {
             family: boot.family(),
+            radio: boot.radio(),
+            eht: None,
             stage: Stage::Rom(Box::new(boot)),
             firmware: inputs.firmware,
             observations: inputs.observations,
@@ -482,6 +487,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                         Ok(mut scan) => {
                             self.client.channels = scan.regulated_channels();
                             self.chains = scan.chains();
+                            self.eht = scan.eht_limits();
                             Ok(Stage::Scan(Box::new(scan)))
                         }
                         Err(mac) => Err((Error::Refused("scan"), mac as Box<dyn Any>)),

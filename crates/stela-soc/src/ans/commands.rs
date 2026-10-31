@@ -124,6 +124,7 @@ fn unserved_tunnel(kind: u32) -> &'static str {
 const APPLE_VENDOR_ID: u16 = 0x106b;
 const READ_ONLY_FIRMWARE_SLOT: u8 = (1 << 1) | 1;
 const SUCCESS: u16 = 0;
+const INVALID_OPCODE: u16 = 1;
 const INVALID_FIELD: u16 = 2;
 const DATA_TRANSFER_ERROR: u16 = 4;
 pub(super) const INVALID_NAMESPACE: u16 = 0xb;
@@ -131,12 +132,14 @@ pub(super) const INVALID_NAMESPACE: u16 = 0xb;
 /// Queue Deletion (NVMe 1.4 figures 145 and 151).
 const INVALID_QUEUE: u16 = 0x101;
 const INVALID_DELETION: u16 = 0x10c;
+const INVALID_LOG_PAGE: u16 = 0x109;
 const LBA_RANGE: u16 = 0x80;
 const WRITE_PROTECTED: u16 = 0x20;
 const DELETE_SQ: u8 = 0;
 const CREATE_SQ: u8 = 1;
 const DELETE_CQ: u8 = 4;
 const CREATE_CQ: u8 = 5;
+const GET_LOG_PAGE: u8 = 2;
 const IDENTIFY: u8 = 6;
 const SET_FEATURES: u8 = 9;
 const GET_FEATURES: u8 = 0xa;
@@ -220,7 +223,7 @@ impl Command {
                 CREATE_SQ | CREATE_CQ | DELETE_SQ | DELETE_CQ => Ok(0),
                 APPLE_TIME => Ok(0),
                 APPLE_DEBUG_SERVICE => Ok(0),
-                IDENTIFY => Ok(1),
+                IDENTIFY | GET_LOG_PAGE => Ok(1),
                 SET_FEATURES | GET_FEATURES if self.long(24) == 0 => Ok(0),
                 APPLE_NAMESPACES => Ok(2),
                 FIRMWARE_DOWNLOAD | APPLE_BFH_PARAMS => Ok(2),
@@ -265,6 +268,10 @@ impl Outcome {
             result,
             status: SUCCESS,
         }
+    }
+    /// The status of a command the model cannot carry out.
+    pub(super) fn unsupported() -> Self {
+        Self::status(INVALID_OPCODE)
     }
 }
 /// What executing a command left: its outcome, or the host transfer it
@@ -371,6 +378,7 @@ impl Ans {
     ) -> Result<Outcome> {
         match cmd.opcode() {
             IDENTIFY => self.identify(cmd, port),
+            GET_LOG_PAGE => self.log_page(cmd, port),
             APPLE_DEBUG_SERVICE => {
                 if cmd.nsid() != 0
                     || cmd.long(24) != 0
@@ -523,6 +531,38 @@ impl Ans {
         }
         cmd.prps(port, data.len(), NVMMU_PAGE_BYTES)?
             .write(port, &data)?;
+        Ok(Outcome::status(SUCCESS))
+    }
+
+    /// Get Log Page, which macOS sends for the SMART / Health log (log 2,
+    /// NVMe 1.4 figure 194) as the disk comes up. The host disk's wear is not
+    /// the guest's to see, so the log is a new disk's: no warning, all the
+    /// spare left over a threshold of 10% and none of its life used. The
+    /// temperature and every counter read 0, which the log defines as not
+    /// reported. Other logs are refused as NVMe refuses a log it lacks.
+    fn log_page(&mut self, cmd: &Command, port: &mut Port<'_, '_>) -> Result<Outcome> {
+        const HEALTH: u32 = 2;
+        const HEALTH_BYTES: usize = 512;
+        const AVAILABLE_SPARE: usize = 3;
+        const SPARE_THRESHOLD: usize = 4;
+        let (selector, upper) = (cmd.word(40), cmd.word(44));
+        if selector & 0xff != HEALTH {
+            return Ok(Outcome::status(INVALID_LOG_PAGE));
+        }
+        let dwords = u64::from(selector >> 16) + (u64::from(upper & 0xffff) << 16) + 1;
+        let bytes = dwords * 4;
+        if selector & 0xff00 != 0
+            || upper >> 16 != 0
+            || cmd.long(48) != 0
+            || bytes > HEALTH_BYTES as u64
+        {
+            return Ok(Outcome::status(INVALID_FIELD));
+        }
+        let mut data = [0; HEALTH_BYTES];
+        data[AVAILABLE_SPARE] = 100;
+        data[SPARE_THRESHOLD] = 10;
+        cmd.prps(port, bytes as usize, NVMMU_PAGE_BYTES)?
+            .write(port, &data[..bytes as usize])?;
         Ok(Outcome::status(SUCCESS))
     }
 

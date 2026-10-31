@@ -115,13 +115,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
     pub(super) fn poll_devices_at(&mut self, now: u64, deadline: u64) -> Step {
         if now >= deadline {
-            // A device's asynchronous work it cannot carry out is dropped,
-            // reported once.
             let started = self.timing_start();
-            if let Err(error) = self.device_transfer(now) {
-                let advance = RequirementKind::DeviceAdvance(format!("{error:?}"));
-                self.degrade(self.requirement(advance));
-            }
+            self.settle_devices(now);
             self.statistics.due_transfers += 1;
             self.statistics.transfer_ticks += self.timing_since(started);
             self.device_lines = None;
@@ -297,7 +292,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     ) -> Option<usize> {
         let block = &self.blocks[index];
         let kind = ExitKind::try_from(kind).ok()?;
-        let unlinked = if dynamic_branch(block.terminal.1).is_some() {
+        let unlinked = if dynamic_branch(block.terminal).is_some() {
             block.dynamic_site.is_some()
         } else if (next_pc ^ block.pc) & !(FETCH_PAGE - 1) != 0
             && matches!(
@@ -352,19 +347,22 @@ impl<H: Host, D: Devices> Machine<H, D> {
         };
         if (next_pc ^ block.pc) & !(FETCH_PAGE - 1) != 0 {
             let exit = block.successors[position];
-            let retired = block.source_map.len() as u32;
+            let retired = block.instructions;
             if self.redirect_through_lookup(exit.site, retired, Some(exit.target), kind, 0) {
-                self.blocks[index].successors.swap_remove(position);
+                self.settle_successor(index, position);
             }
             return;
         }
         let physical = block.physical.wrapping_add(next_pc.wrapping_sub(block.pc));
-        let Some(&target) = self.index.get(&(next_pc, physical, block.variant)) else {
+        let Some(target) = self
+            .index
+            .get(&self.blocks, next_pc, physical, block.variant)
+        else {
             return;
         };
         let exit = block.successors[position];
         let site = exit.site;
-        let retired = block.source_map.len() as u32;
+        let retired = block.instructions;
         let entry = self.blocks[target].code.0 as u64;
         let control = self.chain.address();
         let Ok(thunk) = self.host.install(&[0; chain::THUNK_BYTES]) else {
@@ -387,8 +385,18 @@ impl<H: Host, D: Devices> Machine<H, D> {
         };
         self.patch_native(thunk, &code);
         self.patch_native(NativeCode(site as usize), &jump);
-        self.blocks[index].successors.swap_remove(position);
+        self.settle_successor(index, position);
         self.statistics.links += 1;
+    }
+
+    /// Drop block `index`'s exit at `position`, now chained: most blocks
+    /// chain all theirs, and then keep no list.
+    fn settle_successor(&mut self, index: usize, position: usize) {
+        let successors = &mut self.blocks[index].successors;
+        successors.swap_remove(position);
+        if successors.is_empty() {
+            *successors = Vec::new();
+        }
     }
 
     /// Redirect block `index`'s exit to the target in RAX, which just left
@@ -406,7 +414,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         else {
             return;
         };
-        let Some((kind, fixed)) = dynamic_branch(block.terminal.1) else {
+        let Some((kind, fixed)) = dynamic_branch(block.terminal) else {
             return;
         };
         let page = if self.variants[block.variant.0 as usize].guarded_page {
@@ -417,7 +425,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if fixed.unwrap_or(page) != btype {
             return;
         }
-        let retired = block.source_map.len() as u32;
+        let retired = block.instructions;
         if self.redirect_through_lookup(site, retired, None, kind, btype) {
             self.blocks[index].dynamic_site = None;
         }

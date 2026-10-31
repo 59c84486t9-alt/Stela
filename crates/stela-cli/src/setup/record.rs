@@ -190,6 +190,12 @@ impl Record {
     }
 
     pub(super) fn line(&self, mut system: System) -> String {
+        // Every bundle of a setup is of its one Mac.
+        system.guest_pes = self
+            .bundles
+            .iter()
+            .map(|bundle| bundle.processors)
+            .find(|&processors| processors != 0);
         system.tss = self.tss;
         system.profile = self.profile;
         // The key file is `--wifi`'s default one.

@@ -348,6 +348,7 @@ pub struct Heap {
     /// [`Heap::low`] to read without taking it.
     live: AtomicUsize,
     total: AtomicUsize,
+    carved: AtomicUsize,
     waits: AtomicU64,
 }
 // SAFETY: all list/header mutations use the real acquire/release exclusion.
@@ -383,6 +384,7 @@ impl Heap {
             any_tagged: AtomicBool::new(false),
             live: AtomicUsize::new(0),
             total: AtomicUsize::new(0),
+            carved: AtomicUsize::new(0),
             waits: AtomicU64::new(0),
             state: UnsafeCell::new(State {
                 start: 0,
@@ -495,6 +497,41 @@ impl Heap {
         state.total = end - start;
     }
 
+    /// Stop managing the heap's end beyond `keep` more bytes of its last
+    /// free block, and return those whole pages for their owner to reuse.
+    /// `None` when the last block is allocated or holds no more than `keep`.
+    pub fn release_tail(&self, keep: usize) -> Option<Range<usize>> {
+        let _guard = self.lock();
+        // SAFETY: this live acquire/release guard excludes every metadata
+        // writer and masks local reentry until this state borrow ends.
+        let state = unsafe { &mut *self.state.get() };
+        if !state.ready {
+            return None;
+        }
+        let mut block = state.start as *mut Header;
+        // SAFETY: the guard; the blocks cover the heap, each named by its
+        // predecessor's size, and the last ends at `state.end`.
+        unsafe {
+            while block as usize + size(block) < state.end {
+                block = (block as usize + size(block)) as *mut Header;
+            }
+            if (*block).size & FREE == 0 {
+                return None;
+            }
+            let end = aligned(block as usize + keep.max(MIN_BLOCK), PAGE_BYTES)?;
+            if end >= state.end {
+                return None;
+            }
+            let released = end..state.end;
+            state.remove(block);
+            (*block).size = (end - block as usize) | (*block).size & (FREE | PREVIOUS_FREE);
+            state.end = end;
+            state.total -= released.len();
+            state.insert(block);
+            Some(released)
+        }
+    }
+
     /// Attempt ordinary heap allocation without waiting for the heap lock.
     /// Zero-sized requests, an uninitialized heap, contention and exhaustion
     /// return NULL without changing heap bytes or accounting. Success uses the
@@ -595,9 +632,12 @@ impl Heap {
     }
 
     /// Whether more than three quarters of the heap is allocated, as the
-    /// lock and each core's cache last left it.
+    /// lock and each core's cache last left it, or so nearly all of it is out
+    /// of the bins that a large request may find no block: freed small blocks
+    /// wait in their classes, and what they free between live ones is holes.
     pub fn low(&self) -> bool {
-        self.live() > self.total.load(Ordering::Relaxed) / 4 * 3
+        let total = self.total.load(Ordering::Relaxed);
+        self.live() > total / 4 * 3 || self.carved.load(Ordering::Relaxed) > total / 16 * 15
     }
 
     /// Bytes allocated and not freed: the class lists' and the caches'.
@@ -833,6 +873,7 @@ impl Drop for Guard<'_> {
         let state = unsafe { &*self.heap.state.get() };
         self.heap.live.store(state.live, Ordering::Relaxed);
         self.heap.total.store(state.total, Ordering::Relaxed);
+        self.heap.carved.store(state.carved, Ordering::Relaxed);
         self.heap.held.store(false, Ordering::Release);
         #[cfg(target_os = "uefi")]
         // SAFETY: this CPU's saved flags; the guard cannot migrate and no

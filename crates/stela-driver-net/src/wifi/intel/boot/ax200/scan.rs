@@ -7,7 +7,7 @@
 //! The shared native RX owner stays live; whole-device extraction is separate.
 use super::super::hcmd::{CapturedNotification, NotificationPoll};
 use super::*;
-use crate::wifi::intel::command::Id;
+use crate::wifi::intel::{command::Id, identity, mcc};
 use crate::wifi::{Band, Channel, regulatory, scan as protocol};
 use regulatory::OsPolicy;
 mod policy;
@@ -259,12 +259,19 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Scan<'_, Q, B, O> {
             .collect()
     }
     /// The same channels with the regulatory flags their firmware
-    /// restrictions give them.
+    /// restrictions give them, and the country's word on puncturing.
     pub fn regulated_channels(&mut self) -> Vec<(Channel, u32)> {
         let channels = self.channels();
         let Some(parts) = self.mac.country.scan_policy_parts() else {
             return Vec::new();
         };
+        // `iwl_mld_get_regdomain`: only FM radios answer to this policy.
+        let setup = &mut parts.board.scan.mcc.setup;
+        let whole = setup.lari.radio.initialized.boot.radio() == identity::Rf::Fm
+            && !mcc::puncturing_allowed(
+                setup.lari.bios.puncturing(),
+                parts.selection.country.alpha2(),
+            );
         channels
             .into_iter()
             .filter_map(|channel| {
@@ -273,10 +280,13 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Scan<'_, Q, B, O> {
                         && observation.channel.frequency_mhz == channel.frequency_mhz
                 })?;
                 let restrictions = observed.restrictions;
-                Some((
-                    channel,
-                    crate::wifi::intel::link::channel_flags(&restrictions),
-                ))
+                let flags = crate::wifi::intel::link::channel_flags(&restrictions);
+                let whole = if whole {
+                    regulatory::channel::NO_PUNCTURING
+                } else {
+                    0
+                };
+                Some((channel, flags | whole))
             })
             .collect()
     }
@@ -284,6 +294,20 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Scan<'_, Q, B, O> {
     pub fn chains(&self) -> (u32, u32) {
         let information = &self.mac.initialized_nvm().information;
         (information.tx_chains, information.rx_chains)
+    }
+    /// What limits a radio with EHT.
+    pub fn eht_limits(&self) -> Option<crate::wifi::intel::identity::EhtLimits> {
+        self.mac
+            .country
+            .board
+            .scan
+            .mcc
+            .setup
+            .lari
+            .radio
+            .initialized
+            .boot
+            .eht_limits()
     }
     pub fn command_bytes(&self) -> Option<&[u8]> {
         self.command_bytes.as_deref()

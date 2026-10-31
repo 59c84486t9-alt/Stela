@@ -265,3 +265,49 @@ fn an_integrated_ax211_keeps_the_device_busy_where_it_cannot_set_ltr() {
     assert!(clear.unwrap() < run.unwrap());
     assert!(ops[run.unwrap()..].contains(&Op::Read(0x2808)));
 }
+
+#[test]
+fn a_be200_starts_its_rom_through_gp_control() {
+    let mut bytes = ax210_bytes();
+    bytes[72..76].copy_from_slice(&(106u32 << 8).to_le_bytes());
+    let mut observed = ax210_profile().observed();
+    (
+        observed.device,
+        observed.hardware_revision,
+        observed.radio_id,
+    ) = (0x272b, 0x472, 0x112200);
+    let gl = Profile::select(observed).unwrap();
+    let catalog = catalog_for(&gl, gl.firmware_request().name, &bytes);
+    let (observation, step_catalog) = step_fixture();
+    let step = crate::wifi::intel::platform::load_step(observation, &step_catalog).unwrap();
+    let source = Source::default();
+    let domain = Arc::new(Domain::default());
+    let state = ax210_state();
+    state
+        .lock()
+        .unwrap()
+        .registers
+        .extend([(0x28, 0x472), (0x9c, 0x112200), (0x24, 0x08100001)]);
+    let drops = Arc::new(AtomicUsize::new(0));
+    // SAFETY: this test solely owns its fresh RAM, domain and model.
+    let _boot = unsafe {
+        RomBoot::start_ax210(
+            awake_profile(state.clone(), drops.clone(), gl.clone()),
+            crate::wifi::intel::identity::stage(&gl, &catalog).unwrap(),
+            step,
+            &source,
+            Some(domain.clone()),
+            32,
+            ProductResetPolicy::NoIwlmei,
+        )
+        .unwrap()
+    };
+    let ops = state.lock().unwrap().ops.clone();
+    assert!(ops.contains(&Op::Write(0x2c, 0x01010101)));
+    assert!(
+        ops.iter()
+            .any(|op| matches!(op, Op::Write(0x24, value) if value & (1 << 7) != 0))
+    );
+    assert!(!ops.contains(&Op::Write(0x444, 0x03d05c44)));
+    assert!(ops.contains(&Op::Write(0xd4, 0x88fa88fa)));
+}

@@ -389,9 +389,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let variant = self.page_variant(variant, physical);
         let indexed = self
             .known_variant(variant)
-            .and_then(|id| self.index.get(&(pc, physical, id)));
+            .and_then(|id| self.index.get(&self.blocks, pc, physical, id));
         let index = match indexed {
-            Some(&index) => index,
+            Some(index) => index,
             None => match self.compile(pc, physical, variant)? {
                 Fetched::Block(index) => index,
                 Fetched::Exception(exception) => {

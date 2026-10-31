@@ -12,7 +12,7 @@ fn legacy_first_fault_qualification_is_cached_and_reports_dispatcher_cost() {
     make_pending(&mut machine, index, &input);
     let mut owner = machine.fault_recovery.remove(&index).unwrap();
     let started = std::time::Instant::now();
-    let first = owner.qualify(BASE).unwrap().to_vec();
+    let first = owner.qualify(BASE, None).unwrap();
     let cold = started.elapsed();
     assert!(
         first
@@ -21,7 +21,7 @@ fn legacy_first_fault_qualification_is_cached_and_reports_dispatcher_cost() {
     );
     let started = std::time::Instant::now();
     for _ in 0..32 {
-        assert_eq!(owner.qualify(BASE).unwrap(), first);
+        assert_eq!(owner.qualify(BASE, None).unwrap(), first);
     }
     let cached = started.elapsed();
     assert_eq!(
@@ -64,32 +64,14 @@ fn store_window() -> (
 }
 
 #[test]
-fn compiled_owner_moves_one_compact_minted_row_bank_without_binding_copies() {
+fn a_compiled_owner_keeps_only_its_packed_rows() {
     let (preparation, source, compiled) = store_window();
-    let rows = compiled.fault_recovery.len();
-    let capacity = compiled.fault_recovery.capacity();
-    let binding_pointers: Vec<_> = compiled
-        .fault_recovery
-        .iter()
-        .map(|row| row.bindings.as_ptr())
-        .collect();
-    let binding_bytes: usize = compiled
-        .fault_recovery
-        .iter()
-        .map(|row| row.bindings.capacity() * core::mem::size_of::<RecoveryBinding>())
-        .sum();
-    let portable: Vec<_> = compiled
-        .fault_recovery
-        .iter()
-        .map(UnqualifiedFaultRecovery::from)
-        .collect();
-    let portable_binding_bytes: usize = portable
-        .iter()
-        .map(|row| row.bindings.capacity() * core::mem::size_of::<RecoveryBinding>())
-        .sum();
-    let portable_bytes = portable.capacity() * core::mem::size_of::<UnqualifiedFaultRecovery>()
-        + portable_binding_bytes;
-    drop(portable);
+    let expected = compiled.fault_recovery.clone();
+    let unpacked = expected.len() * core::mem::size_of::<FaultRecovery>()
+        + expected
+            .iter()
+            .map(|row| row.bindings.len() * core::mem::size_of::<RecoveryBinding>())
+            .sum::<usize>();
     let native_bytes = compiled.native.x86_64_code.len();
     let mut owner =
         Template::compiled(Arc::new(Emission::new(source, compiled, preparation))).installed();
@@ -98,20 +80,11 @@ fn compiled_owner_moves_one_compact_minted_row_bank_without_binding_copies() {
         native_bytes,
         "the code's image, not a copy"
     );
-    let bank = owner.test_rows_mut();
-    assert_eq!(bank.len(), rows);
-    for (row, pointer) in bank.iter().zip(binding_pointers) {
-        assert_eq!(row.bindings.as_ptr(), pointer);
-    }
-    let old_row_bytes =
-        capacity * core::mem::size_of::<FaultRecovery>() + binding_bytes + portable_bytes;
-    let retained_row_bytes = core::mem::size_of_val(bank) + binding_bytes;
+    assert_eq!(owner.qualify(BASE, None).unwrap(), expected);
     assert!(
-        retained_row_bytes < old_row_bytes,
-        "one exact-length bank replaces duplicate portable and capacity storage"
-    );
-    eprintln!(
-        "recovery retained requested layout: native={native_bytes} rows={rows} old_row_capacity={capacity} old_row_bytes={old_row_bytes} retained_row_bytes={retained_row_bytes} (Vec/Box payload only; allocator headers, size classes and CPU caches excluded)"
+        owner.test_packed_bytes() * 3 < unpacked,
+        "{} packed bytes of {unpacked}",
+        owner.test_packed_bytes()
     );
 }
 
@@ -129,15 +102,15 @@ fn exact_lazy_qualification_replaces_portable_bank_with_only_minted_rows() {
             .map(UnqualifiedFaultRecovery::from)
             .collect(),
     };
-    let mut owner = Template::stored(template, source, preparation).installed();
-    assert_eq!(owner.qualify(BASE).unwrap(), expected);
+    let mut owner = Template::stored(template, source, preparation, None).installed();
+    assert_eq!(owner.qualify(BASE, None).unwrap(), expected);
     assert_eq!(owner.qualification_attempts, 1);
-    assert_eq!(owner.qualify(BASE).unwrap(), expected);
+    assert_eq!(owner.qualify(BASE, None).unwrap(), expected);
     assert_eq!(owner.qualification_attempts, 1);
 }
 
 #[test]
-fn dirty_guest_binding_buffers_move_with_the_compact_minted_bank() {
+fn dirty_guest_bindings_survive_packing() {
     // The complete system-mode region keeps dirty values across its stores
     // and loads; a short fallback can commit every value before the load.
     let program = [0x9100_0400u32, 0xf900_0020, 0xf940_0043, 0x9100_0c64].repeat(64);
@@ -158,17 +131,8 @@ fn dirty_guest_binding_buffers_move_with_the_compact_minted_bank() {
             .iter()
             .any(|row| !row.bindings.is_empty())
     );
-    let pointers: Vec<_> = compiled
-        .fault_recovery
-        .iter()
-        .map(|row| row.bindings.as_ptr())
-        .collect();
     let expected = compiled.fault_recovery.clone();
     let mut owner =
         Template::compiled(Arc::new(Emission::new(source, compiled, preparation))).installed();
-    let rows = owner.test_rows_mut();
-    assert_eq!(rows, expected.as_slice());
-    for (row, pointer) in rows.iter().zip(pointers) {
-        assert_eq!(row.bindings.as_ptr(), pointer);
-    }
+    assert_eq!(owner.qualify(BASE, None).unwrap(), expected);
 }

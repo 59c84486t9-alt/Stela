@@ -163,6 +163,8 @@ pub struct KeyStore {
     diagnostics: Journal,
     /// Commands already reported as unimplemented.
     unimplemented: Vec<u8>,
+    /// Commands whose refusal was already reported.
+    refused: Vec<u8>,
     /// Whether the unmodeled lock states were reported.
     state_reported: bool,
 }
@@ -246,8 +248,31 @@ impl KeyStore {
     }
 
     /// Answer one AP request: read its message, write the reply message
-    /// and return the reply frame.
+    /// and return the reply frame. The first refusal of each command is
+    /// named in the diagnostics, unless the command reports its own.
     pub fn request(
+        &mut self,
+        frame: Frame,
+        payload: &mut dyn Payload,
+        entropy: &mut dyn super::Entropy,
+    ) -> Result<Frame, Refusal> {
+        let result = self.serve(frame, payload, entropy);
+        if let Err(refusal) = &result
+            && frame.tag != system_key::PERFORM_OPERATION
+            && !self.unimplemented.contains(&frame.tag)
+            && !self.refused.contains(&frame.tag)
+        {
+            self.refused.push(frame.tag);
+            self.diagnostics.record(alloc::format!(
+                "SEP keystore: command {:#04x}: {}",
+                frame.tag,
+                refusal.reason
+            ));
+        }
+        result
+    }
+
+    fn serve(
         &mut self,
         frame: Frame,
         payload: &mut dyn Payload,

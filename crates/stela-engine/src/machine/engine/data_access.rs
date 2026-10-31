@@ -101,6 +101,16 @@ impl<H: Host, D: Devices> Machine<H, D> {
         result
     }
 
+    /// Carry out the devices' due work around an access. What a device
+    /// cannot carry out is dropped, reported once, and leaves the access
+    /// that found it due alone.
+    pub(super) fn settle_devices(&mut self, now: u64) {
+        if let Err(error) = self.device_transfer(now) {
+            let advance = RequirementKind::DeviceAdvance(alloc::format!("{error:?}"));
+            self.degrade(self.requirement(advance));
+        }
+    }
+
     pub(super) fn read_register(&self, register: Register) -> u64 {
         match register {
             Register::X(index) => self.cpu.state.x[usize::from(index)],
@@ -220,9 +230,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
             }
             let value = self.read_register(store.source_register());
             let now = self.now();
-            let written = self
-                .device_write(physical, bytes, value, now)
-                .and_then(|()| self.device_transfer(now));
+            let written = self.device_write(physical, bytes, value, now);
+            if written.is_ok() {
+                self.settle_devices(now);
+            }
             if let Err(error) = written
                 && let Some(step) =
                     self.device_refused(error, address, physical, bytes, Some(value))
@@ -343,9 +354,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 MemoryTransfer::Store => {
                     let values = data.map(|register| self.read_register(register));
                     for (element, value) in elements.into_iter().zip(values) {
-                        let written = self
-                            .device_write(element, bytes, value, now)
-                            .and_then(|()| self.device_transfer(now));
+                        let written = self.device_write(element, bytes, value, now);
+                        if written.is_ok() {
+                            self.settle_devices(now);
+                        }
                         if let Err(error) = written {
                             let at = address + (element - physical);
                             if let Some(step) =

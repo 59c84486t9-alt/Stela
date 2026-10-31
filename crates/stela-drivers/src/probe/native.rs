@@ -429,6 +429,7 @@ pub(super) unsafe fn intel_wifi<B: wifi::intel::radio::bios::service::BiosIo>(
         .map_err(|error| refused(ServiceError::Mapping(error)))?;
     let vendor = function.vendor;
     let device = function.device;
+    let link_speed = crate::bus::pci::link_speed(&function);
     let config = function.config();
     let pci = Pci {
         vendor,
@@ -436,6 +437,7 @@ pub(super) unsafe fn intel_wifi<B: wifi::intel::radio::bios::service::BiosIo>(
         subsystem_vendor: config.read16(0x2c),
         subsystem_device: config.read16(0x2e),
         revision: config.read8(0x08),
+        link_speed,
     };
     // iwl_pci_probe: memory decoding and bus mastering, polled.
     function.enable_polled();

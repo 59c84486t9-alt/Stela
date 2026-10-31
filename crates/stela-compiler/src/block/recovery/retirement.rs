@@ -99,6 +99,18 @@ impl RetirementPoint {
         point.position()?;
         Ok(point)
     }
+    /// Back from [`super::PackedRecovery`], which holds only checked points.
+    pub(super) const fn packed(
+        instruction_pc: GuestAddress,
+        retired_before: u16,
+        phase: RetirementPhase,
+    ) -> Self {
+        Self {
+            instruction_pc,
+            retired_before,
+            phase,
+        }
+    }
     pub const fn instruction_pc(self) -> GuestAddress {
         self.instruction_pc
     }

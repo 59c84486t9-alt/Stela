@@ -101,7 +101,7 @@ pub(super) fn complete_from_free_slot(
     free_slot: u16,
     packet: &[u8],
 ) {
-    let stride = if boot.profile.family() == Family::Ax210 {
+    let stride = if boot.profile.family() >= Family::Ax210 {
         16
     } else {
         8
@@ -123,7 +123,7 @@ pub(super) fn complete_from_free_slot(
             if response.unsolicited() || (response.group == 0 && response.command == 0x1c) {
                 continue;
             }
-            let slots = if boot.profile.family() == Family::Ax210 {
+            let slots = if boot.profile.family() >= Family::Ax210 {
                 128
             } else {
                 32
@@ -147,7 +147,7 @@ pub(super) fn complete_from_free_slot(
     let payload = &boot.buffers[usize::from(vid - 1)].allocation;
     device_write(domain, payload.region().address, 0, packet, true);
     let mut descriptor = [0; 32];
-    let stride = if boot.profile.family() == Family::Ax210 {
+    let stride = if boot.profile.family() >= Family::Ax210 {
         descriptor[4..6].copy_from_slice(&vid.to_le_bytes());
         32
     } else {

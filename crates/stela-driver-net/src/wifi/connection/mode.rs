@@ -13,7 +13,7 @@ use crate::wifi::{
     Band, Channel,
     regulatory::channel::{
         DISABLED, NO_20MHZ, NO_80MHZ, NO_160MHZ, NO_320MHZ, NO_EHT, NO_HE, NO_HT40MINUS,
-        NO_HT40PLUS, NO_OFDM,
+        NO_HT40PLUS, NO_OFDM, NO_PUNCTURING,
     },
     station::{
         operations::{ChannelDefinition, Operations},
@@ -93,6 +93,10 @@ impl Channels<'_> {
         let Some(control_flags) = self.flags(control) else {
             return false;
         };
+        // `ieee80211_chandef_usable`.
+        if def.punctured != 0 && control_flags & NO_PUNCTURING != 0 {
+            return false;
+        }
         let mut prohibited = prohibited;
         match def.width {
             Width::Mhz20 => {

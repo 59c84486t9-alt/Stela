@@ -18,7 +18,7 @@ use crate::{
         station::{
             AssociationContext,
             operations::MuEdcaRecord,
-            phy::{AccessCategory, He, Mode, Negotiated, Width},
+            phy::{AccessCategory, Eht, He, Mode, Negotiated, Width},
             power_envelope::PowerEnvelope,
         },
     },
@@ -132,9 +132,30 @@ pub struct MacState {
     pub high_priority: bool,
 }
 
-/// `iwl_mvm_mld_mac_ctxt_cmd_sta` modifying MAC 0.
-pub fn mac_config(state: MacState) -> Vec<u8> {
-    let mut bytes = alloc::vec![0; 52];
+/// `iwl_mac_config_cmd`: version 4 can name NAN addresses.
+pub fn mac_bytes(version: u8) -> usize {
+    if version >= 4 { 56 } else { 52 }
+}
+
+/// `iwl_mac_power_cmd`: version 3 keeps the first 20 of `_v2`'s 40 bytes, and a
+/// station without power management or uAPSD leaves zero what it moved.
+pub fn power_bytes(version: u8) -> usize {
+    if version >= 3 { 20 } else { 40 }
+}
+
+/// `iwl_sta_cfg_cmd`: each later version names more of the peer.
+pub fn station_bytes(version: u8) -> usize {
+    match version {
+        0 | 1 => 96,
+        2 => 104,
+        _ => 112,
+    }
+}
+
+/// `iwl_mvm_mld_mac_ctxt_cmd_sta` modifying MAC 0. `version` is the firmware's
+/// `MAC_CONFIG_CMD` version.
+pub fn mac_config(version: u8, state: MacState) -> Vec<u8> {
+    let mut bytes = alloc::vec![0; mac_bytes(version)];
     word(&mut bytes, 4, ACTION_MODIFY);
     word(&mut bytes, 8, MAC_TYPE_BSS_STATION);
     bytes[12..18].copy_from_slice(&state.address.0);
@@ -144,8 +165,13 @@ pub fn mac_config(state: MacState) -> Vec<u8> {
         ACCEPT_BEACON
     };
     word(&mut bytes, 20, ACCEPT_GROUP | beacons);
-    half(&mut bytes, 24, u16::from(state.he));
-    word(&mut bytes, 28, u32::from(state.eht));
+    if version == 2 {
+        half(&mut bytes, 24, u16::from(state.he));
+        word(&mut bytes, 28, u32::from(state.eht));
+    } else {
+        bytes[24] = u8::from(state.he);
+        bytes[26] = u8::from(state.eht);
+    }
     word(&mut bytes, 32, 1);
     if let Some(aid) = state.aid {
         word(&mut bytes, 36, 1);
@@ -380,6 +406,9 @@ const EXTENSION_NONE: u8 = 7;
 /// `IWL_HE_PKT_EXT_BPSK`.
 const EXTENSION_BPSK: u8 = 0;
 
+/// `IWL_HE_PKT_EXT_4096QAM`.
+const EXTENSION_4096QAM: u8 = 6;
+
 /// `iwl_mvm_he_get_ppe_val`: three bits at `position`, which may straddle a byte.
 fn threshold(ppe: &[u8], position: usize) -> u8 {
     let byte = |index: usize| u16::from(ppe.get(index).copied().unwrap_or(0));
@@ -387,39 +416,89 @@ fn threshold(ppe: &[u8], position: usize) -> u8 {
     ((pair >> (position % 8)) & 7) as u8
 }
 
-/// `iwl_mvm_set_sta_pkt_ext` for an HE AP: its PPE thresholds, or else what its
-/// nominal padding implies.
-pub fn packet_extension(he: &He) -> [u8; PACKET_EXTENSION_BYTES] {
-    const THRESHOLDS_PRESENT: u8 = 0x80;
-    const PADDING_RESERVED: u8 = 3;
-    let mut table = [EXTENSION_NONE; PACKET_EXTENSION_BYTES];
-    if he.phy[6] & THRESHOLDS_PRESENT != 0 {
-        let ppe = he.ppe.as_slice();
-        let header = ppe.first().copied().unwrap_or(0);
-        let streams = (usize::from(header & 7) + 1).min(STREAMS);
-        let widths = (header >> 3) & 0xf;
-        let mut position = 7;
-        for stream in 0..streams {
-            for width in 0..WIDTHS {
-                if widths >> width & 1 == 0 {
-                    continue;
-                }
-                let at = (stream * WIDTHS + width) * 2;
-                table[at + 1] = threshold(ppe, position);
-                table[at] = threshold(ppe, position + 3);
+/// `iwl_mld_parse_ppe`: a table's thresholds, from `position` in `ppe`. EHT
+/// lets a width without its own keep the last width's; HE leaves it unset.
+fn parsed_thresholds(
+    table: &mut [u8; PACKET_EXTENSION_BYTES],
+    ppe: &[u8],
+    (streams, widths): (usize, u8),
+    mut position: usize,
+    inherit: bool,
+) {
+    for stream in 0..streams.min(STREAMS) {
+        let (mut low, mut high) = (EXTENSION_NONE, EXTENSION_NONE);
+        for width in 0..WIDTHS {
+            if widths >> width & 1 != 0 {
+                high = threshold(ppe, position);
+                low = threshold(ppe, position + 3);
                 position += 6;
+            } else if !inherit {
+                continue;
             }
+            let at = (stream * WIDTHS + width) * 2;
+            table[at..at + 2].copy_from_slice(&[low, high]);
         }
-        return table;
     }
-    let (low, high) = match he.phy[9] >> 6 {
+}
+
+/// HE's own thresholds: a seven-bit header of streams and widths.
+fn he_thresholds(table: &mut [u8; PACKET_EXTENSION_BYTES], he: &He, inherit: bool) {
+    let ppe = he.ppe.as_slice();
+    let header = ppe.first().copied().unwrap_or(0);
+    let shape = (usize::from(header & 7) + 1, (header >> 3) & 0xf);
+    parsed_thresholds(table, ppe, shape, 7, inherit);
+}
+
+/// `iwl_mld_set_pkt_ext_from_nominal_padding`, whose cases EHT and HE share.
+fn padded_thresholds(table: &mut [u8; PACKET_EXTENSION_BYTES], padding: u8) {
+    let (low, high) = match padding {
         0 => (EXTENSION_NONE, EXTENSION_NONE),
         1 => (EXTENSION_BPSK, EXTENSION_NONE),
-        2 => (EXTENSION_NONE, EXTENSION_BPSK),
-        PADDING_RESERVED.. => return table,
+        _ => (EXTENSION_NONE, EXTENSION_BPSK),
     };
     for pair in table.as_chunks_mut::<2>().0 {
         *pair = [low, high];
+    }
+}
+
+/// `iwl_mld_fill_pkt_ext` for an AP: EHT's thresholds, then HE's with the
+/// padding MCS 12 and 13 need, then what the nominal padding implies. The EHT
+/// header's nine bits name five widths; Linux reads only its first byte, which
+/// loses 320 MHz's own thresholds.
+pub fn packet_extension(he: &He, eht: Option<&Eht>) -> [u8; PACKET_EXTENSION_BYTES] {
+    const EHT_THRESHOLDS: u8 = 0x08;
+    const HE_THRESHOLDS: u8 = 0x80;
+    const PADDING_8US: u8 = 1;
+    const PADDING_RESERVED: u8 = 3;
+    let mut table = [EXTENSION_NONE; PACKET_EXTENSION_BYTES];
+    let Some(eht) = eht else {
+        if he.phy[6] & HE_THRESHOLDS != 0 {
+            he_thresholds(&mut table, he, false);
+        } else if he.phy[9] >> 6 != PADDING_RESERVED {
+            padded_thresholds(&mut table, he.phy[9] >> 6);
+        }
+        return table;
+    };
+    let padding = (eht.phy[5] >> 4) & 3;
+    if eht.phy[5] & EHT_THRESHOLDS != 0 {
+        let ppe = eht.ppe.as_slice();
+        let header = u16::from_le_bytes([
+            ppe.first().copied().unwrap_or(0),
+            ppe.get(1).copied().unwrap_or(0),
+        ]);
+        let shape = (usize::from(header & 0xf) + 1, ((header >> 4) & 0x1f) as u8);
+        parsed_thresholds(&mut table, ppe, shape, 9, true);
+    } else if he.phy[6] & HE_THRESHOLDS != 0 {
+        he_thresholds(&mut table, he, true);
+        for pair in table.as_chunks_mut::<2>().0 {
+            if padding > PADDING_8US && pair[1] == EXTENSION_NONE {
+                pair[1] = EXTENSION_4096QAM;
+            } else if padding == PADDING_8US && *pair == [EXTENSION_NONE; 2] {
+                pair[0] = EXTENSION_4096QAM;
+            }
+        }
+    } else {
+        padded_thresholds(&mut table, padding);
     }
     table
 }
@@ -453,18 +532,26 @@ pub fn control_flags(mac: &[u8; 6]) -> u32 {
     flags
 }
 
-/// `iwl_mvm_get_sta_ampdu_dens`' size: the base exponent and the HE extension,
-/// bounded by the firmware's 4 MB.
+/// `iwl_mld_fill_ampdu_size_and_dens`' size: the base exponent and the HE and
+/// EHT extensions, bounded by the firmware's 4 MB.
 pub fn ampdu_exponent(negotiated: &Negotiated) -> u8 {
-    const LIMIT_4M: u8 = 7;
-    let extension = negotiated.he.as_ref().map_or(0, |he| (he.mac[3] >> 3) & 3);
-    (negotiated.peer_ampdu_base_exponent + extension).min(LIMIT_4M)
+    /// `STA_FLG_MAX_AGG_SIZE_4M`, 8 KB being zero.
+    const LIMIT_4M: u8 = 9;
+    let he = negotiated.he.as_ref().map_or(0, |he| (he.mac[3] >> 3) & 3);
+    let eht = match negotiated.eht {
+        Some(_) => negotiated.peer().eht().map_or(0, |eht| eht.mac[1] & 1),
+        None => 0,
+    };
+    (negotiated.peer_ampdu_base_exponent + he + eht).min(LIMIT_4M)
 }
 
 /// `iwl_mvm_mld_cfg_sta` for station 0 on link 0. `version` is the firmware's
 /// `STA_CONFIG_CMD` version.
 pub fn station_config(version: u8, state: PeerState) -> Vec<u8> {
-    let mut bytes = alloc::vec![0; if version <= 1 { 96 } else { 104 }];
+    let mut bytes = alloc::vec![0; station_bytes(version)];
+    if version >= 3 {
+        word(&mut bytes, 4, 1);
+    }
     bytes[8..14].copy_from_slice(&state.address.0);
     bytes[16..22].copy_from_slice(&state.address.0);
     word(&mut bytes, 28, u32::from(state.aid));
@@ -522,6 +609,44 @@ pub fn max_amsdu(negotiated: &Negotiated) -> u16 {
     }
 }
 
+/// How a `TLC_MNG_CONFIG_CMD` version lays out what `rate_config` fills.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RateShape {
+    pub bytes: usize,
+    /// Where `max_ch_width` lies.
+    pub head: usize,
+    /// Width classes per stream.
+    pub classes: usize,
+    /// One class's rate bitmap.
+    pub rate_bytes: usize,
+}
+
+impl RateShape {
+    pub fn of(version: u8) -> Option<Self> {
+        match version {
+            1 | 2 => Some(Self {
+                bytes: 24,
+                head: 4,
+                classes: 2,
+                rate_bytes: 2,
+            }),
+            3 | 4 => Some(Self {
+                bytes: 28,
+                head: 4,
+                classes: 3,
+                rate_bytes: 2,
+            }),
+            6 => Some(Self {
+                bytes: 52,
+                head: 8,
+                classes: 4,
+                rate_bytes: 4,
+            }),
+            _ => None,
+        }
+    }
+}
+
 /// `rs_fw_set_supp_rates` and the rest of `iwl_mvm_rs_fw_rate_init`: the
 /// rates firmware rate selection may use for the AP. Until the port opens
 /// `authorized` is false and it stays at 20 MHz. `max_mpdu` is what the
@@ -530,33 +655,38 @@ pub fn rate_config(
     negotiated: &Negotiated,
     band: Band,
     antennas: u8,
-    bytes: usize,
+    shape: RateShape,
     authorized: bool,
     max_mpdu: u16,
 ) -> Option<Vec<u8>> {
+    let RateShape { bytes, head, .. } = shape;
     let mut out = alloc::vec![0; bytes];
+    // Version 6 names stations by mask, station 0 by its bit.
+    if head == 8 {
+        out[0] = 1;
+    }
     half(&mut out, bytes - 4, max_mpdu);
     let width = if authorized {
         width_code(negotiated.width)?
     } else {
         0
     };
-    out[4] = width;
-    out[5] = match negotiated.mode {
+    out[head] = width;
+    out[head + 1] = match negotiated.mode {
         Mode::Legacy => 0,
         Mode::Ht => 1,
         Mode::Vht => 2,
         Mode::He => 3,
-        Mode::Eht => return None,
+        Mode::Eht => 4,
     };
-    out[6] = antennas;
+    out[head + 2] = antennas;
     let (ht, vht, he) = (&negotiated.ht, &negotiated.vht, &negotiated.he);
     if he.is_none() {
         // rs_fw_sgi_cw_support: an HE station's guard intervals are the
         // firmware's own.
         let ht_cap = ht.as_ref().map_or(0, |ht| ht.capability);
         let vht_cap = vht.as_ref().map_or(0, |vht| vht.capability);
-        out[7] = u8::from(ht_cap & 0x20 != 0)
+        out[head + 3] = u8::from(ht_cap & 0x20 != 0)
             | u8::from(ht_cap & 0x40 != 0) << 1
             | u8::from(vht_cap & 0x20 != 0) << 2
             | u8::from(vht_cap & 0x40 != 0) << 3;
@@ -571,19 +701,30 @@ pub fn rate_config(
     let ldpc = ht_cap & 1 != 0
         || vht_cap & 0x10 != 0
         || he.as_ref().is_some_and(|he| he.phy[1] & 0x20 != 0);
-    let flags = u16::from(stbc && antennas.count_ones() > 1) | u16::from(ldpc) << 1;
-    half(&mut out, 8, flags);
+    // Dual carrier modulation needs the peer to receive it; every admitted
+    // device can send it. The extra LTF needs both ends.
+    let dcm = he.as_ref().is_some_and(|he| he.phy[3] & 0x18 != 0);
+    let extra_ltf = negotiated.mode == Mode::Eht
+        && [negotiated.local(), negotiated.peer()]
+            .iter()
+            .all(|side| side.eht().is_some_and(|eht| eht.phy[5] & 0x40 != 0));
+    let flags = u16::from(stbc && antennas.count_ones() > 1)
+        | u16::from(ldpc) << 1
+        | u16::from(dcm) << 3
+        | u16::from(extra_ltf) << 6;
+    half(&mut out, head + 4, flags);
     half(
         &mut out,
-        10,
+        head + 6,
         hardware_rates(band, negotiated.legacy.supported),
     );
     // Each stream's rates, per width class of the command's version.
-    let classes = (bytes - 16) / 4;
-    let mut set =
-        |nss: usize, wide: usize, bits: u16| half(&mut out, 12 + (nss * classes + wide) * 2, bits);
+    let mut set = |nss: usize, wide: usize, bits: u16| {
+        let at = head + 8 + (nss * shape.classes + wide) * shape.rate_bytes;
+        half(&mut out, at, bits);
+    };
     match negotiated.mode {
-        Mode::Legacy | Mode::Eht => {}
+        Mode::Legacy => {}
         Mode::Ht => {
             let mcs = ht.as_ref()?.peer_rx_mcs;
             set(0, 0, u16::from(mcs[0]));
@@ -609,6 +750,26 @@ pub fn rate_config(
                 set(nss, 0, mcs_bits(he.mcs_80.rx, nss, [7, 9, 11]));
                 if let Some(wide) = he.mcs_160 {
                     set(nss, 1, mcs_bits(wide.rx, nss, [7, 9, 11]));
+                }
+            }
+        }
+        Mode::Eht => {
+            // `iwl_mld_fill_eht_rates`: 80 MHz's class always, then those the
+            // width reaches. A range's low nibble is what the device sends
+            // and the peer receives.
+            const RANGES: [u16; 4] = [0xff, 0x300, 0xc00, 0x3000];
+            let common = &negotiated.eht.as_ref()?.common;
+            let classes = usize::from(width.max(2) - 1).min(shape.classes);
+            let maps = [common.bw80, common.bw160, common.bw320];
+            for (class, map) in maps.into_iter().enumerate().take(classes) {
+                let Some(map) = map else { continue };
+                for nss in 0..2 {
+                    let bits = RANGES
+                        .into_iter()
+                        .zip(map)
+                        .filter(|&(_, streams)| usize::from(streams & 15) > nss)
+                        .fold(0, |bits, (range, _)| bits | range);
+                    set(nss, class, bits);
                 }
             }
         }
@@ -736,8 +897,8 @@ pub fn smart_fifo(negotiated: &Negotiated) -> Vec<u8> {
 
 /// `iwl_mvm_power_build_cmd` for a station whose power management stays off:
 /// the keep-alive a beacon interval and DTIM period need.
-pub fn power(save_power: bool, beacon_interval: u16, dtim_period: u8) -> Vec<u8> {
-    let mut bytes = alloc::vec![0; 40];
+pub fn power(version: u8, save_power: bool, beacon_interval: u16, dtim_period: u8) -> Vec<u8> {
+    let mut bytes = alloc::vec![0; power_bytes(version)];
     half(&mut bytes, 4, u16::from(save_power));
     let beacons = 3 * u32::from(dtim_period) * u32::from(beacon_interval);
     let keep_alive = (beacons * TU_US)
@@ -773,6 +934,55 @@ pub fn protection(context: &AssociationContext) -> Protection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wifi_7_firmware_reads_its_support_as_bytes_in_a_longer_command() {
+        let state = MacState {
+            address: Mac([2, 0, 0, 0, 0, 1]),
+            he: true,
+            eht: true,
+            aid: Some(7),
+            high_priority: false,
+        };
+        let bytes = mac_config(4, state);
+        assert_eq!(bytes.len(), 56);
+        assert_eq!(bytes[24..28], [1, 0, 1, 0]);
+        assert_eq!(bytes[28..32], [0; 4]);
+        assert_eq!(bytes[40..42], [7, 0]);
+        let older = mac_config(2, state);
+        assert_eq!(older.len(), 52);
+        assert_eq!(older[24..32], [1, 0, 0, 0, 1, 0, 0, 0]);
+    }
+
+    #[test]
+    fn a_peer_is_named_by_its_links_mask_from_version_3() {
+        let state = PeerState {
+            address: Mac([2, 0, 0, 0, 0, 2]),
+            aid: 1,
+            mfp: false,
+            mimo: false,
+            ampdu_spacing: 0,
+            ampdu_exponent: 0,
+            wmm_service_period: None,
+            uapsd_queues: 0,
+            he: None,
+        };
+        let bytes = station_config(3, state);
+        assert_eq!(bytes.len(), 112);
+        assert_eq!(bytes[4..8], [1, 0, 0, 0]);
+        let older = station_config(2, state);
+        assert_eq!(older.len(), 104);
+        assert_eq!(older[4..8], [0; 4]);
+    }
+
+    #[test]
+    fn a_rate_command_has_its_versions_shape() {
+        let shape = |version| RateShape::of(version).map(|shape| (shape.bytes, shape.head));
+        assert_eq!(shape(2), Some((24, 4)));
+        assert_eq!(shape(4), Some((28, 4)));
+        assert_eq!(shape(6), Some((52, 8)));
+        assert_eq!(shape(5), None);
+    }
 
     #[test]
     fn power_constraints_take_the_stricter_limit_of_each_width() {
@@ -816,14 +1026,14 @@ mod tests {
             aid: None,
             high_priority: true,
         };
-        let bytes = mac_config(state);
+        let bytes = mac_config(2, state);
         assert_eq!(bytes[4], 2);
         assert_eq!(bytes[20], 0b1100);
         assert_eq!(bytes[24], 1);
         assert_eq!(bytes[44], 1 << 5);
         state.aid = Some(7);
         state.high_priority = false;
-        let bytes = mac_config(state);
+        let bytes = mac_config(2, state);
         assert_eq!(bytes[20], 0b100);
         assert_eq!((bytes[36], bytes[40], bytes[44]), (1, 7, 0));
     }
@@ -894,9 +1104,10 @@ mod tests {
 
     #[test]
     fn the_keep_alive_covers_three_dtim_periods() {
-        let quick = power(false, 100, 1);
+        let quick = power(2, false, 100, 1);
         assert_eq!(u16::from_le_bytes([quick[6], quick[7]]), 25);
-        let slow = power(false, 1000, 10);
+        let slow = power(3, false, 1000, 10);
+        assert_eq!(slow.len(), 20);
         assert_eq!(u16::from_le_bytes([slow[6], slow[7]]), 31);
     }
 
@@ -932,7 +1143,7 @@ mod tests {
         let mut phy = [0; 11];
         phy[6] = 0x80;
         let capabilities = ap([0; 6], phy, &[0x61, 0x1c, 0xc7, 0x71]);
-        let table = packet_extension(capabilities.he().unwrap());
+        let table = packet_extension(capabilities.he().unwrap(), None);
         assert_eq!(table[..4], [7; 4], "narrower widths stay unset");
         assert_eq!(table[4..8], [7, 0, 7, 0]);
         assert_eq!(table[8..10], [7, 7]);
@@ -945,12 +1156,69 @@ mod tests {
         let padded = |value: u8| {
             let mut phy = [0; 11];
             phy[9] = value << 6;
-            packet_extension(ap([0; 6], phy, &[]).he().unwrap())
+            packet_extension(ap([0; 6], phy, &[]).he().unwrap(), None)
         };
         assert_eq!(padded(0), [7; 20]);
         assert_eq!(padded(1)[..2], [EXTENSION_BPSK, EXTENSION_NONE]);
         assert_eq!(padded(2)[18..], [EXTENSION_NONE, EXTENSION_BPSK]);
         assert_eq!(padded(3), [7; 20], "reserved");
+    }
+
+    fn eht(phy5: u8, ppe: &[u8]) -> Eht {
+        let mut elements = alloc::vec![1, 1, 0x8c];
+        elements.extend([255, 22, 35]);
+        elements.extend([0; 17]);
+        elements.extend([0xfa, 0xff, 0xfa, 0xff]);
+        let mut element = alloc::vec![108, 0, 0];
+        element.extend([0, 0, 0, 0, 0, phy5, 0, 0, 0]);
+        element.extend([0x22; 3]);
+        element.extend(ppe);
+        elements.extend([255, element.len() as u8]);
+        elements.extend(element);
+        crate::wifi::station::phy::Capabilities::parse(
+            Band::Ghz5,
+            crate::wifi::station::phy::Role::AccessPoint,
+            &elements,
+        )
+        .unwrap()
+        .eht()
+        .unwrap()
+        .clone()
+    }
+
+    #[test]
+    fn eht_thresholds_pass_to_the_widths_without_their_own() {
+        // One stream, widths 0 and 2 of the nine-bit header, then 320 MHz's
+        // bit from its second byte. Each pair reads PPET16 then PPET8.
+        let header: u16 = 0x150;
+        let mut bits: u64 = u64::from(header);
+        for (at, value) in [(9, 1), (12, 2), (15, 3), (18, 4), (21, 5), (24, 6)] {
+            bits |= value << at;
+        }
+        let ppe = &bits.to_le_bytes()[..4];
+        let he = ap([0; 6], [0; 11], &[]);
+        let table = packet_extension(he.he().unwrap(), Some(&eht(0x08, ppe)));
+        assert_eq!(table[..2], [2, 1]);
+        assert_eq!(table[2..4], [2, 1], "inherited");
+        assert_eq!(table[4..6], [4, 3]);
+        assert_eq!(table[6..8], [4, 3], "inherited");
+        assert_eq!(table[8..10], [6, 5], "320 MHz's own");
+        assert_eq!(table[10..], [7; 10], "a second stream stays unset");
+    }
+
+    #[test]
+    fn eht_padding_tops_up_he_thresholds_and_stands_in_for_absent_ones() {
+        let mut phy = [0; 11];
+        phy[6] = 0x80;
+        let he = ap([0; 6], phy, &[0x61, 0x1c, 0xc7, 0x71]);
+        let table = packet_extension(he.he().unwrap(), Some(&eht(2 << 4, &[])));
+        assert_eq!(table[..2], [7, 6], "no threshold of its own");
+        assert_eq!(table[4..6], [7, 0], "kept");
+        let table = packet_extension(he.he().unwrap(), Some(&eht(1 << 4, &[])));
+        assert_eq!(table[..2], [6, 7]);
+        let plain = ap([0; 6], [0; 11], &[]);
+        let table = packet_extension(plain.he().unwrap(), Some(&eht(3 << 4, &[])));
+        assert_eq!(table[18..], [EXTENSION_NONE, EXTENSION_BPSK]);
     }
 
     #[test]

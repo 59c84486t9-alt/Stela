@@ -671,6 +671,69 @@ impl Ans {
     /// NVMMU TCB PRPs are authoritative; their encryption and hash fields
     /// must be zero until those engines are modeled, apart from the
     /// CDW14/CDW15 copy the CG v2 driver places at TCB 0x38.
+    /// Check a submitted command against its TCB and carry it out.
+    fn start(
+        &mut self,
+        queue: usize,
+        tag: u16,
+        command: &mut commands::Command,
+        tcb: &[u8; 128],
+        port: &mut Port<'_, '_>,
+        sart: &mut Sart,
+    ) -> Result<commands::Executed> {
+        // `NVMeCoastGuardSetTCBEntry` (CG v2, 0x3de4bd8..0x3de4be4)
+        // copies CDW14 and CDW15 to TCB 0x38 and 0x3c; earlier
+        // submissions leave them zero. It then copies the request's key
+        // area to 0x40.
+        let mirror = &tcb[56..64];
+        if tcb[0] != 0 && tcb[0] != command.opcode()
+            || u16::from(tcb[2]) != tag
+            || tcb[3] != 0
+            || mirror != [0; 8] && mirror != &command.0[56..64]
+            || tcb[6..24].iter().chain(&tcb[40..56]).any(|&b| b != 0)
+        {
+            return Err(refuse!(
+                "ANS NVMMU TCB opcode, tag, encryption or hash fields are not modeled"
+            ));
+        }
+        // SPTM's MAP_PAGES writes CDW0 bits 12:8 to TCB byte 1
+        // (`270c8130`). Bits 1:0 are the request's IODirection, a grant
+        // of device writes (bit 0) and reads (bit 1); a read into an
+        // in-out descriptor grants both, so the command's own direction
+        // need only be within the grant. Bits 3:2 are its inline crypto
+        // mode, which names the key in the key area: wrapped by the
+        // SEP's inline engine, or raw (`inline_key`).
+        let flags = tcb[1];
+        let area = tcb[64..].try_into().unwrap();
+        let key = match (flags & commands::CRYPTO) >> 2 {
+            0 if tcb[64..].iter().all(|&b| b == 0) => None,
+            inline_key::WRAPPED => Some(self.inline.unwrap(area)?),
+            inline_key::RAW => Some(inline_key::InlineKey::raw(area)?),
+            _ => {
+                return Err(refuse!(
+                    "ANS NVMMU inline crypto mode or key area is not modeled"
+                ));
+            }
+        };
+        command.validate()?;
+        let direction = command.direction(queue)?;
+        if flags & !(3 | commands::CRYPTO) != 0 || direction & !flags & 3 != 0 {
+            return Err(refuse!(
+                "ANS NVMMU TCB DMA permissions do not grant the command's direction"
+            ));
+        }
+        if command.0[1] != 0 && command.0[1] != flags & commands::CRYPTO {
+            return Err(refuse!(
+                "ANS command and NVMMU TCB inline crypto modes differ"
+            ));
+        }
+        if queue != 0 && matches!(command.opcode(), 1 | 2 | 5) && tcb[4..6] != command.0[48..50] {
+            return Err(refuse!("ANS NVMMU length differs from the command"));
+        }
+        command.0[24..40].copy_from_slice(&tcb[24..40]);
+        self.execute(queue, command, key, port, sart)
+    }
+
     pub fn run(&mut self, port: &mut Port<'_, '_>, sart: &mut Sart) -> Result<(), MmioError> {
         if !self.executing() {
             return Err(refuse(
@@ -712,6 +775,7 @@ impl Ans {
         }
         // Submitted commands execute in order; a host transfer runs while
         // the next ones execute.
+        let mut refused = None;
         while let Some(&(queue, tag)) = self.pending.front() {
             let error = |reason: Refusal| refusal(queue, reason);
             let q = self.queues[queue];
@@ -745,60 +809,21 @@ impl Ans {
                 tcb,
                 tunnel: None,
             });
-            // `NVMeCoastGuardSetTCBEntry` (CG v2, 0x3de4bd8..0x3de4be4)
-            // copies CDW14 and CDW15 to TCB 0x38 and 0x3c; earlier
-            // submissions leave them zero. It then copies the request's key
-            // area to 0x40.
-            let mirror = &tcb[56..64];
-            if tcb[0] != 0 && tcb[0] != command.opcode()
-                || u16::from(tcb[2]) != tag
-                || tcb[3] != 0
-                || mirror != [0; 8] && mirror != &command.0[56..64]
-                || tcb[6..24].iter().chain(&tcb[40..56]).any(|&b| b != 0)
-            {
-                return Err(error(refuse!(
-                    "ANS NVMMU TCB opcode, tag, encryption or hash fields are not modeled"
-                )));
-            }
-            // SPTM's MAP_PAGES writes CDW0 bits 12:8 to TCB byte 1
-            // (`270c8130`). Bits 1:0 are the request's IODirection, a grant
-            // of device writes (bit 0) and reads (bit 1); a read into an
-            // in-out descriptor grants both, so the command's own direction
-            // need only be within the grant. Bits 3:2 are its inline crypto
-            // mode, which names the key in the key area: wrapped by the
-            // SEP's inline engine, or raw (`inline_key`).
-            let flags = tcb[1];
-            let area = tcb[64..].try_into().unwrap();
-            let key = match (flags & commands::CRYPTO) >> 2 {
-                0 if tcb[64..].iter().all(|&b| b == 0) => None,
-                inline_key::WRAPPED => Some(self.inline.unwrap(area).map_err(error)?),
-                inline_key::RAW => Some(inline_key::InlineKey::raw(area).map_err(error)?),
-                _ => {
-                    return Err(error(refuse!(
-                        "ANS NVMMU inline crypto mode or key area is not modeled"
-                    )));
+            let executed = match self.start(queue, tag, &mut command, &tcb, port, sart) {
+                Ok(executed) => executed,
+                Err(reason) => {
+                    // A command the model cannot carry out fails alone: the
+                    // guest gets its status and the queues go on.
+                    self.pending.pop_front();
+                    self.completed.push_back(Completed {
+                        queue,
+                        command,
+                        outcome: commands::Outcome::unsupported(),
+                    });
+                    refused.get_or_insert(error(reason));
+                    continue;
                 }
             };
-            command.validate().map_err(error)?;
-            let direction = command.direction(queue).map_err(error)?;
-            if flags & !(3 | commands::CRYPTO) != 0 || direction & !flags & 3 != 0 {
-                return Err(error(refuse!(
-                    "ANS NVMMU TCB DMA permissions do not grant the command's direction"
-                )));
-            }
-            if command.0[1] != 0 && command.0[1] != flags & commands::CRYPTO {
-                return Err(error(refuse!(
-                    "ANS command and NVMMU TCB inline crypto modes differ"
-                )));
-            }
-            if queue != 0 && matches!(command.opcode(), 1 | 2 | 5) && tcb[4..6] != command.0[48..50]
-            {
-                return Err(error(refuse!("ANS NVMMU length differs from the command")));
-            }
-            command.0[24..40].copy_from_slice(&tcb[24..40]);
-            let executed = self
-                .execute(queue, &command, key, port, sart)
-                .map_err(error)?;
             self.pending.pop_front();
             match executed {
                 commands::Executed::Done(outcome) => self.completed.push_back(Completed {
@@ -884,7 +909,7 @@ impl Ans {
             self.shutdown = false;
             self.status = READY | SHUTDOWN_COMPLETE;
         }
-        Ok(())
+        refused.map_or(Ok(()), Err)
     }
 }
 

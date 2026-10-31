@@ -112,6 +112,8 @@ struct Inbox {
     /// It runs no guest code until the world it was stopped for restarts,
     /// or while it waits in the engine for other PEs.
     parked: AtomicBool,
+    /// The run is over and this PE's machine has freed its blocks.
+    discarded: AtomicBool,
     /// The serial of the last maintenance posted and of the last applied.
     posted: AtomicU64,
     applied: AtomicU64,
@@ -188,6 +190,8 @@ pub struct Hub {
     request: Mutex<Option<Request>>,
     /// Every running PE but the home one and the requester parks.
     stopped: AtomicBool,
+    /// The run is over: a parked PE frees its blocks and stays parked.
+    finishing: AtomicBool,
     /// A device left bytes for the host to feed or drain
     /// ([`Hub::request_service`]).
     service: AtomicBool,
@@ -234,6 +238,7 @@ impl Hub {
                     chain: chain_control::Storage::new(),
                     owner: AtomicU64::new(0),
                     parked: AtomicBool::new(false),
+                    discarded: AtomicBool::new(false),
                     posted: AtomicU64::new(0),
                     applied: AtomicU64::new(0),
                     lines: AtomicU64::new(0),
@@ -253,6 +258,7 @@ impl Hub {
             requested: AtomicBool::new(false),
             request: Mutex::new(None),
             stopped: AtomicBool::new(false),
+            finishing: AtomicBool::new(false),
             service: AtomicBool::new(false),
             source_observations: AtomicBool::new(false),
         })
@@ -588,6 +594,25 @@ impl Hub {
         }
     }
 
+    /// End the run: every PE but `home` parks for good and frees its blocks,
+    /// waited for while `waiting` holds. A PE that does not get there only
+    /// keeps its memory.
+    fn finish(&self, home: usize, mut waiting: impl FnMut() -> bool) {
+        self.finishing.store(true, Ordering::Release);
+        self.stopped.store(true, Ordering::SeqCst);
+        for pe in self.others(home) {
+            let inbox = &self.inboxes[pe];
+            while inbox.live.load(Ordering::Acquire)
+                && !inbox.discarded.load(Ordering::Acquire)
+                && waiting()
+            {
+                self.interrupt(pe);
+                self.wake(pe);
+                core::hint::spin_loop();
+            }
+        }
+    }
+
     fn restart_others(&self) {
         self.stopped.store(false, Ordering::Release);
     }
@@ -793,7 +818,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             impdef: self.cpu.apple.impdef.cluster_registers(),
         });
         let host = self.host.counter();
-        let pace = Pace::new(self.profile.counter_frequency);
+        let pace = Pace::new(self.profile.counter_frequency, hub.pes() as u64);
         self.clock.seed(&hub.clock, host, pace);
         self.clock
             .attach(Arc::clone(&hub.clock), self.current, self.statistics.blocks);
@@ -1108,6 +1133,19 @@ impl<H: Host, D: Devices> Machine<H, D> {
         applied
     }
 
+    /// The run is over: stop every other PE and free every PE's blocks for
+    /// proving them. A second of the system count bounds the wait.
+    pub fn discard_every_block(&mut self) {
+        const WAIT: u64 = 24_000_000;
+        self.discard_blocks();
+        if let Some(hub) = self.parallel.clone() {
+            let started = self.host.counter();
+            hub.finish(self.current, || {
+                self.host.counter().wrapping_sub(started) < WAIT
+            });
+        }
+    }
+
     /// Run no guest code while the home machine has stopped the others.
     fn park(&mut self, hub: &Arc<Hub>) -> Step {
         let started = self.host.counter();
@@ -1116,6 +1154,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let mut applied = Ok(());
         while hub.stopped.load(Ordering::SeqCst) {
             applied = applied.and(self.wait_for_others(hub));
+            if hub.finishing.load(Ordering::Acquire)
+                && !hub.inboxes[self.current].discarded.load(Ordering::Relaxed)
+            {
+                self.discard_blocks();
+                hub.inboxes[self.current]
+                    .discarded
+                    .store(true, Ordering::Release);
+            }
             core::hint::spin_loop();
         }
         hub.set_parked(self.current, false);

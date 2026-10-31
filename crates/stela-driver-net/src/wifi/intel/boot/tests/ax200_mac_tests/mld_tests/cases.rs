@@ -29,7 +29,7 @@ fn pinned_ax200_firmware_selects_mld_mac_and_inactive_link_commands() {
 fn unsupported_mld_versions_and_partial_publication_keep_owner() {
     for case in 0..3 {
         let bytes = image(
-            if case == 0 { 4 } else { 1 },
+            if case == 0 { 5 } else { 1 },
             Some(if case == 1 { 9 } else { 1 }),
         );
         let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);

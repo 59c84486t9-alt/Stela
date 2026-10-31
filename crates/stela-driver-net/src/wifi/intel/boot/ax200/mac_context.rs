@@ -23,7 +23,6 @@ const BEACON_FILTER: Id = Id {
     version: 0,
 };
 const MAC_CONTEXT_BYTES: usize = 148;
-const MAC_POWER_BYTES: usize = 40;
 const BEACON_FILTER_V4_API: u32 = 47;
 const ACTION_ADD: u32 = 1;
 const ACTION_REMOVE: u32 = 3;
@@ -33,8 +32,11 @@ const ACCEPT_BEACON: u32 = 1 << 6;
 const COLD_CCK_BASIC_RESPONSES: u32 = 0xf;
 const COLD_OFDM_BASIC_RESPONSES: u32 = (1 << 0) | (1 << 2) | (1 << 4);
 const KEEP_ALIVE_SECONDS: u16 = 25;
-pub(in crate::wifi::intel::boot::ax200) fn cold_power_bytes(mode: PowerMode) -> Vec<u8> {
-    let mut bytes = alloc::vec![0; MAC_POWER_BYTES];
+pub(in crate::wifi::intel::boot::ax200) fn cold_power_bytes(
+    version: u8,
+    mode: PowerMode,
+) -> Vec<u8> {
+    let mut bytes = alloc::vec![0; crate::wifi::intel::association::power_bytes(version)];
     bytes[4..6].copy_from_slice(&u16::from(mode == PowerMode::SavePower).to_le_bytes());
     bytes[6..8].copy_from_slice(&KEEP_ALIVE_SECONDS.to_le_bytes());
     bytes
@@ -270,7 +272,7 @@ impl<Q: BootIo, B: BiosIo, O: CountryIo> Ax200Mac<'_, Q, B, O> {
             id: MAC_CONTEXT,
             bytes,
         });
-        let bytes = cold_power_bytes(self.country.board.scan.mcc.setup.options.power_mode);
+        let bytes = cold_power_bytes(2, self.country.board.scan.mcc.setup.options.power_mode);
         self.commands.push(MacCommand {
             kind: MacCommandKind::Power,
             id: MAC_POWER,

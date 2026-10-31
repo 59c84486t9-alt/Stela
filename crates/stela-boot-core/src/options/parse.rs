@@ -58,6 +58,19 @@ impl ParseState<'_> {
                 }
                 options.native_cores = Some(count);
             }
+            GUEST_PES => {
+                if options.guest_pes.is_some() {
+                    return Err(Error::DuplicateGuestPes);
+                }
+                let count = value()
+                    .ok_or(Error::GuestPeCount)?
+                    .parse::<usize>()
+                    .map_err(|_| Error::GuestPeCount)?;
+                if count == 0 {
+                    return Err(Error::GuestPeCount);
+                }
+                options.guest_pes = Some(count);
+            }
             "--native-memory-check" => options.native_memory_check = true,
             "--native-clock-check" => {
                 flag(&mut options.native_clock_check, Error::DuplicateNativeClock)?

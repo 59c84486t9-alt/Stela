@@ -42,10 +42,7 @@ pub(super) const COMPLETE_GROUP: u8 = 0;
 const GENERAL: usize = 8;
 const GENERAL_BYTES: usize = 36;
 const CHANNELS: usize = GENERAL + GENERAL_BYTES;
-const FIRMWARE_CHANNELS: usize = 67;
 const CHANNEL_CONFIG_BYTES: usize = 8;
-const PERIODIC: usize = CHANNELS + 4 + FIRMWARE_CHANNELS * CHANNEL_CONFIG_BYTES;
-const PROBE: usize = PERIODIC + 12;
 const PROBE_SEGMENTS: usize = 5 * 4;
 const PROBE_BUFFER_BYTES: usize = 512;
 const SSID_ENTRY_BYTES: usize = 34;
@@ -54,8 +51,31 @@ const SHORT_SSID_ENTRIES: usize = 8;
 const SHORT_SSIDS: usize = SHORT_SSID_ENTRIES * 4;
 const BSSID_ENTRIES: usize = 16;
 const BSSIDS: usize = BSSID_ENTRIES * 6;
-const SSIDS: usize = PROBE + PROBE_SEGMENTS + PROBE_BUFFER_BYTES + 4;
-pub(super) const REQUEST_BYTES: usize = SSIDS + DIRECT_SSIDS + SHORT_SSIDS + BSSIDS;
+/// Where a request's tables lie, after its channels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Layout {
+    channels: usize,
+    periodic: usize,
+    probe: usize,
+    ssids: usize,
+    bytes: usize,
+}
+impl Layout {
+    /// `SCAN_MAX_NUM_CHANS_V3`, and `_V4` from version 18.
+    const fn of(version: u8) -> Self {
+        let channels = if version >= 18 { 68 } else { 67 };
+        let periodic = CHANNELS + 4 + channels * CHANNEL_CONFIG_BYTES;
+        let probe = periodic + 12;
+        let ssids = probe + PROBE_SEGMENTS + PROBE_BUFFER_BYTES + 4;
+        Self {
+            channels,
+            periodic,
+            probe,
+            ssids,
+            bytes: ssids + DIRECT_SSIDS + SHORT_SSIDS + BSSIDS,
+        }
+    }
+}
 /// A management header and the wildcard SSID firmware replaces.
 const HEADER: usize = 26;
 /// The first version carrying a channel's band in its flags, not its own byte.
@@ -98,7 +118,7 @@ pub(super) fn validate(
             .ok_or(Ax200ScanError::MissingApi(id.opcode))
     };
     let request = version(REQUEST)?;
-    if !(14..=17).contains(&request) {
+    if !(14..=18).contains(&request) {
         return Err(Ax200ScanError::Version {
             command: REQUEST.opcode,
             version: request,
@@ -157,13 +177,14 @@ pub(super) fn encode(
     if request.active() != probe.is_some() {
         return Err(Ax200ScanError::ProbePowerRequired);
     }
+    let layout = Layout::of(version);
     // cfg80211 splits a scan, so a request is all 6 GHz or none of it.
     let six_ghz = request
         .channels()
         .first()
         .is_some_and(|ch| ch.band == Band::Ghz6);
     if request.channels().is_empty()
-        || request.channels().len() > FIRMWARE_CHANNELS
+        || request.channels().len() > layout.channels
         || (!six_ghz && !request.six_ghz().is_empty())
         || request
             .channels()
@@ -205,9 +226,9 @@ pub(super) fn encode(
     };
     let mut bytes = Vec::new();
     bytes
-        .try_reserve_exact(REQUEST_BYTES)
+        .try_reserve_exact(layout.bytes)
         .map_err(|_| Ax200ScanError::NoMemory)?;
-    bytes.resize(REQUEST_BYTES, 0);
+    bytes.resize(layout.bytes, 0);
     // One serialized UID0. Only the same owner can reuse it after
     // completion, command reclaim and old-RB/deferred-user retirement.
     bytes[4..8].copy_from_slice(&PRIORITY_EXT_6.to_le_bytes());
@@ -220,9 +241,10 @@ pub(super) fn encode(
     // Both LMAC timing arrays are zero for the unassociated MAC.
     // EBS is disabled: no previous successful EBS is invented.
     if six_ghz {
-        encode_six_ghz(&mut bytes, request, version, abilities)?;
+        encode_six_ghz(&mut bytes, request, version, abilities, layout)?;
     } else {
-        let bitmap = direct_ssids(&mut bytes[SSIDS..SSIDS + DIRECT_SSIDS], ssids);
+        let table = layout.ssids..layout.ssids + DIRECT_SSIDS;
+        let bitmap = direct_ssids(&mut bytes[table], ssids);
         bytes[CHANNELS] = ENABLE_CHANNEL_ORDER;
         bytes[CHANNELS + 1] = request.channels().len() as u8;
         bytes[CHANNELS + 2..CHANNELS + 4].copy_from_slice(&[10, 2]);
@@ -230,9 +252,9 @@ pub(super) fn encode(
             put_channel(&mut bytes, index, channel, bitmap, version);
         }
     }
-    bytes[PERIODIC + 2] = 1; // one ordinary iteration, interval/delay zero
-    bytes[PROBE + 2..PROBE + 4].copy_from_slice(&(HEADER as u16).to_le_bytes());
-    let frame = PROBE + PROBE_SEGMENTS;
+    bytes[layout.periodic + 2] = 1; // one ordinary iteration, interval/delay zero
+    bytes[layout.probe + 2..layout.probe + 4].copy_from_slice(&(HEADER as u16).to_le_bytes());
+    let frame = layout.probe + PROBE_SEGMENTS;
     bytes[frame] = 0x40; // a probe request, with the wildcard SSID firmware replaces
     bytes[frame + 4..frame + 10].fill(0xff);
     bytes[frame + 10..frame + 16].copy_from_slice(&local.0);
@@ -240,7 +262,7 @@ pub(super) fn encode(
     let mut offset = HEADER;
     let parts: [&[u8]; 4] = [&ghz2, &ghz5, &ghz6, &common];
     for (segment, part) in parts.into_iter().enumerate() {
-        let at = PROBE + (segment + 1) * 4;
+        let at = layout.probe + (segment + 1) * 4;
         bytes[at..at + 2].copy_from_slice(&(offset as u16).to_le_bytes());
         bytes[at + 2..at + 4].copy_from_slice(&(part.len() as u16).to_le_bytes());
         bytes[frame + offset..frame + offset + part.len()].copy_from_slice(part);
@@ -277,7 +299,12 @@ struct SixGhzTables {
 }
 
 /// `iwl_mvm_umac_scan_fill_6g_chan_list`.
-fn six_ghz_tables(bytes: &mut [u8], request: &protocol::Request, hidden: bool) -> SixGhzTables {
+fn six_ghz_tables(
+    bytes: &mut [u8],
+    request: &protocol::Request,
+    hidden: bool,
+    ssids: usize,
+) -> SixGhzTables {
     let mut tables = SixGhzTables {
         short_ssids: Vec::new(),
         bssids: Vec::new(),
@@ -285,7 +312,7 @@ fn six_ghz_tables(bytes: &mut [u8], request: &protocol::Request, hidden: bool) -
     let named = request.ssids().iter().filter(|ssid| !ssid.is_empty());
     for (index, ssid) in named.take(SHORT_SSID_ENTRIES).enumerate() {
         if hidden {
-            let entry = &mut bytes[SSIDS + index * SSID_ENTRY_BYTES..][..SSID_ENTRY_BYTES];
+            let entry = &mut bytes[ssids + index * SSID_ENTRY_BYTES..][..SSID_ENTRY_BYTES];
             entry[1] = ssid.len() as u8;
             entry[2..2 + ssid.len()].copy_from_slice(ssid);
         }
@@ -307,15 +334,15 @@ fn six_ghz_tables(bytes: &mut [u8], request: &protocol::Request, hidden: bool) -
             tables.bssids.push(target.bssid);
         }
     }
-    let shorts = SSIDS + DIRECT_SSIDS;
+    let shorts = ssids + DIRECT_SSIDS;
     for (index, (short, _)) in tables.short_ssids.iter().enumerate() {
         bytes[shorts + index * 4..][..4].copy_from_slice(&short.to_le_bytes());
     }
     for (index, bssid) in tables.bssids.iter().enumerate() {
         bytes[shorts + SHORT_SSIDS + index * 6..][..6].copy_from_slice(&bssid.0);
     }
-    bytes[SSIDS - 4] = tables.short_ssids.len() as u8;
-    bytes[SSIDS - 3] = tables.bssids.len() as u8;
+    bytes[ssids - 4] = tables.short_ssids.len() as u8;
+    bytes[ssids - 3] = tables.bssids.len() as u8;
     tables
 }
 
@@ -326,8 +353,9 @@ fn encode_six_ghz(
     request: &protocol::Request,
     version: u8,
     abilities: Abilities,
+    layout: Layout,
 ) -> Result<(), Ax200ScanError> {
-    let tables = six_ghz_tables(bytes, request, abilities.hidden_six_ghz);
+    let tables = six_ghz_tables(bytes, request, abilities.hidden_six_ghz, layout.ssids);
     let targets = request.six_ghz();
     let ssids = request.ssids();
     let mut count = 0;
@@ -424,7 +452,22 @@ mod tests {
     use super::*;
 
     const LOCAL: crate::Mac = crate::Mac([2, 0, 0, 0, 0, 1]);
+    const LAYOUT: Layout = Layout::of(17);
+    const PROBE: usize = LAYOUT.probe;
+    const SSIDS: usize = LAYOUT.ssids;
     const FRAME: usize = PROBE + PROBE_SEGMENTS;
+
+    #[test]
+    fn version_18_has_room_for_one_more_channel() {
+        let (old, new) = (Layout::of(17), Layout::of(18));
+        assert_eq!((old.channels, new.channels), (67, 68));
+        assert_eq!(
+            old.bytes,
+            8 + 36 + 4 + 67 * 8 + 12 + 20 + 512 + 4 + 680 + 32 + 96
+        );
+        assert_eq!(new.bytes, old.bytes + 8);
+        assert_eq!(new.ssids, old.ssids + 8);
+    }
 
     fn channel(band: Band, number: u16, frequency_mhz: u16) -> Channel {
         Channel {

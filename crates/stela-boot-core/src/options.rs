@@ -33,6 +33,7 @@ pub const VERIFY_ON_READ: &str = "--verify-on-read";
 pub const UPDATE_RESTORE: &str = mount_interface::UPDATE_RESTORE_OPTION;
 pub const EXTERNAL_DISKS: &str = "--external-disks";
 pub const NATIVE_CORES: &str = "--native-cores";
+pub const GUEST_PES: &str = "--guest-pes";
 pub const WIFI: &str = "--wifi";
 pub const WIFI_KEY: &str = "--wifi-key";
 pub const WIFI_COUNTRY: &str = "--wifi-country";
@@ -268,6 +269,11 @@ pub struct System {
     /// siblings. Without it every physical core up to the executor's
     /// capacity is assigned.
     pub native_cores: Option<usize>,
+    /// The PEs of the Mac this boots (`--guest-pes N`), which setup records
+    /// from its DeviceTree: the loader reserves code and page tables only for
+    /// the executors that will run them. Without it every assigned core is
+    /// sized for a PE.
+    pub guest_pes: Option<usize>,
     /// Check owned AP startup/host resources, then stop before guest entry.
     pub native_bootstrap_check: bool,
     /// Bounded checked-memory kernel execution on the selected cores.
@@ -377,6 +383,7 @@ impl Default for System {
             native_mmio_check: false,
             native_clock_check: false,
             native_cores: None,
+            guest_pes: None,
             native_bootstrap_check: false,
             native_shared_check: false,
             native_artifacts: false,
@@ -530,6 +537,16 @@ fn flag(set: &mut bool, duplicate: Error) -> Result<(), Error> {
 }
 
 impl System {
+    /// The executors of the `cores` assigned that run PEs: the BSP alone
+    /// when `serialized`, else one for each PE of the guest.
+    pub fn runners(&self, cores: usize, serialized: bool) -> usize {
+        match (serialized, self.guest_pes) {
+            (true, _) => 1,
+            (false, Some(pes)) => pes.min(cores),
+            (false, None) => cores,
+        }
+    }
+
     /// The line starts with `--system`.
     pub fn is_system(text: &str) -> bool {
         text.split_ascii_whitespace().next() == Some(SYSTEM)
@@ -720,6 +737,7 @@ impl fmt::Display for System {
         line.flag("--survey", self.survey)?;
         line.flag("--sep-observe", self.sep_observe)?;
         line.value(NATIVE_CORES, self.native_cores)?;
+        line.value(GUEST_PES, self.guest_pes)?;
         line.flag("--native-rounds", self.native_rounds)?;
         line.flag("--native-artifacts", self.native_artifacts)?;
         line.flag("--native-memory-check", self.native_memory_check)?;

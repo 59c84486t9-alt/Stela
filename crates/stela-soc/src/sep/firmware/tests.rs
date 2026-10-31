@@ -1,4 +1,3 @@
-use super::super::observe;
 use super::*;
 use crate::Result;
 use stela_contracts::refuse;
@@ -335,8 +334,8 @@ fn shared_directory_faults_do_not_announce_os_active_or_services() {
         Frame::from_mailbox(replies[0]).unwrap().opcode,
         control::OS_ACTIVE
     );
-    // OS active, then the xART pair, sks and pnon, name and capacities.
-    assert_eq!(replies.len(), 9);
+    // OS active, then the xART pair, sks, pnon and scrd, name and capacities.
+    assert_eq!(replies.len(), 11);
     assert!(!fw.dma_pending());
 }
 
@@ -386,7 +385,11 @@ fn error_replies_follow_each_phase_protocol_and_refuse_without_one() {
         (0x4d | keystore::REPLY, 6, keystore::FAILURE, 0)
     );
     assert_eq!(reply(&mut fw, request(keystore::ID, 0xcd, 6)), None);
-    assert_eq!(reply(&mut fw, request(observe::CREDENTIALS_ID, 3, 4)), None);
+    let scrd = reply(&mut fw, request(credentials::ID, 3, 4)).unwrap();
+    assert_eq!(
+        (scrd.service, scrd.tag, scrd.opcode, scrd.data),
+        (credentials::ID, 3, 0, 0xe000_02c7)
+    );
     let control = reply(&mut fw, request(message::CONTROL, 1, 99)).unwrap();
     assert_eq!(
         control,

@@ -107,7 +107,7 @@ impl<'a> Iterator for Packets<'a> {
         }
         let raw = &self.bytes[start..start + length];
         self.offset = next;
-        self.ended = self.family == Family::Ax210;
+        self.ended = self.family >= Family::Ax210;
         Some(Ok(Packet {
             raw_flags: flags,
             command: raw[4],
@@ -137,7 +137,7 @@ pub fn free_descriptor(family: Family, iova: u64, id: u16) -> Result<FreeDescrip
     }
     Ok(match family {
         Family::Ax200 => FreeDescriptor::Ax200((iova | u64::from(id)).to_le_bytes()),
-        Family::Ax210 => {
+        _ => {
             let mut bytes = [0; 16];
             bytes[..2].copy_from_slice(&id.to_le_bytes());
             bytes[8..].copy_from_slice(&iova.to_le_bytes());
@@ -151,14 +151,22 @@ pub struct UsedDescriptor<'a> {
     pub fragmented: bool,
     pub raw: &'a [u8],
 }
+/// `iwl_pcie_used_bd_size`.
+pub(super) const fn used_stride(family: Family) -> usize {
+    match family {
+        Family::Ax200 | Family::Bz | Family::Sc => 4,
+        Family::Ax210 => 32,
+    }
+}
 pub fn used_descriptor(family: Family, raw: &[u8]) -> Result<UsedDescriptor<'_>, Error> {
-    let expected = if family == Family::Ax200 { 4 } else { 32 };
+    let expected = used_stride(family);
     if raw.len() != expected {
         return Err(Error::DescriptorSize);
     }
     let (id, fragmented) = match family {
         Family::Ax200 => ((le32(raw, 0) & 0xfff) as u16, false),
         Family::Ax210 => (le16(raw, 4), raw[6] & 1 != 0),
+        Family::Bz | Family::Sc => (le16(raw, 0), raw[2] & 1 != 0),
     };
     if id == 0 || (family == Family::Ax200 && id > 0xfff) {
         return Err(Error::DescriptorId);

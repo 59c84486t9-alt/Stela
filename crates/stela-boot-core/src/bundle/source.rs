@@ -510,7 +510,7 @@ mod tests {
         let mut original = DeviceTree::parse(&tree(0, 0)).unwrap();
         original.ensure_child("/", "counter-control").unwrap();
         original
-            .set_property("/counter-control", "compatible", b"clpc,t8112\0".to_vec())
+            .set_property("/counter-control", "compatible", b"clpc,t6000\0".to_vec())
             .unwrap();
         let original = original.serialize();
         let mut prepared = DeviceTree::parse(&tree(0x6000, 8)).unwrap();

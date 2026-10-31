@@ -39,12 +39,16 @@ const CAPABILITIES: u32 = 30;
 const PAGING: u32 = 32;
 const FW_VERSION: u32 = 36;
 const CMD_VERSIONS: u32 = 48;
+const CMD_BIOS_TABLES: u32 = 73;
 const IML: u32 = 52;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// `IWL_DEVICE_FAMILY`, ordered as Linux compares it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Family {
     Ax200,
     Ax210,
+    Bz,
+    Sc,
 }
 
 impl Family {
@@ -54,12 +58,15 @@ impl Family {
         match self {
             Self::Ax200 => "iwlwifi-cc-a0-77.ucode",
             Self::Ax210 => "iwlwifi-ty-a0-gf-a0-89.ucode",
+            Self::Bz => "iwlwifi-gl-c0-fm-c0-c106.ucode",
+            Self::Sc => "iwlwifi-sc-a0-fm-c0-c106.ucode",
         }
     }
     pub fn firmware_api(self) -> u32 {
         match self {
             Self::Ax200 => 77,
             Self::Ax210 => 89,
+            Self::Bz | Self::Sc => 106,
         }
     }
 }
@@ -358,6 +365,9 @@ impl<'a> Firmware<'a> {
                         .collect();
                     singleton(&mut image.command_versions, versions, kind)?;
                 }
+                CMD_BIOS_TABLES if !count.is_multiple_of(4) => {
+                    return Err(Error::TlvLength { kind, bytes: count });
+                }
                 IML => {
                     if data.is_empty() {
                         return Err(Error::TlvLength { kind, bytes: 0 });
@@ -414,6 +424,19 @@ impl<'a> Firmware<'a> {
             .iter()
             .copied()
             .find(|v| v.group == group && v.command == command)
+    }
+
+    /// `iwl_fw_lookup_cmd_bios_supported_revision`: the newest BIOS table a
+    /// command takes from UEFI or from ACPI, where the image says.
+    pub fn bios_table_revision(&self, group: u8, command: u8, uefi: bool) -> Option<u8> {
+        let table = self.tlvs.iter().find(|tlv| tlv.kind == CMD_BIOS_TABLES)?;
+        let row = table
+            .data
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .find(|row| row[0] == command && row[1] == group)?;
+        Some(row[if uefi { 3 } else { 2 }])
     }
 
     /// Gen2 self-load layout only. AX210 has additional gen3 IML/context/PNVM

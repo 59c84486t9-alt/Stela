@@ -37,8 +37,8 @@ pub struct RecoverySite {
 /// mint helper-failure permission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TranslatedAccess {
-    bytes: u8,
-    flags: u8,
+    pub(super) bytes: u8,
+    pub(super) flags: u8,
 }
 impl TranslatedAccess {
     pub const fn bytes(self) -> u8 {
@@ -66,6 +66,13 @@ impl RecoverySite {
     }
     pub const fn translated_access(self) -> Option<TranslatedAccess> {
         self.translated
+    }
+    /// Back from [`super::PackedRecovery`], which holds only minted sites.
+    pub(super) fn packed(kind: u8, translated: Option<(u8, u8)>) -> Self {
+        Self {
+            kind: RecoverySiteKind::try_from(kind).expect("packed by new"),
+            translated: translated.map(|(bytes, flags)| TranslatedAccess { bytes, flags }),
+        }
     }
     pub(crate) const fn guest_access() -> Self {
         Self {

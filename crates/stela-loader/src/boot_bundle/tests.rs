@@ -797,8 +797,8 @@ fn lays_out_sptm_regions_and_patch_slots() -> Result<()> {
     assert_eq!(
         (REVISION, prepared_digest(&bundle)?),
         (
-            32,
-            "b284eebb93b9c998316d910cf9af9dbe3b121bb9312c4497a5fd2dffba9f99e4".to_owned()
+            33,
+            "2282554604131299f7c7f3c6587e671ac28afc7d77ff0728ead446e034bb3279".to_owned()
         )
     );
     let original = bundle

@@ -60,62 +60,54 @@ pub struct Partition {
     pub pool_bytes: u64,
 }
 
-/// What each worker keeps of the code arena and shadow pool while the BSP
-/// runs every PE serialized: none of them runs guest code then.
-const WORKER_CODE: u64 = 4 * 1024 * 1024;
-const WORKER_POOL: u64 = 4 * 1024 * 1024;
+/// What an executor that runs no PE keeps of the code arena and shadow pool.
+const PARKED_CODE: u64 = 4 * 1024 * 1024;
+const PARKED_POOL: u64 = 4 * 1024 * 1024;
 
-/// The code and pool bytes the `cores - 1` workers keep while the BSP runs
-/// every PE serialized. The loader adds them to the BSP's own share.
-pub const fn serialized_reserve(cores: usize) -> (u64, u64) {
-    let workers = cores.saturating_sub(1) as u64;
-    (workers * WORKER_CODE, workers * WORKER_POOL)
+/// The code and pool bytes the executors past the `runners` of `cores` keep.
+/// The loader adds them to the runners' own shares.
+pub const fn parked_reserve(cores: usize, runners: usize) -> (u64, u64) {
+    let parked = cores.saturating_sub(runners) as u64;
+    (parked * PARKED_CODE, parked * PARKED_POOL)
 }
 
 /// Divide only whole frames/code ring units; unused tail bytes remain owned
-/// by the allocation and cannot be lent to a second executor. Executors
-/// share alike while each runs PEs; `serialized`, the BSP takes all but the
-/// workers' [`WORKER_CODE`] and [`WORKER_POOL`].
+/// by the allocation and cannot be lent to a second executor. The first
+/// `runners` executors run PEs and share alike all but the others'
+/// [`PARKED_CODE`] and [`PARKED_POOL`].
 pub fn partition(
     cores: usize,
+    runners: usize,
     slot: usize,
     code: u64,
     pool: u64,
-    serialized: bool,
 ) -> Result<Partition> {
-    if cores == 0 || cores > MAX_CORES || slot >= cores {
+    if cores == 0 || cores > MAX_CORES || slot >= cores || runners == 0 || runners > cores {
         return Err(refuse!("invalid native executor slot"));
     }
-    let workers = cores as u64 - 1;
+    let parked = (cores - runners) as u64;
+    let share = |total: u64, reserve: u64, unit: u64| {
+        total.saturating_sub(parked * reserve) / runners as u64 / unit * unit
+    };
     // Each host ring has eight 16-byte-aligned code units. Each shadow pool
     // needs 64 permanent root frames and at least one frame in each half.
-    let (code_bytes, pool_bytes, code_offset, pool_offset) = if serialized && workers > 0 {
-        let first = |total: u64, reserve: u64, unit: u64| {
-            total.saturating_sub(workers * reserve) / unit * unit
-        };
-        let (code_first, pool_first) = (
-            first(code, WORKER_CODE, 128),
-            first(pool, WORKER_POOL, PAGE),
-        );
-        let behind = slot.saturating_sub(1) as u64;
-        match slot {
-            0 => (code_first, pool_first, 0, 0),
-            _ => (
-                WORKER_CODE,
-                WORKER_POOL,
-                code_first + behind * WORKER_CODE,
-                pool_first + behind * WORKER_POOL,
-            ),
-        }
-    } else {
-        let code_bytes = code / cores as u64 / 128 * 128;
-        let pool_bytes = pool / cores as u64 / PAGE * PAGE;
-        (
-            code_bytes,
-            pool_bytes,
-            slot as u64 * code_bytes,
-            slot as u64 * pool_bytes,
-        )
+    let (code_share, pool_share) = (
+        share(code, PARKED_CODE, 128),
+        share(pool, PARKED_POOL, PAGE),
+    );
+    let (code_bytes, pool_bytes, code_offset, pool_offset) = match slot.checked_sub(runners) {
+        None => (
+            code_share,
+            pool_share,
+            slot as u64 * code_share,
+            slot as u64 * pool_share,
+        ),
+        Some(behind) => (
+            PARKED_CODE,
+            PARKED_POOL,
+            runners as u64 * code_share + behind as u64 * PARKED_CODE,
+            runners as u64 * pool_share + behind as u64 * PARKED_POOL,
+        ),
     };
     if code_bytes < 128 || pool_bytes < 66 * PAGE {
         return Err(refuse!("native executor resources too small"));
@@ -160,19 +152,16 @@ mod tests {
     }
     #[test]
     fn private_arenas_have_no_overlap_or_fractional_ring_units() {
-        for (cores, serialized) in (1..=MAX_CORES).flat_map(|cores| [(cores, false), (cores, true)])
+        for (cores, runners) in
+            (1..=MAX_CORES).flat_map(|cores| [(cores, cores), (cores, 1), (cores, cores.min(8))])
         {
-            let (code_reserve, pool_reserve) = if serialized {
-                serialized_reserve(cores)
-            } else {
-                (0, 0)
-            };
+            let (code_reserve, pool_reserve) = parked_reserve(cores, runners);
             let code = 128 * 1024 * 1024 + 127 + code_reserve;
             let pool = 64 * 1024 * 1024 + PAGE - 1 + pool_reserve;
             let mut previous_code = 0;
             let mut previous_pool = 0;
             for slot in 0..cores {
-                let part = partition(cores, slot, code, pool, serialized).unwrap();
+                let part = partition(cores, runners, slot, code, pool).unwrap();
                 assert_eq!(part.code_offset, previous_code);
                 assert_eq!(part.pool_offset, previous_pool);
                 assert_eq!(part.code_bytes % 128, 0);
@@ -190,22 +179,47 @@ mod tests {
     #[test]
     fn a_serialized_bsp_takes_all_but_the_workers_reserves() {
         let (code, pool) = (512 * 1024 * 1024, 1024 * 1024 * 1024);
-        let bsp = partition(8, 0, code, pool, true).unwrap();
-        assert_eq!(bsp.code_bytes, code - 7 * WORKER_CODE);
-        assert_eq!(bsp.pool_bytes, pool - 7 * WORKER_POOL);
-        let last = partition(8, 7, code, pool, true).unwrap();
+        let bsp = partition(8, 1, 0, code, pool).unwrap();
+        assert_eq!(bsp.code_bytes, code - 7 * PARKED_CODE);
+        assert_eq!(bsp.pool_bytes, pool - 7 * PARKED_POOL);
+        let last = partition(8, 1, 7, code, pool).unwrap();
         assert_eq!(last.code_offset + last.code_bytes, code);
         assert_eq!(last.pool_offset + last.pool_bytes, pool);
     }
 
+    /// A host with more cores than the guest has PEs parks the rest, which
+    /// take no share.
+    #[test]
+    fn cores_past_the_guests_pes_keep_only_a_reserve() {
+        let (code, pool) = (56 * PARKED_CODE + (8 << 28), 56 * PARKED_POOL + (8 << 28));
+        let share = 1 << 28;
+        let first = partition(64, 8, 7, code, pool).unwrap();
+        assert_eq!((first.code_bytes, first.pool_bytes), (share, share));
+        assert_eq!(first.code_offset, 7 * share);
+        let parked = partition(64, 8, 8, code, pool).unwrap();
+        assert_eq!(
+            (parked.code_bytes, parked.pool_bytes),
+            (PARKED_CODE, PARKED_POOL)
+        );
+        assert_eq!(parked.code_offset, 8 * share);
+        let last = partition(64, 8, 63, code, pool).unwrap();
+        assert_eq!(last.code_offset + last.code_bytes, code);
+    }
+
     #[test]
     fn unavailable_slots_and_insufficient_private_roots_refuse() {
-        for (cores, slot) in [(0, 0), (MAX_CORES + 1, 0), (2, 2)] {
-            assert!(partition(cores, slot, 1024, 1024 * PAGE, false).is_err());
+        for (cores, runners, slot) in [
+            (0, 1, 0),
+            (MAX_CORES + 1, 1, 0),
+            (2, 2, 2),
+            (2, 0, 0),
+            (2, 3, 0),
+        ] {
+            assert!(partition(cores, runners, slot, 1024, 1024 * PAGE).is_err());
         }
-        assert!(partition(2, 0, 255, 1024 * PAGE, false).is_err());
-        assert!(partition(2, 0, 1024, 132 * PAGE - 1, false).is_err());
-        assert!(partition(2, 0, 256, 132 * PAGE, false).is_ok());
-        assert!(partition(2, 0, 256, 132 * PAGE, true).is_err());
+        assert!(partition(2, 2, 0, 255, 1024 * PAGE).is_err());
+        assert!(partition(2, 2, 0, 1024, 132 * PAGE - 1).is_err());
+        assert!(partition(2, 2, 0, 256, 132 * PAGE).is_ok());
+        assert!(partition(2, 1, 0, 256, 132 * PAGE).is_err());
     }
 }

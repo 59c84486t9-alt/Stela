@@ -539,7 +539,7 @@ fn start_processors(boot: Boot<'_>, host: &mut OpenedHost) -> Processors {
             worker_ram,
             native_tsc_base,
             options.native_bootstrap_check,
-            serialized,
+            options.runners(handoff.native_resources.cores as usize, serialized),
         )
     }
     .unwrap_or_else(|error| {
@@ -847,6 +847,9 @@ fn model_board(
         full_profile.processors.len().max(1),
     )
     .unwrap_or_else(|error| output::fatal(error));
+    if options.guest_pes.is_some_and(|pes| active_workers > pes) {
+        output::fatal("the Mac has more PEs than --guest-pes reserved executors for");
+    }
     output::arguments(format_args!(
         "NATIVE ACTIVE workers={active_workers} parked={} source_PEs={}\n",
         handoff.native_resources.cores as usize - active_workers,
@@ -1712,12 +1715,13 @@ fn install_host(handoff: &'static Handoff, options: &Options, ram: &[RamRange]) 
         || options.native_rounds
         || options.native_shared_check
         || options.native_bootstrap_check);
+    let cores = handoff.native_resources.cores as usize;
     let partition = crate::native_smp::resources::partition(
-        handoff.native_resources.cores as usize,
+        cores,
+        options.runners(cores, serialized),
         0,
         handoff.code.bytes,
         handoff.pool.bytes,
-        serialized,
     )
     .unwrap_or_else(|error| output::fatal(error));
     let native_tsc_base = host::rdtsc();

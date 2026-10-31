@@ -55,7 +55,7 @@ use patches::*;
 
 /// The revision of the content [`prepare`] writes within its schema; a
 /// bundle of another revision is prepared again (`stela setup update stela`).
-pub const REVISION: u32 = 32;
+pub const REVISION: u32 = 33;
 /// m1n1 `_write_boot_args`: the physical aperture base XNU expects, offset
 /// by `phys_base` modulo 32 MiB.
 const VIRT_BASE: u64 = 0xfffffe0010000000;
@@ -794,6 +794,7 @@ fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> 
         target: Some(inputs.target.clone()),
         options: options.clone(),
         boot_cpu: Some(shaped.boot_cpu),
+        processors: shaped.processors,
         sources: sources(inputs, ramdisk_source),
         files: files
             .iter()

@@ -350,10 +350,16 @@ fn encode(
         .command_version(COMMAND.wire().group, COMMAND.opcode)
         .ok_or(Ax200TransmitPowerError::MissingApi)?
         .command_version;
-    if !matches!(version, 3..=5 | 8) {
+    if !matches!(version, 3..=5 | 8..=11) {
         return Err(Ax200TransmitPowerError::Version(version));
     }
-    let length = if version == 8 {
+    let length = if version == 11 {
+        116
+    } else if version == 10 {
+        108
+    } else if version == 9 {
+        40
+    } else if version == 8 {
         120
     } else if firmware.supports_api(45) {
         44
@@ -376,7 +382,11 @@ fn encode(
 mod tests {
     extern crate std;
     use super::*;
-    use crate::wifi::intel::firmware::Firmware;
+    use crate::wifi::intel::{
+        association,
+        firmware::{Family, Firmware},
+        transmit,
+    };
     fn image(version: u8, reduced: bool, ack: bool) -> Vec<u8> {
         let mut bytes = alloc::vec![0; 88];
         bytes[4..8].copy_from_slice(&0x0a4c_5749u32.to_le_bytes());
@@ -414,6 +424,15 @@ mod tests {
         assert_eq!(command.len(), 120);
         assert_eq!(&command[8..10], &[176, 0]);
     }
+    #[test]
+    fn each_later_version_has_its_own_length() {
+        for (version, length) in [(9, 40), (10, 108), (11, 116)] {
+            let bytes = image(version, false, false);
+            let command = encode(&Firmware::parse(&bytes).unwrap(), 22).unwrap();
+            assert_eq!(command.len(), length);
+            assert_eq!(&command[8..10], &[176, 0]);
+        }
+    }
     /// A model firmware declares only what its test expects, so real images are
     /// the one check of what a gate admits.
     #[test]
@@ -423,6 +442,28 @@ mod tests {
         let firmware = Firmware::parse(&bytes).unwrap();
         super::super::super::wire::validate(&firmware).unwrap();
         encode(&firmware, 22).unwrap();
+        let channel = Channel {
+            band: Band::Ghz2,
+            number: 1,
+            frequency_mhz: 2412,
+        };
+        super::super::configuration(&firmware, 3, channel, PowerMode::ContinuouslyAwake).unwrap();
+        crate::wifi::intel::mcc::Response::layout(&firmware).unwrap();
+        assert!(
+            [Family::Ax200, Family::Ax210, Family::Bz]
+                .into_iter()
+                .any(|family| transmit::rate_format(&firmware, family).is_ok())
+        );
+        let version = |group, command| {
+            firmware
+                .command_version(group, command)
+                .map_or(0, |version| version.command_version)
+        };
+        assert!(association::RateShape::of(version(5, 0x0f)).is_some());
+        assert!(version(3, 8) <= 4, "MAC_CONFIG");
+        assert!(version(3, 9) <= 8, "LINK_CONFIG");
+        assert!(version(3, 0x0a) <= 3, "STA_CONFIG");
+        assert!(version(1, 0xa9) <= 3, "MAC_PM_POWER_TABLE");
     }
     #[test]
     #[ignore = "oracle: STELA_IWLWIFI_TRANSMIT_POWER_TRACE"]

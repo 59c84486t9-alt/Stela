@@ -450,11 +450,12 @@ fn plain_ordering(target: crate::TargetCpu, checks: MemoryChecks) -> bool {
 ///
 /// The check's branch can be mispredicted, so past it a CMOVA, which uses
 /// the comparison's flags and no prediction, replaces an out-of-range RAX
-/// with `masked`, an unmapped address 2^40 or more from any mapped one, so
-/// that no access's extent leaves it: an access that speculation runs past
-/// a failed check never reaches Stela's memory (Intel's and AMD's
-/// bounds-check bypass guidance). A passed check leaves RAX unchanged, and
-/// the UD2 runs before the CMOVA with the guest's address.
+/// with the comparison's own ECX, zero-extended: an address below 2^32, in
+/// the guest's lower range, which the current root maps only as the guest's
+/// translation does. An access that speculation runs past a failed check
+/// never reaches Stela's memory (Intel's and AMD's bounds-check bypass
+/// guidance). A passed check leaves RAX unchanged, and the UD2 runs before
+/// the CMOVA with the guest's address.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
 )]
@@ -462,46 +463,37 @@ pub struct RangeCheck {
     pub shift: u8,
     pub bias: u8,
     pub bound: u8,
-    pub masked: u64,
 }
 
-/// The upper half's first address on a four-level host.
-const UPPER_HALF: u64 = 0xffff_8000_0000_0000;
 /// A four-level check's slices of 2 TiB.
 const SLICE_SHIFT: u8 = 41;
 /// The slices of each half.
 const HALF_SLICES: u8 = 64;
-/// The masked address's distance below `U`, inside the guard.
-const MASK_BELOW_UPPER: u64 = 1 << 40;
 /// The largest positive sign-extended imm8.
 const IMM8_MAX: u8 = 127;
 const OPCODE_INC: u8 = 1;
 
 impl RangeCheck {
-    /// Five-level paging (LA57): bits 63:48 all clear or all set; a failed
-    /// check's masked address is PML5 entry 1, which no shadow root maps.
+    /// Five-level paging (LA57): bits 63:48 all clear or all set.
     pub const FIVE_LEVEL: Self = Self {
         shift: 48,
         bias: 1,
         bound: 1,
-        masked: 1 << 48,
     };
 
     /// Four-level paging with Stela's window and guard in the `slices`
     /// slices of 2 TiB below `U` (2 to 63): the window's, then the guard,
-    /// the whole slice below `U`, which takes the masked address.
+    /// the whole slice below `U`.
     pub const fn four_level(slices: u8) -> Self {
         assert!(
             slices >= 2 && slices < HALF_SLICES,
             "a four-level placement takes 2 to 63 slices: at least one for \
              the window and the guard, the whole slice below U"
         );
-        let upper = UPPER_HALF + ((slices as u64) << SLICE_SHIFT);
         Self {
             shift: SLICE_SHIFT,
             bias: HALF_SLICES - slices,
             bound: IMM8_MAX - slices,
-            masked: upper - MASK_BELOW_UPPER,
         }
     }
 
@@ -531,13 +523,12 @@ impl RangeCheck {
     }
 
     /// The mask after the check.
-    fn mask(self, asm: &mut asm::Asm) {
+    fn mask(asm: &mut asm::Asm) {
         use asm::{
             Cond,
             Gpr::{Rax, Rcx},
             Size,
         };
-        asm.mov_imm64(Rcx, self.masked);
         asm.cmov(Cond::A, Size::Qword, Rax, Rcx);
     }
 
@@ -547,7 +538,7 @@ impl RangeCheck {
         let passed = self.test(&mut asm);
         asm.guest_check();
         asm.bind(passed);
-        self.mask(&mut asm);
+        Self::mask(&mut asm);
     }
 
     /// The translated variant's check: a failure calls the translation
@@ -568,7 +559,7 @@ impl RangeCheck {
         asm.translated_helper_return(access.bytes, access.flags);
         let translated = asm.jmp8();
         asm.bind(passed);
-        self.mask(&mut asm);
+        Self::mask(&mut asm);
         asm.bind(translated);
     }
 
@@ -588,12 +579,12 @@ impl RangeCheck {
         // translated variant's call (including a separate access-data fragment).
         const ENDS: [[&[usize]; 2]; 2] = [
             [
-                &[3, 7, 9, 12, 14, 16, 26, 30],
-                &[3, 7, 9, 12, 14, 17, 27, 29, 31, 33, 43, 47],
+                &[3, 7, 9, 12, 14, 16, 20],
+                &[3, 7, 9, 12, 14, 17, 27, 29, 31, 33, 37],
             ],
             [
-                &[3, 7, 10, 13, 15, 17, 27, 31],
-                &[3, 7, 10, 13, 15, 18, 28, 30, 32, 34, 44, 48],
+                &[3, 7, 10, 13, 15, 17, 21],
+                &[3, 7, 10, 13, 15, 18, 28, 30, 32, 34, 38],
             ],
         ];
         let [0x48, 0x89, 0xc1, 0x48, 0xc1, 0xf9, shift, rest @ ..] = code else {
@@ -634,24 +625,7 @@ impl RangeCheck {
             }
             _ => return None,
         };
-        let [
-            0x48,
-            0xb9,
-            _,
-            _,
-            _,
-            _,
-            _,
-            _,
-            _,
-            _,
-            0x48,
-            0x0f,
-            0x47,
-            0xc1,
-            ..,
-        ] = rest
-        else {
+        let [0x48, 0x0f, 0x47, 0xc1, ..] = rest else {
             return None;
         };
         if *shift >= u64::BITS as u8 || *bound > IMM8_MAX {
@@ -666,9 +640,9 @@ impl RangeCheck {
 /// past the mask.
 #[cfg(test)]
 const TRANSLATION_CALL_BYTES: u8 = 19;
-/// `mov rcx,masked; cmova rax,rcx`.
+/// `cmova rax,rcx`.
 #[cfg(test)]
-const MASK_BYTES: u8 = 14;
+const MASK_BYTES: u8 = 4;
 
 /// What a guest access makes, which the translated variant's helper
 /// translates its address for: the bytes it covers from its address

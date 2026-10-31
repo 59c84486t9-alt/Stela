@@ -25,12 +25,40 @@ pub(super) fn firmware(rows: &[[u8; 4]]) -> Vec<u8> {
     b
 }
 pub(super) fn rows(family: Family) -> [[u8; 4]; 4] {
+    let (tx, response, tlc, rx) = match family {
+        Family::Ax200 => (9, 7, 3, 4),
+        Family::Ax210 => (10, 7, 3, 5),
+        Family::Bz | Family::Sc => (12, 9, 4, 8),
+    };
     [
-        [0x1c, 1, if family == Family::Ax200 { 9 } else { 10 }, 7],
-        [0xf7, 5, 99, 3],
-        [0xc1, 0, 99, if family == Family::Ax200 { 4 } else { 5 }],
+        [0x1c, 1, tx, response],
+        [0xf7, 5, 99, tlc],
+        [0xc1, 0, 99, rx],
         [0xf5, 5, 99, 3],
     ]
+}
+#[test]
+fn wifi_7_firmware_shares_one_rate_format() {
+    for family in [Family::Bz, Family::Sc] {
+        let r = rows(family);
+        let b = firmware(&r);
+        let fw = Firmware::parse(&b).unwrap();
+        assert_eq!(rate_format(&fw, family), Ok(RateFormat::V3));
+        // Firmware without RX_NO_DATA_NOTIF still has a format.
+        let b = firmware(&r[..3]);
+        let fw = Firmware::parse(&b).unwrap();
+        assert_eq!(rate_format(&fw, family), Ok(RateFormat::V3));
+        for (row, field, value) in [(0, 3, 8), (1, 3, 3), (2, 3, 5)] {
+            let mut r = rows(family);
+            r[row][field] = value;
+            let b = firmware(&r);
+            let fw = Firmware::parse(&b).unwrap();
+            assert_eq!(rate_format(&fw, family), Err(Error::RateVersions));
+        }
+    }
+    let b = firmware(&rows(Family::Ax210));
+    let fw = Firmware::parse(&b).unwrap();
+    assert_eq!(rate_format(&fw, Family::Ax210), Ok(RateFormat::V2));
 }
 fn parameters() -> Parameters {
     Parameters {

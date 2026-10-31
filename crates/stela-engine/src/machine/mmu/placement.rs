@@ -133,7 +133,6 @@ mod tests {
         for address in [1 << 48, 0x0040_0000_0000_0000, 0xfffe_ffff_ffff_ffff] {
             assert!(!placement.native(address), "{address:#x}");
         }
-        assert!(!placement.native(placement.check().masked));
         assert_eq!(placement.guard(), None);
     }
 
@@ -142,7 +141,6 @@ mod tests {
         let placement = Placement::four_level(2).unwrap();
         let upper = placement.native_upper();
         assert_eq!(upper, 0xffff_8400_0000_0000);
-        assert_eq!(placement.check().masked, upper - SLICE / 2);
         assert_eq!(placement.check().bias, 62);
         assert_eq!(placement.check().bound, 125);
         for address in [
@@ -170,8 +168,6 @@ mod tests {
         ] {
             assert!(!placement.native(address), "{address:#x}");
         }
-        let masked = placement.check().masked;
-        assert!(placement.in_guard(masked) && !placement.native(masked));
         let (first, last) = placement.guard().unwrap();
         assert_eq!(last - first + 1, SLICE);
         const { assert!(SLICE >= ELISION_REACH) };

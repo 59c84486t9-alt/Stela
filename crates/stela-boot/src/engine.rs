@@ -889,7 +889,7 @@ fn finish<H: Host>(
             }
             // The run is over: its blocks' memory goes to proving the new
             // ones.
-            machine.discard_blocks();
+            machine.discard_every_block();
             translations::write();
             match reset.transition {
                 Transition::Restart => {

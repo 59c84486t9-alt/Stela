@@ -59,6 +59,15 @@ pub enum Layout {
     V4,
     V8,
 }
+/// `iwl_puncturing_is_allowed_in_bios`: the US and Canada need the platform's
+/// word, which `puncturing` holds by `iwl_uefi_cnv_puncturing_flags`.
+pub const fn puncturing_allowed(puncturing: u32, country: [u8; 2]) -> bool {
+    match &country {
+        b"US" => puncturing & 1 != 0,
+        b"CA" => puncturing & 2 != 0,
+        _ => true,
+    }
+}
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Puncturing {
     #[default]
@@ -337,6 +346,9 @@ mod tests {
         assert!(!Capabilities::decode(6, 0).unwrap().allow_40mhz);
         assert!(Capabilities::decode(5, 1 << 3).unwrap().allow_80mhz);
         assert!(!Capabilities::decode(6, 1 << 3).unwrap().allow_80mhz);
+        assert!(!puncturing_allowed(2, *b"US") && puncturing_allowed(1, *b"US"));
+        assert!(!puncturing_allowed(1, *b"CA") && puncturing_allowed(2, *b"CA"));
+        assert!(puncturing_allowed(0, *b"DE"));
         assert!(!Capabilities::decode(5, 1 << 3).unwrap().allow_160mhz);
         assert!(Capabilities::decode(6, 1 << 3).unwrap().allow_160mhz);
     }

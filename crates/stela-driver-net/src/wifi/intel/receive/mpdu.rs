@@ -192,7 +192,12 @@ impl<'a> Observation<'a> {
             return Err(Error::NotMpdu);
         }
         let version = fw.command_version(0, 0xc1).map(|v| v.notification_version);
-        if version != Some(if family == Family::Ax200 { 4 } else { 5 }) {
+        let accepted = match family {
+            Family::Ax200 => 4..=4,
+            Family::Ax210 => 5..=5,
+            Family::Bz | Family::Sc => 6..=8,
+        };
+        if !version.is_some_and(|version| accepted.contains(&version)) {
             return Err(Error::Version(version));
         }
         let packet_flags = le32(raw, 0);

@@ -151,6 +151,19 @@ impl<B: BiosIo> Session<B> {
     }
     /// Source WRDD permits CN only. This records a BIOS observation, never
     /// location/OS permission or an override of a firmware response.
+    /// `iwl_uefi_get_puncturing`: which countries the platform enables channel
+    /// puncturing for. Nothing it cannot say enables any.
+    pub(crate) fn puncturing(&mut self) -> u32 {
+        const REVISION: u8 = 0;
+        const MASK: u32 = 3;
+        match self.uefi(Variable::Puncturing) {
+            Ok(Some(raw)) if raw.first() == Some(&REVISION) => raw
+                .get(1..5)
+                .and_then(|value| value.try_into().ok())
+                .map_or(0, |value| u32::from_le_bytes(value) & MASK),
+            _ => 0,
+        }
+    }
     pub(crate) fn country(&mut self) -> Result<lari::Observation, Error> {
         if let Some(observation) = self.country {
             return Ok(observation);

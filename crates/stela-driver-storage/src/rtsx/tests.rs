@@ -1086,6 +1086,7 @@ fn stale(card: &mut Card, chip: &Rc<RefCell<Chip>>) {
 
 #[test]
 fn native_empty_socket_insertion_ppbuf_read_write_and_removal_retire_aliases() {
+    let _virtual = crate::test_clock::virtualize();
     let chip = Chip::new(false, false);
     let mut host = make_host(&chip, false).unwrap();
     assert!(host.poll().unwrap().is_none());
@@ -1151,6 +1152,7 @@ fn native_empty_socket_insertion_ppbuf_read_write_and_removal_retire_aliases() {
 }
 #[test]
 fn native_mmc_real_width_ext_csd_cache_and_no_command_after_poweroff_notification() {
+    let _virtual = crate::test_clock::virtualize();
     let chip = Chip::new(true, true);
     let mut host = make_host(&chip, false).unwrap();
     let mut card = host.poll().unwrap().unwrap();
@@ -1190,6 +1192,7 @@ fn native_mmc_real_width_ext_csd_cache_and_no_command_after_poweroff_notificatio
 }
 #[test]
 fn native_transfer_errors_and_suppressed_completion_retire_before_payload_reuse() {
+    let _virtual = crate::test_clock::virtualize();
     for fault in [
         Fault::MissingEnd,
         Fault::Crc7,
@@ -1341,6 +1344,7 @@ fn native_physical_width_busy_readiness_and_failed_stop_are_not_success() {
 }
 #[test]
 fn native_haimr_fault_after_effect_and_removed_pci_permanently_fence_public_io() {
+    let _virtual = crate::test_clock::virtualize();
     for stuck in [false, true] {
         let chip = Chip::new(false, true);
         let mut host = make_host(&chip, false).unwrap();
@@ -1370,6 +1374,7 @@ fn native_haimr_fault_after_effect_and_removed_pci_permanently_fence_public_io()
 }
 #[test]
 fn card_power_and_clock_precede_cmd0() {
+    let _virtual = crate::test_clock::virtualize();
     let chip = Chip::new(false, true);
     chip.borrow_mut().transfer_polls = 3;
     let mut host = make_host(&chip, true).unwrap();
@@ -1393,6 +1398,7 @@ fn card_power_and_clock_precede_cmd0() {
 }
 #[test]
 fn native_board_vendor_profile_and_shared_memory_stick_gate_real_card_power() {
+    let _virtual = crate::test_clock::virtualize();
     let chip = Chip::new(false, true);
     {
         let mut c = chip.borrow_mut();
@@ -1503,6 +1509,7 @@ fn native_extended_capability_bodies_refuse_forged_l1ss_before_effects() {
 }
 #[test]
 fn native_readonly_and_constructor_faults_never_publish_or_grant_dma() {
+    let _virtual = crate::test_clock::virtualize();
     let chip = Chip::new(false, true);
     chip.borrow_mut().bipr |= 1 << 19;
     let mut host = make_host(&chip, false).unwrap();
@@ -1557,6 +1564,7 @@ fn native_readonly_and_constructor_faults_never_publish_or_grant_dma() {
 }
 #[test]
 fn native_card_below_source_initial_data_rate_refuses_before_overclocked_data() {
+    let _virtual = crate::test_clock::virtualize();
     let chip = Chip::new(false, true);
     chip.borrow_mut().card.transfer_speed = 0x0a; // CSD:10MHz
     let mut host = make_host(&chip, false).unwrap();
@@ -1576,6 +1584,7 @@ fn native_card_below_source_initial_data_rate_refuses_before_overclocked_data() 
 }
 #[test]
 fn native_real_clock_late_publication_ack_completion_status_and_ppbuf_refuse_output() {
+    let _virtual = crate::test_clock::virtualize();
     for point in [
         DelayPoint::HaimrPublication,
         DelayPoint::StartAck,
@@ -1626,6 +1635,7 @@ fn native_real_clock_late_publication_ack_completion_status_and_ppbuf_refuse_out
 }
 #[test]
 fn native_primary_crc_survives_late_or_failed_retirement_and_failed_initial_restore() {
+    let _virtual = crate::test_clock::virtualize();
     for late in [false, true] {
         let chip = Chip::new(false, true);
         let mut host = make_host(&chip, false).unwrap();
@@ -1685,6 +1695,7 @@ fn native_primary_crc_survives_late_or_failed_retirement_and_failed_initial_rest
 }
 #[test]
 fn native_constructor_stop_budget_starts_before_first_mmio_publication() {
+    let _virtual = crate::test_clock::virtualize();
     let chip = Chip::new(false, true);
     chip.borrow_mut().delay_on = Some(DelayPoint::ConstructorStop);
     // Constructor uses100ms at clock1000; advance the real TSC by more
@@ -1703,6 +1714,7 @@ fn native_constructor_stop_budget_starts_before_first_mmio_publication() {
 }
 #[test]
 fn native_wrong_ack_sd_error_and_transfer_failure_survive_same_read_deadline() {
+    let _virtual = crate::test_clock::virtualize();
     for mode in 0..4 {
         let chip = Chip::new(false, true);
         let mut host = make_host(&chip, false).unwrap();
@@ -1774,6 +1786,7 @@ fn native_wrong_ack_sd_error_and_transfer_failure_survive_same_read_deadline() {
 }
 #[test]
 fn native_observed_overcurrent_or_memory_stick_survives_failed_emergency_shutdown() {
+    let _virtual = crate::test_clock::virtualize();
     for overcurrent in [false, true] {
         for during in [false, true] {
             let chip = Chip::new(false, true);
@@ -1826,6 +1839,7 @@ fn native_observed_overcurrent_or_memory_stick_survives_failed_emergency_shutdow
 }
 #[test]
 fn native_successful_memory_stick_poweroff_is_final_and_fresh_commands_retire_again() {
+    let _virtual = crate::test_clock::virtualize();
     for phase in 0..4 {
         let chip = Chip::new(false, true);
         let mut host = make_host(&chip, false).unwrap();
@@ -1894,6 +1908,7 @@ fn native_successful_memory_stick_poweroff_is_final_and_fresh_commands_retire_ag
 }
 #[test]
 fn native_completed_r1_error_survives_late_final_response_observation() {
+    let _virtual = crate::test_clock::virtualize();
     let chip = Chip::new(false, true);
     let mut host = make_host(&chip, false).unwrap();
     let mut card = host.poll().unwrap().unwrap();
@@ -1928,6 +1943,7 @@ fn rts522a(mmc: bool, present: bool, revision: u8, l1ss: u8, rtd3: bool) -> Rc<R
 }
 #[test]
 fn native_rts522a_real_silicon_revision_l1ss_board_and_electrical_profiles() {
+    let _virtual = crate::test_clock::virtualize();
     for revision in [0, 1, 15] {
         for l1ss in [0, 1, 2, 4, 8, 15] {
             for rtd3 in [false, true] {
@@ -1978,6 +1994,7 @@ fn native_rts522a_real_silicon_revision_l1ss_board_and_electrical_profiles() {
 }
 #[test]
 fn native_rts522a_mmc_empty_media_retirement_and_failed_ocp_ack() {
+    let _virtual = crate::test_clock::virtualize();
     for mmc in [false, true] {
         let chip = rts522a(mmc, false, 0, 8, true);
         let mut host = make_host(&chip, false).unwrap();
@@ -2031,6 +2048,7 @@ fn native_rts522a_mmc_empty_media_retirement_and_failed_ocp_ack() {
 }
 #[test]
 fn native_rts522a_overcurrent_clears_latch_after_poweroff_without_later_stop() {
+    let _virtual = crate::test_clock::virtualize();
     let chip = rts522a(false, true, 0, 15, false);
     let mut host = make_host(&chip, false).unwrap();
     let mut card = host.poll().unwrap().unwrap();
@@ -2057,6 +2075,7 @@ fn native_rts522a_overcurrent_clears_latch_after_poweroff_without_later_stop() {
 }
 #[test]
 fn native_rts522a_unavailable_ltr_and_revision_access_failures_are_explicit() {
+    let _virtual = crate::test_clock::virtualize();
     let chip = rts522a(false, false, 1, 0, false);
     {
         let mut c = chip.borrow_mut();
@@ -2091,6 +2110,7 @@ fn native_rts522a_unavailable_ltr_and_revision_access_failures_are_explicit() {
 }
 #[test]
 fn native_rts522a_cmd11_modes_clocks_and_three_sweep_tuning() {
+    let _virtual = crate::test_clock::virtualize();
     for (function, hz, timing) in [
         (0, 25_000_000, Timing::Sdr12),
         (1, 50_000_000, Timing::Sdr25),
@@ -2149,6 +2169,7 @@ fn native_rts522a_cmd11_modes_clocks_and_three_sweep_tuning() {
 }
 #[test]
 fn native_rts522a_voltage_or_tuning_failure_never_publishes_and_repower_uses_fresh_cmd0() {
+    let _virtual = crate::test_clock::virtualize();
     for fault in 0..5 {
         let chip = rts522a(false, true, 1, 0, false);
         chip.borrow_mut().card.uhs_modes = 8;
@@ -2206,6 +2227,7 @@ fn native_rts522a_voltage_or_tuning_failure_never_publishes_and_repower_uses_fre
 }
 #[test]
 fn native_rts522a_tuning_media_faults_or_unacknowledged_speed_do_not_become_phase_evidence() {
+    let _virtual = crate::test_clock::virtualize();
     for fault in [Fault::Remove, Fault::Delink, Fault::Overcurrent] {
         let chip = rts522a(false, true, 0, 15, false);
         chip.borrow_mut().card.uhs_modes = 8;
@@ -2232,6 +2254,7 @@ fn native_rts522a_tuning_media_faults_or_unacknowledged_speed_do_not_become_phas
 }
 #[test]
 fn native_rts522a_phase_timeouts_continue_only_after_acknowledged_idle_and_stop() {
+    let _virtual = crate::test_clock::virtualize();
     for rejection in [Fault::CrcTimeout, Fault::ResponseTimeout] {
         let chip = rts522a(false, true, 1, 15, false);
         chip.borrow_mut().card.uhs_modes = 8;
@@ -2259,6 +2282,7 @@ fn native_rts522a_phase_timeouts_continue_only_after_acknowledged_idle_and_stop(
 }
 #[test]
 fn native_rts522a_late_timeout_status_is_fatal_not_another_phase() {
+    let _virtual = crate::test_clock::virtualize();
     let chip = rts522a(false, true, 1, 15, false);
     chip.borrow_mut().card.uhs_modes = 8;
     chip.borrow_mut().tuning_late_timeout = true;

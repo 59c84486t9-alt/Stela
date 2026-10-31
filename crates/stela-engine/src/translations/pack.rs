@@ -276,17 +276,26 @@ pub struct Counters {
     pub dropped: u64,
 }
 
-/// A block offered for proof: its offer without the compiled block, which
-/// the proof compiles again.
-#[derive(Debug, Clone)]
-struct Pending {
-    key: Digest,
-    page: u64,
-    pc: u64,
-    context: Digest,
-    input: Vec<u8>,
-    preparation: Arc<Preparation>,
+/// A block offered for proof: its place in its page and its input's in the
+/// page's [`PendingPage::inputs`]. The proof compiles the block again.
+#[derive(Debug, Clone, Copy)]
+struct PendingBlock {
+    offset: u16,
+    length: u16,
+    start: u32,
 }
+
+/// A page's blocks of one context waiting for proof, by offset. What the
+/// blocks share is held once, so a block costs little more than its words.
+#[derive(Debug)]
+struct PendingPage {
+    preparation: Arc<Preparation>,
+    blocks: Vec<PendingBlock>,
+    inputs: Vec<u8>,
+}
+
+/// A pending page's key, guest page and context.
+type PendingKey = (Digest, u64, Digest);
 
 /// A shared block's PC and the leading words of its page key and context:
 /// a compact index whose rare collision only replaces an entry, as a hit
@@ -314,8 +323,11 @@ pub struct Store<'a> {
     /// each. The records themselves are the engine's to keep: decoded, they
     /// take several times the pack's bytes.
     loaded: BTreeMap<Digest, bool>,
-    pending: Vec<Pending>,
-    /// Capacity of the input buffers; Pending slots are charged separately.
+    pending: BTreeMap<PendingKey, PendingPage>,
+    /// The blocks in `pending`.
+    pending_blocks: usize,
+    /// What `pending` holds: a charge for each page's entry and tree node,
+    /// and the capacity of its buffers.
     pending_bytes: usize,
     /// The blocks offered, by page key, PC and context, for the other
     /// machines sharing the store, oldest first. The bound charges kept
@@ -353,7 +365,8 @@ impl<'a> Store<'a> {
             translator,
             pack,
             loaded: BTreeMap::new(),
-            pending: Vec::new(),
+            pending: BTreeMap::new(),
+            pending_blocks: 0,
             pending_bytes: 0,
             shared: BTreeMap::new(),
             shared_order: VecDeque::new(),
@@ -452,50 +465,68 @@ impl<'a> Store<'a> {
     }
 
     fn keep_pending(&mut self, offer: &Offer) {
-        let inputs = self.pending_bytes.saturating_add(offer.input().len());
-        let slots = MAX_PENDING_BYTES.saturating_sub(inputs) / size_of::<Pending>();
-        if inputs > MAX_PENDING_BYTES || slots <= self.pending.len() {
+        if !self.reserve_pending(offer) {
             self.counters.dropped += 1;
-            return;
         }
-        if self.pending.len() == self.pending.capacity() {
-            let capacity = self
-                .pending
-                .capacity()
-                .saturating_mul(2)
-                .max(self.pending.len() + 1)
-                .min(slots);
-            if self
-                .pending
-                .try_reserve_exact(capacity - self.pending.len())
-                .is_err()
-            {
-                self.counters.dropped += 1;
-                return;
-            }
-        }
-        let mut input = Vec::new();
-        if input.try_reserve_exact(offer.input().len()).is_err()
-            || self
-                .pending_bytes
-                .saturating_add(input.capacity())
-                .saturating_add(self.pending.capacity() * size_of::<Pending>())
-                > MAX_PENDING_BYTES
-        {
-            self.counters.dropped += 1;
-            return;
-        }
-        input.extend_from_slice(offer.input());
-        self.pending_bytes += input.capacity();
-        self.counters.offered += 1;
-        self.pending.push(Pending {
-            key: offer.key(),
-            page: offer.page(),
-            pc: offer.pc(),
-            context: offer.context(),
-            input,
-            preparation: Arc::clone(offer.preparation()),
+    }
+
+    /// Keep `offer` for proof unless its page holds the block already:
+    /// whether it fit.
+    fn reserve_pending(&mut self, offer: &Offer) -> bool {
+        const BLOCK_BYTES: usize = size_of::<PendingBlock>();
+        // An entry in a B-tree node about half full.
+        const PAGE_BYTES: usize = 2 * size_of::<(PendingKey, PendingPage)>();
+        let (Ok(offset), Ok(length)) = (
+            u16::try_from(offer.pc() - offer.page()),
+            u16::try_from(offer.input().len()),
+        ) else {
+            return false;
+        };
+        let group = (offer.key(), offer.page(), offer.context());
+        let known = self.pending.get(&group);
+        let place = known.map_or(Err(0), |page| {
+            page.blocks
+                .binary_search_by_key(&offset, |block| block.offset)
         });
+        let Err(place) = place else {
+            return true;
+        };
+        let new_page = if known.is_some() { 0 } else { PAGE_BYTES };
+        let charge = BLOCK_BYTES + usize::from(length) + new_page;
+        if self.pending_bytes.saturating_add(charge) > MAX_PENDING_BYTES {
+            return false;
+        }
+        let page = self.pending.entry(group).or_insert_with(|| PendingPage {
+            preparation: Arc::clone(offer.preparation()),
+            blocks: Vec::new(),
+            inputs: Vec::new(),
+        });
+        let held = page.blocks.capacity() * BLOCK_BYTES + page.inputs.capacity();
+        // A page's inputs stay far below 4 GiB: its blocks do not overlap by
+        // more than a block each, and `length` fits 16 bits.
+        let start = page.inputs.len() as u32;
+        if page.blocks.try_reserve(1).is_err()
+            || page.inputs.try_reserve(usize::from(length)).is_err()
+        {
+            if page.blocks.is_empty() {
+                self.pending.remove(&group);
+            }
+            return false;
+        }
+        page.blocks.insert(
+            place,
+            PendingBlock {
+                offset,
+                length,
+                start,
+            },
+        );
+        page.inputs.extend_from_slice(offer.input());
+        let grown = page.blocks.capacity() * BLOCK_BYTES + page.inputs.capacity() - held;
+        self.pending_bytes += grown + new_page;
+        self.pending_blocks += 1;
+        self.counters.offered += 1;
+        true
     }
 
     /// The translator whose records the store keeps.
@@ -534,7 +565,7 @@ impl<'a> Store<'a> {
 
     /// Blocks waiting for proof.
     pub fn pending(&self) -> usize {
-        self.pending.len()
+        self.pending_blocks
     }
 
     /// Prove the offered blocks while `room` says there is memory to, and
@@ -543,33 +574,32 @@ impl<'a> Store<'a> {
         let mut proven: BTreeMap<Digest, Record> = BTreeMap::new();
         let (mut count, mut unprovable) = (0, 0);
         let pending = core::mem::take(&mut self.pending);
-        let mut unproven = pending.len() as u64;
-        for pending in pending {
-            if !room() {
-                break;
-            }
-            unproven -= 1;
-            let Pending {
-                key,
-                page,
-                pc,
-                context,
-                input,
-                preparation,
-            } = pending;
-            let entry = Offer::compile(key, page, pc, context, input, preparation)
-                .and_then(|offer| offer.prove());
-            match entry {
-                Some(entry) => {
-                    count += 1;
-                    proven
-                        .entry(key)
-                        .or_insert_with(|| Record::new(self.translator, key))
-                        .insert(entry);
+        let mut unproven = self.pending_blocks as u64;
+        'pages: for ((key, page, context), held) in pending {
+            for block in held.blocks {
+                if !room() {
+                    break 'pages;
                 }
-                None => unprovable += 1,
+                unproven -= 1;
+                let start = block.start as usize;
+                let input = held.inputs[start..start + usize::from(block.length)].to_vec();
+                let pc = page + u64::from(block.offset);
+                let preparation = Arc::clone(&held.preparation);
+                let entry = Offer::compile(key, page, pc, context, input, preparation)
+                    .and_then(|offer| offer.prove());
+                match entry {
+                    Some(entry) => {
+                        count += 1;
+                        proven
+                            .entry(key)
+                            .or_insert_with(|| Record::new(self.translator, key))
+                            .insert(entry);
+                    }
+                    None => unprovable += 1,
+                }
             }
         }
+        self.pending_blocks = 0;
         self.pending_bytes = 0;
         // Gained entries first, then this boot's records, then the others.
         let stored = |key: &Digest| {
@@ -797,8 +827,8 @@ mod tests {
         assert!(store.prepared(&key, 0x1000, &first.context()).is_some());
         assert!(store.prepared(&key, 0x1020, &fifth.context()).is_some());
         assert!(store.shared_usage() <= 4 * bytes + fifo);
-        // Every offer still waits for proof.
-        assert_eq!(store.pending(), 9);
+        // Each distinct block waits for proof once, however often offered.
+        assert_eq!(store.pending(), 5);
     }
 
     #[test]

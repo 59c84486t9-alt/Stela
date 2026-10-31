@@ -333,3 +333,13 @@ fn unchanged_donor_structs_match_every_alive_field_and_ax210_descriptor_lane() {
     }
     assert_eq!(actual.as_bytes(), trace);
 }
+
+#[test]
+fn a_bz_completion_is_a_four_byte_tag() {
+    let used = used_descriptor(Family::Bz, &[0x34, 0x12, 1, 0]).unwrap();
+    assert_eq!((used.id, used.fragmented), (0x1234, true));
+    assert_eq!(
+        used_descriptor(Family::Bz, &[0; 32]).unwrap_err(),
+        Error::DescriptorSize
+    );
+}

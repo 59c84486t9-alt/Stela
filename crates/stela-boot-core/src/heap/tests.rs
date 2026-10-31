@@ -1,5 +1,5 @@
 use super::*;
-use std::{boxed::Box, sync::Barrier, thread};
+use std::{boxed::Box, sync::Barrier, thread, vec::Vec};
 
 #[repr(align(4096))]
 struct Ram([u8; 128 * 1024]);
@@ -11,6 +11,62 @@ fn backing() -> Box<Ram> {
 fn usage_values(heap: &Heap) -> [usize; 5] {
     let u = heap.usage();
     [u.total, u.live, u.carved, u.peak, u.largest]
+}
+
+#[test]
+fn a_heap_whose_bins_are_nearly_empty_is_low_though_little_is_live() {
+    let heap = Heap::new();
+    let mut ram = backing();
+    // SAFETY: exclusive test backing, kept through every exact free.
+    unsafe { heap.initialize(ram.0.as_mut_ptr(), ram.0.len()) };
+    let layout = Layout::from_size_align(4096, 16).unwrap();
+    // SAFETY: valid layouts; the blocks return to their class, never to the
+    // bins, which is what this test measures.
+    unsafe {
+        let blocks: Vec<*mut u8> = (0..31).map(|_| heap.alloc(layout)).collect();
+        assert!(blocks.iter().all(|block| !block.is_null()));
+        for block in blocks {
+            heap.dealloc(block, layout);
+        }
+    }
+    assert_eq!(heap.usage().live, 0);
+    assert!(heap.low());
+}
+
+#[test]
+fn a_released_tail_leaves_the_heap_serving_from_what_remains() {
+    let heap = Heap::new();
+    let mut ram = backing();
+    let start = ram.0.as_ptr() as usize;
+    assert_eq!(heap.release_tail(0), None);
+    // SAFETY: exclusive test backing, kept through every exact free.
+    unsafe { heap.initialize(ram.0.as_mut_ptr(), ram.0.len()) };
+    let layout = Layout::from_size_align(8192, 16).unwrap();
+    // SAFETY: a valid layout, freed below.
+    let first = unsafe { heap.alloc(layout) };
+    assert!(!first.is_null());
+
+    let released = heap.release_tail(16 * 1024).unwrap();
+    assert!(released.start.is_multiple_of(PAGE_BYTES));
+    assert_eq!(released.end, start + ram.0.len());
+    assert_eq!(heap.usage().total, released.start - start);
+    assert_eq!(heap.release_tail(1 << 20), None);
+
+    // SAFETY: a valid layout, freed below.
+    let second = unsafe { heap.alloc(layout) };
+    assert!(!second.is_null() && (second as usize + layout.size()) <= released.start);
+    // More than the kept bytes can hold is refused, not served past the end.
+    let large = Layout::from_size_align(32 * 1024, 16).unwrap();
+    // SAFETY: a valid layout that fails.
+    assert!(unsafe { heap.alloc(large) }.is_null());
+    // SAFETY: the blocks and exact layouts allocated above.
+    unsafe {
+        heap.dealloc(first, layout);
+        heap.dealloc(second, layout);
+    }
+    assert_eq!(heap.usage().live, 0);
+    // Everything coalesced back, up to the new end and not past it.
+    assert_eq!(heap.usage().largest, released.start - start);
 }
 
 #[test]
