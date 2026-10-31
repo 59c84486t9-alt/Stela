@@ -186,16 +186,16 @@ fn frames_fill_the_hidden_buffer_and_flip_past_a_busy_engine() {
     let (mut first, mut second, flips);
     {
         let mut display = Display::take(&mut card, (2, 2)).unwrap();
-        let (front, back) = (
-            display.buffers[0].framebuffer,
+        let (back, spare) = (
             display.buffers[1].framebuffer,
+            display.buffers[2].framebuffer,
         );
         let rows: Vec<u8> = (0..16).collect();
         display.present(&rows).unwrap();
-        assert_eq!(display.buffers[0].framebuffer, back);
+        assert_eq!(display.buffers[0].framebuffer, spare);
         display.present(&rows).unwrap();
-        assert_eq!(display.buffers[0].framebuffer, front);
-        flips = [back, front];
+        assert_eq!(display.buffers[0].framebuffer, back);
+        flips = [spare, back];
         first = Vec::new();
         second = Vec::new();
         first.extend_from_slice(&rows[..8]);
@@ -204,7 +204,7 @@ fn frames_fill_the_hidden_buffer_and_flip_past_a_busy_engine() {
     assert_eq!(card.flips, flips);
     assert_eq!(card.relaxed, 2);
     // The rows land `pitch` apart.
-    let filled = &card.memory[1];
+    let filled = &card.memory[2];
     assert_eq!(&filled[..8], first);
     assert_eq!(&filled[24..32], second);
 }

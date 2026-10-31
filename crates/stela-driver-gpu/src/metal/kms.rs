@@ -2,9 +2,10 @@
 //!
 //! Binding a GPU ends what the firmware left: its framebuffer sits behind a
 //! BAR the driver remaps, and its display engine is the driver's to program.
-//! [`Display`] takes the first connected output and scans out one of two
-//! linear buffers of video memory, each a DRM dumb buffer, flipping between
-//! them.
+//! [`Display`] takes the first connected output and scans out one of three
+//! linear buffers of video memory, each a DRM dumb buffer: the one a flip last
+//! named, the one before it, which shows until that flip lands, and the one a
+//! frame fills.
 //!
 //! NVIDIA's display engine reads only video memory, so a guest surface in
 //! guest RAM cannot be scanned out in place: frames copy in, top to bottom.
@@ -200,7 +201,8 @@ pub struct Display<D> {
     height: u32,
     pitch: usize,
     /// What the engine reads, then the one the next frame fills.
-    buffers: [Buffer; 2],
+    /// The newest frame, the one before it and the one that shows neither.
+    buffers: [Buffer; 3],
 }
 
 // SAFETY: the buffers' mappings go with the display, which one PE uses at a
@@ -346,6 +348,7 @@ impl<D: Drm> Display<D> {
         let (width, height) = (u32::from(mode.hdisplay), u32::from(mode.vdisplay));
         let (front, pitch) = buffer(&mut drm, width, height)?;
         let (back, _) = buffer(&mut drm, width, height)?;
+        let (spare, _) = buffer(&mut drm, width, height)?;
         let mut connectors = connector;
         let mut set = Crtc {
             connectors: ptr::from_mut(&mut connectors) as u64,
@@ -363,7 +366,7 @@ impl<D: Drm> Display<D> {
             width,
             height,
             pitch: pitch as usize,
-            buffers: [front, back],
+            buffers: [front, back, spare],
         })
     }
 
@@ -382,22 +385,22 @@ impl<D: Drm> Display<D> {
     /// next vertical blank.
     pub fn present(&mut self, rows: &[u8]) -> Result<(), Error> {
         let row = self.width as usize * BYTES_PER_PIXEL as usize;
-        let target = self.buffers[1].pixels.as_ptr();
+        let target = self.buffers[2].pixels.as_ptr();
         for (y, line) in rows
             .chunks_exact(row)
             .take(self.height as usize)
             .enumerate()
         {
             // SAFETY: `y` is a row of the mapped buffer, whose rows are
-            // `pitch` apart and hold `row` bytes, and the engine reads the
-            // other buffer.
+            // `pitch` apart and hold `row` bytes, and the engine reads
+            // another buffer.
             unsafe {
                 ptr::copy_nonoverlapping(line.as_ptr(), target.add(y * self.pitch), row);
             }
         }
         let mut flip = PageFlip {
             crtc: self.crtc,
-            framebuffer: self.buffers[1].framebuffer,
+            framebuffer: self.buffers[2].framebuffer,
             ..PageFlip::default()
         };
         loop {
@@ -407,7 +410,7 @@ impl<D: Drm> Display<D> {
                 error => return Err(Error::Request(error)),
             }
         }
-        self.buffers.swap(0, 1);
+        self.buffers.rotate_right(1);
         Ok(())
     }
 }
