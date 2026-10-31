@@ -647,6 +647,11 @@ pub struct Machine<H: Host, D: Devices> {
     /// The register the native fault being handled reached, which its
     /// exit's ticks are charged to ([`Self::timing_exit`]).
     timed_device: Option<u64>,
+    /// System exits by instruction word, with their handling time under step
+    /// timing ([`Self::system_words`]).
+    system_words: BTreeMap<u32, DeviceRegister>,
+    /// The word of the system exit being handled.
+    timed_word: Option<u32>,
     #[cfg(all(feature = "std", feature = "native-profile"))]
     floating_profile: Option<alloc::boxed::Box<floating_profile::Sampler>>,
     #[cfg(all(feature = "std", feature = "native-profile"))]
@@ -936,6 +941,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
             exit_words: BTreeMap::new(),
             device_registers: BTreeMap::new(),
             timed_device: None,
+            system_words: BTreeMap::new(),
+            timed_word: None,
             #[cfg(all(feature = "std", feature = "native-profile"))]
             floating_profile: None,
             #[cfg(all(feature = "std", feature = "native-profile"))]

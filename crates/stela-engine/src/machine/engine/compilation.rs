@@ -777,6 +777,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
     /// Device accesses by the physical address they reached: which
     /// device registers to serve faster.
+    pub fn system_words(&self) -> &BTreeMap<u32, DeviceRegister> {
+        &self.system_words
+    }
+
     pub fn device_registers(&self) -> &BTreeMap<u64, DeviceRegister> {
         &self.device_registers
     }

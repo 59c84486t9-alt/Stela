@@ -90,6 +90,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let now = self.host.profile_ticks();
         if let Some(timing) = &mut self.step_timing {
             let spent = now.wrapping_sub(since);
+            if let Some(word) = self.timed_word.take() {
+                let timed = self.system_words.entry(word).or_default();
+                timed.accesses += 1;
+                timed.ticks += spent;
+            }
             if let Some(physical) = device
                 && let Some(register) = self.device_registers.get_mut(&physical)
             {

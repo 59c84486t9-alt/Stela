@@ -259,6 +259,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 if let Some(miss) = self.lookup_miss(last, next_pc, kind, remaining > budget) {
                     self.statistics.lookup_misses[miss] += 1;
                 }
+                if kind == ExitKind::System as u64 && self.step_timing.is_some() {
+                    self.timed_word = Some(self.blocks[last].terminal);
+                }
                 let exited = self.exit(last, next_pc, kind);
                 if exited.is_ok() {
                     let btype = self.cpu.pstate.btype;

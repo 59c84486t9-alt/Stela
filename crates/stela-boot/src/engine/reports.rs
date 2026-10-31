@@ -206,6 +206,8 @@ pub(super) struct ExitsSeen {
     pub(super) forgets: [u64; 4],
     /// `Machine::device_registers`.
     pub(super) registers: BTreeMap<u64, DeviceRegister>,
+    /// `Machine::system_words`.
+    pub(super) system: BTreeMap<u32, DeviceRegister>,
 }
 
 /// The `ExitKind`s `Statistics::exit_kinds` counts.
@@ -311,7 +313,27 @@ impl ExitsSeen {
             output::arguments(format_args!(" {physical:#x}:{count}/{}us", micros(ticks)));
         }
         output::arguments(format_args!("\n"));
+        let system = machine.system_words().clone();
+        let mut top: Vec<_> = system
+            .iter()
+            .map(|(word, timed)| {
+                let last = self.system.get(word).copied().unwrap_or_default();
+                (
+                    timed.ticks - last.ticks,
+                    timed.accesses - last.accesses,
+                    *word,
+                )
+            })
+            .filter(|&(_, count, _)| count != 0)
+            .collect();
+        top.sort_unstable_by(|a, b| b.cmp(a));
+        output::arguments(format_args!("SYSTEM WORDS"));
+        for (ticks, count, word) in top.into_iter().take(REGISTERS) {
+            output::arguments(format_args!(" {word:#010x}:{count}/{}us", micros(ticks)));
+        }
+        output::arguments(format_args!("\n"));
         *self = Self {
+            system,
             entries,
             kinds,
             words,
