@@ -30,6 +30,16 @@ void stela_linux_wait(const volatile unsigned int *word, unsigned int value, u64
 /* Wake every sleeper of stela_linux_wait, to look at its word again. */
 void stela_linux_wake(void);
 
+/* Memory the owner holds, of physically contiguous runs of whole pages. */
+struct stela_linux_run {
+	u64 physical;
+	u64 bytes;
+};
+
+/* A dma-buf of the runs, which must outlive it, as a descriptor; or a negative
+ * errno. A driver maps it through the requester's DMA domain. */
+int stela_linux_export(const struct stela_linux_run *runs, size_t count);
+
 /* Maps size bytes of file at offset into space at address, through the file's
  * mmap, or returns a negative errno. Pages arrive by the client's faults. */
 int stela_linux_mmap(struct file *file, void *space, unsigned long address, size_t size,

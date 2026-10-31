@@ -1,5 +1,5 @@
 //! Buffers, textures, samplers and heaps.
-use super::{BufferId, Device, HeapId, SamplerId, Slab, TextureId};
+use super::{BufferId, Device, HeapId, MemoryId, SamplerId, Slab, TextureId};
 use crate::metal::{
     abi::{CpuCacheMode, HazardTrackingMode, HeapType, ResourceOptions, StorageMode, TextureType},
     binding::{HeapArray, NULL_DESCRIPTOR, ResourceId},
@@ -29,7 +29,8 @@ use crate::metal::{
     },
 };
 use alloc::{collections::BTreeMap, vec::Vec};
-use core::ops::Range;
+use core::{num::NonZeroU64, ops::Range};
+use stela_contracts::gate::MemoryRange;
 
 const TEXTURE_ARRAYS: [HeapArray; 2] = [HeapArray::SampledImages, HeapArray::StorageImages];
 const TEXEL_BUFFER_ARRAYS: [HeapArray; 2] = [
@@ -138,8 +139,16 @@ struct SparseHeap {
     memory_types: u32,
 }
 
+/// Imported guest memory no buffer or heap has taken yet.
+#[derive(Clone, Copy, Debug)]
+struct ImportObject {
+    memory: Memory,
+    bytes: u64,
+}
+
 #[derive(Debug, Default)]
 pub(super) struct Resources {
+    imports: Slab<ImportObject>,
     buffers: Slab<BufferObject>,
     textures: Slab<TextureObject>,
     samplers: Slab<SamplerObject>,
@@ -161,36 +170,69 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         Ok(self.own_buffer(allocation, length, options))
     }
 
-    /// `newBufferWithBytesNoCopy:length:options:deallocator:`: a buffer over
-    /// the process's memory at `address`, imported where it is, so its
-    /// `contents` is `address`. The frontend runs the deallocator once the
-    /// last command buffer that used the buffer completes.
-    pub fn new_buffer_with_bytes_no_copy(
+    /// The wired guest RAM of `ranges`, which the GPU reaches where it is. The
+    /// kernel keeps it wired until [`Self::retired`] answers `token`.
+    pub fn import_memory(&mut self, ranges: &[MemoryRange], token: NonZeroU64) -> Result<MemoryId> {
+        let bytes = ranges.iter().map(|range| range.bytes).sum();
+        let memory = self.backend.import_memory(ranges, token)?;
+        self.allocated += bytes;
+        Ok(MemoryId(
+            self.resources
+                .imports
+                .insert(ImportObject { memory, bytes }),
+        ))
+    }
+
+    /// Imported memory no object took.
+    pub fn release_import(&mut self, id: MemoryId) -> Result<()> {
+        let import = self.resources.imports.remove(id.0)?;
+        self.release_memory(import.memory, import.bytes);
+        Ok(())
+    }
+
+    /// The token of imported memory the GPU no longer reaches.
+    pub fn retired(&mut self) -> Option<NonZeroU64> {
+        self.backend.retired()
+    }
+
+    /// Whether [`Self::retired`] has an answer.
+    pub fn retiring(&self) -> bool {
+        self.backend.retiring()
+    }
+
+    /// A buffer over imported memory, which it keeps; the frontend's mapping
+    /// is its `contents`. `newBufferWithBytesNoCopy:…` imports the app's
+    /// pages, and the frontend runs the deallocator once the last command
+    /// buffer that used the buffer completes.
+    pub fn new_imported_buffer(
         &mut self,
-        address: u64,
+        id: MemoryId,
         length: u64,
         options: ResourceOptions,
     ) -> Result<BufferId> {
-        let alignment = self
-            .backend
-            .physical_device()
-            .limits
-            .host_pointer_alignment
-            .ok_or(Error::Unsupported("newBufferWithBytesNoCopy"))?;
         ensure(
             matches!(
                 options.storage_mode,
                 StorageMode::Shared | StorageMode::Managed
             ),
-            "bytesNoCopy buffers are shared or managed",
+            "imported buffers are shared or managed",
         )?;
-        ensure(
-            address != 0 && address.is_multiple_of(alignment) && length.is_multiple_of(alignment),
-            "bytesNoCopy memory starts and ends on a page",
-        )?;
+        let ImportObject { memory, bytes } = *self.resources.imports.get(id.0)?;
+        ensure(length <= bytes, "the buffer is longer than its memory")?;
         let plan = resource::buffer(&self.capabilities, length, options)?;
-        let allocation = self.backend.create_host_buffer(&plan.info, address)?;
-        Ok(self.own_buffer(allocation, length, options))
+        let (buffer, address) = self.backend.create_placed_buffer(&plan.info, memory, 0)?;
+        self.resources.imports.remove(id.0)?;
+        self.allocated -= bytes;
+        Ok(self.own_buffer(
+            BufferAllocation {
+                buffer,
+                memory,
+                address,
+                allocated: bytes,
+            },
+            length,
+            options,
+        ))
     }
 
     fn own_buffer(
@@ -236,16 +278,6 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             address: buffer.address,
             length: buffer.length,
         })
-    }
-
-    /// `contents`: where the CPU reaches the buffer, or zero for a private
-    /// buffer.
-    pub fn buffer_contents(&self, id: BufferId) -> Result<u64> {
-        let buffer = self.resources.buffers.get(id.0)?;
-        if buffer.options.storage_mode == StorageMode::Private {
-            return Ok(0);
-        }
-        Ok(self.backend.mapped_address(buffer.memory)? + buffer.memory_offset)
     }
 
     pub fn buffer_placement(&self, id: BufferId) -> Result<Placement> {
@@ -1062,6 +1094,28 @@ impl<B: Backend, C: Compiler> Device<B, C> {
     }
 
     /// `newHeapWithDescriptor:`.
+    /// `newHeapWithDescriptor:` of a heap the CPU reaches: over imported
+    /// memory, which it keeps.
+    pub fn new_imported_heap(
+        &mut self,
+        id: MemoryId,
+        descriptor: &HeapDescriptor,
+    ) -> Result<HeapId> {
+        let plan = heap::heap(
+            &self.capabilities,
+            descriptor,
+            crate::metal::capabilities::ApiFeatures::IMPLEMENTED,
+        )?;
+        ensure(
+            descriptor.heap_type != HeapType::Sparse,
+            "sparse heaps are the device's",
+        )?;
+        let ImportObject { memory, bytes } = *self.resources.imports.get(id.0)?;
+        ensure(bytes == plan.size, "the heap is not the size of its memory")?;
+        self.resources.imports.remove(id.0)?;
+        Ok(self.own_heap(descriptor, memory, None, plan.size))
+    }
+
     pub fn new_heap(&mut self, descriptor: &HeapDescriptor) -> Result<HeapId> {
         let plan = heap::heap(
             &self.capabilities,
@@ -1087,15 +1141,25 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             .backend
             .allocate_memory(plan.size, plan.memory, memory_types)?;
         self.allocated += plan.size;
+        Ok(self.own_heap(descriptor, memory, sparse, plan.size))
+    }
+
+    fn own_heap(
+        &mut self,
+        descriptor: &HeapDescriptor,
+        memory: Memory,
+        sparse: Option<SparseHeap>,
+        size: u64,
+    ) -> HeapId {
         let allocator =
-            (descriptor.heap_type == HeapType::Automatic).then(|| HeapAllocator::new(plan.size));
-        Ok(HeapId(self.resources.heaps.insert(HeapObject {
+            (descriptor.heap_type == HeapType::Automatic).then(|| HeapAllocator::new(size));
+        HeapId(self.resources.heaps.insert(HeapObject {
             descriptor: *descriptor,
             memory,
             allocator,
             sparse,
             resources: 0,
-        })))
+        }))
     }
 
     /// `heapBufferSizeAndAlignWithLength:options:`.

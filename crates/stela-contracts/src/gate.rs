@@ -1,7 +1,7 @@
 //! A call gate: native code a guest thread enters through a device access,
 //! reaching that thread's memory as its own unprivileged loads and stores
 //! would.
-use alloc::sync::Arc;
+use alloc::{sync::Arc, vec::Vec};
 use core::num::NonZeroU64;
 
 /// Why the caller's memory refused an access.
@@ -24,6 +24,13 @@ pub trait CallerMemory {
     fn write(&mut self, address: u64, data: &[u8]) -> Result<(), CallerFault>;
 }
 
+/// Wired guest RAM: contiguous guest physical memory, in whole pages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemoryRange {
+    pub address: u64,
+    pub bytes: u64,
+}
+
 /// The native service a gate enters, by connection. Calls run on the PEs
 /// that make them, outside the board's lock, so one call's length is no
 /// other PE's; the service orders them itself.
@@ -39,13 +46,23 @@ pub trait GateService: Send + Sync {
         record: u64,
         caller: &mut dyn CallerMemory,
     ) -> Result<(), CallerFault>;
+    /// Gives `connection` the guest RAM of `ranges`, which the kernel keeps
+    /// wired until [`Self::retired`] answers `token`. Answers its handle.
+    fn import(
+        &self,
+        connection: NonZeroU64,
+        ranges: &[MemoryRange],
+        token: NonZeroU64,
+    ) -> Result<NonZeroU64, &'static str>;
+    /// The token of imported memory the GPU no longer reaches.
+    fn retired(&self) -> Option<NonZeroU64>;
     /// Whether the GPU completed work since this last answered true. Under
     /// the board's lock, so it answers at once.
     fn signaled(&self) -> bool;
 }
 
 /// What a store to a gate window asks of the service.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GateRequest {
     Open,
     Close(NonZeroU64),
@@ -54,6 +71,12 @@ pub enum GateRequest {
         connection: NonZeroU64,
         record: u64,
     },
+    Import {
+        connection: NonZeroU64,
+        ranges: Vec<MemoryRange>,
+        token: NonZeroU64,
+    },
+    Retire,
 }
 
 /// A request's result, for the gate to record.
@@ -66,6 +89,8 @@ pub enum GateOutcome {
         connection: NonZeroU64,
         fault: Option<CallerFault>,
     },
+    Imported(Option<NonZeroU64>),
+    Retired(Option<NonZeroU64>),
 }
 
 /// A store's request, taken from the gate to run in that store's own step
@@ -96,6 +121,12 @@ impl GateCall {
                 connection,
                 fault: self.service.serve(connection, record, caller).err(),
             },
+            GateRequest::Import {
+                connection,
+                ranges,
+                token,
+            } => GateOutcome::Imported(self.service.import(connection, &ranges, token).ok()),
+            GateRequest::Retire => GateOutcome::Retired(self.service.retired()),
         }
     }
 }
@@ -137,6 +168,22 @@ pub mod window {
         STATUS = 0x20;
         /// Control: a store acknowledges completed work.
         ACK = 0x28;
+        /// Control: the guest physical address of an import's next range.
+        IMPORT_ADDRESS = 0x30;
+        /// Control: a store of that range's length adds it to the import.
+        IMPORT_BYTES = 0x38;
+        /// Control: the nonzero token `RETIRED` will name the import by.
+        IMPORT_TOKEN = 0x40;
+        /// Control: a store of a gate page imports the ranges added for its
+        /// connection. Only the kext reaches this page, so only the kernel
+        /// names physical memory.
+        IMPORT = 0x48;
+        /// Control: the handle of the last import, 0 when it failed.
+        IMPORTED = 0x50;
+        /// Control: a store looks for retired memory.
+        RETIRE = 0x58;
+        /// Control: the token that found, 0 for none.
+        RETIRED = 0x60;
 
         /// Gate: a store names a call record.
         CALL = 0x00;

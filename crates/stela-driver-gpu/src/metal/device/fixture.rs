@@ -31,7 +31,14 @@ use crate::metal::{
         physical::PhysicalDevice,
     },
 };
-use alloc::{boxed::Box, collections::BTreeMap, string::String, vec::Vec};
+use alloc::{
+    boxed::Box,
+    collections::{BTreeMap, VecDeque},
+    string::String,
+    vec::Vec,
+};
+use core::num::NonZeroU64;
+use stela_contracts::gate::MemoryRange;
 
 #[derive(Default)]
 pub(crate) struct MockBackend {
@@ -45,7 +52,8 @@ pub(crate) struct MockBackend {
     pub(crate) writes: Vec<(Memory, u64, Vec<u8>)>,
     pub(crate) invalidated: Vec<(Memory, u64, u64)>,
     /// Host memory each imported memory is, by memory.
-    pub(crate) host: BTreeMap<u64, u64>,
+    pub(crate) imports: BTreeMap<u64, (Vec<MemoryRange>, NonZeroU64)>,
+    pub(crate) retired: VecDeque<NonZeroU64>,
     pub(crate) semaphores: BTreeMap<u64, u64>,
     pub(crate) queries_ready: bool,
     pub(crate) layouts: Vec<IndirectCommandsLayoutInfo>,
@@ -103,15 +111,16 @@ impl Backend for MockBackend {
             allocated: info.size,
         })
     }
-    fn create_host_buffer(&mut self, info: &BufferInfo, address: u64) -> Result<BufferAllocation> {
+    fn import_memory(&mut self, ranges: &[MemoryRange], token: NonZeroU64) -> Result<Memory> {
         let id = self.id();
-        self.host.insert(id, address);
-        Ok(BufferAllocation {
-            buffer: Buffer(id),
-            memory: Memory(id),
-            address: id << 32,
-            allocated: info.size,
-        })
+        self.imports.insert(id, (ranges.to_vec(), token));
+        Ok(Memory(id))
+    }
+    fn retired(&mut self) -> Option<NonZeroU64> {
+        self.retired.pop_front()
+    }
+    fn retiring(&self) -> bool {
+        !self.retired.is_empty()
     }
     fn create_placed_buffer(
         &mut self,
@@ -210,6 +219,11 @@ impl Backend for MockBackend {
         })
     }
     fn destroy(&mut self, object: Object) {
+        if let Object::Memory(Memory(id)) = object
+            && let Some((_, token)) = self.imports.remove(&id)
+        {
+            self.retired.push_back(token);
+        }
         self.destroyed.push(object);
     }
     fn write_descriptor(&mut self, index: u32, descriptor: Descriptor) {
@@ -237,14 +251,6 @@ impl Backend for MockBackend {
     fn invalidate_memory(&mut self, memory: Memory, offset: u64, size: u64) -> Result<()> {
         self.invalidated.push((memory, offset, size));
         Ok(())
-    }
-    /// Memory `n` is mapped at `1 << 63 | n << 32`, unless it is imported
-    /// host memory.
-    fn mapped_address(&self, memory: Memory) -> Result<u64> {
-        if let Some(&address) = self.host.get(&memory.0) {
-            return Ok(address);
-        }
-        Ok(1 << 63 | memory.0 << 32)
     }
     fn copy_to_image(&mut self, _: Image, _: &BufferImageCopy, _: &[u8]) -> Result<()> {
         Ok(())

@@ -21,6 +21,8 @@ use super::{
     physical::{Features, PhysicalDevice},
 };
 use crate::metal::{binding::HeapArray, command_buffer::Segment, error::Result};
+use core::num::NonZeroU64;
+use stela_contracts::gate::MemoryRange;
 
 /// `VkMemoryRequirements`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -96,12 +98,13 @@ pub trait Backend {
         info: &BufferInfo,
         request: MemoryRequest,
     ) -> Result<BufferAllocation>;
-    /// A buffer over `info.size` bytes of the process's memory at
-    /// `address`, imported with `VK_EXT_external_memory_host` and reached
-    /// there by the host; the process keeps the range mapped for the
-    /// buffer's life. Both are multiples of
-    /// [`host_pointer_alignment`](super::physical::Limits::host_pointer_alignment).
-    fn create_host_buffer(&mut self, info: &BufferInfo, address: u64) -> Result<BufferAllocation>;
+    /// The wired guest RAM of `ranges`, which the GPU reaches where it is.
+    /// Destroying the memory lets [`Self::retired`] answer `token`.
+    fn import_memory(&mut self, ranges: &[MemoryRange], token: NonZeroU64) -> Result<Memory>;
+    /// The token of imported memory now destroyed.
+    fn retired(&mut self) -> Option<NonZeroU64>;
+    /// Whether [`Self::retired`] has an answer.
+    fn retiring(&self) -> bool;
     /// A buffer bound at `offset` in `memory`; returns its device address.
     fn create_placed_buffer(
         &mut self,
@@ -169,9 +172,6 @@ pub trait Backend {
     fn flush_memory(&mut self, memory: Memory, offset: u64, size: u64) -> Result<()>;
     /// `vkInvalidateMappedMemoryRanges` before CPU reads.
     fn invalidate_memory(&mut self, memory: Memory, offset: u64, size: u64) -> Result<()>;
-    /// Where mapped `memory` starts in the process, which the guest's
-    /// threads share with the backend.
-    fn mapped_address(&self, memory: Memory) -> Result<u64>;
     /// `vkCopyMemoryToImage` of tightly packed rows into one subresource
     /// region (`hostImageCopy`).
     fn copy_to_image(

@@ -5,9 +5,9 @@ use super::{
         self, BufferResponse, ColorAttachmentRecord, ConstantInfo, ConstantRecord, Empty, Fault,
         FunctionReflectionRequest, FunctionReflectionResponse, Handle, Length,
         LibraryFunctionNamesRequest, LinkedFunctionsRecord, NegotiateRequest, NegotiateResponse,
-        NewBufferRequest, NewFunctionRequest, NewLibraryRequest, NewRenderPipelineRequest,
-        Operation, PipelineFlags, Record, RenderTargetsRecord, Span, Status, TessellationRecord,
-        TextureDescriptorRecord, Value,
+        NewBufferRequest, NewFunctionRequest, NewImportedBufferRequest, NewLibraryRequest,
+        NewRenderPipelineRequest, Operation, PipelineFlags, Record, RenderTargetsRecord, Span,
+        Status, TessellationRecord, TextureDescriptorRecord, Value,
         commands::{CommandBufferCode, CommandHeader, CommitRequest},
     },
 };
@@ -30,6 +30,7 @@ use crate::metal::{
 };
 use alloc::{vec, vec::Vec};
 use core::num::NonZeroU64;
+use stela_contracts::gate::MemoryRange;
 
 mod commands;
 mod gate;
@@ -97,11 +98,38 @@ impl GuestMemory for Memory {
         self.bytes[range].copy_from_slice(bytes);
         Ok(())
     }
+}
 
-    fn address(&self, span: Span) -> Result<u64, Fault> {
-        self.range(span)?;
-        Ok(span.address)
-    }
+/// `length` bytes of wired guest RAM, as the kext imports them.
+fn imported(service: &mut TestService, connection: NonZeroU64, length: u64) -> u64 {
+    let range = MemoryRange {
+        address: 0x8_0000_0000,
+        bytes: length,
+    };
+    let token = NonZeroU64::MIN;
+    service.import(connection, &[range], token).unwrap().get()
+}
+
+/// A buffer the CPU reaches, as the frontend makes one.
+fn cpu_buffer(
+    service: &mut TestService,
+    connection: NonZeroU64,
+    length: u64,
+    storage_mode: StorageMode,
+) -> BufferResponse {
+    let request = NewImportedBufferRequest {
+        memory: imported(service, connection, length),
+        length,
+        options: options(storage_mode),
+    };
+    call(
+        service,
+        connection,
+        Operation::NewImportedBuffer,
+        &request,
+        &mut Memory::default(),
+    )
+    .unwrap()
 }
 
 fn options(storage_mode: StorageMode) -> u64 {
@@ -220,6 +248,9 @@ fn commit(
 }
 
 fn new_buffer(service: &mut TestService, connection: NonZeroU64, storage_mode: StorageMode) -> u64 {
+    if storage_mode != StorageMode::Private {
+        return cpu_buffer(service, connection, 256, storage_mode).handle;
+    }
     let request = NewBufferRequest {
         length: 256,
         options: options(storage_mode),

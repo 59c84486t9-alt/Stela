@@ -3859,6 +3859,17 @@ fn a_gate_store_is_served_in_its_own_pes_step() {
             self.0.lock().unwrap().push((connection.get(), record));
             Ok(())
         }
+        fn import(
+            &self,
+            _: NonZeroU64,
+            _: &[stela_contracts::gate::MemoryRange],
+            _: NonZeroU64,
+        ) -> Result<NonZeroU64, &'static str> {
+            Err("no memory")
+        }
+        fn retired(&self) -> Option<NonZeroU64> {
+            None
+        }
         fn signaled(&self) -> bool {
             false
         }

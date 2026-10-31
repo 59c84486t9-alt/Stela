@@ -1356,14 +1356,12 @@ fn completion_recycles_upload_chunks() {
     let first = record(&mut device);
     complete(&mut device, first);
     let created = device.backend().next;
-    let second = record(&mut device);
+    record(&mut device);
     assert_eq!(
         device.backend().next,
         created,
         "the completed chunk is reused"
     );
-    assert!(device.wait(second, 0).is_ok());
-    assert!(device.wait(second + 1, 0).is_err(), "never committed");
 }
 
 #[test]
@@ -1657,15 +1655,15 @@ fn indirect_mapping_updates_bind_once_their_arguments_are_read() {
 
     let commands = encode(&mut device, 32).unwrap();
     device.commit(commands).unwrap();
-    let later = submit(&mut device);
+    submit(&mut device);
     // Origin (1, 0, 0), size (1, 2, 1), level 0, slice 0: the right column.
     let (submitted, steps, step) = copied(&mut device, [1, 0, 0, 1, 2, 1, 0, 0]);
+    assert_eq!(device.poll(), Ok(0));
     assert_eq!(
-        device.wait(later, 0),
-        Ok(false),
+        device.backend().submissions.len(),
+        submitted,
         "later command buffers wait"
     );
-    assert_eq!(device.backend().submissions.len(), submitted);
     device.backend().signal_semaphore(steps, step).unwrap();
     assert_eq!(device.poll(), Ok(0));
     let submissions = &device.backend().submissions;
@@ -1954,50 +1952,27 @@ fn uncommitted_command_buffers_return_their_upload_memory() {
 }
 
 #[test]
-fn bytes_no_copy_buffers_are_the_memory_they_wrap() {
+fn imported_memory_stays_until_the_gpu_is_done_with_it() {
     let mut device = device();
-    let address = 0x7000_0000;
-    let buffer = device
-        .new_buffer_with_bytes_no_copy(address, 8192, options(StorageMode::Shared))
-        .unwrap();
-    assert_eq!(device.buffer_contents(buffer), Ok(address));
-    let refused = [
-        (
-            address + 16,
-            4096,
-            StorageMode::Shared,
-            "bytesNoCopy memory starts and ends on a page",
-        ),
-        (
-            address,
-            100,
-            StorageMode::Shared,
-            "bytesNoCopy memory starts and ends on a page",
-        ),
-        (
-            address,
-            4096,
-            StorageMode::Private,
-            "bytesNoCopy buffers are shared or managed",
-        ),
-    ];
-    for (address, length, storage_mode, reason) in refused {
-        assert_eq!(
-            device.new_buffer_with_bytes_no_copy(address, length, options(storage_mode)),
-            Err(Error::Invalid(reason))
-        );
-    }
-
-    let mut backend = MockBackend::new();
-    backend
-        .physical
-        .as_mut()
-        .unwrap()
-        .limits
-        .host_pointer_alignment = None;
-    let mut device = device_on(backend);
+    let token = core::num::NonZeroU64::new(9).unwrap();
+    let ranges = [stela_contracts::gate::MemoryRange {
+        address: 0x8_0000_0000,
+        bytes: 8192,
+    }];
+    let memory = device.import_memory(&ranges, token).unwrap();
+    assert_eq!(device.backend().imports.len(), 1);
     assert_eq!(
-        device.new_buffer_with_bytes_no_copy(address, 4096, options(StorageMode::Shared)),
-        Err(Error::Unsupported("newBufferWithBytesNoCopy"))
+        device.new_imported_buffer(memory, 8192, options(StorageMode::Private)),
+        Err(Error::Invalid("imported buffers are shared or managed"))
     );
+    assert_eq!(
+        device.new_imported_buffer(memory, 8193, options(StorageMode::Shared)),
+        Err(Error::Invalid("the buffer is longer than its memory"))
+    );
+    let buffer = device
+        .new_imported_buffer(memory, 8192, options(StorageMode::Shared))
+        .unwrap();
+    assert_eq!(device.current_allocated_size(), 8192);
+    device.destroy_buffer(buffer).unwrap();
+    assert_eq!(device.current_allocated_size(), 0);
 }

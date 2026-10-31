@@ -22,7 +22,7 @@ const INTERRUPT_PARENT: &str = "interrupt-parent";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Placement {
     pub physical: u64,
-    /// The AIC input of its completion interrupt.
+    /// The AIC vector of its completion interrupt.
     pub irq: u32,
 }
 

@@ -22,6 +22,8 @@
 //! call.
 mod bindings;
 pub mod ffi;
+#[cfg(feature = "metal-linked")]
+mod linked;
 #[cfg(test)]
 mod tests;
 
@@ -212,6 +214,9 @@ pub struct AirCompiler {
     next_library: u64,
     refusal: Option<Refusal>,
 }
+
+// SAFETY: the target's NIR options are the driver's, read from any thread.
+unsafe impl Send for AirCompiler {}
 
 impl AirCompiler {
     /// A compiler for the Vulkan device `device` describes.

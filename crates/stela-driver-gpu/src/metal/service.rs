@@ -17,7 +17,7 @@ use super::{
     command_buffer::blit::Region,
     device::{
         BufferId, ComputePipelineId, CounterBufferId, Device, EventId, FunctionId, HeapId,
-        LibraryId, RenderPipelineId, SamplerId, TextureId,
+        LibraryId, MemoryId, RenderPipelineId, SamplerId, TextureId,
     },
     error::Error,
     indirect::IndirectCommandBufferId,
@@ -30,7 +30,8 @@ use core::{
     ops::Range,
 };
 use identity::{DeviceEpoch, ObjectHandle, ObjectTable};
-pub use shared::SharedService;
+pub use shared::{ServiceHost, SharedService};
+use stela_contracts::gate::MemoryRange;
 use wire::{Fault, Handle, NegotiateRequest, NegotiateResponse, Operation, Record, Span, Status};
 
 mod commands;
@@ -90,16 +91,12 @@ const MAX_OBJECTS: NonZeroU32 = NonZeroU32::new(1 << 20).unwrap();
 pub trait GuestMemory {
     fn read(&mut self, span: Span) -> Result<Vec<u8>, Fault>;
     fn write(&mut self, span: Span, bytes: &[u8]) -> Result<(), Fault>;
-    /// Where the backend, which shares the task's address space, reaches a
-    /// span the task maps: memory a buffer is made over
-    /// (`newBufferWithBytesNoCopy:`), which the task keeps mapped while the
-    /// buffer lives.
-    fn address(&self, span: Span) -> Result<u64, Fault>;
 }
 
 /// A device object a connection holds.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Object {
+    Memory(MemoryId),
     Buffer(BufferId),
     Texture(TextureId),
     Sampler(SamplerId),
@@ -132,6 +129,7 @@ macro_rules! kinds {
 }
 
 kinds! {
+    Memory(MemoryId);
     Buffer(BufferId);
     Texture(TextureId);
     Sampler(SamplerId);
@@ -286,6 +284,42 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         released
     }
 
+    /// Gives `connection` the wired guest RAM of `ranges`; the handle goes to
+    /// a buffer or heap of that memory, or to `Release`.
+    pub fn import(
+        &mut self,
+        connection: NonZeroU64,
+        ranges: &[MemoryRange],
+        token: NonZeroU64,
+    ) -> Result<NonZeroU64, Fault> {
+        self.connection(connection)?;
+        let memory = self.device.import_memory(ranges, token)?;
+        let handle = self.hold(connection, Object::Memory(memory))?;
+        NonZeroU64::new(handle.handle).ok_or(Fault::STALE)
+    }
+
+    /// The token of imported memory the GPU no longer reaches.
+    pub fn retired(&mut self) -> Option<NonZeroU64> {
+        self.device.retired()
+    }
+
+    /// Whether [`Self::retired`] has an answer.
+    pub(super) fn retiring(&self) -> bool {
+        self.device.retiring()
+    }
+
+    /// Takes the imported memory `handle` names from the connection, for an
+    /// object that keeps it.
+    fn take_memory(&mut self, connection: NonZeroU64, handle: u64) -> Result<MemoryId, Fault> {
+        let memory = self.object::<MemoryId>(connection, handle)?;
+        let epoch = self.epoch;
+        let handle = ObjectHandle::decode(handle).ok_or(Fault::STALE)?;
+        self.connection(connection)?
+            .objects
+            .remove(connection, epoch, handle)?;
+        Ok(memory)
+    }
+
     /// Runs `operation` for `connection` on its request record, writing its
     /// response record.
     pub fn call(
@@ -347,7 +381,9 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             Operation::FunctionBindings => self.function_bindings(&mut call),
             Operation::ArgumentLayout => reflection::argument_layout(&mut call),
             Operation::NewBuffer => self.new_buffer(&mut call),
-            Operation::NewBufferNoCopy => self.new_buffer_no_copy(&mut call),
+            Operation::NewImportedBuffer => self.new_imported_buffer(&mut call),
+            Operation::FormatAlignments => self.format_alignments(&mut call),
+            Operation::SparseTileSize => self.sparse_tile_size(&mut call),
             Operation::BufferDidModifyRange => self.buffer_did_modify_range(&mut call),
             Operation::NewTexture => self.new_texture(&mut call),
             Operation::NewTextureView => self.new_texture_view(&mut call),
@@ -389,7 +425,6 @@ impl<B: Backend, C: Compiler> Service<B, C> {
                 let value = self.device.poll()?;
                 call.reply(&wire::Value { value })
             }
-            Operation::Wait => self.wait(&mut call),
             Operation::Commit => self.commit(&mut call),
             Operation::CommandBufferTimes => {
                 let wire::Value { value } = call.request()?;
@@ -493,6 +528,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
     fn destroy(&mut self, object: Object) -> Result<(), Error> {
         let device = &mut self.device;
         match object {
+            Object::Memory(id) => device.release_import(id),
             Object::Buffer(id) => device.destroy_buffer(id),
             Object::Texture(id) => device.destroy_texture(id),
             Object::Sampler(id) => device.destroy_sampler(id),

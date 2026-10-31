@@ -8,7 +8,7 @@ use super::{Attachment, Chip, Refusal};
 #[cfg(feature = "metal-vulkan")]
 use crate::metal::{
     compiler::{self, AirCompiler},
-    native::{InternalKernels, Loader, NativeBackend},
+    native::{InternalKernels, Loader, MemoryExporter, NativeBackend, vk},
 };
 use crate::metal::{
     device::Device,
@@ -17,6 +17,7 @@ use crate::metal::{
     shader::Compiler,
     vulkan::{backend::Backend, physical::PciBusInfo},
 };
+use alloc::boxed::Box;
 
 /// The GPU the platform hands the Metal device.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -66,35 +67,46 @@ pub fn serve<B: Backend, C: Compiler>(
 #[cfg(feature = "metal-vulkan")]
 pub type NativeService = Service<NativeBackend, AirCompiler>;
 
-/// Opens NVK's device for `gpu` and serves it with `compiler`.
+/// Opens NVK's device for `gpu` and serves it with the AIR compiler service
+/// `compiler` answers for that device.
 ///
 /// # Safety
 ///
-/// `loader` is NVK's entry point and `compiler` the AIR compiler service
-/// with NVK's NIR options for this GPU, both outliving the service.
+/// `loader` is NVK's entry point and `compiler` answers the AIR compiler
+/// service with NVK's NIR options for the device it is given, both outliving
+/// the service.
 #[cfg(feature = "metal-vulkan")]
 pub unsafe fn open(
     loader: Loader,
-    compiler: compiler::Service,
+    exporter: Box<dyn MemoryExporter>,
+    compiler: impl FnOnce(vk::PhysicalDevice) -> compiler::Service,
     gpu: &Gpu,
     epoch: DeviceEpoch,
 ) -> Result<NativeService, OpenError> {
-    // SAFETY: the caller guarantees the service and its options.
-    let kernels = unsafe { compiler.internal_kernels() }?;
-    let [accumulate, select, resolve_draws, resolve_dispatches] = kernels.code();
-    let internal = InternalKernels {
-        accumulate,
-        select,
-        resolve_draws,
-        resolve_dispatches,
+    let mut built = None;
+    let kernels = |physical| {
+        let service = compiler(physical);
+        // SAFETY: the caller guarantees the service and its options.
+        let kernels = unsafe { service.internal_kernels() }?;
+        let [accumulate, select, resolve_draws, resolve_dispatches] = kernels.code();
+        // The kernels last until the pipelines hold their own copies.
+        built = Some((service, kernels));
+        Ok(InternalKernels {
+            accumulate,
+            select,
+            resolve_draws,
+            resolve_dispatches,
+        })
     };
     // SAFETY: the caller guarantees NVK's entry point, and the kernels are
     // the service's NIR for NVK.
-    let backend = unsafe { NativeBackend::new(loader, gpu.pci, internal) }?;
-    // The pipelines hold their own copies.
+    let backend = unsafe { NativeBackend::new(loader, gpu.pci, exporter, kernels) }?;
+    let Some((service, kernels)) = built else {
+        return Err(Error::Invalid("the backend asked for no kernels").into());
+    };
     drop(kernels);
     // SAFETY: the caller guarantees the service and its options outlive it.
-    let compiler = unsafe { AirCompiler::new(compiler, backend.physical_device()) };
+    let compiler = unsafe { AirCompiler::new(service, backend.physical_device()) };
     serve(backend, compiler, gpu, epoch)
 }
 

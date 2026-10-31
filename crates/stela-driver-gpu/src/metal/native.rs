@@ -38,10 +38,16 @@ use super::{
         physical::{PciBusInfo, PhysicalDevice},
     },
 };
-use alloc::{collections::BTreeMap, vec::Vec};
-use ash::{ext, khr, vk};
-use core::ptr::NonNull;
+use alloc::{
+    boxed::Box,
+    collections::{BTreeMap, VecDeque},
+    vec::Vec,
+};
+pub use ash::vk;
+use ash::{ext, khr};
+use core::{num::NonZeroU64, ptr::NonNull};
 use physical::{Extensions, FeatureChain};
+use stela_contracts::gate::MemoryRange;
 
 /// The driver's loader entry point.
 #[derive(Clone, Copy)]
@@ -71,6 +77,27 @@ pub struct InternalKernels {
 }
 
 /// A host mapping of a `VkDeviceMemory`.
+/// Memory the platform holds, as a dma-buf for the driver to import.
+pub trait MemoryExporter: Send {
+    /// A dma-buf of `ranges`, and a mapping of them for the host.
+    fn export(&self, ranges: &[MemoryRange]) -> Result<ExportedMemory>;
+    /// Undoes an export the driver did not import, which leaves it the
+    /// descriptor.
+    fn close(&self, exported: ExportedMemory);
+    /// Ends the host's mapping of memory the driver freed, which took the
+    /// descriptor when it imported.
+    fn unmap(&self, exported: ExportedMemory);
+}
+
+/// An export: `fd` is a dma-buf of `bytes`, which the host reaches at
+/// `pointer`.
+#[derive(Clone, Copy, Debug)]
+pub struct ExportedMemory {
+    pub fd: i32,
+    pub pointer: NonNull<u8>,
+    pub bytes: u64,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct Mapping {
     pointer: NonNull<u8>,
@@ -100,9 +127,12 @@ struct ExtensionFns {
     host_image_copy: Option<ext::host_image_copy::Device>,
     dynamic_state3: Option<ext::extended_dynamic_state3::Device>,
     sample_locations: Option<ext::sample_locations::Device>,
+    /// Depth bias by pointer: a target without floating-point registers, such
+    /// as `stela.efi`'s Rust, cannot pass the core command's floats to C.
+    depth_bias: Option<ext::depth_bias_control::Device>,
     mesh: Option<ext::mesh_shader::Device>,
     calibrated: Option<khr::calibrated_timestamps::Device>,
-    external_memory_host: Option<ext::external_memory_host::Device>,
+    external_memory_fd: Option<khr::external_memory_fd::Device>,
     conditional: ext::conditional_rendering::Device,
     /// With the snapshot's `generated_commands` limits.
     generated: Option<generated::Fns>,
@@ -123,6 +153,11 @@ pub struct NativeBackend {
     command_pool: vk::CommandPool,
     in_flight: Vec<InFlight>,
     mappings: BTreeMap<u64, Mapping>,
+    exporter: Box<dyn MemoryExporter>,
+    /// What each imported memory came from, and its token.
+    imports: BTreeMap<u64, (ExportedMemory, NonZeroU64)>,
+    /// The tokens of imported memory now freed.
+    retired: VecDeque<NonZeroU64>,
     /// Images still in `VK_IMAGE_LAYOUT_UNDEFINED`, with their aspects.
     new_images: Vec<(vk::Image, vk::ImageAspectFlags)>,
     /// Orders sparse binds between command buffers: before a segment's
@@ -159,14 +194,24 @@ fn failure(result: vk::Result) -> Error {
     }
 }
 
+// SAFETY: Vulkan's handles hold to no thread, and the fields behind pointers
+// are this backend's alone.
+unsafe impl Send for NativeBackend {}
+
 impl NativeBackend {
     /// Creates the instance and device for the GPU at `pci`.
     ///
     /// # Safety
     ///
     /// `loader.get_instance_proc_addr` is a Vulkan driver's entry point, and
-    /// `kernels` hold shader modules the compiler made for that driver.
-    pub unsafe fn new(loader: Loader, pci: PciBusInfo, kernels: InternalKernels) -> Result<Self> {
+    /// `kernels` answers shader modules the compiler made for the device it
+    /// is given.
+    pub unsafe fn new(
+        loader: Loader,
+        pci: PciBusInfo,
+        exporter: Box<dyn MemoryExporter>,
+        kernels: impl FnOnce(vk::PhysicalDevice) -> Result<InternalKernels>,
+    ) -> Result<Self> {
         let static_fn = ash::StaticFn {
             get_instance_proc_addr: loader.get_instance_proc_addr,
         };
@@ -193,6 +238,10 @@ impl NativeBackend {
         {
             destroy_instance(&instance);
             return Err(Error::Unsupported(missing.name));
+        }
+        if !snapshot.limits.dma_buf_import {
+            destroy_instance(&instance);
+            return Err(Error::Unsupported("VK_EXT_external_memory_dma_buf"));
         }
 
         let mut features = FeatureChain::new(&extensions, false);
@@ -225,12 +274,14 @@ impl NativeBackend {
                 .then(|| ext::extended_dynamic_state3::Device::new(&instance, &device)),
             sample_locations: has(ext::sample_locations::NAME)
                 .then(|| ext::sample_locations::Device::new(&instance, &device)),
+            depth_bias: has(ext::depth_bias_control::NAME)
+                .then(|| ext::depth_bias_control::Device::new(&instance, &device)),
             mesh: has(ext::mesh_shader::NAME)
                 .then(|| ext::mesh_shader::Device::new(&instance, &device)),
             calibrated: has(khr::calibrated_timestamps::NAME)
                 .then(|| khr::calibrated_timestamps::Device::new(&instance, &device)),
-            external_memory_host: has(ext::external_memory_host::NAME)
-                .then(|| ext::external_memory_host::Device::new(&instance, &device)),
+            external_memory_fd: has(khr::external_memory_fd::NAME)
+                .then(|| khr::external_memory_fd::Device::new(&instance, &device)),
             // A requirement: the device was refused without it.
             conditional: ext::conditional_rendering::Device::new(&instance, &device),
             generated: features
@@ -238,6 +289,7 @@ impl NativeBackend {
                 .then(|| generated::Fns::load(&instance, &device))
                 .flatten(),
         };
+        let kernels = kernels(physical);
         let mut snapshot = snapshot;
         if fns.generated.is_none() {
             snapshot.limits.generated_commands = None;
@@ -261,6 +313,9 @@ impl NativeBackend {
             command_pool: vk::CommandPool::null(),
             in_flight: Vec::new(),
             mappings: BTreeMap::new(),
+            exporter,
+            imports: BTreeMap::new(),
+            retired: VecDeque::new(),
             new_images: Vec::new(),
             bind_timeline: vk::Semaphore::null(),
             bind_value: 0,
@@ -270,6 +325,7 @@ impl NativeBackend {
             resolve_dispatches: vk::Pipeline::null(),
         };
         // Dropping a partly built backend destroys what was created.
+        let kernels = kernels?;
         backend.create_layout(family)?;
         backend.bind_timeline = handle(backend.create_semaphore(0)?.0);
         let kernel = |code| ComputePipelineInfo {
@@ -680,54 +736,44 @@ impl Backend for NativeBackend {
         })
     }
 
-    fn create_host_buffer(&mut self, info: &BufferInfo, address: u64) -> Result<BufferAllocation> {
-        let host = self
+    fn import_memory(&mut self, ranges: &[MemoryRange], token: NonZeroU64) -> Result<Memory> {
+        let fns = self
             .fns
-            .external_memory_host
+            .external_memory_fd
             .as_ref()
-            .ok_or(Error::Unsupported("host memory import"))?;
-        let handle_type = vk::ExternalMemoryHandleTypeFlags::HOST_ALLOCATION_EXT;
-        let pointer = address as *mut core::ffi::c_void;
-        let mut host_properties = vk::MemoryHostPointerPropertiesEXT::default();
-        // SAFETY: the pointer is the process's own memory, which the caller
-        // keeps mapped.
-        unsafe {
-            (host.fp().get_memory_host_pointer_properties_ext)(
-                self.device.handle(),
-                handle_type,
-                pointer,
-                &mut host_properties,
-            )
-        }
-        .result()
-        .map_err(failure)?;
-        let buffer = objects::host_buffer(info, |create| {
-            // SAFETY: the create info outlives the call.
-            unsafe { self.device.create_buffer(create, None) }.map_err(failure)
-        })?;
-        // SAFETY: the buffer was just created.
-        let needs = unsafe { self.device.get_buffer_memory_requirements(buffer) };
+            .ok_or(Error::Unsupported("memory import"))?;
+        let handle_type = vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT;
+        let exported = self.exporter.export(ranges)?;
+        let mut properties = vk::MemoryFdPropertiesKHR::default();
+        // SAFETY: the descriptor is the dma-buf just exported.
+        let queried =
+            unsafe { fns.get_memory_fd_properties(handle_type, exported.fd, &mut properties) };
         let request = MemoryRequest {
-            required: super::vulkan::MemoryProperties::HOST_VISIBLE,
+            required: super::vulkan::MemoryProperties::EMPTY,
             preferred: super::vulkan::MemoryProperties::HOST_COHERENT,
             mapped: false,
         };
-        let types = needs.memory_type_bits & host_properties.memory_type_bits;
-        let index = objects::memory_candidates(&self.snapshot.memory, types, request)
-            .first()
-            .copied();
-        let Some(index) = index else {
-            // SAFETY: nothing uses the new buffer.
-            unsafe { self.device.destroy_buffer(buffer, None) };
-            return Err(Error::Unsupported("host memory of a buffer's memory type"));
+        let index =
+            objects::memory_candidates(&self.snapshot.memory, properties.memory_type_bits, request)
+                .first()
+                .copied();
+        let imported = queried
+            .map_err(failure)
+            .and_then(|()| index.ok_or(Error::Unsupported("a memory type of imported memory")));
+        let index = match imported {
+            Ok(index) => index,
+            Err(error) => {
+                self.exporter.close(exported);
+                return Err(error);
+            }
         };
-        let mut import = vk::ImportMemoryHostPointerInfoEXT::default()
+        let mut import = vk::ImportMemoryFdInfoKHR::default()
             .handle_type(handle_type)
-            .host_pointer(pointer);
+            .fd(exported.fd);
         let mut flags =
             vk::MemoryAllocateFlagsInfo::default().flags(vk::MemoryAllocateFlags::DEVICE_ADDRESS);
         let allocate = vk::MemoryAllocateInfo::default()
-            .allocation_size(info.size)
+            .allocation_size(exported.bytes)
             .memory_type_index(index)
             .push_next(&mut import)
             .push_next(&mut flags);
@@ -735,40 +781,30 @@ impl Backend for NativeBackend {
         let memory = match unsafe { self.device.allocate_memory(&allocate, None) } {
             Ok(memory) => memory,
             Err(error) => {
-                // SAFETY: nothing uses the new buffer.
-                unsafe { self.device.destroy_buffer(buffer, None) };
+                self.exporter.close(exported);
                 return Err(failure(error));
             }
         };
-        // SAFETY: the memory was imported for this buffer.
-        let bound = unsafe { self.device.bind_buffer_memory(buffer, memory, 0) }.map_err(failure);
-        self.or_destroy(
-            bound,
-            &[
-                Object::Buffer(Buffer(raw(buffer))),
-                Object::Memory(Memory(raw(memory))),
-            ],
-        )?;
-        // The host reaches the memory where it already is.
-        let coherent = self.snapshot.memory.types[index as usize]
-            .properties
-            .contains(super::vulkan::MemoryProperties::HOST_COHERENT);
-        let pointer =
-            NonNull::new(pointer.cast::<u8>()).ok_or(Error::Invalid("null host memory"))?;
+        // The host reaches the memory through a mapping of its own: Linux has
+        // no pages to map for an imported buffer.
         self.mappings.insert(
             raw(memory),
             Mapping {
-                pointer,
-                size: info.size,
-                coherent,
+                pointer: exported.pointer,
+                size: exported.bytes,
+                coherent: true,
             },
         );
-        Ok(BufferAllocation {
-            buffer: Buffer(raw(buffer)),
-            memory: Memory(raw(memory)),
-            address: self.address(buffer, info),
-            allocated: needs.size,
-        })
+        self.imports.insert(raw(memory), (exported, token));
+        Ok(Memory(raw(memory)))
+    }
+
+    fn retired(&mut self) -> Option<NonZeroU64> {
+        self.retired.pop_front()
+    }
+
+    fn retiring(&self) -> bool {
+        !self.retired.is_empty()
     }
 
     fn create_placed_buffer(
@@ -777,10 +813,15 @@ impl Backend for NativeBackend {
         memory: Memory,
         offset: u64,
     ) -> Result<(Buffer, u64)> {
-        let buffer = objects::buffer(info, |create| {
+        let create = |create: &vk::BufferCreateInfo<'_>| {
             // SAFETY: the create info outlives the call.
             unsafe { self.device.create_buffer(create, None) }.map_err(failure)
-        })?;
+        };
+        let buffer = if self.imports.contains_key(&memory.0) {
+            objects::imported_buffer(info, create)
+        } else {
+            objects::buffer(info, create)
+        }?;
         // SAFETY: the Metal heap placed the buffer within `memory`.
         let bound = unsafe {
             self.device
@@ -1040,6 +1081,10 @@ impl Backend for NativeBackend {
                 Object::Memory(memory) => {
                     self.mappings.remove(&memory.0);
                     self.device.free_memory(handle(memory.0), None);
+                    if let Some((exported, token)) = self.imports.remove(&memory.0) {
+                        self.exporter.unmap(exported);
+                        self.retired.push_back(token);
+                    }
                 }
                 Object::IndirectCommandsLayout(layout) => self.generated().destroy_layout(layout.0),
                 Object::ExecutionSet(set) => self.generated().destroy_set(set.0),
@@ -1099,10 +1144,6 @@ impl Backend for NativeBackend {
         let range = self.atom_range(memory, offset, size);
         // SAFETY: as in `flush_memory`.
         unsafe { self.device.invalidate_mapped_memory_ranges(&[range]) }.map_err(failure)
-    }
-
-    fn mapped_address(&self, memory: Memory) -> Result<u64> {
-        Ok(self.mapping(memory, 0, 0)?.pointer.as_ptr() as u64)
     }
 
     fn copy_to_image(

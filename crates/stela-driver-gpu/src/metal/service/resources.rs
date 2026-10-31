@@ -2,20 +2,21 @@
 use super::{
     Call, Object, Service, boolean, known, region,
     wire::{
-        AUTOMATIC, BufferRangeRequest, BufferResponse, Empty, Fault, Handle, HeapBufferSizeRequest,
-        HeapDescriptorRecord, HeapUsageRequest, HeapUsageResponse, NewBufferNoCopyRequest,
+        AUTOMATIC, BufferRangeRequest, BufferResponse, Empty, Fault, FormatAlignmentsResponse,
+        Handle, HeapBufferSizeRequest, HeapDescriptorRecord, HeapUsageRequest, HeapUsageResponse,
         NewBufferRequest, NewBufferTextureRequest, NewHeapBufferRequest, NewHeapTextureRequest,
-        NewTextureViewRequest, SamplerDescriptorRecord, SamplerResponse, SizeAndAlignRecord,
-        TextureBytesRequest, TextureDescriptorRecord, TextureResponse,
+        NewImportedBufferRequest, NewTextureViewRequest, PixelFormatRequest,
+        SamplerDescriptorRecord, SamplerResponse, SizeAndAlignRecord, SparseTileRequest,
+        SparseTileResponse, Status, TextureBytesRequest, TextureDescriptorRecord, TextureResponse,
     },
 };
 use crate::metal::{
     abi::{
         CompareFunction, HeapType, ResourceOptions, SamplerAddressMode, SamplerBorderColor,
-        SamplerMinMagFilter, SamplerMipFilter, SamplerReductionMode, SparsePageSize,
+        SamplerMinMagFilter, SamplerMipFilter, SamplerReductionMode, SparsePageSize, StorageMode,
         SwizzleChannels, TextureSwizzle, TextureType, TextureUsage,
     },
-    device::{BufferId, Device, HeapId, TextureId, resources::Strides},
+    device::{BufferId, Device, HeapId, MemoryId, TextureId, resources::Strides},
     error::Error,
     heap::{HeapDescriptor, SizeAndAlign},
     pixel_format::PixelFormat,
@@ -30,20 +31,50 @@ impl<B: Backend, C: Compiler> Service<B, C> {
     pub(super) fn new_buffer(&mut self, call: &mut Call) -> Result<(), Fault> {
         let request: NewBufferRequest = call.request()?;
         let options = options(request.options)?;
+        // A guest task reaches only its own memory.
+        if options.storage_mode != StorageMode::Private {
+            return Err(Fault::new(
+                Status::Invalid,
+                "the CPU's buffers are imported",
+            ));
+        }
         let buffer = self.device.new_buffer(request.length, options)?;
         let response = self.adopt_buffer(call.connection, buffer)?;
         call.reply(&response)
     }
 
-    pub(super) fn new_buffer_no_copy(&mut self, call: &mut Call) -> Result<(), Fault> {
-        let request: NewBufferNoCopyRequest = call.request()?;
+    pub(super) fn new_imported_buffer(&mut self, call: &mut Call) -> Result<(), Fault> {
+        let request: NewImportedBufferRequest = call.request()?;
         let options = options(request.options)?;
-        let address = call.memory.address(request.bytes)?;
-        let buffer =
-            self.device
-                .new_buffer_with_bytes_no_copy(address, request.bytes.length, options)?;
+        let memory = self.object::<MemoryId>(call.connection, request.memory)?;
+        let buffer = self
+            .device
+            .new_imported_buffer(memory, request.length, options)?;
+        self.take_memory(call.connection, request.memory)?;
         let response = self.adopt_buffer(call.connection, buffer)?;
         call.reply(&response)
+    }
+
+    pub(super) fn format_alignments(&mut self, call: &mut Call) -> Result<(), Fault> {
+        let request: PixelFormatRequest = call.request()?;
+        let format = pixel_format(request.pixel_format)?;
+        let capabilities = self.device.capabilities();
+        call.reply(&FormatAlignmentsResponse {
+            linear_texture: capabilities.minimum_linear_texture_alignment(format),
+            texture_buffer: capabilities.minimum_texture_buffer_alignment(format),
+        })
+    }
+
+    pub(super) fn sparse_tile_size(&mut self, call: &mut Call) -> Result<(), Fault> {
+        let request: SparseTileRequest = call.request()?;
+        let size = self.device.capabilities().sparse_tile_size(
+            texture_type(request.texture_type)?,
+            pixel_format(request.pixel_format)?,
+            request.sample_count,
+        );
+        call.reply(&SparseTileResponse {
+            size: size.map_or([0; 3], |size| [size.width, size.height, size.depth]),
+        })
     }
 
     pub(super) fn buffer_did_modify_range(&mut self, call: &mut Call) -> Result<(), Fault> {
@@ -137,7 +168,18 @@ impl<B: Backend, C: Compiler> Service<B, C> {
                 "sparse page size",
             )?,
         };
-        let heap = self.device.new_heap(&descriptor)?;
+        let heap = if request.memory == 0 {
+            // A guest task reaches only its own memory.
+            if descriptor.options.storage_mode != StorageMode::Private {
+                return Err(Fault::new(Status::Invalid, "the CPU's heaps are imported"));
+            }
+            self.device.new_heap(&descriptor)?
+        } else {
+            let memory = self.object::<MemoryId>(call.connection, request.memory)?;
+            let heap = self.device.new_imported_heap(memory, &descriptor)?;
+            self.take_memory(call.connection, request.memory)?;
+            heap
+        };
         let handle = self.hold(call.connection, Object::Heap(heap))?;
         call.reply(&handle)
     }
@@ -209,7 +251,6 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             Ok(BufferResponse {
                 handle: 0,
                 gpu_address: device.buffer(buffer)?.address,
-                contents: device.buffer_contents(buffer)?,
                 allocated_size: placement.allocated_size,
                 heap_offset: placement.heap_offset,
             })

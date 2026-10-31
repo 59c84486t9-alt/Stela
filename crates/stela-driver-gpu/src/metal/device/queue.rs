@@ -588,26 +588,6 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         Ok(completed)
     }
 
-    /// `waitUntilCompleted` for the command buffer with `serial`; `timeout`
-    /// bounds each wait for held work, then the command buffer's.
-    pub fn wait(&mut self, serial: u64, timeout: u64) -> Result<bool> {
-        ensure(
-            serial <= self.submitted,
-            "the command buffer was not committed",
-        )?;
-        if self.lost {
-            return Err(Error::DeviceLost);
-        }
-        if !self.submit_held_through(serial, timeout)? {
-            return Ok(false);
-        }
-        let reached = self
-            .backend
-            .wait_semaphore(self.timeline, serial, timeout)?;
-        self.poll()?;
-        Ok(reached)
-    }
-
     /// Recycles what completed work held, keeps its GPU times and destroys
     /// what it kept alive; a failed invalidation or read is answered once
     /// the bookkeeping is done.

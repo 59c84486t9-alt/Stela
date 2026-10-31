@@ -1,9 +1,16 @@
 use super::{Memory, MockBackend, MockCompiler, Stream, commit, connect, service};
-use crate::metal::service::{
-    GuestMemory, SharedService,
-    wire::{self, GateCall, NegotiateRequest, NegotiateResponse, Operation, Span, Status},
+use crate::metal::{
+    capabilities::block::Block,
+    service::{
+        GuestMemory, ServiceHost, SharedService,
+        wire::{self, GateCall, NegotiateRequest, NegotiateResponse, Operation, Span, Status},
+    },
 };
-use core::{mem::size_of, num::NonZeroU64};
+use core::{
+    mem::size_of,
+    num::NonZeroU64,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 use stela_contracts::gate::{CallerFault, CallerMemory, GateService};
 
 impl CallerMemory for Memory {
@@ -78,7 +85,12 @@ fn a_failed_gate_call_reports_its_status_and_reason() {
     let mut service = service();
     let connection = service.connect().unwrap();
     let mut memory = Memory::default();
-    let oversized = gate_call(&mut memory, Operation::Negotiate, &[0; 8192], 16);
+    let oversized = gate_call(
+        &mut memory,
+        Operation::Negotiate,
+        &[0; size_of::<Block>() + 1],
+        16,
+    );
     service.serve(connection, oversized, &mut memory).unwrap();
     let call = completed(&mut memory, oversized);
     assert_eq!(call.status, Status::Malformed.raw());
@@ -90,6 +102,48 @@ fn a_failed_gate_call_reports_its_status_and_reason() {
     assert_eq!(
         service.serve(connection, 0x10, &mut memory),
         Err(CallerFault::Denied { address: 0x10 })
+    );
+}
+
+#[test]
+fn the_capability_block_crosses_the_gate() {
+    let mut service = service();
+    let connection = connect(&mut service);
+    let mut memory = Memory::default();
+    let record = gate_call(
+        &mut memory,
+        Operation::Capabilities,
+        &[],
+        size_of::<Block>(),
+    );
+    service.serve(connection, record, &mut memory).unwrap();
+    assert_eq!(completed(&mut memory, record).status, Status::Ok.raw());
+}
+
+#[test]
+fn a_span_the_caller_lost_asks_it_to_call_again() {
+    let mut service = service();
+    let connection = service.connect().unwrap();
+    let mut memory = Memory::default();
+    let reason = memory.put(&[0; 64]);
+    let response = memory.put(&[0; size_of::<NegotiateResponse>()]);
+    let record = memory
+        .records(&[GateCall {
+            operation: Operation::Negotiate.raw(),
+            status: u32::MAX,
+            request: Span {
+                address: 0x10,
+                length: size_of::<NegotiateRequest>() as u64,
+            },
+            response,
+            reason,
+            reason_length: 0,
+        }])
+        .address;
+    service.serve(connection, record, &mut memory).unwrap();
+    assert_eq!(
+        completed(&mut memory, record).status,
+        Status::Unmapped.raw()
     );
 }
 
@@ -118,6 +172,11 @@ fn commit_shared(shared: &Shared, connection: NonZeroU64) {
     .unwrap();
 }
 
+const HOST: ServiceHost = ServiceHost {
+    relax: || panic!("nothing waits"),
+    run: |call| call(),
+};
+
 /// The GPU finishes what was committed.
 fn complete(shared: &Shared) {
     let mut turn = shared.try_turn().unwrap();
@@ -128,7 +187,7 @@ fn complete(shared: &Shared) {
 
 #[test]
 fn the_shared_service_finds_completed_work_only_after_an_interrupt() {
-    let shared = SharedService::new(service(), || panic!("nothing holds the service"));
+    let shared = SharedService::new(service(), HOST);
     let connection = connect(&mut shared.try_turn().unwrap());
     commit_shared(&shared, connection);
     assert!(!shared.signaled());
@@ -140,8 +199,25 @@ fn the_shared_service_finds_completed_work_only_after_an_interrupt() {
 }
 
 #[test]
+fn every_call_runs_where_the_platform_says() {
+    static RUNS: AtomicUsize = AtomicUsize::new(0);
+    let host = ServiceHost {
+        run: |call| {
+            RUNS.fetch_add(1, Ordering::Relaxed);
+            call();
+        },
+        ..HOST
+    };
+    let shared = SharedService::new(service(), host);
+    let connection = shared.connect().unwrap();
+    assert_eq!(RUNS.load(Ordering::Relaxed), 1);
+    shared.disconnect(connection);
+    assert_eq!(RUNS.load(Ordering::Relaxed), 2);
+}
+
+#[test]
 fn an_interrupt_during_a_call_is_left_to_that_call() {
-    let shared = SharedService::new(service(), || panic!("nothing waits"));
+    let shared = SharedService::new(service(), HOST);
     let connection = connect(&mut shared.try_turn().unwrap());
     commit_shared(&shared, connection);
     complete(&shared);

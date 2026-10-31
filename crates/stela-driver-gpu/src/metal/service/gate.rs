@@ -7,14 +7,14 @@ use super::{
     GuestMemory, Service,
     wire::{self, Fault, GateCall, Span, Status},
 };
-use crate::metal::{shader::Compiler, vulkan::backend::Backend};
+use crate::metal::{capabilities::block::Block, shader::Compiler, vulkan::backend::Backend};
 use alloc::{vec, vec::Vec};
 use core::num::NonZeroU64;
 use stela_contracts::gate::{CallerFault, CallerMemory};
 
-/// Request and response records are fixed-width and small; variable data
-/// travels in spans the operation names.
-const MAX_RECORD_BYTES: u64 = 4096;
+/// Request and response records are fixed-width, the capability block the
+/// largest; variable data travels in spans the operation names.
+const MAX_RECORD_BYTES: u64 = size_of::<Block>() as u64;
 
 /// The calling thread's memory, as the service reads and writes spans.
 struct Caller<'a>(&'a mut dyn CallerMemory);
@@ -37,18 +37,13 @@ impl GuestMemory for Caller<'_> {
         }
         self.0.write(span.address, bytes).map_err(fault)
     }
-
-    fn address(&self, _span: Span) -> Result<u64, Fault> {
-        Err(Fault::new(
-            Status::Unsupported,
-            "buffers over the caller's own memory",
-        ))
-    }
 }
 
 fn fault(error: CallerFault) -> Fault {
     match error {
-        CallerFault::Denied { .. } => Fault::malformed("a span the caller cannot access"),
+        CallerFault::Denied { .. } => {
+            Fault::new(Status::Unmapped, "a span the caller cannot access")
+        }
         CallerFault::NotRam { .. } => Fault::malformed("a span that is not memory"),
         CallerFault::Unsupported(reason) => Fault::new(Status::Unsupported, reason),
     }

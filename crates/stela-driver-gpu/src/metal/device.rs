@@ -91,6 +91,7 @@ ids! {
     TextureId;
     SamplerId;
     HeapId;
+    MemoryId;
     LibraryId;
     FunctionId;
     RenderPipelineId;

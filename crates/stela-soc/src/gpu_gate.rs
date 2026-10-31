@@ -21,15 +21,16 @@
 //! the gate raises its interrupt until the kext acknowledges it, so threads
 //! waiting for command buffers sleep in the kernel and ask again on wake.
 use super::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
-use alloc::{collections::BTreeMap, sync::Arc};
+use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use core::num::NonZeroU64;
 use stela_contracts::{
     bus::AdvancePolicy,
     gate::{
-        CallerFault, GateCall, GateOutcome, GateRequest, GateService,
+        CallerFault, GateCall, GateOutcome, GateRequest, GateService, MemoryRange,
         window::{
-            ACK, CALL, CLOSE, COUNT, FAULT, FAULT_DENIED, FAULT_NOT_RAM, FAULT_UNSUPPORTED, OPEN,
-            OPENED, PAGE, STATUS,
+            ACK, CALL, CLOSE, COUNT, FAULT, FAULT_DENIED, FAULT_NOT_RAM, FAULT_UNSUPPORTED, IMPORT,
+            IMPORT_ADDRESS, IMPORT_BYTES, IMPORT_TOKEN, IMPORTED, OPEN, OPENED, PAGE, RETIRE,
+            RETIRED, STATUS,
         },
     },
     interrupt::{AicInput, Wire},
@@ -57,6 +58,12 @@ pub struct Gate {
     slots: [Slot; CONNECTIONS],
     faults: [u64; CONNECTIONS],
     opened: u64,
+    /// The address of the range the next `IMPORT_BYTES` adds.
+    range_address: u64,
+    ranges: Vec<MemoryRange>,
+    token: u64,
+    imported: u64,
+    retired: u64,
     /// What each PE's store asked, until that store's step takes it.
     pending: BTreeMap<usize, GateRequest>,
 }
@@ -70,6 +77,11 @@ impl Gate {
             slots: [Slot::Free; CONNECTIONS],
             faults: [0; CONNECTIONS],
             opened: 0,
+            range_address: 0,
+            ranges: Vec::new(),
+            token: 0,
+            imported: 0,
+            retired: 0,
             pending: BTreeMap::new(),
         }
     }
@@ -110,6 +122,8 @@ impl Gate {
                     };
                 }
             }
+            GateOutcome::Imported(handle) => self.imported = handle.map_or(0, NonZeroU64::get),
+            GateOutcome::Retired(token) => self.retired = token.map_or(0, NonZeroU64::get),
         }
     }
 
@@ -131,6 +145,23 @@ impl Gate {
             |_, request| !matches!(request, GateRequest::Serve { gate: other, .. } if *other == gate),
         );
         self.pending.insert(cpu, GateRequest::Close(connection));
+        Ok(())
+    }
+
+    fn import(&mut self, cpu: usize, page: u64) -> Result<(), &'static str> {
+        self.imported = 0;
+        let gate = gate_index(page).ok_or("no gate page")?;
+        let Slot::Open(connection) = self.slots[gate] else {
+            return Err("an import for a closed gate");
+        };
+        let token = NonZeroU64::new(self.token).ok_or("an import without a token")?;
+        let ranges = core::mem::take(&mut self.ranges);
+        let request = GateRequest::Import {
+            connection,
+            ranges,
+            token,
+        };
+        self.pending.insert(cpu, request);
         Ok(())
     }
 }
@@ -173,6 +204,8 @@ impl MmioDevice for Gate {
             (0, OPENED) => Ok(self.opened),
             (0, COUNT) => Ok(CONNECTIONS as u64),
             (0, STATUS) => Ok(self.status.into()),
+            (0, IMPORTED) => Ok(self.imported),
+            (0, RETIRED) => Ok(self.retired),
             (_, FAULT) => {
                 let gate = gate_index(page).ok_or_else(|| refused("no such register"))?;
                 Ok(self.faults[gate])
@@ -199,6 +232,17 @@ impl MmioDevice for Gate {
             (0, ACK) => {
                 self.status = false;
                 access.interrupts.set_level(Wire::Aic(self.irq), false);
+            }
+            (0, IMPORT_ADDRESS) => self.range_address = value,
+            (0, IMPORT_BYTES) => self.ranges.push(MemoryRange {
+                address: self.range_address,
+                bytes: value,
+            }),
+            (0, IMPORT_TOKEN) => self.token = value,
+            (0, IMPORT) => self.import(access.cpu, value).map_err(refused)?,
+            (0, RETIRE) => {
+                self.retired = 0;
+                self.pending.insert(access.cpu, GateRequest::Retire);
             }
             (_, CALL) => {
                 let gate = gate_index(page).ok_or_else(|| refused("no such register"))?;
@@ -236,6 +280,8 @@ mod tests {
         next: u64,
         disconnected: Vec<u64>,
         served: Vec<(u64, u64, u8)>,
+        imported: Vec<(u64, Vec<MemoryRange>, u64)>,
+        retired: Vec<u64>,
     }
 
     struct Service(Mutex<Log>);
@@ -265,6 +311,22 @@ mod tests {
                 .served
                 .push((connection.get(), record, byte[0]));
             Ok(())
+        }
+
+        fn import(
+            &self,
+            connection: NonZeroU64,
+            ranges: &[MemoryRange],
+            token: NonZeroU64,
+        ) -> Result<NonZeroU64, &'static str> {
+            let mut log = self.0.lock().unwrap();
+            log.imported
+                .push((connection.get(), ranges.to_vec(), token.get()));
+            NonZeroU64::new(0x1000 + log.imported.len() as u64).ok_or("exhausted")
+        }
+
+        fn retired(&self) -> Option<NonZeroU64> {
+            NonZeroU64::new(self.0.lock().unwrap().retired.pop()?)
         }
 
         fn signaled(&self) -> bool {
@@ -321,6 +383,55 @@ mod tests {
             &mut Access::new(0, 0, &mut NoInterrupts),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn the_kernel_names_the_memory_a_connection_imports() {
+        let service = Arc::new(Service(Mutex::new(Log::default())));
+        let mut gate = Gate::new(service.clone(), IRQ);
+        store(&mut gate, 0, OPEN, 1).unwrap();
+        serve(&mut gate, 0);
+        let page = load(&mut gate, OPENED);
+        for (address, bytes) in [(0x8000, 0x4000), (0x2_0000, 0x8000)] {
+            store(&mut gate, 0, IMPORT_ADDRESS, address).unwrap();
+            store(&mut gate, 0, IMPORT_BYTES, bytes).unwrap();
+        }
+        assert!(store(&mut gate, 0, IMPORT, page).is_err(), "no token yet");
+        store(&mut gate, 0, IMPORT_TOKEN, 9).unwrap();
+        store(&mut gate, 0, IMPORT, page).unwrap();
+        serve(&mut gate, 0);
+        assert_eq!(load(&mut gate, IMPORTED), 0x1001);
+        assert_eq!(
+            service.0.lock().unwrap().imported,
+            [(
+                1,
+                [
+                    MemoryRange {
+                        address: 0x8000,
+                        bytes: 0x4000
+                    },
+                    MemoryRange {
+                        address: 0x2_0000,
+                        bytes: 0x8000
+                    }
+                ]
+                .to_vec(),
+                9
+            )]
+        );
+        // Ranges go with their import.
+        store(&mut gate, 0, IMPORT, page).unwrap();
+        serve(&mut gate, 0);
+        assert_eq!(service.0.lock().unwrap().imported[1].1, []);
+
+        assert!(store(&mut gate, 0, IMPORT, page + 1).is_err());
+        service.0.lock().unwrap().retired.push(9);
+        store(&mut gate, 0, RETIRE, 1).unwrap();
+        serve(&mut gate, 0);
+        assert_eq!(load(&mut gate, RETIRED), 9);
+        store(&mut gate, 0, RETIRE, 1).unwrap();
+        serve(&mut gate, 0);
+        assert_eq!(load(&mut gate, RETIRED), 0);
     }
 
     /// Runs what PE `cpu`'s store left, as its step does.

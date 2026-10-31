@@ -3,7 +3,9 @@
 //! The device is one Vulkan device with one state, so calls take turns under
 //! a lock. A PE waiting its turn runs the platform's `relax`, since the call
 //! it waits for may need that PE: on the CPU that runs the kernel, waiting
-//! without running it would never end.
+//! without running it would never end. Each call runs through the platform's
+//! `run`, as a compile needs more stack than a PE keeps; the lock makes one
+//! such stack enough.
 //!
 //! The gate asks about completed work under the board's lock, where a Vulkan
 //! call would hold up every PE, so [`GateService::signaled`] only reads a
@@ -17,7 +19,7 @@ use core::{
     ops::{Deref, DerefMut},
     sync::atomic::{AtomicBool, Ordering},
 };
-use stela_contracts::gate::{CallerFault, CallerMemory, GateService};
+use stela_contracts::gate::{CallerFault, CallerMemory, GateService, MemoryRange};
 
 pub struct SharedService<B: Backend, C: Compiler> {
     service: UnsafeCell<Service<B, C>>,
@@ -26,7 +28,17 @@ pub struct SharedService<B: Backend, C: Compiler> {
     stale: AtomicBool,
     /// Completed work the gate has not taken.
     completed: AtomicBool,
-    relax: fn(),
+    host: ServiceHost,
+}
+
+/// What the platform does for the shared service.
+#[derive(Clone, Copy)]
+pub struct ServiceHost {
+    /// Waits a moment for the turn's holder.
+    pub relax: fn(),
+    /// Calls its argument on a stack a compile fits on. Only a turn's holder
+    /// comes here.
+    pub run: fn(&mut dyn FnMut()),
 }
 
 // SAFETY: the lock gives one PE at a time the service, which `Send` lets move
@@ -58,7 +70,8 @@ impl<B: Backend, C: Compiler> Drop for Turn<'_, B, C> {
     fn drop(&mut self) {
         // A failed `try_turn` left the look to this holder, which it sees
         // once `stale` has been raised.
-        if self.0.stale.swap(false, Ordering::SeqCst) && (**self).signaled() {
+        let completed = self.0.stale.swap(false, Ordering::SeqCst) && (**self).signaled();
+        if completed || self.retiring() {
             self.0.completed.store(true, Ordering::Release);
         }
         self.0.locked.store(false, Ordering::SeqCst);
@@ -69,13 +82,13 @@ impl<B: Backend, C: Compiler> Drop for Turn<'_, B, C> {
 }
 
 impl<B: Backend, C: Compiler> SharedService<B, C> {
-    pub fn new(service: Service<B, C>, relax: fn()) -> Self {
+    pub fn new(service: Service<B, C>, host: ServiceHost) -> Self {
         Self {
             service: UnsafeCell::new(service),
             locked: AtomicBool::new(false),
             stale: AtomicBool::new(false),
             completed: AtomicBool::new(false),
-            relax,
+            host,
         }
     }
 
@@ -88,8 +101,20 @@ impl<B: Backend, C: Compiler> SharedService<B, C> {
             if let Some(turn) = self.try_turn() {
                 return turn;
             }
-            (self.relax)();
+            (self.host.relax)();
         }
+    }
+
+    /// Runs `call` on the service in a turn of its own.
+    fn call<R>(&self, call: impl FnOnce(&mut Service<B, C>) -> R) -> R {
+        let mut turn = self.turn();
+        let (mut call, mut result) = (Some(call), None);
+        (self.host.run)(&mut || {
+            if let Some(call) = call.take() {
+                result = Some(call(&mut turn));
+            }
+        });
+        result.expect("the platform runs what it is given")
     }
 
     /// The GPU interrupted: look for what completed now, or leave that to the
@@ -102,12 +127,13 @@ impl<B: Backend, C: Compiler> SharedService<B, C> {
 
 impl<B: Backend + Send, C: Compiler + Send> GateService for SharedService<B, C> {
     fn connect(&self) -> Result<NonZeroU64, &'static str> {
-        self.turn().connect().map_err(|fault| fault.reason)
+        self.call(|service| service.connect())
+            .map_err(|fault| fault.reason)
     }
 
     fn disconnect(&self, connection: NonZeroU64) {
         // The gate closes only connections it opened and holds.
-        let closed = self.turn().disconnect(connection);
+        let closed = self.call(|service| service.disconnect(connection));
         debug_assert!(closed.is_ok());
     }
 
@@ -117,7 +143,21 @@ impl<B: Backend + Send, C: Compiler + Send> GateService for SharedService<B, C> 
         record: u64,
         caller: &mut dyn CallerMemory,
     ) -> Result<(), CallerFault> {
-        self.turn().serve(connection, record, caller)
+        self.call(|service| service.serve(connection, record, caller))
+    }
+
+    fn import(
+        &self,
+        connection: NonZeroU64,
+        ranges: &[MemoryRange],
+        token: NonZeroU64,
+    ) -> Result<NonZeroU64, &'static str> {
+        self.call(|service| service.import(connection, ranges, token))
+            .map_err(|fault| fault.reason)
+    }
+
+    fn retired(&self) -> Option<NonZeroU64> {
+        self.call(|service| service.retired())
     }
 
     fn signaled(&self) -> bool {

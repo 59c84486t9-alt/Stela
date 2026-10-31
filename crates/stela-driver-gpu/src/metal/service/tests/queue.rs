@@ -6,7 +6,7 @@ use crate::metal::{
         wire::{
             CommandBufferTimesResponse, CounterSetCode, Empty, EventValueRequest, Handle,
             NewCounterBufferRequest, Operation, ResolveCountersRequest, ResolveCountersResponse,
-            Status, TimestampsResponse, Value, WaitEventRequest, WaitRequest, WaitResponse,
+            Status, TimestampsResponse, Value, WaitEventRequest, WaitResponse,
         },
     },
 };
@@ -164,20 +164,6 @@ fn the_queue_answers_its_serials_and_clocks() {
     let completed: Value =
         call(&mut service, connection, Operation::Poll, &Empty {}, memory).unwrap();
     assert_eq!(completed.value, 0);
-    let uncommitted = WaitRequest {
-        serial: 1,
-        timeout: 0,
-    };
-    assert_eq!(
-        status(call::<_, WaitResponse>(
-            &mut service,
-            connection,
-            Operation::Wait,
-            &uncommitted,
-            memory,
-        )),
-        Status::Invalid
-    );
     assert_eq!(
         status(call::<_, CommandBufferTimesResponse>(
             &mut service,

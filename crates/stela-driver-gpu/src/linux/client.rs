@@ -14,12 +14,22 @@ const DRM_MAJOR: u32 = 226;
 /// Linux's `MINORBITS`.
 const MINOR_BITS: u32 = 20;
 
+/// Physically contiguous memory the owner holds, in whole pages:
+/// `stela_linux_run`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Run {
+    pub physical: u64,
+    pub bytes: u64,
+}
+
 /// A client's mapping of a file.
 #[derive(Clone, Copy, Debug)]
 pub struct Mapping(*mut c_void);
 
 unsafe extern "C" {
     fn stela_linux_open(device: u32, flags: c_uint) -> c_int;
+    fn stela_linux_export(runs: *const Run, count: usize) -> c_int;
     fn stela_linux_fd_close(fd: c_int);
     fn stela_linux_fd_dup(fd: c_int) -> c_int;
     fn stela_linux_fd_device(fd: c_int) -> c_long;
@@ -66,6 +76,15 @@ pub unsafe fn open(minor: u32) -> Errno {
     const READ_WRITE: c_uint = 2;
     // SAFETY: the module's contract.
     unsafe { stela_linux_open(DRM_MAJOR << MINOR_BITS | minor, READ_WRITE) }
+}
+
+/// A dma-buf of `runs`, for a descriptor or a negative errno.
+///
+/// # Safety
+/// See the module. The memory outlives the buffer.
+pub unsafe fn export(runs: &[Run]) -> Errno {
+    // SAFETY: the module's contract and this function's.
+    unsafe { stela_linux_export(runs.as_ptr(), runs.len()) }
 }
 
 /// # Safety

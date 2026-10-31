@@ -3,8 +3,7 @@ use super::{
     Call, Object, Service, known,
     wire::{
         CounterSetCode, Empty, EventValueRequest, Fault, Handle, NewCounterBufferRequest,
-        ResolveCountersRequest, ResolveCountersResponse, Value, WaitEventRequest, WaitRequest,
-        WaitResponse,
+        ResolveCountersRequest, ResolveCountersResponse, Value, WaitEventRequest, WaitResponse,
     },
 };
 use crate::metal::{
@@ -35,12 +34,6 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         let reached = self
             .device
             .wait_event(event, request.value, request.timeout)?;
-        call.reply(&waited(reached))
-    }
-
-    pub(super) fn wait(&mut self, call: &mut Call) -> Result<(), Fault> {
-        let request: WaitRequest = call.request()?;
-        let reached = self.device.wait(request.serial, request.timeout)?;
         call.reply(&waited(reached))
     }
 

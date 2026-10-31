@@ -330,7 +330,12 @@ impl Recorder<'_> {
                     slope,
                 } => {
                     device.cmd_set_depth_bias_enable(buffer, enable);
-                    device.cmd_set_depth_bias(buffer, constant, clamp, slope);
+                    let info = vk::DepthBiasInfoEXT::default()
+                        .depth_bias_constant_factor(constant)
+                        .depth_bias_clamp(clamp)
+                        .depth_bias_slope_factor(slope);
+                    let bias = unsupported(fns.depth_bias.as_ref(), "dynamic depth bias")?;
+                    (bias.fp().cmd_set_depth_bias2_ext)(buffer, &info);
                 }
                 Command::SetBlendConstants(constants) => {
                     device.cmd_set_blend_constants(buffer, constants);

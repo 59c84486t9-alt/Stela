@@ -322,19 +322,21 @@ records! {
         pub options: u64,
     }
 
-    /// A new buffer: its `gpuAddress`, its `contents` (zero for a private
-    /// buffer), `allocatedSize` and `heapOffset`.
+    /// A new buffer: its `gpuAddress`, `allocatedSize` and `heapOffset`.
     pub struct BufferResponse {
         pub handle: u64,
         pub gpu_address: u64,
-        pub contents: u64,
         pub allocated_size: u64,
         pub heap_offset: u64,
     }
 
-    /// `newBufferWithBytesNoCopy:length:options:deallocator:`.
-    pub struct NewBufferNoCopyRequest {
-        pub bytes: Span,
+    /// A buffer over imported memory, which the frontend keeps mapped: what
+    /// a CPU reaches. `newBufferWithBytesNoCopy:length:options:deallocator:`
+    /// imports the app's pages; shared and managed buffers its own. The
+    /// buffer takes the memory's handle.
+    pub struct NewImportedBufferRequest {
+        pub memory: u64,
+        pub length: u64,
         pub options: u64,
     }
 
@@ -395,6 +397,30 @@ records! {
         pub bytes_per_row: u64,
     }
 
+    /// What depends on a pixel format's size or support.
+    pub struct PixelFormatRequest {
+        pub pixel_format: u64,
+    }
+
+    /// `minimumLinearTextureAlignmentForPixelFormat:` and
+    /// `minimumTextureBufferAlignmentForPixelFormat:`.
+    pub struct FormatAlignmentsResponse {
+        pub linear_texture: u64,
+        pub texture_buffer: u64,
+    }
+
+    /// `sparseTileSizeWithTextureType:pixelFormat:sampleCount:`.
+    pub struct SparseTileRequest {
+        pub texture_type: u64,
+        pub pixel_format: u64,
+        pub sample_count: u64,
+    }
+
+    /// Texels per tile, zero when the texture cannot be sparse.
+    pub struct SparseTileResponse {
+        pub size: [u64; 3],
+    }
+
     /// `MTLRegion` of one mipmap level and slice.
     pub struct RegionRecord {
         pub slice: u64,
@@ -434,8 +460,10 @@ records! {
         pub resource_id: u64,
     }
 
-    /// `MTLHeapDescriptor`.
+    /// `MTLHeapDescriptor`, over imported memory when `memory` is nonzero,
+    /// as a heap the CPU reaches is; the heap takes the handle.
     pub struct HeapDescriptorRecord {
+        pub memory: u64,
         pub size: u64,
         pub options: u64,
         pub heap_type: u64,
@@ -682,13 +710,6 @@ records! {
         pub timeout: u64,
     }
 
-    /// `waitUntilCompleted` of the command buffer committed as `serial`,
-    /// each wait bounded by `timeout` nanoseconds.
-    pub struct WaitRequest {
-        pub serial: u64,
-        pub timeout: u64,
-    }
-
     /// Whether a wait saw its value before its timeout.
     pub struct WaitResponse {
         pub reached: u32,
@@ -819,6 +840,9 @@ raw_enum! {
         StaleHandle = 7,
         /// The connection is unknown or closed.
         Closed = 8,
+        /// A span's page is not mapped for the caller now, as any page of a
+        /// task may not be: the frontend touches it and calls again.
+        Unmapped = 9,
     }
 }
 
@@ -938,9 +962,11 @@ operations! {
     HeapUsage = 0x020e => HeapUsageRequest, HeapUsageResponse;
     /// `makeAliasable` of a heap buffer or texture.
     MakeAliasable = 0x020f => Handle, Empty;
-    /// The frontend runs the deallocator once the last command buffer that
+    /// The frontend runs a deallocator once the last command buffer that
     /// used the buffer completes.
-    NewBufferNoCopy = 0x0210 => NewBufferNoCopyRequest, BufferResponse;
+    NewImportedBuffer = 0x0210 => NewImportedBufferRequest, BufferResponse;
+    FormatAlignments = 0x0211 => PixelFormatRequest, FormatAlignmentsResponse;
+    SparseTileSize = 0x0212 => SparseTileRequest, SparseTileResponse;
     NewRenderPipeline = 0x0301 => NewRenderPipelineRequest, RenderPipelineResponse;
     NewMeshPipeline = 0x0302 => NewMeshPipelineRequest, RenderPipelineResponse;
     NewComputePipeline = 0x0303 => NewComputePipelineRequest, ComputePipelineResponse;
@@ -962,7 +988,6 @@ operations! {
     AllocatedSize = 0x0408 => Empty, Value;
     /// Submits ready work and answers the completed serial.
     Poll = 0x0409 => Empty, Value;
-    Wait = 0x040a => WaitRequest, WaitResponse;
     /// Replays a command stream into a command buffer, submits it and
     /// answers its serial.
     Commit = 0x040b => commands::CommitRequest, Value;

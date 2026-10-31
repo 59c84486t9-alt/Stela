@@ -1,4 +1,7 @@
-use super::{IDENTITY, Memory, TestService, call, connect, options, service_on, status, texture};
+use super::{
+    IDENTITY, Memory, TestService, call, connect, cpu_buffer, imported, options, service_on,
+    status, texture,
+};
 use crate::metal::{
     abi::{
         CompareFunction, HeapType, SamplerAddressMode, SamplerBorderColor, SamplerMinMagFilter,
@@ -9,15 +12,17 @@ use crate::metal::{
     service::{
         GuestMemory, Outcome,
         wire::{
-            AUTOMATIC, BufferRangeRequest, BufferResponse, Empty, Handle, HeapBufferSizeRequest,
-            HeapDescriptorRecord, HeapUsageRequest, HeapUsageResponse, NewBufferNoCopyRequest,
-            NewBufferRequest, NewHeapBufferRequest, NewTextureViewRequest, Operation, RegionRecord,
-            SamplerDescriptorRecord, SamplerResponse, SizeAndAlignRecord, Status,
-            TextureBytesRequest, TextureResponse,
+            AUTOMATIC, BufferRangeRequest, BufferResponse, Empty, FormatAlignmentsResponse, Handle,
+            HeapBufferSizeRequest, HeapDescriptorRecord, HeapUsageRequest, HeapUsageResponse,
+            NewBufferRequest, NewHeapBufferRequest, NewImportedBufferRequest,
+            NewTextureViewRequest, Operation, PixelFormatRequest, RegionRecord,
+            SamplerDescriptorRecord, SamplerResponse, SizeAndAlignRecord, SparseTileRequest,
+            SparseTileResponse, Status, TextureBytesRequest, TextureResponse,
         },
     },
 };
 use core::num::NonZeroU64;
+use stela_contracts::gate::MemoryRange;
 
 fn release(service: &mut TestService, connection: NonZeroU64, handle: u64) -> Status {
     status(call::<_, Empty>(
@@ -30,7 +35,7 @@ fn release(service: &mut TestService, connection: NonZeroU64, handle: u64) -> St
 }
 
 #[test]
-fn buffers_answer_their_addresses_and_contents() {
+fn buffers_answer_their_addresses() {
     let mut service = service_on(MockBackend::new());
     let connection = connect(&mut service);
     let memory = &mut Memory::default();
@@ -47,12 +52,11 @@ fn buffers_answer_their_addresses_and_contents() {
             memory,
         )
     };
-    let shared = buffer(StorageMode::Shared).unwrap();
-    assert_ne!(shared.gpu_address, 0);
-    assert_ne!(shared.contents, 0);
-    assert_eq!((shared.allocated_size, shared.heap_offset), (4096, 0));
     let private = buffer(StorageMode::Private).unwrap();
-    assert_eq!(private.contents, 0);
+    assert_ne!(private.gpu_address, 0);
+    assert_eq!((private.allocated_size, private.heap_offset), (4096, 0));
+    assert_eq!(status(buffer(StorageMode::Shared)), Status::Invalid);
+    let shared = cpu_buffer(&mut service, connection, 4096, StorageMode::Shared);
     assert_eq!(
         call::<_, BufferResponse>(
             &mut service,
@@ -178,6 +182,7 @@ fn heaps_place_resources_and_report_their_usage() {
     let connection = connect(&mut service);
     let memory = &mut Memory::default();
     let heap = HeapDescriptorRecord {
+        memory: 0,
         size: 1 << 20,
         options: options(StorageMode::Private),
         heap_type: HeapType::Automatic.raw(),
@@ -246,6 +251,40 @@ fn heaps_place_resources_and_report_their_usage() {
 }
 
 #[test]
+fn pixel_formats_answer_their_alignments_and_tiles() {
+    let mut service = service_on(MockBackend::new());
+    let connection = connect(&mut service);
+    let memory = &mut Memory::default();
+    let format = PixelFormat::Rgba8Unorm.raw();
+    let request = PixelFormatRequest {
+        pixel_format: format,
+    };
+    let alignments: FormatAlignmentsResponse = call(
+        &mut service,
+        connection,
+        Operation::FormatAlignments,
+        &request,
+        memory,
+    )
+    .unwrap();
+    assert!(alignments.linear_texture.is_power_of_two());
+    let request = SparseTileRequest {
+        texture_type: TextureType::D1.raw(),
+        pixel_format: format,
+        sample_count: 1,
+    };
+    let tile: SparseTileResponse = call(
+        &mut service,
+        connection,
+        Operation::SparseTileSize,
+        &request,
+        memory,
+    )
+    .unwrap();
+    assert_eq!(tile.size, [0; 3], "a 1D texture is never sparse");
+}
+
+#[test]
 fn samplers_decode_their_descriptors() {
     let mut service = service_on(MockBackend::new());
     let connection = connect(&mut service);
@@ -294,35 +333,55 @@ fn samplers_decode_their_descriptors() {
 }
 
 #[test]
-fn buffers_wrap_guest_memory_without_copying() {
+fn a_cpu_reaches_buffers_of_imported_memory() {
     let mut service = service_on(MockBackend::new());
     let connection = connect(&mut service);
     let memory = &mut Memory::default();
-    let request = NewBufferNoCopyRequest {
-        bytes: memory.put(&[0; 8192]),
-        options: options(StorageMode::Shared),
+    let shared = cpu_buffer(&mut service, connection, 8192, StorageMode::Shared);
+    assert_eq!(shared.allocated_size, 8192);
+
+    // The buffer took the memory's handle, as it does the memory.
+    let handle = imported(&mut service, connection, 8192);
+    let request = NewImportedBufferRequest {
+        memory: handle,
+        length: 8192,
+        options: options(StorageMode::Managed),
     };
-    let buffer: BufferResponse = call(
-        &mut service,
-        connection,
-        Operation::NewBufferNoCopy,
-        &request,
-        memory,
-    )
-    .unwrap();
-    assert_eq!(buffer.contents, request.bytes.address);
-    let unaligned = NewBufferNoCopyRequest {
-        bytes: memory.put(&[0; 100]),
+    let new = |service: &mut TestService, memory: &mut Memory, request| {
+        status(call::<_, BufferResponse>(
+            service,
+            connection,
+            Operation::NewImportedBuffer,
+            &request,
+            memory,
+        ))
+    };
+    let private = NewImportedBufferRequest {
+        options: options(StorageMode::Private),
         ..request
     };
-    assert_eq!(
-        status(call::<_, BufferResponse>(
-            &mut service,
-            connection,
-            Operation::NewBufferNoCopy,
-            &unaligned,
-            memory,
-        )),
-        Status::Invalid
-    );
+    let long = NewImportedBufferRequest {
+        length: 8193,
+        ..request
+    };
+    assert_eq!(new(&mut service, memory, private), Status::Invalid);
+    assert_eq!(new(&mut service, memory, long), Status::Invalid);
+    assert_eq!(new(&mut service, memory, request), Status::Ok);
+    assert_eq!(new(&mut service, memory, request), Status::StaleHandle);
+}
+
+#[test]
+fn imported_memory_retires_once_the_gpu_is_done_with_it() {
+    let mut service = service_on(MockBackend::new());
+    let connection = connect(&mut service);
+    let token = NonZeroU64::new(7).unwrap();
+    let range = MemoryRange {
+        address: 0x8_0000_0000,
+        bytes: 4096,
+    };
+    let memory = service.import(connection, &[range], token).unwrap();
+    assert_eq!(service.retired(), None);
+    assert_eq!(release(&mut service, connection, memory.get()), Status::Ok);
+    assert_eq!(service.retired(), Some(token));
+    assert_eq!(service.retired(), None);
 }

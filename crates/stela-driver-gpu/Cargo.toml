@@ -27,6 +27,8 @@ amd-commands = ["dep:cc"]
 metal = ["dep:stela-contracts"]
 # The Metal device's native backend over a loaded Vulkan driver (NVK).
 metal-vulkan = ["metal", "dep:ash"]
+# The image links the Metal compiler's C (`crates/stela-mesa`).
+metal-linked = ["metal-vulkan"]
 
 [dependencies]
 stela-driver-base = { path = "../stela-driver-base" }
