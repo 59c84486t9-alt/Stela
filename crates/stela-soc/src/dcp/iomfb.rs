@@ -2,9 +2,11 @@
 //! monitor: the replies to the methods the AP's IOMobileFramebuffer stack
 //! calls during boot, power, mode set and swap, and the callbacks the
 //! coprocessor makes. Every call is first checked against its interface row
-//! ([`super::abi`]); a tag outside the interface, a call whose sizes differ
-//! from its row and a method the model does not serve all refuse by name, so
-//! an unmodeled operation is a recorded gap, never a fake success.
+//! ([`super::abi`]); a tag outside the interface and a call whose sizes differ
+//! from its row refuse by name. A method of the interface the model does not
+//! serve is reported once and answers zeros, as a refusal would leave the
+//! AP's call open for good: an unmodeled operation is a recorded gap, and its
+//! zeros are no model of it.
 //!
 //! The boot sequence follows Asahi Linux's AP side of the same protocol
 //! (`drivers/gpu/drm/apple/iomfb_template.c`: `boot_1` .. `boot_done`,
@@ -58,7 +60,7 @@ use super::rpc::{Callback, Service, Step};
 use super::swap::{self, Layer, Submission};
 use crate::Result;
 use alloc::boxed::Box;
-use alloc::collections::VecDeque;
+use alloc::collections::{BTreeSet, VecDeque};
 use alloc::format;
 use alloc::rc::Rc;
 use alloc::string::String;
@@ -133,6 +135,11 @@ pub struct Methods {
     advertised: Result<Advertised>,
     /// Why the last call refused, with the tag and its interface row.
     last_refusal: Option<String>,
+    /// The interface's methods answered without a model, each reported once.
+    unmodeled: BTreeSet<[u8; 4]>,
+    /// `set_color_remap_mode`'s value, which reads back; 0 is IOMFB's normal
+    /// mode, and the scanout applies no other.
+    color_remap_mode: u32,
     log: VecDeque<Log>,
     dropped: u64,
     dumped: u32,
@@ -210,6 +217,8 @@ impl Methods {
             scanout,
             advertised,
             last_refusal: None,
+            unmodeled: BTreeSet::new(),
+            color_remap_mode: 0,
             log: VecDeque::new(),
             dropped: 0,
             dumped: 0,
@@ -328,6 +337,14 @@ impl Methods {
             abi::tag_str(&tag)
         ));
         Err(reason)
+    }
+
+    /// Report method `tag`, which has no model, once. The AP's caller gets on
+    /// with what the method would have told it or done.
+    fn report_unmodeled(&mut self, tag: [u8; 4]) {
+        if self.unmodeled.insert(tag) {
+            self.record_log(Log::Unmodeled(tag));
+        }
     }
 
     fn callback_log(&mut self, tag: [u8; 4], input: usize, output: u32) {
@@ -461,6 +478,22 @@ impl Service for Methods {
             }
             // setup_video_limits(): the fixed mode has no limits to set up.
             b"A027" => Ok(Step::Return(Vec::new())),
+            // set_color_remap_mode(mode) -> status.
+            b"A426" => {
+                self.color_remap_mode = fields.u32()?;
+                if self.color_remap_mode != 0 {
+                    self.report_unmodeled(tag);
+                }
+                Ok(Step::Return(IO_RETURN_SUCCESS.to_le_bytes().to_vec()))
+            }
+            // get_color_remap_mode(*mode) -> {mode, status}: the pointer's
+            // value and a null flag go in (IOMobileFramebufferAP 0xad7c358),
+            // which the answer does not depend on.
+            b"A427" => {
+                let mut bytes = self.color_remap_mode.to_le_bytes().to_vec();
+                bytes.extend_from_slice(&IO_RETURN_SUCCESS.to_le_bytes());
+                Ok(Step::Return(bytes))
+            }
             // set_parameter_dcp(param, value[4], count) -> u32. The one
             // parameter Asahi sets is adaptive sync, which a fixed 60 Hz
             // mode has off; any other parameter refuses.
@@ -652,7 +685,13 @@ impl Service for Methods {
                 Ok(Step::Return(Vec::new()))
             }
             _ => match answer(&tag, input, output, self.mode()) {
-                Ok(bytes) => Ok(Step::Return(bytes)),
+                Ok(Some(bytes)) => Ok(Step::Return(bytes)),
+                // A refusal here would leave the AP's call open for good: it
+                // waits, and the link retries the call. Its output is zeros.
+                Ok(None) => {
+                    self.report_unmodeled(tag);
+                    Ok(Step::Return(alloc::vec![0; output as usize]))
+                }
                 Err(reason) => self.refuse(tag, reason),
             },
         }
@@ -786,14 +825,14 @@ fn bool_reply(ok: bool) -> Vec<u8> {
     u32::from(ok).to_le_bytes().to_vec()
 }
 
-/// Answer a stateless query for the fixed `mode`, or refuse it by name. The
-/// output must be exactly the length the AP's header allocated (the
-/// interface's size); a mismatch refuses rather than truncates.
-pub fn answer(code: &[u8; 4], input: &[u8], output: u32, mode: Mode) -> Result<Vec<u8>> {
+/// Answer a stateless query for the fixed `mode`, or `None` for a method with
+/// no model. The output must be exactly the length the AP's header allocated
+/// (the interface's size); a mismatch refuses rather than truncates.
+pub fn answer(code: &[u8; 4], input: &[u8], output: u32, mode: Mode) -> Result<Option<Vec<u8>>> {
     let out = output as usize;
-    let sized = |bytes: Vec<u8>| -> Result<Vec<u8>> {
+    let sized = |bytes: Vec<u8>| -> Result<Option<Vec<u8>>> {
         if bytes.len() == out {
-            Ok(bytes)
+            Ok(Some(bytes))
         } else {
             Err(refuse!(
                 "DCP method output size differs from the AP's header"
@@ -866,9 +905,7 @@ pub fn answer(code: &[u8; 4], input: &[u8], output: u32, mode: Mode) -> Result<V
             }
             sized(bytes)
         }
-        _ => Err(refuse!(
-            "DCP method is not modeled for the one fixed monitor"
-        )),
+        _ => Ok(None),
     }
 }
 

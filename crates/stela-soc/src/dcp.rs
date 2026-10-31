@@ -97,6 +97,8 @@ pub enum Log {
     },
     /// A named refusal, with the call's interface row.
     Refused(String),
+    /// A method of the interface with no model, answered with zeros.
+    Unmodeled([u8; 4]),
     /// An AFK endpoint's message or ring entry.
     Afk {
         endpoint: u8,
@@ -154,6 +156,14 @@ impl core::fmt::Display for Log {
                 write!(f, "DCP presented swap {swap_id} surfaces={surfaces:x?}")
             }
             Log::Refused(text) => write!(f, "DCP refused {text}"),
+            Log::Unmodeled(tag) => {
+                let name = abi::method(tag).map_or("", |row| row.name);
+                write!(
+                    f,
+                    "DCP unmodeled {} {name}: answered with zeros",
+                    abi::tag_str(tag)
+                )
+            }
             Log::Afk {
                 endpoint,
                 name,
