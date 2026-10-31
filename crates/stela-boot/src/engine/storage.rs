@@ -19,6 +19,7 @@ use crate::Result;
 use crate::output;
 use alloc::{boxed::Box, format, string::String, vec::Vec};
 use core::{
+    cell::Cell,
     arch::asm,
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
@@ -246,6 +247,14 @@ struct Service {
     /// posted, and a look at the disk need not change roots, which without
     /// PCIDs flushes this core's TLB.
     running: u32,
+    /// Whether the disk signals its completions, asked once.
+    signals: Cell<Option<bool>>,
+    /// The doorbell count of the last look that found nothing, while nothing
+    /// has moved since: the guest's device writes look far more often than
+    /// the disk completes, and a look of a disk that signals needs a doorbell
+    /// to find anything. A lost one waits for the look its owner schedules
+    /// anyway.
+    looked: Cell<Option<u64>>,
 }
 impl BlockDevice for Service {
     fn identity(&self) -> &Identity {
@@ -292,6 +301,7 @@ impl BlockDevice for Service {
         let _root = unsafe { RestoreRoot::enter(self.root) };
         let started = self.inner.start(command);
         self.running += u32::from(started.is_ok());
+        self.looked.set(None);
         started
     }
     fn finish(&mut self, tag: u32) -> Option<Finished> {
@@ -299,20 +309,33 @@ impl BlockDevice for Service {
         let _root = unsafe { RestoreRoot::enter(self.root) };
         let finished = self.inner.finish(tag);
         self.running = self.running.saturating_sub(u32::from(finished.is_some()));
+        self.looked.set(None);
         finished
     }
     fn posted(&self) -> bool {
         if self.running == 0 {
             return false;
         }
+        // Read before the look: a signal after it moves the count.
+        let doorbells = super::host::doorbells();
+        if self.signals() && self.looked.get() == Some(doorbells) {
+            return false;
+        }
         // SAFETY: as in read().
         let _root = unsafe { RestoreRoot::enter(self.root) };
-        self.inner.posted()
+        let posted = self.inner.posted();
+        self.looked.set((!posted).then_some(doorbells));
+        posted
     }
     fn signals(&self) -> bool {
+        if let Some(signals) = self.signals.get() {
+            return signals;
+        }
         // SAFETY: as in read(); this query reaches shared controller state.
         let _root = unsafe { RestoreRoot::enter(self.root) };
-        self.inner.signals()
+        let signals = self.inner.signals();
+        self.signals.set(Some(signals));
+        signals
     }
 }
 
@@ -679,6 +702,8 @@ pub unsafe fn open(
             inner: Box::new(partition),
             root,
             running: 0,
+                signals: Cell::new(None),
+                looked: Cell::new(None),
         })
     };
     let (mut store_partition, mut log_partition) = (None, None);
@@ -742,6 +767,8 @@ pub unsafe fn open(
                 inner: Box::new(disk),
                 root,
                 running: 0,
+                signals: Cell::new(None),
+                looked: Cell::new(None),
             }) as Box<dyn BlockDevice>
         })
         .collect();

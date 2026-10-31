@@ -26,9 +26,19 @@ pub(crate) fn clear_interrupted() {
 
 pub(crate) fn wake_interrupt() {
     state().apic.eoi();
+    DOORBELLS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     // Release publication follows EOI; startup evidence cannot race
     // ahead of retirement of the directed interrupt at this physical LAPIC.
     local::doorbell();
+}
+
+/// The doorbells any core has taken.
+static DOORBELLS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// The doorbells any core has taken, a host disk's completion signals among
+/// them: until this moves, a disk that signals has nothing new to look at.
+pub(crate) fn doorbells() -> u64 {
+    DOORBELLS.load(core::sync::atomic::Ordering::Relaxed)
 }
 
 /// The message a host disk sends as it completes a command: the doorbell
