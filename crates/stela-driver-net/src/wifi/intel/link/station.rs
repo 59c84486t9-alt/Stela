@@ -58,6 +58,7 @@ use alloc::{borrow::Cow, collections::VecDeque};
 use zeroize::Zeroizing;
 
 mod active_link;
+mod emlsr;
 mod grade;
 mod he;
 mod link_scan;
@@ -282,6 +283,9 @@ pub(super) struct Client {
     reselect: bool,
     link_scan: link_scan::LinkScan,
     statistics: statistics::Statistics,
+    emlsr: emlsr::Emlsr,
+    /// The radio can run EMLSR.
+    pub(super) eml_capable: bool,
     ciphers: Option<(Cipher, Cipher)>,
     management_cipher: Option<ManagementCipher>,
     keys: Vec<Key>,
@@ -327,6 +331,8 @@ impl Client {
             reselect: false,
             link_scan: link_scan::LinkScan::default(),
             statistics: statistics::Statistics::default(),
+            emlsr: emlsr::Emlsr::default(),
+            eml_capable: false,
             ciphers: None,
             management_cipher: None,
             keys: Vec::new(),
@@ -387,6 +393,7 @@ impl Client {
         self.reselect = false;
         self.link_scan = link_scan::LinkScan::default();
         self.statistics = statistics::Statistics::default();
+        self.emlsr = emlsr::Emlsr::default();
         self.ciphers = None;
         self.management_cipher = None;
         self.keys.clear();
@@ -425,8 +432,12 @@ impl Client {
                 ticket,
                 context: Some(context),
                 links,
+                response,
                 ..
             } => {
+                if self.eml_capable {
+                    self.emlsr = emlsr::Emlsr::offered(&response.elements);
+                }
                 let mut links = links.into_iter();
                 self.dormant = links.next();
                 if links.next().is_some() {
@@ -595,9 +606,11 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         self.run_steps(queue)?;
         if self.client.reselect && self.client.idle() && !self.client.leaving {
             self.client.reselect = false;
-            self.select_link(queue)?;
+            self.select_link(queue, now)?;
             self.run_steps(queue)?;
         }
+        self.run_emlsr(queue, now)?;
+        self.run_steps(queue)?;
         self.run_link_scan(queue, now)?;
         self.run_steps(queue)?;
         self.send_management(queue)?;
@@ -662,6 +675,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             eht: true,
             aid: None,
             high_priority: firmware.supports_capability(COEX_HIGH_PRIORITY),
+            emlsr: None,
         };
         let bytes = commands::mac_config(version_of(firmware, commands::MAC_CONFIG), mac);
         self.client.command(commands::MAC_CONFIG, bytes);
@@ -720,6 +734,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             eht,
             aid: None,
             high_priority,
+            emlsr: None,
         };
         let mac_version = version_of(firmware, commands::MAC_CONFIG);
         let power_version = version_of(firmware, commands::MAC_POWER);
@@ -737,6 +752,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                 mac_version,
                 MacState {
                     aid: Some(aid),
+                    emlsr: client.emlsr.transition(),
                     ..mac
                 },
             ),
@@ -981,6 +997,10 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             client.act(action);
             return Ok(());
         }
+        let seat = metadata.status.station_id();
+        if header.control & 12 == 8 && metadata.mac.amsdu_index() <= 1 {
+            client.count_mpdus(seat.unwrap_or(client.seat), false, 1, now);
+        }
         if header.control & 12 != 8 || !client.port_ready() || !header.data_present() {
             return Ok(());
         }
@@ -988,10 +1008,15 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             // The firmware decrypted the frame under the key of this index,
             // which only this client installed.
             let multicast = header.receiver.is_multicast();
+            // Each link keeps its group keys, under indices that may match.
+            let link = seat
+                .and_then(|seat| client.context_at(seat))
+                .map(|link| link.bssid());
             let installed = client
                 .keys
                 .iter()
                 .filter(|key| key.pairwise != multicast && Some(key.index) == key_index)
+                .filter(|key| key.fitted && (!multicast || link.is_none_or(|ap| key.ap == ap)))
                 .find_map(|key| key.slot.installed());
             let Some(key) = installed else {
                 return Ok(());
@@ -1137,6 +1162,9 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                         self.client
                             .unsupported("a TX response past what is in flight");
                     }
+                    if response.ra_tid & 0xf < 8 {
+                        self.client.count_mpdus(response.ra_tid >> 4, true, 1, now);
+                    }
                     if queue.queue_tid(queue_id) == Some(MANAGEMENT_TID) && self.client.exchange {
                         self.client.exchange = false;
                         let acked = matches!(
@@ -1176,6 +1204,13 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                                 .unsupported("a Block Ack past what is in flight");
                         }
                     }
+                    if let (Some(&station), Some(&[low, high])) = (
+                        raw.get(4),
+                        raw.get(14..16).and_then(|txed| txed.first_chunk()),
+                    ) {
+                        let txed = u16::from_le_bytes([low, high]).into();
+                        self.client.count_mpdus(station, true, txed, now);
+                    }
                 }
                 RATE_NOTIFICATION
                     if word(4).is_some_and(|flags| flags & RATE_NOTIFICATION_AMSDU != 0) =>
@@ -1206,9 +1241,37 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                     self.client.act(action);
                 }
                 MISSED_BEACONS_LEGACY_NOTIFICATION | MISSED_BEACONS_NOTIFICATION
+                    if self.client.emlsr.active =>
+                {
+                    let missed = word(8).unwrap_or(0);
+                    let other = word(16).unwrap_or(0);
+                    let link = word(0).unwrap_or(u32::from(self.client.seat)) as u8;
+                    self.client.emlsr_missed_beacons(link, missed, other);
+                }
+                MISSED_BEACONS_LEGACY_NOTIFICATION | MISSED_BEACONS_NOTIFICATION
                     if word(4).is_some_and(|missed| missed > LINK_SCAN_MISSED_BEACONS) =>
                 {
                     self.client.ask_link_scan(now);
+                }
+                emlsr::MODE_NOTIFICATION if word(0) == Some(emlsr::RECOMMEND_LEAVE) => {
+                    let seat = self.client.seat;
+                    self.client.emlsr.ask_exit(emlsr::Exit::Firmware, seat);
+                }
+                emlsr::TRANSITION_FAILED_NOTIFICATION if self.client.emlsr.active => {
+                    let (link, activating) = (word(0).unwrap_or(0), word(4).unwrap_or(0));
+                    if activating != 0 {
+                        self.client
+                            .emlsr
+                            .ask_exit(emlsr::Exit::FailedEntry, link as u8);
+                    } else if !self.client.leaving {
+                        self.client.events.push_back(keeper::Event::ConnectionLost);
+                        let action = self.client.station.disconnect().map_err(Error::Station)?;
+                        self.client.act(action);
+                    }
+                }
+                emlsr::BLUETOOTH_NOTIFICATION => {
+                    let active = raw.iter().any(|&byte| byte != 0);
+                    self.client.bluetooth_changed(active, now);
                 }
                 SCAN_START_NOTIFICATION => self.client.link_scan_started(now),
                 statistics::OPERATIONAL_NOTIFICATION => {
@@ -1414,12 +1477,8 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             .station
             .pairwise_peer()
             .ok_or(Error::Refused("no peer"))?;
-        let active = client
-            .context
-            .as_ref()
-            .ok_or(Error::Refused("no context"))?
-            .bssid();
-        let fitted = pairwise || ap == active;
+        let seat = client.seat_of(ap);
+        let fitted = pairwise || seat.is_some();
         let scope = if pairwise {
             KeyScope::Pairwise(peer)
         } else {
@@ -1438,7 +1497,10 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             .map_err(Error::Key)?;
         let identity = ticket.identity();
         let counter = receive.counters()[0];
-        let stations = client.stations();
+        let stations = match seat {
+            Some(seat) if !pairwise => 1 << seat,
+            _ => client.stations(),
+        };
         let bytes = commands::add_key(index, flags, material, counter, stations)
             .ok_or(Error::Refused("key material"))?;
         if let Some(old) = client
@@ -1509,6 +1571,11 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         }
         self.client.stop_statistics();
         // The chain goes down on the IDs it came up with.
+        if self.client.emlsr.active {
+            self.lower_second(queue, 0)?;
+            self.run_steps(queue)?;
+            return Ok(false);
+        }
         if self.client.seat != 0 {
             self.switch_link(queue)?;
             self.run_steps(queue)?;
@@ -1962,6 +2029,14 @@ impl<Q: BootIo, B: BiosIo> Radio for Wifi<Q, B> {
             )
     }
 
+    fn eml_capabilities(&self) -> u16 {
+        if self.client.eml_capable {
+            emlsr::CAPABILITIES
+        } else {
+            0
+        }
+    }
+
     fn supported_channels(&self, band: Band) -> &'static [u8] {
         match band {
             Band::Ghz2 => &[1, 14],
@@ -2378,6 +2453,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             eht: negotiated.eht.is_some(),
             aid: Some(context.response().aid),
             high_priority: false,
+            emlsr: self.client.emlsr.transition(),
         };
         let peer =
             commands::station_config(peer_version, peer_state(context, explicit_mfp, true, seat));
@@ -2415,7 +2491,9 @@ impl Client {
     }
 
     fn forget_management_key(&mut self, ap: Mac, index: u8) {
-        let stations = self.stations();
+        let stations = self
+            .seat_of(ap)
+            .map_or_else(|| self.stations(), |seat| 1 << seat);
         let old = self
             .management_keys
             .iter()
@@ -2444,11 +2522,11 @@ impl Client {
             self.management_cipher
                 .ok_or(Error::Refused("no management cipher"))?,
         );
-        let active = self.context.as_ref().map(|context| context.bssid());
-        let fitted = active == Some(ap);
+        let seat = self.seat_of(ap);
+        let fitted = seat.is_some();
         self.forget_management_key(ap, index);
-        if fitted {
-            let bytes = commands::add_key(index, flags, material, receive.value(), self.stations())
+        if let Some(seat) = seat {
+            let bytes = commands::add_key(index, flags, material, receive.value(), 1 << seat)
                 .ok_or(Error::Refused("key material"))?;
             self.command(commands::SECURITY_KEY, bytes);
         }

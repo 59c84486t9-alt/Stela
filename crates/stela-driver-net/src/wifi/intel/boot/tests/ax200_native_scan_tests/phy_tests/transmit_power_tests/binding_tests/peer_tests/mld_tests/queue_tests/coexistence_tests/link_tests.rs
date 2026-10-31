@@ -209,7 +209,7 @@ impl Device<'_> {
         if (id.group, id.opcode) == (3, 8) {
             self.macs.push(request.to_vec());
         }
-        if id.group == 3 && matches!(id.opcode, 9 | 0x0a) {
+        if id.group == 3 && matches!(id.opcode, 8..=0x0a) {
             self.configuration.push((id.opcode, request.to_vec()));
         }
         if (id.group, id.opcode) == (1, 0x0d) {
@@ -473,6 +473,8 @@ fn other_response() -> Vec<u8> {
             address: Mac(AP_MLD),
             link_id: Some(3),
             mld_capabilities: Some(0),
+            eml_capabilities: Some(1 | 6 << 11),
+            medium_sync_delay: Some(0x2345),
             profiles: vec![Profile {
                 link_id: 5,
                 complete: true,
@@ -1424,6 +1426,7 @@ fn raise_mld<'n>(
     other: bool,
 ) -> (Station<Model, ClockBios>, Device<'n>) {
     let eht = EhtLimits {
+        dual_radio: false,
         stops_at_160: false,
         reduced: false,
         urm: false,
@@ -1662,6 +1665,190 @@ fn a_station_that_stops_hearing_its_link_listens_to_both_and_takes_the_better() 
     assert_eq!(links[0], (1, 0, 0));
     assert_eq!(links.last(), Some(&(3, 1, 0)), "{links:?}");
     assert!(wifi.carrier());
+}
+
+/// Firmware's report of its links and PHYs: `seats` holds, for each, the
+/// signal, then how much of its channel others take.
+fn seats_report(stamp: u32, seats: [(u32, u32); 2]) -> Vec<u8> {
+    let mut body = vec![0; 4 + 4 * 28 + 3 * 88 + 16 * 4];
+    body[..4].copy_from_slice(&stamp.to_le_bytes());
+    for (seat, (energy, load)) in seats.into_iter().enumerate() {
+        let (link, phy) = (4 + seat * 28, 4 + 4 * 28 + seat * 88);
+        body[link..link + 4].copy_from_slice(&energy.to_le_bytes());
+        body[phy + 8..phy + 12].copy_from_slice(&load.to_le_bytes());
+    }
+    let statistics = Id {
+        group: 0x10,
+        opcode: 0,
+        version: 0,
+    };
+    command_packet(statistics, 0x8000, &body)
+}
+
+/// An EMLSR association: moved to its better link, it heard both strong and
+/// took traffic, and both links are active.
+fn emlsr_mld(native: &Native) -> (Station<Model, ClockBios>, Device<'_>, usize) {
+    let (mut wifi, mut device, _, _) = moved_mld(native);
+    device.other.as_mut().unwrap().0 = other_beacon([40, 40]);
+    device.elements = linked_ap(128);
+    device.inject(
+        wifi.radio().rom().unwrap(),
+        &seats_report(1_000_000, [(0, 0), (44, 100)]),
+    );
+    run(&mut wifi, &mut device, |_, _, _| false);
+    let entered = device.configuration.len();
+    wifi.radio_mut().end_throughput_block();
+    wifi.radio_mut().end_link_blockout();
+    let scanned = run(&mut wifi, &mut device, |_, device, _| {
+        device.scans.len() > 1
+            && device.configuration[entered..]
+                .iter()
+                .any(|(opcode, bytes)| *opcode == 9 && word(bytes, 0) == 1)
+    });
+    assert!(
+        scanned,
+        "{:?} {:?}",
+        wifi.radio().error(),
+        device.commands.last()
+    );
+    assert!(
+        !lowered(&mut wifi, &mut device, entered),
+        "the first link stays: {:?}",
+        wifi.radio().error()
+    );
+    (wifi, device, entered)
+}
+
+/// Link operations after `from`: operation, link, active.
+fn links_since(device: &Device<'_>, from: usize) -> Vec<(u32, u32, u32)> {
+    device.configuration[from..]
+        .iter()
+        .filter(|(opcode, _)| *opcode == 9)
+        .map(|(_, bytes)| (word(bytes, 0), word(bytes, 4), word(bytes, 24)))
+        .collect()
+}
+
+/// A link is removed after `from`.
+fn lowered(wifi: &mut Station<Model, ClockBios>, device: &mut Device<'_>, from: usize) -> bool {
+    run(wifi, device, |_, device, _| {
+        links_since(device, from)
+            .iter()
+            .any(|&(operation, _, _)| operation == 3)
+    })
+}
+
+/// A notification of firmware group `group`.
+fn notify(group: u8, opcode: u8, body: &[u8]) -> Vec<u8> {
+    let id = Id {
+        group,
+        opcode,
+        version: 0,
+    };
+    command_packet(id, 0x8000, body)
+}
+
+#[test]
+fn a_busy_mld_station_with_two_strong_links_keeps_both_active_and_returns_before_it_leaves() {
+    let native = Native::default();
+    let (mut wifi, mut device, entered) = emlsr_mld(&native);
+    let links = links_since(&device, entered);
+    assert_eq!(links[0], (1, 0, 0), "{links:?}");
+    assert!(links.contains(&(2, 0, 1)), "{links:?}");
+    assert!(
+        !links.iter().any(|&(operation, _, _)| operation == 3),
+        "{links:?}"
+    );
+    assert!(wifi.carrier());
+    assert!(wifi.radio().emlsr_active());
+    // The AP's transition reaches firmware with the association's MAC.
+    let mac = device
+        .configuration
+        .iter()
+        .rev()
+        .find(|(opcode, bytes)| *opcode == 8 && word(bytes, 40) != 0)
+        .unwrap();
+    assert_eq!(mac.1[37..40], [6, 0x45, 0x23]);
+    let left = device.configuration.len();
+    wifi.radio_mut().deauthenticate(3).unwrap();
+    let gone = run(&mut wifi, &mut device, |wifi, _, _| {
+        wifi.radio().stage() == Standing::Idle
+    });
+    assert!(gone, "{:?}", wifi.radio().error());
+    let links = links_since(&device, left);
+    assert!(links.contains(&(3, 1, 0)), "{links:?}");
+    assert!(!wifi.radio().emlsr_active());
+}
+
+#[test]
+fn a_fading_link_ends_emlsr_and_the_other_stays() {
+    let native = Native::default();
+    let (mut wifi, mut device, _) = emlsr_mld(&native);
+    let exit = device.configuration.len();
+    device.inject(
+        wifi.radio().rom().unwrap(),
+        &seats_report(2_000_000, [(80, 60), (44, 60)]),
+    );
+    assert!(
+        lowered(&mut wifi, &mut device, exit),
+        "{:?}",
+        wifi.radio().error()
+    );
+    let links = links_since(&device, exit);
+    assert!(links.contains(&(3, 0, 0)), "{links:?}");
+    assert!(wifi.carrier());
+    assert!(!wifi.radio().emlsr_active());
+}
+
+#[test]
+fn firmware_asking_to_leave_ends_emlsr_on_the_primary_link() {
+    let native = Native::default();
+    let (mut wifi, mut device, _) = emlsr_mld(&native);
+    let exit = device.configuration.len();
+    device.inject(wifi.radio().rom().unwrap(), &notify(5, 0xf3, &[0; 4]));
+    assert!(lowered(&mut wifi, &mut device, exit));
+    assert!(links_since(&device, exit).contains(&(3, 0, 0)));
+    assert!(!wifi.radio().emlsr_active());
+}
+
+#[test]
+fn a_link_that_misses_its_beacons_gives_way_to_the_other() {
+    let native = Native::default();
+    let (mut wifi, mut device, _) = emlsr_mld(&native);
+    let exit = device.configuration.len();
+    let mut body = [0; 20];
+    body[0] = 1;
+    body[8] = 15;
+    body[16] = 1;
+    device.inject(wifi.radio().rom().unwrap(), &notify(3, 0xf6, &body));
+    assert!(lowered(&mut wifi, &mut device, exit));
+    assert!(links_since(&device, exit).contains(&(3, 1, 0)));
+    assert!(wifi.carrier());
+    assert!(!wifi.radio().emlsr_active());
+}
+
+#[test]
+fn a_failed_activation_falls_back_to_the_link_firmware_names() {
+    let native = Native::default();
+    let (mut wifi, mut device, _) = emlsr_mld(&native);
+    let exit = device.configuration.len();
+    let mut body = [0; 8];
+    body[0] = 1;
+    body[4] = 1;
+    device.inject(wifi.radio().rom().unwrap(), &notify(3, 0xf7, &body));
+    assert!(lowered(&mut wifi, &mut device, exit));
+    assert!(links_since(&device, exit).contains(&(3, 0, 0)));
+    assert!(wifi.carrier());
+}
+
+#[test]
+fn a_failed_deactivation_loses_the_connection() {
+    let native = Native::default();
+    let (mut wifi, mut device, _) = emlsr_mld(&native);
+    let mut body = [0; 8];
+    body[0] = 1;
+    device.inject(wifi.radio().rom().unwrap(), &notify(3, 0xf7, &body));
+    let lost = run(&mut wifi, &mut device, |_, _, up| !up);
+    assert!(lost, "{:?}", wifi.radio().error());
 }
 
 #[test]

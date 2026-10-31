@@ -738,6 +738,8 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                             {
                                 self.eht = self.eht.or(self.assumed_eht);
                             }
+                            self.client.eml_capable =
+                                self.eht.is_some_and(|limits| !limits.dual_radio);
                             Ok(Stage::Scan(Box::new(scan)))
                         }
                         Err(mac) => Err((Error::Refused("scan"), mac as Box<dyn Kept>)),

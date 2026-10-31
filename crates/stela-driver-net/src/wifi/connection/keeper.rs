@@ -127,6 +127,10 @@ pub trait Radio: Link {
     fn probes(&self, channel: Channel) -> bool;
     /// The Supported Channels of `band`, which a spectrum-managed request names.
     fn supported_channels(&self, band: Band) -> &'static [u8];
+    /// `eml_capabilities` of `struct wiphy_iftype_ext_capab`.
+    fn eml_capabilities(&self) -> u16 {
+        0
+    }
     /// The country's power limit at `frequency_mhz`.
     fn regulated_power_dbm(&self, frequency_mhz: u16) -> i32;
     fn advertisement(&self, band: Band) -> Result<Advertisement, Self::Error>;
@@ -876,7 +880,7 @@ impl<R: Radio> Keeper<R> {
     /// The multi-link setup of `links` with the AP MLD whose setup link is
     /// `bss`, each other link requested as it would associate alone, and the
     /// links the handshakes key. The station MLD reports mt7925's MLD
-    /// capabilities, one simultaneous link, and no EML capabilities.
+    /// capabilities, one simultaneous link, and the radio's EML capabilities.
     fn multi_link(
         &self,
         links: &Links<R::Handle>,
@@ -905,7 +909,7 @@ impl<R: Radio> Keeper<R> {
             Setup {
                 association: affiliation,
                 mld_capabilities: 0,
-                eml_capabilities: 0,
+                eml_capabilities: self.link.eml_capabilities(),
                 links: requested,
             },
             MultiLink {

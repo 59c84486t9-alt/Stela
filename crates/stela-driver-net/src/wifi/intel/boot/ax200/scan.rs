@@ -42,6 +42,8 @@ pub enum Ax200ScanTraffic {
     Low,
     Medium,
     High,
+    /// Both of an EMLSR association's links take frames.
+    Balanced,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Ax200ScanPhase {

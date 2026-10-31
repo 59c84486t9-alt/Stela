@@ -6,8 +6,12 @@
 use super::*;
 
 pub(super) const OPERATIONAL_NOTIFICATION: (u8, u8) = (0x00, 0x10);
-/// `IWL_MLD_LOW_RSSI_MLO_SCAN_THRESH`.
+/// `IWL_MLD_LOW_RSSI_MLO_SCAN_THRESH`, and `IWL_MLD_LOW_RSSI_THRESH_*` of EMLSR.
 const LOW_SIGNAL_DBM: i32 = -72;
+/// `IWL_MLD_EXIT_EMLSR_CHAN_LOAD`, of 256.
+const LOAD_TOO_LOW: u32 = 2 * 256 / 100;
+/// The loads whose crossing makes EMLSR worth another look, with the width's.
+const LOADS_WORTH_A_LOOK: [u32; 3] = [25, 40, 50];
 /// `IWL_FW_MAX_LINKS` of `iwl_stats_ntfy_per_link`, after the time stamp.
 const LINKS: usize = 4 * 28;
 const LINK_BYTES: usize = 28;
@@ -27,38 +31,49 @@ const SHORTEST_WINDOW_US: u32 = 500_000;
 /// below.
 const LOAD_LEVELS: [(u32, u32); 3] = [(45, 40), (70, 65), (85, 80)];
 
-/// One report of the firmware link and PHY that hold the active link.
+/// What firmware says of one seat's link and PHY.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Report {
-    stamp: u32,
+struct SeatReport {
     signal: i32,
     air_us: u32,
     load_by_us: u32,
     load_not_by_us: u32,
 }
 
+/// One report of the seats.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Report {
+    stamp: u32,
+    seats: [SeatReport; 2],
+}
+
 impl Report {
-    /// `iwl_system_statistics_notif_oper` of `version`, seat `seat`.
-    fn parse(raw: &[u8], version: u8, seat: u8) -> Option<Self> {
+    /// `iwl_system_statistics_notif_oper` of `version`.
+    fn parse(raw: &[u8], version: u8) -> Option<Self> {
         let word = |at: usize| {
             raw.get(at..at + 4)
                 .map(|bytes| u32::from_le_bytes(bytes.try_into().unwrap()))
         };
-        let link = 4 + usize::from(seat) * LINK_BYTES;
         let phy_bytes = if version >= 4 {
             PHY_BYTES
         } else {
             PHY_BYTES_V3
         };
-        let phy = 4 + LINKS + usize::from(seat) * phy_bytes;
         // The stations follow the PHYs: the whole report arrived.
         word(4 + LINKS + PHYS * phy_bytes)?;
+        let seat = |seat: usize| {
+            let link = 4 + seat * LINK_BYTES;
+            let phy = 4 + LINKS + seat * phy_bytes;
+            Some(SeatReport {
+                signal: (word(link)? as i32).wrapping_neg(),
+                air_us: word(link + 4)?,
+                load_by_us: word(phy + 4)?,
+                load_not_by_us: word(phy + 8)?,
+            })
+        };
         Some(Self {
             stamp: word(0)?,
-            signal: (word(link)? as i32).wrapping_neg(),
-            air_us: word(link + 4)?,
-            load_by_us: word(phy + 4)?,
-            load_not_by_us: word(phy + 8)?,
+            seats: [seat(0)?, seat(1)?],
         })
     }
 }
@@ -71,10 +86,10 @@ pub(super) struct Statistics {
     /// `last_stats_ts_usec`.
     stamp: u32,
     pub(super) traffic: boot::Ax200ScanTraffic,
-    /// `channel_load_by_us`.
-    pub(super) load_by_us: u32,
-    /// `avg_channel_load_not_by_us`.
-    load_not_by_us: u32,
+    /// `channel_load_by_us` of each seat's PHY.
+    pub(super) load_by_us: [u32; 2],
+    /// `avg_channel_load_not_by_us` of each seat's PHY.
+    pub(super) load_not_by_us: [u32; 2],
     /// `chan_load_lvl`.
     level: usize,
 }
@@ -114,10 +129,10 @@ impl Statistics {
         rises
     }
 
-    /// The firmware PHY and link changed: what they counted went with them.
-    pub(super) fn link_moved(&mut self) {
-        self.load_by_us = 0;
-        self.load_not_by_us = 0;
+    /// Seat `seat` emptied: what its PHY counted went with it.
+    pub(super) fn seat_emptied(&mut self, seat: u8) {
+        self.load_by_us[usize::from(seat)] = 0;
+        self.load_not_by_us[usize::from(seat)] = 0;
         self.level = 0;
     }
 }
@@ -143,46 +158,89 @@ impl Client {
         }
     }
 
-    /// Whether the AP of the active link says how loaded it is: without its
+    /// What the AP of `seat`'s link last said of itself: without a load
     /// element the links grade on defaults, and a scan would change nothing.
-    fn active_load_known(&self) -> bool {
-        let Some(active) = &self.context else {
-            return false;
-        };
+    fn heard_elements(&self, seat: u8) -> Option<&[u8]> {
+        let active = self.context_at(seat)?;
         self.observed
             .iter()
             .find(|heard| heard.observation.bss().bssid == active.bssid())
-            .is_some_and(|heard| grade::reports_load(&heard.observation.bss().elements))
+            .map(|heard| &heard.observation.bss().elements[..])
     }
 
-    /// `iwl_mld_process_per_link_stats` and `iwl_mld_fill_chanctx_stats` for
-    /// one report.
+    /// `iwl_mld_update_link_sig`: 0 is no measurement. EMLSR gives up a link
+    /// this weak; otherwise it is time to look at the other.
+    fn seat_heard(&mut self, seat: u8, signal: i32, now: u64) {
+        if signal == 0 || signal >= LOW_SIGNAL_DBM {
+            return;
+        }
+        if self.emlsr.active {
+            self.emlsr.ask_exit(emlsr::Exit::LowSignal, 1 - seat);
+        } else {
+            self.ask_link_scan(now);
+        }
+    }
+
+    /// `iwl_mld_fill_chanctx_stats` and `iwl_mld_chan_load_update_iter`.
+    fn seat_measured(&mut self, seat: u8, report: &SeatReport, now: u64) {
+        let (at, primary) = (usize::from(seat), seat == self.seat);
+        let old = self.statistics.load_not_by_us[at];
+        self.statistics.load_by_us[at] = report.load_by_us;
+        if report.load_not_by_us != UNKNOWN_LOAD {
+            if report.load_not_by_us > 100 {
+                self.unsupported("a channel load past 100%");
+                return;
+            }
+            self.statistics.load_not_by_us[at] = (report.load_not_by_us >> 1) + (old >> 1);
+        }
+        let load = self.statistics.load_not_by_us[at];
+        let elements = self.heard_elements(seat).unwrap_or_default();
+        let by_others = grade::load_by_others(elements, report.load_by_us);
+        if !primary {
+            return;
+        }
+        if by_others.is_some() && self.statistics.load_rises(load) {
+            self.ask_link_scan(now);
+        }
+        if self.emlsr.active {
+            if by_others.is_some_and(|load| load < LOAD_TOO_LOW) {
+                self.emlsr.ask_exit(emlsr::Exit::ChannelLoad, seat);
+            }
+            return;
+        }
+        let Some(active) = &self.context else {
+            return;
+        };
+        let lowest = emlsr::lowest_load(active.definition().width);
+        let crossed = |level: u32| old <= level && load > level;
+        if crossed(lowest) || LOADS_WORTH_A_LOOK.into_iter().any(crossed) {
+            self.retry_emlsr(now);
+        }
+    }
+
+    /// `iwl_mld_process_per_link_stats`, then `iwl_mld_process_per_phy_stats`,
+    /// for one report.
     pub(super) fn statistics_arrived(&mut self, raw: &[u8], version: u8, now: u64) {
         if !self.statistics.watched {
             return;
         }
-        let Some(report) = Report::parse(raw, version, self.seat) else {
+        let Some(report) = Report::parse(raw, version) else {
             self.unsupported("a short statistics report");
             return;
         };
-        self.statistics.count_traffic(report.air_us, report.stamp);
-        // `iwl_mld_update_link_sig`: 0 is no measurement.
-        if report.signal != 0 && report.signal < LOW_SIGNAL_DBM {
-            self.ask_link_scan(now);
+        let primary = self.seat;
+        let second = self.emlsr.active.then_some(1 - primary);
+        let seats = core::iter::once(primary).chain(second);
+        let air_us = seats
+            .clone()
+            .map(|seat| report.seats[usize::from(seat)].air_us)
+            .fold(0, u32::wrapping_add);
+        self.statistics.count_traffic(air_us, report.stamp);
+        for seat in seats.clone() {
+            self.seat_heard(seat, report.seats[usize::from(seat)].signal, now);
         }
-        self.statistics.load_by_us = report.load_by_us;
-        if report.load_not_by_us == UNKNOWN_LOAD {
-            return;
-        }
-        if report.load_not_by_us > 100 {
-            self.unsupported("a channel load past 100%");
-            return;
-        }
-        let load = &mut self.statistics.load_not_by_us;
-        *load = (report.load_not_by_us >> 1) + (*load >> 1);
-        let load = *load;
-        if self.active_load_known() && self.statistics.load_rises(load) {
-            self.ask_link_scan(now);
+        for seat in seats {
+            self.seat_measured(seat, &report.seats[usize::from(seat)], now);
         }
     }
 }
@@ -210,19 +268,20 @@ mod tests {
     }
 
     #[test]
-    fn a_report_is_read_at_the_seat_of_the_active_link_in_either_version() {
-        let wanted = Report {
-            stamp: 7,
+    fn a_report_is_read_at_each_seat_in_either_version() {
+        let wanted = SeatReport {
             signal: -80,
             air_us: 9,
             load_by_us: 5,
             load_not_by_us: 60,
         };
-        assert_eq!(Report::parse(&raw(3, 1), 3, 1), Some(wanted));
-        assert_eq!(Report::parse(&raw(4, 1), 4, 1), Some(wanted));
-        assert_eq!(Report::parse(&raw(4, 0), 4, 0), Some(wanted));
+        let seats = |raw: Vec<u8>, version| Report::parse(&raw, version).unwrap().seats;
+        assert_eq!(seats(raw(3, 1), 3)[1], wanted);
+        assert_eq!(seats(raw(4, 1), 4)[1], wanted);
+        assert_eq!(seats(raw(4, 0), 4)[0], wanted);
+        assert_eq!(seats(raw(4, 0), 4)[1].signal, 0);
         let short = &raw(4, 0)[..4 + LINKS + PHYS * PHY_BYTES];
-        assert_eq!(Report::parse(short, 4, 0), None);
+        assert_eq!(Report::parse(short, 4), None);
     }
 
     #[test]
@@ -253,7 +312,7 @@ mod tests {
         assert_eq!(statistics.level, 3);
         assert!(!statistics.load_rises(69));
         assert_eq!(statistics.level, 2, "level 2 holds down to 65");
-        statistics.link_moved();
+        statistics.seat_emptied(1);
         assert!(statistics.load_rises(45), "a new PHY starts again");
     }
 }

@@ -82,6 +82,9 @@ pub struct EhtLimits {
     /// `slow_pcie`: a discrete link under 8 GT/s cannot carry two streams of
     /// MCS above 9 at 320 MHz.
     pub slow_bus: bool,
+    /// CSR_HW_RFID_IS_CDB: two radios, which `iwl_mld_vif_has_emlsr_cap` keeps
+    /// out of EMLSR.
+    pub dual_radio: bool,
 }
 
 impl EhtLimits {
@@ -397,6 +400,7 @@ impl Profile {
             reduced: sku[0] & REDUCED_CAPABILITY != 0,
             urm,
             slow_bus: !self.platform.integrated && self.observed.link_speed < SPEED_8GT,
+            dual_radio: radio_id(self.observed).is_ok_and(|id| id & CDB != 0),
         })
     }
     /// CSR_HW_REV with the step `get_crf_id` found, as firmware is told it.

@@ -297,13 +297,14 @@ pub(super) fn encode_internal(
     bytes[4..8].copy_from_slice(&PRIORITY_EXT_4.to_le_bytes());
     bytes[GENERAL + 1] |= (NOTIFY_START >> 8) as u8;
     bytes[GENERAL + 3] = link;
-    // `scan_timing`: wild, mild and fragmented.
+    // `scan_timing`: wild, mild, fragmented and fast balance.
     let (out_of_service, suspend) = match traffic {
         Ax200ScanTraffic::Low => (120u32, 30u32),
         Ax200ScanTraffic::Medium => (120, 120),
         Ax200ScanTraffic::High => (44, 95),
+        Ax200ScanTraffic::Balanced => (37, 30),
     };
-    if traffic == Ax200ScanTraffic::High {
+    if matches!(traffic, Ax200ScanTraffic::High | Ax200ScanTraffic::Balanced) {
         bytes[GENERAL] |= FRAGMENTED;
         bytes[GENERAL + 34] = FRAGMENTS;
         bytes[CHANNELS] |= CHANNEL_FRAGMENTED;
@@ -527,6 +528,10 @@ mod tests {
         assert_eq!(full[CHANNELS], ENABLE_CHANNEL_ORDER | CHANNEL_FRAGMENTED);
         assert_eq!(full[GENERAL + 12..GENERAL + 16], 44u32.to_le_bytes());
         assert_eq!(full[GENERAL + 20..GENERAL + 24], 95u32.to_le_bytes());
+        let both = encode_internal(&request, 17, LOCAL, 1, Ax200ScanTraffic::Balanced).unwrap();
+        assert_eq!(both[GENERAL] & FRAGMENTED, FRAGMENTED);
+        assert_eq!(both[GENERAL + 12..GENERAL + 16], 37u32.to_le_bytes());
+        assert_eq!(both[GENERAL + 20..GENERAL + 24], 30u32.to_le_bytes());
     }
 
     #[test]

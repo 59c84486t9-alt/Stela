@@ -145,6 +145,8 @@ pub struct MacState {
     /// `COEX_HIGH_PRIORITY_ENABLE`: until the port opens, Bluetooth yields to
     /// the handshake's frames.
     pub high_priority: bool,
+    /// The AP MLD's EMLSR transition timeout and medium sync delay.
+    pub emlsr: Option<(u8, u16)>,
 }
 
 /// `iwl_mac_config_cmd`: version 4 can name NAN addresses.
@@ -191,6 +193,10 @@ pub fn mac_config(version: u8, state: MacState) -> Vec<u8> {
     if let Some(aid) = state.aid {
         word(&mut bytes, 36, 1);
         word(&mut bytes, 40, u32::from(aid));
+        if let Some((timeout, delay)) = state.emlsr {
+            bytes[37] = timeout;
+            bytes[38..40].copy_from_slice(&delay.to_le_bytes());
+        }
     }
     if state.high_priority {
         word(&mut bytes, 44, COEX_HIGH_PRIORITY);
@@ -1086,8 +1092,18 @@ mod tests {
             eht: true,
             aid: Some(7),
             high_priority: false,
+            emlsr: None,
         };
         let bytes = mac_config(4, state);
+        assert_eq!(bytes[37..40], [0; 3]);
+        let timed = mac_config(
+            4,
+            MacState {
+                emlsr: Some((10, 0x10ac)),
+                ..state
+            },
+        );
+        assert_eq!(timed[37..40], [10, 0xac, 0x10]);
         assert_eq!(bytes.len(), 56);
         assert_eq!(bytes[24..28], [1, 0, 1, 0]);
         assert_eq!(bytes[28..32], [0; 4]);
@@ -1170,6 +1186,7 @@ mod tests {
             eht: false,
             aid: None,
             high_priority: true,
+            emlsr: None,
         };
         let bytes = mac_config(2, state);
         assert_eq!(bytes[4], 2);

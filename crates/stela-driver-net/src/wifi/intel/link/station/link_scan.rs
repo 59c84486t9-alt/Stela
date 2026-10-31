@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 // Copyright (C) 2024-2026 Intel Corporation
-//! `iwl_mld_int_mlo_scan`: a station with one active link of two listens on
-//! both links' channels when the active one goes quiet, and
-//! `_iwl_mld_select_links` then takes the better. Firmware runs the scan
+//! `iwl_mld_int_mlo_scan`: a station listens on both links' channels when a
+//! link goes quiet or EMLSR comes within reach, and `_iwl_mld_select_links`
+//! then takes what is better. Firmware runs the scan
 //! beside the association; frames keep flowing and the scan protocol's
 //! [`Scanner`] keeps its one request.
 use super::*;
@@ -48,6 +48,7 @@ impl Client {
         }
         self.link_scan.started = Some(now.saturating_sub(JOIN_SCAN_US));
         self.link_scan.activated = now;
+        self.emlsr.block_for_throughput(now);
     }
 
     /// `iwl_mld_int_mlo_scan`.
@@ -142,7 +143,11 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                 request,
                 self.address,
                 client.seat,
-                client.statistics.traffic,
+                match client.statistics.traffic {
+                    boot::Ax200ScanTraffic::High => boot::Ax200ScanTraffic::High,
+                    _ if client.emlsr.active => boot::Ax200ScanTraffic::Balanced,
+                    traffic => traffic,
+                },
             )
             .map_err(Error::Scan)?;
         scanner.submitted(ticket).map_err(protocol)?;

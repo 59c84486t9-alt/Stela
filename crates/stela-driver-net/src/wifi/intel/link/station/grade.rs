@@ -127,16 +127,14 @@ const GRADES_320: [Line; 23] = same([
 /// `WLAN_EID_QBSS_LOAD`.
 const BSS_LOAD: u8 = 11;
 /// `SCALE_FACTOR`, against which a channel's load runs.
-const SCALE: u32 = 256;
+pub(super) const SCALE: u32 = 256;
 
 /// `iwl_mld_get_chan_load`: the BSS Load element's channel utilization, or
 /// the band's default. `by_us` is the percent the station's own frames take
 /// of the element's load; a count past the element's own is ignored.
-fn load(band: Band, elements: &[u8], by_us: u32) -> u32 {
-    if let Some([_, _, utilization, _, _]) = crate::wifi::connection::find(elements, BSS_LOAD) {
-        let load = u32::from(*utilization);
-        let by_us = by_us * SCALE / 100;
-        return if by_us <= load { load - by_us } else { load };
+pub(super) fn load(band: Band, elements: &[u8], by_us: u32) -> u32 {
+    if let Some(load) = load_by_others(elements, by_us) {
+        return load;
     }
     let percent = match band {
         Band::Ghz2 => 30,
@@ -146,9 +144,15 @@ fn load(band: Band, elements: &[u8], by_us: u32) -> u32 {
     percent * SCALE / 100
 }
 
-/// Whether `elements` say how loaded the channel is.
-pub(super) fn reports_load(elements: &[u8]) -> bool {
-    crate::wifi::connection::find(elements, BSS_LOAD).is_some_and(|load| load.len() == 5)
+/// `iwl_mld_get_chan_load_by_others`: what `elements` say of the channel's
+/// load, without the `by_us` percent that is the station's.
+pub(super) fn load_by_others(elements: &[u8], by_us: u32) -> Option<u32> {
+    let &[_, _, utilization, _, _] = crate::wifi::connection::find(elements, BSS_LOAD)? else {
+        return None;
+    };
+    let load = u32::from(utilization);
+    let by_us = by_us * SCALE / 100;
+    Some(if by_us <= load { load - by_us } else { load })
 }
 
 /// The grade of a link of `width` with `punctured` subchannels, heard at
