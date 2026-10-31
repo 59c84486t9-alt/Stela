@@ -3,6 +3,7 @@
 #include "air_to_nir.h"
 #include "air_calls.h"
 #include "air_commands.h"
+#include "air_log.h"
 #include "air_constants.h"
 #include "air_math.h"
 #include "air_matrix.h"
@@ -2963,6 +2964,58 @@ air_atomic_call(struct translator *t, LLVMValueRef inst, LLVMValueRef callee, co
    return fail(t, STELA_AIR_INSTRUCTION, "unsupported AIR atomic function");
 }
 
+static nir_def *
+log_buffer(void *translator)
+{
+   struct translator *t = translator;
+   if (!t->options->load_device_value) {
+      fail(t, STELA_AIR_INSTRUCTION, "os_log has no log buffer here");
+      return NULL;
+   }
+   return t->options->load_device_value(&t->b, STELA_AIR_LOG_BUFFER, t->options->binding_data);
+}
+
+static bool
+log_guard_begin(void *translator, nir_def *condition, nir_block *blocks[3])
+{
+   struct memory_guard guard;
+   if (!memory_guard_begin(translator, condition, &guard))
+      return false;
+   blocks[0] = guard.then_block;
+   blocks[1] = guard.else_block;
+   blocks[2] = guard.merge;
+   return true;
+}
+
+static void
+log_guard_end(void *translator, nir_block *const blocks[3])
+{
+   const struct memory_guard guard = {blocks[0], blocks[1], blocks[2]};
+   memory_guard_end(translator, &guard, NULL);
+}
+
+/* A call of os_log's methods; false with no error when it is something else. */
+static bool
+log_call(struct translator *t, LLVMValueRef inst, LLVMValueRef callee, bool *lowered)
+{
+   const struct stela_air_log_context context = {
+      .call = {.b = &t->b, .error = t->error, .translator = t, .operand = texture_operand,
+               .fragment = t->stage_options && t->stage_options->stage == STELA_AIR_FRAGMENT},
+      .buffer = log_buffer, .guard_begin = log_guard_begin, .guard_end = log_guard_end,
+   };
+   switch (stela_air_log_call(&context, inst, callee)) {
+   case STELA_AIR_CALL_OTHER:
+      *lowered = false;
+      return true;
+   case STELA_AIR_CALL_FAILED:
+      return false;
+   case STELA_AIR_CALL_LOWERED:
+      break;
+   }
+   *lowered = true;
+   return true;
+}
+
 /* AIR's barriers and fences, with memory flags 1 device, 2 threadgroup and 4
  * texture memory. A barrier is (flags, scope), as Apple's compiler emits, or
  * (flags, order, scope); a fence is (flags, order, scope). Orders are C++'s,
@@ -3443,6 +3496,8 @@ instruction(struct translator *t, LLVMValueRef inst)
       return matrix_elements(t, inst, op);
    if (op == LLVMShuffleVector || op == LLVMExtractElement || op == LLVMInsertElement)
       return vector_instruction(t, inst, op);
+   if (op == LLVMFPExt && stela_air_log_promotion(inst))
+      return true;
    if (op != LLVMStore && op != LLVMGetElementPtr && op != LLVMBitCast && op != LLVMCall &&
        !value_shape(LLVMTypeOf(inst), &components, &bits) &&
        !(op == LLVMSelect && stela_air_matrix_type(LLVMTypeOf(inst), &bits)))
@@ -3477,8 +3532,14 @@ instruction(struct translator *t, LLVMValueRef inst)
    }
    if (op == LLVMCall) {
       LLVMValueRef callee = LLVMGetCalledValue(inst);
-      /* Inlining leaves no call of a defined function, and dispatch only
-       * calls through other pointers than a table's. */
+      bool logged;
+      if (!log_call(t, inst, callee, &logged))
+         return false;
+      if (logged)
+         return true;
+      /* Inlining leaves no call of a defined function but os_log's, whose
+       * varargs do not inline, and dispatch only calls through other
+       * pointers than a table's. */
       if (stela_air_defined_function(callee))
          return fail(t, STELA_AIR_INSTRUCTION, "a function call was not inlined");
       if (!LLVMIsAFunction(callee))

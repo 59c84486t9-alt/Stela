@@ -591,8 +591,9 @@ LIMIT(sparseTileSizeInBytes, sparse_tile_bytes)
 
 - (id)newCommandQueueWithDescriptor:(id)descriptor
 {
-	(void)descriptor;
-	return [self newCommandQueue];
+	StelaGPUQueue *queue = [self newCommandQueue];
+	queue->_logState = [descriptor logState];
+	return queue;
 }
 
 /* What has no service object. */

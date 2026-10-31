@@ -46,17 +46,19 @@
 
 - (id)commandBuffer
 {
-	return [[StelaGPUCommandBuffer alloc] initWithQueue:self retainsReferences:YES];
+	return [[StelaGPUCommandBuffer alloc] initWithQueue:self retainsReferences:YES logState:_logState];
 }
 
 - (id)commandBufferWithUnretainedReferences
 {
-	return [[StelaGPUCommandBuffer alloc] initWithQueue:self retainsReferences:NO];
+	return [[StelaGPUCommandBuffer alloc] initWithQueue:self retainsReferences:NO logState:_logState];
 }
 
 - (id)commandBufferWithDescriptor:(id)descriptor
 {
-	return [[StelaGPUCommandBuffer alloc] initWithQueue:self retainsReferences:[descriptor retainedReferences]];
+	return [[StelaGPUCommandBuffer alloc] initWithQueue:self
+					  retainsReferences:[descriptor retainedReferences]
+						   logState:[descriptor logState] ?: _logState];
 }
 
 - (void)insertDebugCaptureBoundary
@@ -96,7 +98,9 @@
 	bool _retains;
 }
 
-- (instancetype)initWithQueue:(StelaGPUQueue *)queue retainsReferences:(BOOL)retains
+- (instancetype)initWithQueue:(StelaGPUQueue *)queue
+	    retainsReferences:(BOOL)retains
+		     logState:(StelaGPULogState *)logState
 {
 	self = [super init];
 	if (self) {
@@ -108,6 +112,11 @@
 		_scheduledHandlers = [NSMutableArray arrayWithCapacity:2];
 		_completedHandlers = [NSMutableArray arrayWithCapacity:2];
 		_status = MTLCommandBufferStatusNotEnqueued;
+		_logState = logState;
+		if (logState) {
+			StelaHandle buffer = {.handle = [logState bufferHandle]};
+			stela_stream_entry(&_stream, StelaCommandBufferCodeLogBuffer, &buffer, sizeof(buffer), NULL, 0);
+		}
 		dispatch_group_enter(_completion);
 	}
 	return self;
@@ -181,6 +190,7 @@
 /* Under the queue's lock, so serials follow the order of enqueue. */
 - (void)submit
 {
+	[_logState commandBufferStarted];
 	[_device flushIndirect];
 	StelaCommitRequest request = {.commands = stela_span(_stream.bytes, _stream.length)};
 	StelaValue serial = {};
@@ -215,6 +225,7 @@
 				     failure);
 	}
 	_status = failure ? MTLCommandBufferStatusError : MTLCommandBufferStatusCompleted;
+	[_logState commandBufferEnded];
 	for (NSUInteger i = 0; i < _completedHandlers.count; i++) {
 		((void (^)(id))[_completedHandlers objectAtIndex:i])(self);
 	}

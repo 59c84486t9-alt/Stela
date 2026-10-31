@@ -142,7 +142,15 @@ enum {
 	MTLIOStatusComplete = 3,
 };
 enum {
+	MTLLogStateErrorInvalidSize = 1,
 	MTLLogStateErrorInvalid = 2,
+};
+enum {
+	MTLLogLevelDebug = 1,
+	MTLLogLevelInfo = 2,
+	MTLLogLevelNotice = 3,
+	MTLLogLevelError = 4,
+	MTLLogLevelFault = 5,
 };
 enum {
 	MTLSparseTextureRegionAlignmentModeOutward = 0,
@@ -252,6 +260,7 @@ enum {
 	X(MTLFence)                                                                                \
 	X(MTLEvent)                                                                                \
 	X(MTLSharedEvent)                                                                          \
+	X(MTLLogState)                                                                             \
 	X(MTLIOFileHandle)                                                                         \
 	X(MTLIOCommandQueue)                                                                       \
 	X(MTLIOCommandBuffer)                                                                      \
@@ -335,6 +344,9 @@ __attribute__((ns_returns_retained)) NSArray *MTLCopyAllDevices(void);
 - (NSUInteger)size;
 - (NSUInteger)type;
 - (NSUInteger)sparsePageSize;
+/* MTLLogStateDescriptor, and the log state of a command buffer's or queue's. */
+- (NSInteger)bufferSize;
+- (id)logState;
 /* MTLIOCommandQueueDescriptor. */
 - (NSUInteger)maxCommandBufferCount;
 - (NSInteger)priority;

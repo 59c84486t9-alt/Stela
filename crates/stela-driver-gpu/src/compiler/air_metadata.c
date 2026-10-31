@@ -252,7 +252,7 @@ stela_air_metadata_globals(struct stela_air_metadata *t, bool *threadgroup)
       if (++count > AIR_MAX_ARGUMENTS)
          return fail(t, STELA_AIR_LIMIT, "global count exceeded");
       if (global == constructors || retention_list(global) ||
-          stela_air_metadata_is_function_constant(t, global))
+          stela_air_metadata_is_function_constant(t, global) || stela_air_log_only(global))
          continue;
       if (!stela_air_metadata_global(t, global, &info))
          return false;

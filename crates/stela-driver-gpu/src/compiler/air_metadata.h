@@ -507,6 +507,9 @@ struct stela_air_metadata {
 
 bool stela_air_md_string(LLVMValueRef value, const char *expected);
 bool stela_air_md_uint(LLVMValueRef value, unsigned *number);
+/* Whether only os_log's calls read a value: its object or a string, which
+ * calls take as constants and no function reaches at run time. */
+bool stela_air_log_only(LLVMValueRef value);
 bool stela_air_md_node(struct stela_air_metadata *m, LLVMValueRef node,
                        LLVMValueRef *operands, unsigned *count);
 bool stela_air_named_md(struct stela_air_metadata *m, const char *name,

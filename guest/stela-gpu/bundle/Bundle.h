@@ -103,6 +103,7 @@ void stela_depth_stencil_record(id descriptor, StelaDepthStencilRecord *record);
 
 @interface StelaGPUDevice (Resources)
 - (id)newTextureWithDescriptor:(id)descriptor;
+- (id)newBufferWithLength:(NSUInteger)length options:(NSUInteger)options;
 @end
 
 @interface StelaGPUDevice (Pipelines)
@@ -394,9 +395,17 @@ NSData *stela_compile_source(NSString *source, id options, NSError **error);
 }
 @end
 
+/* What `Logging.m` reads messages from once no command buffer using it runs. */
+@interface StelaGPULogState : NSObject <MTLLogState>
+- (uint64_t)bufferHandle;
+- (void)commandBufferStarted;
+- (void)commandBufferEnded;
+@end
+
 @interface StelaGPUQueue : NSObject <MTLCommandQueue> {
 @public
 	StelaGPUDevice *_device;
+	StelaGPULogState *_logState;
 }
 @property(copy) NSString *label;
 - (instancetype)initWithDevice:(StelaGPUDevice *)device;
@@ -410,11 +419,14 @@ NSData *stela_compile_source(NSString *source, id options, NSError **error);
 	StelaGPUQueue *_queue;
 	StelaStream _stream;
 	NSMutableArray *_retained;
+	StelaGPULogState *_logState;
 	uint64_t _serial;
 	bool _committed;
 }
 @property(copy) NSString *label;
-- (instancetype)initWithQueue:(StelaGPUQueue *)queue retainsReferences:(BOOL)retains;
+- (instancetype)initWithQueue:(StelaGPUQueue *)queue
+	    retainsReferences:(BOOL)retains
+		     logState:(StelaGPULogState *)logState;
 /* Keeps `object` until the command buffer completes, unless it retains none. */
 - (void)use:(id)object;
 - (void)submit;

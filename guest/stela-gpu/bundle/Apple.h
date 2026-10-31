@@ -281,6 +281,9 @@ int sysctlbyname(const char *name, void *value, size_t *size, void *new_value, s
 #define O_RDONLY 0
 #define O_CLOEXEC 0x1000000
 #define EINTR 4
+int snprintf(char *text, size_t size, const char *format, ...);
+char *strchr(const char *text, int character);
+void *memchr(const void *bytes, int value, size_t length);
 int open(const char *path, int flags, ...);
 int close(int file);
 long pread(int file, void *bytes, size_t length, long long offset);

@@ -1154,6 +1154,77 @@ defined_functions_inline_into_their_callers(void)
           error.kind == STELA_AIR_INSTRUCTION && strstr(error.detail, "recursive"));
 }
 
+/* os_log.log_error("hi %d %f %ld", ...) through the method Apple's compiler
+ * defines for it, in a kernel, with a float its call promotes and a long. */
+static const char *logging =
+   "@sub = private addrspace(2) constant [4 x i8] c\"sub\\00\"\n"
+   "@cat = private addrspace(2) constant [4 x i8] c\"cat\\00\"\n"
+   "@fmt = private addrspace(2) constant [13 x i8] c\"hi %d %f %ld\\00\"\n"
+   "%log = type { ptr addrspace(2), ptr addrspace(2) }\n"
+   "@log = internal addrspace(2) global %log { ptr addrspace(2) @sub, ptr addrspace(2) @cat }\n"
+   "@default = external addrspace(2) global %log\n"
+   "declare void @llvm.va_start.p0(ptr)\ndeclare void @llvm.va_end.p0(ptr)\n"
+   "declare void @air.os_log(ptr addrspace(2), ptr addrspace(2), i32, ptr addrspace(2), ptr, i64)\n"
+   "define linkonce_odr void @log_error(ptr addrspace(2) %o, ptr addrspace(2) %f, i64 %n, ...) {\n"
+   "%list = alloca ptr, align 8\ncall void @llvm.va_start.p0(ptr %list)\n"
+   "%s = load ptr addrspace(2), ptr addrspace(2) %o, align 8\n"
+   "%g = getelementptr inbounds %log, ptr addrspace(2) %o, i64 0, i32 1\n"
+   "%c = load ptr addrspace(2), ptr addrspace(2) %g, align 8\n"
+   "%l = load ptr, ptr %list, align 8\n"
+   "call void @air.os_log(ptr addrspace(2) %s, ptr addrspace(2) %c, i32 16, ptr addrspace(2) %f,"
+   " ptr %l, i64 %n)\n"
+   "call void @llvm.va_end.p0(ptr %list)\nret void\n}\n"
+   "define void @logs(ptr addrspace(1) %data, i32 %tid) {\n"
+   "%t = uitofp i32 %tid to float\n%d = fpext float %t to double\n%w = zext i32 %tid to i64\n"
+   "call void (ptr addrspace(2), ptr addrspace(2), i64, ...) @log_error(ptr addrspace(2) @log,"
+   " ptr addrspace(2) @fmt, i64 20, i32 %tid, double %d, i64 %w)\n"
+   "call void (ptr addrspace(2), ptr addrspace(2), i64, ...) @log_error(ptr addrspace(2) @default,"
+   " ptr addrspace(2) @fmt, i64 4, i32 %tid)\n"
+   "ret void\n}\n"
+   "define void @promotes(ptr addrspace(1) %data, i32 %tid) {\n"
+   "%t = uitofp i32 %tid to float\n%d = fpext float %t to double\n"
+   "%f = fptrunc double %d to float\n"
+   "store float %f, ptr addrspace(1) %data, align 4\nret void\n}\n"
+   "!air.kernel = !{!2, !5}\n"
+   "!2 = !{ptr @logs, !3, !4}\n!3 = !{}\n!4 = !{!40, !41}\n!5 = !{ptr @promotes, !3, !4}\n"
+   "!40 = !{i32 0, !\"air.buffer\", !\"air.location_index\", i32 0, i32 1, !\"air.read_write\","
+   " !\"air.address_space\", i32 1, !\"air.arg_type_size\", i32 4, !\"air.arg_type_align_size\","
+   " i32 4, !\"air.arg_type_name\", !\"int\", !\"air.arg_name\", !\"data\"}\n"
+   "!41 = !{i32 1, !\"air.thread_position_in_grid\", !\"air.arg_type_name\", !\"uint\","
+   " !\"air.arg_name\", !\"tid\"}\n";
+
+static unsigned
+count_intrinsic(nir_shader *shader, nir_intrinsic_op op)
+{
+   unsigned count = 0;
+   nir_foreach_function_impl(impl, shader) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            count += instr->type == nir_instr_type_intrinsic &&
+                     nir_instr_as_intrinsic(instr)->intrinsic == op;
+         }
+      }
+   }
+   return count;
+}
+
+static void
+os_log_appends_self_contained_records(void)
+{
+   const struct stela_metal_specialization specialization = {.workgroup_size = {64, 1, 1}};
+   struct stela_metal_reflection reflection;
+   struct stela_air_error error;
+   assert(reflect(logging, "logs", &reflection, &error));
+   nir_shader *shader = compile(logging, "logs", &specialization, &error);
+   assert(shader);
+   /* Each call reserves its record and writes at least its six words. */
+   assert(count_intrinsic(shader, nir_intrinsic_global_atomic) >= 2);
+   assert(count_intrinsic(shader, nir_intrinsic_store_global) >= 12);
+   stela_metal_release(shader);
+   /* A double any other instruction reads is no promotion. */
+   assert(!compile(logging, "promotes", &specialization, &error));
+}
+
 static const char *stitching_kernel =
    "declare i32 @quadrupled(i32)\n"
    "define void @stitches(ptr addrspace(1) %data, i32 %tid) {\n"
@@ -1546,6 +1617,7 @@ main(void)
    bindings_reflect_their_structures();
    defined_functions_inline_into_their_callers();
    stitched_functions_call_their_nodes_in_order();
+   os_log_appends_self_contained_records();
    linked_functions_resolve_tables_and_externals();
    recursion_unrolls_to_the_call_stack_depth();
    linked_modules_specialize_their_function_constants();

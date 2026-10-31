@@ -614,6 +614,8 @@ raw_enum! {
         WaitForEvent = 0x0003,
         /// `SampleCounters`.
         SampleCounters = 0x0004,
+        /// `Handle`: the log state's buffer, before any encoder.
+        LogBuffer = 0x0005,
     }
 }
 

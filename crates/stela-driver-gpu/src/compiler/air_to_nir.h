@@ -231,6 +231,8 @@ enum stela_air_device_value {
    STELA_AIR_PATCH_IDS,
    /* A dynamic kernel's threadgroup shape as a uvec3. */
    STELA_AIR_THREADGROUP_SHAPE,
+   /* The address of the buffer os_log appends to, zero for none. */
+   STELA_AIR_LOG_BUFFER,
 };
 typedef nir_def *(*stela_air_load_device_value)(nir_builder *, enum stela_air_device_value,
                                                 void *binding_data);

@@ -349,8 +349,11 @@ impl Bindings {
 
     /// Bindings carry over between encoders only through the table memory
     /// already uploaded; a new encoder starts empty, as Metal's do.
+    /// Forgets an encoder's bindings; the log buffer is the command buffer's.
     fn reset(&mut self) {
+        let log = self.constants.log;
         *self = Self::default();
+        self.constants.log = log;
     }
 }
 
@@ -458,6 +461,11 @@ impl CommandBuffer {
             encoder: Encoder::None,
             features,
         }
+    }
+
+    /// Gives the shaders of this command buffer the buffer `os_log` appends to.
+    pub fn set_log_buffer(&mut self, buffer: BufferRef) {
+        self.bindings.constants.log = buffer.address;
     }
 
     fn idle(&self) -> Result<()> {

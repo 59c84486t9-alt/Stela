@@ -1171,6 +1171,39 @@ fn barriers(recording: &Recording) -> usize {
 }
 
 #[test]
+fn every_encoder_pushes_the_command_buffer_s_log_buffer() {
+    let threads = Size {
+        width: 64,
+        height: 1,
+        depth: 1,
+    };
+    let mut resolver = MockResolver::default();
+    let mut commands = CommandBuffer::new(FEATURES);
+    let log = buffer(4, 1024);
+    commands.set_log_buffer(log);
+    for _ in 0..2 {
+        commands.begin_compute(DispatchType::Serial).unwrap();
+        commands
+            .set_compute_pipeline_state(&kernel_state(false))
+            .unwrap();
+        commands
+            .dispatch_threadgroups(&mut resolver, [1, 1, 1], threads)
+            .unwrap();
+        commands.end_encoding(&mut resolver).unwrap();
+    }
+    let recording = commit(commands, &mut resolver, (Semaphore(1), 1));
+    let logs: Vec<_> = recording.segments[0]
+        .commands
+        .iter()
+        .filter_map(|command| match command {
+            Command::PushConstants(constants) => Some(constants.log),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(logs, [log.address; 2]);
+}
+
+#[test]
 fn serial_dispatches_order_writes_and_concurrent_ones_do_not() {
     let threads = Size {
         width: 64,
@@ -2477,13 +2510,13 @@ fn generated_layouts_read_the_sequence_at_token_offsets() {
                 8,
                 IndirectToken::PushConstants {
                     offset: 0,
-                    size: 52
+                    size: 60
                 }
             ),
-            (64, IndirectToken::IndexBuffer),
-            (96, IndirectToken::VertexBuffer(1)),
-            (560, IndirectToken::VertexBuffer(30)),
-            (592, IndirectToken::DrawIndexed),
+            (72, IndirectToken::IndexBuffer),
+            (104, IndirectToken::VertexBuffer(1)),
+            (568, IndirectToken::VertexBuffer(30)),
+            (600, IndirectToken::DrawIndexed),
         ]
     );
 }

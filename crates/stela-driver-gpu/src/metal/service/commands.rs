@@ -4,7 +4,7 @@
 use super::{
     Call, Service, boolean, known,
     wire::{
-        self, Empty, Fault, Record, Status, Value,
+        self, Empty, Fault, Handle, Record, Status, Value,
         commands::{
             BufferLayoutRecord, CommandBufferCode, CommandCode, CommandHeader, CommitRequest,
             DepthStencilRecord, EventCommand, PatchSourceRecord, SampleCounters, StencilRecord,
@@ -165,6 +165,10 @@ impl<B: Backend, C: Compiler> Service<B, C> {
                     }
                     _ => commands.encode_wait_for_event(resolver, event, value),
                 }?;
+            }
+            CommandBufferCode::LogBuffer => {
+                let Handle { handle } = payload.record()?;
+                commands.set_log_buffer(self.buffer_ref(connection, handle)?);
             }
             CommandBufferCode::SampleCounters => {
                 let SampleCounters {

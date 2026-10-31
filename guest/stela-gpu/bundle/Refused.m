@@ -10,14 +10,6 @@
 		stela_report(what, &failure);                                                      \
 	} while (0)
 
-#define REFUSE_ERROR(domain, code, why)                                                            \
-	do {                                                                                       \
-		if (error) {                                                                       \
-			StelaFailure failure = {.reason = why};                                    \
-			*error = stela_error(domain, code, &failure);                              \
-		}                                                                                  \
-	} while (0)
-
 #define RAY_TRACING "this device has no acceleration structures"
 
 @implementation StelaGPUDevice (Refused)
@@ -55,12 +47,6 @@
 - (id)newAccelerationStructureWithDescriptor:(id)descriptor
 {
 	REFUSE("newAccelerationStructureWithDescriptor:", RAY_TRACING);
-	return nil;
-}
-
-- (id)newLogStateWithDescriptor:(id)descriptor error:(NSError **)error
-{
-	REFUSE_ERROR(MTLLogStateErrorDomain, MTLLogStateErrorInvalid, "this device has no shader logging");
 	return nil;
 }
 
