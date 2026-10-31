@@ -3897,7 +3897,20 @@ fn a_gate_store_is_served_in_its_own_pes_step() {
     let mut d = AppleDevices::new();
     let irq = AicInput::new(0, 700);
     d.add_gpu_gate(GATE, irq, service.clone()).unwrap();
-    assert!(d.add_gpu_gate(GATE, irq, service.clone()).is_err());
+    assert!(
+        d.add_gpu_gate(GATE, irq, service.clone()).is_err(),
+        "a gate's window is its own"
+    );
+    let second = GATE + stela_contracts::gate::window::BYTES;
+    d.add_gpu_gate(second, AicInput::new(0, 701), service.clone())
+        .unwrap();
+    // A call finishes at the gate that took it.
+    d.write(3, second, 8, 0, 0).unwrap();
+    let outcome = d.take_call(3).unwrap().run(&mut Caller);
+    assert_eq!(outcome.window, 1);
+    d.finish_call(outcome);
+    assert_eq!(d.read(3, second + 8, 8, 0).unwrap(), 1);
+    assert_eq!(d.read(3, GATE + 8, 8, 0).unwrap(), 0);
     d.write(0, GATE, 8, 0, 0).unwrap();
     let outcome = d.take_call(0).unwrap().run(&mut Caller);
     d.finish_call(outcome);

@@ -237,7 +237,7 @@ static void *read_variable(StelaGate *gate, uint32_t operation, void *request, s
 		uint32_t status = stela_gate_call(gate, operation, request, request_bytes, response,
 						  response_bytes, spans, &failure);
 		if (status != StelaStatusOk) {
-			stela_report("reflection", &failure);
+			stela_report("a service answer", &failure);
 			free(bytes);
 			return NULL;
 		}
@@ -524,6 +524,20 @@ typedef struct {
 
 @end
 
+/* The encoder of the argument buffer a reflected buffer binding points to. */
+static id encoder_of_binding(StelaGPUDevice *device, StelaGPUBinding *binding)
+{
+	StelaGPUType *structure = binding->_typeInfo ? binding->_typeInfo->_element : nil;
+	if (!structure) {
+		return nil;
+	}
+	StelaGPUArgumentEncoder *encoder = [[StelaGPUArgumentEncoder alloc] initWithDevice:device
+									     encodedLength:binding.bufferDataSize
+										 alignment:binding.bufferAlignment];
+	[encoder addType:structure offset:0 index:0];
+	return encoder;
+}
+
 @implementation StelaGPUFunction
 
 - (instancetype)initWithLibrary:(StelaGPULibrary *)library handle:(uint64_t)handle name:(NSString *)name
@@ -619,18 +633,9 @@ typedef struct {
 	NSArray *bindings = [StelaGPUReflection bindingsOfFunction:self];
 	for (NSUInteger i = 0; i < bindings.count; i++) {
 		StelaGPUBinding *binding = [bindings objectAtIndex:i];
-		if (binding.type != MTLBindingTypeBuffer || binding.index != index || !binding->_typeInfo) {
-			continue;
+		if (binding.type == MTLBindingTypeBuffer && binding.index == index) {
+			return encoder_of_binding(_device, binding);
 		}
-		StelaGPUType *structure = binding->_typeInfo->_element;
-		if (!structure) {
-			break;
-		}
-		StelaGPUArgumentEncoder *encoder = [[StelaGPUArgumentEncoder alloc] initWithDevice:_device
-										     encodedLength:binding.bufferDataSize
-											 alignment:binding.bufferAlignment];
-		[encoder addType:structure offset:0 index:0];
-		return encoder;
 	}
 	return nil;
 }
@@ -663,14 +668,55 @@ typedef struct {
 	return list;
 }
 
+/* What the library says of itself, once: a library's bytes never change. */
+- (void)identify
+{
+	if (_identified) {
+		return;
+	}
+	StelaLibraryIdentityRequest request = {.library = _handle};
+	StelaLibraryIdentityResponse response = {};
+	char *name = read_variable(&_device->_gate, StelaOperationLibraryIdentity, &request, sizeof(request),
+				   &request.out, &response, sizeof(response), &response.length);
+	if (name) {
+		_type = response.library_type;
+		_installName = response.length ? [[NSString alloc] initWithBytes:name
+									  length:response.length
+									encoding:NSUTF8StringEncoding]
+					       : nil;
+		free(name);
+	}
+	_identified = YES;
+}
+
 - (NSUInteger)type
 {
-	return 0;
+	[self identify];
+	return _type;
 }
 
 - (NSString *)installName
 {
-	return nil;
+	[self identify];
+	return _installName;
+}
+
+/* `MTLDynamicLibrary`: a dynamic library is the library it was made from. */
+- (BOOL)serializeToURL:(NSURL *)url error:(NSError **)error
+{
+	StelaLibraryDataRequest request = {.library = _handle};
+	StelaLength response = {};
+	void *bytes = read_variable(&_device->_gate, StelaOperationLibraryData, &request, sizeof(request), &request.out,
+				    &response, sizeof(response), &response.length);
+	if (!bytes) {
+		if (error) {
+			StelaFailure failure = {.reason = "the library's bytes"};
+			*error = stela_error(MTLDynamicLibraryDomain, MTLDynamicLibraryErrorUnsupported, &failure);
+		}
+		return NO;
+	}
+	NSData *data = [NSData dataWithBytesNoCopy:bytes length:response.length freeWhenDone:YES];
+	return [data writeToURL:url options:NSDataWritingAtomic error:error];
 }
 
 - (id)newFunctionWithName:(NSString *)name constantValues:(id)values error:(NSError **)error
@@ -753,7 +799,102 @@ typedef struct {
 
 @end
 
+/* An archive's failure, in its domain, from a pipeline's. */
+static BOOL add_failed(NSError **error, NSInteger code, NSError *failure)
+{
+	if (error) {
+		*error = [NSError errorWithDomain:MTLBinaryArchiveDomain code:code userInfo:failure.userInfo];
+	}
+	return NO;
+}
+
+@implementation StelaGPUBinaryArchive
+
+- (BOOL)addComputePipelineFunctionsWithDescriptor:(id)descriptor error:(NSError **)error
+{
+	NSError *failure = nil;
+	id pipeline = [_device computePipeline:descriptor options:0 reflection:NULL archive:_handle error:&failure];
+	return pipeline ? YES : add_failed(error, MTLBinaryArchiveErrorCompilationFailure, failure);
+}
+
+- (BOOL)addRenderPipelineFunctionsWithDescriptor:(id)descriptor error:(NSError **)error
+{
+	NSError *failure = nil;
+	id pipeline = [_device renderPipeline:descriptor options:0 reflection:NULL archive:_handle error:&failure];
+	return pipeline ? YES : add_failed(error, MTLBinaryArchiveErrorCompilationFailure, failure);
+}
+
+- (BOOL)addMeshRenderPipelineFunctionsWithDescriptor:(id)descriptor error:(NSError **)error
+{
+	NSError *failure = nil;
+	id pipeline = [_device meshPipeline:descriptor options:0 reflection:NULL archive:_handle error:&failure];
+	return pipeline ? YES : add_failed(error, MTLBinaryArchiveErrorCompilationFailure, failure);
+}
+
+/* Tile shading is an Apple family's, and no such family answers here. */
+- (BOOL)addTileRenderPipelineFunctionsWithDescriptor:(id)descriptor error:(NSError **)error
+{
+	(void)descriptor;
+	if (error) {
+		StelaFailure failure = {.reason = "this device has no tile shading"};
+		*error = stela_error(MTLBinaryArchiveDomain, MTLBinaryArchiveErrorUnexpectedElement, &failure);
+	}
+	return NO;
+}
+
+/* A visible function compiles into the stages linking it: only its pipelines are kept. */
+- (BOOL)addFunctionWithDescriptor:(id)descriptor library:(StelaGPULibrary *)library error:(NSError **)error
+{
+	NSError *failure = nil;
+	id function = [library newFunctionWithDescriptor:descriptor error:&failure];
+	return function ? YES : add_failed(error, MTLBinaryArchiveErrorUnexpectedElement, failure);
+}
+
+- (BOOL)serializeToURL:(NSURL *)url error:(NSError **)error
+{
+	StelaArchiveDataRequest request = {.archive = _handle};
+	StelaLength response = {};
+	void *bytes = read_variable(&_device->_gate, StelaOperationArchiveData, &request, sizeof(request), &request.out,
+				    &response, sizeof(response), &response.length);
+	if (!bytes) {
+		if (error) {
+			StelaFailure failure = {.reason = "the archive's bytes"};
+			*error = stela_error(MTLBinaryArchiveDomain, MTLBinaryArchiveErrorInternalError, &failure);
+		}
+		return NO;
+	}
+	NSData *data = [NSData dataWithBytesNoCopy:bytes length:response.length freeWhenDone:YES];
+	return [data writeToURL:url options:NSDataWritingAtomic error:error];
+}
+
+@end
+
 @implementation StelaGPUDevice (Libraries)
+
+- (id)newBinaryArchiveWithDescriptor:(id)descriptor error:(NSError **)error
+{
+	NSURL *url = [descriptor url];
+	NSData *data = nil;
+	if (url) {
+		NSError *failure = nil;
+		data = [NSData dataWithContentsOfURL:url options:0 error:&failure];
+		if (!data) {
+			add_failed(error, MTLBinaryArchiveErrorInvalidFile, failure);
+			return nil;
+		}
+	}
+	StelaNewArchiveRequest request = {.data = stela_span(data.bytes, data.length)};
+	StelaHandle response = {};
+	StelaFailure failure;
+	StelaSpans spans = {.reads = &request.data, .read_count = 1};
+	if (STELA_CALL_SPANS(&_gate, NewArchive, &request, &response, spans, &failure) != StelaStatusOk) {
+		if (error) {
+			*error = stela_error(MTLBinaryArchiveDomain, MTLBinaryArchiveErrorInternalError, &failure);
+		}
+		return nil;
+	}
+	return [[StelaGPUBinaryArchive alloc] initWithDevice:self handle:response.handle];
+}
 
 - (id)libraryWithBytes:(const void *)bytes length:(NSUInteger)length error:(NSError **)error
 {
@@ -810,23 +951,81 @@ typedef struct {
 	return [self newDefaultLibraryWithBundle:[NSBundle mainBundle] error:NULL];
 }
 
-/* Only MTLCompilerService compiles source, which drives AGX's own back end. */
+- (id)dynamicLibrary:(StelaGPULibrary *)library error:(NSError **)error
+{
+	if (!(_capabilities->flags & StelaFlags_DYNAMIC_LIBRARIES)) {
+		if (error) {
+			StelaFailure failure = {.reason = "this device loads no dynamic libraries"};
+			*error = stela_error(MTLDynamicLibraryDomain, MTLDynamicLibraryErrorUnsupported, &failure);
+		}
+		return nil;
+	}
+	if ([library type] != MTLLibraryTypeDynamic) {
+		if (error) {
+			StelaFailure failure = {.reason = "the library is not a dynamic library"};
+			*error = stela_error(MTLDynamicLibraryDomain, MTLDynamicLibraryErrorInvalidFile, &failure);
+		}
+		return nil;
+	}
+	return library;
+}
+
+- (id)newDynamicLibrary:(StelaGPULibrary *)library error:(NSError **)error
+{
+	return [self dynamicLibrary:library error:error];
+}
+
+- (id)newDynamicLibraryWithURL:(NSURL *)url error:(NSError **)error
+{
+	NSData *data = [NSData dataWithContentsOfURL:url options:0 error:error];
+	StelaGPULibrary *library = data ? [self libraryWithBytes:data.bytes length:data.length error:error] : nil;
+	return library ? [self dynamicLibrary:library error:error] : nil;
+}
+
 - (id)newLibraryWithSource:(NSString *)source options:(id)options error:(NSError **)error
 {
-	(void)source;
-	(void)options;
-	if (error) {
-		StelaFailure failure = {.reason = "this device compiles no Metal source: use a metallib"};
-		*error = stela_error(MTLLibraryErrorDomain, MTLLibraryErrorUnsupported, &failure);
+	options = options ?: [NSClassFromString(@"MTLCompileOptions") new];
+	NSData *air = stela_compile_source(source, options, error);
+	if (!air) {
+		return nil;
 	}
-	return nil;
+	BOOL dynamic = [options libraryType] == MTLLibraryTypeDynamic;
+	const char *install_name = dynamic ? [options installName].UTF8String : NULL;
+	NSArray *libraries = [options libraries];
+	uint64_t handles[libraries.count + 1];
+	for (NSUInteger i = 0; i < libraries.count; i++) {
+		handles[i] = ((StelaGPULibrary *)libraries[i])->_handle;
+	}
+	StelaNewSourceLibraryRequest request = {
+		.air = stela_span(air.bytes, air.length),
+		.install_name = stela_span(install_name, install_name ? strlen(install_name) : 0),
+		.libraries = stela_span(handles, libraries.count * sizeof(*handles)),
+	};
+	StelaHandle response = {};
+	StelaFailure failure;
+	StelaSpans spans = {.reads = &request.air, .read_count = 3};
+	if (STELA_CALL_SPANS(&_gate, NewSourceLibrary, &request, &response, spans, &failure) != StelaStatusOk) {
+		if (error) {
+			*error = stela_error(MTLLibraryErrorDomain, MTLLibraryErrorInternal, &failure);
+		}
+		return nil;
+	}
+	StelaGPULibrary *library = [[StelaGPULibrary alloc] initWithDevice:self handle:response.handle];
+	return dynamic ? [self dynamicLibrary:library error:error] : library;
 }
 
 - (void)newLibraryWithSource:(NSString *)source options:(id)options completionHandler:(void (^)(id, NSError *))handler
 {
-	NSError *error = nil;
-	id library = [self newLibraryWithSource:source options:options error:&error];
-	handler(library, error);
+	dispatch_async(dispatch_get_global_queue(0, 0), ^{
+		NSError *error = nil;
+		id library = [self newLibraryWithSource:source options:options error:&error];
+		handler(library, error);
+	});
+}
+
+- (id)newArgumentEncoderWithBufferBinding:(StelaGPUBinding *)binding
+{
+	return encoder_of_binding(self, binding);
 }
 
 - (id)newArgumentEncoderWithArguments:(NSArray *)arguments

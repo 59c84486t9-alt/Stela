@@ -71,12 +71,11 @@ typedef nir_def *(*stela_air_resource_id)(nir_builder *b, const struct stela_air
                                           const struct stela_air_sampler *sampler,
                                           nir_def *element, void *data);
 
-/* The mip level count of a write or read_write texture argument, or with id
- * of the one an argument buffer's identifier names (texture is then NULL):
- * the count of the images bind_texture selects among. */
-typedef nir_def *(*stela_air_texture_levels)(nir_builder *b,
-                                             const struct stela_air_texture *texture,
-                                             nir_def *id, void *data);
+/* What a texture argument's binding says, or with id what the identifier an
+ * argument buffer holds does (texture is then NULL). */
+typedef nir_def *(*stela_air_texture_query)(nir_builder *b,
+                                            const struct stela_air_texture *texture,
+                                            nir_def *id, void *data);
 
 /* AIR's indirect command functions (air_commands.c), as Metal's
  * render_command and compute_command methods. */
@@ -223,6 +222,8 @@ enum stela_air_device_value {
    STELA_AIR_DISPATCH_GRID,
    /* The amplification ID of an amplified draw, as a uint. */
    STELA_AIR_AMPLIFICATION,
+   /* The amplified draw's views as a uint. */
+   STELA_AIR_AMPLIFICATIONS,
    /* That view's mapping as a uint: the viewport offset in the low half, the
     * render target array index offset in the high half. */
    STELA_AIR_VIEW_MAPPING,
@@ -231,6 +232,8 @@ enum stela_air_device_value {
    STELA_AIR_PATCH_IDS,
    /* A dynamic kernel's threadgroup shape as a uvec3. */
    STELA_AIR_THREADGROUP_SHAPE,
+   /* The address of the buffer os_log appends to, zero for none. */
+   STELA_AIR_LOG_BUFFER,
 };
 typedef nir_def *(*stela_air_load_device_value)(nir_builder *, enum stela_air_device_value,
                                                 void *binding_data);
@@ -293,9 +296,11 @@ struct stela_air_options {
     * refused. */
    const struct stela_air_constexpr_sampler *constexpr_samplers;
    unsigned constexpr_sampler_count;
-   /* Storage textures' level counts; NULL refuses get_num_mip_levels of
-    * them. */
-   stela_air_texture_levels texture_levels;
+   /* The count of the images bind_texture selects among for a write or
+    * read_write texture; NULL refuses get_num_mip_levels of them. */
+   stela_air_texture_query texture_levels;
+   /* Whether a texture is unbound; NULL refuses is_null_texture. */
+   stela_air_texture_query texture_null;
    /* Indirect command buffers and pipeline states in argument buffers;
     * NULL refuses AIR's command functions. */
    stela_air_command_count command_count;

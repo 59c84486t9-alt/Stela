@@ -83,6 +83,7 @@ void stela_depth_stencil_record(id descriptor, StelaDepthStencilRecord *record);
 	StelaBlock *_capabilities;
 }
 - (instancetype)initWithAcceleratorPort:(io_service_t)port;
+- (uint64_t)registryID;
 /* `length` bytes of new memory at *contents wired for the GPU; 0 on failure. */
 - (uint64_t)importLength:(uint64_t)length contents:(void **)contents failure:(StelaFailure *)failure;
 /* Wires the task's memory at `address`; 0 on failure. */
@@ -98,6 +99,30 @@ void stela_depth_stencil_record(id descriptor, StelaDepthStencilRecord *record);
 - (void)noteIndirect:(StelaGPUIndirectCommandBuffer *)buffer;
 - (void)forgetIndirect:(StelaGPUIndirectCommandBuffer *)buffer;
 - (void)flushIndirect;
+@end
+
+@interface StelaGPUDevice (Resources)
+- (id)newTextureWithDescriptor:(id)descriptor;
+- (id)newBufferWithLength:(NSUInteger)length options:(NSUInteger)options;
+@end
+
+@interface StelaGPUDevice (Pipelines)
+/* A pipeline of `descriptor`; a nonzero `archive` is the one it compiles into. */
+- (id)renderPipeline:(id)descriptor
+	     options:(NSUInteger)options
+	  reflection:(id *)reflection
+	     archive:(uint64_t)archive
+	       error:(NSError **)error;
+- (id)meshPipeline:(id)descriptor
+	   options:(NSUInteger)options
+	reflection:(id *)reflection
+	   archive:(uint64_t)archive
+	     error:(NSError **)error;
+- (id)computePipeline:(id)descriptor
+	      options:(NSUInteger)options
+	   reflection:(id *)reflection
+	      archive:(uint64_t)archive
+		error:(NSError **)error;
 @end
 
 /* What holds a service handle. */
@@ -143,11 +168,15 @@ void stela_depth_stencil_record(id descriptor, StelaDepthStencilRecord *record);
 	NSUInteger _bufferOffset, _bufferBytesPerRow, _firstMipmapInTail, _tailSizeInBytes;
 	NSUInteger _parentLevel, _parentSlice;
 	MTLTextureSwizzleChannels _swizzle;
-	BOOL _sparse;
+	BOOL _sparse, _shareable;
 	id _buffer, _parent;
 	IOSurfaceRef _surface;
 	NSUInteger _surfacePlane;
+	StelaTextureDescriptorRecord _record;
 }
+- (instancetype)initWithDevice:(StelaGPUDevice *)device
+		      response:(const StelaTextureResponse *)response
+			record:(const StelaTextureDescriptorRecord *)record;
 - (instancetype)initWithDevice:(StelaGPUDevice *)device
 		      response:(const StelaTextureResponse *)response
 		    descriptor:(id)descriptor;
@@ -186,7 +215,20 @@ void stela_depth_stencil_record(id descriptor, StelaDepthStencilRecord *record);
 @interface StelaGPUEvent : StelaGPUObject <MTLSharedEvent>
 @end
 
-@interface StelaGPULibrary : StelaGPUObject <MTLLibrary>
+@interface StelaGPULibrary : StelaGPUObject <MTLLibrary, MTLDynamicLibrary> {
+@public
+	BOOL _identified;
+	NSUInteger _type;
+	NSString *_installName;
+}
+- (NSUInteger)type;
+@end
+
+/* The AIR Metal `source` compiles to under `MTLCompileOptions`. */
+NSData *stela_compile_source(NSString *source, id options, NSError **error);
+
+/* `MTLBinaryArchive`: the service's pipeline cache. */
+@interface StelaGPUBinaryArchive : StelaGPUObject <MTLBinaryArchive>
 @end
 
 /* `MTLVertexAttribute` and `MTLAttribute`. */
@@ -353,9 +395,22 @@ void stela_depth_stencil_record(id descriptor, StelaDepthStencilRecord *record);
 }
 @end
 
+/* What `Logging.m` reads messages from once no command buffer using it runs. */
+@interface StelaGPULogState : NSObject <MTLLogState>
+- (uint64_t)bufferHandle;
+- (void)commandBufferStarted;
+- (void)commandBufferEnded;
+@end
+
+@interface StelaGPUDevice (Logging)
+- (StelaGPULogState *)environmentLogState;
+- (StelaGPULogState *)logStateWithCapacity:(NSInteger)capacity level:(NSInteger)level error:(NSError **)error;
+@end
+
 @interface StelaGPUQueue : NSObject <MTLCommandQueue> {
 @public
 	StelaGPUDevice *_device;
+	StelaGPULogState *_logState;
 }
 @property(copy) NSString *label;
 - (instancetype)initWithDevice:(StelaGPUDevice *)device;
@@ -369,11 +424,14 @@ void stela_depth_stencil_record(id descriptor, StelaDepthStencilRecord *record);
 	StelaGPUQueue *_queue;
 	StelaStream _stream;
 	NSMutableArray *_retained;
+	StelaGPULogState *_logState;
 	uint64_t _serial;
 	bool _committed;
 }
 @property(copy) NSString *label;
-- (instancetype)initWithQueue:(StelaGPUQueue *)queue retainsReferences:(BOOL)retains;
+- (instancetype)initWithQueue:(StelaGPUQueue *)queue
+	    retainsReferences:(BOOL)retains
+		     logState:(StelaGPULogState *)logState;
 /* Keeps `object` until the command buffer completes, unless it retains none. */
 - (void)use:(id)object;
 - (void)submit;

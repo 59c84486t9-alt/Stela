@@ -14,7 +14,6 @@ use stela_contracts::{refuse, require};
 
 pub mod aic;
 pub mod apple_device_tree;
-#[cfg(feature = "std")]
 pub mod aux_kc;
 pub mod boot_args;
 pub mod boot_bundle;

@@ -1,7 +1,7 @@
 use super::{
     pipelines::{
         ComputePipelineRequest, ConstantKey, ConstantValue, FunctionHandle, LinkedFunctions,
-        MeshPipelineRequest, RenderPipelineRequest,
+        MeshPipelineRequest, PipelineArchives, RenderPipelineRequest,
     },
     queue::{AttachmentRequest, CounterSet, RenderPassRequest},
     resources::Strides,
@@ -37,9 +37,9 @@ use crate::metal::{
     sparse::{MappingUpdate, SparseRegion},
     vulkan::{
         MemoryProperties, PipelineStages, PrimitiveTopology, ShaderStages,
-        backend::Descriptor,
+        backend::{Descriptor, Object},
         command::Command,
-        object::{Buffer, MemoryRequest, Pipeline},
+        object::{Buffer, MemoryRequest, Pipeline, PipelineSource},
     },
 };
 use alloc::{string::String, vec::Vec};
@@ -331,6 +331,7 @@ fn constexpr_samplers_are_created_once_and_reach_compilation() {
         stage_input: None,
         linked_functions: LinkedFunctions::default(),
         support_indirect_command_buffers: true,
+        archives: Default::default(),
     };
     let created = |device: &mut TestDevice| {
         let descriptors = &device.backend().descriptors;
@@ -447,6 +448,7 @@ fn indirect_pipelines_share_execution_sets_by_state() {
         vertex_linked_functions: LinkedFunctions::default(),
         fragment_linked_functions: LinkedFunctions::default(),
         support_indirect_command_buffers: true,
+        archives: Default::default(),
     };
     let first = device.new_render_pipeline(&request).unwrap();
     let second = device.new_render_pipeline(&request).unwrap();
@@ -456,6 +458,7 @@ fn indirect_pipelines_share_execution_sets_by_state() {
     let plain = device
         .new_render_pipeline(&RenderPipelineRequest {
             support_indirect_command_buffers: false,
+            archives: Default::default(),
             ..request.clone()
         })
         .unwrap();
@@ -538,6 +541,7 @@ fn indirect_compute_pipelines_share_the_compute_execution_set() {
         stage_input: None,
         linked_functions: LinkedFunctions::default(),
         support_indirect_command_buffers: true,
+        archives: Default::default(),
     };
     let first = device.new_compute_pipeline(&request).unwrap();
     let specialization = device.compiler.compiled.last().unwrap().clone();
@@ -552,6 +556,7 @@ fn indirect_compute_pipelines_share_the_compute_execution_set() {
     let plain = device
         .new_compute_pipeline(&ComputePipelineRequest {
             support_indirect_command_buffers: false,
+            archives: Default::default(),
             ..request.clone()
         })
         .unwrap();
@@ -659,6 +664,7 @@ fn amplified_pipelines_compile_amplified_vertex_functions() {
         vertex_linked_functions: LinkedFunctions::default(),
         fragment_linked_functions: LinkedFunctions::default(),
         support_indirect_command_buffers: false,
+        archives: Default::default(),
     };
     device.new_render_pipeline(&request).unwrap();
     let amplified: Vec<bool> = device
@@ -726,6 +732,253 @@ fn functions_take_values_for_their_function_constants() {
     }
 }
 
+fn archived_compute(function: FunctionId, archives: PipelineArchives) -> ComputePipelineRequest {
+    ComputePipelineRequest {
+        compute_function: function,
+        threadgroup_size_is_multiple_of_thread_execution_width: false,
+        max_total_threads_per_threadgroup: 0,
+        stage_input: None,
+        linked_functions: LinkedFunctions::default(),
+        support_indirect_command_buffers: false,
+        archives,
+    }
+}
+
+fn required(archive: ArchiveId) -> PipelineArchives {
+    PipelineArchives {
+        searched: alloc::vec![archive],
+        required: true,
+        added_to: None,
+    }
+}
+
+fn added_to(archive: ArchiveId) -> PipelineArchives {
+    PipelineArchives {
+        added_to: Some(archive),
+        ..PipelineArchives::default()
+    }
+}
+
+#[test]
+fn binary_archives_hold_what_was_added_and_outlive_their_files() {
+    let mut device = device();
+    let kernel = device.new_function(LIBRARY, "kernel", &[]).unwrap();
+    let empty = device.new_archive(&[]).unwrap();
+    assert_eq!(
+        device.new_compute_pipeline(&archived_compute(kernel, required(empty))),
+        Err(Error::NotArchived)
+    );
+    assert!(
+        device.backend().compute.is_empty(),
+        "a miss compiles nothing"
+    );
+
+    let adding = archived_compute(kernel, added_to(empty));
+    let added = device.new_compute_pipeline(&adding).unwrap();
+    device.destroy_compute_pipeline(added).unwrap();
+    assert_eq!(device.backend().compute.len(), 1);
+    let found = device
+        .new_compute_pipeline(&archived_compute(kernel, required(empty)))
+        .unwrap();
+    assert!(matches!(
+        device.backend().compute.last().unwrap().source,
+        PipelineSource::Archived(_)
+    ));
+    device.destroy_compute_pipeline(found).unwrap();
+
+    // Its bytes make the same archive, found after one that lacks it.
+    let data = device.archive_data(empty).unwrap();
+    let loaded = device.new_archive(&data).unwrap();
+    let missing = device.new_archive(&[]).unwrap();
+    let archives = PipelineArchives {
+        searched: alloc::vec![missing, loaded],
+        required: true,
+        added_to: None,
+    };
+    assert!(
+        device
+            .new_compute_pipeline(&archived_compute(kernel, archives))
+            .is_ok()
+    );
+}
+
+#[test]
+fn binary_archives_learn_the_shapes_dispatches_compile() {
+    let mut device = device();
+    let kernel = device.new_function(LIBRARY, "kernel", &[]).unwrap();
+    let archive = device.new_archive(&[]).unwrap();
+    let searched = PipelineArchives {
+        searched: alloc::vec![archive],
+        ..PipelineArchives::default()
+    };
+    let pipeline = device
+        .new_compute_pipeline(&archived_compute(kernel, searched))
+        .unwrap();
+    assert!(device.backend().compute.is_empty(), "shapes compile later");
+    assert_eq!(device.archive_data(archive), Ok(alloc::vec![0]));
+    let dispatch = Specialization {
+        workgroup_size: Some([64, 1, 1]),
+        ..Specialization::default()
+    };
+    device
+        .compute_variant(u64::from(pipeline.0), &dispatch)
+        .unwrap();
+    assert_eq!(device.archive_data(archive), Ok(alloc::vec![1]));
+}
+
+#[test]
+fn pipelines_keep_their_binary_archives() {
+    let mut device = device();
+    let kernel = device.new_function(LIBRARY, "kernel", &[]).unwrap();
+    let archive = device.new_archive(&[]).unwrap();
+    let searched = PipelineArchives {
+        searched: alloc::vec![archive],
+        ..PipelineArchives::default()
+    };
+    let request = archived_compute(kernel, searched);
+    let pipeline = device.new_compute_pipeline(&request).unwrap();
+    device.destroy_archive(archive).unwrap();
+    assert_eq!(
+        device.destroy_archive(archive),
+        Err(Error::Invalid("unknown or destroyed object"))
+    );
+    assert_eq!(
+        device.new_compute_pipeline(&request),
+        Err(Error::Invalid("unknown or destroyed object"))
+    );
+    let dispatch = Specialization {
+        workgroup_size: Some([64, 1, 1]),
+        ..Specialization::default()
+    };
+    device
+        .compute_variant(u64::from(pipeline.0), &dispatch)
+        .unwrap();
+    let cached = |device: &mut TestDevice| {
+        device
+            .backend()
+            .destroyed
+            .iter()
+            .any(|object| matches!(object, Object::PipelineCache(_)))
+    };
+    assert!(!cached(&mut device));
+    device.destroy_compute_pipeline(pipeline).unwrap();
+    let serial = submit(&mut device);
+    complete(&mut device, serial);
+    assert!(cached(&mut device), "the last pipeline frees the archive");
+}
+
+#[test]
+fn render_pipelines_come_from_binary_archives() {
+    let mut device = device();
+    let vertex = device.new_function(LIBRARY, "vertex", &[]).unwrap();
+    let archive = device.new_archive(&[]).unwrap();
+    let request = |archives| RenderPipelineRequest {
+        vertex_function: vertex,
+        fragment_function: None,
+        vertex_descriptor: None,
+        targets: color_targets(),
+        input_primitive_topology: PrimitiveTopologyClass::Unspecified,
+        max_vertex_amplification_count: 1,
+        tessellation: TessellationDescriptor::default(),
+        vertex_linked_functions: LinkedFunctions::default(),
+        fragment_linked_functions: LinkedFunctions::default(),
+        support_indirect_command_buffers: false,
+        archives,
+    };
+    assert_eq!(
+        device.new_render_pipeline(&request(required(archive))),
+        Err(Error::NotArchived)
+    );
+    let added = device
+        .new_render_pipeline(&request(added_to(archive)))
+        .unwrap();
+    device.destroy_render_pipeline(added).unwrap();
+    device
+        .new_render_pipeline(&request(required(archive)))
+        .unwrap();
+    assert!(matches!(
+        device.backend().graphics.last().unwrap().source,
+        PipelineSource::Archived(_)
+    ));
+}
+
+#[test]
+fn mesh_pipelines_answer_for_binary_archives_at_creation() {
+    let mut device = device();
+    let mesh = device.new_function(LIBRARY, "mesh", &[]).unwrap();
+    let archive = device.new_archive(&[]).unwrap();
+    let request = |archives| MeshPipelineRequest {
+        object_function: None,
+        mesh_function: mesh,
+        fragment_function: None,
+        targets: color_targets(),
+        max_vertex_amplification_count: 1,
+        object_threads: StageThreads::default(),
+        mesh_threads: StageThreads::default(),
+        payload_memory_length: 0,
+        object_linked_functions: LinkedFunctions::default(),
+        mesh_linked_functions: LinkedFunctions::default(),
+        fragment_linked_functions: LinkedFunctions::default(),
+        archives,
+    };
+    assert_eq!(
+        device.new_mesh_render_pipeline(&request(required(archive))),
+        Err(Error::NotArchived)
+    );
+    device
+        .new_mesh_render_pipeline(&request(added_to(archive)))
+        .unwrap();
+    device
+        .new_mesh_render_pipeline(&request(required(archive)))
+        .unwrap();
+}
+
+#[test]
+fn a_stitched_function_links_what_it_calls() {
+    let mut device = device();
+    let kernel = device.new_function(LIBRARY, "kernel", &[]).unwrap();
+    let visible = device.new_function(LIBRARY, "visible", &[]).unwrap();
+    assert_eq!(
+        device.new_stitched_library(&[kernel], &[]),
+        Err(Error::Invalid("stitched functions are visible functions"))
+    );
+    let library = device.new_stitched_library(&[visible], &[]).unwrap();
+    let stitched = device.new_function(library, "visible", &[]).unwrap();
+    // A second stitch of the first links what the first calls too.
+    let library = device.new_stitched_library(&[stitched], &[]).unwrap();
+    let outer = device.new_function(library, "visible", &[]).unwrap();
+    device.destroy_function(visible).unwrap();
+    device.destroy_function(stitched).unwrap();
+
+    let request = ComputePipelineRequest {
+        compute_function: kernel,
+        threadgroup_size_is_multiple_of_thread_execution_width: false,
+        max_total_threads_per_threadgroup: 0,
+        stage_input: None,
+        linked_functions: LinkedFunctions {
+            functions: alloc::vec![outer],
+            max_call_stack_depth: 1,
+            ..LinkedFunctions::default()
+        },
+        support_indirect_command_buffers: false,
+        archives: Default::default(),
+    };
+    let pipeline = device.new_compute_pipeline(&request).unwrap();
+    let dispatch = Specialization {
+        workgroup_size: Some([64, 1, 1]),
+        ..Specialization::default()
+    };
+    device
+        .compute_variant(u64::from(pipeline.0), &dispatch)
+        .unwrap();
+    let linking = &device.compiler.compiled.last().unwrap().linking;
+    let libraries = |functions: &[LinkedFunction]| -> Vec<u64> {
+        functions.iter().map(|function| function.library).collect()
+    };
+    assert_eq!(libraries(&linking.functions), [2]);
+    assert_eq!(libraries(&linking.private_functions), [1, 0]);
+}
+
 #[test]
 fn stages_link_visible_functions_and_name_them_by_handle() {
     let mut device = device();
@@ -756,6 +1009,7 @@ fn stages_link_visible_functions_and_name_them_by_handle() {
             ..LinkedFunctions::default()
         },
         support_indirect_command_buffers: false,
+        archives: Default::default(),
     };
     let pipeline = device
         .new_compute_pipeline(&request(alloc::vec![visible]))
@@ -821,6 +1075,7 @@ fn stages_link_visible_functions_and_name_them_by_handle() {
             ..LinkedFunctions::default()
         },
         support_indirect_command_buffers: false,
+        archives: Default::default(),
     };
     let pipeline = device.new_render_pipeline(&render).unwrap();
     let handle =
@@ -843,7 +1098,7 @@ fn visible_function_tables_hold_handles() {
     assert!(device.new_visible_function_table(0).is_err());
     let table = device.new_visible_function_table(4).unwrap();
     let (memory, offset, length) = device.buffer_memory(table).unwrap();
-    assert_eq!(length, 32);
+    assert_eq!(length, 40);
     device
         .set_visible_functions(table, 2, &[Some(FunctionHandle(3)), None])
         .unwrap();
@@ -851,16 +1106,69 @@ fn visible_function_tables_hold_handles() {
         device.set_visible_functions(table, 3, &[None, None]),
         Err(Error::Invalid("functions past the table's end"))
     );
-    let mut bytes = [0xff; 32];
+    let mut bytes = [0xff; 40];
     device
         .backend()
         .read_memory(memory, offset, &mut bytes)
         .unwrap();
-    let handles: Vec<u64> = bytes
+    let words: Vec<u64> = bytes
         .chunks(8)
         .map(|word| u64::from_le_bytes(word.try_into().unwrap()))
         .collect();
-    assert_eq!(handles, [0, 0, 3, 0], "tables start with no functions");
+    assert_eq!(words, [4, 0, 0, 3, 0], "a count, then no functions");
+}
+
+#[test]
+fn source_libraries_name_their_functions_and_keep_what_they_load_with() {
+    let mut device = device();
+    let air = b"BC\xc0\xde\0\0\0\0";
+    let dependency = device.new_library(fixture(false)).unwrap();
+    let library = device
+        .new_source_library(air, Some("lib/source"), &[dependency])
+        .unwrap();
+    assert_eq!(
+        device.library_function_names(library),
+        Ok(&[String::from("kernel"), String::from("visible")][..])
+    );
+    assert_eq!(
+        device.library_identity(library),
+        Ok((true, Some("lib/source")))
+    );
+
+    // Its functions link what the options named.
+    let kernel = device.new_function(library, "kernel", &[]).unwrap();
+    let pipeline = device
+        .new_compute_pipeline(&ComputePipelineRequest {
+            compute_function: kernel,
+            threadgroup_size_is_multiple_of_thread_execution_width: false,
+            max_total_threads_per_threadgroup: 0,
+            stage_input: None,
+            linked_functions: LinkedFunctions::default(),
+            support_indirect_command_buffers: false,
+            archives: Default::default(),
+        })
+        .unwrap();
+    let dispatch = Specialization {
+        workgroup_size: Some([64, 1, 1]),
+        ..Specialization::default()
+    };
+    device
+        .compute_variant(u64::from(pipeline.0), &dispatch)
+        .unwrap();
+    assert_eq!(
+        device.compiler.compiled.last().unwrap().linking.libraries,
+        [1]
+    );
+
+    // And they load for as long as it does.
+    let kept = device.new_library(fixture(false)).unwrap();
+    let keeper = device.new_source_library(air, None, &[kept]).unwrap();
+    assert_eq!(device.library_identity(keeper), Ok((false, None)));
+    device.destroy_library(kept).unwrap();
+    assert!(device.compiler.libraries[3].is_some());
+    device.destroy_library(keeper).unwrap();
+    assert!(device.compiler.libraries[3].is_none());
+    assert!(device.new_source_library(air, None, &[kept]).is_err());
 }
 
 #[test]
@@ -888,6 +1196,7 @@ fn pipelines_keep_their_functions_and_libraries() {
                 ..LinkedFunctions::default()
             },
             support_indirect_command_buffers: false,
+            archives: Default::default(),
         })
         .unwrap();
     device.destroy_function(kernel).unwrap();
@@ -943,6 +1252,7 @@ fn render_pipelines_compile_their_functions_once() {
         vertex_linked_functions: LinkedFunctions::default(),
         fragment_linked_functions: LinkedFunctions::default(),
         support_indirect_command_buffers: false,
+        archives: Default::default(),
     };
     let pipeline = device.new_render_pipeline(&request).unwrap();
     assert_eq!(
@@ -1108,6 +1418,7 @@ fn post_tessellation_functions_compile_with_their_feeding_stages() {
         vertex_linked_functions: LinkedFunctions::default(),
         fragment_linked_functions: LinkedFunctions::default(),
         support_indirect_command_buffers: false,
+        archives: Default::default(),
     };
     let pipeline = device.new_render_pipeline(&request).unwrap();
     let tessellation = &device.compiler.tessellations[0];
@@ -1180,6 +1491,7 @@ fn compute_and_mesh_variants_compile_per_shape() {
             stage_input: None,
             linked_functions: LinkedFunctions::default(),
             support_indirect_command_buffers: false,
+            archives: Default::default(),
         })
         .unwrap();
     let state = device.compute_pipeline_state(pipeline).unwrap().clone();
@@ -1233,11 +1545,12 @@ fn compute_and_mesh_variants_compile_per_shape() {
         object_linked_functions: LinkedFunctions::default(),
         mesh_linked_functions: LinkedFunctions::default(),
         fragment_linked_functions: LinkedFunctions::default(),
+        archives: Default::default(),
     };
     let compiled = device.compiler.compiled.len();
     let id = device.new_mesh_render_pipeline(&request).unwrap();
     let first = device
-        .mesh_variant(u64::from(id.0), [32, 1, 1], [64, 1, 1])
+        .mesh_variant(u64::from(id.0), [32, 1, 1], [64, 1, 1], &[])
         .unwrap();
     let linked = [("user(color)", false), ("user(normal)", true)];
     let stages: Vec<_> = device.compiler.compiled[compiled..]
@@ -1261,9 +1574,19 @@ fn compute_and_mesh_variants_compile_per_shape() {
         "the fragment, then the object function the draw launches and the mesh function"
     );
     let again = device
-        .mesh_variant(u64::from(id.0), [32, 1, 1], [64, 1, 1])
+        .mesh_variant(u64::from(id.0), [32, 1, 1], [64, 1, 1], &[])
         .unwrap();
     assert_eq!(first, again);
+    let sized = device
+        .mesh_variant(u64::from(id.0), [32, 1, 1], [64, 1, 1], &[(0, 256)])
+        .unwrap();
+    assert_ne!(first, sized, "threadgroup memory is part of a variant");
+    let object = &device.compiler.compiled[device.compiler.compiled.len() - 2];
+    assert_eq!(object.threadgroup_lengths, [(0, 256)]);
+    assert_eq!(
+        device.compiler.compiled.last().unwrap().threadgroup_lengths,
+        []
+    );
     let stages: Vec<_> = device
         .backend()
         .graphics
@@ -1277,7 +1600,7 @@ fn compute_and_mesh_variants_compile_per_shape() {
     assert_eq!(stages, [S::TASK, S::MESH, S::FRAGMENT]);
     assert!(
         device
-            .mesh_variant(u64::from(id.0), [32, 1, 1], [4096, 1, 1])
+            .mesh_variant(u64::from(id.0), [32, 1, 1], [4096, 1, 1], &[])
             .is_err(),
         "beyond the mesh limit"
     );
@@ -1701,6 +2024,7 @@ fn indirect_commands_execute_snapshots_of_their_buffer() {
             stage_input: None,
             linked_functions: LinkedFunctions::default(),
             support_indirect_command_buffers: false,
+            archives: Default::default(),
         })
         .unwrap();
     let state = device.compute_pipeline_state(pipeline).unwrap().clone();

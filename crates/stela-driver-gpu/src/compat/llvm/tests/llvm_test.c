@@ -4,6 +4,7 @@
  * builds and runs it. */
 #include "llvm-c/Analysis.h"
 #include "llvm-c/BitReader.h"
+#include "llvm-c/BitWriter.h"
 #include "llvm-c/Core.h"
 #include "llvm-c/Error.h"
 #include "llvm-c/Linker.h"
@@ -115,6 +116,20 @@ static LLVMValueRef add_decided(LLVMContextRef context, LLVMModuleRef module, co
 	return function;
 }
 
+static LLVMValueRef add_kept(LLVMContextRef context, LLVMModuleRef module, const char *name)
+{
+	LLVMTypeRef word = LLVMInt32TypeInContext(context);
+	LLVMValueRef function = LLVMAddFunction(module, name, LLVMFunctionType(word, &word, 1, 0));
+	LLVMBasicBlockRef entry = LLVMAppendBasicBlockInContext(context, function, "entry");
+	LLVMBuilderRef builder = LLVMCreateBuilderInContext(context);
+	LLVMPositionBuilderAtEnd(builder, entry);
+	LLVMValueRef slot = LLVMBuildAlloca(builder, word, "slot");
+	LLVMBuildStore(builder, LLVMGetParam(function, 0), slot);
+	LLVMBuildRet(builder, LLVMBuildLoad2(builder, word, slot, "kept"));
+	LLVMDisposeBuilder(builder);
+	return function;
+}
+
 int test(void)
 {
 	LLVMContextRef context = LLVMContextCreate();
@@ -143,8 +158,14 @@ int test(void)
 
 	LLVMValueRef decided = add_decided(context, module, "decided");
 	CHECK(LLVMCountBasicBlocks(decided) == 3);
-	CHECK(run_on(decided, "sccp,unreachableblockelim"));
+	CHECK(run_on(decided, "sccp,unreachableblockelim,dce"));
 	CHECK(LLVMCountBasicBlocks(decided) < 3);
+	CHECK(valid(module));
+
+	LLVMValueRef kept = add_kept(context, module, "kept");
+	CHECK(count(module, LLVMAlloca) == 1);
+	CHECK(run_on(kept, "sroa"));
+	CHECK(count(module, LLVMAlloca) == 0);
 	CHECK(valid(module));
 
 	LLVMTypeRef word = LLVMInt32TypeInContext(context);
@@ -153,6 +174,14 @@ int test(void)
 	LLVMSetLinkage(unused, LLVMInternalLinkage);
 	CHECK(run(module, "globalopt"));
 	CHECK(!LLVMGetNamedGlobal(module, "unused"));
+
+	/* Stitching writes bitcode that compiles like any other. */
+	LLVMMemoryBufferRef written = LLVMWriteBitcodeToMemoryBuffer(module);
+	LLVMModuleRef reread = NULL;
+	CHECK(written && !LLVMParseBitcodeInContext2(context, written, &reread));
+	CHECK(reread && LLVMGetNamedFunction(reread, "pick"));
+	LLVMDisposeModule(reread);
+	LLVMDisposeMemoryBuffer(written);
 	CHECK(valid(module));
 
 	CHECK(!run(module, "instcombine"));

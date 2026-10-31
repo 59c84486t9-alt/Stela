@@ -12,12 +12,14 @@
  * Shaders read the push constants with load_push_constant, which the Vulkan
  * driver lowers through its pipeline layout, and everything else from global
  * memory. */
-#define STELA_METAL_PUSH_BYTES 52u
+#define STELA_METAL_PUSH_BYTES 64u
 #define STELA_METAL_PUSH_TABLES 0u
 #define STELA_METAL_PUSH_ARGUMENTS 24u
-#define STELA_METAL_PUSH_GRID 32u
-#define STELA_METAL_PUSH_AMPLIFICATION 44u
-#define STELA_METAL_PUSH_VIEW_MAPPING 48u
+#define STELA_METAL_PUSH_LOG 32u
+#define STELA_METAL_PUSH_GRID 40u
+#define STELA_METAL_PUSH_AMPLIFICATION 52u
+#define STELA_METAL_PUSH_VIEW_MAPPING 56u
+#define STELA_METAL_PUSH_AMPLIFICATIONS 60u
 
 #define STELA_METAL_BUFFERS 31u
 #define STELA_METAL_TEXTURES 128u
@@ -67,8 +69,8 @@
 #define STELA_METAL_RESOLVE_FLAGS 60u
 #define STELA_METAL_RESOLVE_CLASS_COUNT 64u
 #define STELA_METAL_RESOLVE_PUSH 72u
-#define STELA_METAL_RESOLVE_VERTEX_BUFFERS 128u
-#define STELA_METAL_RESOLVE_SLOTS 624u
+#define STELA_METAL_RESOLVE_VERTEX_BUFFERS 136u
+#define STELA_METAL_RESOLVE_SLOTS 632u
 #define STELA_METAL_RESOLVE_SLOT_BYTES 16u
 #define STELA_METAL_RESOLVE_INHERIT_PIPELINE 1u
 #define STELA_METAL_RESOLVE_INHERIT_BUFFERS 2u
@@ -83,14 +85,14 @@
  * constants' arguments address. */
 #define STELA_METAL_SEQUENCE_PIPELINE 0u
 #define STELA_METAL_SEQUENCE_PUSH 8u
-#define STELA_METAL_SEQUENCE_INDEX_BUFFER 64u
-#define STELA_METAL_SEQUENCE_VERTEX_BUFFERS 80u
+#define STELA_METAL_SEQUENCE_INDEX_BUFFER 72u
+#define STELA_METAL_SEQUENCE_VERTEX_BUFFERS 88u
 #define STELA_METAL_SEQUENCE_VERTEX_BUFFER_BYTES 16u
-#define STELA_METAL_SEQUENCE_DRAW 576u
-#define STELA_METAL_SEQUENCE_DRAW_INDEXED 592u
-#define STELA_METAL_SEQUENCE_DISPATCH 64u
-#define STELA_METAL_SEQUENCE_DISPATCH_ARGUMENTS 80u
-#define STELA_METAL_SEQUENCE_BYTES 624u
+#define STELA_METAL_SEQUENCE_DRAW 584u
+#define STELA_METAL_SEQUENCE_DRAW_INDEXED 600u
+#define STELA_METAL_SEQUENCE_DISPATCH 72u
+#define STELA_METAL_SEQUENCE_DISPATCH_ARGUMENTS 96u
+#define STELA_METAL_SEQUENCE_BYTES 640u
 
 /* indirect/record.rs RecordLayout: a GPU-resident indirect command buffer
  * at its gpuResourceID. A header of uint words leads: the record stride and
@@ -217,9 +219,13 @@ nir_deref_instr *stela_metal_bind_texture(nir_builder *b, const struct stela_air
                                           const struct glsl_type *type, bool faces,
                                           nir_def *level, void *stage);
 
-/* stela_air_texture_levels: the count the texture's MTLResourceID carries. */
+/* stela_air_texture_query: the count the texture's MTLResourceID carries. */
 nir_def *stela_metal_texture_levels(nir_builder *b, const struct stela_air_texture *texture,
                                     nir_def *id, void *stage);
+
+/* stela_air_texture_query: whether the texture's MTLResourceID is the null one. */
+nir_def *stela_metal_texture_null(nir_builder *b, const struct stela_air_texture *texture,
+                                  nir_def *id, void *stage);
 
 /* stela_air_bind_sampler likewise, of the sampler's float- or integer-border
  * descriptor. */

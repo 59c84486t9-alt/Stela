@@ -25,6 +25,10 @@ struct stela_air_texture_context {
    bool (*store_word)(void *translator, LLVMValueRef pointer, nir_def *value);
 };
 
+/* Whether value is a call of air.get_read_sampler, the placeholder Metal 4's
+ * reads take, which has no value of its own. */
+bool stela_air_read_sampler(LLVMValueRef value);
+
 enum stela_air_texture_status {
    STELA_AIR_TEXTURE_OTHER, /* Not a texture function; nothing was emitted. */
    STELA_AIR_TEXTURE_LOWERED,

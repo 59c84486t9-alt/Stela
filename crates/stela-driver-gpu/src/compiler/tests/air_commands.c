@@ -333,6 +333,22 @@ kernels_encode_compute_commands(void)
    ralloc_free(shader);
 }
 
+/* Before Metal 3.1 a buffer command takes no stride. */
+static void
+older_kernels_set_buffers_without_strides(void)
+{
+   const char *body =
+      "declare void @air.set_kernel_buffer_compute_command.p2i8(ptr addrspace(1), i32,"
+      " ptr addrspace(2), i32)\n"
+      KERNEL("call void @air.set_kernel_buffer_compute_command.p2i8(ptr addrspace(1) %cb, i32 0,"
+             " ptr addrspace(2) %constants, i32 2)\n");
+   nir_shader *shader = translated(body, metadata(true));
+   const struct layout *l = &compute_layout;
+   run(shader, l);
+   assert(get64(record(COMMANDS, l, 0) + l->tables[0] + 8 * 2) == CONSTANTS);
+   ralloc_free(shader);
+}
+
 static void
 refused(const char *body, const char *metadata, enum stela_air_error_kind kind)
 {
@@ -376,6 +392,7 @@ main(void)
    glsl_type_singleton_init_or_ref();
    kernels_encode_render_commands();
    kernels_encode_compute_commands();
+   older_kernels_set_buffers_without_strides();
    unsupported_commands_are_refused();
    glsl_type_singleton_decref();
    puts("air commands: ok");

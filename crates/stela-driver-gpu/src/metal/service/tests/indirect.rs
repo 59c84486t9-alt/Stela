@@ -53,6 +53,7 @@ fn indirect_compute_commands_encode_and_execute() {
         .handle;
     let request = NewComputePipelineRequest {
         compute_function: kernel,
+        archives: Default::default(),
         flags: PipelineFlags::INDIRECT_COMMAND_BUFFERS.bits(),
         ..Default::default()
     };

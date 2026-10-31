@@ -11,7 +11,7 @@ use crate::metal::{
         command::{BufferImageCopy, Subresource},
         object::{
             BufferInfo, ColorBlendAttachment, ComputePipelineInfo, GraphicsPipelineInfo, ImageInfo,
-            ImageViewInfo, MemoryRequest, SamplerInfo, Semaphore, ShaderCode,
+            ImageViewInfo, MemoryRequest, PipelineSource, SamplerInfo, Semaphore, ShaderCode,
         },
         physical::Memory,
     },
@@ -305,6 +305,19 @@ fn stage(stage: ShaderStages, nir: &NirStage) -> vk::PipelineShaderStageCreateIn
     info
 }
 
+/// What creating a pipeline from `source` asks.
+fn create_flags(source: PipelineSource) -> vk::PipelineCreateFlags {
+    match source {
+        PipelineSource::Archived(_) => vk::PipelineCreateFlags::FAIL_ON_PIPELINE_COMPILE_REQUIRED,
+        PipelineSource::Compiled | PipelineSource::Cached(_) => vk::PipelineCreateFlags::empty(),
+    }
+}
+
+/// The flags that replace `flags` on a pipeline indirect commands bind.
+fn indirect_flags(flags: vk::PipelineCreateFlags) -> vk::PipelineCreateFlags2KHR {
+    generated::INDIRECT_BINDABLE | vk::PipelineCreateFlags2KHR::from_raw(flags.as_raw().into())
+}
+
 pub(super) fn compute_pipeline<T>(
     info: &ComputePipelineInfo,
     layout: vk::PipelineLayout,
@@ -320,9 +333,10 @@ pub(super) fn compute_pipeline<T>(
     if info.required_subgroup_size != 0 {
         stage = stage.push_next(&mut subgroup);
     }
-    let mut flags =
-        vk::PipelineCreateFlags2CreateInfoKHR::default().flags(generated::INDIRECT_BINDABLE);
+    let source = create_flags(info.source);
+    let mut flags = vk::PipelineCreateFlags2CreateInfoKHR::default().flags(indirect_flags(source));
     let mut create = vk::ComputePipelineCreateInfo::default()
+        .flags(source)
         .stage(stage)
         .layout(layout);
     if info.indirect_bindable {
@@ -458,8 +472,9 @@ pub(super) fn graphics_pipeline<T>(
     if info.topology == PrimitiveTopology::PatchList {
         create = create.tessellation_state(&tessellation);
     }
-    let mut flags =
-        vk::PipelineCreateFlags2CreateInfoKHR::default().flags(generated::INDIRECT_BINDABLE);
+    let source = create_flags(info.source);
+    create = create.flags(source);
+    let mut flags = vk::PipelineCreateFlags2CreateInfoKHR::default().flags(indirect_flags(source));
     if info.indirect_bindable {
         create = create.push_next(&mut flags);
     }

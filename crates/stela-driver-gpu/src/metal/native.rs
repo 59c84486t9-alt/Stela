@@ -32,8 +32,8 @@ use super::{
             Buffer, BufferInfo, BufferView, BufferViewInfo, ComputePipelineInfo, ExecutionSet,
             GraphicsPipelineInfo, Image, ImageInfo, ImageView, ImageViewInfo,
             IndirectCommandsLayout, IndirectCommandsLayoutInfo, Memory, MemoryRequest, Pipeline,
-            QueryPool, QueryPoolInfo, Sampler, SamplerInfo, Semaphore, ShaderCode,
-            SparseImageRequirements,
+            PipelineCache, PipelineSource, QueryPool, QueryPoolInfo, Sampler, SamplerInfo,
+            Semaphore, ShaderCode, SparseImageRequirements,
         },
         physical::{PciBusInfo, PhysicalDevice},
     },
@@ -190,6 +190,7 @@ fn failure(result: vk::Result) -> Error {
         | vk::Result::ERROR_TOO_MANY_OBJECTS
         | vk::Result::ERROR_FRAGMENTED_POOL
         | vk::Result::ERROR_OUT_OF_POOL_MEMORY => Error::OutOfMemory,
+        vk::Result::PIPELINE_COMPILE_REQUIRED => Error::NotArchived,
         _ => Error::Unsupported("Vulkan device operation"),
     }
 }
@@ -333,6 +334,7 @@ impl NativeBackend {
             required_subgroup_size: 0,
             full_subgroups: false,
             indirect_bindable: false,
+            source: PipelineSource::Compiled,
         };
         backend.accumulate = backend.create_compute(&kernel(kernels.accumulate))?;
         backend.select = backend.create_compute(&kernel(kernels.select))?;
@@ -581,7 +583,7 @@ impl NativeBackend {
             // call.
             unsafe {
                 self.device
-                    .create_compute_pipelines(vk::PipelineCache::null(), &[*create], None)
+                    .create_compute_pipelines(pipeline_cache(info.source), &[*create], None)
             }
             .map(|pipelines| pipelines[0])
             .map_err(|(_, error)| failure(error))
@@ -651,6 +653,14 @@ impl Drop for NativeBackend {
 /// Converts a raw boundary handle to its Vulkan type.
 fn handle<T: vk::Handle>(raw: u64) -> T {
     T::from_raw(raw)
+}
+
+/// The cache a creation from `source` reads.
+fn pipeline_cache(source: PipelineSource) -> vk::PipelineCache {
+    match source {
+        PipelineSource::Compiled => vk::PipelineCache::null(),
+        PipelineSource::Cached(cache) | PipelineSource::Archived(cache) => handle(cache.0),
+    }
 }
 
 fn raw<T: vk::Handle>(handle: T) -> u64 {
@@ -967,7 +977,7 @@ impl Backend for NativeBackend {
             // NIR outlive the call.
             unsafe {
                 self.device
-                    .create_graphics_pipelines(vk::PipelineCache::null(), &[*create], None)
+                    .create_graphics_pipelines(pipeline_cache(info.source), &[*create], None)
             }
             .map(|pipelines| Pipeline(raw(pipelines[0])))
             .map_err(|(_, error)| failure(error))
@@ -977,6 +987,21 @@ impl Backend for NativeBackend {
     fn create_compute_pipeline(&mut self, info: &ComputePipelineInfo) -> Result<Pipeline> {
         self.create_compute(info)
             .map(|pipeline| Pipeline(raw(pipeline)))
+    }
+
+    fn create_pipeline_cache(&mut self, data: &[u8]) -> Result<PipelineCache> {
+        let create = vk::PipelineCacheCreateInfo::default().initial_data(data);
+        // SAFETY: the create info and the data outlive the call, and the
+        // driver ignores data whose header is not its own.
+        unsafe { self.device.create_pipeline_cache(&create, None) }
+            .map(|cache| PipelineCache(raw(cache)))
+            .map_err(failure)
+    }
+
+    fn pipeline_cache_data(&mut self, cache: PipelineCache) -> Result<Vec<u8>> {
+        // SAFETY: the cache is alive and the service creates no pipeline
+        // meanwhile.
+        unsafe { self.device.get_pipeline_cache_data(handle(cache.0)) }.map_err(failure)
     }
 
     fn create_query_pool(&mut self, info: &QueryPoolInfo) -> Result<QueryPool> {
@@ -1073,6 +1098,9 @@ impl Backend for NativeBackend {
                 Object::Sampler(sampler) => self.device.destroy_sampler(handle(sampler.0), None),
                 Object::Pipeline(pipeline) => {
                     self.device.destroy_pipeline(handle(pipeline.0), None);
+                }
+                Object::PipelineCache(cache) => {
+                    self.device.destroy_pipeline_cache(handle(cache.0), None);
                 }
                 Object::QueryPool(pool) => self.device.destroy_query_pool(handle(pool.0), None),
                 Object::Semaphore(semaphore) => {

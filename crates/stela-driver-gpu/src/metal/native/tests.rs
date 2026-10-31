@@ -194,6 +194,7 @@ fn pipeline(
         stencil_format: None,
         color_blend: vec![],
         dynamic_states: vec![],
+        source: Default::default(),
         indirect_bindable: false,
     }
 }

@@ -8,12 +8,14 @@
 //! and libraries its descriptor names, whose variants it compiles later:
 //! destroying a library or function ends its creator's use, and the object
 //! goes once nothing uses it.
-use super::{BufferId, ComputePipelineId, Device, FunctionId, LibraryId, RenderPipelineId, Slab};
+use super::{
+    ArchiveId, BufferId, ComputePipelineId, Device, FunctionId, LibraryId, RenderPipelineId, Slab,
+};
 use crate::metal::{
     abi::{DataType, FunctionType, PrimitiveTopologyClass},
     command_buffer::{ComputePipelineState, IndirectCompute, RenderPipelineState},
     error::{Error, Result, ensure, require},
-    library::Library,
+    library::{self, Header, Library},
     pipeline::{
         self, ComputePipelineDescriptor, MeshRenderPipelineDescriptor, RenderPipelineDescriptor,
         RenderTargets, StageThreads, TessellatedVertex, TessellationDescriptor,
@@ -23,17 +25,31 @@ use crate::metal::{
         CompiledShader, Compiler, Interface, LinkedFunction, Linking, Reflection, Specialization,
         Stage, Tessellation, TessellationStages, Varying,
     },
+    stitching::StitchedGraph,
     vertex::{StageInputDescriptor, VertexDescriptor},
     vulkan::{
         ShaderStages,
         backend::{Backend, Object},
-        object::{ComputePipelineInfo, Pipeline, ShaderCode},
+        object::{ComputePipelineInfo, Pipeline, PipelineCache, PipelineSource, ShaderCode},
     },
 };
 use alloc::{string::String, vec::Vec};
 
 /// What a destroyed object's id fails with.
 const DESTROYED: &str = "unknown or destroyed object";
+
+/// A function's `TYPE` in a Metal library.
+fn mtlb_stage(function_type: FunctionType) -> u8 {
+    match function_type {
+        FunctionType::Vertex => 0,
+        FunctionType::Fragment => 1,
+        FunctionType::Kernel => 2,
+        FunctionType::Visible => 4,
+        FunctionType::Intersection => 6,
+        FunctionType::Mesh => 7,
+        FunctionType::Object => 8,
+    }
+}
 
 /// Who uses a library or function: its creator until it destroys the
 /// object, and the functions and pipelines made from it.
@@ -59,7 +75,66 @@ impl Users {
 struct LibraryObject {
     library: u64,
     names: Vec<String>,
+    dynamic: bool,
+    install_name: Option<String>,
+    /// `MTLCompileOptions.libraries` and a stitched library's functions'
+    /// libraries, which it keeps.
+    dependencies: Vec<LibraryId>,
+    /// What a pipeline linking its functions links too: stitched functions'
+    /// calls stay declarations.
+    stitched: Vec<LinkedFunction>,
     users: Users,
+}
+
+/// `MTLBinaryArchive`: the driver's pipeline cache, which holds what its
+/// back end compiled. Each pipeline's stages still lower from AIR.
+#[derive(Debug)]
+struct ArchiveObject {
+    cache: PipelineCache,
+    users: Users,
+}
+
+/// A descriptor's `binaryArchives` and what its request does with them.
+#[derive(Clone, Debug, Default)]
+pub struct PipelineArchives {
+    /// The archives to search, in order.
+    pub searched: Vec<ArchiveId>,
+    /// `MTLPipelineOptionFailOnBinaryArchiveMiss`.
+    pub required: bool,
+    /// The archive `add…FunctionsWithDescriptor:` compiles the pipeline
+    /// into.
+    pub added_to: Option<ArchiveId>,
+}
+
+/// Where a pipeline's Vulkan pipelines come from.
+#[derive(Clone, Debug, Default)]
+struct Sources {
+    searched: Vec<PipelineCache>,
+    required: bool,
+    /// What compiles a pipeline no searched archive holds.
+    compiled: PipelineSource,
+}
+
+impl Sources {
+    /// A pipeline whose stages compile per draw or dispatch shape still
+    /// compiles one now, when its creation answers for an archive.
+    fn compiles_at_creation(&self) -> bool {
+        self.required || self.compiled != PipelineSource::Compiled
+    }
+
+    /// The sources of variants compiled after the pipeline's creation: a
+    /// draw has no miss to fail with, and since no request names its shapes,
+    /// the first archive learns them.
+    fn of_variants(&self) -> Self {
+        Self {
+            searched: self.searched.clone(),
+            required: false,
+            compiled: match (self.compiled, self.searched.first()) {
+                (PipelineSource::Compiled, Some(&cache)) => PipelineSource::Cached(cache),
+                (compiled, _) => compiled,
+            },
+        }
+    }
 }
 
 /// A specialized function (`newFunctionWithName:constantValues:`).
@@ -112,6 +187,7 @@ impl Linked {
 struct Kept {
     functions: Vec<FunctionId>,
     libraries: Vec<LibraryId>,
+    archives: Vec<ArchiveId>,
 }
 
 impl Kept {
@@ -121,7 +197,7 @@ impl Kept {
     ) -> Self {
         let mut kept = Self {
             functions: functions.into_iter().collect(),
-            libraries: Vec::new(),
+            ..Self::default()
         };
         for linked in linked {
             kept.functions.extend(&linked.functions);
@@ -133,9 +209,15 @@ impl Kept {
 
     fn library(library: LibraryId) -> Self {
         Self {
-            functions: Vec::new(),
             libraries: alloc::vec![library],
+            ..Self::default()
         }
+    }
+
+    fn with_archives(mut self, archives: &PipelineArchives) -> Self {
+        self.archives.extend(&archives.searched);
+        self.archives.extend(archives.added_to);
+        self
     }
 }
 
@@ -145,6 +227,7 @@ struct RenderObject {
     kept: Kept,
     /// Each stage's linked functions.
     linked: Vec<(Stage, Linked)>,
+    sources: Sources,
     /// A mesh pipeline's compiled fragment function, which every variant
     /// links.
     fragment: Option<ShaderCode>,
@@ -162,9 +245,9 @@ struct MeshFunctions {
     varyings: Vec<Varying>,
 }
 
-/// Threads per object and per mesh threadgroup, which mesh variants are
-/// compiled for.
-type MeshShape = ([u32; 3], [u32; 3]);
+/// Threads per object and per mesh threadgroup and the object stage's
+/// threadgroup memory lengths, which mesh variants are compiled for.
+type MeshShape = ([u32; 3], [u32; 3], Vec<(u32, u64)>);
 
 #[derive(Debug)]
 struct ComputeObject {
@@ -172,12 +255,14 @@ struct ComputeObject {
     kept: Kept,
     function: FunctionId,
     linked: Linked,
+    sources: Sources,
     variants: Vec<(Specialization, Pipeline)>,
 }
 
 #[derive(Debug, Default)]
 pub(super) struct Pipelines {
     libraries: Slab<LibraryObject>,
+    archives: Slab<ArchiveObject>,
     functions: Slab<FunctionObject>,
     render: Slab<RenderObject>,
     compute: Slab<ComputeObject>,
@@ -202,7 +287,27 @@ impl Pipelines {
         for &id in &kept.libraries {
             ensure(self.libraries.get(id.0)?.users.creator, DESTROYED)?;
         }
+        for &id in &kept.archives {
+            ensure(self.archives.get(id.0)?.users.creator, DESTROYED)?;
+        }
         Ok(())
+    }
+
+    fn sources(&self, archives: &PipelineArchives) -> Result<Sources> {
+        let cache = |id: ArchiveId| Ok(self.archives.get(id.0)?.cache);
+        Ok(Sources {
+            searched: archives
+                .searched
+                .iter()
+                .map(|&id| cache(id))
+                .collect::<Result<_>>()?,
+            required: archives.required,
+            compiled: archives
+                .added_to
+                .map_or(Ok(PipelineSource::Compiled), |id| {
+                    cache(id).map(PipelineSource::Cached)
+                })?,
+        })
     }
 }
 
@@ -283,6 +388,7 @@ pub struct RenderPipelineRequest {
     /// switch to the pipeline, unless it is tessellated or amplifies
     /// vertices, whose draws only the CPU encodes.
     pub support_indirect_command_buffers: bool,
+    pub archives: PipelineArchives,
 }
 
 /// `MTLComputePipelineDescriptor` with the device's function id.
@@ -298,6 +404,7 @@ pub struct ComputePipelineRequest {
     /// switch to the pipeline, whose threadgroup buffers then align to at
     /// most 16 bytes.
     pub support_indirect_command_buffers: bool,
+    pub archives: PipelineArchives,
 }
 
 /// `MTLMeshRenderPipelineDescriptor` with the device's function ids.
@@ -314,21 +421,93 @@ pub struct MeshPipelineRequest {
     pub object_linked_functions: LinkedFunctions,
     pub mesh_linked_functions: LinkedFunctions,
     pub fragment_linked_functions: LinkedFunctions,
+    pub archives: PipelineArchives,
 }
 
 impl<B: Backend, C: Compiler> Device<B, C> {
+    /// `newLibraryWithSource:` of the AIR the source compiled to.
+    /// `dependencies` are `MTLCompileOptions.libraries`, which load with the
+    /// library for whatever links it.
+    pub fn new_source_library(
+        &mut self,
+        air: &[u8],
+        install_name: Option<&str>,
+        dependencies: &[LibraryId],
+    ) -> Result<LibraryId> {
+        for &id in dependencies {
+            ensure(self.pipelines.libraries.get(id.0)?.users.creator, DESTROYED)?;
+        }
+        let functions = self.compiler.functions(air)?;
+        let stages: Vec<_> = functions
+            .iter()
+            .map(|(name, function_type)| (name.as_str(), mtlb_stage(*function_type)))
+            .collect();
+        let kind = install_name.map_or(0, |_| Header::DYNAMIC);
+        let library = self.new_library(library::assemble(air, &stages, kind, install_name))?;
+        for &id in dependencies {
+            self.pipelines.libraries.get_mut(id.0)?.users.others += 1;
+        }
+        self.pipelines.libraries.get_mut(library.0)?.dependencies = dependencies.to_vec();
+        Ok(library)
+    }
+
+    /// `newLibraryWithStitchedDescriptor:error:`: a library of `graphs`, whose
+    /// calls index `functions`.
+    pub fn new_stitched_library(
+        &mut self,
+        functions: &[FunctionId],
+        graphs: &[StitchedGraph],
+    ) -> Result<LibraryId> {
+        let mut libraries = Vec::with_capacity(functions.len());
+        let mut stitched = Vec::with_capacity(functions.len());
+        for &id in functions {
+            let function = self.pipelines.functions.get(id.0)?;
+            ensure(
+                matches!(function.reflection, Reflection::Visible { .. }),
+                "stitched functions are visible functions",
+            )?;
+            let mut constants = function.constants.clone();
+            constants.sort_unstable_by_key(|&(index, _)| index);
+            stitched.push(LinkedFunction {
+                library: self.pipelines.library(function.library)?,
+                entry: function.entry.clone(),
+                constants,
+            });
+            libraries.push(function.library);
+        }
+        let sources: Vec<_> = stitched
+            .iter()
+            .map(|function| (function.library, function.entry.as_str()))
+            .collect();
+        let air = self.compiler.stitch(&sources, graphs)?;
+        // A stitched function's own stitched functions link with it.
+        for id in &libraries {
+            let below = &self.pipelines.libraries.get(id.0)?.stitched;
+            stitched.extend_from_slice(below);
+        }
+        let library = self.new_source_library(&air, None, &libraries)?;
+        self.pipelines.libraries.get_mut(library.0)?.stitched = stitched;
+        Ok(library)
+    }
+
     /// `newLibraryWithData:`: keeps a Metal library for its functions.
     pub fn new_library(&mut self, data: Vec<u8>) -> Result<LibraryId> {
-        let names = Library::parse(&data)
-            .map_err(|_| Error::Invalid("Metal library"))?
+        let parsed = Library::parse(&data).map_err(|_| Error::Invalid("Metal library"))?;
+        let names = parsed
             .functions()
             .iter()
             .map(|function| String::from(function.name))
             .collect();
+        let dynamic = parsed.header.kind == Header::DYNAMIC;
+        let install_name = parsed.install_name.map(String::from);
         let library = self.compiler.add_library(data)?;
         let index = self.pipelines.libraries.insert(LibraryObject {
             library,
             names,
+            dynamic,
+            install_name,
+            dependencies: Vec::new(),
+            stitched: Vec::new(),
             users: Users::CREATED,
         });
         Ok(LibraryId(index))
@@ -337,6 +516,70 @@ impl<B: Backend, C: Compiler> Device<B, C> {
     /// `functionNames`.
     pub fn library_function_names(&self, id: LibraryId) -> Result<&[String]> {
         Ok(&self.pipelines.libraries.get(id.0)?.names)
+    }
+
+    /// `type` and `installName`.
+    pub fn library_identity(&self, id: LibraryId) -> Result<(bool, Option<&str>)> {
+        let library = self.pipelines.libraries.get(id.0)?;
+        Ok((library.dynamic, library.install_name.as_deref()))
+    }
+
+    /// The library's bytes, which `serializeToURL:` writes.
+    pub fn library_data(&self, id: LibraryId) -> Result<&[u8]> {
+        self.compiler.library_data(self.pipelines.library(id)?)
+    }
+
+    /// `newBinaryArchiveWithDescriptor:error:` of `data`, a file's bytes:
+    /// another device's or driver's archive holds nothing of this one's.
+    pub fn new_archive(&mut self, data: &[u8]) -> Result<ArchiveId> {
+        let cache = self.backend.create_pipeline_cache(data)?;
+        let index = self.pipelines.archives.insert(ArchiveObject {
+            cache,
+            users: Users::CREATED,
+        });
+        Ok(ArchiveId(index))
+    }
+
+    /// The bytes `serializeToURL:error:` writes.
+    pub fn archive_data(&mut self, id: ArchiveId) -> Result<Vec<u8>> {
+        let cache = self.pipelines.archives.get(id.0)?.cache;
+        self.backend.pipeline_cache_data(cache)
+    }
+
+    /// Ends the creator's use of an archive, which goes with the last
+    /// pipeline reading it.
+    pub fn destroy_archive(&mut self, id: ArchiveId) -> Result<()> {
+        let users = &mut self.pipelines.archives.get_mut(id.0)?.users;
+        ensure(users.creator, DESTROYED)?;
+        users.creator = false;
+        self.collect_archive(id)
+    }
+
+    fn collect_archive(&mut self, id: ArchiveId) -> Result<()> {
+        if self.pipelines.archives.get(id.0)?.users.none() {
+            let archive = self.pipelines.archives.remove(id.0)?;
+            self.defer(Object::PipelineCache(archive.cache));
+        }
+        Ok(())
+    }
+
+    /// A pipeline from the first of `sources` that holds it, else compiled
+    /// unless the request wants it from them.
+    fn create_from(
+        &mut self,
+        sources: &Sources,
+        mut create: impl FnMut(&mut B, PipelineSource) -> Result<Pipeline>,
+    ) -> Result<Pipeline> {
+        for &cache in &sources.searched {
+            match create(&mut self.backend, PipelineSource::Archived(cache)) {
+                Err(Error::NotArchived) => {}
+                created => return created,
+            }
+        }
+        if sources.required {
+            return Err(Error::NotArchived);
+        }
+        create(&mut self.backend, sources.compiled)
     }
 
     /// Ends the creator's use of a library, which goes with the last
@@ -352,6 +595,10 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         if self.pipelines.libraries.get(id.0)?.users.none() {
             let library = self.pipelines.libraries.remove(id.0)?;
             self.compiler.remove_library(library.library)?;
+            self.release(Kept {
+                libraries: library.dependencies,
+                ..Kept::default()
+            })?;
         }
         Ok(())
     }
@@ -490,6 +737,9 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         for &id in &kept.libraries {
             self.pipelines.libraries.get_mut(id.0)?.users.others += 1;
         }
+        for &id in &kept.archives {
+            self.pipelines.archives.get_mut(id.0)?.users.others += 1;
+        }
         Ok(())
     }
 
@@ -502,6 +752,10 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         for id in kept.libraries {
             self.pipelines.libraries.get_mut(id.0)?.users.others -= 1;
             self.collect_library(id)?;
+        }
+        for id in kept.archives {
+            self.pipelines.archives.get_mut(id.0)?.users.others -= 1;
+            self.collect_archive(id)?;
         }
         Ok(())
     }
@@ -517,8 +771,21 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         let function = self.pipelines.functions.get(id.0)?;
         let library = self.pipelines.library(function.library)?;
         let entry = function.entry.clone();
+        let mut linking = specialization.linking;
+        for &dependency in &self
+            .pipelines
+            .libraries
+            .get(function.library.0)?
+            .dependencies
+        {
+            let dependency = self.pipelines.library(dependency)?;
+            if !linking.libraries.contains(&dependency) {
+                linking.libraries.push(dependency);
+            }
+        }
         let specialization = Specialization {
             constants: function.constants.clone(),
+            linking,
             ..specialization
         };
         let samplers = self
@@ -590,8 +857,10 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 &request.vertex_linked_functions,
                 &request.fragment_linked_functions,
             ],
-        );
+        )
+        .with_archives(&request.archives);
         self.pipelines.ensure_created(&kept)?;
+        let sources = self.pipelines.sources(&request.archives)?;
         let vertex_linked = self.link(&request.vertex_linked_functions, true)?;
         let fragment_linked = self.link(&request.fragment_linked_functions, true)?;
         let pipelines = &self.pipelines;
@@ -665,7 +934,11 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                     && plan.tessellation.is_none()
                     && plan.amplification_count == 1
                     && generated.is_some();
-                Ok((self.backend.create_graphics_pipeline(&plan.info)?, plan))
+                let pipeline = self.create_from(&sources, |backend, source| {
+                    plan.info.source = source;
+                    backend.create_graphics_pipeline(&plan.info)
+                })?;
+                Ok((pipeline, plan))
             });
         codes.iter().for_each(|code| self.compiler.release(*code));
         let (vulkan, plan) = created?;
@@ -697,6 +970,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 (Stage::Vertex, vertex_linked),
                 (Stage::Fragment, fragment_linked)
             ],
+            sources: Sources::default(),
             fragment: None,
             mesh: None,
             variants: Vec::new(),
@@ -722,8 +996,10 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 &request.mesh_linked_functions,
                 &request.fragment_linked_functions,
             ],
-        );
+        )
+        .with_archives(&request.archives);
         self.pipelines.ensure_created(&kept)?;
+        let sources = self.pipelines.sources(&request.archives)?;
         let linked = [
             (Stage::Object, &request.object_linked_functions),
             (Stage::Mesh, &request.mesh_linked_functions),
@@ -794,6 +1070,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 indirect: None,
             },
             linked,
+            sources: sources.clone(),
             fragment: fragment.map(|shader| shader.code),
             mesh: Some(MeshFunctions {
                 object: request.object_function,
@@ -802,8 +1079,19 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             }),
             variants: Vec::new(),
         });
-        self.pipelines.render.get_mut(index)?.state.id = u64::from(index);
-        Ok(RenderPipelineId(index))
+        let id = RenderPipelineId(index);
+        let render = self.pipelines.render.get_mut(index)?;
+        render.state.id = u64::from(index);
+        let threads = render.state.plan.mesh;
+        if let Some(threads) = threads.filter(|_| sources.compiles_at_creation()) {
+            let (object, mesh) = threads.smallest();
+            if let Err(error) = self.mesh_variant(u64::from(index), object, mesh, &[]) {
+                self.destroy_render_pipeline(id)?;
+                return Err(error);
+            }
+        }
+        self.pipelines.render.get_mut(index)?.sources = sources.of_variants();
+        Ok(id)
     }
 
     pub fn render_pipeline_state(&self, id: RenderPipelineId) -> Result<&RenderPipelineState> {
@@ -816,10 +1104,11 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         id: u64,
         object_threads: [u32; 3],
         mesh_threads: [u32; 3],
+        object_lengths: &[(u32, u64)],
     ) -> Result<Pipeline> {
         let index = u32::try_from(id).map_err(|_| Error::Invalid("unknown pipeline"))?;
         let render = self.pipelines.render.get(index)?;
-        let key = (object_threads, mesh_threads);
+        let key = (object_threads, mesh_threads, object_lengths.to_vec());
         if let Some((_, pipeline)) = render.variants.iter().find(|(known, _)| *known == key) {
             return Ok(*pipeline);
         }
@@ -840,19 +1129,21 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         plan.mesh
             .ok_or(Error::Invalid("not a mesh pipeline"))?
             .check(object_threads, mesh_threads)?;
+        let sources = render.sources.clone();
         let mut info = plan.info.clone();
         let mut stages = Vec::new();
         let mut codes = Vec::new();
         // The first stage is the one mesh draws launch; the mesh function
         // links to the fragment function.
         let [object_linking, mesh_linking] = linkings;
-        for (function, threads, stage, varyings, linking) in [
+        for (function, threads, stage, varyings, linking, threadgroup_lengths) in [
             (
                 object,
                 object_threads,
                 Stage::Object,
                 Vec::new(),
                 object_linking,
+                object_lengths.to_vec(),
             ),
             (
                 Some(mesh),
@@ -860,6 +1151,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 Stage::Mesh,
                 varyings,
                 mesh_linking,
+                Vec::new(),
             ),
         ] {
             let Some(function) = function else { continue };
@@ -868,6 +1160,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 varyings,
                 launched_by_grid: stage == Stage::Object || object.is_none(),
                 linking,
+                threadgroup_lengths,
                 ..Specialization::default()
             };
             match self.compile(function, specialization) {
@@ -883,7 +1176,10 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         }
         stages.extend(info.stages);
         info.stages = stages;
-        let pipeline = self.backend.create_graphics_pipeline(&info);
+        let pipeline = self.create_from(&sources, |backend, source| {
+            info.source = source;
+            backend.create_graphics_pipeline(&info)
+        });
         codes
             .into_iter()
             .for_each(|code| self.compiler.release(code));
@@ -926,8 +1222,10 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         request: &ComputePipelineRequest,
     ) -> Result<ComputePipelineId> {
         let function = request.compute_function;
-        let kept = Kept::new([function], [&request.linked_functions]);
+        let kept =
+            Kept::new([function], [&request.linked_functions]).with_archives(&request.archives);
         self.pipelines.ensure_created(&kept)?;
+        let sources = self.pipelines.sources(&request.archives)?;
         let linked = self.link(&request.linked_functions, false)?;
         let interface = self.pipelines.interface(function)?.clone();
         let descriptor = ComputePipelineDescriptor {
@@ -941,14 +1239,19 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         let generated = self.backend.physical_device().limits.generated_commands;
         let bindable =
             generated.is_some_and(|limits| limits.pipeline_stages.contains(ShaderStages::COMPUTE));
-        let indirect = if request.support_indirect_command_buffers && bindable {
-            let specialization = Specialization {
-                linking: linked.linking.clone(),
-                ..pipeline::indirect_compute_variant(&plan)
-            };
-            let subgroups = (plan.thread_execution_width as u32, plan.full_subgroups);
+        let subgroups = (plan.thread_execution_width as u32, plan.full_subgroups);
+        let variant = Specialization {
+            linking: linked.linking.clone(),
+            ..pipeline::indirect_compute_variant(&plan)
+        };
+        if sources.compiles_at_creation() {
             let pipeline =
-                self.create_compute_variant(function, subgroups, specialization, true)?;
+                self.create_compute_variant(function, subgroups, variant.clone(), false, &sources)?;
+            self.defer(Object::Pipeline(pipeline));
+        }
+        let indirect = if request.support_indirect_command_buffers && bindable {
+            let pipeline =
+                self.create_compute_variant(function, subgroups, variant, true, &sources)?;
             match self.add_indirect_compute(pipeline) {
                 Ok(place) => Some(IndirectCompute { pipeline, place }),
                 Err(error) => {
@@ -971,6 +1274,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             state,
             function,
             linked,
+            sources: sources.of_variants(),
             variants: Vec::new(),
         });
         self.pipelines.compute.get_mut(index)?.state.id = u64::from(index);
@@ -1012,7 +1316,8 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             linking: compute.linked.linking.clone(),
             ..specialization.clone()
         };
-        let pipeline = self.create_compute_variant(function, subgroups, linked, false)?;
+        let sources = compute.sources.clone();
+        let pipeline = self.create_compute_variant(function, subgroups, linked, false, &sources)?;
         self.pipelines
             .compute
             .get_mut(index)?
@@ -1029,15 +1334,20 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         (width, full_subgroups): (u32, bool),
         specialization: Specialization,
         indirect_bindable: bool,
+        sources: &Sources,
     ) -> Result<Pipeline> {
         let compiled = self.compile(function, specialization)?;
-        let info = ComputePipelineInfo {
+        let mut info = ComputePipelineInfo {
             code: compiled.code,
             required_subgroup_size: width,
             full_subgroups,
             indirect_bindable,
+            source: PipelineSource::Compiled,
         };
-        let pipeline = self.backend.create_compute_pipeline(&info);
+        let pipeline = self.create_from(sources, |backend, source| {
+            info.source = source;
+            backend.create_compute_pipeline(&info)
+        });
         self.compiler.release(compiled.code);
         pipeline
     }
@@ -1066,18 +1376,20 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             .and_then(|linked| linked.handle(function)))
     }
 
-    /// `newVisibleFunctionTableWithDescriptor:`: a shared buffer of `count`
-    /// function handles, each calling no function. It binds as the buffer
-    /// at a table argument's index, and its address is its
-    /// `gpuResourceID`.
+    /// `newVisibleFunctionTableWithDescriptor:`: a shared buffer of `count`,
+    /// which shaders read as the table's size, then `count` function
+    /// handles, each calling no function. It binds as the buffer at a table
+    /// argument's index, and its address is its `gpuResourceID`.
     pub fn new_visible_function_table(&mut self, count: u64) -> Result<BufferId> {
         const INVALID: Error = Error::Invalid("visible function table size");
         let bytes = count
-            .checked_mul(8)
-            .filter(|&bytes| bytes != 0)
+            .checked_add(1)
+            .and_then(|words| words.checked_mul(8))
+            .filter(|_| count != 0)
             .ok_or(INVALID)?;
-        let zeros = alloc::vec![0; usize::try_from(bytes).map_err(|_| INVALID)?];
-        self.new_shared_buffer(&zeros)
+        let mut contents = alloc::vec![0; usize::try_from(bytes).map_err(|_| INVALID)?];
+        contents[..8].copy_from_slice(&count.to_le_bytes());
+        self.new_shared_buffer(&contents)
     }
 
     /// `setFunction:atIndex:` and `setFunctions:withRange:`: writes
@@ -1089,7 +1401,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         handles: &[Option<FunctionHandle>],
     ) -> Result<()> {
         let (memory, offset, length) = self.buffer_memory(table)?;
-        let start = index.checked_mul(8);
+        let start = index.checked_add(1).and_then(|word| word.checked_mul(8));
         let end = start.and_then(|start| start.checked_add(handles.len() as u64 * 8));
         ensure(
             end.is_some_and(|end| end <= length),
@@ -1100,7 +1412,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             .flat_map(|handle| handle.map_or(0, |handle| handle.0).to_le_bytes())
             .collect();
         self.backend
-            .write_memory(memory, offset + index * 8, &bytes)
+            .write_memory(memory, offset + (index + 1) * 8, &bytes)
     }
 
     /// Resolves a stage's linked functions, which must be visible
@@ -1148,11 +1460,17 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 })
                 .collect()
         };
+        let mut private_functions = entries(&linked.private_functions)?;
+        for &id in functions() {
+            let library = self.pipelines.functions.get(id.0)?.library;
+            let stitched = &self.pipelines.libraries.get(library.0)?.stitched;
+            private_functions.extend_from_slice(stitched);
+        }
         Ok(Linked {
             functions: linked.functions.clone(),
             linking: Linking {
                 functions: entries(&linked.functions)?,
-                private_functions: entries(&linked.private_functions)?,
+                private_functions,
                 libraries: linked
                     .libraries
                     .iter()

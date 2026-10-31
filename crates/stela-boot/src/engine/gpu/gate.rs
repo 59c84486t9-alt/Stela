@@ -1,23 +1,23 @@
 //! The Metal service over NVK, which the guest reaches through StelaGPU's gate.
 //!
 //! It opens on the boot CPU once nouveau has bound the GPUs, before the guest's
-//! DeviceTree is final, so the tree has a gate only with a device behind it.
-//! The tree has one gate, so Metal gets the first GPU; the rest stay Linux's.
+//! DeviceTree is final, so the tree has a gate only with a device behind it,
+//! and one for each GPU that opened.
 //!
-//! The service runs on a stack of its own, deep enough for a compile. Its lock
-//! means one is enough; opening comes before any caller.
+//! Each service runs on a stack of its own, deep enough for a compile. Its
+//! lock means one is enough; opening comes before any caller.
 use super::{
-    BOOT_CPU, PAGE, client, installed, pump,
+    BOOT_CPU, Bound, Installed, PAGE, client, installed, pump,
     stack::{self, Stack},
 };
-use crate::{engine::host, output};
+use crate::engine::host;
 use alloc::{boxed::Box, format, sync::Arc, vec::Vec};
 use core::{
     ffi::{c_char, c_void},
     hint,
     num::NonZeroU64,
     ptr::{self, NonNull},
-    sync::atomic::{AtomicPtr, AtomicU64, Ordering},
+    sync::atomic::{AtomicPtr, Ordering},
 };
 use stela_contracts::gate::{GateService, MemoryRange, window};
 use stela_drivers::gpu::{
@@ -41,22 +41,20 @@ type Shared = SharedService<NativeBackend, AirCompiler>;
 /// A process's main stack, as big as the deepest compile LLVM bounds.
 const STACK_BYTES: usize = 16 << 20;
 
-/// The service for the kernel's interrupts, once it is open.
-static SERVICE: AtomicPtr<Shared> = AtomicPtr::new(ptr::null_mut());
-/// The end of the service's stack.
-static STACK: AtomicU64 = AtomicU64::new(0);
+/// The services for the kernel's interrupts, once all are open.
+static SERVICES: AtomicPtr<Vec<Arc<Shared>>> = AtomicPtr::new(ptr::null_mut());
 
 unsafe extern "C" {
     fn stela_nvk_nir_options(physical: vk::PhysicalDevice) -> *const c_void;
 }
 
-fn run(body: &mut dyn FnMut()) {
-    // SAFETY: the stack lives for the boot, and only the opener or a turn's
-    // holder is here.
-    unsafe { stack::on_stack(STACK.load(Ordering::Relaxed), body) };
+fn run(stack: u64, body: &mut dyn FnMut()) {
+    // SAFETY: a service's stack lives for the boot, and only the opener or a
+    // turn's holder is here.
+    unsafe { stack::on_stack(stack, body) };
 }
 
-fn relax() {
+pub(super) fn relax() {
     if host::processor() == BOOT_CPU.load(Ordering::Relaxed) {
         pump();
     }
@@ -115,7 +113,7 @@ impl MemoryExporter for Exporter {
     }
 }
 
-fn service(gpu: &Gpu) -> Result<Arc<Shared>, OpenError> {
+fn service(gpu: &Gpu, stack: u64) -> Result<Arc<Shared>, OpenError> {
     let compiler = |physical| {
         // SAFETY: NVK's own physical device, whose options last as long.
         let options = unsafe { stela_nvk_nir_options(physical) };
@@ -136,43 +134,56 @@ fn service(gpu: &Gpu) -> Result<Arc<Shared>, OpenError> {
     }?;
     Ok(Arc::new(SharedService::new(
         service,
-        ServiceHost { relax, run },
+        ServiceHost { relax, stack, run },
     )))
 }
 
-/// Open the service over the first bound GPU. What stops it is reported, and
-/// the Mac boots without Metal.
+/// Open a service over every bound GPU. What stops one is reported, and the
+/// Mac boots without Metal on that GPU.
 pub(in crate::engine) fn open_service() {
     let Some(gpu) = installed() else {
         return;
     };
-    let Some(first) = gpu.start.bound.first() else {
-        return;
+    let mut constructed = false;
+    let services: Vec<_> = gpu
+        .start
+        .bound
+        .iter()
+        .enumerate()
+        .filter_map(|(index, bound)| open_gpu(gpu, index, bound, &mut constructed))
+        .collect();
+    SERVICES.store(Box::into_raw(Box::new(services)), Ordering::Release);
+}
+
+/// The service of `bound`, at DRM minor `index`, whose failure is reported.
+fn open_gpu(
+    gpu: &Installed,
+    index: usize,
+    bound: &Bound,
+    constructed: &mut bool,
+) -> Option<Arc<Shared>> {
+    let refuse = |reason: &str| {
+        crate::status::warn(&format!("GPU {}: {reason}", bound.name));
+        None
     };
-    for other in &gpu.start.bound[1..] {
-        output::arguments(format_args!(
-            "GPU {}: Metal has the first GPU only\n",
-            other.name
-        ));
-    }
-    let Some(link) = first.link else {
-        return crate::status::warn(&format!("GPU {} has no PCIe link", first.name));
+    let Some(link) = bound.link else {
+        return refuse("no PCIe link");
     };
-    let Some(chipset) = client::chipset(0) else {
-        return crate::status::warn(&format!("GPU {} reports no chipset", first.name));
+    let Some(chipset) = client::chipset(index as u32) else {
+        return refuse("no chipset reported");
     };
     let Some(stack) = Stack::map(gpu.window, STACK_BYTES) else {
-        return crate::status::warn("no memory for the GPU's service");
+        return refuse("no memory for its service");
     };
-    STACK.store(stack.top(), Ordering::Relaxed);
+    let top = stack.top();
     // It serves for the boot.
     core::mem::forget(stack);
     let target = Gpu {
         pci: PciBusInfo {
-            domain: first.drm.segment.into(),
-            bus: first.drm.bus.into(),
-            device: first.drm.slot.into(),
-            function: first.drm.function.into(),
+            domain: bound.drm.segment.into(),
+            bus: bound.drm.bus.into(),
+            device: bound.drm.slot.into(),
+            function: bound.drm.function.into(),
         },
         chipset,
         // A GPU in a Thunderbolt enclosure reaches Stela as the function
@@ -180,57 +191,45 @@ pub(in crate::engine) fn open_service() {
         attachment: Attachment {
             link,
             external: false,
-            location_number: 0,
+            location_number: index as u64,
         },
     };
     let mut opened = None;
-    run(&mut || {
-        // SAFETY: the one call, before any other of the C's.
-        unsafe { stela_mesa::stela_constructors() };
-        opened = Some(service(&target));
-    });
-    match opened {
-        Some(Ok(service)) => SERVICE.store(Arc::into_raw(service).cast_mut(), Ordering::Release),
-        Some(Err(error)) => {
-            crate::status::warn(&format!(
-                "Metal could not open on {}: {error:?}",
-                first.name
-            ));
+    run(top, &mut || {
+        if !core::mem::replace(constructed, true) {
+            // SAFETY: the one call, before any other of the C's.
+            unsafe { stela_mesa::stela_constructors() };
         }
-        None => {}
+        opened = Some(service(&target, top));
+    });
+    match opened? {
+        Ok(service) => Some(service),
+        Err(error) => refuse(&format!("Metal could not open: {error:?}")),
     }
 }
 
-fn shared() -> Option<&'static Shared> {
-    // SAFETY: a published service is leaked, so it lives for the boot.
-    unsafe { SERVICE.load(Ordering::Acquire).as_ref() }
+fn shared() -> &'static [Arc<Shared>] {
+    // SAFETY: the published services are leaked, so they live for the boot.
+    unsafe { SERVICES.load(Ordering::Acquire).as_ref() }.map_or(&[], Vec::as_slice)
 }
 
-/// Tell the service the GPU interrupted.
+/// Tell the services a GPU interrupted: its MSI says nothing of which.
 pub(super) fn interrupted() {
-    if let Some(service) = shared() {
-        service.interrupted();
-    }
+    shared().iter().for_each(|service| service.interrupted());
 }
 
-/// Add the gate's node to `tree`, when there is a service behind it, for what
-/// the board mounts there.
+/// Add each service's gate node to `tree`, for what the board mounts there.
 pub(in crate::engine) fn place(
     tree: &mut DeviceTree,
-) -> Option<(stela_gpu::Placement, Arc<dyn GateService>)> {
-    let service = NonNull::new(SERVICE.load(Ordering::Acquire))?;
-    match stela_gpu::place_gpu_gate(tree, window::BYTES) {
-        Ok(placement) => {
-            // SAFETY: from `Arc::into_raw`, and the published count is kept.
-            let service = unsafe {
-                Arc::increment_strong_count(service.as_ptr());
-                Arc::from_raw(service.as_ptr())
-            };
-            Some((placement, service))
-        }
-        Err(error) => {
-            crate::status::warn(&format!("the GPU's gate has no place: {error}"));
-            None
+) -> Vec<(stela_gpu::Placement, Arc<dyn GateService>)> {
+    let mut gates = Vec::new();
+    for (index, service) in shared().iter().enumerate() {
+        match stela_gpu::place_gpu_gate(tree, index, window::BYTES) {
+            Ok(placement) => gates.push((placement, service.clone() as Arc<dyn GateService>)),
+            Err(error) => {
+                crate::status::warn(&format!("GPU {index}'s gate has no place: {error}"));
+            }
         }
     }
+    gates
 }

@@ -1,11 +1,13 @@
 use super::{
-    Memory, TestService, call, connect, new_function, new_library, render_pipeline_request,
-    service, status,
+    GuestMemory, Memory, TestService, call, connect, new_function, new_library,
+    render_pipeline_request, service, status,
 };
 use crate::metal::service::wire::{
-    BufferResponse, ComputePipelineResponse, Empty, FunctionHandleRequest, FunctionHandleResponse,
-    Handle, LinkedFunctionsRecord, NewComputePipelineRequest, NewFunctionTableRequest,
-    NewRenderPipelineRequest, Operation, RenderPipelineResponse, SetFunctionsRequest, Span, Status,
+    ArchiveDataRequest, BufferResponse, ComputePipelineResponse, Empty, FunctionHandleRequest,
+    FunctionHandleResponse, Handle, Length, LinkedFunctionsRecord, NewArchiveRequest,
+    NewComputePipelineRequest, NewFunctionTableRequest, NewRenderPipelineRequest,
+    NewStitchedLibraryRequest, Operation, PipelineArchivesRecord, RenderPipelineResponse,
+    SetFunctionsRequest, Span, Status,
 };
 use core::num::NonZeroU64;
 
@@ -32,6 +34,7 @@ fn compute_pipeline(
         max_total_threads_per_threadgroup: 0,
         stage_input: Default::default(),
         linked_functions,
+        archives: Default::default(),
         flags,
     };
     call(
@@ -41,6 +44,61 @@ fn compute_pipeline(
         &request,
         memory,
     )
+}
+
+#[test]
+fn archives_read_back_and_answer_for_pipelines() {
+    let mut service = service();
+    let connection = connect(&mut service);
+    let memory = &mut Memory::default();
+    let library = new_library(&mut service, connection, memory);
+    let kernel = new_function(&mut service, connection, library, "kernel", &[], memory)
+        .unwrap()
+        .handle;
+    let data = memory.put(&[]);
+    let archive = call::<_, Handle>(
+        &mut service,
+        connection,
+        Operation::NewArchive,
+        &NewArchiveRequest { data },
+        memory,
+    )
+    .unwrap()
+    .handle;
+
+    let mut create = |memory: &mut Memory, searched: &[u64], added_to, required| {
+        let request = NewComputePipelineRequest {
+            compute_function: kernel,
+            archives: PipelineArchivesRecord {
+                searched: memory.records(searched),
+                added_to,
+                required,
+            },
+            ..Default::default()
+        };
+        status::<ComputePipelineResponse>(call(
+            &mut service,
+            connection,
+            Operation::NewComputePipeline,
+            &request,
+            memory,
+        ))
+    };
+    assert_eq!(create(memory, &[archive], 0, 1), Status::Invalid);
+    assert_eq!(create(memory, &[], archive, 0), Status::Ok);
+    assert_eq!(create(memory, &[archive], 0, 1), Status::Ok);
+
+    let out = memory.put(&[0; 4]);
+    let length: Length = call(
+        &mut service,
+        connection,
+        Operation::ArchiveData,
+        &ArchiveDataRequest { archive, out },
+        memory,
+    )
+    .unwrap();
+    assert_eq!(length.length, 1);
+    assert_eq!(memory.read(out).unwrap(), [1, 0, 0, 0]);
 }
 
 fn handle(
@@ -164,6 +222,45 @@ fn compute_pipelines_link_functions_and_answer_their_handles() {
         Err(Status::StaleHandle)
     );
     assert_eq!(release(&mut service, pipeline.handle), Status::Ok);
+}
+
+#[test]
+fn stitched_libraries_take_visible_functions() {
+    let mut service = service();
+    let connection = connect(&mut service);
+    let memory = &mut Memory::default();
+    let library = new_library(&mut service, connection, memory);
+    let mut function = |library, name| {
+        new_function(&mut service, connection, library, name, &[], memory)
+            .unwrap()
+            .handle
+    };
+    let (kernel, visible) = (function(library, "kernel"), function(library, "visible"));
+    // `f(a) = visible(a)`.
+    let words = [1u32, 2, 2, 0x66, 0, 0, 1, 1, 0];
+    let graphs: alloc::vec::Vec<u8> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+    let graphs = memory.put(&graphs);
+    let mut stitched = |functions: &[u64], memory: &mut Memory| {
+        let request = NewStitchedLibraryRequest {
+            functions: memory.records(functions),
+            graphs,
+        };
+        call::<_, Handle>(
+            &mut service,
+            connection,
+            Operation::NewStitchedLibrary,
+            &request,
+            memory,
+        )
+    };
+    assert_eq!(status(stitched(&[kernel], memory)), Status::Invalid);
+    let stitched = stitched(&[visible], memory).unwrap().handle;
+
+    let function = new_function(&mut service, connection, stitched, "visible", &[], memory)
+        .unwrap()
+        .handle;
+    let linked = linked(memory, &[function]);
+    compute_pipeline(&mut service, connection, kernel, linked, 0, memory).unwrap();
 }
 
 #[test]

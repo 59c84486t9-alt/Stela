@@ -49,6 +49,7 @@ const RENDER_STAGES: [Stage; 3] = [Stage::Vertex, Stage::Fragment, Stage::Mesh];
 /// The render encoder's Metal state an execution restores.
 struct SavedRender {
     pipeline: Option<RenderPipelineState>,
+    object_threadgroup_lengths: Vec<(u32, u64)>,
     vertex_buffers: [Option<VertexBinding>; 31],
     amplification: Vec<u32>,
     factors: Option<FactorBuffer>,
@@ -171,6 +172,7 @@ impl CommandBuffer {
         let render = render(&mut self.encoder)?;
         let saved = SavedRender {
             pipeline: render.pipeline.clone(),
+            object_threadgroup_lengths: render.object_threadgroup_lengths.clone(),
             vertex_buffers: render.vertex_buffers,
             amplification: render.amplification.clone(),
             factors: render.factors,
@@ -255,6 +257,7 @@ impl CommandBuffer {
             }
             *buffers = Some(&command.buffers);
         }
+        render(&mut self.encoder)?.object_threadgroup_lengths = command.threadgroup_lengths.clone();
         let mut raster = render(&mut self.encoder)?.raster;
         let own = &command.raster;
         if !descriptor.inherit_cull_mode {
@@ -375,6 +378,7 @@ impl CommandBuffer {
         }
         let render = render(&mut self.encoder)?;
         render.vertex_buffers = saved.vertex_buffers;
+        render.object_threadgroup_lengths = saved.object_threadgroup_lengths;
         render.amplification = saved.amplification;
         render.factors = saved.factors;
         self.set_raster_state(&saved.raster)?;

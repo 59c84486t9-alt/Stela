@@ -33,11 +33,14 @@ impl Prepare {
             };
             return self.run_recovery(&mut image, path, kind, volume, &options);
         }
+        let bundles = self.kext_bundles()?;
+        let kexts = super::kexts(&bundles);
         let request = installed::Request {
             boot_hash: self.boot_hash.as_deref(),
             model: self.model.as_deref(),
             volume,
             authority: None,
+            kexts: &kexts,
         };
         let (offset, installed) = installed::prepare_disk(&mut image, &request, &options)?;
         let provenance = serde_json::json!({

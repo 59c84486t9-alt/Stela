@@ -242,6 +242,13 @@ air_atomics_follow_their_names(void)
       "%f = call i32 @air.atomic.local.and.u.i32(ptr addrspace(3) %p, i32 %d, i32 0, i32 1, i1 true)\n"
       "store i32 %f, ptr addrspace(1) %out, align 4\nret void\n",
       expected, ARRAY_SIZE(expected));
+   /* Metal 1 has no volatility. */
+   const nir_atomic_op added[] = {nir_atomic_op_iadd};
+   expect_atomics(
+      "declare i32 @air.atomic.global.add.u.i32(ptr addrspace(1), i32, i32, i32)\n",
+      "%a = call i32 @air.atomic.global.add.u.i32(ptr addrspace(1) %out, i32 1, i32 0, i32 2)\n"
+      "store i32 %a, ptr addrspace(1) %out, align 4\nret void\n",
+      added, ARRAY_SIZE(added));
    /* Loads and stores are coherent accesses; a compare-exchange compares
     * and receives through its thread pointer; 64-bit min and max return
     * nothing. */
@@ -337,6 +344,10 @@ barriers_and_fences_follow_their_flags(void)
    check_barrier("declare void @air.wg.barrier(i32, i32) convergent\n",
                  "call void @air.wg.barrier(i32 1, i32 1) convergent",
                  SCOPE_WORKGROUP, SCOPE_WORKGROUP, device);
+   /* Linked Metal 1 libraries spell the attribute differently. */
+   check_barrier("declare void @air.wg.barrier(i32, i32) noduplicate\n",
+                 "call void @air.wg.barrier(i32 1, i32 1) noduplicate",
+                 SCOPE_WORKGROUP, SCOPE_WORKGROUP, device);
    const char *simdgroup = "declare void @air.simdgroup.barrier(i32, i32) convergent\n";
    check_barrier(simdgroup, "call void @air.simdgroup.barrier(i32 2, i32 4) convergent",
                  SCOPE_SUBGROUP, SCOPE_SUBGROUP, nir_var_mem_shared);
@@ -353,7 +364,7 @@ barriers_and_fences_follow_their_flags(void)
       {threadgroup, "call void @air.wg.barrier(i32 8, i32 5, i32 1) convergent"},
       {threadgroup, "call void @air.wg.barrier(i32 2, i32 0, i32 1) convergent"},
       {threadgroup, "call void @air.wg.barrier(i32 2, i32 5, i32 2) convergent"},
-      {simdgroup, "call void @air.simdgroup.barrier(i32 2, i32 1) convergent"},
+      {simdgroup, "call void @air.simdgroup.barrier(i32 2, i32 2) convergent"},
       {"declare void @air.wg.barrier(i32, i32, i32)\n", "call void @air.wg.barrier(i32 2, i32 5, i32 1)"},
       {fence, "call void @air.atomic.fence(i32 1, i32 2, i32 2)"},
       {fence, "call void @air.atomic.fence(i32 1, i32 5, i32 0)"},
@@ -380,6 +391,10 @@ simd_functions_lower_to_subgroup_operations(void)
       "declare i32 @air.quad_prefix_inclusive_product.u.i32(i32)\n"
       "declare i1 @air.simd_all(i1)\n"
       "declare i64 @air.simd_ballot.i64(i1)\n"
+      "declare i16 @air.quad_ballot(i1)\n"
+      "declare i64 @air.simd_active_threads_mask.i64()\n"
+      "declare i16 @air.quad_active_threads_mask()\n"
+      "declare i1 @air.simd_is_helper_thread()\n"
       "declare i1 @air.quad_is_first()\n"
       "declare float @air.simd_shuffle_and_fill_down.f32(float, float, i16, i16)\n"
       "declare i32 @air.quad_shuffle_and_fill_up.u.i32(i32, i32, i16, i16)\n"
@@ -397,6 +412,10 @@ simd_functions_lower_to_subgroup_operations(void)
       "%v = icmp eq i32 %p, 0\n"
       "%all = call i1 @air.simd_all(i1 %v)\n"
       "%ballot = call i64 @air.simd_ballot.i64(i1 %all)\n"
+      "%quad_ballot = call i16 @air.quad_ballot(i1 %all)\n"
+      "%active = call i64 @air.simd_active_threads_mask.i64()\n"
+      "%quad_active = call i16 @air.quad_active_threads_mask()\n"
+      "%helper = call i1 @air.simd_is_helper_thread()\n"
       "%first = call i1 @air.quad_is_first()\n"
       "%hb = bitcast <2 x half> %h to i32\n"
       "%wt = trunc i64 %w to i32\n%bt = trunc i64 %ballot to i32\n"
@@ -415,7 +434,7 @@ simd_functions_lower_to_subgroup_operations(void)
    assert(count(shader, nir_intrinsic_reduce) == 3);
    assert(count(shader, nir_intrinsic_exclusive_scan) == 1);
    assert(count(shader, nir_intrinsic_vote_all) == 1);
-   assert(count(shader, nir_intrinsic_ballot) == 2);
+   assert(count(shader, nir_intrinsic_ballot) == 5);
    ralloc_free(shader);
    const char *refusals[][2] = {
       /* The lane is an i16. */
@@ -424,6 +443,7 @@ simd_functions_lower_to_subgroup_operations(void)
       /* Bitwise functions take integers. */
       {"declare float @air.simd_and.f32(float)\n",
        "%a = call float @air.simd_and.f32(float 1.0)\nret void\n"},
+      {"declare i32 @air.quad_ballot(i1)\n", "%a = call i32 @air.quad_ballot(i1 true)\nret void\n"},
       {"declare i16 @air.simd_ballot.i16(i1)\n",
        "%a = call i16 @air.simd_ballot.i16(i1 true)\nret void\n"},
       /* A fill's delta and modulo are i16s. */

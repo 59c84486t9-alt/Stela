@@ -8,6 +8,7 @@
 #include "util/ralloc.h"
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #ifdef NDEBUG
 #error "These tests require active assertions"
@@ -42,13 +43,16 @@ static const char *quad =
    "%q = call " POINT " @control_point(i32 1, ptr %points)\n"
    "%uv = extractvalue " POINT " %q, 1\n"
    "%offset = fadd <2 x float> %uv, %at\n"
-   "%ids = add i32 %id, %instance\n"
+   "%points_in_patch = call i32 @air.get_num_patch_control_points()\n"
+   "%sum = add i32 %id, %instance\n"
+   "%ids = add i32 %sum, %points_in_patch\n"
    "%r0 = insertvalue " RESULT " undef, <4 x float> %position, 0\n"
    "%r1 = insertvalue " RESULT " %r0, <4 x float> %color, 1\n"
    "%r2 = insertvalue " RESULT " %r1, <2 x float> %offset, 2\n"
    "%r3 = insertvalue " RESULT " %r2, i32 %ids, 3\n"
    "ret " RESULT " %r3\n}\n"
    "declare " POINT " @control_point(i32, ptr) section \"air.externally_defined\"\n"
+   "declare i32 @air.get_num_patch_control_points()\n"
    "!air.vertex = !{!2}\n"
    "!2 = !{ptr @patch, !3, !4, !5}\n"
    "!3 = !{!30, !31, !32, !33}\n"
@@ -190,6 +194,25 @@ patch_metadata_reflects_control_points_and_patch_inputs(void)
    LLVMDisposeMemoryBuffer(input);
 }
 
+/* A patch that declares no control points leaves its size to the draw. */
+static void
+uncounted_patches_refuse_their_size(void)
+{
+   const char *count = ", !\"air.patch_control_point\", i32 4";
+   const char *at = strstr(quad, count);
+   assert(at);
+   char *text = malloc(strlen(quad) + 1);
+   assert(text);
+   memcpy(text, quad, (size_t)(at - quad));
+   strcpy(text + (at - quad), at + strlen(count));
+   struct stela_air_error error = {0};
+   assert(!translate(text, true, &error));
+   if (error.kind != STELA_AIR_INSTRUCTION)
+      fprintf(stderr, "uncounted patch: %u %s\n", error.kind, error.detail);
+   assert(error.kind == STELA_AIR_INSTRUCTION && strstr(error.detail, "no control points"));
+   free(text);
+}
+
 static unsigned
 intrinsics(nir_shader *shader, nir_intrinsic_op op)
 {
@@ -249,10 +272,6 @@ patch_functions_refuse_what_they_cannot_read(void)
    /* Patch functions run per tessellated vertex, without vertex IDs. */
    text = change(quad, "air.instance_id", "air.vertex_id");
    refuse(text, true, STELA_AIR_ARGUMENT);
-   free(text);
-   /* A member marked unused is never read. */
-   text = change(quad, "!\"uv\"}\n!41", "!\"uv\", !\"air.arg_unused\"}\n!41");
-   refuse(text, true, STELA_AIR_INSTRUCTION);
    free(text);
    /* Every attribute has its own location. */
    text = change(quad, "i32 2, i32 1,", "i32 1, i32 1,");
@@ -356,6 +375,7 @@ main(void)
    patch_metadata_reflects_control_points_and_patch_inputs();
    patch_functions_become_evaluation_shaders();
    patch_functions_refuse_what_they_cannot_read();
+   uncounted_patches_refuse_their_size();
    kernels_fetch_their_stage_in_at_their_position();
    printf("AIR stage-in tests passed\n");
    return 0;

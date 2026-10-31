@@ -84,8 +84,8 @@ struct stela_air_buffer {
    enum stela_air_buffer_access access;
    unsigned type_size; /* Zero when the input omits this optional reflection. */
    unsigned type_alignment;
-   /* An air.visible_function_table: device memory of 64-bit function
-    * handles, read only. */
+   /* An air.visible_function_table: read-only device memory of its 64-bit
+    * entry count, then that many function handles. */
    bool function_table;
 };
 
@@ -206,6 +206,7 @@ enum stela_air_builtin {
    STELA_AIR_PATCH_ID,
    /* Vertex and fragment functions. */
    STELA_AIR_AMPLIFICATION_ID,
+   STELA_AIR_AMPLIFICATION_COUNT,
    /* Fragment functions. */
    STELA_AIR_FRONT_FACING,
    STELA_AIR_SAMPLE_ID,
@@ -323,7 +324,7 @@ struct stela_air_stage_io {
    enum stela_air_sampling sampling;
    enum stela_air_depth_qualifier depth; /* Only DEPTH. */
    bool used, invariant;
-   bool absent; /* An argument whose [[function_constant]] is false. */
+   bool absent; /* An argument or output whose [[function_constant]] is false. */
    bool argument_buffer; /* Only STAGE_BUFFER: an air.indirect_buffer. */
    /* A VARYING the function interpolates itself, an interpolant<T, P>: its
     * argument is an opaque pointer the air.interpolate_* calls read, and it
@@ -370,8 +371,9 @@ struct stela_air_stage_entry {
     * air.discard_fragment. */
    uint64_t threadgroup_bytes;
    bool discards;
-   /* A fragment function's [[early_fragment_tests]]. */
-   bool early_fragment_tests;
+   /* A fragment function's [[early_fragment_tests]], and a [[sample_mask]]
+    * input's post_depth_coverage. */
+   bool early_fragment_tests, post_depth_coverage;
 };
 typedef bool (*stela_air_visit_stage)(const struct stela_air_inspection *,
                                      const struct stela_air_stage_entry *, void *);
@@ -383,6 +385,38 @@ bool stela_air_inspect_stage(const void *, size_t, const struct stela_air_consta
  * Only the lists are read; inspection validates the rest. */
 bool stela_air_entry_stage(const void *, size_t, const char *entry, unsigned *stage,
                            struct stela_air_error *);
+/* Calls visit with each function the entry lists name and its list, zero for
+ * air.kernel, as stela_air_entry_stage numbers them, until it refuses one. */
+typedef bool (*stela_air_visit_function)(void *, const char *name, size_t name_bytes,
+                                         unsigned stage);
+bool stela_air_functions(const void *, size_t, stela_air_visit_function, void *,
+                         struct stela_air_error *);
+/* A visible function a stitched function calls, and the module defining it. */
+struct stela_air_stitch_source {
+   const void *bitcode;
+   size_t size;
+   const char *name;
+};
+#define STELA_AIR_STITCH_INPUT UINT32_MAX
+#define STELA_AIR_STITCH_NO_OUTPUT UINT32_MAX
+/* A node of a stitched function: an input, argument `input` of the function,
+ * or a call of source `function` on the values of earlier nodes. */
+struct stela_air_stitch_node {
+   uint32_t function, input;
+   const uint32_t *arguments;
+   uint32_t argument_count;
+};
+struct stela_air_stitch_graph {
+   const char *name;
+   const struct stela_air_stitch_node *nodes;
+   uint32_t node_count;
+   uint32_t output; /* The node whose result it returns. */
+};
+/* Calls visit with the bitcode of a module of the graphs: air_stitch.c. */
+typedef void (*stela_air_visit_bytes)(void *, const void *, size_t);
+bool stela_air_stitch(const struct stela_air_stitch_source *, unsigned,
+                      const struct stela_air_stitch_graph *, unsigned, stela_air_visit_bytes,
+                      void *, struct stela_air_error *);
 /* A module's constexpr sampler states, AIR_MAX_SAMPLER_STATES at most, as
  * stela_air_metadata_sampler_states lists them. */
 #define AIR_MAX_SAMPLER_STATES AIR_MAX_METADATA_OPERANDS
@@ -458,11 +492,12 @@ struct stela_air_metadata {
    LLVMModuleRef module;
    LLVMTargetDataRef layout;
    struct stela_air_error *error;
-   unsigned air_minor, language_major, language_minor;
+   unsigned air_major, air_minor, language_major, language_minor;
    unsigned max_device_buffers, max_threadgroup_buffers, max_constant_buffers;
    bool render; /* Additive decoder mode; legacy compute remains false. */
    bool framebuffer_fetch_present, framebuffer_fetch_enabled;
    bool denorms_disable, fast_math;
+   bool unoptimized; /* A function was built to stay as written. */
    /* The module's one llvm.ident string, which qualified profiles name, or
     * NULL; captured by validation, before linking adds others. */
    const char *ident;
@@ -475,10 +510,16 @@ struct stela_air_metadata {
 
 bool stela_air_md_string(LLVMValueRef value, const char *expected);
 bool stela_air_md_uint(LLVMValueRef value, unsigned *number);
+/* Whether only os_log's calls read a value: its object or a string, which
+ * calls take as constants and no function reaches at run time. */
+bool stela_air_log_only(LLVMValueRef value);
 bool stela_air_md_node(struct stela_air_metadata *m, LLVMValueRef node,
                        LLVMValueRef *operands, unsigned *count);
 bool stela_air_named_md(struct stela_air_metadata *m, const char *name,
                         LLVMValueRef *operands, unsigned *count);
+/* Whether a triple names the module's AIR version; linked libraries of AIR 2.0
+ * and older name none. */
+bool stela_air_metadata_target(const struct stela_air_metadata *t, const char *target);
 bool stela_air_metadata_layout(struct stela_air_metadata *m);
 bool stela_air_metadata_validate(struct stela_air_metadata *m);
 /* The module's function constants and, when storage is not NULL, the global

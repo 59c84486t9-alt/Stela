@@ -164,6 +164,51 @@ records! {
         pub out: Span,
     }
 
+    /// `NewSourceLibrary`: the AIR the source compiled to, the install name
+    /// of a dynamic library, empty for an executable one, and a span of
+    /// handles of the libraries it loads with.
+    pub struct NewSourceLibraryRequest {
+        pub air: Span,
+        pub install_name: Span,
+        pub libraries: Span,
+    }
+
+    /// `newLibraryWithStitchedDescriptor:error:`: the handles of its
+    /// `functions` as `u64`s, and its graphs as `metal/stitching.rs` reads them.
+    pub struct NewStitchedLibraryRequest {
+        pub functions: Span,
+        pub graphs: Span,
+    }
+
+    /// `NewArchive`: the bytes of an archive's file, if it has one.
+    pub struct NewArchiveRequest {
+        pub data: Span,
+    }
+
+    /// `ArchiveData`: the span receiving the archive's bytes.
+    pub struct ArchiveDataRequest {
+        pub archive: u64,
+        pub out: Span,
+    }
+
+    /// `LibraryIdentity`: the span receiving the library's install name.
+    pub struct LibraryIdentityRequest {
+        pub library: u64,
+        pub out: Span,
+    }
+
+    /// `MTLLibraryType` and the length of the install name, zero for none.
+    pub struct LibraryIdentityResponse {
+        pub library_type: u64,
+        pub length: u64,
+    }
+
+    /// `LibraryData`: the span receiving the library's bytes.
+    pub struct LibraryDataRequest {
+        pub library: u64,
+        pub out: Span,
+    }
+
     /// `NewFunction`: the function's name and its `ConstantRecord`s.
     pub struct NewFunctionRequest {
         pub library: u64,
@@ -338,6 +383,18 @@ records! {
         pub memory: u64,
         pub length: u64,
         pub options: u64,
+    }
+
+    /// What crosses between processes for a shared object: see
+    /// [`sharing`](super::sharing).
+    pub struct ShareToken {
+        pub token: [u64; 2],
+    }
+
+    /// Shares an event or texture under `token`, unless it has one already.
+    pub struct ShareObjectRequest {
+        pub handle: u64,
+        pub token: [u64; 2],
     }
 
     /// `didModifyRange:`.
@@ -582,6 +639,16 @@ records! {
         pub reserved: u32,
     }
 
+    /// A descriptor's `binaryArchives`, a span of handles, and what its
+    /// request does with them.
+    pub struct PipelineArchivesRecord {
+        pub searched: Span,
+        /// The archive `add…FunctionsWithDescriptor:` compiles into, or zero.
+        pub added_to: u64,
+        /// `MTLPipelineOptionFailOnBinaryArchiveMiss`.
+        pub required: u64,
+    }
+
     /// `MTLLinkedFunctions` and the stage's call stack depth: spans of
     /// function and library handles.
     pub struct LinkedFunctionsRecord {
@@ -603,6 +670,7 @@ records! {
         pub tessellation: TessellationRecord,
         pub vertex_linked_functions: LinkedFunctionsRecord,
         pub fragment_linked_functions: LinkedFunctionsRecord,
+        pub archives: PipelineArchivesRecord,
         /// `PipelineFlags`.
         pub flags: u64,
     }
@@ -626,6 +694,7 @@ records! {
         pub object_linked_functions: LinkedFunctionsRecord,
         pub mesh_linked_functions: LinkedFunctionsRecord,
         pub fragment_linked_functions: LinkedFunctionsRecord,
+        pub archives: PipelineArchivesRecord,
     }
 
     /// A new render pipeline and its `gpuResourceID`, zero when indirect
@@ -647,6 +716,7 @@ records! {
         pub max_total_threads_per_threadgroup: u64,
         pub stage_input: StageInputRecord,
         pub linked_functions: LinkedFunctionsRecord,
+        pub archives: PipelineArchivesRecord,
         /// `PipelineFlags`.
         pub flags: u64,
     }
@@ -882,6 +952,9 @@ impl From<Error> for Fault {
             Error::Unsupported(capability) => Self::new(Status::Unsupported, capability),
             Error::OutOfMemory => Self::new(Status::OutOfMemory, "out of memory"),
             Error::DeviceLost => Self::new(Status::DeviceLost, "the device was lost"),
+            Error::NotArchived => {
+                Self::new(Status::Invalid, "no binary archive holds the pipeline")
+            }
         }
     }
 }
@@ -937,6 +1010,17 @@ operations! {
     NewLibrary = 0x0101 => NewLibraryRequest, Handle;
     /// `functionNames`.
     LibraryFunctionNames = 0x0102 => LibraryFunctionNamesRequest, Length;
+    /// `type` and `installName`.
+    LibraryIdentity = 0x0107 => LibraryIdentityRequest, LibraryIdentityResponse;
+    /// The bytes `serializeToURL:` writes.
+    LibraryData = 0x0108 => LibraryDataRequest, Length;
+    /// `newLibraryWithSource:options:error:`.
+    NewSourceLibrary = 0x010b => NewSourceLibraryRequest, Handle;
+    NewStitchedLibrary = 0x010c => NewStitchedLibraryRequest, Handle;
+    /// `newBinaryArchiveWithDescriptor:error:`.
+    NewArchive = 0x0109 => NewArchiveRequest, Handle;
+    /// The bytes `serializeToURL:error:` writes.
+    ArchiveData = 0x010a => ArchiveDataRequest, Length;
     /// `newFunctionWithName:constantValues:`.
     NewFunction = 0x0103 => NewFunctionRequest, Handle;
     /// What `MTLFunction` reports of the function.
@@ -1000,6 +1084,12 @@ operations! {
     Commit = 0x040b => commands::CommitRequest, Value;
     /// The GPU times of the completed command buffer with a serial.
     CommandBufferTimes = 0x040c => Value, CommandBufferTimesResponse;
+    /// `newSharedEventHandle` and `newSharedTextureHandle`.
+    ShareObject = 0x040d => ShareObjectRequest, ShareToken;
+    /// `newSharedEventWithHandle:`.
+    OpenSharedEvent = 0x040e => ShareToken, Handle;
+    /// `newSharedTextureWithHandle:`.
+    OpenSharedTexture = 0x040f => ShareToken, TextureResponse;
     NewIndirectCommandBuffer = 0x0501 => NewIndirectRequest, Handle;
     /// `gpuResourceID`, which makes the buffer GPU-resident.
     IndirectResourceId = 0x0502 => Handle, Value;

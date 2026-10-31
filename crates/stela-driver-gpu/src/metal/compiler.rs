@@ -39,6 +39,7 @@ use super::{
         PatchDomain, Provenance, Reflection, Scalar, Specialization, Stage, Tessellation,
         TessellationStages, TextureUse, ThreadgroupUse, Varying,
     },
+    stitching::{StitchedGraph, StitchedNode},
     vertex::{Attribute, STRIDE_DYNAMIC, StageInputDescriptor, VertexDescriptor},
     vulkan::{object::ShaderCode, physical::PhysicalDevice},
 };
@@ -52,7 +53,7 @@ use alloc::{
 use core::{
     ffi::{c_char, c_void},
     ptr::{self, NonNull},
-    str,
+    slice, str,
 };
 
 /// The constructs the AIR frontend lowers completely (`metal/README.md`).
@@ -114,6 +115,24 @@ pub struct Service {
     /// `stela_metal_sampler_states`.
     pub sampler_states:
         unsafe extern "C" fn(*const c_void, usize, *mut u64, *mut u32, *mut ffi::AirError) -> bool,
+    /// `stela_metal_functions`.
+    pub functions: unsafe extern "C" fn(
+        *const c_void,
+        usize,
+        ffi::VisitFunction,
+        *mut c_void,
+        *mut ffi::AirError,
+    ) -> bool,
+    /// `stela_metal_stitch`.
+    pub stitch: unsafe extern "C" fn(
+        *const ffi::StitchSource,
+        u32,
+        *const ffi::StitchGraph,
+        u32,
+        ffi::VisitBytes,
+        *mut c_void,
+        *mut ffi::AirError,
+    ) -> bool,
     /// `stela_metal_compile`.
     pub compile: unsafe extern "C" fn(
         *const c_void,
@@ -271,6 +290,148 @@ impl Compiler for AirCompiler {
         self.next_library += 1;
         self.libraries.insert(id, data);
         Ok(id)
+    }
+
+    fn functions(&mut self, air: &[u8]) -> Result<Vec<(String, FunctionType)>> {
+        unsafe extern "C" fn visit(
+            data: *mut c_void,
+            name: *const c_char,
+            name_bytes: usize,
+            stage: u32,
+        ) -> bool {
+            // SAFETY: the data is the list below, and the service's name is
+            // `name_bytes` long for the call.
+            let (list, name) = unsafe {
+                (
+                    &mut *data.cast::<Vec<(String, FunctionType)>>(),
+                    slice::from_raw_parts(name.cast::<u8>(), name_bytes),
+                )
+            };
+            let (Ok(name), Some(stage)) =
+                (str::from_utf8(name), FunctionType::from_raw(stage.into()))
+            else {
+                return false;
+            };
+            list.push((String::from(name), stage));
+            true
+        }
+        let air = Air::parse(air).map_err(|_| Error::Invalid("AIR"))?;
+        let mut functions = Vec::new();
+        let mut error = ffi::AirError::NONE;
+        // SAFETY: the bitcode and the list outlive the call, which writes
+        // the list through `visit` and the error.
+        let listed = unsafe {
+            (self.service.functions)(
+                air.bitcode.as_ptr().cast(),
+                air.bitcode.len(),
+                visit,
+                ptr::from_mut(&mut functions).cast(),
+                &mut error,
+            )
+        };
+        if !listed {
+            return Err(refuse(&mut self.refusal, "the library", &error));
+        }
+        Ok(functions)
+    }
+
+    fn stitch(&mut self, sources: &[(u64, &str)], graphs: &[StitchedGraph]) -> Result<Vec<u8>> {
+        unsafe extern "C" fn visit(data: *mut c_void, bytes: *const c_void, size: usize) {
+            // SAFETY: the data is the module below, and the service's bytes
+            // are `size` long for the call.
+            let (module, bytes) = unsafe {
+                (
+                    &mut *data.cast::<Vec<u8>>(),
+                    slice::from_raw_parts(bytes.cast::<u8>(), size),
+                )
+            };
+            module.extend_from_slice(bytes);
+        }
+        let selected = sources
+            .iter()
+            .map(|&(library, entry)| select(&self.libraries, library, entry))
+            .collect::<Result<Vec<_>>>()?;
+        let sources: Vec<_> = selected
+            .iter()
+            .map(|selected| ffi::StitchSource {
+                bitcode: selected.air.bitcode.as_ptr().cast(),
+                size: selected.air.bitcode.len(),
+                name: selected.entry.as_ptr(),
+            })
+            .collect();
+        let count = |len: usize| u32::try_from(len).map_err(|_| MALFORMED);
+        let names = graphs
+            .iter()
+            .map(|graph| CString::new(graph.name.as_str()).map_err(|_| MALFORMED))
+            .collect::<Result<Vec<_>>>()?;
+        let nodes = graphs
+            .iter()
+            .map(|graph| {
+                graph
+                    .nodes
+                    .iter()
+                    .map(|node| {
+                        Ok(match node {
+                            StitchedNode::Input(index) => ffi::StitchNode {
+                                function: u32::MAX,
+                                input: *index,
+                                arguments: ptr::null(),
+                                argument_count: 0,
+                            },
+                            StitchedNode::Call {
+                                function,
+                                arguments,
+                            } => ffi::StitchNode {
+                                function: *function,
+                                input: 0,
+                                arguments: arguments.as_ptr(),
+                                argument_count: count(arguments.len())?,
+                            },
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let raw = graphs
+            .iter()
+            .zip(&names)
+            .zip(&nodes)
+            .map(|((graph, name), nodes)| {
+                Ok(ffi::StitchGraph {
+                    name: name.as_ptr(),
+                    nodes: nodes.as_ptr(),
+                    node_count: count(nodes.len())?,
+                    output: graph.output.unwrap_or(u32::MAX),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let mut module = Vec::new();
+        let mut error = ffi::AirError::NONE;
+        // SAFETY: the sources and graphs, with what they point to, and the
+        // module outlive the call, which writes the module through `visit`
+        // and the error.
+        let stitched = unsafe {
+            (self.service.stitch)(
+                sources.as_ptr(),
+                count(sources.len())?,
+                raw.as_ptr(),
+                count(raw.len())?,
+                visit,
+                ptr::from_mut(&mut module).cast(),
+                &mut error,
+            )
+        };
+        if !stitched {
+            return Err(refuse(&mut self.refusal, "stitched functions", &error));
+        }
+        Ok(module)
+    }
+
+    fn library_data(&self, library: u64) -> Result<&[u8]> {
+        self.libraries
+            .get(&library)
+            .map(Vec::as_slice)
+            .ok_or(Error::Invalid("unknown library"))
     }
 
     fn remove_library(&mut self, library: u64) -> Result<()> {

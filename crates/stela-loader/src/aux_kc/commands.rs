@@ -3,6 +3,7 @@
 //! out.
 use super::fit;
 use crate::Result;
+use alloc::vec::Vec;
 use object::macho;
 
 pub const HEADER_BYTES: usize = 32;

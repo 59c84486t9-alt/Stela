@@ -7,7 +7,8 @@
 //!   each array is a null descriptor, so an unbound slot reads zero.
 //! - **Push constants** are [`PushConstants`]: the GPU address of each
 //!   stage's argument table, of the latest draw's or dispatch's own
-//!   arguments, and the dispatch's grid size. Every stage may read them.
+//!   arguments and of the log buffer, and the dispatch's grid size. Every
+//!   stage may read them.
 //!
 //! An [`ArgumentTable`] mirrors Metal's per-stage binding slots. Buffers are
 //! device addresses with their bound lengths; textures and samplers are
@@ -115,6 +116,9 @@ pub struct PushConstants {
     /// dispatch's region (`MTLStageInRegionIndirectArguments`: `uint`
     /// origin and size). Only stages synthesized for those read it.
     pub arguments: u64,
+    /// The command buffer's log state's buffer, which `os_log` appends to;
+    /// zero for none.
+    pub log: u64,
     /// Threads in the grid (`dispatchThreads`), for the compiler's bounds
     /// check of non-uniform threadgroups; zero for uniform dispatches.
     pub grid: [u32; 3],
@@ -124,18 +128,22 @@ pub struct PushConstants {
     /// That view's `MTLVertexAmplificationViewMapping`: the viewport offset
     /// in the low half, the render target array offset in the high half.
     pub view_mapping: u32,
+    /// The views of the draw (`[[amplification_count]]`), at least one.
+    pub amplification_count: u32,
 }
 
 // Vulkan guarantees 128 bytes of push constants.
 const _: () = assert!(PushConstants::BYTES <= 128);
 
 impl PushConstants {
-    pub const BYTES: u32 = 52;
+    pub const BYTES: u32 = 64;
     pub const TABLES_OFFSET: u32 = 0;
     pub const ARGUMENTS_OFFSET: u32 = 24;
-    pub const GRID_OFFSET: u32 = 32;
-    pub const AMPLIFICATION_OFFSET: u32 = 44;
-    pub const VIEW_MAPPING_OFFSET: u32 = 48;
+    pub const LOG_OFFSET: u32 = 32;
+    pub const GRID_OFFSET: u32 = 40;
+    pub const AMPLIFICATION_OFFSET: u32 = 52;
+    pub const VIEW_MAPPING_OFFSET: u32 = 56;
+    pub const AMPLIFICATIONS_OFFSET: u32 = 60;
 
     pub fn encode(&self) -> [u8; Self::BYTES as usize] {
         let mut bytes = [0; Self::BYTES as usize];
@@ -145,9 +153,11 @@ impl PushConstants {
         };
         self.tables.iter().for_each(|table| writer.u64(*table));
         writer.u64(self.arguments);
+        writer.u64(self.log);
         self.grid.iter().for_each(|size| writer.u32(*size));
         writer.u32(self.amplification_id);
         writer.u32(self.view_mapping);
+        writer.u32(self.amplification_count);
         bytes
     }
 }
@@ -405,8 +415,8 @@ impl ResolveArguments {
     pub const FLAGS_OFFSET: u32 = 60;
     pub const CLASS_COUNT_OFFSET: u32 = 64;
     pub const PUSH_OFFSET: u32 = 72;
-    pub const VERTEX_BUFFERS_OFFSET: u32 = 128;
-    pub const SLOTS_OFFSET: u32 = 624;
+    pub const VERTEX_BUFFERS_OFFSET: u32 = 136;
+    pub const SLOTS_OFFSET: u32 = 632;
     pub const SLOT_BYTES: u32 = 16;
     pub const INHERIT_PIPELINE: u32 = 1;
     pub const INHERIT_BUFFERS: u32 = 2;
@@ -499,18 +509,18 @@ impl GeneratedSequence {
     pub const PIPELINE_OFFSET: u32 = 0;
     pub const PUSH_OFFSET: u32 = 8;
     /// `VkBindIndexBufferIndirectCommandEXT`.
-    pub const INDEX_BUFFER_OFFSET: u32 = 64;
+    pub const INDEX_BUFFER_OFFSET: u32 = 72;
     /// A [`SequenceVertexBuffer`] per vertex buffer index.
-    pub const VERTEX_BUFFERS_OFFSET: u32 = 80;
+    pub const VERTEX_BUFFERS_OFFSET: u32 = 88;
     pub const VERTEX_BUFFER_BYTES: u32 = 16;
     /// `VkDrawIndirectCommand`.
-    pub const DRAW_OFFSET: u32 = 576;
+    pub const DRAW_OFFSET: u32 = 584;
     /// `VkDrawIndexedIndirectCommand`.
-    pub const DRAW_INDEXED_OFFSET: u32 = 592;
+    pub const DRAW_INDEXED_OFFSET: u32 = 600;
     /// `VkDispatchIndirectCommand`.
-    pub const DISPATCH_OFFSET: u32 = 64;
-    pub const DISPATCH_ARGUMENTS_OFFSET: u32 = 80;
-    pub const BYTES: u32 = 624;
+    pub const DISPATCH_OFFSET: u32 = 72;
+    pub const DISPATCH_ARGUMENTS_OFFSET: u32 = 96;
+    pub const BYTES: u32 = 640;
     pub const ALIGNMENT: u64 = 16;
 }
 
@@ -748,6 +758,7 @@ mod tests {
                 "STELA_METAL_PUSH_ARGUMENTS",
                 PushConstants::ARGUMENTS_OFFSET,
             ),
+            ("STELA_METAL_PUSH_LOG", PushConstants::LOG_OFFSET),
             ("STELA_METAL_PUSH_GRID", PushConstants::GRID_OFFSET),
             (
                 "STELA_METAL_PUSH_AMPLIFICATION",
@@ -756,6 +767,10 @@ mod tests {
             (
                 "STELA_METAL_PUSH_VIEW_MAPPING",
                 PushConstants::VIEW_MAPPING_OFFSET,
+            ),
+            (
+                "STELA_METAL_PUSH_AMPLIFICATIONS",
+                PushConstants::AMPLIFICATIONS_OFFSET,
             ),
             ("STELA_METAL_BUFFERS", MAX_BUFFER_BINDINGS),
             ("STELA_METAL_TEXTURES", MAX_TEXTURE_BINDINGS),
@@ -1173,16 +1188,20 @@ mod tests {
         let constants = PushConstants {
             tables: [1, 2, 3],
             arguments: 7,
+            log: 8,
             grid: [4, 5, 6],
             amplification_id: 1,
+            amplification_count: 2,
             view_mapping: 2 << 16 | 1,
         };
         let bytes = constants.encode();
         assert_eq!(bytes[PushConstants::TABLES_OFFSET as usize + 16], 3);
         assert_eq!(bytes[PushConstants::ARGUMENTS_OFFSET as usize], 7);
+        assert_eq!(bytes[PushConstants::LOG_OFFSET as usize], 8);
         assert_eq!(bytes[PushConstants::GRID_OFFSET as usize + 8], 6);
         assert_eq!(bytes[PushConstants::AMPLIFICATION_OFFSET as usize], 1);
         assert_eq!(bytes[PushConstants::VIEW_MAPPING_OFFSET as usize + 2], 2);
+        assert_eq!(bytes[PushConstants::AMPLIFICATIONS_OFFSET as usize], 2);
     }
 
     #[test]
@@ -1272,7 +1291,7 @@ mod tests {
             |offset: u32| u32::from_le_bytes(bytes[offset as usize..][..4].try_into().unwrap());
         let u64_at =
             |offset: u32| u64::from_le_bytes(bytes[offset as usize..][..8].try_into().unwrap());
-        assert_eq!(bytes.len(), 640);
+        assert_eq!(bytes.len(), 648);
         assert_eq!(u64_at(ResolveArguments::HEADER_OFFSET), 0x1000);
         assert_eq!(u64_at(ResolveArguments::STRIDES_OFFSET), 0x4000);
         assert_eq!(u32_at(ResolveArguments::COUNT_OFFSET), 9);

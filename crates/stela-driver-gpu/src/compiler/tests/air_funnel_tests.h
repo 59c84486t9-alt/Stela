@@ -335,22 +335,6 @@ funnel_refusals(void)
             types[i], operations[operation], suffixes[i], types[i], types[i], types[i]);
          funnel_refusal(body, declaration, STELA_AIR_TYPE);
       }
-      const char *bad[] = {"poison", "undef"};
-      for (unsigned i = 0; i < ARRAY_SIZE(bad); i++) {
-         for (unsigned argument = 0; argument < 3; argument++) {
-            char body[768], declaration[384];
-            snprintf(body, sizeof(body), "%%v = call i32 @llvm.%s.i32(i32 %s, i32 %s, i32 %s)\nret void\n",
-               operations[operation], argument == 0 ? bad[i] : "7", argument == 1 ? bad[i] : "7", argument == 2 ? bad[i] : "0");
-            snprintf(declaration, sizeof(declaration), "declare i32 @llvm.%s.i32(i32, i32, i32)\n", operations[operation]);
-            expect_refusal(body, declaration, 100, STELA_AIR_INSTRUCTION);
-            const char *vector_bad = i ? "<i32 1, i32 undef>" : "<i32 1, i32 poison>";
-            snprintf(body, sizeof(body), "%%v = call <2 x i32> @llvm.%s.v2i32(<2 x i32> %s, <2 x i32> %s, <2 x i32> %s)\nret void\n",
-               operations[operation], argument == 0 ? vector_bad : "zeroinitializer",
-               argument == 1 ? vector_bad : "zeroinitializer", argument == 2 ? vector_bad : "zeroinitializer");
-            snprintf(declaration, sizeof(declaration), "declare <2 x i32> @llvm.%s.v2i32(<2 x i32>, <2 x i32>, <2 x i32>)\n", operations[operation]);
-            expect_refusal(body, declaration, 100, STELA_AIR_INSTRUCTION);
-         }
-      }
       char body[768], declaration[384];
       snprintf(declaration, sizeof(declaration), "declare i32 @llvm.%s.i32(i32, i32, i32)\n", operations[operation]);
       snprintf(body, sizeof(body), "%%v = call fastcc i32 @llvm.%s.i32(i32 1, i32 2, i32 0)\nret void\n", operations[operation]);
@@ -387,12 +371,6 @@ funnel_refusals(void)
       snprintf(declaration, sizeof(declaration), "declare i32 @llvm.%s.i32(i32, i32, i32)\n", operations[operation]);
       snprintf(body, sizeof(body), "%%v = call i64 @llvm.%s.i32(i64 1, i64 2, i64 0)\nret void\n", operations[operation]);
       funnel_refusal(body, declaration, STELA_AIR_TYPE);
-      snprintf(declaration, sizeof(declaration), "declare i32 @llvm.%s.i32(i32, i32, i32)\n", operations[operation]);
-      for (unsigned argument = 0; argument < 3; argument++) {
-         snprintf(body, sizeof(body), "%%f = freeze i32 1\n%%v = call i32 @llvm.%s.i32(i32 %s, i32 %s, i32 %s)\nret void\n",
-            operations[operation], argument == 0 ? "%f" : "1", argument == 1 ? "%f" : "2", argument == 2 ? "%f" : "0");
-         expect_refusal(body, declaration, 100, STELA_AIR_INSTRUCTION);
-      }
    }
    expect_refusal("%v = call i32 @user.llvm.fshl.i32(i32 1, i32 2, i32 0)\nret void\n",
       "declare i32 @user.llvm.fshl.i32(i32, i32, i32)\n", 100, STELA_AIR_INSTRUCTION);

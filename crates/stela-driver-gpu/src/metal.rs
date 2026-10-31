@@ -23,6 +23,7 @@ pub mod error;
 pub mod hazard;
 pub mod heap;
 pub mod indirect;
+pub mod kms;
 pub mod library;
 #[cfg(feature = "metal-vulkan")]
 pub mod native;
@@ -36,6 +37,7 @@ pub mod sampler;
 pub mod service;
 pub mod shader;
 pub mod sparse;
+pub mod stitching;
 pub mod upload;
 pub mod vertex;
 pub mod vulkan;

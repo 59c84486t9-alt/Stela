@@ -18,11 +18,12 @@
  * guessed.
  *
  * NIR computes approximate functions at the accuracy Vulkan requires, which
- * matches Metal's fast variants, not its precise ones. Single-precision
- * approximate functions therefore lower only as AIR's "fast_" variants or as
- * LLVM intrinsics that allow approximation (afn); precise ones are refused.
- * Half-precision approximate functions evaluate in single precision. */
+ * matches Metal's fast variants, not its precise ones. AIR's "fast_" variants
+ * and LLVM intrinsics that allow approximation (afn) lower to NIR's; the
+ * others to air_precise.c. Half-precision approximate functions evaluate in
+ * single precision. */
 #include "air_math.h"
+#include "air_precise.h"
 #include "compiler/nir/nir_builtin_builder.h"
 #include "compiler/nir/nir_format_convert.h"
 #include <limits.h>
@@ -309,6 +310,38 @@ floating_value(nir_builder *b, enum operation operation, nir_def **s, nir_def **
    }
 }
 
+/* An approximate function at Metal's precise accuracy. */
+static nir_def *
+precise_value(nir_builder *b, enum operation operation, unsigned count, nir_def **s, nir_def **second)
+{
+   static stela_air_precise_function *const functions[] = {
+      [LOG2] = stela_air_precise_log2, [EXP2] = stela_air_precise_exp2,
+      [SQRT] = stela_air_precise_sqrt, [RSQRT] = stela_air_precise_rsqrt,
+      [COS] = stela_air_precise_cos, [SIN] = stela_air_precise_sin,
+      [TAN] = stela_air_precise_tan, [ACOS] = stela_air_precise_acos,
+      [ASIN] = stela_air_precise_asin, [ATAN] = stela_air_precise_atan,
+      [COSH] = stela_air_precise_cosh, [SINH] = stela_air_precise_sinh,
+      [TANH] = stela_air_precise_tanh, [ACOSH] = stela_air_precise_acosh,
+      [ASINH] = stela_air_precise_asinh, [ATANH] = stela_air_precise_atanh,
+      [EXP] = stela_air_precise_exp, [EXP10] = stela_air_precise_exp10,
+      [LOG] = stela_air_precise_log, [LOG10] = stela_air_precise_log10,
+      [COSPI] = stela_air_precise_cospi, [SINPI] = stela_air_precise_sinpi,
+      [TANPI] = stela_air_precise_tanpi, [POW] = stela_air_precise_pow,
+      [POWR] = stela_air_precise_powr, [ATAN2] = stela_air_precise_atan2,
+      [FMOD] = stela_air_precise_fmod,
+   };
+   switch (operation) {
+   case NORMALIZE: return stela_air_precise_normalize(b, s[0]);
+   case LENGTH: return stela_air_precise_length(b, s[0], NULL);
+   case DISTANCE: return stela_air_precise_length(b, s[0], s[1]);
+   case SINCOS:
+      *second = stela_air_precise(b, stela_air_precise_cos, s[0], NULL);
+      return stela_air_precise(b, stela_air_precise_sin, s[0], NULL);
+   default:
+      return stela_air_precise(b, functions[operation], s[0], count > 1 ? s[1] : NULL);
+   }
+}
+
 /* x's bits counted from the least significant end of its lanes' width. */
 static nir_def *
 reverse_bits(nir_builder *b, nir_def *x)
@@ -548,26 +581,24 @@ lower(const struct stela_air_call_context *c, LLVMValueRef call, LLVMValueRef ca
       *result = integer_value(b, operation, sign == SIGNED, s);
       return STELA_AIR_CALL_LOWERED;
    }
-   unsigned lanes;
-   LLVMTypeRef scalar = stela_air_call_element(operand, &lanes);
    if (!stela_air_call_floating(operand) || type != result_type(operand, operation))
       return stela_air_call_fail(c, STELA_AIR_TYPE, "unsupported floating-point function types"), STELA_AIR_CALL_FAILED;
    if ((operation == DFDX || operation == DFDY || operation == FWIDTH) && !c->fragment)
       return stela_air_call_fail(c, STELA_AIR_INSTRUCTION, "derivatives exist only in fragment functions"),
              STELA_AIR_CALL_FAILED;
-   if (approximate(operation) && !fast && LLVMGetTypeKind(scalar) == LLVMFloatTypeKind)
-      return stela_air_call_fail(c, STELA_AIR_INSTRUCTION, "precise single-precision function accuracy is unqualified"),
-             STELA_AIR_CALL_FAILED;
    if (!c->fp_environment(c->translator) || !operands(c, call, operation, count, s))
       return STELA_AIR_CALL_FAILED;
    nir_def *second = NULL;
-   if (s[0]->bit_size == 16 && approximate(operation)) {
+   bool narrow = s[0]->bit_size == 16 && approximate(operation);
+   if (narrow) {
       for (unsigned i = 0; i < count; i++)
          s[i] = s[i] ? nir_f2f32(b, s[i]) : NULL;
-      *result = nir_f2f16(b, floating_value(b, operation, s, &second));
+   }
+   *result = approximate(operation) && !fast ? precise_value(b, operation, count, s, &second) :
+                                               floating_value(b, operation, s, &second);
+   if (narrow) {
+      *result = nir_f2f16(b, *result);
       second = second ? nir_f2f16(b, second) : NULL;
-   } else {
-      *result = floating_value(b, operation, s, &second);
    }
    if (second && !c->store(c->translator, LLVMGetOperand(call, count - 1), NULL, second))
       return STELA_AIR_CALL_FAILED;

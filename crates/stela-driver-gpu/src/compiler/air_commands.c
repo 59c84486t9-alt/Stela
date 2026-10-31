@@ -32,9 +32,12 @@ static const struct form forms[] = {
    {"clear_barrier_compute_command", STELA_AIR_COMMAND_CLEAR_BARRIER, false, 0, ""},
    {"set_pipeline_state_render_command", STELA_AIR_COMMAND_PIPELINE, true, 0, "S"},
    {"set_pipeline_state_compute_command", STELA_AIR_COMMAND_PIPELINE, false, 0, "S"},
+   /* Metal 3.1 adds the vertex and kernel buffers' strides. */
    {"set_vertex_buffer_render_command", STELA_AIR_COMMAND_BUFFER, true, STELA_AIR_VERTEX, "Plu"},
+   {"set_vertex_buffer_render_command", STELA_AIR_COMMAND_BUFFER, true, STELA_AIR_VERTEX, "Pu"},
    {"set_fragment_buffer_render_command", STELA_AIR_COMMAND_BUFFER, true, STELA_AIR_FRAGMENT, "Pu"},
    {"set_kernel_buffer_compute_command", STELA_AIR_COMMAND_BUFFER, false, 0, "Plu"},
+   {"set_kernel_buffer_compute_command", STELA_AIR_COMMAND_BUFFER, false, 0, "Pu"},
    {"set_threadgroup_memory_length_compute_command", STELA_AIR_COMMAND_THREADGROUP_LENGTH, false,
     0, "uu"},
    {"set_stage_in_region_compute_command", STELA_AIR_COMMAND_STAGE_IN_REGION, false, 0, "vv"},
@@ -213,8 +216,10 @@ stela_air_command_call(const struct stela_air_command_context *c, LLVMValueRef c
        !ends_with(stem, stem_bytes, "_compute_command"))
       return STELA_AIR_CALL_OTHER;
    const struct form *form = NULL;
-   for (unsigned i = 0; !form && i < ARRAY_SIZE(forms); i++) {
-      if (stela_air_call_named(stem, stem_bytes, forms[i].name))
+   unsigned operands = LLVMGetNumArgOperands(call);
+   for (unsigned i = 0; i < ARRAY_SIZE(forms); i++) {
+      if (stela_air_call_named(stem, stem_bytes, forms[i].name) &&
+          (!form || operands == 2 + strlen(forms[i].signature)))
          form = &forms[i];
    }
    /* Patch and mesh draws, their buffers, rasterizer state and imageblocks. */

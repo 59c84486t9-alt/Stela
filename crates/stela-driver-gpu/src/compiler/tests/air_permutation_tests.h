@@ -233,14 +233,6 @@ integer_permutation_tests(void)
             types[i], operations[operation], suffixes[i], types[i]);
          permutation_refusal(body, declaration, STELA_AIR_TYPE);
       }
-      const char *bad_values[] = {"poison", "undef"};
-      for (unsigned i = 0; i < ARRAY_SIZE(bad_values); i++) {
-         char body[256], declaration[128];
-         snprintf(body, sizeof(body), "%%v = call i32 @llvm.%s.i32(i32 %s)\nret void\n",
-            operations[operation], bad_values[i]);
-         snprintf(declaration, sizeof(declaration), "declare i32 @llvm.%s.i32(i32)\n", operations[operation]);
-         expect_refusal(body, declaration, 100, STELA_AIR_INSTRUCTION);
-      }
    }
    permutation_refusal("%v = call i8 @llvm.bswap.i8(i8 1)\nret void\n",
                         "declare i8 @llvm.bswap.i8(i8)\n", STELA_AIR_TYPE);
@@ -264,8 +256,6 @@ integer_permutation_tests(void)
                         "declare float @llvm.bswap.f32(float)\n", STELA_AIR_TYPE);
    expect_refusal("%v = call i32 @user.llvm.bitreverse.i32(i32 1)\nret void\n",
                    "declare i32 @user.llvm.bitreverse.i32(i32)\n", 100, STELA_AIR_INSTRUCTION);
-   expect_refusal("%v = freeze i32 1\n%c = call i32 @llvm.bswap.i32(i32 %v)\nret void\n",
-                   "declare i32 @llvm.bswap.i32(i32)\n", 100, STELA_AIR_INSTRUCTION);
 }
 
 #endif

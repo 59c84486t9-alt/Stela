@@ -23,10 +23,10 @@ static StelaSpan handle_list(NSArray *objects, StelaSpan *spans, size_t *used, u
 	return span;
 }
 
-/* What one request's linked functions need kept: three spans a stage. */
+/* What one request's linked functions need kept: three spans a stage, and its archives. */
 typedef struct {
-	StelaSpan spans[9];
-	uint64_t *storage[9];
+	StelaSpan spans[10];
+	uint64_t *storage[10];
 	size_t used;
 } Linked;
 
@@ -38,6 +38,20 @@ static void linked_functions(Linked *linked, id functions, NSArray *libraries, N
 		.private_functions = handle_list([functions privateFunctions], linked->spans, &linked->used, linked->storage),
 		.libraries = handle_list(libraries, linked->spans, &linked->used, linked->storage),
 		.max_call_stack_depth = depth,
+	};
+}
+
+/*
+ * A descriptor's binary archives. `added_to` is the archive a pipeline made
+ * only to fill it compiles into, which searches none.
+ */
+static StelaPipelineArchivesRecord archives_record(Linked *linked, id descriptor, NSUInteger options, uint64_t added_to)
+{
+	NSArray *searched = added_to ? nil : [descriptor binaryArchives];
+	return (StelaPipelineArchivesRecord){
+		.searched = handle_list(searched, linked->spans, &linked->used, linked->storage),
+		.added_to = added_to,
+		.required = (options & MTLPipelineOptionFailOnBinaryArchiveMiss) != 0,
 	};
 }
 
@@ -349,6 +363,15 @@ static id render_pipeline(StelaGPUDevice *device, const StelaRenderPipelineRespo
 				reflection:(id *)reflection
 				     error:(NSError **)error
 {
+	return [self renderPipeline:descriptor options:options reflection:reflection archive:0 error:error];
+}
+
+- (id)renderPipeline:(id)descriptor
+	     options:(NSUInteger)options
+	  reflection:(id *)reflection
+	     archive:(uint64_t)archive
+	       error:(NSError **)error
+{
 	StelaGPUFunction *vertex = [descriptor vertexFunction];
 	StelaGPUFunction *fragment = [descriptor fragmentFunction];
 	id layout = [descriptor vertexDescriptor];
@@ -379,6 +402,7 @@ static id render_pipeline(StelaGPUDevice *device, const StelaRenderPipelineRespo
 			 [descriptor maxVertexCallStackDepth], &request.vertex_linked_functions);
 	linked_functions(&linked, [descriptor fragmentLinkedFunctions], [descriptor fragmentPreloadedLibraries],
 			 [descriptor maxFragmentCallStackDepth], &request.fragment_linked_functions);
+	request.archives = archives_record(&linked, descriptor, options, archive);
 	StelaRenderPipelineResponse response;
 	StelaFailure failure;
 	StelaSpans spans = {.reads = linked.spans, .read_count = linked.used};
@@ -436,6 +460,15 @@ static id render_pipeline(StelaGPUDevice *device, const StelaRenderPipelineRespo
 				    reflection:(id *)reflection
 					 error:(NSError **)error
 {
+	return [self meshPipeline:descriptor options:options reflection:reflection archive:0 error:error];
+}
+
+- (id)meshPipeline:(id)descriptor
+	   options:(NSUInteger)options
+	reflection:(id *)reflection
+	   archive:(uint64_t)archive
+	     error:(NSError **)error
+{
 	StelaGPUFunction *object = [descriptor objectFunction];
 	StelaGPUFunction *mesh = [descriptor meshFunction];
 	StelaGPUFunction *fragment = [descriptor fragmentFunction];
@@ -461,6 +494,7 @@ static id render_pipeline(StelaGPUDevice *device, const StelaRenderPipelineRespo
 	linked_functions(&linked, [descriptor objectLinkedFunctions], nil, 1, &request.object_linked_functions);
 	linked_functions(&linked, [descriptor meshLinkedFunctions], nil, 1, &request.mesh_linked_functions);
 	linked_functions(&linked, [descriptor fragmentLinkedFunctions], nil, 1, &request.fragment_linked_functions);
+	request.archives = archives_record(&linked, descriptor, options, archive);
 	StelaRenderPipelineResponse response;
 	StelaFailure failure;
 	StelaSpans spans = {.reads = linked.spans, .read_count = linked.used};
@@ -522,6 +556,15 @@ static id render_pipeline(StelaGPUDevice *device, const StelaRenderPipelineRespo
 				 reflection:(id *)reflection
 				      error:(NSError **)error
 {
+	return [self computePipeline:descriptor options:options reflection:reflection archive:0 error:error];
+}
+
+- (id)computePipeline:(id)descriptor
+	      options:(NSUInteger)options
+	   reflection:(id *)reflection
+	      archive:(uint64_t)archive
+		error:(NSError **)error
+{
 	StelaGPUFunction *function = [descriptor computeFunction];
 	id input = [descriptor stageInputDescriptor];
 	BOOL indirect = [descriptor supportIndirectCommandBuffers];
@@ -542,6 +585,7 @@ static id render_pipeline(StelaGPUDevice *device, const StelaRenderPipelineRespo
 	Linked linked = {};
 	linked_functions(&linked, [descriptor linkedFunctions], [descriptor preloadedLibraries],
 			 [descriptor maxCallStackDepth], &request.linked_functions);
+	request.archives = archives_record(&linked, descriptor, options, archive);
 	StelaComputePipelineResponse response;
 	StelaFailure failure;
 	StelaSpans spans = {.reads = linked.spans, .read_count = linked.used};

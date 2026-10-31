@@ -162,6 +162,20 @@ pub struct ColorBlendAttachment {
     pub write_mask: ColorComponents,
 }
 
+/// Where a creation finds its pipeline.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum PipelineSource {
+    /// Compiled, kept nowhere.
+    #[default]
+    Compiled,
+    /// Taken from the cache, or compiled and kept there.
+    Cached(PipelineCache),
+    /// Taken from the cache alone, failing with
+    /// [`NotArchived`](crate::metal::error::Error::NotArchived) when it lacks
+    /// the pipeline (`VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT`).
+    Archived(PipelineCache),
+}
+
 /// `VkGraphicsPipelineCreateInfo` for dynamic rendering
 /// (`VkPipelineRenderingCreateInfo`) over the device's single pipeline
 /// layout. Everything Metal sets on the encoder is in `dynamic_states`.
@@ -183,6 +197,7 @@ pub struct GraphicsPipelineInfo {
     pub stencil_format: Option<Format>,
     pub color_blend: Vec<ColorBlendAttachment>,
     pub dynamic_states: Vec<DynamicState>,
+    pub source: PipelineSource,
     /// `VK_PIPELINE_CREATE_2_INDIRECT_BINDABLE_BIT_EXT`: execution sets may
     /// hold the pipeline.
     pub indirect_bindable: bool,
@@ -198,6 +213,7 @@ pub struct ComputePipelineInfo {
     pub full_subgroups: bool,
     /// As [`GraphicsPipelineInfo::indirect_bindable`].
     pub indirect_bindable: bool,
+    pub source: PipelineSource,
 }
 
 /// What one token of a device-generated command sequence reads at its
@@ -251,6 +267,8 @@ handles! {
     BufferView;
     Sampler;
     Pipeline;
+    /// `VkPipelineCache`.
+    PipelineCache;
     QueryPool;
     /// A timeline `VkSemaphore`.
     Semaphore;

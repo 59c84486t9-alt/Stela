@@ -144,6 +144,19 @@ impl Framebuffer {
             .then_some(framebuffer)
     }
 
+    /// A blue-low `width` by `height` screen at `base`, `stride` pixels a row.
+    #[cfg(feature = "nvk")]
+    pub fn linear(base: usize, width: usize, height: usize, stride: usize) -> Self {
+        Self {
+            base,
+            bytes: stride * height * BYTES_PER_PIXEL,
+            width,
+            height,
+            stride,
+            encoding: Encoding::Bgr,
+        }
+    }
+
     /// The same mode reached at another address (the engine's physmap).
     pub fn relocated(self, base: usize) -> Self {
         Self { base, ..self }
@@ -400,6 +413,15 @@ pub fn install(screen: Framebuffer) {
     screen.clear();
     // SAFETY: see `Console`; no reference to the text is live here.
     unsafe { *CONSOLE.0.get() = Text::new(screen) };
+}
+
+/// Keep the text [`release`] kept for `screen`, which now shows.
+#[cfg(feature = "nvk")]
+pub fn parked_on(screen: Framebuffer) {
+    // SAFETY: see `Console`; no reference to the text is live here.
+    if let Some(text) = unsafe { &mut *PARKED.0.get() } {
+        text.screen = screen;
+    }
 }
 
 /// Stop drawing text: the screen now shows something else. The text is

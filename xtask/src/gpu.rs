@@ -144,7 +144,8 @@ pub fn run(command: Command) -> Result<()> {
             render_inputs: &render_inputs,
         }),
         Command::Nvidia { jobs, target } => nvidia::build(jobs, target),
-        Command::Nvk { jobs } => nvk::build(jobs),
+        // `stela.efi` carries the kext it links against each boot's kernel.
+        Command::Nvk { jobs } => nvk::build(jobs).and_then(|()| crate::guest::run()),
         Command::Llvm { jobs, test } => llvm::build(&nvidia::Toolchain::discover()?, jobs, test),
     }
 }

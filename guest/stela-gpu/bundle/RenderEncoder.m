@@ -563,11 +563,8 @@ patchIndexBufferOffset:(NSUInteger)patchOffset
 
 - (void)setObjectThreadgroupMemoryLength:(NSUInteger)length atIndex:(NSUInteger)index
 {
-	(void)index;
-	if (length) {
-		StelaFailure failure = {.reason = "the service sizes an object stage's threadgroup memory itself"};
-		stela_report("setObjectThreadgroupMemoryLength:", &failure);
-	}
+	StelaSetThreadgroupMemory command = {.length = length, .index = index};
+	ENTRY(StelaRenderCodeSetObjectThreadgroupMemory, command);
 }
 
 - (void)drawMeshThreadgroups:(MTLSize)groups

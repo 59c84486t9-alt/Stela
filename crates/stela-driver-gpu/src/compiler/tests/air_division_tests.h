@@ -203,13 +203,7 @@ integer_division_tests(void)
       snprintf(body, sizeof(body), "%%v = %s <5 x i32> <i32 7, i32 7, i32 7, i32 7, i32 7>, "
                "<i32 3, i32 3, i32 3, i32 3, i32 3>\nret void\n", ops[op]);
       expect_refusal(body, "", 100, STELA_AIR_TYPE);
-      snprintf(body, sizeof(body), "%%v = %s i32 poison, 3\nret void\n", ops[op]);
-      expect_refusal(body, "", 100, STELA_AIR_INSTRUCTION);
-      snprintf(body, sizeof(body), "%%v = %s i32 7, undef\nret void\n", ops[op]);
-      expect_refusal(body, "", 100, STELA_AIR_INSTRUCTION);
    }
-   expect_refusal("%v = freeze i32 poison\n%q = udiv i32 %v, 3\nret void\n",
-                  "", 100, STELA_AIR_INSTRUCTION);
 }
 
 #endif

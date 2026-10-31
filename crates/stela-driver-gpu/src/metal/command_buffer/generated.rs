@@ -483,6 +483,7 @@ impl CommandBuffer {
             &[Stage::Vertex, Stage::Fragment],
         )?;
         arguments.constants = self.bindings.constants;
+        arguments.constants.amplification_count = 1;
         arguments.vertex_buffers = render(&mut self.encoder)?.sequence_vertex_buffers()?;
         arguments.counts = counts.address;
         let upload =

@@ -1,6 +1,6 @@
 /*
  * StelaGPU: the accelerator Metal discovers, over Stela's call gate at
- * /arm-io/stela-gpu (stela_contracts::gate::window).
+ * /arm-io/stela-gpu<n> (stela_contracts::gate::window).
  *
  * The kext opens and closes one gate connection per user client and maps
  * its gate page into the client's task, which then calls the native GPU

@@ -232,6 +232,12 @@
 		factorStride:stride];
 }
 
+- (void)setObjectThreadgroupMemoryLength:(NSUInteger)length atIndex:(NSUInteger)index
+{
+	StelaSetThreadgroupMemory record = {.length = length, .index = index};
+	ENCODE(StelaIndirectRenderCodeSetObjectThreadgroupMemory, record);
+}
+
 - (void)drawMeshThreadgroups:(MTLSize)groups
     threadsPerObjectThreadgroup:(MTLSize)object
       threadsPerMeshThreadgroup:(MTLSize)mesh

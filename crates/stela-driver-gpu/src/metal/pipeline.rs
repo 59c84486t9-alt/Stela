@@ -35,7 +35,9 @@ use super::{
     vulkan::{
         BlendFactor, BlendOp, ColorComponents, CompareOp, DynamicState, Format, PrimitiveTopology,
         SampleCounts, ShaderStages, StencilOp,
-        object::{ColorBlendAttachment, GraphicsPipelineInfo, ShaderCode, VertexInput},
+        object::{
+            ColorBlendAttachment, GraphicsPipelineInfo, PipelineSource, ShaderCode, VertexInput,
+        },
     },
 };
 use alloc::vec::Vec;
@@ -336,6 +338,24 @@ pub struct MeshThreads {
 }
 
 impl MeshThreads {
+    /// The smallest threads per object and per mesh threadgroup a draw may
+    /// ask.
+    pub fn smallest(&self) -> ([u32; 3], [u32; 3]) {
+        let smallest = |stage: Option<StageThreads>| {
+            let multiple = stage.is_some_and(|stage| stage.multiple_of_width);
+            [
+                if multiple {
+                    self.thread_execution_width as u32
+                } else {
+                    1
+                },
+                1,
+                1,
+            ]
+        };
+        (smallest(self.object), smallest(Some(self.mesh)))
+    }
+
     /// Checks a draw's threads per object and per mesh threadgroup.
     pub fn check(&self, object: [u32; 3], mesh: [u32; 3]) -> Result<()> {
         let total = |threads: [u32; 3]| threads.iter().map(|&size| u64::from(size)).product();
@@ -675,6 +695,7 @@ fn targets(
             stencil_format: stencil,
             color_blend,
             dynamic_states,
+            source: PipelineSource::Compiled,
             indirect_bindable: false,
         },
         topology_class: PrimitiveTopologyClass::Unspecified,

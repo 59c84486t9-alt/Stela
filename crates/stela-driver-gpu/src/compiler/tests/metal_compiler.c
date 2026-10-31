@@ -145,6 +145,8 @@ static const char *constants =
    " [{ i32, ptr, ptr } { i32 65535, ptr @init, ptr null }]\n"                              \
    "declare i1 @air.is_function_constant_defined(ptr addrspace(2))\n"                       \
    "declare i32 @air.unknown(i32)\n"                                                        \
+   "declare float @air.convert.f.f32.s.i32(i32)\n"                                          \
+   "declare i32 @air.convert.s.i32.f.f32(float)\n"                                          \
    "define void @derived(ptr addrspace(1) %data) {\n"                                       \
    "%v = load i32, ptr addrspace(2) @twice_width, align 4\n"                                \
    "store i32 %v, ptr addrspace(1) %data, align 4\n"                                        \
@@ -165,6 +167,10 @@ static const char *constants =
    "!50 = !{ptr addrspace(2) @width, !\"int\", !\"width\", i32 0}\n"
 
 static const char *derived = DERIVED("%x = shl nsw i32 %w, 1\n");
+/* The same through AIR's conversions, as `int(float(width) * 2)`. */
+static const char *converted = DERIVED("%f = call float @air.convert.f.f32.s.i32(i32 %w)\n"
+                                       "%d = fmul fast float %f, 2.000000e+00\n"
+                                       "%x = call i32 @air.convert.s.i32.f.f32(float %d)\n");
 /* A constructor that calls an AIR function, which no constant folds. */
 static const char *called = DERIVED("%x = call i32 @air.unknown(i32 %w)\n");
 
@@ -225,9 +231,129 @@ static const char *conditional =
    CONDITIONAL("br i1 %on, label %tinted, label %untinted\n", "bool");
 /* One reading tint whatever use_tint is. */
 static const char *unguarded = CONDITIONAL("br label %tinted\n", "bool");
+/* One whose read Apple's compiler hoists ahead of what decides it. */
+static const char *hoisted =
+   CONDITIONAL("%h = load i32, ptr addrspace(1) %tint, align 4\n"
+               "%s = select i1 %on, i32 %h, i32 undef\n"
+               "store i32 %s, ptr addrspace(1) %data, align 4\n"
+               "br i1 %on, label %tinted, label %untinted\n", "bool");
 /* One whose predicate is not a bool. */
 static const char *mistyped =
    CONDITIONAL("br i1 %on, label %tinted, label %untinted\n", "int");
+
+/* A kernel as Metal 2.4 records one, in a Debug build: its buffer leaves its
+ * address space to its type, and its simdgroup barrier has the older scope. */
+static const char *older_kernel =
+   "declare void @air.simdgroup.barrier(i32, i32) convergent\n"
+   "define void @older(ptr addrspace(1) %data, i32 %tid) !dbg !62 {\n"
+   "call void @air.simdgroup.barrier(i32 0, i32 1) convergent, !dbg !63\n"
+   "store i32 %tid, ptr addrspace(1) %data, align 4, !dbg !63\n"
+   "ret void, !dbg !63\n}\n"
+   "!air.kernel = !{!2}\n"
+   "!2 = !{ptr @older, !3, !4}\n!3 = !{}\n!4 = !{!40, !41}\n"
+   "!40 = !{i32 0, !\"air.buffer\", !\"air.location_index\", i32 0, i32 1, !\"air.read_write\","
+   " !\"air.arg_type_size\", i32 4, !\"air.arg_type_align_size\", i32 4,"
+   " !\"air.arg_type_name\", !\"uint\", !\"air.arg_name\", !\"data\"}\n"
+   "!41 = !{i32 1, !\"air.thread_position_in_grid\", !\"air.arg_type_name\", !\"uint\","
+   " !\"air.arg_name\", !\"tid\"}\n"
+   "!llvm.dbg.cu = !{!60}\n!llvm.module.flags = !{!64, !67}\n!llvm_utils.workingdir = !{!68}\n"
+   "!60 = distinct !DICompileUnit(language: DW_LANG_C_plus_plus_14, file: !61,"
+   " emissionKind: LineTablesOnly)\n"
+   "!61 = !DIFile(filename: \"a.metal\", directory: \"/\")\n"
+   "!62 = distinct !DISubprogram(name: \"older\", scope: !61, file: !61, line: 1,"
+   " type: !65, unit: !60, spFlags: DISPFlagDefinition)\n"
+   "!63 = !DILocation(line: 2, scope: !62)\n"
+   "!64 = !{i32 2, !\"Debug Info Version\", i32 3}\n"
+   "!65 = !DISubroutineType(types: !66)\n!66 = !{}\n"
+   "!67 = !{i32 7, !\"Dwarf Version\", i32 4}\n!68 = !{!\"/\"}\n";
+
+/* A kernel as -O0 records one, keeping its values in memory, its matrices in
+ * aggregates and its switch to be lowered. */
+static const char *unoptimized_kernel =
+   "define void @unoptimized(ptr addrspace(1) %data, i32 %tid) noinline optnone {\n"
+   "entry:\n"
+   "%slot = alloca i32, align 4\n"
+   "store i32 %tid, ptr %slot, align 4\n"
+   "%id = load i32, ptr %slot, align 4\n"
+   "%flags = or i32 1, 2\n"
+   "call void @air.wg.barrier(i32 %flags, i32 1) convergent\n"
+   "%first = insertvalue {[2 x <2 x float>]} poison, <2 x float> zeroinitializer, 0, 0\n"
+   "%second = insertvalue {[2 x <2 x float>]} %first, <2 x float> <float 1.0, float 2.0>, 0, 1\n"
+   "%rows = extractvalue {[2 x <2 x float>]} %second, 0\n"
+   "%row = extractvalue [2 x <2 x float>] %rows, 1\n"
+   "%lane = extractelement <2 x float> %row, i32 %id\n"
+   "%written = insertelement <2 x float> %row, float %lane, i32 %id\n"
+   "switch i32 %id, label %done [i32 1, label %one]\n"
+   "one:\n"
+   "store <2 x float> %written, ptr addrspace(1) %data, align 8\n"
+   "store <2 x i16> bitcast (<1 x float> splat (float 1.0) to <2 x i16>), ptr addrspace(1) %data, align 4\n"
+   "br label %done\n"
+   "done:\n"
+   "ret void\n}\n"
+   "declare void @air.wg.barrier(i32, i32) convergent\n"
+   "!air.kernel = !{!2}\n"
+   "!2 = !{ptr @unoptimized, !3, !4}\n!3 = !{}\n!4 = !{!40, !41}\n"
+   "!40 = !{i32 0, !\"air.buffer\", !\"air.location_index\", i32 0, i32 1, !\"air.read_write\","
+   " !\"air.arg_type_size\", i32 8, !\"air.arg_type_align_size\", i32 8,"
+   " !\"air.arg_type_name\", !\"float2\", !\"air.arg_name\", !\"data\"}\n"
+   "!41 = !{i32 1, !\"air.thread_position_in_grid\", !\"air.arg_type_name\", !\"uint\","
+   " !\"air.arg_name\", !\"tid\"}\n";
+
+/* A position and a varying only a true function constant keeps. */
+static const char *optional_output =
+   "@fog = internal addrspace(2) global i8 undef, align 1\n"
+   "@fog.init = linkonce_odr hidden addrspace(2) externally_initialized constant i8 undef,"
+   " section \"air.fc_initializer\", align 1\n"
+   "@fogged = internal addrspace(2) global i8 0, align 1\n"
+   "@llvm.global_ctors = appending global [1 x { i32, ptr, ptr }]"
+   " [{ i32, ptr, ptr } { i32 65535, ptr @init, ptr null }]\n"
+   "@llvm.compiler.used = appending global [1 x ptr] [ptr addrspacecast (ptr addrspace(2) @fogged"
+   " to ptr)], section \"llvm.metadata\"\n"
+   "declare i8 @air.normalize_function_constant_predicate.i8(i8)\n"
+   "define <{ <4 x float>, float }> @optional(<4 x float> %p) {\n"
+   "%a = insertvalue <{ <4 x float>, float }> undef, <4 x float> %p, 0\n"
+   "%b = insertvalue <{ <4 x float>, float }> %a, float 1.0, 1\n"
+   "ret <{ <4 x float>, float }> %b\n}\n"
+   "define internal void @init() section \"air.static_init\" {\n"
+   "%v = load i8, ptr addrspace(2) @fog.init, align 1\n"
+   "store i8 %v, ptr addrspace(2) @fog, align 1\n"
+   "%t = call i8 @air.normalize_function_constant_predicate.i8(i8 %v)\n"
+   "store i8 %t, ptr addrspace(2) @fogged, align 1\n"
+   "ret void\n}\n"
+   "!air.vertex = !{!2}\n"
+   "!2 = !{ptr @optional, !3, !4}\n!3 = !{!30, !31}\n!4 = !{!40}\n"
+   "!30 = !{!\"air.position\", !\"air.arg_type_name\", !\"float4\", !\"air.arg_name\", !\"p\"}\n"
+   "!31 = !{!\"air.function_constant\", !32, !\"air.vertex_output\", !\"generated(f)\","
+   " !\"air.arg_type_name\", !\"float\", !\"air.arg_name\", !\"f\"}\n"
+   "!32 = !{ptr addrspace(2) @fogged, !\"bool\", !\"fog\"}\n"
+   "!40 = !{i32 0, !\"air.vertex_input\", !\"air.location_index\", i32 0, i32 1,"
+   " !\"air.arg_type_name\", !\"float4\", !\"air.arg_name\", !\"in\"}\n"
+   "!air.function_constants = !{!50}\n"
+   "!50 = !{ptr addrspace(2) @fog.init, !\"bool\", !\"fog\", i32 0}\n";
+
+/* Lanes Apple's compiler leaves poison in a splat, and a value it freezes. */
+static const char *undefined_lanes =
+   "define void @lanes(ptr addrspace(1) %data, i32 %tid) {\n"
+   "%f = uitofp i32 %tid to float\n"
+   "%a = insertelement <4 x float> poison, float %f, i64 0\n"
+   "%s = shufflevector <4 x float> %a, <4 x float> undef, <4 x i32> <i32 0, i32 0, i32 0, i32 poison>\n"
+   "%m = fmul fast <4 x float> %s, %s\n"
+   "store <4 x float> %m, ptr addrspace(1) %data, align 16\n"
+   "%n = extractelement <4 x float> %s, i64 3\n"
+   "%g = freeze <4 x float> %s\n"
+   "%x = extractelement <4 x float> %g, i64 3\n"
+   "%y = fadd fast float %n, %x\n"
+   "%c = icmp eq i32 %tid, 0\n"
+   "%z = select i1 %c, float undef, float %y\n"
+   "store float %z, ptr addrspace(1) %data, align 4\n"
+   "ret void\n}\n"
+   "!air.kernel = !{!2}\n"
+   "!2 = !{ptr @lanes, !3, !4}\n!3 = !{}\n!4 = !{!40, !41}\n"
+   "!40 = !{i32 0, !\"air.buffer\", !\"air.location_index\", i32 0, i32 1, !\"air.read_write\","
+   " !\"air.address_space\", i32 1, !\"air.arg_type_size\", i32 16, !\"air.arg_type_align_size\","
+   " i32 16, !\"air.arg_type_name\", !\"float4\", !\"air.arg_name\", !\"data\"}\n"
+   "!41 = !{i32 1, !\"air.thread_position_in_grid\", !\"air.arg_type_name\", !\"uint\","
+   " !\"air.arg_name\", !\"tid\"}\n";
 
 /* Texture and sampler array arguments, which a function reflects slot by
  * slot, reading the width of the second texture. */
@@ -312,7 +438,8 @@ static const char *calls =
    "store i32 %v, ptr addrspace(1) %data, align 4\nret void\n}\n"
    "!air.kernel = !{!2, !5}\n!air.visible = !{!6}\n"
    "!2 = !{ptr @calls, !3, !4}\n!3 = !{}\n!4 = !{!40, !41}\n!5 = !{ptr @recurses, !3, !4}\n"
-   "!6 = !{ptr @doubled, !7, !8}\n!7 = !{!70}\n!8 = !{!80}\n"
+   "!6 = !{ptr @doubled, !7, !8, !9}\n!7 = !{!70}\n!8 = !{!80}\n"
+   "!9 = !{!\"air.stitching_info\"}\n"
    "!40 = !{i32 0, !\"air.buffer\", !\"air.location_index\", i32 0, i32 1, !\"air.read_write\","
    " !\"air.address_space\", i32 1, !\"air.arg_type_size\", i32 4, !\"air.arg_type_align_size\","
    " i32 4, !\"air.arg_type_name\", !\"int\", !\"air.arg_name\", !\"data\"}\n"
@@ -326,6 +453,7 @@ static const char *calls =
  * table can name. */
 #define TABLES(call)                                                                        \
    "declare ptr @air.get_function_pointer_visible_function_table(ptr addrspace(1), i32)\n"  \
+   "declare i32 @air.get_size_visible_function_table(ptr addrspace(1))\n"                  \
    "declare i32 @external(i32)\n"                                                         \
    "define i32 @doubled(i32 %x) {\n%y = shl i32 %x, 1\nret i32 %y\n}\n"                     \
    "define void @tables(ptr addrspace(1) %table, ptr addrspace(1) %data, i32 %tid) {\n"     \
@@ -354,6 +482,10 @@ static const char *tables = TABLES("%v = call i32 %f(i32 %tid)\n");
 /* A call through a bitcast of the pointer to its own type, as Apple's
  * compiler emits it. */
 static const char *recast = TABLES("%g = bitcast ptr %f to ptr\n%v = call i32 %g(i32 %tid)\n");
+/* A call with the table's size. */
+static const char *sized =
+   TABLES("%n = call i32 @air.get_size_visible_function_table(ptr addrspace(1) %table)\n"
+          "%v = call i32 %f(i32 %n)\n");
 /* A table's pointer used as other than a callee. */
 static const char *escaping = TABLES("%v = ptrtoint ptr %f to i32\n");
 /* The library linked with it: the external function and two visible
@@ -618,6 +750,37 @@ reflect_specialized(const char *fixture, const char *entry,
 }
 
 static bool
+count_function(void *data, const char *name, size_t name_bytes,
+               enum stela_metal_function_stage stage)
+{
+   (void)stage;
+   *(unsigned *)data += name && name_bytes;
+   return true;
+}
+
+/* The functions a fixture lists, zero when it cannot be listed. */
+static unsigned
+listed_functions(const char *fixture)
+{
+   LLVMMemoryBufferRef input = bitcode(fixture);
+   unsigned count = 0;
+   bool listed = stela_metal_functions(LLVMGetBufferStart(input), LLVMGetBufferSize(input),
+                                       count_function, &count, NULL);
+   LLVMDisposeMemoryBuffer(input);
+   return listed ? count : 0;
+}
+
+static bool
+list_function(void *data, const char *name, size_t name_bytes,
+              enum stela_metal_function_stage stage)
+{
+   (void)name_bytes;
+   assert(!strcmp(name, "vertex") && stage == STELA_METAL_VERTEX);
+   (*(unsigned *)data)++;
+   return true;
+}
+
+static bool
 reflect(const char *fixture, const char *entry, struct stela_metal_reflection *reflection,
         struct stela_air_error *error)
 {
@@ -682,6 +845,18 @@ varying(nir_shader *shader, nir_variable_mode mode, int location)
          return var;
    }
    return NULL;
+}
+
+/* A library of source has no container to list its functions. */
+static void
+modules_list_their_functions(void)
+{
+   LLVMMemoryBufferRef input = bitcode(vertex);
+   unsigned count = 0;
+   assert(stela_metal_functions(LLVMGetBufferStart(input), LLVMGetBufferSize(input), list_function,
+                                &count, NULL));
+   LLVMDisposeMemoryBuffer(input);
+   assert(count == 1);
 }
 
 static void
@@ -952,6 +1127,10 @@ derived_constants_are_constructed_from_their_function_constants(void)
    assert(shader && stores_constant(shader, 10) && !shader->constant_data_size);
    stela_metal_release(shader);
 
+   shader = compile(converted, "derived", &specialization, &error);
+   assert(shader && stores_constant(shader, 10));
+   stela_metal_release(shader);
+
    /* Without width, its definedness test selects eight. */
    specialization.constant_count = 0;
    shader = compile(derived, "derived", &specialization, &error);
@@ -991,6 +1170,10 @@ function_constants_select_arguments(void)
       assert(shader);
       stela_metal_release(shader);
 
+      shader = compile(hoisted, "conditional", &specialization, &error);
+      assert(shader);
+      stela_metal_release(shader);
+
       /* A function that reads an absent argument is refused. */
       shader = compile(unguarded, "conditional", &specialization, &error);
       assert(on ? shader != NULL :
@@ -1000,6 +1183,67 @@ function_constants_select_arguments(void)
    }
    assert(!reflect(mistyped, "conditional", &reflection, &error) &&
           error.kind == STELA_AIR_METADATA && strstr(error.detail, "predicate"));
+}
+
+/* An output a false function constant makes absent is not one. */
+static void
+function_constants_select_outputs(void)
+{
+   struct stela_metal_reflection reflection;
+   struct stela_air_error error;
+   for (uint8_t on = 0; on < 2; on++) {
+      const struct stela_air_constant_value value = {0, &on, sizeof(on)};
+      assert(reflect_specialized(optional_output, "optional", &value, 1, &reflection, &error));
+      const struct stela_metal_linked_varying varying = {"generated(f)", 12, 0};
+      const struct stela_metal_specialization specialization = {
+         .constants = &value, .constant_count = 1, .varyings = &varying, .varying_count = 1,
+      };
+      nir_shader *shader = compile(optional_output, "optional", &specialization, &error);
+      if (!shader)
+         fprintf(stderr, "optional: %u %s\n", error.kind, error.detail);
+      assert(shader);
+      unsigned outputs = 0;
+      nir_foreach_shader_out_variable(variable, shader)
+         outputs++;
+      assert(outputs == 1u + on);
+      stela_metal_release(shader);
+   }
+}
+
+static void
+older_kernels_compile(void)
+{
+   const struct stela_metal_specialization specialization = {.workgroup_size = {64, 1, 1}};
+   struct stela_air_error error;
+   nir_shader *shader = compile(older_kernel, "older", &specialization, &error);
+   if (!shader)
+      fprintf(stderr, "older: %u %s\n", error.kind, error.detail);
+   assert(shader);
+   stela_metal_release(shader);
+}
+
+static void
+unoptimized_kernels_compile(void)
+{
+   const struct stela_metal_specialization specialization = {.workgroup_size = {64, 1, 1}};
+   struct stela_air_error error;
+   nir_shader *shader = compile(unoptimized_kernel, "unoptimized", &specialization, &error);
+   if (!shader)
+      fprintf(stderr, "unoptimized: %u %s\n", error.kind, error.detail);
+   assert(shader && !shader->scratch_size);
+   stela_metal_release(shader);
+}
+
+static void
+undefined_lanes_read_as_anything(void)
+{
+   const struct stela_metal_specialization specialization = {.workgroup_size = {64, 1, 1}};
+   struct stela_air_error error;
+   nir_shader *shader = compile(undefined_lanes, "lanes", &specialization, &error);
+   if (!shader)
+      fprintf(stderr, "lanes: %u %s\n", error.kind, error.detail);
+   assert(shader);
+   stela_metal_release(shader);
 }
 
 static void
@@ -1111,6 +1355,177 @@ defined_functions_inline_into_their_callers(void)
           error.kind == STELA_AIR_INSTRUCTION && strstr(error.detail, "recursive"));
 }
 
+/* os_log.log_error("hi %d %f %ld", ...) through the method Apple's compiler
+ * defines for it, in a kernel, with a float its call promotes and a long. */
+static const char *logging =
+   "@sub = private addrspace(2) constant [4 x i8] c\"sub\\00\"\n"
+   "@cat = private addrspace(2) constant [4 x i8] c\"cat\\00\"\n"
+   "@ptr = private addrspace(2) constant [3 x i8] c\"%p\\00\"\n"
+   "@fmt = private addrspace(2) constant [13 x i8] c\"hi %d %f %ld\\00\"\n"
+   "%log = type { ptr addrspace(2), ptr addrspace(2) }\n"
+   "@log = internal addrspace(2) global %log { ptr addrspace(2) @sub, ptr addrspace(2) @cat }\n"
+   "@default = external addrspace(2) global %log\n"
+   "@llvm.global_ctors = appending global [0 x { i32, ptr, ptr }] zeroinitializer\n"
+   "declare void @llvm.va_start.p0(ptr)\ndeclare void @llvm.va_end.p0(ptr)\n"
+   "declare void @air.os_log(ptr addrspace(2), ptr addrspace(2), i32, ptr addrspace(2), ptr, i64)\n"
+   "define linkonce_odr void @log_error(ptr addrspace(2) %o, ptr addrspace(2) %f, i64 %n, ...) {\n"
+   "%list = alloca ptr, align 8\ncall void @llvm.va_start.p0(ptr %list)\n"
+   "%s = load ptr addrspace(2), ptr addrspace(2) %o, align 8\n"
+   "%g = getelementptr inbounds %log, ptr addrspace(2) %o, i64 0, i32 1\n"
+   "%c = load ptr addrspace(2), ptr addrspace(2) %g, align 8\n"
+   "%l = load ptr, ptr %list, align 8\n"
+   "call void @air.os_log(ptr addrspace(2) %s, ptr addrspace(2) %c, i32 16, ptr addrspace(2) %f,"
+   " ptr %l, i64 %n)\n"
+   "call void @llvm.va_end.p0(ptr %list)\nret void\n}\n"
+   "define void @logs(ptr addrspace(1) %data, i32 %tid) {\n"
+   "%t = uitofp i32 %tid to float\n%d = fpext float %t to double\n%w = zext i32 %tid to i64\n"
+   "call void (ptr addrspace(2), ptr addrspace(2), i64, ...) @log_error(ptr addrspace(2) @log,"
+   " ptr addrspace(2) @fmt, i64 20, i32 %tid, double %d, i64 %w)\n"
+   "call void (ptr addrspace(2), ptr addrspace(2), i64, ...) @log_error(ptr addrspace(2) @default,"
+   " ptr addrspace(2) @fmt, i64 4, i32 %tid)\n"
+   "call void (ptr addrspace(2), ptr addrspace(2), i64, ...) @log_error(ptr addrspace(2) @default,"
+   " ptr addrspace(2) @ptr, i64 8, ptr addrspace(1) %data)\n"
+   "ret void\n}\n"
+   "define void @promotes(ptr addrspace(1) %data, i32 %tid) {\n"
+   "%t = uitofp i32 %tid to float\n%d = fpext float %t to double\n"
+   "%f = fptrunc double %d to float\n"
+   "store float %f, ptr addrspace(1) %data, align 4\nret void\n}\n"
+   "!air.kernel = !{!2, !5}\n"
+   "!2 = !{ptr @logs, !3, !4}\n!3 = !{}\n!4 = !{!40, !41}\n!5 = !{ptr @promotes, !3, !4}\n"
+   "!40 = !{i32 0, !\"air.buffer\", !\"air.location_index\", i32 0, i32 1, !\"air.read_write\","
+   " !\"air.address_space\", i32 1, !\"air.arg_type_size\", i32 4, !\"air.arg_type_align_size\","
+   " i32 4, !\"air.arg_type_name\", !\"int\", !\"air.arg_name\", !\"data\"}\n"
+   "!41 = !{i32 1, !\"air.thread_position_in_grid\", !\"air.arg_type_name\", !\"uint\","
+   " !\"air.arg_name\", !\"tid\"}\n";
+
+static unsigned
+count_intrinsic(nir_shader *shader, nir_intrinsic_op op)
+{
+   unsigned count = 0;
+   nir_foreach_function_impl(impl, shader) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            count += instr->type == nir_instr_type_intrinsic &&
+                     nir_instr_as_intrinsic(instr)->intrinsic == op;
+         }
+      }
+   }
+   return count;
+}
+
+static void
+os_log_appends_self_contained_records(void)
+{
+   const struct stela_metal_specialization specialization = {.workgroup_size = {64, 1, 1}};
+   struct stela_metal_reflection reflection;
+   struct stela_air_error error;
+   assert(reflect(logging, "logs", &reflection, &error));
+   nir_shader *shader = compile(logging, "logs", &specialization, &error);
+   assert(shader);
+   /* Each call reads whether the buffer is past its capacity, reserves its
+    * record and writes at least its six words. */
+   assert(count_intrinsic(shader, nir_intrinsic_load_global) >= 6);
+   assert(count_intrinsic(shader, nir_intrinsic_global_atomic) >= 3);
+   assert(count_intrinsic(shader, nir_intrinsic_store_global) >= 18);
+   stela_metal_release(shader);
+   /* A double any other instruction reads is no promotion. */
+   assert(!compile(logging, "promotes", &specialization, &error));
+}
+
+static const char *stitching_kernel =
+   "declare i32 @quadrupled.MTL_VISIBLE_FN_REF(i32) section \"air.externally_defined\"\n"
+   "define void @stitches(ptr addrspace(1) %data, i32 %tid) {\n"
+   "%v = call i32 @quadrupled.MTL_VISIBLE_FN_REF(i32 %tid)\n"
+   "store i32 %v, ptr addrspace(1) %data, align 4\nret void\n}\n"
+   "!air.kernel = !{!2}\n!air.visible_function_references = !{!5}\n"
+   "!2 = !{ptr @stitches, !3, !4}\n!3 = !{}\n!4 = !{!40, !41}\n"
+   "!5 = !{!\"air.visible_function_reference\", ptr @quadrupled.MTL_VISIBLE_FN_REF,"
+   " !\"quadrupled\"}\n"
+   "!40 = !{i32 0, !\"air.buffer\", !\"air.location_index\", i32 0, i32 1, !\"air.read_write\","
+   " !\"air.address_space\", i32 1, !\"air.arg_type_size\", i32 4, !\"air.arg_type_align_size\","
+   " i32 4, !\"air.arg_type_name\", !\"int\", !\"air.arg_name\", !\"data\"}\n"
+   "!41 = !{i32 1, !\"air.thread_position_in_grid\", !\"air.arg_type_name\", !\"uint\","
+   " !\"air.arg_name\", !\"tid\"}\n";
+
+/* Keeps the bitcode of LLVM's wrapper for a Darwin target, as `metal/library.rs`
+ * reads it from a library. */
+static void
+keep_stitched(void *data, const void *bytes, size_t size)
+{
+   uint32_t wrapper[5];
+   assert(size >= sizeof(wrapper));
+   memcpy(wrapper, bytes, sizeof(wrapper));
+   assert(wrapper[0] == 0x0b17c0de && wrapper[2] + wrapper[3] <= size);
+   *(LLVMMemoryBufferRef *)data = LLVMCreateMemoryBufferWithMemoryRangeCopy(
+      (const char *)bytes + wrapper[2], wrapper[3], "stitched");
+}
+
+static bool
+visible_quadrupled(void *data, const char *name, size_t name_bytes,
+                   enum stela_metal_function_stage stage)
+{
+   assert(name_bytes == 10 && !memcmp(name, "quadrupled", 10) && stage == STELA_METAL_VISIBLE);
+   (*(unsigned *)data)++;
+   return true;
+}
+
+/* quadrupled(x) = doubled(doubled(x)) is a visible function of its own module,
+ * which a pipeline links with the module it calls. */
+static void
+stitched_functions_call_their_nodes_in_order(void)
+{
+   LLVMMemoryBufferRef source = bitcode(calls);
+   struct stela_air_stitch_source sources[] = {
+      {LLVMGetBufferStart(source), LLVMGetBufferSize(source), "doubled"},
+      {LLVMGetBufferStart(source), LLVMGetBufferSize(source), "calls"},
+   };
+   const uint32_t first = 0, second = 1;
+   const struct stela_air_stitch_node nodes[] = {
+      {.function = STELA_AIR_STITCH_INPUT},
+      {.function = 0, .arguments = &first, .argument_count = 1},
+      {.function = 0, .arguments = &second, .argument_count = 1},
+   };
+   const struct stela_air_stitch_graph graph = {"quadrupled", nodes, 3, 2};
+   struct stela_air_error error;
+   LLVMMemoryBufferRef stitched = NULL;
+   assert(stela_metal_stitch(sources, 1, &graph, 1, keep_stitched, &stitched, &error));
+
+   unsigned listed = 0;
+   assert(stela_metal_functions(LLVMGetBufferStart(stitched), LLVMGetBufferSize(stitched),
+                                visible_quadrupled, &listed, &error));
+   assert(listed == 1);
+
+   const struct stela_air_module modules[] = {
+      {LLVMGetBufferStart(stitched), LLVMGetBufferSize(stitched)},
+      {LLVMGetBufferStart(source), LLVMGetBufferSize(source)},
+   };
+   const struct stela_metal_specialization specialization = {
+      .workgroup_size = {64, 1, 1}, .modules = modules, .module_count = 2,
+   };
+   nir_shader *shader = compile(stitching_kernel, "stitches", &specialization, &error);
+   assert(shader);
+   stela_metal_release(shader);
+
+   /* Without the module it calls, the function is undefined. */
+   const struct stela_metal_specialization unlinked = {
+      .workgroup_size = {64, 1, 1}, .modules = modules, .module_count = 1,
+   };
+   assert(!compile(stitching_kernel, "stitches", &unlinked, &error));
+
+   /* Only visible functions stitch, with as many arguments as they take. */
+   assert(!stela_metal_stitch(&sources[1], 1, &graph, 1, keep_stitched, &stitched, &error) &&
+          strstr(error.detail, "not visible"));
+   const struct stela_air_stitch_node calling_nothing[] = {
+      {.function = 0, .argument_count = 0},
+   };
+   const struct stela_air_stitch_graph short_call = {"short", calling_nothing, 1,
+                                                     STELA_AIR_STITCH_NO_OUTPUT};
+   assert(!stela_metal_stitch(sources, 1, &short_call, 1, keep_stitched, &stitched, &error) &&
+          strstr(error.detail, "number of arguments"));
+   LLVMDisposeMemoryBuffer(stitched);
+   LLVMDisposeMemoryBuffer(source);
+}
+
 /* compile() with the modules and linked functions of a pipeline. */
 static nir_shader *
 compile_linked(const char *fixture, const char *entry, const char *const *modules,
@@ -1162,6 +1577,9 @@ linked_functions_resolve_tables_and_externals(void)
    shader = compile_linked(recast, "tables", &linked, 1, functions, 3, &error);
    assert(shader);
    stela_metal_release(shader);
+   shader = compile_linked(sized, "tables", &linked, 1, functions, 3, &error);
+   assert(shader);
+   stela_metal_release(shader);
 
    /* Without the library, the external function is unresolved. */
    assert(!compile_linked(tables, "tables", NULL, 0, functions, 1, &error));
@@ -1173,6 +1591,12 @@ linked_functions_resolve_tables_and_externals(void)
    /* A table's pointer that escapes its calls. */
    assert(!compile_linked(escaping, "tables", &linked, 1, functions, 3, &error));
    assert(error.kind == STELA_AIR_INSTRUCTION && strstr(error.detail, "only called"));
+   /* A library's kernel of the kernel's name is its own. */
+   const char *sharing[] = {linked, "define void @tables() {\nret void\n}\n!air.kernel = !{!0}\n"
+                                    "!0 = !{ptr @tables, !1, !1}\n!1 = !{}\n"};
+   shader = compile_linked(tables, "tables", sharing, 2, functions, 3, &error);
+   assert(shader);
+   stela_metal_release(shader);
    /* A library that defines the kernel's own function again. */
    const char *twice[] = {linked, "define i32 @doubled(i32 %x) {\nret i32 %x\n}\n!air.visible = !{}\n"};
    assert(!compile_linked(tables, "tables", twice, 2, functions, 3, &error));
@@ -1313,7 +1737,8 @@ recursion_result(const char *function, uint32_t depth, struct stela_air_error *e
    put64(push + STELA_METAL_PUSH_TABLES, BASE + TABLE);
    put64(memory + TABLE + STELA_METAL_TABLE_BUFFER_ADDRESSES, BASE + FUNCTIONS);
    put64(memory + TABLE + STELA_METAL_TABLE_BUFFER_ADDRESSES + 8, BASE + DATA);
-   put64(memory + FUNCTIONS, 1);
+   put64(memory + FUNCTIONS, 2);
+   put64(memory + FUNCTIONS + 8, 1);
    put32(memory + DATA, 3);
    const struct air_effect_environment environment = {
       .base = BASE, .bytes = memory, .size = sizeof(memory), .push = push,
@@ -1397,6 +1822,7 @@ int
 main(void)
 {
    glsl_type_singleton_init_or_ref();
+   modules_list_their_functions();
    kernels_reflect_and_compile_their_threadgroup_memory();
    dynamic_kernels_take_their_dispatch_shape();
    render_stages_compile_at_their_linked_locations();
@@ -1405,10 +1831,16 @@ main(void)
    mesh_stages_compile_with_their_launch();
    function_constants_reflect_and_specialize();
    derived_constants_are_constructed_from_their_function_constants();
+   function_constants_select_outputs();
+   older_kernels_compile();
+   unoptimized_kernels_compile();
+   undefined_lanes_read_as_anything();
    function_constants_select_arguments();
    arrays_reflect_each_slot();
    bindings_reflect_their_structures();
    defined_functions_inline_into_their_callers();
+   stitched_functions_call_their_nodes_in_order();
+   os_log_appends_self_contained_records();
    linked_functions_resolve_tables_and_externals();
    recursion_unrolls_to_the_call_stack_depth();
    linked_modules_specialize_their_function_constants();

@@ -98,8 +98,10 @@ static const char *kernel_metadata =
    " !\"Inner\", !\"air.arg_name\", !\"inner\"}\n"
    "!37 = !{i32 0, i32 8, i32 0, !\"uint*\", !\"counts\", !\"air.indirect_argument\", !38}\n"
    "!38 = !{i32 0, !\"air.buffer\", !\"air.location_index\", i32 0, i32 1, !\"air.read_write\","
-   " !\"air.address_space\", i32 1, !\"air.arg_type_size\", i32 4, !\"air.arg_type_align_size\", i32 4,"
-   " !\"air.arg_type_name\", !\"uint\", !\"air.arg_name\", !\"counts\"}\n"
+   " !\"air.address_space\", i32 1, !\"air.struct_type_info\", !39, !\"air.arg_type_size\", i32 4,"
+   " !\"air.arg_type_align_size\", i32 4, !\"air.arg_type_name\", !\"Counts\","
+   " !\"air.arg_name\", !\"counts\"}\n"
+   "!39 = !{i32 0, i32 4, i32 0, !\"uint\", !\"count\"}\n"
    "!20 = !{i32 2, i32 9, i32 0}\n!21 = !{!\"Metal\", i32 4, i32 1, i32 0}\n";
 
 /* A fragment function that samples a material's texture with its sampler. */
@@ -442,6 +444,19 @@ inlined_structures_are_fields_of_their_buffer(void)
            replaced(inlined_metadata, "!\"air.indirect_argument\", i32 1,",
                     "!\"air.indirect_argument\", !\"pair\","),
            STELA_AIR_METADATA);
+
+   /* An array of pointers records one element's size and location. */
+   char *pointers = strdup(replaced(inlined_metadata, "i32 40, i32 8, i32 0", "i32 40, i32 8, i32 4"));
+   refused(inlined_body, pointers, STELA_AIR_TYPE);
+   char *sized = strdup(replaced(pointers, "!\"air.buffer_size\", i32 48", "!\"air.buffer_size\", i32 72"));
+   shader = kernel(inlined_body, replaced(sized, "!\"air.arg_type_size\", i32 48", "!\"air.arg_type_size\", i32 72"),
+                   &error);
+   if (!shader)
+      fprintf(stderr, "pointers: %u %s\n", error.kind, error.detail);
+   assert(shader);
+   ralloc_free(shader);
+   free(sized);
+   free(pointers);
 }
 
 static bool

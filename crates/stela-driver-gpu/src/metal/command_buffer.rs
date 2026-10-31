@@ -122,12 +122,13 @@ pub trait Resolver: ChunkSource {
     ) -> Result<ResourceId>;
 
     /// The mesh pipeline variant for the object and mesh threadgroup sizes
-    /// of a draw, compiled on first use.
+    /// and object threadgroup memory of a draw, compiled on first use.
     fn mesh_pipeline(
         &mut self,
         state: &RenderPipelineState,
         object: [u32; 3],
         mesh: [u32; 3],
+        object_lengths: &[(u32, u64)],
     ) -> Result<Pipeline>;
 
     /// A reset query pool of `query_type` and its query count; pipeline
@@ -348,8 +349,11 @@ impl Bindings {
 
     /// Bindings carry over between encoders only through the table memory
     /// already uploaded; a new encoder starts empty, as Metal's do.
+    /// Forgets an encoder's bindings; the log buffer is the command buffer's.
     fn reset(&mut self) {
+        let log = self.constants.log;
         *self = Self::default();
+        self.constants.log = log;
     }
 }
 
@@ -457,6 +461,11 @@ impl CommandBuffer {
             encoder: Encoder::None,
             features,
         }
+    }
+
+    /// Gives the shaders of this command buffer the buffer `os_log` appends to.
+    pub fn set_log_buffer(&mut self, buffer: BufferRef) {
+        self.bindings.constants.log = buffer.address;
     }
 
     fn idle(&self) -> Result<()> {

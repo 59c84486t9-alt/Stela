@@ -261,7 +261,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         })
     }
 
-    fn adopt_texture(
+    pub(super) fn adopt_texture(
         &mut self,
         connection: NonZeroU64,
         texture: TextureId,

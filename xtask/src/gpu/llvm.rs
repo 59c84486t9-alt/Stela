@@ -1,5 +1,5 @@
-//! LLVM for `stela.efi`: the AIR compiler's bitcode reader, verifier, linker
-//! and passes, unpatched, over libc++ and `compat/libc`.
+//! LLVM for `stela.efi`: the AIR compiler's bitcode reader and writer,
+//! verifier, linker and passes, unpatched, over libc++ and `compat/libc`.
 //!
 //! LLVM's CMake only states what these steps state here, and the build host
 //! need not have it. `llvm-min-tblgen` builds natively and generates what
@@ -35,12 +35,13 @@ const TOOL_MAIN: &str = "llvm-min-tblgen.cpp";
 /// The `include/llvm` directories whose `CMakeLists.txt` names generated files.
 const GENERATED: [&str; 4] = ["IR", "Analysis", "CodeGen", "TargetParser"];
 /// Every source file of these libraries, under `llvm/lib`.
-const LIBRARIES: [&str; 11] = [
+const LIBRARIES: [&str; 12] = [
     "Support",
     "Demangle",
     "BinaryFormat",
     "Bitstream/Reader",
     "Bitcode/Reader",
+    "Bitcode/Writer",
     "IR",
     "Remarks",
     "Linker",
@@ -48,8 +49,10 @@ const LIBRARIES: [&str; 11] = [
     "Transforms/Utils",
     "ProfileData",
 ];
-/// The passes the AIR compiler runs, by source, with the C API's data layouts.
-const UNITS: [&str; 8] = [
+/// The passes the AIR compiler runs, by source, with the C API's data layouts
+/// and the bitcode writer's string table.
+const UNITS: [&str; 11] = [
+    "MC/StringTableBuilder.cpp",
     "Target/Target.cpp",
     "TargetParser/AMDGPUTargetParser.cpp",
     "TargetParser/ARMTargetParser.cpp",
@@ -57,7 +60,9 @@ const UNITS: [&str; 8] = [
     "TargetParser/Triple.cpp",
     "Transforms/IPO/AlwaysInliner.cpp",
     "Transforms/IPO/GlobalOpt.cpp",
+    "Transforms/Scalar/DCE.cpp",
     "Transforms/Scalar/SCCP.cpp",
+    "Transforms/Scalar/SROA.cpp",
 ];
 /// libc++'s out-of-line code, under `libcxx/src`.
 const LIBCXX: [&str; 23] = [

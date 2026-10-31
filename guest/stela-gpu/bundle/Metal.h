@@ -23,6 +23,9 @@ typedef struct {
 	NSUInteger size, align;
 } MTLSizeAndAlign;
 typedef struct {
+	NSUInteger accelerationStructureSize, buildScratchBufferSize, refitScratchBufferSize;
+} MTLAccelerationStructureSizes;
+typedef struct {
 	double red, green, blue, alpha;
 } MTLClearColor;
 typedef struct {
@@ -113,6 +116,65 @@ enum {
 	MTLLibraryErrorFileNotFound = 6,
 };
 enum {
+	MTLLibraryTypeExecutable = 0,
+	MTLLibraryTypeDynamic = 1,
+};
+enum {
+	MTLStitchedLibraryOptionFailOnBinaryArchiveMiss = 1,
+};
+enum {
+	MTLIOErrorURLInvalid = 1,
+	MTLIOErrorInternal = 2,
+};
+enum {
+	MTLIOPriorityHigh = 0,
+	MTLIOPriorityNormal = 1,
+	MTLIOPriorityLow = 2,
+};
+enum {
+	MTLIOCommandQueueTypeConcurrent = 0,
+	MTLIOCommandQueueTypeSerial = 1,
+};
+enum {
+	MTLIOStatusPending = 0,
+	MTLIOStatusCancelled = 1,
+	MTLIOStatusError = 2,
+	MTLIOStatusComplete = 3,
+};
+enum {
+	MTLLogStateErrorInvalidSize = 1,
+	MTLLogStateErrorInvalid = 2,
+};
+enum {
+	MTLLogLevelDebug = 1,
+	MTLLogLevelInfo = 2,
+	MTLLogLevelNotice = 3,
+	MTLLogLevelError = 4,
+	MTLLogLevelFault = 5,
+};
+enum {
+	MTLSparseTextureRegionAlignmentModeOutward = 0,
+	MTLSparseTextureRegionAlignmentModeInward = 1,
+};
+enum {
+	MTLLibraryOptimizationLevelDefault = 0,
+	MTLLibraryOptimizationLevelSize = 1,
+};
+enum {
+	MTLCompileSymbolVisibilityDefault = 0,
+	MTLCompileSymbolVisibilityHidden = 1,
+};
+enum {
+	MTLDynamicLibraryErrorInvalidFile = 1,
+	MTLDynamicLibraryErrorUnsupported = 5,
+};
+enum {
+	MTLBinaryArchiveErrorInvalidFile = 1,
+	MTLBinaryArchiveErrorUnexpectedElement = 2,
+	MTLBinaryArchiveErrorCompilationFailure = 3,
+	MTLBinaryArchiveErrorInternalError = 4,
+};
+enum {
 	MTLPipelineOptionNone = 0,
 	MTLPipelineOptionArgumentInfo = 1 << 0,
 	MTLPipelineOptionBindingInfo = 1 << 0,
@@ -198,6 +260,10 @@ enum {
 	X(MTLFence)                                                                                \
 	X(MTLEvent)                                                                                \
 	X(MTLSharedEvent)                                                                          \
+	X(MTLLogState)                                                                             \
+	X(MTLIOFileHandle)                                                                         \
+	X(MTLIOCommandQueue)                                                                       \
+	X(MTLIOCommandBuffer)                                                                      \
 	X(MTLLibrary)                                                                              \
 	X(MTLFunction)                                                                             \
 	X(MTLFunctionHandle)                                                                       \
@@ -224,16 +290,44 @@ enum {
 	X(MTLTextureBinding)                                                                       \
 	X(MTLThreadgroupBinding)                                                                   \
 	X(MTLObjectPayloadBinding)                                                                 \
-	X(MTLDrawable)
+	X(MTLDrawable)                                                                             \
+	X(MTLDynamicLibrary)                                                                       \
+	X(MTLBinaryArchive)                                                                        \
+	X(MTLResidencySet)
 
 #define STELA_DECLARE_PROTOCOL(name) @protocol name @end
 STELA_PROTOCOLS(STELA_DECLARE_PROTOCOL)
+
+/* What crosses between processes for a shared object. */
+@interface MTLSharedEventHandle : NSObject
+@end
+
+@interface MTLSharedTextureHandle : NSObject
+@end
+
+__attribute__((ns_returns_retained)) NSArray *MTLCopyAllDevices(void);
 
 /* The accessors of Metal's descriptors. */
 @interface NSObject (StelaDescriptors)
 - (BOOL)respondsToSelector:(SEL)selector;
 - (id)objectAtIndexedSubscript:(NSUInteger)index;
 - (NSString *)label;
+/* MTLResidencySetDescriptor. */
+- (NSUInteger)initialCapacity;
+/* MTLAllocation. */
+- (NSUInteger)allocatedSize;
+/* MTLCompileOptions. */
+- (NSUInteger)languageVersion;
+- (NSUInteger)mathMode;
+- (NSUInteger)mathFloatingPointFunctions;
+- (NSUInteger)optimizationLevel;
+- (NSUInteger)compileSymbolVisibility;
+- (NSUInteger)libraryType;
+- (BOOL)preserveInvariance;
+- (BOOL)enableLogging;
+- (NSDictionary *)preprocessorMacros;
+- (NSString *)installName;
+- (NSArray *)libraries;
 /* MTLTextureDescriptor and MTLHeapDescriptor. */
 - (NSUInteger)textureType;
 - (NSUInteger)pixelFormat;
@@ -244,11 +338,18 @@ STELA_PROTOCOLS(STELA_DECLARE_PROTOCOL)
 - (NSUInteger)sampleCount;
 - (NSUInteger)arrayLength;
 - (NSUInteger)resourceOptions;
+- (NSUInteger)storageMode;
 - (NSUInteger)usage;
 - (MTLTextureSwizzleChannels)swizzle;
 - (NSUInteger)size;
 - (NSUInteger)type;
 - (NSUInteger)sparsePageSize;
+/* MTLLogStateDescriptor, and the log state of a command buffer's or queue's. */
+- (NSInteger)bufferSize;
+- (id)logState;
+/* MTLIOCommandQueueDescriptor. */
+- (NSUInteger)maxCommandBufferCount;
+- (NSInteger)priority;
 /* MTLSamplerDescriptor. */
 - (NSUInteger)minFilter;
 - (NSUInteger)magFilter;
@@ -311,6 +412,8 @@ STELA_PROTOCOLS(STELA_DECLARE_PROTOCOL)
 - (id)vertexPreloadedLibraries;
 - (id)fragmentPreloadedLibraries;
 - (id)preloadedLibraries;
+- (id)binaryArchives;
+- (id)url;
 - (NSUInteger)maxVertexCallStackDepth;
 - (NSUInteger)maxFragmentCallStackDepth;
 - (NSUInteger)maxCallStackDepth;
@@ -425,6 +528,10 @@ STELA_PROTOCOLS(STELA_DECLARE_PROTOCOL)
 @end
 
 extern NSString *const MTLLibraryErrorDomain;
+extern NSString *const MTLIOErrorDomain;
+extern NSString *const MTLLogStateErrorDomain;
+extern NSString *const MTLDynamicLibraryDomain;
+extern NSString *const MTLBinaryArchiveDomain;
 extern NSString *const MTLCommandBufferErrorDomain;
 extern NSString *const MTLCounterErrorDomain;
 extern NSString *const MTLCommonCounterSetTimestamp;

@@ -2,18 +2,21 @@
 use super::{
     Call, Object, Service,
     wire::{
-        self, AttributeInfo, ConstantInfo, ConstantRecord, Fault, FunctionReflectionRequest,
-        FunctionReflectionResponse, LibraryFunctionNamesRequest, NewFunctionRequest,
-        NewLibraryRequest,
+        self, ArchiveDataRequest, AttributeInfo, ConstantInfo, ConstantRecord, Fault,
+        FunctionReflectionRequest, FunctionReflectionResponse, LibraryDataRequest,
+        LibraryFunctionNamesRequest, LibraryIdentityRequest, LibraryIdentityResponse,
+        NewArchiveRequest, NewFunctionRequest, NewLibraryRequest, NewSourceLibraryRequest,
+        NewStitchedLibraryRequest,
     },
 };
 use crate::metal::{
     abi::DataType,
     device::{
-        FunctionId, LibraryId,
+        ArchiveId, FunctionId, LibraryId,
         pipelines::{ConstantKey, ConstantValue},
     },
     shader::{Compiler, PatchDomain, Reflection},
+    stitching,
     vulkan::backend::Backend,
 };
 use alloc::{string::String, vec::Vec};
@@ -27,6 +30,37 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         call.reply(&handle)
     }
 
+    pub(super) fn new_source_library(&mut self, call: &mut Call) -> Result<(), Fault> {
+        let request: NewSourceLibraryRequest = call.request()?;
+        let memory = &mut *call.memory;
+        let air = memory.read(request.air)?;
+        let install_name = (request.install_name.length != 0)
+            .then(|| text(&memory.read(request.install_name)?))
+            .transpose()?;
+        let libraries = wire::read_array::<u64>(&memory.read(request.libraries)?)?
+            .into_iter()
+            .map(|handle| self.object::<LibraryId>(call.connection, handle))
+            .collect::<Result<Vec<_>, Fault>>()?;
+        let library = self
+            .device
+            .new_source_library(&air, install_name.as_deref(), &libraries)?;
+        let handle = self.hold(call.connection, Object::Library(library))?;
+        call.reply(&handle)
+    }
+
+    pub(super) fn new_stitched_library(&mut self, call: &mut Call) -> Result<(), Fault> {
+        let request: NewStitchedLibraryRequest = call.request()?;
+        let memory = &mut *call.memory;
+        let functions = wire::read_array::<u64>(&memory.read(request.functions)?)?
+            .into_iter()
+            .map(|handle| self.object::<FunctionId>(call.connection, handle))
+            .collect::<Result<Vec<_>, Fault>>()?;
+        let graphs = stitching::decode(&memory.read(request.graphs)?, functions.len())?;
+        let library = self.device.new_stitched_library(&functions, &graphs)?;
+        let handle = self.hold(call.connection, Object::Library(library))?;
+        call.reply(&handle)
+    }
+
     pub(super) fn library_function_names(&mut self, call: &mut Call) -> Result<(), Fault> {
         let request: LibraryFunctionNamesRequest = call.request()?;
         let library = self.object::<LibraryId>(call.connection, request.library)?;
@@ -36,6 +70,40 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             names.push(0);
         }
         call.reply_data(request.out, &names)
+    }
+
+    pub(super) fn library_identity(&mut self, call: &mut Call) -> Result<(), Fault> {
+        let request: LibraryIdentityRequest = call.request()?;
+        let library = self.object::<LibraryId>(call.connection, request.library)?;
+        let (dynamic, install_name) = self.device.library_identity(library)?;
+        let install_name = install_name.unwrap_or_default().as_bytes();
+        call.write_fitting(request.out, install_name)?;
+        call.reply(&LibraryIdentityResponse {
+            // `MTLLibraryType`.
+            library_type: dynamic.into(),
+            length: install_name.len() as u64,
+        })
+    }
+
+    pub(super) fn library_data(&mut self, call: &mut Call) -> Result<(), Fault> {
+        let request: LibraryDataRequest = call.request()?;
+        let library = self.object::<LibraryId>(call.connection, request.library)?;
+        call.reply_data(request.out, self.device.library_data(library)?)
+    }
+
+    pub(super) fn new_archive(&mut self, call: &mut Call) -> Result<(), Fault> {
+        let request: NewArchiveRequest = call.request()?;
+        let data = call.memory.read(request.data)?;
+        let archive = self.device.new_archive(&data)?;
+        let handle = self.hold(call.connection, Object::Archive(archive))?;
+        call.reply(&handle)
+    }
+
+    pub(super) fn archive_data(&mut self, call: &mut Call) -> Result<(), Fault> {
+        let request: ArchiveDataRequest = call.request()?;
+        let archive = self.object::<ArchiveId>(call.connection, request.archive)?;
+        let data = self.device.archive_data(archive)?;
+        call.reply_data(request.out, &data)
     }
 
     pub(super) fn new_function(&mut self, call: &mut Call) -> Result<(), Fault> {

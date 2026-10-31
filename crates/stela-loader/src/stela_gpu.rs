@@ -1,17 +1,16 @@
-//! StelaGPU's call gate in the guest's DeviceTree: `/arm-io/stela-gpu`,
-//! whose nub the StelaGPU kext matches by `compatible` and maps by `reg`.
-//! The window goes in the first gap of `/arm-io`'s `ranges`, aligned to its
+//! StelaGPU's call gates in the guest's DeviceTree: `/arm-io/stela-gpu<n>` for
+//! GPU `n`, whose nub the StelaGPU kext matches by `compatible` and maps by
+//! `reg`. A window goes in the first gap of `/arm-io`'s `ranges`, aligned to its
 //! size, that no `/arm-io` device's registers use, and the completion
 //! interrupt on the AIC input past every one the tree's AIC clients use, so
 //! neither collides with anything the board places; the runtime mounts the
 //! gate where this answers.
 use crate::Result;
 use crate::apple_device_tree::{DeviceTree, Node};
-use alloc::vec::Vec;
+use alloc::{format, vec::Vec};
 use stela_contracts::{refuse, require};
 
 const ARM_IO: &str = "/arm-io";
-const NAME: &str = "stela-gpu";
 const COMPATIBLE: &[u8] = b"gpu,stela\0";
 
 const AIC: &str = "/arm-io/aic";
@@ -26,16 +25,17 @@ pub struct Placement {
     pub irq: u32,
 }
 
-/// Adds the gate's node for a window of `bytes`, a power of two.
-pub fn place_gpu_gate(tree: &mut DeviceTree, bytes: u64) -> Result<Placement> {
+/// Adds the node of GPU `index`'s gate for a window of `bytes`, a power of two.
+pub fn place_gpu_gate(tree: &mut DeviceTree, index: usize, bytes: u64) -> Result<Placement> {
     require!(bytes.is_power_of_two(), "the gate window is a power of two");
+    let name = format!("stela-gpu{index}");
     let arm_io = tree
         .node(ARM_IO)
         .ok_or(refuse!("DeviceTree has no /arm-io"))?;
     require!(
-        arm_io.child(NAME).is_none(),
-        "/arm-io already has a {NAME}",
-        NAME
+        arm_io.child(&name).is_none(),
+        "/arm-io already has a {name}",
+        name
     );
     for cells in ["#address-cells", "#size-cells"] {
         require!(
@@ -70,7 +70,7 @@ pub fn place_gpu_gate(tree: &mut DeviceTree, bytes: u64) -> Result<Placement> {
         .max()
         .map_or(Some(0), |last| last.checked_add(1))
         .ok_or(refuse!("the AIC has no input past its clients'"))?;
-    let mut node = Node::named(NAME)?;
+    let mut node = Node::named(&name)?;
     node.set_property("compatible", COMPATIBLE.to_vec())?;
     node.set_property(INTERRUPT_PARENT, aic.to_le_bytes().to_vec())?;
     node.set_property("interrupts", irq.to_le_bytes().to_vec())?;
@@ -198,31 +198,41 @@ mod tests {
             interrupting(device("gpio", 0x60_0000, 0x1_0000), 99, &[0x400]),
         ]);
         assert_eq!(
-            place_gpu_gate(&mut tree, WINDOW).unwrap(),
+            place_gpu_gate(&mut tree, 0, WINDOW).unwrap(),
             Placement {
                 physical: 0x2_0080_0000,
                 irq: 0x32,
             }
         );
-        let node = tree.node("/arm-io/stela-gpu").unwrap();
+        let node = tree.node("/arm-io/stela-gpu0").unwrap();
         assert_eq!(node.property("compatible").unwrap().value, COMPATIBLE);
         assert_eq!(node.property("interrupts").unwrap().as_u32(), Some(0x32));
         assert_eq!(
             node.property("reg").unwrap().value,
             [0x80_0000, WINDOW].map(u64::to_le_bytes).concat()
         );
-        assert!(place_gpu_gate(&mut tree, WINDOW).is_err());
+        assert!(place_gpu_gate(&mut tree, 0, WINDOW).is_err());
+    }
+
+    #[test]
+    fn each_gpu_has_a_window_and_an_interrupt_of_its_own() {
+        let mut tree = tree(Vec::new());
+        let first = place_gpu_gate(&mut tree, 0, WINDOW).unwrap();
+        let second = place_gpu_gate(&mut tree, 1, WINDOW).unwrap();
+        assert_eq!(second.physical, first.physical + WINDOW);
+        assert_eq!(second.irq, first.irq + 1);
+        assert!(tree.node("/arm-io/stela-gpu1").is_some());
     }
 
     #[test]
     fn a_full_bus_or_a_foreign_layout_has_no_place_for_the_gate() {
         let mut full = tree(vec![device("everything", 0, 0x1000_0000)]);
-        assert!(place_gpu_gate(&mut full, WINDOW).is_err());
+        assert!(place_gpu_gate(&mut full, 0, WINDOW).is_err());
         let mut narrow = tree(Vec::new());
         narrow
             .set_property(ARM_IO, "#size-cells", 1u32.to_le_bytes().to_vec())
             .unwrap();
-        assert!(place_gpu_gate(&mut narrow, WINDOW).is_err());
-        assert!(place_gpu_gate(&mut tree(Vec::new()), 0x3000).is_err());
+        assert!(place_gpu_gate(&mut narrow, 0, WINDOW).is_err());
+        assert!(place_gpu_gate(&mut tree(Vec::new()), 0, 0x3000).is_err());
     }
 }

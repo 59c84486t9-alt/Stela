@@ -61,6 +61,8 @@ struct MockResolver {
     chunks: u64,
     compiled: Vec<Specialization>,
     pools: u64,
+    /// The object threadgroup memory of the last mesh draw.
+    object_lengths: Vec<(u32, u64)>,
     /// Pipeline states by id, for indirect commands.
     render_states: Vec<RenderPipelineState>,
     compute_states: Vec<ComputePipelineState>,
@@ -110,7 +112,9 @@ impl Resolver for MockResolver {
         _: &RenderPipelineState,
         _: [u32; 3],
         _: [u32; 3],
+        object_lengths: &[(u32, u64)],
     ) -> Result<Pipeline> {
+        self.object_lengths = object_lengths.to_vec();
         Ok(Pipeline(900))
     }
 
@@ -605,8 +609,18 @@ fn mesh_thread_draws_cover_the_grid_with_the_first_stage() {
             .unwrap();
         commands.set_render_pipeline_state(&state).unwrap();
         commands
+            .set_object_threadgroup_memory_length(64, 2)
+            .unwrap();
+        commands
+            .set_object_threadgroup_memory_length(16, 0)
+            .unwrap();
+        commands
+            .set_object_threadgroup_memory_length(32, 2)
+            .unwrap();
+        commands
             .draw_mesh_threads(&mut resolver, [100, 1, 1], [32, 1, 1], [8, 1, 1])
             .unwrap();
+        assert_eq!(resolver.object_lengths, [(0, 16), (2, 32)]);
         commands.end_encoding(&mut resolver).unwrap();
         let recording = commit(commands, &mut resolver, (Semaphore(1), 1));
         assert!(
@@ -1154,6 +1168,39 @@ fn barriers(recording: &Recording) -> usize {
     count(&recording.segments[0].commands[1..], |command| {
         matches!(command, Command::Barrier(_))
     })
+}
+
+#[test]
+fn every_encoder_pushes_the_command_buffer_s_log_buffer() {
+    let threads = Size {
+        width: 64,
+        height: 1,
+        depth: 1,
+    };
+    let mut resolver = MockResolver::default();
+    let mut commands = CommandBuffer::new(FEATURES);
+    let log = buffer(4, 1024);
+    commands.set_log_buffer(log);
+    for _ in 0..2 {
+        commands.begin_compute(DispatchType::Serial).unwrap();
+        commands
+            .set_compute_pipeline_state(&kernel_state(false))
+            .unwrap();
+        commands
+            .dispatch_threadgroups(&mut resolver, [1, 1, 1], threads)
+            .unwrap();
+        commands.end_encoding(&mut resolver).unwrap();
+    }
+    let recording = commit(commands, &mut resolver, (Semaphore(1), 1));
+    let logs: Vec<_> = recording.segments[0]
+        .commands
+        .iter()
+        .filter_map(|command| match command {
+            Command::PushConstants(constants) => Some(constants.log),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(logs, [log.address; 2]);
 }
 
 #[test]
@@ -2463,13 +2510,13 @@ fn generated_layouts_read_the_sequence_at_token_offsets() {
                 8,
                 IndirectToken::PushConstants {
                     offset: 0,
-                    size: 52
+                    size: 64
                 }
             ),
-            (64, IndirectToken::IndexBuffer),
-            (96, IndirectToken::VertexBuffer(1)),
-            (560, IndirectToken::VertexBuffer(30)),
-            (592, IndirectToken::DrawIndexed),
+            (72, IndirectToken::IndexBuffer),
+            (104, IndirectToken::VertexBuffer(1)),
+            (568, IndirectToken::VertexBuffer(30)),
+            (600, IndirectToken::DrawIndexed),
         ]
     );
 }

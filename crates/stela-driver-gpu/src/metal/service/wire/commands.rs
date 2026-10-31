@@ -614,6 +614,8 @@ raw_enum! {
         WaitForEvent = 0x0003,
         /// `SampleCounters`.
         SampleCounters = 0x0004,
+        /// `Handle`: the log state's buffer, before any encoder.
+        LogBuffer = 0x0005,
     }
 }
 
@@ -734,6 +736,8 @@ raw_enum! {
         DrawMeshThreads = 0x0610,
         /// No record.
         Reset = 0x0611,
+        /// `SetThreadgroupMemory`.
+        SetObjectThreadgroupMemory = 0x0612,
     }
 }
 
@@ -871,6 +875,8 @@ raw_enum! {
         SetDepthStoreActionOptions = 0x0325,
         /// `Mode`: an `MTLStoreActionOptions`.
         SetStencilStoreActionOptions = 0x0326,
+        /// `SetThreadgroupMemory`.
+        SetObjectThreadgroupMemory = 0x0327,
     }
 }
 

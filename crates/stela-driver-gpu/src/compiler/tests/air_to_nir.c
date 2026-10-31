@@ -1222,8 +1222,6 @@ cfg_limits_and_refusals(void)
       "left:\nbr label %join\nright:\nbr label %join\n"
       "join:\n%p = phi {i32, i32} [{i32 1, i32 2}, %left], [{i32 3, i32 4}, %right]\nret void\n",
       "", 100, STELA_AIR_TYPE);
-   expect_refusal("br i1 poison, label %same, label %same\nsame:\nret void\n",
-      "", 100, STELA_AIR_INSTRUCTION);
    expect_refusal("unreachable\n", "", 100, STELA_AIR_CONTROL_FLOW);
    expect_refusal(loop_body, "", 20, STELA_AIR_LIMIT);
    expect_refusal(conditional_body, "", 20, STELA_AIR_LIMIT);
@@ -2187,16 +2185,6 @@ floating_contracts(void)
       LLVMDisposeMemoryBuffer(input);
       free(prefix);
    }
-   const char *unsupported[] = {
-      "%v = fdiv float 1.0, 2.0\nret void\n",
-      "%v = frem float 1.0, 2.0\nret void\n",
-   };
-   for (unsigned i = 0; i < ARRAY_SIZE(unsupported); i++) {
-      LLVMMemoryBufferRef input = ieee_bitcode(stela_air_test_prefix, unsupported[i]);
-      struct stela_air_error error;
-      CHECK(!translate(input, &test_nir_options, 100, &error) && error.kind == STELA_AIR_INSTRUCTION);
-      LLVMDisposeMemoryBuffer(input);
-   }
    LLVMMemoryBufferRef constrained = ieee_bitcode_extra(stela_air_test_prefix,
       "%v = call float @llvm.experimental.constrained.fadd.f32(float 1.0, float 2.0, "
       "metadata !\"round.tonearest\", metadata !\"fpexcept.ignore\")\nret void\n",
@@ -2323,9 +2311,11 @@ vector_semantics(void)
    constant_store("%s = shufflevector <2 x i32> <i32 1, i32 2>, <2 x i32> poison, <2 x i32> <i32 1, i32 poison>\n"
                   "%l = extractelement <2 x i32> %s, i32 0\n"
                   "store i32 %l, ptr addrspace(1) %out, align 4\nret void\n", 2, 0x100000);
-   expect_refusal("%s = shufflevector <2 x i32> <i32 1, i32 2>, <2 x i32> poison, <2 x i32> <i32 1, i32 poison>\n"
-                  "store <2 x i32> %s, ptr addrspace(1) %out, align 8\nret void\n", "", 100,
-                  STELA_AIR_INSTRUCTION);
+   /* Stored whole, its poison lane holds anything and the other its value. */
+   constant_store("%s = shufflevector <2 x i32> <i32 1, i32 2>, <2 x i32> poison, <2 x i32> <i32 1, i32 poison>\n"
+                  "%w = shufflevector <2 x i32> %s, <2 x i32> poison, <2 x i32> <i32 0, i32 0>\n"
+                  "%l = extractelement <2 x i32> %w, i32 1\n"
+                  "store i32 %l, ptr addrspace(1) %out, align 4\nret void\n", 2, 0x100000);
 }
 
 /* A PHI's undefined incoming value takes NIR's undef, which any edge that
@@ -2424,11 +2414,11 @@ tests(void)
    expect_refusal("%v = fadd float 1.0, 2.0\nret void\n", "", 100, STELA_AIR_METADATA);
    expect_refusal("%v = load volatile i32, ptr addrspace(1) %out, align 4\nret void\n", "", 100, STELA_AIR_MEMORY);
    expect_refusal("%v = load atomic i32, ptr addrspace(1) %out acquire, align 4\nret void\n", "", 100, STELA_AIR_MEMORY);
-   expect_refusal("%v = freeze i32 poison\nret void\n", "", 100, STELA_AIR_INSTRUCTION);
+   constant_store("%v = freeze i32 poison\nstore i32 %v, ptr addrspace(1) %out, align 4\nret void\n",
+                  0, 0x100000);
    expect_refusal("call void @helper()\nret void\n", "declare void @helper()\n", 100, STELA_AIR_INSTRUCTION);
    expect_refusal("store i32 %later, ptr addrspace(1) %out, align 4\n%later = add i32 %tid, 1\nret void\n", "", 100, STELA_AIR_VERIFY);
    expect_refusal("ret void\n", "!air.function_constants = !{!3}\n", 100, STELA_AIR_METADATA);
-   expect_refusal("%v = add i32 undef, 1\nret void\n", "", 100, STELA_AIR_INSTRUCTION);
    expect_refusal("%address = inttoptr i64 1048576 to ptr addrspace(1)\nret void\n", "", 100, STELA_AIR_TYPE);
    expect_refusal("%address = bitcast ptr addrspace(1) null to ptr addrspace(1)\nret void\n", "", 100, STELA_AIR_MEMORY);
    /* LLVM 23's verifier refuses a GEP into a vector of i1, which an older

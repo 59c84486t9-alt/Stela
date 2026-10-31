@@ -28,6 +28,7 @@ static const char *module =
    "declare void @air.set_primitive_id_mesh(ptr addrspace(7), i32, i32)\n"
    "declare void @air.set_primitive_culled_mesh(ptr addrspace(7), i32, i1)\n"
    "declare void @air.set_index_mesh(ptr addrspace(7), i32, i8)\n"
+   "declare void @air.set_indices_mesh.v2i8(ptr addrspace(7), i32, <2 x i8>)\n"
    "declare void @air.set_primitive_count_mesh(ptr addrspace(7), i32)\n";
 
 static const char *versions =
@@ -84,6 +85,10 @@ static const char *mesh_body = MESH(
    "%v = trunc i32 %tid to i8\n"
    "call void @air.set_index_mesh(ptr addrspace(7) %m, i32 %tid, i8 %v)\n"
    "call void @air.set_primitive_count_mesh(ptr addrspace(7) %m, i32 %s)\n");
+
+/* Two indices at once. */
+static const char *indices_body = MESH(
+   "call void @air.set_indices_mesh.v2i8(ptr addrspace(7) %m, i32 %tid, <2 x i8> <i8 1, i8 2>)\n");
 
 static const char *mesh_metadata =
    "!air.mesh = !{!2}\n"
@@ -327,6 +332,19 @@ meshes_output_primitives(void)
 }
 
 static void
+meshes_set_several_indices(void)
+{
+   struct stela_air_stage_options o = options(STELA_AIR_MESH);
+   struct stela_air_error error;
+   nir_shader *shader = mesh(indices_body, mesh_metadata, &o, &error);
+   if (!shader)
+      fprintf(stderr, "indices: %u %s\n", error.kind, error.detail);
+   /* Each index stores its primitive's three corners. */
+   assert(shader && intrinsics(shader, nir_intrinsic_store_deref) == 6);
+   ralloc_free(shader);
+}
+
+static void
 fragments_read_primitive_data_flat(void)
 {
    struct stela_air_stage_options o = options(STELA_AIR_FRAGMENT);
@@ -405,6 +423,7 @@ main(void)
    glsl_type_singleton_init_or_ref();
    objects_launch_mesh_grids();
    meshes_output_primitives();
+   meshes_set_several_indices();
    fragments_read_primitive_data_flat();
    mesh_misuse_is_refused();
    invalid_meshes_are_refused();

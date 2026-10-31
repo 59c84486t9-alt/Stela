@@ -929,8 +929,10 @@ impl<B: Backend, C: Compiler> Resolver for DeviceResolver<'_, B, C> {
         state: &RenderPipelineState,
         object: [u32; 3],
         mesh: [u32; 3],
+        object_lengths: &[(u32, u64)],
     ) -> Result<Pipeline> {
-        self.device.mesh_variant(state.id, object, mesh)
+        self.device
+            .mesh_variant(state.id, object, mesh, object_lengths)
     }
 
     fn query_pool(&mut self, query_type: QueryType) -> Result<(QueryPool, u32)> {

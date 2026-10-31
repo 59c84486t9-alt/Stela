@@ -386,6 +386,27 @@ fn submit(operation: Operation) -> i64 {
     request.result.load(Ordering::Acquire)
 }
 
+/// A file of the DRM node at `minor`.
+pub(super) fn open_node(minor: u32) -> Option<c_int> {
+    let fd = submit(Operation::Open(minor)) as c_int;
+    (fd >= 0).then_some(fd)
+}
+
+/// The ioctl `request` on `fd`: zero or a negative errno.
+pub(super) fn control(fd: c_int, request: u32, argument: *mut c_void) -> i64 {
+    submit(Operation::Control {
+        fd,
+        request,
+        argument,
+    })
+}
+
+/// Maps `size` bytes of `fd` at `offset`.
+pub(super) fn map(fd: c_int, offset: u64, size: usize) -> Option<NonNull<u8>> {
+    let address = submit(Operation::Map { fd, offset, size });
+    NonNull::new(u64::try_from(address).ok()? as *mut u8)
+}
+
 /// `NOUVEAU_GETPARAM_CHIPSET_ID` of the bound GPU at `index`.
 pub(super) fn chipset(index: u32) -> Option<u16> {
     let fd = submit(Operation::Open(RENDER_MINOR + index)) as c_int;

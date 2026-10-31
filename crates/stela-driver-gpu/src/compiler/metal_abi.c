@@ -35,6 +35,10 @@ nir_def *stela_metal_load_device_value(nir_builder *b, enum stela_air_device_val
       return load_push(b, 32, STELA_METAL_PUSH_AMPLIFICATION);
    case STELA_AIR_VIEW_MAPPING:
       return load_push(b, 32, STELA_METAL_PUSH_VIEW_MAPPING);
+   case STELA_AIR_AMPLIFICATIONS:
+      return load_push(b, 32, STELA_METAL_PUSH_AMPLIFICATIONS);
+   case STELA_AIR_LOG_BUFFER:
+      return load_push(b, 64, STELA_METAL_PUSH_LOG);
    case STELA_AIR_THREADGROUP_SHAPE:
       return nir_load_global(b, 3, 32,
                              nir_iadd_imm(b, load_push(b, 64, STELA_METAL_PUSH_ARGUMENTS),
@@ -162,15 +166,30 @@ nir_deref_instr *stela_metal_bind_texture(nir_builder *b, const struct stela_air
       level, stage);
 }
 
+/* The MTLResourceID a texture query names, or NULL for a bad binding. */
+static nir_def *
+queried_id(nir_builder *b, const struct stela_air_texture *texture, nir_def *id, void *stage)
+{
+   if (id)
+      return id;
+   if (texture->index >= STELA_METAL_TEXTURES)
+      return NULL;
+   return table_id(b, stage, STELA_METAL_TABLE_TEXTURES + 8u * texture->index);
+}
+
 nir_def *stela_metal_texture_levels(nir_builder *b, const struct stela_air_texture *texture,
                                     nir_def *id, void *stage)
 {
-   if (!id) {
-      if (texture->index >= STELA_METAL_TEXTURES)
-         return NULL;
-      id = table_id(b, stage, STELA_METAL_TABLE_TEXTURES + 8u * texture->index);
-   }
-   return nir_iadd_imm(b, nir_ushr_imm(b, id_half(b, id, true), STELA_METAL_LEVEL_SHIFT), 1);
+   id = queried_id(b, texture, id, stage);
+   return id ? nir_iadd_imm(b, nir_ushr_imm(b, id_half(b, id, true), STELA_METAL_LEVEL_SHIFT), 1) :
+               NULL;
+}
+
+nir_def *stela_metal_texture_null(nir_builder *b, const struct stela_air_texture *texture,
+                                  nir_def *id, void *stage)
+{
+   id = queried_id(b, texture, id, stage);
+   return id ? nir_ieq_imm(b, id, 0) : NULL;
 }
 
 nir_deref_instr *stela_metal_bind_sampler(nir_builder *b, const struct stela_air_sampler *sampler,

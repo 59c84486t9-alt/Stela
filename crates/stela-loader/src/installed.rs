@@ -34,11 +34,12 @@
 //! `SystemVersion.plist` on Preboot, its Cryptex1's when it has one, the model
 //! and board name from the DeviceTree, and chip and board identifiers from
 //! the boot manifest.
+use crate::aux_kc::{self, Kext};
 use crate::{Error, Result, Within};
 use crate::{
     apple_device_tree::DeviceTree,
     boot_bundle::{self, Bundle, Input, Inputs, Options, RootHash, Source, Target},
-    boot_policy::SealedVolume,
+    boot_policy::{KextGrant, SealedVolume},
     boot_selection::{BootVolume, VolumeType, uuid_text},
     im4m, im4p,
     local_policy::{LocalPolicy, PolicyAuthority},
@@ -100,6 +101,21 @@ pub struct Request<'a> {
     pub volume: Option<BootVolume>,
     /// Verifies LocalPolicy signatures; the SEP model's.
     pub authority: Option<&'a dyn PolicyAuthority>,
+    /// Kexts to link against the system's boot collection (`aux_kc`).
+    pub kexts: &'a [Kext<'a>],
+}
+
+/// The collection of `request`'s kexts, linked against `kernel`, and what
+/// admits it.
+fn auxiliary_collection(kernel: &[u8], request: &Request) -> Result<Option<(Decoded, KextGrant)>> {
+    if request.kexts.is_empty() {
+        return Ok(None);
+    }
+    let linked = aux_kc::link(kernel, request.kexts)?;
+    let source = linked.source(request.kexts);
+    let grant = linked.grant();
+    let bytes = linked.collection;
+    Ok(Some((Decoded { source, bytes }, grant)))
 }
 
 /// The hash type and hash of a root-hash record: an `isys` object's payload,
@@ -662,6 +678,7 @@ pub fn prepare<R: ReadAt>(
         },
         bytes,
     });
+    let (auxiliary, kexts) = auxiliary_collection(&kernel.bytes, request)?.unzip();
     let inputs = Inputs {
         target: Target {
             product_type,
@@ -681,7 +698,7 @@ pub fn prepare<R: ReadAt>(
             board_id: manifest_id(manifest.as_ref(), "BORD")?,
         },
         kernel_collection: kernel.input(),
-        auxiliary_collection: None,
+        auxiliary_collection: auxiliary.as_ref().map(Decoded::input),
         sptm: sptm.input(),
         txm: txm.input(),
         device_tree: device_tree.input(),
@@ -704,6 +721,7 @@ pub fn prepare<R: ReadAt>(
         pivot_root_hash: pivot_root_hash.as_ref().map(Decoded::input),
     };
     let mut options = options.placed_at(inputs.dram_base()?);
+    options.security.kexts = kexts;
     options.boot_command = Some(crate::handoff::installed_command(
         options.boot_command,
         &options.boot_args,

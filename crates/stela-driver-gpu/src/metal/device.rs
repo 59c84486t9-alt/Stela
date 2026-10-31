@@ -81,7 +81,7 @@ impl<T> Slab<T> {
 macro_rules! ids {
     ($($(#[$meta:meta])* $name:ident;)*) => {$(
         $(#[$meta])*
-        #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+        #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
         pub struct $name(pub u32);
     )*};
 }
@@ -93,6 +93,8 @@ ids! {
     HeapId;
     MemoryId;
     LibraryId;
+    /// `MTLBinaryArchive`.
+    ArchiveId;
     FunctionId;
     RenderPipelineId;
     ComputePipelineId;

@@ -10,7 +10,17 @@
 #[cfg(feature = "nvk")]
 pub(super) mod client;
 #[cfg(feature = "nvk")]
+pub(super) mod display;
+#[cfg(feature = "nvk")]
 pub(super) mod gate;
+/// `xtask guest`'s objects of the StelaGPU kext.
+#[cfg(feature = "nvk")]
+mod kext {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../target/guest/StelaGPU.kext.rs"
+    ));
+}
 #[cfg(feature = "nvk")]
 mod stack;
 
@@ -802,6 +812,30 @@ pub(super) struct Machine {
 
 fn environment_error(error: WorkError) -> kernel_work::Error {
     kernel_work::Error::Work(error)
+}
+
+/// The kexts a boot that gives the GPUs to nouveau links into its system.
+pub(super) fn kexts() -> Vec<stela_loader::aux_kc::Kext<'static>> {
+    #[cfg(feature = "nvk")]
+    return alloc::vec![stela_loader::aux_kc::Kext {
+        info: kext::INFO,
+        objects: kext::OBJECTS.to_vec(),
+        bundle_path: "/Library/Extensions/StelaGPU.kext".into(),
+    }];
+    #[cfg(not(feature = "nvk"))]
+    Vec::new()
+}
+
+/// Takes the display for the GPUs [`open`] bound, in the firmware's `screen`
+/// size if it can, and opens their Metal services.
+pub(super) fn serve(
+    #[cfg_attr(not(feature = "nvk"), allow(unused_variables))] screen: (usize, usize),
+) {
+    #[cfg(feature = "nvk")]
+    {
+        display::take(screen);
+        gate::open_service();
+    }
 }
 
 /// Bring Linux up over `claimed`, and return once nouveau has bound them or

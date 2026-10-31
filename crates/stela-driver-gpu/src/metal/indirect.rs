@@ -70,7 +70,7 @@ impl IndirectPipeline {
 }
 
 /// Names an indirect command buffer on its device.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct IndirectCommandBufferId(pub u32);
 
 /// `MTLIndirectCommandBufferDescriptor`.
@@ -251,7 +251,7 @@ pub struct IndirectCommand {
     pub pipeline: Option<CommandPipeline>,
     /// The command's buffers, unless the buffer inherits the encoder's.
     pub buffers: Vec<IndirectBuffer>,
-    /// Kernel threadgroup memory lengths by index.
+    /// Kernel or object threadgroup memory lengths by index.
     pub threadgroup_lengths: Vec<(u32, u64)>,
     /// The rasterizer state parts the buffer does not inherit.
     pub raster: RasterState,
@@ -808,6 +808,18 @@ impl IndirectRenderCommand<'_> {
             factors,
         };
         self.target.set_action(&self.descriptor, action)
+    }
+
+    /// `setObjectThreadgroupMemoryLength:atIndex:`, which a mesh draw's
+    /// variant takes, so the record has no field of it.
+    pub fn set_object_threadgroup_memory_length(&mut self, length: u64, index: u32) -> Result<()> {
+        self.target.edit(Field::Action, |command| {
+            let lengths = &mut command.threadgroup_lengths;
+            lengths.retain(|&(slot, _)| slot != index);
+            lengths.push((index, length));
+            lengths.sort_unstable();
+            Ok(())
+        })
     }
 
     /// `drawMeshThreadgroups:threadsPerObjectThreadgroup:threadsPerMeshThreadgroup:`.

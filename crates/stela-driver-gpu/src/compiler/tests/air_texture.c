@@ -19,6 +19,8 @@ static const char *module =
    "target triple = \"air64_v29-apple-macosx27.2.0\"\n"
    "declare { <4 x float>, i8 } @air.sample_texture_2d.v4f32(ptr addrspace(1), ptr addrspace(2),"
    " <2 x float>, i1, <2 x i32>, i1, float, float, i32)\n"
+   "declare { float, i8 } @air.sample_compare_depth_2d_grad.f32(ptr addrspace(1), ptr addrspace(2),"
+   " i32, <2 x float>, float, <2 x float>, <2 x float>, float, i1, <2 x i32>, i32)\n"
    "declare { float, i8 } @air.sample_compare_depth_2d.f32(ptr addrspace(1), ptr addrspace(2), i32,"
    " <2 x float>, float, i1, <2 x i32>, i1, float, float, i32)\n"
    "declare { <4 x float>, i8 } @air.gather_texture_2d.v4f32(ptr addrspace(1), ptr addrspace(2),"
@@ -149,6 +151,10 @@ static const char *fragment_body =
    "%d = call { float, i8 } @air.sample_compare_depth_2d.f32(ptr addrspace(1) %depth,"
    " ptr addrspace(2) %smp, i32 1, <2 x float> <float 0.5, float 0.5>, float 0.75, i1 true,"
    " <2 x i32> zeroinitializer, i1 false, float 0.0, float 0.0, i32 0)\n"
+   "%grad = call { float, i8 } @air.sample_compare_depth_2d_grad.f32(ptr addrspace(1) %depth,"
+   " ptr addrspace(2) %smp, i32 1, <2 x float> <float 0.5, float 0.5>, float 0.75,"
+   " <2 x float> <float 1.0, float 0.0>, <2 x float> <float 0.0, float 1.0>, float 0.0, i1 true,"
+   " <2 x i32> zeroinitializer, i32 0)\n"
    "%g = call { <4 x float>, i8 } @air.gather_texture_2d.v4f32(ptr addrspace(1) %color,"
    " ptr addrspace(2) %smp, <2 x float> <float 0.5, float 0.5>, i1 true, <2 x i32> zeroinitializer,"
    " i32 2, i32 0)\n"
@@ -194,6 +200,7 @@ options(struct stela_metal_stage *stage, bool compute)
       .bind_texture = stela_metal_bind_texture, .bind_sampler = stela_metal_bind_sampler,
       .bind_texture_id = stela_metal_bind_texture_id, .bind_sampler_id = stela_metal_bind_sampler_id,
       .resource_id = stela_metal_resource_id, .texture_levels = stela_metal_texture_levels,
+      .texture_null = stela_metal_texture_null,
       .max_private_bytes = 64,
    };
 }
@@ -517,6 +524,15 @@ constexpr_samplers_bind_their_samplers(void)
           nir_src_as_uint(half->src[0].src) == id);
    ralloc_free(shader);
 
+   /* Before Metal 3.2 the state is one word with its top bit set. */
+   char older[8192];
+   snprintf(older, sizeof(older), "%s%s",
+            "@__air_sampler_state = internal addrspace(2) constant i64 -9188470239253757879, align 8\n",
+            replace(kernel_body, "ptr addrspace(2) %smp, <2", "ptr addrspace(2) @__air_sampler_state, <2"));
+   shader = kernel_with(older, metadata, &o, &error);
+   assert(shader);
+   ralloc_free(shader);
+
    /* A state the options give no sampler. */
    refuse(body, metadata, STELA_AIR_ARGUMENT, "has no sampler");
    /* A state whose second word is not zero. */
@@ -645,6 +661,11 @@ static const char *atomic_body =
    " <2 x i32>, i32, <4 x i32>, i32, i32)\n"
    "declare i1 @air.atomic_compare_exchange_weak_explicit_texture_2d.u.v4i32(ptr addrspace(1),"
    " <2 x i32>, ptr, <4 x i32>, i32, i32, i32)\n"
+   "declare <4 x i32> @air.atomic_load_explicit_texture_2d.u.v4i32(ptr addrspace(1), <2 x i32>,"
+   " i32, i32)\n"
+   "declare void @air.atomic_store_explicit_texture_2d.u.v4i32(ptr addrspace(1), <4 x i32>,"
+   " <2 x i32>, i32, i32)\n"
+   "declare i1 @air.is_null_texture_2d(ptr addrspace(1))\n"
    "define void @kernel(ptr addrspace(1) %t, ptr addrspace(1) %a, ptr addrspace(1) %out) {\n"
    "%e = alloca <4 x i32>, align 16\n"
    "%add = call <4 x i32> @air.atomic_fetch_add_explicit_texture_2d.u.v4i32(ptr addrspace(1) %t,"
@@ -656,11 +677,20 @@ static const char *atomic_body =
    "store <4 x i32> <i32 7, i32 0, i32 0, i32 0>, ptr %e, align 16\n"
    "%ok = call i1 @air.atomic_compare_exchange_weak_explicit_texture_2d.u.v4i32(ptr addrspace(1) %t,"
    " <2 x i32> <i32 1, i32 2>, ptr %e, <4 x i32> <i32 9, i32 0, i32 0, i32 0>, i32 0, i32 0, i32 3)\n"
+   "%load = call <4 x i32> @air.atomic_load_explicit_texture_2d.u.v4i32(ptr addrspace(1) %t,"
+   " <2 x i32> <i32 1, i32 2>, i32 0, i32 3)\n"
+   "call void @air.atomic_store_explicit_texture_2d.u.v4i32(ptr addrspace(1) %t,"
+   " <4 x i32> <i32 3, i32 0, i32 0, i32 0>, <2 x i32> <i32 1, i32 2>, i32 0, i32 3)\n"
+   "%null = call i1 @air.is_null_texture_2d(ptr addrspace(1) %t)\n"
    "%x = extractelement <4 x i32> %add, i32 0\n"
    "%y = extractelement <4 x i32> %min, i32 0\n"
+   "%l = extractelement <4 x i32> %load, i32 0\n"
    "%s = add i32 %x, %y\n"
    "%w = zext i1 %ok to i32\n"
-   "%r = add i32 %s, %w\n"
+   "%n = zext i1 %null to i32\n"
+   "%m = add i32 %l, %n\n"
+   "%q = add i32 %s, %w\n"
+   "%r = add i32 %q, %m\n"
    "store i32 %r, ptr addrspace(1) %out, align 4\n"
    "ret void\n}\n";
 
@@ -707,12 +737,13 @@ kernels_take_texture_atomics(void)
    if (!shader)
       fprintf(stderr, "texture atomics: %u %s\n", error.kind, error.detail);
    assert(shader);
-   nir_intrinsic_instr *atomics[4];
-   assert(image_atomics(shader, atomics, ARRAY_SIZE(atomics)) == 4);
+   nir_intrinsic_instr *atomics[6];
+   assert(image_atomics(shader, atomics, ARRAY_SIZE(atomics)) == 6);
    const nir_atomic_op ops[] = {nir_atomic_op_iadd, nir_atomic_op_iadd, nir_atomic_op_imin,
-                                nir_atomic_op_cmpxchg};
+                                nir_atomic_op_cmpxchg, nir_atomic_op_iadd, nir_atomic_op_xchg};
    const enum pipe_format formats[] = {PIPE_FORMAT_R32_UINT, PIPE_FORMAT_R32_UINT,
-                                       PIPE_FORMAT_R32_SINT, PIPE_FORMAT_R32_UINT};
+                                       PIPE_FORMAT_R32_SINT, PIPE_FORMAT_R32_UINT,
+                                       PIPE_FORMAT_R32_UINT, PIPE_FORMAT_R32_UINT};
    for (unsigned i = 0; i < ARRAY_SIZE(atomics); i++) {
       assert(nir_intrinsic_atomic_op(atomics[i]) == ops[i]);
       assert(nir_intrinsic_format(atomics[i]) == formats[i]);
@@ -733,6 +764,136 @@ kernels_take_texture_atomics(void)
           atomic_metadata, STELA_AIR_INSTRUCTION, "atomic order");
 }
 
+#define SPELLED(calls) \
+   "define void @kernel(i32 %tid, ptr addrspace(1) %src, ptr addrspace(2) %smp," \
+   " ptr addrspace(1) %dst, ptr addrspace(1) %layers, ptr addrspace(1) %out) {\n" calls \
+   "%u = fptoui float %x to i32\nstore i32 %u, ptr addrspace(1) %out, align 4\nret void\n}\n"
+
+static const char *metal4_declarations =
+   "declare ptr addrspace(2) @air.get_read_sampler()\n"
+   "declare { <4 x float>, i8 } @air.read_texture_2d.v4f32(ptr addrspace(1), ptr addrspace(2),"
+   " <2 x i32>, <2 x i32>, i32, i32)\n"
+   "declare <4 x i32> @air.atomic_fetch_add_explicit_texture_2d.u.v4i32(ptr addrspace(1), <2 x i32>,"
+   " <2 x i32>, <4 x i32>, i32, i32)\n";
+
+/* Metal 4 reads through a placeholder sampler and past a zero offset. */
+static const char *metal4_read = SPELLED(
+   "%none = call ptr addrspace(2) @air.get_read_sampler()\n"
+   "%s = call { <4 x float>, i8 } @air.read_texture_2d.v4f32(ptr addrspace(1) %src,"
+   " ptr addrspace(2) %none, <2 x i32> <i32 1, i32 2>, <2 x i32> zeroinitializer, i32 0, i32 0)\n"
+   "%t = extractvalue { <4 x float>, i8 } %s, 0\n"
+   "%x = extractelement <4 x float> %t, i64 0\n");
+
+static const char *metal4_atomic =
+   "define void @kernel(ptr addrspace(1) %t, ptr addrspace(1) %a, ptr addrspace(1) %out) {\n"
+   "%add = call <4 x i32> @air.atomic_fetch_add_explicit_texture_2d.u.v4i32(ptr addrspace(1) %t,"
+   " <2 x i32> <i32 1, i32 2>, <2 x i32> zeroinitializer, <4 x i32> <i32 5, i32 0, i32 0, i32 0>,"
+   " i32 0, i32 3)\nret void\n}\n";
+
+static const char *metal1_declarations =
+   "declare <4 x float> @air.sample_texture_2d.v4f32(ptr addrspace(1), ptr addrspace(2), <2 x float>,"
+   " i1, <2 x i32>, i1, float)\n"
+   "declare void @air.write_texture_2d.v4f32(ptr addrspace(1), <2 x i32>, <4 x float>, i32)\n";
+
+/* Metal 1 has no access operands or minimum level of detail, and returns
+ * bare texels. */
+static const char *metal1_calls = SPELLED(
+   "%s = call <4 x float> @air.sample_texture_2d.v4f32(ptr addrspace(1) %src,"
+   " ptr addrspace(2) %smp, <2 x float> <float 0.5, float 0.25>, i1 true, <2 x i32> zeroinitializer,"
+   " i1 true, float 1.0)\n"
+   "call void @air.write_texture_2d.v4f32(ptr addrspace(1) %dst, <2 x i32> <i32 3, i32 4>,"
+   " <4 x float> %s, i32 0)\n"
+   "%x = extractelement <4 x float> %s, i64 0\n");
+
+static nir_shader *
+spelled(const char *triple, const char *declarations, const char *body, const char *metadata,
+        struct stela_air_error *error)
+{
+   char prefix[1024];
+   snprintf(prefix, sizeof(prefix),
+            "target datalayout = \"e-p:64:64-i32:32-i64:64-f32:32-v128:128-n8:16:32\"\n"
+            "target triple = \"%s\"\n%s", triple, declarations);
+   LLVMMemoryBufferRef input = stela_air_test_custom_bitcode(prefix, body, metadata, "");
+   const struct stela_air_options o = options(&primary, true);
+   nir_shader *shader = stela_air_to_nir(LLVMGetBufferStart(input), LLVMGetBufferSize(input),
+                                         "kernel", &nir_options, &o, error);
+   LLVMDisposeMemoryBuffer(input);
+   if (!shader)
+      fprintf(stderr, "%s: %u %s\n", triple, error->kind, error->detail);
+   return shader;
+}
+
+static const char *lod_declaration =
+   "declare float @air.calculate_clamped_lod_texture_2d(ptr addrspace(1), ptr addrspace(2),"
+   " <2 x float>, i32)\n";
+
+static const char *kernel_lod = SPELLED(
+   "%x = call float @air.calculate_clamped_lod_texture_2d(ptr addrspace(1) %src,"
+   " ptr addrspace(2) %smp, <2 x float> <float 0.5, float 0.25>, i32 0)\n");
+
+static void
+kernels_calculate_levels_over_their_quadgroups(void)
+{
+   struct stela_air_error error = {0};
+   nir_shader *shader = spelled("air64_v29-apple-macosx27.2.0", lod_declaration, kernel_lod,
+                                kernel_metadata, &error);
+   assert(shader && count(shader).tex[nir_texop_lod] == 1);
+   assert(shader->info.derivative_group == DERIVATIVE_GROUP_LINEAR);
+   assert(nir_shader_supports_implicit_lod(shader));
+   ralloc_free(shader);
+}
+
+static void
+every_metal_version_spells_its_calls(void)
+{
+   struct stela_air_error error = {0};
+   nir_shader *shader = spelled("air64_v29-apple-macosx27.2.0", metal4_declarations, metal4_read,
+                                kernel_metadata, &error);
+   assert(shader && count(shader).tex[nir_texop_txf] == 1);
+   ralloc_free(shader);
+
+   /* Libraries built for iOS run here unchanged. */
+   shader = spelled("air64_v29-apple-ios27.2.0", metal4_declarations, metal4_read, kernel_metadata,
+                    &error);
+   assert(shader);
+   ralloc_free(shader);
+
+   /* An offset is only ever zero. */
+   assert(!spelled("air64_v29-apple-macosx27.2.0", metal4_declarations,
+                   replace(metal4_read, "<2 x i32> zeroinitializer", "<2 x i32> <i32 1, i32 0>"),
+                   kernel_metadata, &error));
+   assert(error.kind == STELA_AIR_INSTRUCTION && strstr(error.detail, "at an offset"));
+
+   shader = spelled("air64_v29-apple-macosx27.2.0", metal4_declarations, metal4_atomic,
+                    atomic_metadata, &error);
+   nir_intrinsic_instr *atomics[1];
+   assert(shader && image_atomics(shader, atomics, 1) == 1);
+   ralloc_free(shader);
+
+   shader = spelled("air64_v111-apple-macosx10.12.0", metal1_declarations, metal1_calls,
+                    replace(kernel_metadata, "!20 = !{i32 2, i32 9, i32 0}\n!21 = !{!\"Metal\", i32 4, i32 1",
+                            "!20 = !{i32 1, i32 11, i32 0}\n!21 = !{!\"Metal\", i32 1, i32 2"),
+                    &error);
+   assert(shader);
+   struct census census = count(shader);
+   assert(census.tex[nir_texop_txl] == 1 && census.store);
+   ralloc_free(shader);
+
+   /* Linking older libraries drops the version from the triple. */
+   shader = spelled("air64-apple-macosx10.12.0", metal1_declarations, metal1_calls,
+                    replace(kernel_metadata, "!20 = !{i32 2, i32 9, i32 0}\n!21 = !{!\"Metal\", i32 4, i32 1",
+                            "!20 = !{i32 1, i32 11, i32 0}\n!21 = !{!\"Metal\", i32 1, i32 2"),
+                    &error);
+   assert(shader);
+   ralloc_free(shader);
+
+   /* The triple otherwise carries the version. */
+   assert(!spelled("air64_v29-apple-macosx10.12.0", metal1_declarations, metal1_calls,
+                   replace(kernel_metadata, "!20 = !{i32 2, i32 9, i32 0}", "!20 = !{i32 1, i32 11, i32 0}"),
+                   &error));
+   assert(error.kind == STELA_AIR_TARGET);
+}
+
 int
 main(void)
 {
@@ -746,6 +907,8 @@ main(void)
    cube_reads_fetch_their_faces();
    unsupported_texture_uses_are_refused();
    kernels_take_texture_atomics();
+   every_metal_version_spells_its_calls();
+   kernels_calculate_levels_over_their_quadgroups();
    glsl_type_singleton_decref();
    puts("AIR textures: sample/level/offset, write, read_write array read, size queries, "
         "implicit-derivative fragment sampling, depth compare, gather, storage levels, arrays, atomics, "

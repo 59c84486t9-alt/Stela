@@ -26,7 +26,7 @@ use core::num::NonZeroU64;
 use stela_contracts::{
     bus::AdvancePolicy,
     gate::{
-        CallerFault, GateCall, GateOutcome, GateRequest, GateService, MemoryRange,
+        CallerFault, GateAnswer, GateCall, GateRequest, GateService, MemoryRange,
         window::{
             ACK, CALL, CLOSE, COUNT, FAULT, FAULT_DENIED, FAULT_NOT_RAM, FAULT_UNSUPPORTED, IMPORT,
             IMPORT_ADDRESS, IMPORT_BYTES, IMPORT_TOKEN, IMPORTED, OPEN, OPENED, PAGE, RETIRE,
@@ -50,6 +50,8 @@ enum Slot {
 }
 
 pub struct Gate {
+    /// Which of the board's gates this is.
+    window: usize,
     service: Arc<dyn GateService>,
     irq: AicInput,
     /// Completed work the kext has not acknowledged.
@@ -69,8 +71,9 @@ pub struct Gate {
 }
 
 impl Gate {
-    pub fn new(service: Arc<dyn GateService>, irq: AicInput) -> Self {
+    pub fn new(window: usize, service: Arc<dyn GateService>, irq: AicInput) -> Self {
         Self {
+            window,
             service,
             irq,
             status: false,
@@ -89,13 +92,13 @@ impl Gate {
     /// The request PE `cpu`'s store made, to run in that store's own step.
     pub fn take(&mut self, cpu: usize) -> Option<GateCall> {
         let request = self.pending.remove(&cpu)?;
-        Some(GateCall::new(self.service.clone(), request))
+        Some(GateCall::new(self.window, self.service.clone(), request))
     }
 
     /// Records what a taken request came to.
-    pub fn finish(&mut self, outcome: GateOutcome) {
-        match outcome {
-            GateOutcome::Opened(connection) => {
+    pub fn finish(&mut self, answer: GateAnswer) {
+        match answer {
+            GateAnswer::Opened(connection) => {
                 self.opened = 0;
                 let Some(gate) = self.slots.iter().position(|&slot| slot == Slot::Opening) else {
                     return;
@@ -106,8 +109,8 @@ impl Gate {
                     self.opened = gate as u64 + 1;
                 }
             }
-            GateOutcome::Closed => {}
-            GateOutcome::Served {
+            GateAnswer::Closed => {}
+            GateAnswer::Served {
                 gate,
                 connection,
                 fault,
@@ -122,8 +125,8 @@ impl Gate {
                     };
                 }
             }
-            GateOutcome::Imported(handle) => self.imported = handle.map_or(0, NonZeroU64::get),
-            GateOutcome::Retired(token) => self.retired = token.map_or(0, NonZeroU64::get),
+            GateAnswer::Imported(handle) => self.imported = handle.map_or(0, NonZeroU64::get),
+            GateAnswer::Retired(token) => self.retired = token.map_or(0, NonZeroU64::get),
         }
     }
 
@@ -388,7 +391,7 @@ mod tests {
     #[test]
     fn the_kernel_names_the_memory_a_connection_imports() {
         let service = Arc::new(Service(Mutex::new(Log::default())));
-        let mut gate = Gate::new(service.clone(), IRQ);
+        let mut gate = Gate::new(0, service.clone(), IRQ);
         store(&mut gate, 0, OPEN, 1).unwrap();
         serve(&mut gate, 0);
         let page = load(&mut gate, OPENED);
@@ -438,7 +441,7 @@ mod tests {
     fn serve(gate: &mut Gate, cpu: usize) {
         if let Some(call) = gate.take(cpu) {
             let outcome = call.run(&mut Caller);
-            gate.finish(outcome);
+            gate.finish(outcome.answer);
         }
     }
 
@@ -449,7 +452,7 @@ mod tests {
     }
 
     fn gate(log: &Arc<Service>) -> Gate {
-        Gate::new(log.clone(), IRQ)
+        Gate::new(0, log.clone(), IRQ)
     }
 
     #[test]
@@ -485,7 +488,7 @@ mod tests {
         serve(&mut gate, 1);
         assert_eq!(opened(&mut gate), page);
         let outcome = call.run(&mut Caller);
-        gate.finish(outcome);
+        gate.finish(outcome.answer);
         assert_eq!(load(&mut gate, page * PAGE + FAULT), 0);
     }
 

@@ -301,11 +301,11 @@ static void resolve_writes_each_command_sequence(void)
    /* Each stage's table copy and buffer slots, the vertex buffers and the
     * slots. */
    assert(census.loops == 6);
-   /* The execution set index, 13 push constant words, per stage a table
+   /* The execution set index, 16 push constant words, per stage a table
     * word, its two slot fields and its address, the index buffer's three
     * fields, a vertex buffer's three, the draws' one and five, and a
     * count. */
-   assert(census.stores == 1 + 13 + 2 * 4 + 3 + 3 + 1 + 5 + 1);
+   assert(census.stores == 1 + 16 + 2 * 4 + 3 + 3 + 1 + 5 + 1);
    ralloc_free(shader);
 }
 

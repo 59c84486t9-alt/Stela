@@ -248,25 +248,36 @@ void stela_depth_stencil_record(id descriptor, StelaDepthStencilRecord *record)
 		      response:(const StelaTextureResponse *)response
 		    descriptor:(id)descriptor
 {
+	StelaTextureDescriptorRecord record;
+	stela_texture_record(descriptor, &record);
+	return [self initWithDevice:device response:response record:&record];
+}
+
+- (instancetype)initWithDevice:(StelaGPUDevice *)device
+		      response:(const StelaTextureResponse *)response
+			record:(const StelaTextureDescriptorRecord *)record
+{
 	self = [super initWithDevice:device handle:response->handle];
 	if (self) {
-		_options = [descriptor resourceOptions];
+		_record = *record;
+		_options = record->options;
 		_allocatedSize = response->allocated_size;
 		_heapOffset = response->heap_offset;
 		_resourceID = response->resource_id;
 		_sparse = response->sparse != 0;
 		_firstMipmapInTail = response->first_mipmap_in_tail;
 		_tailSizeInBytes = response->tail_size;
-		_textureType = [descriptor textureType];
-		_pixelFormat = [descriptor pixelFormat];
-		_width = [descriptor width];
-		_height = [descriptor height];
-		_depth = [descriptor depth];
-		_mipmapLevelCount = [descriptor mipmapLevelCount];
-		_sampleCount = [descriptor sampleCount];
-		_arrayLength = [descriptor arrayLength];
-		_usage = [descriptor usage];
-		_swizzle = [descriptor swizzle];
+		_textureType = record->texture_type;
+		_pixelFormat = record->pixel_format;
+		_width = record->width;
+		_height = record->height;
+		_depth = record->depth;
+		_mipmapLevelCount = record->mipmap_level_count;
+		_sampleCount = record->sample_count;
+		_arrayLength = record->array_length;
+		_usage = record->usage;
+		_swizzle = (MTLTextureSwizzleChannels){record->swizzle[0], record->swizzle[1],
+						       record->swizzle[2], record->swizzle[3]};
 	}
 	return self;
 }
@@ -318,7 +329,7 @@ void stela_depth_stencil_record(id descriptor, StelaDepthStencilRecord *record)
 
 - (BOOL)isShareable
 {
-	return NO;
+	return _shareable;
 }
 
 - (BOOL)isFramebufferOnly
@@ -752,11 +763,6 @@ void stela_depth_stencil_record(id descriptor, StelaDepthStencilRecord *record)
 			block(self, [self signaledValue]);
 		});
 	});
-}
-
-- (id)newSharedEventHandle
-{
-	return nil;
 }
 
 @end

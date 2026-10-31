@@ -27,19 +27,38 @@
 	return _device;
 }
 
+/* Everything a task holds is resident: `Residency.m`. */
+- (void)addResidencySet:(id)set
+{
+}
+
+- (void)addResidencySets:(const id __unsafe_unretained[])sets count:(NSUInteger)count
+{
+}
+
+- (void)removeResidencySet:(id)set
+{
+}
+
+- (void)removeResidencySets:(const id __unsafe_unretained[])sets count:(NSUInteger)count
+{
+}
+
 - (id)commandBuffer
 {
-	return [[StelaGPUCommandBuffer alloc] initWithQueue:self retainsReferences:YES];
+	return [[StelaGPUCommandBuffer alloc] initWithQueue:self retainsReferences:YES logState:_logState];
 }
 
 - (id)commandBufferWithUnretainedReferences
 {
-	return [[StelaGPUCommandBuffer alloc] initWithQueue:self retainsReferences:NO];
+	return [[StelaGPUCommandBuffer alloc] initWithQueue:self retainsReferences:NO logState:_logState];
 }
 
 - (id)commandBufferWithDescriptor:(id)descriptor
 {
-	return [[StelaGPUCommandBuffer alloc] initWithQueue:self retainsReferences:[descriptor retainedReferences]];
+	return [[StelaGPUCommandBuffer alloc] initWithQueue:self
+					  retainsReferences:[descriptor retainedReferences]
+						   logState:[descriptor logState] ?: _logState];
 }
 
 - (void)insertDebugCaptureBoundary
@@ -79,7 +98,9 @@
 	bool _retains;
 }
 
-- (instancetype)initWithQueue:(StelaGPUQueue *)queue retainsReferences:(BOOL)retains
+- (instancetype)initWithQueue:(StelaGPUQueue *)queue
+	    retainsReferences:(BOOL)retains
+		     logState:(StelaGPULogState *)logState
 {
 	self = [super init];
 	if (self) {
@@ -91,6 +112,11 @@
 		_scheduledHandlers = [NSMutableArray arrayWithCapacity:2];
 		_completedHandlers = [NSMutableArray arrayWithCapacity:2];
 		_status = MTLCommandBufferStatusNotEnqueued;
+		_logState = logState;
+		if (logState) {
+			StelaHandle buffer = {.handle = [logState bufferHandle]};
+			stela_stream_entry(&_stream, StelaCommandBufferCodeLogBuffer, &buffer, sizeof(buffer), NULL, 0);
+		}
 		dispatch_group_enter(_completion);
 	}
 	return self;
@@ -164,6 +190,7 @@
 /* Under the queue's lock, so serials follow the order of enqueue. */
 - (void)submit
 {
+	[_logState commandBufferStarted];
 	[_device flushIndirect];
 	StelaCommitRequest request = {.commands = stela_span(_stream.bytes, _stream.length)};
 	StelaValue serial = {};
@@ -198,6 +225,7 @@
 				     failure);
 	}
 	_status = failure ? MTLCommandBufferStatusError : MTLCommandBufferStatusCompleted;
+	[_logState commandBufferEnded];
 	for (NSUInteger i = 0; i < _completedHandlers.count; i++) {
 		((void (^)(id))[_completedHandlers objectAtIndex:i])(self);
 	}
@@ -209,6 +237,15 @@
 - (void)addScheduledHandler:(void (^)(id))handler
 {
 	[_scheduledHandlers addObject:[handler copy]];
+}
+
+/* Everything a task holds is resident: `Residency.m`. */
+- (void)useResidencySet:(id)set
+{
+}
+
+- (void)useResidencySets:(const id __unsafe_unretained[])sets count:(NSUInteger)count
+{
 }
 
 - (void)addCompletedHandler:(void (^)(id))handler
@@ -263,10 +300,10 @@
 {
 }
 
+/* No fence reaches the window server, so a frame presents once the GPU finished it. */
 - (void)presentDrawable:(id)drawable
 {
-	[self use:drawable];
-	[self addScheduledHandler:^(id buffer) {
+	[self addCompletedHandler:^(id buffer) {
 		(void)buffer;
 		[drawable present];
 	}];
@@ -274,7 +311,7 @@
 
 - (void)presentDrawable:(id)drawable atTime:(CFTimeInterval)time
 {
-	[self addScheduledHandler:^(id buffer) {
+	[self addCompletedHandler:^(id buffer) {
 		(void)buffer;
 		[drawable presentAtTime:time];
 	}];
@@ -282,7 +319,7 @@
 
 - (void)presentDrawable:(id)drawable afterMinimumDuration:(CFTimeInterval)duration
 {
-	[self addScheduledHandler:^(id buffer) {
+	[self addCompletedHandler:^(id buffer) {
 		(void)buffer;
 		[drawable presentAfterMinimumDuration:duration];
 	}];

@@ -364,6 +364,44 @@ unsafe extern "C" fn kernel<const N: usize>(options: *const c_void) -> *mut c_vo
     ptr::without_provenance_mut(0x100 * (N + 1))
 }
 
+unsafe extern "C" fn functions(
+    _: *const c_void,
+    _: usize,
+    visit: ffi::VisitFunction,
+    data: *mut c_void,
+    _: *mut ffi::AirError,
+) -> bool {
+    // SAFETY: the name is valid for the call.
+    unsafe { visit(data, c"kernel".as_ptr(), 6, 3) && visit(data, c"visible".as_ptr(), 7, 5) }
+}
+
+unsafe extern "C" fn stitch(
+    sources: *const ffi::StitchSource,
+    source_count: u32,
+    graphs: *const ffi::StitchGraph,
+    graph_count: u32,
+    visit: ffi::VisitBytes,
+    data: *mut c_void,
+    _: *mut ffi::AirError,
+) -> bool {
+    // SAFETY: the sources and graphs are valid for the call.
+    let (sources, graphs) = unsafe {
+        (
+            slice::from_raw_parts(sources, source_count as usize),
+            slice::from_raw_parts(graphs, graph_count as usize),
+        )
+    };
+    // The module says what the service was given.
+    let names = [
+        sources.len() as u8,
+        graphs.len() as u8,
+        graphs[0].node_count as u8,
+    ];
+    // SAFETY: the callback takes the bytes for the call.
+    unsafe { visit(data, names.as_ptr().cast(), names.len()) };
+    true
+}
+
 unsafe extern "C" fn release(shader: *mut c_void) {
     FAKE.with_borrow_mut(|fake| fake.released.push(shader.addr()));
 }
@@ -373,6 +411,8 @@ fn service() -> Service {
         reflect,
         reflect_bindings,
         sampler_states,
+        functions,
+        stitch,
         compile,
         tessellation_stages,
         accumulate_kernel: kernel::<0>,
@@ -836,6 +876,27 @@ fn visible_functions_reflect_their_constants_and_only_link() {
         compiler.compile(library, "kernel", &specialization),
         Err(Error::Invalid("a visible function is not a pipeline stage"))
     );
+}
+
+#[test]
+fn stitching_gives_the_service_each_source_and_graph() {
+    let (mut compiler, library) = with_library();
+    let graph = StitchedGraph {
+        name: "stitched".into(),
+        nodes: vec![
+            StitchedNode::Input(0),
+            StitchedNode::Call {
+                function: 0,
+                arguments: vec![0],
+            },
+        ],
+        output: Some(1),
+    };
+    assert_eq!(
+        compiler.stitch(&[(library, "kernel")], &[graph]).unwrap(),
+        [1, 1, 2]
+    );
+    assert!(compiler.stitch(&[(library, "absent")], &[]).is_err());
 }
 
 #[test]

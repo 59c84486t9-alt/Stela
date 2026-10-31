@@ -4,6 +4,10 @@ use super::super::capabilities::{MAX_BUFFER_BINDINGS, MAX_SAMPLER_BINDINGS, MAX_
 use alloc::string::String;
 use core::ffi::{c_char, c_void};
 
+/// `stela_metal_visit_function`, whose last argument is a function type.
+pub(super) type VisitFunction =
+    unsafe extern "C" fn(*mut c_void, *const c_char, usize, u32) -> bool;
+
 pub(super) const ATTRIBUTES: usize = 31;
 pub(super) const VARYINGS: usize = 32;
 pub(super) const COLOR_OUTPUTS: usize = 9;
@@ -316,6 +320,35 @@ pub(super) struct Module {
     pub constants: *const ConstantValue,
     pub constant_count: u32,
 }
+
+/// `stela_air_stitch_source`.
+#[repr(C)]
+pub struct StitchSource {
+    pub(super) bitcode: *const c_void,
+    pub(super) size: usize,
+    pub(super) name: *const c_char,
+}
+
+/// `stela_air_stitch_node`.
+#[repr(C)]
+pub struct StitchNode {
+    pub(super) function: u32,
+    pub(super) input: u32,
+    pub(super) arguments: *const u32,
+    pub(super) argument_count: u32,
+}
+
+/// `stela_air_stitch_graph`.
+#[repr(C)]
+pub struct StitchGraph {
+    pub(super) name: *const c_char,
+    pub(super) nodes: *const StitchNode,
+    pub(super) node_count: u32,
+    pub(super) output: u32,
+}
+
+/// `stela_air_visit_bytes`.
+pub(super) type VisitBytes = unsafe extern "C" fn(*mut c_void, *const c_void, usize);
 
 /// `struct stela_air_linked_function`.
 #[repr(C)]

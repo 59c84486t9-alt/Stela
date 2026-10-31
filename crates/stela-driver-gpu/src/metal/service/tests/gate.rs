@@ -174,7 +174,8 @@ fn commit_shared(shared: &Shared, connection: NonZeroU64) {
 
 const HOST: ServiceHost = ServiceHost {
     relax: || panic!("nothing waits"),
-    run: |call| call(),
+    stack: 0x4000,
+    run: |_, call| call(),
 };
 
 /// The GPU finishes what was committed.
@@ -202,7 +203,8 @@ fn the_shared_service_finds_completed_work_only_after_an_interrupt() {
 fn every_call_runs_where_the_platform_says() {
     static RUNS: AtomicUsize = AtomicUsize::new(0);
     let host = ServiceHost {
-        run: |call| {
+        run: |stack, call| {
+            assert_eq!(stack, HOST.stack);
             RUNS.fetch_add(1, Ordering::Relaxed);
             call();
         },

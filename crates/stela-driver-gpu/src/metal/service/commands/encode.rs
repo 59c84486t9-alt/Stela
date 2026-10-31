@@ -114,6 +114,15 @@ impl<B: Backend, C: Compiler> Service<B, C> {
                 self.render_command(id, index)?
                     .set_vertex_buffer_with_stride(buffer, request.offset, request.stride, slot)?;
             }
+            IndirectRenderCode::SetObjectThreadgroupMemory => {
+                let SetThreadgroupMemory {
+                    length,
+                    index: slot,
+                } = payload.record()?;
+                let slot = binding(slot)?;
+                self.render_command(id, index)?
+                    .set_object_threadgroup_memory_length(length, slot)?;
+            }
             IndirectRenderCode::SetCullMode => {
                 let Mode { mode } = payload.record()?;
                 let mode = known(CullMode::from_raw(mode), "cull mode")?;

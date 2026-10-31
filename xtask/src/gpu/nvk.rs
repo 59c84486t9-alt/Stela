@@ -82,15 +82,18 @@ const STAND_INS: [&str; 6] = [
     "nir_options",
 ];
 /// The Metal compiler service, under `compiler`, built with an NVK unit's flags.
-const AIR: [&str; 13] = [
+const AIR: [&str; 16] = [
     "air_call",
     "air_calls",
     "air_commands",
     "air_constants",
+    "air_log",
     "air_math",
+    "air_precise",
     "air_matrix",
     "air_metadata",
     "air_simd",
+    "air_stitch",
     "air_texture",
     "air_to_nir",
     "metal_abi",

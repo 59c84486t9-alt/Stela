@@ -30,8 +30,14 @@ fn from_disk(
     } else if let Some(kind) = options.recovery {
         bundle::recovery_from_disk(partition, kind, options.boot_volume, &defaults)
     } else {
+        let kexts = if options.gpu {
+            gpu::kexts()
+        } else {
+            Vec::new()
+        };
         let request = installed::Request {
             volume: options.boot_volume,
+            kexts: &kexts,
             ..installed::Request::default()
         };
         let mut defaults = defaults;
@@ -647,9 +653,10 @@ fn run_guest(boot: Boot<'_>, host: OpenedHost, storage: Storage, processors: Pro
     #[cfg_attr(not(feature = "nvk"), allow(unused_mut))]
     let mut assigned = assign(boot, &mut roster, topology_source.as_ref(), &full_profile);
     #[cfg(feature = "nvk")]
-    let gpu_gate = assigned
+    let gpu_gates = assigned
         .as_mut()
-        .and_then(|assigned| gpu::gate::place(&mut assigned.tree));
+        .map(|assigned| gpu::gate::place(&mut assigned.tree))
+        .unwrap_or_default();
     // SAFETY: all raw guest input copies have ended; AP executors are parked,
     // and no guest/device DMA producer has entered. The same loader bytes are
     // for every subsequent native CPU and synchronous device writer.
@@ -727,16 +734,18 @@ fn run_guest(boot: Boot<'_>, host: OpenedHost, storage: Storage, processors: Pro
         tree,
     );
     #[cfg(feature = "nvk")]
-    if let (Some((placement, service)), Some(board)) = (gpu_gate, &board) {
-        // The board's AIC took its dies and inputs from this vector too.
-        let per_die = u32::from(board.aic.layout.max_irq());
-        let irq = stela_contracts::interrupt::AicInput::new(
-            (placement.irq / per_die) as u8,
-            (placement.irq % per_die) as u16,
-        );
-        devices
-            .add_gpu_gate(placement.physical, irq, service)
-            .unwrap_or_else(|error| output::fatal(&error));
+    if let Some(board) = &board {
+        for (placement, service) in gpu_gates {
+            // The board's AIC took its dies and inputs from this vector too.
+            let per_die = u32::from(board.aic.layout.max_irq());
+            let irq = stela_contracts::interrupt::AicInput::new(
+                (placement.irq / per_die) as u8,
+                (placement.irq % per_die) as u16,
+            );
+            devices
+                .add_gpu_gate(placement.physical, irq, service)
+                .unwrap_or_else(|error| output::fatal(&error));
+        }
     }
     // This function never returns, so nothing else frees the bundle: guest
     // memory and the devices now hold what they need of it, and the heap's
@@ -1066,7 +1075,8 @@ fn start_machine(boot: Boot<'_>, parts: MachineParts) -> ! {
 }
 
 /// Claim the GPUs from probe and start them in the host's Linux environment.
-/// A GPU that cannot start is reported, and the Mac boots without it.
+/// A GPU that cannot start is reported, and the Mac boots without it; whether
+/// any started is the answer.
 fn open_gpus(
     work: &'static kernel_work::KernelWork,
     mmio: Option<&'static crate::native_mmio::Source>,
@@ -1075,12 +1085,12 @@ fn open_gpus(
     firmware: &Option<alloc::sync::Arc<stela_drivers::firmware::Catalog>>,
     tsc_hz: u64,
     adapters: Vec<stela_drivers::gpu::Adapter>,
-) {
+) -> bool {
     let Some(window) = mmio.and_then(|mmio| mmio.window()) else {
         crate::status::warn("this PC cannot map a GPU's memory, so it is left unused");
-        return;
+        return false;
     };
-    let Some(mmio) = mmio else { return };
+    let Some(mmio) = mmio else { return false };
     crate::status::begin("Starting the GPU");
     let claimed = work.call_owned(60_000_000, move || {
         let services = services::Services::new(mmio, remappers, None, heap, tsc_hz, Vec::new());
@@ -1095,11 +1105,11 @@ fn open_gpus(
         Ok((claimed, Some(random))) if !claimed.is_empty() => (claimed, random),
         Ok(_) => {
             crate::status::warn("no GPU to start");
-            return;
+            return false;
         }
         Err(error) => {
             crate::status::warn(&format!("the GPU could not be claimed: {error}"));
-            return;
+            return false;
         }
     };
     let machine = gpu::Machine {
@@ -1111,11 +1121,13 @@ fn open_gpus(
     };
     match gpu::open(machine, claimed) {
         Ok(()) => {
-            #[cfg(feature = "nvk")]
-            gpu::gate::open_service();
             crate::status::done("started");
+            true
         }
-        Err(error) => crate::status::warn(&format!("the GPU could not start: {error}")),
+        Err(error) => {
+            crate::status::warn(&format!("the GPU could not start: {error}"));
+            false
+        }
     }
 }
 
@@ -1183,11 +1195,17 @@ fn place_devices(
     let firmware = |name: &str| -> Option<&[u8]> {
         carried(name).or_else(|| flash.and_then(|flash| flash.image(name)))
     };
-    let scanout = handoff.screen.map(|screen| {
-        let screen = screen.relocated(layout::physical(screen.base as u64) as usize);
-        alloc::boxed::Box::new(display::GopScanout::new(screen))
-            as alloc::boxed::Box<dyn stela_soc::machine::Scanout>
-    });
+    let firmware_scanout = || {
+        handoff.screen.map(|screen| {
+            let screen = screen.relocated(layout::physical(screen.base as u64) as usize);
+            alloc::boxed::Box::new(display::GopScanout::new(screen))
+                as alloc::boxed::Box<dyn stela_soc::machine::Scanout>
+        })
+    };
+    #[cfg(feature = "nvk")]
+    let scanout = gpu::display::scanout().or_else(firmware_scanout);
+    #[cfg(not(feature = "nvk"))]
+    let scanout = firmware_scanout();
     let programmed = mount::memory_locks(placement.read_only_region, core_locks);
     let memory = board.and_then(|board| memory_resources(board, canonical_ram, programmed));
     let cacheless_memory = memory.is_some();
@@ -2152,8 +2170,8 @@ fn start_devices(
             if let Some(acpi) = host_acpi {
                 acpi.retain_power(power);
             }
-            if options.gpu {
-                open_gpus(
+            if options.gpu
+                && open_gpus(
                     work,
                     mmio,
                     remappers,
@@ -2161,7 +2179,9 @@ fn start_devices(
                     host_firmware,
                     tsc_hz,
                     gpus,
-                );
+                )
+            {
+                gpu::serve(handoff.screen.map_or((0, 0), |screen| screen.resolution()));
             }
             disks.profile_callbacks(options.profile);
             let count = |count: usize, one: &str, many: &str| {

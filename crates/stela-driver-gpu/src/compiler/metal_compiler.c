@@ -322,6 +322,34 @@ inspect_entry(const void *air, size_t size, const char *entry,
                       false;
 }
 
+struct listing {
+   stela_metal_visit_function visit;
+   void *data;
+};
+
+static bool
+list_function(void *data, const char *name, size_t name_bytes, unsigned stage)
+{
+   struct listing *listing = data;
+   return listing->visit(listing->data, name, name_bytes, function_stages[stage]);
+}
+
+bool
+stela_metal_functions(const void *air, size_t size, stela_metal_visit_function visit, void *data,
+                      struct stela_air_error *error)
+{
+   struct listing listing = {visit, data};
+   return stela_air_functions(air, size, list_function, &listing, error);
+}
+
+bool
+stela_metal_stitch(const struct stela_air_stitch_source *sources, uint32_t source_count,
+                   const struct stela_air_stitch_graph *graphs, uint32_t graph_count,
+                   stela_air_visit_bytes visit, void *data, struct stela_air_error *error)
+{
+   return stela_air_stitch(sources, source_count, graphs, graph_count, visit, data, error);
+}
+
 /* Reflects entry, and selects its stage by the AIR list that names it. */
 static bool
 reflect(const void *air, size_t size, const char *entry,
@@ -724,6 +752,7 @@ stela_metal_compile(const void *air, size_t size, const char *entry,
       .constexpr_samplers = specialization->samplers,
       .constexpr_sampler_count = specialization->sampler_count,
       .texture_levels = stela_metal_texture_levels,
+      .texture_null = stela_metal_texture_null,
       .command_count = stela_metal_command_count,
       .encode_command = stela_metal_encode_command,
       .load_device_value = stela_metal_load_device_value,
