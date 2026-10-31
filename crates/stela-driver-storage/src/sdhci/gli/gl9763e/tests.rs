@@ -1,6 +1,6 @@
 //! GL9763E original-controller and embedded-MMC regressions.
 use super::*;
-use crate::{bus::dma::RegionAllocator, sdhci::model::*};
+use crate::{bus::dma::TestRegion, sdhci::model::*};
 use alloc::{collections::BTreeMap, vec};
 
 struct State {
@@ -227,10 +227,7 @@ fn initialize_owner(owner: &mut Owner) -> Result<(), BlockError> {
 
 #[test]
 fn native_gl9763e_original_phy_idle_cqe_retirement_and_eight_pin_mmc_pio_are_real() {
-    let mut backing = vec![0u64; 128 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: original descriptor/payload backing outlives every model owner/card alias.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(128 * 1024 * 8);
     let (mut owner, card, state) = owner();
     card.borrow_mut().ext[202] = 0x50;
     initialize_owner(&mut owner).unwrap();
@@ -297,10 +294,7 @@ fn native_gl9763e_original_phy_idle_cqe_retirement_and_eight_pin_mmc_pio_are_rea
 
 #[test]
 fn gl9763e_supply_and_adma_follow_card_state() {
-    let mut backing = vec![0u64; 128 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: the model DMA engine consumes these descriptor/payload pages.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(128 * 1024 * 8);
     let (mut owner, card, state) = owner();
     {
         let mut c = card.borrow_mut();
@@ -358,10 +352,7 @@ fn native_gl9763e_unknown_firmware_cqe_work_and_refused_halt_never_start_legacy_
 #[test]
 fn native_gl9763e_revoked_pci_or_reenabled_queue_fences_published_mmc_before_commands() {
     for queue in [false, true] {
-        let mut backing = vec![0u64; 128 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: revoked original requester keeps every DMA range and stale card alias.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(128 * 1024 * 8);
         let (mut owner, card, state) = owner();
         initialize_owner(&mut owner).unwrap();
         let mut host = Host::new(
@@ -490,10 +481,7 @@ fn native_gl9763e_current_metadata_uses_the_vcc_supply_field() {
         (CAP_300, POWER_300, 0x22),
         (CAP_180, POWER_180, 0x33),
     ] {
-        let mut backing = vec![0u64; 128 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: metadata initialization keeps these original DMA ranges.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(128 * 1024 * 8);
         let (mut owner, card, _) = owner();
         initialize_owner(&mut owner).unwrap();
         card.borrow_mut().caps = capability | CAP_HIGH_SPEED | 200 << 8;

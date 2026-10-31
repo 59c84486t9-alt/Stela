@@ -603,6 +603,9 @@ unsafe fn intel_wifi(
             bios,
             database: database.clone(),
             network: network.clone(),
+            entropy: services
+                .entropy()
+                .map_err(|error| (Error::Native(error), None))?,
         };
         // SAFETY: forwarded from the caller.
         unsafe { native::intel_wifi(services, address, inputs) }
@@ -785,6 +788,12 @@ pub unsafe fn probe_with_provider(
     // Broadcom PCIe Bluetooth functions, attached once the scan has found
     // every bridge of their segment.
     let mut broadcom_bluetooth = Vec::new();
+    // USB4 hosts with a software connection manager come up first: the scan
+    // below then finds what they tunnel, as it finds any other function.
+    let software_usb4 = services.map_or_else(Vec::new, |services| {
+        // SAFETY: the caller owns the machine, and no driver has started.
+        unsafe { native::usb4::bring_up(services, handoff, &mut devices) }
+    });
     let mut usb4_hosts = Vec::new();
     let mut mehlow = false;
     // Each PCI bridge and its secondary bus, for ACPI companion lookups.
@@ -901,7 +910,9 @@ pub unsafe fn probe_with_provider(
                         continue;
                     }
                     native::Kind::Usb4 => {
-                        usb4_hosts.push(address);
+                        if !software_usb4.contains(&address) {
+                            usb4_hosts.push(address);
+                        }
                         continue;
                     }
                     native::Kind::Ehci => {
@@ -1269,7 +1280,7 @@ pub unsafe fn probe_with_provider(
             continue;
         };
         // SAFETY: as for tg3; the scan found every bridge of the segment.
-        match unsafe { native::usb4::attach(services, address, &bridges, handoff.clock) } {
+        match unsafe { native::usb4::attach(services, address, &bridges, handoff.clock, false) } {
             Ok(host) => devices.usb4_hosts.push(host),
             Err((error, kept)) => {
                 devices.failures.push((address, error));

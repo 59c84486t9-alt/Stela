@@ -4,6 +4,8 @@
 // Copyright (C) 2016-2017 Intel Deutschland GmbH
 //! Private queue memory for the unique acknowledged native station owner.
 use super::*;
+#[cfg(test)]
+use alloc::vec::Vec;
 
 pub(in crate::wifi::intel) struct NativeMemory {
     memory: UnpublishedQueue,
@@ -14,11 +16,12 @@ impl NativeMemory {
     pub(in crate::wifi::intel) fn prepare(
         fw: &Firmware<'_>,
         family: Family,
+        slots: u16,
         source: &dyn PageSource,
         domain: Arc<dyn DmaDomain>,
     ) -> Result<Self, Error> {
         Ok(Self {
-            memory: UnpublishedQueue::prepare(fw, family, source, domain)?,
+            memory: UnpublishedQueue::prepare(fw, family, slots, source, domain)?,
             released: false,
             exposed: false,
         })
@@ -74,8 +77,58 @@ impl NativeMemory {
         }
         Ok(())
     }
-    pub(in crate::wifi::intel) fn released(&self) -> bool {
-        self.released
+    /// TB0's address in `slot`.
+    pub(in crate::wifi::intel) fn first(&self, slot: usize) -> u64 {
+        self.memory.first.region().address + slot as u64 * 64
+    }
+    /// # Safety
+    /// `slot`'s descriptor is invalid, so the device reads no TB0 there.
+    pub(in crate::wifi::intel) unsafe fn write_first(
+        &self,
+        slot: usize,
+        bytes: &[u8],
+    ) -> Result<(), Error> {
+        // SAFETY: as the caller promises.
+        unsafe { self.memory.first.write_owned(slot * 64, bytes) }.map_err(Error::Dma)
+    }
+    /// `iwl_pcie_gen2_update_byte_tbl` and the descriptor it describes.
+    /// # Safety
+    /// `slot` is past the published write pointer.
+    pub(in crate::wifi::intel) unsafe fn write_descriptor(
+        &self,
+        slot: usize,
+        tfd: &[u8],
+        byte_count: u16,
+    ) -> Result<(), Error> {
+        // SAFETY: as the caller promises.
+        unsafe {
+            self.memory
+                .byte_counts
+                .write_owned(slot * 2, &byte_count.to_le_bytes())
+                .map_err(Error::Dma)?;
+            self.memory
+                .descriptors
+                .write_owned(slot * 256, tfd)
+                .map_err(Error::Dma)
+        }
+    }
+    /// `iwl_txq_set_tfd_invalid_gen2`: `slot` points at the invalid buffer.
+    /// # Safety
+    /// The device finished this slot's frame.
+    pub(in crate::wifi::intel) unsafe fn invalidate(&self, slot: usize) -> Result<(), Error> {
+        let tfd = Tfd::encode(&[self.memory.invalid.region()]).map_err(Error::Descriptor)?;
+        // SAFETY: as the caller promises.
+        unsafe { self.memory.descriptors.write_owned(slot * 256, tfd.bytes()) }.map_err(Error::Dma)
+    }
+    #[cfg(test)]
+    pub(in crate::wifi::intel) fn byte_count(&self, slot: usize) -> u16 {
+        let bytes =
+            crate::wifi::intel::dma::tests::read_back(&self.memory.byte_counts, slot * 2, 2);
+        u16::from_le_bytes([bytes[0], bytes[1]])
+    }
+    #[cfg(test)]
+    pub(in crate::wifi::intel) fn descriptor(&self, slot: usize) -> Vec<u8> {
+        crate::wifi::intel::dma::tests::read_back(&self.memory.descriptors, slot * 256, 256)
     }
     pub(in crate::wifi::intel) fn uncertain(&self) -> bool {
         self.exposed && !self.released

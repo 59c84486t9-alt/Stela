@@ -14,7 +14,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
 };
-use stela_boot_core::options::System;
+use stela_boot_core::options::{System, Uuid};
 use stela_loader::mount_interface::{Choice, Choices};
 
 /// What setup writes, recorded on the ESP so `uninstall` can remove it.
@@ -107,6 +107,10 @@ pub(super) struct Record {
     /// The Wi-Fi network every choice joins (`--wifi`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) wifi: Option<wifi::Network>,
+    /// The USB4 devices every choice admits without an IOMMU
+    /// (`--usb4-approve`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) usb4_approved: Vec<String>,
     /// The network addresses every choice sets by hand (`--ipv4`, `--dns`).
     #[serde(default, skip_serializing_if = "addresses::Addresses::is_automatic")]
     pub(super) addresses: addresses::Addresses,
@@ -194,6 +198,11 @@ impl Record {
             .wifi
             .as_ref()
             .and_then(|network| network.country.clone());
+        system.usb4_approved = self
+            .usb4_approved
+            .iter()
+            .filter_map(|uuid| Uuid::parse(uuid))
+            .collect();
         self.addresses.apply(&mut system);
         format!("{system}\n")
     }

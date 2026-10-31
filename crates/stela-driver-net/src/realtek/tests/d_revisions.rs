@@ -118,12 +118,9 @@ fn d_revisions_refuse_unready_phy_missing_firmware_and_efuse_faults() {
 
 #[test]
 fn d_mac_start_clears_stale_jumbo_state_and_uses_single_fetch_receive_configuration() {
-    use crate::bus::dma::RegionAllocator;
+    use crate::bus::dma::TestRegion;
     for version in [25, 26] {
-        let mut backing = vec![0u64; 200_000];
-        let base = backing.as_mut_ptr() as u64;
-        // SAFETY: backing outlives all descriptor use and has no other accesses.
-        let mut dma = unsafe { RegionAllocator::new(base..base + (backing.len() * 8) as u64) };
+        let mut dma = TestRegion::new(200_000 * 8);
         let mut rx = Ring::new(&mut dma, true).unwrap();
         let mut tx = Ring::new(&mut dma, true).unwrap();
         rx.initialize(true);

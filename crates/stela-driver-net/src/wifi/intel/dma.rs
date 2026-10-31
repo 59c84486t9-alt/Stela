@@ -5,7 +5,7 @@
 //! leases. No CPU/physical pointer becomes an IOVA. The ROM context and RX/TX
 //! rings are separate allocations owned by the eventual transport.
 use super::{
-    context::{Images, Region, crosses_4g_boundary},
+    context::{Images, Region},
     firmware::{Section, SelfLoadPlan},
 };
 use crate::bus::dma::{
@@ -34,7 +34,10 @@ impl From<MemoryError> for Error {
     }
 }
 
-pub(super) struct Chunk {
+/// The largest allocation: a 1024-entry descriptor ring.
+const MAX_CHUNK_BYTES: usize = 1024 * 256;
+
+pub(in crate::wifi::intel) struct Chunk {
     mapping: Option<DmaMapping>,
     cpu: CpuMapping,
     region: Region,
@@ -47,7 +50,7 @@ impl Chunk {
         data: &[u8],
         direction: Direction,
     ) -> Result<Self, Error> {
-        if data.is_empty() || data.len() > 32768 {
+        if data.is_empty() || data.len() > MAX_CHUNK_BYTES {
             return Err(Error::PayloadSize);
         }
         // Keep rejected allocations reserved while trying another address, as
@@ -72,7 +75,7 @@ impl Chunk {
                 region,
                 exposed: false,
             };
-            if crosses_4g_boundary(region.address, data.len() as u16) {
+            if (region.address >> 32) != ((region.address + data.len() as u64) >> 32) {
                 rejected.push(chunk);
                 continue;
             }
@@ -344,6 +347,16 @@ pub(in crate::wifi::intel) mod tests {
         boxed::Box,
         collections::BTreeMap,
     };
+    /// What the device would read from `chunk`.
+    pub(in crate::wifi::intel) fn read_back(chunk: &Chunk, offset: usize, bytes: usize) -> Vec<u8> {
+        let pointer = chunk.cpu.address(offset, bytes).unwrap();
+        let mut copy = alloc::vec![0; bytes];
+        // SAFETY: model memory no concurrent writer holds.
+        unsafe {
+            core::ptr::copy_nonoverlapping(pointer.as_ptr(), copy.as_mut_ptr(), bytes);
+        }
+        copy
+    }
     use core::{
         alloc::Layout,
         ops::Range,

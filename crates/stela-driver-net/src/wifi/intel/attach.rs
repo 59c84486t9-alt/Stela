@@ -10,7 +10,7 @@ use super::{
     boot::{self, BootIo, ProductResetPolicy, RomBoot},
     firmware::{self, Family},
     identity::{self, IdentityError, Observed, Profile, StageError},
-    link::{Inputs, Wifi},
+    link::{Inputs, Station, Wifi},
     platform,
     power::{self, ManagementSession, Power},
     radio::bios::service::BiosIo,
@@ -98,7 +98,7 @@ pub unsafe fn attach<Q: BootIo, B: BiosIo>(
     pci: Pci,
     domain: Arc<dyn DmaDomain>,
     inputs: Inputs<B>,
-) -> Result<Wifi<Q, B>, AttachError> {
+) -> Result<Station<Q, B>, AttachError> {
     let hardware_revision = io.read32(HW_REV).map_err(AttachError::Register)?;
     let radio_id = io.read32(HW_RF_ID).map_err(AttachError::Register)?;
     let profile = Profile::select(Observed {

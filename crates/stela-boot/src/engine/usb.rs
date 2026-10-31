@@ -7,17 +7,28 @@
 //! pointer that arrives joins the host input; another new device is
 //! reported and its owners kept.
 //!
-//! USB4 hosts whose firmware runs the connection manager are looked at on
-//! the same timer: each firmware event is reported, as Linux's
-//! `icm_handle_notification` receives it.
+//! A USB4 host whose firmware runs the connection manager is looked at on the
+//! same timer: each firmware event is reported, as Linux's
+//! `icm_handle_notification` receives it. A software connection manager is
+//! polled every slice, since its work waits on the host's control channel;
+//! neither takes the host's interrupts. What it tunnels after probe works
+//! for USB3 and DisplayPort, and a PCIe device stays unused until the next
+//! boot's scan, as a USB device no consumer takes does.
 //!
 //! The controllers' registers and DMA pages are reached through the
 //! loader's identity root, so each poll runs in it (`storage::RestoreRoot`).
 use super::storage::RestoreRoot;
 use crate::output;
-use alloc::{sync::Arc, vec::Vec};
+use alloc::{string::String, sync::Arc, vec::Vec};
 use stela_drivers::{
-    bus::{dma::RegionAllocator, thunderbolt::icm},
+    bus::{
+        dma::RegionAllocator,
+        thunderbolt::{
+            icm,
+            manager::{Admission, Platform, Report, Uuid},
+            ring,
+        },
+    },
     firmware::{Catalog, HandoffProvider},
     input::InputDevice,
     probe::native::usb4,
@@ -27,12 +38,53 @@ use stela_drivers::{
 /// Firmware events serviced per USB4 host per poll.
 const USB4_EVENTS: usize = 16;
 
-/// Report one firmware event of `host`.
-pub fn report_usb4(host: &usb4::Host, event: &icm::Event) {
-    let location = &host.location;
+/// What a USB4 host's software connection manager asks of the mount.
+pub(super) struct Usb4Platform {
+    location: String,
+    /// Whether an IOMMU confines the host and its tunnels' bridges.
+    isolated: bool,
+    /// The devices `--usb4-approve` lists.
+    approved: Vec<Uuid>,
+    tsc_per_ms: u64,
+}
+
+impl Usb4Platform {
+    pub(super) fn new(location: &str, isolated: bool, approved: Vec<Uuid>, tsc_hz: u64) -> Self {
+        Self {
+            location: String::from(location),
+            isolated,
+            approved,
+            tsc_per_ms: (tsc_hz / 1000).max(1),
+        }
+    }
+}
+
+impl Platform for Usb4Platform {
+    fn now_ms(&self) -> u64 {
+        super::host::rdtsc() / self.tsc_per_ms
+    }
+
+    fn report(&mut self, report: Report) {
+        let location = &self.location;
+        output::arguments(format_args!("HOST USB4 {location}: {report}\n"));
+    }
+
+    fn admit_pcie(&self, uuid: Uuid) -> Admission {
+        if self.isolated {
+            Admission::Isolated
+        } else if self.approved.contains(&uuid) {
+            Admission::Listed
+        } else {
+            Admission::Refused
+        }
+    }
+}
+
+/// Report one firmware event of the host at `location`.
+pub fn report_usb4(location: &str, icm: &icm::Host<ring::Mmio>, event: &icm::Event) {
     match event {
         icm::Event::Notification(message) => {
-            match icm::Notification::decode(host.icm.family(), message) {
+            match icm::Notification::decode(icm.family(), message) {
                 Ok(notification) => {
                     output::arguments(format_args!("HOST USB4 {location}: {notification}\n"))
                 }
@@ -56,10 +108,18 @@ pub fn report_usb4(host: &usb4::Host, event: &icm::Event) {
 /// most 255 ms.
 const POLL_HZ: u64 = 16;
 
+/// A USB4 host and what the polls last saw of it.
+struct Usb4 {
+    host: usb4::Host,
+    /// Whether its connection manager still runs.
+    running: bool,
+    /// A software connection manager's PCIe tunnels.
+    pcie_tunnels: usize,
+}
+
 pub struct HostUsb {
     hosts: Vec<xhci::Host>,
-    /// USB4 hosts, and whether each one's connection manager still runs.
-    usb4: Vec<(usb4::Host, bool)>,
+    usb4: Vec<Usb4>,
     tsc_per_ms: u64,
     /// The probe's DMA pages, which enumeration of a new device draws on.
     dma: RegionAllocator,
@@ -82,7 +142,17 @@ impl HostUsb {
     ) -> Self {
         Self {
             hosts,
-            usb4: usb4.into_iter().map(|host| (host, true)).collect(),
+            usb4: usb4
+                .into_iter()
+                .map(|host| Usb4 {
+                    pcie_tunnels: match &host.connection {
+                        usb4::Connection::Software { manager } => manager.pcie_tunnels(),
+                        usb4::Connection::Firmware { .. } => 0,
+                    },
+                    host,
+                    running: true,
+                })
+                .collect(),
             tsc_per_ms: (tsc_hz / 1000).max(1),
             dma,
             firmware,
@@ -102,9 +172,7 @@ impl HostUsb {
         if timed {
             self.last = now;
         }
-        if timed {
-            self.poll_usb4(now);
-        }
+        self.poll_usb4(now, timed);
         let firmware = HandoffProvider::new(self.firmware.as_deref());
         for host in &mut self.hosts {
             let mut changes = {
@@ -150,31 +218,61 @@ impl HostUsb {
         inputs
     }
 
-    /// Service each running USB4 host's firmware events. A host whose
+    /// Run each running USB4 host's software connection manager for up to a
+    /// millisecond, and, when `timed`, service each firmware's events. A host whose
     /// transport faults is reported once and left stopped.
-    fn poll_usb4(&mut self, now: u64) {
+    fn poll_usb4(&mut self, now: u64, timed: bool) {
         let now_ms = now / self.tsc_per_ms;
-        for (host, running) in &mut self.usb4 {
-            if !*running {
+        for usb4 in &mut self.usb4 {
+            if !usb4.running {
                 continue;
             }
-            for _ in 0..USB4_EVENTS {
-                let event = {
-                    // SAFETY: as for the xHCI controllers below.
-                    let _root = unsafe { RestoreRoot::enter(self.root) };
-                    host.icm.poll(now_ms)
-                };
-                match event {
-                    Ok(Some(event)) => report_usb4(host, &event),
-                    Ok(None) => break,
-                    Err(error) => {
-                        output::arguments(format_args!(
-                            "HOST USB4 {}: connection manager transport stopped: {error:?}\n",
-                            host.location
-                        ));
-                        *running = false;
-                        break;
+            let location = &usb4.host.location;
+            match &mut usb4.host.connection {
+                usb4::Connection::Firmware { .. } if !timed => {}
+                usb4::Connection::Firmware { icm, .. } => {
+                    for _ in 0..USB4_EVENTS {
+                        let event = {
+                            // SAFETY: as for the xHCI controllers below.
+                            let _root = unsafe { RestoreRoot::enter(self.root) };
+                            icm.poll(now_ms)
+                        };
+                        match event {
+                            Ok(Some(event)) => report_usb4(location, icm, &event),
+                            Ok(None) => break,
+                            Err(error) => {
+                                output::arguments(format_args!(
+                                    "HOST USB4 {location}: connection manager transport \
+                                     stopped: {error:?}\n",
+                                ));
+                                usb4.running = false;
+                                break;
+                            }
+                        }
                     }
+                }
+                usb4::Connection::Software { manager } => {
+                    {
+                        // SAFETY: as for the xHCI controllers below.
+                        let _root = unsafe { RestoreRoot::enter(self.root) };
+                        loop {
+                            usb4.running = manager.poll();
+                            if !usb4.running
+                                || manager.idle()
+                                || super::host::rdtsc().wrapping_sub(now) >= self.tsc_per_ms
+                            {
+                                break;
+                            }
+                        }
+                    }
+                    let tunnels = manager.pcie_tunnels();
+                    if tunnels > usb4.pcie_tunnels {
+                        output::arguments(format_args!(
+                            "HOST USB4 {location}: PCIe device added after the scan: \
+                             unused until the next boot\n"
+                        ));
+                    }
+                    usb4.pcie_tunnels = tunnels;
                 }
             }
         }

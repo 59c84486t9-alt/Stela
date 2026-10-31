@@ -1,6 +1,6 @@
 extern crate std;
 use super::*;
-use crate::bus::dma::RegionAllocator;
+use crate::bus::dma::{RegionAllocator, TestRegion};
 use alloc::collections::BTreeMap;
 
 struct Cursor {
@@ -547,10 +547,7 @@ fn primary_arrays_match_limits_and_keep_zero_unused_contexts() {
                 u32::from(requested).min(8).min(maximum - 1)
             );
             assert_eq!(1 << ((layout.info() >> 10 & 0x1f) + 1), layout.contexts);
-            let mut backing = vec![0u64; 64 * 1024];
-            let start = backing.as_mut_ptr() as u64;
-            // SAFETY: this whole backing is exclusive/live for the model.
-            let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+            let mut dma = TestRegion::new(64 * 1024 * 8);
             let streams = Streams::new(&mut dma, layout, dma::Profile::SPEC, false).unwrap();
             for index in 0..layout.contexts as usize {
                 let value = streams.array.read::<u64>(index * 16);
@@ -571,10 +568,7 @@ fn primary_arrays_match_limits_and_keep_zero_unused_contexts() {
 #[test]
 fn real_contexts_independent_dma_completions_and_stream_rings_wrap() {
     for (context_bytes, overfetch) in [(32, false), (64, false), (32, true), (64, true)] {
-        let mut backing = vec![0u64; 256 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: backing remains exclusive and outlives every DMA access.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(256 * 1024 * 8);
         let (mut controller, model) = controller(&mut dma, context_bytes);
         if overfetch {
             controller.dma_profile = dma::Profile::pci(0x1d17, 0x9202);
@@ -646,10 +640,7 @@ fn real_contexts_independent_dma_completions_and_stream_rings_wrap() {
 
 #[test]
 fn ordinary_and_stream_submissions_reject_high_payloads_before_ring_mutation() {
-    let mut backing = vec![0u64; 256 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: the model keeps exclusive live backing for all DMA.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(256 * 1024 * 8);
     let (mut controller, model) = controller(&mut dma, 32);
     controller
         .configure_streams(
@@ -713,10 +704,7 @@ fn ordinary_and_stream_submissions_reject_high_payloads_before_ring_mutation() {
 #[test]
 fn cancel_retires_every_stream_then_rejects_stale_tickets_and_events() {
     for halted in [false, true] {
-        let mut backing = vec![0u64; 256 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: all context/ring/data addresses remain live.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(256 * 1024 * 8);
         let (mut controller, model) = controller(&mut dma, 32);
         controller
             .configure_streams(1, &[endpoint(0x81, 4)], &[0x81], 3, &mut dma)
@@ -778,10 +766,7 @@ fn cancel_retires_every_stream_then_rejects_stale_tickets_and_events() {
 
 #[test]
 fn stream_transaction_errors_soft_retry_every_pending_stream_like_linux() {
-    let mut backing = vec![0u64; 256 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: all context/ring/data addresses remain live.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(256 * 1024 * 8);
     let (mut controller, model) = controller(&mut dma, 32);
     controller
         .configure_streams(1, &[endpoint(0x81, 4)], &[0x81], 3, &mut dma)
@@ -826,10 +811,7 @@ fn stream_transaction_errors_soft_retry_every_pending_stream_like_linux() {
 
 #[test]
 fn transferless_stream_errors_reset_the_endpoint_like_linux() {
-    let mut backing = vec![0u64; 256 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: all context/ring/data addresses remain live.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(256 * 1024 * 8);
     let (mut controller, model) = controller(&mut dma, 32);
     controller
         .configure_streams(1, &[endpoint(0x81, 4)], &[0x81], 3, &mut dma)
@@ -888,10 +870,7 @@ fn transferless_stream_errors_reset_the_endpoint_like_linux() {
 #[test]
 fn partial_dequeue_failure_keeps_every_stream_and_blocks_all_mutation() {
     for fail_stream in 1..=3 {
-        let mut backing = vec![0u64; 256 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: this test keeps every allocation after uncertain stop.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(256 * 1024 * 8);
         let (mut controller, model) = controller(&mut dma, 32);
         controller
             .configure_streams(1, &[endpoint(0x81, 4)], &[0x81], 3, &mut dma)
@@ -944,10 +923,7 @@ fn partial_dequeue_failure_keeps_every_stream_and_blocks_all_mutation() {
 
 #[test]
 fn invalid_limits_and_advertisements_refuse_before_context_publication() {
-    let mut backing = vec![0u64; 128 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: all DMA remains live/exclusive and no failed plan is published.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(128 * 1024 * 8);
     let (mut controller, model) = controller(&mut dma, 32);
     for (maximum, speed, exponent, selected, requested) in [
         (2, SUPER_SPEED, 4, vec![0x81], 2),
@@ -980,10 +956,7 @@ fn invalid_limits_and_advertisements_refuse_before_context_publication() {
 #[test]
 fn uncertain_configuration_and_invalid_residual_never_release_streams() {
     for configure_error in [false, true] {
-        let mut backing = vec![0u64; 256 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: all allocations kept through completion/poison checks.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(256 * 1024 * 8);
         let (mut controller, model) = controller(&mut dma, 32);
         if configure_error {
             model.borrow_mut().fail_command = Some((CONFIGURE_ENDPOINT, 0));
@@ -1078,10 +1051,7 @@ fn unchanged_linux_primary_size_context_and_wire_encodings() {
 
 #[test]
 fn status_and_data_streams_are_posted_before_ordinary_uas_command() {
-    let mut backing = vec![0u64; 256 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: exclusively kept RAM for all device/context/ring accesses.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(256 * 1024 * 8);
     let (mut controller, model) = controller(&mut dma, 64);
     let endpoints = [
         endpoint(0x81, 4),
@@ -1121,10 +1091,7 @@ fn status_and_data_streams_are_posted_before_ordinary_uas_command() {
 
 #[test]
 fn foreign_ticket_cannot_consume_another_controllers_pending_completion() {
-    let mut backing = vec![0u64; 256 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: a single allocator gives distinct kept ranges to both controllers.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(256 * 1024 * 8);
     let (mut first, one) = controller(&mut dma, 32);
     let (mut second, two) = controller(&mut dma, 32);
     for controller in [&mut first, &mut second] {
@@ -1163,10 +1130,7 @@ fn each_stream_allocation_failure_precedes_every_hardware_context_change() {
         }
     }
     for fail_at in 0..13 {
-        let mut backing = vec![0u64; 256 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: exclusively kept backing for all test DMA.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(256 * 1024 * 8);
         let (mut controller, model) = controller(&mut dma, 32);
         let input = controller.slots[1].as_ref().unwrap().input.bytes().to_vec();
         let endpoints = [
@@ -1302,10 +1266,7 @@ fn pci_identity_binds_exact_stream_quirks_without_writes() {
 
 #[test]
 fn pure_capacity_query_never_publishes_and_unknown_or_broken_identity_refuses() {
-    let mut backing = vec![0u64; 256 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: single kept exclusive model allocation range.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(256 * 1024 * 8);
     let (mut controller, model) = controller(&mut dma, 32);
     controller.slots[1].as_mut().unwrap().current_configuration = Some(0);
     let endpoints = [endpoint(0x81, 4), endpoint(2, 3)];
@@ -1340,10 +1301,7 @@ fn pure_capacity_query_never_publishes_and_unknown_or_broken_identity_refuses() 
 
 #[test]
 fn cadence_reserved_state_is_cleared_after_each_acknowledged_stream_dequeue() {
-    let mut backing = vec![0u64; 256 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: all model contexts, arrays, rings and data remain allocated.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(256 * 1024 * 8);
     let (mut controller, model) = controller(&mut dma, 32);
     controller.stream_policy = Policy::pci(0x17cd, 0x0200);
     model.borrow_mut().cadence = true;

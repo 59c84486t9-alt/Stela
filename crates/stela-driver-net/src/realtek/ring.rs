@@ -110,8 +110,8 @@ fn fits32(address: u64, length: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bus::dma::RegionAllocator;
-    use alloc::vec;
+    use crate::bus::dma::TestRegion;
+
     #[test]
     fn dma_limit_checks_entire_range_and_overflow() {
         assert!(fits32(0xffff_f000, 4096));
@@ -122,10 +122,7 @@ mod tests {
     #[test]
     fn device_ownership_ring_wrap_padding_fcs_and_corruption_boundaries() {
         // Both rings, plus room for alignment.
-        let mut backing = vec![0u64; (2 * DESCRIPTORS * (DESCRIPTOR + BUFFER) + 4096) / 8];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: backing remains alive and no other accesses alias the allocator.
-        let mut dma = unsafe { RegionAllocator::new(start..start + (backing.len() * 8) as u64) };
+        let mut dma = TestRegion::new((2 * DESCRIPTORS * (DESCRIPTOR + BUFFER) + 4096) / 8 * 8);
         let mut tx = Ring::new(&mut dma, true).unwrap();
         let mut rx = Ring::new(&mut dma, true).unwrap();
         tx.initialize(false);

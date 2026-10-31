@@ -374,11 +374,7 @@ fn ax88772_native_all_candidates_revisions_split_rx_and_quarantine() {
             ] {
                 for scenario in 0..6 {
                     cases += 1;
-                    let mut backing = vec![0u64; 64 * 1024];
-                    let start = backing.as_mut_ptr() as u64;
-                    // SAFETY: backing outlives all modeled DMA objects.
-                    let mut dma =
-                        unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+                    let mut dma = TestRegion::new(64 * 1024 * 8);
                     let (mut controller, model) =
                         unconfigured_cancellation_controller_with_configurations(
                             &mut dma,
@@ -596,11 +592,7 @@ fn ax179_aliases_use_shared_dma_and_quarantine() {
             (SUPER_SPEED_PLUS, 1024),
         ] {
             for scenario in 0..6 {
-                let mut backing = vec![0u64; 128 * 1024];
-                let start = backing.as_mut_ptr() as u64;
-                // SAFETY: the backing outlives every modeled DMA object.
-                let mut dma =
-                    unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+                let mut dma = TestRegion::new(128 * 1024 * 8);
                 let (mut controller, model) =
                     unconfigured_cancellation_controller_with_configurations(
                         &mut dma,

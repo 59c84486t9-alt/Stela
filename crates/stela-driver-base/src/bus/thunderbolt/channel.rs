@@ -6,8 +6,8 @@
 //! Linux ctl.c serializes control work and dispatches asynchronous events apart
 //! from replies. This bounded engine owns one request for the whole channel,
 //! since an error has no address/sequence and may come from an upstream router.
-//! Timeouts/cancellation permanently refuse new requests until the platform
-//! destroys/drains/resets the containing channel; late packets cannot be reused.
+//! A timeout ends the request, as a router can go at any moment: the sequence
+//! moves on, so a reply that comes late is dropped, like ctl.c's.
 use super::{config, ring};
 use crate::bus::dma::{mapping::DmaDomain, memory::PageSource};
 use alloc::sync::Arc;
@@ -48,6 +48,11 @@ pub enum Event {
     /// Bad CRC/markers/header or a late/unrelated reply was dropped. The active
     /// request remains active; a malformed packet never supplies its result.
     Discarded(config::Error),
+    /// No reply by the request's deadline. A reply that comes later is
+    /// [`Self::Discarded`], and new requests are welcome.
+    TimedOut {
+        request: u64,
+    },
 }
 struct Active {
     id: u64,
@@ -142,11 +147,6 @@ impl<R: ring::Registers> Channel<R> {
             return self.poison(Error::ClockRegressed);
         }
         self.last_now = now;
-        if let Some(active) = self.active.as_ref()
-            && now >= active.deadline
-        {
-            return self.poison(Error::Timeout { request: active.id });
-        }
         Ok(())
     }
     /// Enable/prime RX before enabling TX so a request cannot outrun reception.
@@ -223,14 +223,6 @@ impl<R: ring::Registers> Channel<R> {
     pub fn reset(&mut self, route: config::Route, now: u64, deadline: u64) -> Result<u64, Error> {
         self.issue(config::Request::reset(route), now, deadline)
     }
-    /// Cancellation has no protocol receipt. Keep published leases and refuse
-    /// later requests; only a containing drain/reset can end ambiguity.
-    pub fn cancel(&mut self) -> Result<Option<u64>, Error> {
-        self.running()?;
-        let id = self.active.take().map(|a| a.id);
-        self.phase = Phase::Poisoned;
-        Ok(id)
-    }
     fn acknowledge(&mut self) -> Result<Option<Event>, Error> {
         let Some((frame, _)) = self.pending_event.as_ref() else {
             return Ok(None);
@@ -258,7 +250,13 @@ impl<R: ring::Registers> Channel<R> {
         }
         let completion = match self.rx.poll() {
             Ok(Some(frame)) => frame,
-            Ok(None) => return Ok(None),
+            // A reply that made it wins over the clock.
+            Ok(None) => {
+                return Ok(self
+                    .active
+                    .take_if(|active| now >= active.deadline)
+                    .map(|active| Event::TimedOut { request: active.id }));
+            }
             Err(error) => return self.poison(error.into()),
         };
         let event = (|| {
@@ -473,28 +471,47 @@ mod tests {
     }
 
     #[test]
-    fn channel_timeout_cancel_and_clock_regression_never_reuse_ambiguous_dma() {
+    fn a_timeout_ends_the_request_and_new_ones_start_clean() {
+        use super::super::{
+            channel::{Error as ChannelError, Event},
+            config::Route,
+        };
+        let (_source, _domain, _model, mut channel) = channel();
+        channel.start(5).unwrap();
+        let id = channel
+            .read(Route::new(0).unwrap(), cfg_address(), 5, 10)
+            .unwrap();
+        assert_eq!(channel.poll(9), Ok(None));
+        assert_eq!(channel.poll(10), Ok(Some(Event::TimedOut { request: id })));
+        assert_eq!(channel.poll(11), Ok(None));
+        let next = channel
+            .read(Route::new(0).unwrap(), cfg_address(), 12, 30)
+            .unwrap();
+        assert_ne!(next, id);
+        assert_eq!(
+            channel.read(Route::new(0).unwrap(), cfg_address(), 12, 30),
+            Err(ChannelError::Busy)
+        );
+        channel_release(&mut channel);
+    }
+
+    #[test]
+    fn a_clock_regression_never_reuses_ambiguous_dma() {
         use super::super::{channel::Error as ChannelError, config::Route};
-        for case in 0..3 {
-            let (_source, _domain, model, mut channel) = channel();
-            channel.start(5).unwrap();
-            let id = channel
-                .read(Route::new(0).unwrap(), cfg_address(), 5, 10)
-                .unwrap();
-            let writes = model.state.lock().unwrap().writes.len();
-            match case {
-                0 => assert_eq!(channel.poll(10), Err(ChannelError::Timeout { request: id })),
-                1 => assert_eq!(channel.cancel(), Ok(Some(id))),
-                _ => assert_eq!(channel.poll(4), Err(ChannelError::ClockRegressed)),
-            }
-            assert_eq!(
-                channel.read(Route::new(0).unwrap(), cfg_address(), 11, 30),
-                Err(ChannelError::Poisoned)
-            );
-            assert_eq!(channel.poll(11), Err(ChannelError::Poisoned));
-            assert_eq!(model.state.lock().unwrap().writes.len(), writes);
-            channel_release(&mut channel);
-        }
+        let (_source, _domain, model, mut channel) = channel();
+        channel.start(5).unwrap();
+        channel
+            .read(Route::new(0).unwrap(), cfg_address(), 5, 10)
+            .unwrap();
+        let writes = model.state.lock().unwrap().writes.len();
+        assert_eq!(channel.poll(4), Err(ChannelError::ClockRegressed));
+        assert_eq!(
+            channel.read(Route::new(0).unwrap(), cfg_address(), 11, 30),
+            Err(ChannelError::Poisoned)
+        );
+        assert_eq!(channel.poll(11), Err(ChannelError::Poisoned));
+        assert_eq!(model.state.lock().unwrap().writes.len(), writes);
+        channel_release(&mut channel);
     }
 
     #[test]

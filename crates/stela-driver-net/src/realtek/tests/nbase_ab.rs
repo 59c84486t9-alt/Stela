@@ -74,7 +74,7 @@ fn nbase_a_b_phy_capability_internal_probe_tuning_and_advertisement_are_exact() 
 
 #[test]
 fn nbase_a_b_mac_selects_legacy_dma_and_preserves_distinct_masks_before_publish() {
-    use crate::bus::dma::RegionAllocator;
+    use crate::bus::dma::TestRegion;
     for version in [61, 63] {
         let time = Time::default();
         let model = Model::nbase(&time);
@@ -124,10 +124,7 @@ fn nbase_a_b_mac_selects_legacy_dma_and_preserves_distinct_masks_before_publish(
                     .any(|(r, _, _)| matches!(*r, TX_HIGH | TX_LOW | RX_HIGH | RX_LOW))
             );
         }
-        let mut backing = vec![0u64; 200_000];
-        let base = backing.as_mut_ptr() as u64;
-        // SAFETY: backing remains alive and has no other descriptor accesses.
-        let mut dma = unsafe { RegionAllocator::new(base..base + (backing.len() * 8) as u64) };
+        let mut dma = TestRegion::new(200_000 * 8);
         let mut rx = Ring::new(&mut dma, true).unwrap();
         let mut tx = Ring::new(&mut dma, true).unwrap();
         rx.initialize(true);

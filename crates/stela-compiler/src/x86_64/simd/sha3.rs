@@ -1,7 +1,8 @@
-//! EOR3, BCAX, RAX1 and XAR with SSE2.
-use super::{Host, commit, packed, packed_imm, read_vector};
-use crate::x86_64::asm::Code;
+//! EOR3, BCAX, RAX1 and XAR with SSE2, or AVX-512 ternary logic and rotates.
+use super::{Host, commit, packed, packed_imm, read_vector, vector_memory};
+use crate::x86_64::asm::{Code, vector_extensions};
 use crate::{
+    TargetCpu,
     aarch64::simd::sha3::{Kind, Operand},
     x86_64::isa::ShiftOpcode,
 };
@@ -18,6 +19,57 @@ const ROTATE_LEFT_ONE: u8 = 1;
 const SWAP_DWORDS_IN_QWORDS: u8 = 0xb1;
 const ROTATE_WORDS_RIGHT_ONE: u8 = 0x39;
 const ROTATE_WORDS_RIGHT_THREE: u8 = 0x93;
+/// VPTERNLOG tables over A:B:C = Vn:Vm:Va.
+const EXCLUSIVE_OR_THREE: u8 = 0x96;
+const EXCLUSIVE_OR_AND_NOT: u8 = 0xb4;
+
+/// AVX-512 F with VL: one VPTERNLOGD reading Va from guest state for EOR3
+/// and BCAX, PXOR and one rotate for RAX1 and XAR. XAR by 0 or 32 keeps its
+/// single SSE2 shuffle.
+fn emit_extended(code: &mut Code, operand: &Operand, target: TargetCpu) -> bool {
+    if !vector_extensions::merge_supported(target)
+        || matches!(
+            operand.kind,
+            Kind::Xar {
+                rotation: NO_ROTATION | DWORD_BITS
+            }
+        )
+    {
+        return false;
+    }
+    read_vector(code, operand.left, RESULT);
+    match operand.kind {
+        Kind::Eor3 { third } | Kind::Bcax { third } => {
+            read_vector(code, operand.right, SECOND);
+            let table = if matches!(operand.kind, Kind::Eor3 { .. }) {
+                EXCLUSIVE_OR_THREE
+            } else {
+                EXCLUSIVE_OR_AND_NOT
+            };
+            vector_extensions::ternary(code, RESULT, SECOND, vector_memory(third), table, target);
+        }
+        Kind::Rax1 => {
+            read_vector(code, operand.right, SECOND);
+            vector_extensions::rotate_qwords_right(
+                code,
+                SECOND,
+                SECOND,
+                QWORD_BITS - ROTATE_LEFT_ONE,
+                target,
+            );
+            packed(code, Host::Xor, RESULT, SECOND);
+        }
+        Kind::Xar { rotation } => {
+            read_vector(code, operand.right, SECOND);
+            packed(code, Host::Xor, RESULT, SECOND);
+            if rotation != NO_ROTATION {
+                vector_extensions::rotate_qwords_right(code, RESULT, RESULT, rotation, target);
+            }
+        }
+    }
+    commit(code, operand.destination, RESULT);
+    true
+}
 
 fn rotate_right(code: &mut Code, rotation: u8) {
     match rotation {
@@ -50,7 +102,10 @@ fn rotate_right(code: &mut Code, rotation: u8) {
     }
 }
 
-pub(super) fn emit(code: &mut Code, operand: &Operand) {
+pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu) {
+    if emit_extended(code, operand, target) {
+        return;
+    }
     match operand.kind {
         Kind::Eor3 { third } => {
             read_vector(code, operand.left, RESULT);
@@ -113,12 +168,72 @@ mod tests {
                     left: 31,
                     right: 31,
                 },
+                TargetCpu::X86_64_V3,
             );
             assert_eq!(code.len(), expected_bytes, "{kind:?}");
             // MOVDQU is the only write and covers all of V31.
             let mut expected_store = vec![0xf3, 0x0f, 0x7f, 0x87];
             expected_store.extend(super::super::vector_offset(31).to_le_bytes());
             assert!(code.ends_with(&expected_store), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn ternary_logic_and_rotates_match_the_sse2_recipes() {
+        use crate::x86_64::asm::vector_extensions::execution::Native;
+        use crate::{GuestAddress, GuestState, context::ExecutionContext};
+        use alloc::vec::Vec;
+        let candidate = TargetCpu::X86_64_V4;
+        if !TargetCpu::detect().supports(candidate) {
+            return;
+        }
+        let mut words = Vec::new();
+        for (destination, left, right, third) in
+            [(3u32, 1u32, 2u32, 4u32), (5, 5, 5, 5), (1, 2, 1, 2)]
+        {
+            let registers = right << 16 | left << 5 | destination;
+            words.push((0xce00_0000 | registers | third << 10, true));
+            words.push((0xce20_0000 | registers | third << 10, true));
+            words.push((0xce60_8c00 | registers, true));
+            for rotation in [0u32, 1, 16, 32, 48, 63] {
+                let shortened = rotation % 32 != 0;
+                words.push((0xce80_0000 | registers | rotation << 10, shortened));
+            }
+        }
+        let mut random = 0x6a09_e667_f3bc_c908_u64;
+        for (word, shortened) in words {
+            let source: Vec<u8> = [word, 0xd65f03c0]
+                .into_iter()
+                .flat_map(u32::to_le_bytes)
+                .collect();
+            let compile = |target| {
+                crate::testing::leaf_for(&source, GuestAddress(0x1000), target)
+                    .unwrap()
+                    .x86_64_code
+            };
+            let baseline = compile(TargetCpu::X86_64_V3);
+            let extended = compile(candidate);
+            if shortened {
+                assert!(extended.len() < baseline.len(), "{word:#010x}");
+            } else {
+                assert_eq!(extended, baseline, "{word:#010x}");
+            }
+            let [baseline, extended] = [&baseline, &extended].map(|code| Native::new(code));
+            for _ in 0..16 {
+                let mut state = GuestState::default();
+                for vector in &mut state.v {
+                    for limb in vector {
+                        random ^= random << 13;
+                        random ^= random >> 7;
+                        random ^= random << 17;
+                        *limb = random;
+                    }
+                }
+                let mut expected = state.clone();
+                baseline.run(&mut expected, &mut ExecutionContext::default());
+                extended.run(&mut state, &mut ExecutionContext::default());
+                assert_eq!(state, expected, "{word:#010x}");
+            }
         }
     }
 }

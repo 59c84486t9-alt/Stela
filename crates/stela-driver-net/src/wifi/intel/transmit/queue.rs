@@ -43,7 +43,9 @@ fn negotiate(fw: &Firmware<'_>) -> Result<(), Error> {
     }
     Ok(())
 }
-fn initial_slots(family: Family) -> u16 {
+/// The management queue's window: `IWL_MGMT_QUEUE_SIZE`, raised to the AX210
+/// family's minimum by `iwl_mvm_tvqm_enable_txq`.
+pub(in crate::wifi::intel) fn management_slots(family: Family) -> u16 {
     if family == Family::Ax200 { 16 } else { 128 }
 }
 fn bc_bytes(family: Family) -> usize {
@@ -180,6 +182,7 @@ pub struct Reply {
 /// and final Drop run in process/deferred context, never a hard IRQ handler.
 pub struct UnpublishedQueue {
     family: Family,
+    slots: u16,
     byte_counts: Chunk,
     descriptors: Chunk,
     first: Chunk,
@@ -193,14 +196,13 @@ pub struct Layout {
     pub invalid: Region,
 }
 impl UnpublishedQueue {
-    /// Initial non-QoS/management window: source16 entries, raised to
-    /// the AX210 family minimum128 by mvm/sta.c::iwl_mvm_tvqm_enable_txq.
     pub fn slots(&self) -> u16 {
-        initial_slots(self.family)
+        self.slots
     }
     pub fn prepare(
         fw: &Firmware<'_>,
         family: Family,
+        slots: u16,
         source: &dyn PageSource,
         domain: Arc<dyn DmaDomain>,
     ) -> Result<Self, Error> {
@@ -210,12 +212,12 @@ impl UnpublishedQueue {
                 .map_err(Error::Dma)
         };
         let byte_counts = allocate(&vec![0; bc_bytes(family)])?;
-        let descriptors = allocate(&vec![0; usize::from(initial_slots(family)) * 256])?;
-        let first = allocate(&vec![0; usize::from(initial_slots(family)) * 64])?;
+        let descriptors = allocate(&vec![0; usize::from(slots) * 256])?;
+        let first = allocate(&vec![0; usize::from(slots) * 64])?;
         let invalid = allocate(&[6, 0xf, 0xff, 0xff, 0, 0, 0, 0])?;
         let tfd = Tfd::encode(&[invalid.region()]).map_err(Error::Descriptor)?;
-        let mut ring = alloc::vec::Vec::with_capacity(usize::from(initial_slots(family)) * 256);
-        for _ in 0..initial_slots(family) {
+        let mut ring = alloc::vec::Vec::with_capacity(usize::from(slots) * 256);
+        for _ in 0..slots {
             ring.extend(tfd.bytes());
         }
         // SAFETY: Fresh exclusive host allocation; no address has been published.
@@ -224,6 +226,7 @@ impl UnpublishedQueue {
         }
         let prepared = Self {
             family,
+            slots,
             byte_counts,
             descriptors,
             first,
@@ -232,7 +235,7 @@ impl UnpublishedQueue {
         let layout = prepared.layout();
         geometry(
             family,
-            usize::from(initial_slots(family)),
+            usize::from(slots),
             layout.byte_counts,
             layout.descriptors,
         )?;
@@ -255,7 +258,7 @@ impl UnpublishedQueue {
             Parameters {
                 station_mask,
                 tid,
-                slots: initial_slots(self.family),
+                slots: self.slots,
                 byte_counts: self.byte_counts.region(),
                 descriptors: self.descriptors.region(),
             },
@@ -376,7 +379,7 @@ mod tests {
             let source = Source::default();
             let domain = Arc::new(Domain::default());
             assert!(matches!(
-                UnpublishedQueue::prepare(&fw, Family::Ax200, &source, domain.clone()),
+                UnpublishedQueue::prepare(&fw, Family::Ax200, 16, &source, domain.clone()),
                 Err(Error::Version)
             ));
             assert_eq!(source.calls.load(Ordering::Relaxed), 0);
@@ -390,7 +393,14 @@ mod tests {
         for family in [Family::Ax200, Family::Ax210] {
             let source = Source::default();
             let domain = Arc::new(Domain::default());
-            let queue = UnpublishedQueue::prepare(&fw, family, &source, domain.clone()).unwrap();
+            let queue = UnpublishedQueue::prepare(
+                &fw,
+                family,
+                management_slots(family),
+                &source,
+                domain.clone(),
+            )
+            .unwrap();
             let layout = queue.layout();
             assert_eq!(layout.descriptors.bytes, usize::from(queue.slots()) * 256);
             assert_eq!(layout.first.bytes, usize::from(queue.slots()) * 64);
@@ -427,7 +437,14 @@ mod tests {
                         }),
                     });
                     assert!(
-                        UnpublishedQueue::prepare(&fw, family, &source, domain.clone()).is_err()
+                        UnpublishedQueue::prepare(
+                            &fw,
+                            family,
+                            management_slots(family),
+                            &source,
+                            domain.clone()
+                        )
+                        .is_err()
                     );
                     assert!(domain.records.lock().unwrap().live.is_empty());
                 }
@@ -437,7 +454,14 @@ mod tests {
             // invalidation releases the last lease.
             let source = Source::default();
             let domain = Arc::new(Domain::default());
-            let queue = UnpublishedQueue::prepare(&fw, family, &source, domain.clone()).unwrap();
+            let queue = UnpublishedQueue::prepare(
+                &fw,
+                family,
+                management_slots(family),
+                &source,
+                domain.clone(),
+            )
+            .unwrap();
             domain.records.lock().unwrap().unmap_fail = Some(0);
             drop(queue);
             assert_eq!(domain.records.lock().unwrap().live.len(), 1);
@@ -455,7 +479,14 @@ mod tests {
             let fw = Firmware::parse(&bytes).unwrap();
             let source = Source::default();
             let domain = Arc::new(Domain::default());
-            let queue = UnpublishedQueue::prepare(&fw, family, &source, domain.clone()).unwrap();
+            let queue = UnpublishedQueue::prepare(
+                &fw,
+                family,
+                management_slots(family),
+                &source,
+                domain.clone(),
+            )
+            .unwrap();
             assert_eq!(queue.configuration(1, 15).unwrap().id().version, 0);
             drop(queue);
             assert!(domain.records.lock().unwrap().live.is_empty());

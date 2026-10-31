@@ -8,7 +8,7 @@ use super::numerical::{
 };
 use super::{Host, commit, packed, read_vector, vector_offset};
 use crate::TargetCpu;
-use crate::x86_64::asm::{Alu, Code, Gpr, Rm, ShiftOp, Size};
+use crate::x86_64::asm::{Alu, Code, Gpr, Rm, ShiftOp, Size, vector_extensions};
 use crate::x86_64::asm::{BitTest, FloatLanes};
 use crate::x86_64::isa::ShiftOpcode;
 use crate::x86_64::simd::encode::guest;
@@ -111,10 +111,24 @@ fn integer_offset(integer: IntegerOperand, lane: u32) -> u32 {
     vector_offset(register) + lane * (format.width.bits() / BITS_PER_BYTE)
 }
 
+/// AVX512-FP16 converts Half in one rounding; a fixed-point scale would add
+/// another.
+pub(super) fn half_supported(operand: &IntegerConversion, target: TargetCpu) -> bool {
+    vector_extensions::half_supported(target) && operand.frac_bits == 0
+}
+
 fn read_integer(code: &mut Code, integer: IntegerOperand, lane: u32) {
     let format = integer.format();
     match integer {
         IntegerOperand::General { register, .. } => super::super::load(code, register),
+        IntegerOperand::Simd { .. } if format.width == IntegerWidth::Bits16 => {
+            let element = guest(integer_offset(integer, lane));
+            if format.signed {
+                code.asm().movsx(Size::Dword, Rax, Size::Word, element);
+            } else {
+                code.asm().movzx(Size::Dword, Rax, Size::Word, element);
+            }
+        }
         IntegerOperand::Simd { .. } => {
             code.asm().mov_load(
                 width(format.width == IntegerWidth::Bits64),
@@ -172,13 +186,41 @@ fn scale(code: &mut Code, operand: &IntegerConversion, shape: Shape, direction: 
     }
 }
 
-fn convert_integer_lane(code: &mut Code, operand: &IntegerConversion, lane: u32) {
+fn convert_integer_lane(
+    code: &mut Code,
+    operand: &IntegerConversion,
+    lane: u32,
+    target: TargetCpu,
+) {
     let integer = operand.integer.format();
     read_integer(code, operand.integer, lane);
+    if operand.format == Format::Half {
+        let wide = integer.width == IntegerWidth::Bits64;
+        if integer.signed {
+            vector_extensions::half_from_signed(code, RESULT_VECTOR, wide, Rax);
+        } else {
+            vector_extensions::scalar_from_unsigned(
+                code,
+                RESULT_VECTOR,
+                Format::Half,
+                wide,
+                Rax,
+                target,
+            );
+        }
+        return;
+    }
     let wide = integer.width == IntegerWidth::Bits64 || !integer.signed;
     if integer.signed || integer.width != IntegerWidth::Bits64 {
         to_float(code, operand.format, wide);
-    } else {
+    } else if !vector_extensions::scalar_from_unsigned(
+        code,
+        RESULT_VECTOR,
+        operand.format,
+        true,
+        Rax,
+        target,
+    ) {
         // High unsigned values do not fit CVTSI's signed input. Retaining a
         // sticky low bit before halving preserves all four rounding modes.
         let mut asm = code.asm();
@@ -237,8 +279,9 @@ pub(in crate::x86_64) fn from_integer(
     code: &mut Code,
     operand: &IntegerConversion,
     pc: GuestAddress,
+    target: TargetCpu,
 ) {
-    if operand.format == Format::Half {
+    if operand.format == Format::Half && !half_supported(operand, target) {
         // S->H after integer->S can double round; there is no baseline H CVT.
         helper(code, pc);
         return;
@@ -251,24 +294,38 @@ pub(in crate::x86_64) fn from_integer(
         read_vector(code, operand.float, RESULT_VECTOR);
     }
     environment_round(code, Rounding::Fpcr);
-    if shape != Shape::Scalar && operand.format == Format::Single && integer.signed {
+    let signed_single = operand.format == Format::Single && integer.signed;
+    if shape != Shape::Scalar
+        && (signed_single
+            || vector_extensions::packed_conversion_supported(operand.format, integer, target))
+    {
         let IntegerOperand::Simd { register, .. } = operand.integer else {
             unreachable!("vector integer source")
         };
         read_numerical_vector(code, shape, register, RESULT_VECTOR);
-        Host::ConvertPackedDwordToSingle.register(
-            code,
-            RESULT_VECTOR,
-            RESULT_VECTOR,
-            TargetCpu::Baseline,
-        );
+        if signed_single {
+            Host::ConvertPackedDwordToSingle.register(
+                code,
+                RESULT_VECTOR,
+                RESULT_VECTOR,
+                TargetCpu::Baseline,
+            );
+        } else {
+            vector_extensions::packed_from_integer(
+                code,
+                RESULT_VECTOR,
+                operand.format,
+                integer,
+                target,
+            );
+        }
         scale(code, operand, shape, -1);
     } else if shape == Shape::Scalar {
-        convert_integer_lane(code, operand, 0);
+        convert_integer_lane(code, operand, 0, target);
     } else {
         packed(code, Host::Xor, INTEGER_ACCUMULATOR, INTEGER_ACCUMULATOR);
         for lane in 0..shape.lane_count(operand.format) {
-            convert_integer_lane(code, operand, lane);
+            convert_integer_lane(code, operand, lane, target);
             lane_from_vector(code, operand.format == Format::Double, RESULT_VECTOR);
             pack_integer_lane(code, integer.width, lane);
         }
@@ -302,10 +359,44 @@ fn guard_float_source(code: &mut Code, operand: &IntegerConversion) -> usize {
 fn read_float_lane(code: &mut Code, operand: &IntegerConversion, lane: u32) {
     let element =
         guest(vector_offset(operand.float) + lane * (operand.format.bits() / BITS_PER_BYTE));
-    if operand.format == Format::Single {
-        code.asm().movd_to_xmm(RESULT_VECTOR, element);
-    } else {
+    if operand.format == Format::Double {
         Host::MoveQword.emit(code, RESULT_VECTOR, element, TargetCpu::Baseline);
+    } else {
+        code.asm().movd_to_xmm(RESULT_VECTOR, element);
+    }
+}
+
+/// VCVT(T)SH2(U)SI of the low Half lane. Half's largest finite value fits a
+/// dword, so an H integer checks the range of the dword result.
+fn half_to_general(
+    code: &mut Code,
+    integer: IntegerFormat,
+    truncate: bool,
+    failures: &mut Vec<usize>,
+    target: TargetCpu,
+) {
+    let wide = integer.width == IntegerWidth::Bits64;
+    if integer.signed {
+        vector_extensions::half_to_signed(code, Rax, RESULT_VECTOR, wide, truncate);
+    } else {
+        vector_extensions::scalar_to_unsigned(
+            code,
+            Rax,
+            RESULT_VECTOR,
+            Format::Half,
+            wide,
+            truncate,
+            target,
+        );
+    }
+    if integer.width == IntegerWidth::Bits16 {
+        let mut asm = code.asm();
+        asm.mov(Size::Dword, Rdx, Rax);
+        if integer.signed {
+            asm.alu_imm32(Alu::Add, Size::Dword, Rdx, i32::from(i16::MAX) + 1);
+        }
+        asm.shift_imm(ShiftOp::Shr, Size::Dword, Rdx, u16::BITS as u8);
+        failures.push(branch(code, Condition::NotZero));
     }
 }
 
@@ -314,50 +405,59 @@ fn convert_float_lane(
     operand: &IntegerConversion,
     mode: IntegerRounding,
     failures: &mut Vec<usize>,
+    target: TargetCpu,
 ) {
     let integer = operand.integer.format();
     let truncate = mode == IntegerRounding::TowardZero;
-    if integer.signed {
-        from_float(
-            code,
-            operand.format,
-            truncate,
-            integer.width == IntegerWidth::Bits64,
-        );
-    } else if integer.width == IntegerWidth::Bits32 {
-        from_float(code, operand.format, truncate, true);
-        let mut asm = code.asm();
-        asm.mov(Size::Qword, Rdx, Rax);
-        asm.shift_imm(ShiftOp::Shr, Size::Qword, Rdx, u32::BITS as u8);
-        asm.test(Size::Dword, Rdx, Rdx);
-        failures.push(branch(code, Condition::NotZero));
-    } else {
-        float_constant(code, operand.format, UNSIGNED_HIGH_EXPONENT, Shape::Scalar);
-        if operand.format == Format::Single {
-            code.asm().ucomiss(RESULT_VECTOR, Rm::Xmm(TEMPORARY_VECTOR));
+    let wide = integer.width == IntegerWidth::Bits64;
+    if operand.format == Format::Half {
+        half_to_general(code, integer, truncate, failures, target);
+    } else if integer.signed {
+        from_float(code, operand.format, truncate, wide);
+    } else if !vector_extensions::scalar_to_unsigned(
+        code,
+        Rax,
+        RESULT_VECTOR,
+        operand.format,
+        wide,
+        truncate,
+        target,
+    ) {
+        if integer.width == IntegerWidth::Bits32 {
+            from_float(code, operand.format, truncate, true);
+            let mut asm = code.asm();
+            asm.mov(Size::Qword, Rdx, Rax);
+            asm.shift_imm(ShiftOp::Shr, Size::Qword, Rdx, u32::BITS as u8);
+            asm.test(Size::Dword, Rdx, Rdx);
+            failures.push(branch(code, Condition::NotZero));
         } else {
-            code.asm().ucomisd(RESULT_VECTOR, Rm::Xmm(TEMPORARY_VECTOR));
+            float_constant(code, operand.format, UNSIGNED_HIGH_EXPONENT, Shape::Scalar);
+            if operand.format == Format::Single {
+                code.asm().ucomiss(RESULT_VECTOR, Rm::Xmm(TEMPORARY_VECTOR));
+            } else {
+                code.asm().ucomisd(RESULT_VECTOR, Rm::Xmm(TEMPORARY_VECTOR));
+            }
+            let low = branch(code, Condition::Below);
+            // Subtraction is exact throughout [2^63,2^64) (Sterbenz). Anything
+            // beyond that interval raises native invalid and is retried by the core.
+            emit_opcode(
+                code,
+                operand.format,
+                Shape::Scalar,
+                ArithmeticOpcode::Subtract,
+                TEMPORARY_VECTOR,
+            );
+            from_float(code, operand.format, truncate, true);
+            code.asm().bit_imm(BitTest::Bts, Size::Qword, Rax, SIGN_BIT);
+            let done = jump(code);
+            let low_start = code.len();
+            resolve(code, low, low_start);
+            from_float(code, operand.format, truncate, true);
+            code.asm().bit_imm(BitTest::Bt, Size::Qword, Rax, SIGN_BIT);
+            failures.push(branch(code, Condition::Below));
+            let end = code.len();
+            resolve(code, done, end);
         }
-        let low = branch(code, Condition::Below);
-        // Subtraction is exact throughout [2^63,2^64) (Sterbenz). Anything
-        // beyond that interval raises native invalid and is retried by the core.
-        emit_opcode(
-            code,
-            operand.format,
-            Shape::Scalar,
-            ArithmeticOpcode::Subtract,
-            TEMPORARY_VECTOR,
-        );
-        from_float(code, operand.format, truncate, true);
-        code.asm().bit_imm(BitTest::Bts, Size::Qword, Rax, SIGN_BIT);
-        let done = jump(code);
-        let low_start = code.len();
-        resolve(code, low, low_start);
-        from_float(code, operand.format, truncate, true);
-        code.asm().bit_imm(BitTest::Bt, Size::Qword, Rax, SIGN_BIT);
-        failures.push(branch(code, Condition::Below));
-        let end = code.len();
-        resolve(code, done, end);
     }
 }
 
@@ -376,19 +476,23 @@ fn finish_integer(code: &mut Code, operand: &IntegerConversion, packed_result: b
                 }
             } else {
                 read_vector(code, register, RESULT_VECTOR);
-                let wide = format.width == IntegerWidth::Bits64;
-                lane_to_vector(code, wide, TEMPORARY_VECTOR);
-                if wide {
-                    Host::MoveScalarDouble
+                if format.width == IntegerWidth::Bits16 {
+                    code.asm().pinsrw(RESULT_VECTOR, Rax, 0);
                 } else {
-                    Host::MoveScalarSingle
+                    let wide = format.width == IntegerWidth::Bits64;
+                    lane_to_vector(code, wide, TEMPORARY_VECTOR);
+                    if wide {
+                        Host::MoveScalarDouble
+                    } else {
+                        Host::MoveScalarSingle
+                    }
+                    .register(
+                        code,
+                        RESULT_VECTOR,
+                        TEMPORARY_VECTOR,
+                        TargetCpu::Baseline,
+                    );
                 }
-                .register(
-                    code,
-                    RESULT_VECTOR,
-                    TEMPORARY_VECTOR,
-                    TargetCpu::Baseline,
-                );
                 test_control(code, FPCR_NEP);
                 let merge = branch(code, Condition::NotZero);
                 clear_scalar(code, operand.format, RESULT_VECTOR);
@@ -405,8 +509,11 @@ pub(in crate::x86_64) fn to_integer(
     operand: &IntegerConversion,
     mode: IntegerRounding,
     pc: GuestAddress,
+    target: TargetCpu,
 ) {
-    if operand.format == Format::Half || mode == IntegerRounding::NearestAway {
+    if operand.format == Format::Half && !half_supported(operand, target)
+        || mode == IntegerRounding::NearestAway
+    {
         // SSE2 has no ties-away control. Adding 0.5 before truncation double
         // rounds near half ties; keep the exact integer-core route instead.
         helper(code, pc);
@@ -414,8 +521,10 @@ pub(in crate::x86_64) fn to_integer(
     }
     let shape = operand.integer.shape();
     let integer = operand.integer.format();
-    let packed_result =
-        shape != Shape::Scalar && operand.format == Format::Single && integer.signed;
+    let signed_single = operand.format == Format::Single && integer.signed;
+    let packed_result = shape != Shape::Scalar
+        && (signed_single
+            || vector_extensions::packed_conversion_supported(operand.format, integer, target));
     let mut helper_patches = Vec::new();
     test_control(code, FPCR_EXCEPTION_ENABLE_MASK);
     helper_patches.push(branch(code, Condition::NotZero));
@@ -424,7 +533,16 @@ pub(in crate::x86_64) fn to_integer(
     let mut environment_failures = Vec::new();
     if packed_result {
         scale(code, operand, shape, 1);
-        if mode == IntegerRounding::TowardZero {
+        if !signed_single {
+            vector_extensions::packed_to_integer(
+                code,
+                RESULT_VECTOR,
+                operand.format,
+                integer,
+                mode == IntegerRounding::TowardZero,
+                target,
+            );
+        } else if mode == IntegerRounding::TowardZero {
             code.asm().cvttps2dq(RESULT_VECTOR, Rm::Xmm(RESULT_VECTOR));
         } else {
             Host::ConvertPackedSingleToDword.register(
@@ -441,7 +559,7 @@ pub(in crate::x86_64) fn to_integer(
         for lane in 0..shape.lane_count(operand.format) {
             read_float_lane(code, operand, lane);
             scale(code, operand, Shape::Scalar, 1);
-            convert_float_lane(code, operand, mode, &mut environment_failures);
+            convert_float_lane(code, operand, mode, &mut environment_failures, target);
             if shape != Shape::Scalar {
                 pack_integer_lane(code, integer.width, lane);
             }
@@ -474,6 +592,7 @@ pub(in crate::x86_64) fn javascript(
     destination: Register,
     source: u8,
     pc: GuestAddress,
+    target: TargetCpu,
 ) {
     const NZCV_ZERO_SHIFT: u32 = 30;
     const INEXACT_TO_NZCV_SHIFT: u8 = (NZCV_ZERO_SHIFT - INEXACT.trailing_zeros()) as u8;
@@ -492,7 +611,7 @@ pub(in crate::x86_64) fn javascript(
     // A normal input whose truncated value fits in 32 bits gives the JavaScript
     // result directly. Other inputs exit to software completion of FJCVTZS,
     // which handles wrapping, special values and zeros.
-    to_integer(code, &operand, IntegerRounding::TowardZero, pc);
+    to_integer(code, &operand, IntegerRounding::TowardZero, pc, target);
     // commit_inexact leaves only fresh IXC in ECX. Accumulated FPSR.IXC must
     // not clear Z for a later exact input, including a discarded WZR result.
     let mut asm = code.asm();

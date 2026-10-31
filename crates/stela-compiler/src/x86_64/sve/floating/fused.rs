@@ -1,11 +1,12 @@
-//! SVE fused multiply-add: FMA3, or an exact-product SSE2 path.
+//! SVE fused multiply-add: AVX512-FP16 or FMA3, or an exact-product SSE2 path.
+use super::arithmetic::{broadcast_bits, element, prepare_result_range, repeat_half_lane};
 use crate::x86_64::asm::Gpr::{Rax, Rcx};
-use crate::x86_64::asm::{Alu, Code, Cond, Rm, ShiftOp, Size};
+use crate::x86_64::asm::{Alu, Code, Cond, Rm, ShiftOp, Size, vector_extensions};
 use crate::{
     CompileError, GuestAddress, TargetCpu,
     aarch64::{
         floating::{Format, features::NumericalFeatures, fused::FusedOperation},
-        scalable::{BITS_PER_BYTE, ElementSize, VECTOR_CHUNK_BYTES, VectorLength},
+        scalable::{BITS_PER_BYTE, VECTOR_CHUNK_BYTES, VectorLength},
         simd::arithmetic::Shape,
         sve::floating::arithmetic::{Inputs, Kind, Operand, ResultShape, Source},
     },
@@ -18,7 +19,7 @@ use crate::{
         },
         simd::numerical::{
             ArithmeticOpcode, FusedOpcode, emit_fma, emit_opcode_to, prepare_vector_input_range,
-            prepare_vector_result_range, rounding_control, vector_exponent_range,
+            rounding_control, vector_exponent_range,
         },
         sve::floating::classify::guard_active_exception_enables,
     },
@@ -35,7 +36,7 @@ const OUTPUT_SLOT: usize = 0;
 const SINGLE_BROADCAST_STRIDE: u8 = 0x55;
 const DOUBLE_LOW_BROADCAST: u8 = 0x44;
 const DOUBLE_HIGH_BROADCAST: u8 = 0xee;
-const REPEAT_LOW_DWORD: u8 = 0;
+const HALF_LANES_PER_CHUNK: u8 = 8;
 const BENIGN_ADDEND_INCREMENT: u32 = 1;
 const MXCSR_INEXACT: u32 = 1 << 5;
 const MXCSR_OTHER_STATUS: u32 = MXCSR_INEXACT - 1;
@@ -43,27 +44,6 @@ const MXCSR_TO_FPSR_INEXACT_SHIFT: u8 = 1;
 
 fn reject(code: &mut Code, failures: &mut Vec<usize>) {
     failures.push(code.asm().jcc(Cond::Ne).offset());
-}
-
-fn broadcast(code: &mut Code, format: Format, bits: u64, target: TargetCpu) {
-    if format == Format::Single {
-        code.asm().mov_imm32(Rax, bits as u32);
-    } else {
-        code.asm().mov_imm64(Rax, bits);
-    }
-    code.asm()
-        .simd(Host::MoveGprQword, CONSTANT_SCRATCH, Rax, target);
-    if format == Format::Single {
-        code.asm().simd_imm(
-            Host::ShuffleDword,
-            CONSTANT_SCRATCH,
-            Rm::Xmm(CONSTANT_SCRATCH),
-            REPEAT_LOW_DWORD,
-            target,
-        );
-    } else {
-        Host::UnpackLowQword.register(code, CONSTANT_SCRATCH, CONSTANT_SCRATCH, target);
-    }
 }
 
 /// Inactive 2 + 1*1 and every signed variant are exact normal results.
@@ -74,7 +54,7 @@ fn benign_inactive(code: &mut Code, format: Format, input: u8, target: TargetCpu
         0
     };
     let bits = u64::from(format.exponent_bias() + increment) << format.fraction_bits();
-    broadcast(code, format, bits, target);
+    broadcast_bits(code, format, bits, CONSTANT_SCRATCH, target);
     Host::MoveAligned.register(code, MASK_SCRATCH, ACTIVE, target);
     Host::AndNot.register(code, MASK_SCRATCH, CONSTANT_SCRATCH, target);
     Host::And.register(code, input, ACTIVE, target);
@@ -96,6 +76,7 @@ fn load_right(
     load_z_chunk(code, register, chunk, RIGHT, length, target);
     if let Source::Indexed { index, .. } = source {
         let order = match format {
+            Format::Half => return repeat_half_lane(code, RIGHT, index, target),
             Format::Single => index * SINGLE_BROADCAST_STRIDE,
             Format::Double => {
                 if index == 0 {
@@ -104,7 +85,6 @@ fn load_right(
                     DOUBLE_HIGH_BROADCAST
                 }
             }
-            Format::Half => unreachable!("Half uses exact completion"),
         };
         code.asm()
             .simd_imm(Host::ShuffleDword, RIGHT, Rm::Xmm(RIGHT), order, target);
@@ -130,8 +110,9 @@ fn negate_baseline(code: &mut Code, operation: FusedOperation, format: Format, t
     }
 }
 
-/// Emit the fourteen fused forms, natively only for normal single and double
-/// values; software completion handles the rest. RDI/R15 and the guest sources
+/// Emit the fourteen fused forms, natively only for normal values, with Half
+/// on its AVX512-FP16 instructions; software completion handles the rest.
+/// RDI/R15 and the guest sources
 /// survive; RAX/RCX/RDX, flags and XMM0-7 are clobbered. `TargetCpu::Fma`
 /// implies OS-enabled AVX state; the baseline target never emits VEX.
 pub(in crate::x86_64) fn emit(
@@ -142,10 +123,8 @@ pub(in crate::x86_64) fn emit(
     pc: GuestAddress,
     target: TargetCpu,
 ) -> Result<bool, CompileError> {
-    let element = match operand.format {
-        Format::Single => ElementSize::Word,
-        Format::Double => ElementSize::Doubleword,
-        Format::Half => return Ok(false),
+    let Some(element) = element(operand.format, target) else {
+        return Ok(false);
     };
     let (
         Kind::Fused(operation),
@@ -205,7 +184,16 @@ pub(in crate::x86_64) fn emit(
             reject(code, &mut failures);
         }
         numerical::clear_status(code, &frame);
-        if native_fma {
+        if operand.format == Format::Half {
+            vector_extensions::half_writemask(code, HALF_LANES_PER_CHUNK);
+            vector_extensions::half_fused(
+                code,
+                FusedOpcode::from(operation) as u8,
+                LEFT,
+                ADDEND,
+                RIGHT,
+            );
+        } else if native_fma {
             emit_fma(
                 code,
                 operand.format,
@@ -231,7 +219,7 @@ pub(in crate::x86_64) fn emit(
             numerical::capture_status(code, &frame);
             code.asm().test(Size::Dword, Rcx, Rcx);
             reject(code, &mut failures);
-            prepare_vector_result_range(code);
+            prepare_result_range(code, operand.format);
             vector_exponent_range(code, operand.format, Shape::Vector128, LEFT);
             reject(code, &mut failures);
             numerical::clear_status(code, &frame);
@@ -244,7 +232,7 @@ pub(in crate::x86_64) fn emit(
                 ADDEND,
             );
         }
-        prepare_vector_result_range(code);
+        prepare_result_range(code, operand.format);
         vector_exponent_range(code, operand.format, Shape::Vector128, LEFT);
         reject(code, &mut failures);
         numerical::capture_status(code, &frame);

@@ -5,6 +5,7 @@ use crate::aarch64::scalable::{ElementSize, VectorLength};
 use crate::aarch64::sve::integer_comparison::{Operand, Relation, Right};
 use crate::x86_64::asm::BitTest;
 use crate::x86_64::asm::Gpr::{R8, R9, R10, R11, Rax, Rcx, Rdi, Rdx, Rsp};
+use crate::x86_64::asm::vector_extensions::{self, Predicate};
 use crate::x86_64::asm::{Alu, Code, Cond, Mem, Rm, ShiftOp, Size};
 use crate::x86_64::isa::{ShiftOpcode as Shift, SimdOpcode as Host};
 
@@ -108,6 +109,29 @@ fn compare_lanes(
         relation,
         Relation::NotEqual | Relation::GreaterEqual | Relation::LessEqual
     );
+    // AVX-512 compares unsigned lanes without a sign bias. Signed relations
+    // keep one SSE compare, inverted where needed.
+    if unsigned
+        && !equality
+        && vector_extensions::compare(
+            code,
+            size.bytes() as u8,
+            !unsigned,
+            match relation {
+                Relation::Equal => Predicate::Equal,
+                Relation::NotEqual => Predicate::NotEqual,
+                Relation::GreaterEqual => Predicate::GreaterEqual,
+                Relation::Greater => Predicate::Greater,
+                Relation::LessEqual => Predicate::LessEqual,
+                Relation::Less => Predicate::Less,
+            },
+            XMM_LEFT,
+            XMM_RIGHT,
+            target,
+        )
+    {
+        return Ok((XMM_LEFT, false));
+    }
     let (left, right) = if reverse {
         (XMM_RIGHT, XMM_LEFT)
     } else {

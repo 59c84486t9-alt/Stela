@@ -53,19 +53,41 @@ impl<'a> Response<'a> {
         Self::parse_raw(fw, family, packet.raw())
     }
     pub fn parse_raw(fw: &Firmware<'_>, family: Family, raw: &'a [u8]) -> Result<Self, Error> {
-        if fw.command_version(1, 0x1c).map(|v| v.notification_version) != Some(7) {
-            return Err(Error::Version);
-        }
-        if super::rate_format_2(fw, family).is_err() {
-            return Err(Error::RateFormat);
-        }
+        Self::check(fw, family)?;
         if raw.len() < 8
             || (u32::from_le_bytes(raw[..4].try_into().unwrap()) & 0x3fff) as usize + 4 != raw.len()
             || raw[4..6] != [0x1c, 0]
         {
             return Err(Error::Packet);
         }
-        let d = &raw[8..];
+        let sequence = u16::from_le_bytes([raw[6], raw[7]]);
+        Self::parse_body(family, sequence, raw, &raw[8..])
+    }
+    /// The response of a retained notification: `body` without its header.
+    pub fn parse_notification(
+        fw: &Firmware<'_>,
+        family: Family,
+        sequence: u16,
+        body: &'a [u8],
+    ) -> Result<Self, Error> {
+        Self::check(fw, family)?;
+        Self::parse_body(family, sequence, body, body)
+    }
+    fn check(fw: &Firmware<'_>, family: Family) -> Result<(), Error> {
+        if fw.command_version(1, 0x1c).map(|v| v.notification_version) != Some(7) {
+            return Err(Error::Version);
+        }
+        if super::rate_format_2(fw, family).is_err() {
+            return Err(Error::RateFormat);
+        }
+        Ok(())
+    }
+    fn parse_body(
+        family: Family,
+        sequence: u16,
+        raw: &'a [u8],
+        d: &'a [u8],
+    ) -> Result<Self, Error> {
         let count = *d.first().ok_or(Error::Length)?;
         if count != 1 {
             return Err(Error::FrameCount(count));
@@ -87,7 +109,7 @@ impl<'a> Response<'a> {
             }) as u16;
         Ok(Self {
             raw,
-            sequence: u16::from_le_bytes([raw[6], raw[7]]),
+            sequence,
             queue,
             status: h(40),
             aggregate_sequence: h(42),

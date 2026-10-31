@@ -124,7 +124,7 @@ mod tests {
         super::{model::*, tests::controller},
         *,
     };
-    use crate::bus::dma::RegionAllocator;
+    use crate::bus::dma::TestRegion;
     use alloc::collections::BTreeMap;
 
     #[test]
@@ -138,11 +138,7 @@ mod tests {
             ] {
                 let nodes =
                     BTreeMap::from([(0, Node::hub(HIGH_SPEED, 1)), (1, Node::leaf(HIGH_SPEED))]);
-                let mut backing = vec![0u64; 256 * 1024];
-                let start = backing.as_mut_ptr() as u64;
-                // SAFETY: model commands and TDs stay in kept RAM.
-                let mut dma =
-                    unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+                let mut dma = TestRegion::new(256 * 1024 * 8);
                 let (mut c, model) = controller(&mut dma, context, nodes);
                 let mut failures = Vec::new();
                 c.enumerate(&mut dma, &mut failures);

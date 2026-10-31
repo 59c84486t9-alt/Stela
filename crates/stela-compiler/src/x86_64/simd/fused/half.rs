@@ -1,11 +1,12 @@
-//! Exact finite Half FMA, with one integer rounding to the target format.
+//! Exact finite Half FMA, with one integer rounding to the target format, or
+//! one AVX512-FP16 instruction.
 use super::super::super::isa::ShiftOpcode;
 use super::super::numerical::{
     ArithmeticOpcode, Condition, branch, emit_fma, emit_opcode_to, jump,
     prepare_vector_input_range, resolve, test_control, vector_exponent_range,
 };
 use super::super::{Host, commit, half as lanes, packed};
-use crate::x86_64::asm::{Alu, Code, Disp, Gpr, Mem, ShiftOp, Size};
+use crate::x86_64::asm::{Alu, Code, Disp, Gpr, Mem, ShiftOp, Size, vector_extensions};
 use crate::{
     GuestAddress, TargetCpu,
     aarch64::{
@@ -14,7 +15,7 @@ use crate::{
     },
     block::ExitKind,
 };
-use alloc::vec::Vec;
+use alloc::{vec, vec::Vec};
 
 // Three complete original vectors and a zeroed result remain private until all
 // active lanes pass. Only caller-volatile registers are used; RSI is untouched.
@@ -117,23 +118,12 @@ fn arithmetic(code: &mut Code, operand: &Operand, target: TargetCpu) {
     packed(code, Host::MoveAligned, lanes::RESULT, lanes::LEFT);
 }
 
-pub(super) fn emit(code: &mut Code, operand: &Operand, pc: GuestAddress, target: TargetCpu) {
-    debug_assert_eq!(operand.format, Format::Half);
-    let mut helper = Vec::new();
-    let mut rollback = Vec::new();
-    let widening = if operand.shape == Shape::Scalar {
-        // Measured whole scalar recipes favor integer field construction on
-        // dependent inputs; packed lane loops benefit from checked F16C.
-        TargetCpu::Baseline
-    } else {
-        target
-    };
-    if widening.supports(TargetCpu::F16c) || target.supports(TargetCpu::Fma) {
-        code.asm().vzeroupper();
-    }
+/// Read all three vectors; `helper` takes enabled exceptions and any active
+/// input that is not normal. The scalar form keeps the addend for NEP merging.
+fn guarded_inputs(code: &mut Code, operand: &Operand) -> Vec<usize> {
     // FPMulAdd keeps enabled exceptions under either AH setting.
     test_control(code, FPCR_EXCEPTION_ENABLE_MASK);
-    helper.push(branch(code, Condition::NotZero));
+    let mut helper = vec![branch(code, Condition::NotZero)];
     super::read_numerical_vector(code, operand.shape, operand.left, lanes::LEFT);
     super::read_numerical_vector(code, operand.shape, operand.addend, lanes::RESULT);
     super::prepare_right(code, operand); // Indexed Q0 may read Vm's upper qword.
@@ -145,6 +135,44 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, pc: GuestAddress, target:
         vector_exponent_range(code, Format::Half, operand.shape, source);
         helper.push(branch(code, Condition::NotZero));
     }
+    helper
+}
+
+/// One AVX512-FP16 instruction, whose single rounding needs no exponent span
+/// bound.
+fn emit_native(code: &mut Code, operand: &Operand, pc: GuestAddress) {
+    let mut helper = guarded_inputs(code, operand);
+    lanes::run_native(code, operand.shape, &mut helper, |code| {
+        vector_extensions::half_fused(
+            code,
+            super::super::numerical::FusedOpcode::from(operand.operation) as u8,
+            lanes::LEFT,
+            lanes::RESULT,
+            lanes::RIGHT,
+        );
+    });
+    let merge = operand.shape == Shape::Scalar;
+    lanes::finish_native(code, operand.destination, merge, helper, pc);
+}
+
+pub(super) fn emit(code: &mut Code, operand: &Operand, pc: GuestAddress, target: TargetCpu) {
+    debug_assert_eq!(operand.format, Format::Half);
+    if vector_extensions::half_supported(target) {
+        emit_native(code, operand, pc);
+        return;
+    }
+    let mut rollback = Vec::new();
+    let widening = if operand.shape == Shape::Scalar {
+        // Measured whole scalar recipes favor integer field construction on
+        // dependent inputs; packed lane loops benefit from checked F16C.
+        TargetCpu::Baseline
+    } else {
+        target
+    };
+    if widening.supports(TargetCpu::F16c) || target.supports(TargetCpu::Fma) {
+        code.asm().vzeroupper();
+    }
+    let helper = guarded_inputs(code, operand);
     let baseline = TargetCpu::Baseline;
     code.asm()
         .alu_imm8(Alu::Sub, Size::Qword, Rsp, FRAME_BYTES as i8);

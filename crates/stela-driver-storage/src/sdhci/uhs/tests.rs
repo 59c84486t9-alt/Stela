@@ -1,7 +1,6 @@
 //! Card/controller models exercise UHS initialization and block I/O.
 use super::*;
-use crate::{bus::dma::RegionAllocator, sdhci::model::*};
-use alloc::vec;
+use crate::{bus::dma::TestRegion, sdhci::model::*};
 
 fn host(
     dma: &mut dyn DmaAllocator,
@@ -49,10 +48,7 @@ fn native_sdr12_25_50_104_switch_voltage_and_complete_pio_adma_io() {
         (7, CAP_SDR104, Timing::Sdr50, 52_000_000, false),
     ] {
         for pio in [false, true] {
-            let mut backing = vec![0u64; 128 * 1024];
-            let start = backing.as_mut_ptr() as u64;
-            // SAFETY: backing outlives the host, card and all DMA effects.
-            let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+            let mut dma = TestRegion::new(128 * 1024 * 8);
             let (mut host, chip) = host(&mut dma, functions, caps, pio);
             let mut card = host.poll().unwrap().unwrap();
             assert_eq!(card.info().signal_voltage, SignalVoltage::V1_8);
@@ -94,10 +90,7 @@ fn native_voltage_pin_clock_and_enable_failures_power_off_before_fresh_identify(
         VoltageFault::DatLowAfter,
         VoltageFault::OneDatLowAfter,
     ] {
-        let mut backing = vec![0u64; 128 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: every model allocation remains live through recovery and fresh I/O.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(128 * 1024 * 8);
         let (mut host, chip) = host(&mut dma, 15, CAP_SDR104, false);
         chip.borrow_mut().voltage_fault = Some(fault);
         let primary = host.poll().err().unwrap();
@@ -121,10 +114,7 @@ fn native_voltage_pin_clock_and_enable_failures_power_off_before_fresh_identify(
 
 #[test]
 fn uhs_failed_poweroff_quarantines_owner() {
-    let mut backing = vec![0u64; 128 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: quarantined ownership keeps backing through every refused operation.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(128 * 1024 * 8);
     let (mut host, chip) = host(&mut dma, 15, CAP_SDR104, false);
     chip.borrow_mut().voltage_fault = Some(VoltageFault::Enable);
     chip.borrow_mut().power_off_stuck = true;
@@ -144,10 +134,7 @@ fn uhs_failed_poweroff_quarantines_owner() {
 #[test]
 fn native_tuning_needs_real_ready_completion_and_hardware_selected_clock() {
     for fault in 0..6 {
-        let mut backing = vec![0u64; 128 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: backing remains owned even on command/removal/reset uncertainty.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(128 * 1024 * 8);
         let (mut host, chip) = host(&mut dma, 15, CAP_SDR104, false);
         match fault {
             0 => chip.borrow_mut().tuning_no_clock = true,
@@ -172,10 +159,7 @@ fn native_tuning_needs_real_ready_completion_and_hardware_selected_clock() {
 
 #[test]
 fn native_cmd11_lost_response_after_electrical_effect_still_removes_card_power() {
-    let mut backing = vec![0u64; 128 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: the failed command keeps its original allocations through cleanup.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(128 * 1024 * 8);
     let (mut host, chip) = host(&mut dma, 15, CAP_SDR104, false);
     chip.borrow_mut().silence_voltage_response = true;
     assert_eq!(host.poll().err(), Some(BlockError::Timeout));
@@ -188,10 +172,7 @@ fn native_cmd11_lost_response_after_electrical_effect_still_removes_card_power()
 
 #[test]
 fn native_retuning_precedes_live_io_and_failed_retuning_permanently_fences_aliases() {
-    let mut backing = vec![0u64; 128 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: model/allocations outlive both old card aliases.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(128 * 1024 * 8);
     let (mut host, chip) = host(&mut dma, 15, CAP_SDR104 | 1 << 8, false);
     let mut card = host.poll().unwrap().unwrap();
     let mut old = card.clone();
@@ -230,10 +211,7 @@ fn native_retuning_precedes_live_io_and_failed_retuning_permanently_fences_alias
 
 #[test]
 fn native_unsupported_retune_modes_and_vendor_profiles_do_not_negotiate_unsupported_timing() {
-    let mut backing = vec![0u64; 128 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: one live model owns this region throughout negotiation.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(128 * 1024 * 8);
     let (mut host, chip) = host(&mut dma, 15, CAP_SDR104 | CAP_SDR50_TUNING | 1 << 14, false);
     let card = host.poll().unwrap().unwrap();
     assert_eq!(card.info().timing, Timing::Sdr25);
@@ -254,10 +232,7 @@ fn native_unsupported_retune_modes_and_vendor_profiles_do_not_negotiate_unsuppor
 
 #[test]
 fn native_uhs_timing_write_without_acknowledgment_never_publishes_a_card() {
-    let mut backing = vec![0u64; 128 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: native command/data allocations remain live after failed setup.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(128 * 1024 * 8);
     let (mut host, chip) = host(&mut dma, 15, CAP_SDR104, false);
     chip.borrow_mut().uhs_timing_stuck = true;
     let primary = host.poll().err().unwrap();
@@ -282,11 +257,7 @@ fn unchanged_linux_uhs_signaling_and_tuning_decisions_match_native_operations() 
             .split_whitespace()
             .map(|word| word.parse().unwrap())
             .collect();
-        let mut backing = vec![0u64; 128 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: the per-record controller and card retire before this live
-        // allocation is dropped, including all source-modeled failure records.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(128 * 1024 * 8);
         let (mut host, chip) = host(&mut dma, 15, CAP_SDR104, false);
         match kind {
             "T" => {

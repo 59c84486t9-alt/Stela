@@ -110,7 +110,7 @@ fn ep_failed_notification_and_fp_missing_or_failed_mac_firmware_never_publish_dm
 
 #[test]
 fn ep_fp_mac_masks_and_ring_publication_follow_complete_backend_setup() {
-    use crate::bus::dma::RegionAllocator;
+    use crate::bus::dma::TestRegion;
     for xid in [0x502, 0x54b] {
         let rev = revision::detect(xid << 20).unwrap();
         let time = Time::default();
@@ -151,10 +151,7 @@ fn ep_fp_mac_masks_and_ring_publication_follow_complete_backend_setup() {
                     .any(|(r, _, _)| matches!(*r, TX_HIGH | TX_LOW | RX_HIGH | RX_LOW))
             );
         }
-        let mut backing = vec![0u64; 200_000];
-        let base = backing.as_mut_ptr() as u64;
-        // SAFETY: backing outlives descriptor access and has no other accesses.
-        let mut dma = unsafe { RegionAllocator::new(base..base + (backing.len() * 8) as u64) };
+        let mut dma = TestRegion::new(200_000 * 8);
         let mut rx = Ring::new(&mut dma, true).unwrap();
         let mut tx = Ring::new(&mut dma, true).unwrap();
         rx.initialize(true);

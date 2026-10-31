@@ -514,15 +514,12 @@ const DID_NOT_STOP: BlockError = BlockError::Unsupported("xHCI endpoint did not 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bus::dma::RegionAllocator;
+    use crate::bus::dma::TestRegion;
     use crate::usb::xhci::model::*;
 
     #[test]
     fn operations_never_wait_and_ep0_takes_one_control_transfer_at_a_time() {
-        let mut backing = vec![0u64; 64 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: exclusive test backing outlives all DMA/controller use.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(64 * 1024 * 8);
         let (mut controller, model) = cancellation_controller(&mut dma);
         let id = controller.test_device_id(1).unwrap();
         model.borrow_mut().silence_transfer = Some(1);

@@ -292,6 +292,9 @@ pub(crate) enum Map {
     M0f = 1,
     M0f38 = 2,
     M0f3a = 3,
+    /// EVEX only: AVX512-FP16's maps 5 and 6.
+    M5 = 5,
+    M6 = 6,
 }
 
 /// VEX implied mandatory prefixes (VEX.pp).

@@ -203,7 +203,13 @@ fn check(mapping: &Mapping, operand: &Operand, mut state: GuestState, caller: u3
 
 #[test]
 fn signed_zero_and_normal_selection_match_full_helper_state() {
-    for target in [TargetCpu::Baseline, TargetCpu::detect()] {
+    let host = stela_compiler::x86_64::modeled::host();
+    let targets = [
+        TargetCpu::Baseline,
+        TargetCpu::detect(),
+        TargetCpu::X86_64_V4.with_avx10_2(),
+    ];
+    for target in targets.into_iter().filter(|target| host.supports(*target)) {
         for base in forms() {
             for (d, n, m) in [
                 (0, 1, 2),

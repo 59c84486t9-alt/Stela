@@ -339,10 +339,7 @@ impl Transport for GeneralDevice {
     }
 }
 fn run(c: Vec<u8>, f: impl FnOnce(&mut AudioDevice<GeneralDevice>)) {
-    let mut memory = vec![0u64; 256 * 1024];
-    let base = memory.as_mut_ptr() as u64;
-    // SAFETY: exclusive model RAM outlives all kept DMA and device owners.
-    let mut dma = unsafe { RegionAllocator::new(base..base + memory.len() as u64 * 8) };
+    let mut dma = TestRegion::new(256 * 1024 * 8);
     let mut transport = GeneralDevice::new();
     let binding = plan(&c).unwrap().discover(&mut transport).unwrap();
     let mut a = AudioDevice::new(transport, binding, &mut dma).unwrap();

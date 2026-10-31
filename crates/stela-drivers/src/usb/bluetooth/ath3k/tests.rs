@@ -474,11 +474,8 @@ fn successful_upload_with_failed_retirement_keeps_full_historical_evidence() {
 
 #[test]
 fn real_bind_configures_only_raw_output_and_keeps_the_completed_uploader() {
-    use crate::bus::dma::RegionAllocator;
-    let mut backing = vec![0u64; 64 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: backing exclusively owns these DMA pages and outlives every owner.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    use crate::bus::dma::TestRegion;
+    let mut dma = TestRegion::new(64 * 1024 * 8);
     let (controller, hardware) = xhci::model::unconfigured_cancellation_controller(&mut dma);
     let shared = Rc::new(RefCell::new(controller));
     let (_, catalog, _) = model(Kind::Ar3011, 0, false, 0, 4097);

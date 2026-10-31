@@ -18,6 +18,7 @@ use crate::{
         sve::floating::conversion::{Kind, Operand},
     },
     x86_64::{
+        asm::vector_extensions,
         isa::{ShiftOpcode, SimdOpcode as Host},
         scalable::{
             load_z_chunk,
@@ -66,6 +67,8 @@ const LOW_DWORDS_FROM_QWORDS: u8 = 0b10_00_10_00;
 enum Mapping {
     Scalar,
     PackedSignedDword,
+    /// Every S/D and W/X pair but signed W, at every vector length.
+    PackedAvx512,
     PackedSignedHalf,
     F16c,
     UnsignedHalfPack,
@@ -74,6 +77,13 @@ enum Mapping {
 
 impl Mapping {
     fn select(conversion: Conversion, length: VectorLength, target: TargetCpu) -> Self {
+        if vector_extensions::packed_conversion_supported(
+            conversion.float,
+            conversion.integer,
+            target,
+        ) {
+            return Self::PackedAvx512;
+        }
         let short_vector = length.bytes() == VECTOR_CHUNK_BYTES;
         let long_vector = length.bytes() == INTEGER30_LONG_VECTOR_BYTES;
         let f16c = target.supports(TargetCpu::F16c);
@@ -283,21 +293,42 @@ fn scalar_chunk(
                     );
                     pack_integer(code, slot_bytes, target);
                 } else {
-                    if conversion.unsigned_x() {
-                        unsigned64::from_integer(code, conversion.float);
-                    } else {
+                    if !conversion.unsigned_x() {
                         convert_from_integer(code, conversion);
+                    } else if !vector_extensions::scalar_from_unsigned(
+                        code,
+                        SCALAR,
+                        conversion.float,
+                        true,
+                        Rax,
+                        target,
+                    ) {
+                        unsigned64::from_integer(code, conversion.float);
                     }
                     Host::MoveAligned.register(code, PACK, SCALAR, target);
                 }
             }
             Direction::ToInteger => {
-                if conversion.unsigned_x() {
+                if conversion.integer.signed {
+                    truncate_to_integer(code, conversion);
+                    if slot_bytes == QWORD_BYTES && conversion.integer.width == IntegerWidth::Bits32
+                    {
+                        code.asm().movsxd(Rax, Rax);
+                    }
+                } else if vector_extensions::scalar_to_unsigned(
+                    code,
+                    Rax,
+                    SCALAR,
+                    conversion.float,
+                    conversion.unsigned_x(),
+                    true,
+                    target,
+                ) {
+                    // Every unrepresentable result sets IE, which rejects.
+                } else if conversion.unsigned_x() {
                     unsigned64::to_integer(code, conversion.float, failures);
                 } else {
                     truncate_to_integer(code, conversion);
-                }
-                if !conversion.integer.signed && !conversion.unsigned_x() {
                     // CVTT64 admits unsigned W only when high32 is zero.
                     // Negative fractions truncating to zero are valid too.
                     let mut asm = code.asm();
@@ -305,10 +336,6 @@ fn scalar_chunk(
                     asm.shift_imm(ShiftOp::Shr, Size::Qword, Rdx, u32::BITS as u8);
                     asm.test(Size::Dword, Rdx, Rdx);
                     reject(code, failures);
-                } else if slot_bytes == QWORD_BYTES
-                    && conversion.integer.width == IntegerWidth::Bits32
-                {
-                    code.asm().movsxd(Rax, Rax);
                 }
                 pack_integer(code, slot_bytes, target);
             }
@@ -534,6 +561,57 @@ fn packed_chunk(code: &mut Code, conversion: Conversion, target: TargetCpu) {
     }
 }
 
+/// Convert the masked SOURCE chunk into RESULT with one AVX-512 conversion.
+/// A W lane in an X slot is its low dword, and an S lane its low Single:
+/// PSHUFD gathers narrow sources into the low quadword, and PUNPCKLDQ with
+/// zeroed PACK spreads narrow results back with zero upper halves (unsigned
+/// W results zero-extend, as the scalar CVTT64 recipe leaves them).
+fn packed_avx512_chunk(code: &mut Code, conversion: Conversion, slot_bytes: u8, target: TargetCpu) {
+    let spread = |narrow: bool| narrow && slot_bytes == QWORD_BYTES;
+    let (narrow_source, narrow_result) = match conversion.direction {
+        Direction::FromInteger => (
+            spread(conversion.integer.width == IntegerWidth::Bits32),
+            spread(conversion.float == Format::Single),
+        ),
+        Direction::ToInteger => (
+            spread(conversion.float == Format::Single),
+            spread(conversion.integer.width == IntegerWidth::Bits32),
+        ),
+    };
+    Host::MoveAligned.register(code, RESULT, SOURCE, target);
+    if narrow_source {
+        code.asm().simd_imm(
+            Host::ShuffleDword,
+            RESULT,
+            Rm::Xmm(RESULT),
+            LOW_DWORDS_FROM_QWORDS,
+            target,
+        );
+    }
+    let converted = match conversion.direction {
+        Direction::FromInteger => vector_extensions::packed_from_integer(
+            code,
+            RESULT,
+            conversion.float,
+            conversion.integer,
+            target,
+        ),
+        Direction::ToInteger => vector_extensions::packed_to_integer(
+            code,
+            RESULT,
+            conversion.float,
+            conversion.integer,
+            true,
+            target,
+        ),
+    };
+    debug_assert!(converted, "the mapping checked the conversion");
+    if narrow_result {
+        Host::Xor.register(code, PACK, PACK, target);
+        Host::UnpackLowDword.register(code, RESULT, PACK, target);
+    }
+}
+
 /// Caller keeps instruction availability and the streaming entry guard.
 /// Unsupported forms leave `code` unchanged. No guest state is changed
 /// until numerical::finish, including when source aliases destination.
@@ -623,12 +701,13 @@ pub(in crate::x86_64) fn emit(
                     target,
                 );
             }
-            if mapping == Mapping::PackedSignedDword {
-                packed_chunk(code, conversion, target);
-            } else if mapping == Mapping::PackedSignedHalf {
-                packed_signed_half_chunk(code, target);
-            } else {
-                scalar_chunk(code, conversion, slot_bytes, &mut failures, target, mapping);
+            match mapping {
+                Mapping::PackedSignedDword => packed_chunk(code, conversion, target),
+                Mapping::PackedAvx512 => {
+                    packed_avx512_chunk(code, conversion, slot_bytes, target);
+                }
+                Mapping::PackedSignedHalf => packed_signed_half_chunk(code, target),
+                _ => scalar_chunk(code, conversion, slot_bytes, &mut failures, target, mapping),
             }
             if half_reverse && mapping != Mapping::PackedSignedHalf {
                 // Every reverse Half lane destroys XMM6, but SOURCE1/RESULT3

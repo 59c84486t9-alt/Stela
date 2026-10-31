@@ -5,13 +5,7 @@ use super::*;
 #[test]
 fn routed_payload_completion() {
     for speed in [FULL_SPEED, HIGH_SPEED, SUPER_SPEED, SUPER_SPEED_PLUS] {
-        let mut backing = vec![0u64; 256 * 1024];
-        let base = backing.as_mut_ptr() as u64;
-        let mut dma =
-        // SAFETY: The routed-transfer fixture owns this unresized vector throughout
-        // controller, descriptor and payload accesses. The independent
-        // device peer runs synchronously on the current thread.
-        unsafe { RegionAllocator::new(base..base + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(256 * 1024 * 8);
         let parent_speed = if speed == FULL_SPEED {
             HIGH_SPEED
         } else {
@@ -82,14 +76,7 @@ fn queued_dma_contexts_and_schedules() {
     for speed in [FULL_SPEED, HIGH_SPEED] {
         for context_bytes in [32, 64] {
             for cfc in [false, true] {
-                let mut backing = vec![0u64; 128 * 1024];
-                let start = backing.as_mut_ptr() as u64;
-                let mut dma =
-                    // SAFETY: This speed/context fixture keeps the full stable
-                    // vector for every queued ring and payload. All addresses are
-                    // identity-mapped CPU pointers and no hardware user can outlive
-                    // the scope.
-                    unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+                let mut dma = TestRegion::new(128 * 1024 * 8);
                 let (mut controller, model) = controller(&mut dma, speed, context_bytes, cfc);
                 let endpoints = [endpoint(1, speed), endpoint(0x82, speed)];
                 controller.configure(1, &endpoints, None, &mut dma).unwrap();

@@ -224,6 +224,8 @@ struct Request {
     wifi_passphrase_file: Option<PathBuf>,
     wifi_country: Option<String>,
     no_wifi: bool,
+    usb4_approve: Vec<String>,
+    no_usb4_approve: bool,
     /// `--wifi`'s passphrase, once read or typed.
     wifi_passphrase: Option<String>,
     ipv4: Option<stela_boot_core::options::StaticIpv4>,

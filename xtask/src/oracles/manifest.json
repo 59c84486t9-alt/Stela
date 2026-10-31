@@ -304,16 +304,6 @@
   },
   {
     "package": "stela-driver-base",
-    "test": "unchanged_linux_adapter_controls_and_nfc_register_effects_match",
-    "source": "crates/stela-driver-base/src/bus/thunderbolt/adapter/tests.rs",
-    "kind": "oracle",
-    "inputs": [
-      "STELA_THUNDERBOLT_ADAPTER_ORACLE"
-    ],
-    "reason": "requires hash-pinned unchanged Linux adapter control trace"
-  },
-  {
-    "package": "stela-driver-base",
     "test": "unchanged_linux_config_frames_match_rust_wire_bytes",
     "source": "crates/stela-driver-base/src/bus/thunderbolt/config/tests.rs",
     "kind": "oracle",
@@ -334,36 +324,6 @@
   },
   {
     "package": "stela-driver-base",
-    "test": "unchanged_linux_dp_complete_write_transcript_matches_native_dma",
-    "source": "crates/stela-driver-base/src/bus/thunderbolt/displayport/tests.rs",
-    "kind": "oracle",
-    "inputs": [
-      "STELA_THUNDERBOLT_DP_ORACLE"
-    ],
-    "reason": "requires pinned unchanged Linux DP activation/stop transcript"
-  },
-  {
-    "package": "stela-driver-base",
-    "test": "unchanged_linux_drom_acquisition_crc_and_port_metadata_match_native_frames",
-    "source": "crates/stela-driver-base/src/bus/thunderbolt/drom/tests.rs",
-    "kind": "oracle",
-    "inputs": [
-      "STELA_THUNDERBOLT_DROM_ORACLE"
-    ],
-    "reason": "requires pinned unchanged Linux DROM acquisition/CRC/parser transcript"
-  },
-  {
-    "package": "stela-driver-base",
-    "test": "unchanged_linux_hop_deactivation_register_effects_match",
-    "source": "crates/stela-driver-base/src/bus/thunderbolt/hop.rs",
-    "kind": "oracle",
-    "inputs": [
-      "STELA_THUNDERBOLT_HOP_ORACLE"
-    ],
-    "reason": "requires hash-pinned unchanged Linux hop-deactivation trace"
-  },
-  {
-    "package": "stela-driver-base",
     "test": "unchanged_linux_icm_driver_ready_and_command_wire_agree",
     "source": "crates/stela-driver-base/src/bus/thunderbolt/icm/tests.rs",
     "kind": "oracle",
@@ -371,106 +331,6 @@
       "STELA_THUNDERBOLT_ICM_ORACLE"
     ],
     "reason": "requires hash-pinned unchanged Linux ICM parsing/TX trace"
-  },
-  {
-    "package": "stela-driver-base",
-    "test": "unchanged_linux_link_bonding_credit_and_two_ended_write_trace_matches_dma",
-    "source": "crates/stela-driver-base/src/bus/thunderbolt/link/tests.rs",
-    "kind": "oracle",
-    "inputs": [
-      "STELA_THUNDERBOLT_LINK_ORACLE"
-    ],
-    "reason": "requires hash-pinned unchanged Gen2/3 Linux link trace"
-  },
-  {
-    "package": "stela-driver-base",
-    "test": "unchanged_linux_router_operation_bytes_and_source_statuses_match_native_dma",
-    "source": "crates/stela-driver-base/src/bus/thunderbolt/operations/tests.rs",
-    "kind": "oracle",
-    "inputs": [
-      "STELA_THUNDERBOLT_OPERATIONS_ORACLE"
-    ],
-    "reason": "requires pinned unchanged Linux native router operation transcript"
-  },
-  {
-    "package": "stela-driver-base",
-    "test": "unchanged_linux_path_usb3_complete_write_trace_matches_dma",
-    "source": "crates/stela-driver-base/src/bus/thunderbolt/path/tests.rs",
-    "kind": "oracle",
-    "inputs": [
-      "STELA_THUNDERBOLT_PATH_ORACLE"
-    ],
-    "reason": "requires unchanged Linux two-hop path oracle trace"
-  },
-  {
-    "package": "stela-driver-base",
-    "test": "unchanged_linux_pcie_complete_write_transcript_matches_native_dma",
-    "source": "crates/stela-driver-base/src/bus/thunderbolt/pcie/tests.rs",
-    "kind": "oracle",
-    "inputs": [
-      "STELA_THUNDERBOLT_PCIE_ORACLE"
-    ],
-    "reason": "requires pinned unchanged Linux PCIe activation/stop transcript"
-  },
-  {
-    "package": "stela-driver-base",
-    "test": "unchanged_linux_usb4_power_register_effects_match",
-    "source": "crates/stela-driver-base/src/bus/thunderbolt/power/tests.rs",
-    "kind": "oracle",
-    "inputs": [
-      "STELA_THUNDERBOLT_POWER_ORACLE"
-    ],
-    "reason": "requires pinned unchanged Linux USB4 wake/sleep trace"
-  },
-  {
-    "package": "stela-driver-base",
-    "test": "unchanged_linux_router_full_write_trace_matches_dma_engine",
-    "source": "crates/stela-driver-base/src/bus/thunderbolt/router/tests.rs",
-    "kind": "oracle",
-    "inputs": [
-      "STELA_THUNDERBOLT_ROUTER_ORACLE"
-    ],
-    "reason": "requires hash-pinned unchanged full Linux USB4 router trace"
-  },
-  {
-    "package": "stela-driver-base",
-    "test": "unchanged_linux_router_adapter_bitfields_and_helpers_match",
-    "source": "crates/stela-driver-base/src/bus/thunderbolt/topology/tests.rs",
-    "kind": "oracle",
-    "inputs": [
-      "STELA_THUNDERBOLT_TOPOLOGY_ORACLE"
-    ],
-    "reason": "requires hash-pinned unchanged Linux topology helper trace"
-  },
-  {
-    "package": "stela-driver-base",
-    "test": "unchanged_linux_usb3_bandwidth_complete_writes_and_rates_match_dma",
-    "source": "crates/stela-driver-base/src/bus/thunderbolt/usb3/tests.rs",
-    "kind": "oracle",
-    "inputs": [
-      "STELA_USB3_BANDWIDTH_ORACLE"
-    ],
-    "reason": "requires unchanged Linux root USB3 bandwidth oracle"
-  },
-  {
-    "package": "stela-driver-base",
-    "test": "unchanged_linux_usb3_tunnel_full_bandwidth_paths_and_endpoint_writes_match_dma",
-    "source": "crates/stela-driver-base/src/bus/thunderbolt/usb3/tests.rs",
-    "kind": "oracle",
-    "inputs": [
-      "STELA_USB3_TUNNEL_ORACLE"
-    ],
-    "reason": "requires unchanged Linux full root USB3 activation oracle"
-  },
-  {
-    "package": "stela-driver-base",
-    "test": "unchanged_linux_usb3_complete_activation_optional_release_and_stop_match_dma",
-    "source": "crates/stela-driver-base/src/bus/thunderbolt/usb3/tests.rs",
-    "kind": "oracle",
-    "inputs": [
-      "STELA_USB3_STOP_ORACLE"
-    ],
-    "reason": "requires unchanged Linux complete USB3 stop/release oracle"
   },
   {
     "package": "stela-driver-gpu",

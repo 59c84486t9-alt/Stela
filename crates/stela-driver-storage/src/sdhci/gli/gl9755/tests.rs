@@ -1,6 +1,6 @@
 //! GL9755 native kept-configuration and dual-rail regressions.
 use super::*;
-use crate::{bus::dma::RegionAllocator, sdhci::model::*};
+use crate::{bus::dma::TestRegion, sdhci::model::*};
 use alloc::vec;
 
 struct State {
@@ -317,10 +317,7 @@ fn host(
 
 #[test]
 fn native_gl9755_original_pci_phy_power_cycle_and_two_rails_precede_real_pio() {
-    let mut backing = vec![0u64; 128 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: model backing remains alive for original descriptors and card aliases.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(128 * 1024 * 8);
     let (mut host, card, state) = host(&mut dma, false, false);
     let c = Config(state.clone());
     assert_eq!(c.read32(0x10), 0x9000_0004);
@@ -355,10 +352,7 @@ fn native_gl9755_original_pci_phy_power_cycle_and_two_rails_precede_real_pio() {
 
 #[test]
 fn native_gl9755_uhs_standard_tuning_pci_pll_and_v4_dma_transfer_payloads() {
-    let mut backing = vec![0u64; 128 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: backing is the model DMA address space throughout I/O.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(128 * 1024 * 8);
     let (mut host, card, state) = host(&mut dma, true, true);
     let mut disk = host.poll().unwrap().unwrap();
     assert_eq!(host.inner.borrow().sd_timing, Timing::Sdr104);
@@ -384,10 +378,7 @@ fn native_gl9755_uhs_standard_tuning_pci_pll_and_v4_dma_transfer_payloads() {
 #[test]
 fn native_gl9755_overcurrent_removes_both_rails_preserves_cleanup_and_fences_aliases() {
     for failed_cleanup in [false, true] {
-        let mut backing = vec![0u64; 128 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: original allocations remain held after permanent power quarantine.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(128 * 1024 * 8);
         let (mut host, card, state) = host(&mut dma, false, false);
         let mut disk = host.poll().unwrap().unwrap();
         let mut alias = disk.clone();
@@ -417,10 +408,7 @@ fn native_gl9755_overcurrent_removes_both_rails_preserves_cleanup_and_fences_ali
 #[test]
 fn native_gl9755_refused_pci_pll_and_vdd2_ack_never_publish_card_commands() {
     for power in [false, true] {
-        let mut backing = vec![0u64; 128 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: no refused startup can publish aliases or release model backing early.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(128 * 1024 * 8);
         let (mut p, card, state) = port();
         initialize_port(&mut p).unwrap();
         if power {
@@ -470,10 +458,7 @@ fn native_gl9755_runtime_original_requester_epoch_and_active_uhs2_refuse_before_
 #[test]
 fn native_gl9755_single_ocp_latch_at_w1c_boundary_cannot_be_lost_before_command() {
     for tuning in [false, true] {
-        let mut backing = vec![0u64; 128 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: model DMA backing remains held after electrical quarantine.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(128 * 1024 * 8);
         let (mut host, card, state) = host(&mut dma, tuning, false);
         let mut disk = host.poll().unwrap().unwrap();
         let commands = card.borrow().commands.len();
@@ -509,10 +494,7 @@ fn native_gl9755_single_ocp_latch_at_w1c_boundary_cannot_be_lost_before_command(
 #[test]
 fn gl9755_overcurrent_keeps_first_failure() {
     for tuning in [false, true] {
-        let mut backing = vec![0u64; 128 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: all original allocations remain live after the failed electrical fence.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(128 * 1024 * 8);
         let (mut host, card, state) = host(&mut dma, true, false);
         state.borrow_mut().ocp_on_signal = !tuning;
         state.borrow_mut().ocp_on_tuning = tuning;
@@ -552,10 +534,7 @@ fn gl9755_overcurrent_keeps_first_failure() {
 #[test]
 fn gl9755_lost_pci_state_fences_without_mmio() {
     for mutation in 0..5 {
-        let mut backing = vec![0u64; 128 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: a lost requester epoch permanently keeps all boot DMA ranges.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(128 * 1024 * 8);
         let (mut host, card, state) = host(&mut dma, false, false);
         let mut disk = host.poll().unwrap().unwrap();
         match mutation {

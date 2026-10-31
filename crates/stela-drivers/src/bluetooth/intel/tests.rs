@@ -1753,10 +1753,7 @@ mod iml_tests {
 #[test]
 fn intel_initializer_uses_xhci_dma_and_reframes_bulk_after_acknowledged_stop() {
     use crate::usb::bluetooth::{FirmwareStatus, Packet, intel};
-    let mut backing = vec![0u64; 128 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: exclusive model DMA stays live through all host endpoints.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(128 * 1024 * 8);
     let (controller, model) = unconfigured_cancellation_controller(&mut dma);
     let shared: Shared = Rc::new(RefCell::new(controller));
     let (mut device, catalog, script) = intel::tests::fixture();

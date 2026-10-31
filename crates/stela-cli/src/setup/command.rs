@@ -5,6 +5,7 @@
 use super::{Action, InstallImage, NextBoot, Request, builds, ecid::Ecid, wifi};
 use clap::{Args, Subcommand, builder::TypedValueParser};
 use std::path::PathBuf;
+use stela_boot_core::options::Uuid;
 
 /// `stela setup`.
 #[derive(Args)]
@@ -177,6 +178,13 @@ impl Wifi {
     }
 }
 
+/// A USB4 device's UUID, in the spelling the boot log prints.
+fn usb4_device(text: &str) -> Result<String, String> {
+    Uuid::parse(text)
+        .map(|uuid| uuid.to_string())
+        .ok_or_else(|| "a USB4 device is named by its UUID, as the boot log prints it".into())
+}
+
 /// The addresses `stela.efi`'s network uses instead of DHCP's.
 #[derive(Args)]
 struct Addressing {
@@ -238,6 +246,12 @@ struct Create {
     image: Image,
     #[command(flatten)]
     wifi: Wifi,
+    /// Give this USB4 device a PCIe tunnel on PCs without an IOMMU that
+    /// confines it, where it can reach all of memory. Repeat for more
+    /// devices. The boot log prints each refused device's UUID, which a
+    /// device can claim falsely.
+    #[arg(long, value_name = "UUID", value_parser = usb4_device)]
+    usb4_approve: Vec<String>,
     #[command(flatten)]
     addressing: Addressing,
     /// Where an install reads the macOS restore image: `offline` copies the
@@ -359,6 +373,7 @@ impl Create {
             ..Request::default()
         };
         self.image.apply(&mut request);
+        request.usb4_approve = self.usb4_approve;
         self.wifi.apply(&mut request);
         self.addressing.apply(&mut request);
         request
@@ -594,6 +609,15 @@ struct Configure {
     no_profile: bool,
     #[command(flatten)]
     wifi: Wifi,
+    /// Give this USB4 device a PCIe tunnel on PCs without an IOMMU that
+    /// confines it, where it can reach all of memory. Repeat for more
+    /// devices; the list replaces the last one. The boot log prints each
+    /// refused device's UUID, which a device can claim falsely.
+    #[arg(long, value_name = "UUID", value_parser = usb4_device)]
+    usb4_approve: Vec<String>,
+    /// Approve no USB4 device.
+    #[arg(long, conflicts_with = "usb4_approve")]
+    no_usb4_approve: bool,
     /// Join no Wi-Fi network, and remove the key file.
     #[arg(long, conflicts_with = "wifi")]
     no_wifi: bool,
@@ -621,6 +645,8 @@ impl Configure {
             profile: self.profile,
             no_profile: self.no_profile,
             no_wifi: self.no_wifi,
+            usb4_approve: self.usb4_approve,
+            no_usb4_approve: self.no_usb4_approve,
             automatic_ipv4: self.automatic_ipv4,
             automatic_dns: self.automatic_dns,
             dry_run: self.dry_run,

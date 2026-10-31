@@ -341,3 +341,105 @@ fn avx2_register_shifts_match_signed_byte_counts_with_aliases() {
         }
     }
 }
+
+#[test]
+fn gfni_byte_and_avx512_qword_shifts_match_the_sse2_recipes() {
+    use crate::x86_64::asm::vector_extensions::execution::Native;
+    use crate::{GuestAddress, GuestState, context::ExecutionContext};
+    use alloc::vec::Vec;
+    let candidate = TargetCpu::X86_64_V4.with_gfni();
+    if !TargetCpu::detect().supports(candidate) {
+        return;
+    }
+    // Immediate shift opcodes (U clear): SSHR, SSRA, SRSHR, SRSRA, SHL,
+    // SQSHL; with U set USHR, USRA, URSHR, URSRA, SLI, SRI, SQSHLU, UQSHL.
+    let right = [0x0400u32, 0x1400, 0x2400, 0x3400];
+    let left = [0x5400u32, 0x7400];
+    let unsigned_left = [0x5400u32, 0x6400, 0x7400];
+    let mut words = Vec::new();
+    for (size_bits, right_base, left_base) in [(8u32, 16u32, 8u32), (64, 128, 64)] {
+        for amount in [1u32, 3, size_bits - 1, size_bits] {
+            let shift_right = (right_base - amount) << 16;
+            for q in [0u32, 1] {
+                if size_bits == 64 && q == 0 {
+                    continue;
+                }
+                for opcode in right {
+                    words.push(0x0f00_0000 | q << 30 | shift_right | opcode);
+                    words.push(0x2f00_0000 | q << 30 | shift_right | opcode);
+                }
+                words.push(0x2f00_0000 | q << 30 | shift_right | 0x4400);
+                if amount < size_bits {
+                    let shift_left = (left_base + amount) << 16;
+                    for opcode in left {
+                        words.push(0x0f00_0000 | q << 30 | shift_left | opcode);
+                    }
+                    for opcode in unsigned_left {
+                        words.push(0x2f00_0000 | q << 30 | shift_left | opcode);
+                    }
+                }
+            }
+            if size_bits == 64 {
+                // Scalar D forms.
+                for opcode in right {
+                    words.push(0x5f00_0000 | shift_right | opcode);
+                    words.push(0x7f00_0000 | shift_right | opcode);
+                }
+            }
+        }
+    }
+    // Byte halving: SHADD, UHADD, SRHADD, URHADD, SHSUB, UHSUB (16B).
+    for word in [
+        0x4e20_0400u32,
+        0x6e20_0400,
+        0x4e20_1400,
+        0x6e20_1400,
+        0x4e20_2400,
+        0x6e20_2400,
+    ] {
+        words.push(word | 2 << 16);
+    }
+    let mut changed = 0;
+    let mut random = 0x3c6e_f372_fe94_f82b_u64;
+    for mut word in words {
+        word |= 1 << 5 | 3;
+        let source: Vec<u8> = [word, 0xd65f03c0]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        let compile = |target| {
+            crate::testing::leaf_for(&source, GuestAddress(0x1000), target)
+                .unwrap()
+                .x86_64_code
+        };
+        let baseline = compile(TargetCpu::X86_64_V3);
+        let extended = compile(candidate);
+        changed += usize::from(baseline != extended);
+        let [baseline, extended] = [&baseline, &extended].map(|code| Native::new(code));
+        for sample in 0..24 {
+            let mut state = GuestState {
+                fpsr: if sample % 2 == 0 { 0 } else { 1 << 27 },
+                ..GuestState::default()
+            };
+            for vector in &mut state.v {
+                for limb in vector {
+                    random ^= random << 13;
+                    random ^= random >> 7;
+                    random ^= random << 17;
+                    *limb = match sample % 6 {
+                        0 => 0x8080_8080_8080_8080,
+                        1 => 0x7f7f_7f7f_7f7f_7f7f,
+                        2 => 0x8000_0000_0000_0001,
+                        _ => random,
+                    };
+                }
+            }
+            let mut expected = state.clone();
+            baseline.run(&mut expected, &mut ExecutionContext::default());
+            extended.run(&mut state, &mut ExecutionContext::default());
+            assert_eq!(state, expected, "{word:#010x} sample={sample}");
+        }
+    }
+    std::println!("GFNI_AVX512_SHIFT_CHANGED_FORMS={changed}");
+    assert!(changed > 0);
+}

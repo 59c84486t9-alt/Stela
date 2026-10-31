@@ -6,10 +6,7 @@ fn native_hs200_hs400_and_enhanced_strobe_change_real_mmc_payloads() {
     for variant in 0..6 {
         let mode = variant % 3;
         let vcc180 = variant >= 3;
-        let mut backing = vec![0u64; 128 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: the DMA backing outlives all controller/card aliases.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(128 * 1024 * 8);
         let (mut owner, card, state) = owner();
         initialize_owner(&mut owner).unwrap();
         {
@@ -91,10 +88,7 @@ fn native_hs200_hs400_and_enhanced_strobe_change_real_mmc_payloads() {
 #[test]
 fn native_hs200_response_crc_is_tolerated_only_at_the_source_switch_status() {
     for fault in 0..9 {
-        let mut backing = vec![0u64; 128 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: every original resource remains alive through containment.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(128 * 1024 * 8);
         let (mut owner, card, _state) = owner();
         initialize_owner(&mut owner).unwrap();
         {
@@ -136,10 +130,7 @@ fn native_hs200_response_crc_is_tolerated_only_at_the_source_switch_status() {
 #[test]
 fn native_fast_timing_tuning_or_strobe_refusal_fences_before_publication() {
     for fault in 0..5 {
-        let mut backing = vec![0u64; 128 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: failed transitions keep all original resources and pages.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(128 * 1024 * 8);
         let (mut owner, card, state) = owner();
         initialize_owner(&mut owner).unwrap();
         {

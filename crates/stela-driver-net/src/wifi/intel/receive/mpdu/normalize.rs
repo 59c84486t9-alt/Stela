@@ -210,10 +210,7 @@ pub(crate) fn normalize(
     {
         return Err(Error::Aggregation);
     }
-    if management && (header.protected() || metadata.status.cipher_code() != SEC_NONE) {
-        return Err(Error::ManagementProtection);
-    }
-    if header.protected() && !header.data_present() {
+    if header.protected() && !header.data_present() && !management {
         return Err(Error::Frame(frame::Error::Unsupported(
             "protected non-data frame",
         )));

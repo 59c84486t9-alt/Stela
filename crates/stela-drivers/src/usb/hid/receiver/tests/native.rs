@@ -271,10 +271,7 @@ fn stop(found: &mut xhci::Found) {
 
 #[test]
 fn composite_ep0_dma_initialization_and_discovery_preserve_standard_input_once() {
-    let mut ram = vec![0u64; 1024 * 1024];
-    let start = ram.as_mut_ptr() as u64;
-    // SAFETY: backing outlives every real native controller/class/DMA owner.
-    let mut dma = unsafe { model::RegionAllocator::new(start..start + ram.len() as u64 * 8) };
+    let mut dma = model::TestRegion::new(1024 * 1024 * 8);
     let (mut found, peer, _) = fixture(&mut dma, tests::PROFILE, 0xc539, true);
     assert!(found.failures.is_empty());
     assert_eq!(found.inputs.len(), 4);
@@ -367,10 +364,7 @@ fn composite_ep0_dma_initialization_and_discovery_preserve_standard_input_once()
 
 #[test]
 fn wrong_slot_nonce_and_old_success_or_error_replies_cannot_requalify_reconnect() {
-    let mut ram = vec![0u64; 1024 * 1024];
-    let start = ram.as_mut_ptr() as u64;
-    // SAFETY: native owners use this exclusive backing allocation.
-    let mut dma = unsafe { model::RegionAllocator::new(start..start + ram.len() as u64 * 8) };
+    let mut dma = model::TestRegion::new(1024 * 1024 * 8);
     let (mut found, peer, _) = fixture(&mut dma, tests::PROFILE, 0xc539, false);
     let input = vendor(&mut found);
     initialize(input);
@@ -460,10 +454,7 @@ fn wrong_slot_nonce_and_old_success_or_error_replies_cannot_requalify_reconnect(
 
 #[test]
 fn stop_restart_stall_and_external_output_revoke_protocol_without_reusing_history() {
-    let mut ram = vec![0u64; 1024 * 1024];
-    let start = ram.as_mut_ptr() as u64;
-    // SAFETY: all controller and native class buffers remain in live RAM.
-    let mut dma = unsafe { model::RegionAllocator::new(start..start + ram.len() as u64 * 8) };
+    let mut dma = model::TestRegion::new(1024 * 1024 * 8);
     let (mut found, peer, _) = fixture(&mut dma, tests::PROFILE, 0xc539, false);
     let input = vendor(&mut found);
     initialize(input);
@@ -605,10 +596,7 @@ fn stale_member_cannot_mutate_shared_current_group_or_consume_current_dma() {
 
 #[test]
 fn candidate_or_profile_refusal_keeps_generic_hid_owners_and_raw_reports() {
-    let mut ram = vec![0u64; 2 * 1024 * 1024];
-    let start = ram.as_mut_ptr() as u64;
-    // SAFETY: every model/native owner remains within this allocation.
-    let mut dma = unsafe { model::RegionAllocator::new(start..start + ram.len() as u64 * 8) };
+    let mut dma = model::TestRegion::new(2 * 1024 * 1024 * 8);
     let mut malformed = tests::PROFILE.to_vec();
     malformed[21] = 4;
     let mut split = vec![
@@ -669,10 +657,7 @@ fn candidate_or_profile_refusal_keeps_generic_hid_owners_and_raw_reports() {
 
 #[test]
 fn output_status_failure_is_not_a_protocol_ack_or_an_automatic_retry() {
-    let mut ram = vec![0u64; 1024 * 1024];
-    let start = ram.as_mut_ptr() as u64;
-    // SAFETY: RAM outlives the configured native controller and all class owners.
-    let mut dma = unsafe { model::RegionAllocator::new(start..start + ram.len() as u64 * 8) };
+    let mut dma = model::TestRegion::new(1024 * 1024 * 8);
     let (mut found, peer, _) = fixture(&mut dma, tests::PROFILE, 0xc539, false);
     peer.borrow_mut().stall_control = Some(SET_REPORT);
     let input = vendor(&mut found);

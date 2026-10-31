@@ -531,7 +531,7 @@ pub(in crate::x86_64) fn emit(
     target: TargetCpu,
     entry: Entry,
 ) -> Option<ColdSplit> {
-    if always_exits(operand) {
+    if always_exits(operand) && !crate::x86_64::asm::vector_extensions::half_supported(target) {
         super::super::block::direct_exit(code, pc, ExitKind::FloatingPoint);
         None
     } else if operand.format == Format::Half {

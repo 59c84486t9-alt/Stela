@@ -2005,11 +2005,13 @@ fn start_devices(
             let mmio = *native_mmio;
             let medium_partition = options.install_source;
             let log_partition = handoff.log_partition.map(Guid);
+            let usb4_approved = options.usb4_approved.clone();
             let work = kernel_work
                 .unwrap_or_else(|| output::fatal("native probe requires an owned continuation"));
             let opened = work.call_owned(60_000_000, move || {
-                let native = mmio
-                    .map(|mmio| services::Services::new(mmio, remappers, host_acpi, heap, tsc_hz));
+                let native = mmio.map(|mmio| {
+                    services::Services::new(mmio, remappers, host_acpi, heap, tsc_hz, usb4_approved)
+                });
                 let targets: Vec<_> = owned_targets.iter().collect();
                 // SAFETY: one admitted foreground task under the work
                 // dispatcher's loader-root/driver guard. Owned handoff, inputs

@@ -2,11 +2,15 @@
 // Copyright (C) 2003-2015, 2018-2026 Intel Corporation
 // Copyright (C) 2013-2015 Intel Mobile Communications GmbH
 // Copyright (C) 2016-2017 Intel Deutschland GmbH
-//! MLD station0 non-QoS queue allocation and empty queue lifetime.
-//! No frame or descriptor is published by this owner yet.
+//! MLD station0's queue allocation and lifetime: the non-QoS queue, each
+//! TID's as `operation` adds it, and their removal.
 use super::*;
 mod coexistence;
-use crate::wifi::intel::transmit::queue::{self as wire, Configuration, NativeMemory, Reply};
+mod operation;
+use crate::wifi::intel::transmit::{
+    queue::{self as wire, Configuration, NativeMemory, Reply},
+    ring::{self, Ring},
+};
 pub use coexistence::{Ax200Coexistence, Ax200CoexistenceError, Ax200CoexistencePhase};
 const SCHEDULER: Id = Id {
     group: 5,
@@ -41,6 +45,7 @@ pub enum Ax200ManagementQueueError {
     Binding(Ax200BindingError),
     Boot(Error),
     Queue(wire::Error),
+    Ring(ring::Error),
     ReservedQueue(u16),
     FlushLength(usize),
     FlushStation(u16),
@@ -51,8 +56,11 @@ pub enum Ax200ManagementQueueError {
 }
 pub struct Ax200ManagementQueue<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> {
     pub(in crate::wifi::intel::boot) peer: Option<Ax200LegacyPeer<'a, Q, B, O>>,
+    /// A queue's memory until the scheduler accepts it.
     pub(in crate::wifi::intel::boot) memory: Option<NativeMemory>,
     pub(in crate::wifi::intel::boot) configuration: Option<Configuration>,
+    /// Each TID's live queue, the management queue first.
+    pub(in crate::wifi::intel::boot) rings: Vec<(u8, Ring)>,
     reply: Option<Reply>,
     phase: Ax200ManagementQueuePhase,
     ticket: Option<CommandTicket>,
@@ -81,6 +89,7 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200LegacyPeer<'a, Q, B
             peer: Some(self),
             memory: None,
             configuration: None,
+            rings: Vec::new(),
             reply: None,
             phase: Ax200ManagementQueuePhase::NotStarted,
             ticket: None,
@@ -92,7 +101,9 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200LegacyPeer<'a, Q, B
 }
 impl<Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Drop for Ax200ManagementQueue<'_, Q, B, O> {
     fn drop(&mut self) {
-        if self.memory.as_ref().is_some_and(NativeMemory::uncertain) {
+        if self.memory.as_ref().is_some_and(NativeMemory::uncertain)
+            || self.rings.iter().any(|(_, ring)| ring.uncertain())
+        {
             // Extra queue maps can remain uncertain even after RomBoot stopped
             // (for example an invalidation failure). Keep its original OS,
             // board, requester/domain and native owner with those mappings.
@@ -189,7 +200,8 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200ManagementQueue<'a,
         if self.phase != Ax200ManagementQueuePhase::Removed
             || self.first_error.is_some()
             || self.ticket.is_some()
-            || !self.memory.as_ref().is_some_and(NativeMemory::released)
+            || !self.rings.is_empty()
+            || self.memory.is_some()
         {
             return Err(Box::new(self));
         }
@@ -216,7 +228,55 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200ManagementQueue<'a,
                 return Err(error);
             }
         }
+        for (_, ring) in &mut self.rings {
+            // SAFETY: as above.
+            if let Err(error) = unsafe { ring.release() } {
+                let error = Ax200ManagementQueueError::Ring(error);
+                self.fail(error.clone());
+                return Err(error);
+            }
+        }
         self.phase = Ax200ManagementQueuePhase::Stopped;
+        Ok(())
+    }
+    /// Move the accepted queue's memory into `tid`'s ring.
+    fn attach_ring(&mut self, tid: u8, reply: Reply) {
+        let memory = self.memory.take().unwrap();
+        let boot = self.peer().binding.power.phy.boot();
+        let (domain, family) = (boot.domain.clone(), boot.profile.family());
+        let ring = Ring::new(memory, domain, family, reply.queue, reply.write_pointer);
+        self.rings.push((tid, ring));
+    }
+    /// `iwl_mvm_flush_sta`'s reply: what each queue dropped comes back.
+    fn flushed(&mut self, raw: &[u8]) -> Result<(), Ax200ManagementQueueError> {
+        if raw.len() != 132 {
+            return Err(Ax200ManagementQueueError::FlushLength(raw.len()));
+        }
+        let h = |at: usize| u16::from_le_bytes(raw[at..at + 2].try_into().unwrap());
+        if h(0) != 0 {
+            return Err(Ax200ManagementQueueError::FlushStation(h(0)));
+        }
+        let count = usize::from(h(2));
+        if count > self.rings.len() {
+            return Err(Ax200ManagementQueueError::FlushQueues(h(2)));
+        }
+        for index in 0..count {
+            let at = 4 + index * 8;
+            let (tid, queue, read_after) = (h(at), h(at + 2), h(at + 6));
+            let Some((_, ring)) = self
+                .rings
+                .iter_mut()
+                .find(|(_, ring)| ring.queue() == queue)
+            else {
+                return Err(Ax200ManagementQueueError::FlushQueue { tid, queue });
+            };
+            // `iwl_pcie_reclaim` leaves an empty queue alone.
+            if ring.used() != 0 {
+                // SAFETY: the firmware dropped these frames and holds no
+                // reference to them.
+                unsafe { ring.reclaim(read_after) }.map_err(Ax200ManagementQueueError::Ring)?;
+            }
+        }
         Ok(())
     }
     /// # Safety
@@ -313,22 +373,24 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200ManagementQueue<'a,
                                         return Err(Ax200ManagementQueueError::ReservedQueue(0));
                                     }
                                     self.reply = Some(reply);
+                                    self.attach_ring(15, reply);
                                     self.phase =
                                         Ax200ManagementQueuePhase::ManagementFramesRequired;
                                     Ok(())
                                 }),
-                            Ax200ManagementQueuePhase::WaitingFlush => {
-                                flush_empty(&response.raw, self.reply.unwrap())
-                                    .map(|()| self.phase = Ax200ManagementQueuePhase::WaitingRemove)
-                            }
+                            Ax200ManagementQueuePhase::WaitingFlush => self
+                                .flushed(&response.raw)
+                                .map(|()| self.phase = Ax200ManagementQueuePhase::WaitingRemove),
                             Ax200ManagementQueuePhase::WaitingRemove => {
+                                let (_, mut ring) = self.rings.pop().unwrap();
                                 // SAFETY: real scheduler REMOVE and its HCMD DMA
-                                // reclaim completed; this owner published no frame.
-                                unsafe { self.memory.as_mut().unwrap().release() }
-                                    .map_err(Ax200ManagementQueueError::Queue)
-                                    .map(|()| {
-                                        self.phase = Ax200ManagementQueuePhase::WaitingStationRemove
-                                    })
+                                // reclaim completed, and the flush emptied it.
+                                let released = unsafe { ring.release() }
+                                    .map_err(Ax200ManagementQueueError::Ring);
+                                if self.rings.is_empty() {
+                                    self.phase = Ax200ManagementQueuePhase::WaitingStationRemove;
+                                }
+                                released
                             }
                             Ax200ManagementQueuePhase::WaitingStationRemove => {
                                 let peer = self.peer();
@@ -400,6 +462,7 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200ManagementQueue<'a,
                         NativeMemory::prepare(
                             &boot.firmware,
                             Family::Ax200,
+                            wire::management_slots(Family::Ax200),
                             source,
                             boot.domain.clone(),
                         )
@@ -433,10 +496,12 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200ManagementQueue<'a,
                 Ax200ManagementQueuePhase::WaitingStationRemove => {
                     (STATION_REMOVE, alloc::vec![0;4])
                 }
-                _ => (SCHEDULER, remove_bytes(1)),
+                _ => (
+                    SCHEDULER,
+                    remove_bytes(1, self.rings.last().map_or(15, |(tid, _)| *tid)),
+                ),
             };
-            // SAFETY: original empty queue FLUSH/REMOVE creates no new RF;
-            // all source entries remain invalid and no frames were published.
+            // SAFETY: FLUSH and REMOVE create no new RF.
             unsafe {
                 self.peer()
                     .binding
@@ -455,40 +520,12 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200ManagementQueue<'a,
         Ok(self.phase)
     }
 }
-fn remove_bytes(station_mask: u32) -> Vec<u8> {
+fn remove_bytes(station_mask: u32, tid: u8) -> Vec<u8> {
     let mut bytes = alloc::vec![0;36];
     bytes[..4].copy_from_slice(&1u32.to_le_bytes());
     bytes[4..8].copy_from_slice(&station_mask.to_le_bytes());
-    bytes[8..12].copy_from_slice(&15u32.to_le_bytes());
+    bytes[8..12].copy_from_slice(&u32::from(tid).to_le_bytes());
     bytes
-}
-
-fn flush_empty(raw: &[u8], queue: Reply) -> Result<(), Ax200ManagementQueueError> {
-    if raw.len() != 132 {
-        return Err(Ax200ManagementQueueError::FlushLength(raw.len()));
-    }
-    let h = |at| u16::from_le_bytes(raw[at..at + 2].try_into().unwrap());
-    if h(0) != 0 {
-        return Err(Ax200ManagementQueueError::FlushStation(h(0)));
-    }
-    match h(2) {
-        0 => Ok(()),
-        1 => {
-            if h(4) != 15 || h(6) != queue.queue {
-                return Err(Ax200ManagementQueueError::FlushQueue {
-                    tid: h(4),
-                    queue: h(6),
-                });
-            }
-            // Original pcie_reclaim exits before using read_after when
-            // is_flush and host read_ptr == write_ptr. This unique owner has
-            // never submitted a frame, so those host pointers remain equal.
-            // Raw pointer metadata stays in the response; it grants
-            // no descriptor completion. SCD_REMOVE still gates release.
-            Ok(())
-        }
-        count => Err(Ax200ManagementQueueError::FlushQueues(count)),
-    }
 }
 #[cfg(test)]
 mod tests {
@@ -528,7 +565,7 @@ mod tests {
                     .iter()
                     .map(|p| u8::from_str_radix(std::str::from_utf8(p).unwrap(), 16).unwrap())
                     .collect();
-                assert_eq!(remove_bytes(number(3) as u32), bytes, "{line}");
+                assert_eq!(remove_bytes(number(3) as u32, 15), bytes, "{line}");
             }
         }
         assert_eq!(keys.len(), 72);

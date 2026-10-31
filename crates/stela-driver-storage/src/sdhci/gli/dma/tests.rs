@@ -1,7 +1,6 @@
 //! Unchanged-source wire/control comparison; DMA effects have separate peers.
 use super::*;
-use crate::bus::dma::RegionAllocator;
-use alloc::vec;
+use crate::bus::dma::TestRegion;
 
 struct Controls {
     byte: u8,
@@ -77,11 +76,7 @@ fn unchanged_linux_v4_capability_controls_and_adma_descriptors_match_native() {
         registers.write8(HOST_CONTROL, control);
         assert_eq!(u64::from(registers.byte), number(6), "{line}");
         assert_eq!(u64::from(registers.word), number(7), "{line}");
-        let mut backing = vec![0u64; 64];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: isolated descriptor RAM remains live; no pointer/doorbell is
-        // submitted to a device by this bounded wire-format source comparison.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(64 * 8);
         let mut table = dma.allocate(64, 8).unwrap();
         let address = if number(4) == 0 {
             0x1234_5000

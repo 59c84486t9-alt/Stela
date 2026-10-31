@@ -1,6 +1,6 @@
 //! Lane moves and permutes. All inputs are read before the destination is written.
 use super::{Host, commit, packed, read_vector, vector_offset};
-use crate::x86_64::asm::{Alu, Code, Cond, Disp, Gpr, Mem, ShiftOp, Size};
+use crate::x86_64::asm::{Alu, Code, Cond, Disp, Gpr, Mem, ShiftOp, Size, vector_extensions};
 use crate::x86_64::simd::encode::guest;
 use crate::{
     TargetCpu,
@@ -213,6 +213,21 @@ fn table(code: &mut Code, operand: &Operand, target: TargetCpu) {
     else {
         unreachable!("a decoded table operation");
     };
+    if vector_extensions::table_supported(1, target) {
+        read_vector(code, indices, 1);
+        if preserve {
+            read_vector(code, destination, 0);
+        }
+        let tables: alloc::vec::Vec<_> = (0..registers)
+            .map(|index| guest(vector_offset((first + index) % 32)))
+            .collect();
+        vector_extensions::table(code, 1, 0, 1, &tables, preserve, [2, 3], target);
+        if bytes == 8 {
+            packed(code, Host::MoveQword, 0, 0);
+        }
+        commit(code, destination, 0);
+        return;
+    }
     if target >= TargetCpu::Ssse3 {
         read_vector(code, indices, 1);
         packed(code, Host::Xor, 0, 0); // result

@@ -546,6 +546,46 @@ impl<R: Registers> Unit<R> {
         Ok(unit)
     }
 
+    /// Whether requester `rid` may attach to this unit.
+    pub fn allows(&self, rid: u16) -> bool {
+        self.lock().state().allowed.binary_search(&rid).is_ok()
+    }
+
+    /// Allow requester `rid`, which arrived below a covered bridge after this
+    /// unit was taken. It has no context entry until it attaches, so its
+    /// requests fault until then.
+    pub fn admit_requester(&self, rid: u16) -> Result<(), VtdError> {
+        let mut guard = self.lock();
+        let state = guard.state();
+        if state.shutdown || state.poisoned {
+            return Err(VtdError::Busy);
+        }
+        let Err(at) = state.allowed.binary_search(&rid) else {
+            return Ok(());
+        };
+        let bus = (rid >> 8) as u8;
+        if !state.contexts.contains_key(&bus) {
+            let context = Table::new(self.source, self.physical_bits)?;
+            // Complete and visible before the root entry that leads to it.
+            if let Some(line) = self.table_cacheline {
+                context.flush(&*self.registers, line);
+            }
+            publish();
+            state.root.write(usize::from(bus), context.physical() | 1);
+            state.contexts.insert(bus, context);
+            if let Some(line) = self.table_cacheline {
+                state.root.flush(&*self.registers, line);
+            }
+            publish();
+            if let Err(error) = self.invalidate(TRANSLATION, true) {
+                state.poisoned = true;
+                return Err(error);
+            }
+        }
+        state.allowed.insert(at, rid);
+        Ok(())
+    }
+
     /// Publish one owned stopped requester into this already owned unit.
     ///
     /// # Safety

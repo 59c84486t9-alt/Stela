@@ -234,10 +234,7 @@ impl Transport for BasicDevice {
     }
 }
 fn run(f: impl FnOnce(&mut AudioDevice<BasicDevice>)) {
-    let mut memory = vec![0u64; 256 * 1024];
-    let base = memory.as_mut_ptr() as u64;
-    // SAFETY: exclusive backing allocation outlives the complete DMA owner.
-    let mut dma = unsafe { RegionAllocator::new(base..base + memory.len() as u64 * 8) };
+    let mut dma = TestRegion::new(256 * 1024 * 8);
     let binding = parse(&configuration(0x25, 2, 1, 3), 3).unwrap();
     let mut audio = AudioDevice::new(BasicDevice::new(), binding, &mut dma).unwrap();
     f(&mut audio);

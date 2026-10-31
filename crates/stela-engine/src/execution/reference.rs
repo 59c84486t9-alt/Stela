@@ -2,7 +2,11 @@
 //! No guest OS services are supplied. Only faults in the executable
 //! ranges of the active test invocation can be converted to a native exit.
 use crate::machine::{FaultCause, NativeFault};
-use core::{arch::global_asm, cell::Cell};
+use core::{
+    arch::global_asm,
+    cell::Cell,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 use stela_compiler::{GuestState, block::BlockExit};
 const FAULT_KIND: u64 = 0xffff;
 const TRAP_INVALID_OPCODE: u16 = 6;
@@ -112,13 +116,18 @@ unsafe extern "sysv64" {
     fn stela_reference_enter(state: *mut GuestState, code: usize, stack: *mut u64) -> BlockExit;
     fn stela_reference_recover();
 }
-extern "C" fn fault_handler(signal: i32, _info: *mut libc::siginfo_t, context: *mut libc::c_void) {
+/// The signals [`fault_handler`] takes.
+const SIGNALS: [i32; 3] = [libc::SIGSEGV, libc::SIGBUS, libc::SIGILL];
+/// The SA_SIGINFO handler each of [`SIGNALS`] had, zero for none.
+static PRIOR: [AtomicUsize; SIGNALS.len()] = [const { AtomicUsize::new(0) }; SIGNALS.len()];
+
+extern "C" fn fault_handler(signal: i32, info: *mut libc::siginfo_t, context: *mut libc::c_void) {
     let recovery = ACTIVE.with(Cell::get);
     // SAFETY: Linux supplies a valid ucontext for SA_SIGINFO. ACTIVE belongs to
     // this thread and is non-null only while its boxed Recovery and code live.
     unsafe {
-        let context = &mut *context.cast::<libc::ucontext_t>();
-        let registers = &mut context.uc_mcontext.gregs;
+        let frame = &mut *context.cast::<libc::ucontext_t>();
+        let registers = &mut frame.uc_mcontext.gregs;
         let rip = registers[libc::REG_RIP as usize] as u64;
         if let Some(recovery) = recovery.as_mut()
             && recovery.covers(rip)
@@ -155,8 +164,17 @@ extern "C" fn fault_handler(signal: i32, _info: *mut libc::siginfo_t, context: *
                 stela_reference_recover as *const () as libc::greg_t;
             return;
         }
-        // An unrelated host fault keeps its normal terminal behavior.
-        libc::signal(signal, libc::SIG_DFL);
+        // An unrelated host fault keeps its normal behavior: the handler it
+        // had, or termination.
+        let slot = SIGNALS.iter().position(|&candidate| candidate == signal);
+        let prior = slot.map_or(0, |slot| PRIOR[slot].load(Ordering::Relaxed));
+        if prior != 0 {
+            let prior: extern "C" fn(i32, *mut libc::siginfo_t, *mut libc::c_void) =
+                core::mem::transmute(prior);
+            prior(signal, info, context);
+        } else {
+            libc::signal(signal, libc::SIG_DFL);
+        }
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -177,19 +195,23 @@ fn install_handlers() -> Result<(), SignalInstallError> {
     static HANDLERS: std::sync::OnceLock<Result<(), SignalInstallError>> =
         std::sync::OnceLock::new();
     *HANDLERS.get_or_init(|| {
-        for signal in [libc::SIGSEGV, libc::SIGBUS, libc::SIGILL] {
+        for (slot, signal) in SIGNALS.into_iter().enumerate() {
             // SAFETY: zero is a valid initial sigaction, SA_SIGINFO selects the
             // matching callback, and sigemptyset initializes its signal mask.
             unsafe {
                 let mut action: libc::sigaction = core::mem::zeroed();
+                let mut prior: libc::sigaction = core::mem::zeroed();
                 action.sa_sigaction = fault_handler as *const () as usize;
                 action.sa_flags = libc::SA_SIGINFO;
                 if libc::sigemptyset(&raw mut action.sa_mask) != 0
-                    || libc::sigaction(signal, &raw const action, core::ptr::null_mut()) != 0
+                    || libc::sigaction(signal, &raw const action, &raw mut prior) != 0
                 {
                     return Err(SignalInstallError {
                         errno: std::io::Error::last_os_error().raw_os_error().unwrap_or(-1),
                     });
+                }
+                if prior.sa_flags & libc::SA_SIGINFO != 0 {
+                    PRIOR[slot].store(prior.sa_sigaction, Ordering::Relaxed);
                 }
             }
         }

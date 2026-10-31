@@ -342,7 +342,7 @@ pub(crate) mod tests {
     pub(crate) mod generation;
     use super::*;
     use crate::{
-        bus::dma::RegionAllocator,
+        bus::dma::{RegionAllocator, TestRegion},
         usb::xhci::{self, FULL_SPEED},
     };
 
@@ -408,10 +408,7 @@ pub(crate) mod tests {
     fn a_cleanly_closed_transport_posts_its_receives_again_like_btusb_open() {
         use alloc::rc::Rc;
         use core::cell::RefCell;
-        let mut backing = vec![0u64; 64 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: backing exclusively owns these modeled DMA pages.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(64 * 1024 * 8);
         let (controller, _) = xhci::model::cancellation_controller(&mut dma);
         let controller = Rc::new(RefCell::new(controller));
         let device = firmware_device(controller.borrow().test_device_id(1).unwrap());
