@@ -232,8 +232,8 @@ pub struct Run {
     #[arg(long, value_parser = clap::value_parser!(u8).range(0..=10))]
     icount: Option<u8>,
     /// Run the x86 guest on the host's processor through KVM instead of
-    /// translating it with TCG, with the host's CPU model unless `--cpu`
-    /// names one. Needs a Linux host with `/dev/kvm`.
+    /// translating it with TCG, with the host's CPU model and its invariant
+    /// TSC unless `--cpu` names one. Needs a Linux host with `/dev/kvm`.
     #[arg(long, conflicts_with = "icount")]
     kvm: bool,
     /// Attach a GPT disk image through virtio-blk, NVMe and AHCI, have the
@@ -345,8 +345,10 @@ pub struct Run {
     /// models test the same driver the mount uses on a PC.
     #[arg(long, value_enum, requires = "network")]
     network_model: Option<NetworkModel>,
-    /// Have the mount POST once to this `http://` URL over the host network
-    /// at start and report the reply: adds `--network-check URL`.
+    /// Have the mount POST once to this `http://` or `https://` URL over the
+    /// host network at start and report the reply: adds `--network-check
+    /// URL`. HTTPS needs `--kvm`: native TLS dates certificates by the
+    /// invariant TSC, which TCG does not offer.
     #[arg(long, requires = "network_adapter")]
     network_check: Option<String>,
     /// Check DHCP, DNS, TCP and NIC ring reuse against a local HTTP peer

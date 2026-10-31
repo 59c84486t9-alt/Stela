@@ -1,6 +1,6 @@
 extern crate std;
 use super::*;
-use crate::bus::dma::RegionAllocator;
+use crate::bus::dma::{RegionAllocator, TestRegion};
 
 #[test]
 fn only_intel_controllers_settle_after_reset() {
@@ -88,10 +88,7 @@ fn clock() -> Clock {
 
 #[test]
 fn register_offsets_outside_the_bar_refuse_the_controller() {
-    let mut backing = vec![0u64; 64 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: this test keeps exclusive live identity-mapped RAM.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(64 * 1024 * 8);
     // Doorbells for eight slots end at 0x1024; xECP 0x800 is at 0x2000.
     for (size, extended, fits) in [
         (0x1024, 0, true),
@@ -117,10 +114,7 @@ fn register_offsets_outside_the_bar_refuse_the_controller() {
 #[test]
 fn constructor_pads_command_and_event_segments_without_extra_trbs() {
     for overfetch in [false, true] {
-        let mut backing = vec![0u64; 64 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: this test keeps exclusive live identity-mapped RAM.
-        let mut region = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut region = TestRegion::new(64 * 1024 * 8);
         let mut dma = Allocator {
             inner: &mut region,
             requests: Vec::new(),
@@ -185,11 +179,7 @@ fn constructor_pads_command_and_event_segments_without_extra_trbs() {
 fn every_initial_allocation_failure_precedes_all_pointer_publication_and_run() {
     for overfetch in [false, true] {
         for fail in 0..7 {
-            let mut backing = vec![0u64; 64 * 1024];
-            let start = backing.as_mut_ptr() as u64;
-            // SAFETY: all allocations remain owned even after failure.
-            let mut region =
-                unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+            let mut region = TestRegion::new(64 * 1024 * 8);
             let mut dma = Allocator {
                 inner: &mut region,
                 requests: Vec::new(),

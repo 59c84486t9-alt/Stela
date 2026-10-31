@@ -1,6 +1,6 @@
 //! SVE integer dot products, one 128-bit segment at a time. All sources are
 //! staged before each destination chunk is written.
-use crate::x86_64::asm::{Code, Rm};
+use crate::x86_64::asm::{Code, Rm, vector_extensions};
 
 use crate::TargetCpu;
 use crate::aarch64::scalable::{ElementSize, VECTOR_CHUNK_BYTES, VectorLength, is_z_register};
@@ -75,13 +75,25 @@ fn byte_components(code: &mut Code, left_signed: bool, right_signed: bool) {
     }
 }
 
-fn byte_dot(code: &mut Code, signedness: Signedness) {
+/// The four-byte dot products of XMM0 and XMM1 into the register returned.
+fn byte_dot(code: &mut Code, signedness: Signedness, target: TargetCpu) -> u8 {
     let left_signed = matches!(signedness, Signedness::Signed | Signedness::SignedUnsigned);
     let right_signed = matches!(signedness, Signedness::Signed | Signedness::UnsignedSigned);
+    if vector_extensions::byte_dot(
+        code,
+        LEFT_HIGH,
+        &[[LEFT, RIGHT]],
+        [left_signed, right_signed],
+        [RIGHT_HIGH, SIGNS],
+        target,
+    ) {
+        return LEFT_HIGH;
+    }
     byte_components(code, left_signed, right_signed);
     packed(code, Host::MultiplyAddWords, LEFT, RIGHT);
     packed(code, Host::MultiplyAddWords, LEFT_HIGH, RIGHT_HIGH);
     packed(code, Host::AddDword, LEFT, LEFT_HIGH);
+    LEFT
 }
 
 /// Reconstruct each individual 32-bit product before any horizontal sum.
@@ -260,13 +272,34 @@ pub(crate) fn emit_integer(
             target,
         );
         index_right(code, operand);
-        match operand.kind {
+        if !wide
+            && matches!(
+                operand.kind,
+                Kind::Integer {
+                    signedness: Signedness::Unsigned,
+                    products: Products::Two,
+                }
+            )
+            && vector_extensions::unsigned_word_dot(code, ACCUMULATOR, LEFT, RIGHT, target)
+        {
+            store_z_chunk(
+                code,
+                operand.destination,
+                chunk,
+                ACCUMULATOR,
+                length,
+                target,
+            );
+            continue;
+        }
+        let result = match operand.kind {
             Kind::Integer {
                 signedness,
                 products: Products::Four,
-            } if !wide => byte_dot(code, signedness),
+            } if !wide => byte_dot(code, signedness, target),
             Kind::Integer { signedness, .. } => {
                 halfword_dot(code, signedness == Signedness::Signed, wide, target);
+                LEFT
             }
             Kind::Complex { rotation } => {
                 let (select_real, _, subtract) = rotation.component_selection();
@@ -275,18 +308,19 @@ pub(crate) fn emit_integer(
                 } else {
                     complex_byte_dot(code, select_real != 0, subtract);
                 }
+                LEFT
             }
             Kind::HalfDot | Kind::HalfMultiplyLong { .. } => {
                 unreachable!("floating dot rejected before emission")
             }
-        }
+        };
         packed(
             code,
             if wide { Host::AddQword } else { Host::AddDword },
-            LEFT,
+            result,
             ACCUMULATOR,
         );
-        store_z_chunk(code, operand.destination, chunk, LEFT, length, target);
+        store_z_chunk(code, operand.destination, chunk, result, length, target);
     }
     true
 }

@@ -128,10 +128,7 @@ fn key(usage: u8, pressed: bool) -> Input {
 
 #[test]
 fn mixed_page_report_binding_and_dma_poll_parity_keep_canonical_decoder() {
-    let mut ram = vec![0u64; 1024 * 1024];
-    let start = ram.as_mut_ptr() as u64;
-    // SAFETY: this backing outlives both real controller and input DMA owners.
-    let mut dma = unsafe { model::RegionAllocator::new(start..start + ram.len() as u64 * 8) };
+    let mut dma = model::TestRegion::new(1024 * 1024 * 8);
     let mut descriptor = MIXED.to_vec();
     descriptor.extend_from_slice(&[
         5, 1, 9, 6, 0xa1, 1, 0x85, 2, 5, 7, 9, 0, 9, 5, 0x15, 0, 0x25, 1, 0x75, 8, 0x95, 1, 0x81,
@@ -235,10 +232,7 @@ fn unsigned32_selector_keeps_canonical_report_protocol_and_complete_values() {
         5, 1, 9, 6, 0xa1, 1, 0x85, 1, 5, 7, 9, 4, 9, 5, 9, 6, 0x17, 0xfe, 0xff, 0xff, 0x7f, 0x27,
         0xff, 0xff, 0xff, 0xff, 0x75, 32, 0x95, 1, 0x81, 0, 0xc0,
     ];
-    let mut ram = vec![0u64; 512 * 1024];
-    let start = ram.as_mut_ptr() as u64;
-    // SAFETY: RAM keeps every native controller/DMA owner.
-    let mut dma = unsafe { model::RegionAllocator::new(start..start + ram.len() as u64 * 8) };
+    let mut dma = model::TestRegion::new(512 * 1024 * 8);
     let (mut input, peer, _) = fixture(&mut dma, &bytes);
     assert!(input.descriptor().is_some());
     assert!(
@@ -274,10 +268,7 @@ fn unsigned32_selector_keeps_canonical_report_protocol_and_complete_values() {
 
 #[test]
 fn stall_retirement_keeps_sparse_binding_and_original_dma_until_ack() {
-    let mut ram = vec![0u64; 512 * 1024];
-    let start = ram.as_mut_ptr() as u64;
-    // SAFETY: RAM keeps every native controller/DMA owner.
-    let mut dma = unsafe { model::RegionAllocator::new(start..start + ram.len() as u64 * 8) };
+    let mut dma = model::TestRegion::new(512 * 1024 * 8);
     let (mut input, peer, _) = fixture(&mut dma, MIXED);
     assert!(input.poll_hid().reports.is_empty());
     let physical = input.buffer.physical();
@@ -342,10 +333,7 @@ fn stale_sparse_binding_cannot_touch_current_native_dma_or_consume_its_completio
 #[test]
 fn rejected_boot_descriptor_keeps_original_bytes_and_standard_boot_table() {
     let bytes = [5, 7, 0x19, 9, 0x29, 4, 0x75, 8, 0x95, 1, 0x81, 0];
-    let mut ram = vec![0u64; 512 * 1024];
-    let start = ram.as_mut_ptr() as u64;
-    // SAFETY: RAM outlives every native DMA/controller owner.
-    let mut dma = unsafe { model::RegionAllocator::new(start..start + ram.len() as u64 * 8) };
+    let mut dma = model::TestRegion::new(512 * 1024 * 8);
     let (mut input, peer, _) = fixture(&mut dma, &bytes);
     assert_eq!(input.report_descriptor(), bytes);
     assert!(

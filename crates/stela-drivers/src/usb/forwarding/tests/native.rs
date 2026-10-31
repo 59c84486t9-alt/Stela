@@ -412,10 +412,7 @@ fn fixture_with_schedule(
 
 #[test]
 fn queued_packet_lists_keep_individual_payloads_residuals_misses_and_original_schedule() {
-    let mut ram = vec![0u64; 512 * 1024];
-    let start = ram.as_mut_ptr() as u64;
-    // SAFETY: exclusive model RAM outlives all original controllers and owners.
-    let mut dma = unsafe { model::RegionAllocator::new(start..start + ram.len() as u64 * 8) };
+    let mut dma = model::TestRegion::new(512 * 1024 * 8);
     let (mut owner, peer) = fixture(&mut dma, false);
     let first = owner
         .submit_isochronous(0x81, &[4, 5, 0], &[], &mut dma)
@@ -481,10 +478,7 @@ fn queued_packet_lists_keep_individual_payloads_residuals_misses_and_original_sc
 
 #[test]
 fn cancellation_keeps_collected_packets() {
-    let mut ram = vec![0u64; 512 * 1024];
-    let start = ram.as_mut_ptr() as u64;
-    // SAFETY: exclusive live fixture DMA.
-    let mut dma = unsafe { model::RegionAllocator::new(start..start + ram.len() as u64 * 8) };
+    let mut dma = model::TestRegion::new(512 * 1024 * 8);
     let (mut owner, peer) = fixture(&mut dma, false);
     let first = owner
         .submit_isochronous(0x81, &[2, 3], &[], &mut dma)
@@ -508,10 +502,7 @@ fn cancellation_keeps_collected_packets() {
 
 #[test]
 fn packet_extent_limits_and_foreign_requests_cannot_publish_or_consume_dma() {
-    let mut ram = vec![0u64; 512 * 1024];
-    let start = ram.as_mut_ptr() as u64;
-    // SAFETY: original model RAM stays exclusive for both owners.
-    let mut dma = unsafe { model::RegionAllocator::new(start..start + ram.len() as u64 * 8) };
+    let mut dma = model::TestRegion::new(512 * 1024 * 8);
     let (mut owner, peer) = fixture(&mut dma, false);
     let (mut foreign, foreign_peer) = fixture(&mut dma, false);
     let before = dma.remaining();
@@ -551,10 +542,7 @@ fn packet_extent_limits_and_foreign_requests_cannot_publish_or_consume_dma() {
 #[test]
 fn failed_stop_or_post_publication_controller_failure_keeps_all_original_buffers() {
     for fail_after_publication in [false, true] {
-        let mut ram = vec![0u64; 512 * 1024];
-        let start = ram.as_mut_ptr() as u64;
-        // SAFETY: fenced owners drop before their original RAM does.
-        let mut dma = unsafe { model::RegionAllocator::new(start..start + ram.len() as u64 * 8) };
+        let mut dma = model::TestRegion::new(512 * 1024 * 8);
         let (mut owner, peer) = fixture(&mut dma, false);
         if fail_after_publication {
             peer.borrow_mut().fatal_after = Some(1);
@@ -584,10 +572,7 @@ fn failed_stop_or_post_publication_controller_failure_keeps_all_original_buffers
 
 #[test]
 fn checked_primary_streams_reuse_original_payload_dma_and_reject_stale_streams() {
-    let mut ram = vec![0u64; 512 * 1024];
-    let start = ram.as_mut_ptr() as u64;
-    // SAFETY: original stream arrays, rings and payload DMA remain live.
-    let mut dma = unsafe { model::RegionAllocator::new(start..start + ram.len() as u64 * 8) };
+    let mut dma = model::TestRegion::new(512 * 1024 * 8);
     let (mut owner, peer) = fixture(&mut dma, true);
     assert!(owner.enable_streams(&[0x81, 2], 3, &mut dma).unwrap() >= 3);
     for stream in [1, 2, 3, 1] {
@@ -620,10 +605,7 @@ fn checked_primary_streams_reuse_original_payload_dma_and_reject_stale_streams()
 #[test]
 fn cancellation_preserves_unpolled_terminal_receipts_for_each_transfer_kind() {
     for kind in 0..3 {
-        let mut ram = vec![0u64; 512 * 1024];
-        let start = ram.as_mut_ptr() as u64;
-        // SAFETY: original payload, endpoint and event DMA outlive retirement.
-        let mut dma = unsafe { model::RegionAllocator::new(start..start + ram.len() as u64 * 8) };
+        let mut dma = model::TestRegion::new(512 * 1024 * 8);
         let (mut owner, peer) = fixture(&mut dma, kind != 2);
         let stream = if kind == 1 {
             owner.enable_streams(&[0x81, 2], 3, &mut dma).unwrap();
@@ -660,11 +642,7 @@ fn cancellation_preserves_unpolled_terminal_receipts_for_each_transfer_kind() {
 fn ordinary_cancellation_preserves_receive_boundaries_racing_stop() {
     for code in [1, 13, 26, 28] {
         for failure in [None, Some(STOP), Some(SET_DEQUEUE)] {
-            let mut ram = vec![0u64; 512 * 1024];
-            let start = ram.as_mut_ptr() as u64;
-            // SAFETY: failed acknowledgements keep every original allocation.
-            let mut dma =
-                unsafe { model::RegionAllocator::new(start..start + ram.len() as u64 * 8) };
+            let mut dma = model::TestRegion::new(512 * 1024 * 8);
             let (mut owner, peer) = fixture(&mut dma, true);
             let original = owner.pipes[&0x81].buffer.physical();
             let request = owner.submit(0x81, 0, 7, &[]).unwrap();
@@ -706,11 +684,7 @@ fn ordinary_cancellation_preserves_receive_boundaries_racing_stop() {
 fn explicit_cancellation_preserves_observed_transport_errors_and_failed_ack_ownership() {
     for kind in 0..4 {
         for failed_ack in [false, true] {
-            let mut ram = vec![0u64; 512 * 1024];
-            let start = ram.as_mut_ptr() as u64;
-            // SAFETY: no failed retirement releases or reallocates this DMA.
-            let mut dma =
-                unsafe { model::RegionAllocator::new(start..start + ram.len() as u64 * 8) };
+            let mut dma = model::TestRegion::new(512 * 1024 * 8);
             let (mut owner, peer) = fixture(&mut dma, kind < 2);
             let stream = if kind == 1 {
                 owner.enable_streams(&[0x81, 2], 3, &mut dma).unwrap();
@@ -796,10 +770,7 @@ fn retired_request_refuses_before_mmio_and_preserves_current_unpolled_completion
 
 #[test]
 fn transport_error_stops_all_endpoint_requests_without_reading_unknown_packet_bytes() {
-    let mut ram = vec![0u64; 512 * 1024];
-    let start = ram.as_mut_ptr() as u64;
-    // SAFETY: original DMA remains exclusive through native endpoint retirement.
-    let mut dma = unsafe { model::RegionAllocator::new(start..start + ram.len() as u64 * 8) };
+    let mut dma = model::TestRegion::new(512 * 1024 * 8);
     let (mut owner, peer) = fixture(&mut dma, false);
     let first = owner
         .submit_isochronous(0x81, &[2, 3], &[], &mut dma)
@@ -892,10 +863,7 @@ fn scheduled_refused_without_publication(
 
 #[test]
 fn explicit_single_packet_uses_requested_frame_and_cannot_fallback_without_cfc() {
-    let mut ram = vec![0u64; 512 * 1024];
-    let start = ram.as_mut_ptr() as u64;
-    // SAFETY: original model RAM is held through terminal events and cancel ACK.
-    let mut dma = unsafe { model::RegionAllocator::new(start..start + ram.len() as u64 * 8) };
+    let mut dma = model::TestRegion::new(512 * 1024 * 8);
     let (mut owner, peer) = fixture(&mut dma, false);
     // This fixture has no Contiguous Frame ID capability. A two-packet
     // request must fail as a whole before its otherwise-valid first TD escapes.
@@ -933,10 +901,7 @@ fn explicit_single_packet_uses_requested_frame_and_cannot_fallback_without_cfc()
 
 #[test]
 fn explicit_packet_request_rejects_past_alignment_and_ambiguous_epochs_before_allocation() {
-    let mut ram = vec![0u64; 512 * 1024];
-    let start = ram.as_mut_ptr() as u64;
-    // SAFETY: exclusive fixture RAM remains live until the native owner drops.
-    let mut dma = unsafe { model::RegionAllocator::new(start..start + ram.len() as u64 * 8) };
+    let mut dma = model::TestRegion::new(512 * 1024 * 8);
     let (mut owner, peer) = fixture(&mut dma, false);
     for target in [15992, 16000, 16008, 16017, 0x4000, u16::MAX] {
         scheduled_refused_without_publication(&mut owner, &peer, &mut dma, &[1], target);
@@ -951,10 +916,7 @@ fn explicit_packet_request_rejects_past_alignment_and_ambiguous_epochs_before_al
 
 #[test]
 fn explicit_request_cancellation_and_configuration_retire_original_identities() {
-    let mut ram = vec![0u64; 512 * 1024];
-    let start = ram.as_mut_ptr() as u64;
-    // SAFETY: original packet DMA remains live through endpoint Stop/Dequeue ACK.
-    let mut dma = unsafe { model::RegionAllocator::new(start..start + ram.len() as u64 * 8) };
+    let mut dma = model::TestRegion::new(512 * 1024 * 8);
     let (mut owner, peer) = fixture(&mut dma, false);
     let first = owner
         .submit_isochronous_scheduled(
@@ -1023,10 +985,7 @@ fn explicit_request_cancellation_and_configuration_retire_original_identities() 
 
 #[test]
 fn explicit_packet_lists_wrap_real_microframes_and_keep_subframe_queue_continuations() {
-    let mut ram = vec![0u64; 512 * 1024];
-    let start = ram.as_mut_ptr() as u64;
-    // SAFETY: every TD/event/payload is within this independent RAM.
-    let mut dma = unsafe { model::RegionAllocator::new(start..start + ram.len() as u64 * 8) };
+    let mut dma = model::TestRegion::new(512 * 1024 * 8);
     let (mut owner, peer) = fixture_with_schedule(
         &mut dma,
         false,
@@ -1118,10 +1077,7 @@ fn explicit_packet_lists_wrap_real_microframes_and_keep_subframe_queue_continuat
 
 #[test]
 fn explicit_preflight_uses_interval_and_checks_entire_list_horizon_without_cancel() {
-    let mut ram = vec![0u64; 512 * 1024];
-    let start = ram.as_mut_ptr() as u64;
-    // SAFETY: original addressed endpoint contexts and payload DMA remain live.
-    let mut dma = unsafe { model::RegionAllocator::new(start..start + ram.len() as u64 * 8) };
+    let mut dma = model::TestRegion::new(512 * 1024 * 8);
     let (mut owner, peer) = fixture_with_schedule(
         &mut dma,
         false,
@@ -1182,10 +1138,7 @@ fn explicit_preflight_uses_interval_and_checks_entire_list_horizon_without_cance
 
 #[test]
 fn explicit_clock_advance_during_publication_requires_real_endpoint_cancellation() {
-    let mut ram = vec![0u64; 512 * 1024];
-    let start = ram.as_mut_ptr() as u64;
-    // SAFETY: original buffers remain held until real endpoint retirement ACK.
-    let mut dma = unsafe { model::RegionAllocator::new(start..start + ram.len() as u64 * 8) };
+    let mut dma = model::TestRegion::new(512 * 1024 * 8);
     let (mut owner, peer) = fixture_with_schedule(
         &mut dma,
         false,
@@ -1231,10 +1184,7 @@ fn explicit_clock_advance_during_publication_requires_real_endpoint_cancellation
 #[test]
 fn explicit_partial_publication_or_failed_stop_keeps_every_original_packet_buffer() {
     for fatal in [false, true] {
-        let mut ram = vec![0u64; 512 * 1024];
-        let start = ram.as_mut_ptr() as u64;
-        // SAFETY: failed-retirement owners and every original DMA allocation stay live.
-        let mut dma = unsafe { model::RegionAllocator::new(start..start + ram.len() as u64 * 8) };
+        let mut dma = model::TestRegion::new(512 * 1024 * 8);
         let (mut owner, peer) = fixture_with_schedule(
             &mut dma,
             false,
@@ -1295,11 +1245,7 @@ fn explicit_partial_publication_or_failed_stop_keeps_every_original_packet_buffe
 
 #[test]
 fn modeled_state_transitions_preserve_configured_endpoint_context_fields() {
-    let mut ram = vec![0u64; 512 * 1024];
-    let start = ram.as_mut_ptr() as u64;
-    // SAFETY: configured endpoint contexts and every ring remain in
-    // this exclusive fixture allocation until their original owners drop.
-    let mut dma = unsafe { model::RegionAllocator::new(start..start + ram.len() as u64 * 8) };
+    let mut dma = model::TestRegion::new(512 * 1024 * 8);
     let check = |peer: &Rc<RefCell<Peer>>, dci: u8, mask: u32, expected: u32| {
         let base = peer.borrow().base.clone();
         let model = base.borrow();

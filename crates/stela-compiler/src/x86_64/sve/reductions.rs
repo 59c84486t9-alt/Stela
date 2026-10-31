@@ -3,7 +3,7 @@ use crate::TargetCpu;
 use crate::aarch64::scalable::{ElementSize, VECTOR_CHUNK_BYTES, VectorLength};
 use crate::aarch64::sve::reductions::{Kind, Operand, Output};
 use crate::x86_64::asm::Gpr::{R8, R9, Rax};
-use crate::x86_64::asm::{Alu, Code, Cond, Rm, Size};
+use crate::x86_64::asm::{Alu, Code, Cond, Rm, Size, vector_extensions};
 use crate::x86_64::isa::{ShiftOpcode, SimdOpcode as Host};
 use crate::x86_64::scalable::{clear_z_upper, load_z_chunk, read_predicate_mask, store_z_chunk};
 
@@ -160,6 +160,18 @@ fn combine(code: &mut Code, kind: Kind, element: ElementSize, target: TargetCpu)
         packed(code, opcode, RESULT, SOURCE, target);
         return;
     }
+    if element == ElementSize::Doubleword
+        && vector_extensions::quadword_extremum(
+            code,
+            RESULT,
+            SOURCE,
+            is_signed(kind),
+            !is_minimum(kind),
+            target,
+        )
+    {
+        return;
+    }
     let (left, right) = if is_minimum(kind) {
         (SOURCE, RESULT)
     } else {
@@ -290,8 +302,10 @@ pub fn emit(code: &mut Code, operand: Operand, length: VectorLength, target: Tar
         operand.kind,
         Kind::SignedMaximum | Kind::UnsignedMaximum | Kind::SignedMinimum | Kind::UnsignedMinimum
     ) && operand.element_size == ElementSize::Doubleword;
-    let qword_columns =
-        qword_extrema && !(operand.output == Output::Quadword && length.chunks() == 1);
+    // VPMAX/VPMIN[SU]Q combine quadword lanes in place of the CMOV columns.
+    let qword_columns = qword_extrema
+        && !vector_extensions::quadword_supported(target)
+        && !(operand.output == Output::Quadword && length.chunks() == 1);
     let bias_value = if operand.output == Output::Quadword && length.chunks() == 1 {
         0
     } else {

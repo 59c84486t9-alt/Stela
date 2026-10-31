@@ -133,6 +133,70 @@ pub trait DmaAllocator {
     fn allocate(&mut self, bytes: usize, align: usize) -> Result<DmaBuffer, BlockError>;
 }
 
+/// Zeroed heap memory a test fixture hands out front to back, aligned to
+/// [`TestRegion::ALIGN`] so that whether an aligned allocation fits never
+/// depends on where the heap placed the region. Freed on drop.
+#[cfg(any(test, feature = "test-support"))]
+pub struct TestRegion {
+    layout: core::alloc::Layout,
+    start: *mut u8,
+    allocator: RegionAllocator,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl TestRegion {
+    /// The largest alignment a driver requests: a 64 KiB transfer buffer.
+    pub const ALIGN: usize = 64 * 1024;
+
+    pub fn new(bytes: usize) -> Self {
+        assert_ne!(bytes, 0, "an empty test DMA region");
+        let layout = core::alloc::Layout::from_size_align(bytes, Self::ALIGN)
+            .expect("test DMA region layout");
+        // SAFETY: the layout has a non-zero size.
+        let start = unsafe { alloc::alloc::alloc_zeroed(layout) };
+        assert!(!start.is_null(), "test DMA region allocation");
+        let base = start as u64;
+        // SAFETY: the region owns this allocation until it drops, and test
+        // peers reach it at the CPU's address.
+        let allocator = unsafe { RegionAllocator::new(base..base + bytes as u64) };
+        Self {
+            layout,
+            start,
+            allocator,
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl core::ops::Deref for TestRegion {
+    type Target = RegionAllocator;
+    fn deref(&self) -> &RegionAllocator {
+        &self.allocator
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl core::ops::DerefMut for TestRegion {
+    fn deref_mut(&mut self) -> &mut RegionAllocator {
+        &mut self.allocator
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl DmaAllocator for TestRegion {
+    fn allocate(&mut self, bytes: usize, align: usize) -> Result<DmaBuffer, BlockError> {
+        self.allocator.allocate(bytes, align)
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Drop for TestRegion {
+    fn drop(&mut self) {
+        // SAFETY: `start` came from `alloc_zeroed` with this layout.
+        unsafe { alloc::alloc::dealloc(self.start, self.layout) }
+    }
+}
+
 /// Hands out a fixed range of identity-mapped pages front to back.
 pub struct RegionAllocator {
     next: u64,

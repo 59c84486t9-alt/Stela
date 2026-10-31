@@ -9,7 +9,7 @@
 //! report unrestricted DMA once.
 use super::aml::HostAcpi;
 use crate::{native_memory, native_mmio, output};
-use alloc::sync::Arc;
+use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, Ordering};
 use stela_boot_core::passthrough::Passthrough;
 use stela_drivers::{
@@ -21,6 +21,7 @@ use stela_drivers::{
             owned::OwnedConfig,
             requester::{FunctionRole, RequesterBinding, StoppedRequester},
         },
+        thunderbolt::manager::{Platform, Uuid},
     },
     platform::acpi::resources::{self, DeviceResources, MemoryBroker, Resource, Space},
     probe::{NativeServices, ServiceError},
@@ -52,6 +53,8 @@ pub(super) struct Services<'a> {
     acpi: Option<&'static HostAcpi>,
     heap: core::ops::Range<u64>,
     tsc_hz: u64,
+    /// The USB4 devices `--usb4-approve` lists.
+    usb4_approved: Vec<Uuid>,
     /// A broker for each register window [`NativeServices::acpi_memory`]
     /// reserved, with the window: one device's `_CRS` memory rounded to
     /// pages, which only that broker suballocates.
@@ -107,6 +110,7 @@ impl<'a> Services<'a> {
         acpi: Option<&'static HostAcpi>,
         heap: core::ops::Range<u64>,
         tsc_hz: u64,
+        usb4_approved: Vec<Uuid>,
     ) -> Self {
         // SAFETY: the engine programs no PIC or I/O APIC pin of its own.
         let acpi = acpi.filter(|_| match unsafe { mmio.mask_isa(&I8042_IRQS) } {
@@ -124,6 +128,7 @@ impl<'a> Services<'a> {
             acpi,
             heap,
             tsc_hz,
+            usb4_approved,
             brokers: core::cell::RefCell::new(alloc::vec::Vec::new()),
         }
     }
@@ -316,6 +321,32 @@ unsafe impl NativeServices for Services<'_> {
             output::arguments(format_args!("no IOMMU: device DMA unrestricted\n"));
         }
         Ok(Arc::new(Passthrough::retaining(self.heap.clone(), binding)))
+    }
+
+    fn dma_translated(&self, address: Address) -> bool {
+        self.remappers.translates(address)
+    }
+
+    fn requester_arrived(&self, address: Address, bridge: Address) -> Result<(), ServiceError> {
+        self.remappers.admit(address, bridge).map_err(|error| {
+            output::arguments(format_args!(
+                "HOST IOMMU requester {address} refused: {error:?}\n"
+            ));
+            ServiceError::Refused("the IOMMU refused the requester that arrived")
+        })
+    }
+
+    fn usb4_platform(
+        &self,
+        location: &str,
+        isolated: bool,
+    ) -> Result<Box<dyn Platform + Send>, ServiceError> {
+        Ok(Box::new(super::usb::Usb4Platform::new(
+            location,
+            isolated,
+            self.usb4_approved.clone(),
+            self.tsc_hz,
+        )))
     }
 
     fn pages(&self) -> &'static dyn PageSource {

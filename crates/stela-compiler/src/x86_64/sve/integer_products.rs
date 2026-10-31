@@ -5,7 +5,7 @@ use crate::aarch64::Unsupported;
 use crate::aarch64::scalable::{ElementSize, Predication, VectorLength};
 use crate::aarch64::sve::integer_products::{Kind, Multiplier, Operand, Selection};
 use crate::x86_64::asm::Gpr::{Rax, Rcx, Rdx};
-use crate::x86_64::asm::{Code, Rm, Size, Unary};
+use crate::x86_64::asm::{Code, Rm, Size, Unary, vector_extensions};
 use crate::x86_64::isa::{ShiftOpcode, SimdOpcode as Host};
 use crate::x86_64::scalable::{load_z_chunk, read_predicate_mask, store_z_chunk};
 
@@ -313,12 +313,15 @@ fn multiply_low(code: &mut Code, element: ElementSize) {
     }
 }
 
-/// The checked dword multiply replaces the complete two-part SSE2 low-product
-/// recipe. Keep the baseline kernel shared with callers lacking SSE4.1.
+/// The checked dword and quadword multiplies (PMULLD, VPMULLQ) replace the
+/// complete partial-product recipes. Keep the baseline kernel shared with
+/// callers lacking them.
 fn multiply_low_for_target(code: &mut Code, element: ElementSize, target: TargetCpu) {
     if element == ElementSize::Word && target.supports(TargetCpu::Sse41) {
         Host::MultiplyLowDword.register(code, RESULT, RIGHT, target);
-    } else {
+    } else if element != ElementSize::Doubleword
+        || !vector_extensions::quadword_multiply(code, RESULT, RIGHT, target)
+    {
         multiply_low(code, element);
     }
 }

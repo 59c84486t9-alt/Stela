@@ -10,6 +10,8 @@ use std::{fs, path::Path, process::Command as Process};
 pub(super) struct Check {
     fixture: Option<network_check::Fixture>,
     url: Option<String>,
+    /// The TCP port a requested URL names, which the peer must have seen.
+    port: Option<u16>,
 }
 
 impl Check {
@@ -24,13 +26,23 @@ impl Check {
             .clone()
             .or_else(|| fixture.as_ref().map(|fixture| fixture.url.clone()));
         if let Some(url) = &url {
+            let https = url.starts_with("https://");
             ensure!(
-                url.starts_with("http://") && !url.contains(char::is_whitespace),
-                "the network check is one http:// URL"
+                (https || url.starts_with("http://")) && !url.contains(char::is_whitespace),
+                "the network check is one http:// or https:// URL"
+            );
+            ensure!(
+                !https || arguments.kvm,
+                "an https:// network check needs --kvm: native TLS dates certificates by the invariant TSC, which TCG does not offer"
             );
             options.push_str(&format!(" --network-check {url}"));
         }
-        Ok(Self { fixture, url })
+        let port = arguments
+            .network_check
+            .as_deref()
+            .map(network_check::port)
+            .transpose()?;
+        Ok(Self { fixture, url, port })
     }
 
     /// Check what the mount reported against the peer's log. The check's
@@ -57,7 +69,7 @@ impl Check {
         }
         let driver = expected_driver(arguments);
         Ok(self.url.as_ref().map(|url| {
-            network_check::verify(serial, self.fixture.as_ref(), driver, &peer)?;
+            network_check::verify(serial, self.fixture.as_ref(), self.port, driver, &peer)?;
             Ok(json!({
                 "passed": true,
                 "url": url,

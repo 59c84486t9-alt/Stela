@@ -100,6 +100,8 @@ global_asm!(
     "jne 90f",
     "testl $0x100, (stela_ap_mtrr_cap - stela_ap_start)(%ebp)",
     "jz 6f", // no fixed attributes to expose without MTRRcap.FIX
+    "testl ${amd_fixed_dram}, (stela_ap_syscfg - stela_ap_start)(%ebp)",
+    "jz 6f", // RdMem/WrMem have no effect without MtrrFixDramEn
     "mov %esi, %eax",
     "or ${amd_fixed_modify}, %eax", // MFDM: expose actual RdMem/WrMem for writes
     "wrmsr", // preserve every effective routing/non-memory control for now
@@ -132,7 +134,12 @@ global_asm!(
     "5: cmpl $0, (stela_ap_amd - stela_ap_start)(%ebp)",
     "je 7f",
     "mov ${amd_syscfg}, %ecx",
-    "mov (stela_ap_syscfg - stela_ap_start)(%ebp), %eax",
+    "rdmsr", // write only a change: a hypervisor may refuse SYSCFG writes
+    "cmp (stela_ap_syscfg - stela_ap_start)(%ebp), %eax",
+    "jne 8f",
+    "cmp (stela_ap_syscfg - stela_ap_start + 4)(%ebp), %edx",
+    "je 7f",
+    "8: mov (stela_ap_syscfg - stela_ap_start)(%ebp), %eax",
     "mov (stela_ap_syscfg - stela_ap_start + 4)(%ebp), %edx",
     "wrmsr", // complete known memory controls; retain identical opaque fields
     "7: mov $0x277, %ecx",
@@ -245,6 +252,7 @@ global_asm!(
     amd_edx = const amd::VENDOR[1],
     amd_ecx = const amd::VENDOR[2],
     amd_fixed_modify = const amd::FIXED_MODIFY,
+    amd_fixed_dram = const amd::FIXED_DRAM,
     amd_preserved = const !(amd::FIXED_MODIFY as u32),
     mtrr_stride = const core::mem::size_of::<Write>(),
     mtrr_bytes = const MAX_WRITABLE * core::mem::size_of::<Write>(),

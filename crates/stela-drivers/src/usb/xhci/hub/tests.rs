@@ -1,6 +1,6 @@
 extern crate std;
 use super::{model::*, *};
-use crate::bus::dma::RegionAllocator;
+use crate::bus::dma::{RegionAllocator, TestRegion};
 use alloc::collections::BTreeMap;
 
 pub(in super::super) fn controller(
@@ -51,10 +51,7 @@ fn fault_node(fault: Fault) -> Node {
 #[test]
 fn superspeed_cold_hub_uses_contexts_depth_power_routes_and_bulk_io() {
     for context in [32, 64] {
-        let mut backing = vec![0u64; 256 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: exclusive live backing remains held through all DMA.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(256 * 1024 * 8);
         let (mut controller, model) = controller(&mut dma, context, nodes());
         let mut failures = Vec::new();
         let devices = controller.enumerate(&mut dma, &mut failures);
@@ -143,10 +140,7 @@ fn nested_superspeed_hubs_preserve_five_route_nibbles_and_no_usb2_tt() {
             port.change = 0;
         }
     }
-    let mut backing = vec![0u64; 512 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: exclusive backing keeps every ancestor/child context and TD.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(512 * 1024 * 8);
     let (mut controller, model) = controller(&mut dma, 64, nodes);
     let mut failures = Vec::new();
     let devices = controller.enumerate(&mut dma, &mut failures);
@@ -181,10 +175,7 @@ fn superspeedplus_uses_bos_speed_ids_and_extended_status() {
         root.bos = Some(bos());
         root.ports.as_mut().unwrap()[0].extended = 0x11 | (lanes - 1) << 8 | (lanes - 1) << 12;
         nodes.get_mut(&1).unwrap().speed = SUPER_SPEED_PLUS;
-        let mut backing = vec![0u64; 256 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: all native model DMA remains live and exclusively owned.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(256 * 1024 * 8);
         let (mut controller, model) = controller(&mut dma, 32, nodes);
         let mut failures = Vec::new();
         let devices = controller.enumerate(&mut dma, &mut failures);
@@ -213,10 +204,7 @@ fn asymmetric_or_unknown_ssp_port_status_never_inherits_upstream_speed() {
         root.speed = SUPER_SPEED_PLUS;
         root.bos = Some(bos());
         root.ports.as_mut().unwrap()[0].extended = extended;
-        let mut backing = vec![0u64; 256 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: rejected child links cannot release or reuse kept DMA.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(256 * 1024 * 8);
         let (mut controller, model) = controller(&mut dma, 32, nodes);
         let mut failures = Vec::new();
         let devices = controller.enumerate(&mut dma, &mut failures);
@@ -258,10 +246,7 @@ fn hub_power_and_overcurrent_health_gate_all_downstream_admission() {
         root.hub_status = status;
         root.hub_change = change;
         root.after_power_status = after;
-        let mut backing = vec![0u64; 256 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: failed power admission keeps every controller/hub allocation.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(256 * 1024 * 8);
         let (mut controller, model) = controller(&mut dma, 32, nodes);
         let mut failures = Vec::new();
         let devices = controller.enumerate(&mut dma, &mut failures);
@@ -290,10 +275,7 @@ fn hub_power_and_overcurrent_health_gate_all_downstream_admission() {
 fn historical_local_power_change_is_acknowledged_and_health_rechecked() {
     let mut nodes = nodes();
     nodes.get_mut(&0).unwrap().hub_change = 1;
-    let mut backing = vec![0u64; 256 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: all hub and child DMA is held by the fixture's owners.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(256 * 1024 * 8);
     let (mut controller, model) = controller(&mut dma, 32, nodes);
     let mut failures = Vec::new();
     let devices = controller.enumerate(&mut dma, &mut failures);
@@ -327,10 +309,7 @@ fn port_admission_refuses_power_lifecycle_reset_and_status_failures() {
     ] {
         let mut nodes = nodes();
         nodes.insert(0, fault_node(fault));
-        let mut backing = vec![0u64; 256 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: allocations remain held even after uncertain operations.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(256 * 1024 * 8);
         let (mut controller, model) = controller(&mut dma, 32, nodes);
         let mut failures = Vec::new();
         let devices = controller.enumerate(&mut dma, &mut failures);
@@ -363,10 +342,7 @@ fn inactive_and_failed_hot_reset_require_real_bounded_warm_reset() {
     for fault in [Fault::Inactive, Fault::HotThenWarm] {
         let mut nodes = nodes();
         nodes.insert(0, fault_node(fault));
-        let mut backing = vec![0u64; 256 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: fixture keeps complete DMA ownership through every reset.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(256 * 1024 * 8);
         let (mut controller, model) = controller(&mut dma, 32, nodes);
         let mut failures = Vec::new();
         let devices = controller.enumerate(&mut dma, &mut failures);
@@ -392,10 +368,7 @@ fn inactive_and_failed_hot_reset_require_real_bounded_warm_reset() {
 fn disconnect_during_reset_does_not_publish_a_child_or_recycle_hub_owners() {
     let mut nodes = nodes();
     nodes.insert(0, fault_node(Fault::Disconnect));
-    let mut backing = vec![0u64; 256 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: the disconnected hub's original DMA remains held.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(256 * 1024 * 8);
     let (mut controller, model) = controller(&mut dma, 32, nodes);
     let mut failures = Vec::new();
     let devices = controller.enumerate(&mut dma, &mut failures);
@@ -421,10 +394,7 @@ fn disconnect_during_reset_does_not_publish_a_child_or_recycle_hub_owners() {
 #[test]
 fn failed_or_uncertain_hub_configuration_never_sends_depth_or_power() {
     for silent in [false, true] {
-        let mut backing = vec![0u64; 256 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: all rings/contexts remain held after failed Configure.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(256 * 1024 * 8);
         let (mut controller, model) = controller(&mut dma, 32, nodes());
         if silent {
             model.borrow_mut().silent = Some((CONFIGURE_ENDPOINT, 1));
@@ -456,10 +426,7 @@ fn failed_or_uncertain_hub_configuration_never_sends_depth_or_power() {
 fn usb2_hub_refactor_preserves_full_speed_child_transaction_translator() {
     let mut nodes = BTreeMap::from([(0, Node::hub(HIGH_SPEED, 1)), (1, Node::leaf(FULL_SPEED))]);
     nodes.get_mut(&0).unwrap().ports.as_mut().unwrap()[0].child_speed = FULL_SPEED;
-    let mut backing = vec![0u64; 256 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: complete USB2 parent/child contexts remain live and exclusive.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(256 * 1024 * 8);
     let (mut controller, model) = controller(&mut dma, 32, nodes);
     let mut failures = Vec::new();
     let devices = controller.enumerate(&mut dma, &mut failures);
@@ -537,10 +504,7 @@ fn malformed_hub_descriptors_and_bos_never_reach_configuration_or_child_allocati
         let root = nodes.get_mut(&0).unwrap();
         root.descriptor = descriptor;
         root.bos = bos;
-        let mut backing = vec![0u64; 256 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: even malformed wire inputs only access kept fixture DMA.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(256 * 1024 * 8);
         let (mut controller, model) = controller(&mut dma, 32, nodes);
         let mut failures = Vec::new();
         let devices = controller.enumerate(&mut dma, &mut failures);
@@ -573,10 +537,7 @@ fn failed_later_port_preserves_prior_child_dma_and_does_not_authorize_behind_hub
         .unwrap()
         .push(PortModel::connected());
     nodes.get_mut(&0).unwrap().ports.as_mut().unwrap()[1].fault = Fault::Reset;
-    let mut backing = vec![0u64; 256 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: the already admitted child and failed port's hub keep owners.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(256 * 1024 * 8);
     let (mut controller, model) = controller(&mut dma, 32, nodes);
     let mut failures = Vec::new();
     let devices = controller.enumerate(&mut dma, &mut failures);
@@ -658,10 +619,7 @@ fn invalid_route_and_retired_or_foreign_hub_owner_refuse_before_transport_effect
     assert!(child(1, root, 0, SUPER_SPEED).is_err());
     assert!(child(1, root, 16, SUPER_SPEED).is_err());
     assert!(child(1, root, 1, HIGH_SPEED).is_err());
-    let mut backing = vec![0u64; 256 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: all addressed but unconfigured state remains held.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(256 * 1024 * 8);
     let (mut controller, model) = controller(&mut dma, 32, nodes());
     let mut device = controller
         .identify(root, "hub model port 1".into(), &mut dma)
@@ -784,10 +742,7 @@ fn superspeed_port_connection_is_debounced_before_any_reset_or_child_publication
         (true, false),
     ]
     .into();
-    let mut backing = vec![0u64; 256 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: exclusive fixture RAM remains live until all controller owners drop.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(256 * 1024 * 8);
     let (mut controller, model) = controller(&mut dma, 64, nodes);
     let mut failures = Vec::new();
     let devices = controller.enumerate(&mut dma, &mut failures);
@@ -814,10 +769,7 @@ fn superspeed_unsettled_connection_or_repeated_csc_never_resets_or_addresses_chi
         let mut nodes = nodes();
         let port = &mut nodes.get_mut(&0).unwrap().ports.as_mut().unwrap()[0];
         port.connection_samples = (0..200).map(|i| (!toggles || i % 2 == 0, true)).collect();
-        let mut backing = vec![0u64; 256 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: exclusive fixture RAM remains live until all controller owners drop.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(256 * 1024 * 8);
         let (mut controller, model) = controller(&mut dma, 32, nodes);
         let mut failures = Vec::new();
         let devices = controller.enumerate(&mut dma, &mut failures);
@@ -850,10 +802,7 @@ fn superspeed_reset_waits_for_reconnection_and_ignores_reset_connection_change()
     ] {
         let mut nodes = nodes();
         nodes.insert(0, fault_node(fault));
-        let mut backing = vec![0u64; 256 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: fixture RAM and all contexts remain held through completion.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(256 * 1024 * 8);
         let (mut controller, model) = controller(&mut dma, 64, nodes);
         let mut failures = Vec::new();
         let devices = controller.enumerate(&mut dma, &mut failures);
@@ -939,10 +888,7 @@ fn superspeed_retries_ordinary_disabled_or_not_ready_hot_resets() {
     for fault in [Fault::FirstResetDisabled, Fault::FirstResetNotU0] {
         let mut nodes = nodes();
         nodes.insert(0, fault_node(fault));
-        let mut backing = vec![0u64; 256 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: fixture RAM remains exclusively owned through all reset attempts.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(256 * 1024 * 8);
         let (mut controller, model) = controller(&mut dma, 32, nodes);
         let mut failures = Vec::new();
         let devices = controller.enumerate(&mut dma, &mut failures);
@@ -983,10 +929,7 @@ fn bus_powered_hub_charges_each_budget_once() {
         leaf.max_power = 12;
         nodes.insert(port, leaf);
     }
-    let mut backing = vec![0u64; 256 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: fixture backing is exclusively kept through every DMA access.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(256 * 1024 * 8);
     let (mut controller, model) = controller(&mut dma, 64, nodes);
     let mut failures = Vec::new();
     let devices = controller.enumerate(&mut dma, &mut failures);
@@ -1022,10 +965,7 @@ fn bus_powered_hub_never_powers_ports_without_a_current_reservation() {
     for port in 1..=7 {
         nodes.insert(port, Node::leaf(SUPER_SPEED));
     }
-    let mut backing = vec![0u64; 512 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: all hub and child contexts remain held in exclusive fixture RAM.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(512 * 1024 * 8);
     let (mut controller, model) = controller(&mut dma, 32, nodes);
     let mut failures = Vec::new();
     let devices = controller.enumerate(&mut dma, &mut failures);
@@ -1092,10 +1032,7 @@ fn bus_powered_child_configuration_cannot_bypass_the_one_unit_limit() {
     let mut leaf = Node::leaf(SUPER_SPEED);
     leaf.max_power = 20; //160mA >150mA parent contract.
     let nodes = BTreeMap::from([(0, bus_powered_hub(1)), (1, leaf)]);
-    let mut backing = vec![0u64; 256 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: controller and every TD reference this exclusive live RAM.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(256 * 1024 * 8);
     let (mut controller, model) = controller(&mut dma, 64, nodes);
     let mut failures = Vec::new();
     let devices = controller.enumerate(&mut dma, &mut failures);
@@ -1140,10 +1077,7 @@ fn consecutive_bus_hubs_refuse_but_self_powered_downstream_hubs_keep_local_capac
         let mut leaf = Node::leaf(SUPER_SPEED);
         leaf.max_power = 100;
         let nodes = BTreeMap::from([(0, bus_powered_hub(1)), (1, middle), (0x11, leaf)]);
-        let mut backing = vec![0u64; 512 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: all nested parent and child DMA owners keep the backing.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(512 * 1024 * 8);
         let (mut controller, model) = controller(&mut dma, 64, nodes);
         let mut failures = Vec::new();
         let devices = controller.enumerate(&mut dma, &mut failures);
@@ -1182,10 +1116,7 @@ fn failed_or_uncertain_raw_configuration_keeps_maximum_draw_until_ack() {
         let mut leaf = Node::leaf(SUPER_SPEED);
         leaf.max_power = 100;
         let nodes = BTreeMap::from([(0, leaf)]);
-        let mut backing = vec![0u64; 256 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: DMA remains held across control cancellation and retries.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(256 * 1024 * 8);
         let (mut controller, model) = controller(&mut dma, 32, nodes);
         let mut failures = Vec::new();
         let devices = controller.enumerate(&mut dma, &mut failures);
@@ -1226,10 +1157,7 @@ fn usb2_bus_hub_uses_two_ma_configuration_units_and_hundred_ma_child_limits() {
     let mut second = Node::leaf(FULL_SPEED);
     second.max_power = 51;
     let nodes = BTreeMap::from([(0, hub), (1, first), (2, second)]);
-    let mut backing = vec![0u64; 256 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: the USB2 TT tree keeps the fixture contexts and payloads.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(256 * 1024 * 8);
     let (mut controller, model) = controller(&mut dma, 32, nodes);
     let mut failures = Vec::new();
     let devices = controller.enumerate(&mut dma, &mut failures);
@@ -1266,10 +1194,7 @@ fn root_power_loss_quarantines_old_handles_and_unknown_power_never_grants_curren
         PP | CCS | PED | (1 << 3), // Over-current with unknown wire speed.
     ] {
         let nodes = BTreeMap::from([(0, Node::leaf(SUPER_SPEED))]);
-        let mut backing = vec![0u64; 256 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: root owner and all DMA remain live across power failure.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(256 * 1024 * 8);
         let (mut controller, model) = controller(&mut dma, 32, nodes);
         let mut failures = Vec::new();
         let devices = controller.enumerate(&mut dma, &mut failures);
@@ -1302,10 +1227,7 @@ fn root_power_loss_quarantines_old_handles_and_unknown_power_never_grants_curren
         );
     }
     let nodes = BTreeMap::from([(0, Node::leaf(SUPER_SPEED))]);
-    let mut backing = vec![0u64; 256 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: no device is granted DMA until its root protocol checks.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(256 * 1024 * 8);
     let (mut controller, model) = controller(&mut dma, 32, nodes);
     controller.port_major[0] = 0;
     let before = (model.borrow().mmio_reads, model.borrow().mmio_writes);
@@ -1345,10 +1267,7 @@ fn hub_power_contract_uses_status_after_configuration_ack() {
             let mut leaf = Node::leaf(speed);
             leaf.max_power = 100; // 200/800mA needs a self-powered parent.
             let nodes = BTreeMap::from([(0, hub), (1, leaf)]);
-            let mut backing = vec![0u64; 256 * 1024];
-            let start = backing.as_mut_ptr() as u64;
-            // SAFETY: each full USB2/SS tree owns this exclusive fixture RAM.
-            let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+            let mut dma = TestRegion::new(256 * 1024 * 8);
             let (mut controller, model) = controller(&mut dma, 64, nodes);
             let mut failures = Vec::new();
             let devices = controller.enumerate(&mut dma, &mut failures);
@@ -1384,10 +1303,7 @@ fn hub_endpoint_teardown_does_not_authorize_reconfiguration_of_live_children() {
         let mut hub = Node::hub(speed, 1);
         hub.max_power = 10;
         let nodes = BTreeMap::from([(0, hub), (1, Node::leaf(speed))]);
-        let mut backing = vec![0u64; 256 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: all old hub/child DMA owners keep this exclusive RAM.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(256 * 1024 * 8);
         let (mut controller, model) = controller(&mut dma, 32, nodes);
         let mut failures = Vec::new();
         let devices = controller.enumerate(&mut dma, &mut failures);
@@ -1438,10 +1354,7 @@ fn hub_endpoint_teardown_does_not_authorize_reconfiguration_of_live_children() {
 fn raw_port_power_revalidates_root_and_hub_health_before_authorizing_current() {
     for root_lost in [false, true] {
         let nodes = BTreeMap::from([(0, Node::hub(SUPER_SPEED, 1)), (1, Node::leaf(SUPER_SPEED))]);
-        let mut backing = vec![0u64; 256 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: uncertain power never frees any fixture allocation/alias.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(256 * 1024 * 8);
         let (mut controller, model) = controller(&mut dma, 64, nodes);
         let mut failures = Vec::new();
         let devices = controller.enumerate(&mut dma, &mut failures);
@@ -1520,10 +1433,7 @@ fn usb2_hub_descriptors_need_only_device_removable_like_get_hub_descriptor() {
             port.change = 0;
         }
         let nodes = BTreeMap::from([(0, hub)]);
-        let mut backing = vec![0u64; 256 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: the model consumes DMA from kept backing only.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(256 * 1024 * 8);
         let (mut c, model) = controller(&mut dma, 32, nodes);
         let mut failures = Vec::new();
         assert_eq!(c.enumerate(&mut dma, &mut failures).len(), 1);
@@ -1544,10 +1454,7 @@ fn usb2_hub_descriptors_need_only_device_removable_like_get_hub_descriptor() {
     ] {
         let mut hub = Node::hub(HIGH_SPEED, 1);
         hub.descriptor = Some(bytes);
-        let mut backing = vec![0u64; 256 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: malformed wire data cannot alter the fixture range.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(256 * 1024 * 8);
         let (mut c, model) = controller(&mut dma, 64, BTreeMap::from([(0, hub)]));
         let mut failures = Vec::new();
         assert_eq!(c.enumerate(&mut dma, &mut failures).len(), 1);
@@ -1560,10 +1467,7 @@ fn usb2_hub_descriptors_need_only_device_removable_like_get_hub_descriptor() {
 fn kept_hub_status_uses_same_reserved_field_contract_as_cold_enumeration() {
     for speed in [HIGH_SPEED, SUPER_SPEED] {
         let nodes = BTreeMap::from([(0, Node::hub(speed, 1)), (1, Node::leaf(speed))]);
-        let mut backing = vec![0u64; 256 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: raw status replies target only the hub EP0 DMA.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(256 * 1024 * 8);
         let (mut c, model) = controller(&mut dma, 32, nodes);
         let mut failures = Vec::new();
         c.enumerate(&mut dma, &mut failures);
@@ -1638,10 +1542,7 @@ fn usb2_multi_tt_validates_the_acknowledged_original_alternate_before_powering_c
                 port.change = 0;
             }
             let nodes = BTreeMap::from([(0, hub), (1, Node::leaf(HIGH_SPEED))]);
-            let mut backing = vec![0u64; 256 * 1024];
-            let start = backing.as_mut_ptr() as u64;
-            // SAFETY: descriptors and ACK faults cannot outlive fixture DMA.
-            let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+            let mut dma = TestRegion::new(256 * 1024 * 8);
             let (mut c, model) = controller(&mut dma, context, nodes);
             let mut failures = Vec::new();
             let devices = c.enumerate(&mut dma, &mut failures);

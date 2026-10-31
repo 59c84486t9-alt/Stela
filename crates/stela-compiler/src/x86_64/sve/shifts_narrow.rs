@@ -8,6 +8,7 @@ use crate::{
         sve::shifts_narrow::{Kind, Operand, Part},
     },
     x86_64::{
+        asm::vector_extensions,
         isa::{ShiftOpcode as Shift, SimdOpcode as Host},
         scalable::{load_z_chunk, store_z_chunk},
     },
@@ -131,7 +132,11 @@ fn narrow_projected(
         destination: 0,
         shift: amount,
     };
-    if small == DWORD_BITS && !matches!(kind, Kind::ShiftRight | Kind::RoundRight) {
+    // AVX-512 saturates quadwords in vectors; SSE goes lane by lane.
+    if small == DWORD_BITS
+        && !matches!(kind, Kind::ShiftRight | Kind::RoundRight)
+        && !vector_extensions::saturating_narrow_supported(QWORD_BITS / BYTE_BITS, target)
+    {
         scalar_narrow_qwords(code, operand);
         if projection == NarrowProjection::Packed {
             compact_even_lanes(code, small);
@@ -332,7 +337,7 @@ fn signed_output(kind: Kind) -> bool {
     )
 }
 
-fn shift_narrow_input(code: &mut Code, operand: Operand, wide: u8) {
+fn shift_narrow_input(code: &mut Code, operand: Operand, wide: u8, target: TargetCpu) {
     if operand.kind.is_extract() {
         return;
     }
@@ -351,17 +356,24 @@ fn shift_narrow_input(code: &mut Code, operand: Operand, wide: u8) {
         );
         binary(code, Host::And, TEMP_XMM, MASK_XMM);
     }
-    shift(
-        code,
-        wide,
-        if signed_input(operand.kind) {
-            Direction::Arithmetic
-        } else {
-            Direction::Right
-        },
-        SOURCE_XMM,
-        operand.shift,
-    );
+    if wide == QWORD_BITS && signed_input(operand.kind) {
+        // Only AVX-512 hosts narrow signed quadwords in vectors.
+        let shifted =
+            vector_extensions::arithmetic_qword_right(code, SOURCE_XMM, operand.shift, target);
+        debug_assert!(shifted, "the narrow checked the extension");
+    } else {
+        shift(
+            code,
+            wide,
+            if signed_input(operand.kind) {
+                Direction::Arithmetic
+            } else {
+                Direction::Right
+            },
+            SOURCE_XMM,
+            operand.shift,
+        );
+    }
     if rounded(operand.kind) {
         binary(
             code,
@@ -385,12 +397,41 @@ fn narrow(
     target: TargetCpu,
 ) {
     let wide = 2 * small;
-    shift_narrow_input(code, operand, wide);
+    shift_narrow_input(code, operand, wide, target);
     if matches!(operand.kind, Kind::ShiftRight | Kind::RoundRight) {
         constant(code, MASK_XMM, low_mask(small));
         binary(code, Host::And, SOURCE_XMM, MASK_XMM);
         if projection == NarrowProjection::Packed {
             compact_even_lanes(code, small);
+        }
+        return;
+    }
+    // Signed B and H sources keep their single PACKSS or PACKUS.
+    if (small == DWORD_BITS || !signed_input(operand.kind))
+        && vector_extensions::saturating_narrow(
+            code,
+            wide / BYTE_BITS,
+            [signed_input(operand.kind), signed_output(operand.kind)],
+            TEMP_XMM,
+            SOURCE_XMM,
+            None,
+            target,
+        )
+    {
+        // Zero-extending the packed lanes places them in even positions.
+        match (projection, small) {
+            (NarrowProjection::Packed, _) => {
+                binary(code, Host::MoveAligned, SOURCE_XMM, TEMP_XMM);
+            }
+            (NarrowProjection::Interleaved, BYTE_BITS) => {
+                Host::ZeroExtendByteToWord.register(code, SOURCE_XMM, TEMP_XMM, target);
+            }
+            (NarrowProjection::Interleaved, WORD_BITS) => {
+                Host::ZeroExtendWordToDword.register(code, SOURCE_XMM, TEMP_XMM, target);
+            }
+            (NarrowProjection::Interleaved, _) => {
+                Host::ZeroExtendDwordToQword.register(code, SOURCE_XMM, TEMP_XMM, target);
+            }
         }
         return;
     }

@@ -1,6 +1,6 @@
 //! Byte dot products and 2x8-by-8x2 matrix multiply-accumulate.
 use super::{Host, commit, packed, read_vector, shuffle};
-use crate::x86_64::asm::Code;
+use crate::x86_64::asm::{Code, vector_extensions};
 use crate::{
     TargetCpu,
     aarch64::simd::{
@@ -106,8 +106,62 @@ fn matrix_ssse3(code: &mut Code, left_signed: bool, right_signed: bool, target: 
     Host::HorizontalAddDword.register(code, RESULT, LEFT_HIGH, target);
 }
 
+/// VNNI sums the products in XMM4, then adds the old destination; the matrix
+/// forms gather each result's two dword groups with the shuffles of
+/// [`matrix_sse2`].
+fn byte_dot(code: &mut Code, operand: &Operand, signed: [bool; 2], target: TargetCpu) {
+    const SUM: u8 = EXTENSION_MASK;
+    match operand.kind {
+        Kind::Matrix(_) => {
+            read_vector(code, operand.left, ORIGINAL_LEFT);
+            read_vector(code, operand.right, ORIGINAL_RIGHT);
+            for (register, source, control) in [
+                (LEFT, ORIGINAL_LEFT, MATRIX_LEFT_LOW),
+                (RIGHT, ORIGINAL_RIGHT, MATRIX_RIGHT_LOW),
+                (LEFT_HIGH, ORIGINAL_LEFT, MATRIX_LEFT_HIGH),
+                (RIGHT_HIGH, ORIGINAL_RIGHT, MATRIX_RIGHT_HIGH),
+            ] {
+                shuffle(code, register, source, control);
+            }
+            vector_extensions::byte_dot(
+                code,
+                SUM,
+                &[[LEFT, RIGHT], [LEFT_HIGH, RIGHT_HIGH]],
+                signed,
+                [ORIGINAL_LEFT, ORIGINAL_RIGHT],
+                target,
+            );
+        }
+        Kind::Dot(_) => {
+            read_vector(code, operand.left, LEFT);
+            read_vector(code, operand.right, RIGHT);
+            if let Some(index) = operand.index {
+                shuffle(code, RIGHT, RIGHT, index * DOT_GROUP_BROADCAST);
+            }
+            vector_extensions::byte_dot(
+                code,
+                SUM,
+                &[[LEFT, RIGHT]],
+                signed,
+                [LEFT_HIGH, RIGHT_HIGH],
+                target,
+            );
+        }
+    }
+    read_vector(code, operand.destination, OLD_DESTINATION);
+    packed(code, Host::AddDword, SUM, OLD_DESTINATION);
+    if operand.shape == Shape::Vector64 {
+        packed(code, Host::MoveQword, SUM, SUM);
+    }
+    commit(code, operand.destination, SUM);
+}
+
 pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu) {
     let (left_signed, right_signed) = operand.kind.signedness();
+    if vector_extensions::byte_dot_supported(target) {
+        byte_dot(code, operand, [left_signed, right_signed], target);
+        return;
+    }
     match operand.kind {
         Kind::Matrix(_) if target.supports(TargetCpu::Ssse3) => {
             read_vector(code, operand.left, LEFT);

@@ -131,9 +131,11 @@ pub fn emit(code: &mut Code, operand: Operand, length: VectorLength, target: Tar
                 Mapping::Scalar => {
                     scalar::chunk(code, operand.kind, operand.element_size, operand.count)
                 }
-                Mapping::Packed => variable::chunk(code, operand.kind, operand.element_size),
+                Mapping::Packed => {
+                    variable::chunk(code, operand.kind, operand.element_size, target)
+                }
                 Mapping::PackedSaturating => {
-                    saturating::chunk(code, operand.kind, operand.element_size)
+                    saturating::chunk(code, operand.kind, operand.element_size, target)
                 }
             }
         }
@@ -167,15 +169,16 @@ fn immediate_chunk(code: &mut Code, operand: Operand, target: TargetCpu) {
     let lane = operand.element_size.bytes() as u8;
     let bits = lane * BITS_PER_BYTE;
     match operand.kind {
-        Kind::LogicalLeft => logical_shift(code, 0, lane, amount, true),
-        Kind::LogicalRight => logical_shift(code, 0, lane, amount, false),
-        Kind::ArithmeticRight => right_shift(code, 0, lane, amount, true),
+        Kind::LogicalLeft => logical_shift(code, 0, lane, amount, true, target),
+        Kind::LogicalRight => logical_shift(code, 0, lane, amount, false, target),
+        Kind::ArithmeticRight => right_shift(code, 0, lane, amount, true, target),
         Kind::RoundRightSigned | Kind::RoundRightUnsigned => rounded_right(
             code,
             lane,
             amount,
             operand.kind == Kind::RoundRightSigned,
             true,
+            target,
         ),
         Kind::AccumulateSigned
         | Kind::AccumulateUnsigned
@@ -189,7 +192,7 @@ fn immediate_chunk(code: &mut Code, operand: Operand, target: TargetCpu) {
                 operand.kind,
                 Kind::RoundAccumulateSigned | Kind::RoundAccumulateUnsigned
             );
-            rounded_right(code, lane, amount, signed, round);
+            rounded_right(code, lane, amount, signed, round, target);
             let add = match operand.element_size {
                 ElementSize::Byte => Host::AddByte,
                 ElementSize::Halfword => Host::AddWord,
@@ -201,9 +204,9 @@ fn immediate_chunk(code: &mut Code, operand: Operand, target: TargetCpu) {
         }
         Kind::InsertLeft => {
             if amount != 0 {
-                logical_shift(code, 6, lane, bits - amount, true);
-                logical_shift(code, 6, lane, bits - amount, false);
-                logical_shift(code, 0, lane, amount, true);
+                logical_shift(code, 6, lane, bits - amount, true, target);
+                logical_shift(code, 6, lane, bits - amount, false, target);
+                logical_shift(code, 0, lane, amount, true, target);
                 packed(code, Host::Or, 0, 6, target);
             }
         }
@@ -211,9 +214,9 @@ fn immediate_chunk(code: &mut Code, operand: Operand, target: TargetCpu) {
             if amount == bits {
                 packed(code, Host::MoveAligned, 0, 6, target);
             } else {
-                logical_shift(code, 6, lane, bits - amount, false);
-                logical_shift(code, 6, lane, bits - amount, true);
-                logical_shift(code, 0, lane, amount, false);
+                logical_shift(code, 6, lane, bits - amount, false, target);
+                logical_shift(code, 6, lane, bits - amount, true, target);
+                logical_shift(code, 0, lane, amount, false, target);
                 packed(code, Host::Or, 0, 6, target);
             }
         }
@@ -221,8 +224,8 @@ fn immediate_chunk(code: &mut Code, operand: Operand, target: TargetCpu) {
             packed(code, Host::Xor, 0, 1, target);
             if amount != bits {
                 packed(code, Host::MoveAligned, 1, 0, target);
-                logical_shift(code, 0, lane, amount, false);
-                logical_shift(code, 1, lane, bits - amount, true);
+                logical_shift(code, 0, lane, amount, false, target);
+                logical_shift(code, 1, lane, bits - amount, true, target);
                 packed(code, Host::Or, 0, 1, target);
             }
         }

@@ -80,9 +80,14 @@ pub(super) fn command(arguments: &Run, options: MachineOptions<'_>) -> Process {
     let mut command = Process::new(qemu);
     // A USB's startup choices take a keyboard. System mode places the guest
     // beside the window with LA57, which the selected CPU exposes unless
-    // `--no-la57` hides it.
+    // `--no-la57` hides it. KVM's host model hides the invariant TSC, as
+    // migration could change its rate; a run never migrates, and the mount
+    // counts time and dates TLS certificates by it, as on a PC.
     let cpu = qemu_cpu(
-        arguments.cpu.as_deref().or(arguments.kvm.then_some("host")),
+        arguments
+            .cpu
+            .as_deref()
+            .or(arguments.kvm.then_some("host,+invtsc")),
         arguments.no_la57,
         usb || system || arguments.host_check(),
     );

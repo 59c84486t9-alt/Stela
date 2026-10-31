@@ -29,4 +29,5 @@ stela-fingerprint = { path = "../stela-fingerprint" }
 
 [dev-dependencies]
 anyhow.workspace = true
+stela-compiler = { path = "../stela-compiler", features = ["test-support"] }
 stela-contracts = { path = "../stela-contracts", features = ["test-support"] }

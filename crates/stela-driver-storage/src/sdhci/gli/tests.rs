@@ -1,6 +1,9 @@
 //! GL9750 native card/register and source-oracle regressions.
 use super::*;
-use crate::{bus::dma::RegionAllocator, sdhci::model::*};
+use crate::{
+    bus::dma::{RegionAllocator, TestRegion},
+    sdhci::model::*,
+};
 use alloc::{collections::BTreeMap, vec};
 
 struct Bank {
@@ -246,10 +249,7 @@ fn host(dma: &mut dyn DmaAllocator) -> (Host, Rc<RefCell<Hardware>>, Rc<RefCell<
 
 #[test]
 fn native_gl9750_phy_pll_real_voltage_tuning_and_pio_block_io() {
-    let mut backing = vec![0u64; 128 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: payload and controller allocations outlive every card alias.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(128 * 1024 * 8);
     let (mut host, card, bank) = host(&mut dma);
     let mut disk = host.poll().unwrap().unwrap();
     assert_eq!(disk.info().timing, Timing::Sdr104);
@@ -279,10 +279,7 @@ fn native_gl9750_phy_pll_real_voltage_tuning_and_pio_block_io() {
 #[test]
 fn native_gl9750_second_rx_polarity_requires_real_first_phase_retirement() {
     for timeout in [false, true] {
-        let mut backing = vec![0u64; 128 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: failed first-phase effects keep DMA/controller ownership.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(128 * 1024 * 8);
         let (mut host, card, bank) = host(&mut dma);
         bank.borrow_mut().first_polarity_bad = !timeout;
         bank.borrow_mut().first_polarity_timeout = timeout;
@@ -305,10 +302,7 @@ fn native_gl9750_second_rx_polarity_requires_real_first_phase_retirement() {
 
 #[test]
 fn native_gl9750_protected_register_failure_closes_window_and_fences_aliases() {
-    let mut backing = vec![0u64; 128 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: every old card and failed register epoch keeps original backing.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(128 * 1024 * 8);
     let (mut host, _, bank) = host(&mut dma);
     let mut disk = host.poll().unwrap().unwrap();
     bank.borrow_mut().ignore = Some(MISC);
@@ -336,10 +330,7 @@ fn native_gl9750_protected_register_failure_closes_window_and_fences_aliases() {
 
 #[test]
 fn native_gl9750_phase_timeout_preserves_primary_and_failed_reset_without_reusing_aliases() {
-    let mut backing = vec![0u64; 128 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: quarantined controller and both stale aliases keep all backing.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(128 * 1024 * 8);
     let (mut host, _, bank) = host(&mut dma);
     let mut disk = host.poll().unwrap().unwrap();
     let mut old = disk.clone();
@@ -364,10 +355,7 @@ fn native_gl9750_phase_timeout_preserves_primary_and_failed_reset_without_reusin
 
 #[test]
 fn native_gl9750_both_polarity_timeouts_keep_timeout_and_each_card_stop_ack() {
-    let mut backing = vec![0u64; 128 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: both timed-out native/card tasks keep their original allocations.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(128 * 1024 * 8);
     let (mut host, card, bank) = host(&mut dma);
     bank.borrow_mut().both_polarities_timeout = true;
     assert_eq!(host.poll().err(), Some(BlockError::Timeout));
@@ -394,10 +382,7 @@ fn native_gl9750_both_polarity_timeouts_keep_timeout_and_each_card_stop_ack() {
 
 #[test]
 fn native_gl9750_missing_v4_mode_ack_refuses_before_card_commands() {
-    let mut backing = vec![0u64; 128 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: rejected mode programming never publishes a controller command.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(128 * 1024 * 8);
     let (mut host, card, bank) = host(&mut dma);
     bank.borrow_mut().v4_stuck = true;
     assert!(host.poll().is_err());
@@ -419,10 +404,7 @@ fn dma_host(
 
 #[test]
 fn native_gl9750_normal_shutdown_stops_vendor_pll_before_card_rail_off() {
-    let mut backing = vec![0u64; 128 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: the original card and all aliases keep their model DMA RAM.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(128 * 1024 * 8);
     let (mut host, card, bank) = host(&mut dma);
     let mut disk = host.poll().unwrap().unwrap();
     assert_ne!(*bank.borrow().words.get(&PLL).unwrap() & DIRECT, 0);
@@ -483,10 +465,7 @@ fn native_gl9750_v4_adma_64bit_legacy_and_modern_capabilities_transfer_real_payl
 
 #[test]
 fn native_gl9750_uncertain_dma_grant_never_posts_a_command_and_keeps_failed_owner() {
-    let mut backing = vec![0u64; 128 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: no native grant failure can release the original DMA allocations.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(128 * 1024 * 8);
     let (mut host, _, bank) = dma_host(&mut dma, 4, 1 << 27);
     let mut disk = host.poll().unwrap().unwrap();
     let mut old = disk.clone();
@@ -505,11 +484,7 @@ fn native_gl9750_uncertain_dma_grant_never_posts_a_command_and_keeps_failed_owne
 
 #[test]
 fn native_gl9750_ignored_dma_selection_cannot_publish_a_dma_command_or_output() {
-    let mut backing = vec![0u64; 128 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: ignored controller configuration keeps original descriptor and
-    // payload allocations kept, and publishes no data command.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(128 * 1024 * 8);
     let (mut host, card, bank) = dma_host(&mut dma, 4, 1 << 27);
     let mut disk = host.poll().unwrap().unwrap();
     let mut old = disk.clone();
@@ -543,10 +518,7 @@ fn native_gl9750_ignored_dma_selection_cannot_publish_a_dma_command_or_output() 
 
 #[test]
 fn gl9750_dma_error_keeps_primary_failure() {
-    let mut backing = vec![0u64; 128 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: failed DMA retirement keeps every descriptor/payload backing live.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(128 * 1024 * 8);
     let (mut host, card, bank) = dma_host(&mut dma, 4, 1 << 27);
     let mut disk = host.poll().unwrap().unwrap();
     card.borrow_mut().data_error = true;
@@ -625,11 +597,7 @@ fn native_gl9750_v4_adma32_uses_real_low_address_descriptor_and_payload_pages() 
 
 #[test]
 fn native_gl9750_mmc_adma_cache_flush_and_poweroff_preserve_the_real_card_lifecycle() {
-    let mut backing = vec![0u64; 128 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: the MMC card and all aliases keep the modeled DMA RAM
-    // until acknowledged power-off and controller retirement have completed.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(128 * 1024 * 8);
     let (mut host, card, bank) = host(&mut dma);
     *card.borrow_mut() = Hardware::new(Kind::Mmc, true);
     card.borrow_mut().version = 4;
@@ -814,10 +782,7 @@ fn native_gl9750_pci_dma_grant_uses_acknowledged_word_stores_and_never_regrants_
 
 #[test]
 fn native_gl9750_pci_power_cycle_restores_bars_and_masks_source_aer_event() {
-    let mut backing = vec![0u64; 128 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: PCI source model and native controller keep all allocation epochs.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(128 * 1024 * 8);
     let (host, card, bank) = host(&mut dma);
     drop(host);
     let mut registers = PortModel {
@@ -846,10 +811,7 @@ fn native_gl9750_pci_power_cycle_restores_bars_and_masks_source_aer_event() {
 #[test]
 fn native_gl9750_pci_failed_power_identity_and_aer_ack_are_explicit() {
     for failure in 1..=5 {
-        let mut backing = vec![0u64; 128 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: failed admission publishes no DMA and preserves all model owners.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(128 * 1024 * 8);
         let (host, card, bank) = host(&mut dma);
         drop(host);
         let mut registers = PortModel {
@@ -894,10 +856,7 @@ fn native_gl9750_pci_failed_power_identity_and_aer_ack_are_explicit() {
 
 #[test]
 fn native_gl9750_embedded_aer_capability_cannot_authorize_configuration_writes() {
-    let mut backing = vec![0u64; 128 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: rejected capability inventories never enter controller effects.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(128 * 1024 * 8);
     let (host, card, bank) = host(&mut dma);
     drop(host);
     let mut registers = PortModel {
@@ -1018,12 +977,7 @@ fn unchanged_linux_gl9750_phy_clocks_and_two_polarity_tuning_match_native() {
                 assert_eq!(registers.read16(CLOCK), values[7] as u16, "{line}");
             }
             "T" => {
-                let mut backing = vec![0u64; 128 * 1024];
-                let start = backing.as_mut_ptr() as u64;
-                // SAFETY: each complete native card initialization keeps its
-                // command/payload allocations through final retirement.
-                let mut dma =
-                    unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+                let mut dma = TestRegion::new(128 * 1024 * 8);
                 let (mut host, card, bank) = host(&mut dma);
                 card.borrow_mut().tuning_iterations = values[0] as usize;
                 bank.borrow_mut().first_polarity_bad = values[1] == 1;

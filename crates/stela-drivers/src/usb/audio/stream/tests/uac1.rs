@@ -158,10 +158,7 @@ impl Transport for LegacyModel {
     }
 }
 fn run(f: impl FnOnce(&mut AudioDevice<LegacyModel>)) {
-    let mut memory = vec![0u64; 256 * 1024];
-    let base = memory.as_mut_ptr() as u64;
-    // SAFETY: exclusive test allocation outlives the transport and all its DMA.
-    let mut dma = unsafe { RegionAllocator::new(base..base + memory.len() as u64 * 8) };
+    let mut dma = TestRegion::new(256 * 1024 * 8);
     let mut audio = AudioDevice::new(
         LegacyModel::new(),
         parse(&configuration()).unwrap(),

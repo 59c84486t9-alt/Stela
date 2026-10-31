@@ -341,7 +341,7 @@ fn broadcom_diagnostic_real_native_bulk_mode_records_and_failed_retirement_own_d
 
 #[test]
 fn broadcom_diagnostic_reentrant_allocator_cannot_retire_foreign_endpoint_or_dma() {
-    use crate::bus::dma::RegionAllocator;
+    use crate::bus::dma::{RegionAllocator, TestRegion};
     use crate::usb::xhci::{Shared, SlotId, TransferTicket};
     use alloc::rc::Rc;
     use core::cell::RefCell;
@@ -379,10 +379,7 @@ fn broadcom_diagnostic_reentrant_allocator_cannot_retire_foreign_endpoint_or_dma
             Ok(buffer)
         }
     }
-    let mut backing = vec![0u64; 128 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: exclusively kept fixture memory outlives both native owners.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(128 * 1024 * 8);
     let (controller, model) = xhci::model::cancellation_controller(&mut dma);
     let controller = Rc::new(RefCell::new(controller));
     let (mut d, catalog, replies) = fixture(0x220e);

@@ -16,29 +16,6 @@ use core::{
     sync::atomic::{AtomicBool, AtomicUsize},
 };
 use std::sync::Mutex;
-mod bandwidth;
-mod links;
-mod paths;
-mod routers;
-mod tunnels;
-pub(crate) use bandwidth::{
-    BandwidthPeer, BandwidthReservation, bandwidth_fixture, bandwidth_step, drive_bandwidth,
-};
-pub(crate) use links::{
-    LinkFixture, LinkPeer, LinkWrite, drive_link, link_fixture, link_fixture_with_protocol,
-    link_fixture_with_usb3,
-};
-pub(crate) use paths::{
-    PathFixture, PathPeer, PathReservation, drive_path, path_fixture, path_step,
-};
-pub(crate) use routers::{
-    NativeCursor, RouterOwner, RouterPeer, RouterWrite, configured_router, drive_router,
-    router_adapter, router_owner,
-};
-pub(crate) use tunnels::{
-    StopFixture, TunnelFixture, TunnelPeer, TunnelWrite, drive_release, drive_stop, drive_tunnel,
-    stop_fixture, stop_step, tunnel_fixture, tunnel_step,
-};
 
 pub(crate) struct Backing {
     pub(crate) pointer: NonNull<u8>,
@@ -512,44 +489,6 @@ pub(crate) fn channel_release(channel: &mut super::super::channel::Channel<Model
     unsafe { channel.release() }.unwrap();
 }
 
-pub(crate) struct HopOwner {
-    pub(crate) target: super::super::hop::Target,
-    pub(crate) dropped: Arc<AtomicUsize>,
-}
-
-impl Drop for HopOwner {
-    fn drop(&mut self) {
-        self.dropped.fetch_add(1, Ordering::Relaxed);
-    }
-}
-
-// SAFETY: the model exclusively reserves this synthetic hop/router;
-// its Arc is the allocation lifetime, no other model actor reconfigures it.
-unsafe impl super::super::hop::Owner for HopOwner {
-    fn target(&self) -> super::super::hop::Target {
-        self.target
-    }
-}
-
-pub(crate) fn hop_response(domain: &Domain, model: &Model, index: usize, data: &[u32]) -> Encoded {
-    let word = domain.read32(model.descriptor_address(Direction::Tx, index) + 8);
-    let kind = PacketType::try_from(((word >> 12) & 15) as u8).unwrap();
-    let sent = domain.data(
-        model.frame_address(Direction::Tx, index),
-        (word & 0xfff) as usize,
-    );
-    let route_hi = u32::from_be_bytes(sent[..4].try_into().unwrap());
-    let route_lo = u32::from_be_bytes(sent[4..8].try_into().unwrap());
-    let address = u32::from_be_bytes(sent[8..12].try_into().unwrap());
-    assert_eq!((address >> 25) & 3, 0, "must use actual path config space");
-    assert_eq!(address & 0x1fff, 16);
-    assert_eq!((address >> 19) & 63, 1);
-    assert_eq!((address >> 13) & 63, 2);
-    let mut words = vec![route_hi | (1 << 31), route_lo, address & !(63 << 19)];
-    words.extend_from_slice(data);
-    incoming(kind, &words)
-}
-
 pub(crate) struct IcmPci {
     pub(crate) device: u16,
     pub(crate) command: u32,
@@ -602,85 +541,4 @@ pub(crate) fn icm_release(host: &mut super::super::icm::Host<Model>) {
     host.disable().unwrap();
     // SAFETY: modeled physical DMA/IRQ/work is finally drained.
     unsafe { host.release() }.unwrap();
-}
-
-pub(crate) struct AdapterOwner {
-    pub(crate) target: super::super::adapter::Target,
-    pub(crate) operation: super::super::adapter::Operation,
-    pub(crate) dropped: Arc<AtomicUsize>,
-}
-
-impl Drop for AdapterOwner {
-    fn drop(&mut self) {
-        self.dropped.fetch_add(1, Ordering::Relaxed);
-    }
-}
-
-// SAFETY: this fixture owns the synthetic adapter, unchanged capability
-// metadata and positive credit reservation, with no competing CM/link change.
-unsafe impl super::super::adapter::Owner for AdapterOwner {
-    fn target(&self) -> super::super::adapter::Target {
-        self.target
-    }
-    fn operation(&self) -> super::super::adapter::Operation {
-        self.operation
-    }
-}
-
-pub(crate) fn adapter_owner(
-    operation: super::super::adapter::Operation,
-) -> (Arc<AdapterOwner>, Arc<AtomicUsize>) {
-    let dropped = Arc::new(AtomicUsize::new(0));
-    let owner = Arc::new(AdapterOwner {
-        target: super::super::adapter::Target {
-            route: super::super::config::Route::new(0).unwrap(),
-            port: 1,
-            kind: super::super::topology::AdapterKind::Lane,
-            usb4: true,
-            phy_capability: Some(8),
-            usb4_capability: Some(0x30),
-        },
-        operation,
-        dropped: dropped.clone(),
-    });
-    (owner, dropped)
-}
-
-pub(crate) fn adapter_response(
-    domain: &Domain,
-    model: &Model,
-    index: usize,
-    offset: u16,
-    data: &[u32],
-) -> Encoded {
-    let descriptor = domain.read32(model.descriptor_address(Direction::Tx, index) + 8);
-    let kind = PacketType::try_from(((descriptor >> 12) & 15) as u8).unwrap();
-    let frame = domain.data(
-        model.frame_address(Direction::Tx, index),
-        (descriptor & 0xfff) as usize,
-    );
-    let address = u32::from_be_bytes(frame[8..12].try_into().unwrap());
-    assert_eq!(address & 0x1fff, u32::from(offset));
-    assert_eq!((address >> 25) & 3, 1);
-    assert_eq!((address >> 13) & 63, 1);
-    assert_eq!((address >> 19) & 63, 1);
-    let mut reply = vec![
-        u32::from_be_bytes(frame[..4].try_into().unwrap()) | (1 << 31),
-        u32::from_be_bytes(frame[4..8].try_into().unwrap()),
-        address & !(63 << 19),
-    ];
-    reply.extend_from_slice(data);
-    incoming(kind, &reply)
-}
-
-pub(crate) fn controller_error(domain: &Domain, model: &Model, cursor: &NativeCursor) -> Encoded {
-    let bytes = domain.data(model.frame_address(Direction::Tx, cursor.tx % 10), 16);
-    incoming(
-        PacketType::Error,
-        &[
-            u32::from_be_bytes(bytes[..4].try_into().unwrap()) | (1 << 31),
-            u32::from_be_bytes(bytes[4..8].try_into().unwrap()),
-            2,
-        ],
-    )
 }

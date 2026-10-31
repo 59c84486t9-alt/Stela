@@ -303,6 +303,31 @@ fn stopped_claim(rid: u16) -> RequesterClaim {
 }
 
 #[test]
+fn a_requester_that_arrives_later_joins_the_unit() {
+    let registers = ModelRegisters::new();
+    let unit =
+        // SAFETY: the model registers stand in for the unit, and this test is the only
+        // process-context owner.
+        unsafe { Unit::take_over(registers.clone(), source(), &[8], 48, &[]) }.unwrap();
+    assert!(!unit.allows(0x300));
+    assert!(matches!(
+        // SAFETY: the model requester is stopped and owned by this test, with no DMA in flight.
+        unsafe { unit.attach_requester(stopped_claim(0x300)) },
+        Err(VtdError::Busy)
+    ));
+    unit.admit_requester(0x300).unwrap();
+    unit.admit_requester(0x300).unwrap();
+    unit.admit_requester(9).unwrap();
+    assert!(unit.allows(0x300));
+    assert!(unit.allows(9));
+    // SAFETY: as above.
+    let later = unsafe { unit.attach_requester(stopped_claim(0x300)) }.unwrap();
+    // SAFETY: as above.
+    let sibling = unsafe { unit.attach_requester(stopped_claim(9)) }.unwrap();
+    assert_ne!(later.domain_id(), sibling.domain_id());
+}
+
+#[test]
 fn coherent_words_observe_only_the_live_domains_pins() {
     let registers = ModelRegisters::new();
     let unit =

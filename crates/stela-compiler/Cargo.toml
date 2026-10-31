@@ -10,6 +10,7 @@ workspace = true
 [features]
 default = ["std"]
 std = ["serde/std"]
+test-support = ["std"]
 
 [dependencies]
 serde.workspace = true

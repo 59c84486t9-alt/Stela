@@ -5,13 +5,7 @@ use super::*;
 #[test]
 fn request_list_wrap_and_service() {
     for context_bytes in [32, 64] {
-        let mut backing = vec![0u64; 32 * 1024];
-        let base = backing.as_mut_ptr() as u64;
-        let mut dma =
-        // SAFETY: The request-list fixture keeps this stable vector through all
-        // queued interval descriptors and completed payloads. Every device-peer
-        // access is synchronous and identity-mapped into it.
-        unsafe { RegionAllocator::new(base..base + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(32 * 1024 * 8);
         let (mut c, model) = controller(&mut dma, HIGH_SPEED, context_bytes, true);
         let mut ep = endpoint(0x81, HIGH_SPEED);
         ep.interval = 2; // Recipe: two microframes.
@@ -67,13 +61,7 @@ fn request_list_wrap_and_service() {
 
 #[test]
 fn request_list_window_preflight() {
-    let mut backing = vec![0u64; 32 * 1024];
-    let base = backing.as_mut_ptr() as u64;
-    let mut dma =
-    // SAFETY: This list-preflight fixture keeps all allocated ring/payload memory
-    // live in its unresized vector; rejected horizons and counts cannot create an
-    // asynchronous user.
-    unsafe { RegionAllocator::new(base..base + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(32 * 1024 * 8);
     let (mut c, model) = controller(&mut dma, HIGH_SPEED, 32, false);
     c.configure(1, &[endpoint(0x81, HIGH_SPEED)], None, &mut dma)
         .unwrap();
@@ -119,12 +107,7 @@ fn request_list_window_preflight() {
 
 #[test]
 fn request_list_continuation_and_bounds() {
-    let mut backing = vec![0u64; 32 * 1024];
-    let base = backing.as_mut_ptr() as u64;
-    let mut dma =
-    // SAFETY: This continuation fixture owns all live queue and payload allocations
-    // in the stable vector until the synchronous list/ticket checks end.
-    unsafe { RegionAllocator::new(base..base + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(32 * 1024 * 8);
     let (mut c, model) = controller(&mut dma, HIGH_SPEED, 32, true);
     c.configure(1, &[endpoint(0x81, HIGH_SPEED)], None, &mut dma)
         .unwrap();
@@ -170,13 +153,7 @@ fn request_list_continuation_and_bounds() {
 
 #[test]
 fn request_list_ring_collision() {
-    let mut backing = vec![0u64; 32 * 1024];
-    let base = backing.as_mut_ptr() as u64;
-    let mut dma =
-    // SAFETY: This collision fixture keeps the original ring and payload
-    // allocations for both pending and rejected lists; no background or physical DMA
-    // accessor exists.
-    unsafe { RegionAllocator::new(base..base + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(32 * 1024 * 8);
     let (mut c, model) = controller(&mut dma, HIGH_SPEED, 32, true);
     c.configure(1, &[endpoint(0x81, HIGH_SPEED)], None, &mut dma)
         .unwrap();

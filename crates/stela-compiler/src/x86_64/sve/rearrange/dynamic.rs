@@ -8,6 +8,7 @@ use crate::x86_64::asm::{Alu, Code, Cond, Disp, Gpr, Mem, Rm, ShiftOp, Size, Una
 use crate::aarch64::Register;
 use crate::aarch64::scalable::{ElementSize, MAX_VECTOR_BYTES, VECTOR_CHUNK_BYTES, VectorLength};
 use crate::aarch64::sve::rearrange::{IndexOperand, Operand};
+use crate::x86_64::asm::vector_extensions;
 use crate::x86_64::isa::SimdOpcode as Host;
 use crate::x86_64::scalable::{load_z_chunk, read_predicate_chunk, store_z_chunk};
 use crate::{GuestState, TargetCpu};
@@ -28,6 +29,8 @@ const TABLE_CHUNK_LAST_INDEX: u8 = VECTOR_CHUNK_BYTES as u8 - 1;
 const BYTE_INDEX_VALUES: usize = u8::MAX as usize + 1;
 // Measured whole-table cutoff; larger whole tables keep the scalar mapping.
 const BYTE_TABLE_SHUFFLE_LIMIT_BYTES: usize = 64;
+// One AVX-512 permute recipe reads at most four table chunks.
+const PERMUTE_TABLE_LIMIT_BYTES: usize = 4 * VECTOR_CHUNK_BYTES;
 const Z_REGISTER_MASK: u8 = 31;
 
 fn stack_adjust(code: &mut Code, bytes: usize, allocate: bool) {
@@ -188,15 +191,26 @@ impl TableFrame {
 enum TableRecipe {
     ScalarGather,
     ByteShuffle,
+    Permute,
 }
 
 fn table_recipe(
     element_size: ElementSize,
+    register_count: u8,
     segment: bool,
     length: VectorLength,
     target: TargetCpu,
 ) -> TableRecipe {
-    if element_size == ElementSize::Byte
+    let table_bytes = if segment {
+        VECTOR_CHUNK_BYTES
+    } else {
+        usize::from(register_count) * length.bytes()
+    };
+    if table_bytes <= PERMUTE_TABLE_LIMIT_BYTES
+        && vector_extensions::table_supported(element_size.bytes() as u8, target)
+    {
+        TableRecipe::Permute
+    } else if element_size == ElementSize::Byte
         && target.supports(TargetCpu::Ssse3)
         && (segment || length.bytes() <= BYTE_TABLE_SHUFFLE_LIMIT_BYTES)
     {
@@ -216,18 +230,78 @@ pub(super) fn requires_explicit_dit_zero(
     match operand {
         Operand::Table {
             element_size,
+            register_count,
             segment,
             ..
-        } => table_recipe(element_size, segment, length, target) == TableRecipe::ScalarGather,
+        } => {
+            table_recipe(element_size, register_count, segment, length, target)
+                == TableRecipe::ScalarGather
+        }
         _ => false,
     }
 }
 
 fn emit_table(code: &mut Code, op: Table, length: VectorLength, target: TargetCpu) {
-    match table_recipe(op.element_size, op.segment, length, target) {
+    match table_recipe(
+        op.element_size,
+        op.register_count,
+        op.segment,
+        length,
+        target,
+    ) {
+        TableRecipe::Permute => emit_table_permute(code, op, length, target),
         TableRecipe::ByteShuffle => emit_table_ssse3(code, op, length, target),
         TableRecipe::ScalarGather => emit_table_unrolled(code, op, length, target),
     }
+}
+
+/// AVX-512 permutes of each index chunk over the snapshot of the whole table,
+/// or of its own segment for TBLQ/TBXQ. K1 bounds every index without
+/// branches or index-addressed loads, and each result chunk goes straight
+/// to the destination because sources and the TBX destination are copies.
+fn emit_table_permute(code: &mut Code, op: Table, length: VectorLength, target: TargetCpu) {
+    let frame = TableFrame::snapshot(code, op, length, target);
+    let table_chunks = if op.segment {
+        1
+    } else {
+        frame.table_bytes / VECTOR_CHUNK_BYTES
+    };
+    for chunk in 0..length.chunks() {
+        let offset = chunk * VECTOR_CHUNK_BYTES;
+        let first_table = if op.segment { offset } else { 0 };
+        let tables: [Mem; 4] = core::array::from_fn(|table| {
+            stack_slot(first_table + table * VECTOR_CHUNK_BYTES, None, 1)
+        });
+        xmm_stack(
+            code,
+            Host::LoadUnaligned,
+            SECOND,
+            frame.indexes + offset,
+            target,
+        );
+        if op.extension {
+            xmm_stack(
+                code,
+                Host::LoadUnaligned,
+                FIRST,
+                frame.output + offset,
+                target,
+            );
+        }
+        let emitted = vector_extensions::table(
+            code,
+            op.element_size.bytes() as u8,
+            FIRST,
+            SECOND,
+            &tables[..table_chunks],
+            op.extension,
+            [TABLE_CHUNK, RELATIVE_INDEX],
+            target,
+        );
+        debug_assert!(emitted, "the recipe checked the extension");
+        store_z_chunk(code, op.destination, chunk, FIRST, length, target);
+    }
+    stack_adjust(code, frame.bytes, false);
 }
 
 /// SSE2 baseline: a full unsigned bounds check of B/H/S/D indices before a

@@ -3,7 +3,7 @@ use super::isa::SimdOpcode;
 use super::isa::SimdOpcode as Host;
 use super::{MemoryChecks, memory_address, memory_writeback};
 use crate::aarch64::simd::{Comparison, IntegerOperation, Operand};
-use crate::x86_64::asm::{Code, Gpr, Mem};
+use crate::x86_64::asm::{Code, Gpr, Mem, vector_extensions};
 use alloc::vec::Vec;
 pub(in crate::x86_64) mod absolute_selection;
 mod aes;
@@ -173,6 +173,20 @@ fn equal(code: &mut Code, lane_bytes: u8, target: crate::TargetCpu) {
 }
 
 pub(super) fn greater(code: &mut Code, lane_bytes: u8, unsigned: bool, target: crate::TargetCpu) {
+    // Unsigned lanes compare directly instead of after a sign bias.
+    if unsigned
+        && vector_extensions::compare(
+            code,
+            lane_bytes,
+            false,
+            vector_extensions::Predicate::Greater,
+            0,
+            1,
+            target,
+        )
+    {
+        return;
+    }
     if lane_bytes == 8 && target >= crate::TargetCpu::Sse42 {
         if unsigned {
             move_constant(code, 4, 0x8000000000000000);
@@ -214,6 +228,36 @@ pub(super) fn greater(code: &mut Code, lane_bytes: u8, unsigned: bool, target: c
     shuffle(code, 0, 0, 0xa0);
     packed(code, Host::And, 0, 3);
     packed(code, Host::Or, 0, 2);
+}
+
+/// Whether [`emit_numerical`] completes on `target` an `operation` that
+/// [`numerical_always_exits`] ends its block with.
+pub(super) fn numerical_terminal_inline(
+    operation: &crate::aarch64::FloatingPointOperation,
+    target: crate::TargetCpu,
+) -> bool {
+    use crate::aarch64::{
+        FloatingPointOperation,
+        floating::{Format, integer::IntegerRounding},
+        simd::conversion::Operand,
+    };
+    match operation {
+        FloatingPointOperation::Binary(operand) => {
+            operand.format == Format::Half
+                && crate::x86_64::asm::vector_extensions::half_supported(target)
+        }
+        FloatingPointOperation::Conversion(Operand::Precision(operand)) => {
+            precision::half_narrowing_supported(operand.mode, target)
+        }
+        FloatingPointOperation::Conversion(Operand::FromInteger(operand)) => {
+            integer_conversion::half_supported(operand, target)
+        }
+        FloatingPointOperation::Conversion(Operand::ToInteger { operand, rounding }) => {
+            integer_conversion::half_supported(operand, target)
+                && *rounding != IntegerRounding::NearestAway
+        }
+        _ => false,
+    }
 }
 
 pub(super) fn numerical_always_exits(operation: &crate::aarch64::FloatingPointOperation) -> bool {
@@ -292,7 +336,9 @@ pub(super) fn emit_numerical_split(
         crate::aarch64::FloatingPointOperation::ExtremaScale(operand) => {
             extrema_scale::emit(code, operand, pc, target);
         }
-        crate::aarch64::FloatingPointOperation::MinMax(operand) => minmax::emit(code, operand, pc),
+        crate::aarch64::FloatingPointOperation::MinMax(operand) => {
+            minmax::emit(code, operand, pc, target)
+        }
         crate::aarch64::FloatingPointOperation::Rounding(operand) => {
             rounding::emit(code, operand, pc, target)
         }
@@ -302,17 +348,17 @@ pub(super) fn emit_numerical_split(
         crate::aarch64::FloatingPointOperation::Conversion(operand) => {
             use crate::aarch64::simd::conversion::Operand;
             match operand {
-                Operand::Precision(operand) => precision::emit(code, operand, pc),
+                Operand::Precision(operand) => precision::emit(code, operand, pc, target),
                 Operand::FromInteger(operand) => {
-                    integer_conversion::from_integer(code, operand, pc)
+                    integer_conversion::from_integer(code, operand, pc, target)
                 }
                 Operand::ToInteger { operand, rounding } => {
-                    integer_conversion::to_integer(code, operand, *rounding, pc)
+                    integer_conversion::to_integer(code, operand, *rounding, pc, target)
                 }
                 Operand::JavaScript {
                     destination,
                     source,
-                } => integer_conversion::javascript(code, *destination, *source, pc),
+                } => integer_conversion::javascript(code, *destination, *source, pc, target),
             }
         }
     }
@@ -352,7 +398,7 @@ pub(super) fn emit_after(
         Operand::I8mm(ref operand) => i8mm::emit(code, operand, target),
         Operand::Sha1(ref operand) => sha1::emit(code, operand, target),
         Operand::Sha256(ref operand) => sha256::emit(code, operand, target),
-        Operand::Sha3(ref operand) => sha3::emit(code, operand),
+        Operand::Sha3(ref operand) => sha3::emit(code, operand, target),
         Operand::Sha512(ref operand) => sha512::emit(code, operand, target),
         Operand::Sm3(ref operand) => sm3::emit(code, operand),
         Operand::Sm4(ref operand) => sm4::emit(code, operand, target),
@@ -389,7 +435,12 @@ pub(super) fn emit_after(
             lane_bytes,
         } => {
             use Comparison::*;
-            let reverse = matches!(operation, GreaterEqual | HigherEqual | LessZero);
+            // AVX-512 compares unsigned lanes without a bias (CMHI through
+            // `greater`) and tests lanes directly. Signed relations keep one
+            // SSE compare, inverted where needed: a mask round trip is slower.
+            let extended = vector_extensions::compare_supported(lane_bytes, target)
+                && matches!(operation, HigherEqual | Test);
+            let reverse = !extended && matches!(operation, GreaterEqual | HigherEqual | LessZero);
             let left_xmm = u8::from(reverse);
             let right_xmm = u8::from(!reverse);
             read_vector(code, left, left_xmm);
@@ -398,23 +449,30 @@ pub(super) fn emit_after(
             } else {
                 packed(code, Host::Xor, right_xmm, right_xmm);
             }
-            match operation {
-                Equal => equal(code, lane_bytes, target),
-                Test => {
-                    packed(code, Host::And, 0, 1);
-                    packed(code, Host::Xor, 1, 1);
-                    equal(code, lane_bytes, target);
+            if extended && operation == Test {
+                vector_extensions::test(code, lane_bytes, 0, 1, target);
+            } else if extended {
+                let predicate = vector_extensions::Predicate::GreaterEqual;
+                vector_extensions::compare(code, lane_bytes, false, predicate, 0, 1, target);
+            } else {
+                match operation {
+                    Equal => equal(code, lane_bytes, target),
+                    Test => {
+                        packed(code, Host::And, 0, 1);
+                        packed(code, Host::Xor, 1, 1);
+                        equal(code, lane_bytes, target);
+                    }
+                    _ => greater(
+                        code,
+                        lane_bytes,
+                        matches!(operation, Higher | HigherEqual),
+                        target,
+                    ),
                 }
-                _ => greater(
-                    code,
-                    lane_bytes,
-                    matches!(operation, Higher | HigherEqual),
-                    target,
-                ),
-            }
-            if matches!(operation, GreaterEqual | HigherEqual | LessEqualZero | Test) {
-                packed(code, Host::EqualDword, 1, 1);
-                packed(code, Host::Xor, 0, 1);
+                if matches!(operation, GreaterEqual | HigherEqual | LessEqualZero | Test) {
+                    packed(code, Host::EqualDword, 1, 1);
+                    packed(code, Host::Xor, 0, 1);
+                }
             }
             if bytes == 8 {
                 packed(code, Host::MoveQword, 0, 0);
@@ -494,7 +552,9 @@ pub(super) fn emit_after(
                             _ => unreachable!(),
                         };
                         opcode.register(code, 0, 0, target);
-                    } else {
+                    } else if lane_bytes != 8
+                        || !vector_extensions::quadword_absolute(code, 0, target)
+                    {
                         packed(code, Host::Xor, 1, 1);
                         packed(
                             code,

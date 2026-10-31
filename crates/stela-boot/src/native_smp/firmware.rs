@@ -99,7 +99,11 @@ impl FixedVisibility {
         if original & amd::ENCRYPTION != 0 {
             return Err(Error::AmdMemoryControls);
         }
-        if fixed && original & amd::FIXED_MODIFY == 0 {
+        // With MtrrFixDramEn clear the fixed MTRRs' RdMem and WrMem bits have
+        // no effect (AMD APM Vol. 2 7.7.4), so the type bits read without the
+        // modify enable are the whole policy and SYSCFG stays untouched; a
+        // hypervisor may refuse the write (KVM raises #GP).
+        if fixed && original & amd::FIXED_DRAM != 0 && original & amd::FIXED_MODIFY == 0 {
             guard.changed = true;
             // SAFETY: the caller guarantees CPL0 on AMD64; only the fixed-MTRR modify enable
             // changes, and the guard restores it.
@@ -109,18 +113,7 @@ impl FixedVisibility {
             core::sync::atomic::compiler_fence(Ordering::SeqCst);
             // SAFETY: the caller guarantees CPL0 on AMD64, where SYSCFG exists.
             if unsafe { msr::AMD_SYSCFG.read() } != original | amd::FIXED_MODIFY {
-                // With MtrrFixDramEn clear the fixed MTRRs' RdMem and WrMem
-                // bits have no effect (AMD APM Vol. 2 7.7.4), so the type
-                // bits read without the modify enable are the whole policy.
-                if original & amd::FIXED_DRAM != 0 {
-                    return Err(Error::AmdMemoryControls);
-                }
-                guard.changed = false;
-                // SAFETY: the caller guarantees CPL0 on AMD64; only the fixed-MTRR modify enable
-                // changes, and the guard restores it.
-                unsafe {
-                    msr::AMD_SYSCFG.write(original);
-                }
+                return Err(Error::AmdMemoryControls);
             }
         }
         Ok(guard)
@@ -288,7 +281,7 @@ pub(crate) unsafe fn observe() -> Result<Snapshot, Error> {
                 // Do not report masked fixed zeros as physical source state.
                 snapshot.amd_fixed_raw = true;
                 push_msr(&mut snapshot, amd::SYSCFG, original)?;
-                for index in amd::REGISTERS.into_iter().skip(1) {
+                for index in amd::enabled(original) {
                     push_msr(&mut snapshot, index, msr::rdmsr(index))?;
                 }
             }

@@ -150,7 +150,7 @@ impl CheckedPlan {
                 super::Terminator::System(_)
                 | super::Terminator::PointerAuthentication(_)
                 | super::Terminator::Amx(_)
-                | super::Terminator::FloatingPoint
+                | super::Terminator::FloatingPoint { .. }
                     if system_helpers => {}
                 super::Terminator::PointerAuthentication(instruction)
                     if process_helpers
@@ -160,7 +160,7 @@ impl CheckedPlan {
                         ) => {}
                 super::Terminator::Clock(_) | super::Terminator::ThreadRegister(_)
                     if process_helpers => {}
-                super::Terminator::FloatingPoint
+                super::Terminator::FloatingPoint { .. }
                 | super::Terminator::PointerAuthentication(_)
                 | super::Terminator::Clock(_)
                 | super::Terminator::ThreadRegister(_)

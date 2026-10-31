@@ -53,6 +53,8 @@ pub struct HostCpuid {
     pub leaf7_1_eax: u32,
     /// Leaf 7 subleaf 1 EDX.
     pub leaf7_1_edx: u32,
+    /// Leaf 24H subleaf 0 EBX: the AVX10 converged version.
+    pub leaf24_ebx: u32,
     /// Leaf 29H subleaf 0 EBX: APX conditional, NDD and NF capabilities.
     pub leaf29_ebx: u32,
     /// Leaf 8000_0001H ECX.
@@ -115,6 +117,7 @@ impl HostCpuid {
             leaf7_edx: leaf7.edx,
             leaf7_1_eax: leaf7_1.eax,
             leaf7_1_edx: leaf7_1.edx,
+            leaf24_ebx: leaf(0x24).ebx,
             leaf29_ebx: leaf(0x29).ebx,
             extended1_ecx,
             xcr0,
@@ -297,12 +300,26 @@ features! {
     Avx512bitalg, with_avx512bitalg, "+avx512bitalg", |cpu| {
         cpu.avx512f() && HostCpuid::bit(cpu.leaf7_ecx, 12)
     };
+    /// AVX-512 VBMI: VPERMB, VPERMI2B, VPERMT2B and VPMULTISHIFTQB.
+    Avx512vbmi, with_avx512vbmi, "+avx512vbmi", |cpu| {
+        cpu.avx512f() && HostCpuid::bit(cpu.leaf7_ecx, 1)
+    };
     /// AVX-512 VNNI: VPDPBUSD and VPDPWSSD.
     Avx512vnni, with_avx512vnni, "+avx512vnni", |cpu| {
         cpu.avx512f() && HostCpuid::bit(cpu.leaf7_ecx, 11)
     };
     /// AVX-VNNI: the VEX forms of VPDPBUSD and VPDPWSSD.
     AvxVnni, with_avx_vnni, "+avxvnni", |cpu| cpu.avx() && HostCpuid::bit(cpu.leaf7_1_eax, 4);
+    /// AVX-VNNI-INT8: VPDPBSSD, VPDPBSUD and VPDPBUUD byte dot products of
+    /// every signedness.
+    AvxVnniInt8, with_avx_vnni_int8, "+avxvnniint8", |cpu| {
+        cpu.avx() && HostCpuid::bit(cpu.leaf7_1_edx, 4)
+    };
+    /// AVX-VNNI-INT16: VPDPWUUD, VPDPWUSD and VPDPWSUD word dot products of
+    /// every signedness.
+    AvxVnniInt16, with_avx_vnni_int16, "+avxvnniint16", |cpu| {
+        cpu.avx() && HostCpuid::bit(cpu.leaf7_1_edx, 10)
+    };
     /// AVX-512 BF16: VDPBF16PS and VCVTNE2PS2BF16.
     Avx512bf16, with_avx512bf16, "+avx512bf16", |cpu| {
         cpu.avx512f() && HostCpuid::bit(cpu.leaf7_1_eax, 5)
@@ -314,6 +331,10 @@ features! {
     /// AVX-512 FP16: half-precision arithmetic.
     Avx512fp16, with_avx512fp16, "+avx512fp16", |cpu| {
         cpu.avx512f() && HostCpuid::bit(cpu.leaf7_edx, 23)
+    };
+    /// AVX10.2: VMINMAX among its converged EVEX instructions.
+    Avx102, with_avx10_2, "+avx10.2", |cpu| {
+        cpu.avx512f() && HostCpuid::bit(cpu.leaf7_1_edx, 19) && cpu.leaf24_ebx & 0xff >= 2
     };
     /// VAES: VEX and EVEX AES rounds on wide vectors.
     Vaes, with_vaes, "+vaes", |cpu| cpu.avx() && HostCpuid::bit(cpu.leaf7_ecx, 9);

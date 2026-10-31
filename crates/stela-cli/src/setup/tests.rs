@@ -272,6 +272,8 @@ fn command(f: &Fixture, usb: &Path) -> Request {
         wifi_passphrase_file: None,
         wifi_country: None,
         no_wifi: false,
+        usb4_approve: Vec::new(),
+        no_usb4_approve: false,
         wifi_passphrase: None,
         ipv4: None,
         ipv4_gateway: None,
@@ -3190,6 +3192,29 @@ fn static_addresses_apply_to_all_boot_choices_until_made_automatic() {
         "{}",
         options()
     );
+}
+
+#[test]
+fn usb4_approvals_apply_to_all_boot_choices_until_withdrawn() {
+    let mut f = fixture(64 * GIB, false);
+    add_stela(&mut f);
+    let uuid = "01234567-89ab-cdef-0123-456789abcdef";
+    let mut request = command(&f, &f.esp);
+    request.usb4_approve = vec![uuid.into()];
+    setup(&environment(&f.host), request).unwrap();
+    let options = || fs::read_to_string(f.esp.join("EFI/stela/stela.cfg")).unwrap();
+    assert!(
+        options().contains(&format!("--usb4-approve {uuid}")),
+        "{}",
+        options()
+    );
+    let report = rerun(&f, |c| {
+        c.action = Action::Configure;
+        c.no_usb4_approve = true;
+    })
+    .unwrap();
+    assert!(report.contains("only with an IOMMU"), "{report}");
+    assert!(!options().contains("--usb4-approve"), "{}", options());
 }
 
 #[test]

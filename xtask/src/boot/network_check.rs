@@ -1,7 +1,7 @@
 //! An independent HTTP response fixture for after-EBS driver checks. The
 //! response spans many NIC descriptors and TCP windows; comparing its digest
 //! catches corrupt DMA contents, missed segments and ring-wrap mistakes.
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::{
     io::{self, Read, Write},
     net::{TcpListener, TcpStream},
@@ -82,6 +82,7 @@ pub enum VerificationError {
     IncompleteLease,
     MissingDnsQuery,
     MissingConnection { port: u16 },
+    MissingRequest { port: u16 },
 }
 
 impl std::fmt::Display for VerificationError {
@@ -108,23 +109,54 @@ impl std::fmt::Display for VerificationError {
                 output,
                 "the network peer did not connect to the fixture server (127.0.0.1:{port})"
             ),
+            Self::MissingRequest { port } => write!(
+                output,
+                "the network peer did not relay the check's TCP connection to port {port}"
+            ),
         }
     }
 }
 
 impl std::error::Error for VerificationError {}
 
+/// The TCP port `url` names, or its scheme's: 443 for HTTPS, 80 for HTTP.
+pub fn port(url: &str) -> Result<u16> {
+    let uri = stela_formats::uri::Uri::new(url)
+        .ok()
+        .context("the network check URL is not an RFC 3986 URI")?;
+    let authority = uri
+        .authority_components()
+        .context("the network check URL names no host")?;
+    match authority.port().filter(|port| !port.is_empty()) {
+        Some(port) => port.parse().context("the network check URL's port"),
+        None if uri.scheme_str().eq_ignore_ascii_case("https") => Ok(443),
+        None => Ok(80),
+    }
+}
+
 /// A successful translation run does not establish that its requested
-/// network check ran. Require the mount's explicit after-EBS result, and
-/// the entire fixture body when running the deterministic driver check.
+/// network check ran. Require the mount's explicit after-EBS result, the
+/// peer's relay of a requested URL's connection (so an HTTPS check's
+/// success is the mount's own TLS session with that server), and the
+/// entire fixture body when running the deterministic driver check.
 pub fn verify(
     serial: &str,
     fixture: Option<&Fixture>,
+    port: Option<u16>,
     expected_driver: &str,
     peer: &str,
 ) -> Result<(), VerificationError> {
     if !serial.lines().any(|line| line == "NETWORK CHECK passed") {
         return Err(VerificationError::MissingResult);
+    }
+    if let Some(port) = port {
+        let destination = format!(":{port} open");
+        if !peer
+            .lines()
+            .any(|line| line.starts_with("TCP 10.0.2.15:") && line.ends_with(&destination))
+        {
+            return Err(VerificationError::MissingRequest { port });
+        }
     }
     if let Some(fixture) = fixture {
         let expected = format!(
@@ -226,8 +258,51 @@ mod tests {
     }
 
     #[test]
+    fn requested_urls_name_their_port() {
+        for (url, expected) in [
+            ("https://gs.apple.com/TSS/controller?action=2", 443),
+            ("HTTPS://h:8443/p", 8443),
+            ("http://h/p", 80),
+            ("http://h:/p", 80),
+            ("http://[2001:db8::1]:8080/p", 8080),
+        ] {
+            assert_eq!(port(url).unwrap(), expected, "{url}");
+        }
+        for url in ["http:/p", "http://h:99999/p", "http://h:x/p"] {
+            assert!(port(url).is_err(), "{url}");
+        }
+    }
+
+    #[test]
+    fn requested_urls_require_the_peers_relay() {
+        let serial = "NETWORK CHECK passed\n";
+        let peer = "TCP 10.0.2.15:50581 -> 17.32.214.236:443 open\n";
+        assert!(verify(serial, None, Some(443), "virtio-net", peer).is_ok());
+        for peer in [
+            "",
+            "TCP 10.0.2.15:50581 -> 17.32.214.236:80 open\n",
+            "TCP 10.0.2.15:50581 -> 17.32.214.236:443 refused\n",
+            "GUEST| TCP 10.0.2.15:50581 -> 17.32.214.236:443 open\n",
+        ] {
+            assert_eq!(
+                verify(serial, None, Some(443), "virtio-net", peer),
+                Err(VerificationError::MissingRequest { port: 443 })
+            );
+        }
+    }
+
+    #[test]
     fn requested_checks_require_the_mounts_result() {
-        assert!(verify("NETWORK CHECK passed\nSTOP idle\n", None, "e1000e", "").is_ok());
+        assert!(
+            verify(
+                "NETWORK CHECK passed\nSTOP idle\n",
+                None,
+                None,
+                "e1000e",
+                ""
+            )
+            .is_ok()
+        );
         for serial in [
             "STOP idle\n",
             "NETWORK POST http://localhost/check sent=0 received=1\n",
@@ -235,7 +310,7 @@ mod tests {
             "GUEST| NETWORK CHECK passed\n",
         ] {
             assert_eq!(
-                verify(serial, None, "e1000e", ""),
+                verify(serial, None, None, "e1000e", ""),
                 Err(VerificationError::MissingResult)
             );
         }
@@ -256,21 +331,22 @@ mod tests {
                     DHCP ACK 10.0.2.15 to 52:54:00:12:34:56\n\
                     DNS query localhost type 1\n\
                     TCP 10.0.2.15:50581 -> 127.0.0.1:12345 open\n";
-        assert!(verify(&serial, Some(&fixture), "e1000e", peer).is_ok());
+        assert!(verify(&serial, Some(&fixture), None, "e1000e", peer).is_ok());
         assert_eq!(
-            verify(&serial, Some(&fixture), "virtio-net", peer),
+            verify(&serial, Some(&fixture), None, "virtio-net", peer),
             Err(VerificationError::WrongDriver {
                 expected: "virtio-net".into()
             })
         );
         for missing in peer.lines() {
             let incomplete = peer.replace(missing, "");
-            assert!(verify(&serial, Some(&fixture), "e1000e", &incomplete).is_err());
+            assert!(verify(&serial, Some(&fixture), None, "e1000e", &incomplete).is_err());
         }
         assert!(
             verify(
                 &serial,
                 Some(&fixture),
+                None,
                 "e1000e",
                 &peer.replace(":12345 open", ":9999 open")
             )
@@ -280,17 +356,28 @@ mod tests {
             verify(
                 &serial,
                 Some(&fixture),
+                None,
                 "e1000e",
                 &peer.replace("DNS query", "GUEST| DNS query")
             )
             .is_err()
         );
 
-        assert!(verify("NETWORK CHECK passed\n", Some(&fixture), "e1000e", peer).is_err());
+        assert!(
+            verify(
+                "NETWORK CHECK passed\n",
+                Some(&fixture),
+                None,
+                "e1000e",
+                peer
+            )
+            .is_err()
+        );
         assert!(
             verify(
                 &serial.replace("200000", "199999"),
                 Some(&fixture),
+                None,
                 "e1000e",
                 peer
             )
@@ -300,6 +387,7 @@ mod tests {
             verify(
                 &serial.replace(digest, &"f".repeat(64)),
                 Some(&fixture),
+                None,
                 "e1000e",
                 peer
             )
@@ -309,6 +397,7 @@ mod tests {
             verify(
                 &serial.replace("NETWORK CHECK passed\n", ""),
                 Some(&fixture),
+                None,
                 "e1000e",
                 peer,
             )

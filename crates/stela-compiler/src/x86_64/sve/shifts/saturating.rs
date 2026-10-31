@@ -87,7 +87,7 @@ fn equal(code: &mut Code, element: ElementSize) {
 }
 /// Inputs XMM0=data, XMM1=full signed counts; preserve counts1 and old merge6.
 /// Caller owns a64-byte stack scratch frame at RSP.
-pub(super) fn chunk(code: &mut Code, kind: Kind, element: ElementSize) {
+pub(super) fn chunk(code: &mut Code, kind: Kind, element: ElementSize, target: TargetCpu) {
     let signed = matches!(
         kind,
         Kind::SaturatingSigned | Kind::SaturatingRoundingSigned
@@ -111,9 +111,9 @@ pub(super) fn chunk(code: &mut Code, kind: Kind, element: ElementSize) {
     stack_vector(code, 0, SOURCE_SLOT, true);
     stack_vector(code, 1, COUNTS_SLOT, true);
     // Truncated left shift is exact precisely when its inverse restores input.
-    super::variable::chunk(code, Kind::LogicalLeft, element);
+    super::variable::chunk(code, Kind::LogicalLeft, element, target);
     stack_vector(code, 0, LEFT_SLOT, true);
-    super::variable::chunk(code, right, element);
+    super::variable::chunk(code, right, element, target);
     stack_vector(code, 3, SOURCE_SLOT, false);
     equal(code, element);
     if signed {
@@ -133,13 +133,13 @@ pub(super) fn chunk(code: &mut Code, kind: Kind, element: ElementSize) {
     packed(code, Host::Xor, 1, 2);
     packed(code, subtract(element), 1, 2);
     stack_vector(code, 0, SOURCE_SLOT, false);
-    super::variable::chunk(code, right, element);
+    super::variable::chunk(code, right, element, target);
     if rounded {
         stack_vector(code, 0, QUOTIENT_SLOT, true);
         repeated_constant(code, 2, element, 1);
         packed(code, subtract(element), 1, 2);
         stack_vector(code, 0, SOURCE_SLOT, false);
-        super::variable::chunk(code, right, element);
+        super::variable::chunk(code, right, element, target);
         repeated_constant(code, 2, element, 1);
         packed(code, Host::And, 0, 2);
         stack_vector(code, 3, QUOTIENT_SLOT, false);

@@ -36,8 +36,11 @@ pub(super) fn emit(
         assert_eq!(core, operand, "admitted source/operand identity changed");
         return arithmetic::emit_core(code, core, length, features, pc, target);
     }
+    // AVX512-FP16 runs indexed Half products in the forms below.
+    let host_half = crate::x86_64::asm::vector_extensions::half_supported(target)
+        && matches!(operand.kind, Kind::Binary(_) | Kind::Fused(_));
     let before = code.len();
-    if super::indexed_half::emit(code, operand, length, features, pc, target)? {
+    if !host_half && super::indexed_half::emit(code, operand, length, features, pc, target)? {
         return Ok(true);
     }
     assert_eq!(

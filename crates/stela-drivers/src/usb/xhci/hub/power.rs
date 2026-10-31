@@ -274,7 +274,7 @@ mod tests {
         super::{model::*, tests::controller},
         *,
     };
-    use crate::bus::dma::RegionAllocator;
+    use crate::bus::dma::TestRegion;
     use alloc::collections::BTreeMap;
 
     fn stop_subtree(c: &mut Controller, child: u8) {
@@ -296,11 +296,7 @@ mod tests {
         for speed in [HIGH_SPEED, SUPER_SPEED] {
             for context in [32, 64] {
                 let nodes = BTreeMap::from([(0, Node::hub(speed, 1)), (1, Node::leaf(speed))]);
-                let mut backing = vec![0u64; 256 * 1024];
-                let start = backing.as_mut_ptr() as u64;
-                // SAFETY: backing keeps all controller/endpoint fixture DMA.
-                let mut dma =
-                    unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+                let mut dma = TestRegion::new(256 * 1024 * 8);
                 let (mut c, model) = controller(&mut dma, context, nodes);
                 let mut failures = Vec::new();
                 let devices = c.enumerate(&mut dma, &mut failures);
@@ -353,11 +349,7 @@ mod tests {
                 Fault::OverCurrentChange,
             ] {
                 let nodes = BTreeMap::from([(0, Node::hub(speed, 1)), (1, Node::leaf(speed))]);
-                let mut backing = vec![0u64; 256 * 1024];
-                let start = backing.as_mut_ptr() as u64;
-                // SAFETY: injected port faults do not shorten DMA lifetime.
-                let mut dma =
-                    unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+                let mut dma = TestRegion::new(256 * 1024 * 8);
                 let (mut c, model) = controller(&mut dma, 64, nodes);
                 let mut failures = Vec::new();
                 c.enumerate(&mut dma, &mut failures);
@@ -397,10 +389,7 @@ mod tests {
     fn external_hub_remote_resume_clears_only_observed_suspend_change() {
         for speed in [HIGH_SPEED, SUPER_SPEED] {
             let nodes = BTreeMap::from([(0, Node::hub(speed, 1)), (1, Node::leaf(speed))]);
-            let mut backing = vec![0u64; 256 * 1024];
-            let start = backing.as_mut_ptr() as u64;
-            // SAFETY: every modeled transfer refers to kept fixture RAM.
-            let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+            let mut dma = TestRegion::new(256 * 1024 * 8);
             let (mut c, model) = controller(&mut dma, 32, nodes);
             let mut failures = Vec::new();
             c.enumerate(&mut dma, &mut failures);

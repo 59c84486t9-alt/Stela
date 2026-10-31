@@ -5,7 +5,15 @@ fn context_options(
     scalable: stela_compiler::scalable_context::ScalableProfile,
     numerical: stela_compiler::aarch64::floating::features::NumericalFeatures,
 ) -> Options {
-    Options::new(BlockProfile::new(Features::CONTEXT), TargetCpu::Baseline)
+    target_options(TargetCpu::Baseline, scalable, numerical)
+}
+
+fn target_options(
+    target: TargetCpu,
+    scalable: stela_compiler::scalable_context::ScalableProfile,
+    numerical: stela_compiler::aarch64::floating::features::NumericalFeatures,
+) -> Options {
+    Options::new(BlockProfile::new(Features::CONTEXT), target)
         .with_scalable(scalable)
         .with_numerical_features(numerical)
 }
@@ -385,14 +393,17 @@ mod fp8_conversion {
 }
 mod numerical22 {
     //! Context-backed blocks with numerical exits.
-    #![cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    #![cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
 
     use super::*;
     use std::{ffi::c_void, ptr::NonNull};
     use stela_compiler::{
         GuestState,
         aarch64::{
-            floating::{FPCR_EXCEPTION_ENABLE_MASK, features::NumericalFeatures},
+            floating::{
+                FPCR_DN, FPCR_EXCEPTION_ENABLE_MASK, FPCR_FZ16, FPCR_ROUNDING_SHIFT,
+                features::NumericalFeatures,
+            },
             scalable::{
                 LOOKUP_TABLE_BYTES, PREDICATE_REGISTER_COUNT, ScalableMode, VECTOR_REGISTER_COUNT,
                 VectorLength,
@@ -585,12 +596,17 @@ mod numerical22 {
     }
 
     fn profile(bytes: usize, features: NumericalFeatures) -> Options {
+        target_profile(TargetCpu::Baseline, bytes, features)
+    }
+
+    fn target_profile(target: TargetCpu, bytes: usize, features: NumericalFeatures) -> Options {
         let length = VectorLength::from_bytes(bytes).unwrap();
         let mut declared = ScalableFeatures::of(ScalableFeature::Sme).with(ScalableFeature::Sme2);
         if features.full_a64() {
             declared = declared.with(ScalableFeature::SmeFa64);
         }
-        context_options(
+        target_options(
+            target,
             ScalableProfile::new_with_features(
                 length,
                 ScalableMode::new(true, true),
@@ -743,6 +759,129 @@ mod numerical22 {
             expected.set_result(&THREE_HALF.to_le_bytes())?;
             assert_eq!(fixture.snapshot()?, expected.snapshot()?);
         }
+        Ok(())
+    }
+
+    /// A normal Half, or for a quarter of `kind`s one of any class.
+    fn half_lane(kind: u64, bits: u64) -> u16 {
+        let bits = bits as u16;
+        match kind % 4 {
+            0 => bits,
+            1 => bits & 0x83ff | 0x3c00,
+            _ => bits & 0x83ff | ((bits >> 4 & 15) + 8) << 10,
+        }
+    }
+
+    /// Run `block` to its end, through completion when it exits; true when it
+    /// ran inline.
+    fn settle(block: &PreparedScalableBlock, fixture: &mut Fixture, word: u32) -> Result<bool> {
+        // SAFETY: the block owns its bounded source and matches the fixture's
+        // profile; storage is disjoint and the block returns once.
+        let exit =
+            unsafe { block.invoke(&mut fixture.thread, &mut fixture.scalable, &mut context())? };
+        if exit.kind == ExitKind::Fallthrough as u64 {
+            return Ok(true);
+        }
+        assert_eq!(exit.kind, ExitKind::ScalableNumerical as u64, "{word:x}");
+        block.complete_numerical(&mut fixture.thread, &mut fixture.scalable, exit)?;
+        Ok(false)
+    }
+
+    /// Every Half form of the shared S/D pipelines runs on AVX512-FP16 and,
+    /// inline or through its exit, ends as whole-instruction completion does.
+    #[test]
+    fn avx512fp16_half_forms_match_whole_instruction_completion() -> Result<()> {
+        // llvm-mc: FADD, FSUB, FMUL, FSUBR, FABD, FMULX, FDIV, FDIVR; FADD, FSUB
+        // and FMUL unpredicated; FADD #0.5, FSUB #1.0, FSUBR #0.5, FMUL #2.0;
+        // FMUL Z2.H[5]; FMLA, FMLS, FNMLA, FNMLS, FMAD, FMSB, FNMAD, FNMSB; FMLA
+        // Z2.H[6], FMLS Z2.H[1].
+        const FORMS: [u32; 26] = [
+            0x6540_8020,
+            0x6541_8020,
+            0x6542_8020,
+            0x6543_8020,
+            0x6548_8020,
+            0x654a_8020,
+            0x654d_8020,
+            0x654c_8020,
+            0x6542_0020,
+            0x6542_0420,
+            0x6542_0820,
+            0x6558_8000,
+            0x6559_8020,
+            0x655b_8000,
+            0x655a_8020,
+            0x646a_2020,
+            0x6562_0020,
+            0x6562_2020,
+            0x6562_4020,
+            0x6562_6020,
+            0x6562_8020,
+            0x6562_a020,
+            0x6562_c020,
+            0x6562_e020,
+            0x6472_0020,
+            0x642a_0420,
+        ];
+        let target = TargetCpu::X86_64_V4.with_avx512fp16();
+        if !stela_compiler::x86_64::modeled::host().supports(target) {
+            return Ok(());
+        }
+        let mut random = 0x7137_4491_b5c0_fbcf_u64;
+        let mut next = move || {
+            random ^= random << 13;
+            random ^= random >> 7;
+            random ^= random << 17;
+            random
+        };
+        let features = NumericalFeatures::default();
+        let mut inline = 0;
+        for bytes in [16, 32, 64] {
+            for word in FORMS {
+                let native = PreparedScalableBlock::prepare(
+                    &source(word),
+                    BASE,
+                    &target_profile(target, bytes, features),
+                )?;
+                let completion = prepare(bytes, word, features)?;
+                for sample in 0..32 {
+                    let mut fixture = Fixture::new(bytes, true)?;
+                    fixture.thread.registers.fpcr = sample << FPCR_ROUNDING_SHIFT
+                        | if sample & 4 != 0 { FPCR_FZ16 } else { 0 }
+                        | if sample & 8 != 0 { FPCR_DN } else { 0 };
+                    for register in 0..3 {
+                        let kind = u64::from(sample) + 1;
+                        let lanes: Vec<u8> = (0..bytes / 2)
+                            .flat_map(|_| half_lane(kind, next()).to_le_bytes())
+                            .collect();
+                        fixture.scalable.write_z(
+                            &mut fixture.thread.registers,
+                            register,
+                            &lanes,
+                        )?;
+                    }
+                    let predicate: Vec<u8> = (0..bytes / 8)
+                        .map(|_| {
+                            if sample & 16 != 0 {
+                                next() as u8
+                            } else {
+                                u8::MAX
+                            }
+                        })
+                        .collect();
+                    fixture.scalable.write_predicate(0, &predicate)?;
+                    let mut expected = fixture.clone();
+                    settle(&completion, &mut expected, word)?;
+                    inline += u32::from(settle(&native, &mut fixture, word)?);
+                    assert_eq!(
+                        fixture.snapshot()?,
+                        expected.snapshot()?,
+                        "{word:x} {bytes} {sample}"
+                    );
+                }
+            }
+        }
+        assert!(inline > 1000, "inline={inline}");
         Ok(())
     }
 

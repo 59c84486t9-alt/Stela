@@ -1,5 +1,5 @@
 //! SME2 integer dot products, including 16-to-64-bit products.
-use crate::x86_64::asm::{Alu, Code, Gpr, ShiftOp, Size};
+use crate::x86_64::asm::{Alu, Code, Gpr, ShiftOp, Size, vector_extensions};
 use crate::x86_64::simd::encode::guest;
 use crate::{
     GuestState, TargetCpu,
@@ -175,8 +175,23 @@ fn reduce_four_products(code: &mut Code, source: u8, signed: bool, target: Targe
     Host::AddQword.register(code, source, TEMPORARY, target);
 }
 
-/// XMM0/1 inputs, XMM2 accumulator, XMM0 result; XMM3..6 scratch, XMM7 preserved.
-fn dot_chunk(code: &mut Code, operand: &Operand, target: TargetCpu, horizontal: bool) {
+/// XMM0/1 inputs, XMM2 accumulator; XMM3..6 scratch, XMM7 preserved. Returns
+/// the result register.
+fn dot_chunk(code: &mut Code, operand: &Operand, target: TargetCpu, horizontal: bool) -> u8 {
+    if operand.terms == 4
+        && operand.accumulator == ElementSize::Word
+        && vector_extensions::byte_dot(
+            code,
+            UPPER_LEFT,
+            &[[LEFT, RIGHT]],
+            [operand.left_signed, operand.right_signed],
+            [UPPER_RIGHT, TEMPORARY],
+            target,
+        )
+    {
+        Host::AddDword.register(code, UPPER_LEFT, ACCUMULATOR, target);
+        return UPPER_LEFT;
+    }
     if operand.accumulator == ElementSize::Doubleword {
         word_products(code, operand.left_signed, target);
         reduce_four_products(code, LEFT, operand.left_signed, target);
@@ -186,6 +201,11 @@ fn dot_chunk(code: &mut Code, operand: &Operand, target: TargetCpu, horizontal: 
     } else if operand.terms == 2 && operand.left_signed {
         Host::MultiplyAddWords.register(code, LEFT, RIGHT, target);
         Host::AddDword.register(code, LEFT, ACCUMULATOR, target);
+    } else if operand.terms == 2
+        && !operand.right_signed
+        && vector_extensions::unsigned_word_dot(code, ACCUMULATOR, LEFT, RIGHT, target)
+    {
+        return ACCUMULATOR;
     } else if operand.terms == 2 {
         word_products(code, false, target);
         // High products occupy XMM4, which the reduction uses as scratch.
@@ -200,6 +220,7 @@ fn dot_chunk(code: &mut Code, operand: &Operand, target: TargetCpu, horizontal: 
         adjacent_pair_sums(code, LEFT, UPPER_LEFT, target, horizontal);
         Host::AddDword.register(code, LEFT, ACCUMULATOR, target);
     }
+    LEFT
 }
 
 /// Caller validates SME2, SM+ZA, SVL and I16I64 before entry. This unpredicated
@@ -240,8 +261,8 @@ pub(crate) fn emit(code: &mut Code, operand: &Operand, length: VectorLength, tar
             let displacement =
                 (usize::from(group) * partition_bytes + chunk * VECTOR_CHUNK_BYTES) as u32;
             load_za_chunk_at_r8(code, ACCUMULATOR, displacement, target);
-            dot_chunk(code, operand, target, horizontal);
-            store_za_chunk_at_r8(code, LEFT, displacement, target);
+            let result = dot_chunk(code, operand, target, horizontal);
+            store_za_chunk_at_r8(code, result, displacement, target);
         }
     }
 }

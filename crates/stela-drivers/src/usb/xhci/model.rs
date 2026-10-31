@@ -10,7 +10,7 @@ pub(crate) use super::reset::tests::{
     fixture_hid as reset_hid_fixture,
 };
 use super::*;
-pub(crate) use crate::bus::dma::RegionAllocator;
+pub(crate) use crate::bus::dma::{RegionAllocator, TestRegion};
 
 impl Controller {
     /// Install a hostile register surface after fixture construction. Identity

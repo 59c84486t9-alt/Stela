@@ -79,10 +79,7 @@ fn descriptor_selected_mixer_controls_and_pcm_share_the_live_native_transport_ow
     let all = interfaces(&c);
     let binding = Binding::parse(&all[0], &all, &c, 3).unwrap();
     assert_eq!(binding.graph.signal_cluster(6), Ok((2, 3)));
-    let mut memory = vec![0u64; 256 * 1024];
-    let base = memory.as_mut_ptr() as u64;
-    // SAFETY: this exclusive backing outlives the PCM device and all tickets.
-    let mut dma = unsafe { RegionAllocator::new(base..base + memory.len() as u64 * 8) };
+    let mut dma = TestRegion::new(256 * 1024 * 8);
     let transport = MixerDevice {
         transport: Model::new(),
         gain: 0,

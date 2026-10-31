@@ -181,7 +181,7 @@ fn shared_system_numerical_forms_recover_the_exact_unexecuted_terminal() {
                 .unwrap();
                 let terminal_pc = GuestAddress(base.0 + u64::from(prefix) * 4);
                 assert!(matches!(plan.parsed().terminal,
-                    Some((pc, Terminator::FloatingPoint)) if pc == terminal_pc));
+                    Some((pc, Terminator::FloatingPoint { .. })) if pc == terminal_pc));
                 assert_eq!(plan.source_bytes(), (usize::from(prefix) + 1) * 4);
                 let analysis = analyze_with_profile(&source, base, shared).unwrap();
                 assert_eq!(analysis.terminator_pc, Some(terminal_pc));
@@ -1085,6 +1085,51 @@ fn terminal_half_division_shares_exact_consumption_analysis_and_emission() {
             );
         }
     }
+}
+
+#[test]
+fn terminal_half_division_completes_inline_only_with_the_host_instruction() {
+    let base = GuestAddress(0x1000);
+    let continuation = GuestAddress(base.0 + size_of::<u32>() as u64);
+    // FDIV V0.8H,V0.8H,V0.8H; the unsupported word stays outside the block.
+    let source = bytes(&[0x6e403c00, 0xffffffff]);
+    let compile = |target| {
+        crate::compile(
+            &source,
+            base,
+            &crate::Options::new(BlockProfile::ORDINARY, target),
+        )
+        .unwrap()
+    };
+    let exit = |pc: GuestAddress, kind: ExitKind| {
+        let mut exit = vec![0x48, 0xb8]; // MOVABS RAX,PC
+        exit.extend(pc.0.to_le_bytes());
+        exit.push(0xba); // MOV EDX,kind; RET
+        exit.extend((kind as u32).to_le_bytes());
+        exit.push(0xc3);
+        exit
+    };
+    let helper = compile(crate::TargetCpu::X86_64_V4);
+    assert_eq!(helper.source_bytes, size_of::<u32>());
+    assert!(
+        helper
+            .native
+            .x86_64_code
+            .ends_with(&exit(base, ExitKind::FloatingPoint))
+    );
+    let inline = compile(crate::TargetCpu::X86_64_V4.with_avx512fp16());
+    assert_eq!(inline.source_bytes, size_of::<u32>());
+    let code = &inline.native.x86_64_code;
+    assert!(code.ends_with(&exit(continuation, ExitKind::Fallthrough)));
+    assert!(
+        code.windows(4)
+            .any(|window| window == [0x7c, 0x89, 0x5e, 0xc1])
+    );
+    let helper_exit = exit(base, ExitKind::FloatingPoint);
+    assert!(
+        code.windows(helper_exit.len())
+            .any(|window| window == helper_exit)
+    );
 }
 
 #[test]

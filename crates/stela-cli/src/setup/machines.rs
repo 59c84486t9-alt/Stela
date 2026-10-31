@@ -380,6 +380,17 @@ pub(super) fn configure(environment: &Environment<'_>, command: &Request) -> Res
             record.esp.join(super::wifi::KEY_PATH).display()
         )?;
     }
+    if !command.usb4_approve.is_empty() {
+        record.usb4_approved = command.usb4_approve.clone();
+        writeln!(
+            text,
+            "  USB4 PCIe      also without an IOMMU for {}",
+            record.usb4_approved.join(", ")
+        )?;
+    }
+    if command.no_usb4_approve && !std::mem::take(&mut record.usb4_approved).is_empty() {
+        writeln!(text, "  USB4 PCIe      only with an IOMMU")?;
+    }
     record.choices_text()?;
     if command.dry_run {
         text.push_str("Dry run: nothing was changed.\n");

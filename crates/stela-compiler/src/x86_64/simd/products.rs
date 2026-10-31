@@ -1,7 +1,7 @@
 //! Integer multiplies, widening arithmetic and absolute differences.
 use super::rearrange::{add_or_subtract, lane_constant};
 use super::{Host, commit, greater, packed, packed_imm, read_vector, rearrange::constant, shuffle};
-use crate::x86_64::asm::{Code, Cond, Gpr, Size, resolve};
+use crate::x86_64::asm::{Code, Cond, Gpr, Size, resolve, vector_extensions};
 use crate::{
     TargetCpu,
     aarch64::simd::products::{Accumulate, Kind, Operand},
@@ -240,11 +240,16 @@ fn indexed_low_product(code: &mut Code, lane: u8, bytes: u8, target: TargetCpu) 
 
 /// Even/odd byte products form two exact PMADDWD pair sums per dword. Their
 /// sum is the four-byte dot product, with no saturating intermediate operation.
-fn dot(code: &mut Code, operand: &Operand, signed: bool) {
+fn dot(code: &mut Code, operand: &Operand, signed: bool, target: TargetCpu) {
     const BYTE_BITS: u8 = 8;
     const LOW_BYTE_MASK: u64 = 0x00ff;
     if let Some(index) = operand.index {
         indexed(code, 4, index);
+    }
+    if vector_extensions::byte_dot(code, 2, &[[0, 1]], [signed; 2], [3, 4], target) {
+        read_vector(code, operand.destination, 0);
+        packed(code, Host::AddDword, 0, 2);
+        return;
     }
     packed(code, Host::MoveAligned, 2, 0);
     packed(code, Host::MoveAligned, 3, 1);
@@ -624,7 +629,7 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu) {
     }
     let mut result = 0;
     match kind {
-        Kind::Dot { signed } => dot(code, operand, signed),
+        Kind::Dot { signed } => dot(code, operand, signed, target),
         Kind::RoundedDoublingAccumulate { subtract } => {
             rounded_accumulate(code, operand, subtract, target)
         }

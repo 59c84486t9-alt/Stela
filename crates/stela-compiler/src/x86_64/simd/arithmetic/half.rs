@@ -1,6 +1,10 @@
-//! Half-precision arithmetic through exact widened intermediates.
-use crate::x86_64::asm::Code;
-use alloc::vec::Vec;
+//! Half-precision arithmetic through exact widened intermediates, or one
+//! AVX512-FP16 instruction.
+use crate::x86_64::asm::{
+    Code, Gpr,
+    vector_extensions::{self, HalfOpcode},
+};
+use alloc::{vec, vec::Vec};
 mod product;
 
 use super::super::super::isa::ShiftOpcode;
@@ -21,6 +25,10 @@ const LEFT_ODD: u8 = 6;
 const RIGHT_ODD: u8 = 3;
 const EVEN_HALF_WORDS: u8 = 0x88;
 const SECOND_HALF_WORD: u8 = 0x55;
+/// The sign constant of the AVX512-FP16 path; free after its range checks.
+const NATIVE_SIGN: u8 = 2;
+/// Half lanes in the low qword.
+const QWORD_LANES: u8 = 4;
 
 fn compact_even_words(code: &mut Code, source: u8) {
     packed_imm(code, Host::ShuffleLowWord, source, source, EVEN_HALF_WORDS);
@@ -107,8 +115,71 @@ fn operation(operation: BinaryOperation) -> (ArithmeticOpcode, lanes::ResultSign
     }
 }
 
+fn native_opcode(operation: BinaryOperation) -> HalfOpcode {
+    match operation {
+        BinaryOperation::Add => HalfOpcode::Add,
+        BinaryOperation::Subtract | BinaryOperation::AbsoluteDifference => HalfOpcode::Subtract,
+        BinaryOperation::Multiply
+        | BinaryOperation::NegatedMultiply
+        | BinaryOperation::MultiplyExtended => HalfOpcode::Multiply,
+        BinaryOperation::Divide => HalfOpcode::Divide,
+    }
+}
+
+/// FNMUL and FABD transform the rounded result, here in the `lanes` active
+/// lanes; the cleared inactive lanes stay zero.
+fn native_sign(code: &mut Code, operation: BinaryOperation, lanes: u8) {
+    let (word, opcode) = match operation {
+        BinaryOperation::NegatedMultiply => (Format::Half.sign_mask(), Host::Xor),
+        BinaryOperation::AbsoluteDifference => (Format::Half.sign_mask() - 1, Host::And),
+        _ => return,
+    };
+    let qword = (0..lanes.min(QWORD_LANES)).fold(0, |qword, lane| {
+        qword | word << (u32::from(lane) * Format::Half.bits())
+    });
+    let mut asm = code.asm();
+    asm.mov_imm64(Gpr::Rax, qword);
+    asm.movq_to_xmm(NATIVE_SIGN, Gpr::Rax);
+    if lanes > QWORD_LANES {
+        packed(code, Host::UnpackLowQword, NATIVE_SIGN, NATIVE_SIGN);
+    }
+    packed(code, opcode, lanes::LEFT, NATIVE_SIGN);
+}
+
+/// One AVX512-FP16 operation under the same input guards as the lane recipe.
+fn emit_native(code: &mut Code, operand: &Operand, pc: GuestAddress) {
+    test_control(code, FPCR_EXCEPTION_ENABLE_MASK);
+    let mut helper = vec![branch(code, Condition::NotZero)];
+    prepare_inputs(code, operand);
+    prepare_vector_input_range(code, Format::Half);
+    for source in [lanes::LEFT, lanes::RIGHT] {
+        vector_exponent_range(code, Format::Half, operand.shape, source);
+        helper.push(branch(code, Condition::NotZero));
+    }
+    lanes::run_native(code, operand.shape, &mut helper, |code| {
+        vector_extensions::half_arithmetic(
+            code,
+            native_opcode(operand.operation),
+            lanes::LEFT,
+            lanes::RIGHT,
+        );
+    });
+    native_sign(
+        code,
+        operand.operation,
+        operand.shape.lane_count(Format::Half) as u8,
+    );
+    let merge =
+        operand.shape == Shape::Scalar && !matches!(operand.inputs, Inputs::PairwiseScalar { .. });
+    lanes::finish_native(code, operand.destination, merge, helper, pc);
+}
+
 pub(super) fn emit(code: &mut Code, operand: &Operand, pc: GuestAddress, target: TargetCpu) {
     debug_assert_eq!(operand.format, Format::Half);
+    if vector_extensions::half_supported(target) {
+        emit_native(code, operand, pc);
+        return;
+    }
     let mut helper = Vec::new();
     let mut rollback = Vec::new();
     let packed_product = product::supports(operand);

@@ -1,14 +1,11 @@
 use super::*;
-use crate::bus::dma::RegionAllocator;
+use crate::bus::dma::TestRegion;
 use crate::usb::xhci::model::*;
 
 #[test]
 fn unacknowledged_configuration_never_activates_endpoints_or_reuses_poisoned_ep0() {
     for scenario in 0..3 {
-        let mut backing = vec![0u64; 128 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: exclusive backing outlives controller and hardware model.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(128 * 1024 * 8);
         let (mut controller, model) = unconfigured_cancellation_controller_with_configurations(
             &mut dma,
             &[
@@ -66,10 +63,7 @@ fn unacknowledged_configuration_never_activates_endpoints_or_reuses_poisoned_ep0
 #[test]
 fn failed_endpoint_configuration_keeps_rings_without_exposing_or_replacing_them() {
     for missing_completion in [false, true] {
-        let mut backing = vec![0u64; 128 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: backing is live/exclusive through every DMA ring.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(128 * 1024 * 8);
         let (mut controller, model) = unconfigured_cancellation_controller_with_configurations(
             &mut dma,
             &[
@@ -115,10 +109,7 @@ fn failed_endpoint_configuration_keeps_rings_without_exposing_or_replacing_them(
 
 #[test]
 fn acknowledged_zero_configuration_returns_to_address_state_without_endpoint_activation() {
-    let mut backing = vec![0u64; 128 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: backing remains live and exclusive through controller/model use.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(128 * 1024 * 8);
     let (mut controller, model) = unconfigured_cancellation_controller_with_configurations(
         &mut dma,
         &[
@@ -171,10 +162,7 @@ fn refused_superspeed_plan_preserves_inventory_without_configuration_or_dma() {
         configuration::select(&mut device).unwrap();
         assert_eq!(device.configuration, sanitized);
         assert_eq!(device.configurations, [configuration]);
-        let mut backing = vec![0u64; 128 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: backing stays exclusive/live throughout model and controller access.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(128 * 1024 * 8);
         let (controller, model) = unconfigured_cancellation_controller_with_configurations(
             &mut dma,
             &[
@@ -202,10 +190,7 @@ fn refused_superspeed_plan_preserves_inventory_without_configuration_or_dma() {
 fn superspeed_companions_reach_real_32_and_64_byte_controller_contexts() {
     for speed in [SUPER_SPEED, SUPER_SPEED_PLUS] {
         for context in [32, 64] {
-            let mut backing = vec![0u64; 128 * 1024];
-            let start = backing.as_mut_ptr() as u64;
-            // SAFETY: backing outlives every model and controller DMA object.
-            let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+            let mut dma = TestRegion::new(128 * 1024 * 8);
             let (mut controller, model) = unconfigured_cancellation_controller_with_configurations(
                 &mut dma,
                 &[
@@ -285,10 +270,7 @@ fn superspeed_companions_reach_real_32_and_64_byte_controller_contexts() {
 
 #[test]
 fn invalid_superspeed_companion_refuses_before_any_dma_publication() {
-    let mut backing = vec![0u64; 128 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: backing remains exclusive and live throughout model DMA use.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(128 * 1024 * 8);
     let (mut controller, model) = unconfigured_cancellation_controller_with_configurations(
         &mut dma,
         &[

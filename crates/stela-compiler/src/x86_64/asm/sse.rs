@@ -1,6 +1,6 @@
 //! Typed SSE and AVX forms (Intel SDM Vol. 2) on the generic legacy and SSE
 //! encodings.
-use super::{Asm, Gpr, Rm, Size};
+use super::{Asm, Gpr, Map, Pp, Rm, Size, Vex};
 
 /// Legacy SSE forms `name xmm, xmm/m`: an optional mandatory prefix and the
 /// opcode bytes.
@@ -214,6 +214,21 @@ impl Asm<'_> {
     pub(crate) fn vzeroupper(&mut self) {
         self.fixed(&[0xc5, 0xf8, 0x77]);
     }
+    /// `kmovw k, r32` (AVX-512F): the low word of `source` into opmask `mask`.
+    pub(crate) fn kmovw(&mut self, mask: u8, source: Gpr) {
+        self.vex(
+            Vex {
+                map: Map::M0f,
+                pp: Pp::None,
+                w: false,
+                l: false,
+            },
+            0x92,
+            mask,
+            0,
+            Rm::Reg(source),
+        );
+    }
 }
 
 #[cfg(test)]
@@ -234,6 +249,7 @@ mod tests {
         use Size::*;
         for (expected, code) in [
             (&[0xc5, 0xf8, 0x77][..], one(|a| a.vzeroupper())),
+            (&[0xc5, 0xf8, 0x92, 0xc8], one(|a| a.kmovw(1, Gpr::Rax))),
             (&[0x0f, 0x16, 0xca], one(|a| a.movlhps(1, Rm::Xmm(2)))),
             (&[0x66, 0x0f, 0x7e, 0xf0], one(|a| a.movd_from_xmm(Rax, 6))),
             (&[0x66, 0x0f, 0x6e, 0xe0], one(|a| a.movd_to_xmm(4, Rax))),

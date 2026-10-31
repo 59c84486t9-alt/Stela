@@ -7,10 +7,10 @@ use super::numerical::{
     vector_exponent_range, vector_normal_or_zero_range, zero_scalar,
 };
 use super::{Host, commit, packed, packed_imm, read_vector};
-use crate::x86_64::asm::{Code, Gpr, Rm};
+use crate::x86_64::asm::{Code, Gpr, Rm, vector_extensions};
 use crate::x86_64::asm::{FloatLanes, FloatOp};
 use crate::{
-    GuestAddress,
+    GuestAddress, TargetCpu,
     aarch64::{
         floating::{
             FPCR_AH, FPCR_EXCEPTION_ENABLE_MASK, FPCR_NEP, Format, minmax::MinMaxOperation,
@@ -85,8 +85,9 @@ fn raw_selection(
 }
 
 /// Legacy SSE selects operand2 on a zero tie. Symmetric selection followed by
-/// sign AND (maximum) or OR (minimum) gives Arm's standard zero sign. Plain
-/// AH=1 keeps operand2 instead. No inactive scalar lane undergoes FP work.
+/// sign AND (maximum) or OR (minimum) gives Arm's standard zero sign, as
+/// AVX10.2's VMINMAX does alone. Plain AH=1 keeps operand2 instead. No inactive
+/// scalar lane undergoes FP work.
 fn selection(
     code: &mut Code,
     operation: MinMaxOperation,
@@ -94,6 +95,7 @@ fn selection(
     shape: Shape,
     destination: u8,
     right: u8,
+    target: TargetCpu,
 ) {
     if format == Format::Half {
         raw_selection(code, operation, format, shape, destination, right);
@@ -115,7 +117,16 @@ fn selection(
     } else {
         Host::And
     };
-    if shape == Shape::Scalar {
+    if vector_extensions::extrema_supported(target) {
+        vector_extensions::extrema(
+            code,
+            format,
+            shape == Shape::Scalar,
+            !is_minimum(operation),
+            destination,
+            right,
+        );
+    } else if shape == Shape::Scalar {
         packed(code, Host::MoveAligned, SELECTION_SCRATCH, destination);
         raw_selection(code, operation, format, shape, SELECTION_SCRATCH, right);
         raw_selection(code, operation, format, shape, right, destination);
@@ -224,7 +235,7 @@ fn half_pairs(code: &mut Code, operation: MinMaxOperation, source: u8) {
         PAIR_VECTOR,
         SWAP_ADJACENT_WORDS,
     );
-    selection(
+    raw_selection(
         code,
         operation,
         Format::Half,
@@ -242,7 +253,13 @@ fn compact_half_pairs(code: &mut Code, shape: Shape, source: u8) {
     }
 }
 
-fn vector_pairs(code: &mut Code, operation: MinMaxOperation, format: Format, shape: Shape) {
+fn vector_pairs(
+    code: &mut Code,
+    operation: MinMaxOperation,
+    format: Format,
+    shape: Shape,
+    target: TargetCpu,
+) {
     match format {
         Format::Half => {
             for source in [RESULT_VECTOR, RIGHT_VECTOR] {
@@ -266,19 +283,43 @@ fn vector_pairs(code: &mut Code, operation: MinMaxOperation, format: Format, sha
             let mut asm = code.asm();
             asm.unpcklps(RESULT_VECTOR, Rm::Xmm(RIGHT_VECTOR));
             asm.movhlps(RIGHT_VECTOR, Rm::Xmm(RESULT_VECTOR));
-            selection(code, operation, format, shape, RESULT_VECTOR, RIGHT_VECTOR);
+            selection(
+                code,
+                operation,
+                format,
+                shape,
+                RESULT_VECTOR,
+                RIGHT_VECTOR,
+                target,
+            );
         }
         Format::Single => {
             packed(code, Host::MoveAligned, PAIR_VECTOR, RESULT_VECTOR);
             shuffle_single(code, RESULT_VECTOR, RIGHT_VECTOR, EVEN_DWORDS);
             shuffle_single(code, PAIR_VECTOR, RIGHT_VECTOR, ODD_DWORDS);
-            selection(code, operation, format, shape, RESULT_VECTOR, PAIR_VECTOR);
+            selection(
+                code,
+                operation,
+                format,
+                shape,
+                RESULT_VECTOR,
+                PAIR_VECTOR,
+                target,
+            );
         }
         Format::Double => {
             packed(code, Host::MoveAligned, PAIR_VECTOR, RESULT_VECTOR);
             unpack_double(code, RESULT_VECTOR, RIGHT_VECTOR, false);
             unpack_double(code, PAIR_VECTOR, RIGHT_VECTOR, true);
-            selection(code, operation, format, shape, RESULT_VECTOR, PAIR_VECTOR);
+            selection(
+                code,
+                operation,
+                format,
+                shape,
+                RESULT_VECTOR,
+                PAIR_VECTOR,
+                target,
+            );
         }
     }
 }
@@ -306,7 +347,7 @@ fn finish_binary(code: &mut Code, format: Format, shape: Shape, destination: u8)
     commit(code, destination, RESULT_VECTOR);
 }
 
-fn binary(code: &mut Code, operand: &Operand, pc: GuestAddress) {
+fn binary(code: &mut Code, operand: &Operand, pc: GuestAddress, target: TargetCpu) {
     let Operand::Binary {
         operation,
         format,
@@ -337,9 +378,17 @@ fn binary(code: &mut Code, operand: &Operand, pc: GuestAddress) {
         half_order(code, RIGHT_VECTOR);
     }
     if mode == BinaryMode::Pairwise {
-        vector_pairs(code, operation, format, shape);
+        vector_pairs(code, operation, format, shape, target);
     } else {
-        selection(code, operation, format, shape, RESULT_VECTOR, RIGHT_VECTOR);
+        selection(
+            code,
+            operation,
+            format,
+            shape,
+            RESULT_VECTOR,
+            RIGHT_VECTOR,
+            target,
+        );
     }
     if format == Format::Half {
         half_order(code, RESULT_VECTOR);
@@ -354,6 +403,7 @@ fn pairwise_scalar(
     destination: u8,
     source: u8,
     pc: GuestAddress,
+    target: TargetCpu,
 ) {
     let mut helper = Vec::new();
     exception_guard(code, &mut helper);
@@ -374,6 +424,7 @@ fn pairwise_scalar(
         Shape::Scalar,
         RESULT_VECTOR,
         RIGHT_VECTOR,
+        target,
     );
     if format == Format::Half {
         half_order(code, RESULT_VECTOR);
@@ -382,15 +433,17 @@ fn pairwise_scalar(
     commit(code, destination, RESULT_VECTOR);
 }
 
-fn reduction(
-    code: &mut Code,
-    operation: MinMaxOperation,
-    format: Format,
-    shape: Shape,
-    destination: u8,
-    source: u8,
-    pc: GuestAddress,
-) {
+fn reduction(code: &mut Code, operand: &Operand, pc: GuestAddress, target: TargetCpu) {
+    let Operand::Reduction {
+        operation,
+        format,
+        shape,
+        destination,
+        source,
+    } = *operand
+    else {
+        unreachable!("reduction min/max operand")
+    };
     let mut helper = Vec::new();
     exception_guard(code, &mut helper);
     read_numerical_vector(code, shape, source, RESULT_VECTOR);
@@ -410,7 +463,15 @@ fn reduction(
         for &amount in shifts {
             packed(code, Host::MoveAligned, PAIR_VECTOR, RESULT_VECTOR);
             ShiftOpcode::RightBytes.emit(code, PAIR_VECTOR, amount);
-            selection(code, operation, format, shape, RESULT_VECTOR, PAIR_VECTOR);
+            selection(
+                code,
+                operation,
+                format,
+                shape,
+                RESULT_VECTOR,
+                PAIR_VECTOR,
+                target,
+            );
         }
         half_order(code, RESULT_VECTOR);
     } else {
@@ -430,7 +491,15 @@ fn reduction(
             RIGHT_VECTOR,
             ODD_DWORDS,
         );
-        selection(code, operation, format, shape, RESULT_VECTOR, RIGHT_VECTOR);
+        selection(
+            code,
+            operation,
+            format,
+            shape,
+            RESULT_VECTOR,
+            RIGHT_VECTOR,
+            target,
+        );
         packed(code, Host::MoveAligned, RIGHT_VECTOR, RESULT_VECTOR);
         ShiftOpcode::RightBytes.emit(code, RIGHT_VECTOR, (format.bits() / BITS_PER_BYTE) as u8);
         selection(
@@ -440,31 +509,29 @@ fn reduction(
             Shape::Scalar,
             RESULT_VECTOR,
             RIGHT_VECTOR,
+            target,
         );
     }
     clear_scalar(code, format, RESULT_VECTOR);
     commit(code, destination, RESULT_VECTOR);
 }
 
-pub(in crate::x86_64) fn emit(code: &mut Code, operand: &Operand, pc: GuestAddress) {
+pub(in crate::x86_64) fn emit(
+    code: &mut Code,
+    operand: &Operand,
+    pc: GuestAddress,
+    target: TargetCpu,
+) {
     match *operand {
-        Operand::Binary { .. } => binary(code, operand, pc),
+        Operand::Binary { .. } => binary(code, operand, pc, target),
         Operand::PairwiseScalar {
             operation,
             format,
             destination,
             source,
         } => {
-            pairwise_scalar(code, operation, format, destination, source, pc);
+            pairwise_scalar(code, operation, format, destination, source, pc, target);
         }
-        Operand::Reduction {
-            operation,
-            format,
-            shape,
-            destination,
-            source,
-        } => {
-            reduction(code, operation, format, shape, destination, source, pc);
-        }
+        Operand::Reduction { .. } => reduction(code, operand, pc, target),
     }
 }

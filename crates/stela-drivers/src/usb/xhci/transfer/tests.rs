@@ -1,13 +1,10 @@
 use super::*;
-use crate::bus::dma::RegionAllocator;
+use crate::bus::dma::TestRegion;
 use crate::usb::xhci::model::*;
 
 #[test]
 fn strings_use_the_first_listed_language_and_default_to_english() {
-    let mut backing = vec![0u64; 32 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: backing outlives all modeled controller DMA.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(32 * 1024 * 8);
     let (mut controller, model) = unconfigured_cancellation_controller(&mut dma);
     for (descriptor, language) in [
         (vec![6, STRING_DESCRIPTOR, 0x07, 0x04, 0x09, 0x04], 0x0407),
@@ -25,10 +22,7 @@ fn strings_use_the_first_listed_language_and_default_to_english() {
 #[test]
 fn cancellation_stops_running_resets_halted_and_clears_late_events() {
     for initial in [1, 2, 3] {
-        let mut backing = vec![0u64; 64 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: backing is exclusive live DMA throughout this test.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(64 * 1024 * 8);
         let (mut controller, model) = cancellation_controller(&mut dma);
         let buffer = dma.allocate(512, 512).unwrap();
         let trb = controller.submit(1, 3, buffer.physical(), 512).unwrap();
@@ -54,10 +48,7 @@ fn cancellation_stops_running_resets_halted_and_clears_late_events() {
 
 #[test]
 fn a_full_transfer_ring_refuses_submission_until_cancelled() {
-    let mut backing = vec![0u64; 64 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: backing is exclusive live DMA throughout this test.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(64 * 1024 * 8);
     let (mut controller, model) = cancellation_controller(&mut dma);
     let buffer = dma.allocate(512, 512).unwrap();
     for _ in 0..RING_TRBS - 2 {
@@ -80,10 +71,7 @@ fn cancellation_failure_keeps_dma_recorded_and_blocks_reuse() {
         Some((SET_DEQUEUE, 17)),
         None,
     ] {
-        let mut backing = vec![0u64; 64 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: backing outlives controller/model/DMA access.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(64 * 1024 * 8);
         let (mut controller, model) = cancellation_controller(&mut dma);
         let buffer = dma.allocate(512, 512).unwrap();
         controller.submit(1, 3, buffer.physical(), 512).unwrap();
@@ -124,10 +112,7 @@ fn cancellation_failure_keeps_dma_recorded_and_blocks_reuse() {
 
 #[test]
 fn cancellation_handles_completion_and_halt_races_without_resetting_running() {
-    let mut backing = vec![0u64; 64 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: backing remains exclusive and live through controller/model use.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(64 * 1024 * 8);
     let (mut controller, model) = cancellation_controller(&mut dma);
     let buffer = dma.allocate(512, 512).unwrap();
     let trb = controller.submit(1, 3, buffer.physical(), 512).unwrap();
@@ -146,10 +131,7 @@ fn cancellation_handles_completion_and_halt_races_without_resetting_running() {
 
 #[test]
 fn short_control_out_after_status_ack_fails_without_poisoning_completed_endpoint() {
-    let mut backing = vec![0u64; 64 * 1024];
-    let start = backing.as_mut_ptr() as u64;
-    // SAFETY: backing outlives all model DMA.
-    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let mut dma = TestRegion::new(64 * 1024 * 8);
     let (mut controller, model) = unconfigured_cancellation_controller(&mut dma);
     model.borrow_mut().short_control_out = true;
     let request = setup(0x40, 5, 0xe810, 0x0188, 4);
@@ -169,10 +151,7 @@ fn short_control_out_after_status_ack_fails_without_poisoning_completed_endpoint
 #[test]
 fn control_timeout_stops_running_ep0_and_keeps_poison_if_stop_fails() {
     for fail_stop in [false, true] {
-        let mut backing = vec![0u64; 64 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: exclusive test backing outlives all DMA/controller use.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(64 * 1024 * 8);
         let (mut controller, model) = cancellation_controller(&mut dma);
         model.borrow_mut().silence_transfer = Some(1);
         if fail_stop {
@@ -223,10 +202,7 @@ fn control_timeout_stops_running_ep0_and_keeps_poison_if_stop_fails() {
 #[test]
 fn bulk_timeout_stops_running_td_and_cannot_reuse_it_after_failed_cancel() {
     for fail_stop in [false, true] {
-        let mut backing = vec![0u64; 64 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: exclusive test backing outlives all DMA/controller use.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(64 * 1024 * 8);
         let (mut controller, model) = cancellation_controller(&mut dma);
         let buffer = dma.allocate(512, 512).unwrap();
         if fail_stop {
@@ -281,10 +257,7 @@ fn bulk_timeout_stops_running_td_and_cannot_reuse_it_after_failed_cancel() {
 #[test]
 fn halted_reset_with_failed_dequeue_refuses_endpoint_and_dma_reuse() {
     for dci in [1, 3, 4, 5] {
-        let mut backing = vec![0u64; 64 * 1024];
-        let start = backing.as_mut_ptr() as u64;
-        // SAFETY: backing outlives controller/model and every DMA buffer.
-        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut dma = TestRegion::new(64 * 1024 * 8);
         let buffer = dma.allocate(512, 512).unwrap();
         let (mut controller, model) =
             failed_stall_recovery(&mut dma, buffer.physical(), buffer.len(), dci);

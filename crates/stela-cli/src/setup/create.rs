@@ -498,6 +498,7 @@ pub(super) fn plan(
             ssid,
             country: command.wifi_country.clone(),
         }),
+        usb4_approved: command.usb4_approve.clone(),
         addresses: super::addresses::Addresses::requested(command)?,
     };
     // The restore bundles are prepared above: the install plan adds the
