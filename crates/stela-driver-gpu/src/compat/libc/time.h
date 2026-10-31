@@ -18,6 +18,8 @@ struct tm {
 #define CLOCK_THREAD_CPUTIME_ID 3
 #define TIME_UTC 1
 #define TIMER_ABSTIME 1
+/* Only CLOCK_MONOTONIC has a host provider. Realtime and CPU clocks fail
+ * explicitly; calendar conversion functions operate on supplied timestamps. */
 int clock_gettime(clockid_t clock, struct timespec *time);
 int clock_nanosleep(clockid_t clock, int flags, const struct timespec *time,
 		    struct timespec *remaining);

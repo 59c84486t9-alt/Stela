@@ -34,18 +34,27 @@ const FORMATTED_APART: [&str; 3] = [
 ];
 /// The other hosts Stela ships for, with the packages Clippy checks there
 /// without linking: macOS compiles installer and native preparation tools,
-/// Windows the installer. The development tasks stay on this host.
-const CROSS: [(&str, &[&str]); 2] = [
+/// Windows the installer, and Apple silicon the isolated GPU maintenance
+/// executable. The development tasks stay on this host.
+const CROSS: [(&str, &[&str]); 3] = [
     (
         "x86_64-apple-darwin",
-        &["--workspace", "--exclude", "xtask"],
+        &["--all-targets", "--workspace", "--exclude", "xtask"],
     ),
-    ("x86_64-pc-windows-msvc", &["-p", "stela-cli"]),
+    (
+        "x86_64-pc-windows-msvc",
+        &["--all-targets", "-p", "stela-cli"],
+    ),
+    // Keep the ARM maintenance executable independent of the x86 engine.
+    (
+        "aarch64-apple-darwin",
+        &["--all-targets", "-p", "stela-gpu-maintenance"],
+    ),
 ];
 const CROSS_TARGET_DIR: &str = "target/cross";
 const DENY: [&str; 3] = ["--", "-D", "warnings"];
 
-pub fn run(fix: bool) -> Result<()> {
+pub fn run(fix: bool, nvk: bool) -> Result<()> {
     if fix {
         exec(&mut command(["fmt", "--all"]))?;
         for manifest in FORMATTED_APART {
@@ -85,8 +94,36 @@ pub fn run(fix: bool) -> Result<()> {
         ]),
         uefi(["-p", "stela-drivers", "--features", "native-acpi"]),
     ];
+    if nvk {
+        boot_lane.push(uefi([
+            "-p",
+            "stela-driver-gpu",
+            "--features",
+            "metal-linked,nouveau-port",
+        ]));
+        let mut nvk_clippy = uefi([BOOT[0], BOOT[1], "--features", "nvk"]);
+        // Mesa's unchanged path crates declare their upstream naming lint
+        // policy in their manifests. Deny warnings on the mount itself;
+        // Stela's driver owners are checked separately above.
+        nvk_clippy.env("RUSTFLAGS", BOOT_RUSTFLAGS);
+        boot_lane.push(nvk_clippy);
+        let mut linked = command([
+            "build",
+            "--locked",
+            "--manifest-path",
+            BOOT_MANIFEST,
+            "--features",
+            "nvk",
+            "--target",
+            BOOT_TARGET,
+            "--target-dir",
+            BOOT_TARGET_DIR,
+        ]);
+        linked.env("CARGO_BUILD_JOBS", "8");
+        boot_lane.push(linked);
+    }
     boot_lane.extend(CROSS.map(|(target, packages)| {
-        let mut clippy = command(["clippy", "--all-targets", "--locked"]);
+        let mut clippy = command(["clippy", "--locked"]);
         clippy
             .args(packages)
             .args(["--target", target, "--target-dir", CROSS_TARGET_DIR])
@@ -114,29 +151,36 @@ pub fn run(fix: bool) -> Result<()> {
             .map(|mut format| scope.spawn(move || buffered(&mut format)))
             .collect();
         // The GPU ports build against the pinned, patched upstream sources.
-        let lanes = crate::gpu::fetch::fetch(false).map(|()| {
-            let boot = scope.spawn(move || lane(boot_lane, buffered));
-            let host = lane(host_lane, exec);
-            let boot = boot.join().expect("the UEFI lane panicked");
-            // The tests run once nothing else does: some time their fixtures
-            // against the host's clock.
-            [
-                boot,
-                host.and_then(|()| {
-                    exec(&mut command(test))?;
-                    // The all-feature suite selects the software crypto backend.
-                    // Check the default selector independently as well.
-                    exec(&mut command([
-                        "test",
-                        "--locked",
-                        "-p",
-                        "stela-crypto",
-                        "--no-default-features",
-                        "--lib",
-                    ]))
-                }),
-            ]
-        });
+        let lanes = crate::gpu::fetch::fetch(false)
+            .and_then(|()| {
+                if nvk {
+                    crate::gpu::build_nvk(8)?;
+                }
+                Ok(())
+            })
+            .map(|()| {
+                let boot = scope.spawn(move || lane(boot_lane, buffered));
+                let host = lane(host_lane, exec);
+                let boot = boot.join().expect("the UEFI lane panicked");
+                // The tests run once nothing else does: some time their fixtures
+                // against the host's clock.
+                [
+                    boot,
+                    host.and_then(|()| {
+                        exec(&mut command(test))?;
+                        // The all-feature suite selects the software crypto backend.
+                        // Check the default selector independently as well.
+                        exec(&mut command([
+                            "test",
+                            "--locked",
+                            "-p",
+                            "stela-crypto",
+                            "--no-default-features",
+                            "--lib",
+                        ]))
+                    }),
+                ]
+            });
         let mut results: Vec<Result<()>> = formatting
             .into_iter()
             .map(|part| part.join().expect("formatting panicked"))

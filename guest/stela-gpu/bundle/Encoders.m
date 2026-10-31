@@ -2,7 +2,8 @@
  * The blit, compute and resource state encoders, and what every encoder shares.
  * An encoder writes one entry per call. `useResource:`, `useHeap:` and fences
  * write none: every resource is resident and the hazard tracker orders the
- * queue. See docs/design/metal-device.md.
+ * queue. Residency declarations still keep the declared objects alive on
+ * command buffers with retained references. See docs/design/metal-device.md.
  */
 #include "Bundle.h"
 
@@ -19,6 +20,8 @@ static StelaRegionRecord region_record(NSUInteger slice, NSUInteger level, MTLOr
 }
 
 @implementation StelaGPUEncoder {
+	NSString *_label;
+	StelaGPUEncoderInfo *_errorInfo;
 	/* What `endEncoding` samples. */
 	struct {
 		__unsafe_unretained StelaGPUCounterSampleBuffer *buffer;
@@ -33,6 +36,7 @@ static StelaRegionRecord region_record(NSUInteger slice, NSUInteger level, MTLOr
 	if (self) {
 		_commands = commands;
 		_stream = stream;
+		_errorInfo = [commands recordEncoder];
 	}
 	return self;
 }
@@ -40,6 +44,17 @@ static StelaRegionRecord region_record(NSUInteger slice, NSUInteger level, MTLOr
 - (id)device
 {
 	return _commands->_device;
+}
+
+- (NSString *)label
+{
+	return _label;
+}
+
+- (void)setLabel:(NSString *)label
+{
+	_label = [label copy];
+	_errorInfo.label = label ?: @"";
 }
 
 - (void)endEncoding
@@ -76,26 +91,67 @@ static StelaRegionRecord region_record(NSUInteger slice, NSUInteger level, MTLOr
 
 - (void)useResource:(id)resource usage:(NSUInteger)usage
 {
-	(void)resource;
 	(void)usage;
+	[_commands use:resource];
 }
 
 - (void)useResources:(const id __unsafe_unretained[])resources count:(NSUInteger)count usage:(NSUInteger)usage
 {
-	(void)resources;
-	(void)count;
-	(void)usage;
+	for (NSUInteger i = 0; i < count; i++) {
+		[self useResource:resources[i] usage:usage];
+	}
 }
 
 - (void)useHeap:(id)heap
 {
-	(void)heap;
+	[_commands use:heap];
 }
 
 - (void)useHeaps:(const id __unsafe_unretained[])heaps count:(NSUInteger)count
 {
-	(void)heaps;
-	(void)count;
+	for (NSUInteger i = 0; i < count; i++) {
+		[self useHeap:heaps[i]];
+	}
+}
+
+- (void)useResource:(id)resource usage:(NSUInteger)usage stages:(NSUInteger)stages
+{
+	(void)stages;
+	[self useResource:resource usage:usage];
+}
+
+- (void)useResources:(const id __unsafe_unretained[])resources
+	       count:(NSUInteger)count
+	       usage:(NSUInteger)usage
+	      stages:(NSUInteger)stages
+{
+	(void)stages;
+	[self useResources:resources count:count usage:usage];
+}
+
+- (void)useHeap:(id)heap stages:(NSUInteger)stages
+{
+	(void)stages;
+	[self useHeap:heap];
+}
+
+- (void)useHeaps:(const id __unsafe_unretained[])heaps count:(NSUInteger)count stages:(NSUInteger)stages
+{
+	(void)stages;
+	[self useHeaps:heaps count:count];
+}
+
+/* The queue's hazard barriers cover every graphics stage between encoders. */
+- (void)updateFence:(id)fence afterStages:(NSUInteger)stages
+{
+	(void)stages;
+	[self updateFence:fence];
+}
+
+- (void)waitForFence:(id)fence beforeStages:(NSUInteger)stages
+{
+	(void)stages;
+	[self waitForFence:fence];
 }
 
 - (void)sampleCountersInBuffer:(StelaGPUCounterSampleBuffer *)buffer

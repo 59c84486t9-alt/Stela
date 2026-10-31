@@ -10,6 +10,7 @@
 #include <linux/sched/task_stack.h>
 #include <linux/sched/task.h>
 #include <linux/sched/signal.h>
+#include <linux/sched/rt.h>
 #include <linux/string.h>
 #include <stela/atomic_callback.h>
 #include <stela/linux.h>
@@ -28,8 +29,7 @@ static_assert(!IS_ENABLED(CONFIG_DEBUG_MUTEXES));
 static_assert(!IS_ENABLED(CONFIG_DEBUG_WW_MUTEX_SLOWPATH));
 static_assert(!IS_ENABLED(CONFIG_PREEMPT_VOLUNTARY_BUILD));
 static_assert(!IS_ENABLED(CONFIG_PREEMPT_DYNAMIC));
-/* I2C's required RT/PI extension is separate; no partial RT field enablement. */
-static_assert(!IS_ENABLED(CONFIG_RT_MUTEXES));
+static_assert(IS_ENABLED(CONFIG_RT_MUTEXES));
 static_assert(!IS_ENABLED(CONFIG_BLOCK));
 static_assert(!IS_ENABLED(CONFIG_TASK_DELAY_ACCT));
 static_assert(!IS_ENABLED(CONFIG_PSI));
@@ -52,6 +52,7 @@ struct stela_linux_task {
 	bool attached, active, suspended, prepared;
 	bool io_blocked, load_blocked, finalizing;
 	bool scope_boundary;
+	bool rt_prepared;
 };
 
 /* The real same-CPU Runtime owns publication. This does not authorize C entry
@@ -246,6 +247,9 @@ static bool quiet_except_usage_flags(const struct stela_linux_task *task, unsign
 	       task->linux_task.flags == PF_KTHREAD && !task->linux_task.blocked_on &&
 	       !task->linux_task.blocked_donor && !task->linux_task.wake_q.next &&
 	       !task->linux_task.in_iowait && !task->linux_task.is_blocked &&
+	       !task->rt_prepared && !task->linux_task.pi_blocked_on &&
+	       !task->linux_task.pi_top_task && RB_EMPTY_ROOT(&task->linux_task.pi_waiters.rb_root) &&
+	       task->linux_task.prio == task->linux_task.normal_prio &&
 	       !task->io_blocked && !task->load_blocked &&
 	       sigisemptyset(&pending) &&
 	       list_empty(&task->linux_task.pending.list) &&
@@ -279,6 +283,7 @@ struct stela_linux_task *stela_linux_task_allocate(void)
 	task->linux_task.prio = DEFAULT_PRIO;
 	task->linux_task.static_prio = DEFAULT_PRIO;
 	task->linux_task.normal_prio = DEFAULT_PRIO;
+	task->linux_task.pi_waiters = RB_ROOT_CACHED;
 	INIT_LIST_HEAD(&task->linux_task.pending.list);
 	sigemptyset(&task->linux_task.pending.signal);
 	refcount_set(&task->linux_task.usage, 1);
@@ -517,6 +522,24 @@ int stela_linux_task_complete(struct stela_linux_task *task,
 	stela_linux_lease_snapshot(&lease);
 	if (lease.owner || lease.irq_flags != ARCH_IRQ_ENABLED)
 		return -EBUSY;
+	/* Runtime reuses this physical stack for a new NORMAL job. No PI donor
+	 * or waiter survives quiet(), so exit can withdraw its base FIFO policy. */
+	if (task->linux_task.policy != SCHED_NORMAL || task_nice(&task->linux_task)) {
+		struct stela_linux_task_rank before = {
+			.policy = task->linux_task.policy,
+			.realtime = task->linux_task.rt_priority,
+			.effective = task->linux_task.prio,
+			.nice = task_nice(&task->linux_task),
+		};
+		struct stela_linux_task_rank after = {.policy = SCHED_NORMAL, .effective = DEFAULT_PRIO};
+		if (!task->ops->rank || task->ops->rank(task->binding, task->context.sequence, &before, &after, false))
+			return -EBUSY;
+		task->linux_task.policy = SCHED_NORMAL;
+		task->linux_task.rt_priority = 0;
+		task->linux_task.static_prio = DEFAULT_PRIO;
+		task->linux_task.normal_prio = DEFAULT_PRIO;
+		task->linux_task.prio = DEFAULT_PRIO;
+	}
 	task->lease = lease;
 	task->context.sequence = 0;
 	task->linux_task.on_cpu = 0;
@@ -596,10 +619,12 @@ int stela_linux_task_park(bool scheduler_preempt_disabled)
 {
 	struct stela_linux_task *task = current_record();
 	/* As Linux's sched_submit_work, before the switch is prepared. */
-	stela_linux_worker_sleeping(true);
+	if (!task->rt_prepared)
+		stela_linux_worker_sleeping(true);
 	int error = prepare(task, scheduler_preempt_disabled ? 1 : 0);
 	if (error) {
-		stela_linux_worker_sleeping(false);
+		if (!task->rt_prepared)
+			stela_linux_worker_sleeping(false);
 		return error;
 	}
 	/* Same selected scheduler effect as try_to_block_task: a signal posted
@@ -614,7 +639,8 @@ int stela_linux_task_park(bool scheduler_preempt_disabled)
 	if (result > 1)
 		__builtin_trap();
 	result = finish_prepared(task, result);
-	stela_linux_worker_sleeping(false);
+	if (!task->rt_prepared)
+		stela_linux_worker_sleeping(false);
 	return result;
 }
 
@@ -691,6 +717,132 @@ void schedule(void)
 	__set_current_state(TASK_RUNNING);
 }
 
+/* Original RT-mutex slow paths submit work before publishing their waiter.
+ * Creating another worker after pi_blocked_on is visible could recurse into
+ * a second RT wait by this task, so the generic park skips that work here. */
+void rt_mutex_pre_schedule(void)
+{
+	struct stela_linux_task *task = current_record();
+	if (task->rt_prepared || task->linux_task.pi_blocked_on)
+		__builtin_trap();
+	stela_linux_worker_sleeping(true);
+	task->rt_prepared = true;
+}
+
+void rt_mutex_post_schedule(void)
+{
+	struct stela_linux_task *task = current_record();
+	if (!task->rt_prepared || task->linux_task.pi_blocked_on)
+		__builtin_trap();
+	task->rt_prepared = false;
+	stela_linux_worker_sleeping(false);
+}
+
+void rt_mutex_schedule(void)
+{
+	struct stela_linux_task *task = current_record();
+	if (!task->rt_prepared)
+		__builtin_trap();
+	schedule();
+}
+
+void rt_mutex_futex_pre_schedule(void) { rt_mutex_pre_schedule(); }
+void rt_mutex_futex_post_schedule(void) { rt_mutex_post_schedule(); }
+
+static struct stela_linux_task *priority_target(struct task_struct *p)
+{
+	(void)current_record();
+	for (unsigned int slot = 0; slot < STACK_TASKS; slot++) {
+		struct stela_linux_task *task = stack_tasks[slot];
+		if (task && &task->linux_task == p && task->attached && task->context.sequence)
+			return task;
+	}
+	/* No caller-controlled task or an old job may change the queue's ranks. */
+	__builtin_trap();
+}
+
+static int update_priority(struct stela_linux_task *task, unsigned int policy,
+			   unsigned int realtime, int priority, int nice, bool head)
+{
+	struct task_struct *p = &task->linux_task;
+	struct stela_linux_task_rank before = {
+		.policy = p->policy, .realtime = p->rt_priority, .effective = p->prio,
+		.nice = task_nice(p),
+	};
+	struct stela_linux_task_rank after = {
+		.policy = policy, .realtime = realtime, .effective = priority, .nice = nice,
+	};
+	if (before.policy == after.policy && before.realtime == after.realtime &&
+	    before.effective == after.effective && before.nice == after.nice)
+		return 0;
+	if (!task->ops->rank)
+		return -EOPNOTSUPP;
+	return task->ops->rank(task->binding, task->context.sequence, &before, &after, head);
+}
+
+/* NORMAL workqueue priority remains nice-based; it never acquires the
+ * strict real-time policy. Original PI may still boost its effective rank. */
+void set_user_nice(struct task_struct *p, long nice)
+{
+	struct stela_linux_task *task = priority_target(p);
+	if (nice < MIN_NICE || nice > MAX_NICE || nice == task_nice(p))
+		return;
+	guard(raw_spinlock_irqsave)(&p->pi_lock);
+	int normal = p->policy == SCHED_FIFO ? p->normal_prio : NICE_TO_PRIO((int)nice);
+	int priority = p->pi_top_task ? min(normal, p->pi_top_task->prio) : normal;
+	int error = update_priority(task, p->policy, p->rt_priority, priority, (int)nice, false);
+	if (error) {
+		stela_linux_unsupported("NORMAL nice scheduling needs the retained kernel service domain");
+		if (error != -EOPNOTSUPP)
+			__builtin_trap();
+		return;
+	}
+	p->static_prio = NICE_TO_PRIO((int)nice);
+	p->normal_prio = normal;
+	p->prio = priority;
+}
+
+void sched_set_fifo(struct task_struct *p)
+{
+	struct stela_linux_task *task = priority_target(p);
+	{
+		guard(raw_spinlock_irqsave)(&p->pi_lock);
+		unsigned int realtime = MAX_RT_PRIO / 2;
+		int normal = MAX_RT_PRIO - 1 - (int)realtime;
+		int priority = p->pi_top_task ? min(normal, p->pi_top_task->prio) : normal;
+		int error = update_priority(task, SCHED_FIFO, realtime, priority, task_nice(p), false);
+		if (error) {
+			/* An unconfigured hosted Runtime cannot acquire FIFO semantics. */
+			stela_linux_unsupported("FIFO scheduling needs the retained kernel service domain");
+			if (error != -EOPNOTSUPP)
+				__builtin_trap();
+			return;
+		}
+		p->policy = SCHED_FIFO;
+		p->rt_priority = realtime;
+		p->normal_prio = normal;
+		p->prio = priority;
+	}
+	/* As __sched_setscheduler in the pinned core: changing a blocked task
+	 * must reorder its original waiter and propagate to the lock owner. The
+	 * original helper acquires pi_lock itself, after this policy commit. */
+	rt_mutex_adjust_pi(p);
+}
+
+/* Called by the original RT-mutex owner/waiter trees with p->pi_lock held.
+ * Linux retains the donor/waiter; Runtime stores only its primitive rank.
+ * Queue and original task fields commit together before that lease ends. */
+void rt_mutex_setprio(struct task_struct *p, struct task_struct *pi_task)
+{
+	struct stela_linux_task *task = priority_target(p);
+	int priority = pi_task ? min(p->normal_prio, pi_task->prio) : p->normal_prio;
+	bool head = p->prio < priority && priority < MAX_RT_PRIO;
+	if (update_priority(task, p->policy, p->rt_priority, priority, task_nice(p), head))
+		__builtin_trap();
+	p->pi_top_task = pi_task;
+	p->prio = priority;
+}
+
 static int wake_state(struct task_struct *linux_task, unsigned int state)
 {
 	(void)current_record();
@@ -752,11 +904,6 @@ void io_schedule(void)
 	io_schedule_finish(token);
 }
 
-/* Linux asks only its own kthreads to stop or park, and Stela creates none. */
-bool kthread_should_stop_or_park(void)
-{
-	return false;
-}
 
 static int wait_signal(unsigned int kind)
 {

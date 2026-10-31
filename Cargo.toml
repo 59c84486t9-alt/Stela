@@ -3,6 +3,7 @@ members = [
     "crates/stela-boot-core",
     "crates/stela-crypto",
     "crates/stela-cli",
+    "crates/stela-gpu-maintenance",
     "crates/stela-dev",
     "crates/stela-loader",
     "crates/stela-compiler",
@@ -32,6 +33,7 @@ members = [
 default-members = [
     "crates/stela-boot-core",
     "crates/stela-cli",
+    "crates/stela-gpu-maintenance",
     "crates/stela-dev",
     "crates/stela-loader",
     "crates/stela-compiler",
@@ -85,6 +87,7 @@ stela-runtime = { path = "crates/stela-runtime" }
 stela-tls = { path = "crates/stela-tls" }
 stela-loader = { path = "crates/stela-loader" }
 stela-cli = { path = "crates/stela-cli" }
+stela-gpu-maintenance = { path = "crates/stela-gpu-maintenance" }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

@@ -12,6 +12,26 @@ use core::{
     ptr, slice,
 };
 
+/// Purpose of a real worker continuation; pools retain independent headroom.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum WorkerKind {
+    Dedicated = 0,
+    Normal = 1,
+    HighPriority = 2,
+}
+impl TryFrom<u32> for WorkerKind {
+    type Error = Errno;
+    fn try_from(value: u32) -> Result<Self, Errno> {
+        match value {
+            0 => Ok(Self::Dedicated),
+            1 => Ok(Self::Normal),
+            2 => Ok(Self::HighPriority),
+            _ => Err(-22),
+        }
+    }
+}
+
 /// A negative Linux errno.
 pub type Errno = i32;
 
@@ -34,7 +54,7 @@ pub trait Platform {
     /// Bytes from an already seeded generator. Must not sleep or allocate.
     fn random_bytes(&self, bytes: &mut [u8]);
     /// Start a task running `stela_linux_workers_run`, never inline.
-    fn start_worker(&self) -> Result<(), Errno>;
+    fn start_worker(&self, kind: WorkerKind) -> Result<(), Errno>;
     /// Power the machine off.
     fn shutdown(&self, force: bool);
     /// Map page-aligned device memory uncached, or write-combining where its
@@ -77,7 +97,7 @@ struct Services {
     warn: unsafe extern "C" fn(*mut c_void, *const c_char, c_int, *const c_char),
     unsupported: unsafe extern "C" fn(*mut c_void, *const c_char),
     random_bytes: unsafe extern "C" fn(*mut c_void, *mut c_void, usize),
-    start_worker: unsafe extern "C" fn(*mut c_void) -> c_int,
+    start_worker: unsafe extern "C" fn(*mut c_void, u32) -> c_int,
     shutdown: unsafe extern "C" fn(*mut c_void, bool),
     map_device: unsafe extern "C" fn(*mut c_void, u64, usize, bool) -> *mut c_void,
     unmap_device: unsafe extern "C" fn(*mut c_void, *mut c_void),
@@ -201,9 +221,12 @@ mod trampolines {
         }
     }
 
-    pub unsafe extern "C" fn start_worker<P: Platform>(context: *mut c_void) -> c_int {
+    pub unsafe extern "C" fn start_worker<P: Platform>(context: *mut c_void, kind: u32) -> c_int {
         // SAFETY: see the module.
-        status(unsafe { platform::<P>(context) }.start_worker())
+        status(WorkerKind::try_from(kind).and_then(|kind| {
+            // SAFETY: this service invocation retains the owner's platform.
+            unsafe { platform::<P>(context) }.start_worker(kind)
+        }))
     }
 
     pub unsafe extern "C" fn shutdown<P: Platform>(context: *mut c_void, force: bool) {
@@ -436,7 +459,8 @@ mod tests {
         fn random_bytes(&self, bytes: &mut [u8]) {
             bytes.fill(7);
         }
-        fn start_worker(&self) -> Result<(), Errno> {
+        fn start_worker(&self, kind: WorkerKind) -> Result<(), Errno> {
+            assert_eq!(kind, WorkerKind::Normal);
             self.workers.set(self.workers.get() + 1);
             if self.workers.get() > 1 {
                 Err(-11)
@@ -518,8 +542,8 @@ mod tests {
             let mut bytes = [0u8; 4];
             (s.random_bytes)(context, bytes.as_mut_ptr().cast(), 4);
             assert_eq!(bytes, [7; 4]);
-            assert_eq!((s.start_worker)(context), 0);
-            assert_eq!((s.start_worker)(context), -11);
+            assert_eq!((s.start_worker)(context, WorkerKind::Normal as u32), 0);
+            assert_eq!((s.start_worker)(context, WorkerKind::Normal as u32), -11);
             (s.shutdown)(context, false);
 
             assert_eq!((s.map_device)(context, 0x1000, 0, false), ptr::null_mut());

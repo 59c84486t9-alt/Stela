@@ -58,6 +58,11 @@ private:
 	IOInterruptEventSource *interrupt = nullptr;
 	/* Serializes the control page's open and close sequences. */
 	IOLock *lock = nullptr;
+	/* With lock held: stop closes admission but never acknowledges DMA. */
+	bool stopping = false;
+	uint64_t imports = 0;
+	/* A stopped provider with unretired DMA cannot be freed or unloaded. */
+	bool retainedForDma = false;
 	uint64_t completionCount = 0;
 };
 

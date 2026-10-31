@@ -9,6 +9,7 @@ pub mod args;
 pub mod boot;
 mod boot_log;
 pub mod efi;
+pub use stela_gpu_maintenance as gpu;
 mod progress;
 pub mod restore;
 mod setup;
@@ -55,6 +56,8 @@ pub(crate) enum Command {
     /// Print the boot log stela.efi keeps on a machine-state partition, from a
     /// disk image or a raw partition.
     BootLog(boot_log::BootLog),
+    /// Install the GPU components and LocalPolicy from a macOS maintenance boot.
+    Gpu(gpu::Gpu),
 }
 
 // Windows ships the direct installer; other hosts expose these subcommands.
@@ -70,6 +73,7 @@ impl Command {
         match self {
             Self::Setup(command) => command.run(),
             Self::BootLog(command) => command.run(),
+            Self::Gpu(command) => command.run(),
         }
     }
 }

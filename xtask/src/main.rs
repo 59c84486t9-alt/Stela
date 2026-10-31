@@ -29,9 +29,16 @@ enum Task {
         /// Format sources before checking.
         #[arg(long)]
         fix: bool,
+        /// Also build and check the complete NVIDIA/NVK UEFI image.
+        #[arg(long)]
+        nvk: bool,
     },
     /// Build the release `stela` with its matching `stela.efi` embedded.
-    Dist,
+    Dist {
+        /// Include the NVIDIA/NVK rendering stack and guest components.
+        #[arg(long)]
+        nvk: bool,
+    },
     /// Check the Markdown files' links and paths and the `cargo xtask` tasks
     /// the tree names.
     Links,
@@ -59,8 +66,8 @@ enum Task {
 
 fn main() -> ExitCode {
     let result = match Cli::parse().task {
-        Task::Check { fix } => check::run(fix).map(|()| ExitCode::SUCCESS),
-        Task::Dist => dist::run().map(|()| ExitCode::SUCCESS),
+        Task::Check { fix, nvk } => check::run(fix, nvk).map(|()| ExitCode::SUCCESS),
+        Task::Dist { nvk } => dist::run(nvk).map(|()| ExitCode::SUCCESS),
         Task::Links => links::run().map(|()| ExitCode::SUCCESS),
         Task::Oracles(task) => task.run().map(|()| ExitCode::SUCCESS),
         Task::Boot(command) => boot::run(command),

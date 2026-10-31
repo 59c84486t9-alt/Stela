@@ -72,7 +72,12 @@ impl<B: Backend, C: Compiler> Drop for Turn<'_, B, C> {
     fn drop(&mut self) {
         // A failed `try_turn` left the look to this holder, which it sees
         // once `stale` has been raised.
-        let completed = self.0.stale.swap(false, Ordering::SeqCst) && (**self).signaled();
+        let mut completed = false;
+        if self.0.stale.swap(false, Ordering::SeqCst) || self.device().is_lost() {
+            // Polling enters Vulkan too. An interrupt can take this path
+            // without a guest call's stack switch around it.
+            (self.0.host.run)(self.0.host.stack, &mut || completed = (**self).signaled());
+        }
         if completed || self.retiring() {
             self.0.completed.store(true, Ordering::Release);
         }
@@ -124,6 +129,18 @@ impl<B: Backend, C: Compiler> SharedService<B, C> {
     pub fn interrupted(&self) {
         self.stale.store(true, Ordering::SeqCst);
         drop(self.try_turn());
+    }
+
+    /// Closes admission while holding the same turn as guest calls, so a
+    /// call either precedes closure or observes it.
+    pub fn begin_quiesce(&self) {
+        self.call(|service| service.begin_quiesce());
+    }
+
+    /// Advances the native owner's GPU stop protocol on the service stack.
+    /// An idle answer does not disconnect the gate or invalidate DMA maps.
+    pub fn quiesce_step(&self) -> crate::metal::device::lifecycle::QuiesceStatus {
+        self.call(|service| service.quiesce_step())
     }
 }
 

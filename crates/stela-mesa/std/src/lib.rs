@@ -10,13 +10,13 @@
 extern crate alloc as alloc_crate;
 
 pub use alloc_crate::{alloc, borrow, boxed, fmt, format, rc, slice, str, string, vec};
+pub use core::primitive::{i128, i16, i32, i64, i8, isize, u128, u16, u32, u64, u8, usize};
 pub use core::{
     any, array, ascii, assert, assert_eq, assert_ne, cell, char, clone, cmp, column, compile_error,
     concat, convert, debug_assert, debug_assert_eq, debug_assert_ne, default, f32, f64, file,
-    format_args, future, hint, i128, i16, i32, i64, i8, include, include_bytes, include_str, isize,
-    iter, line, marker, matches, mem, module_path, num, ops, option, option_env, pin, ptr, result,
-    stringify, task, time, todo, u128, u16, u32, u64, u8, unimplemented, unreachable, usize, write,
-    writeln,
+    format_args, future, hint, include, include_bytes, include_str, iter, line, marker, matches,
+    mem, module_path, num, ops, option, option_env, pin, ptr, result, stringify, task, time, todo,
+    unimplemented, unreachable, write, writeln,
 };
 
 pub mod collections;

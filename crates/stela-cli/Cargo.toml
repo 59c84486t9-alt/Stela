@@ -9,6 +9,7 @@ name = "stela"
 path = "src/main.rs"
 
 [dependencies]
+stela-gpu-maintenance.workspace = true
 stela-soc-data = { path = "../stela-soc-data", default-features = false }
 stela-engine = { path = "../stela-engine" }
 stela-contracts = { path = "../stela-contracts" }

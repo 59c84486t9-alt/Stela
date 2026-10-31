@@ -210,7 +210,15 @@ pub(super) fn unmap_export(address: u64, bytes: u64) {
 
 /// Closes a descriptor Linux gave out.
 pub(super) fn close_descriptor(fd: c_int) {
-    submit(Operation::Close(fd));
+    let result = submit(Operation::Close(fd));
+    if result < 0 {
+        // This void exporter/display cleanup contract cannot return the error
+        // or prove that its caller will keep the original physical owner.
+        // Stop before releasing that owner's stack, export mapping or memory.
+        output::fatal(format_args!(
+            "GPU descriptor {fd} cleanup refused ({result}); retaining its owners"
+        ));
+    }
 }
 
 /// Run `operation` on a Linux task.
@@ -306,34 +314,70 @@ unsafe extern "C" fn serve(context: *mut c_void) {
     request.done.store(true, Ordering::Release);
 }
 
-/// Start a task for each posted call. In the dispatcher. Calls past what the
-/// queue holds go back, to wait for a task to finish.
+/// A wake leaf uses the service task's existing owner/process scope. Its
+/// requester keeps the stack record live until the release acknowledgement.
+unsafe extern "C" fn serve_wake(context: *mut c_void) {
+    // SAFETY: start deferred this Wake request and its poster waits for done.
+    let request = unsafe { &*context.cast::<Request>() };
+    // SAFETY: the service owns a real entered process continuation; waking
+    // waiters is bounded and cannot sleep or enter another owner.
+    unsafe { client::wake() };
+    request.result.store(0, Ordering::Relaxed);
+    request.done.store(true, Ordering::Release);
+}
+
+/// Admit posted operations in the dispatcher. General capacity refusal is an
+/// immediate resource failure; queued operations must not depend on a later
+/// unaccepted ioctl or thread startup. Wake leaves use the reserved service.
 pub(super) fn start(gpu: &Installed) -> Result<(), WorkError> {
     let mut request = REQUESTS
         .swap(ptr::null_mut(), Ordering::Acquire)
         .cast_const();
-    // SAFETY: a posted request stays live until it is done, and only this
-    // function reads `next` once it has been taken.
+    let mut deferred = false;
+    // Inspect every captured request: Owner pressure must not hide a Wake
+    // farther down this list, because that wake can release the occupied tasks.
+    // SAFETY: captured posted requests stay live until the done acknowledgement.
     while let Some(current) = unsafe { request.as_ref() } {
         let next = current.next.get();
-        // SAFETY: as above: `serve` ends before its poster stops waiting.
-        let spawned = unsafe {
-            gpu.environment
-                .as_ref()
-                .spawn(serve, request.cast_mut().cast())
+        // SAFETY: posted storage lives until done. Wake leaves run on the
+        // existing service task; all other requests retain ordinary task rules.
+        let accepted = unsafe {
+            match current.operation {
+                Operation::Wake => gpu
+                    .environment
+                    .as_ref()
+                    .defer_service(serve_wake, request.cast_mut().cast()),
+                _ => gpu
+                    .environment
+                    .as_ref()
+                    .spawn(serve, request.cast_mut().cast())
+                    .map(drop),
+            }
         };
-        match spawned {
-            Ok(_) => request = next,
+        match accepted {
+            Ok(()) => {}
+            Err(WorkError::Full) if matches!(current.operation, Operation::Wake) => {
+                // Every occupied leaf slot has a raised SERVICE reason and a
+                // bounded nonblocking callback. Retry after that independent
+                // service drains; this never waits for a General/pool credit.
+                post(current);
+                deferred = true;
+            }
             Err(WorkError::Full) => {
-                // SAFETY: as above, for this and what follows it.
-                while let Some(left) = unsafe { request.as_ref() } {
-                    request = left.next.get();
-                    post(left);
+                if let Operation::Thread(thread) = current.operation {
+                    // SAFETY: no serve task accepted this request, so its
+                    // transferred thread box has never run or been consumed.
+                    drop(unsafe { Box::from_raw(thread) });
                 }
-                return gpu.events.notify();
+                current.result.store(ENOMEM, Ordering::Relaxed);
+                current.done.store(true, Ordering::Release);
             }
             Err(error) => return Err(error),
         }
+        request = next;
+    }
+    if deferred {
+        gpu.events.notify()?;
     }
     Ok(())
 }
@@ -422,7 +466,7 @@ pub(super) fn chipset(index: u32) -> Option<u16> {
         request: GET_PARAM,
         argument: (&raw mut parameter).cast(),
     });
-    submit(Operation::Close(fd));
+    close_descriptor(fd);
     (result == 0).then_some(parameter.value as u16)
 }
 
@@ -568,10 +612,11 @@ extern "C" fn stela_libc_drm_mmap(fd: c_int, offset: u64, size: usize) -> *mut c
 #[unsafe(no_mangle)]
 extern "C" fn stela_libc_drm_munmap(address: *mut c_void, _size: usize) -> c_int {
     let mapped = installed().is_some_and(|gpu| gpu.window.contains(address as u64));
-    if mapped {
-        submit(Operation::Unmap(address as u64));
+    if !mapped {
+        return 0;
     }
-    mapped.into()
+    let result = submit(Operation::Unmap(address as u64));
+    if result < 0 { result as c_int } else { 1 }
 }
 
 #[unsafe(no_mangle)]

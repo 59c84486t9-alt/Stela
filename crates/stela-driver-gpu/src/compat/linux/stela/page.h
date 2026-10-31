@@ -133,6 +133,15 @@ int stela_linux_page_stack_admit(
 int stela_linux_page_stack_cancel(const struct stela_linux_stack_ticket_v1 *ticket);
 
 void stela_linux_pages_finish(void);
+/* Entered serialized owner only. Pin one live aligned physical page's actual
+ * provider allocation before exposing it to DMA. NULL transfers nothing.
+ * Each non-NULL token prevents allocation/descriptor/provider retirement even
+ * after Linux logically frees all its pages; release it only after successful
+ * device quiescence and domain unmap. An uncertain map/unmap must keep it.
+ * Tokens can repeat for pages belonging to the same allocation; every success
+ * requires exactly one unpin. Unpin does not invoke the provider or allocate. */
+void *stela_linux_page_dma_pin(u64 physical);
+void stela_linux_page_dma_unpin(void *pin);
 /* Explicit bounded service diagnostic, not GPU or native-IRQ qualification.
  * Requires quiescent entry; owns and retires only its temporary allocations. */
 int stela_linux_page_catalog_verify(u64 generation);

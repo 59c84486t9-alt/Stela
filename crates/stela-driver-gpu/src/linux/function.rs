@@ -1,16 +1,19 @@
 //! A physical PCI function presented to Linux, which then binds any driver
 //! matching it (`compat/linux/kernel/pci_host.c`). Configuration space and DMA
 //! stay Stela's: the function's owner placed it, and Linux reaches both through
-//! the table here.
+//! the table here. Domain errors retain real allocation pins and stop at the
+//! terminal Linux boundary before callers can reuse DMA-visible memory.
 use super::owner::Errno;
 use alloc::{boxed::Box, collections::BTreeMap, sync::Arc, vec::Vec};
 use core::{
     ffi::{c_char, c_int, c_uint, c_void},
+    marker::PhantomData,
     ptr::NonNull,
+    sync::atomic::{AtomicU64, Ordering},
 };
 use stela_driver_base::bus::{
     dma::{
-        mapping::{Direction, DmaDomain, DomainMapping},
+        mapping::{Direction, DmaDomain, DmaError, DomainMapping, QuarantineStatus},
         memory::CacheAttribute,
         pages::DmaPages,
     },
@@ -26,6 +29,32 @@ const PAGE_BYTES: u64 = 1 << PAGE_SHIFT;
 
 const PCIBIOS_BAD_REGISTER_NUMBER: c_int = 0x87;
 const ENOMEM: Errno = -12;
+
+static QUARANTINED_MAPPINGS: AtomicU64 = AtomicU64::new(0);
+static QUARANTINED_BYTES: AtomicU64 = AtomicU64::new(0);
+
+/// Linux DMA leases kept without acknowledged domain removal. These counters
+/// are cumulative; no reset or reclamation is inferred from quarantine.
+pub fn dma_quarantine_status() -> QuarantineStatus {
+    QuarantineStatus {
+        mappings: QUARANTINED_MAPPINGS.load(Ordering::Relaxed),
+        bytes: QUARANTINED_BYTES.load(Ordering::Relaxed),
+    }
+}
+
+fn count_quarantine(mappings: u64, bytes: u64) {
+    let _ = QUARANTINED_MAPPINGS.try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+        Some(value.saturating_add(mappings))
+    });
+    let _ = QUARANTINED_BYTES.try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+        Some(value.saturating_add(bytes))
+    });
+}
+
+fn quarantine<T>(resources: T, mappings: u64, bytes: u64) {
+    count_quarantine(mappings, bytes);
+    core::mem::forget(resources);
+}
 
 /// The function's owner.
 pub trait Host {
@@ -118,57 +147,149 @@ struct RawFunction {
     devfn: c_uint,
     irq: c_uint,
     regions: [Region; BARS],
+    release_context: Option<unsafe extern "C" fn(*mut c_void)>,
 }
 
-const _: () = assert!(size_of::<RawFunction>() == 224);
+const _: () = assert!(size_of::<RawFunction>() == 232);
+const _: () = assert!(core::mem::offset_of!(RawFunction, release_context) == 224);
 
 unsafe extern "C" {
     fn stela_linux_pci_attach(function: *const RawFunction) -> *mut c_void;
     fn stela_linux_pci_bound(device: *const c_void) -> bool;
     fn stela_linux_pci_remove_device(device: *mut c_void);
-    fn stela_linux_unsupported(operation: *const c_char);
+    fn stela_linux_pci_quarantined_functions() -> u64;
+    fn stela_linux_fatal(message: *const c_char) -> !;
+    fn stela_linux_page_dma_pin(physical: u64) -> *mut c_void;
+    fn stela_linux_page_dma_unpin(pin: *mut c_void);
 }
 
-/// A mapping of pages Linux's allocator pins, by the address Linux was given.
+/// Functions whose final device reference ended outside their original
+/// quiescent owner. Their C storage, host and DMA roots remain quarantined.
+pub fn quarantined_functions() -> u64 {
+    // SAFETY: this diagnostic only atomically reads a monotonic C counter.
+    unsafe { stela_linux_pci_quarantined_functions() }
+}
+
+/// A reference to the Linux catalog's original provider allocation. This
+/// retains the entire allocation even if Linux frees a noncompound tail.
+struct PagePin(NonNull<c_void>);
+
+impl Drop for PagePin {
+    fn drop(&mut self) {
+        // SAFETY: pins are released only inside an entered, serialized Linux
+        // mapping callback, before map exposure or after successful unmap.
+        unsafe { stela_linux_page_dma_unpin(self.0.as_ptr()) };
+    }
+}
+
+struct Mapping {
+    token: DomainMapping,
+    _pins: Vec<PagePin>,
+}
+
+/// A mapping of pinned Linux allocations, by the address Linux was given.
 /// Passthrough domains give one physical range the same address every time, so
 /// each address keeps a stack of the mappings at it.
 struct Mappings {
     domain: Arc<dyn DmaDomain>,
     limit: u64,
-    live: BTreeMap<u64, Vec<DomainMapping>>,
+    live: BTreeMap<u64, Vec<Mapping>>,
 }
 
 impl Mappings {
-    fn map(&mut self, physical: u64, size: usize, direction: Direction) -> Option<u64> {
+    fn pin(physical: u64, size: usize) -> Option<(u64, DmaPages, Vec<PagePin>)> {
         let offset = physical % PAGE_BYTES;
         let end = physical.checked_add(u64::try_from(size).ok()?.max(1))?;
-        let pages = (physical - offset..end).step_by(PAGE_BYTES as usize);
-        // SAFETY: Linux keeps pages pinned while a mapping of them is live,
-        // and its DMA API ends the mapping before it frees them.
-        let pages = unsafe {
-            DmaPages::from_physical(pages.collect(), PAGE_SHIFT, CacheAttribute::WriteBack)
+        let physical: Vec<_> = (physical - offset..end)
+            .step_by(PAGE_BYTES as usize)
+            .collect();
+        let mut pins = Vec::new();
+        pins.try_reserve_exact(physical.len()).ok()?;
+        for &page in &physical {
+            // SAFETY: map is called in the serialized entered Linux owner.
+            // C checks live PFN ownership and retains its provider allocation.
+            pins.push(PagePin(NonNull::new(unsafe {
+                stela_linux_page_dma_pin(page)
+            })?));
         }
-        .ok()?;
-        // SAFETY: as above, for the pin the domain must keep.
-        let mapping = unsafe { self.domain.map(&pages, direction, self.limit) }.ok()?;
-        let address = mapping.address + offset;
-        self.live.entry(address).or_default().push(mapping);
-        Some(address)
+        // SAFETY: every physical page's original allocation is retained by
+        // pins until successful unmap, or permanently on uncertain teardown.
+        let pages =
+            unsafe { DmaPages::from_physical(physical, PAGE_SHIFT, CacheAttribute::WriteBack) }
+                .ok()?;
+        Some((offset, pages, pins))
     }
 
-    fn unmap(&mut self, address: u64) {
-        let Some(stack) = self.live.get_mut(&address) else {
-            return;
+    fn map(
+        &mut self,
+        physical: u64,
+        size: usize,
+        direction: Direction,
+    ) -> Result<Option<u64>, DmaError> {
+        let Some((offset, pages, pins)) = Self::pin(physical, size) else {
+            return Ok(None);
         };
-        let mapping = stack.pop();
+        // SAFETY: the real allocation pins and domain survive every uncertain
+        // failure; Linux's DMA API quiesces the device before explicit unmap.
+        let mapping = match unsafe {
+            self.domain
+                .map(&pages, direction, self.limit.min(MAPPING_ERROR - 1))
+        } {
+            Ok(mapping) => mapping,
+            Err(error) => {
+                // DmaError does not distinguish clean refusal from failed
+                // invalidation. Keep the real pins and domain in either case.
+                quarantine((pins, self.domain.clone()), 1, pages.bytes() as u64);
+                return Err(error);
+            }
+        };
+        let address = mapping.address + offset;
+        self.live.entry(address).or_default().push(Mapping {
+            token: mapping,
+            _pins: pins,
+        });
+        Ok(Some(address))
+    }
+
+    fn unmap(&mut self, address: u64) -> Result<(), DmaError> {
+        let Some(stack) = self.live.get_mut(&address) else {
+            return Ok(());
+        };
+        let Some(mapping) = stack.last() else {
+            return Ok(());
+        };
+        // SAFETY: Linux's DMA API unmaps only once the device is done.
+        // An error leaves the token and provider pins intact.
+        unsafe { self.domain.unmap(mapping.token) }?;
+        stack.pop();
         if stack.is_empty() {
             self.live.remove(&address);
         }
-        // SAFETY: Linux's DMA API unmaps only once the device is done.
-        if let Some(Err(_)) = mapping.map(|mapping| unsafe { self.domain.unmap(mapping) }) {
-            // The domain keeps the mapping, and Linux may reuse the pages.
-            // SAFETY: Linux called in, so its owner is entered.
-            unsafe { stela_linux_unsupported(c"a DMA unmap that failed".as_ptr()) };
+        Ok(())
+    }
+}
+
+impl Drop for Mappings {
+    fn drop(&mut self) {
+        if !self.live.is_empty() {
+            // Driver removal is not proof that every domain invalidation
+            // succeeded. Preserve active mappings, original provider pins and
+            // domain roots; catalog retirement stays busy for these leases.
+            let (count, bytes) =
+                self.live
+                    .values()
+                    .flatten()
+                    .fold((0u64, 0u64), |totals, mapping| {
+                        (
+                            totals.0.saturating_add(1),
+                            totals.1.saturating_add(mapping.token.bytes as u64),
+                        )
+                    });
+            quarantine(
+                (core::mem::take(&mut self.live), self.domain.clone()),
+                count,
+                bytes,
+            );
         }
     }
 }
@@ -184,6 +305,13 @@ fn direction(linux: c_uint) -> Direction {
 struct State<H> {
     host: H,
     mappings: Mappings,
+}
+
+unsafe extern "C" fn release_context<H>(context: *mut c_void) {
+    // SAFETY: successful attach transferred this unique Box to C. The final
+    // C device release invokes it once, only in the original quiescent owner;
+    // no device reference can issue another callback after final release.
+    drop(unsafe { Box::from_raw(context.cast::<State<H>>()) });
 }
 
 /// # Safety
@@ -240,15 +368,29 @@ unsafe extern "C" fn dma_map<H: Host>(
 ) -> u64 {
     // SAFETY: the table's context.
     let state = unsafe { state::<H>(context) };
-    state
-        .mappings
-        .map(physical, size, direction(linux))
-        .unwrap_or(MAPPING_ERROR)
+    match state.mappings.map(physical, size, direction(linux)) {
+        Ok(address) => address.unwrap_or(MAPPING_ERROR),
+        // The DMA API permits its caller to reuse suballocations immediately
+        // after refusal. Allocation pins alone cannot stop slab-slot reuse.
+        // DmaError does not certify that a refusal left no translation.
+        // SAFETY: the callback is inside its entered Linux owner.
+        Err(_) => unsafe {
+            stela_linux_fatal(c"DMA map failed without proven retirement".as_ptr())
+        },
+    }
 }
 
 unsafe extern "C" fn dma_unmap<H: Host>(context: *mut c_void, address: u64, _: usize, _: c_uint) {
     // SAFETY: the table's context.
-    unsafe { state::<H>(context) }.mappings.unmap(address);
+    let state = unsafe { state::<H>(context) };
+    if state.mappings.unmap(address).is_err() {
+        let bytes = state.mappings.live[&address].last().unwrap().token.bytes;
+        count_quarantine(1, bytes as u64);
+        // The void DMA API cannot report incomplete invalidation. Stop before
+        // the C caller can free/reuse even a suballocation of retained pages.
+        // SAFETY: the callback is inside its entered Linux owner.
+        unsafe { stela_linux_fatal(c"DMA unmap failed without proven retirement".as_ptr()) };
+    }
 }
 
 unsafe extern "C" fn enable_msi<H: Host>(context: *mut c_void) -> c_int {
@@ -262,21 +404,27 @@ unsafe extern "C" fn disable_msi<H: Host>(context: *mut c_void) {
     unsafe { state::<H>(context) }.host.disable_msi();
 }
 
-/// A function Linux can see. Must be dropped in the Linux owner it was attached
-/// in, as Linux then unbinds its driver.
+/// A function Linux can see. Drop unregisters it in the owner it was attached
+/// in. Other C device references retain the host and DMA roots until the final
+/// quiescent put in that owner; other final puts quarantine those resources.
 pub struct Attached<H> {
     device: NonNull<c_void>,
-    state: *mut State<H>,
+    _host: PhantomData<H>,
 }
 
 impl<H: Host> Attached<H> {
     /// # Safety
     /// In an entered Linux owner, on a Linux task, as a driver may bind here.
+    /// That owner and its platform services outlive all escaped device
+    /// references, including any quarantined final release.
     pub unsafe fn new(
         host: H,
         domain: Arc<dyn DmaDomain>,
         placement: Placement,
-    ) -> Result<Self, Errno> {
+    ) -> Result<Self, Errno>
+    where
+        H: 'static,
+    {
         let state = Box::into_raw(Box::new(State {
             host,
             mappings: Mappings {
@@ -298,10 +446,14 @@ impl<H: Host> Attached<H> {
             devfn: placement.devfn.into(),
             irq: placement.irq,
             regions: placement.regions,
+            release_context: Some(release_context::<H>),
         };
         // SAFETY: the caller's contract; C copies the table.
         match NonNull::new(unsafe { stela_linux_pci_attach(&raw) }) {
-            Some(device) => Ok(Self { device, state }),
+            Some(device) => Ok(Self {
+                device,
+                _host: PhantomData,
+            }),
             None => {
                 // SAFETY: refused, so Linux never saw it.
                 drop(unsafe { Box::from_raw(state) });
@@ -327,138 +479,12 @@ impl<H: Host> Attached<H> {
 
 impl<H> Drop for Attached<H> {
     fn drop(&mut self) {
-        // SAFETY: the type's contract; the removal unbinds the driver, after
-        // which Linux holds no mapping and makes no call into the state.
+        // SAFETY: the type's contract; removal unbinds the driver and drops
+        // registration. C's final device release owns State destruction, so
+        // outstanding device references retain their callback context.
         unsafe { stela_linux_pci_remove_device(self.device.as_ptr()) };
-        // SAFETY: as above, and only `new` made it.
-        drop(unsafe { Box::from_raw(self.state) });
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use core::ops::Range;
-    use core::sync::atomic::{AtomicU64, Ordering};
-    use stela_driver_base::bus::dma::mapping::DmaError;
-
-    /// A function's configuration space as plain memory.
-    struct Config([u8; 256]);
-
-    impl ConfigSpace for Config {
-        fn read32(&self, offset: u16) -> u32 {
-            let at = usize::from(offset);
-            u32::from_le_bytes(self.0[at..at + 4].try_into().unwrap())
-        }
-        fn write32(&mut self, offset: u16, value: u32) {
-            let at = usize::from(offset);
-            self.0[at..at + 4].copy_from_slice(&value.to_le_bytes());
-        }
-        fn write16(&mut self, offset: u16, value: u16) {
-            let at = usize::from(offset);
-            self.0[at..at + 2].copy_from_slice(&value.to_le_bytes());
-        }
-        fn write8(&mut self, offset: u16, value: u8) {
-            self.0[usize::from(offset)] = value;
-        }
-    }
-
-    #[test]
-    fn msi_programs_its_one_message_by_width() {
-        const CAPABILITY: u16 = 0x60;
-        for (width, data_at) in [(1 << 7, 0x6c), (0, 0x68)] {
-            let mut config = Config([0; 256]);
-            // Enabled, with a previous owner's multiple-message setting.
-            config.write16(CAPABILITY + 2, width | 1 | 2 << 4);
-            let msi = Msi::at(CAPABILITY);
-            msi.program(&mut config, 0x1_fee0_1000, 0x51);
-            assert_eq!(config.read16(CAPABILITY + 2), width | 2 << 4);
-            assert_eq!(config.read32(CAPABILITY + 4), 0xfee0_1000);
-            assert_eq!(config.read16(data_at), 0x51);
-            msi.enable(&mut config);
-            assert_eq!(config.read16(CAPABILITY + 2), width | 1);
-            msi.disable(&mut config);
-            assert_eq!(config.read16(CAPABILITY + 2), width);
-        }
-    }
-
-    #[derive(Default)]
-    struct Identity {
-        next: AtomicU64,
-        unmapped: AtomicU64,
-    }
-
-    // SAFETY: bookkeeping over addresses nothing dereferences.
-    unsafe impl DmaDomain for Identity {
-        unsafe fn map(
-            &self,
-            pages: &DmaPages,
-            _: Direction,
-            limit: u64,
-        ) -> Result<DomainMapping, DmaError> {
-            let address = pages.physical_pages()[0];
-            assert!(address <= limit);
-            Ok(DomainMapping {
-                id: self.next.fetch_add(1, Ordering::Relaxed),
-                address,
-                bytes: pages.bytes(),
-            })
-        }
-        unsafe fn unmap(&self, _: DomainMapping) -> Result<(), DmaError> {
-            self.unmapped.fetch_add(1, Ordering::Relaxed);
-            Ok(())
-        }
-        unsafe fn sync_for_device(
-            &self,
-            _: DomainMapping,
-            _: Range<usize>,
-            _: Direction,
-        ) -> Result<(), DmaError> {
-            Ok(())
-        }
-        unsafe fn sync_for_cpu(
-            &self,
-            _: DomainMapping,
-            _: Range<usize>,
-            _: Direction,
-        ) -> Result<(), DmaError> {
-            Ok(())
-        }
-    }
-
-    #[test]
-    fn the_same_pages_can_be_mapped_twice() {
-        let domain = Arc::new(Identity::default());
-        let mut mappings = Mappings {
-            domain: domain.clone(),
-            limit: u64::MAX >> 1,
-            live: BTreeMap::new(),
-        };
-        let address = mappings.map(0x5010, 0x2000, Direction::ToDevice);
-        assert_eq!(address, Some(0x5010));
-        assert_eq!(mappings.map(0x5010, 0x10, Direction::FromDevice), address);
-        mappings.unmap(0x5010);
-        assert_eq!(domain.unmapped.load(Ordering::Relaxed), 1);
-        assert!(mappings.live.contains_key(&0x5010));
-        mappings.unmap(0x5010);
-        assert!(mappings.live.is_empty());
-        mappings.unmap(0x5010);
-        assert_eq!(domain.unmapped.load(Ordering::Relaxed), 2);
-    }
-
-    #[test]
-    fn a_mapping_spans_every_page_it_touches() {
-        let domain = Arc::new(Identity::default());
-        let mut mappings = Mappings {
-            domain,
-            limit: u64::MAX >> 1,
-            live: BTreeMap::new(),
-        };
-        mappings
-            .map(0x1ff0, 0x20, Direction::Bidirectional)
-            .unwrap();
-        let mapping = mappings.live[&0x1ff0][0];
-        assert_eq!(mapping.bytes, 0x2000);
-        assert_eq!(mappings.map(u64::MAX, 2, Direction::ToDevice), None);
-    }
-}
+mod tests;

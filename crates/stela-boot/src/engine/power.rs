@@ -233,6 +233,19 @@ impl HostPowerControl {
         }
     }
 
+    /// Request a clean guest shutdown. Repeated native requests remain button
+    /// pulses; only an explicit forced request bypasses the guest's exit.
+    pub fn request_shutdown(&mut self, devices: &mut AppleDevices) {
+        let result = devices
+            .power_button(true)
+            .and_then(|()| devices.power_button(false));
+        if let Err(error) = result
+            && !core::mem::replace(&mut self.refused, true)
+        {
+            output::arguments(format_args!("POWER orderly shutdown refused: {error}\n"));
+        }
+    }
+
     /// Whether the host's power button was pressed since the last call.
     pub fn pressed(&mut self) -> bool {
         if let Some(acpi) = self.acpi.filter(|acpi| acpi.hardware_active()) {

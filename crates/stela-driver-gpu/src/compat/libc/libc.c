@@ -557,7 +557,17 @@ int strerror_r(int error, char *buffer, size_t size)
 
 int clock_gettime(clockid_t clock, struct timespec *time)
 {
-	(void)clock;
+	if (!time) {
+		errno = EINVAL;
+		return -1;
+	}
+	if (clock != CLOCK_MONOTONIC) {
+		/* Deterministic failed output also protects optional Mesa profiling
+		 * callers that neglect the error; it is never a successful clock. */
+		*time = (struct timespec){0};
+		errno = clock == CLOCK_REALTIME || clock == CLOCK_PROCESS_CPUTIME_ID || clock == CLOCK_THREAD_CPUTIME_ID ? ENOTSUP : EINVAL;
+		return -1;
+	}
 	uint64_t now = stela_libc_now_ns();
 	time->tv_sec = (time_t)(now / 1000000000);
 	time->tv_nsec = (long)(now % 1000000000);
@@ -566,28 +576,31 @@ int clock_gettime(clockid_t clock, struct timespec *time)
 
 int timespec_get(struct timespec *time, int base)
 {
-	clock_gettime(CLOCK_MONOTONIC, time);
-	return base;
+	if (base != TIME_UTC) {
+		errno = EINVAL;
+		return 0;
+	}
+	return clock_gettime(CLOCK_REALTIME, time) ? 0 : base;
 }
 
 time_t time(time_t *result)
 {
-	time_t now = (time_t)(stela_libc_now_ns() / 1000000000);
 	if (result)
-		*result = now;
-	return now;
+		*result = (time_t)-1;
+	errno = ENOTSUP;
+	return (time_t)-1;
 }
 
 int gettimeofday(struct timeval *time, void *zone)
 {
 	(void)zone;
-	uint64_t now = stela_libc_now_ns();
-	time->tv_sec = (time_t)(now / 1000000000);
-	time->tv_usec = (long)(now / 1000 % 1000000);
-	return 0;
+	if (time)
+		*time = (struct timeval){0};
+	errno = ENOTSUP;
+	return -1;
 }
 
-/* The host has one clock, since boot, which reads as a day count from 1970. */
+/* Calendar conversion of a supplied Unix timestamp; no host wall-clock claim. */
 struct tm *localtime_r(const time_t *time, struct tm *result)
 {
 	long days = (long)(*time / 86400), seconds = (long)(*time % 86400);
@@ -617,9 +630,16 @@ struct tm *localtime(const time_t *time)
 	return localtime_r(time, &result);
 }
 
-static uint64_t nanoseconds(const struct timespec *time)
+static int nanoseconds(const struct timespec *time, uint64_t *result)
 {
-	return (uint64_t)time->tv_sec * 1000000000 + (uint64_t)time->tv_nsec;
+	if (!time || time->tv_sec < 0 || time->tv_nsec < 0 || time->tv_nsec >= 1000000000)
+		return EINVAL;
+	uint64_t seconds = (uint64_t)time->tv_sec;
+	uint64_t nanos = (uint64_t)time->tv_nsec;
+	if (seconds > (UINT64_MAX - 1 - nanos) / 1000000000)
+		return EOVERFLOW;
+	*result = seconds * 1000000000 + nanos;
+	return 0;
 }
 
 /* What a sleep waits on. */
@@ -628,19 +648,33 @@ static const unsigned int never_changes;
 int clock_nanosleep(clockid_t clock, int flags, const struct timespec *time,
 		    struct timespec *remaining)
 {
-	(void)clock;
-	(void)remaining;
-	uint64_t until = nanoseconds(time);
-	if (!(flags & TIMER_ABSTIME))
-		until += stela_libc_now_ns();
+	if (flags & ~TIMER_ABSTIME)
+		return EINVAL;
+	if (clock != CLOCK_MONOTONIC)
+		return clock == CLOCK_REALTIME || clock == CLOCK_PROCESS_CPUTIME_ID || clock == CLOCK_THREAD_CPUTIME_ID ? ENOTSUP : EINVAL;
+	uint64_t until;
+	int error = nanoseconds(time, &until);
+	if (error)
+		return error;
+	if (!(flags & TIMER_ABSTIME)) {
+		uint64_t now = stela_libc_now_ns();
+		if (until >= UINT64_MAX - now)
+			return EOVERFLOW;
+		until += now;
+	}
 	while (stela_libc_now_ns() < until)
 		stela_libc_wait(&never_changes, 0, until);
+	if (remaining && !(flags & TIMER_ABSTIME))
+		*remaining = (struct timespec){0};
 	return 0;
 }
 
 int nanosleep(const struct timespec *time, struct timespec *remaining)
 {
-	return clock_nanosleep(CLOCK_MONOTONIC, 0, time, remaining);
+	int error = clock_nanosleep(CLOCK_MONOTONIC, 0, time, remaining);
+	if (error)
+		errno = error;
+	return error ? -1 : 0;
 }
 
 int usleep(unsigned int micros)
@@ -841,7 +875,10 @@ void *mmap(void *address, size_t size, int protection, int flags, int fd, off_t 
 
 int munmap(void *address, size_t size)
 {
-	if (!stela_libc_drm_munmap(address, size))
+	int mapped = stela_libc_drm_munmap(address, size);
+	if (mapped < 0)
+		return checked(mapped);
+	if (!mapped)
 		free(address);
 	return 0;
 }
@@ -976,25 +1013,22 @@ int poll(struct pollfd *fds, nfds_t count, int timeout)
 
 int regcomp(regex_t *regex, const char *pattern, int flags)
 {
-	(void)regex;
-	(void)pattern;
-	(void)flags;
-	return 0;
+	return llvm_regcomp(regex, pattern, flags);
 }
 
 int regexec(const regex_t *regex, const char *text, size_t count, regmatch_t *matches, int flags)
 {
-	(void)regex;
-	(void)text;
-	(void)count;
-	(void)matches;
-	(void)flags;
-	return REG_NOMATCH;
+	return llvm_regexec(regex, text, count, matches, flags);
 }
 
 void regfree(regex_t *regex)
 {
-	(void)regex;
+	llvm_regfree(regex);
+}
+
+size_t regerror(int code, const regex_t *regex, char *buffer, size_t size)
+{
+	return llvm_regerror(code, regex, buffer, size);
 }
 
 void *dlopen(const char *file, int flags)
@@ -1066,6 +1100,16 @@ struct emutls_control {
 static void *tls_values[STELA_LIBC_CORES][TLS_VARIABLES];
 static size_t tls_count;
 static volatile int tls_lock;
+
+void stela_libc_thread_cleanup(void)
+{
+	unsigned int core = stela_libc_core();
+	for (size_t index = 0; index < TLS_VARIABLES; index++) {
+		void *value = tls_values[core][index];
+		tls_values[core][index] = NULL;
+		free(value);
+	}
+}
 
 /* A value per thread, and every caller of Mesa on a host processor is one. */
 void *__emutls_get_address(struct emutls_control *control)

@@ -45,7 +45,7 @@ use alloc::{
 };
 pub use ash::vk;
 use ash::{ext, khr};
-use core::{num::NonZeroU64, ptr::NonNull};
+use core::{mem::ManuallyDrop, num::NonZeroU64, ptr::NonNull};
 use physical::{Extensions, FeatureChain};
 use stela_contracts::gate::MemoryRange;
 
@@ -139,7 +139,8 @@ struct ExtensionFns {
 }
 
 pub struct NativeBackend {
-    _entry: ash::Entry,
+    // A failed idle query leaves the driver's code and export owner live.
+    _entry: ManuallyDrop<ash::Entry>,
     instance: ash::Instance,
     device: ash::Device,
     fns: ExtensionFns,
@@ -153,7 +154,7 @@ pub struct NativeBackend {
     command_pool: vk::CommandPool,
     in_flight: Vec<InFlight>,
     mappings: BTreeMap<u64, Mapping>,
-    exporter: Box<dyn MemoryExporter>,
+    exporter: ManuallyDrop<Box<dyn MemoryExporter>>,
     /// What each imported memory came from, and its token.
     imports: BTreeMap<u64, (ExportedMemory, NonZeroU64)>,
     /// The tokens of imported memory now freed.
@@ -298,7 +299,7 @@ impl NativeBackend {
         // SAFETY: the device was created with one queue in `family`.
         let queue = unsafe { device.get_device_queue(family, 0) };
         let mut backend = Self {
-            _entry: entry,
+            _entry: ManuallyDrop::new(entry),
             instance,
             device,
             fns,
@@ -314,7 +315,7 @@ impl NativeBackend {
             command_pool: vk::CommandPool::null(),
             in_flight: Vec::new(),
             mappings: BTreeMap::new(),
-            exporter,
+            exporter: ManuallyDrop::new(exporter),
             imports: BTreeMap::new(),
             retired: VecDeque::new(),
             new_images: Vec::new(),
@@ -629,10 +630,15 @@ impl NativeBackend {
 
 impl Drop for NativeBackend {
     fn drop(&mut self) {
+        // An error is not evidence that queued DMA stopped. Keep every native
+        // handle, the driver's code and the exporter on that uncertain path.
+        // SAFETY: the device belongs to this backend and no caller uses it now.
+        if unsafe { self.device.device_wait_idle() }.is_err() {
+            return;
+        }
         // SAFETY: after the device idles, nothing uses any object, and each
         // handle is destroyed once; null handles are ignored by Vulkan.
         unsafe {
-            let _ = self.device.device_wait_idle();
             self.device.destroy_pipeline(self.accumulate, None);
             self.device.destroy_pipeline(self.resolve_draws, None);
             self.device.destroy_pipeline(self.resolve_dispatches, None);
@@ -646,6 +652,8 @@ impl Drop for NativeBackend {
                 .destroy_descriptor_set_layout(self.heap.layout, None);
             self.device.destroy_device(None);
             self.instance.destroy_instance(None);
+            ManuallyDrop::drop(&mut self.exporter);
+            ManuallyDrop::drop(&mut self._entry);
         }
     }
 }
@@ -668,6 +676,13 @@ fn raw<T: vk::Handle>(handle: T) -> u64 {
 }
 
 impl Backend for NativeBackend {
+    fn acknowledge_idle(&mut self) -> Result<()> {
+        // SAFETY: this backend exclusively owns the device. The Metal owner
+        // closes admission and drains its submission timeline before asking;
+        // only a successful Vulkan acknowledgement establishes idleness.
+        unsafe { self.device.device_wait_idle() }.map_err(failure)
+    }
+
     fn physical_device(&self) -> &PhysicalDevice {
         &self.snapshot
     }
@@ -1288,13 +1303,10 @@ impl Backend for NativeBackend {
                 });
         let submitted = recorded.and_then(|()| self.queue_segments(segments, &buffers));
         if let Err(error) = submitted {
-            // SAFETY: after the queue idles nothing uses the buffers, part
-            // of which may have been submitted.
-            unsafe {
-                let _ = self.device.queue_wait_idle(self.queue);
-                self.device
-                    .free_command_buffers(self.command_pool, &buffers);
-            }
+            // Some segments may have reached the queue. A failed idle query
+            // leaves their buffers owned by the command pool until device
+            // teardown can prove idleness.
+            let _ = free_after_idle(&self.device, self.queue, self.command_pool, &buffers);
             self.new_images = new_images;
             return Err(error);
         }
@@ -1309,12 +1321,7 @@ impl Backend for NativeBackend {
             // Without a completion signal the buffers are free only once the
             // queue idles.
             None => {
-                // SAFETY: waiting for the queue makes the buffers free.
-                unsafe {
-                    self.device.queue_wait_idle(self.queue).map_err(failure)?;
-                    self.device
-                        .free_command_buffers(self.command_pool, &buffers);
-                }
+                free_after_idle(&self.device, self.queue, self.command_pool, &buffers)?;
             }
         }
         Ok(())
@@ -1336,6 +1343,21 @@ impl Backend for NativeBackend {
             unsafe { calibrated.get_calibrated_timestamps(&domains) }.map_err(failure)?;
         Ok((stamps[1], stamps[0]))
     }
+}
+
+/// Free possibly submitted buffers only after the driver acknowledges idle.
+fn free_after_idle(
+    device: &ash::Device,
+    queue: vk::Queue,
+    pool: vk::CommandPool,
+    buffers: &[vk::CommandBuffer],
+) -> Result<()> {
+    // SAFETY: the backend exclusively owns this queue, pool and buffers.
+    unsafe {
+        device.queue_wait_idle(queue).map_err(failure)?;
+        device.free_command_buffers(pool, buffers);
+    }
+    Ok(())
 }
 
 /// Submits `pending` in one `vkQueueSubmit2` and empties it.

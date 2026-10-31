@@ -8,6 +8,8 @@
 #include <poll.h>
 #include <pthread.h>
 #include <pwd.h>
+#include <regex.h>
+#include <setjmp.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -15,6 +17,8 @@
 #include <string.h>
 #include <wchar.h>
 #include <time.h>
+#include <sys/time.h>
+#include <sys/mman.h>
 #include <unistd.h>
 #include <stela/host.h>
 #include "host.h"
@@ -182,6 +186,29 @@ static void test_allocation(void)
 	free(NULL);
 }
 
+static void test_unmap_refusal(void)
+{
+	extern void *drm_unmap_address;
+	extern int drm_unmap_result;
+	/* Initialize errno's compiler TLS before counting the mapping's owner. */
+	errno = 0;
+	size_t before = live_blocks;
+	unsigned char *mapping = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+				      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	CHECK(mapping != MAP_FAILED && live_blocks == before + 1);
+	mapping[0] = 0x5a;
+	drm_unmap_address = mapping;
+	drm_unmap_result = -ENOMEM;
+	CHECK(munmap(mapping, 4096) == -1 && errno == ENOMEM);
+	CHECK(live_blocks == before + 1 && mapping[0] == 0x5a);
+	/* A successful DRM unmap is handled by the host, not the libc heap. */
+	drm_unmap_result = 1;
+	CHECK(!munmap(mapping, 4096) && live_blocks == before + 1);
+	/* The ordinary anonymous mapping path still releases its heap owner. */
+	drm_unmap_address = NULL;
+	CHECK(!munmap(mapping, 4096) && live_blocks == before);
+}
+
 static void test_refusals(void)
 {
 	struct pollfd file = { .fd = 0, .events = POLLIN };
@@ -289,6 +316,36 @@ static void test_time(void)
 	clock_gettime(CLOCK_MONOTONIC, &start);
 	clock_gettime(CLOCK_MONOTONIC, &end);
 	CHECK(end.tv_sec >= start.tv_sec);
+	clockid_t unsupported[] = {CLOCK_REALTIME, CLOCK_PROCESS_CPUTIME_ID, CLOCK_THREAD_CPUTIME_ID};
+	for (unsigned int index = 0; index < sizeof(unsupported) / sizeof(unsupported[0]); index++) {
+		end = (struct timespec){1, 2};
+		CHECK(clock_gettime(unsupported[index], &end) == -1 && errno == ENOTSUP);
+		CHECK(!end.tv_sec && !end.tv_nsec);
+	}
+	CHECK(clock_gettime(-1, &end) == -1 && errno == EINVAL);
+	CHECK(clock_gettime(CLOCK_MONOTONIC, NULL) == -1 && errno == EINVAL);
+	CHECK(!timespec_get(&end, TIME_UTC) && errno == ENOTSUP);
+	CHECK(!timespec_get(&end, -1) && errno == EINVAL);
+	CHECK(time(&epoch) == (time_t)-1 && epoch == (time_t)-1 && errno == ENOTSUP);
+	struct timeval wall = {1, 2};
+	CHECK(gettimeofday(&wall, NULL) == -1 && errno == ENOTSUP);
+	CHECK(!wall.tv_sec && !wall.tv_usec);
+	struct timespec invalid[] = {{-1, 0}, {0, -1}, {0, 1000000000}, {INT64_MAX, 0}};
+	for (unsigned int index = 0; index < sizeof(invalid) / sizeof(invalid[0]); index++) {
+		int error = index == 3 ? EOVERFLOW : EINVAL;
+		CHECK(clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &invalid[index], NULL) == error);
+		CHECK(nanosleep(&invalid[index], NULL) == -1 && errno == error);
+	}
+	struct timespec zero = {0}, remaining = {1, 2};
+	CHECK(!clock_nanosleep(CLOCK_MONOTONIC, 0, &zero, &remaining));
+	CHECK(!remaining.tv_sec && !remaining.tv_nsec);
+	CHECK(clock_nanosleep(CLOCK_REALTIME, 0, &zero, NULL) == ENOTSUP);
+	CHECK(clock_nanosleep(-1, 0, &zero, NULL) == EINVAL);
+	CHECK(clock_nanosleep(CLOCK_MONOTONIC, 2, &zero, NULL) == EINVAL);
+	/* A representable duration can still overflow when added to now. */
+	struct timespec too_late = {(time_t)((UINT64_MAX - 1) / 1000000000),
+		(long)((UINT64_MAX - 1) % 1000000000)};
+	CHECK(clock_nanosleep(CLOCK_MONOTONIC, 0, &too_late, NULL) == EOVERFLOW);
 	CHECK(!getenv("HOME"));
 }
 
@@ -329,7 +386,13 @@ static void test_threads(void)
 	CHECK(!pthread_join(thread, &result));
 	CHECK(result == argument + 1);
 	CHECK(*per_thread_on(0) == 7);
-	CHECK(pthread_join(1, NULL) == EINVAL);
+    CHECK(pthread_join(pthread_self(), NULL) == EDEADLK);
+	CHECK(pthread_setname_np(pthread_self(), "mesa-worker") == ENOTSUP);
+	clockid_t cpu_clock = -1;
+	CHECK(pthread_getcpuclockid(pthread_self(), &cpu_clock) == ENOTSUP);
+	struct timespec cpu_time = {1, 2};
+	CHECK(clock_gettime(cpu_clock, &cpu_time) == -1 && errno == ENOTSUP);
+	CHECK(!cpu_time.tv_sec && !cpu_time.tv_nsec);
 
 	pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 	unsigned int woken = wakes;
@@ -347,7 +410,9 @@ static void test_threads(void)
 
 	pthread_mutexattr_t attribute;
 	pthread_mutexattr_init(&attribute);
-	pthread_mutexattr_settype(&attribute, PTHREAD_MUTEX_RECURSIVE);
+	CHECK(pthread_mutexattr_settype(&attribute, -1) == EINVAL);
+	CHECK(attribute.kind == PTHREAD_MUTEX_NORMAL);
+	CHECK(!pthread_mutexattr_settype(&attribute, PTHREAD_MUTEX_RECURSIVE));
 	pthread_mutex_t recursive;
 	pthread_mutex_init(&recursive, &attribute);
 	CHECK(!pthread_mutex_lock(&recursive));
@@ -361,7 +426,30 @@ static void test_threads(void)
 	struct timespec now;
 	clock_gettime(CLOCK_MONOTONIC, &now);
 	pthread_mutex_lock(&mutex);
-	CHECK(pthread_cond_timedwait(&cond, &mutex, &now) == ETIMEDOUT);
+	unsigned int before_wait = waits;
+	CHECK(pthread_cond_timedwait(&cond, &mutex, &now) == ENOTSUP);
+	CHECK(pthread_cond_timedwait(&cond, &mutex, NULL) == EINVAL);
+	CHECK(mutex.locked && waits == before_wait);
+	CHECK(pthread_mutex_timedlock(&mutex, &now) == ENOTSUP);
+	pthread_condattr_t condattr;
+	CHECK(!pthread_condattr_init(&condattr) && condattr.clock == CLOCK_REALTIME);
+	CHECK(pthread_condattr_setclock(&condattr, -1) == EINVAL);
+	CHECK(condattr.clock == CLOCK_REALTIME);
+	CHECK(!pthread_condattr_setclock(&condattr, CLOCK_MONOTONIC));
+	CHECK(pthread_condattr_setclock(&condattr, CLOCK_REALTIME) == ENOTSUP);
+	CHECK(condattr.clock == CLOCK_MONOTONIC);
+	pthread_cond_t monotonic;
+	CHECK(!pthread_cond_init(&monotonic, &condattr));
+	CHECK(monotonic.clock == CLOCK_MONOTONIC);
+	CHECK(!pthread_condattr_destroy(&condattr));
+	struct timespec invalid_deadlines[] = {{-1, 0}, {0, -1}, {0, 1000000000}, {INT64_MAX, 0}};
+	for (unsigned int index = 0; index < sizeof(invalid_deadlines) / sizeof(invalid_deadlines[0]); index++) {
+		int error = index == 3 ? EOVERFLOW : EINVAL;
+		CHECK(pthread_cond_timedwait(&monotonic, &mutex, &invalid_deadlines[index]) == error);
+		CHECK(mutex.locked && waits == before_wait);
+		CHECK(pthread_mutex_timedlock(&mutex, &invalid_deadlines[index]) == error);
+	}
+	CHECK(pthread_cond_timedwait(&monotonic, &mutex, &now) == ETIMEDOUT);
 	CHECK(mutex.locked);
 	/* Another processor signals while this one waits. */
 	waited_word = &cond.generation;
@@ -397,6 +485,123 @@ static void test_threads(void)
 	current_core = 3;
 	CHECK(!pthread_getspecific(key));
 	current_core = 0;
+	CHECK(!pthread_key_delete(key));
+}
+
+static pthread_key_t destructor_key;
+static unsigned int destructor_calls;
+
+static void key_destructor(void *value)
+{
+	CHECK(pthread_getspecific(destructor_key) == NULL);
+	destructor_calls++;
+	CHECK(!pthread_setspecific(destructor_key, value));
+}
+
+static void *exiting_thread(void *value)
+{
+	CHECK(per_thread == 5);
+	per_thread = 9;
+	CHECK(!pthread_setspecific(destructor_key, value));
+	pthread_exit(value);
+}
+
+static void test_thread_lifetimes(void)
+{
+	/* More completed threads than the live-thread limit, with fresh TLS. */
+	char argument[2];
+	for (unsigned int i = 0; i < STELA_LIBC_THREADS * 3; i++) {
+		pthread_t thread;
+		CHECK(!pthread_create(&thread, NULL, thread_body, argument));
+		void *result = NULL;
+		CHECK(!pthread_join(thread, &result));
+		CHECK(result == argument + 1);
+		CHECK(pthread_join(thread, NULL) == EINVAL);
+	}
+	/* Failed starts must not consume slots either. */
+	extern int thread_start_error;
+	thread_start_error = -ENOMEM;
+	for (unsigned int i = 0; i < STELA_LIBC_THREADS * 2; i++) {
+		pthread_t thread;
+		CHECK(pthread_create(&thread, NULL, thread_body, argument) == ENOMEM);
+	}
+	thread_start_error = 0;
+	CHECK(!pthread_key_create(&destructor_key, key_destructor));
+	pthread_t thread;
+	void *result = NULL;
+	CHECK(!pthread_create(&thread, NULL, exiting_thread, argument));
+	CHECK(!pthread_join(thread, &result));
+	CHECK(result == argument);
+	CHECK(destructor_calls == PTHREAD_DESTRUCTOR_ITERATIONS);
+	CHECK(!pthread_key_delete(destructor_key));
+	CHECK(pthread_setspecific(destructor_key, argument) == EINVAL);
+	CHECK(pthread_getspecific(destructor_key) == NULL);
+	/* A detached thread reclaims its slot without a join. */
+	pthread_attr_t attr;
+	CHECK(!pthread_attr_init(&attr));
+	CHECK(pthread_attr_setdetachstate(&attr, -1) == EINVAL);
+	CHECK(!pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED));
+	for (unsigned int i = 0; i < STELA_LIBC_THREADS * 2; i++)
+		CHECK(!pthread_create(&thread, &attr, thread_body, argument));
+	CHECK(pthread_join(thread, NULL) == EINVAL);
+	CHECK(!pthread_attr_destroy(&attr));
+	CHECK(!pthread_create(&thread, NULL, thread_body, argument));
+	CHECK(!pthread_detach(thread));
+	CHECK(pthread_detach(thread) == EINVAL);
+	/* Key deletion and reuse neither call a destructor nor retain its value. */
+	for (unsigned int i = 0; i < 128; i++) {
+		pthread_key_t key;
+		CHECK(!pthread_key_create(&key, key_destructor));
+		CHECK(!pthread_setspecific(key, argument));
+		CHECK(!pthread_key_delete(key));
+		CHECK(pthread_key_delete(key) == EINVAL);
+	}
+	CHECK(destructor_calls == PTHREAD_DESTRUCTOR_ITERATIONS);
+}
+
+static void test_regex(void)
+{
+	regex_t regex;
+	regmatch_t matches[3];
+	CHECK(!regcomp(&regex, "^([a-z]+)-([[:digit:]]+)$", REG_EXTENDED | REG_ICASE));
+	CHECK(!regexec(&regex, "Mesa-123", 3, matches, 0));
+	CHECK(matches[0].rm_so == 0 && matches[0].rm_eo == 8);
+	CHECK(matches[1].rm_so == 0 && matches[1].rm_eo == 4);
+	CHECK(matches[2].rm_so == 5 && matches[2].rm_eo == 8);
+	CHECK(regexec(&regex, "Mesa-abc", 0, NULL, 0) == REG_NOMATCH);
+	regfree(&regex);
+	CHECK(!regcomp(&regex, "^(red|blue)$", REG_EXTENDED | REG_NOSUB));
+	CHECK(!regexec(&regex, "blue", 0, NULL, 0));
+	CHECK(regexec(&regex, "green", 0, NULL, 0) == REG_NOMATCH);
+	regfree(&regex);
+	int code = regcomp(&regex, "(", REG_EXTENDED);
+	CHECK(code != 0);
+	char message[64], short_message[2];
+	size_t bytes = regerror(code, &regex, message, sizeof(message));
+	CHECK(bytes > 1 && bytes == strlen(message) + 1);
+	CHECK(regerror(code, &regex, short_message, sizeof(short_message)) == bytes);
+	CHECK(short_message[1] == 0);
+}
+
+static void test_nonlocal_return(void)
+{
+	jmp_buf saved;
+	unsigned int before, after;
+	unsigned short x87_before, x87_after;
+	__asm__ volatile("stmxcsr %0" : "=m"(before));
+	__asm__ volatile("fnstcw %0" : "=m"(x87_before));
+	int value = setjmp(saved);
+	if (!value) {
+		unsigned int changed = before ^ 0x2000;
+		unsigned short x87_changed = x87_before ^ 0x400;
+		__asm__ volatile("ldmxcsr %0" : : "m"(changed));
+		__asm__ volatile("fldcw %0" : : "m"(x87_changed));
+		longjmp(saved, 0);
+	}
+	CHECK(value == 1);
+	__asm__ volatile("stmxcsr %0" : "=m"(after));
+	__asm__ volatile("fnstcw %0" : "=m"(x87_after));
+	CHECK(before == after && x87_before == x87_after);
 }
 
 int test(void)
@@ -406,6 +611,7 @@ int test(void)
 	test_sorting();
 	test_strings();
 	test_allocation();
+	test_unmap_refusal();
 	test_refusals();
 	test_division();
 	test_system();
@@ -413,6 +619,9 @@ int test(void)
 	test_math();
 	test_time();
 	test_threads();
+	test_thread_lifetimes();
+	test_regex();
+	test_nonlocal_return();
 	if (failures)
 		fprintf(stderr, "%d of the C library's checks failed\n", failures);
 	return failures != 0;

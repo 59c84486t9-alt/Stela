@@ -23,6 +23,9 @@ unsigned int stela_libc_core(void);
 /* Run body(argument) as a thread on its own stack, with stela_libc_core()
  * answering core for it; 0 or a negative errno. */
 int stela_libc_thread_start(void (*body)(void *), void *argument, unsigned int core);
+/* C library-owned TLS storage, released by its exiting thread after its key
+ * destructors finish and before its core index may be reused. */
+void stela_libc_thread_cleanup(void);
 /* Wait while *word holds value, until the deadline in stela_libc_now_ns()'s
  * nanoseconds; UINT64_MAX is no deadline. It may return early. */
 void stela_libc_wait(const volatile unsigned int *word, unsigned int value, uint64_t deadline);
@@ -40,7 +43,8 @@ long stela_libc_drm_rdev(int fd);
 int stela_libc_drm_ioctl(int fd, unsigned long request, void *argument);
 /* A pointer, or a negative errno. Every page is mapped on return. */
 void *stela_libc_drm_mmap(int fd, uint64_t offset, size_t size);
-/* Whether the address came from `stela_libc_drm_mmap`. */
+/* 0: not a DRM mapping; +1: DRM unmap completed; negative errno: recognized
+ * DRM mapping remains owned/mapped because cleanup failed. */
 int stela_libc_drm_munmap(void *address, size_t size);
 /* The render nodes' count, and one's PCI location and IDs. */
 unsigned int stela_libc_drm_devices(void);

@@ -61,6 +61,20 @@ StelaGPU::attachGate(IOService *provider)
 void
 StelaGPU::stop(IOService *provider)
 {
+	if (lock) {
+		IOLockLock(lock);
+		stopping = true;
+		IOLockUnlock(lock);
+		// Only the host's retirement tokens permit unwiring imported pages.
+		retireMemory();
+		IOLockLock(lock);
+		if (imports != 0 && !retainedForDma) {
+			retainedForDma = true;
+			retain();
+			IOLog("StelaGPU: stopped with %llu wired imports; retaining the provider until native DMA retirement is available\n", imports);
+		}
+		IOLockUnlock(lock);
+	}
 	if (interrupt) {
 		interrupt->disable();
 		workLoop->removeEventSource(interrupt);
@@ -87,6 +101,10 @@ uint64_t
 StelaGPU::openGate()
 {
 	IOLockLock(lock);
+	if (stopping) {
+		IOLockUnlock(lock);
+		return 0;
+	}
 	write(STELA_GATE_OPEN, 1);
 	uint64_t page = read(STELA_GATE_OPENED);
 	IOLockUnlock(lock);
@@ -123,6 +141,12 @@ StelaGPU::importMemory(uint64_t page, task_t task, mach_vm_address_t address, ma
 		return 0;
 	}
 	IOLockLock(lock);
+	if (stopping || imports == ~uint64_t(0)) {
+		IOLockUnlock(lock);
+		memory->complete();
+		memory->release();
+		return 0;
+	}
 	for (IOByteCount offset = 0; offset < length;) {
 		IOByteCount bytes = 0;
 		addr64_t physical = memory->getPhysicalSegment(offset, &bytes, kIOMemoryMapperNone);
@@ -133,6 +157,9 @@ StelaGPU::importMemory(uint64_t page, task_t task, mach_vm_address_t address, ma
 	write(STELA_GATE_IMPORT_TOKEN, reinterpret_cast<uint64_t>(memory));
 	write(STELA_GATE_IMPORT, page);
 	uint64_t handle = read(STELA_GATE_IMPORTED);
+	if (handle != 0) {
+		imports++;
+	}
 	IOLockUnlock(lock);
 	if (handle == 0) {
 		memory->complete();
@@ -148,6 +175,11 @@ StelaGPU::retireMemory()
 		IOLockLock(lock);
 		write(STELA_GATE_RETIRE, 1);
 		uint64_t token = read(STELA_GATE_RETIRED);
+		if (token != 0) {
+			// The host answers only tokens of successful imports, once each.
+			assert(imports != 0);
+			imports--;
+		}
 		IOLockUnlock(lock);
 		if (token == 0) {
 			return;

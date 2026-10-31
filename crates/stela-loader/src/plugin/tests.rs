@@ -208,6 +208,71 @@ fn arm64_reaches_imports_through_plain_stubs_and_the_got() {
 }
 
 #[test]
+fn trusted_hashes_name_each_slices_code_directory() {
+    let (arm64, arm64e) = (object(ARM64), object(ARM64E));
+    let file = link(IDENTIFIER, &[vec![&arm64], vec![&arm64e]]).unwrap();
+    let hashes = code_hashes(&file).unwrap();
+    assert_eq!(hashes.len(), 2);
+    for (index, hash) in hashes.iter().enumerate() {
+        let slice = thin(&file, index);
+        let header = macho::MachHeader64::<LE>::parse(slice, 0).unwrap();
+        let mut commands = header.load_commands(LE, slice, 0).unwrap();
+        let mut checked = false;
+        while let Some(command) = commands.next().unwrap() {
+            if command.cmd() == macho::LC_CODE_SIGNATURE {
+                let data: &macho::LinkeditDataCommand<LE> = command.data().unwrap();
+                let directory = &slice[data.dataoff.get(LE) as usize + 20..];
+                assert_eq!(*hash, Sha256::digest(directory)[..20]);
+                checked = true;
+            }
+        }
+        assert!(checked);
+    }
+}
+
+#[test]
+fn trusted_hashes_refuse_truncation_and_changed_signed_pages() {
+    let arm64 = object(ARM64);
+    let file = link(IDENTIFIER, &[vec![&arm64]]).unwrap();
+    for length in [0, 4, 8, 27, file.len() - 1] {
+        assert!(code_hashes(&file[..length]).is_err(), "length {length}");
+    }
+    let slice = thin(&file, 0);
+    let start = slice.as_ptr() as usize - file.as_ptr() as usize;
+    let mut changed = file.clone();
+    changed[start + 0x1000] ^= 1;
+    let error = code_hashes(&changed).unwrap_err();
+    assert!(error.to_string().contains("signed page"), "{error}");
+    // The slice may not borrow a following slice's signature.
+    changed = file.clone();
+    changed[20..24].copy_from_slice(&32u32.to_be_bytes());
+    assert!(code_hashes(&changed).is_err());
+}
+
+#[test]
+fn trusted_hashes_refuse_invalid_signature_extents_and_hash_tables() {
+    let signed = vec![0; HASH_PAGE as usize + 1];
+    let blob = sign(&signed, IDENTIFIER, 0);
+    code_hash(&signed, &blob).unwrap();
+    for (at, value) in [
+        (8, 2),
+        (16, u32::MAX),
+        (24, u32::MAX),
+        (36, 0),
+        (44, 1),
+        (48, u32::MAX),
+        (52, 1),
+    ] {
+        let mut changed = blob.clone();
+        changed[at..at + 4].copy_from_slice(&value.to_be_bytes());
+        assert!(code_hash(&signed, &changed).is_err(), "offset {at}");
+    }
+    let mut changed = blob.clone();
+    changed[57] = 1; // SHA-1 cannot be labeled as a SHA-256 trust entry.
+    assert!(code_hash(&signed, &changed).is_err());
+}
+
+#[test]
 fn arm64e_signs_its_stubs_and_keeps_each_pointers_signature() {
     let object = object(ARM64E);
     let file = link(IDENTIFIER, &[vec![&object]]).unwrap();

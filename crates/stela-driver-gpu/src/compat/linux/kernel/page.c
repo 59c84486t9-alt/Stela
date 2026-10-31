@@ -41,6 +41,7 @@ struct allocation_record {
 	size_t count;
 	size_t live;
 	size_t next;
+    size_t dma_refs;
     u64 external_nonce;
 };
 
@@ -421,6 +422,39 @@ static size_t physical_index(phys_addr_t address)
     return index;
 }
 
+void *stela_linux_page_dma_pin(u64 physical)
+{
+    require_context();
+    if (!catalog.pages || (physical & (PAGE_SIZE - 1)))
+        return NULL;
+    size_t index = physical_slot(physical);
+    if (index == NO_INDEX || !catalog.state[index].live)
+        return NULL;
+    struct allocation_record *record = catalog.allocations + catalog.state[index].allocation;
+    if (!record->pin || !record->live || record->dma_refs == SIZE_MAX)
+        return NULL;
+    /* Hold the provider's original allocation, including noncompound tails
+     * which __free_pages may logically retire while the head has references. */
+    record->dma_refs++;
+    return record;
+}
+
+void stela_linux_page_dma_unpin(void *pin)
+{
+    require_catalog();
+    unsigned long address = (unsigned long)pin;
+    unsigned long base = (unsigned long)catalog.allocations;
+    size_t bytes = catalog.page_count * sizeof(*catalog.allocations);
+    if (address < base || address - base >= bytes ||
+        (address - base) % sizeof(*catalog.allocations))
+        __builtin_trap();
+    struct allocation_record *record = pin;
+    if (!record->pin || !record->dma_refs)
+        __builtin_trap();
+    record->dma_refs--;
+    /* Final provider release still happens only at checked quiescence. */
+}
+
 struct page *pfn_to_page(unsigned long pfn)
 {
     if (pfn > (U64_MAX >> PAGE_SHIFT))
@@ -499,6 +533,10 @@ void stela_linux_pages_finish(void)
         struct allocation_record *record = catalog.allocations + index;
 		if (!record->pin || record->live)
 			__builtin_trap();
+        if (record->dma_refs) {
+            link = &record->next;
+            continue;
+        }
         if (catalog.release_ready) {
             in_callback = true;
             bool ready = catalog.release_ready(catalog.context, record->pin);
@@ -2086,6 +2124,42 @@ static void annotated_stack_admission(void)
     free(stack);
 }
 
+static void dma_pins_retain_original_allocations(void)
+{
+    assert(!stela_linux_page_dma_pin(TEST_PHYSICAL));
+    struct page *page = alloc_pages(GFP_KERNEL, 2);
+    assert(page);
+    u64 physical = page_to_phys(page);
+    assert(!stela_linux_page_dma_pin(physical + 1));
+    assert(!stela_linux_page_dma_pin(TEST_PHYSICAL + TEST_PAGES * PAGE_SIZE));
+    /* A noncompound tail has no independent Linux page reference. The DMA
+     * lease must hold the actual allocation when __free_pages drops it. */
+    void *head = stela_linux_page_dma_pin(physical);
+    void *tail = stela_linux_page_dma_pin(physical + 3 * PAGE_SIZE);
+    assert(head && tail == head);
+    struct allocation_record *record = head;
+    record->dma_refs = SIZE_MAX;
+    assert(!stela_linux_page_dma_pin(physical));
+    record->dma_refs = 2;
+    unsigned int releases = fixture.releases;
+    __free_pages(page, 2);
+    assert(!catalog.live_pages);
+    assert(!stela_linux_page_dma_pin(physical));
+    assert(stela_linux_page_catalog_unregister(catalog.generation) == -EBUSY);
+    assert(fixture.releases == releases && record->pin && record->dma_refs == 2);
+    stela_linux_page_dma_unpin(head);
+    stela_linux_pages_finish();
+    assert(fixture.releases == releases && record->pin && record->dma_refs == 1);
+    stela_linux_page_dma_unpin(tail);
+    assert(fixture.releases == releases);
+    stela_linux_pages_finish();
+    assert(fixture.releases == releases + 1 && catalog.retired == NO_INDEX);
+    page = alloc_pages(GFP_KERNEL, 2);
+    assert(page && page_to_phys(page) == physical);
+    __free_pages(page, 2);
+    stela_linux_pages_finish();
+}
+
 int main(void)
 {
 	reclaimable_policy();
@@ -2133,6 +2207,7 @@ int main(void)
 	sg_iterator_geometry();
 	sg_chained_allocation();
 	sg_page_segments();
+    dma_pins_retain_original_allocations();
 	assert(!catalog.live_pages);
 	assert(!stela_linux_page_catalog_unregister(1));
 	assert(stela_linux_page_catalog_register(&reservation, &test_ops, &fixture) == -EINVAL);

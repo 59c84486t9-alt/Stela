@@ -42,6 +42,14 @@ void stela_linux_atomic_softirq_dispatch_end(struct stela_linux_atomic_callback 
 void stela_linux_atomic_callback_bh_begin(struct stela_linux_atomic_callback *scope);
 void stela_linux_atomic_callback_bh_end(struct stela_linux_atomic_callback *scope);
 
+/* A nonblocking process leaf on the actual retained service task. Requires
+ * balanced entered process context and enabled simulated IRQs. Adds no IRQ,
+ * softirq or preempt nesting; the private guard forbids sleeping/owner exit and
+ * verifies exact state restoration around bounded wake/notification callbacks.
+ */
+void stela_linux_atomic_process_leaf_begin(struct stela_linux_atomic_callback *scope);
+void stela_linux_atomic_process_leaf_end(struct stela_linux_atomic_callback *scope);
+
 /* Independent of caller-rebalanceable preempt/IRQ counters. Owner exit,
  * quiescence, PREPARE and lease switches consult this BEFORE effects/drains.
  * It supplies no task, owner, physical ISR or execution-root authorization.

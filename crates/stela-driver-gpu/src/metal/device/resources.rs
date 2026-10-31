@@ -173,6 +173,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
     /// The wired guest RAM of `ranges`, which the GPU reaches where it is. The
     /// kernel keeps it wired until [`Self::retired`] answers `token`.
     pub fn import_memory(&mut self, ranges: &[MemoryRange], token: NonZeroU64) -> Result<MemoryId> {
+        self.ensure_admission()?;
         let bytes = ranges.iter().map(|range| range.bytes).sum();
         let memory = self.backend.import_memory(ranges, token)?;
         self.allocated += bytes;
