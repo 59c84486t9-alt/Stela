@@ -60,6 +60,10 @@ unsafe impl Registers for Io {
             Ok(())
         }
     }
+    fn publish(&mut self, q: Queue, producer: u16) -> Result<(), Error> {
+        self.device.lock().unwrap().indices[index(q)].0 = producer;
+        Ok(())
+    }
     fn publish_h2c(&mut self, producer: u16) -> Result<(), Error> {
         let mut d = self.device.lock().unwrap();
         let m = self.memory.lock().unwrap();
@@ -122,6 +126,43 @@ fn install_profile(
         )
     }
 }
+#[test]
+fn frames_take_their_queue_and_come_back_as_the_device_reads_them() {
+    let memory = Arc::new(Mutex::new(Model::default()));
+    let device = Arc::new(Mutex::new(Device::default()));
+    let mut rings = install(&memory, &device).unwrap();
+    let queue = Queue::Management;
+    for _ in 0..127 {
+        rings.frame(queue, &Source, &[0; 48], &[0; 100]).unwrap();
+    }
+    assert_eq!(
+        rings.frame(queue, &Source, &[0; 48], &[0; 100]),
+        Err(Error::Full)
+    );
+    assert!(!rings.quarantined());
+    device.lock().unwrap().indices[index(queue)].1 = 3;
+    assert_eq!(rings.reclaim_frames(), Ok(3));
+    assert_eq!(rings.spare.len(), 3);
+    rings.frame(queue, &Source, &[0; 48], &[0; 100]).unwrap();
+    assert_eq!(rings.spare.len(), 2);
+    assert_eq!(
+        rings.frame(Queue::H2c, &Source, &[0; 48], &[]),
+        Err(Error::UnsupportedLayout)
+    );
+    device.lock().unwrap().indices[index(queue)].1 = 1;
+    assert_eq!(rings.reclaim_frames(), Err(Error::CompletionBeyondPending));
+    assert!(rings.quarantined());
+}
+
+#[test]
+fn a_frames_two_buffers_are_the_descriptor_and_the_mpdu_behind_it() {
+    let descriptor = frame_descriptor(0x1000, 81);
+    assert_eq!(descriptor[..4], [48, 0, 2, 0]);
+    assert_eq!(descriptor[4..8], 0x1000u32.to_le_bytes());
+    assert_eq!(descriptor[8..10], [81, 0]);
+    assert_eq!(descriptor[12..], 0x1030u32.to_le_bytes());
+}
+
 #[test]
 fn phydm_and_iqk_complete_on_fresh_status() {
     use super::super::firmware_control::{Control, tests::bus};

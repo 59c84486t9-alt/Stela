@@ -161,7 +161,9 @@ impl<I: Io> Control<I> {
     pub fn next_mailbox(&self) -> u8 {
         self.next_box
     }
-    fn io(&mut self) -> Result<&mut I, Error> {
+    /// The register interface beside the mailbox, for the PHY and MAC stores
+    /// this owner serializes with its commands.
+    pub fn io(&mut self) -> Result<&mut I, Error> {
         self.io.as_mut().ok_or(Error::InvalidState)
     }
     fn verify(&mut self) -> Result<(), Error> {
@@ -226,7 +228,8 @@ impl<I: Io> Control<I> {
         }
         Err(Error::Clock)
     }
-    fn publish_rfk(&mut self, start: bool) -> Result<Published, Error> {
+    /// `rtw_fw_send_h2c_command`: the next free mailbox takes the command.
+    fn publish(&mut self, message: u32, extension: u32) -> Result<Published, Error> {
         self.verify()?;
         let mailbox = self.next_box;
         // Source atomic budget: 3,000,000 ns minus 100,000+one ns per failed
@@ -247,14 +250,23 @@ impl<I: Io> Control<I> {
         }
         self.published = true;
         self.io()?
-            .write32(REG_HMEBOX0_EX + u32::from(mailbox) * 4, 0)?;
-        self.io()?.write32(
-            REG_HMEBOX0 + u32::from(mailbox) * 4,
-            INFORM_RFK_STATUS | (u32::from(start) << 8),
-        )?;
+            .write32(REG_HMEBOX0_EX + u32::from(mailbox) * 4, extension)?;
+        self.io()?
+            .write32(REG_HMEBOX0 + u32::from(mailbox) * 4, message)?;
         self.next_box = (mailbox + 1) % 4;
         self.verify()?;
         Ok(Published { mailbox })
+    }
+    fn publish_rfk(&mut self, start: bool) -> Result<Published, Error> {
+        self.publish(INFORM_RFK_STATUS | (u32::from(start) << 8), 0)
+    }
+    /// Publish one of [`super::commands`]' mailbox commands. A mailbox that
+    /// stays busy means firmware stopped taking commands, which quarantines.
+    pub fn command(&mut self, (message, extension): (u32, u32)) -> Result<(), Error> {
+        self.ready()?;
+        self.poisoned = true;
+        let result = self.publish(message, extension);
+        self.finish(result).map(|_| ())
     }
     /// Begin source GAPK's RFK handshake from a non-set baseline.
     /// BT IQK must be observed idle; no source timeout-skip fallback is minted.

@@ -19,6 +19,10 @@ use core::sync::atomic::{Ordering, fence};
 const H2C_COUNT: usize = 128;
 const DESCRIPTOR: usize = 16;
 const PACKET: usize = 48 + 32;
+/// One frame's page: its packet descriptor, then the MPDU.
+const FRAME: usize = 4096;
+/// The pages a quiet queue keeps mapped for the next burst.
+const SPARE: usize = 64;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
     Resource(beacon::Error),
@@ -61,7 +65,16 @@ const QUEUES: [Queue; 7] = [
     Queue::High,
     Queue::H2c,
 ];
+/// The frames one queue has given the device.
+struct Frames {
+    slots: Vec<Option<Allocation>>,
+    read: u16,
+    write: u16,
+}
 impl Queue {
+    fn index(self) -> usize {
+        QUEUES.iter().position(|&queue| queue == self).unwrap_or(0)
+    }
     pub fn count(self) -> u16 {
         if self == Self::BestEffort { 256 } else { 128 }
     }
@@ -116,6 +129,8 @@ pub unsafe trait Registers {
     fn indices(&mut self, queue: Queue) -> Result<(u16, u16), Error>;
     fn configure(&mut self, queue: Queue, address: u32) -> Result<(), Error>;
     fn publish_h2c(&mut self, producer: u16) -> Result<(), Error>;
+    /// `rtw_pci_tx_kick_off_queue`.
+    fn publish(&mut self, queue: Queue, producer: u16) -> Result<(), Error>;
 }
 // SAFETY: `Bar::new` binds the exclusive BAR of the profile's requester.
 unsafe impl Registers for Bar {
@@ -162,6 +177,10 @@ unsafe impl Registers for Bar {
         self.write16(RTK_PCI_TXBD_IDX_H2CQ, producer);
         Ok(())
     }
+    fn publish(&mut self, queue: Queue, producer: u16) -> Result<(), Error> {
+        self.write16(queue.registers().2, producer);
+        Ok(())
+    }
 }
 
 /// All seven indexed TX queues have real native descriptor backing, so engine
@@ -173,6 +192,8 @@ pub struct Rings<R: Registers> {
     domain: Arc<dyn DmaDomain>,
     rings: Vec<Allocation>,
     pending: Vec<Option<Allocation>>,
+    frames: Vec<Frames>,
+    spare: Vec<Allocation>,
     read: u16,
     write: u16,
     sequence: u16,
@@ -229,11 +250,30 @@ impl<R: Registers> Rings<R> {
             rings.push(a);
         }
         pending.resize_with(H2C_COUNT, || None);
+        let mut frames = Vec::new();
+        for q in &QUEUES[..6] {
+            let mut slots = Vec::new();
+            slots
+                .try_reserve_exact(usize::from(q.count()))
+                .map_err(|_| {
+                    Error::Resource(beacon::Error::Memory(
+                        crate::bus::dma::memory::MemoryError::OutOfMemory,
+                    ))
+                })?;
+            slots.resize_with(usize::from(q.count()), || None);
+            frames.push(Frames {
+                slots,
+                read: 0,
+                write: 0,
+            });
+        }
         let mut s = Self {
             io: Some(io),
             domain,
             rings,
             pending,
+            frames,
+            spare: Vec::new(),
             read: 0,
             write: 0,
             sequence: 0,
@@ -336,6 +376,117 @@ impl<R: Registers> Rings<R> {
             return Err(Error::Full);
         }
         self.command(source, iqk(self.sequence))
+    }
+    /// `rtw_pci_tx_write_data`: give `queue` one frame, which `packet` describes.
+    /// [`Error::Full`] only asks to try again once the queue drains.
+    pub fn frame(
+        &mut self,
+        queue: Queue,
+        source: &dyn PageSource,
+        packet: &[u8; 48],
+        frame: &[u8],
+    ) -> Result<(), Error> {
+        if self.poisoned || !self.configured {
+            return Err(Error::Quarantined);
+        }
+        if queue == Queue::H2c || 48 + frame.len() > FRAME {
+            return Err(Error::UnsupportedLayout);
+        }
+        self.used = true;
+        self.poisoned = true;
+        let result = self.submit_frame(queue, source, packet, frame);
+        if matches!(result, Ok(()) | Err(Error::Full)) {
+            self.poisoned = false;
+        }
+        result
+    }
+    fn submit_frame(
+        &mut self,
+        queue: Queue,
+        source: &dyn PageSource,
+        packet: &[u8; 48],
+        frame: &[u8],
+    ) -> Result<(), Error> {
+        self.reclaim_queue(queue)?;
+        let which = queue.index();
+        let count = queue.count();
+        let cursor = &self.frames[which];
+        let index = usize::from(cursor.write);
+        if (cursor.write + 1) % count == cursor.read {
+            return Err(Error::Full);
+        }
+        let a = match self.spare.pop() {
+            Some(a) => a,
+            None => Allocation::new(source, self.domain.clone(), FRAME, Direction::ToDevice)?,
+        };
+        let total = 48 + frame.len();
+        let address = a.address()?;
+        a.write(0, packet)?;
+        a.write(48, frame)?;
+        a.dma
+            .sync_for_device(0..total)
+            .map_err(beacon::Error::from)?;
+        let offset = index * DESCRIPTOR;
+        let cursor = &mut self.frames[which];
+        cursor.slots[index] = Some(a);
+        if let Some(a) = &mut cursor.slots[index] {
+            a.published = true;
+        }
+        let descriptor = frame_descriptor(address, frame.len());
+        self.rings[which].write(offset, &descriptor)?;
+        self.rings[which]
+            .dma
+            .sync_for_device(offset..offset + DESCRIPTOR)
+            .map_err(beacon::Error::from)?;
+        let cursor = &mut self.frames[which];
+        cursor.write = (cursor.write + 1) % count;
+        let producer = cursor.write;
+        fence(Ordering::Release);
+        self.io
+            .as_mut()
+            .ok_or(Error::Quarantined)?
+            .publish(queue, producer)
+    }
+    /// Take back the frames the device has read, from every queue. That they
+    /// were read says nothing of whether they went on air.
+    pub fn reclaim_frames(&mut self) -> Result<usize, Error> {
+        if self.poisoned || !self.configured {
+            return Err(Error::Quarantined);
+        }
+        self.poisoned = true;
+        let mut reclaimed = 0;
+        for queue in QUEUES {
+            if queue != Queue::H2c {
+                reclaimed += self.reclaim_queue(queue)?;
+            }
+        }
+        self.poisoned = false;
+        Ok(reclaimed)
+    }
+    fn reclaim_queue(&mut self, queue: Queue) -> Result<usize, Error> {
+        let (host, device) = self.io.as_mut().ok_or(Error::Quarantined)?.indices(queue)?;
+        let count = queue.count();
+        let cursor = &mut self.frames[queue.index()];
+        if host != cursor.write || device >= count {
+            return Err(Error::Index);
+        }
+        let done = (device + count - cursor.read) % count;
+        if done > (cursor.write + count - cursor.read) % count {
+            return Err(Error::CompletionBeyondPending);
+        }
+        for _ in 0..done {
+            let mut a = cursor.slots[usize::from(cursor.read)]
+                .take()
+                .ok_or(Error::CompletionBeyondPending)?;
+            cursor.read = (cursor.read + 1) % count;
+            if self.spare.len() < SPARE {
+                self.spare.push(a);
+            } else {
+                // SAFETY: the consumer index passed it, ending device reads.
+                unsafe { a.release()? };
+            }
+        }
+        Ok(usize::from(done))
     }
     pub(super) fn quarantine_firmware(&mut self) {
         self.poisoned = true;
@@ -499,13 +650,21 @@ impl<R: Registers> Rings<R> {
                 a.release()?;
             }
         }
-        for a in self.pending.iter_mut().flatten() {
+        for a in self
+            .pending
+            .iter_mut()
+            .chain(self.frames.iter_mut().flat_map(|queue| &mut queue.slots))
+            .flatten()
+            .chain(&mut self.spare)
+        {
             // SAFETY: covered by this function's own safety contract.
             unsafe {
                 a.release()?;
             }
         }
         self.pending.clear();
+        self.frames.clear();
+        self.spare.clear();
         self.configured = false;
         Ok(())
     }
@@ -545,6 +704,17 @@ fn iqk(sequence: u16) -> [u8; 32] {
     p[4..8].copy_from_slice(&(9u32 | (u32::from(sequence) << 16)).to_le_bytes());
     p[8] = 1;
     p
+}
+/// `rtw_pci_tx_write_data`'s two buffer descriptors: the packet descriptor at
+/// `address`, then the MPDU behind it.
+fn frame_descriptor(address: u32, length: usize) -> [u8; DESCRIPTOR] {
+    let mut bd = [0; DESCRIPTOR];
+    bd[..2].copy_from_slice(&48u16.to_le_bytes());
+    bd[2..4].copy_from_slice(&(((47 + length) / 128 + 1) as u16).to_le_bytes());
+    bd[4..8].copy_from_slice(&address.to_le_bytes());
+    bd[8..10].copy_from_slice(&(length as u16).to_le_bytes());
+    bd[12..16].copy_from_slice(&(address + 48).to_le_bytes());
+    bd
 }
 fn h2c_descriptors(address: u32) -> Result<([u8; 48], [u8; 16]), Error> {
     address
