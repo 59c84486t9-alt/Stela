@@ -154,20 +154,28 @@ impl<'a> Services<'a> {
             .map_err(|_| ServiceError::Refused("configuration space mapping refused"))
     }
 
-    /// Stop the function's DMA and interrupts, as Linux's
+    /// Gate PCI requester DMA and interrupt controls, as Linux's
     /// `pci_clear_master`, `pci_msi_shutdown`, `pci_msix_shutdown` and
     /// `pci_disable_ats`/`pri`/`pasid` do, then wait for its outstanding
     /// requests (`pci_wait_for_pending_transaction`).
     fn stop(&self, config: &mut OwnedConfig) -> Result<(), ServiceError> {
         let command = config.read16(COMMAND);
+        let status = config.read16(STATUS);
+        if command == u16::MAX || status == u16::MAX {
+            return Err(ServiceError::Claim(
+                stela_drivers::bus::pci::requester::ClaimError::ReadFailed {
+                    offset: if command == u16::MAX { COMMAND } else { STATUS },
+                },
+            ));
+        }
         config.write16(COMMAND, command & !BUS_MASTER | INTX_DISABLE);
         let mut express = None;
-        if config.read16(STATUS) & CAPABILITY_LIST != 0 {
+        if status & CAPABILITY_LIST != 0 {
             let found: alloc::vec::Vec<_> = config
                 .capabilities()
-                .filter_map(Result::ok)
-                .map(|entry| (entry.offset, entry.id))
-                .collect();
+                .map(|entry| entry.map(|entry| (entry.offset, entry.id)))
+                .collect::<Result<_, _>>()
+                .map_err(|error| ServiceError::Claim(error.into()))?;
             for (offset, id) in found {
                 match id {
                     MSI => {
@@ -190,9 +198,9 @@ impl<'a> Services<'a> {
         if express.is_some() && config.read32(0x100) != u32::MAX {
             let found: alloc::vec::Vec<_> = config
                 .extended_capabilities()
-                .filter_map(Result::ok)
-                .map(|entry| (entry.offset, entry.id))
-                .collect();
+                .map(|entry| entry.map(|entry| (entry.offset, entry.id)))
+                .collect::<Result<_, _>>()
+                .map_err(|error| ServiceError::Claim(error.into()))?;
             for (offset, id) in found {
                 match id {
                     ATS => {
@@ -242,13 +250,18 @@ unsafe impl NativeServices for Services<'_> {
     }
 
     fn claim_stopped(&self, address: Address) -> Result<StoppedRequester, ServiceError> {
-        let mut config = self.config(address)?;
-        self.stop(&mut config)?;
-        let function = Function::new(address, config)
+        let role = self.remappers.function_role(address);
+        if role != FunctionRole::Physical {
+            return Err(ServiceError::Claim(
+                stela_drivers::bus::pci::requester::ClaimError::UnsupportedRole(role),
+            ));
+        }
+        let mut function = Function::new(address, self.config(address)?)
             .ok_or(ServiceError::Refused("no function answers at this address"))?;
+        self.stop(function.config())?;
         // SAFETY: bus mastering, interrupts and outstanding requests were
-        // stopped above; probe enumerates physical functions only.
-        unsafe { StoppedRequester::from_stopped_pci(function, FunctionRole::Physical) }
+        // stopped above; the complete stable PF/VF inventory supplies role.
+        unsafe { StoppedRequester::from_stopped_pci(function, role) }
             .map_err(|(error, _)| ServiceError::Claim(error))
     }
 
@@ -322,13 +335,37 @@ unsafe impl NativeServices for Services<'_> {
         self.remappers.translates(address)
     }
 
-    fn requester_arrived(&self, address: Address, bridge: Address) -> Result<(), ServiceError> {
-        self.remappers.admit(address, bridge).map_err(|error| {
-            output::arguments(format_args!(
-                "HOST IOMMU requester {address} refused: {error:?}\n"
+    fn dma_subtree_translated(&self, address: Address) -> bool {
+        self.remappers.translates_subtree(address)
+    }
+
+    unsafe fn requesters_arrived(
+        &self,
+        arrivals: stela_drivers::probe::services::ArrivalInventory<'_>,
+    ) -> Result<(), ServiceError> {
+        if arrivals
+            .functions
+            .iter()
+            .any(|address| address.segment != arrivals.bridge.segment)
+            || !self.remappers.observe_arrivals(
+                arrivals.bridge,
+                arrivals.functions,
+                arrivals.read32,
+            )
+        {
+            return Err(ServiceError::Refused(
+                "PCI arrival has no stable complete PF/VF inventory",
             ));
-            ServiceError::Refused("the IOMMU refused the requester that arrived")
-        })
+        }
+        for &address in arrivals.functions {
+            self.remappers.admit(address).map_err(|error| {
+                output::arguments(format_args!(
+                    "HOST IOMMU requester {address} refused: {error:?}\n"
+                ));
+                ServiceError::Refused("the IOMMU refused the requester that arrived")
+            })?;
+        }
+        Ok(())
     }
 
     fn usb4_platform(

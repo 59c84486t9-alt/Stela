@@ -27,7 +27,10 @@ use stela_boot_core::remapping::{self, Present};
 use stela_drivers::bus::{
     dma::{mapping::DmaDomain, memory::CacheAttribute},
     mmio::owned::{PhysicalSpan, Protection},
-    pci::{Address, EcamWindow, requester::RequesterBinding},
+    pci::{
+        Address, EcamWindow,
+        requester::{FunctionRole, RequesterBinding, roles},
+    },
 };
 use stela_runtime::pc::acpi;
 
@@ -41,7 +44,7 @@ fn physical_bits() -> u8 {
 const CLAIMED_DISPLAYS: &[u16] = &[];
 
 struct Taken {
-    segment: u16,
+    descriptor: usize,
     unit: Arc<Unit<MmioRegisters>>,
 }
 
@@ -49,6 +52,9 @@ struct Taken {
 pub(super) struct Remappers {
     taken: Vec<Taken>,
     amd: Vec<amd::Taken>,
+    roles: core::cell::RefCell<roles::Inventory>,
+    topology: core::cell::RefCell<Vec<(u16, Vec<Present>)>>,
+    dmar: Option<dmar::Remapping>,
 }
 
 /// Every present function, grouped by PCI segment across the platform's
@@ -58,12 +64,20 @@ pub(super) struct Remappers {
 /// The current root maps every window's configuration space uncached.
 unsafe fn inventory(windows: &[EcamWindow]) -> Vec<(u16, Vec<Present>)> {
     remapping::enumerate_segments(windows, |window, rid, offset| {
-        let address = window.base + (u64::from(rid) << 12) + u64::from(offset);
         // SAFETY: enumerate_segments selects the validated window containing
         // this requester, and offset names an aligned configuration dword.
-        let value = unsafe { (address as *const u32).read_volatile() };
+        let value = unsafe { configuration(window, rid, offset) };
         (value != u32::MAX).then_some(value)
     })
+}
+
+/// # Safety
+/// The validated window is mapped uncached in this root and contains rid's
+/// bus. offset is an aligned dword no later than 4092 in this function.
+unsafe fn configuration(window: &EcamWindow, rid: u16, offset: u16) -> u32 {
+    let address = window.base + (u64::from(rid) << 12) + u64::from(offset);
+    // SAFETY: the caller supplies this exact complete mapped ECAM dword.
+    unsafe { (address as *const u32).read_volatile() }
 }
 
 /// The requester ID of the function at `address`.
@@ -76,6 +90,9 @@ impl Remappers {
         Self {
             taken: Vec::new(),
             amd: Vec::new(),
+            roles: core::cell::RefCell::new(roles::Inventory::empty()),
+            topology: core::cell::RefCell::new(Vec::new()),
+            dmar: None,
         }
     }
 
@@ -87,7 +104,9 @@ impl Remappers {
     /// # Safety
     /// No host driver has started; `root` is the loader root, which maps
     /// the ACPI tables at `rsdp` and `ecam`'s configuration space. The
-    /// firmware's translation was turned off at ExitBootServices.
+    /// firmware's translation was turned off at ExitBootServices. PCI function,
+    /// SR-IOV, reset and routing writers stay excluded through the inventory and
+    /// later claims; ECAM lists every admitted bus, not only remapped segments.
     pub(super) unsafe fn take(
         rsdp: u64,
         root: u64,
@@ -97,26 +116,53 @@ impl Remappers {
         tsc_hz: u64,
     ) -> Self {
         let mut remappers = Self::none();
-        if rsdp == 0 {
-            return remappers;
-        }
-        let (dmar, ivrs, inventories) = {
+        let (dmar, ivrs, inventories, roles) = {
             // SAFETY: forwarded; the loader root maps the tables and ECAM.
             let _root = unsafe { RestoreRoot::enter(root) };
             let find = |signature| {
+                if rsdp == 0 {
+                    return None;
+                }
                 // SAFETY: the firmware's RSDP, whose tables the loader root maps.
                 unsafe { acpi::find(rsdp, signature) }
                     .ok()
                     .map(<[u8]>::to_vec)
             };
             let (dmar, ivrs) = (find(b"DMAR"), find(b"IVRS"));
-            if dmar.is_none() && ivrs.is_none() {
-                return remappers;
-            }
             // SAFETY: the loader root maps every validated ECAM window.
             let inventories = unsafe { inventory(ecam) };
-            (dmar, ivrs, inventories)
+            let functions: Vec<_> = inventories
+                .iter()
+                .flat_map(|(segment, present)| {
+                    present.iter().map(|function| Address {
+                        segment: *segment,
+                        bus: (function.rid >> 8) as u8,
+                        device: ((function.rid >> 3) & 31) as u8,
+                        function: (function.rid & 7) as u8,
+                    })
+                })
+                .collect();
+            let roles = roles::Inventory::capture(&functions, |address, offset| {
+                if offset > 4092 || !offset.is_multiple_of(4) {
+                    return None;
+                }
+                let window = ecam.iter().find(|window| {
+                    window.segment == address.segment
+                        && (window.start_bus..=window.end_bus).contains(&address.bus)
+                })?;
+                // SAFETY: current loader root maps this checked window;
+                // capture runs before any host driver/configuration writer starts.
+                Some(unsafe { configuration(window, requester(address), offset) })
+            });
+            (dmar, ivrs, inventories, roles)
         };
+        for issue in roles.issues() {
+            output::arguments(format_args!(
+                "UNSUPPORTED Stela PCI function-role inventory: {issue:?}\n"
+            ));
+        }
+        *remappers.roles.get_mut() = roles;
+        *remappers.topology.get_mut() = inventories.clone();
         if let Some(ivrs) = ivrs {
             // SAFETY: forwarded.
             remappers.amd =
@@ -134,6 +180,7 @@ impl Remappers {
                 return remappers;
             }
         };
+        remappers.dmar = Some(parsed.clone());
         for (segment, present) in &inventories {
             for (index, decision) in remapping::plan(&parsed, *segment, present, CLAIMED_DISPLAYS) {
                 let unit = &parsed.units[index];
@@ -177,7 +224,7 @@ impl Remappers {
                             requesters.len()
                         ));
                         remappers.taken.push(Taken {
-                            segment: *segment,
+                            descriptor: index,
                             unit: taken,
                         });
                     }
@@ -260,31 +307,184 @@ impl Remappers {
         }
     }
 
-    /// The VT-d unit that allows `rid` on `segment`.
-    fn vtd(&self, segment: u16, rid: u16) -> Option<&Taken> {
-        self.taken
+    /// The taken hardware unit selected by this requester's firmware route.
+    /// An untaken descriptor remains explicitly untranslated, even when the
+    /// parent bridge uses a different taken unit.
+    fn vtd(&self, segment: u16, rid: u16) -> Result<Option<&Taken>, VtdError> {
+        let Some(dmar) = &self.dmar else {
+            return Ok(None);
+        };
+        let topology = self.topology.borrow();
+        let Some((_, present)) = topology.iter().find(|(found, _)| *found == segment) else {
+            return Err(VtdError::Unsupported);
+        };
+        let selected =
+            remapping::route(dmar, segment, present, rid).map_err(|_| VtdError::Unsupported)?;
+        Ok(selected.and_then(|descriptor| {
+            self.taken
+                .iter()
+                .find(|taken| taken.descriptor == descriptor)
+        }))
+    }
+
+    fn amd(&self, segment: u16, rid: u16) -> Result<Option<&amd::Taken>, VtdError> {
+        let mut selected = None;
+        for taken in &self.amd {
+            if taken.routes(segment, rid).map_err(|_| VtdError::Busy)? {
+                if selected.is_some() {
+                    return Err(VtdError::Unsupported);
+                }
+                selected = Some(taken);
+            }
+        }
+        Ok(selected)
+    }
+
+    /// Initial complete PF/VF inventory, kept under the original PCI epoch.
+    /// New arrivals require a fresh role inventory before a native claim.
+    pub(super) fn function_role(&self, address: Address) -> FunctionRole {
+        self.roles.borrow().role(address)
+    }
+
+    /// Join the complete adopted subtree and the original bridge's updated
+    /// bus numbers before selecting firmware routes or granting native claims.
+    pub(super) fn observe_arrivals(
+        &self,
+        bridge: Address,
+        functions: &[Address],
+        read32: &mut dyn FnMut(Address, u16) -> Option<u32>,
+    ) -> bool {
+        let fresh = roles::Inventory::capture(functions, &mut *read32);
+        let mut updates = Vec::new();
+        for address in core::iter::once(bridge).chain(functions.iter().copied()) {
+            let observation = (|| {
+                let class = read32(address, 8).filter(|value| *value != u32::MAX)?;
+                let header = read32(address, 12).filter(|value| *value != u32::MAX)?;
+                let buses = if header >> 16 & 0x7f == 1 {
+                    let buses = read32(address, 24).filter(|value| *value != u32::MAX)?;
+                    let secondary = (buses >> 8) as u8;
+                    let subordinate = (buses >> 16) as u8;
+                    if secondary <= address.bus || subordinate < secondary {
+                        return None;
+                    }
+                    Some((secondary, subordinate))
+                } else {
+                    None
+                };
+                Some(Present {
+                    rid: requester(address),
+                    class: [(class >> 24) as u8, (class >> 16) as u8, (class >> 8) as u8],
+                    bridge: buses,
+                })
+            })();
+            let Some(observation) = observation else {
+                self.roles.borrow_mut().invalidate_topology(address);
+                return false;
+            };
+            updates.push(observation);
+        }
+        let mut topology = self.topology.borrow_mut();
+        let Some((_, present)) = topology
+            .iter_mut()
+            .find(|(segment, _)| *segment == bridge.segment)
+        else {
+            self.roles.borrow_mut().invalidate_topology(bridge);
+            return false;
+        };
+        if !present
             .iter()
-            .find(|taken| taken.segment == segment && taken.unit.allows(rid))
+            .any(|entry| entry.rid == requester(bridge) && entry.class[..2] == [6, 4])
+            || updates[0].class[..2] != [6, 4]
+            || updates[0].bridge.is_none()
+        {
+            self.roles.borrow_mut().invalidate_topology(bridge);
+            return false;
+        }
+        for update in updates {
+            if let Some(entry) = present.iter_mut().find(|entry| entry.rid == update.rid) {
+                if entry.class != update.class {
+                    self.roles.borrow_mut().invalidate_topology(bridge);
+                    return false;
+                }
+                *entry = update;
+            } else {
+                present.push(update);
+            }
+        }
+        present.sort_unstable_by_key(|entry| entry.rid);
+        let mut roles = self.roles.borrow_mut();
+        let previous = roles.issues().len();
+        roles.extend(fresh);
+        for issue in &roles.issues()[previous..] {
+            output::arguments(format_args!(
+                "UNSUPPORTED Stela PCI function-role arrival: {issue:?}\n"
+            ));
+        }
+        functions
+            .iter()
+            .all(|address| roles.role(*address) != FunctionRole::Unverified)
     }
 
     /// Whether a taken unit confines the DMA of the function at `address`.
     pub(super) fn translates(&self, address: Address) -> bool {
         let rid = requester(address);
-        self.amd
-            .iter()
-            .any(|taken| taken.covers(address.segment, rid))
-            || self.vtd(address.segment, rid).is_some()
+        self.amd(address.segment, rid)
+            .ok()
+            .flatten()
+            .is_some_and(|taken| taken.covers(address.segment, rid))
+            || self
+                .vtd(address.segment, rid)
+                .ok()
+                .flatten()
+                .is_some_and(|taken| taken.unit.allows(rid))
     }
 
-    /// Bring the function at `address`, which arrived below `bridge`, under
-    /// the unit that translates the bridge. With none, nothing changes.
-    pub(super) fn admit(&self, address: Address, bridge: Address) -> Result<(), VtdError> {
-        let (rid, parent) = (requester(address), requester(bridge));
-        if let Some(taken) = self
-            .amd
+    /// Confinement for every possible future child, rather than only the
+    /// bridge's own RID. A still-untranslated explicit child unit cannot be
+    /// hidden by an active include-all unit that happens to route its parent.
+    pub(super) fn translates_subtree(&self, address: Address) -> bool {
+        let topology = self.topology.borrow();
+        let Some((_, present)) = topology
             .iter()
-            .find(|taken| taken.covers(bridge.segment, parent))
-        {
+            .find(|(segment, _)| *segment == address.segment)
+        else {
+            return false;
+        };
+        let rid = requester(address);
+        let Some((first, last)) = present
+            .iter()
+            .find(|entry| entry.rid == rid)
+            .and_then(|entry| entry.bridge)
+        else {
+            return false;
+        };
+        if !self.amd.is_empty() {
+            return (first..=last).all(|bus| {
+                (0..=255u16).all(|function| {
+                    self.amd(address.segment, u16::from(bus) << 8 | function)
+                        .is_ok_and(|taken| taken.is_some())
+                })
+            });
+        }
+        let Some(dmar) = &self.dmar else {
+            return false;
+        };
+        remapping::subtree_routes(dmar, address.segment, present, rid).is_some_and(|routes| {
+            !routes.is_empty()
+                && routes.iter().all(|descriptor| {
+                    self.taken
+                        .iter()
+                        .any(|taken| taken.descriptor == *descriptor)
+                })
+        })
+    }
+
+    /// Admit a newly observed requester through its own firmware route.
+    /// Initial blocked entries stay blocked until the driver's stopped receipt
+    /// authorizes private attachment; parent coverage grants no child route.
+    pub(super) fn admit(&self, address: Address) -> Result<(), VtdError> {
+        let rid = requester(address);
+        if let Some(taken) = self.amd(address.segment, rid)? {
             return taken.admit(rid).map_err(|error| {
                 output::arguments(format_args!(
                     "HOST IOMMU AMD-Vi admission refused: {error:?}\n"
@@ -292,7 +492,7 @@ impl Remappers {
                 VtdError::Busy
             });
         }
-        self.vtd(bridge.segment, parent)
+        self.vtd(address.segment, rid)?
             .map_or(Ok(()), |taken| taken.unit.admit_requester(rid))
     }
 
@@ -304,7 +504,14 @@ impl Remappers {
     ) -> Result<Result<Arc<dyn DmaDomain>, VtdError>, RequesterBinding> {
         let segment = binding.address().segment;
         let rid = binding.requester();
-        if let Some(taken) = self.amd.iter().find(|taken| taken.covers(segment, rid)) {
+        let amd = match self.amd(segment, rid) {
+            Ok(taken) => taken,
+            Err(error) => return Ok(Err(error)),
+        };
+        if let Some(taken) = amd {
+            if !taken.covers(segment, rid) {
+                return Ok(Err(VtdError::Unsupported));
+            }
             return Ok(taken.domain(binding).map_err(|error| {
                 output::arguments(format_args!(
                     "HOST IOMMU AMD-Vi attach refused: {error:?}\n"
@@ -312,8 +519,10 @@ impl Remappers {
                 VtdError::Busy
             }));
         }
-        let Some(taken) = self.vtd(segment, rid) else {
-            return Err(binding);
+        let taken = match self.vtd(segment, rid) {
+            Ok(Some(taken)) if taken.unit.allows(rid) => taken,
+            Ok(Some(_)) | Err(_) => return Ok(Err(VtdError::Unsupported)),
+            Ok(None) => return Err(binding),
         };
         // SAFETY: the driver's binding of its stopped function, whose bus
         // mastering it enables after mapping through this domain.

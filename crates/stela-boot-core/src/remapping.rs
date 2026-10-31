@@ -52,10 +52,11 @@ const CLASS: u16 = 0x08;
 const HEADER: u16 = 0x0c;
 const BUSES: u16 = 0x18;
 
-/// Every function behind `roots`, found as Linux's `pci_scan_child_bus`
-/// finds them: each root bus, then each bus a bridge leads to. `read32`
-/// reads a configuration dword of a requester, `None` where nothing
-/// answers.
+/// Every function behind `roots`, including every RID on each reached bus.
+/// Function zero and its multifunction bit cannot establish absence of ARI
+/// functions or the PF that supplies another function's VF identity. This
+/// read-only inventory does not authorize attaching unsupported ARI devices.
+/// `read32` reads a configuration dword, None where nothing answers.
 pub fn enumerate(roots: &[u8], mut read32: impl FnMut(u16, u16) -> Option<u32>) -> Vec<Present> {
     let mut found = Vec::new();
     let mut seen = [false; 256];
@@ -65,16 +66,8 @@ pub fn enumerate(roots: &[u8], mut read32: impl FnMut(u16, u16) -> Option<u32>) 
             continue;
         }
         for device in 0..32u16 {
-            let first = u16::from(bus) << 8 | device << 3;
-            let Some(header) = read32(first, VENDOR)
-                .filter(|id| *id as u16 != 0xffff)
-                .and_then(|_| read32(first, HEADER))
-            else {
-                continue;
-            };
-            let functions = if header >> 16 & 0x80 != 0 { 8 } else { 1 };
-            for function in 0..functions {
-                let rid = first | function;
+            for function in 0..8u16 {
+                let rid = u16::from(bus) << 8 | device << 3 | function;
                 if read32(rid, VENDOR).is_none_or(|id| id as u16 == 0xffff) {
                     continue;
                 }
@@ -187,6 +180,8 @@ impl Scope {
 pub enum Leave {
     /// No present requester sits in its scope.
     Empty,
+    /// More than one firmware unit claims this requester.
+    Ambiguous(u16),
     /// This display controller sits in its scope, and no driver maps the
     /// unit's reserved regions for it.
     Display(u16),
@@ -235,9 +230,131 @@ pub fn remainder(present: &[Present], listed: &[u16]) -> Vec<u16> {
         .collect()
 }
 
+/// The requesters each firmware unit routes: explicit scopes precede the
+/// include-all remainder. Policy refusals do not change hardware routing.
+fn coverage(
+    remapping: &crate::dmar::Remapping,
+    segment: u16,
+    present: &[Present],
+) -> Vec<(usize, Vec<u16>)> {
+    let on_segment = || {
+        remapping
+            .units
+            .iter()
+            .enumerate()
+            .filter(|(_, unit)| unit.segment == segment)
+    };
+    let mut listed = Vec::new();
+    let mut coverage = Vec::new();
+    for (index, unit) in on_segment().filter(|(_, unit)| !unit.include_all) {
+        let covered: Vec<u16> = unit
+            .scopes
+            .iter()
+            .flat_map(|scope| scope.resolve(present))
+            .collect();
+        listed.extend_from_slice(&covered);
+        coverage.push((index, covered));
+    }
+    for (index, _) in on_segment().filter(|(_, unit)| unit.include_all) {
+        let covered = remainder(present, &listed);
+        coverage.push((index, covered));
+    }
+    coverage
+}
+
+/// Resolve one present requester through firmware scopes, including scopes
+/// that became resolvable after bridge adoption. A bridge's own unit need not
+/// route a child. Ambiguous routing supplies no remapper or passthrough grant.
+pub fn route(
+    remapping: &crate::dmar::Remapping,
+    segment: u16,
+    present: &[Present],
+    rid: u16,
+) -> Result<Option<usize>, Leave> {
+    let coverage = coverage(remapping, segment, present);
+    let mut matching = coverage.iter().filter(|(_, rids)| rids.contains(&rid));
+    let selected = matching.next().map(|(index, _)| *index);
+    if matching.next().is_some() {
+        return Err(Leave::Ambiguous(rid));
+    }
+    Ok(selected)
+}
+
+/// Whether a firmware scope can cover future children of this bridge, and
+/// whether its bridge scope covers the entire reserved downstream bus range.
+fn prospective(scope: &Scope, present: &[Present], downstream: (u8, u8)) -> (bool, bool) {
+    let (secondary, subordinate) = downstream;
+    let mut bus = scope.bus;
+    for (index, &(device, function)) in scope.path.iter().enumerate() {
+        if (secondary..=subordinate).contains(&bus) {
+            return (true, false);
+        }
+        let rid = u16::from(bus) << 8 | u16::from(device) << 3 | u16::from(function);
+        let Some(found) = present.iter().find(|entry| entry.rid == rid) else {
+            return (false, false);
+        };
+        if index + 1 == scope.path.len() {
+            return found.bridge.filter(|_| scope.bridge).map_or(
+                (false, false),
+                |(first, last)| {
+                    (
+                        first <= subordinate && secondary <= last,
+                        first <= secondary && subordinate <= last,
+                    )
+                },
+            );
+        }
+        let Some((next, _)) = found.bridge else {
+            return (false, false);
+        };
+        bus = next;
+    }
+    (false, false)
+}
+
+/// Every descriptor that could route a future child within the bridge's
+/// reserved buses. An unresolved downstream endpoint scope still counts.
+/// Unknown/unassigned bridge ranges return None, never an isolation grant.
+/// This is conservative topology data, not permission to change PCI routing.
+pub fn subtree_routes(
+    remapping: &crate::dmar::Remapping,
+    segment: u16,
+    present: &[Present],
+    bridge: u16,
+) -> Option<Vec<usize>> {
+    let downstream = present.iter().find(|entry| entry.rid == bridge)?.bridge?;
+    let mut selected = Vec::new();
+    let mut complete = false;
+    for (index, unit) in remapping
+        .units
+        .iter()
+        .enumerate()
+        .filter(|(_, unit)| unit.segment == segment && !unit.include_all)
+    {
+        for scope in &unit.scopes {
+            let (possible, whole) = prospective(scope, present, downstream);
+            if possible && !selected.contains(&index) {
+                selected.push(index);
+            }
+            complete |= whole;
+        }
+    }
+    if !complete {
+        selected.extend(
+            remapping
+                .units
+                .iter()
+                .enumerate()
+                .filter(|(_, unit)| unit.segment == segment && unit.include_all)
+                .map(|(index, _)| index),
+        );
+    }
+    Some(selected)
+}
+
 /// What the policy does with each unit of `remapping` on `segment`, by its
-/// index in `remapping.units`: listed units first, then include-all units
-/// over what the listed ones leave.
+/// descriptor index. Explicit units precede include-all units. Overlapping
+/// hardware coverage refuses every affected unit before register effects.
 pub fn plan(
     remapping: &crate::dmar::Remapping,
     segment: u16,
@@ -255,284 +372,28 @@ pub fn plan(
                 .flat_map(|scope| scope.resolve(present))
         })
         .collect();
-    let on_segment = || {
-        remapping
-            .units
-            .iter()
-            .enumerate()
-            .filter(|(_, unit)| unit.segment == segment)
-    };
-    let mut listed = Vec::new();
-    let mut decisions = Vec::new();
-    for (index, unit) in on_segment().filter(|(_, unit)| !unit.include_all) {
-        let covered: Vec<u16> = unit
-            .scopes
-            .iter()
-            .flat_map(|scope| scope.resolve(present))
-            .collect();
-        listed.extend_from_slice(&covered);
-        decisions.push((
-            index,
-            decide(&covered, &reserved, present, claimed_displays),
-        ));
+    let coverage = coverage(remapping, segment, present);
+    let mut counts = alloc::collections::BTreeMap::<u16, usize>::new();
+    for (_, rids) in &coverage {
+        let mut unique = rids.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        for rid in unique {
+            *counts.entry(rid).or_default() += 1;
+        }
     }
-    for (index, _) in on_segment().filter(|(_, unit)| unit.include_all) {
-        let covered = remainder(present, &listed);
-        decisions.push((
-            index,
-            decide(&covered, &reserved, present, claimed_displays),
-        ));
-    }
-    decisions
+    coverage
+        .iter()
+        .map(|(index, rids)| {
+            let decision = if let Some(&rid) = rids.iter().find(|rid| counts[rid] > 1) {
+                Err(Leave::Ambiguous(rid))
+            } else {
+                decide(rids, &reserved, present, claimed_displays)
+            };
+            (*index, decision)
+        })
+        .collect()
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use alloc::{collections::BTreeMap, vec};
-
-    /// A function's requester, class, multifunction bit and bridge buses.
-    type Function = (u16, [u8; 3], bool, Option<(u8, u8)>);
-
-    /// A config space of `(rid, offset) -> dword`.
-    fn space(functions: &[Function]) -> BTreeMap<(u16, u16), u32> {
-        let mut space = BTreeMap::new();
-        for &(rid, class, multi, bridge) in functions {
-            space.insert((rid, VENDOR), 0x1234_8086);
-            space.insert(
-                (rid, CLASS),
-                u32::from(class[0]) << 24 | u32::from(class[1]) << 16 | u32::from(class[2]) << 8,
-            );
-            let kind = u32::from(bridge.is_some()) | if multi { 0x80 } else { 0 };
-            space.insert((rid, HEADER), kind << 16);
-            if let Some((secondary, subordinate)) = bridge {
-                space.insert(
-                    (rid, BUSES),
-                    u32::from(secondary) << 8 | u32::from(subordinate) << 16,
-                );
-            }
-        }
-        space
-    }
-
-    fn inventory() -> Vec<Present> {
-        let space = space(&[
-            (0x0000, [6, 0, 0], false, None),
-            (0x0010, [3, 0, 0], false, None),
-            (0x00a0, [0x0c, 3, 0x30], true, None),
-            (0x00a1, [5, 0, 0], true, None),
-            (0x00e0, [6, 4, 0], false, Some((1, 2))),
-            (0x0100, [6, 4, 0], false, Some((2, 2))),
-            (0x0200, [1, 8, 2], false, None),
-        ]);
-        enumerate(&[0], |rid, offset| space.get(&(rid, offset)).copied())
-    }
-
-    #[test]
-    fn window_geometry_rejects_empty_overflow_and_out_of_width_ranges() {
-        assert_eq!(
-            window_range(&(0x12345..0x12346), 48),
-            Some(0x12000..0x13000)
-        );
-        let limit = 1u64 << 52;
-        assert_eq!(
-            window_range(&(limit - 1..limit), 52),
-            Some(limit - 4096..limit)
-        );
-        for range in [
-            0..0,
-            0x1000..0x1000,
-            0..u64::MAX,
-            u64::MAX - 4096..u64::MAX,
-            limit..limit + 1,
-        ] {
-            assert_eq!(window_range(&range, 52), None);
-        }
-        for bits in [0, 31, 53, 64] {
-            assert_eq!(window_range(&(0x1000..0x2000), bits), None);
-        }
-    }
-
-    #[test]
-    fn enumeration_follows_bridges_and_multifunction_devices() {
-        let found = inventory();
-        let rids: Vec<u16> = found.iter().map(|function| function.rid).collect();
-        assert_eq!(
-            rids,
-            [0x0000, 0x0010, 0x00a0, 0x00a1, 0x00e0, 0x0100, 0x0200]
-        );
-        assert!(found[1].display());
-        assert!(found[2].usb());
-        assert_eq!(found[4].bridge, Some((1, 2)));
-    }
-
-    #[test]
-    fn disjoint_ecam_windows_share_one_complete_segment_inventory() {
-        use crate::dmar::{Drhd, Remapping};
-        let windows = [
-            EcamWindow {
-                base: 0x8000_0000,
-                segment: 0,
-                start_bus: 1,
-                end_bus: 1,
-            },
-            EcamWindow {
-                base: 0x9000_0000,
-                segment: 0,
-                start_bus: 7,
-                end_bus: 7,
-            },
-            EcamWindow {
-                base: 0xa000_0000,
-                segment: 3,
-                start_bus: 1,
-                end_bus: 1,
-            },
-        ];
-        let first = space(&[(0x0100, [1, 8, 2], false, None)]);
-        let second = space(&[(0x0700, [2, 0, 0], false, None)]);
-        let other = space(&[(0x0100, [0x0c, 3, 0x30], false, None)]);
-        let inventories = enumerate_segments(&windows, |window, rid, offset| {
-            assert!((window.start_bus..=window.end_bus).contains(&((rid >> 8) as u8)));
-            let config = match window.base {
-                0x8000_0000 => &first,
-                0x9000_0000 => &second,
-                0xa000_0000 => &other,
-                _ => panic!("foreign ECAM window"),
-            };
-            config.get(&(rid, offset)).copied()
-        });
-        assert_eq!(inventories.len(), 2);
-        assert_eq!(inventories[0].0, 0);
-        assert_eq!(
-            inventories[0].1.iter().map(|f| f.rid).collect::<Vec<_>>(),
-            [0x0100, 0x0700]
-        );
-        assert_eq!(inventories[1].0, 3);
-        assert_eq!(inventories[1].1[0].rid, 0x0100);
-        assert!(inventories[1].1[0].usb());
-        let remapping = Remapping {
-            physical_bits: 39,
-            units: vec![Drhd {
-                base: 0xfed9_0000,
-                bytes: 4096,
-                segment: 0,
-                include_all: true,
-                scopes: vec![],
-            }],
-            reserved: vec![],
-        };
-        assert_eq!(
-            plan(&remapping, 0, &inventories[0].1, &[]),
-            [(0, Ok(vec![0x0100, 0x0700]))]
-        );
-    }
-
-    #[test]
-    fn scopes_resolve_endpoints_paths_and_bridge_subtrees() {
-        let present = inventory();
-        let endpoint = Scope {
-            bridge: false,
-            bus: 0,
-            path: vec![(0x1c, 0), (0, 0), (0, 0)],
-        };
-        assert_eq!(endpoint.resolve(&present), [0x0200]);
-        let bridge = Scope {
-            bridge: true,
-            bus: 0,
-            path: vec![(0x1c, 0)],
-        };
-        assert_eq!(bridge.resolve(&present), [0x00e0, 0x0100, 0x0200]);
-        let absent = Scope {
-            bridge: false,
-            bus: 0,
-            path: vec![(5, 0)],
-        };
-        assert!(absent.resolve(&present).is_empty());
-    }
-
-    #[test]
-    fn an_include_all_unit_covers_what_listed_units_leave() {
-        use crate::dmar::{Drhd, Remapping, Rmrr};
-        let present = inventory();
-        let unit = |include_all, scopes| Drhd {
-            base: 0xfed9_0000,
-            bytes: 4096,
-            segment: 0,
-            include_all,
-            scopes,
-        };
-        let graphics = Scope {
-            bridge: false,
-            bus: 0,
-            path: vec![(2, 0)],
-        };
-        let mut remapping = Remapping {
-            physical_bits: 39,
-            units: vec![unit(true, vec![]), unit(false, vec![graphics])],
-            reserved: vec![Rmrr {
-                segment: 0,
-                base: 0x7d00_0000,
-                limit: 0x7d01_ffff,
-                scopes: vec![Scope {
-                    bridge: false,
-                    bus: 0,
-                    path: vec![(0x14, 0)],
-                }],
-            }],
-        };
-        let decisions = plan(&remapping, 0, &present, &[]);
-        assert_eq!(decisions[0], (1, Err(Leave::Display(0x0010))));
-        assert_eq!(
-            decisions[1],
-            (0, Ok(vec![0x0000, 0x00a0, 0x00a1, 0x00e0, 0x0100, 0x0200]))
-        );
-        assert!(plan(&remapping, 1, &present, &[]).is_empty());
-        remapping.reserved[0].scopes[0].path = vec![(0x1c, 0), (0, 0), (0, 0)];
-        assert_eq!(
-            plan(&remapping, 0, &present, &[])[1],
-            (0, Err(Leave::Reserved(0x0200)))
-        );
-    }
-
-    #[test]
-    fn a_claimed_display_may_keep_its_reserved_ranges_but_other_classes_may_not() {
-        let present = inventory();
-        let all = remainder(&present, &[]);
-        assert_eq!(
-            decide(&all, &[0x0010], &present, &[0x0010]),
-            Ok(all.clone())
-        );
-        assert_eq!(
-            decide(&all, &[0x0010], &present, &[]),
-            Err(Leave::Display(0x0010))
-        );
-        assert_eq!(
-            decide(&all, &[0x0200], &present, &[0x0010, 0x0200]),
-            Err(Leave::Reserved(0x0200))
-        );
-    }
-
-    #[test]
-    fn displays_and_non_usb_reservations_leave_a_unit_untranslated() {
-        let present = inventory();
-        let all = remainder(&present, &[]);
-        assert_eq!(
-            decide(&all, &[], &present, &[]),
-            Err(Leave::Display(0x0010))
-        );
-        assert_eq!(decide(&all, &[], &present, &[0x0010]), Ok(all.clone()));
-        let rest = remainder(&present, &[0x0010]);
-        assert_eq!(decide(&rest, &[0x00a0], &present, &[]), Ok(rest.clone()));
-        assert_eq!(
-            decide(&rest, &[0x0200], &present, &[]),
-            Err(Leave::Reserved(0x0200))
-        );
-        // A reservation for a requester another unit covers does not count.
-        assert_eq!(
-            decide(&[0x0200], &[0x0010], &present, &[]),
-            Ok(vec![0x0200])
-        );
-        assert_eq!(decide(&[], &[], &present, &[]), Err(Leave::Empty));
-    }
-}
+mod tests;

@@ -394,6 +394,12 @@ pub(super) unsafe fn take(
 }
 
 impl Taken {
+    /// Full IVRS routing coverage, including still-blocked future arrivals.
+    pub(super) fn routes(&self, segment: u16, rid: u16) -> Result<bool, Error> {
+        let unit = self.unit.try_borrow().map_err(|_| Error::Busy)?;
+        Ok(unit.covers(segment, rid))
+    }
+
     pub(super) fn covers(&self, segment: u16, rid: u16) -> bool {
         self.segment == segment && self.requesters.borrow().contains(&rid)
     }
@@ -405,7 +411,10 @@ impl Taken {
         if !unit.covers(self.segment, rid) {
             return Err(Error::Requester);
         }
-        self.requesters.borrow_mut().push(rid);
+        let mut requesters = self.requesters.borrow_mut();
+        if !requesters.contains(&rid) {
+            requesters.push(rid);
+        }
         Ok(())
     }
 
