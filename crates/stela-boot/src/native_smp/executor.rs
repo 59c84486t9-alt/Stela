@@ -391,7 +391,7 @@ pub(crate) unsafe fn start(
     ram: &[host::RamRange],
     tsc_base: u64,
     _fp_qualification: bool,
-    serialized: bool,
+    runners: usize,
 ) -> Result<Executors, StartupFailure> {
     let cores = handoff.native_resources.cores as usize;
     if cores == 0 || cores > capture.core_count as usize || handoff.tsc_hz == 0 {
@@ -444,14 +444,9 @@ pub(crate) unsafe fn start(
     }
     let effective_pat = memory_source.pat;
     for slot in 1..cores {
-        let part = resources::partition(
-            cores,
-            slot,
-            handoff.code.bytes,
-            handoff.pool.bytes,
-            serialized,
-        )
-        .map_err(|_| StartupFailure::Resources)?;
+        let part =
+            resources::partition(cores, runners, slot, handoff.code.bytes, handoff.pool.bytes)
+                .map_err(|_| StartupFailure::Resources)?;
         let processor = capture.processors[capture.selected[slot] as usize];
         let destination =
             u32::try_from(processor.apic_id).map_err(|_| StartupFailure::Resources)?;

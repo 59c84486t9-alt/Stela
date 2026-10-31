@@ -85,7 +85,8 @@ pub(super) fn reserve(
     cores: usize,
     ram: &[(usize, usize)],
 ) -> Result<EngineMemory> {
-    let sizes = Sizes::for_host(free_ram()?, cores, system.parallel);
+    let runners = system.runners(cores, !system.parallel);
+    let sizes = Sizes::for_host(free_ram()?, cores, runners);
     let heap = allocate(sizes.heap)?;
     // The engine allocator uses this existing physmap directly. Prove the
     // complete firmware reservation is covered before publishing the handoff.
@@ -164,13 +165,11 @@ pub(super) fn reserve(
     };
     let code = allocate(sizes.code)?;
     let pool = allocate(sizes.pool)?;
-    // The engine splits both evenly, or serialized when this loader sized
-    // them for the BSP alone; check the BSP's and the last worker's part.
-    for serialized in [false, !system.parallel] {
+    // The engine splits both among its runners, which a diagnostic may make
+    // every core; check the BSP's and the last worker's part.
+    for runners in [system.runners(cores, false), runners] {
         for slot in [0, cores - 1] {
-            crate::native_smp::resources::partition(
-                cores, slot, code.bytes, pool.bytes, serialized,
-            )?;
+            crate::native_smp::resources::partition(cores, runners, slot, code.bytes, pool.bytes)?;
         }
     }
     let handoff_page = allocate(size_of::<Handoff>() as u64)?;

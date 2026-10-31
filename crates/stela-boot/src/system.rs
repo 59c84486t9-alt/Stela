@@ -52,6 +52,9 @@ const POOL_SHARE: u64 = 64;
 /// Free host RAM bytes per byte of the engine heap and of the code arena.
 const HEAP_SHARE: u64 = 16;
 const CODE_SHARE: u64 = 64;
+/// The loader heap's free bytes kept past boot services, for what still runs
+/// before the engine does; the rest of it goes to the guest.
+const LOADER_HEAP_KEPT: usize = 16 * MIB as usize;
 /// The code arena divides into parts of whole 2 MiB pages.
 const CODE_ALIGNMENT: u64 = 16 * MIB;
 const BELOW_4G: u64 = 0xffff_f000;
@@ -132,30 +135,24 @@ struct Sizes {
 impl Sizes {
     /// Each part takes a share of the `free` host RAM, between its bounds;
     /// the guest gets everything left. The pool scales with the guest DRAM
-    /// each of the `cores` executors maps, of which `free` is the bound, and
-    /// the code arena with the executors that run PEs: every one with
-    /// `parallel`, else the BSP alone, which the idle workers' serialized
-    /// reserves are added to. Each other executor that runs PEs adds an
-    /// eighth of the heap's share, for its machine's translation metadata.
-    fn for_host(free: u64, cores: usize, parallel: bool) -> Self {
-        let running = if parallel { cores as u64 } else { 1 };
+    /// each of the `runners` executors that run PEs maps, of which `free` is
+    /// the bound, and the code arena with them too; the other `cores` add
+    /// only their reserves. Each runner after the first adds an eighth of the
+    /// heap's share, for its machine's translation metadata.
+    fn for_host(free: u64, cores: usize, runners: usize) -> Self {
+        let running = runners as u64;
         let heap = free / HEAP_SHARE + (running - 1) * (free / HEAP_SHARE / 8);
         let clamp = |bytes: u64, bounds: RangeInclusive<u64>, alignment: u64| {
             (bytes / alignment * alignment).clamp(*bounds.start(), *bounds.end())
         };
-        // Serialized, the BSP keeps a whole share and each idle worker its
-        // reserve besides.
-        let (code_reserve, pool_reserve) = if parallel {
-            (0, 0)
-        } else {
-            crate::native_smp::resources::serialized_reserve(cores)
-        };
+        let (code_reserve, pool_reserve) =
+            crate::native_smp::resources::parked_reserve(cores, runners);
         Self {
             heap: clamp(heap, HEAP_BYTES, LARGE),
             code: clamp(free / CODE_SHARE, CODE_BYTES, CODE_ALIGNMENT) * running
                 + code_reserve.next_multiple_of(CODE_ALIGNMENT),
             pool: clamp(
-                (free / POOL_SHARE).saturating_mul(cores as u64),
+                (free / POOL_SHARE).saturating_mul(running),
                 POOL_BYTES,
                 LARGE,
             ) + pool_reserve,
@@ -184,6 +181,26 @@ fn free_ram() -> Result<u64> {
             end.saturating_sub(start)
         })
         .sum())
+}
+
+/// Return the loader heap's unused end to the firmware, whose free ranges
+/// the guest's are found from: the heap is sized before anything is known of
+/// what the boot will load. A refusal only leaves those pages to Stela.
+fn release_loader_heap() {
+    let Some(released) = crate::ALLOCATOR.release_tail(LOADER_HEAP_KEPT) else {
+        return;
+    };
+    let pages = released.len() / PAGE as usize;
+    let Some(start) = core::ptr::NonNull::new(released.start as *mut u8) else {
+        return;
+    };
+    // SAFETY: LOADER_DATA pages of the heap's firmware allocation, which the
+    // heap no longer manages and nothing else refers to.
+    let result = unsafe { boot::free_pages(start, pages) };
+    output::arguments(format_args!(
+        "BOOT HEAP released {}M: {result:?}\n",
+        released.len() >> 20
+    ));
 }
 
 /// Whether a firmware memory map entry is RAM: every type but the reserved,
@@ -724,6 +741,14 @@ fn load(
         layout::image() + (crate::engine::entry as *const () as u64 - image.start as u64);
 
     crate::status::done("");
+    let boot_heap = crate::ALLOCATOR.usage();
+    output::arguments(format_args!(
+        "BOOT HEAP total={}M peak={}M live={}M\n",
+        boot_heap.total >> 20,
+        boot_heap.peak >> 20,
+        boot_heap.live >> 20,
+    ));
+    release_loader_heap();
     // SAFETY: the fresh immutable MP observation is held LOADER_DATA. Identity
     // mappings and the calibrated local APIC remain valid across EBS.
     let capture = unsafe {

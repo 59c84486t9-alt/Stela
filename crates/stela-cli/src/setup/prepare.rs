@@ -22,6 +22,7 @@ pub(super) struct Prepared {
     pub(super) kind: Kind,
     pub(super) personalized: bool,
     pub(super) generation: bundle::Generation,
+    pub(super) processors: usize,
     pub(super) directory: tempfile::TempDir,
     pub(super) bytes: u64,
 }
@@ -139,6 +140,7 @@ pub(super) fn prepare_kind(
             kind,
             personalized,
             generation,
+            processors: bundle::processors(&output)?,
             directory,
             bytes,
         });
@@ -190,6 +192,7 @@ pub(super) fn copy_bundles(record: &mut Record, prepared: &[Prepared]) -> Result
             manifest_sha256: digest,
             kind: bundle.kind,
             personalized: bundle.personalized,
+            processors: bundle.processors,
         });
     }
     Ok(())

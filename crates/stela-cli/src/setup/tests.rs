@@ -499,6 +499,10 @@ fn setup_installs_from_the_usb_and_uninstall_restores_it() {
     // The only bundle is the machine's restore bundle.
     assert_eq!(record.bundles.len(), 1);
     assert_eq!(record.bundles[0].kind, Kind::Restore);
+    let mut sized = record.clone();
+    sized.bundles[0].processors = 8;
+    let line = sized.line(stela_boot_core::options::System::default());
+    assert!(line.contains("--guest-pes 8"), "{line}");
     let bundle = bundle_of(&f, Some(ecid));
     assert_eq!(
         fs::read(bundle.join("ramdisk.img")).unwrap(),

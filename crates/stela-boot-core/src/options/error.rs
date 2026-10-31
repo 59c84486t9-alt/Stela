@@ -34,6 +34,8 @@ pub enum Error {
     DuplicateNativeCores,
     NativeCoreCount,
     NativeCoreCapacity,
+    DuplicateGuestPes,
+    GuestPeCount,
     MissingRestoreSource,
     DuplicateRestoreSource,
     MissingRestoreManifest,
@@ -152,6 +154,8 @@ impl Error {
             Self::NativeCoreCapacity => {
                 "--native-cores is outside the supported physical-core capacity"
             }
+            Self::DuplicateGuestPes => "--guest-pes must occur once",
+            Self::GuestPeCount => "--guest-pes needs a processor count",
             Self::MissingRestoreSource => "missing restore source partition",
             Self::DuplicateRestoreSource => "duplicate restore source",
             Self::MissingRestoreManifest => "missing restore manifest path",

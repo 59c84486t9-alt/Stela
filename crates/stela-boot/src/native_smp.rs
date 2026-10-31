@@ -150,10 +150,10 @@ pub(crate) unsafe fn validate(
     }
     resources::partition(
         cores,
+        cores,
         cores - 1,
         handoff.code.bytes,
         handoff.pool.bytes,
-        false,
     )?;
     if cores > 1
         && (!(crate::tables::PAGE..1 << 20).contains(&resources.sipi)

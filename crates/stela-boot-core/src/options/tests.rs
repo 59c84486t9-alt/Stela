@@ -222,6 +222,24 @@ fn native_core_counts_refuse_duplicates_zero_and_over_capacity() {
 }
 
 #[test]
+fn guest_pes_bound_the_executors_that_run_them() {
+    for text in [
+        "--system --guest-pes",
+        "--system --guest-pes 0",
+        "--system --guest-pes 8 --guest-pes 8",
+    ] {
+        assert!(System::parse(text).is_err(), "{text}");
+    }
+    let options = System::parse("--system --guest-pes 8").unwrap();
+    assert_eq!(options.guest_pes, Some(8));
+    assert!(options.to_string().contains("--guest-pes 8"));
+    assert_eq!(options.runners(64, false), 8);
+    assert_eq!(options.runners(2, false), 2);
+    assert_eq!(options.runners(64, true), 1);
+    assert_eq!(System::parse("--system").unwrap().runners(64, false), 64);
+}
+
+#[test]
 fn invalid_lines_refuse() {
     for text in [
         "--storage x",

@@ -123,6 +123,9 @@ pub(super) struct Bundle {
     /// IPSW's global ticket.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(super) personalized: bool,
+    /// The PEs of its Mac; 0 for a bundle that did not record them.
+    #[serde(default)]
+    pub(super) processors: usize,
 }
 
 /// Fields selecting one bundle within a setup's build/machine generations.
@@ -222,6 +225,8 @@ struct Listing {
     #[serde(default)]
     revision: u32,
     #[serde(default)]
+    processors: usize,
+    #[serde(default)]
     files: Vec<Listed>,
 }
 
@@ -239,6 +244,12 @@ pub(super) fn generation(directory: &Path) -> Result<Generation> {
         schema: listing.schema_version,
         revision: listing.revision,
     })
+}
+
+/// The PEs of the Mac a prepared bundle directory boots.
+pub(super) fn processors(directory: &Path) -> Result<usize> {
+    let listing: Listing = stela_engine::read_json(&directory.join(MANIFEST))?;
+    Ok(listing.processors)
 }
 
 /// Bytes of the files in a prepared bundle directory.

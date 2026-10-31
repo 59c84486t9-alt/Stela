@@ -594,6 +594,10 @@ pub struct Manifest {
     /// identities.
     #[serde(default)]
     pub boot_cpu: Option<BootCpu>,
+    /// The PEs of the prepared `/cpus`, which setup passes on as
+    /// `--guest-pes`.
+    #[serde(default)]
+    pub processors: usize,
     #[serde(default)]
     pub sources: Vec<Source>,
     pub files: Vec<File>,
