@@ -1595,7 +1595,8 @@ impl<D: Device> Rtl8822c<D> {
         Ok(())
     }
 
-    fn protected_management(&mut self, frame: Mpdu, now: u64) -> Result<(), Error> {
+    fn protected_management(&mut self, mut frame: Mpdu, now: u64) -> Result<(), Error> {
+        let local = self.address;
         let Some(epoch) = self.station.association_epoch() else {
             return Ok(());
         };
@@ -1606,10 +1607,16 @@ impl<D: Device> Rtl8822c<D> {
             return Ok(());
         }
         let header = *frame.header();
-        let Some(body) = frame.bytes().get(header.length + 8..) else {
+        let Some(key) = self.keys.iter_mut().find(|key| key.pairwise) else {
             return Ok(());
         };
-        let body = body.get(..body.len().saturating_sub(8)).unwrap_or(&[]);
+        frame.security.key = key.slot.installed();
+        // Under packet numbers `ieee80211_crypto_ccmp_decrypt` keeps apart
+        // from data's.
+        let Ok(authenticated) = key.slot.authorize_unicast_management(&frame, local) else {
+            return Ok(());
+        };
+        let body = authenticated.body();
         match header.control & 0xfc {
             0xa0 | 0xc0 => {
                 let action = self

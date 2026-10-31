@@ -816,6 +816,31 @@ fn fragments_that_skip_a_number_are_dropped() {
     assert_eq!(delivered(&mut wifi), []);
 }
 
+/// An SA Query request at packet number `number`, opened as hardware leaves
+/// it, its MIC in place.
+fn sa_query(number: u8) -> Vec<u8> {
+    let mut frame = management(0xd0, &[number, 0, 0, 0x20, 0, 0, 0, 0, 8, 0, 1, 2]);
+    frame[1] = 0x40;
+    frame.extend([0; 8]);
+    frame
+}
+
+/// How many SA Query answers the station sent.
+fn query_answers(air: &Air) -> usize {
+    air.sent.iter().filter(|sent| sent.2[0] == 0xd0).count()
+}
+
+#[test]
+fn a_protected_management_frame_is_taken_once_under_its_packet_number() {
+    let (mut wifi, model) = connected();
+    model.0.borrow_mut().hear(sa_query(5), true);
+    assert!(run(&mut wifi, &model, |_, air| query_answers(air) == 1));
+    model.0.borrow_mut().hear(sa_query(5), true);
+    assert!(!run(&mut wifi, &model, |_, air| query_answers(air) > 1));
+    model.0.borrow_mut().hear(sa_query(6), true);
+    assert!(run(&mut wifi, &model, |_, air| query_answers(air) == 2));
+}
+
 #[test]
 fn an_a_msdu_gives_up_each_of_its_frames() {
     let (mut wifi, model) = connected();

@@ -1669,6 +1669,40 @@ fn a_nontransmitted_bss_hears_its_transmitter_announce_a_quiet_switch() {
     assert!(wifi.radio().silent());
 }
 
+/// An SA Query request from the other link to `receiver` under the pairwise
+/// key at packet number `number`.
+fn sa_query(receiver: Mac, number: u8) -> Vec<u8> {
+    let mut frame = vec![0; 24];
+    frame[..2].copy_from_slice(&[0xd0, 0x40]);
+    frame[4..10].copy_from_slice(&receiver.0);
+    frame[10..16].copy_from_slice(&OTHER);
+    frame[16..22].copy_from_slice(&OTHER);
+    frame.extend([number, 0, 0, 0x20, 0, 0, 0, 0]);
+    frame.extend([8, 0, 1, 2]);
+    placed_at(frame, 3 | 2 << 8 | 1 << 6, None, 127 << 24, [44, 56, 36])
+}
+
+#[test]
+fn a_protected_management_frame_is_taken_once_under_its_packet_number() {
+    let native = Native::default();
+    let (mut wifi, mut device, local, _) = moved_mld(&native);
+    let answers = |device: &Device<'_>| {
+        device
+            .air
+            .iter()
+            .filter(|frame| frame.windows(4).any(|at| at == [8, 1, 1, 2]))
+            .count()
+    };
+    device.inject(wifi.radio().rom().unwrap(), &sa_query(local, 5));
+    let answered = run(&mut wifi, &mut device, |_, device, _| answers(device) == 1);
+    assert!(answered, "{:?}", wifi.radio().error());
+    device.inject(wifi.radio().rom().unwrap(), &sa_query(local, 5));
+    assert!(!run(&mut wifi, &mut device, |_, device, _| answers(device) > 1));
+    device.inject(wifi.radio().rom().unwrap(), &sa_query(local, 6));
+    let answered = run(&mut wifi, &mut device, |_, device, _| answers(device) == 2);
+    assert!(answered, "{:?}", wifi.radio().error());
+}
+
 /// The AP MLD the model's AP is link 3 of.
 const AP_MLD: [u8; 6] = [2, 10, 11, 12, 13, 14];
 /// The address [`FixedEntropy`] draws for the station's link.

@@ -994,7 +994,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         let mut policy = Admitted(&client.channels);
         if header.control & 12 == 0 {
             if header.protected() {
-                return self.protected_management(frame, now);
+                return self.protected_management(frame, key_index, now);
             }
             if client.station.phase() == Peering::ExternalAuthenticating {
                 let session = client
@@ -1140,18 +1140,35 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         }
     }
 
-    /// A protected management frame the firmware decrypted: its departure
-    /// ends the association, and an SA Query is answered, as
+    /// A protected management frame the firmware decrypted, under packet
+    /// numbers `ieee80211_crypto_ccmp_decrypt` keeps apart from data's: its
+    /// departure ends the association, and an SA Query is answered, as
     /// `ieee80211_process_sa_query_req` does.
-    fn protected_management(&mut self, frame: Mpdu, now: u64) -> Result<(), Error> {
+    fn protected_management(
+        &mut self,
+        mut frame: Mpdu,
+        key_index: Option<u8>,
+        now: u64,
+    ) -> Result<(), Error> {
+        let local = self.address;
         let client = &mut self.client;
         let Some(epoch) = client.station.association_epoch() else {
             return Ok(());
         };
-        let header = frame.header();
-        let Some(body) = frame.bytes().get(header.length + 8..) else {
+        let Some(key) = client
+            .keys
+            .iter_mut()
+            .find(|key| key.pairwise && key.fitted && Some(key.index) == key_index)
+        else {
             return Ok(());
         };
+        frame.security.key = key.slot.installed();
+        frame.security.integrity = Integrity::Verified;
+        let Ok(authenticated) = key.slot.authorize_unicast_management(&frame, local) else {
+            return Ok(());
+        };
+        let header = frame.header();
+        let body = authenticated.body();
         match header.control & 0xfc {
             0xa0 | 0xc0 => {
                 let action = client
@@ -1180,7 +1197,6 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                 let Some(ap) = header.transmitter else {
                     return Ok(());
                 };
-                let local = self.address;
                 client
                     .outbox
                     .push_back((None, management(local, ap, 0xd0, true, &response)));
