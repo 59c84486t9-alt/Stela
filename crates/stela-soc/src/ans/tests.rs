@@ -385,7 +385,7 @@ fn debug_service_masks_round_trip_through_no_dma_completions() {
                 .is_err()
         );
         assert_eq!(rig.ans.debug, debug::DebugService::default());
-        assert_eq!(rig.bytes(CQ, 16), [0; 16]);
+        assert_eq!(admin_status(&mut rig, 0), UNSUPPORTED);
     }
     for words in [
         [1, 0, 1, 0xb00, 1, 0],
@@ -687,15 +687,46 @@ fn a_host_write_cache_is_reported_and_flushed_only_when_the_guest_asks() {
     assert_eq!(flushed(), 3);
 }
 
-#[test]
-fn unknown_admin_opcode_never_completes() {
-    let mut rig = Rig::new();
-    assert!(rig.submit(0, 0, 0xff, 0, 0, [0; 6]).is_err());
-    assert_eq!(rig.bytes(CQ, 16), vec![0; 16]);
+/// The status of a command the model cannot carry out.
+const UNSUPPORTED: u16 = 1;
+
+/// The status field of the admin completion in `slot`.
+fn admin_status(rig: &mut Rig, slot: u64) -> u16 {
+    let entry = rig.bytes(CQ + slot * 16, 16);
+    u16::from_le_bytes([entry[14], entry[15]]) >> 1
 }
 
 #[test]
-fn protected_tcb_commands_never_complete() {
+fn an_unknown_admin_opcode_fails_alone() {
+    let mut rig = Rig::new();
+    assert!(rig.submit(0, 0, 0xff, 0, 0, [0; 6]).is_err());
+    assert_eq!(admin_status(&mut rig, 0), UNSUPPORTED);
+    // The refusal is reported once and the next command runs.
+    rig.run().unwrap();
+    rig.submit(0, 1, 6, 0, DATA, [1, 0, 0, 0, 0, 0]).unwrap();
+    assert_eq!(admin_status(&mut rig, 1), 0);
+}
+
+#[test]
+fn the_health_log_reads_as_a_new_disk_and_others_are_absent() {
+    let mut rig = Rig::new();
+    // Log 2, 128 dwords, as IONVMeController asks for it.
+    rig.submit(0, 0, 2, u32::MAX, DATA, [0x007f_0002, 0, 0, 0, 0, 0])
+        .unwrap();
+    assert_eq!(admin_status(&mut rig, 0), 0);
+    let log = rig.bytes(DATA, 512);
+    assert_eq!((log[0], log[3], log[4], log[5]), (0, 100, 10, 0));
+    // A log it lacks, and more of the log than there is.
+    for (words, status) in [(0x007f_0001, 0x109), (0x0080_0002, 2)] {
+        let mut rig = Rig::new();
+        rig.submit(0, 0, 2, u32::MAX, DATA, [words, 0, 0, 0, 0, 0])
+            .unwrap();
+        assert_eq!(admin_status(&mut rig, 0), status);
+    }
+}
+
+#[test]
+fn protected_tcb_commands_fail_alone() {
     let mut rig = Rig::new();
     assert!(rig.ram.write(TCB + 64, &[1]));
     // Install an ordinary identify first, then change its protected TCB
@@ -713,7 +744,7 @@ fn protected_tcb_commands_never_complete() {
     assert_eq!((rejected.queue, rejected.tag), (0, 0));
     assert_eq!(rejected.command[0], 6);
     assert_eq!(rejected.tcb[64], 1);
-    assert_eq!(rig.bytes(CQ, 16), vec![0; 16]);
+    assert_eq!(admin_status(&mut rig, 0), UNSUPPORTED);
     // TCB 0x38..0x40 holds zero or a copy of CDW14 and CDW15.
     let mut rig = Rig::new();
     assert!(rig.ram.write(SQ, &cmd));
@@ -722,7 +753,7 @@ fn protected_tcb_commands_never_complete() {
     assert!(rig.ram.write(TCB + 60, &[1]));
     rig.write(ADMIN_SUBMIT, 0).unwrap();
     assert!(rig.run().is_err());
-    assert_eq!(rig.bytes(CQ, 16), vec![0; 16]);
+    assert_eq!(admin_status(&mut rig, 0), UNSUPPORTED);
 }
 
 #[test]
@@ -1231,7 +1262,7 @@ fn completed_effects_survive_cq_fault_retention_and_retry_without_reexecution() 
     assert!(rig.latch.is_asserted(Wire::Aic(IRQ)));
 }
 #[test]
-fn partial_data_dma_keeps_tag_owned_without_a_successful_completion() {
+fn partial_data_dma_fails_its_command() {
     let mut rig = large_mps(253, 2);
     let tag = 252;
     large_command(&mut rig, tag, 6, LARGE_DATA + 4092, [1, 0, 0, 0, 0, 0]);
@@ -1260,11 +1291,9 @@ fn partial_data_dma_keeps_tag_owned_without_a_successful_completion() {
             .is_err()
     );
     assert_eq!(rig.bytes(LARGE_DATA + 4092, 4), [0x6b, 0x10, 0x6b, 0x10]);
-    assert_eq!(rig.bytes(LARGE_CQ, 16), [0; 16]);
-    assert_eq!(rig.ans.pending.front(), Some(&(0, tag)));
-    assert!(rig.ans.completed.is_empty());
-    assert!(rig.write(TCB_INVALIDATE, u64::from(tag)).is_err());
-    rig.run().unwrap();
+    let entry = rig.bytes(LARGE_CQ, 16);
+    assert_eq!(u16::from_le_bytes([entry[14], entry[15]]) >> 1, UNSUPPORTED);
+    assert!(rig.ans.pending.is_empty());
     assert!(rig.ans.completed.is_empty());
     assert_eq!(rig.ans.queues[0].pending, 1);
 }
