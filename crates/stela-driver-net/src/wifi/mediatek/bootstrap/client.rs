@@ -222,6 +222,7 @@ struct Owned<I: BarIo, Q: QueueIo, C: 'static> {
     interface: Interface<Arc<C>>,
     station: Station,
     pmf_observations: Vec<Arc<PmfBssObservation>>,
+    fragments: station::fragments::Fragments,
     txs: txs::State,
     pmf_selected: Option<Arc<PmfBssObservation>>,
     pmf_authentication: Option<wifi::regulatory::PmfAuthenticationBinding>,
@@ -246,6 +247,8 @@ struct Owned<I: BarIo, Q: QueueIo, C: 'static> {
     transport_facts: Vec<mailbox::init::Fact>,
     asynchronous: Vec<crate::wifi::mediatek::ring::rx::Frame>,
     pending_rx: VecDeque<receive::ReceivedFrame>,
+    /// The last look at the receive rings found them empty.
+    rings_empty: bool,
     receive_groups: receive::Groups<C>,
     receive_ba: [Option<ba::Receive<C>>; 8],
     transmit_ba: [Option<ba::Transmit<C>>; 8],
@@ -286,6 +289,8 @@ struct Owned<I: BarIo, Q: QueueIo, C: 'static> {
     single_link: Option<Context>,
     /// An AP MLD association's other links.
     links: Vec<multi_link::Link<C>>,
+    /// A beacon took one of the association's links.
+    link_taken: bool,
 }
 /// On uncertain/live Drop keep the entire controller, station, real key
 /// material history and resources. No new owner may reset their PN.
@@ -332,6 +337,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 interface,
                 station,
                 pmf_observations: Vec::new(),
+                fragments: Default::default(),
                 txs: txs::State::default(),
                 pmf_selected: None,
                 pmf_authentication: None,
@@ -355,6 +361,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 transport_facts: Vec::new(),
                 asynchronous: Vec::new(),
                 pending_rx: VecDeque::new(),
+                rings_empty: true,
                 receive_groups: receive::Groups::new(),
                 receive_ba: core::array::from_fn(|_| None),
                 transmit_ba: core::array::from_fn(|_| None),
@@ -380,6 +387,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 six_ghz: None,
                 single_link: None,
                 links: Vec::new(),
+                link_taken: false,
             })),
         })
     }

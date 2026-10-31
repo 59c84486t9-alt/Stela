@@ -3,9 +3,12 @@ use super::commit;
 use super::sha32::{RESULT, Rotate32, Scalar32, pack_state};
 use crate::aarch64::simd::sm3::{Kind, Operand};
 use crate::x86_64::asm::Code;
+use crate::x86_64::simd::encode::gpr;
 
-// Caller-saved words only; RDI remains the real GuestState pointer.
+// Caller-saved words only, the pinned RSI saved around their use; RDI remains
+// the real GuestState pointer.
 const WORDS: [u8; 4] = [0, 1, 2, 6];
+const SAVED_RSI: u8 = 7;
 const VALUE: u8 = 8;
 const TEMP: u8 = 9;
 const OTHER: u8 = 10;
@@ -110,6 +113,7 @@ fn round(code: &mut Code, operand: &Operand, second: bool, nonlinear: bool, lane
 }
 
 pub(super) fn emit(code: &mut Code, operand: &Operand) {
+    code.asm().movq_to_xmm(SAVED_RSI, gpr(WORDS[3]));
     match operand.kind {
         Kind::Schedule1 => schedule(code, operand, true),
         Kind::Schedule2 => schedule(code, operand, false),
@@ -120,6 +124,7 @@ pub(super) fn emit(code: &mut Code, operand: &Operand) {
             lane,
         } => round(code, operand, second, nonlinear, lane),
     }
+    code.asm().movq_from_xmm(gpr(WORDS[3]), SAVED_RSI);
     commit(code, operand.destination, RESULT);
 }
 

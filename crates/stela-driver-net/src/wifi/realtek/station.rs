@@ -6,17 +6,20 @@
 //! `IEEE80211_KEY_FLAG_GENERATE_IV` asks, `Reorder` holds a Block Ack
 //! agreement's frames, and robust management frames are sealed in software as
 //! `IEEE80211_KEY_FLAG_SW_MGMT_TX` asks. [`Device`] is the hardware beneath it.
-//! Frames leave singly: nothing here starts a transmit Block Ack agreement yet.
 use super::{
-    ccmp,
+    bit_rate, ccmp,
     commands::{self, RateInfo, Report},
     descriptor::{
         Aggregate, Packet, QSEL_MANAGEMENT, RATE_1M, RATE_6M, RATE_ID_B, RATE_ID_G, SECURITY_CCMP,
     },
     dynamic, templates,
-    transmit::Queue,
+    transmit::{self, Queue},
 };
-use crate::wifi::security::aggregate::{OrderedGroup, Shape};
+use crate::wifi::security::{
+    aggregate::{OrderedGroup, Shape},
+    michael,
+};
+use crate::wifi::station::fragments::Fragments;
 use crate::{
     Clock, Link, LinkError, Mac,
     wifi::{
@@ -40,7 +43,7 @@ use crate::{
             Action, AssociationContext, Completion, Join, NativeBssObservation, Phase as Peering,
             RegulatoryPolicy, Station, Ticket,
             ba::{self, tx},
-            data::{self, Ingress, Protection, Qos, SequenceOwner, TxClass},
+            data::{self, Ingress, Protection, Qos, SequenceOwner, TxClass, amsdu},
             external,
             multi_link::Affiliation,
             operations::ChannelDefinition,
@@ -70,7 +73,8 @@ pub const MAC_ID: u8 = 0;
 pub const PORT: u8 = 0;
 /// `RTW_SEC_DEFAULT_KEY_NUM`: group keys sit at their index, pairwise ones after.
 const PAIRWISE_CAM: u8 = 4;
-/// `RTW_CAM_AES`.
+/// `RTW_CAM_TKIP` and `RTW_CAM_AES`.
+const CAM_TKIP: u8 = 2;
 const CAM_AES: u8 = 4;
 /// `WLAN_HT_SMPS_CONTROL_DISABLED` and `WLAN_HT_SMPS_CONTROL_STATIC`.
 const SMPS_DISABLED: u8 = 0;
@@ -83,6 +87,12 @@ const TRANSMIT_WINDOW: u16 = 64;
 const REORDER_TICKS_PER_SECOND: u32 = 1_000_000;
 /// The frames a TID waits with while its queue is full.
 const MAX_HELD: usize = 256;
+/// A CCMP header, the IV a frame carries behind its MAC header.
+const IV_BYTES: usize = 8;
+/// `IEEE80211_TKIP_ICV_LEN`, and where a TKIP key keeps the Michael key for
+/// what it receives, `NL80211_TKIP_DATA_OFFSET_RX_MIC_KEY`.
+const ICV_BYTES: usize = 4;
+const RECEIVE_MICHAEL_KEY: usize = 24;
 /// `ieee80211_add_wmm_info_ie`, without U-APSD.
 const WMM_ELEMENT: [u8; 9] = [221, 7, 0, 0x50, 0xf2, 2, 0, 1, 0];
 /// `WLAN_CATEGORY_BACK`.
@@ -290,6 +300,8 @@ fn capability_elements(band: Band) -> Vec<u8> {
     // IEEE80211_HT_MCS_TX_DEFINED.
     elements.extend_from_slice(&[1, 0, 0, 0]);
     elements.extend_from_slice(&[0; 7]);
+    // mac80211's `ext_capa`: operating mode notifications.
+    elements.extend_from_slice(&[127, 8, 0, 0, 0, 0, 0, 0, 0, 0x40]);
     if band == Band::Ghz5 {
         // MPDU 11454, SGI 80, RX LDPC, TX STBC, one RX STBC stream, HTC-VHT,
         // the largest A-MPDU.
@@ -330,6 +342,66 @@ fn probe_request(local: Mac, ssid: &[u8], band: Band, extra: &[u8]) -> Vec<u8> {
 
 /// `rtw_update_sta_info`'s rate ID and what it tells firmware of the peer, on
 /// a link `width` wide.
+/// `enum rtw_bandwidth`.
+fn width_code(width: Width) -> u8 {
+    match width {
+        Width::Mhz80 => 2,
+        Width::Mhz40 => 1,
+        _ => 0,
+    }
+}
+
+/// What `ieee80211_crypto_tkip_decrypt` and `ieee80211_rx_h_michael_mic_verify`
+/// make of a TKIP frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Michael {
+    Intact,
+    /// A frame this key already took, or no TKIP frame at all: dropped, with
+    /// no verdict on Michael.
+    Dropped,
+    Failed,
+}
+
+/// Check `frame`, decrypted with `IV` and trailer in place, under `key`.
+/// Michael covers an MSDU, so fragments never reach here.
+fn check_michael(frame: &mut Mpdu, key: &Key) -> Michael {
+    let header = *frame.header();
+    let bytes = frame.bytes();
+    let body = header.length + IV_BYTES;
+    let Some(end) = bytes.len().checked_sub(ICV_BYTES + michael::MIC_BYTES) else {
+        return Michael::Dropped;
+    };
+    let Some(Ok((number, _))) = bytes
+        .get(header.length..)
+        .map(PacketNumber::from_tkip_header)
+    else {
+        return Michael::Dropped;
+    };
+    if end < body {
+        return Michael::Dropped;
+    }
+    let source = bytes[16..22].try_into().unwrap_or([0; 6]);
+    let stored = bytes[end..end + michael::MIC_BYTES].to_vec();
+    let mut mic_key = [0; michael::MIC_BYTES];
+    mic_key.copy_from_slice(&key.material[RECEIVE_MICHAEL_KEY..]);
+    let priority = header.tid.unwrap_or(0);
+    let computed = michael::michael(
+        &mic_key,
+        &header.receiver.0,
+        &source,
+        priority,
+        &bytes[body..end],
+    );
+    frame.security.pn = Some(number);
+    if key.slot.replays(frame) {
+        Michael::Dropped
+    } else if computed == stored[..] {
+        Michael::Intact
+    } else {
+        Michael::Failed
+    }
+}
+
 fn rate_info(context: &AssociationContext, width: Width, initial: bool, level: u8) -> RateInfo {
     let negotiated = context.negotiated();
     let band = context.channel().band;
@@ -354,11 +426,7 @@ fn rate_info(context: &AssociationContext, width: Width, initial: bool, level: u
     }
     let cck_only = band == Band::Ghz2 && vht.is_none() && ht.is_none() && legacy <= 0xf;
     let mask = dynamic::rates_at_level(mask, level, cck_only);
-    let width = match width {
-        Width::Mhz80 => 2,
-        Width::Mhz40 => 1,
-        _ => 0,
-    };
+    let width = width_code(width);
     // `get_rate_id`.
     let rate_id = match (band, vht.is_some(), ht.is_some(), streams, width) {
         (Band::Ghz2, true, _, 2, _) => 12,
@@ -477,6 +545,12 @@ pub struct Rtl8822c<D: Device> {
     aggregating: [Option<Arc<tx::Session>>; 8],
     /// The TIDs an agreement cannot start on, `RTW_TXQ_BLOCK_BA`.
     unaggregated: [bool; 8],
+    /// The TIDs whose agreement carries no A-MSDU, `IEEE80211_TXQ_NO_AMSDU`.
+    no_amsdu: [bool; 8],
+    /// `agg.max_rc_amsdu_len`, which starts unset.
+    rate_amsdu: u16,
+    /// The frame last held is plain data, which others may join.
+    tail_joins: bool,
     admitted: Option<(Ticket, Arc<AssociationContext>)>,
     context: Option<Arc<AssociationContext>>,
     keys: Vec<Key>,
@@ -488,6 +562,7 @@ pub struct Rtl8822c<D: Device> {
     tuned: Option<Channel>,
     /// The frames each TID's Block Ack agreement holds in order.
     agreements: [Option<Reorder<Mpdu>>; 8],
+    fragments: Fragments,
     /// The next TX report number, `tx_report.sn`.
     report: u8,
     /// A report's number, which the management frame it names may await.
@@ -526,6 +601,9 @@ impl<D: Device> Rtl8822c<D> {
             changes: VecDeque::new(),
             aggregating: Default::default(),
             unaggregated: [false; 8],
+            no_amsdu: [false; 8],
+            rate_amsdu: 0,
+            tail_joins: false,
             admitted: None,
             context: None,
             keys: Vec::new(),
@@ -534,6 +612,7 @@ impl<D: Device> Rtl8822c<D> {
             integrity: None,
             tuned: None,
             agreements: Default::default(),
+            fragments: Fragments::default(),
             report: 0,
             reporting: None,
             port_open: false,
@@ -627,6 +706,7 @@ impl<D: Device> Rtl8822c<D> {
         for agreement in &mut self.agreements {
             *agreement = None;
         }
+        self.fragments.clear();
         self.changes.clear();
         self.aggregating = Default::default();
         self.unaggregated = [false; 8];
@@ -987,8 +1067,9 @@ impl<D: Device> Rtl8822c<D> {
                             .complete_tx_block_ack_program(ticket, Completion::Accepted)
                     }
                 }
-                tx::Action::Operational { session, .. } => {
+                tx::Action::Operational { session, agreement } => {
                     let tid = usize::from(session.tid());
+                    self.no_amsdu[tid] |= !agreement.amsdu_in_ampdu();
                     self.aggregating[tid] = Some(session);
                     continue;
                 }
@@ -1053,8 +1134,31 @@ impl<D: Device> Rtl8822c<D> {
             self.parked.push_back((tid, ethernet.to_vec(), class));
             return Ok(());
         }
+        let joining = tid.filter(|&tid| self.tail_has_room(&context, tid, ethernet.len(), class));
         let mut policy = Admitted(&self.channels);
         let mut keys: Vec<&mut KeySlot> = self.keys.iter_mut().map(|key| &mut key.slot).collect();
+        if let Some(tid) = joining {
+            let plan = self
+                .station
+                .prepare_qos_subframe_refs(
+                    epoch,
+                    ethernet,
+                    class,
+                    Qos {
+                        context: &context,
+                        tid,
+                    },
+                    &mut keys,
+                    &mut policy,
+                )
+                .map_err(Error::Data)?;
+            if let Some((_, packet, mpdu)) = self.held.back_mut() {
+                let iv = if packet.security == 0 { 0 } else { IV_BYTES };
+                amsdu::append(mpdu, plan.plaintext_mpdu(), iv);
+                packet.size = mpdu.len() as u16;
+            }
+            return Ok(());
+        }
         let plan = match tid {
             Some(tid) => self.station.prepare_qos_msdu_refs(
                 epoch,
@@ -1111,6 +1215,7 @@ impl<D: Device> Rtl8822c<D> {
             self.held.pop_front();
         }
         self.held.push_back((queue, packet, mpdu));
+        self.tail_joins = tid.is_some() && class == TxClass::Data;
         if let Some(tid) = tid
             && class == TxClass::Data
             && queue != Queue::Voice
@@ -1118,6 +1223,45 @@ impl<D: Device> Rtl8822c<D> {
             self.start_aggregation(tid);
         }
         Ok(())
+    }
+
+    /// `ieee80211_amsdu_aggregate`: whether `size` more bytes of data on `tid`
+    /// may join the frame waiting last, while one waits. `SUPPORTS_AMSDU_IN_AMPDU`
+    /// holds, and `rtw_ops_can_aggregate_in_amsdu` keeps 2.4 GHz out of it.
+    /// `max_amsdu_subframes` cannot bind here: its least is 8, and no frame
+    /// this long holds so many.
+    fn tail_has_room(
+        &self,
+        context: &AssociationContext,
+        tid: u8,
+        size: usize,
+        class: TxClass,
+    ) -> bool {
+        let peer = usize::from(context.negotiated().max_tx_amsdu);
+        let limit = match self.rate_amsdu {
+            0 => peer,
+            rate => peer.min(rate.into()),
+        };
+        class == TxClass::Data
+            && self.tail_joins
+            && context.channel().band != Band::Ghz2
+            && !self.no_amsdu[usize::from(tid)]
+            && self.held.back().is_some_and(|(_, packet, mpdu)| {
+                packet.queue == tid
+                    && mpdu.len() + size + amsdu::SUBFRAME_OVERHEAD
+                        <= limit.min(transmit::MAX_FRAME)
+            })
+    }
+
+    /// `rtw_fw_ra_report_iter`'s `max_rc_amsdu_len`, on the width set up for
+    /// the peer when firmware does not name one.
+    fn rate_reported(&mut self, rate: u8, short_gi: bool, width: Option<u8>) {
+        let width = width.unwrap_or_else(|| {
+            self.context
+                .as_deref()
+                .map_or(0, |context| width_code(self.width(context)))
+        });
+        self.rate_amsdu = bit_rate::max_amsdu(bit_rate::bit_rate(rate, short_gi, width));
     }
 
     fn take_incoming(&mut self, now: u64) -> Result<(), Error> {
@@ -1142,6 +1286,12 @@ impl<D: Device> Rtl8822c<D> {
                         following.reported(number, acknowledged, now);
                     }
                 }
+                Incoming::Report(Report::Rate {
+                    mac_id: MAC_ID,
+                    rate,
+                    short_gi,
+                    width,
+                }) => self.rate_reported(rate, short_gi, width),
                 Incoming::Report(_) => {}
                 Incoming::Frame(frame) => {
                     if let Some(mpdu) = self.mpdu(frame)
@@ -1219,24 +1369,61 @@ impl<D: Device> Rtl8822c<D> {
         if header.protected() {
             let multicast = header.receiver.is_multicast();
             let index = frame.bytes().get(header.length + 3).map(|byte| byte >> 6);
-            let key = self
+            let held = self
                 .keys
                 .iter()
-                .filter(|key| key.pairwise != multicast && Some(key.index) == index)
-                .find_map(|key| key.slot.installed());
-            let Some(key) = key else {
+                .position(|key| key.pairwise != multicast && Some(key.index) == index);
+            let Some(held) = held else {
+                return Ok(());
+            };
+            let Some(key) = self.keys[held].slot.installed() else {
                 return Ok(());
             };
             if frame.security.icv_error {
                 return Ok(());
             }
+            if self.keys[held].material.len() == Cipher::Tkip.key_length()
+                && frame.security.decrypted
+            {
+                if header.fragmented() {
+                    self.unsupported("a fragmented TKIP frame");
+                    return Ok(());
+                }
+                match check_michael(&mut frame, &self.keys[held]) {
+                    Michael::Intact => {}
+                    Michael::Dropped => return Ok(()),
+                    Michael::Failed => {
+                        let pairwise = !multicast;
+                        self.events
+                            .push_back(keeper::Event::MichaelFailure { pairwise });
+                        return Ok(());
+                    }
+                }
+            }
             frame.security.key = Some(key);
+        }
+        if header.fragmented() {
+            self.reassemble(&frame, now);
+            return Ok(());
         }
         self.order(frame, now);
         Ok(())
     }
 
     /// `ieee80211_sta_manage_reorder_buf` for a frame under an agreement.
+    /// `frame`, one fragment; the station has the MSDU with the last of them.
+    fn reassemble(&mut self, frame: &Mpdu, now: u64) {
+        let key = frame.security.key;
+        let slot = self
+            .keys
+            .iter_mut()
+            .map(|key| &mut key.slot)
+            .find(|slot| key.is_some() && slot.installed() == key);
+        if let Some(whole) = self.fragments.add(frame, slot, now) {
+            self.deliver(whole);
+        }
+    }
+
     fn order(&mut self, frame: Mpdu, now: u64) {
         let header = frame.header();
         let agreement = header
@@ -1306,19 +1493,19 @@ impl<D: Device> Rtl8822c<D> {
         }
     }
 
-    fn hear(&mut self, bss: Bss, now: u64) {
-        let observation = Arc::new(NativeBssObservation { bss });
-        match self
+    fn hear(&mut self, mut bss: Bss, now: u64) {
+        let known = self
             .observed
             .iter_mut()
-            .find(|heard| heard.observation.bss().bssid == observation.bss().bssid)
-        {
+            .find(|heard| heard.observation.bss().bssid == bss.bssid);
+        match known {
             Some(heard) => {
-                heard.observation = observation;
+                bss.keep_name_of(heard.observation.bss());
+                heard.observation = Arc::new(NativeBssObservation { bss });
                 heard.at = now;
             }
             None => self.observed.push(Heard {
-                observation,
+                observation: Arc::new(NativeBssObservation { bss }),
                 at: now,
             }),
         }
@@ -1408,21 +1595,45 @@ impl<D: Device> Rtl8822c<D> {
         Ok(())
     }
 
-    fn protected_management(&mut self, frame: Mpdu, now: u64) -> Result<(), Error> {
+    fn protected_management(&mut self, mut frame: Mpdu, now: u64) -> Result<(), Error> {
+        let local = self.address;
         let Some(epoch) = self.station.association_epoch() else {
             return Ok(());
         };
-        // mac80211 decrypts in software what hardware did not, which the
-        // unicast path has no key to here; such a frame cannot be trusted.
-        if !frame.security.decrypted {
-            self.unsupported("a protected management frame hardware did not decrypt");
-            return Ok(());
-        }
         let header = *frame.header();
-        let Some(body) = frame.bytes().get(header.length + 8..) else {
+        let Some(key) = self.keys.iter_mut().find(|key| key.pairwise) else {
             return Ok(());
         };
-        let body = body.get(..body.len().saturating_sub(8)).unwrap_or(&[]);
+        // mac80211 decrypts in software what hardware did not.
+        if !frame.security.decrypted {
+            let number = frame
+                .bytes()
+                .get(header.length..)
+                .and_then(|iv| PacketNumber::from_header(iv).ok());
+            let material: Option<&[u8; 16]> = key.material[..].try_into().ok();
+            let (Some((number, _)), Some(material)) = (number, material) else {
+                return Ok(());
+            };
+            let Some(opened) = ccmp::open(material, frame.bytes(), number) else {
+                return Ok(());
+            };
+            let security = SecurityStatus {
+                decrypted: true,
+                integrity: Integrity::Verified,
+                ..SecurityStatus::default()
+            };
+            let Ok(clear) = Mpdu::new(opened, frame.radio.clone(), security) else {
+                return Ok(());
+            };
+            frame = clear;
+        }
+        frame.security.key = key.slot.installed();
+        // Under packet numbers `ieee80211_crypto_ccmp_decrypt` keeps apart
+        // from data's.
+        let Ok(authenticated) = key.slot.authorize_unicast_management(&frame, local) else {
+            return Ok(());
+        };
+        let body = authenticated.body();
         match header.control & 0xfc {
             0xa0 | 0xc0 => {
                 let action = self
@@ -1930,6 +2141,8 @@ impl<D: Device> Radio for Rtl8822c<D> {
         let pages = templates::build(self.address, context.bssid(), aid, wmm, band);
         Self::hardware(self.device.set_templates(&pages))?;
         Self::hardware(self.device.command(commands::default_port(PORT, MAC_ID)))?;
+        self.no_amsdu = [false; 8];
+        self.rate_amsdu = 0;
         self.context = Some(context.clone());
         self.station
             .complete_configuration(ticket, Completion::Accepted, self.clock.now_us())
@@ -1958,9 +2171,19 @@ impl<D: Device> Radio for Rtl8822c<D> {
         material: &[u8],
         receive: ReplaySeed,
     ) -> Result<KeyIdentity, Error> {
-        let bytes: &[u8; 16] = material
-            .try_into()
-            .map_err(|_| Error::Unsupported("a key other than CCMP-128 on an RTL8822C"))?;
+        // rtw88 takes TKIP as `RTW_CAM_TKIP` and leaves Michael to mac80211.
+        let (cipher, kind) = if material.len() == Cipher::Ccmp128.key_length() {
+            (Cipher::Ccmp128, CAM_AES)
+        } else if !pairwise && material.len() == Cipher::Tkip.key_length() {
+            (Cipher::Tkip, CAM_TKIP)
+        } else {
+            return Err(Error::Unsupported(
+                "a key other than CCMP-128 or a TKIP group key on an RTL8822C",
+            ));
+        };
+        let temporal = material
+            .first_chunk::<16>()
+            .ok_or(Error::Refused("key material"))?;
         let peer = self
             .station
             .pairwise_peer()
@@ -1979,17 +2202,17 @@ impl<D: Device> Radio for Rtl8822c<D> {
         let mut slot = unsafe { KeySlot::new(self.next_slot) }.map_err(Error::Key)?;
         self.next_slot = self.next_slot.wrapping_add(1);
         let ticket = slot
-            .begin_install(index, Cipher::Ccmp128, material, receive, scope, transmit)
+            .begin_install(index, cipher, material, receive, scope, transmit)
             .map_err(Error::Key)?;
         let identity = ticket.identity();
         let entry = if pairwise { PAIRWISE_CAM } else { index };
         Self::hardware(self.device.write_key(&CamKey {
             entry,
             index,
-            kind: CAM_AES,
+            kind,
             group: !pairwise,
             peer: if pairwise { peer } else { Mac::BROADCAST },
-            material: bytes,
+            material: temporal,
         }))?;
         slot.complete_install(ticket, InstallOutcome::Accepted)
             .map_err(Error::Key)?;

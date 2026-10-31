@@ -14,11 +14,13 @@ fn from_disk(
 ) -> Vec<(String, Vec<u8>)> {
     crate::status::begin("Reading macOS's boot files from its disk");
     // The kernel's text on the screen and on the debug UART, which the
-    // boot log records, as setup's bundles have it.
+    // boot log records, as setup's bundles have it. A panic's stackshot
+    // waits for every PE to answer: 10 s at 24 MHz, not XNU's 1.44 ms, which
+    // is too short for PEs that answer at their next exit.
     let defaults = boot_bundle::Options {
         ecid: options.ecid,
         boot_command: options.boot_command,
-        boot_args: "-v serial=3 serial-device-name=uart0".into(),
+        boot_args: "-v serial=3 serial-device-name=uart0 ml-timeout-debug-ack=240000000".into(),
         ..boot_bundle::Options::default()
     };
     let result = if options.upgrade {
@@ -70,6 +72,9 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     run_guest(boot, host, storage, processors)
 }
 
+/// The part of the engine heap that holes cannot take from large requests.
+const HEAP_RESERVE_SHARE: usize = 16;
+
 /// What every phase after the host's reads: the loader's handoff,
 /// `stela.cfg` and the validated physical processors.
 #[derive(Clone, Copy)]
@@ -105,6 +110,7 @@ fn start(handoff: u64) -> Started {
     // SAFETY: this reserved heap is unused and its RW+NX physmap is shared by
     // every native root for the complete engine lifetime.
     unsafe { crate::ALLOCATOR.initialize(heap as *mut u8, handoff.heap.bytes as usize) };
+    crate::ALLOCATOR.reserve_tail(handoff.heap.bytes as usize / HEAP_RESERVE_SHARE);
     // SAFETY: this loader-owned private seed is held in the shared physmap,
     // exclusively consumed here before any native service is published.
     if let Err(error) = unsafe { crate::random::initialize(handoff.random_seed) } {
@@ -1029,7 +1035,7 @@ fn start_machine(boot: Boot<'_>, parts: MachineParts) -> ! {
         machine
             .enter_parallel(hub)
             .unwrap_or_else(|error| output::fatal(error));
-        translations::share(parallel::SHARED_CODE_BYTES);
+        translations::share(handoff.heap.bytes as usize / parallel::SHARED_CODE_SHARE);
         parallel::spawn(
             &machine,
             &worker_bindings,

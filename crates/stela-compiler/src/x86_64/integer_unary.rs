@@ -1,8 +1,8 @@
 //! FEAT_CSSC ABS, CNT and CTZ.
 use super::{
     Register, Width,
-    asm::{Alu, Asm, Cond, Gpr, Mem, ShiftOp, Size, Unary},
-    load_with, offset, store_with,
+    asm::{Alu, Asm, Cond, Gpr, Rm, ShiftOp, Size, Unary},
+    load_with, store_with,
 };
 use crate::x86_64::asm::Code;
 use crate::{
@@ -10,7 +10,7 @@ use crate::{
     aarch64::integer_unary::{Kind, Operand},
 };
 
-use Gpr::{Rax, Rcx, Rdi, Rdx};
+use Gpr::{Rax, Rcx, Rdx};
 
 const PAIR_MASK: u64 = 0x5555_5555_5555_5555;
 const TWO_BIT_MASK: u64 = 0x3333_3333_3333_3333;
@@ -88,17 +88,14 @@ pub(super) fn emit_with(asm: &mut Asm, operand: &Operand, target: TargetCpu) {
 }
 
 /// A count of the guest source read straight from the frame.
-fn memory_count(asm: &mut Asm, operand: &Operand, count: fn(&mut Asm, Size, Gpr, Mem)) {
+fn memory_count(asm: &mut Asm, operand: &Operand, count: fn(&mut Asm, Size, Gpr, Rm)) {
     // Break the count destination dependency before its folded memory read.
     // The memory read precedes the guest destination write, including aliases.
     asm.alu(Alu::Xor, Size::Dword, Rax, Rax);
-    let source = offset(operand.source).expect("nonzero scalar count source");
-    count(
-        asm,
-        size(operand.width),
-        Rax,
-        Mem::base_disp32(Rdi, source as i32),
-    );
+    let source = asm
+        .guest(operand.source)
+        .expect("nonzero scalar count source");
+    count(asm, size(operand.width), Rax, source);
 }
 
 /// The population count of RAX (EAX unless `wide`) in EAX, from integer

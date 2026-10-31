@@ -404,6 +404,8 @@ pub(super) struct Access<'a, H: Host, D: Devices> {
     reset: bool,
     code: Code,
     refusal: Cell<Option<&'static str>>,
+    /// The storage of the plain read the accessor made last.
+    plain: Cell<Option<(Register, u64)>>,
     /// The timer bank the generic timer registers name (`timer::agt`).
     bank: Bank,
 }
@@ -419,7 +421,7 @@ enum Translation {
     /// TLB maintenance: every fetch translation, of the shadow what the
     /// TLBI reaches, and of the lookup table what it reaches everywhere;
     /// and the scope other PEs apply, for one broadcast beyond this PE.
-    Maintenance(Reach, tlbi::Everywhere, Option<tlbi::Scope>),
+    Maintenance(Reach, tlbi::Everywhere, Option<u16>, Option<tlbi::Scope>),
 }
 
 /// HCR_EL2.FB: EL1 TLBIs broadcast Inner Shareable.
@@ -428,7 +430,7 @@ const HCR_FB: u32 = 9;
 /// What `tlbi` removes from the shadow of `cpu`'s current context, and
 /// from a cache of every context's translations. EL2 is enabled and
 /// HCR_EL2.E2H is RES1 (`cpu`).
-fn reach(cpu: &Cpu, tlbi: &Tlbi) -> (Reach, tlbi::Everywhere, Option<tlbi::Scope>) {
+fn reach(cpu: &Cpu, tlbi: &Tlbi) -> (Reach, tlbi::Everywhere, Option<u16>, Option<tlbi::Scope>) {
     let controls = cpu.controls(cpu.regime());
     let context = tlbi::Context {
         el: cpu.pstate.el,
@@ -443,15 +445,23 @@ fn reach(cpu: &Cpu, tlbi: &Tlbi) -> (Reach, tlbi::Everywhere, Option<tlbi::Scope
     };
     let scope = Scope::new(tlbi, context);
     let broadcast = super::parallel::broadcasts(&scope).then_some(scope);
-    (scope.reach(&current), scope.everywhere(), broadcast)
+    (
+        scope.reach(&current),
+        scope.everywhere(),
+        scope.named_asid(),
+        broadcast,
+    )
 }
 
 /// The compiled code an instruction-cache invalidation makes stale.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Code {
     Unchanged,
-    /// IC IVAU: the page holding this physical address.
-    Page(u64),
+    /// IC IVAU of `address`, in the page holding `physical`.
+    Page {
+        address: u64,
+        physical: u64,
+    },
     /// IC IALLU and IC IALLUIS.
     All,
 }
@@ -830,6 +840,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             code: Code::Unchanged,
             refusal: Cell::new(None),
             bank,
+            plain: Cell::new(None),
         };
         let effect = match (accessor.run)(&mut context, index) {
             Ok(effect) | Err(effect) => effect,
@@ -841,8 +852,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
             reset,
             code,
             refusal,
+            plain,
             ..
         } = context;
+        self.plain_read = plain.into_inner();
         let refusal = refusal.into_inner().or(match effect {
             Effect::Refused(reason) => Some(reason),
             _ => None,
@@ -850,8 +863,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
         match translation {
             Translation::All => self.controls_changed(),
             Translation::TableBase => self.table_base_changed(),
-            Translation::Maintenance(reach, everywhere, broadcast) => {
-                self.tlb_maintained(reach, everywhere);
+            Translation::Maintenance(reach, everywhere, asid, broadcast) => {
+                self.tlb_maintained(reach, everywhere, asid);
                 if let Some(scope) = broadcast {
                     self.post(super::parallel::Maintenance::Tlb(scope));
                 }
@@ -861,10 +874,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
         match code {
             Code::Unchanged => {}
-            Code::Page(physical) => {
+            Code::Page { address, physical } => {
                 self.invalidate_code_page(physical);
                 self.host.code_invalidated(Some(physical));
-                self.post(super::parallel::Maintenance::Code(Some(physical)));
+                self.post_code_page(physical);
+                self.mirrors.open_code_page(address);
             }
             Code::All => {
                 self.discard_code(Discard::Maintenance);

@@ -174,6 +174,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         s.channel = None;
         s.channel_change = None;
         s.csa = csa::State::default();
+        s.fragments.clear();
         s.power_save = false;
         s.management = None;
         s.pmf_selected = None;

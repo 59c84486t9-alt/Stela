@@ -77,7 +77,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if !instruction
             || requirement.pc != self.cpu.pc
             || requirement.el != self.cpu.pstate.el
-            || self.cpu.has_canonical_memory() && self.serial_hold.is_none()
+            || self.canonical_memory_serves()
             || self.pending_native_device_access().is_some()
         {
             return Err(Stop::Unsupported(requirement));

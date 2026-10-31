@@ -116,8 +116,8 @@ pub struct AppleState {
     pub sprr_fields: [u64; 2],
     /// GXF_CONFIG of EL1 and EL2.
     pub gxf_config: [u64; 2],
-    /// GL1 and GL2.
-    pub guarded: [GuardedBank; 2],
+    /// GL1 and GL2, which native code writes while this state lives.
+    pub guarded: alloc::boxed::Box<[GuardedBank; 2]>,
     /// APCTL_EL1 and APCTL_EL2.
     pub apctl: [u64; 2],
     /// KERNELKEYLO/HI_EL1.
@@ -157,7 +157,7 @@ impl Default for AppleState {
             sprr_perm: [0; 4],
             sprr_fields: [0; 2],
             gxf_config: [0; 2],
-            guarded: [GuardedBank::default(), GuardedBank::default()],
+            guarded: alloc::boxed::Box::default(),
             apctl: [0; 2],
             kernel_key: [0; 2],
             pointer_keys: super::pointer_keys::Bank::default(),
@@ -344,7 +344,7 @@ fn bank(el: u8) -> Bank {
 /// A canonical PE executed serially keeps its snapshot monitor too, which
 /// clears with the canonical reservation.
 pub(crate) enum PreparedExclusiveClear<'a> {
-    Legacy(&'a mut Option<Reservation>),
+    Legacy(&'a mut Option<Reservation>, &'a mut u32),
     Canonical(
         crate::memory::domain::PreparedLocalClear<'a>,
         &'a mut Option<Reservation>,
@@ -353,7 +353,10 @@ pub(crate) enum PreparedExclusiveClear<'a> {
 impl PreparedExclusiveClear<'_> {
     pub(crate) fn commit(self) {
         match self {
-            Self::Legacy(monitor) => *monitor = None,
+            Self::Legacy(monitor, native) => {
+                *monitor = None;
+                *native = 0;
+            }
             Self::Canonical(clear, monitor) => {
                 clear.commit();
                 *monitor = None;
@@ -453,7 +456,10 @@ impl Cpu {
                 &mut self.monitor,
             ))
         } else {
-            Ok(PreparedExclusiveClear::Legacy(&mut self.monitor))
+            Ok(PreparedExclusiveClear::Legacy(
+                &mut self.monitor,
+                &mut self.state.exclusive_bytes,
+            ))
         }
     }
     pub fn clear_exclusive(&mut self) -> Result<(), stela_compiler::context::memory::MemoryStatus> {
@@ -573,6 +579,12 @@ impl Cpu {
             Stack::Guarded(level) => &mut self.apple.guarded[level].sp,
             Stack::El0 | Stack::El1 | Stack::El2 => unreachable!("SP_ELx live in the file"),
         }
+    }
+
+    /// Where the stack MSR SPSel, #1 selects at this guarded level lives.
+    pub fn guarded_stack(&self) -> u64 {
+        let level = usize::from(self.pstate.el.max(1)) - 1;
+        &self.apple.guarded[level].sp as *const u64 as u64
     }
 
     fn sp_register(which: Stack) -> Option<Register> {
@@ -944,6 +956,16 @@ impl Cpu {
         self.pstate.pacm &= self.pacm_enabled();
         self.pc = elr;
         Ok(Ok(()))
+    }
+
+    /// [`Self::controls`] with only the fields translation reads, for what
+    /// compares controls to tell whether translations stayed the same.
+    pub fn translating_controls(&self, regime: TranslationRegime) -> Controls {
+        let controls = self.controls(regime);
+        Controls {
+            sctlr: controls.sctlr & mmu::SCTLR_TRANSLATION,
+            ..controls
+        }
     }
 
     pub fn requester(&self) -> mmu::Requester {

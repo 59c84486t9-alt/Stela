@@ -74,10 +74,10 @@ impl RunBlocks {
                 x: registers.x,
                 sp: registers.sp,
                 nzcv: registers.nzcv,
-                reserved: registers.reserved,
                 v: registers.v,
                 fpcr: registers.fpcr,
                 fpsr: registers.fpsr,
+                ..Default::default()
             },
         };
         let source = std::fs::read(input)?;

@@ -6,6 +6,17 @@ use stela_contracts::{
     refuse,
 };
 
+/// One PE's System registers that take none of the board's locks, as
+/// [`Devices::system_register`] serves them.
+pub trait LocalRegisters: Send + Sync {
+    /// An MRS (`write` `None`) or MSR of `encoding`: `None` for an encoding
+    /// this does not hold, else the value read (0 for a write).
+    fn register(&self, encoding: Encoding, write: Option<u64>) -> Option<u64>;
+    /// The address of the 64-bit word `encoding` reads, for the board's
+    /// life, if a plain read of it reads just that.
+    fn storage(&self, encoding: Encoding) -> Option<u64>;
+}
+
 /// The x86 machine beneath the engine: guest RAM, native code, shadow
 /// translation, time and waiting.
 pub trait Host {
@@ -206,6 +217,10 @@ pub trait Host {
     /// its controls translates differently (a TTBR0 write arrives only
     /// here, not through [`Host::invalidate_translations`]).
     fn set_regime(&mut self, regime: &Regime);
+    /// From now on, take every lower-half global translation into `span`
+    /// before the shadow uses one, walking again when that widens it. What
+    /// the shadow holds from before is not in it.
+    fn share_lower_globals(&mut self, _span: alloc::sync::Arc<super::GlobalSpan>) {}
     /// Keep the branch predictions trained before this call from steering
     /// speculation after it (FEAT_CSV2): the engine calls it whenever the
     /// guest's context for prediction changes ([`PredictionContext`]). A host
@@ -470,6 +485,15 @@ pub trait Devices {
         _now: u64,
     ) -> Option<Result<u64, &'static str>> {
         None
+    }
+    /// PE `cpu`'s handle on the registers [`Self::system_register`] serves
+    /// that no lock need guard, fixed for the board's life.
+    fn local_registers(&self, _cpu: usize) -> Option<Arc<dyn LocalRegisters>> {
+        None
+    }
+    /// [`LocalRegisters::storage`] of PE `cpu`'s `encoding`.
+    fn register_storage(&mut self, cpu: usize, encoding: Encoding) -> Option<u64> {
+        self.local_registers(cpu)?.storage(encoding)
     }
     /// Whether [`Self::system_register`] may serve `encoding`, fixed for the
     /// board's life: devices shared behind a lock are asked only for these.

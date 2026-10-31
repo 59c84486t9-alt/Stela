@@ -349,6 +349,18 @@ pub enum Operation {
     Return,
 }
 
+impl Operation {
+    /// The target of a branch that can fall through.
+    pub(crate) fn conditional_target(&self) -> Option<GuestAddress> {
+        match *self {
+            // AL and NV both satisfy ConditionHolds.
+            Self::BranchCondition { target, condition } if condition < 14 => Some(target),
+            Self::BranchZero { target, .. } | Self::BranchBit { target, .. } => Some(target),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Instruction {
     pub pc: GuestAddress,

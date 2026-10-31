@@ -6,6 +6,7 @@ pub(crate) mod checked_memory;
 mod recovery;
 pub(crate) use super::region::ResidentLoopPlan;
 
+use super::chain::ExitWord;
 use crate::{
     GuestAddress, NativeBlock,
     aarch64::{Instruction, Operation, Register},
@@ -16,10 +17,10 @@ pub(super) fn exit_kind(code: &mut Code, kind: ExitKind) {
     exit_kind_with(&mut code.asm(), kind);
 }
 
-/// `mov edx,kind; ret`: the exit to the target in RAX.
-pub(super) fn exit_kind_with(asm: &mut Asm, kind: ExitKind) {
+/// `mov edx,word; ret`: the exit to the target in RAX.
+pub(super) fn exit_kind_with(asm: &mut Asm, word: impl Into<ExitWord>) {
     // MOV EDX zero-extends to the ABI's u64.
-    asm.mov_imm32(Gpr::Rdx, kind as u32);
+    asm.mov_imm32(Gpr::Rdx, word.into().encoded());
     asm.ret();
 }
 
@@ -27,10 +28,10 @@ pub(crate) fn direct_exit(code: &mut Code, target: GuestAddress, kind: ExitKind)
     direct_exit_with(&mut code.asm(), target, kind);
 }
 
-/// `movabs rax,target; mov edx,kind; ret`.
-pub(super) fn direct_exit_with(asm: &mut Asm, target: GuestAddress, kind: ExitKind) {
+/// `movabs rax,target; mov edx,word; ret`.
+pub(super) fn direct_exit_with(asm: &mut Asm, target: GuestAddress, word: impl Into<ExitWord>) {
     asm.mov_imm64(Gpr::Rax, target.0);
-    exit_kind_with(asm, kind);
+    exit_kind_with(asm, word);
 }
 
 fn conditional_exit(
@@ -79,6 +80,7 @@ pub(crate) fn emit_ordinary_for_target(
         RegionPolicy {
             optimize: true,
             fault_table: false,
+            pinned: false,
         },
         super::MemoryChecks::DEFAULT,
         super::NativeSystem::NONE,
@@ -118,6 +120,7 @@ pub(crate) fn emit_for_target(
         RegionPolicy {
             optimize: false,
             fault_table: false,
+            pinned: false,
         },
         checks,
         super::NativeSystem::NONE,
@@ -137,20 +140,20 @@ pub(crate) fn emit_system_mode(
     checks: super::MemoryChecks,
     native: super::NativeSystem,
 ) -> (NativeBlock, Vec<crate::block::FaultRecovery>) {
-    // Allocated and clean-load regions settle the frame at exits; across
-    // an access they may keep guest registers in host registers, which
-    // the fault recovery table names, so the engine finds the frame exact
-    // at a fault inside one. Their loads carry no SCTLR_ELx.A check. Accesses check the guest range
-    // (`x86_64::guest_range`). PEs run concurrently, so atomics stay locked
-    // and barriers fence.
+    // Guest registers stay in host registers (`x86_64::pinned`), which the
+    // engine's fault settlement reads, so no block needs the regions, which
+    // spend the same host registers within one block. Accesses check the
+    // guest range (`x86_64::guest_range`). PEs run concurrently, so atomics
+    // stay locked and barriers fence.
     emit_selected(
         instructions,
         terminal,
         fallthrough,
         target,
         RegionPolicy {
-            optimize: !checks.alignment,
+            optimize: false,
             fault_table: true,
+            pinned: true,
         },
         super::MemoryChecks {
             guest_range: true,
@@ -165,6 +168,8 @@ pub(crate) fn emit_system_mode(
 struct RegionPolicy {
     optimize: bool,
     fault_table: bool,
+    /// Keep guest registers in host registers ([`super::pinned`]).
+    pinned: bool,
 }
 
 /// With `fault_table`, region accesses keep dirty values in registers and
@@ -181,10 +186,13 @@ fn emit_selected(
     let RegionPolicy {
         optimize: optimize_regions,
         fault_table,
+        pinned,
     } = regions;
     let mut fault_recovery = vec![];
     let mut block = super::Emitted::default();
     let code = &mut block.x86_64_code;
+    code.set_pinned(pinned);
+    code.set_constant_time(target.data_independent_timing());
     let mut fixups = vec![];
     // The DIT audit covers each instruction's own lowering, not the
     // register-allocated and clean-load regions' recipes.
@@ -216,6 +224,9 @@ fn emit_selected(
     // What the last instruction emitted left in registers.
     let mut after = Held::NOTHING;
     let mut out_of_line = OutOfLine::default();
+    // Each branch the block runs past: its jump to a side exit, its target
+    // and the instructions up to it.
+    let mut side_exits = vec![];
     while cursor < instructions.len() {
         let held = core::mem::replace(&mut after, Held::NOTHING);
         // Build the new candidate privately. Rejection leaves both cursor and
@@ -325,6 +336,18 @@ fn emit_selected(
         }
         let instruction = &instructions[cursor];
         block.source_map.push((instruction.pc, code.len()));
+        if let Some(target) = instruction.operation.conditional_target() {
+            let taken = branch_condition(code, &instruction.operation, held.rax)
+                .expect("a conditional branch's condition");
+            side_exits.push((code.asm().jcc(taken), target, block.source_map.len()));
+            cursor += 1;
+            continue;
+        }
+        let frame_bound = pinned && super::pinned::frame_bound(&instruction.operation);
+        if frame_bound {
+            code.set_pinned(false);
+            super::pinned::write_back(code);
+        }
         after = emit_single(
             code,
             Some(&mut out_of_line),
@@ -334,6 +357,10 @@ fn emit_selected(
             checks_at(cursor),
             held,
         );
+        if frame_bound {
+            super::pinned::reload(code);
+            code.set_pinned(true);
+        }
         cursor += 1;
     }
     debug_assert!(
@@ -353,6 +380,13 @@ fn emit_selected(
             target,
         },
     );
+    // After the terminal, whose direct exits end the code before them.
+    let instructions_run = block.source_map.len();
+    for (jump, target, run) in side_exits {
+        let mut asm = code.asm();
+        asm.bind(jump);
+        direct_exit_with(&mut asm, target, side_exit(instructions_run - run));
+    }
     if fault_table {
         fault_recovery = recovery::bind(
             &block.x86_64_code,
@@ -427,18 +461,28 @@ fn emit_single(
     }
     // The instruction keeps a non-empty native range for its source map.
     if let super::Rax::Guest(register) = held.rax
-        && let Some(load) = super::frame_load(register)
+        && let Some(load) = super::register_load(code, register)
         && code[start..].starts_with(&load)
         && code.len() > start + load.len()
     {
         code.remove_instruction(start..start + load.len());
     }
-    let rax = super::rax_after(&instruction.operation);
+    let rax = match super::rax_after(&instruction.operation) {
+        // A direct form may leave the result only in its host register.
+        super::Rax::Guest(register)
+            if code.is_pinned()
+                && !super::register_store(code, register)
+                    .is_some_and(|store| code.ends_with(&store)) =>
+        {
+            super::Rax::Unknown
+        }
+        rax => rax,
+    };
     debug_assert!(match rax {
         super::Rax::Unknown => true,
-        super::Rax::Nzcv => code.ends_with(&nzcv_store()),
+        super::Rax::Nzcv => code.ends_with(&nzcv_store(code.is_pinned())),
         super::Rax::Guest(register) =>
-            super::frame_store(register).is_some_and(|store| code.ends_with(&store)),
+            super::register_store(code, register).is_some_and(|store| code.ends_with(&store)),
     });
     let xmm0 = match &instruction.operation {
         Operation::Simd(operand) => super::simd::xmm0_after(operand, &code[start..], held.xmm0),
@@ -567,14 +611,55 @@ fn target_of(code: &[u8], site: usize) -> usize {
 
 /// `mov [rdi+GuestState.nzcv],eax`, which ends each emission after which
 /// RAX holds [`super::Rax::Nzcv`].
-fn nzcv_store() -> Code {
+fn nzcv_store(pinned: bool) -> Code {
     let mut code = Code::new();
-    super::store_nzcv(&mut code.asm());
+    code.set_pinned(pinned);
+    match pinned {
+        true => super::flag_word::store_captured(&mut code.asm()),
+        false => super::store_nzcv(&mut code.asm()),
+    }
     code
 }
+/// The exit word of a side exit that skips `skipped` instructions.
+fn side_exit(skipped: usize) -> ExitWord {
+    ExitWord {
+        kind: ExitKind::Direct,
+        skipped: u16::try_from(skipped).expect("bounded block instructions"),
+    }
+}
+
 /// The direct exits to static successors that [`emit_terminal`] ended
-/// `code` with: the target's last, after a conditional branch's fallthrough.
+/// `native`'s code with, the target's last, after a conditional branch's
+/// fallthrough, and the side exits of the branches in `instructions`, in
+/// their order, that follow them.
 pub(crate) fn successor_exits(
+    native: &NativeBlock,
+    instructions: &[Instruction],
+    terminal: Option<&(GuestAddress, Terminator)>,
+    fallthrough: GuestAddress,
+) -> Vec<super::chain::DirectExit> {
+    use super::chain::{DIRECT_EXIT_BYTES, DirectExit};
+    let branches: Vec<_> = instructions
+        .iter()
+        .enumerate()
+        .filter_map(|(at, branch)| Some((at + 1, branch.operation.conditional_target()?)))
+        .collect();
+    let end = native.x86_64_code.len() - branches.len() * DIRECT_EXIT_BYTES;
+    let mut exits = terminal_exits(&native.x86_64_code[..end], terminal, fallthrough);
+    for (position, (run, target)) in branches.into_iter().enumerate() {
+        let word = side_exit(native.source_map.len() - run);
+        exits.push(DirectExit {
+            offset: end + position * DIRECT_EXIT_BYTES,
+            target,
+            kind: word.kind,
+            skipped: word.skipped,
+        });
+    }
+    exits
+}
+
+/// The direct exits that end `code`.
+fn terminal_exits(
     code: &[u8],
     terminal: Option<&(GuestAddress, Terminator)>,
     fallthrough: GuestAddress,
@@ -591,8 +676,8 @@ pub(crate) fn successor_exits(
             | Operation::BranchZero { target, .. }
             | Operation::BranchBit { target, .. },
         )) => (*target, ExitKind::Direct, true),
-        // A DC ZVA or DC clean completed natively falls through; any other
-        // System instruction exits at itself, which the stub check below
+        // A DC ZVA, DC clean or exclusive completed natively falls through;
+        // any other System instruction exits at itself, which the stub check below
         // rejects.
         Some(Terminator::System(request)) => (request.next_pc, ExitKind::Fallthrough, false),
         // So does a numerical operation completed inline; otherwise the same check
@@ -615,6 +700,7 @@ pub(crate) fn successor_exits(
                     offset,
                     target,
                     kind,
+                    skipped: 0,
                 },
             )
         })
@@ -643,12 +729,6 @@ fn emit_terminal(
         rax,
         target,
     } = context;
-    // The terminal's own load of a register RAX already holds.
-    let load = |code: &mut Code, register| {
-        if rax != super::Rax::Guest(register) {
-            super::load(code, register);
-        }
-    };
     if let Some((pc, terminal)) = terminal {
         source_map.push((*pc, code.len()));
         match terminal {
@@ -692,7 +772,11 @@ fn emit_terminal(
                 let zero = native.zero_block.zip(super::zero_block::operand(request));
                 let clean = super::cache_clean::operand(request)
                     .filter(|(operation, _)| native.cache_clean.contains(*operation));
-                if let Some((bytes, rt)) = zero {
+                let exclusive =
+                    super::native_exclusive::operand(request).filter(|_| native.exclusive);
+                if let Some(transfer) = exclusive {
+                    super::native_exclusive::emit(code, transfer, request, checks);
+                } else if let Some((bytes, rt)) = zero {
                     super::zero_block::emit(code, rt, bytes, checks);
                     direct_exit(code, request.next_pc, ExitKind::Fallthrough);
                 } else if let Some((_, rt)) = clean {
@@ -713,7 +797,7 @@ fn emit_terminal(
                 direct_exit(code, *target, ExitKind::Call);
             }
             Terminator::Register { source, kind } => {
-                load(code, *source);
+                load_unless_held(code, *source, rax);
                 if *kind == ExitKind::Call {
                     // Capture BLR X30's target before LR is overwritten.
                     code.asm().mov(Size::Qword, Gpr::Rcx, Gpr::Rax);
@@ -725,35 +809,67 @@ fn emit_terminal(
             }
             Terminator::Branch(operation) => match *operation {
                 Operation::Branch { target } => direct_exit(code, target, ExitKind::Direct),
-                Operation::BranchCondition { target, condition } => {
-                    let taken = super::condition_holds(code, condition, rax == super::Rax::Nzcv);
+                Operation::BranchCondition { target, .. }
+                | Operation::BranchZero { target, .. }
+                | Operation::BranchBit { target, .. } => {
+                    let taken = branch_condition(code, operation, rax);
                     conditional_exit(code, taken, target, fallthrough);
-                }
-                Operation::BranchZero {
-                    target,
-                    source,
-                    width,
-                    nonzero,
-                } => {
-                    load(code, source);
-                    let taken = super::test_zero(code, width, nonzero);
-                    conditional_exit(code, Some(taken), target, fallthrough);
-                }
-                Operation::BranchBit {
-                    target,
-                    source,
-                    bit,
-                    nonzero,
-                } => {
-                    load(code, source);
-                    let taken = super::test_bit(code, bit, nonzero);
-                    conditional_exit(code, Some(taken), target, fallthrough);
                 }
                 _ => unreachable!("block decoder restricts branch terminators"),
             },
         }
     } else {
         direct_exit(code, fallthrough, ExitKind::Fallthrough);
+    }
+}
+
+/// Load a register unless RAX, as `rax` says, already holds it.
+fn load_unless_held(code: &mut Code, register: Register, rax: super::Rax) {
+    if rax != super::Rax::Guest(register) {
+        super::load(code, register);
+    }
+}
+
+/// Test a conditional branch's condition: the host condition it is taken
+/// in, or `None` when it always is. `rax` says what RAX holds.
+fn branch_condition(code: &mut Code, operation: &Operation, rax: super::Rax) -> Option<Cond> {
+    match *operation {
+        Operation::BranchCondition { condition, .. } => {
+            let loaded = rax == super::Rax::Nzcv && code.ends_with(&nzcv_store(code.is_pinned()));
+            super::condition_holds(code, condition, loaded)
+        }
+        Operation::BranchZero {
+            source,
+            width,
+            nonzero,
+            ..
+        } => Some(match code.host(source) {
+            Some(host) => {
+                let size = Size::of(width == crate::aarch64::Width::X64);
+                code.asm().test(size, host, host);
+                if nonzero { Cond::Ne } else { Cond::E }
+            }
+            None => {
+                load_unless_held(code, source, rax);
+                super::test_zero(code, width, nonzero)
+            }
+        }),
+        Operation::BranchBit {
+            source,
+            bit,
+            nonzero,
+            ..
+        } => Some(match code.host(source) {
+            Some(host) => {
+                let bits = code.asm();
+                super::test_bit_of(bits, host, bit, nonzero)
+            }
+            None => {
+                load_unless_held(code, source, rax);
+                super::test_bit(code, bit, nonzero)
+            }
+        }),
+        _ => unreachable!("not a conditional branch"),
     }
 }
 

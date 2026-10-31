@@ -335,6 +335,12 @@ impl Host for BareHost<'_> {
         Some(code.0)
     }
 
+    fn share_lower_globals(&mut self, span: Arc<GlobalSpan>) {
+        let state = state();
+        state.lower_globals = Some(span);
+        state.reset_lower();
+    }
+
     fn set_regime(&mut self, regime: &Regime) {
         let state = state();
         if let Some(current) = state.regime
@@ -426,7 +432,7 @@ impl Host for BareHost<'_> {
         if state.current != view {
             state.current = view;
             state.view_switches += 1;
-            load_root(state.roots[view]);
+            state.load_view(view);
         }
     }
 
@@ -484,7 +490,7 @@ impl Host for BareHost<'_> {
             for &(first, last) in &unmapped {
                 let mut page = first & !(PAGE - 1);
                 loop {
-                    invlpg(page);
+                    state.contexts.forget(page, state.current);
                     if page >= last & !(PAGE - 1) {
                         break;
                     }

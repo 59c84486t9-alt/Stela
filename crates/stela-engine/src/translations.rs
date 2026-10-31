@@ -84,6 +84,7 @@ pub struct Exit {
     pub offset: u32,
     pub target: u64,
     pub kind: u8,
+    pub skipped: u16,
 }
 
 /// One stored block translation.
@@ -142,6 +143,7 @@ impl Entry {
                     offset: exit.offset as usize,
                     target: GuestAddress(exit.target.wrapping_add(page)),
                     kind: ExitKind::try_from(u64::from(exit.kind)).ok()?,
+                    skipped: exit.skipped,
                 })
             })
             .collect::<Option<_>>()?;
@@ -350,6 +352,7 @@ impl Record {
                 out.extend(exit.offset.to_le_bytes());
                 out.extend(exit.target.to_le_bytes());
                 out.push(exit.kind);
+                out.extend(exit.skipped.to_le_bytes());
             }
             out.extend((entry.recovery.len() as u32).to_le_bytes());
             for range in &entry.recovery {
@@ -490,12 +493,13 @@ impl<'a> Reader<'a> {
         let source_map = (0..self.count(6)?)
             .map(|_| Ok((self.u16()?, self.u32()?)))
             .collect::<Result<_, _>>()?;
-        let exits = (0..self.count(13)?)
+        let exits = (0..self.count(15)?)
             .map(|_| {
                 Ok(Exit {
                     offset: self.u32()?,
                     target: self.u64()?,
                     kind: self.u8()?,
+                    skipped: self.u16()?,
                 })
             })
             .collect::<Result<_, _>>()?;
@@ -649,7 +653,7 @@ pub fn prove(
                 .zip(&block.direct_exits)
                 .all(|(moved, original)| {
                     moved.offset == original.offset
-                        && moved.kind == original.kind
+                        && moved.word() == original.word()
                         && moved.target.0.wrapping_sub(original.target.0) == displacement
                 })
     };
@@ -725,6 +729,7 @@ pub fn prove(
                     offset: u32::try_from(exit.offset).ok()?,
                     target: exit.target.0.wrapping_sub(page),
                     kind: exit.kind as u8,
+                    skipped: exit.skipped,
                 })
             })
             .collect::<Option<_>>()?,

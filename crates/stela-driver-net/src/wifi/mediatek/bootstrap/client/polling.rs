@@ -25,6 +25,13 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         self.poll_inner(now, source, policy, None, None)
     }
 
+    /// Whether the last pass left the receive rings nothing to give, as the
+    /// end of a NAPI poll does.
+    pub(super) fn rings_empty(&self) -> bool {
+        let s = self.state();
+        s.rings_empty && s.pending_rx.is_empty()
+    }
+
     pub(super) fn poll_inner(
         &mut self,
         now: u64,
@@ -63,12 +70,14 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         }
         if s.pending_rx.is_empty() {
             let raw = s.controller.poll_events().map_err(Error::Bootstrap)?;
+            s.rings_empty = raw.is_empty();
             s.pending_rx
                 .extend(raw.into_iter().map(|frame| receive::ReceivedFrame {
                     queue: receive::Queue::Event,
                     frame,
                 }));
             if let Some(f) = s.controller.poll_data().map_err(Error::Bootstrap)? {
+                s.rings_empty = false;
                 s.pending_rx.push_back(receive::ReceivedFrame {
                     queue: receive::Queue::Data,
                     frame: f,
@@ -183,7 +192,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             }
             if modern_data
                 && !frame.header().data_present()
-                && Self::on_other_link(s, &frame, &mut events)
+                && Self::beacon_of_other_link(s, &frame, &mut events)
             {
                 events.push(Event::Raw(f));
                 continue;
@@ -193,15 +202,18 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                     .scanner
                     .observe(s.scan_ticket.unwrap(), &frame, policy)
                     .map_err(Error::Scan)?;
-                s.pmf_observations
-                    .try_reserve(1)
-                    .map_err(|_| Error::NoMemory)?;
-                if s.pmf_observations.len() == pmf::MAX_OBSERVATIONS {
-                    s.pmf_observations.remove(0);
+                let nontransmitted = scan::multiple_bssid::nontransmitted(&bss);
+                for bss in core::iter::once(bss).chain(nontransmitted) {
+                    s.pmf_observations
+                        .try_reserve(1)
+                        .map_err(|_| Error::NoMemory)?;
+                    if s.pmf_observations.len() == pmf::MAX_OBSERVATIONS {
+                        s.pmf_observations.remove(0);
+                    }
+                    s.pmf_observations
+                        .push(Arc::new(PmfBssObservation { bss: bss.clone() }));
+                    events.push(Event::Bss(bss));
                 }
-                s.pmf_observations
-                    .push(Arc::new(PmfBssObservation { bss: bss.clone() }));
-                events.push(Event::Bss(bss));
                 continue;
             }
             if s.station.phase() == station::Phase::ExternalAuthenticating {
@@ -240,6 +252,11 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             }
             if modern_data && matches!(frame.header().control & 0x00fc, 0x0080 | 0x0050) {
                 Self::observe_edca(s, frame)?;
+                if core::mem::take(&mut s.link_taken) {
+                    events.push(Event::Unsupported(
+                        "an AP MLD taking a link from an association: it ends",
+                    ));
+                }
                 events.push(Event::Raw(f));
                 continue;
             }
@@ -350,6 +367,23 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 Self::action_guarded(s, action, now, source, policy, guard.as_deref_mut())?;
             } else if s.phase == Phase::Associated {
                 Self::validate_pmf_data(s)?;
+                if frame.header().fragmented() {
+                    // ieee80211_rx_h_defragment: the station has the MSDU with
+                    // the last fragment, and refuses what it replays.
+                    let (ptk, gtk) =
+                        Self::receiving(&mut s.ptk, &mut s.gtk, &mut s.links, &frame.radio)?;
+                    let slot = frame.security.key.map(|_| ptk.slot_mut());
+                    if let Some(whole) = s.fragments.add(&frame, slot, now)
+                        && let Ok(ingress) = s.station.receive_msdu_refs(
+                            epoch,
+                            &whole,
+                            &mut [ptk.slot_mut(), gtk.slot_mut()],
+                        )
+                    {
+                        events.push(Event::Ingress(ingress));
+                    }
+                    continue;
+                }
                 if modern_data
                     && (frame.header().protected()
                         || frame.header().amsdu

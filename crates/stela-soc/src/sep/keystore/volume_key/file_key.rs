@@ -24,10 +24,26 @@
 //!   -> key, IV key, flags.
 //!
 //! The request flags are 2 for a new key and 0x102 for an unwrap, with bit
-//! 0 set when the caller takes no key; bit 8's meaning is not recovered.
-//! The reply flags' bit 1 becomes the raw key's `CP_RAW_KEY_WRAPPEDKEY`
-//! (0x2d51f28, 0x2d26354). Other request types send other variants
-//! (`rewrap_data_with_opts`, unwrap variants 0 and 2), which refuse.
+//! 0 set when the caller takes no key. The reply flags' bit 1 becomes the raw
+//! key's `CP_RAW_KEY_WRAPPEDKEY` (0x2d51f28, 0x2d26354). Other request types
+//! send other variants (`rewrap_data_with_opts`, unwrap variant 0), which
+//! refuse.
+//!
+//! **Scalable keys.** APFS gives a file an EK, its file key, wrapped by an
+//! EKWK, wrapped under the protection class (`new_skey` 0x491a7d0), with
+//! the unwrapped EKWK as an ephemeral key it keeps in memory (at most 64
+//! bytes, `alloc_new_ekwk`). Request type 2 sets flags bit 8:
+//! - `fs_new_ekwk_ek` 0x2d50254: NEW_KEY with no trailing blob -> key, IV
+//!   key, ephemeral key, wrapped EK, wrapped EKWK, in the blobs `new_key`
+//!   (0x2d51d48) gives `fs_new_ekwk_ek`'s third, sixth and fourth arguments.
+//! - `fs_new_ek` 0x2d50484: NEW_KEY class 0, the ephemeral key as the
+//!   trailing blob -> key, IV key, wrapped EK in the wrapped key's place.
+//! - UNWRAP_KEY variant 2 (`__ipc_unwrap_pfk_data_v2` 0x2d58f50): u64,
+//!   handle, parameters, class, wrapped EK, wrapped EKWK, ephemeral key,
+//!   flags -> key, IV key, ephemeral key, flags. `fs_unwrap_ekwk` 0x2d23238
+//!   sends the wrapped EKWK under its class, with a wrapped EK if it wants
+//!   the key too; `fs_unwrap_ek` 0x2d50660 sends class 0, a wrapped EK and
+//!   the ephemeral key.
 //!
 //! **Keys.** The key is the inline engine's wrapped form, as for a VEK. The
 //! IV key is 16 bytes derived from the key, so an unwrap returns what the new
@@ -38,9 +54,11 @@
 //! restarts or the VEK's state is dropped; each class key derives from it. A wrapped key
 //! is Stela's format: magic, class and volume UUID, then the key sealed
 //! under that class key, so it opens only on its machine, volume and class
-//! once the volume's class keys are loaded. The volume comes from the
+//! once the volume's class keys are loaded. A wrapped EKWK is such a key; an
+//! EK is sealed under its EKWK, and an ephemeral key is the EKWK sealed under
+//! a key of the machine's. The volume comes from the
 //! parameters' `volume_uuid`; a request without one refuses. Keybag
-//! handles, personas, file-system contexts and request flag bit 8 are not
+//! handles, personas and file-system contexts are not
 //! interpreted, and classes differ only in their keys: none is ever locked,
 //! so class A and B keys stay available. That is reported once.
 use super::super::super::Entropy;
@@ -58,13 +76,14 @@ pub(super) const NEW_KEY: u8 = 0x10;
 
 const NEW_KEY_VARIANT: u32 = 2;
 const UNWRAP_KEY_VARIANT: u32 = 1;
+const UNWRAP_SCALABLE_VARIANT: u32 = 2;
 /// The u64 `new_key` and `unwrap_data` send first.
 const CLIENT: u64 = 1;
-/// Request flags: the caller takes no key; it wants a SEP-wrapped key; bit
-/// 8, not recovered.
+/// Request flags: the caller takes no key; it wants a SEP-wrapped key; the
+/// request is of type 2.
 const NO_KEY: u32 = 1;
 const WRAPPED_KEY: u32 = 1 << 1;
-const UNRECOVERED: u32 = 1 << 8;
+const SCALABLE: u32 = 1 << 8;
 /// `check_class`'s request flags.
 const CHECK_CLASS: u32 = 0;
 /// Reply flags: the key is SEP-wrapped.
@@ -75,16 +94,20 @@ const MAGIC: [u8; 4] = *b"SFK1";
 /// Magic, class, volume UUID; then the sealed key.
 const HEADER: usize = 4 + 4 + UUID_BYTES;
 pub(super) const WRAPPED_BYTES: usize = HEADER + SEALED_BYTES;
+const EK_MAGIC: [u8; 4] = *b"SEK1";
+pub(super) const WRAPPED_EK_BYTES: usize = EK_MAGIC.len() + SEALED_BYTES;
 
 const CLASS_ROOT_DOMAIN: &[u8] = b"Stela SEP class keys v1\0";
 const CLASS_KEY_DOMAIN: &[u8] = b"Stela SEP class key v1\0";
 const FILE_KEY_DOMAIN: &[u8] = b"Stela SEP per-file key v1\0";
+const EK_DOMAIN: &[u8] = b"Stela SEP EK v1\0";
+const EPHEMERAL_DOMAIN: &[u8] = b"Stela SEP ephemeral key v1\0";
 const IV_KEY_DOMAIN: &[u8] = b"Stela SEP per-file IV key v1\0";
 /// `iv_key_len`, the only length `_return_ek` accepts.
 const IV_KEY_BYTES: usize = 16;
 
 pub(super) const UNINTERPRETED: &str = "SEP per-file keys: keybag handles, personas, \
-     file-system contexts and request flag bit 8 are not interpreted, and no class is ever locked";
+     and file-system contexts are not interpreted, and no class is ever locked";
 
 pub(super) fn recognizes(command: u8) -> bool {
     matches!(command, NEW_KEY | UNWRAP_KEY)
@@ -122,12 +145,11 @@ impl VolumeKeys {
         entropy: &mut dyn Entropy,
         notes: &mut dyn FnMut(String),
     ) -> Result<Vec<u8>> {
-        let expected = if command == NEW_KEY {
-            NEW_KEY_VARIANT
-        } else {
-            UNWRAP_KEY_VARIANT
+        let expected = match command {
+            NEW_KEY => variant == NEW_KEY_VARIANT,
+            _ => matches!(variant, UNWRAP_KEY_VARIANT | UNWRAP_SCALABLE_VARIANT),
         };
-        if variant != expected {
+        if !expected {
             return Err(refuse!("SEP per-file key command variant is not modeled"));
         }
         if fields.lword()? != CLIENT {
@@ -138,14 +160,30 @@ impl VolumeKeys {
         let _handle = fields.word()?;
         let volume = volume(fields.blob()?)?;
         let class = fields.word()?;
-        if class == 0 {
-            return Err(refuse!("SEP per-file key names no protection class"));
-        }
         let mut reply = Reply::default();
+        if command == UNWRAP_KEY && variant == UNWRAP_SCALABLE_VARIANT {
+            reply = self.unwrap_scalable(volume, class, fields)?;
+            self.report(UNINTERPRETED, notes);
+            return Ok(reply.0);
+        }
         if command == NEW_KEY {
             let request = fields.word()?;
             let context = fields.blob()?.len();
-            let trailing = fields.blob()?.len();
+            let trailing = fields.blob()?;
+            if request & SCALABLE != 0 {
+                flags(request)?;
+                if context != CONTEXT_BYTES {
+                    return Err(refuse!("SEP new per-file key context is not modeled"));
+                }
+                fields.end()?;
+                reply = self.new_scalable(volume, class, trailing, entropy)?;
+                self.report(UNINTERPRETED, notes);
+                return Ok(reply.0);
+            }
+            let trailing = trailing.len();
+            if class == 0 {
+                return Err(refuse!("SEP per-file key names no protection class"));
+            }
             if request == CHECK_CLASS && context == 0 && trailing == 0 {
                 fields.end()?;
                 self.class_keys(volume)?;
@@ -174,6 +212,9 @@ impl VolumeKeys {
             reply.word(SEP_WRAPPED);
             reply.word(class);
         } else {
+            if class == 0 {
+                return Err(refuse!("SEP per-file key names no protection class"));
+            }
             let wrapped = fields.blob()?;
             flags(fields.word()?)?;
             fields.end()?;
@@ -183,6 +224,92 @@ impl VolumeKeys {
         }
         self.report(UNINTERPRETED, notes);
         Ok(reply.0)
+    }
+
+    /// A new EK under the EKWK the `ephemeral` key holds, or with no
+    /// ephemeral key under a new EKWK of `class`.
+    fn new_scalable(
+        &self,
+        volume: [u8; UUID_BYTES],
+        class: u32,
+        ephemeral: &[u8],
+        entropy: &mut dyn Entropy,
+    ) -> Result<Reply> {
+        let key = random(entropy)?;
+        let mut reply = Reply::default();
+        if ephemeral.is_empty() {
+            if class == 0 {
+                return Err(refuse!("SEP new EKWK names no protection class"));
+            }
+            let classes = self.class_keys(volume)?;
+            let wrapping = random(entropy)?;
+            self.key_reply(&mut reply, &key)?;
+            reply.blob(&self.ephemeral(&wrapping));
+            reply.blob(&wrap_ek(&wrapping, &key));
+            reply.blob(&wrap(classes, class, &wrapping));
+        } else {
+            if class != 0 {
+                return Err(refuse!("SEP new EK names a protection class"));
+            }
+            let wrapping = self.open_ephemeral(ephemeral)?;
+            self.key_reply(&mut reply, &key)?;
+            reply.blob(&[]);
+            reply.blob(&wrap_ek(&wrapping, &key));
+            reply.blob(&[]);
+        }
+        reply.word(SEP_WRAPPED);
+        reply.word(class);
+        Ok(reply)
+    }
+
+    /// UNWRAP_KEY variant 2's reply to its `fields` after the class: the
+    /// EKWK comes from the ephemeral key, or from its wrapped form under
+    /// `class`, which then answers an ephemeral key.
+    fn unwrap_scalable(
+        &self,
+        volume: [u8; UUID_BYTES],
+        class: u32,
+        fields: &mut Fields<'_>,
+    ) -> Result<Reply> {
+        let wrapped_ek = fields.blob()?;
+        let wrapped_ekwk = fields.blob()?;
+        let ephemeral = fields.blob()?;
+        let request = fields.word()?;
+        flags(request)?;
+        fields.end()?;
+        let (wrapping, opened) = if ephemeral.is_empty() {
+            let wrapping = unwrap(self.class_keys(volume)?, class, wrapped_ekwk)?;
+            let opened = self.ephemeral(&wrapping);
+            (wrapping, Some(opened))
+        } else {
+            (self.open_ephemeral(ephemeral)?, None)
+        };
+        let mut reply = Reply::default();
+        if request & NO_KEY != 0 || wrapped_ek.is_empty() {
+            reply.blob(&[]);
+            reply.blob(&[]);
+        } else {
+            self.key_reply(&mut reply, &*unwrap_ek(&wrapping, wrapped_ek)?)?;
+        }
+        reply.blob(opened.as_ref().map_or(&[], |key| key.as_slice()));
+        reply.word(SEP_WRAPPED);
+        Ok(reply)
+    }
+
+    fn ephemeral(&self, wrapping: &[u8; KEY_BYTES]) -> [u8; SEALED_BYTES] {
+        seal(&self.ephemeral_key(), EPHEMERAL_DOMAIN, &[], wrapping)
+    }
+
+    fn open_ephemeral(&self, ephemeral: &[u8]) -> Result<Zeroizing<[u8; KEY_BYTES]>> {
+        let sealed = ephemeral
+            .try_into()
+            .map_err(|_| refuse!("SEP ephemeral key is not a Stela key"))?;
+        open(&self.ephemeral_key(), EPHEMERAL_DOMAIN, &[], sealed)
+            .map_err(|_| refuse!("SEP ephemeral key does not open on this machine"))
+    }
+
+    fn ephemeral_key(&self) -> Zeroizing<[u8; 32]> {
+        derive(&self.root, EPHEMERAL_DOMAIN, &[])
     }
 
     fn class_keys(&self, volume: [u8; UUID_BYTES]) -> Result<&ClassKeys> {
@@ -218,7 +345,7 @@ fn volume(parameters: &[u8]) -> Result<[u8; UUID_BYTES]> {
 
 /// Request flags: a SEP-wrapped key, optionally not taken.
 fn flags(flags: u32) -> Result<()> {
-    if flags & WRAPPED_KEY == 0 || flags & !(NO_KEY | WRAPPED_KEY | UNRECOVERED) != 0 {
+    if flags & WRAPPED_KEY == 0 || flags & !(NO_KEY | WRAPPED_KEY | SCALABLE) != 0 {
         return Err(refuse!("SEP per-file key request flags are not modeled"));
     }
     Ok(())
@@ -237,6 +364,25 @@ fn wrap(classes: &ClassKeys, class: u32, key: &[u8; KEY_BYTES]) -> Vec<u8> {
     let mut wrapped = header.to_vec();
     wrapped.extend_from_slice(&seal(&classes.key(class), FILE_KEY_DOMAIN, &header, key));
     wrapped
+}
+
+fn wrap_ek(wrapping: &[u8; KEY_BYTES], key: &[u8; KEY_BYTES]) -> Vec<u8> {
+    let mut wrapped = EK_MAGIC.to_vec();
+    wrapped.extend_from_slice(&seal(wrapping, EK_DOMAIN, &EK_MAGIC, key));
+    wrapped
+}
+
+fn unwrap_ek(wrapping: &[u8; KEY_BYTES], wrapped: &[u8]) -> Result<Zeroizing<[u8; KEY_BYTES]>> {
+    let (Some(sealed), true) = (
+        wrapped
+            .strip_prefix(&EK_MAGIC)
+            .and_then(|sealed| sealed.try_into().ok()),
+        wrapped.len() == WRAPPED_EK_BYTES,
+    ) else {
+        return Err(refuse!("SEP wrapped EK is not a Stela key"));
+    };
+    open(wrapping, EK_DOMAIN, &EK_MAGIC, sealed)
+        .map_err(|_| refuse!("SEP wrapped EK does not open under its EKWK"))
 }
 
 fn unwrap(classes: &ClassKeys, class: u32, wrapped: &[u8]) -> Result<Zeroizing<[u8; KEY_BYTES]>> {

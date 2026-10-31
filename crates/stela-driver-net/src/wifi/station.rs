@@ -422,8 +422,7 @@ impl Station {
             .ok_or(Error::Unsupported("modern request required"))?;
         if selection.capabilities().band() != join.channel.band
             || beacon.channel != join.channel
-            || beacon.bssid != join.bssid
-            || beacon.transmitter != join.bssid
+            || !beacon.answers_for(join.bssid)
         {
             return Err(Error::Unsupported("selected beacon/local PHY mismatch"));
         }
@@ -529,8 +528,7 @@ impl Station {
         let beacon = observed.bss.clone();
         if selection.capabilities().band() != join.channel.band
             || beacon.channel != join.channel
-            || beacon.bssid != join.bssid
-            || beacon.transmitter != join.bssid
+            || !beacon.answers_for(join.bssid)
         {
             return Err(Error::Unsupported("selected beacon/local PHY mismatch"));
         }

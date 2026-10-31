@@ -15,7 +15,7 @@ use core::{
     marker::PhantomData,
     mem::ManuallyDrop,
     ptr::{self, NonNull},
-    sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering},
 };
 use stela_drivers::platform::work::{
     Cpu, RetainedOwner, WorkError,
@@ -40,11 +40,10 @@ static ACTIVE: AtomicPtr<State> = AtomicPtr::new(ptr::null_mut());
 // Other native host processors use the same engine handler. They must reject
 // BEFORE loading/dereferencing the owning CPU's registration pointer: checking
 // State.cpu afterward would race real BSP removal and permit a use-after-free.
-static ACTIVE_CPU: AtomicU32 = AtomicU32::new(u32::MAX);
-// A legacy CPUID APIC ID can be narrower than the x2APIC ID namespace.
-// The original HostOwner also owns a distinct permanently pinned GS record on
-// every physical CPU. Validate that live architectural identity BEFORE ACTIVE,
-// so a remote CPU with a colliding legacy ID cannot borrow a removable pointer.
+// The original HostOwner owns a distinct permanently pinned GS record on every
+// physical CPU. Validate that live architectural identity BEFORE ACTIVE, on
+// every timer arm and interrupt: unlike CPUID it never exits to a hypervisor,
+// and unlike a legacy APIC ID no remote CPU can collide with it.
 static ACTIVE_GS: AtomicU64 = AtomicU64::new(0);
 
 fn processor_id() -> u32 {
@@ -66,9 +65,6 @@ fn gs_base() -> u64 {
 }
 
 fn registration_cpu() -> bool {
-    if processor_id() != ACTIVE_CPU.load(Ordering::Acquire) {
-        return false;
-    }
     let expected_gs = ACTIVE_GS.load(Ordering::Acquire);
     expected_gs != 0 && gs_base() == expected_gs
 }
@@ -727,7 +723,6 @@ impl Installed {
             // The explicit raw strong reference is registration ownership;
             // removal is same-CPU IRQ-excluded and precedes from_raw release.
             ACTIVE_GS.store(state.cpu.gs, Ordering::Release);
-            ACTIVE_CPU.store(state.cpu.id, Ordering::Release);
             ACTIVE.store(Arc::into_raw(state.clone()).cast_mut(), Ordering::Release);
             let clock: Arc<dyn Clock> = Arc::new(NativeClock(state.clone()));
             let idle: Arc<dyn Idle> = Arc::new(NativeIdle {
@@ -988,7 +983,6 @@ impl Installed {
             }
         };
         let pointer = ACTIVE.swap(ptr::null_mut(), Ordering::AcqRel);
-        ACTIVE_CPU.store(u32::MAX, Ordering::Release);
         ACTIVE_GS.store(0, Ordering::Release);
         let apic = self.state.cpu.controller();
         // Hand the original guest deadline back to its existing host owner.

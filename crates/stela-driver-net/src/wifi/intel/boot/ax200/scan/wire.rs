@@ -25,6 +25,24 @@ pub(super) struct Abilities {
     pub(super) hidden_six_ghz: bool,
     /// It keeps one antenna through a 6 GHz scan.
     pub(super) fixed_antenna: bool,
+    /// `iwl_mld_scan_use_ebs`: it may leave a channel it finds quiet early.
+    pub(super) ebs: bool,
+    /// `enable_6ghz_passive`: a scan of 2.4 and 5 GHz also listens on the 6 GHz
+    /// channels no rule opens yet, for what they say of where the device is.
+    pub(super) passive_six_ghz: bool,
+}
+/// `IWL_UCODE_TLV_FLAGS_EBS_SUPPORT`.
+const EBS_SUPPORT: u32 = 1 << 25;
+/// Whether `firmware` may leave a quiet channel early, as `last_failed` says.
+pub(super) fn energy_based(firmware: &Firmware<'_>, last_failed: bool) -> bool {
+    !last_failed
+        && firmware
+            .flags()
+            .is_some_and(|flags| flags & EBS_SUPPORT != 0)
+}
+/// Whether a scan's EBS status rules EBS out of later scans.
+pub(super) fn energy_based_failed(status: u8) -> bool {
+    !ENERGY_BASED_FINE.contains(&status)
 }
 pub(super) const REQUEST: Id = Id {
     group: 1,
@@ -92,6 +110,10 @@ const PASS_ALL: u16 = 1 << 1;
 const USE_ALL_RX_CHAINS: u16 = 1 << 6;
 const ADAPTIVE_DWELL: u16 = 1 << 7;
 const ENABLE_CHANNEL_ORDER: u8 = 1 << 5;
+/// `IWL_SCAN_CHANNEL_FLAG_EBS`, `_EBS_ACCURATE` and `_CACHE_ADD`.
+const ENERGY_BASED: u8 = 7;
+/// `IWL_SCAN_EBS_SUCCESS` and `IWL_SCAN_EBS_INACTIVE`.
+const ENERGY_BASED_FINE: [u8; 2] = [0, 3];
 const CHANNEL_FRAGMENTED: u8 = 1 << 3;
 const PSC_NO_FILTER: u8 = 1 << 6;
 const FLAGS2: usize = GENERAL + 9;
@@ -100,6 +122,12 @@ const DONT_TOGGLE_ANTENNA: u8 = 1 << 2;
 const UNSOLICITED_PROBE_RESPONSE: u32 = 1 << 24;
 const PSC_NO_LISTEN: u32 = 1 << 25;
 const CHANNEL_FORCE_PASSIVE: u32 = 1 << 26;
+/// `IWL_UMAC_SCAN_GEN_FLAGS_V2_6GHZ_PASSIVE_SCAN`.
+const PASSIVE_SIX_GHZ: u16 = 1 << 13;
+/// The first and the distance between 6 GHz's preferred scanning channels.
+const FIRST_PSC: u16 = 5;
+const PSC_STEP: u16 = 16;
+const PSC_COUNT: usize = 15;
 /// `IEEE80211_RNR_TBTT_PARAMS_PSD_RESERVED`.
 const PSD_RESERVED: i8 = -128;
 const PRIORITY_EXT_6: u32 = 6;
@@ -219,7 +247,13 @@ pub(super) fn encode(
     }
     let ssids = request.ssids();
     let directed = ssids.first().is_some_and(|ssid| !ssid.is_empty());
+    let passive_six_ghz = abilities.passive_six_ghz
+        && !six_ghz
+        && request.channels().len() + PSC_COUNT <= layout.channels;
     let mut flags = PASS_ALL | ADAPTIVE_DWELL;
+    if passive_six_ghz {
+        flags |= PASSIVE_SIX_GHZ;
+    }
     if ssids.is_empty() {
         flags |= FORCE_PASSIVE;
     } else if ssids.len() == 1 && directed {
@@ -251,11 +285,14 @@ pub(super) fn encode(
     } else {
         let table = layout.ssids..layout.ssids + DIRECT_SSIDS;
         let bitmap = direct_ssids(&mut bytes[table], ssids);
-        bytes[CHANNELS] = ENABLE_CHANNEL_ORDER;
+        bytes[CHANNELS] = ENABLE_CHANNEL_ORDER | if abilities.ebs { ENERGY_BASED } else { 0 };
         bytes[CHANNELS + 1] = request.channels().len() as u8;
         bytes[CHANNELS + 2..CHANNELS + 4].copy_from_slice(&[10, 2]);
         for (index, &channel) in request.channels().iter().enumerate() {
             put_channel(&mut bytes, index, channel, bitmap, version);
+        }
+        if passive_six_ghz {
+            put_passive_six_ghz(&mut bytes, request.channels().len(), version);
         }
     }
     bytes[layout.periodic + 2] = 1; // one ordinary iteration, interval/delay zero
@@ -286,12 +323,15 @@ pub(super) fn encode_internal(
     local: crate::Mac,
     link: u8,
     traffic: Ax200ScanTraffic,
+    ebs: bool,
 ) -> Result<Vec<u8>, Ax200ScanError> {
     let abilities = Abilities {
         ds_parameters: false,
         tpc_report: false,
         hidden_six_ghz: false,
         fixed_antenna: false,
+        ebs,
+        passive_six_ghz: false,
     };
     let mut bytes = encode(request, version, local, None, abilities)?;
     bytes[4..8].copy_from_slice(&PRIORITY_EXT_4.to_le_bytes());
@@ -332,6 +372,24 @@ fn put_channel(bytes: &mut [u8], index: usize, channel: Channel, flags: u32, ver
     bytes[at..at + 4].copy_from_slice(&flags.to_le_bytes());
     bytes[at + 4] = channel.number as u8;
     bytes[at + 6] = 1;
+}
+
+/// `iwl_mld_scan_cmd_set_chan_params`' passive channels after `count` others.
+fn put_passive_six_ghz(bytes: &mut [u8], count: usize, version: u8) {
+    for index in 0..PSC_COUNT {
+        let number = FIRST_PSC + index as u16 * PSC_STEP;
+        let channel = Channel {
+            band: Band::Ghz6,
+            number,
+            frequency_mhz: 5950 + 5 * number,
+        };
+        let at = count + index;
+        put_channel(bytes, at, channel, 0, version);
+        if version >= BAND_IN_FLAGS {
+            bytes[CHANNELS + 4 + at * CHANNEL_CONFIG_BYTES + 5] = PSD_RESERVED as u8;
+        }
+    }
+    bytes[CHANNELS + 1] = (count + PSC_COUNT) as u8;
 }
 
 /// The short SSIDs and BSSIDs a 6 GHz scan's channels index.
@@ -508,7 +566,7 @@ mod tests {
             frequency_mhz: 2412,
         };
         let request = protocol::Request::new(vec![channel], Vec::new(), Vec::new()).unwrap();
-        let bytes = encode_internal(&request, 17, LOCAL, 1, Ax200ScanTraffic::Low).unwrap();
+        let bytes = encode_internal(&request, 17, LOCAL, 1, Ax200ScanTraffic::Low, false).unwrap();
         let flags = u16::from_le_bytes([bytes[GENERAL], bytes[GENERAL + 1]]);
         assert_eq!(
             flags,
@@ -520,15 +578,23 @@ mod tests {
         assert_eq!(bytes[GENERAL + 16..GENERAL + 20], [0; 4]);
         assert_eq!(bytes[GENERAL + 20..GENERAL + 24], 30u32.to_le_bytes());
         assert_eq!(bytes[GENERAL + 24..GENERAL + 28], [0; 4]);
-        let busy = encode_internal(&request, 17, LOCAL, 1, Ax200ScanTraffic::Medium).unwrap();
+        let busy =
+            encode_internal(&request, 17, LOCAL, 1, Ax200ScanTraffic::Medium, false).unwrap();
         assert_eq!(busy[GENERAL + 20..GENERAL + 24], 120u32.to_le_bytes());
-        let full = encode_internal(&request, 17, LOCAL, 1, Ax200ScanTraffic::High).unwrap();
+        let full = encode_internal(&request, 17, LOCAL, 1, Ax200ScanTraffic::High, false).unwrap();
         assert_eq!(full[GENERAL] & FRAGMENTED, FRAGMENTED);
         assert_eq!(full[GENERAL + 34], 3);
         assert_eq!(full[CHANNELS], ENABLE_CHANNEL_ORDER | CHANNEL_FRAGMENTED);
         assert_eq!(full[GENERAL + 12..GENERAL + 16], 44u32.to_le_bytes());
         assert_eq!(full[GENERAL + 20..GENERAL + 24], 95u32.to_le_bytes());
-        let both = encode_internal(&request, 17, LOCAL, 1, Ax200ScanTraffic::Balanced).unwrap();
+        let both =
+            encode_internal(&request, 17, LOCAL, 1, Ax200ScanTraffic::Balanced, false).unwrap();
+        let energy_based =
+            encode_internal(&request, 17, LOCAL, 1, Ax200ScanTraffic::High, true).unwrap();
+        assert_eq!(
+            energy_based[CHANNELS],
+            ENABLE_CHANNEL_ORDER | ENERGY_BASED | CHANNEL_FRAGMENTED
+        );
         assert_eq!(both[GENERAL] & FRAGMENTED, FRAGMENTED);
         assert_eq!(both[GENERAL + 12..GENERAL + 16], 37u32.to_le_bytes());
         assert_eq!(both[GENERAL + 20..GENERAL + 24], 30u32.to_le_bytes());
@@ -589,7 +655,58 @@ mod tests {
         tpc_report: false,
         hidden_six_ghz: false,
         fixed_antenna: false,
+        ebs: false,
+        passive_six_ghz: false,
     };
+
+    #[test]
+    fn a_passive_six_ghz_pass_follows_the_channels_asked_for() {
+        let channel = Channel {
+            band: Band::Ghz2,
+            number: 1,
+            frequency_mhz: 2412,
+        };
+        let request = protocol::Request::new(vec![channel], Vec::new(), Vec::new()).unwrap();
+        let passive = Abilities {
+            passive_six_ghz: true,
+            ..MEASURED
+        };
+        let bytes = encode(&request, 17, LOCAL, None, passive).unwrap();
+        let flags = u16::from_le_bytes([bytes[GENERAL], bytes[GENERAL + 1]]);
+        assert_ne!(flags & PASSIVE_SIX_GHZ, 0);
+        assert_eq!(bytes[CHANNELS + 1], 16);
+        let last = CHANNELS + 4 + 15 * CHANNEL_CONFIG_BYTES;
+        assert_eq!(bytes[last + 4], 229);
+        assert_eq!(bytes[last + 5], PSD_RESERVED as u8);
+        assert_eq!(bytes[last + 6], 1);
+        let word = u32::from_le_bytes(bytes[last..last + 4].try_into().unwrap());
+        assert_eq!(word >> BAND_SHIFT, u32::from(PHY_BAND_6));
+        let bytes = encode(&request, 16, LOCAL, None, passive).unwrap();
+        let last = CHANNELS + 4 + 15 * CHANNEL_CONFIG_BYTES;
+        assert_eq!(bytes[last + 5], PHY_BAND_6);
+        let plain = encode(&request, 17, LOCAL, None, MEASURED).unwrap();
+        assert_eq!(plain[CHANNELS + 1], 1);
+    }
+
+    #[test]
+    fn a_scan_asks_for_ebs_when_it_may_and_a_failure_stops_it() {
+        let channel = Channel {
+            band: Band::Ghz2,
+            number: 1,
+            frequency_mhz: 2412,
+        };
+        let request = protocol::Request::new(vec![channel], Vec::new(), Vec::new()).unwrap();
+        let bytes = encode(&request, 17, LOCAL, None, MEASURED).unwrap();
+        assert_eq!(bytes[CHANNELS], ENABLE_CHANNEL_ORDER);
+        let energy_based = Abilities {
+            ebs: true,
+            ..MEASURED
+        };
+        let bytes = encode(&request, 17, LOCAL, None, energy_based).unwrap();
+        assert_eq!(bytes[CHANNELS], ENABLE_CHANNEL_ORDER | ENERGY_BASED);
+        assert!(!energy_based_failed(0) && !energy_based_failed(3));
+        assert!(energy_based_failed(1) && energy_based_failed(2));
+    }
 
     const SIX_1: Channel = Channel {
         band: Band::Ghz6,
@@ -772,6 +889,8 @@ mod tests {
         let reports = Abilities {
             hidden_six_ghz: false,
             fixed_antenna: false,
+            ebs: false,
+            passive_six_ghz: false,
             ds_parameters: true,
             tpc_report: true,
         };
@@ -780,6 +899,8 @@ mod tests {
         let quiet = Abilities {
             hidden_six_ghz: false,
             fixed_antenna: false,
+            ebs: false,
+            passive_six_ghz: false,
             ds_parameters: false,
             tpc_report: false,
         };

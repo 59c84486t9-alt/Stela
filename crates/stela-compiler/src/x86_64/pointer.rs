@@ -14,6 +14,9 @@
 //! layout and remembers it ([`Completion`]); a result it does not complete
 //! (an authentication that fails) takes the original exit.
 //!
+//! PACGA completes the same way under a tag word of its own, as a signing
+//! with the generic key whose result goes to another register.
+//!
 //! A key whose SCTLR enable is clear has the tag word [`DISABLED`]: the
 //! thunk completes with the pointer unchanged, as Arm `AddPAC` and `Auth`
 //! return it, so BRA*, BLRA* and RETA* branch to it.
@@ -28,6 +31,7 @@
 use crate::x86_64::asm::{Alu, Code, Cond, Gpr, Mem, ShiftOp, Size, resolve};
 use crate::{
     GuestAddress,
+    aarch64::Register,
     block::{
         ExitKind, PointerAuthenticationKey as Key, PointerAuthenticationModifier as Modifier,
         PointerAuthenticationOperation as Operation,
@@ -39,6 +43,10 @@ pub mod strip;
 
 /// Entries in the memo.
 pub const MEMO_ENTRIES: usize = 1 << 14;
+/// The tag word of the generic key, after those of [`key_index`].
+pub const GENERIC_KEY: u8 = 4;
+/// The tag words, one for each key.
+pub const TAG_WORDS: usize = 5;
 /// The tag word of a key whose SCTLR enable is clear, so that every
 /// signing and authentication with it returns its pointer unchanged (Arm
 /// `AddPAC`, `Auth`, which test the enable before any trap): a thunk then
@@ -51,10 +59,10 @@ pub const SIGNED: u64 = 1;
 /// combined (branch and return) forms.
 pub const AUTHENTICATED: u64 = 2;
 /// [`Form::request`]: an authentication rather than a signing, and its
-/// combined (branch and return) form; the key's index is bits 1:0.
-pub const REQUEST_AUTHENTICATE: u32 = 1 << 2;
-pub const REQUEST_COMBINED: u32 = 1 << 3;
-const REQUEST_KEY: u32 = 3;
+/// combined (branch and return) form; the key's tag word is bits 2:0.
+pub const REQUEST_AUTHENTICATE: u32 = 1 << 3;
+pub const REQUEST_COMBINED: u32 = 1 << 4;
+const REQUEST_KEY: u32 = 7;
 
 /// The engine's routine a thunk calls on a memo miss, and its argument.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,6 +83,11 @@ pub type ServiceRoutine = extern "sysv64" fn(u64, u32, u64, u64) -> Completion;
 pub struct Completion {
     pub completed: u64,
     pub value: u64,
+}
+
+/// Whether a [`Form::request`] is PACGA's, which [`requested`] does not name.
+pub fn requests_generic_code(request: u32) -> bool {
+    request & REQUEST_KEY == u32::from(GENERIC_KEY)
 }
 
 /// The key and operation of a [`Form::request`].
@@ -147,11 +160,14 @@ enum Finish {
 /// What a thunk needs of a PAC instruction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Form {
-    key: Key,
+    /// The key's tag word.
+    key: u8,
     kind: u64,
-    /// The register holding the pointer, and the result's for `Register`.
+    /// The register holding the pointer.
     pointer: u8,
     modifier: Modifier,
+    /// The result's register for `Register`.
+    result: u8,
     completion: Finish,
 }
 
@@ -159,7 +175,7 @@ impl Form {
     /// What the service computes for this form: its key, and a signing,
     /// a plain authentication or, for RETA*, BRA* and BLRA*, a combined one.
     pub fn request(&self) -> u32 {
-        let mut request = u32::from(key_index(self.key));
+        let mut request = u32::from(self.key);
         if self.kind == AUTHENTICATED {
             request |= REQUEST_AUTHENTICATE;
             if self.completion != Finish::Register {
@@ -170,9 +186,23 @@ impl Form {
     }
 
     /// The form of `operation`, or `None` for the PAC instructions thunks do
-    /// not complete: strips, generic codes, loads, FEAT_PAuth_LR forms and
-    /// register-31 operands.
+    /// not complete: strips, loads, FEAT_PAuth_LR forms and register-31
+    /// operands, but for PACGA's modifier, which is SP.
     pub fn of(operation: Operation) -> Option<Self> {
+        if let Operation::GenericCode(code) = operation {
+            let modifier = match code.modifier {
+                31 => Modifier::StackPointer,
+                register => Modifier::Register(register),
+            };
+            return (code.source < 31 && code.destination < 31).then_some(Self {
+                key: GENERIC_KEY,
+                kind: SIGNED,
+                pointer: code.source,
+                modifier,
+                result: code.destination,
+                completion: Finish::Register,
+            });
+        }
         let sp = Modifier::StackPointer;
         let x16 = Modifier::Register(16);
         let (key, kind, pointer, modifier, completion) = match operation {
@@ -207,10 +237,11 @@ impl Form {
             _ => return None,
         };
         (pointer < 31 && modifier != Modifier::Register(31)).then_some(Self {
-            key,
+            key: key_index(key),
             kind,
             pointer,
             modifier,
+            result: pointer,
             completion,
         })
     }
@@ -233,19 +264,23 @@ pub struct Thunk {
 pub fn thunk(form: Form, pc: GuestAddress, memo: u64, tags: u64, service: Service) -> Thunk {
     use Gpr::{R8, R9, R11, Rax, Rcx, Rdi, Rdx, Rsi, Rsp};
     use Size::{Dword, Qword};
-    let mut code = Code::new();
+    let mut code = Code::pinned();
     let mut asm = code.asm();
     let mut exits = Vec::new();
-    let pointer = frame(u32::from(form.pointer) * 8);
+    let pointer = asm.guest(Register::X(form.pointer)).expect("X0..X30");
     asm.mov_load(Qword, Rax, pointer);
     match form.modifier {
         Modifier::Register(register) => {
-            asm.mov_load(Qword, Rdx, frame(u32::from(register) * 8));
+            let modifier = asm.guest(Register::X(register)).expect("X0..X30");
+            asm.mov_load(Qword, Rdx, modifier);
         }
-        Modifier::StackPointer => asm.mov_load(Qword, Rdx, frame(STACK_POINTER)),
+        Modifier::StackPointer => {
+            let stack = asm.guest(Register::Sp).expect("SP has storage");
+            asm.mov_load(Qword, Rdx, stack);
+        }
         Modifier::Zero => asm.alu(Alu::Xor, Dword, Rdx, Rdx),
     }
-    asm.mov_imm64(R8, tags + u64::from(key_index(form.key)) * 8);
+    asm.mov_imm64(R8, tags + u64::from(form.key) * 8);
     asm.mov_load(Qword, R8, Mem::base(R8, 0));
     asm.test(Qword, R8, R8);
     // The key is not open.
@@ -279,7 +314,8 @@ pub fn thunk(form: Form, pc: GuestAddress, memo: u64, tags: u64, service: Servic
     let mut dynamic = None;
     match form.completion {
         Finish::Register => {
-            asm.mov_store(Qword, pointer, Rax);
+            let result = asm.guest(Register::X(form.result)).expect("X0..X30");
+            asm.mov_store(Qword, result, Rax);
             next = Some(asm.len());
             super::block::direct_exit_with(&mut asm, next_pc, ExitKind::Fallthrough);
         }
@@ -290,7 +326,8 @@ pub fn thunk(form: Form, pc: GuestAddress, memo: u64, tags: u64, service: Servic
         Finish::Branch { link } => {
             if link {
                 asm.mov_imm64(Rcx, next_pc.0);
-                asm.mov_store(Qword, frame(30 * 8), Rcx);
+                let storage = asm.guest(Register::X(30)).expect("X30 has storage");
+                asm.mov_store(Qword, storage, Rcx);
             }
             dynamic = Some(asm.len());
             let kind = if link {
@@ -309,12 +346,17 @@ pub fn thunk(form: Form, pc: GuestAddress, memo: u64, tags: u64, service: Servic
     asm.alu_imm8(Alu::And, Qword, Rsp, -16);
     asm.push(R11);
     asm.push(Rdi);
+    // The one pinned register a call may change, and the alignment.
+    asm.push(Rsi);
+    asm.push(Rsi);
     asm.mov(Qword, Rcx, Rdx);
     asm.mov(Qword, Rdx, Rax);
     asm.mov_imm32(Rsi, form.request());
     asm.mov_imm64(Rdi, service.state);
     asm.mov_imm64(Rax, service.routine);
     asm.call_rm(Rax);
+    asm.pop(Rsi);
+    asm.pop(Rsi);
     asm.pop(Rdi);
     asm.pop(Rsp);
     asm.test(Qword, Rax, Rax);
@@ -332,13 +374,6 @@ pub fn thunk(form: Form, pc: GuestAddress, memo: u64, tags: u64, service: Servic
         next,
         dynamic,
     }
-}
-
-const STACK_POINTER: u32 = core::mem::offset_of!(crate::GuestState, sp) as u32;
-
-/// `[rdi+offset]` with a 32-bit displacement: a field of the guest frame.
-fn frame(offset: u32) -> Mem {
-    Mem::base_disp32(Gpr::Rdi, offset as i32)
 }
 
 #[cfg(test)]

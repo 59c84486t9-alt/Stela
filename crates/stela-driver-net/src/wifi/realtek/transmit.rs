@@ -20,7 +20,10 @@ const H2C_COUNT: usize = 128;
 const DESCRIPTOR: usize = 16;
 const PACKET: usize = 48 + 32;
 /// One frame's page: its packet descriptor, then the MPDU.
-const FRAME: usize = 4096;
+const FRAME: usize = 8192;
+/// The longest MPDU a buffer holds behind its descriptor, which an HT peer's
+/// long A-MSDU fits and a VHT peer's longest is held to.
+pub const MAX_FRAME: usize = FRAME - 48;
 /// The pages a quiet queue keeps mapped for the next burst.
 const SPARE: usize = 64;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -298,6 +301,15 @@ impl<R: Registers> Rings<R> {
     }
     pub fn pending(&self) -> usize {
         distance(self.read, self.write)
+    }
+    /// A frame still with the device, `rtw_pci_deep_ps_enter`'s bar to it. The
+    /// firmware's own queue does not count.
+    pub fn frames_pending(&self) -> bool {
+        QUEUES
+            .iter()
+            .filter(|&&queue| queue != Queue::H2c)
+            .map(|queue| &self.frames[queue.index()])
+            .any(|frames| frames.read != frames.write)
     }
     /// Queue source general-info packet; success is publication only. Geometry
     /// must belong to the exact profile. No firmware ACK is invented.

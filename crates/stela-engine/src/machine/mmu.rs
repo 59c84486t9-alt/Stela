@@ -247,6 +247,12 @@ impl Stage2 {
 pub const SCTLR_M: u64 = 1 << 0;
 pub const SCTLR_WXN: u64 = 1 << 19;
 pub const SCTLR_SPAN: u64 = 1 << 23;
+/// The SCTLR fields translation reads: M, A, C, SA, SA0, nAA, I, WXN, E0E, EE
+/// and EPAN, with BT0 and BT1, which decide where a fetched page's branches
+/// may land. A guest's thread switches write others, the pointer
+/// authentication enables among them, which leave every translation alone.
+pub const SCTLR_TRANSLATION: u64 =
+    0x1f | 1 << 6 | 1 << 12 | SCTLR_WXN | 3 << 24 | 3 << 35 | 1 << 57;
 
 /// The largest physical address this profile implements (48 bits,
 /// ID_AA64MMFR0_EL1.PARange 0b0101).

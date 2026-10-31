@@ -144,7 +144,10 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
                 self.read_activity_monitor(register, index)
             }
             Register::AMEVTYPER0_EL0 => amu::EVENTS[index as usize],
-            Register::SP_EL0 => cpu.sp(0),
+            Register::SP_EL0 => {
+                self.plain.set(Some((register, 0)));
+                cpu.sp(0)
+            }
             Register::SP_EL1 => cpu.sp(1),
             Register::SP_EL2 => cpu.sp(2),
             Register::FPCR => u64::from(cpu.state.fpcr),
@@ -187,7 +190,12 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
                 Some(channel) => channel.read_control(cpu, self.bank, self.now),
                 None => match (self.bank, cpu.apple.generic_timer.get(register)) {
                     (Bank::Apple, Some(value)) => value,
-                    _ => cpu.registers.get(register, index),
+                    _ => {
+                        if super::super::mirrors::reads_storage(register) {
+                            self.plain.set(Some((register, index)));
+                        }
+                        cpu.registers.get(register, index)
+                    }
                 },
             },
         }
@@ -281,6 +289,9 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
                     _ => 2,
                 };
                 cpu.set_sp(el, value);
+                if register == Register::SP_EL0 && cpu.pstate.sp {
+                    self.plain.set(Some((register, 0)));
+                }
                 return Ok(());
             }
             Register::FPCR => {
@@ -290,6 +301,7 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
             // Without AArch32, FPSR keeps only QC and the cumulative flags.
             Register::FPSR => {
                 cpu.state.fpsr = (value & !cpu.registers.res0(Register::FPSR)) as u32;
+                self.plain.set(Some((register, 0)));
                 return Ok(());
             }
             // FPMR lives with the scalable state, which resets it whenever
@@ -319,6 +331,8 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
             self.machine.switch_thread(value, self.now);
         }
         let cpu = &mut self.machine.cpu;
+        let sctlr = matches!(register, Register::SCTLR_EL1 | Register::SCTLR_EL2);
+        let before = if sctlr { cpu.read(register) } else { 0 };
         // The Apple bank's copy keeps the register's reserved bits.
         let banked = cpu.write_el2_pointer_key(register, value)
             || self.bank == Bank::Apple && {
@@ -329,6 +343,12 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
             };
         if !banked {
             cpu.registers.set(register, index, value);
+            if matches!(
+                register,
+                Register::ELR_EL1 | Register::ELR_EL2 | Register::SPSR_EL1 | Register::SPSR_EL2
+            ) {
+                self.plain.set(Some((register, index)));
+            }
         }
         self.machine.register_written(register);
         self.machine
@@ -338,18 +358,22 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
             if self.translation == Translation::Unchanged {
                 self.translation = Translation::TableBase;
             }
+        } else if sctlr && (before ^ self.machine.cpu.read(register)) & mmu::SCTLR_TRANSLATION == 0
+        {
+            self.regime = true;
         } else if translates(register) {
             self.translation = Translation::All;
         }
+        if watches(register) {
+            self.regime = true;
+        }
         // A CONTEXTIDR write changes the guest's prediction context
         // (`PredictionContext`) without changing translation.
-        if watches(register)
-            || matches!(
-                register,
-                Register::CONTEXTIDR_EL1 | Register::CONTEXTIDR_EL2
-            )
-        {
-            self.regime = true;
+        if matches!(
+            register,
+            Register::CONTEXTIDR_EL1 | Register::CONTEXTIDR_EL2
+        ) {
+            self.machine.sync_host_regime();
         }
         Ok(())
     }
@@ -374,8 +398,8 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
             // current context alone, loses what the TLBI reaches of it, a
             // superset of its scope and level.
             Operation::Tlbi(tlbi) => {
-                let (reach, everywhere, broadcast) = reach(&self.machine.cpu, &tlbi);
-                self.translation = Translation::Maintenance(reach, everywhere, broadcast);
+                let (reach, everywhere, asid, broadcast) = reach(&self.machine.cpu, &tlbi);
+                self.translation = Translation::Maintenance(reach, everywhere, asid, broadcast);
                 Ok(())
             }
             Operation::At {
@@ -418,7 +442,10 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
             }
             Operation::Ic { scope, operand } => {
                 self.code = if scope == CacheScope::PoU {
-                    Code::Page(self.check_maintenance(operand, false)?)
+                    Code::Page {
+                        address: operand,
+                        physical: self.check_maintenance(operand, false)?,
+                    }
                 } else {
                     Code::All
                 };

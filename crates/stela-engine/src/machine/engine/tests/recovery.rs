@@ -169,8 +169,9 @@ fn chained_load_case(branch: u32, btype: u8, landing_pad: bool) {
         entry = current_entry;
         target = current_target;
         machine.remember_target(target_pc, target);
+        let context = machine.chain.contexts()[chain::half(target_pc)];
         assert_eq!(
-            machine.targets[chain::lookup_slot(target_pc)].targets,
+            machine.targets[chain::lookup_slot(target_pc, context)].targets,
             0b0111
         );
     }

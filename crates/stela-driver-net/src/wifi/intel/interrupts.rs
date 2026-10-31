@@ -39,6 +39,9 @@ const INT: u32 = 8;
 /// `CSR_INT`'s firmware and hardware error bits.
 pub const INT_SW_ERR: u32 = 1 << 25;
 pub const INT_HW_ERR: u32 = 1 << 29;
+/// A cause only the MSI-X registers report, which takes a free bit of the word
+/// [`take`] and [`acknowledge`] give.
+pub const INT_TOP_FATAL: u32 = 1 << 3;
 
 fn sw_err(family: Family) -> u32 {
     if family >= Family::Bz {
@@ -50,19 +53,19 @@ fn sw_err(family: Family) -> u32 {
 
 /// `iwl_pcie_irq_msix_handler`'s and `iwl_pcie_irq_handler`'s look for errors,
 /// ahead of the look at the rings: clear what fired the vector and let it fire
-/// again, so nothing arriving after that look goes unsignalled. Whether the
-/// firmware or NIC died.
-pub fn acknowledge(io: &mut impl Csr, family: Family, vector: bool) -> Result<bool, AccessError> {
+/// again, so nothing arriving after that look goes unsignalled. How the
+/// firmware or NIC died, if it did.
+pub fn acknowledge(io: &mut impl Csr, family: Family, vector: bool) -> Result<u32, AccessError> {
     let fatal = io.read32(INT)? & (INT_SW_ERR | INT_HW_ERR);
     if fatal != 0 {
         io.write32(INT, fatal)?;
     }
     if !vector {
-        return Ok(fatal != 0);
+        return Ok(fatal);
     }
     let causes = take(io, family)?;
     io.write32(AUTOMASK, 1)?;
-    Ok(fatal != 0 || causes & (INT_SW_ERR | INT_HW_ERR) != 0)
+    Ok(fatal | causes & (INT_SW_ERR | INT_HW_ERR | INT_TOP_FATAL))
 }
 
 /// Clear the causes of a function in MSI-X mode, which reports through them
@@ -79,6 +82,9 @@ pub fn take(io: &mut impl Csr, family: Family) -> Result<u32, AccessError> {
     }
     if fh & 1 << FH_ERR != 0 || hw & (1 << HW_ERR | 1 << TOP_FATAL_ERR) != 0 {
         causes |= INT_HW_ERR;
+    }
+    if family >= Family::Bz && hw & 1 << TOP_FATAL_ERR != 0 {
+        causes |= INT_TOP_FATAL;
     }
     Ok(causes)
 }
@@ -130,13 +136,13 @@ mod tests {
     #[test]
     fn only_an_error_ends_the_firmware_and_a_vector_fires_again() {
         let mut io = BTreeMap::from([(INT, 1 | INT_SW_ERR), (AUTOMASK, 1)]);
-        assert!(acknowledge(&mut io, Family::Ax200, false).unwrap());
+        assert_eq!(acknowledge(&mut io, Family::Ax200, false), Ok(INT_SW_ERR));
         assert_eq!((io[&INT], io[&AUTOMASK]), (1, 1));
-        assert!(!acknowledge(&mut io, Family::Ax200, false).unwrap());
+        assert_eq!(acknowledge(&mut io, Family::Ax200, false), Ok(0));
         io.insert(FH_CAUSES, 1 << 21);
-        assert!(acknowledge(&mut io, Family::Ax200, true).unwrap());
+        assert_eq!(acknowledge(&mut io, Family::Ax200, true), Ok(INT_HW_ERR));
         assert_eq!(io[&AUTOMASK], 0, "the model clears what is written");
-        assert!(!acknowledge(&mut io, Family::Ax200, true).unwrap());
+        assert_eq!(acknowledge(&mut io, Family::Ax200, true), Ok(0));
     }
 
     #[test]
@@ -154,7 +160,8 @@ mod tests {
         assert_eq!(take(Family::Ax200, 0, 1 << 5), 0);
         assert_eq!(take(Family::Ax200, 1 << 21, 0), INT_HW_ERR);
         assert_eq!(take(Family::Ax200, 0, 1 << 29), INT_HW_ERR);
-        assert_eq!(take(Family::Bz, 0, 1 << 3), INT_HW_ERR);
+        assert_eq!(take(Family::Bz, 0, 1 << 3), INT_HW_ERR | INT_TOP_FATAL);
+        assert_eq!(take(Family::Ax210, 0, 1 << 3), INT_HW_ERR);
     }
 
     #[test]

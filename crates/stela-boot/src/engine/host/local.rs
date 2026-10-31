@@ -348,14 +348,15 @@ pub(crate) fn processor() -> u32 {
 }
 
 pub(super) fn state() -> &'static mut State {
+    installed().expect("host state installed")
+}
+
+/// This core's state, while one is installed.
+pub(super) fn installed() -> Option<&'static mut State> {
     // SAFETY: execution is pinned to the Owner's host CPU. Outside native
     // code interrupts are disabled and calls never overlap; native execution
     // keeps no State reference while a fault/helper borrows it.
-    unsafe {
-        (&mut *(*current()).state.get())
-            .as_mut()
-            .expect("host state installed")
-    }
+    unsafe { (&mut *(*current()).state.get()).as_mut() }
 }
 
 /// Current-owner slots only; numbers or copied records cannot prove

@@ -11,6 +11,7 @@ pub(super) enum Op {
     Write(u32, u32),
     Write8(u32, u8),
     Delay(u32),
+    Reset,
 }
 #[derive(Clone)]
 pub(super) struct Owner(pub(super) Arc<AtomicUsize>);
@@ -32,6 +33,7 @@ pub(super) struct ModelState {
     pub(super) all_ff: bool,
     pub(super) stop_ack: bool,
     pub(super) sentinel: Option<(usize, u32)>,
+    pub(super) no_reset: bool,
 }
 impl Default for ModelState {
     fn default() -> Self {
@@ -43,6 +45,7 @@ impl Default for ModelState {
             all_ff: false,
             stop_ack: true,
             sentinel: None,
+            no_reset: false,
         }
     }
 }
@@ -108,5 +111,8 @@ unsafe impl BootIo for Model {
         let shift = (register & 3) * 8;
         *word = (*word & !(0xff << shift)) | (u32::from(value) << shift);
         Ok(())
+    }
+    fn reset_function(&mut self) -> bool {
+        self.operation(Op::Reset).is_ok_and(|state| !state.no_reset)
     }
 }

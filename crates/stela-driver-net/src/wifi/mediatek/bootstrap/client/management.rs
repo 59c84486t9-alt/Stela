@@ -382,12 +382,16 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         let d = rx::decode(Chip::Mt7925, raw).map_err(Error::Rx)?;
         let h = frame.header();
         let group = h.receiver.is_multicast();
+        // A link's PTK is the MLDs', but its IGTK reaches only the setup link.
+        let other = Self::other_link(s, &frame.radio);
+        let on = other.unwrap_or(p);
         if (
             frame.radio.band,
             frame.radio.channel,
             frame.radio.frequency_mhz,
-        ) != (p.channel.band, p.channel.number, p.channel.frequency_mhz)
-            || d.wcid != p.wcid
+        ) != (on.channel.band, on.channel.number, on.channel.frequency_mhz)
+            || d.wcid != on.wcid
+            || group && other.is_some()
             || d.unicast_to_me == group
             || h.control & 12 != 0
             || d.security.icv_error
@@ -402,20 +406,13 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         let mut body = Vec::new();
         body.try_reserve_exact(frame.bytes().len())
             .map_err(|_| Error::NoMemory)?;
+        let (ptk, gtk) = Self::receiving(&mut s.ptk, &mut s.gtk, &mut s.links, &frame.radio)?;
         let pn = if group {
-            let proof = s
-                .gtk
-                .as_mut()
-                .ok_or(Error::NoKey)?
-                .authenticate_bip(&frame)
-                .map_err(Error::Key)?;
+            let proof = gtk.authenticate_bip(&frame).map_err(Error::Key)?;
             body.extend_from_slice(proof.body());
             proof.packet_number()
         } else {
-            let proof = s
-                .ptk
-                .as_mut()
-                .ok_or(Error::NoKey)?
+            let proof = ptk
                 .authorize_unicast_management(&frame, local)
                 .map_err(|e| Error::Key(mailbox::key::Error::Security(e)))?;
             body.extend_from_slice(proof.body());

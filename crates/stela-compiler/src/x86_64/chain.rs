@@ -24,9 +24,14 @@
 //! everything that decides which block a fetch runs: the translation and
 //! code generations, the exception level and the block variant), one per
 //! half of the address space ([`half`]): a TTBR0 write changes only the
-//! lower half's translations, so the upper half's entries outlive it. A hit
-//! transfers like a thunk; a miss, another context or no budget exits
-//! exactly as the redirected exit would. It also clobbers R8, which no exit
+//! lower half's translations, so the upper half's entries outlive it. The
+//! context also moves an entry's slot ([`lookup_salt`]), as the processes of
+//! a system run one shared library's code at the same addresses in contexts
+//! of their own, and would otherwise take each other's entries at every
+//! switch. A slot's set holds two entries in one cache line ([`LookupTable`]),
+//! as two hot PCs of one set would otherwise take each other's entry at every
+//! call. A hit transfers like a thunk; a miss, another context or no budget
+//! exits exactly as the redirected exit would. It also clobbers R8, which no exit
 //! keeps live. The thunk of an exit that sets a nonzero BTYPE (BR or BLR)
 //! also requires the entry to accept that BTYPE (`LookupEntry::targets`),
 //! as a Branch Target check of the entered block's first instruction would.
@@ -37,7 +42,7 @@ use crate::x86_64::asm::{
     Size::{self, Dword, Qword},
 };
 use crate::{GuestAddress, block::ExitKind};
-use alloc::vec::Vec;
+use alloc::{boxed::Box, vec, vec::Vec};
 
 /// Bytes in a direct exit: `movabs rax, target; mov edx, kind; ret`.
 pub const DIRECT_EXIT_BYTES: usize = 16;
@@ -47,10 +52,15 @@ pub const JUMP_BYTES: usize = 5;
 pub const THUNK_BYTES: usize = 42 + DIRECT_EXIT_BYTES + 10;
 /// Bytes in an exit to a dynamic target in RAX: `mov edx, kind; ret`.
 pub const DYNAMIC_EXIT_BYTES: usize = 6;
+/// Bits of a PC that select a [`LookupEntry`].
+const LOOKUP_BITS: u32 = 18;
+/// The slots of one PC, one a context takes by the low bits of its number.
+pub const LOOKUP_SALT_BITS: u32 = 6;
+pub const LOOKUP_SALTS: usize = 1 << LOOKUP_SALT_BITS;
 /// Entries in the engine's lookup table, a power of two.
-pub const LOOKUP_ENTRIES: usize = 1 << 16;
+pub const LOOKUP_ENTRIES: usize = 1 << LOOKUP_BITS;
 /// Bytes in a [`lookup_thunk`], without and with its static target.
-pub const LOOKUP_THUNK_BYTES: usize = 91 + 10;
+pub const LOOKUP_THUNK_BYTES: usize = 116 + 10;
 pub const STATIC_LOOKUP_THUNK_BYTES: usize = LOOKUP_THUNK_BYTES + 10;
 
 /// A direct exit to a static successor in a block's code.
@@ -60,6 +70,48 @@ pub struct DirectExit {
     pub offset: usize,
     pub target: GuestAddress,
     pub kind: ExitKind,
+    /// The block's instructions it leaves unrun ([`ExitWord`]).
+    pub skipped: u16,
+}
+
+impl DirectExit {
+    pub fn word(&self) -> ExitWord {
+        ExitWord {
+            kind: self.kind,
+            skipped: self.skipped,
+        }
+    }
+}
+
+/// What a block's exit returns in RDX: its [`ExitKind`] and, for the side
+/// exit of a branch the block runs past, how many of the block's instructions
+/// that exit left unrun.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExitWord {
+    pub kind: ExitKind,
+    pub skipped: u16,
+}
+
+impl ExitWord {
+    const KIND_BITS: u32 = 8;
+
+    pub const fn encoded(self) -> u32 {
+        self.kind as u32 | (self.skipped as u32) << Self::KIND_BITS
+    }
+
+    /// The kind and the skipped instructions of a word from RDX.
+    pub const fn split(word: u64) -> (u64, u16) {
+        (
+            word & ((1 << Self::KIND_BITS) - 1),
+            (word >> Self::KIND_BITS) as u16,
+        )
+    }
+}
+
+impl From<ExitKind> for ExitWord {
+    fn from(kind: ExitKind) -> Self {
+        Self { kind, skipped: 0 }
+    }
 }
 
 /// The engine's chaining state, which thunks address absolutely.
@@ -90,13 +142,15 @@ pub struct ChainControl {
     /// The attached owner's Acquire snapshot taken before draining sources.
     /// A notification after that snapshot remains pending for the next boundary.
     pub observed_interrupt_epoch: u64,
+    /// [`lookup_salt`] of each of the `contexts`.
+    pub salts: [u32; 2],
 }
 
 // Epoch and observed state are naturally aligned atomic-width words. Capture
 // and storage owners keep the mapped control alive for every embedded address.
 const _: () = assert!(core::mem::offset_of!(ChainControl, interrupt_epoch) == 64);
 const _: () = assert!(core::mem::offset_of!(ChainControl, observed_interrupt_epoch) == 72);
-const _: () = assert!(core::mem::size_of::<ChainControl>() == 80);
+const _: () = assert!(core::mem::size_of::<ChainControl>() == 88);
 
 /// One block a fetch at `pc` runs in `context`, or nothing in context 0.
 #[repr(C)]
@@ -114,6 +168,97 @@ pub struct LookupEntry {
     pub targets: u32,
 }
 
+/// The entries of one set, a cache line, which a thunk probes from the
+/// target's slot to the slot beside it.
+#[repr(C, align(64))]
+#[derive(Debug, Clone, Copy, Default)]
+struct LookupSet([LookupEntry; 2]);
+
+const _: () = assert!(core::mem::size_of::<LookupEntry>() == 32);
+const _: () = assert!(core::mem::size_of::<LookupSet>() == 64);
+
+/// The other entry of `slot`'s set.
+const fn neighbour(slot: usize) -> usize {
+    slot ^ 1
+}
+
+/// The [`LookupEntry`] table, by [`lookup_slot`].
+pub struct LookupTable(Box<[LookupSet]>);
+
+impl LookupTable {
+    pub fn new() -> Self {
+        let sets = vec![LookupSet::default(); LOOKUP_ENTRIES / 2];
+        Self(sets.into_boxed_slice())
+    }
+
+    /// The table's host address, for `ChainControl::table`.
+    pub fn address(&self) -> u64 {
+        self.0.as_ptr() as u64
+    }
+
+    pub fn clear(&mut self) {
+        self.0.fill(LookupSet::default());
+    }
+
+    /// Whether every entry is empty.
+    pub fn is_empty(&self) -> bool {
+        self.0
+            .iter()
+            .flat_map(|set| &set.0)
+            .all(|entry| *entry == LookupEntry::default())
+    }
+
+    /// The entry of `pc` in `context`'s set for `slot`: one in `context` if
+    /// there is one, as a thunk would find it, else one in another context.
+    pub fn find(&self, slot: usize, pc: u64, context: u64) -> LookupEntry {
+        let (first, second) = (self[slot], self[neighbour(slot)]);
+        if second.pc == pc && (first.pc != pc || first.context != context) {
+            second
+        } else {
+            first
+        }
+    }
+
+    /// Put `entry` in the slot its PC and context pick, and what held it
+    /// beside it unless that is the entry's own older self.
+    pub fn insert(&mut self, slot: usize, entry: LookupEntry) {
+        let resident = self[slot];
+        if resident.context != 0 && (resident.pc != entry.pc || resident.context != entry.context) {
+            self[neighbour(slot)] = resident;
+        }
+        self[slot] = entry;
+    }
+
+    /// Forget what `slot`'s set holds of the PCs in `pcs`.
+    pub fn forget(&mut self, slot: usize, pcs: core::ops::RangeInclusive<u64>) {
+        for slot in [slot, neighbour(slot)] {
+            if pcs.contains(&self[slot].pc) {
+                self[slot] = LookupEntry::default();
+            }
+        }
+    }
+}
+
+impl Default for LookupTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl core::ops::Index<usize> for LookupTable {
+    type Output = LookupEntry;
+
+    fn index(&self, slot: usize) -> &LookupEntry {
+        &self.0[slot / 2].0[slot % 2]
+    }
+}
+
+impl core::ops::IndexMut<usize> for LookupTable {
+    fn index_mut(&mut self, slot: usize) -> &mut LookupEntry {
+        &mut self.0[slot / 2].0[slot % 2]
+    }
+}
+
 /// The bits of `ChainControl::block` above the block's index that hold the
 /// BTYPE it was entered with.
 pub const BLOCK_BTYPE_SHIFT: u32 = 32;
@@ -124,9 +269,17 @@ pub const fn half(pc: u64) -> usize {
     (pc >> 55 & 1) as usize
 }
 
-/// The table slot of `pc`.
-pub const fn lookup_slot(pc: u64) -> usize {
-    (pc as usize >> 2) & (LOOKUP_ENTRIES - 1)
+/// What `context` flips of the slots of the PCs it looks up.
+pub const fn lookup_salt(context: u64) -> u32 {
+    (context as u32 & ((1 << LOOKUP_SALT_BITS) - 1)) << (LOOKUP_BITS - LOOKUP_SALT_BITS)
+}
+
+/// The table slot of `pc` in `context`: its low bits with the next ones
+/// folded in, as code a multiple of the table's span apart is common and
+/// would share every slot, and the context's salt.
+pub const fn lookup_slot(pc: u64, context: u64) -> usize {
+    let pc = pc as u32;
+    (pc >> 2 ^ pc >> (2 + LOOKUP_BITS) ^ lookup_salt(context)) as usize & (LOOKUP_ENTRIES - 1)
 }
 
 // `sub qword [rcx],1` addresses the budget at offset 0.
@@ -134,6 +287,7 @@ const _: () = assert!(core::mem::offset_of!(ChainControl, budget) == 0);
 const RETIRED: i32 = core::mem::offset_of!(ChainControl, retired) as i32;
 const BLOCK: i32 = core::mem::offset_of!(ChainControl, block) as i32;
 const CONTEXTS: i32 = core::mem::offset_of!(ChainControl, contexts) as i32;
+const SALTS: i32 = core::mem::offset_of!(ChainControl, salts) as i32;
 const TABLE: i32 = core::mem::offset_of!(ChainControl, table) as i32;
 const HITS: i32 = core::mem::offset_of!(ChainControl, hits) as i32;
 const LINKED: i32 = core::mem::offset_of!(ChainControl, linked) as i32;
@@ -206,7 +360,7 @@ struct ThunkPlan {
     block: u32,
     entry: u64,
     target: GuestAddress,
-    kind: ExitKind,
+    kind: ExitWord,
 }
 
 const _: () = assert!(core::mem::size_of::<LookupEntry>() == 32);
@@ -217,7 +371,7 @@ const ENTRY_BLOCK: i32 = core::mem::offset_of!(LookupEntry, block) as i32;
 const ENTRY_TARGETS: i32 = core::mem::offset_of!(LookupEntry, targets) as i32;
 
 /// A direct exit to `target` with `kind`, as every block emits it.
-pub fn direct_exit(target: GuestAddress, kind: ExitKind) -> [u8; DIRECT_EXIT_BYTES] {
+pub fn direct_exit(target: GuestAddress, kind: impl Into<ExitWord>) -> [u8; DIRECT_EXIT_BYTES] {
     let mut code = Code::new();
     super::block::direct_exit_with(&mut code.asm(), target, kind);
     code.try_into().expect("a direct exit's length")
@@ -235,7 +389,7 @@ pub fn thunk(
     block: u32,
     entry: u64,
     target: GuestAddress,
-    kind: ExitKind,
+    kind: impl Into<ExitWord>,
 ) -> Option<Vec<u8>> {
     thunk_with_policy(
         ThunkPlan {
@@ -245,7 +399,7 @@ pub fn thunk(
             block,
             entry,
             target,
-            kind,
+            kind: kind.into(),
         },
         Interruption::Epoch,
     )
@@ -291,7 +445,7 @@ pub fn lookup_thunk(
     control: u64,
     retired: u32,
     target: Option<GuestAddress>,
-    kind: ExitKind,
+    kind: impl Into<ExitWord>,
     btype: u8,
 ) -> Option<Vec<u8>> {
     lookup_with_policy(control, retired, target, kind, btype, Interruption::Epoch)
@@ -300,7 +454,7 @@ fn lookup_with_policy(
     control: u64,
     retired: u32,
     target: Option<GuestAddress>,
-    kind: ExitKind,
+    kind: impl Into<ExitWord>,
     btype: u8,
     policy: Interruption,
 ) -> Option<Vec<u8>> {
@@ -318,21 +472,35 @@ fn lookup_with_policy(
     if let Some(interrupted) = interruption_gate(&mut asm, policy) {
         misses.push(interrupted);
     }
-    // RDX = the target's entry in the table.
-    asm.mov(Dword, Rdx, Rax);
-    asm.shift_imm(ShiftOp::Shr, Dword, Rdx, 2);
-    asm.alu_imm32(Alu::And, Dword, Rdx, LOOKUP_ENTRIES as i32 - 1);
-    asm.shift_imm(ShiftOp::Shl, Dword, Rdx, 5);
-    asm.alu_load(Alu::Add, Qword, Rdx, Mem::base(Rcx, TABLE));
-    asm.alu_load(Alu::Cmp, Qword, Rax, Mem::base(Rdx, 0));
-    misses.push(asm.jcc8(Cond::Ne));
-    // R8 = the context of the target's half.
+    // R8 = the target's half; RDX = its entry in the table.
     asm.mov(Qword, R8, Rax);
     asm.shift_imm(ShiftOp::Shr, Qword, R8, 55);
     asm.alu_imm8(Alu::And, Dword, R8, 1);
+    asm.mov(Dword, Rdx, Rax);
+    asm.shift_imm(ShiftOp::Shr, Dword, Rdx, LOOKUP_BITS as u8);
+    asm.alu(Alu::Xor, Dword, Rdx, Rax);
+    asm.shift_imm(ShiftOp::Shr, Dword, Rdx, 2);
+    asm.alu_load(Alu::Xor, Dword, Rdx, Mem::indexed(Rcx, R8, 4, SALTS));
+    asm.alu_imm32(Alu::And, Dword, Rdx, LOOKUP_ENTRIES as i32 - 1);
+    asm.shift_imm(ShiftOp::Shl, Dword, Rdx, 5);
+    asm.alu_load(Alu::Add, Qword, Rdx, Mem::base(Rcx, TABLE));
     asm.mov_load(Qword, R8, Mem::indexed(Rcx, R8, 8, CONTEXTS));
+    asm.alu_load(Alu::Cmp, Qword, Rax, Mem::base(Rdx, 0));
+    let other_pc = asm.jcc8(Cond::Ne);
+    asm.alu_load(Alu::Cmp, Qword, R8, Mem::base(Rdx, ENTRY_CONTEXT));
+    let found = asm.jcc8(Cond::E);
+    asm.bind(other_pc);
+    asm.alu_imm8(
+        Alu::Xor,
+        Qword,
+        Rdx,
+        core::mem::size_of::<LookupEntry>() as i8,
+    );
+    asm.alu_load(Alu::Cmp, Qword, Rax, Mem::base(Rdx, 0));
+    misses.push(asm.jcc8(Cond::Ne));
     asm.alu_load(Alu::Cmp, Qword, R8, Mem::base(Rdx, ENTRY_CONTEXT));
     misses.push(asm.jcc8(Cond::Ne));
+    asm.bind(found);
     if btype != 0 {
         asm.test_imm(Size::Byte, Mem::base(Rdx, ENTRY_TARGETS), 1 << btype);
         misses.push(asm.jcc8(Cond::E));
@@ -440,8 +608,15 @@ mod tests {
         super::super::block::exit_kind(&mut emitted, ExitKind::Return);
         assert_eq!(emitted, dynamic_exit(ExitKind::Return));
         let span = 4 * LOOKUP_ENTRIES as u64;
-        assert_eq!(lookup_slot(span + 4), 1);
-        assert_eq!(lookup_slot(2 * span), 0);
+        assert_eq!(lookup_slot(4, 0), 1);
+        assert_eq!(lookup_slot(span, 0), 1);
+        assert_ne!(lookup_slot(span + 4, 0), lookup_slot(4, 0));
+        assert_ne!(lookup_slot(4, 1), lookup_slot(4, 0));
+        assert_eq!(
+            lookup_slot(4, 7),
+            lookup_slot(4, 7 + LOOKUP_SALTS as u64),
+            "only a context's low bits pick its slot"
+        );
     }
 
     /// Lookup thunks run on the host: a hit in the current context with
@@ -470,10 +645,11 @@ mod tests {
         const PAGE: usize = 4096;
         const BLOCK_AT: usize = 1024;
         const TARGET: u64 = 0xffff_fe00_0123_4568;
-        let mut table = vec![LookupEntry::default(); LOOKUP_ENTRIES];
+        let mut table = LookupTable::new();
         let mut control = ChainControl {
-            table: table.as_ptr() as u64,
+            table: table.address(),
             contexts: [5, 7],
+            salts: [lookup_salt(5), lookup_salt(7)],
             ..ChainControl::default()
         };
         let control_at = &mut control as *mut ChainControl as u64;
@@ -521,7 +697,7 @@ mod tests {
                 block: 42,
                 targets: 0b0111,
             };
-            table[lookup_slot(TARGET)] = entry;
+            table[lookup_slot(TARGET, 7)] = entry;
             control.budget = 2;
             assert_eq!(exit(dynamic(0, TARGET)), (0x5151, 99));
             assert_eq!(
@@ -535,25 +711,39 @@ mod tests {
             assert_eq!((control.budget, control.retired), (u64::MAX, 12));
             control.budget = 5;
             // Another PC in the slot, and another context, miss.
-            let other = TARGET + 4 * LOOKUP_ENTRIES as u64;
+            let other = TARGET ^ (1 << (2 + LOOKUP_BITS) | 1 << 2);
+            assert_eq!(lookup_slot(other, 7), lookup_slot(TARGET, 7));
             assert_eq!(exit(dynamic(0, other)), (other, ExitKind::Return as u64));
-            table[lookup_slot(TARGET)].context = 6;
+            // The set's other entry serves too.
+            let (hits, retired) = (control.hits, control.retired);
+            table.insert(lookup_slot(TARGET, 7), LookupEntry { pc: other, ..entry });
+            assert_eq!(table[neighbour(lookup_slot(TARGET, 7))].pc, TARGET);
+            assert_eq!(exit(dynamic(0, TARGET)), (0x5151, 99));
+            assert_eq!(table.find(lookup_slot(TARGET, 7), TARGET, 7).pc, TARGET);
+            assert_eq!(exit(dynamic(0, other)), (0x5151, 99));
+            assert_eq!(control.hits, hits + 2);
+            control.retired = retired;
+            control.hits = hits;
+            control.budget = 5;
+            table[neighbour(lookup_slot(TARGET, 7))] = LookupEntry::default();
+            table[lookup_slot(TARGET, 7)] = entry;
+            table[lookup_slot(TARGET, 7)].context = 6;
             assert_eq!(exit(dynamic(0, TARGET)), (TARGET, ExitKind::Return as u64));
             assert_eq!(exit(fixed(0, 0)), (TARGET, ExitKind::Call as u64));
             assert_eq!((control.budget, control.hits, control.block), (5, 2, 42));
             // The lower half's context names a lower-half target's entries.
             let lower = TARGET & !(1 << 55);
-            table[lookup_slot(lower)] = LookupEntry { pc: lower, ..entry };
+            table[lookup_slot(lower, 5)] = LookupEntry { pc: lower, ..entry };
             assert_eq!(exit(dynamic(0, lower)), (lower, ExitKind::Return as u64));
-            table[lookup_slot(lower)].context = 5;
+            table[lookup_slot(lower, 5)].context = 5;
             assert_eq!(exit(dynamic(0, lower)), (0x5151, 99));
             assert_eq!((control.budget, control.hits), (4, 3));
-            table[lookup_slot(TARGET)] = entry;
+            table[lookup_slot(TARGET, 7)] = entry;
             // A BR with BTYPE 0b11 needs the entry to accept it, and names
             // the BTYPE beside the block.
-            table[lookup_slot(TARGET)].context = 7;
+            table[lookup_slot(TARGET, 7)].context = 7;
             assert_eq!(exit(branch(0, TARGET)), (TARGET, ExitKind::Indirect as u64));
-            table[lookup_slot(TARGET)].targets = 0b1001;
+            table[lookup_slot(TARGET, 7)].targets = 0b1001;
             assert_eq!(exit(branch(0, TARGET)), (0x5151, 99));
             assert_eq!(
                 (control.budget, control.retired, control.hits, control.block),

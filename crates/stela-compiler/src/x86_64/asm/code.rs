@@ -8,6 +8,10 @@ pub(crate) struct Code {
     pub(super) bytes: Vec<u8>,
     pub(super) instructions: usize,
     pub(super) sites: Vec<EmissionSite>,
+    /// Whether guest registers live in host registers ([`super::super::pinned`]).
+    pub(super) pinned: bool,
+    /// Whether this code runs under PSTATE.DIT on a target that audits it.
+    constant_time: bool,
 }
 
 /// Exact faulting instruction interval, separate from source retirement.
@@ -16,6 +20,8 @@ pub(crate) struct EmissionSite {
     pub start: usize,
     pub end: usize,
     pub site: crate::block::RecoverySite,
+    /// The host register that holds SP during the access, if not its own.
+    pub stack: Option<u8>,
 }
 
 /// A byte and instruction position captured at an emission boundary.
@@ -63,7 +69,45 @@ impl Code {
             bytes: Vec::with_capacity(INITIAL_BYTES),
             instructions: 0,
             sites: Vec::new(),
+            pinned: false,
+            constant_time: false,
         }
+    }
+    /// Code that keeps [`super::super::pinned`] guest registers in host
+    /// registers.
+    pub(crate) fn pinned() -> Self {
+        Self {
+            pinned: true,
+            ..Self::new()
+        }
+    }
+    /// Empty code of this one's kind.
+    pub(crate) fn alike(&self) -> Self {
+        Self {
+            pinned: self.pinned,
+            constant_time: self.constant_time,
+            ..Self::new()
+        }
+    }
+    /// Whether emitters must keep to data operand independent instructions.
+    pub(crate) const fn constant_time(&self) -> bool {
+        self.constant_time
+    }
+    /// Keep to data operand independent instructions, or not.
+    pub(crate) fn set_constant_time(&mut self, constant_time: bool) {
+        self.constant_time = constant_time;
+    }
+    /// Whether this code keeps guest registers in host registers.
+    pub(crate) const fn is_pinned(&self) -> bool {
+        self.pinned
+    }
+    /// The host register that holds `register` in this code.
+    pub(crate) fn host(&self, register: crate::aarch64::Register) -> Option<super::Gpr> {
+        self.pinned.then(|| super::super::pinned::host(register))?
+    }
+    /// Keep guest registers in host registers from here on, or not.
+    pub(crate) fn set_pinned(&mut self, pinned: bool) {
+        self.pinned = pinned;
     }
     /// An encoder that appends here and adds to this count.
     pub(crate) fn asm(&mut self) -> Asm<'_> {
@@ -72,6 +116,7 @@ impl Code {
             instructions: 0,
             shared: Some(&mut self.instructions),
             sites: Some(&mut self.sites),
+            pinned: self.pinned,
         }
     }
     /// A typed recipe that emits exactly one guest memory instruction.
@@ -95,6 +140,7 @@ impl Code {
             start,
             end,
             site: crate::block::RecoverySite::guest_access(),
+            stack: None,
         });
     }
     pub(crate) fn sites(&self) -> &[EmissionSite] {
@@ -188,6 +234,8 @@ impl Code {
             bytes: self.bytes.split_off(at.bytes),
             instructions: self.instructions - at.instructions,
             sites,
+            pinned: self.pinned,
+            constant_time: self.constant_time,
         };
         self.instructions = at.instructions;
         tail

@@ -17,6 +17,77 @@ fn hub(pes: usize) -> (Arc<Hub>, Arc<AtomicUsize>) {
     (hub, kicks)
 }
 
+fn tlbi(kind: crate::machine::system::TlbiKind, operand: u64) -> Maintenance {
+    use crate::machine::system::{Regime, Tlbi, TlbiAttr, TlbiLevel};
+    Maintenance::Tlb(tlbi::Scope::new(
+        &Tlbi {
+            kind,
+            regime: Regime::EL10,
+            vmid: None,
+            broadcast: Broadcast::ISH,
+            level: TlbiLevel::Any,
+            attr: TlbiAttr::AllAttr,
+            operand,
+        },
+        tlbi::Context::default(),
+    ))
+}
+
+/// A TLBI of another context leaves its mail for the PE's next read, and
+/// neither interrupts it nor waits for it.
+#[test]
+fn a_tlbi_passes_by_a_pe_translating_another_context() {
+    use crate::machine::system::TlbiKind::{ASID, VA, VAA};
+    const ASID_5: u64 = 5 << 48;
+    let (hub, _) = hub(2);
+    let inbox = &hub.inboxes[1];
+    let word = context_word(mmu::Regime::El10, 7);
+    let epoch = || inbox.chain.interrupt_epoch().load(Ordering::Relaxed);
+    assert_eq!(hub.broadcast(0, tlbi(ASID, ASID_5)).len(), 1, "unpublished");
+    inbox.translating.store(word, Ordering::Relaxed);
+    let interrupts = epoch();
+    let passes = [ASID_5, ASID_5 | 0x1234];
+    for (kind, operand) in [ASID, VA].into_iter().zip(passes) {
+        assert!(hub.broadcast(0, tlbi(kind, operand)).is_empty());
+    }
+    assert_eq!(epoch(), interrupts);
+    assert!(hub.pending(1));
+    assert_eq!(hub.take(1).unwrap().maintenance.len(), 3);
+    assert_eq!(
+        hub.broadcast(0, tlbi(ASID, 7 << 48)).len(),
+        1,
+        "its context"
+    );
+    assert_eq!(hub.broadcast(0, tlbi(VAA, 0x1234)).len(), 1, "every ASID");
+    assert!(inbox.lower_globals.widen(0x123_0000, 0x123_ffff));
+    assert!(!inbox.lower_globals.widen(0x123_4000, 0x123_7fff));
+    assert_eq!(
+        hub.broadcast(0, tlbi(VA, ASID_5 | 0x1234)).len(),
+        1,
+        "its global page"
+    );
+    assert!(hub.broadcast(0, tlbi(VA, ASID_5 | 0x4321)).is_empty());
+}
+
+/// What a PE translates is published before its next mail read.
+#[test]
+fn a_pe_publishes_the_context_it_translates() {
+    use super::super::tests::machine;
+    let mut machine = machine(&[0xd503_201f]);
+    let (hub, _) = hub(1);
+    machine.enter_parallel(Arc::clone(&hub)).unwrap();
+    assert_eq!(
+        hub.inboxes[0].translating.load(Ordering::Relaxed),
+        ANY_CONTEXT
+    );
+    machine.sync_host_regime();
+    let controls = machine.cpu.controls(machine.cpu.regime());
+    assert_eq!(
+        hub.inboxes[0].translating.load(Ordering::Relaxed),
+        context_word(controls.regime, mmu::current_asid(&controls))
+    );
+}
+
 #[test]
 fn duplicate_safe_attachment_refuses_without_replacing_the_live_owner() {
     use super::super::tests::{BASE, board};
@@ -141,12 +212,7 @@ fn populated_machine_discards_thunks_before_adopting_a_hub_control() {
         machine.blocks.is_empty() && machine.index.is_empty() && machine.fault_recovery.is_empty()
     );
     assert!(machine.host.installed.is_empty());
-    assert!(
-        machine
-            .targets
-            .iter()
-            .all(|entry| *entry == stela_compiler::x86_64::chain::LookupEntry::default())
-    );
+    assert!(machine.targets.is_empty());
     machine.cpu.pc = BASE;
     machine.host.exits = vec![direct(BASE + 12), direct(BASE), direct(BASE + 12)];
     machine.step().unwrap();
@@ -459,6 +525,27 @@ fn a_page_invalidation_the_pe_has_yet_to_read_covers_the_same_page_again() {
     // Every post counts: the PE's acknowledgment of the last one is the
     // one waited for.
     assert_eq!((mail.serial, machine.posted.as_slice()), (5, &[(1, 5)][..]));
+}
+
+#[test]
+fn an_ic_ivau_reaches_other_pes_only_for_compiled_pages_once_per_dsb() {
+    const PAGE: u64 = 0x4000_0000;
+    let (hub, _) = hub(2);
+    let mut machine = first_of_two(&[], &hub);
+    // No PE compiled from it: the IC IVAU of each line stops here.
+    machine.post_code_page(PAGE);
+    assert!(machine.posted.is_empty());
+    // The next lines of a page add nothing to its first one.
+    hub.compiling(PAGE + 0x100);
+    machine.post_code_page(PAGE + 0x40);
+    machine.post_code_page(PAGE + 0x80);
+    assert_eq!(machine.posted, [(1, 1)]);
+    // A DSB ends the run: what follows may have been written since.
+    let mail = hub.take(1).unwrap();
+    hub.acknowledge(1, mail.serial);
+    machine.complete_maintenance().unwrap();
+    machine.post_code_page(PAGE + 0x40);
+    assert_eq!(machine.posted, [(1, 2)]);
 }
 
 #[test]

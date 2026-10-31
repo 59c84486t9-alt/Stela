@@ -51,6 +51,10 @@ pub(crate) struct Tables {
     pub geo: Option<Selected<Geo>>,
     pub tas: Option<Selected<Tas>>,
     pub sgom: Option<[u8; 338]>,
+    /// UATS: the 6 GHz AP types each country allows.
+    pub ap_types: Option<[u8; 338]>,
+    /// UNEB: the same of UNII-9.
+    pub unii9_ap_types: Option<[u8; 338]>,
 }
 
 fn integer(object: &Object) -> Option<u64> {
@@ -399,12 +403,21 @@ impl<B: BiosIo> Session<B> {
             None
         };
         let tas = self.selected_table(Variable::Wtas, uefi_tas, acpi_tas)?;
+        let map = |raw: Option<_>| {
+            raw.as_deref()
+                .and_then(|raw| power_tables::CountryMap::parse(raw).ok())
+                .and_then(|table| table.raw_map().try_into().ok())
+        };
+        let ap_types = map(self.uefi(Variable::Uats)?);
+        let unii9_ap_types = map(self.uefi(Variable::Uneb)?);
         Ok(Tables {
             ppag,
             sar,
             geo,
             tas,
             sgom,
+            ap_types,
+            unii9_ap_types,
         })
     }
 }

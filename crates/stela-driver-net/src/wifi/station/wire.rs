@@ -207,6 +207,7 @@ fn rsn(mut bytes: &[u8]) -> Result<(Cipher, Cipher), Error> {
 }
 
 pub(super) mod action;
+pub mod link_changes;
 pub mod multi_link;
 pub mod pmf;
 pub mod six_ghz;

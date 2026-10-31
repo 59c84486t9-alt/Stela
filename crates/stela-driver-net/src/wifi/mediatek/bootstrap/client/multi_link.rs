@@ -15,7 +15,10 @@ use crate::wifi::{
         mcu::{client::MldLink, key::Context as KeyContext},
     },
     security::KeySlot,
-    station::AssociationContext,
+    station::{
+        AssociationContext,
+        wire::link_changes::{mappings, removals},
+    },
 };
 use alloc::borrow::Cow;
 use station::multi_link::Affiliation;
@@ -39,6 +42,20 @@ pub(super) struct LinkKey<'a> {
     pub(super) seed: ReplaySeed,
 }
 
+/// Whether `elements` take any of `links` from the association, which goes
+/// on in mac80211 but ends here: the links stay up together until it does, and
+/// the next join leaves out what the AP no longer offers.
+fn taking_a_link(links: u16, elements: &[u8]) -> bool {
+    let removed = removals(elements)
+        .is_some_and(|removed| removed.iter().any(|&(link, _)| links & 1 << link != 0));
+    let barred = mappings(elements).map_or(true, |mappings| {
+        mappings
+            .iter()
+            .any(|mapping| mapping.switch_time != 0 && links & !mapping.links != 0)
+    });
+    removed || barred
+}
+
 /// Another link of an AP MLD association, as `mt7925_mac_link_bss_add` and
 /// `mt7925_mac_link_sta_add` add one: an interface of its own, its AP's
 /// WCID and keys, and the records configuring both.
@@ -54,7 +71,7 @@ pub(super) struct Link<C: 'static> {
     ptk_removed: Option<Removal>,
     gtk_removed: Option<Removal>,
     interface_removed: Option<Deactivated>,
-    /// The unsupported operations of the link's frames already reported.
+    /// The link's untracked beacons and channel switch already reported.
     reported: [bool; 2],
     /// The link's BSS record, the setup link's AP record naming both links,
     /// the link's AP record and its EDCA, in `mt7925_mac_link_sta_add` order.
@@ -365,36 +382,60 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         )
     }
 
-    /// Whether management or control frame `frame` came on another link,
-    /// whose beacons and management mac80211 tracks per link and this
-    /// driver leaves to the OS: what it leaves is reported to `events` once
-    /// per link.
-    pub(super) fn on_other_link(
+    /// The profile of the link other than the setup link that `radio` heard
+    /// a frame on.
+    pub(super) fn other_link(s: &Owned<I, Q, C>, radio: &wifi::RadioStatus) -> Option<Profile> {
+        let link = s.links.iter().find(|link| {
+            (link.profile.channel.band, link.profile.channel.number) == (radio.band, radio.channel)
+        })?;
+        Some(link.profile)
+    }
+
+    /// Whether `frame` is a beacon of another link, whose tracking mac80211
+    /// does per link and this driver leaves undone: reported to `events` once
+    /// per link. The link's other frames name the MLDs and go the setup
+    /// link's way.
+    pub(super) fn beacon_of_other_link(
         s: &mut Owned<I, Q, C>,
         frame: &Mpdu,
         events: &mut Vec<Event>,
     ) -> bool {
-        let radio = &frame.radio;
-        let Some(link) = s.links.iter_mut().find(|link| {
-            (link.profile.channel.band, link.profile.channel.number) == (radio.band, radio.channel)
-        }) else {
+        if !matches!(frame.header().control & 0x00fc, 0x0080 | 0x0050) {
+            return false;
+        }
+        let Some(link) = Self::link_on(s, &frame.radio) else {
             return false;
         };
-        let (kind, operation) = if matches!(frame.header().control & 0x00fc, 0x0080 | 0x0050) {
-            (
-                0,
+        if !core::mem::replace(&mut link.reported[0], true) {
+            events.push(Event::Unsupported(
                 "MLO link beacon tracking: EDCA, channel switch, bandwidth and beacon loss",
-            )
-        } else {
-            (
-                1,
-                "MLO link management: departures, actions and block ack sessions",
-            )
-        };
-        if !core::mem::replace(&mut link.reported[kind], true) {
-            events.push(Event::Unsupported(operation));
+            ));
         }
         true
+    }
+
+    /// Whether a channel switch announced on `radio` is another link's, which
+    /// stays on its channel until its AP is gone: reported once per link.
+    pub(super) fn switch_of_other_link(s: &mut Owned<I, Q, C>, radio: &wifi::RadioStatus) -> bool {
+        let Some(link) = Self::link_on(s, radio) else {
+            return false;
+        };
+        let first = !core::mem::replace(&mut link.reported[1], true);
+        if first {
+            s.csa.ready.push(Event::Unsupported(
+                "a channel switch of an MLO link other than the setup link",
+            ));
+        }
+        true
+    }
+
+    fn link_on<'a>(
+        s: &'a mut Owned<I, Q, C>,
+        radio: &wifi::RadioStatus,
+    ) -> Option<&'a mut Link<C>> {
+        s.links.iter_mut().find(|link| {
+            (link.profile.channel.band, link.profile.channel.number) == (radio.band, radio.channel)
+        })
     }
 
     /// The PTK and GTK of the link `radio` received on: another link's on
@@ -559,6 +600,28 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         Ok(())
     }
 
+    /// A beacon of the association of `setup` took one of its links: report it
+    /// once and let the association go.
+    pub(super) fn follow_links(
+        s: &mut Owned<I, Q, C>,
+        setup: &AssociationContext,
+        elements: &[u8],
+    ) {
+        let Some(affiliation) = setup.affiliation() else {
+            return;
+        };
+        let links = s
+            .links
+            .iter()
+            .fold(1 << affiliation.link_id, |links, link| {
+                links | 1 << link.link_id
+            });
+        if taking_a_link(links, elements) {
+            s.link_taken = true;
+            s.csa.drop_connection();
+        }
+    }
+
     /// `mt7925_change_vif_links` restoring the single-link station once the
     /// association's peers retired.
     pub(super) fn unbind_links(s: &mut Owned<I, Q, C>) -> Result<(), Error> {
@@ -571,5 +634,36 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             .map_err(|e| Error::Bootstrap(super::super::Error::Interface(e)))?;
         s.phase = Phase::Idle;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_link_of_ours_going_ends_the_association_and_a_stranger_does_not() {
+        let links = 1 << 3 | 1 << 5;
+        let removing = |link: u8| vec![255, 9, 107, 2, 0, 1, 0, 3, link, 0, 1];
+        assert!(taking_a_link(links, &removing(5)));
+        assert!(!taking_a_link(links, &removing(6)));
+        assert!(!taking_a_link(links, &[]));
+    }
+
+    #[test]
+    fn a_mapping_ends_the_association_only_when_it_comes_and_leaves_a_link_out() {
+        let links = 1 << 3 | 1 << 5;
+        let mapped = |control: u8, to: u8| {
+            let mut element = vec![255, 13, 109, control, 0xff, 9, 0];
+            element.extend([to; 8]);
+            element
+        };
+        assert!(taking_a_link(links, &mapped(2 | 0x08 | 0x20, 1 << 3)));
+        assert!(!taking_a_link(
+            links,
+            &mapped(2 | 0x08 | 0x20, 1 << 3 | 1 << 5)
+        ));
+        // Refused outright, as mac80211 disconnects on it.
+        assert!(taking_a_link(links, &mapped(0x08 | 0x20, 1 << 3)));
     }
 }

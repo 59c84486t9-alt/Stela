@@ -95,6 +95,38 @@ fn setup(chip: Chip, model: Model) -> Control<Model> {
     .unwrap()
 }
 #[test]
+fn a_captured_interrupt_is_acknowledged_with_the_vector_quiet() {
+    let mut m = Model::default();
+    m.registers
+        .insert(MT_WFDMA0_HOST_INT_STA, 1 << 29 | 1 << 2 | 1 << 31);
+    m.registers.insert(MT_MCU_CMD, 1);
+    let mut c = setup(Chip::Mt7925, m);
+    c.driver_own(false).unwrap();
+    c.open_interrupts().unwrap();
+    let start = c.registers.test_io().operations.len();
+    c.capture_interrupts().unwrap();
+    let io = c.registers.test_io();
+    let writes: Vec<_> = io.operations[start..]
+        .iter()
+        .filter(|operation| operation.0 == 1)
+        .map(|operation| (operation.1, operation.2))
+        .collect();
+    assert_eq!(
+        writes,
+        [
+            (MT_WFDMA0_HOST_INT_ENA, 0),
+            (MT_WFDMA0_HOST_INT_STA, 1 << 29 | 1 << 2),
+            (MT_MCU_CMD, 1),
+        ]
+    );
+    c.unmask_interrupts().unwrap();
+    let io = c.registers.test_io();
+    assert_eq!(io.registers[&MT_WFDMA0_HOST_INT_ENA], 0x2e07_fff5);
+    assert_eq!(io.registers[&MT_PCIE_MAC_INT_ENABLE], 0xff);
+    assert_eq!(io.registers[&MT_MCU2HOST_SW_INT_ENA], 1);
+}
+
+#[test]
 fn ownership_ack_and_dma_idle_precede_scheduler_reset_writes() {
     for chip in [Chip::Mt7921, Chip::Mt7922, Chip::Mt7925] {
         for force in [false, true] {

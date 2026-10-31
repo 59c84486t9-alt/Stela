@@ -673,6 +673,10 @@ impl Translations for Store<'_> {
         self.keep_pending(&offer);
         self.keep_shared(offer);
     }
+
+    fn lend(&mut self, offer: Offer) {
+        self.keep_shared(offer);
+    }
 }
 
 #[cfg(test)]

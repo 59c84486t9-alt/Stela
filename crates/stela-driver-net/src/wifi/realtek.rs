@@ -6,11 +6,13 @@
 //! hardware references, not a Linux kernel interface.
 pub mod attach;
 pub mod beacon;
+pub mod bit_rate;
 pub mod bootstrap;
 pub mod calibrate;
 pub mod ccmp;
 pub mod coex;
 pub mod commands;
+pub mod deep;
 pub mod descriptor;
 pub mod download;
 pub mod dynamic;
@@ -24,6 +26,7 @@ pub mod hci;
 pub mod identity;
 pub mod interrupt;
 pub mod io;
+pub mod link;
 pub mod phy;
 pub mod power;
 pub mod receive;

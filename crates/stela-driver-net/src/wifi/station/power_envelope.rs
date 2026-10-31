@@ -223,6 +223,15 @@ impl PowerEnvelope {
         envelope
     }
 
+    /// The one envelope `data` holds, as a Channel Switch Wrapper carries it.
+    pub fn single(data: &[u8]) -> Self {
+        let mut envelope = Self::none();
+        if valid(data) {
+            envelope.take(data);
+        }
+        envelope
+    }
+
     /// `ieee80211_parse_tpe`, of an element `valid` admitted.
     fn take(&mut self, data: &[u8]) {
         let (info, values) = (data[0], &data[1..]);

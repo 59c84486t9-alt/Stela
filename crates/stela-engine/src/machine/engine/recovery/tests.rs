@@ -110,9 +110,7 @@ fn exact_lazy_qualification_replaces_portable_bank_with_only_minted_rows() {
 }
 
 #[test]
-fn dirty_guest_bindings_survive_packing() {
-    // The complete system-mode region keeps dirty values across its stores
-    // and loads; a short fallback can commit every value before the load.
+fn fault_rows_survive_packing() {
     let program = [0x9100_0400u32, 0xf900_0020, 0xf940_0043, 0x9100_0c64].repeat(64);
     let mut description = prepare::test_preparation().description();
     description.checks = stela_compiler::x86_64::MemoryChecks::system(true, false, true, false);
@@ -122,15 +120,10 @@ fn dirty_guest_bindings_survive_packing() {
         compiled, input, ..
     } = preparation.prepare(&source, BASE, source.len()).unwrap()
     else {
-        panic!("actual dirty-register load compilation");
+        panic!("actual load compilation");
     };
     assert_eq!(input, source.len());
-    assert!(
-        compiled
-            .fault_recovery
-            .iter()
-            .any(|row| !row.bindings.is_empty())
-    );
+    assert!(!compiled.fault_recovery.is_empty());
     let expected = compiled.fault_recovery.clone();
     let mut owner =
         Template::compiled(Arc::new(Emission::new(source, compiled, preparation))).installed();

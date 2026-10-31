@@ -113,7 +113,7 @@ mod tests {
                     state.x.fill(0xdead_beef_1234_5678);
                     state.sp = 0xa500_0000_0000_2000;
                     state.nzcv = 0xf000_0000;
-                    state.reserved = 0xa5a5_5a5a;
+                    state.exclusive_bytes = 0xa5a5_5a5a;
                     state.fpcr = 0x0300_0000;
                     state.fpsr = 0x0800_009f;
                     state.v.fill([0x1122_3344, 0x8877_6655]);

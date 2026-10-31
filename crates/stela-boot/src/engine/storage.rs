@@ -38,51 +38,66 @@ use stela_runtime::pc::{
     storage::{self, Named, Target},
 };
 
+/// CR4.PGE: entries of [`tables::GLOBAL`] pages outlive CR3 writes.
+const PGE: u64 = 1 << 7;
 /// CR4.PCIDE: TLB entries tagged by their root's context.
 const PCIDE: u64 = 1 << 17;
 /// CR3's context, which holds PWT and PCD without PCIDE.
 const CONTEXT: u64 = 0xfff;
-/// The loader root's context while tagged; every engine root keeps 0.
+/// The loader root's context while tagged; the host root keeps 0 and the
+/// guest views' roots have their own (`host::view_context`).
 const LOADER_CONTEXT: u64 = 1;
 /// A CR3 write that keeps the entering context's TLB entries.
-const KEEP_ENTRIES: u64 = 1 << 63;
+pub(super) const KEEP_ENTRIES: u64 = 1 << 63;
 
-/// Tags this core's TLB entries by root while the engine runs. Entering the
-/// loader's root ([`RestoreRoot`]) then flushes only its own context and
-/// leaving it flushes nothing, so the engine's translations survive a call
-/// into the host drivers. Every engine root keeps context 0, whose CR3
-/// writes still flush, so INVLPG and root reloads keep their meaning; no
-/// engine mapping changes inside a driver call. Dropped, CR4 is restored
-/// for the native validations, which require PCIDE clear.
+/// Keeps this core's TLB entries across root changes while the engine runs:
+/// the window's in global pages, on every processor, and with PCIDs the
+/// others by root. Entering the loader's root ([`RestoreRoot`]) then flushes
+/// only its own context and leaving it flushes nothing, so the engine's
+/// translations survive a call into the host drivers; no engine mapping
+/// changes inside one. Dropped, CR4 is restored for the native validations,
+/// which require PCIDE clear.
 pub(super) struct TaggedRoots {
     cr4: u64,
+    tagged: bool,
 }
 impl TaggedRoots {
-    /// None without PCIDs, or with cache controls in the current root's
-    /// context bits.
+    /// Global pages, and tagged roots unless the processor has no PCIDs or
+    /// the current root's context bits hold cache controls.
     pub(super) fn enable() -> Option<Self> {
-        if core::arch::x86_64::__cpuid(1).ecx & 1 << 17 == 0 {
-            return None;
-        }
         let (cr3, cr4): (u64, u64);
         // SAFETY: CPL0 control register reads.
         unsafe {
             asm!("mov {}, cr3", out(reg) cr3, options(nomem, nostack, preserves_flags));
             asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack, preserves_flags));
         }
-        if cr4 & PCIDE != 0 || cr3 & CONTEXT != 0 {
+        if cr4 & PCIDE != 0 {
             return None;
         }
-        // SAFETY: the processor has PCIDs and the current root context 0.
-        unsafe { asm!("mov cr4, {}", in(reg) cr4 | PCIDE, options(nostack, preserves_flags)) };
-        Some(Self { cr4 })
+        let tagged = core::arch::x86_64::__cpuid(1).ecx & 1 << 17 != 0 && cr3 & CONTEXT == 0;
+        let enabled = cr4 | PGE | if tagged { PCIDE } else { 0 };
+        // SAFETY: every processor that runs this has PGE, and PCIDE is set
+        // only with PCIDs and the current root context 0.
+        unsafe { asm!("mov cr4, {}", in(reg) enabled, options(nostack, preserves_flags)) };
+        super::host::tag_views(tagged);
+        Some(Self { cr4, tagged })
     }
 }
 impl Drop for TaggedRoots {
     fn drop(&mut self) {
-        // SAFETY: outside a driver call the current root has context 0;
-        // clearing PCIDE flushes every context.
-        unsafe { asm!("mov cr4, {}", in(reg) self.cr4, options(nostack, preserves_flags)) };
+        if self.tagged {
+            super::host::tag_views(false);
+        }
+        let cr3: u64;
+        // SAFETY: outside a driver call; PCIDE clears only under context 0,
+        // and clearing it flushes every context, as clearing PGE does.
+        unsafe {
+            if self.tagged {
+                asm!("mov {}, cr3", out(reg) cr3, options(nomem, nostack, preserves_flags));
+                asm!("mov cr3, {}", in(reg) cr3 & !CONTEXT, options(nostack, preserves_flags));
+            }
+            asm!("mov cr4, {}", in(reg) self.cr4, options(nostack, preserves_flags));
+        }
     }
 }
 
@@ -96,18 +111,18 @@ pub(super) fn entered_loader_root(owner: &crate::paging::loader::LoaderTables) -
     if !HOST_DRIVERS.load(Ordering::Acquire) {
         return false;
     }
-    let (root, cr4, gs): (u64, u64, u64);
+    let (root, gs): (u64, u64);
     // SAFETY: this internal query follows RootIdentity's CPL0/CPU admission.
     unsafe {
-        asm!("mov {}, cr3", "mov {}, cr4", out(reg) root, out(reg) cr4, options(nomem, nostack, preserves_flags));
+        asm!("mov {}, cr3", out(reg) root, options(nomem, nostack, preserves_flags));
         gs = crate::cpu::msr::GS_BASE.read();
     }
-    let expected = if cr4 & PCIDE != 0 {
-        owner.root() | LOADER_CONTEXT
-    } else {
-        owner.root()
-    };
-    gs != 0 && HOST_DRIVERS_GS.load(Ordering::Acquire) == gs && root == expected
+    // The context is 0 only without PCIDs, whose CR3 holds none.
+    let context = root & CONTEXT;
+    gs != 0
+        && HOST_DRIVERS_GS.load(Ordering::Acquire) == gs
+        && (context == LOADER_CONTEXT || context == 0)
+        && root & !CONTEXT == owner.root()
 }
 /// Counter ticks cores waited for [`HOST_DRIVERS`] since the last report,
 /// and the longest wait.
@@ -161,17 +176,24 @@ impl RestoreRoot {
     /// `root` is the live loader root, keeping the engine window.
     pub(super) unsafe fn enter(root: u64) -> Self {
         lock_host_drivers();
-        let (previous, flags, cr4): (u64, u64, u64);
-        // SAFETY: CPL0 control register reads; interrupts remain off until
+        let (previous, flags): (u64, u64);
+        // SAFETY: CPL0 control register read; interrupts remain off until
         // the original root has been restored.
         unsafe {
-            asm!("pushfq","pop {flags}","cli","mov {previous}, cr3","mov {cr4}, cr4",flags=out(reg)flags,previous=out(reg)previous,cr4=out(reg)cr4);
+            asm!("pushfq","pop {flags}","cli","mov {previous}, cr3",flags=out(reg)flags,previous=out(reg)previous);
         }
         // SAFETY: native CPU; this records the same concrete manager
         // owner while IF0 excludes its own IRQ/reentrant root transition.
         let gs = unsafe { crate::cpu::msr::GS_BASE.read() };
         HOST_DRIVERS_GS.store(gs, Ordering::Release);
-        let tagged = cr4 & PCIDE != 0;
+        // A context says so without a read of CR4, which a hypervisor may
+        // intercept: disks are polled here thousands of times a second.
+        let tagged = previous & CONTEXT != 0 || {
+            let cr4: u64;
+            // SAFETY: CPL0 control register read.
+            unsafe { asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack, preserves_flags)) };
+            cr4 & PCIDE != 0
+        };
         // Tagged, entering flushes the loader's context alone.
         let root = if tagged {
             root & !CONTEXT | LOADER_CONTEXT

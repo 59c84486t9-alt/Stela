@@ -5,7 +5,7 @@ fn forms_name_their_key_kind_operands_and_completion() {
     let form = Form::of(Operation::SignIbSp).unwrap();
     assert_eq!(
         (form.key, form.kind, form.pointer, form.modifier),
-        (Key::Ib, SIGNED, 30, Modifier::StackPointer)
+        (key_index(Key::Ib), SIGNED, 30, Modifier::StackPointer)
     );
     assert_eq!(requested(form.request()), (Key::Ib, false, false));
     let branch = Form::of(Operation::Branch {
@@ -27,6 +27,28 @@ fn forms_name_their_key_kind_operands_and_completion() {
     assert_eq!(requested(plain.request()), (Key::Db, true, false));
     let ret = Form::of(Operation::ReturnIbSp).unwrap();
     assert_eq!(requested(ret.request()), (Key::Ib, true, true));
+    let code = |destination, source, modifier| {
+        Form::of(Operation::GenericCode(
+            crate::block::pauth_memory::GenericCode {
+                destination,
+                source,
+                modifier,
+            },
+        ))
+    };
+    let generic = code(1, 2, 31).unwrap();
+    assert_eq!(
+        (
+            generic.key,
+            generic.pointer,
+            generic.result,
+            generic.modifier
+        ),
+        (GENERIC_KEY, 2, 1, Modifier::StackPointer)
+    );
+    assert!(requests_generic_code(generic.request()));
+    assert!(!requests_generic_code(form.request()));
+    assert!(code(1, 31, 3).is_none() && code(31, 2, 3).is_none());
     // Register 31 operands and the other PAC forms stay with the engine.
     assert!(
         Form::of(Operation::Sign {
@@ -126,7 +148,7 @@ fn thunks_complete_hits_and_computed_misses_natively() {
             bytes.extend(5i32.to_le_bytes());
             bytes.extend([0x48, 0x83, 0xc4, 0x08, 0xc3]); // add rsp,8; ret
         }
-        bytes.extend(code);
+        bytes.extend(crate::x86_64::pinned::entered(code));
         // SAFETY: private anonymous memory, RX after the copy, unmapped
         // after the call; the thunk touches only `state`, the memo, the
         // tags and the stack, and calls `service`.

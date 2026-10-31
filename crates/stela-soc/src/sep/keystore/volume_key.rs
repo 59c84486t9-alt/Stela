@@ -136,6 +136,7 @@ const UNREAD_SEALED_SYSTEM: &str =
     "SEP volume keys: loading class keys does not interpret the sealed-System bit";
 
 mod file_key;
+mod keychain;
 mod media;
 
 pub(super) fn recognizes(command: u8) -> bool {
@@ -144,6 +145,7 @@ pub(super) fn recognizes(command: u8) -> bool {
         NEW_VEK | UNWRAP_VEK | NEW_KEK | GET_SIZE | SET_PROTECTION | GET_BLOB_STATE
     ) || media::recognizes(command)
         || file_key::recognizes(command)
+        || keychain::recognizes(command)
 }
 
 /// The volume keys of one sepOS start.
@@ -190,6 +192,9 @@ impl VolumeKeys {
         }
         if file_key::recognizes(command) {
             return self.file_key(command, variant, fields, entropy, notes);
+        }
+        if keychain::recognizes(command) {
+            return self.keychain(command, variant, fields, notes);
         }
         let expected = if command == UNWRAP_VEK {
             matches!(variant, 0 | 1)

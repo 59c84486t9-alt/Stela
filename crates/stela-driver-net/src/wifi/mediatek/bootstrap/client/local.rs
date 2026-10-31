@@ -54,6 +54,11 @@ pub struct Advertisement {
     mlo: MloObservations,
     he_source_maps: [McsMaps; 3],
 }
+/// mac80211's `ext_capa` for `CHANCTX_STA_CSA` and the Multiple BSSID bit of
+/// `ieee80211_send_assoc`: extended channel switching, Multiple BSSID and
+/// operating mode notifications.
+const EXTENDED_CAPABILITIES: [u8; 8] = [4, 0, 0x40, 0, 0, 0, 0, 0x40];
+
 impl Advertisement {
     pub fn elements(&self) -> &[u8] {
         &self.elements
@@ -255,6 +260,7 @@ fn make(
         ht[3..3 + usize::from(nss)].fill(0xff);
         ht[15] = 1;
         ie(&mut elements, 45, &ht);
+        ie(&mut elements, 127, &EXTENDED_CAPABILITIES);
         if band == Band::Ghz5 {
             let mut vht = [0; 12];
             let cap = VHT_BASE | if nss > 1 { 0x80 } else { 0 };
@@ -287,6 +293,9 @@ fn make(
         he.push(pattern[i % 3]);
     }
     he.push(pattern[(size - 1) % 3] & (0xff >> (8 - (bits - 1) % 8)));
+    if band == Band::Ghz6 {
+        ie(&mut elements, 127, &EXTENDED_CAPABILITIES);
+    }
     extension(&mut elements, 35, &he);
     if band == Band::Ghz6 {
         // Source5G density0 + maxAMPDU1024K + MPDU11454 + TX/RX ant pattern.

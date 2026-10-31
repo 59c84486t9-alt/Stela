@@ -85,7 +85,11 @@ fn input(operand: &Operand, a: u64, b: u64, fpcr: u32) -> GuestState {
         x: std::array::from_fn(|i| 0x1234_5678_0000_0000 | i as u64),
         sp: 0x1234_0000,
         nzcv: 0xa000_0000,
-        reserved: 0x9e71_a53c,
+        exclusive_bytes: 0x9e71_a53c,
+        exclusive_address: 0,
+        exclusive_value: 0,
+        daif: 0,
+        pending: 0,
         v: [[0; 2]; 32],
         fpcr,
         // IXC starts clear, forcing the full path even under default FPCR.
@@ -263,7 +267,10 @@ fn full_path_zeros_rounding_aliases_and_host_environment_match_completion() {
                 .unwrap()
                 .compile()
                 .unwrap();
-                let mapping = Mapping::new(&block.native.x86_64_code).unwrap();
+                let mapping = Mapping::new(&stela_compiler::x86_64::pinned::entered(
+                    &block.native.x86_64_code,
+                ))
+                .unwrap();
                 let format = operand.format;
                 let one = one_bits(format);
                 let sign = sign_mask(format);
@@ -344,7 +351,10 @@ fn full_path_enabled_exceptions_keep_the_prefix_and_original_state() {
         .unwrap()
         .compile()
         .unwrap();
-        let mapping = Mapping::new(&block.native.x86_64_code).unwrap();
+        let mapping = Mapping::new(&stela_compiler::x86_64::pinned::entered(
+            &block.native.x86_64_code,
+        ))
+        .unwrap();
         for bit in 0..32 {
             let enable = 1 << bit;
             if enable & FPCR_EXCEPTION_ENABLE_MASK == 0 {
@@ -381,7 +391,10 @@ fn full_path_mixed_lanes_preserve_distinct_pairs_and_reject_late_bad_inputs() {
         .unwrap()
         .compile()
         .unwrap();
-        let mapping = Mapping::new(&block.native.x86_64_code).unwrap();
+        let mapping = Mapping::new(&stela_compiler::x86_64::pinned::entered(
+            &block.native.x86_64_code,
+        ))
+        .unwrap();
         let format = operand.format;
         let one = one_bits(format);
         let two = one + (1 << fraction_bits(format));
@@ -504,7 +517,10 @@ fn half_arithmetic_matches_completion_on_each_host_recipe() {
             .unwrap()
             .compile()
             .unwrap();
-            let mapping = Mapping::new(&block.native.x86_64_code).unwrap();
+            let mapping = Mapping::new(&stela_compiler::x86_64::pinned::entered(
+                &block.native.x86_64_code,
+            ))
+            .unwrap();
             let controls = [0, FPCR_FZ16, FPCR_AH | FPCR_FZ16, FPCR_NEP, FPCR_DN];
             for (case, &(a, b)) in VALUES
                 .iter()

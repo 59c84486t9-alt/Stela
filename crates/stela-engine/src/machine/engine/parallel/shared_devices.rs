@@ -1,7 +1,7 @@
 //! The board's devices shared by the PE threads: the locked board and its
 //! device-bus calls.
 
-use super::super::{GateCall, GateOutcome};
+use super::super::{GateCall, GateOutcome, LocalRegisters};
 use super::*;
 
 pub(super) struct Board<D> {
@@ -178,6 +178,8 @@ pub struct SharedDevices<D> {
     pub(super) board: Arc<Board<D>>,
     /// The machine that serves resets and DMA.
     pub(super) home: bool,
+    /// Each PE's [`Devices::local_registers`], once asked for.
+    local: Vec<Option<Option<Arc<dyn LocalRegisters>>>>,
 }
 
 impl<D: Devices> SharedDevices<D> {
@@ -210,6 +212,7 @@ impl<D: Devices> SharedDevices<D> {
         Self {
             board: Arc::new(board),
             home: true,
+            local: Vec::new(),
         }
     }
 
@@ -218,6 +221,7 @@ impl<D: Devices> SharedDevices<D> {
         Self {
             board: Arc::clone(&self.board),
             home: false,
+            local: Vec::new(),
         }
     }
 
@@ -261,6 +265,18 @@ impl<D: Devices> SharedDevices<D> {
         let mut devices = self.board.lock(call);
         let now = self.now(now);
         f(&mut devices, now)
+    }
+
+    /// PE `cpu`'s own registers, without the devices' lock once it has its
+    /// handle.
+    fn local_registers_of(&mut self, cpu: usize) -> Option<&Arc<dyn LocalRegisters>> {
+        if self.local.len() <= cpu {
+            self.local.resize_with(cpu + 1, || None);
+        }
+        if self.local[cpu].is_none() {
+            self.local[cpu] = Some(self.with(|devices| devices.local_registers(cpu)));
+        }
+        self.local[cpu].as_ref()?.as_ref()
     }
 
     /// A call that can change devices: run it, then tell every other PE
@@ -484,6 +500,12 @@ impl<D: Devices> Devices for SharedDevices<D> {
         {
             return None;
         }
+        if let Some(value) = self
+            .local_registers_of(cpu)
+            .and_then(|local| local.register(encoding, write))
+        {
+            return Some(Ok(value));
+        }
         if write.is_none() {
             return self.at(Call::Register, now, |devices, now| {
                 devices.system_register(cpu, encoding, None, now)
@@ -531,6 +553,9 @@ impl<D: Devices> Devices for SharedDevices<D> {
     }
     fn memory_lock(&self) -> mmu::MemoryLocks {
         self.with(|devices| devices.memory_lock())
+    }
+    fn register_storage(&mut self, cpu: usize, encoding: Encoding) -> Option<u64> {
+        self.local_registers_of(cpu)?.storage(encoding)
     }
     fn serves_register(&self, encoding: Encoding) -> bool {
         register_bit(encoding)

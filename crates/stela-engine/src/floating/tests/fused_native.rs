@@ -73,7 +73,10 @@ fn compile(word: u32, target: TargetCpu) -> (Operand, Block) {
     .unwrap()
     .compile()
     .unwrap();
-    let mapping = Mapping::new(&block.native.x86_64_code).unwrap();
+    let mapping = Mapping::new(&stela_compiler::x86_64::pinned::entered(
+        &block.native.x86_64_code,
+    ))
+    .unwrap();
     let bounded_span = !target.supports(TargetCpu::X86_64_V4.with_avx512fp16());
     (
         operand,
@@ -89,7 +92,11 @@ fn input(operand: &Operand, values: [u64; 3], fpcr: u32) -> GuestState {
         x: std::array::from_fn(|i| 0x1234_5678_0000_0000 | i as u64),
         sp: 0x1234_0000,
         nzcv: 0xa000_0000,
-        reserved: 0x9e71_a53c,
+        exclusive_bytes: 0x9e71_a53c,
+        exclusive_address: 0,
+        exclusive_value: 0,
+        daif: 0,
+        pending: 0,
         v: [[POISON | POISON << 16 | POISON << 32 | POISON << 48; 2]; 32],
         fpcr,
         fpsr: 0,

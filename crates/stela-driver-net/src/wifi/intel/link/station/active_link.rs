@@ -51,11 +51,13 @@ impl Client {
         }
     }
 
-    /// The seat of the link of `ap`, when firmware holds it.
+    /// The seat of the link of `ap`, or of the BSS `ap` transmits for, when
+    /// firmware holds it.
     pub(super) fn seat_of(&self, ap: Mac) -> Option<u8> {
-        [self.seat, 1 - self.seat]
-            .into_iter()
-            .find(|&seat| self.context_at(seat).is_some_and(|link| link.bssid() == ap))
+        [self.seat, 1 - self.seat].into_iter().find(|&seat| {
+            self.context_at(seat)
+                .is_some_and(|link| link.bssid() == ap || link.beacon().transmitter == ap)
+        })
     }
 
     /// `iwl_mld_update_sta_resources`: what the AP's firmware stations share
@@ -218,6 +220,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                 beacon_interval: bss.beacon_interval,
                 dtim_period: context.dtim_period(),
                 he,
+                nontransmitted: bss.profile.map(|profile| (bss.transmitter, profile.index)),
             },
         );
         let peer = commands::station_config(
@@ -283,6 +286,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                 0
             },
         );
+        let second = second.filter(|_| !client.barred(dormant));
         let load = [
             statistics.load_not_by_us[seat],
             statistics.load_not_by_us[other],
@@ -325,7 +329,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         let (power_id, power_limit) = queue
             .transmit_limit(new, dbm)
             .ok_or(Error::Refused("transmit power"))?;
-        let constraints = self.six_ghz_power(queue, to.beacon(), new);
+        let constraints = self.six_ghz_power(queue, to.beacon(), new, None);
         let tids = station_queues(queue);
         let now = self.clock.now_us();
         let client = &mut self.client;
@@ -379,10 +383,12 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         let power_version = version_of(queue.firmware(), commands::MAC_POWER);
         let client = &mut self.client;
         if active {
-            client.command(
-                commands::LINK_CONFIG,
-                commands::activation(source.link, false),
-            );
+            let deactivation = if client.going_quiet(gone) {
+                commands::silent_deactivation(source.link)
+            } else {
+                commands::activation(source.link, false)
+            };
+            client.command(commands::LINK_CONFIG, deactivation);
         }
         client.drop_group_keys(gone.bssid(), before);
         client.move_resources(&tids, before | after, after);

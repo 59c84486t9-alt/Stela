@@ -8,14 +8,17 @@ use super::*;
 /// the engine found plain stays plain, with the same value, until derived
 /// state may change ([`Machine::derived_changed`]). They are the thread
 /// pointers, Apple's GL2 thread pointer and GXF status, the GL1 exception
-/// registers a guarded level saves on entry ([`GUARDED_MIRRORS`]),
+/// registers a guarded level saves and restores ([`GUARDED_MIRRORS`]),
 /// SPRR_PERM_EL0 ([`SPRR_PERM_MIRROR`]) and DAIF; and the virtual count and
 /// Apple's alias of it, whose cells hold the offset they subtract from the
-/// clock's count ([`COUNT_MIRRORS`]).
-pub(super) const MIRRORED: [Encoding; 13] = {
+/// clock's count ([`COUNT_MIRRORS`]); CurrentEL, which each state's cell
+/// answers for good; and the cycle and instruction counters a kernel reads
+/// around each exception to charge threads, which a transition brings up to
+/// date ([`COUNTER_MIRRORS`]).
+pub(super) const MIRRORED: [Encoding; 16] = {
     use registers::encodings::{
-        ASPSR_GL1, CNTVCT_ALIAS_EL0, DAIF, ELR_GL1, GXF_STATUS_EL1, SPRR_PERM_EL0, SPSR_GL1,
-        TPIDR_EL0, TPIDR_EL1, TPIDR_EL2, TPIDR_GL2, TPIDRRO_EL0,
+        ASPSR_GL1, CNTVCT_ALIAS_EL0, CURRENT_EL, DAIF, ELR_GL1, GXF_STATUS_EL1, SPRR_PERM_EL0,
+        SPSR_GL1, TPIDR_EL0, TPIDR_EL1, TPIDR_EL2, TPIDR_GL2, TPIDRRO_EL0,
     };
     use stela_compiler::aarch64::system::registers::CNTVCT_EL0;
     [
@@ -28,6 +31,9 @@ pub(super) const MIRRORED: [Encoding; 13] = {
         SPSR_GL1,
         ASPSR_GL1,
         ELR_GL1,
+        CURRENT_EL,
+        super::super::pmu::PMC[0],
+        super::super::pmu::PMC[1],
         SPRR_PERM_EL0,
         CNTVCT_EL0,
         CNTVCT_ALIAS_EL0,
@@ -42,17 +48,77 @@ pub(super) const ZERO_REGISTER: u8 = 31;
 /// same register and Xt.
 pub(super) const MRS_READ: u32 = 1 << 21;
 
-/// The cells of the [`MIRRORED`] registers, in its order: native code reads
-/// `cells`, the running PE's at its EL and GXF state. A read's value and
-/// plainness follow from System registers and PSTATE, of which an exception
-/// entry or return, GENTER or GEXIT changes the EL, the GXF state and the
-/// masks alone: `banks` keeps the cells each EL and GXF state left, which
-/// it finds again ([`Mirrors::transition`]). Anything else that changes
-/// derived state closes every cell of every bank.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// The registers read other than [`MIRRORED`] ones that get a cell of their
+/// own the first time code naming them is installed
+/// ([`Machine::stored_cell`]), which reads the register's live storage: the
+/// ones a kernel reads around each exception and thread switch, FPCR and
+/// FPSR, and the core counters a sampler reads in bursts
+/// ([`Devices::register_storage`]). When there are more, the rest take System
+/// exits.
+pub(super) const STORED_CELLS: usize = 64;
+
+/// The cells of the [`MIRRORED`] registers, in its order, and the
+/// [`STORED_CELLS`]: native code reads `cells`, the running PE's at its EL
+/// and GXF state. A read's value and plainness follow from System registers
+/// and PSTATE, of which an exception entry or return, GENTER or GEXIT changes
+/// these and the masks alone: `banks` keeps the cells each state left, which
+/// it finds again ([`Mirrors::transition`]). Only SP_EL0 follows SPSel, whose
+/// thunks read `selected`, PSTATE.SP while native code runs, which can change
+/// it (`x86_64::register_read::stack_select_thunk`).
+/// Anything else that changes derived state closes every cell of every bank.
+/// The last of them says whether writes of the masks complete natively
+/// ([`MASK_WRITES`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct Mirrors {
-    pub(super) cells: [register_read::Cell; MIRRORED.len()],
-    pub(super) banks: [[register_read::Cell; MIRRORED.len()]; MIRROR_STATES],
+    pub(super) cells: [register_read::Cell; CELLS],
+    pub(super) banks: [[register_read::Cell; CELLS]; MIRROR_STATES],
+    pub(super) selected: u64,
+}
+
+/// The cell of MSR SPSel, open once one completed plainly in the state:
+/// its `value` is the address of the stack SPSel 1 selects there.
+pub(super) const STACK_SELECT: usize = MASK_WRITES + 1 + WRITTEN.len();
+
+/// The cell of IC IVAU (`x86_64::register_read::code_page_thunk`), open
+/// from one's completion until something could make another do more: code
+/// compiled, a translation changed or the DSB that ends the kernel's run of
+/// lines. Its `value` is an address in the page.
+pub(super) const CODE_PAGE: usize = STACK_SELECT + 1;
+
+const CELLS: usize = CODE_PAGE + 1;
+
+/// The cell of the mask writes (`x86_64::register_read::mask_thunk`), open
+/// once one completed plainly in the state.
+pub(super) const MASK_WRITES: usize = MIRRORED.len() + STORED_CELLS;
+
+/// The registers whose MSR native code completes, which a kernel writes
+/// around each exception and whose writes change nothing else: a cell each,
+/// after [`MASK_WRITES`], that a plain write opens on the storage it reached
+/// (FPSR's lives in the frame, so names none). They stay open as reads do.
+pub(super) const WRITTEN: [(Encoding, SystemRegister); 4] = [
+    (Encoding::new(3, 0, 4, 0, 1), SystemRegister::ELR_EL1),
+    (Encoding::new(3, 0, 4, 0, 0), SystemRegister::SPSR_EL1),
+    (STACK_ZERO, SystemRegister::SP_EL0),
+    (Encoding::new(3, 3, 4, 4, 1), SystemRegister::FPSR),
+];
+
+/// SP_EL0, plain only with SP_ELx selected.
+pub(super) const STACK_ZERO: Encoding = Encoding::new(3, 0, 4, 1, 0);
+
+impl Default for Mirrors {
+    fn default() -> Self {
+        let cell = register_read::Cell::default();
+        Self {
+            cells: [cell; CELLS],
+            banks: [[cell; CELLS]; MIRROR_STATES],
+            selected: 0,
+        }
+    }
+}
+
+/// The cell of `WRITTEN[index]`.
+pub(super) const fn written_cell(index: usize) -> usize {
+    MASK_WRITES + 1 + index
 }
 
 /// The ELs and GXF states, `Mirrors::banks` per [`mirror_state`].
@@ -67,6 +133,29 @@ impl Mirrors {
     pub(super) fn transition(&mut self, from: usize, to: usize) {
         self.banks[from] = self.cells;
         self.cells = self.banks[to];
+    }
+
+    /// The register of cell `index` now holds `value`, as its open cells
+    /// in every state read it.
+    pub(super) fn update(&mut self, index: usize, value: u64) {
+        for cells in core::iter::once(&mut self.cells).chain(&mut self.banks) {
+            if cells[index].readable != 0 {
+                cells[index].value = value;
+            }
+        }
+    }
+
+    /// IC IVAU of `address` completed: its page's lines need no other.
+    pub(super) fn open_code_page(&mut self, address: u64) {
+        self[CODE_PAGE] = register_read::Cell {
+            readable: 1,
+            value: address,
+        };
+    }
+
+    /// Another IC IVAU of the page could do more.
+    pub(super) fn close_code_page(&mut self) {
+        self.close(CODE_PAGE);
     }
 
     /// Close the cells of one register in every state.
@@ -103,6 +192,69 @@ pub(super) fn stored(register: SystemRegister) -> bool {
     )
 }
 
+/// System registers no read of a System register follows: not its value,
+/// which only a read of the register itself takes, nor whether it traps. A
+/// kernel writes them at each thread switch and timer. What derives from
+/// them goes as ever ([`Machine::forget_derived`]).
+pub(super) fn keeps_reads(register: SystemRegister) -> bool {
+    use SystemRegister::*;
+    matches!(
+        register,
+        CONTEXTIDR_EL1
+            | CONTEXTIDR_EL2
+            | APIAKeyLo_EL1
+            | APIAKeyHi_EL1
+            | APIBKeyLo_EL1
+            | APIBKeyHi_EL1
+            | APDAKeyLo_EL1
+            | APDAKeyHi_EL1
+            | APDBKeyLo_EL1
+            | APDBKeyHi_EL1
+            | APGAKeyLo_EL1
+            | APGAKeyHi_EL1
+            | CNTP_CTL_EL0
+            | CNTP_CVAL_EL0
+            | CNTV_CTL_EL0
+            | CNTV_CVAL_EL0
+            | CNTHP_CTL_EL2
+            | CNTHP_CVAL_EL2
+            | CNTHV_CTL_EL2
+            | CNTHV_CVAL_EL2
+    )
+}
+
+/// Whether a generated read that ends with `register`'s value is the plain
+/// read of its storage, which a cell may point at: only state those reads
+/// return as stored, never a view composed from it.
+pub(super) fn reads_storage(register: SystemRegister) -> bool {
+    use SystemRegister::*;
+    stored(register)
+        || matches!(
+            register,
+            SP_EL0
+                | HCR_EL2
+                | SCTLR_EL1
+                | SCTLR_EL2
+                | TCR_EL1
+                | TCR_EL2
+                | TTBR1_EL1
+                | TTBR1_EL2
+                | VBAR_EL1
+                | VBAR_EL2
+                | CONTEXTIDR_EL1
+                | CONTEXTIDR_EL2
+                | CPTR_EL2
+                | CPACR_EL1
+        )
+}
+
+/// Whether MRS of `encoding` can have a stored cell of its own storage: not
+/// the ID space, whose reads are few, nor the IMPLEMENTATION DEFINED one,
+/// which Apple's state answers.
+pub(super) fn storable(encoding: Encoding) -> bool {
+    !(encoding.op0() == 3 && matches!(encoding.crn(), 0 | 11 | 15))
+}
+
 impl core::ops::Index<usize> for Mirrors {
     type Output = register_read::Cell;
     fn index(&self, index: usize) -> &Self::Output {
@@ -133,11 +285,10 @@ const _: () = assert!(matches!(
 ));
 
 /// The [`MIRRORED`] indices of SPSR_GL1, ASPSR_GL1 and ELR_GL1, which a
-/// guarded level reads when it is entered: GENTER and an exception taken to
-/// the level write them, so a transition reads them again into their open
-/// cells ([`Machine::transitioned`]), and a write of a GL bank register,
-/// through any name, closes them ([`guarded_bank`]). They open only in a
-/// guarded level, where they are plain.
+/// guarded level reads when it is entered and writes before it leaves. Their
+/// cells open only in a guarded level, where they are plain, on the bank's
+/// storage: reads and writes both go there, as GENTER and an exception
+/// taken to the level do ([`registers::guarded_storage`]).
 pub(super) const GUARDED_MIRRORS: [usize; 3] = [6, 7, 8];
 const _: () = assert!(matches!(
     [
@@ -152,12 +303,12 @@ const _: () = assert!(matches!(
     ]
 ));
 
-/// Whether `encoding` names a register of a GL bank: GL1's (`S3_6_C15_C10_*`)
-/// or GL1's from EL2 (`S3_6_C15_C9_*`).
-pub(super) fn guarded_bank(encoding: Encoding) -> bool {
-    (encoding.op0(), encoding.op1(), encoding.crn()) == (3, 6, 15)
-        && matches!(encoding.crm(), 9 | 10)
-}
+/// The [`MIRRORED`] indices of the cycle and instruction counters. They
+/// move at every instruction but no read depends on it: between transitions
+/// they read the count of the last one, as exceptions are what a kernel
+/// charges to threads, and later reads never go back.
+pub(super) const COUNTER_MIRRORS: [usize; 2] = [10, 11];
+const _: () = assert!(COUNTER_MIRRORS[0] == 10);
 
 /// MRS X0 of `encoding`.
 pub(super) fn read_word(encoding: Encoding) -> u32 {
@@ -187,6 +338,15 @@ pub(super) fn daif_register(daif: u8) -> u64 {
 
 pub(super) const DAIF_REGISTER_SHIFT: u32 = 6;
 
+/// The index in [`WRITTEN`] of a write of `access`.
+pub(super) fn written(access: RegisterAccess) -> Option<usize> {
+    if access.direction() != Direction::Write {
+        return None;
+    }
+    let encoding = access.encoding();
+    WRITTEN.iter().position(|&(written, _)| written == encoding)
+}
+
 /// The [`MIRRORED`] index of a read of `access`, other than to XZR.
 pub(super) fn mirrored(access: RegisterAccess) -> Option<usize> {
     if access.direction() != Direction::Read || access.rt() == ZERO_REGISTER {
@@ -195,6 +355,63 @@ pub(super) fn mirrored(access: RegisterAccess) -> Option<usize> {
     MIRRORED
         .iter()
         .position(|&encoding| encoding == access.encoding())
+}
+
+/// The [`GUARDED_MIRRORS`] index of a write of `access`.
+pub(super) fn guarded_written(access: RegisterAccess) -> Option<usize> {
+    if access.direction() != Direction::Write {
+        return None;
+    }
+    let encoding = access.encoding();
+    GUARDED_MIRRORS
+        .into_iter()
+        .find(|&index| MIRRORED[index] == encoding)
+}
+
+/// The MSR `word` at `pc` of a [`GUARDED_MIRRORS`] register: its index and Xt.
+pub(super) fn guarded_written_register(pc: u64, word: u32) -> Option<(usize, u8)> {
+    let instruction = block::decode_system_mode_instruction(GuestAddress(pc), word).ok()??;
+    match instruction.operation {
+        SystemOperation::Register(access) => Some((guarded_written(access)?, access.rt())),
+        _ => None,
+    }
+}
+
+/// The MSR `word` at `pc` of a [`WRITTEN`] register: its index and Xt.
+pub(super) fn written_register(pc: u64, word: u32) -> Option<(usize, u8)> {
+    let instruction = block::decode_system_mode_instruction(GuestAddress(pc), word).ok()??;
+    match instruction.operation {
+        SystemOperation::Register(access) => Some((written(access)?, access.rt())),
+        _ => None,
+    }
+}
+
+/// The selection the MSR SPSel `word` writes, if it is one.
+pub(super) fn stack_select(word: u32) -> Option<bool> {
+    match word {
+        0xd500_40bf => Some(false),
+        0xd500_41bf => Some(true),
+        _ => None,
+    }
+}
+
+/// Xt of the IC IVAU `word`, if it is one.
+pub(super) fn code_page_invalidation(word: u32) -> Option<u8> {
+    const IC_IVAU: u32 = 0xd50b_7520;
+    (word & !31 == IC_IVAU).then_some((word & 31) as u8)
+}
+
+/// The MRS `word` at `pc`, if it reads to a register.
+pub(super) fn mrs_access(pc: u64, word: u32) -> Option<RegisterAccess> {
+    let instruction = block::decode_system_mode_instruction(GuestAddress(pc), word).ok()??;
+    match instruction.operation {
+        SystemOperation::Register(access)
+            if access.direction() == Direction::Read && access.rt() != ZERO_REGISTER =>
+        {
+            Some(access)
+        }
+        _ => None,
+    }
 }
 
 /// The [`MIRRORED`] index and Xt of `word` at `pc` if it is MRS of a
@@ -208,7 +425,8 @@ pub(super) fn mirrored_read(pc: u64, word: u32) -> Option<(usize, u8)> {
 }
 
 /// Whether `word` at `pc` is a System instruction blocks compiled for
-/// `system` complete natively: DC ZVA or one of its DC clean operations.
+/// `system` complete natively: DC ZVA, one of its DC clean operations or an
+/// exclusive of one register.
 pub(super) fn completes_natively(pc: u64, word: u32, system: NativeSystem) -> bool {
     block::decode_system_mode_instruction(GuestAddress(pc), word)
         .ok()
@@ -217,5 +435,6 @@ pub(super) fn completes_natively(pc: u64, word: u32, system: NativeSystem) -> bo
             system.zero_block.is_some() && zero_block::operand(&instruction).is_some()
                 || cache_clean::operand(&instruction)
                     .is_some_and(|(operation, _)| system.cache_clean.contains(operation))
+                || system.exclusive && native_exclusive::operand(&instruction).is_some()
         })
 }

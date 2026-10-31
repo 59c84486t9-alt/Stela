@@ -3,7 +3,8 @@
 // Instant802 Networks, Inc.; 2008 Jouni Malinen; 2016-2017 Intel Deutschland
 // GmbH; 2020-2023 Intel Corporation. See THIRD_PARTY.md.
 //! CCMP-128 sealing of a robust management frame, which rtw88 leaves to
-//! mac80211 with `IEEE80211_KEY_FLAG_SW_MGMT_TX`.
+//! mac80211 with `IEEE80211_KEY_FLAG_SW_MGMT_TX`, and opening one hardware
+//! left sealed.
 use crate::wifi::security::PacketNumber;
 use alloc::vec::Vec;
 use stela_crypto::{
@@ -50,6 +51,25 @@ pub fn seal(key: &[u8; 16], header: &[u8], iv: &[u8; 8], pn: PacketNumber, body:
     out
 }
 
+/// `frame`, sealed for the packet number its IV carries, with its body in the
+/// clear and its MIC cleared, if that MIC holds.
+pub fn open(key: &[u8; 16], frame: &[u8], pn: PacketNumber) -> Option<Vec<u8>> {
+    let header = frame.get(..24)?;
+    let sealed = frame.get(32..)?;
+    let body = sealed.get(..sealed.len().checked_sub(MIC)?)?;
+    let (nonce, aad) = special_blocks(header, pn);
+    // Counter mode undoes itself; only the MIC of that pass means nothing.
+    let mut clear = ccm(key, &nonce, &aad, body);
+    clear.truncate(body.len());
+    if ccm(key, &nonce, &aad, &clear) != sealed {
+        return None;
+    }
+    let mut out = frame.to_vec();
+    out[32..32 + clear.len()].copy_from_slice(&clear);
+    out[32 + clear.len()..].fill(0);
+    Some(out)
+}
+
 /// `body` encrypted under `key`, then its MIC.
 fn ccm(key: &[u8; 16], nonce: &[u8; 13], aad: &[u8], body: &[u8]) -> Vec<u8> {
     let cipher = Aes128::new(GenericArray::from_slice(key));
@@ -86,6 +106,24 @@ fn ccm(key: &[u8; 16], nonce: &[u8; 13], aad: &[u8], body: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn what_is_sealed_opens_and_a_changed_byte_does_not() {
+        let key = [7; 16];
+        let mut header = [0; 24];
+        header[..2].copy_from_slice(&[0xd0, 0x40]);
+        header[4..10].fill(2);
+        header[10..22].fill(3);
+        let pn = PacketNumber::new(9).unwrap();
+        let iv = [9, 0, 0, 0x20, 0, 0, 0, 0];
+        let mut frame = seal(&key, &header, &iv, pn, &[8, 0, 1, 2]);
+        assert_ne!(frame[32..36], [8, 0, 1, 2]);
+        let opened = open(&key, &frame, pn).unwrap();
+        assert_eq!(opened[32..36], [8, 0, 1, 2]);
+        assert_eq!(opened[36..], [0; 8]);
+        frame[33] ^= 1;
+        assert_eq!(open(&key, &frame, pn), None);
+    }
 
     /// IEEE 802.11i's CCMP vector, a data frame, whose nonce and masked header
     /// `ccmp_special_blocks` would give.

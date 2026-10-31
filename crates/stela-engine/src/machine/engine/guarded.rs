@@ -29,7 +29,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             self.degrade(requirement);
         }
         let trace = self.monitor_before(MonitorKind::GuardedEnter { immediate });
-        let from = super::mirror_state(self.cpu.pstate.el, self.cpu.pstate.guarded);
+        let from = self.mirror_state();
         if self.cpu.guarded_enter(immediate).is_err() {
             return self.undefined();
         }
@@ -46,7 +46,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
     /// GEXIT (`Cpu::guarded_exit`).
     fn guarded_exit(&mut self) -> Step {
-        let from = super::mirror_state(self.cpu.pstate.el, self.cpu.pstate.guarded);
+        let from = self.mirror_state();
         if self.cpu.pstate.guarded && self.cpu.pstate.el != 0 {
             let bank = &self.cpu.apple.guarded[usize::from(self.cpu.pstate.el) - 1];
             self.guest_entry(bank.spsr, bank.aspsr & ASPSR_GUARDED != 0);
@@ -173,11 +173,12 @@ pub(super) mod tests {
         assert_eq!(machine.mirrors.cells, el1);
         machine.system_instruction(GENTER).unwrap();
         assert_eq!(machine.mirrors.cells, gl1);
-        // A write of TPIDR_EL1 closes its cells alone.
+        // A write of TPIDR_EL1 reaches its cells alone.
+        machine.cpu.state.x[9] = 0x8000;
         machine.system_instruction(MSR_TPIDR_EL1).unwrap();
         machine.system_instruction(GEXIT).unwrap();
         let cells = machine.mirrors.cells;
-        assert_eq!((cells[thread].readable, cells[status]), (0, el1[status]));
+        assert_eq!((cells[thread].value, cells[status]), (0x8000, el1[status]));
     }
 
     #[test]

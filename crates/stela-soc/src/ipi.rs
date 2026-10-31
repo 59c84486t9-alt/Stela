@@ -22,6 +22,12 @@
 //!
 //! These registers are EL1-accessible; the engine decides EL0 traps before
 //! calling [`FastIpi::access`].
+//!
+//! Every FIQ handler reads IPI_SR, so a PE reads its own word outside the
+//! devices' lock ([`FastIpi::status`]); sends and acknowledgements, which
+//! move the FIQ line, stay under it.
+use alloc::sync::Arc;
+use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use stela_engine::system::access::AccessKind;
 
 #[cfg(not(feature = "std"))]
@@ -54,9 +60,10 @@ pub enum IpiError {
     Unsupported(Register, &'static str),
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Default)]
 struct CpuState {
-    pending: bool,
+    /// IPI_SR.
+    pending: Arc<AtomicU64>,
     /// Counter value at which a deferred IPI fires.
     deferred: Option<u64>,
 }
@@ -70,12 +77,16 @@ pub struct FastIpi {
 }
 impl FastIpi {
     pub fn new(cpus: Vec<Affinity>) -> Self {
-        let state = vec![CpuState::default(); cpus.len()];
+        let state = cpus.iter().map(|_| CpuState::default()).collect();
         Self {
             cpus,
             state,
             countdown: None,
         }
+    }
+    /// `cpu`'s IPI_SR, for reading.
+    pub fn status(&self, cpu: CpuIndex) -> Option<Arc<AtomicU64>> {
+        Some(Arc::clone(&self.state.get(cpu)?.pending))
     }
     /// One MRS or MSR by `cpu` at counter value `now`. Returns the value read,
     /// or 0 for a write.
@@ -128,14 +139,14 @@ impl FastIpi {
                 }
                 Ok(0)
             }
-            (Register::Status, AccessKind::Read) => Ok(u64::from(self.state[cpu].pending)),
+            (Register::Status, AccessKind::Read) => Ok(self.state[cpu].pending.load(Relaxed)),
             (Register::Status, AccessKind::Write { value }) => {
                 if value & !SR_PENDING != 0 {
                     return unsupported("IPI_SR fields other than PENDING are not modeled");
                 }
                 let state = &mut self.state[cpu];
-                if value & SR_PENDING != 0 && state.pending {
-                    state.pending = false;
+                if value & SR_PENDING != 0 && state.pending.load(Relaxed) != 0 {
+                    state.pending.store(0, Relaxed);
                     interrupts.set_level(Wire::Fiq(cpu, FiqSource::FastIpi), false);
                 }
                 Ok(0)
@@ -169,8 +180,8 @@ impl FastIpi {
         next
     }
     fn raise(cpu: CpuIndex, state: &mut CpuState, interrupts: &mut dyn InterruptSink) {
-        if !state.pending {
-            state.pending = true;
+        if state.pending.load(Relaxed) == 0 {
+            state.pending.store(SR_PENDING, Relaxed);
             interrupts.set_level(Wire::Fiq(cpu, FiqSource::FastIpi), true);
         }
     }

@@ -28,8 +28,8 @@
 use super::chain_control;
 use super::{
     CanonicalDeviceMemory, CanonicalDeviceWrite, ConsumedPair, ConsumedScalar, ConsumedWrite,
-    DeviceError, DeviceReadShape, Devices, Discard, Host, Machine, RequirementKind, Reset,
-    ScalarRead, Start, Step,
+    DeviceError, DeviceReadShape, Devices, Discard, FETCH_PAGE, Fetched, Host, Machine,
+    RequirementKind, Reset, ScalarRead, Start, Step, Variant,
     clock::{ClockStatus, Pace, SharedClock},
     processors::Peer,
     step_timing,
@@ -48,7 +48,7 @@ use alloc::{
     sync::Arc,
     vec::Vec,
 };
-use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use stela_compiler::aarch64::system::registers::Encoding;
 use stela_contracts::refuse;
 
@@ -64,6 +64,45 @@ pub use profile::{BroadcastCounts, BroadcastKind, BroadcastProfile};
 /// in the engine costs it one return through its interrupt handler.
 pub trait Kick: Send + Sync {
     fn kick(&self, pe: usize);
+}
+
+/// A PE that may use any context's translations ([`Inbox::translating`]).
+const ANY_CONTEXT: u32 = u32::MAX;
+
+/// [`Inbox::translating`] of a regime's ASID.
+fn context_word(regime: mmu::Regime, asid: u16) -> u32 {
+    (regime as u32) << 16 | u32::from(asid)
+}
+
+/// The lower half's addresses a PE may hold global translations of, only
+/// ever widened. A TLBI by ASID removes those too, so it is not private
+/// ([`tlbi::Private`]) there.
+#[derive(Debug)]
+pub struct GlobalSpan {
+    first: AtomicU64,
+    last: AtomicU64,
+}
+
+impl GlobalSpan {
+    fn new() -> Self {
+        Self {
+            first: AtomicU64::new(u64::MAX),
+            last: AtomicU64::new(0),
+        }
+    }
+
+    /// Take in `first..=last` before using a translation there. When that
+    /// widens the span, a broadcast may have passed the PE by while it
+    /// walked, so it walks again: the caller's walk could predate the TLBI.
+    pub fn widen(&self, first: u64, last: u64) -> bool {
+        let lower = self.first.fetch_min(first, Ordering::SeqCst);
+        let upper = self.last.fetch_max(last, Ordering::SeqCst);
+        first < lower || last > upper
+    }
+
+    fn overlaps(&self, first: u64, last: u64) -> bool {
+        self.first.load(Ordering::SeqCst) <= last && self.last.load(Ordering::SeqCst) >= first
+    }
 }
 
 /// Maintenance one PE broadcasts to the others.
@@ -101,9 +140,9 @@ struct Inbox {
     sleeping: AtomicBool,
     /// The host needs its core ([`Hub::call_host`]).
     host_call: AtomicBool,
-    /// Its machine left its run loop, for the host's service or a stop: it
-    /// runs no guest code until it reads its mail again, so a broadcast
-    /// need not wait for it, as for one that sleeps.
+    /// Its machine left its run loop, for the host's service or a stop, or
+    /// compiles: it runs no guest code until it reads its mail again, so a
+    /// broadcast need not wait for it, as for one that sleeps.
     outside: AtomicBool,
     /// Stable native chaining allocation, kept even between PE owners.
     chain: Arc<chain_control::Storage>,
@@ -119,11 +158,28 @@ struct Inbox {
     applied: AtomicU64,
     /// Device lines changed since the machine last read them.
     lines: AtomicU64,
+    /// The regime and ASID ([`context_word`]) of the only non-global
+    /// translations it may use before it reads its mail.
+    translating: AtomicU32,
+    lower_globals: Arc<GlobalSpan>,
     /// Its machine's counts, as it last published them ([`Hub::publish`]).
     counts: Mutex<Counts>,
     source: observation::Slot,
     broadcasts: profile::Slot,
     mail: Mutex<Mail>,
+}
+
+impl Inbox {
+    /// Whether this PE may use a translation a TLBI private to one context
+    /// removes.
+    fn may_use(&self, private: tlbi::Private) -> bool {
+        let translating = self.translating.load(Ordering::SeqCst);
+        translating == ANY_CONTEXT
+            || translating == context_word(private.regime, private.asid)
+            || private
+                .addresses
+                .is_some_and(|(first, last)| self.lower_globals.overlaps(first, last))
+    }
 }
 
 /// What one PE's machine has done, for reports on how the PEs run together:
@@ -196,6 +252,30 @@ pub struct Hub {
     /// ([`Hub::request_service`]).
     service: AtomicBool,
     source_observations: AtomicBool,
+    /// The fetch pages any PE may have compiled from ([`Hub::compiling`]).
+    code_pages: CodePages,
+}
+
+/// Which physical fetch pages any PE may have compiled from, as a filter:
+/// bit `n` covers every page of a frame number congruent to `n`. A PE sets
+/// a page's bit before it reads the page to compile. So a PE that finds it
+/// clear after the guest's writes knows no block holds what they replaced,
+/// and an IC IVAU of data, of pages loaded for the first time, stops there.
+struct CodePages(Box<[AtomicU64]>);
+
+impl CodePages {
+    /// The bits, a power of two: 16 GiB of 16 KiB pages cover it once.
+    const BITS: usize = 1 << 20;
+
+    fn new() -> Self {
+        Self((0..Self::BITS / 64).map(|_| AtomicU64::new(0)).collect())
+    }
+
+    /// The word and bit of the page holding `physical`.
+    fn at(&self, physical: u64) -> (&AtomicU64, u64) {
+        let frame = (physical / FETCH_PAGE) as usize & (Self::BITS - 1);
+        (&self.0[frame / 64], 1 << (frame % 64))
+    }
 }
 
 /// A device access that only the home machine's canonical memory serves.
@@ -234,6 +314,8 @@ impl Hub {
                     live: AtomicBool::new(false),
                     sleeping: AtomicBool::new(false),
                     host_call: AtomicBool::new(false),
+                    translating: AtomicU32::new(ANY_CONTEXT),
+                    lower_globals: Arc::new(GlobalSpan::new()),
                     outside: AtomicBool::new(false),
                     chain: chain_control::Storage::new(),
                     owner: AtomicU64::new(0),
@@ -260,6 +342,7 @@ impl Hub {
             stopped: AtomicBool::new(false),
             finishing: AtomicBool::new(false),
             service: AtomicBool::new(false),
+            code_pages: CodePages::new(),
             source_observations: AtomicBool::new(false),
         })
     }
@@ -304,10 +387,15 @@ impl Hub {
     }
 
     fn post(&self, pe: usize, write: impl FnOnce(&mut Mail)) {
+        self.leave(pe, write);
+        self.interrupt(pe);
+    }
+
+    /// Leave mail for PE `pe` to find at its next read.
+    fn leave(&self, pe: usize, write: impl FnOnce(&mut Mail)) {
         let inbox = &self.inboxes[pe];
         write(&mut inbox.mail.lock().unwrap_or_else(|e| e.into_inner()));
         inbox.pending.store(true, Ordering::SeqCst);
-        self.interrupt(pe);
     }
 
     /// Publish interruption after its source; every next chain gate compares
@@ -428,12 +516,21 @@ impl Hub {
     /// that sleep; the serials to wait for. An instruction cache
     /// invalidation the PE has yet to read already covers the same page
     /// again, as IC IVAU of each line of a page posts it.
+    ///
+    /// A PE that translates another context than a TLBI's is neither
+    /// interrupted nor waited for: nothing it can use is stale, and the
+    /// mail left first is read before it uses that context, which it
+    /// publishes first ([`Machine::publish_translating`]).
     pub(super) fn broadcast(&self, from: usize, maintenance: Maintenance) -> Vec<(usize, u64)> {
+        let private = match maintenance {
+            Maintenance::Tlb(scope) => scope.private(),
+            _ => None,
+        };
         let mut posted = Vec::new();
         for pe in self.others(from) {
             let inbox = &self.inboxes[pe];
             let mut serial = 0;
-            self.post(pe, |mail| {
+            self.leave(pe, |mail| {
                 mail.serial += 1;
                 serial = mail.serial;
                 let covered = match maintenance {
@@ -447,9 +544,26 @@ impl Hub {
                 }
             });
             inbox.posted.store(serial, Ordering::Release);
-            posted.push((pe, serial));
+            if private.is_none_or(|private| inbox.may_use(private)) {
+                self.interrupt(pe);
+                posted.push((pe, serial));
+            }
         }
         posted
+    }
+
+    /// A PE is about to read the page holding `physical` to compile it.
+    pub(super) fn compiling(&self, physical: u64) {
+        let (word, bit) = self.code_pages.at(physical);
+        if word.load(Ordering::SeqCst) & bit == 0 {
+            word.fetch_or(bit, Ordering::SeqCst);
+        }
+    }
+
+    /// Whether any PE may have compiled from the page holding `physical`.
+    pub(super) fn has_code(&self, physical: u64) -> bool {
+        let (word, bit) = self.code_pages.at(physical);
+        word.load(Ordering::SeqCst) & bit != 0
     }
 
     /// Whether every PE in `posted` applied its maintenance, stopped
@@ -459,14 +573,10 @@ impl Hub {
     pub(super) fn applied(&self, posted: &mut Vec<(usize, u64)>) -> bool {
         posted.retain(|&(pe, serial)| {
             let inbox = &self.inboxes[pe];
-            let done = inbox.applied.load(Ordering::Acquire) >= serial
-                || !inbox.live.load(Ordering::Acquire)
-                || inbox.sleeping.load(Ordering::SeqCst)
-                || inbox.outside.load(Ordering::SeqCst);
-            if !done {
-                self.interrupt(pe);
-            }
-            !done
+            inbox.applied.load(Ordering::Acquire) < serial
+                && inbox.live.load(Ordering::Acquire)
+                && !inbox.sleeping.load(Ordering::SeqCst)
+                && !inbox.outside.load(Ordering::SeqCst)
         });
         posted.is_empty()
     }
@@ -796,6 +906,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
         let (attached, control) = Attached::new(&hub, self.current, true)?;
         self.adopt_parallel_control(control);
+        // What native code may complete depends on going parallel.
+        self.forget_derived();
         for peer in &mut self.peers {
             match peer {
                 Peer::Running => {}
@@ -818,12 +930,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
             impdef: self.cpu.apple.impdef.cluster_registers(),
         });
         let host = self.host.counter();
-        let pace = Pace::new(self.profile.counter_frequency, hub.pes() as u64);
+        let pace = Pace::new(self.profile.counter_frequency);
         self.clock.seed(&hub.clock, host, pace);
         self.clock
             .attach(Arc::clone(&hub.clock), self.current, self.statistics.blocks);
         hub.home.store(self.current, Ordering::Relaxed);
         self.share_kept_pages(hub.pes());
+        self.share_lower_globals(&hub);
         self.idle_skip = false;
         hub.set_live(self.current, true);
         self.attached = Some(attached);
@@ -836,11 +949,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
         // Every installed thunk embeds the old control address. Retire the
         // whole local arena and lookup table before dropping that allocation.
         self.discard_code(Discard::Control);
-        self.targets
-            .fill(stela_compiler::x86_64::chain::LookupEntry::default());
+        self.targets.clear();
         self.chain = control;
-        self.chain
-            .initialize(self.targets.as_ptr() as u64, contexts);
+        self.chain.initialize(self.targets.address(), contexts);
     }
 
     /// Whether this machine runs one PE of a board whose PEs each run on
@@ -881,6 +992,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.cpu.core_locks = core_locks;
         self.cpu.memory_lock = self.devices.memory_lock();
         self.share_kept_pages(hub.pes());
+        self.share_lower_globals(&hub);
         hub.set_live(self.current, true);
         self.attached = Some(attached);
         self.parallel = Some(hub);
@@ -953,6 +1065,24 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 .is_some_and(|wait| wait.kind == super::WaitKind::Event && !wait.down)
     }
 
+    /// Compile the block at `pc`, and whether mail reached this PE meanwhile,
+    /// which it reads before it runs anything. A compile takes far longer
+    /// than a maintenance broadcast should wait, and runs no guest code.
+    pub(super) fn compile_aside(
+        &mut self,
+        pc: u64,
+        physical: u64,
+        variant: Variant,
+    ) -> (Result<Fetched, super::Stop>, bool) {
+        let Some(hub) = self.parallel.clone() else {
+            return (self.compile(pc, physical, variant), false);
+        };
+        hub.set_outside(self.current, true);
+        let compiled = self.compile(pc, physical, variant);
+        hub.set_outside(self.current, false);
+        (compiled, hub.pending(self.current))
+    }
+
     /// Halt the host core until an interrupt, or, in parallel, also until
     /// mail or a device line change reaches this PE.
     pub(super) fn sleep(&mut self) {
@@ -974,7 +1104,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     asid: (controls.regime != mmu::Regime::El2)
                         .then(|| mmu::current_asid(&controls)),
                 };
-                self.tlb_maintained(scope.reach(&current), scope.everywhere());
+                self.tlb_maintained(
+                    scope.reach(&current),
+                    scope.everywhere(),
+                    scope.named_asid(),
+                );
             }
             Maintenance::Code(Some(physical)) => {
                 self.invalidate_code_page(physical);
@@ -996,6 +1130,34 @@ impl<H: Host, D: Devices> Machine<H, D> {
         Ok(())
     }
 
+    /// Publish the context `controls` translate, before this PE's walks
+    /// use it and before it next reads its mail ([`Hub::broadcast`]).
+    pub(super) fn publish_translating(&self, controls: &mmu::Controls) {
+        let Some(hub) = &self.parallel else {
+            return;
+        };
+        let translating = &hub.inboxes[self.current].translating;
+        let word = context_word(controls.regime, mmu::current_asid(controls));
+        if translating.load(Ordering::Relaxed) != word {
+            translating.store(word, Ordering::SeqCst);
+        }
+    }
+
+    /// See [`GlobalSpan::widen`]: whether the leaf holding `address` widened
+    /// this PE's span.
+    pub(super) fn widen_lower_globals(&self, address: u64, size: u64) -> bool {
+        self.parallel.as_ref().is_some_and(|hub| {
+            let (first, last) = mmu::shadow::leaf(address, size);
+            hub.inboxes[self.current].lower_globals.widen(first, last)
+        })
+    }
+
+    /// Give the host what it keeps this PE's span in.
+    fn share_lower_globals(&mut self, hub: &Hub) {
+        self.host
+            .share_lower_globals(Arc::clone(&hub.inboxes[self.current].lower_globals));
+    }
+
     /// Send the CPU power changes this PE made to every other PE's machine,
     /// and wait until each running one has applied them.
     pub(super) fn forward_power(&mut self) -> Step {
@@ -1004,6 +1166,19 @@ impl<H: Host, D: Devices> Machine<H, D> {
             self.complete_maintenance()?;
         }
         Ok(())
+    }
+
+    /// An IC IVAU of the page holding `physical`, for the other PEs: not
+    /// when no PE may have compiled from it, nor again before this PE's
+    /// next DSB, which the writes of what it cleans preceded. A kernel
+    /// cleans a page line by line, and its other lines add nothing.
+    pub(super) fn post_code_page(&mut self, physical: u64) {
+        let page = physical & !(FETCH_PAGE - 1);
+        let needed = self.parallel.as_ref().is_some_and(|hub| hub.has_code(page));
+        if needed && self.code_posted != Some(page) {
+            self.code_posted = Some(page);
+            self.post(Maintenance::Code(Some(page)));
+        }
     }
 
     /// Post `maintenance` to every other running PE, which applies it at
@@ -1040,6 +1215,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// one posted, reading this PE's own mail meanwhile: two PEs may wait
     /// on each other. A start that arrives meanwhile is posted again.
     pub(super) fn complete_maintenance(&mut self) -> Step {
+        self.code_posted = None;
+        self.mirrors.close_code_page();
         let Some(hub) = self.parallel.clone() else {
             return Ok(());
         };

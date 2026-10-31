@@ -13,6 +13,18 @@ pub(crate) enum BitTest {
 }
 
 impl Asm<'_> {
+    /// `lahf`: AH = SF:ZF:0:AF:0:PF:1:CF.
+    pub(crate) fn lahf(&mut self) {
+        self.fixed(&[0x9f]);
+    }
+    /// `sahf`: SF, ZF, AF, PF and CF from AH.
+    pub(crate) fn sahf(&mut self) {
+        self.fixed(&[0x9e]);
+    }
+    /// `cmc`: CF = !CF.
+    pub(crate) fn cmc(&mut self) {
+        self.fixed(&[0xf5]);
+    }
     /// `sub rsp, imm32`: reserve `bytes` of private stack.
     pub(crate) fn reserve_stack(&mut self, bytes: usize) {
         self.alu_imm32(Alu::Sub, Size::Qword, Gpr::Rsp, bytes as i32);

@@ -1,17 +1,37 @@
 //! The installed blocks by physical page: a page's sorted slots and page
 //! offsets, whose blocks hold the rest of each key. A block costs a few
-//! bytes here, and forgetting a page forgets its blocks at once.
+//! bytes here, and forgetting a page forgets its blocks at once. Each fetch
+//! a lookup misses comes here, so a direct-mapped cache of pages answers
+//! most without walking the ordered map, which sweeps keep their place in.
 use super::{Block, FETCH_PAGE, VariantId, table::Table};
-use alloc::{collections::BTreeMap, vec::Vec};
+use alloc::{boxed::Box, collections::BTreeMap, vec, vec::Vec};
 
 const _: () = assert!(FETCH_PAGE <= 1 << u16::BITS);
 
 /// Where [`BlockIndex::sweep`] goes on: past this entry of this page.
 pub(super) type Cursor = (u64, usize);
 
+/// The pages [`BlockIndex::front`] holds, a power of two.
+const FRONT: usize = 1 << 12;
+/// A frame no page has: pages are aligned.
+const NO_FRAME: u64 = 1;
+
+/// One block of a page.
+#[derive(Clone, Copy)]
+struct Entry {
+    offset: u16,
+    slot: u32,
+}
+
 pub(super) struct BlockIndex {
-    /// Each physical page's blocks: page offsets, ascending, and slots.
-    pages: BTreeMap<u64, Vec<(u16, u32)>>,
+    /// Each physical page's [`Self::entries`].
+    pages: BTreeMap<u64, u32>,
+    /// A page's blocks, by ascending offset.
+    entries: Vec<Vec<Entry>>,
+    /// The [`Self::entries`] of forgotten pages.
+    free: Vec<u32>,
+    /// Recently found pages and their [`Self::entries`].
+    front: Box<[(u64, u32)]>,
 }
 
 fn split(physical: u64) -> (u64, u16) {
@@ -22,25 +42,44 @@ fn split(physical: u64) -> (u64, u16) {
 }
 
 impl BlockIndex {
-    pub(super) const fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             pages: BTreeMap::new(),
+            entries: Vec::new(),
+            free: Vec::new(),
+            front: vec![(NO_FRAME, 0); FRONT].into_boxed_slice(),
         }
+    }
+
+    /// The cache slot of the page at `frame`.
+    fn front_slot(frame: u64) -> usize {
+        (frame / FETCH_PAGE) as usize & (FRONT - 1)
+    }
+
+    /// The [`Self::entries`] of the page at `frame`.
+    fn page(&self, frame: u64) -> Option<usize> {
+        let (cached, entries) = self.front[Self::front_slot(frame)];
+        if cached == frame {
+            return Some(entries as usize);
+        }
+        self.pages.get(&frame).map(|&entries| entries as usize)
     }
 
     /// The entries of `physical`'s page at its offset, which blocks of
     /// other PCs or variants may share.
-    fn at(&self, physical: u64) -> Option<&[(u16, u32)]> {
+    fn at(&mut self, physical: u64) -> Option<&[Entry]> {
         let (frame, offset) = split(physical);
-        let entries = self.pages.get(&frame)?;
-        let start = entries.partition_point(|entry| entry.0 < offset);
-        let count = entries[start..].partition_point(|entry| entry.0 == offset);
+        let page = self.page(frame)?;
+        self.front[Self::front_slot(frame)] = (frame, page as u32);
+        let entries = &self.entries[page];
+        let start = entries.partition_point(|entry| entry.offset < offset);
+        let count = entries[start..].partition_point(|entry| entry.offset == offset);
         Some(&entries[start..start + count])
     }
 
     /// The block at `pc`, `physical` and `variant`.
     pub(super) fn get(
-        &self,
+        &mut self,
         blocks: &Table<Block>,
         pc: u64,
         physical: u64,
@@ -48,7 +87,7 @@ impl BlockIndex {
     ) -> Option<usize> {
         self.at(physical)?
             .iter()
-            .map(|entry| entry.1 as usize)
+            .map(|entry| entry.slot as usize)
             .find(|&slot| blocks[slot].pc == pc && blocks[slot].variant == variant)
     }
 
@@ -56,28 +95,57 @@ impl BlockIndex {
     pub(super) fn insert(&mut self, blocks: &Table<Block>, slot: usize) {
         let block = &blocks[slot];
         let (frame, offset) = split(block.physical);
-        let entries = self.pages.entry(frame).or_default();
-        let start = entries.partition_point(|entry| entry.0 < offset);
+        let page = match self.page(frame) {
+            Some(page) => page,
+            None => {
+                let page = self.free.pop().unwrap_or_else(|| {
+                    self.entries.push(Vec::new());
+                    self.entries.len() as u32 - 1
+                });
+                self.pages.insert(frame, page);
+                page as usize
+            }
+        };
+        let entries = &mut self.entries[page];
+        let start = entries.partition_point(|entry| entry.offset < offset);
         let same = entries[start..]
             .iter()
-            .take_while(|entry| entry.0 == offset)
+            .take_while(|entry| entry.offset == offset)
             .position(|entry| {
-                let other = &blocks[entry.1 as usize];
+                let other = &blocks[entry.slot as usize];
                 other.pc == block.pc && other.variant == block.variant
             });
         match same {
-            Some(position) => entries[start + position].1 = slot as u32,
-            None => entries.insert(start, (offset, slot as u32)),
+            Some(position) => entries[start + position].slot = slot as u32,
+            None => entries.insert(
+                start,
+                Entry {
+                    offset,
+                    slot: slot as u32,
+                },
+            ),
         }
     }
 
     /// Stop finding the blocks of the page at `frame`: whether it had any.
     pub(super) fn forget_page(&mut self, frame: u64) -> bool {
-        self.pages.remove(&frame).is_some()
+        let Some(page) = self.pages.remove(&frame) else {
+            return false;
+        };
+        self.entries[page as usize] = Vec::new();
+        self.free.push(page);
+        let cached = &mut self.front[Self::front_slot(frame)];
+        if cached.0 == frame {
+            cached.0 = NO_FRAME;
+        }
+        true
     }
 
     pub(super) fn clear(&mut self) {
         self.pages.clear();
+        self.entries.clear();
+        self.free.clear();
+        self.front.fill((NO_FRAME, 0));
     }
 
     /// The indexed blocks, past `cursor`, in page order, with the cursor
@@ -87,18 +155,16 @@ impl BlockIndex {
         cursor: Option<Cursor>,
     ) -> impl Iterator<Item = (Cursor, usize)> + '_ {
         let (first, past) = cursor.map_or((0, None), |(frame, position)| (frame, Some(position)));
-        self.pages
-            .range(first..)
-            .flat_map(move |(&frame, entries)| {
-                let skip = past
-                    .filter(|_| frame == first)
-                    .map_or(0, |position| position + 1);
-                entries
-                    .iter()
-                    .enumerate()
-                    .skip(skip)
-                    .map(move |(position, entry)| ((frame, position), entry.1 as usize))
-            })
+        self.pages.range(first..).flat_map(move |(&frame, &page)| {
+            let skip = past
+                .filter(|_| frame == first)
+                .map_or(0, |position| position + 1);
+            self.entries[page as usize]
+                .iter()
+                .enumerate()
+                .skip(skip)
+                .map(move |(position, entry)| ((frame, position), entry.slot as usize))
+        })
     }
 
     #[cfg(all(feature = "std", feature = "native-profile"))]
@@ -108,7 +174,7 @@ impl BlockIndex {
 
     #[cfg(any(test, all(feature = "std", feature = "native-profile")))]
     pub(super) fn len(&self) -> usize {
-        self.pages.values().map(Vec::len).sum()
+        self.entries.iter().map(Vec::len).sum()
     }
 
     #[cfg(test)]
@@ -129,7 +195,7 @@ mod tests {
             code: NativeCode(0),
             instructions: 1,
             variant: VariantId(variant),
-            successors: Vec::new(),
+            successors: Box::default(),
             dynamic_site: None,
             first: 0,
             terminal: 0,

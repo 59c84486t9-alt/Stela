@@ -2,20 +2,11 @@
 //! exceptions.
 
 use super::*;
+use stela_compiler::x86_64::flag_word;
 
-// In the owning host stack through native/context execution.
-// recovery_rsp points to the complete image, never to a naked GPR snapshot.
-// The adjacent footer preserves both original stack ownership and BlockExit's
-// two result registers across scalar-only state restoration.
-#[repr(C)]
-pub(super) struct RecoveryFooter {
-    pub(super) xstate: super::super::xstate::EntryMetadata,
-    pub(super) saved_stack: u64,
-    pub(super) result_rax: u64,
-    pub(super) result_rdx: u64,
-    pub(super) context: u64,
-}
-
+// Native code owns the FP registers: the host is soft-float, translated code
+// keeps no guest state in them across an exit and IRQs use their IST images.
+// recovery_rsp holds the host's registers, which return and recovery pop.
 global_asm!(
     r#"
 .global stela_enter_block
@@ -35,71 +26,63 @@ stela_enter_owned:
     push rdi
     push rsi
     push rdx
-    mov rbx, rsp
     cmp qword ptr gs:[{recovery}], 0
     jne {refuse}
     cmp qword ptr gs:[{helper}], 0
     jne {refuse}
-    mov r11, gs:[{image_bytes}]
-    sub rsp, r11
-    sub rsp, {footer_bytes}
-    and rsp, -64
-    lea rsi, [rsp + r11]
-    mov [rsi + {saved_stack}], rbx
-    mov [rsi + {context}], r10
-    mov rdi, rsp
-    call {save}
-    fninit
     ldmxcsr [rip + {default_mxcsr}]
-    // Publish only a complete owned image. IRQs use separate IST images;
-    // a terminal NMI can never return through a half-published recovery frame.
     mov gs:[{recovery}], rsp
-    mov r11, gs:[{image_bytes}]
-    mov rbx, [rsp + r11 + {saved_stack}]
-    mov rdi, [rbx + 16]
-    mov rsi, [rbx + 8]
-    cmp qword ptr [rsp + r11 + {context}], 0
+    test r10d, r10d
     jne stela_enter_owned_context
     // Preserve the legacy generated-block entry alignment (RSP%16=0 in the
     // block); the separate context ABI remains SysV (RSP%16=8 in the block).
     sub rsp, 8
-    call rsi
-    add rsp, 8
+    mov rax, rsi
+    // The pinned guest registers (`x86_64::pinned`) live in these while
+    // native code runs, with the flag word (`x86_64::flag_word`).
+    mov ecx, [rdi + {nzcv}]
+    shr ecx, {arm_shift}
+    imul ecx, ecx, {pack}
+    and ecx, {word_mask}
+    mov [rdi + {nzcv}], ecx
+    mov rbx, [rdi + {sp}]
+    mov rsi, [rdi + 64]
+    mov r14, [rdi + 152]
+    mov r15, [rdi + 0]
+    mov rbp, [rdi + 8]
+    mov r12, [rdi + 128]
+    mov r13, [rdi + 136]
+    call rax
+    mov [rdi + {sp}], rbx
+    mov [rdi + 64], rsi
+    mov [rdi + 152], r14
+    mov [rdi + 0], r15
+    mov [rdi + 8], rbp
+    mov [rdi + 128], r12
+    mov [rdi + 136], r13
+    mov ecx, [rdi + {nzcv}]
+    and ecx, {word_mask}
+    imul ecx, ecx, {unpack}
+    and ecx, {arm_mask}
+    mov [rdi + {nzcv}], ecx
     jmp stela_native_owned_return
 stela_enter_owned_context:
-    mov rdx, [rbx]
     call rdx
 stela_native_owned_return:
     cmp qword ptr gs:[{helper}], 0
     jne {refuse}
-    mov rsp, gs:[{recovery}]
-    test rsp, rsp
-    jz {refuse}
-    mov r11, gs:[{image_bytes}]
-    mov [rsp + r11 + {result_rax}], rax
-    mov [rsp + r11 + {result_rdx}], rdx
     jmp stela_native_restore_host
 .global stela_native_recover
 stela_native_recover:
+    xor eax, eax
+    mov edx, 0xffff
+stela_native_restore_host:
+    // An abandoned helper has no surviving borrowed state or image.
     mov rsp, gs:[{recovery}]
     test rsp, rsp
     jz {refuse}
-    mov r11, gs:[{image_bytes}]
-    mov qword ptr [rsp + r11 + {result_rax}], 0
-    mov qword ptr [rsp + r11 + {result_rdx}], 0xffff
-stela_native_restore_host:
-    mov rdi, rsp
-    lea rsi, [rsp + r11]
-    call {restore}
-    // No Rust runs between exact restoration and returning to the original
-    // host stack. An abandoned helper has no surviving borrowed state/image.
-    mov r11, gs:[{image_bytes}]
-    mov rbx, [rsp + r11 + {saved_stack}]
-    mov rax, [rsp + r11 + {result_rax}]
-    mov rdx, [rsp + r11 + {result_rdx}]
     mov qword ptr gs:[{helper}], 0
     mov qword ptr gs:[{recovery}], 0
-    mov rsp, rbx
     add rsp, 24
     pop r15
     pop r14
@@ -109,16 +92,15 @@ stela_native_restore_host:
     pop rbp
     ret
 "#,
+    sp = const core::mem::offset_of!(GuestState, sp),
+    nzcv = const core::mem::offset_of!(GuestState, nzcv),
+    arm_shift = const flag_word::ARM_SHIFT,
+    pack = const flag_word::PACK_MULTIPLIER,
+    unpack = const flag_word::UNPACK_MULTIPLIER,
+    word_mask = const flag_word::WORD_MASK,
+    arm_mask = const flag_word::ARM_MASK,
     recovery = const local::RECOVERY_RSP_OFFSET,
     helper = const local::HELPER_RSP_OFFSET,
-    image_bytes = const local::XSTATE_IMAGE_BYTES_OFFSET,
-    footer_bytes = const size_of::<RecoveryFooter>(),
-    saved_stack = const core::mem::offset_of!(RecoveryFooter, saved_stack),
-    result_rax = const core::mem::offset_of!(RecoveryFooter, result_rax),
-    result_rdx = const core::mem::offset_of!(RecoveryFooter, result_rdx),
-    context = const core::mem::offset_of!(RecoveryFooter, context),
-    save = sym super::super::xstate::stela_xstate_save_owned,
-    restore = sym super::super::xstate::stela_xstate_restore_owned,
     refuse = sym super::super::xstate::stela_xstate_boundary_refuse,
     default_mxcsr = sym super::super::xstate::DEFAULT_MXCSR,
 );
@@ -242,6 +224,15 @@ pub(crate) fn page_fault(
     let root = state.roots[state.current];
     let virtual_page = address & !(PAGE - 1);
     let half = if address >> 63 == 0 { LOWER } else { UPPER };
+    if half == LOWER
+        && translation.global
+        && state.lower_globals.as_ref().is_some_and(|span| {
+            let (first, last) = shadow::leaf(address, translation.size);
+            span.widen(first, last)
+        })
+    {
+        return;
+    }
     state.pool.half = half;
     // A failed allocation can already have installed intermediate tables.
     state.legacy_translations_dirty = true;

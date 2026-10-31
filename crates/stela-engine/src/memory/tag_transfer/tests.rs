@@ -53,7 +53,7 @@ fn state() -> GuestState {
     state.x.fill(0xa500_0000_0000_2000);
     state.sp = 0xb300_0000_0000_3040;
     state.nzcv = 0xf000_0000;
-    state.reserved = 0xa5a5_5a5a;
+    state.exclusive_bytes = 0xa5a5_5a5a;
     state.v.fill([0x1234_5678_9abc_def0, 0xfedc_ba98_7654_3210]);
     state.fpcr = 0x0300_0000;
     state.fpsr = 0x0800_009f;

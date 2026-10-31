@@ -2,9 +2,12 @@
 use crate::x86_64::asm::Code;
 use crate::{
     GuestAddress,
-    block::{FaultRecovery, RetirementPoint},
+    block::{FaultRecovery, RecoveryBinding, RetirementPoint},
 };
 use alloc::vec::Vec;
+
+/// SP's number in a [`RecoveryBinding`].
+const STACK_POINTER: u8 = 31;
 
 /// Broad register locations do not imply a guest access. Split them at exact
 /// typed emission sites; only those instructions can authorize guest projection.
@@ -61,7 +64,11 @@ pub(super) fn bind(
                 start: marker.start,
                 end: marker.end,
                 site: marker.site,
-                bindings: Vec::new(),
+                bindings: marker
+                    .stack
+                    .map(|host| RecoveryBinding::gpr(STACK_POINTER, host))
+                    .into_iter()
+                    .collect(),
                 retirement: RetirementPoint::before(
                     pc,
                     u16::try_from(index).expect("bounded instruction prefix"),
@@ -78,7 +85,7 @@ mod tests {
     use super::*;
     use crate::{
         aarch64::{Instruction, Operation},
-        block::{RecoveryBinding, RecoverySite, RecoverySiteKind},
+        block::{RecoverySite, RecoverySiteKind},
         x86_64::asm::{Gpr, Mem, Size},
     };
     #[test]

@@ -141,6 +141,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
             && [HCR_VI, HCR_VF, HCR_VSE]
                 .into_iter()
                 .any(|bit| self.cpu.virtual_pending(bit));
+        self.cpu.state.pending = if virtual_pending {
+            u32::from(DAIF_A | DAIF_I | DAIF_F)
+        } else {
+            u32::from(if lines.irq { DAIF_I } else { 0 } | if lines.fiq { DAIF_F } else { 0 })
+        };
         if !lines.irq && !lines.fiq && !virtual_pending {
             return false;
         }

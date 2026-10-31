@@ -4,7 +4,9 @@ mod boundary;
 mod mirrors;
 mod reports;
 use boundary::*;
-pub use boundary::{ConsumedPair, DeviceError, Devices, Host, NoDevices, ScalarRead, Start};
+pub use boundary::{
+    ConsumedPair, DeviceError, Devices, Host, LocalRegisters, NoDevices, ScalarRead, Start,
+};
 use mirrors::*;
 use reports::*;
 pub use reports::{
@@ -48,8 +50,8 @@ pub use clock::ClockStatus;
 pub use monitor::{MonitorEvent, MonitorKind, MonitorLocation};
 pub use native_timing::{NativeInstructionSample, NativeTimingPhase, NativeTimingWork};
 pub use parallel::{
-    BroadcastCounts, BroadcastKind, BroadcastProfile, Call, Counts, Hub, Kick, MaterializedSource,
-    ParallelAdmissionError, SharedDevices, SourceObservation, SourcePhase,
+    BroadcastCounts, BroadcastKind, BroadcastProfile, Call, Counts, GlobalSpan, Hub, Kick,
+    MaterializedSource, ParallelAdmissionError, SharedDevices, SourceObservation, SourcePhase,
 };
 pub use stela_contracts::dma::{DmaError, TransferFault};
 mod pointer;
@@ -75,6 +77,7 @@ pub use budget::RunBudget;
 use crate::{pauth, scalable::ScalableState};
 use alloc::string::ToString;
 use alloc::{
+    boxed::Box,
     collections::{BTreeMap, BTreeSet},
     format,
     string::String,
@@ -83,6 +86,7 @@ use alloc::{
     vec::Vec,
 };
 use core::fmt;
+use core::num::NonZeroU64;
 #[cfg(test)]
 use core::sync::atomic::AtomicU64;
 use core::sync::atomic::Ordering;
@@ -106,6 +110,7 @@ pub use shared_memory::{
 pub use shared_memory::{NativeDataTlbStatistics, NativeSourceStatistics};
 #[cfg(test)]
 use stela_compiler::x86_64::chain::ChainControl;
+use stela_compiler::x86_64::chain::ExitWord;
 use stela_compiler::{
     GuestAddress, GuestState, Lifter, TargetCpu,
     aarch64::{
@@ -125,8 +130,8 @@ use stela_compiler::{
         system::SystemOperation,
     },
     x86_64::{
-        MemoryChecks, NativeSystem, cache_clean, chain, pointer as x86_64_pointer, register_read,
-        zero_block,
+        MemoryChecks, NativeSystem, cache_clean, chain, native_exclusive,
+        pointer as x86_64_pointer, register_read, zero_block,
     },
 };
 pub use stela_contracts::bus::Transition;
@@ -158,6 +163,8 @@ const MAX_BLOCK_BYTES: u64 = block::MAX_BLOCK_INSTRUCTIONS as u64 * INSTRUCTION;
 /// most blocks end within them, and the rest compile from the whole window.
 const FIRST_WINDOW_BYTES: usize = 32 * INSTRUCTION as usize;
 const FETCH_CACHE: usize = 1024;
+/// Bits in each half's filter of the pages fetched from.
+const FETCHED_PAGES: usize = 1 << 16;
 /// The level a fetch the host refuses (`Host::fetch_permitted`) reports its
 /// permission fault at: the host refuses whole pages, a level 3 leaf's.
 const HOST_REFUSED_FETCH_LEVEL: i8 = 3;
@@ -411,25 +418,28 @@ struct Block {
     physical: u64,
     code: NativeCode,
     /// The guest instructions it retires.
-    instructions: u32,
+    instructions: u16,
     variant: VariantId,
     /// Direct exits to static successors not yet chained, its own and its
     /// PAC thunk's.
-    successors: Vec<Successor>,
+    successors: Box<[Successor]>,
     /// The host address of the exit to the target in RAX that its RET, BR
     /// or BLR form (or that form's PAC thunk) ends with, until a lookup thunk
     /// serves it.
-    dynamic_site: Option<u64>,
+    dynamic_site: Option<NonZeroU64>,
     /// Its first instruction, for the Branch Target check of a branch to it.
     first: u32,
     /// The word of its last instruction, where it exits to the engine.
     terminal: u32,
-    /// Exits to the engine at `terminal`.
-    taken: u64,
+    /// Exits to the engine at `terminal`, up to its limit.
+    taken: u32,
     /// The guest bytes it was compiled from, for [`Machine::stale_code`].
-    source_bytes: u32,
+    source_bytes: u16,
     source_hash: u64,
 }
+
+// Every PE keeps one per block it ran, millions in all.
+const _: () = assert!(size_of::<Block>() <= 80);
 
 impl Block {
     /// The PC of its last instruction.
@@ -497,7 +507,7 @@ pub struct StaleCode {
 struct Successor {
     site: u64,
     target: GuestAddress,
-    kind: ExitKind,
+    word: ExitWord,
 }
 
 #[derive(Clone, Copy)]
@@ -507,8 +517,13 @@ struct FetchEntry {
     /// FEAT_BTI's guarded page (Arm `InGuardedPage`).
     guarded: bool,
     el: u8,
-    generation: u64,
+    epoch: FetchEpoch,
 }
+
+/// What a half's cached fetches and lookup contexts last as long as: the
+/// translation generation, and the table generation of a half that TTBR0
+/// selects ([`Machine::fetch_epoch`]).
+type FetchEpoch = (u64, u64);
 
 #[derive(Clone, Copy)]
 struct JumpEntry {
@@ -541,7 +556,7 @@ struct Space {
 struct Recent {
     el: u8,
     variant: Variant,
-    generations: (u64, u64),
+    generations: (FetchEpoch, u64),
     number: u64,
 }
 
@@ -550,6 +565,13 @@ const SPACES: usize = 64;
 /// The recent contexts one half finds without comparing controls: enough
 /// for the ELs and GXF states a kernel's exceptions alternate between.
 const RECENT: usize = 4;
+/// `Machine::lower_globals` with no such fetch.
+const NO_GLOBALS: (u64, u64) = (u64::MAX, 0);
+
+/// Whether `controls` translate `asid`.
+fn same_asid(controls: &mmu::Controls, asid: u16) -> bool {
+    (mmu::current_asid(controls) ^ asid) & 0xff == 0
+}
 
 /// A [`Variant`] in [`Machine::variants`]: a block's and its index keys'
 /// compact name for what it was compiled for.
@@ -665,11 +687,13 @@ pub struct Machine<H: Host, D: Devices> {
     jump: Vec<Option<JumpEntry>>,
     /// Advances when cached fetch translations become stale.
     translation_generation: u64,
+    /// TTBR0 writes: the kernel's fetches outlive a process switch.
+    table_generation: u64,
     /// Advances when installed code is discarded.
     code_generation: u64,
     /// The blocks fetches ran, by PC and context, for lookup thunks
     /// (`x86_64::chain`): the table `ChainControl::table` names.
-    targets: alloc::boxed::Box<[chain::LookupEntry]>,
+    targets: chain::LookupTable,
     /// Each half's lookup contexts ([`Space`]) since its translations last
     /// changed in a way no control value shows, most recently used last.
     spaces: [Vec<Space>; 2],
@@ -680,8 +704,30 @@ pub struct Machine<H: Host, D: Devices> {
     /// non-global: what a TLBI by VA or ASID reaches of its lookup entries.
     fetch_leaves: [u64; 2],
     private_fetches: [bool; 2],
+    /// The first and last addresses of the lower half fetched through a
+    /// global page since its contexts were last forgotten, or [`NO_GLOBALS`].
+    lower_globals: (u64, u64),
+    /// A filter of the pages each half fetched from since its contexts were
+    /// last forgotten: a TLBI of any other page reaches no lookup entry and
+    /// no cached fetch, as most by far do not.
+    fetched_pages: [Vec<u64>; 2],
+    /// The registers of the stored cells, in the order of the cells.
+    stored_reads: Vec<Encoding>,
+    /// The page this PE posted an IC IVAU of since its last DSB.
+    code_posted: Option<u64>,
+    /// The storage the last generated read returned, if it was a plain one.
+    plain_read: Option<(SystemRegister, u64)>,
     /// The next context number; numbers are never reused.
     next_context: u64,
+    /// The numbers from which lookup entries were written since code last
+    /// went: older ones may name a block no longer found.
+    code_floor: u64,
+    /// The code generation `code_floor` was taken in.
+    floor_generation: u64,
+    /// What owns each lookup salt ([`Self::context_salt`]), and the next
+    /// salt a new owner takes.
+    salt_owners: [u64; chain::LOOKUP_SALTS],
+    next_salt: usize,
     /// Identification registers the CPU profile has no value for.
     profile_missing: Vec<SystemRegister>,
     /// Accessors by encoding.
@@ -909,13 +955,23 @@ impl<H: Host, D: Devices> Machine<H, D> {
             fetch: vec![None; FETCH_CACHE],
             jump: vec![None; JUMP_CACHE],
             translation_generation: 1,
+            table_generation: 1,
             code_generation: 1,
-            targets: vec![chain::LookupEntry::default(); chain::LOOKUP_ENTRIES].into_boxed_slice(),
+            targets: chain::LookupTable::new(),
             spaces: [Vec::new(), Vec::new()],
             recent: [[None; RECENT]; 2],
             fetch_leaves: [0; 2],
             private_fetches: [false; 2],
+            lower_globals: NO_GLOBALS,
+            fetched_pages: [vec![0; FETCHED_PAGES / 64], vec![0; FETCHED_PAGES / 64]],
+            stored_reads: Vec::new(),
+            code_posted: None,
+            plain_read: None,
             next_context: 1,
+            code_floor: 1,
+            floor_generation: 1,
+            salt_owners: [0; chain::LOOKUP_SALTS],
+            next_salt: 0,
             profile_missing: Vec::new(),
             lookup: super::system::Lookup::new(),
             timers: None,
@@ -974,7 +1030,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             tag_checks: [false; 2],
             tags_checked_at: None,
         };
-        machine.chain.set_table(machine.targets.as_ptr() as u64);
+        machine.chain.set_table(machine.targets.address());
         machine.peers = processors::boot(&machine.profile, boot_processor);
         machine.load_profile();
         machine.sync_regime();

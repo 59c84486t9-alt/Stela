@@ -1,5 +1,5 @@
 //! PRFM as SSE PREFETCH hints.
-use super::{load, offset};
+use super::load;
 use crate::aarch64::{
     prefetch::{Address, Hint, Operand},
     register_offset::IndexExtend,
@@ -49,10 +49,9 @@ pub(super) fn emit(code: &mut Code, operand: &Operand) {
             shift,
         } => {
             load(code, base);
-            if let Some(displacement) = offset(index) {
+            if let Some(state) = code.asm().guest(index) {
                 // Read precisely the bits used by ExtendReg. W forms avoid an
                 // unnecessary 64-bit load followed by a separate conversion.
-                let state = Mem::base_disp32(Gpr::Rdi, displacement as i32);
                 let mut asm = code.asm();
                 match extend {
                     IndexExtend::Uxtw => asm.mov_load(Size::Dword, Gpr::Rcx, state),

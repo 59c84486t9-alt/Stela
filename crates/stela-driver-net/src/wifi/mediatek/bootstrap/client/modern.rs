@@ -554,7 +554,10 @@ pub(super) fn operation(
     band: wifi::Band,
 ) -> Result<wire::modern::Operation, Error> {
     let definition = context.definition();
-    let (mbssid_indicator, mbssid_index) = mbssid(&context.beacon().elements)?;
+    let (mbssid_indicator, mbssid_index) = context
+        .beacon()
+        .profile
+        .map_or((0, 0), |profile| (profile.indicator, profile.index));
     Ok(wire::modern::Operation {
         center_channel: center_channel(band, definition.center1_mhz)?,
         second_center_channel: definition
@@ -596,28 +599,5 @@ pub(super) fn center_channel(band: wifi::Band, mhz: u32) -> Result<u8, Error> {
         .filter(|n| *n != 0)
         .ok_or(Error::WrongProfile)
 }
-fn mbssid(mut elements: &[u8]) -> Result<(u8, u8), Error> {
-    let mut indicator = None;
-    let mut index = None;
-    while !elements.is_empty() {
-        let n = usize::from(*elements.get(1).ok_or(Error::WrongProfile)?);
-        let bytes = elements.get(2..2 + n).ok_or(Error::WrongProfile)?;
-        let slot = match elements[0] {
-            71 => Some(&mut indicator),
-            85 => Some(&mut index),
-            _ => None,
-        };
-        if let Some(slot) = slot {
-            let value = *bytes.first().ok_or(Error::WrongProfile)?;
-            if slot.is_some_and(|old| old != value) {
-                return Err(Error::WrongProfile);
-            }
-            *slot = Some(value);
-        }
-        elements = &elements[2 + n..];
-    }
-    Ok((indicator.unwrap_or(0), index.unwrap_or(0)))
-}
-
 #[cfg(test)]
 pub(super) mod tests;

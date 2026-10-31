@@ -85,6 +85,9 @@ unsafe impl super::super::radio::bios::service::BiosIo for RadioBios {
                 raw
             }
             Variable::Wbem => vec![0, 3, 0, 0, 0],
+            Variable::Uats | Variable::Uneb => {
+                return Err(super::super::radio::bios::service::IoError::NotFound);
+            }
             _ => panic!("unrequested source"),
         })
     }

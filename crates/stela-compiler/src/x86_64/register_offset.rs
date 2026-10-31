@@ -1,7 +1,7 @@
 //! Register-offset loads and stores to private RAM.
 use super::{
     Access, AddressMode, MemoryTransfer, Register, Shift, Width, memory_address, memory_store,
-    offset, right_operand,
+    right_operand,
 };
 use crate::aarch64::register_offset::{IndexExtend, Operand};
 use crate::x86_64::asm::{Alu, Code, Gpr, Mem, ShiftOp, Size};
@@ -88,11 +88,10 @@ const MAX_SCALE_SHIFT: u8 = 3;
 /// modulo 2^64. A W index is read with its extension from its frame slot;
 /// a ZR index adds nothing. RCX and host flags are scratch.
 pub(crate) fn index_add(code: &mut Code, index: Register, extend: IndexExtend, shift: u8) {
-    let Some(slot) = offset(index) else {
+    let mut asm = code.asm();
+    let Some(state) = asm.guest(index) else {
         return;
     };
-    let state = Mem::base_disp32(Gpr::Rdi, slot as i32);
-    let mut asm = code.asm();
     match extend {
         IndexExtend::Uxtw => asm.mov_load(Size::Dword, Gpr::Rcx, state),
         IndexExtend::Sxtw => asm.movsxd(Gpr::Rcx, state),
@@ -119,32 +118,37 @@ pub(crate) fn index_add(code: &mut Code, index: Register, extend: IndexExtend, s
 fn transfer(code: &mut Code, operand: &Operand) {
     match operand.transfer {
         MemoryTransfer::Store => {
-            right_operand(code, operand.data, Width::X64, Shift::Lsl, 0);
-            memory_store::emit(code, operand.bytes, 0, memory_store::Source::Rcx);
+            let source = match code.host(operand.data) {
+                Some(host) => memory_store::Source::Host(host),
+                None => {
+                    right_operand(code, operand.data, Width::X64, Shift::Lsl, 0);
+                    memory_store::Source::Rcx
+                }
+            };
+            memory_store::emit(code, operand.bytes, 0, source);
         }
         MemoryTransfer::Load { signed, width } => {
             let size = Size::of(width == Width::X64);
             let address = Mem::base(Gpr::Rax, 0);
+            let host = code.host(operand.data).unwrap_or(Gpr::Rcx);
             let mut asm = code.asm();
             asm.guest_access(|asm| match (operand.bytes, signed) {
-                (1, false) => asm.movzx(size, Gpr::Rcx, Size::Byte, address),
-                (2, false) => asm.movzx(size, Gpr::Rcx, Size::Word, address),
-                (1, true) => asm.movsx(size, Gpr::Rcx, Size::Byte, address),
-                (2, true) => asm.movsx(size, Gpr::Rcx, Size::Word, address),
+                (1, false) => asm.movzx(size, host, Size::Byte, address),
+                (2, false) => asm.movzx(size, host, Size::Word, address),
+                (1, true) => asm.movsx(size, host, Size::Byte, address),
+                (2, true) => asm.movsx(size, host, Size::Word, address),
                 (4, true) => {
                     debug_assert!(size == Size::Qword);
-                    asm.movsxd(Gpr::Rcx, address);
+                    asm.movsxd(host, address);
                 }
-                (4 | 8, false) => asm.mov_load(size, Gpr::Rcx, address),
+                (4 | 8, false) => asm.mov_load(size, host, address),
                 _ => unreachable!("decoder validates signed register-offset size"),
             });
             // A load to ZR still accesses memory and can fault.
-            if let Some(displacement) = offset(operand.data) {
-                asm.mov_store(
-                    Size::Qword,
-                    Mem::base_disp32(Gpr::Rdi, displacement as i32),
-                    Gpr::Rcx,
-                );
+            if host == Gpr::Rcx
+                && let Some(data) = asm.guest(operand.data)
+            {
+                asm.mov_store(Size::Qword, data, Gpr::Rcx);
             }
         }
     }

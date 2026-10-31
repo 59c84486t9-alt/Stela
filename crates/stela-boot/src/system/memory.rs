@@ -3,6 +3,16 @@ use super::*;
 use crate::Result;
 use stela_contracts::refuse;
 
+/// [`allocate`] aligned as [`tables::LARGE`], so that its mapping can take
+/// large pages.
+fn allocate_large(bytes: u64) -> Result<Region> {
+    let pages = (bytes + tables::LARGE).div_ceil(PAGE) as usize;
+    Ok(Region {
+        physical: (firmware::pages(pages)? as u64).next_multiple_of(tables::LARGE),
+        bytes,
+    })
+}
+
 /// The relocated engine image and the host ranges its mappings must reach.
 pub(super) struct EngineImage {
     pub snapshot: Snapshot,
@@ -37,7 +47,7 @@ pub(super) fn prepare_image() -> Result<EngineImage> {
     if image.start != snapshot.start || image.end - image.start != snapshot.bytes {
         return Err(refuse!("image layout changed after the snapshot"));
     }
-    let engine = allocate(snapshot.bytes as u64)?;
+    let engine = allocate_large(snapshot.bytes as u64)?;
     // SAFETY: two distinct live allocations of `bytes`.
     unsafe {
         core::ptr::copy_nonoverlapping(
@@ -163,7 +173,7 @@ pub(super) fn reserve(
         physical: native_resources.stacks.physical,
         bytes: STACK_BYTES,
     };
-    let code = allocate(sizes.code)?;
+    let code = allocate_large(sizes.code)?;
     let pool = allocate(sizes.pool)?;
     // The engine splits both among its runners, which a diagnostic may make
     // every core; check the BSP's and the last worker's part.
@@ -259,15 +269,24 @@ pub(super) fn map(
         )?;
     }
     // The window: the engine image with section rights, heap, stack, code.
-    for page in (0..snapshot.bytes as u64).step_by(PAGE as usize) {
+    let bytes = snapshot.bytes as u64;
+    let mut page = 0;
+    while page < bytes {
         let rights = image.rights(image.start + page as usize);
-        tables::map_page(
+        let run = (page..bytes)
+            .step_by(PAGE as usize)
+            .take_while(|&next| image.rights(image.start + next as usize) == rights)
+            .count() as u64
+            * PAGE;
+        tables::map_range(
             frames,
             root,
             layout::image() + page,
             engine.physical + page,
-            rights,
+            run,
+            rights | tables::GLOBAL,
         )?;
+        page += run;
     }
     let data = PRESENT | WRITABLE | NX;
     for slot in 0..cores {
@@ -277,7 +296,7 @@ pub(super) fn map(
             layout::stack() + slot as u64 * STACK_STRIDE + PAGE,
             native_resources.stacks.physical + slot as u64 * STACK_BYTES,
             STACK_BYTES,
-            data,
+            data | tables::GLOBAL,
         )?;
     }
     // These real LoaderData allocations outlive every root and continuation.
@@ -309,7 +328,7 @@ pub(super) fn map(
                         .physical_offset(index)
                         .map_err(|_| refuse!("guarded stack physical offset overflow"))?,
                 slot.usable.end - slot.usable.start,
-                data,
+                data | tables::GLOBAL,
             )?;
         }
     }
@@ -350,7 +369,7 @@ pub(super) fn map(
         layout::code(),
         code.physical,
         code.bytes,
-        PRESENT,
+        PRESENT | tables::GLOBAL,
     )?;
     // The physmap: all RAM, the framebuffer and the local APIC.
     for &(start, end) in ram {
@@ -361,7 +380,7 @@ pub(super) fn map(
             layout::physical(start),
             start,
             end - start,
-            data,
+            data | tables::GLOBAL,
         )?;
     }
     if let Some(screen) = screen {

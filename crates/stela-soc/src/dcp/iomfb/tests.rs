@@ -68,22 +68,22 @@ fn drain(methods: &mut Methods, answer: &[u8]) -> Vec<([u8; 4], Vec<u8>)> {
 #[test]
 fn display_size_tags_report_the_fixed_mode_at_verified_sizes() {
     assert_eq!(
-        answer(b"A451", &[], 4, FULL_HD).unwrap(),
+        answer(b"A451", &[], 4, FULL_HD).unwrap().unwrap(),
         1920u32.to_le_bytes()
     );
     assert_eq!(
-        answer(b"A452", &[], 4, FULL_HD).unwrap(),
+        answer(b"A452", &[], 4, FULL_HD).unwrap().unwrap(),
         1080u32.to_le_bytes()
     );
     assert_eq!(
-        answer(b"A351", &[], 4, FULL_HD).unwrap(),
+        answer(b"A351", &[], 4, FULL_HD).unwrap().unwrap(),
         1920u32.to_le_bytes()
     );
     assert_eq!(
-        answer(b"A350", &[], 4, FULL_HD).unwrap(),
+        answer(b"A350", &[], 4, FULL_HD).unwrap().unwrap(),
         1080u32.to_le_bytes()
     );
-    let size = answer(b"A453", &[0; 4], 8, FULL_HD).unwrap();
+    let size = answer(b"A453", &[0; 4], 8, FULL_HD).unwrap().unwrap();
     assert_eq!(&size[0..4], &1920u32.to_le_bytes());
     assert_eq!(&size[4..8], &1080u32.to_le_bytes());
 }
@@ -91,15 +91,15 @@ fn display_size_tags_report_the_fixed_mode_at_verified_sizes() {
 #[test]
 fn connection_tags_describe_one_external_main_display() {
     assert_eq!(
-        answer(b"A379", &[], 4, FULL_HD).unwrap(),
+        answer(b"A379", &[], 4, FULL_HD).unwrap().unwrap(),
         1u32.to_le_bytes()
     );
     assert_eq!(
-        answer(b"A384", &[], 4, FULL_HD).unwrap(),
+        answer(b"A384", &[], 4, FULL_HD).unwrap().unwrap(),
         0u32.to_le_bytes()
     );
     assert_eq!(
-        answer(b"A412", &[], 4, FULL_HD).unwrap(),
+        answer(b"A412", &[], 4, FULL_HD).unwrap().unwrap(),
         1u32.to_le_bytes()
     );
 }
@@ -152,13 +152,23 @@ fn status_methods_succeed_under_the_ap_link_status_contract() {
 #[test]
 fn the_boot_framebuffer_is_inherited_not_recreated() {
     assert_eq!(
-        answer(b"A454", &[], 4, FULL_HD).unwrap(),
+        answer(b"A454", &[], 4, FULL_HD).unwrap().unwrap(),
         0u32.to_le_bytes()
     );
-    assert!(answer(b"A389", &[], 0, FULL_HD).unwrap().is_empty());
-    assert!(answer(b"A478", &[0; 4], 0, FULL_HD).unwrap().is_empty());
+    assert!(
+        answer(b"A389", &[], 0, FULL_HD)
+            .unwrap()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        answer(b"A478", &[0; 4], 0, FULL_HD)
+            .unwrap()
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(
-        answer(b"A475", &[], 4, FULL_HD).unwrap(),
+        answer(b"A475", &[], 4, FULL_HD).unwrap().unwrap(),
         1u32.to_le_bytes()
     );
 }
@@ -267,12 +277,43 @@ fn calls_off_the_interface_or_its_sizes_refuse_by_name() {
     assert!(methods.call(*b"A451", &[], 8).is_err());
     let refusal = methods.last_refusal().unwrap();
     assert!(refusal.contains("display_width") && refusal.contains("out 0x4"));
-    // A method on the interface the model does not serve.
-    assert!(methods.call(*b"A123", &[0; 0x18], 4).is_err());
-    assert!(methods.last_refusal().unwrap().contains("start_task_dcp"));
     // Each call and refusal is in the display log.
     assert!(matches!(methods.take_log(), Some(Log::Call { tag, .. }) if &tag == b"A999"));
     assert!(matches!(methods.take_log(), Some(Log::Refused(_))));
+}
+
+#[test]
+fn a_method_without_a_model_answers_zeros_and_is_reported_once() {
+    let mut methods = methods();
+    let logged = |methods: &mut Methods| {
+        let mut reported = 0;
+        while let Some(entry) = methods.take_log() {
+            reported += usize::from(matches!(entry, Log::Unmodeled(tag) if &tag == b"A123"));
+        }
+        reported
+    };
+    assert_eq!(returned(methods.call(*b"A123", &[0; 0x18], 4)), [0; 4]);
+    assert_eq!(logged(&mut methods), 1);
+    assert_eq!(returned(methods.call(*b"A123", &[0; 0x18], 4)), [0; 4]);
+    assert_eq!(logged(&mut methods), 0);
+    assert!(methods.last_refusal().is_none());
+}
+
+#[test]
+fn the_color_remap_mode_reads_back_and_a_mode_the_scanout_lacks_is_reported() {
+    let mut methods = methods();
+    let query = [6, 0, 0, 0, 0, 0xaa, 0xaa, 0xaa];
+    let mut expected = [0u8; 8];
+    assert_eq!(returned(methods.call(*b"A427", &query, 8)), expected);
+    assert_eq!(
+        returned(methods.call(*b"A426", &2u32.to_le_bytes(), 4)),
+        [0; 4]
+    );
+    expected[0] = 2;
+    assert_eq!(returned(methods.call(*b"A427", &query, 8)), expected);
+    let reported = core::iter::from_fn(|| methods.take_log())
+        .any(|entry| matches!(entry, Log::Unmodeled(tag) if &tag == b"A426"));
+    assert!(reported);
 }
 
 #[test]

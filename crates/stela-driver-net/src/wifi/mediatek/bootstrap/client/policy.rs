@@ -158,6 +158,7 @@ fn copy_bss(b: &scan::result::Bss) -> Result<scan::result::Bss, PolicyError> {
         signal_dbm: b.signal_dbm,
         ssid: b.ssid.as_deref().map(copy).transpose()?,
         elements: copy(&b.elements)?,
+        profile: b.profile,
     })
 }
 fn channel(band: Band, n: u16) -> Option<Channel> {
@@ -848,6 +849,13 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
         if !self.revoked {
             for event in &events {
                 if let Event::Bss(bss) = event {
+                    let name = self
+                        .observed
+                        .iter()
+                        .find(|b| b.bss.bssid == bss.bssid && b.bss.channel == bss.channel)
+                        .and_then(|b| {
+                            (bss.hides_ssid() && !b.bss.hides_ssid()).then(|| b.bss.ssid.clone())
+                        });
                     self.observed.retain(|b| {
                         now.checked_sub(b.seen)
                             .is_some_and(|age| age <= BSS_EXPIRE_US)
@@ -857,10 +865,14 @@ impl<I: BarIo, Q: QueueIo, C: 'static> ManagedClient<I, Q, C> {
                         self.observed.remove(0);
                     }
                     let handle = BssHandle(NEXT_BSS.next().ok_or(PolicyError::Bss)?);
+                    let mut bss = copy_bss(bss)?;
+                    if let Some(name) = name {
+                        bss.ssid = name;
+                    }
                     self.observed.push(Observed {
                         handle,
                         seen: now,
-                        bss: copy_bss(bss)?,
+                        bss,
                     });
                 }
             }

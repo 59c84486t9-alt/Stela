@@ -82,6 +82,12 @@ struct Air {
     quiet: bool,
     /// The AP takes no frame at all.
     gone: bool,
+    /// The AP's beacons keep its name to themselves.
+    hidden: bool,
+    /// The AP's group traffic goes under TKIP.
+    tkip: bool,
+    /// The SSID of each probe.
+    probe_names: Vec<Vec<u8>>,
 }
 
 impl Air {
@@ -112,7 +118,18 @@ impl Air {
                 continue;
             }
             match bytes[0] {
-                0x40 => self.probed.extend(self.tuned.last().map(|tuned| tuned.0)),
+                0x40 => {
+                    let name = bytes[26..26 + usize::from(bytes[25])].to_vec();
+                    self.probed.extend(self.tuned.last().map(|tuned| tuned.0));
+                    let here = self.tuned.last().is_some_and(|t| t.0 == self.channel);
+                    if self.hidden && here && name == SSID {
+                        let mut response = advertised(self, self.channel as u8);
+                        response[0] = 0x50;
+                        response[4..10].copy_from_slice(&LOCAL);
+                        self.hear(response, false);
+                    }
+                    self.probe_names.push(name);
+                }
                 0xb0 => self.hear(management(0xb0, &[0, 0, 2, 0, 0, 0]), false),
                 0x00 => {
                     let mut body = vec![0x11, 0, 0, 0, 1, 0xc0];
@@ -144,7 +161,12 @@ impl Device for Model {
         assert_eq!(eirp_mbm, 2000);
         air.tuned.push((number, scanning));
         if scanning && number == air.channel {
-            air.hear(beacon(number as u8), false);
+            let mut heard = advertised(&air, number as u8);
+            if air.hidden {
+                heard.drain(38..38 + SSID.len());
+                heard[37] = 0;
+            }
+            air.hear(heard, false);
         }
         Ok(())
     }
@@ -163,7 +185,7 @@ impl Device for Model {
     fn receive(&mut self, sink: &mut dyn FnMut(Incoming)) -> Result<(), String> {
         let mut air = self.0.borrow_mut();
         if !air.quiet && air.tuned.last() == Some(&(air.channel, false)) {
-            let beacon = beacon(air.channel as u8);
+            let beacon = advertised(&air, air.channel as u8);
             air.hear(beacon, false);
         }
         air.incoming.drain(..).for_each(sink);
@@ -260,12 +282,27 @@ fn beacon(channel: u8) -> Vec<u8> {
     frame.extend(rates(u16::from(channel)));
     frame.extend([3, 1, channel, 5, 4, 0, 2, 0, 0]);
     frame.extend(RSN);
-    if channel < 14 {
-        frame.extend(HT);
-        // HT Operation's primary channel.
-        let at = frame.len() - 22;
-        frame[at] = channel;
-        frame.extend(WMM);
+    frame.extend(HT);
+    // HT Operation's primary channel.
+    let at = frame.len() - 22;
+    frame[at] = channel;
+    frame.extend(WMM);
+    frame
+}
+
+/// `rsn` as an AP under TKIP for its group traffic sends it.
+fn tkip_rsn() -> [u8; 22] {
+    let mut rsn = RSN;
+    rsn[7] = 2;
+    rsn
+}
+
+/// What the model's AP beacons on `channel`.
+fn advertised(air: &Air, channel: u8) -> Vec<u8> {
+    let mut frame = beacon(channel);
+    if air.tkip {
+        let at = frame.windows(RSN.len()).position(|w| w == RSN).unwrap();
+        frame[at..at + RSN.len()].copy_from_slice(&tkip_rsn());
     }
     frame
 }
@@ -349,11 +386,26 @@ const OPEN: [(u32, u32, u8, u16); 1] = [(2_402_000, 2_472_000, 0, 2000)];
 
 /// Join the model's AP on channel 1 through its handshake to an open port.
 fn connected() -> (Wifi<Model>, Model) {
-    let (mut wifi, model) = wifi(&OPEN, 1);
+    connected_on(&OPEN, 1)
+}
+
+/// Join the model's AP on `channel` through its handshake to an open port.
+fn connected_on(rules: &[(u32, u32, u8, u16)], channel: u16) -> (Wifi<Model>, Model) {
+    connected_under(rules, channel, RSN)
+}
+
+/// [`connected_on`], with the AP offering `rsn`.
+fn connected_under(
+    rules: &[(u32, u32, u8, u16)],
+    channel: u16,
+    rsn: [u8; 22],
+) -> (Wifi<Model>, Model) {
+    let (mut wifi, model) = wifi(rules, channel);
+    model.0.borrow_mut().tkip = rsn != RSN;
     assert!(run(&mut wifi, &model, |wifi, _| {
         wifi.radio().station().phase() == Peering::Associated
     }));
-    let security = Security::select(&RSN, true).unwrap();
+    let security = Security::select(&rsn, true).unwrap();
     let mut ap = Authenticator::between(
         security.suites(),
         Zeroizing::new([0; 32]),
@@ -371,7 +423,7 @@ fn connected() -> (Wifi<Model>, Model) {
     model.0.borrow_mut().hear(frame, false);
     assert!(run(&mut wifi, &model, |_, air| !answers(air).is_empty()));
     ap.message_2(&answers(&model.0.borrow())[0]);
-    let frame = data(LOCAL, 1, [0x88, 0x8e], &ap.message_3(&RSN), None);
+    let frame = data(LOCAL, 1, [0x88, 0x8e], &ap.message_3(&rsn), None);
     model.0.borrow_mut().hear(frame, false);
     assert!(run(&mut wifi, &model, |_, air| answers(air).len() > 1));
     assert!(wifi.carrier());
@@ -457,6 +509,92 @@ fn a_scan_probes_where_it_may_and_only_listens_where_it_may_not() {
 }
 
 #[test]
+fn a_network_no_scan_found_is_asked_for_by_name() {
+    let (mut wifi, model) = wifi(&OPEN, 1);
+    model.0.borrow_mut().hidden = true;
+    assert!(run(&mut wifi, &model, |wifi, _| {
+        wifi.radio().station().phase() == Peering::Associated
+    }));
+    let air = model.0.borrow();
+    let first_named = air
+        .probe_names
+        .iter()
+        .position(|name| name == SSID)
+        .unwrap();
+    assert!(first_named > 0, "the first scan keeps the name to itself");
+    assert!(air.probe_names[..first_named].iter().all(Vec::is_empty));
+}
+
+#[test]
+fn a_network_in_plain_sight_is_never_named() {
+    let (_, model) = connected();
+    let air = model.0.borrow();
+    assert!(air.probe_names.iter().all(Vec::is_empty));
+}
+
+/// A connection whose group key is the test authenticator's TKIP key.
+fn tkip_group() -> (Wifi<Model>, Model) {
+    connected_under(&OPEN, 1, tkip_rsn())
+}
+
+/// A broadcast TKIP frame from the AP with `mic` behind `body`.
+fn tkip_frame(body: &[u8], mic: [u8; 8]) -> Vec<u8> {
+    let mut frame = data([0xff; 6], 9, [8, 0], body, Some((1, 1)));
+    frame.truncate(frame.len() - 8);
+    frame.extend(mic);
+    frame.extend([0; 4]);
+    frame
+}
+
+/// What Michael gives the LLC and `body` of [`tkip_frame`].
+fn tkip_mic(body: &[u8]) -> [u8; 8] {
+    let mut msdu = vec![0xaa, 0xaa, 3, 0, 0, 0, 8, 0];
+    msdu.extend(body);
+    // The key's second half, which the AP signs with.
+    let key = [0x60, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67];
+    michael::michael(&key, &[0xff; 6], &AP, 0, &msdu)
+}
+
+#[test]
+fn a_tkip_group_key_reaches_the_cam_by_its_temporal_half() {
+    let (_, model) = tkip_group();
+    let air = model.0.borrow();
+    let tkip = air.keys.iter().find(|key| key.2 == CAM_TKIP).unwrap();
+    assert_eq!((tkip.1, tkip.3), (1, true));
+    assert_eq!(tkip.4[..], (0x50..0x60).collect::<Vec<u8>>());
+}
+
+#[test]
+fn a_tkip_frame_passes_on_its_michael() {
+    let (mut wifi, model) = tkip_group();
+    let body = [0x45, 0, 0, 20];
+    model
+        .0
+        .borrow_mut()
+        .hear(tkip_frame(&body, tkip_mic(&body)), true);
+    wifi.carrier();
+    let ethernet = wifi.receive().unwrap().unwrap();
+    assert_eq!(ethernet[..6], [0xff; 6]);
+    assert_eq!(ethernet[14..], body);
+}
+
+#[test]
+fn a_failed_michael_is_dropped_and_told_to_the_ap() {
+    let (mut wifi, model) = tkip_group();
+    let before = model.0.borrow().sent.len();
+    let body = [0x45, 0, 0, 20];
+    model.0.borrow_mut().hear(tkip_frame(&body, [0; 8]), true);
+    assert!(run(&mut wifi, &model, |_, air| air.sent.len() > before));
+    assert!(wifi.receive().unwrap().is_none());
+    let air = model.0.borrow();
+    assert!(
+        air.sent[before..]
+            .iter()
+            .any(|(_, _, bytes)| eapol(bytes).is_some())
+    );
+}
+
+#[test]
 fn a_scan_gives_the_gain_up_and_back() {
     let (mut wifi, model) = wifi(&OPEN, 1);
     assert!(run(&mut wifi, &model, |_, air| air.scans.len() == 2));
@@ -523,6 +661,57 @@ fn a_lost_authentication_goes_again() {
     assert_eq!(tries, 2);
 }
 
+/// Two frames of data that waited for the rings on 5 GHz, as sent.
+fn waited_on_five_ghz(before_sending: impl FnOnce(&mut Air)) -> Vec<Vec<u8>> {
+    let rules = [(5_170_000, 5_250_000, 0, 2000)];
+    let (mut wifi, model) = connected_on(&rules, 36);
+    let before = model.0.borrow().sent.len();
+    before_sending(&mut model.0.borrow_mut());
+    wifi.carrier();
+    model.0.borrow_mut().full = true;
+    let ethernet = ip(0xc0);
+    wifi.transmit(&ethernet).unwrap();
+    wifi.transmit(&ethernet).unwrap();
+    wifi.carrier();
+    model.0.borrow_mut().full = false;
+    run(&mut wifi, &model, |_, air| air.sent.len() > before);
+    for _ in 0..4 {
+        wifi.carrier();
+    }
+    let air = model.0.borrow();
+    let sent = air.sent[before..].iter();
+    sent.map(|(_, _, mpdu)| mpdu.clone()).collect()
+}
+
+#[test]
+fn data_waiting_together_on_five_ghz_leaves_as_one_amsdu() {
+    let sent = waited_on_five_ghz(|_| ());
+    let [mpdu] = &sent[..] else {
+        panic!("{} frames", sent.len());
+    };
+    assert_eq!(mpdu[24] & 0x80, 0x80);
+    assert_eq!(mpdu[26 + 3] & 0x20, 0x20, "under the head's IV");
+    assert_eq!(
+        mpdu[26 + 8 + 12..26 + 8 + 14],
+        [0, 54],
+        "LLC and the IP frame"
+    );
+}
+
+#[test]
+fn a_slow_rate_keeps_frames_apart() {
+    let sent = waited_on_five_ghz(|air| {
+        air.incoming.push_back(Incoming::Report(Report::Rate {
+            mac_id: MAC_ID,
+            rate: 4,
+            short_gi: false,
+            width: None,
+        }));
+    });
+    assert_eq!(sent.len(), 2);
+    assert!(sent.iter().all(|mpdu| mpdu[24] & 0x80 == 0));
+}
+
 #[test]
 fn data_leaves_with_its_packet_number_and_waits_out_a_full_queue() {
     let (mut wifi, model) = connected();
@@ -576,6 +765,96 @@ fn received_data_passes_its_replay_and_integrity_checks() {
     model.0.borrow_mut().hear(group, true);
     wifi.carrier();
     assert_eq!(delivered(&mut wifi), [0x45]);
+}
+
+/// Fragment `number` of frame `sequence` under the pairwise key at packet
+/// number `pn`, with `more` to follow.
+fn fragment(sequence: u16, number: u8, more: bool, pn: u8, payload: &[u8]) -> Vec<u8> {
+    let mut frame = data(LOCAL, sequence, [8, 0], &[], Some((0, pn)));
+    frame.truncate(34);
+    frame.extend_from_slice(payload);
+    frame.extend([0; 8]);
+    frame[1] |= u8::from(more) << 2;
+    frame[22] |= number;
+    frame
+}
+
+#[test]
+fn fragments_under_consecutive_numbers_make_one_frame() {
+    let (mut wifi, model) = connected();
+    let first = [&[0xaa, 0xaa, 3, 0, 0, 0, 8, 0][..], &[0x45; 4]].concat();
+    model
+        .0
+        .borrow_mut()
+        .hear(fragment(30, 0, true, 1, &first), true);
+    model
+        .0
+        .borrow_mut()
+        .hear(fragment(30, 1, false, 2, &[0x46; 4]), true);
+    wifi.carrier();
+    let ethernet = wifi.receive().unwrap().unwrap();
+    assert_eq!(
+        ethernet[14..],
+        [0x45, 0x45, 0x45, 0x45, 0x46, 0x46, 0x46, 0x46]
+    );
+    assert_eq!(wifi.receive().unwrap(), None);
+}
+
+#[test]
+fn fragments_that_skip_a_number_are_dropped() {
+    let (mut wifi, model) = connected();
+    let first = [&[0xaa, 0xaa, 3, 0, 0, 0, 8, 0][..], &[0x45; 4]].concat();
+    model
+        .0
+        .borrow_mut()
+        .hear(fragment(31, 0, true, 5, &first), true);
+    model
+        .0
+        .borrow_mut()
+        .hear(fragment(31, 1, false, 7, &[0x46; 4]), true);
+    wifi.carrier();
+    assert_eq!(delivered(&mut wifi), []);
+}
+
+/// An SA Query request at packet number `number`, opened as hardware leaves
+/// it, its MIC in place.
+fn sa_query(number: u8) -> Vec<u8> {
+    let mut frame = management(0xd0, &[number, 0, 0, 0x20, 0, 0, 0, 0, 8, 0, 1, 2]);
+    frame[1] = 0x40;
+    frame.extend([0; 8]);
+    frame
+}
+
+/// How many SA Query answers the station sent.
+fn query_answers(air: &Air) -> usize {
+    air.sent.iter().filter(|sent| sent.2[0] == 0xd0).count()
+}
+
+#[test]
+fn a_protected_management_frame_is_taken_once_under_its_packet_number() {
+    let (mut wifi, model) = connected();
+    model.0.borrow_mut().hear(sa_query(5), true);
+    assert!(run(&mut wifi, &model, |_, air| query_answers(air) == 1));
+    model.0.borrow_mut().hear(sa_query(5), true);
+    assert!(!run(&mut wifi, &model, |_, air| query_answers(air) > 1));
+    model.0.borrow_mut().hear(sa_query(6), true);
+    assert!(run(&mut wifi, &model, |_, air| query_answers(air) == 2));
+}
+
+#[test]
+fn a_protected_management_frame_hardware_left_sealed_opens_under_the_key() {
+    let (mut wifi, model) = connected();
+    let key = model.0.borrow().keys.iter().find(|key| !key.3).unwrap().4;
+    let sealed = |key: &[u8; 16], number: u8| {
+        let frame = sa_query(number);
+        let iv: &[u8; 8] = frame[24..32].try_into().unwrap();
+        let pn = PacketNumber::new(number.into()).unwrap();
+        ccmp::seal(key, &frame[..24], iv, pn, &frame[32..36])
+    };
+    model.0.borrow_mut().hear(sealed(&[0; 16], 5), false);
+    assert!(!run(&mut wifi, &model, |_, air| query_answers(air) > 0));
+    model.0.borrow_mut().hear(sealed(&key, 5), false);
+    assert!(run(&mut wifi, &model, |_, air| query_answers(air) == 1));
 }
 
 #[test]
@@ -662,9 +941,9 @@ fn an_association_leaves_firmware_its_frames() {
     let (_, model) = connected();
     let air = model.0.borrow();
     assert_eq!(air.templates.len(), 1);
-    let pages = &air.templates[0];
+    let pages = air.templates[0].pages(&[0; 169], &[0; 16]);
     // The PS-Poll's AID from the association response, in its first bytes.
-    assert_eq!(pages.pages[80 + 48..80 + 52], [0xa4, 0, 1, 0xc0]);
+    assert_eq!(pages.data[80 + 48..80 + 52], [0xa4, 0, 1, 0xc0]);
 }
 
 #[test]

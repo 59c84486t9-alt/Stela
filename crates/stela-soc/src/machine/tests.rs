@@ -2509,8 +2509,15 @@ fn fast_ipis_raise_and_clear_the_target_pes_fiq() {
     );
     assert!(devices.lines(2, 0).fiq && !devices.lines(0, 0).fiq);
     assert_eq!(devices.system_register(2, status, None, 0), Some(Ok(1)));
+    let local = devices.local_registers(2).unwrap();
+    assert_eq!(local.register(status, None), Some(1));
+    assert_eq!(local.register(status, Some(1)), None);
+    let word = local.storage(status).unwrap() as *const u64;
+    // SAFETY: the board keeps the word for its life.
+    assert_eq!(unsafe { word.read_volatile() }, 1);
     assert_eq!(devices.system_register(2, status, Some(1), 0), Some(Ok(0)));
     assert!(!devices.lines(2, 0).fiq);
+    assert_eq!(local.register(status, None), Some(0));
     assert_eq!(
         devices.system_register(0, Encoding::new(3, 5, 15, 2, 0), None, 0),
         None

@@ -28,7 +28,7 @@ const ALL_CONTEXTS: u64 = 2;
 /// Whether INVPCID is available: 0 unknown, 1 absent, 2 present.
 static INVPCID_PRESENT: AtomicU8 = AtomicU8::new(0);
 
-fn invpcid() -> bool {
+pub(crate) fn invpcid() -> bool {
     match INVPCID_PRESENT.load(Ordering::Relaxed) {
         0 => {
             let present = __cpuid_count(7, 0).ebx & INVPCID != 0;

@@ -401,7 +401,7 @@ fn the_least_recently_used_pages_are_let_go() {
 }
 
 #[test]
-fn with_memory_low_pages_are_let_go_and_nothing_is_offered() {
+fn with_memory_low_pages_stay_and_nothing_is_offered() {
     // A block in each of two pages: add x0, x0, #1; svc #0.
     const PAGE_WORDS: usize = FETCH_PAGE as usize / INSTRUCTION as usize;
     let mut words = vec![0; PAGE_WORDS + 2];
@@ -411,15 +411,15 @@ fn with_memory_low_pages_are_let_go_and_nothing_is_offered() {
     }
     let mut machine = machine(&words);
     machine.host.store = Some(MemoryStore::default());
-    // A ring arena, whose reclaim leaves the first part's block alone.
-    machine.host.ring = Some(4);
+    // Nothing to reclaim yet, which would forget the first page's block.
+    machine.memory_release_blocks = usize::MAX;
     assert!(machine.fetch_block(BASE, false).is_ok());
     assert_eq!(machine.statistics.offered, 1);
     machine.host.memory_low = true;
     assert!(machine.fetch_block(BASE + FETCH_PAGE, false).is_ok());
     assert_eq!(
         machine.pages.keys().copied().collect::<Vec<_>>(),
-        [BASE + FETCH_PAGE]
+        [BASE, BASE + FETCH_PAGE]
     );
     assert_eq!(machine.statistics.offered, 1);
     assert_eq!(machine.host.store.as_ref().unwrap().offers.len(), 1);

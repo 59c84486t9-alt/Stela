@@ -191,6 +191,11 @@ impl Device<'_> {
                 reply(511).to_vec()
             }
             (_, 0x1e) => vec![0; 132],
+            (2, 0) | (0 | 1, 0x25) => shared_memory(
+                self.native
+                    .transmit_fifo
+                    .load(core::sync::atomic::Ordering::Relaxed),
+            ),
             (5, 0x16) => {
                 self.block_acks.push(request.to_vec());
                 u32::from(SESSION).to_le_bytes().to_vec()
@@ -392,6 +397,10 @@ fn answer(receiver: [u8; 6], subtype: u16, body: &[u8]) -> Vec<u8> {
 /// The station address `nvm_response` holds.
 const LOCAL: [u8; 6] = [0x02, 0x12, 0x34, 0x56, 0x78, 0x9a];
 
+/// The transmitter of the Multiple BSSID set whose second BSS the model's AP
+/// is, for a [`beacon`] whose `elements` start with the set.
+const TRANSMITTER: [u8; 6] = [2, 3, 4, 5, 6, 6];
+
 /// A channel 1 ESS beacon from 02:03:04:05:06:07 carrying `ssid` and the 1
 /// and 6 Mb/s rates.
 fn beacon(ssid: &[u8], rsn: &[u8], quality: bool, elements: &[u8]) -> Vec<u8> {
@@ -411,6 +420,10 @@ fn beacon(ssid: &[u8], rsn: &[u8], quality: bool, elements: &[u8]) -> Vec<u8> {
         frame.extend(WMM);
     }
     frame.extend(elements);
+    if elements.first() == Some(&71) {
+        frame[10..16].copy_from_slice(&TRANSMITTER);
+        frame[16..22].copy_from_slice(&TRANSMITTER);
+    }
     mpdu(frame, 3)
 }
 
@@ -541,6 +554,16 @@ fn placed_at(
         version: 0,
     };
     command_packet(mpdu, 0x8000, &payload)
+}
+
+/// Firmware's report of two LMACs whose FIFOs are each `size` bytes.
+fn shared_memory(size: u32) -> Vec<u8> {
+    let mut payload = vec![0; 260];
+    payload[32..36].copy_from_slice(&2u32.to_le_bytes());
+    for at in (40..100).chain(112..172).step_by(4) {
+        payload[at..at + 4].copy_from_slice(&size.to_le_bytes());
+    }
+    payload
 }
 
 /// Bring the modeled function up for the network "test" until it is ready
@@ -1431,6 +1454,40 @@ fn frames_that_wait_together_leave_as_an_amsdu_the_firmware_allows() {
     assert_eq!(device.air[sent + 1][24] & 0x80, 0);
 }
 
+#[test]
+fn an_amsdu_stops_short_of_firmwares_fifo() {
+    let native = Native::default();
+    native
+        .transmit_fifo
+        .store(1500 + 256, core::sync::atomic::Ordering::Relaxed);
+    let (mut wifi, mut device) = connect(&native, true);
+    let rates = Id {
+        group: 5,
+        opcode: 0xf7,
+        version: 0,
+    };
+    let mut body = [0; 20];
+    body[4] = 2;
+    body[12..14].copy_from_slice(&2200u16.to_le_bytes());
+    body[16] = 1;
+    device.inject(
+        wifi.radio().rom().unwrap(),
+        &command_packet(rates, 0x8000, &body),
+    );
+    settle(&mut wifi, &mut device);
+    let sent = device.air.len();
+    let ethernet = [&[9; 6][..], &LOCAL, &[8, 0], &[0x45], &[0; 999]].concat();
+    for _ in 0..2 {
+        wifi.transmit(&ethernet).unwrap();
+    }
+    let gone = run(&mut wifi, &mut device, |_, device, _| {
+        device.air.len() >= sent + 2
+    });
+    assert!(gone, "{:?}", wifi.radio().error());
+    assert_eq!(device.air[sent][24] & 0x80, 0);
+    assert_eq!(device.air[sent + 1][24] & 0x80, 0);
+}
+
 /// A protected frame's fragment `index` of sequence 5, under packet number
 /// `number`, carrying `body` straight after its header.
 fn fragment(index: u8, more: bool, number: u8, body: &[u8]) -> Vec<u8> {
@@ -1591,6 +1648,108 @@ fn an_he_ap_reaches_the_link_and_the_station_commands() {
     assert_eq!(peer[52], 1, "random access");
     assert_eq!(peer[72..92], [7; 20], "zero nominal padding");
     assert_eq!(peer[92], 1, "HE-HTC");
+}
+
+/// A Multiple BSSID set naming the network the model's AP joins as index 1,
+/// with `extra` in its profile, and what makes [`HE_AP`] a set member.
+fn multiple_bssid(extra: &[u8]) -> Vec<u8> {
+    let mut profile = vec![83, 2, 0x31, 0, 85, 3, 1, 3, 2, 0, 4];
+    profile.extend(b"test");
+    profile.extend(extra);
+    let mut set = vec![71, profile.len() as u8 + 3, 3, 0, profile.len() as u8];
+    set.extend(profile);
+    set.extend(HE_AP);
+    set
+}
+
+#[test]
+fn a_nontransmitted_bss_joins_on_its_profile_and_names_its_transmitter() {
+    let native = Native::default();
+    let elements: &'static [u8] = Vec::leak(multiple_bssid(&[]));
+    let (mut wifi, phase, mut device) =
+        raise_beside(&native, Some(*b"US"), vec![b"top"], 0, OPEN, true, elements);
+    assert_eq!(phase, Phase::AuthenticationRequired);
+    let associated = run(&mut wifi, &mut device, |wifi, _, _| {
+        wifi.radio().station().phase() == Peering::Associated
+    });
+    assert!(associated, "{:?}", wifi.radio().station().phase());
+    assert_eq!(device.air[0][4..10], AP, "the profile's own address");
+    assert_eq!(device.air[1][28..34], [0, 4, b't', b'e', b's', b't']);
+    let extended = [127, 9, 4, 0, 0x40, 0, 0, 0, 0, 0xc0, 1];
+    let request = &device.air[1];
+    assert!(request.windows(extended.len()).any(|at| at == extended));
+    assert!(run(&mut wifi, &mut device, |_, device, _| {
+        device.configuration.len() >= 2
+    }));
+    let (_, link) = device
+        .configuration
+        .iter()
+        .rfind(|(opcode, _)| *opcode == 9)
+        .unwrap();
+    assert_eq!(link[156..162], TRANSMITTER);
+    assert_eq!(link[164], 1);
+    assert_eq!(word(link, 140), 300, "the profile's DTIM period");
+}
+
+#[test]
+fn a_nontransmitted_bss_hears_its_transmitter_announce_a_quiet_switch() {
+    let native = Native::default();
+    let elements: &'static [u8] = Vec::leak(multiple_bssid(&[]));
+    let (mut wifi, _, mut device) =
+        raise_beside(&native, Some(*b"US"), vec![b"top"], 0, OPEN, true, elements);
+    let associated = run(&mut wifi, &mut device, |wifi, _, _| {
+        wifi.radio().station().phase() == Peering::Associated
+    });
+    assert!(associated, "{:?}", wifi.radio().station().phase());
+    settle(&mut wifi, &mut device);
+    let commands = device.commands.len();
+    // The switch element is the set's, which every member inherits.
+    let announcement: &[u8] = &[37, 3, 1, 2, 5];
+    let mut with = elements.to_vec();
+    with.extend(announcement);
+    device.inject(
+        wifi.radio().rom().unwrap(),
+        &beacon(b"top", &RSN, true, &with),
+    );
+    let timed = run(&mut wifi, &mut device, |_, device, _| {
+        device.commands[commands..].contains(&(3, 4))
+    });
+    assert!(timed, "{:?}", wifi.radio().error());
+    assert!(wifi.radio().silent());
+}
+
+/// An SA Query request from the other link to `receiver` under the pairwise
+/// key at packet number `number`.
+fn sa_query(receiver: Mac, number: u8) -> Vec<u8> {
+    let mut frame = vec![0; 24];
+    frame[..2].copy_from_slice(&[0xd0, 0x40]);
+    frame[4..10].copy_from_slice(&receiver.0);
+    frame[10..16].copy_from_slice(&OTHER);
+    frame[16..22].copy_from_slice(&OTHER);
+    frame.extend([number, 0, 0, 0x20, 0, 0, 0, 0]);
+    frame.extend([8, 0, 1, 2]);
+    placed_at(frame, 3 | 2 << 8 | 1 << 6, None, 127 << 24, [44, 56, 36])
+}
+
+#[test]
+fn a_protected_management_frame_is_taken_once_under_its_packet_number() {
+    let native = Native::default();
+    let (mut wifi, mut device, local, _) = moved_mld(&native);
+    let answers = |device: &Device<'_>| {
+        device
+            .air
+            .iter()
+            .filter(|frame| frame.windows(4).any(|at| at == [8, 1, 1, 2]))
+            .count()
+    };
+    device.inject(wifi.radio().rom().unwrap(), &sa_query(local, 5));
+    let answered = run(&mut wifi, &mut device, |_, device, _| answers(device) == 1);
+    assert!(answered, "{:?}", wifi.radio().error());
+    device.inject(wifi.radio().rom().unwrap(), &sa_query(local, 5));
+    assert!(!run(&mut wifi, &mut device, |_, device, _| answers(device) > 1));
+    device.inject(wifi.radio().rom().unwrap(), &sa_query(local, 6));
+    let answered = run(&mut wifi, &mut device, |_, device, _| answers(device) == 2);
+    assert!(answered, "{:?}", wifi.radio().error());
 }
 
 /// The AP MLD the model's AP is link 3 of.
@@ -1774,6 +1933,100 @@ fn miss_beacons(wifi: &mut Station<Model, ClockBios>, device: &mut Device<'_>) {
         &command_packet(missed, 0x8000, &body),
     );
     assert!(!run(wifi, device, |_, device, _| device.scans.len() > 1));
+}
+
+/// A Reconfiguration element removing `links`, `timer` beacons from now.
+fn removal(links: &[u8], timer: u16) -> Vec<u8> {
+    let mut body = vec![107, 2, 0, 1];
+    for link in links {
+        body.extend([0, 5, *link | 0x40, 0, 3]);
+        body.extend(timer.to_le_bytes());
+    }
+    [&[255, body.len() as u8][..], &body].concat()
+}
+
+/// A mapping of every TID to `links` from `switch_time` on.
+fn mapping(links: u8, switch_time: u16) -> Vec<u8> {
+    let mut element = vec![255, 13, 109, 2 | 0x08 | 0x20, 0xff];
+    element.extend(switch_time.to_le_bytes());
+    element.extend([links; 8]);
+    element
+}
+
+#[test]
+fn a_link_the_ap_removes_gives_way_to_the_other_for_good() {
+    let native = Native::default();
+    let (mut wifi, mut device, _, _) = moved_mld(&native);
+    let announced = device.configuration.len();
+    device.inject(
+        wifi.radio().rom().unwrap(),
+        &announcing_beacon([60, 60], &removal(&[5], 0)),
+    );
+    assert!(
+        lowered(&mut wifi, &mut device, announced),
+        "{:?}",
+        wifi.radio().error()
+    );
+    settle(&mut wifi, &mut device);
+    assert_eq!(wifi.radio().link_count(), 1);
+    assert!(wifi.carrier());
+    let (_, new) = device.configuration[announced..]
+        .iter()
+        .find(|(opcode, bytes)| *opcode == 9 && word(bytes, 0) == 1)
+        .unwrap();
+    assert_eq!(new[166], 3);
+}
+
+#[test]
+fn the_dormant_link_the_ap_removes_just_goes() {
+    let native = Native::default();
+    let (mut wifi, mut device, _, _) = moved_mld(&native);
+    let announced = device.configuration.len();
+    device.inject(
+        wifi.radio().rom().unwrap(),
+        &announcing_beacon([60, 60], &removal(&[3], 0)),
+    );
+    settle(&mut wifi, &mut device);
+    assert_eq!(wifi.radio().link_count(), 1);
+    assert!(links_since(&device, announced).is_empty());
+    assert!(wifi.carrier());
+}
+
+#[test]
+fn removing_every_link_ends_the_association() {
+    let native = Native::default();
+    let (mut wifi, mut device, _, _) = moved_mld(&native);
+    device.inject(
+        wifi.radio().rom().unwrap(),
+        &announcing_beacon([60, 60], &removal(&[3, 5], 0)),
+    );
+    run(&mut wifi, &mut device, |_, _, _| false);
+    assert!(!wifi.carrier());
+}
+
+#[test]
+fn an_advertised_mapping_moves_the_station_off_a_link_it_leaves_out_when_it_comes() {
+    let native = Native::default();
+    let (mut wifi, mut device, _, _) = moved_mld(&native);
+    let announced = device.configuration.len();
+    device.inject(
+        wifi.radio().rom().unwrap(),
+        // Within the time a move is given to be ready.
+        &announcing_beacon([60, 60], &mapping(1 << 3, 90)),
+    );
+    assert!(
+        lowered(&mut wifi, &mut device, announced),
+        "{:?}",
+        wifi.radio().error()
+    );
+    settle(&mut wifi, &mut device);
+    assert_eq!(wifi.radio().link_count(), 2, "it may yet come back");
+    assert!(wifi.carrier());
+    let (_, new) = device.configuration[announced..]
+        .iter()
+        .find(|(opcode, bytes)| *opcode == 9 && word(bytes, 0) == 1)
+        .unwrap();
+    assert_eq!(new[166], 3);
 }
 
 #[test]
@@ -2006,6 +2259,7 @@ fn a_fading_link_ends_emlsr_and_the_other_stays() {
     );
     let links = links_since(&device, exit);
     assert!(links.contains(&(3, 0, 0)), "{links:?}");
+    assert_eq!(leaving_block_tx(&device, exit), 0);
     assert!(wifi.carrier());
     assert!(!wifi.radio().emlsr_active());
 }
@@ -2062,6 +2316,34 @@ fn a_failed_deactivation_loses_the_connection() {
     assert!(lost, "{:?}", wifi.radio().error());
 }
 
+/// `block_tx` of the deactivation after `exit`.
+fn leaving_block_tx(device: &Device<'_>, exit: usize) -> u8 {
+    device.configuration[exit..]
+        .iter()
+        .find(|(opcode, bytes)| {
+            *opcode == 9 && word(bytes, 0) == 2 && word(bytes, 24) == 1 && word(bytes, 28) == 0
+        })
+        .unwrap()
+        .1[32]
+}
+
+#[test]
+fn firmware_sends_nothing_on_an_emlsr_link_a_quiet_switch_takes() {
+    let native = Native::default();
+    let (mut wifi, mut device, _) = emlsr_mld(&native);
+    let exit = device.configuration.len();
+    device.inject(
+        wifi.radio().rom().unwrap(),
+        &announcing_beacon([60, 60], &[37, 3, 1, 36, 5]),
+    );
+    assert!(
+        lowered(&mut wifi, &mut device, exit),
+        "{:?}",
+        wifi.radio().error()
+    );
+    assert_eq!(leaving_block_tx(&device, exit), 1);
+}
+
 #[test]
 fn a_quiet_switch_takes_the_link_with_it_and_lasts_until_the_ap_is_heard_again() {
     let native = Native::default();
@@ -2084,6 +2366,17 @@ fn a_quiet_switch_takes_the_link_with_it_and_lasts_until_the_ap_is_heard_again()
         1,
         "firmware times the switch"
     );
+    let disables = |device: &Device<'_>| {
+        device.commands[commands..]
+            .iter()
+            .filter(|command| **command == (3, 0xd))
+            .count()
+    };
+    assert_eq!(
+        disables(&device),
+        0,
+        "firmware keeps sending until the move"
+    );
     device.inject(wifi.radio().rom().unwrap(), &notify(3, 0xff, &[1, 0, 0, 0]));
     assert!(
         run(&mut wifi, &mut device, |_, device, _| {
@@ -2092,6 +2385,7 @@ fn a_quiet_switch_takes_the_link_with_it_and_lasts_until_the_ap_is_heard_again()
         "{:?}",
         wifi.radio().error()
     );
+    assert_eq!(disables(&device), 1, "firmware's held frames stop for it");
     // Down, reconfigured on its new PHY, and up.
     let links = links_since(&device, announced);
     assert_eq!(links, [(2, 1, 1), (2, 1, 0xfe), (2, 1, 1)], "{links:?}");
@@ -2100,6 +2394,25 @@ fn a_quiet_switch_takes_the_link_with_it_and_lasts_until_the_ap_is_heard_again()
     device.inject(wifi.radio().rom().unwrap(), &other_beacon([60, 60]));
     let heard = run(&mut wifi, &mut device, |wifi, _, _| !wifi.radio().silent());
     assert!(heard, "{:?}", wifi.radio().error());
+    let resumed = run(&mut wifi, &mut device, |_, device, _| disables(device) == 2);
+    assert!(resumed, "{:?}", wifi.radio().error());
+}
+
+#[test]
+fn beacons_missed_while_data_is_heard_keep_the_link() {
+    let native = Native::default();
+    let (mut wifi, mut device, _, _) = moved_mld(&native);
+    let missed = |consecutive: u8, since_receive: u8| {
+        let mut body = [0; 20];
+        body[4] = since_receive;
+        body[8] = consecutive;
+        notify(3, 0xf6, &body)
+    };
+    device.inject(wifi.radio().rom().unwrap(), &missed(30, 3));
+    assert!(!run(&mut wifi, &mut device, |_, _, up| !up));
+    device.inject(wifi.radio().rom().unwrap(), &missed(30, 4));
+    let lost = run(&mut wifi, &mut device, |_, _, up| !up);
+    assert!(lost, "{:?}", wifi.radio().error());
 }
 
 #[test]
@@ -2360,6 +2673,46 @@ fn an_open_port_sleeps_on_the_vector_which_each_pass_clears_and_rearms() {
     run(&mut wifi, &mut device, |_, _, _| false);
     let state = native.state.lock().unwrap();
     assert_eq!(state.registers.get(&AUTOMASK), Some(&1));
+}
+
+#[test]
+fn only_the_last_restarts_reset_the_function_and_one_without_a_reset_still_boots() {
+    let resets = |spent: usize, no_reset: bool| {
+        let native = Native::default();
+        native.state.lock().unwrap().no_reset = no_reset;
+        let (mut wifi, _device) = connect(&native, false);
+        wifi.radio_mut().spend_restarts(spent);
+        native.state.lock().unwrap().registers.insert(8, 1 << 25);
+        wifi.carrier();
+        assert_eq!(wifi.radio().phase(), Phase::Booting);
+        let state = native.state.lock().unwrap();
+        let resets = state.ops.iter().filter(|op| matches!(op, Op::Reset));
+        (resets.count(), wifi.radio().no_reset())
+    };
+    let top_fatal = {
+        let native = Native::default();
+        let (mut wifi, _device) = connect(&native, false);
+        wifi.radio_mut().vector = true;
+        wifi.radio_mut().family = crate::wifi::intel::firmware::Family::Bz;
+        native
+            .state
+            .lock()
+            .unwrap()
+            .registers
+            .insert(0x2808, 1 << 3);
+        wifi.carrier();
+        assert_eq!(wifi.radio().phase(), Phase::Booting);
+        let state = native.state.lock().unwrap();
+        state
+            .ops
+            .iter()
+            .filter(|op| matches!(op, Op::Reset))
+            .count()
+    };
+    assert_eq!(top_fatal, 1, "a TOP fatal error waits for no list");
+    assert_eq!(resets(2, false), (0, false));
+    assert_eq!(resets(3, false), (1, false));
+    assert_eq!(resets(3, true), (1, true));
 }
 
 #[test]

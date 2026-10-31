@@ -113,7 +113,12 @@ global_asm!(
     "ret",
 );
 unsafe extern "sysv64" {
-    fn stela_reference_enter(state: *mut GuestState, code: usize, stack: *mut u64) -> BlockExit;
+    fn stela_reference_enter(
+        state: *mut GuestState,
+        code: usize,
+        stack: *mut u64,
+        block: usize,
+    ) -> BlockExit;
     fn stela_reference_recover();
 }
 /// The signals [`fault_handler`] takes.
@@ -271,6 +276,26 @@ impl NativeRunner {
         code: usize,
         state: &mut GuestState,
     ) -> Result<BlockExit, HostFault> {
+        // SAFETY: as the caller keeps this function's.
+        unsafe { self.run_through(code, 0, state) }
+    }
+
+    /// Run `code` as [`Self::run`] does with `block` in RCX, as
+    /// [`stela_compiler::x86_64::pinned::entry`] takes the block it runs.
+    ///
+    /// # Safety
+    /// As [`Self::run`], of `code` and `block`.
+    #[inline(always)]
+    #[allow(
+        clippy::result_large_err,
+        reason = "fixed captured register bank avoids fault-path allocation"
+    )]
+    pub unsafe fn run_through(
+        &mut self,
+        code: usize,
+        block: usize,
+        state: &mut GuestState,
+    ) -> Result<BlockExit, HostFault> {
         let recovery: *mut Recovery = &mut *self.recovery;
         ACTIVE.with(|active| {
             assert!(active.get().is_null(), "nested reference native invocation");
@@ -278,7 +303,7 @@ impl NativeRunner {
         });
         // SAFETY: the caller passes block code; the recovery slot and the
         // ranges it points to outlive the run.
-        let exit = unsafe { stela_reference_enter(state, code, &raw mut (*recovery).stack) };
+        let exit = unsafe { stela_reference_enter(state, code, &raw mut (*recovery).stack, block) };
         ACTIVE.with(|active| active.set(core::ptr::null_mut()));
         if exit.kind == FAULT_KIND
             && let Some(fault) = self.recovery.recorded.take()

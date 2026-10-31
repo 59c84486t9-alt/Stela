@@ -104,25 +104,29 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// the guarded level, the variant, the code generation and the half's
     /// translation inputs ([`Space`]). Lookup entries name it.
     pub(super) fn context(&mut self, el: u8, variant: Variant, half: usize) -> u64 {
-        let generations = (self.translation_generation, self.code_generation);
+        let generations = (self.fetch_epoch(half), self.code_generation);
+        if self.floor_generation != generations.1 {
+            self.floor_generation = generations.1;
+            self.code_floor = self.next_context << chain::LOOKUP_SALT_BITS;
+        }
         if let Some(recent) = self.recent[half].iter().flatten().find(|recent| {
             (recent.el, recent.variant, recent.generations) == (el, variant, generations)
         }) {
             return recent.number;
         }
         let inputs = self.half_inputs(half, el);
-        let spaces = &mut self.spaces[half];
-        spaces.retain(|space| space.code == generations.1);
-        let found = spaces
+        self.spaces[half].retain(|space| space.code == generations.1);
+        let found = self.spaces[half]
             .iter()
             .position(|space| space.el == el && space.variant == variant && space.inputs == inputs);
         let space = match found {
-            Some(at) => spaces.remove(at),
+            Some(at) => self.spaces[half].remove(at),
             None => {
-                if spaces.len() == SPACES {
-                    spaces.remove(0);
+                if self.spaces[half].len() == SPACES {
+                    self.spaces[half].remove(0);
                 }
-                let number = self.next_context;
+                let salt = self.context_salt(half, el, variant, inputs.0.ttbr0);
+                let number = self.next_context << chain::LOOKUP_SALT_BITS | salt;
                 self.next_context += 1;
                 Space {
                     inputs,
@@ -142,6 +146,36 @@ impl<H: Host, D: Devices> Machine<H, D> {
             number: space.number,
         });
         space.number
+    }
+
+    /// The salt of a context of `half` at `el` in `variant` under `table`:
+    /// the same across the contexts one takes the place of, so that a
+    /// forgotten context's entries meet its successor's lookups, which
+    /// revalidate them, and another address space's PCs take other slots
+    /// while there are salts for them.
+    fn context_salt(&mut self, half: usize, el: u8, variant: Variant, table: u64) -> u64 {
+        let id = u64::from(self.variant_id(variant).0);
+        let owner = table ^ (half as u64) ^ u64::from(el) << 1 ^ id << 6;
+        let salt = self.salt_owners.iter().position(|known| *known == owner);
+        salt.unwrap_or_else(|| {
+            let salt = self.next_salt;
+            self.next_salt = (salt + 1) % chain::LOOKUP_SALTS;
+            self.salt_owners[salt] = owner;
+            salt
+        }) as u64
+    }
+
+    /// The salts `half`'s contexts hold, bit `s` for salt `s`: where a
+    /// lookup could find an entry of that half.
+    pub(super) fn live_salts(&self, half: usize) -> u64 {
+        let spaces = self.spaces[half].iter().map(|space| space.number);
+        let recent = self.recent[half]
+            .iter()
+            .flatten()
+            .map(|recent| recent.number);
+        spaces.chain(recent).fold(0, |salts, number| {
+            salts | 1 << (number % chain::LOOKUP_SALTS as u64)
+        })
     }
 
     /// Both halves' contexts at `el` in `variant`.
@@ -172,7 +206,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         } else {
             TranslationRegime::El10
         };
-        let mut controls = self.cpu.controls(regime);
+        let mut controls = self.cpu.translating_controls(regime);
         if el == 0 {
             controls.sprr.el1 = 0;
         } else {
@@ -228,7 +262,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if let Some(entry) = self.fetch[slot]
             && entry.page == page
             && entry.el == el
-            && entry.generation == self.translation_generation
+            && entry.epoch == self.fetch_epoch(chain::half(pc))
         {
             return Ok(entry.physical | (pc & (FETCH_PAGE - 1)));
         }
@@ -249,14 +283,18 @@ impl<H: Host, D: Devices> Machine<H, D> {
             }
             Translated::Mapped(translation) => {
                 let half = chain::half(pc);
-                self.fetched_through(half, translation.size, translation.global);
+                if half == 0 && translation.global && self.widen_lower_globals(pc, translation.size)
+                {
+                    return self.fetch_physical(pc);
+                }
+                self.fetched_through(half, pc, translation.size, translation.global);
                 let physical = translation.physical & !(FETCH_PAGE - 1);
                 self.fetch[slot] = Some(FetchEntry {
                     page,
                     physical,
                     guarded: translation.guarded,
                     el,
-                    generation: self.translation_generation,
+                    epoch: self.fetch_epoch(half),
                 });
                 Ok(translation.physical)
             }

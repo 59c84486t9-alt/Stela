@@ -31,6 +31,7 @@ const SIGMA_TEMPORARY: u8 = 4;
 const SAVED_RBX: u8 = 4;
 const SAVED_RBP: u8 = 5;
 const SAVED_R12: u8 = 6;
+const SAVED_RSI: u8 = 7;
 const REVERSE_DWORDS: u8 = 0x1b;
 const REVERSE_DWORD_PAIRS: u8 = 0xb1;
 const BIG_SIGMA0: [u8; 3] = [2, 13, 22];
@@ -39,9 +40,14 @@ const SMALL_SIGMA0: [u8; 3] = [7, 18, 3];
 const SMALL_SIGMA1: [u8; 3] = [17, 19, 10];
 
 fn preserve_scratch(code: &mut Code, restore: bool) {
-    // Full host RBX/RBP/R12 values stay in SysV caller-saved XMM4..6.
+    // Full host RBX/RBP/R12/RSI values stay in SysV caller-saved XMM4..7.
     // No host stack or guest RAM is touched; these XMMs survive the scalar body.
-    for (xmm, register) in [(SAVED_RBX, EBX), (SAVED_RBP, EBP), (SAVED_R12, R12D)] {
+    for (xmm, register) in [
+        (SAVED_RBX, EBX),
+        (SAVED_RBP, EBP),
+        (SAVED_R12, R12D),
+        (SAVED_RSI, ESI),
+    ] {
         let mut asm = code.asm();
         if restore {
             asm.movq_from_xmm(gpr(register), xmm);

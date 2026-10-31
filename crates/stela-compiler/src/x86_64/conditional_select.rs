@@ -1,5 +1,5 @@
 //! Branchless conditional select from the saved guest NZCV.
-use super::{capture_nzcv, condition_holds, load, right_operand, store, store_nzcv};
+use super::{capture_nzcv, condition_holds, flag_word, load, right_operand, store, store_nzcv};
 use crate::aarch64::{
     Shift, Width,
     conditional_select::{CompareOperand, CompareRight, Operand, Otherwise},
@@ -30,15 +30,25 @@ pub(super) fn emit_compare(code: &mut Code, operand: &CompareOperand) {
     let op = if operand.subtract { Alu::Sub } else { Alu::Add };
     code.asm()
         .alu(op, Size::of(operand.width == Width::X64), Rax, Rcx);
-    capture_nzcv(code, operand.subtract);
+    let pinned = code.is_pinned();
+    if pinned {
+        flag_word::capture_in_rax(code, operand.subtract);
+    } else {
+        capture_nzcv(code, operand.subtract);
+    }
+    let fallback = flag_word::constant(code, u32::from(operand.fallback) << NZCV_SHIFT);
     let mut asm = code.asm();
     if predicate.is_some() {
         // The fallback NZCV word where the condition fails.
-        asm.mov_imm32(Rdx, u32::from(operand.fallback) << NZCV_SHIFT);
+        asm.mov_imm32(Rdx, fallback);
         asm.test(Size::Byte, R8, R8);
         asm.cmov(Cond::E, Size::Dword, Rax, Rdx);
     }
-    store_nzcv(&mut asm);
+    if pinned {
+        flag_word::store(&mut asm, Rax);
+    } else {
+        store_nzcv(&mut asm);
+    }
 }
 
 pub(super) fn emit(code: &mut Code, operand: &Operand) {

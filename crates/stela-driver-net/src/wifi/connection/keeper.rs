@@ -457,6 +457,8 @@ pub struct Keeper<R: Radio> {
     reported: Option<String>,
     /// wpa_supplicant's `last_michael_mic_error`.
     michael_failed: Option<u64>,
+    /// The last scan missed the network, so the next asks for it by name.
+    directed: bool,
 }
 
 impl<R: Radio> Keeper<R> {
@@ -475,6 +477,7 @@ impl<R: Radio> Keeper<R> {
             failure: None,
             reported: None,
             michael_failed: None,
+            directed: false,
         }
     }
 
@@ -616,8 +619,15 @@ impl<R: Radio> Keeper<R> {
     /// channel that may transmit, 2.4 and 5 GHz first and 6 GHz after them as
     /// cfg80211 splits a scan. It probes where the channel permits and listens
     /// elsewhere, as mac80211 scans NO_IR channels passively within one active
-    /// scan, so each runs in those two parts.
+    /// scan, so each runs in those two parts. `scan_ssid` has wpa_supplicant
+    /// name a hidden network; with nobody to set that here, a scan names the
+    /// network once the last one missed it, so that a visible network's name
+    /// stays off the air.
     fn scan(&mut self, now: u64) {
+        let mut ssids = vec![Vec::new()];
+        if self.directed {
+            ssids.push(self.network.ssid.clone());
+        }
         let parts = [&[Band::Ghz2, Band::Ghz5][..], &[Band::Ghz6]]
             .into_iter()
             .flat_map(|bands| {
@@ -626,7 +636,7 @@ impl<R: Radio> Keeper<R> {
                     .flat_map(|&band| self.link.channels(band))
                     .map(|(channel, _)| channel)
                     .partition(|&channel| self.link.probes(channel));
-                [(active, vec![Vec::new()]), (passive, Vec::new())]
+                [(active, ssids.clone()), (passive, Vec::new())]
             })
             .filter(|(channels, _)| !channels.is_empty())
             .map(|(channels, ssids)| scan::Request::new(channels, ssids, Vec::new()))
@@ -725,6 +735,7 @@ impl<R: Radio> Keeper<R> {
             }
         }
         let ssid = String::from_utf8_lossy(&self.network.ssid).into_owned();
+        self.directed = best.is_none() && refusal.is_none();
         let Some((handle, bss, security)) = best else {
             self.fail(match refusal {
                 Some(reason) => format!("{}: {ssid} {reason}", R::NAME),

@@ -5,7 +5,7 @@ use core::{
     marker::PhantomData,
     sync::atomic::{AtomicU64, Ordering},
 };
-use stela_compiler::x86_64::chain::ChainControl;
+use stela_compiler::x86_64::chain::{ChainControl, lookup_salt};
 
 /// By its hub inbox even when no Machine owns the PE. The hub exposes
 /// only the interruption epoch; all other fields belong to its admitted Machine.
@@ -124,7 +124,11 @@ impl Owner {
     }
     pub(super) fn set_contexts(&mut self, contexts: [u64; 2]) {
         // SAFETY: the sole owner writes this non-budget field outside native execution.
-        unsafe { core::ptr::addr_of_mut!((*self.storage.control.get()).contexts).write(contexts) };
+        unsafe {
+            let control = self.storage.control.get();
+            core::ptr::addr_of_mut!((*control).contexts).write(contexts);
+            core::ptr::addr_of_mut!((*control).salts).write(contexts.map(lookup_salt));
+        }
     }
     pub(super) fn begin(&mut self, block: usize, budget: u64) {
         let control = self.storage.control.get();
@@ -166,6 +170,7 @@ impl Owner {
             hits,
             linked,
             contexts: self.contexts(),
+            salts: self.contexts().map(lookup_salt),
             // SAFETY: the sole owner observes a non-budget field outside entry.
             table: unsafe { core::ptr::addr_of!((*control).table).read() },
             interrupt_epoch: self.storage.interrupt_epoch().load(Ordering::Acquire),

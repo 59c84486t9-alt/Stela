@@ -78,7 +78,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
             SystemOperation::Wait {
                 kind,
                 timeout_register,
-            } => self.wait(word, kind, timeout_register),
+            } => {
+                self.adopt_native_monitor();
+                self.wait(word, kind, timeout_register)
+            }
             SystemOperation::TagMemory(operand) => self.tag_memory(word, operand),
             SystemOperation::TagOffset(operand) => self.tag_offset(word, operand),
             // No halting debug: Debug-state-only instructions are UNDEFINED.
@@ -202,7 +205,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// `AuthIB` and `AArch64_ExceptionReturn`).
     pub(super) fn exception_return(&mut self, key: Option<AuthenticationKey>) -> Step {
         let pc = self.cpu.pc;
-        let from = mirror_state(self.cpu.pstate.el, self.cpu.pstate.guarded);
+        let from = self.mirror_state();
         if self.cpu.pstate.el == 0 {
             return self.undefined();
         }
@@ -308,10 +311,19 @@ impl<H: Host, D: Devices> Machine<H, D> {
         {
             return self.permission_write(word, access);
         }
+        if let Some(index) = written(access) {
+            return self.stored_write(word, access, index);
+        }
+        if let Some(index) = guarded_written(access) {
+            return self.guarded_access(word, access, index);
+        }
         let Some(index) = mirrored(access) else {
-            return self.register_access(word, access);
+            return self.stored_read(word, access);
         };
-        if GUARDED_MIRRORS.contains(&index) && !self.cpu.pstate.guarded {
+        if GUARDED_MIRRORS.contains(&index) {
+            return self.guarded_access(word, access, index);
+        }
+        if COUNTER_MIRRORS.contains(&index) && self.cpu.pmu.is_none() {
             return self.register_access(word, access);
         }
         let before = self.completion_point();
@@ -329,6 +341,77 @@ impl<H: Host, D: Devices> Machine<H, D> {
         };
         if let (Ok(()), true, Some(value)) = (&step, after == before, value) {
             self.mirrors[index] = register_read::Cell { readable: 1, value };
+        }
+        step
+    }
+
+    /// MRS or MSR of a [`GUARDED_MIRRORS`] register: in a guarded level, one
+    /// that completes plainly opens its cell on the bank's storage.
+    fn guarded_access(&mut self, word: u32, access: RegisterAccess, index: usize) -> Step {
+        if !self.cpu.pstate.guarded {
+            return self.register_access(word, access);
+        }
+        let before = self.completion_point();
+        let step = self.register_access(word, access);
+        let value = registers::guarded_storage(&self.cpu, access.encoding());
+        if let (Ok(()), true, Some(value)) = (&step, self.position() == before, value) {
+            self.mirrors[index] = register_read::Cell { readable: 1, value };
+        }
+        step
+    }
+
+    /// The cell of a read of `access` that one was made for, if a read
+    /// that completes plainly opens it on the register's live storage. A
+    /// read of FPCR or FPSR completes from the frame ([`Self::stored_cell`]).
+    fn stored_read(&mut self, word: u32, access: RegisterAccess) -> Step {
+        use registers::encodings::{FPCR, FPSR};
+        let encoding = access.encoding();
+        let cell = (access.direction() == Direction::Read && access.rt() != ZERO_REGISTER)
+            .then(|| self.stored_reads.iter().position(|&read| read == encoding))
+            .flatten();
+        let Some(cell) = cell else {
+            return self.register_access(word, access);
+        };
+        let before = self.completion_point();
+        self.plain_read = None;
+        let step = self.register_access(word, access);
+        let value = if matches!(encoding, FPCR | FPSR) {
+            Some(0)
+        } else {
+            self.plain_read
+                .filter(|&(register, index)| {
+                    self.cpu.registers.get(register, index)
+                        == self.cpu.state.x[usize::from(access.rt())]
+                })
+                .and_then(|(register, index)| self.cpu.registers.address(register, index))
+                .or_else(|| self.devices.register_storage(self.current, encoding))
+        };
+        if let (Ok(()), true, Some(value)) = (&step, self.position() == before, value) {
+            self.mirrors[MIRRORED.len() + cell] = register_read::Cell { readable: 1, value };
+        }
+        step
+    }
+
+    /// MSR of `WRITTEN[index]`: one that only reaches the register's
+    /// storage opens its cell there, for a register that takes what the
+    /// thunk's fixed bits say: the register the write reached may be
+    /// another EL's.
+    fn stored_write(&mut self, word: u32, access: RegisterAccess, index: usize) -> Step {
+        let (_, named) = WRITTEN[index];
+        let before = self.completion_point();
+        self.plain_read = None;
+        let step = self.register_access(word, access);
+        let value = self
+            .plain_read
+            .filter(|&(register, _)| {
+                self.register_fixed_bits(register) == self.register_fixed_bits(named)
+            })
+            .and_then(|(register, index)| match register {
+                SystemRegister::FPSR => Some(0),
+                _ => self.cpu.registers.address(register, index),
+            });
+        if let (Ok(()), true, Some(value)) = (&step, self.position() == before, value) {
+            self.mirrors[written_cell(index)] = register_read::Cell { readable: 1, value };
         }
         step
     }
@@ -488,7 +571,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.device_lines = None;
         Some(match (result, write) {
             (Ok(value), None) => RegisterOutcome::Read(value),
-            (Ok(_), Some(_)) => RegisterOutcome::Written(registers::Changes::default()),
+            (Ok(_), Some(_)) => RegisterOutcome::Written(registers::Changes {
+                reads_kept: true,
+                ..registers::Changes::default()
+            }),
             (Err(reason), _) => RegisterOutcome::Refused(Refusal::UnsupportedSetting(reason)),
         })
     }
@@ -498,7 +584,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// System registers and the other PSTATE fields as they were, so state
     /// derived from them stays: the DAIF mirror takes the new masks, PAN
     /// changes the host's requester, and SPSel only which SP `GuestState`
-    /// holds. The step re-evaluates interrupt delivery after any of them.
+    /// holds, which native code can then switch ([`STACK_SELECT`]). The step
+    /// re-evaluates interrupt delivery after any of them.
     /// Every other change forgets derived state as an MSR does.
     pub(super) fn pstate_immediate(
         &mut self,
@@ -523,6 +610,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             if cell.readable != 0 {
                 cell.value = daif_register(after.daif);
             }
+            self.mirrors[MASK_WRITES].readable = 1;
         } else if only(Pstate {
             pan: after.pan,
             ..before
@@ -535,6 +623,18 @@ impl<H: Host, D: Devices> Machine<H, D> {
             ..before
         }) {
             return self.register_outcome(word, None, RegisterOutcome::Written(changes));
+        } else {
+            let level = match after.el {
+                1 => SystemRegister::SP_EL1,
+                _ => SystemRegister::SP_EL2,
+            };
+            let stack = match after.guarded {
+                true => Some(self.cpu.guarded_stack()),
+                false => self.cpu.registers.address(level, 0),
+            };
+            if let Some(value) = stack {
+                self.mirrors[STACK_SELECT] = register_read::Cell { readable: 1, value };
+            }
         }
         self.next()
     }
@@ -556,11 +656,6 @@ impl<H: Host, D: Devices> Machine<H, D> {
             RegisterOutcome::Written(changes) => {
                 if let Some(access) = access {
                     self.degraded_written(access);
-                    if guarded_bank(access.encoding()) {
-                        for index in GUARDED_MIRRORS {
-                            self.mirrors.close(index);
-                        }
-                    }
                 }
                 if let Some(missing) = changes.unmodeled {
                     let refusal = Refusal::UnsupportedSetting(missing);
@@ -572,7 +667,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     self.device_lines = None;
                 }
                 // PSTATE.D and Apple registers can change what is derived.
-                if !changes.stored && !changes.permissions {
+                if changes.reads_kept {
+                    self.forget_derived();
+                } else if !changes.stored && !changes.permissions {
                     self.derived_changed();
                 }
                 if changes.translation {
@@ -726,7 +823,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             fault_address: exception.fault_address,
         });
         let (from_el, from_guarded) = (self.cpu.pstate.el, self.cpu.pstate.guarded);
-        let from = mirror_state(from_el, from_guarded);
+        let from = self.mirror_state();
         self.cpu.take(exception);
         self.statistics.exceptions += 1;
         self.host.report(&Event::Exception {

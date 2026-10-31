@@ -178,8 +178,11 @@ fn after(operation: &Operation, bases: u32) -> u32 {
         Operation::IntegerUnary(operand) => bases & !bit(operand.destination),
         Operation::IntegerMinMax(operand) => bases & !bit(operand.destination),
         Operation::Crc(operand) => bases & !bit(operand.destination),
-        // NZCV, barriers and hints only.
+        // NZCV, barriers and hints only; the block a branch leaves is over.
         Operation::Flags(_)
+        | Operation::BranchCondition { .. }
+        | Operation::BranchZero { .. }
+        | Operation::BranchBit { .. }
         | Operation::Synchronization(_)
         | Operation::Ordered(ordered::Operand::Barrier { .. })
         | Operation::Nop

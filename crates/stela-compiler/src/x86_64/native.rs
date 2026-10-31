@@ -1,8 +1,9 @@
 //! Running emitted code on the host in tests.
 use crate::GuestState;
 
-/// Run `code`, followed by a RET, on the host with RDI = `state`.
-pub(crate) fn run(code: &[u8], state: &mut GuestState) {
+/// Run `code`, followed by a RET, on the host with RDI = `state`: RAX after
+/// it, the next PC of a block's exit.
+pub(crate) fn run(code: &[u8], state: &mut GuestState) -> u64 {
     use core::ffi::c_void;
     unsafe extern "C" {
         fn mmap(
@@ -40,8 +41,9 @@ pub(crate) fn run(code: &[u8], state: &mut GuestState) {
         core::ptr::copy_nonoverlapping(code.as_ptr(), page.cast(), code.len());
         page.cast::<u8>().add(code.len()).write(RET);
         assert_eq!(mprotect(page, bytes, PROT_READ_EXECUTE), 0);
-        let entry: unsafe extern "sysv64" fn(*mut GuestState) = core::mem::transmute(page);
-        entry(state);
+        let entry: unsafe extern "sysv64" fn(*mut GuestState) -> u64 = core::mem::transmute(page);
+        let returned = entry(state);
         assert_eq!(munmap(page, bytes), 0);
+        returned
     }
 }

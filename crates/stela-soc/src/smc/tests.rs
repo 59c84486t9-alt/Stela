@@ -32,6 +32,15 @@ fn send(smc: &mut Smc, payload: u64) -> u64 {
 }
 
 #[test]
+fn a_held_power_button_turns_the_machine_off_whatever_the_ap_does() {
+    let (mut smc, _sram) = smc();
+    smc.power_button_held();
+    let off = smc.take_transition().unwrap();
+    assert_eq!((off.device, off.transition), ("smc", Transition::PowerOff));
+    assert!(smc.take_transition().is_none());
+}
+
+#[test]
 fn rtc_key_requires_owner_and_publication_without_reply_or_sram_fabrication() {
     use crate::pmu::{RtcClock, RtcEpoch};
     let (mut smc, sram) = smc();
@@ -248,7 +257,7 @@ fn initialize_names_the_shared_page_and_key_count_reads_big_endian() {
     assert_eq!(reply & 0xff, u64::from(SUCCESS));
     assert_eq!(reply >> 12 & 0xf, 3);
     assert_eq!(reply >> 16 & 0xff, 4);
-    assert_eq!((reply >> 32) as u32, u32::from_be(17));
+    assert_eq!((reply >> 32) as u32, u32::from_be(26));
     // Unknown keys, short reads and bad sizes answer SMC errors.
     assert_eq!(
         send(&mut smc, request(READ, 0, 4, 0, code(b"RGEN"))) & 0xff,
@@ -304,12 +313,12 @@ fn keys_enumerate_sorted_with_their_information() {
     assert_eq!(((second >> 32) as u32).to_le_bytes(), *b"D1Vn");
     let third = send(&mut smc, request(KEY_BY_INDEX, 0, 0, 0, 2));
     assert_eq!(((third >> 32) as u32).to_le_bytes(), *b"MBSE");
-    let eighth = send(&mut smc, request(KEY_BY_INDEX, 0, 0, 0, 7));
-    assert_eq!(((eighth >> 32) as u32).to_le_bytes(), *b"aDC#");
-    let tenth = send(&mut smc, request(KEY_BY_INDEX, 0, 0, 0, 9));
-    assert_eq!(((tenth >> 32) as u32).to_le_bytes(), *b"gP09");
+    let sixteenth = send(&mut smc, request(KEY_BY_INDEX, 0, 0, 0, 15));
+    assert_eq!(((sixteenth >> 32) as u32).to_le_bytes(), *b"aDC#");
+    let nineteenth = send(&mut smc, request(KEY_BY_INDEX, 0, 0, 0, 18));
+    assert_eq!(((nineteenth >> 32) as u32).to_le_bytes(), *b"gP09");
     assert_eq!(
-        send(&mut smc, request(KEY_BY_INDEX, 0, 0, 0, 17)) & 0xff,
+        send(&mut smc, request(KEY_BY_INDEX, 0, 0, 0, 26)) & 0xff,
         u64::from(INDEX_RANGE)
     );
     send(&mut smc, request(KEY_INFO, 0, 0, 0, code(b"gP16")));
@@ -536,20 +545,35 @@ fn the_port_controller_lock_is_granted_to_the_ap_at_once() {
 }
 
 #[test]
-fn the_smc_exports_no_adc_sensors() {
-    let (mut smc, _) = smc();
+fn the_smc_exports_the_pmu_device_temperatures() {
+    let (mut smc, sram) = smc();
     let count = send(&mut smc, request(READ, 0, 4, 0, code(b"aDC#")));
     assert_eq!((count & 0xff, count >> 16 & 0xff), (u64::from(SUCCESS), 4));
-    assert_eq!(count >> 32, 0);
+    assert_eq!(count >> 32, 8);
     assert_eq!(
         send(&mut smc, request(WRITE, 0, 4, 0, code(b"aDC#"))) & 0xff,
         u64::from(NOT_WRITABLE)
     );
-    // Without a channel there is no per-index sensor key.
+
+    // The index goes in through the shared page and the channel's key comes
+    // back: `AppleSMC::_createSensor` names `PMU tdev8` from it.
+    sram.put(&7u32.to_le_bytes());
+    let channel = send(&mut smc, request(READ_WRITE, 0, 4, 4, code(b"aDC?")));
+    assert_eq!(channel & 0xff, u64::from(SUCCESS));
+    assert_eq!(channel >> 32, u64::from(code(b"TP8d")));
+    sram.put(&8u32.to_le_bytes());
     assert_eq!(
-        send(&mut smc, request(KEY_INFO, 0, 0, 0, code(b"aDC0"))) & 0xff,
-        u64::from(KEY_NOT_FOUND)
+        send(&mut smc, request(READ_WRITE, 0, 4, 4, code(b"aDC?"))) & 0xff,
+        u64::from(BAD_ARGUMENT)
     );
+
+    // A sensor reads the key it was named after, an IOFixed in the low word.
+    send(&mut smc, request(KEY_INFO, 0, 0, 0, code(b"TP8d")));
+    assert_eq!(sram.get(6), [8, b'i', b'o', b'f', b't', READABLE]);
+    let temperature = send(&mut smc, request(READ, 0, 8, 0, code(b"TP8d")));
+    assert_eq!(temperature & 0xff, u64::from(SUCCESS));
+    assert_eq!(sram.get(8), BOARD_TEMPERATURE.to_le_bytes());
+    assert_eq!(BOARD_TEMPERATURE as i32 >> 16, 35);
 }
 
 #[test]

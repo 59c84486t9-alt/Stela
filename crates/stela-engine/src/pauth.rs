@@ -94,6 +94,8 @@ pub struct Context {
     version: Version,
     /// TCR_EL1 of the system-mode regime; `None` keeps the process profile.
     regime: Option<u64>,
+    /// Whether PACs come from [`keyed`], not QARMA5.
+    keyed: bool,
 }
 impl fmt::Debug for Context {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -148,6 +150,7 @@ impl Context {
             keys,
             version,
             regime: None,
+            keyed: false,
         }
     }
 
@@ -156,6 +159,22 @@ impl Context {
     pub fn with_translation_regime(mut self, tcr: u64) -> Self {
         self.regime = Some(tcr);
         self
+    }
+
+    /// Take [`keyed`]'s cipher in place of QARMA5. The ID registers still
+    /// report QARMA5, which only a guest recomputing a PAC from its own keys
+    /// could find untrue.
+    pub fn with_implementation_defined_cipher(mut self) -> Self {
+        self.keyed = true;
+        self
+    }
+
+    /// The PAC of `data` and `modifier` under `key`.
+    fn cipher(&self, data: u64, modifier: u64, key: &[u64; 2]) -> u64 {
+        match self.keyed {
+            true => keyed::compute(data, modifier, key),
+            false => qarma5(data, modifier, key),
+        }
     }
 
     /// The PAC field of `pointer` for an `operation` in `domain`. Arm
@@ -227,7 +246,7 @@ impl Context {
             self.version,
             layout,
             pointer,
-            qarma5(input, modifier, words),
+            self.cipher(input, modifier, words),
         ))
     }
 
@@ -263,7 +282,7 @@ impl Context {
             },
             combined,
             pointer,
-            qarma5(input, modifier, words),
+            self.cipher(input, modifier, words),
         )
         .map_err(|failure| AuthenticationError::Failure { code: failure.code })?;
         Ok(AuthResult {
@@ -283,7 +302,7 @@ impl Context {
             .generic
             .as_ref()
             .ok_or(AuthenticationError::GenericKeyUnavailable)?;
-        Ok(qarma5(data, modifier, words) & GENERIC_CODE_MASK)
+        Ok(self.cipher(data, modifier, words) & GENERIC_CODE_MASK)
     }
 
     /// Architectural XPAC: keyless restoration, never an authentication check.
@@ -322,6 +341,7 @@ impl Context {
 const MIN_TNSZ: u64 = 16;
 const MAX_TNSZ: u64 = 39;
 
+mod keyed;
 mod qarma;
 use qarma::compute as qarma5;
 

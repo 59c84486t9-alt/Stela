@@ -3,9 +3,9 @@
 //! their encoder counts. Internal branches and call descriptors stay together.
 use super::asm::{Alu, Checkpoint, Code, Gpr, Mem, Size, Span};
 use super::{
-    Access, ImmediateAddress, MemoryChecks, MemoryTransfer, Register, Shift, Width, accessed,
-    address_add, address_checks, frame, load, memory_store, memory_writeback, offset,
-    right_operand, stack_alignment_check,
+    Access, AddressMode, ImmediateAddress, MemoryChecks, MemoryTransfer, Register, Shift, Width,
+    accessed, address_add, address_checks, load, memory_store, memory_writeback, right_operand,
+    stack_alignment_check, stack_alignment_check_register,
 };
 use alloc::vec::Vec;
 
@@ -135,6 +135,16 @@ pub(super) fn address(
         displacement,
         mode,
     } = address;
+    // Through a pinned base the address needs no copy of it.
+    if let (Some(host), AddressMode::Offset) = (code.host(base), mode) {
+        if base == Register::Sp && checks.stack_alignment && !checks.stack_checked {
+            stack_alignment_check_register(code, host);
+        }
+        code.asm()
+            .lea(Size::Qword, Gpr::Rax, Mem::base(host, displacement));
+        address_checks(code, checks, unit, access);
+        return;
+    }
     let start = code.checkpoint();
     load(code, base);
     mark(&mut recipe, code, start, Kind::Base, mask(Gpr::Rax));
@@ -179,38 +189,46 @@ pub(super) fn scalar(
     address(code, checks, location, bytes, access, recipe.as_deref_mut());
     match transfer {
         MemoryTransfer::Store => {
+            let source = match code.host(data) {
+                Some(host) => memory_store::Source::Host(host),
+                None => {
+                    let start = code.checkpoint();
+                    right_operand(code, data, Width::X64, Shift::Lsl, 0);
+                    mark(
+                        &mut recipe,
+                        code,
+                        start,
+                        Kind::Stage {
+                            element: 0,
+                            host: Gpr::Rcx,
+                        },
+                        mask(Gpr::Rcx),
+                    );
+                    memory_store::Source::Rcx
+                }
+            };
             let start = code.checkpoint();
-            right_operand(code, data, Width::X64, Shift::Lsl, 0);
-            mark(
-                &mut recipe,
-                code,
-                start,
-                Kind::Stage {
-                    element: 0,
-                    host: Gpr::Rcx,
-                },
-                mask(Gpr::Rcx),
-            );
-            let start = code.checkpoint();
-            memory_store::emit(code, bytes, 0, memory_store::Source::Rcx);
+            memory_store::emit(code, bytes, 0, source);
             mark(&mut recipe, code, start, Kind::Store, 0);
         }
         MemoryTransfer::Load { signed, width } => {
             let size = Size::of(width == Width::X64);
             let source = accessed();
+            // A fault leaves a host destination as it was.
+            let host = code.host(data).unwrap_or(Gpr::Rcx);
             let start = code.checkpoint();
             {
                 let mut asm = code.asm();
                 asm.guest_access(|asm| match (bytes, signed) {
-                    (1, false) => asm.movzx(size, Gpr::Rcx, Size::Byte, source),
-                    (2, false) => asm.movzx(size, Gpr::Rcx, Size::Word, source),
-                    (1, true) => asm.movsx(size, Gpr::Rcx, Size::Byte, source),
-                    (2, true) => asm.movsx(size, Gpr::Rcx, Size::Word, source),
+                    (1, false) => asm.movzx(size, host, Size::Byte, source),
+                    (2, false) => asm.movzx(size, host, Size::Word, source),
+                    (1, true) => asm.movsx(size, host, Size::Byte, source),
+                    (2, true) => asm.movsx(size, host, Size::Word, source),
                     (4, true) => {
                         debug_assert!(width == Width::X64);
-                        asm.movsxd(Gpr::Rcx, source);
+                        asm.movsxd(host, source);
                     }
-                    (4 | 8, false) => asm.mov_load(size, Gpr::Rcx, source),
+                    (4 | 8, false) => asm.mov_load(size, host, source),
                     _ => unreachable!("decoder validates scalar memory size"),
                 });
             }
@@ -218,16 +236,15 @@ pub(super) fn scalar(
                 &mut recipe,
                 code,
                 start,
-                Kind::Load {
-                    element: 0,
-                    host: Gpr::Rcx,
-                },
+                Kind::Load { element: 0, host },
                 mask(Gpr::Rcx),
             );
             // A discarded load still performs its faultable access.
-            if let Some(slot) = offset(data) {
+            if host == Gpr::Rcx
+                && let Some(data) = code.asm().guest(data)
+            {
                 let start = code.checkpoint();
-                code.asm().mov_store(Size::Qword, frame(slot), Gpr::Rcx);
+                code.asm().mov_store(Size::Qword, data, Gpr::Rcx);
                 mark(&mut recipe, code, start, Kind::Commit, 0);
             }
         }
@@ -254,37 +271,46 @@ pub(super) fn pair(
     address(code, checks, location, bytes, access, recipe.as_deref_mut());
     match transfer {
         MemoryTransfer::Store => {
-            let start = code.checkpoint();
-            right_operand(code, data[0], Width::X64, Shift::Lsl, 0);
-            mark(
-                &mut recipe,
-                code,
-                start,
-                Kind::Stage {
-                    element: 0,
-                    host: Gpr::Rcx,
-                },
-                mask(Gpr::Rcx),
-            );
-            let start = code.checkpoint();
-            match offset(data[1]) {
-                Some(slot) => code.asm().mov_load(Size::Qword, Gpr::R8, frame(slot)),
-                None => code.asm().alu(Alu::Xor, Size::Dword, Gpr::R8, Gpr::R8),
-            }
-            mark(
-                &mut recipe,
-                code,
-                start,
-                Kind::Stage {
-                    element: 1,
-                    host: Gpr::R8,
-                },
-                mask(Gpr::R8),
-            );
-            for (element, source) in [
-                (0, memory_store::Source::Rcx),
-                (1, memory_store::Source::R8),
-            ] {
+            let first = match code.host(data[0]) {
+                Some(host) => memory_store::Source::Host(host),
+                None => {
+                    let start = code.checkpoint();
+                    right_operand(code, data[0], Width::X64, Shift::Lsl, 0);
+                    mark(
+                        &mut recipe,
+                        code,
+                        start,
+                        Kind::Stage {
+                            element: 0,
+                            host: Gpr::Rcx,
+                        },
+                        mask(Gpr::Rcx),
+                    );
+                    memory_store::Source::Rcx
+                }
+            };
+            let second = match code.host(data[1]) {
+                Some(host) => memory_store::Source::Host(host),
+                None => {
+                    let start = code.checkpoint();
+                    match code.asm().guest(data[1]) {
+                        Some(storage) => code.asm().mov_load(Size::Qword, Gpr::R8, storage),
+                        None => code.asm().alu(Alu::Xor, Size::Dword, Gpr::R8, Gpr::R8),
+                    }
+                    mark(
+                        &mut recipe,
+                        code,
+                        start,
+                        Kind::Stage {
+                            element: 1,
+                            host: Gpr::R8,
+                        },
+                        mask(Gpr::R8),
+                    );
+                    memory_store::Source::R8
+                }
+            };
+            for (element, source) in [(0, first), (1, second)] {
                 let start = code.checkpoint();
                 memory_store::emit(code, bytes, element * bytes, source);
                 mark(&mut recipe, code, start, Kind::Store, 0);
@@ -314,9 +340,9 @@ pub(super) fn pair(
                 );
             }
             for (register, staged) in [(data[0], Gpr::Rcx), (data[1], Gpr::R8)] {
-                if let Some(slot) = offset(register) {
+                if let Some(storage) = code.asm().guest(register) {
                     let start = code.checkpoint();
-                    code.asm().mov_store(Size::Qword, frame(slot), staged);
+                    code.asm().mov_store(Size::Qword, storage, staged);
                     mark(&mut recipe, code, start, Kind::Commit, 0);
                 }
             }

@@ -29,6 +29,7 @@ use super::{
         InitializationProgress, LariError, LariPhase, LariRadio, LegacyPeer, MpduProgress,
         PnvmProgress, RomBoot, ScanResultProgress, UnifiedNvm,
     },
+    error_log::Tables,
     firmware::Family,
     identity::Profile,
     interrupts,
@@ -45,7 +46,7 @@ use crate::{
         connection::keeper::Keeper,
         network::Network,
         regulatory::database::{self, Database},
-        scan::{self, result::Bss},
+        scan::{self, multiple_bssid, result::Bss},
         security,
         station::{self as association, Station as Association},
     },
@@ -94,8 +95,8 @@ pub enum Error {
     Coexistence(Ax200CoexistenceError),
     /// A step's firmware or host deadline passed.
     Timeout(&'static str),
-    /// The firmware or NIC reported its own death.
-    FirmwareDied,
+    /// The firmware or NIC reported its own death, in the words of its logs.
+    FirmwareDied(String),
     /// Booting the function again failed.
     Restart(String),
     /// A step refused to start from the state the previous one left.
@@ -293,6 +294,13 @@ struct Attempts {
 }
 
 impl Attempts {
+    /// `iwl_trans_determine_restart_mode`: past three attempts its list resets
+    /// the function, and a product reset without the BIOS's `_PRR` does the
+    /// same.
+    fn resets(&self) -> bool {
+        self.count > 3
+    }
+
     /// Whether to boot again at `now`, spending an attempt.
     fn allow(&mut self, now: u64) -> bool {
         match self.backoff {
@@ -324,6 +332,13 @@ struct Restart<Q, B> {
     domain: Arc<dyn DmaDomain>,
     entries: u16,
     attempts: Attempts,
+    /// The function turned out to have no reset, which is said once.
+    no_reset: bool,
+    /// `request_top_reset`: the block shared with Bluetooth failed, for which
+    /// the list's early reprobes are no use. Stela admits no MAC with a TOP
+    /// reset of its own, so it takes the function reset of a product reset
+    /// without `_PRR`.
+    top_failed: bool,
 }
 
 /// One Intel Wi-Fi function's bring-up.
@@ -342,7 +357,7 @@ pub struct Wifi<Q: BootIo, B: BiosIo> {
     client: station::Client,
     /// The transmit and receive antennas.
     chains: (u32, u32),
-    family: Family,
+    pub(crate) family: Family,
     radio: super::identity::Rf,
     /// Whether the function's first MSI-X vector reaches the host.
     pub(super) vector: bool,
@@ -356,6 +371,8 @@ pub struct Wifi<Q: BootIo, B: BiosIo> {
     error: Option<Error>,
     /// Whether the link reported the bring-up failure.
     reported: bool,
+    /// Where this firmware keeps its error logs.
+    tables: Tables,
     restart: Restart<Q, B>,
 }
 
@@ -410,6 +427,8 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             domain,
             entries,
             attempts: Attempts::default(),
+            no_reset: false,
+            top_failed: false,
         };
         let wifi = Self {
             family: boot.family(),
@@ -435,6 +454,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             address: Mac::default(),
             error: None,
             reported: false,
+            tables: Tables::default(),
             restart,
         };
         Keeper::keep(wifi, inputs.network, inputs.entropy, inputs.clock)
@@ -444,9 +464,15 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
     /// The ROM boot reads this for itself, ALIVE among it. A register that
     /// stopped answering says as much.
     fn died(&mut self) -> bool {
-        !matches!(self.stage, Stage::Rom(_) | Stage::Pnvm(_))
-            && interrupts::acknowledge(&mut self.restart.io, self.family, self.vector)
-                .unwrap_or(true)
+        if matches!(self.stage, Stage::Rom(_) | Stage::Pnvm(_)) {
+            return false;
+        }
+        let Ok(fatal) = interrupts::acknowledge(&mut self.restart.io, self.family, self.vector)
+        else {
+            return true;
+        };
+        self.restart.top_failed |= fatal & interrupts::INT_TOP_FATAL != 0;
+        fatal != 0
     }
 
     /// `iwl_trans_restart_wk`, each attempt a reprobe: stop what the failed
@@ -463,6 +489,9 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             return false;
         }
         self.stage = Stage::Moving;
+        let reset = self.restart.attempts.resets() || core::mem::take(&mut self.restart.top_failed);
+        let no_reset = reset && !self.restart.io.reset_function();
+        let first = no_reset && !core::mem::replace(&mut self.restart.no_reset, true);
         let restart = &self.restart;
         // SAFETY: the owner that held `io`'s twin stopped, and `new`'s
         // contract holds for what it kept.
@@ -501,7 +530,24 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         self.error = None;
         self.reported = false;
         self.client = station::Client::new(unassigned());
+        if first {
+            self.client
+                .unsupported("a reset of this function: it boots again without one");
+        }
         true
+    }
+
+    /// As many failed boots as the list's `count`, just now.
+    #[cfg(test)]
+    pub(crate) fn spend_restarts(&mut self, count: usize) {
+        self.restart.attempts.count = count;
+        self.restart.attempts.last_us = self.clock.now_us();
+    }
+
+    /// Whether a function reset was asked for and not there.
+    #[cfg(test)]
+    pub(crate) fn no_reset(&self) -> bool {
+        self.restart.no_reset
     }
 
     /// The station address the NVM holds, once read.
@@ -607,7 +653,8 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         }
         match stage {
             Stage::Rom(mut boot) => match boot.poll() {
-                Ok(Some(_alive)) => {
+                Ok(Some(alive)) => {
+                    self.tables = Tables::of(&alive);
                     // SAFETY: forwarded from `poll`.
                     match unsafe { boot.begin_pnvm(self.firmware, self.observations, pages) } {
                         Ok(PnvmProgress::Skipped | PnvmProgress::Observed) => Ok(self.nvm(*boot)),
@@ -975,6 +1022,9 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                     Ok(ScanResultProgress::Observed(result)) => {
                         if let Ok(bss) = result.result() {
                             self.observe(bss);
+                            for nontransmitted in multiple_bssid::nontransmitted(bss) {
+                                self.observe(&nontransmitted);
+                            }
                         }
                     }
                     Ok(ScanResultProgress::Rejected(_)) => {}
@@ -1007,17 +1057,21 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         {
             beacons.heard(bss.channel);
         }
-        let heard = station::Heard {
-            observation: Arc::new(association::NativeBssObservation { bss: bss.clone() }),
-            at: self.clock.now_us(),
-        };
-        match self
+        let known = self
             .client
             .observed
-            .iter_mut()
-            .find(|known| known.observation.bss().bssid == bss.bssid)
-        {
-            Some(known) => *known = heard,
+            .iter()
+            .position(|known| known.observation.bss().bssid == bss.bssid);
+        let mut latest = bss.clone();
+        if let Some(known) = known {
+            latest.keep_name_of(self.client.observed[known].observation.bss());
+        }
+        let heard = station::Heard {
+            observation: Arc::new(association::NativeBssObservation { bss: latest }),
+            at: self.clock.now_us(),
+        };
+        match known {
+            Some(known) => self.client.observed[known] = heard,
             None => self.client.observed.push(heard),
         }
     }
@@ -1048,6 +1102,18 @@ mod tests {
             "the list began again"
         );
         assert_eq!(attempts.count, 1);
+    }
+
+    #[test]
+    fn the_fourth_and_fifth_attempts_reset_the_function() {
+        let mut attempts = Attempts::default();
+        let resets: Vec<bool> = (1..=RESTARTS as u64)
+            .map(|second| {
+                attempts.allow(second * 1_000_000);
+                attempts.resets()
+            })
+            .collect();
+        assert_eq!(resets, [false, false, false, true, true]);
     }
 
     #[test]

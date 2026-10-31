@@ -360,7 +360,8 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             return Err(Error::WrongProfile);
         }
         let header = Header::parse(d.payload).map_err(Error::Frame)?;
-        if d.fragment || (!grouped && (d.ampdu || d.amsdu.is_some())) {
+        if (d.fragment && !d.rejoinable_fragment()) || (!grouped && (d.ampdu || d.amsdu.is_some()))
+        {
             return Err(Error::Unsupported);
         }
         if header.data_present() {
@@ -438,15 +439,20 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 } else {
                     Integrity::Verified
                 },
-                iv_stripped: d.security.iv_stripped,
+                iv_stripped: d.security.iv_stripped && !d.fragment,
                 mic_stripped: d.security.mic_stripped,
                 icv_error: d.security.icv_error,
                 tkip_mic_error: d.security.tkip_mic_error,
                 ..SecurityStatus::default()
             };
         }
+        let bytes = if d.fragment {
+            d.normalize_fragment(header.length)
+        } else {
+            d.normalize(header.length)
+        };
         let mut frame = Mpdu::new(
-            d.normalize(header.length).map_err(Error::Rx)?,
+            bytes.map_err(Error::Rx)?,
             wifi::RadioStatus {
                 band,
                 channel: channel.number,

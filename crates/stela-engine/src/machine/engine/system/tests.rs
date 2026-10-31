@@ -1397,6 +1397,133 @@ fn native_dc_zva_is_exactly_the_untrapped_dc_zva() {
 /// exactly the contexts where the generated accessor reads the register
 /// with no trap or UNDEFINED.
 #[test]
+fn only_writes_a_read_follows_close_the_cells() {
+    use stela_compiler::x86_64::register_read::Cell;
+    const MRS_X1_TPIDR_EL1: u32 = 0xd538_d081;
+    const MSR_CONTEXTIDR_X0: u32 = 0xd518_d020;
+    const MSR_APIAKEYLO_X0: u32 = 0xd518_2100;
+    const MSR_TPIDR_EL1_X0: u32 = 0xd518_d080;
+    const MSR_CPACR_X0: u32 = 0xd518_1040;
+    let mut machine = machine(&[]);
+    machine.cpu.pstate = Pstate::reset(1);
+    // HCR_EL2.APK: the keys do not trap.
+    machine.cpu.registers.set(Register::HCR_EL2, 0, 1 << 40);
+    let index = super::super::MIRRORED
+        .iter()
+        .position(|&encoding| encoding == Encoding::new(3, 0, 13, 0, 4))
+        .unwrap();
+    machine.cpu.registers.set(Register::TPIDR_EL1, 0, 0x7000);
+    machine.system_instruction(MRS_X1_TPIDR_EL1).unwrap();
+    let open = machine.mirrors[index];
+    assert_eq!(
+        open,
+        Cell {
+            readable: 1,
+            value: 0x7000
+        }
+    );
+    for word in [MSR_CONTEXTIDR_X0, MSR_APIAKEYLO_X0] {
+        machine.system_instruction(word).unwrap();
+        assert_eq!(machine.mirrors[index], open);
+    }
+    // Its own write reaches the cell.
+    machine.cpu.state.x[0] = 0x8000;
+    machine.system_instruction(MSR_TPIDR_EL1_X0).unwrap();
+    assert_eq!(
+        machine.mirrors[index],
+        Cell {
+            readable: 1,
+            value: 0x8000
+        }
+    );
+    // CPACR_EL1 decides traps of reads.
+    machine.cpu.state.x[0] = 0;
+    machine.system_instruction(MSR_CPACR_X0).unwrap();
+    assert_eq!(machine.mirrors[index], Cell::default());
+}
+
+#[test]
+fn counter_cells_take_the_count_at_each_transition() {
+    use super::super::COUNTER_MIRRORS;
+    use crate::machine::pmu::{self, Context, Filter, Pmu};
+    const MRS_X3_PMC1: u32 = 0xd53a_f103;
+    let mut machine = machine(&[]);
+    machine.cpu.pstate = Pstate::reset(1);
+    let context = Context {
+        el: 1,
+        filter: Filter::Guest,
+        waiting: false,
+    };
+    let mut monitor = Pmu::new(36_000_000, 24_000_000);
+    monitor.write(pmu::PMCR1, 1 << 17, 0, 0, context).unwrap();
+    monitor
+        .write(pmu::PMCR1_EL12, 1 << 17, 0, 0, context)
+        .unwrap();
+    monitor.write(pmu::PMCR0, 2, 0, 0, context).unwrap();
+    machine.cpu.pmu = Some(monitor);
+    machine.cpu.retired = 10;
+    machine.system_instruction(MRS_X3_PMC1).unwrap();
+    let index = COUNTER_MIRRORS[1];
+    assert_eq!(machine.mirrors[index].readable, 1);
+    assert_eq!(machine.mirrors[index].value, machine.cpu.state.x[3]);
+    let read = machine.cpu.state.x[3];
+    machine.cpu.retired += 100;
+    assert_eq!(machine.mirrors[index].value, read);
+    machine.transitioned(machine.mirror_state());
+    assert_eq!(machine.mirrors[index].value, read + 100);
+}
+
+#[test]
+fn written_registers_open_their_cells_on_plain_writes_only() {
+    use super::super::{WRITTEN, written_cell};
+    use stela_compiler::x86_64::register_read::Cell;
+    const MSR_ELR_X0: u32 = 0xd518_4020;
+    const MSR_SP_EL0_X0: u32 = 0xd518_4100;
+    const MSR_FPSR_X0: u32 = 0xd51b_4420;
+    let mut machine = machine(&[]);
+    machine.cpu.pstate = Pstate::reset(1);
+    machine.cpu.pstate.sp = true;
+    // CPACR_EL1.FPEN: FPSR does not trap.
+    machine.cpu.registers.set(Register::CPACR_EL1, 0, 3 << 20);
+    machine.cpu.state.x[0] = 0x4000;
+    let cell = |mirrors: &super::super::Mirrors, register| {
+        let index = WRITTEN.iter().position(|&(_, named)| named == register);
+        mirrors[written_cell(index.unwrap())]
+    };
+    machine.system_instruction(MSR_ELR_X0).unwrap();
+    let address = machine.cpu.registers.address(Register::ELR_EL1, 0).unwrap();
+    assert_eq!(
+        cell(&machine.mirrors, Register::ELR_EL1),
+        Cell {
+            readable: 1,
+            value: address
+        }
+    );
+    machine.system_instruction(MSR_SP_EL0_X0).unwrap();
+    let address = machine.cpu.registers.address(Register::SP_EL0, 0).unwrap();
+    assert_eq!(
+        cell(&machine.mirrors, Register::SP_EL0),
+        Cell {
+            readable: 1,
+            value: address
+        }
+    );
+    machine.system_instruction(MSR_FPSR_X0).unwrap();
+    assert_eq!(
+        cell(&machine.mirrors, Register::FPSR),
+        Cell {
+            readable: 1,
+            value: 0
+        }
+    );
+    // EL0 traps them: nothing opens.
+    let mut machine = super::super::tests::machine(&[]);
+    machine.cpu.pstate = Pstate::reset(0);
+    machine.system_instruction(MSR_ELR_X0).unwrap();
+    assert_eq!(cell(&machine.mirrors, Register::ELR_EL1), Cell::default());
+}
+
+#[test]
 fn mirrored_cells_open_exactly_on_the_plain_reads() {
     const THREAD: u64 = 0xffff_fe00_1234_5000;
     let mut reads = [0; super::super::MIRRORED.len()];
@@ -1421,7 +1548,8 @@ fn mirrored_cells_open_exactly_on_the_plain_reads() {
             // degraded answer no cell keeps.
             let read = (machine.cpu.pstate.el, machine.cpu.pc) == (pstate.el, BASE + 4)
                 && machine.statistics.exceptions == exceptions
-                && (pstate.guarded || !super::super::GUARDED_MIRRORS.contains(&index));
+                && (pstate.guarded || !super::super::GUARDED_MIRRORS.contains(&index))
+                && (machine.cpu.pmu.is_some() || !super::super::COUNTER_MIRRORS.contains(&index));
             let value = machine.cpu.state.x[1];
             assert_eq!(
                 machine.mirrors[index],
@@ -1968,6 +2096,7 @@ fn el1_traps_to_el2(
                 reset: false,
                 code: Code::Unchanged,
                 refusal: Cell::new(None),
+                plain: Cell::new(None),
                 bank: super::Bank::Arm,
             };
             let effect = match (accessor.run)(&mut context, m) {

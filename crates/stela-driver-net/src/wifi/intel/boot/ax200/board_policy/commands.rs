@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 // Copyright (C) 2017 Intel Deutschland GmbH
 // Copyright (C) 2018-2026 Intel Corporation
-//! Source cold PPAG/SAR/geo/SGOM/TAS commands, private to the AX200 owner.
+//! Source cold PPAG/SAR/geo/SGOM/TAS/AP type commands, private to the AX200
+//! owner.
 use super::*;
 use crate::wifi::intel::{firmware::Firmware, radio::bios::service::power};
 const PPAG_CAPABILITY: u32 = 52;
@@ -29,6 +30,12 @@ const GEO_COMMAND: Id = Id {
 const SGOM_COMMAND: Id = Id {
     group: 12,
     opcode: 4,
+    version: 0,
+};
+/// `MCC_ALLOWED_AP_TYPE_CMD`.
+const AP_TYPE_COMMAND: Id = Id {
+    group: 12,
+    opcode: 5,
     version: 0,
 };
 const TAS_COMMAND: Id = Id {
@@ -105,6 +112,20 @@ pub(super) fn tas_approved(identity: &service::DmiIdentity) -> bool {
     .any(|s| matches(identity, s, None))
         || matches(identity, "Google", Some("HP"))
 }
+/// `iwl_mld_init_ap_type_tables`' body at command `version`: the country
+/// maps either UEFI table made valid, the first version knowing only one.
+fn ap_types(version: u8, tables: &power::Tables) -> Result<Option<Vec<u8>>, Ax200BoardPolicyError> {
+    if tables.ap_types.is_none() && tables.unii9_ap_types.is_none() {
+        return Ok(None);
+    }
+    let mut bytes = tables.ap_types.unwrap_or([0; 338]).to_vec();
+    match version {
+        1 => bytes.extend([0; 2]),
+        2 => bytes.extend(tables.unii9_ap_types.unwrap_or([0; 338])),
+        _ => return Err(unsupported(BoardCommandKind::ApTypes, version)),
+    }
+    Ok(Some(bytes))
+}
 fn command(kind: BoardCommandKind, id: Id, bytes: Vec<u8>) -> BoardCommand {
     BoardCommand { kind, id, bytes }
 }
@@ -117,6 +138,7 @@ pub(super) fn prepare(
     fw: &Firmware<'_>,
     tables: &power::Tables,
     identity: Option<&service::DmiIdentity>,
+    six_ghz: bool,
 ) -> Result<Vec<BoardCommand>, Ax200BoardPolicyError> {
     let mut commands = Vec::new();
     if fw.supports_capability(PPAG_CAPABILITY)
@@ -301,8 +323,17 @@ pub(super) fn prepare(
             commands.push(command(BoardCommandKind::Tas, TAS_COMMAND, bytes));
         }
     }
+    if six_ghz
+        && fw
+            .command_version(AP_TYPE_COMMAND.wire().group, AP_TYPE_COMMAND.wire().opcode)
+            .is_some()
+        && let Some(bytes) = ap_types(version(fw, AP_TYPE_COMMAND)?, tables)?
+    {
+        commands.push(command(BoardCommandKind::ApTypes, AP_TYPE_COMMAND, bytes));
+    }
     Ok(commands)
 }
+
 /// `iwl_fw_lookup_cmd_bios_supported_revision`: firmware may name the newest
 /// table a version 7 or 8 command takes. Linux sends nothing for a newer one.
 fn ppag_revision_taken(
@@ -323,5 +354,38 @@ fn source(source: ObservationSource) -> u8 {
     match source {
         ObservationSource::Acpi => 1,
         ObservationSource::Uefi => 2,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tables(ap_types: Option<u8>, unii9: Option<u8>) -> power::Tables {
+        power::Tables {
+            ppag: None,
+            sar: None,
+            geo: None,
+            tas: None,
+            sgom: None,
+            ap_types: ap_types.map(|value| [value; 338]),
+            unii9_ap_types: unii9.map(|value| [value; 338]),
+        }
+    }
+
+    #[test]
+    fn neither_uefi_table_sends_nothing() {
+        assert_eq!(ap_types(1, &tables(None, None)), Ok(None));
+    }
+
+    #[test]
+    fn the_first_version_carries_one_map_and_the_second_both() {
+        let first = ap_types(1, &tables(Some(1), Some(2))).unwrap().unwrap();
+        assert_eq!(first.len(), 340);
+        assert_eq!((first[337], first[338]), (1, 0));
+        let second = ap_types(2, &tables(None, Some(2))).unwrap().unwrap();
+        assert_eq!(second.len(), 676);
+        assert_eq!((second[337], second[338]), (0, 2));
+        assert!(ap_types(3, &tables(Some(1), None)).is_err());
     }
 }

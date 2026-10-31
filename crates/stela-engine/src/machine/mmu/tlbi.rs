@@ -10,6 +10,15 @@
 use super::Regime;
 use crate::machine::system::{Broadcast, Regime as Named, Tlbi, TlbiKind, TlbiLevel};
 
+/// What a TLBI reaches of a PE that translates another context: at most
+/// global entries in the lower half, at `addresses`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Private {
+    pub regime: Regime,
+    pub asid: u16,
+    pub addresses: Option<(u64, u64)>,
+}
+
 /// A cached translation with the context it was made in (pseudocode
 /// TLBRecord).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -353,6 +362,37 @@ impl Scope {
             TlbiKind::ASID => Everywhere::NonGlobal,
             _ => Everywhere::All,
         }
+    }
+
+    /// The ASID whose non-global entries this TLBI alone reaches: the VA and
+    /// ASID forms that name one, whose VA forms reach global entries too.
+    pub fn named_asid(self) -> Option<u16> {
+        matches!(self.kind, TlbiKind::VA | TlbiKind::RVA | TlbiKind::ASID).then_some(self.asid)
+    }
+
+    /// The context this TLBI is private to, if it reaches nothing else but
+    /// global entries in the lower half: a kernel's global upper half is
+    /// every PE's, so the VA forms there are not.
+    pub fn private(self) -> Option<Private> {
+        if !self.valid || self.regime == Regime::El2 {
+            return None;
+        }
+        let addresses = match self.kind {
+            TlbiKind::ASID => None,
+            TlbiKind::VA => Some((canonical(self.address), canonical(self.address))),
+            TlbiKind::RVA => match self.overlapping() {
+                Reach::Overlapping { first, last } => Some((first, last)),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        addresses
+            .is_none_or(|(first, last)| (first | last) >> 63 == 0)
+            .then_some(Private {
+                regime: self.regime,
+                asid: self.asid,
+                addresses,
+            })
     }
 
     /// The canonical VAs a range form names.

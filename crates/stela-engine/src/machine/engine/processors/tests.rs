@@ -266,7 +266,7 @@ fn retirement_totals_count_live_parked_and_replaced_cpus_once() {
 fn a_switch_keeps_cached_translations_only_between_pes_that_translate_alike() {
     let mut machine = pair();
     let (first, other) = (machine.current, 1 - machine.current);
-    let generation = machine.translation_generation;
+    let (generation, tables) = (machine.translation_generation, machine.table_generation);
     machine.switch_to(other);
     assert_eq!(machine.translation_generation, generation);
     assert_eq!(machine.statistics.translation_changes, 0);
@@ -278,7 +278,7 @@ fn a_switch_keeps_cached_translations_only_between_pes_that_translate_alike() {
     machine.floating_point = Some(None);
     machine.switch_to(first);
     assert_eq!(machine.floating_point, None);
-    assert!(machine.translation_generation > generation);
+    assert!(machine.table_generation > tables);
     assert_eq!(machine.statistics.table_base_changes, 1);
     assert_eq!(machine.statistics.translation_changes, 0);
     let Peer::Parked(parked) = &mut machine.peers[other] else {

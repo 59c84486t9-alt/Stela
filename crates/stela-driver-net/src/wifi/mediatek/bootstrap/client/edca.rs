@@ -56,8 +56,12 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         if Self::switched_from(s, channel) {
             return Ok(());
         }
-        if h.transmitter != Some(p.peer)
-            || frame.bytes().get(16..22) != Some(p.peer.0.as_slice())
+        let joined = modern.context().clone();
+        let sent_by = |address: crate::Mac| {
+            h.transmitter == Some(address)
+                && frame.bytes().get(16..22) == Some(address.0.as_slice())
+        };
+        if !(sent_by(p.peer) || sent_by(joined.beacon().transmitter))
             || (
                 frame.radio.band,
                 frame.radio.channel,
@@ -85,16 +89,25 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         {
             return Err(Error::WrongProfile);
         }
-        let mut elements = frame.bytes().get(36..).ok_or(Error::WrongProfile)?;
+        let sent = frame.bytes().get(36..).ok_or(Error::WrongProfile)?;
+        // A nontransmitted BSS reads its share of its transmitter's frames,
+        // and an EMA AP's without that share say what they all inherit.
+        let own = scan::multiple_bssid::heard(joined.beacon(), sent);
+        let capabilities = match &own {
+            Some(own) => Some(own.capabilities),
+            None if joined.beacon().profile.is_some() => None,
+            None => Some(u16::from_le_bytes([frame.bytes()[34], frame.bytes()[35]])),
+        };
+        let mut elements = own.as_ref().map_or(sent, |own| own.elements.as_slice());
         // mac80211 processes a beacon's channel switch elements first.
         if subtype == 0x0080 {
             Self::process_channel_switch(s, elements, csa::Source::Beacon, None);
+            Self::follow_links(s, &joined, elements);
         }
         let modern = s.modern.as_ref().ok_or(Error::WrongPhase)?;
         // mac80211 `ieee80211_handle_bss_capability`: on 2.4 GHz the slot
         // follows the AP's Short Slot Time capability; elsewhere it is 9 us.
-        if p.channel.band == wifi::Band::Ghz2 {
-            let capabilities = u16::from_le_bytes([frame.bytes()[34], frame.bytes()[35]]);
+        if let (wifi::Band::Ghz2, Some(capabilities)) = (p.channel.band, capabilities) {
             let slot = if capabilities & (1 << 10) != 0 { 9 } else { 20 };
             s.slot_time = (slot != p.slot_time).then_some(slot);
         }

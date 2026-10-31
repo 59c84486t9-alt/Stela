@@ -4,9 +4,9 @@
 //! The runtime derives both keep masks through its authoritative PAC layout
 //! and closes this cell whenever derived state changes. A closed cell takes
 //! the original instruction exit, without changing architectural state.
-use super::{Thunk, frame};
+use super::Thunk;
 use crate::x86_64::asm::{Alu, BitTest, Code, Cond, Gpr, Mem, Size};
-use crate::{GuestAddress, block::ExitKind};
+use crate::{GuestAddress, aarch64::Register, block::ExitKind};
 
 /// Fixed-address state read by a strip thunk. Each keep mask excludes the
 /// extension field that is restored from bit 55; tagged bytes remain set.
@@ -34,12 +34,12 @@ pub fn thunk(pc: GuestAddress, register: u8, cell: u64) -> Option<Thunk> {
     if register > 31 {
         return None;
     }
-    let mut code = Code::new();
+    let mut code = Code::pinned();
     let mut asm = code.asm();
     let mut closed = None;
     // XZR has no effect and depends on no regime state.
     if register != 31 {
-        let pointer = frame(u32::from(register) * 8);
+        let pointer = asm.guest(Register::X(register)).expect("X0..X30");
         asm.mov_imm64(Rdx, cell);
         asm.alu_imm8(Alu::Cmp, Qword, Mem::base(Rdx, 0), 0);
         closed = Some(asm.jcc(Cond::E));
@@ -116,7 +116,8 @@ mod tests {
             unsafe {
                 let page = mmap(core::ptr::null_mut(), 4096, 3, 2 | ANONYMOUS, -1, 0);
                 assert_ne!(page as usize, usize::MAX);
-                core::ptr::copy_nonoverlapping(code.code.as_ptr(), page.cast(), code.code.len());
+                let entered = crate::x86_64::pinned::entered(&code.code);
+                core::ptr::copy_nonoverlapping(entered.as_ptr(), page.cast(), entered.len());
                 assert_eq!(mprotect(page, 4096, 5), 0);
                 let run: unsafe extern "sysv64" fn(*mut GuestState) -> Exit =
                     core::mem::transmute(page);
@@ -126,7 +127,7 @@ mod tests {
                 }
                 before.sp = 0x1234_0000;
                 before.nzcv = 0xa000_0000;
-                before.reserved = 0x9876_5432;
+                before.exclusive_bytes = 0x9876_5432;
                 before.fpcr = 0x0300_0000;
                 before.fpsr = 0x0800_009f;
                 before

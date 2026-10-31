@@ -48,7 +48,7 @@ impl Gpr {
         assert!(number < 32, "GPR encoding must be in zero through31");
         REGISTERS[number as usize]
     }
-    pub(super) const fn number(self) -> u8 {
+    pub(crate) const fn number(self) -> u8 {
         self as u8
     }
     pub(super) const fn low(self) -> u8 {

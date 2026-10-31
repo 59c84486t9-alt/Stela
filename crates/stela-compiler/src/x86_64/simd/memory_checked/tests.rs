@@ -358,7 +358,11 @@ fn state() -> GuestState {
     let mut state = GuestState {
         sp: GUEST_BASE + 32,
         nzcv: 0xa000_0000,
-        reserved: 0x1357_9bdf,
+        exclusive_bytes: 0x1357_9bdf,
+        exclusive_address: 0,
+        exclusive_value: 0,
+        daif: 0,
+        pending: 0,
         fpcr: 0x0040_0000,
         fpsr: 0x0800_009f,
         ..GuestState::default()

@@ -122,7 +122,7 @@ fn word_pair_cx8(code: &mut Code, compare: [Register; 2], source: [Register; 2])
     code.asm().mov(Dword, Rbx, Rcx);
     input_rcx(code, DWORD_BYTES, source[1]);
     let mut asm = code.asm();
-    asm.guest_access(|asm| {
+    asm.guest_access_moving_stack(R9, |asm| {
         asm.lock();
         asm.cmpxchg8b(Mem::base(R8, 0))
     });
@@ -187,7 +187,7 @@ fn doubleword_pair(code: &mut Code, compare: [Register; 2], source: [Register; 2
         input_rcx(code, QWORD_BYTES, source[1]);
     }
     let mut asm = code.asm();
-    asm.guest_access(|asm| {
+    asm.guest_access_moving_stack(R9, |asm| {
         asm.lock();
         asm.cmpxchg16b(Mem::base(R8, 0))
     });

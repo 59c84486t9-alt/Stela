@@ -17,6 +17,7 @@ use super::{
     identity::{Observed, Profile},
     interrupt::Controller,
     io::{Bar, Io, NativeIo},
+    link::Link,
     phy::{self, PhyInitialized, source_mac},
     receive, transmit,
 };
@@ -63,6 +64,8 @@ pub struct Claim {
     pub domain: Arc<dyn DmaDomain>,
     pub firmware: &'static dyn Provider,
     pub observed: Observed,
+    /// The function's PCIe Link Control.
+    pub link_control: u16,
 }
 
 /// What failed, and at which step of the bring-up.
@@ -103,6 +106,7 @@ pub struct Up {
     pub mac: Mac,
     pub clock: Clock,
     pub pages: &'static dyn PageSource,
+    pub link: Link,
 }
 
 /// `rtw_chip_info_setup`, then `rtw_power_on` and `rtw_core_start`.
@@ -122,6 +126,7 @@ pub unsafe fn bring_up(claim: Claim) -> Result<Up, Error> {
         domain,
         firmware,
         observed,
+        link_control,
     } = claim;
     let profile = Profile::select(observed).map_err(at("identity"))?;
     let staged = profile.stage(firmware).map_err(at("firmware"))?;
@@ -190,6 +195,8 @@ pub unsafe fn bring_up(claim: Claim) -> Result<Up, Error> {
         (mac_state, phy)
     };
     let geometry = mac_state.fifo();
+    let link = Link::configure(&mut io, profile.cut(), board.raw().rfe_raw, link_control)
+        .map_err(at("pcie link"))?;
     let interrupts = Controller::new(bar().map_err(at("bar"))?).map_err(at("interrupts"))?;
     transmit
         .general_info(pages, geometry)
@@ -233,5 +240,6 @@ pub unsafe fn bring_up(claim: Claim) -> Result<Up, Error> {
         mac,
         clock,
         pages,
+        link,
     })
 }

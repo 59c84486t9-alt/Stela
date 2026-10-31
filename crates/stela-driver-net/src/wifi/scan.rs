@@ -11,6 +11,7 @@
 use super::{Band, Channel};
 use alloc::vec::Vec;
 
+pub mod multiple_bssid;
 pub mod result;
 pub mod six_ghz;
 

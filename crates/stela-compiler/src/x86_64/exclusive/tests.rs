@@ -143,7 +143,7 @@ mod native_component {
         state.nzcv = 0xf000_0000;
         state.fpcr = 0x03c0_0000;
         state.fpsr = 0x0800_001f;
-        state.reserved = 0x1234_5678;
+        state.exclusive_bytes = 0x1234_5678;
         for (register, vector) in state.v.iter_mut().enumerate() {
             *vector = [register as u64 * 17 + 3, register as u64 * 23 + 5];
         }
@@ -263,7 +263,7 @@ mod native_component {
 
     #[test]
     fn emitted_exclusive_payloads_results_and_faults_match_private_abi() {
-        assert_eq!(size_of::<GuestState>(), 784);
+        assert_eq!(size_of::<GuestState>(), 808);
         assert_eq!(size_of::<ExclusiveData>(), EXCLUSIVE_DATA_BYTES);
         assert_eq!(align_of::<ExclusiveData>(), EXCLUSIVE_DATA_ALIGNMENT);
         let dump =

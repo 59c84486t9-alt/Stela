@@ -688,9 +688,8 @@ fn device_state_says_unlocked_without_a_passcode_in_both_variants() {
 }
 
 #[test]
-fn a_client_terminating_is_acknowledged_with_the_variant_alone() {
-    let mut fields = [7u64, 8, 9].map(u64::to_le_bytes).concat();
-    fields.extend_from_slice(&5u32.to_le_bytes());
+fn a_client_terminating_is_answered_with_no_keybag_state() {
+    let fields = 7u64.to_le_bytes();
     let request = request_with(1, &fields);
     let (reply, output) = ask(
         &mut KeyStore::default(),
@@ -700,7 +699,11 @@ fn a_client_terminating_is_acknowledged_with_the_variant_alone() {
     reply.unwrap();
     let parsed = Message::parse(&output).unwrap();
     assert_eq!(parsed.variant(), 1);
-    assert_eq!(parsed.fields().end(), Ok(()));
+    let mut reply = parsed.fields();
+    assert_eq!(reply.lword(), Ok(0));
+    assert_eq!(reply.lword(), Ok(0));
+    assert_eq!(reply.word(), Ok(u32::MAX));
+    assert_eq!(reply.end(), Ok(()));
     let request = request_with(0, &fields);
     let (reply, _) = ask(
         &mut KeyStore::default(),

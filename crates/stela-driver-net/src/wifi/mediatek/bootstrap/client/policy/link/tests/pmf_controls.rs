@@ -430,6 +430,7 @@ fn an_ap_mld_association_adds_its_other_link_on_an_interface_of_its_own() {
             bss: scan::result::Bss {
                 bssid: OTHER,
                 transmitter: OTHER,
+                profile: None,
                 channel: CHANNEL_52,
                 elements: elements.clone(),
                 ..bss.clone()
@@ -532,8 +533,8 @@ fn an_ap_mld_association_adds_its_other_link_on_an_interface_of_its_own() {
     }
     link.authorize_port(epoch).unwrap();
     assert!(link.carrier());
-    // Link 1's beacons and management go to the OS as they came, what this
-    // leaves untracked reported once a link.
+    // Link 1's beacons go to the OS as they came, what this leaves untracked
+    // reported once a link; an unprotected action frame goes nowhere.
     let mut beacon = response(0x80, &[0; 12]);
     beacon[4..10].copy_from_slice(&Mac::BROADCAST.0);
     let mut action = response(0xd0, &[3, 0]);
@@ -556,10 +557,7 @@ fn an_ap_mld_association_adds_its_other_link_on_an_interface_of_its_own() {
         .collect::<Vec<_>>();
     assert_eq!(
         reported,
-        [
-            "MLO link beacon tracking: EDCA, channel switch, bandwidth and beacon loss",
-            "MLO link management: departures, actions and block ack sessions",
-        ]
+        ["MLO link beacon tracking: EDCA, channel switch, bandwidth and beacon loss"]
     );
     assert!(link.carrier());
     // The AP MLD's protected ADDBA request for TID 0 on the setup link starts
@@ -581,6 +579,22 @@ fn an_ap_mld_association_adds_its_other_link_on_an_interface_of_its_own() {
         .map(|packet| (packet[48], packet[49]))
         .collect();
     assert_eq!(wcids, [(0, 1), (1, 2)]);
+    // A request for TID 1 on link 1, under the MLDs' PTK as link 1 holds it,
+    // does the same.
+    let before = model.response.lock().unwrap().client_commands.len();
+    let mut addba = response(0x40d0, &[3, 0, 2, 0x06, 0x10, 0, 0, 0x10, 0]);
+    addba[4..10].copy_from_slice(&OTHER_LINK.0);
+    addba[10..16].copy_from_slice(&OTHER.0);
+    addba[16..22].copy_from_slice(&OTHER.0);
+    let mut bytes = incoming_bytes(&addba, Some((2, 0, 2)), false);
+    bytes[13] = 52;
+    device_receive(&model.queues[&0xd4520], &bytes, true, 0);
+    for _ in 0..4 {
+        link.service().unwrap();
+        finish_tx(&model);
+    }
+    let commands = model.response.lock().unwrap().client_commands[before..].to_vec();
+    assert_eq!(records(&commands, 3, 8, 6).len(), 2);
     let before = model.response.lock().unwrap().client_commands.len();
     depart(&mut link, &model);
     let commands = model.response.lock().unwrap().client_commands[before..].to_vec();

@@ -95,6 +95,7 @@ pub fn request_elements(request: &Request<'_>, advertised: &[u8]) -> Vec<u8> {
     for &(id, body) in &parts {
         let used = match (id, body.first()) {
             (45, _) => request.mode >= Mode::Ht,
+            (127, _) => true,
             (191, _) => request.mode >= Mode::Vht,
             (255, Some(35 | 59)) => request.mode >= Mode::He,
             (255, Some(108)) => request.mode >= Mode::Eht,

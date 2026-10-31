@@ -22,6 +22,8 @@ const SCAN_RESULT: u8 = 0x38;
 /// `H2C_CMD_RSVD_PAGE` and `H2C_CMD_SET_PWR_MODE`.
 const RESERVED_PAGES: u32 = 0;
 const POWER_MODE: u32 = 0x20;
+/// `H2C_CMD_LPS_PG_INFO`.
+const POWER_GATE_PAGES: u32 = 0x2b;
 
 /// `C2H_BT_INFO`, `C2H_BT_MP_INFO` and `C2H_BT_HID_INFO`.
 const BT_INFO: u8 = 0x09;
@@ -40,6 +42,18 @@ pub fn reserved_pages(ps_poll: u8, null: u8, qos_null: u8) -> (u32, u32) {
     (
         RESERVED_PAGES | (u32::from(ps_poll) << 16) | (u32::from(null) << 24),
         u32::from(qos_null),
+    )
+}
+
+/// `rtw_fw_set_pg_info`: where firmware finds what a power gate loses, and
+/// whether `keys` were saved among it.
+pub fn power_gate_pages(info: u8, predistortion: u8, keys: bool) -> (u32, u32) {
+    (
+        POWER_GATE_PAGES
+            | (u32::from(keys) << 8)
+            | (u32::from(info) << 16)
+            | (u32::from(predistortion) << 24),
+        0,
     )
 }
 
@@ -164,6 +178,8 @@ pub enum Report {
         mac_id: u8,
         rate: u8,
         short_gi: bool,
+        /// The width it was sent on, which older firmware leaves out.
+        width: Option<u8>,
     },
     /// `rtw_fw_scan_result`: how crowded the scan found the air.
     Density(u8),
@@ -195,6 +211,7 @@ impl Report {
                 rate: payload.first()? & 0x7f,
                 short_gi: payload.first()? & 0x80 != 0,
                 mac_id: *payload.get(1)?,
+                width: payload.get(6).copied(),
             },
             SCAN_RESULT => Self::Density(*payload.first()?),
             BT_INFO => {

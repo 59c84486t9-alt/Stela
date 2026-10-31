@@ -63,7 +63,10 @@ fn compile(word: u32, target: TargetCpu) -> Mapping {
     .unwrap()
     .compile()
     .unwrap();
-    Mapping::new(&block.native.x86_64_code).unwrap()
+    Mapping::new(&stela_compiler::x86_64::pinned::entered(
+        &block.native.x86_64_code,
+    ))
+    .unwrap()
 }
 
 fn mxcsr() -> u32 {
