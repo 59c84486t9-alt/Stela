@@ -67,7 +67,7 @@ pub struct DmiIdentity {
 /// valid until independently stopped; uncertain owner Drop keeps it. SMBIOS
 /// vendor strings come from this same native platform, preserve
 /// absence and are individually bounded to 4096 bytes.
-pub unsafe trait BiosIo: 'static {
+pub unsafe trait BiosIo: Clone + 'static {
     fn evaluate(&mut self, request: Request) -> Result<Object, IoError>;
     fn variable(&mut self, variable: Variable) -> Result<Vec<u8>, IoError>;
     /// Real SMBIOS on the same platform; no PCI/ACPI-derived guess.

@@ -6,6 +6,7 @@ use crate::wifi::intel::radio::{
     bios::service::{self, BiosIo, IoError, Object, Request},
     control::Kind,
 };
+#[derive(Clone)]
 pub(super) struct ClockBios {
     inner: RadioBios,
     clock_error: Option<IoError>,

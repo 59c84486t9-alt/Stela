@@ -24,7 +24,7 @@ fn mld_activation_refuses_unapproved_rate_or_power_before_publication() {
             policy.transmit_ceiling_mbm.store(1999, Ordering::SeqCst);
         }
         // SAFETY: authored same-device service explicitly denies this envelope.
-        let mut link = unsafe { power.begin_mld_link() }.unwrap_or_else(|_| panic!("MLD link"));
+        let mut link = unsafe { power.begin_mld_link(None) }.unwrap_or_else(|_| panic!("MLD link"));
         let calls = source.calls.load(Ordering::Relaxed);
         let ops = native.state.lock().unwrap().ops.len();
         let causes = native
@@ -71,7 +71,7 @@ fn missing_ack_keeps_phy_parent_and_latches_mld_failure() {
         let (power, _, _) = powered(&catalog, &empty, &source, &native, &policy, true);
         authorize(&policy);
         // SAFETY: same finite source response/revocation model.
-        let mut link = unsafe { power.begin_mld_link() }.unwrap_or_else(|_| panic!("MLD link"));
+        let mut link = unsafe { power.begin_mld_link(None) }.unwrap_or_else(|_| panic!("MLD link"));
         // SAFETY: Source supplies exclusive model RAM; Native keeps this
         // requester/domain and policy, with no asynchronous device access.
         unsafe { link.advance(&source) }.unwrap();

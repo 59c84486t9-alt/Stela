@@ -16,7 +16,6 @@ use crate::{
         regulatory::PowerType,
         security::{Cipher, management::ManagementCipher},
         station::{
-            AssociationContext,
             operations::MuEdcaRecord,
             phy::{AccessCategory, Eht, He, Mode, Negotiated, Width},
             power_envelope::PowerEnvelope,
@@ -55,9 +54,24 @@ pub const RATE_CONFIG: Id = Id {
     opcode: 0x0f,
     version: 0,
 };
+pub const STATION_REMOVE: Id = Id {
+    group: 3,
+    opcode: 0x0c,
+    version: 0,
+};
+pub const SCHEDULER: Id = Id {
+    group: 5,
+    opcode: 0x17,
+    version: 0,
+};
 pub const SECURITY_KEY: Id = Id {
     group: 5,
     opcode: 0x18,
+    version: 0,
+};
+pub const SYSTEM_STATISTICS: Id = Id {
+    group: 2,
+    opcode: 0x0f,
     version: 0,
 };
 pub const SMART_FIFO: Id = Id {
@@ -75,6 +89,16 @@ pub const MAC_POWER: Id = Id {
     opcode: 0xa9,
     version: 0,
 };
+pub const CHANNEL_SWITCH: Id = Id {
+    group: 3,
+    opcode: 0x04,
+    version: 0,
+};
+pub const CANCEL_CHANNEL_SWITCH: Id = Id {
+    group: 3,
+    opcode: 0x06,
+    version: 0,
+};
 pub const BEACON_FILTER: Id = Id {
     group: 0,
     opcode: 0xd2,
@@ -83,11 +107,15 @@ pub const BEACON_FILTER: Id = Id {
 
 const ACTION_ADD: u32 = 1;
 const ACTION_MODIFY: u32 = 2;
+/// `IWL_SEC_KEY_FLAG_CIPHER_MASK` and `IWL_SEC_KEY_FLAG_CIPHER_TKIP`.
+const KEY_CIPHER_MASK: u32 = 7;
+const KEY_CIPHER_TKIP: u32 = 3;
 const ACTION_REMOVE: u32 = 3;
 const MAC_TYPE_BSS_STATION: u32 = 5;
 const ACCEPT_GROUP: u32 = 1 << 2;
 const ACCEPT_BEACON: u32 = 1 << 3;
 const COEX_HIGH_PRIORITY: u32 = 1 << 5;
+const PROTECTED_TWT_SUPPORTED: u32 = 1 << 3;
 /// `LINK_CONTEXT_MODIFY_ALL` without `LINK_CONTEXT_MODIFY_ACTIVE`.
 const MODIFY_ALL_BUT_ACTIVE: u32 = 0xfe;
 /// `iwl_mvm_protect_assoc`'s 900 ms in `MSEC_TO_TU` time units.
@@ -130,6 +158,10 @@ pub struct MacState {
     /// `COEX_HIGH_PRIORITY_ENABLE`: until the port opens, Bluetooth yields to
     /// the handshake's frames.
     pub high_priority: bool,
+    /// The AP MLD's EMLSR transition timeout and medium sync delay.
+    pub emlsr: Option<(u8, u16)>,
+    /// `bss_conf->twt_protected`.
+    pub protected_twt: bool,
 }
 
 /// `iwl_mac_config_cmd`: version 4 can name NAN addresses.
@@ -176,10 +208,22 @@ pub fn mac_config(version: u8, state: MacState) -> Vec<u8> {
     if let Some(aid) = state.aid {
         word(&mut bytes, 36, 1);
         word(&mut bytes, 40, u32::from(aid));
+        if let Some((timeout, delay)) = state.emlsr {
+            bytes[37] = timeout;
+            bytes[38..40].copy_from_slice(&delay.to_le_bytes());
+        }
     }
-    if state.high_priority {
-        word(&mut bytes, 44, COEX_HIGH_PRIORITY);
-    }
+    let coexistence = if state.high_priority {
+        COEX_HIGH_PRIORITY
+    } else {
+        0
+    };
+    let twt = if state.protected_twt {
+        PROTECTED_TWT_SUPPORTED
+    } else {
+        0
+    };
+    word(&mut bytes, 44, coexistence | twt);
     bytes
 }
 
@@ -245,7 +289,9 @@ fn protection_flags(protection: Protection, width: Width) -> u32 {
 /// What `LINK_CONFIG_CMD` says of the link once its BSS is known.
 #[derive(Clone, Copy, Debug)]
 pub struct LinkState<'a> {
-    pub address: Mac,
+    /// The firmware link and PHY of the link.
+    pub seat: u8,
+    pub link: StationLink,
     pub band: Band,
     pub basic_rates: u16,
     pub short_preamble: bool,
@@ -282,10 +328,11 @@ const fn firmware_category(aci: usize) -> usize {
     }
 }
 
-/// `iwl_mvm_send_ap_tx_power_constraint_cmd` for link 0 of a station, with
+/// `iwl_mvm_send_ap_tx_power_constraint_cmd` for a station's `link`, with
 /// `iwl_mvm_tpe_sta_cmd_data`'s stricter of the AP's own and client limits.
-pub fn power_constraints(ap_type: PowerType, envelope: &PowerEnvelope) -> Vec<u8> {
+pub fn power_constraints(link: u8, ap_type: PowerType, envelope: &PowerEnvelope) -> Vec<u8> {
     let mut bytes = alloc::vec![0; 28];
+    bytes[0] = link;
     bytes[2] = match ap_type {
         PowerType::LowPowerIndoor => 0,
         PowerType::StandardPower => 1,
@@ -302,12 +349,26 @@ pub fn power_constraints(ap_type: PowerType, envelope: &PowerEnvelope) -> Vec<u8
     bytes
 }
 
+/// The station's side of its link: the address, and the link's ID at an AP
+/// MLD, which is zero without one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StationLink {
+    pub address: Mac,
+    pub id: u8,
+}
+
+/// `iwl_link_config_cmd::spec_link_id`.
+pub const SPEC_LINK_ID: usize = 166;
+
 /// `iwl_mvm_link_changed` for every part but activation.
 pub fn link_config(version: u8, state: LinkState<'_>) -> Vec<u8> {
     let mut bytes = alloc::vec![0; 208];
     word(&mut bytes, 0, ACTION_MODIFY);
-    bytes[16..22].copy_from_slice(&state.address.0);
+    word(&mut bytes, 4, u32::from(state.seat));
+    word(&mut bytes, 12, u32::from(state.seat));
+    bytes[16..22].copy_from_slice(&state.link.address.0);
     word(&mut bytes, 24, MODIFY_ALL_BUT_ACTIVE);
+    bytes[SPEC_LINK_ID] = state.link.id;
     word(&mut bytes, 28, 1);
     let (cck, ofdm) = ack_rates(state.band, hardware_rates(state.band, state.basic_rates));
     word(&mut bytes, 36, cck);
@@ -336,6 +397,51 @@ pub fn link_config(version: u8, state: LinkState<'_>) -> Vec<u8> {
     if let Some(he) = state.he {
         link_he(&mut bytes, version, he);
     }
+    bytes
+}
+
+/// `iwl_mld_add_link`: a link no PHY serves yet, under the address firmware
+/// takes only now.
+pub fn add_link(link: StationLink, seat: u8) -> Vec<u8> {
+    let mut bytes = alloc::vec![0; 208];
+    word(&mut bytes, 0, ACTION_ADD);
+    word(&mut bytes, 4, u32::from(seat));
+    word(&mut bytes, 12, u32::MAX);
+    bytes[16..22].copy_from_slice(&link.address.0);
+    bytes[SPEC_LINK_ID] = link.id;
+    bytes
+}
+
+/// `iwl_mld_change_link_in_fw` for `LINK_CONTEXT_MODIFY_ACTIVE` alone of a
+/// link's `configuration`.
+pub fn activation(mut configuration: Vec<u8>, active: bool) -> Vec<u8> {
+    word(&mut configuration, 24, 1);
+    word(&mut configuration, 28, u32::from(active));
+    configuration
+}
+
+/// `iwl_mld_rm_link_from_fw`.
+pub fn remove_link(seat: u8) -> Vec<u8> {
+    let mut bytes = alloc::vec![0; 208];
+    word(&mut bytes, 0, ACTION_REMOVE);
+    word(&mut bytes, 4, u32::from(seat));
+    word(&mut bytes, 12, u32::MAX);
+    bytes
+}
+
+/// `iwl_mld_rm_sta_from_fw`.
+pub fn remove_station(seat: u8) -> Vec<u8> {
+    u32::from(seat).to_le_bytes().to_vec()
+}
+
+/// `iwl_mld_update_sta_txqs` for `tid`'s queue.
+pub fn modify_queue(tid: u8, old: u32, new: u32) -> Vec<u8> {
+    const MODIFY: u32 = 2;
+    let mut bytes = alloc::vec![0; 36];
+    word(&mut bytes, 0, MODIFY);
+    word(&mut bytes, 4, old);
+    word(&mut bytes, 8, u32::from(tid));
+    word(&mut bytes, 12, new);
     bytes
 }
 
@@ -374,7 +480,12 @@ fn link_he(bytes: &mut [u8], version: u8, he: LinkHe) {
 /// What `STA_CONFIG_CMD` says of the AP station.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PeerState {
+    /// The firmware station and link of the AP's link.
+    pub seat: u8,
+    /// The AP MLD's address, or the BSS's.
     pub address: Mac,
+    /// The AP's address on the link.
+    pub link: Mac,
     pub aid: u16,
     /// Robust frames need the firmware's protection: the association's PMF
     /// and, as `iwl_mvm_mld_cfg_sta` sets it, every station before its port
@@ -549,11 +660,18 @@ pub fn ampdu_exponent(negotiated: &Negotiated) -> u8 {
 /// `STA_CONFIG_CMD` version.
 pub fn station_config(version: u8, state: PeerState) -> Vec<u8> {
     let mut bytes = alloc::vec![0; station_bytes(version)];
-    if version >= 3 {
-        word(&mut bytes, 4, 1);
-    }
+    word(&mut bytes, 0, u32::from(state.seat));
+    word(
+        &mut bytes,
+        4,
+        if version >= 3 {
+            1 << state.seat
+        } else {
+            u32::from(state.seat)
+        },
+    );
     bytes[8..14].copy_from_slice(&state.address.0);
-    bytes[16..22].copy_from_slice(&state.address.0);
+    bytes[16..22].copy_from_slice(&state.link.0);
     word(&mut bytes, 28, u32::from(state.aid));
     word(&mut bytes, 36, u32::from(state.mfp));
     word(&mut bytes, 40, u32::from(state.mimo));
@@ -658,13 +776,12 @@ pub fn rate_config(
     shape: RateShape,
     authorized: bool,
     max_mpdu: u16,
+    seat: u8,
 ) -> Option<Vec<u8>> {
     let RateShape { bytes, head, .. } = shape;
     let mut out = alloc::vec![0; bytes];
-    // Version 6 names stations by mask, station 0 by its bit.
-    if head == 8 {
-        out[0] = 1;
-    }
+    // Version 6 names stations by mask.
+    out[0] = if head == 8 { 1 << seat } else { seat };
     half(&mut out, bytes - 4, max_mpdu);
     let width = if authorized {
         width_code(negotiated.width)?
@@ -779,17 +896,20 @@ pub fn rate_config(
 
 /// `iwl_mvm_get_sec_flags` for a data or group key.
 pub fn key_flags(cipher: Cipher, pairwise: bool, management: bool) -> Option<u32> {
+    const WEP: u32 = 1;
     const CCMP: u32 = 2;
     const GCMP: u32 = 5;
     const KEY_SIZE: u32 = 0x10;
     const MFP: u32 = 0x20;
     const MCAST: u32 = 0x40;
     let suite = match cipher {
+        Cipher::Wep40 => WEP,
+        Cipher::Wep104 => WEP | KEY_SIZE,
+        Cipher::Tkip => KEY_CIPHER_TKIP,
         Cipher::Ccmp128 => CCMP,
         Cipher::Ccmp256 => CCMP | KEY_SIZE,
         Cipher::Gcmp128 => GCMP,
         Cipher::Gcmp256 => GCMP | KEY_SIZE,
-        Cipher::Tkip | Cipher::Wep40 | Cipher::Wep104 => return None,
     };
     Some(suite | if pairwise { 0 } else { MCAST } | if management { MFP } else { 0 })
 }
@@ -810,29 +930,38 @@ pub fn management_key_flags(cipher: ManagementCipher) -> u32 {
         }
 }
 
-/// `iwl_mvm_mld_send_key` adding a key for station 0. `receive` is the
+/// `iwl_mvm_mld_send_key` adding a key for `stations`. `receive` is the
 /// packet number the AP's frames continue from.
-pub fn add_key(index: u8, flags: u32, material: &[u8], receive: u64) -> Option<Vec<u8>> {
+pub fn add_key(
+    index: u8,
+    flags: u32,
+    material: &[u8],
+    receive: u64,
+    stations: u32,
+) -> Option<Vec<u8>> {
     if material.len() > 32 {
         return None;
     }
     let mut bytes = alloc::vec![0; 80];
     word(&mut bytes, 0, ACTION_ADD);
-    word(&mut bytes, 4, 1);
+    word(&mut bytes, 4, stations);
     word(&mut bytes, 8, u32::from(index));
     word(&mut bytes, 12, flags);
     bytes[16..16 + material.len()].copy_from_slice(material);
+    if flags & KEY_CIPHER_MASK == KEY_CIPHER_TKIP {
+        // `NL80211_TKIP_DATA_OFFSET_TX_MIC_KEY` and its RX key after it.
+        let (transmit, receive) = material.get(16..32)?.split_at(8);
+        bytes[48..56].copy_from_slice(receive);
+        bytes[56..64].copy_from_slice(transmit);
+    }
     bytes[64..72].copy_from_slice(&receive.to_le_bytes());
     Some(bytes)
 }
 
-/// The AP's firmware station, as `iwl_mvm_sta_fw_id_mask` names it.
-const STATION_MASK: u32 = 1;
-
 /// `iwl_rx_baid_cfg_cmd`, for `IWL_RX_BAID_ACTION_ADD`.
-pub fn allocate_block_ack(tid: u8, start: u16, window: u16) -> Vec<u8> {
+pub fn allocate_block_ack(tid: u8, start: u16, window: u16, stations: u32) -> Vec<u8> {
     let mut bytes = alloc::vec![0; 16];
-    word(&mut bytes, 4, STATION_MASK);
+    word(&mut bytes, 4, stations);
     bytes[8] = tid;
     bytes[12..14].copy_from_slice(&start.to_le_bytes());
     bytes[14..16].copy_from_slice(&window.to_le_bytes());
@@ -841,26 +970,48 @@ pub fn allocate_block_ack(tid: u8, start: u16, window: u16) -> Vec<u8> {
 
 /// `iwl_rx_baid_cfg_cmd`, for `IWL_RX_BAID_ACTION_REMOVE`: version 1 names
 /// the session the firmware gave, later ones its station and TID.
-pub fn remove_block_ack(version: u8, id: u8, tid: u8) -> Vec<u8> {
+pub fn remove_block_ack(version: u8, id: u8, tid: u8, stations: u32) -> Vec<u8> {
     const REMOVE: u32 = 2;
     let mut bytes = alloc::vec![0; 16];
     word(&mut bytes, 0, REMOVE);
     if version <= 1 {
         word(&mut bytes, 4, u32::from(id));
     } else {
-        word(&mut bytes, 4, STATION_MASK);
+        word(&mut bytes, 4, stations);
         word(&mut bytes, 8, u32::from(tid));
     }
     bytes
 }
 
+/// `iwl_mld_update_sta_baids` for `tid`'s session.
+pub fn modify_block_ack(tid: u8, old: u32, new: u32) -> Vec<u8> {
+    const MODIFY: u32 = 1;
+    let mut bytes = alloc::vec![0; 16];
+    word(&mut bytes, 0, MODIFY);
+    word(&mut bytes, 4, old);
+    word(&mut bytes, 8, new);
+    word(&mut bytes, 12, u32::from(tid));
+    bytes
+}
+
 /// `__iwl_mvm_sec_key_del`.
-pub fn remove_key(index: u8, flags: u32) -> Vec<u8> {
+pub fn remove_key(index: u8, flags: u32, stations: u32) -> Vec<u8> {
     let mut bytes = alloc::vec![0; 80];
     word(&mut bytes, 0, ACTION_REMOVE);
-    word(&mut bytes, 4, 1);
+    word(&mut bytes, 4, stations);
     word(&mut bytes, 8, u32::from(index));
     word(&mut bytes, 12, flags);
+    bytes
+}
+
+/// `iwl_mld_update_sta_key_iter`.
+pub fn modify_key(index: u8, flags: u32, old: u32, new: u32) -> Vec<u8> {
+    let mut bytes = alloc::vec![0; 80];
+    word(&mut bytes, 0, ACTION_MODIFY);
+    word(&mut bytes, 4, old);
+    word(&mut bytes, 8, new);
+    word(&mut bytes, 12, u32::from(index));
+    word(&mut bytes, 16, flags);
     bytes
 }
 
@@ -897,6 +1048,37 @@ pub fn smart_fifo(negotiated: &Negotiated) -> Vec<u8> {
 
 /// `iwl_mvm_power_build_cmd` for a station whose power management stays off:
 /// the keep-alive a beacon interval and DTIM period need.
+/// `IWL_STATS_CFG_FLG_DISABLE_NTFY_MSK`.
+const STATISTICS_OFF: u32 = 1 << 0;
+/// `IWL_STATS_CFG_FLG_ON_DEMAND_NTFY_MSK`.
+const STATISTICS_ON_DEMAND: u32 = 1 << 1;
+/// `IWL_STATS_NTFY_TYPE_ID_OPER` and `_OPER_PART1`.
+const STATISTICS_OPERATIONAL: u32 = 3;
+/// `PERIODIC_STATS_SECONDS`.
+const STATISTICS_PERIOD_S: u32 = 5;
+
+/// `iwl_mld_send_fw_stats_cmd`.
+fn statistics(flags: u32, seconds: u32, types: u32) -> Vec<u8> {
+    [flags, seconds, types]
+        .iter()
+        .flat_map(|word| word.to_le_bytes())
+        .collect()
+}
+
+/// `iwl_mld_clear_stats_in_fw`: the counters start from here.
+pub fn clear_statistics() -> Vec<u8> {
+    statistics(STATISTICS_ON_DEMAND, 0, STATISTICS_OPERATIONAL)
+}
+
+/// `iwl_mld_request_periodic_fw_stats`.
+pub fn periodic_statistics(enable: bool) -> Vec<u8> {
+    if enable {
+        statistics(0, STATISTICS_PERIOD_S, STATISTICS_OPERATIONAL)
+    } else {
+        statistics(STATISTICS_OFF, 0, 0)
+    }
+}
+
 pub fn power(version: u8, save_power: bool, beacon_interval: u16, dtim_period: u8) -> Vec<u8> {
     let mut bytes = alloc::vec![0; power_bytes(version)];
     half(&mut bytes, 4, u16::from(save_power));
@@ -906,6 +1088,29 @@ pub fn power(version: u8, save_power: bool, beacon_interval: u16, dtim_period: u
         .max(KEEP_ALIVE_SECONDS);
     half(&mut bytes, 6, keep_alive as u16);
     bytes
+}
+
+/// `iwl_mvm_schedule_client_csa`, adding the switch firmware times or
+/// `modify`ing its count, with `tsf` when the beacon saying so was heard.
+pub fn channel_switch(
+    modify: bool,
+    tsf: u32,
+    count: u8,
+    delayed_beacons: u8,
+    quiet: bool,
+) -> Vec<u8> {
+    let mut bytes = alloc::vec![0; 16];
+    word(&mut bytes, 4, if modify { ACTION_MODIFY } else { 1 });
+    word(&mut bytes, 8, tsf);
+    bytes[12] = count;
+    bytes[13] = delayed_beacons;
+    bytes[14] = u8::from(quiet);
+    bytes
+}
+
+/// `struct iwl_cancel_channel_switch_cmd`.
+pub fn cancel_channel_switch(id: u32) -> Vec<u8> {
+    id.to_le_bytes().to_vec()
 }
 
 /// `IWL_BF_CMD_CONFIG_DEFAULTS` enabling the filter: `bytes` is the firmware's
@@ -919,8 +1124,7 @@ pub fn beacon_filter(bytes: usize) -> Vec<u8> {
 }
 
 /// What the AP's beacon says of protection, ERP and HT Operation alike.
-pub fn protection(context: &AssociationContext) -> Protection {
-    let elements = &context.beacon().elements;
+pub fn protection(elements: &[u8]) -> Protection {
     Protection {
         erp: crate::wifi::connection::find(elements, 42)
             .and_then(|erp| erp.first())
@@ -931,9 +1135,33 @@ pub fn protection(context: &AssociationContext) -> Protection {
     }
 }
 
+/// `WLAN_RSNX_CAPA_PROTECTED_TWT` in the RSNXE of an association response.
+pub fn twt_protected(elements: &[u8]) -> bool {
+    crate::wifi::connection::find(elements, 244)
+        .and_then(|rsnx| rsnx.first())
+        .is_some_and(|capabilities| capabilities & 1 << 4 != 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn protected_twt_follows_the_rsnxe_into_the_data_policy() {
+        assert!(twt_protected(&[244, 1, 0x20 | 1 << 4]));
+        assert!(!twt_protected(&[244, 1, 0x20]));
+        assert!(!twt_protected(&[48, 1, 1 << 4]));
+        let state = MacState {
+            address: Mac([2, 0, 0, 0, 0, 1]),
+            he: true,
+            eht: false,
+            aid: Some(7),
+            high_priority: true,
+            emlsr: None,
+            protected_twt: true,
+        };
+        assert_eq!(mac_config(2, state)[44], 1 << 5 | 1 << 3);
+    }
 
     #[test]
     fn wifi_7_firmware_reads_its_support_as_bytes_in_a_longer_command() {
@@ -943,8 +1171,19 @@ mod tests {
             eht: true,
             aid: Some(7),
             high_priority: false,
+            emlsr: None,
+            protected_twt: false,
         };
         let bytes = mac_config(4, state);
+        assert_eq!(bytes[37..40], [0; 3]);
+        let timed = mac_config(
+            4,
+            MacState {
+                emlsr: Some((10, 0x10ac)),
+                ..state
+            },
+        );
+        assert_eq!(timed[37..40], [10, 0xac, 0x10]);
         assert_eq!(bytes.len(), 56);
         assert_eq!(bytes[24..28], [1, 0, 1, 0]);
         assert_eq!(bytes[28..32], [0; 4]);
@@ -957,7 +1196,9 @@ mod tests {
     #[test]
     fn a_peer_is_named_by_its_links_mask_from_version_3() {
         let state = PeerState {
+            seat: 0,
             address: Mac([2, 0, 0, 0, 0, 2]),
+            link: Mac([2, 0, 0, 0, 0, 2]),
             aid: 1,
             mfp: false,
             mimo: false,
@@ -990,9 +1231,9 @@ mod tests {
         envelope.max_local[0].power[0] = 30;
         envelope.max_client[0].power[0] = 20;
         envelope.psd_client[0].power[15] = -8;
-        let bytes = power_constraints(PowerType::VeryLowPower, &envelope);
+        let bytes = power_constraints(1, PowerType::VeryLowPower, &envelope);
         assert_eq!(bytes.len(), 28);
-        assert_eq!(bytes[..4], [0, 0, 2, 0]);
+        assert_eq!(bytes[..4], [1, 0, 2, 0]);
         assert_eq!(bytes[4..6], [20, 127]);
         assert_eq!(bytes[23..25], [127, 0xf8]);
         assert_eq!(bytes[25..], [0; 3]);
@@ -1025,6 +1266,8 @@ mod tests {
             eht: false,
             aid: None,
             high_priority: true,
+            emlsr: None,
+            protected_twt: false,
         };
         let bytes = mac_config(2, state);
         assert_eq!(bytes[4], 2);
@@ -1051,7 +1294,11 @@ mod tests {
         let bytes = link_config(
             5,
             LinkState {
-                address: Mac([2; 6]),
+                seat: 0,
+                link: StationLink {
+                    address: Mac([2; 6]),
+                    id: 0,
+                },
                 band: Band::Ghz5,
                 basic_rates: 1,
                 short_preamble: false,
@@ -1094,12 +1341,20 @@ mod tests {
         assert_eq!(key_flags(Cipher::Ccmp128, true, false), Some(2));
         assert_eq!(key_flags(Cipher::Gcmp256, false, false), Some(0x55));
         assert_eq!(key_flags(Cipher::Ccmp128, false, true), Some(0x62));
-        assert_eq!(key_flags(Cipher::Tkip, true, false), None);
-        let bytes = add_key(1, 0x42, &[9; 16], 5).unwrap();
+        assert_eq!(key_flags(Cipher::Tkip, true, false), Some(3));
+        assert_eq!(key_flags(Cipher::Tkip, false, false), Some(0x43));
+        assert_eq!(key_flags(Cipher::Wep40, true, false), Some(1));
+        assert_eq!(key_flags(Cipher::Wep104, true, false), Some(0x11));
+        let material: Vec<u8> = (0..32).collect();
+        let tkip = add_key(1, 3, &material, 0, 1).unwrap();
+        assert_eq!(tkip[48..56], material[24..32], "firmware's RX Michael key");
+        assert_eq!(tkip[56..64], material[16..24]);
+        assert_eq!(add_key(1, 3, &material[..16], 0, 1), None);
+        let bytes = add_key(1, 0x42, &[9; 16], 5, 1).unwrap();
         assert_eq!((bytes[0], bytes[4], bytes[8], bytes[12]), (1, 1, 1, 0x42));
         assert_eq!(bytes[16..32], [9; 16]);
         assert_eq!(bytes[64], 5);
-        assert_eq!(add_key(0, 2, &[0; 33], 0), None);
+        assert_eq!(add_key(0, 2, &[0; 33], 0, 1), None);
     }
 
     #[test]
@@ -1244,7 +1499,11 @@ mod tests {
         let bytes = link_config(
             6,
             LinkState {
-                address: Mac([2; 6]),
+                seat: 0,
+                link: StationLink {
+                    address: Mac([2; 6]),
+                    id: 0,
+                },
                 band: Band::Ghz5,
                 basic_rates: 1,
                 short_preamble: false,

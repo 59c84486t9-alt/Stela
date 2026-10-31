@@ -581,6 +581,12 @@ impl KeySlot {
             .ok_or(Error::Truncated)?;
         Ok((start, end, pn))
     }
+    /// Whether `mpdu`'s packet number is one this key already took, which
+    /// `ieee80211_tkip_decrypt_data` drops before Michael's verdict counts.
+    pub fn replays(&self, mpdu: &Mpdu) -> bool {
+        let queue = data_replay_queue(mpdu);
+        mpdu.security.pn.is_some_and(|pn| pn.0 <= self.rx_pn[queue])
+    }
     fn commit_receive(&mut self, queue: usize, pn: PacketNumber) -> Result<(), Error> {
         if self.installed().is_some_and(|key| key.cipher.is_wep()) {
             return Ok(());

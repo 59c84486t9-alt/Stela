@@ -30,7 +30,7 @@ fn mld_bound<'a>(
     let (power, _, _) = powered(catalog, empty, source, native, policy, short);
     authorize(policy);
     // SAFETY: original finite response and provider/revocation model.
-    let mut link = unsafe { power.begin_mld_link() }.unwrap_or_else(|_| panic!("MLD link"));
+    let mut link = unsafe { power.begin_mld_link(None) }.unwrap_or_else(|_| panic!("MLD link"));
     // SAFETY: this Source fixture allocates exclusive model RAM, while Native
     // keeps the matching domain and same-device policy through publication.
     unsafe { link.advance(source) }.unwrap();

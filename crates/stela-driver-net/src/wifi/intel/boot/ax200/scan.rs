@@ -34,6 +34,17 @@ const TPC_REPORT: u32 = 10;
 const HIDDEN_SIX_GHZ: u32 = 59;
 /// `IWL_UCODE_TLV_CAPA_SCAN_DONT_TOGGLE_ANT`.
 const FIXED_ANTENNA: u32 = 111;
+/// `enum iwl_mld_traffic_load`: how much air a station's own frames take, which
+/// says how long a scan beside them may stay away.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Ax200ScanTraffic {
+    #[default]
+    Low,
+    Medium,
+    High,
+    /// Both of an EMLSR association's links take frames.
+    Balanced,
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Ax200ScanPhase {
     NotStarted,

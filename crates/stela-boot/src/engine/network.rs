@@ -73,6 +73,9 @@ impl Link for RootLink {
     fn signals(&self) -> bool {
         self.device.signals()
     }
+    fn due_us(&self) -> Option<u64> {
+        self.device.due_us()
+    }
 }
 
 /// The PC's clock, moving the screen's running step as the stack waits.

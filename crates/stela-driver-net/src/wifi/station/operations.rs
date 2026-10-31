@@ -75,7 +75,7 @@ pub struct ChannelDefinition {
     pub punctured: u16,
 }
 
-pub(super) fn mhz(width: Width) -> u32 {
+pub(crate) fn mhz(width: Width) -> u32 {
     match width {
         Width::Mhz20 => 20,
         Width::Mhz40 => 40,

@@ -95,4 +95,9 @@ pub trait Link {
     fn signals(&self) -> bool {
         false
     }
+    /// The clock's time at which a link that [`Self::signals`] next needs
+    /// [`Self::receive`] for timers no signal ends, whatever arrives first.
+    fn due_us(&self) -> Option<u64> {
+        None
+    }
 }

@@ -291,6 +291,13 @@ impl Link for Adapter {
             Self::MediatekWifi(device) => device.signals(),
         }
     }
+    fn due_us(&self) -> Option<u64> {
+        match self {
+            #[cfg(feature = "native-acpi")]
+            Self::IntelWifi(device) => device.due_us(),
+            _ => None,
+        }
+    }
     fn transmit(&mut self, frame: &[u8]) -> Result<(), LinkError> {
         match self {
             Self::Virtio(device) => device.transmit(frame),
@@ -562,6 +569,7 @@ struct WifiInputs<'a> {
 unsafe fn intel_wifi(
     services: &dyn NativeServices,
     address: Address,
+    completion: Option<crate::bus::irq::MsiMessage>,
     wifi: &WifiInputs<'_>,
     regulatory: &Option<
         Result<
@@ -608,7 +616,7 @@ unsafe fn intel_wifi(
                 .map_err(|error| (Error::Native(error), None))?,
         };
         // SAFETY: forwarded from the caller.
-        unsafe { native::intel_wifi(services, address, inputs) }
+        unsafe { native::intel_wifi(services, address, completion, inputs) }
             .map(|link| Adapter::IntelWifi(Box::new(link)))
     }
     #[cfg(not(feature = "native-acpi"))]
@@ -616,6 +624,7 @@ unsafe fn intel_wifi(
         let _ = (
             services,
             address,
+            completion,
             clock,
             observations,
             firmware,
@@ -974,7 +983,14 @@ pub unsafe fn probe_with_provider(
                         // SAFETY: as for tg3 below; the companion is this
                         // function's own.
                         match unsafe {
-                            intel_wifi(services, address, wifi, &devices.regulatory, &bridges)
+                            intel_wifi(
+                                services,
+                                address,
+                                handoff.completion,
+                                wifi,
+                                &devices.regulatory,
+                                &bridges,
+                            )
                         } {
                             Ok(link) => devices.nics.push(link),
                             Err((error, kept)) => {
@@ -1462,6 +1478,7 @@ mod tests {
             intel_wifi(
                 &services,
                 address,
+                None,
                 &WifiInputs {
                     clock: handoff.clock,
                     observations: Default::default(),

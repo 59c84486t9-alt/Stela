@@ -12,12 +12,14 @@ pub(super) enum Op {
     Write8(u32, u8),
     Delay(u32),
 }
+#[derive(Clone)]
 pub(super) struct Owner(pub(super) Arc<AtomicUsize>);
 impl Drop for Owner {
     fn drop(&mut self) {
         self.0.fetch_add(1, Ordering::Relaxed);
     }
 }
+#[derive(Clone)]
 pub(super) struct Model {
     pub(super) state: Arc<Mutex<ModelState>>,
     pub(super) _owner: Owner,

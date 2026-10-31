@@ -121,6 +121,32 @@ impl Authenticator {
         }
     }
 
+    /// The same authenticator as an AP MLD's: message 2 names the station MLD.
+    pub(crate) fn naming_station_mld(mut self) -> Self {
+        put_kde(&mut self.station_rsn, MAC_ADDRESS_KDE, &self.station.0);
+        self
+    }
+
+    /// Message 2 also names the station on `links`.
+    pub(crate) fn naming_links(mut self, links: &[Link]) -> Self {
+        for link in links {
+            let mut body = vec![link.link_id];
+            body.extend_from_slice(&link.local.0);
+            put_kde(&mut self.station_rsn, MLO_LINK_KDE, &body);
+        }
+        self
+    }
+
+    /// Message 3 of an AP MLD, with `links` its accepted links and `keys`
+    /// theirs.
+    pub(crate) fn mld_message_3(&mut self, links: &[Link], keys: &[u8]) -> Vec<u8> {
+        let mut data = links[0].rsn.clone();
+        put_kde(&mut data, MAC_ADDRESS_KDE, &self.own.0);
+        data.extend(links.iter().flat_map(link_kde));
+        data.extend_from_slice(keys);
+        self.signed(PAIRWISE | ACK | MIC | INSTALL | SECURE | ENCRYPTED, &data)
+    }
+
     pub(crate) fn message_1(&mut self) -> Vec<u8> {
         self.replay += 1;
         build(
@@ -269,6 +295,24 @@ fn four_way_and_group_handshakes_install_the_authenticators_keys() {
         let group = step.group.unwrap();
         assert_eq!((group.index, &group.material[..]), (2, &[0x66; 16][..]));
         assert!(step.pairwise.is_none());
+    }
+}
+
+#[test]
+fn a_michael_report_counts_up_under_the_ptks_mic() {
+    let (mut ap, mut station) = begun(suites(Akm::Psk));
+    assert_eq!(station.michael_report(false), None, "no PTK yet");
+    let step = station.receive(&ap.message_3(&RSN), &mut random).unwrap();
+    assert!(step.pairwise.is_some());
+    let kck = *ap.ptk.as_ref().unwrap().kck();
+    for (replay, pairwise) in [(0, false), (1, true)] {
+        let report = station.michael_report(pairwise).unwrap();
+        let key = Frame::parse(&report).unwrap();
+        assert_eq!(key.replay, replay);
+        let kind = if pairwise { PAIRWISE } else { 0 };
+        let info = REQUEST | ERROR | MIC | SECURE | kind;
+        assert_eq!(key.info & !VERSION, info);
+        key.verify(Akm::Psk, &kck).unwrap();
     }
 }
 
@@ -424,7 +468,7 @@ fn link_kde(link: &Link) -> Vec<u8> {
 }
 
 /// An MLO GTK KDE of `link_id` with PN 3, and its MLO IGTK KDE with IPN 9.
-fn link_keys(link_id: u8, index: u8, fill: u8) -> Vec<u8> {
+pub(crate) fn link_keys(link_id: u8, index: u8, fill: u8) -> Vec<u8> {
     let mut gtk = vec![index | link_id << 4, 3, 0, 0, 0, 0, 0];
     gtk.extend_from_slice(&[fill; 16]);
     let mut igtk = vec![4, 0, 9, 0, 0, 0, 0, 0, link_id << 4];

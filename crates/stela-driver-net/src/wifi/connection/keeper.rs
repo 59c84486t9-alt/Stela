@@ -70,6 +70,11 @@ pub enum Event {
     Unsupported(&'static str),
     /// The AP or the firmware ended the association.
     ConnectionLost,
+    /// The firmware went with all it held, and the radio may be booting it
+    /// again.
+    FirmwareLost,
+    /// A TKIP frame failed its Michael MIC, `cfg80211_michael_mic_failure`.
+    MichaelFailure { pairwise: bool },
 }
 
 /// What the NIC offers on a band.
@@ -124,6 +129,14 @@ pub trait Radio: Link {
     fn probes(&self, channel: Channel) -> bool;
     /// The Supported Channels of `band`, which a spectrum-managed request names.
     fn supported_channels(&self, band: Band) -> &'static [u8];
+    /// Whether a multi-link association may use a 6 GHz link.
+    fn six_ghz_links(&self) -> bool {
+        false
+    }
+    /// `eml_capabilities` of `struct wiphy_iftype_ext_capab`.
+    fn eml_capabilities(&self) -> u16 {
+        0
+    }
     /// The country's power limit at `frequency_mhz`.
     fn regulated_power_dbm(&self, frequency_mhz: u16) -> i32;
     fn advertisement(&self, band: Band) -> Result<Advertisement, Self::Error>;
@@ -160,6 +173,7 @@ pub trait Radio: Link {
         handle: Self::Handle,
         selection: Selection,
         profile: Self::Profile,
+        multi_link: Option<Affiliation>,
         budget_us: u64,
     ) -> Result<Arc<external::Session>, Self::Error>;
     fn transmit_external_authentication(
@@ -193,7 +207,17 @@ pub trait Radio: Link {
         index: u8,
         material: &[u8],
         receive: ReplaySeed,
-    ) -> Result<KeyIdentity, Self::Error>;
+    ) -> Result<(), Self::Error>;
+    /// Keep link `link_id`'s IGTK: whether the radio can.
+    fn install_link_management_key(
+        &mut self,
+        _link_id: u8,
+        _index: u8,
+        _material: &[u8],
+        _receive: PacketNumber,
+    ) -> Result<bool, Self::Error> {
+        Ok(false)
+    }
     /// # Safety
     /// The association's authenticated handshake gave the key, and the radio
     /// is polled with its interrupts masked, so no earlier key user remains.
@@ -413,6 +437,11 @@ enum State<H, M> {
     },
 }
 
+/// `WLAN_REASON_MICHAEL_MIC_FAILURE`.
+const MICHAEL_FAILURE: u16 = 14;
+/// How near two Michael failures start countermeasures, and how long they last.
+const COUNTERMEASURES_US: u64 = 60_000_000;
+
 /// A radio kept connected to one network.
 pub struct Keeper<R: Radio> {
     link: R,
@@ -426,6 +455,8 @@ pub struct Keeper<R: Radio> {
     /// The latest failure, which `receive` reports once.
     failure: Option<String>,
     reported: Option<String>,
+    /// wpa_supplicant's `last_michael_mic_error`.
+    michael_failed: Option<u64>,
 }
 
 impl<R: Radio> Keeper<R> {
@@ -443,6 +474,7 @@ impl<R: Radio> Keeper<R> {
             failures: 0,
             failure: None,
             reported: None,
+            michael_failed: None,
         }
     }
 
@@ -510,6 +542,13 @@ impl<R: Radio> Keeper<R> {
                 }
                 Event::ConnectionLost => {
                     self.fail(format!("{}: the AP ended the association", R::NAME));
+                    self.state = State::Leaving {
+                        at: now + RECONNECT_US,
+                    };
+                }
+                Event::MichaelFailure { pairwise } => self.michael_failure(pairwise, now),
+                // `service` reported why.
+                Event::FirmwareLost => {
                     self.state = State::Leaving {
                         at: now + RECONNECT_US,
                     };
@@ -745,6 +784,7 @@ impl<R: Radio> Keeper<R> {
                 handle,
                 selection,
                 profile,
+                links.as_ref().map(|links| links.affiliation),
                 SAE_BUDGET_US,
             )
         } else {
@@ -789,9 +829,10 @@ impl<R: Radio> Keeper<R> {
     }
 
     /// `ieee80211_mgd_assoc` for an AP MLD: when the NIC reports MLO and
-    /// `bss`, on 2.4 or 5 GHz, is a link of an AP MLD that `request`
-    /// associates with as EHT with PMF, the station takes a random address on
-    /// it and requests one more link as `mt76_select_links` picks it.
+    /// `bss` is a link of an AP MLD that `request` associates with as EHT
+    /// with PMF, on 6 GHz only for a radio with `six_ghz_links`: the station
+    /// takes a random address on it and requests one more link as
+    /// `mt76_select_links` picks it.
     fn links(
         &self,
         bss: &Bss,
@@ -805,21 +846,24 @@ impl<R: Radio> Keeper<R> {
             .advertisement(bss.channel.band)
             .map_err(|error| format!("{error}"))?
             .multi_link;
-        if bss.channel.band == Band::Ghz6
+        let six_ghz = self.link.six_ghz_links();
+        if (bss.channel.band == Band::Ghz6 && !six_ghz)
             || multi_link != Some(true)
             || request.pmf().is_none()
             || request.modern().map(|modern| modern.mode()) != Some(Mode::Eht)
         {
             return Ok(None);
         }
-        // The links run on 2.4 and 5 GHz channels that may transmit.
+        // The links run on channels that may transmit, and on 6 GHz under a
+        // power type the channel allows.
         let usable = |other: &Bss| {
-            other.channel.band != Band::Ghz6
-                && self
-                    .link
-                    .channels(other.channel.band)
+            let channels = self.link.channels(other.channel.band);
+            match other.channel.band {
+                Band::Ghz6 => six_ghz && power_type_usable(other, &channels),
+                _ => channels
                     .iter()
-                    .any(|&(channel, _)| channel == other.channel)
+                    .any(|&(channel, _)| channel == other.channel),
+            }
         };
         let observed = self.link.bss();
         let other = other_link(bss, ap, &observed, usable)
@@ -857,7 +901,7 @@ impl<R: Radio> Keeper<R> {
     /// The multi-link setup of `links` with the AP MLD whose setup link is
     /// `bss`, each other link requested as it would associate alone, and the
     /// links the handshakes key. The station MLD reports mt7925's MLD
-    /// capabilities, one simultaneous link, and no EML capabilities.
+    /// capabilities, one simultaneous link, and the radio's EML capabilities.
     fn multi_link(
         &self,
         links: &Links<R::Handle>,
@@ -886,7 +930,7 @@ impl<R: Radio> Keeper<R> {
             Setup {
                 association: affiliation,
                 mld_capabilities: 0,
-                eml_capabilities: 0,
+                eml_capabilities: self.link.eml_capabilities(),
                 links: requested,
             },
             MultiLink {
@@ -1183,6 +1227,36 @@ impl<R: Radio> Keeper<R> {
         }
     }
 
+    /// `wpa_supplicant_event_michael_mic_failure`: the AP hears of each
+    /// failure, and a second within a minute leaves it for a minute.
+    fn michael_failure(&mut self, pairwise: bool, now: u64) {
+        let State::Connected {
+            supplicant,
+            bssid,
+            ptk,
+            ..
+        } = &mut self.state
+        else {
+            return;
+        };
+        let (bssid, ptk) = (*bssid, *ptk);
+        let step = Step {
+            reply: supplicant.michael_report(pairwise),
+            ..Step::default()
+        };
+        if let Err(message) = self.apply(step, bssid, Some(ptk)) {
+            return self.failed(now, message);
+        }
+        let last = self.michael_failed.replace(now);
+        if last.is_some_and(|last| now < last + COUNTERMEASURES_US) {
+            self.fail(format!("{}: TKIP countermeasures started", R::NAME));
+            let _ = self.link.deauthenticate(MICHAEL_FAILURE);
+            self.state = State::Leaving {
+                at: now + COUNTERMEASURES_US,
+            };
+        }
+    }
+
     /// Send a handshake step's reply, then install its keys as
     /// wpa_supplicant does after message 4.
     fn apply(&mut self, step: Step, bssid: Mac, ptk: Option<KeyIdentity>) -> Result<(), String> {
@@ -1215,7 +1289,19 @@ impl<R: Radio> Keeper<R> {
             self.link
                 .install_link_key(link.link_id, key.index, &key.material, key.receive)
                 .map_err(|error| format!("{error}"))?;
-            if link.integrity.is_some() {
+            let kept = match &link.integrity {
+                Some(key) => self
+                    .link
+                    .install_link_management_key(
+                        link.link_id,
+                        key.index,
+                        &key.material,
+                        key.receive,
+                    )
+                    .map_err(|error| format!("{error}"))?,
+                None => true,
+            };
+            if !kept {
                 self.fail(format!(
                     "{} unsupported: MLO link IGTKs; another link's group-addressed \
                      robust management frames reach the OS unverified",
@@ -1354,6 +1440,9 @@ impl<R: Radio> Link for Keeper<R> {
     }
     fn signals(&self) -> bool {
         self.link.signals()
+    }
+    fn due_us(&self) -> Option<u64> {
+        self.link.due_us()
     }
     fn transmit(&mut self, frame: &[u8]) -> Result<(), LinkError> {
         self.link.transmit(frame)

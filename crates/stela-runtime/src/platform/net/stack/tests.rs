@@ -441,7 +441,7 @@ fn a_signalling_link_sleeps_until_the_deadline_when_nothing_arrives() {
             Ok(())
         }
     }
-    struct Signalling(End);
+    struct Signalling(End, Option<u64>);
     impl Link for Signalling {
         fn mac(&self) -> Mac {
             self.0.mac
@@ -455,14 +455,17 @@ fn a_signalling_link_sleeps_until_the_deadline_when_nothing_arrives() {
         fn signals(&self) -> bool {
             true
         }
+        fn due_us(&self) -> Option<u64> {
+            self.1
+        }
     }
     let clock = Sleeping::default();
-    let silent = Signalling(End {
+    let end = || End {
         mac: CLIENT,
         out: Rc::default(),
         into: Rc::default(),
-    });
-    let mut stack = Stack::new(silent, clock.clone(), 7).unwrap();
+    };
+    let mut stack = Stack::new(Signalling(end(), None), clock.clone(), 7).unwrap();
     match stack.dhcp() {
         Err(NetError::Dhcp(why)) => assert!(why.starts_with("no IPv4 lease"), "{why}"),
         other => panic!("{other:?}"),
@@ -471,6 +474,12 @@ fn a_signalling_link_sleeps_until_the_deadline_when_nothing_arrives() {
     // handful of sleeps rather than a poll per clock reading.
     assert!((1..64).contains(&clock.1.get()), "{}", clock.1.get());
     assert!(clock.0.get() >= DHCP_WAIT_US);
+    // The link's own timer ends a sleep the caller would let run on.
+    let due = clock.0.get() + 1_000;
+    let mut stack = Stack::new(Signalling(end(), Some(due)), clock.clone(), 7).unwrap();
+    stack.poll().unwrap();
+    stack.wait(1_000_000).unwrap();
+    assert_eq!(clock.0.get(), due);
 }
 
 #[test]

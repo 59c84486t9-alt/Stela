@@ -11,12 +11,12 @@ use super::{
     firmware::{self, Family},
     identity::{self, IdentityError, Observed, Profile, StageError},
     link::{Inputs, Station, Wifi},
-    platform,
+    platform::{self, Observations},
     power::{self, ManagementSession, Power},
-    radio::bios::service::BiosIo,
+    radio::bios::service::{BiosIo, DmiIdentity},
 };
 use crate::{
-    bus::dma::mapping::DmaDomain,
+    bus::dma::{mapping::DmaDomain, memory::PageSource},
     firmware::{ErrorKind, Provider},
 };
 use alloc::{format, string::String, sync::Arc};
@@ -37,6 +37,9 @@ pub struct Pci {
     pub revision: u8,
     /// PCI_EXP_LNKSTA's current speed.
     pub link_speed: u8,
+    /// Whether the function's first MSI-X vector wakes the core that looks
+    /// for its frames.
+    pub vector: bool,
 }
 
 /// Why the function did not reach ROM boot.
@@ -99,7 +102,7 @@ pub unsafe fn attach<Q: BootIo, B: BiosIo>(
     mut io: Q,
     pci: Pci,
     domain: Arc<dyn DmaDomain>,
-    inputs: Inputs<B>,
+    mut inputs: Inputs<B>,
 ) -> Result<Station<Q, B>, AttachError> {
     let hardware_revision = io.read32(HW_REV).map_err(AttachError::Register)?;
     let radio_id = io.read32(HW_RF_ID).map_err(AttachError::Register)?;
@@ -112,7 +115,7 @@ pub unsafe fn attach<Q: BootIo, B: BiosIo>(
         ManagementSession::NotConnected,
     )
     .map_err(AttachError::Power)?;
-    let profile = Profile::select(Observed {
+    let mut profile = Profile::select(Observed {
         vendor: pci.vendor,
         device: pci.device,
         subsystem_vendor: pci.subsystem_vendor,
@@ -124,7 +127,48 @@ pub unsafe fn attach<Q: BootIo, B: BiosIo>(
         silicon,
     })
     .map_err(AttachError::Identity)?;
-    let staged = identity::stage(&profile, inputs.firmware).map_err(|error| match error {
+    // A system without an SMBIOS identity is on no vendor's list.
+    if let Ok(DmiIdentity {
+        system_vendor: Some(vendor),
+        ..
+    }) = inputs.bios.dmi_identity()
+    {
+        profile = profile.with_system_vendor(&vendor);
+    }
+    // SAFETY: the caller's contract is RomBoot's.
+    let boot = unsafe {
+        start(
+            io,
+            profile,
+            pci.vector,
+            domain,
+            receive_entries(family),
+            inputs.firmware,
+            inputs.observations,
+            inputs.pages,
+        )
+    }?;
+    // SAFETY: forwarded from the caller.
+    Ok(unsafe { Wifi::new(boot, inputs) })
+}
+
+/// Stage `profile`'s firmware, wake the function and ROM-boot it.
+///
+/// # Safety
+/// [`attach`]'s contract, with `io` alone in reaching the stopped function.
+#[expect(clippy::too_many_arguments, reason = "each is one input of the boot")]
+pub(super) unsafe fn start<Q: BootIo>(
+    io: Q,
+    profile: Profile,
+    vector: bool,
+    domain: Arc<dyn DmaDomain>,
+    entries: u16,
+    firmware: &'static dyn Provider,
+    observations: Observations,
+    pages: &'static dyn PageSource,
+) -> Result<RomBoot<'static, Q>, AttachError> {
+    let family = profile.family();
+    let staged = identity::stage(&profile, firmware).map_err(|error| match error {
         StageError::Resource { request, error } if error.kind == ErrorKind::Missing => {
             AttachError::NoPinnedFirmware {
                 family,
@@ -141,18 +185,17 @@ pub unsafe fn attach<Q: BootIo, B: BiosIo>(
         },
     })?;
     let mut power = Power::new(io, profile);
+    if vector {
+        power = power.with_vector();
+    }
     power
         .wake(ManagementSession::NotConnected)
         .map_err(AttachError::Power)?;
-    let entries = receive_entries(family);
-    let firmware: &'static dyn Provider = inputs.firmware;
-    let boot = match family {
+    match family {
         // SAFETY: the caller's contract is RomBoot's.
-        Family::Ax200 => unsafe {
-            RomBoot::start(power, staged, inputs.pages, Some(domain), entries)
-        },
+        Family::Ax200 => unsafe { RomBoot::start(power, staged, pages, Some(domain), entries) },
         _ => {
-            let step = platform::load_step(inputs.observations.step, firmware)
+            let step = platform::load_step(observations.step, firmware)
                 .map_err(|error| AttachError::Step(format!("{error:?}")))?;
             // SAFETY: as above; no CSME session is attached to the function.
             unsafe {
@@ -160,7 +203,7 @@ pub unsafe fn attach<Q: BootIo, B: BiosIo>(
                     power,
                     staged,
                     step,
-                    inputs.pages,
+                    pages,
                     Some(domain),
                     entries,
                     ProductResetPolicy::NoIwlmei,
@@ -168,7 +211,5 @@ pub unsafe fn attach<Q: BootIo, B: BiosIo>(
             }
         }
     }
-    .map_err(AttachError::Boot)?;
-    // SAFETY: forwarded from the caller.
-    Ok(unsafe { Wifi::new(boot, inputs) })
+    .map_err(AttachError::Boot)
 }

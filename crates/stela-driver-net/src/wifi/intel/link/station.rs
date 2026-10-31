@@ -17,7 +17,9 @@ use crate::wifi::{
     connection::keeper::{self, Advertisement, Peer, Radio, Stage as Standing},
     frame::{MAX_AMPDU_BUF_EHT, Mpdu},
     intel::{
-        association::{self as commands, LinkHe, LinkState, MacState, PeerHe, PeerState},
+        association::{
+            self as commands, LinkHe, LinkState, MacState, PeerHe, PeerState, StationLink,
+        },
         command,
         firmware::Family,
         identity::Rf,
@@ -45,16 +47,30 @@ use crate::wifi::{
         external,
         fragments::Fragments,
         multi_link::Affiliation,
+        operations::ChannelDefinition,
         operations::Operations,
         phy::{self, Capabilities, Role},
         power_envelope::PowerEnvelope,
         wire::six_ghz::Selection,
     },
 };
-use alloc::collections::VecDeque;
+use alloc::{borrow::Cow, collections::VecDeque};
+use zeroize::Zeroizing;
 
+mod active_link;
+mod beacon;
+mod country;
+mod emlsr;
+mod grade;
 mod he;
+mod link_scan;
 mod reception;
+mod statistics;
+
+/// How long a signalling station sleeps at most: the coarse timers it keeps
+/// between frames, its Block Ack sessions' and its connection's, have no
+/// firmware signal of their own.
+const TIMER_TICK_US: u64 = 100_000;
 use super::super::identity::EhtLimits;
 use reception::{MAX_SESSIONS, Parent, Reception};
 mod eht;
@@ -70,12 +86,14 @@ const MANAGEMENT_TID: u8 = 15;
 const MISSED_BEACONS: u32 = 19;
 /// `IWL_MVM_MISSED_BEACONS_SINCE_RX_THOLD`.
 const MISSED_BEACONS_SINCE_RECEIVE: u32 = 4;
+/// `IWL_MLD_MISSED_BEACONS_THRESHOLD`.
+const LINK_SCAN_MISSED_BEACONS: u32 = 8;
 /// `MCC_SOURCE_WIFI`.
-const COUNTRY_FROM_WIFI: u8 = 5;
 /// How long a departure's frame may take to reach the air before the queues
 /// flush it, as `ieee80211_flush_queues` waits for it.
 const DEPARTURE_DRAIN_US: u64 = 200_000;
 const SESSION_PROTECTION_NOTIFICATION: (u8, u8) = (0xfb, 3);
+const SCAN_START_NOTIFICATION: (u8, u8) = (0xb2, 0);
 const MISSED_BEACONS_LEGACY_NOTIFICATION: (u8, u8) = (0xa2, 0);
 const MISSED_BEACONS_NOTIFICATION: (u8, u8) = (0xf6, 3);
 const TRANSMIT_RESPONSE: (u8, u8) = (0x1c, 0);
@@ -104,6 +122,10 @@ const SESSION_TIMED_OUT: u16 = 39;
 const BLOCK_ACK_ALLOCATION: u32 = 63;
 /// `IWL_UCODE_TLV_CAPA_STA_EXP_MFP_SUPPORT`.
 const EXPLICIT_MFP: u32 = 114;
+/// `IWL_UCODE_TLV_CAPA_PROTECTED_TWT`.
+const PROTECTED_TWT: u32 = 56;
+/// `MICHAEL_MIC_LEN`.
+const MICHAEL_MIC_BYTES: usize = 8;
 /// `IWL_UCODE_TLV_CAPA_COEX_HIGH_PRIO`.
 const COEX_HIGH_PRIORITY: u32 = 61;
 /// `IWL_UCODE_TLV_API_SMART_FIFO_OFFLOAD`.
@@ -129,10 +151,13 @@ enum Then {
     Key {
         pairwise: bool,
         index: u8,
+        ap: Mac,
         ticket: Box<InstallTicket>,
     },
     /// The port's commands finished: firmware rate selection may widen.
     Authorized,
+    /// Firmware answered a country update.
+    Country,
 }
 
 /// A receive Block Ack agreement the firmware is to take up or give up.
@@ -181,6 +206,23 @@ struct Key {
     index: u8,
     flags: u32,
     acknowledged: bool,
+    /// The AP on the link the key belongs to.
+    ap: Mac,
+    /// Whether firmware holds the key, which a dormant link's does not.
+    fitted: bool,
+    /// What a group key gives firmware as its link activates: the key and
+    /// the packet number its AP's frames continue from.
+    material: Option<(Zeroizing<Vec<u8>>, u64)>,
+}
+
+/// One IGTK of a link.
+struct LinkIntegrity {
+    ap: Mac,
+    index: u8,
+    flags: u32,
+    material: Zeroizing<Vec<u8>>,
+    receive: u64,
+    fitted: bool,
 }
 
 /// A data frame waiting for its queue or its queue's room.
@@ -216,8 +258,8 @@ pub(super) struct Client {
     pub(super) regulatory: Option<database::Country>,
     steps: VecDeque<Step>,
     waiting: Option<Waiting>,
-    /// The IGTKs the firmware holds, by index and flags.
-    management_keys: Vec<(u8, u32)>,
+    /// Each link's IGTKs.
+    management_keys: Vec<LinkIntegrity>,
     /// The deauthentication a departure sends before anything goes down.
     farewell: Option<Vec<u8>>,
     /// Until when the departure waits for its deauthentication.
@@ -238,7 +280,20 @@ pub(super) struct Client {
     /// A management exchange's frame awaits its TX response.
     exchange: bool,
     admitted: Option<(Ticket, Arc<AssociationContext>)>,
+    /// The active link's configuration.
     context: Option<Arc<AssociationContext>>,
+    /// The other link an MLD association made.
+    dormant: Option<Arc<AssociationContext>>,
+    /// Which of firmware's two sets of link IDs the active link holds.
+    seat: u8,
+    /// A new look at the links is due.
+    reselect: bool,
+    link_scan: link_scan::LinkScan,
+    statistics: statistics::Statistics,
+    emlsr: emlsr::Emlsr,
+    tracking: beacon::Tracking,
+    /// The radio can run EMLSR.
+    pub(super) eml_capable: bool,
     ciphers: Option<(Cipher, Cipher)>,
     management_cipher: Option<ManagementCipher>,
     keys: Vec<Key>,
@@ -252,6 +307,8 @@ pub(super) struct Client {
     /// The way down finished: the keeper retires the peer.
     left: bool,
     reported: Vec<&'static str>,
+    /// When the rules' last change comes to bear on the links.
+    grace_ends: Option<u64>,
 }
 
 impl Client {
@@ -279,6 +336,14 @@ impl Client {
             exchange: false,
             admitted: None,
             context: None,
+            dormant: None,
+            seat: 0,
+            reselect: false,
+            link_scan: link_scan::LinkScan::default(),
+            statistics: statistics::Statistics::default(),
+            emlsr: emlsr::Emlsr::default(),
+            tracking: beacon::Tracking::default(),
+            eml_capable: false,
             ciphers: None,
             management_cipher: None,
             keys: Vec::new(),
@@ -289,6 +354,7 @@ impl Client {
             leaving: false,
             left: false,
             reported: Vec::new(),
+            grace_ends: None,
         }
     }
 
@@ -335,6 +401,12 @@ impl Client {
         self.exchange = false;
         self.admitted = None;
         self.context = None;
+        self.dormant = None;
+        self.reselect = false;
+        self.link_scan = link_scan::LinkScan::default();
+        self.statistics = statistics::Statistics::default();
+        self.emlsr = emlsr::Emlsr::default();
+        self.tracking = beacon::Tracking::default();
         self.ciphers = None;
         self.management_cipher = None;
         self.keys.clear();
@@ -373,10 +445,16 @@ impl Client {
                 ticket,
                 context: Some(context),
                 links,
+                response,
                 ..
             } => {
-                if !links.is_empty() {
-                    self.unsupported("MLO links on Intel Wi-Fi");
+                if self.eml_capable {
+                    self.emlsr = emlsr::Emlsr::offered(&response.elements);
+                }
+                let mut links = links.into_iter();
+                self.dormant = links.next();
+                if links.next().is_some() {
+                    self.unsupported("a third MLO link: it stays dormant for good");
                 }
                 self.admitted = Some((ticket, context));
             }
@@ -402,6 +480,22 @@ impl RegulatoryPolicy for Admitted<'_> {
     }
     fn allow_data_tx(&mut self, channel: Channel) -> bool {
         self.allow_management_tx(channel)
+    }
+}
+
+/// The channels an association's scan listens on: it sends nothing there.
+impl scan::Policy for Admitted<'_> {
+    fn allow_receive(&mut self, channel: Channel) -> bool {
+        self.0.iter().any(|&(allowed, _)| allowed == channel)
+    }
+    fn allow_probe(&mut self, _: Channel) -> bool {
+        false
+    }
+    fn lookup_channel(&mut self, band: Band, number: u16) -> Option<Channel> {
+        self.0
+            .iter()
+            .map(|&(channel, _)| channel)
+            .find(|channel| channel.band == band && channel.number == number)
     }
 }
 
@@ -446,7 +540,12 @@ fn management(local: Mac, ap: Mac, subtype: u16, protected: bool, body: &[u8]) -
 
 impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
     /// Raise the chain for `bss`.
-    fn raise(&mut self, bss: &Bss, plan: Plan) -> Result<(), Error> {
+    fn raise(
+        &mut self,
+        bss: &Bss,
+        affiliation: Option<Affiliation>,
+        plan: Plan,
+    ) -> Result<(), Error> {
         let stage = core::mem::replace(&mut self.stage, Stage::Moving);
         let Stage::Scan(scan) = stage else {
             self.stage = stage;
@@ -455,6 +554,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         self.selected = Some(Selected {
             bss: bss.clone(),
             rates: legacy_rates(&bss.elements, bss.channel.band),
+            affiliation,
         });
         match (*scan).begin_phy_context(bss.channel) {
             Ok(phy) => {
@@ -474,6 +574,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         let now = self.clock.now_us();
         if let Some(plan) = self.client.plan.take() {
             self.limit_six_ghz_power(queue);
+            self.translate_addresses(queue);
             self.arrive(plan, now)?;
         }
         self.take_notifications(queue, now)?;
@@ -516,6 +617,17 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             }
         }
         self.run_steps(queue)?;
+        if self.client.reselect && self.client.idle() && !self.client.leaving {
+            self.client.reselect = false;
+            self.select_link(queue, now)?;
+            self.run_steps(queue)?;
+        }
+        self.run_tracking(queue, now)?;
+        self.run_steps(queue)?;
+        self.run_emlsr(queue, now)?;
+        self.run_steps(queue)?;
+        self.run_link_scan(queue, now)?;
+        self.run_steps(queue)?;
         self.send_management(queue)?;
         self.send_data(queue)
     }
@@ -523,9 +635,21 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
     /// `iwl_mvm_mld_assign_vif_chanctx`: tell firmware what a 6 GHz AP's power
     /// type and envelopes allow before the first frame to it.
     fn limit_six_ghz_power(&mut self, queue: &mut Queue<Q, B>) {
-        let Some(bss) = self.selected.as_ref().map(|selected| &selected.bss) else {
+        let Some(selected) = &self.selected else {
             return;
         };
+        if let Some(bytes) = self.six_ghz_power(queue, &selected.bss, 0) {
+            self.client.command(commands::POWER_CONSTRAINTS, bytes);
+        }
+    }
+
+    /// What firmware's link `seat` hears of `bss`, an AP on 6 GHz.
+    pub(super) fn six_ghz_power(
+        &self,
+        queue: &mut Queue<Q, B>,
+        bss: &Bss,
+        seat: u8,
+    ) -> Option<Vec<u8>> {
         let widest = self.widest(bss.channel.band);
         let flags = self
             .client
@@ -533,19 +657,13 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             .iter()
             .find(|(channel, _)| *channel == bss.channel)
             .map_or(0, |(_, flags)| *flags);
-        let (Some(_), Ok(operations)) = (
-            queue.firmware().command_version(
-                commands::POWER_CONSTRAINTS.group,
-                commands::POWER_CONSTRAINTS.opcode,
-            ),
-            Operations::parse(&bss.elements),
-        ) else {
-            return;
-        };
+        queue.firmware().command_version(
+            commands::POWER_CONSTRAINTS.group,
+            commands::POWER_CONSTRAINTS.opcode,
+        )?;
+        let operations = Operations::parse(&bss.elements).ok()?;
         let six = operations.he.as_ref().and_then(|he| he.six_ghz);
-        let Some(ap_type) = six.and_then(|six| PowerType::of((six[1] & 0x78) >> 3, flags)) else {
-            return;
-        };
+        let ap_type = PowerType::of((six?[1] & 0x78) >> 3, flags)?;
         let mut envelope = PowerEnvelope::parse(&bss.elements);
         let ap = operations
             .channel(bss.channel, phy::Mode::Eht, None)
@@ -556,8 +674,32 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             Ok(ap) => envelope.fit(&ap, &ap.narrowed_to(widest)),
             Err(_) => envelope = PowerEnvelope::none(),
         }
-        let bytes = commands::power_constraints(ap_type, &envelope);
-        self.client.command(commands::POWER_CONSTRAINTS, bytes);
+        Some(commands::power_constraints(seat, ap_type, &envelope))
+    }
+
+    /// `iwl_mld_set_wifi_gen`'s MLD case: firmware translates an MLD's
+    /// addresses only under EHT, which an AP's own capabilities turn on only
+    /// after its association response.
+    fn translate_addresses(&mut self, queue: &mut Queue<Q, B>) {
+        if self
+            .selected
+            .as_ref()
+            .is_none_or(|selected| selected.affiliation.is_none())
+        {
+            return;
+        }
+        let firmware = queue.firmware();
+        let mac = MacState {
+            address: self.address,
+            he: true,
+            eht: true,
+            aid: None,
+            high_priority: firmware.supports_capability(COEX_HIGH_PRIORITY),
+            emlsr: None,
+            protected_twt: false,
+        };
+        let bytes = commands::mac_config(version_of(firmware, commands::MAC_CONFIG), mac);
+        self.client.command(commands::MAC_CONFIG, bytes);
     }
 
     /// The chain is up: start what it was raised for, under session protection.
@@ -590,99 +732,49 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         context: &AssociationContext,
         ticket: Ticket,
     ) -> Result<(), Error> {
-        let local = self.address;
         let negotiated = context.negotiated();
         let bss = context.beacon();
-        let band = bss.channel.band;
         let aid = context.response().aid;
         let he = negotiated.he.is_some();
-        let antennas = queue.antennas();
         let definition = context.definition();
         let eht = negotiated.eht.is_some();
-        // `ieee80211_set_chanreq_ap`: wider OFDMA follows the AP's own channel.
-        let wide_ofdma = eht
-            .then(|| {
-                let vht = negotiated
-                    .local()
-                    .vht()
-                    .zip(negotiated.peer().vht())
-                    .map(|(own, ap)| (own.capability, ap.capability));
-                context
-                    .operations()
-                    .channel(bss.channel, phy::Mode::Eht, vht)
-                    .ok()
-            })
-            .flatten();
+        let commands_of_link = self.link_commands(queue, context, self.client.seat, false)?;
         let phy = if definition.width == phy::Width::Mhz20 && !eht {
             Vec::new()
         } else {
             queue
-                .phy_changed(&definition, wide_ofdma.as_ref())
+                .phy_changed(&definition, commands_of_link.wide_ofdma.as_ref())
                 .ok_or(Error::Refused("channel width"))?
         };
         let firmware = queue.firmware();
-        let link_version = firmware
-            .command_version(commands::LINK_CONFIG.group, commands::LINK_CONFIG.opcode)
-            .map_or(1, |version| version.command_version);
         let high_priority = firmware.supports_capability(COEX_HIGH_PRIORITY);
         let fifo_offloaded = firmware.supports_api(SMART_FIFO_OFFLOAD);
-        let peer_version = firmware
-            .command_version(3, 0x0a)
-            .map_or(0, |version| version.command_version);
-        let rate_shape = rate_shape(firmware)?;
-        let explicit_mfp = firmware.supports_capability(EXPLICIT_MFP);
-        let longest = if firmware.supports_capability(CHECKSUM_OFFLOAD) {
-            commands::max_amsdu(negotiated)
-        } else {
-            0
-        };
         let mac = MacState {
-            address: local,
+            address: self.address,
             he,
             eht,
             aid: None,
             high_priority,
+            emlsr: None,
+            protected_twt: protected_twt(firmware, context),
         };
         let mac_version = version_of(firmware, commands::MAC_CONFIG);
         let power_version = version_of(firmware, commands::MAC_POWER);
-        let rates = commands::rate_config(negotiated, band, antennas, rate_shape, false, longest)
-            .ok_or(Error::Refused("rates"))?;
-        let edca = negotiated.edca();
-        let link = commands::link_config(
-            link_version,
-            LinkState {
-                address: local,
-                band,
-                basic_rates: negotiated.legacy.basic,
-                short_preamble: bss.capabilities & (1 << 5) != 0,
-                short_slot: band != Band::Ghz2 || bss.capabilities & (1 << 10) != 0,
-                protection: commands::protection(context),
-                width: negotiated.width,
-                qos: negotiated.wmm.is_some(),
-                edca: &edca,
-                beacon_interval: bss.beacon_interval,
-                dtim_period: context.dtim_period(),
-                he: link_he(context),
-            },
-        );
-        let peer = commands::station_config(
-            peer_version,
-            peer_state(context, explicit_mfp, self.client.port_open),
-        );
         let client = &mut self.client;
         for (id, bytes) in phy {
             client.command(id, bytes);
         }
         client.command(commands::MAC_CONFIG, commands::mac_config(mac_version, mac));
-        client.command(commands::LINK_CONFIG, link);
-        client.command(commands::RATE_CONFIG, rates);
-        client.command(commands::STATION_CONFIG, peer);
+        client.command(commands::LINK_CONFIG, commands_of_link.link);
+        client.command(commands::RATE_CONFIG, commands_of_link.rates);
+        client.command(commands::STATION_CONFIG, commands_of_link.peer);
         client.command(
             commands::MAC_CONFIG,
             commands::mac_config(
                 mac_version,
                 MacState {
                     aid: Some(aid),
+                    emlsr: client.emlsr.transition(),
                     ..mac
                 },
             ),
@@ -733,7 +825,8 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                 // SAFETY: as above.
                 Step::Queue { tid } => unsafe {
                     let mode = self.client.context.as_ref().map(|c| c.negotiated().mode);
-                    queue.add_queue(*tid, mode.unwrap_or(phy::Mode::Legacy), pages)
+                    let stations = self.client.stations();
+                    queue.add_queue(*tid, mode.unwrap_or(phy::Mode::Legacy), stations, pages)
                 },
                 Step::BlockAck(agreement) => {
                     let (tid, id) = (
@@ -745,13 +838,15 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                             tid,
                             agreement.session.start_sequence(),
                             agreement.session.window(),
+                            self.client.stations(),
                         )
                     } else {
                         let version = queue
                             .firmware()
                             .command_version(5, 0x16)
                             .map_or(1, |version| version.command_version);
-                        commands::remove_block_ack(version, id.unwrap_or(0), tid)
+                        let stations = self.client.stations();
+                        commands::remove_block_ack(version, id.unwrap_or(0), tid, stations)
                     };
                     // SAFETY: as above.
                     unsafe { queue.submit(commands::BLOCK_ACK_ALLOCATION, &bytes, pages) }
@@ -803,19 +898,25 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             Then::Key {
                 pairwise,
                 index,
+                ap,
                 ticket,
             } => {
                 let key = client
                     .keys
                     .iter_mut()
-                    .find(|key| key.pairwise == pairwise && key.index == index)
+                    .find(|key| key.pairwise == pairwise && key.index == index && key.ap == ap)
                     .ok_or(Error::Refused("key"))?;
                 key.slot
                     .complete_install(*ticket, InstallOutcome::Accepted)
                     .map_err(Error::Key)?;
                 key.acknowledged = true;
             }
-            Then::Authorized => client.port_open = true,
+            Then::Authorized => {
+                client.port_open = true;
+                let now = self.clock.now_us();
+                client.link_authorized(now);
+            }
+            Then::Country => self.country_answered(queue, &response)?,
         }
         Ok(())
     }
@@ -850,8 +951,25 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
     ) -> Result<(), Error> {
         let key_index = normalized.key_index();
         let mut frame = normalized.into_frame();
-        let header = frame.header();
+        if self.hear_on_link_scan(&frame) || self.client.beacon_heard(&frame, now) {
+            return Ok(());
+        }
         let client = &mut self.client;
+        // The station's data paths take a frame's MLD view themselves.
+        if frame.header().control & 12 == 0
+            && let Some(view) =
+                client
+                    .station
+                    .mld_view(&frame)
+                    .ok()
+                    .and_then(|(view, _)| match view {
+                        Cow::Owned(view) => Some(view),
+                        Cow::Borrowed(_) => None,
+                    })
+        {
+            frame = view;
+        }
+        let header = frame.header();
         let mut policy = Admitted(&client.channels);
         if header.control & 12 == 0 {
             if header.protected() {
@@ -902,6 +1020,10 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             client.act(action);
             return Ok(());
         }
+        let seat = metadata.status.station_id();
+        if header.control & 12 == 8 && metadata.mac.amsdu_index() <= 1 {
+            client.count_mpdus(seat.unwrap_or(client.seat), false, 1, now);
+        }
         if header.control & 12 != 8 || !client.port_ready() || !header.data_present() {
             return Ok(());
         }
@@ -909,14 +1031,29 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             // The firmware decrypted the frame under the key of this index,
             // which only this client installed.
             let multicast = header.receiver.is_multicast();
+            // Each link keeps its group keys, under indices that may match.
+            let link = seat
+                .and_then(|seat| client.context_at(seat))
+                .map(|link| link.bssid());
             let installed = client
                 .keys
                 .iter()
                 .filter(|key| key.pairwise != multicast && Some(key.index) == key_index)
-                .find_map(|key| key.slot.installed());
-            let Some(key) = installed else {
+                .filter(|key| key.fitted && (!multicast || link.is_none_or(|ap| key.ap == ap)))
+                .find_map(|key| Some((key.slot.installed()?, key.slot.replays(&frame))));
+            let Some((key, replayed)) = installed else {
                 return Ok(());
             };
+            // Firmware's Michael check failed: nothing of it is the AP's.
+            if frame.security.tkip_mic_error {
+                if !replayed {
+                    let pairwise = !multicast;
+                    client
+                        .events
+                        .push_back(keeper::Event::MichaelFailure { pairwise });
+                }
+                return Ok(());
+            }
             frame.security.key = Some(key);
             frame.security.integrity = Integrity::Verified;
         }
@@ -1022,13 +1159,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
     /// Firmware notifications beside the frames.
     fn take_notifications(&mut self, queue: &mut Queue<Q, B>, now: u64) -> Result<(), Error> {
         while let Some(update) = queue.take_country_update() {
-            // `iwl_mvm_rx_chub_update_mcc` ignores what the air tells an
-            // associated station. Anything else keeps the applied rules.
-            let associated = self.client.station.association_epoch().is_some();
-            if !(associated && update.raw.get(2) == Some(&COUNTRY_FROM_WIFI)) {
-                self.client
-                    .unsupported("a firmware country update: the applied rules stay");
-            }
+            self.country_update(&update.raw);
         }
         while let Some(notification) = queue.take_other_notification() {
             let raw = &notification.raw;
@@ -1057,6 +1188,9 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                     if queue.reclaim(queue_id, next).is_err() {
                         self.client
                             .unsupported("a TX response past what is in flight");
+                    }
+                    if response.ra_tid & 0xf < 8 {
+                        self.client.count_mpdus(response.ra_tid >> 4, true, 1, now);
                     }
                     if queue.queue_tid(queue_id) == Some(MANAGEMENT_TID) && self.client.exchange {
                         self.client.exchange = false;
@@ -1097,6 +1231,13 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                                 .unsupported("a Block Ack past what is in flight");
                         }
                     }
+                    if let (Some(&station), Some(&[low, high])) = (
+                        raw.get(4),
+                        raw.get(14..16).and_then(|txed| txed.first_chunk()),
+                    ) {
+                        let txed = u16::from_le_bytes([low, high]).into();
+                        self.client.count_mpdus(station, true, txed, now);
+                    }
                 }
                 RATE_NOTIFICATION
                     if word(4).is_some_and(|flags| flags & RATE_NOTIFICATION_AMSDU != 0) =>
@@ -1126,8 +1267,60 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                     let action = self.client.station.disconnect().map_err(Error::Station)?;
                     self.client.act(action);
                 }
+                MISSED_BEACONS_LEGACY_NOTIFICATION | MISSED_BEACONS_NOTIFICATION
+                    if self.client.emlsr.active =>
+                {
+                    let missed = word(8).unwrap_or(0);
+                    let other = word(16).unwrap_or(0);
+                    let link = word(0).unwrap_or(u32::from(self.client.seat)) as u8;
+                    self.client.emlsr_missed_beacons(link, missed, other);
+                }
+                MISSED_BEACONS_LEGACY_NOTIFICATION | MISSED_BEACONS_NOTIFICATION
+                    if word(4).is_some_and(|missed| missed > LINK_SCAN_MISSED_BEACONS) =>
+                {
+                    self.client.ask_link_scan(now);
+                }
+                emlsr::MODE_NOTIFICATION if word(0) == Some(emlsr::RECOMMEND_LEAVE) => {
+                    let seat = self.client.seat;
+                    self.client.emlsr.ask_exit(emlsr::Exit::Firmware, seat);
+                }
+                emlsr::TRANSITION_FAILED_NOTIFICATION if self.client.emlsr.active => {
+                    let (link, activating) = (word(0).unwrap_or(0), word(4).unwrap_or(0));
+                    if activating != 0 {
+                        self.client
+                            .emlsr
+                            .ask_exit(emlsr::Exit::FailedEntry, link as u8);
+                    } else if !self.client.leaving {
+                        self.client.events.push_back(keeper::Event::ConnectionLost);
+                        let action = self.client.station.disconnect().map_err(Error::Station)?;
+                        self.client.act(action);
+                    }
+                }
+                beacon::SWITCH_START_NOTIFICATION => {
+                    self.client.switch_started(word(0).unwrap_or(0));
+                }
+                beacon::SWITCH_ERROR_NOTIFICATION if word(4).is_some_and(beacon::switch_failed) => {
+                    self.client.tracking.drop_connection();
+                }
+                emlsr::BLUETOOTH_NOTIFICATION => {
+                    let active = raw.iter().any(|&byte| byte != 0);
+                    self.client.bluetooth_changed(active, now);
+                }
+                SCAN_START_NOTIFICATION => self.client.link_scan_started(now),
+                statistics::OPERATIONAL_NOTIFICATION => {
+                    let version = queue
+                        .firmware()
+                        .command_version(0x10, 0)
+                        .map_or(3, |version| version.notification_version);
+                    self.client.statistics_arrived(raw, version, now);
+                }
                 _ => {}
             }
+        }
+        // After its start, which came first.
+        while let Some(end) = queue.take_scan_completion() {
+            self.client
+                .link_scan_finished(end.raw.get(6).copied().unwrap_or(0))?;
         }
         Ok(())
     }
@@ -1146,7 +1339,8 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
 
     /// Management frames, once session protection holds the channel for them.
     fn send_management(&mut self, queue: &mut Queue<Q, B>) -> Result<(), Error> {
-        if self.client.outbox.is_empty() {
+        if self.client.outbox.is_empty() || (self.client.tracking.silent() && !self.client.leaving)
+        {
             return Ok(());
         }
         let associated = self.client.station.phase() == Peering::Associated;
@@ -1193,6 +1387,9 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
 
     /// Data frames onto their TIDs' queues, each adding its queue first.
     fn send_data(&mut self, queue: &mut Queue<Q, B>) -> Result<(), Error> {
+        if self.client.tracking.silent() {
+            return Ok(());
+        }
         let antennas = queue.antennas();
         for tid in 0..16u8 {
             if self.client.held[usize::from(tid)].is_empty() {
@@ -1288,17 +1485,26 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         if client.held[queue].len() >= MAX_HELD {
             client.held[queue].pop_front();
         }
+        let encrypted = matches!(plan.protection(), Protection::Firmware { .. });
+        let mut mpdu = plan.plaintext_mpdu().to_vec();
+        // `IEEE80211_KEY_FLAG_PUT_MIC_SPACE`: firmware writes Michael's MIC.
+        if encrypted && matches!(client.ciphers, Some((Cipher::Tkip, _))) {
+            mpdu.resize(mpdu.len() + MICHAEL_MIC_BYTES, 0);
+        }
         client.held[queue].push_back(Held {
-            mpdu: plan.plaintext_mpdu().to_vec(),
-            encrypted: matches!(plan.protection(), Protection::Firmware { .. }),
+            mpdu,
+            encrypted,
             control_port: plan.control_port(),
         });
         Ok(())
     }
 
-    /// `iwl_mvm_mld_set_key` for the association's data and group keys.
+    /// `iwl_mvm_mld_set_key` for the association's data key, or a group key
+    /// of the link of `ap`. A dormant link's stands installed without
+    /// reaching firmware, as mac80211 holds it back until the link activates.
     fn install(
         &mut self,
+        ap: Mac,
         pairwise: bool,
         index: u8,
         material: &[u8],
@@ -1314,10 +1520,12 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             .station
             .pairwise_peer()
             .ok_or(Error::Refused("no peer"))?;
+        let seat = client.seat_of(ap);
+        let fitted = pairwise || seat.is_some();
         let scope = if pairwise {
             KeyScope::Pairwise(peer)
         } else {
-            KeyScope::Group(peer)
+            KeyScope::Group(ap)
         };
         // SAFETY: the counter gives each key of the adapter its own slot.
         let mut slot = unsafe { KeySlot::new(client.next_slot) }.map_err(Error::Key)?;
@@ -1331,32 +1539,50 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             .begin_install(index, cipher, material, receive, scope, transmit)
             .map_err(Error::Key)?;
         let identity = ticket.identity();
-        let bytes = commands::add_key(index, flags, material, receive.counters()[0])
+        let counter = receive.counters()[0];
+        let stations = match seat {
+            Some(seat) if !pairwise => 1 << seat,
+            _ => client.stations(),
+        };
+        let bytes = commands::add_key(index, flags, material, counter, stations)
             .ok_or(Error::Refused("key material"))?;
         if let Some(old) = client
             .keys
             .iter()
-            .position(|key| key.pairwise == pairwise && key.index == index)
+            .position(|key| key.pairwise == pairwise && key.index == index && key.ap == ap)
         {
             let old = client.keys.remove(old);
-            client.command(
-                commands::SECURITY_KEY,
-                commands::remove_key(old.index, old.flags),
-            );
+            if old.fitted {
+                client.command(
+                    commands::SECURITY_KEY,
+                    commands::remove_key(old.index, old.flags, stations),
+                );
+            }
+        }
+        if !fitted {
+            slot.complete_install(ticket, InstallOutcome::Accepted)
+                .map_err(Error::Key)?;
         }
         client.keys.push(Key {
             slot,
             pairwise,
             index,
             flags,
-            acknowledged: false,
+            acknowledged: !fitted,
+            ap,
+            fitted,
+            material: (!pairwise).then(|| (Zeroizing::new(material.to_vec()), counter)),
         });
+        if !fitted {
+            return Ok(identity);
+        }
         client.steps.push_back(Step::Command {
             id: commands::SECURITY_KEY,
             bytes,
             then: Then::Key {
                 pairwise,
                 index,
+                ap,
                 ticket: Box::new(ticket),
             },
         });
@@ -1365,7 +1591,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
 
     /// The chain's way down, once its last commands finished.
     pub(super) fn leave(&mut self, queue: &mut Queue<Q, B>) -> Result<bool, Error> {
-        if !self.client.leaving || !self.client.idle() {
+        if !self.client.leaving || !self.client.idle() || self.client.link_scanning() {
             return Ok(false);
         }
         if let Some(frame) = self.client.farewell.take() {
@@ -1386,6 +1612,18 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             }
             self.client.draining = None;
         }
+        self.client.stop_statistics();
+        // The chain goes down on the IDs it came up with.
+        if self.client.emlsr.active {
+            self.lower_second(queue, 0)?;
+            self.run_steps(queue)?;
+            return Ok(false);
+        }
+        if self.client.seat != 0 {
+            self.switch_link(queue)?;
+            self.run_steps(queue)?;
+            return Ok(false);
+        }
         if self.client.session != Session::Off {
             self.client.session = Session::Off;
             self.client.command(
@@ -1402,18 +1640,23 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         for (id, tid) in self.client.reception.take_sessions() {
             self.client.command(
                 commands::BLOCK_ACK_ALLOCATION,
-                commands::remove_block_ack(version, id, tid),
+                commands::remove_block_ack(version, id, tid, self.client.stations()),
             );
         }
-        for key in core::mem::take(&mut self.client.keys) {
+        let stations = self.client.stations();
+        let keys = core::mem::take(&mut self.client.keys);
+        for key in keys.into_iter().filter(|key| key.fitted) {
             self.client.command(
                 commands::SECURITY_KEY,
-                commands::remove_key(key.index, key.flags),
+                commands::remove_key(key.index, key.flags, stations),
             );
         }
-        for (index, flags) in core::mem::take(&mut self.client.management_keys) {
-            self.client
-                .command(commands::SECURITY_KEY, commands::remove_key(index, flags));
+        let keys = core::mem::take(&mut self.client.management_keys);
+        for key in keys.into_iter().filter(|key| key.fitted) {
+            self.client.command(
+                commands::SECURITY_KEY,
+                commands::remove_key(key.index, key.flags, stations),
+            );
         }
         if !self.client.idle() {
             self.run_steps(queue)?;
@@ -1473,10 +1716,17 @@ fn version_of(firmware: &crate::wifi::intel::firmware::Firmware<'_>, id: command
         .map_or(0, |version| version.command_version)
 }
 
-fn peer_state(context: &AssociationContext, explicit_mfp: bool, authorized: bool) -> PeerState {
+fn peer_state(
+    context: &AssociationContext,
+    explicit_mfp: bool,
+    authorized: bool,
+    seat: u8,
+) -> PeerState {
     let negotiated = context.negotiated();
     PeerState {
-        address: context.bssid(),
+        seat,
+        address: context.peer(),
+        link: context.bssid(),
         aid: context.response().aid,
         mfp: explicit_mfp && (context.pmf().is_some() || !authorized),
         mimo: negotiated.rx_nss > 1,
@@ -1552,6 +1802,16 @@ fn capability_elements(band: Band, device: Device, widest: phy::Width) -> Vec<u8
     // `ieee80211_add_wmm_info_ie`, without U-APSD.
     elements.extend_from_slice(&[221, 7, 0, 0x50, 0xf2, 2, 0, 1, 0]);
     elements
+}
+
+/// `bss_conf->twt_protected`: `ieee80211_assoc_config_link` reads the response.
+fn protected_twt(
+    firmware: &crate::wifi::intel::firmware::Firmware<'_>,
+    context: &AssociationContext,
+) -> bool {
+    context.negotiated().he.is_some()
+        && firmware.supports_capability(PROTECTED_TWT)
+        && commands::twt_protected(&context.response().elements)
 }
 
 /// The rates and capabilities a probe names, `ieee80211_build_preq_ies_band`.
@@ -1710,6 +1970,15 @@ impl<Q: BootIo, B: BiosIo> Link for Wifi<Q, B> {
     fn carrier(&mut self) -> bool {
         self.client.port_open
     }
+    /// A station signals once its port is open. Until then the handshake's
+    /// timers run on a caller that keeps polling.
+    fn signals(&self) -> bool {
+        self.vector && self.client.port_open
+    }
+    fn due_us(&self) -> Option<u64> {
+        self.signals()
+            .then(|| self.clock.now_us().saturating_add(TIMER_TICK_US))
+    }
     fn transmit(&mut self, frame: &[u8]) -> Result<(), LinkError> {
         if !self.client.port_open {
             return Err(LinkError::NoCarrier);
@@ -1737,14 +2006,29 @@ impl<Q: BootIo, B: BiosIo> Radio for Wifi<Q, B> {
     }
 
     fn service(&mut self) -> Result<(), Error> {
-        self.poll();
-        if let Some(error) = &self.error
-            && !self.reported
-        {
-            self.reported = true;
-            return Err(error.clone());
+        if self.error.is_none() && self.died() {
+            self.error = Some(Error::FirmwareDied);
         }
-        self.serve()
+        self.poll();
+        let served = if self.error.is_none() {
+            self.serve()
+        } else {
+            Ok(())
+        };
+        // Firmware that stopped answering is as dead as firmware that says so.
+        if let Err(error @ Error::Timeout(_)) = &served {
+            self.error = Some(error.clone());
+        }
+        let Some(error) = self.error.clone() else {
+            return served;
+        };
+        let restarted = self.restart();
+        if self.reported && !restarted {
+            return Ok(());
+        }
+        self.reported = !restarted;
+        self.client.events.push_back(keeper::Event::FirmwareLost);
+        Err(error)
     }
 
     fn take_event(&mut self) -> Option<keeper::Event> {
@@ -1798,6 +2082,18 @@ impl<Q: BootIo, B: BiosIo> Radio for Wifi<Q, B> {
             )
     }
 
+    fn six_ghz_links(&self) -> bool {
+        true
+    }
+
+    fn eml_capabilities(&self) -> u16 {
+        if self.client.eml_capable {
+            emlsr::CAPABILITIES
+        } else {
+            0
+        }
+    }
+
     fn supported_channels(&self, band: Band) -> &'static [u8] {
         match band {
             Band::Ghz2 => &[1, 14],
@@ -1821,7 +2117,7 @@ impl<Q: BootIo, B: BiosIo> Radio for Wifi<Q, B> {
             capabilities,
             elements,
             he_source_maps: he::maps(self.chains.0 & self.chains.1 == 3),
-            multi_link: Some(false),
+            multi_link: Some(self.eht.is_some()),
         })
     }
 
@@ -1893,7 +2189,8 @@ impl<Q: BootIo, B: BiosIo> Radio for Wifi<Q, B> {
     fn join(&mut self, handle: usize, join: Join, _: ()) -> Result<(), Error> {
         let observed = self.observed(handle)?;
         let bss = observed.bss().clone();
-        self.raise(&bss, Plan::Join { join, observed })
+        let affiliation = join.request.multi_link().map(|setup| setup.association);
+        self.raise(&bss, affiliation, Plan::Join { join, observed })
     }
 
     fn begin_external_authentication(
@@ -1903,9 +2200,6 @@ impl<Q: BootIo, B: BiosIo> Radio for Wifi<Q, B> {
         multi_link: Option<Affiliation>,
         budget_us: u64,
     ) -> Result<Arc<external::Session>, Error> {
-        if multi_link.is_some() {
-            return Err(Error::Unsupported("MLO on Intel Wi-Fi"));
-        }
         let observed = self.observed(handle)?;
         let bss = observed.bss().clone();
         let now = self.clock.now_us();
@@ -1918,14 +2212,14 @@ impl<Q: BootIo, B: BiosIo> Radio for Wifi<Q, B> {
                     bssid: bss.bssid,
                     channel: bss.channel,
                     ssid: bss.ssid.clone().unwrap_or_default(),
-                    multi_link: None,
+                    multi_link,
                 },
                 now,
                 budget_us,
                 &mut policy,
             )
             .map_err(Error::Station)?;
-        self.raise(&bss, Plan::Exchange)?;
+        self.raise(&bss, multi_link, Plan::Exchange)?;
         Ok(session)
     }
 
@@ -1934,6 +2228,7 @@ impl<Q: BootIo, B: BiosIo> Radio for Wifi<Q, B> {
         handle: usize,
         selection: Selection,
         _: (),
+        multi_link: Option<Affiliation>,
         budget_us: u64,
     ) -> Result<Arc<external::Session>, Error> {
         let observed = self.observed(handle)?;
@@ -1950,13 +2245,13 @@ impl<Q: BootIo, B: BiosIo> Radio for Wifi<Q, B> {
         }
         let session = client
             .station
-            .prepare_six_ghz_authentication(observed, selection, local, None, now, budget_us)
+            .prepare_six_ghz_authentication(observed, selection, local, multi_link, now, budget_us)
             .map_err(Error::Station)?;
         client
             .station
             .commit_six_ghz_authentication(session.clone(), now)
             .map_err(Error::Station)?;
-        self.raise(&bss, Plan::Exchange)?;
+        self.raise(&bss, multi_link, Plan::Exchange)?;
         Ok(session)
     }
 
@@ -2025,17 +2320,33 @@ impl<Q: BootIo, B: BiosIo> Radio for Wifi<Q, B> {
         material: &[u8],
         receive: ReplaySeed,
     ) -> Result<KeyIdentity, Error> {
-        self.install(pairwise, index, material, receive)
+        let ap = self.client.setup_ap().ok_or(Error::Refused("no peer"))?;
+        self.install(ap, pairwise, index, material, receive)
     }
 
     fn install_link_key(
         &mut self,
-        _: u8,
-        _: u8,
-        _: &[u8],
-        _: ReplaySeed,
-    ) -> Result<KeyIdentity, Error> {
-        Err(Error::Unsupported("MLO on Intel Wi-Fi"))
+        link_id: u8,
+        index: u8,
+        material: &[u8],
+        receive: ReplaySeed,
+    ) -> Result<(), Error> {
+        let ap = self.client.link_ap(link_id)?;
+        self.install(ap, false, index, material, receive)
+            .map(|_| ())
+    }
+
+    fn install_link_management_key(
+        &mut self,
+        link_id: u8,
+        index: u8,
+        material: &[u8],
+        receive: PacketNumber,
+    ) -> Result<bool, Error> {
+        let client = &mut self.client;
+        let ap = client.link_ap(link_id)?;
+        client.keep_management_key(ap, index, material, receive)?;
+        Ok(true)
     }
 
     unsafe fn install_management_key(
@@ -2049,15 +2360,8 @@ impl<Q: BootIo, B: BiosIo> Radio for Wifi<Q, B> {
         if !client.keys_settled() {
             return Err(Error::Pending);
         }
-        let flags = commands::management_key_flags(
-            client
-                .management_cipher
-                .ok_or(Error::Refused("no management cipher"))?,
-        );
-        let bytes = commands::add_key(index, flags, material, receive.value())
-            .ok_or(Error::Refused("key material"))?;
-        client.command(commands::SECURITY_KEY, bytes);
-        client.management_keys.push((index, flags));
+        let ap = client.setup_ap().ok_or(Error::Refused("no peer"))?;
+        client.keep_management_key(ap, index, material, receive)?;
         Ok(Arc::new(ManagementKey { index }))
     }
 
@@ -2071,14 +2375,8 @@ impl<Q: BootIo, B: BiosIo> Radio for Wifi<Q, B> {
         // SAFETY: forwarded from the keeper.
         let installed = unsafe { self.install_management_key(0, index, material, receive) }?;
         let client = &mut self.client;
-        if let Some(old) = client
-            .management_keys
-            .iter()
-            .position(|key| key.0 == session.index)
-        {
-            let (index, flags) = client.management_keys.remove(old);
-            client.command(commands::SECURITY_KEY, commands::remove_key(index, flags));
-        }
+        let ap = client.setup_ap().ok_or(Error::Refused("no peer"))?;
+        client.forget_management_key(ap, session.index);
         Ok(installed)
     }
 
@@ -2093,13 +2391,19 @@ impl<Q: BootIo, B: BiosIo> Radio for Wifi<Q, B> {
             .iter()
             .find(|key| key.pairwise)
             .ok_or(Error::Refused("no pairwise key"))?;
-        let gtk = client
-            .keys
-            .iter()
-            .rev()
-            .find(|key| !key.pairwise)
-            .ok_or(Error::Refused("no group key"))?;
-        let links = [(&ptk.slot, &gtk.slot)];
+        let links = client
+            .station
+            .on_air()
+            .map(|link| {
+                let gtk = client
+                    .keys
+                    .iter()
+                    .rev()
+                    .find(|key| !key.pairwise && key.ap == link.ap)
+                    .ok_or(Error::Refused("no group key"))?;
+                Ok((&ptk.slot, &gtk.slot))
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
         if client.station.requires_protected_management() {
             client
                 .station
@@ -2138,13 +2442,13 @@ impl<Q: BootIo, B: BiosIo> Radio for Wifi<Q, B> {
             );
             return Ok(());
         }
-        if let (Some(ap), true) = (
-            client.station.pairwise_peer(),
+        if let (Ok((local, ap)), true) = (
+            client.station.addresses(),
             matches!(self.stage, Stage::Ready(_)),
         ) {
             let protected = client.station.protected_port_authorized();
             client.farewell = Some(management(
-                self.address,
+                local,
                 ap,
                 0xc0,
                 protected,
@@ -2197,16 +2501,21 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             0
         };
         let mac_version = version_of(firmware, commands::MAC_CONFIG);
-        let rates = commands::rate_config(negotiated, band, antennas, rate_shape, true, longest)
-            .ok_or(Error::Refused("rates"))?;
+        let seat = self.client.seat;
+        let rates =
+            commands::rate_config(negotiated, band, antennas, rate_shape, true, longest, seat)
+                .ok_or(Error::Refused("rates"))?;
         let mac = MacState {
             address: self.address,
             he: negotiated.he.is_some(),
             eht: negotiated.eht.is_some(),
             aid: Some(context.response().aid),
             high_priority: false,
+            emlsr: self.client.emlsr.transition(),
+            protected_twt: protected_twt(firmware, context),
         };
-        let peer = commands::station_config(peer_version, peer_state(context, explicit_mfp, true));
+        let peer =
+            commands::station_config(peer_version, peer_state(context, explicit_mfp, true, seat));
         let client = &mut self.client;
         client.command(commands::BEACON_FILTER, commands::beacon_filter(filter));
         client.command(commands::MAC_CONFIG, commands::mac_config(mac_version, mac));
@@ -2221,6 +2530,76 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
 }
 
 impl Client {
+    /// The setup link's AP.
+    fn setup_ap(&self) -> Option<Mac> {
+        self.station.on_air().next().map(|link| link.ap)
+    }
+
+    /// The AP on the MLD association's link `link_id`.
+    fn link_ap(&self, link_id: u8) -> Result<Mac, Error> {
+        self.station
+            .link_contexts()
+            .iter()
+            .find(|context| {
+                context
+                    .affiliation()
+                    .is_some_and(|link| link.link_id == link_id)
+            })
+            .map(|context| context.bssid())
+            .ok_or(Error::Refused("no such link"))
+    }
+
+    fn forget_management_key(&mut self, ap: Mac, index: u8) {
+        let stations = self
+            .seat_of(ap)
+            .map_or_else(|| self.stations(), |seat| 1 << seat);
+        let old = self
+            .management_keys
+            .iter()
+            .position(|key| key.ap == ap && key.index == index);
+        if let Some(old) = old {
+            let old = self.management_keys.remove(old);
+            if old.fitted {
+                self.command(
+                    commands::SECURITY_KEY,
+                    commands::remove_key(old.index, old.flags, stations),
+                );
+            }
+        }
+    }
+
+    /// An IGTK of the link of `ap`, which firmware takes while that link is
+    /// active.
+    fn keep_management_key(
+        &mut self,
+        ap: Mac,
+        index: u8,
+        material: &[u8],
+        receive: PacketNumber,
+    ) -> Result<(), Error> {
+        let flags = commands::management_key_flags(
+            self.management_cipher
+                .ok_or(Error::Refused("no management cipher"))?,
+        );
+        let seat = self.seat_of(ap);
+        let fitted = seat.is_some();
+        self.forget_management_key(ap, index);
+        if let Some(seat) = seat {
+            let bytes = commands::add_key(index, flags, material, receive.value(), 1 << seat)
+                .ok_or(Error::Refused("key material"))?;
+            self.command(commands::SECURITY_KEY, bytes);
+        }
+        self.management_keys.push(LinkIntegrity {
+            ap,
+            index,
+            flags,
+            material: Zeroizing::new(material.to_vec()),
+            receive: receive.value(),
+            fitted,
+        });
+        Ok(())
+    }
+
     fn port_ready(&self) -> bool {
         self.context.is_some()
     }

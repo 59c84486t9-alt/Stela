@@ -176,6 +176,56 @@ impl<'a, Q: BootIo, B: BiosIo, O: CountryIo + OsPolicy> Ax200Phy<'a, Q, B, O> {
         let chains = self.commands.get(1).cloned();
         Some(core::iter::once(modified).chain(chains).collect())
     }
+    /// `iwl_mld_phy_fw_action`: the PHY context `seat` of a link on
+    /// `definition`, added and then moved as `iwl_mvm_phy_ctxt_changed` moves
+    /// the first.
+    pub(in crate::wifi::intel::boot) fn context(
+        &mut self,
+        seat: u8,
+        definition: &ChannelDefinition,
+        wide_ofdma: Option<&ChannelDefinition>,
+    ) -> Option<Vec<PhyCommand>> {
+        let chains = self.scan.mac.initialized_nvm().information.rx_chains;
+        let mode = self
+            .scan
+            .mac
+            .country
+            .board
+            .scan
+            .mcc
+            .setup
+            .options
+            .power_mode;
+        let firmware = &self.boot().firmware;
+        let ultra_high_band = firmware.supports_capability(48);
+        let version = firmware
+            .command_version(PHY.wire().group, PHY.opcode)?
+            .command_version;
+        let mut commands = configuration(firmware, chains, definition.control, mode).ok()?;
+        let moved = modified(
+            commands.first()?,
+            definition,
+            wide_ofdma,
+            version,
+            ultra_high_band,
+        )?;
+        commands.push(moved);
+        for command in &mut commands {
+            command.bytes[..4].copy_from_slice(&u32::from(seat).to_le_bytes());
+        }
+        Some(commands)
+    }
+    /// The removal of the context `seat` of a link on `definition`.
+    pub(in crate::wifi::intel::boot) fn context_removal(
+        &mut self,
+        seat: u8,
+        definition: &ChannelDefinition,
+    ) -> Option<PhyCommand> {
+        let mut command = self.context(seat, definition, None)?.swap_remove(0);
+        command.kind = PhyCommandKind::Remove;
+        command.bytes[4..8].copy_from_slice(&3u32.to_le_bytes());
+        Some(command)
+    }
     pub fn take_other_notification(&mut self) -> Option<FirmwareNotification> {
         self.scan.take_other_notification()
     }

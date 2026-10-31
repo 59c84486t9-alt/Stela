@@ -53,6 +53,7 @@ fn feature(mut bytes: Vec<u8>, kind: u32, bit: u32, enabled: bool) -> Vec<u8> {
 fn parameters() -> LegacyPeer {
     LegacyPeer {
         address: Mac([2, 3, 4, 5, 6, 7]),
+        link: Mac([2, 3, 4, 5, 6, 7]),
         beacon_interval_tu: 100,
         rates: 0xfff,
     }

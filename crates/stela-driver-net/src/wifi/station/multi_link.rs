@@ -151,7 +151,7 @@ impl Station {
     /// The station's and the AP's addresses in the frames of the current
     /// association: the setup link's until the association is made, then the
     /// MLDs' of a multi-link one, as mac80211 addresses its frames.
-    pub(super) fn addresses(&self) -> Result<(Mac, Mac), Error> {
+    pub fn addresses(&self) -> Result<(Mac, Mac), Error> {
         let join = self.join.as_ref().ok_or(Error::NotAssociated)?;
         Ok(match &self.context {
             Some(context) if matches!(self.phase, Phase::Configuring | Phase::Associated) => {
