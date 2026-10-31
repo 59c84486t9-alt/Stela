@@ -27,6 +27,43 @@ fn function_client(name: &str, phandle_value: u32, provider: u32) -> Node {
 }
 
 #[test]
+fn a_name_matched_client_needs_the_parent_it_waits_for() {
+    let audio = |parent: u32| {
+        let mut client = typed(node("dp-audio0", None, vec![]), b"dp-audio0\0");
+        client
+            .set_property("dma-parent", parent.to_le_bytes().to_vec())
+            .unwrap();
+        client
+    };
+    let tree = |parent, provider: Option<&[u8]>| DeviceTree {
+        root: node(
+            "",
+            None,
+            vec![node(
+                "arm-io",
+                None,
+                vec![
+                    phandle(node("sio-dma", provider, vec![]), 7),
+                    audio(parent),
+                    typed(node("dp-audio1", None, vec![]), b"dp-audio1\0"),
+                ],
+            )],
+        ),
+    };
+    let mut absent = tree(7, None);
+    let mut hidden = Vec::new();
+    hide_unprovided_clients(&mut absent, &mut hidden);
+    assert_eq!(hidden, ["/arm-io/dp-audio0", "/arm-io/dp-audio1"]);
+    assert!(absent.property("/arm-io/dp-audio0", IGNORE).is_some());
+
+    let mut present = tree(7, Some(b"sio-dma,t8112\0"));
+    let mut hidden = Vec::new();
+    hide_unprovided_clients(&mut present, &mut hidden);
+    assert_eq!(hidden, ["/arm-io/dp-audio1"]);
+    assert!(present.property("/arm-io/dp-audio0", IGNORE).is_none());
+}
+
+#[test]
 fn name_matched_clients_require_an_admitted_function_provider() {
     let tree = |provider| DeviceTree {
         root: node(
@@ -327,6 +364,49 @@ fn identity_retirement_requires_a_hidden_ledger_entry_and_preserves_structural_m
     let prior = ledger.clone();
     retire_hidden_service_identities(&mut tree, &ledger);
     assert_eq!(ledger, prior);
+}
+
+#[test]
+fn a_hidden_controller_binds_no_driver_and_keeps_no_client_waiting() {
+    let parent = |name, phandle: u32| {
+        let mut client = node(name, Some(b"usbc,cd3217\0"), vec![]);
+        client
+            .set_property(ACIO_PARENT, phandle.to_le_bytes().to_vec())
+            .unwrap();
+        client
+    };
+    let mut tree = DeviceTree {
+        root: node(
+            "",
+            None,
+            vec![node(
+                "arm-io",
+                None,
+                vec![
+                    typed(phandle(node("acio0", None, vec![]), 7), b"acio\0"),
+                    typed(node("atc0-dpphy", None, vec![]), b"AAPL,atc-dpphy\0"),
+                    typed(node("atc0-dpin0", None, vec![]), b"AAPL,atc-dpin\0"),
+                    typed(phandle(node("acio1", None, vec![]), 8), b"acio\0"),
+                    parent("hpm0", 7),
+                    parent("hpm1", 8),
+                ],
+            )],
+        ),
+    };
+    let mut ledger: Vec<String> = ["/arm-io/acio0", "/arm-io/atc0-dpphy", "/arm-io/atc0-dpin0"]
+        .map(String::from)
+        .into();
+    retire_hidden_service_identities(&mut tree, &ledger);
+    retire_hidden_acio_parents(&mut tree, &mut ledger);
+    for path in ledger.iter().take(3) {
+        assert!(tree.property(path, DEVICE_TYPE).is_none(), "{path}");
+    }
+    assert!(tree.property("/arm-io/hpm0", ACIO_PARENT).is_none());
+    assert_eq!(ledger.last().unwrap(), "/arm-io/hpm0 acio-parent");
+    assert_eq!(ledger.len(), 4);
+    // A controller a model owns keeps its identity and its clients.
+    assert!(tree.property("/arm-io/acio1", DEVICE_TYPE).is_some());
+    assert!(tree.property("/arm-io/hpm1", ACIO_PARENT).is_some());
 }
 
 #[test]

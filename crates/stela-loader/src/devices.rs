@@ -64,9 +64,17 @@
 //!
 //! A final pass also retires audited service-advertising `device_type`
 //! values on hidden devices: raw DeviceTree display discovery does not
-//! honor `compatible` or `AAPL,ignore`. The existing admission ledger keeps
-//! the hidden paths; original inputs keep the removed identity bytes.
-//! Structural and unaudited type metadata remain.
+//! honor `compatible` or `AAPL,ignore`, and `IONameMatch` compares the type
+//! too, so a Thunderbolt or DisplayPort driver would bind a hidden node and
+//! wait in `start` for hardware that never answers, holding the registry
+//! busy until kernelmanagerd's quiet wait panics. The existing admission
+//! ledger keeps the hidden paths; original inputs keep the removed identity
+//! bytes. Structural and unaudited type metadata remain.
+//!
+//! A kept client's `acio-parent` naming a hidden ACIO goes too (`PATH
+//! acio-parent`): `resolvePHandleHAL` (26A434 0xfffffe000979f710) gives up
+//! at once without the property but otherwise waits 60 s for a controller
+//! that cannot appear. Either way the client has no USB4 tunnels.
 //!
 //! An SPMI controller with no admitted target or external platform-function
 //! or interrupt consumer also loses `compatible`. Board templates may carry
@@ -85,19 +93,34 @@ const PHANDLE: &str = "AAPL,phandle";
 const SECURE_ROOT_PREFIX: &str = "secure-root-prefix";
 const DEVICE_TYPE: &str = "device_type";
 const IOMMU_PARENT: &str = "iommu-parent";
+const ACIO_PARENT: &str = "acio-parent";
 const NO_PMU: &str = "no-pmu";
 const IGNORE: &str = "AAPL,ignore";
-/// Raw DeviceTree consumers use these physical display classes as service
-/// advertisements even after `compatible` is removed. Only audited class
+/// Consumers that use these physical classes as service advertisements even
+/// after `compatible` is removed: raw DeviceTree readers of the display
+/// classes (`installer-warnings.md#display-service-admission`), and the
+/// `IONameMatch` of `AppleThunderboltHALType5` and the
+/// `AppleATCDP*Port` drivers, which match the type alone. Only audited class
 /// identities are retired; unknown `device_type` metadata stays intact.
-/// See `installer-warnings.md#display-service-admission` for both consumers.
-const SERVICE_IDENTITIES: &[&[u8]] = &[b"display-subsystem\0", b"ext-display-subsystem\0"];
+const SERVICE_IDENTITIES: &[&[u8]] = &[
+    b"display-subsystem\0",
+    b"ext-display-subsystem\0",
+    b"acio\0",
+    b"AAPL,atc-dpphy\0",
+    b"AAPL,atc-dpin\0",
+    b"AAPL,atc-dpout\0",
+];
 /// Required functions of name-matched hardware classes, not optional
 /// callbacks inferred from arbitrary `function-*` properties. The original
 /// AMFM requires its PCIe platform function. Other WLAN interfaces need
 /// their active bus established before imposing a direct PCIe requirement;
 /// the original driver also has a serial-provider personality.
 const REQUIRED_FUNCTIONS: &[(&str, &[&str])] = &[("amfm", &["function-pcie_port_control"])];
+/// Name-matched hardware classes and the property naming the provider each
+/// waits for in `start`. `DCPAVAudioDMADelegate`'s `IONameMatch` lists
+/// `dp-audio0` to `dp-audio9`, so run 130's kernelmanagerd quiet wait panicked
+/// on those nubs with their `sio-dma` absent.
+const REQUIRED_PARENTS: &[(&str, &str)] = &[("dp-audio", "dma-parent")];
 /// A service-selected hardware interface replaces the direct platform
 /// function, rather than making it optional. AppleOLYHAL's withProvider
 /// (26A434 0xfffffe0009b465a8..0x9b465dc) selects its AMFM implementation
@@ -366,6 +389,7 @@ pub fn hide_unmodeled(tree: &mut DeviceTree) -> Vec<String> {
     }
     publish_gpu_ttbat(tree, &mut hidden);
     retire_hidden_service_identities(tree, &hidden);
+    retire_hidden_acio_parents(tree, &mut hidden);
     hidden
 }
 
@@ -515,6 +539,28 @@ fn retire_hidden_service_identities(tree: &mut DeviceTree, hidden: &[String]) {
     }
 }
 
+/// Drop each kept client's `acio-parent` naming a hidden node.
+fn retire_hidden_acio_parents(tree: &mut DeviceTree, hidden: &mut Vec<String>) {
+    let mut clients = Vec::new();
+    visible_paths(
+        &tree.root,
+        "",
+        &|node| node.property(ACIO_PARENT).is_some(),
+        &mut clients,
+    );
+    for path in clients {
+        let parent = tree
+            .property(&path, ACIO_PARENT)
+            .and_then(|property| property.as_u32())
+            .and_then(|phandle| path_of(&tree.root, "", phandle));
+        if parent.is_some_and(|parent| hidden.contains(&parent)) {
+            let node = tree.node_mut(&path).expect("visited path");
+            node.remove_property(ACIO_PARENT);
+            hidden.push(format!("{path} {ACIO_PARENT}"));
+        }
+    }
+}
+
 fn required_service(node: &Node) -> Option<&'static str> {
     let kind = node.property(DEVICE_TYPE).and_then(|p| p.as_str());
     REQUIRED_SERVICES
@@ -533,6 +579,16 @@ fn required_functions(node: &Node) -> &'static [&'static str] {
         .iter()
         .find_map(|&(name, functions)| (kind == Some(name)).then_some(functions))
         .unwrap_or_default()
+}
+
+/// The phandle of the provider `node`'s class requires by property: `None`
+/// for a class that names none, `Some(None)` for a node missing it.
+fn required_parent(node: &Node) -> Option<Option<u32>> {
+    let kind = node.property(DEVICE_TYPE).and_then(|p| p.as_str())?;
+    REQUIRED_PARENTS
+        .iter()
+        .find(|&&(class, _)| kind.starts_with(class))
+        .map(|&(_, property)| node.property(property).and_then(|p| p.as_u32()))
 }
 
 struct PlatformClient {
@@ -559,8 +615,9 @@ fn platform_clients(
     let required = required_functions(node);
     let phandle = node.property(PHANDLE).and_then(|p| p.as_u32());
     let service = required_service(node);
+    let parent = required_parent(node);
     let here = if path.is_empty() { "/" } else { path };
-    if (!required.is_empty() || service.is_some()) && !structural(here) {
+    if (!required.is_empty() || service.is_some() || parent.is_some()) && !structural(here) {
         let providers = required
             .iter()
             .map(|name| {
@@ -571,6 +628,7 @@ fn platform_clients(
                 let prefix = value.get(..8)?;
                 Some(u32::from_le_bytes(prefix[..4].try_into().expect("4 bytes")))
             })
+            .chain(parent)
             .collect();
         clients.push(PlatformClient {
             path: path.into(),
