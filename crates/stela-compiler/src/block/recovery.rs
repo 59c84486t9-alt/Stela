@@ -1,10 +1,12 @@
 //! Typed register/spill recovery and atomic guest retirement settlement.
+mod packed;
 mod qualification;
 mod retirement;
 mod sites;
 mod spills;
 use super::HostGprSnapshot;
 use crate::GuestAddress;
+pub use packed::PackedRecovery;
 pub use qualification::{RecoveryQualificationError, RecoveryTemplate, UnqualifiedFaultRecovery};
 pub use retirement::{RecoveredPosition, RetirementPhase, RetirementPoint};
 pub use sites::{RecoverySettlement, RecoverySite, RecoverySiteKind, TranslatedAccess};

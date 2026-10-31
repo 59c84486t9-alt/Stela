@@ -37,9 +37,10 @@ pub use pointer_authentication::{
 };
 pub use recovery::{
     FaultRecovery, FaultRecoveryError, HostFaultSnapshot, HostSpillSnapshot, InvalidSpillOffset,
-    NATIVE_SPILL_WORDS, RecoveredPosition, RecoveryBinding, RecoveryQualificationError,
-    RecoverySettlement, RecoverySite, RecoverySiteKind, RecoverySource, RecoveryTemplate,
-    RetirementPhase, RetirementPoint, SpillOffset, TranslatedAccess, UnqualifiedFaultRecovery,
+    NATIVE_SPILL_WORDS, PackedRecovery, RecoveredPosition, RecoveryBinding,
+    RecoveryQualificationError, RecoverySettlement, RecoverySite, RecoverySiteKind, RecoverySource,
+    RecoveryTemplate, RetirementPhase, RetirementPoint, SpillOffset, TranslatedAccess,
+    UnqualifiedFaultRecovery,
 };
 pub use system::{SystemInstruction, decode_system_instruction, decode_system_mode_instruction};
 pub use thread::{ThreadRegisterInstruction, decode_thread_register_instruction};
