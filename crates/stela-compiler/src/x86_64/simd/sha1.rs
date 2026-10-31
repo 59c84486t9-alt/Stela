@@ -5,6 +5,7 @@ use super::sha32::{
 };
 use super::{Host, commit, packed, read_vector, shuffle};
 use crate::x86_64::asm::Code;
+use crate::x86_64::simd::encode::gpr;
 use crate::{
     TargetCpu,
     aarch64::simd::sha1::{Kind, Operand},
@@ -22,6 +23,8 @@ const R11D: u8 = 11;
 const LEFT: u8 = 1;
 const RIGHT: u8 = 2;
 const TEMPORARY: u8 = 3;
+/// Keeps the pinned register in RSI across the scalar body.
+const SAVED_RSI: u8 = 7;
 const LOW_WORD: u8 = 0;
 const HASH_E_INDEX: usize = WORDS_PER_VECTOR;
 const HASH_A_ROTATE: u8 = 5;
@@ -43,6 +46,7 @@ const MAJORITY_CONSTANT: u32 = 0x8f1bbcdc;
 
 fn rounds_baseline(code: &mut Code, operand: &Operand) {
     use Scalar32::*;
+    code.asm().movq_to_xmm(SAVED_RSI, gpr(ESI));
     let mut state = [EAX, ECX, EDX, ESI, R8D];
     for (lane, register) in state[..WORDS_PER_VECTOR].iter().enumerate() {
         Move.state(code, *register, operand.destination, lane as u8);
@@ -82,6 +86,7 @@ fn rounds_baseline(code: &mut Code, operand: &Operand) {
         state = [e, a, b, c, d];
     }
     pack_state(code, [state[0], state[1], state[2], state[3]]);
+    code.asm().movq_from_xmm(gpr(ESI), SAVED_RSI);
 }
 
 fn rounds_sha(code: &mut Code, operand: &Operand, target: TargetCpu) {

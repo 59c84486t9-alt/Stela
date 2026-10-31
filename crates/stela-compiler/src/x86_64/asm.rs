@@ -32,25 +32,67 @@ pub(crate) struct Asm<'a> {
     instructions: usize,
     shared: Option<&'a mut usize>,
     sites: Option<&'a mut Vec<EmissionSite>>,
+    pinned: bool,
 }
 
 impl<'a> Asm<'a> {
+    /// Whether this encoder appends to pinned code.
+    pub(crate) const fn is_pinned(&self) -> bool {
+        self.pinned
+    }
+    /// `emit` given the frame's NZCV word from byte `offset`, which pinned
+    /// code reaches through [`super::flag_word`] alone.
+    pub(crate) fn with_flags(&mut self, offset: u32, emit: impl FnOnce(&mut Self, Mem)) {
+        const NZCV: u32 = core::mem::offset_of!(crate::GuestState, nzcv) as u32;
+        let pinned = core::mem::replace(&mut self.pinned, false);
+        emit(self, super::frame(NZCV + offset));
+        self.pinned = pinned;
+    }
     pub(crate) fn new(code: &'a mut Vec<u8>) -> Self {
         Self {
             code,
             instructions: 0,
             shared: None,
             sites: None,
+            pinned: false,
         }
+    }
+    /// [`Self::new`] for code that keeps guest registers in host registers
+    /// ([`super::pinned`]).
+    pub(crate) fn pinned(code: &'a mut Vec<u8>) -> Self {
+        Self {
+            pinned: true,
+            ..Self::new(code)
+        }
+    }
+    /// The storage of `register`, which XZR lacks: its host register in
+    /// pinned code, else its frame slot.
+    pub(crate) fn guest(&self, register: crate::aarch64::Register) -> Option<Rm> {
+        let slot = super::offset(register)? as i32;
+        Some(if !self.pinned {
+            Mem::base_disp32(Gpr::Rdi, slot).into()
+        } else if let Some(host) = super::pinned::host(register) {
+            host.into()
+        } else {
+            Mem::base(Gpr::Rdi, slot).into()
+        })
     }
     /// Mark exactly one guest memory operand, including its prefixes and
     /// immediate bytes. Frame/staging/address instructions must remain outside.
     pub(crate) fn guest_access(&mut self, emit: impl FnOnce(&mut Self)) {
-        self.fault_site(crate::block::RecoverySite::guest_access(), emit);
+        self.fault_site(crate::block::RecoverySite::guest_access(), None, emit);
+    }
+    /// [`Self::guest_access`] of an instruction that needs the host register
+    /// of SP, which `stack` holds meanwhile.
+    pub(crate) fn guest_access_moving_stack(&mut self, stack: Gpr, emit: impl FnOnce(&mut Self)) {
+        let site = crate::block::RecoverySite::guest_access();
+        self.fault_site(site, Some(stack.number()), emit);
     }
     /// Intentional alignment/range failure, rather than an unsupported opcode.
     pub(crate) fn guest_check(&mut self) {
-        self.fault_site(crate::block::RecoverySite::guest_check(), |asm| asm.ud2());
+        self.fault_site(crate::block::RecoverySite::guest_check(), None, |asm| {
+            asm.ud2()
+        });
     }
     /// Emit the unchanged translated descriptor and mark ONLY its first byte as
     /// a deliberate helper-return token. The CALL opcode and descriptor tail
@@ -67,10 +109,16 @@ impl<'a> Asm<'a> {
                 start,
                 end: start + 1,
                 site: crate::block::RecoverySite::translated_helper(bytes, flags),
+                stack: None,
             });
         }
     }
-    fn fault_site(&mut self, site: crate::block::RecoverySite, emit: impl FnOnce(&mut Self)) {
+    fn fault_site(
+        &mut self,
+        site: crate::block::RecoverySite,
+        stack: Option<u8>,
+        emit: impl FnOnce(&mut Self),
+    ) {
         let start = self.len();
         let instructions = self.instructions;
         emit(self);
@@ -85,7 +133,12 @@ impl<'a> Asm<'a> {
                 sites.last().is_none_or(|previous| previous.end <= start),
                 "fault sites do not nest"
             );
-            sites.push(EmissionSite { start, end, site });
+            sites.push(EmissionSite {
+                start,
+                end,
+                site,
+                stack,
+            });
         }
     }
     fn count(&mut self) {
@@ -202,6 +255,11 @@ impl<'a> Asm<'a> {
         self.data(&value.to_le_bytes());
     }
     /// `movabs r64, imm64` (REX.W B8+r, or REX2 for R16..R31).
+    /// `mov destination16,value`, which keeps the bits above.
+    pub(crate) fn mov_imm16(&mut self, destination: Gpr, value: u16) {
+        self.opcode_reg(Size::Word, 0xb8, destination);
+        self.data(&value.to_le_bytes());
+    }
     pub(crate) fn mov_imm64(&mut self, destination: Gpr, value: u64) {
         self.opcode_reg(Size::Qword, 0xb8, destination);
         self.data(&value.to_le_bytes());

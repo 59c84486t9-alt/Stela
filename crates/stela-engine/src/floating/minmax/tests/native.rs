@@ -79,7 +79,11 @@ fn input(operand: &Operand, a: u64, b: u64, fpcr: u32) -> GuestState {
         x: std::array::from_fn(|i| 0x1234_5678_0000_0000 | i as u64),
         sp: 0x1234_0000,
         nzcv: 0xa000_0000,
-        reserved: 0x9e71_a53c,
+        exclusive_bytes: 0x9e71_a53c,
+        exclusive_address: 0,
+        exclusive_value: 0,
+        daif: 0,
+        pending: 0,
         v: [[0; 2]; 32],
         fpcr,
         fpsr: FPSR_QC | EXCEPTIONS,
@@ -234,7 +238,10 @@ fn signed_zero_and_normal_selection_match_full_helper_state() {
                 .unwrap()
                 .compile()
                 .unwrap();
-                let mapping = Mapping::new(&block.native.x86_64_code).unwrap();
+                let mapping = Mapping::new(&stela_compiler::x86_64::pinned::entered(
+                    &block.native.x86_64_code,
+                ))
+                .unwrap();
                 let format = operand.format();
                 let one = match format {
                     Format::Half => 0x3c00,
@@ -347,7 +354,10 @@ fn exceptional_active_lanes_and_enables_exit_before_any_effect() {
         .unwrap()
         .compile()
         .unwrap();
-        let mapping = Mapping::new(&block.native.x86_64_code).unwrap();
+        let mapping = Mapping::new(&stela_compiler::x86_64::pinned::entered(
+            &block.native.x86_64_code,
+        ))
+        .unwrap();
         let format = operand.format();
         let sign = sign_mask(format);
         let maximum = exponent_mask(format);

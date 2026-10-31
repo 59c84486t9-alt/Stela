@@ -4,7 +4,7 @@ use std::{cell::Cell, collections::BTreeMap, rc::Rc};
 use stela_compiler::{GuestState, TargetCpu};
 use stela_contracts::Chip;
 use stela_engine::{
-    execution::reference::NativeRunner,
+    execution::{platform::Mapping as NativeMapping, reference::NativeRunner},
     machine::{
         Cpu, CpuProfile, FaultCause, Host, InstallError, Machine, NativeCode, NativeExit,
         NoDevices, Regime, exception::Pstate, identification, mmu, registers::encodings,
@@ -214,6 +214,7 @@ pub struct NativeHost {
     tables: Tables,
     code: Vec<Executable>,
     runner: NativeRunner,
+    entry: NativeMapping,
     vector: u64,
 }
 impl NativeHost {
@@ -327,7 +328,7 @@ impl Host for NativeHost {
     unsafe fn execute(&mut self, native: NativeCode, state: &mut GuestState) -> NativeExit {
         // SAFETY: Machine keeps this installed block and its block ABI, all
         // reachable mappings and the distinct GuestState for the whole call.
-        match unsafe { self.runner.run(native.0, state) } {
+        match unsafe { self.runner.run_through(self.entry.entry(), native.0, state) } {
             Ok(exit) => NativeExit::Exit {
                 next_pc: exit.next_pc,
                 kind: exit.kind,
@@ -432,6 +433,7 @@ pub fn machine(
         tables,
         code: vec![],
         runner: NativeRunner::new(vec![])?,
+        entry: NativeMapping::new(&stela_compiler::x86_64::pinned::entry())?,
         vector: vector.0,
     };
     let mut machine = Machine::new(cpu, host, NoDevices, profile, target);

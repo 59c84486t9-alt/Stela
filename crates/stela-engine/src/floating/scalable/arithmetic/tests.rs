@@ -33,7 +33,11 @@ fn setup(length: usize) -> (GuestState, ScalableState) {
         x: std::array::from_fn(|index| 0x1234_0000_0000_0000 | index as u64),
         nzcv: 0xa000_0000,
         sp: 0x1111_2222_3333_4444,
-        reserved: 0xaaaa_5555,
+        exclusive_bytes: 0xaaaa_5555,
+        exclusive_address: 0,
+        exclusive_value: 0,
+        daif: 0,
+        pending: 0,
         ..GuestState::default()
     };
     let mut scalable = ScalableState::new(VectorLength::from_bytes(length).unwrap(), true);

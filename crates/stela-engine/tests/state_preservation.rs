@@ -30,7 +30,11 @@ fn state(flags: u32) -> GuestState {
         x: std::array::from_fn(|index| 0x123456789abcdef0u64.rotate_left(index as u32)),
         sp: 0x12340000,
         nzcv: flags << 28,
-        reserved: 0xa5c39e71,
+        exclusive_bytes: 0xa5c39e71,
+        exclusive_address: 0,
+        exclusive_value: 0,
+        daif: 0,
+        pending: 0,
         v: std::array::from_fn(|index| {
             [
                 0x0123456789abcdefu64.rotate_left(index as u32) ^ u64::from(flags),

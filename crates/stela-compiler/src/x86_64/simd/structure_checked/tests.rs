@@ -545,7 +545,11 @@ mod native {
             nzcv: 0xa000_0000,
             fpcr: 0x0040_0000,
             fpsr: 0x0800_009f,
-            reserved: 0x1357_9bdf,
+            exclusive_bytes: 0x1357_9bdf,
+            exclusive_address: 0,
+            exclusive_value: 0,
+            daif: 0,
+            pending: 0,
             ..GuestState::default()
         };
         for (index, register) in state.x.iter_mut().enumerate() {

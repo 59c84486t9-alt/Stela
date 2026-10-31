@@ -94,6 +94,7 @@ pub(crate) mod checked_pointer;
 mod conditional_select;
 mod crc;
 pub(crate) mod exclusive;
+pub mod flag_word;
 mod flags;
 mod fp_register;
 mod guest_range;
@@ -110,6 +111,7 @@ mod memory_recipe;
     target_os = "linux"
 ))]
 pub mod modeled;
+pub mod pinned;
 /// Without the Linux signal-frame models, tests run only what the host has.
 #[cfg(all(
     any(test, feature = "test-support"),
@@ -146,6 +148,7 @@ mod simd;
 mod stack_alignment;
 pub(crate) use simd::CheckedMemoryOperand as CheckedFixedMemoryOperand;
 pub mod cache_clean;
+pub mod native_exclusive;
 pub(crate) mod sme;
 pub(crate) mod sve;
 mod system;
@@ -172,6 +175,8 @@ pub mod zero_block;
 pub struct NativeSystem {
     pub zero_block: Option<u16>,
     pub cache_clean: cache_clean::Operations,
+    /// PEs run on host cores of their own, and exclusives pass by value.
+    pub exclusive: bool,
 }
 
 impl NativeSystem {
@@ -179,6 +184,7 @@ impl NativeSystem {
     pub const NONE: Self = Self {
         zero_block: None,
         cache_clean: cache_clean::Operations::NONE,
+        exclusive: false,
     };
 }
 
@@ -234,8 +240,17 @@ pub(super) fn test_zero(code: &mut Code, width: Width, nonzero: bool) -> asm::Co
 
 /// `bt rax,bit`: the condition under which the bit is set, or clear.
 pub(super) fn test_bit(code: &mut Code, bit: u8, nonzero: bool) -> asm::Cond {
-    code.asm()
-        .bit_imm(asm::BitTest::Bt, asm::Size::Qword, asm::Gpr::Rax, bit);
+    test_bit_of(code.asm(), asm::Gpr::Rax, bit, nonzero)
+}
+
+/// `bt register,bit`: the condition under which the bit is set, or clear.
+pub(super) fn test_bit_of(
+    mut asm: asm::Asm,
+    register: asm::Gpr,
+    bit: u8,
+    nonzero: bool,
+) -> asm::Cond {
+    asm.bit_imm(asm::BitTest::Bt, asm::Size::Qword, register, bit);
     if nonzero { asm::Cond::B } else { asm::Cond::Ae }
 }
 
@@ -251,13 +266,9 @@ fn load(code: &mut Code, register: Register) {
 
 /// RAX = the guest register (zero for XZR), from the frame at RDI.
 fn load_with(asm: &mut asm::Asm, register: Register) {
-    use asm::{Alu, Gpr, Mem, Size};
-    match offset(register) {
-        Some(offset) => asm.mov_load(
-            Size::Qword,
-            Gpr::Rax,
-            Mem::base_disp32(Gpr::Rdi, offset as i32),
-        ),
+    use asm::{Alu, Gpr, Size};
+    match asm.guest(register) {
+        Some(storage) => asm.mov_load(Size::Qword, Gpr::Rax, storage),
         None => asm.alu(Alu::Xor, Size::Dword, Gpr::Rax, Gpr::Rax),
     }
 }
@@ -268,13 +279,9 @@ fn store(code: &mut Code, register: Register) {
 
 /// The guest register (nothing for XZR) = RAX, in the frame at RDI.
 fn store_with(asm: &mut asm::Asm, register: Register) {
-    use asm::{Gpr, Mem, Size};
-    if let Some(offset) = offset(register) {
-        asm.mov_store(
-            Size::Qword,
-            Mem::base_disp32(Gpr::Rdi, offset as i32),
-            Gpr::Rax,
-        );
+    use asm::{Gpr, Size};
+    if let Some(storage) = asm.guest(register) {
+        asm.mov_store(Size::Qword, storage, Gpr::Rax);
     }
 }
 
@@ -796,9 +803,9 @@ pub(crate) fn address_add(code: &mut Code, displacement: i32, mode: AddressMode)
 
 fn memory_writeback(code: &mut Code, base: Register, mode: AddressMode) {
     if mode != AddressMode::Offset {
-        let offset = offset(base).expect("memory base cannot be ZR");
-        code.asm()
-            .mov_store(asm::Size::Qword, frame(offset), asm::Gpr::Rdx);
+        let mut asm = code.asm();
+        let storage = asm.guest(base).expect("memory base cannot be ZR");
+        asm.mov_store(asm::Size::Qword, storage, asm::Gpr::Rdx);
     }
 }
 
@@ -838,13 +845,9 @@ fn right_operand_with(
     shift: Shift,
     amount: u8,
 ) {
-    use asm::{Alu, Gpr, Mem, ShiftOp, Size};
-    match offset(register) {
-        Some(offset) => asm.mov_load(
-            Size::Qword,
-            Gpr::Rcx,
-            Mem::base_disp32(Gpr::Rdi, offset as i32),
-        ),
+    use asm::{Alu, Gpr, ShiftOp, Size};
+    match asm.guest(register) {
+        Some(storage) => asm.mov_load(Size::Qword, Gpr::Rcx, storage),
         None => asm.alu(Alu::Xor, Size::Dword, Gpr::Rcx, Gpr::Rcx),
     }
     if amount != 0 {
@@ -888,6 +891,14 @@ fn condition_holds(code: &mut Code, condition: u8, loaded: bool) -> Option<asm::
     if condition >= 14 {
         return None;
     } // AL and NV both satisfy ConditionHolds.
+    let loaded = if !code.is_pinned() {
+        loaded
+    } else if code.constant_time() {
+        flag_word::load_arm(code, Rax);
+        true
+    } else {
+        return Some(flag_word::condition(code, condition, loaded));
+    };
     let mut asm = code.asm();
     if !loaded {
         asm.mov_load(Size::Dword, Rax, frame(NZCV));
@@ -963,18 +974,18 @@ pub(super) fn rax_after(operation: &Operation) -> Rax {
     }
 }
 
-/// [`load`]'s bytes for a frame register.
-pub(super) fn frame_load(register: Register) -> Option<[u8; 7]> {
-    let mut code = Code::new();
+/// [`load`]'s bytes for a register in code like `like`, but for XZR.
+pub(super) fn register_load(like: &Code, register: Register) -> Option<Code> {
+    let mut code = like.alike();
     load(&mut code, register);
-    code.try_into().ok()
+    offset(register).map(|_| code)
 }
 
-/// [`store`]'s bytes for a frame register.
-pub(super) fn frame_store(register: Register) -> Option<[u8; 7]> {
-    let mut code = Code::new();
+/// [`store`]'s bytes for a register in code like `like`, but for XZR.
+pub(super) fn register_store(like: &Code, register: Register) -> Option<Code> {
+    let mut code = like.alike();
     store(&mut code, register);
-    code.try_into().ok()
+    offset(register).map(|_| code)
 }
 
 /// `movabs rax,value`.
@@ -983,6 +994,9 @@ fn immediate(code: &mut Code, value: u64) {
 }
 
 fn nzcv(code: &mut Code, subtract: bool) {
+    if code.is_pinned() {
+        return flag_word::capture(code, subtract);
+    }
     capture_nzcv(code, subtract);
     store_nzcv(&mut code.asm());
 }
@@ -1046,9 +1060,12 @@ pub(crate) fn emit_instruction(
     checks: MemoryChecks,
 ) {
     use asm::{
-        Alu, BitTest,
+        Alu,
         Gpr::{Rax, Rcx},
     };
+    if pinned::emit_direct(code, &instruction.operation) {
+        return;
+    }
     match instruction.operation {
         Operation::FloatingPoint(_) => {
             unreachable!("numerical instructions require block emission")
@@ -1150,7 +1167,6 @@ pub(crate) fn emit_instruction(
             // Arm's SBC is AddWithCarry(left, NOT(right), C): ADC of the
             // complement, whose host CF and OF are Arm's C and V. (CMC is
             // not on Intel's data operand independent timing list.)
-            const NZCV: u32 = core::mem::offset_of!(crate::GuestState, nzcv) as u32;
             const CARRY_BIT: u8 = 29;
             let size = asm::Size::of(width == Width::X64);
             let mut asm = code.asm();
@@ -1159,7 +1175,7 @@ pub(crate) fn emit_instruction(
             }
             // Recover guest C after operand loads, including XOR-based
             // ZR loads that clobber host flags.
-            asm.bit_imm(BitTest::Bt, asm::Size::Dword, frame(NZCV), CARRY_BIT);
+            flag_word::carry(&mut asm, CARRY_BIT);
             asm.alu(Alu::Adc, size, Rax, Rcx);
             store(code, destination);
             if flags {

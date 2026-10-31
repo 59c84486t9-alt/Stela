@@ -481,7 +481,11 @@ mod numerical22 {
             let mut registers = GuestState {
                 sp: SP_CANARY,
                 nzcv: INITIAL_NZCV,
-                reserved: RESERVED_CANARY,
+                exclusive_bytes: RESERVED_CANARY,
+                exclusive_address: 0,
+                exclusive_value: 0,
+                daif: 0,
+                pending: 0,
                 ..GuestState::default()
             };
             for (index, value) in registers.x.iter_mut().enumerate() {

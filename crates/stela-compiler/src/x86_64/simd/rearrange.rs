@@ -45,22 +45,26 @@ pub(super) fn add_or_subtract(lane: u8, subtract: bool) -> Host {
 
 fn load_lane(code: &mut Code, source: LaneSource, bytes: u8) {
     use crate::aarch64::Register;
-    let offset = match source {
+    let mut asm = code.asm();
+    let storage = match source {
         LaneSource::General(Register::Zero) => {
-            code.asm().alu(Alu::Xor, Size::Dword, Rax, Rax);
+            asm.alu(Alu::Xor, Size::Dword, Rax, Rax);
             return;
         }
-        LaneSource::General(Register::X(index)) => u32::from(index) * 8,
-        LaneSource::Vector { register, byte } => vector_offset(register) + u32::from(byte),
+        LaneSource::General(register @ Register::X(_)) => {
+            asm.guest(register).expect("X0..X30 have storage")
+        }
+        LaneSource::Vector { register, byte } => {
+            guest(vector_offset(register) + u32::from(byte)).into()
+        }
         LaneSource::General(Register::Sp) => unreachable!("lane transfers use ZR, not SP"),
     };
     // Zero-extending load of the exact width into RAX, from GuestState.
-    let mut asm = code.asm();
     match bytes {
-        1 => asm.movzx(Size::Dword, Rax, Size::Byte, guest(offset)),
-        2 => asm.movzx(Size::Dword, Rax, Size::Word, guest(offset)),
-        4 => asm.mov_load(Size::Dword, Rax, guest(offset)),
-        8 => asm.mov_load(Size::Qword, Rax, guest(offset)),
+        1 => asm.movzx(Size::Dword, Rax, Size::Byte, storage),
+        2 => asm.movzx(Size::Dword, Rax, Size::Word, storage),
+        4 => asm.mov_load(Size::Dword, Rax, storage),
+        8 => asm.mov_load(Size::Qword, Rax, storage),
         _ => unreachable!("reviewed lane size"),
     }
 }

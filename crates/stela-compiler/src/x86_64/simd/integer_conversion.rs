@@ -10,6 +10,7 @@ use super::{Host, commit, packed, read_vector, vector_offset};
 use crate::TargetCpu;
 use crate::x86_64::asm::{Alu, Code, Gpr, Rm, ShiftOp, Size, vector_extensions};
 use crate::x86_64::asm::{BitTest, FloatLanes};
+use crate::x86_64::flag_word;
 use crate::x86_64::isa::ShiftOpcode;
 use crate::x86_64::simd::encode::guest;
 use crate::{
@@ -614,12 +615,12 @@ pub(in crate::x86_64) fn javascript(
     to_integer(code, &operand, IntegerRounding::TowardZero, pc, target);
     // commit_inexact leaves only fresh IXC in ECX. Accumulated FPSR.IXC must
     // not clear Z for a later exact input, including a discarded WZR result.
+    let shift = match code.is_pinned() {
+        true => (flag_word::ZERO.trailing_zeros() - INEXACT.trailing_zeros()) as u8,
+        false => INEXACT_TO_NZCV_SHIFT,
+    };
     let mut asm = code.asm();
     asm.alu_imm8(Alu::Xor, Size::Dword, Rcx, INEXACT as i8);
-    asm.shift_imm(ShiftOp::Shl, Size::Dword, Rcx, INEXACT_TO_NZCV_SHIFT);
-    asm.mov_store(
-        Size::Dword,
-        guest(core::mem::offset_of!(crate::GuestState, nzcv) as u32),
-        Rcx,
-    );
+    asm.shift_imm(ShiftOp::Shl, Size::Dword, Rcx, shift);
+    flag_word::store(&mut asm, Rcx);
 }

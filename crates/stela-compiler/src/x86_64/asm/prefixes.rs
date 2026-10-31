@@ -29,6 +29,14 @@ impl Asm<'_> {
                 displacement,
                 width,
             }) => {
+                #[cfg(debug_assertions)]
+                debug_assert!(
+                    !(self.pinned
+                        && base == Gpr::Rdi
+                        && index.is_none()
+                        && super::super::pinned::slot(displacement)),
+                    "the frame slot of a pinned register"
+                );
                 // RBP and R13 have no mod-00 form; RSP and R12 need a SIB.
                 let scale = i32::from(scale);
                 let short = displacement % scale == 0 && i8::try_from(displacement / scale).is_ok();

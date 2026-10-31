@@ -191,7 +191,7 @@ impl Options {
                 ));
             }
         }
-        if !self.native.cache_clean.is_empty() && !system_mode {
+        if (self.native.exclusive || !self.native.cache_clean.is_empty()) && !system_mode {
             return Err(CompileError::new(
                 crate::CompileErrorKind::NativeCacheCleanUnsupported {
                     profile: self.profile,

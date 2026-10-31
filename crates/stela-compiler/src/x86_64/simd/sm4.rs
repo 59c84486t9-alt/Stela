@@ -6,7 +6,7 @@ use crate::{
     aarch64::simd::sm4::{Kind, Operand},
     x86_64::asm::Code,
 };
-const STATE: [u8; 4] = [0, 1, 2, 6];
+const STATE: [u8; 4] = [0, 1, 2, 10];
 const VALUE: u8 = 8;
 const ROTATE: u8 = 9;
 

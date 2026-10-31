@@ -10,8 +10,6 @@ pub(crate) struct RegisterInput {
     pub(crate) sp: u64,
     #[serde(default)]
     pub(crate) nzcv: u32,
-    #[serde(default)]
-    pub(crate) reserved: u32,
     /// Little-endian low/high 64-bit limbs of each architectural V register.
     #[serde(default)]
     pub(crate) v: [[u64; 2]; 32],
@@ -22,7 +20,7 @@ pub(crate) struct RegisterInput {
 }
 
 pub(crate) fn register_json(state: &stela_compiler::GuestState) -> serde_json::Value {
-    serde_json::json!({"x":state.x,"sp":state.sp,"nzcv":state.nzcv,"reserved":state.reserved,
+    serde_json::json!({"x":state.x,"sp":state.sp,"nzcv":state.nzcv,
         "v":state.v,"fpcr":state.fpcr,"fpsr":state.fpsr})
 }
 

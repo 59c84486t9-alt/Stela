@@ -1,5 +1,5 @@
 //! LSE atomics. RDX holds the checked guest address on entry.
-use super::{load, offset, store};
+use super::{load, store};
 use crate::aarch64::{
     Register,
     atomic::{Kind, Operand},
@@ -120,11 +120,10 @@ pub(super) fn address_offset(
 /// The guest `register` at `bytes`, zero-extended, into `destination`.
 fn input(code: &mut Code, bytes: u8, register: Register, destination: Gpr) {
     let mut asm = code.asm();
-    let Some(displacement) = offset(register) else {
+    let Some(state) = asm.guest(register) else {
         asm.alu(Alu::Xor, Size::Dword, destination, destination);
         return;
     };
-    let state = Mem::base_disp32(Gpr::Rdi, displacement as i32);
     match bytes {
         BYTE_BYTES | HALFWORD_BYTES => {
             asm.movzx(Size::Dword, destination, size(bytes), state);

@@ -1,13 +1,13 @@
 //! Native interruption-gate safety and CPU measurements.
 use super::super::*;
-use alloc::{boxed::Box, format, vec, vec::Vec};
+use alloc::{boxed::Box, format, vec::Vec};
 use core::ffi::c_void;
 use std::{
     fs,
     io::Write,
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU32, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -189,6 +189,7 @@ struct Shared {
     linked: AtomicU64,
     epoch: AtomicU64,
     observed: AtomicU64,
+    salts: [AtomicU32; 2],
 }
 const _: () = assert!(core::mem::offset_of!(Shared, epoch) == INTERRUPT_EPOCH as usize);
 const _: () = assert!(core::mem::offset_of!(Shared, observed) == OBSERVED_INTERRUPT_EPOCH as usize);
@@ -205,6 +206,7 @@ impl Shared {
             linked: AtomicU64::new(0),
             epoch: AtomicU64::new(0),
             observed: AtomicU64::new(0),
+            salts: [AtomicU32::new(0), AtomicU32::new(0)],
         }
     }
 }
@@ -448,9 +450,9 @@ fn native_interruption_gate_costs() {
     )
     .unwrap();
     for lookup in [false, true] {
-        let mut table = vec![LookupEntry::default(); LOOKUP_ENTRIES];
+        let mut table = LookupTable::new();
         let mut control = Box::new(Aligned(ChainControl {
-            table: table.as_ptr() as u64,
+            table: table.address(),
             contexts: [5, 7],
             ..ChainControl::default()
         }));
@@ -463,7 +465,7 @@ fn native_interruption_gate_costs() {
         ] {
             let native = Mapping::new();
             let code = if lookup {
-                table[lookup_slot(TARGET.0)] = LookupEntry {
+                table[lookup_slot(TARGET.0, 0)] = LookupEntry {
                     pc: TARGET.0,
                     context: 5,
                     entry: native.address(),

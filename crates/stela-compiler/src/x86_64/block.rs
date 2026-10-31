@@ -79,6 +79,7 @@ pub(crate) fn emit_ordinary_for_target(
         RegionPolicy {
             optimize: true,
             fault_table: false,
+            pinned: false,
         },
         super::MemoryChecks::DEFAULT,
         super::NativeSystem::NONE,
@@ -118,6 +119,7 @@ pub(crate) fn emit_for_target(
         RegionPolicy {
             optimize: false,
             fault_table: false,
+            pinned: false,
         },
         checks,
         super::NativeSystem::NONE,
@@ -137,20 +139,20 @@ pub(crate) fn emit_system_mode(
     checks: super::MemoryChecks,
     native: super::NativeSystem,
 ) -> (NativeBlock, Vec<crate::block::FaultRecovery>) {
-    // Allocated and clean-load regions settle the frame at exits; across
-    // an access they may keep guest registers in host registers, which
-    // the fault recovery table names, so the engine finds the frame exact
-    // at a fault inside one. Their loads carry no SCTLR_ELx.A check. Accesses check the guest range
-    // (`x86_64::guest_range`). PEs run concurrently, so atomics stay locked
-    // and barriers fence.
+    // Guest registers stay in host registers (`x86_64::pinned`), which the
+    // engine's fault settlement reads, so no block needs the regions, which
+    // spend the same host registers within one block. Accesses check the
+    // guest range (`x86_64::guest_range`). PEs run concurrently, so atomics
+    // stay locked and barriers fence.
     emit_selected(
         instructions,
         terminal,
         fallthrough,
         target,
         RegionPolicy {
-            optimize: !checks.alignment,
+            optimize: false,
             fault_table: true,
+            pinned: true,
         },
         super::MemoryChecks {
             guest_range: true,
@@ -165,6 +167,8 @@ pub(crate) fn emit_system_mode(
 struct RegionPolicy {
     optimize: bool,
     fault_table: bool,
+    /// Keep guest registers in host registers ([`super::pinned`]).
+    pinned: bool,
 }
 
 /// With `fault_table`, region accesses keep dirty values in registers and
@@ -181,10 +185,13 @@ fn emit_selected(
     let RegionPolicy {
         optimize: optimize_regions,
         fault_table,
+        pinned,
     } = regions;
     let mut fault_recovery = vec![];
     let mut block = super::Emitted::default();
     let code = &mut block.x86_64_code;
+    code.set_pinned(pinned);
+    code.set_constant_time(target.data_independent_timing());
     let mut fixups = vec![];
     // The DIT audit covers each instruction's own lowering, not the
     // register-allocated and clean-load regions' recipes.
@@ -325,6 +332,11 @@ fn emit_selected(
         }
         let instruction = &instructions[cursor];
         block.source_map.push((instruction.pc, code.len()));
+        let frame_bound = pinned && super::pinned::frame_bound(&instruction.operation);
+        if frame_bound {
+            code.set_pinned(false);
+            super::pinned::write_back(code);
+        }
         after = emit_single(
             code,
             Some(&mut out_of_line),
@@ -334,6 +346,10 @@ fn emit_selected(
             checks_at(cursor),
             held,
         );
+        if frame_bound {
+            super::pinned::reload(code);
+            code.set_pinned(true);
+        }
         cursor += 1;
     }
     debug_assert!(
@@ -427,18 +443,28 @@ fn emit_single(
     }
     // The instruction keeps a non-empty native range for its source map.
     if let super::Rax::Guest(register) = held.rax
-        && let Some(load) = super::frame_load(register)
+        && let Some(load) = super::register_load(code, register)
         && code[start..].starts_with(&load)
         && code.len() > start + load.len()
     {
         code.remove_instruction(start..start + load.len());
     }
-    let rax = super::rax_after(&instruction.operation);
+    let rax = match super::rax_after(&instruction.operation) {
+        // A direct form may leave the result only in its host register.
+        super::Rax::Guest(register)
+            if code.is_pinned()
+                && !super::register_store(code, register)
+                    .is_some_and(|store| code.ends_with(&store)) =>
+        {
+            super::Rax::Unknown
+        }
+        rax => rax,
+    };
     debug_assert!(match rax {
         super::Rax::Unknown => true,
-        super::Rax::Nzcv => code.ends_with(&nzcv_store()),
+        super::Rax::Nzcv => code.ends_with(&nzcv_store(code.is_pinned())),
         super::Rax::Guest(register) =>
-            super::frame_store(register).is_some_and(|store| code.ends_with(&store)),
+            super::register_store(code, register).is_some_and(|store| code.ends_with(&store)),
     });
     let xmm0 = match &instruction.operation {
         Operation::Simd(operand) => super::simd::xmm0_after(operand, &code[start..], held.xmm0),
@@ -567,9 +593,13 @@ fn target_of(code: &[u8], site: usize) -> usize {
 
 /// `mov [rdi+GuestState.nzcv],eax`, which ends each emission after which
 /// RAX holds [`super::Rax::Nzcv`].
-fn nzcv_store() -> Code {
+fn nzcv_store(pinned: bool) -> Code {
     let mut code = Code::new();
-    super::store_nzcv(&mut code.asm());
+    code.set_pinned(pinned);
+    match pinned {
+        true => super::flag_word::store_captured(&mut code.asm()),
+        false => super::store_nzcv(&mut code.asm()),
+    }
     code
 }
 /// The direct exits to static successors that [`emit_terminal`] ended
@@ -591,8 +621,8 @@ pub(crate) fn successor_exits(
             | Operation::BranchZero { target, .. }
             | Operation::BranchBit { target, .. },
         )) => (*target, ExitKind::Direct, true),
-        // A DC ZVA or DC clean completed natively falls through; any other
-        // System instruction exits at itself, which the stub check below
+        // A DC ZVA, DC clean or exclusive completed natively falls through;
+        // any other System instruction exits at itself, which the stub check below
         // rejects.
         Some(Terminator::System(request)) => (request.next_pc, ExitKind::Fallthrough, false),
         // So does a numerical operation completed inline; otherwise the same check
@@ -692,7 +722,11 @@ fn emit_terminal(
                 let zero = native.zero_block.zip(super::zero_block::operand(request));
                 let clean = super::cache_clean::operand(request)
                     .filter(|(operation, _)| native.cache_clean.contains(*operation));
-                if let Some((bytes, rt)) = zero {
+                let exclusive =
+                    super::native_exclusive::operand(request).filter(|_| native.exclusive);
+                if let Some(transfer) = exclusive {
+                    super::native_exclusive::emit(code, transfer, request, checks);
+                } else if let Some((bytes, rt)) = zero {
                     super::zero_block::emit(code, rt, bytes, checks);
                     direct_exit(code, request.next_pc, ExitKind::Fallthrough);
                 } else if let Some((_, rt)) = clean {
@@ -726,7 +760,9 @@ fn emit_terminal(
             Terminator::Branch(operation) => match *operation {
                 Operation::Branch { target } => direct_exit(code, target, ExitKind::Direct),
                 Operation::BranchCondition { target, condition } => {
-                    let taken = super::condition_holds(code, condition, rax == super::Rax::Nzcv);
+                    let loaded =
+                        rax == super::Rax::Nzcv && code.ends_with(&nzcv_store(code.is_pinned()));
+                    let taken = super::condition_holds(code, condition, loaded);
                     conditional_exit(code, taken, target, fallthrough);
                 }
                 Operation::BranchZero {
@@ -735,8 +771,17 @@ fn emit_terminal(
                     width,
                     nonzero,
                 } => {
-                    load(code, source);
-                    let taken = super::test_zero(code, width, nonzero);
+                    let taken = match code.host(source) {
+                        Some(host) => {
+                            let size = Size::of(width == crate::aarch64::Width::X64);
+                            code.asm().test(size, host, host);
+                            if nonzero { Cond::Ne } else { Cond::E }
+                        }
+                        None => {
+                            load(code, source);
+                            super::test_zero(code, width, nonzero)
+                        }
+                    };
                     conditional_exit(code, Some(taken), target, fallthrough);
                 }
                 Operation::BranchBit {
@@ -745,8 +790,16 @@ fn emit_terminal(
                     bit,
                     nonzero,
                 } => {
-                    load(code, source);
-                    let taken = super::test_bit(code, bit, nonzero);
+                    let taken = match code.host(source) {
+                        Some(host) => {
+                            let bits = code.asm();
+                            super::test_bit_of(bits, host, bit, nonzero)
+                        }
+                        None => {
+                            load(code, source);
+                            super::test_bit(code, bit, nonzero)
+                        }
+                    };
                     conditional_exit(code, Some(taken), target, fallthrough);
                 }
                 _ => unreachable!("block decoder restricts branch terminators"),

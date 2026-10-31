@@ -61,7 +61,11 @@ fn initial_state() -> GuestState {
         x: std::array::from_fn(|index| 0xdead_beef_1234_5678 ^ index as u64),
         sp: 0xfeed_0000_0000_0003,
         nzcv: 0xa000_0000,
-        reserved: 0xa5c3_9e71,
+        exclusive_bytes: 0xa5c3_9e71,
+        exclusive_address: 0,
+        exclusive_value: 0,
+        daif: 0,
+        pending: 0,
         v: std::array::from_fn(|index| {
             [
                 0x89ab_cdef_0123_4567 ^ index as u64,

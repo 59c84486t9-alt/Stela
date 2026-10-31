@@ -66,12 +66,11 @@ pub(super) fn emit(
             );
         }
         PostIndex::Register(index) => {
-            scalar_state_transfer(
-                code,
-                false,
-                QWORD_BYTES,
-                super::super::offset(Register::X(index)).expect("post-index is X0..X30"),
-            );
+            let mut asm = code.asm();
+            let index = asm
+                .guest(Register::X(index))
+                .expect("post-index is X0..X30");
+            asm.mov_load(Size::Qword, Gpr::Rcx, index);
             // The address plus the post-index register.
             code.asm().lea(
                 Size::Qword,

@@ -47,7 +47,11 @@ fn state(value: u64, flags: u32) -> ThreadState {
     let mut registers = GuestState {
         sp: 0x12340000,
         nzcv: flags << 28,
-        reserved: 0xa5c39e71,
+        exclusive_bytes: 0xa5c39e71,
+        exclusive_address: 0,
+        exclusive_value: 0,
+        daif: 0,
+        pending: 0,
         ..GuestState::default()
     };
     for index in 0..31 {

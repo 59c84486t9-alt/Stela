@@ -110,7 +110,11 @@ fn setup(length: usize) -> (GuestState, ScalableState) {
         x: std::array::from_fn(|index| CONTROL_SENTINEL ^ index as u64),
         sp: CONTROL_SENTINEL,
         nzcv: 0xa000_0000,
-        reserved: 0x8157_31ab,
+        exclusive_bytes: 0x8157_31ab,
+        exclusive_address: 0,
+        exclusive_value: 0,
+        daif: 0,
+        pending: 0,
         ..GuestState::default()
     };
     let mut scalable = ScalableState::new(VectorLength::from_bytes(length).unwrap(), true);

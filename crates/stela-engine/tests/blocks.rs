@@ -62,7 +62,7 @@ mod numerical {
         thread.registers.fpcr = if nep { FPCR_NEP } else { 0 };
         thread.registers.fpsr = FPSR_QC | 0x80000000;
         thread.registers.nzcv = 0xa0000000;
-        thread.registers.reserved = 0xa53cf012;
+        thread.registers.exclusive_bytes = 0xa53cf012;
         thread
     }
     fn publish(expected: &mut GuestState, d: usize, n: usize, bits: u64, width: u32) {

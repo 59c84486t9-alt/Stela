@@ -9,9 +9,9 @@ use super::numerical::{helper_section, jump};
 use super::{Host, commit, packed, read_vector};
 use crate::x86_64::asm::FloatLanes;
 use crate::x86_64::asm::{Alu, Code, Cond, Gpr, Rm, ShiftOp, Size};
-use crate::x86_64::simd::encode::guest;
+use crate::x86_64::flag_word;
 use crate::{
-    GuestAddress, GuestState, TargetCpu,
+    GuestAddress, TargetCpu,
     aarch64::{
         flags::{NZCV_C, NZCV_N, NZCV_SHIFT, NZCV_Z},
         floating::{FPCR_EXCEPTION_ENABLE_MASK, FPCR_NEP, Format, comparison::Predicate},
@@ -72,10 +72,6 @@ fn move_scalar(code: &mut Code, format: Format, register: Gpr, vector: u8) {
     }
 }
 
-fn nzcv() -> crate::x86_64::asm::Mem {
-    guest(core::mem::offset_of!(GuestState, nzcv) as u32)
-}
-
 fn exception_guard(code: &mut Code, helper: &mut Vec<usize>) {
     test_control(code, FPCR_EXCEPTION_ENABLE_MASK);
     helper.push(branch(code, Condition::NotZero));
@@ -89,8 +85,8 @@ fn scalar_normal_guard(code: &mut Code, format: Format, source: u8, helper: &mut
 /// A zero comparison also accepts signed zero and infinity. A zero fraction
 /// proves one of those classes or an exact normal power of two; remaining
 /// values must pass the ordinary normal guard. No subnormal or NaN executes.
-fn scalar_zero_guard(code: &mut Code, format: Format, helper: &mut Vec<usize>) {
-    move_scalar(code, format, Gpr::Rax, LEFT_VECTOR);
+fn scalar_zero_guard(code: &mut Code, format: Format, source: u8, helper: &mut Vec<usize>) {
+    move_scalar(code, format, Gpr::Rax, source);
     let register_bits = if format == Format::Double {
         u64::BITS
     } else {
@@ -103,7 +99,7 @@ fn scalar_zero_guard(code: &mut Code, format: Format, helper: &mut Vec<usize>) {
         (register_bits - format.fraction_bits()) as u8,
     );
     let zero_fraction = branch(code, Condition::Zero);
-    scalar_normal_guard(code, format, LEFT_VECTOR, helper);
+    scalar_normal_guard(code, format, source, helper);
     let accepted = code.len();
     resolve(code, zero_fraction, accepted);
 }
@@ -199,30 +195,38 @@ fn select_flags(code: &mut Code, condition: Cond) {
 }
 
 fn store_flags(code: &mut Code) {
-    code.asm().mov_store(Size::Dword, nzcv(), Gpr::Rax);
+    flag_word::store(&mut code.asm(), Gpr::Rax);
+}
+
+/// The flags of an ordered comparison, as `code` holds them: greater, less
+/// and equal.
+fn ordered_words(code: &Code) -> [u32; 3] {
+    [NZCV_C, NZCV_N, NZCV_Z | NZCV_C].map(|flags| flag_word::constant(code, flags))
 }
 
 fn ordered_flags(code: &mut Code, integer: bool) {
+    let [greater, less, equal] = ordered_words(code);
     let mut asm = code.asm();
-    asm.mov_imm32(Gpr::Rax, NZCV_C);
-    asm.mov_imm32(Gpr::Rdx, NZCV_N);
+    asm.mov_imm32(Gpr::Rax, greater);
+    asm.mov_imm32(Gpr::Rdx, less);
     select_flags(code, if integer { Cond::L } else { Cond::B });
-    code.asm().mov_imm32(Gpr::Rdx, NZCV_Z | NZCV_C);
+    code.asm().mov_imm32(Gpr::Rdx, equal);
     select_flags(code, Cond::E);
     store_flags(code);
 }
 
 fn zero_flags(code: &mut Code, format: Format) {
     move_scalar(code, format, Gpr::Rcx, LEFT_VECTOR);
+    let [greater, less, equal] = ordered_words(code);
     let mut asm = code.asm();
     asm.test(lane_size(format), Gpr::Rcx, Gpr::Rcx);
-    asm.mov_imm32(Gpr::Rax, NZCV_C);
-    asm.mov_imm32(Gpr::Rdx, NZCV_N);
+    asm.mov_imm32(Gpr::Rax, greater);
+    asm.mov_imm32(Gpr::Rdx, less);
     select_flags(code, Cond::S);
     // Shift off the sign at the lane width; both +0 and -0 set ZF.
     let mut asm = code.asm();
     asm.shift_imm(ShiftOp::Shl, lane_size(format), Gpr::Rcx, 1);
-    asm.mov_imm32(Gpr::Rdx, NZCV_Z | NZCV_C);
+    asm.mov_imm32(Gpr::Rdx, equal);
     select_flags(code, Cond::E);
     store_flags(code);
 }
@@ -233,8 +237,14 @@ fn emit_flags(code: &mut Code, format: Format, left: u8, right: CompareSource, p
     read_vector(code, left, LEFT_VECTOR);
     if let CompareSource::Register(right) = right {
         read_vector(code, right, RIGHT_VECTOR);
+        // The half order key holds for normal values alone. UCOMIS orders
+        // zeros and infinities with no host or guest flag.
         for source in [LEFT_VECTOR, RIGHT_VECTOR] {
-            scalar_normal_guard(code, format, source, &mut helper);
+            if format == Format::Half {
+                scalar_normal_guard(code, format, source, &mut helper);
+            } else {
+                scalar_zero_guard(code, format, source, &mut helper);
+            }
         }
         if format == Format::Half {
             half_order_key(code, LEFT_VECTOR);
@@ -252,7 +262,7 @@ fn emit_flags(code: &mut Code, format: Format, left: u8, right: CompareSource, p
         helper_section(code, &helper, pc);
         ordered_flags(code, format == Format::Half);
     } else {
-        scalar_zero_guard(code, format, &mut helper);
+        scalar_zero_guard(code, format, LEFT_VECTOR, &mut helper);
         helper_section(code, &helper, pc);
         zero_flags(code, format);
     }
@@ -275,11 +285,8 @@ fn emit_conditional_flags(
         let completed = jump(code);
         let fallback_start = code.len();
         resolve(code, failed, fallback_start);
-        code.asm().mov_rm_imm32(
-            Size::Dword,
-            nzcv(),
-            (u32::from(fallback) << NZCV_SHIFT) as i32,
-        );
+        let fallback = flag_word::constant(code, u32::from(fallback) << NZCV_SHIFT);
+        flag_word::store_constant(&mut code.asm(), fallback);
         let completed_target = code.len();
         resolve(code, completed, completed_target);
     }
@@ -509,7 +516,7 @@ fn emit_predicate(code: &mut Code, operand: &Operand, pc: GuestAddress) {
     } else {
         read_numerical_vector(code, shape, left, LEFT_VECTOR);
         if shape == Shape::Scalar {
-            scalar_zero_guard(code, format, &mut helper);
+            scalar_zero_guard(code, format, LEFT_VECTOR, &mut helper);
         } else {
             vector_zero_guard(code, format, shape, &mut helper);
         }
