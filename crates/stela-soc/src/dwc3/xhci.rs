@@ -260,8 +260,9 @@ pub struct Xhci {
 #[derive(Clone, Default)]
 struct Trace {
     lines: VecDeque<String>,
-    /// The last line noted, and how often it recurred since.
-    last: Option<String>,
+    /// The last two lines noted, oldest first, and how often either
+    /// recurred since: a driver toggling a register alternates two lines.
+    last: [Option<String>; 2],
     repeated: u64,
     /// Lines added this second, and the system count it began at.
     spent: u32,
@@ -282,7 +283,7 @@ impl Trace {
     fn flush_repeats(&mut self) {
         let repeated = core::mem::take(&mut self.repeated);
         if repeated != 0 {
-            self.push(format!("(the line before recurred {repeated} times)"));
+            self.push(format!("(the lines before recurred {repeated} times)"));
         }
     }
 }
@@ -358,21 +359,21 @@ impl Xhci {
         let trace = core::mem::take(&mut self.trace);
         *self = Self::new();
         self.trace = trace;
-        self.trace.last = None;
+        self.trace.last = [None, None];
         self.note(format!("{why}: controller reset"));
     }
 
-    /// Adds `line` to the trace; a line repeating the one before is only
-    /// counted.
+    /// Adds `line` to the trace; a line repeating one of the last two is
+    /// only counted.
     fn note(&mut self, line: String) {
         let trace = &mut self.trace;
-        if trace.last.as_ref() == Some(&line) {
+        if trace.last.iter().flatten().any(|last| *last == line) {
             trace.repeated += 1;
             return;
         }
         trace.flush_repeats();
         trace.push(line.clone());
-        trace.last = Some(line);
+        trace.last = [trace.last[1].take(), Some(line)];
     }
 
     /// The host trace's next line, for the boot log.
@@ -412,6 +413,7 @@ impl Xhci {
                 );
             }
         }
+        self.slot_summary(&mut line);
         Some(line)
     }
 

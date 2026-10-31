@@ -38,7 +38,8 @@ use super::{
     SLOT_NOT_ENABLED, SUCCESS, TOGGLE, TRANSACTION_ERROR, TRB_BYTES, TRB_ERROR, Xhci,
 };
 use crate::Result;
-use alloc::{boxed::Box, format, vec::Vec};
+use alloc::{boxed::Box, format, string::String, vec::Vec};
+use core::fmt::Write;
 use stela_contracts::refuse;
 use {
     crate::usb, crate::usb::Function, crate::usb::Reply, crate::usb::Token,
@@ -166,6 +167,9 @@ struct Endpoint {
     /// The function NAKed: poll again from `next`.
     waiting: bool,
     next: u64,
+    /// A doorbell restarted the endpoint and its output context still says
+    /// Stopped. Drivers read that state to choose Stop Endpoint.
+    restarted: bool,
 }
 
 impl Endpoint {
@@ -181,6 +185,7 @@ impl Endpoint {
             rung: false,
             waiting: false,
             next: 0,
+            restarted: false,
         }
     }
 
@@ -686,6 +691,7 @@ impl Xhci {
         let endpoint = &mut slot.endpoints[dci - 1];
         if endpoint.state == EpState::Stopped {
             endpoint.state = EpState::Running;
+            endpoint.restarted = true;
         }
         if endpoint.state == EpState::Running {
             endpoint.rung = true;
@@ -697,6 +703,32 @@ impl Xhci {
             ));
         }
         Ok(())
+    }
+
+    /// Appends each slot's state and route and the rings of its enabled
+    /// endpoints, for the boot log's heartbeat.
+    pub(super) fn slot_summary(&self, line: &mut String) {
+        for (n, slot) in self.slots.iter().enumerate() {
+            let Some(slot) = slot else { continue };
+            let (state, route) = (slot.state, slot.route());
+            let _ = write!(line, " slot{}=[{state:?} route={route:#x}", n + 1);
+            for (e, endpoint) in slot.endpoints.iter().enumerate() {
+                if endpoint.state != EpState::Disabled {
+                    let _ = write!(
+                        line,
+                        " dci{}={:?}@{:#x}/{}{}{}{}",
+                        e + 1,
+                        endpoint.state,
+                        endpoint.ring.dequeue,
+                        u8::from(endpoint.ring.cycle),
+                        if endpoint.td.is_some() { " td" } else { "" },
+                        if endpoint.rung { " rung" } else { "" },
+                        if endpoint.waiting { " waiting" } else { "" },
+                    );
+                }
+            }
+            line.push(']');
+        }
     }
 
     /// Endpoints with work to try now.
@@ -749,6 +781,9 @@ impl Xhci {
                 let Some(slot) = self.slot_mut(id) else {
                     break;
                 };
+                if core::mem::take(&mut slot.endpoints[dci - 1].restarted) {
+                    Self::write_endpoint_context(port, slot, dci)?;
+                }
                 let (root, route) = (slot.port(), slot.route());
                 // A suspended link schedules nothing.
                 if self.port_ready(root) && !self.ports[root - 1].active() {
@@ -795,6 +830,7 @@ impl Xhci {
         let slot = self.slot_mut(id).unwrap();
         let (root, route) = (slot.port(), slot.route());
         let present = self.port_ready(root);
+        let mut found = false;
         while *budget > 0 {
             let endpoint = &mut self.slot_mut(id).unwrap().endpoints[dci - 1];
             if endpoint.td.is_none() {
@@ -802,10 +838,19 @@ impl Xhci {
                     Some(td) => endpoint.td = Some(td),
                     None => {
                         endpoint.rung = false;
+                        let ring = endpoint.ring;
+                        if !found {
+                            self.note(format!(
+                                "slot {id} dci {dci} doorbell: no TRB owned at {:#x} cycle {}",
+                                ring.dequeue,
+                                u8::from(ring.cycle)
+                            ));
+                        }
                         return Ok(());
                     }
                 }
             }
+            found = true;
             let device = function
                 .as_deref_mut()
                 .filter(|_| present)

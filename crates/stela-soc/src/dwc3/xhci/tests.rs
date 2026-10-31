@@ -565,8 +565,8 @@ fn an_attached_keyboard_enumerates_and_reports_keys_through_its_rings() {
     b.service();
     assert_eq!(event(&mut b.ram, b.events)[3] & CYCLE, 0);
     assert!(!b.x.pending());
-    // The keyboard's default 500 ms idle rate repeats its report.
-    assert_eq!(b.x.deadline(Some(&b.hid)), Some(125 * 96_000));
+    // The keyboard reports changes alone, so nothing is due.
+    assert_eq!(b.x.deadline(Some(&b.hid)), None);
     b.hid
         .input(stela_drivers::input::Input::Key {
             usage: 0x04,
@@ -715,6 +715,28 @@ fn stopping_a_polled_endpoint_reports_its_started_td_first() {
     assert_eq!(b.event()[3] >> 10 & 0x3f, PORT_STATUS_CHANGE);
     let e = b.command([0, 0, 0, DISABLE_SLOT << 10 | 1 << 24 | CYCLE]);
     assert_eq!(e[2] >> 24, SUCCESS);
+}
+
+/// macOS reads the output context to choose Stop Endpoint: one left saying
+/// Stopped sends it straight to Set TR Dequeue Pointer, which fails.
+#[test]
+fn a_doorbell_shows_a_restarted_endpoint_as_running_in_its_output_context() {
+    let mut b = enumerated();
+    let stop = b.command([0, 0, 0, STOP_ENDPOINT << 10 | 3 << 16 | 1 << 24 | CYCLE]);
+    assert_eq!(stop[2] >> 24, SUCCESS);
+    assert_eq!(b.context(OUTPUT + 0x20 * 3)[0] & 7, 3);
+    wr(&mut b.x, DOORBELLS + 4, 3);
+    b.service();
+    assert_eq!(b.context(OUTPUT + 0x20 * 3)[0] & 7, 1);
+    let dequeue = b.command([
+        EP1_RING as u32 | 1,
+        (EP1_RING >> 32) as u32,
+        0,
+        SET_TR_DEQUEUE << 10 | 3 << 16 | 1 << 24 | CYCLE,
+    ]);
+    assert_eq!(dequeue[2] >> 24, CONTEXT_STATE_ERROR);
+    let stop = b.command([0, 0, 0, STOP_ENDPOINT << 10 | 3 << 16 | 1 << 24 | CYCLE]);
+    assert_eq!(stop[2] >> 24, SUCCESS);
 }
 
 #[test]
