@@ -681,3 +681,15 @@ fn complete_local_he_source_words_must_match_transmitted_maps_without_gaining_pe
     assert!(no_he.clone().with_local_he_source_maps(maps).is_err());
     assert!(no_he.meets_local_he_basic(0).is_err());
 }
+
+#[test]
+fn the_wmm_set_count_comes_with_its_parameters() {
+    let mut element = vec![221, 24, 0, 0x50, 0xf2, 2, 1, 1, 7, 0];
+    for aci in 0..4u8 {
+        element.extend([aci << 5 | 3, 0x54, 0, 0]);
+    }
+    let (count, parameters) = Wmm::announced(&element).unwrap();
+    assert_eq!(count, 7);
+    assert_eq!(parameters[1].aci, 1);
+    assert_eq!(Wmm::announced(&[3, 1, 36]), None);
+}

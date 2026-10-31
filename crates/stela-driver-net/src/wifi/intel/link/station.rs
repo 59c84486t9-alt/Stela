@@ -1325,7 +1325,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
                     self.client.switch_started(word(0).unwrap_or(0));
                 }
                 beacon::SWITCH_ERROR_NOTIFICATION if word(4).is_some_and(beacon::switch_failed) => {
-                    self.client.tracking.drop_connection();
+                    self.client.tracking.watch.drop_connection();
                 }
                 coexistence::PROFILE_NOTIFICATION => self.client.bluetooth.profile(raw),
                 emlsr::BLUETOOTH_NOTIFICATION => {
@@ -1365,7 +1365,8 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
 
     /// Management frames, once session protection holds the channel for them.
     fn send_management(&mut self, queue: &mut Queue<Q, B>) -> Result<(), Error> {
-        if self.client.outbox.is_empty() || (self.client.tracking.silent() && !self.client.leaving)
+        if self.client.outbox.is_empty()
+            || (self.client.tracking.watch.silent() && !self.client.leaving)
         {
             return Ok(());
         }
@@ -1415,7 +1416,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
 
     /// Data frames onto their TIDs' queues, each adding its queue first.
     fn send_data(&mut self, queue: &mut Queue<Q, B>) -> Result<(), Error> {
-        if self.client.tracking.silent() {
+        if self.client.tracking.watch.silent() {
             return Ok(());
         }
         let antennas = queue.antennas();
