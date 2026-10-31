@@ -10,6 +10,10 @@ pub const PAGE: u64 = 4096;
 pub const LARGE: u64 = 2 * 1024 * 1024;
 pub const PRESENT: u64 = 1;
 pub const WRITABLE: u64 = 1 << 1;
+/// A user page, which SMAP keeps supervisor data accesses out of while
+/// RFLAGS.AC is clear. Every level must set it for a page to be one, so
+/// intermediate entries always do and a leaf alone decides.
+pub const USER: u64 = 1 << 2;
 const HUGE: u64 = 1 << 7;
 /// Kept across CR3 writes while CR4.PGE is set: only for mappings every
 /// root shares and nothing changes.
@@ -55,7 +59,7 @@ pub fn entry(
             }
             let next = frames.frame().ok_or(refuse!("no page-table frame left"))?;
             // SAFETY: as above; intermediate entries never carry NX.
-            unsafe { slot.write_volatile(next | PRESENT | WRITABLE) };
+            unsafe { slot.write_volatile(next | PRESENT | WRITABLE | USER) };
             table = next;
         } else if value & HUGE != 0 {
             return Err(refuse!("address already mapped by a large page"));

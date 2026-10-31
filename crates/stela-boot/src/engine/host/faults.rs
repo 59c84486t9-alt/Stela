@@ -220,8 +220,28 @@ pub(crate) fn page_fault(
         Ok(resolved) => resolved,
         Err(cause) => return abandon(state, frame, address, write, cause, saved),
     };
-    let rights = PRESENT | NX | if translation.writable { WRITABLE } else { 0 };
-    let root = state.roots[state.current];
+    // Filled for EL1 without PAN, a leaf is one PAN guards unless it would
+    // translate the same with PAN set; one filled with PAN set never is.
+    let guarded = state.contexts.pan_flag
+        && state.current % VIEWS == EL1_VIEW
+        && !matches!(
+            mmu::translate(
+                &regime.controls,
+                address,
+                Access::Read,
+                mmu::Requester {
+                    pan: true,
+                    ..regime.requester
+                },
+                &mut GuestTables(state),
+            ),
+            Outcome::Mapped(same) if same.writable == translation.writable
+        );
+    let rights = PRESENT
+        | NX
+        | if translation.writable { WRITABLE } else { 0 }
+        | if guarded { tables::USER } else { 0 };
+    let root = state.roots[state.root_of(state.current)];
     let virtual_page = address & !(PAGE - 1);
     let half = if address >> 63 == 0 { LOWER } else { UPPER };
     if half == LOWER

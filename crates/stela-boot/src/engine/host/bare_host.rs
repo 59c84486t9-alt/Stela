@@ -295,6 +295,7 @@ impl Host for BareHost<'_> {
     unsafe fn execute(&mut self, code: NativeCode, guest: &mut GuestState) -> NativeExit {
         assert!(!state().native, "nested native block entry");
         state().native = true;
+        state().load_pan();
         let entered = rdtsc();
         // SAFETY: the engine passes installed system-mode block code.
         let exit = unsafe { stela_enter_block(guest, code.0) };
@@ -314,6 +315,7 @@ impl Host for BareHost<'_> {
             profile_timestamp,
         );
         state().native = true;
+        state().load_pan();
         let entered = rdtsc();
         // SAFETY: caller holds the installed context block, live frame
         // and service owners. The current GS HostOwner keeps recovery state.
@@ -430,9 +432,12 @@ impl Host for BareHost<'_> {
             (_, true, false) => PAN_VIEW,
         } + if regime.tag_checked() { VIEWS } else { 0 };
         if state.current != view {
+            let load = state.root_of(view) != state.root_of(state.current);
             state.current = view;
-            state.view_switches += 1;
-            state.load_view(view);
+            if load {
+                state.view_switches += 1;
+                state.load_view(view);
+            }
         }
     }
 
@@ -490,7 +495,8 @@ impl Host for BareHost<'_> {
             for &(first, last) in &unmapped {
                 let mut page = first & !(PAGE - 1);
                 loop {
-                    state.contexts.forget(page, state.current);
+                    let current = state.root_of(state.current);
+                    state.contexts.forget(page, current);
                     if page >= last & !(PAGE - 1) {
                         break;
                     }

@@ -18,6 +18,12 @@
 //! (`mmu::shadow::Extents`), so a TLBI unmaps only the ranges it reaches.
 //! The detached lower halves of a few recent TTBR0s stay in their frames
 //! (`mmu::shadow::Kept`), and a switch back attaches its half again.
+//!
+//! With SMAP, EL1's two views share EL1's root, as they differ only in what
+//! PAN takes away, which is all data access or none: a leaf that PAN guards
+//! is a user page, and PAN is RFLAGS.AC clear ([`State::root_of`]). PAN
+//! changes around each copy to user memory, so this spares a root load, and
+//! without PCIDs a TLB flush, on every one.
 use super::interrupts::{Frame, SPURIOUS_VECTOR, TIMER_VECTOR};
 use crate::Result;
 use crate::{
@@ -57,9 +63,9 @@ use bare_host::*;
 use faults::*;
 pub(crate) use faults::{native_exception, page_fault};
 pub(crate) use signals::{
-    clear_interrupted, completion_signal, doorbell_counter, in_interrupt, interrupted,
+    clear_interrupted, completion_signal, doorbell_counter, doorbells, in_interrupt, interrupted,
     join_shootdown, ring, root_irq_active, shootdown, shootdown_interrupt, sleep_for,
-    doorbells, undelivered_doorbells, wake_interrupt,
+    undelivered_doorbells, wake_interrupt,
 };
 pub use signals::{stray_interrupt, timer_interrupt};
 #[cfg(feature = "diagnostics")]
@@ -245,13 +251,31 @@ struct Contexts {
     /// May hold what was invalidated since; so is one never loaded.
     stale: [bool; ROOTS],
     invpcid: bool,
+    /// CR4.SMAP is set, and RFLAGS.AC stands for PAN ([`tag_views`]).
+    pan_flag: bool,
 }
 
 /// Whether this core's views load in their contexts from now on, as
-/// [`storage::TaggedRoots`] sets or restores PCIDE.
-pub(super) fn tag_views(tagged: bool) {
+/// [`storage::TaggedRoots`] sets or restores PCIDE, and whether RFLAGS.AC
+/// stands for PAN, as it sets or restores SMAP.
+pub(super) fn tag_views(tagged: bool, pan_flag: bool) {
     if let Some(state) = local::installed() {
         state.contexts.tagged = tagged;
+        state.contexts.pan_flag = pan_flag;
+    }
+}
+
+/// Whether this core has the state [`tag_views`] sets.
+pub(super) fn views_installed() -> bool {
+    local::installed().is_some()
+}
+
+/// Lift SMAP for what runs next on this core, which is not guest code: the
+/// loader root's firmware tables may mark any page a user page.
+pub(super) fn allow_user_pages() {
+    if local::installed().is_some_and(|state| state.contexts.pan_flag) {
+        // SAFETY: CPL0 with SMAP, which `pan_flag` says this core has.
+        unsafe { asm!("stac", options(nomem, nostack)) };
     }
 }
 
@@ -551,6 +575,7 @@ pub unsafe fn install(config: Config) -> Result<HostOwner> {
                 tagged: false,
                 stale: [true; ROOTS],
                 invpcid: crate::native_mmio::shootdown::invpcid(),
+                pan_flag: false,
             },
             legacy_translations_dirty: false,
             current: usize::MAX,
@@ -990,9 +1015,37 @@ impl State {
         }
     }
 
+    /// The root `view` runs in: its own, or under [`Contexts::pan_flag`] for
+    /// EL1 with PAN EL1's, whose tables hold the same leaves.
+    fn root_of(&self, view: usize) -> usize {
+        if self.contexts.pan_flag && view % VIEWS == PAN_VIEW {
+            view - PAN_VIEW + EL1_VIEW
+        } else {
+            view
+        }
+    }
+
+    /// Set RFLAGS.AC for a native run in the current view, where it only
+    /// matters in EL1's root: clear for PAN, which keeps out of user pages.
+    fn load_pan(&self) {
+        if !self.contexts.pan_flag {
+            return;
+        }
+        // SAFETY: CPL0 with SMAP, which `pan_flag` says this core has. Only
+        // AC changes, and no code between here and the guest's reads it.
+        unsafe {
+            if self.current % VIEWS == PAN_VIEW {
+                asm!("clac", options(nomem, nostack));
+            } else {
+                asm!("stac", options(nomem, nostack));
+            }
+        }
+    }
+
     /// Load root `view` in its context, which keeps what the context holds
     /// unless it is stale.
     fn load_view(&mut self, view: usize) {
+        let view = self.root_of(view);
         let root = self.roots[view];
         if !self.contexts.tagged {
             return load_root(root);

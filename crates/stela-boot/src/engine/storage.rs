@@ -19,8 +19,8 @@ use crate::Result;
 use crate::output;
 use alloc::{boxed::Box, format, string::String, vec::Vec};
 use core::{
-    cell::Cell,
     arch::asm,
+    cell::Cell,
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use stela_contracts::refuse;
@@ -43,6 +43,9 @@ use stela_runtime::pc::{
 const PGE: u64 = 1 << 7;
 /// CR4.PCIDE: TLB entries tagged by their root's context.
 const PCIDE: u64 = 1 << 17;
+/// CR4.SMAP: supervisor data accesses stay out of user pages unless
+/// RFLAGS.AC is set, which the host's views use for PAN.
+const SMAP: u64 = 1 << 21;
 /// CR3's context, which holds PWT and PCD without PCIDE.
 const CONTEXT: u64 = 0xfff;
 /// The loader root's context while tagged; the host root keeps 0 and the
@@ -53,7 +56,7 @@ pub(super) const KEEP_ENTRIES: u64 = 1 << 63;
 
 /// Keeps this core's TLB entries across root changes while the engine runs:
 /// the window's in global pages, on every processor, and with PCIDs the
-/// others by root. Entering the loader's root ([`RestoreRoot`]) then flushes
+/// others by root, and with SMAP spares the changes PAN would make. Entering the loader's root ([`RestoreRoot`]) then flushes
 /// only its own context and leaving it flushes nothing, so the engine's
 /// translations survive a call into the host drivers; no engine mapping
 /// changes inside one. Dropped, CR4 is restored for the native validations,
@@ -76,19 +79,22 @@ impl TaggedRoots {
             return None;
         }
         let tagged = core::arch::x86_64::__cpuid(1).ecx & 1 << 17 != 0 && cr3 & CONTEXT == 0;
-        let enabled = cr4 | PGE | if tagged { PCIDE } else { 0 };
+        let smap = super::host::views_installed()
+            && core::arch::x86_64::__get_cpuid_max(0).0 >= 7
+            && core::arch::x86_64::__cpuid_count(7, 0).ebx & 1 << 20 != 0;
+        let enabled = cr4 | PGE | if tagged { PCIDE } else { 0 } | if smap { SMAP } else { 0 };
         // SAFETY: every processor that runs this has PGE, and PCIDE is set
-        // only with PCIDs and the current root context 0.
+        // only with PCIDs and the current root context 0. With SMAP, the
+        // host leaves no page it touches a user page, and the loader root's
+        // calls run with AC set ([`RestoreRoot`]).
         unsafe { asm!("mov cr4, {}", in(reg) enabled, options(nostack, preserves_flags)) };
-        super::host::tag_views(tagged);
+        super::host::tag_views(tagged, smap);
         Some(Self { cr4, tagged })
     }
 }
 impl Drop for TaggedRoots {
     fn drop(&mut self) {
-        if self.tagged {
-            super::host::tag_views(false);
-        }
+        super::host::tag_views(false, false);
         let cr3: u64;
         // SAFETY: outside a driver call; PCIDE clears only under context 0,
         // and clearing it flushes every context, as clearing PGE does.
@@ -199,6 +205,7 @@ impl RestoreRoot {
                 };
                 cr4 & PCIDE != 0
             });
+        super::host::allow_user_pages();
         // Tagged, entering flushes the loader's context alone.
         let root = if tagged {
             root & !CONTEXT | LOADER_CONTEXT
@@ -702,8 +709,8 @@ pub unsafe fn open(
             inner: Box::new(partition),
             root,
             running: 0,
-                signals: Cell::new(None),
-                looked: Cell::new(None),
+            signals: Cell::new(None),
+            looked: Cell::new(None),
         })
     };
     let (mut store_partition, mut log_partition) = (None, None);

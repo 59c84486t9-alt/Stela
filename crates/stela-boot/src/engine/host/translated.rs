@@ -199,6 +199,7 @@ extern "sysv64" fn translate(saved: &mut Saved) -> u64 {
     let [bytes, flags] = unsafe { (saved.ret as *const [u8; 2]).read_unaligned() };
     let write = flags & WRITE != 0;
     let view = state.current as u8;
+    let current = state.root_of(state.current);
     state.helper_calls += 1;
     for _ in 0..FILLS {
         match state.tlb.lookup(address, u64::from(bytes), write, view) {
@@ -213,7 +214,7 @@ extern "sysv64" fn translate(saved: &mut Saved) -> u64 {
                     abandon(state, saved, address, write, FaultCause::NonCanonical)
                 };
                 state.bounces += 1;
-                let slot = bounce.map(first, second, &mut state.contexts, state.current);
+                let slot = bounce.map(first, second, &mut state.contexts, current);
                 return slot + (address & (tables::PAGE - 1));
             }
             Lookup::Miss { address: missing } => {
