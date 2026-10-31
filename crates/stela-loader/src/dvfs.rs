@@ -19,16 +19,21 @@
 //!   points (`machine::board::operating_points`);
 //! - any other domain's table whose first state has voltage 0 is a list of
 //!   state numbers, `(0, 0), (1, 0), …`, and the domain has as many states as
-//!   the last number plus one. The IPSW DeviceTree ships `voltage-states0`,
-//!   `2` and `9` in this form; the driver asserts the list is not empty.
+//!   the last number plus one, each without a clock. The IPSW DeviceTree ships
+//!   `voltage-states0`, `2` and `9` in this form; the driver asserts the list
+//!   is not empty;
+//! - one whose first state has a voltage is a run of `(clock in Hz, voltage)`
+//!   states of a domain of the plain type, byte 2 of 0.
 //!
 //! iBoot fills these tables from the chip itself: each state's voltage from
 //! its calibration fuses, and the non-CPU domains' clocks from their PLL
 //! registers. An emulated chip has neither. The CPU tables leave the voltage
 //! 0, which the driver uses only for its dynamic energy estimate (V² × f), so
-//! the estimate states no energy rather than an invented one. Every other
-//! domain gets one state, `(0, 0)`: the machine does not scale its clock, so
-//! the domain has a single operating point. The optional `-sram` and
+//! the estimate states no energy rather than an invented one. The ANE gets
+//! `board::ANE_CLOCKS_MHZ`, chosen clocks that CLPC cannot start without, at
+//! the least voltage that marks them as clocks. Every other domain gets one
+//! state, `(0, 0)`: the machine does not scale its clock, so the domain has a
+//! single operating point. The optional `-sram` and
 //! `-extra` tables are not published. A CPU cluster of a SoC without
 //! operating-point evidence keeps no table: inventing clocks would be a
 //! placeholder, so the bundle records the gap and the driver's own stop
@@ -45,12 +50,18 @@ const PERF_DOMAINS: &str = "perf-domains";
 const DOMAIN: usize = 28;
 /// The period unit: a state's period is this over its clock in Hz.
 const PERIOD_SCALE: u64 = 65_536 * 1_000_000_000;
+/// The domain whose table holds [`board::ANE_CLOCKS_MHZ`].
+const ANE: &str = "ANE";
+/// The voltage of a state whose only use is to mark its table as clocks.
+const LEAST_VOLTAGE: u32 = 1;
 
 /// What [`publish`] did for one domain without a table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Contents {
     /// A CPU cluster's operating points.
     OperatingPoints,
+    /// Clocks chosen for a domain nothing runs at.
+    ChosenClocks,
     /// A single state, for a domain whose clock the machine does not scale.
     SingleState,
     /// Nothing: the SoC has no operating-point evidence for this cluster.
@@ -112,6 +123,16 @@ fn cluster(domain: &str, chip_id: u32) -> Result<Option<Vec<u8>>> {
     Ok(Some(value))
 }
 
+/// The ANE's table: [`board::ANE_CLOCKS_MHZ`] as Hz.
+fn ane_clocks() -> Vec<u8> {
+    let mut value = Vec::with_capacity(board::ANE_CLOCKS_MHZ.len() * 8);
+    for mhz in board::ANE_CLOCKS_MHZ {
+        value.extend_from_slice(&(mhz * 1_000_000).to_le_bytes());
+        value.extend_from_slice(&LEAST_VOLTAGE.to_le_bytes());
+    }
+    value
+}
+
 /// Add the table of each `perf-domains` domain that lacks one. Returns the
 /// tables written; a tree without the domains gets none.
 pub fn publish(tree: &mut DeviceTree, chip_id: u32) -> Result<Vec<Table>> {
@@ -145,6 +166,8 @@ pub fn publish(tree: &mut DeviceTree, chip_id: u32) -> Result<Vec<Table>> {
                 Some(value) => (Contents::OperatingPoints, Some(value)),
                 None => (Contents::Unpublished, None),
             }
+        } else if domain == ANE {
+            (Contents::ChosenClocks, Some(ane_clocks()))
         } else {
             (Contents::SingleState, Some([0u8; 8].to_vec()))
         };
@@ -214,7 +237,7 @@ mod tests {
         );
         assert_eq!(written[2].domain, "ANE");
         assert_eq!(written[0].contents, Contents::OperatingPoints);
-        assert_eq!(written[2].contents, Contents::SingleState);
+        assert_eq!(written[2].contents, Contents::ChosenClocks);
         // 600 MHz is period 109,226, which the driver reads back as 600 MHz.
         let e = &tree.property(PMGR, "voltage-states1").unwrap().value;
         assert_eq!(e.len(), 7 * 8);
@@ -223,9 +246,11 @@ mod tests {
         let p = &tree.property(PMGR, "voltage-states5").unwrap().value;
         assert_eq!(p.len(), 17 * 8);
         assert_eq!(word(p, 32), 18_703);
-        // A domain whose clock the machine does not scale has one state.
+        // The ANE's clocks are in Hz, marked by a voltage.
         let ane = &tree.property(PMGR, "voltage-states8").unwrap().value;
-        assert_eq!(ane, &vec![0u8; 8]);
+        assert_eq!(ane.len(), 2 * 8);
+        assert_eq!((word(ane, 0), word(ane, 1)), (300_000_000, 1));
+        assert_eq!((word(ane, 2), word(ane, 3)), (600_000_000, 1));
         // The shipped table stays, and a second publish writes nothing.
         assert_eq!(
             tree.property(PMGR, "voltage-states0").unwrap().value.len(),
@@ -274,7 +299,7 @@ mod tests {
         let written = publish(&mut m3, 0x8122).unwrap();
         assert_eq!(written[0].contents, Contents::Unpublished);
         assert!(m3.property(PMGR, "voltage-states1").is_none());
-        assert_eq!(written[2].contents, Contents::SingleState);
+        assert_eq!(written[2].contents, Contents::ChosenClocks);
         assert!(publish(&mut with_domains(None), 0x8122).unwrap().is_empty());
         assert!(publish(&mut with_domains(Some(&[0; 27])), 0x8112).is_err());
     }

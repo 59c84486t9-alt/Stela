@@ -173,6 +173,17 @@ pub struct CounterBlock {
 pub const UART: &str = "uart-1,samsung";
 /// The `compatible` of the watchdog the engine models (`platform::apple::wdt`).
 pub const WATCHDOG: &str = "wdt,s5l8960x";
+/// The `compatible` of the closed-loop performance controller whose kext,
+/// `AppleT8112CLPC`, runs on the modeled PMGR, core counters and PTD. Its
+/// perfcontrol callbacks are what place thread groups on the P-cores.
+pub const CLPC: &str = "clpc,t8112";
+
+/// The ANE domain's clocks in MHz, lowest first. iBoot reads them from the
+/// chip's PLLs; these are chosen, and nothing runs at them. `CLPC::init` turns
+/// each P state's ANE clock into a curve and needs two different clocks, the
+/// lowest at 19 MHz or more for the curve to be positive; the curve is near 1
+/// at the highest.
+pub const ANE_CLOCKS_MHZ: [u32; 2] = [300, 600];
 /// The AIC versions the engine models (`platform::apple::aic1` and `aic`).
 const AICS: [&str; 3] = ["aic,1", "aic,2", "aic,3"];
 /// The modern DART compatible; native legacy families are selected through

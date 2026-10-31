@@ -284,8 +284,12 @@ impl AppleDevices {
         mapped: bool,
         events: &[u8],
     ) -> Result<()> {
-        let model = Cluster::new(dvmr, pstates)
+        let mut model = Cluster::new(dvmr, pstates)
             .and_then(|c| c.with_counters(counter_capacity, mapped, events))?;
+        // Only the P cluster's counters are mapped; only it shares with the ANE.
+        if mapped {
+            model = model.with_ane_states(stela_soc_data::board::ANE_CLOCKS_MHZ.len());
+        }
         let table = model.pstate_bytes();
         let device = self.bus.add(Box::new(model));
         for (offset, bytes) in [

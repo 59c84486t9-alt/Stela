@@ -23,6 +23,9 @@
 //! ones. The registers' other bits are fields no reader of this kernel is
 //! known to take, so they read 0 as well, and every other register refuses.
 //! Fuses are read-only.
+//!
+//! `T8112CLPC::isRunningOnSilicon` (0xfffffe0009f78cf0) reads `0x80c` and
+//! takes bits 31:28 of 0 for a real die, so 0 there is the silicon answer.
 use {
     stela_contracts::bus::Access, stela_contracts::bus::Direction,
     stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError, stela_contracts::bus::Width,
@@ -32,7 +35,7 @@ use {
 const NAME: &str = "aon-fuse";
 
 /// The calibration registers a model describes.
-const DESCRIBED: [u64; 6] = [0x4b0, 0x4c4, 0x4cc, 0x4d8, 0x4dc, 0x4e0];
+const DESCRIBED: [u64; 7] = [0x4b0, 0x4c4, 0x4cc, 0x4d8, 0x4dc, 0x4e0, 0x80c];
 
 /// The block's span.
 pub const FUSE_BYTES: u64 = 0x4000;

@@ -1,6 +1,6 @@
 //! Compatible and role matching for the native models exposed in the DeviceTree.
 use super::{
-    AES, AICS, ASC, BOOT_FIRMWARE, BUTTONS, DCP_EXPERT, DCPEXT_ROLE, DISPEXT, DISPEXT_T6000,
+    AES, AICS, ASC, BOOT_FIRMWARE, BUTTONS, CLPC, DCP_EXPERT, DCPEXT_ROLE, DISPEXT, DISPEXT_T6000,
     DOCK_PORT, GFX_MAPPER, GPIO, GPIO_S5L, GPIO_T6000, HPM, HPM_MANAGER, IOMMU_MAPPER, MCC, NOR,
     NVRAM, PMGR2_IMPLEMENTATION, PMU, RTBUDDY, SEP, SEP_NUB, SMC_PMU, SOCS, SPI, SPMI, SYSCFG,
     T6000_EXTERNAL_OUTPUT_ADMITTED, UART, WATCHDOG, admitted_gpu, atc_phy_compatible,
@@ -225,6 +225,7 @@ pub fn models<'a>(name: &str, property: impl Fn(&str) -> Option<&'a [u8]>) -> bo
         PMU,
         BUTTONS,
         DISPEXT,
+        CLPC,
     ]
     .contains(&name)
         || i2c_compatible(name, property("compatible"))

@@ -125,6 +125,8 @@ pub(super) struct Shaped {
     pub(super) tree: DeviceTree,
     pub(super) placeholders: Vec<PlaceholderDecision>,
     pub(super) boot_cpu: BootCpu,
+    /// The PEs of the shaped `/cpus`.
+    pub(super) processors: usize,
     pub(super) security: Vec<Decision>,
     pub(super) unresolved: Vec<String>,
     pub(super) nvram_published: bool,
@@ -158,6 +160,7 @@ impl Shaped {
                 });
         let placeholders = resolve_placeholders(&mut tree, options)?;
         let boot_cpu = select_boot_cpu(&tree, &original_tree, options.boot_cpu.as_deref())?;
+        let processors = tree.node("/cpus").map_or(0, |cpus| cpus.children.len());
         let mut unresolved = shape_device_tree(&mut tree, &inputs.target, options, &boot_cpu)?;
         let (mut security, policy_unresolved) = boot_policy::apply(
             &mut tree,
@@ -171,6 +174,7 @@ impl Shaped {
             tree,
             placeholders,
             boot_cpu,
+            processors,
             security,
             unresolved,
             nvram_published: false,
@@ -311,6 +315,10 @@ impl Shaped {
                 unresolved.push(match table.contents {
                     dvfs::Contents::OperatingPoints => format!(
                         "/arm-io/pmgr {name}: {domain} operating points without calibrated voltages (0)"
+                    ),
+                    dvfs::Contents::ChosenClocks => format!(
+                        "/arm-io/pmgr {name}: {domain} clocks are chosen, not the chip's; \
+                         nothing runs at them"
                     ),
                     dvfs::Contents::SingleState => {
                         format!("/arm-io/pmgr {name}: {domain} has one state; its clock is not modeled")
