@@ -41,7 +41,8 @@ const FW_VERSION: u32 = 36;
 const CMD_VERSIONS: u32 = 48;
 const IML: u32 = 52;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// `IWL_DEVICE_FAMILY`, ordered as Linux compares it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Family {
     Ax200,
     Ax210,

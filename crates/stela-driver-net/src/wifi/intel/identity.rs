@@ -32,6 +32,14 @@ const AX231: u16 = 0x0294;
 const STEP_B: u32 = 1;
 const STEP_C: u32 = 2;
 
+/// The radio beside a MAC. It, not the MAC's family, decides the channel
+/// table and part of the PHY.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Rf {
+    Hr,
+    Gf,
+}
+
 /// What a device's `iwl_mac_cfg` says of the platform around its MAC.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Platform {
@@ -162,7 +170,7 @@ pub struct Profile {
     observed: Observed,
     family: Family,
     platform: Platform,
-    radio: u32,
+    radio: Rf,
     firmware: &'static str,
     pnvm: Option<&'static str>,
 }
@@ -214,7 +222,7 @@ impl Profile {
             observed,
             family,
             platform,
-            radio,
+            radio: if radio == RF_GF { Rf::Gf } else { Rf::Hr },
             firmware,
             pnvm,
         })
@@ -229,6 +237,9 @@ impl Profile {
     pub fn platform(&self) -> Platform {
         self.platform
     }
+    pub fn radio(&self) -> Rf {
+        self.radio
+    }
     /// `bisr_workaround`, set for the standalone AX200 alone.
     pub fn bisr_workaround(&self) -> bool {
         self.observed.device == AX200
@@ -236,10 +247,9 @@ impl Profile {
     /// The channel table this radio answers with: `uhb_supported` belongs to
     /// the radio, so an HR radio on an AX210-family MAC has no 6 GHz rows.
     pub fn channel_inventory(&self) -> Inventory {
-        if self.radio == RF_GF {
-            Inventory::UltraHighBand
-        } else {
-            Inventory::Extended
+        match self.radio {
+            Rf::Hr => Inventory::Extended,
+            Rf::Gf => Inventory::UltraHighBand,
         }
     }
     pub fn firmware_request(&self) -> Request {

@@ -5,7 +5,11 @@
 //! A station's HE capabilities, `iwl_iftype_cap` as `iwl_nvm_fixup_sband_iftd`
 //! fixes it up for a band and device. Only what `IEEE80211_HE_PHY_CAP0` says
 //! the width set holds goes on the air, as `ieee80211_put_he_cap` writes it.
-use crate::wifi::{Band, intel::firmware::Family, station::phy::McsMaps};
+use crate::wifi::{
+    Band,
+    intel::{firmware::Family, identity::Rf},
+    station::phy::McsMaps,
+};
 use alloc::vec::Vec;
 
 const EXTENSION: u8 = 255;
@@ -47,7 +51,13 @@ pub(super) fn six_ghz_capability(tx: u32, rx: u32) -> [u8; 5] {
 
 /// The element for `band`. `two_streams` is both directions having both
 /// antennas; `wide` is 160 MHz being usable.
-pub(super) fn capability(band: Band, family: Family, two_streams: bool, wide: bool) -> Vec<u8> {
+pub(super) fn capability(
+    band: Band,
+    family: Family,
+    radio: Rf,
+    two_streams: bool,
+    wide: bool,
+) -> Vec<u8> {
     // HTC-HE; 16 us trigger padding and eight receive TIDs; 32-bit bitmaps;
     // OM control and control frames to the multiple BSSID set; A-MSDU in
     // A-MPDU; eight transmit TIDs, 2x996 uplink, dynamic SMPS and trigger
@@ -72,10 +82,12 @@ pub(super) fn capability(band: Band, family: Family, two_streams: bool, wide: bo
     } else {
         phy[7] |= 0x08;
     }
-    match family {
-        // The HR radio has no 1024-QAM below a 242-tone RU.
-        Family::Ax200 => phy[9] &= !0x0c,
-        Family::Ax210 => phy[2] |= 0x40,
+    // The HR radio has no 1024-QAM below a 242-tone RU.
+    if radio == Rf::Hr {
+        phy[9] &= !0x0c;
+    }
+    if family >= Family::Ax210 {
+        phy[2] |= 0x40;
     }
     let [narrow, broad, _] = maps(two_streams);
     let mut element = Vec::new();
@@ -106,13 +118,27 @@ mod tests {
         } else {
             alloc::vec![1, 1, 0x8c]
         };
-        elements.extend(capability(band, family, two_streams, wide));
+        let radio = if family == Family::Ax200 {
+            Rf::Hr
+        } else {
+            Rf::Gf
+        };
+        elements.extend(capability(band, family, radio, two_streams, wide));
         Capabilities::parse(band, Role::Station, &elements).unwrap()
     }
 
     #[test]
+    fn an_hr_radio_on_an_ax210_family_mac_takes_each_from_its_own_side() {
+        let phy = |element: &[u8]| element[9..20].to_vec();
+        let so = phy(&capability(Band::Ghz5, Family::Ax210, Rf::Hr, true, true));
+        assert_eq!(so[9] & 0x0c, 0);
+        assert_ne!(so[2] & 0x40, 0);
+    }
+
+    #[test]
     fn six_ghz_names_he_and_its_own_band_capabilities_alone() {
-        let elements = super::super::capability_elements(Band::Ghz6, Family::Ax210, (3, 3), true);
+        let elements =
+            super::super::capability_elements(Band::Ghz6, Family::Ax210, Rf::Gf, (3, 3), true);
         let capabilities = Capabilities::parse(Band::Ghz6, Role::Station, &elements).unwrap();
         assert_eq!(capabilities.he_6ghz(), Some(0x6bd));
         assert!(capabilities.ht().is_none() && capabilities.vht().is_none());
@@ -121,22 +147,22 @@ mod tests {
 
     #[test]
     fn the_band_sets_its_widths_and_its_ampdu_extension() {
-        let low = capability(Band::Ghz2, Family::Ax210, true, true);
+        let low = capability(Band::Ghz2, Family::Ax210, Rf::Gf, true, true);
         assert_eq!(low[3..9], [0x01, 0x78, 0x20, 0x9a, 0xc0, 0xab]);
         assert_eq!(low[9], 0x02);
         assert_eq!(low.len(), 3 + 17 + 4 + 4, "2.4 GHz names no 160 MHz map");
-        let high = capability(Band::Ghz5, Family::Ax210, true, true);
+        let high = capability(Band::Ghz5, Family::Ax210, Rf::Gf, true, true);
         assert_eq!(high[6], 0x8a);
         assert_eq!(high[9], 0x0c);
         assert_eq!(high.len(), 3 + 17 + 8 + 4);
-        let narrow = capability(Band::Ghz5, Family::Ax210, true, false);
+        let narrow = capability(Band::Ghz5, Family::Ax210, Rf::Gf, true, false);
         assert_eq!(narrow[9], 0x04);
         assert_eq!(narrow.len(), 3 + 17 + 4 + 4);
     }
 
     #[test]
     fn a_single_chain_names_one_stream() {
-        let single = capability(Band::Ghz5, Family::Ax210, false, true);
+        let single = capability(Band::Ghz5, Family::Ax210, Rf::Gf, false, true);
         assert_eq!(single[9 + 2] & 0x04, 0);
         assert_eq!(single[9 + 5], 0);
         assert_eq!(single[9 + 7], 0x0e);
@@ -145,10 +171,10 @@ mod tests {
 
     #[test]
     fn the_radio_decides_small_rus_and_full_mu_mimo() {
-        let hr = capability(Band::Ghz5, Family::Ax200, true, true);
+        let hr = capability(Band::Ghz5, Family::Ax200, Rf::Hr, true, true);
         assert_eq!(hr[9 + 9], 0xf0);
         assert_eq!(hr[9 + 2] & 0x40, 0);
-        let gf = capability(Band::Ghz5, Family::Ax210, true, true);
+        let gf = capability(Band::Ghz5, Family::Ax210, Rf::Gf, true, true);
         assert_eq!(gf[9 + 9], 0xfc);
         assert_ne!(gf[9 + 2] & 0x40, 0);
     }

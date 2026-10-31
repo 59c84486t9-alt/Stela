@@ -351,6 +351,10 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
     pub fn family(&self) -> Family {
         self.profile.family()
     }
+    /// The radio beside this boot's MAC.
+    pub fn radio(&self) -> super::identity::Rf {
+        self.profile.radio()
+    }
     /// Start the standalone AX200 context protocol.
     /// # Safety
     /// PCI Memory Space is enabled and bus mastering has been enabled only

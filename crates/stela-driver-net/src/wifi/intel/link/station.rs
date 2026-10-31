@@ -20,6 +20,7 @@ use crate::wifi::{
         association::{self as commands, LinkHe, LinkState, MacState, PeerHe, PeerState},
         command,
         firmware::Family,
+        identity::Rf,
         transmit::{
             LegacyRate, Parameters,
             response::{Response, block_ack_queues},
@@ -1478,8 +1479,14 @@ fn peer_he(context: &AssociationContext) -> Option<PeerHe> {
 /// `iwl_init_ht_hw_capab`, `iwl_init_vht_hw_capab` and mac80211's SMPS-off
 /// HT capabilities for a device of `tx`, `rx` chains, as an association names
 /// them.
-fn capability_elements(band: Band, family: Family, chains: (u32, u32), wide: bool) -> Vec<u8> {
-    let mut elements = probe_elements(band, family, chains, wide);
+fn capability_elements(
+    band: Band,
+    family: Family,
+    radio: Rf,
+    chains: (u32, u32),
+    wide: bool,
+) -> Vec<u8> {
+    let mut elements = probe_elements(band, family, radio, chains, wide);
     if family == Family::Ax200 {
         // `iwl_vendor_caps`: Intel's capabilities, with improved HE feedback.
         elements.extend_from_slice(&[221, 6, 0x00, 0x17, 0x35, 8, 1, 0]);
@@ -1490,7 +1497,13 @@ fn capability_elements(band: Band, family: Family, chains: (u32, u32), wide: boo
 }
 
 /// The rates and capabilities a probe names, `ieee80211_build_preq_ies_band`.
-fn probe_elements(band: Band, family: Family, chains: (u32, u32), wide: bool) -> Vec<u8> {
+fn probe_elements(
+    band: Band,
+    family: Family,
+    radio: Rf,
+    chains: (u32, u32),
+    wide: bool,
+) -> Vec<u8> {
     let (tx, rx) = (chains.0.count_ones(), chains.1.count_ones());
     let mut elements = Vec::new();
     let mut element = |id: u8, body: &[u8]| {
@@ -1544,7 +1557,13 @@ fn probe_elements(band: Band, family: Family, chains: (u32, u32), wide: bool) ->
         vht[8..10].copy_from_slice(&map.to_le_bytes());
         element(191, &vht);
     }
-    elements.extend(he::capability(band, family, chains.0 & chains.1 == 3, wide));
+    elements.extend(he::capability(
+        band,
+        family,
+        radio,
+        chains.0 & chains.1 == 3,
+        wide,
+    ));
     if band == Band::Ghz6 {
         elements.extend(he::six_ghz_capability(tx, rx));
     }
@@ -1591,7 +1610,8 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             .regulatory
             .as_ref()
             .ok_or(Error::Refused("scan"))?;
-        let elements = |band| probe_elements(band, self.family, self.chains, self.wide(band));
+        let elements =
+            |band| probe_elements(band, self.family, self.radio, self.chains, self.wide(band));
         Ok(boot::Probe {
             elements: [Band::Ghz2, Band::Ghz5, Band::Ghz6].map(elements),
             profiles: self.probe_profiles(country),
@@ -1711,7 +1731,8 @@ impl<Q: BootIo, B: BiosIo> Radio for Wifi<Q, B> {
     }
 
     fn advertisement(&self, band: Band) -> Result<Advertisement, Error> {
-        let elements = capability_elements(band, self.family, self.chains, self.wide(band));
+        let elements =
+            capability_elements(band, self.family, self.radio, self.chains, self.wide(band));
         let capabilities = Capabilities::parse(band, Role::Station, &elements)
             .map_err(|_| Error::Refused("advertisement"))?;
         Ok(Advertisement {

@@ -182,6 +182,7 @@ pub struct Wifi<Q: BootIo, B: BiosIo> {
     /// The transmit and receive antennas.
     chains: (u32, u32),
     family: Family,
+    radio: super::identity::Rf,
     save_power: bool,
     address: Mac,
     error: Option<Error>,
@@ -232,6 +233,7 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
         let deadline = inputs.clock.deadline(ALIVE_TIMEOUT_US);
         let wifi = Self {
             family: boot.family(),
+            radio: boot.radio(),
             stage: Stage::Rom(Box::new(boot)),
             firmware: inputs.firmware,
             observations: inputs.observations,
