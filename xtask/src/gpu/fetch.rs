@@ -89,6 +89,17 @@ impl Submodule {
         git(&self.directory())
     }
 
+    /// Whether the checkout has a commit, which a fetch stopped before its
+    /// first checkout leaves it without.
+    fn checked_out(&self) -> Result<bool> {
+        Ok(self
+            .git()
+            .args(["rev-parse", "--verify", "-q", "HEAD"])
+            .stdout(Stdio::null())
+            .status()?
+            .success())
+    }
+
     fn head(&self) -> Result<String> {
         Ok(capture(self.git().args(["rev-parse", "HEAD"]))?
             .trim()
@@ -229,8 +240,12 @@ fn initialize(submodule: &Submodule) -> Result<()> {
     fs::create_dir_all(&directory)?;
     exec(git(&directory).args(["init", "-q"]))?;
     exec(git(&directory).args(["remote", "add", "origin", &submodule.url]))?;
+    first_checkout(submodule)
+}
+
+fn first_checkout(submodule: &Submodule) -> Result<()> {
     checkout(submodule)?;
-    exec(git(root).args(["submodule", "absorbgitdirs", "--", &submodule.path]))
+    exec(git(tools::root()).args(["submodule", "absorbgitdirs", "--", &submodule.path]))
 }
 
 /// Checks out the pin with its sparse scope and applies the series, fetching
@@ -297,6 +312,10 @@ pub fn fetch(force: bool) -> Result<()> {
         submodule.hold_pin()?;
         if !submodule.directory().join(".git").exists() {
             initialize(&submodule)?;
+            continue;
+        }
+        if !submodule.checked_out()? {
+            first_checkout(&submodule)?;
             continue;
         }
         if submodule.has_pin()? {
@@ -450,6 +469,32 @@ pub fn origins() -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stopped_first_fetch_is_a_checkout_without_a_commit() {
+        let directory = tempfile::tempdir().unwrap();
+        let submodule = Submodule {
+            name: "stopped".into(),
+            path: directory.path().to_str().unwrap().into(),
+            url: String::new(),
+            pin: String::new(),
+        };
+        exec(submodule.git().args(["init", "-q"])).unwrap();
+        assert!(!submodule.checked_out().unwrap());
+        exec(submodule.git().args([
+            "-c",
+            "user.name=Stela",
+            "-c",
+            "user.email=stela@localhost",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "first",
+        ]))
+        .unwrap();
+        assert!(submodule.checked_out().unwrap());
+    }
 
     #[test]
     fn names_follow_subjects() -> Result<()> {
