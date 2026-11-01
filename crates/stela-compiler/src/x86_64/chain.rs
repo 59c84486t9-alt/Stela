@@ -452,13 +452,7 @@ pub(super) fn empty_link(asm: &mut crate::x86_64::asm::Asm, bytes: usize) {
 /// It ends where the direct exit it falls to starts, when the control allows
 /// no transfer. `None` when `entry` is out of a 32-bit jump's reach or an operand
 /// exceeds its 32-bit field.
-pub fn link(
-    at: u64,
-    bytes: usize,
-    retired: u32,
-    block: u32,
-    entry: u64,
-) -> Option<Vec<u8>> {
+pub fn link(at: u64, bytes: usize, retired: u32, block: u32, entry: u64) -> Option<Vec<u8>> {
     let retired = i32::try_from(retired).ok()?;
     let block = i32::try_from(block).ok()?;
     let mut code = Code::new();
@@ -842,13 +836,19 @@ mod tests {
             assert_eq!(exit(fixed(frame, 0)), (0x5151, 99));
             assert_eq!((control.budget, control.retired, control.hits), (0, 12, 2));
             // No budget left: the budget wraps and the exit is taken.
-            assert_eq!(exit(dynamic(frame, TARGET)), (TARGET, ExitKind::Return as u64));
+            assert_eq!(
+                exit(dynamic(frame, TARGET)),
+                (TARGET, ExitKind::Return as u64)
+            );
             assert_eq!((control.budget, control.retired), (u64::MAX, 12));
             control.budget = 5;
             // Another PC in the slot, and another context, miss.
             let other = TARGET ^ (1 << (2 + LOOKUP_BITS) | 1 << 2);
             assert_eq!(lookup_slot(other, 7), lookup_slot(TARGET, 7));
-            assert_eq!(exit(dynamic(frame, other)), (other, ExitKind::Return as u64));
+            assert_eq!(
+                exit(dynamic(frame, other)),
+                (other, ExitKind::Return as u64)
+            );
             // The set's other entry serves too.
             let (hits, retired) = (control.hits, control.retired);
             table.insert(lookup_slot(TARGET, 7), LookupEntry { pc: other, ..entry });
@@ -863,13 +863,19 @@ mod tests {
             table[neighbour(lookup_slot(TARGET, 7))] = LookupEntry::default();
             table[lookup_slot(TARGET, 7)] = entry;
             table[lookup_slot(TARGET, 7)].context = 6;
-            assert_eq!(exit(dynamic(frame, TARGET)), (TARGET, ExitKind::Return as u64));
+            assert_eq!(
+                exit(dynamic(frame, TARGET)),
+                (TARGET, ExitKind::Return as u64)
+            );
             assert_eq!(exit(fixed(frame, 0)), (TARGET, ExitKind::Call as u64));
             assert_eq!((control.budget, control.hits, control.block), (5, 2, 42));
             // The lower half's context names a lower-half target's entries.
             let lower = TARGET & !(1 << 55);
             table[lookup_slot(lower, 5)] = LookupEntry { pc: lower, ..entry };
-            assert_eq!(exit(dynamic(frame, lower)), (lower, ExitKind::Return as u64));
+            assert_eq!(
+                exit(dynamic(frame, lower)),
+                (lower, ExitKind::Return as u64)
+            );
             table[lookup_slot(lower, 5)].context = 5;
             assert_eq!(exit(dynamic(frame, lower)), (0x5151, 99));
             assert_eq!((control.budget, control.hits), (4, 3));
@@ -877,7 +883,10 @@ mod tests {
             // A BR with BTYPE 0b11 needs the entry to accept it, and names
             // the BTYPE beside the block.
             table[lookup_slot(TARGET, 7)].context = 7;
-            assert_eq!(exit(branch(frame, TARGET)), (TARGET, ExitKind::Indirect as u64));
+            assert_eq!(
+                exit(branch(frame, TARGET)),
+                (TARGET, ExitKind::Indirect as u64)
+            );
             table[lookup_slot(TARGET, 7)].targets = 0b1001;
             assert_eq!(exit(branch(frame, TARGET)), (0x5151, 99));
             assert_eq!(
@@ -894,9 +903,15 @@ mod tests {
                 control.linked,
                 control.block,
             );
-            assert_eq!(exit(dynamic(frame, TARGET)), (TARGET, ExitKind::Return as u64));
+            assert_eq!(
+                exit(dynamic(frame, TARGET)),
+                (TARGET, ExitKind::Return as u64)
+            );
             assert_eq!(exit(fixed(frame, 0)), (TARGET, ExitKind::Call as u64));
-            assert_eq!(exit(branch(frame, TARGET)), (TARGET, ExitKind::Indirect as u64));
+            assert_eq!(
+                exit(branch(frame, TARGET)),
+                (TARGET, ExitKind::Indirect as u64)
+            );
             assert_eq!(
                 (
                     control.budget,

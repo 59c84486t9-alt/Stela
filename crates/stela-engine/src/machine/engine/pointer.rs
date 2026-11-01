@@ -12,8 +12,8 @@
 //! was found enabled and untrapped under the current derived state, which
 //! is what both paths require.
 use crate::pauth;
-use core::mem::offset_of;
 use alloc::{boxed::Box, vec, vec::Vec};
+use core::mem::offset_of;
 use stela_compiler::{Anchor, Place, block::PointerAuthenticationKey, x86_64::pointer};
 
 /// The distinct PAC inputs whose memo generations are kept.
@@ -109,8 +109,7 @@ pub(super) const TAGS: Place = Place::new(Anchor::Pointer, offset_of!(PointerSer
 pub(super) const fn strip_place(data: bool) -> Place {
     Place::new(
         Anchor::Pointer,
-        offset_of!(PointerService, strips)
-            + data as usize * size_of::<pointer::strip::Cell>(),
+        offset_of!(PointerService, strips) + data as usize * size_of::<pointer::strip::Cell>(),
     )
 }
 

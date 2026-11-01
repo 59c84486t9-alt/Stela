@@ -425,14 +425,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         };
         let at = thunk.0 as u64;
         let (Some(code), Some(jump)) = (
-            chain::thunk(
-                at,
-                retired,
-                target as u32,
-                entry,
-                exit.target,
-                word,
-            ),
+            chain::thunk(at, retired, target as u32, entry, exit.target, word),
             chain::jump(site, at),
         ) else {
             return;

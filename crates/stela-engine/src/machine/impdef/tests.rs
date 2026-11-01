@@ -38,7 +38,12 @@ fn each_register_keeps_its_value_at_its_own_address() {
 /// them, and of values without the bits that say otherwise.
 #[test]
 fn stored_writes_leave_out_what_the_engine_decides() {
-    let of = |encoding| TABLE.iter().find(|entry| entry.encoding == encoding).unwrap();
+    let of = |encoding| {
+        TABLE
+            .iter()
+            .find(|entry| entry.encoding == encoding)
+            .unwrap()
+    };
     assert_eq!(of(THREAD_KEY_0).stored_write(), Some(0));
     assert_eq!(of(SWITCH_CLEARED).stored_write(), Some(u64::MAX));
     assert_eq!(of(SIQ_CFG_EL1).stored_write(), None);

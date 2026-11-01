@@ -137,7 +137,10 @@ pub(super) const WRITTEN: [(Encoding, SystemRegister); 16] = [
     (STACK_ZERO, SystemRegister::SP_EL0),
     (Encoding::new(3, 3, 4, 4, 1), SystemRegister::FPSR),
     (registers::encodings::TPIDR_EL0, SystemRegister::TPIDR_EL0),
-    (registers::encodings::TPIDRRO_EL0, SystemRegister::TPIDRRO_EL0),
+    (
+        registers::encodings::TPIDRRO_EL0,
+        SystemRegister::TPIDRRO_EL0,
+    ),
     (Encoding::new(3, 0, 2, 1, 0), SystemRegister::APIAKeyLo_EL1),
     (Encoding::new(3, 0, 2, 1, 1), SystemRegister::APIAKeyHi_EL1),
     (Encoding::new(3, 0, 2, 1, 2), SystemRegister::APIBKeyLo_EL1),

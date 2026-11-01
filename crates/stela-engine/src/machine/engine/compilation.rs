@@ -591,11 +591,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let instruction = block::decode_pointer_authentication(GuestAddress(pc), word).ok()??;
         let thunk = match instruction.operation {
             PointerAuthenticationOperation::Strip { data, destination } => {
-                x86_64_pointer::strip::thunk(
-                    GuestAddress(pc),
-                    destination,
-                    strip_place(data),
-                )?
+                x86_64_pointer::strip::thunk(GuestAddress(pc), destination, strip_place(data))?
             }
             operation => {
                 let form = x86_64_pointer::Form::of(operation)?;
@@ -749,7 +745,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// room, and the bits of a value its writes leave to the engine.
     fn stored_write_cell(&mut self, encoding: Encoding) -> Option<(usize, u64)> {
         let (_, refused) = self.cpu.apple_write_storage(encoding)?;
-        let known = self.stored_writes.iter().position(|&write| write == encoding);
+        let known = self
+            .stored_writes
+            .iter()
+            .position(|&write| write == encoding);
         let index = known.or_else(|| {
             (self.stored_writes.len() < STORED_WRITES).then(|| {
                 self.stored_writes.push(encoding);

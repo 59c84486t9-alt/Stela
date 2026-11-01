@@ -312,13 +312,7 @@ pub fn stack_select_thunk(
 /// the `words` tag words at `tags`, as a thread switch writes several halves
 /// and only the last leaves a key worth opening: the next PAC instruction
 /// exits and the engine reopens them under the whole keys.
-pub fn key_write_thunk(
-    pc: GuestAddress,
-    rt: u8,
-    cell: Place,
-    tags: Place,
-    words: usize,
-) -> Thunk {
+pub fn key_write_thunk(pc: GuestAddress, rt: u8, cell: Place, tags: Place, words: usize) -> Thunk {
     let (mut code, miss) = open(cell);
     let mut asm = Asm::new(&mut code);
     asm.mov_load(Size::Qword, Gpr::Rcx, Mem::base_disp8(Gpr::Rax, VALUE));

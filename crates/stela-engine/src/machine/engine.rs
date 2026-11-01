@@ -86,13 +86,12 @@ use alloc::{
     vec::Vec,
 };
 use core::fmt;
+use core::mem::offset_of;
 use core::num::NonZeroU64;
 #[cfg(test)]
 use core::sync::atomic::AtomicU64;
 use core::sync::atomic::Ordering;
-use core::mem::offset_of;
 use pointer::{PointerInputs, PointerOperation, PointerResult, SERVICE, TAGS, strip_place};
-use stela_compiler::{Anchor, Anchors, Place};
 #[cfg(test)]
 pub(crate) use prepare::test_preparation;
 pub use prepare::{Description, Preparation, Prepared, Refused, window};
@@ -113,6 +112,7 @@ pub use shared_memory::{NativeDataTlbStatistics, NativeSourceStatistics};
 #[cfg(test)]
 use stela_compiler::x86_64::chain::ChainControl;
 use stela_compiler::x86_64::chain::ExitWord;
+use stela_compiler::{Anchor, Anchors, Place};
 use stela_compiler::{
     GuestAddress, GuestState, Lifter, TargetCpu,
     aarch64::{

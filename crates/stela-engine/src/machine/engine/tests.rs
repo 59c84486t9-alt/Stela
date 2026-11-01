@@ -5057,12 +5057,8 @@ fn xpac_thunks_follow_regime_masks_without_key_enables_and_close_on_changes() {
         kind: ExitKind::Fallthrough as u64,
     }];
     native.step().unwrap();
-    let thunk = x86_64_pointer::strip::thunk(
-        GuestAddress(base + 4),
-        17,
-        strip_place(true),
-    )
-    .unwrap();
+    let thunk =
+        x86_64_pointer::strip::thunk(GuestAddress(base + 4), 17, strip_place(true)).unwrap();
     assert_eq!(native.host.installed.last(), Some(&thunk.code));
     let installed = native.host.installed.len() * NATIVE_CODE_STRIDE;
     assert_eq!(
@@ -5510,10 +5506,12 @@ fn implementation_defined_values_complete_natively_after_the_engine_does() {
     assert_eq!((cell.readable, cell.value), (1, address));
     // A register that takes only zero completes natively for XZR alone.
     machine.step().unwrap();
-    assert_eq!(machine.stored_writes[1], crate::machine::impdef::SWITCH_CLEARED);
+    assert_eq!(
+        machine.stored_writes[1],
+        crate::machine::impdef::SWITCH_CLEARED
+    );
     let write = cell_place(stored_write_cell(1));
-    let thunk =
-        register_read::checked_write_thunk(GuestAddress(base + 20), 31, write, u64::MAX);
+    let thunk = register_read::checked_write_thunk(GuestAddress(base + 20), 31, write, u64::MAX);
     assert_eq!(machine.host.installed.last(), Some(&thunk.code));
 }
 

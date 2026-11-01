@@ -163,7 +163,13 @@ pub(super) mod tests {
         assert_eq!((el1[status].readable, el1[status].value), (1, 0));
         // GL1's cells are its own: closed until read there.
         machine.system_instruction(GENTER).unwrap();
-        assert!(machine.mirrors.cells().iter().all(|cell| cell.readable == 0));
+        assert!(
+            machine
+                .mirrors
+                .cells()
+                .iter()
+                .all(|cell| cell.readable == 0)
+        );
         machine.system_instruction(MRS_GXF_STATUS).unwrap();
         let gl1 = *machine.mirrors.cells();
         assert_eq!((gl1[status].readable, gl1[status].value), (1, 1));

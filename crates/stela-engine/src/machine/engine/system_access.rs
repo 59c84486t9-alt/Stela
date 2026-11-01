@@ -401,7 +401,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// completes plainly opens on the register's value.
     fn stored_write_access(&mut self, word: u32, access: RegisterAccess) -> Step {
         let encoding = access.encoding();
-        let cell = self.stored_writes.iter().position(|&write| write == encoding);
+        let cell = self
+            .stored_writes
+            .iter()
+            .position(|&write| write == encoding);
         let Some(cell) = cell else {
             return self.register_access(word, access);
         };
