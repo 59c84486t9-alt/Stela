@@ -151,6 +151,11 @@ impl PointerService {
         stripping
     }
 
+    /// Whether every key is closed to native code.
+    pub(super) fn tags_closed(&self) -> bool {
+        self.tags.iter().all(|&tag| tag == 0)
+    }
+
     /// Whether native code had anything open: a tag word or a stripping cell.
     pub(super) fn any_open(&self) -> bool {
         self.tags.iter().any(|&tag| tag != 0) || self.strips.iter().any(|cell| cell.enabled != 0)

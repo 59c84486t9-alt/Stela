@@ -129,13 +129,25 @@ pub(super) const MASK_WRITES: usize = MIRRORED.len() + STORED_CELLS;
 /// around each exception and whose writes change nothing else: a cell each,
 /// after [`MASK_WRITES`], that a plain write opens on the storage it reached
 /// (FPSR's lives in the frame, so names none). They stay open as reads do.
-pub(super) const WRITTEN: [(Encoding, SystemRegister); 6] = [
+/// A PAC key's halves also close the keys to PAC thunks, which then reopen
+/// together (`Machine::open_pointers`).
+pub(super) const WRITTEN: [(Encoding, SystemRegister); 16] = [
     (Encoding::new(3, 0, 4, 0, 1), SystemRegister::ELR_EL1),
     (Encoding::new(3, 0, 4, 0, 0), SystemRegister::SPSR_EL1),
     (STACK_ZERO, SystemRegister::SP_EL0),
     (Encoding::new(3, 3, 4, 4, 1), SystemRegister::FPSR),
     (registers::encodings::TPIDR_EL0, SystemRegister::TPIDR_EL0),
     (registers::encodings::TPIDRRO_EL0, SystemRegister::TPIDRRO_EL0),
+    (Encoding::new(3, 0, 2, 1, 0), SystemRegister::APIAKeyLo_EL1),
+    (Encoding::new(3, 0, 2, 1, 1), SystemRegister::APIAKeyHi_EL1),
+    (Encoding::new(3, 0, 2, 1, 2), SystemRegister::APIBKeyLo_EL1),
+    (Encoding::new(3, 0, 2, 1, 3), SystemRegister::APIBKeyHi_EL1),
+    (Encoding::new(3, 0, 2, 2, 0), SystemRegister::APDAKeyLo_EL1),
+    (Encoding::new(3, 0, 2, 2, 1), SystemRegister::APDAKeyHi_EL1),
+    (Encoding::new(3, 0, 2, 2, 2), SystemRegister::APDBKeyLo_EL1),
+    (Encoding::new(3, 0, 2, 2, 3), SystemRegister::APDBKeyHi_EL1),
+    (Encoding::new(3, 0, 2, 3, 0), SystemRegister::APGAKeyLo_EL1),
+    (Encoding::new(3, 0, 2, 3, 1), SystemRegister::APGAKeyHi_EL1),
 ];
 
 /// SP_EL0, plain only with SP_ELx selected.
@@ -258,11 +270,32 @@ pub(super) fn stored(register: SystemRegister) -> bool {
 /// them goes as ever ([`Machine::forget_derived`]).
 pub(super) fn keeps_reads(register: SystemRegister) -> bool {
     use SystemRegister::*;
+    pointer_key(register)
+        || matches!(
+            register,
+            CONTEXTIDR_EL1
+                | CONTEXTIDR_EL2
+                | CNTP_CTL_EL0
+                | CNTP_CVAL_EL0
+                | CNTP_TVAL_EL0
+                | CNTV_CTL_EL0
+                | CNTV_CVAL_EL0
+                | CNTV_TVAL_EL0
+                | CNTHP_CTL_EL2
+                | CNTHP_CVAL_EL2
+                | CNTHP_TVAL_EL2
+                | CNTHV_CTL_EL2
+                | CNTHV_CVAL_EL2
+                | CNTHV_TVAL_EL2
+        )
+}
+
+/// Whether `register` is half of a PAC key.
+pub(super) fn pointer_key(register: SystemRegister) -> bool {
+    use SystemRegister::*;
     matches!(
         register,
-        CONTEXTIDR_EL1
-            | CONTEXTIDR_EL2
-            | APIAKeyLo_EL1
+        APIAKeyLo_EL1
             | APIAKeyHi_EL1
             | APIBKeyLo_EL1
             | APIBKeyHi_EL1
@@ -272,18 +305,6 @@ pub(super) fn keeps_reads(register: SystemRegister) -> bool {
             | APDBKeyHi_EL1
             | APGAKeyLo_EL1
             | APGAKeyHi_EL1
-            | CNTP_CTL_EL0
-            | CNTP_CVAL_EL0
-            | CNTP_TVAL_EL0
-            | CNTV_CTL_EL0
-            | CNTV_CVAL_EL0
-            | CNTV_TVAL_EL0
-            | CNTHP_CTL_EL2
-            | CNTHP_CVAL_EL2
-            | CNTHP_TVAL_EL2
-            | CNTHV_CTL_EL2
-            | CNTHV_CVAL_EL2
-            | CNTHV_TVAL_EL2
     )
 }
 

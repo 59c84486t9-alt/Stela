@@ -5545,6 +5545,48 @@ fn writes_that_change_nothing_a_read_follows_keep_the_cells() {
 }
 
 #[test]
+fn keys_native_code_wrote_reopen_together_at_the_next_pac_exit() {
+    const MSR: u32 = 0xd518_2146; // msr apibkeylo_el1, x6
+    let mut machine = machine(&[MSR]);
+    machine.cpu.set_pstate(Pstate::reset(1));
+    let hcr = 1 << 40 | 1 << HCR_API; // APK and API
+    machine.cpu.registers.set(SystemRegister::HCR_EL2, 0, hcr);
+    machine.derived_changed();
+    let (index, rt) = written_register(machine.cpu.pc, MSR).unwrap();
+    assert_eq!(rt, 6);
+    machine.cpu.state.x[6] = 3;
+    machine.system_instruction(MSR).unwrap();
+    let key = SystemRegister::APIBKeyLo_EL1;
+    let cell = machine.mirrors[written_cell(index)];
+    assert_eq!(cell.readable, 1);
+    assert_eq!(Some(cell.value), machine.cpu.registers.address(key, 0));
+
+    let mut machine = pac_machine();
+    let sign = |machine: &mut Machine<FakeHost, NoDevices>| {
+        let key = stela_contracts::pauth::Key::Ib;
+        machine
+            .pointer_result(PointerOperation::Sign, key, 0x4000, 0x10)
+            .unwrap()
+            .unwrap()
+    };
+    let before = sign(&mut machine);
+    let generation = machine.pointer.generation;
+    // What the thunk leaves: the new half, and every key closed.
+    if !machine.cpu.write_el2_pointer_key(key, 0x1234) {
+        machine.cpu.registers.set(key, 0, 0x1234);
+    }
+    machine.pointer.tags = [0; x86_64_pointer::TAG_WORDS];
+    let after = sign(&mut machine);
+    assert_ne!(after, before);
+    assert_ne!(machine.pointer.generation, generation);
+    let ia = x86_64_pointer::key_index(PointerAuthenticationKey::Ia);
+    let ib = x86_64_pointer::key_index(PointerAuthenticationKey::Ib);
+    let open = |key| x86_64_pointer::tag(machine.pointer.generation, key, 0);
+    assert_eq!(machine.pointer.tags[usize::from(ia)], open(ia));
+    assert_eq!(machine.pointer.tags[usize::from(ib)], open(ib));
+}
+
+#[test]
 fn sprr_perm_el0_writes_reopen_its_open_cell() {
     const MRS: u32 = 0xd53e_f1a8; // mrs x8, sprr_perm_el0
     const MSR: u32 = 0xd51e_f1a9; // msr sprr_perm_el0, x9

@@ -399,8 +399,17 @@ impl<H: Host, D: Devices> Machine<H, D> {
         Some(Ok(()))
     }
 
-    /// Open the service with the current keys, version and layout.
+    /// Open the service with the current keys, version and layout. A
+    /// context without an open tag word may predate keys native code wrote
+    /// (`register_read::key_write_thunk`).
     fn open_pointers(&mut self) -> Result<(), Stop> {
+        if self.pointer.is_open() && self.pointer.tags_closed() {
+            if self.cpu.pstate.pacm {
+                self.pointer.close();
+            } else {
+                self.revalidate_pointers();
+            }
+        }
         if !self.pointer.is_open() {
             let inputs = PointerInputs {
                 keys: self.pointer_keys(),

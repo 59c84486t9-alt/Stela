@@ -98,6 +98,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
             self.pointer.close();
             return;
         }
+        self.revalidate_pointers();
+    }
+
+    /// Bring the PAC service to the current keys, version, layout, enables
+    /// and traps, opening every key's tag word they allow.
+    pub(super) fn revalidate_pointers(&mut self) {
         let Ok(version) = self.pointer_version() else {
             self.pointer.close();
             return;

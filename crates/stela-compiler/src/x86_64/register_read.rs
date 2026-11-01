@@ -25,6 +25,9 @@
 //! A [`pan_read_thunk`] completes MRS PAN from the frame, where a
 //! [`pan_thunk`] leaves it.
 //!
+//! A [`key_write_thunk`] completes MSR of half of a PAC key, closing the keys
+//! to PAC thunks when it changes one.
+//!
 //! A [`checked_write_thunk`] completes MSR of a register that takes any value
 //! without the bits it refuses, which the engine decides.
 //!
@@ -301,6 +304,38 @@ pub fn stack_select_thunk(
     let (from, to) = if select { (Rcx, Rax) } else { (Rax, Rcx) };
     asm.mov_store(Qword, Mem::base(from, 0), sp);
     asm.mov_load(Qword, sp, Mem::base(to, 0));
+    asm.bind(unchanged);
+    finish(code, miss, pc)
+}
+
+/// [`stored_write_thunk`] of half of a PAC key. A value that changes it clears
+/// the `words` tag words at `tags`, as a thread switch writes several halves
+/// and only the last leaves a key worth opening: the next PAC instruction
+/// exits and the engine reopens them under the whole keys.
+pub fn key_write_thunk(
+    pc: GuestAddress,
+    rt: u8,
+    cell: Place,
+    tags: Place,
+    words: usize,
+) -> Thunk {
+    let (mut code, miss) = open(cell);
+    let mut asm = Asm::new(&mut code);
+    asm.mov_load(Size::Qword, Gpr::Rcx, Mem::base_disp8(Gpr::Rax, VALUE));
+    let all = Written {
+        keep: u64::MAX,
+        set: 0,
+    };
+    all.apply(&mut asm, rt);
+    asm.alu_load(Alu::Cmp, Size::Qword, Gpr::Rax, Mem::base(Gpr::Rcx, 0));
+    let unchanged = asm.jcc(Cond::E);
+    asm.mov_store(Size::Qword, Mem::base(Gpr::Rcx, 0), Gpr::Rax);
+    asm.place(Gpr::Rcx, tags);
+    asm.alu(Alu::Xor, Size::Dword, Gpr::Rax, Gpr::Rax);
+    for word in 0..words {
+        let at = Mem::base_disp8(Gpr::Rcx, (word * size_of::<u64>()) as i8);
+        asm.mov_store(Size::Qword, at, Gpr::Rax);
+    }
     asm.bind(unchanged);
     finish(code, miss, pc)
 }
@@ -790,6 +825,39 @@ mod tests {
         let frame = frame_write_thunk(PC, 3, CELL, offset, written).code;
         assert_eq!(run(&frame, &mut state), NEXT);
         assert_eq!(state.fpsr, 0xab01);
+    }
+
+    #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
+    #[test]
+    fn key_writes_close_the_tag_words_only_when_they_change_the_key() {
+        use crate::GuestState;
+        let mut key = alloc::boxed::Box::new(5u64);
+        let target = &mut *key as *mut u64;
+        let mut cell = alloc::boxed::Box::new(Cell {
+            readable: 1,
+            value: target as u64,
+        });
+        let mut tags = alloc::boxed::Box::new([7u64; 3]);
+        let mut state = GuestState::default();
+        state.anchors[Anchor::Mirrors] = &*cell as *const Cell as u64;
+        state.anchors[Anchor::Pointer] = tags.as_mut_ptr() as u64;
+        let place = Place::new(Anchor::Pointer, 0);
+        let code = key_write_thunk(PC, 3, CELL, place, 2).code;
+        state.x[3] = 5;
+        assert_eq!(run(&code, &mut state), NEXT);
+        assert_eq!(*tags, [7; 3]);
+        state.x[3] = 6;
+        assert_eq!(run(&code, &mut state), NEXT);
+        // SAFETY: the live key, between runs.
+        assert_eq!(unsafe { target.read() }, 6);
+        assert_eq!(*tags, [0, 0, 7]);
+        tags[0] = 7;
+        cell.readable = 0;
+        state.x[3] = 8;
+        assert_eq!(run(&code, &mut state), MISS);
+        // SAFETY: as above.
+        assert_eq!(unsafe { target.read() }, 6);
+        assert_eq!(tags[0], 7);
     }
 
     #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
