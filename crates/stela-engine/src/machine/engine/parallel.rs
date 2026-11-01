@@ -1018,13 +1018,28 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let Some(hub) = &self.parallel else {
             return Ok(());
         };
-        let hub = Arc::clone(hub);
         // Acquire BEFORE looking at any source. A later notification must
         // remain different even if this drain happens to consume its data.
         let observed = hub.inboxes[self.current]
             .chain
             .interrupt_epoch()
             .load(Ordering::Acquire);
+        // Nearly every return to the engine finds nothing, and every PE
+        // returns all the time: this path stays off the hub's reference
+        // count, which one cache line would serve them all.
+        let served = match hub.home.load(Ordering::Relaxed) == self.current {
+            true => hub.requested.load(Ordering::Relaxed),
+            false => hub.stopped.load(Ordering::SeqCst),
+        };
+        if !served
+            && self.deferred_code.is_empty()
+            && hub.lines_epoch(self.current) == self.lines_epoch
+            && !hub.pending(self.current)
+        {
+            self.chain.acknowledge_interrupt(observed);
+            return Ok(());
+        }
+        let hub = Arc::clone(hub);
         let result = (|| {
             if hub.home.load(Ordering::Relaxed) == self.current {
                 self.serve_forwarded(&hub)?;
@@ -1270,12 +1285,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
     pub(super) fn complete_maintenance(&mut self) -> Step {
         self.code_posted = None;
         self.mirrors.close_code_page();
-        let Some(hub) = self.parallel.clone() else {
-            return Ok(());
-        };
         if self.posted.is_empty() {
             return Ok(());
         }
+        let Some(hub) = self.parallel.clone() else {
+            return Ok(());
+        };
         let mut posted = core::mem::take(&mut self.posted);
         let started = self.host.counter();
         self.observe_parallel_source(SourcePhase::BroadcastEnter);
