@@ -8,6 +8,11 @@ pub mod linux;
 #[cfg(feature = "native")]
 pub mod native;
 
+#[cfg(feature = "linux-registry")]
+pub mod inputs;
+#[cfg(feature = "linux-registry")]
+pub mod linux_registry;
+
 /// Whether the caller chose a tool through cc's standard environment.
 pub fn selected(tool: &str) -> bool {
     let target = env::var("TARGET").expect("Cargo supplies TARGET");

@@ -3,15 +3,15 @@
 //! its initcalls in linker sections, which COFF and a static link do not offer;
 //! `linux_registry` reads the objects instead, and `stela_linux_start` runs the
 //! image at boot.
-use super::inputs::{Hash, Limits};
-use super::linux_registry::{
-    self, Group, Input, InputRoot, Plan, RoleLimits, TargetAbi, Unit as PlanUnit,
-};
 use super::native::{self, out_dir, run};
 use sha2::{Digest, Sha256};
 use std::{
     env, fs,
     path::{Path, PathBuf},
+};
+use stela_c_build::inputs::{Hash, Limits};
+use stela_c_build::linux_registry::{
+    self, Group, Input, InputRoot, Plan, RoleLimits, TargetAbi, Unit as PlanUnit,
 };
 use stela_c_build::native::NATIVE_TARGET;
 

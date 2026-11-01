@@ -7,18 +7,12 @@ mod amd_commands;
 #[cfg(feature = "nouveau-port")]
 #[path = "build/initcalls.rs"]
 mod initcalls;
-#[cfg(feature = "nouveau-port")]
-#[path = "build/inputs.rs"]
-mod inputs;
 #[cfg(feature = "intel-port")]
 #[path = "build/intel.rs"]
 mod intel;
 #[cfg(feature = "nouveau-port")]
 #[path = "build/kbuild.rs"]
 mod kbuild;
-#[cfg(feature = "nouveau-port")]
-#[path = "build/linux_registry.rs"]
-mod linux_registry;
 #[cfg(any(feature = "nvidia-port", feature = "linux-kernel"))]
 #[path = "build/native.rs"]
 mod native;

@@ -18,7 +18,7 @@ nvidia-port = ["dep:cc", "dep:stela-c-build", "stela-c-build/native"]
 intel-port = ["linux-kernel"]
 # nouveau's hardware resource manager (NVKM), compiled unchanged; it reaches
 # no device until the kernel services it imports are supplied.
-nouveau-port = ["linux-kernel"]
+nouveau-port = ["linux-kernel", "stela-c-build/linux-registry"]
 # Native AMD page-entry and BAR support; requires real mapping/GMC owners.
 amd-port = ["linux-kernel"]
 # Hosted AMD encoder build; its C runtime is not yet ported to UEFI.
@@ -50,7 +50,6 @@ tempfile = "3"
 
 [build-dependencies]
 # Reuse retained shared-input/object/digest versions; no new crate fetch.
-libc = "0.2"
 object = { version = "0.37", default-features = false, features = ["read"] }
 sha2 = { version = "0.10", default-features = false }
 cc = { version = "1", optional = true }

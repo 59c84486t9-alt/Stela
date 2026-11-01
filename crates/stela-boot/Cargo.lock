@@ -1005,6 +1005,9 @@ name = "stela-c-build"
 version = "0.1.0"
 dependencies = [
  "cc",
+ "libc",
+ "object",
+ "sha2",
 ]
 
 [[package]]
@@ -1067,7 +1070,6 @@ version = "0.1.0"
 dependencies = [
  "ash",
  "cc",
- "libc",
  "object",
  "sha2",
  "stela-c-build",
