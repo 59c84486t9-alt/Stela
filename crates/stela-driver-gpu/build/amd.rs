@@ -1,7 +1,8 @@
 //! Stela's amdgpu port and its hosted tests.
-use super::native::{self, Linux, Module, Tests};
+use super::native::{self, Linux, Tests};
+use stela_c_build::linux::Module;
 
-const AMDGPU: Module = Module {
+const AMDGPU: Module<'static> = Module {
     name: "amdgpu",
     file: "drivers/gpu/drm/amd/amdgpu/amdgpu",
 };
@@ -12,10 +13,10 @@ const AMDGPU: Module = Module {
 pub fn port(linux: &Linux, tests: &mut Tests) {
     const FIXTURES: &str = "src/amd/tests/fixtures.c";
     let configure = |mut build: cc::Build| {
-        linux.apply(
+        linux.environment.apply(
             &mut build,
             None,
-            &[
+            &native::drm_includes(&[
                 "amd/include/asic_reg",
                 "amd/include",
                 "amd/amdgpu",
@@ -29,7 +30,7 @@ pub fn port(linux: &Linux, tests: &mut Tests) {
                 "amd/amdkfd",
                 "amd/ras/rascore",
                 "amd/ras/ras_mgr",
-            ],
+            ]),
             Some(&AMDGPU),
         );
         build

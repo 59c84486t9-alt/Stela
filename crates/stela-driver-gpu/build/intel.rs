@@ -1,12 +1,13 @@
 //! Stela's Xe and i915 port, its dispatch packers and their hosted tests.
 //! Linux's and Mesa's original generators supply the workaround table and the
 //! packet headers, run by a selected Python interpreter.
-use super::native::{self, Linux, Module, Tests};
+use super::native::{self, Linux, Tests};
 use std::{
     env, fs,
     path::{Path, PathBuf},
     process::Command,
 };
+use stela_c_build::linux::Module;
 
 const SOURCE: &str = "src/intel";
 const XE_DRIVER: &str = "../../third_party/linux/drivers/gpu/drm/xe";
@@ -14,7 +15,7 @@ const GENXML: &str = "../../third_party/mesa/src/intel/genxml";
 const LEGACY: &str = "GPGPU_WALKER,MEDIA_STATE_FLUSH";
 const COMPUTE: &str = "COMPUTE_WALKER,COMPUTE_WALKER_BODY,INTERFACE_DESCRIPTOR_DATA,POSTSYNC_DATA,PREF_SLM_ALLOCATION_SIZE";
 
-const XE: Module = Module {
+const XE: Module<'static> = Module {
     name: "xe",
     file: "drivers/gpu/drm/xe/xe",
 };
@@ -83,10 +84,20 @@ struct Builds {
 impl Builds {
     fn new(linux: &Linux, base: &cc::Build, generated: &Path, dispatch: &Path) -> Self {
         let mut xe = base.clone();
-        linux.apply(&mut xe, Some(generated), &["xe"], Some(&XE));
+        linux.environment.apply(
+            &mut xe,
+            Some(generated),
+            &native::drm_includes(&["xe"]),
+            Some(&XE),
+        );
         xe.include(SOURCE);
         let mut i915 = base.clone();
-        linux.apply(&mut i915, None, &["i915"], Some(&I915));
+        linux.environment.apply(
+            &mut i915,
+            None,
+            &native::drm_includes(&["i915"]),
+            Some(&I915),
+        );
         i915.define("I915", None).include(SOURCE);
         let mut encoders = base.clone();
         encoders

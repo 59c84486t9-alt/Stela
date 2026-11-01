@@ -39,20 +39,12 @@ fn require_source(source: &str) {
     );
 }
 
-/// A Linux module, as Kbuild names it to the sources it builds.
-#[cfg(feature = "linux-kernel")]
-pub struct Module {
-    pub name: &'static str,
-    /// The module's path in Linux's tree, without its extension.
-    pub file: &'static str,
-}
-
 /// Stela's Linux environment for unchanged Linux sources, and the kernel-API
 /// in `compat/linux/kernel` that they call, built once for every port.
 #[cfg(feature = "linux-kernel")]
 pub struct Linux {
-    /// Kbuild's generated asm wrappers, in `asm/` and `uapi/asm/`.
-    wrappers: PathBuf,
+    /// Shared Kbuild flags and generated architecture header layout.
+    pub environment: stela_c_build::linux::Environment,
     /// The kernel-API archive for Cargo's target.
     pub archive: PathBuf,
     /// The environment's units whose registrations nouveau's image names.
@@ -165,42 +157,18 @@ const DMA_BUF_SOURCES: &[&str] = &[
 ];
 #[cfg(feature = "linux-kernel")]
 const COMPAT: &str = "src/compat/linux";
-#[cfg(feature = "linux-kernel")]
-const INCLUDE: &str = "../../third_party/linux/include";
-#[cfg(feature = "linux-kernel")]
-const X86_UAPI: &str = "../../third_party/linux/arch/x86/include/uapi";
 
 #[cfg(feature = "linux-kernel")]
 impl Linux {
     pub fn new() -> Self {
         require_sources();
-        additions(Path::new(COMPAT));
-        let wrappers = out_dir().join("linux-asm");
-        // As Kbuild does, each mandatory asm header that the arch does not
-        // provide wraps asm-generic's. Stela's arch headers are compat's.
-        for (list, arch, directory) in [
-            ("asm-generic/Kbuild", format!("{COMPAT}/asm"), "asm"),
-            (
-                "uapi/asm-generic/Kbuild",
-                format!("{X86_UAPI}/asm"),
-                "uapi/asm",
-            ),
-        ] {
-            let output = wrappers.join(directory);
-            fs::create_dir_all(&output).expect("create the asm wrapper directory");
-            let list = fs::read_to_string(format!("{INCLUDE}/{list}"))
-                .unwrap_or_else(|error| panic!("{list}: {error}"));
-            for header in list
-                .lines()
-                .filter_map(|line| line.strip_prefix("mandatory-y += "))
-                .filter(|header| !Path::new(&arch).join(header).exists())
-            {
-                let wrapper = format!("#include <asm-generic/{header}>\n");
-                fs::write(output.join(header), wrapper).expect("write an asm wrapper");
-            }
-        }
+        let environment = stela_c_build::linux::Environment::new(stela_c_build::linux::Roots {
+            linux: LINUX.into(),
+            compat: COMPAT.into(),
+            output: out_dir(),
+        });
         let mut linux = Self {
-            wrappers,
+            environment,
             archive: PathBuf::new(),
             hosted: Vec::new(),
             #[cfg(feature = "nouveau-port")]
@@ -275,7 +243,7 @@ impl Linux {
             println!("cargo:rerun-if-changed={}", source.display());
         }
         let mut build = configure();
-        linux.apply(&mut build, None, &[], None);
+        linux.environment.apply(&mut build, None, &[], None);
         let crc_objects = linux_crc::objects(&build, &crc_tables);
         build.objects(crc_objects);
         #[cfg(feature = "nouveau-port")]
@@ -307,7 +275,7 @@ impl Linux {
             helper.file(format!("{COMPAT}/stela/test.c"));
             let helper_objects = helper.compile_intermediates();
             let mut fixture = configure();
-            linux.apply(&mut fixture, None, &[], None);
+            linux.environment.apply(&mut fixture, None, &[], None);
             fixture
                 .define("STELA_LINUX_TREES_TEST", None)
                 .define("STELA_LINUX_TREES_CALLABLE", None)
@@ -338,7 +306,7 @@ impl Linux {
             ];
             let services = archive(&host, "linux-host", &services);
             let mut kernel_build = host;
-            linux.apply(&mut kernel_build, None, &[], None);
+            linux.environment.apply(&mut kernel_build, None, &[], None);
             let crc_objects = linux_crc::objects(&kernel_build, &crc_tables);
             kernel_build.objects(crc_objects);
             linux.hosted = vec![
@@ -368,7 +336,7 @@ impl Linux {
         let Some(mut build) = hosted() else {
             return;
         };
-        self.apply(&mut build, None, &[], None);
+        self.environment.apply(&mut build, None, &[], None);
         let archives = self.hosted.iter().map(PathBuf::as_path).collect::<Vec<_>>();
         // Dedicated lifecycle fixture: unchanged original kobject/uevent APIs.
         tests.add(
@@ -469,85 +437,15 @@ impl Linux {
             );
         }
     }
+}
 
-    /// Kbuild's definitions, flags and forced includes, and system include
-    /// directories so upstream code keeps Linux's warning profile rather than
-    /// Stela's. `generated` holds headers a driver's build generates and
-    /// `drivers` its directories below Linux's `drivers/gpu/drm`. Stela's
-    /// arch headers in `compat/linux/asm` and the generated wrappers stand for
-    /// Linux's arch tree ahead of its `include` tree, and the x86 uapi
-    /// headers and their wrappers ahead of `include/uapi`.
-    pub fn apply(
-        &self,
-        build: &mut cc::Build,
-        generated: Option<&Path>,
-        drivers: &[&str],
-        module: Option<&Module>,
-    ) {
-        // As Kbuild builds, no headers outside Linux's trees: neither the
-        // host's C library nor the compiler's own. Stela's C code gets the C
-        // headers it uses from `compat`, over Linux's types.
-        build
-            .flag("-nostdinc")
-            .define("__KERNEL__", None)
-            // Linux explicitly supports static reuse without its ELF module
-            // export records (also used by its own UEFI stub).
-            .define("__DISABLE_EXPORTS", None);
-        for flag in [
-            "-fms-extensions",
-            // Linux KBUILD_CFLAGS: EFI names use 16-bit wide literals on every host.
-            "-fshort-wchar",
-            "-fno-strict-aliasing",
-            "-fno-common",
-            "-fno-strict-overflow",
-            "-fno-delete-null-pointer-checks",
-            "-funsigned-char",
-        ] {
-            build.flag(flag);
-        }
-        for header in [
-            format!("{INCLUDE}/linux/kconfig.h"),
-            format!("{INCLUDE}/linux/compiler_types.h"),
-            format!("{COMPAT}/stela/compiler.h"),
-        ] {
-            build.flag("-include").flag(header);
-        }
-        if let Some(module) = module {
-            build
-                .define("KBUILD_MODNAME", format!("\"{}\"", module.name).as_str())
-                .define("KBUILD_MODFILE", format!("\"{}\"", module.file).as_str());
-        }
-        let drivers = drivers
-            .iter()
-            .map(|driver| PathBuf::from(format!("{DRM}/{driver}")))
-            .collect::<Vec<_>>();
-        // Cargo sees no included header, so every source tree the
-        // environment builds from is an input.
-        for directory in drivers.iter().map(|path| path.as_path()).chain([
-            Path::new(COMPAT),
-            Path::new(INCLUDE),
-            Path::new(X86_UAPI),
-            Path::new(LINUX).join("mm").as_path(),
-        ]) {
-            println!("cargo:rerun-if-changed={}", directory.display());
-        }
-        for directory in generated
-            .map(Path::to_path_buf)
-            .into_iter()
-            .chain(drivers)
-            .chain([
-                COMPAT.into(),
-                self.wrappers.clone(),
-                INCLUDE.into(),
-                X86_UAPI.into(),
-                self.wrappers.join("uapi"),
-                format!("{INCLUDE}/uapi").into(),
-                format!("{LINUX}/mm").into(),
-            ])
-        {
-            build.flag("-isystem").flag(directory);
-        }
-    }
+/// Include directories below the GPU framework's source root.
+#[cfg(feature = "linux-kernel")]
+pub fn drm_includes(directories: &[&str]) -> Vec<PathBuf> {
+    directories
+        .iter()
+        .map(|directory| Path::new(DRM).join(directory))
+        .collect()
 }
 
 /// Compile unchanged helpers with the common ABI and baseline diagnostics,
@@ -617,30 +515,6 @@ pub fn upstream_warnings(build: &mut cc::Build) {
         "enum-enum-conversion",
     ] {
         build.flag(format!("-Wno-{warning}"));
-    }
-}
-
-/// Every header in `compat` adds to Linux's: none stands in for one of
-/// `include/` by sharing its path, so upstream code always compiles against
-/// Linux's own headers. Its `asm/` is Stela's arch, which stands in for x86's.
-#[cfg(feature = "linux-kernel")]
-fn additions(directory: &Path) {
-    for entry in fs::read_dir(directory).expect("read the kernel-API directory") {
-        let path = entry.expect("readable directory entry").path();
-        let header = path.strip_prefix(COMPAT).expect("a kernel-API path");
-        if path.is_dir() {
-            if header != Path::new("asm") {
-                additions(&path);
-            }
-            continue;
-        }
-        for tree in [INCLUDE, &format!("{INCLUDE}/uapi")] {
-            assert!(
-                !Path::new(tree).join(header).exists(),
-                "{COMPAT}/{} would replace Linux's in {tree}",
-                header.display()
-            );
-        }
     }
 }
 

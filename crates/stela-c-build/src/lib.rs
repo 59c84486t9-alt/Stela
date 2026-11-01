@@ -3,6 +3,8 @@
 //! the active Rust toolchain's LLVM archiver.
 use std::{env, path::PathBuf, process::Command};
 
+#[cfg(feature = "linux")]
+pub mod linux;
 #[cfg(feature = "native")]
 pub mod native;
 

@@ -11,7 +11,7 @@ workspace = true
 
 [features]
 # Common native Linux kernel services; selecting this attaches no GPU.
-linux-kernel = ["dep:cc", "dep:stela-c-build", "stela-c-build/native", "stela-driver-base/linux-kernel"]
+linux-kernel = ["dep:cc", "dep:stela-c-build", "stela-c-build/linux", "stela-driver-base/linux-kernel"]
 # Build the implemented native NVIDIA OS hooks, not a complete GPU driver.
 nvidia-port = ["dep:cc", "dep:stela-c-build", "stela-c-build/native"]
 # Native Xe command/page-table support; not an initialized Intel GPU driver.
