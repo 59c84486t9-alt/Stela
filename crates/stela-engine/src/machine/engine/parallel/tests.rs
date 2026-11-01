@@ -43,7 +43,11 @@ fn a_tlbi_passes_by_a_pe_translating_another_context() {
     let inbox = &hub.inboxes[1];
     let word = context_word(mmu::Regime::El10, 7);
     let epoch = || inbox.chain.interrupt_epoch().load(Ordering::Relaxed);
-    assert_eq!(hub.broadcast(0, &[tlbi(ASID, ASID_5)]).len(), 1, "unpublished");
+    assert_eq!(
+        hub.broadcast(0, &[tlbi(ASID, ASID_5)]).len(),
+        1,
+        "unpublished"
+    );
     inbox.translating.store(word, Ordering::Relaxed);
     let interrupts = epoch();
     let passes = [ASID_5, ASID_5 | 0x1234];
@@ -58,7 +62,11 @@ fn a_tlbi_passes_by_a_pe_translating_another_context() {
         1,
         "its context"
     );
-    assert_eq!(hub.broadcast(0, &[tlbi(VAA, 0x1234)]).len(), 1, "every ASID");
+    assert_eq!(
+        hub.broadcast(0, &[tlbi(VAA, 0x1234)]).len(),
+        1,
+        "every ASID"
+    );
     assert!(inbox.lower_globals.widen(0x123_0000, 0x123_ffff));
     assert!(!inbox.lower_globals.widen(0x123_4000, 0x123_7fff));
     assert_eq!(

@@ -66,7 +66,10 @@ pub(super) fn address(
         ..checks
     };
     let access = Access::of(write, bytes.into());
-    if let (Some(host), false) = (code.host(base), checks.alignment || checks.checks_every_access()) {
+    if let (Some(host), false) = (
+        code.host(base),
+        checks.alignment || checks.checks_every_access(),
+    ) {
         if base == Register::Sp && checks.stack_alignment && !checks.stack_checked {
             code.asm().test_imm(Size::Byte, host, 15);
             code.check_failure(crate::x86_64::asm::Cond::Ne);

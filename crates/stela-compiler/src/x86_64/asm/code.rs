@@ -200,13 +200,14 @@ impl Code {
                 end: base + site.end,
                 ..site
             }));
-        self.failures.extend(other.failures.into_iter().map(|(jump, instruction)| {
-            let moved = super::Patch {
-                at: base + jump.at,
-                ..jump
-            };
-            (moved, instruction)
-        }));
+        self.failures
+            .extend(other.failures.into_iter().map(|(jump, instruction)| {
+                let moved = super::Patch {
+                    at: base + jump.at,
+                    ..jump
+                };
+                (moved, instruction)
+            }));
         self.bytes.extend(other.bytes);
         self.instructions += other.instructions;
     }

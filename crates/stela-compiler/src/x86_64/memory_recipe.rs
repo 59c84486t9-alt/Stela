@@ -402,9 +402,7 @@ pub(super) fn pair(
             };
             let hosts = [host(code, data[0], Gpr::Rcx), {
                 // The second element's own load is the last to need the base.
-                place
-                    .and_then(|_| code.host(data[1]))
-                    .unwrap_or(Gpr::R8)
+                place.and_then(|_| code.host(data[1])).unwrap_or(Gpr::R8)
             }];
             for (element, host, source) in [
                 (0, hosts[0], Mem::base(at, displacement)),
