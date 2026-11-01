@@ -5,11 +5,12 @@ use super::{
     RECORD, Request, assets,
     bundle::{self, Kind},
     ecid::Ecid,
-    format,
+    firmware, format,
     host::{self, Host},
     image_is_remote, installed, locate_esp, machines, medium,
     prepare::{
-        Prepared, PreparedSetup, copy_bundles, prepare_kind, prepare_restore_bundles, supported,
+        Prepared, PreparedSetup, copy_bundles, download_dir, prepare_kind, prepare_restore_bundles,
+        supported,
     },
     read_efi,
     record::{RECORD_KIND, RECORD_SCHEMA, Record, publish, write_record},
@@ -367,6 +368,8 @@ pub(super) struct Plan {
     pub(super) notes: Vec<String>,
     /// The key file's passphrase, for `--wifi`.
     pub(super) wifi_passphrase: Option<String>,
+    /// The chips of this computer's NVIDIA GPUs, whose firmware setup adds.
+    pub(super) gpu_chips: Vec<&'static str>,
 }
 
 pub(super) fn plan(
@@ -544,6 +547,17 @@ pub(super) fn plan(
     notes.push(tss_note());
     notes.push("Erase installs retain the original development-board FDR failure policy: FDR connectivity is disabled and factory data remains unprovisioned.".into());
     notes.extend(installed.notes.iter().cloned());
+    let mut gpu_chips = Vec::new();
+    for device in environment.host.nvidia_gpus()? {
+        match stela_loader::host_firmware::recipes::nvidia_chip(device) {
+            Some(chip) if !gpu_chips.contains(&chip) => gpu_chips.push(chip),
+            Some(_) => {}
+            None => notes.push(format!(
+                "NVIDIA GPU {device:04x}: setup cannot tell its chip; the boot names the chip \
+                 and `stela setup host-firmware fetch --gpu` adds its firmware."
+            )),
+        }
+    }
     Ok(Plan {
         record,
         ipsw,
@@ -554,6 +568,7 @@ pub(super) fn plan(
         install,
         notes,
         wifi_passphrase: command.wifi_passphrase.clone(),
+        gpu_chips,
     })
 }
 
@@ -576,6 +591,9 @@ pub(super) fn describe(plan: &Plan) -> Result<String> {
     )?;
     writeln!(text, "  restore image  {}", plan.ipsw.display())?;
     writeln!(text, "  EFI partition  {}", record.esp.display())?;
+    if !plan.gpu_chips.is_empty() {
+        writeln!(text, "  GPU firmware   {}", plan.gpu_chips.join(", "))?;
+    }
     let install = &record.installs[0];
     writeln!(
         text,
@@ -881,5 +899,22 @@ pub(super) fn apply(environment: &Environment<'_>, plan: Plan) -> Result<()> {
     efi::add_mount(&esp, &plan.efi_image, None, Some(&record.options))?;
     publish(&mut record)?;
     record.complete = true;
-    write_record(&esp, &record)
+    write_record(&esp, &record)?;
+    for chip in plan.gpu_chips {
+        firmware::provision(firmware::ProvisionOptions {
+            requirements: None,
+            gpu: Some(chip),
+            destination: &esp.join(stela_loader::host_firmware::DIRECTORY),
+            cache: &download_dir().with_file_name("firmware"),
+            dry_run: false,
+            mount_image: &plan.efi_image,
+        })
+        .with_context(|| {
+            format!(
+                "the USB is set up, but without {chip}'s GPU firmware: \
+                 `stela setup host-firmware fetch --gpu {chip}` adds it"
+            )
+        })?;
+    }
+    Ok(())
 }

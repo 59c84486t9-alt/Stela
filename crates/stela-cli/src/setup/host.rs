@@ -224,6 +224,11 @@ pub(crate) trait Host {
     fn mount(&self, identifier: &str) -> Result<PathBuf>;
     /// This computer's CPU, for a disk it boots itself.
     fn cpu(&self) -> Result<Cpu>;
+    /// The PCI device IDs of this computer's NVIDIA GPUs; empty where the
+    /// host cannot list them.
+    fn nvidia_gpus(&self) -> Result<Vec<u16>> {
+        Ok(Vec::new())
+    }
     /// Check write access before downloading or signing for a whole USB.
     fn check_erase_access(&self, _disk: &str) -> Result<()> {
         Ok(())

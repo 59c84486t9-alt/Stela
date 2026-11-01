@@ -577,6 +577,36 @@ fn select_gsp(request: &Request) -> Option<&'static Recipe> {
     GSP.iter().find(|recipe| recipe.image.member == member)
 }
 
+/// The chip of an NVIDIA GPU with PCI device ID `device`, named as nouveau
+/// names chips, by the ranges NVIDIA gives each chip's products. nouveau reads
+/// the real chip from the GPU at boot and names any file a wrong answer left
+/// out.
+pub fn nvidia_chip(device: u16) -> Option<&'static str> {
+    Some(match device {
+        0x1e00..=0x1e7f => "tu102",
+        0x1e80..=0x1eff => "tu104",
+        0x1f00..=0x1f7f => "tu106",
+        0x1f80..=0x1fff => "tu117",
+        0x2180..=0x21ff => "tu116",
+        0x2200..=0x223f => "ga102",
+        0x2400..=0x247f => "ga103",
+        0x2480..=0x24ff => "ga104",
+        0x2500..=0x257f => "ga106",
+        0x2580..=0x25ff => "ga107",
+        0x2680..=0x26ff => "ad102",
+        0x2700..=0x277f => "ad103",
+        0x2780..=0x27ff => "ad104",
+        0x2800..=0x287f => "ad106",
+        0x2880..=0x28ff => "ad107",
+        0x2b80..=0x2bff => "gb202",
+        0x2c00..=0x2cff => "gb203",
+        0x2d00..=0x2d7f => "gb206",
+        0x2d80..=0x2dff => "gb207",
+        0x2f00..=0x2f7f => "gb205",
+        _ => return None,
+    })
+}
+
 /// Requires the GSP-RM files nouveau asks for on `chip`, named as it names
 /// chips: `tu104`, `ga104`, `ad104`.
 pub fn require_gsp(inventory: &mut Inventory, chip: &str) -> Result<(), Error> {
@@ -1031,6 +1061,22 @@ mod tests {
             "name":name, "target":{"driver":driver,"hardware":hardware,"revision":"observed","board":null},"minimum_bytes":12
         }]});
         Inventory::parse(&serde_json::to_vec(&value).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn nvidia_device_ids_name_chips_with_pinned_firmware() {
+        for (device, chip) in [
+            (0x2c02, "gb203"),
+            (0x2b85, "gb202"),
+            (0x2684, "ad102"),
+            (0x2484, "ga104"),
+            (0x1e87, "tu104"),
+        ] {
+            assert_eq!(nvidia_chip(device), Some(chip));
+            require_gsp(&mut Inventory::default(), chip).unwrap();
+        }
+        // An NVIDIA GPU's audio function is no GPU.
+        assert_eq!(nvidia_chip(0x22e9), None);
     }
 
     #[test]

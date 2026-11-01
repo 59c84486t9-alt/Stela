@@ -55,6 +55,7 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 # Setup's disk backend on Windows: storage and volume control codes.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
+    "Win32_Devices_DeviceAndDriverInstallation",
     "Win32_Foundation",
     "Win32_Storage_FileSystem",
     "Win32_System_Console",

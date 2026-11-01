@@ -42,6 +42,7 @@ pub(super) struct FakeHost {
     pub(super) unmounted: std::cell::RefCell<Vec<String>>,
     /// Where `mount` mounts a partition; others refuse.
     pub(super) mountable: BTreeMap<String, PathBuf>,
+    pub(super) nvidia_gpus: std::cell::RefCell<Vec<u16>>,
 }
 
 impl FakeHost {
@@ -57,6 +58,7 @@ impl FakeHost {
             cpu: Cpu { entropy: true },
             unmounted: Default::default(),
             mountable: BTreeMap::new(),
+            nvidia_gpus: Default::default(),
         }
     }
 
@@ -130,6 +132,9 @@ impl Host for FakeHost {
     }
     fn cpu(&self) -> Result<Cpu> {
         Ok(self.cpu)
+    }
+    fn nvidia_gpus(&self) -> Result<Vec<u16>> {
+        Ok(self.nvidia_gpus.borrow().clone())
     }
     fn volume(&self, path: &Path) -> Result<Volume> {
         let (filesystem, free_bytes, disk) = self
@@ -470,7 +475,11 @@ fn setup_installs_from_the_usb_and_uninstall_restores_it() {
 
     let mut dry = command(&f, &f.esp);
     dry.dry_run = true;
+    host.nvidia_gpus.replace(vec![0x2c02, 0x2c05, 0x9999]);
     let plan = setup(&environment(host), dry).unwrap();
+    host.nvidia_gpus.take();
+    assert!(plan.contains("GPU firmware   gb203\n"), "{plan}");
+    assert!(plan.contains("NVIDIA GPU 9999"), "{plan}");
     assert!(plan.contains("Dry run: nothing was changed."), "{plan}");
     assert!(plan.contains("the disk's own recoveryOS"), "{plan}");
     assert!(plan.contains("ECID           0x"), "{plan}");

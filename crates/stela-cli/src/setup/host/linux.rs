@@ -207,6 +207,26 @@ fn require_system_device(devices: &[Device]) -> Result<()> {
 }
 
 impl Host for System {
+    fn nvidia_gpus(&self) -> Result<Vec<u16>> {
+        let hex = |device: &Path, name| {
+            let text = fs::read_to_string(device.join(name)).ok()?;
+            u32::from_str_radix(text.trim().strip_prefix("0x")?, 16).ok()
+        };
+        let mut gpus = Vec::new();
+        for device in fs::read_dir("/sys/bus/pci/devices")? {
+            let device = device?.path();
+            // Base class 3 is a display controller; an NVIDIA GPU's audio
+            // function is not one.
+            if hex(&device, "vendor") == Some(0x10de)
+                && hex(&device, "class").is_some_and(|class| class >> 16 == 3)
+                && let Some(id) = hex(&device, "device")
+            {
+                gpus.push(id as u16);
+            }
+        }
+        Ok(gpus)
+    }
+
     fn volume(&self, path: &Path) -> Result<Volume> {
         use std::os::unix::fs::MetadataExt;
         let filesystem;

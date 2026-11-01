@@ -22,6 +22,10 @@ use std::{
 };
 use windows_sys::{
     Win32::{
+        Devices::DeviceAndDriverInstallation::{
+            DIGCF_PRESENT, SP_DEVINFO_DATA, SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInfo,
+            SetupDiGetClassDevsW, SetupDiGetDeviceInstanceIdW,
+        },
         Foundation::{
             ERROR_INSUFFICIENT_BUFFER, ERROR_MORE_DATA, ERROR_NO_MORE_FILES, GENERIC_READ,
             GENERIC_WRITE, INVALID_HANDLE_VALUE,
@@ -810,5 +814,77 @@ impl Host for System {
 
     fn cpu(&self) -> Result<Cpu> {
         super::cpu()
+    }
+
+    fn nvidia_gpus(&self) -> Result<Vec<u16>> {
+        // The display device class, which an NVIDIA GPU's audio function is
+        // not in.
+        const DISPLAY: GUID = GUID::from_u128(0x4d36e968_e325_11ce_bfc1_08002be10318);
+        // SAFETY: DISPLAY outlives the call; the other inputs are optional.
+        let set = unsafe {
+            SetupDiGetClassDevsW(
+                &DISPLAY,
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                DIGCF_PRESENT,
+            )
+        };
+        ensure!(
+            set != INVALID_HANDLE_VALUE as isize,
+            "cannot list display devices: {}",
+            std::io::Error::last_os_error()
+        );
+        let mut gpus = Vec::new();
+        for index in 0.. {
+            // SAFETY: an all-zero SP_DEVINFO_DATA is valid plain data.
+            let mut device: SP_DEVINFO_DATA = unsafe { std::mem::zeroed() };
+            device.cbSize = size_of::<SP_DEVINFO_DATA>() as u32;
+            // SAFETY: `set` is open and `device` declares its size.
+            if unsafe { SetupDiEnumDeviceInfo(set, index, &mut device) } == 0 {
+                break;
+            }
+            let mut id = [0u16; 512];
+            let mut length = 0;
+            // SAFETY: the buffer's length is passed with it, and `device`
+            // came from `set`.
+            let named = unsafe {
+                SetupDiGetDeviceInstanceIdW(
+                    set,
+                    &device,
+                    id.as_mut_ptr(),
+                    id.len() as u32,
+                    &mut length,
+                )
+            };
+            if named != 0 {
+                let end = (length as usize).saturating_sub(1).min(id.len());
+                gpus.extend(nvidia_device(&String::from_utf16_lossy(&id[..end])));
+            }
+        }
+        // SAFETY: `set` is open and not used again.
+        unsafe { SetupDiDestroyDeviceInfoList(set) };
+        Ok(gpus)
+    }
+}
+
+/// The PCI device ID in an NVIDIA device's instance ID, such as
+/// `PCI\VEN_10DE&DEV_2C02&SUBSYS_...`.
+fn nvidia_device(instance: &str) -> Option<u16> {
+    let device = instance.strip_prefix("PCI\\VEN_10DE&DEV_")?.get(..4)?;
+    u16::from_str_radix(device, 16).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::nvidia_device;
+
+    #[test]
+    fn instance_ids_name_nvidia_devices() {
+        let id = "PCI\\VEN_10DE&DEV_2C02&SUBSYS_88921043&REV_A1\\4&1A2B3C4D&0&0019";
+        assert_eq!(nvidia_device(id), Some(0x2c02));
+        assert_eq!(
+            nvidia_device("PCI\\VEN_1002&DEV_164E&SUBSYS_88771043"),
+            None
+        );
     }
 }
