@@ -33,6 +33,7 @@ pub enum Error {
     Mapping(owned::Error),
     Msix(msix::Error),
     Irq(irq::IrqError),
+    Delivery(irq::posted_msi::Error),
     Readback {
         offset: usize,
         observed: u32,
@@ -137,6 +138,8 @@ pub struct Inputs<C: MsiConfigSpace, B: BarAccess, R: Registers> {
     pub registers: R,
     pub clock: Clock,
     pub interrupts: &'static dyn IrqController,
+    pub domain: Arc<dyn crate::bus::dma::mapping::DmaDomain>,
+    pub msi_completion: irq::posted_msi::MsiCompletion,
 }
 struct Signals<R: Registers> {
     registers: R,
@@ -216,6 +219,10 @@ struct Configuration<C: MsiConfigSpace, B: BarAccess> {
 struct NativeSource<C: MsiConfigSpace, B: BarAccess, R: Registers> {
     configuration: Rc<RefCell<Configuration<C, B>>>,
     signals: Arc<Signals<R>>,
+    domain: Arc<dyn crate::bus::dma::mapping::DmaDomain>,
+    delivery: Rc<RefCell<irq::posted_msi::MsiCompletion>>,
+    programmed: bool,
+    drained: bool,
 }
 impl<C: MsiConfigSpace, B: BarAccess, R: Registers> NativeSource<C, B, R> {
     fn checked(
@@ -231,8 +238,9 @@ impl<C: MsiConfigSpace, B: BarAccess, R: Registers> NativeSource<C, B, R> {
     }
 }
 // SAFETY: the consumed native grant binds PCI/reset/UC/DMA ownership.
-// Source quiescence independently observes stop/reset/cause acknowledgments;
-// registry retirement drains CPU/callbacks before pending work is canceled.
+// Source quiescence observes stop/reset/cause acknowledgments, completes the
+// paired payload path and independently drains bound posted MSI-X delivery.
+// Registry then drains CPU/callbacks before pending work is canceled.
 unsafe impl<C: MsiConfigSpace, B: BarAccess, R: Registers> Source for NativeSource<C, B, R> {
     fn mask(&mut self) -> core::result::Result<(), irq::IrqError> {
         let result = self
@@ -244,7 +252,24 @@ unsafe impl<C: MsiConfigSpace, B: BarAccess, R: Registers> Source for NativeSour
         self.checked(result, irq::IrqError::Mask)
     }
     fn quiesce(&mut self) -> core::result::Result<(), irq::IrqError> {
-        self.checked(self.signals.stopped(), irq::IrqError::Quiesce)
+        let result = (|| {
+            self.signals.stopped()?;
+            if self.programmed && !self.drained {
+                // SAFETY: this original function acknowledged disconnect/reset,
+                // all MSI-X entries are masked, and the serialized core cannot
+                // resume. Its buffers/configuration and root remain held.
+                unsafe { self.domain.drain_posted_writes() }.map_err(|source| Error::Dma {
+                    operation: lifetime::DmaOperation::Drain,
+                    source,
+                })?;
+                // SAFETY: same source/payload completion, masked original route
+                // and kept owners. This is independent of payload/CPU drain.
+                unsafe { self.delivery.borrow().drain() }.map_err(Error::Delivery)?;
+                self.drained = true;
+            }
+            Ok(())
+        })();
+        self.checked(result, irq::IrqError::Quiesce)
     }
     fn route(&self) -> RouteRequest {
         RouteRequest::Msi
@@ -253,10 +278,14 @@ unsafe impl<C: MsiConfigSpace, B: BarAccess, R: Registers> Source for NativeSour
         let Route::Msi(message) = route else {
             return Err(irq::IrqError::Route);
         };
-        // SAFETY: the registry keeps its checked route and callback;
-        // mask and independently observed source stop precede programming.
-        let result =
-            unsafe { self.configuration.borrow_mut().msix.program(message) }.map_err(Error::Msix);
+        self.programmed = true;
+        let result = (|| {
+            // SAFETY: Source::program holds this registry's original exclusive
+            // route for the paired requester/root owner.
+            unsafe { self.delivery.borrow_mut().bind_route(message) }.map_err(Error::Delivery)?;
+            // SAFETY: registry keeps the checked route/callback while masked.
+            unsafe { self.configuration.borrow_mut().msix.program(message) }.map_err(Error::Msix)
+        })();
         self.checked(result, irq::IrqError::Route)
     }
     unsafe fn unmask(&mut self) -> core::result::Result<(), irq::IrqError> {
@@ -278,6 +307,8 @@ pub struct NativePlatform<C: MsiConfigSpace, B: BarAccess, R: Registers> {
     configuration: Option<Rc<RefCell<Configuration<C, B>>>>,
     signals: Option<Arc<Signals<R>>>,
     interrupts: &'static dyn IrqController,
+    domain: Option<Arc<dyn crate::bus::dma::mapping::DmaDomain>>,
+    delivery: Option<Rc<RefCell<irq::posted_msi::MsiCompletion>>>,
     clock: Clock,
     clock_origin: u64,
     registration: Option<Box<dyn IrqRegistration>>,
@@ -292,12 +323,18 @@ impl<C: MsiConfigSpace + 'static, B: BarAccess + 'static, R: Registers> NativePl
     /// interrupt and DMA owners are drained. Shared combo reset is authorized by
     /// its coordinator. Supplied DMA retains coherent mappings and page pins
     /// for this requester; bus addresses need not equal physical/CPU addresses.
-    /// IRQ routing is real/checked.
+    /// IRQ routing is real/checked. `domain` is the paired coherent payload
+    /// root; `msi_completion` owns its independent posted-interrupt path.
+    /// Unavailable completion permits I/O but refuses armed route retirement.
     /// Only one serialized process/deferred owner may service this transport;
     /// the callback's pending flag is its entire work queue. No source,
     /// mapping, DMA or reset owner may be revoked while kept. Native mappings
     /// remain kept until explicit device/DMA/IRQ and mapping retirement.
     /// Constructor errors perform no writes and return every exact input owner.
+    #[expect(
+        clippy::result_large_err,
+        reason = "read-only refusal returns the original function, BAR, root and delivery owners without allocating"
+    )]
     pub unsafe fn new(
         mut inputs: Inputs<C, B, R>,
     ) -> core::result::Result<Self, (Error, Inputs<C, B, R>)> {
@@ -357,6 +394,8 @@ impl<C: MsiConfigSpace + 'static, B: BarAccess + 'static, R: Registers> NativePl
             registers,
             clock,
             interrupts,
+            domain,
+            msi_completion,
         } = inputs;
         // SAFETY: same consumed Function/reset/resources grant. Old real
         // routes/CPU callbacks are independently drained; no numeric substitute.
@@ -372,6 +411,8 @@ impl<C: MsiConfigSpace + 'static, B: BarAccess + 'static, R: Registers> NativePl
                         registers,
                         clock,
                         interrupts,
+                        domain,
+                        msi_completion,
                     },
                 ));
             }
@@ -395,6 +436,8 @@ impl<C: MsiConfigSpace + 'static, B: BarAccess + 'static, R: Registers> NativePl
                 reset_issued: AtomicBool::new(false),
             })),
             interrupts,
+            domain: Some(domain),
+            delivery: Some(Rc::new(RefCell::new(msi_completion))),
             clock,
             clock_origin,
             registration: None,
@@ -485,6 +528,10 @@ unsafe impl<C: MsiConfigSpace + 'static, B: BarAccess + 'static, R: Registers> P
         let source = NativeSource {
             configuration: self.configuration.as_ref().unwrap().clone(),
             signals: self.signals.as_ref().unwrap().clone(),
+            domain: self.domain.as_ref().unwrap().clone(),
+            delivery: self.delivery.as_ref().unwrap().clone(),
+            programmed: false,
+            drained: false,
         };
         let handler = Callback(self.signals.as_ref().unwrap().clone());
         match self.interrupts.request(Box::new(source), Arc::new(handler)) {
@@ -574,6 +621,8 @@ impl<C: MsiConfigSpace, B: BarAccess, R: Registers> Drop for NativePlatform<C, B
             if let Some(signals) = self.signals.take() {
                 core::mem::forget(signals);
             }
+            core::mem::forget(self.domain.take());
+            core::mem::forget(self.delivery.take());
         }
         // Successful physical retirement permits owner Drop. Owned mappings
         // keep/quarantine their boot-lifetime native reservations.

@@ -9,6 +9,7 @@ use crate::{
     bluetooth::{bcm4377, intel_pcie},
     bus::{
         dma::{DomainAllocator, mapping::DmaDomain},
+        irq::posted_msi::MsiCompletion,
         mmio::owned::{CacheAttribute, Mapping, Protection},
         pci::{
             Address, Bar, ConfigSpace, Function,
@@ -967,7 +968,7 @@ pub(super) unsafe fn bcm4377(
     clock: Clock,
 ) -> Result<Bcm4377, Failure> {
     use bcm4377::native::{
-        Error as NativeError, Inputs, MappedRegisters, MsiCompletion, NativeClock, NativePlatform,
+        Error as NativeError, Inputs, MappedRegisters, NativeClock, NativePlatform,
     };
     let refused = |error: ServiceError| (Error::Native(error), None);
     let failed =
@@ -1132,6 +1133,8 @@ pub(super) unsafe fn intel_bluetooth(
         registers: bound.registers,
         clock,
         interrupts,
+        domain: bound.attachment.domain(),
+        msi_completion: MsiCompletion::unavailable(),
     };
     // SAFETY: same original stopped function/root, acknowledged memory/BME,
     // coherent domain, routed IRQ provider and checked UC/MSI-X owners.

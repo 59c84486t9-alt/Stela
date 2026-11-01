@@ -353,6 +353,8 @@ pub(super) fn owned_inputs(
         registers: bound.registers,
         clock: CLOCK,
         interrupts: &NO_INTERRUPTS,
+        domain: bound.attachment.domain(),
+        msi_completion: irq::posted_msi::MsiCompletion::unavailable(),
     };
     // SAFETY: exclusively owned model uses the same cold receipt/root/BAR.
     let platform =
