@@ -105,7 +105,22 @@ pub(super) const PAN_WRITES: usize = CODE_PAGE + 1;
 /// completion until this PE has maintenance for another to complete.
 pub(super) const DATA_BARRIER: usize = PAN_WRITES + 1;
 
-const CELLS: usize = DATA_BARRIER + 1;
+/// The cell of the first of the [`STORED_WRITES`].
+const STORED_WRITE_CELLS: usize = DATA_BARRIER + 1;
+
+/// The IMPLEMENTATION DEFINED registers that a store completes writes of
+/// that get a cell of their own the first time code naming them is installed
+/// ([`Machine::stored_write_cell`]), open on the register's value once a
+/// write completes plainly. A kernel writes them around each thread switch.
+/// When there are more, the rest take System exits.
+pub(super) const STORED_WRITES: usize = 32;
+
+const CELLS: usize = STORED_WRITE_CELLS + STORED_WRITES;
+
+/// The cell of `stored_writes[index]`.
+pub(super) const fn stored_write_cell(index: usize) -> usize {
+    STORED_WRITE_CELLS + index
+}
 
 /// The cell of the mask writes (`x86_64::register_read::mask_thunk`), open
 /// once one completed plainly in the state.
@@ -468,6 +483,15 @@ pub(super) fn data_barrier(pc: u64, word: u32) -> bool {
 pub(super) fn code_page_invalidation(word: u32) -> Option<u8> {
     const IC_IVAU: u32 = 0xd50b_7520;
     (word & !31 == IC_IVAU).then_some((word & 31) as u8)
+}
+
+/// The MSR `word` at `pc`, if it writes a register.
+pub(super) fn msr_access(pc: u64, word: u32) -> Option<RegisterAccess> {
+    let instruction = block::decode_system_mode_instruction(GuestAddress(pc), word).ok()??;
+    match instruction.operation {
+        SystemOperation::Register(access) if access.direction() == Direction::Write => Some(access),
+        _ => None,
+    }
 }
 
 /// The MRS `word` at `pc`, if it reads to a register.

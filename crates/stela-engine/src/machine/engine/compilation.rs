@@ -675,8 +675,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
             } else {
                 register_read::thunk(GuestAddress(pc), rt, cell)
             }
+        } else if let Some(access) = mrs_access(pc, word) {
+            self.stored_read_thunk(pc, access)?
         } else {
-            self.stored_read_thunk(pc, mrs_access(pc, word)?)?
+            let access = msr_access(pc, word)?;
+            let (index, refused) = self.stored_write_cell(access.encoding())?;
+            let cell = cell_place(stored_write_cell(index));
+            register_read::checked_write_thunk(GuestAddress(pc), access.rt(), cell, refused)
         };
         let installed = self.host.install(&thunk.code).ok()?;
         let site = code.0 as u64 + site as u64;
@@ -724,6 +729,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let cell = known.or_else(|| {
             let storable = storable(encoding)
                 || self
+                    .cpu
+                    .impdef(encoding)
+                    .is_some_and(|entry| entry.reads_storage())
+                || self
                     .devices
                     .register_storage(self.current, encoding)
                     .is_some();
@@ -733,6 +742,20 @@ impl<H: Host, D: Devices> Machine<H, D> {
             })
         })?;
         Some(MIRRORED.len() + cell)
+    }
+
+    /// The index of `encoding` in [`Self::stored_writes`], made if there is
+    /// room, and the bits of a value its writes leave to the engine.
+    fn stored_write_cell(&mut self, encoding: Encoding) -> Option<(usize, u64)> {
+        let refused = self.cpu.impdef(encoding)?.stored_write()?;
+        let known = self.stored_writes.iter().position(|&write| write == encoding);
+        let index = known.or_else(|| {
+            (self.stored_writes.len() < STORED_WRITES).then(|| {
+                self.stored_writes.push(encoding);
+                self.stored_writes.len() - 1
+            })
+        })?;
+        Some((index, refused))
     }
 
     /// The thunk completing `access` at `pc` from its stored cell.

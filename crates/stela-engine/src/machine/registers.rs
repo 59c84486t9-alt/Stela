@@ -920,6 +920,11 @@ impl Cpu {
         }
     }
 
+    /// The `machine::impdef` entry of `encoding` on this chip.
+    pub fn impdef(&self, encoding: Encoding) -> Option<&'static impdef::Entry> {
+        impdef::lookup(encoding, self.registers.chip())
+    }
+
     /// A read or write of a `machine::impdef` entry; `physical` is the
     /// system counter, for the performance monitor PMCR1_GL1 filters.
     fn impdef_access(

@@ -733,6 +733,9 @@ pub struct Machine<H: Host, D: Devices> {
     fetched_leaves: [Vec<u64>; 2],
     /// The registers of the stored cells, in the order of the cells.
     stored_reads: Vec<Encoding>,
+    /// The IMPLEMENTATION DEFINED registers with a cell of their own for
+    /// writes ([`STORED_WRITES`]).
+    stored_writes: Vec<Encoding>,
     /// The page this PE posted an IC IVAU of since its last DSB.
     code_posted: Option<u64>,
     /// The storage the last generated read returned, if it was a plain one.
@@ -999,6 +1002,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             lower_globals: NO_GLOBALS,
             fetched_leaves: [vec![0; FETCHED_LEAVES / 64], vec![0; FETCHED_LEAVES / 64]],
             stored_reads: Vec::new(),
+            stored_writes: Vec::new(),
             code_posted: None,
             plain_read: None,
             next_context: 1,

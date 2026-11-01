@@ -6,6 +6,47 @@ fn lookup(encoding: Encoding) -> Option<&'static Entry> {
     super::lookup(encoding, Chip::AppleM2)
 }
 
+/// Every entry has a value of its own, at an address that a later write
+/// keeps, for native code to reach.
+#[test]
+fn each_register_keeps_its_value_at_its_own_address() {
+    let slots = TABLE.iter().map(|entry| entry.encoding).fold(
+        BTreeSet::new(),
+        |mut slots: BTreeSet<_>, encoding| {
+            slots.insert((slot(encoding), encoding.selector()));
+            slots
+        },
+    );
+    assert!(slots.iter().all(|&(at, _)| at < SLOTS));
+    let distinct: BTreeSet<_> = slots.iter().map(|&(at, _)| at).collect();
+    assert_eq!(distinct.len(), slots.len());
+    let entry = TABLE
+        .iter()
+        .find(|entry| entry.class == Class::Storage && entry.scope == Scope::Pe)
+        .unwrap();
+    let mut registers = Registers::default();
+    let address = registers.storage(entry);
+    assert!(registers.read(entry).is_err());
+    registers.write(entry, 7).unwrap();
+    assert_eq!(registers.storage(entry), address);
+    // SAFETY: the address is of the registers' live value.
+    assert_eq!(unsafe { *(address as *const u64) }, 7);
+    assert_eq!(registers.read(entry), Ok(7));
+}
+
+/// A store alone completes the writes of registers that have no more to
+/// them, and of values without the bits that say otherwise.
+#[test]
+fn stored_writes_leave_out_what_the_engine_decides() {
+    let of = |encoding| TABLE.iter().find(|entry| entry.encoding == encoding).unwrap();
+    assert_eq!(of(THREAD_KEY_0).stored_write(), Some(0));
+    assert_eq!(of(SWITCH_CLEARED).stored_write(), Some(u64::MAX));
+    assert_eq!(of(SIQ_CFG_EL1).stored_write(), None);
+    assert_eq!(of(PMCR1_GL1).stored_write(), None);
+    assert!(of(SIQ_CFG_EL1).reads_storage());
+    assert!(!of(TRACE_VA_C5_7).reads_storage());
+}
+
 /// The table is the M2's: its components access every entry, and each
 /// chip's census is sorted for its search. An entry another chip never
 /// accesses is not looked up there.

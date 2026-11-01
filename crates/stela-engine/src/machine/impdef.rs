@@ -72,7 +72,7 @@
 //! has had the space enumerated, so neither an encoding's existence nor its
 //! reset value is observed. The run reports every entry the guest used, so none of
 //! these is silent.
-use alloc::collections::BTreeMap;
+use alloc::{boxed::Box, collections::BTreeMap, vec};
 use stela_compiler::aarch64::system::registers::Encoding;
 use stela_contracts::Chip;
 
@@ -489,6 +489,38 @@ impl Entry {
         self.unmodeled
             .filter(|(bits, _)| value & bits != 0)
             .map(|(_, missing)| missing)
+    }
+
+    /// Whether the PE's value ([`Registers::storage`]) is the register:
+    /// the classes that keep what is written, on this PE alone.
+    const fn stored(&self) -> bool {
+        matches!(
+            self.class,
+            Class::Storage
+                | Class::Tuning
+                | Class::Prediction
+                | Class::Scratch
+                | Class::Control
+                | Class::Counter
+                | Class::Guest
+        ) && matches!(self.scope, Scope::Pe)
+    }
+
+    /// Whether a read that completes returns [`Registers::storage`].
+    pub fn reads_storage(&self) -> bool {
+        self.stored() && self.encoding != TRACE_VA_C5_7
+    }
+
+    /// The bits of a value that take a write more than a store to
+    /// [`Registers::storage`], if a value without them takes no more.
+    pub fn stored_write(&self) -> Option<u64> {
+        let special = matches!(self.encoding, PMCR1_GL1 | SIQ_CFG_EL1);
+        let checked = match self.class {
+            Class::Control | Class::Prediction => !self.permitted,
+            _ => 0,
+        };
+        let unmodeled = self.unmodeled.map_or(0, |(bits, _)| bits);
+        (self.stored() && !special).then_some(checked | unmodeled)
     }
 }
 
@@ -1774,10 +1806,55 @@ pub struct Activity {
     pub mpidr: u64,
 }
 
-/// Values and use counts of the table's registers.
+/// The slots of a [`Values`]: CRn 15's encodings, then CRn 11's.
+const SLOTS: usize = 2 << 10;
+
+/// The slot of `encoding`, of the table's CRns.
+const fn slot(encoding: Encoding) -> usize {
+    let other = encoding.crn() != IMPDEF_CRN;
+    (other as usize) << 10
+        | (encoding.op1() as usize) << 7
+        | (encoding.crm() as usize) << 3
+        | encoding.op2() as usize
+}
+
+/// A PE's values, which stay where they are for native code to reach
+/// ([`Registers::storage`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Values {
+    values: Box<[u64]>,
+    /// A bit per slot, set by its first write.
+    written: Box<[u64]>,
+}
+
+impl Default for Values {
+    fn default() -> Self {
+        Self {
+            values: vec![0; SLOTS].into_boxed_slice(),
+            written: vec![0; SLOTS / 64].into_boxed_slice(),
+        }
+    }
+}
+
+impl Values {
+    fn get(&self, encoding: Encoding) -> Option<u64> {
+        let slot = slot(encoding);
+        (self.written[slot / 64] >> (slot % 64) & 1 != 0).then(|| self.values[slot])
+    }
+
+    fn set(&mut self, encoding: Encoding, value: u64) {
+        let slot = slot(encoding);
+        self.written[slot / 64] |= 1 << (slot % 64);
+        self.values[slot] = value;
+    }
+}
+
+/// Values and use counts of the table's registers. Native code completes
+/// accesses of a register once the engine has completed one, which these
+/// counts then leave out: they say which registers were used.
 #[derive(Debug, Clone, Default)]
 pub struct Registers {
-    values: BTreeMap<u16, u64>,
+    values: Values,
     /// The system count of the PE's first energy reading.
     energy_origin: Option<u64>,
     /// The `Scope::Cluster` values, shared with the cluster's other PEs.
@@ -1806,9 +1883,15 @@ impl Registers {
     fn stored(&self, entry: &Entry) -> Option<u64> {
         let key = entry.encoding.selector();
         match entry.scope {
-            Scope::Pe => self.values.get(&key).copied(),
+            Scope::Pe => self.values.get(entry.encoding),
             Scope::Cluster => self.cluster.borrow().get(&key).copied(),
         }
+    }
+
+    /// The address of a [`Entry::stored`] entry's value on this PE, whose
+    /// first access the engine completes.
+    pub fn storage(&self, entry: &Entry) -> u64 {
+        &self.values.values[slot(entry.encoding)] as *const u64 as u64
     }
 
     /// An `Energy` entry's reading: the energy the PE's core type's modeled
@@ -1884,9 +1967,11 @@ impl Registers {
         // A status register records nothing, so a clearing write leaves it 0.
         if entry.class != Class::Status {
             match entry.scope {
-                Scope::Pe => self.values.insert(key, value),
-                Scope::Cluster => self.cluster.borrow_mut().insert(key, value),
-            };
+                Scope::Pe => self.values.set(entry.encoding, value),
+                Scope::Cluster => {
+                    self.cluster.borrow_mut().insert(key, value);
+                }
+            }
         }
         Ok(())
     }

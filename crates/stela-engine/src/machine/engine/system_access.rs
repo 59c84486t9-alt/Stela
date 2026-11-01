@@ -318,6 +318,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if let Some(index) = guarded_written(access) {
             return self.guarded_access(word, access, index);
         }
+        if access.direction() == Direction::Write {
+            return self.stored_write_access(word, access);
+        }
         let Some(index) = mirrored(access) else {
             return self.stored_read(word, access);
         };
@@ -386,9 +389,33 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 })
                 .and_then(|(register, index)| self.cpu.registers.address(register, index))
                 .or_else(|| self.devices.register_storage(self.current, encoding))
+                .or_else(|| {
+                    self.cpu
+                        .impdef(encoding)
+                        .filter(|entry| entry.reads_storage())
+                        .map(|entry| self.cpu.apple.impdef.storage(entry))
+                })
         };
         if let (Ok(()), true, Some(value)) = (&step, self.position() == before, value) {
             self.mirrors[MIRRORED.len() + cell] = register_read::Cell { readable: 1, value };
+        }
+        step
+    }
+
+    /// MSR of a register with a [`Self::stored_writes`] cell, which one that
+    /// completes plainly opens on the register's value.
+    fn stored_write_access(&mut self, word: u32, access: RegisterAccess) -> Step {
+        let encoding = access.encoding();
+        let cell = self.stored_writes.iter().position(|&write| write == encoding);
+        let Some(cell) = cell else {
+            return self.register_access(word, access);
+        };
+        let before = self.completion_point();
+        let step = self.register_access(word, access);
+        let entry = self.cpu.impdef(encoding);
+        if let (Ok(()), true, Some(entry)) = (&step, self.position() == before, entry) {
+            let value = self.cpu.apple.impdef.storage(entry);
+            self.mirrors[stored_write_cell(cell)] = register_read::Cell { readable: 1, value };
         }
         step
     }

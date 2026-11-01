@@ -22,6 +22,9 @@
 //! [`frame_write_thunk`] writes a field of the frame. It also clobbers RCX
 //! and RDX.
 //!
+//! A [`checked_write_thunk`] completes MSR of a register that takes any value
+//! without the bits it refuses, which the engine decides.
+//!
 //! A [`stack_select_thunk`] completes MSR SPSel: the frame's SP moves to the
 //! stack it leaves and takes the one it selects. The selection is a word of
 //! the engine's while native code runs, which reads of SP_EL0 consult
@@ -202,6 +205,28 @@ pub fn stored_write_thunk(pc: GuestAddress, rt: u8, cell: Place, written: Writte
     written.apply(&mut asm, rt);
     asm.mov_store(Size::Qword, Mem::base(Gpr::Rcx, 0), Gpr::Rax);
     finish(code, miss, pc)
+}
+
+/// [`stored_write_thunk`] of a register that keeps what it is written, unless
+/// the value has one of the bits `refused`.
+pub fn checked_write_thunk(pc: GuestAddress, rt: u8, cell: Place, refused: u64) -> Thunk {
+    let (mut code, miss) = open(cell);
+    let mut asm = Asm::new(&mut code);
+    asm.mov_load(Size::Qword, Gpr::Rcx, Mem::base_disp8(Gpr::Rax, VALUE));
+    let all = Written {
+        keep: u64::MAX,
+        set: 0,
+    };
+    all.apply(&mut asm, rt);
+    if rt == 31 || refused == 0 {
+        asm.mov_store(Size::Qword, Mem::base(Gpr::Rcx, 0), Gpr::Rax);
+        return finish(code, miss, pc);
+    }
+    asm.mov_imm64(Gpr::Rdx, refused);
+    asm.test(Size::Qword, Gpr::Rax, Gpr::Rdx);
+    let unplain = asm.jcc(Cond::Ne);
+    asm.mov_store(Size::Qword, Mem::base(Gpr::Rcx, 0), Gpr::Rax);
+    finish_unless(code, [miss, unplain], pc)
 }
 
 /// The thunk completing `IC IVAU, Xt` at `pc` of an address in the page the
@@ -748,6 +773,33 @@ mod tests {
         let frame = frame_write_thunk(PC, 3, CELL, offset, written).code;
         assert_eq!(run(&frame, &mut state), NEXT);
         assert_eq!(state.fpsr, 0xab01);
+    }
+
+    #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
+    #[test]
+    fn checked_writes_leave_the_refused_bits_to_the_exit() {
+        use crate::GuestState;
+        let mut storage = alloc::boxed::Box::new(5u64);
+        let target = &mut *storage as *mut u64;
+        let cell = alloc::boxed::Box::new(Cell {
+            readable: 1,
+            value: target as u64,
+        });
+        let mut state = GuestState::default();
+        state.anchors[Anchor::Mirrors] = &*cell as *const Cell as u64;
+        let code = checked_write_thunk(PC, 3, CELL, 0xf0).code;
+        state.x[3] = 0x10f;
+        assert_eq!(run(&code, &mut state), NEXT);
+        // SAFETY: the live storage, between runs.
+        assert_eq!(unsafe { target.read() }, 0x10f);
+        state.x[3] = 0x10;
+        assert_eq!(run(&code, &mut state), MISS);
+        // SAFETY: as above.
+        assert_eq!(unsafe { target.read() }, 0x10f);
+        let zero = checked_write_thunk(PC, 31, CELL, u64::MAX).code;
+        assert_eq!(run(&zero, &mut state), NEXT);
+        // SAFETY: as above.
+        assert_eq!(unsafe { target.read() }, 0);
     }
 
     #[test]
