@@ -328,6 +328,16 @@ impl Cpu {
         true
     }
 
+    /// The address of the half of the EL2 PAC key `register` names at this
+    /// EL, once a write has made it known.
+    pub(crate) fn el2_pointer_key_storage(&self, register: Register) -> Option<u64> {
+        if self.pstate.el != 2 {
+            return None;
+        }
+        let key = super::pointer_keys::Register::architectural(register)?;
+        self.apple.pointer_keys.storage(key)
+    }
+
     /// CYC_OVRD's WFI mode.
     pub fn wfi_mode(&self) -> u64 {
         cyc_ovrd_field(self.apple.cyc_ovrd, CYC_OVRD_WFI_SHIFT)

@@ -346,9 +346,13 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
                     .generic_timer
                     .set(register, value & !res0 & !res1 | res1)
             };
+        let key = super::super::mirrors::pointer_key(register);
+        if banked && key {
+            self.plain.set(Some((register, index)));
+        }
         if !banked {
             cpu.registers.set(register, index, value);
-            if super::super::mirrors::pointer_key(register)
+            if key
                 || matches!(
                     register,
                     Register::ELR_EL1

@@ -5560,6 +5560,14 @@ fn keys_native_code_wrote_reopen_together_at_the_next_pac_exit() {
     let cell = machine.mirrors[written_cell(index)];
     assert_eq!(cell.readable, 1);
     assert_eq!(Some(cell.value), machine.cpu.registers.address(key, 0));
+    // A kernel at EL2 reaches its own bank, whose word the cell names.
+    machine.cpu.set_pstate(Pstate::reset(2));
+    machine.derived_changed();
+    machine.cpu.pc = BASE;
+    machine.system_instruction(MSR).unwrap();
+    let cell = machine.mirrors[written_cell(index)];
+    assert_eq!(cell.readable, 1);
+    assert_eq!(Some(cell.value), machine.cpu.el2_pointer_key_storage(key));
 
     let mut machine = pac_machine();
     let sign = |machine: &mut Machine<FakeHost, NoDevices>| {

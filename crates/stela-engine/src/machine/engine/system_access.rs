@@ -433,7 +433,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
             })
             .and_then(|(register, index)| match register {
                 SystemRegister::FPSR => Some(0),
-                _ => self.cpu.registers.address(register, index),
+                _ => self
+                    .cpu
+                    .el2_pointer_key_storage(register)
+                    .or_else(|| self.cpu.registers.address(register, index)),
             });
         if let (Ok(()), true, Some(value)) = (&step, self.position() == before, value) {
             self.mirrors[written_cell(index)] = register_read::Cell { readable: 1, value };

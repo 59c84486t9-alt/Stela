@@ -63,39 +63,45 @@ impl Register {
 /// another pair does not authorize it. Debug output contains no key material.
 #[derive(Clone, Default)]
 pub struct Bank {
-    words: [[Option<u64>; 2]; KEY_COUNT],
+    words: [[u64; 2]; KEY_COUNT],
+    known: [[bool; 2]; KEY_COUNT],
 }
 
 impl fmt::Debug for Bank {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Bank")
-            .field(
-                "initialized_halves",
-                &self.words.map(|pair| pair.map(|word| word.is_some())),
-            )
+            .field("initialized_halves", &self.known)
             .finish()
     }
 }
 
 impl Bank {
     pub(crate) fn read(&self, register: Register) -> Result<u64, &'static str> {
-        self.words[register.pair][register.word]
+        self.known[register.pair][register.word]
+            .then_some(self.words[register.pair][register.word])
             .ok_or("EL2 pointer authentication key half is unavailable")
     }
 
     pub(crate) fn write(&mut self, register: Register, value: u64) {
-        self.words[register.pair][register.word] = Some(value);
+        self.words[register.pair][register.word] = value;
+        self.known[register.pair][register.word] = true;
+    }
+
+    /// The address of a known half's word, which native code may write.
+    pub(crate) fn storage(&self, register: Register) -> Option<u64> {
+        self.known[register.pair][register.word]
+            .then_some(&self.words[register.pair][register.word] as *const u64 as u64)
     }
 
     /// Per-pair initialization presence for bounded reference diagnostics.
     /// Key material remains private to the architectural implementation.
     #[cfg(any(test, feature = "test-support"))]
     pub fn initialized(&self) -> [bool; KEY_COUNT] {
-        self.words.map(|pair| pair.iter().all(Option::is_some))
+        self.known.map(|pair| pair == [true; 2])
     }
 
     pub(crate) fn pairs(&self) -> [Option<[u64; 2]>; KEY_COUNT] {
-        self.words.map(|pair| Some([pair[0]?, pair[1]?]))
+        core::array::from_fn(|pair| (self.known[pair] == [true; 2]).then_some(self.words[pair]))
     }
 }
 
