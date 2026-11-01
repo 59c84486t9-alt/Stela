@@ -17,6 +17,22 @@ unsafe extern "C" fn register_service(context: *mut c_void) {
         .unwrap();
 }
 
+/// The service here binds and returns, so nothing can answer a tick: this clock
+/// stays put, however long a loaded host takes over the scenarios.
+struct FrozenClock {
+    cpu: Arc<dyn Cpu>,
+}
+// SAFETY: a constant is monotonic; no native IRQ attestation.
+unsafe impl service::Clock for FrozenClock {
+    fn cpu(&self) -> &Arc<dyn Cpu> {
+        &self.cpu
+    }
+    fn now_ns(&self) -> Result<u64, WorkError> {
+        self.cpu.check_cpu()?;
+        Ok(0)
+    }
+}
+
 #[test]
 #[ignore = "isolation: child"]
 fn rt_mutex_child() {
@@ -37,11 +53,7 @@ fn rt_mutex_child() {
             ptr::from_ref(runtime.get_ref()).cast_mut(),
             Ordering::Release,
         );
-        let clock: Arc<dyn service::Clock> = Arc::new(ServiceClock {
-            cpu: cpu.clone(),
-            reads: Arc::new(AtomicU64::new(0)),
-            start: std::time::Instant::now(),
-        });
+        let clock: Arc<dyn service::Clock> = Arc::new(FrozenClock { cpu: cpu.clone() });
         let idle = Arc::new(ServiceIdle {
             clock: clock.clone(),
             owner: thread::current(),
