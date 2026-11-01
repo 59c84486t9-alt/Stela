@@ -136,16 +136,37 @@ const DRM_SOURCES: &[&str] = &[
 #[cfg(feature = "nouveau-port")]
 const DRM_UNITS: &[UnitSpec] = &[
     UnitSpec {
+        scope: stela_c_build::linux_capture::Scope {
+            slice: "gpu",
+            group: "drm",
+            group_ordinal: 4,
+            unit_ordinal: 1,
+            global_ordinal: 4,
+        },
         source: "drivers/gpu/drm/drm_drv",
         module: "drm",
         file: "drivers/gpu/drm/drm",
     },
     UnitSpec {
+        scope: stela_c_build::linux_capture::Scope {
+            slice: "gpu",
+            group: "gpusched",
+            group_ordinal: 5,
+            unit_ordinal: 1,
+            global_ordinal: 5,
+        },
         source: "drivers/gpu/drm/scheduler/sched_fence",
         module: "gpu_sched",
         file: "drivers/gpu/drm/scheduler/gpu-sched",
     },
     UnitSpec {
+        scope: stela_c_build::linux_capture::Scope {
+            slice: "gpu",
+            group: "drmdisplayhelper",
+            group_ordinal: 6,
+            unit_ordinal: 1,
+            global_ordinal: 6,
+        },
         source: "drivers/gpu/drm/display/drm_display_helper_mod",
         module: "drm_display_helper",
         file: "drivers/gpu/drm/display/drm_display_helper",
@@ -202,12 +223,49 @@ impl Linux {
             let compiler = linux_capture::compiler(&captured_build);
             let digest =
                 env::var("DEP_STELA_LINUX_COHORT_SHA256").expect("shared cohort producer digest");
+            let common_placements = COMMON
+                .iter()
+                .map(|spec| {
+                    linux_capture::Placement::new(
+                        &Unit::from(*spec).path(),
+                        &shared,
+                        &[
+                            Path::new("../.."),
+                            compiler.parent().expect("compiler root"),
+                        ],
+                    )
+                    .expect("shared source placement")
+                })
+                .collect::<Vec<_>>();
+            // Reconstruct the common producer's literal command paths and
+            // working directory; no artifact option vector is authoritative.
+            let common_environment =
+                stela_c_build::linux::Environment::from_existing(stela_c_build::linux::Roots {
+                    linux: PathBuf::from(LINUX),
+                    compat: PathBuf::from("src/compat"),
+                    output: shared.clone(),
+                });
+            let mut common_build = stela_c_build::native::configure();
+            common_environment.profile(&mut common_build, None, &[], None);
+            let mut common_build = upstream_build(&common_build, Path::new("src/compat"));
+            upstream_warnings(&mut common_build);
+            let common_profiles = COMMON
+                .iter()
+                .map(|spec| {
+                    linux_capture::profile(
+                        &common_build,
+                        Path::new("src/compat/stela/registration.h"),
+                        *spec,
+                        Path::new("../stela-linux"),
+                    )
+                })
+                .collect::<Vec<_>>();
             let mut captured = linux_capture::read(Import {
-                workspace: Path::new("../.."),
-                linux: Path::new(LINUX),
                 output: &shared,
                 compiler: &compiler,
                 units: COMMON,
+                placements: &common_placements,
+                profiles: &common_profiles,
                 sha256: &digest,
             })
             .unwrap_or_else(|error| panic!("shared Linux cohort refused: {error}"));
@@ -215,11 +273,20 @@ impl Linux {
             for spec in DRM_UNITS {
                 let unit = Unit::from(*spec);
                 upstream.retain(|source| *source != unit.path());
+                let placement = linux_capture::Placement::new(
+                    &unit.path(),
+                    &stela_c_build::linux_build::out_dir(),
+                    &[
+                        Path::new("../.."),
+                        compiler.parent().expect("compiler root"),
+                    ],
+                )
+                .expect("DRM source placement");
                 captured.push(linux_capture::compile(
                     &captured_build,
                     &Path::new(COMPAT).join("stela/registration.h"),
-                    unit,
-                    captured.len() as u32 + 1,
+                    *spec,
+                    &placement,
                 ));
             }
             (captured, shared_count)

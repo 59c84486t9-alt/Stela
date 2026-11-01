@@ -1,5 +1,6 @@
 [package]
 name = "stela-driver-gpu"
+links = "stela_driver_gpu"
 version.workspace = true
 edition.workspace = true
 # Original Stela code is MIT; Linux-derived ports retain their GPL notices

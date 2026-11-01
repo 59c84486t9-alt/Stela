@@ -119,12 +119,23 @@ impl Linux {
         {
             let mut captured_build = upstream_build(&build, Path::new(COMPAT));
             upstream_warnings(&mut captured_build);
-            for (index, unit) in captured_units().into_iter().enumerate() {
+            for spec in COMMON {
+                let unit = Unit::from(*spec);
+                let compiler = linux_capture::compiler(&captured_build);
+                let placement = linux_capture::Placement::new(
+                    &unit.path(),
+                    &out_dir(),
+                    &[
+                        Path::new("../.."),
+                        compiler.parent().expect("compiler root"),
+                    ],
+                )
+                .expect("common source placement");
                 linux.captured.push(linux_capture::compile(
                     &captured_build,
                     &Path::new(COMPAT).join("stela/registration.h"),
-                    unit,
-                    index as u32 + 1,
+                    *spec,
+                    &placement,
                 ));
             }
             let image = linux_capture::source(

@@ -23,6 +23,17 @@ pub struct Environment {
     wrappers: PathBuf,
 }
 impl Environment {
+    /// Reconstruct producer flag paths without writing its generated headers.
+    /// Only the producer may call `new`; dependent builds use this view when
+    /// independently deriving the command profile they permit importing.
+    pub fn from_existing(roots: Roots) -> Self {
+        Self {
+            linux: roots.linux,
+            compat: roots.compat,
+            wrappers: roots.output.join("linux-asm"),
+        }
+    }
+
     pub fn new(roots: Roots) -> Self {
         additions(&roots.compat, &roots.compat, &roots.linux.join("include"));
         let wrappers = roots.output.join("linux-asm");
@@ -64,6 +75,26 @@ impl Environment {
         directories: &[PathBuf],
         module: Option<&Module<'_>>,
     ) {
+        self.profile(build, generated, directories, module);
+        for directory in directories.iter().cloned().chain([
+            self.compat.clone(),
+            self.linux.join("include"),
+            self.linux.join("arch/x86/include/uapi"),
+            self.linux.join("mm"),
+        ]) {
+            println!("cargo:rerun-if-changed={}", directory.display());
+        }
+    }
+
+    /// Apply exactly the producer's compiler flags without touching its tree
+    /// or publishing Cargo watches relative to a different consumer crate.
+    pub fn profile(
+        &self,
+        build: &mut cc::Build,
+        generated: Option<&Path>,
+        directories: &[PathBuf],
+        module: Option<&Module<'_>>,
+    ) {
         build
             .flag("-nostdinc")
             .define("__KERNEL__", None)
@@ -93,14 +124,6 @@ impl Environment {
             build
                 .define("KBUILD_MODNAME", format!("\"{}\"", module.name).as_str())
                 .define("KBUILD_MODFILE", format!("\"{}\"", module.file).as_str());
-        }
-        for directory in directories.iter().map(PathBuf::as_path).chain([
-            self.compat.as_path(),
-            include.as_path(),
-            x86_uapi.as_path(),
-            mm.as_path(),
-        ]) {
-            println!("cargo:rerun-if-changed={}", directory.display());
         }
         for directory in generated
             .map(Path::to_path_buf)
@@ -177,6 +200,16 @@ mod tests {
                 output,
             },
         )
+    }
+
+    #[test]
+    fn producer_profile_view_does_not_create_or_change_output() {
+        let (_temporary, roots) = roots();
+        let output = roots.output.clone();
+        assert!(!output.exists());
+        let environment = Environment::from_existing(roots);
+        assert_eq!(environment.wrappers, output.join("linux-asm"));
+        assert!(!output.exists());
     }
 
     #[test]

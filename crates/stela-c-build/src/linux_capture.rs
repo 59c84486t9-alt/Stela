@@ -10,13 +10,16 @@ use crate::linux_registry::{
 };
 use crate::native::NATIVE_TARGET;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     env, fmt, fs,
     path::{Path, PathBuf},
 };
 
 const LINUX: &str = "../../third_party/linux";
 const DOMAIN: &str = "Stela";
+// Source-owned image limits; imports cannot enlarge the selected policy.
+const MAX_IMAGE_UNITS: usize = 2048;
+const MAX_COHORT_BYTES: u64 = 256 << 10;
 
 /// One unit, by its path in Linux's tree, and the module Kbuild builds it into.
 #[derive(Clone, Debug)]
@@ -35,24 +38,210 @@ impl Unit {
 /// A build owner's reviewed source/module identity, independent of artifacts.
 #[derive(Clone, Copy, Debug)]
 pub struct UnitSpec {
+    pub scope: Scope,
     pub source: &'static str,
     pub module: &'static str,
     pub file: &'static str,
 }
 
+/// Stable source-owned occurrence identity, independent of artifact paths.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Scope {
+    pub slice: &'static str,
+    pub group: &'static str,
+    pub group_ordinal: u32,
+    pub unit_ordinal: u32,
+    pub global_ordinal: u32,
+}
+impl Scope {
+    fn token(self) -> String {
+        format!(
+            "s{}g{}u{}n{}",
+            self.slice, self.group, self.unit_ordinal, self.global_ordinal
+        )
+    }
+}
+
+/// Caller-selected placement. Artifact bytes never provide source/output roots.
+#[derive(Clone, Debug)]
+pub struct Placement {
+    source: PathBuf,
+    output: PathBuf,
+    roots: Vec<PathBuf>,
+}
+// Normalize only lexical components before choosing an explicit input root.
+// Below-root names remain intact for descriptor-relative no-follow access.
+fn absolute_lexical(path: &Path) -> Result<PathBuf, ImportError> {
+    let path = if path.is_absolute() {
+        path.to_owned()
+    } else {
+        env::current_dir()
+            .map_err(|error| ImportError::Input(error.to_string()))?
+            .join(path)
+    };
+    let mut result = PathBuf::new();
+    for part in path.components() {
+        match part {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if result.file_name().is_none() || !result.pop() {
+                    return Err(ImportError::Schema(
+                        "input path escapes its absolute prefix",
+                    ));
+                }
+            }
+            part => result.push(part.as_os_str()),
+        }
+    }
+    Ok(result)
+}
+
+impl Placement {
+    pub fn new(source: &Path, output: &Path, roots: &[&Path]) -> Result<Self, ImportError> {
+        let canonical = |path: &Path| {
+            fs::canonicalize(path).map_err(|error| ImportError::Input(error.to_string()))
+        };
+        let source = absolute_lexical(source)?;
+        let output_root = output;
+        let output = canonical(output)?;
+        let mut selected = roots.to_vec();
+        selected.push(output_root);
+        let mut actual_roots = Vec::new();
+        let mut actual_source = None;
+        for selected in selected {
+            let lexical = absolute_lexical(selected)?;
+            let root = canonical(selected)?;
+            if root.parent().is_none() {
+                return Err(ImportError::Schema(
+                    "filesystem-wide placement input root refused",
+                ));
+            }
+            if actual_source.is_none() {
+                let relative = source
+                    .strip_prefix(&lexical)
+                    .or_else(|_| source.strip_prefix(&root));
+                if let Ok(relative) = relative {
+                    crate::inputs::validate_relative(relative).map_err(ImportError::Input)?;
+                    let mut owner = Inputs::new(Limits {
+                        max_unique_files: 1,
+                        max_unique_bytes: 4 << 20,
+                        max_roots: 1,
+                    })
+                    .map_err(ImportError::Input)?;
+                    let id = owner.add_root(&root).map_err(ImportError::Input)?;
+                    let key = owner
+                        .prepare(&[Request {
+                            root: id,
+                            relative,
+                            expected_sha256: None,
+                            max_bytes: 4 << 20,
+                        }])
+                        .map_err(ImportError::Input)?[0];
+                    owner.verify(key).map_err(ImportError::Input)?;
+                    owner.finish().map_err(ImportError::Input)?;
+                    actual_source = Some(root.join(relative));
+                }
+            }
+            if !actual_roots.contains(&root) {
+                actual_roots.push(root);
+            }
+        }
+        Ok(Self {
+            source: actual_source.ok_or(ImportError::Schema(
+                "source leaves caller-owned placement roots",
+            ))?,
+            output,
+            roots: actual_roots,
+        })
+    }
+}
+
+pub fn validate_units(units: &[UnitSpec]) -> Result<(), ImportError> {
+    if units.is_empty() || units.len() > MAX_IMAGE_UNITS {
+        return Err(ImportError::Schema(
+            "explicit cohort must fit the source-owned image unit limit",
+        ));
+    }
+    let mut globals = BTreeSet::new();
+    let mut occurrences = BTreeSet::new();
+    let mut tokens = BTreeSet::new();
+    let mut groups = BTreeMap::new();
+    let mut group_ordinals = BTreeMap::new();
+    let mut previous = 0;
+    for spec in units {
+        let scope = spec.scope;
+        let valid = |s: &str| {
+            !s.is_empty() && s.len() <= 64 && s.bytes().all(|b| b.is_ascii_alphanumeric())
+        };
+        crate::inputs::validate_relative(Path::new(&format!("{}.c", spec.source)))
+            .map_err(ImportError::Input)?;
+        if !valid(scope.slice)
+            || !valid(scope.group)
+            || scope.group_ordinal == 0
+            || scope.group_ordinal > 65536
+            || scope.unit_ordinal == 0
+            || scope.unit_ordinal > 65536
+            || scope.global_ordinal > 65536
+            || scope.global_ordinal <= previous
+            || !globals.insert(scope.global_ordinal)
+            || !occurrences.insert((scope.group, scope.unit_ordinal))
+            || !tokens.insert(scope.token())
+        {
+            return Err(ImportError::Schema(
+                "invalid or duplicate scoped occurrence/ordinal",
+            ));
+        }
+        previous = scope.global_ordinal;
+        let group = (scope.group_ordinal, spec.module, spec.file);
+        if groups
+            .insert(scope.group, group)
+            .is_some_and(|old| old != group)
+            || group_ordinals
+                .insert(scope.group_ordinal, scope.group)
+                .is_some_and(|old| old != scope.group)
+        {
+            return Err(ImportError::Schema(
+                "inconsistent source-owned group identity",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// The common runtime's fixed prefix in every class image.
 pub const COMMON: &[UnitSpec] = &[
     UnitSpec {
+        scope: Scope {
+            slice: "common",
+            group: "rtmutexapi",
+            group_ordinal: 1,
+            unit_ordinal: 1,
+            global_ordinal: 1,
+        },
         source: "kernel/locking/rtmutex_api",
-        module: "rtmutex",
-        file: "kernel/locking/rtmutex",
+        module: "rtmutex_api",
+        file: "kernel/locking/rtmutex_api",
     },
     UnitSpec {
+        scope: Scope {
+            slice: "common",
+            group: "dmabuf",
+            group_ordinal: 2,
+            unit_ordinal: 1,
+            global_ordinal: 2,
+        },
         source: "drivers/dma-buf/dma-buf",
         module: "dma_buf",
         file: "drivers/dma-buf/dma-buf",
     },
     UnitSpec {
+        scope: Scope {
+            slice: "common",
+            group: "dmafence",
+            group_ordinal: 3,
+            unit_ordinal: 1,
+            global_ordinal: 3,
+        },
         source: "drivers/dma-buf/dma-fence",
         module: "dma_fence",
         file: "drivers/dma-buf/dma-fence",
@@ -73,6 +262,7 @@ impl From<UnitSpec> for Unit {
 #[derive(Clone, Debug)]
 pub struct Captured {
     unit: Unit,
+    scope: Scope,
     source: PathBuf,
     /// Established by the local compiler or caller policy, never decoded.
     reviewed_roots: Vec<PathBuf>,
@@ -81,6 +271,7 @@ pub struct Captured {
     object: PathBuf,
     compiler: PathBuf,
     options: Vec<String>,
+    directory: PathBuf,
     dependencies: Vec<PathBuf>,
     pins: BTreeMap<PathBuf, Hash>,
 }
@@ -123,11 +314,52 @@ fn resolved(program: &Path) -> PathBuf {
     fs::canonicalize(&found).unwrap_or_else(|error| panic!("{}: {error}", found.display()))
 }
 
-/// Compile `unit` as `ordinal` with its registrations captured. `build` carries
-/// the unit's module definitions when its whole port shares them.
-pub fn compile(build: &cc::Build, registration: &Path, unit: Unit, ordinal: u32) -> Captured {
-    let token = token(unit.source.rsplit('/').next().expect("a unit name"));
+/// The exact command context the source owner permits importing. Relative
+/// options are meaningful only under this independently selected directory.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Profile {
+    pub directory: PathBuf,
+    pub options: Vec<String>,
+}
+
+/// Derive a producer command from source-owned flags and occurrence identity.
+/// This executes no C compilation and never reads artifact options.
+pub fn profile(
+    build: &cc::Build,
+    registration: &Path,
+    spec: UnitSpec,
+    directory: &Path,
+) -> Profile {
+    let prepared = prepared(build, registration, spec);
+    Profile {
+        directory: fs::canonicalize(directory).expect("producer working directory"),
+        options: prepared
+            .get_compiler()
+            .args()
+            .iter()
+            .map(|option| {
+                option
+                    .to_str()
+                    .expect("compiler options must be UTF-8")
+                    .to_owned()
+            })
+            .collect(),
+    }
+}
+
+fn prepared(build: &cc::Build, registration: &Path, spec: UnitSpec) -> cc::Build {
+    validate_units(&[spec]).expect("source-owned unit identity");
+    let unit = Unit::from(spec);
+    let token = spec.scope.token();
+    let ordinal = spec.scope.global_ordinal;
     let mut build = build.clone();
+    assert!(
+        !build.get_compiler().args().iter().any(|a| {
+            let a = a.to_str().expect("compiler options must be UTF-8");
+            a == "-DMODULE" || a.starts_with("-DMODULE=")
+        }),
+        "selected scoped profile requires built-in translation units"
+    );
     build
         .define("STELA_LINUX_CAPTURE_REGISTRATIONS", None)
         .define("STELA_LINUX_REG_DOMAIN", DOMAIN)
@@ -135,7 +367,7 @@ pub fn compile(build: &cc::Build, registration: &Path, unit: Unit, ordinal: u32)
         .define("STELA_LINUX_REG_UNIT_ORDINAL", ordinal.to_string().as_str())
         .define(
             "STELA_LINUX_REG_GROUP_SYMBOL",
-            group_symbol(&unit.module).as_str(),
+            group_symbol(spec.scope.group).as_str(),
         )
         .flag("-include")
         .flag(registration);
@@ -144,20 +376,55 @@ pub fn compile(build: &cc::Build, registration: &Path, unit: Unit, ordinal: u32)
             .define("KBUILD_MODNAME", format!("\"{}\"", unit.module).as_str())
             .define("KBUILD_MODFILE", format!("\"{}\"", unit.file).as_str());
     }
+    if !defines(&build, "-D__KBUILD_MODNAME=") {
+        build.define("__KBUILD_MODNAME", spec.module);
+    }
+    if !defines(&build, "-DKBUILD_BASENAME=") {
+        let base = spec
+            .source
+            .rsplit('/')
+            .next()
+            .expect("reviewed source name")
+            .replace(['-', ','], "_");
+        build.define("KBUILD_BASENAME", format!("\"{base}\"").as_str());
+    }
+    build
+}
+
+/// Compile one declared scoped occurrence at its caller-owned placement.
+/// `build` carries the reviewed native and original per-unit Kbuild flags.
+pub fn compile(
+    build: &cc::Build,
+    registration: &Path,
+    spec: UnitSpec,
+    placement: &Placement,
+) -> Captured {
+    let build = prepared(build, registration, spec);
+    let unit = Unit::from(spec);
+    let token = spec.scope.token();
+    let ordinal = spec.scope.global_ordinal;
+    let directory = fs::canonicalize(env::current_dir().expect("compiler working directory"))
+        .expect("canonical compiler working directory");
     let compiler = build.get_compiler();
-    let options: Vec<String> = compiler
+    let options = compiler
         .args()
         .iter()
-        .map(|option| option.to_string_lossy().into_owned())
+        .map(|option| {
+            option
+                .to_str()
+                .expect("compiler options must be UTF-8")
+                .to_owned()
+        })
         .collect();
-    let object = fs::canonicalize(out_dir())
-        .expect("build output")
-        .join(format!("captured-{token}.o"));
+    // System-header diagnostics are normally suppressed. Keep the original
+    // function prototypes checked before producing an object for any class.
+    crate::linux_build::check_declarations(&build, std::slice::from_ref(&placement.source));
+    let object = placement.output.join(format!("captured-{token}.o"));
     let depfile = object.with_extension("d");
     run(compiler
         .to_command()
         .arg("-c")
-        .arg(unit.path())
+        .arg(&placement.source)
         .arg("-o")
         .arg(&object)
         .arg("-MD")
@@ -171,10 +438,11 @@ pub fn compile(build: &cc::Build, registration: &Path, unit: Unit, ordinal: u32)
         .map(|path| fs::canonicalize(path).expect("captured dependency"))
         .collect();
     let compiler = resolved(compiler.path());
-    let reviewed_roots = build_roots(&compiler);
-    let source = fs::canonicalize(unit.path()).expect("selected Linux source");
+    let reviewed_roots = placement.roots.clone();
+    let source = placement.source.clone();
     Captured {
         unit,
+        scope: spec.scope,
         source,
         reviewed_roots,
         ordinal,
@@ -182,17 +450,19 @@ pub fn compile(build: &cc::Build, registration: &Path, unit: Unit, ordinal: u32)
         object,
         compiler,
         options,
+        directory,
         dependencies,
         pins: BTreeMap::new(),
     }
 }
 
 fn defines(build: &cc::Build, prefix: &str) -> bool {
-    build
-        .get_compiler()
-        .args()
-        .iter()
-        .any(|option| option.to_string_lossy().starts_with(prefix))
+    build.get_compiler().args().iter().any(|option| {
+        option
+            .to_str()
+            .expect("compiler options must be UTF-8")
+            .starts_with(prefix)
+    })
 }
 
 /// Bounded hash-only snapshots over the explicitly reviewed build roots.
@@ -256,15 +526,7 @@ impl Snapshot {
     }
 }
 
-fn build_roots(compiler: &Path) -> Vec<PathBuf> {
-    vec![
-        fs::canonicalize("../..").expect("workspace root"),
-        fs::canonicalize(out_dir()).expect("Cargo output directory"),
-        compiler.parent().expect("compiler directory").to_path_buf(),
-    ]
-}
-
-/// Resolve the independently configured compiler before admitting metadata.
+/// Resolve the configured compiler before importing any artifact.
 pub fn compiler(build: &cc::Build) -> PathBuf {
     resolved(build.get_compiler().path())
 }
@@ -283,11 +545,11 @@ fn roots(captured: &[Captured]) -> Vec<PathBuf> {
 
 /// The only roots and source identities a dependent build permits importing.
 pub struct Import<'a> {
-    pub workspace: &'a Path,
-    pub linux: &'a Path,
     pub output: &'a Path,
     pub compiler: &'a Path,
     pub units: &'a [UnitSpec],
+    pub placements: &'a [Placement],
+    pub profiles: &'a [Profile],
     /// Digest published by the producer build through Cargo metadata.
     pub sha256: &'a str,
 }
@@ -325,13 +587,13 @@ fn identity(unit: &Captured, spec: UnitSpec, index: usize) -> Result<(), ImportE
             return Err(ImportError::Identity { index, field });
         }
     }
-    if unit.ordinal as usize != index + 1 {
+    if unit.scope != spec.scope || unit.ordinal != spec.scope.global_ordinal {
         return Err(ImportError::Identity {
             index,
             field: "ordinal",
         });
     }
-    let expected = token(spec.source.rsplit('/').next().expect("reviewed unit name"));
+    let expected = spec.scope.token();
     if unit.token != expected {
         return Err(ImportError::Identity {
             index,
@@ -362,6 +624,7 @@ pub fn source(captured: &[Captured], projection: Projection<'_>) -> PathBuf {
         expected.len(),
         "reviewed source cohort count"
     );
+    validate_units(expected).expect("source-owned projection policy");
     for (index, (unit, spec)) in captured.iter().zip(expected).enumerate() {
         identity(unit, *spec, index).unwrap_or_else(|error| panic!("{error}"));
     }
@@ -373,15 +636,26 @@ pub fn source(captured: &[Captured], projection: Projection<'_>) -> PathBuf {
     let mut snapshot = Snapshot::new(&roots);
     let listing = captured
         .iter()
-        .map(|unit| format!("{} {}\n", unit.unit.module, unit.unit.source))
+        .map(|unit| {
+            format!(
+                "{} {} {} {} {} {} {}\n",
+                unit.scope.slice,
+                unit.scope.group,
+                unit.scope.group_ordinal,
+                unit.scope.unit_ordinal,
+                unit.scope.global_ordinal,
+                unit.unit.module,
+                unit.unit.source
+            )
+        })
         .collect::<String>();
     let cohort = write_cohort(&out_dir(), symbol, &listing);
     let mut groups: Vec<Group> = Vec::new();
     for unit in captured {
-        let name = token(&unit.unit.module);
+        let name = unit.scope.group.to_string();
         if groups.iter().all(|group| group.token != name) {
             groups.push(Group {
-                ordinal: groups.len() as u32 + 1,
+                ordinal: unit.scope.group_ordinal,
                 token: name,
                 module_name: unit.unit.module.clone(),
                 module_file: unit.unit.file.clone(),
@@ -394,13 +668,14 @@ pub fn source(captured: &[Captured], projection: Projection<'_>) -> PathBuf {
         .map(|unit| PlanUnit {
             token: unit.token.clone(),
             ordinal: unit.ordinal,
-            group_token: token(&unit.unit.module),
+            group_token: unit.scope.group.into(),
             source: snapshot.input(&unit.source, unit.pin(&unit.source), 4 << 20),
             source_label: unit.unit.source.clone(),
             provenance: format!("Linux's {}", unit.unit.source),
             object: snapshot.input(&unit.object, unit.pin(&unit.object), 64 << 20),
             compiler: snapshot.input(&unit.compiler, unit.pin(&unit.compiler), 1 << 30),
             options: unit.options.clone(),
+            working_directory: unit.directory.clone(),
             dependencies: unit
                 .dependencies
                 .iter()
@@ -423,7 +698,7 @@ pub fn source(captured: &[Captured], projection: Projection<'_>) -> PathBuf {
             max_roots: roots.len(),
         },
         role_limits: RoleLimits {
-            cohort_bytes: 64 << 10,
+            cohort_bytes: MAX_COHORT_BYTES,
             source_bytes: 4 << 20,
             compiler_bytes: 1 << 30,
             dependency_bytes: 64 << 20,
@@ -442,14 +717,14 @@ pub fn source(captured: &[Captured], projection: Projection<'_>) -> PathBuf {
             env::var("TARGET").expect("Cargo supplies TARGET")
         },
         image_symbol: symbol.into(),
-        cohort: snapshot.input(&cohort, None, 64 << 10),
+        cohort: snapshot.input(&cohort, None, MAX_COHORT_BYTES),
         groups,
         units,
     };
     snapshot.finish();
     let shared_groups = captured[..shared_count]
         .iter()
-        .map(|unit| token(&unit.unit.module))
+        .map(|unit| unit.scope.group.into())
         .collect::<Vec<_>>();
     let shared_units = captured[..shared_count]
         .iter()
@@ -457,7 +732,7 @@ pub fn source(captured: &[Captured], projection: Projection<'_>) -> PathBuf {
         .collect::<Vec<_>>();
     let manifest = linux_registry::generate_with_imports(&plan, &shared_groups, &shared_units)
         .unwrap_or_else(|error| panic!("{error}"));
-    assert!(manifest.records > 0, "no unit registered anything");
+    // A selected helper slice may legitimately contain zero registration records.
     let suffix = if descriptors_only {
         "descriptors"
     } else {
@@ -512,9 +787,18 @@ pub fn write(path: &Path, captured: &[Captured]) -> String {
         output.extend_from_slice(&snapshot.input(path, None, limit).sha256);
     }
     let mut snapshot = Snapshot::new(&roots(captured));
-    let mut output = b"STELA-LINUX-CAPTURE-1\0".to_vec();
+    let mut output = b"STELA-LINUX-CAPTURE-3\0".to_vec();
     output.extend_from_slice(&(captured.len() as u32).to_le_bytes());
     for unit in captured {
+        field(&mut output, unit.scope.slice);
+        field(&mut output, unit.scope.group);
+        for ordinal in [
+            unit.scope.group_ordinal,
+            unit.scope.unit_ordinal,
+            unit.scope.global_ordinal,
+        ] {
+            output.extend_from_slice(&ordinal.to_le_bytes());
+        }
         for value in [
             &unit.unit.source,
             &unit.unit.module,
@@ -527,6 +811,12 @@ pub fn write(path: &Path, captured: &[Captured]) -> String {
         file(&mut output, &mut snapshot, &unit.object, 64 << 20);
         file(&mut output, &mut snapshot, &unit.compiler, 1 << 30);
         file(&mut output, &mut snapshot, &unit.source, 4 << 20);
+        field(
+            &mut output,
+            unit.directory
+                .to_str()
+                .expect("compiler directory is UTF-8"),
+        );
         output.extend_from_slice(&(unit.options.len() as u32).to_le_bytes());
         for option in &unit.options {
             field(&mut output, option);
@@ -538,8 +828,24 @@ pub fn write(path: &Path, captured: &[Captured]) -> String {
     }
     snapshot.finish();
     let sha256 = cohort_digest(&output);
-    fs::write(path, output).expect("write captured cohort");
+    write_export(path, &output);
     sha256
+}
+
+// This producer owns the generated metadata leaf. Identical complete bytes
+// must not manufacture a change for downstream Cargo watchers. All source,
+// object/header/compiler hashing and Snapshot.finish still precede this step.
+fn write_export(path: &Path, bytes: &[u8]) {
+    assert!(
+        !fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()),
+        "owned captured metadata leaf must not be a symlink"
+    );
+    let same_size = fs::symlink_metadata(path).is_ok_and(|metadata| {
+        metadata.len() == u64::try_from(bytes.len()).expect("bounded serialized metadata size")
+    });
+    if !same_size || fs::read(path).ok().as_deref() != Some(bytes) {
+        fs::write(path, bytes).expect("write captured cohort");
+    }
 }
 
 fn cohort_digest(bytes: &[u8]) -> String {
@@ -572,32 +878,35 @@ fn expected_digest(value: &str) -> Result<Hash, ImportError> {
 /// Import only the caller's reviewed cohort. Artifact contents cannot choose
 /// source identities, compiler identity, object locations or additional roots.
 pub fn read(policy: Import<'_>) -> Result<Vec<Captured>, ImportError> {
+    validate_units(policy.units)?;
+    if policy.placements.len() != policy.units.len() {
+        return Err(ImportError::Schema("declared placement count differs"));
+    }
+    if policy.profiles.len() != policy.units.len() {
+        return Err(ImportError::Schema(
+            "declared compiler profile count differs",
+        ));
+    }
+    for profile in policy.profiles {
+        if !profile.directory.is_absolute()
+            || fs::canonicalize(&profile.directory).ok().as_ref() != Some(&profile.directory)
+        {
+            return Err(ImportError::Schema(
+                "expected compiler directory must be canonical",
+            ));
+        }
+    }
     let sha256 = expected_digest(policy.sha256)?;
     let canonical =
         |path: &Path| fs::canonicalize(path).map_err(|error| ImportError::Input(error.to_string()));
-    let workspace = canonical(policy.workspace)?;
-    let linux = canonical(policy.linux)?;
     let output = canonical(policy.output)?;
     let compiler = canonical(policy.compiler)?;
-    let compiler_root = compiler
-        .parent()
-        .ok_or(ImportError::Schema("compiler has no parent"))?
-        .to_path_buf();
-    if linux
-        .strip_prefix(&workspace)
-        .ok()
-        .is_none_or(|relative| crate::inputs::validate_relative(relative).is_err())
-    {
-        return Err(ImportError::Schema(
-            "Linux source root is outside workspace",
-        ));
-    }
     let selected = Boundary {
-        linux,
         output,
         compiler,
         units: policy.units,
-        roots: vec![workspace, compiler_root],
+        placements: policy.placements.to_vec(),
+        profiles: policy.profiles.to_vec(),
     };
     const LIMIT: u64 = 16 << 20;
     let mut owner = Inputs::new(Limits {
@@ -624,30 +933,112 @@ pub fn read(policy: Import<'_>) -> Result<Vec<Captured>, ImportError> {
     Ok(captured)
 }
 
+/// Compose only explicitly configured producer slices in global ordinal order.
+pub fn compose(
+    expected: &[UnitSpec],
+    slices: &[&[Captured]],
+) -> Result<Vec<Captured>, ImportError> {
+    validate_units(expected)?;
+    if slices.is_empty() || slices.iter().any(|slice| slice.is_empty()) {
+        return Err(ImportError::Schema("configured slices must be nonempty"));
+    }
+    let count = slices.iter().try_fold(0usize, |n, slice| {
+        n.checked_add(slice.len())
+            .ok_or(ImportError::Schema("slice count overflow"))
+    })?;
+    if count != expected.len() {
+        return Err(ImportError::Schema("configured slice/unit count differs"));
+    }
+    let captured = slices
+        .iter()
+        .flat_map(|slice| slice.iter().cloned())
+        .collect::<Vec<_>>();
+    let mut objects = BTreeSet::new();
+    for (index, (unit, spec)) in captured.iter().zip(expected).enumerate() {
+        identity(unit, *spec, index)?;
+        if unit.pins.is_empty() || !objects.insert(unit.object.clone()) {
+            return Err(ImportError::Identity {
+                index,
+                field: "unique pinned producer object",
+            });
+        }
+    }
+    Ok(captured)
+}
+
+/// Require every imported unit to pin the same independently selected header.
+///
+/// Actual bytes for all dependencies are verified again by source generation.
+pub fn require_header_pin(
+    captured: &[Captured],
+    header: &Path,
+    expected_sha256: &str,
+) -> Result<(), ImportError> {
+    if captured.is_empty() {
+        return Err(ImportError::Schema(
+            "shared header requires a nonempty cohort",
+        ));
+    }
+    let expected = expected_digest(expected_sha256)?;
+    let header = fs::canonicalize(header).map_err(|error| ImportError::Input(error.to_string()))?;
+    for (index, unit) in captured.iter().enumerate() {
+        if !unit.dependencies.contains(&header) || unit.pin(&header) != Some(expected) {
+            return Err(ImportError::Identity {
+                index,
+                field: "shared configuration header pin",
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Require independently configured source pins in the already reviewed order.
+pub fn require_source_pins(
+    captured: &[Captured],
+    expected_sha256: &[&str],
+) -> Result<(), ImportError> {
+    if captured.is_empty() || captured.len() != expected_sha256.len() {
+        return Err(ImportError::Schema("reviewed source pin count differs"));
+    }
+    for (index, (unit, expected)) in captured.iter().zip(expected_sha256).enumerate() {
+        if unit.pin(&unit.source) != Some(expected_digest(expected)?) {
+            return Err(ImportError::Identity {
+                index,
+                field: "reviewed source pin",
+            });
+        }
+    }
+    Ok(())
+}
+
 struct Boundary<'a> {
-    linux: PathBuf,
     output: PathBuf,
     compiler: PathBuf,
     units: &'a [UnitSpec],
-    roots: Vec<PathBuf>,
+    placements: Vec<Placement>,
+    profiles: Vec<Profile>,
 }
 impl Boundary<'_> {
     fn roots(&self) -> Vec<PathBuf> {
-        let mut roots = self.roots.clone();
+        let mut roots = Vec::new();
         if !roots.contains(&self.output) {
             roots.push(self.output.clone());
         }
+        for placement in &self.placements {
+            for root in &placement.roots {
+                if !roots.contains(root) {
+                    roots.push(root.clone());
+                }
+            }
+        }
         roots
     }
-    fn contains(&self, path: &Path) -> bool {
-        self.roots
-            .iter()
-            .chain(std::iter::once(&self.output))
-            .any(|root| {
-                path.strip_prefix(root)
-                    .ok()
-                    .is_some_and(|relative| crate::inputs::validate_relative(relative).is_ok())
-            })
+    fn contains(&self, index: usize, path: &Path) -> bool {
+        self.placements[index].roots.iter().any(|root| {
+            path.strip_prefix(root)
+                .ok()
+                .is_some_and(|relative| crate::inputs::validate_relative(relative).is_ok())
+        })
     }
 }
 
@@ -694,12 +1085,21 @@ fn decode(bytes: &[u8], selected: &Boundary<'_>) -> Result<Vec<Captured>, Import
     if bytes.len() > 16 << 20 {
         return Err(ImportError::Schema("cohort exceeds limit"));
     }
+    validate_units(selected.units)?;
+    if selected.placements.len() != selected.units.len() {
+        return Err(ImportError::Schema("declared placement count differs"));
+    }
+    if selected.profiles.len() != selected.units.len() {
+        return Err(ImportError::Schema(
+            "declared compiler profile count differs",
+        ));
+    }
     for spec in selected.units {
         crate::inputs::validate_relative(Path::new(&format!("{}.c", spec.source)))
             .map_err(ImportError::Input)?;
     }
     let mut reader = Reader(bytes);
-    if reader.bytes(22)? != b"STELA-LINUX-CAPTURE-1\0" {
+    if reader.bytes(22)? != b"STELA-LINUX-CAPTURE-3\0" {
         return Err(ImportError::Schema("unsupported cohort version"));
     }
     let count = reader.count()?;
@@ -708,6 +1108,22 @@ fn decode(bytes: &[u8], selected: &Boundary<'_>) -> Result<Vec<Captured>, Import
     }
     let mut captured = Vec::new();
     for (index, spec) in selected.units.iter().enumerate() {
+        let slice = reader.string()?;
+        let group = reader.string()?;
+        let group_ordinal = reader.count()? as u32;
+        let unit_ordinal = reader.count()? as u32;
+        let global_ordinal = reader.count()? as u32;
+        if slice != spec.scope.slice
+            || group != spec.scope.group
+            || group_ordinal != spec.scope.group_ordinal
+            || unit_ordinal != spec.scope.unit_ordinal
+            || global_ordinal != spec.scope.global_ordinal
+        {
+            return Err(ImportError::Identity {
+                index,
+                field: "scope/group/slice/global ordinal",
+            });
+        }
         let unit = Unit {
             source: reader.string()?,
             module: reader.string()?,
@@ -719,6 +1135,7 @@ fn decode(bytes: &[u8], selected: &Boundary<'_>) -> Result<Vec<Captured>, Import
         let object = reader.file(&mut pins)?;
         let compiler = reader.file(&mut pins)?;
         let source = reader.file(&mut pins)?;
+        let directory = PathBuf::from(reader.string()?);
         let options = (0..reader.count()?)
             .map(|_| reader.string())
             .collect::<Result<Vec<_>, _>>()?;
@@ -727,25 +1144,45 @@ fn decode(bytes: &[u8], selected: &Boundary<'_>) -> Result<Vec<Captured>, Import
             .collect::<Result<Vec<_>, _>>()?;
         let unit = Captured {
             unit,
+            scope: spec.scope,
             source,
             ordinal,
             token,
             object,
             compiler,
             options,
+            directory,
             dependencies,
             pins,
             reviewed_roots: selected.roots(),
         };
         identity(&unit, *spec, index)?;
-        let expected_source = selected.linux.join(format!("{}.c", spec.source));
+        let profile = &selected.profiles[index];
+        if unit.directory != profile.directory || unit.options != profile.options {
+            return Err(ImportError::Identity {
+                index,
+                field: "compiler command profile",
+            });
+        }
+        if unit
+            .options
+            .iter()
+            .any(|a| a == "-DMODULE" || a.starts_with("-DMODULE="))
+        {
+            return Err(ImportError::Identity {
+                index,
+                field: "built-in compiler profile",
+            });
+        }
+        let expected_source = selected.placements[index].source.clone();
         if unit.source != expected_source {
             return Err(ImportError::Path {
                 index,
                 field: "Linux source",
             });
         }
-        let expected_object = selected.output.join(format!("captured-{}.o", unit.token));
+        let output = &selected.placements[index].output;
+        let expected_object = output.join(format!("captured-{}.o", unit.token));
         if unit.object != expected_object {
             return Err(ImportError::Path {
                 index,
@@ -762,7 +1199,7 @@ fn decode(bytes: &[u8], selected: &Boundary<'_>) -> Result<Vec<Captured>, Import
             || unit
                 .dependencies
                 .iter()
-                .any(|path| !selected.contains(path))
+                .any(|path| !selected.contains(index, path))
         {
             return Err(ImportError::Path {
                 index,
@@ -778,297 +1215,8 @@ fn decode(bytes: &[u8], selected: &Boundary<'_>) -> Result<Vec<Captured>, Import
 }
 
 #[cfg(test)]
-mod tests {
-    //! Imported artifacts cannot grant new roots or alter the reviewed cohort.
-    use super::*;
-    use tempfile::TempDir;
+mod tests;
 
-    struct Fixture {
-        _temporary: TempDir,
-        boundary: Boundary<'static>,
-        captured: Vec<Captured>,
-    }
-    fn fixture() -> Fixture {
-        let temporary = tempfile::tempdir().unwrap();
-        let root = temporary.path().canonicalize().unwrap();
-        let workspace = root.join("workspace");
-        let linux = workspace.join("linux");
-        let output = root.join("shared-output");
-        let tools = root.join("toolchain");
-        for directory in [&linux, &output, &tools] {
-            fs::create_dir_all(directory).unwrap();
-        }
-        let compiler = tools.join("clang");
-        fs::write(&compiler, b"fixture compiler identity").unwrap();
-        let boundary = Boundary {
-            linux,
-            output,
-            compiler,
-            units: COMMON,
-            roots: vec![workspace, tools],
-        };
-        let captured = COMMON
-            .iter()
-            .enumerate()
-            .map(|(index, spec)| {
-                let source = boundary.linux.join(format!("{}.c", spec.source));
-                let token = token(spec.source.rsplit('/').next().unwrap());
-                Captured {
-                    unit: (*spec).into(),
-                    source: source.clone(),
-                    reviewed_roots: boundary.roots(),
-                    ordinal: index as u32 + 1,
-                    object: boundary.output.join(format!("captured-{token}.o")),
-                    compiler: boundary.compiler.clone(),
-                    token,
-                    options: vec!["-Dfixture=1".into()],
-                    dependencies: vec![source],
-                    pins: BTreeMap::new(),
-                }
-            })
-            .collect();
-        Fixture {
-            _temporary: temporary,
-            boundary,
-            captured,
-        }
-    }
-    fn encode(captured: &[Captured]) -> Vec<u8> {
-        fn field(bytes: &mut Vec<u8>, value: &str) {
-            bytes.extend_from_slice(&(value.len() as u32).to_le_bytes());
-            bytes.extend_from_slice(value.as_bytes());
-        }
-        fn file(bytes: &mut Vec<u8>, path: &Path) {
-            field(bytes, path.to_str().unwrap());
-            bytes.extend_from_slice(&[1; 32]);
-        }
-        let mut bytes = b"STELA-LINUX-CAPTURE-1\0".to_vec();
-        bytes.extend_from_slice(&(captured.len() as u32).to_le_bytes());
-        for unit in captured {
-            for value in [
-                &unit.unit.source,
-                &unit.unit.module,
-                &unit.unit.file,
-                &unit.token,
-            ] {
-                field(&mut bytes, value);
-            }
-            bytes.extend_from_slice(&unit.ordinal.to_le_bytes());
-            file(&mut bytes, &unit.object);
-            file(&mut bytes, &unit.compiler);
-            file(&mut bytes, &unit.source);
-            bytes.extend_from_slice(&(unit.options.len() as u32).to_le_bytes());
-            for option in &unit.options {
-                field(&mut bytes, option);
-            }
-            bytes.extend_from_slice(&(unit.dependencies.len() as u32).to_le_bytes());
-            for dependency in &unit.dependencies {
-                file(&mut bytes, dependency);
-            }
-        }
-        bytes
-    }
-
-    #[test]
-    fn reviewed_common_cohort_retains_pins_and_only_caller_owned_roots() {
-        let fixture = fixture();
-        let observed = decode(&encode(&fixture.captured), &fixture.boundary).unwrap();
-        assert_eq!(observed.len(), 3);
-        for (index, unit) in observed.iter().enumerate() {
-            identity(unit, COMMON[index], index).unwrap();
-            assert_eq!(unit.reviewed_roots, fixture.boundary.roots());
-            assert_eq!(unit.pin(&unit.object), Some([1; 32]));
-            assert_eq!(unit.pin(&unit.compiler), Some([1; 32]));
-            assert_eq!(unit.pin(&unit.source), Some([1; 32]));
-        }
-    }
-
-    #[test]
-    fn imported_cohort_identity_order_and_count_are_exact() {
-        let fixture = fixture();
-        for field in ["source", "module", "module file", "token", "ordinal"] {
-            let mut changed = fixture.captured.clone();
-            match field {
-                "source" => changed[0].unit.source = "lib/sort".into(),
-                "module" => changed[0].unit.module = "other".into(),
-                "module file" => changed[0].unit.file = "lib/other".into(),
-                "token" => changed[0].token = "other".into(),
-                "ordinal" => changed[0].ordinal = 2,
-                _ => unreachable!(),
-            }
-            assert!(matches!(decode(&encode(&changed), &fixture.boundary),
-                Err(ImportError::Identity { index: 0, field: rejected }) if rejected == field));
-        }
-        let mut changed = fixture.captured.clone();
-        changed.swap(0, 1);
-        assert!(matches!(
-            decode(&encode(&changed), &fixture.boundary),
-            Err(ImportError::Identity { index: 0, .. })
-        ));
-        for count in [2, 4] {
-            let mut changed = fixture.captured.clone();
-            changed.resize(count, fixture.captured[0].clone());
-            assert!(matches!(
-                decode(&encode(&changed), &fixture.boundary),
-                Err(ImportError::Schema("reviewed cohort count differs"))
-            ));
-        }
-    }
-
-    #[test]
-    fn metadata_cannot_select_object_source_compiler_or_dependency_roots() {
-        let fixture = fixture();
-        let unrelated = fixture._temporary.path().join("unreviewed");
-        for (field, path) in [
-            ("shared output", unrelated.join("captured-rtmutexapi.o")),
-            (
-                "shared output",
-                fixture.boundary.output.join("../captured-rtmutexapi.o"),
-            ),
-            ("Linux source", unrelated.join("rtmutex_api.c")),
-            (
-                "Linux source",
-                fixture.boundary.linux.join("kernel/locking/other.c"),
-            ),
-            (
-                "compiler",
-                fixture.boundary.compiler.with_file_name("other-clang"),
-            ),
-            ("dependency roots", unrelated.join("header.h")),
-            (
-                "dependency roots",
-                fixture.boundary.output.join("../header.h"),
-            ),
-        ] {
-            let mut changed = fixture.captured.clone();
-            match field {
-                "shared output" => changed[0].object = path,
-                "Linux source" => changed[0].source = path,
-                "compiler" => changed[0].compiler = path,
-                "dependency roots" => changed[0].dependencies = vec![path],
-                _ => unreachable!(),
-            }
-            assert!(
-                matches!(decode(&encode(&changed), &fixture.boundary),
-                Err(ImportError::Path { index: 0, field: rejected }) if rejected == field),
-                "{field}"
-            );
-        }
-    }
-
-    #[test]
-    fn malformed_versions_lengths_truncation_and_trailing_bytes_refuse() {
-        for bad in ["", "ff", &"x".repeat(64)] {
-            assert!(matches!(expected_digest(bad), Err(ImportError::Schema(_))));
-        }
-        let fixture = fixture();
-        let bytes = encode(&fixture.captured);
-        for length in [0, 21, 25, bytes.len() - 1] {
-            assert!(matches!(
-                decode(&bytes[..length], &fixture.boundary),
-                Err(ImportError::Schema(_))
-            ));
-        }
-        let mut changed = bytes.clone();
-        changed[20] = b'2';
-        assert!(matches!(
-            decode(&changed, &fixture.boundary),
-            Err(ImportError::Schema("unsupported cohort version"))
-        ));
-        let mut changed = bytes.clone();
-        changed[26..30].copy_from_slice(&u32::MAX.to_le_bytes());
-        assert!(matches!(
-            decode(&changed, &fixture.boundary),
-            Err(ImportError::Schema("field/count exceeds limit"))
-        ));
-        let mut changed = bytes;
-        changed.push(0);
-        assert!(matches!(
-            decode(&changed, &fixture.boundary),
-            Err(ImportError::Schema("trailing cohort bytes"))
-        ));
-    }
-
-    #[test]
-    fn duplicate_paths_with_conflicting_pins_refuse() {
-        let fixture = fixture();
-        let mut bytes = encode(&fixture.captured);
-        let source = fixture.captured[0].source.to_str().unwrap().as_bytes();
-        let position = bytes
-            .windows(source.len())
-            .rposition(|window| window == source)
-            .unwrap();
-        bytes[position + source.len()] = 2;
-        assert!(matches!(
-            decode(&bytes, &fixture.boundary),
-            Err(ImportError::Schema("conflicting input pins"))
-        ));
-    }
-
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    #[test]
-    fn bounded_import_reads_only_the_caller_selected_output_and_rejects_symlinks() {
-        let fixture = fixture();
-        let bytes = encode(&fixture.captured);
-        let digest = cohort_digest(&bytes);
-        let selected = || Import {
-            workspace: &fixture.boundary.roots[0],
-            linux: &fixture.boundary.linux,
-            output: &fixture.boundary.output,
-            compiler: &fixture.boundary.compiler,
-            units: COMMON,
-            sha256: &digest,
-        };
-        let path = fixture.boundary.output.join("captured-units.bin");
-        fs::write(&path, &bytes).unwrap();
-        assert_eq!(read(selected()).unwrap().len(), 3);
-        let mut tampered = bytes.clone();
-        tampered.push(0);
-        fs::write(&path, tampered).unwrap();
-        assert!(matches!(read(selected()), Err(ImportError::Input(_))));
-        fs::remove_file(&path).unwrap();
-        let external = fixture._temporary.path().join("outside-cohort.bin");
-        fs::write(&external, encode(&fixture.captured)).unwrap();
-        std::os::unix::fs::symlink(&external, &path).unwrap();
-        assert!(matches!(read(selected()), Err(ImportError::Input(_))));
-    }
-
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    #[test]
-    fn owned_cohort_resolves_output_alias_without_admitting_foreign_inputs() {
-        let fixture = fixture();
-        let output = &fixture.boundary.output;
-        let alias = fixture._temporary.path().join("output-alias");
-        std::os::unix::fs::symlink(output, &alias).unwrap();
-        let listing = "rtmutex kernel/locking/rtmutex_api\n";
-        let path = write_cohort(&alias, "fixture", listing);
-        assert_eq!(path, output.join("fixture-units.txt"));
-        let past = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_234_567_890);
-        fs::File::open(&path).unwrap().set_modified(past).unwrap();
-        let modified = fs::metadata(&path).unwrap().modified().unwrap();
-        assert_eq!(write_cohort(&alias, "fixture", listing), path);
-        assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), modified);
-        let mut snapshot = Snapshot::new(std::slice::from_ref(output));
-        let input = snapshot.input(&path, None, 64 << 10);
-        assert_eq!(input.relative, Path::new("fixture-units.txt"));
-        snapshot.finish();
-        let mut foreign = Snapshot::new(&fixture.boundary.roots[..1]);
-        assert!(
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                foreign.input(&path, None, 64 << 10);
-            }))
-            .is_err()
-        );
-        let external = fixture._temporary.path().join("foreign-units.txt");
-        fs::write(&external, listing).unwrap();
-        fs::remove_file(&path).unwrap();
-        std::os::unix::fs::symlink(&external, &path).unwrap();
-        let mut snapshot = Snapshot::new(std::slice::from_ref(output));
-        assert!(
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                snapshot.input(&path, None, 64 << 10);
-            }))
-            .is_err()
-        );
-    }
-}
+#[cfg(test)]
+#[path = "linux_capture/export_tests.rs"]
+mod export_tests;

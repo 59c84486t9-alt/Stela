@@ -9,6 +9,8 @@ pub mod linux;
 pub mod linux_build;
 #[cfg(feature = "linux-registry")]
 pub mod linux_capture;
+#[cfg(feature = "linux-registry")]
+pub mod linux_radio;
 #[cfg(feature = "native")]
 pub mod native;
 

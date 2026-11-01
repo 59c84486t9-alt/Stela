@@ -64,6 +64,13 @@ const OPEN: &[(&str, &[&str])] = &[
 
 /// The unit of nouveau's own `module_init`.
 const INITCALLS: UnitSpec = UnitSpec {
+    scope: stela_c_build::linux_capture::Scope {
+        slice: "gpu",
+        group: "nouveau",
+        group_ordinal: 7,
+        unit_ordinal: 1,
+        global_ordinal: 7,
+    },
     source: "drivers/gpu/drm/nouveau/nouveau_drm",
     module: MODULE.name,
     file: MODULE.file,
@@ -134,11 +141,21 @@ pub fn port(linux: &mut Linux) {
     });
     let mut captured = linux.take_captured();
     let environment_count = captured.len();
+    let compiler = initcalls::compiler(&build);
+    let placement = initcalls::Placement::new(
+        &initcalls_unit().path(),
+        &stela_c_build::linux_build::out_dir(),
+        &[
+            Path::new("../.."),
+            compiler.parent().expect("compiler root"),
+        ],
+    )
+    .expect("Nouveau source placement");
     captured.push(initcalls::compile(
         &build,
         Path::new("../stela-linux/src/compat/stela/registration.h"),
-        initcalls_unit(),
-        captured.len() as u32 + 1,
+        INITCALLS,
+        &placement,
     ));
     let mut expected = native::environment_units();
     expected.push(INITCALLS);
@@ -163,6 +180,13 @@ pub fn port(linux: &mut Linux) {
         .compile("stela-nouveau-nvkm");
     let archive = stela_c_build::linux_build::out_dir().join("libstela-nouveau-nvkm.a");
     check_imports(&archive, &[&linux.archive, &linux.common_archive]);
+    let output = stela_c_build::linux_build::out_dir();
+    let digest = initcalls::write(
+        &output.join("captured-units.bin"),
+        &captured[initcalls::COMMON.len()..],
+    );
+    println!("cargo:output={}", output.display());
+    println!("cargo:cohort_sha256={digest}");
     // Hosted programs test the environment and link no driver.
     if env::var("CARGO_CFG_TARGET_OS").is_ok_and(|os| os == "uefi") {
         println!("cargo:rustc-link-lib=static=stela-nouveau-nvkm");
