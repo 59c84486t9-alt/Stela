@@ -939,8 +939,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let host = self.host.counter();
         let pace = Pace::new(self.profile.counter_frequency);
         self.clock.seed(&hub.clock, host, pace);
-        self.clock
-            .attach(Arc::clone(&hub.clock), self.current, self.statistics.blocks);
+        self.clock.attach(
+            Arc::clone(&hub.clock),
+            self.current,
+            self.cpu.retired >> super::clock::PACE_UNIT_SHIFT,
+        );
         hub.home.store(self.current, Ordering::Relaxed);
         self.share_kept_pages(hub.pes());
         self.share_lower_globals(&hub);
@@ -993,8 +996,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 *peer = Peer::Remote;
             }
         }
-        self.clock
-            .attach(Arc::clone(&hub.clock), self.current, self.statistics.blocks);
+        self.clock.attach(
+            Arc::clone(&hub.clock),
+            self.current,
+            self.cpu.retired >> super::clock::PACE_UNIT_SHIFT,
+        );
         self.idle_skip = false;
         self.cpu.core_locks = core_locks;
         self.cpu.memory_lock = self.devices.memory_lock();

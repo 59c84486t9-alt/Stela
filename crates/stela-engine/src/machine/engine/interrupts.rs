@@ -20,8 +20,26 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 .pmu
                 .as_ref()
                 .is_some_and(|monitor| monitor.deadline().is_some());
-        let now = if timed { self.now() } else { 0 };
+        let now = match timed {
+            true if self.lines_hold() => self.clock.last(),
+            true => self.now(),
+            false => 0,
+        };
         self.lines_at(now)
+    }
+
+    /// Whether the count is below every count at which the running PE's
+    /// cached lines change with the count alone.
+    fn lines_hold(&mut self) -> bool {
+        let Some((_, devices, pe)) = self.device_lines else {
+            return false;
+        };
+        let monitor = self.cpu.pmu.as_ref().and_then(|monitor| monitor.deadline());
+        let change = [self.timer_deadline(), monitor]
+            .into_iter()
+            .flatten()
+            .fold(devices, u64::min);
+        pe == self.current && self.clock.below(change, || self.host.counter())
     }
 
     /// The lines the devices drive into PE `pe` at count `now`: the cached

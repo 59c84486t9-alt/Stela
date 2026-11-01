@@ -139,6 +139,15 @@ pub enum PeerState<'a> {
 }
 
 impl<H: Host, D: Devices> Machine<H, D> {
+    /// The progress the clock paces this PE by.
+    fn work(&self) -> u64 {
+        if self.clock.paces_instructions() {
+            self.cpu.retired >> super::clock::PACE_UNIT_SHIFT
+        } else {
+            self.statistics.blocks
+        }
+    }
+
     /// Checked kept participants, separate from the live/parked Cpu
     /// ownership slots. An unbound inventory grants no PMGR support credit.
     pub fn processors(&self) -> &Processors {
@@ -307,12 +316,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if !self.processor_paused(self.current)
             && self.waiting.is_none()
             && self.statistics.blocks < self.slice_end
-            && (self.peers.len() < 2 || self.now() < self.slice_deadline)
+            && (self.peers.len() < 2 || self.host.counter() < self.slice_deadline)
         {
             return Ok(());
         }
-        self.clock
-            .end_slice(|| self.host.counter(), self.statistics.blocks);
+        let work = self.work();
+        self.clock.end_slice(|| self.host.counter(), work);
         let paused = self.processor_paused(self.current);
         if paused || self.waiting.is_some() && !self.polls_monitor() {
             // Waiting or paused, the PE has nothing for the count to wait on,
@@ -357,10 +366,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     self.switch_to(next);
                 }
                 self.slice_end = self.statistics.blocks + QUANTUM;
-                self.slice_deadline = now + self.profile.counter_frequency / QUANTUM_HZ;
+                self.slice_deadline =
+                    self.host.counter() + self.profile.counter_frequency / QUANTUM_HZ;
                 let share = self.runnable();
-                self.clock
-                    .start_slice(|| self.host.counter(), self.statistics.blocks, share);
+                let work = self.work();
+                self.clock.start_slice(|| self.host.counter(), work, share);
                 return self.wake();
             }
             // In parallel, only a PE that waits for an interrupt serves the

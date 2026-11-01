@@ -106,7 +106,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// Dispatch need not observe time when no asynchronous DMA is pending.
     /// Scheduler callers already have a timestamp and use `poll_devices`.
     pub(super) fn poll_due_devices(&mut self) -> Step {
-        if let Some(deadline) = self.devices.dma_deadline() {
+        if let Some(deadline) = self.devices.dma_deadline()
+            && !self.clock.below(deadline, || self.host.counter())
+        {
             let now = self.now();
             self.poll_devices_at(now, deadline)?;
         }

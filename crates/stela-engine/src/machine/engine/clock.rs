@@ -36,7 +36,7 @@
 //! nothing, so the count stops within the lookahead of its last boundary,
 //! whatever stopped it, and resumes from there, the time held becoming lag.
 //! A PE that runs keeps the count at the host's pace unless it runs slower
-//! than [`PACE_BLOCKS_PER_SECOND`]; then the count slows with it, so a guest
+//! than [`PACE_INSTRUCTIONS_PER_SECOND`]; then the count slows with it, so a guest
 //! second always holds that much work per running PE, on any host. A PE
 //! waiting in WFI or WFE, held in reset or powered down holds nothing, so an
 //! idle guest's time follows the host's. A PE polling a monitor in WFE is
@@ -66,17 +66,18 @@ use stela_compiler::x86_64::register_read::{Count, CountState};
 /// runs far below 3,000,000 blocks, the ticket spinlock bound at this rate.
 pub(super) const TICKS_PER_BLOCK: u64 = 1;
 
-/// The slowest a running parallel PE may execute blocks while the count
-/// keeps the host's pace, about 300 MIPS. A slower PE slows the count, so
-/// its timeouts still measure its work: the 60 s XNU allows the registry to
-/// come to rest (`IOService.cpp` 6140), from watchdogd's early wait until the
-/// driver extensions launch, needs some 50 G instructions in a 26A434 boot.
-/// At half this floor 48 G ran in that window without finishing, on a host
-/// other work slowed; this one gives it about twice what it needs. The
-/// slowest PE that runs sets the count and every guest sleep lasts as much
-/// longer, so a floor much above this makes a boot's timed waits take several
-/// times their length.
-pub(super) const PACE_BLOCKS_PER_SECOND: u64 = 4_000_000;
+/// The slowest a running parallel PE may retire instructions while the count
+/// keeps the host's pace. A slower PE slows the count, so its timeouts still
+/// measure its work: the 60 s XNU allows the registry to come to rest
+/// (`IOService.cpp` 6140), from watchdogd's early wait until the driver
+/// extensions launch, needs some 50 G instructions in a 26A434 boot, and eight
+/// PEs at this floor give it about twice that. The slowest PE that runs sets
+/// the count and every guest sleep lasts as much longer, so a floor much above
+/// this makes a boot's timed waits take several times their length.
+pub(super) const PACE_INSTRUCTIONS_PER_SECOND: u64 = 250_000_000;
+
+/// The retired instructions of one unit of a parallel PE's progress.
+pub(super) const PACE_UNIT_SHIFT: u32 = 10;
 
 /// Slice periods ([`QUANTUM_HZ`]) a running PE's horizon may lie past the
 /// present: several, so that only a PE stopped for longer than a few slices
@@ -86,7 +87,8 @@ const LOOKAHEAD_SLICES: u64 = 4;
 /// How a [`SharedClock`]'s horizons advance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct Pace {
-    /// The counts each block a PE runs earns its horizon.
+    /// The counts each unit of a PE's work earns its horizon: a block
+    /// serialized, [`PACE_UNIT_SHIFT`] instructions in parallel.
     pub per_block: u64,
     /// The counts a running PE's horizon may lie past the present.
     pub lookahead: u64,
@@ -96,7 +98,7 @@ impl Pace {
     /// The pace of a counter of `frequency` Hz.
     pub(super) fn new(frequency: u64) -> Self {
         Self {
-            per_block: (frequency / PACE_BLOCKS_PER_SECOND).max(1),
+            per_block: ((frequency << PACE_UNIT_SHIFT) / PACE_INSTRUCTIONS_PER_SECOND).max(1),
             lookahead: frequency * LOOKAHEAD_SLICES / QUANTUM_HZ,
         }
     }
@@ -326,6 +328,9 @@ struct Attachment {
     waiting: bool,
     /// The host count at which a poll next needs publishing.
     next_poll: u64,
+    /// The offset it last read: publication only lowers it, so the count
+    /// stays at or below the host's counter past this one.
+    offset: u64,
 }
 
 #[derive(Debug)]
@@ -373,12 +378,14 @@ impl Clock {
     /// Read `clock` as PE `pe` from now on, from the count this clock last
     /// read. The PE holds nothing until its first slice starts.
     pub(super) fn attach(&mut self, clock: Arc<SharedClock>, pe: usize, blocks: u64) {
+        let offset = clock.state.offset.load(Ordering::Relaxed);
         self.shared = Some(Attachment {
             clock,
             pe,
             blocks,
             waiting: true,
             next_poll: 0,
+            offset,
         });
     }
 
@@ -391,12 +398,24 @@ impl Clock {
 
     /// The count now.
     pub(super) fn read(&mut self, mut counter: impl Counter) -> u64 {
-        let count = match &self.shared {
-            Some(attachment) => attachment.clock.read(&mut counter),
+        let count = match &mut self.shared {
+            Some(attachment) => {
+                attachment.offset = attachment.clock.state.offset.load(Ordering::Relaxed);
+                attachment.clock.read(&mut counter)
+            }
             None => return self.read_at(counter()),
         };
         self.count.last = count.max(self.count.last);
         self.count.last
+    }
+
+    /// Whether the count is below `count` for certain, answered without
+    /// reading the state every publication dirties: an exit's question,
+    /// whose usual answer is that no deadline is near.
+    pub(super) fn below(&self, count: u64, mut counter: impl Counter) -> bool {
+        self.shared
+            .as_ref()
+            .is_some_and(|attachment| counter().wrapping_add(attachment.offset) < count)
     }
 
     /// The serialized count at host counter value `host`.
@@ -450,6 +469,11 @@ impl Clock {
             self.count.last = deadline;
             self.sync();
         }
+    }
+
+    /// Whether this clock paces a PE among others, by what it retires.
+    pub(super) fn paces_instructions(&self) -> bool {
+        self.shared.is_some()
     }
 
     /// A slice starts at block count `blocks`, with `share` PEs (at least
@@ -680,11 +704,11 @@ mod tests {
     }
 
     #[test]
-    fn a_24_mhz_pace_earns_a_quarter_microsecond_a_block_and_looks_ahead_four_slices() {
+    fn a_24_mhz_pace_earns_98_counts_a_unit_and_looks_ahead_four_slices() {
         assert_eq!(
             Pace::new(24_000_000),
             Pace {
-                per_block: 6,
+                per_block: 98,
                 lookahead: 192_000
             }
         );
@@ -723,6 +747,23 @@ mod tests {
                 holder: None
             }
         );
+    }
+
+    #[test]
+    fn a_stale_offset_bounds_the_count_from_above() {
+        let (_, mut first, mut second) = pair();
+        first.start_slice(|| 1000, 0, 1);
+        second.start_slice(|| 1000, 0, 1);
+        second.end_slice(|| 1050, 10_000);
+        // The first PE holds the count at 1100 while the host runs on.
+        assert_eq!(second.read(|| 4000), 1100);
+        assert!(first.below(4001, || 4000));
+        assert!(!first.below(4000, || 4000));
+        // The lag makes that bound loose until the next read tightens it.
+        first.end_slice(|| 5000, 100);
+        assert_eq!(first.read(|| 5040), 1140);
+        assert!(first.below(1141, || 5040));
+        assert!(!first.below(1140, || 5040));
     }
 
     #[test]
