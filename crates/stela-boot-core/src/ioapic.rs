@@ -11,11 +11,12 @@ use alloc::{boxed::Box, sync::Arc};
 use core::{
     cell::UnsafeCell,
     mem::ManuallyDrop,
-    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
 };
 use stela_drivers::bus::irq::{
-    FIRST_VECTOR, IrqError, LineRoute, Platform, Polarity, Route, RouteRequest, Source, Target,
-    Trigger, VECTOR_COUNT,
+    ChipEoi, CpuTarget, FIRST_VECTOR, IrqError, LineRoute, Platform, Polarity, RegistryIdentity,
+    Route, Source, Target, Trigger, VECTOR_COUNT,
+    posted_msi::{self, NotificationDomain},
 };
 
 const MASK: u32 = 1 << 16;
@@ -31,16 +32,19 @@ const MAX_PINS: usize = 120;
 pub unsafe trait Registers: Send + Sync {
     fn read(&self, index: u8) -> u32;
     fn write(&self, index: u8, value: u32);
+    /// Actual direct MMIO EOI register, not an IOREGSEL/IOWIN index.
+    /// The caller checked this controller's version is at least 0x20.
+    fn write_eoi(&self, vector: u8);
 }
 
 pub struct Mmio(usize);
 impl Mmio {
     /// # Safety
-    /// `base` is an exclusive UC IOAPIC mapping of at least 32 bytes,
+    /// `base` is an exclusive UC IOAPIC mapping of at least 68 bytes,
     /// aligned to 4 KiB and kept across all roots through final release or
     /// permanent quarantine. No WB/WC alias exists. No IRQ-context release.
     pub unsafe fn new(base: usize) -> Result<Self, IrqError> {
-        if base == 0 || base & 4095 != 0 || base.checked_add(32).is_none() {
+        if base == 0 || base & 4095 != 0 || base.checked_add(68).is_none() {
             return Err(IrqError::Route);
         }
         Ok(Self(base))
@@ -62,6 +66,11 @@ unsafe impl Registers for Mmio {
             (self.0 as *mut u32).write_volatile(u32::from(index));
             ((self.0 + 16) as *mut u32).write_volatile(value);
         }
+    }
+    fn write_eoi(&self, vector: u8) {
+        // SAFETY: original complete UC controller mapping; Unit serializes
+        // access and checked version >=0x20 before this direct register write.
+        unsafe { ((self.0 + 0x40) as *mut u32).write_volatile(u32::from(vector)) };
     }
 }
 
@@ -91,6 +100,9 @@ pub struct State {
 pub struct Unit<R: Registers, P: Platform> {
     registers: R,
     platform: P,
+    domain: Arc<dyn NotificationDomain>,
+    registry: RegistryIdentity,
+    version: u8,
     id: u8,
     gsi_base: u32,
     pins: u16,
@@ -112,13 +124,18 @@ impl<R: Registers, P: Platform> Unit<R, P> {
     /// suppression is disabled and remains disabled through final retirement.
     /// No other CPU/SMM/firmware can program these redirection entries. Pin
     /// ownership/quiescence must separately be proved for each claim.
+    /// `domain` is the actual retained CPU/root/controller-format owner, not
+    /// a target-derived permission; it excludes live remapping-mode changes.
     pub unsafe fn attach(
         registers: R,
         platform: P,
+        domain: Arc<dyn NotificationDomain>,
+        registry: RegistryIdentity,
         id: u8,
         gsi_base: u32,
     ) -> Result<Arc<Self>, IrqError> {
-        platform.check_cpu()?;
+        platform.check_process()?;
+        domain.check().map_err(IrqError::Delivery)?;
         let saved = platform.save_and_disable();
         let version = registers.read(1);
         // SAFETY: `saved` came from `save_and_disable` on this CPU above.
@@ -126,8 +143,8 @@ impl<R: Registers, P: Platform> Unit<R, P> {
         if version == u32::MAX {
             return Err(IrqError::FailedRead);
         }
-        // Every version takes the local APIC's broadcast EOI, the only EOI
-        // used here: Intel's 0x11 and 0x20, AMD's 0x21. The MADT's ID is the
+        // Versions below0x20 require mask/edge/restore for explicit EOI.
+        // Later versions expose the direct EOI register. The MADT's ID is the
         // unit's, as Linux keeps it on x86-64; firmware need not program the
         // ID register to match.
         let pins = ((version >> 16) & 255) as u16 + 1;
@@ -137,6 +154,9 @@ impl<R: Registers, P: Platform> Unit<R, P> {
         Ok(Arc::new(Self {
             registers,
             platform,
+            domain,
+            registry,
+            version: version as u8,
             id,
             gsi_base,
             pins,
@@ -264,6 +284,10 @@ impl<R: Registers, P: Platform> Unit<R, P> {
             epoch,
             target: None,
             retired: true,
+            lifetime: Arc::new(PinLifetime {
+                phase: AtomicU8::new(CLAIMED),
+                failed: AtomicBool::new(false),
+            }),
         })
     }
 }
@@ -290,6 +314,136 @@ pub struct Pin<R: Registers, P: Platform> {
     epoch: u64,
     target: Option<Target>,
     retired: bool,
+    lifetime: Arc<PinLifetime>,
+}
+const CLAIMED: u8 = 0;
+const PROGRAMMED: u8 = 1;
+const RETIRED: u8 = 2;
+const RELEASED: u8 = 3;
+struct PinLifetime {
+    phase: AtomicU8,
+    failed: AtomicBool,
+}
+struct PinDomain<R: Registers, P: Platform> {
+    unit: ManuallyDrop<Arc<Unit<R, P>>>,
+    lifetime: ManuallyDrop<Arc<PinLifetime>>,
+}
+impl<R: Registers, P: Platform> Drop for PinDomain<R, P> {
+    fn drop(&mut self) {
+        if self.unit.platform.check_process().is_err() {
+            return;
+        }
+        // SAFETY: original process context; Slot/caller owns no in-flight
+        // reference when this final process-owned endpoint is released.
+        unsafe {
+            ManuallyDrop::drop(&mut self.lifetime);
+            ManuallyDrop::drop(&mut self.unit);
+        }
+    }
+}
+// SAFETY: original Unit/root domain and the actual private claim allocation
+// remain held. Checks use immutable/atomic metadata only, without Unit locks,
+// raw source access, allocation or release in IRQ context.
+unsafe impl<R: Registers, P: Platform> NotificationDomain for PinDomain<R, P> {
+    fn check(&self) -> Result<(), posted_msi::Error> {
+        self.unit.domain.check()?;
+        if self.lifetime.failed.load(Ordering::Acquire)
+            || self.lifetime.phase.load(Ordering::Acquire) == RELEASED
+        {
+            return Err(posted_msi::Error::RootFailed);
+        }
+        Ok(())
+    }
+}
+
+struct PinEoi<R: Registers, P: Platform> {
+    unit: ManuallyDrop<Arc<Unit<R, P>>>,
+    lifetime: ManuallyDrop<Arc<PinLifetime>>,
+    pin: u8,
+    epoch: u64,
+    target: Target,
+    line: LineRoute,
+}
+impl<R: Registers, P: Platform> Drop for PinEoi<R, P> {
+    fn drop(&mut self) {
+        if self.unit.platform.check_process().is_err() {
+            return;
+        }
+        // SAFETY: only process-owned final release may end kept controller
+        // resources; a foreign/ISR default Drop instead retains both fields.
+        unsafe {
+            ManuallyDrop::drop(&mut self.lifetime);
+            ManuallyDrop::drop(&mut self.unit);
+        }
+    }
+}
+impl<R: Registers, P: Platform> PinEoi<R, P> {
+    fn acknowledge(&self, observed: Trigger) -> Result<(), IrqError> {
+        self.unit.platform.check_cpu()?;
+        self.unit.domain.check().map_err(IrqError::Delivery)?;
+        let phase = self.lifetime.phase.load(Ordering::Acquire);
+        if !matches!(phase, PROGRAMMED | RETIRED) || self.lifetime.failed.load(Ordering::Acquire) {
+            return Err(IrqError::Unregistered);
+        }
+        let _guard = self.unit.lock();
+        // SAFETY: original selector/claim lock. Retirement disarms handler
+        // endpoints before final Slot withdrawal, but keeps this physical pin
+        // owned until every captured chip EOI and the Source finally release.
+        let epoch = unsafe { (*self.unit.epochs.get())[usize::from(self.pin)] };
+        if epoch != self.epoch && !(phase == RETIRED && epoch == 0) {
+            return Err(IrqError::Unregistered);
+        }
+        let low = self.unit.low(self.pin)?;
+        let high = self.unit.registers.read(0x11 + self.pin * 2);
+        let expected = u32::from(self.target.vector)
+            | 1 << 15
+            | if self.line.polarity == Polarity::Low {
+                1 << 13
+            } else {
+                0
+            };
+        if low & (CONFIG & !MASK) != expected || high != u32::from(self.target.destination) << 24 {
+            return Err(IrqError::Route);
+        }
+        if observed == Trigger::Level {
+            return Ok(());
+        }
+        // Intel SDM12.8.4: an edge seen by the CPU has no EOI broadcast.
+        // Linux __eoi_ioapic_pin handles this with direct EOI or a masked
+        // edge/level transition on older controllers; never a selector0x40.
+        if self.unit.version >= 0x20 {
+            self.unit.registers.write_eoi(self.target.vector);
+        } else {
+            let masked = low | MASK;
+            self.unit.registers.write(0x10 + self.pin * 2, masked);
+            if self.unit.low(self.pin)? & CONFIG != masked & CONFIG {
+                return Err(IrqError::Mask);
+            }
+            let edge = masked & !(1 << 15);
+            self.unit.registers.write(0x10 + self.pin * 2, edge);
+            if self.unit.low(self.pin)? & CONFIG != edge & CONFIG {
+                return Err(IrqError::Route);
+            }
+            self.unit.registers.write(0x10 + self.pin * 2, low);
+            if self.unit.low(self.pin)? & CONFIG != low & CONFIG {
+                return Err(IrqError::Route);
+            }
+        }
+        Ok(())
+    }
+}
+// SAFETY: endpoint captures only the original checked Registry reservation;
+// no access is admitted until actual masked route programming has completed.
+// Slot retains original Unit/claim/lifetime through local+chip EOI inflight.
+// Same-CPU IRQ-save selector locking is independent of the !Send Source.
+unsafe impl<R: Registers, P: Platform> ChipEoi for PinEoi<R, P> {
+    fn after_local_eoi(&self, observed: Trigger) -> Result<(), IrqError> {
+        let result = self.acknowledge(observed);
+        if result.is_err() {
+            self.lifetime.failed.store(true, Ordering::Release);
+        }
+        result
+    }
 }
 impl<R: Registers, P: Platform> Pin<R, P> {
     /// Pre-bind a real parent mask endpoint in process context before callback
@@ -305,6 +459,7 @@ impl<R: Registers, P: Platform> Pin<R, P> {
             unit: Arc::clone(&self.unit),
             pin: self.pin,
             epoch: self.epoch,
+            lifetime: self.lifetime.clone(),
         })
     }
 }
@@ -315,6 +470,7 @@ pub struct ParentMask<R: Registers, P: Platform> {
     unit: Arc<Unit<R, P>>,
     pin: u8,
     epoch: u64,
+    lifetime: Arc<PinLifetime>,
 }
 impl<R: Registers, P: Platform> ParentMask<R, P> {
     /// Rearm the same claimed route after its deferred source has been drained.
@@ -329,6 +485,9 @@ impl<R: Registers, P: Platform> ParentMask<R, P> {
     /// physical event after unmask is handled by the same callback.
     pub unsafe fn rearm(&self) -> Result<(), IrqError> {
         self.unit.platform.check_cpu()?;
+        if self.lifetime.failed.load(Ordering::Acquire) {
+            return Err(IrqError::Drain);
+        }
         let _guard = self.unit.lock();
         // SAFETY: the lock serializes claim/epoch checks with route retirement.
         if unsafe { (*self.unit.epochs.get())[usize::from(self.pin)] } != self.epoch {
@@ -374,7 +533,37 @@ unsafe impl<R: Registers, P: Platform> stela_drivers::bus::irq::ParentMask for P
 }
 // SAFETY: devices and unit are held, physical ownership comes from claim's
 // explicit grant. The canonical registry alone publishes/releases callbacks.
-unsafe impl<R: Registers, P: Platform> Source for Pin<R, P> {
+unsafe impl<R: Registers + 'static, P: Platform + 'static> Source for Pin<R, P> {
+    fn notification_domain(&self) -> Result<Arc<dyn NotificationDomain>, IrqError> {
+        self.unit.platform.check_process()?;
+        self.unit.domain.check().map_err(IrqError::Delivery)?;
+        Ok(Arc::new(PinDomain {
+            unit: ManuallyDrop::new(Arc::clone(&self.unit)),
+            lifetime: ManuallyDrop::new(self.lifetime.clone()),
+        }))
+    }
+    fn eoi_endpoint(
+        &mut self,
+        target: &CpuTarget<'_>,
+    ) -> Result<Option<Arc<dyn ChipEoi>>, IrqError> {
+        self.unit.platform.check_process()?;
+        target.check_current()?;
+        if !target.belongs_to(self.unit.registry) {
+            return Err(IrqError::Route);
+        }
+        let actual = target.descriptor();
+        if self.lifetime.failed.load(Ordering::Acquire) {
+            return Err(IrqError::Route);
+        }
+        Ok(Some(Arc::new(PinEoi {
+            unit: ManuallyDrop::new(Arc::clone(&self.unit)),
+            lifetime: ManuallyDrop::new(self.lifetime.clone()),
+            pin: self.pin,
+            epoch: self.epoch,
+            target: actual,
+            line: self.line,
+        })))
+    }
     fn mask(&mut self) -> Result<(), IrqError> {
         self.unit.platform.check_cpu()?;
         let result = {
@@ -394,12 +583,21 @@ unsafe impl<R: Registers, P: Platform> Source for Pin<R, P> {
     fn quiesce(&mut self) -> Result<(), IrqError> {
         self.devices.quiesce()
     }
-    fn route(&self) -> RouteRequest {
-        RouteRequest::Line(self.line)
+    fn route_kind(&self) -> stela_drivers::bus::irq::RouteKind {
+        stela_drivers::bus::irq::RouteKind::Line
     }
-    unsafe fn program(&mut self, route: Route) -> Result<(), IrqError> {
-        self.unit.platform.check_cpu()?;
-        let Route::Line { target, line } = route else {
+    fn requester(&self) -> Option<&stela_drivers::bus::pci::requester::RequesterId> {
+        None
+    }
+    unsafe fn program(
+        &mut self,
+        route: &stela_drivers::bus::irq::AllocatedRoute<'_>,
+    ) -> Result<(), IrqError> {
+        self.unit.platform.check_process()?;
+        if !route.belongs_to(self.unit.registry) {
+            return Err(IrqError::Route);
+        }
+        let Route::Line { target, line } = route.programming() else {
             return Err(IrqError::Route);
         };
         if line != self.line
@@ -449,6 +647,7 @@ unsafe impl<R: Registers, P: Platform> Source for Pin<R, P> {
         {
             return Err(IrqError::Route);
         }
+        self.lifetime.phase.store(PROGRAMMED, Ordering::Release);
         Ok(())
     }
     unsafe fn unmask(&mut self) -> Result<(), IrqError> {
@@ -473,6 +672,9 @@ unsafe impl<R: Registers, P: Platform> Source for Pin<R, P> {
     }
     unsafe fn synchronize(&mut self) -> Result<(), IrqError> {
         self.unit.platform.check_cpu()?;
+        if self.lifetime.failed.load(Ordering::Acquire) {
+            return Err(IrqError::Drain);
+        }
         self.devices.quiesce()?;
         let start = self.unit.platform.ticks();
         loop {
@@ -503,17 +705,22 @@ unsafe impl<R: Registers, P: Platform> Source for Pin<R, P> {
         let _guard = self.unit.lock();
         // SAFETY: the unit lock held above serializes the epoch table.
         unsafe { (*self.unit.epochs.get())[usize::from(self.pin)] = 0 };
+        self.lifetime.phase.store(RETIRED, Ordering::Release);
         Ok(())
     }
 }
 impl<R: Registers, P: Platform> Drop for Pin<R, P> {
     fn drop(&mut self) {
-        if !self.retired || self.unit.platform.check_cpu().is_err() {
+        if !self.retired
+            || self.lifetime.failed.load(Ordering::Acquire)
+            || self.unit.platform.check_process().is_err()
+        {
             self.unit.quarantined.fetch_add(1, Ordering::Relaxed);
             return;
         }
         {
             let _guard = self.unit.lock();
+            self.lifetime.phase.store(RELEASED, Ordering::Release);
             // SAFETY: the unit lock and IRQ save serialize this selector/window pair on the owning
             // CPU.
             unsafe {

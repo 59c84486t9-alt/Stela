@@ -59,6 +59,9 @@ unsafe impl ioapic::Registers for Registers {
     fn write(&self, index: u8, value: u32) {
         ioapic::Registers::write(&self.mmio, index, value);
     }
+    fn write_eoi(&self, vector: u8) {
+        ioapic::Registers::write_eoi(&self.mmio, vector);
+    }
 }
 impl Drop for Registers {
     fn drop(&mut self) {
@@ -133,7 +136,11 @@ impl Root {
         execution: &crate::native_clock::DriverExecution<'_>,
         authority: &Authority,
         madt: &'static [u8],
+        domain: Arc<dyn stela_drivers::bus::irq::posted_msi::NotificationDomain>,
     ) -> Result<Self, Error> {
+        domain
+            .check()
+            .map_err(|error| Error::Irq(IrqError::Delivery(error)))?;
         let scope = execution.process_scope().map_err(Error::Cpu)?;
         let cpu = scope.cpu().map_err(Error::Cpu)?;
         // SAFETY: complete external-controller/main handoff is required
@@ -159,7 +166,7 @@ impl Root {
             let mut mapping = authority
                 .map_physical(physical, CacheAttribute::Uncached, Protection::ReadWrite)
                 .map_err(Error::Mapping)?;
-            let address = match mapping.address(0, 32) {
+            let address = match mapping.address(0, 68) {
                 Ok(address) => address.as_ptr() as usize,
                 Err(error) => {
                     // SAFETY: No IOAPIC access or published source has occurred.
@@ -181,6 +188,8 @@ impl Root {
                 ioapic::Unit::attach(
                     registers,
                     NativePlatform(()),
+                    domain.clone(),
+                    super::CONTROLLER.identity(),
                     descriptor.id,
                     descriptor.gsi_base,
                 )

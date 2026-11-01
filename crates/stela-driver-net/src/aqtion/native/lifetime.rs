@@ -15,7 +15,7 @@ use core::{mem::ManuallyDrop, ops::Deref};
 
 struct Resources<R: RetirableRegisters, T: Timer + 'static> {
     core: Aqtion<R, T>,
-    attachment: Box<dyn Attachment>,
+    attachment: Attachment,
     retention: Option<ConfigRetention>,
     configuration: Option<owned::Mapping>,
 }

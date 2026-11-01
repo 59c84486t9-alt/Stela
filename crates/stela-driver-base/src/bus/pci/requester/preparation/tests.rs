@@ -11,7 +11,7 @@ use crate::bus::{
 use alloc::vec::Vec;
 use core::{
     ops::Range,
-    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
 };
 use std::sync::Mutex;
 
@@ -28,6 +28,11 @@ struct State {
     panic_drain: AtomicBool,
     detach_error: AtomicBool,
     detachments: AtomicUsize,
+    action_delivery: AtomicBool,
+    action_epoch: AtomicU64,
+    action_entries: Mutex<Vec<irq_actions::Entry>>,
+    action_records: Mutex<Vec<u8>>,
+    action_pins_released: AtomicUsize,
 }
 struct RootOwner(Arc<State>);
 impl Drop for RootOwner {
@@ -65,7 +70,10 @@ unsafe impl Root for OldRoot {
             Ok(())
         }
     }
-    unsafe fn bind(&self, binding: RequesterBinding) -> Result<Box<dyn Attachment>, DmaError> {
+    unsafe fn bind(
+        &self,
+        binding: RequesterBinding,
+    ) -> Result<Box<dyn crate::bus::pci::requester::preparation::AttachmentBackend>, DmaError> {
         assert_eq!(binding.address(), ADDRESS);
         binding.check_live().unwrap();
         self.owner
@@ -100,16 +108,34 @@ impl Drop for Control {
 // SAFETY: this synchronous fixture has no hardware or active mappings.
 // Its unique control retains the original binding on failure and makes
 // every old domain reference stale before releasing configuration pins.
-unsafe impl Attachment for Control {
+unsafe impl crate::bus::pci::requester::preparation::AttachmentBackend for Control {
     fn domain(&self) -> Arc<dyn DmaDomain> {
         self.domain.clone()
     }
-    unsafe fn detach(&mut self) -> Result<(), DmaError> {
+    fn irq_owner(
+        &mut self,
+        _requester: &crate::bus::pci::requester::RequesterId,
+        _config: Option<&crate::bus::pci::owned::ConfigRetention>,
+    ) -> Result<Option<Box<dyn crate::bus::irq::posted_msi::RouteOwner>>, DmaError> {
+        if !self.domain._owner.0.action_delivery.load(Ordering::Acquire) {
+            return Ok(None);
+        }
+        irq_actions::owner(self.domain.clone()).map(Some)
+    }
+    unsafe fn detach(
+        &mut self,
+    ) -> Result<(), crate::bus::pci::requester::preparation::DetachError> {
         if self.detached {
-            return Err(DmaError::Unmapped);
+            return Err(
+                crate::bus::pci::requester::preparation::DetachError::Uncertain(DmaError::Unmapped),
+            );
         }
         if self.domain._owner.0.detach_error.load(Ordering::Relaxed) {
-            return Err(DmaError::InvalidationFailed);
+            return Err(
+                crate::bus::pci::requester::preparation::DetachError::Uncertain(
+                    DmaError::InvalidationFailed,
+                ),
+            );
         }
         self.domain.binding.lock().unwrap().take();
         self.domain
@@ -297,7 +323,7 @@ fn failed_or_abandoned_detach_keeps_the_binding_and_original_root() {
             state.detach_error.store(true, Ordering::Relaxed);
             // SAFETY: same stopped fixture; inject failure before any binding release.
             let detached = unsafe { bound.attachment.detach() };
-            assert_eq!(detached, Err(DmaError::InvalidationFailed));
+            assert!(matches!(detached, Err(DmaError::InvalidationFailed)));
         }
         let mut mapping = bound.requester.into_function().into_config().into_mapping();
         drop(bound.attachment);
@@ -307,3 +333,38 @@ fn failed_or_abandoned_detach_keeps_the_binding_and_original_root() {
         assert_eq!(state.detachments.load(Ordering::Relaxed), 0);
     }
 }
+
+#[test]
+fn issuing_an_unused_grant_can_cancel_but_abandonment_cannot_fake_no_route() {
+    for abandon in [false, true] {
+        let (prepared, state) = preparing(false, false);
+        // SAFETY: exact original synchronous idle config/root peer.
+        let mut bound = unsafe { prepared.acknowledge_quiescence() }
+            .finalize()
+            .unwrap_or_else(|e| panic!("{:?}", e.error));
+        let grant = bound.attachment.irq_route().unwrap();
+        assert!(grant.is_unavailable());
+        assert!(grant.belongs_to(bound.attachment.requester()));
+        // Merely issued ownership is not publication. Explicit checked return
+        // permits detach; abandoning the grant cannot fabricate the return.
+        if abandon {
+            drop(grant);
+        } else {
+            bound
+                .attachment
+                .cancel_unpublished_irq(grant)
+                .unwrap_or_else(|_| panic!("original unused grant"));
+        }
+        // SAFETY: exact idle fixture and no real IRQ programmer exists.
+        let result = unsafe { bound.attachment.detach() };
+        if abandon {
+            assert!(matches!(result, Err(DmaError::DrainUnavailable)));
+            assert_eq!(state.detachments.load(Ordering::Relaxed), 0);
+        } else {
+            assert!(result.is_ok());
+            assert_eq!(state.detachments.load(Ordering::Relaxed), 1);
+        }
+    }
+}
+
+mod irq_actions;

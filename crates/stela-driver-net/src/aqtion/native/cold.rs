@@ -28,7 +28,7 @@ struct FailedBinding<R: RetirableRegisters, T: Timer + 'static> {
 }
 pub(super) struct Bound<R: RetirableRegisters, T: Timer + 'static> {
     pub requester: StoppedRequester,
-    pub attachment: Box<dyn Attachment>,
+    pub attachment: Attachment,
     pub hardware: Hardware<R, T>,
     pub profile: Profile,
     pub firmware: firmware::Firmware,

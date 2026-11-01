@@ -37,6 +37,9 @@ struct Owner {
     // Neither a replacement domain nor HCRST certifies old-route retirement.
     resources: RefCell<ManuallyDrop<Resources>>,
     register_failure: Rc<Cell<Option<usize>>>,
+    // Keep the exact retired action/source/route graph through subsequent
+    // device work; IRQ action retirement does not release endpoint resources.
+    retired_irq: RefCell<Option<crate::bus::irq::RetiredSource<dyn crate::bus::irq::Source>>>,
 }
 
 struct Access(Rc<Owner>);
@@ -407,6 +410,7 @@ pub unsafe fn attach(
     let owner = Rc::new(Owner {
         resources: RefCell::new(ManuallyDrop::new(resources)),
         register_failure: Rc::new(Cell::new(None)),
+        retired_irq: RefCell::new(None),
     });
     let mut controller = None;
     let mut retained_memory = None;
@@ -447,7 +451,8 @@ pub unsafe fn attach(
             }
             // Original source mask, callback synchronization and route
             // retirement; IMAN.IE=0 alone cannot establish these facts.
-            resources.irq.retire().map_err(Error::Irq)?;
+            let retired = resources.irq.retire().map_err(Error::Irq)?;
+            *owner.retired_irq.borrow_mut() = Some(retired);
             let command = resources.function.config().read16(4);
             resources.function.config().write16(4, command | 2 | 0x400);
             if resources.function.config().read16(4) & 0x406 != 0x402 {

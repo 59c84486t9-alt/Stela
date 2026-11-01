@@ -3,11 +3,13 @@
 //! stay Stela's: the function's owner placed it, and Linux reaches both through
 //! the table here. Domain errors retain real allocation pins and stop at the
 //! terminal Linux boundary before callers can reuse DMA-visible memory.
+use super::catalogue::{self, Authority, PciAuthority};
 use super::owner::Errno;
 use alloc::{boxed::Box, collections::BTreeMap, sync::Arc, vec::Vec};
 use core::{
     ffi::{c_char, c_int, c_uint, c_void},
     marker::PhantomData,
+    mem::ManuallyDrop,
     ptr::NonNull,
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -28,7 +30,6 @@ const PAGE_SHIFT: u8 = 12;
 const PAGE_BYTES: u64 = 1 << PAGE_SHIFT;
 
 const PCIBIOS_BAD_REGISTER_NUMBER: c_int = 0x87;
-const ENOMEM: Errno = -12;
 
 static QUARANTINED_MAPPINGS: AtomicU64 = AtomicU64::new(0);
 static QUARANTINED_BYTES: AtomicU64 = AtomicU64::new(0);
@@ -103,7 +104,8 @@ impl Msi {
         Self { capability }
     }
 
-    fn control<C: ConfigSpace>(self, config: &C) -> u16 {
+    /// Read this capability's control word through its configuration owner.
+    pub fn control<C: ConfigSpace>(self, config: &C) -> u16 {
         config.read16(self.capability + Self::CONTROL)
     }
 
@@ -148,13 +150,16 @@ struct RawFunction {
     irq: c_uint,
     regions: [Region; BARS],
     release_context: Option<unsafe extern "C" fn(*mut c_void)>,
+    enroll: Option<unsafe extern "C" fn(*mut c_void, *mut c_void) -> c_int>,
 }
 
-const _: () = assert!(size_of::<RawFunction>() == 232);
+const _: () = assert!(size_of::<RawFunction>() == 240);
+const _: () = assert!(core::mem::offset_of!(RawFunction, enroll) == 232);
 const _: () = assert!(core::mem::offset_of!(RawFunction, release_context) == 224);
 
 unsafe extern "C" {
-    fn stela_linux_pci_attach(function: *const RawFunction) -> *mut c_void;
+    fn stela_linux_pci_attach(function: *const RawFunction, error: *mut c_int) -> *mut c_void;
+    fn stela_linux_owner() -> *const super::owner::RawOwner;
     fn stela_linux_pci_bound(device: *const c_void) -> bool;
     fn stela_linux_pci_remove_device(device: *mut c_void);
     fn stela_linux_pci_quarantined_functions() -> u64;
@@ -305,6 +310,7 @@ fn direction(linux: c_uint) -> Direction {
 struct State<H> {
     host: H,
     mappings: Mappings,
+    enrollment: Option<Box<Authority>>,
 }
 
 unsafe extern "C" fn release_context<H>(context: *mut c_void) {
@@ -404,6 +410,75 @@ unsafe extern "C" fn disable_msi<H: Host>(context: *mut c_void) {
     unsafe { state::<H>(context) }.host.disable_msi();
 }
 
+unsafe extern "C" fn enroll<H>(context: *mut c_void, device: *mut c_void) -> c_int {
+    // SAFETY: the attach call retains this State; take ends the mutable borrow
+    // before the generic catalogue can allocate or release any foreign object.
+    let authority = unsafe { state::<H>(context) }.enrollment.take();
+    let Some(authority) = authority else {
+        return -22;
+    };
+    // SAFETY: C initialized this exact device before the first probe; this
+    // canonical process owner still holds the original registration reference.
+    match unsafe { catalogue::bind(device, authority) } {
+        Ok(()) => 0,
+        Err((authority, error)) => {
+            // SAFETY: refusal took no state or authority; no callback overlaps this short restore.
+            unsafe { state::<H>(context) }.enrollment = Some(authority);
+            match error {
+                catalogue::Error::Native(error) => error,
+                _ => -22,
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AttachError {
+    Catalogue(catalogue::Error),
+    Native(Errno),
+}
+static RETAINED_PRESENTATIONS: AtomicU64 = AtomicU64::new(0);
+/// Refused presentation graphs abandoned without native retirement proof.
+/// Observation only: this does not certify reclamation or native progress.
+pub fn retained_presentations() -> u64 {
+    RETAINED_PRESENTATIONS.load(Ordering::Relaxed)
+}
+struct Retained<T> {
+    _value: ManuallyDrop<T>,
+}
+impl<T> Retained<T> {
+    fn new(value: T) -> Self {
+        Self {
+            _value: ManuallyDrop::new(value),
+        }
+    }
+}
+impl<T> Drop for Retained<T> {
+    fn drop(&mut self) {
+        // Presentation refusal is not proof that a caller's native host was
+        // unexposed. Keep the actual allocation and all source/domain roots.
+        let _ = RETAINED_PRESENTATIONS.try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            Some(value.saturating_add(1))
+        });
+    }
+}
+/// The actual host/domain/authority remain retained on a refused presentation.
+/// Drop keeps that graph: no H destructor or native retirement is inferred.
+#[must_use = "presentation refusal retains actual native roots; inspect error and retained state"]
+pub struct Rejected<H> {
+    pub error: AttachError,
+    _held: Retained<Box<Held<H>>>,
+}
+enum Held<H> {
+    Before {
+        _host: H,
+        _authority: Box<PciAuthority>,
+    },
+    Native {
+        _state: Box<State<H>>,
+    },
+}
+
 /// A function Linux can see. Drop unregisters it in the owner it was attached
 /// in. Other C device references retain the host and DMA roots until the final
 /// quiescent put in that owner; other final puts quarantine those resources.
@@ -416,7 +491,8 @@ impl<H: Host> Attached<H> {
     /// # Safety
     /// In an entered Linux owner, on a Linux task, as a driver may bind here.
     /// That owner and its platform services outlive all escaped device
-    /// references, including any quarantined final release.
+    /// references, including any quarantined final release. Refusal returns an
+    /// errno while retaining the host graph; it proves no native retirement.
     pub unsafe fn new(
         host: H,
         domain: Arc<dyn DmaDomain>,
@@ -425,6 +501,77 @@ impl<H: Host> Attached<H> {
     where
         H: 'static,
     {
+        // SAFETY: unchanged legacy presentation contract; no canonical
+        // catalogue authority is inferred for this pre-migration path.
+        unsafe { Self::attach(host, domain, placement, None) }.map_err(|failure| {
+            match failure.error {
+                AttachError::Native(error) => error,
+                _ => -22,
+            }
+        })
+    }
+
+    /// Enroll exact original native source metadata before synchronous probe.
+    ///
+    /// # Safety
+    /// H accesses the exact original OwnedConfig allocation/epoch validated
+    /// when authority was made; its actual native grants stay kept. Its exact
+    /// manifest target/catalogue were qualified for that same observed native
+    /// function/board/source epoch by PciAuthority::new, never guessed labels.
+    /// On this canonical owner's checked Linux task. No borrowed config/entered permit
+    /// is retained in the authority or held across probe/callback/sleep.
+    pub unsafe fn new_catalogued<P: super::owner::Platform, const N: usize>(
+        kernel: &super::kernel::KernelOwner<P, N>,
+        host: H,
+        placement: Placement,
+        authority: PciAuthority,
+    ) -> Result<Self, Rejected<H>>
+    where
+        H: 'static,
+    {
+        // SAFETY: caller is entered; this checks the same actual canonical owner.
+        if unsafe { stela_linux_owner() } != kernel.raw() {
+            return Err(Rejected {
+                error: AttachError::Native(-1),
+                _held: Retained::new(Box::new(Held::Before {
+                    _host: host,
+                    _authority: Box::new(authority),
+                })),
+            });
+        }
+        let domain = match authority.domain() {
+            Ok(domain) => domain,
+            Err(error) => {
+                return Err(Rejected {
+                    error: AttachError::Catalogue(error),
+                    _held: Retained::new(Box::new(Held::Before {
+                        _host: host,
+                        _authority: Box::new(authority),
+                    })),
+                });
+            }
+        };
+        // SAFETY: caller's exact native source and canonical task proof.
+        unsafe {
+            Self::attach(
+                host,
+                domain,
+                placement,
+                Some(Box::new(Authority::Pci(authority))),
+            )
+        }
+    }
+
+    unsafe fn attach(
+        host: H,
+        domain: Arc<dyn DmaDomain>,
+        placement: Placement,
+        enrollment: Option<Box<Authority>>,
+    ) -> Result<Self, Rejected<H>>
+    where
+        H: 'static,
+    {
+        let catalogued = enrollment.is_some();
         let state = Box::into_raw(Box::new(State {
             host,
             mappings: Mappings {
@@ -432,6 +579,7 @@ impl<H: Host> Attached<H> {
                 limit: placement.dma_limit,
                 live: BTreeMap::new(),
             },
+            enrollment,
         }));
         let raw = RawFunction {
             context: state.cast(),
@@ -447,17 +595,25 @@ impl<H: Host> Attached<H> {
             irq: placement.irq,
             regions: placement.regions,
             release_context: Some(release_context::<H>),
+            enroll: catalogued.then_some(enroll::<H>),
         };
-        // SAFETY: the caller's contract; C copies the table.
-        match NonNull::new(unsafe { stela_linux_pci_attach(&raw) }) {
+        let mut error = 0;
+        // SAFETY: caller's attach contract; C copies the table and returns a
+        // reference only after enrollment/publication. Refusal retains State.
+        match NonNull::new(unsafe { stela_linux_pci_attach(&raw, &raw mut error) }) {
             Some(device) => Ok(Self {
                 device,
                 _host: PhantomData,
             }),
             None => {
-                // SAFETY: refused, so Linux never saw it.
-                drop(unsafe { Box::from_raw(state) });
-                Err(ENOMEM)
+                // SAFETY: C refused before publication/probe and explicitly left
+                // context ownership with this caller. Any enrolled record was
+                // retired by its real device put before returning NULL.
+                let state = unsafe { Box::from_raw(state) };
+                Err(Rejected {
+                    error: AttachError::Native(error),
+                    _held: Retained::new(Box::new(Held::Native { _state: state })),
+                })
             }
         }
     }

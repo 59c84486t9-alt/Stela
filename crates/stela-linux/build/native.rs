@@ -290,6 +290,26 @@ impl Linux {
             ("linux_kstrtox", "kstrtox.c", "STELA_LINUX_KSTRTOX_TEST"),
             ("linux_jiffies", "jiffies.c", "STELA_LINUX_JIFFIES_TEST"),
             ("linux_device", "device.c", "STELA_LINUX_DEVICE_TEST"),
+            (
+                "linux_device_catalogue",
+                "catalogue.c",
+                "STELA_LINUX_CATALOGUE_TEST",
+            ),
+            (
+                "linux_device_catalogue_legacy",
+                "catalogue.c",
+                "STELA_LINUX_CATALOGUE_LEGACY_TEST",
+            ),
+            (
+                "linux_device_catalogue_task",
+                "catalogue.c",
+                "STELA_LINUX_CATALOGUE_TASK_TEST",
+            ),
+            (
+                "linux_device_catalogue_workqueue",
+                "catalogue.c",
+                "STELA_LINUX_CATALOGUE_WORKQUEUE_TEST",
+            ),
             ("linux_file", "file.c", "STELA_LINUX_FILE_TEST"),
             ("linux_mapping", "mapping.c", "STELA_LINUX_MAPPING_TEST"),
             ("linux_reclaim", "reclaim.c", "STELA_LINUX_RECLAIM_TEST"),

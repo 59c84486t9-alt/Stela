@@ -67,7 +67,7 @@ pub(crate) use signals::{
     join_shootdown, ring, root_irq_active, shootdown, shootdown_interrupt, sleep_for,
     undelivered_doorbells, wake_interrupt,
 };
-pub use signals::{stray_interrupt, timer_interrupt};
+pub use signals::{spurious_interrupt, stray_interrupt, timer_interrupt};
 #[cfg(feature = "diagnostics")]
 pub(crate) mod fp_diagnostic;
 pub(super) mod local;

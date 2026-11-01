@@ -52,6 +52,19 @@ const LINE: LineRoute = LineRoute {
     polarity: Polarity::High,
     trigger: Trigger::Level,
 };
+/// Source-bound diagnostic admission only; never a NativeServices producer.
+struct FixtureDomain;
+// SAFETY: constructed only inside the previously independently validated
+// single-BSP Q35/TCG SMM-off fixture, retaining its boot-owned root/APIC/IDT
+// and unchanging non-remapped IOAPIC interpretation for this bounded run.
+unsafe impl stela_drivers::bus::irq::posted_msi::NotificationDomain for FixtureDomain {
+    fn check(&self) -> core::result::Result<(), stela_drivers::bus::irq::posted_msi::Error> {
+        super::NativePlatform(())
+            .check_cpu()
+            .map_err(|_| stela_drivers::bus::irq::posted_msi::Error::Context)
+    }
+}
+
 const INTX_DISABLE: u16 = 1 << 10;
 type Io = ioapic::Unit<ioapic::Mmio, super::NativePlatform>;
 
@@ -154,9 +167,17 @@ impl Prepared {
             .map_err(|e| refuse!("IOAPIC mapping: {e}", ?e))?;
         // SAFETY: exact previously checked Q35 single-BSP fixture, kept
         // UC IOAPIC page, EOI broadcast on, no firmware/SMM/other owner.
-        let unit =
-            unsafe { ioapic::Unit::attach(registers, platform, self.unit.id, self.unit.gsi_base) }
-                .map_err(|e| refuse!("IOAPIC attach: {e}", ?e))?;
+        let unit = unsafe {
+            ioapic::Unit::attach(
+                registers,
+                platform,
+                Arc::new(FixtureDomain),
+                super::CONTROLLER.identity(),
+                self.unit.id,
+                self.unit.gsi_base,
+            )
+        }
+        .map_err(|e| refuse!("IOAPIC attach: {e}", ?e))?;
         self.routing
             .owner(LINE, &[(self.unit, unit.pins())])
             .map_err(|e| refuse!("live IOAPIC GSI owner: {e}", ?e))?;
@@ -208,7 +229,11 @@ impl Prepared {
         .map_err(|e| refuse!("IOAPIC line claim: {e}", ?e))?;
         let mut registration = super::service()
             .map_err(|e| refuse!("level service: {e}", ?e))?
-            .request(Box::new(pin), handlers.clone())
+            .request(stela_drivers::bus::irq::Request {
+                source: Box::new(pin),
+                handler: handlers.clone(),
+                routing: stela_drivers::bus::irq::RouteRequest::Line(LINE),
+            })
             .map_err(|e| refuse!("level request: {e}", ?e))?;
         let vector = registration.vector();
         // SAFETY: the level handler group is registered and interrupts are masked again right after
@@ -244,9 +269,17 @@ impl Prepared {
                 handled = ?registration.handled()
             ));
         }
-        registration
+        let retired = registration
             .retire()
             .map_err(|e| refuse!("level retirement: {e}", ?e))?;
+        // SAFETY: exact line retirement succeeded on its owner CPU; source precedes callback.
+        let (source, callback, route) = unsafe { retired.into_parts() }.map_err(|failure| {
+            let error = failure.error;
+            refuse!("line owner context changed: {error}", ?error)
+        })?;
+        drop(source);
+        drop(callback);
+        drop(route);
         let state = unit
             .state(LINE.gsi)
             .map_err(|e| refuse!("retired IOAPIC: {e}", ?e))?;

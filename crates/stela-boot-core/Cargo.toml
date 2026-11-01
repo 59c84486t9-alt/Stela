@@ -39,6 +39,7 @@ stela-runtime = { path = "../stela-runtime" }
 stela-soc-data = { path = "../stela-soc-data" }
 
 [dev-dependencies]
+stela-driver-base = { path = "../stela-driver-base", features = ["test-support"] }
 serde_json.workspace = true
 # An independent SHA-256 the tests check digests against.
 sha2 = { version = "0.10", default-features = false }

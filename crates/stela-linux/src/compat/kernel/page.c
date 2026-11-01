@@ -17,6 +17,7 @@
 #include <linux/sched/task_stack.h>
 #include <stela/linux.h>
 #include <stela/page.h>
+#include <stela/task.h>
 
 #define NO_INDEX SIZE_MAX
 
@@ -138,6 +139,14 @@ static void require_catalog(void)
 	require_context();
 	if (!catalog.pages)
 		__builtin_trap();
+}
+
+int stela_linux_page_owner_context(const struct stela_linux_owner *expected)
+{
+    struct stela_linux_lease lease;
+    stela_linux_lease_snapshot(&lease);
+    return expected && lease.owner == expected && !in_callback &&
+           stela_linux_quiescent() ? 0 : -EPERM;
 }
 
 bool stela_linux_page_request_basic(u32 gfp)
@@ -453,6 +462,49 @@ void stela_linux_page_dma_unpin(void *pin)
         __builtin_trap();
     record->dma_refs--;
     /* Final provider release still happens only at checked quiescence. */
+}
+
+/* This entry is for the actual registered Rust provider Context. Neither a
+ * PFN nor a caller's generation/context labels manufacture an allocation. */
+int stela_linux_page_mapping_pin(u64 generation, const void *context,
+ const struct stela_linux_owner *owner, u64 physical,
+ struct stela_linux_mapping_page *out)
+{
+ if (!out) return -EINVAL;
+ *out=(struct stela_linux_mapping_page){};
+ int error=stela_linux_page_owner_context(owner);
+ if (error) return error;
+ if (!catalog.pages || generation!=catalog.generation || context!=catalog.context ||
+     (physical & (PAGE_SIZE-1))) return -EINVAL;
+ size_t index=physical_slot(physical);
+ if (index==NO_INDEX || !catalog.state[index].live) return -ENOENT;
+ const struct registered_extent *extent=index_extent(index);
+ if (extent->kind!=STELA_LINUX_PAGE_ORDINARY) return -EOPNOTSUPP;
+ struct allocation_record *record=catalog.allocations+catalog.state[index].allocation;
+ if (!record->pin || !record->live || record->external_nonce) return -EOPNOTSUPP;
+ if (record->dma_refs==SIZE_MAX) return -EOVERFLOW;
+ record->dma_refs++;
+ *out=(struct stela_linux_mapping_page){.record=record,.provider_pin=record->pin,
+  .cpu_page=extent->cpu_base+((index-extent->first)<<PAGE_SHIFT)};
+ return 0;
+}
+int stela_linux_page_mapping_unpin(u64 generation, const void *context,
+ const struct stela_linux_owner *owner, void *token)
+{
+ int error=stela_linux_page_owner_context(owner);
+ if (error) return error;
+ if (!catalog.pages || generation!=catalog.generation || context!=catalog.context)
+  return -EINVAL;
+ unsigned long address=(unsigned long)token, base=(unsigned long)catalog.allocations;
+ size_t bytes=catalog.page_count*sizeof(*catalog.allocations);
+ if (address<base || address-base>=bytes || (address-base)%sizeof(*catalog.allocations))
+  return -EINVAL;
+ struct allocation_record *record=token;
+ if (!record->pin || !record->dma_refs || record->external_nonce) return -EINVAL;
+ record->dma_refs--;
+ /* No callback/allocation/recycle here: final provider release stays deferred
+  * to pages_finish after the Rust clone has left its explicit release scope. */
+ return 0;
 }
 
 struct page *pfn_to_page(unsigned long pfn)
@@ -2160,6 +2212,54 @@ static void dma_pins_retain_original_allocations(void)
     stela_linux_pages_finish();
 }
 
+static void mapping_pins_retain_exact_original_allocations(
+ const struct stela_linux_owner *owner)
+{
+ /* Match the actual entered owner so invalid generations/contexts reach
+  * their own validation instead of an earlier foreign-owner refusal. */
+ assert(stela_linux_owner()==owner);
+ struct stela_linux_mapping_page a,b,refused;
+ struct page *page=alloc_pages(GFP_KERNEL,2);
+ assert(page);
+ u64 physical=page_to_phys(page), generation=catalog.generation;
+ static const struct stela_linux_services no_services={};
+ static const struct stela_linux_owner foreign={.services=&no_services};
+ assert(stela_linux_page_mapping_pin(generation+1,&fixture,owner,physical,&refused)==-EINVAL);
+ assert(!refused.record && !refused.provider_pin && !refused.cpu_page);
+ assert(stela_linux_page_mapping_pin(generation,&foreign,owner,physical,&refused)==-EINVAL);
+ assert(stela_linux_page_mapping_pin(generation,&fixture,&foreign,physical,&refused)==-EPERM);
+ assert(stela_linux_page_mapping_pin(generation,&fixture,owner,physical+1,&refused)==-EINVAL);
+ preempt_disable();
+ assert(stela_linux_page_mapping_pin(generation,&fixture,owner,physical,&refused)==-EPERM);
+ preempt_enable();
+ assert(!stela_linux_page_mapping_pin(generation,&fixture,owner,physical,&a));
+ assert(!stela_linux_page_mapping_pin(generation,&fixture,owner,physical+3*PAGE_SIZE,&b));
+ struct allocation_record *record=a.record;
+ assert(b.record==a.record && a.provider_pin==record->pin && b.provider_pin==record->pin);
+ assert(a.cpu_page==page_address(page) && b.cpu_page==(u8 *)page_address(page)+3*PAGE_SIZE);
+ record->dma_refs=SIZE_MAX;
+ assert(stela_linux_page_mapping_pin(generation,&fixture,owner,physical,&refused)==-EOVERFLOW);
+ assert(!refused.record && !refused.provider_pin && !refused.cpu_page);
+ record->dma_refs=2;
+ unsigned int before=fixture.releases;
+ __free_pages(page,2);
+ assert(stela_linux_page_mapping_pin(generation,&fixture,owner,physical,&refused)==-ENOENT);
+ assert(stela_linux_page_catalog_unregister(generation)==-EBUSY);
+ assert(fixture.releases==before && record->dma_refs==2 && record->pin);
+ assert(stela_linux_page_mapping_unpin(generation+1,&fixture,owner,a.record)==-EINVAL);
+ assert(stela_linux_page_mapping_unpin(generation,&foreign,owner,a.record)==-EINVAL);
+ assert(stela_linux_page_mapping_unpin(generation,&fixture,&foreign,a.record)==-EPERM);
+ assert(record->dma_refs==2);
+ assert(!stela_linux_page_mapping_unpin(generation,&fixture,owner,a.record));
+ stela_linux_pages_finish();
+ assert(record->dma_refs==1 && fixture.releases==before);
+ assert(!stela_linux_page_mapping_unpin(generation,&fixture,owner,b.record));
+ assert(stela_linux_page_mapping_unpin(generation,&fixture,owner,b.record)==-EINVAL);
+ assert(fixture.releases==before); /* No inline provider release. */
+ stela_linux_pages_finish();
+ assert(fixture.releases==before+1);
+}
+
 int main(void)
 {
 	reclaimable_policy();
@@ -2208,6 +2308,7 @@ int main(void)
 	sg_chained_allocation();
 	sg_page_segments();
     dma_pins_retain_original_allocations();
+    mapping_pins_retain_exact_original_allocations(&owner);
 	assert(!catalog.live_pages);
 	assert(!stela_linux_page_catalog_unregister(1));
 	assert(stela_linux_page_catalog_register(&reservation, &test_ops, &fixture) == -EINVAL);

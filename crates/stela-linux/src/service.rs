@@ -3,9 +3,9 @@
 //! workqueues and owner run on. All of them share one CPU and take turns, which
 //! is the uniprocessor, non-preemptible execution Linux's code is built for.
 //!
-//! An interrupt only records its line ([`Environment::raise`]); the handlers
+//! An interrupt only records its original epoch ([`IrqEvent::raise`]); the handlers
 //! run on the service task, which sleeps until a line is raised or the next
-//! timer is due (`compat/linux/kernel/service.c`).
+//! timer is due (`compat/kernel/service.c`).
 use super::{
     owner::{RawOwner, WorkerKind},
     task::TaskBinding,
@@ -17,7 +17,7 @@ use core::{
     marker::PhantomPinned,
     pin::Pin,
     ptr::NonNull,
-    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
 };
 use stela_driver_base::platform::work::{
     Callback, Runtime, SwitchBinding, Ticket, WorkError,
@@ -31,6 +31,7 @@ struct Call {
     context: *mut c_void,
     begin: unsafe extern "C" fn(*mut c_void) -> bool,
     next_irq: unsafe extern "C" fn(*mut c_void) -> c_int,
+    complete_irq: unsafe extern "C" fn(*mut c_void),
     drain: unsafe extern "C" fn(*mut c_void),
     finish: unsafe extern "C" fn(*mut c_void, i64),
     done: unsafe extern "C" fn(*mut c_void) -> bool,
@@ -57,23 +58,42 @@ pub unsafe fn sleep_us(minimum: u64) {
 /// Interrupt lines an owner may give Linux.
 pub const LINES: u32 = 256;
 
-/// The lines raised and not yet served.
-struct Lines([AtomicU64; LINES as usize / 64]);
-
-impl Lines {
-    fn raise(&self, line: u32) {
-        self.0[line as usize / 64].fetch_or(1 << (line % 64), Ordering::Release);
+const IRQ_OPEN: u8 = 0;
+const IRQ_CLOSING: u8 = 1;
+const IRQ_JOINED: u8 = 2;
+struct IrqEpoch {
+    line: u32,
+    state: AtomicU8,
+    pending: AtomicBool,
+    active: AtomicUsize,
+}
+/// One original service notification epoch. Native callbacks retain this exact
+/// endpoint instead of rediscovering the current epoch from a numeric line.
+#[derive(Clone)]
+pub struct IrqEvent {
+    epoch: Arc<IrqEpoch>,
+    raised: RaisedWork,
+}
+impl IrqEvent {
+    pub fn raise(&self) -> Result<(), WorkError> {
+        if self.epoch.state.load(Ordering::Acquire) != IRQ_OPEN {
+            return Err(WorkError::Closed);
+        }
+        self.epoch.pending.store(true, Ordering::Release);
+        if self.epoch.state.load(Ordering::Acquire) != IRQ_OPEN {
+            return Err(WorkError::Closed);
+        }
+        self.raised.raise()
     }
-
-    fn take(&self) -> Option<u32> {
-        self.0.iter().zip(0..).find_map(|(word, index)| {
-            let bits = word.load(Ordering::Acquire);
-            (bits != 0).then(|| {
-                let bit = bits.trailing_zeros();
-                word.fetch_and(!(1 << bit), Ordering::AcqRel);
-                index * 64 + bit
-            })
-        })
+    /// Prevent new old-epoch service entries. This alone proves no hardware,
+    /// callback, thread or DMA retirement; those owners must join separately.
+    pub fn begin_close(&self) {
+        let _ = self.epoch.state.compare_exchange(
+            IRQ_OPEN,
+            IRQ_CLOSING,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
     }
 }
 
@@ -119,7 +139,8 @@ pub struct Environment<const N: usize> {
     runtime: NonNull<Runtime<N>>,
     domain: Arc<Domain<N>>,
     raised: RaisedWork,
-    lines: Lines,
+    lines: UnsafeCell<[Option<Arc<IrqEpoch>>; LINES as usize]>,
+    active_irq: UnsafeCell<Option<Arc<IrqEpoch>>>,
     /// The batch the service task is delivering.
     batch: UnsafeCell<Option<Batch>>,
     stopping: AtomicBool,
@@ -153,13 +174,22 @@ impl<const N: usize> Environment<N> {
         if runtime.general_capacity(super::task::stack_requirement()?)? < 5 {
             return Err(WorkError::Unavailable);
         }
+        unsafe extern "C" {
+            fn stela_linux_kernel_environment(owner: *const RawOwner) -> i32;
+        }
+        // SAFETY: caller owns the original resident RawOwner; this only records
+        // cold bootstrap and rejects a second canonical Environment before effects.
+        if unsafe { stela_linux_kernel_environment(owner) } != 0 {
+            return Err(WorkError::Unavailable);
+        }
         runtime.attach_service_domain(domain.clone())?;
         Ok(Box::pin(Self {
             owner,
             runtime: NonNull::from(runtime.get_ref()),
             raised: domain.raised_work()?,
             domain,
-            lines: Lines([const { AtomicU64::new(0) }; LINES as usize / 64]),
+            lines: UnsafeCell::new(core::array::from_fn(|_| None)),
+            active_irq: UnsafeCell::new(None),
             batch: UnsafeCell::new(None),
             stopping: AtomicBool::new(false),
             service_started: AtomicBool::new(false),
@@ -333,12 +363,66 @@ impl<const N: usize> Environment<N> {
         Ok(())
     }
 
-    /// Record that `line`, below [`LINES`], fired. Safe in an interrupt.
-    pub fn raise(&self, line: u32) -> Result<(), WorkError> {
-        self.lines.raise(line);
-        self.raised.raise()
+    /// Create one notification epoch for an original inactive IRQ action.
+    /// # Safety
+    /// Called on the original process CPU; the actual source/entry owner is
+    /// exclusive. A prior epoch was joined, not merely masked or root-fenced.
+    pub unsafe fn irq_epoch(&self, line: u32) -> Result<IrqEvent, WorkError> {
+        self.runtime()
+            .general_capacity(super::task::stack_requirement()?)?;
+        if line >= LINES || self.stopping.load(Ordering::Acquire) {
+            return Err(WorkError::Closed);
+        }
+        // SAFETY: checked original process CPU, no yield/callback in this borrow.
+        let slots = unsafe { &mut *self.lines.get() };
+        if slots[line as usize]
+            .as_ref()
+            .is_some_and(|old| old.state.load(Ordering::Acquire) != IRQ_JOINED)
+        {
+            return Err(WorkError::Busy);
+        }
+        let epoch = Arc::new(IrqEpoch {
+            line,
+            state: AtomicU8::new(IRQ_OPEN),
+            pending: AtomicBool::new(false),
+            active: AtomicUsize::new(0),
+        });
+        slots[line as usize] = Some(epoch.clone());
+        Ok(IrqEvent {
+            epoch,
+            raised: self.raised.clone(),
+        })
     }
-
+    /// Join/cancel old queued primary service only after real native root/CPU
+    /// retirement and C action-thread joining. No entered permit spans a wait.
+    /// # Safety
+    /// This is the original source/event and its producers cannot resume;
+    /// actual source mask/action-close and CPU/inflight/EOI join already completed.
+    /// C primary callbacks cannot sleep; an active callback here would mean
+    /// reentrant free_irq and is refused instead of pretending to wait itself.
+    pub unsafe fn join_irq(&self, event: &IrqEvent) -> Result<(), WorkError> {
+        self.runtime()
+            .general_capacity(super::task::stack_requirement()?)?;
+        // SAFETY: original process CPU, no switch while reading this table.
+        let slots = unsafe { &*self.lines.get() };
+        let epoch = slots
+            .get(event.epoch.line as usize)
+            .and_then(Option::as_ref)
+            .ok_or(WorkError::InvalidTicket)?;
+        if !Arc::ptr_eq(epoch, &event.epoch) {
+            return Err(WorkError::InvalidTicket);
+        }
+        let state = epoch.state.load(Ordering::Acquire);
+        if state != IRQ_CLOSING && state != IRQ_JOINED {
+            return Err(WorkError::Pending);
+        }
+        if epoch.active.load(Ordering::Acquire) != 0 {
+            return Err(WorkError::WouldDeadlock);
+        }
+        epoch.pending.store(false, Ordering::Release);
+        epoch.state.store(IRQ_JOINED, Ordering::Release);
+        Ok(())
+    }
     /// Ask the service task to finish.
     pub fn stop(&self) -> Result<(), WorkError> {
         self.stopping.store(true, Ordering::Release);
@@ -411,7 +495,34 @@ unsafe extern "C" fn begin<const N: usize>(context: *mut c_void) -> bool {
 unsafe extern "C" fn next_irq<const N: usize>(context: *mut c_void) -> c_int {
     // SAFETY: the service call's context.
     let this = unsafe { environment::<N>(context) };
-    this.lines.take().map_or(-1, |line| line as c_int)
+    // SAFETY: this one original service task owns the table cursor/active slot.
+    let active = unsafe { &mut *this.active_irq.get() };
+    assert!(
+        active.is_none(),
+        "previous IRQ service body did not complete"
+    );
+    // SAFETY: same service CPU; process table mutations cannot interleave here.
+    for epoch in unsafe { &*this.lines.get() }.iter().flatten() {
+        if epoch.state.load(Ordering::Acquire) != IRQ_OPEN
+            || !epoch.pending.swap(false, Ordering::AcqRel)
+        {
+            continue;
+        }
+        epoch.active.fetch_add(1, Ordering::AcqRel);
+        *active = Some(epoch.clone());
+        return epoch.line as c_int;
+    }
+    -1
+}
+
+unsafe extern "C" fn complete_irq<const N: usize>(context: *mut c_void) {
+    // SAFETY: this original service call remains entered through primary return.
+    let this = unsafe { environment::<N>(context) };
+    // SAFETY: only the same service task owns this active epoch reference.
+    let epoch = unsafe { &mut *this.active_irq.get() }
+        .take()
+        .expect("active original IRQ service body");
+    assert_eq!(epoch.active.fetch_sub(1, Ordering::AcqRel), 1);
 }
 
 unsafe extern "C" fn drain<const N: usize>(context: *mut c_void) {
@@ -472,6 +583,7 @@ unsafe extern "C" fn service<const N: usize>(context: *mut c_void) {
         context,
         begin: begin::<N>,
         next_irq: next_irq::<N>,
+        complete_irq: complete_irq::<N>,
         drain: drain::<N>,
         finish: finish::<N>,
         done: done::<N>,

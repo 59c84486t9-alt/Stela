@@ -2,6 +2,9 @@
 #ifndef STELA_PAGE_H
 #define STELA_PAGE_H
 #include <linux/types.h>
+struct stela_linux_owner;
+/* Pure current-owner/quiescence check; no entry, callback or ownership change. */
+int stela_linux_page_owner_context(const struct stela_linux_owner *expected);
 
 /* One retained, permanently mapped, contiguous RAM reservation. A generation
  * is nonzero and strictly newer than every successfully registered catalog.
@@ -142,6 +145,14 @@ void stela_linux_pages_finish(void);
  * requires exactly one unpin. Unpin does not invoke the provider or allocate. */
 void *stela_linux_page_dma_pin(u64 physical);
 void stela_linux_page_dma_unpin(void *pin);
+/* Opaque affine allocation ref plus its original provider pin and exact CPU
+ * page. The Rust producer binds the original Context/generation and clones
+ * that Pin's actual PinnedPages before any caller can expose a mapping. */
+struct stela_linux_mapping_page { void *record, *provider_pin, *cpu_page; };
+int stela_linux_page_mapping_pin(u64 generation, const void *context,
+ const struct stela_linux_owner *owner, u64 physical, struct stela_linux_mapping_page *);
+int stela_linux_page_mapping_unpin(u64 generation, const void *context,
+ const struct stela_linux_owner *owner, void *record);
 /* Explicit bounded service diagnostic, not GPU or native-IRQ qualification.
  * Requires quiescent entry; owns and retires only its temporary allocations. */
 int stela_linux_page_catalog_verify(u64 generation);

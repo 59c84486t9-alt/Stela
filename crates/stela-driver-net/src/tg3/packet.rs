@@ -10,7 +10,7 @@ use crate::{
     },
     check_frame,
 };
-use alloc::{boxed::Box, format, sync::Arc, vec::Vec};
+use alloc::{format, sync::Arc, vec::Vec};
 mod memory;
 use super::geometry::Geometry;
 #[cfg(test)]
@@ -34,7 +34,7 @@ pub struct Packet<R: Registers, D: Delay> {
     hardware: Hardware<R, D>,
     memory: Option<Memory>,
     domain: Arc<dyn DmaDomain>,
-    attachment: Option<Box<dyn Attachment>>,
+    attachment: Option<Attachment>,
     mac: Mac,
     board: Option<super::transport::board::Board>,
     carrier_up: bool,
@@ -148,7 +148,7 @@ impl<R: Registers, D: Delay> Packet<R, D> {
     pub unsafe fn attach_bound(
         hardware: Hardware<R, D>,
         pages: &dyn PageSource,
-        attachment: Box<dyn Attachment>,
+        attachment: Attachment,
     ) -> Result<Self, (Error, Self)> {
         // SAFETY: the caller supplies the same original stopped hardware,
         // IRQ/work exclusion and unique attachment. Keep it through all errors.

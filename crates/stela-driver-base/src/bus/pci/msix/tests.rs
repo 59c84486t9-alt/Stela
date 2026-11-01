@@ -551,8 +551,12 @@ mod original {
 }
 
 fn message(index: u16) -> MsiMessage {
+    // Keep the direct-format low word unchanged. A DWORD stride would set
+    // the remappable-format bit for some indices. Distinct high words and
+    // data still exercise every indexed entry's full message readback.
+    // These software wire values grant no native routing permission.
     MsiMessage {
-        address: MESSAGE.address + u64::from(index) * 4,
+        address: MESSAGE.address + (u64::from(index) << 32),
         data: MESSAGE.data ^ (u32::from(index) << 16),
     }
 }
@@ -683,15 +687,53 @@ fn metadata_allocation_failure() {
     let before = m.lock().unwrap().memory.clone();
     let config = m.lock().unwrap().config;
     let events = m.lock().unwrap().events.len();
+    let live = owner.live.0;
+    let control_state = (owner.initialized, owner.open, owner.poisoned);
+    let indexed_message = message(2047);
+    assert!(indexed_message.valid_pci_format());
+    assert_eq!(owner.messages.capacity(), 0);
+    let (emitted, delivered, callback_calls) = {
+        let model = m.lock().unwrap();
+        assert!(model.routes[2047].is_none());
+        (
+            model.emitted.len(),
+            model.delivered_entries.len(),
+            model.routes[0]
+                .as_ref()
+                .unwrap()
+                .calls
+                .load(Ordering::Relaxed),
+        )
+    };
     allocation::arm();
     // SAFETY: Config and Bar keep the same mutex-protected peripheral. Live route
     // callbacks stay held; table writes and message emission run synchronously.
-    let result = unsafe { owner.program_indexed(2047, message(2047)) };
+    let result = unsafe { owner.program_indexed(2047, indexed_message) };
     let attempts = allocation::disarm();
     assert_eq!(result, Err(Error::Allocation));
     assert_eq!(attempts, 1);
     assert!(owner.messages.is_empty() && owner.message == Some(MESSAGE) && owner.live.contains(0));
     assert!(!owner.needs_reset());
+    assert_eq!(owner.messages.capacity(), 0);
+    assert_eq!(owner.live.0, live);
+    assert_eq!(
+        (owner.initialized, owner.open, owner.poisoned),
+        control_state
+    );
+    {
+        let model = m.lock().unwrap();
+        assert!(model.routes[2047].is_none());
+        assert_eq!(model.emitted.len(), emitted);
+        assert_eq!(model.delivered_entries.len(), delivered);
+        assert_eq!(
+            model.routes[0]
+                .as_ref()
+                .unwrap()
+                .calls
+                .load(Ordering::Relaxed),
+            callback_calls
+        );
+    }
     assert_eq!(m.lock().unwrap().events.len(), events);
     assert_eq!(m.lock().unwrap().memory, before);
     assert_eq!(m.lock().unwrap().config, config);
@@ -740,3 +782,59 @@ mod legacy;
 mod mapped;
 
 mod indexed;
+
+#[test]
+fn remapped_index_format_preserves_entry_masks_and_full_readback() {
+    for index in [0u64, 1, 0x7fff, 0x8000, 0xffff] {
+        let (mut helper, model) = attach(fixture(4));
+        let message = MsiMessage {
+            address: 0xfee0_0010 | (index & 0x7fff) << 5 | (index >> 15) << 2,
+            data: 0,
+        };
+        // SAFETY: exact isolated RAM table/source fixture, no native route grant.
+        unsafe { helper.program_indexed(2, message) }.unwrap();
+        let m = model.lock().unwrap();
+        assert_eq!(
+            m.memory[((TABLE + 32) / 4) as usize],
+            message.address as u32
+        );
+        assert_eq!(m.memory[((TABLE + 36) / 4) as usize], 0);
+        assert_eq!(m.memory[((TABLE + 40) / 4) as usize], 0);
+        assert_ne!(m.memory[((TABLE + 44) / 4) as usize] & 1, 0);
+        drop(m);
+        // SAFETY: original synchronous peer has no pending callback or payload.
+        drop(unsafe { helper.release() }.unwrap());
+    }
+}
+
+#[test]
+fn remapped_msix_address_readback_failure_quarantines_original_owners() {
+    let message = MsiMessage {
+        address: 0xfeef_fff4,
+        data: 0,
+    };
+    let (mut successful, trace) = attach(fixture(4));
+    // SAFETY: exact isolated RAM source/table owner.
+    unsafe { successful.program_indexed(2, message) }.unwrap();
+    let readback = trace
+        .lock()
+        .unwrap()
+        .events
+        .iter()
+        .rposition(|e| *e == Event::BarRead(TABLE + 32))
+        .unwrap()
+        + 1;
+    // SAFETY: synchronous model has no asynchronous users.
+    drop(unsafe { successful.release() }.unwrap());
+    let (mut helper, peer) = attach(fixture(4));
+    peer.lock().unwrap().fail = Some(readback);
+    // SAFETY: independent peer refuses the real post-store address readback.
+    assert!(unsafe { helper.program_indexed(2, message) }.is_err());
+    assert_eq!(
+        peer.lock().unwrap().events[readback - 1],
+        Event::BarRead(TABLE + 32)
+    );
+    // SAFETY: isolated peer has no asynchronous users; uncertain readback must
+    // retain the original owners rather than permit a successful release.
+    assert!(unsafe { helper.release() }.is_err());
+}

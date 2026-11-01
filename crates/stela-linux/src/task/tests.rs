@@ -1168,6 +1168,9 @@ fn timer_service_roundtrip() {
 struct Machine {
     start: core::cell::OnceCell<std::time::Instant>,
     environment: AtomicPtr<Environment<16>>,
+    irq: Mutex<Option<crate::service::IrqEvent>>,
+    retired_irq: Mutex<Option<crate::service::IrqEvent>>,
+    irq_masked: AtomicBool,
 }
 
 impl Machine {
@@ -1223,12 +1226,34 @@ impl Platform for Machine {
     unsafe fn unmap_pages(&self, _: *mut c_void, _: usize) {
         unreachable!();
     }
-    fn irq_enable(&self, irq: u32) -> Result<(), Errno> {
+    fn irq_enable(&self, irq: u32) -> Result<(), crate::owner::IrqEnableError> {
         assert_eq!(irq, 7);
+        if self.irq.lock().unwrap().is_none() {
+            // SAFETY: exact synchronous software-only fixture source, with no
+            // hardware, root route or alternate native producer.
+            let event = unsafe { self.environment().irq_epoch(irq) }.unwrap();
+            if let Some(old) = self.retired_irq.lock().unwrap().as_ref() {
+                assert_eq!(old.raise(), Err(WorkError::Closed));
+            }
+            *self.irq.lock().unwrap() = Some(event);
+        }
+        self.irq_masked.store(false, Ordering::Release);
         Ok(())
     }
-    fn irq_disable(&self, irq: u32) {
+    fn irq_disable(&self, irq: u32) -> Result<(), Errno> {
         assert_eq!(irq, 7);
+        self.irq_masked.store(true, Ordering::Release);
+        Ok(())
+    }
+    fn irq_retire(&self, irq: u32) -> Result<(), Errno> {
+        assert_eq!(irq, 7);
+        let event = self.irq.lock().unwrap().take().unwrap();
+        event.begin_close();
+        // SAFETY: this fixture has no hardware route and its only synchronous
+        // software raiser is this owner task; C already joined actual IRQ work.
+        unsafe { self.environment().join_irq(&event) }.unwrap();
+        *self.retired_irq.lock().unwrap() = Some(event);
+        Ok(())
     }
     unsafe fn copy_from_user(&self, _: *mut u8, _: *const u8, _: usize) -> usize {
         unreachable!();
@@ -1249,12 +1274,23 @@ struct EnvironmentTest {
     owner: *const RawOwner,
     context: *mut c_void,
     raise: unsafe extern "C" fn(*mut c_void, u32),
+    masked: unsafe extern "C" fn(*mut c_void, u32) -> bool,
 }
 
 unsafe extern "C" fn raise_line(context: *mut c_void, line: u32) {
     // SAFETY: the test's machine, alive through the task.
     let machine = unsafe { &*context.cast::<Machine>() };
-    machine.environment().raise(line).unwrap();
+    assert_eq!(line, 7);
+    assert!(!machine.irq_masked.load(Ordering::Acquire));
+    let event = machine.irq.lock().unwrap().as_ref().unwrap().clone();
+    event.raise().unwrap();
+}
+
+unsafe extern "C" fn line_masked(context: *mut c_void, line: u32) -> bool {
+    // SAFETY: exact retained synchronous controller peer of this fixture.
+    let machine = unsafe { &*context.cast::<Machine>() };
+    assert_eq!(line, 7);
+    machine.irq_masked.load(Ordering::Acquire)
 }
 
 struct ServicePressure {
@@ -1326,6 +1362,7 @@ fn environment_roundtrip() {
         owner: owner.raw(),
         context: ptr::from_ref(owner.platform()).cast_mut().cast(),
         raise: raise_line,
+        masked: line_masked,
     };
     // SAFETY: the body enters and leaves the owner, and `test` outlives it.
     let task = unsafe {
@@ -2076,4 +2113,64 @@ fn mutex_quarantine_child() {
     drop(executor);
     assert_eq!(dropped.load(Ordering::Relaxed), 4);
     assert_eq!(quarantined(), 2);
+}
+
+/// Run a non-returning terminal C fixture on an actual hosted Runtime stack and
+/// TaskBinding. Reuses the same guarded stacks and checked CPU as the task tests.
+/// # Safety
+/// Keep owner/body/context and all source/dev_id products live on the caller's
+/// suspended frame. The body must terminate the isolated subprocess, never
+/// unwind, return, escape its scoped task loan or install a native IRQ producer.
+pub(crate) unsafe fn terminal_foreground(
+    owner: *const RawOwner,
+    body: unsafe extern "C" fn(*mut c_void),
+    context: *mut c_void,
+) -> ! {
+    struct Call {
+        fixture: Arc<Fixture>,
+        owner: *const RawOwner,
+        body: unsafe extern "C" fn(*mut c_void),
+        context: *mut c_void,
+    }
+    unsafe extern "C" fn entered(context: *mut c_void) {
+        // SAFETY: the outer helper retains this exact stack-local Call and its
+        // actual owner/source roots throughout this non-returning task scope.
+        let call = unsafe { &*context.cast::<Call>() };
+        // SAFETY: run_scoped already installed this Runtime's real task/current;
+        // the original caller retains the SAME owner through fatal reporting.
+        let _owner = unsafe { crate::owner::Entered::new(call.owner) };
+        // SAFETY: caller's retained body/context and non-return/no-unwind contract.
+        unsafe { (call.body)(call.context) };
+        std::process::exit(98); // a fixture return is never a successful trap
+    }
+    unsafe extern "C" fn foreground(context: *mut c_void) {
+        // SAFETY: helper retains Call and Queue's actual fixture through this job.
+        let call = unsafe { &*context.cast::<Call>() };
+        let binding = call.fixture.binding(0);
+        // SAFETY: pinned executor/guarded stack, original fixture and body live
+        // through this actual scoped continuation; no owner is entered outside it.
+        unsafe { binding.run_scoped(call.fixture.runtime(), entered, context) }.unwrap();
+    }
+    let cpu = CpuModel::new();
+    let fixture = Fixture::new(cpu.clone());
+    // SAFETY: this isolated thread owns the Queue and keeps its original fixture.
+    let queue = unsafe { Queue::<16>::new(cpu, fixture.clone()) }.unwrap();
+    let dropped = Arc::new(AtomicU64::new(0));
+    let executor =
+        Executor::new_hosted_for_test(queue, stacks_count(&dropped, 16 * 1024, 4)).unwrap();
+    let runtime = executor.runtime();
+    fixture.runtime.store(
+        runtime.get_ref() as *const Runtime<16> as *mut Runtime<16>,
+        Ordering::Release,
+    );
+    let mut call = Call {
+        fixture,
+        owner,
+        body,
+        context,
+    };
+    // SAFETY: the caller retains every borrowed source/owner/dev_id through the
+    // actual switched foreground stack. The bound body terminates this process.
+    unsafe { runtime.call_foreground(foreground, (&raw mut call).cast(), 10000) }.unwrap();
+    std::process::exit(98);
 }

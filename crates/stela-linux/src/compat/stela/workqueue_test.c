@@ -2,6 +2,7 @@
 /* Linux's workqueues on the existing fixture's real Runtime tasks: the owner
  * starts each requested worker as a General job. */
 #include <linux/interrupt.h>
+#include <linux/errno.h>
 #include <linux/err.h>
 #include <linux/kthread.h>
 #include <linux/reboot.h>
@@ -85,20 +86,44 @@ static void shutdown(void *context, bool force)
 }
 
 static unsigned int line_enables, line_disables;
+static bool enable_notify, enable_refuse;
+static unsigned int enable_primary_calls;
 
-static int irq_enable(void *context, unsigned int irq)
+static int irq_enable(void *context, unsigned int irq, bool *unexposed)
 {
 	(void)context;
 	assert(irq == 7);
+	*unexposed = false;
+	if (enable_refuse) {
+		/* Actual bounded software peer: no route/event/callback was issued. */
+		*unexposed = true;
+		return -ENOSYS;
+	}
 	line_enables++;
+	if (enable_notify)
+		stela_linux_irq_run(irq);
 	return 0;
 }
 
-static void irq_disable(void *context, unsigned int irq)
+static irqreturn_t initial_enable_handler(int irq, void *dev_id)
+{
+	assert(irq == 7 && dev_id == &enable_primary_calls && in_hardirq());
+	enable_primary_calls++;
+	return IRQ_HANDLED;
+}
+
+static int irq_disable(void *context, unsigned int irq)
 {
 	(void)context;
 	assert(irq == 7);
 	line_disables++;
+	return 0;
+}
+static int irq_retire(void *context, unsigned int irq)
+{
+	(void)context;
+	assert(irq == 7 && stela_linux_irq_actions_joined(irq));
+	return 0;
 }
 
 static const struct stela_linux_services services = {
@@ -107,6 +132,7 @@ static const struct stela_linux_services services = {
 	.shutdown = shutdown,
 	.irq_enable = irq_enable,
 	.irq_disable = irq_disable,
+	.irq_retire = irq_retire,
 };
 static const struct stela_linux_owner owner = {.services = &services};
 
@@ -294,6 +320,20 @@ void stela_linux_workqueue_test_main(void *context)
 	assert(forced);
 
 	/* Two sharers: the oneshot's thread keeps the line masked until it ends. */
+	/* A truly unexposed refusal removes only this initialized action; retry
+	 * proves there is no phantom list member. The next native enable delivers
+	 * synchronously while request_irq still holds its request mutex. */
+	enable_refuse = true;
+	assert(request_irq(7, initial_enable_handler, 0, "initial-refused", &enable_primary_calls) == -ENOSYS);
+	assert(!enable_primary_calls && !line_enables);
+	enable_refuse = false;
+	enable_notify = true;
+	assert(!request_irq(7, initial_enable_handler, 0, "initial-visible", &enable_primary_calls));
+	assert(enable_primary_calls == 1);
+	enable_notify = false;
+	free_irq(7, &enable_primary_calls);
+	line_enables = line_disables = 0;
+
 	assert(!request_threaded_irq(7, hard_handler, thread_handler,
 				     IRQF_SHARED | IRQF_ONESHOT, "threaded", &hard_runs));
 	assert(line_enables == 1);

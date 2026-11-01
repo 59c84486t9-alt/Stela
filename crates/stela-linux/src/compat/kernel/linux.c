@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 /* The execution Stela gives Linux code: one owner at a time, on one context
  * that nothing preempts or interrupts. */
+#include <stela/catalogue.h>
 #include <linux/bug.h>
 #include <linux/irqflags.h>
 #include <linux/panic.h>
@@ -81,7 +82,7 @@ bool stela_linux_lease_resume(const struct stela_linux_lease *lease)
 
 bool stela_linux_try_enter(const struct stela_linux_owner *next)
 {
-	if (!next || !next->services)
+	if (!next || !next->services || stela_linux_kernel_entry(next))
 		__builtin_trap();
 	bool expected = false;
 	if (!__atomic_compare_exchange_n(&running, &expected, true, false,

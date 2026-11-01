@@ -35,6 +35,36 @@ impl TryFrom<u32> for WorkerKind {
 /// A negative Linux errno.
 pub type Errno = i32;
 
+/// IRQ enable failure with an explicit original no-publication proof.
+/// Retained is the safe default: errno alone never classifies hardware effects.
+#[derive(Debug, Eq, PartialEq)]
+pub struct IrqEnableError {
+    errno: Errno,
+    unexposed: bool,
+}
+impl IrqEnableError {
+    pub const fn retained(errno: Errno) -> Self {
+        Self {
+            errno,
+            unexposed: false,
+        }
+    }
+    /// # Safety
+    /// This exact original attempt published no native route/callback producer
+    /// able to reach the already-linked new C action. Actual returned native
+    /// owners were canceled in their original context; any issued service
+    /// epoch was closed/joined. A status code or cleared bit proves none of this.
+    pub unsafe fn unexposed(errno: Errno) -> Self {
+        Self {
+            errno,
+            unexposed: true,
+        }
+    }
+    pub const fn errno(self) -> Errno {
+        self.errno
+    }
+}
+
 /// What Linux code needs of the machine it runs on. Each method's contract is
 /// its entry in `stela_linux_services`.
 pub trait Platform {
@@ -70,9 +100,14 @@ pub trait Platform {
     /// uses it any more.
     unsafe fn unmap_pages(&self, address: *mut c_void, count: usize);
     /// Route `irq` to the service, which calls `stela_linux_irq_run`.
-    fn irq_enable(&self, irq: u32) -> Result<(), Errno>;
-    /// Mask `irq`, returning once no new firing can reach the service.
-    fn irq_disable(&self, irq: u32);
+    fn irq_enable(&self, irq: u32) -> Result<(), IrqEnableError>;
+    /// Reversibly mask this source. Old queued delivery may still reach its
+    /// retained service epoch; this grants no action/endpoint retirement.
+    fn irq_disable(&self, irq: u32) -> Result<(), Errno>;
+    /// Retire the exact action after the C registry joined its action threads.
+    /// Return only after root/CPU and actual service-epoch joining; errors
+    /// retain every owner and C must not return/reclaim its request or dev_id.
+    fn irq_retire(&self, irq: u32) -> Result<(), Errno>;
     /// # Safety
     /// `to` is writable for `size` bytes; `from` is an address in the running
     /// client. Returns the bytes left uncopied at a fault.
@@ -103,15 +138,16 @@ struct Services {
     unmap_device: unsafe extern "C" fn(*mut c_void, *mut c_void),
     map_pages: unsafe extern "C" fn(*mut c_void, *const u64, usize) -> *mut c_void,
     unmap_pages: unsafe extern "C" fn(*mut c_void, *mut c_void, usize),
-    irq_enable: unsafe extern "C" fn(*mut c_void, c_uint) -> c_int,
-    irq_disable: unsafe extern "C" fn(*mut c_void, c_uint),
+    irq_enable: unsafe extern "C" fn(*mut c_void, c_uint, *mut bool) -> c_int,
+    irq_disable: unsafe extern "C" fn(*mut c_void, c_uint) -> c_int,
+    irq_retire: unsafe extern "C" fn(*mut c_void, c_uint) -> c_int,
     copy_from_user: unsafe extern "C" fn(*mut c_void, *mut c_void, *const c_void, u64) -> u64,
     copy_to_user: unsafe extern "C" fn(*mut c_void, *mut c_void, *const c_void, u64) -> u64,
     map_user: unsafe extern "C" fn(*mut c_void, *mut c_void, u64, u64, u64) -> c_int,
     unmap_user: unsafe extern "C" fn(*mut c_void, *mut c_void, u64, usize),
 }
 
-const _: () = assert!(size_of::<Services>() == 152);
+const _: () = assert!(size_of::<Services>() == 160);
 
 /// `struct stela_linux_owner`.
 #[repr(C)]
@@ -273,14 +309,35 @@ mod trampolines {
         unsafe { platform::<P>(context).unmap_pages(address, count) };
     }
 
-    pub unsafe extern "C" fn irq_enable<P: Platform>(context: *mut c_void, irq: c_uint) -> c_int {
-        // SAFETY: see the module.
-        status(unsafe { platform::<P>(context) }.irq_enable(irq))
+    pub unsafe extern "C" fn irq_enable<P: Platform>(
+        context: *mut c_void,
+        irq: c_uint,
+        unexposed: *mut bool,
+    ) -> c_int {
+        if unexposed.is_null() {
+            return -22;
+        }
+        // SAFETY: C supplies this writable result for the immediate call. It
+        // starts conservative even if a later native callback aborts/panics.
+        unsafe { unexposed.write(false) };
+        // SAFETY: original entered owner and its classified native attempt.
+        match unsafe { platform::<P>(context) }.irq_enable(irq) {
+            Ok(()) => 0,
+            Err(error) => {
+                // SAFETY: the same immediate writable C result checked above.
+                unsafe { unexposed.write(error.unexposed) };
+                error.errno
+            }
+        }
     }
 
-    pub unsafe extern "C" fn irq_disable<P: Platform>(context: *mut c_void, irq: c_uint) {
+    pub unsafe extern "C" fn irq_disable<P: Platform>(context: *mut c_void, irq: c_uint) -> c_int {
         // SAFETY: see the module.
-        unsafe { platform::<P>(context) }.irq_disable(irq);
+        status(unsafe { platform::<P>(context) }.irq_disable(irq))
+    }
+    pub unsafe extern "C" fn irq_retire<P: Platform>(context: *mut c_void, irq: c_uint) -> c_int {
+        // SAFETY: same exact entered owner's C registry/action join contract.
+        status(unsafe { platform::<P>(context) }.irq_retire(irq))
     }
 
     pub unsafe extern "C" fn copy_from_user<P: Platform>(
@@ -384,6 +441,7 @@ impl<P: Platform> Owner<P> {
                 unmap_pages: t::unmap_pages::<P>,
                 irq_enable: t::irq_enable::<P>,
                 irq_disable: t::irq_disable::<P>,
+                irq_retire: t::irq_retire::<P>,
                 copy_from_user: t::copy_from_user::<P>,
                 copy_to_user: t::copy_to_user::<P>,
                 map_user: t::map_user::<P>,
@@ -488,11 +546,21 @@ mod tests {
         unsafe fn unmap_pages(&self, address: *mut c_void, count: usize) {
             self.note(std::format!("unmap pages {:#x} {count}", address as usize));
         }
-        fn irq_enable(&self, irq: u32) -> Result<(), Errno> {
-            if irq == 0 { Err(-22) } else { Ok(()) }
+        fn irq_enable(&self, irq: u32) -> Result<(), IrqEnableError> {
+            if irq == 0 {
+                // SAFETY: this exact model refused before every effect.
+                Err(unsafe { IrqEnableError::unexposed(-22) })
+            } else {
+                Ok(())
+            }
         }
-        fn irq_disable(&self, irq: u32) {
+        fn irq_disable(&self, irq: u32) -> Result<(), Errno> {
             self.note(std::format!("irq off {irq}"));
+            Ok(())
+        }
+        fn irq_retire(&self, irq: u32) -> Result<(), Errno> {
+            self.note(std::format!("irq retire {irq}"));
+            Ok(())
         }
         unsafe fn copy_from_user(&self, to: *mut u8, from: *const u8, size: usize) -> usize {
             // SAFETY: the tests pass valid buffers.
@@ -556,9 +624,12 @@ mod tests {
             assert_eq!(pages as usize, 0x2000);
             (s.unmap_pages)(context, pages, 2);
 
-            assert_eq!((s.irq_enable)(context, 0), -22);
-            assert_eq!((s.irq_enable)(context, 5), 0);
-            (s.irq_disable)(context, 5);
+            let mut unexposed = false;
+            assert_eq!((s.irq_enable)(context, 0, &mut unexposed), -22);
+            assert!(unexposed);
+            assert_eq!((s.irq_enable)(context, 5, &mut unexposed), 0);
+            assert!(!unexposed);
+            assert_eq!((s.irq_disable)(context, 5), 0);
 
             let source = [1u8, 2];
             let mut target = [0u8; 2];

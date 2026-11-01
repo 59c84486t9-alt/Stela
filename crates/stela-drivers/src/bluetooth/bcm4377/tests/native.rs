@@ -23,7 +23,7 @@ use crate::bluetooth::bcm4377::native::{
 };
 use crate::bus::{
     dma::{memory::PageSource, pages::DmaPages},
-    irq::{self, Registry, posted_msi::MsiCompletion},
+    irq::{self, Registry},
     mmio::owned::{
         self, AddressSpace, Authority, InstalledMapping, MapFailure, MapRequest, Mapping,
         MappingPlatform, PhysicalSpan, Protection, Resource as MmioResource, ResourceBacking,
@@ -56,6 +56,7 @@ enum Event {
     PageSourceDrop,
     MsiBind,
     MsiDrain,
+    MsiPinRelease,
     CpuPending,
     Eoi,
     BarUnmap,
@@ -72,6 +73,10 @@ struct State {
     fail_cpu: AtomicBool,
     fail_payload: AtomicBool,
     fail_msi: AtomicBool,
+    delivery_available: AtomicBool,
+    ownership_epoch: AtomicU64,
+    root_generation: AtomicU64,
+    owner_thread: std::thread::ThreadId,
     fail_enable_ack: AtomicBool,
     fail_master_ack: AtomicBool,
     panic_master: AtomicBool,
@@ -104,6 +109,10 @@ impl State {
             fail_cpu: AtomicBool::new(false),
             fail_payload: AtomicBool::new(false),
             fail_msi: AtomicBool::new(false),
+            delivery_available: AtomicBool::new(false),
+            ownership_epoch: AtomicU64::new(1),
+            root_generation: AtomicU64::new(1),
+            owner_thread: std::thread::current().id(),
             fail_enable_ack: AtomicBool::new(false),
             fail_master_ack: AtomicBool::new(false),
             panic_master: AtomicBool::new(false),
@@ -379,24 +388,58 @@ impl Drop for AttachmentModel {
 }
 // SAFETY: one original config seal pins this independent domain generation;
 // detach refuses mappings and releases that pin only after modeled blocking.
-unsafe impl crate::bus::pci::requester::preparation::Attachment for AttachmentModel {
+unsafe impl crate::bus::pci::requester::preparation::AttachmentBackend for AttachmentModel {
     fn domain(&self) -> Arc<dyn DmaDomain> {
         self.domain.clone()
     }
-    unsafe fn detach(&mut self) -> core::result::Result<(), DmaError> {
+    fn irq_owner(
+        &mut self,
+        _requester: &crate::bus::pci::requester::RequesterId,
+        _config: Option<&crate::bus::pci::owned::ConfigRetention>,
+    ) -> core::result::Result<Option<Box<dyn irq::posted_msi::RouteOwner>>, DmaError> {
+        if !self.domain.state.delivery_available.load(Ordering::Relaxed) {
+            return Ok(None);
+        }
+        let pin = self
+            .retention
+            .as_ref()
+            .ok_or(DmaError::Unmapped)?
+            .retain_epoch()
+            .map_err(|_| DmaError::MappingFailed)?;
+        Ok(Some(Box::new(Delivery {
+            state: self.domain.state.clone(),
+            pin: Some(pin),
+            epoch: self.domain.state.ownership_epoch.load(Ordering::Relaxed),
+            root_generation: self.domain.state.root_generation.load(Ordering::Relaxed),
+            allocated: false,
+        })))
+    }
+    unsafe fn detach(
+        &mut self,
+    ) -> core::result::Result<(), crate::bus::pci::requester::preparation::DetachError> {
         if self.retention.is_none() {
             return Ok(());
         }
         if !self.domain.domain.0.lock().unwrap().leases.is_empty() {
-            return Err(DmaError::MappingFailed);
+            return Err(
+                crate::bus::pci::requester::preparation::DetachError::Unexposed(
+                    DmaError::MappingFailed,
+                ),
+            );
         }
         self.domain.state.event(Event::Detach);
         assert!(
             !self.domain.state.panic_detach.load(Ordering::Relaxed),
             "injected detach unwind"
         );
+        // Audited model-only refusal: the event log is observational; no
+        // binding, table, pin or device effect has occurred before this flag.
         if self.domain.state.fail_detach.load(Ordering::Relaxed) {
-            return Err(DmaError::DrainUnavailable);
+            return Err(
+                crate::bus::pci::requester::preparation::DetachError::Unexposed(
+                    DmaError::DrainUnavailable,
+                ),
+            );
         }
         self.domain.state.bound.store(false, Ordering::Relaxed);
         self.retention.take();
@@ -453,12 +496,20 @@ unsafe impl host::cold::Preparation for PreparingModel {
         let (function, domain, old_retention) =
             unsafe { core::mem::ManuallyDrop::take(&mut self.owner) };
         drop(old_retention);
+        let wrapper_pin = retention.retain_epoch().unwrap();
         Ok(host::cold::Finalized {
             function,
-            attachment: Box::new(AttachmentModel {
-                domain,
-                retention: Some(retention),
-            }),
+            // SAFETY: same original model configuration/root binding; wrapper
+            // checks its own live pin through the actual backend detach.
+            attachment: unsafe {
+                crate::bus::pci::requester::preparation::Attachment::new(
+                    Box::new(AttachmentModel {
+                        domain,
+                        retention: Some(retention),
+                    }),
+                    wrapper_pin,
+                )
+            },
         })
     }
 }
@@ -503,39 +554,139 @@ impl PageSource for PageModel {
         )
     }
 }
-struct Delivery(Arc<State>);
-// SAFETY: independent route model; payload and MSI completion are
-// separate events, with independent injected failures and kept ownership.
-unsafe impl irq::posted_msi::DeliveryOwner for Delivery {
-    fn bind_route(
+struct DeliveryDomain {
+    state: Arc<State>,
+    pin: ConfigRetention,
+    epoch: u64,
+    root_generation: u64,
+}
+// SAFETY: this exact bounded source holds the actual original config view;
+// model root/owner generations are distinct and no native grant is created.
+unsafe impl irq::posted_msi::NotificationDomain for DeliveryDomain {
+    fn check(&self) -> core::result::Result<(), irq::posted_msi::Error> {
+        if self.state.fail_msi.load(Ordering::Acquire) {
+            return Err(irq::posted_msi::Error::RootFailed);
+        }
+        if self.state.owner_thread != std::thread::current().id()
+            || self.state.root_generation.load(Ordering::Acquire) != self.root_generation
+            || self.state.ownership_epoch.load(Ordering::Acquire) != self.epoch
+            || self.state.dead.load(Ordering::Acquire)
+        {
+            return Err(irq::posted_msi::Error::Context);
+        }
+        self.pin
+            .check_live()
+            .map_err(|_| irq::posted_msi::Error::Context)
+    }
+}
+struct Delivery {
+    state: Arc<State>,
+    pin: Option<ConfigRetention>,
+    epoch: u64,
+    root_generation: u64,
+    allocated: bool,
+}
+// SAFETY: exact original RAM config/root model and real retained mapping pin.
+// Independent payload/MSI/CPU controls remain separate; the same attachment
+// must actually detach before this source pin is explicitly released.
+unsafe impl irq::posted_msi::RouteOwner for Delivery {
+    fn allocate(
         &mut self,
-        message: irq::MsiMessage,
-    ) -> core::result::Result<(), irq::posted_msi::Error> {
+        target: &irq::CpuTarget<'_>,
+    ) -> core::result::Result<irq::MsiMessage, irq::posted_msi::AllocationError> {
+        target.check_current().map_err(|_| {
+            irq::posted_msi::AllocationError::Unexposed(irq::posted_msi::Error::Context)
+        })?;
+        self.validate()
+            .map_err(irq::posted_msi::AllocationError::Unexposed)?;
+        assert!(!self.allocated);
+        self.allocated = true;
+        let target = target.descriptor();
+        let message = irq::MsiMessage {
+            address: 0xfee0_0000 | u64::from(target.destination) << 12,
+            data: u32::from(target.vector),
+        };
         assert_eq!(message.address, 0xfee0_0000);
         assert_eq!(
             message.data,
-            u32::from(self.0.vector.load(Ordering::Relaxed))
+            u32::from(self.state.vector.load(Ordering::Relaxed))
         );
-        self.0.event(Event::MsiBind);
+        self.state.event(Event::MsiBind);
+        Ok(message)
+    }
+    fn validate(&self) -> core::result::Result<(), irq::posted_msi::Error> {
+        if self.state.owner_thread != std::thread::current().id()
+            || self.state.root_generation.load(Ordering::Acquire) != self.root_generation
+        {
+            return Err(irq::posted_msi::Error::Context);
+        }
+        if let Some(pin) = &self.pin {
+            // Source/config identity is checked while that exact pin exists.
+            // Terminal observation never touches a released/reprobed endpoint.
+            if self.state.ownership_epoch.load(Ordering::Acquire) != self.epoch
+                || self.state.dead.load(Ordering::Acquire)
+            {
+                return Err(irq::posted_msi::Error::Context);
+            }
+            pin.check_live()
+                .map_err(|_| irq::posted_msi::Error::Context)?;
+        }
         Ok(())
     }
-    unsafe fn drain_posted_msi(&self) -> core::result::Result<(), irq::posted_msi::Error> {
-        self.0.event(Event::MsiDrain);
+    fn notification_domain(
+        &self,
+    ) -> core::result::Result<Arc<dyn irq::posted_msi::NotificationDomain>, irq::posted_msi::Error>
+    {
+        self.validate()?;
+        let pin = self
+            .pin
+            .as_ref()
+            .ok_or(irq::posted_msi::Error::Unbound)?
+            .retain_epoch()
+            .map_err(|_| irq::posted_msi::Error::Context)?;
+        Ok(Arc::new(DeliveryDomain {
+            state: self.state.clone(),
+            pin,
+            epoch: self.epoch,
+            root_generation: self.root_generation,
+        }))
+    }
+    unsafe fn strong_fence(&mut self) -> core::result::Result<(), irq::posted_msi::Error> {
+        self.validate()?;
+        self.state.event(Event::MsiDrain);
         assert_eq!(
-            self.0.events.lock().unwrap().iter().rev().nth(1),
+            self.state.events.lock().unwrap().iter().rev().nth(1),
             Some(&Event::PayloadDrain)
         );
-        if self.0.fail_msi.load(Ordering::Relaxed) {
+        if self.state.fail_msi.load(Ordering::Relaxed) {
             return Err(irq::posted_msi::Error::RootFailed);
         }
         Ok(())
     }
+    unsafe fn release_endpoint(
+        &mut self,
+        proof: &irq::posted_msi::EndpointRetirement<'_>,
+    ) -> core::result::Result<(), irq::posted_msi::Error> {
+        self.validate()?;
+        assert!(proof.requester().is_some());
+        assert!(!self.state.bound.load(Ordering::Relaxed));
+        self.state.event(Event::MsiPinRelease);
+        self.pin.take();
+        Ok(())
+    }
 }
+
 struct Cpu(Arc<State>);
 // SAFETY: explicit same-CPU APIC delivery model, Registry controls slots.
 unsafe impl irq::Platform for Cpu {
     fn check_cpu(&self) -> core::result::Result<(), irq::IrqError> {
+        if self.0.owner_thread != std::thread::current().id() {
+            return Err(irq::IrqError::WrongCpu);
+        }
         Ok(())
+    }
+    fn check_process(&self) -> core::result::Result<(), crate::bus::irq::IrqError> {
+        self.check_cpu()
     }
     fn save_and_disable(&self) -> u64 {
         0
@@ -552,9 +703,13 @@ unsafe impl irq::Platform for Cpu {
         self.0.event(Event::CpuPending);
         Ok(self.0.fail_cpu.load(Ordering::Relaxed) || self.0.pending.load(Ordering::Relaxed))
     }
-    fn eoi(&self) {
+    fn eoi(
+        &self,
+        _vector: u8,
+    ) -> core::result::Result<crate::bus::irq::Trigger, crate::bus::irq::IrqError> {
         self.0.event(Event::Eoi);
         self.0.pending.store(false, Ordering::Relaxed);
+        Ok(crate::bus::irq::Trigger::Edge)
     }
     fn ticks(&self) -> u64 {
         self.0.accesses.fetch_add(1, Ordering::Relaxed) as u64
@@ -704,6 +859,9 @@ fn fixture_native_setup(
         Ok(bound) => bound,
         Err(failure) => return Err((failure.error.clone(), state, counters, device)),
     };
+    state
+        .delivery_available
+        .store(completion, Ordering::Relaxed);
     let inputs = Inputs {
         function: bound.function,
         retained: Arc::new(Root(state.clone())),
@@ -716,11 +874,6 @@ fn fixture_native_setup(
         clock: bound.clock,
         // SAFETY: original_inputs leaked this same model Registry.
         interrupts: unsafe { &*state.registry.load(Ordering::Relaxed) },
-        msi_completion: if completion {
-            MsiCompletion::model(Box::new(Delivery(state.clone())))
-        } else {
-            MsiCompletion::unavailable()
-        },
     };
     Ok(Fixture {
         inputs,
@@ -870,8 +1023,11 @@ fn all_four_native_ids_use_real_registry_msi_dma_hci_and_ordered_retirement() {
         t.close().unwrap();
         let events = state.events.lock().unwrap().clone();
         assert!(position(&events, Event::Reset) < position(&events, Event::PayloadDrain));
-        assert!(position(&events, Event::PayloadDrain) < position(&events, Event::MsiDrain));
-        assert!(position(&events, Event::MsiDrain) < position(&events, Event::CpuPending));
+        assert!(
+            !events.contains(&Event::MsiDrain),
+            "action join does not claim fabric completion"
+        );
+        assert!(position(&events, Event::PayloadDrain) < position(&events, Event::CpuPending));
         assert!(position(&events, Event::CpuPending) < position(&events, Event::BarUnmap));
         assert!(position(&events, Event::CpuPending) < position(&events, Event::DmaUnmap));
         assert!(position(&events, Event::DmaUnmap) < position(&events, Event::Detach));
@@ -908,14 +1064,13 @@ fn native_unpublished_close_stops_the_prepared_bus_master_and_releases_without_r
 }
 #[test]
 fn every_distinct_retirement_failure_keeps_original_route_pins_root_and_first_error() {
-    for failure in 0..7 {
-        let (mut t, device, state, counters) = transport(fixture_native(0x5f69, failure != 3));
+    for failure in [0, 1, 2, 4, 5, 6] {
+        let (mut t, device, state, counters) = transport(fixture_native(0x5f69, true));
         t.start(&catalog(&device, false)).unwrap();
         match failure {
             0 => state.stuck_pending.store(true, Ordering::Relaxed),
             1 => state.fail_payload.store(true, Ordering::Relaxed),
             2 => state.fail_msi.store(true, Ordering::Relaxed),
-            3 => {}
             4 => state.fail_cpu.store(true, Ordering::Relaxed),
             5 => state.fail_bar_unmap.store(true, Ordering::Relaxed),
             6 => state.fail_detach.store(true, Ordering::Relaxed),
@@ -1490,4 +1645,93 @@ fn protocol_close_unwind_seals_every_public_admission_before_platform_retirement
     assert_eq!(domain.0.lock().unwrap().leases.len(), 14);
     assert_eq!(counters.unmaps.load(Ordering::Relaxed), 0);
     assert!(!device.lock().unwrap().dropped);
+}
+
+#[test]
+fn containment_flr_preserves_retiring_owner_but_foreign_generation_refuses() {
+    let (mut first_transport, device, state, _) = transport(fixture_native(0x5f69, true));
+    first_transport.start(&catalog(&device, false)).unwrap();
+    let epoch = state.ownership_epoch.load(Ordering::Relaxed);
+    first_transport.close().unwrap();
+    assert_eq!(state.ownership_epoch.load(Ordering::Relaxed), epoch);
+    let events = state.events.lock().unwrap();
+    let detached = events.iter().rposition(|e| *e == Event::Detach).unwrap();
+    let pin = events
+        .iter()
+        .rposition(|e| *e == Event::MsiPinRelease)
+        .unwrap();
+    let config = events
+        .iter()
+        .rposition(|e| *e == Event::ConfigUnmap)
+        .unwrap();
+    assert!(detached < pin && pin < config);
+    drop(events);
+
+    let (mut transport, device, state, counters) = transport(fixture_native(0x5f69, true));
+    transport.start(&catalog(&device, false)).unwrap();
+    state.ownership_epoch.fetch_add(1, Ordering::Relaxed);
+    assert!(transport.close().is_err());
+    assert_eq!(counters.unmaps.load(Ordering::Relaxed), 0);
+    assert!(!device.lock().unwrap().dropped);
+}
+
+#[test]
+fn equal_bdf_different_actual_config_attachment_refuses_before_native_admission() {
+    let mut source = fixture_native(0x5f69, true);
+    let mut foreign = fixture_native(0x5f69, true);
+    assert_eq!(
+        source.inputs.function.address,
+        foreign.inputs.function.address
+    );
+    // Real independent RAM configuration allocations, not source IDs/numbers.
+    let source_pin = source.inputs.function.config().retain_epoch().unwrap();
+    assert!(
+        source
+            .inputs
+            .attachment
+            .matches_retention(&source_pin)
+            .unwrap()
+    );
+    assert!(
+        !foreign
+            .inputs
+            .attachment
+            .matches_retention(&source_pin)
+            .unwrap()
+    );
+    std::mem::swap(
+        &mut source.inputs.attachment,
+        &mut foreign.inputs.attachment,
+    );
+    let writes = source
+        .state
+        .events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|event| matches!(event, Event::Write(..)))
+        .count();
+    // SAFETY: bounded read-only adversarial source assembly: all input graphs
+    // remain retained, but their claimed association must be rejected.
+    let (error, returned) = match unsafe { NativePlatform::new(source.inputs) } {
+        Ok(_) => panic!("foreign actual configuration admitted"),
+        Err(failure) => failure,
+    };
+    assert!(matches!(
+        error,
+        host::Error::Requirement("same actual source/attachment config allocation")
+    ));
+    let events = source.state.events.lock().unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, Event::Write(..)))
+            .count(),
+        writes
+    );
+    assert!(!events.contains(&Event::MsiBind));
+    assert_eq!(source.counters.unmaps.load(Ordering::Relaxed), 0);
+    // Default erroneous-input abandonment cannot release uncertain native pins.
+    core::mem::forget(returned);
+    core::mem::forget(foreign.inputs);
 }

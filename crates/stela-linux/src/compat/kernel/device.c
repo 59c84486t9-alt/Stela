@@ -12,11 +12,15 @@
 #include <linux/property.h>
 #include <linux/slab.h>
 #include <stela/device.h>
+#include <stela/catalogue.h>
 #include <unsupported.h>
 
 static void device_release(struct kobject *kobj)
 {
 	struct device *dev = kobj_to_dev(kobj);
+	struct stela_linux_device_retirement retired;
+	if (!stela_linux_device_release_begin(dev, &retired))
+		return;
 
 	if (dev->release)
 		dev->release(dev);
@@ -26,6 +30,7 @@ static void device_release(struct kobject *kobj)
 		dev->class->dev_release(dev);
 	else
 		WARN(1, "a device has no release function\n");
+	stela_linux_device_release_end(&retired);
 }
 
 static const struct kobj_type device_ktype = {
@@ -73,14 +78,22 @@ int device_add(struct device *dev)
 	}
 	if (!dev_name(dev))
 		return -EINVAL;
+	struct device *parent = dev->parent;
 	get_device(dev);
-	get_device(dev->parent);
+	get_device(parent);
+	int error = stela_linux_device_inherit(dev);
+	if (error) {
+		put_device(dev);
+		put_device(parent);
+		return error;
+	}
 	return 0;
 }
 
 void device_del(struct device *dev)
 {
 	struct device *parent = dev->parent;
+	stela_linux_device_close(dev);
 
 	stela_linux_devres_release(dev);
 	put_device(dev);

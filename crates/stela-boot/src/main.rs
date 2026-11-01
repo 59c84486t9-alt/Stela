@@ -47,6 +47,7 @@ mod log_file;
 pub(crate) mod native_clock;
 pub mod native_dma;
 mod native_idle;
+mod native_image;
 pub mod native_irq;
 pub mod native_memory;
 #[expect(

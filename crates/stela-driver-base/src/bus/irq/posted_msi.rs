@@ -1,220 +1,433 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2026 Stela contributors
-//! Root and route completion for posted MSI/MSI-X, separate from payload DMA.
-use super::MsiMessage;
-use alloc::boxed::Box;
-use core::cell::Cell;
+//! Original requester/root route ownership, distinct from payload and CPU drain.
+use super::{CpuTarget, MsiMessage, RouteId};
+use crate::bus::pci::requester::{RequesterId, preparation::DetachedRequester};
+use alloc::{boxed::Box, sync::Arc};
+use core::{marker::PhantomData, mem::ManuallyDrop};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
     RootUnavailable,
+    Unsupported,
     RootFailed,
     Unbound,
-    AlreadyBound {
-        original: MsiMessage,
-        attempted: MsiMessage,
-    },
+    AlreadyBound,
+    WrongRequester,
+    Context,
+    NotRetired,
 }
-/// The consumed requester/root epoch and its exclusively allocated route.
-///
-/// # Safety
-/// Bind only this owner's original root and the registry's allocated message.
-/// Numeric addresses/BDFs alone grant no permission. Keep delivery/remapping
-/// resources through completed drain/release or quarantine. `drain_posted_msi`
-/// completes every issued MSI/MSI-X on that path independently of payload
-/// IOTLB drain, reset, elapsed time and CPU IRR/ISR. Check the original epoch
-/// and process context on every operation. Failure/Drop retains uncertain roots.
-pub unsafe trait DeliveryOwner {
-    fn bind_route(&mut self, message: MsiMessage) -> Result<(), Error>;
-    /// # Safety
-    /// This original source cannot issue further payload or interrupts:
-    /// device stop/reset is acknowledged, every route is masked and translated
-    /// payload writes drained. Keep configuration, DMA and root owners.
-    unsafe fn drain_posted_msi(&self) -> Result<(), Error>;
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AllocationError {
+    Unexposed(Error),
+    Uncertain(Error),
 }
-/// No native producer exists until the common root delivery adapter is supplied
-/// (host-driver requirement 9.2). An unavailable capability permits attachment
-/// but refuses armed route retirement. Model construction is host-test-only.
-pub struct MsiCompletion {
-    owner: Option<Box<dyn DeliveryOwner>>,
-    message: Option<MsiMessage>,
-    binding_error: Option<Error>,
-    drained: Cell<bool>,
-}
-impl MsiCompletion {
-    pub fn unavailable() -> Self {
-        Self {
-            owner: None,
-            message: None,
-            binding_error: None,
-            drained: Cell::new(false),
+impl AllocationError {
+    pub fn error(self) -> Error {
+        match self {
+            Self::Unexposed(e) | Self::Uncertain(e) => e,
         }
     }
-    #[cfg(all(any(test, feature = "test-support"), unix, target_arch = "x86_64"))]
-    pub fn model(owner: Box<dyn DeliveryOwner>) -> Self {
-        let mut completion = Self::unavailable();
-        completion.owner = Some(owner);
-        completion
-    }
-    /// # Safety
-    /// This is the original registry's exclusively allocated route for this
-    /// requester/root owner. Keep it through source/CPU/work retirement.
-    pub unsafe fn bind_route(&mut self, message: MsiMessage) -> Result<(), Error> {
-        if let Some(original) = self.message {
-            return Err(Error::AlreadyBound {
-                original,
-                attempted: message,
-            });
-        }
-        self.message = Some(message);
-        if let Some(owner) = &mut self.owner
-            && let Err(error) = owner.bind_route(message)
-        {
-            self.binding_error = Some(error);
-            return Err(error);
-        }
-        Ok(())
-    }
-    /// # Safety
-    /// The bound source cannot resume; all routes are masked, device stop/reset
-    /// and translated payload completion are acknowledged. All original owners
-    /// remain held through this independent completion and later CPU/work drain.
-    pub unsafe fn drain(&self) -> Result<(), Error> {
-        if self.message.is_none() {
-            return Err(Error::Unbound);
-        }
-        if let Some(error) = self.binding_error {
-            return Err(error);
-        }
-        let owner = self.owner.as_ref().ok_or(Error::RootUnavailable)?;
-        if !self.drained.get() {
-            // SAFETY: caller supplies terminal source/payload ownership; this
-            // owner independently acknowledges the bound posted-interrupt path.
-            unsafe { owner.drain_posted_msi() }?;
-            self.drained.set(true);
-        }
-        Ok(())
-    }
-}
-impl Drop for MsiCompletion {
-    fn drop(&mut self) {
-        if self.message.is_some() && !self.drained.get() {
-            core::mem::forget(self.owner.take());
-        }
+    pub(crate) fn untouched(self) -> bool {
+        matches!(self, Self::Unexposed(_))
     }
 }
 
-#[cfg(all(test, unix, target_arch = "x86_64"))]
-mod tests {
-    use super::*;
-    use alloc::sync::Arc;
-    use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    const MESSAGE: MsiMessage = MsiMessage {
-        address: 0xfee00000,
-        data: 0x51,
-    };
-    #[derive(Default)]
-    struct State {
-        binds: AtomicUsize,
-        drains: AtomicUsize,
-        drops: AtomicUsize,
-        fail_bind: AtomicBool,
-        fail_drain: AtomicBool,
+/// Original stable CPU/root/format and live resource guard for ordinary IRQ
+/// notification. This is not all-issued MSI completion or a DMA drain.
+/// # Safety
+/// Construct only from actual retained original ownership. check is IRQ-safe,
+/// allocation-free/nonblocking and checks original immutable/atomic scope
+/// before locks or native I/O. No number or mutable !Send Source substitutes
+/// for the real root/format and source-resource lifetime. Old ordinary messages
+/// may notify a current valid handler; every handler checks its own state/rings.
+/// Format/root/CPU ownership stays frozen for that admitted notification domain.
+/// Endpoint-specific pins belong only to per-action leaves and end in the
+/// actual checked action/endpoint teardown; global root domains do not pin them.
+/// Dropping a guard is not permission for hardware teardown. Any physical owner
+/// retained by a guard must conservatively retain on foreign context or an
+/// unresolved epoch, including refused prepublication return and unwind.
+pub unsafe trait NotificationDomain: Send + Sync {
+    fn check(&self) -> Result<(), Error>;
+}
+
+/// An original attached root/source grant, never a numeric message owner.
+///
+/// # Safety
+/// Allocation joins only the supplied checked Registry reservation and this
+/// exact original configuration/root/reset/source identity. Unexposed errors
+/// return that grant without any possible hardware publication. Every method
+/// checks actual process/root/source epochs. notification_domain is genuine
+/// original ordinary fixed/edge admission, never fabric completion. Strong
+/// Intel fencing remains separate optional evidence. Existing index/root ledger
+/// obligations are retained independently; notification does not reclaim them. release_endpoint consumes the exact higher retirement proof before
+/// ending its source/config pin. The terminal root ledger must survive final
+/// owner Drop; failed/abandoned state retains every uncertain native owner.
+/// No borrowed native entered permit may escape or span a blocking operation.
+pub unsafe trait RouteOwner {
+    fn allocate(&mut self, target: &CpuTarget<'_>) -> Result<MsiMessage, AllocationError>;
+    fn validate(&self) -> Result<(), Error>;
+    /// Original process-mode checks plus a retained IRQ-safe notification guard.
+    /// Missing root/source/format admission is an error, never None-as-success.
+    fn notification_domain(&self) -> Result<Arc<dyn NotificationDomain>, Error>;
+    /// Optional stronger original fabric fence, distinct from generic action
+    /// notification retirement. No all-issued proof is invented by the default.
+    /// # Safety
+    /// This actual original route is masked and its admitted source/pending
+    /// cause protocol is quiescent; all covered native owners stay retained.
+    unsafe fn strong_fence(&mut self) -> Result<(), Error> {
+        Err(Error::Unsupported)
     }
-    struct Root(Arc<State>);
-    // SAFETY: isolated original-route peer; it has no hardware, IRQ, work or
-    // payload users and records independent root completion/refusal events.
-    unsafe impl DeliveryOwner for Root {
-        fn bind_route(&mut self, message: MsiMessage) -> Result<(), Error> {
-            assert_eq!(message, MESSAGE);
-            self.0.binds.fetch_add(1, Ordering::Relaxed);
-            if self.0.fail_bind.load(Ordering::Relaxed) {
-                Err(Error::RootFailed)
-            } else {
-                Ok(())
+    /// # Safety
+    /// The private proof names this exact route after CPU/callback/work
+    /// retirement and, for native endpoints, actual DMA unmap/requester detach.
+    unsafe fn release_endpoint(&mut self, proof: &EndpointRetirement<'_>) -> Result<(), Error>;
+}
+
+/// Borrowed proof constructed only by the canonical retirement transitions.
+/// It supplies no independent native entered permission.
+pub struct EndpointRetirement<'a> {
+    pub(crate) route: &'a RouteId,
+    pub(crate) detached: Option<&'a DetachedRequester>,
+}
+impl EndpointRetirement<'_> {
+    pub fn requester(&self) -> Option<&RequesterId> {
+        self.detached.map(DetachedRequester::requester)
+    }
+    pub fn vector(&self) -> u8 {
+        self.route.target().vector
+    }
+}
+
+enum Origin {
+    Unavailable,
+    Attached,
+    #[cfg(any(test, feature = "test-support", feature = "irq-diagnostics"))]
+    BoundedFixture,
+}
+/// One affine IRQ route: original grant, notification admission and explicit endpoint
+/// pin release. Registry owns it through source/CPU/work retirement.
+pub struct MsiRoute {
+    owner: ManuallyDrop<Option<Box<dyn RouteOwner>>>,
+    origin: Origin,
+    requester: Option<RequesterId>,
+    action_joined: bool,
+    route: Option<RouteId>,
+    message: Option<MsiMessage>,
+    published: bool,
+    domain: ManuallyDrop<Option<Arc<dyn NotificationDomain>>>,
+    cpu_retired: bool,
+    released: bool,
+    local: PhantomData<*mut ()>,
+}
+impl MsiRoute {
+    pub fn unavailable() -> Self {
+        Self {
+            owner: ManuallyDrop::new(None),
+            origin: Origin::Unavailable,
+            requester: None,
+            action_joined: false,
+            route: None,
+            message: None,
+            published: false,
+            domain: ManuallyDrop::new(None),
+            cpu_retired: false,
+            released: false,
+            local: PhantomData,
+        }
+    }
+    pub(crate) fn attached(
+        requester: RequesterId,
+        owner: Option<Box<dyn RouteOwner>>,
+    ) -> Result<Self, Error> {
+        let mut route = Self::unavailable();
+        *route.owner = owner;
+        requester.issue().map_err(|_| Error::WrongRequester)?;
+        route.requester = Some(requester);
+        route.origin = Origin::Attached;
+        Ok(route)
+    }
+    /// Construct only the explicit synchronous diagnostic/model peer.
+    ///
+    /// # Safety
+    /// Provider owns/validates the exact bounded fixture route and context.
+    /// It carries NO native requester/configuration pin, cannot satisfy native
+    /// Attachment detach/reset and is never a NativeServices capability.
+    #[cfg(any(test, feature = "test-support", feature = "irq-diagnostics"))]
+    pub unsafe fn bounded_fixture(owner: Box<dyn RouteOwner>) -> Self {
+        let mut route = Self::unavailable();
+        *route.owner = Some(owner);
+        route.origin = Origin::BoundedFixture;
+        route
+    }
+    pub fn requester(&self) -> Option<&RequesterId> {
+        self.requester.as_ref()
+    }
+    pub fn is_unavailable(&self) -> bool {
+        self.owner.is_none()
+    }
+    pub fn belongs_to(&self, requester: &RequesterId) -> bool {
+        self.requester
+            .as_ref()
+            .is_some_and(|own| own.same_requester(requester))
+    }
+    /// Cancel an unattached unavailable/fixture request before allocation.
+    /// This performs no hardware drain and cannot acknowledge a native endpoint.
+    pub fn cancel_unattached(mut self) -> Result<(), (Error, Self)> {
+        let result = (|| {
+            if self.requester.is_some() || self.route.is_some() || self.published {
+                return Err(Error::AlreadyBound);
             }
-        }
-        unsafe fn drain_posted_msi(&self) -> Result<(), Error> {
-            self.0.drains.fetch_add(1, Ordering::Relaxed);
-            if self.0.fail_drain.load(Ordering::Relaxed) {
-                Err(Error::RootFailed)
-            } else {
-                Ok(())
+            if let Some(owner) = self.owner.as_ref() {
+                owner.validate()?;
             }
+            drop(self.owner.take());
+            self.released = true;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => Ok(()),
+            Err(error) => Err((error, self)),
         }
     }
-    impl Drop for Root {
-        fn drop(&mut self) {
-            self.0.drops.fetch_add(1, Ordering::Relaxed);
+
+    pub(crate) fn check_unpublished(&self) -> Result<(), Error> {
+        if self.published || self.route.is_some() {
+            return Err(Error::AlreadyBound);
+        }
+        if let Some(owner) = self.owner.as_ref() {
+            owner.validate()?;
+        }
+        Ok(())
+    }
+    pub(crate) fn allocation(
+        &mut self,
+        target: &CpuTarget<'_>,
+    ) -> Result<MsiMessage, AllocationError> {
+        if self.route.is_some() {
+            return Err(AllocationError::Unexposed(Error::AlreadyBound));
+        }
+        target
+            .check_current()
+            .map_err(|_| AllocationError::Unexposed(Error::Context))?;
+        if self
+            .requester
+            .as_ref()
+            .is_some_and(|id| !target.matches_requester(id))
+        {
+            return Err(AllocationError::Unexposed(Error::WrongRequester));
+        }
+        if let Some(owner) = self.owner.as_mut() {
+            owner.validate().map_err(AllocationError::Unexposed)?;
+            let domain = owner
+                .notification_domain()
+                .map_err(AllocationError::Unexposed)?;
+            domain.check().map_err(AllocationError::Unexposed)?;
+            *self.domain = Some(domain);
+            let message = match owner.allocate(target) {
+                Ok(message) => message,
+                Err(error) => {
+                    if !error.untouched() {
+                        self.route = Some(target.id().clone());
+                    }
+                    return Err(error);
+                }
+            };
+            self.route = Some(target.id().clone());
+            self.message = Some(message);
+            self.published = true;
+            owner.validate().map_err(AllocationError::Uncertain)?;
+            target
+                .check_current()
+                .map_err(|_| AllocationError::Uncertain(Error::Context))?;
+            Ok(message)
+        } else {
+            Err(AllocationError::Unexposed(Error::RootUnavailable))
         }
     }
-    fn bind(completion: &mut MsiCompletion) -> Result<(), Error> {
-        // SAFETY: this synchronous peer owns the one symbolic allocated route.
-        unsafe { completion.bind_route(MESSAGE) }
+    pub(crate) fn domain(&self) -> Result<Arc<dyn NotificationDomain>, Error> {
+        let domain = self.domain.as_ref().ok_or(Error::RootUnavailable)?;
+        domain.check()?;
+        Ok(domain.clone())
     }
-    fn drain(completion: &MsiCompletion) -> Result<(), Error> {
-        // SAFETY: no model source or asynchronous user can issue traffic; all
-        // original symbolic resources remain kept by this completion owner.
-        unsafe { completion.drain() }
+
+    pub(crate) fn programming(&mut self) -> Result<(), Error> {
+        let route = self.route.as_ref().ok_or(Error::Unbound)?;
+        route.check_process().map_err(|_| Error::Context)?;
+        self.owner
+            .as_ref()
+            .ok_or(Error::RootUnavailable)?
+            .validate()?;
+        self.domain
+            .as_ref()
+            .ok_or(Error::RootUnavailable)?
+            .check()?;
+        self.published = true;
+        Ok(())
     }
-    #[test]
-    fn unavailable_root_refuses_even_a_bound_route() {
-        let mut c = MsiCompletion::unavailable();
-        assert_eq!(drain(&c), Err(Error::Unbound));
-        bind(&mut c).unwrap();
-        assert_eq!(drain(&c), Err(Error::RootUnavailable));
-        assert_eq!(drain(&c), Err(Error::RootUnavailable));
+    pub(crate) fn check_rearm(&self) -> Result<(), Error> {
+        let id = self.route.as_ref().ok_or(Error::Unbound)?;
+        id.check_process().map_err(|_| Error::Context)?;
+        if self.cpu_retired || self.released {
+            return Err(Error::NotRetired);
+        }
+        self.owner
+            .as_ref()
+            .ok_or(Error::RootUnavailable)?
+            .validate()?;
+        self.domain.as_ref().ok_or(Error::RootUnavailable)?.check()
     }
-    #[test]
-    fn exact_route_completion_is_one_shot_and_cannot_bind_another_message() {
-        let state = Arc::new(State::default());
-        let mut c = MsiCompletion::model(Box::new(Root(state.clone())));
-        assert_eq!(drain(&c), Err(Error::Unbound));
-        bind(&mut c).unwrap();
-        let attempted = MsiMessage {
-            data: 0x52,
-            ..MESSAGE
+
+    pub(crate) fn validate(&self) -> Result<(), Error> {
+        self.route
+            .as_ref()
+            .ok_or(Error::Unbound)?
+            .check_process()
+            .map_err(|_| Error::Context)?;
+        self.owner
+            .as_ref()
+            .ok_or(Error::RootUnavailable)?
+            .validate()
+    }
+    pub(crate) fn cpu_retired(&mut self) -> Result<(), Error> {
+        self.validate()?;
+        self.domain
+            .as_ref()
+            .ok_or(Error::RootUnavailable)?
+            .check()?;
+        self.cpu_retired = true;
+        // Same checked process context after the actual old action join. Slot
+        // retains its own immutable guard until final locked withdrawal.
+        drop(self.domain.take());
+        Ok(())
+    }
+    pub(crate) fn join_action(
+        &mut self,
+        requester: &RequesterId,
+        route: &RouteId,
+    ) -> Result<(), Error> {
+        if self.action_joined
+            || !self.cpu_retired
+            || !self.route.as_ref().is_some_and(|own| own.same(route))
+            || !self.belongs_to(requester)
+        {
+            return Err(Error::NotRetired);
+        }
+        self.validate()?;
+        requester
+            .complete_action()
+            .map_err(|_| Error::WrongRequester)?;
+        self.action_joined = true;
+        Ok(())
+    }
+    pub(crate) fn release(
+        &mut self,
+        route: &RouteId,
+        detached: &DetachedRequester,
+    ) -> Result<(), Error> {
+        if !self.cpu_retired
+            || !self.action_joined
+            || !self.route.as_ref().is_some_and(|own| own.same(route))
+        {
+            return Err(Error::NotRetired);
+        }
+        if !self
+            .requester
+            .as_ref()
+            .is_some_and(|own| own.same_requester(detached.requester()))
+            || !detached.matches_route(route)
+        {
+            return Err(Error::WrongRequester);
+        }
+        if self.released {
+            return self.validate();
+        }
+        self.validate()?;
+        let proof = EndpointRetirement {
+            route,
+            detached: Some(detached),
         };
-        assert_eq!(
-            // SAFETY: this isolated fixture owns the second symbolic route;
-            // the completion must refuse replacing its first bound route.
-            unsafe { c.bind_route(attempted) },
-            Err(Error::AlreadyBound {
-                original: MESSAGE,
-                attempted
-            })
-        );
-        drain(&c).unwrap();
-        drain(&c).unwrap();
-        drop(c);
-        assert_eq!(state.binds.load(Ordering::Relaxed), 1);
-        assert_eq!(state.drains.load(Ordering::Relaxed), 1);
-        assert_eq!(state.drops.load(Ordering::Relaxed), 1);
+        // SAFETY: exact private route/requester proof and acknowledged detach
+        // follow real action/CPU/work retirement; source pin is still retained.
+        unsafe {
+            self.owner
+                .as_mut()
+                .ok_or(Error::RootUnavailable)?
+                .release_endpoint(&proof)
+        }?;
+        self.released = true;
+        Ok(())
     }
-    #[test]
-    fn failed_binding_is_sticky_and_keeps_the_root_without_drain() {
-        let state = Arc::new(State::default());
-        state.fail_bind.store(true, Ordering::Relaxed);
-        let mut c = MsiCompletion::model(Box::new(Root(state.clone())));
-        assert_eq!(bind(&mut c), Err(Error::RootFailed));
-        state.fail_bind.store(false, Ordering::Relaxed);
-        assert_eq!(drain(&c), Err(Error::RootFailed));
-        drop(c);
-        assert_eq!(state.drains.load(Ordering::Relaxed), 0);
-        assert_eq!(state.drops.load(Ordering::Relaxed), 0);
-    }
-    #[test]
-    fn abandoned_or_failed_completion_keeps_the_original_root() {
-        for failed in [false, true] {
-            let state = Arc::new(State::default());
-            let mut c = MsiCompletion::model(Box::new(Root(state.clone())));
-            bind(&mut c).unwrap();
-            if failed {
-                state.fail_drain.store(true, Ordering::Relaxed);
-                assert_eq!(drain(&c), Err(Error::RootFailed));
-            }
-            drop(c);
-            assert_eq!(state.drops.load(Ordering::Relaxed), 0);
+    #[cfg(any(test, feature = "test-support", feature = "irq-diagnostics"))]
+    pub(crate) fn release_fixture(&mut self, route: &RouteId) -> Result<(), Error> {
+        if !matches!(self.origin, Origin::BoundedFixture)
+            || self.requester.is_some()
+            || !self.cpu_retired
+            || self.released
+            || !self.route.as_ref().is_some_and(|own| own.same(route))
+        {
+            return Err(Error::NotRetired);
         }
+        self.validate()?;
+        let proof = EndpointRetirement {
+            route,
+            detached: None,
+        };
+        // SAFETY: this constructor is scoped to an explicit no-native-pin
+        // fixture provider, with exact action/CPU/work retirement, not a native
+        // requester/DMA detach or a successful empty endpoint resource.
+        unsafe {
+            self.owner
+                .as_mut()
+                .ok_or(Error::RootUnavailable)?
+                .release_endpoint(&proof)
+        }?;
+        self.released = true;
+        Ok(())
+    }
+    pub(crate) fn cancel(mut self, requester: &RequesterId) -> Result<(), (Error, Self)> {
+        let result = (|| {
+            if self.published
+                || self.route.is_some()
+                || !self
+                    .requester
+                    .as_ref()
+                    .is_some_and(|own| own.same_requester(requester))
+            {
+                return Err(Error::WrongRequester);
+            }
+            if let Some(owner) = self.owner.as_ref() {
+                owner.validate()?;
+            }
+            // The original Attachment checked its live native context before
+            // this explicit prepublication cancellation. No hardware was armed.
+            drop(self.owner.take());
+            requester
+                .complete_action()
+                .map_err(|_| Error::WrongRequester)?;
+            self.released = true;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => Ok(()),
+            Err(error) => Err((error, self)),
+        }
+    }
+}
+impl Drop for MsiRoute {
+    fn drop(&mut self) {
+        if self.released
+            && self
+                .owner
+                .as_ref()
+                .is_none_or(|owner| owner.validate().is_ok())
+        {
+            // SAFETY: explicit checked release already ended any config pin;
+            // the provider now owns only terminal observation whose Drop must
+            // leave the canonical root ledger and blocking resources retained.
+            unsafe {
+                ManuallyDrop::drop(&mut self.owner);
+                ManuallyDrop::drop(&mut self.domain);
+            };
+        }
+        // Every other path retains the actual Box, even after action join.
     }
 }

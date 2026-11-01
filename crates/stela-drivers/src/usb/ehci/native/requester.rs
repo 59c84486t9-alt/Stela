@@ -6,7 +6,7 @@ pub(super) enum Requester {
     Preparing(PreparingRequester),
     Bound {
         pci: Function<OwnedConfig>,
-        attachment: Box<dyn preparation::Attachment>,
+        attachment: preparation::Attachment,
     },
     Retired {
         pci: Function<OwnedConfig>,

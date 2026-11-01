@@ -16,6 +16,10 @@ use stela_driver_base::bus::dma::memory::{CacheAttribute, MemoryError, PinnedPag
 mod stack;
 #[cfg(target_arch = "x86_64")]
 pub use stack::{AdmissionError, StackAdmission};
+#[cfg(target_arch = "x86_64")]
+mod mapping;
+#[cfg(target_arch = "x86_64")]
+pub use mapping::{MappingPagePin, retained_mapping_pins};
 
 const PAGE_SHIFT: u32 = 12;
 const PAGE_BYTES: usize = 1 << PAGE_SHIFT;
@@ -41,6 +45,7 @@ pub enum Error {
     Busy,
     GenerationExhausted,
     Native(c_int),
+    Memory(MemoryError),
 }
 
 /// The immutable physical and CPU span covered by a descriptor catalog.
@@ -258,6 +263,8 @@ unsafe extern "C" {
     ) -> c_int;
     fn stela_linux_page_catalog_unregister(generation: u64) -> c_int;
     fn stela_linux_page_catalog_verify(generation: u64) -> c_int;
+    fn stela_linux_page_owner_context(owner: *const super::owner::RawOwner) -> c_int;
+    fn stela_linux_kernel_catalogue_active() -> bool;
     fn stela_linux_page_request_basic(gfp: u32) -> bool;
     fn stela_linux_page_request_reclaimable(gfp: u32) -> bool;
     fn stela_linux_page_request_blocking(gfp: u32) -> bool;
@@ -283,9 +290,60 @@ impl Drop for Entered {
     }
 }
 
+enum ContextEntry {
+    Legacy,
+    #[cfg(target_arch = "x86_64")]
+    Canonical {
+        owner: *const super::owner::RawOwner,
+        execution: super::kernel::ExecutionPin,
+    },
+}
+impl ContextEntry {
+    fn scope(&self) -> Result<Option<Entered>, Error> {
+        match self {
+            Self::Legacy => {
+                // SAFETY: pure global phase observation, with no entry attempt.
+                if unsafe { stela_linux_kernel_catalogue_active() } {
+                    return Err(Error::Busy);
+                }
+                Entered::try_new().map(Some)
+            }
+            #[cfg(target_arch = "x86_64")]
+            Self::Canonical { owner, .. } => {
+                // SAFETY: observational check only, no entry/owner change.
+                let status = unsafe { stela_linux_page_owner_context(*owner) };
+                if status != 0 {
+                    return Err(Error::Native(status));
+                }
+                Ok(None)
+            }
+        }
+    }
+    fn canonical(&self) -> bool {
+        match self {
+            Self::Legacy => false,
+            #[cfg(target_arch = "x86_64")]
+            Self::Canonical { .. } => true,
+        }
+    }
+    #[cfg(target_arch = "x86_64")]
+    fn check<K: super::owner::Platform, const N: usize>(
+        &self,
+        kernel: &super::kernel::KernelOwner<K, N>,
+    ) -> Result<(), Error> {
+        match self {
+            Self::Canonical { owner, .. } if *owner == kernel.raw() => {
+                self.scope()?;
+                Ok(())
+            }
+            _ => Err(Error::InvalidReservation),
+        }
+    }
+}
 struct Context<P> {
     provider: P,
     reservations: Vec<Extent>,
+    entry: ContextEntry,
 }
 
 struct Pin {
@@ -491,8 +549,20 @@ impl<P: Provider> Catalog<P> {
 
     unsafe fn register_inventory(
         provider: P,
+        reservations: Vec<Extent>,
+        annotated: bool,
+    ) -> Result<Self, Error> {
+        // SAFETY: unchanged legacy registration/exclusion contract.
+        unsafe {
+            Self::register_inventory_entry(provider, reservations, annotated, ContextEntry::Legacy)
+        }
+    }
+
+    unsafe fn register_inventory_entry(
+        provider: P,
         mut reservations: Vec<Extent>,
         annotated: bool,
+        entry: ContextEntry,
     ) -> Result<Self, Error> {
         if reservations.is_empty() {
             return Err(Error::InvalidReservation);
@@ -532,6 +602,7 @@ impl<P: Provider> Catalog<P> {
         let mut context = try_box(Context {
             provider,
             reservations,
+            entry,
         })?;
         let operations = OperationsV2 {
             version: 2,
@@ -545,7 +616,7 @@ impl<P: Provider> Catalog<P> {
             release_ready: release_ready::<P>,
         };
         let result = {
-            let _entered = Entered::try_new()?;
+            let _entered = context.entry.scope()?;
             // SAFETY: arrays contain their declared number of initialized
             // repr(C) records. Provider-owned reservations and Context remain
             // while C validates and copies the selected inventory.
@@ -583,6 +654,105 @@ impl<P: Provider> Catalog<P> {
         })
     }
 
+    /// Register in the actual already-entered canonical execution owner.
+    ///
+    /// # Safety
+    /// Checked serialized native dispatcher bootstrap or Linux process task on
+    /// this KernelOwner's actual CPU/root, quiescent with no native IRQ/reentry
+    /// or migration. Provider/reservation meet register's original contracts.
+    /// The real canonical execution pin covers all C/provider callback code.
+    /// No second entry or invented Linux task/resource is established here.
+    #[cfg(target_arch = "x86_64")]
+    pub unsafe fn register_current<K: super::owner::Platform, const N: usize>(
+        kernel: &super::kernel::KernelOwner<K, N>,
+        provider: P,
+        reservation: Reservation,
+    ) -> Result<Self, Error> {
+        let mut extents = Vec::new();
+        extents
+            .try_reserve_exact(1)
+            .map_err(|_| Error::OutOfMemory)?;
+        extents.push(Extent::ordinary(reservation));
+        // SAFETY: same original provider/reservation/canonical context contract.
+        unsafe { Self::register_current_inventory(kernel, provider, extents, false) }
+    }
+    /// Annotated composed catalogue in the same actual entered canonical owner.
+    ///
+    /// # Safety
+    /// register_current's CPU/root/context rules and register_annotated's
+    /// original disjoint inventory/stack permission contracts all hold.
+    #[cfg(target_arch = "x86_64")]
+    pub unsafe fn register_annotated_current<K: super::owner::Platform, const N: usize>(
+        kernel: &super::kernel::KernelOwner<K, N>,
+        provider: P,
+        extents: Vec<Extent>,
+    ) -> Result<Self, Error> {
+        // SAFETY: caller supplies original composed inventory and current owner.
+        unsafe { Self::register_current_inventory(kernel, provider, extents, true) }
+    }
+    #[cfg(target_arch = "x86_64")]
+    unsafe fn register_current_inventory<K: super::owner::Platform, const N: usize>(
+        kernel: &super::kernel::KernelOwner<K, N>,
+        provider: P,
+        extents: Vec<Extent>,
+        annotated: bool,
+    ) -> Result<Self, Error> {
+        // SAFETY: observational validation, before C metadata publication.
+        let status = unsafe { stela_linux_page_owner_context(kernel.raw()) };
+        if status != 0 {
+            return Err(Error::Native(status));
+        }
+        let entry = ContextEntry::Canonical {
+            owner: kernel.raw(),
+            execution: kernel.execution(),
+        };
+        // SAFETY: original provider plus exact native owner/code retention.
+        unsafe { Self::register_inventory_entry(provider, extents, annotated, entry) }
+    }
+    /// Diagnose this exact existing catalogue; never create another one.
+    ///
+    /// # Safety
+    /// Already entered in its actual canonical process task/CPU/root, quiescent.
+    /// The bounded diagnostic's temporary allocations may use the real provider.
+    #[cfg(target_arch = "x86_64")]
+    pub unsafe fn verify_current<K: super::owner::Platform, const N: usize>(
+        &self,
+        kernel: &super::kernel::KernelOwner<K, N>,
+    ) -> Result<(), Error> {
+        let context = self.context.as_ref().ok_or(Error::InvalidReservation)?;
+        context.entry.check(kernel)?;
+        // SAFETY: same retained generation and actual already-entered owner.
+        let status = unsafe { stela_linux_page_catalog_verify(self.generation) };
+        if status == 0 {
+            Ok(())
+        } else {
+            Err(Error::Native(status))
+        }
+    }
+    /// Same-owner catalogue retirement after every actual external user ends.
+    ///
+    /// # Safety
+    /// Already entered in its original canonical process CPU/root, quiescent.
+    /// All producer/config/task/alias users have actually retired; C may still
+    /// refuse live pages or provider fences. Failure keeps the whole context.
+    #[cfg(target_arch = "x86_64")]
+    pub unsafe fn try_retire_current<K: super::owner::Platform, const N: usize>(
+        &mut self,
+        kernel: &super::kernel::KernelOwner<K, N>,
+    ) -> Result<(), Error> {
+        let Some(context) = self.context.as_ref() else {
+            return Ok(());
+        };
+        context.entry.check(kernel)?;
+        // SAFETY: original generation and admitted process release scope.
+        let status = unsafe { stela_linux_page_catalog_unregister(self.generation) };
+        if status != 0 {
+            return Err(Error::Native(status));
+        }
+        self.context.take();
+        Ok(())
+    }
+
     pub fn generation(&self) -> u64 {
         self.generation
     }
@@ -592,6 +762,17 @@ impl<P: Provider> Catalog<P> {
     pub fn verify(&self) -> Result<(), Error> {
         if self.context.is_none() {
             return Err(Error::InvalidReservation);
+        }
+        if self
+            .context
+            .as_ref()
+            .is_some_and(|context| context.entry.canonical())
+        {
+            return Err(Error::Busy);
+        }
+        // SAFETY: pure phase observation before any bare entry attempt.
+        if unsafe { stela_linux_kernel_catalogue_active() } {
+            return Err(Error::Busy);
         }
         let _entered = Entered::try_new()?;
         // SAFETY: the generation/provider remain registered; the
@@ -609,6 +790,17 @@ impl<P: Provider> Catalog<P> {
     pub fn try_retire(&mut self) -> Result<(), Error> {
         if self.context.is_none() {
             return Ok(());
+        }
+        if self
+            .context
+            .as_ref()
+            .is_some_and(|context| context.entry.canonical())
+        {
+            return Err(Error::Busy); // Only explicit same-owner retirement may release it.
+        }
+        // SAFETY: pure phase observation before any bare entry attempt.
+        if unsafe { stela_linux_kernel_catalogue_active() } {
+            return Err(Error::Busy);
         }
         let result = {
             let _entered = Entered::try_new()?;

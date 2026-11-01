@@ -15,6 +15,8 @@ use super::{
 };
 use crate::bus::mmio::owned::{Error as MappingError, Mapping};
 
+mod irq_identity;
+pub use irq_identity::RequesterId;
 pub mod preparation;
 pub mod roles;
 

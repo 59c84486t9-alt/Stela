@@ -69,7 +69,10 @@ unsafe impl Root for OldRoot {
     unsafe fn bind(
         &self,
         binding: RequesterBinding,
-    ) -> core::result::Result<Box<dyn Attachment>, DmaError> {
+    ) -> core::result::Result<
+        Box<dyn crate::bus::pci::requester::preparation::AttachmentBackend>,
+        DmaError,
+    > {
         self.state.stopped();
         assert!(!self.state.old_pending.load(Ordering::Relaxed));
         assert_eq!(self.state.old_backing.load(Ordering::Relaxed), 0x55aa);
@@ -100,18 +103,24 @@ impl Drop for Control {
 }
 // SAFETY: one original model binding; detach checks every mapping and actual
 // model DMA/engine state, then releases that exact config binding once.
-unsafe impl Attachment for Control {
+unsafe impl crate::bus::pci::requester::preparation::AttachmentBackend for Control {
     fn domain(&self) -> Arc<dyn DmaDomain> {
         Arc::new(super::domain::NativeDomain(self.0.clone()))
     }
-    unsafe fn detach(&mut self) -> core::result::Result<(), DmaError> {
+    unsafe fn detach(
+        &mut self,
+    ) -> core::result::Result<(), crate::bus::pci::requester::preparation::DetachError> {
         self.0.current()?;
         self.0.stopped();
         assert!(self.0.base.maps.lock().unwrap().is_empty());
         assert_eq!(self.0.base.pending_dma.load(Ordering::Relaxed), 0);
         assert!(self.0.base.posted.lock().unwrap().is_empty());
         if self.0.record("detach") {
-            return Err(DmaError::InvalidationFailed);
+            return Err(
+                crate::bus::pci::requester::preparation::DetachError::Uncertain(
+                    DmaError::InvalidationFailed,
+                ),
+            );
         }
         self.0.binding.lock().unwrap().take().unwrap();
         self.0.detached.store(true, Ordering::Relaxed);

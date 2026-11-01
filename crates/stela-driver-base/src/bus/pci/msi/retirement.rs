@@ -58,9 +58,12 @@ impl<C: MsiConfigSpace> DisabledMsiConfig<C> {
     /// reset configuration space. This does not infer stop from scoped access.
     ///
     /// # Safety
-    /// The source and its DMA/posted writes are stopped/drained. The
-    /// real registry has subsequently drained pending CPU vectors, callbacks
-    /// and deferred/timer/reset users, and none can restart. Every mapping,
+    /// Source engines and their DMA/payload writes are stopped/drained. The
+    /// exact old IRQ action has joined CPU/EOI/callbacks and captured
+    /// service/thread/work; former reset users cannot restart. Original stable
+    /// root/CPU/format ownership remains retained for delayed ordinary fixed/
+    /// edge notifications to current valid handlers. This does not establish
+    /// all-issued MSI completion or reclaim a stronger root ledger. Every mapping,
     /// cache, domain and IOTLB retirement obligation remains owned until its
     /// completion. An out-of-band stop can establish these facts without
     /// using with_device_stop; the presence of an attempt proves none of them.

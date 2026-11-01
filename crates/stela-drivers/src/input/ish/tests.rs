@@ -656,11 +656,84 @@ unsafe impl DmaDomain for Domain {
         }
     }
 }
+struct NotificationPeer {
+    peer: Arc<Peer>,
+    thread: std::thread::ThreadId,
+}
+// SAFETY: actual original bounded BAR/device peer and its creating thread;
+// no native requester, fabric completion or Attachment receipt is supplied.
+unsafe impl irq::posted_msi::NotificationDomain for NotificationPeer {
+    fn check(&self) -> core::result::Result<(), irq::posted_msi::Error> {
+        if self.thread != std::thread::current().id() {
+            return Err(irq::posted_msi::Error::Context);
+        }
+        self.peer
+            .view
+            .check_current()
+            .map_err(|_| irq::posted_msi::Error::Context)
+    }
+}
+struct DeliveryPeer {
+    peer: Arc<Peer>,
+    thread: std::thread::ThreadId,
+    allocated: bool,
+}
+// SAFETY: synchronous explicit source model, no native root/endpoint grant.
+unsafe impl irq::posted_msi::RouteOwner for DeliveryPeer {
+    fn allocate(
+        &mut self,
+        target: &irq::CpuTarget<'_>,
+    ) -> core::result::Result<irq::MsiMessage, irq::posted_msi::AllocationError> {
+        self.validate()
+            .map_err(irq::posted_msi::AllocationError::Unexposed)?;
+        target.check_current().map_err(|_| {
+            irq::posted_msi::AllocationError::Unexposed(irq::posted_msi::Error::Context)
+        })?;
+        if self.allocated {
+            return Err(irq::posted_msi::AllocationError::Unexposed(
+                irq::posted_msi::Error::AlreadyBound,
+            ));
+        }
+        self.allocated = true;
+        let target = target.descriptor();
+        Ok(irq::MsiMessage {
+            address: 0xfee0_0000 | u64::from(target.destination) << 12,
+            data: u32::from(target.vector),
+        })
+    }
+    fn validate(&self) -> core::result::Result<(), irq::posted_msi::Error> {
+        irq::posted_msi::NotificationDomain::check(&NotificationPeer {
+            peer: self.peer.clone(),
+            thread: self.thread,
+        })
+    }
+    fn notification_domain(
+        &self,
+    ) -> core::result::Result<Arc<dyn irq::posted_msi::NotificationDomain>, irq::posted_msi::Error>
+    {
+        self.validate()?;
+        Ok(Arc::new(NotificationPeer {
+            peer: self.peer.clone(),
+            thread: self.thread,
+        }))
+    }
+    unsafe fn release_endpoint(
+        &mut self,
+        _proof: &irq::posted_msi::EndpointRetirement<'_>,
+    ) -> core::result::Result<(), irq::posted_msi::Error> {
+        // NativeSource deliberately cannot retire yet. Never turn the missing
+        // source protocol into a successful empty fixture acknowledgement.
+        Err(irq::posted_msi::Error::Unsupported)
+    }
+}
 struct Cpu(Arc<Peer>);
 // SAFETY: serial software CPU/real Registry fixture, not a native IRQ adapter.
 unsafe impl irq::Platform for Cpu {
     fn check_cpu(&self) -> core::result::Result<(), irq::IrqError> {
         Ok(())
+    }
+    fn check_process(&self) -> core::result::Result<(), crate::bus::irq::IrqError> {
+        self.check_cpu()
     }
     fn save_and_disable(&self) -> u64 {
         0
@@ -676,8 +749,12 @@ unsafe impl irq::Platform for Cpu {
     fn pending(&self, _: u8) -> core::result::Result<bool, irq::IrqError> {
         Ok(false)
     }
-    fn eoi(&self) {
+    fn eoi(
+        &self,
+        _vector: u8,
+    ) -> core::result::Result<crate::bus::irq::Trigger, crate::bus::irq::IrqError> {
         self.0.eois.fetch_add(1, Ordering::Relaxed);
+        Ok(crate::bus::irq::Trigger::Edge)
     }
     fn ticks(&self) -> u64 {
         self.0.state.lock().unwrap().now
@@ -766,6 +843,14 @@ fn inputs() -> Parts {
             },
             domain: Arc::new(Domain(peer.clone())),
             interrupts: registry,
+            // SAFETY: exact original bounded fixture peer only, no native pin.
+            msi_route: unsafe {
+                irq::posted_msi::MsiRoute::bounded_fixture(Box::new(DeliveryPeer {
+                    peer: peer.clone(),
+                    thread: std::thread::current().id(),
+                    allocated: false,
+                }))
+            },
             clock: ClockModel(peer.clone()),
         },
         peer,

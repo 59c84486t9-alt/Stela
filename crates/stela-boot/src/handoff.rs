@@ -85,6 +85,9 @@ pub struct Handoff {
     pub(crate) native_task_allocations: crate::native_smp::resources::TaskAllocations,
     /// Original loader table allocations; root is only their copied descriptor.
     pub(crate) native_loader_tables: crate::paging::loader::LoaderTables,
+    /// Moved original allocation of the relocated static Rust/C engine image.
+    /// Observed PE/header ranges cannot recreate this non-Clone owner.
+    pub(crate) native_image: crate::native_image::ResidentImage,
 }
 
 /// A read of the firmware's real-time clock: its time as UTC and its

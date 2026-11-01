@@ -23,18 +23,24 @@ impl Drop for Control {
 }
 // SAFETY: this independent synchronous RAM peer verifies its engine/BME stop,
 // posted-write drain and lack of live mappings. It reaches no native device.
-unsafe impl Attachment for Control {
+unsafe impl crate::bus::pci::requester::preparation::AttachmentBackend for Control {
     fn domain(&self) -> Arc<dyn DmaDomain> {
         self.domain.clone()
     }
-    unsafe fn detach(&mut self) -> Result<(), DmaError> {
+    unsafe fn detach(
+        &mut self,
+    ) -> Result<(), crate::bus::pci::requester::preparation::DetachError> {
         self.domain.require_stopped();
         assert!(self.domain.drained.load(Ordering::Relaxed));
         assert!(self.domain.maps.lock().unwrap().is_empty());
         assert!(self.domain.posted.lock().unwrap().is_empty());
         self.state.calls.fetch_add(1, Ordering::Relaxed);
         if self.state.refuse.load(Ordering::Relaxed) {
-            return Err(DmaError::InvalidationFailed);
+            return Err(
+                crate::bus::pci::requester::preparation::DetachError::Unexposed(
+                    DmaError::InvalidationFailed,
+                ),
+            );
         }
         self.detached = true;
         Ok(())
@@ -50,11 +56,15 @@ struct Fixture {
 fn attached() -> Fixture {
     let (hardware, pages, domain, peer) = parts();
     let state = Arc::new(ControlState::default());
-    let attachment = Box::new(Control {
-        domain: domain.clone(),
-        state: state.clone(),
-        detached: false,
-    });
+    // SAFETY: original synchronous RAM peer owns actual model leases and
+    // stop/drain checks; no native configuration/root is manufactured.
+    let attachment = unsafe {
+        Attachment::bounded_fixture(Box::new(Control {
+            domain: domain.clone(),
+            state: state.clone(),
+            detached: false,
+        }))
+    };
     // SAFETY: all original configuration, device/RAM, remapper and timer
     // owners belong to this isolated fixture, with no IRQ/work users.
     let packet = unsafe { Packet::attach_bound(hardware, &pages, attachment) }

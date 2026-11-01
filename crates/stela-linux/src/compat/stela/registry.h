@@ -144,6 +144,13 @@ int stela_linux_registry_initial_parameters(struct stela_linux_registry *,
 int stela_linux_registry_run_stage(struct stela_linux_registry *, unsigned int,
  struct stela_linux_registry_report *);
 /* Stable status index: init, exit, parameter, info, device, setup arrays. */
+/* Source-owned declared prerequisite by exact actual image/record identity.
+ * Reaching a later stage is not success: stage execution continues on errors.
+ * No initializer/getter callback, lookup by label or implicit readiness.
+ * This is historical success only: caller separately keeps exact source
+ * context/module lifetime and declared init phase; it is no device/I/O grant. */
+int stela_linux_registry_require_success(const struct stela_linux_registry *,
+ const struct stela_linux_registry_image *, const struct stela_linux_init_record *);
 int stela_linux_registry_status(const struct stela_linux_registry *, size_t,
  struct stela_linux_registration_status *);
 /* Original NULL/tail/ERR_PTR result from an already-attempted pass0..9.

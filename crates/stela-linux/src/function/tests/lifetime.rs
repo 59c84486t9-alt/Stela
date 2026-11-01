@@ -134,3 +134,76 @@ fn atomic_final_put_quarantines_host_and_domain_roots() {
     assert_eq!(Arc::strong_count(&domain), 2);
     assert_eq!(quarantined_functions(), 1);
 }
+
+#[test]
+fn retained_refusal_storage_keeps_before_graph() {
+    if !isolated("function::tests::lifetime::retained_refusal_storage_keeps_before_graph") {
+        return;
+    }
+    let drops = Arc::new(AtomicUsize::new(0));
+    let domain = Arc::new(Identity::default());
+    let host = CountedHost {
+        config: CountedConfig {
+            bytes: Config([0; 256]),
+            reads: Arc::new(AtomicUsize::new(0)),
+        },
+        drops: drops.clone(),
+    };
+    // This is the actual common retained-graph storage, not a fabricated
+    // PciAuthority: a model Attachment cannot qualify a native source target.
+    drop(Retained::new(Box::new((host, domain.clone()))));
+    assert_eq!(drops.load(Ordering::Relaxed), 0);
+    assert_eq!(Arc::strong_count(&domain), 2);
+    assert_eq!(retained_presentations(), 1);
+}
+
+#[test]
+fn null_presentation_keeps_actual_host_and_domain_state() {
+    if !isolated("function::tests::lifetime::null_presentation_keeps_actual_host_and_domain_state")
+    {
+        return;
+    }
+    unsafe extern "C" {
+        static stela_linux_bare: crate::owner::RawOwner;
+        fn stela_linux_kernel_claim(owner: *const crate::owner::RawOwner) -> i32;
+        fn stela_linux_kernel_environment(owner: *const crate::owner::RawOwner) -> i32;
+        fn stela_linux_kernel_ready(owner: *const crate::owner::RawOwner) -> i32;
+    }
+    let owner = core::ptr::addr_of!(stela_linux_bare);
+    // SAFETY: isolated cold C bookkeeping model with its actual static bare
+    // owner. This does not construct/qualify a KernelOwner or native Runtime.
+    unsafe {
+        assert_eq!(stela_linux_kernel_claim(owner), 0);
+        assert_eq!(stela_linux_kernel_environment(owner), 0);
+        assert_eq!(stela_linux_kernel_ready(owner), 0);
+    }
+    let _entered = Entered::try_new().unwrap();
+    // SAFETY: every PCI name here is heap-generated; classifier reads nothing.
+    unsafe { crate::image::register(Arc::new(HeapNames)) }
+        .ok()
+        .unwrap();
+    let drops = Arc::new(AtomicUsize::new(0));
+    let reads = Arc::new(AtomicUsize::new(0));
+    let domain = Arc::new(Identity::default());
+    let host = CountedHost {
+        config: CountedConfig {
+            bytes: Config([0; 256]),
+            reads: reads.clone(),
+        },
+        drops: drops.clone(),
+    };
+    // SAFETY: isolated memory-only host/domain and actual entered C model
+    // owner. No driver is registered. Missing enrollment must refuse before
+    // publication/probe, with Rust State ownership left to this caller.
+    let result = unsafe { Attached::attach(host, domain.clone(), Placement::default(), None) };
+    let rejected = match result {
+        Ok(_) => panic!("unenrolled presentation accepted"),
+        Err(value) => value,
+    };
+    assert!(matches!(&rejected.error, AttachError::Native(-1)));
+    drop(rejected);
+    assert!(reads.load(Ordering::Relaxed) > 0);
+    assert_eq!(drops.load(Ordering::Relaxed), 0);
+    assert_eq!(Arc::strong_count(&domain), 2);
+    assert_eq!(retained_presentations(), 1);
+}

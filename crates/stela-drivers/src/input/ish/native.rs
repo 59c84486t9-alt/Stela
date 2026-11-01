@@ -10,9 +10,7 @@ use crate::{
     Clock,
     bus::{
         dma::mapping::DmaDomain,
-        irq::{
-            self, Disposition, Handler, IrqController, IrqRegistration, Route, RouteRequest, Source,
-        },
+        irq::{self, Disposition, Handler, IrqController, IrqRegistration, Route, Source},
         pci::{
             Address, CapabilityError, Function, Layout,
             msi::{self, DisabledMsiConfig, MsiConfig, MsiConfigSpace, RetainedOwner},
@@ -75,6 +73,7 @@ pub struct Inputs<
     pub registers: R,
     pub domain: Arc<dyn DmaDomain>,
     pub interrupts: &'static dyn IrqController,
+    pub msi_route: irq::posted_msi::MsiRoute,
     pub clock: T,
 }
 struct Signals {
@@ -152,8 +151,9 @@ struct NativeSource<C: Configuration, R: Registers> {
     shared: Arc<Shared<R>>,
 }
 // SAFETY: fresh admission is independently stopped/drained. After any route
-// programming this source cannot claim posted-MSI completion: quiesce refuses
-// and every owner stays held. No inferred barrier grants route reuse.
+// This owner has no qualified terminal IRQ-action/pending-cause join yet;
+// quiesce refuses after publication and keeps every uncertain owner. Neither
+// payload completion nor notification-domain admission supplies that join.
 unsafe impl<C: Configuration, R: Registers> Source for NativeSource<C, R> {
     fn mask(&mut self) -> core::result::Result<(), irq::IrqError> {
         let result = (|| {
@@ -177,11 +177,17 @@ unsafe impl<C: Configuration, R: Registers> Source for NativeSource<C, R> {
             Ok(())
         }
     }
-    fn route(&self) -> RouteRequest {
-        RouteRequest::Msi
+    fn route_kind(&self) -> crate::bus::irq::RouteKind {
+        crate::bus::irq::RouteKind::Msi
     }
-    unsafe fn program(&mut self, route: Route) -> core::result::Result<(), irq::IrqError> {
-        let Route::Msi(message) = route else {
+    fn requester(&self) -> Option<&crate::bus::pci::requester::RequesterId> {
+        None
+    }
+    unsafe fn program(
+        &mut self,
+        route: &crate::bus::irq::AllocatedRoute<'_>,
+    ) -> core::result::Result<(), irq::IrqError> {
+        let Route::Msi(message) = route.programming() else {
             return Err(irq::IrqError::Route);
         };
         self.shared
@@ -229,6 +235,7 @@ pub struct Native<
     shared: Option<Arc<Shared<R>>>,
     config: Option<Rc<RefCell<ConfigState<C>>>>,
     registration: Option<Box<dyn IrqRegistration>>,
+    msi_route: Option<irq::posted_msi::MsiRoute>,
     interrupts: &'static dyn IrqController,
     clock: T,
     engine: Engine,
@@ -259,6 +266,10 @@ impl<C: Configuration, R: Registers, T: Time> Native<C, R, T> {
     /// service/stop; only the documented IRQ callback accesses shared registers.
     /// Clock/domain/native access contracts remain valid for every owner.
     /// Rejection returns original owners without any native write.
+    #[expect(
+        clippy::result_large_err,
+        reason = "rejection returns every affine input without allocating or releasing resources"
+    )]
     pub unsafe fn new(
         mut inputs: Inputs<C, R, T>,
     ) -> core::result::Result<Self, (Error, Inputs<C, R, T>)> {
@@ -337,6 +348,7 @@ impl<C: Configuration, R: Registers, T: Time> Native<C, R, T> {
             registers,
             domain,
             interrupts,
+            msi_route,
             clock,
         } = inputs;
         Ok(Self {
@@ -356,6 +368,7 @@ impl<C: Configuration, R: Registers, T: Time> Native<C, R, T> {
             })),
             config: None,
             registration: None,
+            msi_route: Some(msi_route),
             interrupts,
             clock,
             engine: Engine::new(),
@@ -529,18 +542,28 @@ impl<C: Configuration, R: Registers, T: Time> Native<C, R, T> {
             shared: shared.clone(),
         });
         let callback = Arc::new(Callback(shared));
-        self.registration = Some(match self.interrupts.request(source, callback) {
-            Ok(registration) => registration,
-            Err(error) => {
-                return Err(self
-                    .config
-                    .as_ref()
-                    .unwrap()
-                    .borrow()
-                    .failure
-                    .unwrap_or(Error::Irq(error)));
-            }
-        });
+        self.registration = Some(
+            match self.interrupts.request(irq::Request {
+                source,
+                handler: callback,
+                routing: irq::RouteRequest::Msi(
+                    self.msi_route
+                        .take()
+                        .ok_or(Error::Requirement("original unused IRQ route"))?,
+                ),
+            }) {
+                Ok(registration) => registration,
+                Err(error) => {
+                    return Err(self
+                        .config
+                        .as_ref()
+                        .unwrap()
+                        .borrow()
+                        .failure
+                        .unwrap_or(Error::Irq(error.error)));
+                }
+            },
+        );
         self.accept_reset = true;
         self.reset_ready = false;
         let host = read(self.regs(), HOST_COMM)?;
@@ -944,8 +967,8 @@ impl<C: Configuration, R: Registers, T: Time> Native<C, R, T> {
         // SAFETY: submissions/firmware DMA are terminal and acknowledged idle;
         // original domain/root/config/IRQ/mappings remain held.
         unsafe { self.domain.as_ref().unwrap().drain_posted_writes() }.map_err(Error::Dma)?;
-        // No registration.retire/release/unmap. Translated payload
-        // completion does not drain already posted MSI on the original route.
+        // No registration.retire/release/unmap: this adapter has no terminal
+        // old service/pending-cause action join. Payload drain cannot invent it.
         Err(Error::PostedMsiRetirementUnavailable)
     }
 }
@@ -953,6 +976,9 @@ impl<C: Configuration, R: Registers, T: Time> Drop for Native<C, R, T> {
     fn drop(&mut self) {
         // Neither Drop nor a failed stop can certify original posted-MSI/root
         // completion. Preserve every uncertain owner, even after panic.
+        if let Some(v) = self.msi_route.take() {
+            core::mem::forget(v);
+        }
         if let Some(v) = self.registration.take() {
             core::mem::forget(v);
         }

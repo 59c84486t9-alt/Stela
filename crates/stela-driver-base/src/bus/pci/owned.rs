@@ -47,6 +47,26 @@ impl ConfigRetention {
         self.view.check_current()
     }
 
+    /// Retain another view of this same original mapping in its checked
+    /// context. This supplies no second writer or new reset/root permission.
+    pub fn retain_epoch(&self) -> Result<Self, MappingError> {
+        self.check_live()?;
+        Ok(Self {
+            view: self.view.clone(),
+        })
+    }
+
+    /// Compare this actual original configuration allocation/epoch, never
+    /// equal BDFs, resource numbers or merely a shared mapping platform.
+    pub fn same_allocation(&self, other: &Self) -> Result<bool, MappingError> {
+        self.view.shares_mapping(&other.view)
+    }
+
+    /// Compare actual installed mapping-platform provenance only. This
+    /// establishes no endpoint/BAR, I/O, writer, stop or completion permission.
+    pub fn shares_authority(&self, mapping: &Mapping) -> Result<bool, MappingError> {
+        mapping.shares_authority(&self.view)
+    }
     /// Compare kept permissions, never caller-supplied numeric IDs.
     pub fn matches_mapping(&self, mapping: &Mapping) -> Result<bool, MappingError> {
         mapping.shares_mapping(&self.view)

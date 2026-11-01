@@ -91,7 +91,13 @@ impl Prepared {
             pending: pending.clone(),
             failed: failed.clone(),
         });
-        let registration = native_irq::service()?.request(Box::new(pin), callback)?;
+        let registration = native_irq::service()?
+            .request(stela_drivers::bus::irq::Request {
+                source: Box::new(pin),
+                handler: callback,
+                routing: stela_drivers::bus::irq::RouteRequest::Line(self.line),
+            })
+            .map_err(|e| e.error)?;
         Ok(Armed {
             pending,
             failed,
@@ -249,6 +255,13 @@ impl Armed {
         unsafe { self.parent.rearm() }
     }
     pub(super) fn retire(&mut self) -> Result<(), IrqError> {
-        self.registration.retire()
+        let retired = self.registration.retire()?;
+        // SAFETY: same original SCI line owner, stopped sources and completed callback.
+        let (source, callback, route) =
+            unsafe { retired.into_parts() }.map_err(|failure| failure.error)?;
+        drop(source);
+        drop(callback);
+        drop(route);
+        Ok(())
     }
 }

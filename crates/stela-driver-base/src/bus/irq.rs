@@ -1,7 +1,6 @@
-//! Owned native interrupt registrations. Device acknowledgement, completion
-//! fences and reset algorithms belong to the device handler/source owner.
+//! Original notification domains and exact CPU/callback/service action joins.
 pub mod posted_msi;
-
+use crate::bus::pci::requester::{RequesterId, preparation::DetachedRequester};
 use alloc::{boxed::Box, sync::Arc};
 use core::{
     marker::PhantomData,
@@ -16,7 +15,6 @@ const ARMING: u8 = 0;
 const LIVE: u8 = 1;
 const CLOSING: u8 = 2;
 const QUARANTINED: u8 = 3;
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IrqError {
     Unavailable,
@@ -29,15 +27,27 @@ pub enum IrqError {
     Route,
     Drain,
     Unregistered,
+    Delivery(posted_msi::Error),
 }
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MsiMessage {
     pub address: u64,
     pub data: u32,
 }
-
-/// Physical fixed-delivery target, checked by the owning CPU adapter.
+impl MsiMessage {
+    /// Data-format validation only. No message value grants route authority.
+    /// Current remappable programming supports SHV=0 and zero subhandle data;
+    /// the CPU vector remains in the checked root route, not in this data word.
+    pub(crate) fn valid_pci_format(self) -> bool {
+        if self.address & 3 != 0 {
+            return false;
+        }
+        let remapped = self.address & 0xfff0_0010 == 0xfee0_0010;
+        !remapped
+            || (self.address <= u64::from(u32::MAX) && self.address & 8 == 0 && self.data == 0)
+    }
+}
+/// Programming descriptor only; Registry's private reservation grants ownership.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Target {
     pub destination: u8,
@@ -60,8 +70,12 @@ pub struct LineRoute {
     pub trigger: Trigger,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RouteRequest {
+pub enum RouteKind {
     Msi,
+    Line,
+}
+pub enum RouteRequest {
+    Msi(posted_msi::MsiRoute),
     Line(LineRoute),
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -75,6 +89,103 @@ pub enum Disposition {
     Handled,
 }
 
+/// Private allocation identity, kept alive across vector reuse by every proof.
+#[derive(Clone)]
+pub struct RouteId(Arc<RouteIdentity>);
+struct RouteIdentity {
+    platform: &'static dyn Platform,
+    target: Target,
+    requester: Option<RequesterId>,
+    reserved: AtomicBool,
+    registry: RegistryIdentity,
+}
+impl RouteId {
+    pub(crate) fn same(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+    pub(crate) fn target(&self) -> Target {
+        self.0.target
+    }
+    pub(crate) fn check_process(&self) -> Result<(), IrqError> {
+        self.0.platform.check_process()?;
+        decode_error(self.0.registry.fault.load(Ordering::Acquire)).map_or(Ok(()), Err)
+    }
+}
+/// Borrowed view of an owned Registry reservation, never native entered authority.
+/// Only Registry creates it after checking actual CPU/root and exclusive vector.
+pub struct CpuTarget<'a> {
+    id: &'a RouteId,
+}
+impl CpuTarget<'_> {
+    /// Join the actual retained Registry allocation, never vector numbers.
+    pub fn belongs_to(&self, registry: RegistryIdentity) -> bool {
+        self.id.0.registry.same(registry)
+    }
+    pub fn descriptor(&self) -> Target {
+        self.id.target()
+    }
+    pub fn check_current(&self) -> Result<(), IrqError> {
+        self.id.check_process()?;
+        if !self.id.0.reserved.load(Ordering::Acquire) {
+            return Err(IrqError::Unregistered);
+        }
+        Ok(())
+    }
+    pub(crate) fn id(&self) -> &RouteId {
+        self.id
+    }
+    pub(crate) fn matches_requester(&self, requester: &RequesterId) -> bool {
+        self.id
+            .0
+            .requester
+            .as_ref()
+            .is_some_and(|own| own.same_requester(requester))
+    }
+}
+/// Programming view tied to this exact original route. Copied numbers are data.
+pub struct AllocatedRoute<'a> {
+    id: Option<&'a RouteId>,
+    programming: Route,
+}
+impl AllocatedRoute<'_> {
+    /// Symbolic programming data for isolated source-effect models only.
+    /// # Safety
+    /// No physical endpoint or native route may be programmed by this view.
+    /// It cannot mint a CpuTarget, root grant or any retirement receipt.
+    #[cfg(any(test, feature = "test-support"))]
+    pub unsafe fn model_programming(programming: Route) -> Self {
+        Self {
+            id: None,
+            programming,
+        }
+    }
+    pub fn programming(&self) -> Route {
+        self.programming
+    }
+    pub fn belongs_to(&self, registry: RegistryIdentity) -> bool {
+        self.id.is_some_and(|id| id.0.registry.same(registry))
+    }
+    pub fn matches_requester(&self, requester: &RequesterId) -> bool {
+        self.id
+            .and_then(|id| id.0.requester.as_ref())
+            .is_some_and(|own| own.same_requester(requester))
+    }
+    /// # Safety
+    /// This is the existing complete VMD source/fanout owner programming only
+    /// its owned child ingress. It grants no independent child Registry route,
+    /// root capability, detach or interrupt-retirement receipt.
+    pub(crate) unsafe fn vmd_child(&self, message: MsiMessage) -> AllocatedRoute<'_> {
+        AllocatedRoute {
+            id: self.id,
+            programming: Route::Msi(message),
+        }
+    }
+}
+pub struct Request<S> {
+    pub source: S,
+    pub handler: Arc<dyn Handler>,
+    pub routing: RouteRequest,
+}
 /// Immutable, pre-bound sharing group. Every member remains held until
 /// the entire physical source group is masked, stopped and drained. Joining
 /// or removing a member requires complete group retirement and re-registration;
@@ -107,40 +218,63 @@ impl Handler for SharedHandlers {
     }
 }
 
-/// A request that did not register. Once the CPU check passes, a refusal
-/// before anything is published gives the source and handler back
-/// unchanged, so the driver can keep polling its device; after a wrong-CPU
-/// check or an uncertain arming failure they stay held.
+/// Full untouched owners returned only after a checked prepublication refusal.
+/// Default Drop retains; checked extraction permits explicit retry/cancellation.
+pub struct UnregisteredSource<S: Source + ?Sized> {
+    request: ManuallyDrop<Request<Box<S>>>,
+    platform: &'static dyn Platform,
+    owner_cpu: PhantomData<*mut ()>,
+}
+impl<S: Source + ?Sized> UnregisteredSource<S> {
+    /// # Safety
+    /// Keep handler through source release and honor its independent resource
+    /// obligations. No retirement proof is supplied by this untouched request.
+    #[expect(
+        clippy::type_complexity,
+        reason = "explicit source/handler/route transfer preserves the checked extraction contract"
+    )]
+    pub unsafe fn into_parts(
+        mut self,
+    ) -> Result<(Box<S>, Arc<dyn Handler>, RouteRequest), ExtractionFailure<Self>> {
+        if let Err(error) = self.platform.check_process() {
+            return Err(ExtractionFailure {
+                error,
+                retained: self,
+            });
+        }
+        if let RouteRequest::Msi(msi) = &self.request.routing
+            && let Err(error) = msi.check_unpublished()
+        {
+            return Err(ExtractionFailure {
+                error: IrqError::Delivery(error),
+                retained: self,
+            });
+        }
+        // SAFETY: unique checked untouched owner, taken once; fields retain on
+        // every error/default Drop and no callback runs during extraction.
+        let request = unsafe { ManuallyDrop::take(&mut self.request) };
+        Ok((request.source, request.handler, request.routing))
+    }
+}
+pub struct ExtractionFailure<T> {
+    pub error: IrqError,
+    pub retained: T,
+}
 pub struct RequestError {
     pub error: IrqError,
-    pub returned: Option<(Box<dyn Source>, Arc<dyn Handler>)>,
+    pub returned: Option<UnregisteredSource<dyn Source>>,
 }
-
-/// Concrete-source refusal from request_owned. Only checked, untouched owners
-/// are returned; wrong-CPU or uncertain published ownership stays quarantined.
-/// The error itself stays CPU-affine, including when S happens to be Send.
 pub struct OwnedRequestError<S: Source> {
     pub error: IrqError,
     pub returned: Option<UnregisteredSource<S>>,
     owner_cpu: PhantomData<*mut ()>,
 }
-/// Untouched original owners from a checked prepublication refusal. Default
-/// Drop preserves source-before-callback release on the creating CPU. This
-/// wrapper proves no registry retirement and cannot mint a RetiredRoute.
-pub struct UnregisteredSource<S: Source> {
-    source: Box<S>,
-    handler: Arc<dyn Handler>,
-    owner_cpu: PhantomData<*mut ()>,
-}
-impl<S: Source> UnregisteredSource<S> {
-    /// Recover the exact untouched owners for device-specific fallback/retry.
-    ///
-    /// # Safety
-    /// Stay on the original checked process CPU and keep handler until the
-    /// source is consumed/released, including independent device/DMA-dependent
-    /// lifetime obligations. No stop/drain or retired-route proof is supplied.
-    pub unsafe fn into_parts(self) -> (Box<S>, Arc<dyn Handler>) {
-        (self.source, self.handler)
+impl core::fmt::Debug for RequestError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("RequestError")
+            .field("error", &self.error)
+            .field("returned", &self.returned.is_some())
+            .finish()
     }
 }
 impl<S: Source> core::fmt::Debug for OwnedRequestError<S> {
@@ -151,16 +285,6 @@ impl<S: Source> core::fmt::Debug for OwnedRequestError<S> {
             .finish()
     }
 }
-
-impl core::fmt::Debug for RequestError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("RequestError")
-            .field("error", &self.error)
-            .field("returned", &self.returned.is_some())
-            .finish()
-    }
-}
-
 impl From<IrqError> for RequestError {
     fn from(error: IrqError) -> Self {
         Self {
@@ -169,29 +293,25 @@ impl From<IrqError> for RequestError {
         }
     }
 }
-
-/// Object-safe mount service for driver consumers, independent of CPU type.
-/// The platform initializes and permanently keeps the controller.
 pub trait IrqController: Sync {
+    #[expect(
+        clippy::result_large_err,
+        reason = "return original owners inline without allocation after context or publication refusal"
+    )]
     fn request(
         &'static self,
-        source: Box<dyn Source>,
-        handler: Arc<dyn Handler>,
-    ) -> Result<Box<dyn IrqRegistration>, IrqError>;
+        request: Request<Box<dyn Source>>,
+    ) -> Result<Box<dyn IrqRegistration>, RequestError>;
     fn quarantine_count(&self) -> u64;
 }
-
-/// Process/deferred, CPU-affine owner. This trait supplies no
-/// Send/Sync promise; neither operations nor final Drop are hard-IRQ-safe.
 pub trait IrqRegistration {
     fn vector(&self) -> u8;
     fn handled(&self) -> Result<u64, IrqError>;
-    fn retire(&mut self) -> Result<(), IrqError>;
-    /// Complete the same stop/drain sequence and return the original source.
-    /// A failure keeps both owners in this registration for retry/quarantine.
-    fn retire_source(&mut self) -> Result<RetiredSource<dyn Source>, IrqError>;
+    /// Reversible source mask, not root/action retirement.
+    fn mask(&mut self) -> Result<(), IrqError>;
+    fn unmask(&mut self) -> Result<(), IrqError>;
+    fn retire(&mut self) -> Result<RetiredSource<dyn Source>, IrqError>;
 }
-
 /// Physical-parent mask capability for a hard-IRQ failure.
 /// This endpoint grants no route, callback, device or DMA ownership.
 ///
@@ -206,159 +326,308 @@ pub unsafe trait ParentMask: Send + Sync {
     fn mask(&self) -> Result<(), IrqError>;
 }
 
-/// Acknowledged retirement of one registered route. Only the canonical
-/// registry constructs this non-cloneable, CPU-affine receipt after hardware,
-/// callback and work drain. It proves no device DMA/domain/BM retirement.
+/// Exact IRQ-action CPU/EOI/callback/service/thread/work join, not all-issued
+/// MSI completion or engine/payload/DMA detach.
 pub struct RetiredRoute {
-    vector: u8,
+    id: RouteId,
+    msi: Option<posted_msi::MsiRoute>,
+    line_domain: ManuallyDrop<Option<Arc<dyn posted_msi::NotificationDomain>>>,
     owner_cpu: PhantomData<*mut ()>,
 }
 impl RetiredRoute {
     pub fn vector(&self) -> u8 {
-        self.vector
+        self.id.target().vector
+    }
+    pub(crate) fn id(&self) -> &RouteId {
+        &self.id
+    }
+    pub fn requester(&self) -> Option<&RequesterId> {
+        self.id.0.requester.as_ref()
+    }
+    pub fn validate(&self) -> Result<(), IrqError> {
+        self.id.check_process()?;
+        if let Some(msi) = &self.msi {
+            msi.validate().map_err(IrqError::Delivery)?;
+        }
+        if let Some(domain) = self.line_domain.as_ref() {
+            domain.check().map_err(IrqError::Delivery)?;
+        }
+        Ok(())
+    }
+    pub(crate) fn validate_requester(&self, requester: &RequesterId) -> Result<(), IrqError> {
+        if !self
+            .requester()
+            .is_some_and(|own| own.same_requester(requester))
+        {
+            return Err(IrqError::Route);
+        }
+        self.validate()
+    }
+    pub fn release_endpoint(
+        &mut self,
+        detached: &DetachedRequester,
+    ) -> Result<(), posted_msi::Error> {
+        self.msi
+            .as_mut()
+            .ok_or(posted_msi::Error::WrongRequester)?
+            .release(&self.id, detached)
+    }
+    pub(crate) fn join_action(&mut self, requester: &RequesterId) -> Result<(), IrqError> {
+        self.validate_requester(requester)?;
+        self.msi
+            .as_mut()
+            .ok_or(IrqError::Route)?
+            .join_action(requester, &self.id)
+            .map_err(IrqError::Delivery)
+    }
+
+    /// Release only the original bounded no-native-pin diagnostic/model route.
+    /// A native attached or unavailable route cannot use this transition and
+    /// it supplies no DetachedRequester or reset-coordinator proof.
+    pub fn release_unattached_fixture(&mut self) -> Result<(), IrqError> {
+        self.id.check_process()?;
+        #[cfg(any(test, feature = "test-support", feature = "irq-diagnostics"))]
+        if let Some(msi) = &mut self.msi {
+            return msi.release_fixture(&self.id).map_err(IrqError::Delivery);
+        }
+        Err(IrqError::Unsupported)
     }
 }
-
-/// The original source and callback owner after acknowledged route retirement.
-/// Source field order preserves final release while its callback context is
-/// still held. This owner remains process/deferred and CPU-affine.
+impl Drop for RetiredRoute {
+    fn drop(&mut self) {
+        // The affine MSI provider has its own conservative checked Drop. Line
+        // notification metadata likewise cannot end on a foreign CPU/epoch.
+        if self.validate().is_ok() {
+            // SAFETY: original checked process/domain, no active old action;
+            // no controller or source hardware is released by metadata Drop.
+            unsafe { ManuallyDrop::drop(&mut self.line_domain) };
+        }
+    }
+}
+/// The original source/handler/root owner after canonical route retirement.
+/// Default Drop retains every field; extraction is explicit and checked.
+#[must_use = "retired owners must be explicitly extracted or intentionally retained"]
 pub struct RetiredSource<S: Source + ?Sized> {
-    source: Box<S>,
-    handler: Arc<dyn Handler>,
-    route: RetiredRoute,
+    source: ManuallyDrop<Box<S>>,
+    handler: ManuallyDrop<Arc<dyn Handler>>,
+    route: ManuallyDrop<RetiredRoute>,
 }
 impl<S: Source + ?Sized> RetiredSource<S> {
     pub fn route(&self) -> &RetiredRoute {
         &self.route
     }
-
-    /// Extract the original source, callback and route receipt.
-    ///
     /// # Safety
-    /// Stay on the checked process CPU. Keep `handler` until `source` has
-    /// been consumed/released, including any source-destructor dependency on
-    /// callback-owned context, and until all independently required device/DMA
-    /// completion for callback-owned resources is acknowledged. Config/root release still
-    /// requires its stop and completion proofs; route drain alone does
-    /// not grant them. A failed extraction must keep the original owners.
-    pub unsafe fn into_parts(self) -> (Box<S>, Arc<dyn Handler>, RetiredRoute) {
-        (self.source, self.handler, self.route)
+    /// Keep handler until source and its independent device/DMA users have
+    /// retired. The route alone cannot end native config/root pins.
+    #[expect(
+        clippy::type_complexity,
+        reason = "explicit source/handler/route transfer preserves the checked extraction contract"
+    )]
+    pub unsafe fn into_parts(
+        mut self,
+    ) -> Result<(Box<S>, Arc<dyn Handler>, RetiredRoute), ExtractionFailure<Self>> {
+        if let Err(error) = self.route.validate() {
+            return Err(ExtractionFailure {
+                error,
+                retained: self,
+            });
+        }
+        // SAFETY: exact checked route and unique fields, each taken once. The
+        // ManuallyDrop fields remain untouched on every refusal/abandonment.
+        Ok(unsafe {
+            (
+                ManuallyDrop::take(&mut self.source),
+                ManuallyDrop::take(&mut self.handler),
+                ManuallyDrop::take(&mut self.route),
+            )
+        })
     }
 }
+/// An original immutable IRQ-chip EOI endpoint, never the affine Source.
+/// # Safety
+/// Prepared from the same real controller/pin/epoch and checked CpuTarget;
+/// IRQ-safe, no allocation/blocking/foreign !Send access. Revalidate original
+/// mode/route on every call, preserve mask state, and contain failures through
+/// the actual parent. Slot inflight keeps it through local and chip EOI. Drop
+/// cannot tear down a live pin or release native custody in a foreign context;
+/// refused prepublication/unwind paths retain any unresolved physical owner.
+pub unsafe trait ChipEoi: Send + Sync {
+    fn after_local_eoi(&self, observed: Trigger) -> Result<(), IrqError>;
+}
 
-/// Fast hard-IRQ callback. Acknowledge owned real causes before returning, or
-/// mask a deferred source under its work owner. The platform
-/// emits EOI afterwards. A bounded diagnostic may leave a level
-/// asserted once to observe EOI/retrigger behavior. No blocking, allocation or final heap/Arc
-/// release is permitted. Defer work through the device's work owner.
+/// An ordinary notification is a hint, never a device completion receipt.
+/// Check this action's current status/rings before reporting or freeing payload.
+/// The original Source/domain must retain every physical resource reachable by
+/// this handler; CPU callback ownership alone is not a device DMA exclusion.
 pub trait Handler: Send + Sync {
     fn handle(&self) -> Disposition;
 }
-
-/// Exclusive real device/interrupt source kept by its registration.
+/// Exclusive device stop/program/work owner, separate from root route fencing.
 ///
 /// # Safety
-/// The source initially owns an inactive route, with no old firmware/driver
-/// callback or unresolved alias. `mask` disables interrupt generation
-/// and observes the device's acknowledgement. `quiesce` stops submissions and
-/// device DMA/posted interrupt writes, cancels/drains queued workers/timers
-/// and acknowledges pending causes. It excludes future device delivery/work
-/// until explicit `unmask`; the registry invokes it again after callback drain
-/// for work from a formerly in-flight callback. Both calls must keep every
-/// callback-reachable context, BO, reservation, pin and CPU/DMA lease until
-/// registration retirement finishes; quiescence alone never authorizes their
-/// release or skips a hardware fence/IOTLB acknowledgement.
-/// `program` installs exactly the supplied typed route while masked;
-/// `unmask` enables only this route. Errors must never free hardware-reachable
-/// state. These process/deferred methods and final Drop are never ISR-safe.
-/// A source may be CPU-affine and !Send. Only its checked owning
-/// CPU's process registration accesses or finally releases it; IRQ dispatch
-/// sees the separately Send+Sync handler only.
+/// Own the inactive original source/config/reset epoch and complete admitted
+/// route/alias set. mask observes real device acknowledgement; quiesce stops
+/// this owned IRQ action's producers and accounts for its old pending causes
+/// without freeing reachable state. Other endpoint DMA may remain active when
+/// the actual source protocol permits it; engine/payload/unmap/detach proof is
+/// separate terminal endpoint ownership. The original notification domain remains retained independently. program
+/// verifies the exact allocated requester and programs only its admitted data
+/// while masked; unmask cannot enable alternatives. synchronize completes real
+/// controller/post-callback work after CPU drain. Failure/panic/Drop retains
+/// uncertain resources; all calls/final release require original process CPU.
 pub unsafe trait Source {
+    fn route_kind(&self) -> RouteKind;
+    fn requester(&self) -> Option<&RequesterId>;
+    /// Line routes require an actual original controller/root notification
+    /// domain; a missing witness is explicit unavailable admission.
+    fn notification_domain(&self) -> Result<Arc<dyn posted_msi::NotificationDomain>, IrqError> {
+        Err(IrqError::Unsupported)
+    }
+    /// Process-only immutable endpoint capture, before native publication.
+    /// None is valid only where no chip-specific level EOI is needed.
+    fn eoi_endpoint(
+        &mut self,
+        _target: &CpuTarget<'_>,
+    ) -> Result<Option<Arc<dyn ChipEoi>>, IrqError> {
+        Ok(None)
+    }
     fn mask(&mut self) -> Result<(), IrqError>;
     fn quiesce(&mut self) -> Result<(), IrqError>;
-    fn route(&self) -> RouteRequest;
     /// # Safety
-    /// The route is owned by the registry on its checked CPU, matches this
-    /// source's request, and its callback is published before unmask.
-    unsafe fn program(&mut self, route: Route) -> Result<(), IrqError>;
+    /// Registry retains this exact route/CPU/source/callback while masked.
+    unsafe fn program(&mut self, route: &AllocatedRoute<'_>) -> Result<(), IrqError>;
     /// # Safety
-    /// A live registry keeps the programmed route and every callback owner.
+    /// Exact route and LIVE callback are retained by Registry.
     unsafe fn unmask(&mut self) -> Result<(), IrqError>;
-    /// Called after source quiescence, CPU IRR/ISR drain and callback EOI.
-    /// Check route-controller completion (including level Remote IRR)
-    /// and drain work queued by any formerly in-flight callback. An error
-    /// keeps the complete registration; it never authorizes route reuse.
     /// # Safety
-    /// The owned source is stopped, CPU IRR/ISR and all in-flight callbacks
-    /// have drained. No future callback can begin while synchronization runs.
+    /// This old action is CLOSING; its callback cannot begin again and CPU
+    /// IRR/ISR/inflight/EOI have joined. Join every captured service/thread/work
+    /// producer before releasing old reachable state. This is not fabric or DMA
+    /// completion; a later ordinary notification may reach a new valid action.
     unsafe fn synchronize(&mut self) -> Result<(), IrqError>;
 }
-
-/// Existing CPU/interrupt controller adapter, never a second IDT/APIC owner.
+/// Existing checked CPU/controller adapter, never a second vector/root owner.
 ///
 /// # Safety
-/// Save/disable and restore operate on this same CPU; their memory clobbers
-/// order the critical region. `check_cpu` refuses migration/unavailable state.
-/// Routing, pending IRR/ISR reads and EOI have their controller effects.
-/// `interrupt_window` admits queued IRQs and returns with local IRQs disabled;
-/// it is called outside registry locks only. The clock advances during drain.
-/// Vector ownership remains exclusive for the registry lifetime; another CPU
-/// cannot dispatch a route assigned to this registry's CPU.
+/// Actual CPU, IRQ save/restore, pending, target and EOI effects belong to the
+/// retained canonical controller. check_process additionally refuses ISR,
+/// foreign root and unavailable native execution scope. compatibility_message
+/// interrupt_window admits queued delivery only outside Registry/resource locks.
 pub unsafe trait Platform: Send + Sync {
     fn check_cpu(&self) -> Result<(), IrqError>;
+    fn check_process(&self) -> Result<(), IrqError>;
     fn save_and_disable(&self) -> u64;
     /// # Safety
-    /// `saved` is this CPU's immediately enclosing save/disable state.
+    /// saved is the immediately enclosing same-CPU disable state.
     unsafe fn restore(&self, saved: u64);
     fn target(&self, vector: u8) -> Result<Target, IrqError>;
     fn pending(&self, vector: u8) -> Result<bool, IrqError>;
-    fn eoi(&self);
+    /// Snapshot this vector's actual TMR BEFORE local EOI, then acknowledge it.
+    fn eoi(&self, vector: u8) -> Result<Trigger, IrqError>;
     fn ticks(&self) -> u64;
     fn timeout_ticks(&self) -> u64;
     /// # Safety
-    /// No registry lock or non-IRQ-safe resource lock is held; IRQs are off.
+    /// IRQs are disabled; no Registry/resource lock is held.
     unsafe fn interrupt_window(&self);
 }
-
+fn encode_error(error: IrqError) -> u8 {
+    match error {
+        IrqError::Unavailable => 1,
+        IrqError::WrongCpu => 2,
+        IrqError::Exhausted => 3,
+        IrqError::Unsupported => 4,
+        IrqError::FailedRead => 5,
+        IrqError::Mask => 6,
+        IrqError::Quiesce => 7,
+        IrqError::Route => 8,
+        IrqError::Drain => 9,
+        IrqError::Unregistered => 10,
+        IrqError::Delivery(error) => {
+            16 + match error {
+                posted_msi::Error::RootUnavailable => 0,
+                posted_msi::Error::Unsupported => 1,
+                posted_msi::Error::RootFailed => 2,
+                posted_msi::Error::Unbound => 3,
+                posted_msi::Error::AlreadyBound => 4,
+                posted_msi::Error::WrongRequester => 5,
+                posted_msi::Error::Context => 6,
+                posted_msi::Error::NotRetired => 7,
+            }
+        }
+    }
+}
+fn decode_error(code: u8) -> Option<IrqError> {
+    Some(match code {
+        0 => return None,
+        1 => IrqError::Unavailable,
+        2 => IrqError::WrongCpu,
+        3 => IrqError::Exhausted,
+        4 => IrqError::Unsupported,
+        5 => IrqError::FailedRead,
+        6 => IrqError::Mask,
+        7 => IrqError::Quiesce,
+        8 => IrqError::Route,
+        9 => IrqError::Drain,
+        10 => IrqError::Unregistered,
+        16 => IrqError::Delivery(posted_msi::Error::RootUnavailable),
+        17 => IrqError::Delivery(posted_msi::Error::Unsupported),
+        18 => IrqError::Delivery(posted_msi::Error::RootFailed),
+        19 => IrqError::Delivery(posted_msi::Error::Unbound),
+        20 => IrqError::Delivery(posted_msi::Error::AlreadyBound),
+        21 => IrqError::Delivery(posted_msi::Error::WrongRequester),
+        22 => IrqError::Delivery(posted_msi::Error::Context),
+        23 => IrqError::Delivery(posted_msi::Error::NotRetired),
+        _ => IrqError::Drain,
+    })
+}
 struct Slot {
-    // Release the stopped source while its callback context is still held.
     source: core::cell::UnsafeCell<Box<dyn Source>>,
     handler: Arc<dyn Handler>,
+    domain: Option<Arc<dyn posted_msi::NotificationDomain>>,
+    chip: Option<Arc<dyn ChipEoi>>,
+    fault: AtomicU8,
+    routing: core::cell::UnsafeCell<RouteRequest>,
+    id: RouteId,
+    programming: Option<Route>,
     state: AtomicU8,
     inflight: AtomicUsize,
     handled: AtomicU64,
 }
-
-/// Admission owns these bytes from its first instruction. Every early error
-/// keeps them observably without allocating or releasing on an unknown CPU.
 struct Pending<'a, P: Platform> {
     registry: &'a Registry<P>,
-    source: ManuallyDrop<Box<dyn Source>>,
-    handler: ManuallyDrop<Arc<dyn Handler>>,
-    published: bool,
+    request: ManuallyDrop<Request<Box<dyn Source>>>,
+    transferred: bool,
 }
-impl<P: Platform> Pending<'_, P> {
-    /// The unpublished owners, back to the caller on this checked CPU.
-    fn give_back(mut self) -> (Box<dyn Source>, Arc<dyn Handler>) {
-        self.published = true;
-        // SAFETY: this consumes the unique unpublished owners exactly once.
-        unsafe {
-            (
-                ManuallyDrop::take(&mut self.source),
-                ManuallyDrop::take(&mut self.handler),
-            )
+impl<P: Platform + 'static> Pending<'static, P> {
+    fn returned(mut self) -> UnregisteredSource<dyn Source> {
+        self.transferred = true;
+        // SAFETY: unique untouched request after checked prepublication refusal.
+        let request = unsafe { ManuallyDrop::take(&mut self.request) };
+        UnregisteredSource {
+            request: ManuallyDrop::new(request),
+            platform: &self.registry.platform,
+            owner_cpu: PhantomData,
         }
     }
-
-    fn into_slot(mut self) -> Slot {
-        self.published = true;
-        // SAFETY: this consumes the unique unpublished owners exactly once.
+    fn slot(
+        mut self,
+        id: RouteId,
+        programming: Option<Route>,
+        domain: Option<Arc<dyn posted_msi::NotificationDomain>>,
+        chip: Option<Arc<dyn ChipEoi>>,
+    ) -> Slot {
+        self.transferred = true;
+        // SAFETY: all original fields move once; Pending no longer retains them.
+        let request = unsafe { ManuallyDrop::take(&mut self.request) };
         Slot {
-            // SAFETY: taken exactly once; `published` stops Drop from dropping it again.
-            source: core::cell::UnsafeCell::new(unsafe { ManuallyDrop::take(&mut self.source) }),
-            // SAFETY: taken exactly once; `published` stops Drop from dropping it again.
-            handler: unsafe { ManuallyDrop::take(&mut self.handler) },
+            source: core::cell::UnsafeCell::new(request.source),
+            handler: request.handler,
+            domain,
+            chip,
+            fault: AtomicU8::new(0),
+            routing: core::cell::UnsafeCell::new(request.routing),
+            id,
+            programming,
             state: AtomicU8::new(ARMING),
             inflight: AtomicUsize::new(0),
             handled: AtomicU64::new(0),
@@ -367,54 +636,106 @@ impl<P: Platform> Pending<'_, P> {
 }
 impl<P: Platform> Drop for Pending<'_, P> {
     fn drop(&mut self) {
-        if !self.published {
+        if !self.transferred {
             self.registry.count_quarantine();
-            // The real Box/Arc allocations remain held. No source access
-            // or final Drop is checked by a failed admission/CPU check.
         }
     }
 }
-
+struct Reservation<'a, P: Platform> {
+    registry: &'a Registry<P>,
+    index: usize,
+    id: RouteId,
+    transferred: bool,
+}
+impl<P: Platform> Reservation<'_, P> {
+    fn release(mut self) -> Result<(), IrqError> {
+        self.registry.platform.check_process()?;
+        let guard = self.registry.lock();
+        self.registry
+            .reserved
+            .fetch_and(!(1usize << self.index), Ordering::Release);
+        self.id.0.reserved.store(false, Ordering::Release);
+        self.transferred = true;
+        drop(guard);
+        Ok(())
+    }
+}
+impl<P: Platform> Drop for Reservation<'_, P> {
+    fn drop(&mut self) {
+        if !self.transferred {
+            self.registry.count_quarantine();
+        }
+    }
+}
 impl<P: Platform + 'static> IrqController for Registry<P> {
     fn request(
         &'static self,
-        source: Box<dyn Source>,
-        handler: Arc<dyn Handler>,
-    ) -> Result<Box<dyn IrqRegistration>, IrqError> {
-        // A refusal's returned owners are released here, on the checked CPU.
-        Registry::request(self, source, handler)
-            .map(|registration| Box::new(registration) as Box<dyn IrqRegistration>)
-            .map_err(|refusal| refusal.error)
+        request: Request<Box<dyn Source>>,
+    ) -> Result<Box<dyn IrqRegistration>, RequestError> {
+        Registry::request(self, request).map(|r| Box::new(r) as Box<dyn IrqRegistration>)
     }
     fn quarantine_count(&self) -> u64 {
         Registry::quarantine_count(self)
     }
 }
-
-/// One platform-owned vector inventory. Allocations, source operations and
-/// **final release**, including callback-owned state, require process/deferred
-/// context. Dispatch never clones/drops an Arc or allocates/frees memory.
+/// Opaque provenance of the actual permanently retained Registry allocation.
+/// This is metadata only, never a CPU reservation or a native root grant. The
+/// private non-zero-sized lock address cannot alias a replacement: issuing this
+/// token requires a static Registry that is never reclaimed or reconstructed.
+#[derive(Clone, Copy)]
+pub struct RegistryIdentity {
+    held: &'static AtomicBool,
+    fault: &'static AtomicU8,
+}
+impl RegistryIdentity {
+    pub fn same(self, other: Self) -> bool {
+        core::ptr::eq(self.held, other.held)
+    }
+}
+/// The one permanently retained CPU-vector/dispatch inventory.
 pub struct Registry<P: Platform> {
     platform: P,
     slots: [AtomicPtr<Slot>; VECTOR_COUNT],
+    reserved: AtomicUsize,
     held: AtomicBool,
     quarantined: AtomicU64,
+    controller_fault: AtomicU8,
 }
-
 impl<P: Platform> Registry<P> {
     pub const fn new(platform: P) -> Self {
         Self {
             platform,
             slots: [const { AtomicPtr::new(core::ptr::null_mut()) }; VECTOR_COUNT],
+            reserved: AtomicUsize::new(0),
             held: AtomicBool::new(false),
             quarantined: AtomicU64::new(0),
+            controller_fault: AtomicU8::new(0),
         }
     }
-
+    pub fn identity(&'static self) -> RegistryIdentity {
+        RegistryIdentity {
+            held: &self.held,
+            fault: &self.controller_fault,
+        }
+    }
+    /// Latched original controller acknowledgement failure. A true dispatch
+    /// return means vector ownership only; it never certifies successful EOI.
+    pub fn controller_failure(&self) -> Option<IrqError> {
+        decode_error(self.controller_fault.load(Ordering::Acquire))
+    }
+    fn check_controller(&self) -> Result<(), IrqError> {
+        self.controller_failure().map_or(Ok(()), Err)
+    }
     pub fn quarantine_count(&self) -> u64 {
         self.quarantined.load(Ordering::Relaxed)
     }
-
+    fn count_quarantine(&self) {
+        let _ = self
+            .quarantined
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                Some(v.saturating_add(1))
+            });
+    }
     fn lock(&self) -> Guard<'_, P> {
         let saved = self.platform.save_and_disable();
         while self
@@ -429,146 +750,22 @@ impl<P: Platform> Registry<P> {
             saved,
         }
     }
-
-    /// Publish the handler before enabling the source. Any
-    /// uncertain arming failure keeps source/handler and quarantines vector,
-    /// as does a wrong-CPU check. Vector exhaustion and target or route
-    /// refusals give both owners back.
-    pub fn request(
-        &'static self,
-        source: Box<dyn Source>,
-        handler: Arc<dyn Handler>,
-    ) -> Result<Registration<'static, P>, RequestError> {
-        // Keep both owners if CPU validation fails before
-        // publication: this consuming API cannot return a failed source to
-        // its original CPU, and must never run a !Send source's Drop here.
-        let pending = Pending {
-            registry: self,
-            source: ManuallyDrop::new(source),
-            handler: ManuallyDrop::new(handler),
-            published: false,
-        };
-        self.platform.check_cpu()?;
-        let guard = self.lock();
-        let admitted = self
-            .slots
-            .iter()
-            .position(|slot| slot.load(Ordering::Relaxed).is_null())
-            .ok_or(IrqError::Exhausted)
-            .and_then(|index| {
-                let vector = FIRST_VECTOR + index as u8;
-                let target = self.platform.target(vector)?;
-                match target.vector == vector && target.destination != 255 {
-                    true => Ok((index, vector, target)),
-                    false => Err(IrqError::Route),
-                }
-            });
-        let (index, vector, target) = match admitted {
-            Ok(admitted) => admitted,
-            Err(error) => {
-                drop(guard);
-                return Err(RequestError {
-                    error,
-                    returned: Some(pending.give_back()),
-                });
-            }
-        };
-        let route = match pending.source.route() {
-            RouteRequest::Msi => Route::Msi(MsiMessage {
-                address: 0xfee00000 | u64::from(target.destination) << 12,
-                data: u32::from(vector),
-            }),
-            RouteRequest::Line(line) => Route::Line { target, line },
-        };
-        let slot = NonNull::from(Box::leak(Box::new(pending.into_slot())));
-        self.slots[index].store(slot.as_ptr(), Ordering::Release);
-        drop(guard);
-        // SAFETY: the process owner is unique; dispatch never accesses source.
-        let source = unsafe { &mut *slot.as_ref().source.get() };
-        let armed = source
-            .mask()
-            .and_then(|()| source.quiesce())
-            .and_then(|()| {
-                // SAFETY: checked target, kept ARMING slot, mask and stop.
-                unsafe { source.program(route) }
-            });
-        if let Err(error) = armed {
-            self.quarantine(slot);
-            return Err(error.into());
-        }
-        // SAFETY: The slot is already fully kept; a delivery during unmask sees
-        // the real handler. No new submission precedes source configuration.
-        unsafe { slot.as_ref() }
-            .state
-            .store(LIVE, Ordering::Release);
-        // SAFETY: the complete owned route and LIVE callback are published.
-        if let Err(error) = unsafe { source.unmask() } {
-            self.quarantine(slot);
-            let _ = source.mask();
-            return Err(error.into());
-        }
-        Ok(Registration {
-            registry: self,
-            slot,
-            vector,
-            active: true,
-            owner_cpu: PhantomData,
-        })
-    }
-
-    /// Preserve the concrete source type through canonical IRQ retirement.
-    /// This returns the original PCI/config/root owner, never a clone.
-    pub fn request_owned<S: Source + 'static>(
-        &'static self,
-        source: S,
-        handler: Arc<dyn Handler>,
-    ) -> Result<OwnedRegistration<'static, P, S>, OwnedRequestError<S>> {
-        self.request(Box::new(source), handler)
-            .map(|registration| OwnedRegistration {
-                registration,
-                source: PhantomData,
-            })
-            .map_err(|refusal| OwnedRequestError {
-                error: refusal.error,
-                returned: refusal.returned.map(|(source, handler)| {
-                    // SAFETY: this same private request_owned call erased the
-                    // original Box<S>; Registry never replaces its source.
-                    let source = unsafe { Box::from_raw(Box::into_raw(source) as *mut S) };
-                    UnregisteredSource {
-                        source,
-                        handler,
-                        owner_cpu: PhantomData,
-                    }
-                }),
-                owner_cpu: PhantomData,
-            })
-    }
-
     fn quarantine(&self, slot: NonNull<Slot>) {
-        // SAFETY: a quarantined slot is never detached or freed.
-        let previous = unsafe { slot.as_ref() }
+        // SAFETY: every exposed slot is permanently kept until successful
+        // detach; quarantine only touches its CPU-independent atomic state.
+        if unsafe { slot.as_ref() }
             .state
-            .swap(QUARANTINED, Ordering::AcqRel);
-        if previous != QUARANTINED {
+            .swap(QUARANTINED, Ordering::AcqRel)
+            != QUARANTINED
+        {
             self.count_quarantine();
         }
     }
-
-    fn count_quarantine(&self) {
-        let _ = self
-            .quarantined
-            .try_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
-                Some(count.saturating_add(1))
-            });
-    }
-
-    /// Called by the existing IDT dispatcher with local IRQs off. Returns
-    /// true for a route, including closing/quarantined tombstones.
     pub fn dispatch(&self, vector: u8) -> bool {
         let Some(index) = vector
             .checked_sub(FIRST_VECTOR)
             .map(usize::from)
-            .filter(|index| *index < VECTOR_COUNT)
+            .filter(|i| *i < VECTOR_COUNT)
         else {
             return false;
         };
@@ -576,24 +773,397 @@ impl<P: Platform> Registry<P> {
             return false;
         }
         let guard = self.lock();
-        let Some(slot) = NonNull::new(self.slots[index].load(Ordering::Acquire)) else {
-            return false;
-        };
-        // SAFETY: lock protects pointer acquisition; inflight prevents release
-        // until after EOI, even if removal closes the route meanwhile.
-        let slot = unsafe { slot.as_ref() };
-        slot.inflight.fetch_add(1, Ordering::AcqRel);
-        let live = slot.state.load(Ordering::Acquire) == LIVE;
-        drop(guard);
-        if live && slot.handler.handle() == Disposition::Handled {
-            slot.handled.fetch_add(1, Ordering::Relaxed);
+        let slot = NonNull::new(self.slots[index].load(Ordering::Acquire));
+        let pointer = slot;
+        // SAFETY: lock protects acquisition; inflight includes handler + all EOI.
+        let slot = slot.map(|slot| unsafe { slot.as_ref() });
+        if let Some(slot) = slot {
+            slot.inflight.fetch_add(1, Ordering::AcqRel);
         }
-        self.platform.eoi();
-        slot.inflight.fetch_sub(1, Ordering::Release);
+        let mut unwind = DispatchUnwind {
+            registry: self,
+            slot: pointer,
+            completed: false,
+        };
+        let controller_error = self.controller_failure();
+        let state = slot.map(|slot| slot.state.load(Ordering::Acquire));
+        let live = controller_error.is_none() && state == Some(LIVE);
+        drop(guard);
+        let mut error = controller_error;
+        if let Some(slot) = slot
+            && live
+        {
+            let valid = slot
+                .domain
+                .as_ref()
+                .ok_or(posted_msi::Error::RootUnavailable)
+                .and_then(|domain| domain.check());
+            match valid {
+                Ok(()) => {
+                    if slot.handler.handle() == Disposition::Handled {
+                        slot.handled.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                Err(cause) => error = Some(IrqError::Delivery(cause)),
+            }
+        }
+        // The entire reserved range belongs to this original controller.
+        // An ordinary late/unbound notification still needs local EOI.
+        match self.platform.eoi(vector) {
+            Ok(observed) => {
+                // An old ordinary edge packet may reach the reserved vector
+                // before the masked Source is programmed. No new owned level
+                // source is enabled in ARMING, so only local EOI is needed;
+                // the captured chip endpoint is not a programmed pin yet.
+                if let Some(slot) = slot.filter(|_| state != Some(ARMING))
+                    && let Some(chip) = &slot.chip
+                    && let Err(cause) = chip.after_local_eoi(observed)
+                {
+                    error.get_or_insert(cause);
+                }
+            }
+            Err(cause) => {
+                // No Slot may exist for a delayed notification. Preserve the
+                // actual controller failure canonically before allowing any
+                // replacement admission or callback, rather than losing it.
+                let _ = self.controller_fault.compare_exchange(
+                    0,
+                    encode_error(cause),
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                );
+                error.get_or_insert(cause);
+            }
+        }
+        if let Some(slot) = slot {
+            if let Some(error) = error {
+                let _ = slot.fault.compare_exchange(
+                    0,
+                    encode_error(error),
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                );
+                if slot.state.swap(QUARANTINED, Ordering::AcqRel) != QUARANTINED {
+                    self.count_quarantine();
+                }
+            }
+            slot.inflight.fetch_sub(1, Ordering::Release);
+        }
+        unwind.completed = true;
         true
     }
 }
-
+impl<P: Platform + 'static> Registry<P> {
+    fn reserve(
+        &'static self,
+        requester: Option<RequesterId>,
+    ) -> Result<Reservation<'static, P>, IrqError> {
+        self.platform.check_process()?;
+        let guard = self.lock();
+        let used = self.reserved.load(Ordering::Relaxed);
+        let index = (0..VECTOR_COUNT)
+            .find(|i| used & (1usize << i) == 0)
+            .ok_or(IrqError::Exhausted)?;
+        let vector = FIRST_VECTOR + index as u8;
+        let target = self.platform.target(vector)?;
+        if target.vector != vector || target.destination == 255 {
+            return Err(IrqError::Route);
+        }
+        self.reserved.fetch_or(1usize << index, Ordering::Release);
+        drop(guard);
+        // Heap allocation is outside IF-disabled Registry exclusion.
+        let id = RouteId(Arc::new(RouteIdentity {
+            platform: &self.platform,
+            target,
+            requester,
+            reserved: AtomicBool::new(true),
+            registry: self.identity(),
+        }));
+        Ok(Reservation {
+            registry: self,
+            index,
+            id,
+            transferred: false,
+        })
+    }
+    #[expect(
+        clippy::result_large_err,
+        reason = "return original owners inline without allocation after context or publication refusal"
+    )]
+    pub fn request(
+        &'static self,
+        request: Request<Box<dyn Source>>,
+    ) -> Result<Registration<'static, P>, RequestError> {
+        let mut pending = Pending {
+            registry: self,
+            request: ManuallyDrop::new(request),
+            transferred: false,
+        };
+        self.platform.check_process()?;
+        if let Err(error) = self.check_controller() {
+            return Err(RequestError {
+                error,
+                returned: Some(pending.returned()),
+            });
+        }
+        let kind = pending.request.source.route_kind();
+        if !matches!(
+            (&pending.request.routing, kind),
+            (RouteRequest::Msi(_), RouteKind::Msi) | (RouteRequest::Line(_), RouteKind::Line)
+        ) {
+            return Err(RequestError {
+                error: IrqError::Route,
+                returned: Some(pending.returned()),
+            });
+        }
+        let requester = pending.request.source.requester().cloned();
+        if let RouteRequest::Msi(route) = &pending.request.routing {
+            let matches = match (route.requester(), requester.as_ref()) {
+                (None, None) => true,
+                (Some(a), Some(b)) => a.same_requester(b),
+                _ => false,
+            };
+            if !matches {
+                return Err(RequestError {
+                    error: IrqError::Route,
+                    returned: Some(pending.returned()),
+                });
+            }
+        }
+        let mut reservation = match self.reserve(requester) {
+            Ok(value) => value,
+            Err(error) => {
+                let returned = if self.platform.check_process().is_ok() {
+                    Some(pending.returned())
+                } else {
+                    None
+                };
+                return Err(RequestError { error, returned });
+            }
+        };
+        let target = CpuTarget {
+            id: &reservation.id,
+        };
+        let chip = match pending.request.source.eoi_endpoint(&target) {
+            Ok(chip) => chip,
+            Err(error) => {
+                reservation.release()?;
+                return Err(RequestError {
+                    error,
+                    returned: Some(pending.returned()),
+                });
+            }
+        };
+        if matches!(
+            &pending.request.routing,
+            RouteRequest::Line(LineRoute {
+                trigger: Trigger::Level,
+                ..
+            })
+        ) && chip.is_none()
+        {
+            reservation.release()?;
+            return Err(RequestError {
+                error: IrqError::Unsupported,
+                returned: Some(pending.returned()),
+            });
+        }
+        let line_domain = if matches!(&pending.request.routing, RouteRequest::Line(_)) {
+            match pending.request.source.notification_domain() {
+                Ok(domain) => {
+                    if let Err(error) = domain.check() {
+                        reservation.release()?;
+                        return Err(RequestError {
+                            error: IrqError::Delivery(error),
+                            returned: Some(pending.returned()),
+                        });
+                    }
+                    Some(domain)
+                }
+                Err(error) => {
+                    reservation.release()?;
+                    return Err(RequestError {
+                        error,
+                        returned: Some(pending.returned()),
+                    });
+                }
+            }
+        } else {
+            None
+        };
+        let allocated = match &mut pending.request.routing {
+            RouteRequest::Msi(route) => route.allocation(&target).map(Route::Msi),
+            RouteRequest::Line(line) => Ok(Route::Line {
+                target: target.descriptor(),
+                line: *line,
+            }),
+        };
+        let programming = match allocated {
+            Ok(data) => Some(data),
+            Err(error) if error.untouched() && self.platform.check_process().is_ok() => {
+                reservation.release()?;
+                return Err(RequestError {
+                    error: IrqError::Delivery(error.error()),
+                    returned: Some(pending.returned()),
+                });
+            }
+            Err(error) => {
+                let slot = NonNull::from(Box::leak(Box::new(pending.slot(
+                    reservation.id.clone(),
+                    None,
+                    None,
+                    chip,
+                ))));
+                self.slots[reservation.index].store(slot.as_ptr(), Ordering::Release);
+                reservation.transferred = true;
+                self.quarantine(slot);
+                return Err(IrqError::Delivery(error.error()).into());
+            }
+        };
+        let domain = match &pending.request.routing {
+            RouteRequest::Msi(route) => match route.domain() {
+                Ok(domain) => Some(domain),
+                Err(error) => {
+                    let slot = NonNull::from(Box::leak(Box::new(pending.slot(
+                        reservation.id.clone(),
+                        programming,
+                        None,
+                        chip,
+                    ))));
+                    self.slots[reservation.index].store(slot.as_ptr(), Ordering::Release);
+                    reservation.transferred = true;
+                    self.quarantine(slot);
+                    return Err(IrqError::Delivery(error).into());
+                }
+            },
+            RouteRequest::Line(_) => line_domain,
+        };
+        let slot = NonNull::from(Box::leak(Box::new(pending.slot(
+            reservation.id.clone(),
+            programming,
+            domain,
+            chip,
+        ))));
+        self.slots[reservation.index].store(slot.as_ptr(), Ordering::Release);
+        reservation.transferred = true;
+        let vector = reservation.id.target().vector;
+        // SAFETY: this process owner alone accesses affine source and route;
+        // dispatch sees only separately retained immutable handler/atomics.
+        let stored = unsafe { slot.as_ref() };
+        // After publication Drop performs only atomic quarantine, including
+        // an unwinding source callback; no hardware retry runs during Drop.
+        let registration = Registration {
+            registry: self,
+            slot,
+            vector,
+            active: true,
+            owner_cpu: PhantomData,
+        };
+        // SAFETY: unique checked process owner as above.
+        let source = unsafe { &mut *stored.source.get() };
+        let armed = self
+            .check_controller()
+            .and_then(|()| source.mask())
+            .and_then(|()| source.quiesce())
+            .and_then(|()| {
+                self.platform.check_process()?;
+                self.check_controller()?;
+                stored
+                    .domain
+                    .as_ref()
+                    .ok_or(IrqError::Delivery(posted_msi::Error::RootUnavailable))?
+                    .check()
+                    .map_err(IrqError::Delivery)?;
+                // SAFETY: exclusive same-process route ownership, never ISR access.
+                if let RouteRequest::Msi(route) = unsafe { &mut *stored.routing.get() } {
+                    route.programming().map_err(IrqError::Delivery)?;
+                }
+                let route = AllocatedRoute {
+                    id: Some(&stored.id),
+                    programming: stored.programming.ok_or(IrqError::Route)?,
+                };
+                // SAFETY: exact target/root/source, kept ARMING handler and real mask/stop.
+                unsafe { source.program(&route) }?;
+                self.platform.check_process()?;
+                self.check_controller()?;
+                stored
+                    .domain
+                    .as_ref()
+                    .ok_or(IrqError::Delivery(posted_msi::Error::RootUnavailable))?
+                    .check()
+                    .map_err(IrqError::Delivery)
+            });
+        if let Err(error) = armed {
+            self.quarantine(slot);
+            return Err(error.into());
+        }
+        if stored.fault.load(Ordering::Acquire) != 0
+            || stored
+                .state
+                .compare_exchange(ARMING, LIVE, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+        {
+            return Err(decode_error(stored.fault.load(Ordering::Acquire))
+                .unwrap_or(IrqError::Drain)
+                .into());
+        }
+        // SAFETY: published LIVE callback and exact original route stay retained.
+        if let Err(error) = unsafe { source.unmask() } {
+            self.quarantine(slot);
+            let _ = source.mask();
+            return Err(error.into());
+        }
+        self.check_controller()?;
+        if stored.state.load(Ordering::Acquire) != LIVE {
+            return Err(decode_error(stored.fault.load(Ordering::Acquire))
+                .unwrap_or(IrqError::Drain)
+                .into());
+        }
+        Ok(registration)
+    }
+    #[expect(
+        clippy::result_large_err,
+        reason = "return original owners inline without allocation after context or publication refusal"
+    )]
+    pub fn request_owned<S: Source + 'static>(
+        &'static self,
+        request: Request<S>,
+    ) -> Result<OwnedRegistration<'static, P, S>, OwnedRequestError<S>> {
+        let Request {
+            source,
+            handler,
+            routing,
+        } = request;
+        self.request(Request {
+            source: Box::new(source),
+            handler,
+            routing,
+        })
+        .map(|registration| OwnedRegistration {
+            registration,
+            source: PhantomData,
+        })
+        .map_err(|refusal| OwnedRequestError {
+            error: refusal.error,
+            owner_cpu: PhantomData,
+            returned: refusal.returned.map(|mut untouched| {
+                // SAFETY: only this request erased Box<S>; no source can be
+                // replaced before clean prepublication return. No callback.
+                let erased = unsafe { ManuallyDrop::take(&mut untouched.request) };
+                UnregisteredSource {
+                    request: ManuallyDrop::new(Request {
+                        // SAFETY: unique original allocation/type, as above.
+                        source: unsafe { Box::from_raw(Box::into_raw(erased.source) as *mut S) },
+                        handler: erased.handler,
+                        routing: erased.routing,
+                    }),
+                    platform: untouched.platform,
+                    owner_cpu: PhantomData,
+                }
+            }),
+        })
+    }
+}
 struct Guard<'a, P: Platform> {
     registry: &'a Registry<P>,
     saved: u64,
@@ -601,14 +1171,74 @@ struct Guard<'a, P: Platform> {
 impl<P: Platform> Drop for Guard<'_, P> {
     fn drop(&mut self) {
         self.registry.held.store(false, Ordering::Release);
-        // SAFETY: same CPU, exactly this guard's saved interrupt state.
+        // SAFETY: exact immediately enclosing same-CPU interrupt state.
         unsafe { self.registry.platform.restore(self.saved) };
     }
 }
-
-/// Unique CPU-affine owner, neither Send nor Sync. Keeps the
-/// source/handler until mask/quiescence, dispatch and IRR/ISR drain.
-/// Drop and every method require process/deferred context; never an ISR.
+/// Restores the immediately enclosing original CPU state even if a pending,
+/// clock, or delivery-window callback unwinds. It owns no device/root lock.
+struct SavedInterrupts<'a, P: Platform> {
+    platform: &'a P,
+    saved: u64,
+}
+impl<'a, P: Platform> SavedInterrupts<'a, P> {
+    fn new(platform: &'a P) -> Self {
+        Self {
+            platform,
+            saved: platform.save_and_disable(),
+        }
+    }
+}
+impl<P: Platform> Drop for SavedInterrupts<'_, P> {
+    fn drop(&mut self) {
+        // SAFETY: Platform's exact same-CPU window contract forbids migration;
+        // this guard uniquely owns this immediately enclosing saved IRQ state.
+        unsafe { self.platform.restore(self.saved) };
+    }
+}
+/// Callback/EOI unwind cannot leave an apparently LIVE action or admit a
+/// replacement after an unacknowledged interrupt. Drop is atomic-only and
+/// retains the inflight claim; it does not invent CPU/EOI completion.
+struct DispatchUnwind<'a, P: Platform> {
+    registry: &'a Registry<P>,
+    slot: Option<NonNull<Slot>>,
+    completed: bool,
+}
+impl<P: Platform> Drop for DispatchUnwind<'_, P> {
+    fn drop(&mut self) {
+        if self.completed {
+            return;
+        }
+        let code = encode_error(IrqError::Drain);
+        let _ = self.registry.controller_fault.compare_exchange(
+            0,
+            code,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+        if let Some(slot) = self.slot {
+            // SAFETY: lock-protected acquisition retained an inflight claim;
+            // no successful retirement can free this actual allocation.
+            let stored = unsafe { slot.as_ref() };
+            let _ = stored
+                .fault
+                .compare_exchange(0, code, Ordering::AcqRel, Ordering::Acquire);
+            self.registry.quarantine(slot);
+        }
+    }
+}
+struct RetirementUnwind<'a, P: Platform> {
+    registry: &'a Registry<P>,
+    slot: NonNull<Slot>,
+    completed: bool,
+}
+impl<P: Platform> Drop for RetirementUnwind<'_, P> {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.registry.quarantine(self.slot);
+        }
+    }
+}
 pub struct Registration<'a, P: Platform> {
     registry: &'a Registry<P>,
     slot: NonNull<Slot>,
@@ -616,7 +1246,6 @@ pub struct Registration<'a, P: Platform> {
     active: bool,
     owner_cpu: PhantomData<*mut ()>,
 }
-
 impl<P: Platform> Registration<'_, P> {
     pub fn vector(&self) -> u8 {
         self.vector
@@ -625,98 +1254,172 @@ impl<P: Platform> Registration<'_, P> {
         if !self.active {
             return Err(IrqError::Unregistered);
         }
-        // SAFETY: this unique registration keeps its slot until retirement.
+        // SAFETY: this unique registration retains its exact slot.
         Ok(unsafe { self.slot.as_ref() }
             .handled
             .load(Ordering::Relaxed))
     }
-
-    /// A failed stop/drain keeps the complete registration for retry; no
-    /// vector/context or callback-owned pages can be reused by that failure.
-    pub fn retire(&mut self) -> Result<(), IrqError> {
-        // Slot field order releases source while the callback is held.
-        drop(self.detach()?);
-        Ok(())
-    }
-
-    /// Return the source only after final controller and callback drain.
-    pub fn retire_source(&mut self) -> Result<RetiredSource<dyn Source>, IrqError> {
-        let retired = self.detach()?;
-        let Slot {
-            source, handler, ..
-        } = *retired;
-        let source = source.into_inner();
-        Ok(RetiredSource {
-            source,
-            handler,
-            route: RetiredRoute {
-                vector: self.vector,
-                owner_cpu: PhantomData,
-            },
-        })
-    }
-
-    fn detach(&mut self) -> Result<Box<Slot>, IrqError> {
+    pub fn mask(&mut self) -> Result<(), IrqError> {
+        self.registry.platform.check_process()?;
+        self.registry.check_controller()?;
         if !self.active {
             return Err(IrqError::Unregistered);
         }
-        self.registry.platform.check_cpu()?;
-        let guard = self.registry.lock();
-        // SAFETY: unique process owner, protected against dispatch
-        // pointer acquisition; handler borrow remains guarded by inflight.
+        // SAFETY: this registration keeps its exact live source allocation.
         let slot = unsafe { self.slot.as_ref() };
-        slot.state.store(CLOSING, Ordering::Release);
-        drop(guard);
-        // SAFETY: no other process owner accesses this source. ISR does not.
-        let source = unsafe { &mut *slot.source.get() };
-        source.mask()?;
-        source.quiesce()?;
-        let saved = self.registry.platform.save_and_disable();
-        let start = self.registry.platform.ticks();
-        let drained = loop {
-            let pending = match self.registry.platform.pending(self.vector) {
-                Ok(pending) => pending,
-                Err(error) => break Err(error),
-            };
-            if !pending && slot.inflight.load(Ordering::Acquire) == 0 {
-                break Ok(());
-            }
-            if self.registry.platform.ticks().wrapping_sub(start)
-                >= self.registry.platform.timeout_ticks()
-            {
-                break Err(IrqError::Drain);
-            }
-            // SAFETY: no registry/resource lock held; source stopped and
-            // tombstone kept, so pending delivery only drains/EOIs it.
-            unsafe { self.registry.platform.interrupt_window() };
-        };
-        // SAFETY: restore exactly the immediately enclosing same-CPU state.
-        unsafe { self.registry.platform.restore(saved) };
-        drained?;
-        // A callback that was already in flight when closing began may have
-        // queued work before its final EOI. Drain/cancel that work only after
-        // the callback lifetime has ended as well as before hardware draining.
-        // SAFETY: source stop, CPU pending and in-flight callbacks have drained.
-        unsafe { source.synchronize() }?;
-        self.registry.platform.check_cpu()?;
-        let guard = self.registry.lock();
-        if slot.inflight.load(Ordering::Acquire) != 0
-            || self.registry.platform.pending(self.vector)?
-        {
+        if slot.state.load(Ordering::Acquire) != LIVE {
             return Err(IrqError::Drain);
         }
-        self.registry.slots[usize::from(self.vector - FIRST_VECTOR)]
-            .store(core::ptr::null_mut(), Ordering::Release);
-        self.active = false;
-        drop(guard);
-        // SAFETY: real source quiescence excludes any future delivery/work,
-        // and locked final IRR/ISR/inflight checks establish no remaining user.
-        Ok(unsafe { Box::from_raw(self.slot.as_ptr()) })
+        // SAFETY: only this original process owner touches the affine source.
+        unsafe { &mut *slot.source.get() }.mask()
+    }
+    pub fn unmask(&mut self) -> Result<(), IrqError> {
+        self.registry.platform.check_process()?;
+        self.registry.check_controller()?;
+        if !self.active {
+            return Err(IrqError::Unregistered);
+        }
+        // SAFETY: same retained live registration; no ISR touches source/route.
+        let slot = unsafe { self.slot.as_ref() };
+        if slot.state.load(Ordering::Acquire) != LIVE {
+            return Err(IrqError::Drain);
+        }
+        // SAFETY: same unique original process owner as above.
+        if let RouteRequest::Msi(route) = unsafe { &*slot.routing.get() } {
+            route.check_rearm().map_err(IrqError::Delivery)?;
+        }
+        slot.domain
+            .as_ref()
+            .ok_or(IrqError::Delivery(posted_msi::Error::RootUnavailable))?
+            .check()
+            .map_err(IrqError::Delivery)?;
+        // SAFETY: the same exact LIVE callback and checked root route remain.
+        unsafe { (&mut *slot.source.get()).unmask() }
+    }
+    pub fn retire(&mut self) -> Result<RetiredSource<dyn Source>, IrqError> {
+        if !self.active {
+            return Err(IrqError::Unregistered);
+        }
+        // SAFETY: this active registration retains its exact live Slot;
+        // atomic-only inspection is valid even if original context is refused.
+        if unsafe { self.slot.as_ref() }.state.load(Ordering::Acquire) == QUARANTINED {
+            // SAFETY: active registration retains this exact slot and atomics.
+            return Err(
+                decode_error(unsafe { self.slot.as_ref() }.fault.load(Ordering::Acquire))
+                    .unwrap_or(IrqError::Drain),
+            );
+        }
+        let mut poison = RetirementUnwind {
+            registry: self.registry,
+            slot: self.slot,
+            completed: false,
+        };
+        let result = (|| {
+            self.registry.platform.check_process()?;
+            self.registry.check_controller()?;
+            let guard = self.registry.lock();
+            // SAFETY: registration keeps the slot, while lock excludes acquisition.
+            let slot = unsafe { self.slot.as_ref() };
+            slot.state.store(CLOSING, Ordering::Release);
+            drop(guard);
+            // SAFETY: only this unique checked process owner touches source/route.
+            let source = unsafe { &mut *slot.source.get() };
+            source.mask()?;
+            source.quiesce()?;
+            // Notification-domain validation is not fabric completion. The
+            // source action is closed; old ordinary packets may notify a valid
+            // current handler after exact CPU/service/thread/work retirement.
+            if let Some(domain) = &slot.domain {
+                domain.check().map_err(IrqError::Delivery)?;
+            } else {
+                return Err(IrqError::Delivery(posted_msi::Error::RootUnavailable));
+            }
+            let saved = SavedInterrupts::new(&self.registry.platform);
+            let start = self.registry.platform.ticks();
+            let drained = loop {
+                let pending = match self.registry.platform.pending(self.vector) {
+                    Ok(p) => p,
+                    Err(e) => break Err(e),
+                };
+                if !pending && slot.inflight.load(Ordering::Acquire) == 0 {
+                    break Ok(());
+                }
+                if self.registry.platform.ticks().wrapping_sub(start)
+                    >= self.registry.platform.timeout_ticks()
+                {
+                    break Err(IrqError::Drain);
+                }
+                // SAFETY: no Registry/resource lock; retained CLOSING slot
+                // acknowledges pending delivery/EOI without entering old callbacks.
+                unsafe { self.registry.platform.interrupt_window() };
+            };
+            drop(saved);
+            drained?;
+            // SAFETY: CLOSING excludes old callbacks after CPU/EOI drain. Keep
+            // all source memory through actual captured work/controller joins.
+            unsafe { source.synchronize() }?;
+            self.registry.platform.check_process()?;
+            self.registry.check_controller()?;
+            slot.domain
+                .as_ref()
+                .ok_or(IrqError::Delivery(posted_msi::Error::RootUnavailable))?
+                .check()
+                .map_err(IrqError::Delivery)?;
+            // SAFETY: same exclusive process route access after work synchronization.
+            if let RouteRequest::Msi(route) = unsafe { &mut *slot.routing.get() } {
+                route.cpu_retired().map_err(IrqError::Delivery)?;
+            }
+            let guard = self.registry.lock();
+            self.registry.check_controller()?;
+            if slot.state.load(Ordering::Acquire) != CLOSING {
+                return Err(
+                    decode_error(slot.fault.load(Ordering::Acquire)).unwrap_or(IrqError::Drain)
+                );
+            }
+            if slot.inflight.load(Ordering::Acquire) != 0
+                || self.registry.platform.pending(self.vector)?
+            {
+                return Err(IrqError::Drain);
+            }
+            let index = usize::from(self.vector - FIRST_VECTOR);
+            self.registry.slots[index].store(core::ptr::null_mut(), Ordering::Release);
+            self.registry
+                .reserved
+                .fetch_and(!(1usize << index), Ordering::Release);
+            slot.id.0.reserved.store(false, Ordering::Release);
+            self.active = false;
+            drop(guard);
+            poison.completed = true;
+            // SAFETY: source/CPU/work and locked final check excluded old action users;
+            // this unique owner reclaims the original slot allocation exactly once.
+            let retired_slot = unsafe { Box::from_raw(self.slot.as_ptr()) };
+            let Slot {
+                source,
+                handler,
+                routing,
+                id,
+                domain,
+                ..
+            } = *retired_slot;
+            let (msi, line_domain) = match routing.into_inner() {
+                RouteRequest::Msi(msi) => (Some(msi), None),
+                RouteRequest::Line(_) => (None, domain),
+            };
+            Ok(RetiredSource {
+                source: ManuallyDrop::new(source.into_inner()),
+                handler: ManuallyDrop::new(handler),
+                route: ManuallyDrop::new(RetiredRoute {
+                    id,
+                    msi,
+                    line_domain: ManuallyDrop::new(line_domain),
+                    owner_cpu: PhantomData,
+                }),
+            })
+        })();
+        poison.completed = true;
+        result
     }
 }
-
-/// Concrete-source registration with the same process/CPU affinity. Private
-/// construction proves the type of its erased, uniquely kept source.
 pub struct OwnedRegistration<'a, P: Platform, S: Source + 'static> {
     registration: Registration<'a, P>,
     source: PhantomData<S>,
@@ -729,44 +1432,47 @@ impl<P: Platform, S: Source + 'static> OwnedRegistration<'_, P, S> {
         self.registration.handled()
     }
     pub fn retire(&mut self) -> Result<RetiredSource<S>, IrqError> {
-        let RetiredSource {
-            source,
-            handler,
-            route,
-        } = self.registration.retire_source()?;
+        let mut erased = self.registration.retire()?;
+        // SAFETY: request_owned alone erased this unique Box<S>; Registry never
+        // replaces it. Move all retained fields, without foreign callbacks.
+        let (source, handler, route) = unsafe {
+            (
+                ManuallyDrop::take(&mut erased.source),
+                ManuallyDrop::take(&mut erased.handler),
+                ManuallyDrop::take(&mut erased.route),
+            )
+        };
         Ok(RetiredSource {
-            // SAFETY: request_owned alone constructs this wrapper from Box<S>;
-            // Registry never replaces it. Retirement uniquely returns that
-            // allocation after controller/callback/work drain.
-            source: unsafe { Box::from_raw(Box::into_raw(source) as *mut S) },
-            handler,
-            route,
+            // SAFETY: exact allocation/type established by request_owned.
+            source: ManuallyDrop::new(unsafe { Box::from_raw(Box::into_raw(source) as *mut S) }),
+            handler: ManuallyDrop::new(handler),
+            route: ManuallyDrop::new(route),
         })
     }
 }
-
 impl<P: Platform> Drop for Registration<'_, P> {
     fn drop(&mut self) {
-        if self.active && self.retire().is_err() {
+        if self.active {
             self.registry.quarantine(self.slot);
         }
     }
 }
-
 impl<P: Platform> IrqRegistration for Registration<'_, P> {
     fn vector(&self) -> u8 {
-        Registration::vector(self)
+        self.vector()
     }
     fn handled(&self) -> Result<u64, IrqError> {
-        Registration::handled(self)
+        self.handled()
     }
-    fn retire(&mut self) -> Result<(), IrqError> {
-        Registration::retire(self)
+    fn mask(&mut self) -> Result<(), IrqError> {
+        self.mask()
     }
-    fn retire_source(&mut self) -> Result<RetiredSource<dyn Source>, IrqError> {
-        Registration::retire_source(self)
+    fn unmask(&mut self) -> Result<(), IrqError> {
+        self.unmask()
+    }
+    fn retire(&mut self) -> Result<RetiredSource<dyn Source>, IrqError> {
+        self.retire()
     }
 }
-
 #[cfg(test)]
 mod tests;

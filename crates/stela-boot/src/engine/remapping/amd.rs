@@ -483,7 +483,7 @@ unsafe impl stela_drivers::bus::pci::requester::preparation::Root for ColdRoot {
     unsafe fn bind(
         &self,
         binding: RequesterBinding,
-    ) -> Result<Box<dyn stela_drivers::bus::pci::requester::preparation::Attachment>, DmaError>
+    ) -> Result<Box<dyn stela_drivers::bus::pci::requester::preparation::AttachmentBackend>, DmaError>
     {
         if !on_boot_processor() || binding.address() != self.address {
             return Err(DmaError::IommuUnavailable);
@@ -503,19 +503,38 @@ struct Attachment {
 // Backend detach blocks all aliases, completes invalidation and releases the
 // shared configuration binding only after success. Retired requesters reject
 // all later methods; failure/Drop keeps uncertain trees and their binding.
-unsafe impl stela_drivers::bus::pci::requester::preparation::Attachment for Attachment {
+unsafe impl stela_drivers::bus::pci::requester::preparation::AttachmentBackend for Attachment {
+    fn irq_owner(
+        &mut self,
+        _requester: &stela_drivers::bus::pci::requester::RequesterId,
+        _config: Option<&stela_drivers::bus::pci::owned::ConfigRetention>,
+    ) -> Result<Option<Box<dyn stela_drivers::bus::irq::posted_msi::RouteOwner>>, DmaError> {
+        // Explicit capability refusal: no original boot root/context and exact
+        // source grant have been supplied to this attached owner. A retained
+        // DMA root, SID, numeric message or fresh BDF lookup cannot mint one.
+        Ok(None)
+    }
+
     fn domain(&self) -> Arc<dyn DmaDomain> {
         self.domain.clone()
     }
-    unsafe fn detach(&mut self) -> Result<(), DmaError> {
+    unsafe fn detach(
+        &mut self,
+    ) -> Result<(), stela_drivers::bus::pci::requester::preparation::DetachError> {
         let mut inner = self.domain.inner()?;
         if !inner.mappings.is_empty() {
-            return Err(DmaError::MappingFailed);
+            return Err(
+                stela_drivers::bus::pci::requester::preparation::DetachError::Unexposed(
+                    DmaError::MappingFailed,
+                ),
+            );
         }
         // SAFETY: paired driver supplies halt and payload/IRQ/work drainage
         // under the retained root/epoch. Both mapping inventories refuse live
         // leases before DTE effects; wrapper inventory is empty above.
-        unsafe { inner.requester.detach() }.map_err(failed)
+        unsafe { inner.requester.detach() }.map_err(|error| {
+            stela_drivers::bus::pci::requester::preparation::DetachError::Uncertain(failed(error))
+        })
     }
 }
 

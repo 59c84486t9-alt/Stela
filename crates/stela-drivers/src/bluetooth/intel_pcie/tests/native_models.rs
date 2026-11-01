@@ -1,4 +1,4 @@
-//! Native IRQ/HCI models with separate payload and posted-MSI completion.
+//! Bounded native IRQ/HCI models: action joins are separate from payload/fabric.
 extern crate std;
 use super::*;
 use crate::{
@@ -23,7 +23,7 @@ struct Hardware {
     fail_table: Option<u64>,
     payload_drains: usize,
     msi_drains: usize,
-    cpu_after_delivery: usize,
+    cpu_after_payload: usize,
     fail_payload: bool,
     fail_posted_msi: bool,
     fail_msi_bind: bool,
@@ -48,7 +48,7 @@ impl Hardware {
             fail_table: None,
             payload_drains: 0,
             msi_drains: 0,
-            cpu_after_delivery: 0,
+            cpu_after_payload: 0,
             fail_payload: false,
             fail_posted_msi: false,
             fail_msi_bind: false,
@@ -237,6 +237,9 @@ unsafe impl irq::Platform for Cpu {
     fn check_cpu(&self) -> core::result::Result<(), irq::IrqError> {
         Ok(())
     }
+    fn check_process(&self) -> core::result::Result<(), crate::bus::irq::IrqError> {
+        self.check_cpu()
+    }
     fn save_and_disable(&self) -> u64 {
         0
     }
@@ -251,8 +254,7 @@ unsafe impl irq::Platform for Cpu {
         {
             let mut h = self.hardware.lock().unwrap();
             if h.payload_drains != 0 {
-                assert!(h.msi_drains != 0);
-                h.cpu_after_delivery += 1;
+                h.cpu_after_payload += 1;
             }
         }
         if self.fail_pending.load(Ordering::Acquire) {
@@ -261,8 +263,12 @@ unsafe impl irq::Platform for Cpu {
             Ok(false)
         }
     }
-    fn eoi(&self) {
+    fn eoi(
+        &self,
+        _vector: u8,
+    ) -> core::result::Result<crate::bus::irq::Trigger, crate::bus::irq::IrqError> {
         self.eoi.fetch_add(1, Ordering::Relaxed);
+        Ok(crate::bus::irq::Trigger::Edge)
     }
     fn ticks(&self) -> u64 {
         self.ticks.fetch_add(1, Ordering::Relaxed)
@@ -305,7 +311,7 @@ fn inputs() -> Context<Inputs> {
         },
         interrupts: registry,
         domain: Arc::new(root::Payload(h.clone())),
-        msi_completion: root::completion(h.clone()),
+        msi_route: root::completion(h.clone()),
     };
     (inputs, h, registry, fail_pending)
 }
@@ -353,7 +359,7 @@ fn native_owned_function_msix_callback_and_dma_service_release_only_after_real_r
     t.close().unwrap();
     assert_eq!(t.state(), State::Closed);
     assert!(!h.lock().unwrap().bt.armed);
-    assert!(!registry.dispatch(irq::FIRST_VECTOR));
+    assert!(registry.dispatch(irq::FIRST_VECTOR));
     drop(t);
     let h = h.lock().unwrap();
     assert_eq!((h.config_drops, h.bar_drops, h.register_drops), (1, 1, 1));
@@ -542,7 +548,7 @@ fn native_constructor_refuses_unqualified_inputs_without_writes_and_returns_owne
         assert_eq!(h.lock().unwrap().config, before);
         assert!(h.lock().unwrap().table_writes.is_empty());
         assert!(h.lock().unwrap().bt.writes.is_empty());
-        assert!(!registry.dispatch(irq::FIRST_VECTOR));
+        assert!(registry.dispatch(irq::FIRST_VECTOR));
     }
 }
 #[test]

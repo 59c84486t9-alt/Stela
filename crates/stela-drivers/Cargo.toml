@@ -14,6 +14,7 @@ workspace = true
 native-acpi = ["stela-driver-base/native-acpi", "stela-driver-net/native-acpi"]
 linux-kernel = ["dep:stela-linux", "stela-linux/kernel"]
 ram-disk = ["stela-driver-base/ram-disk"]
+irq-diagnostics = ["stela-driver-base/irq-diagnostics"]
 nvidia-port = ["stela-driver-gpu/nvidia-port"]
 intel-port = ["stela-driver-gpu/intel-port"]
 amd-port = ["stela-driver-gpu/amd-port"]

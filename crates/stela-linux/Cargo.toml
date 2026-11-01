@@ -10,9 +10,10 @@ workspace = true
 
 [features]
 # Default builds require no external Linux source.
-kernel = ["dep:cc", "dep:stela-c-build", "stela-c-build/linux-registry", "stela-driver-base/linux-kernel"]
+kernel = ["dep:stela-driver-core", "dep:cc", "dep:stela-c-build", "stela-c-build/linux-registry", "stela-driver-base/linux-kernel"]
 
 [dependencies]
+stela-driver-core = { path = "../stela-driver-core", optional = true }
 stela-driver-base = { path = "../stela-driver-base" }
 stela-crypto = { path = "../stela-crypto" }
 zeroize = { version = "1.9", default-features = false, features = ["alloc"] }

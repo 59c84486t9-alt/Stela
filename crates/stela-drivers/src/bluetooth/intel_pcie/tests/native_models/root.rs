@@ -50,26 +50,77 @@ unsafe impl DmaDomain for Payload {
         }
     }
 }
-struct Delivery(Arc<Mutex<Hardware>>);
-// SAFETY: original synchronous route peer. Binding checks the registry's exact
-// model message; posted interrupt completion is independent of payload/CPU IO.
-unsafe impl irq::posted_msi::DeliveryOwner for Delivery {
-    fn bind_route(
+struct DeliveryDomain {
+    hardware: Arc<Mutex<Hardware>>,
+    thread: std::thread::ThreadId,
+}
+// SAFETY: same original synchronous device/root peer and actual owner thread;
+// this fixture has no physical/remapping authority or native mode transition.
+unsafe impl irq::posted_msi::NotificationDomain for DeliveryDomain {
+    fn check(&self) -> core::result::Result<(), irq::posted_msi::Error> {
+        if self.thread != std::thread::current().id() {
+            return Err(irq::posted_msi::Error::Context);
+        }
+        let hardware = self.hardware.lock().unwrap();
+        if hardware.config_drops != 0 || hardware.register_drops != 0 {
+            return Err(irq::posted_msi::Error::RootFailed);
+        }
+        Ok(())
+    }
+}
+struct Delivery {
+    hardware: Arc<Mutex<Hardware>>,
+    owner: std::thread::ThreadId,
+}
+// SAFETY: original synchronous isolated route peer, with independent payload
+// and root completion controls, no native configuration pin or DMA attachment.
+unsafe impl irq::posted_msi::RouteOwner for Delivery {
+    fn allocate(
         &mut self,
-        message: irq::MsiMessage,
-    ) -> core::result::Result<(), irq::posted_msi::Error> {
+        target: &irq::CpuTarget<'_>,
+    ) -> core::result::Result<irq::MsiMessage, irq::posted_msi::AllocationError> {
+        target.check_current().map_err(|_| {
+            irq::posted_msi::AllocationError::Unexposed(irq::posted_msi::Error::Context)
+        })?;
+        let target = target.descriptor();
+        let message = irq::MsiMessage {
+            address: 0xfee0_0000 | u64::from(target.destination) << 12,
+            data: u32::from(target.vector),
+        };
         assert_eq!(message.address, 0xfee01000);
         assert_eq!(message.data, u32::from(irq::FIRST_VECTOR));
-        let mut h = self.0.lock().unwrap();
+        let mut h = self.hardware.lock().unwrap();
         assert!(h.msi_message.replace(message).is_none());
         if h.fail_msi_bind {
-            Err(irq::posted_msi::Error::RootFailed)
+            Err(irq::posted_msi::AllocationError::Uncertain(
+                irq::posted_msi::Error::RootFailed,
+            ))
+        } else {
+            Ok(message)
+        }
+    }
+    fn validate(&self) -> core::result::Result<(), irq::posted_msi::Error> {
+        if self.owner != std::thread::current().id() {
+            Err(irq::posted_msi::Error::Context)
         } else {
             Ok(())
         }
     }
-    unsafe fn drain_posted_msi(&self) -> core::result::Result<(), irq::posted_msi::Error> {
-        let mut h = self.0.lock().unwrap();
+    fn notification_domain(
+        &self,
+    ) -> core::result::Result<Arc<dyn irq::posted_msi::NotificationDomain>, irq::posted_msi::Error>
+    {
+        self.validate()?;
+        // Original resource custody is live before route allocation; binding
+        // itself is installed before the guard enters a LIVE Slot.
+        Ok(Arc::new(DeliveryDomain {
+            hardware: self.hardware.clone(),
+            thread: self.owner,
+        }))
+    }
+    unsafe fn strong_fence(&mut self) -> core::result::Result<(), irq::posted_msi::Error> {
+        self.validate()?;
+        let mut h = self.hardware.lock().unwrap();
         assert!(h.payload_drains > 0);
         assert!(!h.bt.armed);
         assert!(h.msi_message.is_some());
@@ -80,50 +131,56 @@ unsafe impl irq::posted_msi::DeliveryOwner for Delivery {
             Ok(())
         }
     }
+    unsafe fn release_endpoint(
+        &mut self,
+        proof: &irq::posted_msi::EndpointRetirement<'_>,
+    ) -> core::result::Result<(), irq::posted_msi::Error> {
+        self.validate()?;
+        assert!(proof.requester().is_none());
+        Ok(())
+    }
 }
-pub(super) fn completion(h: Arc<Mutex<Hardware>>) -> irq::posted_msi::MsiCompletion {
-    irq::posted_msi::MsiCompletion::model(Box::new(Delivery(h)))
+pub(super) fn completion(hardware: Arc<Mutex<Hardware>>) -> irq::posted_msi::MsiRoute {
+    // SAFETY: bounded no-native-pin test peer above; not NativeServices and
+    // cannot supply an Attachment or a shared reset retirement receipt.
+    unsafe {
+        irq::posted_msi::MsiRoute::bounded_fixture(Box::new(Delivery {
+            hardware,
+            owner: std::thread::current().id(),
+        }))
+    }
+}
+
+#[test]
+fn missing_notification_admission_refuses_before_source_programming() {
+    let mut backing = vec![0u64; 1024 * 1024];
+    let mut dma = allocator(&mut backing);
+    let (mut inputs, h, _, _) = inputs();
+    inputs.msi_route = irq::posted_msi::MsiRoute::unavailable();
+    // SAFETY: original bounded device model; no native capability is minted.
+    let platform =
+        unsafe { native::NativePlatform::new(inputs) }.unwrap_or_else(|(e, _)| panic!("{e:?}"));
+    let mut t = Transport::new(platform, &mut dma).unwrap();
+    assert!(t.start().is_err());
+    assert!(h.lock().unwrap().msi_message.is_none());
+    drop(t);
+    let h = h.lock().unwrap();
+    assert_eq!(h.msi_drains, 0);
+    assert_eq!((h.config_drops, h.bar_drops, h.register_drops), (0, 0, 0));
 }
 #[test]
-fn missing_or_failed_posted_completion_keeps_armed_route_and_all_owners() {
-    for unavailable in [false, true] {
-        let mut backing = vec![0u64; 1024 * 1024];
-        let mut dma = allocator(&mut backing);
-        let (mut inputs, h, registry, _) = inputs();
-        if unavailable {
-            inputs.msi_completion = irq::posted_msi::MsiCompletion::unavailable();
-        }
-        // SAFETY: explicit original synchronous device/root/IRQ fixture.
-        let platform =
-            unsafe { native::NativePlatform::new(inputs) }.unwrap_or_else(|(e, _)| panic!("{e:?}"));
-        let mut t = Transport::new(platform, &mut dma).unwrap();
-        t.start().unwrap();
-        if !unavailable {
-            h.lock().unwrap().fail_posted_msi = true;
-        }
-        let error = t
-            .close()
-            .expect_err("independent posted completion required");
-        assert_eq!(
-            error,
-            Error::Native(native::Error::Delivery(if unavailable {
-                irq::posted_msi::Error::RootUnavailable
-            } else {
-                irq::posted_msi::Error::RootFailed
-            }))
-        );
-        assert!(!t.retired);
-        assert_eq!(t.state(), State::Failed);
-        let writes = h.lock().unwrap().bt.writes.len();
-        assert_eq!(t.close(), Err(error));
-        assert!(registry.dispatch(irq::FIRST_VECTOR));
-        drop(t);
-        let h = h.lock().unwrap();
-        assert_eq!(h.payload_drains, 1);
-        assert_eq!(h.msi_drains, usize::from(!unavailable));
-        assert_eq!((h.config_drops, h.bar_drops, h.register_drops), (0, 0, 0));
-        assert_eq!(h.bt.writes.len(), writes);
-    }
+fn independent_fabric_pending_does_not_substitute_for_action_or_payload_join() {
+    let mut backing = vec![0u64; 1024 * 1024];
+    let mut dma = allocator(&mut backing);
+    let (mut t, h, registry, _) = attach(&mut dma);
+    t.start().unwrap();
+    h.lock().unwrap().fail_posted_msi = true;
+    t.close().unwrap();
+    assert!(registry.dispatch(irq::FIRST_VECTOR)); // ordinary unbound EOI only
+    drop(t);
+    let h = h.lock().unwrap();
+    assert_eq!((h.payload_drains, h.msi_drains), (1, 0));
+    assert_eq!((h.config_drops, h.bar_drops, h.register_drops), (1, 1, 1));
 }
 #[test]
 fn payload_failure_does_not_claim_posted_interrupt_completion() {
@@ -140,7 +197,7 @@ fn payload_failure_does_not_claim_posted_interrupt_completion() {
     assert_eq!((h.config_drops, h.bar_drops, h.register_drops), (0, 0, 0));
 }
 #[test]
-fn successful_completion_orders_payload_then_posted_delivery_before_cpu_retirement() {
+fn terminal_endpoint_close_orders_payload_before_action_and_native_resources() {
     let mut backing = vec![0u64; 1024 * 1024];
     let mut dma = allocator(&mut backing);
     let (mut t, h, registry, _) = attach(&mut dma);
@@ -150,11 +207,11 @@ fn successful_completion_orders_payload_then_posted_delivery_before_cpu_retireme
         assert_eq!((h.payload_drains, h.msi_drains), (0, 0));
     }
     t.close().unwrap();
-    assert!(!registry.dispatch(irq::FIRST_VECTOR));
+    assert!(registry.dispatch(irq::FIRST_VECTOR));
     drop(t);
     let h = h.lock().unwrap();
-    assert_eq!((h.payload_drains, h.msi_drains), (1, 1));
-    assert!(h.cpu_after_delivery > 0);
+    assert_eq!((h.payload_drains, h.msi_drains), (1, 0));
+    assert!(h.cpu_after_payload > 0);
     assert_eq!((h.config_drops, h.bar_drops, h.register_drops), (1, 1, 1));
 }
 

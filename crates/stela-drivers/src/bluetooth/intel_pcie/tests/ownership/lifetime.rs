@@ -178,3 +178,49 @@ fn failed_engine_stop_keeps_dma_and_original_native_graph() {
     assert_eq!(root.registers_dropped.load(Ordering::Relaxed), 0);
     assert_eq!(counts.unmaps.load(Ordering::Relaxed), 0);
 }
+
+#[test]
+fn core_and_post_core_unwind_never_reopen_owned_transport_or_retry_effects() {
+    for (phase, nth) in [
+        ("reset", 1),
+        ("domain drain", 1),
+        ("unmap", 2),
+        ("detach", 1),
+        ("register retire", 1),
+    ] {
+        let root = Arc::new(RootState::default());
+        let (mut transport, counts) = owned(root.clone());
+        root.events.lock().unwrap().clear();
+        *root.panic_phase.lock().unwrap() = Some(phase);
+        root.panic_nth.store(nth, Ordering::Relaxed);
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| transport.close())).is_err(),
+            "{phase}"
+        );
+        *root.panic_phase.lock().unwrap() = None;
+        let events = root.events.lock().unwrap().clone();
+        let unmaps = counts.unmaps.load(Ordering::Relaxed);
+        let error = Error::Unsupported("interrupted owned Intel PCIe retirement");
+        assert_eq!(transport.start(), Err(error.clone()));
+        assert_eq!(transport.poll(), Err(error.clone()));
+        assert_eq!(
+            transport.send(Kind::Command, &[3, 12, 0]),
+            Err(error.clone())
+        );
+        assert_eq!(transport.enter_d0(), Err(error.clone()));
+        assert!(!transport.ready());
+        assert!(
+            transport
+                .initialize_firmware(
+                    &super::super::NeverFirmware,
+                    crate::bluetooth::intel::PlatformInputs::default()
+                )
+                .is_err()
+        );
+        assert_eq!(transport.close(), Err(error));
+        drop(transport);
+        assert_eq!(*root.events.lock().unwrap(), events, "{phase}");
+        assert_eq!(counts.unmaps.load(Ordering::Relaxed), unmaps, "{phase}");
+        assert_eq!(root.registers_dropped.load(Ordering::Relaxed), 0, "{phase}");
+    }
+}

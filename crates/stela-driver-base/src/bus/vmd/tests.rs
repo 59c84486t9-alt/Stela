@@ -467,15 +467,18 @@ unsafe impl crate::bus::irq::Source for ChildEffects {
             Ok(())
         }
     }
-    fn route(&self) -> crate::bus::irq::RouteRequest {
-        crate::bus::irq::RouteRequest::Msi
+    fn route_kind(&self) -> crate::bus::irq::RouteKind {
+        crate::bus::irq::RouteKind::Msi
+    }
+    fn requester(&self) -> Option<&crate::bus::pci::requester::RequesterId> {
+        None
     }
     unsafe fn program(
         &mut self,
-        route: crate::bus::irq::Route,
+        route: &crate::bus::irq::AllocatedRoute<'_>,
     ) -> Result<(), crate::bus::irq::IrqError> {
         assert_eq!(
-            route,
+            route.programming(),
             crate::bus::irq::Route::Msi(crate::bus::irq::MsiMessage {
                 address: 0xfee0_1000,
                 data: 0
@@ -537,10 +540,12 @@ fn child_providers_gate_parent_owner_return_and_uncertain_stop_retention() {
         source.mask().unwrap();
         // SAFETY: simulate the owning IRQ registry's published model route.
         unsafe {
-            source.program(Route::Msi(MsiMessage {
-                address: 0xfee0_2000,
-                data: 0x50,
-            }))
+            source.program(&crate::bus::irq::AllocatedRoute::model_programming(
+                Route::Msi(MsiMessage {
+                    address: 0xfee0_2000,
+                    data: 0x50,
+                }),
+            ))
         }
         .unwrap();
         // SAFETY: modeled registry keeps both source and fanout.

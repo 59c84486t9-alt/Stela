@@ -5,6 +5,9 @@ pub(super) struct RootState {
     pub events: Mutex<Vec<&'static str>>,
     pub fail_config: Mutex<Option<Arc<Counters>>>,
     pub fail: Mutex<Option<&'static str>>,
+    pub panic_phase: Mutex<Option<&'static str>>,
+    pub panic_nth: AtomicUsize,
+    pub panic_hits: AtomicUsize,
     pub registers_dropped: AtomicUsize,
     pub bars_dropped: AtomicUsize,
     pub pages_dropped: AtomicUsize,
@@ -16,6 +19,15 @@ pub(super) struct RootState {
 impl RootState {
     fn step(&self, name: &'static str) -> core::result::Result<(), DmaError> {
         self.events.lock().unwrap().push(name);
+        let panic_phase = *self.panic_phase.lock().unwrap();
+        if panic_phase == Some(name) {
+            let hit = self.panic_hits.fetch_add(1, Ordering::Relaxed) + 1;
+            assert_ne!(
+                hit,
+                self.panic_nth.load(Ordering::Relaxed),
+                "injected native close unwind"
+            );
+        }
         if *self.fail.lock().unwrap() == Some(name) {
             Err(DmaError::InvalidationFailed)
         } else {
@@ -33,7 +45,10 @@ unsafe impl Root for OldRoot {
     unsafe fn bind(
         &self,
         binding: RequesterBinding,
-    ) -> core::result::Result<Box<dyn Attachment>, DmaError> {
+    ) -> core::result::Result<
+        Box<dyn crate::bus::pci::requester::preparation::AttachmentBackend>,
+        DmaError,
+    > {
         self.0.step("bind")?;
         binding.check_live().unwrap();
         assert!(self.0.bound.lock().unwrap().replace(binding).is_none());
@@ -50,11 +65,13 @@ impl Drop for Control {
 }
 // SAFETY: unique synchronous model attachment; refuses live mappings and only
 // clears its kept configuration after acknowledged symbolic detach.
-unsafe impl Attachment for Control {
+unsafe impl crate::bus::pci::requester::preparation::AttachmentBackend for Control {
     fn domain(&self) -> Arc<dyn DmaDomain> {
         Arc::new(Domain(self.0.clone()))
     }
-    unsafe fn detach(&mut self) -> core::result::Result<(), DmaError> {
+    unsafe fn detach(
+        &mut self,
+    ) -> core::result::Result<(), crate::bus::pci::requester::preparation::DetachError> {
         assert!(self.0.live.lock().unwrap().is_empty());
         self.0.step("detach")?;
         self.0
@@ -164,7 +181,11 @@ unsafe impl native::Registers for Registers {
         }
         m.write32(offset, value);
         if offset == FUNC && value & RESET != 0 {
-            self.root.events.lock().unwrap().push("reset");
+            // Record the actual modeled store through the common phase hook,
+            // including its effect-then-unwind injection used by close tests.
+            self.root
+                .step("reset")
+                .map_err(|_| native::Error::Requirement("modeled reset register effect"))?;
         }
         if m.write_error.is_some_and(|(at, _)| at == offset) {
             return Err(native::Error::Requirement("late modeled store"));
@@ -325,9 +346,9 @@ struct NoInterrupts;
 impl irq::IrqController for NoInterrupts {
     fn request(
         &'static self,
-        _: Box<dyn irq::Source>,
-        _: Arc<dyn irq::Handler>,
-    ) -> core::result::Result<Box<dyn irq::IrqRegistration>, irq::IrqError> {
+        request: irq::Request<Box<dyn irq::Source>>,
+    ) -> core::result::Result<Box<dyn irq::IrqRegistration>, irq::RequestError> {
+        let _kept = core::mem::ManuallyDrop::new(request);
         panic!("unstarted transport admits no IRQ")
     }
     fn quarantine_count(&self) -> u64 {
@@ -340,12 +361,13 @@ pub(super) fn owned_inputs(
     root: Arc<RootState>,
 ) -> (native::lifetime::Inputs<Bar, Registers>, Arc<Counters>) {
     let (cold, counts) = cold(root.clone());
-    let bound = cold
+    let mut bound = cold
         .quiesce_and_bind()
         .unwrap_or_else(|f| panic!("{:?}", f.error));
     let mut function = bound.requester.into_function();
     let retention = function.config().retain_epoch().unwrap();
     function.enable_polled();
+    let msi_route = bound.attachment.irq_route().unwrap();
     let inputs = native::Inputs {
         function,
         retained: Arc::new(()),
@@ -354,7 +376,7 @@ pub(super) fn owned_inputs(
         clock: CLOCK,
         interrupts: &NO_INTERRUPTS,
         domain: bound.attachment.domain(),
-        msi_completion: irq::posted_msi::MsiCompletion::unavailable(),
+        msi_route,
     };
     // SAFETY: exclusively owned model uses the same cold receipt/root/BAR.
     let platform =

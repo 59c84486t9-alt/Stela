@@ -60,11 +60,15 @@ struct stela_linux_services {
 	/* Map count write-back pages contiguously, or return NULL. */
 	void *(*map_pages)(void *context, const u64 *physical, size_t count);
 	void (*unmap_pages)(void *context, void *address, size_t count);
-	/* Route a line to the owner's service, which calls stela_linux_irq_run
-	 * when it fires, or return a negative errno; disabling masks it and
-	 * returns only once no new firing can reach the service. */
-	int (*irq_enable)(void *context, unsigned int irq);
-	void (*irq_disable)(void *context, unsigned int irq);
+	/* Action is already linked before enable. Initialize *unexposed=false;
+	 * set true only with actual no-publication plus exact owner/event cleanup
+	 * proof. An errno/disabled bit never implies that classification. */
+	int (*irq_enable)(void *context, unsigned int irq, bool *unexposed);
+	/* Reversible mask only; queued old delivery remains owned. */
+	int (*irq_disable)(void *context, unsigned int irq);
+	/* Exact action/root/CPU/service join after C action-thread joining.
+	 * A negative result must not return through free_irq/reclaim dev_id. */
+	int (*irq_retire)(void *context, unsigned int irq);
 	/* Copy between the running client's memory and Linux's, returning the
 	 * bytes left uncopied at a fault. */
 	unsigned long (*copy_from_user)(void *context, void *to, const void *from,
@@ -85,7 +89,7 @@ struct stela_linux_owner {
 
 /* Private x86-64 C ABI. All producers and consumers rebuild from this header;
  * Rust currently passes owners opaquely rather than mirroring this table. */
-_Static_assert(sizeof(struct stela_linux_services) == 152, "Linux services ABI");
+_Static_assert(sizeof(struct stela_linux_services) == 160, "Linux services ABI");
 _Static_assert(__builtin_offsetof(struct stela_linux_services, random_bytes) == 48,
 	       "Linux random callback ABI");
 _Static_assert(sizeof(struct stela_linux_owner) == 16, "Linux owner ABI");

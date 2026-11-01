@@ -3,9 +3,10 @@
 #define STELA_PCI_H
 #include <linux/pci.h>
 
-/* A function its owner built, on a bus with the owner's pci_ops. Adding
- * initializes its device; removing drops that reference. */
-void stela_linux_pci_add_device(struct pci_dev *dev);
+/* A function its owner built, on a bus with the owner's pci_ops. Publish an
+ * already initialized/enrolled device; removal drops its registration ref. */
+int stela_linux_pci_publish_device(struct pci_dev *dev);
+bool stela_linux_pci_devices_present(void);
 bool stela_linux_pci_bound(const struct pci_dev *device);
 void stela_linux_pci_remove_device(struct pci_dev *dev);
 
@@ -39,18 +40,23 @@ struct stela_linux_pci_function {
 	 * Nonquiescent or other-owner final release quarantines host/context;
 	 * no destructor is invoked from atomic or private RCU callback context. */
 	void (*release_context)(void *context);
+	/* Original initialized device enrollment; called before any driver probe. */
+	int (*enroll)(void *context, struct device *device);
 };
 
-_Static_assert(sizeof(struct stela_linux_pci_function) == 232, "Linux PCI function ABI");
+_Static_assert(sizeof(struct stela_linux_pci_function) == 240, "Linux PCI function ABI");
 _Static_assert(__builtin_offsetof(struct stela_linux_pci_function, release_context) == 224,
 	       "Linux PCI context release ABI");
 
-/* Present function to Linux, which binds any driver matching it; NULL when out
- * of memory, without taking context ownership. Removal unregisters the device
+_Static_assert(__builtin_offsetof(struct stela_linux_pci_function, enroll) == 232,
+	       "Linux PCI enrollment ABI");
+
+/* Present function to Linux, which binds any driver matching it. NULL reports
+ * a negative errno (if error is non-NULL), without taking context ownership. Removal unregisters the device
  * and drops the registration reference; other references keep callbacks live.
  * The attach owner/platform and callback code must outlive every escaped
  * device reference or quarantined final release. */
-struct pci_dev *stela_linux_pci_attach(const struct stela_linux_pci_function *function);
+struct pci_dev *stela_linux_pci_attach(const struct stela_linux_pci_function *function, int *error);
 /* Cumulative final releases quarantined outside the original process owner.
  * Atomic observation only; no reset or deferred reclamation is implied. */
 u64 stela_linux_pci_quarantined_functions(void);

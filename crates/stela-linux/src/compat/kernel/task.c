@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 /* Original Linux task metadata bound to actual retained Runtime continuations.
  * This implements identity/lease transitions, not a substitute Linux scheduler. */
+#include <stela/catalogue.h>
 #include <linux/errno.h>
 #include <linux/irqflags.h>
 #include <linux/limits.h>
@@ -271,6 +272,8 @@ static struct signal_struct no_process;
 
 struct stela_linux_task *stela_linux_task_allocate(void)
 {
+	if (stela_linux_kernel_prepare_resource())
+		return NULL;
 	struct stela_linux_task *task = stela_linux_heap_alloc(sizeof(*task), __alignof__(*task));
 	if (!task)
 		return NULL;

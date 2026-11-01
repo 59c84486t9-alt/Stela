@@ -1,11 +1,25 @@
 use super::*;
+use posted_msi::RouteOwner;
 extern crate std;
 
 struct Model {
     ticks: AtomicU64,
     pending: AtomicBool,
     fail_pending: AtomicBool,
+    fail_eoi: AtomicBool,
+    dispatch_on_program: AtomicBool,
+    dispatch_on_unmask: AtomicBool,
+    panic_unmask: AtomicBool,
+    panic_pending: AtomicBool,
+    panic_window: AtomicBool,
+    irq_enabled: AtomicBool,
+    root_epoch: AtomicU64,
     fail_mask: AtomicBool,
+    panic_mask: AtomicBool,
+    panic_sync: AtomicBool,
+    root_pending: AtomicBool,
+    root_checks: AtomicUsize,
+    root_fences: AtomicUsize,
     wrong_cpu: AtomicBool,
     fail_target: AtomicBool,
     invalid_target: AtomicBool,
@@ -25,7 +39,20 @@ impl Model {
             ticks: AtomicU64::new(0),
             pending: AtomicBool::new(false),
             fail_pending: AtomicBool::new(false),
+            fail_eoi: AtomicBool::new(false),
+            dispatch_on_program: AtomicBool::new(false),
+            dispatch_on_unmask: AtomicBool::new(false),
+            panic_unmask: AtomicBool::new(false),
+            panic_pending: AtomicBool::new(false),
+            panic_window: AtomicBool::new(false),
+            irq_enabled: AtomicBool::new(true),
+            root_epoch: AtomicU64::new(1),
             fail_mask: AtomicBool::new(false),
+            panic_mask: AtomicBool::new(false),
+            panic_sync: AtomicBool::new(false),
+            root_pending: AtomicBool::new(false),
+            root_checks: AtomicUsize::new(0),
+            root_fences: AtomicUsize::new(0),
             wrong_cpu: AtomicBool::new(false),
             fail_target: AtomicBool::new(false),
             invalid_target: AtomicBool::new(false),
@@ -53,11 +80,15 @@ unsafe impl Platform for ModelPlatform {
             Ok(())
         }
     }
+    fn check_process(&self) -> Result<(), crate::bus::irq::IrqError> {
+        self.check_cpu()
+    }
     fn save_and_disable(&self) -> u64 {
-        0
+        u64::from(self.0.irq_enabled.swap(false, Ordering::AcqRel))
     }
     unsafe fn restore(&self, saved: u64) {
-        assert_eq!(saved, 0);
+        assert!(saved <= 1);
+        self.0.irq_enabled.store(saved != 0, Ordering::Release);
     }
     fn target(&self, vector: u8) -> Result<Target, IrqError> {
         if self.0.fail_target.load(Ordering::Relaxed) {
@@ -74,15 +105,23 @@ unsafe impl Platform for ModelPlatform {
         })
     }
     fn pending(&self, _: u8) -> Result<bool, IrqError> {
+        assert!(
+            !self.0.panic_pending.load(Ordering::Relaxed),
+            "injected pending unwind"
+        );
         if self.0.fail_pending.load(Ordering::Relaxed) {
             Err(IrqError::FailedRead)
         } else {
             Ok(self.0.pending.load(Ordering::Relaxed))
         }
     }
-    fn eoi(&self) {
+    fn eoi(&self, _vector: u8) -> Result<crate::bus::irq::Trigger, crate::bus::irq::IrqError> {
         self.0.eois.fetch_add(1, Ordering::Relaxed);
+        if self.0.fail_eoi.load(Ordering::Acquire) {
+            return Err(IrqError::FailedRead);
+        }
         self.0.pending.store(false, Ordering::Relaxed);
+        Ok(crate::bus::irq::Trigger::Edge)
     }
     fn ticks(&self) -> u64 {
         self.0.ticks.fetch_add(1, Ordering::Relaxed)
@@ -91,6 +130,10 @@ unsafe impl Platform for ModelPlatform {
         8
     }
     unsafe fn interrupt_window(&self) {
+        assert!(
+            !self.0.panic_window.load(Ordering::Relaxed),
+            "injected window unwind"
+        );
         if self.0.admit_irq.load(Ordering::Relaxed) && self.0.pending.load(Ordering::Relaxed) {
             // SAFETY: the model registry is leaked/stable, and closing
             // keeps its source/context for this pending delivery.
@@ -99,11 +142,118 @@ unsafe impl Platform for ModelPlatform {
         }
     }
 }
+
+struct ModelDomain {
+    model: Arc<Model>,
+    epoch: u64,
+}
+// SAFETY: same explicit controller/source model and its actual epoch/CPU state;
+// no native permission or physical source is fabricated by this fixture.
+unsafe impl posted_msi::NotificationDomain for ModelDomain {
+    fn check(&self) -> Result<(), posted_msi::Error> {
+        if self.model.wrong_cpu.load(Ordering::Acquire) {
+            return Err(posted_msi::Error::Context);
+        }
+        if self.model.root_epoch.load(Ordering::Acquire) != self.epoch {
+            return Err(posted_msi::Error::RootFailed);
+        }
+        Ok(())
+    }
+}
+struct DeliveryPeer {
+    model: Arc<Model>,
+    allocated: bool,
+    epoch: u64,
+}
+// SAFETY: explicit isolated no-native-pin route peer. Its independent pending
+// state is not source stop, payload, CPU IRR/ISR or a native delivery receipt.
+unsafe impl posted_msi::RouteOwner for DeliveryPeer {
+    fn allocate(
+        &mut self,
+        target: &CpuTarget<'_>,
+    ) -> Result<MsiMessage, posted_msi::AllocationError> {
+        target
+            .check_current()
+            .map_err(|_| posted_msi::AllocationError::Unexposed(posted_msi::Error::Context))?;
+        if self.allocated {
+            return Err(posted_msi::AllocationError::Unexposed(
+                posted_msi::Error::AlreadyBound,
+            ));
+        }
+        self.allocated = true;
+        let target = target.descriptor();
+        Ok(MsiMessage {
+            address: 0xfee0_0000 | u64::from(target.destination) << 12,
+            data: u32::from(target.vector),
+        })
+    }
+    fn validate(&self) -> Result<(), posted_msi::Error> {
+        self.model.root_checks.fetch_add(1, Ordering::Relaxed);
+        if self.model.root_epoch.load(Ordering::Acquire) != self.epoch {
+            return Err(posted_msi::Error::RootFailed);
+        }
+        if self.model.wrong_cpu.load(Ordering::Relaxed) {
+            Err(posted_msi::Error::Context)
+        } else {
+            Ok(())
+        }
+    }
+    fn notification_domain(
+        &self,
+    ) -> Result<Arc<dyn posted_msi::NotificationDomain>, posted_msi::Error> {
+        self.validate()?;
+        Ok(Arc::new(ModelDomain {
+            model: self.model.clone(),
+            epoch: self.epoch,
+        }))
+    }
+    unsafe fn strong_fence(&mut self) -> Result<(), posted_msi::Error> {
+        self.validate()?;
+        if self.model.root_pending.load(Ordering::Relaxed) {
+            return Err(posted_msi::Error::RootFailed);
+        }
+        self.model.root_fences.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+    unsafe fn release_endpoint(
+        &mut self,
+        proof: &posted_msi::EndpointRetirement<'_>,
+    ) -> Result<(), posted_msi::Error> {
+        self.validate()?;
+        assert!(proof.requester().is_none());
+        Ok(())
+    }
+}
+fn fixture_route(model: &Arc<Model>) -> RouteRequest {
+    // SAFETY: this original synchronous model carries no native config pin;
+    // private Registry target joins it, and its independent root state fences.
+    RouteRequest::Msi(unsafe {
+        posted_msi::MsiRoute::bounded_fixture(Box::new(DeliveryPeer {
+            model: model.clone(),
+            allocated: false,
+            epoch: model.root_epoch.load(Ordering::Acquire),
+        }))
+    })
+}
+fn finish<S: Source + ?Sized>(retired: RetiredSource<S>) {
+    // SAFETY: these fixture sources have no DMA-dependent release users; keep
+    // the original callback through explicit source release on the checked CPU.
+    let (source, handler, mut route) =
+        unsafe { retired.into_parts() }.unwrap_or_else(|_| panic!("checked retired fixture"));
+    route.release_unattached_fixture().unwrap();
+    drop(source);
+    drop(handler);
+}
+
 struct ModelSource(Arc<Model>);
 // SAFETY: explicit stopped-source model with injected mask failures and
 // controller delivery. Quiesce represents device/work completion.
 unsafe impl Source for ModelSource {
     fn mask(&mut self) -> Result<(), IrqError> {
+        assert!(
+            !self.0.panic_mask.load(Ordering::Relaxed),
+            "injected source unwind"
+        );
         if self.0.fail_mask.load(Ordering::Relaxed) {
             Err(IrqError::Mask)
         } else {
@@ -114,11 +264,17 @@ unsafe impl Source for ModelSource {
         self.0.quiesces.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
-    fn route(&self) -> RouteRequest {
-        RouteRequest::Msi
+    fn route_kind(&self) -> crate::bus::irq::RouteKind {
+        crate::bus::irq::RouteKind::Msi
     }
-    unsafe fn program(&mut self, route: Route) -> Result<(), IrqError> {
-        let Route::Msi(message) = route else {
+    fn requester(&self) -> Option<&crate::bus::pci::requester::RequesterId> {
+        None
+    }
+    unsafe fn program(
+        &mut self,
+        route: &crate::bus::irq::AllocatedRoute<'_>,
+    ) -> Result<(), IrqError> {
+        let Route::Msi(message) = route.programming() else {
             return Err(IrqError::Route);
         };
         assert_eq!(message.address, 0xfee00000);
@@ -126,9 +282,24 @@ unsafe impl Source for ModelSource {
             message.data,
             u32::from(self.0.vector.load(Ordering::Relaxed))
         );
+        if self.0.dispatch_on_program.swap(false, Ordering::AcqRel) {
+            // SAFETY: exact permanently retained model Registry; this models
+            // an old ordinary packet during masked new source programming.
+            let registry = unsafe { &*self.0.registry.load(Ordering::Acquire) };
+            assert!(registry.dispatch(self.0.vector.load(Ordering::Acquire)));
+        }
         Ok(())
     }
     unsafe fn unmask(&mut self) -> Result<(), IrqError> {
+        if self.0.dispatch_on_unmask.swap(false, Ordering::AcqRel) {
+            // SAFETY: exact retained synchronous model original controller.
+            let registry = unsafe { &*self.0.registry.load(Ordering::Acquire) };
+            assert!(registry.dispatch(self.0.vector.load(Ordering::Acquire)));
+        }
+        assert!(
+            !self.0.panic_unmask.load(Ordering::Acquire),
+            "post-LIVE enable panic"
+        );
         Ok(())
     }
     unsafe fn synchronize(&mut self) -> Result<(), IrqError> {
@@ -137,6 +308,10 @@ unsafe impl Source for ModelSource {
 }
 impl ModelSource {
     fn synchronized(&mut self) -> Result<(), IrqError> {
+        assert!(
+            !self.0.panic_sync.load(Ordering::Relaxed),
+            "injected work unwind"
+        );
         self.quiesce()
     }
 }
@@ -167,10 +342,11 @@ fn request(
     model: &Arc<Model>,
 ) -> Registration<'static, ModelPlatform> {
     registry
-        .request(
-            Box::new(ModelSource(model.clone())),
-            Arc::new(ModelHandler(model.clone())),
-        )
+        .request(Request {
+            source: Box::new(ModelSource(model.clone())),
+            handler: Arc::new(ModelHandler(model.clone())),
+            routing: fixture_route(model),
+        })
         .unwrap()
 }
 
@@ -190,10 +366,16 @@ unsafe impl Source for LocalSource {
     fn quiesce(&mut self) -> Result<(), IrqError> {
         self.inner.quiesce()
     }
-    fn route(&self) -> RouteRequest {
-        self.inner.route()
+    fn route_kind(&self) -> crate::bus::irq::RouteKind {
+        self.inner.route_kind()
     }
-    unsafe fn program(&mut self, route: Route) -> Result<(), IrqError> {
+    fn requester(&self) -> Option<&crate::bus::pci::requester::RequesterId> {
+        self.inner.requester()
+    }
+    unsafe fn program(
+        &mut self,
+        route: &crate::bus::irq::AllocatedRoute<'_>,
+    ) -> Result<(), IrqError> {
         // SAFETY: forwards the wrapped source's own call under the same contract.
         unsafe { self.inner.program(route) }
     }
@@ -238,18 +420,19 @@ fn local_source_releases_before_handler_only_on_checked_cpu() {
     let registry = registry(model.clone());
     let token = std::rc::Rc::new(core::cell::Cell::new(0));
     let mut registration = registry
-        .request(
-            local_source(&model, token.clone()),
-            Arc::new(ModelHandler(model.clone())),
-        )
+        .request(Request {
+            source: local_source(&model, token.clone()),
+            handler: Arc::new(ModelHandler(model.clone())),
+            routing: fixture_route(&model),
+        })
         .unwrap();
     model.migrate_on_sync.store(true, Ordering::Relaxed);
-    assert_eq!(registration.retire(), Err(IrqError::WrongCpu));
+    assert!(matches!(registration.retire(), Err(IrqError::WrongCpu)));
     assert_eq!(token.get(), 0);
     assert_eq!(model.handler_drops.load(Ordering::Relaxed), 0);
     model.migrate_on_sync.store(false, Ordering::Relaxed);
     model.wrong_cpu.store(false, Ordering::Relaxed);
-    registration.retire().unwrap();
+    finish(registration.retire().unwrap());
     assert_eq!(token.get(), 1);
     assert_eq!(model.source_drops.load(Ordering::Relaxed), 1);
     assert_eq!(model.handler_drops.load(Ordering::Relaxed), 1);
@@ -260,40 +443,43 @@ fn returned_local_source_keeps_callback_context_through_its_final_release() {
     let registry = registry(model.clone());
     let token = std::rc::Rc::new(core::cell::Cell::new(0));
     let mut registration = registry
-        .request(
-            local_source(&model, token.clone()),
-            Arc::new(ModelHandler(model.clone())),
-        )
+        .request(Request {
+            source: local_source(&model, token.clone()),
+            handler: Arc::new(ModelHandler(model.clone())),
+            routing: fixture_route(&model),
+        })
         .unwrap();
-    let retired = registration.retire_source().unwrap();
+    let retired = registration.retire().unwrap();
     assert_eq!(token.get(), 0);
     assert_eq!(model.handler_drops.load(Ordering::Relaxed), 0);
-    drop(retired);
+    finish(retired);
     assert_eq!(token.get(), 1);
     assert_eq!(model.source_drops.load(Ordering::Relaxed), 1);
     assert_eq!(model.handler_drops.load(Ordering::Relaxed), 1);
 }
 #[test]
-fn untouched_typed_refusal_keeps_affine_source_and_callback_bound_for_default_drop() {
+fn untouched_typed_refusal_retains_affine_source_and_callback_on_abandonment() {
     let model = Model::new();
     let registry = registry(model.clone());
     let token = std::rc::Rc::new(core::cell::Cell::new(0));
     model.fail_target.store(true, Ordering::Relaxed);
-    let Err(refusal) = registry.request_owned(
-        LocalSource {
-            inner: ModelSource(model.clone()),
-            token: token.clone(),
-            owner: std::thread::current().id(),
-        },
-        Arc::new(ModelHandler(model.clone())),
-    ) else {
-        panic!("failed target registered")
-    };
-    assert!(refusal.returned.is_some());
+    {
+        let Err(refusal) = registry.request_owned(Request {
+            source: LocalSource {
+                inner: ModelSource(model.clone()),
+                token: token.clone(),
+                owner: std::thread::current().id(),
+            },
+            handler: Arc::new(ModelHandler(model.clone())),
+            routing: fixture_route(&model),
+        }) else {
+            panic!("failed target registered")
+        };
+        assert!(refusal.returned.is_some());
+        assert_eq!(token.get(), 0);
+    }
     assert_eq!(token.get(), 0);
-    drop(refusal);
-    assert_eq!(token.get(), 1);
-    assert_eq!(model.handler_drops.load(Ordering::Relaxed), 1);
+    assert_eq!(model.handler_drops.load(Ordering::Relaxed), 0);
 }
 #[test]
 fn all_early_admission_errors_keep_affine_source_and_callback_owner() {
@@ -310,34 +496,36 @@ fn all_early_admission_errors_keep_affine_source_and_callback_owner() {
         model.fail_target.store(case == 1, Ordering::Relaxed);
         model.invalid_target.store(case == 2, Ordering::Relaxed);
         let token = std::rc::Rc::new(core::cell::Cell::new(0));
-        let result = registry.request(
-            local_source(&model, token.clone()),
-            Arc::new(ModelHandler(model.clone())),
-        );
-        let Err(refusal) = result else {
-            panic!("an inadmissible request registered");
-        };
-        assert_eq!(
-            refusal.error,
-            [
-                IrqError::WrongCpu,
-                IrqError::Route,
-                IrqError::Route,
-                IrqError::Exhausted
-            ][case]
-        );
-        assert_eq!(token.get(), 0);
-        assert_eq!(std::rc::Rc::strong_count(&token), 2);
-        assert_eq!(model.source_drops.load(Ordering::Relaxed), 0);
-        assert_eq!(model.handler_drops.load(Ordering::Relaxed), 0);
-        // Only a wrong-CPU refusal keeps the owners; the others return
-        // them untouched for the driver to keep polling with.
-        assert_eq!(refusal.returned.is_some(), case != 0);
-        assert_eq!(registry.quarantine_count(), u64::from(case == 0));
-        drop(refusal);
+        {
+            let result = registry.request(Request {
+                source: local_source(&model, token.clone()),
+                handler: Arc::new(ModelHandler(model.clone())),
+                routing: fixture_route(&model),
+            });
+            let Err(refusal) = result else {
+                panic!("an inadmissible request registered");
+            };
+            assert_eq!(
+                refusal.error,
+                [
+                    IrqError::WrongCpu,
+                    IrqError::Route,
+                    IrqError::Route,
+                    IrqError::Exhausted
+                ][case]
+            );
+            assert_eq!(token.get(), 0);
+            assert_eq!(std::rc::Rc::strong_count(&token), 2);
+            assert_eq!(model.source_drops.load(Ordering::Relaxed), 0);
+            assert_eq!(model.handler_drops.load(Ordering::Relaxed), 0);
+            // Only a wrong-CPU refusal keeps the owners; the others return
+            // them untouched for the driver to keep polling with.
+            assert_eq!(refusal.returned.is_some(), case != 0);
+            assert_eq!(registry.quarantine_count(), u64::from(case == 0));
+        }
         model.wrong_cpu.store(false, Ordering::Relaxed);
         for mut registered in occupied {
-            registered.retire().unwrap();
+            finish(registered.retire().unwrap());
         }
     }
 }
@@ -352,10 +540,11 @@ fn foreign_thread_admission_and_abandoned_migration_never_drop_local_owner() {
     let other = model.clone();
     std::thread::spawn(move || {
         let token = std::rc::Rc::new(core::cell::Cell::new(0));
-        let result = registry.request(
-            local_source(&other, token.clone()),
-            Arc::new(ModelHandler(other.clone())),
-        );
+        let result = registry.request(Request {
+            source: local_source(&other, token.clone()),
+            handler: Arc::new(ModelHandler(other.clone())),
+            routing: fixture_route(&other),
+        });
         assert!(matches!(
             result,
             Err(RequestError {
@@ -371,10 +560,11 @@ fn foreign_thread_admission_and_abandoned_migration_never_drop_local_owner() {
     assert_eq!(registry.quarantine_count(), 1);
     let token = std::rc::Rc::new(core::cell::Cell::new(0));
     let registration = registry
-        .request(
-            local_source(&model, token.clone()),
-            Arc::new(ModelHandler(model.clone())),
-        )
+        .request(Request {
+            source: local_source(&model, token.clone()),
+            handler: Arc::new(ModelHandler(model.clone())),
+            routing: fixture_route(&model),
+        })
         .unwrap();
     model.wrong_cpu.store(true, Ordering::Relaxed);
     drop(registration);
@@ -410,11 +600,17 @@ fn immutable_sharing_invokes_all_members_and_preserves_unclaimed_status() {
     assert_eq!(Arc::strong_count(&a), 2);
     let model = Model::new();
     let r = registry(model.clone());
-    let mut registration = r.request(Box::new(ModelSource(model.clone())), a).unwrap();
+    let mut registration = r
+        .request(Request {
+            source: Box::new(ModelSource(model.clone())),
+            handler: a,
+            routing: fixture_route(&model),
+        })
+        .unwrap();
     assert!(r.dispatch(registration.vector()));
     assert_eq!(registration.handled(), Ok(0));
     assert_eq!(model.eois.load(Ordering::Relaxed), 1);
-    registration.retire().unwrap();
+    finish(registration.retire().unwrap());
 }
 
 #[test]
@@ -430,14 +626,14 @@ fn real_registration_lifetime_drains_pending_delivery_before_final_release_and_r
     assert_eq!(model.eois.load(Ordering::Relaxed), 1);
     assert_eq!(model.handler_drops.load(Ordering::Relaxed), 0);
     model.pending.store(true, Ordering::Relaxed);
-    registration.retire().unwrap();
-    assert!(!registry.dispatch(vector));
+    finish(registration.retire().unwrap());
+    assert!(registry.dispatch(vector));
     assert_eq!(
         model.callbacks.load(Ordering::Relaxed),
         1,
         "closing IRQ must not enter the detached device callback"
     );
-    assert_eq!(model.eois.load(Ordering::Relaxed), 2);
+    assert_eq!(model.eois.load(Ordering::Relaxed), 3);
     assert_eq!(
         model.quiesces.load(Ordering::Relaxed),
         3,
@@ -447,7 +643,7 @@ fn real_registration_lifetime_drains_pending_delivery_before_final_release_and_r
     assert_eq!(model.handler_drops.load(Ordering::Relaxed), 1);
     let mut reused = request(registry, &model);
     assert_eq!(reused.vector(), vector);
-    reused.retire().unwrap();
+    finish(reused.retire().unwrap());
 }
 
 #[test]
@@ -455,10 +651,11 @@ fn concrete_source_handoff_returns_original_owner_only_after_acknowledged_drain(
     let model = Model::new();
     let registry = registry(model.clone());
     let mut registration = registry
-        .request_owned(
-            ModelSource(model.clone()),
-            Arc::new(ModelHandler(model.clone())),
-        )
+        .request_owned(Request {
+            source: ModelSource(model.clone()),
+            handler: Arc::new(ModelHandler(model.clone())),
+            routing: fixture_route(&model),
+        })
         .unwrap();
     let vector = registration.vector();
     model.pending.store(true, Ordering::Relaxed);
@@ -471,20 +668,22 @@ fn concrete_source_handoff_returns_original_owner_only_after_acknowledged_drain(
     assert_eq!(retired.route().vector(), vector);
     // SAFETY: this concrete modeled source has no release dependency;
     // keep its callback until after explicit source destruction.
-    let (source, handler, route) = unsafe { retired.into_parts() };
+    let (source, handler, mut route) =
+        unsafe { retired.into_parts() }.unwrap_or_else(|_| panic!("checked retired owner"));
     assert!(Arc::ptr_eq(&source.0, &model));
     assert_eq!(route.vector(), vector);
     assert_eq!(model.source_drops.load(Ordering::Relaxed), 0);
     assert_eq!(model.handler_drops.load(Ordering::Relaxed), 0);
     assert_eq!(model.eois.load(Ordering::Relaxed), 1);
-    assert!(!registry.dispatch(vector));
+    assert!(registry.dispatch(vector));
     assert!(matches!(registration.retire(), Err(IrqError::Unregistered)));
+    route.release_unattached_fixture().unwrap();
     drop(source);
     drop(handler);
     assert_eq!(model.source_drops.load(Ordering::Relaxed), 1);
     let mut reused = request(registry, &model);
     assert_eq!(reused.vector(), vector);
-    reused.retire().unwrap();
+    finish(reused.retire().unwrap());
 }
 
 #[test]
@@ -492,23 +691,31 @@ fn typed_early_refusal_preserves_original_source_for_untouched_retry() {
     let model = Model::new();
     let registry = registry(model.clone());
     model.fail_target.store(true, Ordering::Relaxed);
-    let Err(refusal) = registry.request_owned(
-        ModelSource(model.clone()),
-        Arc::new(ModelHandler(model.clone())),
-    ) else {
+    let Err(refusal) = registry.request_owned(Request {
+        source: ModelSource(model.clone()),
+        handler: Arc::new(ModelHandler(model.clone())),
+        routing: fixture_route(&model),
+    }) else {
         panic!("failed target registered")
     };
     assert_eq!(refusal.error, IrqError::Route);
     // SAFETY: preserve the original CPU and callback through source
     // retry below; the refused request has not changed either owner.
-    let (source, handler) = unsafe { refusal.returned.unwrap().into_parts() };
+    let (source, handler, routing) = unsafe { refusal.returned.unwrap().into_parts() }
+        .unwrap_or_else(|_| panic!("checked untouched owner"));
     assert!(Arc::ptr_eq(&source.0, &model));
     assert_eq!(model.source_drops.load(Ordering::Relaxed), 0);
     assert_eq!(model.handler_drops.load(Ordering::Relaxed), 0);
     model.fail_target.store(false, Ordering::Relaxed);
-    let mut registration = registry.request_owned(*source, handler).unwrap();
+    let mut registration = registry
+        .request_owned(Request {
+            source: *source,
+            handler,
+            routing,
+        })
+        .unwrap();
     assert_eq!(registry.quarantine_count(), 0);
-    drop(registration.retire().unwrap());
+    finish(registration.retire().unwrap());
     assert_eq!(model.source_drops.load(Ordering::Relaxed), 1);
     assert_eq!(model.handler_drops.load(Ordering::Relaxed), 1);
 }
@@ -519,15 +726,15 @@ fn failed_pending_read_and_timeout_keep_for_retry_without_vector_reuse() {
     let registry = registry(model.clone());
     let mut registration = request(registry, &model);
     model.fail_pending.store(true, Ordering::Relaxed);
-    assert_eq!(registration.retire(), Err(IrqError::FailedRead));
+    assert!(matches!(registration.retire(), Err(IrqError::FailedRead)));
     assert_eq!(model.source_drops.load(Ordering::Relaxed), 0);
     model.fail_pending.store(false, Ordering::Relaxed);
     model.pending.store(true, Ordering::Relaxed);
     model.admit_irq.store(false, Ordering::Relaxed);
-    assert_eq!(registration.retire(), Err(IrqError::Drain));
+    assert!(matches!(registration.retire(), Err(IrqError::Drain)));
     assert_eq!(model.handler_drops.load(Ordering::Relaxed), 0);
     model.admit_irq.store(true, Ordering::Relaxed);
-    registration.retire().unwrap();
+    finish(registration.retire().unwrap());
     assert_eq!(model.source_drops.load(Ordering::Relaxed), 1);
 }
 
@@ -545,10 +752,11 @@ fn failed_teardown_or_arming_quarantines_the_source() {
     assert!(registry.dispatch(vector));
     assert_eq!(model.callbacks.load(Ordering::Relaxed), 0);
     assert!(matches!(
-        registry.request(
-            Box::new(ModelSource(model.clone())),
-            Arc::new(ModelHandler(model.clone()))
-        ),
+        registry.request(Request {
+            source: Box::new(ModelSource(model.clone())),
+            handler: Arc::new(ModelHandler(model.clone())),
+            routing: fixture_route(&model)
+        }),
         Err(RequestError {
             error: IrqError::Mask,
             returned: None
@@ -586,14 +794,18 @@ fn callback_borrow_outlives_failed_removal_without_arc_clone_or_early_release() 
         model: model.clone(),
     });
     let mut registration = registry
-        .request(Box::new(ModelSource(model.clone())), handler.clone())
+        .request(Request {
+            source: Box::new(ModelSource(model.clone())),
+            handler: handler.clone(),
+            routing: fixture_route(&model),
+        })
         .unwrap();
     let vector = registration.vector();
     // Concurrent model interleaving stresses the reader/remove lifetime;
     // the native adapter remains confined to its one owning BSP.
     let irq = std::thread::spawn(move || assert!(registry.dispatch(vector)));
     handler.entered.wait();
-    assert_eq!(registration.retire(), Err(IrqError::Drain));
+    assert!(matches!(registration.retire(), Err(IrqError::Drain)));
     assert_eq!(
         Arc::strong_count(&handler),
         2,
@@ -602,10 +814,388 @@ fn callback_borrow_outlives_failed_removal_without_arc_clone_or_early_release() 
     assert_eq!(model.source_drops.load(Ordering::Relaxed), 0);
     handler.release.wait();
     irq.join().unwrap();
-    registration.retire().unwrap();
+    finish(registration.retire().unwrap());
     assert_eq!(Arc::strong_count(&handler), 1);
     assert_eq!(model.eois.load(Ordering::Relaxed), 1);
     assert_eq!(model.source_drops.load(Ordering::Relaxed), 1);
     drop(handler);
     assert_eq!(model.handler_drops.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn notification_action_join_does_not_claim_optional_fabric_completion() {
+    let model = Model::new();
+    let registry = registry(model.clone());
+    let mut registration = request(registry, &model);
+    model.root_pending.store(true, Ordering::Relaxed);
+    let mut stronger = DeliveryPeer {
+        model: model.clone(),
+        allocated: true,
+        epoch: 1,
+    };
+    assert_eq!(
+        // SAFETY: independent explicit model source is masked; this optional peer
+        // refuses its stronger proof while notification/action retirement can join.
+        unsafe { stronger.strong_fence() },
+        Err(posted_msi::Error::RootFailed)
+    );
+    let retired = registration.retire().unwrap();
+    assert_eq!(model.root_fences.load(Ordering::Relaxed), 0);
+    model.wrong_cpu.store(true, Ordering::Relaxed);
+    assert_eq!(retired.route().validate(), Err(IrqError::WrongCpu));
+    model.wrong_cpu.store(false, Ordering::Relaxed);
+    finish(retired);
+}
+#[test]
+fn domain_loss_and_eoi_failure_preserve_exact_error_and_old_owners() {
+    for root_loss in [false, true] {
+        let model = Model::new();
+        let registry = registry(model.clone());
+        let mut registration = request(registry, &model);
+        if root_loss {
+            model.root_epoch.store(2, Ordering::Release);
+        } else {
+            model.fail_eoi.store(true, Ordering::Release);
+        }
+        assert!(registry.dispatch(registration.vector()));
+        assert_eq!(
+            model.callbacks.load(Ordering::Relaxed),
+            usize::from(!root_loss)
+        );
+        let expected = if root_loss {
+            IrqError::Delivery(posted_msi::Error::RootFailed)
+        } else {
+            IrqError::FailedRead
+        };
+        assert!(matches!(registration.retire(),Err(error) if error==expected));
+        assert_eq!(model.source_drops.load(Ordering::Relaxed), 0);
+        assert_eq!(model.handler_drops.load(Ordering::Relaxed), 0);
+    }
+}
+#[test]
+fn delayed_ordinary_notification_enters_only_current_valid_status_handler() {
+    struct StatusHandler {
+        cause: AtomicBool,
+        completions: AtomicUsize,
+        entries: AtomicUsize,
+    }
+    impl Handler for StatusHandler {
+        fn handle(&self) -> Disposition {
+            self.entries.fetch_add(1, Ordering::Relaxed);
+            if self.cause.swap(false, Ordering::AcqRel) {
+                self.completions.fetch_add(1, Ordering::Relaxed);
+                Disposition::Handled
+            } else {
+                Disposition::NotMine
+            }
+        }
+    }
+    let model = Model::new();
+    let registry = registry(model.clone());
+    let mut old = request(registry, &model);
+    let vector = old.vector();
+    model.root_pending.store(true, Ordering::Release); // unrelated old ordinary packet
+    finish(old.retire().unwrap());
+    let current = Arc::new(StatusHandler {
+        cause: AtomicBool::new(false),
+        completions: AtomicUsize::new(0),
+        entries: AtomicUsize::new(0),
+    });
+    let mut new = registry
+        .request(Request {
+            source: Box::new(ModelSource(model.clone())),
+            handler: current.clone(),
+            routing: fixture_route(&model),
+        })
+        .unwrap();
+    assert_eq!(new.vector(), vector);
+    assert!(registry.dispatch(vector)); // late old packet: no current cause
+    assert_eq!(current.completions.load(Ordering::Relaxed), 0);
+    assert_eq!(model.callbacks.load(Ordering::Relaxed), 0);
+    current.cause.store(true, Ordering::Release);
+    assert!(registry.dispatch(vector));
+    assert_eq!(current.completions.load(Ordering::Relaxed), 1);
+    assert_eq!(current.entries.load(Ordering::Relaxed), 2);
+    finish(new.retire().unwrap());
+}
+#[test]
+fn abandoned_successful_retirement_does_not_drop_original_source_or_handler() {
+    let model = Model::new();
+    let registry = registry(model.clone());
+    let mut registration = request(registry, &model);
+    drop(registration.retire().unwrap());
+    assert_eq!(model.source_drops.load(Ordering::Relaxed), 0);
+    assert_eq!(model.handler_drops.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn exact_route_identity_rejects_a_later_registration_reusing_the_same_vector() {
+    let model = Model::new();
+    let registry = registry(model.clone());
+    let mut first = request(registry, &model);
+    let old = first.retire().unwrap();
+    let mut second = request(registry, &model);
+    let replacement = second.retire().unwrap();
+    assert_eq!(old.route().vector(), replacement.route().vector());
+    assert!(!old.route().id().same(replacement.route().id()));
+    finish(old);
+    finish(replacement);
+}
+
+#[test]
+fn unavailable_notification_refuses_before_programming_and_returns_exact_grant() {
+    struct AttachedModel(ModelSource, RequesterId);
+    // SAFETY: this isolated source peer contains no native owner; only the
+    // actual symbolic Registry route can reach its programming callbacks.
+    unsafe impl Source for AttachedModel {
+        fn route_kind(&self) -> RouteKind {
+            RouteKind::Msi
+        }
+        fn requester(&self) -> Option<&RequesterId> {
+            Some(&self.1)
+        }
+        fn mask(&mut self) -> Result<(), IrqError> {
+            self.0.mask()
+        }
+        fn quiesce(&mut self) -> Result<(), IrqError> {
+            self.0.quiesce()
+        }
+        unsafe fn program(&mut self, route: &AllocatedRoute<'_>) -> Result<(), IrqError> {
+            assert!(route.matches_requester(&self.1));
+            // SAFETY: forwards the same symbolic Registry programming view.
+            unsafe { self.0.program(route) }
+        }
+        unsafe fn unmask(&mut self) -> Result<(), IrqError> {
+            // SAFETY: forwards the same retained model callback obligation.
+            unsafe { self.0.unmask() }
+        }
+        unsafe fn synchronize(&mut self) -> Result<(), IrqError> {
+            // SAFETY: Registry must establish exact model retirement first.
+            unsafe { self.0.synchronize() }
+        }
+    }
+    let model = Model::new();
+    let registry = registry(model.clone());
+    let requester = RequesterId::new();
+    let grant = posted_msi::MsiRoute::attached(requester.clone(), None)
+        .unwrap_or_else(|_| panic!("idle model key"));
+    let refusal = registry
+        .request(Request {
+            source: Box::new(AttachedModel(ModelSource(model.clone()), requester.clone())),
+            handler: Arc::new(ModelHandler(model.clone())),
+            routing: RouteRequest::Msi(grant),
+        })
+        .err()
+        .expect("unavailable notification cannot arm");
+    assert_eq!(
+        refusal.error,
+        IrqError::Delivery(posted_msi::Error::RootUnavailable)
+    );
+    assert!(
+        requester.check_detach().is_err(),
+        "issuance stays outstanding until exact cancellation"
+    );
+    assert_eq!(model.quiesces.load(Ordering::Relaxed), 0);
+    // SAFETY: exact original untouched model owner and current context.
+    let (source, handler, routing) = unsafe { refusal.returned.unwrap().into_parts() }
+        .unwrap_or_else(|_| panic!("untouched exact owners"));
+    let RouteRequest::Msi(grant) = routing else {
+        panic!("MSI grant")
+    };
+    grant
+        .cancel(&requester)
+        .unwrap_or_else(|_| panic!("exact unpublished cancellation"));
+    assert!(requester.check_detach().is_ok());
+    drop(source);
+    drop(handler);
+    assert_eq!(model.source_drops.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn source_callback_unwind_poison_retains_without_hardware_retry_on_drop() {
+    let model = Model::new();
+    let registry = registry(model.clone());
+    model.panic_mask.store(true, Ordering::Relaxed);
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| request(registry, &model)))
+            .is_err()
+    );
+    assert_eq!(registry.quarantine_count(), 1);
+    assert!(registry.dispatch(FIRST_VECTOR));
+    assert_eq!(model.callbacks.load(Ordering::Relaxed), 0);
+    assert_eq!(model.source_drops.load(Ordering::Relaxed), 0);
+    model.panic_mask.store(false, Ordering::Relaxed);
+    let mut registration = request(registry, &model);
+    model.panic_sync.store(true, Ordering::Relaxed);
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| registration.retire())).is_err()
+    );
+    let fences = model.root_fences.load(Ordering::Relaxed);
+    model.panic_sync.store(false, Ordering::Relaxed);
+    assert!(matches!(registration.retire(), Err(IrqError::Drain)));
+    drop(registration);
+    assert_eq!(model.root_fences.load(Ordering::Relaxed), fences);
+    assert_eq!(model.source_drops.load(Ordering::Relaxed), 0);
+    assert_eq!(registry.quarantine_count(), 2);
+}
+
+#[test]
+fn pending_and_delivery_window_unwind_restore_the_exact_original_irq_state() {
+    for window in [false, true] {
+        let model = Model::new();
+        let registry = registry(model.clone());
+        let mut registration = request(registry, &model);
+        model.pending.store(true, Ordering::Release);
+        if window {
+            model.panic_window.store(true, Ordering::Release);
+        } else {
+            model.panic_pending.store(true, Ordering::Release);
+        }
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| registration.retire()))
+                .is_err()
+        );
+        assert!(model.irq_enabled.load(Ordering::Acquire));
+        assert_eq!(registry.quarantine_count(), 1);
+        assert_eq!(model.source_drops.load(Ordering::Relaxed), 0);
+        let fences = model.root_fences.load(Ordering::Relaxed);
+        drop(registration);
+        assert_eq!(model.root_fences.load(Ordering::Relaxed), fences);
+    }
+}
+#[test]
+fn extraction_preserves_exact_root_epoch_error_and_retains_original_owners() {
+    let model = Model::new();
+    let registry = registry(model.clone());
+    let mut registration = request(registry, &model);
+    let retired = registration.retire().unwrap();
+    model.root_epoch.fetch_add(1, Ordering::AcqRel);
+    {
+        // SAFETY: this negative test attempts extraction through the actual
+        // original receipt; epoch mismatch must refuse before moving any owner.
+        let refusal = match unsafe { retired.into_parts() } {
+            Ok(_) => panic!("stale root extracted"),
+            Err(refusal) => refusal,
+        };
+        assert_eq!(
+            refusal.error,
+            IrqError::Delivery(posted_msi::Error::RootFailed)
+        );
+    }
+    assert_eq!(model.source_drops.load(Ordering::Relaxed), 0);
+    assert_eq!(model.handler_drops.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn unbound_delayed_eoi_failure_poison_is_not_lost_before_replacement_admission() {
+    let model = Model::new();
+    let registry = registry(model.clone());
+    let mut old = request(registry, &model);
+    let vector = old.vector();
+    finish(old.retire().unwrap());
+    model.fail_eoi.store(true, Ordering::Release);
+    assert!(registry.dispatch(vector)); // owns vector, not successful EOI
+    assert_eq!(registry.controller_failure(), Some(IrqError::FailedRead));
+    model.fail_eoi.store(false, Ordering::Release); // cannot erase uncertain effect
+    let quiesces = model.quiesces.load(Ordering::Relaxed);
+    let refusal = registry
+        .request(Request {
+            source: Box::new(ModelSource(model.clone())),
+            handler: Arc::new(ModelHandler(model.clone())),
+            routing: fixture_route(&model),
+        })
+        .err()
+        .unwrap();
+    assert_eq!(refusal.error, IrqError::FailedRead);
+    assert!(refusal.returned.is_some());
+    assert_eq!(model.quiesces.load(Ordering::Relaxed), quiesces);
+    assert_eq!(model.callbacks.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn arming_notification_never_enters_new_handler_or_overwrites_eoi_quarantine() {
+    for failed_eoi in [false, true] {
+        let model = Model::new();
+        let registry = registry(model.clone());
+        model.dispatch_on_program.store(true, Ordering::Release);
+        model.fail_eoi.store(failed_eoi, Ordering::Release);
+        let result = registry.request(Request {
+            source: Box::new(ModelSource(model.clone())),
+            handler: Arc::new(ModelHandler(model.clone())),
+            routing: fixture_route(&model),
+        });
+        assert_eq!(model.callbacks.load(Ordering::Relaxed), 0);
+        assert_eq!(model.eois.load(Ordering::Relaxed), 1);
+        if failed_eoi {
+            let refusal = result.err().unwrap();
+            assert_eq!(refusal.error, IrqError::FailedRead);
+            assert!(refusal.returned.is_none());
+            assert_eq!(model.source_drops.load(Ordering::Relaxed), 0);
+            assert_eq!(model.handler_drops.load(Ordering::Relaxed), 0);
+        } else {
+            let mut registration = result.unwrap();
+            assert!(registry.dispatch(registration.vector()));
+            assert_eq!(model.callbacks.load(Ordering::Relaxed), 1);
+            finish(registration.retire().unwrap());
+        }
+    }
+}
+
+#[test]
+fn post_live_delivery_then_enable_panic_never_returns_unexposed_owners() {
+    let model = Model::new();
+    let registry = registry(model.clone());
+    model.dispatch_on_unmask.store(true, Ordering::Release);
+    model.panic_unmask.store(true, Ordering::Release);
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| request(registry, &model)))
+            .is_err()
+    );
+    assert_eq!(model.callbacks.load(Ordering::Relaxed), 1);
+    assert_eq!(registry.quarantine_count(), 1);
+    assert_eq!(model.source_drops.load(Ordering::Relaxed), 0);
+    assert_eq!(model.handler_drops.load(Ordering::Relaxed), 0);
+    let old = model.vector.load(Ordering::Acquire);
+    assert!(registry.dispatch(old));
+    assert_eq!(model.callbacks.load(Ordering::Relaxed), 1);
+    model.panic_unmask.store(false, Ordering::Release);
+    let mut next = request(registry, &model);
+    assert_ne!(next.vector(), old);
+    finish(next.retire().unwrap());
+}
+
+#[test]
+fn handler_unwind_poison_retains_inflight_owners_and_never_reenters_callback() {
+    struct PanicHandler(Arc<Model>);
+    impl Handler for PanicHandler {
+        fn handle(&self) -> Disposition {
+            self.0.callbacks.fetch_add(1, Ordering::Relaxed);
+            panic!("actual handler unwind");
+        }
+    }
+    impl Drop for PanicHandler {
+        fn drop(&mut self) {
+            self.0.handler_drops.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    let model = Model::new();
+    let registry = registry(model.clone());
+    let mut registration = registry
+        .request(Request {
+            source: Box::new(ModelSource(model.clone())),
+            handler: Arc::new(PanicHandler(model.clone())),
+            routing: fixture_route(&model),
+        })
+        .unwrap();
+    let vector = registration.vector();
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| registry.dispatch(vector)))
+            .is_err()
+    );
+    assert_eq!(registry.controller_failure(), Some(IrqError::Drain));
+    assert!(registry.dispatch(vector));
+    assert_eq!(model.callbacks.load(Ordering::Relaxed), 1);
+    assert!(matches!(registration.retire(), Err(IrqError::Drain)));
+    assert_eq!(model.source_drops.load(Ordering::Relaxed), 0);
+    assert_eq!(model.handler_drops.load(Ordering::Relaxed), 0);
 }

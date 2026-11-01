@@ -712,6 +712,7 @@ fn load(
         placement,
         screen,
         apic_base,
+        resident,
         ..
     } = image;
     let memory::EngineMemory {
@@ -842,6 +843,7 @@ fn load(
             },
             native_task_allocations,
             native_loader_tables: loader_tables,
+            native_image: resident,
         });
     }
     // SAFETY: boot services ended; the completed root maps this code and

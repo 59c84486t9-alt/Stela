@@ -1142,6 +1142,13 @@ impl<R: Registers> RequesterDomain<R> {
             .filter(|d| d.did == self.did && d.generation == self.generation && !d.quarantined)
             .ok_or(DmaError::Unmapped)
     }
+    /// Observe this exact retained domain's mapping inventory without changing
+    /// a context, command queue or configuration. Callers retain their actual
+    /// original process/root context; this supplies no detach/stop receipt.
+    pub fn has_live_mappings(&self) -> Result<bool, DmaError> {
+        let mut guard = self.unit.lock();
+        Ok(!self.domain(guard.state(), false)?.mappings.is_empty())
+    }
     /// # Safety
     /// The device is stopped before disabling, or every enabled DMA
     /// address is published under this owned domain. Device IRQ/work/reset and

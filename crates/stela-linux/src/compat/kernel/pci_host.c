@@ -181,10 +181,12 @@ static void release(struct device *dev)
 	kfree(host);
 }
 
-struct pci_dev *stela_linux_pci_attach(const struct stela_linux_pci_function *function)
+struct pci_dev *stela_linux_pci_attach(const struct stela_linux_pci_function *function, int *status)
 {
+	int error = -ENOMEM;
 	struct host_function *host = kzalloc_obj(*host);
-
+	if (status)
+		*status = error;
 	if (!host)
 		return NULL;
 	host->function = *function;
@@ -223,9 +225,24 @@ struct pci_dev *stela_linux_pci_attach(const struct stela_linux_pci_function *fu
 	dev->dev.coherent_dma_mask = DMA_BIT_MASK(32);
 	dev->dev.release = release;
 	set_dma_ops(&dev->dev, &mapping_ops);
-	stela_linux_pci_add_device(dev);
-	dev_set_name(&dev->dev, "%04x:%02x:%02x.%d", 0, function->bus, PCI_SLOT(function->devfn),
-		     PCI_FUNC(function->devfn));
+	device_initialize(&dev->dev);
+	error = dev_set_name(&dev->dev, "%04x:%02x:%02x.%d", 0, function->bus,
+                         PCI_SLOT(function->devfn), PCI_FUNC(function->devfn));
+	if (!error && function->enroll)
+		error = function->enroll(function->context, &dev->dev);
+	if (!error)
+		error = stela_linux_pci_publish_device(dev);
+	if (error) {
+		/* Refusal never takes the caller's host-context ownership. Any exact
+         * source record already enrolled retires through the real final put. */
+		host->function.release_context = NULL;
+		put_device(&dev->dev);
+		if (status)
+			*status = error;
+		return NULL;
+	}
+	if (status)
+		*status = 0;
 	return dev;
 }
 
@@ -314,7 +331,7 @@ int main(void)
 		.release_context = test_release_context,
 	};
 	function.regions[0] = (struct stela_linux_pci_region){BASE, 0x1000000, IORESOURCE_MEM};
-	struct pci_dev *dev = stela_linux_pci_attach(&function);
+	struct pci_dev *dev = stela_linux_pci_attach(&function, NULL);
 
 	assert(dev && !stela_linux_pci_bound(dev));
 
@@ -384,13 +401,13 @@ int main(void)
 	assert(context_releases == 1);
 	/* A legacy caller can still retain ownership without a release callback. */
 	function.release_context = NULL;
-	dev = stela_linux_pci_attach(&function);
+	dev = stela_linux_pci_attach(&function, NULL);
 	assert(dev);
 	stela_linux_pci_remove_device(dev);
 	assert(context_releases == 1);
 	/* An atomic final put cannot destroy the host or callback context. */
 	function.release_context = test_release_context;
-	dev = stela_linux_pci_attach(&function);
+	dev = stela_linux_pci_attach(&function, NULL);
 	assert(dev);
 	u64 before = stela_linux_pci_quarantined_functions();
 	local_bh_disable();
@@ -399,7 +416,7 @@ int main(void)
 	assert(context_releases == 1 && stela_linux_pci_quarantined_functions() == before + 1);
 	/* Quiescence under another platform does not authorize destruction of
 	 * this function's callback roots through that platform's services. */
-	dev = stela_linux_pci_attach(&function);
+	dev = stela_linux_pci_attach(&function, NULL);
 	assert(dev && pci_dev_get(dev) == dev);
 	stela_linux_pci_remove_device(dev);
 	const struct stela_linux_services other_services = {0};

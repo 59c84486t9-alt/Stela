@@ -76,6 +76,7 @@ pub enum State {
     Rom,
     Iml,
     Operational,
+    Closing,
     Closed,
     Failed,
 }
@@ -242,7 +243,18 @@ impl<P: Platform> Transport<P> {
             &mut self.snapshot,
         )
     }
+    fn admission(&self) -> Result<()> {
+        if self.retirement_attempted {
+            return Err(self
+                .retirement_error
+                .as_deref()
+                .cloned()
+                .unwrap_or(Error::State(self.state)));
+        }
+        Ok(())
+    }
     pub fn start(&mut self) -> Result<()> {
+        self.admission()?;
         if self.state != State::Allocated {
             return Err(Error::State(self.state));
         }
@@ -487,6 +499,7 @@ impl<P: Platform> Transport<P> {
         self.platform.service_complete()
     }
     fn active(&self) -> Result<()> {
+        self.admission()?;
         if matches!(self.state, State::Rom | State::Iml | State::Operational) {
             Ok(())
         } else {
@@ -649,13 +662,25 @@ impl<P: Platform> Transport<P> {
     }
     fn retire(&mut self) -> Result<()> {
         if self.retirement_attempted {
-            return self
-                .retirement_error
-                .as_deref()
-                .cloned()
-                .map_or(Ok(()), Err);
+            return self.retirement_error.as_deref().cloned().map_or_else(
+                || {
+                    if self.retired {
+                        Ok(())
+                    } else {
+                        Err(Error::Unsupported("interrupted Intel PCIe retirement"))
+                    }
+                },
+                Err,
+            );
         }
+        let failed = self.state == State::Failed;
         self.retirement_attempted = true;
+        self.state = State::Closing;
+        // Seal every public admission before any register/reset/root callback.
+        // This error remains if a foreign callback unwinds below this owner.
+        self.retirement_error = Some(Box::new(Error::Unsupported(
+            "interrupted Intel PCIe retirement",
+        )));
         let result: Result<()> = (|| {
             self.write(FH_MASK, u32::MAX)?;
             self.write(HW_MASK, u32::MAX)?;
@@ -678,9 +703,14 @@ impl<P: Platform> Transport<P> {
         match result {
             Ok(()) => {
                 self.retired = true;
+                self.retirement_error = None;
+                if failed {
+                    self.state = State::Failed;
+                }
                 Ok(())
             }
             Err(e) => {
+                self.state = State::Failed;
                 self.retirement_error = Some(Box::new(e.clone()));
                 Err(e)
             }

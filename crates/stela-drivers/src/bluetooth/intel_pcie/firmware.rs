@@ -34,6 +34,12 @@ pub fn initialize<P: Platform>(
     provider: &dyn Provider,
     platform: intel::PlatformInputs,
 ) -> Result<Report, Error> {
+    if let Err(error) = transport.active() {
+        return Err(Error {
+            cause: Box::new(intel::Error::PcieTransport(error)),
+            received: Vec::new(),
+        });
+    }
     let mut io = Native {
         transport,
         received: Vec::new(),

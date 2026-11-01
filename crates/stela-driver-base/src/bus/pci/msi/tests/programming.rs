@@ -147,3 +147,79 @@ fn message_and_authorization_preflight() {
         unsafe { helper.release() }.unwrap(),
     );
 }
+
+#[test]
+fn remappable_message_keeps_zero_data_index_bits_widths_and_masks() {
+    for wide in [false, true] {
+        for index in [0u64, 1, 0x7fff, 0x8000, 0xffff] {
+            let message = MsiMessage {
+                address: 0xfee0_0010 | (index & 0x7fff) << 5 | (index >> 15) << 2,
+                data: 0,
+            };
+            let (mut helper, model) = attach(fixture(wide, true));
+            // SAFETY: exact isolated PCI programming peer only; no native root grant.
+            unsafe { helper.program(message) }.unwrap();
+            {
+                let m = model.lock().unwrap();
+                assert_eq!(m.get(0x54, 4), message.address as u32);
+                assert_eq!(m.get(if wide { 0x5c } else { 0x58 }, 2), 0);
+                assert_eq!(m.get(if wide { 0x5e } else { 0x5a }, 2), 0x5a5a);
+                assert_eq!(m.get(if wide { 0x60 } else { 0x5c }, 4), 0xa5a5_0003);
+            }
+            // SAFETY: synchronous original RAM peer only.
+            drop(unsafe { helper.release() }.unwrap());
+        }
+    }
+    for message in [
+        MsiMessage {
+            address: 0xfee0_0018,
+            data: 0,
+        },
+        MsiMessage {
+            address: 0xfee0_0010,
+            data: 0x50,
+        },
+    ] {
+        let (mut helper, model) = attach(fixture(true, true));
+        assert_eq!(
+            // SAFETY: invalid data in an isolated before-effect negative test.
+            unsafe { helper.program(message) },
+            Err(MsiError::InvalidMessage)
+        );
+        assert!(
+            !model
+                .lock()
+                .unwrap()
+                .events
+                .iter()
+                .any(|e| matches!(e, Event::Write(..)))
+        );
+        // SAFETY: never programmed fixture with no asynchronous users.
+        drop(unsafe { helper.release() }.unwrap());
+    }
+}
+
+#[test]
+fn remappable_message_does_not_bypass_independent_address_readback() {
+    let (mut helper, model) = attach(fixture(true, true));
+    model.lock().unwrap().block_write = Some((0x54, 4));
+    let message = MsiMessage {
+        address: 0xfeef_fff4,
+        data: 0,
+    };
+    assert_eq!(
+        // SAFETY: independent RAM peer deliberately refuses the actual address store.
+        unsafe { helper.program(message) },
+        Err(MsiError::Readback { offset: 0x54 })
+    );
+    assert!(
+        model
+            .lock()
+            .unwrap()
+            .events
+            .iter()
+            .any(|e| matches!(e, Event::Write(0x54, 4, 0xfeef_fff4)))
+    );
+    // Failure must retain the original owners rather than mint retirement.
+    drop(helper);
+}

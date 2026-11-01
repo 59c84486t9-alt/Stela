@@ -12,6 +12,7 @@
  * queued before it. Linux code runs in one context at a time, which
  * serializes everything here. BH workqueues, which run work in softirq
  * context, are not provided. */
+#include <stela/catalogue.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/sprintf.h>
@@ -206,6 +207,8 @@ static void enqueue(struct workqueue_struct *wq, struct work_struct *work)
 
 bool queue_work_on(int cpu, struct workqueue_struct *wq, struct work_struct *work)
 {
+	/* Validate the actual entered owner before any pending/list mutation. */
+	(void)stela_linux_owner();
 	(void)cpu;
 	if (test_and_set_bit(WORK_STRUCT_PENDING_BIT, work_data_bits(work)))
 		return false;
@@ -352,6 +355,8 @@ void drain_workqueue(struct workqueue_struct *wq)
 struct workqueue_struct *alloc_workqueue_noprof(const char *fmt, unsigned int flags,
 						int max_active, ...)
 {
+	if (stela_linux_kernel_prepare_resource())
+		return NULL;
 	if (flags & WQ_BH) {
 		stela_linux_unsupported("BH workqueues");
 		return NULL;

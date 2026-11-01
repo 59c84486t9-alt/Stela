@@ -5,7 +5,6 @@ use crate::bus::pci::{
     owned::OwnedConfig,
     requester::preparation::{self, Attachment, BoundRequester, PreparingRequester},
 };
-use alloc::boxed::Box;
 use core::mem::ManuallyDrop;
 
 struct Resources {
@@ -29,7 +28,7 @@ impl Drop for Cold {
 
 pub struct Bound {
     pub registers: Mmio<OwnedConfig>,
-    pub attachment: Box<dyn Attachment>,
+    pub attachment: Attachment,
 }
 
 /// Failed finalization keeps the original root and BAR graph indefinitely.

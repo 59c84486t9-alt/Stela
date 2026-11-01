@@ -149,3 +149,18 @@ pub fn stray_interrupt(_vector: u8) {
     state.stray += 1;
     state.apic.eoi();
 }
+
+/// A true APIC spurious event sets no ISR bit. A delayed ordinary fixed
+/// interrupt may use the newly reserved spurious vector and still needs EOI.
+/// Common entry keeps IF off, the original per-CPU APIC and this IDT/GS record
+/// live; no callback/source allocation or attribution is involved.
+pub fn spurious_interrupt() {
+    let state = state();
+    let isr = state.apic.read(0x170);
+    if isr == u32::MAX {
+        crate::output::fatal("native spurious-vector ISR is unreadable");
+    }
+    if isr & (1 << 31) != 0 {
+        state.apic.eoi();
+    }
+}

@@ -1165,6 +1165,7 @@ dependencies = [
  "stela-c-build",
  "stela-crypto",
  "stela-driver-base",
+ "stela-driver-core",
  "zeroize",
 ]
 

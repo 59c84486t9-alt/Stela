@@ -473,7 +473,7 @@ pub(crate) extern "sysv64" fn interrupt(frame: &mut Frame, saved: &SavedState<'_
         TIMER_VECTOR => host::timer_interrupt(),
         NATIVE_WAKE_VECTOR => host::wake_interrupt(),
         SHOOTDOWN_VECTOR => host::shootdown_interrupt(),
-        SPURIOUS_VECTOR => {}
+        SPURIOUS_VECTOR => host::spurious_interrupt(),
         vector @ 32.. => host::stray_interrupt(vector),
         _ => fatal(frame),
     }

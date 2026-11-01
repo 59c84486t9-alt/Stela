@@ -25,12 +25,12 @@ pub enum DmaOperation {
 pub struct Inputs<B: BarAccess + 'static, R: RetirableRegisters> {
     pub platform: NativePlatform<OwnedConfig, B, R>,
     pub allocator: DomainAllocator<'static>,
-    pub attachment: Box<dyn Attachment>,
+    pub attachment: Attachment,
     pub retention: ConfigRetention,
 }
 struct Allocations {
     allocator: DomainAllocator<'static>,
-    attachment: Box<dyn Attachment>,
+    attachment: Attachment,
     retention: Option<ConfigRetention>,
 }
 struct AllocationOwner(Option<Box<Allocations>>);
@@ -85,10 +85,23 @@ impl<B: BarAccess + 'static, R: RetirableRegisters> OwnedTransport<B, R> {
     fn transport_mut(&mut self) -> &mut Transport<NativePlatform<OwnedConfig, B, R>> {
         &mut self.resources.as_deref_mut().unwrap().transport
     }
+    fn admission(&self) -> Result<()> {
+        if let Some(error) = &self.failure {
+            return Err(error.clone());
+        }
+        if self.completed {
+            return Err(Error::State(
+                self.resources.as_deref().unwrap().transport.state(),
+            ));
+        }
+        Ok(())
+    }
     pub fn start(&mut self) -> Result<()> {
+        self.admission()?;
         self.transport_mut().start()
     }
     pub fn poll(&mut self) -> Result<alloc::vec::Vec<super::super::Packet>> {
+        self.admission()?;
         self.transport_mut().poll()
     }
     pub fn send(
@@ -96,9 +109,11 @@ impl<B: BarAccess + 'static, R: RetirableRegisters> OwnedTransport<B, R> {
         kind: super::super::Kind,
         bytes: &[u8],
     ) -> Result<super::super::TxReceipt> {
+        self.admission()?;
         self.transport_mut().send(kind, bytes)
     }
     pub fn enter_d0(&mut self) -> Result<super::super::Snapshot> {
+        self.admission()?;
         self.transport_mut().enter_d0()
     }
     pub fn initialize_firmware(
@@ -106,6 +121,12 @@ impl<B: BarAccess + 'static, R: RetirableRegisters> OwnedTransport<B, R> {
         provider: &dyn crate::firmware::Provider,
         platform: crate::bluetooth::intel::PlatformInputs,
     ) -> core::result::Result<super::super::firmware::Report, super::super::firmware::Error> {
+        if let Err(error) = self.admission() {
+            return Err(super::super::firmware::Error {
+                cause: Box::new(crate::bluetooth::intel::Error::PcieTransport(error)),
+                received: alloc::vec::Vec::new(),
+            });
+        }
         super::super::firmware::initialize(self.transport_mut(), provider, platform)
     }
     /// # Safety
@@ -116,11 +137,21 @@ impl<B: BarAccess + 'static, R: RetirableRegisters> OwnedTransport<B, R> {
     /// exclusions and the original processor/root context remain held.
     pub unsafe fn new(inputs: Inputs<B, R>) -> core::result::Result<Self, Failure> {
         let Inputs {
-            platform,
+            mut platform,
             allocator,
             attachment,
             retention,
         } = inputs;
+        if let Err(error) = platform.check_attachment(&attachment) {
+            return Err(Failure {
+                error,
+                _allocations: AllocationOwner(Some(Box::new(Allocations {
+                    allocator,
+                    attachment,
+                    retention: Some(retention),
+                }))),
+            });
+        }
         let mut allocations = AllocationOwner(Some(Box::new(Allocations {
             allocator,
             attachment,
@@ -156,6 +187,11 @@ impl<B: BarAccess + 'static, R: RetirableRegisters> OwnedTransport<B, R> {
         if let Some(error) = &self.failure {
             return Err(error.clone());
         }
+        // Unlike a returned error, unwind cannot run the match below. Seal
+        // outer ownership/admissions before the first core/config/DMA effect.
+        self.failure = Some(Error::Unsupported(
+            "interrupted owned Intel PCIe retirement",
+        ));
         let result: Result<()> = (|| {
             let Resources {
                 transport,
@@ -182,10 +218,33 @@ impl<B: BarAccess + 'static, R: RetirableRegisters> OwnedTransport<B, R> {
                 .map_err(|error| Error::Dma(BlockError::Dma(error)))?;
             // SAFETY: every mapping is gone and the original function cannot
             // resume. The same config/BAR/root owners remain through detach.
-            unsafe { allocation.attachment.detach() }.map_err(|source| NativeError::Dma {
-                operation: DmaOperation::Detach,
-                source,
-            })?;
+            if let Some(grant) = transport.platform.take_unpublished_irq() {
+                allocation
+                    .attachment
+                    .cancel_unpublished_irq(grant)
+                    .map_err(|failure| NativeError::Dma {
+                        operation: DmaOperation::Detach,
+                        source: failure.error,
+                    })?;
+            }
+
+            if let Some(route) = transport.platform.take_retired_irq() {
+                allocation
+                    .attachment
+                    .retain_irq_action(route)
+                    .map_err(|failure| NativeError::Irq(failure.error))?;
+            }
+            // SAFETY: original terminal engine/payload proof and every DMA
+            // mapping is gone; exact action joins remain kept in Attachment.
+            let detached =
+                unsafe { allocation.attachment.detach() }.map_err(|source| NativeError::Dma {
+                    operation: DmaOperation::Detach,
+                    source,
+                })?;
+            allocation
+                .attachment
+                .release_irq_pins(detached)
+                .map_err(|failure| NativeError::Irq(failure.error))?;
             // The seal was checked before DMA retirement; release its view so
             // configuration mapping retirement can complete after detach.
             allocation.retention.take();
@@ -198,6 +257,7 @@ impl<B: BarAccess + 'static, R: RetirableRegisters> OwnedTransport<B, R> {
         match result {
             Ok(()) => {
                 self.completed = true;
+                self.failure = None;
                 Ok(())
             }
             Err(error) => {

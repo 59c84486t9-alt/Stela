@@ -26,7 +26,7 @@ test = false
 
 [features]
 default = []
-diagnostics = []
+diagnostics = ["stela-drivers/irq-diagnostics"]
 native-profile = ["stela-soc/native-profile", "stela-engine/native-profile"]
 # NVK, NIR and NAK in the image, from `cargo xtask gpu nvk`.
 nvk = ["dep:stela-mesa", "stela-drivers/metal-linked"]

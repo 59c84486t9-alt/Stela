@@ -67,8 +67,10 @@ void stela_linux_service_loop(const struct stela_linux_service_call *call)
 		stela_linux_atomic_process_leaf_begin(&leaf);
 		call->drain(call->context);
 		stela_linux_atomic_process_leaf_end(&leaf);
-		for (int irq; (irq = call->next_irq(call->context)) >= 0;)
+		for (int irq; (irq = call->next_irq(call->context)) >= 0;) {
 			stela_linux_irq_run((unsigned int)irq);
+			call->complete_irq(call->context);
+		}
 		call->finish(call->context, stela_linux_service_run());
 	}
 	stela_linux_exit();

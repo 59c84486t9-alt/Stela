@@ -48,6 +48,7 @@ pub(crate) enum Error {
     Cache(MemoryError),
     Work(WorkError),
     Qualification,
+    Image(crate::native_image::Error),
     #[cfg(feature = "diagnostics")]
     NoKernelStacks,
     #[cfg(feature = "diagnostics")]
@@ -68,6 +69,7 @@ impl core::fmt::Display for Error {
             }
             Self::Work(error) => write!(f, "native continuation admission: {error:?}"),
             Self::Qualification => f.write_str("native continuation identity or stack differs"),
+            Self::Image(error) => write!(f, "kernel work executable backing: {error}"),
             #[cfg(feature = "diagnostics")]
             Self::NoKernelStacks => {
                 f.write_str("actual work pool has no Linux-compatible stack slots")
@@ -81,8 +83,25 @@ struct Reservation {
     identity: Arc<RootIdentity>,
     _wire: &'static native_mmio::Wire,
     _handoff: &'static Handoff,
+    _image: crate::native_image::CodePin,
     allocation: native_smp::resources::AllocationClaim,
     released_stack_views: AtomicUsize,
+}
+/// Immutable DATA classifier retaining this exact Queue's original image,
+/// allocation and native root/table custody. This is never executable authority.
+pub(super) struct ReadOnlyImage {
+    _reservation: Arc<Reservation>,
+    ranges: Vec<Range<usize>>,
+}
+// SAFETY: only KernelWork::image constructs this value under the same actual
+// kept original root. The relocated allocation and every native mapping remain
+// owned by Reservation; readonly_ranges admits only original immutable DATA,
+// after relocation, with no later patcher, DMA/guest loan or allocator reuse.
+// contains only checks stored bounds and never dereferences a caller pointer.
+unsafe impl stela_drivers::platform::image::NativeReadOnlyImage for ReadOnlyImage {
+    fn contains(&self, address: usize) -> bool {
+        self.ranges.iter().any(|range| range.contains(&address))
+    }
 }
 struct Backing {
     _reservation: Arc<Reservation>,
@@ -248,6 +267,16 @@ impl KernelWork {
         }
         // SAFETY: loader root, excluding task/native entry.
         let _root = unsafe { RestoreRoot::enter(handoff.root) };
+        // SAFETY: the same validated original handoff/loader root; source
+        // allocation, guest exclusions and callback code stay pinned below.
+        let image = unsafe { handoff.native_image.pin(handoff) }.map_err(Error::Image)?;
+        let allocation = handoff.native_image.allocation_region();
+        if !wire.loader_ram(allocation.physical, allocation.bytes) {
+            return Err(Error::Image(crate::native_image::Error::NotLoaderData));
+        }
+        // SAFETY: original image/header aliases are kept and no writer runs.
+        unsafe { image.check_callback(Self::prepare_plan as *const () as usize) }
+            .map_err(Error::Image)?;
         let mut spans = Vec::new();
         spans
             .try_reserve_exact(plan.count())
@@ -327,6 +356,7 @@ impl KernelWork {
             identity,
             _wire: wire,
             _handoff: handoff,
+            _image: image,
             allocation,
             released_stack_views: AtomicUsize::new(0),
         });
@@ -463,6 +493,23 @@ impl KernelWork {
         drop(call);
         self.busy.set(false);
         Ok(result)
+    }
+    /// Immutable native DATA from the same original relocated engine allocation
+    /// and root graph retained by this Queue, never a second image producer.
+    pub(super) fn image(&self) -> Result<Arc<ReadOnlyImage>, Error> {
+        self.dispatch(|_| {
+            // SAFETY: dispatch entered the actual retained LoaderTables root
+            // on its owning BSP, excluding IRQ/native frames and table writers.
+            let ranges =
+                unsafe { self._cpu.reservation._image.readonly_ranges() }.map_err(Error::Image)?;
+            if ranges.is_empty() {
+                return Err(Error::Inventory);
+            }
+            Ok(Arc::new(ReadOnlyImage {
+                _reservation: self._cpu.reservation.clone(),
+                ranges,
+            }))
+        })?
     }
     /// The CPU the runtime runs on.
     pub(super) fn cpu(&self) -> Arc<dyn Cpu> {

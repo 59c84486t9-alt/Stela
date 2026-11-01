@@ -9,7 +9,6 @@ use crate::{
     bluetooth::{bcm4377, intel_pcie},
     bus::{
         dma::{DomainAllocator, mapping::DmaDomain},
-        irq::posted_msi::MsiCompletion,
         mmio::owned::{CacheAttribute, Mapping, Protection},
         pci::{
             Address, Bar, ConfigSpace, Function,
@@ -1067,9 +1066,6 @@ pub(super) unsafe fn bcm4377(
         properties: Vec::new(),
         clock: bound.clock,
         interrupts,
-        // No root delivery adapter completes posted MSIs yet, so a stopped
-        // function stays quarantined with its owners rather than retired.
-        msi_completion: MsiCompletion::unavailable(),
     };
     // SAFETY: vendor FLR/D0/BAR restore, original-root drain and current-epoch
     // binding completed under the same owners. Constructor performs no reset;
@@ -1157,7 +1153,7 @@ pub(super) unsafe fn intel_bluetooth(
         Ok(cold) => cold,
         Err((error, inputs)) => return Err(failed(error, Box::new((inputs, table)))),
     };
-    let bound = match cold.quiesce_and_bind() {
+    let mut bound = match cold.quiesce_and_bind() {
         Ok(bound) => bound,
         Err(failure) => {
             let error = failure.error.clone();
@@ -1174,11 +1170,43 @@ pub(super) unsafe fn intel_bluetooth(
             ));
         }
     };
+    match bound.attachment.matches_config(function.config()) {
+        Ok(true) => {}
+        Ok(false) => {
+            return Err(failed(
+                native::Error::Requirement("same original BT config allocation").into(),
+                Box::new((function, bound.registers, bound.attachment, retention)),
+            ));
+        }
+        Err(error) => {
+            return Err(failed(
+                native::Error::Dma {
+                    operation: lifetime::DmaOperation::Drain,
+                    source: error,
+                }
+                .into(),
+                Box::new((function, bound.registers, bound.attachment, retention)),
+            ));
+        }
+    }
     // Vendor disconnect/reset, original-root drain and current-epoch binding
     // are complete. BME now permits only the subsequently allocated new domain.
     function.enable_polled();
     let mut msix = [const { None }; 6];
     msix[0] = Some(table);
+    let msi_route = match bound.attachment.irq_route() {
+        Ok(route) => route,
+        Err(error) => {
+            return Err(failed(
+                native::Error::Dma {
+                    operation: lifetime::DmaOperation::Drain,
+                    source: error,
+                }
+                .into(),
+                Box::new((function, msix, bound.registers, bound.attachment, retention)),
+            ));
+        }
+    };
     let inputs = Inputs {
         function,
         retained: Arc::new(authority),
@@ -1187,7 +1215,7 @@ pub(super) unsafe fn intel_bluetooth(
         clock,
         interrupts,
         domain: bound.attachment.domain(),
-        msi_completion: MsiCompletion::unavailable(),
+        msi_route,
     };
     // SAFETY: same original stopped function/root, acknowledged memory/BME,
     // coherent domain, routed IRQ provider and checked UC/MSI-X owners.
@@ -1298,6 +1326,10 @@ pub(super) unsafe fn ish(
         registers,
         domain,
         interrupts,
+        // No original stable notification/source grant is supplied by this
+        // producer yet. Registry refuses before programming instead of
+        // deriving native root authority from a numeric target.
+        msi_route: crate::bus::irq::posted_msi::MsiRoute::unavailable(),
         clock,
     };
     // SAFETY: the mount claimed the stopped function, mapped its BAR0 and

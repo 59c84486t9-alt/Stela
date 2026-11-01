@@ -1,10 +1,7 @@
 //! The retained original VT-d/AMD root used during vendor cold preparation.
 use super::*;
 use alloc::boxed::Box;
-use stela_drivers::bus::{
-    dma::mapping::DmaError,
-    pci::requester::preparation::{Attachment, Root},
-};
+use stela_drivers::bus::{dma::mapping::DmaError, pci::requester::preparation::Root};
 
 struct VtdRoot {
     address: Address,
@@ -19,7 +16,11 @@ unsafe impl Root for VtdRoot {
     fn drain(&self) -> Result<(), DmaError> {
         self.unit.drain_initial_requester(requester(self.address))
     }
-    unsafe fn bind(&self, binding: RequesterBinding) -> Result<Box<dyn Attachment>, DmaError> {
+    unsafe fn bind(
+        &self,
+        binding: RequesterBinding,
+    ) -> Result<Box<dyn stela_drivers::bus::pci::requester::preparation::AttachmentBackend>, DmaError>
+    {
         if binding.address() != self.address {
             return Err(DmaError::IommuUnavailable);
         }
@@ -47,14 +48,42 @@ struct VtdAttachment {
 // the context and completes invalidation before returning its retained claim.
 // Old Arc references check that generation and cannot reach a replacement.
 // An unacknowledged domain Drop quarantines its claim, tables and unit.
-unsafe impl Attachment for VtdAttachment {
+unsafe impl stela_drivers::bus::pci::requester::preparation::AttachmentBackend for VtdAttachment {
+    fn irq_owner(
+        &mut self,
+        _requester: &stela_drivers::bus::pci::requester::RequesterId,
+        _config: Option<&stela_drivers::bus::pci::owned::ConfigRetention>,
+    ) -> Result<Option<Box<dyn stela_drivers::bus::irq::posted_msi::RouteOwner>>, DmaError> {
+        // Explicit component prerequisite. The separate native producer delta
+        // consumes the actual original all-unit mode/root owner and actual
+        // source pairing; no numeric/BDF observer or empty success replaces it.
+        Ok(None)
+    }
+
     fn domain(&self) -> Arc<dyn DmaDomain> {
         self.domain.clone()
     }
-    unsafe fn detach(&mut self) -> Result<(), DmaError> {
+    unsafe fn detach(
+        &mut self,
+    ) -> Result<(), stela_drivers::bus::pci::requester::preparation::DetachError> {
         // SAFETY: caller supplies current-epoch quiescence and payload/IRQ/work
         // drains with original owners kept. Backend refuses live mappings
         // before context effects.
+        // This metadata-only preflight precedes every hardware effect. Actual
+        // detach failures below are all uncertain, regardless of error variant.
+        if self
+            .domain
+            .has_live_mappings()
+            .map_err(stela_drivers::bus::pci::requester::preparation::DetachError::Unexposed)?
+        {
+            return Err(
+                stela_drivers::bus::pci::requester::preparation::DetachError::Unexposed(
+                    DmaError::MappingFailed,
+                ),
+            );
+        }
+        // SAFETY: caller retains the quiesced current epoch and joined IRQ/work;
+        // the preflight above ruled out live payload mappings before detach.
         let claim = unsafe { self.domain.detach() }.map_err(|error| {
             output::arguments(format_args!(
                 "HOST IOMMU VT-d detach {} refused: {error:?}\n",

@@ -601,6 +601,32 @@ int stela_linux_registry_status(const struct stela_linux_registry *r, size_t ind
  *out = r->status[index];
  return 0;
 }
+/* Declared source dependency, not a label/target-address search. The expected
+ * actual image pins the one canonical registry epoch; foreign metadata cannot
+ * nominate a different initializer that happened to return success. */
+int stela_linux_registry_require_success(const struct stela_linux_registry *r,
+ const struct stela_linux_registry_image *expected,
+ const struct stela_linux_init_record *required)
+{
+ struct call_guard guard;
+ if (!r || r != active || !expected || r->image != expected || !required)
+  return -EINVAL;
+ int error = guard_begin(&guard);
+ if (error) return error;
+ if (r->quarantined || r->retired || r->parameter_error) return -EPROTO;
+ for (size_t i = 0; i < r->image->init_count; ++i) {
+  if (r->image->inits[i] != required) continue;
+  const struct stela_linux_registration_status *status = &r->status[i];
+  if (status->state == STELA_LINUX_RECORD_NOT_RUN) return -EAGAIN;
+  if (status->state == STELA_LINUX_RECORD_RUNNING) return -EINPROGRESS;
+  if (status->invocations != 1) return -EPROTO;
+  if (status->state == STELA_LINUX_RECORD_ZERO && !status->returned) return 0;
+  if (status->state == STELA_LINUX_RECORD_NEGATIVE && status->returned < 0)
+   return status->returned;
+  return -EPROTO;
+ }
+ return -ENOENT;
+}
 int stela_linux_registry_parse_result(const struct stela_linux_registry *r, unsigned int pass,
  char **out)
 {
@@ -1096,11 +1122,60 @@ static void positive_parameter_case(void)
  assert(stela_linux_registry_run_stage(test_registry,0,NULL)==-EINVAL && !event_count);
  stela_linux_exit();
 }
+static struct registry_fixture *dependency_fixture;
+static const struct stela_linux_init_record *dependency_record;
+static int dependency_result;
+static unsigned int dependency_hooks, dependency_borrows;
+static int dependency_prerequisite(void)
+{
+ assert(stela_linux_registry_require_success(test_registry, &dependency_fixture->image,
+                                            dependency_record) == -EINPROGRESS);
+ return dependency_result;
+}
+static int dependency_hook(void)
+{
+ dependency_hooks++;
+ int result = stela_linux_registry_require_success(test_registry,
+                                                   &dependency_fixture->image,
+                                                   dependency_record);
+ if (result) return result; /* Never enter the borrowed accessor on failure. */
+ dependency_borrows++;
+ return 0;
+}
+static void dependency_case(void)
+{
+ stela_linux_enter(&stela_linux_bare);
+ struct registry_fixture f; fixture_init(&f);
+ fixture_call(&f,0,STELA_LINUX_REG_INIT,5,0,dependency_prerequisite);
+ fixture_call(&f,1,STELA_LINUX_REG_INIT,5,STELA_LINUX_REG_SYNC,dependency_hook);
+ dependency_fixture=&f; dependency_record=f.inits[0];
+ begin_fixture(&f,""); option_phases();
+ assert(stela_linux_registry_require_success(test_registry,&f.image,dependency_record)==-EAGAIN);
+ struct stela_linux_registry_image foreign_image=f.image;
+ struct stela_linux_init_record foreign_record=*dependency_record;
+ assert(stela_linux_registry_require_success(test_registry,&foreign_image,dependency_record)==-EINVAL);
+ assert(stela_linux_registry_require_success(test_registry,&f.image,&foreign_record)==-ENOENT);
+ int expected=dependency_result>0 ? -EPROTO : dependency_result;
+ for(unsigned stage=0;stage<STELA_LINUX_STAGE_DONE;++stage)
+  assert(stela_linux_registry_run_stage(test_registry,stage,NULL)==
+         (stage==STELA_LINUX_STAGE_FS ? expected : 0));
+ /* The actual registry continues into5s on failure; the explicit prerequisite
+  * is what prevents a source-owned hook from borrowing a destroyed object. */
+ assert(dependency_hooks==1 && dependency_borrows==(dependency_result ? 0U : 1U));
+ assert(stela_linux_registry_require_success(test_registry,&f.image,dependency_record)==expected);
+ stela_linux_exit();
+}
+static void dependency_success_case(void) { dependency_result=0; dependency_case(); }
+static void dependency_failure_case(void) { dependency_result=-ENOMEM; dependency_case(); }
+static void dependency_positive_case(void) { dependency_result=3; dependency_case(); }
 #include <stela/registry_setup_test.h>
 int main(void)
 {
  for(setup_differential_index=0;setup_differential_index<ARRAY_SIZE(setup_differential_inputs);++setup_differential_index)
   assert(stela_test_registry_case(setup_differential_case));
+ assert(stela_test_registry_case(dependency_success_case));
+ assert(stela_test_registry_case(dependency_failure_case));
+ assert(stela_test_registry_case(dependency_positive_case));
  assert(stela_test_registry_case(lifecycle_case));
  assert(stela_test_registry_case(ordering_case));
  assert(stela_test_registry_case(option_case));

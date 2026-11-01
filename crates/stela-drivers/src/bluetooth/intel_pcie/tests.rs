@@ -1,3 +1,4 @@
+extern crate std;
 use super::*;
 use crate::bus::dma::RegionAllocator;
 use alloc::{collections::BTreeMap, rc::Rc};
@@ -58,6 +59,7 @@ pub(super) struct Model {
     d0_delay: u64,
     read_error: Option<usize>,
     write_error: Option<(usize, usize)>,
+    panic_write: Option<usize>,
     byte_error: Option<usize>,
     context: u64,
     posted: BTreeMap<u16, u64>,
@@ -122,6 +124,7 @@ impl Model {
             d0_delay: 0,
             read_error: None,
             write_error: None,
+            panic_write: None,
             byte_error: None,
             context: 0,
             posted: BTreeMap::new(),
@@ -221,6 +224,7 @@ impl Model {
     }
     fn write32(&mut self, o: usize, v: u32) {
         self.writes.push((self.time.get(), o, v));
+        assert_ne!(self.panic_write, Some(o), "injected native register unwind");
         match o {
             FH_CAUSE | HW_CAUSE | AUTOMASK => {
                 let old = self.reg(o);
@@ -1473,3 +1477,46 @@ fn firmware_error_drains_complete_native_packets_queued_before_send_or_poll_fail
 mod native_models;
 
 mod ownership;
+
+struct NeverFirmware;
+impl crate::firmware::Provider for NeverFirmware {
+    fn load(
+        &self,
+        _: crate::firmware::Requirement<'_>,
+    ) -> core::result::Result<crate::firmware::Image<'_>, crate::firmware::Error> {
+        panic!("closed transport must not request firmware")
+    }
+}
+#[test]
+fn retirement_unwind_seals_core_before_the_first_register_effect() {
+    let mut backing = vec![0u64; 1024 * 1024];
+    let mut dma = allocator(&mut backing);
+    let (mut transport, model) = transport(0x4d76, &mut dma);
+    transport.start().unwrap();
+    model.borrow_mut().panic_write = Some(FH_MASK);
+    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| transport.close())).is_err());
+    assert_eq!(transport.state(), State::Closing);
+    model.borrow_mut().panic_write = None;
+    let writes = model.borrow().writes.clone();
+    let error = Error::Unsupported("interrupted Intel PCIe retirement");
+    assert_eq!(transport.start(), Err(error.clone()));
+    assert_eq!(transport.poll(), Err(error.clone()));
+    assert_eq!(
+        transport.send(Kind::Command, &[3, 12, 0]),
+        Err(error.clone())
+    );
+    assert_eq!(transport.enter_d0(), Err(error.clone()));
+    assert!(!transport.ready());
+    assert!(
+        firmware::initialize(
+            &mut transport,
+            &NeverFirmware,
+            crate::bluetooth::intel::PlatformInputs::default()
+        )
+        .is_err()
+    );
+    assert_eq!(transport.close(), Err(error));
+    drop(transport);
+    assert_eq!(model.borrow().writes, writes);
+    assert_eq!(model.borrow().retire_count, 0);
+}

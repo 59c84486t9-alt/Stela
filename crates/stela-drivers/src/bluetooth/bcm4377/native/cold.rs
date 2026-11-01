@@ -30,7 +30,7 @@ pub(crate) unsafe trait Preparation: 'static {
 }
 pub(crate) struct Finalized<C: Configuration> {
     pub function: Function<C>,
-    pub attachment: Box<dyn Attachment>,
+    pub attachment: Attachment,
 }
 pub(crate) struct FinalizeFailure {
     pub error: preparation::Error,
@@ -81,7 +81,7 @@ pub(crate) struct Cold<P: Preparation, R: Registers, T: Time> {
 }
 pub(crate) struct Bound<C: Configuration, R: Registers, T: Time> {
     pub function: Function<C>,
-    pub attachment: Box<dyn Attachment>,
+    pub attachment: Attachment,
     pub topology: native_aspm::Topology<C>,
     pub registers: R,
     pub clock: T,

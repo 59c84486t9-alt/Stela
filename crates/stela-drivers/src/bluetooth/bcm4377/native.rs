@@ -6,7 +6,7 @@
 //! epoch survive terminal source stop, posted-write completion and IRQ drain.
 pub(crate) mod cold;
 mod config;
-use crate::bus::irq::posted_msi::MsiCompletion;
+use crate::bus::irq::posted_msi::MsiRoute;
 mod registers;
 use super::{Board, Chip, PciIdentity, Platform, Result as DriverResult, Space, Transport, memory};
 use crate::bus::pci::regs;
@@ -17,9 +17,7 @@ use crate::{
             mapping::{DmaDomain, DmaError},
             memory::{CacheAttribute, PageSource},
         },
-        irq::{
-            self, Disposition, Handler, IrqController, IrqRegistration, Route, RouteRequest, Source,
-        },
+        irq::{self, Disposition, Handler, IrqController, IrqRegistration, Route, Source},
         mmio::owned::{self, Mapping},
         pci::{
             Address, Function,
@@ -131,14 +129,13 @@ pub struct Inputs<
     pub retained: RetainedOwner,
     pub topology: native_aspm::Topology<C>,
     pub registers: R,
-    pub attachment: Box<dyn Attachment>,
+    pub attachment: Attachment,
     pub pages: Box<dyn PageSource>,
     pub board: Board,
     /// Original values read from this same requester's firmware node.
     pub properties: Vec<(&'static str, Vec<u8>)>,
     pub clock: T,
     pub interrupts: &'static dyn IrqController,
-    pub msi_completion: MsiCompletion,
 }
 struct Allocator {
     domain: Arc<dyn DmaDomain>,
@@ -180,7 +177,7 @@ struct ConfigurationState<C: Configuration> {
 struct NativeSource<C: Configuration> {
     config: Rc<RefCell<ConfigurationState<C>>>,
     signals: Arc<Signals>,
-    delivery: Rc<RefCell<MsiCompletion>>,
+    requester: crate::bus::pci::requester::RequesterId,
 }
 impl<C: Configuration> NativeSource<C> {
     fn checked(&self, result: Result<(), Error>, kind: irq::IrqError) -> Result<(), irq::IrqError> {
@@ -192,9 +189,10 @@ impl<C: Configuration> NativeSource<C> {
     }
 }
 // SAFETY: admission is a fresh independently drained unpublished reset epoch;
-// retirement's stopped latch requires FLR, domain payload completion
-// AND the independent root/route posted-MSI completion. Registry then drains
-// CPU pending vectors/callbacks separately.
+// retirement's stopped latch requires this owner's authorized containment FLR
+// and domain payload completion. It does not advance the ownership generation.
+// Registry separately fences the original root route, then CPU/callback/work;
+// foreign reset/reassignment invalidates the grant instead of renewing it.
 unsafe impl<C: Configuration> Source for NativeSource<C> {
     fn mask(&mut self) -> Result<(), irq::IrqError> {
         let result = {
@@ -214,20 +212,26 @@ unsafe impl<C: Configuration> Source for NativeSource<C> {
             Err(irq::IrqError::Quiesce)
         }
     }
-    fn route(&self) -> RouteRequest {
-        RouteRequest::Msi
+    fn route_kind(&self) -> crate::bus::irq::RouteKind {
+        crate::bus::irq::RouteKind::Msi
     }
-    unsafe fn program(&mut self, route: Route) -> Result<(), irq::IrqError> {
-        let Route::Msi(message) = route else {
+    fn requester(&self) -> Option<&crate::bus::pci::requester::RequesterId> {
+        Some(&self.requester)
+    }
+    unsafe fn program(
+        &mut self,
+        route: &crate::bus::irq::AllocatedRoute<'_>,
+    ) -> Result<(), irq::IrqError> {
+        let Route::Msi(message) = route.programming() else {
             return Err(irq::IrqError::Route);
         };
-        let result = (|| {
-            // SAFETY: this Source::program call holds the registry's route
-            // for the same original requester/root delivery owner.
-            unsafe { self.delivery.borrow_mut().bind_route(message) }.map_err(Error::Delivery)?;
+        if !route.matches_requester(&self.requester) {
+            return Err(irq::IrqError::Route);
+        }
+        let result = {
             // SAFETY: registry keeps the route and original owners.
             unsafe { self.config.borrow_mut().msi.program(message) }.map_err(Error::Msi)
-        })();
+        };
         self.checked(result, irq::IrqError::Route)
     }
     unsafe fn unmask(&mut self) -> Result<(), irq::IrqError> {
@@ -258,7 +262,7 @@ pub struct NativePlatform<
     registers: Option<R>,
     domain: Option<Arc<dyn DmaDomain>>,
     allocator: Option<Allocator>,
-    attachment: Option<Box<dyn Attachment>>,
+    attachment: Option<Attachment>,
     retention: Option<ConfigRetention>,
     quiesced: bool,
     resources_attempted: bool,
@@ -269,7 +273,9 @@ pub struct NativePlatform<
     registration: Option<Box<dyn IrqRegistration>>,
     signals: Arc<Signals>,
     mappings: Vec<Mapping>,
-    delivery: Option<Rc<RefCell<MsiCompletion>>>,
+    msi_route: Option<MsiRoute>,
+    requester: crate::bus::pci::requester::RequesterId,
+    irq_retirement: Option<irq::RetiredRoute>,
     prepared: bool,
     admission_attempted: bool,
     retirement_attempted: bool,
@@ -368,6 +374,23 @@ impl<C: Configuration, R: Registers, T: Time> NativePlatform<C, R, T> {
             Ok(retention) => retention,
             Err(error) => return Err((Error::Mapping(error), inputs)),
         };
+        // Compare the actual original allocation before any route/entry or
+        // device write; equal BDF/vendor/BAR numbers are not source authority.
+        match inputs.attachment.matches_retention(&retention) {
+            Ok(true) => {}
+            Ok(false) => {
+                return Err((
+                    Error::Requirement("same actual source/attachment config allocation"),
+                    inputs,
+                ));
+            }
+            Err(error) => return Err((Error::Dma(error), inputs)),
+        }
+        let requester = inputs.attachment.requester().clone();
+        let msi_route = match inputs.attachment.irq_route() {
+            Ok(route) => route,
+            Err(error) => return Err((Error::Dma(error), inputs)),
+        };
         let Inputs {
             function,
             retained,
@@ -379,7 +402,6 @@ impl<C: Configuration, R: Registers, T: Time> NativePlatform<C, R, T> {
             properties,
             clock,
             interrupts,
-            msi_completion,
         } = inputs;
         let domain = attachment.domain();
         Ok(Self {
@@ -409,7 +431,9 @@ impl<C: Configuration, R: Registers, T: Time> NativePlatform<C, R, T> {
                 stopped: AtomicBool::new(true),
             }),
             mappings: Vec::new(),
-            delivery: Some(Rc::new(RefCell::new(msi_completion))),
+            msi_route: Some(msi_route),
+            requester,
+            irq_retirement: None,
             prepared: false,
             admission_attempted: false,
             retirement_attempted: false,
@@ -495,16 +519,18 @@ impl<C: Configuration, R: Registers, T: Time> NativePlatform<C, R, T> {
         // submissions are terminal, every page/domain/root stays held.
         // BM/TRPND/reset alone never authorize this operation's success.
         unsafe { self.domain.as_ref().unwrap().drain_posted_writes() }.map_err(Error::Dma)?;
-        if self.registration.is_some() {
-            // SAFETY: source/reset and payload completion above; this
-            // independently kept root/route owner completes MSI delivery.
-            unsafe { self.delivery.as_ref().unwrap().borrow().drain() }.map_err(Error::Delivery)?;
-        }
         self.signals.stopped.store(true, Ordering::Release);
-        if let Some(registration) = self.registration.as_mut()
-            && let Err(error) = registration.retire()
-        {
-            return Err(self.irq_error(error));
+        if let Some(registration) = self.registration.as_mut() {
+            let retired = registration
+                .retire()
+                .map_err(|error| self.irq_error(error))?;
+            // SAFETY: exact checked original action/CPU/work retirement. Keep
+            // callback until source destruction and route through native close.
+            let (source, handler, route) =
+                unsafe { retired.into_parts() }.map_err(|failure| self.irq_error(failure.error))?;
+            drop(source);
+            drop(handler);
+            self.irq_retirement = Some(route);
         }
         self.registration = None;
         self.signals.pending.store(false, Ordering::Release);
@@ -529,12 +555,33 @@ impl<C: Configuration, R: Registers, T: Time> NativePlatform<C, R, T> {
                 Error::Requirement("native Broadcom quiescence before resource release").into(),
             );
         }
-        // SAFETY: full engine/payload/MSI/CPU/work drain excludes every live
+        // SAFETY: full engine/payload/action/CPU/work drain excludes every live
         // consumer and original PCI owners remain. Normal transport close
         // already removed coherent leases. A direct safe platform call before
         // lease removal independently refuses inside Attachment::detach;
         // no BAR/config retirement can occur before its acknowledgement.
-        unsafe { self.attachment.as_mut().unwrap().detach() }.map_err(Error::Dma)?;
+        if let Some(grant) = self.msi_route.take() {
+            self.attachment
+                .as_mut()
+                .unwrap()
+                .cancel_unpublished_irq(grant)
+                .map_err(|failure| Error::Dma(failure.error))?;
+        }
+        if let Some(route) = self.irq_retirement.take() {
+            self.attachment
+                .as_mut()
+                .unwrap()
+                .retain_irq_action(route)
+                .map_err(|failure| Error::Irq(failure.error))?;
+        }
+        // SAFETY: separate terminal engine/payload and DMA-unmap proof above;
+        // every issued action is canceled or retained with its real join.
+        let detached = unsafe { self.attachment.as_mut().unwrap().detach() }.map_err(Error::Dma)?;
+        self.attachment
+            .as_mut()
+            .unwrap()
+            .release_irq_pins(detached)
+            .map_err(|failure| Error::Irq(failure.error))?;
         self.retention.take();
         if let Some(function) = self.function.take() {
             self.mappings.push(function.into_config().into_mapping());
@@ -732,18 +779,23 @@ unsafe impl<C: Configuration, R: Registers, T: Time> Platform for NativePlatform
         let source = NativeSource {
             config: configuration,
             signals: self.signals.clone(),
-            delivery: self.delivery.as_ref().unwrap().clone(),
+            requester: self.requester.clone(),
         };
-        match self
-            .interrupts
-            .request(Box::new(source), Arc::new(Callback(self.signals.clone())))
-        {
+        match self.interrupts.request(irq::Request {
+            source: Box::new(source),
+            handler: Arc::new(Callback(self.signals.clone())),
+            routing: irq::RouteRequest::Msi(
+                self.msi_route
+                    .take()
+                    .ok_or(Error::Requirement("original unused IRQ grant"))?,
+            ),
+        }) {
             Ok(registration) => {
                 self.registration = Some(registration);
                 self.signals.stopped.store(false, Ordering::Release);
                 Ok(())
             }
-            Err(error) => Err(self.irq_error(error)),
+            Err(error) => Err(self.irq_error(error.error)),
         }
     }
     fn retire_resources(&mut self) -> DriverResult<()> {
@@ -751,7 +803,13 @@ unsafe impl<C: Configuration, R: Registers, T: Time> Platform for NativePlatform
             return Err(error.clone());
         }
         if self.resources_attempted {
-            return self.retirement_error.clone().map_or(Ok(()), Err);
+            if let Some(route) = &self.irq_retirement {
+                route.validate().map_err(|error| self.irq_error(error))?;
+            }
+            if let Some(attachment) = &self.attachment {
+                attachment.validate_irq_actions().map_err(Error::Irq)?;
+            }
+            return Ok(());
         }
         self.resources_attempted = true;
         self.retirement_error =
@@ -765,7 +823,13 @@ unsafe impl<C: Configuration, R: Registers, T: Time> Platform for NativePlatform
             return Err(error.clone());
         }
         if self.retirement_attempted || self.resources_attempted {
-            return self.retirement_error.clone().map_or(Ok(()), Err);
+            if let Some(route) = &self.irq_retirement {
+                route.validate().map_err(|error| self.irq_error(error))?;
+            }
+            if let Some(attachment) = &self.attachment {
+                attachment.validate_irq_actions().map_err(Error::Irq)?;
+            }
+            return Ok(());
         }
         self.retirement_attempted = true;
         self.retirement_error =
@@ -798,6 +862,7 @@ impl<C: Configuration, R: Registers, T: Time> Drop for NativePlatform<C, R, T> {
             if let Some(value) = self.retention.take() {
                 core::mem::forget(value);
             }
+            core::mem::forget(self.irq_retirement.take());
             if let Some(value) = self.domain.take() {
                 core::mem::forget(value);
             }
@@ -810,7 +875,7 @@ impl<C: Configuration, R: Registers, T: Time> Drop for NativePlatform<C, R, T> {
             if let Some(value) = self.registration.take() {
                 core::mem::forget(value);
             }
-            if let Some(value) = self.delivery.take() {
+            if let Some(value) = self.msi_route.take() {
                 core::mem::forget(value);
             }
             for mapping in self.mappings.drain(..) {

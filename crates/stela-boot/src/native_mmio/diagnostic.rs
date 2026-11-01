@@ -171,13 +171,41 @@ unsafe fn check_native_hpet(handoff: &Handoff, owner: &mut HostOwner) -> Result<
     Ok(())
 }
 
+/// Require an already genuine caller-owned notification domain. This checks
+/// presence/liveness only; it creates no domain, ownership or history grant.
+pub(crate) fn require_notification_owner(
+    notification: Option<
+        alloc::sync::Arc<dyn stela_drivers::bus::irq::posted_msi::NotificationDomain>,
+    >,
+) -> Result<alloc::sync::Arc<dyn stela_drivers::bus::irq::posted_msi::NotificationDomain>, Error> {
+    let notification = stage(
+        "original-notification-owner",
+        notification.ok_or(Error::Unavailable),
+    )?;
+    if let Err(error) = notification.check() {
+        crate::output::arguments(format_args!(
+            "CHECK native-mmio REFUSED stage=notification-domain error={error:?}\n"
+        ));
+        return Err(Error::Unavailable);
+    }
+    Ok(notification)
+}
+
 /// # Safety
 /// Explicit native diagnostic owns this post-EBS BSP, all controller
 /// resources and the complete original HPET/LAPIC source. No firmware, SMM,
 /// other CPU or legacy driver owns or accesses HPET control/counter/comparator/
 /// decode/route state or IOAPIC/ECAM during the kernel-image epoch. Caller stops the boot immediately afterward, preserving the
 /// permanently installed Permission/IRQ/clock's physical root owner.
-pub(crate) unsafe fn check(handoff: &Handoff, owner: &mut HostOwner) -> Result<(), Error> {
+/// `notification` is the actual retained original CPU/root/controller-format
+/// owner for this SAME handoff. Table/map/timed-CPU data never constructs it.
+pub(crate) unsafe fn check(
+    handoff: &Handoff,
+    owner: &mut HostOwner,
+    notification: alloc::sync::Arc<dyn stela_drivers::bus::irq::posted_msi::NotificationDomain>,
+) -> Result<(), Error> {
+    // A checked real input is required even for direct diagnostic callers.
+    let notification = require_notification_owner(Some(notification))?;
     if handoff.native_resources.cores != 1 || handoff.storage.present {
         return Err(Error::Unavailable);
     }
@@ -218,7 +246,12 @@ pub(crate) unsafe fn check(handoff: &Handoff, owner: &mut HostOwner) -> Result<(
         "irq-root-attach",
         // SAFETY: the driver execution owns interrupt delivery and the claimed IOAPICs.
         unsafe {
-            crate::native_irq::root::Root::attach(&execution, source.authority(), source.madt())
+            crate::native_irq::root::Root::attach(
+                &execution,
+                source.authority(),
+                source.madt(),
+                notification,
+            )
         }
         .map_err(|error| {
             crate::output::arguments(format_args!(

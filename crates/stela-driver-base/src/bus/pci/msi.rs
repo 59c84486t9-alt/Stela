@@ -202,9 +202,12 @@ impl<C: MsiConfigSpace> MsiConfig<C> {
     /// dummy token. This keeps the real mapped configuration transport even
     /// if abandoned. Native config accesses and every source/worker/reset are
     /// serialized; no firmware/alias/other CPU can reconfigure or revoke it.
-    /// Old MSI/INTx delivery, callbacks and device work have drained;
-    /// initially disabled MSI alone does not establish this. The platform has
-    /// checked MSI routing. No vector or requester-coherency grant is created.
+    /// Old source actions, CPU/EOI/callbacks and captured service/work have
+    /// joined under the actual stable notification domain; any old device
+    /// cause remains owned. A delayed ordinary fixed/edge packet may notify a
+    /// current valid status-checking handler. Unknown format/root handover needs
+    /// its independent real completion proof. Initially disabled MSI proves
+    /// none of this. No vector, domain or requester-coherency grant is created.
     /// Errors return both owners without modifying configuration.
     pub unsafe fn new(
         mut function: Function<C>,
@@ -297,11 +300,13 @@ impl<C: MsiConfigSpace> MsiConfig<C> {
     ///
     /// # Safety
     /// This typed message belongs to the registry's checked route;
-    /// every callback/resource remains held. Reprogramming requires real
-    /// source/callback/posted-write drain; masking alone is insufficient.
+    /// every callback/resource remains held. Reprogramming requires actual old
+    /// source/pending-cause closure plus CPU/EOI/captured service/work joins
+    /// under the same retained notification domain. This is not an all-issued
+    /// MSI or payload completion receipt; masking alone is insufficient.
     pub unsafe fn program(&mut self, message: MsiMessage) -> Result<(), MsiError> {
         self.normal()?;
-        if message.address & 3 != 0
+        if !message.valid_pci_format()
             || message.data > u32::from(u16::MAX)
             || (!self.layout.wide() && message.address > u64::from(u32::MAX))
         {
@@ -356,10 +361,12 @@ impl<C: MsiConfigSpace> MsiConfig<C> {
     /// Return the owners only after independent source/IRQ/work drain.
     ///
     /// # Safety
-    /// The device is stopped, posted MSI writes/CPU pending vectors,
-    /// callbacks and all deferred/timer/reset users have drained and cannot
-    /// restart. Every DMA lease/fence/IOTLB obligation remains independently
-    /// owned until completed; this helper does not prove any of them.
+    /// Device engines are stopped and old IRQ actions have joined their
+    /// CPU/EOI/callbacks and captured service/thread/work; former reset users
+    /// cannot restart. Stable CPU/root/format ownership remains retained for
+    /// delayed ordinary notifications; this is not all-issued MSI completion.
+    /// Every payload/DMA lease/fence/IOTLB obligation stays independently owned
+    /// until completed; returning config owners proves none of them.
     pub unsafe fn release(&mut self) -> Result<Released<C>, MsiError> {
         self.disable()?;
         self.owner.take().ok_or(MsiError::Released)

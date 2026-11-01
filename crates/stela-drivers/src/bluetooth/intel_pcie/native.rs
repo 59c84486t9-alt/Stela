@@ -8,9 +8,7 @@ use crate::bus::pci::regs;
 use crate::{
     Clock,
     bus::{
-        irq::{
-            self, Disposition, Handler, IrqController, IrqRegistration, Route, RouteRequest, Source,
-        },
+        irq::{self, Disposition, Handler, IrqController, IrqRegistration, Route, Source},
         mmio::owned::{self, CacheAttribute, Mapping, PhysicalSpan, Protection},
         pci::{
             Function,
@@ -139,7 +137,7 @@ pub struct Inputs<C: MsiConfigSpace, B: BarAccess, R: Registers> {
     pub clock: Clock,
     pub interrupts: &'static dyn IrqController,
     pub domain: Arc<dyn crate::bus::dma::mapping::DmaDomain>,
-    pub msi_completion: irq::posted_msi::MsiCompletion,
+    pub msi_route: irq::posted_msi::MsiRoute,
 }
 struct Signals<R: Registers> {
     registers: R,
@@ -220,9 +218,8 @@ struct NativeSource<C: MsiConfigSpace, B: BarAccess, R: Registers> {
     configuration: Rc<RefCell<Configuration<C, B>>>,
     signals: Arc<Signals<R>>,
     domain: Arc<dyn crate::bus::dma::mapping::DmaDomain>,
-    delivery: Rc<RefCell<irq::posted_msi::MsiCompletion>>,
+    requester: Option<crate::bus::pci::requester::RequesterId>,
     programmed: bool,
-    drained: bool,
 }
 impl<C: MsiConfigSpace, B: BarAccess, R: Registers> NativeSource<C, B, R> {
     fn checked(
@@ -239,8 +236,8 @@ impl<C: MsiConfigSpace, B: BarAccess, R: Registers> NativeSource<C, B, R> {
 }
 // SAFETY: the consumed native grant binds PCI/reset/UC/DMA ownership.
 // Source quiescence observes stop/reset/cause acknowledgments, completes the
-// paired payload path and independently drains bound posted MSI-X delivery.
-// Registry then drains CPU/callbacks before pending work is canceled.
+// paired payload path. Registry separately fences the original retained root
+// route before CPU/callback drain and actual pending-work cancellation.
 unsafe impl<C: MsiConfigSpace, B: BarAccess, R: Registers> Source for NativeSource<C, B, R> {
     fn mask(&mut self) -> core::result::Result<(), irq::IrqError> {
         let result = self
@@ -254,7 +251,7 @@ unsafe impl<C: MsiConfigSpace, B: BarAccess, R: Registers> Source for NativeSour
     fn quiesce(&mut self) -> core::result::Result<(), irq::IrqError> {
         let result = (|| {
             self.signals.stopped()?;
-            if self.programmed && !self.drained {
+            if self.programmed {
                 // SAFETY: this original function acknowledged disconnect/reset,
                 // all MSI-X entries are masked, and the serialized core cannot
                 // resume. Its buffers/configuration and root remain held.
@@ -262,30 +259,36 @@ unsafe impl<C: MsiConfigSpace, B: BarAccess, R: Registers> Source for NativeSour
                     operation: lifetime::DmaOperation::Drain,
                     source,
                 })?;
-                // SAFETY: same source/payload completion, masked original route
-                // and kept owners. This is independent of payload/CPU drain.
-                unsafe { self.delivery.borrow().drain() }.map_err(Error::Delivery)?;
-                self.drained = true;
             }
             Ok(())
         })();
         self.checked(result, irq::IrqError::Quiesce)
     }
-    fn route(&self) -> RouteRequest {
-        RouteRequest::Msi
+    fn route_kind(&self) -> crate::bus::irq::RouteKind {
+        crate::bus::irq::RouteKind::Msi
     }
-    unsafe fn program(&mut self, route: Route) -> core::result::Result<(), irq::IrqError> {
-        let Route::Msi(message) = route else {
+    fn requester(&self) -> Option<&crate::bus::pci::requester::RequesterId> {
+        self.requester.as_ref()
+    }
+    unsafe fn program(
+        &mut self,
+        route: &crate::bus::irq::AllocatedRoute<'_>,
+    ) -> core::result::Result<(), irq::IrqError> {
+        let Route::Msi(message) = route.programming() else {
             return Err(irq::IrqError::Route);
         };
+        if self
+            .requester
+            .as_ref()
+            .is_some_and(|own| !route.matches_requester(own))
+        {
+            return Err(irq::IrqError::Route);
+        }
         self.programmed = true;
-        let result = (|| {
-            // SAFETY: Source::program holds this registry's original exclusive
-            // route for the paired requester/root owner.
-            unsafe { self.delivery.borrow_mut().bind_route(message) }.map_err(Error::Delivery)?;
+        let result = {
             // SAFETY: registry keeps the checked route/callback while masked.
             unsafe { self.configuration.borrow_mut().msix.program(message) }.map_err(Error::Msix)
-        })();
+        };
         self.checked(result, irq::IrqError::Route)
     }
     unsafe fn unmask(&mut self) -> core::result::Result<(), irq::IrqError> {
@@ -308,7 +311,9 @@ pub struct NativePlatform<C: MsiConfigSpace, B: BarAccess, R: Registers> {
     signals: Option<Arc<Signals<R>>>,
     interrupts: &'static dyn IrqController,
     domain: Option<Arc<dyn crate::bus::dma::mapping::DmaDomain>>,
-    delivery: Option<Rc<RefCell<irq::posted_msi::MsiCompletion>>>,
+    msi_route: Option<irq::posted_msi::MsiRoute>,
+    requester: Option<crate::bus::pci::requester::RequesterId>,
+    irq_retirement: Option<irq::RetiredRoute>,
     clock: Clock,
     clock_origin: u64,
     registration: Option<Box<dyn IrqRegistration>>,
@@ -324,8 +329,10 @@ impl<C: MsiConfigSpace + 'static, B: BarAccess + 'static, R: Registers> NativePl
     /// its coordinator. Supplied DMA retains coherent mappings and page pins
     /// for this requester; bus addresses need not equal physical/CPU addresses.
     /// IRQ routing is real/checked. `domain` is the paired coherent payload
-    /// root; `msi_completion` owns its independent posted-interrupt path.
-    /// Unavailable completion permits I/O but refuses armed route retirement.
+    /// root; `msi_route` owns genuine stable notification admission. Attached
+    /// native routes require the owning assembler's actual configuration
+    /// allocation check before a private Source requester can be assigned.
+    /// Missing admission refuses before IRQ publication.
     /// Only one serialized process/deferred owner may service this transport;
     /// the callback's pending flag is its entire work queue. No source,
     /// mapping, DMA or reset owner may be revoked while kept. Native mappings
@@ -395,7 +402,7 @@ impl<C: MsiConfigSpace + 'static, B: BarAccess + 'static, R: Registers> NativePl
             clock,
             interrupts,
             domain,
-            msi_completion,
+            msi_route,
         } = inputs;
         // SAFETY: same consumed Function/reset/resources grant. Old real
         // routes/CPU callbacks are independently drained; no numeric substitute.
@@ -412,7 +419,7 @@ impl<C: MsiConfigSpace + 'static, B: BarAccess + 'static, R: Registers> NativePl
                         clock,
                         interrupts,
                         domain,
-                        msi_completion,
+                        msi_route,
                     },
                 ));
             }
@@ -437,7 +444,9 @@ impl<C: MsiConfigSpace + 'static, B: BarAccess + 'static, R: Registers> NativePl
             })),
             interrupts,
             domain: Some(domain),
-            delivery: Some(Rc::new(RefCell::new(msi_completion))),
+            msi_route: Some(msi_route),
+            requester: None,
+            irq_retirement: None,
             clock,
             clock_origin,
             registration: None,
@@ -529,17 +538,25 @@ unsafe impl<C: MsiConfigSpace + 'static, B: BarAccess + 'static, R: Registers> P
             configuration: self.configuration.as_ref().unwrap().clone(),
             signals: self.signals.as_ref().unwrap().clone(),
             domain: self.domain.as_ref().unwrap().clone(),
-            delivery: self.delivery.as_ref().unwrap().clone(),
+            requester: self.requester.clone(),
             programmed: false,
-            drained: false,
         };
         let handler = Callback(self.signals.as_ref().unwrap().clone());
-        match self.interrupts.request(Box::new(source), Arc::new(handler)) {
+        let routing = irq::RouteRequest::Msi(
+            self.msi_route
+                .take()
+                .ok_or(Error::Requirement("original unused IRQ grant"))?,
+        );
+        match self.interrupts.request(irq::Request {
+            source: Box::new(source),
+            handler: Arc::new(handler),
+            routing,
+        }) {
             Ok(registration) => {
                 self.registration = Some(registration);
                 Ok(())
             }
-            Err(error) => Err(self.irq_error(error)),
+            Err(error) => Err(self.irq_error(error.error)),
         }
     }
     fn service_complete(&mut self) -> DriverResult<()> {
@@ -585,23 +602,38 @@ unsafe impl<C: MsiConfigSpace + 'static, B: BarAccess + 'static, R: Registers> P
     }
     fn retire_vector_zero(&mut self) -> DriverResult<()> {
         if self.retired {
+            if let Some(route) = &self.irq_retirement {
+                route.validate().map_err(|error| self.irq_error(error))?;
+            }
             return Ok(());
         }
         if self.attempted && self.registration.is_none() {
             return Err(Error::Requirement("uncertain native IRQ admission retained").into());
         }
-        if let Some(registration) = self.registration.as_mut()
-            && let Err(error) = registration.retire()
-        {
-            return Err(self.irq_error(error));
+        if let Some(registration) = self.registration.as_mut() {
+            let retired = registration
+                .retire()
+                .map_err(|error| self.irq_error(error))?;
+            // SAFETY: exact same checked native route; source is released while
+            // its callback remains kept, after actual action/CPU/work retirement.
+            let (source, handler, mut route) =
+                unsafe { retired.into_parts() }.map_err(|failure| self.irq_error(failure.error))?;
+            if route.requester().is_none() {
+                // Only the feature-confined no-native-pin fixture can succeed.
+                route
+                    .release_unattached_fixture()
+                    .map_err(|error| self.irq_error(error))?;
+            }
+            drop(source);
+            drop(handler);
+            self.irq_retirement = Some(route);
         }
-        // The registry masks MSI-X before its source quiescence checks.
-        // A failed DMA stop still gets that real mask/quarantine attempt.
         self.signals().stopped()?;
         self.registration = None;
         let mut configuration = self.configuration.as_ref().unwrap().borrow_mut();
-        // SAFETY: bus-master stop/reset/cause acknowledgments and real
-        // registry CPU/callback/work drain all completed. DMA pages remain pinned.
+        // SAFETY: exact retained route and Registry action/CPU/work retirement,
+        // or the original never-programmed path; device stop is acknowledged.
+        // DMA and the independent IRQ config pin remain held for native close.
         let owners = unsafe { configuration.msix.release() }.map_err(Error::Msix)?;
         configuration.released = Some(owners);
         self.retired = true;
@@ -622,7 +654,8 @@ impl<C: MsiConfigSpace, B: BarAccess, R: Registers> Drop for NativePlatform<C, B
                 core::mem::forget(signals);
             }
             core::mem::forget(self.domain.take());
-            core::mem::forget(self.delivery.take());
+            core::mem::forget(self.msi_route.take());
+            core::mem::forget(self.irq_retirement.take());
         }
         // Successful physical retirement permits owner Drop. Owned mappings
         // keep/quarantine their boot-lifetime native reservations.
@@ -665,6 +698,48 @@ unsafe impl RetirableRegisters for MappedRegisters {
 impl<B: BarAccess + 'static, R: Registers>
     NativePlatform<crate::bus::pci::owned::OwnedConfig, B, R>
 {
+    fn check_attachment(
+        &mut self,
+        attachment: &crate::bus::pci::requester::preparation::Attachment,
+    ) -> DriverResult<()> {
+        let source = self
+            .configuration
+            .as_ref()
+            .ok_or(Error::Requirement("original MSI-X owner"))?
+            .borrow()
+            .msix
+            .retain_config_epoch()
+            .map_err(Error::Msix)?;
+        if !attachment
+            .matches_retention(&source)
+            .map_err(|error| Error::Dma {
+                operation: lifetime::DmaOperation::Drain,
+                source: error,
+            })?
+        {
+            return Err(
+                Error::Requirement("same actual MSI-X/attachment config allocation").into(),
+            );
+        }
+        if !self
+            .msi_route
+            .as_ref()
+            .is_some_and(|route| route.belongs_to(attachment.requester()))
+        {
+            return Err(Error::Requirement("same original requester IRQ attachment").into());
+        }
+        // Only this checked real source-owner assembly can assign requester.
+        // The generic constructor cannot copy authority from arbitrary grant
+        // metadata into a different Function or configuration allocation.
+        self.requester = Some(attachment.requester().clone());
+        Ok(())
+    }
+    fn take_unpublished_irq(&mut self) -> Option<irq::posted_msi::MsiRoute> {
+        self.msi_route.take()
+    }
+    fn take_retired_irq(&mut self) -> Option<irq::RetiredRoute> {
+        self.irq_retirement.take()
+    }
     fn stop_requester(
         &mut self,
         seal: &crate::bus::pci::owned::ConfigRetention,

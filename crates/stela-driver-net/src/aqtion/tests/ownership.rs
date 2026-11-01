@@ -5,7 +5,7 @@ use crate::{
     aqtion::native as adapter,
     bus::pci::requester::{
         FunctionRole, RequesterBinding,
-        preparation::{self, Attachment, Root},
+        preparation::{self, Root},
     },
 };
 mod domain;

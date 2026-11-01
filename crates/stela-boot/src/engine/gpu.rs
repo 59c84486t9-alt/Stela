@@ -52,18 +52,15 @@ use stela_drivers::gpu::metal::nvidia::PcieLink;
 use stela_drivers::{
     bus::{
         dma::mapping::DmaDomain,
-        irq::{Disposition, Handler, IrqError, IrqRegistration, Route, RouteRequest, Source},
+        irq::{Disposition, Handler, IrqError, IrqRegistration, Route, Source},
         mmio::owned,
         pci::{Bar, ConfigSpace, Function, owned::OwnedConfig},
     },
     firmware::{Catalog, Provider, Requirement, Target},
     gpu,
-    platform::{
-        image::NativeReadOnlyImage,
-        work::{
-            Cpu, WorkError,
-            service::{Clock, Domain, Idle},
-        },
+    platform::work::{
+        Cpu, WorkError,
+        service::{Clock, Domain, Idle},
     },
     probe::{NativeServices, ServiceError},
 };
@@ -186,51 +183,6 @@ unsafe impl Idle for Events {
     }
 }
 
-/// `.rdata` of the running image, which Linux keeps constant names in.
-struct ReadOnlyImage(Range<usize>);
-
-unsafe extern "C" {
-    /// The image's first byte, which the linker defines.
-    static __ImageBase: u8;
-}
-
-impl ReadOnlyImage {
-    /// The section from the headers the image was loaded with.
-    fn locate() -> Option<Self> {
-        const NEW_HEADER: usize = 0x3c;
-        const SECTION_COUNT: usize = 6;
-        const OPTIONAL_SIZE: usize = 20;
-        const SECTIONS: usize = 24;
-        const SECTION_BYTES: usize = 40;
-        let base = addr_of!(__ImageBase);
-        // SAFETY: the loader keeps the image's headers, little-endian on x86.
-        let read = |at: usize, bytes: usize| unsafe {
-            (0..bytes).fold(0usize, |value, byte| {
-                value | usize::from(base.add(at + byte).read()) << (8 * byte)
-            })
-        };
-        let header = read(NEW_HEADER, 4);
-        let sections = header + SECTIONS + read(header + OPTIONAL_SIZE, 2);
-        (0..read(header + SECTION_COUNT, 2)).find_map(|index| {
-            let section = sections + index * SECTION_BYTES;
-            // SAFETY: as for `read`.
-            let name = unsafe { core::slice::from_raw_parts(base.add(section), 8) };
-            (name == b".rdata\0\0").then(|| {
-                let start = base as usize + read(section + 12, 4);
-                Self(start..start + read(section + 8, 4))
-            })
-        })
-    }
-}
-
-// SAFETY: the image's own read-only section, which never moves or changes and
-// holds every literal of the Rust and C code linked into it.
-unsafe impl NativeReadOnlyImage for ReadOnlyImage {
-    fn contains(&self, address: usize) -> bool {
-        self.0.contains(&address)
-    }
-}
-
 unsafe fn allocate_zeroed(layout: Layout) -> *mut u8 {
     // SAFETY: the registration's contract, which this allocator's one attempt
     // at its lock meets; the C side frees through the global allocator.
@@ -267,55 +219,95 @@ impl ConfigSpace for SharedConfig {
 struct MsiSource {
     config: SharedConfig,
     msi: Msi,
+    programmed: bool,
+    event: stela_linux::service::IrqEvent,
+    environment: *const Environment,
+    line: u32,
 }
 
 // SAFETY: the function was stopped when claimed, with no route of its own.
-// Nothing here frees: the config and capability stay with the registration, and
-// nouveau has masked its interrupts by the time it frees the line.
+// Nothing here frees: config/capability stay with the registration. Terminal
+// engine/payload/Linux-work joining is unavailable, so a programmed route's
+// close refuses and retains owners even if nouveau masked its local source.
 unsafe impl Source for MsiSource {
     fn mask(&mut self) -> Result<(), IrqError> {
+        let command = self.config.read16(4);
+        if command == u16::MAX {
+            return Err(IrqError::FailedRead);
+        }
+        self.config.write16(4, command | 1 << 10);
         self.msi.disable(&mut self.config);
+        let actual = self.config.read16(4);
+        let control = self.msi.control(&self.config);
+        if actual == u16::MAX || control == u16::MAX {
+            return Err(IrqError::FailedRead);
+        }
+        if actual & (1 << 10) == 0 || control & 1 != 0 {
+            return Err(IrqError::Mask);
+        }
         Ok(())
     }
     fn quiesce(&mut self) -> Result<(), IrqError> {
+        if self.programmed {
+            // GPU engine/payload and Linux service work have no independent
+            // joined terminal acknowledgement here. Retain the old route.
+            return Err(IrqError::Unsupported);
+        }
         self.mask()
     }
-    fn route(&self) -> RouteRequest {
-        RouteRequest::Msi
+    fn route_kind(&self) -> stela_drivers::bus::irq::RouteKind {
+        stela_drivers::bus::irq::RouteKind::Msi
     }
-    unsafe fn program(&mut self, route: Route) -> Result<(), IrqError> {
-        let Route::Msi(message) = route else {
+    fn requester(&self) -> Option<&stela_drivers::bus::pci::requester::RequesterId> {
+        None
+    }
+    unsafe fn program(
+        &mut self,
+        route: &stela_drivers::bus::irq::AllocatedRoute<'_>,
+    ) -> Result<(), IrqError> {
+        let Route::Msi(message) = route.programming() else {
             return Err(IrqError::Route);
         };
         let data = u16::try_from(message.data).map_err(|_| IrqError::Route)?;
+        self.programmed = true;
         self.msi.program(&mut self.config, message.address, data);
         Ok(())
     }
     unsafe fn unmask(&mut self) -> Result<(), IrqError> {
         self.msi.enable(&mut self.config);
+        let control = self.msi.control(&self.config);
+        if control == u16::MAX {
+            return Err(IrqError::FailedRead);
+        }
+        if control & 1 == 0 {
+            return Err(IrqError::Mask);
+        }
         Ok(())
     }
     unsafe fn synchronize(&mut self) -> Result<(), IrqError> {
-        Ok(())
+        unsafe extern "C" {
+            fn stela_linux_irq_actions_joined(irq: u32) -> bool;
+        }
+        // SAFETY: native callback runs below the exact entered Linux owner;
+        // C free_irq retains its closing request and joined work until return.
+        if !unsafe { stela_linux_irq_actions_joined(self.line) } {
+            return Err(IrqError::Drain);
+        }
+        self.event.begin_close();
+        // SAFETY: Registry already closed this exact action and drained native
+        // CPU/inflight/EOI; the original pinned environment/event are retained.
+        unsafe { (&*self.environment).join_irq(&self.event) }.map_err(|_| IrqError::Drain)
     }
 }
 
 /// Records an interrupt for the service task.
 struct Fired {
-    environment: *const Environment,
-    line: u32,
+    event: stela_linux::service::IrqEvent,
 }
-
-// SAFETY: `raise` is the environment's interrupt-safe entry, and it lives for
-// the boot.
-unsafe impl Send for Fired {}
-// SAFETY: as above.
-unsafe impl Sync for Fired {}
 
 impl Handler for Fired {
     fn handle(&self) -> Disposition {
-        // SAFETY: the environment outlives every route, as above.
-        match unsafe { &*self.environment }.raise(self.line) {
+        match self.event.raise() {
             Ok(()) => Disposition::Handled,
             Err(_) => Disposition::NotMine,
         }
@@ -349,6 +341,7 @@ struct Line {
     config: SharedConfig,
     msi: Option<Msi>,
     registration: Option<Box<dyn IrqRegistration>>,
+    retired: Option<stela_drivers::bus::irq::RetiredSource<dyn Source>>,
 }
 
 /// What Linux code gets from Stela.
@@ -514,42 +507,132 @@ impl Platform for Host {
         self.unmap(address as u64, count);
     }
 
-    fn irq_enable(&self, irq: u32) -> Result<(), Errno> {
+    fn irq_enable(&self, irq: u32) -> Result<(), stela_linux::owner::IrqEnableError> {
+        use stela_linux::owner::IrqEnableError;
+        // Refuse a foreign native execution context before classifying any
+        // owner return; no errno itself proves a clean unpublished attempt.
+        let controller = native_irq::service().map_err(|_| IrqEnableError::retained(ENODEV))?;
         let mut lines = self.lines.borrow_mut();
-        let line = lines.get_mut(irq as usize).ok_or(EINVAL)?;
-        let msi = line.msi.ok_or(EOPNOTSUPP)?;
-        let controller = native_irq::service().map_err(|_| ENODEV)?;
+        let Some(line) = lines.get_mut(irq as usize) else {
+            // SAFETY: checked original process, before any route/event/source.
+            return Err(unsafe { IrqEnableError::unexposed(EINVAL) });
+        };
+        if line.retired.is_some() {
+            return Err(IrqEnableError::retained(EOPNOTSUPP));
+        }
+        if let Some(registration) = &mut line.registration {
+            return registration
+                .unmask()
+                .map_err(|_| IrqEnableError::retained(EIO));
+        }
+        let Some(msi) = line.msi else {
+            // SAFETY: no native attempt or service epoch was issued.
+            return Err(unsafe { IrqEnableError::unexposed(EOPNOTSUPP) });
+        };
+        // SAFETY: actual original entered process; any preceding epoch joined.
+        let event = unsafe { self.environment().irq_epoch(irq) }
+            .map_err(|_| IrqEnableError::retained(EIO))?;
         let source = Box::new(MsiSource {
             config: line.config.clone(),
             msi,
-        });
-        let handler = Arc::new(Fired {
+            programmed: false,
+            event: event.clone(),
             environment: self.environment.get(),
             line: irq,
         });
-        match controller.request(source, handler) {
+        let handler = Arc::new(Fired {
+            event: event.clone(),
+        });
+        match controller.request(stela_drivers::bus::irq::Request {
+            source,
+            handler,
+            routing: stela_drivers::bus::irq::RouteRequest::Msi(
+                stela_drivers::bus::irq::posted_msi::MsiRoute::unavailable(),
+            ),
+        }) {
             Ok(registration) => {
                 line.registration = Some(registration);
                 Ok(())
             }
-            Err(error) => {
-                self.report(format_args!("interrupt {irq} refused: {error:?}"));
-                Err(EIO)
+            Err(refusal) => {
+                let errno = match refusal.error {
+                    stela_drivers::bus::irq::IrqError::Exhausted => ENOMEM,
+                    stela_drivers::bus::irq::IrqError::Unavailable => ENODEV,
+                    stela_drivers::bus::irq::IrqError::Unsupported
+                    | stela_drivers::bus::irq::IrqError::Delivery(
+                        stela_drivers::bus::irq::posted_msi::Error::RootUnavailable
+                        | stela_drivers::bus::irq::posted_msi::Error::Unsupported,
+                    ) => EOPNOTSUPP,
+                    _ => EIO,
+                };
+                if errno == EOPNOTSUPP {
+                    self.unsupported(c"interrupt notification admission");
+                } else {
+                    self.report(format_args!("interrupt {irq} refused: {refusal:?}"));
+                }
+                let Some(untouched) = refusal.returned else {
+                    return Err(IrqEnableError::retained(EIO));
+                };
+                // SAFETY: actual checked prepublication return; extraction
+                // repeats the original process/context/provider checks.
+                let (source, handler, routing) =
+                    unsafe { untouched.into_parts() }.map_err(|_| IrqEnableError::retained(EIO))?;
+                // Retain actual inputs before any fallible cancellation/join.
+                let mut source = core::mem::ManuallyDrop::new(source);
+                let mut handler = core::mem::ManuallyDrop::new(handler);
+                let stela_drivers::bus::irq::RouteRequest::Msi(route) = routing else {
+                    return Err(IrqEnableError::retained(EIO));
+                };
+                route
+                    .cancel_unattached()
+                    .map_err(|_| IrqEnableError::retained(EIO))?;
+                event.begin_close();
+                // SAFETY: RequestError returned actual untouched owners before
+                // Slot/root/source publication, so this new event has no native
+                // callback producer. Join still checks exact epoch/activity.
+                unsafe { self.environment().join_irq(&event) }
+                    .map_err(|_| IrqEnableError::retained(EIO))?;
+                // SAFETY: same original process, unused route canceled and exact
+                // new service epoch actually joined; no C action reachability.
+                unsafe {
+                    core::mem::ManuallyDrop::drop(&mut source);
+                    core::mem::ManuallyDrop::drop(&mut handler);
+                }
+                // SAFETY: all original return/cancel/join facts above, not errno.
+                Err(unsafe { IrqEnableError::unexposed(errno) })
             }
         }
     }
 
-    fn irq_disable(&self, irq: u32) {
+    fn irq_disable(&self, irq: u32) -> Result<(), Errno> {
         let mut lines = self.lines.borrow_mut();
-        let registration = lines
-            .get_mut(irq as usize)
-            .and_then(|line| line.registration.take());
-        if let Some(mut registration) = registration
-            && let Err(error) = registration.retire()
-        {
-            self.report(format_args!("interrupt {irq} kept: {error:?}"));
-            // Retirement failed, so the route stays held for the boot.
-            core::mem::forget(registration);
+        let line = lines.get_mut(irq as usize).ok_or(EINVAL)?;
+        match &mut line.registration {
+            Some(registration) => registration.mask().map_err(|_| EIO),
+            None => Ok(()),
+        }
+    }
+    fn irq_retire(&self, irq: u32) -> Result<(), Errno> {
+        let mut lines = self.lines.borrow_mut();
+        let line = lines.get_mut(irq as usize).ok_or(EINVAL)?;
+        if line.retired.is_some() {
+            return Err(EOPNOTSUPP);
+        }
+        let Some(registration) = line.registration.as_mut() else {
+            return Ok(());
+        };
+        match registration.retire() {
+            Err(error) => {
+                self.report(format_args!("interrupt {irq} action retained: {error:?}"));
+                Err(EOPNOTSUPP)
+            }
+            Ok(retired) => {
+                // GPU has no original endpoint/entry delivery factory or
+                // custody transfer yet. Do not return completed free_irq from
+                // a future partial source implementation; keep typed owners.
+                line.retired = Some(retired);
+                Err(EOPNOTSUPP)
+            }
         }
     }
 
@@ -882,7 +965,7 @@ pub(super) fn open(machine: Machine, claimed: Vec<Claimed>) -> Result<(), Error>
         #[cfg(feature = "nvk")]
         heap_bytes,
     } = machine;
-    let image = ReadOnlyImage::locate().ok_or(kernel_work::Error::Inventory)?;
+    let image = work.image()?;
     #[cfg(feature = "nvk")]
     let claiming = !claimed.is_empty();
     let lines = claimed
@@ -891,6 +974,7 @@ pub(super) fn open(machine: Machine, claimed: Vec<Claimed>) -> Result<(), Error>
             config: claimed.device.config.clone(),
             msi: claimed.device.msi,
             registration: None,
+            retired: None,
         })
         .collect();
     let bars = claimed
@@ -929,7 +1013,7 @@ pub(super) fn open(machine: Machine, claimed: Vec<Claimed>) -> Result<(), Error>
     // SAFETY: one environment for the boot, on the boot CPU before any producer
     // or PE: the image and heap are this binary's, and the page catalog is kept.
     unsafe {
-        stela_linux::image::register(Arc::new(image)).map_err(|_| kernel_work::Error::Inventory)?;
+        stela_linux::image::register(image).map_err(|_| kernel_work::Error::Inventory)?;
         stela_linux::heap::register(allocate_zeroed).map_err(|_| kernel_work::Error::Inventory)?;
         let catalog = native_memory::linux_pages().map_err(|_| kernel_work::Error::Inventory)?;
         core::mem::forget(catalog);

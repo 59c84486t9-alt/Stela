@@ -38,7 +38,7 @@ pub struct Cold<R: Registers> {
 pub struct Bound<R: Registers> {
     pub requester: StoppedRequester,
     pub registers: R,
-    pub attachment: Box<dyn Attachment>,
+    pub attachment: Attachment,
 }
 /// Failed cold preparation never releases the original root/BAR graph.
 pub struct Failure<R: Registers> {

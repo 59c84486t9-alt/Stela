@@ -13,10 +13,10 @@ fn reset_and_original_drain_precede_private_binding() {
     );
     assert_eq!(counts.unmaps.load(Ordering::Relaxed), 0);
     assert_eq!(root.registers_dropped.load(Ordering::Relaxed), 0);
-    assert_eq!(
-        bound.requester.into_function().config().read16(4) & 0x406,
-        0x402
-    );
+    // Keep the actual configuration owner through the attachment's detach.
+    // A temporary Function here would quarantine its mapping after this read.
+    let mut function = bound.requester.into_function();
+    assert_eq!(function.config().read16(4) & 0x406, 0x402);
     // SAFETY: this model admits no mappings or asynchronous users.
     unsafe { bound.attachment.detach() }.unwrap();
     drop(bound.registers);

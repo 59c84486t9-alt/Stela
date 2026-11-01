@@ -1844,6 +1844,13 @@ fn install_host(handoff: &'static Handoff, options: &Options, ram: &[RamRange]) 
     }
     #[cfg(feature = "diagnostics")]
     if options.native_mmio_check {
+        // No original notification-domain producer is composed at this caller.
+        // Refuse before mixed/MMIO/clock/IOAPIC qualification effects; only an
+        // actual same-handoff product may replace this explicit missing input.
+        let notification = crate::native_mmio::diagnostic::require_notification_owner(None)
+            .unwrap_or_else(|_| {
+                output::fatal("native MMIO original notification owner unavailable")
+            });
         // SAFETY: this explicit UP entry owns the task pool for the boot it
         // stops. It retires every view before the MMIO phases and never
         // activates a second permission or publishes a service.
@@ -1854,12 +1861,11 @@ fn install_host(handoff: &'static Handoff, options: &Options, ram: &[RamRange]) 
         // SAFETY: explicit bounded native diagnostic on the original kept
         // handoff/owner. Success stops before guest entry; permanent mapping
         // and IRQ registries keep this exact physical root until VM shutdown.
-        unsafe { crate::native_mmio::diagnostic::check(handoff, &mut host_owner) }.unwrap_or_else(
-            |error| {
+        unsafe { crate::native_mmio::diagnostic::check(handoff, &mut host_owner, notification) }
+            .unwrap_or_else(|error| {
                 output::arguments(format_args!("CHECK native-mmio FAIL {error:?}\n"));
                 output::fatal("native MMIO root qualification failed")
-            },
-        );
+            });
         stop_here("native MMIO root qualification complete", 0x10);
     }
     InstalledHost {

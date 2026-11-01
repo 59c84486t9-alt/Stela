@@ -859,6 +859,14 @@ pub struct MappingView {
     range: Range<usize>,
 }
 impl MappingView {
+    /// Compare the actual original installed mapping lease in current scope.
+    /// Different bounded ranges may share that lease. This supplies no writer,
+    /// device, root route, reset or completion permission from pointer values.
+    pub fn shares_mapping(&self, other: &Self) -> Result<bool, Error> {
+        self.check_current()?;
+        other.check_current()?;
+        Ok(Shared::ptr_eq(&self.lease, &other.lease))
+    }
     /// Pure current-context/lifetime observation of this exact view.
     pub fn check_current(&self) -> Result<(), Error> {
         self.lease

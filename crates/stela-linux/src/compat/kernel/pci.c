@@ -10,6 +10,7 @@
 #include <linux/slab.h>
 #include <stela/device.h>
 #include <stela/pci.h>
+#include <stela/catalogue.h>
 #include <unsupported.h>
 
 /* An ID field matches its value or, as PCI_ANY_ID, any value. */
@@ -161,15 +162,22 @@ static void unbind(struct pci_dev *dev)
 	dev->driver = NULL;
 }
 
-void stela_linux_pci_add_device(struct pci_dev *dev)
+bool stela_linux_pci_devices_present(void)
+{
+	return !list_empty(&devices);
+}
+
+int stela_linux_pci_publish_device(struct pci_dev *dev)
 {
 	struct registered_driver *registered;
+	if (!stela_linux_device_publish_allowed(&dev->dev))
+		return -EPERM;
 
-	device_initialize(&dev->dev);
 	dev->dev.bus = &pci_bus_type;
 	list_add_tail(&dev->bus_list, &devices);
 	list_for_each_entry(registered, &drivers, node)
 		bind(registered->driver, dev);
+	return 0;
 }
 
 bool stela_linux_pci_bound(const struct pci_dev *device)
@@ -179,6 +187,7 @@ bool stela_linux_pci_bound(const struct pci_dev *device)
 
 void stela_linux_pci_remove_device(struct pci_dev *dev)
 {
+	stela_linux_device_close(&dev->dev);
 	unbind(dev);
 	list_del(&dev->bus_list);
 	put_device(&dev->dev);
@@ -519,7 +528,8 @@ int main(void)
 	pci_disable_device(&dev);
 	assert(config[PCI_COMMAND] == PCI_COMMAND_MEMORY && !dev.is_busmaster);
 
-	stela_linux_pci_add_device(&dev);
+	device_initialize(&dev.dev);
+	assert(!stela_linux_pci_publish_device(&dev));
 	assert(pci_get_domain_bus_and_slot(0, 3, PCI_DEVFN(1, 0)) == &dev);
 	pci_dev_put(&dev);
 	assert(!pci_get_domain_bus_and_slot(0, 4, PCI_DEVFN(1, 0)));

@@ -336,6 +336,7 @@ fn callback_transfers_only_valid_pins_and_refuses_before_provider_allocation() {
         let mut context = Context {
             provider,
             reservations: alloc::vec![Extent::ordinary(reservation)],
+            entry: ContextEntry::Legacy,
         };
         let mut output = NativeAllocation {
             pin: ptr::null_mut(),
@@ -446,3 +447,5 @@ fn catalog_retirement_and_nested_drop_preserve_provider_lifetime() {
     drop(unsafe { Box::from_raw(context.cast_mut()) });
     assert_eq!(drops.load(Ordering::Relaxed), 1);
 }
+
+mod mapping_pin;

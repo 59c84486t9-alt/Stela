@@ -379,6 +379,7 @@ pub(crate) struct Source {
     /// Each claimed ECAM bus, by its window and bus.
     buses: core::cell::RefCell<Vec<Bus>>,
     ioapics: core::cell::RefCell<Vec<(crate::native_irq::madt::Unit, Arc<IoapicUnit>)>>,
+    irq_domain: Option<Arc<dyn stela_drivers::bus::irq::posted_msi::NotificationDomain>>,
 }
 
 impl Source {
@@ -502,6 +503,7 @@ impl Source {
             window,
             buses: core::cell::RefCell::new(Vec::new()),
             ioapics: core::cell::RefCell::new(Vec::new()),
+            irq_domain: None,
         })
     }
 
@@ -699,6 +701,9 @@ unsafe impl crate::native_irq::ioapic::Registers for IoapicRegisters {
     fn write(&self, index: u8, value: u32) {
         crate::native_irq::ioapic::Registers::write(&self.mmio, index, value);
     }
+    fn write_eoi(&self, vector: u8) {
+        crate::native_irq::ioapic::Registers::write_eoi(&self.mmio, vector);
+    }
 }
 impl Drop for IoapicRegisters {
     fn drop(&mut self) {
@@ -719,6 +724,10 @@ pub(crate) type IoapicUnit =
     crate::native_irq::ioapic::Unit<IoapicRegisters, crate::native_irq::NativePlatform>;
 
 impl Source {
+    // Positive PCI mode ownership does not supply original IOAPIC/RTE custody.
+    // A separate real line-controller producer is required before this domain
+    // can be installed; current Line/SCI admission stays unavailable.
+
     /// Reuse this source's one selector/window owner and UC mapping.
     ///
     /// # Safety
@@ -728,6 +737,16 @@ impl Source {
         &self,
         descriptor: crate::native_irq::madt::Unit,
     ) -> Result<Arc<IoapicUnit>, Error> {
+        self.identity.check_current().map_err(failed)?;
+        if self.identity.in_interrupt() {
+            return Err(Error::Busy);
+        }
+        let domain = self
+            .irq_domain
+            .as_ref()
+            .cloned()
+            .ok_or(Error::Unavailable)?;
+        domain.check().map_err(failed)?;
         if let Some((_, unit)) = self
             .ioapics
             .borrow()
@@ -756,7 +775,7 @@ impl Source {
             CacheAttribute::Uncached,
             Protection::ReadWrite,
         )?;
-        let address = mapping.address(0, 32)?.as_ptr() as usize;
+        let address = mapping.address(0, 68)?.as_ptr() as usize;
         // SAFETY: exclusive all-root UC mapping of the MADT controller page.
         let mmio = unsafe { crate::native_irq::ioapic::Mmio::new(address) }.map_err(failed)?;
         let registers = IoapicRegisters {
@@ -765,9 +784,17 @@ impl Source {
         };
         let platform = crate::native_irq::NativePlatform::current().map_err(failed)?;
         // SAFETY: mapping and complete exclusive controller handoff above.
-        let unit =
-            unsafe { IoapicUnit::attach(registers, platform, descriptor.id, descriptor.gsi_base) }
-                .map_err(failed)?;
+        let unit = unsafe {
+            IoapicUnit::attach(
+                registers,
+                platform,
+                domain,
+                crate::native_irq::CONTROLLER.identity(),
+                descriptor.id,
+                descriptor.gsi_base,
+            )
+        }
+        .map_err(failed)?;
         self.ioapics.borrow_mut().push((descriptor, unit.clone()));
         Ok(unit)
     }

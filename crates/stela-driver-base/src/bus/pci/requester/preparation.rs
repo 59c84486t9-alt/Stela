@@ -3,6 +3,23 @@
 use super::*;
 use crate::bus::dma::mapping::{DmaDomain, DmaError};
 use alloc::{boxed::Box, sync::Arc};
+mod attachment;
+pub use attachment::{
+    Attachment, CancelFailure, DetachedRequester, PinReleaseFailure, RetainActionFailure,
+};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DetachError {
+    /// Audited refusal before hardware publication or binding release.
+    Unexposed(DmaError),
+    /// Hardware/ownership transition may have begun; retain and do not retry.
+    Uncertain(DmaError),
+}
+impl From<DmaError> for DetachError {
+    fn from(error: DmaError) -> Self {
+        Self::Uncertain(error)
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
@@ -21,16 +38,33 @@ pub enum Error {
 /// sync operations and cannot reach a replacement generation. Failure/unwind
 /// and Drop without acknowledged detach retain uncertain roots, bindings,
 /// reservations and pins. Every method observes the owner's execution context.
-pub unsafe trait Attachment {
+pub unsafe trait AttachmentBackend {
     fn domain(&self) -> Arc<dyn DmaDomain>;
+    /// Construct an unused grant from this exact original root/configuration.
+    /// The borrowed identity comes from this same concrete Attachment; use it
+    /// with the backend's actual retained original config/root, never a lookup.
+    /// No route or endpoint is programmed here. None explicitly reports missing
+    /// notification admission; it is not successful empty completion.
+    fn irq_owner(
+        &mut self,
+        _requester: &crate::bus::pci::requester::RequesterId,
+        _config: Option<&crate::bus::pci::owned::ConfigRetention>,
+    ) -> Result<Option<Box<dyn crate::bus::irq::posted_msi::RouteOwner>>, DmaError> {
+        Ok(None)
+    }
     /// # Safety
     /// This exact original requester is stopped and cannot resume. Payload,
-    /// posted MSI/bypass/IRQ/work users are drained, and its paired
-    /// configuration/BAR/root owners stay kept through detach and subsequent
+    /// bypass and former callback/work users are drained. Every old action has
+    /// joined while its original stable CPU/root/format notification ownership
+    /// remains retained; late ordinary fixed/edge packets may notify only a
+    /// current valid status-checking handler. This is not all-issued completion
+    /// or permission to change that CPU/root/format. Strong root ledgers and
+    /// their tombstones are never reclaimed by endpoint detach.
+    /// Paired configuration/BAR/root owners stay kept through detach and subsequent
     /// retirement. Remaining mapped leases cause refusal before hardware
     /// retirement; they must be quiescently unmapped for success. No reset/reassignment
     /// changes that epoch. This is not a stop or drain request to the driver.
-    unsafe fn detach(&mut self) -> Result<(), DmaError>;
+    unsafe fn detach(&mut self) -> Result<(), DetachError>;
 }
 
 /// The original root path, before the requester gets its private domain.
@@ -52,7 +86,10 @@ pub unsafe trait Root {
     /// The original paired requester is currently quiescent, this root's
     /// drain completed, and its configuration/reset/routing epoch cannot change
     /// before attachment finishes. The original owners remain kept throughout.
-    unsafe fn bind(&self, binding: RequesterBinding) -> Result<Box<dyn Attachment>, DmaError>;
+    unsafe fn bind(
+        &self,
+        binding: RequesterBinding,
+    ) -> Result<Box<dyn AttachmentBackend>, DmaError>;
 }
 
 struct Resources {
@@ -110,7 +147,7 @@ pub struct Failure {
 /// A stopped original requester with its newly attached domain.
 pub struct BoundRequester {
     pub requester: StoppedRequester,
-    pub attachment: Box<dyn Attachment>,
+    pub attachment: Attachment,
 }
 
 impl PreparingRequester {
@@ -201,16 +238,31 @@ impl QuiescenceReceipt {
                 .config()
                 .retain_epoch()
                 .map_err(|error| Error::Claim(ClaimError::Mapping(error)))?;
-            // SAFETY: the consumed driver receipt excludes new producers;
-            // the original configuration seal still matches, its root drain
-            // completed, and all owners stay in this attempt until success.
-            unsafe {
-                resources.root.bind(RequesterBinding {
-                    address: resources.address,
-                    retention: retained,
-                })
-            }
-            .map_err(Error::Dma)
+            let irq_retained = function
+                .config()
+                .retain_epoch()
+                .map_err(|error| Error::Claim(ClaimError::Mapping(error)))?;
+            // Keep the returned affine backend before any later context check.
+            let mut backend = core::mem::ManuallyDrop::new(
+                // SAFETY: the consumed driver receipt excludes new producers;
+                // the original configuration seal still matches, its root drain
+                // completed, and all owners stay in this attempt until success.
+                unsafe {
+                    resources.root.bind(RequesterBinding {
+                        address: resources.address,
+                        retention: retained,
+                    })
+                }
+                .map_err(Error::Dma)?,
+            );
+            irq_retained
+                .check_live()
+                .map_err(|error| Error::Claim(ClaimError::Mapping(error)))?;
+            // SAFETY: the same consumed binding/root produced this backend;
+            // the original configuration's context/epoch was checked again.
+            Ok(unsafe {
+                Attachment::new(core::mem::ManuallyDrop::take(&mut backend), irq_retained)
+            })
         })();
         match result {
             Ok(attachment) => {

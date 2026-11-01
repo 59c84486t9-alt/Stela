@@ -2123,6 +2123,7 @@ dependencies = [
  "stela-compiler",
  "stela-contracts",
  "stela-crypto",
+ "stela-driver-base",
  "stela-drivers",
  "stela-engine",
  "stela-formats",
@@ -2389,6 +2390,7 @@ dependencies = [
  "stela-c-build",
  "stela-crypto",
  "stela-driver-base",
+ "stela-driver-core",
  "tempfile",
  "zeroize",
 ]
