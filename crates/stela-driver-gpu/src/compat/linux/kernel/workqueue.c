@@ -57,7 +57,6 @@ struct task_request {
 	void *context;
 };
 static LIST_HEAD(task_requests);
-static unsigned int dedicated_starting;
 static unsigned long last_seq;
 /* Woken whenever a run ends or a pending item is cancelled. */
 static DECLARE_WAIT_QUEUE_HEAD(work_done);
@@ -138,13 +137,11 @@ int stela_linux_start_task(void (*run)(void *), void *context)
 	request->context = context;
 	list_add_tail(&request->node, &task_requests);
 	starting++;
-	dedicated_starting++;
 	int error = owner->services->start_worker(owner->context, STELA_WORKER_DEDICATED);
 	if (error) {
 		/* The native producer promises no inline execution and no accepted
 		 * job on refusal, so the request is still uniquely ours. */
 		starting--;
-		dedicated_starting--;
 		list_del(&request->node);
 		kfree(request);
 	}
@@ -402,7 +399,6 @@ void stela_linux_workers_run(unsigned int kind)
 		void (*run)(void *) = request->run;
 		void *context = request->context;
 		list_del(&request->node);
-		dedicated_starting--;
 		kfree(request);
 		run(context);
 		kick();
