@@ -22,6 +22,11 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         self.device.quiesce_step()
     }
 
+    /// Whether [`Self::quiesce_step`] answered `GpuIdle`.
+    pub fn quiesced(&self) -> bool {
+        self.device.is_quiesced()
+    }
+
     pub(super) fn admit_quiescing(&self, operation: Operation) -> Result<(), Fault> {
         if self.device.is_quiescing()
             && !matches!(

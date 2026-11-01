@@ -44,7 +44,9 @@ fn quiescing_closes_guest_admission_without_losing_a_healthy_device() {
         Status::Closed
     );
     assert!(!service.device().is_lost());
+    assert!(!service.quiesced());
     assert_eq!(service.quiesce_step(), QuiesceStatus::GpuIdle);
+    assert!(service.quiesced());
     assert_eq!(service.device().current_allocated_size(), 8192);
     assert_eq!(service.retired(), None);
     // Even after idle, the gate still owns the connection and its resources.

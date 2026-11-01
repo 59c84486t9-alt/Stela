@@ -10,7 +10,7 @@ use super::{
     BOOT_CPU, Bound, Installed, PAGE, client, installed, pump,
     stack::{self, Stack},
 };
-use crate::engine::host;
+use crate::{engine::host, output};
 use alloc::{boxed::Box, format, sync::Arc, vec::Vec};
 use core::{
     ffi::{c_char, c_void},
@@ -21,9 +21,13 @@ use core::{
 };
 use stela_contracts::gate::{GateService, MemoryRange, window};
 use stela_drivers::gpu::{
-    linux::client::Run,
+    linux::{
+        client::Run,
+        function::{dma_quarantine_status, quarantined_functions},
+    },
     metal::{
         compiler::{self, AirCompiler},
+        device::lifecycle::QuiesceStatus,
         error::Error,
         native::{ExportedMemory, Loader, MemoryExporter, NativeBackend, vk},
         nvidia::{
@@ -40,6 +44,10 @@ type Shared = SharedService<NativeBackend, AirCompiler>;
 
 /// A process's main stack, as big as the deepest compile LLVM bounds.
 const STACK_BYTES: usize = 16 << 20;
+
+/// How long a GPU's accepted work may go without progress as the PC stops:
+/// with the guest stopped, an event it waits on will never signal.
+const STOP_STALL_SECONDS: u64 = 5;
 
 /// The services for the kernel's interrupts, once all are open.
 static SERVICES: AtomicPtr<Vec<Arc<Shared>>> = AtomicPtr::new(ptr::null_mut());
@@ -208,7 +216,7 @@ fn open_gpu(
     }
 }
 
-fn shared() -> &'static [Arc<Shared>] {
+pub(super) fn shared() -> &'static [Arc<Shared>] {
     // SAFETY: the published services are leaked, so they live for the boot.
     unsafe { SERVICES.load(Ordering::Acquire).as_ref() }.map_or(&[], Vec::as_slice)
 }
@@ -216,6 +224,48 @@ fn shared() -> &'static [Arc<Shared>] {
 /// Tell the services a GPU interrupted: its MSI says nothing of which.
 pub(super) fn interrupted() {
     shared().iter().for_each(|service| service.interrupted());
+}
+
+/// Bring every GPU to rest before the PC resets or turns off, on the boot CPU
+/// outside Linux's callbacks. Admission closes for good and accepted work
+/// finishes; `close_gates` then releases what the guest held of each GPU that
+/// proved idle, answering the imports still in reach. Whatever could not be
+/// proven stays alive and is reported: the transition itself ends the DMA.
+pub(in crate::engine) fn stop(close_gates: impl FnOnce() -> u64) {
+    let Some(gpu) = installed() else {
+        return;
+    };
+    let services = shared();
+    services.iter().for_each(|service| service.begin_quiesce());
+    for (index, service) in services.iter().enumerate() {
+        let status = settle(service, gpu.tsc_hz);
+        output::arguments(format_args!("GPU {index} at the stop: {status:?}\n"));
+    }
+    let reachable = close_gates();
+    let quarantine = dma_quarantine_status();
+    output::arguments(format_args!(
+        "GPU stopped: {reachable} imports in reach, {} DMA mappings of {} bytes and {} functions quarantined\n",
+        quarantine.mappings,
+        quarantine.bytes,
+        quarantined_functions(),
+    ));
+}
+
+/// Step `service` until accepted work ends or stops moving.
+fn settle(service: &Shared, tsc_hz: u64) -> QuiesceStatus {
+    let (mut last, mut moved) = (None, host::rdtsc());
+    loop {
+        let status = service.quiesce_step();
+        let QuiesceStatus::Pending { completed, .. } = status else {
+            return status;
+        };
+        if last != Some(completed) {
+            (last, moved) = (Some(completed), host::rdtsc());
+        } else if host::rdtsc() - moved >= STOP_STALL_SECONDS * tsc_hz {
+            return status;
+        }
+        relax();
+    }
 }
 
 /// Add each service's gate node to `tree`, for what the board mounts there.

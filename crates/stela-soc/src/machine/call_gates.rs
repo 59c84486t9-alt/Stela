@@ -22,4 +22,18 @@ impl AppleDevices {
         self.gpu_gates.push(device);
         Ok(())
     }
+
+    /// Stop every call gate as the PC stops. Answers the imports the GPUs may
+    /// still reach ([`gpu_gate::Gate::stop`]).
+    pub fn stop_gpu_gates(&mut self) -> u64 {
+        let mut reachable = 0;
+        for &gate in &self.gpu_gates {
+            reachable += self
+                .bus
+                .device_mut::<gpu_gate::Gate>(gate)
+                .expect("the gate is mapped")
+                .stop();
+        }
+        reachable
+    }
 }

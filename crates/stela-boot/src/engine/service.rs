@@ -110,6 +110,8 @@ impl Service {
             nor.store(dirty);
             nor.finish();
         }
+        #[cfg(feature = "nvk")]
+        super::gpu::gate::stop(|| self.devices.serve(|devices| devices.stop_gpu_gates()));
     }
 
     /// One service: its quick parts first, the restore's copy of what it

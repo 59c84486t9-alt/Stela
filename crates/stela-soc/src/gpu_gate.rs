@@ -66,6 +66,8 @@ pub struct Gate {
     token: u64,
     imported: u64,
     retired: u64,
+    /// Imports the service holds, whose tokens have not come back.
+    reachable: u64,
     /// What each PE's store asked, until that store's step takes it.
     pending: BTreeMap<usize, GateRequest>,
 }
@@ -85,6 +87,7 @@ impl Gate {
             token: 0,
             imported: 0,
             retired: 0,
+            reachable: 0,
             pending: BTreeMap::new(),
         }
     }
@@ -125,9 +128,33 @@ impl Gate {
                     };
                 }
             }
-            GateAnswer::Imported(handle) => self.imported = handle.map_or(0, NonZeroU64::get),
-            GateAnswer::Retired(token) => self.retired = token.map_or(0, NonZeroU64::get),
+            GateAnswer::Imported(handle) => {
+                self.imported = handle.map_or(0, NonZeroU64::get);
+                self.reachable += u64::from(handle.is_some());
+            }
+            GateAnswer::Retired(token) => {
+                self.retired = token.map_or(0, NonZeroU64::get);
+                self.reachable -= u64::from(token.is_some());
+            }
         }
+    }
+
+    /// Release what the guest left here for good, as the PC stops: every
+    /// connection, then each token that frees. A service without a proof of
+    /// idle keeps all of it. Answers the imports the GPU may still reach.
+    pub fn stop(&mut self) -> u64 {
+        if self.service.quiesced() {
+            self.pending.clear();
+            for slot in &mut self.slots {
+                if let Slot::Open(connection) = core::mem::replace(slot, Slot::Free) {
+                    self.service.disconnect(connection);
+                }
+            }
+            while self.service.retired().is_some() {
+                self.reachable -= 1;
+            }
+        }
+        self.reachable
     }
 
     fn open(&mut self, cpu: usize) {
@@ -285,6 +312,7 @@ mod tests {
         served: Vec<(u64, u64, u8)>,
         imported: Vec<(u64, Vec<MemoryRange>, u64)>,
         retired: Vec<u64>,
+        quiesced: bool,
     }
 
     struct Service(Mutex<Log>);
@@ -330,6 +358,10 @@ mod tests {
 
         fn retired(&self) -> Option<NonZeroU64> {
             NonZeroU64::new(self.0.lock().unwrap().retired.pop()?)
+        }
+
+        fn quiesced(&self) -> bool {
+            self.0.lock().unwrap().quiesced
         }
 
         fn signaled(&self) -> bool {
@@ -507,6 +539,32 @@ mod tests {
         store(&mut gate, 0, OPEN, 0).unwrap();
         assert!(gate.take(0).is_none());
         assert_eq!(load(&mut gate, OPENED), 0);
+    }
+
+    #[test]
+    fn stopping_releases_connections_only_after_the_service_proves_idle() {
+        let log = Arc::new(Service(Mutex::default()));
+        let mut gate = gate(&log);
+        let page = opened(&mut gate);
+        store(&mut gate, 0, IMPORT_TOKEN, 7).unwrap();
+        store(&mut gate, 0, IMPORT, page).unwrap();
+        serve(&mut gate, 0);
+        store(&mut gate, 0, IMPORT_TOKEN, 8).unwrap();
+        store(&mut gate, 0, IMPORT, page).unwrap();
+        serve(&mut gate, 0);
+
+        assert_eq!(gate.stop(), 2);
+        assert!(log.0.lock().unwrap().disconnected.is_empty());
+
+        log.0.lock().unwrap().quiesced = true;
+        log.0.lock().unwrap().retired.push(7);
+        assert_eq!(gate.stop(), 1);
+        assert_eq!(log.0.lock().unwrap().disconnected, [1]);
+        assert!(store(&mut gate, 0, page * PAGE + CALL, 0x11).is_err());
+
+        log.0.lock().unwrap().retired.push(8);
+        assert_eq!(gate.stop(), 0);
+        assert_eq!(log.0.lock().unwrap().disconnected, [1]);
     }
 
     #[test]

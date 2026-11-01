@@ -56,6 +56,9 @@ pub trait GateService: Send + Sync {
     ) -> Result<NonZeroU64, &'static str>;
     /// The token of imported memory the GPU no longer reaches.
     fn retired(&self) -> Option<NonZeroU64>;
+    /// Whether the service's owner closed it and its GPU acknowledged idle,
+    /// which is what lets a gate release what its connections hold.
+    fn quiesced(&self) -> bool;
     /// Whether the GPU completed work since this last answered true. Under
     /// the board's lock, so it answers at once.
     fn signaled(&self) -> bool;

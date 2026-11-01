@@ -3880,6 +3880,9 @@ fn a_gate_store_is_served_in_its_own_pes_step() {
         fn retired(&self) -> Option<NonZeroU64> {
             None
         }
+        fn quiesced(&self) -> bool {
+            false
+        }
         fn signaled(&self) -> bool {
             false
         }

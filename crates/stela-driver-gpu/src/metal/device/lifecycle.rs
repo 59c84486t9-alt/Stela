@@ -35,6 +35,11 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         self.quiesce.is_some()
     }
 
+    /// Whether the backend acknowledged idleness after admission closed.
+    pub fn is_quiesced(&self) -> bool {
+        matches!(self.quiesce, Some(QuiesceStatus::GpuIdle))
+    }
+
     pub(crate) fn ensure_admission(&self) -> Result<()> {
         if self.lost {
             Err(Error::DeviceLost)

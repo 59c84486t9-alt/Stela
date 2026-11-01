@@ -179,6 +179,10 @@ impl<B: Backend + Send, C: Compiler + Send> GateService for SharedService<B, C> 
         self.call(|service| service.retired())
     }
 
+    fn quiesced(&self) -> bool {
+        self.call(|service| service.quiesced())
+    }
+
     fn signaled(&self) -> bool {
         self.completed.swap(false, Ordering::Acquire)
     }
