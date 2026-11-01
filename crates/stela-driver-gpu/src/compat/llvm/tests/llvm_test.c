@@ -130,7 +130,7 @@ static LLVMValueRef add_kept(LLVMContextRef context, LLVMModuleRef module, const
 	return function;
 }
 
-int test(void)
+int main(void)
 {
 	LLVMContextRef context = LLVMContextCreate();
 	LLVMMemoryBufferRef junk =

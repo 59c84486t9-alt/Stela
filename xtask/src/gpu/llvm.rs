@@ -286,17 +286,8 @@ fn build_tool(toolchain: &Toolchain, llvm: &Path, directory: &Path, jobs: u16) -
     Ok(tool)
 }
 
-/// Every unit of the libraries, libc++ and `compat/llvm` for `target`, in
-/// `objects`.
-fn library_units(
-    toolchain: &Toolchain,
-    checkout: &Path,
-    generated: &Path,
-    objects: &Path,
-    target: &[&str],
-) -> Result<Vec<Unit>> {
-    fs::create_dir_all(objects)?;
-    let llvm = checkout.join("llvm");
+/// What every unit of the libraries and libc++ compiles with for `target`.
+fn target_flags(toolchain: &Toolchain, checkout: &Path, target: &[&str]) -> Result<Vec<String>> {
     let compat = gpu().join("compat");
     let resource = resource_directory(&toolchain.clang)?;
     let mut flags: Vec<String> = target.iter().map(|&flag| flag.to_owned()).collect();
@@ -313,6 +304,51 @@ fn library_units(
     ] {
         flags.extend(["-isystem".to_owned(), include.display().to_string()]);
     }
+    Ok(flags)
+}
+
+/// The units of libc++, with `flags`, in `objects`.
+fn out_of_line_units(checkout: &Path, objects: &Path, flags: &[String]) -> Result<Vec<Unit>> {
+    let libcxx = checkout.join("libcxx/src");
+    let mut library_flags = flags.to_vec();
+    library_flags.retain(|flag| flag != "-std=c++17");
+    library_flags.extend(["-std=c++23", "-D_LIBCPP_BUILDING_LIBRARY"].map(str::to_owned));
+    library_flags.push(format!("-I{}", libcxx.display()));
+    library_flags.push(format!("-I{}", checkout.join("libc").display()));
+    LIBCXX
+        .into_iter()
+        .map(|name| {
+            let file = libcxx.join(format!("{name}.cpp"));
+            unit(&file, objects, checkout, &library_flags)
+        })
+        .collect()
+}
+
+/// The units of libc++ for `target`, in `objects`.
+pub(super) fn libcxx_units(
+    toolchain: &Toolchain,
+    target: &[&str],
+    objects: &Path,
+) -> Result<Vec<Unit>> {
+    fs::create_dir_all(objects)?;
+    let checkout = third_party("llvm");
+    let flags = target_flags(toolchain, &checkout, target)?;
+    out_of_line_units(&checkout, objects, &flags)
+}
+
+/// Every unit of the libraries, libc++ and `compat/llvm` for `target`, in
+/// `objects`.
+fn library_units(
+    toolchain: &Toolchain,
+    checkout: &Path,
+    generated: &Path,
+    objects: &Path,
+    target: &[&str],
+) -> Result<Vec<Unit>> {
+    fs::create_dir_all(objects)?;
+    let llvm = checkout.join("llvm");
+    let compat = gpu().join("compat");
+    let mut flags = target_flags(toolchain, checkout, target)?;
     for include in [generated.to_owned(), llvm.join("include")] {
         flags.push(format!("-I{}", include.display()));
     }
@@ -345,16 +381,7 @@ fn library_units(
         }
         units.push(unit(file, objects, checkout, &flags)?);
     }
-    let libcxx = checkout.join("libcxx/src");
-    let mut library_flags = flags.clone();
-    library_flags.retain(|flag| flag != "-std=c++17");
-    library_flags.extend(["-std=c++23", "-D_LIBCPP_BUILDING_LIBRARY"].map(str::to_owned));
-    library_flags.push(format!("-I{}", libcxx.display()));
-    library_flags.push(format!("-I{}", checkout.join("libc").display()));
-    for name in LIBCXX {
-        let file = libcxx.join(format!("{name}.cpp"));
-        units.push(unit(&file, objects, checkout, &library_flags)?);
-    }
+    units.extend(out_of_line_units(checkout, objects, &flags)?);
     for name in STELA {
         let file = compat.join(format!("llvm/{name}.cpp"));
         units.push(unit(&file, objects, &compat, &flags)?);

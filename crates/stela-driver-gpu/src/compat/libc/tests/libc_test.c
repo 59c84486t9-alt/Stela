@@ -604,7 +604,7 @@ static void test_nonlocal_return(void)
 	CHECK(before == after && x87_before == x87_after);
 }
 
-int test(void)
+int main(void)
 {
 	test_formatting();
 	test_parsing();

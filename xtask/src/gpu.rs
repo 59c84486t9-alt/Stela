@@ -9,6 +9,7 @@ mod llvm;
 mod mesa;
 mod nvidia;
 mod nvk;
+mod sysroot;
 mod support;
 mod toolchain;
 

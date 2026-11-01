@@ -3,8 +3,8 @@
 #define STELA_LIBC_TEST_HOST_H
 #include <stddef.h>
 
-/* The test: its result is the program's exit status. */
-int test(void);
+/* The program: its result is the exit status. */
+int main(void);
 _Noreturn void leave(int status);
 
 extern size_t live_blocks;

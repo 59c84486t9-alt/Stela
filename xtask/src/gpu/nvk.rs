@@ -1,6 +1,6 @@
 //! NVK, NIR and NAK for `stela.efi`.
 //!
-//! Meson configures Mesa for a declared machine, the same from every build
+//! Meson configures Mesa for `sysroot`'s machine, the same from every build
 //! host, which leaves its generated sources and its compile plan. This task
 //! then compiles that plan for the boot image's C target against `compat/libc`,
 //! and archives it where `crates/stela-mesa`
@@ -10,6 +10,7 @@
 use super::{
     nvidia::Toolchain,
     support::{NATIVE_TARGET, build_directory, capture, gpu, third_party, tool},
+    sysroot::Sysroot,
 };
 use crate::tools::{self, exec};
 use anyhow::{Context, Result, ensure};
@@ -58,9 +59,6 @@ const UNUSED_TOOLS: [&str; 2] = ["mesa_clc", "vtn_bindgen2"];
 /// `compat/mesa/nv_cubin.c`.
 const LIBDRM_VERSION: &str = "2.4.133";
 const LIBELF_VERSION: &str = "0.190";
-/// The machine Meson's probes compile for. Its link probes resolve nothing, so
-/// every function they ask about links, and `HOST_DEFINES` drops what they get wrong.
-const PROBE_TARGET: &str = "x86_64-unknown-linux-gnu";
 
 /// Units not built, by a part of their source path: each either has a stand-in
 /// in `compat/mesa`, or needs what the image lacks and nothing here calls it.
@@ -109,41 +107,31 @@ const MODEL_UNIT: &str = "nvk_query_pool.c";
 /// The C library, under `compat/libc`.
 pub(super) const LIBC: [&str; 6] = ["libc", "stdio", "pthread", "math", "system", "wchar"];
 /// Original LLVM units behind `compat/libc/regex.h`, also present in the
-/// freestanding LLVM archive. The libc-only test links these directly.
-const REGEX: [&str; 5] = ["regcomp", "regexec", "regfree", "regerror", "regstrlcpy"];
+/// freestanding LLVM archive.
+pub(super) const REGEX: [&str; 5] = ["regcomp", "regexec", "regfree", "regerror", "regstrlcpy"];
 
-/// What Meson's probes claim that the C library does not offer, or that names a
-/// path the image does not take. SSE4.1 and BLAKE3's assembly are host features;
-/// the image runs on any x86-64.
-const HOST_DEFINES: [&str; 20] = [
+/// What Meson's probes find that names a path the image does not take. SSE4.1
+/// and BLAKE3's assembly are host features; the image runs on any x86-64.
+const HOST_DEFINES: [&str; 8] = [
     "ALLOW_KCMP",
-    "HAS_SCHED_GETAFFINITY",
     "HAVE_CET_H",
     "HAVE_DIRENT_D_TYPE",
     "HAVE_DLADDR",
     "HAVE_DRI2",
     "HAVE_FLOCK",
-    "HAVE_FMEMOPEN",
     "HAVE_FUNC_ATTRIBUTE_VISIBILITY",
-    "HAVE_QSORT_S",
-    "HAVE___BUILTIN_AARCH64_GET_FPCR",
-    "HAVE___BUILTIN_AARCH64_SET_FPCR",
-    "HAVE___BUILTIN_ARM_GET_FPSCR",
-    "HAVE___BUILTIN_ARM_SET_FPSCR",
-    "HAVE_MKOSTEMP",
-    "HAVE_POSIX_FALLOCATE",
-    "HAVE_RANDOM_R",
     "HAVE_RENDERDOC_INTEGRATION=1",
-    "HAVE___BUILTIN_ADD_OVERFLOW_P",
-    "HAVE___BUILTIN_SUB_OVERFLOW_P",
 ];
 const LATE_DEFINES: [&str; 3] = [
     "USE_SSE41",
     "VK_USE_PLATFORM_DISPLAY_KHR",
     "VK_USE_PLATFORM_HEADLESS_EXT",
 ];
-const ADDED_DEFINES: [&str; 5] = [
+/// What the image has without the probes finding it: `HAVE_DL_ITERATE_PHDR`
+/// declares the build ID that `compat/mesa/build_id.c` provides.
+const ADDED_DEFINES: [&str; 6] = [
     "STELA_LIBC",
+    "HAVE_DL_ITERATE_PHDR",
     "BLAKE3_NO_SSE2",
     "BLAKE3_NO_SSE41",
     "BLAKE3_NO_AVX2",
@@ -233,70 +221,19 @@ fn paths(directory: &Path) -> Result<(PathBuf, PathBuf)> {
     Ok((stubs, path.into()))
 }
 
-/// What Meson's probes and Bindgen compile with. Probing the build host would
-/// let it choose what `stela.efi` contains, and would find no DRM on a Mac.
-fn probe_flags(clang: &Path) -> Result<[String; 5]> {
-    // Meson keeps one `-isystem` of a list.
-    Ok([
-        format!("--target={PROBE_TARGET}"),
-        "-nostdinc".to_owned(),
-        format!("-isystem{}", gpu().join("compat/libc").display()),
-        format!("-idirafter{}/include", resource_directory(clang)?),
-        "-DSTELA_LIBC".to_owned(),
-    ])
-}
-
-/// Meson's description of the machine Mesa is configured for.
-fn machine_file(toolchain: &Toolchain, packages: &Path) -> Result<String> {
-    let list = |flags: &[String]| {
-        flags
-            .iter()
-            .map(|flag| format!("'{flag}'"))
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-    let compile = probe_flags(&toolchain.clang)?;
-    let link = [
-        format!("--target={PROBE_TARGET}"),
-        format!("--ld-path={}", toolchain.linker.display()),
-        "-nostdlib".to_owned(),
-        "-Wl,--unresolved-symbols=ignore-all".to_owned(),
-    ];
-    Ok(format!(
-        "[binaries]
-         c = '{clang}'
-         cpp = '{clangxx}'
-         ar = '{archiver}'
-         rust = 'rustc'
-         pkg-config = 'pkg-config'
-         [built-in options]
-         c_args = [{compile}]
-         cpp_args = [{compile}]
-         c_link_args = [{link}]
-         cpp_link_args = [{link}]
-         [properties]
-         needs_exe_wrapper = true
-         pkg_config_libdir = ['{packages}']
-         [host_machine]
-         system = 'linux'
-         cpu_family = 'x86_64'
-         cpu = 'x86_64'
-         endian = 'little'
-",
-        clang = toolchain.clang.display(),
-        clangxx = toolchain.clangxx.display(),
-        archiver = toolchain.archiver.display(),
-        compile = list(&compile),
-        link = list(&link),
-        packages = packages.display(),
-    ))
-}
-
-fn setup(toolchain: &Toolchain, directory: &Path, build: &Path, path: &Path) -> Result<()> {
+fn setup(
+    toolchain: &Toolchain,
+    sysroot: &Sysroot,
+    directory: &Path,
+    build: &Path,
+    path: &Path,
+) -> Result<()> {
     let packages = directory.join("pkgconfig");
     let machine = directory.join("machine.ini");
-    let description = machine_file(toolchain, &packages)?;
-    if build.join("build.ninja").is_file()
+    let description = sysroot.machine_file(toolchain, &packages);
+    let plan = build.join("build.ninja");
+    let modified = |path: &Path| fs::metadata(path).and_then(|file| file.modified()).ok();
+    if modified(&plan) > modified(&sysroot.libc())
         && fs::read_to_string(&machine).is_ok_and(|current| current == description)
     {
         return Ok(());
@@ -340,7 +277,7 @@ fn setup(toolchain: &Toolchain, directory: &Path, build: &Path, path: &Path) -> 
 }
 
 /// Every source Meson generates, and the structured copy of the compiler crate.
-fn generate(clang: &Path, build: &Path, path: &Path) -> Result<()> {
+fn generate(sysroot: &Sysroot, build: &Path, path: &Path) -> Result<()> {
     let ninja = tool("ninja", "generators/bin")?;
     let mut targets = BTreeSet::new();
     for rule in ["CUSTOM_COMMAND", "CUSTOM_COMMAND_DEP"] {
@@ -378,7 +315,7 @@ fn generate(clang: &Path, build: &Path, path: &Path) -> Result<()> {
         Command::new(&ninja)
             .args(&targets)
             .current_dir(build)
-            .env("BINDGEN_EXTRA_CLANG_ARGS", probe_flags(clang)?.join(" "))
+            .env("BINDGEN_EXTRA_CLANG_ARGS", sysroot.compile.join(" "))
             .env("PATH", path),
     )
 }
@@ -742,8 +679,9 @@ pub fn build(jobs: u16) -> Result<()> {
     let (_, path) = paths(&directory)?;
     fs::create_dir_all(&directory)?;
     super::llvm::build(&toolchain, jobs, false)?;
-    setup(&toolchain, &directory, &build, &path)?;
-    generate(&toolchain.clang, &build, &path)?;
+    let sysroot = Sysroot::build(&toolchain, &directory, jobs)?;
+    setup(&toolchain, &sysroot, &directory, &build, &path)?;
+    generate(&sysroot, &build, &path)?;
     let libc = gpu().join("compat/libc");
     let includes = include_flags(&toolchain.clang, &libc)?;
     bindings(&build, &path, &includes)?;
@@ -773,62 +711,38 @@ pub fn build(jobs: u16) -> Result<()> {
     println!("{} objects in {}", units.len(), archive.display());
     // The test is a static Linux program.
     if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
-        test_libc(&toolchain, &directory)?;
+        test_libc(&toolchain, &sysroot, &directory)?;
     }
     Ok(())
 }
 
 /// Builds `compat/libc/tests/libc_test.c` with the C library as a static Linux
 /// program, and runs it.
-fn test_libc(toolchain: &Toolchain, directory: &Path) -> Result<()> {
+fn test_libc(toolchain: &Toolchain, sysroot: &Sysroot, directory: &Path) -> Result<()> {
     let libc = gpu().join("compat/libc");
     let output = directory.join("libc-test");
     fs::create_dir_all(&output)?;
     let resource = format!("{}/include", resource_directory(&toolchain.clang)?);
-    let mut objects = Vec::new();
-    for unit in LIBC.into_iter().chain(["tests/host", "tests/libc_test"]) {
-        let object = output.join(format!("{}.o", unit.replace('/', "-")));
-        exec(
-            Command::new(&toolchain.clang)
-                .args(LIBC_TEST_FLAGS)
-                .arg("-isystem")
-                .arg(&libc)
-                .arg("-isystem")
-                .arg(&resource)
-                .arg("-c")
-                .arg(libc.join(format!("{unit}.c")))
-                .arg("-o")
-                .arg(&object),
-        )?;
-        objects.push(object);
-    }
-    for unit in REGEX {
-        let source = third_party("llvm").join(format!("llvm/lib/Support/{unit}.c"));
-        let object = output.join(format!("{unit}.o"));
-        exec(
-            Command::new(&toolchain.clang)
-                .args(LIBC_TEST_FLAGS)
-                .arg("-isystem")
-                .arg(&libc)
-                .arg("-isystem")
-                .arg(&resource)
-                .arg("-I")
-                .arg(gpu().join("compat/llvm/include"))
-                .arg("-I")
-                .arg(third_party("llvm").join("llvm/include"))
-                .arg("-c")
-                .arg(source)
-                .arg("-o")
-                .arg(&object),
-        )?;
-        objects.push(object);
-    }
+    let test = output.join("libc_test.o");
+    exec(
+        Command::new(&toolchain.clang)
+            .args(LIBC_TEST_FLAGS)
+            .arg("-isystem")
+            .arg(&libc)
+            .arg("-isystem")
+            .arg(&resource)
+            .arg("-c")
+            .arg(libc.join("tests/libc_test.c"))
+            .arg("-o")
+            .arg(&test),
+    )?;
     let program = output.join("libc_test");
     exec(
         Command::new(&toolchain.linker)
             .args(["-static", "-o"])
             .arg(&program)
-            .args(&objects),
+            .arg(&test)
+            .arg(sysroot.libc()),
     )?;
     exec(&mut Command::new(&program)).context("the C library's test failed")
 }
@@ -858,7 +772,7 @@ mod tests {
             "-Iinclude",
             "--target=probe",
             "-DMESA_DEBUG=0",
-            "-DHAVE_QSORT_S",
+            "-DHAVE_FLOCK",
             "-Wall",
             "-MD",
             "-MQ",

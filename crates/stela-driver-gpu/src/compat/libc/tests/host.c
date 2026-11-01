@@ -219,7 +219,7 @@ __attribute__((used)) static void start(void)
 	for (void (**constructor)(void) = __init_array_start; constructor < __init_array_end;
 	     constructor++)
 		(*constructor)();
-	leave(test());
+	leave(main());
 }
 
 /* `stela.efi` takes these from what shares its image: Linux's lib/string.c, and
