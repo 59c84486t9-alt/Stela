@@ -195,7 +195,8 @@ fn embed_kext(kext: &Path, code: &[CodeHash], source: &Path) -> Result<()> {
 
 /// A kext's code generation: Apple clang's `-mkernel` set, which upstream
 /// clang leaves to the build, and Apple clang's name for its
-/// pointer-authentication intrinsics, which xnu's `ptrauth.h` tests.
+/// pointer-authentication intrinsics, which xnu's `ptrauth.h` tests. The kernel
+/// authenticates every function pointer by its type, `kmod_info`'s first.
 const KEXT_FLAGS: &[&str] = &[
     "-std=gnu++20",
     "-O2",
@@ -204,6 +205,7 @@ const KEXT_FLAGS: &[&str] = &[
     "-Werror",
     "-mkernel",
     "-fapple-kext",
+    "-fptrauth-function-pointer-type-discrimination",
     "-fno-rtti",
     "-fno-exceptions",
     "-fno-builtin",
