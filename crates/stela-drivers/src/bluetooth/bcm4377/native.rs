@@ -4,6 +4,7 @@
 //! Explicit native Broadcom PCIe attachment. No discovery or guest service is
 //! implied. Original configuration, UC BARs, coherent domain and root
 //! epoch survive terminal source stop, posted-write completion and IRQ drain.
+pub(crate) mod cold;
 mod config;
 use crate::bus::irq::posted_msi::MsiCompletion;
 mod registers;
@@ -24,7 +25,8 @@ use crate::{
             Address, Function,
             msi::{self, DisabledMsiConfig, MsiConfig, MsiConfigSpace, RetainedOwner},
             native_aspm,
-            owned::OwnedConfig,
+            owned::{ConfigRetention, OwnedConfig},
+            requester::preparation::{self, Attachment},
         },
     },
 };
@@ -38,6 +40,8 @@ pub use registers::{MappedRegisters, Registers};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
     Requirement(&'static str),
+    Preparation(preparation::Error),
+    Power(crate::block::BlockError),
     ConfigRead { offset: u16, width: u8 },
     ConfigReadback { offset: u16, observed: u32 },
     Mapping(owned::Error),
@@ -59,9 +63,13 @@ impl From<Error> for super::Error {
 /// Accesses are serialized native config effects under the unique owner;
 /// owned_address is its immutable real BDF, not copied Function metadata. The
 /// returned Mapping is that same original mapping and resource epoch, without
-/// escaped aliases/accessors. No reset/removal/config writer can revoke it.
+/// escaped aliases/accessors. `retain_epoch` pins that exact mapping and
+/// `matches_retention` compares its original permission identity, rather than
+/// BDF or physical labels. No reset/removal/config writer can revoke it.
 pub unsafe trait Configuration: MsiConfigSpace + 'static {
     fn owned_address(&self) -> Address;
+    fn retain_epoch(&self) -> Result<ConfigRetention, owned::Error>;
+    fn matches_retention(&self, seal: &ConfigRetention) -> Result<bool, owned::Error>;
     fn into_mapping(self) -> Mapping;
 }
 // SAFETY: OwnedConfig keeps the original exclusive native mapping and BDF;
@@ -69,6 +77,12 @@ pub unsafe trait Configuration: MsiConfigSpace + 'static {
 unsafe impl Configuration for OwnedConfig {
     fn owned_address(&self) -> Address {
         self.address()
+    }
+    fn retain_epoch(&self) -> Result<ConfigRetention, owned::Error> {
+        self.retain_epoch()
+    }
+    fn matches_retention(&self, seal: &ConfigRetention) -> Result<bool, owned::Error> {
+        self.matches_retention(seal)
     }
     fn into_mapping(self) -> Mapping {
         self.into_mapping()
@@ -117,7 +131,7 @@ pub struct Inputs<
     pub retained: RetainedOwner,
     pub topology: native_aspm::Topology<C>,
     pub registers: R,
-    pub domain: Arc<dyn DmaDomain>,
+    pub attachment: Box<dyn Attachment>,
     pub pages: Box<dyn PageSource>,
     pub board: Board,
     /// Original values read from this same requester's firmware node.
@@ -244,6 +258,10 @@ pub struct NativePlatform<
     registers: Option<R>,
     domain: Option<Arc<dyn DmaDomain>>,
     allocator: Option<Allocator>,
+    attachment: Option<Box<dyn Attachment>>,
+    retention: Option<ConfigRetention>,
+    quiesced: bool,
+    resources_attempted: bool,
     clock: T,
     interrupts: &'static dyn IrqController,
     layout: config::Layout,
@@ -262,9 +280,12 @@ impl<C: Configuration, R: Registers, T: Time> NativePlatform<C, R, T> {
     /// # Safety
     /// Inputs are this exclusive native endpoint's original config,
     /// reserved UC BAR0/2 mappings, complete kept bridge/root topology and
-    /// acknowledged stopped requester epoch. Former device/firmware/CPU/DMA/IRQ
+    /// acknowledged cold FLR/D0/BAR-restored requester epoch. The consumed
+    /// driver receipt drained the original root before the unique private
+    /// attachment was created; no allocation or IRQ predates that binding.
+    /// Former device/firmware/CPU/DMA/IRQ
     /// owners, aliases, timers and work are independently stopped/drained. The
-    /// same domain is attached to this requester and keeps its root /
+    /// attachment's domain is bound to this requester and keeps its root /
     /// remapper epoch, with native coherent WB payload/ring-index accesses and
     /// low IOVA capability; the allocator returns real exclusive zeroed pages.
     /// Board/properties are immutable observations from its bound node.
@@ -343,12 +364,16 @@ impl<C: Configuration, R: Registers, T: Time> NativePlatform<C, R, T> {
             Ok(checked) => checked,
             Err(error) => return Err((error, inputs)),
         };
+        let retention = match inputs.function.config().retain_epoch() {
+            Ok(retention) => retention,
+            Err(error) => return Err((Error::Mapping(error), inputs)),
+        };
         let Inputs {
             function,
             retained,
             topology,
             registers,
-            domain,
+            attachment,
             pages,
             board,
             properties,
@@ -356,6 +381,7 @@ impl<C: Configuration, R: Registers, T: Time> NativePlatform<C, R, T> {
             interrupts,
             msi_completion,
         } = inputs;
+        let domain = attachment.domain();
         Ok(Self {
             identity,
             board,
@@ -369,6 +395,10 @@ impl<C: Configuration, R: Registers, T: Time> NativePlatform<C, R, T> {
                 pages,
             }),
             domain: Some(domain),
+            attachment: Some(attachment),
+            retention: Some(retention),
+            quiesced: false,
+            resources_attempted: false,
             clock,
             interrupts,
             layout,
@@ -390,11 +420,20 @@ impl<C: Configuration, R: Registers, T: Time> NativePlatform<C, R, T> {
     /// Allocate through the same domain bound by construction; this
     /// entry cannot accidentally pair the platform with another requester's DMA.
     pub fn into_transport(mut self) -> DriverResult<Transport<Self>> {
-        let mut allocator = self.allocator.take().expect("unused native allocator");
-        Transport::new(self, &mut allocator)
+        // The page source belongs to this entire native graph, including
+        // partially allocated/error and unwind paths.
+        let mut allocator =
+            core::mem::ManuallyDrop::new(self.allocator.take().expect("unused native allocator"));
+        let mut transport = Transport::new(self, &mut *allocator)?;
+        transport.platform.as_mut().unwrap().allocator =
+            Some(core::mem::ManuallyDrop::into_inner(allocator));
+        Ok(transport)
     }
     pub fn service_pending(&self) -> bool {
-        !self.retirement_attempted && self.signals.pending.load(Ordering::Acquire)
+        !self.retirement_attempted
+            && !self.resources_attempted
+            && self.retirement_error.is_none()
+            && self.signals.pending.load(Ordering::Acquire)
     }
     fn irq_error(&self, fallback: irq::IrqError) -> super::Error {
         self.configuration
@@ -403,14 +442,25 @@ impl<C: Configuration, R: Registers, T: Time> NativePlatform<C, R, T> {
             .unwrap_or(Error::Irq(fallback))
             .into()
     }
-    fn live(&self) -> Result<(), Error> {
-        if self.retirement_attempted {
-            Err(Error::Requirement("terminal native Broadcom epoch"))
+    fn live(&self) -> DriverResult<()> {
+        if let Some(error) = &self.retirement_error {
+            return Err(error.clone());
+        }
+        if self.retirement_attempted || self.resources_attempted {
+            Err(self
+                .retirement_error
+                .clone()
+                .unwrap_or_else(|| Error::Requirement("terminal native Broadcom epoch").into()))
         } else {
             Ok(())
         }
     }
     fn retire_inner(&mut self) -> DriverResult<()> {
+        self.retention
+            .as_ref()
+            .unwrap()
+            .check_live()
+            .map_err(Error::Mapping)?;
         if self.configuration.is_some() && self.registration.is_none() {
             return Err(Error::Requirement("uncertain native MSI admission retained").into());
         }
@@ -420,14 +470,25 @@ impl<C: Configuration, R: Registers, T: Time> NativePlatform<C, R, T> {
             // SAFETY: one serialized terminal stop on the original config;
             // pins/root/route remain owned; no BAR access after this reset.
             unsafe {
-                state
-                    .disabled
-                    .as_mut()
-                    .unwrap()
-                    .with_device_stop(|c| self.layout.stop(c, &self.clock))
+                state.disabled.as_mut().unwrap().with_device_stop(|c| {
+                    if !c
+                        .matches_retention(self.retention.as_ref().unwrap())
+                        .map_err(Error::Mapping)?
+                    {
+                        return Err(Error::Requirement("same original Broadcom config epoch"));
+                    }
+                    self.layout.stop(c, &self.clock)
+                })
             }
             .map_err(Error::Msi)??;
         } else if let Some(function) = self.function.as_mut() {
+            if !function
+                .config()
+                .matches_retention(self.retention.as_ref().unwrap())
+                .map_err(Error::Mapping)?
+            {
+                return Err(Error::Requirement("same original Broadcom config epoch").into());
+            }
             self.layout.stop(function.config(), &self.clock)?;
         }
         // SAFETY: supported FLR and current BM-off exclude new requests;
@@ -459,6 +520,22 @@ impl<C: Configuration, R: Registers, T: Time> NativePlatform<C, R, T> {
             self.retained = Some(retained);
             self.function = Some(function);
         }
+        self.quiesced = true;
+        Ok(())
+    }
+    fn retire_resources_inner(&mut self) -> DriverResult<()> {
+        if !self.quiesced {
+            return Err(
+                Error::Requirement("native Broadcom quiescence before resource release").into(),
+            );
+        }
+        // SAFETY: full engine/payload/MSI/CPU/work drain excludes every live
+        // consumer and original PCI owners remain. Normal transport close
+        // already removed coherent leases. A direct safe platform call before
+        // lease removal independently refuses inside Attachment::detach;
+        // no BAR/config retirement can occur before its acknowledgement.
+        unsafe { self.attachment.as_mut().unwrap().detach() }.map_err(Error::Dma)?;
+        self.retention.take();
         if let Some(function) = self.function.take() {
             self.mappings.push(function.into_config().into_mapping());
         }
@@ -502,36 +579,32 @@ unsafe impl<C: Configuration, R: Registers, T: Time> Platform for NativePlatform
     fn prepare(&mut self, chip: Chip) -> DriverResult<()> {
         self.live()?;
         if self.prepared || Chip::select(self.identity)? != chip {
-            return Err(Error::Requirement("one same-chip native preparation").into());
+            let error: super::Error = Error::Requirement("one same-chip native preparation").into();
+            self.retirement_attempted = true;
+            self.retirement_error = Some(error.clone());
+            return Err(error);
         }
-        // Latch before any possible effect; no safe retry after partial reset.
+        // Latch before BME admission; unwind cannot permit access or retry.
         self.prepared = true;
+        self.retirement_error =
+            Some(Error::Requirement("interrupted native Broadcom preparation").into());
         let result: DriverResult<()> = (|| {
             let function = self.function.as_mut().unwrap();
-            if chip == Chip::Bcm4377 {
-                self.topology
-                    .as_mut()
-                    .unwrap()
-                    .disable(function)
-                    .map_err(Error::Aspm)?;
+            if !function
+                .config()
+                .matches_retention(self.retention.as_ref().unwrap())
+                .map_err(Error::Mapping)?
+            {
+                return Err(Error::Requirement("same cold Broadcom config epoch").into());
             }
-            self.layout.prepare(function.config(), &self.clock)?;
-            if chip == Chip::Bcm4377 {
-                self.topology
-                    .as_mut()
-                    .unwrap()
-                    .disable(function)
-                    .map_err(Error::Aspm)?;
-            }
-            // SAFETY: reset completed with no published DMA address;
-            // all original root/domain/backing resources remain held.
-            unsafe { self.domain.as_ref().unwrap().drain_posted_writes() }.map_err(Error::Dma)?;
             self.layout.enable(function.config())?;
             Ok(())
         })();
         if let Err(error) = &result {
             self.retirement_attempted = true;
             self.retirement_error = Some(error.clone());
+        } else {
+            self.retirement_error = None;
         }
         result
     }
@@ -673,15 +746,32 @@ unsafe impl<C: Configuration, R: Registers, T: Time> Platform for NativePlatform
             Err(error) => Err(self.irq_error(error)),
         }
     }
+    fn retire_resources(&mut self) -> DriverResult<()> {
+        if let Some(error) = &self.retirement_error {
+            return Err(error.clone());
+        }
+        if self.resources_attempted {
+            return self.retirement_error.clone().map_or(Ok(()), Err);
+        }
+        self.resources_attempted = true;
+        self.retirement_error =
+            Some(Error::Requirement("interrupted native Broadcom resource retirement").into());
+        let result = self.retire_resources_inner();
+        self.retirement_error = result.as_ref().err().cloned();
+        result
+    }
     fn retire(&mut self) -> DriverResult<()> {
-        if self.retirement_attempted {
+        if let Some(error) = &self.retirement_error {
+            return Err(error.clone());
+        }
+        if self.retirement_attempted || self.resources_attempted {
             return self.retirement_error.clone().map_or(Ok(()), Err);
         }
         self.retirement_attempted = true;
+        self.retirement_error =
+            Some(Error::Requirement("interrupted native Broadcom quiescence").into());
         let result = self.retire_inner();
-        if let Err(error) = &result {
-            self.retirement_error = Some(error.clone());
-        }
+        self.retirement_error = result.as_ref().err().cloned();
         result
     }
 }
@@ -700,6 +790,12 @@ impl<C: Configuration, R: Registers, T: Time> Drop for NativePlatform<C, R, T> {
                 core::mem::forget(value);
             }
             if let Some(value) = self.registers.take() {
+                core::mem::forget(value);
+            }
+            if let Some(value) = self.attachment.take() {
+                core::mem::forget(value);
+            }
+            if let Some(value) = self.retention.take() {
                 core::mem::forget(value);
             }
             if let Some(value) = self.domain.take() {

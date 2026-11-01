@@ -2,6 +2,7 @@
 //! Native config/mapping/Registry models composed with the literal IPC device.
 //! These are software ownership/effect tests, not physical platform validation.
 use super::*;
+use crate::bluetooth::bcm4377::State as TransportState;
 #[test]
 fn native_clock_rejects_invalid_calibration_and_unrepresentable_attempt_before_attachment() {
     for rate in [0, u64::MAX, u64::MAX / 2 / 120_000_000 + 1] {
@@ -33,7 +34,7 @@ use crate::bus::{
         msi::MsiConfigSpace,
         native_aspm::{RootBus, Topology},
         owned::{
-            OwnedConfig,
+            ConfigRetention, OwnedConfig,
             test_support::{Counters, fixture as owned_config},
         },
     },
@@ -49,6 +50,10 @@ enum Event {
     Write(u16, u8, u32),
     Reset,
     PayloadDrain,
+    OriginalDrain,
+    Bind,
+    Allocate,
+    PageSourceDrop,
     MsiBind,
     MsiDrain,
     CpuPending,
@@ -57,6 +62,7 @@ enum Event {
     ConfigUnmap,
     DmaUnmap,
     RootDrop,
+    Detach,
 }
 struct State {
     events: Mutex<Vec<Event>>,
@@ -67,7 +73,20 @@ struct State {
     fail_payload: AtomicBool,
     fail_msi: AtomicBool,
     fail_enable_ack: AtomicBool,
+    fail_master_ack: AtomicBool,
+    panic_master: AtomicBool,
     fail_bar_unmap: AtomicBool,
+    fail_detach: AtomicBool,
+    fail_config_unmap: AtomicBool,
+    fail_allocate: AtomicUsize,
+    allocations: AtomicUsize,
+    fail_original: AtomicBool,
+    panic_original: AtomicBool,
+    panic_detach: AtomicBool,
+    panic_payload: AtomicBool,
+    panic_control: AtomicBool,
+    fail_bind: AtomicBool,
+    bound: AtomicBool,
     reset_ready: AtomicU64,
     accesses: AtomicUsize,
     fault_access: AtomicUsize,
@@ -86,7 +105,20 @@ impl State {
             fail_payload: AtomicBool::new(false),
             fail_msi: AtomicBool::new(false),
             fail_enable_ack: AtomicBool::new(false),
+            fail_master_ack: AtomicBool::new(false),
+            panic_master: AtomicBool::new(false),
             fail_bar_unmap: AtomicBool::new(false),
+            fail_detach: AtomicBool::new(false),
+            fail_config_unmap: AtomicBool::new(false),
+            fail_allocate: AtomicUsize::new(0),
+            allocations: AtomicUsize::new(0),
+            fail_original: AtomicBool::new(false),
+            panic_original: AtomicBool::new(false),
+            panic_detach: AtomicBool::new(false),
+            panic_payload: AtomicBool::new(false),
+            panic_control: AtomicBool::new(false),
+            fail_bind: AtomicBool::new(false),
+            bound: AtomicBool::new(false),
             reset_ready: AtomicU64::new(0),
             accesses: AtomicUsize::new(0),
             fault_access: AtomicUsize::new(0),
@@ -122,6 +154,7 @@ impl Drop for Root {
 }
 struct Config {
     inner: OwnedConfig,
+    counters: Arc<Counters>,
     state: Arc<State>,
     device: Arc<Mutex<Device>>,
 }
@@ -201,6 +234,15 @@ impl ConfigSpace for Config {
             self.device.lock().unwrap().domain.0.lock().unwrap().stopped = false;
         }
         self.state.access(Event::Write(offset, 2, u32::from(value)));
+        if offset == 4 && value & 4 != 0 {
+            assert!(
+                !self.state.panic_master.load(Ordering::Relaxed),
+                "injected BME admission unwind"
+            );
+            if self.state.fail_master_ack.load(Ordering::Relaxed) {
+                self.state.dead.store(true, Ordering::Relaxed);
+            }
+        }
         if offset == 0x5a && value & 1 != 0 && self.state.fail_enable_ack.load(Ordering::Relaxed) {
             self.state.dead.store(true, Ordering::Relaxed);
         }
@@ -213,8 +255,23 @@ unsafe impl Configuration for Config {
     fn owned_address(&self) -> Address {
         self.inner.address()
     }
+    fn retain_epoch(&self) -> core::result::Result<ConfigRetention, owned::Error> {
+        self.inner.retain_epoch()
+    }
+    fn matches_retention(
+        &self,
+        seal: &ConfigRetention,
+    ) -> core::result::Result<bool, owned::Error> {
+        self.inner.matches_retention(seal)
+    }
     fn into_mapping(self) -> Mapping {
         self.state.event(Event::ConfigUnmap);
+        if self.state.fail_config_unmap.load(Ordering::Relaxed) {
+            self.counters.fail_context_at.store(
+                self.counters.contexts.load(Ordering::Relaxed) + 1,
+                Ordering::Relaxed,
+            );
+        }
         self.inner.into_mapping()
     }
 }
@@ -231,6 +288,7 @@ unsafe impl Time for ClockModel {
 struct NativeDomain {
     domain: Arc<Domain>,
     state: Arc<State>,
+    _root: Root,
 }
 // SAFETY: delegates the page model's mappings; its independently
 // modeled stopped flag and completion fault control retirement, not fence tokens.
@@ -241,10 +299,27 @@ unsafe impl DmaDomain for NativeDomain {
         direction: Direction,
         limit: u64,
     ) -> core::result::Result<DomainMapping, DmaError> {
+        if !self.state.bound.load(Ordering::Relaxed) {
+            return Err(DmaError::Unmapped);
+        }
         // SAFETY: caller keeps exact pins/domain as in delegated model.
-        unsafe { self.domain.map(pages, direction, limit) }
+        let mapping = unsafe { self.domain.map(pages, direction, limit) }?;
+        let pin = pages.as_single().unwrap();
+        let cpu = pin
+            .cpu_mapping(CacheAttribute::WriteBack)
+            .unwrap()
+            .address(0, 1)
+            .unwrap()
+            .as_ptr() as u64;
+        assert_ne!(mapping.address, pin.physical_pages()[0]);
+        assert_ne!(mapping.address, cpu);
+        assert_ne!(pin.physical_pages()[0], cpu);
+        Ok(mapping)
     }
     unsafe fn unmap(&self, mapping: DomainMapping) -> core::result::Result<(), DmaError> {
+        if !self.state.bound.load(Ordering::Relaxed) {
+            return Err(DmaError::Unmapped);
+        }
         self.state.event(Event::DmaUnmap);
         // SAFETY: same stopped-consumer caller contract and original domain.
         unsafe { self.domain.unmap(mapping) }
@@ -255,6 +330,9 @@ unsafe impl DmaDomain for NativeDomain {
         range: Range<usize>,
         direction: Direction,
     ) -> core::result::Result<(), DmaError> {
+        if !self.state.bound.load(Ordering::Relaxed) {
+            return Err(DmaError::Unmapped);
+        }
         // SAFETY: exact mapping/direction/bounds delegated to the domain.
         unsafe { self.domain.sync_for_device(mapping, range, direction) }
     }
@@ -264,11 +342,21 @@ unsafe impl DmaDomain for NativeDomain {
         range: Range<usize>,
         direction: Direction,
     ) -> core::result::Result<(), DmaError> {
+        if !self.state.bound.load(Ordering::Relaxed) {
+            return Err(DmaError::Unmapped);
+        }
         // SAFETY: no continuous CPU handoff is invented by this model.
         unsafe { self.domain.sync_for_cpu(mapping, range, direction) }
     }
     unsafe fn drain_posted_writes(&self) -> core::result::Result<(), DmaError> {
+        if !self.state.bound.load(Ordering::Relaxed) {
+            return Err(DmaError::Unmapped);
+        }
         self.state.event(Event::PayloadDrain);
+        assert!(
+            !self.state.panic_payload.load(Ordering::Relaxed),
+            "injected payload unwind"
+        );
         assert!(self.state.resets.load(Ordering::Relaxed) != 0);
         if self.state.fail_payload.load(Ordering::Relaxed) {
             return Err(DmaError::DrainUnavailable);
@@ -277,7 +365,109 @@ unsafe impl DmaDomain for NativeDomain {
         Ok(())
     }
 }
-struct PageModel(Mutex<u64>);
+struct AttachmentModel {
+    domain: Arc<NativeDomain>,
+    retention: Option<ConfigRetention>,
+}
+impl Drop for AttachmentModel {
+    fn drop(&mut self) {
+        if self.retention.is_some() {
+            core::mem::forget(self.domain.clone());
+            core::mem::forget(self.retention.take());
+        }
+    }
+}
+// SAFETY: one original config seal pins this independent domain generation;
+// detach refuses mappings and releases that pin only after modeled blocking.
+unsafe impl crate::bus::pci::requester::preparation::Attachment for AttachmentModel {
+    fn domain(&self) -> Arc<dyn DmaDomain> {
+        self.domain.clone()
+    }
+    unsafe fn detach(&mut self) -> core::result::Result<(), DmaError> {
+        if self.retention.is_none() {
+            return Ok(());
+        }
+        if !self.domain.domain.0.lock().unwrap().leases.is_empty() {
+            return Err(DmaError::MappingFailed);
+        }
+        self.domain.state.event(Event::Detach);
+        assert!(
+            !self.domain.state.panic_detach.load(Ordering::Relaxed),
+            "injected detach unwind"
+        );
+        if self.domain.state.fail_detach.load(Ordering::Relaxed) {
+            return Err(DmaError::DrainUnavailable);
+        }
+        self.domain.state.bound.store(false, Ordering::Relaxed);
+        self.retention.take();
+        Ok(())
+    }
+}
+struct PreparingModel {
+    owner: core::mem::ManuallyDrop<(Function<Config>, Arc<NativeDomain>, ConfigRetention)>,
+}
+// SAFETY: the explicit original model owns the exact config and root/domain
+// epoch. Its one consumed finalize checks BME and pins config until detach.
+unsafe impl host::cold::Preparation for PreparingModel {
+    type Config = Config;
+    fn function_mut(&mut self) -> &mut Function<Config> {
+        &mut self.owner.0
+    }
+    unsafe fn finalize(
+        mut self,
+    ) -> core::result::Result<host::cold::Finalized<Config>, host::cold::FinalizeFailure> {
+        let state = self.owner.1.state.clone();
+        let (function, _, retained) = &mut *self.owner;
+        assert!(function.config().inner.matches_retention(retained).unwrap());
+        assert_eq!(state.resets.load(Ordering::Relaxed), 1);
+        assert_eq!(self.owner.0.config().read16(4) & 0x406, 0x400);
+        assert!(self.owner.1.domain.0.lock().unwrap().leases.is_empty());
+        state.event(Event::OriginalDrain);
+        assert!(
+            !state.panic_original.load(Ordering::Relaxed),
+            "injected original-root unwind"
+        );
+        if state.fail_original.load(Ordering::Relaxed) {
+            return Err(host::cold::FinalizeFailure {
+                error: crate::bus::pci::requester::preparation::Error::Dma(
+                    DmaError::DrainUnavailable,
+                ),
+                retained: core::mem::ManuallyDrop::new(Box::new(self)),
+            });
+        }
+        state.event(Event::Bind);
+        if state.fail_bind.load(Ordering::Relaxed) {
+            return Err(host::cold::FinalizeFailure {
+                error: crate::bus::pci::requester::preparation::Error::Dma(
+                    DmaError::DrainUnavailable,
+                ),
+                retained: core::mem::ManuallyDrop::new(Box::new(self)),
+            });
+        }
+        assert!(!state.bound.swap(true, Ordering::Relaxed));
+        // SAFETY: original owner is moved exactly once after modeled binding;
+        // failure and unwind leave the ManuallyDrop graph retained.
+        let retention = self.owner.0.config().inner.retain_epoch().unwrap();
+        // SAFETY: the successful one-shot bind transfers every owner exactly
+        // once; before this move, unwind retains the ManuallyDrop graph.
+        let (function, domain, old_retention) =
+            unsafe { core::mem::ManuallyDrop::take(&mut self.owner) };
+        drop(old_retention);
+        Ok(host::cold::Finalized {
+            function,
+            attachment: Box::new(AttachmentModel {
+                domain,
+                retention: Some(retention),
+            }),
+        })
+    }
+}
+struct PageModel(Mutex<u64>, Arc<State>);
+impl Drop for PageModel {
+    fn drop(&mut self) {
+        self.1.event(Event::PageSourceDrop);
+    }
+}
 impl PageSource for PageModel {
     fn allocate(
         &self,
@@ -285,6 +475,12 @@ impl PageSource for PageModel {
         alignment: usize,
         attribute: CacheAttribute,
     ) -> core::result::Result<PinnedPages, MemoryError> {
+        self.1.event(Event::Allocate);
+        assert!(self.1.bound.load(Ordering::Relaxed));
+        let allocation = self.1.allocations.fetch_add(1, Ordering::Relaxed) + 1;
+        if self.1.fail_allocate.load(Ordering::Relaxed) == allocation {
+            return Err(MemoryError::OutOfMemory);
+        }
         assert_eq!(alignment, 4096);
         assert_eq!(attribute, CacheAttribute::WriteBack);
         let reserved = bytes.next_multiple_of(4096);
@@ -457,6 +653,12 @@ unsafe impl Registers for NativeRegisters {
         if next != prior {
             self.state.interrupt();
         }
+        if space == Space::Bar0 && offset == DOORBELL && value & 0xff00 == 0 {
+            assert!(
+                !self.state.panic_control.load(Ordering::Relaxed),
+                "injected protocol-close control doorbell unwind"
+            );
+        }
         result
     }
     fn read8(&self, space: Space, offset: u32) -> core::result::Result<u8, host::Error> {
@@ -477,6 +679,57 @@ struct Fixture {
     counters: Arc<Counters>,
 }
 fn fixture_native(device_id: u16, completion: bool) -> Fixture {
+    fixture_native_setup(device_id, completion, |_| {})
+        .unwrap_or_else(|_| panic!("valid cold model"))
+}
+type ColdInputs = host::cold::Inputs<PreparingModel, NativeRegisters, ClockModel>;
+type ColdFailure = (host::Error, Arc<State>, Arc<Counters>, Arc<Mutex<Device>>);
+fn fixture_native_setup(
+    device_id: u16,
+    completion: bool,
+    setup: impl FnOnce(&mut ColdInputs),
+) -> core::result::Result<Fixture, ColdFailure> {
+    let (mut cold_inputs, state, counters, device) = original_inputs(device_id);
+    setup(&mut cold_inputs);
+    // SAFETY: model owns original config, BARs, topology and root, with no
+    // private mapping or IRQ admission until the shared cold sequence returns.
+    let cold = match unsafe { host::cold::Cold::new(cold_inputs) } {
+        Ok(cold) => cold,
+        Err((error, inputs)) => {
+            core::mem::forget(inputs);
+            return Err((error, state, counters, device));
+        }
+    };
+    let bound = match cold.quiesce_and_bind() {
+        Ok(bound) => bound,
+        Err(failure) => return Err((failure.error.clone(), state, counters, device)),
+    };
+    let inputs = Inputs {
+        function: bound.function,
+        retained: Arc::new(Root(state.clone())),
+        topology: bound.topology,
+        registers: bound.registers,
+        attachment: bound.attachment,
+        pages: Box::new(PageModel(Mutex::new(0x1_0000_0000), state.clone())),
+        board: Board::from_property(b"apple,formosa\0").unwrap(),
+        properties: vec![],
+        clock: bound.clock,
+        // SAFETY: original_inputs leaked this same model Registry.
+        interrupts: unsafe { &*state.registry.load(Ordering::Relaxed) },
+        msi_completion: if completion {
+            MsiCompletion::model(Box::new(Delivery(state.clone())))
+        } else {
+            MsiCompletion::unavailable()
+        },
+    };
+    Ok(Fixture {
+        inputs,
+        device,
+        state,
+        counters,
+    })
+}
+fn original_inputs(device_id: u16) -> (ColdInputs, Arc<State>, Arc<Counters>, Arc<Mutex<Device>>) {
     let (model, _, device) = fixture(device_id);
     let state = Arc::new(State::new());
     let registry = Box::leak(Box::new(Registry::new(Cpu(state.clone()))));
@@ -503,6 +756,7 @@ fn fixture_native(device_id: u16, completion: bool) -> Fixture {
     }
     let config = Config {
         inner: config,
+        counters: counters.clone(),
         state: state.clone(),
         device: device.clone(),
     };
@@ -541,34 +795,23 @@ fn fixture_native(device_id: u16, completion: bool) -> Fixture {
     let domain = Arc::new(NativeDomain {
         domain: device.lock().unwrap().domain.clone(),
         state: state.clone(),
+        _root: Root(state.clone()),
     });
-    let inputs = Inputs {
-        function,
-        retained: Arc::new(Root(state.clone())),
+    let mut function = function;
+    let retention = function.config().inner.retain_epoch().unwrap();
+    let cold_inputs = host::cold::Inputs {
+        requester: PreparingModel {
+            owner: core::mem::ManuallyDrop::new((function, domain, retention)),
+        },
         topology,
         registers: NativeRegisters {
             registers,
             device: RefCell::new(model),
             state: state.clone(),
         },
-        domain,
-        pages: Box::new(PageModel(Mutex::new(0x1_0000_0000))),
-        board: Board::from_property(b"apple,formosa\0").unwrap(),
-        properties: vec![],
         clock: ClockModel(device.clone()),
-        interrupts: registry,
-        msi_completion: if completion {
-            MsiCompletion::model(Box::new(Delivery(state.clone())))
-        } else {
-            MsiCompletion::unavailable()
-        },
     };
-    Fixture {
-        inputs,
-        device,
-        state,
-        counters,
-    }
+    (cold_inputs, state, counters, device)
 }
 type NativeTransport = Transport<NativePlatform<Config, NativeRegisters, ClockModel>>;
 fn transport(
@@ -630,7 +873,10 @@ fn all_four_native_ids_use_real_registry_msi_dma_hci_and_ordered_retirement() {
         assert!(position(&events, Event::PayloadDrain) < position(&events, Event::MsiDrain));
         assert!(position(&events, Event::MsiDrain) < position(&events, Event::CpuPending));
         assert!(position(&events, Event::CpuPending) < position(&events, Event::BarUnmap));
-        assert!(position(&events, Event::BarUnmap) < position(&events, Event::DmaUnmap));
+        assert!(position(&events, Event::CpuPending) < position(&events, Event::DmaUnmap));
+        assert!(position(&events, Event::DmaUnmap) < position(&events, Event::Detach));
+        assert!(position(&events, Event::Detach) < position(&events, Event::BarUnmap));
+        assert!(position(&events, Event::Detach) < position(&events, Event::ConfigUnmap));
         assert_eq!(counters.unmaps.load(Ordering::Relaxed), 1);
         assert_eq!(state.resets.load(Ordering::Relaxed), 2);
         assert!(
@@ -662,7 +908,7 @@ fn native_unpublished_close_stops_the_prepared_bus_master_and_releases_without_r
 }
 #[test]
 fn every_distinct_retirement_failure_keeps_original_route_pins_root_and_first_error() {
-    for failure in 0..6 {
+    for failure in 0..7 {
         let (mut t, device, state, counters) = transport(fixture_native(0x5f69, failure != 3));
         t.start(&catalog(&device, false)).unwrap();
         match failure {
@@ -672,6 +918,7 @@ fn every_distinct_retirement_failure_keeps_original_route_pins_root_and_first_er
             3 => {}
             4 => state.fail_cpu.store(true, Ordering::Relaxed),
             5 => state.fail_bar_unmap.store(true, Ordering::Relaxed),
+            6 => state.fail_detach.store(true, Ordering::Relaxed),
             _ => unreachable!(),
         }
         state.events.lock().unwrap().clear();
@@ -686,13 +933,13 @@ fn every_distinct_retirement_failure_keeps_original_route_pins_root_and_first_er
         if failure <= 3 {
             assert!(!events.contains(&Event::CpuPending));
         }
-        assert!(!events.contains(&Event::DmaUnmap));
+        assert_eq!(events.contains(&Event::DmaUnmap), failure >= 5);
         assert_eq!(counters.unmaps.load(Ordering::Relaxed), 0);
         drop(t);
         assert!(!device.lock().unwrap().dropped);
         assert!(!state.events.lock().unwrap().contains(&Event::RootDrop));
-        assert!(
-            !device
+        assert_eq!(
+            device
                 .lock()
                 .unwrap()
                 .domain
@@ -700,7 +947,8 @@ fn every_distinct_retirement_failure_keeps_original_route_pins_root_and_first_er
                 .lock()
                 .unwrap()
                 .leases
-                .is_empty()
+                .is_empty(),
+            failure >= 5,
         );
     }
 }
@@ -735,8 +983,11 @@ fn late_effect_then_config_failure_has_one_uncertain_reset_and_no_release() {
 }
 
 fn release_unpublished(mut inputs: Inputs<Config, NativeRegisters, ClockModel>) {
+    // SAFETY: constructor rejection left this test attachment unpublished;
+    // its independent model has no leases and excludes every prior user.
+    unsafe { inputs.attachment.detach() }.unwrap();
     // SAFETY: constructor refusal had no device effects; this isolated model
-    // has never published DMA/IRQ work or any raw config/BAR mapping alias.
+    // has no DMA/IRQ work or raw views, and its attachment is now detached.
     unsafe { inputs.registers.retire() }.unwrap();
     let mut mapping = inputs.function.into_config().into_mapping();
     // SAFETY: same unpublished original isolated config owner.
@@ -845,4 +1096,398 @@ fn effect_then_failed_msi_enable_admission_keeps_registry_and_original_epoch() {
     drop(t);
     assert!(!device.lock().unwrap().dropped);
     assert!(!state.events.lock().unwrap().contains(&Event::RootDrop));
+}
+
+#[test]
+fn cold_reset_original_root_drain_and_bind_precede_every_new_dma_allocation() {
+    for id in [0x5fa0, 0x5f69, 0x5f71, 0x5f72] {
+        let (mut t, _, state, _) = transport(fixture_native(id, false));
+        let events = state.events.lock().unwrap().clone();
+        assert!(position(&events, Event::Reset) < position(&events, Event::OriginalDrain));
+        assert!(position(&events, Event::OriginalDrain) < position(&events, Event::Bind));
+        assert!(position(&events, Event::Bind) < position(&events, Event::Allocate));
+        assert_eq!(state.resets.load(Ordering::Relaxed), 1);
+        assert_eq!(state.allocations.load(Ordering::Relaxed), 14);
+        assert!(!events.contains(&Event::PayloadDrain));
+        t.close().unwrap();
+    }
+}
+#[test]
+fn failed_original_drain_or_bind_retains_original_cold_graph_without_allocation() {
+    for failed_bind in [false, true] {
+        let result = fixture_native_setup(0x5f69, false, |inputs| {
+            let state = &inputs.requester.owner.1.state;
+            if failed_bind {
+                state.fail_bind.store(true, Ordering::Relaxed);
+            } else {
+                state.fail_original.store(true, Ordering::Relaxed);
+            }
+        });
+        let (_, state, counters, device) = match result {
+            Err(failure) => failure,
+            Ok(_) => panic!("original-root failure admitted a private attachment"),
+        };
+        let events = state.events.lock().unwrap();
+        assert!(events.contains(&Event::OriginalDrain));
+        assert_eq!(events.contains(&Event::Bind), failed_bind);
+        assert!(!events.contains(&Event::Allocate));
+        assert!(!events.contains(&Event::BarUnmap));
+        assert!(!events.contains(&Event::RootDrop));
+        assert!(!state.bound.load(Ordering::Relaxed));
+        assert_eq!(counters.unmaps.load(Ordering::Relaxed), 0);
+        assert!(!device.lock().unwrap().dropped);
+    }
+}
+#[test]
+fn abandoned_cold_owner_retains_original_configuration_bars_and_root_without_effects() {
+    let (inputs, state, counters, device) = original_inputs(0x5f69);
+    // SAFETY: original isolated model, with no DMA/IRQ/work admission.
+    let cold = match unsafe { host::cold::Cold::new(inputs) } {
+        Ok(cold) => cold,
+        Err(_) => panic!("valid cold model"),
+    };
+    state.events.lock().unwrap().clear();
+    drop(cold);
+    assert!(state.events.lock().unwrap().is_empty());
+    assert_eq!(counters.unmaps.load(Ordering::Relaxed), 0);
+    assert!(!device.lock().unwrap().dropped);
+}
+#[test]
+fn every_cold_config_effect_or_read_failure_retains_before_private_binding() {
+    let (inputs, state, _, _) = original_inputs(0x5f69);
+    state.accesses.store(0, Ordering::Relaxed);
+    // SAFETY: original isolated model owner and advancing clock.
+    let cold = match unsafe { host::cold::Cold::new(inputs) } {
+        Ok(cold) => cold,
+        Err(_) => panic!("valid cold model"),
+    };
+    let bound = cold
+        .quiesce_and_bind()
+        .unwrap_or_else(|_| panic!("valid cold bind"));
+    // The model finalize's own read is a peer check after the source sequence;
+    // fault injection here covers only accesses from Cold and Layout.
+    let accesses = state.accesses.load(Ordering::Relaxed) - 1;
+    core::mem::forget(bound);
+    for access in 1..=accesses {
+        let (inputs, state, counters, device) = original_inputs(0x5f69);
+        state.accesses.store(0, Ordering::Relaxed);
+        state.fault_access.store(access, Ordering::Relaxed);
+        state.events.lock().unwrap().clear();
+        // SAFETY: same original model; injected effects/read failures never
+        // certify quiescence or authorize a private binding.
+        match unsafe { host::cold::Cold::new(inputs) } {
+            Err((_, inputs)) => core::mem::forget(inputs),
+            Ok(cold) => assert!(cold.quiesce_and_bind().is_err(), "cold access {access}"),
+        }
+        let events = state.events.lock().unwrap();
+        assert!(!events.contains(&Event::Bind), "cold access {access}");
+        assert!(!events.contains(&Event::Allocate));
+        assert!(!events.contains(&Event::BarUnmap));
+        assert!(!events.contains(&Event::RootDrop));
+        assert_eq!(counters.unmaps.load(Ordering::Relaxed), 0);
+        assert!(!device.lock().unwrap().dropped);
+    }
+}
+#[test]
+fn every_partial_native_allocation_failure_keeps_allocator_attachment_and_original_owners() {
+    for allocation in 1..=14 {
+        let f = fixture_native(0x5f69, false);
+        f.state.fail_allocate.store(allocation, Ordering::Relaxed);
+        // SAFETY: cold receipt and original-root binding already completed.
+        let platform = match unsafe { NativePlatform::new(f.inputs) } {
+            Ok(platform) => platform,
+            Err(_) => panic!("valid native model"),
+        };
+        assert!(platform.into_transport().is_err());
+        let events = f.state.events.lock().unwrap();
+        assert_eq!(f.state.resets.load(Ordering::Relaxed), 1);
+        assert!(!events.contains(&Event::DmaUnmap));
+        assert!(!events.contains(&Event::Detach));
+        assert!(!events.contains(&Event::BarUnmap));
+        assert!(!events.contains(&Event::RootDrop));
+        assert!(!events.contains(&Event::PageSourceDrop));
+        assert_eq!(f.counters.unmaps.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            f.device
+                .lock()
+                .unwrap()
+                .domain
+                .0
+                .lock()
+                .unwrap()
+                .leases
+                .len(),
+            allocation - 1
+        );
+        assert!(!f.device.lock().unwrap().dropped);
+    }
+}
+#[test]
+fn active_native_drop_has_no_hidden_reset_drain_or_release() {
+    let (mut t, device, state, counters) = transport(fixture_native(0x5f69, true));
+    t.start(&catalog(&device, false)).unwrap();
+    state.events.lock().unwrap().clear();
+    drop(t);
+    assert!(state.events.lock().unwrap().is_empty());
+    assert_eq!(state.resets.load(Ordering::Relaxed), 1);
+    assert_eq!(counters.unmaps.load(Ordering::Relaxed), 0);
+    assert!(!device.lock().unwrap().dropped);
+}
+#[test]
+fn native_dma_unmap_failure_is_sticky_and_prevents_detach_and_pci_retirement() {
+    let (mut t, device, state, counters) = transport(fixture_native(0x5f69, true));
+    t.start(&catalog(&device, false)).unwrap();
+    device.lock().unwrap().domain.0.lock().unwrap().fail_unmap = true;
+    state.events.lock().unwrap().clear();
+    let first = t.close().unwrap_err();
+    let events = state.events.lock().unwrap().clone();
+    assert!(events.contains(&Event::DmaUnmap));
+    assert!(!events.contains(&Event::Detach));
+    assert!(!events.contains(&Event::BarUnmap));
+    assert_eq!(t.close(), Err(first));
+    drop(t);
+    assert_eq!(*state.events.lock().unwrap(), events);
+    assert_eq!(counters.unmaps.load(Ordering::Relaxed), 0);
+    assert!(!device.lock().unwrap().dropped);
+}
+#[test]
+fn native_config_mapping_failure_is_sticky_after_dma_and_requester_retirement() {
+    let (mut t, device, state, counters) = transport(fixture_native(0x5f69, true));
+    t.start(&catalog(&device, false)).unwrap();
+    state.fail_config_unmap.store(true, Ordering::Relaxed);
+    state.events.lock().unwrap().clear();
+    let first = t.close().unwrap_err();
+    let events = state.events.lock().unwrap().clone();
+    assert!(position(&events, Event::DmaUnmap) < position(&events, Event::Detach));
+    assert!(position(&events, Event::Detach) < position(&events, Event::BarUnmap));
+    assert_eq!(t.close(), Err(first));
+    drop(t);
+    assert_eq!(*state.events.lock().unwrap(), events);
+    assert_eq!(counters.unmaps.load(Ordering::Relaxed), 0);
+    assert!(!device.lock().unwrap().dropped);
+}
+#[test]
+fn actual_attachment_pin_blocks_config_mapping_retirement_until_detach_acknowledges() {
+    let mut f = fixture_native(0x5f69, false);
+    let stale = f.inputs.attachment.domain();
+    let mut mapping = f.inputs.function.into_config().into_mapping();
+    // SAFETY: original isolated model has no private leases or live IRQ users;
+    // this deliberate premature config retirement must independently refuse.
+    assert_eq!(unsafe { mapping.retire() }, Err(owned::Error::Busy));
+    assert_eq!(f.counters.unmaps.load(Ordering::Relaxed), 0);
+    f.state.fail_detach.store(true, Ordering::Relaxed);
+    // SAFETY: model original function remains contained with no live mappings.
+    assert!(unsafe { f.inputs.attachment.detach() }.is_err());
+    // SAFETY: failed detach must keep its actual config retention pin.
+    assert_eq!(unsafe { mapping.retire() }, Err(owned::Error::Busy));
+    f.state.fail_detach.store(false, Ordering::Relaxed);
+    // SAFETY: only this independent test peer retries; native close is sticky.
+    unsafe { f.inputs.attachment.detach() }.unwrap();
+    // SAFETY: acknowledged detach released the final config retention pin.
+    unsafe { mapping.retire() }.unwrap();
+    assert_eq!(
+        // SAFETY: retained stale domain must reject access after detach before
+        // any requester generation or payload operation can be revived.
+        unsafe { stale.drain_posted_writes() },
+        Err(DmaError::Unmapped)
+    );
+    // SAFETY: isolated, unpublished device and configuration users are retired.
+    unsafe { f.inputs.registers.retire() }.unwrap();
+    assert_eq!(f.counters.unmaps.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn original_root_unwind_keeps_the_consumed_cold_owner_and_all_companions() {
+    let (inputs, state, counters, device) = original_inputs(0x5f69);
+    state.panic_original.store(true, Ordering::Relaxed);
+    // SAFETY: original isolated config/root/BAR model with no private users.
+    let cold = match unsafe { host::cold::Cold::new(inputs) } {
+        Ok(cold) => cold,
+        Err(_) => panic!("valid cold model"),
+    };
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| cold.quiesce_and_bind())).is_err()
+    );
+    let events = state.events.lock().unwrap();
+    assert!(events.contains(&Event::OriginalDrain));
+    assert!(!events.contains(&Event::Bind));
+    assert!(!events.contains(&Event::BarUnmap));
+    assert!(!events.contains(&Event::RootDrop));
+    assert_eq!(counters.unmaps.load(Ordering::Relaxed), 0);
+    assert!(!device.lock().unwrap().dropped);
+}
+#[test]
+fn bound_payload_or_detach_unwind_is_terminal_without_a_hidden_retry_or_success() {
+    for detach in [false, true] {
+        let (mut t, device, state, counters) = transport(fixture_native(0x5f69, true));
+        t.start(&catalog(&device, false)).unwrap();
+        if detach {
+            state.panic_detach.store(true, Ordering::Relaxed);
+        } else {
+            state.panic_payload.store(true, Ordering::Relaxed);
+        }
+        state.events.lock().unwrap().clear();
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| t.close())).is_err());
+        let events = state.events.lock().unwrap().clone();
+        if detach {
+            assert!(events.contains(&Event::Detach));
+            assert!(Platform::retire_resources(t.platform.as_mut().unwrap()).is_err());
+        } else {
+            assert!(!events.contains(&Event::Detach));
+            assert!(Platform::retire(t.platform.as_mut().unwrap()).is_err());
+        }
+        assert!(!events.contains(&Event::BarUnmap));
+        let first = t.close().unwrap_err();
+        assert_eq!(t.close(), Err(first));
+        drop(t);
+        assert_eq!(*state.events.lock().unwrap(), events);
+        assert_eq!(counters.unmaps.load(Ordering::Relaxed), 0);
+        assert!(!device.lock().unwrap().dropped);
+    }
+}
+
+#[test]
+fn direct_native_resource_retirement_refuses_live_leases_before_any_pci_release() {
+    let (mut t, device, state, counters) = transport(fixture_native(0x5f69, true));
+    t.start(&catalog(&device, false)).unwrap();
+    t.retire_platform().unwrap();
+    assert_eq!(
+        device.lock().unwrap().domain.0.lock().unwrap().leases.len(),
+        14
+    );
+    state.events.lock().unwrap().clear();
+    let first = Platform::retire_resources(t.platform.as_mut().unwrap()).unwrap_err();
+    assert_eq!(
+        first,
+        Error::Native(host::Error::Dma(DmaError::MappingFailed))
+    );
+    assert_eq!(
+        Platform::retire_resources(t.platform.as_mut().unwrap()),
+        Err(first.clone())
+    );
+    assert_eq!(t.close(), Err(first));
+    drop(t);
+    assert!(state.events.lock().unwrap().is_empty());
+    assert_eq!(counters.unmaps.load(Ordering::Relaxed), 0);
+    assert!(!device.lock().unwrap().dropped);
+    assert_eq!(
+        device.lock().unwrap().domain.0.lock().unwrap().leases.len(),
+        14
+    );
+}
+#[test]
+fn native_prepare_effect_failure_or_unwind_is_terminal_for_every_safe_entry() {
+    for unwind in [false, true] {
+        let f = fixture_native(0x5f69, false);
+        // SAFETY: original cold receipt and binding have completed; no new
+        // allocations or route exist before explicit platform preparation.
+        let mut platform = match unsafe { NativePlatform::new(f.inputs) } {
+            Ok(platform) => platform,
+            Err(_) => panic!("valid native model"),
+        };
+        if unwind {
+            f.state.panic_master.store(true, Ordering::Relaxed);
+        } else {
+            f.state.fail_master_ack.store(true, Ordering::Relaxed);
+        }
+        if unwind {
+            assert!(
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Platform::prepare(
+                    &mut platform,
+                    Chip::Bcm4378
+                )))
+                .is_err()
+            );
+        } else {
+            assert!(Platform::prepare(&mut platform, Chip::Bcm4378).is_err());
+        }
+        let events = f.state.events.lock().unwrap().clone();
+        let first = Platform::service_begin(&mut platform).unwrap_err();
+        assert_eq!(
+            Platform::prepare(&mut platform, Chip::Bcm4378),
+            Err(first.clone())
+        );
+        assert_eq!(Platform::retire(&mut platform), Err(first.clone()));
+        assert_eq!(Platform::retire_resources(&mut platform), Err(first));
+        drop(platform);
+        assert_eq!(*f.state.events.lock().unwrap(), events);
+        assert_eq!(f.state.resets.load(Ordering::Relaxed), 1);
+        assert_eq!(f.counters.unmaps.load(Ordering::Relaxed), 0);
+        assert!(!f.device.lock().unwrap().dropped);
+        assert!(!events.contains(&Event::Allocate));
+        assert!(!events.contains(&Event::PageSourceDrop));
+        assert!(!events.contains(&Event::RootDrop));
+    }
+}
+
+fn native_dma_digest(domain: &Domain) -> Vec<(u64, [u8; 32])> {
+    let state = domain.0.lock().unwrap();
+    state
+        .leases
+        .iter()
+        .map(|(address, lease)| {
+            let pointer = lease.cpu.address(0, lease.token.bytes).unwrap();
+            let bytes: Vec<_> = (0..lease.token.bytes)
+                .map(|offset| {
+                    // SAFETY: this explicit model owns the complete checked CPU
+                    // mapping; process/device access is serialized while hashing it.
+                    unsafe { pointer.as_ptr().add(offset).read_volatile() }
+                })
+                .collect();
+            (*address, Sha256::digest(bytes).into())
+        })
+        .collect()
+}
+#[test]
+fn protocol_close_unwind_seals_every_public_admission_before_platform_retirement() {
+    let (mut t, device, state, counters) = transport(fixture_native(0x5f69, true));
+    let provider = catalog(&device, false);
+    t.start(&provider).unwrap();
+    let domain = device.lock().unwrap().domain.clone();
+    let controls_before = device.lock().unwrap().controls.len();
+    state.panic_control.store(true, Ordering::Relaxed);
+    state.events.lock().unwrap().clear();
+    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| t.close())).is_err());
+    assert_eq!(t.state(), TransportState::Closing);
+    let events = state.events.lock().unwrap().clone();
+    assert!(!events.contains(&Event::Reset));
+    assert!(!events.contains(&Event::PayloadDrain));
+    assert!(!events.contains(&Event::MsiDrain));
+    assert!(!events.contains(&Event::DmaUnmap));
+    assert!(!events.contains(&Event::Detach));
+    assert!(!events.contains(&Event::BarUnmap));
+    assert!(!events.contains(&Event::ConfigUnmap));
+    {
+        let model = device.lock().unwrap();
+        assert_eq!(model.controls.len(), controls_before + 1);
+        assert_eq!(model.controls.last().unwrap()[0], 3);
+    }
+    let dma = native_dma_digest(&domain);
+    let operations = device.lock().unwrap().operations;
+    let syncs = domain.0.lock().unwrap().syncs;
+    assert_eq!(
+        t.send(Kind::Command, &[0x03, 0x0c, 0]),
+        Err(Error::State(TransportState::Closing))
+    );
+    assert_eq!(t.poll(), Err(Error::State(TransportState::Closing)));
+    assert_eq!(
+        t.start(&provider),
+        Err(Error::State(TransportState::Closing))
+    );
+    assert_eq!(
+        t.initialize(&provider),
+        Err(Error::State(TransportState::Closing))
+    );
+    let first = t.close().unwrap_err();
+    assert_eq!(t.state(), TransportState::Failed);
+    assert_eq!(t.close(), Err(first));
+    drop(t);
+    assert_eq!(*state.events.lock().unwrap(), events);
+    assert_eq!(device.lock().unwrap().operations, operations);
+    assert_eq!(device.lock().unwrap().controls.len(), controls_before + 1);
+    assert_eq!(domain.0.lock().unwrap().syncs, syncs);
+    assert_eq!(native_dma_digest(&domain), dma);
+    assert_eq!(domain.0.lock().unwrap().leases.len(), 14);
+    assert_eq!(counters.unmaps.load(Ordering::Relaxed), 0);
+    assert!(!device.lock().unwrap().dropped);
 }

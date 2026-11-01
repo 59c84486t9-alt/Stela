@@ -991,59 +991,89 @@ pub(super) unsafe fn bcm4377(
     clock: Clock,
 ) -> Result<Bcm4377, Failure> {
     use bcm4377::native::{
-        Error as NativeError, Inputs, MappedRegisters, NativeClock, NativePlatform,
+        Error as NativeError, Inputs, MappedRegisters, NativeClock, NativePlatform, cold,
     };
     let refused = |error: ServiceError| (Error::Native(error), None);
     let failed =
         |error: NativeError, kept: Box<dyn Any>| (Error::Bcm4377(error.into()), Some(kept));
+    let power_clock = clock;
     // SAFETY: the handoff's clock is the calibrated invariant TSC.
     let clock =
         unsafe { NativeClock::new(clock) }.map_err(|error| (Error::Bcm4377(error.into()), None))?;
     let interrupts = services.interrupts().map_err(refused)?;
     let authority = services.authority().map_err(refused)?;
-    let (requester, domain, bars) = claim_sized(services, address)?;
+    let mut requester = services.prepare_requester(address).map_err(refused)?;
+    // Restore D0 before BAR sizing under the original configuration/root owner.
+    if let Err(error) = requester.function_mut().power_up(&power_clock) {
+        return Err(failed(
+            NativeError::Power(error),
+            Box::new((requester, topology)),
+        ));
+    }
+    let bars = requester.function_mut().bars();
     let bar0 = match map(services, address, &bars, 0) {
         Ok(mapping) => mapping,
-        Err(error) => return Err((Error::Native(error), Some(Box::new(requester)))),
+        Err(error) => return Err((Error::Native(error), Some(Box::new((requester, topology))))),
     };
     let bar2 = match map(services, address, &bars, 2) {
         Ok(mapping) => mapping,
-        Err(error) => return Err((Error::Native(error), Some(Box::new((requester, bar0))))),
+        Err(error) => {
+            return Err((
+                Error::Native(error),
+                Some(Box::new((requester, topology, bar0))),
+            ));
+        }
     };
     let spans = match (bar0.physical_span(), bar2.physical_span()) {
         (Ok(bar0), Ok(bar2)) => [bar0, bar2],
         (Err(error), _) | (_, Err(error)) => {
             return Err(failed(
                 NativeError::Mapping(error),
-                Box::new((requester, bar0, bar2)),
+                Box::new((requester, topology, bar0, bar2)),
             ));
         }
     };
     // SAFETY: the mount mapped exactly BAR0 and BAR2 uncached, once each.
     let registers = match unsafe { MappedRegisters::new(spans, [bar0, bar2]) } {
         Ok(registers) => registers,
-        Err((error, mappings)) => return Err(failed(error, Box::new((requester, mappings)))),
+        Err((error, mappings)) => {
+            return Err(failed(error, Box::new((requester, topology, mappings))));
+        }
     };
-    let inputs = Inputs {
-        function: requester.into_function(),
-        retained: Arc::new(authority),
+    let cold_inputs = cold::Inputs {
+        requester,
         topology,
         registers,
-        domain,
+        clock,
+    };
+    // SAFETY: original requester/BAR/root/backing are held, prior firmware,
+    // IRQ/work, bypass and competing PCI writers excluded. No private DMA yet.
+    let cold = unsafe { cold::Cold::new(cold_inputs) }
+        .map_err(|(error, inputs)| failed(error, Box::new(inputs)))?;
+    let bound = match cold.quiesce_and_bind() {
+        Ok(bound) => bound,
+        Err(failure) => return Err(failed(failure.error.clone(), Box::new(failure))),
+    };
+    let inputs = Inputs {
+        function: bound.function,
+        retained: Arc::new(authority),
+        topology: bound.topology,
+        registers: bound.registers,
+        attachment: bound.attachment,
         pages: Box::new(services.pages()),
         board,
         // An x86 board's firmware node carries none of the device-tree
         // calibration or address properties Apple silicon boards do.
         properties: Vec::new(),
-        clock,
+        clock: bound.clock,
         interrupts,
         // No root delivery adapter completes posted MSIs yet, so a stopped
         // function stays quarantined with its owners rather than retired.
         msi_completion: MsiCompletion::unavailable(),
     };
-    // SAFETY: the mount claimed the stopped function with its interrupts
-    // drained, mapped its BARs, isolated its domain and handed over its
-    // segment's bridges; the caller's contract covers the rest.
+    // SAFETY: vendor FLR/D0/BAR restore, original-root drain and current-epoch
+    // binding completed under the same owners. Constructor performs no reset;
+    // only its subsequent transport preparation enables the new domain's BME.
     let platform = unsafe { NativePlatform::new(inputs) }
         .map_err(|(error, inputs)| failed(error, Box::new(inputs)))?;
     platform
