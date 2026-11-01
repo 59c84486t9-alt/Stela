@@ -357,7 +357,7 @@ pub fn storage_path(path: &str) -> bool {
 #[cfg(feature = "std")]
 mod package;
 #[cfg(feature = "std")]
-pub use package::{Package, check_installed_mount};
+pub use package::{Package, check_installed_mount, sync_directory};
 
 #[cfg(test)]
 mod tests;

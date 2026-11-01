@@ -426,7 +426,10 @@ impl Package {
             } else {
                 atomic_write(&destination, bytes)?;
             }
-            File::open(&destination)
+            // Windows flushes a file only through a handle that can write.
+            OpenOptions::new()
+                .write(true)
+                .open(&destination)
                 .and_then(|file| file.sync_all())
                 .map_err(io)?;
             sync_directory(&object_directory)?;
@@ -444,7 +447,10 @@ impl Package {
             } else {
                 atomic_write(&destination, bytes)?;
             }
-            File::open(&destination)
+            // Windows flushes a file only through a handle that can write.
+            OpenOptions::new()
+                .write(true)
+                .open(&destination)
                 .and_then(|file| file.sync_all())
                 .map_err(io)?;
             sync_directory(&object_directory)?;
@@ -486,14 +492,27 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), Error> {
     result
 }
 
-fn sync_directory(path: &Path) -> Result<(), Error> {
+/// Make the renames and creations in the directory `path` durable.
+pub fn sync_directory(path: &Path) -> Result<(), Error> {
     #[cfg(unix)]
     {
         File::open(path)
             .and_then(|directory| directory.sync_all())
             .map_err(io)
     }
-    #[cfg(not(unix))]
+    // FlushFileBuffers flushes a directory, through a handle that can write.
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        OpenOptions::new()
+            .write(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(path)
+            .and_then(|directory| directory.sync_all())
+            .map_err(io)
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = path;
         Err(fail(

@@ -91,7 +91,7 @@ fn cached(client: &Client, directory: &Path, artifact: &Artifact) -> Result<Vec<
     temporary
         .persist_noclobber(&path)
         .with_context(|| format!("cannot publish immutable firmware cache {}", path.display()))?;
-    File::open(directory)?.sync_all()?;
+    host_firmware::sync_directory(directory)?;
     read_cached(&path, artifact)
 }
 
