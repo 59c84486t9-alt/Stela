@@ -106,7 +106,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.remember_target(pc, index);
         let page = pc & !(FETCH_PAGE - 1);
         let context = self.chain.contexts()[chain::half(pc)];
-        let visit = (page / FETCH_PAGE ^ context).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        let visit = ((page / FETCH_PAGE) ^ context).wrapping_mul(0x9e37_79b9_7f4a_7c15);
         let visit = &mut self.visited_pages[(visit >> 48) as usize % VISITED_PAGES];
         if *visit == (page, context) {
             return;
