@@ -9,14 +9,13 @@ use crate::machine::{
     exception::Class,
     mmu::{self, Access, Outcome as Translated},
 };
-use alloc::boxed::Box;
 #[cfg(not(feature = "std"))]
 use alloc::string::ToString;
 use alloc::{format, vec::Vec};
 use stela_compiler::{
     GuestAddress,
     amx::{
-        AmxOperand, AmxOperation, AmxRegisters, decode,
+        AmxOperand, AmxOperation, decode,
         model::{self, AmxError, AmxMemory, MemoryFault},
     },
 };
@@ -188,11 +187,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 return self.refuse_amx(word, "set while state is live: syndrome unknown");
             }
             AmxOperation::Set => {
-                self.cpu.amx.registers = Some(Box::new(AmxRegisters::zeroed()));
+                self.cpu.amx.start();
                 return self.next();
             }
             AmxOperation::Clear if live => {
-                self.cpu.amx.registers = None;
+                self.cpu.amx.clear();
                 return self.next();
             }
             AmxOperation::Clear => {

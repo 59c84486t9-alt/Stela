@@ -362,6 +362,6 @@ fn transfers_outside_ram_stop_without_effects() {
     assert!(format!("{stop:?}").contains("Device"), "{stop:?}");
     assert_eq!(
         machine.cpu.amx.registers.as_deref(),
-        Some(&AmxRegisters::zeroed())
+        Some(&stela_compiler::amx::AmxRegisters::zeroed())
     );
 }

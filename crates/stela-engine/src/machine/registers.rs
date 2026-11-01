@@ -842,11 +842,7 @@ impl Cpu {
             };
         }
         if super::amx::Unit::owns(encoding) {
-            let el = if self.regime() == TranslationRegime::El20 {
-                2
-            } else {
-                1
-            };
+            let el = self.amx_kernel_el();
             return if read {
                 self.amx.read(encoding, el).expect("checked")
             } else {
@@ -926,9 +922,21 @@ impl Cpu {
         impdef::lookup(encoding, self.registers.chip())
     }
 
+    /// The EL AMX's control registers take for the kernel's.
+    fn amx_kernel_el(&self) -> u8 {
+        if self.regime() == TranslationRegime::El20 {
+            2
+        } else {
+            1
+        }
+    }
+
     /// The address of Apple's register `encoding`, if a read that completes
     /// here returns what it holds.
     pub fn apple_read_storage(&self, encoding: Encoding) -> Option<u64> {
+        if super::amx::Unit::owns(encoding) {
+            return self.amx.storage(encoding, self.amx_kernel_el());
+        }
         if let Some(entry) = self.impdef(encoding) {
             return entry
                 .reads_storage()

@@ -103,6 +103,8 @@ pub fn governing(kernel_el: u8) -> AmxView {
 pub struct Unit {
     generation: Option<Generation>,
     controls: [u64; 2],
+    /// `AMX_STATE_T`: 1 between `set` and `clr`.
+    state: u64,
     pub registers: Option<Box<AmxRegisters>>,
 }
 
@@ -127,6 +129,7 @@ impl Unit {
         Self {
             generation,
             controls: [0; 2],
+            state: 0,
             registers: None,
         }
     }
@@ -147,7 +150,30 @@ impl Unit {
     }
 
     pub fn live(&self) -> bool {
-        self.registers.is_some()
+        self.state != 0
+    }
+
+    /// `set`: the registers exist, zeroed.
+    pub fn start(&mut self) {
+        self.registers = Some(Box::new(AmxRegisters::zeroed()));
+        self.state = 1;
+    }
+
+    /// `clr`: the registers go.
+    pub fn clear(&mut self) {
+        self.registers = None;
+        self.state = 0;
+    }
+
+    /// The address of the word an MRS of `encoding` returns, for those that
+    /// return a stored word and have nothing else to do.
+    pub fn storage(&self, encoding: Encoding, kernel_el: u8) -> Option<u64> {
+        self.generation?;
+        match route(encoding, kernel_el) {
+            Some(Route::View(view)) => Some(&self.controls[view as usize] as *const u64 as u64),
+            Some(Route::Undefined) => None,
+            None => (encoding == AMX_STATE_T).then_some(&self.state as *const u64 as u64),
+        }
     }
 
     /// MRS of an AMX control register, or `None` for other encodings.
@@ -166,7 +192,7 @@ impl Unit {
             None => {}
         }
         match encoding {
-            AMX_STATE_T => Some(Outcome::Read(u64::from(self.live()))),
+            AMX_STATE_T => Some(Outcome::Read(self.state)),
             AMXIDR_EL1 => Some(Outcome::Read(1 << (generation.reference_version() - 1))),
             _ => None,
         }
@@ -306,8 +332,16 @@ mod tests {
         assert!(unit.enabled(AmxView::El1));
         assert!(!unit.enabled(AmxView::El2));
         assert_eq!(unit.read(AMX_STATE_T, 1), Some(Outcome::Read(0)));
-        unit.registers = Some(Box::new(AmxRegisters::zeroed()));
+        unit.start();
         assert_eq!(unit.read(AMX_STATE_T, 1), Some(Outcome::Read(1)));
+        let word = |address| {
+            // SAFETY: `storage` names a live word of the unit.
+            unsafe { core::ptr::read(address as *const u64) }
+        };
+        assert_eq!(word(unit.storage(AMX_STATE_T, 1).unwrap()), 1);
+        let control = unit.storage(AMX_CTL_EL1, 1).unwrap();
+        assert_eq!(word(control), AMX_CTL_ENABLE | 0x100);
+        assert_eq!(unit.storage(AMX_CTL_EL2, 1), None);
         assert!(matches!(
             unit.write(AMX_CTL_EL1, 1, 1 << 62),
             Some(Outcome::Refused(_))
