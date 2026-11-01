@@ -124,6 +124,10 @@ pub(super) fn command(arguments: &Run, options: MachineOptions<'_>) -> Process {
                 .flatten(),
         )
         .args(["-m", &memory, "-nodefaults", "-no-reboot"])
+        // Every change to a mapped page of guest RAM flushes the guest's
+        // whole mapping, which under nested virtualization discards the
+        // outer hypervisor's shadow tables: fault it all in before it runs.
+        .args(arguments.kvm.then_some("-mem-prealloc"))
         .args(
             arguments
                 .loadvm
