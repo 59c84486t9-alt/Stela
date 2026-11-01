@@ -5470,6 +5470,81 @@ fn mirrored_reads_complete_natively_from_the_open_cell() {
 /// register reopens with the value it stored, so dyld's toggle and its
 /// read-back take one exit; any other SPRR_PERM write closes it.
 #[test]
+fn implementation_defined_values_complete_natively_after_the_engine_does() {
+    const ADD: u32 = 0x9100_0400; // add x0, x0, #1
+    const MSR: u32 = 0xd51c_fdc6; // msr s3_4_c15_c13_6, x6
+    const MRS: u32 = 0xd53c_fdc8; // mrs x8, s3_4_c15_c13_6
+    const SWITCH: u32 = 0xd51d_f19f; // msr s3_5_c15_c1_4, xzr
+    let encoding = crate::machine::impdef::THREAD_KEY_0;
+    let mut machine = machine(&[ADD, MSR, ADD, MRS, ADD, SWITCH, ADD]);
+    let base = machine.cpu.pc;
+    let fall = |next_pc| NativeExit::Exit {
+        next_pc,
+        kind: ExitKind::Fallthrough as u64,
+    };
+    machine.cpu.pstate = Pstate::reset(2);
+    machine.derived_changed();
+    machine.host.exits = vec![fall(base + 8), fall(base + 16), fall(base + 24)];
+    machine.step().unwrap();
+    assert_eq!(machine.stored_writes, [encoding]);
+    let write = cell_place(stored_write_cell(0));
+    let thunk = register_read::checked_write_thunk(GuestAddress(base + 4), 6, write, 0);
+    assert_eq!(machine.host.installed.last(), Some(&thunk.code));
+    // Reading it before a write stops; the engine's write opens the cell.
+    machine.cpu.pc = base + 4;
+    machine.cpu.state.x[6] = 0x77;
+    machine.system_instruction(MSR).unwrap();
+    let storage = machine.cpu.impdef(encoding).unwrap();
+    let address = machine.cpu.apple.impdef.storage(storage);
+    let cell = machine.mirrors[stored_write_cell(0)];
+    assert_eq!((cell.readable, cell.value), (1, address));
+    // A read completes from the same value.
+    machine.step().unwrap();
+    assert_eq!(machine.stored_reads, [encoding]);
+    machine.cpu.pc = base + 12;
+    machine.system_instruction(MRS).unwrap();
+    assert_eq!(machine.cpu.state.x[8], 0x77);
+    let cell = machine.mirrors[MIRRORED.len()];
+    assert_eq!((cell.readable, cell.value), (1, address));
+    // A register that takes only zero completes natively for XZR alone.
+    machine.step().unwrap();
+    assert_eq!(machine.stored_writes[1], crate::machine::impdef::SWITCH_CLEARED);
+    let write = cell_place(stored_write_cell(1));
+    let thunk =
+        register_read::checked_write_thunk(GuestAddress(base + 20), 31, write, u64::MAX);
+    assert_eq!(machine.host.installed.last(), Some(&thunk.code));
+}
+
+#[test]
+fn writes_that_change_nothing_a_read_follows_keep_the_cells() {
+    const MRS: u32 = 0xd538_d088; // mrs x8, tpidr_el1
+    const MSR_TCR: u32 = 0xd518_2049; // msr tcr_el1, x9
+    const MSR_SCTLR: u32 = 0xd518_1009; // msr sctlr_el1, x9
+    let mut machine = machine(&[MRS]);
+    let base = machine.cpu.pc;
+    let thread = MIRRORED
+        .iter()
+        .position(|&e| e == registers::encodings::TPIDR_EL1)
+        .unwrap();
+    machine.system_instruction(MRS).unwrap();
+    assert_eq!(machine.mirrors[thread].readable, 1);
+    machine.cpu.pc = base;
+    machine.cpu.state.x[9] = machine.cpu.registers.get(SystemRegister::TCR_EL1, 0);
+    let generation = machine.translation_generation;
+    machine.system_instruction(MSR_TCR).unwrap();
+    assert_eq!(machine.mirrors[thread].readable, 1);
+    assert_eq!(machine.translation_generation, generation);
+    // Of SCTLR, EnALS alone leaves them.
+    let sctlr = machine.cpu.registers.get(SystemRegister::SCTLR_EL1, 0);
+    machine.cpu.state.x[9] = sctlr ^ 1 << 56;
+    machine.system_instruction(MSR_SCTLR).unwrap();
+    assert_eq!(machine.mirrors[thread].readable, 1);
+    machine.cpu.state.x[9] = sctlr ^ 1 << 56 ^ 1 << 9;
+    machine.system_instruction(MSR_SCTLR).unwrap();
+    assert!(machine.mirrors.closed());
+}
+
+#[test]
 fn sprr_perm_el0_writes_reopen_its_open_cell() {
     const MRS: u32 = 0xd53e_f1a8; // mrs x8, sprr_perm_el0
     const MSR: u32 = 0xd51e_f1a9; // msr sprr_perm_el0, x9

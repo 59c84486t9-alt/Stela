@@ -1437,7 +1437,7 @@ fn only_writes_a_read_follows_close_the_cells() {
         }
     );
     // CPACR_EL1 decides traps of reads.
-    machine.cpu.state.x[0] = 0;
+    machine.cpu.state.x[0] = machine.cpu.registers.get(Register::CPACR_EL1, 0) ^ 3 << 20;
     machine.system_instruction(MSR_CPACR_X0).unwrap();
     assert_eq!(machine.mirrors[index], Cell::default());
 }

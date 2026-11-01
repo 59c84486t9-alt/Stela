@@ -258,12 +258,16 @@ pub(super) fn keeps_reads(register: SystemRegister) -> bool {
             | APGAKeyHi_EL1
             | CNTP_CTL_EL0
             | CNTP_CVAL_EL0
+            | CNTP_TVAL_EL0
             | CNTV_CTL_EL0
             | CNTV_CVAL_EL0
+            | CNTV_TVAL_EL0
             | CNTHP_CTL_EL2
             | CNTHP_CVAL_EL2
+            | CNTHP_TVAL_EL2
             | CNTHV_CTL_EL2
             | CNTHV_CVAL_EL2
+            | CNTHV_TVAL_EL2
     )
 }
 

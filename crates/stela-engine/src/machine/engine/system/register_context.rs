@@ -3,6 +3,10 @@
 
 use super::*;
 
+/// SCTLR_ELx.EnALS: a trap of LD64B and ST64B, which reaches no MRS or MSR
+/// and no translation.
+const SCTLR_ENALS: u64 = 1 << 56;
+
 impl<H: Host, D: Devices> Context for Access<'_, H, D> {
     fn chip(&self) -> Chip {
         self.machine.cpu.registers.chip()
@@ -333,6 +337,7 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
         let cpu = &mut self.machine.cpu;
         let sctlr = matches!(register, Register::SCTLR_EL1 | Register::SCTLR_EL2);
         let before = if sctlr { cpu.read(register) } else { 0 };
+        let held = cpu.registers.get(register, index);
         // The Apple bank's copy keeps the register's reserved bits.
         let banked = cpu.write_el2_pointer_key(register, value)
             || self.bank == Bank::Apple && {
@@ -350,10 +355,19 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
                 self.plain.set(Some((register, index)));
             }
         }
-        self.machine.register_written(register);
+        let changed = held ^ cpu.registers.get(register, index);
         self.machine
             .profile_missing
             .retain(|missing| *missing != register);
+        // A guarded level writes back the controls it finds around each of
+        // its calls: what derives from a value stays while the value does.
+        if !banked && (changed == 0 || sctlr && changed == SCTLR_ENALS) {
+            if changed != 0 {
+                self.machine.forget_derived();
+            }
+            return Ok(());
+        }
+        self.machine.register_written(register);
         if table_base(register) {
             if self.translation == Translation::Unchanged {
                 self.translation = Translation::TableBase;
