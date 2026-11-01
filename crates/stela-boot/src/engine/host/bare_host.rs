@@ -277,10 +277,16 @@ impl Host for BareHost<'_> {
     fn release_oldest_code(&mut self) -> Option<core::ops::Range<usize>> {
         let state = state();
         // The ring fills parts in turn: the first holding code after the
-        // one being filled is the oldest.
-        let part = (1..CODE_UNITS)
+        // one being filled is the oldest. With only that one, what it holds
+        // is all this machine runs, and the ring bounds its growth: pressure
+        // from the rest of the heap would only make it compile the same
+        // blocks again.
+        let Some(part) = (1..CODE_UNITS)
             .map(|step| (state.code_unit + step) % CODE_UNITS)
-            .find(|&part| !state.installed_ranges[part as usize].is_empty())?;
+            .find(|&part| !state.installed_ranges[part as usize].is_empty())
+        else {
+            return Some(0..0);
+        };
         state.installed_immutable.clear();
         state.installed_ranges[part as usize].clear();
         let unit = code_unit_bytes(state);

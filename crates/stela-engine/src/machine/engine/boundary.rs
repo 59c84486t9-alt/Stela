@@ -146,7 +146,8 @@ pub trait Host {
     /// Free the oldest part of the code arena that holds code, other than
     /// the part new code fills, and return the host addresses it held: low
     /// memory releases the oldest blocks' metadata and keeps the newer
-    /// code. `None` when no other part holds code.
+    /// code. An empty range when no other part holds code; `None` for a
+    /// host whose arena is one part.
     fn release_oldest_code(&mut self) -> Option<core::ops::Range<usize>> {
         None
     }

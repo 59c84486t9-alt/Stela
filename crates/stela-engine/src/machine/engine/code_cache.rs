@@ -349,7 +349,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
     /// Release local code owners under pressure before allocating compilation
     /// input and recovery metadata: the oldest arena part's blocks, or every
-    /// block when the part new code fills holds them all.
+    /// block on a host whose arena is one part.
     ///
     /// Memory another machine or the shared store holds stays low however
     /// much this one releases, so within one stretch of pressure a machine

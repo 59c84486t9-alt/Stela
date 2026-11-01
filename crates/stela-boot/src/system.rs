@@ -41,7 +41,7 @@ mod memory;
 const MIB: u64 = 1024 * 1024;
 /// The bounds of the parts of Stela's memory sized from host RAM
 /// ([`Sizes::for_host`]).
-const HEAP_BYTES: RangeInclusive<u64> = 512 * MIB..=2048 * MIB;
+const HEAP_BYTES: RangeInclusive<u64> = 512 * MIB..=3072 * MIB;
 const CODE_BYTES: RangeInclusive<u64> = 128 * MIB..=512 * MIB;
 const POOL_BYTES: RangeInclusive<u64> = 64 * MIB..=2048 * MIB;
 /// Guest DRAM bytes per byte of each native executor's shadow page-table
