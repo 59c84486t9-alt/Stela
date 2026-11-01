@@ -7,6 +7,7 @@
 use super::support::{
     build_directory, capture, evidence_directory, gpu, source_binding, third_party, tool,
 };
+use super::toolchain::GENERATORS;
 use crate::tools;
 use anyhow::{Context, Result, ensure};
 use meson::Build;
@@ -389,8 +390,8 @@ pub fn build(options: BuildOptions<'_>) -> Result<()> {
         .and_then(|_| tools::which("clrxdisasm"))
         .map(|path| tools::binding(&path))
         .transpose()?;
-    let meson = tool("meson", "generators/bin")?;
-    let ninja = tool("ninja", "generators/bin")?;
+    let meson = tool("meson", GENERATORS)?;
+    let ninja = tool("ninja", GENERATORS)?;
     let bindgen = tool("bindgen", "rust/bin")?;
     let cbindgen = tool("cbindgen", "rust/bin")?;
     let paths = [&meson, &ninja, &bindgen, &cbindgen]

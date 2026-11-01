@@ -7,6 +7,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     fs::File,
+    io::Read,
     path::{Component, Path, PathBuf},
 };
 
@@ -111,6 +112,11 @@ pub fn validate_relative(path: &Path) -> Result<()> {
             path.display()
         );
     }
+    #[cfg(windows)]
+    require!(
+        path.to_str().is_some_and(|text| !text.contains(':')),
+        "invalid relative input components"
+    );
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         use std::os::unix::ffi::OsStrExt;
@@ -128,6 +134,40 @@ pub fn validate_relative(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The bytes of `input`, at most `limit`: their count, digest and, when
+/// `retain` is set, the bytes themselves.
+fn stream(input: &mut File, limit: u64, retain: bool) -> Result<(u64, Hash, Option<Vec<u8>>)> {
+    let mut digest = Sha256::new();
+    let mut bytes = retain.then(Vec::new);
+    let mut size = 0u64;
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let remaining = limit
+            .checked_add(1)
+            .and_then(|bound| bound.checked_sub(size))
+            .ok_or("input limit overflow")?;
+        let count =
+            usize::try_from(remaining.min(u64::try_from(buffer.len()).map_err(|e| e.to_string())?))
+                .map_err(|e| e.to_string())?;
+        let read = input
+            .read(&mut buffer[..count])
+            .map_err(|e| e.to_string())?;
+        if read == 0 {
+            break;
+        }
+        size = size
+            .checked_add(u64::try_from(read).map_err(|e| e.to_string())?)
+            .ok_or("input size overflow")?;
+        require!(size <= limit, "input grew beyond byte bound");
+        digest.update(&buffer[..read]);
+        if let Some(bytes) = &mut bytes {
+            bytes.try_reserve(read).map_err(|error| error.to_string())?;
+            bytes.extend_from_slice(&buffer[..read]);
+        }
+    }
+    Ok((size, digest.finalize().into(), bytes))
+}
+
 pub struct Inputs {
     limits: Limits,
     roots: Vec<platform::Root>,
@@ -139,7 +179,7 @@ impl Inputs {
     pub fn new(limits: Limits) -> Result<Self> {
         require!(
             platform::SUPPORTED,
-            "safe build inputs require Linux/macOS no-follow descriptor operations"
+            "safe build inputs require no-follow operations this host lacks"
         );
         require!(
             limits.max_unique_files > 0
@@ -402,7 +442,7 @@ mod platform {
     use super::*;
     use std::{
         ffi::{CString, OsStr},
-        io::{self, Read},
+        io,
         mem::MaybeUninit,
         os::{
             fd::{AsRawFd, FromRawFd, RawFd},
@@ -595,33 +635,7 @@ mod platform {
                 });
             }
             hook(Step::BeforeRead)?;
-            let mut digest = Sha256::new();
-            let mut bytes = retain.then(Vec::new);
-            let mut size = 0u64;
-            let mut buffer = [0u8; 64 * 1024];
-            loop {
-                let remaining = limit
-                    .checked_add(1)
-                    .and_then(|bound| bound.checked_sub(size))
-                    .ok_or("input limit overflow")?;
-                let count = usize::try_from(
-                    remaining.min(u64::try_from(buffer.len()).map_err(|e| e.to_string())?),
-                )
-                .map_err(|e| e.to_string())?;
-                let read = os(input.read(&mut buffer[..count]))?;
-                if read == 0 {
-                    break;
-                }
-                size = size
-                    .checked_add(u64::try_from(read).map_err(|e| e.to_string())?)
-                    .ok_or("input size overflow")?;
-                require!(size <= limit, "input grew beyond byte bound");
-                digest.update(&buffer[..read]);
-                if let Some(bytes) = &mut bytes {
-                    bytes.try_reserve(read).map_err(|error| error.to_string())?;
-                    bytes.extend_from_slice(&buffer[..read]);
-                }
-            }
+            let (size, sha256, bytes) = stream(&mut input, limit, retain)?;
             hook(Step::AfterRead)?;
             let after = identity(&input)?;
             require!(
@@ -630,14 +644,228 @@ mod platform {
             );
             Ok(Capture {
                 identity: after,
-                sha256: Some(digest.finalize().into()),
+                sha256: Some(sha256),
                 bytes,
             })
         }
     }
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(windows)]
+mod platform {
+    use super::*;
+    use std::{
+        ffi::OsStr,
+        fs::OpenOptions,
+        io,
+        mem::MaybeUninit,
+        os::windows::{fs::OpenOptionsExt, io::AsRawHandle},
+    };
+    pub(super) const SUPPORTED: bool = true;
+    /// Holding a directory open without delete sharing pins its name, which
+    /// gives the walk what a descriptor-relative open gives it on Unix.
+    const SHARE_READ_WRITE: u32 = 1 | 2;
+    const BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    const ATTRIBUTE_DIRECTORY: u32 = 0x10;
+    const ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    /// Windows times count this many units in a second, and 100 ns in each.
+    const TICKS_PER_SECOND: u64 = 10_000_000;
+    #[repr(C)]
+    struct Time {
+        low: u32,
+        high: u32,
+    }
+    impl Time {
+        fn split(&self) -> (i128, i128) {
+            let ticks = u64::from(self.high) << 32 | u64::from(self.low);
+            (
+                i128::from(ticks / TICKS_PER_SECOND),
+                i128::from(ticks % TICKS_PER_SECOND) * 100,
+            )
+        }
+    }
+    #[repr(C)]
+    struct Information {
+        attributes: u32,
+        creation: Time,
+        access: Time,
+        write: Time,
+        volume: u32,
+        size_high: u32,
+        size_low: u32,
+        links: u32,
+        index_high: u32,
+        index_low: u32,
+    }
+    unsafe extern "system" {
+        fn GetFileInformationByHandle(file: *mut core::ffi::c_void, out: *mut Information) -> i32;
+    }
+    pub(super) fn identity(file: &File) -> Result<Identity> {
+        let mut value = MaybeUninit::<Information>::uninit();
+        // SAFETY: live File owns the handle; the output storage is writable.
+        let status =
+            unsafe { GetFileInformationByHandle(file.as_raw_handle(), value.as_mut_ptr()) };
+        require!(
+            status != 0,
+            "handle information: {}",
+            io::Error::last_os_error()
+        );
+        // SAFETY: a successful call initialized the whole structure.
+        let value = unsafe { value.assume_init() };
+        let (mtime_secs, mtime_nanos) = value.write.split();
+        let (ctime_secs, ctime_nanos) = value.creation.split();
+        Ok(Identity {
+            device: i128::from(value.volume),
+            inode: u128::from(value.index_high) << 32 | u128::from(value.index_low),
+            mode: u64::from(value.attributes),
+            bytes: u64::from(value.size_high) << 32 | u64::from(value.size_low),
+            mtime_secs,
+            mtime_nanos,
+            ctime_secs,
+            ctime_nanos,
+        })
+    }
+    fn plain(value: &Identity) -> bool {
+        value.mode & u64::from(ATTRIBUTE_REPARSE_POINT) == 0
+    }
+    fn directory_mode(value: &Identity) -> bool {
+        value.mode & u64::from(ATTRIBUTE_DIRECTORY) != 0 && plain(value)
+    }
+    fn regular(value: &Identity) -> bool {
+        value.mode & u64::from(ATTRIBUTE_DIRECTORY) == 0 && plain(value)
+    }
+    /// The object at `path` itself, a reparse point or not.
+    fn open(path: &Path) -> Result<File> {
+        os(OpenOptions::new()
+            .read(true)
+            .share_mode(SHARE_READ_WRITE)
+            .custom_flags(BACKUP_SEMANTICS | OPEN_REPARSE_POINT)
+            .open(path))
+        .map_err(|error| format!("no-follow open {}: {error}", path.display()))
+    }
+    fn os<T>(value: io::Result<T>) -> Result<T> {
+        value.map_err(|error| error.to_string())
+    }
+    fn open_directory(path: &Path) -> Result<File> {
+        let directory = open(path)?;
+        require!(
+            directory_mode(&identity(&directory)?),
+            "not a plain directory: {}",
+            path.display()
+        );
+        Ok(directory)
+    }
+    /// Each directory of `path` opened without following, held to the end.
+    fn absolute(path: &Path) -> Result<Vec<File>> {
+        let mut prefix = PathBuf::new();
+        let mut held = Vec::new();
+        for part in path.components() {
+            prefix.push(part);
+            if matches!(part, Component::Normal(_)) {
+                held.push(open_directory(&prefix)?);
+            }
+        }
+        Ok(held)
+    }
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub(super) enum Step {
+        BeforeDirectory(usize),
+        BeforeFinalOpen,
+        BeforeRead,
+        AfterRead,
+    }
+    pub(super) struct Capture {
+        pub identity: Identity,
+        pub sha256: Option<Hash>,
+        pub bytes: Option<Vec<u8>>,
+    }
+    pub(super) struct Root {
+        pub path: PathBuf,
+        pub identity: Identity,
+        _held: Vec<File>,
+    }
+    impl Root {
+        pub fn new(selected: &Path) -> Result<Self> {
+            let path = os(selected.canonicalize())?;
+            // Sources are joined with `/`, which a verbatim path takes literally.
+            let path = path
+                .to_str()
+                .and_then(|path| path.strip_prefix(r"\\?\"))
+                .map_or(path.clone(), PathBuf::from);
+            let held = absolute(&path)?;
+            let identity = identity(held.last().ok_or("input root has no directory")?)?;
+            Ok(Self {
+                path,
+                identity,
+                _held: held,
+            })
+        }
+        pub fn check(&self) -> Result<()> {
+            let held = absolute(&self.path)?;
+            let current = held.last().ok_or("input root has no directory")?;
+            require!(
+                self.identity.same_object(&identity(current)?),
+                "selected input root changed"
+            );
+            Ok(())
+        }
+        pub fn capture(
+            &self,
+            relative: &Path,
+            limit: u64,
+            hash: bool,
+            retain: bool,
+            hook: &mut impl FnMut(Step) -> Result<()>,
+        ) -> Result<Capture> {
+            validate_relative(relative)?;
+            let mut at = self.path.clone();
+            let mut held = Vec::new();
+            let parent = relative
+                .parent()
+                .filter(|path| !path.as_os_str().is_empty());
+            for (index, part) in parent.iter().flat_map(|path| path.components()).enumerate() {
+                hook(Step::BeforeDirectory(index))?;
+                let Component::Normal(part) = part else {
+                    return Err("invalid input directory component".into());
+                };
+                at.push::<&OsStr>(part);
+                held.push(open_directory(&at)?);
+            }
+            at.push(relative.file_name().ok_or("input filename missing")?);
+            hook(Step::BeforeFinalOpen)?;
+            let mut input = open(&at)?;
+            let before = identity(&input)?;
+            require!(
+                regular(&before) && before.bytes <= limit,
+                "nonregular/symlink/oversized input: {}",
+                relative.display()
+            );
+            if !hash {
+                return Ok(Capture {
+                    identity: before,
+                    sha256: None,
+                    bytes: None,
+                });
+            }
+            hook(Step::BeforeRead)?;
+            let (size, sha256, bytes) = stream(&mut input, limit, retain)?;
+            hook(Step::AfterRead)?;
+            let after = identity(&input)?;
+            require!(
+                before == after && size == before.bytes,
+                "input changed during bounded capture"
+            );
+            Ok(Capture {
+                identity: after,
+                sha256: Some(sha256),
+                bytes,
+            })
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 mod platform {
     use super::*;
     pub(super) const SUPPORTED: bool = false;

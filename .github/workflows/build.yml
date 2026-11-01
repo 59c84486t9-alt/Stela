@@ -19,7 +19,7 @@ jobs:
 
       - name: Install tools
         run: |
-          brew install llvm lld pkgconf zig
+          brew install llvm lld zig
           echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
           echo "$(brew --prefix lld)/bin" >> "$GITHUB_PATH"
           rustup target add aarch64-apple-darwin x86_64-apple-darwin \

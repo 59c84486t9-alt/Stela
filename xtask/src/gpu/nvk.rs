@@ -9,8 +9,9 @@
 //! the C library, the configuration below and the units in `compat/mesa`.
 use super::{
     nvidia::Toolchain,
-    support::{NATIVE_TARGET, build_directory, capture, gpu, third_party, tool},
+    support::{NATIVE_TARGET, build_directory, capture, gpu, slashed, third_party, tool},
     sysroot::Sysroot,
+    toolchain::GENERATORS,
 };
 use crate::tools::{self, exec};
 use anyhow::{Context, Result, ensure};
@@ -210,7 +211,7 @@ fn paths(directory: &Path) -> Result<(PathBuf, PathBuf)> {
     let path = std::env::join_paths(
         [
             stubs.clone(),
-            local.join("generators/bin"),
+            local.join(GENERATORS),
             local.join("rust/bin"),
         ]
         .into_iter()
@@ -230,7 +231,7 @@ fn setup(
 ) -> Result<()> {
     let packages = directory.join("pkgconfig");
     let machine = directory.join("machine.ini");
-    let description = sysroot.machine_file(toolchain, &packages);
+    let description = sysroot.machine_file(toolchain, &packages)?;
     let plan = build.join("build.ninja");
     let modified = |path: &Path| fs::metadata(path).and_then(|file| file.modified()).ok();
     if modified(&plan) > modified(&sysroot.libc())
@@ -246,10 +247,13 @@ fn setup(
     fs::create_dir_all(&stubs)?;
     for name in UNUSED_TOOLS {
         let stub = stubs.join(name);
-        fs::write(&stub, "#!/bin/sh\nexit 1\n")?;
-        exec(Command::new("chmod").arg("+x").arg(&stub))?;
+        fs::write(&stub, "#!/usr/bin/env python3\nraise SystemExit(1)\n")?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&stub, fs::Permissions::from_mode(0o755))?;
+        }
     }
-    crate::tools::which("pkg-config").context("install pkg-config, which finds the .pc files")?;
     fs::create_dir_all(&packages)?;
     let libdrm = third_party("libdrm");
     fs::write(
@@ -257,28 +261,32 @@ fn setup(
         format!(
             "Name: libdrm\nDescription: vendored headers\nVersion: {LIBDRM_VERSION}\n\
              Cflags: -I{0} -I{0}/include/drm\n",
-            libdrm.display()
+            slashed(&libdrm)
         ),
     )?;
     fs::write(
         packages.join("libelf.pc"),
         format!("Name: libelf\nDescription: unused\nVersion: {LIBELF_VERSION}\nCflags:\n"),
     )?;
-    exec(
-        Command::new(tool("meson", "generators/bin")?)
-            .arg("setup")
-            .arg(build)
-            .arg(third_party("mesa"))
-            .arg("--cross-file")
-            .arg(machine)
-            .args(OPTIONS)
-            .env("PATH", path),
-    )
+    let mut setup = Command::new(tool("meson", GENERATORS)?);
+    setup
+        .arg("setup")
+        .arg(build)
+        .arg(third_party("mesa"))
+        .arg("--cross-file")
+        .arg(machine)
+        .args(OPTIONS)
+        .env("PATH", path);
+    // Rust on Windows does not link through the C compiler Meson finds.
+    if cfg!(windows) {
+        setup.env("RUSTC_LD_FOR_BUILD", "lld-link");
+    }
+    exec(&mut setup)
 }
 
 /// Every source Meson generates, and the structured copy of the compiler crate.
 fn generate(sysroot: &Sysroot, build: &Path, path: &Path) -> Result<()> {
-    let ninja = tool("ninja", "generators/bin")?;
+    let ninja = tool("ninja", GENERATORS)?;
     let mut targets = BTreeSet::new();
     for rule in ["CUSTOM_COMMAND", "CUSTOM_COMMAND_DEP"] {
         let listed = capture(
@@ -311,11 +319,17 @@ fn generate(sysroot: &Sysroot, build: &Path, path: &Path) -> Result<()> {
             && !target.starts_with("meson-")
             && !target.ends_with("install")
     });
+    // bindgen splits these as a shell does, and a path may hold a space.
+    let quoted: Vec<_> = sysroot
+        .compile
+        .iter()
+        .map(|argument| format!("\"{}\"", argument.replace('\\', "/")))
+        .collect();
     exec(
         Command::new(&ninja)
             .args(&targets)
             .current_dir(build)
-            .env("BINDGEN_EXTRA_CLANG_ARGS", sysroot.compile.join(" "))
+            .env("BINDGEN_EXTRA_CLANG_ARGS", quoted.join(" "))
             .env("PATH", path),
     )
 }
@@ -693,7 +707,7 @@ pub fn build(jobs: u16) -> Result<()> {
     common.extend(TARGET_FLAGS.map(str::to_owned));
     common.extend(ADDED_DEFINES.map(|define| format!("-D{define}")));
     common.push(format!("-I{}", gpu().join("compat/mesa").display()));
-    let ninja = tool("ninja", "generators/bin")?;
+    let ninja = tool("ninja", GENERATORS)?;
     let units = units(&build, &objects, &ninja, &path, &common)?;
     compile(&toolchain.clang, &build, &units, jobs)?;
 
@@ -702,11 +716,10 @@ pub fn build(jobs: u16) -> Result<()> {
     if archive.is_file() {
         fs::remove_file(&archive)?;
     }
-    exec(
-        Command::new(&toolchain.archiver)
-            .arg("rcs")
-            .arg(&archive)
-            .args(units.iter().map(|unit| &unit.output)),
+    super::support::archive(
+        &toolchain.archiver,
+        &archive,
+        units.iter().map(|unit| &unit.output),
     )?;
     println!("{} objects in {}", units.len(), archive.display());
     // The test is a static Linux program.

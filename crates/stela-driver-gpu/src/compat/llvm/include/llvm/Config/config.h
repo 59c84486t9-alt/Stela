@@ -14,6 +14,9 @@
 #define HAVE_DECL_ARC4RANDOM 0
 #define HAVE_DECL_FE_ALL_EXCEPT 1
 #define HAVE_DECL_FE_INEXACT 1
+#ifdef _WIN32
+#define HAVE_DECL_STRERROR_S 1
+#else
 #define HAVE_DECL_STRERROR_S 0
 #define HAVE_GETPAGESIZE 1
 #define HAVE_ISATTY 1
@@ -26,6 +29,7 @@
 #define HAVE_STRUCT_STAT_ST_MTIM_TV_NSEC 1
 #endif
 #define HAVE_UNISTD_H 1
+#endif
 #define HAVE_ICU 0
 #define HAVE_WINDOWS_ICU 0
 #define HAVE_ICONV 0

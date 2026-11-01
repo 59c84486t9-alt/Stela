@@ -36,9 +36,10 @@ pub fn exec(command: &mut Command) -> Result<()> {
 }
 
 pub fn which(name: impl AsRef<OsStr>) -> Option<PathBuf> {
-    let name = name.as_ref();
+    let mut name = name.as_ref().to_owned();
+    name.push(env::consts::EXE_SUFFIX);
     env::split_paths(&env::var_os("PATH")?)
-        .map(|directory| directory.join(name))
+        .map(|directory| directory.join(&name))
         .find(|path| path.is_file())
 }
 

@@ -23,6 +23,31 @@ pub fn third_party(name: &str) -> PathBuf {
     crate::tools::root().join("third_party").join(name)
 }
 
+/// A path as Meson's files and `.pc` files read it: a backslash is an escape in both.
+pub fn slashed(path: &Path) -> String {
+    path.display().to_string().replace('\\', "/")
+}
+
+/// Archives `members` through a response file: thousands of paths outgrow a
+/// Windows command line.
+pub fn archive<'a>(
+    archiver: &Path,
+    archive: &Path,
+    members: impl Iterator<Item = &'a PathBuf>,
+) -> Result<()> {
+    let list = archive.with_extension("rsp");
+    let quoted: Vec<_> = members
+        .map(|member| format!("\"{}\"", slashed(member)))
+        .collect();
+    fs::write(&list, quoted.join("\n"))?;
+    crate::tools::exec(
+        Command::new(archiver)
+            .arg("rcs")
+            .arg(archive)
+            .arg(format!("@{}", list.display())),
+    )
+}
+
 /// A build tree under Cargo's target directory.
 pub fn build_directory(name: &str) -> PathBuf {
     crate::tools::root().join("target/gpu").join(name)
@@ -45,7 +70,7 @@ pub fn tool(name: &str, local: &str) -> Result<PathBuf> {
     let path = crate::tools::root()
         .join(".tools/gpu")
         .join(local)
-        .join(name);
+        .join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
     path.is_file()
         .then_some(path)
         .or_else(|| crate::tools::which(name))

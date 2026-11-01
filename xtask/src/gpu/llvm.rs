@@ -120,6 +120,27 @@ const CXX_FLAGS: [&str; 8] = [
     "-D__STDC_LIMIT_MACROS",
     "-fno-exceptions",
 ];
+/// What LLVM's Windows support code expects of a unit that builds on Windows.
+const TOOL_WINDOWS_FLAGS: [&str; 4] = [
+    "-DUNICODE",
+    "-D_UNICODE",
+    "-D_HAS_EXCEPTIONS=0",
+    "-D_WIN32_WINNT=0x0A00",
+];
+/// The system libraries `llvm-min-tblgen` links.
+const TOOL_LIBRARIES: &[&str] = if cfg!(windows) {
+    &[
+        "-lole32",
+        "-lpsapi",
+        "-lshell32",
+        "-lws2_32",
+        "-lntdll",
+        "-luuid",
+        "-ladvapi32",
+    ]
+} else {
+    &["-lm"]
+};
 /// What a C unit drops of the flags above.
 const CXX_ONLY: [&str; 4] = [
     "-std=c++17",
@@ -156,7 +177,7 @@ fn sources(directory: &Path, extensions: &[&str], found: &mut Vec<PathBuf>) -> R
 
 fn unit(source: &Path, objects: &Path, root: &Path, flags: &[String]) -> Result<Unit> {
     let relative = source.strip_prefix(root).unwrap_or(source);
-    let name = relative.to_string_lossy().replace(['/', '.'], "_") + ".o";
+    let name = relative.to_string_lossy().replace(['/', '\\', '.'], "_") + ".o";
     let mut arguments = flags.to_vec();
     arguments.push(
         if source.extension().is_some_and(|extension| extension == "c") {
@@ -228,6 +249,9 @@ fn build_tool(toolchain: &Toolchain, llvm: &Path, directory: &Path, jobs: u16) -
     fs::create_dir_all(&objects)?;
     let mut flags: Vec<String> = CXX_FLAGS.map(str::to_owned).to_vec();
     flags.push("-O1".to_owned());
+    if cfg!(windows) {
+        flags.extend(TOOL_WINDOWS_FLAGS.map(str::to_owned));
+    }
     for include in [gpu().join("compat/llvm/include"), llvm.join("include")] {
         flags.push(format!("-I{}", include.display()));
     }
@@ -264,7 +288,7 @@ fn build_tool(toolchain: &Toolchain, llvm: &Path, directory: &Path, jobs: u16) -
         })
         .collect::<Result<Vec<_>>>()?;
     compile(&toolchain.clang, directory, &units, jobs)?;
-    let tool = directory.join("llvm-min-tblgen");
+    let tool = directory.join(format!("llvm-min-tblgen{}", std::env::consts::EXE_SUFFIX));
     let newest = units
         .iter()
         .map(|unit| fs::metadata(&unit.output)?.modified())
@@ -280,7 +304,7 @@ fn build_tool(toolchain: &Toolchain, llvm: &Path, directory: &Path, jobs: u16) -
                 .arg("-o")
                 .arg(&tool)
                 .args(units.iter().map(|unit| &unit.output))
-                .arg("-lm"),
+                .args(TOOL_LIBRARIES),
         )?;
     }
     Ok(tool)
@@ -417,11 +441,10 @@ pub(super) fn build(toolchain: &Toolchain, jobs: u16, test: bool) -> Result<()> 
     if archive.is_file() {
         fs::remove_file(&archive)?;
     }
-    exec(
-        Command::new(&toolchain.archiver)
-            .arg("rcs")
-            .arg(&archive)
-            .args(units.iter().map(|unit| &unit.output)),
+    super::support::archive(
+        &toolchain.archiver,
+        &archive,
+        units.iter().map(|unit| &unit.output),
     )?;
     println!("{} objects in {}", units.len(), archive.display());
     if test {

@@ -2,7 +2,7 @@
 //! Ninja and Mesa's Python generator modules in a virtual environment, and the
 //! Rust binding generators NAK's build calls.
 use crate::tools::{self, exec};
-use anyhow::{Result, bail, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use sha2::{Digest, Sha256};
 use std::{fs, path::PathBuf, process::Command};
 
@@ -26,9 +26,10 @@ const STANDALONE: [(&str, &str); 3] = [
         "4595c5589fff7bf0cb158d9a88a797e0d791fa33830770fcb7bf3f4b104feeae",
     ),
 ];
-const PYTHON_PACKAGES: [&str; 5] = [
+const PYTHON_PACKAGES: [&str; 6] = [
     "meson==1.11.2",
     "ninja==1.13.2",
+    "pkgconf==2.5.1.post2",
     "Mako==1.4.3",
     "packaging==26.3",
     "PyYAML==6.0.3",
@@ -36,9 +37,40 @@ const PYTHON_PACKAGES: [&str; 5] = [
 const RUST_PACKAGES: [&str; 2] = ["bindgen-cli@0.73.2", "cbindgen@0.29.4"];
 /// The pins an installation was made from, beside it.
 const STAMP: &str = "stela-pins";
+/// Where a virtual environment keeps its programs, under `.tools/gpu`.
+pub const GENERATORS: &str = if cfg!(windows) {
+    "generators/Scripts"
+} else {
+    "generators/bin"
+};
+/// The virtual environment's Python, under `.tools/gpu/generators`.
+const VENV_PYTHON: &str = if cfg!(windows) {
+    "Scripts/python.exe"
+} else {
+    "bin/python3"
+};
 
 fn directory() -> PathBuf {
     tools::root().join(".tools/gpu")
+}
+
+/// Meson's pkg-config. The wheel's launcher loses its output to whoever
+/// captures it, so Meson runs the program it wraps, which needs no system one.
+pub fn pkg_config() -> Result<String> {
+    let generators = directory().join("generators");
+    let packages = if cfg!(windows) {
+        generators.join("Lib/site-packages")
+    } else {
+        fs::read_dir(generators.join("lib"))?
+            .next()
+            .context("the generators name no Python")??
+            .path()
+            .join("site-packages")
+    };
+    Ok(super::support::slashed(&packages.join(format!(
+        "pkgconf/.bin/pkgconf{}",
+        std::env::consts::EXE_SUFFIX
+    ))))
 }
 
 /// Installs whatever is missing or pinned differently, then returns.
@@ -46,7 +78,7 @@ pub fn install() -> Result<()> {
     let generators = directory().join("generators");
     let pins = PYTHON_PACKAGES.join("\n") + "\n";
     if fs::read_to_string(generators.join(STAMP)).ok().as_deref() != Some(pins.as_str()) {
-        let python = generators.join("bin/python3");
+        let python = generators.join(VENV_PYTHON);
         if !python.is_file() {
             exec(
                 Command::new(base_python()?)

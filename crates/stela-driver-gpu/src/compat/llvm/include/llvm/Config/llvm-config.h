@@ -6,8 +6,10 @@
 #define LLVM_ENABLE_THREADS 0
 #define LLVM_HAS_ATOMICS 1
 #define LLVM_HOST_TRIPLE "x86_64-unknown-uefi"
+#ifndef _WIN32
 #define LLVM_ON_UNIX 1
 #define HAVE_SYSEXITS_H 1
+#endif
 #define LLVM_USE_INTEL_JITEVENTS 0
 #define LLVM_USE_OPROFILE 0
 #define LLVM_USE_PERF 0

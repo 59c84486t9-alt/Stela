@@ -97,7 +97,11 @@ fn resolved(program: &Path) -> PathBuf {
     let found = env::var_os("PATH")
         .into_iter()
         .flat_map(|paths| env::split_paths(&paths).collect::<Vec<_>>())
-        .map(|directory| directory.join(program))
+        .map(|directory| {
+            let mut candidate = directory.join(program).into_os_string();
+            candidate.push(env::consts::EXE_SUFFIX);
+            PathBuf::from(candidate)
+        })
         .find(|candidate| candidate.is_file())
         .unwrap_or_else(|| program.to_path_buf());
     fs::canonicalize(&found).unwrap_or_else(|error| panic!("{}: {error}", found.display()))
@@ -143,8 +147,8 @@ pub fn compile(build: &cc::Build, unit: Unit, ordinal: u32) -> Captured {
         .arg(&depfile));
     let dependencies = fs::read_to_string(&depfile)
         .unwrap_or_else(|error| panic!("{}: {error}", depfile.display()))
-        .replace("\\\n", " ")
-        .split_whitespace()
+        .lines()
+        .flat_map(|line| line.trim_end_matches('\\').split_whitespace())
         .skip(1)
         .map(PathBuf::from)
         .collect();

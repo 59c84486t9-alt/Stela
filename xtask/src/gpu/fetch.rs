@@ -239,6 +239,8 @@ fn initialize(submodule: &Submodule) -> Result<()> {
     let directory = submodule.directory();
     fs::create_dir_all(&directory)?;
     exec(git(&directory).args(["init", "-q"]))?;
+    // Pinned sources hash and build the same on every host.
+    exec(git(&directory).args(["config", "core.autocrlf", "false"]))?;
     exec(git(&directory).args(["remote", "add", "origin", &submodule.url]))?;
     first_checkout(submodule)
 }

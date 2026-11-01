@@ -6,17 +6,18 @@ use super::{
     llvm,
     nvidia::Toolchain,
     nvk::{LIBC, LIBC_TEST_FLAGS, REGEX, Unit, compile, resource_directory},
-    support::{gpu, third_party},
+    support::{gpu, slashed, third_party},
 };
-use crate::tools::exec;
 use anyhow::Result;
 use std::{
     fs,
     path::{Path, PathBuf},
-    process::Command,
 };
 
 const TARGET: &str = "--target=x86_64-unknown-linux-gnu";
+/// The Rust of the machine: nothing builds with it, and Meson checks that it
+/// links programs. This target carries the C library that takes.
+const RUST_TARGET: &str = "x86_64-unknown-linux-musl";
 /// Some of Mesa's probes link shared libraries.
 const POSITION_INDEPENDENT: &str = "-fPIC";
 
@@ -70,8 +71,8 @@ impl Sysroot {
 
         // The compiler's own directory is a default one, which Meson drops
         // from `-isystem`.
-        let installed = format!("-idirafter{resource}");
-        let system = |include: &Path| format!("-isystem{}", include.display());
+        let installed = format!("-idirafter{}", resource.replace('\\', "/"));
+        let system = |include: &Path| format!("-isystem{}", slashed(include));
         let shared = [TARGET.to_owned(), "-nostdinc".to_owned()];
         let mut compile = shared.to_vec();
         compile.extend([system(&libc), installed.clone(), "-DSTELA_LIBC".to_owned()]);
@@ -98,7 +99,7 @@ impl Sysroot {
     }
 
     /// Meson's description of the machine, with `.pc` files in `packages`.
-    pub fn machine_file(&self, toolchain: &Toolchain, packages: &Path) -> String {
+    pub fn machine_file(&self, toolchain: &Toolchain, packages: &Path) -> Result<String> {
         let list = |flags: &[String]| {
             flags
                 .iter()
@@ -108,20 +109,22 @@ impl Sysroot {
         };
         let mut link = vec![
             TARGET.to_owned(),
-            format!("--ld-path={}", toolchain.linker.display()),
-            format!("--sysroot={}", self.directory.display()),
+            format!("--ld-path={}", slashed(&toolchain.linker)),
+            format!("--sysroot={}", slashed(&self.directory)),
             "-nostdlib".to_owned(),
         ];
         let mut link_cxx = link.clone();
         link.push("-lc".to_owned());
         link_cxx.extend(["-lc++".to_owned(), "-lc".to_owned()]);
-        format!(
+        Ok(format!(
             "[binaries]\n\
              c = '{clang}'\n\
              cpp = '{clangxx}'\n\
              ar = '{archiver}'\n\
-             rust = 'rustc'\n\
-             pkg-config = 'pkg-config'\n\
+             nm = '{symbols}'\n\
+             rust = ['rustc', '--target', '{RUST_TARGET}', '-C', 'link-arg={TARGET}', \
+             '-C', 'link-arg=--ld-path={linker}']\n\
+             pkg-config = '{pkg_config}'\n\
              [built-in options]\n\
              c_args = [{compile}]\n\
              cpp_args = [{compile_cxx}]\n\
@@ -135,15 +138,22 @@ impl Sysroot {
              cpu_family = 'x86_64'\n\
              cpu = 'x86_64'\n\
              endian = 'little'\n",
-            clang = toolchain.clang.display(),
-            clangxx = toolchain.clangxx.display(),
-            archiver = toolchain.archiver.display(),
+            clang = slashed(&toolchain.clang),
+            clangxx = slashed(&toolchain.clangxx),
+            archiver = slashed(&toolchain.archiver),
+            symbols = slashed(
+                &toolchain
+                    .archiver
+                    .with_file_name(format!("llvm-nm{}", std::env::consts::EXE_SUFFIX))
+            ),
+            linker = slashed(&toolchain.linker),
+            pkg_config = super::toolchain::pkg_config()?,
             compile = list(&self.compile),
             compile_cxx = list(&self.compile_cxx),
             link = list(&link),
             link_cxx = list(&link_cxx),
-            packages = packages.display(),
-        )
+            packages = slashed(packages),
+        ))
     }
 }
 
@@ -157,10 +167,9 @@ fn archive(toolchain: &Toolchain, archive: &Path, units: &[Unit]) -> Result<()> 
     if archive.is_file() {
         fs::remove_file(archive)?;
     }
-    exec(
-        Command::new(&toolchain.archiver)
-            .arg("rcs")
-            .arg(archive)
-            .args(units.iter().map(|unit| &unit.output)),
+    super::support::archive(
+        &toolchain.archiver,
+        archive,
+        units.iter().map(|unit| &unit.output),
     )
 }

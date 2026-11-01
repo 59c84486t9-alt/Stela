@@ -65,12 +65,13 @@ impl Toolchain {
             .join("lib/rustlib")
             .join(host)
             .join("bin");
+        let tool = |name: &str| directory.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
         let toolchain = Self {
             clang: tools::which("clang").context("install Clang")?,
             clangxx: tools::which("clang++").context("install Clang's C++ compiler")?,
-            linker: directory.join("gcc-ld/ld.lld"),
-            objcopy: directory.join("llvm-objcopy"),
-            archiver: directory.join("llvm-ar"),
+            linker: tool("gcc-ld/ld.lld"),
+            objcopy: tool("llvm-objcopy"),
+            archiver: tool("llvm-ar"),
         };
         for path in [&toolchain.linker, &toolchain.objcopy, &toolchain.archiver] {
             ensure!(
