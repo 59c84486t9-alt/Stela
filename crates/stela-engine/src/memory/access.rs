@@ -146,7 +146,7 @@ pub(super) unsafe fn read_doublewords(pointer: *const u8, output: &mut [u8]) -> 
     #[cfg(target_arch = "x86_64")]
     {
         let mut bytes = 0;
-        for chunk in output.chunks_exact_mut(DOUBLEWORD_BYTES) {
+        for chunk in output.as_chunks_mut::<DOUBLEWORD_BYTES>().0 {
             let value: u64;
             // SAFETY: an aligned doubleword of the caller's coherent RAM,
             // which Intel and AMD read atomically.
