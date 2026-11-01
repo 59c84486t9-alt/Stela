@@ -19,7 +19,7 @@ use core::{
     mem::ManuallyDrop,
     ops::Range,
     ptr::NonNull,
-    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
 };
 use stela_drivers::bus::dma::{
     mapping::{Direction, DmaDomain, DmaError, DomainMapping},
@@ -28,6 +28,8 @@ use stela_drivers::bus::dma::{
 };
 
 use crate::requester::RequesterClaim;
+
+pub mod interrupt;
 
 const PAGE: usize = 4096;
 const ADDRESS: u64 = 0x000f_ffff_ffff_f000;
@@ -91,6 +93,7 @@ pub enum VtdError {
     Memory,
     Timeout,
     Invalidation,
+    Exhausted,
     FaultOverflow,
 }
 
@@ -317,6 +320,10 @@ struct State {
 /// require process/deferred context; the lock is not a hard-IRQ service.
 pub struct Unit<R: Registers> {
     registers: ManuallyDrop<R>,
+    // Persistent GCMD controls only; one-shot SRTP/SIRTP/WBF are never saved.
+    command: AtomicU32,
+    interrupts: ManuallyDrop<UnsafeCell<Option<interrupt::State>>>,
+    ecap: u64,
     source: &'static (dyn PageSource + Sync),
     held: AtomicBool,
     state: ManuallyDrop<UnsafeCell<State>>,
@@ -510,6 +517,9 @@ impl<R: Registers> Unit<R> {
         }
         let unit = Arc::new(Self {
             registers: ManuallyDrop::new(registers),
+            command: AtomicU32::new(0),
+            interrupts: ManuallyDrop::new(UnsafeCell::new(None)),
+            ecap,
             source,
             held: AtomicBool::new(false),
             state: ManuallyDrop::new(UnsafeCell::new(State {
@@ -537,10 +547,11 @@ impl<R: Registers> Unit<R> {
         // owner, never a firmware handler kept across ownership transfer.
         unit.registers.write32(FECTL, 1 << 31);
         unit.registers.write64(RTADDR, state.root.physical());
-        unit.registers.write32(GCMD, ROOT_POINTER);
+        unit.write_command(ROOT_POINTER)?;
         unit.wait32(GSTS, ROOT_POINTER, true)?;
-        unit.invalidate(0, true)?;
-        unit.registers.write32(GCMD, TRANSLATION);
+        unit.invalidate(true)?;
+        unit.command.store(TRANSLATION, Ordering::Relaxed);
+        unit.write_command(0)?;
         unit.wait32(GSTS, TRANSLATION, true)?;
         drop(guard);
         Ok(unit)
@@ -569,7 +580,7 @@ impl<R: Registers> Unit<R> {
         }
         // VT-d 6.5.4's DW acknowledgement covers this original root's
         // translated writes; use the same checked completion as live domains.
-        if self.invalidate(TRANSLATION, false).is_err() {
+        if self.invalidate(false).is_err() {
             state.poisoned = true;
             return Err(DmaError::InvalidationFailed);
         }
@@ -602,7 +613,7 @@ impl<R: Registers> Unit<R> {
                 state.root.flush(&*self.registers, line);
             }
             publish();
-            if let Err(error) = self.invalidate(TRANSLATION, true) {
+            if let Err(error) = self.invalidate(true) {
                 state.poisoned = true;
                 return Err(error);
             }
@@ -674,7 +685,7 @@ impl<R: Registers> Unit<R> {
                 context.flush(&*self.registers, line);
             }
             publish();
-            if let Err(error) = self.invalidate(TRANSLATION, true) {
+            if let Err(error) = self.invalidate(true) {
                 state.poisoned = true;
                 return Err(error);
             }
@@ -690,7 +701,7 @@ impl<R: Registers> Unit<R> {
             context.flush(&*self.registers, line);
         }
         publish();
-        if let Err(error) = self.invalidate(TRANSLATION, true) {
+        if let Err(error) = self.invalidate(true) {
             state.poisoned = true;
             return Err(error);
         }
@@ -751,6 +762,9 @@ impl<R: Registers> Unit<R> {
         if self.cap & CAP_PAGE_SELECTIVE == 0 || u64::from(mask) > largest {
             return self.invalidate_domain(did);
         }
+        if self.queued_iotlb(3, did, first >> mask << mask << 12, mask as u8)? {
+            return Ok(());
+        }
         publish();
         self.flush_write_buffer()?;
         let mut request = IOTLB_INVALIDATE | IOTLB_PAGE | u64::from(did) << IOTLB_DOMAIN_SHIFT;
@@ -775,8 +789,9 @@ impl<R: Registers> Unit<R> {
         Ok(())
     }
     fn flush_write_buffer(&self) -> Result<(), VtdError> {
+        self.check_interrupt_state()?;
         if self.cap & CAP_WRITE_BUFFER != 0 {
-            self.registers.write32(GCMD, TRANSLATION | WRITE_BUFFER);
+            self.write_command(WRITE_BUFFER)?;
             self.wait32(GSTS, WRITE_BUFFER, false)?;
         }
         Ok(())
@@ -784,6 +799,9 @@ impl<R: Registers> Unit<R> {
     /// Invalidate one domain's IOTLB entries, draining its queued DMA: the
     /// unit may grant the global invalidation instead.
     fn invalidate_domain(&self, did: u16) -> Result<(), VtdError> {
+        if self.queued_iotlb(2, did, 0, 0)? {
+            return Ok(());
+        }
         publish();
         self.flush_write_buffer()?;
         let mut request = IOTLB_INVALIDATE | IOTLB_DOMAIN | u64::from(did) << IOTLB_DOMAIN_SHIFT;
@@ -848,7 +866,10 @@ impl<R: Registers> Unit<R> {
             core::hint::spin_loop();
         }
     }
-    fn invalidate(&self, command: u32, context: bool) -> Result<(), VtdError> {
+    fn invalidate(&self, context: bool) -> Result<(), VtdError> {
+        if self.queued_global(context)? {
+            return Ok(());
+        }
         publish();
         if context {
             self.wait64(CCMD, CONTEXT_INVALIDATE)?;
@@ -873,7 +894,7 @@ impl<R: Registers> Unit<R> {
             return Err(VtdError::Invalidation);
         }
         if self.cap & CAP_WRITE_BUFFER != 0 {
-            self.registers.write32(GCMD, command | WRITE_BUFFER);
+            self.write_command(WRITE_BUFFER)?;
             self.wait32(GSTS, WRITE_BUFFER, false)?;
         }
         Ok(())
@@ -894,8 +915,14 @@ impl<R: Registers> Unit<R> {
         if !state.domains.is_empty() {
             return Err(VtdError::Busy);
         }
-        self.invalidate(TRANSLATION, true)?;
-        self.registers.write32(GCMD, 0);
+        self.interrupt_shutdown_ready()?;
+        // Latch before any disable/invalidation effect, including unwind. A
+        // failed shutdown must not permit a new requester/map on that root.
+        state.poisoned = true;
+        self.stop_interrupt_remapping()?;
+        self.invalidate(true)?;
+        self.command.store(0, Ordering::Relaxed);
+        self.write_command(0)?;
         self.wait32(GSTS, TRANSLATION, false)?;
         state.shutdown = true;
         Ok(())
@@ -911,6 +938,7 @@ impl<R: Registers> Drop for Unit<R> {
             // acknowledgement and TE-off acknowledgement preceded shutdown.
             unsafe {
                 ManuallyDrop::drop(&mut self.state);
+                ManuallyDrop::drop(&mut self.interrupts);
                 ManuallyDrop::drop(&mut self.registers);
             }
         } else {
@@ -1141,7 +1169,7 @@ impl<R: Registers> RequesterDomain<R> {
             context.flush(&*self.unit.registers, line);
         }
         publish();
-        if let Err(error) = self.unit.invalidate(TRANSLATION, true) {
+        if let Err(error) = self.unit.invalidate(true) {
             state.poisoned = true;
             return Err(error);
         }
@@ -1390,7 +1418,7 @@ unsafe impl<R: Registers + 'static> DmaDomain for RequesterDomain<R> {
         // returning. It neither establishes device stop nor drains peer DMA.
         // The existing operation verifies completion/granularity and performs
         // the real write-buffer flush where the unit requires it.
-        if self.unit.invalidate(TRANSLATION, false).is_err() {
+        if self.unit.invalidate(false).is_err() {
             state.poisoned = true;
             return Err(DmaError::InvalidationFailed);
         }
