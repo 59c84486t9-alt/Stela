@@ -892,7 +892,14 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> Link for Managed
                 && s.pending.is_none()
                 && s.released.is_none()
                 && s.notices.is_empty();
-            self.now() + if idle { TIMER_TICK_US } else { 0 }
+            let due = self
+                .now()
+                .saturating_add(if idle { TIMER_TICK_US } else { 0 });
+            s.client
+                .client
+                .state()
+                .link_removal
+                .map_or(due, |deadline| due.min(deadline))
         })
     }
     fn transmit(&mut self, frame: &[u8]) -> Result<(), LinkError> {
