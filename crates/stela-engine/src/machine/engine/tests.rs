@@ -2727,6 +2727,31 @@ fn a_tlbi_by_va_drops_the_lookup_entries_of_its_leaf_in_every_context() {
     assert_eq!(machine.contexts(2, variant), contexts);
 }
 
+#[test]
+fn a_new_context_learns_the_blocks_its_page_fetched_in_others() {
+    const RET: u32 = 0xd65f_03c0;
+    let mut machine = machine(&[RET, RET, RET]);
+    let mut fetch = |pc| match machine.fetch_block(pc, false) {
+        Ok(Fetched::Block(index)) => index,
+        _ => panic!("a block"),
+    };
+    let (first, second) = (fetch(BASE), fetch(BASE + 4));
+    // The third block of the page was compiled, but no fetch reached it.
+    let third = fetch(BASE + 8);
+    machine.blocks[third].fetched = false;
+
+    let contexts = machine.chain.contexts().map(|context| context + (1 << 8));
+    machine.chain.set_contexts(contexts);
+    machine.remember_target_page(BASE, first);
+    let context = contexts[chain::half(BASE)];
+    let entry = |machine: &Machine<FakeHost, NoDevices>, pc| {
+        machine.targets.find(chain::lookup_slot(pc, context), pc, context)
+    };
+    let learnt = entry(&machine, BASE + 4);
+    assert_eq!((learnt.context, learnt.block), (context, second as u32));
+    assert_ne!(entry(&machine, BASE + 8).context, context);
+}
+
 /// A TLBI by VA of one process leaves the other processes' entries of the
 /// same VAs, by probe or by table scan, unless a global page shares them.
 #[test]

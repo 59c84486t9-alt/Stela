@@ -40,7 +40,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 && block.physical == physical
                 && self.variants[block.variant.0 as usize] == variant
             {
-                self.remember_target(pc, target.block as usize);
+                self.remember_target_page(pc, target.block as usize);
                 return Ok(Fetched::Block(target.block as usize));
             }
         }
@@ -51,7 +51,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             && entry.variant == variant
             && entry.generation == self.code_generation
         {
-            self.remember_target(pc, entry.block);
+            self.remember_target_page(pc, entry.block);
             return Ok(Fetched::Block(entry.block));
         }
         let indexed = self
@@ -93,8 +93,36 @@ impl<H: Host, D: Devices> Machine<H, D> {
             generation: self.code_generation,
             block: index,
         });
-        self.remember_target(pc, index);
+        self.remember_target_page(pc, index);
         Ok(Fetched::Block(index))
+    }
+
+    /// [`Self::remember_target`], and, the first time this context reaches
+    /// the page of `pc`, every block of the page a fetch reached in any
+    /// context: a process runs what its libraries' other processes ran, and
+    /// learning it one exit at a time costs more than the blocks' code.
+    pub(super) fn remember_target_page(&mut self, pc: u64, index: usize) {
+        self.blocks[index].fetched = true;
+        self.remember_target(pc, index);
+        let page = pc & !(FETCH_PAGE - 1);
+        let context = self.chain.contexts()[chain::half(pc)];
+        let visit = (page / FETCH_PAGE ^ context).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        let visit = &mut self.visited_pages[(visit >> 48) as usize % VISITED_PAGES];
+        if *visit == (page, context) {
+            return;
+        }
+        *visit = (page, context);
+        let variant = self.blocks[index].variant;
+        let mut blocks = core::mem::take(&mut self.page_blocks);
+        blocks.extend(self.index.page(self.blocks[index].physical));
+        for &other in &blocks {
+            let block = &self.blocks[other];
+            if block.fetched && block.variant == variant && block.pc & !(FETCH_PAGE - 1) == page {
+                self.remember_target(block.pc, other);
+            }
+        }
+        blocks.clear();
+        self.page_blocks = blocks;
     }
 
     /// Record that a fetch at `pc` runs block `index` in the current
@@ -523,6 +551,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             first,
             terminal,
             taken: 0,
+            fetched: false,
             source_bytes: compiled.source_bytes() as u16,
             source_hash: source_hash(&source[..compiled.source_bytes()]),
         };

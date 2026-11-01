@@ -174,6 +174,8 @@ const HOST_REFUSED_FETCH_LEVEL: i8 = 3;
 /// ID_AA64PFR0_EL1.CSV3, FEAT_CSV3's field.
 const CSV3_SHIFT: u32 = 60;
 const JUMP_CACHE: usize = 4096;
+/// The pages and contexts [`Machine::visited_pages`] holds.
+const VISITED_PAGES: usize = 1 << 12;
 /// The most blocks one native run chains into, which bounds how late the
 /// engine sees a timer or device deadline pass (tens of microseconds of
 /// guest code; every System register write and device access exits
@@ -436,6 +438,10 @@ struct Block {
     terminal: u32,
     /// Exits to the engine at `terminal`, up to its limit.
     taken: u32,
+    /// A fetch reached it through the engine: it is worth a lookup entry in
+    /// the other contexts of its page
+    /// ([`Machine::remember_target_page`]).
+    fetched: bool,
     /// The guest bytes it was compiled from, for [`Machine::stale_code`].
     source_bytes: u16,
     source_hash: u64,

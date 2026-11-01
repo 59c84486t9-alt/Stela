@@ -57,7 +57,7 @@ impl BlockIndex {
     }
 
     /// The [`Self::entries`] of the page at `frame`.
-    fn page(&self, frame: u64) -> Option<usize> {
+    fn page_of(&self, frame: u64) -> Option<usize> {
         let (cached, entries) = self.front[Self::front_slot(frame)];
         if cached == frame {
             return Some(entries as usize);
@@ -69,7 +69,7 @@ impl BlockIndex {
     /// other PCs or variants may share.
     fn at(&mut self, physical: u64) -> Option<&[Entry]> {
         let (frame, offset) = split(physical);
-        let page = self.page(frame)?;
+        let page = self.page_of(frame)?;
         self.front[Self::front_slot(frame)] = (frame, page as u32);
         let entries = &self.entries[page];
         let start = entries.partition_point(|entry| entry.offset < offset);
@@ -91,11 +91,20 @@ impl BlockIndex {
             .find(|&slot| blocks[slot].pc == pc && blocks[slot].variant == variant)
     }
 
+    /// The blocks of the page holding `physical`.
+    pub(super) fn page(&self, physical: u64) -> impl Iterator<Item = usize> + '_ {
+        let (frame, _) = split(physical);
+        BlockIndex::page_of(self, frame)
+            .into_iter()
+            .flat_map(|page| &self.entries[page])
+            .map(|entry| entry.slot as usize)
+    }
+
     /// Find the block in `slot` by its key, in place of any block of the key.
     pub(super) fn insert(&mut self, blocks: &Table<Block>, slot: usize) {
         let block = &blocks[slot];
         let (frame, offset) = split(block.physical);
-        let page = match self.page(frame) {
+        let page = match self.page_of(frame) {
             Some(page) => page,
             None => {
                 let page = self.free.pop().unwrap_or_else(|| {
@@ -200,6 +209,7 @@ mod tests {
             first: 0,
             terminal: 0,
             taken: 0,
+            fetched: false,
             source_bytes: 4,
             source_hash: 0,
         }
