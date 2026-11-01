@@ -280,7 +280,12 @@ unsafe impl Cpu for CpuModel {
     fn ticks(&self) -> u64 {
         self.time.fetch_add(1, Ordering::Relaxed)
     }
-    fn fatal(&self, _: WorkError) -> ! {
+    fn fatal(&self, error: WorkError) -> ! {
+        std::eprintln!(
+            "fatal work error {error:?}
+{}",
+            std::backtrace::Backtrace::force_capture()
+        );
         std::process::abort()
     }
 }
