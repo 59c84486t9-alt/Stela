@@ -305,6 +305,7 @@ fn library_units(
     flags.extend(CXX_FLAGS.map(str::to_owned));
     flags.extend(TARGET_CXX_FLAGS.map(str::to_owned));
     for include in [
+        compat.join("llvm/libcxx"),
         compat.join("llvm/include"),
         checkout.join("libcxx/include"),
         compat.join("libc"),

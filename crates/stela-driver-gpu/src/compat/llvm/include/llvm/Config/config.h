@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception */
-/* LLVM's private configuration: what compat/libc and glibc, under the build's
- * own tool, both offer. A function neither needs stays undefined, so its users
+/* LLVM's private configuration: what compat/libc, and the C library of the
+ * machine building its own tool, both offer. A function neither needs stays undefined, so its users
  * take LLVM's portable path. */
 #ifndef CONFIG_H
 #define CONFIG_H
@@ -20,7 +20,11 @@
 #define HAVE_PTHREAD_H 1
 #define HAVE_SYSCONF 1
 #define HAVE_SYS_MMAN_H 1
+#ifdef __APPLE__
+#define HAVE_STRUCT_STAT_ST_MTIMESPEC_TV_NSEC 1
+#else
 #define HAVE_STRUCT_STAT_ST_MTIM_TV_NSEC 1
+#endif
 #define HAVE_UNISTD_H 1
 #define HAVE_ICU 0
 #define HAVE_WINDOWS_ICU 0
