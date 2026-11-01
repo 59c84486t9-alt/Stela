@@ -31,15 +31,9 @@ fn legacy_xmm_floor_never_invents_extended_features() {
     assert_eq!(actual.target(), Ok(expected));
     // Legacy XMM features report what the processor has, tier by tier.
     actual.declarations.cpuid1_ecx |= CPUID_SSSE3;
-    assert_eq!(
-        actual.target(),
-        Ok(TargetCpu::Ssse3.with_cx8().with_cx16())
-    );
+    assert_eq!(actual.target(), Ok(TargetCpu::Ssse3.with_cx8().with_cx16()));
     actual.declarations.cpuid1_ecx |= CPUID_SSE41;
-    assert_eq!(
-        actual.target(),
-        Ok(TargetCpu::Sse41.with_cx8().with_cx16())
-    );
+    assert_eq!(actual.target(), Ok(TargetCpu::Sse41.with_cx8().with_cx16()));
     actual.declarations.cpuid1_ecx |= CPUID_SSE42 | CPUID_PCLMULQDQ | CPUID_POPCNT | CPUID_AES;
     actual.declarations.cpuid7_ebx |= CPUID_SHA;
     let expected = TargetCpu::Sse42

@@ -670,7 +670,9 @@ pub fn dynamic_exit(kind: ExitKind) -> [u8; DYNAMIC_EXIT_BYTES] {
 /// `code` without the check failures that end a block, after its exits.
 pub fn without_failures(code: &[u8]) -> &[u8] {
     const UD2: [u8; 2] = [0x0f, 0x0b];
-    let failures = code.rchunks_exact(UD2.len()).take_while(|bytes| *bytes == UD2);
+    let failures = code
+        .rchunks_exact(UD2.len())
+        .take_while(|bytes| *bytes == UD2);
     &code[..code.len() - failures.count() * UD2.len()]
 }
 

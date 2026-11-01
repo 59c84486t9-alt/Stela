@@ -9,6 +9,7 @@ use crate::{
     bluetooth::{bcm4377, intel_pcie},
     bus::{
         dma::{DomainAllocator, mapping::DmaDomain},
+        irq::posted_msi::MsiCompletion,
         mmio::owned::{CacheAttribute, Mapping, Protection},
         pci::{
             Address, Bar, ConfigSpace, Function,
@@ -876,9 +877,8 @@ fn claim_sized(services: &dyn NativeServices, address: Address) -> Result<Sized,
 
 /// An Intel PCIe Bluetooth transport over its owned BAR0, whose MSI-X table
 /// entry 0 delivers its interrupts.
-pub type IntelBluetooth = intel_pcie::Transport<
-    intel_pcie::native::NativePlatform<OwnedConfig, MappedBar, intel_pcie::native::MappedRegisters>,
->;
+pub type IntelBluetooth =
+    intel_pcie::native::lifetime::OwnedTransport<MappedBar, intel_pcie::native::MappedRegisters>;
 
 /// A Broadcom BCM4377-family transport over its owned BAR0 and BAR2, whose
 /// MSI delivers its interrupts.
@@ -968,7 +968,7 @@ pub(super) unsafe fn bcm4377(
     clock: Clock,
 ) -> Result<Bcm4377, Failure> {
     use bcm4377::native::{
-        Error as NativeError, Inputs, MappedRegisters, MsiCompletion, NativeClock, NativePlatform,
+        Error as NativeError, Inputs, MappedRegisters, NativeClock, NativePlatform,
     };
     let refused = |error: ServiceError| (Error::Native(error), None);
     let failed =
@@ -1044,11 +1044,20 @@ pub(super) unsafe fn intel_bluetooth(
     address: Address,
     clock: Clock,
 ) -> Result<IntelBluetooth, Failure> {
-    use intel_pcie::native::{self as native, Inputs, NativePlatform};
+    use intel_pcie::native::{self as native, Inputs, NativePlatform, cold, lifetime};
     let refused = |error: ServiceError| (Error::Native(error), None);
     let failed =
         |error: intel_pcie::Error, kept: Box<dyn Any>| (Error::IntelBluetooth(error), Some(kept));
-    let (requester, domain, bars) = claim_sized(services, address)?;
+    let mut requester = services.prepare_requester(address).map_err(refused)?;
+    // Power restoration precedes sizing/MMIO, with the original root/backing
+    // still held and requester DMA gated by preparation.
+    if let Err(error) = requester.function_mut().power_up(&clock) {
+        return Err(failed(
+            native::Error::Power(error).into(),
+            Box::new(requester),
+        ));
+    }
+    let bars = requester.function_mut().bars();
     let interrupts = services.interrupts().map_err(refused)?;
     let authority = services.authority().map_err(refused)?;
     let Some(bar @ Bar::Memory { .. }) = bars[0] else {
@@ -1060,21 +1069,60 @@ pub(super) unsafe fn intel_bluetooth(
         Err(error) => {
             return Err(failed(
                 native::Error::Mapping(error).into(),
-                Box::new(mapping),
+                Box::new((requester, mapping)),
             ));
         }
     };
-    // SAFETY: the mount mapped exactly BAR0 uncached, and the registers below
-    // keep that mapping for as long as the MSI-X table is used.
+    // SAFETY: same original complete UC BAR0. This table view is not used
+    // until after cold reset, original-root drain and private attachment.
     let table = match unsafe { MappedBar::new(full, [Some(&mapping), None]) } {
         Ok(table) => table,
-        Err(error) => return Err(failed(native::Error::Msix(error).into(), Box::new(mapping))),
+        Err(error) => {
+            return Err(failed(
+                native::Error::Msix(error).into(),
+                Box::new((requester, mapping)),
+            ));
+        }
     };
-    // SAFETY: as above; no other driver maps this BAR.
-    let registers = unsafe { native::MappedRegisters::new(full, mapping) }
-        .map_err(|(error, mapping)| failed(error.into(), Box::new(mapping)))?;
-    let mut function = requester.into_function();
-    // btintel_pcie_probe: memory decoding and bus mastering before MSI-X.
+    // SAFETY: original exclusively owned BAR0, with the inactive table view
+    // kept locally. The cold owner preserves this mapping through every failure.
+    let registers = match unsafe { native::MappedRegisters::new(full, mapping) } {
+        Ok(registers) => registers,
+        Err((error, mapping)) => {
+            return Err(failed(error.into(), Box::new((requester, mapping, table))));
+        }
+    };
+    let inputs = cold::Inputs {
+        requester,
+        registers,
+        clock,
+    };
+    // SAFETY: the original function is powered D0; prior IRQ/work/firmware,
+    // competing writers and bypass are excluded by the mount. Clock/backing
+    // remain the original provider's. No private allocation or IRQ exists yet.
+    let cold = match unsafe { cold::Cold::new(inputs) } {
+        Ok(cold) => cold,
+        Err((error, inputs)) => return Err(failed(error, Box::new((inputs, table)))),
+    };
+    let bound = match cold.quiesce_and_bind() {
+        Ok(bound) => bound,
+        Err(failure) => {
+            let error = failure.error.clone();
+            return Err(failed(error, Box::new((failure, table))));
+        }
+    };
+    let mut function = bound.requester.into_function();
+    let retention = match function.config().retain_epoch() {
+        Ok(retention) => retention,
+        Err(error) => {
+            return Err(failed(
+                native::Error::Mapping(error).into(),
+                Box::new((function, bound.registers, bound.attachment)),
+            ));
+        }
+    };
+    // Vendor disconnect/reset, original-root drain and current-epoch binding
+    // are complete. BME now permits only the subsequently allocated new domain.
     function.enable_polled();
     let mut msix = [const { None }; 6];
     msix[0] = Some(table);
@@ -1082,20 +1130,37 @@ pub(super) unsafe fn intel_bluetooth(
         function,
         retained: Arc::new(authority),
         bars: msix,
-        registers,
+        registers: bound.registers,
         clock,
         interrupts,
+        domain: bound.attachment.domain(),
+        msi_completion: MsiCompletion::unavailable(),
     };
-    // SAFETY: the mount claimed the stopped function with its interrupts
-    // drained, mapped its BAR0 and gave its domain and MSI controller; the
-    // function reset is this function's own.
-    let platform = unsafe { NativePlatform::new(inputs) }
-        .map_err(|(error, inputs)| failed(error.into(), Box::new(inputs)))?;
-    // SAFETY: the mount's domain isolates this requester and its pages are
-    // kept for the boot; the controller addresses 64 bits.
-    let mut dma = unsafe { DomainAllocator::new(services.pages(), domain, u64::MAX) };
-    let mut transport = intel_pcie::Transport::new(platform, &mut dma)
-        .map_err(|error| (Error::IntelBluetooth(error), None))?;
+    // SAFETY: same original stopped function/root, acknowledged memory/BME,
+    // coherent domain, routed IRQ provider and checked UC/MSI-X owners.
+    let platform = match unsafe { NativePlatform::new(inputs) } {
+        Ok(platform) => platform,
+        Err((error, inputs)) => {
+            return Err(failed(
+                error.into(),
+                Box::new((inputs, bound.attachment, retention)),
+            ));
+        }
+    };
+    // SAFETY: receipt finalized this exact requester's snooped coherent domain,
+    // with all old backing held through its original completion; DMA is 64-bit.
+    let allocator =
+        unsafe { DomainAllocator::new(services.pages(), bound.attachment.domain(), u64::MAX) };
+    let inputs = lifetime::Inputs {
+        platform,
+        allocator,
+        attachment: bound.attachment,
+        retention,
+    };
+    // SAFETY: these are the same original function, configuration seal, unique
+    // attachment and allocator. The native owner retains them through teardown.
+    let mut transport = unsafe { lifetime::OwnedTransport::new(inputs) }
+        .map_err(|failure| failed(failure.error.clone(), Box::new(failure)))?;
     match transport.start() {
         Ok(()) => Ok(transport),
         Err(error) => Err(failed(error, Box::new(transport))),

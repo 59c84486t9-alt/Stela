@@ -5,8 +5,7 @@
 //! implied. Original configuration, UC BARs, coherent domain and root
 //! epoch survive terminal source stop, posted-write completion and IRQ drain.
 mod config;
-pub(crate) mod delivery;
-pub use delivery::MsiCompletion;
+use crate::bus::irq::posted_msi::MsiCompletion;
 mod registers;
 use super::{Board, Chip, PciIdentity, Platform, Result as DriverResult, Space, Transport, memory};
 use crate::bus::pci::regs;
@@ -46,6 +45,7 @@ pub enum Error {
     Aspm(native_aspm::Error),
     Dma(DmaError),
     Irq(irq::IrqError),
+    Delivery(irq::posted_msi::Error),
     Timeout(&'static str),
 }
 impl From<Error> for super::Error {
@@ -208,7 +208,9 @@ unsafe impl<C: Configuration> Source for NativeSource<C> {
             return Err(irq::IrqError::Route);
         };
         let result = (|| {
-            self.delivery.borrow_mut().bind_route(message)?;
+            // SAFETY: this Source::program call holds the registry's route
+            // for the same original requester/root delivery owner.
+            unsafe { self.delivery.borrow_mut().bind_route(message) }.map_err(Error::Delivery)?;
             // SAFETY: registry keeps the route and original owners.
             unsafe { self.config.borrow_mut().msi.program(message) }.map_err(Error::Msi)
         })();
@@ -435,7 +437,7 @@ impl<C: Configuration, R: Registers, T: Time> NativePlatform<C, R, T> {
         if self.registration.is_some() {
             // SAFETY: source/reset and payload completion above; this
             // independently kept root/route owner completes MSI delivery.
-            unsafe { self.delivery.as_ref().unwrap().borrow().drain() }?;
+            unsafe { self.delivery.as_ref().unwrap().borrow().drain() }.map_err(Error::Delivery)?;
         }
         self.signals.stopped.store(true, Ordering::Release);
         if let Some(registration) = self.registration.as_mut()

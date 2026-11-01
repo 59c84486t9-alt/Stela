@@ -8,6 +8,7 @@ mod memory;
 pub mod native;
 mod packet;
 mod registers;
+mod reset;
 #[cfg(test)]
 mod tests;
 use crate::{
@@ -43,8 +44,9 @@ pub struct Identity {
 /// epoch; there is no MSI/INTx fallback. All old callbacks and firmware owners
 /// are drained, all callbacks only schedule this serialized process/deferred
 /// service, and shared hardware reset is authorized by the platform coordinator.
-/// Supplied DMA pages are boot-lifetime reserved, coherent and identity-addressed
-/// for this requester. Native owners cannot be revoked while kept.
+/// Supplied DMA buffers retain their coherent requester-domain mappings and
+/// CPU page pins. Device fields use their bus addresses, independently of CPU
+/// and physical addresses. Native owners cannot be revoked while kept.
 /// `retire_vector_zero` must mask and drain the real route/callback/work lifetime;
 /// it does not certify that device DMA has stopped. Drop must keep any failed
 /// physical ownership rather than releasing a still-active route/mapping.
@@ -89,6 +91,7 @@ pub struct Snapshot {
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
+    Preparation(crate::bus::pci::requester::preparation::Error),
     Unsupported(&'static str),
     State(State),
     Dma(BlockError),
@@ -140,7 +143,7 @@ pub struct TxReceipt {
 pub struct Transport<P: Platform> {
     platform: ManuallyDrop<P>,
     identity: Identity,
-    memory: Memory,
+    memory: Option<Memory>,
     state: State,
     snapshot: Snapshot,
     hardware_revision: Option<u32>,
@@ -167,7 +170,7 @@ impl<P: Platform> Transport<P> {
         Ok(Self {
             platform: ManuallyDrop::new(platform),
             identity,
-            memory,
+            memory: Some(memory),
             state: State::Allocated,
             snapshot: Snapshot::default(),
             hardware_revision: None,
@@ -184,6 +187,16 @@ impl<P: Platform> Transport<P> {
             fault: None,
             fault_snapshot: None,
         })
+    }
+    fn memory(&self) -> &Memory {
+        self.memory
+            .as_ref()
+            .expect("BT buffers retained while active")
+    }
+    fn memory_mut(&mut self) -> &mut Memory {
+        self.memory
+            .as_mut()
+            .expect("BT buffers retained while active")
     }
     pub fn identity(&self) -> Identity {
         self.identity
@@ -213,51 +226,21 @@ impl<P: Platform> Transport<P> {
         self.platform.write32(offset, value)
     }
     fn delay(&self, us: u64) {
-        let start = self.platform.now_us();
-        while self.platform.now_us().wrapping_sub(start) < us {
-            crate::waiting();
-            core::hint::spin_loop();
-        }
+        reset::wait(&*self.platform, us);
     }
     fn update_function(&mut self, clear: u32, set: u32) -> Result<u32> {
-        let value = self.read(FUNC)?;
-        self.snapshot.function = value;
-        if value == u32::MAX {
-            return Err(Error::Mmio("unreadable function control"));
-        }
-        let value = (value & !clear) | set;
-        self.write(FUNC, value)?;
-        Ok(value)
+        reset::update_function(
+            &mut reset::PlatformIo(&mut *self.platform),
+            &mut self.snapshot,
+            clear,
+            set,
+        )
     }
     fn reset_device(&mut self) -> Result<()> {
-        self.update_function(ENABLE | MAC_INIT | FUNC_INIT, MASTER_DISCONNECT)?;
-        let mut stopped = false;
-        for _ in 0..3 {
-            let value = self.read(FUNC)?;
-            self.snapshot.function = value;
-            if value != u32::MAX && value & MASTER_STOPPED != 0 {
-                stopped = true;
-                break;
-            }
-            self.delay(10_000);
-        }
-        if !stopped {
-            return Err(Error::Timeout(
-                "actual bus-master disconnect acknowledgment",
-            ));
-        }
-        self.delay(10_000);
-        self.update_function(ENABLE | MAC_INIT | FUNC_INIT, RESET)?;
-        self.delay(10_000);
-        self.snapshot.function = self.read(FUNC)?;
-        self.snapshot.boot_stage = self.read(BOOT)?;
-        if self.snapshot.boot_stage != 0 {
-            return Err(Error::Protocol {
-                requirement: "actual reset boot stage zero",
-                observed: u64::from(self.snapshot.boot_stage),
-            });
-        }
-        Ok(())
+        reset::reset(
+            &mut reset::PlatformIo(&mut *self.platform),
+            &mut self.snapshot,
+        )
     }
     pub fn start(&mut self) -> Result<()> {
         if self.state != State::Allocated {
@@ -279,7 +262,7 @@ impl<P: Platform> Transport<P> {
         self.write(HW_MASK, hw & !HW_ENABLED)?;
         self.platform.arm_vector_zero()?;
         fence(Ordering::Release);
-        let ci = self.memory.pool.physical() + CI as u64;
+        let ci = self.memory().pool.physical() + CI as u64;
         self.write(CI_LOW, ci as u32)?;
         self.write(CI_HIGH, (ci >> 32) as u32)?;
         if self.identity.device == 0x4d76 {
@@ -312,7 +295,7 @@ impl<P: Platform> Transport<P> {
         self.post_initial_rx()
     }
     fn post_rx(&mut self) -> Result<()> {
-        let index = usize::from(self.memory.index(TR_HEAD, 1));
+        let index = usize::from(self.memory().index(TR_HEAD, 1));
         if index >= RX_COUNT || self.rx_owned[index] {
             return Err(Error::Protocol {
                 requirement: "free actual RX descriptor and buffer",
@@ -321,12 +304,13 @@ impl<P: Platform> Transport<P> {
         }
         let mut d = [0; 16];
         d[..4].copy_from_slice(&(index as u32).to_le_bytes());
-        d[8..]
-            .copy_from_slice(&(self.memory.rx.physical() + (index * BUFFER) as u64).to_le_bytes());
-        self.memory.descriptor(FRBD + index * 16, &d);
+        d[8..].copy_from_slice(
+            &(self.memory().rx.physical() + (index * BUFFER) as u64).to_le_bytes(),
+        );
+        self.memory_mut().descriptor(FRBD + index * 16, &d);
         self.rx_owned[index] = true;
         let next = ((index + 1) % RX_COUNT) as u16;
-        self.memory.set_index(TR_HEAD, 1, next);
+        self.memory_mut().set_index(TR_HEAD, 1, next);
         fence(Ordering::Release);
         self.write(DOORBELL, RX_DB | u32::from(next))
     }
@@ -354,8 +338,8 @@ impl<P: Platform> Transport<P> {
         Ok(())
     }
     fn tx_completions(&mut self) -> Result<()> {
-        let head = usize::from(self.memory.index(CR_HEAD, 0));
-        let mut tail = usize::from(self.memory.index(CR_TAIL, 0));
+        let head = usize::from(self.memory().index(CR_HEAD, 0));
+        let mut tail = usize::from(self.memory().index(CR_TAIL, 0));
         if head >= TX_COUNT || tail >= TX_COUNT {
             return Err(Error::Protocol {
                 requirement: "bounded TX completion indices",
@@ -364,7 +348,7 @@ impl<P: Platform> Transport<P> {
         }
         fence(Ordering::Acquire);
         while tail != head {
-            let d = self.memory.pool.read::<u32>(URBD0 + tail * 4);
+            let d = self.memory().pool.read::<u32>(URBD0 + tail * 4);
             let pending = self.pending.as_mut().ok_or(Error::Protocol {
                 requirement: "actual in-flight TX for completion",
                 observed: u64::from(d),
@@ -385,13 +369,13 @@ impl<P: Platform> Transport<P> {
             }
             pending.complete = true;
             tail = (tail + 1) % TX_COUNT;
-            self.memory.set_index(CR_TAIL, 0, tail as u16);
+            self.memory_mut().set_index(CR_TAIL, 0, tail as u16);
         }
         Ok(())
     }
     fn rx_completions(&mut self) -> Result<()> {
-        let head = usize::from(self.memory.index(CR_HEAD, 1));
-        let mut tail = usize::from(self.memory.index(CR_TAIL, 1));
+        let head = usize::from(self.memory().index(CR_HEAD, 1));
+        let mut tail = usize::from(self.memory().index(CR_TAIL, 1));
         if head >= RX_COUNT || tail >= RX_COUNT {
             return Err(Error::Protocol {
                 requirement: "bounded RX completion indices",
@@ -400,7 +384,7 @@ impl<P: Platform> Transport<P> {
         }
         fence(Ordering::Acquire);
         while tail != head {
-            let d = self.memory.pool.read::<u32>(URBD1 + tail * 4);
+            let d = self.memory().pool.read::<u32>(URBD1 + tail * 4);
             let tag = (d & 0xffff) as usize;
             if tag >= RX_COUNT || !self.rx_owned[tag] {
                 return Err(Error::Protocol {
@@ -409,8 +393,10 @@ impl<P: Platform> Transport<P> {
                 });
             }
             self.rx_owned[tag] = false;
-            let packet =
-                packet::receive(&self.memory.rx.bytes()[tag * BUFFER..(tag + 1) * BUFFER], d)?;
+            let packet = packet::receive(
+                &self.memory().rx.bytes()[tag * BUFFER..(tag + 1) * BUFFER],
+                d,
+            )?;
             if self.received.len() >= 128 {
                 return Err(Error::Packet {
                     requirement: "bounded retained PCIe RX queue",
@@ -429,12 +415,15 @@ impl<P: Platform> Transport<P> {
             }
             self.received.push_back(packet);
             tail = (tail + 1) % RX_COUNT;
-            self.memory.set_index(CR_TAIL, 1, tail as u16);
+            self.memory_mut().set_index(CR_TAIL, 1, tail as u16);
             self.post_rx()?;
         }
         Ok(())
     }
     fn service(&mut self) -> Result<()> {
+        if self.memory.is_none() {
+            return Err(Error::State(self.state));
+        }
         self.platform.service_begin()?;
         let fh = self.read(FH_CAUSE)?;
         let hw = self.read(HW_CAUSE)?;
@@ -483,7 +472,7 @@ impl<P: Platform> Transport<P> {
                         observed: u64::from(self.snapshot.boot_stage),
                     });
                 }
-                self.memory.reset_indices();
+                self.memory_mut().reset_indices();
                 self.rx_owned.fill(false);
                 self.post_initial_rx()?;
                 if self.snapshot.boot_stage & OP != 0 {
@@ -515,7 +504,7 @@ impl<P: Platform> Transport<P> {
     }
     /// Whether [`Self::send`] can take a packet: it has one owner at a time.
     pub fn ready(&self) -> bool {
-        self.pending.is_none()
+        self.active().is_ok() && self.pending.is_none()
     }
     pub fn send(&mut self, kind: Kind, bytes: &[u8]) -> Result<TxReceipt> {
         self.active()?;
@@ -539,7 +528,7 @@ impl<P: Platform> Transport<P> {
     fn send_inner(&mut self, kind: Kind, bytes: &[u8]) -> Result<TxReceipt> {
         self.service()?;
         let start = self.platform.now_us();
-        let index = usize::from(self.memory.index(TR_HEAD, 0));
+        let index = usize::from(self.memory().index(TR_HEAD, 0));
         if index >= TX_COUNT {
             return Err(Error::Protocol {
                 requirement: "bounded TX descriptor index",
@@ -547,13 +536,14 @@ impl<P: Platform> Transport<P> {
             });
         }
         let offset = index * BUFFER;
-        self.memory.tx.bytes_mut()[offset..offset + 4]
+        self.memory_mut().tx.bytes_mut()[offset..offset + 4]
             .copy_from_slice(&(kind as u32).to_le_bytes());
-        self.memory.tx.bytes_mut()[offset + 4..offset + 4 + bytes.len()].copy_from_slice(bytes);
+        self.memory_mut().tx.bytes_mut()[offset + 4..offset + 4 + bytes.len()]
+            .copy_from_slice(bytes);
         let mut d = [0; 16];
         d[1..3].copy_from_slice(&((bytes.len() + 4) as u16).to_le_bytes());
-        d[4..12].copy_from_slice(&(self.memory.tx.physical() + offset as u64).to_le_bytes());
-        self.memory.descriptor(TFD + index * 16, &d);
+        d[4..12].copy_from_slice(&(self.memory().tx.physical() + offset as u64).to_le_bytes());
+        self.memory_mut().descriptor(TFD + index * 16, &d);
         let next = ((index + 1) % TX_COUNT) as u16;
         let opcode = if kind == Kind::Command {
             Some(u16::from_le_bytes([bytes[0], bytes[1]]))
@@ -578,7 +568,7 @@ impl<P: Platform> Transport<P> {
         if reset.is_some() {
             self.boot_notification = false;
         }
-        self.memory.set_index(TR_HEAD, 0, next);
+        self.memory_mut().set_index(TR_HEAD, 0, next);
         fence(Ordering::Release);
         if self.platform.now_us().wrapping_sub(start) >= 500_000 {
             return Err(Error::Timeout("TX publication deadline"));

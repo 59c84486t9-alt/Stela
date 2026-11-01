@@ -2742,7 +2742,9 @@ fn a_new_context_learns_the_blocks_its_page_fetched_in_others() {
     machine.remember_target_page(BASE, first);
     let context = contexts[chain::half(BASE)];
     let entry = |machine: &Machine<FakeHost, NoDevices>, pc| {
-        machine.targets.find(chain::lookup_slot(pc, context), pc, context)
+        machine
+            .targets
+            .find(chain::lookup_slot(pc, context), pc, context)
     };
     let learnt = entry(&machine, BASE + 4);
     assert_eq!((learnt.context, learnt.block), (context, second as u32));

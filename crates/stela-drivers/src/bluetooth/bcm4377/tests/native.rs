@@ -18,12 +18,11 @@ fn native_clock_rejects_invalid_calibration_and_unrepresentable_attempt_before_a
     }
 }
 use crate::bluetooth::bcm4377::native::{
-    self as host, Configuration, Inputs, MappedRegisters, MsiCompletion, NativePlatform, Registers,
-    Time,
+    self as host, Configuration, Inputs, MappedRegisters, NativePlatform, Registers, Time,
 };
 use crate::bus::{
     dma::{memory::PageSource, pages::DmaPages},
-    irq::{self, Registry},
+    irq::{self, Registry, posted_msi::MsiCompletion},
     mmio::owned::{
         self, AddressSpace, Authority, InstalledMapping, MapFailure, MapRequest, Mapping,
         MappingPlatform, PhysicalSpan, Protection, Resource as MmioResource, ResourceBacking,
@@ -311,8 +310,11 @@ impl PageSource for PageModel {
 struct Delivery(Arc<State>);
 // SAFETY: independent route model; payload and MSI completion are
 // separate events, with independent injected failures and kept ownership.
-unsafe impl host::delivery::DeliveryOwner for Delivery {
-    fn bind_route(&mut self, message: irq::MsiMessage) -> core::result::Result<(), host::Error> {
+unsafe impl irq::posted_msi::DeliveryOwner for Delivery {
+    fn bind_route(
+        &mut self,
+        message: irq::MsiMessage,
+    ) -> core::result::Result<(), irq::posted_msi::Error> {
         assert_eq!(message.address, 0xfee0_0000);
         assert_eq!(
             message.data,
@@ -321,16 +323,14 @@ unsafe impl host::delivery::DeliveryOwner for Delivery {
         self.0.event(Event::MsiBind);
         Ok(())
     }
-    unsafe fn drain_posted_msi(&self) -> core::result::Result<(), host::Error> {
+    unsafe fn drain_posted_msi(&self) -> core::result::Result<(), irq::posted_msi::Error> {
         self.0.event(Event::MsiDrain);
         assert_eq!(
             self.0.events.lock().unwrap().iter().rev().nth(1),
             Some(&Event::PayloadDrain)
         );
         if self.0.fail_msi.load(Ordering::Relaxed) {
-            return Err(host::Error::Requirement(
-                "independent modeled posted MSI drain failed",
-            ));
+            return Err(irq::posted_msi::Error::RootFailed);
         }
         Ok(())
     }

@@ -209,3 +209,20 @@ fn rejected_metadata_returns_the_live_mapping_for_explicit_retirement() {
         retire(mapping, &counters);
     }
 }
+
+#[test]
+fn read_only_epoch_seal_pins_exact_mapping_and_refuses_same_address_substitute() {
+    let (config, counters) = fixture(ADDRESS);
+    let (foreign, foreign_counters) = fixture(ADDRESS);
+    let seal = config.retain_epoch().unwrap();
+    assert_eq!(config.matches_retention(&seal), Ok(true));
+    assert_eq!(foreign.matches_retention(&seal), Ok(false));
+    let mut mapping = config.into_mapping();
+    // SAFETY: synchronous RAM fixture has no device/IRQ/work access. The live
+    // seal must still prevent retirement of the mapping that backs it.
+    assert_eq!(unsafe { mapping.retire() }, Err(MappingError::Busy));
+    assert_eq!(counters.unmaps.load(Ordering::Relaxed), 0);
+    drop(seal);
+    retire(mapping, &counters);
+    retire(foreign.into_mapping(), &foreign_counters);
+}

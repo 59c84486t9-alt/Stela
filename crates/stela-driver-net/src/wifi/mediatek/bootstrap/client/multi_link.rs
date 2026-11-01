@@ -42,18 +42,13 @@ pub(super) struct LinkKey<'a> {
     pub(super) seed: ReplaySeed,
 }
 
-/// Whether `elements` take any of `links` from the association, which goes
-/// on in mac80211 but ends here: the links stay up together until it does, and
-/// the next join leaves out what the AP no longer offers.
-fn taking_a_link(links: u16, elements: &[u8]) -> bool {
-    let removed = removals(elements)
-        .is_some_and(|removed| removed.iter().any(|&(link, _)| links & 1 << link != 0));
-    let barred = mappings(elements).map_or(true, |mappings| {
+/// Whether an advertised TID mapping excludes an associated link.
+fn barred_link(links: u16, elements: &[u8]) -> bool {
+    mappings(elements).map_or(true, |mappings| {
         mappings
             .iter()
             .any(|mapping| mapping.switch_time != 0 && links & !mapping.links != 0)
-    });
-    removed || barred
+    })
 }
 
 /// Another link of an AP MLD association, as `mt7925_mac_link_bss_add` and
@@ -643,8 +638,10 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         Ok(())
     }
 
-    /// A beacon of the association of `setup` took one of its links: report it
-    /// once and let the association go.
+    /// `ieee80211_ml_reconfiguration`: a present reconfiguration replaces or
+    /// cancels the removal countdown; absence leaves the earlier one running.
+    /// Runtime per-link retirement remains unsupported, so expiry follows the
+    /// existing reported association-disconnect response.
     pub(super) fn follow_links(
         s: &mut Owned<I, Q, C>,
         setup: &AssociationContext,
@@ -653,13 +650,51 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         let Some(affiliation) = setup.affiliation() else {
             return;
         };
-        let links = s
-            .links
+        let mut intervals = [None; 15];
+        intervals[usize::from(affiliation.link_id)] = s.profile.map(|p| p.beacon_interval);
+        for link in &s.links {
+            intervals[usize::from(link.link_id)] = Some(link.profile.beacon_interval);
+        }
+        let links = intervals
             .iter()
-            .fold(1 << affiliation.link_id, |links, link| {
-                links | 1 << link.link_id
+            .enumerate()
+            .fold(0, |mask, (link, interval)| {
+                mask | if interval.is_some() { 1 << link } else { 0 }
             });
-        if taking_a_link(links, elements) {
+        if let Some(removing) = removals(elements) {
+            // mac80211 records a profile's last timer when it occurs twice.
+            let mut timers = [None; 15];
+            for (link, count) in removing {
+                timers[usize::from(link)] = Some(count);
+            }
+            let mut delay = None;
+            for (interval, count) in intervals.into_iter().zip(timers) {
+                if let (Some(interval), Some(count)) = (interval, count) {
+                    let link_delay = u64::from(interval) * u64::from(count.saturating_sub(1));
+                    // Preserve ieee80211_ml_reconfiguration's zero-delay
+                    // initialization and subsequent minimum in link-ID order.
+                    delay = Some(match delay {
+                        None | Some(0) => link_delay,
+                        Some(previous) => previous.min(link_delay),
+                    });
+                }
+            }
+            let now = s.controller.state().control.clock.now_us();
+            s.link_removal = delay.map(|delay| now.saturating_add(delay * 1024));
+        }
+        if barred_link(links, elements) {
+            s.link_taken = true;
+            s.csa.drop_connection();
+        }
+    }
+
+    /// Dispatch a due removal even if no further beacon or data arrives.
+    pub(super) fn poll_link_removal(s: &mut Owned<I, Q, C>) {
+        if s.phase == Phase::Associated
+            && s.link_removal
+                .is_some_and(|deadline| s.controller.state().control.clock.now_us() >= deadline)
+        {
+            s.link_removal = None;
             s.link_taken = true;
             s.csa.drop_connection();
         }
@@ -685,15 +720,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_link_of_ours_going_ends_the_association_and_a_stranger_does_not() {
-        let links = 1 << 3 | 1 << 5;
-        let removing = |link: u8| vec![255, 9, 107, 2, 0, 1, 0, 3, link, 0, 1];
-        assert!(taking_a_link(links, &removing(5)));
-        assert!(!taking_a_link(links, &removing(6)));
-        assert!(!taking_a_link(links, &[]));
-    }
-
-    #[test]
     fn a_mapping_ends_the_association_only_when_it_comes_and_leaves_a_link_out() {
         let links = 1 << 3 | 1 << 5;
         let mapped = |control: u8, to: u8| {
@@ -701,12 +727,12 @@ mod tests {
             element.extend([to; 8]);
             element
         };
-        assert!(taking_a_link(links, &mapped(2 | 0x08 | 0x20, 1 << 3)));
-        assert!(!taking_a_link(
+        assert!(barred_link(links, &mapped(2 | 0x08 | 0x20, 1 << 3)));
+        assert!(!barred_link(
             links,
             &mapped(2 | 0x08 | 0x20, 1 << 3 | 1 << 5)
         ));
         // Refused outright, as mac80211 disconnects on it.
-        assert!(taking_a_link(links, &mapped(0x08 | 0x20, 1 << 3)));
+        assert!(barred_link(links, &mapped(0x08 | 0x20, 1 << 3)));
     }
 }

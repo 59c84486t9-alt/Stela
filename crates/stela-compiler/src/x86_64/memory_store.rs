@@ -44,7 +44,12 @@ pub(super) fn aligned_register_offset(
 /// Every register and XMM source survives.
 pub(super) fn emit(code: &mut Code, bytes: u8, displacement: u8, source: Source) {
     debug_assert!(displacement == 0 || displacement == bytes);
-    emit_to(code, bytes, Mem::base(Gpr::Rax, i32::from(displacement)), source);
+    emit_to(
+        code,
+        bytes,
+        Mem::base(Gpr::Rax, i32::from(displacement)),
+        source,
+    );
 }
 
 /// The store at `target`.

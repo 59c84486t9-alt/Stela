@@ -1,5 +1,7 @@
 //! Owned native interrupt registrations. Device acknowledgement, completion
 //! fences and reset algorithms belong to the device handler/source owner.
+pub mod posted_msi;
+
 use alloc::{boxed::Box, sync::Arc};
 use core::{
     marker::PhantomData,

@@ -858,3 +858,5 @@ fn invalid_second_link_beacon_does_not_suppress_the_valid_beacons_gap_report() {
 }
 
 mod link_keys;
+
+mod reconfiguration_timer;

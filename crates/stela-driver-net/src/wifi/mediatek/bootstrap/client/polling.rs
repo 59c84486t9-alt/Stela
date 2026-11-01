@@ -256,11 +256,6 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
             }
             if modern_data && matches!(frame.header().control & 0x00fc, 0x0080 | 0x0050) {
                 Self::observe_edca(s, frame)?;
-                if core::mem::take(&mut s.link_taken) {
-                    events.push(Event::Unsupported(
-                        "an AP MLD taking a link from an association: it ends",
-                    ));
-                }
                 events.push(Event::Raw(f));
                 continue;
             }
@@ -408,6 +403,12 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                     .map_err(Error::Data)?;
                 events.push(Event::Ingress(ingress));
             }
+        }
+        Self::poll_link_removal(s);
+        if core::mem::take(&mut s.link_taken) {
+            events.push(Event::Unsupported(
+                "an AP MLD taking a link from an association: it ends",
+            ));
         }
         events.extend(Self::poll_reorder(s, now)?.into_iter().map(Event::Ingress));
         events.append(&mut s.csa.ready);

@@ -289,7 +289,9 @@ struct Owned<I: BarIo, Q: QueueIo, C: 'static> {
     single_link: Option<Context>,
     /// An AP MLD association's other links.
     links: Vec<multi_link::Link<C>>,
-    /// A beacon took one of the association's links.
+    /// Deadline of the AP's pending Multi-Link reconfiguration.
+    link_removal: Option<u64>,
+    /// A reconfiguration reached its deadline or a TID mapping barred a link.
     link_taken: bool,
 }
 /// On uncertain/live Drop keep the entire controller, station, real key
@@ -387,6 +389,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
                 six_ghz: None,
                 single_link: None,
                 links: Vec::new(),
+                link_removal: None,
                 link_taken: false,
             })),
         })

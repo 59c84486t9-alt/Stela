@@ -9,6 +9,8 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
     pub(super) fn remove(s: &mut Owned<I, Q, C>, ticket: Ticket) -> Result<(), Error> {
         let p = s.profile.ok_or(Error::WrongProfile)?;
         s.remove_ticket = Some(ticket);
+        s.link_removal = None;
+        s.link_taken = false;
         s.phase = Phase::Removing;
         s.format_generation = None;
         // Canonical disconnect has already invalidated these sessions. This
