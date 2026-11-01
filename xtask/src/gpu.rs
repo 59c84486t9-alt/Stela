@@ -9,8 +9,8 @@ mod llvm;
 mod mesa;
 mod nvidia;
 mod nvk;
-mod sysroot;
 mod support;
+mod sysroot;
 mod toolchain;
 
 /// Floating-point semantics required by the supplied AIR input.
