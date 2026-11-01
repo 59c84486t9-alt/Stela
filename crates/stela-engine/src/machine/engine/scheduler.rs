@@ -306,7 +306,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
     /// Why block `index`'s exit of `kind` to `next_pc` took no lookup
     /// transfer, as an index of `Statistics::lookup_misses`, when it is one
-    /// a lookup thunk serves; `spent` when a thunk found no budget left.
+    /// a lookup dispatcher serves; `spent` when a dispatcher found no budget left.
     pub(super) fn lookup_miss(
         &self,
         index: usize,
@@ -356,7 +356,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// variant. Its BTYPE is 0, as no branch that sets it ends in a direct
     /// exit, and every System register write, exception and device access
     /// that changes what the next fetch checks returns to the engine. An
-    /// exit out of the page goes through a lookup thunk instead.
+    /// exit out of the page goes through a lookup dispatcher instead.
     pub(super) fn link(&mut self, index: usize, next_pc: u64, word: impl Into<ExitWord>) {
         let word = word.into();
         let block = &self.blocks[index];
@@ -374,8 +374,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
         };
         let retired = u32::from(block.instructions) - u32::from(word.skipped);
         if (next_pc ^ block.pc) & !(FETCH_PAGE - 1) != 0 {
-            let exit = block.successors[position];
-            if self.redirect_through_lookup(exit.site, retired, Some(exit.target), word, 0) {
+            let site = block.successors[position].site;
+            let site = site + (chain::DIRECT_EXIT_BYTES - chain::LOOKUP_EXIT_BYTES) as u64;
+            if self.redirect_through_lookup(site, retired, word, 0) {
                 self.settle_successor(index, position);
             }
             return;
@@ -391,6 +392,15 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let site = exit.site;
         let entry = self.blocks[target].code.0 as u64;
         let control = self.chain.address();
+        if exit.slot != 0 {
+            let at = site - exit.slot as u64;
+            if let Some(code) = chain::link(at, exit.slot, control, retired, target as u32, entry) {
+                self.patch_native(NativeCode(at as usize), &code);
+                self.settle_successor(index, position);
+                self.statistics.links += 1;
+            }
+            return;
+        }
         let Ok(thunk) = self.host.install(&[0; chain::THUNK_BYTES]) else {
             return;
         };
@@ -425,8 +435,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
     }
 
     /// Redirect block `index`'s exit to the target in RAX, which just left
-    /// BTYPE `btype`, through a lookup thunk, whose target any fetch may
-    /// have run. The thunk sets the BTYPE the form sets from the block's
+    /// BTYPE `btype`, through a lookup dispatcher, whose target any fetch may
+    /// have run. It sets the BTYPE the form sets from the block's
     /// page: 0 for RET, 0b10 for BLR forms, 0b01 for BR forms through X16
     /// or X17, and for BR forms through another register 0b11 in a guarded
     /// page and 0b01 elsewhere. Blocks are compiled per guarded page, so
@@ -451,34 +461,42 @@ impl<H: Host, D: Devices> Machine<H, D> {
             return;
         }
         let retired = u32::from(block.instructions);
-        if self.redirect_through_lookup(site.get(), retired, None, kind.into(), btype) {
+        if self.redirect_through_lookup(site.get(), retired, kind.into(), btype) {
             self.blocks[index].dynamic_site = None;
         }
     }
 
-    /// Install a lookup thunk for the exit of `word` at host address `site`
-    /// (to `target`, or the target in RAX) by a branch that sets `btype`,
-    /// and jump there from the exit.
+    /// Send the end of the exit of `word` at host address `site`, from a
+    /// block that ran `retired` instructions by a branch that sets `btype`,
+    /// to the lookup dispatcher.
     pub(super) fn redirect_through_lookup(
         &mut self,
         site: u64,
         retired: u32,
-        target: Option<GuestAddress>,
         word: ExitWord,
         btype: u8,
     ) -> bool {
-        let control = self.chain.address();
-        let Some(code) = chain::lookup_thunk(control, retired, target, word, btype) else {
+        let Some(exit) = self
+            .lookup_dispatcher(btype)
+            .and_then(|at| chain::lookup_exit(site, word, retired, at))
+        else {
             return false;
         };
-        let Ok(thunk) = self.host.install(&code) else {
-            return false;
-        };
-        let Some(jump) = chain::jump(site, thunk.0 as u64) else {
-            return false;
-        };
-        self.patch_native(NativeCode(site as usize), &jump);
+        self.patch_native(NativeCode(site as usize), &exit);
         self.statistics.lookups += 1;
         true
+    }
+
+    /// The dispatcher of `btype`, in the part of the arena new code fills:
+    /// like a thunk, it stays until after every exit that jumps to it, as
+    /// parts go oldest first and those exits are in that part or older ones.
+    fn lookup_dispatcher(&mut self, btype: u8) -> Option<u64> {
+        if let Some(code) = self.lookup_dispatchers[usize::from(btype)] {
+            return Some(code.0 as u64);
+        }
+        let code = chain::lookup_dispatcher(self.chain.address(), btype)?;
+        let installed = self.host.install(&code).ok()?;
+        self.lookup_dispatchers[usize::from(btype)] = Some(installed);
+        Some(installed.0 as u64)
     }
 }

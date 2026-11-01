@@ -618,8 +618,9 @@ fn system_mode_blocks_complete_dc_zva_natively_only_with_a_block_size() {
     crate::x86_64::zero_block::emit(&mut zeroing, 3, 64, crate::x86_64::MemoryChecks::DEFAULT);
     assert_eq!(code[at..at + zeroing.len()], zeroing);
     let next = GuestAddress(BASE + 8);
+    let slot = crate::x86_64::chain::link_slot(Some(BASE), next, ExitKind::Fallthrough);
     assert_eq!(
-        code[at + zeroing.len()..],
+        code[at + zeroing.len() + slot..],
         direct_exit(next, ExitKind::Fallthrough)
     );
     assert_eq!(native.direct_exits.len(), 1);
@@ -687,8 +688,9 @@ fn planned_dc_clean_operations_check_xt_and_fall_through() {
     crate::x86_64::cache_clean::emit(&mut check, 0, crate::x86_64::MemoryChecks::DEFAULT);
     assert_eq!(code[at..at + check.len()], check);
     let next = GuestAddress(BASE + 8);
+    let slot = crate::x86_64::chain::link_slot(Some(BASE), next, ExitKind::Fallthrough);
     assert_eq!(
-        code[at + check.len()..],
+        code[at + check.len() + slot..],
         direct_exit(next, ExitKind::Fallthrough)
     );
     assert_eq!(native.direct_exits.len(), 1);
@@ -772,12 +774,17 @@ fn system_mode_profile_keeps_ordinary_memory_and_exits_on_system_instructions() 
                 .all(|(index, (pc, _))| pc.0 == BASE.0 + 4 * index as u64)
         );
         let at = map.last().unwrap().1;
+        let end = compiled.native.x86_64_code.len()
+            - 2 * compiled.native.x86_64_code[at..]
+                .rchunks_exact(2)
+                .take_while(|bytes| *bytes == [0x0f, 0x0b])
+                .count();
         let mut expected = vec![0x48, 0xb8];
         expected.extend(terminal_pc.0.to_le_bytes());
         expected.push(0xba);
         expected.extend((kind as u32).to_le_bytes());
-        expected.push(0xc3);
-        assert_eq!(&compiled.native.x86_64_code[at..], expected, "{word:#x}");
+        expected.extend([0xc3, 0xcc, 0xcc, 0xcc, 0xcc]);
+        assert_eq!(&compiled.native.x86_64_code[at..end], expected, "{word:#x}");
     }
     // The shared lane's PEs still end a block at ISB.
     let shared = BlockProfile::new(Features::SYSTEM_MODE)
@@ -969,6 +976,7 @@ fn system_profile_has_one_source_bound_exit_and_rejects_memory_prefixes() {
         expected.push(MOV_EDX_IMMEDIATE);
         expected.extend((ExitKind::System as u32).to_le_bytes());
         expected.push(RETURN);
+        expected.extend([0xcc; 4]);
         assert_eq!(&compiled.native.x86_64_code[at..], expected);
     }
     // Ordinary RAM, exclusives and legacy FP/SIMD cannot bypass shared owners.
@@ -1046,7 +1054,7 @@ fn terminal_half_division_shares_exact_consumption_analysis_and_emission() {
             helper.extend(helper_pc.0.to_le_bytes());
             helper.push(0xba); // MOV EDX,FloatingPoint; RET
             helper.extend((ExitKind::FloatingPoint as u32).to_le_bytes());
-            helper.push(0xc3);
+            helper.extend([0xc3, 0xcc, 0xcc, 0xcc, 0xcc]);
             let offset = compiled.native.source_map[1].1;
             assert_eq!(&compiled.native.x86_64_code[offset..], helper);
             let suffix = &source[analysis.source_bytes..];
@@ -1079,7 +1087,7 @@ fn terminal_half_division_completes_inline_only_with_the_host_instruction() {
         exit.extend(pc.0.to_le_bytes());
         exit.push(0xba); // MOV EDX,kind; RET
         exit.extend((kind as u32).to_le_bytes());
-        exit.push(0xc3);
+        exit.extend([0xc3, 0xcc, 0xcc, 0xcc, 0xcc]);
         exit
     };
     let helper = compile(crate::TargetCpu::X86_64_V4);
@@ -2129,7 +2137,7 @@ fn trap_is_a_consumed_boundary_with_its_own_source_map_and_no_leaf_fallback() {
             compiled.native.source_map,
             [(GuestAddress(0x2ffc), 0), (GuestAddress(0x3000), 1)]
         );
-        assert_eq!(compiled.native.x86_64_code.len(), 17);
+        assert_eq!(compiled.native.x86_64_code.len(), 21);
         assert_eq!(compiled.native.x86_64_code[0], 0x90);
         assert!(crate::testing::leaf(&bytes(&[word, 0xd65f03c0]), GuestAddress(0x3000)).is_err());
     }

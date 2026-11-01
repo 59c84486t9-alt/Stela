@@ -2303,24 +2303,12 @@ fn side_exits_retire_the_instructions_that_ran() {
         .unwrap();
     machine.step().unwrap();
     let control = machine.chain.address();
-    let (at, thunk) = &machine.host.patches[machine.host.patches.len() - 2];
+    let (at, code) = machine.host.patches.last().unwrap();
     let entry = machine.blocks[1].code.0 as u64;
+    assert_eq!(*at as u64, exit.site - exit.slot as u64);
     assert_eq!(
-        Some(thunk.clone()),
-        chain::thunk(
-            *at as u64,
-            control,
-            1,
-            1,
-            entry,
-            GuestAddress(base + 12),
-            word
-        )
-    );
-    let jump = chain::jump(exit.site, *at as u64).unwrap().to_vec();
-    assert_eq!(
-        machine.host.patches[machine.host.patches.len() - 1],
-        (exit.site as usize, jump)
+        Some(code.clone()),
+        chain::link(*at as u64, exit.slot, control, 1, 1, entry)
     );
 }
 
@@ -2348,26 +2336,17 @@ fn direct_exits_chain_into_their_successors_in_the_page() {
     let control = machine.chain.address();
     let (first, second) = (&machine.blocks[0], &machine.blocks[1]);
     // The second block's exit to the first, then the first's to it.
-    for (patches, from, to, target, index) in [
-        (&machine.host.patches[..2], second, first, base, 0),
-        (&machine.host.patches[2..], first, second, base + 12, 1),
+    for (patch, from, to, target, index) in [
+        (&machine.host.patches[0], second, first, base, 0),
+        (&machine.host.patches[1], first, second, base + 12, 1),
     ] {
-        let (at, thunk) = &patches[0];
-        let expected = chain::thunk(
-            *at as u64,
-            control,
-            2,
-            index,
-            to.code.0 as u64,
-            GuestAddress(target),
-            ExitKind::Direct,
-        );
-        assert_eq!(Some(thunk.clone()), expected);
-        // The block's one direct exit ends its code.
+        // The block's one direct exit ends its code, its link slot before it.
         let code = &machine.host.installed[from.code.0 / NATIVE_CODE_STRIDE - 1];
         let site = from.code.0 + code.len() - chain::DIRECT_EXIT_BYTES;
-        let jump = chain::jump(site as u64, *at as u64).unwrap().to_vec();
-        assert_eq!(patches[1], (site, jump));
+        let slot = chain::link_slot(Some(from.pc), GuestAddress(target), ExitKind::Direct);
+        let at = site - slot;
+        let expected = chain::link(at as u64, slot, control, 2, index, to.code.0 as u64);
+        assert_eq!((patch.0, Some(patch.1.clone())), (at, expected));
         assert!(from.successors.is_empty());
     }
     // The first block chains into the second, which exits to the first.
@@ -2472,7 +2451,7 @@ fn direct_exits_chain_into_their_successors_in_the_page() {
 /// under the context's number, which changes with the generations and
 /// the EL and returns with neither changed.
 #[test]
-fn returns_and_exits_out_of_the_page_go_through_lookup_thunks() {
+fn returns_and_exits_out_of_the_page_go_through_lookup_dispatchers() {
     const ADD: u32 = 0x9100_0400; // add x0, x0, #1
     const RET: u32 = 0xd65f_03c0;
     let mut words = vec![0; 1026];
@@ -2508,24 +2487,22 @@ fn returns_and_exits_out_of_the_page_go_through_lookup_thunks() {
     // The branch's direct exit, then the RET's exit to RAX, ends each
     // block's code.
     let sites = [
-        first.code.0 + code(first).len() - chain::DIRECT_EXIT_BYTES,
-        second.code.0 + code(second).len() - chain::DYNAMIC_EXIT_BYTES,
+        first.code.0 + code(first).len() - chain::LOOKUP_EXIT_BYTES,
+        second.code.0 + code(second).len() - chain::LOOKUP_EXIT_BYTES,
     ];
-    let thunks = [
-        chain::lookup_thunk(control, 1, Some(GuestAddress(far)), ExitKind::Direct, 0),
-        chain::lookup_thunk(control, 2, None, ExitKind::Return, 0),
-    ];
-    for (index, (site, thunk)) in sites.into_iter().zip(thunks).enumerate() {
-        let at = machine
-            .host
-            .installed
-            .iter()
-            .position(|installed| Some(installed) == thunk.as_ref())
-            .expect("the thunk is installed")
-            + 1;
-        let at = at * NATIVE_CODE_STRIDE;
-        let jump = chain::jump(site as u64, at as u64).unwrap().to_vec();
-        assert_eq!(machine.host.patches[index], (site, jump));
+    let dispatcher = chain::lookup_dispatcher(control, 0).unwrap();
+    let at = machine
+        .host
+        .installed
+        .iter()
+        .position(|installed| *installed == dispatcher)
+        .expect("the dispatcher is installed")
+        + 1;
+    let at = (at * NATIVE_CODE_STRIDE) as u64;
+    let exits = [(ExitKind::Direct, 1), (ExitKind::Return, 2)];
+    for (index, (site, (kind, ran))) in sites.into_iter().zip(exits).enumerate() {
+        let exit = chain::lookup_exit(site as u64, kind, ran, at).unwrap();
+        assert_eq!(machine.host.patches[index], (site, exit.to_vec()));
     }
     let half = chain::half(base);
     let context = machine.chain.contexts()[half];
@@ -2929,8 +2906,8 @@ fn indirect_branches_go_through_lookups_that_check_the_target() {
         (2, ExitKind::Indirect, 0b01),
         (3, ExitKind::Indirect, 0b11),
     ] {
-        let thunk = chain::lookup_thunk(control, 1, None, kind, btype).unwrap();
-        assert!(machine.host.installed.contains(&thunk), "{index}");
+        let dispatcher = chain::lookup_dispatcher(control, btype).unwrap();
+        assert!(machine.host.installed.contains(&dispatcher), "{kind:?}");
         assert_eq!(machine.blocks[index].dynamic_site, None, "{index}");
     }
     assert_eq!(machine.statistics.lookups, 4);
@@ -5010,6 +4987,7 @@ fn pac_exits_complete_natively_from_the_memo_under_open_tags() {
     assert_eq!(
         *block.successors,
         [Successor {
+            slot: 0,
             site: (installed + thunk.next.unwrap()) as u64,
             target: GuestAddress(base + 8),
             word: ExitKind::Fallthrough.into(),
@@ -5069,6 +5047,7 @@ fn xpac_thunks_follow_regime_masks_without_key_enables_and_close_on_changes() {
     assert_eq!(
         *native.blocks[0].successors,
         [Successor {
+            slot: 0,
             site: (installed + thunk.next.unwrap()) as u64,
             target: GuestAddress(base + 8),
             word: ExitKind::Fallthrough.into(),
@@ -5112,10 +5091,57 @@ fn xpac_thunks_follow_regime_masks_without_key_enables_and_close_on_changes() {
     }
 }
 
+/// A waiting PE polls longer while its waits end soon, and stops polling
+/// once they outlast the longest poll.
+#[test]
+fn idle_polling_follows_how_long_waits_last() {
+    let mut machine = machine(&[0xd503_201f]);
+    let most = machine.profile.counter_frequency / super::processors::IDLE_POLL_HZ;
+    machine.tune_idle_poll(1);
+    assert_eq!(machine.idle_poll, most / 4);
+    machine.tune_idle_poll(most);
+    machine.tune_idle_poll(most);
+    machine.tune_idle_poll(most);
+    assert_eq!(machine.idle_poll, most);
+    machine.tune_idle_poll(most + 1);
+    assert_eq!(machine.idle_poll, most / 2);
+    machine.tune_idle_poll(most + 1);
+    machine.tune_idle_poll(most + 1);
+    assert_eq!(machine.idle_poll, 0);
+}
+
 /// A RETAB's PAC thunk ends its completion with the exit to the target
 /// in RAX, which the first return through it redirects into a lookup.
+/// Neither the check failures after a block's last exit nor a side exit
+/// that leaves only the PAC terminal unrun hides that exit from its thunk.
 #[test]
-fn pac_returns_go_through_a_lookup_thunk() {
+fn what_follows_a_pac_exit_keeps_its_thunk() {
+    const LOAD: u32 = 0xf940_0020; // ldr x0,[x1]
+    const BRANCH: u32 = 0xb400_0080; // cbz x0,.+16
+    const RETAB: u32 = 0xd65f_0fff;
+    for words in [&[LOAD, RETAB][..], &[LOAD, BRANCH, RETAB]] {
+        let mut machine = machine(words);
+        let base = machine.cpu.pc;
+        machine.host.exits = vec![NativeExit::Exit {
+            next_pc: base + 0x2000,
+            kind: ExitKind::Return as u64,
+        }];
+        machine.step().unwrap();
+        let last = base + (words.len() as u64 - 1) * 4;
+        let (memo, tags, service) = machine.pointer.addresses();
+        let thunk = x86_64_pointer::thunk(
+            x86_64_pointer::Form::of(block::PointerAuthenticationOperation::ReturnIbSp).unwrap(),
+            GuestAddress(last),
+            memo,
+            tags,
+            service,
+        );
+        assert!(machine.host.installed.contains(&thunk.code), "{words:x?}");
+    }
+}
+
+#[test]
+fn pac_returns_go_through_a_lookup_dispatcher() {
     const RETAB: u32 = 0xd65f_0fff;
     let mut machine = machine(&[RETAB]);
     let base = machine.cpu.pc;
@@ -5142,16 +5168,18 @@ fn pac_returns_go_through_a_lookup_thunk() {
     let at = at * NATIVE_CODE_STRIDE;
     let site = (at + thunk.dynamic.unwrap()) as u64;
     let control = machine.chain.address();
-    let lookup = chain::lookup_thunk(control, 1, None, ExitKind::Return, 0).unwrap();
-    assert_eq!(machine.host.installed.last(), Some(&lookup));
-    let jump = chain::jump(
+    let dispatcher = chain::lookup_dispatcher(control, 0).unwrap();
+    assert_eq!(machine.host.installed.last(), Some(&dispatcher));
+    let exit = chain::lookup_exit(
         site,
+        ExitKind::Return,
+        1,
         (machine.host.installed.len() * NATIVE_CODE_STRIDE) as u64,
     )
     .unwrap();
     assert_eq!(
         machine.host.patches.last(),
-        Some(&(site as usize, jump.to_vec()))
+        Some(&(site as usize, exit.to_vec()))
     );
     assert_eq!(machine.statistics.lookups, 1);
     assert_eq!(machine.blocks[0].dynamic_site, None);
@@ -5308,6 +5336,7 @@ fn mirrored_reads_complete_natively_from_the_open_cell() {
     assert_eq!(
         *block.successors,
         [Successor {
+            slot: 0,
             site: (installed + thunk.next.unwrap()) as u64,
             target: GuestAddress(base + 8),
             word: ExitKind::Fallthrough.into(),

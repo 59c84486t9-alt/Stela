@@ -94,7 +94,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             retained_source_pages: self.pages.len(),
             compile_wall_ticks_scope: "accepted foreground prepare only; excludes discarded short-window attempts, refusals and background compilation; host counter ticks, not CPU cycles",
             preparation_scope: "since this writer enabled metrics; all outer Preparation::prepare calls and wall ticks, including internal retry work; returned bytes exclude internal discarded emissions; not exact emitter invocation counts or CPU cycles; excludes shared/stored rebase and background workers",
-            lookup_counter_scope: "lookups counts installed lookup thunks; lookup_hits counts successful native transfers; their ratio is not a hit rate",
+            lookup_counter_scope: "lookups counts exits sent to lookup dispatchers; lookup_hits counts successful native transfers; their ratio is not a hit rate",
             counter_scope: "raw engine lifetime counters; subtract initial_statistics for writer epoch; legacy u64 counters have no saturation detection; residency fields are gauges, not RSS",
         }
     }

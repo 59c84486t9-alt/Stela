@@ -363,7 +363,7 @@ pub struct Statistics {
     /// ThreadRegister, FloatingPoint, ScalableNumerical, System, AMX).
     pub exit_kinds: [u64; 13],
     /// Exits of returns, indirect branches, calls and direct exits out of
-    /// their page, by why no lookup thunk transferred them: none was
+    /// their page, by why no lookup dispatcher transferred them: none was
     /// installed yet, the target's table slot named another PC, or another
     /// context, the chain budget was spent, or the entry refused the BTYPE.
     pub lookup_misses: [u64; 5],

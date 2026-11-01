@@ -196,7 +196,7 @@ pub(super) struct ExitsSeen {
     pub(super) entries: u64,
     pub(super) kinds: [u64; EXIT_KINDS],
     pub(super) words: BTreeMap<u32, u64>,
-    /// Lookup thunks installed, lookup hits, and the events that drop cached translations
+    /// Exits sent to lookup dispatchers, lookup hits, and the events that drop cached translations
     /// and lookups: translation control writes, TLBIs, TTBR0 writes and
     /// IC IVAU.
     pub(super) lookups: [u64; 2],

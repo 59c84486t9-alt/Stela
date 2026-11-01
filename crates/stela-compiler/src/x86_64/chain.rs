@@ -13,12 +13,14 @@
 //! before spending the local budget. A mismatch takes the original exit. After the native
 //! call returns, `block` is the block whose exit or fault ended the run, in
 //! its low 32 bits, and the BTYPE it was entered with in bits 33:32: 0 from
-//! every thunk but a lookup thunk of a BR or BLR form.
+//! every thunk but a lookup dispatcher of a BR or BLR form.
 //! Thunks clobber only RAX, RCX, RDX and flags, which every direct exit
 //! already may.
 //!
-//! A [`lookup_thunk`] serves an exit whose successor is not in the block's
-//! page, or not static (a return): it finds the target in the engine's
+//! A [`lookup_dispatcher`] serves an exit whose successor is not in the
+//! block's page, or not static (a return), which [`lookup_exit`] rewrites to
+//! jump there. There is one per BTYPE however many exits use it, so a block's
+//! exit costs ten bytes it already has. It finds the target in the engine's
 //! [`LookupEntry`] table, which the engine fills from its own dispatches
 //! and tags with the context they were valid in (`ChainControl::contexts`,
 //! everything that decides which block a fetch runs: the translation and
@@ -31,27 +33,38 @@
 //! switch. A slot's set holds two entries in one cache line ([`LookupTable`]),
 //! as two hot PCs of one set would otherwise take each other's entry at every
 //! call. A hit transfers like a thunk; a miss, another context or no budget
-//! exits exactly as the redirected exit would. It also clobbers R8, which no exit
-//! keeps live. The thunk of an exit that sets a nonzero BTYPE (BR or BLR)
-//! also requires the entry to accept that BTYPE (`LookupEntry::targets`),
-//! as a Branch Target check of the entered block's first instruction would.
+//! exits exactly as the redirected exit would, its word in RDX whole. It also
+//! clobbers R8 and R9, which no exit keeps live. The dispatcher of an exit that
+//! sets a nonzero BTYPE (BR or BLR) also requires the entry to accept that
+//! BTYPE (`LookupEntry::targets`), as a Branch Target check of the entered
+//! block's first instruction would.
 use crate::x86_64::asm::{
     Alu, BitTest, Code, Cond,
-    Gpr::{R8, Rax, Rcx, Rdx},
+    Gpr::{self, R8, R9, Rax, Rcx, Rdx},
     Mem, ShiftOp,
     Size::{self, Dword, Qword},
 };
 use crate::{GuestAddress, block::ExitKind};
 use alloc::{boxed::Box, vec, vec::Vec};
 
-/// Bytes in a direct exit: `movabs rax, target; mov edx, kind; ret`.
-pub const DIRECT_EXIT_BYTES: usize = 16;
+/// Bytes in a direct exit: `movabs rax, target` and a [`DYNAMIC_EXIT_BYTES`]
+/// exit.
+pub const DIRECT_EXIT_BYTES: usize = 10 + DYNAMIC_EXIT_BYTES;
 /// Bytes a redirection writes over the start of a direct exit.
 pub const JUMP_BYTES: usize = 5;
 /// Bytes in a [`thunk`].
 pub const THUNK_BYTES: usize = 42 + DIRECT_EXIT_BYTES + 10;
-/// Bytes in an exit to a dynamic target in RAX: `mov edx, kind; ret`.
-pub const DYNAMIC_EXIT_BYTES: usize = 6;
+/// Bytes in a [`link`], which a slot of its size before the direct exit
+/// holds, without and with the interruption gate.
+pub const LINK_BYTES: usize = 37;
+pub const POLLED_LINK_BYTES: usize = LINK_BYTES + 10;
+/// The span within which a link needs no translation of its own.
+const LINK_PAGE: u64 = 4096;
+/// Bytes in an exit to a dynamic target in RAX: `mov edx, kind; ret`, with
+/// room for the jump of a [`lookup_exit`].
+pub const DYNAMIC_EXIT_BYTES: usize = 10;
+/// Bytes a [`lookup_exit`] writes over the end of an exit, all of it.
+pub const LOOKUP_EXIT_BYTES: usize = DYNAMIC_EXIT_BYTES;
 /// Bits of a PC that select a [`LookupEntry`].
 const LOOKUP_BITS: u32 = 18;
 /// The slots of one PC, one a context takes by the low bits of its number.
@@ -59,9 +72,6 @@ pub const LOOKUP_SALT_BITS: u32 = 6;
 pub const LOOKUP_SALTS: usize = 1 << LOOKUP_SALT_BITS;
 /// Entries in the engine's lookup table, a power of two.
 pub const LOOKUP_ENTRIES: usize = 1 << LOOKUP_BITS;
-/// Bytes in a [`lookup_thunk`], without and with its static target.
-pub const LOOKUP_THUNK_BYTES: usize = 116 + 10;
-pub const STATIC_LOOKUP_THUNK_BYTES: usize = LOOKUP_THUNK_BYTES + 10;
 
 /// A direct exit to a static successor in a block's code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,7 +95,8 @@ impl DirectExit {
 
 /// What a block's exit returns in RDX: its [`ExitKind`] and, for the side
 /// exit of a branch the block runs past, how many of the block's instructions
-/// that exit left unrun.
+/// that exit left unrun. A [`lookup_exit`] holds the instructions it ran
+/// above them, which only a dispatcher reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExitWord {
     pub kind: ExitKind,
@@ -94,6 +105,8 @@ pub struct ExitWord {
 
 impl ExitWord {
     const KIND_BITS: u32 = 8;
+    const SKIPPED_BITS: u32 = 12;
+    const RAN_SHIFT: u32 = Self::KIND_BITS + Self::SKIPPED_BITS;
 
     pub const fn encoded(self) -> u32 {
         self.kind as u32 | (self.skipped as u32) << Self::KIND_BITS
@@ -103,7 +116,7 @@ impl ExitWord {
     pub const fn split(word: u64) -> (u64, u16) {
         (
             word & ((1 << Self::KIND_BITS) - 1),
-            (word >> Self::KIND_BITS) as u16,
+            (word >> Self::KIND_BITS & ((1 << Self::SKIPPED_BITS) - 1)) as u16,
         )
     }
 }
@@ -132,7 +145,7 @@ pub struct ChainControl {
     pub contexts: [u64; 2],
     /// The host address of the [`LookupEntry`] table.
     pub table: u64,
-    /// Transfers lookup thunks made.
+    /// Transfers lookup dispatchers made.
     pub hits: u64,
     /// Transfers the other thunks made.
     pub linked: u64,
@@ -339,16 +352,17 @@ impl Interruption {
 fn interruption_gate(
     asm: &mut crate::x86_64::asm::Asm,
     policy: Interruption,
+    scratch: Gpr,
 ) -> Option<crate::x86_64::asm::Patch> {
     match policy {
         Interruption::Epoch => {
             // Aligned MOV is an acquire load on x86. The owner never rewrites
             // this word; a notifier only advances it after publishing sources.
-            asm.mov_load(Qword, Rdx, Mem::base(Rcx, INTERRUPT_EPOCH));
+            asm.mov_load(Qword, scratch, Mem::base(Rcx, INTERRUPT_EPOCH));
             asm.alu_load(
                 Alu::Cmp,
                 Qword,
-                Rdx,
+                scratch,
                 Mem::base(Rcx, OBSERVED_INTERRUPT_EPOCH),
             );
             Some(asm.jcc8(Cond::Ne))
@@ -395,6 +409,78 @@ pub fn direct_exit(target: GuestAddress, kind: impl Into<ExitWord>) -> [u8; DIRE
     code.try_into().expect("a direct exit's length")
 }
 
+/// The bytes the direct exit of `kind` to `target` keeps before it for a
+/// [`link`], in a block at `block` whose code keeps them. A transfer within
+/// the page runs there, in the block's own code, for what a thunk apart would
+/// cost a kernel's cold code in fetches; one elsewhere takes a lookup dispatcher.
+/// Only a backward one looks for an interruption: every other way round a
+/// loop is through a lookup dispatcher.
+pub fn link_slot(block: Option<u64>, target: GuestAddress, kind: ExitKind) -> usize {
+    match block {
+        Some(block)
+            if matches!(
+                kind,
+                ExitKind::Fallthrough | ExitKind::Direct | ExitKind::Call
+            ) && (block ^ target.0) & !(LINK_PAGE - 1) == 0 =>
+        {
+            if target.0 <= block {
+                POLLED_LINK_BYTES
+            } else {
+                LINK_BYTES
+            }
+        }
+        _ => 0,
+    }
+}
+
+/// The link slot of an unlinked exit: a jump to the exit.
+pub(super) fn empty_link(asm: &mut crate::x86_64::asm::Asm, bytes: usize) {
+    const SHORT_JUMP_BYTES: usize = 2;
+    if bytes != 0 {
+        let exit = asm.jmp8();
+        for _ in SHORT_JUMP_BYTES..bytes {
+            asm.int3();
+        }
+        asm.bind(exit);
+    }
+}
+
+/// What fills the link slot of `bytes` at host address `at` to chain a block
+/// of `retired` instructions into block `block`, whose code is at `entry`.
+/// It ends where the direct exit it falls to starts, when `control` allows no
+/// transfer. `None` when `entry` is out of a 32-bit jump's reach or an operand
+/// exceeds its 32-bit field.
+pub fn link(
+    at: u64,
+    bytes: usize,
+    control: u64,
+    retired: u32,
+    block: u32,
+    entry: u64,
+) -> Option<Vec<u8>> {
+    let retired = i32::try_from(retired).ok()?;
+    let block = i32::try_from(block).ok()?;
+    let mut code = Code::new();
+    let mut asm = code.asm();
+    asm.mov_imm64(Rcx, control);
+    let interrupted = (bytes == POLLED_LINK_BYTES)
+        .then(|| interruption_gate(&mut asm, Interruption::Epoch, Rdx))
+        .flatten();
+    spend_budget(&mut asm, Interruption::Epoch);
+    let exhausted = asm.jcc8(Cond::B);
+    asm.alu_imm32(Alu::Add, Qword, Mem::base(Rcx, RETIRED), retired);
+    asm.mov_rm_imm32(Qword, Mem::base(Rcx, BLOCK), block);
+    let transfer = asm.jmp();
+    let relative = relative(at + transfer.end() as u64, entry)?;
+    asm.bind(exhausted);
+    if let Some(interrupted) = interrupted {
+        asm.bind(interrupted);
+    }
+    code.patch(transfer.offset(), relative.to_le_bytes());
+    debug_assert_eq!(code.len(), bytes);
+    Some(code.into_bytes())
+}
+
 /// A thunk at host address `at` that chains a block of `retired`
 /// instructions into block `block`, whose code is at `entry`, or takes the
 /// direct exit to `target` with `kind` when `control` allows no transfer.
@@ -437,7 +523,7 @@ fn thunk_with_policy(plan: ThunkPlan, policy: Interruption) -> Option<Vec<u8>> {
     let mut code = Code::new();
     let mut asm = code.asm();
     asm.mov_imm64(Rcx, control);
-    let interrupted = interruption_gate(&mut asm, policy);
+    let interrupted = interruption_gate(&mut asm, policy, Rdx);
     spend_budget(&mut asm, policy);
     let exhausted = asm.jcc8(Cond::B);
     asm.alu_imm32(Alu::Add, Qword, Mem::base(Rcx, RETIRED), retired);
@@ -455,101 +541,127 @@ fn thunk_with_policy(plan: ThunkPlan, policy: Interruption) -> Option<Vec<u8>> {
     Some(code.into_bytes())
 }
 
-/// A lookup thunk for an exit of `kind` from a block of `retired`
-/// instructions, to `target` or, for `None`, to the target in RAX, by a
-/// branch that sets `btype`. `None` when `retired` exceeds its 32-bit field
-/// or `btype` is not a BTYPE.
-pub fn lookup_thunk(
-    control: u64,
-    retired: u32,
-    target: Option<GuestAddress>,
-    kind: impl Into<ExitWord>,
-    btype: u8,
-) -> Option<Vec<u8>> {
-    lookup_with_policy(control, retired, target, kind, btype, Interruption::Epoch)
+/// The dispatcher at the end of the [`lookup_exit`]s of branches that set
+/// `btype`: the target in RAX, the exit's word in EDX. `None` when `btype` is
+/// not a BTYPE.
+pub fn lookup_dispatcher(control: u64, btype: u8) -> Option<Vec<u8>> {
+    dispatcher_with_policy(control, btype, Interruption::Epoch)
 }
-fn lookup_with_policy(
-    control: u64,
-    retired: u32,
-    target: Option<GuestAddress>,
-    kind: impl Into<ExitWord>,
-    btype: u8,
-    policy: Interruption,
-) -> Option<Vec<u8>> {
-    let retired = i32::try_from(retired).ok()?;
+fn dispatcher_with_policy(control: u64, btype: u8, policy: Interruption) -> Option<Vec<u8>> {
     if btype > 3 {
         return None;
     }
     let mut code = Code::new();
     let mut asm = code.asm();
-    if let Some(target) = target {
-        asm.mov_imm64(Rax, target.0);
-    }
     asm.mov_imm64(Rcx, control);
     let mut misses = Vec::new();
-    if let Some(interrupted) = interruption_gate(&mut asm, policy) {
+    if let Some(interrupted) = interruption_gate(&mut asm, policy, R9) {
         misses.push(interrupted);
     }
-    // R8 = the target's half; RDX = its entry in the table.
+    // R8 = the target's half; R9 = its entry in the table.
     asm.mov(Qword, R8, Rax);
     asm.shift_imm(ShiftOp::Shr, Qword, R8, 55);
     asm.alu_imm8(Alu::And, Dword, R8, 1);
-    asm.mov(Dword, Rdx, Rax);
-    asm.shift_imm(ShiftOp::Shr, Dword, Rdx, LOOKUP_BITS as u8);
-    asm.alu(Alu::Xor, Dword, Rdx, Rax);
-    asm.shift_imm(ShiftOp::Shr, Dword, Rdx, 2);
-    asm.alu_load(Alu::Xor, Dword, Rdx, Mem::indexed(Rcx, R8, 4, SALTS));
-    asm.alu_imm32(Alu::And, Dword, Rdx, LOOKUP_ENTRIES as i32 - 1);
-    asm.shift_imm(ShiftOp::Shl, Dword, Rdx, 5);
-    asm.alu_load(Alu::Add, Qword, Rdx, Mem::base(Rcx, TABLE));
+    asm.mov(Dword, R9, Rax);
+    asm.shift_imm(ShiftOp::Shr, Dword, R9, LOOKUP_BITS as u8);
+    asm.alu(Alu::Xor, Dword, R9, Rax);
+    asm.shift_imm(ShiftOp::Shr, Dword, R9, 2);
+    asm.alu_load(Alu::Xor, Dword, R9, Mem::indexed(Rcx, R8, 4, SALTS));
+    asm.alu_imm32(Alu::And, Dword, R9, LOOKUP_ENTRIES as i32 - 1);
+    asm.shift_imm(ShiftOp::Shl, Dword, R9, 5);
+    asm.alu_load(Alu::Add, Qword, R9, Mem::base(Rcx, TABLE));
     asm.mov_load(Qword, R8, Mem::indexed(Rcx, R8, 8, CONTEXTS));
-    asm.alu_load(Alu::Cmp, Qword, Rax, Mem::base(Rdx, 0));
+    asm.alu_load(Alu::Cmp, Qword, Rax, Mem::base(R9, 0));
     let other_pc = asm.jcc8(Cond::Ne);
-    asm.alu_load(Alu::Cmp, Qword, R8, Mem::base(Rdx, ENTRY_CONTEXT));
+    asm.alu_load(Alu::Cmp, Qword, R8, Mem::base(R9, ENTRY_CONTEXT));
     let found = asm.jcc8(Cond::E);
     asm.bind(other_pc);
     asm.alu_imm8(
         Alu::Xor,
         Qword,
-        Rdx,
+        R9,
         core::mem::size_of::<LookupEntry>() as i8,
     );
-    asm.alu_load(Alu::Cmp, Qword, Rax, Mem::base(Rdx, 0));
+    asm.alu_load(Alu::Cmp, Qword, Rax, Mem::base(R9, 0));
     misses.push(asm.jcc8(Cond::Ne));
-    asm.alu_load(Alu::Cmp, Qword, R8, Mem::base(Rdx, ENTRY_CONTEXT));
+    asm.alu_load(Alu::Cmp, Qword, R8, Mem::base(R9, ENTRY_CONTEXT));
     misses.push(asm.jcc8(Cond::Ne));
     asm.bind(found);
     if btype != 0 {
-        asm.test_imm(Size::Byte, Mem::base(Rdx, ENTRY_TARGETS), 1 << btype);
+        asm.test_imm(Size::Byte, Mem::base(R9, ENTRY_TARGETS), 1 << btype);
         misses.push(asm.jcc8(Cond::E));
     }
     spend_budget(&mut asm, policy);
     misses.push(asm.jcc8(Cond::B));
-    asm.alu_imm32(Alu::Add, Qword, Mem::base(Rcx, RETIRED), retired);
+    asm.shift_imm(ShiftOp::Shr, Dword, Rdx, ExitWord::RAN_SHIFT as u8);
+    asm.alu(Alu::Add, Qword, Mem::base(Rcx, RETIRED), Rdx);
     asm.alu_imm8(Alu::Add, Qword, Mem::base(Rcx, HITS), 1);
-    asm.mov_load(Dword, R8, Mem::base(Rdx, ENTRY_BLOCK));
+    asm.mov_load(Dword, R8, Mem::base(R9, ENTRY_BLOCK));
     for bit in 0..2 {
         if btype & 1 << bit != 0 {
             asm.bit_imm(BitTest::Bts, Qword, R8, BLOCK_BTYPE_SHIFT as u8 + bit);
         }
     }
     asm.mov_store(Qword, Mem::base(Rcx, BLOCK), R8);
-    asm.jmp_rm(Mem::base(Rdx, ENTRY_CODE));
+    asm.jmp_rm(Mem::base(R9, ENTRY_CODE));
     for miss in misses {
         asm.bind(miss);
     }
-    super::block::exit_kind_with(&mut asm, kind);
-    let code = code.into_bytes();
-    debug_assert!(
-        btype != 0
-            || code.len()
-                == if target.is_some() {
-                    STATIC_LOOKUP_THUNK_BYTES - 10 + policy.extra_bytes()
-                } else {
-                    LOOKUP_THUNK_BYTES - 10 + policy.extra_bytes()
-                }
-    );
-    Some(code)
+    asm.ret();
+    Some(code.into_bytes())
+}
+
+/// What the end of the exit of `word` at host address `at` becomes to go
+/// through `dispatcher`: the word with the `ran` instructions of the block it
+/// leaves, and the jump. `None` when `ran` exceeds its field or `dispatcher`
+/// is out of a 32-bit jump's reach.
+pub fn lookup_exit(
+    at: u64,
+    word: impl Into<ExitWord>,
+    ran: u32,
+    dispatcher: u64,
+) -> Option<[u8; LOOKUP_EXIT_BYTES]> {
+    if ran >= 1 << (u32::BITS - ExitWord::RAN_SHIFT) {
+        return None;
+    }
+    let mut code = Code::new();
+    let mut asm = code.asm();
+    asm.mov_imm32(Rdx, word.into().encoded() | ran << ExitWord::RAN_SHIFT);
+    let transfer = asm.jmp();
+    let relative = relative(at + transfer.end() as u64, dispatcher)?;
+    code.patch(transfer.offset(), relative.to_le_bytes());
+    code.try_into().ok()
+}
+
+/// An exit and its dispatcher in one piece, to run without an arena.
+#[cfg(test)]
+fn lookup_thunk(
+    control: u64,
+    ran: u32,
+    target: Option<GuestAddress>,
+    kind: impl Into<ExitWord>,
+    btype: u8,
+) -> Option<Vec<u8>> {
+    lookup_with_policy(control, ran, target, kind, btype, Interruption::Epoch)
+}
+#[cfg(test)]
+fn lookup_with_policy(
+    control: u64,
+    ran: u32,
+    target: Option<GuestAddress>,
+    kind: impl Into<ExitWord>,
+    btype: u8,
+    policy: Interruption,
+) -> Option<Vec<u8>> {
+    let mut code = Code::new();
+    let mut asm = code.asm();
+    if let Some(target) = target {
+        asm.mov_imm64(Rax, target.0);
+    }
+    asm.mov_imm32(Rdx, kind.into().encoded() | ran << ExitWord::RAN_SHIFT);
+    let mut bytes = code.into_bytes();
+    bytes.extend(dispatcher_with_policy(control, btype, policy)?);
+    Some(bytes)
 }
 
 /// The exit to a dynamic target in RAX that blocks end with.
@@ -557,6 +669,13 @@ pub fn dynamic_exit(kind: ExitKind) -> [u8; DYNAMIC_EXIT_BYTES] {
     let mut code = Code::new();
     super::block::exit_kind_with(&mut code.asm(), kind);
     code.try_into().expect("a dynamic exit's length")
+}
+
+/// `code` without the check failures that end a block, after its exits.
+pub fn without_failures(code: &[u8]) -> &[u8] {
+    const UD2: [u8; 2] = [0x0f, 0x0b];
+    let failures = code.rchunks_exact(UD2.len()).take_while(|bytes| *bytes == UD2);
+    &code[..code.len() - failures.count() * UD2.len()]
 }
 
 /// `jmp rel32` at host address `at` to `to`, or `None` out of reach.
@@ -637,7 +756,7 @@ mod tests {
         );
     }
 
-    /// Lookup thunks run on the host: a hit in the current context with
+    /// Lookup dispatchers run on the host: a hit in the current context with
     /// budget left counts and enters the entry's block; a miss, another
     /// context or no budget exits with the target and kind.
     #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
@@ -682,11 +801,7 @@ mod tests {
         let fixed =
             lookup_thunk(control_at, 3, Some(GuestAddress(TARGET)), ExitKind::Call, 0).unwrap();
         let branch = lookup_thunk(control_at, 5, None, ExitKind::Indirect, 3).unwrap();
-        assert_eq!(dynamic.len(), LOOKUP_THUNK_BYTES);
-        assert_eq!(branch.len(), LOOKUP_THUNK_BYTES + 6 + 10);
-        assert!(lookup_thunk(control_at, 5, None, ExitKind::Indirect, 4).is_none());
-        assert_eq!(fixed.len(), STATIC_LOOKUP_THUNK_BYTES);
-        assert_eq!(fixed[fixed.len() - 6..], dynamic_exit(ExitKind::Call));
+        assert!(lookup_dispatcher(control_at, 4).is_none());
         // SAFETY: private anonymous memory, RX after the copies, unmapped
         // at the end; the thunks touch only `control` and `table`.
         unsafe {
@@ -707,7 +822,10 @@ mod tests {
             let dynamic: Thunk = core::mem::transmute(page);
             let fixed: Thunk = core::mem::transmute(base.add(fixed_at));
             let branch: Thunk = core::mem::transmute(base.add(branch_at));
-            let exit = |result: u128| (result as u64, (result >> 64) as u64);
+            let exit = |result: u128| {
+                let word = (result >> 64) as u64;
+                (result as u64, ExitWord::split(word).0)
+            };
             let entry = LookupEntry {
                 pc: TARGET,
                 context: 7,

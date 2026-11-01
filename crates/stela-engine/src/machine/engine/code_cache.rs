@@ -340,6 +340,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// Make room in the code arena: reclaim its oldest part, or discard
     /// every block on a host whose arena is one part.
     pub(super) fn reclaim_code(&mut self) {
+        self.lookup_dispatchers = Default::default();
         match self.host.reclaim_code() {
             Some(range) => self.evict_code(range),
             None => self.discard_code(Discard::Arena),
@@ -419,6 +420,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     pub(super) fn discard_code(&mut self, cause: Discard) {
         self.exit_words = self.exit_words();
         self.host.discard_code();
+        self.lookup_dispatchers = Default::default();
         self.blocks.clear();
         self.free_blocks.clear();
         self.fault_recovery.clear();

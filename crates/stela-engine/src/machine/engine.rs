@@ -427,7 +427,7 @@ struct Block {
     /// PAC thunk's.
     successors: Box<[Successor]>,
     /// The host address of the exit to the target in RAX that its RET, BR
-    /// or BLR form (or that form's PAC thunk) ends with, until a lookup thunk
+    /// or BLR form (or that form's PAC thunk) ends with, until a lookup dispatcher
     /// serves it.
     dynamic_site: Option<NonZeroU64>,
     /// Its first instruction, for the Branch Target check of a branch to it.
@@ -511,6 +511,8 @@ struct Successor {
     site: u64,
     target: GuestAddress,
     word: ExitWord,
+    /// The bytes before `site` kept for a link ([`chain::link_slot`]).
+    slot: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -697,9 +699,11 @@ pub struct Machine<H: Host, D: Devices> {
     translation_generation: u64,
     /// TTBR0 writes: the kernel's fetches outlive a process switch.
     table_generation: u64,
+    /// The installed lookup dispatchers, by BTYPE.
+    lookup_dispatchers: [Option<NativeCode>; 4],
     /// Advances when installed code is discarded.
     code_generation: u64,
-    /// The blocks fetches ran, by PC and context, for lookup thunks
+    /// The blocks fetches ran, by PC and context, for lookup dispatchers
     /// (`x86_64::chain`): the table `ChainControl::table` names.
     targets: chain::LookupTable,
     /// Each half's lookup contexts ([`Space`]) since its translations last
@@ -969,6 +973,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             jump: vec![None; JUMP_CACHE],
             translation_generation: 1,
             table_generation: 1,
+            lookup_dispatchers: Default::default(),
             code_generation: 1,
             targets: chain::LookupTable::new(),
             spaces: [Vec::new(), Vec::new()],

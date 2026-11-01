@@ -79,7 +79,7 @@ fn direct(mapping: &Mapping, control: u64, policy: Interruption) -> Vec<u8> {
     .unwrap()
 }
 fn exited(value: u128) -> (u64, u64) {
-    (value as u64, (value >> 64) as u64)
+    (value as u64, ExitWord::split((value >> 64) as u64).0)
 }
 
 #[test]

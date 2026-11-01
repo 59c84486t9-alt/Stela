@@ -312,6 +312,7 @@ const JNZ: u8 = 0x85;
 
 #[test]
 fn register_completions_chain_onward_and_misses_exit_unchanged() {
+    use super::super::chain::{DIRECT_EXIT_BYTES, DYNAMIC_EXIT_BYTES};
     let pc = GuestAddress(0x4000);
     let form = Form::of(Operation::SignIbSp).unwrap();
     let service = Service {
@@ -321,12 +322,12 @@ fn register_completions_chain_onward_and_misses_exit_unchanged() {
     let thunk = thunk(form, pc, 0x1000, 0x2000, service);
     let end = thunk.code.len();
     assert_eq!(
-        thunk.code[end - 16..],
+        thunk.code[end - DIRECT_EXIT_BYTES..],
         super::super::chain::direct_exit(pc, ExitKind::PointerAuthentication)
     );
     let next = thunk.next.unwrap();
     assert_eq!(
-        thunk.code[next..next + 16],
+        thunk.code[next..next + DIRECT_EXIT_BYTES],
         super::super::chain::direct_exit(GuestAddress(0x4004), ExitKind::Fallthrough)
     );
     // The closed key and the refused service land on the exit; the
@@ -339,8 +340,8 @@ fn register_completions_chain_onward_and_misses_exit_unchanged() {
             let relative =
                 i32::from_le_bytes(thunk.code[at + 2..at + 6].try_into().unwrap()) as usize;
             match at + 6 + relative {
-                target if target == end - 16 => exits += 1,
-                target if target == next + 16 => calls += 1,
+                target if target == end - DIRECT_EXIT_BYTES => exits += 1,
+                target if target == next + DIRECT_EXIT_BYTES => calls += 1,
                 target if target == complete => identities += 1,
                 target => panic!("a jump to {target}"),
             }
@@ -355,11 +356,11 @@ fn register_completions_chain_onward_and_misses_exit_unchanged() {
     assert_eq!(ret.next, None);
     let returns = ret.dynamic.unwrap();
     assert_eq!(
-        ret.code[returns..returns + 6],
+        ret.code[returns..returns + DYNAMIC_EXIT_BYTES],
         super::super::chain::dynamic_exit(ExitKind::Return)
     );
     // The service path's `jmp complete` precedes the final exit.
-    let back = ret.code.len() - 16 - 5;
+    let back = ret.code.len() - DIRECT_EXIT_BYTES - 5;
     assert_eq!(ret.code[back], 0xe9);
     let relative = i32::from_le_bytes(ret.code[back + 1..back + 5].try_into().unwrap());
     assert_eq!((back as i64 + 5 + i64::from(relative)) as usize, returns);

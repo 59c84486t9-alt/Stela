@@ -602,11 +602,21 @@ impl CompilationPlan {
                     alloc::vec::Vec::new(),
                 )
             };
+            let linked = profile.has(Features::FULL_SYSTEM).then(|| {
+                parsed
+                    .instructions
+                    .first()
+                    .map(|first| first.pc)
+                    .or(parsed.terminal.as_ref().map(|(pc, _)| *pc))
+                    .unwrap_or(parsed.next_pc)
+                    .0
+            });
             let direct_exits = crate::x86_64::block::successor_exits(
                 &native,
                 &parsed.instructions,
                 parsed.terminal.as_ref(),
                 parsed.next_pc,
+                linked,
             );
             return Ok(CompiledBlock {
                 native,

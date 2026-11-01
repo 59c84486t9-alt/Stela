@@ -9,7 +9,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let el = self.cpu.pstate.el | u8::from(self.cpu.pstate.guarded) << 4;
         let contexts = self.contexts(el, context);
         self.chain.set_contexts(contexts);
-        // What a lookup thunk would enter, in the context that keeps its
+        // What a lookup dispatcher would enter, in the context that keeps its
         // translation current. The engine checks BTYPE against the fetch's
         // translation, which this leaves uncached.
         let context_number = contexts[chain::half(pc)];
@@ -98,7 +98,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     }
 
     /// Record that a fetch at `pc` runs block `index` in the current
-    /// context, for lookup thunks. The fetch translated `pc`, so its page's
+    /// context, for lookup dispatchers. The fetch translated `pc`, so its page's
     /// entry is in the fetch cache.
     /// Not for single-instruction blocks, which debug checks precede, nor trace
     /// points, which the engine records.
@@ -476,19 +476,21 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 site: code.0 as u64 + exit.offset as u64,
                 target: exit.target,
                 word: exit.word(),
+                slot: chain::link_slot(Some(pc), exit.target, exit.kind),
             })
             .collect();
         // RET, BR and BLR end the code with their exit to the target in
         // RAX; the PAC thunk of a RETA*, BRA* or BLRA* has one too. Only
-        // side exits follow a terminal's.
+        // side exits follow a terminal's, and of the direct exits only a
+        // terminal that has one precedes them: what a thunk completes has
+        // none, whatever a side exit just before it leaves unrun.
         let code_bytes = &compiled.native().x86_64_code;
         let terminal_end = compiled
             .direct_exits()
             .iter()
-            .filter(|exit| exit.skipped != 0)
-            .map(|exit| exit.offset)
+            .map(|exit| exit.offset - chain::link_slot(Some(pc), exit.target, exit.kind))
             .min()
-            .unwrap_or(code_bytes.len());
+            .unwrap_or(chain::without_failures(code_bytes).len());
         let code_bytes = &code_bytes[..terminal_end];
         let mut dynamic_site = (!single
             && terminal & 0xff9f_fc1f == 0xd61f_0000
@@ -578,6 +580,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.patch_native(NativeCode(site as usize), &jump);
         let successor = thunk.next.map(|next| Successor {
             site: installed.0 as u64 + next as u64,
+            slot: 0,
             target: GuestAddress(pc + INSTRUCTION),
             word: ExitKind::Fallthrough.into(),
         });
@@ -652,6 +655,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.patch_native(NativeCode(site as usize), &jump);
         thunk.next.map(|next| Successor {
             site: installed.0 as u64 + next as u64,
+            slot: 0,
             target: GuestAddress(pc + INSTRUCTION),
             word: ExitKind::Fallthrough.into(),
         })

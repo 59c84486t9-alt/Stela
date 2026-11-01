@@ -95,6 +95,7 @@ pub(super) fn check(host: &mut dyn Host) -> Result<()> {
         v: core::array::from_fn(|i| [i as u64, !(i as u64)]),
         fpcr: 0x400000,
         fpsr: 0x8000000,
+        ..Default::default()
     };
     state.x[30] = 0x9000;
     let before = state.clone();

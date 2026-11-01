@@ -33,12 +33,17 @@ pub(crate) struct Asm<'a> {
     shared: Option<&'a mut usize>,
     sites: Option<&'a mut Vec<EmissionSite>>,
     pinned: bool,
+    linked_block: Option<u64>,
 }
 
 impl<'a> Asm<'a> {
     /// Whether this encoder appends to pinned code.
     pub(crate) const fn is_pinned(&self) -> bool {
         self.pinned
+    }
+    /// The block whose exits keep a link slot, if this code's do.
+    pub(crate) const fn linked_block(&self) -> Option<u64> {
+        self.linked_block
     }
     /// `emit` given the frame's NZCV word from byte `offset`, which pinned
     /// code reaches through [`super::flag_word`] alone.
@@ -55,6 +60,7 @@ impl<'a> Asm<'a> {
             shared: None,
             sites: None,
             pinned: false,
+            linked_block: None,
         }
     }
     /// [`Self::new`] for code that keeps guest registers in host registers

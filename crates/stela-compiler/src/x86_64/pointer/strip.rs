@@ -78,7 +78,7 @@ mod tests {
         let zero = thunk(GuestAddress(u64::MAX - 3), 31, 0).unwrap();
         assert_eq!(zero.next, Some(0));
         assert_eq!(
-            &zero.code[..16],
+            &zero.code[..super::super::super::chain::DIRECT_EXIT_BYTES],
             &super::super::super::chain::direct_exit(GuestAddress(0), ExitKind::Fallthrough)
         );
     }

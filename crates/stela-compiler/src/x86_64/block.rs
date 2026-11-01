@@ -22,14 +22,22 @@ pub(super) fn exit_kind_with(asm: &mut Asm, word: impl Into<ExitWord>) {
     // MOV EDX zero-extends to the ABI's u64.
     asm.mov_imm32(Gpr::Rdx, word.into().encoded());
     asm.ret();
+    // The rest of the room a `chain::lookup_exit` takes.
+    for _ in 0..4 {
+        asm.int3();
+    }
 }
 
 pub(crate) fn direct_exit(code: &mut Code, target: GuestAddress, kind: ExitKind) {
     direct_exit_with(&mut code.asm(), target, kind);
 }
 
-/// `movabs rax,target; mov edx,word; ret`.
+/// `movabs rax,target` and the exit of `word`, after its empty link slot in
+/// code whose exits keep one.
 pub(super) fn direct_exit_with(asm: &mut Asm, target: GuestAddress, word: impl Into<ExitWord>) {
+    let word = word.into();
+    let slot = super::chain::link_slot(asm.linked_block(), target, word.kind);
+    super::chain::empty_link(asm, slot);
     asm.mov_imm64(Gpr::Rax, target.0);
     exit_kind_with(asm, word);
 }
@@ -647,23 +655,32 @@ pub(crate) fn successor_exits(
     instructions: &[Instruction],
     terminal: Option<&(GuestAddress, Terminator)>,
     fallthrough: GuestAddress,
+    linked: Option<u64>,
 ) -> Vec<super::chain::DirectExit> {
-    use super::chain::{DIRECT_EXIT_BYTES, DirectExit};
+    use super::chain::{DIRECT_EXIT_BYTES, DirectExit, link_slot};
     let branches: Vec<_> = instructions
         .iter()
         .enumerate()
         .filter_map(|(at, branch)| Some((at + 1, branch.operation.conditional_target()?)))
         .collect();
-    let end = native.x86_64_code.len() - branches.len() * DIRECT_EXIT_BYTES;
-    let mut exits = terminal_exits(&native.x86_64_code[..end], terminal, fallthrough);
-    for (position, (run, target)) in branches.into_iter().enumerate() {
+    let slot = |target| link_slot(linked, target, ExitKind::Direct);
+    let side_bytes: usize = branches
+        .iter()
+        .map(|(_, target)| slot(*target) + DIRECT_EXIT_BYTES)
+        .sum();
+    // Check failures end the code, after every exit's RET.
+    let mut end = super::chain::without_failures(&native.x86_64_code).len() - side_bytes;
+    let mut exits = terminal_exits(&native.x86_64_code[..end], terminal, fallthrough, linked);
+    for (run, target) in branches {
         let word = side_exit(native.source_map.len() - run);
+        let offset = end + slot(target);
         exits.push(DirectExit {
-            offset: end + position * DIRECT_EXIT_BYTES,
+            offset,
             target,
             kind: word.kind,
             skipped: word.skipped,
         });
+        end = offset + DIRECT_EXIT_BYTES;
     }
     exits
 }
@@ -673,8 +690,9 @@ fn terminal_exits(
     code: &[u8],
     terminal: Option<&(GuestAddress, Terminator)>,
     fallthrough: GuestAddress,
+    linked: Option<u64>,
 ) -> Vec<super::chain::DirectExit> {
-    use super::chain::{DIRECT_EXIT_BYTES, DirectExit, direct_exit};
+    use super::chain::{DIRECT_EXIT_BYTES, DirectExit, direct_exit, link_slot};
     let (target, kind, conditional) = match terminal.map(|(_, terminal)| terminal) {
         None => (fallthrough, ExitKind::Fallthrough, false),
         Some(Terminator::DirectCall(target)) => (*target, ExitKind::Call, false),
@@ -695,15 +713,21 @@ fn terminal_exits(
         Some(Terminator::FloatingPoint { .. }) => (fallthrough, ExitKind::Fallthrough, false),
         Some(_) => return vec![],
     };
+    // The target's exit ends the code, after a conditional's fallthrough's.
+    let last = code.len().checked_sub(DIRECT_EXIT_BYTES);
+    let before =
+        last.and_then(|last| last.checked_sub(link_slot(linked, target, kind) + DIRECT_EXIT_BYTES));
     let candidates = [
-        conditional.then_some((2, fallthrough, ExitKind::Fallthrough)),
-        Some((1, target, kind)),
+        conditional
+            .then_some(before)
+            .flatten()
+            .map(|offset| (offset, fallthrough, ExitKind::Fallthrough)),
+        last.map(|offset| (offset, target, kind)),
     ];
     candidates
         .into_iter()
         .flatten()
-        .filter_map(|(from_end, target, kind)| {
-            let offset = code.len().checked_sub(from_end * DIRECT_EXIT_BYTES)?;
+        .filter_map(|(offset, target, kind)| {
             // An always-true condition emits no fallthrough exit.
             (code[offset..offset + DIRECT_EXIT_BYTES] == direct_exit(target, kind)).then_some(
                 DirectExit {
