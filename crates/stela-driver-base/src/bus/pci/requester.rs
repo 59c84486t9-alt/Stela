@@ -332,7 +332,9 @@ fn extended<C: ConfigSpace>(config: &C) -> Result<(), ClaimError> {
     Ok(())
 }
 
-fn validate_stopped<C: ConfigSpace>(function: &mut Function<C>) -> Result<(), ClaimError> {
+/// Recheck PCI containment observations only. This supplies no engine stop,
+/// payload/IRQ/work retirement, physical-role proof or new requester capability.
+pub fn validate_stopped<C: ConfigSpace>(function: &mut Function<C>) -> Result<(), ClaimError> {
     let expected = u32::from(function.vendor) | u32::from(function.device) << 16;
     let class = function.class;
     let config = function.config();

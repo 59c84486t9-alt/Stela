@@ -60,6 +60,8 @@ struct Shared {
     drains: usize,
     domain_prepared: bool,
     private_bindings: usize,
+    detached: bool,
+    detach_fail: bool,
     device_syncs: usize,
     cpu_syncs: usize,
     cpu: Option<CpuMapping>,
@@ -135,6 +137,8 @@ impl Shared {
             drains: 0,
             domain_prepared: false,
             private_bindings: 0,
+            detached: false,
+            detach_fail: false,
             device_syncs: 0,
             cpu_syncs: 0,
             cpu: None,
@@ -548,6 +552,9 @@ unsafe impl DmaDomain for Domain {
         assert_eq!(direction, Direction::Bidirectional);
         let mut m = self.0.lock().unwrap();
         assert!(!m.mapped);
+        if m.detached || m.detach_fail {
+            return Err(DmaError::Unmapped);
+        }
         assert!(
             m.domain_prepared,
             "DMA map before original-path completion and private binding"
@@ -876,9 +883,19 @@ impl Hardware for Access {
     fn domain(&mut self) -> Result<Arc<dyn DmaDomain>, Error> {
         Ok(Arc::new(Domain(self.0.clone())))
     }
+    fn detach_requester(&mut self) -> Result<(), Error> {
+        let mut m = self.0.lock().unwrap();
+        assert!(!m.bme && !m.mapped && m.drained);
+        assert_eq!(m.words[(OP + STS) / 4] & (HALT | ASS | PSS), HALT);
+        if m.detach_fail {
+            return Err(Error::Dma(DmaError::InvalidationFailed));
+        }
+        m.detached = true;
+        Ok(())
+    }
     fn retire(&mut self) -> Result<(), Error> {
         let mut m = self.0.lock().unwrap();
-        assert!(!m.bme && !m.mapped);
+        assert!(!m.bme && !m.mapped && m.detached);
         m.retired = true;
         Ok(())
     }
@@ -1733,4 +1750,19 @@ fn cold_attachment_does_not_bind_or_allocate_before_engine_and_old_root_completi
         "recovery must retain its bound original domain"
     );
     c.shutdown().unwrap();
+}
+
+#[test]
+fn failed_requester_detach_never_retires_configuration_or_restarts_the_controller() {
+    let m = Arc::new(Mutex::new(Shared::new()));
+    let mut c = controller(m.clone());
+    m.lock().unwrap().detach_fail = true;
+    assert_eq!(c.shutdown(), Err(Error::Dma(DmaError::InvalidationFailed)));
+    {
+        let state = m.lock().unwrap();
+        assert!(!state.detached && !state.retired && !state.mapped && !state.bme);
+    }
+    assert_eq!(c.recover(), Err(Error::Quarantined));
+    drop(c);
+    assert!(!m.lock().unwrap().retired);
 }

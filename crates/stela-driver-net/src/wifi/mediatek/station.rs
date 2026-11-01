@@ -326,6 +326,21 @@ impl<I: BarIo, Q: QueueIo, C: Send + Sync + 'static, S: PageSource + 'static> Ra
             .map(|_| ())
     }
 
+    unsafe fn install_link_management_key(
+        &mut self,
+        link_id: u8,
+        index: u8,
+        material: &[u8],
+        receive: PacketNumber,
+    ) -> Result<bool, LinkControlError> {
+        // SAFETY: inherited from the keeper's authenticated key and drain boundary.
+        unsafe {
+            self.link
+                .install_link_management_key(link_id, index, material, receive)
+        }?;
+        Ok(true)
+    }
+
     unsafe fn install_management_key(
         &mut self,
         epoch: u64,

@@ -62,6 +62,7 @@ pub enum Error {
     },
     RingFull,
     Dma(crate::bus::dma::mapping::DmaError),
+    Preparation(crate::bus::pci::requester::preparation::Error),
     Memory(crate::bus::dma::memory::MemoryError),
 }
 

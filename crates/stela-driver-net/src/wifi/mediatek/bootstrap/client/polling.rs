@@ -456,7 +456,12 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
         }
         // BIP leaves the Protected field clear; its MMIE carries the key.
         let bytes = frame.bytes();
-        let mmie = bytes.len() >= 24 + 18 && bytes[bytes.len() - 18..][..2] == [76, 16];
+        let length = s
+            .management_cipher
+            .unwrap_or(ManagementCipher::Cmac128)
+            .mmie_length();
+        let mmie = bytes.len() >= 24 + length
+            && bytes[bytes.len() - length..][..2] == [76, (length - 2) as u8];
         match (mmie, departure) {
             (false, true) => Unencrypted::Report,
             (false, false) => Unencrypted::Drop,

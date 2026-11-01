@@ -105,6 +105,34 @@ impl<R: Registers, D: Delay> Hardware<R, D> {
             clkreq_bug: None,
         }
     }
+    /// Stop inherited packet engines while the original configuration/root
+    /// and DMA backing remain held. This publishes no DMA or reset operation.
+    /// The returned registers still require an original-root drain receipt.
+    pub fn quiesce_cold(mut self) -> Result<R, (Error, Self)> {
+        let result = (|| {
+            self.timer_ready()?;
+            if self.identity.is_some() || self.failure.is_some() || self.stopped {
+                return Err(Error::Poisoned);
+            }
+            let command = Self::checked(self.regs().config_read32(4)?)? as u16;
+            if command & 4 != 0 {
+                return Err(Error::UnsupportedBoard);
+            }
+            // Decode permits vendor containment; BME stays clear and inherited
+            // interrupt delivery remains disabled by the original platform.
+            self.regs().config_write16(4, command | 0x402)?;
+            if self.regs().config_read32(4)? & 0x406 != 0x402 {
+                return Err(Error::ConfigDidNotLatch);
+            }
+            self.packet_identity()?;
+            self.packet_stop()
+        })();
+        match self.record(result) {
+            Ok(()) => Ok(self.release_registers()),
+            Err(error) => Err((error, self)),
+        }
+    }
+
     pub fn identity(&self) -> Option<Identity> {
         self.identity
     }

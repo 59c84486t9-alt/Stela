@@ -95,6 +95,10 @@ pub(super) struct Statistics {
 }
 
 impl Statistics {
+    pub(super) fn watching(&self) -> bool {
+        self.watched
+    }
+
     /// `iwl_mld_stats_recalc_traffic_load`.
     fn count_traffic(&mut self, air_us: u32, stamp: u32) {
         if self.stamp != 0 {

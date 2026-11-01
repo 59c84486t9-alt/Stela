@@ -40,6 +40,36 @@ impl<I: BarIo, Q: QueueIo, C: 'static, S: PageSource + 'static> ManagedLink<I, Q
         Ok(result?)
     }
 
+    /// Install or rotate one secondary link's authenticated IGTK.
+    ///
+    /// # Safety
+    /// Inherit ManagedClient::install_link_management_key's authentic input,
+    /// peer-index retirement and independent hardware/RX/IRQ/work/user drain.
+    /// This frontend's empty queues do not establish that external fence.
+    pub unsafe fn install_link_management_key(
+        &mut self,
+        link_id: u8,
+        index: u8,
+        material: &[u8],
+        receive: PacketNumber,
+    ) -> Result<(), LinkControlError> {
+        let s = self.state_mut();
+        if !s.data.is_empty()
+            || !s.notices.is_empty()
+            || s.pending.is_some()
+            || s.released.is_some()
+        {
+            return Err(LinkControlError::Backpressure);
+        }
+        // SAFETY: inherited authenticated key, peer policy and independent drain.
+        let result = unsafe {
+            s.client
+                .install_link_management_key(link_id, index, material, receive)
+        };
+        Self::reconcile(s);
+        Ok(result?)
+    }
+
     /// Consume a taken ProtectedManagement notice with its original session,
     /// rechecking the current association, keys and policy at the callback.
     pub fn with_management<T>(

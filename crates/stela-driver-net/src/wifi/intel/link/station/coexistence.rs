@@ -10,6 +10,17 @@
 //! firmware's averaged beacons, and chains narrow once the AP's action frame
 //! is on its queue rather than on its acknowledgement.
 use super::*;
+
+mod statistics;
+
+pub(super) const LEGACY_STATISTICS_NOTIFICATION: (u8, u8) = (0x9d, 0);
+const NEW_RX_STATISTICS_API: u32 = 35;
+
+#[derive(Clone, Copy)]
+pub(super) enum StatisticsNotification {
+    Legacy,
+    System,
+}
 use crate::wifi::{intel::association::SpatialPowerSave, station::operations::ChannelDefinition};
 
 pub(super) const PROFILE_NOTIFICATION: (u8, u8) = (0xce, 0);
@@ -117,8 +128,9 @@ impl Bluetooth {
         self.stale = true;
     }
 
-    /// `iwl_mvm_bt_rssi_event`.
-    pub(super) fn heard(&mut self, signal: i32) {
+    /// The nonzero firmware beacon-filter measurement used by
+    /// iwl_mvm_update_link_sig before iwl_mvm_bt_rssi_event.
+    pub(super) fn measured(&mut self, signal: i32) {
         self.signal = Some(signal);
         self.stale |= self.grading != 0 && self.reduced_at(signal) != self.reduced;
     }
@@ -171,6 +183,61 @@ impl Bluetooth {
 }
 
 impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
+    /// iwl_mvm_handle_rx_statistics and iwl_mvm_handle_rx_system_oper_stats.
+    /// The native notification still belongs to this queue's firmware epoch;
+    /// its MAC index is a selector within that owner, not a new owner grant.
+    pub(super) fn coexistence_statistics(
+        &mut self,
+        queue: &mut Queue<Q, B>,
+        raw: &[u8],
+        notification: StatisticsNotification,
+    ) {
+        if !matches!(queue.family(), Family::Ax200 | Family::Ax210)
+            || self
+                .client
+                .context
+                .as_ref()
+                .is_some_and(|context| context.affiliation().is_some())
+            || self.client.leaving
+            || self.client.station.phase() != Peering::Associated
+        {
+            return;
+        }
+        let firmware = queue.firmware();
+        let system = firmware
+            .command_version(
+                commands::SYSTEM_STATISTICS.group,
+                commands::SYSTEM_STATISTICS.opcode,
+            )
+            .is_some_and(|version| version.command_version != u8::MAX);
+        let format = match notification {
+            StatisticsNotification::Legacy if system => return,
+            StatisticsNotification::Legacy => statistics::Format::Legacy {
+                version: firmware
+                    .command_version(0, LEGACY_STATISTICS_NOTIFICATION.0)
+                    .filter(|version| version.notification_version != u8::MAX)
+                    .map_or(0, |version| version.notification_version),
+                new_statistics: firmware.supports_api(NEW_RX_STATISTICS_API),
+            },
+            StatisticsNotification::System => statistics::Format::System {
+                version: firmware
+                    .command_version(0x10, 0)
+                    .filter(|version| version.notification_version != u8::MAX)
+                    .map_or(0, |version| version.notification_version),
+            },
+        };
+        match format.signal(raw, self.client.seat) {
+            Ok(Some(signal)) => self.client.bluetooth.measured(signal),
+            Ok(None) => {}
+            Err(statistics::Error::Version(_)) => self
+                .client
+                .unsupported("a firmware Bluetooth statistics version"),
+            Err(_) => self
+                .client
+                .unsupported("a malformed firmware Bluetooth statistics report"),
+        }
+    }
+
     pub(super) fn run_coexistence(&mut self, queue: &mut Queue<Q, B>) -> Result<(), Error> {
         let family = queue.family();
         let client = &self.client;
@@ -178,6 +245,26 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             return Ok(());
         }
         let associated = client.station.phase() == Peering::Associated;
+        let system_statistics = queue
+            .firmware()
+            .command_version(
+                commands::SYSTEM_STATISTICS.group,
+                commands::SYSTEM_STATISTICS.opcode,
+            )
+            .is_some_and(|version| version.command_version != u8::MAX);
+        if associated
+            && system_statistics
+            && !client.statistics.watching()
+            && client
+                .context
+                .as_ref()
+                .is_some_and(|context| context.affiliation().is_none())
+        {
+            // mvm configures periodic system reports and clears association
+            // counters. The existing serialized command path owns both ACKs.
+            self.client.watch_statistics();
+            return Ok(());
+        }
         let link = client.context.clone().filter(|_| associated);
         if client.bluetooth.chains_due && client.outbox.is_empty() {
             self.client.bluetooth.chains_due = false;
@@ -302,21 +389,21 @@ mod tests {
         bluetooth.profile(&body);
         bluetooth.stale = false;
         assert!(!bluetooth.reduces(true), "an AP unheard is a weak one");
-        bluetooth.heard(-50);
+        bluetooth.measured(-50);
         assert!(bluetooth.stale);
         assert!(bluetooth.reduces(true));
         assert!(!bluetooth.reduces(false));
         bluetooth.reduced = true;
         bluetooth.stale = false;
-        bluetooth.heard(-64);
+        bluetooth.measured(-64);
         assert!(!bluetooth.stale, "between the two thresholds nothing moves");
         assert!(bluetooth.reduces(true));
-        bluetooth.heard(-70);
+        bluetooth.measured(-70);
         assert!(bluetooth.stale);
         assert!(!bluetooth.reduces(true));
         body[24] = 1;
         bluetooth.profile(&body);
-        bluetooth.heard(-50);
+        bluetooth.measured(-50);
         assert!(!bluetooth.reduces(true), "a loose table keeps full power");
     }
 

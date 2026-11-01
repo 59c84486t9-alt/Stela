@@ -14,7 +14,7 @@ use std::sync::Mutex;
 
 // Independent bounded test peer: ordinary AES-CMAC blocks over the source BIP
 // AAD/body/MMIE. It never invokes production Cmac/BipKey to invent a proof.
-fn cmac(material: &[u8; 16], bytes: &[u8]) -> [u8; 16] {
+pub(crate) fn cmac(material: &[u8; 16], bytes: &[u8]) -> [u8; 16] {
     let aes = Aes128::new_from_slice(material).unwrap();
     let block = |bytes: &mut [u8; 16]| aes.encrypt_block(aes::Block::from_mut_slice(bytes));
     let double = |mut bytes: [u8; 16]| {

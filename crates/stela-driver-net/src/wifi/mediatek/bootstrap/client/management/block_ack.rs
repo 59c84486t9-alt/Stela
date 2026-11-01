@@ -36,7 +36,7 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Client<I, Q, C> {
     ) -> Result<(), Error> {
         let s = self.state_mut();
         let original = received.as_ref().ok_or(Error::WrongPhase)?;
-        Self::validate_management(s, &original.session)?;
+        Self::validate_received_management(s, original)?;
         if original.group {
             return Err(Error::Unsupported);
         }

@@ -6,7 +6,10 @@ pub(super) enum Requester {
     Preparing(PreparingRequester),
     Bound {
         pci: Function<OwnedConfig>,
-        domain: Arc<dyn DmaDomain>,
+        attachment: Box<dyn preparation::Attachment>,
+    },
+    Retired {
+        pci: Function<OwnedConfig>,
     },
     Failed {
         _failure: preparation::Failure,
@@ -18,12 +21,12 @@ impl Requester {
         match self {
             Self::Preparing(preparing) => Ok(preparing.function_mut()),
             Self::Bound { pci, .. } => Ok(pci),
-            Self::Failed { .. } | Self::Consumed => Err(Error::Quarantined),
+            Self::Retired { .. } | Self::Failed { .. } | Self::Consumed => Err(Error::Quarantined),
         }
     }
     pub(super) fn domain(&self) -> Result<Arc<dyn DmaDomain>, Error> {
         match self {
-            Self::Bound { domain, .. } => Ok(domain.clone()),
+            Self::Bound { attachment, .. } => Ok(attachment.domain()),
             _ => Err(Error::Quarantined),
         }
     }
@@ -33,10 +36,10 @@ impl Requester {
     /// During first attachment no Stela submissions or DMA allocations exist.
     /// The original BAR/configuration/root owners stay kept during this call.
     pub(super) unsafe fn bind(&mut self) -> Result<(), Error> {
-        if let Self::Bound { domain, .. } = self {
+        if let Self::Bound { attachment, .. } = self {
             // SAFETY: caller observed the owned controller's stop; runtime
             // drainage uses the same domain that owns its active DMA leases.
-            return unsafe { domain.drain_posted_writes() }.map_err(Error::Dma);
+            return unsafe { attachment.domain().drain_posted_writes() }.map_err(Error::Dma);
         }
         let Self::Preparing(preparing) = core::mem::replace(self, Self::Consumed) else {
             return Err(Error::Quarantined);
@@ -49,7 +52,7 @@ impl Requester {
             Ok(bound) => {
                 *self = Self::Bound {
                     pci: bound.requester.into_function(),
-                    domain: bound.domain,
+                    attachment: bound.attachment,
                 };
                 Ok(())
             }
@@ -60,9 +63,34 @@ impl Requester {
             }
         }
     }
+    pub(super) fn is_retired(&self) -> bool {
+        matches!(self, Self::Retired { .. })
+    }
+    /// # Safety
+    /// Full current-epoch halt, BME/IRQ/work exclusion, original payload
+    /// drainage precede this call. Remaining mapped leases cause refusal;
+    /// original configuration/BAR/root owners stay kept until retirement completes.
+    pub(super) unsafe fn retire(&mut self) -> Result<(), Error> {
+        match self {
+            Self::Bound { pci, attachment } => {
+                crate::bus::pci::requester::validate_stopped(pci)
+                    .map_err(|error| Error::Preparation(preparation::Error::Claim(error)))?;
+                // SAFETY: same paired stopped/drained owner and original
+                // generation. Backend refuses remaining mapped leases before
+                // retiring any context or configuration retention.
+                unsafe { attachment.detach() }.map_err(Error::Dma)?;
+            }
+            _ => return Err(Error::Quarantined),
+        }
+        let Self::Bound { pci, .. } = core::mem::replace(self, Self::Consumed) else {
+            unreachable!("same serialized attachment")
+        };
+        *self = Self::Retired { pci };
+        Ok(())
+    }
     pub(super) fn into_function(self) -> Result<Function<OwnedConfig>, Error> {
         match self {
-            Self::Bound { pci, .. } => Ok(pci),
+            Self::Retired { pci } => Ok(pci),
             _ => {
                 core::mem::forget(self);
                 Err(Error::Quarantined)

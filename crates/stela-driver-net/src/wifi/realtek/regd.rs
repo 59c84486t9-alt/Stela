@@ -249,7 +249,7 @@ const SHEETS: [([u8; 2], FactorySheet, FactorySheet); 239] = [
     (*b"ZW", Etsi, Etsi),
 ];
 
-/// `rtw_regd_find_reg_by_name` of `alpha2`.
+/// `rtw_reg_find_by_name` of `alpha2`.
 pub fn sheets(alpha2: [u8; 2]) -> (FactorySheet, FactorySheet) {
     SHEETS
         .binary_search_by_key(&alpha2, |row| row.0)
@@ -266,5 +266,30 @@ mod tests {
         assert_eq!(sheets(*b"DE"), (Etsi, Etsi));
         assert_eq!(sheets(*b"00"), (WorldMinimum, WorldMinimum));
         assert_eq!(sheets(*b"ZZ"), (WorldMinimum, WorldMinimum));
+    }
+
+    #[test]
+    fn every_two_byte_country_matches_pinned_linux() {
+        use sha2::{Digest, Sha256};
+
+        // Unchanged rtw_reg_find_by_name, including its world fallback, emits
+        // [alpha2[0], alpha2[1], regd_2g, regd_5g] for each input in this order.
+        // realtek_wifi_country_oracle.py binds the complete donor file hashes.
+        let mut digest = Sha256::new();
+        for first in u8::MIN..=u8::MAX {
+            for second in u8::MIN..=u8::MAX {
+                let (two, five) = sheets([first, second]);
+                digest.update([first, second, two as u8, five as u8]);
+            }
+        }
+        let actual: [u8; 32] = digest.finalize().into();
+        assert_eq!(
+            actual,
+            [
+                0xbd, 0xdb, 0x58, 0xe1, 0x1b, 0x2a, 0x5d, 0x77, 0x0c, 0xf5, 0x3a, 0x27, 0x87, 0x6b,
+                0xb0, 0x62, 0x64, 0x66, 0x8a, 0xbf, 0xda, 0x2d, 0x04, 0xf6, 0x4a, 0x24, 0x23, 0x20,
+                0xb9, 0xac, 0x54, 0x3c,
+            ]
+        );
     }
 }

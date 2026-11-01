@@ -6,7 +6,7 @@ use crate::bus::pci::{ConfigSpace, Function, owned::OwnedConfig, requester::Requ
 /// binding of a driver that keeps the function.
 pub(super) enum Owner {
     Function(RefCell<Function<OwnedConfig>>),
-    Binding(RequesterBinding),
+    Binding(RefCell<Option<RequesterBinding>>),
 }
 
 struct Binding {
@@ -126,7 +126,7 @@ impl<P: ColdPlatform> Unit<P> {
         }
         let rid = binding.requester();
         // SAFETY: forwarded.
-        unsafe { self.attach_owner(rid, Owner::Binding(binding)) }
+        unsafe { self.attach_owner(rid, Owner::Binding(RefCell::new(Some(binding)))) }
     }
 
     /// # Safety
@@ -252,7 +252,10 @@ impl<P: ColdPlatform> Requester<P> {
         }
         // A binding's requester lives while its configuration epoch does.
         if let Owner::Binding(binding) = &*self.owner
-            && binding.check_live().is_err()
+            && binding
+                .borrow()
+                .as_ref()
+                .is_none_or(|binding| binding.check_live().is_err())
         {
             return Err(Error::Requester);
         }
@@ -409,9 +412,10 @@ impl<P: ColdPlatform> Requester<P> {
         Ok(())
     }
     /// # Safety
-    /// This requester is stopped, every mapping was quiescently removed,
-    /// all payload/posted/IRQ/work users are drained and cannot resume. Original
-    /// configuration/root ownership must remain held through this operation.
+    /// This requester is stopped, and all payload/posted/IRQ/work users are
+    /// drained and cannot resume. Original configuration/root ownership stays
+    /// held. Live mappings are refused before DTE effects; success requires
+    /// their quiescent removal first.
     pub unsafe fn detach(&mut self) -> Result<(), Error> {
         self.live()?;
         if !self.bindings.is_empty() {
@@ -432,6 +436,12 @@ impl<P: ColdPlatform> Requester<P> {
         unsafe { self.tree.retire() };
         self.active.borrow_mut().retain(|rid| *rid != self.rid);
         self.detached = true;
+        // Every tree/hardware clone shares this same cell. Once the DTEs and
+        // walks are retired, old domain references must not pin configuration
+        // forever or acquire a replacement epoch. live() rejects them first.
+        if let Owner::Binding(binding) = &*self.owner {
+            binding.borrow_mut().take();
+        }
         Ok(())
     }
 }

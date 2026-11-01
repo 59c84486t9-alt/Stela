@@ -100,6 +100,7 @@ pub(super) trait Hardware {
     fn bus_master(&mut self, enabled: bool) -> Result<(), Error>;
     fn prepare_dma(&mut self) -> Result<(), Error>;
     fn drain(&mut self) -> Result<(), Error>;
+    fn detach_requester(&mut self) -> Result<(), Error>;
     fn retire(&mut self) -> Result<(), Error>;
     fn domain(&mut self) -> Result<Arc<dyn DmaDomain>, Error>;
 }
@@ -259,8 +260,16 @@ impl Hardware for Native {
         // same already bound domain that owns every current EHCI DMA lease.
         unsafe { self.r().requester.domain()?.drain_posted_writes() }.map_err(Error::Dma)
     }
+    fn detach_requester(&mut self) -> Result<(), Error> {
+        // SAFETY: shutdown observed full HALT/ASS0/PSS0, BMEclear, original
+        // payload drain and successful unmap of its arena. The attachment
+        // grant excludes IRQ/work/firmware producers through final retirement.
+        unsafe { self.r().requester.retire() }
+    }
     fn retire(&mut self) -> Result<(), Error> {
-        self.r().requester.domain()?;
+        if !self.r().requester.is_retired() {
+            return Err(Error::Quarantined);
+        }
         // SAFETY: Controller::shutdown has stopped engines, BME and DMA,
         // drained the domain and removed its arena mapping; no callbacks exist.
         unsafe { self.r().registers.retire() }.map_err(|_| Error::Register)?;
@@ -445,6 +454,7 @@ impl Controller {
             }
         }
         self.arena = None;
+        self.hw().detach_requester()?;
         self.hw().retire()?;
         self.ports.iter_mut().for_each(|port| *port = None);
         self.state = State::Stopped;
