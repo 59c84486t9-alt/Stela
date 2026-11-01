@@ -1,5 +1,6 @@
 //! Native interruption-gate safety and CPU measurements.
 use super::super::*;
+use crate::GuestState;
 use alloc::{boxed::Box, format, vec::Vec};
 use core::ffi::c_void;
 use std::{
@@ -45,12 +46,14 @@ impl Mapping {
             assert_eq!(mprotect(self.page, 4096, 5), 0);
         }
     }
-    fn run(&self) -> u128 {
+    fn run(&self, control: u64) -> u128 {
+        let mut frame = frame(control);
         // SAFETY: installed thunk has the SysV128 return ABI and touches only
-        // its control/table. It clobbers caller-volatile registers.
+        // its frame and control/table. It clobbers caller-volatile registers.
         unsafe {
-            let enter: unsafe extern "sysv64" fn() -> u128 = core::mem::transmute(self.page);
-            enter()
+            let enter: unsafe extern "sysv64" fn(*mut GuestState) -> u128 =
+                core::mem::transmute(self.page);
+            enter(&mut *frame)
         }
     }
 }
@@ -63,11 +66,16 @@ impl Drop for Mapping {
 const TARGET: GuestAddress = GuestAddress(0x1234);
 const INTERRUPT_TEST_BUDGET: u64 = 4096;
 const RENDEZVOUS_AFTER: u64 = 1000;
-fn direct(mapping: &Mapping, control: u64, policy: Interruption) -> Vec<u8> {
+/// A frame that finds `control`.
+fn frame(control: u64) -> Box<GuestState> {
+    let mut frame = Box::new(GuestState::default());
+    frame.anchors[Anchor::Control] = control;
+    frame
+}
+fn direct(mapping: &Mapping, policy: Interruption) -> Vec<u8> {
     thunk_with_policy(
         ThunkPlan {
             at: mapping.address(),
-            control,
             retired: 7,
             block: 3,
             entry: mapping.address(),
@@ -93,13 +101,13 @@ fn epoch_mismatch_exits_before_spending_or_changing_accounting() {
         observed_interrupt_epoch: 0,
         ..ChainControl::default()
     });
+    let address = (&mut *control as *mut ChainControl) as u64;
     let native = Mapping::new();
-    native.install(&direct(
-        &native,
-        (&mut *control as *mut ChainControl) as u64,
-        Interruption::Epoch,
-    ));
-    assert_eq!(exited(native.run()), (TARGET.0, ExitKind::Direct as u64));
+    native.install(&direct(&native, Interruption::Epoch));
+    assert_eq!(
+        exited(native.run(address)),
+        (TARGET.0, ExitKind::Direct as u64)
+    );
     assert_eq!(
         (
             control.budget,
@@ -111,7 +119,10 @@ fn epoch_mismatch_exits_before_spending_or_changing_accounting() {
     );
     control.interrupt_epoch = u64::MAX;
     control.observed_interrupt_epoch = u64::MAX - 1;
-    assert_eq!(exited(native.run()), (TARGET.0, ExitKind::Direct as u64));
+    assert_eq!(
+        exited(native.run(address)),
+        (TARGET.0, ExitKind::Direct as u64)
+    );
     assert_eq!(
         (
             control.budget,
@@ -139,16 +150,8 @@ fn dynamic_lookup_pending_and_saturated_epochs_never_touch_the_invalid_table() {
         let mut prefix = Code::new();
         prefix.asm().mov_imm64(Rax, TARGET.0);
         let mut code = prefix.into_bytes();
-        code.extend(
-            lookup_thunk(
-                (&mut *control as *mut ChainControl) as u64,
-                7,
-                None,
-                kind,
-                btype,
-            )
-            .unwrap(),
-        );
+        code.extend(lookup_thunk(7, None, kind, btype).unwrap());
+        let address = (&mut *control as *mut ChainControl) as u64;
         native.install(&code);
         for (epoch, observed) in [(1, 0), (u64::MAX, u64::MAX - 1)] {
             control.interrupt_epoch = epoch;
@@ -160,7 +163,7 @@ fn dynamic_lookup_pending_and_saturated_epochs_never_touch_the_invalid_table() {
                 control.linked,
                 control.block,
             );
-            assert_eq!(exited(native.run()), (TARGET.0, kind as u64));
+            assert_eq!(exited(native.run(address)), (TARGET.0, kind as u64));
             assert_eq!(
                 (
                     control.budget,
@@ -285,7 +288,6 @@ fn rendezvous_backedge(native: &Mapping, control: u64, gate: u64, policy: Interr
     let thunk = thunk_with_policy(
         ThunkPlan {
             at: native.address() + prefix.len() as u64,
-            control,
             retired: 7,
             block: 3,
             entry: native.address(),
@@ -317,12 +319,14 @@ fn interrupt_at_rendezvous(policy: Interruption) -> InterruptionOutcome {
     let retained = Arc::clone(&control);
     let retained_gate = Arc::clone(&gate);
     let worker = std::thread::spawn(move || {
+        let mut frame = frame(Arc::as_ptr(&retained) as u64);
         // SAFETY: main keeps the RX mapping until join; both allocations
         // remain owned, and the generated program writes only their declared
         // native counters/test rendezvous using caller-volatile registers.
         let result = unsafe {
-            let run: unsafe extern "sysv64" fn() -> u128 = core::mem::transmute(entry);
-            run()
+            let run: unsafe extern "sysv64" fn(*mut GuestState) -> u128 =
+                core::mem::transmute(entry);
+            run(&mut *frame)
         };
         (result, retained, retained_gate)
     });
@@ -390,18 +394,18 @@ fn an_already_checked_native_boundary_allows_one_transfer_then_stops() {
     prefix.asm().mov_imm64(Rdx, 0);
     let enter_tail = prefix.asm().jmp();
     let at = native.address() + prefix.len() as u64;
-    let body = thunk(at, address, 7, 3, at, TARGET, ExitKind::Direct).unwrap();
+    let body = thunk(at, 7, 3, at, TARGET, ExitKind::Direct).unwrap();
     // Golden legacy encodings identify the exact post-guard native window.
     // The first entry has already admitted a transfer with the old epoch;
     // its backedge re-enters the full, unchanged production thunk.
-    const AFTER_GUARD: usize = 20;
+    const AFTER_GUARD: usize = 17;
     assert_eq!(
-        &body[10..18],
+        &body[7..15],
         &[0x48, 0x8b, 0x51, 0x40, 0x48, 0x3b, 0x51, 0x48]
     );
-    assert_eq!(body[18], 0x75);
+    assert_eq!(body[15], 0x75);
     assert_eq!(
-        AFTER_GUARD + usize::from(body[19]),
+        AFTER_GUARD + usize::from(body[16]),
         body.len() - DIRECT_EXIT_BYTES
     );
     assert_eq!(&body[AFTER_GUARD..AFTER_GUARD + 4], &[0x48, 0x83, 0x29, 1]);
@@ -414,7 +418,10 @@ fn an_already_checked_native_boundary_allows_one_transfer_then_stops() {
     let mut code = prefix.into_bytes();
     code.extend(body);
     native.install(&code);
-    assert_eq!(exited(native.run()), (TARGET.0, ExitKind::Direct as u64));
+    assert_eq!(
+        exited(native.run(address)),
+        (TARGET.0, ExitKind::Direct as u64)
+    );
     assert_eq!(
         (
             control.budget,
@@ -472,9 +479,9 @@ fn native_interruption_gate_costs() {
                     block: 3,
                     targets: 15,
                 };
-                lookup_with_policy(pointer, 7, Some(TARGET), ExitKind::Direct, 0, policy).unwrap()
+                lookup_with_policy(7, Some(TARGET), ExitKind::Direct, 0, policy).unwrap()
             } else {
-                direct(&native, pointer, policy)
+                direct(&native, policy)
             };
             native.install(&code);
             let name = format!("{}-{policy:?}", if lookup { "lookup" } else { "direct" });
@@ -486,7 +493,7 @@ fn native_interruption_gate_costs() {
                 control.0.hits = 0;
                 control.0.linked = 0;
                 let start = Instant::now();
-                let result = native.run();
+                let result = native.run(pointer);
                 let elapsed = start.elapsed();
                 assert_eq!(exited(result), (TARGET.0, ExitKind::Direct as u64));
                 assert_eq!(control.0.retired, ITERATIONS * 7);

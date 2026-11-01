@@ -1,5 +1,8 @@
 use super::*;
 
+/// The tag words of these tests.
+const TAGS: Place = Place::new(Anchor::Mirrors, 0);
+
 #[test]
 fn forms_name_their_key_kind_operands_and_completion() {
     let form = Form::of(Operation::SignIbSp).unwrap();
@@ -171,26 +174,23 @@ fn thunks_complete_hits_and_computed_misses_natively() {
     let mut memo = vec![MemoEntry::default(); MEMO_ENTRIES];
     let mut tags = [0u64; 4];
     let (memo, tags) = (memo.as_mut_ptr(), tags.as_mut_ptr());
-    let address = (memo as u64, tags as u64);
     // SAFETY: key_index produces 0..4 and tags outlives these synchronous thunk calls.
     let set_tag = |key: u8, value: u64| unsafe { tags.add(usize::from(key)).write(value) };
     // SAFETY: slot masks into MEMO_ENTRIES; each returned borrow ends before native execution.
     let entry = |index: usize| unsafe { &mut *memo.add(index) };
     let routine: ServiceRoutine = service;
-    let service = Service {
-        state: 0x5e41,
-        routine: routine as usize as u64,
-    };
     let make = |operation| {
         thunk(
             Form::of(operation).unwrap(),
             pc,
-            address.0,
-            address.1,
-            service,
+            TAGS,
+            routine as usize as u64,
         )
     };
     let mut state = GuestState::default();
+    state.anchors[Anchor::Memo] = memo as u64;
+    state.anchors[Anchor::Mirrors] = tags as u64;
+    state.anchors[Anchor::Pointer] = 0x5e41;
     // PACIBSP: X30 signed with SP.
     let ib = key_index(Key::Ib);
     *entry(slot(pointer, modifier)) = MemoEntry {
@@ -315,11 +315,7 @@ fn register_completions_chain_onward_and_misses_exit_unchanged() {
     use super::super::chain::{DIRECT_EXIT_BYTES, DYNAMIC_EXIT_BYTES};
     let pc = GuestAddress(0x4000);
     let form = Form::of(Operation::SignIbSp).unwrap();
-    let service = Service {
-        state: 0x3000,
-        routine: 0x4000,
-    };
-    let thunk = thunk(form, pc, 0x1000, 0x2000, service);
+    let thunk = thunk(form, pc, TAGS, 0x4000);
     let end = thunk.code.len();
     assert_eq!(
         thunk.code[end - DIRECT_EXIT_BYTES..],
@@ -352,7 +348,7 @@ fn register_completions_chain_onward_and_misses_exit_unchanged() {
     // A return completes at its exit to the target in RAX, which the
     // service path reaches too.
     let ret = Form::of(Operation::ReturnIaSp).unwrap();
-    let ret = super::thunk(ret, pc, 0, 0, service);
+    let ret = super::thunk(ret, pc, TAGS, 0x4000);
     assert_eq!(ret.next, None);
     let returns = ret.dynamic.unwrap();
     assert_eq!(

@@ -101,11 +101,6 @@ impl Owners {
     pub(super) fn len(&self) -> usize {
         self.slots.iter().flatten().count()
     }
-
-    #[cfg(test)]
-    pub(super) fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
 }
 
 /// A terminal native implementation failure. Captured data and code owners stay

@@ -387,6 +387,7 @@ impl Clock {
             next_poll: 0,
             offset,
         });
+        self.publish_state();
     }
 
     /// Hand this serialized clock's count, as at the host counter `host`, on
@@ -565,13 +566,22 @@ impl Clock {
 
     /// Native count reads at the host counter `((tsc - base) * per_tsc) >>
     /// 64` ([`super::Host::tsc_counter`]): where they find this reader.
-    pub(super) fn native(&mut self, (base, per_tsc): (u64, u64)) -> u64 {
+    pub(super) fn native(&mut self, (base, per_tsc): (u64, u64)) {
         self.count.base = base;
         self.count.per_tsc = per_tsc;
+        self.publish_state();
+    }
+
+    /// Show native count reads the state this clock follows.
+    fn publish_state(&mut self) {
         self.count.state = match &self.shared {
             Some(attachment) => &attachment.clock.state as *const CountState as u64,
             None => &self.own as *const CountState as u64,
         };
+    }
+
+    /// The reader native count reads use ([`Anchor::Count`]).
+    pub(super) fn reader(&self) -> u64 {
         &self.count as *const Count as u64
     }
 

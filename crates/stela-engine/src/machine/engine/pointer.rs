@@ -12,8 +12,9 @@
 //! was found enabled and untrapped under the current derived state, which
 //! is what both paths require.
 use crate::pauth;
+use core::mem::offset_of;
 use alloc::{boxed::Box, vec, vec::Vec};
-use stela_compiler::{block::PointerAuthenticationKey, x86_64::pointer};
+use stela_compiler::{Anchor, Place, block::PointerAuthenticationKey, x86_64::pointer};
 
 /// The distinct PAC inputs whose memo generations are kept.
 pub(super) const POINTER_INPUTS_SEEN: usize = 16;
@@ -96,6 +97,21 @@ pub(super) struct PointerService {
     pub(super) tags: [u64; pointer::TAG_WORDS],
     /// Instruction/data XPAC masks, independent of cryptographic key state.
     pub(super) strips: [pointer::strip::Cell; 2],
+}
+
+/// The routine a thunk calls on a memo miss.
+pub(super) const SERVICE: pointer::ServiceRoutine = complete;
+
+/// Where native code finds the service's tag words.
+pub(super) const TAGS: Place = Place::new(Anchor::Pointer, offset_of!(PointerService, tags));
+
+/// Where native code finds the stripping cell of `data`.
+pub(super) const fn strip_place(data: bool) -> Place {
+    Place::new(
+        Anchor::Pointer,
+        offset_of!(PointerService, strips)
+            + data as usize * size_of::<pointer::strip::Cell>(),
+    )
 }
 
 impl PointerService {
@@ -195,10 +211,6 @@ impl PointerService {
         }
     }
 
-    pub(super) fn strip_address(&self, data: bool) -> u64 {
-        &self.strips[usize::from(data)] as *const pointer::strip::Cell as u64
-    }
-
     pub(super) fn open_stripping(&mut self, context: &pauth::Context, data: bool) {
         let keep = context.stripping_masks(data);
         self.strips[usize::from(data)] = pointer::strip::Cell {
@@ -230,18 +242,10 @@ impl PointerService {
         );
     }
 
-    /// The thunk's view of this service: its memo, tag words and
-    /// [`complete`] with its address.
-    pub(super) fn addresses(&self) -> (u64, u64, pointer::Service) {
-        let routine: pointer::ServiceRoutine = complete;
-        (
-            self.memo.as_ptr() as u64,
-            self.tags.as_ptr() as u64,
-            pointer::Service {
-                state: self as *const Self as u64,
-                routine: routine as usize as u64,
-            },
-        )
+    /// What native code finds through [`Anchor::Pointer`] and
+    /// [`Anchor::Memo`].
+    pub(super) fn anchors(&self) -> (u64, u64) {
+        (self as *const Self as u64, self.memo.as_ptr() as u64)
     }
 
     /// One signing or authentication with the open context, remembered
@@ -429,7 +433,7 @@ mod tests {
         let mut input = inputs(pauth::Version::Classic, 25 | 25 << 16);
         input.keys[4] = Some([7, 9]);
         service.open(input);
-        let state = service.addresses().2.state;
+        let state = service.anchors().0;
         let form = pointer::Form::of(
             stela_compiler::block::PointerAuthenticationOperation::GenericCode(
                 stela_compiler::block::pauth_memory::GenericCode {
@@ -621,7 +625,7 @@ mod tests {
             let mut engine = PointerService::new();
             native.open(inputs);
             engine.open(inputs);
-            let state = native.addresses().2.state;
+            let state = native.anchors().0;
             for key in [Key::Ia, Key::Ib, Key::Da, Key::Db] {
                 let pauth_key = key_of(key);
                 let index = usize::from(pointer::key_index(key));

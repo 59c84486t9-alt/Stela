@@ -1,5 +1,67 @@
 //! Guest register state, shared by hosted and freestanding execution.
 
+/// What native code reaches of the PE running it, a pointer each in
+/// [`GuestState::anchors`]: code holds a [`Place`], never one PE's address.
+#[repr(usize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Anchor {
+    /// `x86_64::chain::ChainControl`.
+    Control,
+    /// The engine's mirrors of System registers.
+    Mirrors,
+    /// The engine's pointer authentication service.
+    Pointer,
+    /// That service's memo.
+    Memo,
+    /// The clock reader (`x86_64::register_read::Count`).
+    Count,
+    /// The storage of SP_EL0.
+    StackZero,
+}
+
+/// The entries of [`Anchors`].
+const ANCHORS: usize = 6;
+
+/// A PE's pointer for each [`Anchor`]. They are no part of the guest's state:
+/// any two compare equal.
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Anchors([u64; ANCHORS]);
+
+impl PartialEq for Anchors {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for Anchors {}
+
+impl core::ops::Index<Anchor> for Anchors {
+    type Output = u64;
+    fn index(&self, anchor: Anchor) -> &u64 {
+        &self.0[anchor as usize]
+    }
+}
+
+impl core::ops::IndexMut<Anchor> for Anchors {
+    fn index_mut(&mut self, anchor: Anchor) -> &mut u64 {
+        &mut self.0[anchor as usize]
+    }
+}
+
+/// `offset` bytes past an anchor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Place {
+    pub anchor: Anchor,
+    pub offset: usize,
+}
+
+impl Place {
+    pub const fn new(anchor: Anchor, offset: usize) -> Self {
+        Self { anchor, offset }
+    }
+}
+
 /// The register state every compiled function takes in RDI
 /// ([`crate::block::BlockProfile::abi`] names the ABI). Registers enter and
 /// leave native code in this layout. Only NZCV bits 31:28 of PSTATE are held
@@ -35,6 +97,8 @@ pub struct GuestState {
     /// PSTATE.PAN while native code runs, which completes MSR PAN when the
     /// host keeps it in RFLAGS.AC (`x86_64::register_read::pan_thunk`).
     pub pan: u64,
+    /// Set by the engine as it enters native code.
+    pub anchors: Anchors,
 }
 
 impl GuestState {
@@ -59,6 +123,7 @@ impl Default for GuestState {
             pending: 0,
             unreachable: Self::UNREACHABLE,
             pan: 0,
+            anchors: Anchors::default(),
         }
     }
 }
@@ -72,9 +137,9 @@ mod tests {
     #[test]
     fn layout_matches_native_abi() {
         for profile in [BlockProfile::ORDINARY, BlockProfile::new(Features::LEAF)] {
-            assert!(profile.abi().starts_with("x86_64-sysv-guest-state-v8-"));
+            assert!(profile.abi().starts_with("x86_64-sysv-guest-state-v9-"));
         }
-        assert_eq!(size_of::<GuestState>(), 824);
+        assert_eq!(size_of::<GuestState>(), 872);
         assert_eq!(align_of::<GuestState>(), 8);
         assert_eq!(offset_of!(GuestState, x), 0);
         assert_eq!(offset_of!(GuestState, sp), 248);

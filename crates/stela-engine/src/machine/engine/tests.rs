@@ -2302,13 +2302,12 @@ fn side_exits_retire_the_instructions_that_ran() {
         .find(|exit| exit.word == word)
         .unwrap();
     machine.step().unwrap();
-    let control = machine.chain.address();
     let (at, code) = machine.host.patches.last().unwrap();
     let entry = machine.blocks[1].code.0 as u64;
     assert_eq!(*at as u64, exit.site - exit.slot as u64);
     assert_eq!(
         Some(code.clone()),
-        chain::link(*at as u64, exit.slot, control, 1, 1, entry)
+        chain::link(*at as u64, exit.slot, 1, 1, entry)
     );
 }
 
@@ -2333,7 +2332,6 @@ fn direct_exits_chain_into_their_successors_in_the_page() {
     machine.step().unwrap();
     machine.step().unwrap();
     assert_eq!(machine.statistics.links, 2);
-    let control = machine.chain.address();
     let (first, second) = (&machine.blocks[0], &machine.blocks[1]);
     // The second block's exit to the first, then the first's to it.
     for (patch, from, to, target, index) in [
@@ -2345,7 +2343,7 @@ fn direct_exits_chain_into_their_successors_in_the_page() {
         let site = from.code.0 + code.len() - chain::DIRECT_EXIT_BYTES;
         let slot = chain::link_slot(Some(from.pc), GuestAddress(target), ExitKind::Direct);
         let at = site - slot;
-        let expected = chain::link(at as u64, slot, control, 2, index, to.code.0 as u64);
+        let expected = chain::link(at as u64, slot, 2, index, to.code.0 as u64);
         assert_eq!((patch.0, Some(patch.1.clone())), (at, expected));
         assert!(from.successors.is_empty());
     }
@@ -2479,7 +2477,6 @@ fn returns_and_exits_out_of_the_page_go_through_lookup_dispatchers() {
     assert_eq!(machine.statistics.exit_kinds, kinds);
     // Neither exit had a thunk yet.
     assert_eq!(machine.statistics.lookup_misses, [2, 0, 0, 0, 0]);
-    let control = machine.chain.address();
     let (first, second) = (&machine.blocks[0], &machine.blocks[1]);
     assert!(first.successors.is_empty() && first.dynamic_site.is_none());
     assert!(second.dynamic_site.is_none());
@@ -2490,7 +2487,7 @@ fn returns_and_exits_out_of_the_page_go_through_lookup_dispatchers() {
         first.code.0 + code(first).len() - chain::LOOKUP_EXIT_BYTES,
         second.code.0 + code(second).len() - chain::LOOKUP_EXIT_BYTES,
     ];
-    let dispatcher = chain::lookup_dispatcher(control, 0).unwrap();
+    let dispatcher = chain::lookup_dispatcher(0).unwrap();
     let at = machine
         .host
         .installed
@@ -2924,14 +2921,13 @@ fn indirect_branches_go_through_lookups_that_check_the_target() {
     machine.step().unwrap();
     assert_eq!(machine.blocks.len(), 4);
     assert!(!machine.block_variant(2).guarded_page && machine.block_variant(3).guarded_page);
-    let control = machine.chain.address();
     for (index, kind, btype) in [
         (0, ExitKind::Call, 0b10),
         (1, ExitKind::Indirect, 0b01),
         (2, ExitKind::Indirect, 0b01),
         (3, ExitKind::Indirect, 0b11),
     ] {
-        let dispatcher = chain::lookup_dispatcher(control, btype).unwrap();
+        let dispatcher = chain::lookup_dispatcher(btype).unwrap();
         assert!(machine.host.installed.contains(&dispatcher), "{kind:?}");
         assert_eq!(machine.blocks[index].dynamic_site, None, "{index}");
     }
@@ -4993,13 +4989,11 @@ fn pac_exits_complete_natively_from_the_memo_under_open_tags() {
     machine.step().unwrap();
     let block = &machine.blocks[0];
     let code = &machine.host.installed[block.code.0 / NATIVE_CODE_STRIDE - 1];
-    let (memo, tags, service) = machine.pointer.addresses();
     let thunk = x86_64_pointer::thunk(
         x86_64_pointer::Form::of(block::PointerAuthenticationOperation::SignIbSp).unwrap(),
         GuestAddress(base + 4),
-        memo,
-        tags,
-        service,
+        TAGS,
+        SERVICE as usize as u64,
     );
     let installed = machine.host.installed.len() * NATIVE_CODE_STRIDE;
     assert_eq!(
@@ -5064,7 +5058,7 @@ fn xpac_thunks_follow_regime_masks_without_key_enables_and_close_on_changes() {
     let thunk = x86_64_pointer::strip::thunk(
         GuestAddress(base + 4),
         17,
-        native.pointer.strip_address(true),
+        strip_place(true),
     )
     .unwrap();
     assert_eq!(native.host.installed.last(), Some(&thunk.code));
@@ -5153,13 +5147,11 @@ fn what_follows_a_pac_exit_keeps_its_thunk() {
         }];
         machine.step().unwrap();
         let last = base + (words.len() as u64 - 1) * 4;
-        let (memo, tags, service) = machine.pointer.addresses();
         let thunk = x86_64_pointer::thunk(
             x86_64_pointer::Form::of(block::PointerAuthenticationOperation::ReturnIbSp).unwrap(),
             GuestAddress(last),
-            memo,
-            tags,
-            service,
+            TAGS,
+            SERVICE as usize as u64,
         );
         assert!(machine.host.installed.contains(&thunk.code), "{words:x?}");
     }
@@ -5175,13 +5167,11 @@ fn pac_returns_go_through_a_lookup_dispatcher() {
         kind: ExitKind::Return as u64,
     }];
     machine.step().unwrap();
-    let (memo, tags, service) = machine.pointer.addresses();
     let thunk = x86_64_pointer::thunk(
         x86_64_pointer::Form::of(block::PointerAuthenticationOperation::ReturnIbSp).unwrap(),
         GuestAddress(base),
-        memo,
-        tags,
-        service,
+        TAGS,
+        SERVICE as usize as u64,
     );
     let at = machine
         .host
@@ -5192,8 +5182,7 @@ fn pac_returns_go_through_a_lookup_dispatcher() {
         + 1;
     let at = at * NATIVE_CODE_STRIDE;
     let site = (at + thunk.dynamic.unwrap()) as u64;
-    let control = machine.chain.address();
-    let dispatcher = chain::lookup_dispatcher(control, 0).unwrap();
+    let dispatcher = chain::lookup_dispatcher(0).unwrap();
     assert_eq!(machine.host.installed.last(), Some(&dispatcher));
     let exit = chain::lookup_exit(
         site,
@@ -5278,7 +5267,7 @@ fn stored_reads_complete_natively_from_the_live_register() {
     machine.step().unwrap();
     assert_eq!(machine.stored_reads, [Encoding::new(3, 0, 4, 0, 1)]);
     let index = MIRRORED.len();
-    let cell = &machine.mirrors[index] as *const register_read::Cell as u64;
+    let cell = cell_place(index);
     let thunk = register_read::stored_thunk(GuestAddress(base + 4), 8, cell);
     assert_eq!(machine.host.installed.last(), Some(&thunk.code));
     machine.cpu.pstate = Pstate::reset(1);
@@ -5320,7 +5309,7 @@ fn stored_reads_complete_natively_from_the_live_register() {
         kind: ExitKind::Fallthrough as u64,
     }];
     fp.step().unwrap();
-    let cell = &fp.mirrors[index] as *const register_read::Cell as u64;
+    let cell = cell_place(index);
     let offset = core::mem::offset_of!(GuestState, fpcr);
     let thunk = register_read::frame_thunk(GuestAddress(base + 4), 8, cell, offset);
     assert_eq!(fp.host.installed.last(), Some(&thunk.code));
@@ -5348,7 +5337,7 @@ fn mirrored_reads_complete_natively_from_the_open_cell() {
     machine.step().unwrap();
     let block = &machine.blocks[0];
     let code = &machine.host.installed[block.code.0 / NATIVE_CODE_STRIDE - 1];
-    let cell = &machine.mirrors[thread] as *const register_read::Cell as u64;
+    let cell = cell_place(thread);
     let thunk = register_read::thunk(GuestAddress(base + 4), 8, cell);
     let installed = machine.host.installed.len() * NATIVE_CODE_STRIDE;
     assert_eq!(
@@ -5579,8 +5568,8 @@ fn count_reads_complete_natively_where_the_host_counts_its_tsc() {
                 kind: ExitKind::Fallthrough as u64,
             }];
             machine.step().unwrap();
-            let cell = &machine.mirrors[index] as *const register_read::Cell as u64;
-            let count = tsc.map_or(0, |tsc| machine.clock.native(tsc));
+            let cell = cell_place(index);
+            let count = Place::new(Anchor::Count, 0);
             let installed = machine.host.installed.last().unwrap();
             let thunk = register_read::count_thunk(GuestAddress(base + 4), 10, cell, count);
             assert_eq!(*installed == thunk.code, tsc.is_some());

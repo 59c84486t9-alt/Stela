@@ -90,7 +90,9 @@ use core::num::NonZeroU64;
 #[cfg(test)]
 use core::sync::atomic::AtomicU64;
 use core::sync::atomic::Ordering;
-use pointer::{PointerInputs, PointerOperation, PointerResult};
+use core::mem::offset_of;
+use pointer::{PointerInputs, PointerOperation, PointerResult, SERVICE, TAGS, strip_place};
+use stela_compiler::{Anchor, Anchors, Place};
 #[cfg(test)]
 pub(crate) use prepare::test_preparation;
 pub use prepare::{Description, Preparation, Prepared, Refused, window};

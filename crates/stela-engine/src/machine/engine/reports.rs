@@ -310,20 +310,17 @@ pub enum Discard {
     Arena,
     /// Breakpoints or traces changed, which every block embeds.
     Diagnostics,
-    /// A new parallel chain control, whose address every thunk embeds.
-    Control,
     /// The run ended.
     Finished,
 }
 
 impl Discard {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 6] = [
         Self::Maintenance,
         Self::Memory,
         Self::Table,
         Self::Arena,
         Self::Diagnostics,
-        Self::Control,
         Self::Finished,
     ];
 
@@ -334,7 +331,6 @@ impl Discard {
             Self::Table => "table",
             Self::Arena => "arena",
             Self::Diagnostics => "diagnostics",
-            Self::Control => "control",
             Self::Finished => "finished",
         }
     }

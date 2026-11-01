@@ -270,6 +270,19 @@ impl<'a> Asm<'a> {
         self.opcode_reg(Size::Dword, 0xb8, destination);
         self.data(&value.to_le_bytes());
     }
+    /// Load the address of `place` in the running PE's data.
+    pub(crate) fn place(&mut self, destination: Gpr, place: crate::Place) {
+        let anchor = core::mem::offset_of!(crate::GuestState, anchors) + place.anchor as usize * 8;
+        self.mov_load(Size::Qword, destination, Mem::base(Gpr::Rdi, anchor as i32));
+        if place.offset != 0 {
+            self.lea(
+                Size::Qword,
+                destination,
+                Mem::base(destination, place.offset as i32),
+            );
+        }
+    }
+
     /// `movabs r64, imm64` (REX.W B8+r, or REX2 for R16..R31).
     /// `mov destination16,value`, which keeps the bits above.
     pub(crate) fn mov_imm16(&mut self, destination: Gpr, value: u16) {

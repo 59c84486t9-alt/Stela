@@ -217,12 +217,30 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
     /// Run compiled block `index` and the blocks it chains into, up to
     /// `budget` of them, and complete the last one's exit or fault.
+    /// What native code finds this PE's data through.
+    pub(super) fn anchors(&self) -> Anchors {
+        let (pointer, memo) = self.pointer.anchors();
+        let mut anchors = Anchors::default();
+        anchors[Anchor::Control] = self.chain.address();
+        anchors[Anchor::Mirrors] = &*self.mirrors as *const Mirrors as u64;
+        anchors[Anchor::Pointer] = pointer;
+        anchors[Anchor::Memo] = memo;
+        anchors[Anchor::Count] = self.clock.reader();
+        anchors[Anchor::StackZero] = self
+            .cpu
+            .registers
+            .address(SystemRegister::SP_EL0, 0)
+            .expect("SP_EL0 has storage");
+        anchors
+    }
+
     pub(super) fn execute(&mut self, index: usize, budget: u64) -> Step {
         let entry = self.blocks[index].code;
         self.chain.begin(index, budget);
         self.cpu.state.daif = u32::from(self.cpu.pstate.daif);
         self.mirrors.selected = u64::from(self.cpu.pstate.sp);
         self.cpu.state.pan = u64::from(self.cpu.pstate.pan);
+        self.cpu.state.anchors = self.anchors();
         let entered = self.timing_start();
         // SAFETY: installed by this machine since the last discard, for the system-mode block ABI;
         // chained blocks and thunks too.
@@ -391,10 +409,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let exit = block.successors[position];
         let site = exit.site;
         let entry = self.blocks[target].code.0 as u64;
-        let control = self.chain.address();
         if exit.slot != 0 {
             let at = site - exit.slot as u64;
-            if let Some(code) = chain::link(at, exit.slot, control, retired, target as u32, entry) {
+            if let Some(code) = chain::link(at, exit.slot, retired, target as u32, entry) {
                 self.patch_native(NativeCode(at as usize), &code);
                 self.settle_successor(index, position);
                 self.statistics.links += 1;
@@ -408,7 +425,6 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let (Some(code), Some(jump)) = (
             chain::thunk(
                 at,
-                control,
                 retired,
                 target as u32,
                 entry,
@@ -494,7 +510,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if let Some(code) = self.lookup_dispatchers[usize::from(btype)] {
             return Some(code.0 as u64);
         }
-        let code = chain::lookup_dispatcher(self.chain.address(), btype)?;
+        let code = chain::lookup_dispatcher(btype)?;
         let installed = self.host.install(&code).ok()?;
         self.lookup_dispatchers[usize::from(btype)] = Some(installed);
         Some(installed.0 as u64)

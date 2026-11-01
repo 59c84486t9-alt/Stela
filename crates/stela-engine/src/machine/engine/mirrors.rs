@@ -75,6 +75,17 @@ pub(super) struct Mirrors {
     pub(super) selected: u64,
 }
 
+/// Where native code finds the cell at `index`.
+pub(super) const fn cell_place(index: usize) -> Place {
+    Place::new(
+        Anchor::Mirrors,
+        offset_of!(Mirrors, cells) + index * size_of::<register_read::Cell>(),
+    )
+}
+
+/// Where native code finds [`Mirrors::selected`].
+pub(super) const SELECTED: Place = Place::new(Anchor::Mirrors, offset_of!(Mirrors, selected));
+
 /// The cell of MSR SPSel, open once one completed plainly in the state:
 /// its `value` is the address of the stack SPSel 1 selects there.
 pub(super) const STACK_SELECT: usize = MASK_WRITES + 1 + WRITTEN.len();

@@ -6,7 +6,7 @@
 //! the original instruction exit, without changing architectural state.
 use super::Thunk;
 use crate::x86_64::asm::{Alu, BitTest, Code, Cond, Gpr, Mem, Size};
-use crate::{GuestAddress, aarch64::Register, block::ExitKind};
+use crate::{GuestAddress, Place, aarch64::Register, block::ExitKind};
 
 /// Fixed-address state read by a strip thunk. Each keep mask excludes the
 /// extension field that is restored from bit 55; tagged bytes remain set.
@@ -28,7 +28,7 @@ const REGION_BIT: u8 = 55;
 /// Complete XPAC on `register`, with no key access, from `cell` while open.
 /// Only RAX, RCX, RDX, R8 and host flags are clobbered, as at a block exit;
 /// guest NZCV, SP and every other register remain in their canonical frame.
-pub fn thunk(pc: GuestAddress, register: u8, cell: u64) -> Option<Thunk> {
+pub fn thunk(pc: GuestAddress, register: u8, cell: Place) -> Option<Thunk> {
     use Gpr::{R8, Rax, Rcx, Rdx};
     use Size::Qword;
     if register > 31 {
@@ -40,7 +40,7 @@ pub fn thunk(pc: GuestAddress, register: u8, cell: u64) -> Option<Thunk> {
     // XZR has no effect and depends on no regime state.
     if register != 31 {
         let pointer = asm.guest(Register::X(register)).expect("X0..X30");
-        asm.mov_imm64(Rdx, cell);
+        asm.place(Rdx, cell);
         asm.alu_imm8(Alu::Cmp, Qword, Mem::base(Rdx, 0), 0);
         closed = Some(asm.jcc(Cond::E));
         asm.mov_load(Qword, Rax, pointer);
@@ -71,11 +71,14 @@ pub fn thunk(pc: GuestAddress, register: u8, cell: u64) -> Option<Thunk> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Anchor;
+
+    const CELL: Place = Place::new(Anchor::Pointer, 0);
 
     #[test]
     fn invalid_register_refuses_and_xzr_needs_no_cell_access() {
-        assert!(thunk(GuestAddress(0x4000), 32, 0).is_none());
-        let zero = thunk(GuestAddress(u64::MAX - 3), 31, 0).unwrap();
+        assert!(thunk(GuestAddress(0x4000), 32, CELL).is_none());
+        let zero = thunk(GuestAddress(u64::MAX - 3), 31, CELL).unwrap();
         assert_eq!(zero.next, Some(0));
         assert_eq!(
             &zero.code[..super::super::super::chain::DIRECT_EXIT_BYTES],
@@ -110,7 +113,7 @@ mod tests {
         let pc = GuestAddress(0x4000);
         let mut cell = Cell::default();
         for register in [0, 8, 17, 30, 31] {
-            let code = thunk(pc, register, &cell as *const Cell as u64).unwrap();
+            let code = thunk(pc, register, CELL).unwrap();
             // SAFETY: private anonymous page, writable only during copying,
             // then executable; code touches only this live cell and frame.
             unsafe {
@@ -125,6 +128,7 @@ mod tests {
                 for (i, value) in before.x.iter_mut().enumerate() {
                     *value = 0xfeed_0000_0000_0000 | i as u64;
                 }
+                before.anchors[Anchor::Pointer] = &cell as *const Cell as u64;
                 before.sp = 0x1234_0000;
                 before.nzcv = 0xa000_0000;
                 before.exclusive_bytes = 0x9876_5432;

@@ -187,7 +187,7 @@ fn an_interrupt_borrow_survives_detach_and_reuse_without_a_raw_pointer_lease() {
 }
 
 #[test]
-fn populated_machine_discards_thunks_before_adopting_a_hub_control() {
+fn a_populated_machine_keeps_its_code_as_it_adopts_a_hub_control() {
     use super::super::tests::{BASE, machine};
     use stela_compiler::block::ExitKind;
     let mut machine = machine(&[0x9100_0400, 0x1400_0002, 0, 0x9100_0400, 0x17ff_fffc]);
@@ -200,36 +200,23 @@ fn populated_machine_discards_thunks_before_adopting_a_hub_control() {
     machine.step().unwrap();
     machine.step().unwrap();
     assert_eq!(machine.statistics.links, 2);
-    assert!(!machine.host.installed.is_empty() && !machine.host.patches.is_empty());
+    let (blocks, installed) = (machine.blocks.len(), machine.host.installed.len());
+    let contexts = machine.chain.contexts();
     let old_address = machine.chain.address();
     let old_storage = machine.chain.weak_storage();
-    let old_patches = machine.host.patches.len();
     let (hub, _) = hub(1);
     machine.enter_parallel(Arc::clone(&hub)).unwrap();
     assert_ne!(machine.chain.address(), old_address);
     assert!(old_storage.upgrade().is_none());
-    assert!(
-        machine.blocks.is_empty() && machine.index.is_empty() && machine.fault_recovery.is_empty()
+    // Code finds the control through the frame, which the next entry sets.
+    assert_eq!(machine.chain.contexts(), contexts);
+    assert_eq!(
+        (machine.blocks.len(), machine.host.installed.len()),
+        (blocks, installed)
     );
-    assert!(machine.host.installed.is_empty());
-    assert!(machine.targets.is_empty());
-    machine.cpu.pc = BASE;
-    machine.host.exits = vec![direct(BASE + 12), direct(BASE), direct(BASE + 12)];
-    machine.step().unwrap();
-    machine.step().unwrap();
-    machine.step().unwrap();
-    let current = machine.chain.address().to_le_bytes();
-    let previous = old_address.to_le_bytes();
-    let rebuilt = &machine.host.patches[old_patches..];
-    assert!(
-        rebuilt
-            .iter()
-            .any(|(_, bytes)| bytes.windows(8).any(|word| word == current))
-    );
-    assert!(
-        rebuilt
-            .iter()
-            .all(|(_, bytes)| bytes.windows(8).all(|word| word != previous))
+    assert_eq!(
+        machine.anchors()[stela_compiler::Anchor::Control],
+        machine.chain.address()
     );
 }
 

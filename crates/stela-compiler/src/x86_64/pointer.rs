@@ -30,7 +30,7 @@
 //! exit. The call aligns the stack to 16 bytes itself.
 use crate::x86_64::asm::{Alu, Code, Cond, Gpr, Mem, ShiftOp, Size, resolve};
 use crate::{
-    GuestAddress,
+    Anchor, GuestAddress, Place,
     aarch64::Register,
     block::{
         ExitKind, PointerAuthenticationKey as Key, PointerAuthenticationModifier as Modifier,
@@ -64,17 +64,8 @@ pub const REQUEST_AUTHENTICATE: u32 = 1 << 3;
 pub const REQUEST_COMBINED: u32 = 1 << 4;
 const REQUEST_KEY: u32 = 7;
 
-/// The engine's routine a thunk calls on a memo miss, and its argument.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Service {
-    /// The first argument.
-    pub state: u64,
-    /// A `ServiceRoutine`.
-    pub routine: u64,
-}
-
-/// The service's signature: its state, [`Form::request`], the pointer and
-/// the modifier.
+/// The engine's routine a thunk calls on a memo miss: [`Anchor::Pointer`],
+/// [`Form::request`], the pointer and the modifier.
 pub type ServiceRoutine = extern "sysv64" fn(u64, u32, u64, u64) -> Completion;
 
 /// What the service returns: `value` when `completed` is nonzero.
@@ -259,9 +250,9 @@ pub struct Thunk {
 }
 
 /// The thunk completing the PAC instruction of `form` at `pc` from the memo
-/// at `memo` under the tag words at `tags`, or through `service`, else
-/// exiting at `pc` for the engine.
-pub fn thunk(form: Form, pc: GuestAddress, memo: u64, tags: u64, service: Service) -> Thunk {
+/// ([`Anchor::Memo`]) under the tag words at `tags`, or through `service`, a
+/// [`ServiceRoutine`], else exiting at `pc` for the engine.
+pub fn thunk(form: Form, pc: GuestAddress, tags: Place, service: u64) -> Thunk {
     use Gpr::{R8, R9, R11, Rax, Rcx, Rdi, Rdx, Rsi, Rsp};
     use Size::{Dword, Qword};
     let mut code = Code::pinned();
@@ -280,7 +271,10 @@ pub fn thunk(form: Form, pc: GuestAddress, memo: u64, tags: u64, service: Servic
         }
         Modifier::Zero => asm.alu(Alu::Xor, Dword, Rdx, Rdx),
     }
-    asm.mov_imm64(R8, tags + u64::from(form.key) * 8);
+    asm.place(
+        R8,
+        Place::new(tags.anchor, tags.offset + usize::from(form.key) * 8),
+    );
     asm.mov_load(Qword, R8, Mem::base(R8, 0));
     asm.test(Qword, R8, R8);
     // The key is not open.
@@ -296,7 +290,7 @@ pub fn thunk(form: Form, pc: GuestAddress, memo: u64, tags: u64, service: Servic
     asm.shift_imm(ShiftOp::Shr, Qword, Rcx, SLOT_SHIFT);
     // 32-byte entries.
     asm.shift_imm(ShiftOp::Shl, Qword, Rcx, 5);
-    asm.mov_imm64(R9, memo);
+    asm.place(R9, Place::new(Anchor::Memo, 0));
     asm.alu(Alu::Add, Qword, Rcx, R9);
     let mut misses = Vec::new();
     asm.alu_load(Alu::Cmp, Qword, Rax, Mem::base(Rcx, 0));
@@ -352,8 +346,8 @@ pub fn thunk(form: Form, pc: GuestAddress, memo: u64, tags: u64, service: Servic
     asm.mov(Qword, Rcx, Rdx);
     asm.mov(Qword, Rdx, Rax);
     asm.mov_imm32(Rsi, form.request());
-    asm.mov_imm64(Rdi, service.state);
-    asm.mov_imm64(Rax, service.routine);
+    asm.place(Rdi, Place::new(Anchor::Pointer, 0));
+    asm.mov_imm64(Rax, service);
     asm.call_rm(Rax);
     asm.pop(Rsi);
     asm.pop(Rsi);

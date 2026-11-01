@@ -2,7 +2,7 @@
 //! static successor can be redirected through a thunk straight into the
 //! successor's code, so the dispatcher runs once for a chain of blocks.
 //!
-//! The engine owns one [`ChainControl`] at a fixed host address. Before it
+//! Each PE owns one [`ChainControl`] that [`Anchor::Control`] names. Before it
 //! enters a block it sets `budget` to the chained transfers it allows,
 //! `retired`, `linked` and `hits` to 0 and `block` to the entered block's
 //! index. Each thunk takes one transfer from `budget` (or, when none is
@@ -44,7 +44,7 @@ use crate::x86_64::asm::{
     Mem, ShiftOp,
     Size::{self, Dword, Qword},
 };
-use crate::{GuestAddress, block::ExitKind};
+use crate::{Anchor, GuestAddress, Place, block::ExitKind};
 use alloc::{boxed::Box, vec, vec::Vec};
 
 /// Bytes in a direct exit: `movabs rax, target` and a [`DYNAMIC_EXIT_BYTES`]
@@ -53,10 +53,10 @@ pub const DIRECT_EXIT_BYTES: usize = 10 + DYNAMIC_EXIT_BYTES;
 /// Bytes a redirection writes over the start of a direct exit.
 pub const JUMP_BYTES: usize = 5;
 /// Bytes in a [`thunk`].
-pub const THUNK_BYTES: usize = 42 + DIRECT_EXIT_BYTES + 10;
+pub const THUNK_BYTES: usize = 39 + DIRECT_EXIT_BYTES + 10;
 /// Bytes in a [`link`], which a slot of its size before the direct exit
 /// holds, without and with the interruption gate.
-pub const LINK_BYTES: usize = 37;
+pub const LINK_BYTES: usize = 34;
 pub const POLLED_LINK_BYTES: usize = LINK_BYTES + 10;
 /// The span within which a link needs no translation of its own.
 const LINK_PAGE: u64 = 4096;
@@ -72,6 +72,9 @@ pub const LOOKUP_SALT_BITS: u32 = 6;
 pub const LOOKUP_SALTS: usize = 1 << LOOKUP_SALT_BITS;
 /// Entries in the engine's lookup table, a power of two.
 pub const LOOKUP_ENTRIES: usize = 1 << LOOKUP_BITS;
+
+/// Where a thunk finds the running PE's [`ChainControl`].
+const CONTROL: Place = Place::new(Anchor::Control, 0);
 
 /// A direct exit to a static successor in a block's code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,7 +130,7 @@ impl From<ExitKind> for ExitWord {
     }
 }
 
-/// The engine's chaining state, which thunks address absolutely.
+/// The engine's chaining state, which thunks find through [`Anchor::Control`].
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ChainControl {
@@ -387,7 +390,6 @@ fn spend_budget(asm: &mut crate::x86_64::asm::Asm, policy: Interruption) {
 }
 struct ThunkPlan {
     at: u64,
-    control: u64,
     retired: u32,
     block: u32,
     entry: u64,
@@ -447,13 +449,12 @@ pub(super) fn empty_link(asm: &mut crate::x86_64::asm::Asm, bytes: usize) {
 
 /// What fills the link slot of `bytes` at host address `at` to chain a block
 /// of `retired` instructions into block `block`, whose code is at `entry`.
-/// It ends where the direct exit it falls to starts, when `control` allows no
-/// transfer. `None` when `entry` is out of a 32-bit jump's reach or an operand
+/// It ends where the direct exit it falls to starts, when the control allows
+/// no transfer. `None` when `entry` is out of a 32-bit jump's reach or an operand
 /// exceeds its 32-bit field.
 pub fn link(
     at: u64,
     bytes: usize,
-    control: u64,
     retired: u32,
     block: u32,
     entry: u64,
@@ -462,7 +463,7 @@ pub fn link(
     let block = i32::try_from(block).ok()?;
     let mut code = Code::new();
     let mut asm = code.asm();
-    asm.mov_imm64(Rcx, control);
+    asm.place(Rcx, CONTROL);
     let interrupted = (bytes == POLLED_LINK_BYTES)
         .then(|| interruption_gate(&mut asm, Interruption::Epoch, Rdx))
         .flatten();
@@ -483,12 +484,11 @@ pub fn link(
 
 /// A thunk at host address `at` that chains a block of `retired`
 /// instructions into block `block`, whose code is at `entry`, or takes the
-/// direct exit to `target` with `kind` when `control` allows no transfer.
+/// direct exit to `target` with `kind` when the control allows no transfer.
 /// `None` when `entry` is out of a 32-bit jump's reach or an operand
 /// exceeds its 32-bit field.
 pub fn thunk(
     at: u64,
-    control: u64,
     retired: u32,
     block: u32,
     entry: u64,
@@ -498,7 +498,6 @@ pub fn thunk(
     thunk_with_policy(
         ThunkPlan {
             at,
-            control,
             retired,
             block,
             entry,
@@ -511,7 +510,6 @@ pub fn thunk(
 fn thunk_with_policy(plan: ThunkPlan, policy: Interruption) -> Option<Vec<u8>> {
     let ThunkPlan {
         at,
-        control,
         retired,
         block,
         entry,
@@ -522,7 +520,7 @@ fn thunk_with_policy(plan: ThunkPlan, policy: Interruption) -> Option<Vec<u8>> {
     let block = i32::try_from(block).ok()?;
     let mut code = Code::new();
     let mut asm = code.asm();
-    asm.mov_imm64(Rcx, control);
+    asm.place(Rcx, CONTROL);
     let interrupted = interruption_gate(&mut asm, policy, Rdx);
     spend_budget(&mut asm, policy);
     let exhausted = asm.jcc8(Cond::B);
@@ -544,16 +542,16 @@ fn thunk_with_policy(plan: ThunkPlan, policy: Interruption) -> Option<Vec<u8>> {
 /// The dispatcher at the end of the [`lookup_exit`]s of branches that set
 /// `btype`: the target in RAX, the exit's word in EDX. `None` when `btype` is
 /// not a BTYPE.
-pub fn lookup_dispatcher(control: u64, btype: u8) -> Option<Vec<u8>> {
-    dispatcher_with_policy(control, btype, Interruption::Epoch)
+pub fn lookup_dispatcher(btype: u8) -> Option<Vec<u8>> {
+    dispatcher_with_policy(btype, Interruption::Epoch)
 }
-fn dispatcher_with_policy(control: u64, btype: u8, policy: Interruption) -> Option<Vec<u8>> {
+fn dispatcher_with_policy(btype: u8, policy: Interruption) -> Option<Vec<u8>> {
     if btype > 3 {
         return None;
     }
     let mut code = Code::new();
     let mut asm = code.asm();
-    asm.mov_imm64(Rcx, control);
+    asm.place(Rcx, CONTROL);
     let mut misses = Vec::new();
     if let Some(interrupted) = interruption_gate(&mut asm, policy, R9) {
         misses.push(interrupted);
@@ -636,17 +634,15 @@ pub fn lookup_exit(
 /// An exit and its dispatcher in one piece, to run without an arena.
 #[cfg(test)]
 fn lookup_thunk(
-    control: u64,
     ran: u32,
     target: Option<GuestAddress>,
     kind: impl Into<ExitWord>,
     btype: u8,
 ) -> Option<Vec<u8>> {
-    lookup_with_policy(control, ran, target, kind, btype, Interruption::Epoch)
+    lookup_with_policy(ran, target, kind, btype, Interruption::Epoch)
 }
 #[cfg(test)]
 fn lookup_with_policy(
-    control: u64,
     ran: u32,
     target: Option<GuestAddress>,
     kind: impl Into<ExitWord>,
@@ -660,7 +656,7 @@ fn lookup_with_policy(
     }
     asm.mov_imm32(Rdx, kind.into().encoded() | ran << ExitWord::RAN_SHIFT);
     let mut bytes = code.into_bytes();
-    bytes.extend(dispatcher_with_policy(control, btype, policy)?);
+    bytes.extend(dispatcher_with_policy(btype, policy)?);
     Some(bytes)
 }
 
@@ -710,7 +706,6 @@ mod tests {
     fn thunks_count_name_and_jump_or_exit() {
         let code = thunk(
             0x1000,
-            0x8877_6655_4433_2211,
             7,
             3,
             0x2000,
@@ -718,18 +713,19 @@ mod tests {
             ExitKind::Fallthrough,
         )
         .unwrap();
-        let mut expected = vec![0x48, 0xb9, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
+        let mut expected = vec![0x48, 0x8b, 0x8f];
+        expected.extend(824u32.to_le_bytes());
         expected.extend([0x48, 0x8b, 0x51, 0x40, 0x48, 0x3b, 0x51, 0x48, 0x75, 32]);
         expected.extend([0x48, 0x83, 0x29, 0x01, 0x72, 26]);
         expected.extend([0x48, 0x81, 0x41, 0x08, 7, 0, 0, 0]);
         expected.extend([0x48, 0x83, 0x41, 0x38, 0x01]);
         expected.extend([0x48, 0xc7, 0x41, 0x10, 3, 0, 0, 0]);
-        // The jump ends 0x34 bytes into the thunk.
+        // The jump ends 0x31 bytes into the thunk.
         expected.extend([0xe9]);
-        expected.extend((0x2000i32 - 0x1034).to_le_bytes());
+        expected.extend((0x2000i32 - 0x1031).to_le_bytes());
         expected.extend(direct_exit(GuestAddress(0xabc), ExitKind::Fallthrough));
         assert_eq!(code, expected);
-        assert!(thunk(0, 0, 0, 0, 1 << 40, GuestAddress(0), ExitKind::Direct).is_none());
+        assert!(thunk(0, 0, 0, 1 << 40, GuestAddress(0), ExitKind::Direct).is_none());
     }
 
     #[test]
@@ -789,7 +785,9 @@ mod tests {
             salts: [lookup_salt(5), lookup_salt(7)],
             ..ChainControl::default()
         };
-        let control_at = &mut control as *mut ChainControl as u64;
+        let mut state = crate::GuestState::default();
+        state.anchors[Anchor::Control] = &mut control as *mut ChainControl as u64;
+        let frame = &mut state as *mut crate::GuestState as u64;
         // A target block that returns a marker; the dynamic thunk takes its
         // target from the second argument; the static one names TARGET.
         let block = [
@@ -797,11 +795,10 @@ mod tests {
             0xba, 99, 0, 0, 0, // mov edx,99
             0xc3,
         ];
-        let dynamic = lookup_thunk(control_at, 9, None, ExitKind::Return, 0).unwrap();
-        let fixed =
-            lookup_thunk(control_at, 3, Some(GuestAddress(TARGET)), ExitKind::Call, 0).unwrap();
-        let branch = lookup_thunk(control_at, 5, None, ExitKind::Indirect, 3).unwrap();
-        assert!(lookup_dispatcher(control_at, 4).is_none());
+        let dynamic = lookup_thunk(9, None, ExitKind::Return, 0).unwrap();
+        let fixed = lookup_thunk(3, Some(GuestAddress(TARGET)), ExitKind::Call, 0).unwrap();
+        let branch = lookup_thunk(5, None, ExitKind::Indirect, 3).unwrap();
+        assert!(lookup_dispatcher(4).is_none());
         // SAFETY: private anonymous memory, RX after the copies, unmapped
         // at the end; the thunks touch only `control` and `table`.
         unsafe {
@@ -835,28 +832,28 @@ mod tests {
             };
             table[lookup_slot(TARGET, 7)] = entry;
             control.budget = 2;
-            assert_eq!(exit(dynamic(0, TARGET)), (0x5151, 99));
+            assert_eq!(exit(dynamic(frame, TARGET)), (0x5151, 99));
             assert_eq!(
                 (control.budget, control.retired, control.hits, control.block),
                 (1, 9, 1, 42)
             );
-            assert_eq!(exit(fixed(0, 0)), (0x5151, 99));
+            assert_eq!(exit(fixed(frame, 0)), (0x5151, 99));
             assert_eq!((control.budget, control.retired, control.hits), (0, 12, 2));
             // No budget left: the budget wraps and the exit is taken.
-            assert_eq!(exit(dynamic(0, TARGET)), (TARGET, ExitKind::Return as u64));
+            assert_eq!(exit(dynamic(frame, TARGET)), (TARGET, ExitKind::Return as u64));
             assert_eq!((control.budget, control.retired), (u64::MAX, 12));
             control.budget = 5;
             // Another PC in the slot, and another context, miss.
             let other = TARGET ^ (1 << (2 + LOOKUP_BITS) | 1 << 2);
             assert_eq!(lookup_slot(other, 7), lookup_slot(TARGET, 7));
-            assert_eq!(exit(dynamic(0, other)), (other, ExitKind::Return as u64));
+            assert_eq!(exit(dynamic(frame, other)), (other, ExitKind::Return as u64));
             // The set's other entry serves too.
             let (hits, retired) = (control.hits, control.retired);
             table.insert(lookup_slot(TARGET, 7), LookupEntry { pc: other, ..entry });
             assert_eq!(table[neighbour(lookup_slot(TARGET, 7))].pc, TARGET);
-            assert_eq!(exit(dynamic(0, TARGET)), (0x5151, 99));
+            assert_eq!(exit(dynamic(frame, TARGET)), (0x5151, 99));
             assert_eq!(table.find(lookup_slot(TARGET, 7), TARGET, 7).pc, TARGET);
-            assert_eq!(exit(dynamic(0, other)), (0x5151, 99));
+            assert_eq!(exit(dynamic(frame, other)), (0x5151, 99));
             assert_eq!(control.hits, hits + 2);
             control.retired = retired;
             control.hits = hits;
@@ -864,23 +861,23 @@ mod tests {
             table[neighbour(lookup_slot(TARGET, 7))] = LookupEntry::default();
             table[lookup_slot(TARGET, 7)] = entry;
             table[lookup_slot(TARGET, 7)].context = 6;
-            assert_eq!(exit(dynamic(0, TARGET)), (TARGET, ExitKind::Return as u64));
-            assert_eq!(exit(fixed(0, 0)), (TARGET, ExitKind::Call as u64));
+            assert_eq!(exit(dynamic(frame, TARGET)), (TARGET, ExitKind::Return as u64));
+            assert_eq!(exit(fixed(frame, 0)), (TARGET, ExitKind::Call as u64));
             assert_eq!((control.budget, control.hits, control.block), (5, 2, 42));
             // The lower half's context names a lower-half target's entries.
             let lower = TARGET & !(1 << 55);
             table[lookup_slot(lower, 5)] = LookupEntry { pc: lower, ..entry };
-            assert_eq!(exit(dynamic(0, lower)), (lower, ExitKind::Return as u64));
+            assert_eq!(exit(dynamic(frame, lower)), (lower, ExitKind::Return as u64));
             table[lookup_slot(lower, 5)].context = 5;
-            assert_eq!(exit(dynamic(0, lower)), (0x5151, 99));
+            assert_eq!(exit(dynamic(frame, lower)), (0x5151, 99));
             assert_eq!((control.budget, control.hits), (4, 3));
             table[lookup_slot(TARGET, 7)] = entry;
             // A BR with BTYPE 0b11 needs the entry to accept it, and names
             // the BTYPE beside the block.
             table[lookup_slot(TARGET, 7)].context = 7;
-            assert_eq!(exit(branch(0, TARGET)), (TARGET, ExitKind::Indirect as u64));
+            assert_eq!(exit(branch(frame, TARGET)), (TARGET, ExitKind::Indirect as u64));
             table[lookup_slot(TARGET, 7)].targets = 0b1001;
-            assert_eq!(exit(branch(0, TARGET)), (0x5151, 99));
+            assert_eq!(exit(branch(frame, TARGET)), (0x5151, 99));
             assert_eq!(
                 (control.budget, control.retired, control.hits, control.block),
                 (3, 26, 4, 3 << BLOCK_BTYPE_SHIFT | 42)
@@ -895,9 +892,9 @@ mod tests {
                 control.linked,
                 control.block,
             );
-            assert_eq!(exit(dynamic(0, TARGET)), (TARGET, ExitKind::Return as u64));
-            assert_eq!(exit(fixed(0, 0)), (TARGET, ExitKind::Call as u64));
-            assert_eq!(exit(branch(0, TARGET)), (TARGET, ExitKind::Indirect as u64));
+            assert_eq!(exit(dynamic(frame, TARGET)), (TARGET, ExitKind::Return as u64));
+            assert_eq!(exit(fixed(frame, 0)), (TARGET, ExitKind::Call as u64));
+            assert_eq!(exit(branch(frame, TARGET)), (TARGET, ExitKind::Indirect as u64));
             assert_eq!(
                 (
                     control.budget,
@@ -909,7 +906,7 @@ mod tests {
                 prior
             );
             control.observed_interrupt_epoch = 1;
-            assert_eq!(exit(dynamic(0, TARGET)), (0x5151, 99));
+            assert_eq!(exit(dynamic(frame, TARGET)), (0x5151, 99));
             assert_eq!(control.budget, 4);
             assert_eq!(munmap(page, PAGE), 0);
         }

@@ -46,7 +46,7 @@
 //! and chaining uses RCX).
 use super::asm::{Alu, Asm, Cond, Gpr, Mem, Patch, Rm, ShiftOp, Size, Unary};
 use super::pointer::Thunk;
-use crate::{GuestAddress, GuestState, aarch64::Register, block::ExitKind};
+use crate::{GuestAddress, GuestState, Place, aarch64::Register, block::ExitKind};
 use alloc::vec::Vec;
 use core::sync::atomic::AtomicU64;
 
@@ -114,7 +114,7 @@ fn register(rt: u8) -> Rm {
 
 /// The thunk completing `MRS Xt, <register>` at `pc` from the cell at
 /// `cell`, else exiting at `pc` for the engine.
-pub fn thunk(pc: GuestAddress, rt: u8, cell: u64) -> Thunk {
+pub fn thunk(pc: GuestAddress, rt: u8, cell: Place) -> Thunk {
     let (mut code, miss) = open(cell);
     if rt != 31 {
         let mut asm = Asm::new(&mut code);
@@ -126,7 +126,7 @@ pub fn thunk(pc: GuestAddress, rt: u8, cell: u64) -> Thunk {
 
 /// The thunk completing `MRS Xt, <register>` at `pc` from the storage the
 /// `value` of the cell at `cell` points at, else exiting at `pc`.
-pub fn stored_thunk(pc: GuestAddress, rt: u8, cell: u64) -> Thunk {
+pub fn stored_thunk(pc: GuestAddress, rt: u8, cell: Place) -> Thunk {
     let (mut code, miss) = open(cell);
     let mut asm = Asm::new(&mut code);
     asm.mov_load(Size::Qword, Gpr::Rax, Mem::base_disp8(Gpr::Rax, VALUE));
@@ -137,7 +137,7 @@ pub fn stored_thunk(pc: GuestAddress, rt: u8, cell: u64) -> Thunk {
 
 /// [`stored_thunk`] of a read that is plain only while the word at `select`
 /// is nonzero.
-pub fn selected_stored_thunk(pc: GuestAddress, rt: u8, cell: u64, select: u64) -> Thunk {
+pub fn selected_stored_thunk(pc: GuestAddress, rt: u8, cell: Place, select: Place) -> Thunk {
     let (mut code, miss) = open(cell);
     let unselected = selected(&mut code, select);
     let mut asm = Asm::new(&mut code);
@@ -148,16 +148,16 @@ pub fn selected_stored_thunk(pc: GuestAddress, rt: u8, cell: u64, select: u64) -
 }
 
 /// Branch away while the word at `select` is zero.
-fn selected(code: &mut Vec<u8>, select: u64) -> Patch {
+fn selected(code: &mut Vec<u8>, select: Place) -> Patch {
     let mut asm = Asm::new(code);
-    asm.mov_imm64(Gpr::Rcx, select);
+    asm.place(Gpr::Rcx, select);
     asm.alu_imm8(Alu::Cmp, Size::Qword, Mem::base(Gpr::Rcx, 0), 0);
     asm.jcc(Cond::E)
 }
 
 /// The thunk completing `MRS Xt, <register>` at `pc` from the 32-bit frame
 /// field at `offset` while the cell at `cell` is open, else exiting at `pc`.
-pub fn frame_thunk(pc: GuestAddress, rt: u8, cell: u64, offset: usize) -> Thunk {
+pub fn frame_thunk(pc: GuestAddress, rt: u8, cell: Place, offset: usize) -> Thunk {
     let (mut code, miss) = open(cell);
     let mut asm = Asm::new(&mut code);
     let field = Mem::base_disp32(Gpr::Rdi, offset as i32);
@@ -195,7 +195,7 @@ impl Written {
 
 /// The thunk completing `MSR <register>, Xt` at `pc` through the storage the
 /// `value` of the cell at `cell` points at, else exiting at `pc`.
-pub fn stored_write_thunk(pc: GuestAddress, rt: u8, cell: u64, written: Written) -> Thunk {
+pub fn stored_write_thunk(pc: GuestAddress, rt: u8, cell: Place, written: Written) -> Thunk {
     let (mut code, miss) = open(cell);
     let mut asm = Asm::new(&mut code);
     asm.mov_load(Size::Qword, Gpr::Rcx, Mem::base_disp8(Gpr::Rax, VALUE));
@@ -206,7 +206,7 @@ pub fn stored_write_thunk(pc: GuestAddress, rt: u8, cell: u64, written: Written)
 
 /// The thunk completing `IC IVAU, Xt` at `pc` of an address in the page the
 /// `value` of the cell at `cell` names, else exiting at `pc`.
-pub fn code_page_thunk(pc: GuestAddress, rt: u8, cell: u64) -> Thunk {
+pub fn code_page_thunk(pc: GuestAddress, rt: u8, cell: Place) -> Thunk {
     let (mut code, miss) = open(cell);
     let mut asm = Asm::new(&mut code);
     asm.mov_load(Size::Qword, Gpr::Rcx, Mem::base_disp8(Gpr::Rax, VALUE));
@@ -221,8 +221,8 @@ pub fn code_page_thunk(pc: GuestAddress, rt: u8, cell: u64) -> Thunk {
 pub fn selected_write_thunk(
     pc: GuestAddress,
     rt: u8,
-    cell: u64,
-    select: u64,
+    cell: Place,
+    select: Place,
     written: Written,
 ) -> Thunk {
     let (mut code, miss) = open(cell);
@@ -240,22 +240,22 @@ pub fn selected_write_thunk(
 pub fn stack_select_thunk(
     pc: GuestAddress,
     select: bool,
-    cell: u64,
-    current: u64,
-    sp0: u64,
+    cell: Place,
+    current: Place,
+    sp0: Place,
 ) -> Thunk {
     use Gpr::{Rax, Rcx, Rdx};
     use Size::Qword;
     let (mut code, miss) = open(cell);
     let sp = super::pinned::host(Register::Sp).expect("SP is pinned");
     let mut asm = Asm::new(&mut code);
-    asm.mov_imm64(Rcx, current);
+    asm.place(Rcx, current);
     asm.alu_imm8(Alu::Cmp, Qword, Mem::base(Rcx, 0), i8::from(select));
     let unchanged = asm.jcc(Cond::E);
     asm.mov_imm32(Rdx, u32::from(select));
     asm.mov_store(Qword, Mem::base(Rcx, 0), Rdx);
     asm.mov_load(Qword, Rax, Mem::base_disp8(Rax, VALUE));
-    asm.mov_imm64(Rcx, sp0);
+    asm.place(Rcx, sp0);
     let (from, to) = if select { (Rcx, Rax) } else { (Rax, Rcx) };
     asm.mov_store(Qword, Mem::base(from, 0), sp);
     asm.mov_load(Qword, sp, Mem::base(to, 0));
@@ -268,7 +268,7 @@ pub fn stack_select_thunk(
 pub fn frame_write_thunk(
     pc: GuestAddress,
     rt: u8,
-    cell: u64,
+    cell: Place,
     offset: usize,
     written: Written,
 ) -> Thunk {
@@ -314,7 +314,7 @@ fn frame_field(offset: usize) -> Mem {
 
 /// The thunk completing `MSR PAN, #pan` at `pc` while the cell at `cell` is
 /// open, on a host that keeps PSTATE.PAN in RFLAGS.AC, else exiting at `pc`.
-pub fn pan_thunk(pc: GuestAddress, pan: bool, cell: u64) -> Thunk {
+pub fn pan_thunk(pc: GuestAddress, pan: bool, cell: Place) -> Thunk {
     const CLAC: [u8; 3] = [0x0f, 0x01, 0xca];
     const STAC: [u8; 3] = [0x0f, 0x01, 0xcb];
     let (mut code, miss) = open(cell);
@@ -329,7 +329,7 @@ pub fn pan_thunk(pc: GuestAddress, pan: bool, cell: u64) -> Thunk {
 /// The thunk completing a DSB at `pc` while the cell at `cell` is open, that
 /// is while the engine has no maintenance for it to complete, else exiting
 /// at `pc`.
-pub fn barrier_thunk(pc: GuestAddress, cell: u64) -> Thunk {
+pub fn barrier_thunk(pc: GuestAddress, cell: Place) -> Thunk {
     let (mut code, miss) = open(cell);
     Asm::new(&mut code).mfence();
     finish(code, miss, pc)
@@ -337,7 +337,7 @@ pub fn barrier_thunk(pc: GuestAddress, cell: u64) -> Thunk {
 
 /// The thunk completing `write` at `pc` in the frame while the cell at
 /// `cell` is open, else exiting at `pc`.
-pub fn mask_thunk(write: MaskWrite, pc: GuestAddress, cell: u64) -> Thunk {
+pub fn mask_thunk(write: MaskWrite, pc: GuestAddress, cell: Place) -> Thunk {
     use Gpr::{Rax, Rcx, Rdx};
     use Size::{Dword, Qword};
     let (mut code, closed) = open(cell);
@@ -375,7 +375,7 @@ pub fn mask_thunk(write: MaskWrite, pc: GuestAddress, cell: u64) -> Thunk {
 
 /// The thunk completing `MRS Xt, DAIF` at `pc` from the frame while the cell
 /// at `cell` is open, else exiting at `pc`.
-pub fn mask_read_thunk(pc: GuestAddress, rt: u8, cell: u64) -> Thunk {
+pub fn mask_read_thunk(pc: GuestAddress, rt: u8, cell: Place) -> Thunk {
     let (mut code, miss) = open(cell);
     let mut asm = Asm::new(&mut code);
     let masks = frame_field(core::mem::offset_of!(GuestState, daif));
@@ -389,14 +389,14 @@ pub fn mask_read_thunk(pc: GuestAddress, rt: u8, cell: u64) -> Thunk {
 /// reader at `count` less the `value` of the cell at `cell`, else exiting
 /// at `pc`. It spins while a writer publishes; `lfence` keeps the TSC
 /// sample between the two sequence reads (Intel SDM Vol. 2B, RDTSC).
-pub fn count_thunk(pc: GuestAddress, rt: u8, cell: u64, count: u64) -> Thunk {
+pub fn count_thunk(pc: GuestAddress, rt: u8, cell: Place, count: Place) -> Thunk {
     use Gpr::{Rax, Rcx, Rdx};
     use Size::Qword;
     let (mut code, miss) = open(cell);
     let field = |offset| Mem::base_disp8(Rcx, offset);
     let state = |offset| Mem::base_disp8(Rax, offset);
     let mut asm = Asm::new(&mut code);
-    asm.mov_imm64(Rcx, count);
+    asm.place(Rcx, count);
     let start = asm.jmp8();
     let busy = asm.len();
     asm.pause();
@@ -430,7 +430,7 @@ pub fn count_thunk(pc: GuestAddress, rt: u8, cell: u64, count: u64) -> Thunk {
     asm.cmov(Cond::B, Qword, Rdx, field(LAST));
     asm.mov_store(Qword, field(LAST), Rdx);
     if rt != 31 {
-        asm.mov_imm64(Rax, cell);
+        asm.place(Rax, cell);
         asm.alu_load(Alu::Sub, Qword, Rdx, Mem::base_disp8(Rax, VALUE));
         asm.mov_store(Qword, register(rt), Rdx);
     }
@@ -438,10 +438,10 @@ pub fn count_thunk(pc: GuestAddress, rt: u8, cell: u64, count: u64) -> Thunk {
 }
 
 /// Load `cell` and branch to the miss while it is not readable.
-fn open(cell: u64) -> (Vec<u8>, Patch) {
+fn open(cell: Place) -> (Vec<u8>, Patch) {
     let mut code = Vec::with_capacity(128);
     let mut asm = Asm::new(&mut code);
-    asm.mov_imm64(Gpr::Rax, cell);
+    asm.place(Gpr::Rax, cell);
     asm.alu_imm8(Alu::Cmp, Size::Qword, Mem::base(Gpr::Rax, 0), 0);
     let miss = asm.jcc(Cond::E);
     (code, miss)
@@ -476,11 +476,17 @@ fn finish_unless<const N: usize>(mut code: Vec<u8>, misses: [Patch; N], pc: Gues
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Anchor;
     use crate::x86_64::chain::{DIRECT_EXIT_BYTES, direct_exit};
+
+    /// The anchors of these tests, each at the data itself.
+    const CELL: Place = Place::new(Anchor::Mirrors, 0);
+    const WORD: Place = Place::new(Anchor::Pointer, 0);
+    const READER: Place = Place::new(Anchor::Count, 0);
+    const SP0: Place = Place::new(Anchor::StackZero, 0);
 
     #[test]
     fn pan_writes_move_the_flag_and_the_frame() {
-        const CELL: u64 = 0x2000;
         for (pan, flag) in [(true, [0x0f, 0x01, 0xca]), (false, [0x0f, 0x01, 0xcb])] {
             let thunk = pan_thunk(GuestAddress(0x1000), pan, CELL);
             assert!(thunk.code.windows(3).any(|bytes| bytes == flag));
@@ -529,7 +535,8 @@ mod tests {
         };
         // The PC of the exit `write` takes.
         fn run(write: MaskWrite, cell: &Cell, state: &mut GuestState) -> u64 {
-            let thunk = mask_thunk(write, PC, cell as *const Cell as u64);
+            let thunk = mask_thunk(write, PC, CELL);
+            state.anchors[Anchor::Mirrors] = cell as *const Cell as u64;
             // SAFETY: private anonymous memory, RX after the copy, unmapped
             // after the call; the code reads and writes only `state` and
             // `cell`.
@@ -577,7 +584,7 @@ mod tests {
     #[test]
     fn thunks_end_in_the_fallthrough_then_the_original_exit() {
         let pc = GuestAddress(0x4000);
-        let thunk = thunk(pc, 8, 0x1000);
+        let thunk = thunk(pc, 8, CELL);
         let end = thunk.code.len();
         assert_eq!(
             thunk.code[end - DIRECT_EXIT_BYTES..],
@@ -663,7 +670,8 @@ mod tests {
         let set = |value: Cell| unsafe { address.write(value) };
         let mut state = GuestState::default();
         state.x[19] = 7;
-        let read = thunk(pc, 19, address as u64);
+        state.anchors[Anchor::Mirrors] = address as u64;
+        let read = thunk(pc, 19, CELL);
         set(Cell {
             readable: 0,
             value: 0xffff_fe00_1234_5000,
@@ -677,7 +685,7 @@ mod tests {
         assert_eq!(run(&read.code, &mut state), next);
         assert_eq!(state.x[19], 0xffff_fe00_1234_5000);
         let before = state.x;
-        assert_eq!(run(&thunk(pc, 31, address as u64).code, &mut state), next);
+        assert_eq!(run(&thunk(pc, 31, CELL).code, &mut state), next);
         assert_eq!(state.x, before);
     }
 
@@ -699,7 +707,8 @@ mod tests {
             (&closed, 0xffff_fe00_1234_5fc0, MISS),
         ] {
             state.x[19] = xt;
-            let thunk = code_page_thunk(PC, 19, cell as *const Cell as u64);
+            state.anchors[Anchor::Mirrors] = cell as *const Cell as u64;
+            let thunk = code_page_thunk(PC, 19, CELL);
             assert_eq!(run(&thunk.code, &mut state), exit);
             assert_eq!(state.x[19], xt);
         }
@@ -718,7 +727,8 @@ mod tests {
         let address = &mut *cell as *mut Cell;
         let mut state = GuestState::default();
         state.x[3] = 0xabcd;
-        let code = stored_write_thunk(PC, 3, address as u64, written).code;
+        state.anchors[Anchor::Mirrors] = address as u64;
+        let code = stored_write_thunk(PC, 3, CELL, written).code;
         assert_eq!(run(&code, &mut state), MISS);
         // SAFETY: the live Cell box and the live storage, between runs.
         unsafe {
@@ -730,12 +740,12 @@ mod tests {
         assert_eq!(run(&code, &mut state), NEXT);
         // SAFETY: as above.
         assert_eq!(unsafe { target.read() }, 0xab01);
-        let zero = stored_write_thunk(PC, 31, address as u64, written).code;
+        let zero = stored_write_thunk(PC, 31, CELL, written).code;
         assert_eq!(run(&zero, &mut state), NEXT);
         // SAFETY: as above.
         assert_eq!(unsafe { target.read() }, 1);
         let offset = core::mem::offset_of!(GuestState, fpsr);
-        let frame = frame_write_thunk(PC, 3, address as u64, offset, written).code;
+        let frame = frame_write_thunk(PC, 3, CELL, offset, written).code;
         assert_eq!(run(&frame, &mut state), NEXT);
         assert_eq!(state.fpsr, 0xab01);
     }
@@ -753,8 +763,11 @@ mod tests {
             sp: 0x3000,
             ..GuestState::default()
         };
-        let to_sp0 = stack_select_thunk(PC, false, address, word, sp0).code;
-        let to_spx = stack_select_thunk(PC, true, address, word, sp0).code;
+        state.anchors[Anchor::Mirrors] = address;
+        state.anchors[Anchor::Pointer] = word;
+        state.anchors[Anchor::StackZero] = sp0;
+        let to_sp0 = stack_select_thunk(PC, false, CELL, WORD, SP0).code;
+        let to_spx = stack_select_thunk(PC, true, CELL, WORD, SP0).code;
         assert_eq!(run(&to_sp0, &mut state), MISS);
         cell.readable = 1;
         cell.value = spx;
@@ -792,8 +805,10 @@ mod tests {
             ..Count::default()
         });
         let (cell_at, count_at) = (&mut *cell as *mut Cell, &mut *count as *mut Count);
-        let read = count_thunk(PC, 3, cell_at as u64, count_at as u64);
+        let read = count_thunk(PC, 3, CELL, READER);
         let mut state = GuestState::default();
+        state.anchors[Anchor::Mirrors] = cell_at as u64;
+        state.anchors[Anchor::Count] = count_at as u64;
         assert_eq!(run(&read.code, &mut state), MISS);
         // SAFETY: the boxes outlive every thunk run.
         unsafe {
@@ -817,7 +832,7 @@ mod tests {
         assert_eq!((state.x[3], last()), (270, 300));
         published.ceiling.store(u64::MAX, Relaxed);
         let before = state.x;
-        let discard = count_thunk(PC, 31, cell_at as u64, count_at as u64);
+        let discard = count_thunk(PC, 31, CELL, READER);
         assert_eq!(run(&discard.code, &mut state), NEXT);
         assert_eq!((state.x, last()), (before, 500));
     }

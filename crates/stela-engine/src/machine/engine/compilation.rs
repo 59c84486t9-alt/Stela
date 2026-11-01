@@ -594,13 +594,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 x86_64_pointer::strip::thunk(
                     GuestAddress(pc),
                     destination,
-                    self.pointer.strip_address(data),
+                    strip_place(data),
                 )?
             }
             operation => {
                 let form = x86_64_pointer::Form::of(operation)?;
-                let (memo, tags, service) = self.pointer.addresses();
-                x86_64_pointer::thunk(form, GuestAddress(pc), memo, tags, service)
+                x86_64_pointer::thunk(form, GuestAddress(pc), TAGS, SERVICE as usize as u64)
             }
         };
         let installed = self.host.install(&thunk.code).ok()?;
@@ -638,37 +637,38 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
         let masks = register_read::MaskWrite::of(word).filter(|_| self.native_system().exclusive);
         let thunk = if let Some(write) = masks {
-            let cell = &self.mirrors[MASK_WRITES] as *const register_read::Cell as u64;
+            let cell = cell_place(MASK_WRITES);
             register_read::mask_thunk(write, GuestAddress(pc), cell)
         } else if let Some(pan) = pan_write(word).filter(|_| self.host.pan_in_flags()) {
-            let cell = &self.mirrors[PAN_WRITES] as *const register_read::Cell as u64;
+            let cell = cell_place(PAN_WRITES);
             register_read::pan_thunk(GuestAddress(pc), pan, cell)
         } else if data_barrier(pc, word) {
-            let cell = &self.mirrors[DATA_BARRIER] as *const register_read::Cell as u64;
+            let cell = cell_place(DATA_BARRIER);
             register_read::barrier_thunk(GuestAddress(pc), cell)
         } else if let Some(rt) = code_page_invalidation(word).filter(|&rt| rt != ZERO_REGISTER) {
-            let cell = &self.mirrors[CODE_PAGE] as *const register_read::Cell as u64;
+            let cell = cell_place(CODE_PAGE);
             register_read::code_page_thunk(GuestAddress(pc), rt, cell)
         } else if let Some(select) = stack_select(word) {
-            let cell = &self.mirrors[STACK_SELECT] as *const register_read::Cell as u64;
-            let current = &self.mirrors.selected as *const u64 as u64;
-            let sp0 = self.cpu.registers.address(SystemRegister::SP_EL0, 0)?;
+            let cell = cell_place(STACK_SELECT);
+            let current = SELECTED;
+            let sp0 = Place::new(Anchor::StackZero, 0);
             register_read::stack_select_thunk(GuestAddress(pc), select, cell, current, sp0)
         } else if let Some((index, rt)) = written_register(pc, word) {
             self.stored_write_thunk(GuestAddress(pc), index, rt)
         } else if let Some((index, rt)) = guarded_written_register(pc, word) {
-            let cell = &self.mirrors[index] as *const register_read::Cell as u64;
+            let cell = cell_place(index);
             let all = register_read::Written {
                 keep: u64::MAX,
                 set: 0,
             };
             register_read::stored_write_thunk(GuestAddress(pc), rt, cell, all)
         } else if let Some((index, rt)) = mirrored_read(pc, word) {
-            let cell = &self.mirrors[index] as *const register_read::Cell as u64;
+            let cell = cell_place(index);
             if GUARDED_MIRRORS.contains(&index) {
                 register_read::stored_thunk(GuestAddress(pc), rt, cell)
             } else if COUNT_MIRRORS.contains(&index) {
-                let count = self.clock.native(self.host.tsc_counter()?);
+                self.clock.native(self.host.tsc_counter()?);
+                let count = Place::new(Anchor::Count, 0);
                 register_read::count_thunk(GuestAddress(pc), rt, cell, count)
             } else if index == DAIF_MIRROR && self.native_system().exclusive {
                 register_read::mask_read_thunk(GuestAddress(pc), rt, cell)
@@ -693,14 +693,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// The thunk completing MSR of `WRITTEN[index]` from Xt at `pc`.
     fn stored_write_thunk(&self, pc: GuestAddress, index: usize, rt: u8) -> x86_64_pointer::Thunk {
         let (_, register) = WRITTEN[index];
-        let cell = &self.mirrors[written_cell(index)] as *const register_read::Cell as u64;
+        let cell = cell_place(written_cell(index));
         let written = self.register_fixed_bits(register);
         if register == SystemRegister::FPSR {
             let offset = core::mem::offset_of!(GuestState, fpsr);
             return register_read::frame_write_thunk(pc, rt, cell, offset, written);
         }
         if register == SystemRegister::SP_EL0 {
-            let selected = &self.mirrors.selected as *const u64 as u64;
+            let selected = SELECTED;
             return register_read::selected_write_thunk(pc, rt, cell, selected, written);
         }
         register_read::stored_write_thunk(pc, rt, cell, written)
@@ -744,10 +744,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
         use registers::encodings::{FPCR, FPSR};
         let encoding = access.encoding();
         let index = self.stored_cell(encoding)?;
-        let cell = &self.mirrors[index] as *const register_read::Cell as u64;
+        let cell = cell_place(index);
         let (pc, rt) = (GuestAddress(pc), access.rt());
         if encoding == STACK_ZERO {
-            let selected = &self.mirrors.selected as *const u64 as u64;
+            let selected = SELECTED;
             return Some(register_read::selected_stored_thunk(pc, rt, cell, selected));
         }
         Some(match encoding {

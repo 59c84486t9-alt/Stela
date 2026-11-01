@@ -964,10 +964,6 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
     fn adopt_parallel_control(&mut self, control: chain_control::Owner) {
         let contexts = self.chain.contexts();
-        // Every installed thunk embeds the old control address. Retire the
-        // whole local arena and lookup table before dropping that allocation.
-        self.discard_code(Discard::Control);
-        self.targets.clear();
         self.chain = control;
         self.chain.initialize(self.targets.address(), contexts);
     }
