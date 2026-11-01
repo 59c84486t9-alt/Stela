@@ -37,6 +37,9 @@ fn stop(mut client: Client<Bar, Q, NativeGuard>, model: Model) {
 
 #[test]
 fn sae_commit_token_retry_confirm_transport_never_grants_association() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut client, model) = setup();
     let session = client
         .begin_external_authentication(
@@ -195,6 +198,9 @@ fn sae_commit_token_retry_confirm_transport_never_grants_association() {
 
 #[test]
 fn sae_frames_go_again_by_tx_status_until_ieee80211_auth_max_tries() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut client, model) = setup();
     let session = client
         .begin_external_authentication(profile(), vec![b'x'], None, 0, 3_000_000, &mut Policy(true))
@@ -281,6 +287,9 @@ fn sae_frames_go_again_by_tx_status_until_ieee80211_auth_max_tries() {
 /// interface gets its address back once the peer retires.
 #[test]
 fn an_ap_mld_exchange_runs_on_the_setup_link_address() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     use crate::wifi::station::multi_link::{Affiliation, Mld};
     let link = crate::Mac([2, 0xb, 0, 0, 0, 1]);
     let affiliation = Affiliation {
@@ -358,6 +367,9 @@ fn an_ap_mld_exchange_runs_on_the_setup_link_address() {
 
 #[test]
 fn a_denied_sae_exchange_ends_like_ieee80211_rx_mgmt_auth() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut client, model) = setup();
     let session = client
         .begin_external_authentication(profile(), vec![b'x'], None, 0, 2_000_000, &mut Policy(true))
@@ -400,6 +412,9 @@ fn a_denied_sae_exchange_ends_like_ieee80211_rx_mgmt_auth() {
 
 #[test]
 fn cancellation_keeps_real_pending_dma_and_late_rx_until_explicit_peer_drain() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut client, model) = setup();
     let session = client
         .begin_external_authentication(profile(), vec![b'x'], None, 0, 2_000_000, &mut Policy(true))
@@ -486,6 +501,9 @@ fn cancellation_keeps_real_pending_dma_and_late_rx_until_explicit_peer_drain() {
 
 #[test]
 fn stale_foreign_and_invalid_os_commands_are_refused_before_roc_or_dma() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut client, model) = setup();
     let (mut other, other_model) = setup();
     let session = client
@@ -602,6 +620,9 @@ fn stale_foreign_and_invalid_os_commands_are_refused_before_roc_or_dma() {
 
 #[test]
 fn frontend_and_native_deadlines_cancel_without_retransmission_or_permission() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for native_timeout in [false, true] {
         let (mut client, model) = setup();
         let session = client
@@ -653,6 +674,9 @@ fn frontend_and_native_deadlines_cancel_without_retransmission_or_permission() {
 
 #[test]
 fn rx_rejects_wrong_peer_channel_algorithm_transaction_and_short_fixed_fields() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut client, model) = setup();
     let session = client
         .begin_external_authentication(profile(), vec![b'x'], None, 0, 2_000_000, &mut Policy(true))
@@ -762,6 +786,9 @@ fn rx_rejects_wrong_peer_channel_algorithm_transaction_and_short_fixed_fields() 
 
 #[test]
 fn exchange_deadline_during_dma_preparation_refuses_producer_publication() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     use crate::bus::dma::memory::{CacheAttribute, MemoryError, PageGeometry, PinnedPages};
     struct DelayedSource {
         clock: crate::Clock,
@@ -840,6 +867,9 @@ fn exchange_deadline_during_dma_preparation_refuses_producer_publication() {
 
 #[test]
 fn peer_firmware_refusal_quarantines_original_exchange_and_resources() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut client, model) = setup();
     // Existing firmware peer model returns its nonzero unified status.
     // BSS may have succeeded and the peer command may have affected hardware;

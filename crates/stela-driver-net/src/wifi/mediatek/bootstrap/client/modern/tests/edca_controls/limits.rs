@@ -4,6 +4,9 @@ use super::*;
 
 #[test]
 fn regulatory_limits_clamp_queue_bytes() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut driver, model, mut owner, state) = secure_modern();
     let frame = beacon(&driver, 1, |_| {});
     observe(&mut driver, &model, &frame).unwrap();

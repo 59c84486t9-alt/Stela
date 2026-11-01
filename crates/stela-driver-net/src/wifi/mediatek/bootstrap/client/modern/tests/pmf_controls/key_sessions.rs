@@ -4,6 +4,9 @@ use super::*;
 
 #[test]
 fn configuration_and_igtk_failure() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for dropped in [false, true] {
         let (mut driver, model, before, mut owner, state, _) = awaiting_pmf();
         let context = driver.modern_context().unwrap().clone();
@@ -93,6 +96,9 @@ fn configuration_and_igtk_failure() {
 
 #[test]
 fn igtk_rotation_revokes_old_session() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut driver, model, mut owner, state, protection) = configured();
     protection.authenticated.set(true);
     protection.port.set(true);

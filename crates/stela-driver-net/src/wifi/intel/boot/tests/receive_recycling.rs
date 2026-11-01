@@ -6,12 +6,18 @@ use super::*;
 
 #[test]
 fn rx_recycling_publishes_initial_tail_and_sustains_command_ring_wraps() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     exercise_rx_recycling(None);
 }
 
 #[test]
 #[ignore = "oracle: STELA_IWLWIFI_RX_RECYCLE_ORACLE"]
 fn rx_recycling_unchanged_source_free_producer_and_vid_oracle() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     use sha2::{Digest, Sha256};
     let bytes = std::fs::read(std::env::var("STELA_IWLWIFI_RX_RECYCLE_ORACLE").unwrap()).unwrap();
     assert_eq!(
@@ -23,6 +29,9 @@ fn rx_recycling_unchanged_source_free_producer_and_vid_oracle() {
 
 #[test]
 fn rx_recycling_waits_for_target_slot_completion_when_payloads_complete_out_of_order() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let bytes = firmware_bytes();
     let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
     let empty = resources::Catalog::from_handoff(vec![]).unwrap();
@@ -62,6 +71,9 @@ fn rx_recycling_waits_for_target_slot_completion_when_payloads_complete_out_of_o
 
 #[test]
 fn rx_recycling_faults_keep_dma_and_requester() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for failure in 0..4 {
         let bytes = firmware_bytes();
         let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);

@@ -6,6 +6,9 @@ use super::*;
 
 #[test]
 fn unified_missing_unknown_or_contradictory_nvm_abi_refuses_before_commands() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for failure in 0..3 {
         let mut bytes = if failure == 0 {
             firmware_bytes()
@@ -48,6 +51,9 @@ fn unified_missing_unknown_or_contradictory_nvm_abi_refuses_before_commands() {
 
 #[test]
 fn unified_mac_data_words_allow_all_ff_fallback_and_valid_sentinel_patterns() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     use crate::wifi::intel::nvm::{AddressSource, Request};
     for case in 0..8 {
         let bytes = unified_bytes(false);

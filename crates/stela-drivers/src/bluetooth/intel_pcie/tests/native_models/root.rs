@@ -153,6 +153,9 @@ pub(super) fn completion(hardware: Arc<Mutex<Hardware>>) -> irq::posted_msi::Msi
 
 #[test]
 fn missing_notification_admission_refuses_before_source_programming() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let mut backing = vec![0u64; 1024 * 1024];
     let mut dma = allocator(&mut backing);
     let (mut inputs, h, _, _) = inputs();
@@ -170,6 +173,9 @@ fn missing_notification_admission_refuses_before_source_programming() {
 }
 #[test]
 fn independent_fabric_pending_does_not_substitute_for_action_or_payload_join() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let mut backing = vec![0u64; 1024 * 1024];
     let mut dma = allocator(&mut backing);
     let (mut t, h, registry, _) = attach(&mut dma);
@@ -184,6 +190,9 @@ fn independent_fabric_pending_does_not_substitute_for_action_or_payload_join() {
 }
 #[test]
 fn payload_failure_does_not_claim_posted_interrupt_completion() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let mut backing = vec![0u64; 1024 * 1024];
     let mut dma = allocator(&mut backing);
     let (mut t, h, _, _) = attach(&mut dma);
@@ -198,6 +207,9 @@ fn payload_failure_does_not_claim_posted_interrupt_completion() {
 }
 #[test]
 fn terminal_endpoint_close_orders_payload_before_action_and_native_resources() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let mut backing = vec![0u64; 1024 * 1024];
     let mut dma = allocator(&mut backing);
     let (mut t, h, registry, _) = attach(&mut dma);
@@ -217,6 +229,9 @@ fn terminal_endpoint_close_orders_payload_before_action_and_native_resources() {
 
 #[test]
 fn failed_route_binding_keeps_its_attempted_root_without_delivery_receipt() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let mut backing = vec![0u64; 1024 * 1024];
     let mut dma = allocator(&mut backing);
     let (inputs, h, _, _) = inputs();

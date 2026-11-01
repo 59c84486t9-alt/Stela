@@ -33,6 +33,9 @@ fn beacon(link: &TestLink, count: u8) -> Vec<u8> {
 
 #[test]
 fn owning_link_consumes_current_wmm() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut link, model, join, bss, _) = setup_link();
     associate(&mut link, &model, join, bss);
     secure(&mut link);
@@ -64,6 +67,9 @@ fn owning_link_consumes_current_wmm() {
 
 #[test]
 fn failed_owning_update_reconciles_carrier_and_kept_ethernet_immediately() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut link, model, join, bss, _) = setup_link();
     associate(&mut link, &model, join, bss);
     secure(&mut link);
@@ -90,6 +96,9 @@ fn failed_owning_update_reconciles_carrier_and_kept_ethernet_immediately() {
 
 #[test]
 fn a_beacon_narrowing_the_channel_moves_the_firmware_like_ieee80211_config_bw() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     use crate::wifi::station::phy::Width;
     let (mut link, model, join, bss, _) = setup_link();
     associate(&mut link, &model, join, bss);
@@ -143,6 +152,9 @@ fn channel_switch_events(link: &mut TestLink) -> Vec<Event> {
 
 #[test]
 fn an_announced_channel_switch_moves_the_firmware_like_mt7925_csa_work() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     use crate::wifi::station::phy::Width;
     let (mut link, model, join, bss, _) = setup_link();
     associate(&mut link, &model, join, bss);
@@ -213,6 +225,9 @@ fn an_announced_channel_switch_moves_the_firmware_like_mt7925_csa_work() {
 
 #[test]
 fn a_channel_switch_to_another_band_disconnects_like_mac80211() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut link, model, join, bss, _) = setup_link();
     associate(&mut link, &model, join, bss);
     secure(&mut link);
@@ -239,6 +254,9 @@ fn a_channel_switch_to_another_band_disconnects_like_mac80211() {
 
 #[test]
 fn a_new_association_forgets_the_last_aps_channel_and_timing() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut link, model, join, bss, _) = setup_link();
     associate(&mut link, &model, join, bss);
     secure(&mut link);
@@ -259,6 +277,9 @@ fn a_new_association_forgets_the_last_aps_channel_and_timing() {
 
 #[test]
 fn power_save_follows_the_authorized_port_like_ieee80211_recalc_ps_vif() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut link, model, join, bss, _) = setup_link();
     associate(&mut link, &model, join, bss);
     assert!(!link.state().client.client.power_save());
@@ -289,6 +310,9 @@ fn power_save_follows_the_authorized_port_like_ieee80211_recalc_ps_vif() {
 
 #[test]
 fn unclaimed_actions_go_back_to_their_sender_like_ieee80211_rx_h_action_return() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut link, model, join, bss, _) = setup_link();
     associate(&mut link, &model, join, bss);
     secure(&mut link);
@@ -336,6 +360,9 @@ fn unclaimed_actions_go_back_to_their_sender_like_ieee80211_rx_h_action_return()
 
 #[test]
 fn frames_ask_for_hardware_amsdu_like_wcid_amsdu() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut link, model, join, bss, _) = setup_link();
     associate(&mut link, &model, join, bss);
     secure(&mut link);
@@ -367,6 +394,9 @@ fn frames_ask_for_hardware_amsdu_like_wcid_amsdu() {
 
 #[test]
 fn rssi_monitor_without_firmware_rssi_events_watches_beacons_like_mac80211() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut link, model, join, bss, _) = setup_link();
     associate(&mut link, &model, join, bss);
     secure(&mut link);

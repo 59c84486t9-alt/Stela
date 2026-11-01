@@ -4,6 +4,9 @@ use super::*;
 
 #[test]
 fn thermal_power_errors_remain_sticky_and_uncertain_dma_keeps_both_owners() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for case in 0..7 {
         let bytes = setup_bytes();
         let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);

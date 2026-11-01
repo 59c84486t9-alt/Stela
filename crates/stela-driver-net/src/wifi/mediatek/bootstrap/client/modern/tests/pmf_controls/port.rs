@@ -4,6 +4,9 @@ use super::*;
 
 #[test]
 fn port_requires_key_acks_and_os_handshake() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut driver, model, mut owner, state, protection) = configured();
     protection.authenticated.set(true);
     let session = attach(&mut driver, &mut owner);

@@ -6,6 +6,9 @@ use super::*;
 
 #[test]
 fn ax210_wrong_protocol_missing_oversized_iml_and_unqualified_inputs_do_no_io_or_dma() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (observation, step_catalog) = step_fixture();
     for mode in 0..5 {
         let mut bytes = if mode == 0 {
@@ -73,6 +76,9 @@ fn ax210_wrong_protocol_missing_oversized_iml_and_unqualified_inputs_do_no_io_or
 
 #[test]
 fn missing_domain_invalid_ring_size_and_unwoken_epoch_allocate_nothing() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let bytes = firmware_bytes();
     let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
     for mode in 0..3 {
@@ -124,6 +130,9 @@ fn missing_domain_invalid_ring_size_and_unwoken_epoch_allocate_nothing() {
 
 #[test]
 fn staged_profile_diagnostic_name_board_and_driver_swaps_refuse_before_io_or_dma() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     struct Redirect<'p>(resources::Image<'p>);
     impl resources::Provider for Redirect<'_> {
         fn load<'p>(

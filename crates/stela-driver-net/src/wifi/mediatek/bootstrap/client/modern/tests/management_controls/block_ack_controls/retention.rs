@@ -4,6 +4,9 @@ use super::*;
 
 #[test]
 fn command_and_unmap_failures_keep_owners() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for command_failure in [false, true] {
         let (mut driver, model, mut owner, state) = fixture();
         let session = attach(&mut driver, &mut owner);
@@ -49,6 +52,9 @@ fn command_and_unmap_failures_keep_owners() {
 
 #[test]
 fn bounded_deferral_preserves_frame() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut driver, model, mut owner, state) = fixture();
     let session = attach(&mut driver, &mut owner);
     for step in 0..32 {

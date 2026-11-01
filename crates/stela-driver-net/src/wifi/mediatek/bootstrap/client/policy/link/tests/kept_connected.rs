@@ -63,6 +63,9 @@ fn sent_eapol_on(model: &Model, channel: u8) -> Vec<u8> {
 
 #[test]
 fn the_station_scans_joins_and_opens_the_port_after_the_4_way_handshake() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (client, model) = setup_modern();
     let (_, bss) = modern_inputs(&client);
     let client = ManagedClient::new(client, country(), Environment::Indoor).unwrap();
@@ -171,6 +174,9 @@ fn sae_from_ap(model: &Model, frame: &crate::wifi::sae::Frame) {
 
 #[test]
 fn a_passphrase_network_offering_sae_authenticates_by_it_before_the_handshake() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (client, model) = setup_modern();
     let (_, bss) = inputs_akm(&client, 8);
     let client = ManagedClient::new(client, country(), Environment::Indoor).unwrap();
@@ -281,6 +287,9 @@ fn a_passphrase_network_offering_sae_authenticates_by_it_before_the_handshake() 
 
 #[test]
 fn a_protected_psk_association_opens_its_port_once_the_igtk_installs() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (client, model) = setup_modern();
     let (_, bss) = inputs_akm(&client, 2);
     let client = ManagedClient::new(client, country(), Environment::Indoor).unwrap();
@@ -360,6 +369,9 @@ fn a_protected_psk_association_opens_its_port_once_the_igtk_installs() {
 
 #[test]
 fn a_scan_listens_where_its_channels_bar_probes_and_finds_the_ap_there() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (client, model) = setup_passive_five();
     let (_, bss) = modern_inputs(&client);
     let client = ManagedClient::new(client, passive_country(), Environment::Indoor).unwrap();
@@ -417,6 +429,9 @@ fn incoming_six(model: &Model, frame: &[u8]) {
 
 #[test]
 fn a_reported_six_ghz_ap_is_scanned_and_joined_by_sae_hash_to_element() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (client, model) = setup_six(0);
     let client = ManagedClient::new(client, six_country(), Environment::Indoor).unwrap();
     let link = ManagedLink::new(

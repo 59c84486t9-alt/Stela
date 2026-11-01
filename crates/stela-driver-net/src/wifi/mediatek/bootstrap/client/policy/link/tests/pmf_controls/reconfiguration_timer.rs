@@ -37,6 +37,9 @@ fn clock(link: &TestLink) -> crate::Clock {
 }
 #[test]
 fn announced_countdown_preserves_the_association_before_expiry() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let _time = crate::test_clock::virtualize();
     let (mut link, model) = authorized_two_link_association();
     let epoch = link.station().association_epoch();
@@ -54,6 +57,9 @@ fn announced_countdown_preserves_the_association_before_expiry() {
 }
 #[test]
 fn empty_reconfiguration_cancels_a_pending_countdown() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let _time = crate::test_clock::virtualize();
     let (mut link, model) = authorized_two_link_association();
     beacon(&link, &model, Some(&removal(1, 10)));
@@ -71,6 +77,9 @@ fn empty_reconfiguration_cancels_a_pending_countdown() {
 }
 #[test]
 fn absent_reconfiguration_keeps_the_countdown_and_reports_expiry_once() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let _time = crate::test_clock::virtualize();
     let (mut link, model) = authorized_two_link_association();
     beacon(&link, &model, Some(&removal(1, 10)));
@@ -111,6 +120,9 @@ fn absent_reconfiguration_keeps_the_countdown_and_reports_expiry_once() {
 
 #[test]
 fn duplicate_timers_and_zero_initialization_follow_the_kernel_link_order() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let _time = crate::test_clock::virtualize();
     for first_link in [0, 1] {
         let (mut link, model) = authorized_two_link_association();
@@ -131,6 +143,9 @@ fn duplicate_timers_and_zero_initialization_follow_the_kernel_link_order() {
 }
 #[test]
 fn an_idle_vector_wakes_by_the_removal_deadline() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let _time = crate::test_clock::virtualize();
     let (link, model) = authorized_two_link_association();
     let mut link = link.with_vector();
@@ -150,6 +165,9 @@ fn an_idle_vector_wakes_by_the_removal_deadline() {
 
 #[test]
 fn an_unassociated_link_does_not_start_a_countdown() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let _time = crate::test_clock::virtualize();
     let (mut link, model) = authorized_two_link_association();
     let epoch = link.station().association_epoch();

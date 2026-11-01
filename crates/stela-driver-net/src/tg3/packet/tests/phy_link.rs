@@ -12,6 +12,9 @@ fn attached(bcm5762: bool) -> (Packet<Reg, Timer>, Pages, Arc<Domain>, Arc<Mutex
 
 #[test]
 fn negotiated_duplex_modes_transfer_and_restore_mac() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for bcm5762 in [false, true] {
         let (mut packet, pages, domain, peer) = attached(bcm5762);
         assert_eq!(peer.lock().unwrap().phy[&4], 0x1e1);
@@ -43,6 +46,9 @@ fn negotiated_duplex_modes_transfer_and_restore_mac() {
 
 #[test]
 fn mac_duplex_write_must_latch_before_packet_publication() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for bcm5762 in [false, true] {
         let (mut packet, pages, domain, peer) = attached(bcm5762);
         {
@@ -69,6 +75,9 @@ fn mac_duplex_write_must_latch_before_packet_publication() {
 
 #[test]
 fn half_duplex_requires_real_link_and_completed_autonegotiation() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for bcm5762 in [false, true] {
         for status in [0, 4, 0x20] {
             let (mut packet, _, _, peer) = attached(bcm5762);
@@ -84,6 +93,9 @@ fn half_duplex_requires_real_link_and_completed_autonegotiation() {
 
 #[test]
 fn unsupported_gigabit_half_and_reserved_phy_results_cannot_create_carrier() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for bcm5762 in [false, true] {
         for aux in [0, 0x400, 0x600] {
             let (mut packet, _, _, peer) = attached(bcm5762);
@@ -99,6 +111,9 @@ fn unsupported_gigabit_half_and_reserved_phy_results_cannot_create_carrier() {
 #[test]
 #[ignore = "oracle: STELA_TG3_PHY_LINK_ORACLE"]
 fn unchanged_linux_aux_decode_and_mac_duplex_match_driver() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let path = std::env::var("STELA_TG3_PHY_LINK_ORACLE").expect("set original AUX/MAC trace");
     let trace = std::fs::read_to_string(path).unwrap();
     let lines: Vec<_> = trace.lines().collect();

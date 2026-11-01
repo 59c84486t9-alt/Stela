@@ -943,6 +943,9 @@ fn agreed<'n>(native: &'n Native) -> (Station<Model, ClockBios>, Device<'n>) {
 
 #[test]
 fn bring_up_scans_for_the_network_and_readies_its_station() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let native = Native::default();
     let (wifi, phase, device) = bring_up(&native, Some(*b"US"), vec![b"test"], 0, OPEN);
     let wifi = wifi.radio();
@@ -958,6 +961,9 @@ fn bring_up_scans_for_the_network_and_readies_its_station() {
 
 #[test]
 fn without_a_country_world_rules_apply_and_only_the_networks_bss_is_joined() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let native = Native::default();
     let (wifi, phase, device) = bring_up(&native, None, vec![b"other", b"test"], 0, OPEN);
     let wifi = wifi.radio();
@@ -973,6 +979,9 @@ fn without_a_country_world_rules_apply_and_only_the_networks_bss_is_joined() {
 
 #[test]
 fn a_station_joins_an_ap_on_a_dfs_no_ir_indoor_only_channel() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let native = Native::default();
     // Valid, without ACTIVE, with RADAR and INDOOR_ONLY.
     let restricted = 0x0f31;
@@ -985,6 +994,9 @@ fn a_station_joins_an_ap_on_a_dfs_no_ir_indoor_only_channel() {
 
 #[test]
 fn a_station_associates_answers_the_handshake_and_leaves_with_its_ap() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let native = Native::default();
     let (mut wifi, mut device) = connect(&native, false);
     // Session protection before the exchange, then the MAC, link, rates and
@@ -1044,6 +1056,9 @@ fn a_station_associates_answers_the_handshake_and_leaves_with_its_ap() {
 
 #[test]
 fn a_leaving_station_tells_its_ap_before_its_station_goes() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let native = Native::default();
     let (mut wifi, mut device) = connect(&native, false);
     let commands = device.commands.len();
@@ -1061,6 +1076,9 @@ fn a_leaving_station_tells_its_ap_before_its_station_goes() {
 
 #[test]
 fn a_country_the_air_tells_an_associated_station_changes_nothing() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let native = Native::default();
     let (mut wifi, mut device) = connect(&native, false);
     let update = Id {
@@ -1088,6 +1106,9 @@ fn michael_failure(number: u8) -> Vec<u8> {
 
 #[test]
 fn a_second_michael_failure_in_a_minute_leaves_the_ap() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let native = Native::default();
     let (mut wifi, mut device) = connect(&native, false);
     // A packet number the key already took tells of nothing.
@@ -1124,6 +1145,9 @@ fn bluetooth(grading: u8) -> Vec<u8> {
 
 #[test]
 fn firmware_that_keeps_its_chains_leaves_sm_power_save_to_itself() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let native = Native::default();
     let (mut wifi, mut device) = connect(&native, true);
     device.inject(wifi.radio().rom().unwrap(), &bluetooth(3));
@@ -1145,6 +1169,9 @@ fn legacy_beacon_statistics(mac: u32, energy: u8) -> Vec<u8> {
 
 #[test]
 fn invalid_or_unrelated_firmware_statistics_cannot_reduce_bluetooth_power() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for fault in 0..4 {
         let native = Native::default();
         let (mut wifi, mut device) = connect(&native, false);
@@ -1219,6 +1246,9 @@ fn statistics_image(new_statistics: bool, version: u8, system: bool) -> Vec<u8> 
 
 #[test]
 fn firmware_statistics_negotiate_each_layout_and_drive_bluetooth_hysteresis() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for (new_statistics, version, system) in [
         (false, 11, false),
         (true, 13, false),
@@ -1325,6 +1355,9 @@ fn firmware_statistics_negotiate_each_layout_and_drive_bluetooth_hysteresis() {
 
 #[test]
 fn bluetooth_gets_its_channel_inhibited_and_a_strong_ap_less_power() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let native = Native::default();
     let (mut wifi, mut device) = connect(&native, false);
     let commands = device.commands.len();
@@ -1360,6 +1393,9 @@ fn bluetooth_gets_its_channel_inhibited_and_a_strong_ap_less_power() {
 
 #[test]
 fn busy_bluetooth_tells_the_ap_of_sm_power_save_and_narrows_the_phy() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let native = Native {
         host_chains: true,
         ..Native::default()
@@ -1394,6 +1430,9 @@ fn country_update(country: [u8; 2], source: u8) -> Vec<u8> {
 
 #[test]
 fn a_platform_country_replaces_the_rules_an_associated_station_keeps_to() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let native = Native::default();
     let (mut wifi, mut device) = connect_in(&native, None, false);
     assert_eq!(wifi.radio().rules(), Some(WORLD));
@@ -1411,6 +1450,9 @@ fn a_platform_country_replaces_the_rules_an_associated_station_keeps_to() {
 
 #[test]
 fn a_link_the_new_rules_bar_goes_after_the_rules_minute() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let native = Native::default();
     let (mut wifi, mut device) = connect_in(&native, None, false);
     device.channel = 0;
@@ -1428,6 +1470,9 @@ fn a_link_the_new_rules_bar_goes_after_the_rules_minute() {
 
 #[test]
 fn a_configured_country_stands_against_firmwares_report() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let native = Native::default();
     let (mut wifi, mut device) = connect(&native, false);
     let asked = device.countries.len();
@@ -1442,6 +1487,9 @@ fn a_configured_country_stands_against_firmwares_report() {
 
 #[test]
 fn a_wmm_ap_gets_each_class_on_its_tids_queue() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let native = Native::default();
     let (mut wifi, mut device) = connect(&native, true);
     // The handshake's voice-class frames took their TID's queue.
@@ -1459,6 +1507,9 @@ fn a_wmm_ap_gets_each_class_on_its_tids_queue() {
 
 #[test]
 fn a_block_ack_session_is_agreed_with_the_firmware_first() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let native = Native::default();
     let (_, device) = agreed(&native);
     let command = &device.block_acks[0];
@@ -1478,6 +1529,9 @@ fn a_block_ack_session_is_agreed_with_the_firmware_first() {
 
 #[test]
 fn a_session_gives_the_station_its_frames_in_order() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let native = Native::default();
     let (mut wifi, mut device) = agreed(&native);
     device.inject(wifi.radio().rom().unwrap(), &session_frame(6, 5, 2, 0x66));
@@ -1505,6 +1559,9 @@ fn a_session_gives_the_station_its_frames_in_order() {
 
 #[test]
 fn a_firmware_split_amsdu_reaches_the_station_whole_under_one_packet_number() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let native = Native::default();
     let (mut wifi, mut device) = connect(&native, true);
     let status = 3 | 2 << 8 | 1 << 6;
@@ -1539,6 +1596,9 @@ fn a_firmware_split_amsdu_reaches_the_station_whole_under_one_packet_number() {
 
 #[test]
 fn an_amsdu_missing_a_record_is_lost_whole() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let native = Native::default();
     let (mut wifi, mut device) = connect(&native, true);
     let status = 3 | 2 << 8 | 1 << 6;
@@ -1555,6 +1615,9 @@ fn an_amsdu_missing_a_record_is_lost_whole() {
 
 #[test]
 fn a_peer_ending_a_session_releases_what_it_held() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let native = Native::default();
     let (mut wifi, mut device) = agreed(&native);
     device.inject(wifi.radio().rom().unwrap(), &session_frame(7, 5, 3, 0x77));
@@ -1577,6 +1640,9 @@ fn a_peer_ending_a_session_releases_what_it_held() {
 
 #[test]
 fn a_departure_takes_its_sessions_down_without_telling_the_peer() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let native = Native::default();
     let (mut wifi, mut device) = agreed(&native);
     let sent = device.air.len();
@@ -1592,6 +1658,9 @@ fn a_departure_takes_its_sessions_down_without_telling_the_peer() {
 
 #[test]
 fn block_ack_notifications_alone_free_the_queues() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let native = Native::default();
     let (mut wifi, mut device) = connect(&native, true);
     device.aggregating = true;
@@ -1611,6 +1680,9 @@ fn block_ack_notifications_alone_free_the_queues() {
 
 #[test]
 fn frames_that_wait_together_leave_as_an_amsdu_the_firmware_allows() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let native = Native::default();
     let (mut wifi, mut device) = connect(&native, true);
     let rates = Id {
@@ -1657,6 +1729,9 @@ fn frames_that_wait_together_leave_as_an_amsdu_the_firmware_allows() {
 
 #[test]
 fn an_amsdu_stops_short_of_firmwares_fifo() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let native = Native::default();
     native
         .transmit_fifo
@@ -1710,6 +1785,9 @@ fn first_body() -> Vec<u8> {
 
 #[test]
 fn fragments_under_consecutive_packet_numbers_become_one_msdu() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let native = Native::default();
     let (mut wifi, mut device) = connect(&native, true);
     device.inject(
@@ -1737,6 +1815,9 @@ fn fragments_under_consecutive_packet_numbers_become_one_msdu() {
 
 #[test]
 fn a_fragment_out_of_its_place_or_its_packet_numbers_is_dropped() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let native = Native::default();
     let (mut wifi, mut device) = connect(&native, true);
     // With nothing before it.
@@ -1759,6 +1840,9 @@ fn a_fragment_out_of_its_place_or_its_packet_numbers_is_dropped() {
 
 #[test]
 fn a_scan_probes_where_a_frame_may_start_and_listens_elsewhere() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     const FORCE_PASSIVE: u8 = 8;
     let native = Native::default();
     let (_, phase, device) = raise(&native, Some(*b"US"), vec![b"test"], 0, OPEN, true);
@@ -1780,6 +1864,9 @@ fn a_scan_probes_where_a_frame_may_start_and_listens_elsewhere() {
 
 #[test]
 fn a_network_one_scan_part_heard_outlives_the_parts_after_it() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let native = Native::default();
     let (_, phase, device) = raise_split(
         &native,
@@ -1815,6 +1902,9 @@ const HE_AP: [u8; 2 + 22 + 2 + 7 + 4 + 16] = [
 
 #[test]
 fn an_he_ap_reaches_the_link_and_the_station_commands() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let native = Native::default();
     let (mut wifi, phase, mut device) =
         raise_beside(&native, Some(*b"US"), vec![b"test"], 0, OPEN, true, &HE_AP);
@@ -1865,6 +1955,9 @@ fn multiple_bssid(extra: &[u8]) -> Vec<u8> {
 
 #[test]
 fn a_nontransmitted_bss_joins_on_its_profile_and_names_its_transmitter() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let native = Native::default();
     let elements: &'static [u8] = Vec::leak(multiple_bssid(&[]));
     let (mut wifi, phase, mut device) =
@@ -1894,6 +1987,9 @@ fn a_nontransmitted_bss_joins_on_its_profile_and_names_its_transmitter() {
 
 #[test]
 fn a_nontransmitted_bss_hears_its_transmitter_announce_a_quiet_switch() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let native = Native::default();
     let elements: &'static [u8] = Vec::leak(multiple_bssid(&[]));
     let (mut wifi, _, mut device) =
@@ -1934,6 +2030,9 @@ fn sa_query(receiver: Mac, number: u8) -> Vec<u8> {
 
 #[test]
 fn a_protected_management_frame_is_taken_once_under_its_packet_number() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let native = Native::default();
     let (mut wifi, mut device, local, _) = moved_mld(&native);
     let answers = |device: &Device<'_>| {
@@ -2156,6 +2255,9 @@ fn mapping(links: u8, switch_time: u16) -> Vec<u8> {
 
 #[test]
 fn a_link_the_ap_removes_gives_way_to_the_other_for_good() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let native = Native::default();
     let (mut wifi, mut device, _, _) = moved_mld(&native);
     let announced = device.configuration.len();
@@ -2180,6 +2282,9 @@ fn a_link_the_ap_removes_gives_way_to_the_other_for_good() {
 
 #[test]
 fn the_dormant_link_the_ap_removes_just_goes() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let native = Native::default();
     let (mut wifi, mut device, _, _) = moved_mld(&native);
     let announced = device.configuration.len();
@@ -2195,6 +2300,9 @@ fn the_dormant_link_the_ap_removes_just_goes() {
 
 #[test]
 fn removing_every_link_ends_the_association() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let native = Native::default();
     let (mut wifi, mut device, _, _) = moved_mld(&native);
     device.inject(
@@ -2207,6 +2315,9 @@ fn removing_every_link_ends_the_association() {
 
 #[test]
 fn an_advertised_mapping_moves_the_station_off_a_link_it_leaves_out_when_it_comes() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let native = Native::default();
     let (mut wifi, mut device, _, _) = moved_mld(&native);
     let announced = device.configuration.len();
@@ -2232,6 +2343,9 @@ fn an_advertised_mapping_moves_the_station_off_a_link_it_leaves_out_when_it_come
 
 #[test]
 fn an_mld_station_moves_to_its_better_link_and_back_before_it_leaves() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let native = Native::default();
     let (mut wifi, mut device, local, authorized) = moved_mld(&native);
     // The other link comes up beside the first before the first goes.
@@ -2295,6 +2409,9 @@ fn an_mld_station_moves_to_its_better_link_and_back_before_it_leaves() {
 
 #[test]
 fn a_station_that_stops_hearing_its_link_listens_to_both_and_takes_the_better() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let native = Native::default();
     let (mut wifi, mut device, _, _) = moved_mld(&native);
     miss_beacons(&mut wifi, &mut device);
@@ -2414,6 +2531,9 @@ fn notify(group: u8, opcode: u8, body: &[u8]) -> Vec<u8> {
 
 #[test]
 fn a_busy_mld_station_with_two_strong_links_keeps_both_active_and_returns_before_it_leaves() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let native = Native::default();
     let (mut wifi, mut device, entered) = emlsr_mld(&native);
     let links = links_since(&device, entered);
@@ -2446,6 +2566,9 @@ fn a_busy_mld_station_with_two_strong_links_keeps_both_active_and_returns_before
 
 #[test]
 fn a_fading_link_ends_emlsr_and_the_other_stays() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let native = Native::default();
     let (mut wifi, mut device, _) = emlsr_mld(&native);
     let exit = device.configuration.len();
@@ -2467,6 +2590,9 @@ fn a_fading_link_ends_emlsr_and_the_other_stays() {
 
 #[test]
 fn firmware_asking_to_leave_ends_emlsr_on_the_primary_link() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let native = Native::default();
     let (mut wifi, mut device, _) = emlsr_mld(&native);
     let exit = device.configuration.len();
@@ -2478,6 +2604,9 @@ fn firmware_asking_to_leave_ends_emlsr_on_the_primary_link() {
 
 #[test]
 fn a_link_that_misses_its_beacons_gives_way_to_the_other() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let native = Native::default();
     let (mut wifi, mut device, _) = emlsr_mld(&native);
     let exit = device.configuration.len();
@@ -2494,6 +2623,9 @@ fn a_link_that_misses_its_beacons_gives_way_to_the_other() {
 
 #[test]
 fn a_failed_activation_falls_back_to_the_link_firmware_names() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let native = Native::default();
     let (mut wifi, mut device, _) = emlsr_mld(&native);
     let exit = device.configuration.len();
@@ -2508,6 +2640,9 @@ fn a_failed_activation_falls_back_to_the_link_firmware_names() {
 
 #[test]
 fn a_failed_deactivation_loses_the_connection() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let native = Native::default();
     let (mut wifi, mut device, _) = emlsr_mld(&native);
     let mut body = [0; 8];
@@ -2530,6 +2665,9 @@ fn leaving_block_tx(device: &Device<'_>, exit: usize) -> u8 {
 
 #[test]
 fn firmware_sends_nothing_on_an_emlsr_link_a_quiet_switch_takes() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let native = Native::default();
     let (mut wifi, mut device, _) = emlsr_mld(&native);
     let exit = device.configuration.len();
@@ -2547,6 +2685,9 @@ fn firmware_sends_nothing_on_an_emlsr_link_a_quiet_switch_takes() {
 
 #[test]
 fn a_quiet_switch_takes_the_link_with_it_and_lasts_until_the_ap_is_heard_again() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let native = Native::default();
     let (mut wifi, mut device, _, _) = moved_mld(&native);
     let announced = device.configuration.len();
@@ -2601,6 +2742,9 @@ fn a_quiet_switch_takes_the_link_with_it_and_lasts_until_the_ap_is_heard_again()
 
 #[test]
 fn beacons_missed_while_data_is_heard_keep_the_link() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let native = Native::default();
     let (mut wifi, mut device, _, _) = moved_mld(&native);
     let missed = |consecutive: u8, since_receive: u8| {
@@ -2618,6 +2762,9 @@ fn beacons_missed_while_data_is_heard_keep_the_link() {
 
 #[test]
 fn an_action_frame_announces_a_switch_as_a_beacon_does() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let native = Native::default();
     let (mut wifi, mut device) = connect(&native, false);
     let commands = device.commands.len();
@@ -2637,6 +2784,9 @@ fn an_action_frame_announces_a_switch_as_a_beacon_does() {
 
 #[test]
 fn a_new_mu_edca_count_reaches_the_link_once_and_so_does_its_loss() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     const MU_EDCA: [u8; 16] = [
         255, 14, 38, 1, 2, 0xa4, 8, 2, 0xa4, 8, 2, 0xa4, 8, 2, 0xa4, 8,
     ];
@@ -2658,6 +2808,9 @@ fn a_new_mu_edca_count_reaches_the_link_once_and_so_does_its_loss() {
 
 #[test]
 fn a_switch_firmware_starts_unannounced_is_only_cancelled_by_firmware_that_times_it() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let native = Native::default();
     let (mut wifi, mut device, _, _) = moved_mld(&native);
     let commands = device.commands.len();
@@ -2669,6 +2822,9 @@ fn a_switch_firmware_starts_unannounced_is_only_cancelled_by_firmware_that_times
 
 #[test]
 fn firmware_saying_a_switch_failed_loses_the_connection() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let native = Native::default();
     let (mut wifi, mut device, _, _) = moved_mld(&native);
     device.inject(
@@ -2686,6 +2842,9 @@ fn firmware_saying_a_switch_failed_loses_the_connection() {
 
 #[test]
 fn a_fading_link_starts_a_scan_that_keeps_out_of_the_way_of_heavy_traffic() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let native = Native::default();
     let (mut wifi, mut device, _, _) = moved_mld(&native);
     device.inject(wifi.radio().rom().unwrap(), &report(1_000_000, 44, 0));
@@ -2718,6 +2877,9 @@ fn a_fading_link_starts_a_scan_that_keeps_out_of_the_way_of_heavy_traffic() {
 
 #[test]
 fn leaving_stops_a_scan_of_the_links_and_waits_for_firmware_to_let_it_go() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let native = Native::default();
     let (mut wifi, mut device, _, _) = moved_mld(&native);
     device.holds_link_scan = true;
@@ -2743,6 +2905,9 @@ fn leaving_stops_a_scan_of_the_links_and_waits_for_firmware_to_let_it_go() {
 
 #[test]
 fn an_ap_mld_takes_the_station_on_a_link_of_its_own_and_gives_it_back() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let native = Native::default();
     let (mut wifi, mut device) = raise_mld(&native, mld_ap(), false);
     let associated = run(&mut wifi, &mut device, |wifi, _, _| {
@@ -2860,6 +3025,9 @@ fn an_ap_mld_takes_the_station_on_a_link_of_its_own_and_gives_it_back() {
 
 #[test]
 fn an_open_port_sleeps_on_the_vector_which_each_pass_clears_and_rearms() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     const CAUSES: u32 = 0x2800;
     const AUTOMASK: u32 = 0x2810;
     let native = Native::default();
@@ -2878,6 +3046,9 @@ fn an_open_port_sleeps_on_the_vector_which_each_pass_clears_and_rearms() {
 
 #[test]
 fn only_the_last_restarts_reset_the_function_and_one_without_a_reset_still_boots() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let resets = |spent: usize, no_reset: bool| {
         let native = Native::default();
         native.state.lock().unwrap().no_reset = no_reset;
@@ -2918,6 +3089,9 @@ fn only_the_last_restarts_reset_the_function_and_one_without_a_reset_still_boots
 
 #[test]
 fn a_firmware_error_frees_the_function_and_boots_it_for_the_keeper_to_join_again() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let native = Native::default();
     let (mut wifi, mut device) = connect(&native, false);
     let live = native.domain.records.lock().unwrap().live.len();

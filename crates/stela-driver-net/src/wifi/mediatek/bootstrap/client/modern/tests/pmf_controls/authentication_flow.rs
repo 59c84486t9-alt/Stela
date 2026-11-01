@@ -4,6 +4,9 @@ use super::*;
 
 #[test]
 fn preassociation_denial_and_guarded_retry() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for hardware in [false, true] {
         let (mut driver, model, join, observed, mut owner, state, protection) = preparing();
         let before = model.bar.0.lock().unwrap().log.len();
@@ -92,6 +95,9 @@ fn preassociation_denial_and_guarded_retry() {
 
 #[test]
 fn pending_publication_guard_revision() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for revision in [false, true] {
         let (mut driver, model, join, observed, mut owner, state, protection) = preparing();
         // SAFETY: The initial request uses its original observation and native
@@ -184,6 +190,9 @@ fn pending_publication_guard_revision() {
 
 #[test]
 fn authentication_retry_tickets() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut driver, model, join, observed, mut owner, state, _) = preparing();
     // SAFETY: The selected request, original scan and native-memory owner remain
     // current. Both model leases serialize the first authentication request; no

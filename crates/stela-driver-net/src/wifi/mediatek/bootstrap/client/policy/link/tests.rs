@@ -183,6 +183,9 @@ fn incoming_control(model: &Model, pn: Option<u64>, marker: u8) {
 }
 #[test]
 fn link_routes_control_port_then_real_ethernet_and_retires_exact_packets() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut link, model, join, bss, provider) = setup_link();
     associate(&mut link, &model, join, bss);
     let original_epoch = link.station().association_epoch().unwrap();
@@ -253,6 +256,9 @@ fn link_routes_control_port_then_real_ethernet_and_retires_exact_packets() {
 }
 #[test]
 fn an_open_network_carries_plaintext_ethernet_once_associated() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     use station::{
         phy::{Mode, Width},
         wire::AssociationRequest,
@@ -321,6 +327,9 @@ fn an_open_network_carries_plaintext_ethernet_once_associated() {
 }
 #[test]
 fn an_ap_without_wmm_or_ht_associates_in_legacy_mode_like_mac80211() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     use station::{
         phy::{Mode, Width},
         wire::AssociationRequest,
@@ -372,6 +381,9 @@ fn an_ap_without_wmm_or_ht_associates_in_legacy_mode_like_mac80211() {
 }
 #[test]
 fn wpa1_tkip_carries_data_and_reports_michael_failures_like_mac80211() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     use station::{
         phy::{Mode, Width},
         wire::AssociationRequest,
@@ -462,6 +474,9 @@ fn wpa1_tkip_carries_data_and_reports_michael_failures_like_mac80211() {
 }
 #[test]
 fn static_wep_with_shared_key_auth_carries_data_like_mt7925_set_key() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     use crate::wifi::security::{Cipher, wep};
     use station::{
         phy::{Mode, Width},
@@ -573,6 +588,9 @@ fn static_wep_with_shared_key_auth_carries_data_like_mt7925_set_key() {
 }
 #[test]
 fn aborting_a_join_deauthenticates_like_ieee80211_mgd_deauth() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut link, model, join, bss, _) = setup_link();
     scan_join(&mut link, &model, join, bss);
     assert_eq!(finish_tx(&model)[0][..2], [0xb0, 0]);
@@ -585,6 +603,9 @@ fn aborting_a_join_deauthenticates_like_ieee80211_mgd_deauth() {
 }
 #[test]
 fn the_link_carries_each_aes_cipher_like_mt7925_set_key() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for (suite, length) in [(10, 32), (8, 16), (9, 32)] {
         let (client, model) = setup_modern();
         let (join, bss) = modern_inputs_cipher(&client, suite);
@@ -608,6 +629,9 @@ fn the_link_carries_each_aes_cipher_like_mt7925_set_key() {
 }
 #[test]
 fn full_data_and_control_queues_keep_native_batches_in_order() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut link, model, join, bss, provider) = setup_link();
     associate(&mut link, &model, join, bss);
     secure(&mut link);
@@ -657,6 +681,9 @@ fn full_data_and_control_queues_keep_native_batches_in_order() {
 }
 #[test]
 fn removal_waits_for_both_real_tx_facts_and_uncertain_stop_keeps_frontend_owner() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut link, model, join, bss, provider) = setup_link();
     associate(&mut link, &model, join, bss);
     secure(&mut link);
@@ -686,6 +713,9 @@ fn removal_waits_for_both_real_tx_facts_and_uncertain_stop_keeps_frontend_owner(
 }
 #[test]
 fn unpublished_allocation_failure_and_bad_rx_never_forge_completion_or_close_valid_port() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut link, model, join, bss, provider) = setup_link();
     associate(&mut link, &model, join, bss);
     secure(&mut link);
@@ -735,6 +765,9 @@ fn unpublished_allocation_failure_and_bad_rx_never_forge_completion_or_close_val
 }
 #[test]
 fn actual_2ghz_he20_profile_scans_associates_and_carries_ethernet_on_its_real_channel() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     use station::{
         phy::{Capabilities, Mode, Role, Width},
         wire::AssociationRequest,
@@ -901,6 +934,9 @@ fn actual_2ghz_he20_profile_scans_associates_and_carries_ethernet_on_its_real_ch
 }
 #[test]
 fn native_rx_ring_failure_cannot_leave_cached_association_carrier_up() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut link, model, join, bss, provider) = setup_link();
     associate(&mut link, &model, join, bss);
     secure(&mut link);
@@ -932,6 +968,9 @@ fn native_rx_ring_failure_cannot_leave_cached_association_carrier_up() {
 }
 #[test]
 fn malformed_rx_preserves_authentication_timeout() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut link, model, join, bss, provider) = setup_link();
     let _clock = crate::test_clock::virtualize();
     scan_join(&mut link, &model, join, bss);
@@ -988,6 +1027,9 @@ fn deferred_message(link: &TestLink) -> std::string::String {
 }
 #[test]
 fn queued_valid_receive_alternates_original_error_under_repeated_bad_rx() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut link, model, join, bss, provider) = setup_link();
     associate(&mut link, &model, join, bss);
     secure(&mut link);
@@ -1027,6 +1069,9 @@ fn queued_valid_receive_alternates_original_error_under_repeated_bad_rx() {
 }
 #[test]
 fn shared_deferred_error_survives_explicit_service_and_prevents_next_tx_publication() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut link, model, join, bss, provider) = setup_link();
     associate(&mut link, &model, join, bss);
     let ptk = secure(&mut link);
@@ -1075,6 +1120,9 @@ fn shared_deferred_error_survives_explicit_service_and_prevents_next_tx_publicat
 }
 #[test]
 fn data_and_eapol_alternate_single_publication() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for control_port in [false, true] {
         let (mut link, model, join, bss, provider) = setup_link();
         associate(&mut link, &model, join, bss);
@@ -1136,6 +1184,9 @@ fn data_and_eapol_alternate_single_publication() {
 }
 #[test]
 fn soft_rx_followed_by_native_submission_failure_reports_both_without_fake_tx() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut link, model, join, bss, provider) = setup_link();
     associate(&mut link, &model, join, bss);
     secure(&mut link);
@@ -1160,6 +1211,9 @@ fn soft_rx_followed_by_native_submission_failure_reports_both_without_fake_tx() 
 }
 #[test]
 fn deferred_error_cannot_bypass_fresh_native_hard_failure_for_any_packet_io() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for operation in 0..3 {
         let (mut link, model, join, bss, provider) = setup_link();
         associate(&mut link, &model, join, bss);
@@ -1209,6 +1263,9 @@ fn deferred_error_cannot_bypass_fresh_native_hard_failure_for_any_packet_io() {
 }
 #[test]
 fn revocation_and_new_association_never_deliver_held_old_epoch_data() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for revoke in [false, true] {
         let (mut link, model, join, bss, provider) = setup_link();
         associate(&mut link, &model, join, bss);
@@ -1259,6 +1316,9 @@ fn revocation_and_new_association_never_deliver_held_old_epoch_data() {
 }
 #[test]
 fn soft_rx_plus_real_tx_retirement_poison_is_never_deferred_as_packet_rejection() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for operation in 0..3 {
         let (mut link, model, join, bss, provider) = setup_link();
         associate(&mut link, &model, join, bss);

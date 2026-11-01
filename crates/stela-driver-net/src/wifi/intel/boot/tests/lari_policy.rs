@@ -6,17 +6,26 @@ use super::*;
 
 #[test]
 fn lari_bios_source_commands_and_dma_retirement_both_families() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     exercise_lari_bios(false);
 }
 
 #[test]
 #[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
 fn lari_images_drive_lari6_without_extension_and_lari8_with_extension() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     exercise_lari_bios(true);
 }
 
 #[test]
 fn lari_schema_missing_services_rfkill_and_uncertain_command_keep_original_owner() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for case in 0..7 {
         let bytes = lari_bytes(false, if case == 0 { 99 } else { 6 });
         let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);

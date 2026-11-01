@@ -58,6 +58,9 @@ fn receive(link: &mut TestLink, model: &Model, raw: &[u8]) -> Received {
 
 #[test]
 fn second_link_igtk_uses_its_gtk_batch_and_independent_ipn() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut link, model) = authorized_two_link_association();
     install(&mut link, 4, 0x66, 100).unwrap();
     {
@@ -105,6 +108,9 @@ fn second_link_igtk_uses_its_gtk_batch_and_independent_ipn() {
 
 #[test]
 fn second_link_rotation_revokes_its_delayed_envelope_only() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut link, model) = authorized_two_link_association();
     install(&mut link, 4, 0x66, 100).unwrap();
     link.register_action(&[126]).unwrap();
@@ -137,6 +143,9 @@ fn second_link_rotation_revokes_its_delayed_envelope_only() {
 
 #[test]
 fn second_link_bip_deauthentication_ends_association() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut link, model) = authorized_two_link_association();
     install(&mut link, 4, 0x66, 100).unwrap();
     let rx = receive(&mut link, &model, &group_frame(OTHER, 4, 0x66, 101, true));
@@ -153,6 +162,9 @@ fn second_link_bip_deauthentication_ends_association() {
 
 #[test]
 fn uncertain_second_link_igtk_keeps_the_whole_owner_quarantined() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut link, model) = authorized_two_link_association();
     model.response.lock().unwrap().status = 9;
     assert!(install(&mut link, 4, 0x66, 100).is_err());
@@ -170,6 +182,9 @@ fn uncertain_second_link_igtk_keeps_the_whole_owner_quarantined() {
 
 #[test]
 fn secondary_igtk_waits_for_the_keepers_last_handshake_reply() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     use crate::wifi::{
         connection::keeper::tests::assert_secondary_key_waits_for_retirement,
         network::{Network, Secret},
@@ -243,6 +258,9 @@ fn secondary_igtk_waits_for_the_keepers_last_handshake_reply() {
 
 #[test]
 fn second_link_refuses_wrong_wcid_channel_and_mic_before_advancing_ipn() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for fault in 0..4 {
         let (mut link, model) = authorized_two_link_association();
         install(&mut link, 4, 0x66, 100).unwrap();
@@ -276,6 +294,9 @@ fn second_link_refuses_wrong_wcid_channel_and_mic_before_advancing_ipn() {
 
 #[test]
 fn second_link_key_rejects_unknown_link_and_held_notices_without_commands() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut link, model) = keyed_two_link_association();
     let before = model.response.lock().unwrap().client_commands.len();
     assert!(
@@ -313,6 +334,9 @@ fn second_link_key_rejects_unknown_link_and_held_notices_without_commands() {
 
 #[test]
 fn second_link_all_bip_suites_authenticate_independent_vectors() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     use crate::wifi::security::management::ManagementCipher;
     // Frozen Python cryptography 46.0.5 CMAC/AESGCM vectors: A2/BSSID
     // 02:06:07:08:09:0b, reason 7, index 4, IPN 101, key bytes 0x66.

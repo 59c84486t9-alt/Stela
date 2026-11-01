@@ -5,6 +5,9 @@ use super::*;
 use crate::bluetooth::bcm4377::State as TransportState;
 #[test]
 fn native_clock_rejects_invalid_calibration_and_unrepresentable_attempt_before_attachment() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     for rate in [0, u64::MAX, u64::MAX / 2 / 120_000_000 + 1] {
         assert!(
             // SAFETY: constructor receives invalid negative metadata; it must refuse
@@ -993,6 +996,9 @@ fn position(events: &[Event], event: Event) -> usize {
 
 #[test]
 fn all_four_native_ids_use_real_registry_msi_dma_hci_and_ordered_retirement() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     for id in [0x5fa0, 0x5f69, 0x5f71, 0x5f72] {
         let (mut t, device, state, counters) = transport(fixture_native(id, true));
         t.start(&catalog(&device, false)).unwrap();
@@ -1052,6 +1058,9 @@ fn all_four_native_ids_use_real_registry_msi_dma_hci_and_ordered_retirement() {
 }
 #[test]
 fn native_unpublished_close_stops_the_prepared_bus_master_and_releases_without_route() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let (mut t, _, state, counters) = transport(fixture_native(0x5fa0, false));
     state.events.lock().unwrap().clear();
     t.close().unwrap();
@@ -1064,6 +1073,9 @@ fn native_unpublished_close_stops_the_prepared_bus_master_and_releases_without_r
 }
 #[test]
 fn every_distinct_retirement_failure_keeps_original_route_pins_root_and_first_error() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     for failure in [0, 1, 2, 4, 5, 6] {
         let (mut t, device, state, counters) = transport(fixture_native(0x5f69, true));
         t.start(&catalog(&device, false)).unwrap();
@@ -1109,6 +1121,9 @@ fn every_distinct_retirement_failure_keeps_original_route_pins_root_and_first_er
 }
 #[test]
 fn native_d0_preserves_pme_status_and_all_pci_control_writes_are_narrow() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let (mut t, _, state, _) = transport(fixture_native(0x5fa0, false));
     let events = state.events.lock().unwrap().clone();
     assert!(events.contains(&Event::Write(0x4c, 2, 0)));
@@ -1121,6 +1136,9 @@ fn native_d0_preserves_pme_status_and_all_pci_control_writes_are_narrow() {
 }
 #[test]
 fn late_effect_then_config_failure_has_one_uncertain_reset_and_no_release() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let (mut t, device, state, counters) = transport(fixture_native(0x5f69, true));
     t.start(&catalog(&device, false)).unwrap();
     // Find admission-time access count; the next command read fails.
@@ -1155,6 +1173,9 @@ fn release_unpublished(mut inputs: Inputs<Config, NativeRegisters, ClockModel>) 
 }
 #[test]
 fn native_constructor_rejects_malformed_original_owners_before_any_write() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     for failure in 0..7 {
         let mut f = fixture_native(0x5fa0, true);
         match failure {
@@ -1201,6 +1222,9 @@ fn native_constructor_rejects_malformed_original_owners_before_any_write() {
 }
 #[test]
 fn every_constructor_config_read_fault_returns_the_same_original_unmodified_owners() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let f = fixture_native(0x5f69, true);
     f.state.accesses.store(0, Ordering::Relaxed);
     // SAFETY: valid isolated native ownership model; reads only in construction.
@@ -1235,6 +1259,9 @@ fn every_constructor_config_read_fault_returns_the_same_original_unmodified_owne
 }
 #[test]
 fn effect_then_failed_msi_enable_admission_keeps_registry_and_original_epoch() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let (mut t, device, state, counters) = transport(fixture_native(0x5f69, true));
     state.fail_enable_ack.store(true, Ordering::Relaxed);
     let first = t.start(&catalog(&device, false)).unwrap_err();
@@ -1255,6 +1282,9 @@ fn effect_then_failed_msi_enable_admission_keeps_registry_and_original_epoch() {
 
 #[test]
 fn cold_reset_original_root_drain_and_bind_precede_every_new_dma_allocation() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     for id in [0x5fa0, 0x5f69, 0x5f71, 0x5f72] {
         let (mut t, _, state, _) = transport(fixture_native(id, false));
         let events = state.events.lock().unwrap().clone();
@@ -1269,6 +1299,9 @@ fn cold_reset_original_root_drain_and_bind_precede_every_new_dma_allocation() {
 }
 #[test]
 fn failed_original_drain_or_bind_retains_original_cold_graph_without_allocation() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     for failed_bind in [false, true] {
         let result = fixture_native_setup(0x5f69, false, |inputs| {
             let state = &inputs.requester.owner.1.state;
@@ -1295,6 +1328,9 @@ fn failed_original_drain_or_bind_retains_original_cold_graph_without_allocation(
 }
 #[test]
 fn abandoned_cold_owner_retains_original_configuration_bars_and_root_without_effects() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let (inputs, state, counters, device) = original_inputs(0x5f69);
     // SAFETY: original isolated model, with no DMA/IRQ/work admission.
     let cold = match unsafe { host::cold::Cold::new(inputs) } {
@@ -1309,6 +1345,9 @@ fn abandoned_cold_owner_retains_original_configuration_bars_and_root_without_eff
 }
 #[test]
 fn every_cold_config_effect_or_read_failure_retains_before_private_binding() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let (inputs, state, _, _) = original_inputs(0x5f69);
     state.accesses.store(0, Ordering::Relaxed);
     // SAFETY: original isolated model owner and advancing clock.
@@ -1345,6 +1384,9 @@ fn every_cold_config_effect_or_read_failure_retains_before_private_binding() {
 }
 #[test]
 fn every_partial_native_allocation_failure_keeps_allocator_attachment_and_original_owners() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     for allocation in 1..=14 {
         let f = fixture_native(0x5f69, false);
         f.state.fail_allocate.store(allocation, Ordering::Relaxed);
@@ -1379,6 +1421,9 @@ fn every_partial_native_allocation_failure_keeps_allocator_attachment_and_origin
 }
 #[test]
 fn active_native_drop_has_no_hidden_reset_drain_or_release() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let (mut t, device, state, counters) = transport(fixture_native(0x5f69, true));
     t.start(&catalog(&device, false)).unwrap();
     state.events.lock().unwrap().clear();
@@ -1390,6 +1435,9 @@ fn active_native_drop_has_no_hidden_reset_drain_or_release() {
 }
 #[test]
 fn native_dma_unmap_failure_is_sticky_and_prevents_detach_and_pci_retirement() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let (mut t, device, state, counters) = transport(fixture_native(0x5f69, true));
     t.start(&catalog(&device, false)).unwrap();
     device.lock().unwrap().domain.0.lock().unwrap().fail_unmap = true;
@@ -1407,6 +1455,9 @@ fn native_dma_unmap_failure_is_sticky_and_prevents_detach_and_pci_retirement() {
 }
 #[test]
 fn native_config_mapping_failure_is_sticky_after_dma_and_requester_retirement() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let (mut t, device, state, counters) = transport(fixture_native(0x5f69, true));
     t.start(&catalog(&device, false)).unwrap();
     state.fail_config_unmap.store(true, Ordering::Relaxed);
@@ -1423,6 +1474,9 @@ fn native_config_mapping_failure_is_sticky_after_dma_and_requester_retirement() 
 }
 #[test]
 fn actual_attachment_pin_blocks_config_mapping_retirement_until_detach_acknowledges() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let mut f = fixture_native(0x5f69, false);
     let stale = f.inputs.attachment.domain();
     let mut mapping = f.inputs.function.into_config().into_mapping();
@@ -1453,6 +1507,9 @@ fn actual_attachment_pin_blocks_config_mapping_retirement_until_detach_acknowled
 
 #[test]
 fn original_root_unwind_keeps_the_consumed_cold_owner_and_all_companions() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let (inputs, state, counters, device) = original_inputs(0x5f69);
     state.panic_original.store(true, Ordering::Relaxed);
     // SAFETY: original isolated config/root/BAR model with no private users.
@@ -1473,6 +1530,9 @@ fn original_root_unwind_keeps_the_consumed_cold_owner_and_all_companions() {
 }
 #[test]
 fn bound_payload_or_detach_unwind_is_terminal_without_a_hidden_retry_or_success() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     for detach in [false, true] {
         let (mut t, device, state, counters) = transport(fixture_native(0x5f69, true));
         t.start(&catalog(&device, false)).unwrap();
@@ -1503,6 +1563,9 @@ fn bound_payload_or_detach_unwind_is_terminal_without_a_hidden_retry_or_success(
 
 #[test]
 fn direct_native_resource_retirement_refuses_live_leases_before_any_pci_release() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let (mut t, device, state, counters) = transport(fixture_native(0x5f69, true));
     t.start(&catalog(&device, false)).unwrap();
     t.retire_platform().unwrap();
@@ -1532,6 +1595,9 @@ fn direct_native_resource_retirement_refuses_live_leases_before_any_pci_release(
 }
 #[test]
 fn native_prepare_effect_failure_or_unwind_is_terminal_for_every_safe_entry() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     for unwind in [false, true] {
         let f = fixture_native(0x5f69, false);
         // SAFETY: original cold receipt and binding have completed; no new
@@ -1595,6 +1661,9 @@ fn native_dma_digest(domain: &Domain) -> Vec<(u64, [u8; 32])> {
 }
 #[test]
 fn protocol_close_unwind_seals_every_public_admission_before_platform_retirement() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let (mut t, device, state, counters) = transport(fixture_native(0x5f69, true));
     let provider = catalog(&device, false);
     t.start(&provider).unwrap();
@@ -1649,6 +1718,9 @@ fn protocol_close_unwind_seals_every_public_admission_before_platform_retirement
 
 #[test]
 fn containment_flr_preserves_retiring_owner_but_foreign_generation_refuses() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let (mut first_transport, device, state, _) = transport(fixture_native(0x5f69, true));
     first_transport.start(&catalog(&device, false)).unwrap();
     let epoch = state.ownership_epoch.load(Ordering::Relaxed);
@@ -1677,6 +1749,9 @@ fn containment_flr_preserves_retiring_owner_but_foreign_generation_refuses() {
 
 #[test]
 fn equal_bdf_different_actual_config_attachment_refuses_before_native_admission() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let mut source = fixture_native(0x5f69, true);
     let mut foreign = fixture_native(0x5f69, true);
     assert_eq!(

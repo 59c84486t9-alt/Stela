@@ -985,6 +985,9 @@ fn attach() -> (Packet<Reg, Timer>, Pages, Arc<Domain>, Arc<Mutex<Device>>) {
 
 #[test]
 fn nonidentity_rings_transfer_frames_pad_strip_fcs_and_retire() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut packet, pages, domain, peer) = attach();
     assert_eq!(packet.mac(), Mac([2, 0x11, 0x22, 0x33, 0x44, 0x55]));
     assert!(packet.carrier());
@@ -1009,6 +1012,9 @@ fn nonidentity_rings_transfer_frames_pad_strip_fcs_and_retire() {
 }
 #[test]
 fn wraps_tx_and_rx_producer_return_indices() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut packet, _, domain, peer) = attach();
     // One frame past the 512-entry send ring, then past the 2048-entry
     // standard and 4096-entry return rings.
@@ -1028,6 +1034,9 @@ fn wraps_tx_and_rx_producer_return_indices() {
 }
 #[test]
 fn only_real_completed_tx_slots_can_be_reused_and_full_is_recoverable() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut packet, _, domain, peer) = attach();
     peer.lock().unwrap().hold_tx = true;
     for _ in 0..511 {
@@ -1046,6 +1055,9 @@ fn only_real_completed_tx_slots_can_be_reused_and_full_is_recoverable() {
 }
 #[test]
 fn carrier_comes_from_phy_status_and_negotiated_mode() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut packet, _, _, peer) = attach();
     peer.lock().unwrap().phy.insert(1, 0);
     assert!(!packet.carrier());
@@ -1064,6 +1076,9 @@ fn carrier_comes_from_phy_status_and_negotiated_mode() {
 }
 #[test]
 fn corrupted_rx_is_dropped_and_invalid_opaque_poison_keeps_owners() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut packet, pages, domain, peer) = attach();
     peer.lock().unwrap().receive(&[0x12; 60], 0x10000, &domain);
     assert_eq!(packet.receive().unwrap(), None);
@@ -1082,6 +1097,9 @@ fn corrupted_rx_is_dropped_and_invalid_opaque_poison_keeps_owners() {
 }
 #[test]
 fn late_payload_writes_drain_before_unmap_and_failure_keeps_exact_epoch() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (packet, pages, domain, peer) = attach();
     domain.defer.store(true, Ordering::Relaxed);
     peer.lock().unwrap().receive(&[0x7b; 60], 0, &domain);
@@ -1108,6 +1126,9 @@ fn late_payload_writes_drain_before_unmap_and_failure_keeps_exact_epoch() {
 }
 #[test]
 fn a_refused_retirement_never_drains_or_unmaps() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     // A live engine that does not stop, and a Command.BM clear the device
     // ignores: neither authorizes a drain or an unmap until it is cured.
     let stuck: fn(&mut Device, bool) = |peer, on| peer.stop_stuck = on.then_some(0x4800);
@@ -1131,6 +1152,9 @@ fn a_refused_retirement_never_drains_or_unmaps() {
 
 #[test]
 fn reset_phy_nvm_and_coherence_failures_never_advertise_attachment() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for fault in 0..4 {
         let (hardware, pages, domain, peer) = parts();
         {
@@ -1169,6 +1193,9 @@ fn reset_phy_nvm_and_coherence_failures_never_advertise_attachment() {
 }
 #[test]
 fn nvm_fallback_uses_internal_port_and_exact_read_protocol() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (hardware, pages, domain, peer) = parts();
     {
         let mut p = peer.lock().unwrap();
@@ -1193,6 +1220,9 @@ fn nvm_fallback_uses_internal_port_and_exact_read_protocol() {
 }
 #[test]
 fn live_status_with_future_completion_cannot_retire_unsubmitted_buffer() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut packet, _, domain, peer) = attach();
     let status = peer.lock().unwrap().status();
     domain.store(status + 16, &0x0001_0000u32.to_le_bytes());
@@ -1203,6 +1233,9 @@ fn live_status_with_future_completion_cannot_retire_unsubmitted_buffer() {
 
 #[test]
 fn link_loss_discards_old_tx_only_after_real_drain_and_rebuilds_rings() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut packet, _, domain, peer) = attach();
     assert!(packet.carrier());
     peer.lock().unwrap().hold_tx = true;
@@ -1224,6 +1257,9 @@ fn link_loss_discards_old_tx_only_after_real_drain_and_rebuilds_rings() {
 }
 #[test]
 fn visibility_failure_after_attachment_poison_keeps_for_real_retirement() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut packet, pages, domain, _) = attach();
     domain.fail_sync.store(true, Ordering::Relaxed);
     assert!(packet.transmit(&[0x5a; 60]).is_err());
@@ -1238,6 +1274,9 @@ fn visibility_failure_after_attachment_poison_keeps_for_real_retirement() {
 }
 #[test]
 fn peer_reads_published_device_snapshot_instead_of_unsynchronized_cpu_bytes() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (_hardware, pages, domain, _) = parts();
     let pins = pages
         .allocate(4096, 4096, CacheAttribute::WriteBack)
@@ -1274,6 +1313,9 @@ fn peer_reads_published_device_snapshot_instead_of_unsynchronized_cpu_bytes() {
 }
 #[test]
 fn peer_refuses_cpu_ownership_before_delayed_dma_payload_completion() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (_packet, _, domain, peer) = attach();
     domain.defer.store(true, Ordering::Relaxed);
     peer.lock().unwrap().receive(&[0x43; 60], 0, &domain);
@@ -1299,6 +1341,9 @@ fn peer_refuses_cpu_ownership_before_delayed_dma_payload_completion() {
 }
 #[test]
 fn peer_rejects_drain_without_engine_stop_and_bus_master_clear() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (_packet, _, domain, _) = attach();
     let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         // SAFETY: intentional rejected symbolic negative control only.
@@ -1309,6 +1354,9 @@ fn peer_rejects_drain_without_engine_stop_and_bus_master_clear() {
 
 #[test]
 fn partial_page_allocation_keeps_every_mapping_handle_for_explicit_retirement() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for allocated in 0..6 {
         let (hardware, mut pages, domain, peer) = parts();
         pages.fail_after = Some(allocated);
@@ -1333,6 +1381,9 @@ fn partial_page_allocation_keeps_every_mapping_handle_for_explicit_retirement() 
 
 #[test]
 fn rdma_fifo_fix_preserves_reserve_bits_and_is_observed_before_enable() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (packet, _, _, peer) = attach();
     let p = peer.lock().unwrap();
     assert_eq!(p.mac[&0x4900], 0x0123_0844);
@@ -1357,6 +1408,9 @@ fn rdma_fifo_fix_preserves_reserve_bits_and_is_observed_before_enable() {
 }
 #[test]
 fn rdma_fix_access_or_readback_failure_never_enables_read_dma() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for fault in 0..4 {
         let (hardware, pages, domain, peer) = parts();
         {
@@ -1402,6 +1456,9 @@ fn rdma_fix_access_or_readback_failure_never_enables_read_dma() {
 }
 #[test]
 fn a0_mbuf_low_water_is_counted_acknowledged_and_packet_io_continues() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut packet, _, domain, peer) = attach();
     peer.lock().unwrap().mac.insert(0x3c48, 0x40);
     assert_eq!(packet.receive().unwrap(), None);
@@ -1427,6 +1484,9 @@ fn a0_mbuf_low_water_is_counted_acknowledged_and_packet_io_continues() {
 }
 #[test]
 fn reasserted_low_water_remains_visible_and_counter_never_wraps() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut packet, _, _, peer) = attach();
     {
         let mut p = peer.lock().unwrap();
@@ -1447,6 +1507,9 @@ fn reasserted_low_water_remains_visible_and_counter_never_wraps() {
 }
 #[test]
 fn every_fatal_flow_message_and_dma_cause_remains_an_explicit_kept_fault() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     // Preserve every original single-bit cause: four registers by 32 bits,
     // excluding only the flow low-water bit and message MSI request bit.
     // Also keep the combined flow mask to exercise simultaneous causes;
@@ -1492,6 +1555,9 @@ fn every_fatal_flow_message_and_dma_cause_remains_an_explicit_kept_fault() {
 }
 #[test]
 fn stale_status_and_msi_request_alone_are_not_fatal_attention_causes() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut packet, _, _, peer) = attach();
     assert_eq!(packet.hardware.packet_attention(), Ok(false));
     peer.lock().unwrap().mac.insert(0x6004, 1);
@@ -1501,6 +1567,9 @@ fn stale_status_and_msi_request_alone_are_not_fatal_attention_causes() {
 }
 #[test]
 fn attention_ack_failures_keep_owners() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     // Cause reads, targeted W1C write, and ordering read after that write.
     for fault in 0..6 {
         let (mut packet, pages, domain, peer) = attach();
@@ -1549,6 +1618,9 @@ fn rejected_dma_effect(
 }
 #[test]
 fn peer_refuses_each_deleted_or_disabled_mac_dma_engine_and_workaround() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let common = [(0x4000, 2), (0x6800, 4), (0x6800, 0x10), (0x6800, 0x20)];
     let tx = [
         (0x4400, 2),
@@ -1613,6 +1685,9 @@ fn peer_refuses_each_deleted_or_disabled_mac_dma_engine_and_workaround() {
 }
 #[test]
 fn peer_refuses_dma_without_pci_and_host_access_controls() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for path in [DmaPath::Tx, DmaPath::Rx, DmaPath::Status] {
         let (packet, _, domain, peer) = attach();
         packet.memory.as_ref().unwrap().tx(0, &[0x92; 60]).unwrap();
@@ -1629,6 +1704,9 @@ fn peer_refuses_dma_without_pci_and_host_access_controls() {
 
 #[test]
 fn fatal_flow_observed_during_low_water_ack_is_never_discarded() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut packet, pages, domain, peer) = attach();
     {
         let mut p = peer.lock().unwrap();

@@ -219,6 +219,9 @@ pub(crate) fn device_complete_one(state: &Arc<Mutex<State>>) {
 }
 #[test]
 fn iova_payload_and_dma_index_ownership_survive_many_ring_wraps() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut ring, state) = setup(8);
     for i in 0..70u64 {
         let bytes = vec![i as u8; 4096 - i as usize];
@@ -264,6 +267,9 @@ fn iova_payload_and_dma_index_ownership_survive_many_ring_wraps() {
 }
 #[test]
 fn two_entry_reserve_and_bad_hardware_progress_fail_explicitly() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut ring, state) = setup(4);
     ring.submit(1, &[1]).unwrap();
     ring.submit(2, &[2]).unwrap();
@@ -278,6 +284,9 @@ fn two_entry_reserve_and_bad_hardware_progress_fail_explicitly() {
 }
 #[test]
 fn failed_publication_keeps_pending_dma_and_retry_requires_quiescence() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut ring, state) = setup(4);
     state.lock().unwrap().fail_publish = true;
     assert_eq!(ring.submit(7, &[0xa5; 4096]), Err(Error::RegisterFailure));
@@ -316,6 +325,9 @@ fn failed_publication_keeps_pending_dma_and_retry_requires_quiescence() {
 }
 #[test]
 fn dropping_active_queue_quarantines_descriptor_and_exposed_payload_pins() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut ring, state) = setup(4);
     ring.submit(9, &[9]).unwrap();
     drop(ring);
@@ -331,6 +343,9 @@ fn dropping_active_queue_quarantines_descriptor_and_exposed_payload_pins() {
 }
 #[test]
 fn visibility_failures_poison_without_releasing_unknown_ownership() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for fail_at in [2, 3, 4, 5] {
         let (mut ring, state) = setup(4);
         state.lock().unwrap().memory.lock().unwrap().fail_sync_at = Some(fail_at);
@@ -365,6 +380,9 @@ fn visibility_failures_poison_without_releasing_unknown_ownership() {
 }
 #[test]
 fn partial_unmap_failure_can_finish_after_acknowledged_quiescence() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut ring, state) = setup(4);
     ring.submit(20, &[20]).unwrap();
     state.lock().unwrap().memory.lock().unwrap().fail_unmap_at = Some(2);
@@ -395,6 +413,9 @@ fn partial_unmap_failure_can_finish_after_acknowledged_quiescence() {
 }
 #[test]
 fn uncertain_configuration_keeps_only_the_published_descriptor_mapping() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let state = Arc::new(Mutex::new(State {
         fail_configure: true,
         ..State::default()
@@ -414,6 +435,9 @@ fn uncertain_configuration_keeps_only_the_published_descriptor_mapping() {
 }
 #[test]
 fn requester_and_bar_owner_drop_only_after_full_quiescent_unmap() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut ring, state) = setup(4);
     ring.submit(1, &[1]).unwrap();
     state.lock().unwrap().memory.lock().unwrap().fail_unmap_at = Some(2);

@@ -407,6 +407,9 @@ mod tests {
 
     #[test]
     fn station_actions_take_mac80211s_verdicts() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         use Kernel::*;
         let ht = Some(0x0002);
         let verdict = |body: &[u8]| kernel(&frame(body), true, true, true, ht, false);

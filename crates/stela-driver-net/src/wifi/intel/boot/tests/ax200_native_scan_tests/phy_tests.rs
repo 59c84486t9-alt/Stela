@@ -84,6 +84,9 @@ fn emitted(phy: &Ax200Phy<'_, Model, ClockBios, ScanOs>, native: &Native) -> Vec
 }
 #[test]
 fn phy_commands_reclaim_on_ack() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for version in [3, 4] {
         for rlc in [None, Some(1), Some(2), Some(3)] {
             let bytes = phy_bytes(version, rlc);
@@ -237,6 +240,9 @@ fn phy_commands_reclaim_on_ack() {
 #[test]
 #[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
 fn ax200_phy4_rlc2_schema_does_not_bypass_mld_mac_requirement() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     use sha2::{Digest, Sha256};
     let root = std::env::var("STELA_IWLWIFI_IMAGES").unwrap();
     let bytes =
@@ -257,6 +263,9 @@ fn ax200_phy4_rlc2_schema_does_not_bypass_mld_mac_requirement() {
 }
 #[test]
 fn phy_prepublication_denial_and_unknown_schema_have_no_native_effects() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for case in 0..6 {
         let bytes = phy_bytes(if case == 5 { 7 } else { 3 }, Some(2));
         let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
@@ -299,6 +308,9 @@ fn phy_prepublication_denial_and_unknown_schema_have_no_native_effects() {
 }
 #[test]
 fn phy_cannot_consume_pending_or_completed_but_unretired_scan() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let bytes = phy_bytes(3, Some(2));
     let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
     let empty = resources::Catalog::from_handoff(vec![]).unwrap();
@@ -349,6 +361,9 @@ fn phy_cannot_consume_pending_or_completed_but_unretired_scan() {
 }
 #[test]
 fn phy_partial_rlc_failure_quarantines_original_owners_until_independent_stop() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for case in 0..5 {
         let bytes = phy_bytes(3, Some(2));
         let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
@@ -459,6 +474,9 @@ fn phy_partial_rlc_failure_quarantines_original_owners_until_independent_stop() 
 
 #[test]
 fn phy_rearm_failures_keep_first_error() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for producer in [false, true] {
         let bytes = phy_bytes(4, Some(2));
         let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);

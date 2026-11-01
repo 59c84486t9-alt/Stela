@@ -598,6 +598,9 @@ pub(in crate::wifi::intel) mod tests {
     }
     #[test]
     fn domain_addresses_copies_visibility_and_split_lifetimes() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         let bytes = image();
         let fw = super::super::firmware::Firmware::parse(&bytes).unwrap();
         let plan = fw.self_load_plan().unwrap();
@@ -662,6 +665,9 @@ pub(in crate::wifi::intel) mod tests {
     }
     #[test]
     fn every_prepublication_allocation_mapping_visibility_failure_unwinds() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         let bytes = image();
         let fw = super::super::firmware::Firmware::parse(&bytes).unwrap();
         let plan = fw.self_load_plan().unwrap();
@@ -698,6 +704,9 @@ pub(in crate::wifi::intel) mod tests {
     }
     #[test]
     fn boundary_retries_preserve_reservations_and_have_a_finite_budget() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         let bytes = image();
         let fw = super::super::firmware::Firmware::parse(&bytes).unwrap();
         let plan = fw.self_load_plan().unwrap();
@@ -725,6 +734,9 @@ pub(in crate::wifi::intel) mod tests {
     }
     #[test]
     fn failed_invalidation_keeps_pins_for_retry_and_exposed_drop_quarantines() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         let bytes = image();
         let fw = super::super::firmware::Firmware::parse(&bytes).unwrap();
         let plan = fw.self_load_plan().unwrap();
@@ -759,6 +771,9 @@ pub(in crate::wifi::intel) mod tests {
     #[test]
     #[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
     fn images_preserve_every_mapped_payload_and_paging_lifetime() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         use super::super::firmware::{Family, Firmware};
         use sha2::{Digest, Sha256};
         let directory = std::env::var("STELA_IWLWIFI_IMAGES").expect("firmware directory");
@@ -824,6 +839,9 @@ pub(in crate::wifi::intel) mod tests {
 
     #[test]
     fn prepublication_cleanup_invalidation_failure_keeps_the_uncertain_pin() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         let bytes = image();
         let fw = super::super::firmware::Firmware::parse(&bytes).unwrap();
         let plan = fw.self_load_plan().unwrap();

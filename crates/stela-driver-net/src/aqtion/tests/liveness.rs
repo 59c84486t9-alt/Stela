@@ -3,6 +3,9 @@
 use super::*;
 #[test]
 fn allones_programmed_mac_padding_initializes_and_transfers_on_both_generations() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for device in [0x07b1, 0x04c0] {
         let (mut owner, peer, domain, dropped) = setup(device);
         if peer.profile.generation == Generation::Atlantic {
@@ -30,6 +33,9 @@ fn allones_programmed_mac_padding_initializes_and_transfers_on_both_generations(
 }
 #[test]
 fn allones_data_requires_independent_alive_access_and_keeps_failed_initialization() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for device in [0x07b1, 0x04c0] {
         for unavailable in [false, true] {
             let (mut owner, peer, domain, dropped) = setup(device);
@@ -65,6 +71,9 @@ fn allones_data_requires_independent_alive_access_and_keeps_failed_initializatio
 }
 #[test]
 fn live_antigua_allones_boot_status_is_not_a_boot_started_acknowledgement() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut owner, peer, domain, dropped) = setup(0x04c0);
     peer.fault.set(Fault::BootAllOnes);
     assert_eq!(owner.start(), Err(Error::Timeout { register: 0x3040 }));
@@ -112,6 +121,9 @@ unsafe impl Timer for NoWait {
 #[test]
 #[ignore = "oracle: STELA_AQTION_LIVENESS_ORACLE"]
 fn unchanged_linux_live_read_data_flags_and_exact_independent_alive_access_match_native() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let text =
         std::fs::read_to_string(std::env::var("STELA_AQTION_LIVENESS_ORACLE").unwrap()).unwrap();
     let mut count = 0;

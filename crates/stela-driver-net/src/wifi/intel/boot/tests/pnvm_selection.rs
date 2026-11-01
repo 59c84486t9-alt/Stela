@@ -6,6 +6,9 @@ use super::*;
 
 #[test]
 fn alive_bios_source_scratch_doorbell_and_raw_notification_preserve_tables() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for fragmented in [false, true] {
         let mut bytes = ax210_bytes();
         if fragmented {
@@ -89,6 +92,9 @@ fn alive_bios_source_scratch_doorbell_and_raw_notification_preserve_tables() {
 
 #[test]
 fn zero_sku_requests_nothing_and_missing_capture_or_bad_bios_never_fake_fallback() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     use core::cell::RefCell;
     struct Spy<'a> {
         catalog: &'a resources::Catalog,
@@ -203,6 +209,9 @@ fn zero_sku_requests_nothing_and_missing_capture_or_bad_bios_never_fake_fallback
 
 #[test]
 fn ax200_keeps_bios_receipts_and_explicit_pre_v2_no_payload_transfer() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let bytes = firmware_bytes();
     let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
     let (observations, provider) =

@@ -72,11 +72,17 @@ fn board_bytes() -> Vec<u8> {
 }
 #[test]
 fn board_power_commands_use_bios_and_original_reclaimed_dma() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     exercise(false);
 }
 #[test]
 #[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
 fn ax200_board_schema_and_native_owner() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     exercise(true);
 }
 fn exercise(actual: bool) {

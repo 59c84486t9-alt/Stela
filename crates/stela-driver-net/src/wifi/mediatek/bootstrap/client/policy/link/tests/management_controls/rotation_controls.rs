@@ -15,6 +15,9 @@ fn stop(link: &mut TestLink, model: &Model) {
 
 #[test]
 fn owning_live_igtk_rotation_preserves_buffered_notice_then_revokes_taken_envelope() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut link, model, first, drops) = prepared();
     incoming(&model, &response(0x40c0, &[7, 0]), Some((1, 0, 9)), false);
     link.service().unwrap();
@@ -67,6 +70,9 @@ fn owning_live_igtk_rotation_preserves_buffered_notice_then_revokes_taken_envelo
 
 #[test]
 fn owning_live_igtk_rotation_waits_for_released_tx_notice_and_exact_retry_is_effect_free() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut link, model, first, drops) = prepared();
     link.transmit_management(&first, Transmit::SaQueryRequest([1, 2]))
         .unwrap();

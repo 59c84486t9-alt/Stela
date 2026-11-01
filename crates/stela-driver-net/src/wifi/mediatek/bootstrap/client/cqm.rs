@@ -81,6 +81,9 @@ mod tests {
 
     #[test]
     fn beacon_signal_crosses_the_threshold_like_ieee80211_handle_beacon_sig() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         let mut cqm = Cqm::default();
         cqm.set(Some((-70, 4)), false);
         for _ in 0..3 {

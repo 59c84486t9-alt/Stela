@@ -40,6 +40,8 @@ pub mod probe;
 pub mod usb;
 
 #[cfg(test)]
+mod model_test_process;
+#[cfg(test)]
 use stela_driver_base::test_clock;
 use stela_driver_base::{registers, waiting, working};
 use stela_driver_core::bytes;

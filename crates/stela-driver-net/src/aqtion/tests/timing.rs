@@ -29,6 +29,9 @@ fn native_clock(
 }
 #[test]
 fn invalid_native_clock_refuses_start_reset_and_pm_before_any_effect() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for device in [0x07b1, 0x04c0] {
         for rate in [0, u64::MAX, (u64::MAX / 2) / 60_000_000 + 1] {
             let (owner, peer, domain, dropped) = setup(device);
@@ -63,6 +66,9 @@ fn invalid_native_clock_refuses_start_reset_and_pm_before_any_effect() {
 }
 #[test]
 fn kept_model_timer_preflight_preserves_running_and_suspended_epoch() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for device in [0x07b1, 0x04c0] {
         let (mut owner, peer, domain, dropped) = setup(device);
         let pm = peer.native_pm.borrow().as_ref().unwrap().clone();
@@ -124,6 +130,9 @@ fn kept_model_timer_preflight_preserves_running_and_suspended_epoch() {
 }
 #[test]
 fn every_reset_wait_failure_preserves_issued_reset_or_releases_only_owned_locks() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for (device, flb) in [(0x07b1, false), (0x07b1, true)] {
         let (_, base, _, _) = setup(device);
         if device == 0x07b1 {
@@ -156,6 +165,9 @@ fn every_reset_wait_failure_preserves_issued_reset_or_releases_only_owned_locks(
 }
 #[test]
 fn wait_failure_acquiring_second_reset_semaphore_releases_only_first() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (_, peer, _, _) = setup(0x07b1);
     firmware4(&peer, false);
     peer.second_lock_busy.set(true);
@@ -172,6 +184,9 @@ fn wait_failure_acquiring_second_reset_semaphore_releases_only_first() {
 
 #[test]
 fn antigua_reset_clock_failure_fences_retry_and_keeps_dma() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut owner, peer, domain, dropped) = setup(0x04c0);
     peer.fault.set(Fault::Reset);
     peer.fail_wait.set(Some(1));
@@ -193,6 +208,9 @@ fn antigua_reset_clock_failure_fences_retry_and_keeps_dma() {
 
 #[test]
 fn pm_wait_failure_keeps_unknown_power_and_original_owners_until_d0_retry() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for device in [0x07b1, 0x04c0] {
         let (mut owner, peer, domain, dropped) = setup(device);
         let pm = peer.native_pm.borrow().as_ref().unwrap().clone();

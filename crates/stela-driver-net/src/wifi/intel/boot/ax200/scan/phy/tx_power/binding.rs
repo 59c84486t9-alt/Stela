@@ -554,6 +554,9 @@ mod tests {
     #[test]
     #[ignore = "oracle: STELA_IWLWIFI_QUOTA_TRACE"]
     fn pinned_linux_cold_quota_layout_offload_and_acknowledged_cache() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         use sha2::{Digest, Sha256};
         let trace = std::fs::read(std::env::var("STELA_IWLWIFI_QUOTA_TRACE").unwrap()).unwrap();
         assert_eq!(
@@ -609,6 +612,9 @@ mod tests {
     #[test]
     #[ignore = "oracle: STELA_IWLWIFI_BINDING_TRACE"]
     fn pinned_linux_cold_binding_sf_and_mac_power_bytes() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         use sha2::{Digest, Sha256};
         let trace = std::fs::read(std::env::var("STELA_IWLWIFI_BINDING_TRACE").unwrap()).unwrap();
         assert_eq!(

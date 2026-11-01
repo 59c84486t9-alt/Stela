@@ -157,6 +157,9 @@ fn stop(mut link: TestLink, model: &Model) {
 
 #[test]
 fn programmed_six_ghz_frontend_publishes_native_rnr_probe_and_routes_dma_bss() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut link, model) = setup(true, true, 0);
     let local = link.local_advertisement(Band::Ghz6).unwrap();
     assert_eq!(local.capabilities().band(), Band::Ghz6);
@@ -213,6 +216,9 @@ fn programmed_six_ghz_frontend_publishes_native_rnr_probe_and_routes_dma_bss() {
 
 #[test]
 fn no_ir_refuses_active_publication_but_passive_cancel_keeps_real_drain_owner() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut link, model) = setup(true, true, 2);
     let before = model.response.lock().unwrap().client_commands.len();
     let heads = queue_heads(&model);
@@ -252,6 +258,9 @@ fn no_ir_refuses_active_publication_but_passive_cancel_keeps_real_drain_owner() 
 
 #[test]
 fn six_ghz_notice_backpressure_preserves_next_native_rx_descriptor() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut link, model) = setup(true, true, 0);
     link.begin_scan(passive_request(), SCAN_BUDGET_US).unwrap();
     for timestamp in 0..NOTICES {
@@ -312,6 +321,9 @@ fn six_ghz_notice_backpressure_preserves_next_native_rx_descriptor() {
 
 #[test]
 fn six_ghz_nic_and_programmed_band_requirements_are_not_frontend_grants() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for available in [false, true] {
         let (mut link, model) = setup(available, false, 0);
         if available {

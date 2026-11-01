@@ -4,6 +4,9 @@ use super::*;
 
 #[test]
 fn recipient_response_keeps_session() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut driver, model, mut owner, state) = fixture();
     let session = attach(&mut driver, &mut owner);
     let proof = observe(&mut driver, &model, &request(), 101, NOW);
@@ -66,6 +69,9 @@ fn recipient_response_keeps_session() {
 
 #[test]
 fn recipient_delba_waits_for_response_drain() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut driver, model, mut owner, state) = fixture();
     let session = attach(&mut driver, &mut owner);
     let proof = observe(&mut driver, &model, &request(), 101, NOW);

@@ -148,6 +148,9 @@ fn selective() -> ReceiveFilter {
 
 #[test]
 fn real_station_multicast_hash_aliases_and_promiscuous_modes_control_dma_acceptance() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for chip in [0x0572_0000, 0x0576_1000, 0x0576_2000] {
         let mut f = fixture(chip);
         let own = f.packet.mac();
@@ -207,6 +210,9 @@ fn real_station_multicast_hash_aliases_and_promiscuous_modes_control_dma_accepta
 
 #[test]
 fn requested_filter_survives_real_rebuild_and_phy_resume_before_receive_engine_publication() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for chip in [0x0572_0000, 0x0576_1000, 0x0576_2000] {
         let mut f = fixture(chip);
         let policy = selective();
@@ -273,6 +279,9 @@ fn requested_filter_survives_real_rebuild_and_phy_resume_before_receive_engine_p
 
 #[test]
 fn receive_filter_hash_matches_source() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for chip in [0x0572_0000, 0x0576_1000, 0x0576_2000] {
         let mut f = fixture(chip);
         let groups = (0..=255)
@@ -334,6 +343,9 @@ fn receive_filter_hash_matches_source() {
 
 #[test]
 fn unconfirmed_filter_updates_publish_nothing() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for chip in [0x0572_0000, 0x0576_1000, 0x0576_2000] {
         for fault in 0..4 {
             let mut f = fixture(chip);
@@ -376,6 +388,9 @@ fn unconfirmed_filter_updates_publish_nothing() {
 
 #[test]
 fn malformed_lists_and_stopped_or_phy_suspended_calls_refuse_before_any_filter_effect() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let mut f = fixture(0x0576_1000);
     let before = f.peer.lock().unwrap().access.len();
     for policy in [
@@ -447,6 +462,9 @@ fn source_policy(case: u32) -> ReceiveFilter {
 #[test]
 #[ignore = "oracle: STELA_TG3_FILTER_ORACLE"]
 fn unchanged_linux_complete_receive_policy_crc_hash_slots_writes_and_settling_match_native() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let trace = std::fs::read_to_string(
         std::env::var("STELA_TG3_FILTER_ORACLE").expect("fresh original filter trace required"),
     )
@@ -544,6 +562,9 @@ fn unchanged_linux_complete_receive_policy_crc_hash_slots_writes_and_settling_ma
 
 #[test]
 fn all_ones_filter_data_requires_independent_pci_identity_and_mmio_liveness() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for chip in [0x0572_0000, 0x0576_1000, 0x0576_2000] {
         let mut f = fixture(chip);
         let alias = Mac([2, 1, 0xff, 0xff, 0xff, 0xff]);

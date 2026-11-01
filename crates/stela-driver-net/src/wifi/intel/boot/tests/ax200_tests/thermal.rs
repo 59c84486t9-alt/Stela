@@ -4,11 +4,17 @@ use super::*;
 
 #[test]
 fn thermal_power_use_original_ax200_epoch_and_reclaimed_completions() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     exercise_setup(false);
 }
 #[test]
 #[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
 fn ax200_thermal_power_versions_and_capability_branches() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     exercise_setup(true);
 }
 fn exercise_setup(actual: bool) {

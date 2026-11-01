@@ -168,6 +168,9 @@ mod tests {
     use super::*;
     #[test]
     fn final_pending_batch_enforces_budget_before_success_and_preserves_prior_error() {
+        if crate::model_test_process::isolate() {
+            return;
+        }
         for prior_error in [false, true] {
             let mut backing = alloc::vec![0u64; 1024 * 1024];
             let mut dma = super::super::tests::allocator(&mut backing);

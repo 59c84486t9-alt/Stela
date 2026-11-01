@@ -53,6 +53,9 @@ fn six_link(
 
 #[test]
 fn a_six_ghz_sae_exchange_goes_through_the_client_own_board_and_os() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut link, model, handle) = six_link(0, &beacon_elements());
     let session = link
         .begin_six_ghz_external_authentication(
@@ -101,6 +104,9 @@ fn a_six_ghz_sae_exchange_goes_through_the_client_own_board_and_os() {
 
 #[test]
 fn a_very_low_power_ap_is_refused_where_the_channel_bars_vlp_clients() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let mut elements = beacon_elements();
     // The HE operation's 6 GHz information names a VLP AP.
     let he = elements
@@ -127,6 +133,9 @@ fn a_very_low_power_ap_is_refused_where_the_channel_bars_vlp_clients() {
 
 #[test]
 fn owning_link_authentication_uses_bss_and_backpressures_native_receive() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (client, model) = setup_modern();
     let client = ManagedClient::new(client, country(), Environment::Indoor).unwrap();
     let mut link = ManagedLink::new(client, Source).unwrap();

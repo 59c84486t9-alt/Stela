@@ -4,6 +4,9 @@ use super::*;
 
 #[test]
 fn older_addba_cannot_reverse_delba() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut driver, model, mut owner, state) = fixture();
     let session = attach(&mut driver, &mut owner);
     let older = observe(&mut driver, &model, &request(), 101, NOW);
@@ -56,6 +59,9 @@ fn older_addba_cannot_reverse_delba() {
 
 #[test]
 fn foreign_and_group_observation_preflight() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut driver, model, mut owner, state) = fixture();
     let session = attach(&mut driver, &mut owner);
     let (mut foreign, foreign_model, mut foreign_owner, foreign_state) = fixture();
@@ -123,6 +129,9 @@ fn foreign_and_group_observation_preflight() {
 
 #[test]
 fn malformed_actions_preserve_observations() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut driver, model, mut owner, state) = fixture();
     let session = attach(&mut driver, &mut owner);
     for (step, body) in [

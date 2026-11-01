@@ -255,11 +255,17 @@ fn completion(uid: u32, status: u8, group: u8) -> Vec<u8> {
 }
 #[test]
 fn passive_umac15_holds_original_os_lease_at_real_dma_handoff_and_requires_completion() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     exercise_completion(false);
 }
 #[test]
 #[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
 fn ax200_umac15_schema_does_not_bypass_mld_mac_requirement() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     exercise_completion(true);
 }
 fn exercise_completion(actual: bool) {
@@ -407,6 +413,9 @@ fn exercise_completion(actual: bool) {
 }
 #[test]
 fn active_late_channel_denial_missing_os_and_between_guard_revocation_never_submit() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for case in 0..5 {
         let bytes = bytes();
         let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
@@ -447,6 +456,9 @@ fn active_late_channel_denial_missing_os_and_between_guard_revocation_never_subm
 }
 #[test]
 fn cancel_revoke_and_abort_not_found_wait_for_original_scan_completion_even_in_rfkill() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for revoked in [false, true] {
         let bytes = bytes();
         let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
@@ -534,6 +546,9 @@ fn cancel_revoke_and_abort_not_found_wait_for_original_scan_completion_even_in_r
 }
 #[test]
 fn wrong_uid_status_and_group_cannot_complete_or_release_original_scan() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for case in 0..5 {
         let bytes = bytes();
         let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
@@ -589,6 +604,9 @@ fn wrong_uid_status_and_group_cannot_complete_or_release_original_scan() {
 }
 #[test]
 fn native_scan_visibility_pending_and_reclaim_deadlines_keep_original_owner() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for case in 0..4 {
         let bytes = bytes();
         let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
@@ -685,6 +703,9 @@ fn beacon_packet() -> Vec<u8> {
 }
 #[test]
 fn completed_mpdu_is_policy_checked_and_precedes_same_rb_scan_completion() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for revoked in [false, true] {
         let bytes = bytes();
         let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
@@ -755,6 +776,9 @@ fn completed_mpdu_is_policy_checked_and_precedes_same_rb_scan_completion() {
 }
 #[test]
 fn elapsed_scan_budget_submits_real_abort_and_abort_ack_does_not_disable_completion_deadline() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for timeout in [false, true] {
         let bytes = bytes();
         let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
@@ -813,6 +837,9 @@ fn elapsed_scan_budget_submits_real_abort_and_abort_ack_does_not_disable_complet
 }
 #[test]
 fn malformed_abort_reply_keeps_response_and_original_scan_lifetime() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for body in [vec![], vec![0; 3], vec![0; 5], 3u32.to_le_bytes().to_vec()] {
         let bytes = bytes();
         let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
@@ -864,6 +891,9 @@ fn malformed_abort_reply_keeps_response_and_original_scan_lifetime() {
 }
 #[test]
 fn completion_wins_host_poll_deadline_but_still_requires_real_radio_rx_drain() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let bytes = bytes();
     let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
     let empty = resources::Catalog::from_handoff(vec![]).unwrap();
@@ -908,6 +938,9 @@ fn completion_wins_host_poll_deadline_but_still_requires_real_radio_rx_drain() {
 }
 #[test]
 fn prepublication_native_read_fault_remains_first_error_without_scan_submission() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let bytes = bytes();
     let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
     let empty = resources::Catalog::from_handoff(vec![]).unwrap();
@@ -940,6 +973,9 @@ fn prepublication_native_read_fault_remains_first_error_without_scan_submission(
 }
 #[test]
 fn result_poll_native_fault_and_repaired_retry_return_the_same_original_error() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let bytes = bytes();
     let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
     let empty = resources::Catalog::from_handoff(vec![]).unwrap();
@@ -967,6 +1003,9 @@ fn result_poll_native_fault_and_repaired_retry_return_the_same_original_error() 
 }
 #[test]
 fn prepublication_completed_rbs_and_backpressure_never_relabel_old_rx_as_new_scan() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for case in 0..3 {
         let bytes = bytes();
         let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
@@ -1057,6 +1096,9 @@ fn prepublication_completed_rbs_and_backpressure_never_relabel_old_rx_as_new_sca
 }
 #[test]
 fn prepublication_second_rb_reserved_events_remain_canonical_and_block_admission() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for mcc in [false, true] {
         let bytes = bytes();
         let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
@@ -1135,6 +1177,9 @@ fn prepublication_second_rb_reserved_events_remain_canonical_and_block_admission
 }
 #[test]
 fn pre_scan_raw_drain_native_fault_is_sticky_before_any_request_publication() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let bytes = bytes();
     let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
     let empty = resources::Catalog::from_handoff(vec![]).unwrap();

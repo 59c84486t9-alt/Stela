@@ -4,6 +4,9 @@ use super::*;
 
 #[test]
 fn update_keeps_outstanding_packet() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut driver, model, mut owner, state) = secure_modern();
     let permit = admit(&mut owner, &driver, AssociationUse::Data);
     let epoch = driver.station().association_epoch().unwrap();
@@ -39,6 +42,9 @@ fn update_keeps_outstanding_packet() {
 
 #[test]
 fn uncertain_ack_quarantines_owner() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for failure in 0..3 {
         let (mut driver, model, mut owner, _) = secure_modern();
         let context = driver.modern_context().unwrap().clone();
@@ -68,6 +74,9 @@ fn uncertain_ack_quarantines_owner() {
 
 #[test]
 fn update_preserves_pending_block_ack() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut driver, model, mut owner, _) = secure_modern();
     let parameters: u16 = 1 | 2 | (6 << 2) | (8 << 6);
     let mut body = vec![3, 0, 7];

@@ -331,6 +331,9 @@ fn attach(dma: &mut RegionAllocator) -> Context<Driver> {
 }
 #[test]
 fn native_owned_function_msix_callback_and_dma_service_release_only_after_real_retirement() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let mut backing = vec![0u64; 1024 * 1024];
     let mut dma = allocator(&mut backing);
     let (mut t, h, registry, _) = attach(&mut dma);
@@ -366,6 +369,9 @@ fn native_owned_function_msix_callback_and_dma_service_release_only_after_real_r
 }
 #[test]
 fn native_missing_stop_or_cpu_drain_never_releases_owners() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     for no_stop in [false, true] {
         let mut backing = vec![0u64; 1024 * 1024];
         let mut dma = allocator(&mut backing);
@@ -399,6 +405,9 @@ fn native_missing_stop_or_cpu_drain_never_releases_owners() {
 }
 #[test]
 fn native_records_real_disconnect_ack_before_reset_can_clear_status() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let mut backing = vec![0u64; 1024 * 1024];
     let mut dma = allocator(&mut backing);
     let (mut t, h, _, _) = attach(&mut dma);
@@ -412,6 +421,9 @@ fn native_records_real_disconnect_ack_before_reset_can_clear_status() {
 }
 #[test]
 fn native_late_callback_during_service_keeps_next_rx_and_work_notification() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     for already_posted in [false, true] {
         let mut backing = vec![0u64; 1024 * 1024];
         let mut dma = allocator(&mut backing);
@@ -439,6 +451,9 @@ fn native_late_callback_during_service_keeps_next_rx_and_work_notification() {
 }
 #[test]
 fn native_callback_between_mask_restores_cannot_reopen_pending_sources() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let mut backing = vec![0u64; 1024 * 1024];
     let mut dma = allocator(&mut backing);
     let (mut t, h, registry, _) = attach(&mut dma);
@@ -464,6 +479,9 @@ fn native_callback_between_mask_restores_cannot_reopen_pending_sources() {
 }
 #[test]
 fn msix_failures_keep_raw_fault_and_terminal_owner() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     for failed_arm in [false, true] {
         let mut backing = vec![0u64; 1024 * 1024];
         let mut dma = allocator(&mut backing);
@@ -490,6 +508,9 @@ fn msix_failures_keep_raw_fault_and_terminal_owner() {
 }
 #[test]
 fn native_callback_mask_fault_during_source_restore_refuses_successful_service() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let mut backing = vec![0u64; 1024 * 1024];
     let mut dma = allocator(&mut backing);
     let (mut t, h, registry, _) = attach(&mut dma);
@@ -514,6 +535,9 @@ fn native_callback_mask_fault_during_source_restore_refuses_successful_service()
 }
 #[test]
 fn native_constructor_refuses_unqualified_inputs_without_writes_and_returns_owners() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     for failure in 0..7 {
         let (mut inputs, h, registry, _) = inputs();
         match failure {
@@ -553,6 +577,9 @@ fn native_constructor_refuses_unqualified_inputs_without_writes_and_returns_owne
 }
 #[test]
 fn native_msix_irq_dma_attachment_runs_shared_secure_iml_and_operational_firmware() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     use crate::{
         bluetooth::intel::{self, TransportIdentity},
         firmware::{Catalog, Provenance, Resource},

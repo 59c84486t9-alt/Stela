@@ -369,6 +369,9 @@ pub(crate) fn eth(protocol: u16) -> Vec<u8> {
 }
 #[test]
 fn rssi_events_report_crossings_like_mt7925_mcu_rssi_monitor_event() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let mut payload = vec![3, 0, 0, 0];
     payload.extend_from_slice(&[0, 0, 8, 0]);
     payload.extend_from_slice(&(-75i32).to_le_bytes());
@@ -394,6 +397,9 @@ fn rssi_events_report_crossings_like_mt7925_mcu_rssi_monitor_event() {
 }
 #[test]
 fn late_legacy_configuration_ack_cannot_reuse_cached_poll_time() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut driver, model) = setup();
     assert!(matches!(
         associated_with_configuration_delay(&mut driver, &model, 0, 600_000),
@@ -415,6 +421,9 @@ pub(crate) fn data(group: bool) -> Vec<u8> {
 }
 #[test]
 fn mt7925_init_scan_secure_client_reconnect_and_stop() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut driver, model) = setup();
     let request = scan::Request::new(vec![CHANNEL], vec![], vec![]).unwrap();
     driver
@@ -589,6 +598,9 @@ fn mt7925_init_scan_secure_client_reconnect_and_stop() {
 
 #[test]
 fn combo_initial_boot_is_consumed_once_on_success_or_uncertainty() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for failed in [false, true] {
         let mut f = NativeFixture::new(Chip::Mt7925);
         f.install().unwrap();
@@ -617,6 +629,9 @@ fn combo_initial_boot_is_consumed_once_on_success_or_uncertainty() {
 
 #[test]
 fn failed_peer_ack_keeps_programmed_peer_without_packet_admission() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut driver, model) = setup();
     model.response.lock().unwrap().status = 0xdeadbeef;
     assert!(matches!(
@@ -635,6 +650,9 @@ fn failed_peer_ack_keeps_programmed_peer_without_packet_admission() {
 
 #[test]
 fn wrong_roc_token_never_publishes_authentication_or_reuses_owner() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut driver, model) = setup();
     model.response.lock().unwrap().wrong_roc_token = true;
     assert!(matches!(
@@ -660,6 +678,9 @@ fn wrong_roc_token_never_publishes_authentication_or_reuses_owner() {
 
 #[test]
 fn peer_removal_cannot_retire_outstanding_packet_owners() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut driver, model) = setup();
     associated(&mut driver, &model, 0);
     let epoch = driver.station().association_epoch().unwrap();
@@ -708,6 +729,9 @@ fn peer_removal_cannot_retire_outstanding_packet_owners() {
 
 #[test]
 fn partial_receive_chain_blocks_peer_generation_retirement() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut driver, model) = setup();
     associated(&mut driver, &model, 0);
     driver
@@ -751,6 +775,9 @@ fn partial_receive_chain_blocks_peer_generation_retirement() {
 
 #[test]
 fn roc_expiry_before_packet_publication() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     use crate::bus::dma::memory::{CacheAttribute, MemoryError, PageSource, PinnedPages};
     struct DelayedSource {
         allocations: AtomicUsize,
@@ -826,6 +853,9 @@ pub(crate) fn retired_group_for_reinstall() -> (
 }
 #[test]
 fn reinstalled_gtk_keeps_its_slot_and_takes_the_os_rsc() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for rsc in [3, 9] {
         let (mut driver, model, old) = retired_group_for_reinstall();
         let seed = ReplaySeed::uniform(wifi::security::PacketNumber::new(rsc).unwrap());
@@ -868,6 +898,9 @@ fn reinstalled_gtk_keeps_its_slot_and_takes_the_os_rsc() {
 }
 #[test]
 fn uncertain_gtk_install_never_authorizes_port_or_drops_real_peer_owner() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut driver, model, _) = retired_group_for_reinstall();
     model.response.lock().unwrap().status = 0xdead;
     assert!(matches!(
@@ -902,6 +935,9 @@ fn uncertain_gtk_install_never_authorizes_port_or_drops_real_peer_owner() {
 
 #[test]
 fn local_advertisement_uses_kept_real_report_image_eeprom_and_policy_inputs() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (driver, model) = setup();
     let count = model.response.lock().unwrap().client_commands.len();
     for band in [Band::Ghz2, Band::Ghz5] {
@@ -966,6 +1002,9 @@ fn raw(pn: u64) -> Vec<u8> {
 }
 #[test]
 fn completed_ptk_management_rx_preserves_data_pn_and_retires_with_peer() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut driver, model) = setup();
     associated(&mut driver, &model, 0);
     let ptk = driver
@@ -1108,6 +1147,9 @@ fn completed_ptk_management_rx_preserves_data_pn_and_retires_with_peer() {
 
 #[test]
 fn uncertain_ptk_publication_never_authenticates_management_or_releases_owner() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for dropped in [false, true] {
         let (mut driver, model) = setup();
         associated(&mut driver, &model, 0);

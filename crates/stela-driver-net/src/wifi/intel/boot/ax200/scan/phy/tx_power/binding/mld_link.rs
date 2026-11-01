@@ -190,6 +190,9 @@ mod tests {
     }
     #[test]
     fn an_mld_link_replaces_the_cold_one_under_its_own_address_and_id() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         let mut original = alloc::vec![0; 208];
         original[0] = 1;
         original[12..16].fill(255);
@@ -213,6 +216,9 @@ mod tests {
     #[test]
     #[ignore = "oracle: STELA_IWLWIFI_MLD_LINK_TRACE"]
     fn pinned_linux_mld_link_activation_unassign_reset_and_phy_reference_bytes() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         use sha2::{Digest, Sha256};
         let trace = std::fs::read(std::env::var("STELA_IWLWIFI_MLD_LINK_TRACE").unwrap()).unwrap();
         assert_eq!(

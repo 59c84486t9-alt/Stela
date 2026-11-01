@@ -721,6 +721,9 @@ mod tests {
 
     #[test]
     fn a_mapping_ends_the_association_only_when_it_comes_and_leaves_a_link_out() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         let links = 1 << 3 | 1 << 5;
         let mapped = |control: u8, to: u8| {
             let mut element = vec![255, 13, 109, control, 0xff, 9, 0];

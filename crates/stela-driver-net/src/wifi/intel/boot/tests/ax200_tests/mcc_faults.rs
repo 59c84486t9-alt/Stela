@@ -4,6 +4,9 @@ use super::*;
 
 #[test]
 fn mcc_failures_keep_evidence_and_owner() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for case in 0..5 {
         let bytes = setup_bytes();
         let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);

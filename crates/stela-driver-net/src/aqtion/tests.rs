@@ -744,6 +744,9 @@ fn setup_with_memory(device: u16, allocate_memory: bool) -> Fixture {
 }
 #[test]
 fn exact_profiles_do_not_admit_usb_fiber_or_unimplemented_silicon_families() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for id in [
         0x07b1, 0x87b1, 0x08b1, 0x88b1, 0x11b1, 0x91b1, 0x12b1, 0x92b1, 0x00c0, 0x94c0, 0x93c0,
         0x04c0, 0x14c0, 0x34c0,
@@ -763,6 +766,9 @@ fn exact_profiles_do_not_admit_usb_fiber_or_unimplemented_silicon_families() {
 }
 #[test]
 fn b1_and_antigua_rings_transfer_and_wrap() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for id in [0x07b1, 0x08b1, 0x11b1, 0x12b1, 0x04c0, 0x93c0] {
         let (mut net, peer, domain, dropped) = setup(id);
         net.start().unwrap();
@@ -790,6 +796,9 @@ fn b1_and_antigua_rings_transfer_and_wrap() {
 }
 #[test]
 fn bad_rx_metadata_and_fragment_chains_are_not_invented_as_frames() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut net, peer, _, _) = setup(0x07b1);
     net.start().unwrap();
     peer.set(0x370, 0x100);
@@ -811,6 +820,9 @@ fn bad_rx_metadata_and_fragment_chains_are_not_invented_as_frames() {
 }
 #[test]
 fn stop_and_dma_drain_failures_keep_all_resources_for_retry() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut net, peer, domain, dropped) = setup(0x04c0);
     net.start().unwrap();
     peer.fault.set(Fault::QueueStop);
@@ -832,6 +844,9 @@ fn stop_and_dma_drain_failures_keep_all_resources_for_retry() {
 }
 #[test]
 fn firmware_failures_are_bounded_and_do_not_publish_a_working_link() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for (id, fault) in [
         (0x07b1, Fault::RamSemaphore),
         (0x07b1, Fault::RamCompletion),
@@ -856,6 +871,9 @@ fn firmware_failures_are_bounded_and_do_not_publish_a_working_link() {
 }
 #[test]
 fn loss_visibility_and_invalid_hardware_heads_are_terminal_until_recovery() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut net, peer, domain, _) = setup(0x07b1);
     net.start().unwrap();
     peer.set(0x370, 0x100);
@@ -875,6 +893,9 @@ fn loss_visibility_and_invalid_hardware_heads_are_terminal_until_recovery() {
 }
 #[test]
 fn unsupported_coherent_dma_cannot_be_silently_replaced_with_a_fence() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut net, _, domain, _) = setup(0x07b1);
     domain.incoherent.store(true, Ordering::Relaxed);
     assert_eq!(net.start(), Err(Error::Dma(DmaError::CoherenceUnavailable)));
@@ -884,6 +905,9 @@ fn unsupported_coherent_dma_cannot_be_silently_replaced_with_a_fence() {
 
 #[test]
 fn ordinary_suspend_stops_dma_before_d3_and_keeps_the_resumable_epoch() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut net, peer, domain, dropped) = setup(0x07b1);
     let config = net.function.as_mut().unwrap().config();
     config.write16(6, 1 << 4);
@@ -1178,6 +1202,9 @@ fn native_config(address: Address, device: u16) -> (Function<ControlledConfig>, 
 // real RAM; refused/absent device responses are explicitly modeled by the wrapper.
 #[test]
 fn native_failed_d0_resume_is_retryable_and_never_uses_powered_off_mmio() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut net, peer, domain, dropped) = setup(0x07b1);
     let pm = peer.native_pm.borrow().as_ref().unwrap().clone();
     net.start().unwrap();
@@ -1230,6 +1257,9 @@ fn native_failed_d0_resume_is_retryable_and_never_uses_powered_off_mmio() {
 
 #[test]
 fn native_d3_readback_loss_keeps_drained_retirement_and_d0_retry_safe() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for retire in [false, true] {
         let (mut net, peer, domain, dropped) = setup(0x04c0);
         let pm = peer.native_pm.borrow().as_ref().unwrap().clone();
@@ -1279,6 +1309,9 @@ fn native_d3_readback_loss_keeps_drained_retirement_and_d0_retry_safe() {
 
 #[test]
 fn initial_native_d0_failure_keeps_uninitialized_owner_without_mmio() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut net, peer, domain, dropped) = setup_with_memory(0x07b1, false);
     let pm = peer.native_pm.borrow().as_ref().unwrap().clone();
     // Model attach before Memory allocation, using its power helper.
@@ -1313,6 +1346,9 @@ fn initial_native_d0_failure_keeps_uninitialized_owner_without_mmio() {
 
 #[test]
 fn modeled_removed_config_resume_keeps_owners_and_never_uses_powered_off_mmio() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for device in [0x07b1, 0x04c0] {
         let (mut net, peer, domain, dropped) = setup(device);
         let pm = peer.native_pm.borrow().as_ref().unwrap().clone();
@@ -1362,6 +1398,9 @@ fn reset_releases(peer: &Peer) -> Vec<usize> {
 }
 #[test]
 fn reset_semaphores_are_read_to_acquire_and_write_to_release() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (_, peer, _, _) = setup(0x07b1);
     assert_eq!(peer.read(0x3ac), Ok(1));
     assert_eq!(peer.read(0x3ac), Ok(0));
@@ -1370,6 +1409,9 @@ fn reset_semaphores_are_read_to_acquire_and_write_to_release() {
 }
 #[test]
 fn firmware4_second_lock_timeout_releases_only_the_acquired_first_lock_then_retries() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for flb in [false, true] {
         let (_, peer, _, _) = setup(0x07b1);
         let hw = hardware(&peer);
@@ -1391,6 +1433,9 @@ fn firmware4_second_lock_timeout_releases_only_the_acquired_first_lock_then_retr
 }
 #[test]
 fn firmware4_pre_reset_mmio_errors_release_both_locks_in_reverse_order() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for flb in [false, true] {
         for failed_read in [0x53c, 0] {
             let (_, peer, _, _) = setup(0x07b1);
@@ -1415,6 +1460,9 @@ fn firmware4_pre_reset_mmio_errors_release_both_locks_in_reverse_order() {
 }
 #[test]
 fn firmware4_uncertain_semaphore_release_or_acquire_blocks_reacquisition() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for (failed_release, reached_device) in
         [(0x3ac, false), (0x3b0, false), (0x3ac, true), (0x3b0, true)]
     {
@@ -1475,6 +1523,9 @@ fn firmware4_uncertain_semaphore_release_or_acquire_blocks_reacquisition() {
 }
 #[test]
 fn firmware4_reset_store_uncertainty_and_flb_post_first_reset_abort_keep_ownership() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for flb in [false, true] {
         let (_, peer, _, _) = setup(0x07b1);
         let hw = hardware(&peer);
@@ -1498,6 +1549,9 @@ fn firmware4_reset_store_uncertainty_and_flb_post_first_reset_abort_keep_ownersh
 }
 #[test]
 fn restart_after_delayed_traffic_drains_each_epoch_and_rebuilds_device_heads() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for id in [0x07b1, 0x04c0] {
         let (mut net, peer, domain, dropped) = setup(id);
         net.start().unwrap();
@@ -1539,6 +1593,9 @@ fn restart_after_delayed_traffic_drains_each_epoch_and_rebuilds_device_heads() {
 }
 #[test]
 fn delayed_firmware_ack_is_required_before_link_shutdown_finishes() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for id in [0x07b1, 0x04c0] {
         let (mut net, peer, _, _) = setup(id);
         net.start().unwrap();
@@ -1560,6 +1617,9 @@ fn assert_bus_master_rejection(body: impl FnOnce()) {
 }
 #[test]
 fn model_rejects_dma_drain_before_native_bus_master_clear_and_keeps_pending_writes() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for device in [0x07b1, 0x04c0] {
         let (mut net, peer, domain, dropped) = setup(device);
         net.start().unwrap();
@@ -1600,6 +1660,9 @@ fn model_rejects_dma_drain_before_native_bus_master_clear_and_keeps_pending_writ
 }
 #[test]
 fn model_rejects_dma_drain_and_unmap_without_bus_master_readback() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for device in [0x07b1, 0x04c0] {
         for unmap in [false, true] {
             let (mut net, peer, domain, dropped) = setup(device);
@@ -1666,6 +1729,9 @@ fn model_rejects_dma_drain_and_unmap_without_bus_master_readback() {
 
 #[test]
 fn model_rejects_unmap_after_native_bus_master_reenable_and_keeps_dma() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for device in [0x07b1, 0x04c0] {
         let (mut net, _, domain, dropped) = setup(device);
         net.start().unwrap();
@@ -1746,6 +1812,9 @@ fn model_rejects_tx_payload_dma_without_visibility() {
 
 #[test]
 fn delayed_rx_writeback_is_invisible_until_completion_and_stop_drains_pending_writes() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut net, peer, domain, dropped) = setup(0x07b1);
     net.start().unwrap();
     peer.set(0x370, 0x100);
@@ -1768,6 +1837,9 @@ fn delayed_rx_writeback_is_invisible_until_completion_and_stop_drains_pending_wr
 
 #[test]
 fn firmware4_first_lock_timeout_does_not_release_another_owner() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (_, peer, _, _) = setup(0x07b1);
     let hw = hardware(&peer);
     firmware4(&peer, false);
@@ -1783,6 +1855,9 @@ fn firmware4_first_lock_timeout_does_not_release_another_owner() {
 
 #[test]
 fn native_refused_d3_requires_fresh_d0_acknowledgement_before_restart() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut net, peer, domain, dropped) = setup(0x07b1);
     let pm = peer.native_pm.borrow().as_ref().unwrap().clone();
     net.start().unwrap();
@@ -2248,6 +2323,9 @@ mod registers_oracle {
     #[test]
     #[ignore = "oracle: STELA_AQTION_REGISTERS_ORACLE"]
     fn unchanged_linux_aqtion_registers() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         let path = std::env::var_os("STELA_AQTION_REGISTERS_ORACLE")
             .expect("set STELA_AQTION_REGISTERS_ORACLE");
         assert!(
@@ -2322,6 +2400,9 @@ mod registers_oracle {
 
     #[test]
     fn accepts_complete_aqtion_register_control_trace() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         let trace = control_trace();
         assert_eq!(parse_trace(&trace).unwrap().len(), CASE_COUNT);
         compare_trace(&trace);
@@ -2329,6 +2410,9 @@ mod registers_oracle {
 
     #[test]
     fn rejects_parseable_aqtion_register_comparison_corruptions() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         let trace = control_trace();
         compare_trace(&trace); // A baseline failure cannot count as rejection.
         // Every replacement keeps a complete valid input inventory and passes
@@ -2381,6 +2465,9 @@ mod registers_oracle {
 
     #[test]
     fn rejects_malformed_aqtion_register_oracle_rows_and_incomplete_coverage() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         const VALID: &str = "hw_atl_rdm_rx_desc_en_set 0 0 0 23304 0 0 1 0";
         assert_eq!(parse_row(VALID).unwrap().address, 23304);
         for bad in [

@@ -560,6 +560,9 @@ mod tests {
 
     #[test]
     fn an_internal_scan_listens_beside_its_link_within_linux_s_times() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         let channel = Channel {
             band: Band::Ghz2,
             number: 1,
@@ -602,6 +605,9 @@ mod tests {
 
     #[test]
     fn version_18_has_room_for_one_more_channel() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         let (old, new) = (Layout::of(17), Layout::of(18));
         assert_eq!((old.channels, new.channels), (67, 68));
         assert_eq!(
@@ -661,6 +667,9 @@ mod tests {
 
     #[test]
     fn a_passive_six_ghz_pass_follows_the_channels_asked_for() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         let channel = Channel {
             band: Band::Ghz2,
             number: 1,
@@ -690,6 +699,9 @@ mod tests {
 
     #[test]
     fn a_scan_asks_for_ebs_when_it_may_and_a_failure_stops_it() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         let channel = Channel {
             band: Band::Ghz2,
             number: 1,
@@ -748,6 +760,9 @@ mod tests {
 
     #[test]
     fn a_six_ghz_scan_probes_each_channel_for_what_is_known_on_it() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         let reported = protocol::SixGhz {
             short_ssid: Some(0xaabb_ccdd),
             psd_20: 4,
@@ -773,6 +788,9 @@ mod tests {
 
     #[test]
     fn a_channel_that_answers_by_itself_takes_its_bssids() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         let reported = protocol::SixGhz {
             short_ssid: Some(1),
             unsolicited_probe: true,
@@ -784,6 +802,9 @@ mod tests {
 
     #[test]
     fn too_many_bssids_listen_instead() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         let many = (0..10).map(|last| target(0, last)).collect();
         let bytes = six_ghz(vec![SIX_1], vec![vec![]], many);
         assert_eq!(flags(&bytes, 0), BAND_6 | CHANNEL_FORCE_PASSIVE);
@@ -791,6 +812,9 @@ mod tests {
 
     #[test]
     fn a_hidden_ap_is_named_and_never_listened_for() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         let ssid = b"net".to_vec();
         let short = protocol::six_ghz::short_ssid(&ssid);
         let reported = protocol::SixGhz {
@@ -818,6 +842,9 @@ mod tests {
 
     #[test]
     fn an_unreported_channel_outside_the_psc_is_skipped() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         let request = protocol::Request::new(vec![SIX_1], vec![vec![]], vec![]).unwrap();
         assert_eq!(
             encode(&request, 17, LOCAL, Some(&probe()), MEASURED).unwrap_err(),
@@ -827,6 +854,9 @@ mod tests {
 
     #[test]
     fn a_request_never_mixes_6_ghz_with_other_bands() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         let mut mixed = channels();
         mixed.push(SIX_5);
         let request = protocol::Request::new(mixed, vec![vec![]], vec![]).unwrap();
@@ -838,6 +868,9 @@ mod tests {
 
     #[test]
     fn each_channel_names_its_band_where_its_version_reads_it() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         let request = protocol::Request::new(channels(), vec![vec![]], vec![]).unwrap();
         let config = |bytes: &[u8], index: usize| {
             let at = CHANNELS + 4 + index * CHANNEL_CONFIG_BYTES;
@@ -860,6 +893,9 @@ mod tests {
 
     #[test]
     fn a_wildcard_scan_probes_every_channel_under_its_one_ssid() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         let request = protocol::Request::new(channels(), vec![vec![]], vec![221, 1, 7]).unwrap();
         let bytes = encode(&request, 15, LOCAL, Some(&probe()), MEASURED).unwrap();
         assert_eq!(word(&bytes, GENERAL), PASS_ALL | ADAPTIVE_DWELL);
@@ -885,6 +921,9 @@ mod tests {
 
     #[test]
     fn firmware_that_writes_the_power_report_is_left_to() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         let request = protocol::Request::new(channels(), vec![vec![]], vec![]).unwrap();
         let reports = Abilities {
             hidden_six_ghz: false,
@@ -911,6 +950,9 @@ mod tests {
 
     #[test]
     fn one_named_network_listens_on_every_chain_within_the_directed_budget() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         let ssids = vec![b"net".to_vec()];
         let request = protocol::Request::new(channels(), ssids, vec![]).unwrap();
         let bytes = encode(&request, 15, LOCAL, Some(&probe()), MEASURED).unwrap();
@@ -924,6 +966,9 @@ mod tests {
 
     #[test]
     fn ssids_fill_the_table_last_first_and_every_channel_names_them() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         let ssids = vec![b"one".to_vec(), vec![], b"one".to_vec()];
         let request = protocol::Request::new(channels(), ssids, vec![]).unwrap();
         let bytes = encode(&request, 15, LOCAL, Some(&probe()), MEASURED).unwrap();
@@ -935,6 +980,9 @@ mod tests {
 
     #[test]
     fn a_passive_scan_stays_passive_and_names_no_ssid() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         let request = protocol::Request::new(channels(), vec![], vec![221, 1, 7]).unwrap();
         let bytes = encode(&request, 15, LOCAL, None, MEASURED).unwrap();
         assert_eq!(
@@ -948,6 +996,9 @@ mod tests {
 
     #[test]
     fn a_scan_and_its_probe_must_agree() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         let active = protocol::Request::new(channels(), vec![vec![]], vec![]).unwrap();
         let passive = protocol::Request::new(channels(), vec![], vec![]).unwrap();
         assert_eq!(
@@ -959,6 +1010,9 @@ mod tests {
 
     #[test]
     fn elements_beyond_the_template_are_refused() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         let request = protocol::Request::new(channels(), vec![vec![]], vec![]).unwrap();
         let mut oversized = probe();
         oversized.elements[1] = vec![0; PROBE_BUFFER_BYTES];

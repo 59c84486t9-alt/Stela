@@ -4,6 +4,9 @@ use super::*;
 
 #[test]
 fn management_tx_keeps_packet_owner() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut driver, model, mut owner, state) = fixture();
     let session = attach(&mut driver, &mut owner);
     let permit = admit(&mut owner, &driver, AssociationUse::Management);
@@ -71,6 +74,9 @@ fn management_tx_keeps_packet_owner() {
 
 #[test]
 fn key_and_unmap_failures_keep_owners() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for key_failure in [false, true] {
         let (mut driver, model, mut owner, state) = fixture();
         if key_failure {

@@ -2,6 +2,9 @@ use super::*;
 
 #[test]
 fn mld_mac_preserves_command_order_identity_and_remove_lifetimes() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for (mac, link) in [(1, None), (2, Some(1)), (3, Some(8))] {
         exercise(&image(mac, link));
     }
@@ -10,6 +13,9 @@ fn mld_mac_preserves_command_order_identity_and_remove_lifetimes() {
 #[test]
 #[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
 fn pinned_ax200_firmware_selects_mld_mac_and_inactive_link_commands() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     use sha2::{Digest, Sha256};
     let root = std::env::var("STELA_IWLWIFI_IMAGES").unwrap();
     let bytes =
@@ -27,6 +33,9 @@ fn pinned_ax200_firmware_selects_mld_mac_and_inactive_link_commands() {
 
 #[test]
 fn unsupported_mld_versions_and_partial_publication_keep_owner() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for case in 0..3 {
         let bytes = image(
             if case == 0 { 5 } else { 1 },
@@ -115,6 +124,9 @@ fn unsupported_mld_versions_and_partial_publication_keep_owner() {
 
 #[test]
 fn receive_rearm_failure_latches_error_and_quarantines_uncertain_dma() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let bytes = image(1, None);
     let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
     let empty = resources::Catalog::from_handoff(vec![]).unwrap();

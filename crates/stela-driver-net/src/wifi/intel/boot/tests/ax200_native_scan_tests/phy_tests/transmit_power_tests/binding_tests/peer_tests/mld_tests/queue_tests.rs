@@ -129,6 +129,9 @@ fn flush(queue: u16) -> [u8; 132] {
 }
 #[test]
 fn mld_scheduler_add_owns_real_dma_and_full_queue_identity_until_flush_remove_ack_reclaim() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     exercise(&image(3));
 }
 fn exercise(bytes: &[u8]) {
@@ -285,6 +288,9 @@ fn exercise(bytes: &[u8]) {
 }
 #[test]
 fn unknown_scheduler_schema_and_denied_rate_never_allocate_or_publish_queue_dma() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for version in [3, 4] {
         let bytes = image(version);
         let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
@@ -328,6 +334,9 @@ fn unknown_scheduler_schema_and_denied_rate_never_allocate_or_publish_queue_dma(
 }
 #[test]
 fn reserved_hcmd_queue_and_failed_scheduler_reply_never_grant_queue_ownership() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for reserved in [false, true] {
         let bytes = image(3);
         let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
@@ -370,6 +379,9 @@ fn reserved_hcmd_queue_and_failed_scheduler_reply_never_grant_queue_ownership() 
 }
 #[test]
 fn scheduler_map_invalidation_failure_after_successful_stop_keeps_original_peer_policy_owner() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let bytes = image(3);
     let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
     let empty = resources::Catalog::from_handoff(vec![]).unwrap();
@@ -406,6 +418,9 @@ fn scheduler_map_invalidation_failure_after_successful_stop_keeps_original_peer_
 }
 #[test]
 fn missing_scheduler_add_or_remove_ack_freezes_extra_dma_and_parent_through_failed_stop() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for remove in [false, true] {
         let bytes = image(3);
         let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
@@ -489,6 +504,9 @@ fn missing_scheduler_add_or_remove_ack_freezes_extra_dma_and_parent_through_fail
 #[test]
 #[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
 fn ax200_mld_scheduler3_reply2_allocates_and_removes_original_queue_dma() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     use sha2::{Digest, Sha256};
     let root = std::env::var("STELA_IWLWIFI_IMAGES").unwrap();
     let bytes =

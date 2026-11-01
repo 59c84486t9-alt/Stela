@@ -6,6 +6,9 @@ use super::*;
 
 #[test]
 fn ax210_publishes_iml_scratch_dummy_tails_and_keeps_pnvm_context_after_alive() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let bytes = ax210_bytes();
     let catalog = catalog_for(&ax210_profile(), Family::Ax210.firmware_name(), &bytes);
     let (observation, step_catalog) = step_fixture();
@@ -116,6 +119,9 @@ fn ax210_publishes_iml_scratch_dummy_tails_and_keeps_pnvm_context_after_alive() 
 
 #[test]
 fn ax210_all_prepublication_faults_release_and_each_partial_stop_can_retry() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let bytes = ax210_bytes();
     let catalog = catalog_for(&ax210_profile(), Family::Ax210.firmware_name(), &bytes);
     let (observation, step_catalog) = step_fixture();
@@ -198,6 +204,9 @@ fn ax210_all_prepublication_faults_release_and_each_partial_stop_can_retry() {
 
 #[test]
 fn an_integrated_ax201_reaches_ltr_through_its_peripheral_registers() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let bytes = firmware_bytes();
     let mut observed = profile().observed();
     (observed.device, observed.hardware_revision) = (0x06f0, 0x332);
@@ -231,6 +240,9 @@ fn an_integrated_ax201_reaches_ltr_through_its_peripheral_registers() {
 
 #[test]
 fn an_integrated_ax211_keeps_the_device_busy_where_it_cannot_set_ltr() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let bytes = ax210_bytes();
     let mut observed = ax210_profile().observed();
     (observed.device, observed.hardware_revision) = (0x7af0, 0x370);
@@ -268,6 +280,9 @@ fn an_integrated_ax211_keeps_the_device_busy_where_it_cannot_set_ltr() {
 
 #[test]
 fn a_be200_starts_its_rom_through_gp_control() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let mut bytes = ax210_bytes();
     bytes[72..76].copy_from_slice(&(106u32 << 8).to_le_bytes());
     let mut observed = ax210_profile().observed();

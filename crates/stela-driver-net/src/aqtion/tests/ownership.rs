@@ -14,6 +14,9 @@ use model::*;
 
 #[test]
 fn original_reset_and_root_completion_precede_nonidentity_native_traffic() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for device in [0x07b1, 0x04c0] {
         let fixture = inputs(device);
         let mut owner = attach(fixture.inputs, &fixture.pages).unwrap();
@@ -76,6 +79,9 @@ fn original_reset_and_root_completion_precede_nonidentity_native_traffic() {
 }
 #[test]
 fn failed_original_completion_or_binding_keeps_cold_graph_without_allocating() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for device in [0x07b1, 0x04c0] {
         for failed in ["original drain", "bind"] {
             let fixture = inputs(device);
@@ -92,6 +98,9 @@ fn failed_original_completion_or_binding_keeps_cold_graph_without_allocating() {
 }
 #[test]
 fn engine_stop_and_clock_failures_cannot_reach_original_root_completion() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for device in [0x07b1, 0x04c0] {
         for clock_failed in [false, true] {
             let fixture = inputs(device);
@@ -113,6 +122,9 @@ fn engine_stop_and_clock_failures_cannot_reach_original_root_completion() {
 }
 #[test]
 fn abandoning_an_active_native_owner_retains_pages_binding_and_registers() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for device in [0x07b1, 0x04c0] {
         let fixture = inputs(device);
         let owner = attach(fixture.inputs, &fixture.pages).unwrap();
@@ -126,6 +138,9 @@ fn abandoning_an_active_native_owner_retains_pages_binding_and_registers() {
 }
 #[test]
 fn each_native_retirement_failure_is_sticky_and_keeps_remaining_resources() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for device in [0x07b1, 0x04c0] {
         for failed in [
             "bound drain",
@@ -185,6 +200,9 @@ fn each_native_retirement_failure_is_sticky_and_keeps_remaining_resources() {
 }
 #[test]
 fn partial_native_allocation_keeps_successful_maps_and_original_binding() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for device in [0x07b1, 0x04c0] {
         let fixture = inputs(device);
         fixture.state.fail_map_at.store(3, Ordering::Relaxed);
@@ -203,6 +221,9 @@ fn partial_native_allocation_keeps_successful_maps_and_original_binding() {
 }
 #[test]
 fn changed_configuration_or_bar_refuses_before_vendor_register_access() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for identity in [false, true] {
         let mut fixture = inputs(0x07b1);
         fixture
@@ -227,6 +248,9 @@ fn changed_configuration_or_bar_refuses_before_vendor_register_access() {
 
 #[test]
 fn suspended_native_retirement_releases_owners_without_powered_mmio() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for device in [0x07b1, 0x04c0] {
         let fixture = inputs(device);
         let mut owner = attach(fixture.inputs, &fixture.pages).unwrap();

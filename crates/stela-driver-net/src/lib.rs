@@ -9,6 +9,9 @@
 extern crate alloc;
 
 #[cfg(test)]
+mod test_process;
+
+#[cfg(test)]
 use stela_driver_base::test_clock;
 use stela_driver_base::{Clock, Deadline, Handoff, block, bus, registers, waiting};
 use stela_driver_core::{bytes, firmware};

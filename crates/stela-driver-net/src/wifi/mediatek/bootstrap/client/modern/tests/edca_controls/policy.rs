@@ -4,6 +4,9 @@ use super::*;
 
 #[test]
 fn revoked_and_foreign_update_admission() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut driver, model, mut owner, state) = secure_modern();
     let frame = beacon(&driver, 1, |_| {});
     observe(&mut driver, &model, &frame).unwrap();
@@ -37,6 +40,9 @@ fn revoked_and_foreign_update_admission() {
 
 #[test]
 fn independent_queue_policy_denials() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut driver, model, mut owner, state) = secure_modern();
     let frame = beacon(&driver, 1, |_| {});
     observe(&mut driver, &model, &frame).unwrap();
@@ -71,6 +77,9 @@ fn independent_queue_policy_denials() {
 
 #[test]
 fn association_permission_does_not_grant_edca() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     struct OriginalOnly(Hardware);
     struct Guard(HardwareGuard);
     impl reg::HardwareLease for Guard {

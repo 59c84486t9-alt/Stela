@@ -21,6 +21,9 @@ fn power_writes(peer: &Arc<Mutex<Device>>, from: usize) -> Vec<(u8, u16)> {
 
 #[test]
 fn phy_low_power_resume_restores_traffic() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for bcm5762 in [false, true] {
         let (mut packet, pages, domain, peer) = attached(bcm5762);
         let addresses = packet.memory.as_ref().unwrap().addresses().unwrap();
@@ -75,6 +78,9 @@ fn phy_low_power_resume_restores_traffic() {
 
 #[test]
 fn stopped_suspended_owner_can_retire_without_waking_phy_or_repeating_stop() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for bcm5762 in [false, true] {
         let (mut packet, pages, domain, peer) = attached(bcm5762);
         packet.suspend_phy().unwrap();
@@ -88,6 +94,9 @@ fn stopped_suspended_owner_can_retire_without_waking_phy_or_repeating_stop() {
 
 #[test]
 fn phy_suspend_never_precedes_engine_stop_and_posted_payload_drain() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for bcm5762 in [false, true] {
         for stop_failure in [false, true] {
             let (mut packet, pages, domain, peer) = attached(bcm5762);
@@ -119,6 +128,9 @@ fn phy_suspend_never_precedes_engine_stop_and_posted_payload_drain() {
 
 #[test]
 fn link_flap_avoidance_policy_refuses_phy_mutation_and_allows_retirement() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for bcm5762 in [false, true] {
         let (mut packet, pages, _, peer) = attached(bcm5762);
         peer.lock().unwrap().sram.insert(0xd3c, 0x0040_0000);
@@ -133,6 +145,9 @@ fn link_flap_avoidance_policy_refuses_phy_mutation_and_allows_retirement() {
 
 #[test]
 fn each_ignored_phy_power_write_is_detected_and_preserves_original_uncertain_owner() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for bcm5762 in [false, true] {
         for ignored in [(0x10, 8), (0x18, 0x1b2), (0, 0x800)] {
             let (mut packet, pages, domain, peer) = attached(bcm5762);
@@ -154,6 +169,9 @@ fn each_ignored_phy_power_write_is_detected_and_preserves_original_uncertain_own
 
 #[test]
 fn uncertain_mdio_reply_during_phy_suspend_cannot_be_cleared_by_resume() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for bcm5762 in [false, true] {
         let (mut packet, pages, _, peer) = attached(bcm5762);
         {
@@ -173,6 +191,9 @@ fn uncertain_mdio_reply_during_phy_suspend_cannot_be_cleared_by_resume() {
 
 #[test]
 fn independent_peer_refuses_power_writes_with_live_dma_or_missing_drain() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for engines_running in [false, true] {
         let (mut packet, _, domain, peer) = attach();
         if !engines_running {
@@ -193,6 +214,9 @@ fn independent_peer_refuses_power_writes_with_live_dma_or_missing_drain() {
 #[test]
 #[ignore = "oracle: STELA_TG3_PHY_POWER_ORACLE"]
 fn unchanged_linux_phy_power_writes_match_kept_driver() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let path = std::env::var("STELA_TG3_PHY_POWER_ORACLE").expect("set original PHY power trace");
     let trace = std::fs::read_to_string(path).unwrap();
     let mut lines = trace.lines();

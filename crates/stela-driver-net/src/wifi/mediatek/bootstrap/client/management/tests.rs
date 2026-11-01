@@ -75,6 +75,9 @@ fn stop(driver: &mut Native, model: &Model) {
 
 #[test]
 fn initial_igtk_batch_binds_original_peer_keys_and_preserves_exact_retry() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut driver, model) = setup();
     associated(&mut driver, &model, 0);
     let (epoch, ptk, gtk) = keys(&mut driver);
@@ -124,6 +127,9 @@ fn initial_igtk_batch_binds_original_peer_keys_and_preserves_exact_retry() {
 
 #[test]
 fn unicast_management_rx_authenticates_without_automatic_departure_or_data_replay() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut driver, model) = setup();
     associated(&mut driver, &model, 0);
     let (epoch, _, _) = keys(&mut driver);
@@ -169,6 +175,9 @@ fn unicast_management_rx_authenticates_without_automatic_departure_or_data_repla
 
 #[test]
 fn group_bip_rx_enforces_original_mic_ipn_and_peer_lookup_before_os_consumption() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut driver, model) = setup();
     associated(&mut driver, &model, 0);
     let (epoch, _, _) = keys(&mut driver);
@@ -238,6 +247,9 @@ fn group_bip_rx_enforces_original_mic_ipn_and_peer_lookup_before_os_consumption(
 
 #[test]
 fn protected_tx_keeps_session_until_descriptor_free_and_unmap_before_peer_removal() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut driver, model) = setup();
     associated(&mut driver, &model, 0);
     let (epoch, ptk, _) = keys(&mut driver);
@@ -329,6 +341,9 @@ fn protected_tx_keeps_session_until_descriptor_free_and_unmap_before_peer_remova
 
 #[test]
 fn deferred_replies_are_revoked_on_disconnect() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut driver, model) = setup();
     associated(&mut driver, &model, 0);
     let (epoch, _, _) = keys(&mut driver);
@@ -403,6 +418,9 @@ fn deferred_replies_are_revoked_on_disconnect() {
 
 #[test]
 fn uncertain_igtk_publication_quarantines_complete_owner_without_transport_or_drop() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for dropped in [false, true] {
         let (mut driver, model) = setup();
         associated(&mut driver, &model, 0);
@@ -450,6 +468,9 @@ fn uncertain_igtk_publication_quarantines_complete_owner_without_transport_or_dr
 
 #[test]
 fn hostile_completed_unicast_never_emits_management_or_advances_the_original_pn() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut driver, model) = setup();
     associated(&mut driver, &model, 0);
     let (epoch, _, _) = keys(&mut driver);
@@ -489,6 +510,9 @@ fn hostile_completed_unicast_never_emits_management_or_advances_the_original_pn(
 
 #[test]
 fn foreign_native_session_and_current_modern_owner_are_refused_without_hardware_effects() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut driver, model) = setup();
     associated(&mut driver, &model, 0);
     let (epoch, _, _) = keys(&mut driver);
@@ -565,6 +589,9 @@ fn foreign_native_session_and_current_modern_owner_are_refused_without_hardware_
 
 #[test]
 fn protected_departure_and_query_request_bytes_use_current_ptk_without_local_policy_effects() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut driver, model) = setup();
     associated(&mut driver, &model, 0);
     let (epoch, _, _) = keys(&mut driver);
@@ -603,6 +630,9 @@ fn protected_departure_and_query_request_bytes_use_current_ptk_without_local_pol
 
 #[test]
 fn protected_tx_unmap_failure_keeps_session_and_refuses_further_management() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut driver, model) = setup();
     associated(&mut driver, &model, 0);
     let (epoch, _, _) = keys(&mut driver);

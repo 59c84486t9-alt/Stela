@@ -6,6 +6,9 @@ use super::*;
 
 #[test]
 fn hcmd_wrong_duplicate_and_foreign_completions_do_not_grant_reclaim() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for sequence in [0x100, 1, 0x4000, 0] {
         let bytes = firmware_bytes();
         let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
@@ -80,6 +83,9 @@ fn hcmd_wrong_duplicate_and_foreign_completions_do_not_grant_reclaim() {
 
 #[test]
 fn hcmd_publication_faults_keep_real_owner_and_all_exposed_dma() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     // Alloc/map/initial visibility/TB0 visibility precede descriptor
     // publication; descriptor visibility or producer failure is uncertain.
     for failure in 0..6 {
@@ -133,6 +139,9 @@ fn hcmd_publication_faults_keep_real_owner_and_all_exposed_dma() {
 
 #[test]
 fn hcmd_ring_and_sequence_wrap_match_each_family_without_reusing_live_slots() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for ax210 in [false, true] {
         let p = if ax210 { ax210_profile() } else { profile() };
         let bytes = if ax210 {
@@ -215,6 +224,9 @@ fn hcmd_ring_and_sequence_wrap_match_each_family_without_reusing_live_slots() {
 
 #[test]
 fn hcmd_exhausted_boot_rx_credit_refuses_publication() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let bytes = firmware_bytes();
     let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
     let empty = resources::Catalog::from_handoff(vec![]).unwrap();

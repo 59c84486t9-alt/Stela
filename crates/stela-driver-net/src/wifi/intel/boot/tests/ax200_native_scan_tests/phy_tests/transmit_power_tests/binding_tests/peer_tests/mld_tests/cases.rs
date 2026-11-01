@@ -2,11 +2,17 @@ use super::*;
 
 #[test]
 fn mld_peer_identity_waits_for_config_and_rate_ack_reclamation() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     exercise(&mld_image(1));
 }
 
 #[test]
 fn mld_peer_refuses_unqualified_versions_or_rates_before_publication() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for version in [1, 4] {
         let bytes = mld_image(version);
         let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
@@ -78,6 +84,9 @@ fn mld_peer_refuses_unqualified_versions_or_rates_before_publication() {
 
 #[test]
 fn missing_mld_peer_ack_keeps_binding_and_pending_dma() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for target in [1, 2, 3, 4] {
         let bytes = mld_image(2);
         let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
@@ -144,6 +153,9 @@ fn missing_mld_peer_ack_keeps_binding_and_pending_dma() {
 #[test]
 #[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
 fn pinned_ax200_firmware_selects_mld_station_and_tlc_commands() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     use sha2::{Digest, Sha256};
     let root = std::env::var("STELA_IWLWIFI_IMAGES").unwrap();
     let bytes =

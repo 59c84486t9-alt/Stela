@@ -4,6 +4,9 @@ use super::*;
 
 #[test]
 fn invalid_native_calibration_preserves_original_packet_owner_before_all_device_effects() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for chip in [0x0572_0000, 0x0576_1000, 0x0576_2000] {
         for rate in [0, u64::MAX, u64::MAX / 60_000_000 + 1] {
             let (mut previous, pages, domain, peer) = if chip == 0x0576_1000 {

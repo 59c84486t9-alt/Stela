@@ -1,4 +1,5 @@
 extern crate std;
+
 use crate::wifi::mediatek::mailbox::clc::{remaining::tests::*, tests::*};
 use crate::wifi::mediatek::{
     firmware::{
@@ -388,6 +389,9 @@ impl NativeFixture {
 
 #[test]
 fn initial_mt7925_wfsys_ack_precedes_dma_stop_and_every_queue_publication() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let mut f = NativeFixture::new(Chip::Mt7925);
     f.bar.0.lock().unwrap().values.insert(0xf0140, 0xa5a50011);
     f.install().unwrap();
@@ -430,6 +434,9 @@ fn initial_mt7925_wfsys_ack_precedes_dma_stop_and_every_queue_publication() {
 
 #[test]
 fn initial_wfsys_failure_keeps_controller_before_any_dma_publication_or_retry() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for fail in [None, Some(3), Some(4), Some(5), Some(6), Some(7)] {
         let mut f = NativeFixture::new(Chip::Mt7925);
         {
@@ -456,6 +463,9 @@ fn initial_wfsys_failure_keeps_controller_before_any_dma_publication_or_retry() 
 
 #[test]
 fn complete_source_bootstrap_owns_all_queues_and_real_runtime_transition() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for chip in [Chip::Mt7921, Chip::Mt7922, Chip::Mt7925] {
         let mut f = NativeFixture::new(chip);
         f.install().unwrap();
@@ -603,6 +613,9 @@ fn complete_source_bootstrap_owns_all_queues_and_real_runtime_transition() {
 }
 #[test]
 fn publication_failures_keep_guard_and_context() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for chip in [Chip::Mt7921, Chip::Mt7925] {
         for fail in [0, 1] {
             let mut f = NativeFixture::new(chip);
@@ -627,6 +640,9 @@ fn publication_failures_keep_guard_and_context() {
 }
 #[test]
 fn dormant_foreign_queue_is_refused_before_any_dma_publication() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let mut f = NativeFixture::new(Chip::Mt7925);
     f.bar.0.lock().unwrap().values.insert(0xd4514, 17);
     assert!(matches!(
@@ -646,6 +662,9 @@ fn dormant_foreign_queue_is_refused_before_any_dma_publication() {
 
 #[test]
 fn global_and_source_per_wcid_controls_match_receive_format() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     use crate::wifi::mediatek::{mcu::device::Context, rx};
     for chip in [Chip::Mt7921, Chip::Mt7925] {
         let mut f = NativeFixture::new(chip);
@@ -736,6 +755,9 @@ fn global_and_source_per_wcid_controls_match_receive_format() {
 #[test]
 #[ignore = "oracle: STELA_MT792X_BOOTSTRAP_ORACLE"]
 fn composed_bootstrap_matches_source_mac_effects_and_all_initial_packet_bytes() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let root = std::path::PathBuf::from(std::env::var("STELA_MT792X_BOOTSTRAP_ORACLE").unwrap());
     for (chip, id) in [
         (Chip::Mt7921, 7921),
@@ -842,6 +864,9 @@ fn composed_bootstrap_matches_source_mac_effects_and_all_initial_packet_bytes() 
 #[test]
 #[ignore = "oracle: STELA_MT792X_FIRMWARE"]
 fn all_images_boot_the_full_native_layout_before_source_initialization() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let images = std::path::PathBuf::from(std::env::var("STELA_MT792X_FIRMWARE").unwrap());
     for chip in [Chip::Mt7921, Chip::Mt7922, Chip::Mt7925] {
         let mut f = NativeFixture::new(chip);
@@ -877,6 +902,9 @@ fn all_images_boot_the_full_native_layout_before_source_initialization() {
 }
 #[test]
 fn independent_rom_and_runtime_fragment_streams_never_concatenate() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let mut f = NativeFixture::new(Chip::Mt7921);
     f.install().unwrap();
     device_receive(&f.queues[&0xd4500], &[0xaa, 0xab], false, 0);
@@ -892,6 +920,9 @@ fn independent_rom_and_runtime_fragment_streams_never_concatenate() {
 }
 #[test]
 fn missing_live_rfkill_service_refuses_start_before_any_radio_command() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for chip in [Chip::Mt7921, Chip::Mt7925] {
         let mut f = NativeFixture::new(chip);
         {
@@ -922,6 +953,9 @@ fn missing_live_rfkill_service_refuses_start_before_any_radio_command() {
 }
 #[test]
 fn wrong_prepared_input_refuses_before_restart_or_firmware_mutation() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let mut f = NativeFixture::new(Chip::Mt7921);
     f.install().unwrap();
     let r = Requests::new(&identity(Chip::Mt7925));

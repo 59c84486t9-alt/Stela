@@ -983,6 +983,9 @@ fn active(device: u16) -> (Transport<Model>, Arc<Mutex<Device>>) {
 
 #[test]
 fn all_source_variants_boot_literal_context_rings_and_reverse_destroy() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     for device in [0x5fa0, 0x5f69, 0x5f71, 0x5f72] {
         let (mut transport, d) = active(device);
         assert_eq!(transport.state(), State::Active);
@@ -1056,6 +1059,9 @@ fn all_source_variants_boot_literal_context_rings_and_reverse_destroy() {
 }
 #[test]
 fn source_tx_ack_is_distinct_from_real_hci_and_sco_needs_no_tx_doorbell() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let (mut transport, d) = active(0x5f69);
     let command = [0x03, 0x0c, 0];
     let sco = [1, 0, 2, 0xaa, 0xbb];
@@ -1106,6 +1112,9 @@ fn source_tx_ack_is_distinct_from_real_hci_and_sco_needs_no_tx_doorbell() {
 }
 #[test]
 fn source_rx_footer_mapped_sco_credit_and_wrap() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let (mut transport, d) = active(0x5f72);
     // More than one complete completion/transfer wrap, including unrecognized
     // footer flags/msgids which donor ignores for short inline ACL/event data.
@@ -1147,6 +1156,9 @@ fn source_rx_footer_mapped_sco_credit_and_wrap() {
 }
 #[test]
 fn source_descriptor_wrap_and_message_reuse_wait_for_real_ack() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let (mut transport, d) = active(0x5fa0);
     d.lock().unwrap().consume_tx = false;
     for _ in 0..127 {
@@ -1173,6 +1185,9 @@ fn source_descriptor_wrap_and_message_reuse_wait_for_real_ack() {
 }
 #[test]
 fn firmware_missing_only_fallback_and_target_otp_binding() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     for fallback in [false, true] {
         let (p, mut a, d) = fixture(0x5f71);
         let provider = catalog(&d, fallback);
@@ -1203,6 +1218,9 @@ fn firmware_missing_only_fallback_and_target_otp_binding() {
 }
 #[test]
 fn source_identity_refuses_ambiguous_unsafe_or_unsupported_metadata() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let (p, _, d) = fixture(0x5fa0);
     drop(p);
     let pci = d.lock().unwrap().pci;
@@ -1234,6 +1252,9 @@ fn source_identity_refuses_ambiguous_unsafe_or_unsupported_metadata() {
 }
 #[test]
 fn boot_ack_deadline_includes_register_effect_and_wrong_stages_are_terminal() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     for (offset, delay) in [(0x140, 5_100_000), (0x144, 1_100_000)] {
         let (p, mut a, d) = fixture(0x5f69);
         let provider = catalog(&d, false);
@@ -1268,6 +1289,9 @@ fn boot_ack_deadline_includes_register_effect_and_wrong_stages_are_terminal() {
 }
 #[test]
 fn complete_raw_packets_before_bad_completion_survive_terminal_fault() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     for fail_retire in [false, true] {
         let (mut transport, d) = active(0x5f69);
         let event = [0xff, 1, 0x9a];
@@ -1306,6 +1330,9 @@ fn complete_raw_packets_before_bad_completion_survive_terminal_fault() {
 }
 #[test]
 fn stale_duplicate_out_of_range_cross_ring_and_corrupt_indices_fail_closed() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     for case in 0..7 {
         let (mut transport, d) = active(0x5fa0);
         let submission = transport.send(Kind::Command, &[1, 0, 0]).unwrap();
@@ -1349,6 +1376,9 @@ fn stale_duplicate_out_of_range_cross_ring_and_corrupt_indices_fail_closed() {
 }
 #[test]
 fn observation_bound_keeps_final_packet_and_first_failure() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let (mut transport, d) = active(0x5f69);
     transport.observation_bytes = OBSERVATION_BYTES - 1;
     let raw = d.lock().unwrap().completion(2, 2, 0, 2, &[0xff, 0], false);
@@ -1360,6 +1390,9 @@ fn observation_bound_keeps_final_packet_and_first_failure() {
 }
 #[test]
 fn failed_root_retirement_is_attempted_once_and_all_owners_survive() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let (mut transport, d) = active(0x5f71);
     d.lock().unwrap().fail_retire = true;
     let error = transport.close().unwrap_err();
@@ -1378,6 +1411,9 @@ fn failed_root_retirement_is_attempted_once_and_all_owners_survive() {
 }
 #[test]
 fn unmap_failure_preserves_mapping_and_cannot_restart_retirement() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let (mut transport, d) = active(0x5fa0);
     d.lock().unwrap().domain.0.lock().unwrap().fail_unmap = true;
     assert_eq!(
@@ -1395,6 +1431,9 @@ fn unmap_failure_preserves_mapping_and_cannot_restart_retirement() {
 }
 #[test]
 fn every_start_mmio_effect_error_is_terminal_with_first_fault_and_no_rewrite() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let operations = {
         let (transport, d) = active(0x5f69);
         let operations = d.lock().unwrap().operations;
@@ -1428,6 +1467,9 @@ fn every_start_mmio_effect_error_is_terminal_with_first_fault_and_no_rewrite() {
 }
 #[test]
 fn every_start_visibility_error_preserves_terminal_buffers_and_root_owner() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let syncs = {
         let (transport, d) = active(0x5fa0);
         let syncs = d.lock().unwrap().domain.0.lock().unwrap().syncs;
@@ -1454,6 +1496,9 @@ fn every_start_visibility_error_preserves_terminal_buffers_and_root_owner() {
 
 #[test]
 fn tx_capacity_and_rx_malformed_lengths_keep_original_bytes() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let (mut transport, d) = active(0x5f69);
     let mut command = vec![0x98, 0xfd, 255];
     command.extend_from_slice(&[0x5a; 255]);
@@ -1504,6 +1549,9 @@ fn tx_capacity_and_rx_malformed_lengths_keep_original_bytes() {
 }
 #[test]
 fn source_oversized_footer_and_mapped_lengths_are_rejected_before_reading() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     for mapped in [false, true] {
         let (mut transport, d) = active(0x5f69);
         {
@@ -1520,6 +1568,9 @@ fn source_oversized_footer_and_mapped_lengths_are_rejected_before_reading() {
 }
 #[test]
 fn every_live_send_poll_and_close_mmio_effect_error_stops_once() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     // Independent RX in the same service turn forces failure coverage for both
     // RX credit doorbells and outbound descriptor doorbells. Closing
     // exercises destroy ACKs plus snapshot reads before root stop.
@@ -1571,6 +1622,9 @@ fn every_live_send_poll_and_close_mmio_effect_error_stops_once() {
 }
 #[test]
 fn retirement_cancels_unacknowledged_tx_without_delivery_claim() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let (mut transport, d) = active(0x5fa0);
     d.lock().unwrap().acknowledge = false;
     let submission = transport.send(Kind::Acl, &[1, 0, 0, 0]).unwrap();
@@ -1584,6 +1638,9 @@ fn retirement_cancels_unacknowledged_tx_without_delivery_claim() {
 
 #[test]
 fn unpublished_allocations_close_without_device_ring_or_reset_effects() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let (p, mut a, d) = fixture(0x5fa0);
     let mut transport = Transport::new(p, &mut a).unwrap();
     transport.close().unwrap();
@@ -1596,6 +1653,9 @@ fn unpublished_allocations_close_without_device_ring_or_reset_effects() {
 }
 #[test]
 fn original_otp_bytes_survive_rejected_metadata_and_partial_reads() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     for partial in [false, true] {
         let (p, mut a, d) = fixture(0x5f69);
         let provider = catalog(&d, false);
@@ -1635,6 +1695,9 @@ impl Provider for FailedProvider {
 }
 #[test]
 fn resource_integrity_or_target_failure_never_attempts_fallback() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     for kind in [
         crate::firmware::ErrorKind::WrongTarget,
         crate::firmware::ErrorKind::DigestMismatch {
@@ -1791,6 +1854,9 @@ fn setup_fixture(device: u16, stepping: &str, replacement: bool, fault: HciFault
 }
 #[test]
 fn ipc_initialization_uses_source_variant_calibration_ptb_and_address() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     for (device, stepping) in [
         (0x5fa0, "a0"),
         (0x5f69, "b1"),
@@ -1848,6 +1914,9 @@ fn ipc_initialization_uses_source_variant_calibration_ptb_and_address() {
 }
 #[test]
 fn native_ack_or_status_alone_cannot_finish_hci_and_credits_require_grant() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     for fault in [
         HciFault::AckOnly(0),
         HciFault::StatusOnly(0),
@@ -1887,6 +1956,9 @@ fn native_ack_or_status_alone_cannot_finish_hci_and_credits_require_grant() {
 }
 #[test]
 fn controller_rejections_stop_required_upload_but_4377_ptb_is_explicit() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     for at in 0..7 {
         let (mut transport, d, provider, _) =
             setup_fixture(0x5f69, "b1", false, HciFault::Reject(at, 0x0c));
@@ -1924,6 +1996,9 @@ fn controller_rejections_stop_required_upload_but_4377_ptb_is_explicit() {
 }
 #[test]
 fn native_malformed_wrong_duplicate_and_late_hci_are_terminal_with_raw_transcript() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     for fault in [
         HciFault::WrongOpcode(0),
         HciFault::Duplicate(0),
@@ -1963,6 +2038,9 @@ fn native_malformed_wrong_duplicate_and_late_hci_are_terminal_with_raw_transcrip
 }
 #[test]
 fn address_property_requires_real_write_and_matching_readback() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     for fault in [HciFault::IgnoreAddressWrite, HciFault::InvalidReadback] {
         let (mut transport, _, provider, _) = setup_fixture(0x5f72, "z9", true, fault);
         assert!(matches!(
@@ -2004,6 +2082,9 @@ fn address_property_requires_real_write_and_matching_readback() {
 }
 #[test]
 fn metadata_labels_do_not_supply_board_calibration_or_live_hci_credits() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     for property in [None, Some(vec![]), Some(vec![0; 4 * 1024 * 1024 + 1])] {
         let (mut transport, d, provider, _) = setup_fixture(0x5f69, "b1", false, HciFault::None);
         let diagnostic = property
@@ -2071,6 +2152,9 @@ impl Provider for SetupProvider {
 }
 #[test]
 fn ptb_missing_fallback_and_nonmissing_refusal_preserve_completed_calibration() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let (mut transport, d, _, _) = setup_fixture(0x5f69, "b1", false, HciFault::None);
     let ptb = (0..415).map(|n| (n % 239) as u8).collect::<Vec<_>>();
     let fallback = setup_catalog(&d, &ptb, true);
@@ -2121,6 +2205,9 @@ fn ptb_missing_fallback_and_nonmissing_refusal_preserve_completed_calibration() 
 }
 #[test]
 fn ptb_capacity_refuses_without_truncated_hci_or_fallback() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     for (device, ptb) in [
         (0x5fa0, vec![0xa1; 256]),
         (0x5f69, vec![0xa2; 4 * 1024 * 1024 + 1]),
@@ -2139,6 +2226,9 @@ fn ptb_capacity_refuses_without_truncated_hci_or_fallback() {
 }
 #[test]
 fn initialization_transcript_bound_keeps_real_completion_before_terminal_refusal() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let (mut transport, d, provider, _) = setup_fixture(0x5f69, "b1", false, HciFault::None);
     // Ten startup control ACKs, then async event+HCI CC fit;
     // its transfer ACK is the observation crossing the bound.
@@ -2164,6 +2254,9 @@ fn initialization_transcript_bound_keeps_real_completion_before_terminal_refusal
 }
 #[test]
 fn every_native_setup_mmio_effect_error_keeps_first_fault_and_domain() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let first = {
         let (mut transport, d, provider, _) = setup_fixture(0x5f69, "b1", true, HciFault::None);
         transport.start(&provider).unwrap();
@@ -2218,6 +2311,9 @@ fn every_native_setup_mmio_effect_error_keeps_first_fault_and_domain() {
 }
 #[test]
 fn already_received_same_opcode_cannot_authorize_a_new_hci_command() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let (mut transport, d, provider, _) = setup_fixture(0x5f69, "b1", false, HciFault::Preexisting);
     assert!(matches!(
         transport.initialize(&provider),
@@ -2230,6 +2326,9 @@ fn already_received_same_opcode_cannot_authorize_a_new_hci_command() {
 }
 #[test]
 fn status_then_complete_preserves_both_events_and_only_complete_finishes() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let (mut transport, _, provider, expected) =
         setup_fixture(0x5f69, "b1", false, HciFault::StatusThenComplete(0));
     transport.initialize(&provider).unwrap();
@@ -2254,6 +2353,9 @@ fn status_then_complete_preserves_both_events_and_only_complete_finishes() {
 }
 #[test]
 fn every_native_setup_visibility_error_keeps_command_and_packet_evidence() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let first = {
         let (mut transport, d, provider, _) = setup_fixture(0x5f69, "b1", true, HciFault::None);
         transport.start(&provider).unwrap();
@@ -2307,6 +2409,9 @@ fn every_native_setup_visibility_error_keeps_command_and_packet_evidence() {
 }
 #[test]
 fn successful_setup_report_and_original_properties_survive_later_unmap_failure() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let (mut transport, d, provider, _) = setup_fixture(0x5f69, "b1", true, HciFault::None);
     let report = transport.initialize(&provider).unwrap();
     let evidence = transport
@@ -2357,6 +2462,9 @@ impl Provider for SlowBin {
 }
 #[test]
 fn outer_budget_contains_late_bin_lookup_before_firmware_or_irq_publication() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     for missing in [false, true] {
         for fail_retire in [false, true] {
             let (mut transport, d, catalog, _) = setup_fixture(0x5f69, "b1", false, HciFault::None);
@@ -2405,6 +2513,9 @@ fn outer_budget_contains_late_bin_lookup_before_firmware_or_irq_publication() {
 }
 #[test]
 fn outer_budget_contains_configuration_and_otp_expiry_with_observed_bytes() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     for otp in [false, true] {
         for fail_retire in [false, true] {
             let (mut transport, d, provider, _) =
@@ -2443,6 +2554,9 @@ fn outer_budget_contains_configuration_and_otp_expiry_with_observed_bytes() {
 }
 #[test]
 fn outer_budget_stops_after_late_firmware_rti_or_control_effect_without_next_publication() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     for (offset, expected_boot, expected_rti, controls) in
         [(0x140, 2, 0, 0), (0x144, 2, 1, 0), (0x174, 2, 2, 1)]
     {
@@ -2492,6 +2606,9 @@ fn outer_budget_stops_after_late_firmware_rti_or_control_effect_without_next_pub
 }
 #[test]
 fn outer_budget_contains_late_dma_visibility_and_msi_admission() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     for sync in 1..=3 {
         let (mut transport, d, provider, _) = setup_fixture(0x5f69, "b1", false, HciFault::None);
         d.lock().unwrap().domain.0.lock().unwrap().delay_sync = Some(sync);
@@ -2538,6 +2655,9 @@ fn outer_budget_contains_late_dma_visibility_and_msi_admission() {
 }
 #[test]
 fn original_visibility_failure_has_priority_over_expiry_and_failed_retirement() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let (mut transport, d, provider, _) = setup_fixture(0x5f69, "b1", false, HciFault::None);
     {
         let mut d = d.lock().unwrap();
@@ -2566,6 +2686,9 @@ fn first_hci_visibility() -> usize {
 }
 #[test]
 fn active_hci_budget_stops_after_11s_visibility_or_sleep_before_head_and_doorbell() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let first = first_hci_visibility();
     for sleep in [false, true] {
         for fail_retire in [false, true] {
@@ -2632,6 +2755,9 @@ fn active_hci_budget_stops_after_11s_visibility_or_sleep_before_head_and_doorbel
 }
 #[test]
 fn active_request_guards_keep_global_priority_and_first_native_visibility_failure() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let first = first_hci_visibility();
     let (mut transport, d, provider, _) = setup_fixture(0x5f69, "b1", false, HciFault::None);
     {
@@ -2666,6 +2792,9 @@ fn active_request_guards_keep_global_priority_and_first_native_visibility_failur
 }
 #[test]
 fn ordinary_control_budget_blocks_late_visibility_before_its_head_or_doorbell() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let (mut transport, d, provider, _) = setup_fixture(0x5f69, "b1", false, HciFault::None);
     {
         let d = d.lock().unwrap();
@@ -2704,6 +2833,9 @@ impl Provider for SlowPtb {
 }
 #[test]
 fn command_deadline_ends_before_intercommand_resource_lookup_and_normal_close() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let (mut transport, d, catalog, _) = setup_fixture(0x5f69, "b1", false, HciFault::None);
     let provider = SlowPtb {
         catalog,

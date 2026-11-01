@@ -106,6 +106,9 @@ pub(super) fn attach_5761() -> (Packet<Reg, Timer>, Pages, Arc<Domain>, Arc<Mute
 
 #[test]
 fn actual_5761_512_rings_wrap_and_half_full_duplex_transfer_then_retire() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut packet, pages, domain, peer) = attach_5761();
     assert_eq!(packet.geometry.rx, 512);
     assert_eq!(packet.geometry.returns, 512);
@@ -131,6 +134,9 @@ fn actual_5761_512_rings_wrap_and_half_full_duplex_transfer_then_retire() {
 
 #[test]
 fn actual_5761_all_source_flash_straps_and_device_ids_use_direct_mac_offset() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for (index, strap) in STRAPS.into_iter().enumerate() {
         let device = [0x1680, 0x1681, 0x1688, 0x1689][index % 4];
         let (hardware, pages, domain, peer) = parts_5761(device);
@@ -169,6 +175,9 @@ fn actual_5761_all_source_flash_straps_and_device_ids_use_direct_mac_offset() {
 
 #[test]
 fn actual_5761_unsupported_board_media_management_clock_or_nvram_never_publish_dma() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for fault in 0..14 {
         let (hardware, pages, domain, peer) = parts_5761(0x1680);
         {
@@ -255,6 +264,9 @@ fn actual_5761_unsupported_board_media_management_clock_or_nvram_never_publish_d
 
 #[test]
 fn bcm5761_restart_drains_old_writes_before_reuse() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut packet, pages, domain, peer) = attach_5761();
     let addresses = packet.memory.as_ref().unwrap().addresses().unwrap();
     assert!(packet.carrier());
@@ -287,6 +299,9 @@ fn bcm5761_restart_drains_old_writes_before_reuse() {
 
 #[test]
 fn actual_5761_out_of_range_return_and_fatal_low_water_require_rebuild() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (mut packet, _, domain, peer) = attach_5761();
     assert!(packet.carrier());
     let status = peer.lock().unwrap().status();
@@ -310,6 +325,9 @@ fn actual_5761_out_of_range_return_and_fatal_low_water_require_rebuild() {
 
 #[test]
 fn actual_5761_required_clock_and_fifo_readback_failures_never_allow_packet_io() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for at in [0x360c, 0x4900, 0x245c] {
         let (hardware, pages, domain, peer) = parts_5761(0x1680);
         peer.lock().unwrap().ignore_write = Some(at);
@@ -339,6 +357,9 @@ fn actual_5761_required_clock_and_fifo_readback_failures_never_allow_packet_io()
 
 #[test]
 fn actual_5761_changed_postreset_profile_and_unmap_failure_keep_original_owner() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let (hardware, pages, domain, peer) = parts_5761(0x1680);
     peer.lock().unwrap().reset_nvram = Some(0x0080_0000);
     // SAFETY: the model device, its pages and its domain belong to this test alone; no other
@@ -383,6 +404,9 @@ fn actual_5761_changed_postreset_profile_and_unmap_failure_keep_original_owner()
 
 #[test]
 fn phy_reset_uncertainty_poison_keeps_original_owner_before_any_allocation() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for profile in 0..3 {
         let (hardware, pages, domain, peer) = match profile {
             0 => parts(),
@@ -422,6 +446,9 @@ fn core_resets(peer: &Arc<Mutex<Device>>) -> usize {
 #[test]
 #[ignore = "oracle: STELA_TG3_BCM5761_ORACLE"]
 fn unchanged_linux_5761_initialization_selections_match_kept_packet_owner() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let trace = std::fs::read_to_string(
         std::env::var("STELA_TG3_BCM5761_ORACLE").expect("fresh original-source trace required"),
     )

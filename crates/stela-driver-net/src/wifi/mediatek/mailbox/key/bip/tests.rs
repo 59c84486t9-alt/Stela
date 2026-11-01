@@ -22,6 +22,9 @@ fn source_bip_packet(gtk: KeyIdentity) -> crate::wifi::frame::Mpdu {
 
 #[test]
 fn bip_gmac_igtks_are_kept_in_software_as_mt7925_set_key_leaves_them() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let response = Arc::new(Mutex::new(Response {
         key_execution: true,
         ..Response::default()
@@ -90,6 +93,9 @@ fn bip_gmac_igtks_are_kept_in_software_as_mt7925_set_key_leaves_them() {
 
 #[test]
 fn acknowledged_igtk_authenticates_source_mic_without_hardware_flag_bypass() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let response = Arc::new(Mutex::new(Response {
         key_execution: true,
         ..Response::default()
@@ -210,6 +216,9 @@ fn acknowledged_igtk_authenticates_source_mic_without_hardware_flag_bypass() {
 
 #[test]
 fn owned_gtk_igtk_batch_preserves_original_data_key_replay_and_exact_retry() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let response = Arc::new(Mutex::new(Response {
         key_execution: true,
         ..Response::default()
@@ -307,6 +316,9 @@ fn owned_gtk_igtk_batch_preserves_original_data_key_replay_and_exact_retry() {
 
 #[test]
 fn invalid_igtk_admission_never_publishes_or_changes_the_original_key() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for (chip, group, cipher) in [
         (Chip::Mt7921, true, Cipher::Ccmp128),
         (Chip::Mt7922, true, Cipher::Ccmp128),
@@ -429,6 +441,9 @@ fn invalid_igtk_admission_never_publishes_or_changes_the_original_key() {
 
 #[test]
 fn uncertain_igtk_batch_revokes_data_and_keeps_namespace() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for fault in 0..4 {
         let response = Arc::new(Mutex::new(Response {
             key_execution: true,

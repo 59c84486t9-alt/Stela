@@ -2,6 +2,9 @@
 use super::*;
 #[test]
 fn reset_and_original_drain_precede_private_binding() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let root = Arc::new(RootState::default());
     let (cold, counts) = cold(root.clone());
     let mut bound = cold
@@ -24,6 +27,9 @@ fn reset_and_original_drain_precede_private_binding() {
 }
 #[test]
 fn abandoned_preparation_keeps_original_graph() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let root = Arc::new(RootState::default());
     let (cold, counts) = cold(root.clone());
     drop(cold);
@@ -33,6 +39,9 @@ fn abandoned_preparation_keeps_original_graph() {
 }
 #[test]
 fn failed_device_stop_or_boot_ack_never_reaches_root() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     for no_stop in [false, true] {
         let root = Arc::new(RootState::default());
         let (requester, counts) = preparing(root.clone());
@@ -72,6 +81,9 @@ fn failed_device_stop_or_boot_ack_never_reaches_root() {
 }
 #[test]
 fn failed_original_drain_or_bind_retains_registers_and_configuration() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     for phase in ["original drain", "bind"] {
         let root = Arc::new(RootState::default());
         *root.fail.lock().unwrap() = Some(phase);
@@ -89,6 +101,9 @@ fn failed_original_drain_or_bind_retains_registers_and_configuration() {
 }
 #[test]
 fn invalid_clock_or_bar_refuses_before_writes() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     for bad_clock in [false, true] {
         let root = Arc::new(RootState::default());
         let (mut requester, _) = preparing(root.clone());
@@ -119,6 +134,9 @@ fn invalid_clock_or_bar_refuses_before_writes() {
 
 #[test]
 fn register_read_or_effect_then_store_errors_refuse_root_transition() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     for read_failure in [false, true] {
         let root = Arc::new(RootState::default());
         let (requester, counts) = preparing(root.clone());

@@ -161,11 +161,17 @@ pub(super) fn country_ready_with_os<'a, O: CountryIo>(
 }
 #[test]
 fn unbound_mac_commands_reclaim_on_ack() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     exercise(false);
 }
 #[test]
 #[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
 fn ax200_mld_image_refuses_legacy_mac_before_effects() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     exercise(true);
 }
 fn exercise(actual: bool) {
@@ -467,6 +473,9 @@ pub(super) fn assert_mld_mac_refusal(bytes: &[u8]) {
 }
 #[test]
 fn mld_selects_distinct_mac_owner_before_any_legacy_publication() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let mut bytes = firmware_bytes(0);
     bytes.extend(30u32.to_le_bytes());
     bytes.extend(8u32.to_le_bytes());

@@ -6,6 +6,9 @@ use super::*;
 
 #[test]
 fn rom_pointer_csr_alive_restock_and_dma_alive_are_distinct_owned_states() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let bytes = firmware_bytes();
     let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
     let source = Source::default();
@@ -88,6 +91,9 @@ fn rom_pointer_csr_alive_restock_and_dma_alive_are_distinct_owned_states() {
 
 #[test]
 fn duplicate_unsubmitted_wrong_queue_failed_alive_and_bad_producer_never_release_rom() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let bytes = firmware_bytes();
     let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
     for mode in 0..7 {
@@ -171,6 +177,9 @@ fn duplicate_unsubmitted_wrong_queue_failed_alive_and_bad_producer_never_release
 
 #[test]
 fn failed_retirement_keeps_owner_for_retry() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let bytes = firmware_bytes();
     let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
     for fail in 0..42 {

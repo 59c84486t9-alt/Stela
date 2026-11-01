@@ -80,6 +80,9 @@ fn attached() -> Fixture {
 
 #[test]
 fn detach_follows_payload_drain_and_all_ring_unmaps_before_register_release() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let Fixture {
         packet,
         pages,
@@ -101,6 +104,9 @@ fn detach_follows_payload_drain_and_all_ring_unmaps_before_register_release() {
 
 #[test]
 fn failed_unmap_prevents_detach_until_retirement_retry() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let Fixture {
         packet,
         pages,
@@ -121,6 +127,9 @@ fn failed_unmap_prevents_detach_until_retirement_retry() {
 
 #[test]
 fn failed_detach_retains_registers_and_backing_and_cannot_restart() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let Fixture {
         packet,
         pages,
@@ -145,6 +154,9 @@ fn failed_detach_retains_registers_and_backing_and_cannot_restart() {
 
 #[test]
 fn failed_engine_stop_keeps_attachment_and_never_attempts_detach() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let Fixture {
         packet,
         pages,

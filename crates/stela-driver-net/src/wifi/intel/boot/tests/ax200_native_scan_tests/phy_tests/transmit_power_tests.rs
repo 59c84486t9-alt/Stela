@@ -108,6 +108,9 @@ fn emitted_power(power: &Ax200TransmitPower<'_, Model, ClockBios, ScanOs>, nativ
 }
 #[test]
 fn bounded_power_uses_source_schema_country_ceiling_real_dma_and_reclaim() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for version in [3, 4, 5] {
         for (reduced, ack, length) in [
             (false, false, 36),
@@ -125,6 +128,9 @@ fn bounded_power_uses_source_schema_country_ceiling_real_dma_and_reclaim() {
 #[test]
 #[ignore = "oracle: STELA_IWLWIFI_IMAGES"]
 fn ax200_power5_schema_does_not_bypass_mld_mac_requirement() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     use sha2::{Digest, Sha256};
     let root = std::env::var("STELA_IWLWIFI_IMAGES").unwrap();
     let bytes =
@@ -202,6 +208,9 @@ fn exercise_power(bytes: &[u8], requested: u8, effective: u8, length: usize) {
 }
 #[test]
 fn power_denial_and_unknown_abi_have_no_command_effects() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for case in 0..5 {
         let bytes = power_bytes(if case == 4 { 12 } else { 5 }, true, false);
         let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);
@@ -244,6 +253,9 @@ fn power_denial_and_unknown_abi_have_no_command_effects() {
 }
 #[test]
 fn power_command_failures_keep_first_error() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for case in 0..3 {
         let bytes = power_bytes(5, true, false);
         let catalog = catalog_for(&profile(), Family::Ax200.firmware_name(), &bytes);

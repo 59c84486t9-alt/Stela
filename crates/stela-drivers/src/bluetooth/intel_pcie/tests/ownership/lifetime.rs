@@ -2,6 +2,9 @@
 use super::*;
 #[test]
 fn nonidentity_descriptors_use_iovas_and_close_retires_all_owners() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let root = Arc::new(RootState::default());
     let (mut t, counts) = owned(root.clone());
     assert!(!t.ready());
@@ -57,6 +60,9 @@ fn nonidentity_descriptors_use_iovas_and_close_retires_all_owners() {
 }
 #[test]
 fn drain_unmap_detach_and_register_failures_keep_uncertain_owners() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     for phase in ["domain drain", "unmap", "detach", "register retire"] {
         let root = Arc::new(RootState::default());
         let (mut t, counts) = owned(root.clone());
@@ -85,6 +91,9 @@ fn drain_unmap_detach_and_register_failures_keep_uncertain_owners() {
 }
 #[test]
 fn dropping_active_owner_performs_no_destructor_stop_or_release() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let root = Arc::new(RootState::default());
     let (t, counts) = owned(root.clone());
     root.events.lock().unwrap().clear();
@@ -98,6 +107,9 @@ fn dropping_active_owner_performs_no_destructor_stop_or_release() {
 
 #[test]
 fn foreign_configuration_seal_refuses_before_domain_drain_or_buffer_release() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let root = Arc::new(RootState::default());
     let (mut inputs, counts) = owned_inputs(root.clone());
     let (foreign, _) = fixture(Address {
@@ -124,6 +136,9 @@ fn foreign_configuration_seal_refuses_before_domain_drain_or_buffer_release() {
 }
 #[test]
 fn configuration_unmap_failure_retains_closed_owner_after_detach() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let root = Arc::new(RootState::default());
     let (mut t, counts) = owned(root.clone());
     *root.fail_config.lock().unwrap() = Some(counts.clone());
@@ -144,6 +159,9 @@ fn configuration_unmap_failure_retains_closed_owner_after_detach() {
 
 #[test]
 fn partial_constructor_failure_keeps_prior_dma_allocations_and_native_owners() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let root = Arc::new(RootState::default());
     let (inputs, counts) = owned_inputs(root.clone());
     root.fail_map_at.store(3, Ordering::Relaxed);
@@ -163,6 +181,9 @@ fn partial_constructor_failure_keeps_prior_dma_allocations_and_native_owners() {
 
 #[test]
 fn failed_engine_stop_keeps_dma_and_original_native_graph() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     let root = Arc::new(RootState::default());
     let (mut t, counts) = owned(root.clone());
     root.events.lock().unwrap().clear();
@@ -181,6 +202,9 @@ fn failed_engine_stop_keeps_dma_and_original_native_graph() {
 
 #[test]
 fn core_and_post_core_unwind_never_reopen_owned_transport_or_retry_effects() {
+    if crate::model_test_process::isolate() {
+        return;
+    }
     for (phase, nth) in [
         ("reset", 1),
         ("domain drain", 1),

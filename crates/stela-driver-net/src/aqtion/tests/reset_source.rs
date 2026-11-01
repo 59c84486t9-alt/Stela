@@ -56,6 +56,9 @@ fn reset(flb: bool, gsr: u32, spi: bool, seed: bool) -> Vec<(u32, u32, u32)> {
 }
 #[test]
 fn reset_keeps_source_control_bits() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for flb in [false, true] {
         for gsr in [0, 0x55aa1234, 0x00ff4444, 0xdeadbeef] {
             let effects = reset(flb, gsr, true, true);
@@ -86,6 +89,9 @@ fn reset_keeps_source_control_bits() {
 #[test]
 #[ignore = "oracle: STELA_AQTION_RESET_ORACLE"]
 fn unchanged_linux_flb_rbl_complete_reset_writes_and_settling_match_hardware() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let text =
         std::fs::read_to_string(std::env::var("STELA_AQTION_RESET_ORACLE").unwrap()).unwrap();
     let mut count = 0;

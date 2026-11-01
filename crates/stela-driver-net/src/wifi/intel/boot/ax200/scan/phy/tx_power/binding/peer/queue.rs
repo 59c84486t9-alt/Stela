@@ -534,6 +534,9 @@ mod tests {
     #[test]
     #[ignore = "oracle: STELA_IWLWIFI_MLD_QUEUE_TRACE"]
     fn pinned_linux_mld_scheduler_remove_and_original_free_call_bytes() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         use sha2::{Digest, Sha256};
         let trace = std::fs::read(std::env::var("STELA_IWLWIFI_MLD_QUEUE_TRACE").unwrap()).unwrap();
         assert_eq!(

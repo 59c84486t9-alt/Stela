@@ -420,6 +420,9 @@ mod tests {
     }
     #[test]
     fn explicit_22_dbm_is_bounded_and_does_not_select_source_automatic_sentinel() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         let bytes = image(5, true, true);
         let command = encode(&Firmware::parse(&bytes).unwrap(), 22).unwrap();
         assert_eq!(command.len(), 44);
@@ -433,6 +436,9 @@ mod tests {
     }
     #[test]
     fn version_8_is_the_whole_command_with_the_same_limit() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         let bytes = image(8, true, true);
         let command = encode(&Firmware::parse(&bytes).unwrap(), 22).unwrap();
         assert_eq!(command.len(), 120);
@@ -440,6 +446,9 @@ mod tests {
     }
     #[test]
     fn each_later_version_has_its_own_length() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         for (version, length) in [(9, 40), (10, 108), (11, 116)] {
             let bytes = image(version, false, false);
             let command = encode(&Firmware::parse(&bytes).unwrap(), 22).unwrap();
@@ -452,6 +461,9 @@ mod tests {
     #[test]
     #[ignore = "oracle: STELA_IWLWIFI_FIRMWARE"]
     fn released_firmware_passes_the_version_gates() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         let bytes = std::fs::read(std::env::var("STELA_IWLWIFI_FIRMWARE").unwrap()).unwrap();
         let firmware = Firmware::parse(&bytes).unwrap();
         super::super::super::wire::validate(&firmware).unwrap();
@@ -482,6 +494,9 @@ mod tests {
     #[test]
     #[ignore = "oracle: STELA_IWLWIFI_TRANSMIT_POWER_TRACE"]
     fn pinned_linux_transmit_power_bytes_and_explicit_limit_boundary() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         use sha2::{Digest, Sha256};
         let bytes =
             std::fs::read(std::env::var("STELA_IWLWIFI_TRANSMIT_POWER_TRACE").unwrap()).unwrap();

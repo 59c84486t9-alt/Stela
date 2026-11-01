@@ -182,6 +182,9 @@ mod tests {
     #[test]
     #[ignore = "oracle: STELA_IWLWIFI_MLD_PEER_TRACE"]
     fn pinned_linux_mld_station_tlc_and_no_queue_removal_bytes() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         use sha2::{Digest, Sha256};
         let trace = std::fs::read(std::env::var("STELA_IWLWIFI_MLD_PEER_TRACE").unwrap()).unwrap();
         assert_eq!(

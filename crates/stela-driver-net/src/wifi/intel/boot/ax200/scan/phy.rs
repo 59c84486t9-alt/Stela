@@ -681,6 +681,9 @@ mod tests {
 
     #[test]
     fn a_wide_channel_names_the_control_channels_place_in_it() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         for (offset, position) in [
             (0, 0),
             (-10, 0),
@@ -700,6 +703,9 @@ mod tests {
 
     #[test]
     fn a_modified_context_keeps_what_it_was_added_with() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         let bytes = image(4, 2, true, false, 3);
         let firmware = Firmware::parse(&bytes).unwrap();
         let channel = Channel {
@@ -738,6 +744,9 @@ mod tests {
 
     #[test]
     fn later_versions_name_a_secondary_control_channel_and_puncturing() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         let bytes = image(6, 3, true, false, 3);
         let firmware = Firmware::parse(&bytes).unwrap();
         let channel = Channel {
@@ -780,6 +789,9 @@ mod tests {
 
     #[test]
     fn phy_lmac_routing_follows_source_cdb_and_band() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         // Pinned binding.c::iwl_mvm_get_lmac_id and context.h LMAC indices.
         // These four source cases are also covered in the C trace.
         for (cdb, band, number, frequency_mhz, expected_lmac) in [
@@ -812,6 +824,9 @@ mod tests {
 
     #[test]
     fn sm_power_save_holds_the_chain_counts_and_no_more() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         let word = 3 << 1 | 2 << 10 | 2 << 12;
         assert_eq!(limited_chains(word, SpatialPowerSave::Off, 2), word);
         assert_eq!(
@@ -828,6 +843,9 @@ mod tests {
 
     #[test]
     fn phy_unknown_versions_and_zero_or_unrepresentable_rx_chains_refuse() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         let channel = Channel {
             band: Band::Ghz2,
             number: 1,
@@ -861,6 +879,9 @@ mod tests {
 
     #[test]
     fn a_6_ghz_context_names_its_band_on_the_high_band_mac() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         let bytes = image(3, 2, true, true, 3);
         let channel = Channel {
             band: Band::Ghz6,
@@ -883,6 +904,9 @@ mod tests {
     #[test]
     #[ignore = "oracle: STELA_IWLWIFI_PHY_TRACE"]
     fn pinned_linux_phy_context_and_rlc_bytes() {
+        if crate::test_process::isolate_model() {
+            return;
+        }
         use sha2::{Digest, Sha256};
         let trace = std::fs::read(std::env::var("STELA_IWLWIFI_PHY_TRACE").unwrap()).unwrap();
         assert_eq!(

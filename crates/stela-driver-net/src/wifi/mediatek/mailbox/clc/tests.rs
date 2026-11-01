@@ -209,6 +209,9 @@ impl Fixture {
 }
 #[test]
 fn clc_preserves_absent_and_zero_values() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for chip in [Chip::Mt7921, Chip::Mt7922, Chip::Mt7925] {
         for flags in [None, Some(0), Some(1)] {
             let mut fixture = Fixture::new(chip, flags);
@@ -284,6 +287,9 @@ fn clc_preserves_absent_and_zero_values() {
 }
 #[test]
 fn native_clc_checks_image_reports_flags_and_live_binding_before_publication() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for mode in 0..7 {
         let chip = Chip::Mt7922;
         let mut fixture = Fixture::new(chip, Some(1));
@@ -365,6 +371,9 @@ fn native_clc_checks_image_reports_flags_and_live_binding_before_publication() {
 }
 #[test]
 fn native_clc_partial_uncertain_and_malformed_execution_keeps_guard_on_drop() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     for chip in [Chip::Mt7921, Chip::Mt7922, Chip::Mt7925] {
         for mode in 0..6 {
             if mode == 5 && chip == Chip::Mt7925 {
@@ -436,6 +445,9 @@ fn native_clc_partial_uncertain_and_malformed_execution_keeps_guard_on_drop() {
 #[test]
 #[ignore = "oracle: STELA_MT792X_CLC_WIRE_ORACLE"]
 fn full_source_clc_plans_execute_through_one_native_requester_and_exact_wire_bytes() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let root = std::path::PathBuf::from(std::env::var("STELA_MT792X_CLC_WIRE_ORACLE").unwrap());
     for (chip, number) in [
         (Chip::Mt7921, 7921),
@@ -534,6 +546,9 @@ fn full_source_clc_plans_execute_through_one_native_requester_and_exact_wire_byt
 #[test]
 #[ignore = "oracle: STELA_MT792X_FIRMWARE"]
 fn downloaded_images_and_owned_reports_execute_clc_past_provider_lifetime() {
+    if crate::test_process::isolate_model() {
+        return;
+    }
     let images = std::path::PathBuf::from(std::env::var("STELA_MT792X_FIRMWARE").unwrap());
     for chip in [Chip::Mt7921, Chip::Mt7922, Chip::Mt7925] {
         for flags in [None, Some(1)] {
