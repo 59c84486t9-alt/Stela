@@ -16,10 +16,11 @@ pub const GSP_REVISION: &str = "1987bb2044a6c2d68c39d01c360bdbe17f1eb60c";
 /// The GSP-RM release nouveau's newest interface takes.
 const GSP_RELEASE: &str = "570.144";
 /// The files of a release, of which each chip family has some.
-const GSP_KINDS: [&str; 5] = [
+const GSP_KINDS: [&str; 6] = [
     "booter_load",
     "booter_unload",
     "bootloader",
+    "fmc",
     "gen_bootloader",
     "gsp",
 ];
@@ -1075,6 +1076,22 @@ mod tests {
             assert_eq!(nvidia_chip(device), Some(chip));
             require_gsp(&mut Inventory::default(), chip).unwrap();
         }
+        // Blackwell boots GSP-RM through the FMC, which nouveau requires too.
+        let mut inventory = Inventory::default();
+        require_gsp(&mut inventory, "gb203").unwrap();
+        let names: Vec<_> = inventory
+            .requests()
+            .iter()
+            .map(|r| r.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "nvidia/gb203/gsp/bootloader-570.144.bin",
+                "nvidia/gb203/gsp/fmc-570.144.bin",
+                "nvidia/gb203/gsp/gsp-570.144.bin",
+            ]
+        );
         // An NVIDIA GPU's audio function is no GPU.
         assert_eq!(nvidia_chip(0x22e9), None);
     }
