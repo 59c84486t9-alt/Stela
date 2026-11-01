@@ -54,7 +54,7 @@ pub enum Error {
     Native(ServiceError),
     Vmd(crate::bus::vmd::Error),
     Tg3(net::tg3::Error),
-    Aqtion(net::aqtion::Error),
+    Aqtion(net::aqtion::native::Error),
     Sfh(input::sfh::Error),
     Ish(input::ish::Error),
     IntelWifi(net::wifi::intel::attach::AttachError),
@@ -200,7 +200,7 @@ pub enum Adapter {
     Usb(UsbNet),
     UsbVendor(UsbEthernet),
     Tg3(Box<native::Located<native::Tg3>>),
-    Aqtion(Box<native::Located<net::aqtion::Aqtion>>),
+    Aqtion(Box<native::Located<net::aqtion::native::Attached>>),
     #[cfg(feature = "native-acpi")]
     IntelWifi(Box<native::Located<native::IntelWifi>>),
     MediatekWifi(Box<native::Located<native::MediatekWifi>>),

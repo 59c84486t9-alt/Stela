@@ -22,7 +22,7 @@ use crate::{
     input::{ish, sfh},
     net::{
         Link, LinkError, Mac,
-        aqtion::{self, Aqtion, MappedRegisters},
+        aqtion::{self, MappedRegisters},
         tg3,
         wifi::{mediatek, realtek as realtek_wifi},
     },
@@ -323,41 +323,64 @@ pub(super) unsafe fn tg3(
 /// Attach an Aquantia AQtion adapter over its BAR0 registers.
 ///
 /// # Safety
-/// As for [`tg3`].
-#[allow(
+/// As for [`tg3`]. Original configuration/root/backing and prior firmware,
+/// IRQ/work and bypass exclusions stay held through cold preparation.
+#[expect(
     clippy::result_large_err,
-    reason = "a failed attach hands back the owners that must outlive the device"
+    reason = "failed native attachment returns the original cold or controller owner"
 )]
 pub(super) unsafe fn aqtion(
     services: &dyn NativeServices,
     address: Address,
     clock: Clock,
-) -> Result<Located<Aqtion>, Failure> {
+) -> Result<Located<aqtion::native::Attached>, Failure> {
     let refused = |error: ServiceError| (Error::Native(error), None);
-    let claimed = claim(services, address).map_err(refused)?;
-    let registers = map(services, address, &claimed.bars, 0).map_err(refused)?;
-    let registers = MappedRegisters::new(registers).map_err(|(error, mapping)| {
-        (
-            Error::Aqtion(error),
-            Some(Box::new(mapping) as Box<dyn Any>),
-        )
-    })?;
-    // SAFETY: the mount claimed the stopped function, mapped its BAR0 and
-    // supplied an isolating domain; the probe runs in process context.
-    match unsafe {
-        Aqtion::attach(
-            claimed.function,
-            registers,
-            clock,
-            claimed.domain,
-            services.pages(),
-        )
-    } {
+    let mut requester = services.prepare_requester(address).map_err(refused)?;
+    let command = requester
+        .function_mut()
+        .config()
+        .read16(crate::bus::pci::regs::COMMAND);
+    if command == u16::MAX || command & crate::bus::pci::regs::COMMAND_MASTER != 0 {
+        return Err((
+            Error::Aqtion(aqtion::native::Error::BusMaster(command)),
+            Some(Box::new(requester)),
+        ));
+    }
+    // Establish D0 before sizing or mapping the BAR, with bus mastering gated.
+    if let Err(error) = requester.function_mut().power_up(&clock) {
+        return Err((
+            Error::Aqtion(aqtion::native::Error::Power(error)),
+            Some(Box::new(requester)),
+        ));
+    }
+    let bars = requester.function_mut().bars();
+    let registers = map(services, address, &bars, 0).map_err(refused)?;
+    let registers = match MappedRegisters::new(registers) {
+        Ok(registers) => registers,
+        Err((error, mapping)) => {
+            return Err((
+                Error::Aqtion(aqtion::native::Error::Device(error)),
+                Some(Box::new((requester, mapping))),
+            ));
+        }
+    };
+    let inputs = aqtion::native::Inputs {
+        requester,
+        registers,
+        timer: clock,
+    };
+    // SAFETY: paired original function/root/BAR and calibrated process timer;
+    // no Stela IRQ/work or competing writer exists. The driver resets firmware,
+    // stops every queue and drains the old root before binding or allocating.
+    match unsafe { aqtion::native::attach(inputs, services.pages()) } {
         Ok(link) => Ok(Located {
             location: alloc::format!("{address}"),
             link,
         }),
-        Err((error, link)) => Err((Error::Aqtion(error), Some(Box::new(link)))),
+        Err(failure) => Err((
+            Error::Aqtion(failure.error.clone()),
+            Some(Box::new(failure)),
+        )),
     }
 }
 
@@ -1308,6 +1331,8 @@ mod tests {
             aqtion,
             Err((Error::Native(ServiceError::Unavailable), None))
         ));
+        assert_eq!(*services.preparations.borrow(), [address(); 2]);
+        assert!(services.stopped.borrow().is_empty());
         // SAFETY: as above.
         let vmd = unsafe { vmd(&services, address(), clock) };
         assert!(matches!(
