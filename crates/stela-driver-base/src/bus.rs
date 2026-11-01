@@ -9,6 +9,7 @@ pub mod irq;
 pub mod lpss;
 pub mod mmio;
 pub mod pci;
+pub mod port;
 pub mod smbus;
 pub mod soundwire;
 pub mod spi;

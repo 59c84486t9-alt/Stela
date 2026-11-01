@@ -30,7 +30,10 @@
 //! it never guesses that I801's KILL acknowledgement applies to an AMD revision.
 //! PEC, process calls, arbitrary I²C transfers and Host Notify are unsupported.
 use super::{Address, Block, Bus, Error, ErrorKind, MAX_BLOCK, Phase, Recovery, Transaction};
-use crate::{Clock, bus::i2c::Timer};
+use crate::{
+    Clock,
+    bus::{i2c::Timer, port},
+};
 
 const HOST_STATUS: u8 = 0;
 const HOST_CONTROL: u8 = 2;
@@ -218,26 +221,14 @@ impl PortIo {
 impl Registers for PortIo {
     fn read8(&mut self, offset: u8) -> u8 {
         assert!(u16::from(offset) < PORT_BYTES);
-        let value: u8;
         // SAFETY: claim's decoded-window, exclusive ownership and privilege contract.
-        unsafe {
-            core::arch::asm!(
-                "in al, dx", in("dx") self.base + u16::from(offset), out("al") value,
-                options(nostack, preserves_flags),
-            );
-        }
-        value
+        unsafe { port::read8(self.base + u16::from(offset)) }
     }
 
     fn write8(&mut self, offset: u8, value: u8) {
         assert!(u16::from(offset) < PORT_BYTES);
         // SAFETY: claim's decoded-window, exclusive ownership and privilege contract.
-        unsafe {
-            core::arch::asm!(
-                "out dx, al", in("dx") self.base + u16::from(offset), in("al") value,
-                options(nostack, preserves_flags),
-            );
-        }
+        unsafe { port::write8(self.base + u16::from(offset), value) }
     }
 }
 

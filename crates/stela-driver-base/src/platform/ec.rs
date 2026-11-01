@@ -207,18 +207,12 @@ impl PortIo {
         Ok(Self { data, command })
     }
     fn read(port: u16) -> u8 {
-        let value;
         // SAFETY: only claim's privileged, exclusively owned EC ports reach here.
-        unsafe {
-            core::arch::asm!("in al, dx", in("dx") port, out("al") value, options(nostack, preserves_flags));
-        }
-        value
+        unsafe { crate::bus::port::read8(port) }
     }
     fn write(port: u16, value: u8) {
         // SAFETY: same exclusive native port contract as read.
-        unsafe {
-            core::arch::asm!("out dx, al", in("dx") port, in("al") value, options(nostack, preserves_flags));
-        }
+        unsafe { crate::bus::port::write8(port, value) }
     }
 }
 impl Registers for PortIo {

@@ -18,6 +18,7 @@ use crate::{
     },
 };
 use core::fmt;
+use stela_driver_base::bus::port;
 
 /// The USB host controller interfaces, by PCI programming interface.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -124,43 +125,27 @@ struct Ports(u16);
 
 impl Registers for Ports {
     fn read8(&mut self, offset: usize) -> u8 {
-        let value: u8;
         // SAFETY: `early`'s caller owns the controller and its decoded ports.
-        unsafe {
-            core::arch::asm!("in al, dx", in("dx") self.0 + offset as u16, out("al") value, options(nostack, preserves_flags));
-        }
-        value
+        unsafe { port::read8(self.0 + offset as u16) }
     }
     fn read16(&mut self, offset: usize) -> u16 {
-        let value: u16;
         // SAFETY: as for `read8`.
-        unsafe {
-            core::arch::asm!("in ax, dx", in("dx") self.0 + offset as u16, out("ax") value, options(nostack, preserves_flags));
-        }
-        value
+        unsafe { port::read16(self.0 + offset as u16) }
     }
     fn write16(&mut self, offset: usize, value: u16) {
         // SAFETY: as for `read8`.
-        unsafe {
-            core::arch::asm!("out dx, ax", in("dx") self.0 + offset as u16, in("ax") value, options(nostack, preserves_flags));
-        }
+        unsafe { port::write16(self.0 + offset as u16, value) }
     }
 }
 
 impl Dwords for Ports {
     fn read32(&mut self, offset: usize) -> u32 {
-        let value: u32;
         // SAFETY: as for `read8`.
-        unsafe {
-            core::arch::asm!("in eax, dx", in("dx") self.0 + offset as u16, out("eax") value, options(nostack, preserves_flags));
-        }
-        value
+        unsafe { port::read32(self.0 + offset as u16) }
     }
     fn write32(&mut self, offset: usize, value: u32) {
         // SAFETY: as for `read8`.
-        unsafe {
-            core::arch::asm!("out dx, eax", in("dx") self.0 + offset as u16, in("eax") value, options(nostack, preserves_flags));
-        }
+        unsafe { port::write32(self.0 + offset as u16, value) }
     }
 }
 

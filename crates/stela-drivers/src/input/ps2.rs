@@ -82,18 +82,12 @@ impl PortIo {
     }
 
     fn read(port: u16) -> u8 {
-        let value: u8;
         // SAFETY: claim establishes privilege and exclusive decoded resources.
-        unsafe {
-            core::arch::asm!("in al, dx", in("dx") port, out("al") value, options(nostack, preserves_flags));
-        }
-        value
+        unsafe { stela_driver_base::bus::port::read8(port) }
     }
     fn write(port: u16, value: u8) {
         // SAFETY: claim establishes privilege and exclusive decoded resources.
-        unsafe {
-            core::arch::asm!("out dx, al", in("dx") port, in("al") value, options(nostack, preserves_flags));
-        }
+        unsafe { stela_driver_base::bus::port::write8(port, value) }
     }
 }
 impl Registers for PortIo {
