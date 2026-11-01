@@ -333,33 +333,33 @@
     "reason": "requires hash-pinned unchanged Linux ICM parsing/TX trace"
   },
   {
-    "package": "stela-driver-gpu",
+    "package": "stela-linux",
     "test": "trees_child",
-    "source": "crates/stela-driver-gpu/src/linux/task/tests.rs",
+    "source": "crates/stela-linux/src/task/tests.rs",
     "kind": "isolation",
     "inputs": [],
-    "reason": "isolated exact child of gpu::c_tests::linux_trees; no global registry sharing"
+    "reason": "isolated exact child of stela_linux::c_tests::linux_trees; no global registry sharing"
   },
   {
-    "package": "stela-driver-gpu",
+    "package": "stela-linux",
     "test": "rt_mutex_child",
-    "source": "crates/stela-driver-gpu/src/linux/task/tests/rt_mutex.rs",
+    "source": "crates/stela-linux/src/task/tests/rt_mutex.rs",
     "kind": "isolation",
     "inputs": [],
-    "reason": "isolated exact child of gpu::c_tests::linux_mutex_wait; original RT mutex inheritance, chains, cancellation and blocked-waiter priority changes"
+    "reason": "isolated exact child of stela_linux::c_tests::linux_mutex_wait; original RT mutex inheritance, chains, cancellation and blocked-waiter priority changes"
   },
   {
-    "package": "stela-driver-gpu",
+    "package": "stela-linux",
     "test": "mutex_child",
-    "source": "crates/stela-driver-gpu/src/linux/task/tests.rs",
+    "source": "crates/stela-linux/src/task/tests.rs",
     "kind": "isolation",
     "inputs": [],
-    "reason": "isolated exact child of gpu::c_tests::linux_mutex_wait"
+    "reason": "isolated exact child of stela_linux::c_tests::linux_mutex_wait"
   },
   {
-    "package": "stela-driver-gpu",
+    "package": "stela-linux",
     "test": "mutex_quarantine_child",
-    "source": "crates/stela-driver-gpu/src/linux/task/tests.rs",
+    "source": "crates/stela-linux/src/task/tests.rs",
     "kind": "isolation",
     "inputs": [],
     "reason": "isolated exact child; intentional quarantine cannot share normal teardown proof"

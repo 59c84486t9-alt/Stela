@@ -1123,9 +1123,7 @@ fn open_gpus(
         let services = services::Services::new(mmio, remappers, None, heap, tsc_hz, Vec::new());
         let random = stela_drivers::probe::NativeServices::entropy(&services)
             .ok()
-            .and_then(|entropy| {
-                stela_drivers::gpu::linux::random::Seeded::from_entropy(&*entropy).ok()
-            });
+            .and_then(|entropy| stela_linux::random::Seeded::from_entropy(&*entropy).ok());
         (gpu::claim_all(&services, &adapters), random)
     });
     let (claimed, random) = match claimed {

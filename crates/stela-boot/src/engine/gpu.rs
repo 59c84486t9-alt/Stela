@@ -57,16 +57,7 @@ use stela_drivers::{
         pci::{Bar, ConfigSpace, Function, owned::OwnedConfig},
     },
     firmware::{Catalog, Provider, Requirement, Target},
-    gpu::{
-        self,
-        linux::{
-            self,
-            function::{self, Attached, Msi, Placement, Region},
-            owner::{Entered, Errno, Owner, Platform, RawOwner},
-            random::Seeded,
-            service::{self, Environment as LinuxEnvironment},
-        },
-    },
+    gpu,
     platform::{
         image::NativeReadOnlyImage,
         work::{
@@ -77,6 +68,12 @@ use stela_drivers::{
     probe::{NativeServices, ServiceError},
 };
 use stela_engine::machine::engine::Hub;
+use stela_linux::{
+    function::{self, Attached, Msi, Placement, Region},
+    owner::{Entered, Errno, Owner, Platform, RawOwner},
+    random::Seeded,
+    service::{self, Environment as LinuxEnvironment},
+};
 
 type Environment = LinuxEnvironment<SLOTS>;
 
@@ -464,10 +461,7 @@ impl Platform for Host {
         self.random.borrow_mut().fill(bytes);
     }
 
-    fn start_worker(
-        &self,
-        kind: stela_drivers::gpu::linux::owner::WorkerKind,
-    ) -> Result<(), Errno> {
+    fn start_worker(&self, kind: stela_linux::owner::WorkerKind) -> Result<(), Errno> {
         self.environment()
             .start_worker(kind)
             .map(|_| ())
@@ -751,7 +745,7 @@ unsafe extern "C" fn start(context: *mut c_void) {
     // SAFETY: a task of the environment, whose owner lasts for the boot.
     let _entered = unsafe { Entered::new(job.owner) };
     // SAFETY: entered, on a task.
-    job.result = unsafe { linux::nouveau::start() };
+    job.result = unsafe { gpu::nouveau::start() };
     if job.result.is_err() {
         return;
     }
@@ -807,7 +801,7 @@ struct Installed {
     heap_bytes: u64,
     /// Clients' mappings with their sizes in pages, by address. For tasks.
     #[cfg(feature = "nvk")]
-    mappings: RefCell<BTreeMap<u64, (linux::client::Mapping, usize)>>,
+    mappings: RefCell<BTreeMap<u64, (stela_linux::client::Mapping, usize)>>,
     /// Mesa's running threads, by the bottom of their stacks. On the boot CPU.
     #[cfg(feature = "nvk")]
     threads: RefCell<BTreeMap<u64, client::Running>>,
@@ -935,8 +929,8 @@ pub(super) fn open(machine: Machine, claimed: Vec<Claimed>) -> Result<(), Error>
     // SAFETY: one environment for the boot, on the boot CPU before any producer
     // or PE: the image and heap are this binary's, and the page catalog is kept.
     unsafe {
-        linux::image::register(Arc::new(image)).map_err(|_| kernel_work::Error::Inventory)?;
-        linux::heap::register(allocate_zeroed).map_err(|_| kernel_work::Error::Inventory)?;
+        stela_linux::image::register(Arc::new(image)).map_err(|_| kernel_work::Error::Inventory)?;
+        stela_linux::heap::register(allocate_zeroed).map_err(|_| kernel_work::Error::Inventory)?;
         let catalog = native_memory::linux_pages().map_err(|_| kernel_work::Error::Inventory)?;
         core::mem::forget(catalog);
     }

@@ -11,7 +11,7 @@ workspace = true
 
 [features]
 # Common native Linux kernel services; selecting this attaches no GPU.
-linux-kernel = ["dep:cc", "dep:stela-c-build", "stela-c-build/linux", "stela-driver-base/linux-kernel"]
+linux-kernel = ["dep:cc", "dep:stela-c-build", "stela-c-build/linux", "dep:stela-linux", "stela-linux/kernel"]
 # Build the implemented native NVIDIA OS hooks, not a complete GPU driver.
 nvidia-port = ["dep:cc", "dep:stela-c-build", "stela-c-build/native"]
 # Native Xe command/page-table support; not an initialized Intel GPU driver.
@@ -31,6 +31,7 @@ metal-vulkan = ["metal", "dep:ash"]
 metal-linked = ["metal-vulkan"]
 
 [dependencies]
+stela-linux = { path = "../stela-linux", optional = true }
 stela-driver-base = { path = "../stela-driver-base" }
 stela-driver-core = { path = "../stela-driver-core" }
 stela-crypto = { path = "../stela-crypto" }
@@ -38,20 +39,15 @@ stela-crypto = { path = "../stela-crypto" }
 stela-contracts = { path = "../stela-contracts", default-features = false, optional = true }
 # Vulkan bindings for the Metal device's native backend; no loader is linked.
 ash = { version = "0.38", default-features = false, optional = true }
-zeroize = { version = "1.9", default-features = false, features = ["alloc"] }
 triomphe = { version = "=0.1.16", default-features = false }
 
 [dev-dependencies]
 stela-driver-base = { path = "../stela-driver-base", features = ["test-support"] }
-libc = "0.2"
-object = { version = "0.37", default-features = false, features = ["read"] }
 sha2 = { version = "0.10", default-features = false }
-tempfile = "3"
 
 [build-dependencies]
-# Reuse retained shared-input/object/digest versions; no new crate fetch.
+# GPU composite imports are checked against their actual archive members.
 object = { version = "0.37", default-features = false, features = ["read"] }
-sha2 = { version = "0.10", default-features = false }
 cc = { version = "1", optional = true }
 stela-c-build = { path = "../stela-c-build", optional = true }
 

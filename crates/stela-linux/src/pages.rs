@@ -1,7 +1,6 @@
 //! Owned platform pins behind Linux's PFN-indexed page descriptors.
 //! The catalog supplies no DMA mapping or GPU attachment. Its provider and
 //! reservation survive until explicit retirement, or observable quarantine.
-use crate::bus::dma::memory::{CacheAttribute, MemoryError, PinnedPages};
 use alloc::{boxed::Box, rc::Rc, vec::Vec};
 use core::{
     alloc::Layout,
@@ -11,6 +10,7 @@ use core::{
     ptr::{self, NonNull},
     sync::atomic::{AtomicU64, Ordering},
 };
+use stela_driver_base::bus::dma::memory::{CacheAttribute, MemoryError, PinnedPages};
 
 #[cfg(target_arch = "x86_64")]
 mod stack;

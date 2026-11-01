@@ -3,7 +3,7 @@
 //! assertions are held. This plain Rust child is not whole-C ASan/UBSan.
 extern crate std;
 use super::*;
-use crate::linux::{
+use crate::{
     owner::{Errno, Owner, Platform, RawOwner},
     service::Environment,
 };
@@ -478,7 +478,7 @@ pub(crate) fn run_trees_child() {
     let output = std::process::Command::new(executable)
         .args([
             "--exact",
-            "linux::task::tests::trees_child",
+            "task::tests::trees_child",
             "--ignored",
             "--test-threads=1",
             "--nocapture",
@@ -493,7 +493,7 @@ pub(crate) fn run_trees_child() {
     // tests. Require named execution AND exactly one passing test.
     let named = stdout
         .lines()
-        .any(|line| line == "test linux::task::tests::trees_child ... ok");
+        .any(|line| line == "test task::tests::trees_child ... ok");
     let one_passed = stdout
         .lines()
         .any(|line| line.starts_with("test result: ok. 1 passed; 0 failed; 0 ignored;"));
@@ -510,7 +510,7 @@ pub(crate) fn run_trees_child() {
 fn trees_child() {
     // SAFETY: isolated single test child; same canonical GlobalAlloc owns this
     // real raw span and ordinary System storage until exact-layout free.
-    assert!(unsafe { crate::linux::heap::register(try_allocate) }.is_ok());
+    assert!(unsafe { crate::heap::register(try_allocate) }.is_ok());
     // SAFETY: the C test hook only checks task state on this thread's entered continuation.
     unsafe { stela_linux_task_test_taskless() };
     // SAFETY: taskless dispatcher, before any TaskBinding attach;
@@ -623,7 +623,7 @@ fn trees_child() {
     timer_service_roundtrip();
     // SAFETY: this child borrows no constant Linux names, which classifying
     // no address as immutable data requires.
-    assert!(unsafe { crate::linux::image::register(alloc::sync::Arc::new(NoImage)) }.is_ok());
+    assert!(unsafe { crate::image::register(alloc::sync::Arc::new(NoImage)) }.is_ok());
     workqueue_roundtrip();
     environment_roundtrip();
     stack_catalog_capacity();
@@ -1185,7 +1185,7 @@ impl Platform for Machine {
     fn delay_us(&self, minimum: u64, _: u64, atomic: bool) {
         assert!(!atomic);
         // SAFETY: Linux's call, on one of the environment's tasks.
-        unsafe { crate::linux::service::sleep_us(minimum) };
+        unsafe { crate::service::sleep_us(minimum) };
     }
     fn firmware(&self, _: &core::ffi::CStr) -> Result<&[u8], Errno> {
         unreachable!();
@@ -1202,7 +1202,7 @@ impl Platform for Machine {
     fn random_bytes(&self, _: &mut [u8]) {
         unreachable!();
     }
-    fn start_worker(&self, kind: crate::linux::owner::WorkerKind) -> Result<(), Errno> {
+    fn start_worker(&self, kind: crate::owner::WorkerKind) -> Result<(), Errno> {
         self.environment()
             .start_worker(kind)
             .map(drop)
@@ -1268,10 +1268,10 @@ unsafe extern "C" fn pressure_wait(context: *mut c_void) {
     // SAFETY: environment_roundtrip keeps this storage and owner through join.
     let pressure = unsafe { &*context.cast::<ServicePressure>() };
     // SAFETY: this is a real retained General task of the owner's environment.
-    let _entered = unsafe { crate::linux::owner::Entered::new(pressure.owner) };
+    let _entered = unsafe { crate::owner::Entered::new(pressure.owner) };
     pressure.started.store(true, Ordering::Release);
     // SAFETY: the word is retained through the original Linux wait and wake.
-    unsafe { crate::linux::client::wait(pressure.word.as_ptr(), 0, u64::MAX) };
+    unsafe { crate::client::wait(pressure.word.as_ptr(), 0, u64::MAX) };
 }
 unsafe extern "C" fn pressure_leaf(context: *mut c_void) {
     // SAFETY: environment_roundtrip keeps this storage through all deliveries.
@@ -1286,7 +1286,7 @@ unsafe extern "C" fn pressure_leaf(context: *mut c_void) {
     unsafe { stela_linux_service_test_leaf_context() };
     pressure.word.store(1, Ordering::Release);
     // SAFETY: already entered in the service owner; original wake is nonblocking.
-    unsafe { crate::linux::client::wake() };
+    unsafe { crate::client::wake() };
     pressure.delivered.fetch_add(1, Ordering::Relaxed);
 }
 
@@ -1406,7 +1406,7 @@ fn environment_roundtrip() {
 static WORKQUEUE_ENVIRONMENT: AtomicPtr<Environment<16>> = AtomicPtr::new(ptr::null_mut());
 /// C's producer uses the same real Environment admission as the native driver.
 unsafe extern "C" fn start_workqueue_worker(_: *mut c_void, kind: u32) -> i32 {
-    let Ok(kind) = crate::linux::owner::WorkerKind::try_from(kind) else {
+    let Ok(kind) = crate::owner::WorkerKind::try_from(kind) else {
         return -22;
     };
     // SAFETY: workqueue_roundtrip publishes this pinned environment until all
@@ -1925,9 +1925,9 @@ fn exact_mutex_child(selector: &str) {
     );
 }
 pub(crate) fn run_mutex_child() {
-    exact_mutex_child("linux::task::tests::mutex_child");
-    exact_mutex_child("linux::task::tests::mutex_quarantine_child");
-    exact_mutex_child("linux::task::tests::rt_mutex::rt_mutex_child");
+    exact_mutex_child("task::tests::mutex_child");
+    exact_mutex_child("task::tests::mutex_quarantine_child");
+    exact_mutex_child("task::tests::rt_mutex::rt_mutex_child");
 }
 
 mod rt_mutex;
@@ -1937,7 +1937,7 @@ mod rt_mutex;
 fn mutex_child() {
     // SAFETY: isolated canonical allocator registry, same real GlobalAlloc
     // owns ordinary and raw-span allocations and their exact-layout frees.
-    assert!(unsafe { crate::linux::heap::register(try_allocate) }.is_ok());
+    assert!(unsafe { crate::heap::register(try_allocate) }.is_ok());
     assert_eq!(core::mem::size_of::<MutexCall>(), 24);
     let dropped = Arc::new(AtomicU64::new(0));
     for scenario in 0..11 {

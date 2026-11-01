@@ -1,0 +1,27 @@
+[package]
+name = "stela-linux"
+version.workspace = true
+edition.workspace = true
+license = "MIT AND BSD-3-Clause AND GPL-2.0-only AND GPL-2.0-or-later"
+links = "stela_linux"
+
+[lints]
+workspace = true
+
+[features]
+# Default builds require no external Linux source.
+kernel = ["dep:cc", "dep:stela-c-build", "stela-c-build/linux-registry", "stela-driver-base/linux-kernel"]
+
+[dependencies]
+stela-driver-base = { path = "../stela-driver-base" }
+stela-crypto = { path = "../stela-crypto" }
+zeroize = { version = "1.9", default-features = false, features = ["alloc"] }
+
+[dev-dependencies]
+libc = "0.2"
+tempfile = "3"
+stela-driver-base = { path = "../stela-driver-base", features = ["test-support"] }
+
+[build-dependencies]
+cc = { version = "1", optional = true }
+stela-c-build = { path = "../stela-c-build", optional = true }

@@ -10,10 +10,6 @@ use core::{
     ptr,
 };
 
-const DRM_MAJOR: u32 = 226;
-/// Linux's `MINORBITS`.
-const MINOR_BITS: u32 = 20;
-
 /// Physically contiguous memory the owner holds, in whole pages:
 /// `stela_linux_run`.
 #[repr(C)]
@@ -67,15 +63,13 @@ pub unsafe fn wake() {
     unsafe { stela_linux_wake() };
 }
 
-/// Open DRM's character device `minor`, for a descriptor or a negative errno.
+/// Open Linux character device `device` with `flags`, for a descriptor or negative errno.
 ///
 /// # Safety
 /// See the module.
-pub unsafe fn open(minor: u32) -> Errno {
-    /// `O_RDWR`.
-    const READ_WRITE: c_uint = 2;
+pub unsafe fn open(device: u32, flags: c_uint) -> Errno {
     // SAFETY: the module's contract.
-    unsafe { stela_linux_open(DRM_MAJOR << MINOR_BITS | minor, READ_WRITE) }
+    unsafe { stela_linux_open(device, flags) }
 }
 
 /// A dma-buf of `runs`, for a descriptor or a negative errno.

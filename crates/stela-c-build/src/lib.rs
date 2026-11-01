@@ -6,6 +6,10 @@ use std::{env, path::PathBuf, process::Command};
 #[cfg(feature = "linux")]
 pub mod linux;
 #[cfg(feature = "native")]
+pub mod linux_build;
+#[cfg(feature = "linux-registry")]
+pub mod linux_capture;
+#[cfg(feature = "native")]
 pub mod native;
 
 #[cfg(feature = "linux-registry")]

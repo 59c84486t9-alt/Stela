@@ -51,7 +51,7 @@ pub(crate) enum Error {
     #[cfg(feature = "diagnostics")]
     NoKernelStacks,
     #[cfg(feature = "diagnostics")]
-    Pages(stela_drivers::gpu::linux::pages::Error),
+    Pages(stela_linux::pages::Error),
 }
 impl core::fmt::Display for Error {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {

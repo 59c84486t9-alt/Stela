@@ -57,7 +57,7 @@ fn attach(
 ) -> Attached<CountedHost> {
     // SAFETY: this fixture's formatted PCI name is allocated by the canonical
     // heap. No literal or borrowed name enters a free-or-borrow lifecycle.
-    unsafe { crate::linux::image::register(Arc::new(HeapNames)) }
+    unsafe { crate::image::register(Arc::new(HeapNames)) }
         .ok()
         .unwrap();
     // SAFETY: isolated entered process owner; the memory-only PCI config and
@@ -81,7 +81,7 @@ fn attach(
 #[test]
 fn extra_device_reference_keeps_callbacks_and_roots_after_removal() {
     if !isolated(
-        "linux::function::tests::lifetime::extra_device_reference_keeps_callbacks_and_roots_after_removal",
+        "function::tests::lifetime::extra_device_reference_keeps_callbacks_and_roots_after_removal",
     ) {
         return;
     }
@@ -110,9 +110,7 @@ fn extra_device_reference_keeps_callbacks_and_roots_after_removal() {
 
 #[test]
 fn atomic_final_put_quarantines_host_and_domain_roots() {
-    if !isolated(
-        "linux::function::tests::lifetime::atomic_final_put_quarantines_host_and_domain_roots",
-    ) {
+    if !isolated("function::tests::lifetime::atomic_final_put_quarantines_host_and_domain_roots") {
         return;
     }
     let _entered = Entered::try_new().unwrap();

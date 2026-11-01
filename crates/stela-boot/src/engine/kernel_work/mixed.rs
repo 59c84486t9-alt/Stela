@@ -132,7 +132,7 @@ pub(in crate::engine) unsafe fn check(
             .cast_mut()
             .cast::<c_void>()
     };
-    let kernel = stela_drivers::gpu::linux::task::stack_requirement().map_err(Error::Work)?;
+    let kernel = stela_linux::task::stack_requirement().map_err(Error::Work)?;
     // SAFETY: fixed finite callbacks fit their real stack class and every Case,
     // Runtime/code/root remains held until complete retirement/quarantine.
     unsafe {

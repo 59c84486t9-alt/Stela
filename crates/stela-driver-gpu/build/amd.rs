@@ -1,6 +1,7 @@
 //! Stela's amdgpu port and its hosted tests.
-use super::native::{self, Linux, Tests};
+use super::native::{self, Linux};
 use stela_c_build::linux::Module;
+use stela_c_build::linux_build::Tests;
 
 const AMDGPU: Module<'static> = Module {
     name: "amdgpu",
@@ -35,9 +36,9 @@ pub fn port(linux: &Linux, tests: &mut Tests) {
         );
         build
     };
-    let adapters = native::sources("src/amd");
+    let adapters = stela_c_build::linux_build::sources("src/amd");
     let port = configure(stela_c_build::native::configure());
-    native::check_declarations(&port, &adapters);
+    stela_c_build::linux_build::check_declarations(&port, &adapters);
     port.clone().files(&adapters).compile("stela-amd-port");
     // Fixtures for the integration test, which links them itself.
     port.clone()
@@ -49,8 +50,9 @@ pub fn port(linux: &Linux, tests: &mut Tests) {
         return;
     };
     let hosted = configure(hosted);
-    let fixtures = native::archive(&hosted, "amd-fixtures-hosted", &[FIXTURES.into()]);
-    let adapters = native::archive(&hosted, "amd-adapters-hosted", &adapters);
+    let fixtures =
+        stela_c_build::linux_build::archive(&hosted, "amd-fixtures-hosted", &[FIXTURES.into()]);
+    let adapters = stela_c_build::linux_build::archive(&hosted, "amd-adapters-hosted", &adapters);
     let mut archives = vec![adapters.as_path(), fixtures.as_path()];
     archives.extend(linux.hosted.iter().map(|archive| archive.as_path()));
     for name in ["ip_discovery", "native_bar", "pci_match"] {

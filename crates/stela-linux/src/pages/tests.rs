@@ -1,9 +1,9 @@
 //! CPU-owned page catalog and C ABI lifetime fixtures.
 extern crate std;
 use super::*;
-use crate::bus::dma::memory::PageBacking;
 use core::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::{Arc, Mutex};
+use stela_driver_base::bus::dma::memory::PageBacking;
 
 // CPU-only ownership model. Physical labels differ from CPU
 // addresses and are never passed to hardware or treated as native evidence.
@@ -119,7 +119,7 @@ fn multiple_mapping_pins_keep_their_distinct_cpu_and_physical_relations() {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
-                "linux::pages::tests::multiple_mapping_pins_keep_their_distinct_cpu_and_physical_relations",
+                "pages::tests::multiple_mapping_pins_keep_their_distinct_cpu_and_physical_relations",
                 "--test-threads=1",
                 "--nocapture",
             ])
@@ -223,7 +223,7 @@ fn logical_c_free_and_busy_drop_keep_the_pin_until_its_owner_acknowledges() {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
-                "linux::pages::tests::logical_c_free_and_busy_drop_keep_the_pin_until_its_owner_acknowledges",
+                "pages::tests::logical_c_free_and_busy_drop_keep_the_pin_until_its_owner_acknowledges",
                 "--test-threads=1",
                 "--nocapture",
             ])
@@ -395,7 +395,7 @@ fn catalog_retirement_and_nested_drop_preserve_provider_lifetime() {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
-                "linux::pages::tests::catalog_retirement_and_nested_drop_preserve_provider_lifetime",
+                "pages::tests::catalog_retirement_and_nested_drop_preserve_provider_lifetime",
                 "--test-threads=1",
                 "--nocapture",
             ])

@@ -2,13 +2,13 @@
 //! PFNs/cache labels are CPU models; no native physical or IRQ grant is tested.
 extern crate std;
 use super::*;
-use crate::bus::dma::memory::PageBacking;
 use alloc::{format, sync::Arc};
 use core::{ops::Range, pin::Pin};
 use std::sync::{
     Mutex,
     atomic::{AtomicBool, AtomicUsize},
 };
+use stela_driver_base::bus::dma::memory::PageBacking;
 use stela_driver_base::platform::work::{
     self, Cpu, Executor, Queue, Runtime, Stack, StackBacking, StackProfile, StackRequirement,
     test_support,
@@ -28,7 +28,7 @@ enum Case {
     UnadmittedDrop,
 }
 fn kernel() -> StackRequirement {
-    crate::linux::task::stack_requirement().unwrap()
+    crate::task::stack_requirement().unwrap()
 }
 fn ordinary() -> StackRequirement {
     StackRequirement::at_least(128 * 1024, 4096, 4096).unwrap()

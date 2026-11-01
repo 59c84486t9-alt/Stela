@@ -177,6 +177,8 @@ pub struct Plan {
 #[derive(Debug)]
 pub struct Manifest {
     pub c_source: String,
+    /// Descriptor definitions can live with their owning common/class archive.
+    pub descriptor_source: String,
     pub receipt: String,
     pub records: usize,
 }
@@ -797,11 +799,96 @@ fn receipt_bindings(out: &mut String, bindings: &inputs::Bindings) -> Result<()>
         stats.unique_files,stats.unique_bytes,stats.bytes_hashed,stats.bytes_returned,stats.metadata_cache_hits).unwrap();
     Ok(())
 }
+/// Descriptor definitions belong to the archive that compiled their units.
+/// Final images import those symbols while preserving their cohort membership.
+fn descriptors(
+    plan: &Plan,
+    imported_groups: &[String],
+    imported_units: &[String],
+    receipt: &mut String,
+) -> String {
+    let mut c = String::from(
+        "/* Generated from actual selected objects; do not edit. */\n#include <stela/registry.h>\n",
+    );
+    for group in &plan.groups {
+        if imported_groups.contains(&group.token) {
+            writeln!(
+                c,
+                "extern const struct stela_linux_build_group {};",
+                group_symbol(&plan.domain_token, &group.token)
+            )
+            .unwrap();
+        } else {
+            writeln!(
+                c,
+                "const struct stela_linux_build_group {} = {{ {}U, {}U, {}U, 0, {}, {}, {} }};",
+                group_symbol(&plan.domain_token, &group.token),
+                ABI,
+                plan.domain_ordinal,
+                group.ordinal,
+                c_string(&group.module_name),
+                c_string(&group.module_file),
+                c_string(&group.provenance)
+            )
+            .unwrap();
+        }
+        writeln!(receipt,"{{\"group\":{},\"ordinal\":{},\"module_name\":{},\"module_file\":{},\"provenance\":{}}}",json_string(&group.token),group.ordinal,json_string(&group.module_name),json_string(&group.module_file),json_string(&group.provenance)).unwrap();
+    }
+    for unit in &plan.units {
+        if imported_units.contains(&unit.token) {
+            writeln!(
+                c,
+                "extern const struct stela_linux_build_unit {};",
+                unit_symbol(&plan.domain_token, &unit.token)
+            )
+            .unwrap();
+        } else {
+            writeln!(
+                c,
+                "const struct stela_linux_build_unit {} = {{ {}U, {}U, &{}, {}, {} }};",
+                unit_symbol(&plan.domain_token, &unit.token),
+                ABI,
+                unit.ordinal,
+                group_symbol(&plan.domain_token, &unit.group_token),
+                c_string(&unit.source_label),
+                c_string(&unit.provenance)
+            )
+            .unwrap();
+        }
+    }
+    c
+}
+
 /// Pure generation after bounded reads. Caller writes outputs only after all
 /// validation succeeds, then compiles C with the SAME target and reviewed ABI.
 /// Root reachability is NOT independent ALL-selected-object link validation.
 pub fn generate(plan: &Plan) -> Result<Manifest> {
+    generate_with_imports(plan, &[], &[])
+}
+
+/// Generate one final canonical image, referencing descriptors already defined
+/// by a shared archive. Imported descriptors still undergo all object/input
+/// validation and remain members of the final image's ordered cohort.
+pub fn generate_with_imports(
+    plan: &Plan,
+    imported_groups: &[String],
+    imported_units: &[String],
+) -> Result<Manifest> {
     validate_plan(plan)?;
+    for group in imported_groups {
+        if !plan
+            .groups
+            .iter()
+            .any(|candidate| &candidate.token == group)
+        {
+            return Err(format!("unknown imported group: {group}"));
+        }
+    }
+    for unit in imported_units {
+        if !plan.units.iter().any(|candidate| &candidate.token == unit) {
+            return Err(format!("unknown imported unit: {unit}"));
+        }
+    }
     let (mut inputs, roots, cohort_key, unit_keys) = prepare_inputs(plan)?;
     inputs.verify(cohort_key)?;
     let mut receipt = String::new();
@@ -907,37 +994,8 @@ pub fn generate(plan: &Plan) -> Result<Manifest> {
         }
         observed.extend(records);
     }
-    let mut c = String::from(
-        "/* Generated from actual selected objects; do not edit. */\n#include <stela/registry.h>\n",
-    );
-    for group in &plan.groups {
-        writeln!(
-            c,
-            "const struct stela_linux_build_group {} = {{ {}U, {}U, {}U, 0, {}, {}, {} }};",
-            group_symbol(&plan.domain_token, &group.token),
-            ABI,
-            plan.domain_ordinal,
-            group.ordinal,
-            c_string(&group.module_name),
-            c_string(&group.module_file),
-            c_string(&group.provenance)
-        )
-        .unwrap();
-        writeln!(receipt,"{{\"group\":{},\"ordinal\":{},\"module_name\":{},\"module_file\":{},\"provenance\":{}}}",json_string(&group.token),group.ordinal,json_string(&group.module_name),json_string(&group.module_file),json_string(&group.provenance)).unwrap();
-    }
-    for unit in &plan.units {
-        writeln!(
-            c,
-            "const struct stela_linux_build_unit {} = {{ {}U, {}U, &{}, {}, {} }};",
-            unit_symbol(&plan.domain_token, &unit.token),
-            ABI,
-            unit.ordinal,
-            group_symbol(&plan.domain_token, &unit.group_token),
-            c_string(&unit.source_label),
-            c_string(&unit.provenance)
-        )
-        .unwrap();
-    }
+    let mut c = descriptors(plan, imported_groups, imported_units, &mut receipt);
+    let descriptor_source = c.clone();
     for record in &observed {
         writeln!(
             c,
@@ -1000,6 +1058,7 @@ pub fn generate(plan: &Plan) -> Result<Manifest> {
     receipt_bindings(&mut receipt, &bindings)?;
     Ok(Manifest {
         c_source: c,
+        descriptor_source,
         receipt,
         records: observed.len(),
     })
@@ -1007,6 +1066,40 @@ pub fn generate(plan: &Plan) -> Result<Manifest> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn descriptor_projection_defines_only_the_archive_owned_cohort() {
+        let mut plan = policy_plan();
+        let mut group = plan.groups[0].clone();
+        group.token = "Class".into();
+        group.ordinal = 2;
+        group.module_name = "class".into();
+        group.module_file = "class/class".into();
+        plan.groups.push(group);
+        let mut unit = plan.units[0].clone();
+        unit.token = "Class".into();
+        unit.ordinal = 2;
+        unit.group_token = "Class".into();
+        plan.units.push(unit);
+        let source = descriptors(
+            &plan,
+            &["image".into()],
+            &["image".into()],
+            &mut String::new(),
+        );
+        for kind in ["group", "unit"] {
+            let shared = format!("stela_linux_{kind}__Fixture__image");
+            let owned = format!("stela_linux_{kind}__Fixture__Class");
+            assert!(source.contains(&format!(
+                "extern const struct stela_linux_build_{kind} {shared};"
+            )));
+            assert!(!source.contains(&format!("{shared} =")));
+            assert_eq!(source.matches(&format!("{owned} =")).count(), 1);
+        }
+        assert!(source.contains("&stela_linux_group__Fixture__Class"));
+        assert!(!source.contains("stela_linux_registry_image"));
+        assert!(!source.contains("static const"));
+    }
+
     use super::*;
 
     // Authored empty COFF containers exercise the external object-reader

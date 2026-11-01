@@ -1,6 +1,6 @@
 //! Actual C callback terminal behavior after domain invalidation uncertainty.
 use super::*;
-use crate::linux::owner::{self, Owner, Platform};
+use crate::owner::{self, Owner, Platform};
 use core::ffi::CStr;
 use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
@@ -44,7 +44,7 @@ impl Platform for Reporter {
     fn random_bytes(&self, _: &mut [u8]) {
         unreachable!()
     }
-    fn start_worker(&self, _: crate::linux::owner::WorkerKind) -> Result<(), Errno> {
+    fn start_worker(&self, _: crate::owner::WorkerKind) -> Result<(), Errno> {
         unreachable!()
     }
     fn shutdown(&self, _: bool) {
@@ -149,14 +149,14 @@ fn terminal(test: &str, map_failure: bool) {
 #[test]
 fn map_failure_stops_before_caller_can_reuse_memory() {
     terminal(
-        "linux::function::tests::fatal::map_failure_stops_before_caller_can_reuse_memory",
+        "function::tests::fatal::map_failure_stops_before_caller_can_reuse_memory",
         true,
     );
 }
 #[test]
 fn unmap_failure_stops_before_caller_can_reuse_memory() {
     terminal(
-        "linux::function::tests::fatal::unmap_failure_stops_before_caller_can_reuse_memory",
+        "function::tests::fatal::unmap_failure_stops_before_caller_can_reuse_memory",
         false,
     );
 }

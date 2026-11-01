@@ -1,7 +1,6 @@
 //! nouveau: the `nouveau-y` composite of its own Kbuild, compiled unchanged in
 //! Stela's Linux environment, and the kernel services it imports that the
 //! environment does not yet supply.
-use super::initcalls::{self, Captured, Unit};
 use super::kbuild::{Config, Kbuild};
 use super::native::{self, Linux};
 use object::{Object, ObjectSymbol, read::archive::ArchiveFile};
@@ -12,10 +11,11 @@ use std::{
     thread,
 };
 use stela_c_build::linux::Module;
+use stela_c_build::linux_capture::{self as initcalls, Projection, Unit, UnitSpec};
 
 const NOUVEAU: &str = "../../third_party/linux/drivers/gpu/drm/nouveau";
-const AUTOCONF: &str = "src/compat/linux/generated/autoconf.h";
-const KERNEL: &str = "src/compat/linux/kernel";
+const AUTOCONF: &str = "../stela-linux/src/compat/generated/autoconf.h";
+const KERNEL: &str = "../stela-linux/src/compat/kernel";
 const MODULE: Module<'static> = Module {
     name: "nouveau",
     file: "drivers/gpu/drm/nouveau/nouveau",
@@ -63,11 +63,14 @@ const OPEN: &[(&str, &[&str])] = &[
 ];
 
 /// The unit of nouveau's own `module_init`.
-const INITCALLS: Unit = Unit {
+const INITCALLS: UnitSpec = UnitSpec {
     source: "drivers/gpu/drm/nouveau/nouveau_drm",
     module: MODULE.name,
     file: MODULE.file,
 };
+fn initcalls_unit() -> Unit {
+    INITCALLS.into()
+}
 
 pub fn port(linux: &mut Linux) {
     let config = Config::parse(&fs::read_to_string(AUTOCONF).expect("read Stela's Kconfig header"))
@@ -100,7 +103,7 @@ pub fn port(linux: &mut Linux) {
         .collect::<Vec<_>>();
     let includes = includes.iter().map(String::as_str).collect::<Vec<_>>();
     // Compiled below, with its registrations captured.
-    sources.retain(|source| *source != INITCALLS.path());
+    sources.retain(|source| *source != initcalls_unit().path());
     let mut build = stela_c_build::native::configure();
     linux.environment.apply(
         &mut build,
@@ -108,7 +111,7 @@ pub fn port(linux: &mut Linux) {
         &native::drm_includes(&includes),
         Some(&MODULE),
     );
-    native::upstream_warnings(&mut build);
+    stela_c_build::linux_build::upstream_warnings(&mut build);
     // As Kbuild builds every profile: Linux relies on the optimizer to drop
     // the calls its configuration disables.
     build.opt_level(2).cargo_metadata(false);
@@ -130,19 +133,36 @@ pub fn port(linux: &mut Linux) {
             .collect::<Vec<_>>()
     });
     let mut captured = linux.take_captured();
+    let environment_count = captured.len();
     captured.push(initcalls::compile(
         &build,
-        INITCALLS,
+        Path::new("../stela-linux/src/compat/stela/registration.h"),
+        initcalls_unit(),
         captured.len() as u32 + 1,
     ));
-    let image = initcalls::image(&captured);
+    let mut expected = native::environment_units();
+    expected.push(INITCALLS);
+    let image = initcalls::source(
+        &captured,
+        Projection {
+            symbol: "stela_linux_nouveau_image",
+            expected: &expected,
+            imported_units: environment_count,
+            descriptors_only: false,
+        },
+    );
     build
         .objects(objects)
-        .objects(captured.iter().map(Captured::object))
+        .objects(
+            captured
+                .iter()
+                .skip(environment_count)
+                .map(|unit| unit.object()),
+        )
         .file(image)
         .compile("stela-nouveau-nvkm");
-    let archive = native::out_dir().join("libstela-nouveau-nvkm.a");
-    check_imports(&archive, &linux.archive);
+    let archive = stela_c_build::linux_build::out_dir().join("libstela-nouveau-nvkm.a");
+    check_imports(&archive, &[&linux.archive, &linux.common_archive]);
     // Hosted programs test the environment and link no driver.
     if env::var("CARGO_CFG_TARGET_OS").is_ok_and(|os| os == "uefi") {
         println!("cargo:rustc-link-lib=static=stela-nouveau-nvkm");
@@ -151,9 +171,12 @@ pub fn port(linux: &mut Linux) {
 
 /// Compare the services the composites reach when linked, directly or through
 /// the environment's objects, and that nothing supplies, with [`OPEN`].
-fn check_imports(port: &Path, environment: &Path) {
+fn check_imports(port: &Path, environment: &[&Path]) {
     let port = members(port);
-    let environment = members(environment);
+    let environment = environment
+        .iter()
+        .flat_map(|archive| members(archive))
+        .collect::<Vec<_>>();
     let definers = environment
         .iter()
         .flat_map(|member| member.defined.iter().map(move |symbol| (symbol, member)))
@@ -235,7 +258,12 @@ fn members(archive: &Path) -> Vec<Member> {
 /// and functions that report themselves unsupported and fail.
 fn traps() -> BTreeSet<String> {
     let mut traps = BTreeSet::new();
-    for source in native::sources(KERNEL) {
+    for source in stela_c_build::linux_build::sources(KERNEL)
+        .into_iter()
+        .chain(stela_c_build::linux_build::sources(
+            "src/compat/linux/kernel",
+        ))
+    {
         let text = fs::read_to_string(&source).expect("read a kernel-API source");
         for (marker, field) in [
             ("STELA_UNSUPPORTED(", 1),

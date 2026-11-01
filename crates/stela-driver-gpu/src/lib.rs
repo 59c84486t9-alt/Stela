@@ -20,8 +20,11 @@ pub mod metal;
 #[cfg(any(feature = "amd-commands", feature = "amd-port"))]
 pub mod amd;
 
+#[cfg(feature = "nouveau-port")]
+pub mod nouveau;
+
 #[cfg(feature = "linux-kernel")]
-pub mod linux;
+pub mod drm;
 
 /// The native ports' hosted C test programs, which `build.rs` compiles.
 #[cfg(all(test, feature = "linux-kernel"))]

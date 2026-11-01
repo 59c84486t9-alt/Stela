@@ -1,10 +1,10 @@
 //! nouveau in a Linux environment: the initcalls that register it, DRM and the
 //! subsystems beneath them (`build/initcalls.rs`).
-use super::owner::Errno;
 use core::{
     ffi::{c_int, c_void},
     ptr,
 };
+use stela_linux::owner::Errno;
 
 unsafe extern "C" {
     static stela_linux_nouveau_image: c_void;

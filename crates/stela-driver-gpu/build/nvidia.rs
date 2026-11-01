@@ -18,7 +18,7 @@ pub fn port() {
             .bytes()
             .all(|byte| byte.is_ascii_digit() || byte == b'.')
     );
-    let generated = native::out_dir().join("nvidia-include");
+    let generated = stela_c_build::linux_build::out_dir().join("nvidia-include");
     fs::create_dir_all(&generated).expect("create NVIDIA generated include");
     fs::write(
         generated.join("version.h"),
@@ -62,6 +62,6 @@ pub fn port() {
         println!("cargo:rerun-if-changed={source}/{directory}");
     }
     build
-        .files(native::sources(port))
+        .files(stela_c_build::linux_build::sources(port))
         .compile("stela-nvidia-port");
 }

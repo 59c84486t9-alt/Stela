@@ -38,7 +38,7 @@ unsafe impl service::Clock for FrozenClock {
 fn rt_mutex_child() {
     // SAFETY: an isolated single-test child owns the canonical allocator and
     // all exact-layout native allocations until their checked retirement.
-    assert!(unsafe { crate::linux::heap::register(try_allocate) }.is_ok());
+    assert!(unsafe { crate::heap::register(try_allocate) }.is_ok());
     let dropped = Arc::new(AtomicU64::new(0));
     for scenario in 11..=14 {
         let cpu = CpuModel::new();

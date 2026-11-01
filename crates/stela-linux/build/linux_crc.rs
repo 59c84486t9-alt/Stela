@@ -1,11 +1,12 @@
 //! Linux's unchanged generic CRC library and its original host table generator.
 //! All generated inputs and objects stay in Cargo's output directory.
-use super::{LINUX, check_declarations, out_dir, run};
+use super::LINUX;
 use std::{
     env, fs,
     path::{Path, PathBuf},
     process::Command,
 };
+use stela_c_build::linux_build::{check_declarations, out_dir, run};
 
 const SOURCES: [(&str, &str, &str); 2] = [
     ("lib/crc/crc32-main.c", "crc32", "lib/crc/crc32"),
@@ -35,7 +36,7 @@ pub fn tables() -> PathBuf {
             "include/linux/crc32poly.h",
         ),
         (
-            PathBuf::from("src/compat/linux/generated/autoconf.h"),
+            PathBuf::from("src/compat/generated/autoconf.h"),
             "include/generated/autoconf.h",
         ),
     ] {

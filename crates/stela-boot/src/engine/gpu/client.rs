@@ -31,10 +31,8 @@ use core::{
     sync::atomic::{AtomicBool, AtomicI64, AtomicPtr, Ordering, fence},
 };
 use stela_boot_core::page_window::Cache;
-use stela_drivers::{
-    gpu::linux::{client, owner::Entered},
-    platform::work::{WorkError, service::Idle},
-};
+use stela_drivers::platform::work::{WorkError, service::Idle};
+use stela_linux::{client, owner::Entered};
 
 const ENODEV: i64 = -19;
 const EFAULT: i64 = -14;
@@ -242,7 +240,7 @@ unsafe fn perform(gpu: &Installed, operation: Operation) -> i64 {
     // SAFETY: the function's own contract for every arm.
     unsafe {
         match operation {
-            Operation::Open(minor) => client::open(minor).into(),
+            Operation::Open(minor) => stela_drivers::gpu::drm::open(minor).into(),
             Operation::Close(fd) => client::close(fd).into(),
             Operation::Duplicate(fd) => client::duplicate(fd).into(),
             Operation::Device(fd) => client::device(fd),

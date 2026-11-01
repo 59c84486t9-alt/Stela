@@ -2,11 +2,8 @@
 extern crate std;
 use super::*;
 use crate::{
-    bus::dma::memory::{CacheAttribute, MemoryError, PageBacking, PinnedPages},
-    linux::{
-        pages::{Request as PageRequest, Reservation},
-        task::TaskBinding,
-    },
+    pages::{Request as PageRequest, Reservation},
+    task::TaskBinding,
 };
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::{
@@ -17,6 +14,7 @@ use core::{
     sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize},
 };
 use std::{sync::Mutex, thread};
+use stela_driver_base::bus::dma::memory::{CacheAttribute, MemoryError, PageBacking, PinnedPages};
 use stela_driver_base::platform::work::{
     Executor, Queue, Runtime, Stack,
     test_support::{CpuModel, backing},
@@ -348,7 +346,7 @@ fn run(forget: bool) {
 #[test]
 fn original_resources_release_per_task_state_and_keep_kernel_after_drop() {
     if !isolated(
-        "linux::resources::tests::original_resources_release_per_task_state_and_keep_kernel_after_drop",
+        "resources::tests::original_resources_release_per_task_state_and_keep_kernel_after_drop",
     ) {
         run(false);
     }
@@ -356,7 +354,7 @@ fn original_resources_release_per_task_state_and_keep_kernel_after_drop() {
 #[test]
 fn forgotten_kernel_owner_cannot_unregister_or_reinitialize_original_roots() {
     if !isolated(
-        "linux::resources::tests::forgotten_kernel_owner_cannot_unregister_or_reinitialize_original_roots",
+        "resources::tests::forgotten_kernel_owner_cannot_unregister_or_reinitialize_original_roots",
     ) {
         run(true);
     }

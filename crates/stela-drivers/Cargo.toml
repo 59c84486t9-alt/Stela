@@ -12,7 +12,7 @@ workspace = true
 
 [features]
 native-acpi = ["stela-driver-base/native-acpi", "stela-driver-net/native-acpi"]
-linux-kernel = ["stela-driver-gpu/linux-kernel"]
+linux-kernel = ["dep:stela-linux", "stela-linux/kernel"]
 ram-disk = ["stela-driver-base/ram-disk"]
 nvidia-port = ["stela-driver-gpu/nvidia-port"]
 intel-port = ["stela-driver-gpu/intel-port"]
@@ -24,6 +24,7 @@ metal-vulkan = ["stela-driver-gpu/metal-vulkan"]
 metal-linked = ["stela-driver-gpu/metal-linked"]
 
 [dependencies]
+stela-linux = { path = "../stela-linux", optional = true }
 stela-driver-audio = { path = "../stela-driver-audio" }
 stela-driver-base = { path = "../stela-driver-base" }
 stela-driver-core = { path = "../stela-driver-core" }

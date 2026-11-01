@@ -1,0 +1,326 @@
+//! The shared native Linux environment: target and tool selection, Stela's
+//! Linux environment for unchanged Linux sources, and the hosted C test
+//! programs that `cargo test` runs when Cargo builds for this machine.
+use std::{
+    env,
+    path::{Path, PathBuf},
+};
+
+use stela_c_build::linux_build::{
+    Tests, archive, linux_archive, out_dir, sources, upstream_build, upstream_warnings,
+};
+use stela_c_build::linux_capture::{self, COMMON, Captured, Projection, Unit};
+use stela_c_build::native::configure;
+use stela_c_build::native::hosted;
+
+#[path = "linux_crc.rs"]
+mod linux_crc;
+
+/// The upstream sources: submodules that `cargo xtask gpu fetch` checks out.
+pub const LINUX: &str = "../../third_party/linux";
+pub fn require_sources() {
+    require_source(LINUX);
+}
+
+fn require_source(source: &str) {
+    assert!(
+        Path::new(source).join(".git").exists(),
+        "{source} is missing; run `cargo xtask gpu fetch`"
+    );
+}
+
+/// Stela's Linux environment for unchanged Linux sources, and the kernel-API
+/// in `compat/linux/kernel` that they call, built once for every port.
+pub struct Linux {
+    /// Shared Kbuild flags and generated architecture header layout.
+    pub environment: stela_c_build::linux::Environment,
+    /// Generic registration units composed into the final canonical image.
+    pub captured: Vec<Captured>,
+    /// What hosted programs running Linux code link: the kernel-API and the
+    /// host's platform services.
+    pub hosted: Vec<PathBuf>,
+}
+
+/// Linux's fences, reservation objects and shared buffers.
+const DMA_BUF_SOURCES: &[&str] = &[
+    "dma-buf",
+    "dma-buf-mapping",
+    "dma-fence",
+    "dma-fence-array",
+    "dma-fence-chain",
+    "dma-fence-unwrap",
+    "dma-resv",
+    "sync_file",
+];
+const COMPAT: &str = "src/compat";
+
+impl Linux {
+    pub fn new() -> Self {
+        require_sources();
+        let environment = stela_c_build::linux::Environment::new(stela_c_build::linux::Roots {
+            linux: LINUX.into(),
+            compat: COMPAT.into(),
+            output: out_dir(),
+        });
+        let mut linux = Self {
+            environment,
+            hosted: Vec::new(),
+            captured: Vec::new(),
+        };
+        let kernel = sources(&format!("{COMPAT}/kernel"));
+        let crc_tables = linux_crc::tables();
+        // Unchanged shared helpers use Linux's arithmetic types. Stela's
+        // extra conversion diagnostics remain confined to its own source.
+        let upstream = vec![
+            PathBuf::from(format!("{LINUX}/lib/string.c")),
+            PathBuf::from(format!("{LINUX}/lib/hexdump.c")),
+            PathBuf::from(format!("{LINUX}/lib/ratelimit.c")),
+            PathBuf::from(format!("{LINUX}/drivers/i2c/algos/i2c-algo-bit.c")),
+            PathBuf::from(format!("{LINUX}/lib/scatterlist.c")),
+            PathBuf::from(format!("{LINUX}/lib/find_bit.c")),
+            PathBuf::from(format!("{LINUX}/lib/bitmap.c")),
+            PathBuf::from(format!("{LINUX}/lib/idr.c")),
+            PathBuf::from(format!("{LINUX}/lib/radix-tree.c")),
+            PathBuf::from(format!("{LINUX}/lib/xarray.c")),
+            PathBuf::from(format!("{LINUX}/lib/rbtree.c")),
+            PathBuf::from(format!("{LINUX}/lib/timerqueue.c")),
+            PathBuf::from(format!("{LINUX}/lib/kobject.c")),
+            PathBuf::from(format!("{LINUX}/lib/kobject_uevent.c")),
+            PathBuf::from(format!("{LINUX}/lib/ctype.c")),
+            PathBuf::from(format!("{LINUX}/lib/refcount_lock.c")),
+            PathBuf::from(format!("{LINUX}/kernel/user.c")),
+            PathBuf::from(format!("{LINUX}/kernel/exec_state.c")),
+            PathBuf::from(format!("{LINUX}/kernel/locking/mutex.c")),
+            PathBuf::from(format!("{LINUX}/kernel/locking/rtmutex_api.c")),
+            PathBuf::from(format!("{LINUX}/kernel/sched/wait_support.c")),
+            PathBuf::from(format!("{LINUX}/kernel/sched/wait.c")),
+            PathBuf::from(format!("{LINUX}/kernel/sched/swait.c")),
+            PathBuf::from(format!("{LINUX}/kernel/sched/completion.c")),
+            PathBuf::from(format!("{LINUX}/kernel/rcuwait_wake.c")),
+            PathBuf::from(format!("{LINUX}/kernel/rcu/rcuwait_finish.c")),
+            PathBuf::from(format!("{LINUX}/fs/seq_output.c")),
+            PathBuf::from(format!("{LINUX}/lib/maple_tree.c")),
+        ];
+        let mut upstream = upstream;
+        upstream.extend(
+            DMA_BUF_SOURCES
+                .iter()
+                .map(|source| PathBuf::from(format!("{LINUX}/drivers/dma-buf/{source}.c"))),
+        );
+        let hosted_upstream = upstream.clone();
+        upstream.retain(|source| !captured_units().iter().any(|unit| unit.path() == *source));
+        for source in &upstream {
+            println!("cargo:rerun-if-changed={}", source.display());
+        }
+        let mut build = configure();
+        linux.environment.apply(&mut build, None, &[], None);
+        let crc_objects = linux_crc::objects(&build, &crc_tables);
+        build.objects(crc_objects);
+        {
+            let mut captured_build = upstream_build(&build, Path::new(COMPAT));
+            upstream_warnings(&mut captured_build);
+            for (index, unit) in captured_units().into_iter().enumerate() {
+                linux.captured.push(linux_capture::compile(
+                    &captured_build,
+                    &Path::new(COMPAT).join("stela/registration.h"),
+                    unit,
+                    index as u32 + 1,
+                ));
+            }
+            let image = linux_capture::source(
+                &linux.captured,
+                Projection {
+                    symbol: "stela_linux_common_image",
+                    expected: COMMON,
+                    imported_units: 0,
+                    descriptors_only: true,
+                },
+            );
+            let descriptors = build.clone().file(image).compile_intermediates();
+            build.objects(descriptors);
+            let digest =
+                linux_capture::write(&out_dir().join("captured-units.bin"), &linux.captured);
+            println!("cargo:cohort_sha256={digest}");
+            build.objects(linux.captured.iter().map(|unit| unit.object()));
+        }
+        linux_archive(&build, "stela-linux", &kernel, &upstream, Path::new(COMPAT));
+        // A callable target-ABI fixture plus host helpers only. It links the
+        // SAME production common archive/Rust heap as the unit binary;
+        // never mix duplicate native/hosted common archives. The standalone
+        // C suites below keep their separate sanitizer-linked programs.
+        if env::var("TARGET").ok() == env::var("HOST").ok()
+            && matches!(
+                env::var("CARGO_CFG_TARGET_OS").as_deref(),
+                Ok("linux" | "macos")
+            )
+        {
+            let mut helper = stela_c_build::native::compiler();
+            helper.define("STELA_TEST_CANONICAL_RUST_HEAP", None);
+            helper.file(format!("{COMPAT}/stela/test.c"));
+            let helper_objects = helper.compile_intermediates();
+            let mut fixture = configure();
+            linux.environment.apply(&mut fixture, None, &[], None);
+            fixture
+                .define("STELA_LINUX_TREES_TEST", None)
+                .define("STELA_LINUX_TREES_CALLABLE", None)
+                .define("STELA_LINUX_PERCPU_TEST", None)
+                .files([
+                    format!("{COMPAT}/kernel/trees.c"),
+                    format!("{COMPAT}/kernel/percpu.c"),
+                    format!("{COMPAT}/stela/task_test.c"),
+                    format!("{COMPAT}/stela/atomic_callback_test.c"),
+                    format!("{COMPAT}/stela/mutex_test.c"),
+                    format!("{COMPAT}/stela/rtmutex_test.c"),
+                    format!("{COMPAT}/stela/resource_test.c"),
+                    format!("{COMPAT}/stela/service_test.c"),
+                    format!("{COMPAT}/stela/timer_test.c"),
+                    format!("{COMPAT}/stela/workqueue_test.c"),
+                    format!("{COMPAT}/stela/i2c_test.c"),
+                    format!("{COMPAT}/stela/sync_test.c"),
+                ])
+                .objects(helper_objects)
+                .compile("linux-task-fixture");
+        }
+        if let Some(host) = hosted() {
+            let services = [
+                PathBuf::from(format!("{COMPAT}/stela/test.c")),
+                PathBuf::from(format!("{COMPAT}/stela/registry_test_host.c")),
+                PathBuf::from(format!("{COMPAT}/stela/taint_test_host.c")),
+                PathBuf::from(format!("{COMPAT}/stela/rodata_test_host.c")),
+            ];
+            let services = archive(&host, "linux-host", &services);
+            let mut kernel_build = host;
+            linux.environment.apply(&mut kernel_build, None, &[], None);
+            let crc_objects = linux_crc::objects(&kernel_build, &crc_tables);
+            kernel_build.objects(crc_objects);
+            linux.hosted = vec![
+                linux_archive(
+                    &kernel_build,
+                    "linux-hosted",
+                    &kernel,
+                    &hosted_upstream,
+                    Path::new(COMPAT),
+                ),
+                services,
+            ];
+        }
+        linux
+    }
+
+    pub fn tests(&self, tests: &mut Tests) {
+        if env::var("TARGET").ok() == env::var("HOST").ok()
+            && matches!(
+                env::var("CARGO_CFG_TARGET_OS").as_deref(),
+                Ok("linux" | "macos")
+            )
+        {
+            tests.rust_children();
+        }
+        let Some(mut build) = hosted() else {
+            return;
+        };
+        self.environment.apply(&mut build, None, &[], None);
+        let archives = self.hosted.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+        // Dedicated lifecycle fixture: unchanged original kobject/uevent APIs.
+        tests.add(
+            &build,
+            "linux_kobjects",
+            &format!("{COMPAT}/stela/kobject_test.c"),
+            &archives,
+        );
+        for (name, source) in [
+            ("linux_compiler_abi", "abi_test.c"),
+            ("linux_thread_initializers", "thread_initializers_test.c"),
+            ("linux_acpi_client", "acpi_client_test.c"),
+            ("linux_acpi_dsm", "acpi_dsm_test.c"),
+            ("linux_random", "random_test.c"),
+            ("linux_resources", "resources_test.c"),
+            ("linux_seq_output", "seq_output_test.c"),
+        ] {
+            tests.add(&build, name, &format!("{COMPAT}/stela/{source}"), &archives);
+        }
+        // This fixture observes calls with the ELF linker's --wrap.
+        if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
+            let mut deferred = build.clone();
+            for symbol in [
+                "stela_linux_heap_alloc",
+                "stela_linux_heap_free",
+                "call_rcu",
+            ] {
+                deferred.flag(format!("-Wl,--wrap={symbol}"));
+            }
+            tests.add(
+                &deferred,
+                "linux_deferred_free",
+                &format!("{COMPAT}/stela/deferred_free_test.c"),
+                &archives,
+            );
+        }
+        for (name, source, define) in [
+            ("linux_printk", "printk.c", "STELA_LINUX_PRINTK_TEST"),
+            ("linux_panic", "panic.c", "STELA_LINUX_PANIC_TEST"),
+            ("linux_rcu", "rcu.c", "STELA_LINUX_RCU_TEST"),
+            ("linux_pages", "page.c", "STELA_LINUX_PAGE_TEST"),
+            ("linux_slab", "slab.c", "STELA_LINUX_SLAB_TEST"),
+            ("linux_cache", "cache.c", "STELA_LINUX_CACHE_TEST"),
+            ("linux_params", "params.c", "STELA_LINUX_PARAMS_TEST"),
+            (
+                "linux_params_parser",
+                "params.c",
+                "STELA_LINUX_PARAMS_PARSER_TEST",
+            ),
+            ("linux_registry", "registry.c", "STELA_LINUX_REGISTRY_TEST"),
+            ("linux_taint", "taint.c", "STELA_LINUX_TAINT_TEST"),
+            (
+                "linux_entry_generation",
+                "linux.c",
+                "STELA_LINUX_ENTRY_GENERATION_TEST",
+            ),
+            ("linux_firmware", "firmware.c", "STELA_LINUX_FIRMWARE_TEST"),
+            ("linux_crc", "crc.c", "STELA_LINUX_CRC_TEST"),
+            ("linux_find_bit", "find_bit.c", "STELA_LINUX_FIND_BIT_TEST"),
+            ("linux_cpuhotplug", "cpuhotplug.c", "STELA_LINUX_CPUHP_TEST"),
+            (
+                "linux_string_helpers",
+                "string_helpers.c",
+                "STELA_LINUX_STRING_HELPERS_TEST",
+            ),
+            ("linux_printf", "printf.c", "STELA_LINUX_PRINTF_TEST"),
+            ("linux_uuid", "uuid.c", "STELA_LINUX_UUID_TEST"),
+            ("linux_kstrtox", "kstrtox.c", "STELA_LINUX_KSTRTOX_TEST"),
+            ("linux_jiffies", "jiffies.c", "STELA_LINUX_JIFFIES_TEST"),
+            ("linux_device", "device.c", "STELA_LINUX_DEVICE_TEST"),
+            ("linux_file", "file.c", "STELA_LINUX_FILE_TEST"),
+            ("linux_mapping", "mapping.c", "STELA_LINUX_MAPPING_TEST"),
+            ("linux_reclaim", "reclaim.c", "STELA_LINUX_RECLAIM_TEST"),
+            ("linux_sort", "sort.c", "STELA_LINUX_SORT_TEST"),
+            ("linux_usercopy", "usercopy.c", "STELA_LINUX_USERCOPY_TEST"),
+            ("linux_dma", "dma.c", "STELA_LINUX_DMA_TEST"),
+            ("linux_pci", "pci.c", "STELA_LINUX_PCI_TEST"),
+            ("linux_pci_host", "pci_host.c", "STELA_LINUX_PCI_HOST_TEST"),
+            ("linux_service", "service.c", "STELA_LINUX_SERVICE_TEST"),
+            ("linux_vmalloc", "vmalloc.c", "STELA_LINUX_VMALLOC_TEST"),
+            ("linux_refcount", "refcount.c", "STELA_LINUX_REFCOUNT_TEST"),
+            (
+                "linux_const_string",
+                "const_string.c",
+                "STELA_LINUX_CONST_STRING_TEST",
+            ),
+        ] {
+            let mut build = build.clone();
+            build.define(define, None);
+            tests.add(
+                &build,
+                name,
+                &format!("{COMPAT}/kernel/{source}"),
+                &archives,
+            );
+        }
+    }
+}
+
+/// Generic kernel registrations precede every class's registrations in the
+/// canonical image, retaining one definition of their descriptor globals.
+fn captured_units() -> Vec<Unit> {
+    COMMON.iter().copied().map(Unit::from).collect()
+}

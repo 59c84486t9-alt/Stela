@@ -1,13 +1,14 @@
 //! Stela's Xe and i915 port, its dispatch packers and their hosted tests.
 //! Linux's and Mesa's original generators supply the workaround table and the
 //! packet headers, run by a selected Python interpreter.
-use super::native::{self, Linux, Tests};
+use super::native::{self, Linux};
 use std::{
     env, fs,
     path::{Path, PathBuf},
     process::Command,
 };
 use stela_c_build::linux::Module;
+use stela_c_build::linux_build::Tests;
 
 const SOURCE: &str = "src/intel";
 const XE_DRIVER: &str = "../../third_party/linux/drivers/gpu/drm/xe";
@@ -111,12 +112,12 @@ impl Builds {
 }
 
 pub fn port(linux: &Linux, tests: &mut Tests) {
-    let output = native::out_dir();
+    let output = stela_c_build::linux_build::out_dir();
     let python = python();
     let generated = output.join("intel-generated");
     workarounds(&generated);
     let dispatch = output.join("intel-dispatch");
-    let (mut encoders, adapters): (Vec<_>, Vec<_>) = native::sources(SOURCE)
+    let (mut encoders, adapters): (Vec<_>, Vec<_>) = stela_c_build::linux_build::sources(SOURCE)
         .into_iter()
         .partition(|path| named(path, &ENCODERS));
     let (i915, xe): (Vec<_>, Vec<_>) = adapters
@@ -134,8 +135,8 @@ pub fn port(linux: &Linux, tests: &mut Tests) {
     port.encoders
         .include("src/compat/freestanding")
         .define("HAVE_ENDIAN_H", None);
-    native::check_declarations(&port.xe, &xe);
-    native::check_declarations(&port.i915, &i915);
+    stela_c_build::linux_build::check_declarations(&port.xe, &xe);
+    stela_c_build::linux_build::check_declarations(&port.i915, &i915);
     port.xe.clone().files(&xe).compile("stela-intel-xe");
     port.i915.clone().files(&i915).compile("stela-intel-i915");
     port.encoders
@@ -151,9 +152,9 @@ pub fn port(linux: &Linux, tests: &mut Tests) {
         hosted.encoders.define("HAVE_ENDIAN_H", None);
     }
     let mut archives = vec![
-        native::archive(&hosted.xe, "intel-xe-hosted", &xe),
-        native::archive(&hosted.i915, "intel-i915-hosted", &i915),
-        native::archive(&hosted.encoders, "intel-encoders-hosted", &encoders),
+        stela_c_build::linux_build::archive(&hosted.xe, "intel-xe-hosted", &xe),
+        stela_c_build::linux_build::archive(&hosted.i915, "intel-i915-hosted", &i915),
+        stela_c_build::linux_build::archive(&hosted.encoders, "intel-encoders-hosted", &encoders),
     ];
     archives.extend(linux.hosted.iter().cloned());
     let archives = archives.iter().map(PathBuf::as_path).collect::<Vec<_>>();
@@ -207,7 +208,7 @@ pub fn port(linux: &Linux, tests: &mut Tests) {
 /// Use this hosted build's compiler, target, flags and system headers;
 /// the freestanding encoder keeps its separate compiler-derived header route.
 fn hosted_endian_header(base: &cc::Build) -> bool {
-    let source = native::out_dir().join("intel-hosted-endian.c");
+    let source = stela_c_build::linux_build::out_dir().join("intel-hosted-endian.c");
     fs::write(&source, "#include <endian.h>\n").expect("write the Mesa header check");
     base.clone()
         .cargo_metadata(false)
@@ -234,8 +235,9 @@ fn workarounds(generated: &Path) {
     let output = generated.join("generated");
     fs::create_dir_all(&output).expect("create the generated Xe header directory");
     let host = env::var("HOST").expect("Cargo supplies HOST");
-    let generator = native::out_dir().join(format!("xe_gen_wa_oob{}", env::consts::EXE_SUFFIX));
-    native::run(
+    let generator = stela_c_build::linux_build::out_dir()
+        .join(format!("xe_gen_wa_oob{}", env::consts::EXE_SUFFIX));
+    stela_c_build::linux_build::run(
         cc::Build::new()
             .host(&host)
             .target(&host)
@@ -247,10 +249,10 @@ fn workarounds(generated: &Path) {
             .arg("-o")
             .arg(&generator),
     );
-    native::run(
+    stela_c_build::linux_build::run(
         Command::new(&generator)
             .arg(format!("{source}/xe_wa_oob.rules"))
-            .arg(native::out_dir().join("xe_wa_oob.c"))
+            .arg(stela_c_build::linux_build::out_dir().join("xe_wa_oob.c"))
             .arg(output.join("xe_wa_oob.h")),
     );
 }

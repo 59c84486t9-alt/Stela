@@ -2,11 +2,9 @@
 use super::*;
 use crate::native_memory::LinuxPages as HeapPages;
 use core::ptr::NonNull;
-use stela_drivers::{
-    bus::dma::memory::PinnedPages,
-    gpu::linux::pages::{
-        Catalog, Extent, PinRetirement, Provider, Request, Reservation as PageReservation,
-    },
+use stela_drivers::bus::dma::memory::PinnedPages;
+use stela_linux::pages::{
+    Catalog, Extent, PinRetirement, Provider, Request, Reservation as PageReservation,
 };
 
 #[derive(Clone, Copy)]
@@ -30,7 +28,7 @@ impl TaskPageInventory {
         owner: Arc<Reservation>,
         spans: &[(Range<usize>, Range<usize>, u64)],
     ) -> Result<Self, Error> {
-        let required = stela_drivers::gpu::linux::task::stack_requirement().map_err(Error::Work)?;
+        let required = stela_linux::task::stack_requirement().map_err(Error::Work)?;
         let mut rows = Vec::new();
         for (bounds, guard, physical) in spans {
             if bounds.len() != required.usable_bytes()

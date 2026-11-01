@@ -33,11 +33,8 @@ impl Drop for LinuxPages {
 // count prevents retargeting the generation; each allocation goes through the
 // zeroed page source and keeps its backing until the last drop. Unsupported
 // flags and contexts are refused before any heap or cache work.
-unsafe impl stela_drivers::gpu::linux::pages::Provider for LinuxPages {
-    fn validate(
-        &self,
-        request: stela_drivers::gpu::linux::pages::Request,
-    ) -> Result<(), MemoryError> {
+unsafe impl stela_linux::pages::Provider for LinuxPages {
+    fn validate(&self, request: stela_linux::pages::Request) -> Result<(), MemoryError> {
         if SOURCE.registration().generation != self.generation
             || request.atomic
             || !request.basic_ram()
@@ -49,10 +46,7 @@ unsafe impl stela_drivers::gpu::linux::pages::Provider for LinuxPages {
         Ok(())
     }
 
-    fn allocate(
-        &self,
-        request: stela_drivers::gpu::linux::pages::Request,
-    ) -> Result<PinnedPages, MemoryError> {
+    fn allocate(&self, request: stela_linux::pages::Request) -> Result<PinnedPages, MemoryError> {
         self.validate(request)?;
         let bytes = request.bytes().ok_or(MemoryError::InvalidSize)?;
         SOURCE.allocate(bytes, bytes, CacheAttribute::WriteBack)
@@ -66,14 +60,12 @@ unsafe impl stela_drivers::gpu::linux::pages::Provider for LinuxPages {
 /// writers and native IRQ reentry for registration, use and retirement. The
 /// heap and its mapping stay registered through every pin and any quarantined
 /// catalog; the caller retires the catalog before re-registering the heap.
-pub unsafe fn linux_pages() -> Result<
-    stela_drivers::gpu::linux::pages::Catalog<LinuxPages>,
-    stela_drivers::gpu::linux::pages::Error,
-> {
+pub unsafe fn linux_pages()
+-> Result<stela_linux::pages::Catalog<LinuxPages>, stela_linux::pages::Error> {
     // SAFETY: the caller's contract.
     let (provider, reservation) = unsafe { linux_page_source() }?;
     // SAFETY: the provider holds the catalog count for this generation.
-    unsafe { stela_drivers::gpu::linux::pages::Catalog::register(provider, reservation) }
+    unsafe { stela_linux::pages::Catalog::register(provider, reservation) }
 }
 
 /// The heap generation and extent for one composed catalog. Returning the
@@ -81,11 +73,9 @@ pub unsafe fn linux_pages() -> Result<
 ///
 /// # Safety
 /// As `linux_pages`.
-pub(crate) unsafe fn linux_page_source() -> Result<
-    (LinuxPages, stela_drivers::gpu::linux::pages::Reservation),
-    stela_drivers::gpu::linux::pages::Error,
-> {
-    use stela_drivers::gpu::linux::pages::{Error, Reservation};
+pub(crate) unsafe fn linux_page_source()
+-> Result<(LinuxPages, stela_linux::pages::Reservation), stela_linux::pages::Error> {
+    use stela_linux::pages::{Error, Reservation};
     let registration = SOURCE.registration();
     if registration.generation == 0 || registration.bytes == 0 {
         return Err(Error::InvalidReservation);
