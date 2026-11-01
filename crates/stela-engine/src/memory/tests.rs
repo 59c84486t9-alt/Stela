@@ -14,13 +14,18 @@ fn spec(address: u64, size: u64) -> MemoryRegionSpec {
 }
 
 // The OS chooses a candidate; a racing allocation can only cause a safe
-// failure. No test assumes a hardcoded address is free.
+// failure. No test assumes a hardcoded address is free. Tests running at once
+// get the same place from the OS, so each takes its own stretch past it.
 fn candidate(size: usize) -> u64 {
+    static STRETCH: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+    let order = core::sync::atomic::Ordering::Relaxed;
+    let stretch = STRETCH.fetch_add(1, order) % 64;
+    let reserved = (stretch + 1) * size;
     // SAFETY: a temporary ordinary anonymous mapping.
     let pointer = unsafe {
         libc::mmap(
             core::ptr::null_mut(),
-            size,
+            reserved,
             libc::PROT_NONE,
             libc::MAP_ANON | libc::MAP_PRIVATE,
             -1,
@@ -28,9 +33,9 @@ fn candidate(size: usize) -> u64 {
         )
     };
     assert_ne!(pointer, libc::MAP_FAILED);
-    let address = pointer as usize as u64;
+    let address = (pointer as usize + stretch * size) as u64;
     // SAFETY: release only the temporary allocation just created.
-    assert_eq!(unsafe { libc::munmap(pointer, size) }, 0);
+    assert_eq!(unsafe { libc::munmap(pointer, reserved) }, 0);
     address
 }
 
