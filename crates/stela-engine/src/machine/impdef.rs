@@ -506,9 +506,10 @@ impl Entry {
         ) && matches!(self.scope, Scope::Pe)
     }
 
-    /// Whether a read that completes returns [`Registers::storage`].
+    /// Whether a read that completes returns [`Registers::storage`]: the SRAM
+    /// rail's accumulator always reads the 0 its word holds.
     pub fn reads_storage(&self) -> bool {
-        self.stored() && self.encoding != TRACE_VA_C5_7
+        self.stored() && self.encoding != TRACE_VA_C5_7 || self.encoding == CORE_SRM_NRG_ACC_DAT
     }
 
     /// The bits of a value that take a write more than a store to
