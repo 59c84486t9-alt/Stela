@@ -913,9 +913,18 @@ impl State {
 
     /// The lower half's root entries [`State::lower_used`] names.
     fn lower_entries(&self) -> impl Iterator<Item = usize> + use<> {
-        let used = self.lower_used;
         let (first, last) = self.half_entries(LOWER);
-        (first..=last).filter(move |&entry| used[entry / 64] & 1 << (entry % 64) != 0)
+        self.lower_used
+            .into_iter()
+            .enumerate()
+            .flat_map(|(word, mut bits)| {
+                core::iter::from_fn(move || {
+                    let bit = (bits != 0).then(|| bits.trailing_zeros() as usize)?;
+                    bits &= bits - 1;
+                    Some(word * 64 + bit)
+                })
+            })
+            .filter(move |entry| (first..=last).contains(entry))
     }
 
     /// Drop the kept lower halves; their frames return with the half's.
