@@ -133,6 +133,10 @@ impl Model {
         self.active_observations += 1;
         let root = self.values[&RTADDR] & ADDRESS;
         for root_pair in self.visible_table(root).as_chunks::<2>().0 {
+            assert_eq!(
+                root_pair[1], 0,
+                "legacy root reserved high half became visible"
+            );
             if root_pair[0] & 1 == 0 {
                 continue;
             }
@@ -147,6 +151,12 @@ impl Model {
                 }
             }
         }
+    }
+    fn root_bytes(&self) -> Vec<u8> {
+        self.visible_table(self.values[&RTADDR] & ADDRESS)
+            .iter()
+            .flat_map(|word| word.to_le_bytes())
+            .collect()
     }
     fn translation(&self, requester: u16, iova: u64) -> Option<u64> {
         let root = self.visible_table(self.values[&RTADDR] & ADDRESS);
@@ -867,9 +877,10 @@ fn hardware_did_capacity_quarantine_and_software_epochs_never_wrap_or_reuse_earl
         assert_eq!(state.contexts.len(), 2);
         for bus in [0, 3] {
             assert_eq!(
-                state.root.read(bus),
+                state.root.read(bus * 2),
                 state.contexts[&(bus as u8)].physical() | 1
             );
+            assert_eq!(state.root.read(bus * 2 + 1), 0);
         }
         assert_eq!(state.root.read(1), 0);
     }
@@ -1430,4 +1441,138 @@ fn initial_root_drain_precedes_private_attachment_and_requires_write_drain() {
         // SAFETY: every modeled requester and pending transfer has retired.
         unsafe { unit.shut_down() }.unwrap();
     }
+}
+
+#[test]
+fn published_legacy_root_uses_full_entries_for_buses_zero_one_and_255() {
+    let source = source();
+    let registers = ModelRegisters::new();
+    {
+        let mut model = registers.0.lock().unwrap();
+        model.values.insert(ECAP, 0x10 << 8); // Noncoherent walker: only real flushes publish.
+        model.source = Some(source);
+    }
+    // SAFETY: exact stopped register/RAM peer, complete requester inventory.
+    let unit = unsafe {
+        Unit::take_over(
+            registers.clone(),
+            source,
+            &[0x0008, 0x0108, 0xff08],
+            48,
+            core::slice::from_ref(&(0x2000..0x3000)),
+        )
+    }
+    .unwrap();
+    {
+        let model = registers.0.lock().unwrap();
+        let published = model.root_bytes();
+        assert_eq!(published.len(), 4096);
+        let mut contexts = Vec::new();
+        // Spec9.1: inspect actual flushed bytes as 256 sixteen-byte entries,
+        // independently from Table's u64 indexing or production write helpers.
+        for (bus, entry) in published.as_chunks::<16>().0.iter().enumerate() {
+            let low = u64::from_le_bytes(entry[..8].try_into().unwrap());
+            let high = u64::from_le_bytes(entry[8..].try_into().unwrap());
+            assert_eq!(high, 0, "bus {bus} reserved upper half");
+            if matches!(bus, 0 | 1 | 255) {
+                assert_eq!(low & 1, 1, "bus {bus} missing actual root entry");
+                assert_eq!(low & 0xffe, 0, "bus {bus} reserved lower bits");
+                contexts.push(low & ADDRESS);
+            } else {
+                assert_eq!(low, 0, "unowned/adjacent bus {bus} changed");
+            }
+        }
+        contexts.sort_unstable();
+        contexts.dedup();
+        assert_eq!(
+            contexts.len(),
+            3,
+            "each bus must lead to its own context page"
+        );
+        for rid in [0x0008, 0x0108, 0xff08] {
+            assert_eq!(model.translation(rid, 0x2000), Some(0x2000));
+            assert_eq!(model.translation(rid, 0x2fff), Some(0x2fff));
+            assert_eq!(model.translation(rid, 0x3000), None);
+        }
+        for rid in [0x0208, 0x7f08, 0xfe08, 0xff10] {
+            assert_eq!(model.translation(rid, 0x2000), None);
+        }
+    }
+    // SAFETY: this synchronous peer has no attached or in-flight requester.
+    unsafe { unit.shut_down() }.unwrap();
+}
+
+#[test]
+fn dynamic_bus_root_publication_preserves_reserved_halves_and_other_buses() {
+    let source = source();
+    let registers = ModelRegisters::new();
+    {
+        let mut model = registers.0.lock().unwrap();
+        model.values.insert(ECAP, 0x10 << 8);
+        model.source = Some(source);
+    }
+    // SAFETY: exact owned peer; bus1 does not exist in the original inventory.
+    let unit = unsafe {
+        Unit::take_over(
+            registers.clone(),
+            source,
+            &[0x0008, 0xff08],
+            48,
+            core::slice::from_ref(&(0x4000..0x5000)),
+        )
+    }
+    .unwrap();
+    let before = registers.0.lock().unwrap().root_bytes();
+    unit.admit_requester(0x0108).unwrap();
+    let after = {
+        let model = registers.0.lock().unwrap();
+        let after = model.root_bytes();
+        assert_ne!(&after[16..24], &[0; 8], "bus1 low half was not published");
+        for (offset, (&old, &new)) in before.iter().zip(&after).enumerate() {
+            if !(16..24).contains(&offset) {
+                assert_eq!(old, new, "dynamic publication changed byte {offset}");
+            }
+        }
+        for (bus, entry) in after.as_chunks::<16>().0.iter().enumerate() {
+            assert_eq!(&entry[8..], &[0; 8], "bus {bus} reserved high half");
+        }
+        assert_eq!(model.translation(0x0008, 0x4000), Some(0x4000));
+        assert_eq!(model.translation(0xff08, 0x4000), Some(0x4000));
+        assert_eq!(
+            model.translation(0x0108, 0x4000),
+            None,
+            "new context must remain blocked"
+        );
+        assert_eq!(model.translation(0x0208, 0x4000), None);
+        after
+    };
+    // SAFETY: this real model claim is stopped and paired to the new RID.
+    let domain = unsafe { unit.attach_requester(stopped_claim(0x0108)) }.unwrap();
+    let mut mapping = DmaMapping::map(
+        domain.clone(),
+        pages(PAGE, 12, 0x990000, Arc::new(AtomicU64::new(0))),
+        Direction::Bidirectional,
+        u64::MAX,
+    )
+    .unwrap();
+    let address = mapping.address().unwrap();
+    {
+        let model = registers.0.lock().unwrap();
+        assert_eq!(
+            model.root_bytes(),
+            after,
+            "attaching changed a root/adjacent bus entry"
+        );
+        assert_eq!(model.translation(0x0108, address), Some(0x990000));
+        assert_eq!(model.translation(0x0008, 0x4000), Some(0x4000));
+        assert_eq!(model.translation(0xff08, 0x4000), Some(0x4000));
+        assert_eq!(model.translation(0x0208, address), None);
+        assert_eq!(model.translation(0x7f08, address), None);
+    }
+    // SAFETY: actual synchronous peer stopped before unmap/detach.
+    unsafe { mapping.unmap() }.unwrap();
+    // SAFETY: all actual mappings are gone, no device/CPU callback remains.
+    drop(unsafe { domain.detach() }.unwrap());
+    // SAFETY: no requester is attached; initial window peers are also stopped.
+    unsafe { unit.shut_down() }.unwrap();
 }
