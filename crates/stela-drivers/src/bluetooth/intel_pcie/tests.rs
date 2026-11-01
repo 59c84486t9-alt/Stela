@@ -728,13 +728,13 @@ fn silent_tx_with_failed_retirement_keeps_first_fault() {
     assert!(!t.retired);
     assert!(!t.pending.unwrap().complete);
     assert_eq!(t.fault_snapshot().unwrap().boot_stage, ROM);
-    let bytes = t.memory.tx.bytes().to_vec();
+    let bytes = t.memory().tx.bytes().to_vec();
     let writes = m.borrow().writes.len();
     let fault = t.fault().cloned();
     assert!(t.send(Kind::Acl, &[1, 0, 1, 0, 0xbb]).is_err());
     assert!(t.poll().is_err());
     assert!(t.close().is_err());
-    assert_eq!(t.memory.tx.bytes(), bytes);
+    assert_eq!(t.memory().tx.bytes(), bytes);
     assert_eq!(m.borrow().writes.len(), writes);
     assert_eq!(t.fault(), fault.as_ref());
     drop(t);
@@ -771,16 +771,16 @@ fn assert_terminal(t: &mut Transport<ModelPlatform>, m: &Rc<RefCell<Model>>) {
     let fault = t.fault().cloned();
     let writes = m.borrow().writes.len();
     let byte_writes = m.borrow().byte_writes.len();
-    let tx = t.memory.tx.bytes().to_vec();
-    let rx = t.memory.rx.bytes().to_vec();
+    let tx = t.memory().tx.bytes().to_vec();
+    let rx = t.memory().rx.bytes().to_vec();
     assert!(t.start().is_err());
     assert!(t.send(Kind::Acl, &[1, 0, 0, 0]).is_err());
     assert!(t.poll().is_err());
     let _ = t.close();
     assert_eq!(m.borrow().writes.len(), writes);
     assert_eq!(m.borrow().byte_writes.len(), byte_writes);
-    assert_eq!(t.memory.tx.bytes(), tx);
-    assert_eq!(t.memory.rx.bytes(), rx);
+    assert_eq!(t.memory().tx.bytes(), tx);
+    assert_eq!(t.memory().rx.bytes(), rx);
     assert_eq!(t.fault(), fault.as_ref());
 }
 
@@ -2093,3 +2093,5 @@ mod native_models {
         }
     }
 }
+
+mod ownership;

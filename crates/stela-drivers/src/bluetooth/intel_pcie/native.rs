@@ -33,8 +33,19 @@ pub enum Error {
     Mapping(owned::Error),
     Msix(msix::Error),
     Irq(irq::IrqError),
-    Readback { offset: usize, observed: u32 },
-    Handler { offset: usize },
+    Readback {
+        offset: usize,
+        observed: u32,
+    },
+    Handler {
+        offset: usize,
+    },
+    Claim(crate::bus::pci::requester::ClaimError),
+    Power(crate::block::BlockError),
+    Dma {
+        operation: lifetime::DmaOperation,
+        source: crate::bus::dma::mapping::DmaError,
+    },
 }
 impl From<Error> for super::Error {
     fn from(error: Error) -> Self {
@@ -200,6 +211,7 @@ struct Configuration<C: MsiConfigSpace, B: BarAccess> {
     msix: MsixConfig<C, B>,
     fault: Option<Error>,
     released: Option<msix::Owners<C, B>>,
+    retiring_configuration: Option<Mapping>,
 }
 struct NativeSource<C: MsiConfigSpace, B: BarAccess, R: Registers> {
     configuration: Rc<RefCell<Configuration<C, B>>>,
@@ -278,12 +290,13 @@ impl<C: MsiConfigSpace + 'static, B: BarAccess + 'static, R: Registers> NativePl
     /// resources, BAR0 UC mapping and reset epoch; PCI D0, memory decoding and
     /// bus mastering are already acknowledged. All former firmware/driver/CPU
     /// interrupt and DMA owners are drained. Shared combo reset is authorized by
-    /// its coordinator. Supplied DMA is coherent, identity-addressed and
-    /// boot-lifetime reserved for this requester. IRQ routing is real/checked.
+    /// its coordinator. Supplied DMA retains coherent mappings and page pins
+    /// for this requester; bus addresses need not equal physical/CPU addresses.
+    /// IRQ routing is real/checked.
     /// Only one serialized process/deferred owner may service this transport;
     /// the callback's pending flag is its entire work queue. No source,
     /// mapping, DMA or reset owner may be revoked while kept. Native mappings
-    /// stay reserved for the boot even after successful controller close.
+    /// remain kept until explicit device/DMA/IRQ and mapping retirement.
     /// Constructor errors perform no writes and return every exact input owner.
     pub unsafe fn new(
         mut inputs: Inputs<C, B, R>,
@@ -369,6 +382,7 @@ impl<C: MsiConfigSpace + 'static, B: BarAccess + 'static, R: Registers> NativePl
                 msix,
                 fault: None,
                 released: None,
+                retiring_configuration: None,
             }))),
             signals: Some(Arc::new(Signals {
                 registers,
@@ -572,5 +586,116 @@ impl<C: MsiConfigSpace + 'static, B: BarAccess + 'static, R: Registers>
     /// This flag never represents an HCI packet, transfer or firmware result.
     pub fn service_pending(&self) -> bool {
         self.platform.service_pending()
+    }
+}
+
+pub mod cold;
+
+pub mod lifetime;
+
+/// Register owner whose mapping can be retired after all device/CPU users stop.
+/// # Safety
+/// `retire_mapping` retires this same original mapping, with its real context
+/// checks and acknowledged unmap. Error and Drop retain uncertain backing.
+pub unsafe trait RetirableRegisters: Registers {
+    /// # Safety
+    /// This original device cannot restart; payload/IRQ/work/CPU users are
+    /// drained, requester translations detached, and every table/PBA view is
+    /// dropped. No retained callback or accessor can reach these registers.
+    unsafe fn retire_mapping(&mut self) -> core::result::Result<(), Error>;
+}
+// SAFETY: Mapping performs the original context/lease checks and acknowledged
+// unmap. Its failed retirement/Drop preserves the original resources.
+unsafe impl RetirableRegisters for MappedRegisters {
+    unsafe fn retire_mapping(&mut self) -> core::result::Result<(), Error> {
+        // SAFETY: the caller supplies full device/translation/CPU retirement.
+        unsafe { self.mapping.retire() }.map_err(Error::Mapping)
+    }
+}
+
+impl<B: BarAccess + 'static, R: Registers>
+    NativePlatform<crate::bus::pci::owned::OwnedConfig, B, R>
+{
+    fn stop_requester(
+        &mut self,
+        seal: &crate::bus::pci::owned::ConfigRetention,
+    ) -> DriverResult<()> {
+        use crate::bus::pci::{ConfigSpace, requester::validate_stopped};
+        if !self.retired || self.registration.is_some() {
+            return Err(
+                Error::Requirement("actual BT IRQ retirement before requester stop").into(),
+            );
+        }
+        let mut configuration = self.configuration.as_ref().unwrap().borrow_mut();
+        let (function, _, _) = configuration.released.as_mut().ok_or(Error::Requirement(
+            "same original BT configuration after IRQ retirement",
+        ))?;
+        if !function
+            .config()
+            .matches_retention(seal)
+            .map_err(Error::Mapping)?
+        {
+            return Err(Error::Requirement("current original BT configuration epoch").into());
+        }
+        let command = function.config().read16(regs::COMMAND);
+        if command == u16::MAX {
+            return Err(Error::Readback {
+                offset: regs::COMMAND.into(),
+                observed: u32::MAX,
+            }
+            .into());
+        }
+        function.config().write16(
+            regs::COMMAND,
+            command & !regs::COMMAND_MASTER | regs::COMMAND_INTX_DISABLE,
+        );
+        validate_stopped(function).map_err(Error::Claim)?;
+        Ok(())
+    }
+}
+impl<B: BarAccess + 'static, R: RetirableRegisters>
+    NativePlatform<crate::bus::pci::owned::OwnedConfig, B, R>
+{
+    /// # Safety
+    /// This original transport's engines/BME and IRQ/work/CPU users are
+    /// retired; all DMA buffers are unmapped and its unique attachment detached.
+    /// The configuration seal was checked before that retirement and is now
+    /// released. No reset, resource reassignment or new accessor can intervene.
+    unsafe fn retire_resources(&mut self) -> DriverResult<()> {
+        if !self.retired || self.registration.is_some() {
+            return Err(Error::Requirement("current BT IRQ/resource retirement").into());
+        }
+        let signals = Arc::get_mut(self.signals.as_mut().unwrap()).ok_or(Error::Requirement(
+            "all original BT callback register owners released",
+        ))?;
+        let configuration = self.configuration.as_ref().unwrap();
+        if Rc::strong_count(configuration) != 1 {
+            return Err(
+                Error::Requirement("all original BT IRQ configuration owners released").into(),
+            );
+        }
+        let mut configuration = configuration.borrow_mut();
+        if configuration.retiring_configuration.is_none() {
+            let (function, retained, bars) = configuration.released.take().ok_or(
+                Error::Requirement("original BT configuration retirement owner"),
+            )?;
+            // Drop every MSI-X mapping view before retiring the register mapping.
+            drop(bars);
+            drop(retained);
+            configuration.retiring_configuration = Some(function.into_config().into_mapping());
+        }
+        // SAFETY: full caller proof, unique signals and all table/PBA views gone.
+        unsafe { signals.registers.retire_mapping() }?;
+        // SAFETY: the unique requester attachment already released its binding,
+        // no live config writer/view remains and IRQ/work/CPU users are retired.
+        unsafe {
+            configuration
+                .retiring_configuration
+                .as_mut()
+                .unwrap()
+                .retire()
+        }
+        .map_err(Error::Mapping)?;
+        Ok(())
     }
 }

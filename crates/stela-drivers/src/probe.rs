@@ -948,12 +948,10 @@ pub unsafe fn probe_with_provider(
                         // SAFETY: as for tg3 below.
                         match unsafe { native::intel_bluetooth(services, address, handoff.clock) } {
                             Ok(mut transport) => {
-                                let initialization =
-                                    crate::bluetooth::intel_pcie::firmware::initialize(
-                                        &mut transport,
-                                        firmware,
-                                        devices.bluetooth_platform.platform_inputs(),
-                                    );
+                                let initialization = transport.initialize_firmware(
+                                    firmware,
+                                    devices.bluetooth_platform.platform_inputs(),
+                                );
                                 devices.pcie_bluetooth.push(native::PcieHci {
                                     location: alloc::format!("{address}"),
                                     controller: native::PcieController::Intel {

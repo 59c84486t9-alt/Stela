@@ -162,14 +162,15 @@ impl OwnedConfig {
         binding.matches_mapping(&self.mapping)
     }
 
-    pub(super) fn matches_retention(
-        &self,
-        retained: &ConfigRetention,
-    ) -> Result<bool, MappingError> {
+    /// Compare the original retained configuration permission, not a BDF or
+    /// physical label. This grants no device stop, drain or reset permission.
+    pub fn matches_retention(&self, retained: &ConfigRetention) -> Result<bool, MappingError> {
         retained.matches_mapping(&self.mapping)
     }
 
-    pub(super) fn retain_epoch(&self) -> Result<ConfigRetention, MappingError> {
+    /// Keep a read-only epoch seal for this exact original configuration.
+    /// It pins mapping retirement until dropped and exposes no register writer.
+    pub fn retain_epoch(&self) -> Result<ConfigRetention, MappingError> {
         Ok(ConfigRetention {
             view: self.mapping.view(0..FUNCTION_BYTES)?,
         })
