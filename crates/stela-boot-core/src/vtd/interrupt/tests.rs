@@ -155,8 +155,6 @@ fn exact_sid_remapped_message_has_independent_index_and_cpu_vector() {
         }
     );
     let mut hardware = f.registers.0.lock().unwrap();
-    hardware.request(SID + 1, 0);
-    assert_eq!(hardware.rejected, 1);
     hardware.request(SID, 0);
     assert_eq!(hardware.fabric, [(0, 0x51)]);
     drop(hardware);
@@ -265,12 +263,71 @@ fn late_old_index_is_rejected_after_vector_reuse_and_fresh_reprobe_index() {
     let mut h = f.registers.0.lock().unwrap();
     h.release_upstream();
     assert_eq!(h.rejected, 1);
+    assert!(h.interrupt_faults.is_empty());
+    assert!(h.events.contains(&"suppressed-fault"));
+    assert_eq!(h.values.get(&FSTS).copied().unwrap_or(0), 0);
     assert!(h.fabric.is_empty());
     assert!(h.irr.is_empty());
     h.request(SID, 1);
     assert_eq!(h.fabric, [(1, 0x56)]);
     drop(h);
     terminal.check().unwrap();
+    new.message().unwrap();
+}
+
+#[test]
+fn absent_terminal_suppression_never_hides_unqualified_or_live_source_faults() {
+    for reason in [0x21, 0x25, 0x26] {
+        let f = Fixture::new(true);
+        f.enable();
+        let (mut old, old_pin) = f.route(1, 0x51);
+        fence(&mut old).unwrap();
+        let (live, live_pin) = f.route(2, 0x52);
+        {
+            let mut h = f.registers.0.lock().unwrap();
+            // First demonstrate that the real absent entry's FPD suppresses
+            // only its qualified fault, without opening its delivery route.
+            h.request(SID, old.identity().index);
+            assert_eq!(h.rejected, 1);
+            assert!(h.interrupt_faults.is_empty());
+            assert!(h.fabric.is_empty());
+            match reason {
+                0x21 => h.request(SID, ENTRIES as u16),
+                0x25 => h.compatibility_request(),
+                0x26 => h.request(SID + 1, live.identity().index),
+                _ => unreachable!(),
+            }
+            assert_eq!(h.interrupt_faults, [reason]);
+            assert_ne!(h.values[&FSTS] & (1 << 1), 0);
+        }
+        assert_eq!(fence(&mut old), Err(VtdError::Invalidation));
+        assert!(live.message().is_err());
+        drop(old);
+        drop(live);
+        assert_eq!(old_pin.drops.load(Ordering::Relaxed), 0);
+        assert_eq!(live_pin.drops.load(Ordering::Relaxed), 0);
+    }
+}
+
+#[test]
+fn unexpected_unallocated_absent_entry_still_faults_and_keeps_the_root() {
+    let f = Fixture::new(true);
+    f.enable();
+    let (mut route, source) = f.route(1, 0x51);
+    {
+        let mut h = f.registers.0.lock().unwrap();
+        h.request(SID, (ENTRIES - 1) as u16);
+        assert_eq!(h.interrupt_faults, [0x22]);
+        assert!(h.fabric.is_empty());
+    }
+    assert_eq!(fence(&mut route), Err(VtdError::Invalidation));
+    drop(route);
+    assert_eq!(source.drops.load(Ordering::Relaxed), 0);
+    // SAFETY: symbolic peers only; an unsuppressed fault cannot grant release.
+    assert!(unsafe { f.unit.shut_down() }.is_err());
+    drop(f.unit);
+    assert_eq!(f.root.drops.load(Ordering::Relaxed), 0);
+    assert_eq!(f.pool.released.load(Ordering::Relaxed), 0);
 }
 
 #[test]

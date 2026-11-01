@@ -128,6 +128,7 @@ pub(super) struct Hardware {
     pub(super) upstream: Vec<(u16, u16)>,
     pub(super) irr: Vec<u8>,
     pub(super) rejected: usize,
+    pub(super) interrupt_faults: Vec<u8>,
     cache: BTreeMap<u16, [u64; 2]>,
     drains: Vec<Option<u16>>,
     visible: BTreeMap<u64, Vec<u64>>,
@@ -167,21 +168,47 @@ impl Hardware {
             self.events.push("late-status");
         }
     }
+    fn reject_interrupt(&mut self, reason: u8, entry: Option<[u64; 2]>) {
+        self.rejected += 1;
+        self.events.push("rejected");
+        let qualified = matches!(reason, 0x22 | 0x24 | 0x26);
+        if qualified && entry.is_some_and(|entry| entry[0] & 2 != 0) {
+            self.events.push("suppressed-fault");
+            return;
+        }
+        self.interrupt_faults.push(reason);
+        *self.values.entry(FSTS).or_default() |= 1 << 1;
+        self.events.push("interrupt-fault");
+    }
+    pub(super) fn compatibility_request(&mut self) {
+        // This fixture owns the explicit compatibility-blocked root policy.
+        assert_ne!(self.values[&GSTS] & u64::from(INTERRUPT_REMAP), 0);
+        assert_eq!(self.values[&GSTS] & u64::from(COMPATIBILITY), 0);
+        self.reject_interrupt(0x25, None);
+    }
     pub(super) fn request(&mut self, sid: u16, index: u16) {
-        let base = self.values[&IRTA] & !0xfff;
+        let irta = self.values[&IRTA];
+        let entries = 1u32 << ((irta & 15) + 1);
+        if u32::from(index) >= entries {
+            self.reject_interrupt(0x21, None);
+            return;
+        }
+        let base = irta & !0xfff;
         let entry = self.cache.get(&index).copied().unwrap_or_else(|| {
             [
                 self.word(base + u64::from(index) * 16),
                 self.word(base + u64::from(index) * 16 + 8),
             ]
         });
-        if entry[0] & 1 == 0
-            || entry[1] & 0xffff != u64::from(sid)
+        if entry[0] & 1 == 0 {
+            self.reject_interrupt(0x22, Some(entry));
+            return;
+        }
+        if entry[1] & 0xffff != u64::from(sid)
             || (entry[1] >> 18) & 3 != 1
             || (entry[1] >> 16) & 3 != 0
         {
-            self.rejected += 1;
-            self.events.push("rejected");
+            self.reject_interrupt(0x26, Some(entry));
             return;
         }
         self.cache.insert(index, entry);
@@ -323,6 +350,7 @@ impl RegistersPeer {
             upstream: Vec::new(),
             irr: Vec::new(),
             rejected: 0,
+            interrupt_faults: Vec::new(),
             cache: BTreeMap::new(),
             drains: Vec::new(),
             visible: BTreeMap::new(),

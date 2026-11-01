@@ -25,6 +25,10 @@ const IR_SUPPORT: u64 = 1 << 3;
 const EIM_REQUIRED: u64 = 1 << 61;
 const ENTRIES: usize = PAGE / 16;
 const TABLE_SIZE: u64 = 7;
+// P=0 still blocks every request. FPD=1 suppresses the qualified absent-entry
+// fault for intentionally delayed old traffic (VT-d 5.0 sections 5.1.4.1, 9.9).
+// Unqualified faults and live-entry source checking remain fully enabled.
+const BLOCKED_ENTRY: u64 = 1 << 1;
 
 /// Immutable context endpoint shared from the original whole-root owner.
 ///
@@ -715,7 +719,8 @@ impl<R: Registers> Route<R> {
                 return Err(VtdError::Exhausted);
             }
             irq.poisoned = true;
-            irq.table.write(usize::from(self.identity.index) * 2, 0);
+            irq.table
+                .write(usize::from(self.identity.index) * 2, BLOCKED_ENTRY);
             irq.publish(&self.unit, &irq.table);
             irq.poisoned = false;
             irq.execute(
