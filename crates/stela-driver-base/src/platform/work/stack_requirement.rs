@@ -194,6 +194,7 @@ impl Catalog {
         Ok(result)
     }
 }
+#[cfg(any(test, target_arch = "x86_64"))]
 pub(super) fn compatible(requirement: Option<StackRequirement>, geometry: Geometry) -> bool {
     requirement.is_none_or(|required| required.accepts(geometry))
 }

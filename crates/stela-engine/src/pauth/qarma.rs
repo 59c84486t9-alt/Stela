@@ -23,6 +23,7 @@ const INV_SHUFFLE: [u8; 16] = [3, 6, 12, 9, 14, 11, 1, 4, 8, 13, 7, 2, 5, 0, 10,
 const TWEAK_SHUFFLE: [u8; 16] = [4, 5, 6, 7, 11, 2, 3, 8, 12, 13, 14, 15, 0, 1, 10, 9];
 const TWEAK_ROTATED: u16 = 0xd894;
 /// The S-box σ₂ (PRINCE's), cell value to cell value.
+#[cfg(any(test, target_arch = "x86_64"))]
 const SBOX: [u8; 16] = [11, 6, 8, 15, 12, 0, 9, 14, 3, 7, 4, 5, 13, 2, 1, 10];
 const ROUND_CONSTANTS: [u64; 5] = [
     0,
@@ -52,11 +53,13 @@ const fn reflected(key_high: u64) -> u64 {
 }
 
 /// ω, the tweak cells' LFSR: one step right, the new top bit b0 ^ b1.
+#[cfg(any(test, target_arch = "x86_64"))]
 const fn lfsr(cell: u8) -> u8 {
     (cell >> 1) | (((cell ^ (cell >> 1)) & 1) << 3)
 }
 
 /// A cell rotated left `bits`.
+#[cfg(any(test, target_arch = "x86_64"))]
 const fn rotate_cell(cell: u8, bits: u32) -> u8 {
     ((cell << bits) | (cell >> (4 - bits))) & 15
 }
@@ -71,6 +74,7 @@ const fn inverse(order: &[u8; 16]) -> [u8; 16] {
     out
 }
 
+#[cfg(any(test, target_arch = "x86_64"))]
 const INV_SBOX: [u8; 16] = inverse(&SBOX);
 const _: () = {
     let check = inverse(&SHUFFLE);

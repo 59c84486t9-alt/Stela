@@ -1,5 +1,7 @@
 //! Durable translation-pack writes through an owned block-device adapter.
+#[cfg(any(test, target_arch = "x86_64"))]
 use alloc::vec::Vec;
+#[cfg(any(test, target_arch = "x86_64"))]
 use stela_engine::translations::pack::Layout;
 
 /// Why a pack was not written in place.

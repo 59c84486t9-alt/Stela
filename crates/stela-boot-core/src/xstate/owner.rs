@@ -12,6 +12,7 @@ use core::marker::PhantomData;
 #[derive(Debug)]
 #[must_use = "retain the actual xstate owner with its descriptor and IST resources"]
 pub struct XstateOwner {
+    #[cfg(target_arch = "x86_64")]
     processor: u32,
     layout: Layout,
     _local: PhantomData<*mut ()>,
@@ -53,6 +54,8 @@ impl XstateOwner {
         })
     }
 
+    /// # Safety
+    /// None: this host has no state to capture.
     #[cfg(not(target_arch = "x86_64"))]
     pub unsafe fn capture() -> Result<Self, LayoutError> {
         Err(LayoutError::UnsupportedHost)

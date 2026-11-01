@@ -54,8 +54,7 @@ const CROSS: [(&str, &[&str]); 3] = [
 ];
 const CROSS_TARGET_DIR: &str = "target/cross";
 /// The host the release build runs on, which must compile the whole
-/// workspace. Its native paths are x86-64's, so this is a check for errors
-/// and leaves linting to the lanes above.
+/// workspace with no warnings, though only x86-64 runs the native paths.
 const RELEASE_HOST: &str = "aarch64-apple-darwin";
 const DENY: [&str; 3] = ["--", "-D", "warnings"];
 
@@ -135,9 +134,10 @@ pub fn run(fix: bool, nvk: bool) -> Result<()> {
             .args(DENY);
         clippy
     }));
-    let mut release_host = command(["check", "--workspace", "--locked"]);
+    let mut release_host = command(["clippy", "--workspace", "--locked"]);
     release_host
         .args(["--target", RELEASE_HOST, "--target-dir", CROSS_TARGET_DIR])
+        .args(DENY)
         // Nothing links, so build scripts' C objects go unused, and this host
         // has no Apple headers to compile them against.
         .env("CC_aarch64_apple_darwin", "true")

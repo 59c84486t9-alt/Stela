@@ -74,6 +74,7 @@ impl<'a> BspRoster<'a> {
     pub fn current(capture: &'a Capture, worker: usize) -> Result<Self> {
         Self::observed(capture, worker, current_apic()?)
     }
+    #[cfg(any(test, target_arch = "x86_64"))]
     fn observed(capture: &'a Capture, worker: usize, current: u32) -> Result<Self> {
         let processors = capture
             .processors
@@ -163,6 +164,7 @@ fn current_apic() -> Result<u32> {
 /// Snapshot that the shared identity decoder must correctly refuse. The query
 /// seam permits direct collector regression tests without a privileged owner
 /// or guessed processor identity; production above queries this CPU.
+#[cfg(any(test, target_arch = "x86_64"))]
 fn current_identity(mut query: impl FnMut(u32, u32) -> native::Cpuid) -> native::Snapshot {
     let identity = query(0, 0);
     let extended = query(0x8000_0000, 0);

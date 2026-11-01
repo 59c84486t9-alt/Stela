@@ -279,6 +279,10 @@ pub struct Queue<const N: usize> {
     owner: ManuallyDrop<RetainedOwner>,
     state: ManuallyDrop<UnsafeCell<State<N>>>,
     held: AtomicBool,
+    #[cfg_attr(
+        not(target_arch = "x86_64"),
+        expect(dead_code, reason = "only the x86-64 native work lanes use it")
+    )]
     inspection: AtomicBool,
     #[cfg(target_arch = "x86_64")]
     completing: AtomicBool,

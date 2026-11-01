@@ -22,7 +22,9 @@ const HALFWORD_BYTES: usize = 2;
 const WORD_BYTES: usize = 4;
 const DOUBLEWORD_BYTES: usize = 8;
 const QUADWORD_BYTES: usize = 16;
+#[cfg(any(test, target_arch = "x86_64"))]
 const BITS_PER_BYTE: usize = 8;
+#[cfg(any(test, target_arch = "x86_64"))]
 const DOUBLEWORD_BITS: usize = DOUBLEWORD_BYTES * BITS_PER_BYTE;
 const SCA_BYTES: usize = QUADWORD_BYTES;
 const SCA_OFFSET_MASK: usize = SCA_BYTES - 1;
@@ -216,6 +218,7 @@ pub(super) unsafe fn write_part(
 /// source permission/tag checks, writer participation and guest ordering intent.
 /// Unexpected host faults require a separate resumable adapter.
 #[inline]
+#[cfg(any(test, target_arch = "x86_64"))]
 pub(super) unsafe fn exchange_part(
     pointer: *mut u8,
     bytes: usize,

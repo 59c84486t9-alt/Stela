@@ -5,6 +5,7 @@ use alloc::string::String;
 
 const CPUID_AVX_HARDWARE: u32 = 1 << 28;
 /// CPUID.1:ECX bit 27: the OS set CR4.OSXSAVE, so XGETBV reads XCR0.
+#[cfg(any(test, target_arch = "x86_64"))]
 const CPUID_OSXSAVE: u32 = 1 << 27;
 /// XCR0 bits 1 and 2: the OS saves XMM and YMM state.
 const XCR0_AVX_STATE: u64 = 0x6;
