@@ -175,7 +175,7 @@ impl NativeProcessorState<'_> {
         *self.native_system = None;
         *self.debug = None;
         self.pointer.close();
-        *self.mirrors = Mirrors::default();
+        self.mirrors.close_all();
         *self.device_lines = None;
         let pmu_timed = cpu.pmu.as_ref().map(|monitor| monitor.timed());
         let amu_timed = cpu.amu.as_ref().map(|monitors| monitors.timed());

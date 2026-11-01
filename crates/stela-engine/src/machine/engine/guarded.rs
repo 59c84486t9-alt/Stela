@@ -29,7 +29,6 @@ impl<H: Host, D: Devices> Machine<H, D> {
             self.degrade(requirement);
         }
         let trace = self.monitor_before(MonitorKind::GuardedEnter { immediate });
-        let from = self.mirror_state();
         if self.cpu.guarded_enter(immediate).is_err() {
             return self.undefined();
         }
@@ -40,13 +39,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
             pc: self.cpu.pc,
         });
         self.monitor_after(trace);
-        self.transitioned(from);
+        self.transitioned();
         Ok(())
     }
 
     /// GEXIT (`Cpu::guarded_exit`).
     fn guarded_exit(&mut self) -> Step {
-        let from = self.mirror_state();
         if self.cpu.pstate.guarded && self.cpu.pstate.el != 0 {
             let bank = &self.cpu.apple.guarded[usize::from(self.cpu.pstate.el) - 1];
             self.guest_entry(bank.spsr, bank.aspsr & ASPSR_GUARDED != 0);
@@ -64,7 +62,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     pc: self.cpu.pc,
                 });
                 self.monitor_after(trace);
-                self.transitioned(from);
+                self.transitioned();
                 Ok(())
             }
         }
@@ -160,24 +158,24 @@ pub(super) mod tests {
             .set(SystemRegister::TPIDR_EL1, 0, 0x7000);
         machine.system_instruction(MRS_TPIDR_EL1).unwrap();
         machine.system_instruction(MRS_GXF_STATUS).unwrap();
-        let el1 = machine.mirrors.cells;
+        let el1 = *machine.mirrors.cells();
         assert_eq!((el1[thread].readable, el1[thread].value), (1, 0x7000));
         assert_eq!((el1[status].readable, el1[status].value), (1, 0));
         // GL1's cells are its own: closed until read there.
         machine.system_instruction(GENTER).unwrap();
-        assert!(machine.mirrors.cells.iter().all(|cell| cell.readable == 0));
+        assert!(machine.mirrors.cells().iter().all(|cell| cell.readable == 0));
         machine.system_instruction(MRS_GXF_STATUS).unwrap();
-        let gl1 = machine.mirrors.cells;
+        let gl1 = *machine.mirrors.cells();
         assert_eq!((gl1[status].readable, gl1[status].value), (1, 1));
         machine.system_instruction(GEXIT).unwrap();
-        assert_eq!(machine.mirrors.cells, el1);
+        assert_eq!(*machine.mirrors.cells(), el1);
         machine.system_instruction(GENTER).unwrap();
-        assert_eq!(machine.mirrors.cells, gl1);
+        assert_eq!(*machine.mirrors.cells(), gl1);
         // A write of TPIDR_EL1 reaches its cells alone.
         machine.cpu.state.x[9] = 0x8000;
         machine.system_instruction(MSR_TPIDR_EL1).unwrap();
         machine.system_instruction(GEXIT).unwrap();
-        let cells = machine.mirrors.cells;
+        let cells = *machine.mirrors.cells();
         assert_eq!((cells[thread].value, cells[status]), (0x8000, el1[status]));
     }
 

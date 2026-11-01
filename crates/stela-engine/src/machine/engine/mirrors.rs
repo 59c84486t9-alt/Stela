@@ -58,29 +58,30 @@ pub(super) const MRS_READ: u32 = 1 << 21;
 pub(super) const STORED_CELLS: usize = 64;
 
 /// The cells of the [`MIRRORED`] registers, in its order, and the
-/// [`STORED_CELLS`]: native code reads `cells`, the running PE's at its EL
-/// and GXF state. A read's value and plainness follow from System registers
-/// and PSTATE, of which an exception entry or return, GENTER or GEXIT changes
-/// these and the masks alone: `banks` keeps the cells each state left, which
-/// it finds again ([`Mirrors::transition`]). Only SP_EL0 follows SPSel, whose
-/// thunks read `selected`, PSTATE.SP while native code runs, which can change
-/// it (`x86_64::register_read::stack_select_thunk`).
+/// [`STORED_CELLS`]: native code reads those of the PE's EL and GXF state,
+/// the bank of `banks` that `state` names. A read's value and plainness
+/// follow from System registers and PSTATE, of which an exception entry or
+/// return, GENTER or GEXIT changes these and the masks alone: each state
+/// keeps its cells, which it finds again ([`Mirrors::transition`]). Only
+/// SP_EL0 follows SPSel, whose thunks read `selected`, PSTATE.SP while native
+/// code runs, which can change it
+/// (`x86_64::register_read::stack_select_thunk`).
 /// Anything else that changes derived state closes every cell of every bank.
 /// The last of them says whether writes of the masks complete natively
 /// ([`MASK_WRITES`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct Mirrors {
-    pub(super) cells: [register_read::Cell; CELLS],
     pub(super) banks: [[register_read::Cell; CELLS]; MIRROR_STATES],
+    state: usize,
+    /// A bit per bank that was the PE's since cells last closed, which only
+    /// those can hold open.
+    entered: u8,
     pub(super) selected: u64,
 }
 
-/// Where native code finds the cell at `index`.
+/// Where native code finds the cell at `index` of the PE's state.
 pub(super) const fn cell_place(index: usize) -> Place {
-    Place::new(
-        Anchor::Mirrors,
-        offset_of!(Mirrors, cells) + index * size_of::<register_read::Cell>(),
-    )
+    Place::new(Anchor::Cells, index * size_of::<register_read::Cell>())
 }
 
 /// Where native code finds [`Mirrors::selected`].
@@ -128,8 +129,9 @@ impl Default for Mirrors {
     fn default() -> Self {
         let cell = register_read::Cell::default();
         Self {
-            cells: [cell; CELLS],
             banks: [[cell; CELLS]; MIRROR_STATES],
+            state: 0,
+            entered: 1,
             selected: 0,
         }
     }
@@ -148,16 +150,38 @@ pub(super) fn mirror_state(el: u8, guarded: bool) -> usize {
 }
 
 impl Mirrors {
-    /// Keep the cells of state `from` and take those of `to`.
-    pub(super) fn transition(&mut self, from: usize, to: usize) {
-        self.banks[from] = self.cells;
-        self.cells = self.banks[to];
+    /// The cells of the PE's state, at what [`Anchor::Cells`] holds.
+    pub(super) fn cells(&self) -> &[register_read::Cell; CELLS] {
+        &self.banks[self.state]
+    }
+
+    /// The PE is in state `to`: native code reads its cells.
+    pub(super) fn transition(&mut self, to: usize) {
+        self.state = to;
+        self.entered |= 1 << to;
+    }
+
+    /// Close every cell. A closed cell keeps no value a mispredicted native
+    /// read could use (FEAT_CSV3's System register rule).
+    pub(super) fn close_all(&mut self) {
+        for (state, cells) in self.banks.iter_mut().enumerate() {
+            if self.entered >> state & 1 != 0 {
+                *cells = [register_read::Cell::default(); CELLS];
+            }
+        }
+        self.entered = 1 << self.state;
+    }
+
+    /// Whether every cell is closed.
+    #[cfg(test)]
+    pub(super) fn closed(&self) -> bool {
+        self.banks.iter().flatten().all(|cell| cell.readable == 0)
     }
 
     /// The register of cell `index` now holds `value`, as its open cells
     /// in every state read it.
     pub(super) fn update(&mut self, index: usize, value: u64) {
-        for cells in core::iter::once(&mut self.cells).chain(&mut self.banks) {
+        for cells in &mut self.banks {
             if cells[index].readable != 0 {
                 cells[index].value = value;
             }
@@ -180,7 +204,7 @@ impl Mirrors {
 
     /// Close the cells of one register in every state.
     pub(super) fn close(&mut self, index: usize) {
-        for cells in core::iter::once(&mut self.cells).chain(&mut self.banks) {
+        for cells in &mut self.banks {
             cells[index] = register_read::Cell::default();
         }
     }
@@ -278,13 +302,13 @@ pub(super) fn storable(encoding: Encoding) -> bool {
 impl core::ops::Index<usize> for Mirrors {
     type Output = register_read::Cell;
     fn index(&self, index: usize) -> &Self::Output {
-        &self.cells[index]
+        &self.banks[self.state][index]
     }
 }
 
 impl core::ops::IndexMut<usize> for Mirrors {
     fn index_mut(&mut self, index: usize) -> &mut Self::Output {
-        &mut self.cells[index]
+        &mut self.banks[self.state][index]
     }
 }
 

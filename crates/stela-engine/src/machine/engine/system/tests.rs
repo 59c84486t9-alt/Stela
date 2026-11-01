@@ -1469,7 +1469,7 @@ fn counter_cells_take_the_count_at_each_transition() {
     let read = machine.cpu.state.x[3];
     machine.cpu.retired += 100;
     assert_eq!(machine.mirrors[index].value, read);
-    machine.transitioned(machine.mirror_state());
+    machine.transitioned();
     assert_eq!(machine.mirrors[index].value, read + 100);
 }
 

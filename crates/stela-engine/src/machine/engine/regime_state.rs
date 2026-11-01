@@ -42,25 +42,22 @@ impl<H: Host, D: Devices> Machine<H, D> {
     pub(super) fn derived_changed(&mut self) {
         self.forget_derived();
         self.device_lines = None;
-        // A closed cell keeps no value a mispredicted native read could use
-        // (FEAT_CSV3's System register rule).
-        *self.mirrors = Mirrors::default();
+        self.mirrors.close_all();
     }
 
-    /// An exception entry or return, GENTER or GEXIT moved the PE from EL
-    /// and GXF state `from`: what derives from PSTATE goes, but the mirrored
-    /// reads keep their cells per state ([`Self::cells_moved`]).
-    pub(super) fn transitioned(&mut self, from: usize) {
+    /// An exception entry or return, GENTER or GEXIT moved the PE to another
+    /// EL or GXF state: what derives from PSTATE goes, but the mirrored reads
+    /// keep their cells per state ([`Self::cells_moved`]).
+    pub(super) fn transitioned(&mut self) {
         self.forget_derived();
-        self.cells_moved(from);
+        self.cells_moved();
     }
 
-    /// The cells of the PE's state replace those of state `from`: an open
-    /// DAIF cell reads the current masks and an open counter cell the count.
-    pub(super) fn cells_moved(&mut self, from: usize) {
+    /// The cells of the PE's state take over: an open DAIF cell reads the
+    /// current masks and an open counter cell the count.
+    pub(super) fn cells_moved(&mut self) {
         let pstate = self.cpu.pstate;
-        self.mirrors
-            .transition(from, mirror_state(pstate.el, pstate.guarded));
+        self.mirrors.transition(self.mirror_state());
         let daif = &mut self.mirrors[DAIF_MIRROR];
         if daif.readable != 0 {
             daif.value = daif_register(pstate.daif);

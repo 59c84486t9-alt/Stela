@@ -206,7 +206,6 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// `AuthIB` and `AArch64_ExceptionReturn`).
     pub(super) fn exception_return(&mut self, key: Option<AuthenticationKey>) -> Step {
         let pc = self.cpu.pc;
-        let from = self.mirror_state();
         if self.cpu.pstate.el == 0 {
             return self.undefined();
         }
@@ -277,7 +276,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             pc: self.cpu.pc,
         });
         self.monitor_after(trace);
-        self.transitioned(from);
+        self.transitioned();
         Ok(())
     }
 
@@ -307,6 +306,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// that completes as a plain read, taking no exception, opens its cell
     /// with the value read.
     pub(super) fn register_instruction(&mut self, word: u32, access: RegisterAccess) -> Step {
+        self.mirrors.transition(self.mirror_state());
         if access.encoding() == registers::encodings::SPRR_PERM_EL0
             && access.direction() == Direction::Write
         {
@@ -827,7 +827,6 @@ impl<H: Host, D: Devices> Machine<H, D> {
             fault_address: exception.fault_address,
         });
         let (from_el, from_guarded) = (self.cpu.pstate.el, self.cpu.pstate.guarded);
-        let from = self.mirror_state();
         self.cpu.take(exception);
         self.statistics.exceptions += 1;
         self.host.report(&Event::Exception {
@@ -839,7 +838,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             fault_address: exception.fault_address,
         });
         self.monitor_after(trace);
-        self.transitioned(from);
+        self.transitioned();
     }
 
     /// Resume a stopped architectural exception after a validation fixture has

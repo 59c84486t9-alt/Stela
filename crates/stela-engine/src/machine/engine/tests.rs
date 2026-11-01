@@ -5301,7 +5301,7 @@ fn stored_reads_complete_natively_from_the_live_register() {
     machine.derived_changed();
     machine.cpu.pstate = Pstate::reset(0);
     machine.system_instruction(MRS).unwrap();
-    assert_eq!(*machine.mirrors, Mirrors::default());
+    assert!(machine.mirrors.closed());
     // FPCR completes from the frame: its cell has no storage to name.
     let mut fp = super::tests::machine(&[ADD, MRS_FPCR, ADD]);
     fp.host.exits = vec![NativeExit::Exit {
@@ -5381,7 +5381,7 @@ fn mirrored_reads_complete_natively_from_the_open_cell() {
     );
     machine.derived_changed();
     // Closed, the cell keeps no value a mispredicted read could use.
-    assert_eq!(*machine.mirrors, Mirrors::default());
+    assert!(machine.mirrors.closed());
     // An Apple register read leaves it open.
     machine.cpu.pc = base + 4;
     machine.system_instruction(MRS).unwrap();
@@ -5395,7 +5395,10 @@ fn mirrored_reads_complete_natively_from_the_open_cell() {
     machine.system_instruction(MRS).unwrap();
     machine.system_instruction(MRS_DAIF).unwrap();
     assert_eq!(machine.mirrors[daif].readable, 1);
-    machine.mirrors.banks[0][thread].readable = 1;
+    let state = machine.mirror_state();
+    machine.mirrors.transition(0);
+    machine.mirrors[thread].readable = 1;
+    machine.mirrors.transition(state);
     machine.cpu.state.x[9] = 0x6000;
     machine.system_instruction(MSR).unwrap();
     assert_eq!(machine.mirrors[thread].value, 0x6000);
@@ -5421,7 +5424,7 @@ fn mirrored_reads_complete_natively_from_the_open_cell() {
     assert_eq!(machine.mirrors[daif], cell);
     assert_eq!(machine.mirrors[thread].readable, 1);
     machine.system_instruction(DAIFCLR_D).unwrap();
-    assert_eq!(*machine.mirrors, Mirrors::default());
+    assert!(machine.mirrors.closed());
     // MSR DAIF of the register keeps them as well, unless it changes D.
     const MSR_DAIF: u32 = 0xd51b_4229; // msr daif, x9
     machine.system_instruction(MRS).unwrap();
@@ -5439,7 +5442,7 @@ fn mirrored_reads_complete_natively_from_the_open_cell() {
     );
     machine.cpu.state.x[9] = masks ^ 1 << 9;
     machine.system_instruction(MSR_DAIF).unwrap();
-    assert_eq!(*machine.mirrors, Mirrors::default());
+    assert!(machine.mirrors.closed());
     // A read to XZR has no cell to open, nor a thunk.
     assert_eq!(mirrored_read(base, 0xd538_d09f), None); // mrs xzr, tpidr_el1
     // A TTBR0 or SPRR_PERM write changes translation alone: the host
@@ -5525,7 +5528,7 @@ fn sprr_perm_el0_writes_reopen_its_open_cell() {
     machine.system_instruction(MRS).unwrap();
     machine.cpu.state.x[9] = 0;
     machine.system_instruction(MSR_SPRR_CONFIG).unwrap();
-    assert_eq!(*machine.mirrors, Mirrors::default());
+    assert!(machine.mirrors.closed());
     let exits = machine.statistics.exceptions;
     machine.cpu.state.x[9] = 0x40;
     machine.system_instruction(MSR).unwrap();

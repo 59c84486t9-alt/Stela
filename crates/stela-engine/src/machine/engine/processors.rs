@@ -679,6 +679,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
         self.device_lines = device_lines;
         *self.mirrors = incoming.mirrors;
+        self.mirrors.transition(self.mirror_state());
     }
 
     /// Clear the Exclusives monitor of every PE whose reserved granule

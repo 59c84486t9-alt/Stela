@@ -215,14 +215,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
             .min(self.block_limit.saturating_sub(next))
     }
 
-    /// Run compiled block `index` and the blocks it chains into, up to
-    /// `budget` of them, and complete the last one's exit or fault.
     /// What native code finds this PE's data through.
     pub(super) fn anchors(&self) -> Anchors {
         let (pointer, memo) = self.pointer.anchors();
         let mut anchors = Anchors::default();
         anchors[Anchor::Control] = self.chain.address();
         anchors[Anchor::Mirrors] = &*self.mirrors as *const Mirrors as u64;
+        anchors[Anchor::Cells] = self.mirrors.cells().as_ptr() as u64;
         anchors[Anchor::Pointer] = pointer;
         anchors[Anchor::Memo] = memo;
         anchors[Anchor::Count] = self.clock.reader();
@@ -234,11 +233,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
         anchors
     }
 
+    /// Run compiled block `index` and the blocks it chains into, up to
+    /// `budget` of them, and complete the last one's exit or fault.
     pub(super) fn execute(&mut self, index: usize, budget: u64) -> Step {
         let entry = self.blocks[index].code;
         self.chain.begin(index, budget);
         self.cpu.state.daif = u32::from(self.cpu.pstate.daif);
         self.mirrors.selected = u64::from(self.cpu.pstate.sp);
+        self.mirrors.transition(self.mirror_state());
         self.cpu.state.pan = u64::from(self.cpu.pstate.pan);
         self.cpu.state.anchors = self.anchors();
         let entered = self.timing_start();

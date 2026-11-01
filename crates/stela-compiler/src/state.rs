@@ -9,6 +9,8 @@ pub enum Anchor {
     Control,
     /// The engine's mirrors of System registers.
     Mirrors,
+    /// Those mirrors' cells of the PE's state.
+    Cells,
     /// The engine's pointer authentication service.
     Pointer,
     /// That service's memo.
@@ -20,7 +22,7 @@ pub enum Anchor {
 }
 
 /// The entries of [`Anchors`].
-const ANCHORS: usize = 6;
+const ANCHORS: usize = 7;
 
 /// A PE's pointer for each [`Anchor`]. They are no part of the guest's state:
 /// any two compare equal.
@@ -137,9 +139,9 @@ mod tests {
     #[test]
     fn layout_matches_native_abi() {
         for profile in [BlockProfile::ORDINARY, BlockProfile::new(Features::LEAF)] {
-            assert!(profile.abi().starts_with("x86_64-sysv-guest-state-v9-"));
+            assert!(profile.abi().starts_with("x86_64-sysv-guest-state-v10-"));
         }
-        assert_eq!(size_of::<GuestState>(), 872);
+        assert_eq!(size_of::<GuestState>(), 880);
         assert_eq!(align_of::<GuestState>(), 8);
         assert_eq!(offset_of!(GuestState, x), 0);
         assert_eq!(offset_of!(GuestState, sp), 248);
