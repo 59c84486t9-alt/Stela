@@ -431,7 +431,7 @@ impl Platform for Host {
                     .and_then(|name| name.split_once('/'))
                 {
                     self.report(format_args!(
-                        "{name} is missing: `stela setup firmware fetch --gpu {chip}` adds it"
+                        "{name} is missing: `stela setup host-firmware fetch --gpu {chip}` adds it"
                     ));
                 }
                 ENOENT
