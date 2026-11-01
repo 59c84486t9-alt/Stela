@@ -1,0 +1,65 @@
+# Everything Stela ships, from one runner. Only macOS can link the Apple
+# binaries, and from there the rest cross-compiles. Manual or tagged, since
+# macOS minutes count tenfold against a private repository's quota.
+name: build
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 300
+    env:
+      CARGO_INCREMENTAL: 0
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install tools
+        run: |
+          brew install llvm lld zig
+          echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix lld)/bin" >> "$GITHUB_PATH"
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin \
+            x86_64-pc-windows-msvc x86_64-unknown-linux-gnu
+          cargo install --locked cargo-xwin cargo-zigbuild
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .tools
+            target/gpu
+          key: gpu-${{ hashFiles('.gitmodules', 'xtask/src/gpu/**', 'third_party/patches/**') }}
+
+      - name: stela.efi and macOS stela
+        run: cargo xtask dist --nvk
+
+      - name: Other stela hosts
+        run: |
+          export STELA_EFI="$PWD/target/boot/x86_64-unknown-uefi/release/stela-dist.efi"
+          cargo build --release --locked -p stela-cli --target x86_64-apple-darwin
+          cargo zigbuild --release --locked -p stela-cli --target x86_64-unknown-linux-gnu.2.31
+          cargo xwin build --release --locked -p stela-cli --target x86_64-pc-windows-msvc
+
+      - name: GPU maintenance and guest components
+        run: |
+          cargo build --release --locked -p stela-gpu-maintenance --target aarch64-apple-darwin
+          cargo xtask guest
+
+      - name: Collect
+        run: |
+          mkdir -p dist
+          cp target/boot/x86_64-unknown-uefi/release/stela-dist.efi dist/stela.efi
+          cp target/release/stela dist/stela-aarch64-macos
+          cp target/x86_64-apple-darwin/release/stela dist/stela-x86_64-macos
+          cp target/x86_64-unknown-linux-gnu/release/stela dist/stela-x86_64-linux
+          cp target/x86_64-pc-windows-msvc/release/stela.exe dist/stela.exe
+          cp target/aarch64-apple-darwin/release/stela-gpu-maintenance dist/
+          cp -R target/guest dist/guest
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stela
+          path: dist
