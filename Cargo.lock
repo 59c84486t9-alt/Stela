@@ -2476,6 +2476,7 @@ dependencies = [
  "rustls",
  "rustls-webpki",
  "sha2",
+ "stela-c-build",
  "webpki-roots",
  "x25519-dalek",
  "zeroize",

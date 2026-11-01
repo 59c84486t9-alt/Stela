@@ -1,5 +1,6 @@
 use sha2::{Digest, Sha256};
 use std::path::Path;
+use stela_c_build::{rust_archiver, selected};
 fn main() {
     let manifest = std::path::PathBuf::from(
         std::env::var_os("CARGO_MANIFEST_DIR").expect("Cargo manifest directory"),
@@ -56,6 +57,10 @@ fn main() {
         build.archiver("llvm-lib");
     }
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap();
+    // A Mac's own `ar` indexes no COFF object, so no symbol would be found.
+    if target_os == "uefi" && !selected("AR") {
+        build.archiver(rust_archiver());
+    }
     if target_os == "uefi" || target_os == "windows" {
         build
             // cc selects Windows COFF for the UEFI target's x64 Microsoft ABI.
