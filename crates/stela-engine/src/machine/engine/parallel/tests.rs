@@ -524,6 +524,16 @@ fn maintenance_waits_for_the_dsb_and_reaches_a_pe_in_one_piece_of_mail() {
 }
 
 #[test]
+fn a_broadcast_passes_by_a_pe_outside_its_run() {
+    let (hub, _) = hub(2);
+    let mut machine = first_of_two(&[], &hub);
+    let posted = hub.broadcast(1, &[Maintenance::Code(None)]);
+    assert!(!hub.applied(&mut posted.clone()));
+    machine.outside_run(|_| assert!(hub.applied(&mut posted.clone())));
+    assert!(!hub.applied(&mut posted.clone()));
+}
+
+#[test]
 fn a_full_list_of_maintenance_goes_out_without_a_dsb() {
     let (hub, _) = hub(2);
     let mut machine = first_of_two(&[], &hub);

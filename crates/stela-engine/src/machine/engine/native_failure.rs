@@ -209,8 +209,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
             FaultCause::Guest(guest) => self.data_abort(fault.address, guest, fault.write, false),
             FaultCause::Device { physical } => {
                 let word = self.word(index, pc)?;
-                self.completing(pc, |machine| {
-                    machine.device_access(word, fault.address, physical, fault.write)
+                self.outside_run(|machine| {
+                    machine.completing(pc, |machine| {
+                        machine.device_access(word, fault.address, physical, fault.write)
+                    })
                 })
             }
             FaultCause::Translation(unsupported) => {

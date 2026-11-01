@@ -1119,6 +1119,21 @@ impl<H: Host, D: Devices> Machine<H, D> {
         (compiled, hub.pending(self.current))
     }
 
+    /// Run `work`, which uses no translation this PE may hold and can take
+    /// long, without holding up the other PEs' broadcasts: a device access
+    /// behind another PE's, or a halt and the timer around it. This PE
+    /// reads its mail before it uses one again.
+    pub(super) fn outside_run<R>(&mut self, work: impl FnOnce(&mut Self) -> R) -> R {
+        if let Some(hub) = &self.parallel {
+            hub.set_outside(self.current, true);
+        }
+        let result = work(self);
+        if let Some(hub) = &self.parallel {
+            hub.set_outside(self.current, false);
+        }
+        result
+    }
+
     /// Halt the host core until an interrupt, or, in parallel, also until
     /// mail or a device line change reaches this PE.
     pub(super) fn sleep(&mut self) {
