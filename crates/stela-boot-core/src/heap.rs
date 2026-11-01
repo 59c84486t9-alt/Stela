@@ -132,8 +132,9 @@ const CPUS: usize = 64;
 /// at once.
 const CACHED: usize = 64;
 const BATCH: usize = 32;
-/// What IA32_TSC_AUX holds, for RDTSCP to read: `TAG` and the core's cache
-/// index.
+/// Where a core's GS base keeps what names its cache: `TAG` and the cache's
+/// index, which [`Heap::tag_cpu`] writes.
+pub const CORE_RECORD: usize = 8;
 const TAG: u32 = 0x5a7e_0000;
 
 /// One core's free blocks by class.
@@ -748,24 +749,23 @@ impl Heap {
     }
 
     /// Give the calling core a cache of its own, which every later
-    /// allocation on it uses. Once per core, where it RDTSCP reads
-    /// IA32_TSC_AUX and no one else uses it.
+    /// allocation on it uses: once per core, with `record` at
+    /// [`CORE_RECORD`] from its GS base. A core with a tagged one finds its
+    /// cache there in a load, where an instruction that names the core
+    /// costs tens of cycles on every allocation and free.
     ///
     /// # Safety
-    /// Ring 0, on a core that runs no other code using IA32_TSC_AUX.
+    /// `record` lies at [`CORE_RECORD`] from the calling core's GS base, for
+    /// as long as it runs, and every core allocates only once its GS base
+    /// is set, after the first call.
     #[cfg(target_os = "uefi")]
-    pub unsafe fn tag_cpu(&self) {
-        // RDTSCP: CPUID 8000_0001h EDX bit 27.
-        let highest = core::arch::x86_64::__cpuid(0x8000_0000).eax;
-        if highest < 0x8000_0001 || core::arch::x86_64::__cpuid(0x8000_0001).edx & (1 << 27) == 0 {
-            return;
-        }
+    pub unsafe fn tag_cpu(&self, record: *mut u32) {
         let cpu = self.tagged.fetch_add(1, Ordering::Relaxed);
         if cpu >= CPUS {
             return;
         }
         // SAFETY: as the caller guarantees.
-        unsafe { crate::msr::TSC_AUX.write(u64::from(TAG | cpu as u32)) };
+        unsafe { record.write(TAG | cpu as u32) };
         self.any_tagged.store(true, Ordering::Release);
     }
 
@@ -778,11 +778,11 @@ impl Heap {
         let aux = 0;
         #[cfg(target_os = "uefi")]
         let aux: u32;
-        // SAFETY: RDTSCP exists, as some core was tagged.
+        // SAFETY: as `tag_cpu` requires, this core's GS base is set.
         #[cfg(target_os = "uefi")]
         unsafe {
-            core::arch::asm!("rdtscp", out("eax") _, out("edx") _, out("ecx") aux,
-                options(nomem, nostack, preserves_flags));
+            core::arch::asm!("mov {:e}, gs:[{}]", out(reg) aux, const CORE_RECORD,
+                options(nostack, preserves_flags, readonly));
         }
         (aux & !0xffff == TAG)
             .then_some((aux & 0xffff) as usize)

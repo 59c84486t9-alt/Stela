@@ -15,6 +15,8 @@ use core::{
 #[repr(C, align(64))]
 pub(crate) struct Local {
     this: *mut Local,
+    /// The heap's name for this processor's cache.
+    heap_core: UnsafeCell<u32>,
     /// Native assembly and the local recovery path share this one slot.
     recovery_rsp: UnsafeCell<u64>,
     handler: super::super::interrupts::Handler,
@@ -39,6 +41,7 @@ impl Local {
     pub(crate) const fn new() -> Self {
         Self {
             this: core::ptr::null_mut(),
+            heap_core: UnsafeCell::new(0),
             recovery_rsp: UnsafeCell::new(0),
             handler: super::super::interrupts::interrupt,
             entry_tables: core::ptr::null(),
@@ -234,6 +237,8 @@ impl Owner {
 }
 
 const _: () = assert!(core::mem::offset_of!(Local, this) == 0);
+const _: () =
+    assert!(core::mem::offset_of!(Local, heap_core) == stela_boot_core::heap::CORE_RECORD);
 pub(super) const RECOVERY_RSP_OFFSET: usize = core::mem::offset_of!(Local, recovery_rsp);
 pub(crate) const XSTATE_IMAGE_BYTES_OFFSET: usize = core::mem::offset_of!(Local, xstate)
     + core::mem::offset_of!(super::super::xstate::EntryAbi, image_bytes);
@@ -299,9 +304,10 @@ pub(crate) unsafe fn activate(
     local.this = local;
     // SAFETY: the descriptor owner pins this private record for the CPU lifetime.
     unsafe { set_base(local as *mut Local as u64) };
-    // SAFETY: CPL0, once for this processor; nothing else here reads
-    // IA32_TSC_AUX.
-    unsafe { crate::ALLOCATOR.tag_cpu() };
+    // SAFETY: the pinned record at this processor's new GS base, and no
+    // processor allocates before it gets here: the boot processor's first
+    // is this call, and an AP's entry reaches here first.
+    unsafe { crate::ALLOCATOR.tag_cpu(local.heap_core.get()) };
 }
 
 /// # Safety

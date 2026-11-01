@@ -192,8 +192,6 @@ const IBPB: [Bit; 2] = [Bit::new(7, Edx, 26), Bit::new(0x8000_0008, Ebx, 12)];
 /// XSAVES (0Dh.1 EAX 3) and XFD (0Dh.1 EAX 4).
 const XSAVES: Bit = Bit::sub(0xd, 1, Eax, 3);
 const XFD_BIT: Bit = Bit::sub(0xd, 1, Eax, 4);
-/// RDTSCP (8000_0001h EDX 27) or RDPID (7 ECX 22).
-const TSC_AUX_BITS: [Bit; 2] = [Bit::new(0x8000_0001, Edx, 27), Bit::new(7, Ecx, 22)];
 
 pub const APIC_BASE: Msr = Msr::new(0x1b, Gate::Cpuid(APIC));
 pub const TSC_ADJUST: Msr = Msr::new(0x3b, Gate::Cpuid(TSC_ADJUST_BIT));
@@ -212,7 +210,6 @@ pub const X2APIC: Msr = Msr::new(0x800, Gate::Cpuid(X2APIC_BIT));
 pub const UARCH_MISC_CTL: Msr = Msr::new(0x1b01, Gate::Msr(&ARCH_CAPABILITIES, 1 << 12));
 pub const EFER: Msr = Msr::new(0xc000_0080, Gate::LongMode);
 pub const GS_BASE: Msr = Msr::new(0xc000_0101, Gate::LongMode);
-pub const TSC_AUX: Msr = Msr::new(0xc000_0103, Gate::AnyCpuid(&TSC_AUX_BITS));
 pub const AMD_SYSCFG: Msr = Msr::new(0xc001_0010, Gate::Amd);
 
 #[cfg(test)]
