@@ -188,6 +188,10 @@ pub enum Leave {
     /// A reserved region names this requester, which is not a USB host
     /// controller.
     Reserved(u16),
+    /// Firmware identifies a DMA source without a native ownership resolver.
+    UnsupportedSource(crate::dmar::SourceKind),
+    /// A firmware structure constrains DMA semantics not implemented here.
+    UnsupportedStructure(u16),
 }
 
 /// The requesters a unit covers, sorted, when the policy takes it.
@@ -218,6 +222,42 @@ pub fn decide(
         return Err(Leave::Reserved(held));
     }
     Ok(covered)
+}
+
+/// Unresolved namespace/unknown sources may share assigned identities with
+/// PCI requesters. Until resolved, exclude their entire segment from grants.
+fn unsupported_sources(remapping: &crate::dmar::Remapping, segment: u16) -> Option<Leave> {
+    use crate::dmar::SourceKind;
+    if let Some(&kind) = remapping
+        .additional_structures
+        .iter()
+        .find(|&&kind| kind >= 5)
+    {
+        return Some(Leave::UnsupportedStructure(kind));
+    }
+    for unit in remapping
+        .units
+        .iter()
+        .filter(|unit| unit.segment == segment)
+    {
+        if let Some(source) = unit.sources.iter().find(|s| {
+            s.flags != 0
+                || s.reserved != 0
+                || !matches!(s.kind, SourceKind::IoApic | SourceKind::Hpet)
+        }) {
+            return Some(Leave::UnsupportedSource(source.kind));
+        }
+    }
+    remapping
+        .reserved
+        .iter()
+        .filter(|region| region.segment == segment)
+        .find_map(|region| {
+            region
+                .sources
+                .first()
+                .map(|source| Leave::UnsupportedSource(source.kind))
+        })
 }
 
 /// The present requesters an include-all unit covers: those no other unit
@@ -271,6 +311,9 @@ pub fn route(
     present: &[Present],
     rid: u16,
 ) -> Result<Option<usize>, Leave> {
+    if let Some(error) = unsupported_sources(remapping, segment) {
+        return Err(error);
+    }
     let coverage = coverage(remapping, segment, present);
     let mut matching = coverage.iter().filter(|(_, rids)| rids.contains(&rid));
     let selected = matching.next().map(|(index, _)| *index);
@@ -322,6 +365,9 @@ pub fn subtree_routes(
     present: &[Present],
     bridge: u16,
 ) -> Option<Vec<usize>> {
+    if unsupported_sources(remapping, segment).is_some() {
+        return None;
+    }
     let downstream = present.iter().find(|entry| entry.rid == bridge)?.bridge?;
     let mut selected = Vec::new();
     let mut complete = false;
@@ -361,6 +407,15 @@ pub fn plan(
     present: &[Present],
     claimed_displays: &[u16],
 ) -> Vec<(usize, Result<Vec<u16>, Leave>)> {
+    if let Some(error) = unsupported_sources(remapping, segment) {
+        return remapping
+            .units
+            .iter()
+            .enumerate()
+            .filter(|(_, unit)| unit.segment == segment)
+            .map(|(index, _)| (index, Err(error)))
+            .collect();
+    }
     let reserved: Vec<u16> = remapping
         .reserved
         .iter()
