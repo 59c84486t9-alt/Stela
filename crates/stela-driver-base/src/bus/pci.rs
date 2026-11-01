@@ -12,6 +12,7 @@ use core::{
 };
 
 mod aspm;
+pub mod assignment;
 pub mod capability;
 pub mod hotplug;
 pub mod msi;
