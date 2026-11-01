@@ -87,6 +87,8 @@ use alloc::{format, string::String, vec::Vec};
 use stela_soc_data::board;
 
 const COMPATIBLE: &str = "compatible";
+const ROLE: &str = "role";
+const GFX_ROLE: &[u8] = b"GFX\0";
 const DEFAULTS: &str = "/defaults";
 const SERIAL_DEVICE: &str = "serial-device";
 const PHANDLE: &str = "AAPL,phandle";
@@ -391,6 +393,49 @@ pub fn hide_unmodeled(tree: &mut DeviceTree) -> Vec<String> {
     retire_hidden_service_identities(tree, &hidden);
     retire_hidden_acio_parents(tree, &mut hidden);
     hidden
+}
+
+/// Hides the AGX model (`sgx`, its `gfx-asc` coprocessor and firmware mapper)
+/// from a boot whose guest has a real GPU, so that StelaGPU is its only Metal
+/// device: the model refuses all GPU work, and macOS could choose it. Returns
+/// their paths for the admission ledger. The properties stay, as they do on
+/// every hidden node.
+pub fn hide_agx(tree: &mut DeviceTree) -> Vec<String> {
+    let mut paths = Vec::new();
+    visible_paths(
+        &tree.root,
+        "",
+        &|node| {
+            compatibles(node).any(|name| name == board::GFX_MAPPER || board::admitted_gpu(name))
+                || node
+                    .property(ROLE)
+                    .is_some_and(|role| role.value == GFX_ROLE)
+        },
+        &mut paths,
+    );
+    let mut hidden = Vec::new();
+    for path in paths {
+        retire(
+            tree.node_mut(&path).expect("visited path"),
+            &path,
+            &mut hidden,
+        );
+    }
+    retire_hidden_service_identities(tree, &hidden);
+    hidden
+}
+
+/// Removes `compatible` from `node` and everything under it.
+fn retire(node: &mut Node, path: &str, hidden: &mut Vec<String>) {
+    if node.property(COMPATIBLE).is_some() {
+        node.remove_property(COMPATIBLE);
+        hidden.push(path.into());
+    }
+    for child in &mut node.children {
+        let name = child.name().unwrap_or("?");
+        let path = format!("{path}/{name}");
+        retire(child, &path, hidden);
+    }
 }
 
 /// Keep buses only for visible targets or externally used provider

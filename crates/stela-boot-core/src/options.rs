@@ -256,9 +256,6 @@ pub struct System {
     /// Cable the native USB keyboard and pointer to the last USB-C
     /// controller and feed it the host's virtio-input devices (`--input`).
     pub input: bool,
-    /// `--gpu`: give the host's NVIDIA GPUs to nouveau. It takes the firmware's
-    /// scanout, so a display on those GPUs stops until the guest presents.
-    pub gpu: bool,
     /// Diagnostic of native pinned RAM in the shared window.
     pub native_memory_check: bool,
     /// Native MMIO/root/cache diagnostic; stops before guest entry.
@@ -378,7 +375,6 @@ impl Default for System {
             survey: false,
             idle_skip: false,
             input: false,
-            gpu: false,
             native_memory_check: false,
             native_mmio_check: false,
             native_clock_check: false,
@@ -537,6 +533,13 @@ fn flag(set: &mut bool, duplicate: Error) -> Result<(), Error> {
 }
 
 impl System {
+    /// This boot starts the macOS the Preboot disk holds, which needs a GPU;
+    /// its recoveryOS and a staged update's installer show on the firmware's
+    /// display, as a restore does.
+    pub fn boots_macos(&self) -> bool {
+        self.preboot.is_some() && self.recovery.is_none() && !self.upgrade
+    }
+
     /// The executors of the `cores` assigned that run PEs: the BSP alone
     /// when `serialized`, else one for each PE of the guest.
     pub fn runners(&self, cores: usize, serialized: bool) -> usize {
@@ -732,7 +735,6 @@ impl fmt::Display for System {
         line.value(DNS, (!self.dns.is_empty()).then(|| Servers(&self.dns)))?;
         line.flag("--tss", self.tss)?;
         line.flag("--input", self.input)?;
-        line.flag("--gpu", self.gpu)?;
         line.flag("--idle-skip", self.idle_skip)?;
         line.flag("--survey", self.survey)?;
         line.flag("--sep-observe", self.sep_observe)?;

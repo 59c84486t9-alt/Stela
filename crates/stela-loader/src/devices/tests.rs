@@ -817,6 +817,43 @@ fn a_visible_gpu_gets_the_handed_off_ttbat_published() {
 }
 
 #[test]
+fn a_real_gpu_hides_the_agx_model_and_nothing_else() {
+    let mut asc = node(
+        "gfx-asc",
+        Some(b"iop,ascwrap-v4\0"),
+        vec![node("iop-gfx-nub", Some(b"iop-nub,rtbuddy-v2\0"), vec![])],
+    );
+    asc.set_property("role", b"GFX\0".to_vec()).unwrap();
+    let mut smc = node("smc", Some(b"iop,ascwrap-v4\0"), vec![]);
+    smc.set_property("role", b"SMC\0".to_vec()).unwrap();
+    let mut sgx = node("sgx", Some(b"gpu,t8112\0"), vec![]);
+    sgx.set_property("gfx-shared-region-base", vec![1]).unwrap();
+    let mapper = node("mapper-gfx-asc", Some(board::GFX_MAPPER.as_bytes()), vec![]);
+    let mut tree = DeviceTree {
+        root: node(
+            "device-tree",
+            None,
+            vec![node("arm-io", None, vec![asc, smc, sgx, mapper])],
+        ),
+    };
+    assert_eq!(
+        hide_agx(&mut tree),
+        [
+            "/arm-io/gfx-asc",
+            "/arm-io/gfx-asc/iop-gfx-nub",
+            "/arm-io/sgx",
+            "/arm-io/mapper-gfx-asc",
+        ]
+    );
+    assert!(tree.property("/arm-io/sgx", COMPATIBLE).is_none());
+    assert!(
+        tree.property("/arm-io/sgx", "gfx-shared-region-base")
+            .is_some()
+    );
+    assert!(tree.property("/arm-io/smc", COMPATIBLE).is_some());
+}
+
+#[test]
 fn spi_requires_a_nor_slave_and_keeps_its_gpio_provider() {
     let mut gpio = node("gpio", Some(board::GPIO.as_bytes()), vec![]);
     gpio.set_property(PHANDLE, 106u32.to_le_bytes().to_vec())

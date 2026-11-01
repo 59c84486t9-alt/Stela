@@ -830,6 +830,18 @@ fn environment_error(error: WorkError) -> kernel_work::Error {
     kernel_work::Error::Work(error)
 }
 
+/// Why this boot gives macOS no Metal device, if it does not. WindowServer
+/// aborts without one (docs/research/display-gpu.md section 2) and watchdogd
+/// then panics the system, so a boot of macOS stops here instead.
+pub(super) fn no_metal_device() -> Option<&'static str> {
+    #[cfg(feature = "nvk")]
+    return gate::shared()
+        .is_empty()
+        .then_some("no GPU started; the lines above say why");
+    #[cfg(not(feature = "nvk"))]
+    Some("this stela.efi was built without GPU drivers (`--nvk`)")
+}
+
 /// The kexts a boot that gives the GPUs to nouveau links into its system.
 pub(super) fn kexts() -> Vec<stela_loader::aux_kc::Kext<'static>> {
     #[cfg(feature = "nvk")]

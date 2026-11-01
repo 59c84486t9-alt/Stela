@@ -465,7 +465,7 @@ impl policy::Update for PolicyUpdate {
         ensure!(
             property("smb2") == Some(&Value::Boolean(true))
                 && property("sip0") == Some(&Value::Integer(0x201)),
-            "maintenance boot has no bounded GPU kext grant; boot this system through Stela with --gpu"
+            "maintenance boot has no bounded GPU kext grant; boot this system through a Stela image with GPU drivers"
         );
         for name in ["auxp", "auxi", "auxr"] {
             ensure!(
@@ -656,7 +656,7 @@ pub(super) fn install(options: Install) -> Result<()> {
         }
     }
     println!(
-        "GPU files installed; LocalPolicy committed at {}. Reboot through the matching Stela --gpu image to activate.",
+        "GPU files installed; LocalPolicy committed at {}. Reboot through the matching Stela image to activate.",
         policy.written.as_ref().unwrap().display()
     );
     Ok(())

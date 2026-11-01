@@ -37,11 +37,7 @@ fn from_disk(
     } else if let Some(kind) = options.recovery {
         bundle::recovery_from_disk(partition, kind, options.boot_volume, &defaults)
     } else {
-        let kexts = if options.gpu {
-            gpu::kexts()
-        } else {
-            Vec::new()
-        };
+        let kexts = gpu::kexts();
         let request = installed::Request {
             volume: options.boot_volume,
             kexts: &kexts,
@@ -72,6 +68,11 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     } = start(handoff);
     let mut host = open_host(handoff, &mut options, host_firmware, native_processors);
     let storage = open_storage(handoff, &options, &mut host);
+    if options.boots_macos()
+        && let Some(reason) = gpu::no_metal_device()
+    {
+        output::fatal(format_args!("macOS cannot run without a GPU: {reason}"));
+    }
     let boot = Boot {
         handoff,
         options: &options,
@@ -634,7 +635,8 @@ fn run_guest(boot: Boot<'_>, host: OpenedHost, storage: Storage, processors: Pro
         x0,
         read_only_region,
         core_locks,
-        hidden_devices,
+        #[cfg_attr(not(feature = "nvk"), allow(unused_mut))]
+        mut hidden_devices,
         live_tree: mut loaded_tree,
         source: loaded_source,
         boot_processor: bundle_boot_processor,
@@ -664,7 +666,13 @@ fn run_guest(boot: Boot<'_>, host: OpenedHost, storage: Storage, processors: Pro
     #[cfg(feature = "nvk")]
     let gpu_gates = assigned
         .as_mut()
-        .map(|assigned| gpu::gate::place(&mut assigned.tree))
+        .map(|assigned| {
+            let gates = gpu::gate::place(&mut assigned.tree);
+            if !gates.is_empty() {
+                hidden_devices.extend(stela_loader::devices::hide_agx(&mut assigned.tree));
+            }
+            gates
+        })
         .unwrap_or_default();
     // SAFETY: all raw guest input copies have ended; AP executors are parked,
     // and no guest/device DMA producer has entered. The same loader bytes are
@@ -2186,7 +2194,7 @@ fn start_devices(
             if let Some(acpi) = host_acpi {
                 acpi.retain_power(power);
             }
-            if options.gpu
+            if options.boots_macos()
                 && open_gpus(
                     work,
                     mmio,
