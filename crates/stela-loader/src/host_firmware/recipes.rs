@@ -29,6 +29,8 @@ const GSP_KINDS: [&str; 6] = [
 pub const WIRELESS_REGDB: &str =
     "https://git.kernel.org/pub/scm/linux/kernel/git/wens/wireless-regdb.git";
 pub const WIRELESS_REGDB_RELEASE: &str = "master-2026-09-03";
+/// The immutable commit to which the named regulatory release peels.
+pub const WIRELESS_REGDB_REVISION: &str = "389b9b702cf9018e9a9078ccc4fa8eaae2e054e3";
 const KERNEL_ORG_GIT: &str = "https://git.kernel.org/";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -367,33 +369,60 @@ const REALTEK_WIFI_LICENSE: Artifact = Artifact {
     sha256: "a61351665b4f264f6c631364f85b907d8f8f41f8b369533ef4021765f9f3b62e",
 };
 
-pub const REALTEK_WIFI: &[Recipe] = &[wifi(
-    "rtw88/rtw8822c_fw.bin",
-    202600,
-    "3deecb31210986d98cdbfb000391e08d602a6eee4ffc883969faa2b907ab03ba",
-    &REALTEK_WIFI_LICENSE,
-)];
+pub const REALTEK_WIFI: &[Recipe] = &[
+    wifi(
+        "rtw88/rtw8822c_fw.bin",
+        202600,
+        "3deecb31210986d98cdbfb000391e08d602a6eee4ffc883969faa2b907ab03ba",
+        &REALTEK_WIFI_LICENSE,
+    ),
+    wifi(
+        "rtw88/rtw8822c_wow_fw.bin",
+        145224,
+        "6717fc6ff426a74571ac4f04cd9698fb2f356012c05c58aa64cf21ceb6b958a2",
+        &REALTEK_WIFI_LICENSE,
+    ),
+    wifi(
+        "rtw89/rtw8852b_fw-2.bin",
+        1554594,
+        "6ff6aeb56bb5b85cba333b755f8cc1dbfe9ff6e5b16e39f6ba01ce7f1eaa7714",
+        &REALTEK_WIFI_LICENSE,
+    ),
+];
 
 const REGULATORY_LICENSE: Artifact = Artifact {
     source: WIRELESS_REGDB,
-    revision: WIRELESS_REGDB_RELEASE,
+    revision: WIRELESS_REGDB_REVISION,
     member: "LICENSE",
     length: 880,
     sha256: "678b0df753c86198fc496d1f1033429bbd57f101472132ee7eaaf9f5e0a7fae1",
 };
-/// Pinned wireless-regdb releases of `regulatory.db`, each with its ISC
-/// LICENSE, from [`WIRELESS_REGDB`].
-pub const REGULATORY: &[Recipe] = &[Recipe {
-    image: Artifact {
-        source: WIRELESS_REGDB,
-        revision: WIRELESS_REGDB_RELEASE,
-        member: "regulatory.db",
-        length: 6348,
-        sha256: "7e236caecd939c8ec98be4870bf30422f28ffef2565a38aaaa2d9ddabd0c2641",
+/// The pinned version-20 database and its detached signature. Provisioning
+/// integrity does not establish successful regulatory signature verification.
+pub const REGULATORY: &[Recipe] = &[
+    Recipe {
+        image: Artifact {
+            source: WIRELESS_REGDB,
+            revision: WIRELESS_REGDB_REVISION,
+            member: "regulatory.db",
+            length: 6348,
+            sha256: "7e236caecd939c8ec98be4870bf30422f28ffef2565a38aaaa2d9ddabd0c2641",
+        },
+        license: &REGULATORY_LICENSE,
+        consumer: Consumer::Wifi,
     },
-    license: &REGULATORY_LICENSE,
-    consumer: Consumer::Wifi,
-}];
+    Recipe {
+        image: Artifact {
+            source: WIRELESS_REGDB,
+            revision: WIRELESS_REGDB_REVISION,
+            member: "regulatory.db.p7s",
+            length: 1085,
+            sha256: "50332f0db09b8bcc719235ec4985c27377f2cc2f42abb7b5dcf951866c5a888a",
+        },
+        license: &REGULATORY_LICENSE,
+        consumer: Consumer::Wifi,
+    },
+];
 
 const GSP_LICENSE: Artifact = Artifact {
     source: LINUX_FIRMWARE,
@@ -666,14 +695,13 @@ fn select_mediatek_wifi(request: &Request) -> Option<&'static Recipe> {
         .find(|recipe| recipe.image.member == request.name)
 }
 
-/// Match the observed production RTL8822C identity emitted by the driver's
-/// `Profile::stage`; retain the complete PCI and SYS_CFG1 values in its request.
+/// Bind each original PCI/SYS_CFG1 request to its own chip's pinned image.
+/// Provisioning preserves observations; it grants no native radio admission.
 fn select_realtek_wifi(request: &Request) -> Option<&'static Recipe> {
     let pci: Vec<_> = request.target.hardware.split(':').collect();
     if pci.len() != 8
         || pci[0] != "pci"
         || pci[1] != "10ec"
-        || !matches!(pci[2], "c822" | "c82f")
         || pci[3] != "subsys"
         || !hex_field(pci[4], 4)
         || !hex_field(pci[5], 4)
@@ -691,10 +719,31 @@ fn select_realtek_wifi(request: &Request) -> Option<&'static Recipe> {
         return None;
     }
     let syscfg = u32::from_str_radix(syscfg, 16).ok()?;
-    if syscfg == u32::MAX
-        || syscfg & (1 << 23) != 0
-        || (syscfg >> 12) & 15 != u32::from_str_radix(cut, 16).ok()?
-    {
+    let cut = u32::from_str_radix(cut, 16).ok()?;
+    // Both original drivers read SYS_CFG1[15:12]; RTL8852B has no RTL8852A
+    // cut correction. The raw word remains attached to the selected resource.
+    if syscfg == u32::MAX || (syscfg >> 12) & 15 != cut {
+        return None;
+    }
+    let chip_matches = match pci[2] {
+        "c822" | "c82f" => {
+            // Only rtw88 interprets BIT_RTL_ID as test silicon here.
+            syscfg & (1 << 23) == 0
+                && matches!(
+                    request.name.as_str(),
+                    "rtw88/rtw8822c_fw.bin" | "rtw88/rtw8822c_wow_fw.bin"
+                )
+        }
+        "b852" | "b85b" => {
+            // Return the exact requested container at every observed cut.
+            // Original rtw89 owns suit selection and its failure semantics;
+            // resource lookup must not turn a later suit failure into a
+            // different early file-format fallback.
+            request.name == "rtw89/rtw8852b_fw-2.bin"
+        }
+        _ => false,
+    };
+    if !chip_matches {
         return None;
     }
     REALTEK_WIFI
@@ -1053,7 +1102,7 @@ mod tests {
         let plan = Plan::select(&inventory).unwrap();
         assert_eq!(
             plan.selections[0].recipe.image.url(),
-            format!("{WIRELESS_REGDB}/plain/regulatory.db?h={WIRELESS_REGDB_RELEASE}")
+            format!("{WIRELESS_REGDB}/plain/regulatory.db?h={WIRELESS_REGDB_REVISION}")
         );
     }
 
@@ -1388,3 +1437,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod wireless_resource_tests;
