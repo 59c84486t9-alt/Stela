@@ -85,7 +85,15 @@ pub(super) const STACK_SELECT: usize = MASK_WRITES + 1 + WRITTEN.len();
 /// lines. Its `value` is an address in the page.
 pub(super) const CODE_PAGE: usize = STACK_SELECT + 1;
 
-const CELLS: usize = CODE_PAGE + 1;
+/// The cell of MSR PAN (`x86_64::register_read::pan_thunk`), open once one
+/// completed plainly in the state on a host that keeps PAN in RFLAGS.AC.
+pub(super) const PAN_WRITES: usize = CODE_PAGE + 1;
+
+/// The cell of DSB (`x86_64::register_read::barrier_thunk`), open from one's
+/// completion until this PE has maintenance for another to complete.
+pub(super) const DATA_BARRIER: usize = PAN_WRITES + 1;
+
+const CELLS: usize = DATA_BARRIER + 1;
 
 /// The cell of the mask writes (`x86_64::register_read::mask_thunk`), open
 /// once one completed plainly in the state.
@@ -151,6 +159,7 @@ impl Mirrors {
             readable: 1,
             value: address,
         };
+        self.close(DATA_BARRIER);
     }
 
     /// Another IC IVAU of the page could do more.
@@ -393,6 +402,27 @@ pub(super) fn stack_select(word: u32) -> Option<bool> {
         0xd500_41bf => Some(true),
         _ => None,
     }
+}
+
+/// The immediate of the MSR PAN `word`, if it is one.
+pub(super) fn pan_write(word: u32) -> Option<bool> {
+    const MSR_PAN: u32 = 0xd500_409f;
+    const IMMEDIATE: u32 = 1 << 8;
+    (word & !IMMEDIATE == MSR_PAN).then_some(word & IMMEDIATE != 0)
+}
+
+/// Whether `word` at `pc` is a DSB that only completes maintenance.
+pub(super) fn data_barrier(pc: u64, word: u32) -> bool {
+    let decoded = block::decode_system_mode_instruction(GuestAddress(pc), word);
+    matches!(
+        decoded
+            .ok()
+            .flatten()
+            .map(|instruction| instruction.operation),
+        Some(SystemOperation::Synchronization(
+            Synchronization::DataCompletion { nxs: false, .. }
+        ))
+    )
 }
 
 /// Xt of the IC IVAU `word`, if it is one.

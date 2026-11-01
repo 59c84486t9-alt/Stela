@@ -15,7 +15,7 @@
 //! guest address in RCX and the access's size and flags in the two bytes
 //! after its CALL, returns past them with the host address in RAX, and
 //! keeps every other register, XMM registers and MXCSR included.
-use super::{Contexts, FaultCause, Recorded, State, layout, resolve, state, tables};
+use super::{Contexts, FaultCause, Recorded, State, flags_pan, layout, resolve, state, tables};
 use core::arch::global_asm;
 use stela_engine::machine::mmu::translated::Lookup;
 
@@ -194,6 +194,7 @@ impl Bounce {
 /// registers' call describes, or no return at all.
 extern "sysv64" fn translate(saved: &mut Saved) -> u64 {
     let state = state();
+    state.follow_pan(flags_pan());
     let address = saved.rcx;
     // SAFETY: the two bytes the stub placed after its CALL, in the arena.
     let [bytes, flags] = unsafe { (saved.ret as *const [u8; 2]).read_unaligned() };

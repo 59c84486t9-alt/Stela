@@ -312,6 +312,29 @@ fn frame_field(offset: usize) -> Mem {
     Mem::base_disp32(Gpr::Rdi, offset as i32)
 }
 
+/// The thunk completing `MSR PAN, #pan` at `pc` while the cell at `cell` is
+/// open, on a host that keeps PSTATE.PAN in RFLAGS.AC, else exiting at `pc`.
+pub fn pan_thunk(pc: GuestAddress, pan: bool, cell: u64) -> Thunk {
+    const CLAC: [u8; 3] = [0x0f, 0x01, 0xca];
+    const STAC: [u8; 3] = [0x0f, 0x01, 0xcb];
+    let (mut code, miss) = open(cell);
+    let mut asm = Asm::new(&mut code);
+    asm.mov_imm32(Gpr::Rax, u32::from(pan));
+    let field = frame_field(core::mem::offset_of!(GuestState, pan));
+    asm.mov_store(Size::Qword, field, Gpr::Rax);
+    asm.fixed(if pan { &CLAC } else { &STAC });
+    finish(code, miss, pc)
+}
+
+/// The thunk completing a DSB at `pc` while the cell at `cell` is open, that
+/// is while the engine has no maintenance for it to complete, else exiting
+/// at `pc`.
+pub fn barrier_thunk(pc: GuestAddress, cell: u64) -> Thunk {
+    let (mut code, miss) = open(cell);
+    Asm::new(&mut code).mfence();
+    finish(code, miss, pc)
+}
+
 /// The thunk completing `write` at `pc` in the frame while the cell at
 /// `cell` is open, else exiting at `pc`.
 pub fn mask_thunk(write: MaskWrite, pc: GuestAddress, cell: u64) -> Thunk {
@@ -454,6 +477,16 @@ fn finish_unless<const N: usize>(mut code: Vec<u8>, misses: [Patch; N], pc: Gues
 mod tests {
     use super::*;
     use crate::x86_64::chain::{DIRECT_EXIT_BYTES, direct_exit};
+
+    #[test]
+    fn pan_writes_move_the_flag_and_the_frame() {
+        const CELL: u64 = 0x2000;
+        for (pan, flag) in [(true, [0x0f, 0x01, 0xca]), (false, [0x0f, 0x01, 0xcb])] {
+            let thunk = pan_thunk(GuestAddress(0x1000), pan, CELL);
+            assert!(thunk.code.windows(3).any(|bytes| bytes == flag));
+            assert!(thunk.next.is_some());
+        }
+    }
 
     #[test]
     fn mask_writes_name_their_form() {

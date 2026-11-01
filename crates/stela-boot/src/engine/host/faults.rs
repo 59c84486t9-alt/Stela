@@ -199,6 +199,7 @@ pub(crate) fn page_fault(
     if !in_code(state, frame.rip) {
         super::super::interrupts::fatal(frame);
     }
+    state.follow_pan(frame.rflags & RFLAGS_AC == 0);
     let Some(regime) = state.regime else {
         super::super::interrupts::fatal(frame);
     };

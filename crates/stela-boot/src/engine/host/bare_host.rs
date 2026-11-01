@@ -299,6 +299,7 @@ impl Host for BareHost<'_> {
         let entered = rdtsc();
         // SAFETY: the engine passes installed system-mode block code.
         let exit = unsafe { stela_enter_block(guest, code.0) };
+        state().follow_pan(guest.pan != 0);
         native_return(code, exit, entered)
     }
 
@@ -447,6 +448,10 @@ impl Host for BareHost<'_> {
 
     fn speculation_barrier(&self) {
         super::super::speculation::fence();
+    }
+
+    fn pan_in_flags(&self) -> bool {
+        state().contexts.pan_flag
     }
 
     fn invalidate_translations(&mut self) {

@@ -608,6 +608,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let thunk = if let Some(write) = masks {
             let cell = &self.mirrors[MASK_WRITES] as *const register_read::Cell as u64;
             register_read::mask_thunk(write, GuestAddress(pc), cell)
+        } else if let Some(pan) = pan_write(word).filter(|_| self.host.pan_in_flags()) {
+            let cell = &self.mirrors[PAN_WRITES] as *const register_read::Cell as u64;
+            register_read::pan_thunk(GuestAddress(pc), pan, cell)
+        } else if data_barrier(pc, word) {
+            let cell = &self.mirrors[DATA_BARRIER] as *const register_read::Cell as u64;
+            register_read::barrier_thunk(GuestAddress(pc), cell)
         } else if let Some(rt) = code_page_invalidation(word).filter(|&rt| rt != ZERO_REGISTER) {
             let cell = &self.mirrors[CODE_PAGE] as *const register_read::Cell as u64;
             register_read::code_page_thunk(GuestAddress(pc), rt, cell)

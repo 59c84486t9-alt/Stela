@@ -234,6 +234,11 @@ pub trait Host {
     /// that cannot order them leaves both empty and identifies no FEAT_CSV3
     /// (`identification::Speculation::faulting_data`).
     fn speculation_barrier(&self) {}
+    /// Whether native code changes PSTATE.PAN itself: RFLAGS.AC stands for
+    /// it on this host, which follows what native code left there.
+    fn pan_in_flags(&self) -> bool {
+        false
+    }
     /// The PE invalidated instruction caches (IC IVAU of `Some(page)`, a
     /// physical page; IC IALLU or IALLUIS for `None`), which this machine
     /// already applied to its own compiled code. A host that runs other

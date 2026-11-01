@@ -52,6 +52,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 // completes for the other PEs (`parallel` `post`).
                 Synchronization::DataCompletion { .. } => {
                     self.complete_maintenance()?;
+                    self.mirrors[DATA_BARRIER].readable = 1;
                     self.next()
                 }
                 Synchronization::StoreBypassBarrier { .. }
@@ -617,6 +618,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }) {
             if before.pan != after.pan {
                 self.sync_host_regime();
+            }
+            if self.host.pan_in_flags() {
+                self.mirrors[PAN_WRITES].readable = 1;
             }
         } else if !only(Pstate {
             sp: after.sp,

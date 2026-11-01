@@ -1258,6 +1258,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let Some(hub) = self.parallel.clone() else {
             return;
         };
+        self.mirrors.close(super::mirrors::DATA_BARRIER);
         let profile = self.observation_inbox(&hub).map(|inbox| &inbox.broadcasts);
         let started = profile.map(|_| self.host.counter());
         let posted = hub.broadcast(self.current, maintenance);

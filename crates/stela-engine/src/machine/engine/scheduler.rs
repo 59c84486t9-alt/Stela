@@ -222,6 +222,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.chain.begin(index, budget);
         self.cpu.state.daif = u32::from(self.cpu.pstate.daif);
         self.mirrors.selected = u64::from(self.cpu.pstate.sp);
+        self.cpu.state.pan = u64::from(self.cpu.pstate.pan);
         let entered = self.timing_start();
         // SAFETY: installed by this machine since the last discard, for the system-mode block ABI;
         // chained blocks and thunks too.
@@ -229,9 +230,18 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let returned = self.timing_charge(step_timing::Phase::Native, entered);
         self.cpu.pstate.daif = self.cpu.state.daif as u8;
         self.cpu.pstate.sp = self.mirrors.selected != 0;
+        if self.cpu.pstate.pan != (self.cpu.state.pan != 0) {
+            self.cpu.pstate.pan = !self.cpu.pstate.pan;
+            self.sync_host_regime();
+        }
         let remaining = self.chain.budget().load(Ordering::Relaxed);
-        let (block, retired, hits, linked) = self.chain.completed();
-        let chained = linked + hits;
+        let (block, retired, hits, _) = self.chain.completed();
+        // A link spends a transfer and counts nothing else.
+        let chained = if remaining > budget {
+            budget
+        } else {
+            budget - remaining
+        };
         let last = (block & u64::from(u32::MAX)) as usize;
         if let NativeExit::Fault(fault) = exit
             && (last >= self.blocks.len() || self.blocks[last].code.0 == 0)

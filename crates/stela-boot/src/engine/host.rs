@@ -270,6 +270,17 @@ pub(super) fn views_installed() -> bool {
     local::installed().is_some()
 }
 
+/// RFLAGS.AC, which is PSTATE.PAN clear where it stands for it.
+const RFLAGS_AC: u64 = 1 << 18;
+
+/// PSTATE.PAN by this core's RFLAGS.AC.
+fn flags_pan() -> bool {
+    let flags: u64;
+    // SAFETY: reads RFLAGS through the stack, which the push and pop balance.
+    unsafe { asm!("pushfq", "pop {}", out(reg) flags, options(preserves_flags)) };
+    flags & RFLAGS_AC == 0
+}
+
 /// Lift SMAP for what runs next on this core, which is not guest code: the
 /// loader root's firmware tables may mark any page a user page.
 pub(super) fn allow_user_pages() {
@@ -1031,6 +1042,18 @@ impl State {
             view - PAN_VIEW + EL1_VIEW
         } else {
             view
+        }
+    }
+
+    /// PSTATE.PAN is `pan`, as native code set it behind the engine, whose
+    /// next regime says the same: the view and the walks' requester follow.
+    fn follow_pan(&mut self, pan: bool) {
+        let view = self.current % VIEWS;
+        if self.contexts.pan_flag && (view == EL1_VIEW || view == PAN_VIEW) {
+            self.current = self.current - view + if pan { PAN_VIEW } else { EL1_VIEW };
+            if let Some(regime) = &mut self.regime {
+                regime.requester.pan = pan;
+            }
         }
     }
 
