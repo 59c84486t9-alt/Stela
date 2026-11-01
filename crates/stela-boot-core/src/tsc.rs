@@ -5,6 +5,8 @@
 //! mapping, lifecycle, synchronization or interrupt permission. Native admission
 //! must observe the real owner/controls, reliability and progress.
 mod calibration;
+mod minimum;
+pub use minimum::LowerScale;
 mod features;
 mod measurement;
 mod sequence;
