@@ -1,8 +1,9 @@
 //! NVK, NIR and NAK for `stela.efi`.
 //!
-//! Meson configures Mesa natively, which leaves its generated sources and its
-//! compile plan. This task then compiles that plan for the boot image's C
-//! target against `compat/libc`, and archives it where `crates/stela-mesa`
+//! Meson configures Mesa for a declared machine, the same from every build
+//! host, which leaves its generated sources and its compile plan. This task
+//! then compiles that plan for the boot image's C target against `compat/libc`,
+//! and archives it where `crates/stela-mesa`
 //! links it. Mesa's Rust builds as ordinary Cargo dependencies of the image,
 //! from sources generated here. Mesa itself stays unpatched: what differs is
 //! the C library, the configuration below and the units in `compat/mesa`.
@@ -28,7 +29,7 @@ use std::{
 /// What NVK needs and nothing else: no window system, no cache on disk and no
 /// host compiler. Its OpenCL kernels are `compat/mesa/nvkcl.c`, so the tools
 /// that would build them are never run.
-const OPTIONS: [&str; 19] = [
+const OPTIONS: [&str; 20] = [
     "-Dvulkan-drivers=nouveau",
     "-Dgallium-drivers=",
     "-Dplatforms=",
@@ -39,6 +40,7 @@ const OPTIONS: [&str; 19] = [
     "-Degl=disabled",
     "-Dgbm=disabled",
     "-Dllvm=disabled",
+    "-Dzlib=disabled",
     "-Dzstd=disabled",
     "-Dshader-cache=disabled",
     "-Dmesa-clc=system",
@@ -56,6 +58,9 @@ const UNUSED_TOOLS: [&str; 2] = ["mesa_clc", "vtn_bindgen2"];
 /// `compat/mesa/nv_cubin.c`.
 const LIBDRM_VERSION: &str = "2.4.133";
 const LIBELF_VERSION: &str = "0.190";
+/// The machine Meson's probes compile for. Its link probes resolve nothing, so
+/// every function they ask about links, and `HOST_DEFINES` drops what they get wrong.
+const PROBE_TARGET: &str = "x86_64-unknown-linux-gnu";
 
 /// Units not built, by a part of their source path: each either has a stand-in
 /// in `compat/mesa`, or needs what the image lacks and nothing here calls it.
@@ -107,36 +112,28 @@ pub(super) const LIBC: [&str; 6] = ["libc", "stdio", "pthread", "math", "system"
 /// freestanding LLVM archive. The libc-only test links these directly.
 const REGEX: [&str; 5] = ["regcomp", "regexec", "regfree", "regerror", "regstrlcpy"];
 
-/// What Meson found on the build host that the C library does not offer, or
-/// that names a path the image does not take. SSE4.1 and BLAKE3's assembly are
-/// host features; the image runs on any x86-64.
-const HOST_DEFINES: [&str; 28] = [
+/// What Meson's probes claim that the C library does not offer, or that names a
+/// path the image does not take. SSE4.1 and BLAKE3's assembly are host features;
+/// the image runs on any x86-64.
+const HOST_DEFINES: [&str; 20] = [
     "ALLOW_KCMP",
     "HAS_SCHED_GETAFFINITY",
     "HAVE_CET_H",
-    "HAVE_COMPRESSION",
     "HAVE_DIRENT_D_TYPE",
     "HAVE_DLADDR",
     "HAVE_DRI2",
     "HAVE_FLOCK",
     "HAVE_FMEMOPEN",
     "HAVE_FUNC_ATTRIBUTE_VISIBILITY",
-    "HAVE_GETRANDOM",
-    "HAVE_ISSIGNALING",
-    "HAVE_LINUX_FUTEX_H",
-    "HAVE_LINUX_UDMABUF_H",
-    "HAVE_MEMFD_CREATE",
+    "HAVE_QSORT_S",
+    "HAVE___BUILTIN_AARCH64_GET_FPCR",
+    "HAVE___BUILTIN_AARCH64_SET_FPCR",
+    "HAVE___BUILTIN_ARM_GET_FPSCR",
+    "HAVE___BUILTIN_ARM_SET_FPSCR",
     "HAVE_MKOSTEMP",
-    "HAVE_OPENMP",
     "HAVE_POSIX_FALLOCATE",
-    "HAVE_PROGRAM_INVOCATION_NAME",
-    "HAVE_PTHREAD_SETAFFINITY",
     "HAVE_RANDOM_R",
     "HAVE_RENDERDOC_INTEGRATION=1",
-    "HAVE_STRTOD_L",
-    "HAVE_SYS_INOTIFY_H",
-    "HAVE_SYS_SHM_H",
-    "HAVE_ZLIB",
     "HAVE___BUILTIN_ADD_OVERFLOW_P",
     "HAVE___BUILTIN_SUB_OVERFLOW_P",
 ];
@@ -236,10 +233,78 @@ fn paths(directory: &Path) -> Result<(PathBuf, PathBuf)> {
     Ok((stubs, path.into()))
 }
 
-fn setup(directory: &Path, build: &Path, path: &Path) -> Result<()> {
-    if build.join("build.ninja").is_file() {
+/// What Meson's probes and Bindgen compile with. Probing the build host would
+/// let it choose what `stela.efi` contains, and would find no DRM on a Mac.
+fn probe_flags(clang: &Path) -> Result<[String; 5]> {
+    // Meson keeps one `-isystem` of a list.
+    Ok([
+        format!("--target={PROBE_TARGET}"),
+        "-nostdinc".to_owned(),
+        format!("-isystem{}", gpu().join("compat/libc").display()),
+        format!("-idirafter{}/include", resource_directory(clang)?),
+        "-DSTELA_LIBC".to_owned(),
+    ])
+}
+
+/// Meson's description of the machine Mesa is configured for.
+fn machine_file(toolchain: &Toolchain, packages: &Path) -> Result<String> {
+    let list = |flags: &[String]| {
+        flags
+            .iter()
+            .map(|flag| format!("'{flag}'"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let compile = probe_flags(&toolchain.clang)?;
+    let link = [
+        format!("--target={PROBE_TARGET}"),
+        format!("--ld-path={}", toolchain.linker.display()),
+        "-nostdlib".to_owned(),
+        "-Wl,--unresolved-symbols=ignore-all".to_owned(),
+    ];
+    Ok(format!(
+        "[binaries]
+         c = '{clang}'
+         cpp = '{clangxx}'
+         ar = '{archiver}'
+         rust = 'rustc'
+         pkg-config = 'pkg-config'
+         [built-in options]
+         c_args = [{compile}]
+         cpp_args = [{compile}]
+         c_link_args = [{link}]
+         cpp_link_args = [{link}]
+         [properties]
+         needs_exe_wrapper = true
+         pkg_config_libdir = ['{packages}']
+         [host_machine]
+         system = 'linux'
+         cpu_family = 'x86_64'
+         cpu = 'x86_64'
+         endian = 'little'
+",
+        clang = toolchain.clang.display(),
+        clangxx = toolchain.clangxx.display(),
+        archiver = toolchain.archiver.display(),
+        compile = list(&compile),
+        link = list(&link),
+        packages = packages.display(),
+    ))
+}
+
+fn setup(toolchain: &Toolchain, directory: &Path, build: &Path, path: &Path) -> Result<()> {
+    let packages = directory.join("pkgconfig");
+    let machine = directory.join("machine.ini");
+    let description = machine_file(toolchain, &packages)?;
+    if build.join("build.ninja").is_file()
+        && fs::read_to_string(&machine).is_ok_and(|current| current == description)
+    {
         return Ok(());
     }
+    if build.is_dir() {
+        fs::remove_dir_all(build)?;
+    }
+    fs::write(&machine, description)?;
     let (stubs, _) = paths(directory)?;
     fs::create_dir_all(&stubs)?;
     for name in UNUSED_TOOLS {
@@ -248,7 +313,6 @@ fn setup(directory: &Path, build: &Path, path: &Path) -> Result<()> {
         exec(Command::new("chmod").arg("+x").arg(&stub))?;
     }
     crate::tools::which("pkg-config").context("install pkg-config, which finds the .pc files")?;
-    let packages = directory.join("pkgconfig");
     fs::create_dir_all(&packages)?;
     let libdrm = third_party("libdrm");
     fs::write(
@@ -268,14 +332,15 @@ fn setup(directory: &Path, build: &Path, path: &Path) -> Result<()> {
             .arg("setup")
             .arg(build)
             .arg(third_party("mesa"))
+            .arg("--cross-file")
+            .arg(machine)
             .args(OPTIONS)
-            .env("PATH", path)
-            .env("PKG_CONFIG_PATH", &packages),
+            .env("PATH", path),
     )
 }
 
 /// Every source Meson generates, and the structured copy of the compiler crate.
-fn generate(build: &Path, path: &Path) -> Result<()> {
+fn generate(clang: &Path, build: &Path, path: &Path) -> Result<()> {
     let ninja = tool("ninja", "generators/bin")?;
     let mut targets = BTreeSet::new();
     for rule in ["CUSTOM_COMMAND", "CUSTOM_COMMAND_DEP"] {
@@ -313,6 +378,7 @@ fn generate(build: &Path, path: &Path) -> Result<()> {
         Command::new(&ninja)
             .args(&targets)
             .current_dir(build)
+            .env("BINDGEN_EXTRA_CLANG_ARGS", probe_flags(clang)?.join(" "))
             .env("PATH", path),
     )
 }
@@ -359,7 +425,12 @@ fn bindings(build: &Path, path: &Path, flags: &[String]) -> Result<()> {
                 .args(flags)
                 .args(["-nostdinc", "-U__CYGWIN__", "-D__linux__", "-U__unix__"])
                 .arg("-DSTELA_LIBC")
-                .args(theirs.iter().filter(|word| *word != "-pthread"))
+                .args(
+                    theirs
+                        .iter()
+                        .filter(|word| *word != "-pthread" && !word.starts_with("--target="))
+                        .filter(|word| !host_define(word)),
+                )
                 .current_dir(build)
                 .env("PATH", path),
         )?;
@@ -427,12 +498,16 @@ fn collect_rust(directory: &Path, sources: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
+fn host_define(flag: &str) -> bool {
+    flag.strip_prefix("-D")
+        .is_some_and(|define| HOST_DEFINES.contains(&define) || LATE_DEFINES.contains(&define))
+}
+
 fn host_only(flag: &str) -> bool {
     HOST_FLAGS.contains(&flag)
         || flag.starts_with("-W")
-        || flag
-            .strip_prefix("-D")
-            .is_some_and(|define| HOST_DEFINES.contains(&define) || LATE_DEFINES.contains(&define))
+        || flag.starts_with("--target=")
+        || host_define(flag)
 }
 
 /// Meson's flags for a unit, for the image's target.
@@ -667,8 +742,8 @@ pub fn build(jobs: u16) -> Result<()> {
     let (_, path) = paths(&directory)?;
     fs::create_dir_all(&directory)?;
     super::llvm::build(&toolchain, jobs, false)?;
-    setup(&directory, &build, &path)?;
-    generate(&build, &path)?;
+    setup(&toolchain, &directory, &build, &path)?;
+    generate(&toolchain.clang, &build, &path)?;
     let libc = gpu().join("compat/libc");
     let includes = include_flags(&toolchain.clang, &libc)?;
     bindings(&build, &path, &includes)?;
@@ -696,7 +771,11 @@ pub fn build(jobs: u16) -> Result<()> {
             .args(units.iter().map(|unit| &unit.output)),
     )?;
     println!("{} objects in {}", units.len(), archive.display());
-    test_libc(&toolchain, &directory)
+    // The test is a static Linux program.
+    if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        test_libc(&toolchain, &directory)?;
+    }
+    Ok(())
 }
 
 /// Builds `compat/libc/tests/libc_test.c` with the C library as a static Linux
@@ -777,8 +856,9 @@ mod tests {
         let words = [
             "cc",
             "-Iinclude",
+            "--target=probe",
             "-DMESA_DEBUG=0",
-            "-DHAVE_ZLIB",
+            "-DHAVE_QSORT_S",
             "-Wall",
             "-MD",
             "-MQ",
