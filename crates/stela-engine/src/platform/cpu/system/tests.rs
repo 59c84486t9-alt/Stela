@@ -6,6 +6,7 @@ fn baseline() -> Observation {
             cpuid1_ecx: 0,
             cpuid1_edx: CPUID_FLOOR_EDX,
             extended_edx: CPUID_LONG_NX,
+            cpuid7_ebx: 0,
             cpuid7_ecx: 0,
             identity: IdentityProbe::Topology(0x1f),
         },
@@ -27,6 +28,27 @@ fn legacy_xmm_floor_never_invents_extended_features() {
     actual.declarations.cpuid1_edx |= 1 << 8;
     actual.declarations.cpuid1_ecx |= 1 << 13;
     let expected = TargetCpu::Baseline.with_cx8().with_cx16();
+    assert_eq!(actual.target(), Ok(expected));
+    // Legacy XMM features report what the processor has, tier by tier.
+    actual.declarations.cpuid1_ecx |= CPUID_SSSE3;
+    assert_eq!(
+        actual.target(),
+        Ok(TargetCpu::Ssse3.with_cx8().with_cx16())
+    );
+    actual.declarations.cpuid1_ecx |= CPUID_SSE41;
+    assert_eq!(
+        actual.target(),
+        Ok(TargetCpu::Sse41.with_cx8().with_cx16())
+    );
+    actual.declarations.cpuid1_ecx |= CPUID_SSE42 | CPUID_PCLMULQDQ | CPUID_POPCNT | CPUID_AES;
+    actual.declarations.cpuid7_ebx |= CPUID_SHA;
+    let expected = TargetCpu::Sse42
+        .with_pclmulqdq()
+        .with_popcnt()
+        .with_aes()
+        .with_sha()
+        .with_cx8()
+        .with_cx16();
     assert_eq!(actual.target(), Ok(expected));
     actual.controls.cr4 |= 1 << 18; // OSXSAVE does not admit AVX or a wider target.
     actual.declarations.cpuid1_ecx |= !(1 << 28);

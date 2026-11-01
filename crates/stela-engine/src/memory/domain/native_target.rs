@@ -1,6 +1,6 @@
 //! A conservative limit, never CPU or memory execution permission. Keep the
-//! current legacy native lane's known capabilities only; wider state and DIT
-//! cannot be enabled by a caller-provided declaration.
+//! legacy XMM recipes both sides have, which is what blocks compile for;
+//! wider state and DIT cannot be enabled by a caller-provided declaration.
 use stela_compiler::TargetCpu;
 
 pub(in crate::memory) fn restrict(actual: TargetCpu, limit: TargetCpu) -> TargetCpu {

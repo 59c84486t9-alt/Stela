@@ -59,9 +59,32 @@ struct CpuDeclarations {
     cpuid1_ecx: u32,
     cpuid1_edx: u32,
     extended_edx: u32,
+    cpuid7_ebx: u32,
     cpuid7_ecx: u32,
     identity: IdentityProbe,
 }
+
+/// CPUID.1:ECX bits, and CPUID.7.0:EBX's SHA, the instruction sets blocks use.
+const CPUID_PCLMULQDQ: u32 = 1 << 1;
+const CPUID_SSSE3: u32 = 1 << 9;
+const CPUID_CX16: u32 = 1 << 13;
+const CPUID_SSE41: u32 = 1 << 19;
+const CPUID_SSE42: u32 = 1 << 20;
+const CPUID_POPCNT: u32 = 1 << 23;
+const CPUID_AES: u32 = 1 << 25;
+#[cfg(any(
+    test,
+    all(target_arch = "x86_64", target_os = "uefi", not(feature = "std"))
+))]
+const CPUID1_ECX_READ: u32 = CPUID_PCLMULQDQ
+    | CPUID_SSSE3
+    | CPUID_CX16
+    | CPUID_SSE41
+    | CPUID_SSE42
+    | CPUID_POPCNT
+    | CPUID_AES
+    | (1 << 28);
+const CPUID_SHA: u32 = 1 << 29;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct NativeControls {
@@ -108,11 +131,34 @@ impl Observation {
         {
             return Err(Refusal::Controls);
         }
-        let mut target = TargetCpu::Baseline;
+        // Legacy XMM instructions, which OSFXSR (CR4_REQUIRED) enables: the
+        // tiers nest, and blocks compile for what this core has.
+        let mut target = match (
+            d.cpuid1_ecx & CPUID_SSSE3 != 0,
+            d.cpuid1_ecx & CPUID_SSE41 != 0,
+            d.cpuid1_ecx & CPUID_SSE42 != 0,
+        ) {
+            (true, true, true) => TargetCpu::Sse42,
+            (true, true, false) => TargetCpu::Sse41,
+            (true, false, _) => TargetCpu::Ssse3,
+            _ => TargetCpu::Baseline,
+        };
+        if d.cpuid1_ecx & CPUID_PCLMULQDQ != 0 {
+            target = target.with_pclmulqdq();
+        }
+        if d.cpuid1_ecx & CPUID_POPCNT != 0 {
+            target = target.with_popcnt();
+        }
+        if d.cpuid1_ecx & CPUID_AES != 0 {
+            target = target.with_aes();
+        }
+        if d.cpuid7_ebx & CPUID_SHA != 0 {
+            target = target.with_sha();
+        }
         if d.cpuid1_edx & (1 << 8) != 0 {
             target = target.with_cx8();
         }
-        if d.cpuid1_ecx & (1 << 13) != 0 {
+        if d.cpuid1_ecx & CPUID_CX16 != 0 {
             target = target.with_cx16();
         }
         // Intel SDM 325462-089 Vol.3A and AMD APM24593rev3.44 §7.3.2:
@@ -381,6 +427,11 @@ fn enumerate(mut cpuid: impl FnMut(u32, u32) -> Cpuid) -> Result<(CpuDeclaration
     }
     let basic = cpuid(1, 0);
     let ext = cpuid(0x8000_0001, 0);
+    let leaf7 = if maximum >= 7 {
+        cpuid(7, 0)
+    } else {
+        Cpuid::default()
+    };
     if basic.edx & CPUID_FLOOR_EDX != CPUID_FLOOR_EDX || ext.edx & CPUID_LONG_NX != CPUID_LONG_NX {
         return Err(Refusal::MissingCpuFeatures);
     }
@@ -407,14 +458,11 @@ fn enumerate(mut cpuid: impl FnMut(u32, u32) -> Cpuid) -> Result<(CpuDeclaration
     Ok((
         CpuDeclarations {
             vendor,
-            cpuid1_ecx: basic.ecx & ((1 << 13) | (1 << 28)),
+            cpuid1_ecx: basic.ecx & CPUID1_ECX_READ,
             cpuid1_edx: basic.edx & (CPUID_FLOOR_EDX | (1 << 8)),
             extended_edx: ext.edx & CPUID_LONG_NX,
-            cpuid7_ecx: if maximum >= 7 {
-                cpuid(7, 0).ecx & (1 << 16)
-            } else {
-                0
-            },
+            cpuid7_ebx: leaf7.ebx & CPUID_SHA,
+            cpuid7_ecx: leaf7.ecx & (1 << 16),
             identity: probe,
         },
         apic_id,
