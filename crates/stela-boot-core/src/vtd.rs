@@ -500,7 +500,8 @@ impl<R: Registers> Unit<R> {
         for bus in allowed.iter().map(|rid| (rid >> 8) as u8) {
             if let alloc::collections::btree_map::Entry::Vacant(entry) = contexts.entry(bus) {
                 let context = Table::new(source, physical_bits)?;
-                root.write(usize::from(bus), context.physical() | 1);
+                // Legacy root entries are 128 bits; Table indexes u64 words.
+                root.write(usize::from(bus) * 2, context.physical() | 1);
                 entry.insert(context);
             }
         }
@@ -607,7 +608,9 @@ impl<R: Registers> Unit<R> {
                 context.flush(&*self.registers, line);
             }
             publish();
-            state.root.write(usize::from(bus), context.physical() | 1);
+            state
+                .root
+                .write(usize::from(bus) * 2, context.physical() | 1);
             state.contexts.insert(bus, context);
             if let Some(line) = self.table_cacheline {
                 state.root.flush(&*self.registers, line);
