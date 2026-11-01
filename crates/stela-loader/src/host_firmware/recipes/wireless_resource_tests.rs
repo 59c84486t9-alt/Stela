@@ -156,7 +156,7 @@ fn signed_regdb_resources_keep_the_observed_global_target_and_immutable_commit()
 
 #[cfg(feature = "std")]
 #[test]
-#[ignore = "requires STELA_WIRELESS_PROVISIONING_EVIDENCE pointing to approved pinned assets"]
+#[ignore = "oracle: STELA_WIRELESS_PROVISIONING_EVIDENCE"]
 fn approved_downloads_match_recipe_and_license_content_pins() {
     let root =
         std::path::PathBuf::from(std::env::var("STELA_WIRELESS_PROVISIONING_EVIDENCE").unwrap());

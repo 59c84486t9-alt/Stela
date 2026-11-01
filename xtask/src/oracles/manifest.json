@@ -1,5 +1,15 @@
 [
   {
+    "package": "stela-loader",
+    "test": "approved_downloads_match_recipe_and_license_content_pins",
+    "source": "crates/stela-loader/src/host_firmware/recipes/wireless_resource_tests.rs",
+    "kind": "oracle",
+    "inputs": [
+      "STELA_WIRELESS_PROVISIONING_EVIDENCE"
+    ],
+    "reason": "requires approved pinned wireless images and license files; verifies local assets without downloading"
+  },
+  {
     "package": "stela-compiler",
     "test": "native_interruption_gate_costs",
     "source": "crates/stela-compiler/src/x86_64/chain/tests/budget.rs",
