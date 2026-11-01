@@ -15,6 +15,12 @@ StelaGPU::start(IOService *provider)
 		stop(provider);
 		return false;
 	}
+	/*
+	 * AppleCLPC reads this from every accelerator it finds and panics without
+	 * it. In milliwatts of the SoC's package budget, which this device spends
+	 * none of.
+	 */
+	setProperty("GetGPUMaxPower", 0ULL, 32);
 	registerService();
 	return true;
 }
