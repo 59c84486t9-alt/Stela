@@ -136,6 +136,40 @@ pub(super) unsafe fn read_part(
     }
 }
 
+/// Read the doublewords at the aligned `pointer` that fill `output`, each one
+/// atomic part as [`read_part`] reads it; the bytes read, which on a host
+/// without this leave the rest to [`read_part`]'s refusal.
+///
+/// # Safety
+/// As [`read_part`], for the whole of what this reads.
+pub(super) unsafe fn read_doublewords(pointer: *const u8, output: &mut [u8]) -> usize {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let mut bytes = 0;
+        for chunk in output.chunks_exact_mut(DOUBLEWORD_BYTES) {
+            let value: u64;
+            // SAFETY: an aligned doubleword of the caller's coherent RAM,
+            // which Intel and AMD read atomically.
+            unsafe {
+                core::arch::asm!(
+                    "mov {value}, qword ptr [{pointer}]",
+                    value = out(reg) value,
+                    pointer = in(reg) pointer.add(bytes),
+                    options(nostack, preserves_flags),
+                );
+            }
+            chunk.copy_from_slice(&value.to_le_bytes());
+            bytes += DOUBLEWORD_BYTES;
+        }
+        bytes
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let _ = (pointer, output);
+        0
+    }
+}
+
 /// Write the low `bytes` of `value` as one atomic little-endian part.
 ///
 /// # Safety

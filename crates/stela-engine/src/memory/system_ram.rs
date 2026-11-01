@@ -198,11 +198,17 @@ impl RegisteredSystemRam {
         output: &mut [u8],
     ) -> Result<(), crate::memory::domain::PublicationFault> {
         use crate::memory::domain::PublicationFault;
-        self.preflight(physical, output.len())
-            .map_err(|status| PublicationFault {
-                status,
-                completed: 0,
-            })?;
+        // Most reads are a descriptor or a block's source, in one region.
+        let admitted = match self.region(physical) {
+            Some((region, offset)) if output.len() <= region.bytes - offset => {
+                self.domain.check_execution()
+            }
+            _ => self.preflight(physical, output.len()),
+        };
+        admitted.map_err(|status| PublicationFault {
+            status,
+            completed: 0,
+        })?;
         let mut done = 0;
         while done < output.len() {
             let fault = |status| PublicationFault {
@@ -224,6 +230,17 @@ impl RegisteredSystemRam {
             while advanced < count {
                 // SAFETY: this nonempty suffix stays inside the checked envelope.
                 let part = unsafe { pointer.as_ptr().add(advanced) };
+                if (part as usize).is_multiple_of(8) && count - advanced >= 8 {
+                    let words = (count - advanced) & !7;
+                    // SAFETY: as below, for these aligned doublewords.
+                    let read =
+                        unsafe { access::read_doublewords(part, &mut output[done..done + words]) };
+                    advanced += read;
+                    done += read;
+                    if read != 0 {
+                        continue;
+                    }
+                }
                 let remaining = count - advanced;
                 let width = [8, 4, 2, 1]
                     .into_iter()
