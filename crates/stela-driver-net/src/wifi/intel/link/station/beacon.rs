@@ -186,7 +186,13 @@ impl Client {
         };
         if band == Band::Ghz6 && !moving {
             let mode = context.negotiated().mode;
-            let envelope = fitted(elements, current.control, mode, &current);
+            // ieee80211_config_bw selects the new operating width before
+            // rearranging the beacon's TPE subchannel limits.
+            let used = width
+                .as_ref()
+                .and_then(|width| width.as_ref().ok())
+                .unwrap_or(&current);
+            let envelope = fitted(elements, used.control, mode, used);
             heard.limited |= envelope != heard.envelope;
             heard.envelope = envelope;
         }
@@ -642,5 +648,247 @@ impl<Q: BootIo, B: BiosIo> Wifi<Q, B> {
             active.progress = Progress::Moved;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Protocol-only beacon power tracking with no native transmission permission.
+    use super::*;
+    use crate::wifi::{
+        RadioStatus, RawRate,
+        security::SecurityStatus,
+        station::{
+            self, Completion, Join, PortPolicy,
+            phy::{Mode, Width},
+            tests::{AP, LOCAL, Policy, ticket},
+        },
+    };
+    use alloc::vec;
+    fn channel() -> Channel {
+        Channel {
+            band: Band::Ghz6,
+            number: 13,
+            frequency_mhz: 6015,
+        }
+    }
+    fn extension(out: &mut Vec<u8>, id: u8, bytes: &[u8]) {
+        out.extend([255, (bytes.len() + 1) as u8, id]);
+        out.extend(bytes);
+    }
+    fn elements(ap: bool, wide: bool, limits: &[u8]) -> Vec<u8> {
+        let mut out = vec![0, 1, b'x', 1, 3, 0x8c, 0x98, 0xb0];
+        let mut he = vec![0; 17];
+        he[6] = 4;
+        he.extend([0xfa, 0xff, 0xfa, 0xff]);
+        extension(&mut out, 35, &he);
+        extension(&mut out, 59, &[0x4a, 0]);
+        if ap {
+            out.extend([
+                221, 24, 0, 0x50, 0xf2, 2, 1, 1, 0x80, 0, 3, 0xa4, 0, 0, 0x27, 0xa4, 0, 0, 0x42,
+                0x43, 94, 0, 0x62, 0x32, 47, 0,
+            ]);
+            extension(
+                &mut out,
+                36,
+                &[
+                    0,
+                    0,
+                    2,
+                    0,
+                    0xff,
+                    0xff,
+                    13,
+                    if wide { 2 } else { 1 },
+                    if wide { 7 } else { 11 },
+                    0,
+                    6,
+                ],
+            );
+            out.extend([5, 4, 0, 3, 0, 0]);
+            out.extend([195, (limits.len() + 1) as u8, 8 + if wide { 3 } else { 2 }]);
+            out.extend(limits);
+        } else {
+            out.extend([221, 7, 0, 0x50, 0xf2, 2, 0, 1, 0]);
+        }
+        out.extend(station::wire::six_ghz::tests::selected());
+        out
+    }
+    fn frame(control: u16, body: &[u8], broadcast: bool) -> Mpdu {
+        let mut bytes = vec![0; 24];
+        bytes[..2].copy_from_slice(&control.to_le_bytes());
+        bytes[4..10].copy_from_slice(if broadcast { &[0xff; 6] } else { &LOCAL.0 });
+        bytes[10..16].copy_from_slice(&AP.0);
+        bytes[16..22].copy_from_slice(&AP.0);
+        bytes.extend(body);
+        Mpdu::new(
+            bytes,
+            RadioStatus {
+                band: Band::Ghz6,
+                channel: 13,
+                frequency_mhz: 6015,
+                signal_dbm: Some(-45),
+                chain_signal_dbm: [None; 4],
+                rate: RawRate {
+                    layout: 1,
+                    words: [0; 4],
+                },
+                rx_rate: None,
+                tsf: None,
+            },
+            SecurityStatus::default(),
+        )
+        .unwrap()
+    }
+    fn client() -> Client {
+        let local = station::phy::Capabilities::parse(
+            Band::Ghz6,
+            station::phy::Role::Station,
+            &elements(false, true, &[]),
+        )
+        .unwrap();
+        let request = station::wire::AssociationRequest::new_modern_with_local_pmf(
+            0x11,
+            10,
+            elements(false, true, &[]),
+            local.clone(),
+            Mode::He,
+            Width::Mhz80,
+        )
+        .unwrap();
+        let join = Join {
+            bssid: AP,
+            channel: channel(),
+            policy: PortPolicy::Controlled,
+            request,
+        };
+        struct ListenOnly;
+        impl crate::wifi::scan::Policy for ListenOnly {
+            fn allow_receive(&mut self, c: Channel) -> bool {
+                c == channel()
+            }
+            fn allow_probe(&mut self, _: Channel) -> bool {
+                false
+            }
+            fn lookup_channel(&mut self, band: Band, number: u16) -> Option<Channel> {
+                (band == Band::Ghz6 && number == 13).then(channel)
+            }
+        }
+        let scan = crate::wifi::scan::Scanner::new(LOCAL)
+            .unwrap()
+            .begin(
+                crate::wifi::scan::Request::new(vec![channel()], vec![], vec![]).unwrap(),
+                0,
+                100,
+                &mut ListenOnly,
+            )
+            .unwrap();
+        let beacon = crate::wifi::scan::result::Bss {
+            ticket: scan,
+            kind: crate::wifi::scan::result::Kind::Beacon,
+            bssid: AP,
+            transmitter: AP,
+            profile: None,
+            timestamp: 100,
+            beacon_interval: 100,
+            capabilities: 0x11,
+            channel: channel(),
+            observed: frame(0xb0, &[0; 6], false).radio,
+            signal_dbm: Some(-45),
+            ssid: Some(vec![b'x']),
+            elements: elements(true, true, &[2, 4, 20, 24]),
+        };
+        let observed = Arc::new(station::NativeBssObservation { bss: beacon });
+        let mut station = station::Station::new(LOCAL).unwrap();
+        let selection =
+            station::wire::six_ghz::Selection::new(station::wire::six_ghz::tests::selected())
+                .unwrap();
+        let session = station
+            .prepare_six_ghz_authentication(observed.clone(), selection, local, None, 0, 1_000_000)
+            .unwrap();
+        station
+            .commit_six_ghz_authentication(session.clone(), 0)
+            .unwrap();
+        for (transaction, status, now) in [(1, 126, 1), (2, 0, 3)] {
+            station
+                .external_authentication_transmit(
+                    &session,
+                    station::external::Frame {
+                        transaction,
+                        status,
+                        data: &[19, 0],
+                    },
+                    now,
+                    &mut Policy(true),
+                )
+                .unwrap();
+            let body = [3, 0, transaction as u8, 0, status as u8, 0, 19, 0];
+            station
+                .receive_external_authentication(&session, frame(0xb0, &body, false), now + 1)
+                .unwrap()
+                .unwrap();
+        }
+        assert!(station.external_authenticated());
+        let assoc = station
+            .associate_external_pmf(&session, join, observed, 6, &mut Policy(true))
+            .unwrap();
+        station.submitted(ticket(&assoc)).unwrap();
+        let mut body = vec![0x11, 0, 0, 0, 1, 0xc0];
+        body.extend(elements(true, true, &[2, 4, 20, 24]));
+        let configured = station
+            .receive(
+                station.association_epoch().unwrap(),
+                &frame(0x10, &body, false),
+                7,
+                &mut Policy(true),
+            )
+            .unwrap();
+        let context = match &configured {
+            station::Action::Configure {
+                context: Some(context),
+                ..
+            } => context.clone(),
+            _ => panic!("modern context required"),
+        };
+        station
+            .complete_configuration(ticket(&configured), Completion::Accepted, 8)
+            .unwrap();
+        let mut client = Client::new(station);
+        client.context = Some(context);
+        client
+    }
+    fn beacon(wide: bool, limits: &[u8]) -> Mpdu {
+        let mut body = vec![0; 12];
+        body[..8].copy_from_slice(&100u64.to_le_bytes());
+        body[8..10].copy_from_slice(&100u16.to_le_bytes());
+        body[10..12].copy_from_slice(&0x11u16.to_le_bytes());
+        body.extend(elements(true, wide, limits));
+        frame(0x80, &body, true)
+    }
+    #[test]
+    fn widened_beacon_keeps_limits_for_every_newly_used_subchannel() {
+        let mut client = client();
+        assert!(client.beacon_heard(&beacon(false, &[20, 24]), 10));
+        assert_eq!(
+            client.tracking.of(AP).unwrap().definition.width,
+            Width::Mhz40
+        );
+        assert!(client.beacon_heard(&beacon(true, &[2, 4, 20, 24]), 11));
+        let heard = client.tracking.of(AP).unwrap();
+        assert_eq!(heard.definition.width, Width::Mhz80);
+        assert_eq!(heard.envelope.psd_local[0].power[..4], [2, 4, 20, 24]);
+        assert_eq!(heard.envelope.psd_local[0].mean(4), 6);
+        assert!(heard.limited);
+    }
+    #[test]
+    fn unchanged_width_updates_limits_and_identical_beacons_need_no_power_command() {
+        let mut client = client();
+        assert!(client.beacon_heard(&beacon(true, &[2, 4, 20, 24]), 10));
+        assert!(!client.tracking.of(AP).unwrap().limited);
+        assert!(client.beacon_heard(&beacon(true, &[2, 4, 8, 12]), 11));
+        assert!(client.tracking.of(AP).unwrap().limited);
+        client.tracking.links[0].limited = false;
+        assert!(client.beacon_heard(&beacon(true, &[2, 4, 8, 12]), 12));
+        assert!(!client.tracking.of(AP).unwrap().limited);
     }
 }
