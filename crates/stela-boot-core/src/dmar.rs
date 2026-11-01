@@ -1,7 +1,6 @@
-//! Bounded DMAR ownership input for one live, known flat segment. A single
-//! include-all unit or a completely matched set of direct endpoint scopes can
-//! identify its remapper; neither proves device quiescence. Bridges, aliases,
-//! multi-hop scopes, reserved regions, ATS and unknown structures are refused.
+//! DMAR units, PCI DMA routes and original interrupt-source metadata.
+//! General parsing preserves firmware source identities for later ownership
+//! checks. The flat-owner policy separately refuses routing it cannot resolve.
 use crate::remapping::Scope;
 use alloc::vec::Vec;
 
@@ -40,6 +39,33 @@ fn quad(bytes: &[u8], offset: usize) -> u64 {
     u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap())
 }
 
+/// Firmware source classes outside PCI endpoint/subhierarchy DMA scopes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SourceKind {
+    IoApic,
+    Hpet,
+    Namespace,
+    Reserved(u8),
+}
+
+/// Original non-PCI scope metadata, before topology or source ownership checks.
+/// IOAPIC paths require bridge resolution; HPET/namespace paths encode their
+/// platform-assigned source ID. Parsing a scope grants no interrupt route.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceScope {
+    pub kind: SourceKind,
+    pub flags: u8,
+    pub reserved: u8,
+    pub enumeration_id: u8,
+    pub bus: u8,
+    pub path: Vec<(u8, u8)>,
+}
+
+struct Scopes {
+    pci: Vec<Scope>,
+    sources: Vec<SourceScope>,
+}
+
 /// A remapping hardware unit (DRHD): its registers, segment and the PCI
 /// requesters it translates, or every requester on the segment no other
 /// unit lists when `include_all`.
@@ -50,6 +76,7 @@ pub struct Drhd {
     pub segment: u16,
     pub include_all: bool,
     pub scopes: Vec<Scope>,
+    pub sources: Vec<SourceScope>,
 }
 
 /// A reserved memory region (RMRR): memory the firmware keeps DMA-ing to
@@ -61,31 +88,38 @@ pub struct Rmrr {
     pub base: u64,
     pub limit: u64,
     pub scopes: Vec<Scope>,
+    pub sources: Vec<SourceScope>,
 }
 
 /// A parsed DMAR table: the host address width and the units and reserved
 /// regions. ATSR, RHSA, ANDD, SATC and later structures describe ATS,
-/// proximity and namespace devices, none of which the mount enables, and
-/// are skipped.
+/// proximity and namespace devices. Their kinds remain recorded for policies
+/// that require a complete interrupt-source inventory.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Remapping {
     pub physical_bits: u8,
+    /// Original DMAR platform flags; capability bits are not ownership grants.
+    pub flags: u8,
     pub units: Vec<Drhd>,
     pub reserved: Vec<Rmrr>,
+    /// Structures not interpreted by the DMA planner. Root-mode admission must
+    /// account for them rather than assume a complete interrupt inventory.
+    pub additional_structures: Vec<u16>,
 }
 
-/// The PCI scopes of a structure starting at `from`. IOAPIC, HPET and ACPI
-/// namespace scopes name interrupt sources, which matter only to interrupt
-/// remapping.
-fn scopes(entry: &[u8], from: usize) -> Result<Vec<Scope>, DmarError> {
-    let mut found = Vec::new();
+/// Partition PCI DMA scopes from the remaining original firmware sources.
+fn scopes(entry: &[u8], from: usize) -> Result<Scopes, DmarError> {
+    let mut found = Scopes {
+        pci: Vec::new(),
+        sources: Vec::new(),
+    };
     let mut scope = from;
     while scope < entry.len() {
         let header = entry
             .get(scope..scope + 6)
             .ok_or(DmarError::InvalidStructure)?;
         let bytes = usize::from(header[1]);
-        if bytes < 6 || !bytes.is_multiple_of(2) {
+        if bytes < 8 || !bytes.is_multiple_of(2) {
             return Err(DmarError::InvalidStructure);
         }
         let end = scope
@@ -99,14 +133,38 @@ fn scopes(entry: &[u8], from: usize) -> Result<Vec<Scope>, DmarError> {
         if path.iter().any(|hop| hop[0] > 31 || hop[1] > 7) {
             return Err(DmarError::InvalidStructure);
         }
+        let path = path.iter().map(|hop| (hop[0], hop[1])).collect();
         if matches!(header[0], 1 | 2) {
-            if path.is_empty() {
+            // These fields are reserved for PCI scopes outside SIDP. Refuse
+            // new semantics instead of losing them in the DMA-only view.
+            if header[2..5] != [0, 0, 0] {
                 return Err(DmarError::InvalidStructure);
             }
-            found.push(Scope {
+            found.pci.push(Scope {
                 bridge: header[0] == 2,
                 bus: header[5],
-                path: path.iter().map(|hop| (hop[0], hop[1])).collect(),
+                path,
+            });
+        } else {
+            let kind = match header[0] {
+                3 => SourceKind::IoApic,
+                4 => SourceKind::Hpet,
+                5 => SourceKind::Namespace,
+                other => SourceKind::Reserved(other),
+            };
+            if !matches!(kind, SourceKind::Reserved(_)) && header[2..4] != [0, 0] {
+                return Err(DmarError::InvalidStructure);
+            }
+            if matches!(kind, SourceKind::Hpet | SourceKind::Namespace) && bytes != 8 {
+                return Err(DmarError::InvalidStructure);
+            }
+            found.sources.push(SourceScope {
+                kind,
+                flags: header[2],
+                reserved: header[3],
+                enumeration_id: header[4],
+                bus: header[5],
+                path,
             });
         }
         scope = end;
@@ -121,6 +179,8 @@ pub fn parse(table: &[u8]) -> Result<Remapping, DmarError> {
         || &table[..4] != b"DMAR"
         || u32::from_le_bytes(table[4..8].try_into().unwrap()) as usize != table.len()
         || table.iter().fold(0u8, |sum, byte| sum.wrapping_add(*byte)) != 0
+        || table[37] & !7 != 0
+        || table[38..HEADER].iter().any(|byte| *byte != 0)
     {
         return Err(DmarError::InvalidTable);
     }
@@ -130,8 +190,10 @@ pub fn parse(table: &[u8]) -> Result<Remapping, DmarError> {
         .ok_or(DmarError::UnsupportedWidth)?;
     let mut remapping = Remapping {
         physical_bits,
+        flags: table[37],
         units: Vec::new(),
         reserved: Vec::new(),
+        additional_structures: Vec::new(),
     };
     let mut offset = HEADER;
     while offset < table.len() {
@@ -147,7 +209,7 @@ pub fn parse(table: &[u8]) -> Result<Remapping, DmarError> {
         let entry = table.get(offset..end).ok_or(DmarError::InvalidStructure)?;
         match kind {
             DRHD => {
-                if length < 16 {
+                if length < 16 || entry[4] & !1 != 0 || entry[5] & 0xf0 != 0 {
                     return Err(DmarError::InvalidStructure);
                 }
                 let base = quad(entry, 8);
@@ -155,9 +217,13 @@ pub fn parse(table: &[u8]) -> Result<Remapping, DmarError> {
                     .checked_shl(12 + u32::from(entry[5] & 0xf))
                     .ok_or(DmarError::InvalidStructure)?;
                 if base == 0
-                    || !base.is_multiple_of(4096)
+                    || !base.is_multiple_of(bytes as u64)
                     || base.checked_add(bytes as u64).is_none()
                 {
+                    return Err(DmarError::InvalidStructure);
+                }
+                let scopes = scopes(entry, 16)?;
+                if entry[4] & 1 != 0 && !scopes.pci.is_empty() {
                     return Err(DmarError::InvalidStructure);
                 }
                 remapping.units.push(Drhd {
@@ -165,11 +231,12 @@ pub fn parse(table: &[u8]) -> Result<Remapping, DmarError> {
                     bytes,
                     segment: word(entry, 6),
                     include_all: entry[4] & 1 != 0,
-                    scopes: scopes(entry, 16)?,
+                    scopes: scopes.pci,
+                    sources: scopes.sources,
                 });
             }
             RMRR => {
-                if length < 24 {
+                if length < 24 || entry[4..6] != [0, 0] {
                     return Err(DmarError::InvalidStructure);
                 }
                 let (base, limit) = (quad(entry, 8), quad(entry, 16));
@@ -182,14 +249,16 @@ pub fn parse(table: &[u8]) -> Result<Remapping, DmarError> {
                 {
                     return Err(DmarError::InvalidStructure);
                 }
+                let scopes = scopes(entry, 24)?;
                 remapping.reserved.push(Rmrr {
                     segment: word(entry, 6),
                     base,
                     limit,
-                    scopes: scopes(entry, 24)?,
+                    scopes: scopes.pci,
+                    sources: scopes.sources,
                 });
             }
-            _ => {}
+            other => remapping.additional_structures.push(other),
         }
         offset = end;
     }
@@ -335,204 +404,4 @@ pub fn single_flat_owner(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use alloc::{vec, vec::Vec};
-    fn seal(mut table: Vec<u8>) -> Vec<u8> {
-        let bytes = table.len() as u32;
-        table[4..8].copy_from_slice(&bytes.to_le_bytes());
-        table[9] = 0;
-        table[9] = 0u8.wrapping_sub(table.iter().fold(0u8, |sum, byte| sum.wrapping_add(*byte)));
-        table
-    }
-    fn fixture() -> Vec<u8> {
-        let mut table = vec![0; 64];
-        table[..4].copy_from_slice(b"DMAR");
-        table[36] = 47;
-        table[50..52].copy_from_slice(&16u16.to_le_bytes());
-        table[52] = 1;
-        table[56..64].copy_from_slice(&0xfed90000u64.to_le_bytes());
-        seal(table)
-    }
-    fn scoped(paths: &[[u8; 8]]) -> Vec<u8> {
-        let mut table = fixture();
-        table[52] = 0;
-        for scope in paths {
-            table.extend(scope);
-        }
-        let length = (table.len() - HEADER) as u16;
-        table[50..52].copy_from_slice(&length.to_le_bytes());
-        seal(table)
-    }
-    #[test]
-    fn parses_units_reserved_regions_and_bridge_paths() {
-        let mut table = fixture();
-        // A second unit with an endpoint behind a bridge and a bridge scope.
-        let mut unit = vec![0, 0, 0, 0, 0, 0, 0, 0];
-        unit.extend(0xfed91000u64.to_le_bytes());
-        unit.extend([1, 10, 0, 0, 0, 0, 0x1c, 0, 0, 0]);
-        unit.extend([2, 8, 0, 0, 0, 0, 0x1d, 0]);
-        unit.extend([3, 8, 0, 0, 2, 0xf0, 0x1f, 0]);
-        let length = unit.len() as u16;
-        unit[2..4].copy_from_slice(&length.to_le_bytes());
-        table.extend(unit);
-        let mut rmrr = vec![1, 0, 32, 0, 0, 0, 0, 0];
-        rmrr.extend(0x7d000000u64.to_le_bytes());
-        rmrr.extend(0x7d01ffffu64.to_le_bytes());
-        rmrr.extend([1, 8, 0, 0, 0, 0, 0x14, 0]);
-        table.extend(rmrr);
-        table.extend([3, 0, 4, 0]);
-        let parsed = parse(&seal(table)).unwrap();
-        assert_eq!(parsed.physical_bits, 48);
-        assert_eq!(parsed.units.len(), 2);
-        assert!(parsed.units[0].include_all);
-        assert_eq!(
-            parsed.units[1].scopes,
-            [
-                Scope {
-                    bridge: false,
-                    bus: 0,
-                    path: vec![(0x1c, 0), (0, 0)]
-                },
-                Scope {
-                    bridge: true,
-                    bus: 0,
-                    path: vec![(0x1d, 0)]
-                }
-            ]
-        );
-        assert_eq!(parsed.reserved[0].limit, 0x7d01ffff);
-        assert_eq!(parsed.reserved[0].scopes[0].path, [(0x14, 0)]);
-        let mut broken = fixture();
-        broken.extend([1, 0, 24, 0, 0, 0, 0, 0]);
-        broken.extend(0x1000u64.to_le_bytes());
-        broken.extend(0x1000u64.to_le_bytes());
-        assert_eq!(parse(&seal(broken)), Err(DmarError::InvalidStructure));
-    }
-
-    #[test]
-    fn reserved_ranges_require_a_representable_end_within_the_host_width() {
-        for (bits, limit, valid) in [
-            (48, u64::MAX, false),
-            (64, u64::MAX, false),
-            (48, (1u64 << 48) + 4095, false),
-            (48, (1u64 << 48) - 1, true),
-        ] {
-            let mut table = fixture();
-            table[36] = bits - 1;
-            table.extend([1, 0, 32, 0, 0, 0, 0, 0]);
-            table.extend((limit & !4095).to_le_bytes());
-            table.extend(limit.to_le_bytes());
-            table.extend([1, 8, 0, 0, 0, 0, 0x14, 0]);
-            let result = parse(&seal(table));
-            if valid {
-                assert_eq!(result.unwrap().reserved[0].limit, limit);
-            } else {
-                assert_eq!(result, Err(DmarError::InvalidStructure));
-            }
-        }
-    }
-
-    #[test]
-    fn requires_live_endpoint_coverage_and_valid_direct_paths() {
-        let one = [1, 8, 0, 0, 0, 0, 1, 0];
-        let two = [1, 8, 0, 0, 0, 0, 2, 0];
-        let ioapic = [3, 8, 0, 0, 0, 255, 31, 0];
-        let complete = scoped(&[two, one, ioapic]);
-        assert!(single_flat_owner(&complete, 0, &[8, 16]).is_ok());
-        assert_eq!(
-            single_flat_owner(&scoped(&[one]), 0, &[8, 16]),
-            Err(DmarError::MissingRequester(16))
-        );
-        assert_eq!(
-            single_flat_owner(&scoped(&[one, one]), 0, &[8]),
-            Err(DmarError::DuplicateRequester(8))
-        );
-        assert_eq!(
-            single_flat_owner(&scoped(&[one, two]), 0, &[8]),
-            Err(DmarError::UnlistedRequester(16))
-        );
-        assert_eq!(
-            single_flat_owner(&complete, 0, &[8, 8]),
-            Err(DmarError::DuplicateRequester(8))
-        );
-        assert_eq!(
-            single_flat_owner(&complete, 0, &[0x108]),
-            Err(DmarError::UnsupportedRouting)
-        );
-        let mut bridge = one;
-        bridge[0] = 2;
-        assert_eq!(
-            single_flat_owner(&scoped(&[bridge]), 0, &[8]),
-            Err(DmarError::UnsupportedScope(2))
-        );
-        for (index, value) in [(1, 7), (2, 1), (4, 1), (6, 32), (7, 8)] {
-            let mut malformed = one;
-            malformed[index] = value;
-            assert_eq!(
-                single_flat_owner(&scoped(&[malformed]), 0, &[8]),
-                Err(DmarError::InvalidStructure)
-            );
-        }
-        let mut multihop = scoped(&[one]);
-        multihop[65] = 10;
-        multihop.extend([2, 0]);
-        multihop[50..52].copy_from_slice(&26u16.to_le_bytes());
-        assert_eq!(
-            single_flat_owner(&seal(multihop), 0, &[8]),
-            Err(DmarError::UnsupportedRouting)
-        );
-    }
-    #[test]
-    fn single_flat_owner_accepts_only_one_complete_unit() {
-        let table = fixture();
-        assert_eq!(
-            single_flat_owner(&table, 0, &[8, 16]),
-            Ok(HardwareUnit {
-                base: 0xfed90000,
-                bytes: 4096,
-                segment: 0,
-                physical_bits: 48
-            })
-        );
-        assert_eq!(
-            single_flat_owner(&table, 1, &[8, 16]),
-            Err(DmarError::UnsupportedRouting)
-        );
-        let mut rmrr = table.clone();
-        rmrr.extend([1, 0, 4, 0]);
-        assert_eq!(
-            single_flat_owner(&seal(rmrr), 0, &[8, 16]),
-            Err(DmarError::UnsupportedStructure(1))
-        );
-        let mut multiple = table.clone();
-        multiple.extend_from_slice(&table[48..]);
-        assert_eq!(
-            single_flat_owner(&seal(multiple), 0, &[8, 16]),
-            Err(DmarError::MultipleUnits)
-        );
-        let mut partial = table.clone();
-        partial[52] = 0;
-        assert_eq!(
-            single_flat_owner(&seal(partial), 0, &[8, 16]),
-            Err(DmarError::MissingRequester(8))
-        );
-        for length in [0u16, 3, 15, 17, u16::MAX] {
-            let mut broken = table.clone();
-            broken[50..52].copy_from_slice(&length.to_le_bytes());
-            assert!(single_flat_owner(&seal(broken), 0, &[8, 16]).is_err());
-        }
-        let mut bad_width = table.clone();
-        bad_width[36] = 255;
-        assert_eq!(
-            single_flat_owner(&seal(bad_width), 0, &[8, 16]),
-            Err(DmarError::UnsupportedWidth)
-        );
-        let mut unaligned = table;
-        unaligned[56] = 1;
-        assert_eq!(
-            single_flat_owner(&seal(unaligned), 0, &[8, 16]),
-            Err(DmarError::InvalidStructure)
-        );
-    }
-}
+mod tests;

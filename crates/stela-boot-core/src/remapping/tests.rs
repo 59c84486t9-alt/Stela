@@ -124,12 +124,15 @@ fn disjoint_ecam_windows_share_one_complete_segment_inventory() {
     assert!(inventories[1].1[0].usb());
     let remapping = Remapping {
         physical_bits: 39,
+        flags: 0,
+        additional_structures: vec![],
         units: vec![Drhd {
             base: 0xfed9_0000,
             bytes: 4096,
             segment: 0,
             include_all: true,
             scopes: vec![],
+            sources: vec![],
         }],
         reserved: vec![],
     };
@@ -172,6 +175,7 @@ fn an_include_all_unit_covers_what_listed_units_leave() {
         segment: 0,
         include_all,
         scopes,
+        sources: vec![],
     };
     let graphics = Scope {
         bridge: false,
@@ -180,6 +184,8 @@ fn an_include_all_unit_covers_what_listed_units_leave() {
     };
     let mut remapping = Remapping {
         physical_bits: 39,
+        flags: 0,
+        additional_structures: vec![],
         units: vec![unit(true, vec![]), unit(false, vec![graphics])],
         reserved: vec![Rmrr {
             segment: 0,
@@ -190,6 +196,7 @@ fn an_include_all_unit_covers_what_listed_units_leave() {
                 bus: 0,
                 path: vec![(0x14, 0)],
             }],
+            sources: vec![],
         }],
     };
     let decisions = plan(&remapping, 0, &present, &[]);
@@ -254,6 +261,7 @@ fn drhd(include_all: bool, scopes: Vec<Scope>) -> crate::dmar::Drhd {
         segment: 0,
         include_all,
         scopes,
+        sources: vec![],
     }
 }
 #[test]
@@ -273,6 +281,8 @@ fn ambiguous_explicit_units_and_duplicate_include_all_units_are_not_taken() {
     ] {
         let remapping = crate::dmar::Remapping {
             physical_bits: 39,
+            flags: 0,
+            additional_structures: vec![],
             units,
             reserved: vec![],
         };
@@ -288,6 +298,8 @@ fn ambiguous_explicit_units_and_duplicate_include_all_units_are_not_taken() {
     }
     let remapping = crate::dmar::Remapping {
         physical_bits: 39,
+        flags: 0,
+        additional_structures: vec![],
         units: vec![drhd(
             false,
             vec![
@@ -310,6 +322,8 @@ fn an_arriving_child_uses_its_explicit_unit_even_when_the_bridge_uses_include_al
     present.retain(|function| function.rid != 0x200);
     let remapping = crate::dmar::Remapping {
         physical_bits: 39,
+        flags: 0,
+        additional_structures: vec![],
         units: vec![
             drhd(true, vec![]),
             drhd(
@@ -341,6 +355,8 @@ fn future_isolation_includes_unresolved_child_scopes_and_excludes_unrelated_endp
     present.retain(|entry| entry.rid != 0x200);
     let mut remapping = crate::dmar::Remapping {
         physical_bits: 39,
+        flags: 0,
+        additional_structures: vec![],
         units: vec![
             drhd(true, vec![]),
             drhd(
@@ -393,4 +409,75 @@ fn inventory_cannot_omit_a_pf_because_function_zero_or_its_multifunction_bit_is_
         present.iter().map(|entry| entry.rid).collect::<Vec<_>>(),
         [0, 1, 9]
     );
+}
+
+#[test]
+fn unowned_firmware_dma_sources_block_plans_routes_and_future_isolation() {
+    use crate::dmar::{Remapping, Rmrr, SourceKind, SourceScope};
+    let present = inventory();
+    let source = |kind| SourceScope {
+        kind,
+        flags: 0,
+        reserved: 0,
+        enumeration_id: 9,
+        bus: 0,
+        path: vec![(0x1f, 0)],
+    };
+    let baseline = Remapping {
+        physical_bits: 39,
+        flags: 1,
+        additional_structures: vec![],
+        units: vec![drhd(true, vec![])],
+        reserved: vec![],
+    };
+    for kind in [SourceKind::IoApic, SourceKind::Hpet] {
+        let mut remapping = baseline.clone();
+        remapping.units[0].sources.push(source(kind));
+        assert!(plan(&remapping, 0, &present, &[0x10])[0].1.is_ok());
+    }
+    for kind in [SourceKind::Namespace, SourceKind::Reserved(0x7f)] {
+        for in_reserved in [false, true] {
+            let mut remapping = baseline.clone();
+            if in_reserved {
+                remapping.reserved.push(Rmrr {
+                    segment: 0,
+                    base: 0x1000,
+                    limit: 0x1fff,
+                    scopes: vec![],
+                    sources: vec![source(kind)],
+                });
+            } else {
+                remapping.units[0].sources.push(source(kind));
+            }
+            assert_eq!(
+                plan(&remapping, 0, &present, &[]),
+                [(0, Err(Leave::UnsupportedSource(kind)))]
+            );
+            assert_eq!(
+                route(&remapping, 0, &present, 0x0200),
+                Err(Leave::UnsupportedSource(kind))
+            );
+            assert_eq!(subtree_routes(&remapping, 0, &present, 0x00e0), None);
+            remapping.units[0].segment = 1;
+            remapping
+                .reserved
+                .iter_mut()
+                .for_each(|region| region.segment = 1);
+            remapping.units.push(drhd(true, vec![]));
+            assert_eq!(route(&remapping, 0, &present, 0x0200), Ok(Some(1)));
+        }
+    }
+    for kind in [5, 6, 0x7f] {
+        let mut remapping = baseline.clone();
+        remapping.additional_structures.push(kind);
+        assert_eq!(
+            plan(&remapping, 0, &present, &[]),
+            [(0, Err(Leave::UnsupportedStructure(kind)))]
+        );
+        assert_eq!(
+            route(&remapping, 0, &present, 0x0200),
+            Err(Leave::UnsupportedStructure(kind))
+        );
+        assert_eq!(subtree_routes(&remapping, 0, &present, 0x00e0), None);
+    }
 }
