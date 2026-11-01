@@ -301,7 +301,10 @@ impl model::AmxMemory for NoMemory {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 type Entry = unsafe extern "sysv64" fn(*mut u8, *const u8, *const u8, u64);
+#[cfg(not(target_arch = "x86_64"))]
+type Entry = unsafe extern "C" fn(*mut u8, *const u8, *const u8, u64);
 
 /// A private RX copy of a kernel library.
 struct Executable {
@@ -311,6 +314,10 @@ struct Executable {
 
 impl Executable {
     fn new(code: &[u8]) -> Result<Self> {
+        anyhow::ensure!(
+            cfg!(target_arch = "x86_64"),
+            "the AMX kernels are x86-64 code; run this on an x86-64 host"
+        );
         let executable = Self {
             pointer: pages::map(None, code.len(), Access::ReadWrite)?,
             length: code.len(),

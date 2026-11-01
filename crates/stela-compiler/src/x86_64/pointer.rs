@@ -66,7 +66,11 @@ const REQUEST_KEY: u32 = 7;
 
 /// The engine's routine a thunk calls on a memo miss: [`Anchor::Pointer`],
 /// [`Form::request`], the pointer and the modifier.
+#[cfg(target_arch = "x86_64")]
 pub type ServiceRoutine = extern "sysv64" fn(u64, u32, u64, u64) -> Completion;
+/// Only x86-64 runs translated code; ARM hosts compile the type alone.
+#[cfg(not(target_arch = "x86_64"))]
+pub type ServiceRoutine = extern "C" fn(u64, u32, u64, u64) -> Completion;
 
 /// What the service returns: `value` when `completed` is nonzero.
 #[repr(C)]

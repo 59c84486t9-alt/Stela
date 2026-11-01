@@ -19,5 +19,4 @@ pub mod translation_store;
 /// Native network protocols over a raw Ethernet link.
 pub use platform::net;
 /// PC storage and firmware services used by the native UEFI mount.
-#[cfg(target_arch = "x86_64")]
 pub use platform::pc;

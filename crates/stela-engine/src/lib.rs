@@ -9,6 +9,24 @@ extern crate alloc;
 compile_error!(
     "freestanding runtime requires aborting panic; platform must terminate the machine on panic"
 );
+/// Defines a function translated code calls. That code follows
+/// `extern "sysv64"`, which only x86-64 has; other hosts never run it and
+/// keep the function for its type alone.
+macro_rules! translated_callee {
+    ($(#[$meta:meta])* $vis:vis fn $($rest:tt)*) => {
+        #[cfg(target_arch = "x86_64")]
+        $(#[$meta])* $vis extern "sysv64" fn $($rest)*
+        #[cfg(not(target_arch = "x86_64"))]
+        $(#[$meta])* $vis extern "C" fn $($rest)*
+    };
+    ($(#[$meta:meta])* $vis:vis unsafe fn $($rest:tt)*) => {
+        #[cfg(target_arch = "x86_64")]
+        $(#[$meta])* $vis unsafe extern "sysv64" fn $($rest)*
+        #[cfg(not(target_arch = "x86_64"))]
+        $(#[$meta])* $vis unsafe extern "C" fn $($rest)*
+    };
+}
+
 pub mod amx;
 mod error;
 #[cfg(feature = "std")]

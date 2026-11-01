@@ -1108,7 +1108,8 @@ fn is_guest_fault(status: u32) -> bool {
     .any(|fault| status == fault as u32)
 }
 
-unsafe extern "sysv64" fn dispatch<P: DataPolicy>(
+translated_callee! {
+unsafe fn dispatch<P: DataPolicy>(
     view: *mut MemoryContextView,
     request: *const MemoryRequest,
 ) -> u32 {
@@ -1169,6 +1170,7 @@ unsafe extern "sysv64" fn dispatch<P: DataPolicy>(
             MemoryStatus::Domain as u32
         }
     }
+}
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

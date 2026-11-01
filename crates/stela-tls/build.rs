@@ -38,9 +38,6 @@ fn main() {
         .define("MBEDTLS_CONFIG_FILE", "\"stela_mbedcrypto_config.h\"")
         .define("NDEBUG", None)
         .define("strcmp", "stela_mbedtls_strcmp")
-        .flag("-mno-sse")
-        .flag("-mno-sse2")
-        .flag("-msoft-float")
         // Official CVE-2025-66442 mitigation: never enable the LLVM select
         // optimization that can turn constant-time C selections into branches.
         .flag("-mllvm")
@@ -48,6 +45,12 @@ fn main() {
         .flag("-fno-stack-protector")
         .flag("-ffunction-sections")
         .flag("-fdata-sections");
+    if std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("x86_64") {
+        build
+            .flag("-mno-sse")
+            .flag("-mno-sse2")
+            .flag("-msoft-float");
+    }
     if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
         // LLVM COFF librarian; cross compilation needs no lib.exe SDK.
         build.archiver("llvm-lib");

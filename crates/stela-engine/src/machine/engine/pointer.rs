@@ -382,11 +382,12 @@ impl PointerService {
     }
 }
 
+translated_callee! {
 /// A PAC thunk's memo miss (`x86_64::pointer::ServiceRoutine`): the result
 /// of `request` on these operands while the requested key's tag word is
 /// open, completed when it is a signing or a successful authentication.
 /// A failed authentication is remembered for the exit the thunk then takes.
-pub(super) extern "sysv64" fn complete(
+pub(super) fn complete(
     service: u64,
     request: u32,
     pointer: u64,
@@ -425,6 +426,7 @@ pub(super) extern "sysv64" fn complete(
         },
         _ => pointer::Completion::default(),
     }
+}
 }
 
 #[cfg(test)]

@@ -260,10 +260,15 @@ impl MemoryRequest {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub type MemoryCallback = unsafe extern "sysv64" fn(
     context: *mut MemoryContextView,
     request: *const MemoryRequest,
 ) -> u32;
+/// Only x86-64 runs translated code; ARM hosts compile the type alone.
+#[cfg(not(target_arch = "x86_64"))]
+pub type MemoryCallback =
+    unsafe extern "C" fn(context: *mut MemoryContextView, request: *const MemoryRequest) -> u32;
 
 /// Borrowed dispatch view. Its owner keeps resolver, tag and monitor state.
 /// Callback failures preserve a diagnostic record after native stack unwind.

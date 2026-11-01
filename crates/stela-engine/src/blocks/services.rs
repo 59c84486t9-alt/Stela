@@ -78,7 +78,10 @@ pub(super) fn serialize_instruction_execution() -> Result<()> {
         Ok(())
     }
     #[cfg(not(target_arch = "x86_64"))]
-    return Err(refuse!("instruction synchronization requires the x86-64 runtime").into());
+    return Err(stela_contracts::refuse!(
+        "instruction synchronization requires the x86-64 runtime"
+    )
+    .into());
 }
 
 pub(super) fn runtime_pauth_key(key: PointerAuthenticationKey) -> stela_contracts::pauth::Key {

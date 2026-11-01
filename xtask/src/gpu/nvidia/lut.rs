@@ -139,6 +139,7 @@ pub(super) struct CpuModelOptions<'a> {
     pub(super) sources: &'a [(&'a str, &'a [&'a str])],
 }
 
+#[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
 pub(super) fn cpu_model(options: CpuModelOptions<'_>) -> Result<serde_json::Value> {
     let CpuModelOptions {
         clang,

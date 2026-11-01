@@ -144,8 +144,11 @@ impl Clock {
         if let Some(ticks) = test_clock::read() {
             return ticks;
         }
+        #[cfg(target_arch = "x86_64")]
         // SAFETY: RDTSC has no memory effects; x86-64 always has it.
-        unsafe { core::arch::x86_64::_rdtsc() }
+        return unsafe { core::arch::x86_64::_rdtsc() };
+        #[cfg(not(target_arch = "x86_64"))]
+        unreachable!("the time-stamp counter read outside x86-64")
     }
 
     fn duration_ticks(&self, microseconds: u64) -> Result<u64, ClockError> {

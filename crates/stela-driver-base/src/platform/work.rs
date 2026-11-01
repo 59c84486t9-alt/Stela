@@ -30,10 +30,13 @@ use core::{
     pin::Pin,
 };
 
+#[cfg(target_arch = "x86_64")]
 mod binding;
 #[cfg(target_arch = "x86_64")]
 mod context;
+#[cfg(target_arch = "x86_64")]
 mod dispatch;
+#[cfg(target_arch = "x86_64")]
 mod lifetime;
 #[cfg(target_arch = "x86_64")]
 pub mod scheduling;

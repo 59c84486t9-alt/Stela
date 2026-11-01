@@ -216,7 +216,10 @@ fn leaf_options(profile: ScalableProfile, target: TargetCpu) -> Options {
 }
 
 /// A context leaf's entry: the two-argument context ABI.
+#[cfg(target_arch = "x86_64")]
 type Entry = unsafe extern "sysv64" fn(*mut GuestState, *mut ExecutionContext);
+#[cfg(not(target_arch = "x86_64"))]
+type Entry = unsafe extern "C" fn(*mut GuestState, *mut ExecutionContext);
 
 /// An installed leaf and what its memory accesses require of the PE.
 #[derive(Debug, Clone, Copy)]
@@ -240,9 +243,10 @@ struct Service<H: Host, D: Devices> {
     failure: Option<Failure>,
 }
 
+translated_callee! {
 /// The `MemoryCallback` of [`Service`]: one architectural element, in
 /// order, which the engine translates, checks and transfers.
-unsafe extern "sysv64" fn serve<H: Host, D: Devices>(
+unsafe fn serve<H: Host, D: Devices>(
     view: *mut MemoryContextView,
     request: *const MemoryRequest,
 ) -> u32 {
@@ -283,6 +287,7 @@ unsafe extern "sysv64" fn serve<H: Host, D: Devices>(
     service.failure = Some(failure);
     view.record(status, request.address, request.pc, view.completed_bytes);
     status as u32
+}
 }
 
 impl<H: Host, D: Devices> Machine<H, D> {

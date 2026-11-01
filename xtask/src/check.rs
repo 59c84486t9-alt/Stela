@@ -3,8 +3,9 @@
 //! Formatting reads only sources, so it runs beside everything else. Once
 //! the GPU sources are fetched, two lanes run at once, each in its own
 //! target directory: the UEFI target's Clippy in [`BOOT_TARGET_DIR`], then
-//! the other shipped hosts' ([`CROSS`]) in [`CROSS_TARGET_DIR`], and the
-//! host's Clippy and test build in `target`. The tests then run alone.
+//! the other shipped hosts' ([`CROSS`]) and a compile for
+//! [`RELEASE_HOST`] in [`CROSS_TARGET_DIR`], and the host's Clippy and test
+//! build in `target`. The tests then run alone.
 //! A lane stops at its first failure; the gate fails if any part did, once
 //! every part has finished.
 use crate::tools::{cargo, exec};
@@ -52,6 +53,10 @@ const CROSS: [(&str, &[&str]); 3] = [
     ),
 ];
 const CROSS_TARGET_DIR: &str = "target/cross";
+/// The host the release build runs on, which must compile the whole
+/// workspace. Its native paths are x86-64's, so this is a check for errors
+/// and leaves linting to the lanes above.
+const RELEASE_HOST: &str = "aarch64-apple-darwin";
 const DENY: [&str; 3] = ["--", "-D", "warnings"];
 
 pub fn run(fix: bool, nvk: bool) -> Result<()> {
@@ -130,6 +135,14 @@ pub fn run(fix: bool, nvk: bool) -> Result<()> {
             .args(DENY);
         clippy
     }));
+    let mut release_host = command(["check", "--workspace", "--locked"]);
+    release_host
+        .args(["--target", RELEASE_HOST, "--target-dir", CROSS_TARGET_DIR])
+        // Nothing links, so build scripts' C objects go unused, and this host
+        // has no Apple headers to compile them against.
+        .env("CC_aarch64_apple_darwin", "true")
+        .env("AR_aarch64_apple_darwin", "true");
+    boot_lane.push(release_host);
     // `--all-features` includes xtask's `fetched-sources`, whose tests read
     // the fetched sources.
     let test = ["test", "--workspace", "--all-features", "--locked"];
@@ -209,7 +222,11 @@ fn install_targets() -> Result<()> {
         .output()
         .context("cannot run rustup, which installs the cross-check targets")?;
     let installed = String::from_utf8_lossy(&installed.stdout);
-    for (target, _) in CROSS {
+    for target in CROSS
+        .map(|(target, _)| target)
+        .into_iter()
+        .chain([RELEASE_HOST])
+    {
         if !installed.lines().any(|line| line.trim() == target) {
             exec(Command::new("rustup").args(["target", "add", target]))?;
         }
