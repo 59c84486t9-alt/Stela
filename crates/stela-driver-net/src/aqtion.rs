@@ -12,7 +12,7 @@ use crate::{
     bus::{
         dma::{
             mapping::{DmaDomain, DmaError},
-            memory::{MemoryError, PageSource},
+            memory::MemoryError,
         },
         mmio::owned,
         pci::{ConfigSpace, Function, owned::OwnedConfig},
@@ -23,6 +23,7 @@ use core::cell::Cell;
 mod firmware;
 mod hardware;
 mod memory;
+pub mod native;
 mod registers;
 use memory::{COUNT, Memory};
 use registers::Field;
@@ -256,9 +257,8 @@ fn power_down<C: ConfigSpace>(function: &mut Function<C>, power: &mut PciPower) 
     Ok(())
 }
 /// Owns the PCI configuration, UC register window, DMA domain and pins.
-/// Failed initialization returns this complete owner for stop/retry/inspection.
 /// Drop quarantines every active physical owner; it never invents DMA completion.
-/// Native attachment accepts `OwnedConfig` only. The defaulted configuration
+/// Native attachment uses the cold/root owner in [`native`]. The defaulted configuration
 /// parameter lets protocol peers exercise the same lifecycle implementation;
 /// it supplies no constructor or physical resource permission.
 pub struct Aqtion<R: Registers = MappedRegisters, T: Timer = Clock, C: ConfigSpace = OwnedConfig> {
@@ -275,106 +275,6 @@ pub struct Aqtion<R: Registers = MappedRegisters, T: Timer = Clock, C: ConfigSpa
     tx_head: usize,
     rx_head: usize,
     dropping: bool,
-}
-impl Aqtion {
-    /// # Safety
-    /// The producer transfers this physical function exclusively after
-    /// stopping firmware/other drivers, IRQ sources and workers. BAR and domain
-    /// belong to this requester/reset epoch; the domain really
-    /// isolates its DMA, including aliases. Reset is checked to preserve that
-    /// epoch and its ATS/NoSnoop policy. Calls occur in serialized process context.
-    /// These are resource permissions, never copied PCI identities.
-    // Return the exact uncertain native owners without allocating on failure.
-    #[allow(
-        clippy::result_large_err,
-        reason = "Failed native attachment returns the original stopped PCI function, BAR mapping and DMA owners instead of dropping uncertain hardware resources"
-    )]
-    pub unsafe fn attach(
-        function: Function<OwnedConfig>,
-        registers: MappedRegisters,
-        clock: Clock,
-        domain: Arc<dyn DmaDomain>,
-        pages: &dyn PageSource,
-    ) -> core::result::Result<Self, (Error, Self)> {
-        let profile = Profile::identify(function.vendor, function.device);
-        let mut owner = Self {
-            function: Some(function),
-            hardware: Some(Hardware {
-                registers,
-                timer: clock,
-                reset_ownership: Cell::new(firmware::ResetOwnership::default()),
-            }),
-            domain: Some(domain),
-            memory: None,
-            profile: profile.unwrap_or(Profile {
-                generation: Generation::Atlantic,
-                device: 0,
-                rates: 0,
-            }),
-            firmware: None,
-            mac: Mac::default(),
-            state: State::Stopped,
-            power: PciPower::Unknown,
-            tx_tail: 0,
-            tx_head: 0,
-            rx_head: 0,
-            dropping: false,
-        };
-        let result = (|| {
-            owner.hw().check_timing()?;
-            if profile.is_none() || owner.function.as_ref().unwrap().class != [2, 0, 0] {
-                return Err(Error::Unsupported("AQtion device/profile"));
-            }
-            // Bind the register owner to the BAR decoded from kept config.
-            let span = owner.hw().registers.mapping.physical_span()?;
-            let required = if owner.profile.generation == Generation::Antigua {
-                0x14800
-            } else {
-                0x10000
-            };
-            if span.bytes() < required {
-                return Err(Error::Unsupported(
-                    "AQtion register BAR shorter than generation requires",
-                ));
-            }
-            // BAR sizing writes temporary all-ones values; disable mastering first,
-            // and power to D0 before touching the BAR or register window.
-            let function = owner.function.as_mut().unwrap();
-            power_up(function, &clock, &mut owner.power)?;
-            let command = function.config().read16(4);
-            if command == u16::MAX {
-                return Err(Error::Removed);
-            }
-            function.config().write16(4, command & !4);
-            let bars = function.bars();
-            if !bars.iter().take(4).any(|bar| match bar {
-                Some(crate::bus::pci::Bar::Memory { address, size, .. }) => {
-                    *address == span.start() && span.bytes() <= *size
-                }
-                _ => false,
-            }) {
-                return Err(Error::Unsupported(
-                    "AQtion register mapping does not name this function's BAR",
-                ));
-            }
-            owner.memory = Some(Memory::new(pages, owner.domain.as_ref().unwrap().clone())?);
-            owner.start()
-        })();
-        match result {
-            Ok(()) => Ok(owner),
-            Err(e) => {
-                owner.state = State::Faulted;
-                Err((e, owner))
-            }
-        }
-    }
-}
-impl Aqtion {
-    /// Restore acknowledged D0, then rebuild firmware/queues. A failed PCI
-    /// transition keeps the owner and may be retried without touching MMIO.
-    pub fn resume(&mut self) -> Result<()> {
-        self.resume_owned()
-    }
 }
 impl<R: Registers, T: Timer, C: ConfigSpace> Aqtion<R, T, C> {
     fn hw(&self) -> &Hardware<R, T> {
@@ -435,6 +335,11 @@ impl<R: Registers, T: Timer, C: ConfigSpace> Aqtion<R, T, C> {
         self.hw().reset(self.profile)?;
         self.hw().stop_queues()?;
         let fw = self.hw().firmware(self.profile)?;
+        self.start_queues(fw)
+    }
+    /// Publish fresh queues after firmware reset and queue stop. Both entry
+    /// paths keep acknowledged D0 and their checked clock/root through this call.
+    fn start_queues(&mut self, fw: firmware::Firmware) -> Result<()> {
         self.mac = fw.mac;
         self.firmware = Some(fw);
         self.hw().configure(self.profile, &fw)?;

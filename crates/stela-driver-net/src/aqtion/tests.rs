@@ -7,7 +7,7 @@ use super::*;
 use crate::bus::{
     dma::{
         mapping::{Direction, DomainMapping},
-        memory::{CacheAttribute, CpuMapping, PageBacking, PinnedPages},
+        memory::{CacheAttribute, CpuMapping, PageBacking, PageSource, PinnedPages},
         pages::DmaPages,
     },
     pci::Address,
@@ -917,12 +917,28 @@ struct NativePm {
     mode: Mutex<PmMode>,
     accesses: Mutex<Vec<ConfigAccess>>,
     actual_state: AtomicUsize,
+    unmaps: AtomicUsize,
+    fail_unmap: AtomicBool,
+    retire_after: Mutex<Option<Arc<AtomicBool>>>,
 }
 // SAFETY: test-only stable RAM, serialized native volatile accesses and locked metadata.
 unsafe impl Send for NativePm {}
 // SAFETY: no references into the UnsafeCell storage are exposed.
 unsafe impl Sync for NativePm {}
 impl NativePm {
+    fn power_state(&self) -> u16 {
+        // SAFETY: this device-side observer owns the same aligned model ECAM
+        // RAM as the configuration mapping; the fixture serializes access.
+        unsafe {
+            self.pointer()
+                .as_ptr()
+                .add(0x44)
+                .cast::<u16>()
+                .read_volatile()
+                & 3
+        }
+    }
+
     fn pointer(&self) -> NonNull<u8> {
         // SAFETY: the model device, its pages and its domain belong to this test alone; no other
         // driver, worker or DMA touches them.
@@ -1091,6 +1107,16 @@ unsafe impl owned::MappingPlatform for NativePm {
         mapping: owned::InstalledMapping,
     ) -> core::result::Result<(), owned::Error> {
         assert_eq!(request.id, mapping.token);
+        if let Some(bar_retired) = self.retire_after.lock().unwrap().as_ref() {
+            assert!(
+                bar_retired.load(Ordering::Relaxed),
+                "configuration before BAR retirement"
+            );
+        }
+        self.unmaps.fetch_add(1, Ordering::Relaxed);
+        if self.fail_unmap.load(Ordering::Relaxed) {
+            return Err(owned::Error::UnmapFailed);
+        }
         Ok(())
     }
 }
@@ -1100,6 +1126,9 @@ fn native_config(address: Address, device: u16) -> (Function<ControlledConfig>, 
         mode: Mutex::new(PmMode::Normal),
         accesses: Mutex::new(Vec::new()),
         actual_state: AtomicUsize::new(0),
+        unmaps: AtomicUsize::new(0),
+        fail_unmap: AtomicBool::new(false),
+        retire_after: Mutex::new(None),
     });
     let span = owned::PhysicalSpan::new(0x8010_0000, 4096).unwrap();
     let space = owned::AddressSpace {
@@ -2412,3 +2441,5 @@ mod retirement;
 mod reset_source;
 
 mod liveness;
+
+mod ownership;
