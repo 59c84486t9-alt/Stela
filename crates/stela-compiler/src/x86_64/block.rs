@@ -192,6 +192,14 @@ fn emit_selected(
     let mut block = super::Emitted::default();
     let code = &mut block.x86_64_code;
     code.set_pinned(pinned);
+    if pinned
+        && let Some(first) = instructions
+            .first()
+            .map(|first| first.pc)
+            .or(terminal.map(|(pc, _)| *pc))
+    {
+        code.set_linked_block(first.0);
+    }
     code.set_constant_time(target.data_independent_timing());
     let mut fixups = vec![];
     // The DIT audit covers each instruction's own lowering, not the
@@ -336,6 +344,7 @@ fn emit_selected(
         }
         let instruction = &instructions[cursor];
         block.source_map.push((instruction.pc, code.len()));
+        code.set_instruction(block.source_map.len() - 1);
         if let Some(target) = instruction.operation.conditional_target() {
             let taken = branch_condition(code, &instruction.operation, held.rax)
                 .expect("a conditional branch's condition");
@@ -387,6 +396,7 @@ fn emit_selected(
         asm.bind(jump);
         direct_exit_with(&mut asm, target, side_exit(instructions_run - run));
     }
+    code.place_failures();
     if fault_table {
         fault_recovery = recovery::bind(
             &block.x86_64_code,
@@ -731,6 +741,7 @@ fn emit_terminal(
     } = context;
     if let Some((pc, terminal)) = terminal {
         source_map.push((*pc, code.len()));
+        code.set_instruction(source_map.len() - 1);
         match terminal {
             Terminator::FloatingPoint { inline } => {
                 // A numerical terminal is unexecuted. Ordinary profiles put

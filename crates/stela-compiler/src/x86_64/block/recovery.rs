@@ -50,12 +50,17 @@ pub(super) fn bind(
             });
         }
         if !matched {
-            let pc = source_map
-                .iter()
-                .filter(|(_, at)| *at <= marker.start)
-                .max_by_key(|(_, at)| *at)
-                .expect("guest operand has source map")
-                .0;
+            let pc = marker
+                .source
+                .map(|index| source_map[index].0)
+                .or_else(|| {
+                    source_map
+                        .iter()
+                        .filter(|(_, at)| *at <= marker.start)
+                        .max_by_key(|(_, at)| *at)
+                        .map(|(pc, _)| *pc)
+                })
+                .expect("guest operand has source map");
             let index = source
                 .iter()
                 .position(|instruction| instruction.pc == pc)

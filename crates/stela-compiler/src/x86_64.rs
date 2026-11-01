@@ -510,11 +510,10 @@ impl RangeCheck {
         self.shift < u64::BITS as u8 && self.bias <= IMM8_MAX && self.bound <= IMM8_MAX
     }
 
-    /// The shift, the bias and the comparison, and the branch past the
-    /// failure, which the caller binds.
-    fn test(self, asm: &mut asm::Asm) -> asm::Patch {
+    /// The shift, the bias and the comparison: above fails.
+    fn compare(self, asm: &mut asm::Asm) {
         use asm::{
-            Alu, Cond,
+            Alu,
             Gpr::{Rax, Rcx},
             ShiftOp, Size,
         };
@@ -526,7 +525,29 @@ impl RangeCheck {
             asm.alu_imm8(Alu::Add, Size::Dword, Rcx, self.bias as i8);
         }
         asm.alu_imm8(Alu::Cmp, Size::Dword, Rcx, self.bound as i8);
-        asm.jcc8(Cond::Be)
+    }
+
+    /// The check of `base`, a pinned guest register whose access moves at
+    /// most 2^16 bytes from it ([`guest_range`]): the address needs no copy.
+    pub(crate) fn emit_base(self, code: &mut Code, base: asm::Gpr) {
+        use asm::{Alu, Gpr::Rcx, ShiftOp, Size};
+        let mut asm = code.asm();
+        asm.mov(Size::Qword, Rcx, base);
+        asm.shift_imm(ShiftOp::Sar, Size::Qword, Rcx, self.shift);
+        if self.bias == OPCODE_INC {
+            asm.inc(Size::Dword, Rcx);
+        } else {
+            asm.alu_imm8(Alu::Add, Size::Dword, Rcx, self.bias as i8);
+        }
+        asm.alu_imm8(Alu::Cmp, Size::Dword, Rcx, self.bound as i8);
+        code.check_failure(asm::Cond::A);
+    }
+
+    /// [`Self::compare`] and the branch past the failure, which the caller
+    /// binds.
+    fn test(self, asm: &mut asm::Asm) -> asm::Patch {
+        self.compare(asm);
+        asm.jcc8(asm::Cond::Be)
     }
 
     /// The mask after the check.
@@ -539,9 +560,16 @@ impl RangeCheck {
         asm.cmov(Cond::A, Size::Qword, Rax, Rcx);
     }
 
-    /// The check with a UD2 failure.
+    /// The check, which in pinned code leaves the failure to the access: a
+    /// branch per access, taken each time, costs a kernel's cold code far
+    /// more than a move. Elsewhere it fails by UD2.
     pub(crate) fn emit(self, code: &mut Code) {
         let mut asm = code.asm();
+        if asm.is_pinned() {
+            self.compare(&mut asm);
+            unreachable_if(&mut asm, asm::Cond::A);
+            return;
+        }
         let passed = self.test(&mut asm);
         asm.guest_check();
         asm.bind(passed);
@@ -578,6 +606,16 @@ impl RangeCheck {
         code.into_bytes()
     }
 
+    /// The comparison every pinned check holds, whichever register it takes
+    /// and however it fails.
+    #[cfg(test)]
+    pub(crate) fn pinned_code(self) -> Vec<u8> {
+        const COPY_BYTES: usize = 3;
+        let mut asm = Code::new();
+        self.compare(&mut asm.asm());
+        asm.into_bytes().split_off(COPY_BYTES)
+    }
+
     /// Golden-byte oracle for a check of any placement. The fragment ends
     /// include the translated descriptor data and must not be used as counts.
     #[cfg(test)]
@@ -602,6 +640,13 @@ impl RangeCheck {
             [0x83, 0xc1, _, rest @ ..] => (1, rest),
             _ => return None,
         };
+        // The pinned check, with the same shift and comparison.
+        const PINNED_ENDS: [&[usize]; 2] = [&[3, 7, 9, 12, 20], &[3, 7, 10, 13, 21]];
+        if let [0x83, 0xf9, bound, 0x48, 0x0f, 0x47, 0x87, _, _, _, _, ..] = rest {
+            let ends = PINNED_ENDS[add];
+            return (*shift < u64::BITS as u8 && *bound <= IMM8_MAX)
+                .then(|| (ends[ends.len() - 1], ends));
+        }
         let [0x83, 0xf9, bound, 0x76, failure, rest @ ..] = rest else {
             return None;
         };
@@ -705,7 +750,17 @@ fn alignment_test(asm: &mut asm::Asm, unit: u8) {
     alignment_tail(asm);
 }
 
+/// RAX, the address of the access to come, made one that faults if `failed`.
+fn unreachable_if(asm: &mut asm::Asm, failed: asm::Cond) {
+    const UNREACHABLE: u32 = core::mem::offset_of!(crate::GuestState, unreachable) as u32;
+    asm.cmov(failed, asm::Size::Qword, asm::Gpr::Rax, frame(UNREACHABLE));
+}
+
 fn alignment_tail(asm: &mut asm::Asm) {
+    if asm.is_pinned() {
+        unreachable_if(asm, asm::Cond::Ne);
+        return;
+    }
     let aligned = asm.jcc8(asm::Cond::E);
     asm.guest_check();
     asm.bind(aligned);

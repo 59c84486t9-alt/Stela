@@ -43,6 +43,7 @@ fn state(flags: u32) -> GuestState {
         }),
         fpcr: 0xa5c39e71 ^ flags,
         fpsr: 0x5a3c618e ^ flags,
+        ..Default::default()
     };
     state.x[0] = 3;
     state.x[30] = STOP.0;

@@ -43,9 +43,13 @@ pub(super) fn aligned_register_offset(
 /// RAX is the address; displacement is zero or the second pair element's size.
 /// Every register and XMM source survives.
 pub(super) fn emit(code: &mut Code, bytes: u8, displacement: u8, source: Source) {
-    debug_assert!(bytes.is_power_of_two() && bytes <= VECTOR_BYTES);
     debug_assert!(displacement == 0 || displacement == bytes);
-    let target = Mem::base(Gpr::Rax, i32::from(displacement));
+    emit_to(code, bytes, Mem::base(Gpr::Rax, i32::from(displacement)), source);
+}
+
+/// The store at `target`.
+pub(super) fn emit_to(code: &mut Code, bytes: u8, target: Mem, source: Source) {
+    debug_assert!(bytes.is_power_of_two() && bytes <= VECTOR_BYTES);
     let mut asm = code.asm();
     asm.guest_access(|asm| match source {
         Source::Xmm(xmm) => match bytes {

@@ -141,6 +141,7 @@ mod tests {
             }),
             fpcr: 0,
             fpsr: FPSR_QC | INEXACT,
+            ..Default::default()
         }
     }
 

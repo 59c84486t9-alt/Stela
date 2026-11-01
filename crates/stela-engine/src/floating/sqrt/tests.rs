@@ -45,6 +45,7 @@ fn state() -> GuestState {
         }),
         fpcr: 0,
         fpsr: FPSR_QC | (1 << 31),
+        ..Default::default()
     }
 }
 

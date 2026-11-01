@@ -3,6 +3,20 @@ use crate::block::{SynchronousTrap, TrapKind};
 use alloc::vec;
 use alloc::vec::Vec;
 
+/// A reload removed before a check takes the check's jump along.
+#[test]
+fn removed_instructions_move_the_check_failures_after_them() {
+    use super::super::asm::{Cond, Gpr, Mem, Size};
+    let mut code = Code::new();
+    code.asm()
+        .mov_load(Size::Qword, Gpr::Rax, Mem::base(Gpr::Rdi, 0));
+    let load = code.len();
+    code.check_failure(Cond::Ne);
+    code.remove_instruction(0..load);
+    code.place_failures();
+    assert_eq!(code[..], [0x0f, 0x85, 0, 0, 0, 0, 0x0f, 0x0b]);
+}
+
 /// A conditional exit's branch skips its fallthrough exit, and each of
 /// its instructions counts.
 #[test]
@@ -16,10 +30,10 @@ fn conditional_exits_branch_over_the_fallthrough_exit() {
     );
     let fallthrough = super::super::chain::direct_exit(GuestAddress(0x1004), ExitKind::Fallthrough);
     let taken = super::super::chain::direct_exit(GuestAddress(0x2000), ExitKind::Direct);
-    assert_eq!(code[..6], [0x0f, 0x85, 16, 0, 0, 0]);
-    assert_eq!(code[6..22], fallthrough);
-    assert_eq!(code[22..], taken);
-    assert_eq!(code.instructions(), 7);
+    assert_eq!(code[..6], [0x0f, 0x85, 20, 0, 0, 0]);
+    assert_eq!(code[6..26], fallthrough);
+    assert_eq!(code[26..], taken);
+    assert_eq!(code.instructions(), 15);
 }
 
 /// add x10, x10, #4; cmp x10, #0x600; b.ne: the CMP takes X10 from

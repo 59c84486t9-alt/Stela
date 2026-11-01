@@ -74,6 +74,7 @@ fn initial_state() -> GuestState {
         }),
         fpcr: FPCR_AHP,
         fpsr: RETAINED_FPSR_BITS,
+        ..Default::default()
     }
 }
 

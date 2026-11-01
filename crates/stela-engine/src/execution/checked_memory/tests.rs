@@ -595,6 +595,7 @@ fn state(address: u64) -> GuestState {
         v: std::array::from_fn(|index| [index as u64 ^ 0xaaaa_5555, !(index as u64)]),
         fpcr: 0x03c0_0000,
         fpsr: 0x0800_001f,
+        ..Default::default()
     };
     state.x[0] = address;
     state.x[30] = 0x9000;

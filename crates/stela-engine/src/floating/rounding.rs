@@ -86,6 +86,7 @@ mod tests {
             }),
             fpcr: 0,
             fpsr: FPSR_QC | UNDERFLOW,
+            ..Default::default()
         }
     }
 

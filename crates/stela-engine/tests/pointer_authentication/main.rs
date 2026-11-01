@@ -52,6 +52,7 @@ fn thread(flags: u32) -> ThreadState {
         }),
         fpcr: 0x03c00000,
         fpsr: 0x0800001f,
+        ..Default::default()
     };
     registers.x[30] = STOP;
     ThreadState {

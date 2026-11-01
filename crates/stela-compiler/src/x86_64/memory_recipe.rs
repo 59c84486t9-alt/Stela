@@ -122,6 +122,62 @@ pub(super) struct Pair {
     pub address: ImmediateAddress,
 }
 
+/// The base's host register, RAX for one in the frame, and where the access
+/// starts: `[base+displacement]` is one host instruction. The checks this
+/// emits leave their failures out of line. `None` for what needs the address
+/// in RAX: alignment against it, a masked or translated access, and a
+/// writeback of a register the access loads.
+fn direct(
+    code: &mut Code,
+    checks: MemoryChecks,
+    address: ImmediateAddress,
+    unit: u8,
+    loads_base: bool,
+) -> Option<(Gpr, i32)> {
+    let ImmediateAddress {
+        base,
+        displacement,
+        mode,
+    } = address;
+    if !code.is_pinned()
+        || checks.checks_every_access()
+        || (checks.alignment && unit > 1)
+        || (loads_base && mode != AddressMode::Offset)
+    {
+        return None;
+    }
+    let host = code.host(base).unwrap_or(Gpr::Rax);
+    if host == Gpr::Rax {
+        load(code, base);
+    }
+    if base == Register::Sp && checks.stack_alignment && !checks.stack_checked {
+        code.asm().test_imm(Size::Byte, host, 15);
+        code.check_failure(super::asm::Cond::Ne);
+    }
+    if checks.guest_range {
+        checks.range.emit_base(code, host);
+    }
+    let start = if mode == AddressMode::PostIndex {
+        0
+    } else {
+        displacement
+    };
+    Some((host, start))
+}
+
+/// A [`direct`] access's writeback, once its faults are behind it.
+fn direct_writeback(code: &mut Code, host: Gpr, address: ImmediateAddress) {
+    if address.mode == AddressMode::Offset {
+        return;
+    }
+    let mut asm = code.asm();
+    asm.lea(Size::Qword, host, Mem::base(host, address.displacement));
+    if host == Gpr::Rax {
+        let storage = asm.guest(address.base).expect("memory base cannot be ZR");
+        asm.mov_store(Size::Qword, storage, Gpr::Rax);
+    }
+}
+
 pub(super) fn address(
     code: &mut Code,
     checks: MemoryChecks,
@@ -137,11 +193,11 @@ pub(super) fn address(
     } = address;
     // Through a pinned base the address needs no copy of it.
     if let (Some(host), AddressMode::Offset) = (code.host(base), mode) {
+        code.asm()
+            .lea(Size::Qword, Gpr::Rax, Mem::base(host, displacement));
         if base == Register::Sp && checks.stack_alignment && !checks.stack_checked {
             stack_alignment_check_register(code, host);
         }
-        code.asm()
-            .lea(Size::Qword, Gpr::Rax, Mem::base(host, displacement));
         address_checks(code, checks, unit, access);
         return;
     }
@@ -186,7 +242,12 @@ pub(super) fn scalar(
     } = operand;
     let ImmediateAddress { base, mode, .. } = location;
     let access = Access::of(transfer == MemoryTransfer::Store, bytes.into());
-    address(code, checks, location, bytes, access, recipe.as_deref_mut());
+    let loads_base = data == base && transfer != MemoryTransfer::Store;
+    let place = direct(code, checks, location, bytes, loads_base);
+    if place.is_none() {
+        address(code, checks, location, bytes, access, recipe.as_deref_mut());
+    }
+    let (at, start) = place.unwrap_or((Gpr::Rax, 0));
     match transfer {
         MemoryTransfer::Store => {
             let source = match code.host(data) {
@@ -207,16 +268,20 @@ pub(super) fn scalar(
                     memory_store::Source::Rcx
                 }
             };
-            let start = code.checkpoint();
-            memory_store::emit(code, bytes, 0, source);
-            mark(&mut recipe, code, start, Kind::Store, 0);
+            let checkpoint = code.checkpoint();
+            memory_store::emit_to(code, bytes, Mem::base(at, start), source);
+            mark(&mut recipe, code, checkpoint, Kind::Store, 0);
         }
         MemoryTransfer::Load { signed, width } => {
             let size = Size::of(width == Width::X64);
-            let source = accessed();
+            let source = if place.is_some() {
+                Mem::base(at, start)
+            } else {
+                accessed()
+            };
             // A fault leaves a host destination as it was.
             let host = code.host(data).unwrap_or(Gpr::Rcx);
-            let start = code.checkpoint();
+            let checkpoint = code.checkpoint();
             {
                 let mut asm = code.asm();
                 asm.guest_access(|asm| match (bytes, signed) {
@@ -235,7 +300,7 @@ pub(super) fn scalar(
             mark(
                 &mut recipe,
                 code,
-                start,
+                checkpoint,
                 Kind::Load { element: 0, host },
                 mask(Gpr::Rcx),
             );
@@ -250,6 +315,10 @@ pub(super) fn scalar(
         }
     }
     // Commit writeback only after all faultable element accesses succeed.
+    if let Some((host, _)) = place {
+        direct_writeback(code, host, location);
+        return;
+    }
     let start = code.checkpoint();
     memory_writeback(code, base, mode);
     mark(&mut recipe, code, start, Kind::Writeback, 0);
@@ -268,7 +337,12 @@ pub(super) fn pair(
     } = operand;
     let ImmediateAddress { base, mode, .. } = location;
     let access = Access::of(transfer == MemoryTransfer::Store, 2 * u16::from(bytes));
-    address(code, checks, location, bytes, access, recipe.as_deref_mut());
+    let loads_base = data.contains(&base) && transfer != MemoryTransfer::Store;
+    let place = direct(code, checks, location, bytes, loads_base);
+    if place.is_none() {
+        address(code, checks, location, bytes, access, recipe.as_deref_mut());
+    }
+    let (at, displacement) = place.unwrap_or((Gpr::Rax, 0));
     match transfer {
         MemoryTransfer::Store => {
             let first = match code.host(data[0]) {
@@ -312,15 +386,29 @@ pub(super) fn pair(
             };
             for (element, source) in [(0, first), (1, second)] {
                 let start = code.checkpoint();
-                memory_store::emit(code, bytes, element * bytes, source);
+                let target = Mem::base(at, displacement + i32::from(element * bytes));
+                memory_store::emit_to(code, bytes, target, source);
                 mark(&mut recipe, code, start, Kind::Store, 0);
             }
         }
         MemoryTransfer::Load { signed, width } => {
             let size = Size::of(width == Width::X64);
+            // In place where no element reads its register back: an aborted
+            // load leaves its destinations UNKNOWN, but never the base.
+            let host = |code: &Code, register, staged| {
+                place
+                    .and_then(|(at, _)| code.host(register).filter(|host| *host != at))
+                    .unwrap_or(staged)
+            };
+            let hosts = [host(code, data[0], Gpr::Rcx), {
+                // The second element's own load is the last to need the base.
+                place
+                    .and_then(|_| code.host(data[1]))
+                    .unwrap_or(Gpr::R8)
+            }];
             for (element, host, source) in [
-                (0, Gpr::Rcx, accessed()),
-                (1, Gpr::R8, Mem::base_disp8(Gpr::Rax, bytes as i8)),
+                (0, hosts[0], Mem::base(at, displacement)),
+                (1, hosts[1], Mem::base(at, displacement + i32::from(bytes))),
             ] {
                 let start = code.checkpoint();
                 code.asm().guest_access(|asm| {
@@ -339,7 +427,10 @@ pub(super) fn pair(
                     mask(host),
                 );
             }
-            for (register, staged) in [(data[0], Gpr::Rcx), (data[1], Gpr::R8)] {
+            for (register, staged) in [(data[0], hosts[0]), (data[1], hosts[1])] {
+                if code.host(register) == Some(staged) {
+                    continue;
+                }
                 if let Some(storage) = code.asm().guest(register) {
                     let start = code.checkpoint();
                     code.asm().mov_store(Size::Qword, storage, staged);
@@ -349,6 +440,10 @@ pub(super) fn pair(
         }
     }
     // Commit writeback only after all faultable element accesses succeed.
+    if let Some((host, _)) = place {
+        direct_writeback(code, host, location);
+        return;
+    }
     let start = code.checkpoint();
     memory_writeback(code, base, mode);
     mark(&mut recipe, code, start, Kind::Writeback, 0);

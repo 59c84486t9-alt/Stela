@@ -47,6 +47,7 @@ fn state() -> ThreadState {
             v: std::array::from_fn(|index| [index as u64, !(index as u64)]),
             fpcr: 0x03c0_0000,
             fpsr: 0x0800_001f,
+            ..Default::default()
         },
     }
 }

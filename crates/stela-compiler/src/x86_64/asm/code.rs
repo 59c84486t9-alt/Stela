@@ -10,8 +10,16 @@ pub(crate) struct Code {
     pub(super) sites: Vec<EmissionSite>,
     /// Whether guest registers live in host registers ([`super::super::pinned`]).
     pub(super) pinned: bool,
+    /// The block's PC, in code whose exits keep a link slot
+    /// ([`super::super::chain::link_slot`]).
+    pub(super) linked_block: Option<u64>,
     /// Whether this code runs under PSTATE.DIT on a target that audits it.
     constant_time: bool,
+    /// Index in the block's source map of the instruction being emitted.
+    instruction: usize,
+    /// Jumps to check failures, which the block places after its exits,
+    /// with the instructions they fail.
+    failures: Vec<(super::Patch, usize)>,
 }
 
 /// Exact faulting instruction interval, separate from source retirement.
@@ -22,6 +30,8 @@ pub(crate) struct EmissionSite {
     pub site: crate::block::RecoverySite,
     /// The host register that holds SP during the access, if not its own.
     pub stack: Option<u8>,
+    /// The instruction this site belongs to, where the code is out of line.
+    pub source: Option<usize>,
 }
 
 /// A byte and instruction position captured at an emission boundary.
@@ -71,6 +81,9 @@ impl Code {
             sites: Vec::new(),
             pinned: false,
             constant_time: false,
+            linked_block: None,
+            instruction: 0,
+            failures: Vec::new(),
         }
     }
     /// Code that keeps [`super::super::pinned`] guest registers in host
@@ -87,6 +100,25 @@ impl Code {
             pinned: self.pinned,
             constant_time: self.constant_time,
             ..Self::new()
+        }
+    }
+    /// The instructions from here on have `index` in the block's source map.
+    pub(crate) fn set_instruction(&mut self, index: usize) {
+        self.instruction = index;
+    }
+    /// Fail the instruction being emitted if `failed` holds: a jump never
+    /// taken costs no more than the mask a guest range check would pay for,
+    /// and needs no address in RAX.
+    pub(crate) fn check_failure(&mut self, failed: super::Cond) {
+        let jump = self.asm().jcc(failed);
+        self.failures.push((jump, self.instruction));
+    }
+    /// Place the check failures: a UD2 each, whose site names its instruction.
+    pub(crate) fn place_failures(&mut self) {
+        for (jump, instruction) in core::mem::take(&mut self.failures) {
+            let mut asm = self.asm();
+            asm.bind(jump);
+            asm.guest_check_of(instruction);
         }
     }
     /// Whether emitters must keep to data operand independent instructions.
@@ -109,6 +141,10 @@ impl Code {
     pub(crate) fn set_pinned(&mut self, pinned: bool) {
         self.pinned = pinned;
     }
+    /// Give the exits from here on a link slot, in the block at `pc`.
+    pub(crate) fn set_linked_block(&mut self, pc: u64) {
+        self.linked_block = Some(pc);
+    }
     /// An encoder that appends here and adds to this count.
     pub(crate) fn asm(&mut self) -> Asm<'_> {
         Asm {
@@ -117,6 +153,7 @@ impl Code {
             shared: Some(&mut self.instructions),
             sites: Some(&mut self.sites),
             pinned: self.pinned,
+            linked_block: self.linked_block,
         }
     }
     /// A typed recipe that emits exactly one guest memory instruction.
@@ -141,6 +178,7 @@ impl Code {
             end,
             site: crate::block::RecoverySite::guest_access(),
             stack: None,
+            source: None,
         });
     }
     pub(crate) fn sites(&self) -> &[EmissionSite] {
@@ -162,6 +200,13 @@ impl Code {
                 end: base + site.end,
                 ..site
             }));
+        self.failures.extend(other.failures.into_iter().map(|(jump, instruction)| {
+            let moved = super::Patch {
+                at: base + jump.at,
+                ..jump
+            };
+            (moved, instruction)
+        }));
         self.bytes.extend(other.bytes);
         self.instructions += other.instructions;
     }
@@ -230,12 +275,26 @@ impl Code {
                 ..site
             })
             .collect();
+        let failures = self
+            .failures
+            .extract_if(.., |(jump, _)| jump.at >= at.bytes)
+            .map(|(jump, instruction)| {
+                let moved = super::Patch {
+                    at: jump.at - at.bytes,
+                    ..jump
+                };
+                (moved, instruction)
+            })
+            .collect();
         let tail = Self {
             bytes: self.bytes.split_off(at.bytes),
             instructions: self.instructions - at.instructions,
             sites,
             pinned: self.pinned,
             constant_time: self.constant_time,
+            linked_block: self.linked_block,
+            instruction: self.instruction,
+            failures,
         };
         self.instructions = at.instructions;
         tail
@@ -250,6 +309,7 @@ impl Code {
             "truncate preserves complete faulting instructions"
         );
         self.sites.retain(|site| site.end <= at.bytes);
+        self.failures.retain(|(jump, _)| jump.at < at.bytes);
         self.bytes.truncate(at.bytes);
         self.instructions = at.instructions;
     }
@@ -272,6 +332,11 @@ impl Code {
                 false
             }
         });
+        for (jump, _) in &mut self.failures {
+            if jump.at >= range.end {
+                jump.at -= removed;
+            }
+        }
         self.bytes.drain(range);
         self.instructions = self
             .instructions

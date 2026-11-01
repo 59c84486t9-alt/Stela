@@ -108,6 +108,7 @@ mod tests {
             }),
             fpcr: FPCR_NEP,
             fpsr: FPSR_QC | DIVIDE_BY_ZERO,
+            ..Default::default()
         }
     }
 

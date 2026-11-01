@@ -100,6 +100,7 @@ fn input(operand: &Operand, values: [u64; 3], fpcr: u32) -> GuestState {
         v: [[POISON | POISON << 16 | POISON << 32 | POISON << 48; 2]; 32],
         fpcr,
         fpsr: 0,
+        ..Default::default()
     };
     for (source, value) in [(operand.addend, values[0]), (operand.left, values[1])] {
         for lane in 0..operand.shape.lane_count(Format::Half) {

@@ -546,27 +546,18 @@ fn native_accesses_to_checked_tagged_memory_exit_to_the_tag_check() {
             BASE,
             stela_compiler::block::RecoverySiteKind::GuestAccess,
         );
-        let check_offset = super::super::tests::native_fault_site(
-            &mut machine,
-            BASE,
-            stela_compiler::block::RecoverySiteKind::GuestCheck,
-        );
         let exit = |cause| {
             NativeExit::Fault(NativeFault {
                 origin: crate::machine::NativeFaultOrigin::Exception,
-                trap: if matches!(cause, FaultCause::InvalidOpcode) {
-                    6
+                trap: if matches!(cause, FaultCause::NonCanonical) {
+                    13
                 } else {
                     14
                 },
                 error_code: 0,
                 spills: stela_compiler::block::HostSpillSnapshot::new(),
                 registers: stela_compiler::block::HostGprSnapshot::legacy([0; 16]),
-                offset: if matches!(cause, FaultCause::InvalidOpcode) {
-                    check_offset
-                } else {
-                    access_offset
-                },
+                offset: access_offset,
                 address: DATA,
                 write: false,
                 cause,
@@ -588,7 +579,7 @@ fn native_accesses_to_checked_tagged_memory_exit_to_the_tag_check() {
         set_x(&mut machine, &[(1, tagged_pointer(0xa, DATA))]);
         machine.cpu.pc = BASE;
         machine.host.exits = vec![
-            exit(FaultCause::InvalidOpcode),
+            exit(FaultCause::NonCanonical),
             exit(FaultCause::TagChecked),
             NativeExit::Exit {
                 next_pc: BASE + 4,
@@ -609,7 +600,7 @@ fn native_accesses_to_checked_tagged_memory_exit_to_the_tag_check() {
         // A mismatching tagged pointer faults before the retry.
         set_x(&mut machine, &[(1, tagged_pointer(0xb, DATA + 8))]);
         machine.cpu.pc = BASE;
-        machine.host.exits = vec![exit(FaultCause::InvalidOpcode)];
+        machine.host.exits = vec![exit(FaultCause::NonCanonical)];
         machine.step().unwrap();
         assert_eq!(
             fault(&machine),

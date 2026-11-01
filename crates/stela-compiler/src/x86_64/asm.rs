@@ -94,6 +94,14 @@ impl<'a> Asm<'a> {
             asm.ud2()
         });
     }
+    /// [`Self::guest_check`] out of line, for the instruction at `source` in
+    /// the block's source map.
+    pub(crate) fn guest_check_of(&mut self, source: usize) {
+        self.guest_check();
+        if let Some(site) = self.sites.as_deref_mut().and_then(|sites| sites.last_mut()) {
+            site.source = Some(source);
+        }
+    }
     /// Emit the unchanged translated descriptor and mark ONLY its first byte as
     /// a deliberate helper-return token. The CALL opcode and descriptor tail
     /// remain internal; neither is a hardware guest-access/check instruction.
@@ -110,6 +118,7 @@ impl<'a> Asm<'a> {
                 end: start + 1,
                 site: crate::block::RecoverySite::translated_helper(bytes, flags),
                 stack: None,
+                source: None,
             });
         }
     }
@@ -138,6 +147,7 @@ impl<'a> Asm<'a> {
                 end,
                 site,
                 stack,
+                source: None,
             });
         }
     }

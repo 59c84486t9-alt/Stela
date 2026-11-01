@@ -248,7 +248,7 @@ fn one_parse_analyzes_and_plans_the_block_it_finds() {
 #[test]
 fn system_mode_blocks_can_omit_the_sp_alignment_check() {
     // test bl,15, on SP's host register.
-    const SP_CHECK: [u8; 7] = [0xf6, 0xc3, 15, 0x74, 2, 0x0f, 0x0b];
+    const SP_CHECK: [u8; 5] = [0xf6, 0xc3, 15, 0x0f, 0x85];
     // ldr x0, [sp, #8]; stp x0, x1, [sp, #-16]!; ldr q0, [sp, x2];
     // ldar x3, [sp]; ldadd x4, x5, [sp]
     let source: Vec<u8> = [
@@ -290,7 +290,7 @@ fn system_mode_blocks_can_omit_the_sp_alignment_check() {
 /// process blocks make no such check.
 #[test]
 fn system_mode_blocks_check_every_access_against_the_guest_ranges() {
-    let check = crate::x86_64::RangeCheck::FIVE_LEVEL.code();
+    let check = crate::x86_64::RangeCheck::FIVE_LEVEL.pinned_code();
     let count = |code: &[u8]| {
         code.windows(check.len())
             .filter(|bytes| *bytes == check)
@@ -367,7 +367,7 @@ fn system_mode_blocks_check_every_access_against_the_guest_ranges() {
         BlockProfile::new(Features::SYSTEM_MODE),
         |options| options.with_memory_checks(FOUR_LEVEL),
     );
-    let four_level_check = crate::x86_64::RangeCheck::four_level(2).code();
+    let four_level_check = crate::x86_64::RangeCheck::four_level(2).pinned_code();
     assert_eq!(count(&four_level), 0);
     assert_eq!(
         four_level
@@ -495,10 +495,10 @@ fn system_mode_blocks_check_sctlr_a_and_the_ordered_granule_when_asked() {
             .native
             .x86_64_code
     };
-    // test al,unit-1; jz +2; ud2 for each element size.
-    let check = |unit: u8| [0xa8, unit - 1, 0x74, 2, 0x0f, 0x0b];
+    // test al,unit-1; cmovne rax,[rdi+unreachable] for each element size.
+    let check = |unit: u8| [0xa8, unit - 1, 0x48, 0x0f, 0x45, 0x87, 0x28, 0x03, 0, 0];
     let count = |code: &[u8], unit: u8| {
-        code.windows(6)
+        code.windows(10)
             .filter(|bytes| *bytes == check(unit))
             .count()
     };
@@ -795,7 +795,7 @@ fn system_mode_profile_keeps_ordinary_memory_and_exits_on_system_instructions() 
         .collect();
     let compiled =
         crate::testing::block_for(&ordinary, BASE, profile, crate::TargetCpu::Baseline).unwrap();
-    let check = crate::x86_64::RangeCheck::FIVE_LEVEL.code();
+    let check = crate::x86_64::RangeCheck::FIVE_LEVEL.pinned_code();
     assert!(
         compiled
             .native
@@ -924,7 +924,7 @@ fn only_system_mode_compiles_range_checks() {
     ] {
         assert_eq!(code(profile), ordinary, "{profile:?}");
     }
-    let check = crate::x86_64::RangeCheck::FIVE_LEVEL.code();
+    let check = crate::x86_64::RangeCheck::FIVE_LEVEL.pinned_code();
     let has_check = |code: &[u8]| code.windows(check.len()).any(|bytes| bytes == check);
     assert!(!has_check(&ordinary));
     let system = code(BlockProfile::new(Features::SYSTEM_MODE));

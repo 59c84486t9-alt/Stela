@@ -77,6 +77,36 @@ pub(super) fn native_fault_site_in_entry<D: Devices>(
     (index, row.start)
 }
 
+/// Where the check of the instruction at `pc` fails: its #UD where it has
+/// one, else its access's #GP, with the trap and the cause.
+pub(super) fn native_check_site<D: Devices>(
+    machine: &mut Machine<FakeHost, D>,
+    pc: u64,
+) -> (usize, u16, FaultCause) {
+    use stela_compiler::block::RecoverySiteKind::{GuestAccess, GuestCheck};
+    let Ok(Fetched::Block(index)) = machine.fetch_block(pc, false) else {
+        panic!("actual compiled native block");
+    };
+    let rows = machine
+        .fault_recovery
+        .get(&index)
+        .unwrap()
+        .test_portable_rows();
+    let at = |kind| {
+        rows.iter()
+            .find(|row| row.retirement.instruction_pc().0 == pc && row.site == kind)
+            .map(|row| row.start)
+    };
+    match at(GuestCheck) {
+        Some(start) => (start, 6, FaultCause::InvalidOpcode),
+        None => (
+            at(GuestAccess).expect("an access"),
+            13,
+            FaultCause::NonCanonical,
+        ),
+    }
+}
+
 pub(super) struct FakeHost {
     pub(super) ram: Vec<u8>,
     pub(super) events: Vec<Event>,
@@ -1327,7 +1357,7 @@ fn pstate_dit_selects_blocks_compiled_for_the_data_independent_timing_target() {
 #[test]
 fn sctlr_sa_selects_blocks_with_or_without_the_sp_alignment_check() {
     // test bl,15, on SP's host register.
-    const SP_CHECK: [u8; 7] = [0xf6, 0xc3, 15, 0x74, 2, 0x0f, 0x0b];
+    const SP_CHECK: [u8; 5] = [0xf6, 0xc3, 15, 0x0f, 0x85];
     // ldr x0, [sp, #8]; svc #0
     let mut machine = machine(&[0xf940_07e0, 0xd400_0001]);
     let has_check = |machine: &Machine<FakeHost, NoDevices>, index: usize| {
@@ -1409,15 +1439,13 @@ fn native_alignment_checks_take_the_alignment_fault_of_the_access() {
         machine.derived_changed();
         machine.cpu.pc = BASE + 4 * index;
         machine.cpu.state.x[1] = address;
-        let offset = native_fault_site(
-            &mut machine,
-            BASE + 4 * index,
-            stela_compiler::block::RecoverySiteKind::GuestCheck,
-        );
+        let (offset, trap, cause) = native_check_site(&mut machine, BASE + 4 * index);
         let NativeExit::Fault(mut fault) = ud else {
             unreachable!()
         };
         fault.offset = offset;
+        fault.trap = trap;
+        fault.cause = cause;
         machine.host.exits.push(NativeExit::Fault(fault));
         let outcome = machine.step();
         (
@@ -1559,8 +1587,8 @@ fn a_mapped_address_outside_the_native_ranges_runs_its_page_translated() {
     machine.derived_changed();
     let Err(Stop::Unsupported(requirement)) = run(
         &mut machine,
-        FaultCause::InvalidOpcode,
-        stela_compiler::block::RecoverySiteKind::GuestCheck,
+        FaultCause::NonCanonical,
+        stela_compiler::block::RecoverySiteKind::GuestAccess,
     ) else {
         panic!("an explicit stop")
     };
@@ -1572,19 +1600,15 @@ fn a_mapped_address_outside_the_native_ranges_runs_its_page_translated() {
         panic!("block")
     };
     assert_eq!(machine.block_variant(index).checks.range, check);
-    // With the helper, a range check's #UD and an elided access's #GP
-    // alike run the page in the translated variant.
+    // With the helper, the #GP of a failed range check or of an access past
+    // an elided one runs the page in the translated variant, each time.
     const HELPER: u64 = 0x1000;
     machine.host.translation_helper = Some(HELPER);
-    for cause in [FaultCause::InvalidOpcode, FaultCause::NonCanonical] {
+    for cause in [FaultCause::NonCanonical; 2] {
         machine.translated_pages.clear();
         let slot = target_slot(&machine, BASE);
         machine.targets[slot] = chain::LookupEntry::default();
-        let kind = if matches!(cause, FaultCause::InvalidOpcode) {
-            stela_compiler::block::RecoverySiteKind::GuestCheck
-        } else {
-            stela_compiler::block::RecoverySiteKind::GuestAccess
-        };
+        let kind = stela_compiler::block::RecoverySiteKind::GuestAccess;
         run(&mut machine, cause, kind).unwrap();
         assert_eq!(machine.cpu.pc, BASE, "{cause:?}");
         assert_eq!(machine.first_translated(), Some((BASE, ADDRESS)));
@@ -1626,9 +1650,8 @@ fn a_mapped_address_outside_the_native_ranges_runs_its_page_translated() {
 /// whatever SCTLR_ELx asks.
 #[test]
 fn system_mode_blocks_check_accesses_against_the_guest_ranges() {
-    const CHECK: [u8; 16] = [
-        0x48, 0x89, 0xc1, 0x48, 0xc1, 0xf9, 48, 0xff, 0xc1, 0x83, 0xf9, 0x01, 0x76, 0x02, 0x0f,
-        0x0b,
+    const CHECK: [u8; 14] = [
+        0x48, 0x89, 0xe9, 0x48, 0xc1, 0xf9, 48, 0xff, 0xc1, 0x83, 0xf9, 0x01, 0x0f, 0x87,
     ];
     // ldr x0, [x1]; svc #0
     let mut machine = machine(&[0xf940_0020, 0xd400_0001]);

@@ -66,6 +66,18 @@ pub(super) fn address(
         ..checks
     };
     let access = Access::of(write, bytes.into());
+    if let (Some(host), false) = (code.host(base), checks.alignment || checks.checks_every_access()) {
+        if base == Register::Sp && checks.stack_alignment && !checks.stack_checked {
+            code.asm().test_imm(Size::Byte, host, 15);
+            code.check_failure(crate::x86_64::asm::Cond::Ne);
+        }
+        code.asm().mov(Size::Qword, Gpr::Rax, host);
+        index_add(code, index, extend, shift);
+        if checks.guest_range {
+            checks.range.emit_base(code, Gpr::Rax);
+        }
+        return;
+    }
     memory_address(
         code,
         base_checks,

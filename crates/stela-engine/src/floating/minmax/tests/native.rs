@@ -87,6 +87,7 @@ fn input(operand: &Operand, a: u64, b: u64, fpcr: u32) -> GuestState {
         v: [[0; 2]; 32],
         fpcr,
         fpsr: FPSR_QC | EXCEPTIONS,
+        ..Default::default()
     };
     for vector in &mut state.v {
         for lane in 0..Shape::Vector128.lane_count(format) {

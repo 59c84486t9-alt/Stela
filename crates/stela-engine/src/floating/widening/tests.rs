@@ -55,6 +55,7 @@ fn state() -> GuestState {
         }),
         fpcr: FPCR_NEP,
         fpsr: FPSR_QC | DIVIDE_BY_ZERO | FPSR_RESERVED_POISON,
+        ..Default::default()
     }
 }
 

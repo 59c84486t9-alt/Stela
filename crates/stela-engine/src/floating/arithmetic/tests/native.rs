@@ -94,6 +94,7 @@ fn input(operand: &Operand, a: u64, b: u64, fpcr: u32) -> GuestState {
         fpcr,
         // IXC starts clear, forcing the full path even under default FPCR.
         fpsr: FPSR_QC | INVALID | DIVIDE_BY_ZERO,
+        ..Default::default()
     };
     for vector in &mut state.v {
         for lane in 0..Shape::Vector128.lane_count(format) {

@@ -9,7 +9,7 @@
 /// the declared field masks; saturating integer SIMD sets QC and floating-point
 /// arithmetic accumulates exception flags.
 #[repr(C)]
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuestState {
     pub x: [u64; 31],
     pub sp: u64,
@@ -29,6 +29,38 @@ pub struct GuestState {
     /// The masks of interrupts waiting when native code was entered: clearing
     /// one is the engine's.
     pub pending: u32,
+    /// [`Self::UNREACHABLE`], which a guest check that fails in system-mode
+    /// code moves into the access's address (`x86_64::RangeCheck`).
+    pub unreachable: u64,
+    /// PSTATE.PAN while native code runs, which completes MSR PAN when the
+    /// host keeps it in RFLAGS.AC (`x86_64::register_read::pan_thunk`).
+    pub pan: u64,
+}
+
+impl GuestState {
+    /// Non-canonical at either paging depth, with room for what a check's
+    /// access adds to it: the access takes a #GP at its own recovery site.
+    pub const UNREACHABLE: u64 = 1 << 62;
+}
+
+impl Default for GuestState {
+    fn default() -> Self {
+        Self {
+            x: [0; 31],
+            sp: 0,
+            nzcv: 0,
+            exclusive_bytes: 0,
+            v: [[0; 2]; 32],
+            fpcr: 0,
+            fpsr: 0,
+            exclusive_address: 0,
+            exclusive_value: 0,
+            daif: 0,
+            pending: 0,
+            unreachable: Self::UNREACHABLE,
+            pan: 0,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -40,9 +72,9 @@ mod tests {
     #[test]
     fn layout_matches_native_abi() {
         for profile in [BlockProfile::ORDINARY, BlockProfile::new(Features::LEAF)] {
-            assert!(profile.abi().starts_with("x86_64-sysv-guest-state-v7-"));
+            assert!(profile.abi().starts_with("x86_64-sysv-guest-state-v8-"));
         }
-        assert_eq!(size_of::<GuestState>(), 808);
+        assert_eq!(size_of::<GuestState>(), 824);
         assert_eq!(align_of::<GuestState>(), 8);
         assert_eq!(offset_of!(GuestState, x), 0);
         assert_eq!(offset_of!(GuestState, sp), 248);
@@ -52,6 +84,8 @@ mod tests {
         assert_eq!(size_of::<[[u64; 2]; 32]>(), 512);
         assert_eq!(offset_of!(GuestState, fpcr), 776);
         assert_eq!(offset_of!(GuestState, fpsr), 780);
+        assert_eq!(offset_of!(GuestState, unreachable), 808);
+        assert_eq!(offset_of!(GuestState, pan), 816);
     }
 
     #[test]

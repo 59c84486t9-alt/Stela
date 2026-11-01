@@ -216,20 +216,15 @@ impl<H: Host, D: Devices> Machine<H, D> {
             FaultCause::Translation(unsupported) => {
                 Err(self.unsupported(RequirementKind::Translation(unsupported)))
             }
-            // The access left the native ranges past a check an earlier
-            // one through its base stood for: its own check finds which.
-            FaultCause::NonCanonical => {
-                let word = self.word(index, pc)?;
-                self.native_check_fault(index, pc, word, &fault)
-            }
-            // Native blocks raise #UD for a misaligned SP base when compiled
-            // with the check (SCTLR_ELx.SA or SA0 set), which comes first,
-            // and for an access that has an Alignment fault: unaligned under
-            // SCTLR_ELx.A, or an atomic, or an ordered access with nAA
-            // clear, crossing its 16-byte granule; and for an address outside
-            // the guest's two ranges.
             FaultCause::Watched | FaultCause::TagChecked => self.watched_access(index, pc),
-            FaultCause::InvalidOpcode => {
+            // Native blocks fault, by #UD or at the access with a #GP, for a
+            // misaligned SP base when compiled with the check (SCTLR_ELx.SA
+            // or SA0 set), which comes first, and for an access that has an
+            // Alignment fault: unaligned under SCTLR_ELx.A, or an atomic, or
+            // an ordered access with nAA clear, crossing its 16-byte granule;
+            // and for an address outside the guest's two ranges, which may
+            // be past a check an earlier one through its base stood for.
+            FaultCause::NonCanonical | FaultCause::InvalidOpcode => {
                 let word = self.word(index, pc)?;
                 if self.block_variant(index).checks.stack_alignment
                     && stack_based(word)
