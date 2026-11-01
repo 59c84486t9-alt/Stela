@@ -427,7 +427,9 @@ fn revision_mismatch(environment: &Environment<'_>, record: &Record) -> Option<S
 
 impl Request {
     fn run(mut self) -> Result<()> {
-        if self.usb.as_os_str().is_empty() && !self.dry_run && elevation::relaunch()? {
+        // A Windows relaunch opens its own window, which only the wizard wants.
+        let elevate = cfg!(unix) || self.usb.as_os_str().is_empty();
+        if elevate && !self.dry_run && elevation::relaunch()? {
             return Ok(());
         }
         debug_assert_eq!(

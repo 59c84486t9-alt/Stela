@@ -1,13 +1,26 @@
-//! Request Windows disk-write rights before asking for installer preferences,
-//! and keep the window the elevated copy runs in readable when it finishes.
+//! Request disk-write rights before asking for installer preferences or
+//! touching a disk, and keep the window the elevated copy runs in readable
+//! when it finishes.
 use anyhow::Result;
 
 #[cfg(windows)]
 static RELAUNCHED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Becomes root through `sudo` in this terminal, or returns if it already is.
 #[cfg(not(windows))]
 pub(super) fn relaunch() -> Result<bool> {
-    Ok(false)
+    use anyhow::Context;
+    use std::os::unix::process::CommandExt;
+    // SAFETY: reads this process's credentials; no pointer arguments.
+    if unsafe { libc::geteuid() } == 0 {
+        return Ok(false);
+    }
+    let error = std::process::Command::new("sudo")
+        .arg("--")
+        .arg(std::env::current_exe()?)
+        .args(std::env::args_os().skip(1))
+        .exec();
+    Err(error).context("setup writes disks as root, and sudo could not start")
 }
 
 #[cfg(not(windows))]
