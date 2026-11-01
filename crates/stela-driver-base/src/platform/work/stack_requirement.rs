@@ -68,7 +68,7 @@ impl StackRequirement {
         size && shape.start.is_multiple_of(self.alignment) && shape.guard >= self.guard
     }
 }
-/// Expected mixed geometry for an explicit bounded32-stack prototype.
+/// Expected mixed geometry of the 32-stack pool.
 /// General counts are validated against unambiguously matching owners.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StackProfile {

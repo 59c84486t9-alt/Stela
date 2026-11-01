@@ -33,9 +33,9 @@ mod plan;
 pub(crate) use firmware::FirmwareContext;
 use plan::Plan;
 #[cfg(feature = "diagnostics")]
-mod prototype;
+mod mixed;
 #[cfg(feature = "diagnostics")]
-pub(super) use prototype::check as check_mixed;
+pub(super) use mixed::check as check_mixed;
 #[derive(Debug)]
 pub(crate) enum Error {
     Inventory,
@@ -214,7 +214,7 @@ impl KernelWork {
         owner: &mut HostOwner,
     ) -> Result<Self, Error> {
         // SAFETY: original caller's handoff/owner/stack lifetime contract.
-        unsafe { Self::prepare_plan(handoff, owner, Plan::uniform(handoff)) }
+        unsafe { Self::prepare_plan(handoff, owner, Plan::new(handoff)?) }
     }
     /// # Safety
     /// Same original handoff/owner contract as prepare. A Plan describes
@@ -267,15 +267,13 @@ impl KernelWork {
         };
         for index in 0..plan.count() {
             let (slot, physical) = plan.slot(index)?;
-            if plan.mixed() {
-                mappings::absent(
-                    previous..slot.usable.start,
-                    identity.root_pages(),
-                    wire.levels(),
-                    &mut read,
-                )
-                .map_err(Error::Mapping)?;
-            }
+            mappings::absent(
+                previous..slot.usable.start,
+                identity.root_pages(),
+                wire.levels(),
+                &mut read,
+            )
+            .map_err(Error::Mapping)?;
             previous = slot.usable.end;
             mappings::qualify(
                 &slot,
@@ -302,35 +300,28 @@ impl KernelWork {
                 physical,
             ));
         }
-        if plan.mixed() {
-            mappings::absent(
-                previous..plan.virtual_range().end,
-                identity.root_pages(),
-                wire.levels(),
-                &mut read,
-            )
-            .map_err(Error::Mapping)?;
-            crate::native_memory::cache::verify_writeback(
-                layout::physical(region.physical),
-                region.physical,
-                region.bytes as usize,
-                layout::physical(0),
-            )
-            .map_err(Error::Cache)?;
-        }
-        let pool = if plan.mixed() {
-            native_smp::resources::TaskPool::Prototype
-        } else {
-            native_smp::resources::TaskPool::Uniform
-        };
-        let allocation = handoff
-            .native_task_allocations
-            .claim(pool, region)
-            .map_err(|error| match error {
-                native_smp::resources::ClaimError::AlreadyOwned => Error::AlreadyOwned,
-                native_smp::resources::ClaimError::Absent
-                | native_smp::resources::ClaimError::DescriptorMismatch => Error::Inventory,
-            })?;
+        mappings::absent(
+            previous..plan.virtual_range().end,
+            identity.root_pages(),
+            wire.levels(),
+            &mut read,
+        )
+        .map_err(Error::Mapping)?;
+        crate::native_memory::cache::verify_writeback(
+            layout::physical(region.physical),
+            region.physical,
+            region.bytes as usize,
+            layout::physical(0),
+        )
+        .map_err(Error::Cache)?;
+        let allocation =
+            handoff
+                .native_task_allocations
+                .claim(region)
+                .map_err(|error| match error {
+                    native_smp::resources::ClaimError::AlreadyOwned => Error::AlreadyOwned,
+                    native_smp::resources::ClaimError::DescriptorMismatch => Error::Inventory,
+                })?;
         // A failed/uncertain admission never reuses this pool.
         let reservation = Arc::new(Reservation {
             identity,
@@ -378,19 +369,15 @@ impl KernelWork {
         // outlive this boot, and no producer is published by construction.
         let queue =
             unsafe { Queue::<SLOTS>::new(shared.clone(), reservation) }.map_err(Error::Work)?;
-        let executor = if plan.mixed() {
-            Executor::new_with_profile(
-                queue,
-                stacks,
-                work::ReservationPolicy::NativeFirmware32Protected {
-                    gpe: work::GpeQueueBudget::QUALIFICATION,
-                },
-                plan::profile()?,
-            )
-            .map_err(Error::Work)?
-        } else {
-            Executor::new_with_services(queue, stacks).map_err(Error::Work)?
-        };
+        let executor = Executor::new_with_profile(
+            queue,
+            stacks,
+            work::ReservationPolicy::NativeFirmware32Protected {
+                gpe: work::GpeQueueBudget::QUALIFICATION,
+            },
+            plan::profile()?,
+        )
+        .map_err(Error::Work)?;
         let result = Self {
             executor,
             _cpu: cpu,

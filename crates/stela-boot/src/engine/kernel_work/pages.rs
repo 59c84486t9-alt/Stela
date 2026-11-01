@@ -135,7 +135,7 @@ unsafe impl Provider for KernelPages {
     }
 }
 impl KernelWork {
-    /// Keep only C-compatible slot coverage. Uniform128K-only pools
+    /// Keep only C-compatible slot coverage. Generic-only pools
     /// report NoKernelStacks. This supplies descriptors, not cold-worker access;
     /// the work owner's entered history still rejects hot-frame preparation.
     pub(super) fn task_pages(&self) -> Result<TaskPageInventory, Error> {

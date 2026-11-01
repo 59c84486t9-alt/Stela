@@ -4,7 +4,7 @@
 use super::topology::MAX_CORES;
 use crate::handoff::Region;
 mod allocation;
-pub(crate) use allocation::{AllocationClaim, ClaimError, TaskAllocations, TaskPool};
+pub(crate) use allocation::{AllocationClaim, ClaimError, TaskAllocations};
 
 pub(crate) use stela_boot_core::native_resources::*;
 
@@ -20,9 +20,6 @@ pub(crate) struct Resources {
     pub invocations: Region,
     /// One BSP work runtime's fixed pool; task roles are admitted later.
     pub tasks: Region,
-    /// Optional bounded UP diagnostic pool; complete raw prefix/suffix remain owned.
-    pub prototype_tasks: Region,
-    pub prototype_task_plan: PrototypeTaskPlan,
     /// Private bounce leaf physical addresses, indexed by fixed worker slot.
     pub bounce: [[u64; 2]; MAX_CORES],
 }
@@ -35,8 +32,6 @@ impl Default for Resources {
             stacks: Region::default(),
             invocations: Region::default(),
             tasks: Region::default(),
-            prototype_tasks: Region::default(),
-            prototype_task_plan: PrototypeTaskPlan::Disabled,
             bounce: [[0; 2]; MAX_CORES],
         }
     }

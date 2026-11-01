@@ -427,7 +427,6 @@ pub(crate) unsafe fn start(
             handoff.native_resources.stacks,
             handoff.native_resources.invocations,
             handoff.native_resources.tasks,
-            handoff.native_resources.prototype_tasks,
         ]
         .into_iter()
         .filter(|region| region.bytes != 0)

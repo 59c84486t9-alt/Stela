@@ -1,4 +1,4 @@
-//! Bounded optional mixed32 owner proof. Small callbacks only record their
+//! Bounded mixed32 owner proof. Small callbacks only record their
 //! context/RSP; they do not enter Linux, AML, Clock or a driver service.
 use super::*;
 use core::{
@@ -65,32 +65,21 @@ pub(in crate::engine) unsafe fn check(
     }
     // Corrupt layout DATA while keeping the original
     // handoff. Validation must reject before a root/stack publication or claim.
-    let mut wrong = Plan::prototype(handoff)?;
-    if let Plan::Mixed { raw, .. } = &mut wrong {
-        raw.bytes -= 4096;
-    } else {
-        return Err(Error::Geometry);
-    }
+    let mut wrong = Plan::new(handoff)?;
+    wrong.raw.bytes -= 4096;
     if !matches!(
         // SAFETY: handoff/owner remain genuine; the bad Plan supplies no permission and must
         // fail their pre-effect exact-inventory comparison.
         unsafe { KernelWork::prepare_plan(handoff, owner, wrong) },
         Err(Error::Inventory)
-    ) || handoff
-        .native_task_allocations
-        .claim_state(native_smp::resources::TaskPool::Prototype)
-        != Ok(false)
+    ) || handoff.native_task_allocations.claimed()
     {
         return Err(Error::Qualification);
     }
     // A real fallible metadata capacity refusal must also occur before claim;
     // this is allocation-overflow coverage, not a claim of firmware OOM testing.
     let mut impossible = Vec::<Case>::new();
-    if impossible.try_reserve_exact(usize::MAX).is_ok()
-        || handoff
-            .native_task_allocations
-            .claim_state(native_smp::resources::TaskPool::Prototype)
-            != Ok(false)
+    if impossible.try_reserve_exact(usize::MAX).is_ok() || handoff.native_task_allocations.claimed()
     {
         return Err(Error::Qualification);
     }
@@ -105,9 +94,9 @@ pub(in crate::engine) unsafe fn check(
             observed: UnsafeCell::new(MaybeUninit::uninit()),
         });
     }
-    // SAFETY: this is the separately selected raw reservation, never
-    // a reinterpretation of production's16-stack pool or unowned metadata.
-    let work = unsafe { KernelWork::prepare_plan(handoff, owner, Plan::prototype(handoff)?) }?;
+    // SAFETY: the original handoff and owner; this diagnostic stops the boot,
+    // so nothing else claims the pool.
+    let work = unsafe { KernelWork::prepare_plan(handoff, owner, Plan::new(handoff)?) }?;
     let stack_pages = work.task_pages()?;
     let described = stack_pages.count();
     if described != cases.iter().filter(|case| case.kernel).count() {

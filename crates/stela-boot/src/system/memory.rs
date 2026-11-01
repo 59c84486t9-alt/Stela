@@ -115,22 +115,11 @@ pub(super) fn reserve(
             .map_err(|_| refuse!("invalid native invocation-stack geometry"))?
             .physical_bytes(),
     )?;
-    use crate::native_smp::resources::{TaskAllocations, TaskPool};
-    let prototype_bytes = if system.native_mmio_check {
-        if cores != 1 {
-            return Err(refuse!("mixed32 diagnostic requires one actual host core"));
-        }
-        Some(
-            crate::native_smp::resources::prototype_tasks(layout::prototype_task_stacks())
-                .map_err(|_| refuse!("mixed32 diagnostic stack geometry overflow"))?
-                .raw_allocation_bytes(),
-        )
-    } else {
-        None
-    };
+    use crate::native_smp::resources::TaskAllocations;
     let native_task_allocations = TaskAllocations::reserve(
-        crate::native_smp::resources::task_stacks().physical_bytes(),
-        prototype_bytes,
+        crate::native_smp::resources::task_stacks(layout::task_stacks())
+            .map_err(|_| refuse!("task stack geometry overflow"))?
+            .raw_allocation_bytes(),
     )
     .map_err(|error| {
         output::arguments(format_args!("TASK MEMORY allocation failed: {error}\n"));
@@ -140,18 +129,9 @@ pub(super) fn reserve(
         cores: cores as u32,
         stacks,
         invocations,
-        tasks: native_task_allocations
-            .region(TaskPool::Uniform)
-            .ok_or(refuse!("task allocation absent"))?,
+        tasks: native_task_allocations.region(),
         ..NativeResources::default()
     };
-    // Only the existing explicit UP MMIO diagnostic requests this additional
-    // plan. Production's uniform16 reservation and constructor stay separate.
-    if let Some(raw) = native_task_allocations.region(TaskPool::Prototype) {
-        native_resources.prototype_tasks = raw;
-        native_resources.prototype_task_plan =
-            crate::native_smp::resources::PrototypeTaskPlan::FirmwarePrototype32Mixed;
-    }
     if cores > 1 {
         let page = boot::allocate_pages(
             AllocateType::MaxAddress(0x9f000),
@@ -302,66 +282,49 @@ pub(super) fn map(
     // These real LoaderData allocations outlive every root and continuation.
     // Map usable pages only; both guard pages of each slot remain absent.
     // This happens before AP/root clones and grants no execution capability.
-    for (base, region, geometry) in [
-        (
-            layout::invocation_stacks(),
-            native_resources.invocations,
-            crate::native_smp::resources::invocation_stacks(cores)
-                .map_err(|_| refuse!("invalid native invocation-stack geometry"))?,
-        ),
-        (
-            layout::task_stacks(),
-            native_resources.tasks,
-            crate::native_smp::resources::task_stacks(),
-        ),
-    ] {
-        for index in 0..geometry.count() {
-            let slot = geometry
-                .slot(base, index)
-                .map_err(|_| refuse!("guarded stack virtual range overflow"))?;
-            tables::map_range(
-                frames,
-                root,
-                slot.usable.start,
-                region.physical
-                    + geometry
-                        .physical_offset(index)
-                        .map_err(|_| refuse!("guarded stack physical offset overflow"))?,
-                slot.usable.end - slot.usable.start,
-                data | tables::GLOBAL,
-            )?;
-        }
+    let geometry = crate::native_smp::resources::invocation_stacks(cores)
+        .map_err(|_| refuse!("invalid native invocation-stack geometry"))?;
+    for index in 0..geometry.count() {
+        let slot = geometry
+            .slot(layout::invocation_stacks(), index)
+            .map_err(|_| refuse!("guarded stack virtual range overflow"))?;
+        tables::map_range(
+            frames,
+            root,
+            slot.usable.start,
+            native_resources.invocations.physical
+                + geometry
+                    .physical_offset(index)
+                    .map_err(|_| refuse!("guarded stack physical offset overflow"))?,
+            slot.usable.end - slot.usable.start,
+            data | tables::GLOBAL,
+        )?;
     }
-    if native_resources.prototype_task_plan
-        == crate::native_smp::resources::PrototypeTaskPlan::FirmwarePrototype32Mixed
-    {
-        let geometry =
-            crate::native_smp::resources::prototype_tasks(layout::prototype_task_stacks())
-                .map_err(|_| refuse!("mixed32 diagnostic virtual range overflow"))?;
-        let raw = native_resources.prototype_tasks;
-        let end = raw
-            .physical
-            .checked_add(raw.bytes)
-            .ok_or(refuse!("mixed32 raw reservation wraps"))?;
-        if raw.bytes != geometry.raw_allocation_bytes() {
-            return Err(refuse!("mixed32 raw reservation size changed"));
-        }
-        for index in 0..geometry.count() {
-            let slot = geometry
-                .slot(index)
-                .map_err(|_| refuse!("mixed32 slot overflow"))?;
-            let backing = geometry
-                .backing(raw.physical..end, index)
-                .map_err(|_| refuse!("mixed32 backing alignment overflow"))?;
-            tables::map_range(
-                frames,
-                root,
-                slot.usable.start,
-                backing.start,
-                backing.end - backing.start,
-                data,
-            )?;
-        }
+    let geometry = crate::native_smp::resources::task_stacks(layout::task_stacks())
+        .map_err(|_| refuse!("task stack virtual range overflow"))?;
+    let raw = native_resources.tasks;
+    let end = raw
+        .physical
+        .checked_add(raw.bytes)
+        .ok_or(refuse!("task stack reservation wraps"))?;
+    if raw.bytes != geometry.raw_allocation_bytes() {
+        return Err(refuse!("task stack reservation size changed"));
+    }
+    for index in 0..geometry.count() {
+        let slot = geometry
+            .slot(index)
+            .map_err(|_| refuse!("task stack slot overflow"))?;
+        let backing = geometry
+            .backing(raw.physical..end, index)
+            .map_err(|_| refuse!("task stack backing alignment overflow"))?;
+        tables::map_range(
+            frames,
+            root,
+            slot.usable.start,
+            backing.start,
+            backing.end - backing.start,
+            data | tables::GLOBAL,
+        )?;
     }
     tables::map_range(
         frames,

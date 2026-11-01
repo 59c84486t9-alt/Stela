@@ -3,12 +3,6 @@ use crate::{handoff::Region, tables::PAGE};
 use core::sync::atomic::{AtomicBool, Ordering};
 use uefi::boot::{self, AllocateType, MemoryType};
 
-#[derive(Clone, Copy)]
-pub(crate) enum TaskPool {
-    Uniform,
-    Prototype,
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum AllocationError {
     InvalidSize(u64),
@@ -32,14 +26,12 @@ impl core::error::Error for AllocationError {}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ClaimError {
-    Absent,
     DescriptorMismatch,
     AlreadyOwned,
 }
 impl core::fmt::Display for ClaimError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str(match self {
-            Self::Absent => "task allocation is absent",
             Self::DescriptorMismatch => "task allocation descriptor differs from its owner",
             Self::AlreadyOwned => "task allocation was already claimed",
         })
@@ -77,37 +69,23 @@ impl Allocation {
 /// reserves these pages before EBS; engine claim never reconstructs an owner.
 #[repr(C)]
 pub(crate) struct TaskAllocations {
-    uniform: Allocation,
-    prototype: Option<Allocation>,
+    tasks: Allocation,
 }
 impl TaskAllocations {
-    pub(crate) fn reserve(uniform: u64, prototype: Option<u64>) -> Result<Self, AllocationError> {
+    pub(crate) fn reserve(bytes: u64) -> Result<Self, AllocationError> {
         Ok(Self {
-            uniform: Allocation::reserve(uniform)?,
-            prototype: prototype.map(Allocation::reserve).transpose()?,
+            tasks: Allocation::reserve(bytes)?,
         })
     }
-    fn allocation(&self, pool: TaskPool) -> Option<&Allocation> {
-        match pool {
-            TaskPool::Uniform => Some(&self.uniform),
-            TaskPool::Prototype => self.prototype.as_ref(),
-        }
-    }
-    pub(crate) fn region(&self, pool: TaskPool) -> Option<Region> {
-        self.allocation(pool).map(|owner| owner.region)
+    pub(crate) fn region(&self) -> Region {
+        self.tasks.region
     }
     #[cfg(feature = "diagnostics")]
-    pub(crate) fn claim_state(&self, pool: TaskPool) -> Result<bool, ClaimError> {
-        self.allocation(pool)
-            .map(|owner| owner.claimed.load(Ordering::Acquire))
-            .ok_or(ClaimError::Absent)
+    pub(crate) fn claimed(&self) -> bool {
+        self.tasks.claimed.load(Ordering::Acquire)
     }
-    pub(crate) fn claim(
-        &'static self,
-        pool: TaskPool,
-        expected: Region,
-    ) -> Result<AllocationClaim, ClaimError> {
-        let owner = self.allocation(pool).ok_or(ClaimError::Absent)?;
+    pub(crate) fn claim(&'static self, expected: Region) -> Result<AllocationClaim, ClaimError> {
+        let owner = &self.tasks;
         let region = owner.region;
         if region.physical != expected.physical || region.bytes != expected.bytes {
             return Err(ClaimError::DescriptorMismatch);

@@ -1247,7 +1247,7 @@ impl<const N: usize> Executor<N> {
             )?),
         })
     }
-    /// Opt into mixed stack geometry for the explicit32-stack prototype.
+    /// Opt into mixed stack geometry for the 32-stack pool.
     /// Empty-queue validation is transactional. Descriptors supply no native
     /// mapping/current/kernel-thread/IRQ permission.
     pub fn new_with_profile(

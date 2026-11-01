@@ -45,7 +45,12 @@ pub(crate) unsafe fn validate(
         .map_err(|_| refuse!("native invocation-stack geometry exceeds capacity"))?;
     for (region, bytes) in [
         (resources.invocations, invocations.physical_bytes()),
-        (resources.tasks, resources::task_stacks().physical_bytes()),
+        (
+            resources.tasks,
+            resources::task_stacks(crate::layout::task_stacks())
+                .map_err(|_| refuse!("native task-stack geometry exceeds capacity"))?
+                .raw_allocation_bytes(),
+        ),
     ] {
         let end = region
             .physical
@@ -64,7 +69,6 @@ pub(crate) unsafe fn validate(
             handoff.code,
             handoff.pool,
             resources.stacks,
-            resources.prototype_tasks,
             handoff.storage.dma,
             if region.physical == resources.invocations.physical {
                 resources.tasks
@@ -92,59 +96,6 @@ pub(crate) unsafe fn validate(
                 .ok_or(refuse!("native guest backing range wraps"))?;
             if region.physical < guest_end && guest.physical < end {
                 return Err(refuse!("native guarded stacks alias guest backing"));
-            }
-        }
-    }
-    match resources.prototype_task_plan {
-        resources::PrototypeTaskPlan::Disabled => {
-            if resources.prototype_tasks.physical != 0 || resources.prototype_tasks.bytes != 0 {
-                return Err(refuse!("unselected prototype task reservation is present"));
-            }
-        }
-        resources::PrototypeTaskPlan::FirmwarePrototype32Mixed => {
-            let region = resources.prototype_tasks;
-            let geometry = resources::prototype_tasks(crate::layout::prototype_task_stacks())
-                .map_err(|_| refuse!("mixed32 reservation geometry exceeds capacity"))?;
-            let end = region
-                .physical
-                .checked_add(region.bytes)
-                .ok_or(refuse!("mixed32 raw reservation wraps"))?;
-            if cores != 1
-                || region.physical == 0
-                || !region.physical.is_multiple_of(crate::tables::PAGE)
-                || region.bytes != geometry.raw_allocation_bytes()
-            {
-                return Err(refuse!(
-                    "mixed32 diagnostic reservation differs from the actual UP plan"
-                ));
-            }
-            for other in [
-                handoff.heap,
-                handoff.code,
-                handoff.pool,
-                resources.stacks,
-                resources.invocations,
-                resources.tasks,
-                handoff.storage.dma,
-            ]
-            .into_iter()
-            .chain(
-                handoff
-                    .guest
-                    .get(..handoff.guest_count)
-                    .ok_or(refuse!("guest inventory exceeds capacity"))?
-                    .iter()
-                    .copied(),
-            ) {
-                let other_end = other
-                    .physical
-                    .checked_add(other.bytes)
-                    .ok_or(refuse!("retained reservation wraps"))?;
-                if region.physical < other_end && other.physical < end {
-                    return Err(refuse!(
-                        "mixed32 raw allocation aliases guest, DMA or retained backing"
-                    ));
-                }
             }
         }
     }

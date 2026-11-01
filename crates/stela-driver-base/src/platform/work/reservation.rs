@@ -9,8 +9,8 @@ use core::ops::Range;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReservationPolicy {
     NativeFirmware16,
-    /// Bounded32-stack execution prototype: the same8 roles and24 General workers.
-    /// Requires mapped owners; no kernel thread or producer is admitted.
+    /// Production's 32 stacks: the same 8 roles and 24 General workers.
+    /// Requires mapped owners.
     NativeFirmware32Protected {
         gpe: GpeQueueBudget,
     },

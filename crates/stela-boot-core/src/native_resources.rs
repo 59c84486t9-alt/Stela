@@ -9,36 +9,25 @@ const PAGE: u64 = 4096;
 pub const STACK_BYTES: u64 = 2 * 1024 * 1024;
 pub const STACK_STRIDE: u64 = STACK_BYTES + PAGE;
 pub const INVOCATION_STACK_BYTES: u64 = 128 * 1024;
-pub const TASK_STACK_BYTES: u64 = 128 * 1024;
-pub const TASK_STACKS: usize = 16;
 
 pub fn invocation_stacks(
     cores: usize,
 ) -> Result<crate::guarded_stacks::Layout, crate::guarded_stacks::Error> {
     crate::guarded_stacks::Layout::new(INVOCATION_STACK_BYTES, cores)
 }
-pub fn task_stacks() -> crate::guarded_stacks::Layout {
-    crate::guarded_stacks::Layout::new(TASK_STACK_BYTES, TASK_STACKS)
-        .expect("constant guarded task-stack geometry")
-}
 
-/// Explicit diagnostic reservation metadata, never a task/current grant.
-#[repr(u32)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum PrototypeTaskPlan {
-    #[default]
-    Disabled = 0,
-    FirmwarePrototype32Mixed = 1,
-}
-pub const PROTOTYPE_STACKS: usize = 32;
-pub const PROTOTYPE_WINDOW_BYTES: u64 = 16 * 1024 * 1024;
-pub fn prototype_tasks(
+pub const TASK_STACKS: usize = 32;
+pub const TASK_WINDOW_BYTES: u64 = 16 * 1024 * 1024;
+/// The BSP's work pool. A Linux task runs only on a stack of exactly its
+/// configured size and alignment, so the service and twenty General
+/// continuations have that shape; the other roles keep generic stacks.
+pub fn task_stacks(
     base: u64,
 ) -> Result<crate::guarded_stacks::MixedLayout, crate::guarded_stacks::Error> {
     use crate::guarded_stacks::{Error, Geometry, MixedLayout};
     let kernel = Geometry::new(16 * 1024, 16 * 1024)?;
     let ordinary = Geometry::new(128 * 1024, PAGE)?;
-    let geometries = core::array::from_fn::<_, PROTOTYPE_STACKS, _>(|index| {
+    let geometries = core::array::from_fn::<_, TASK_STACKS, _>(|index| {
         if index == 2 || (8..28).contains(&index) {
             kernel
         } else {
@@ -46,7 +35,7 @@ pub fn prototype_tasks(
         }
     });
     let layout = MixedLayout::new(base, &geometries)?;
-    if layout.virtual_bytes() > PROTOTYPE_WINDOW_BYTES {
+    if layout.virtual_bytes() > TASK_WINDOW_BYTES {
         return Err(Error::Overflow);
     }
     Ok(layout)
@@ -125,8 +114,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn optional_mixed_plan_keeps_exact_payload_padding_guards_and_classes() {
-        let layout = prototype_tasks(0x9_0000_0000).unwrap();
+    fn task_plan_keeps_exact_payload_padding_guards_and_classes() {
+        let layout = task_stacks(0x8_0000_0000).unwrap();
         assert_eq!(layout.count(), 32);
         assert_eq!(layout.physical_bytes(), 1_785_856);
         assert_eq!(layout.raw_allocation_bytes(), 1_798_144);
@@ -145,10 +134,7 @@ mod tests {
             assert_eq!(slot.upper_guard.start, slot.usable.end);
         }
         assert_eq!(counts, (21, 11));
-        assert!(layout.virtual_bytes() < PROTOTYPE_WINDOW_BYTES);
-        let original = task_stacks();
-        assert_eq!(original.count(), 16);
-        assert_eq!(original.physical_bytes(), 16 * 128 * 1024);
+        assert!(layout.virtual_bytes() < TASK_WINDOW_BYTES);
     }
     #[test]
     fn private_arenas_have_no_overlap_or_fractional_ring_units() {
