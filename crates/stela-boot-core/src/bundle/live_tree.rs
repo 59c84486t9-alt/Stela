@@ -188,9 +188,9 @@ impl LiveTree {
     ) -> Result<Self> {
         reservation(projected, self.physical, self.reservation_bytes)?;
         let bytes = projected.serialize();
-        if bytes.len() > self.bytes.len() {
+        if bytes.len() as u64 > self.reservation_bytes {
             return Err(refuse!(
-                "assigned DeviceTree projection grows beyond its original data span"
+                "assigned DeviceTree projection grows beyond its reservation"
             ));
         }
         let length = u32::try_from(bytes.len())
@@ -222,9 +222,10 @@ impl LiveTree {
                 "live DeviceTree publication snapshot is stale or inaccessible"
             ));
         }
-        old.fill(0);
-        old[..bytes.len()].copy_from_slice(&bytes);
-        if !ram.write(self.physical, &old) {
+        // A shorter tree clears what it no longer covers.
+        let mut next = buffer(bytes.len().max(old.len()))?;
+        next[..bytes.len()].copy_from_slice(&bytes);
+        if !ram.write(self.physical, &next) {
             return Err(refuse!(
                 "DeviceTree publication failed; guest entry is forbidden"
             ));
@@ -242,9 +243,9 @@ impl LiveTree {
         }
         self.args = next_args;
         ram.fence();
-        let mut actual = buffer(old.len())?;
+        let mut actual = buffer(next.len())?;
         if !ram.read(self.physical, &mut actual)
-            || actual != old
+            || actual != next
             || !ram.read(self.args_physical, &mut args)
             || args != self.args
         {
