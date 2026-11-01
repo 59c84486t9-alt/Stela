@@ -1,6 +1,6 @@
 //! StelaGPU's call gates in the guest's DeviceTree: `/arm-io/stela-gpu<n>` for
 //! GPU `n`, whose nub the StelaGPU kext matches by `compatible` and maps by
-//! `reg`. A window goes in the first gap of `/arm-io`'s `ranges`, aligned to its
+//! `reg`. A window goes in the last gap of `/arm-io`'s `ranges`, aligned to its
 //! size, that no `/arm-io` device's registers use, and the completion
 //! interrupt on the AIC input past every one the tree's AIC clients use, so
 //! neither collides with anything the board places; the runtime mounts the
@@ -97,24 +97,26 @@ fn interrupts_of(node: &Node, aic: u32, used: &mut Vec<u32>) {
     }
 }
 
-/// The first offset of `start..start + length`, aligned to `bytes`, whose
-/// `bytes` miss every `used` extent.
+/// The last offset of `start..start + length`, aligned to `bytes`, whose
+/// `bytes` miss every `used` extent. The tree does not name all of the SoC's
+/// registers, the memory controllers' at its bottom among them, and the top of
+/// the range is the part none reach.
 fn gap(start: u64, length: u64, bytes: u64, used: &[(u64, u64)]) -> Option<u64> {
-    let end = start.checked_add(length)?;
-    let mut candidate = start.checked_next_multiple_of(bytes)?;
+    let mut past = start.checked_add(length)?;
     loop {
-        let last = candidate.checked_add(bytes)?;
-        if last > end {
+        let candidate = past.checked_sub(bytes)? & !(bytes - 1);
+        if candidate < start {
             return None;
         }
+        let last = candidate + bytes;
         match used
             .iter()
-            .filter(|&&(first, past)| first < last && candidate < past)
-            .map(|&(_, past)| past)
-            .max()
+            .filter(|&&(first, end)| first < last && candidate < end)
+            .map(|&(first, _)| first)
+            .min()
         {
             None => return Some(candidate),
-            Some(past) => candidate = past.checked_next_multiple_of(bytes)?,
+            Some(first) => past = first,
         }
     }
 }
@@ -191,16 +193,16 @@ mod tests {
     }
 
     #[test]
-    fn the_gate_takes_the_first_aligned_gap_no_device_uses() {
+    fn the_gate_takes_the_last_aligned_gap_no_device_uses() {
         let mut tree = tree(vec![
             interrupting(device("uart", 0, 0x10_0000), AIC_PHANDLE, &[0x20, 0x31]),
-            interrupting(device("wdt", 0x40_0000, 0x1_0000), AIC_PHANDLE, &[0x2c]),
+            interrupting(device("wdt", 0xf80_0000, 0x1_0000), AIC_PHANDLE, &[0x2c]),
             interrupting(device("gpio", 0x60_0000, 0x1_0000), 99, &[0x400]),
         ]);
         assert_eq!(
             place_gpu_gate(&mut tree, 0, WINDOW).unwrap(),
             Placement {
-                physical: 0x2_0080_0000,
+                physical: 0x2_0f40_0000,
                 irq: 0x32,
             }
         );
@@ -209,7 +211,7 @@ mod tests {
         assert_eq!(node.property("interrupts").unwrap().as_u32(), Some(0x32));
         assert_eq!(
             node.property("reg").unwrap().value,
-            [0x80_0000, WINDOW].map(u64::to_le_bytes).concat()
+            [0xf40_0000, WINDOW].map(u64::to_le_bytes).concat()
         );
         assert!(place_gpu_gate(&mut tree, 0, WINDOW).is_err());
     }
@@ -219,7 +221,7 @@ mod tests {
         let mut tree = tree(Vec::new());
         let first = place_gpu_gate(&mut tree, 0, WINDOW).unwrap();
         let second = place_gpu_gate(&mut tree, 1, WINDOW).unwrap();
-        assert_eq!(second.physical, first.physical + WINDOW);
+        assert_eq!(second.physical, first.physical - WINDOW);
         assert_eq!(second.irq, first.irq + 1);
         assert!(tree.node("/arm-io/stela-gpu1").is_some());
     }
