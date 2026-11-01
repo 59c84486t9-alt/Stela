@@ -221,6 +221,73 @@ fn a_kek_bound_vek_unlocks_only_with_its_secret() {
 }
 
 #[test]
+fn user_protection_binds_a_verifier_and_keeps_the_system_seal() {
+    let (mut keys, engine) = keys(1);
+    let (system, area) = new_vek(&mut keys, &[], &[]);
+    let request = Request::new()
+        .word(VERIFIER_TYPE)
+        .blob(b"password")
+        .blob(&USER);
+    let reply = send(&mut keys, NEW_KEK, 0, request, &mut Vec::new()).unwrap();
+    let mut fields = reply_fields(&reply);
+    let verifier = fields.blob().unwrap().to_vec();
+    let protect = |keys: &mut VolumeKeys, secret: &[u8]| {
+        let request = Request::new()
+            .word(SET_USER_PROTECTION)
+            .lword(0)
+            .blob(secret)
+            .blob(&verifier)
+            .blob(&system);
+        send(keys, SET_PROTECTION, 0, request, &mut Vec::new())
+    };
+    assert!(protect(&mut keys, b"wrong").is_err());
+    let reply = protect(&mut keys, b"password").unwrap();
+    let mut fields = reply_fields(&reply);
+    let both = fields.blob().unwrap().to_vec();
+    fields.end().unwrap();
+    assert_eq!(both.len(), VEK_BYTES);
+    let protected = Vek::parse(&both).unwrap();
+    assert_eq!(protected.flags, SYSTEM_SEAL | USER_SEAL);
+    assert_eq!(protected.volume(), VOLUME);
+    assert_eq!(protected.kek, USER);
+    let cipher_of = |area: &[u8]| cipher(&engine, area);
+    let by_system = unwrap(&mut keys, 0, &[], &[], &both).unwrap();
+    let by_user = unwrap(&mut keys, 0, b"password", &verifier, &both).unwrap();
+    assert_eq!(cipher_of(&by_system), cipher_of(&area));
+    assert_eq!(cipher_of(&by_user), cipher_of(&area));
+    assert!(unwrap(&mut keys, 0, b"wrong", &verifier, &both).is_err());
+}
+
+#[test]
+fn a_verifier_checks_its_secret_without_a_vek() {
+    let (mut keys, _) = keys(1);
+    let request = Request::new()
+        .word(VERIFIER_TYPE)
+        .blob(b"password")
+        .blob(&USER);
+    let reply = send(&mut keys, NEW_KEK, 0, request, &mut Vec::new()).unwrap();
+    let mut fields = reply_fields(&reply);
+    let verifier = fields.blob().unwrap().to_vec();
+    fields.end().unwrap();
+    assert_eq!(verifier.len(), KEK_BYTES);
+    let verify = |keys: &mut VolumeKeys, secret: &[u8]| {
+        let request = Request::new()
+            .word(VERIFIER_TYPE)
+            .blob(secret)
+            .blob(&verifier)
+            .blob(&[])
+            .blob(&[]);
+        send(keys, UNWRAP_VEK, 0, request, &mut Vec::new())
+    };
+    let reply = verify(&mut keys, b"password").unwrap();
+    let mut fields = reply_fields(&reply);
+    assert!(fields.blob().unwrap().is_empty());
+    assert_eq!(fields.word().unwrap(), 0);
+    fields.end().unwrap();
+    assert!(verify(&mut keys, b"wrong").is_err());
+}
+
+#[test]
 fn another_machine_or_a_changed_blob_does_not_unlock() {
     let (mut keys, _) = keys(1);
     let (vek, _) = new_vek(&mut keys, &[], &[]);
@@ -755,13 +822,13 @@ fn unmodeled_operations_and_fields_refuse() {
     let (vek, _) = new_vek(&mut keys, &[], &[]);
     let mut notes = Vec::new();
     let request = Request::new()
-        .word(3)
+        .word(4)
         .lword(0)
         .blob(&[])
         .blob(&[])
         .blob(&vek);
     assert!(send(&mut keys, SET_PROTECTION, 0, request, &mut notes).is_err());
-    assert!(notes.iter().any(|note| note.contains("operation 3")));
+    assert!(notes.iter().any(|note| note.contains("operation 4")));
     // ACM authorization, an unknown KEK type and a secret without a KEK.
     let request = Request::new()
         .word(KEK_TYPE)

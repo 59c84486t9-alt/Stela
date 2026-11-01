@@ -10,14 +10,18 @@
 //!   wrapped VEK with type 1 ("wvek len")
 //!   (`_apfs_keybag_set_create_update_record` 0x481ff08).
 //! - NEW_KEK 0x42 (0x2d46518): handle, parameters, type, secret, KEK UUID ->
-//!   wrapped KEK. APFS sends type 2.
+//!   wrapped KEK. APFS sends type 2. `aks_fv_new_verifier`, with which
+//!   opendirectoryd records a user's password, is the same call with type 0
+//!   and the user's UUID; its result is a KEK sized like any other.
 //! - NEW_VEK 0x40 (0x2d46044): handle, parameters, secret, wrapped KEK,
 //!   volume UUID -> wrapped VEK, inline key. Without a KEK and secret the
 //!   VEK is "system-enabled", bound to the device alone.
 //! - UNWRAP_VEK 0x41 (0x2d46288): handle, parameters, type, secret, wrapped
 //!   KEK, wrapped VEK, ACM data -> inline key; variant 1 also returns a
 //!   blob. APFS unlocks with (secret, wrapped KEK, wrapped VEK)
-//!   (`_apfs_keybag_unlock_record_tag` 0x481ed30).
+//!   (`_apfs_keybag_unlock_record_tag` 0x481ed30). `aks_fv_verify_user` is
+//!   the same call with type 0 and no VEK: it asks only whether the secret
+//!   opens the verifier, and gets an empty key back.
 //! - SET_PROTECTION 0x47 (`__ipc_fv_set_protection` 0x2d5c62c, codec
 //!   0x2d46fa8): handle, parameters, operation, u64, three blobs -> blob.
 //!   APFS's `fv_set_protection` arguments x3..x5 are the three blobs. It
@@ -27,7 +31,12 @@
 //!   updated wrapped KEK record with 22 and the KEK second (0x4820924),
 //!   retains an unlock record's state with 15 and releases it with 11, the
 //!   KEK second (`apfs_keybag_aks_retain_unlock_record_for_volumes_group`
-//!   0x481fa6c, 0x481fb80). It loads a volume's class keys with 18
+//!   0x481fa6c, 0x481fb80). `apfs_vek_set_protection` (file 0x4873050) sets
+//!   a VEK's user protection with 3: the secret, the wrapped KEK that binds
+//!   it and the wrapped VEK, answered by the rewrapped VEK, which it keeps in
+//!   the container keybag. It sends that only for a VEK with no user
+//!   protection. opendirectoryd binds a volume's first user this way, with
+//!   the user's verifier as the KEK. It loads a volume's class keys with 18
 //!   (`apfs_keybag_load_class_keys` 0x481e864, call 0x481ea44): the secret
 //!   and its wrapped KEK (the volume keybag's tag 3 unlock record) first and
 //!   second, both empty for a system-enabled VEK, and the wrapped VEK (the
@@ -55,6 +64,8 @@
 //! them. A wrapped KEK is sealed under the root, its UUID and the user's
 //! secret; a wrapped VEK carries a system seal under the root, a user seal
 //! under a KEK, or both, with the VEK UUID and its KEK's UUID bound in.
+//! Setting user protection adds the user seal and keeps the system seal,
+//! which still mounts the volume at boot.
 //! The keybag handle and parameters do not change these keys; they are not
 //! interpreted. Commits keep no record against replaying an older wrapped
 //! key and retained unlock records do not outlive the sepOS start; each
@@ -91,7 +102,10 @@ const WRAPPED_VEK: u32 = 1;
 const WRAPPED_KEK: u32 = 2;
 /// The only KEK and unwrap type APFS sends.
 const KEK_TYPE: u32 = 2;
+/// The type of a user's password verifier.
+const VERIFIER_TYPE: u32 = 0;
 /// Protection operations.
+const SET_USER_PROTECTION: u32 = 3;
 const RELEASE_UNLOCK_RECORD: u32 = 11;
 const COMMIT: u32 = 5;
 const REMOVE_VEK_STATE: u32 = 6;
@@ -223,7 +237,7 @@ impl VolumeKeys {
                 reply.lword(size as u64);
             }
             NEW_KEK => {
-                if fields.word()? != KEK_TYPE {
+                if !matches!(fields.word()?, KEK_TYPE | VERIFIER_TYPE) {
                     return Err(refuse!("SEP volume-key KEK type is not modeled"));
                 }
                 let secret = fields.blob()?;
@@ -251,7 +265,8 @@ impl VolumeKeys {
                 self.inline_key(&mut reply, &vek)?;
             }
             UNWRAP_VEK => {
-                if fields.word()? != KEK_TYPE {
+                let kind = fields.word()?;
+                if !matches!(kind, KEK_TYPE | VERIFIER_TYPE) {
                     return Err(refuse!("SEP volume-key unwrap type is not modeled"));
                 }
                 let secret = fields.blob()?;
@@ -263,8 +278,14 @@ impl VolumeKeys {
                     ));
                 }
                 fields.end()?;
-                let vek = self.open_vek(wrapped_vek, secret, wrapped_kek)?;
-                self.inline_key(&mut reply, &vek)?;
+                if kind == VERIFIER_TYPE && wrapped_vek.is_empty() {
+                    self.open_kek(wrapped_kek, secret)?;
+                    reply.blob(&[]);
+                    reply.word(0);
+                } else {
+                    let vek = self.open_vek(wrapped_vek, secret, wrapped_kek)?;
+                    self.inline_key(&mut reply, &vek)?;
+                }
                 if variant == 1 {
                     reply.blob(&[]);
                 }
@@ -278,7 +299,11 @@ impl VolumeKeys {
                 fields.end()?;
                 let vek_only = value == 0 && first.is_empty() && second.is_empty();
                 let kek_only = value == 0 && first.is_empty() && third.is_empty();
+                let mut output = Vec::new();
                 match operation {
+                    SET_USER_PROTECTION if value == 0 => {
+                        output = self.set_user_protection(third, first, second)?;
+                    }
                     COMMIT if vek_only => {
                         Vek::parse(third)?;
                         self.report(UNRECORDED_COMMIT, notes);
@@ -316,7 +341,7 @@ impl VolumeKeys {
                         ));
                     }
                 }
-                reply.blob(&[]);
+                reply.blob(&output);
             }
             GET_BLOB_STATE => {
                 let wrapped_vek = fields.blob()?;
@@ -397,6 +422,19 @@ impl VolumeKeys {
             )
         }));
         blob
+    }
+
+    /// A system-protected VEK, sealed also under the KEK `secret` opens.
+    fn set_user_protection(
+        &self,
+        blob: &[u8],
+        secret: &[u8],
+        wrapped_kek: &[u8],
+    ) -> Result<Vec<u8>> {
+        let volume = Vek::parse(blob)?.volume();
+        let vek = self.open_vek(blob, &[], &[])?;
+        let kek = self.open_kek(wrapped_kek, secret)?;
+        Ok(self.seal_vek(volume, Some(&*vek), Some((kek.uuid, &*kek.key, &*vek))))
     }
 
     /// The VEK in `blob`: system-protected without a KEK and secret,
