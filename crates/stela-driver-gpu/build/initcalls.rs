@@ -7,12 +7,13 @@ use super::inputs::{Hash, Limits};
 use super::linux_registry::{
     self, Group, Input, InputRoot, Plan, RoleLimits, TargetAbi, Unit as PlanUnit,
 };
-use super::native::{self, NATIVE_TARGET, out_dir, run};
+use super::native::{self, out_dir, run};
 use sha2::{Digest, Sha256};
 use std::{
     env, fs,
     path::{Path, PathBuf},
 };
+use stela_c_build::native::NATIVE_TARGET;
 
 const LINUX: &str = "../../third_party/linux";
 const REGISTRATION: &str = "src/compat/linux/stela/registration.h";

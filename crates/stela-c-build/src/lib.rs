@@ -1,7 +1,10 @@
-//! C tool selection shared by the native ports and ACPICA: clang unless the
-//! caller chose a compiler through cc's standard environment, and the active
-//! Rust toolchain's LLVM archiver for COFF objects.
+//! Shared C tool selection, freestanding target ABI and hosted sanitizer builds.
+//! Callers may select tools through cc's standard environment; COFF archives use
+//! the active Rust toolchain's LLVM archiver.
 use std::{env, path::PathBuf, process::Command};
+
+#[cfg(feature = "native")]
+pub mod native;
 
 /// Whether the caller chose a tool through cc's standard environment.
 pub fn selected(tool: &str) -> bool {

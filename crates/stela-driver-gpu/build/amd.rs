@@ -35,7 +35,7 @@ pub fn port(linux: &Linux, tests: &mut Tests) {
         build
     };
     let adapters = native::sources("src/amd");
-    let port = configure(native::configure());
+    let port = configure(stela_c_build::native::configure());
     native::check_declarations(&port, &adapters);
     port.clone().files(&adapters).compile("stela-amd-port");
     // Fixtures for the integration test, which links them itself.
@@ -44,7 +44,7 @@ pub fn port(linux: &Linux, tests: &mut Tests) {
         .cargo_metadata(false)
         .compile("stela-amd-test-fixtures");
     println!("cargo:rerun-if-changed=src/amd/tests");
-    let Some(hosted) = native::hosted() else {
+    let Some(hosted) = stela_c_build::native::hosted() else {
         return;
     };
     let hosted = configure(hosted);

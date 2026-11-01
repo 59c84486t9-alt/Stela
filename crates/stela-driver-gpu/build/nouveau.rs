@@ -100,7 +100,7 @@ pub fn port(linux: &mut Linux) {
     let includes = includes.iter().map(String::as_str).collect::<Vec<_>>();
     // Compiled below, with its registrations captured.
     sources.retain(|source| *source != INITCALLS.path());
-    let mut build = native::configure();
+    let mut build = stela_c_build::native::configure();
     linux.apply(&mut build, None, &includes, Some(&MODULE));
     native::upstream_warnings(&mut build);
     // As Kbuild builds every profile: Linux relies on the optimizer to drop

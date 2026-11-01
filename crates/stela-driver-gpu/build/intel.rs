@@ -112,7 +112,12 @@ pub fn port(linux: &Linux, tests: &mut Tests) {
         .into_iter()
         .partition(|path| named(path, &I915_ADAPTERS));
     encoders.extend(packets(&python, &dispatch));
-    let mut port = Builds::new(linux, &native::configure(), &generated, &dispatch);
+    let mut port = Builds::new(
+        linux,
+        &stela_c_build::native::configure(),
+        &generated,
+        &dispatch,
+    );
     // Mesa's packing helpers include a few C library headers, which the
     // freestanding encoders take from Stela.
     port.encoders
@@ -126,7 +131,7 @@ pub fn port(linux: &Linux, tests: &mut Tests) {
         .clone()
         .files(&encoders)
         .compile("stela-intel-encoders");
-    let Some(base) = native::hosted() else {
+    let Some(base) = stela_c_build::native::hosted() else {
         return;
     };
     let have_endian_h = hosted_endian_header(&base);

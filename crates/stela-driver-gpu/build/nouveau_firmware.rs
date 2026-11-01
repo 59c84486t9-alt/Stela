@@ -3,12 +3,14 @@
 use std::{env, path::PathBuf};
 
 #[cfg(feature = "linux-kernel")]
-use super::native::{LINUX, Linux, Module, Tests, check_declarations, hosted, run};
+use super::native::{LINUX, Linux, Module, Tests, check_declarations, run};
 #[cfg(feature = "linux-kernel")]
 use std::{
     process::{self, Command},
     time::{SystemTime, UNIX_EPOCH},
 };
+#[cfg(feature = "linux-kernel")]
+use stela_c_build::native::hosted;
 
 const SELECTOR: &str = "STELA_NOUVEAU_FIRMWARE_TESTS";
 const BOOTLOADER: &str = "STELA_NOUVEAU_FIRMWARE_BOOTLOADER";

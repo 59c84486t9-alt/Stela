@@ -26,7 +26,7 @@ pub fn port() {
     )
     .expect("generate NVIDIA version.h");
     println!("cargo:rerun-if-changed={version_mk}");
-    let mut build = native::configure();
+    let mut build = stela_c_build::native::configure();
     // NVIDIA's Unix resource manager for an OS with its own interface layer.
     // Its headers take a predefined __linux__ for Linux's kernel layer, which
     // a Linux host's compiler defines even for this freestanding build.
