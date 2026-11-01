@@ -21,7 +21,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             _ => return,
         };
         if let Some(index) = MIRRORED.iter().position(|&mirrored| mirrored == encoding) {
-            if self.cpu.degraded.is_empty() {
+            if !self.cpu.degraded.contains_key(&encoding.selector()) {
                 let value = self.cpu.registers.get(register, 0);
                 self.mirrors.update(index, value);
             } else {

@@ -177,7 +177,9 @@ pub(super) mod tests {
         assert_eq!(*machine.mirrors.cells(), el1);
         machine.system_instruction(GENTER).unwrap();
         assert_eq!(*machine.mirrors.cells(), gl1);
-        // A write of TPIDR_EL1 reaches its cells alone.
+        // A write of TPIDR_EL1 reaches its cells alone, whatever other
+        // register a refused write left degraded.
+        machine.cpu.degraded.insert(0x1234, 5);
         machine.cpu.state.x[9] = 0x8000;
         machine.system_instruction(MSR_TPIDR_EL1).unwrap();
         machine.system_instruction(GEXIT).unwrap();
