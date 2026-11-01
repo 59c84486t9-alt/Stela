@@ -414,16 +414,22 @@ impl Hub {
         }
     }
 
+    /// Whether mail, a host call, the host's service or a line change PE
+    /// `pe` has not seen since `epoch` wants it awake.
+    pub(super) fn woken(&self, pe: usize, epoch: u64) -> bool {
+        let inbox = &self.inboxes[pe];
+        inbox.pending.load(Ordering::SeqCst)
+            || inbox.host_call.load(Ordering::SeqCst)
+            || inbox.lines.load(Ordering::SeqCst) != epoch
+            || self.service.load(Ordering::SeqCst)
+    }
+
     /// Halt PE `pe`'s core with `halt` unless mail or a line change it has
     /// not seen since `epoch` is already there.
     fn sleep(&self, pe: usize, epoch: u64, halt: impl FnOnce()) {
         let inbox = &self.inboxes[pe];
         inbox.sleeping.store(true, Ordering::SeqCst);
-        if !inbox.pending.load(Ordering::SeqCst)
-            && !inbox.host_call.load(Ordering::SeqCst)
-            && inbox.lines.load(Ordering::SeqCst) == epoch
-            && !self.service.load(Ordering::SeqCst)
-        {
+        if !self.woken(pe, epoch) {
             halt();
         }
         // Ordered before its look at its mail, against a broadcast's look
@@ -1093,6 +1099,46 @@ impl<H: Host, D: Devices> Machine<H, D> {
             }),
             None => self.host.wait_for_interrupt(),
         }
+    }
+
+    /// Wait for a wake on this core from host count `from` for the
+    /// [`Self::idle_poll`] counts, or until `until`, whichever is first:
+    /// whether the PE has something to look at. Nobody sends a polling PE a
+    /// doorbell, and a halt, its timer and the doorbell that ends it take
+    /// the host's hypervisor if it has one, at tens of microseconds an
+    /// access.
+    pub(super) fn poll_for_wake(&mut self, from: u64, until: u64) -> bool {
+        let Some(hub) = &self.parallel else {
+            return false;
+        };
+        let end = from.saturating_add(self.idle_poll);
+        loop {
+            if hub.woken(self.current, self.lines_epoch) || self.host.poll_interrupt() {
+                return true;
+            }
+            let now = self.host.counter();
+            if now >= until {
+                return true;
+            }
+            if now >= end {
+                return false;
+            }
+            core::hint::spin_loop();
+        }
+    }
+
+    /// Fit [`Self::idle_poll`] to a wait that took `blocked` counts as
+    /// Linux's haltpoll governor does: halve it once waits outlast the
+    /// longest poll, double it when a short one had to halt.
+    pub(super) fn tune_idle_poll(&mut self, blocked: u64) {
+        let most = self.profile.counter_frequency / super::processors::IDLE_POLL_HZ;
+        self.idle_poll = if blocked > most {
+            Some(self.idle_poll / 2)
+                .filter(|poll| *poll >= most / 4)
+                .unwrap_or(0)
+        } else {
+            (self.idle_poll * 2).clamp(most / 4, most)
+        };
     }
 
     /// Maintenance another PE broadcast, reached from this PE's context.

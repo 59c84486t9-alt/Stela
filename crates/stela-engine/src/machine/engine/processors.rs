@@ -61,6 +61,10 @@ pub(super) const QUANTUM: u64 = 1 << 14;
 /// 2 ms, so the seven other PEs of an eight-PE board hold a preempted
 /// spinlock holder off for at most 14 ms.
 pub(super) const QUANTUM_HZ: u64 = 500;
+
+/// The inverse of the longest a waiting PE polls before it halts: 200 us,
+/// Linux's `guest_halt_poll_ns`.
+pub(super) const IDLE_POLL_HZ: u64 = 5000;
 /// XNU xnu-12377.121.6 machine_routines.c:108,1251 groups the original
 /// DeviceTree `reg` by Aff1 (proc_reg.h:1059-1061). Aff2 is a core type,
 /// not part of the physical cluster, including the M6's mixed P/M cluster.
@@ -316,11 +320,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
             // be handed a lock, and goes on holding the count.
             self.clock.wait(|| self.host.counter());
         }
-        let mut waited = false;
+        let mut armed = false;
         loop {
             let pass = self.host.counter();
             if run_deadline.is_some_and(|deadline| deadline.remaining(pass).is_none()) {
-                if waited {
+                if armed {
                     self.host.arm_timer(None);
                 }
                 return Err(Stop::Budget);
@@ -329,7 +333,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 self.read_mail()?;
             }
             if self.take_host_call() {
-                if waited {
+                if armed {
                     self.host.arm_timer(None);
                 }
                 return Err(Stop::Waiting);
@@ -346,7 +350,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 .map(|offset| (current + offset) % count)
                 .find(|&pe| self.ready(pe, now))
             {
-                if waited {
+                if armed {
                     self.host.arm_timer(None);
                 }
                 if next != self.current {
@@ -364,7 +368,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             if (self.parallel.is_none() || self.waits_for_interrupt())
                 && self.devices.take_host_service()
             {
-                if waited {
+                if armed {
                     self.host.arm_timer(None);
                 }
                 return Err(Stop::Waiting);
@@ -392,7 +396,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 (deadline, limit) => deadline.or(limit),
             };
             let Some(until) = until else {
-                if waited {
+                if armed {
                     self.host.arm_timer(None);
                 }
                 return Err(Stop::Waiting);
@@ -407,7 +411,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 let until = match run_deadline {
                     Some(deadline) => {
                         let Some(until) = deadline.timer(self.host.counter(), until) else {
-                            if waited {
+                            if armed {
                                 self.host.arm_timer(None);
                             }
                             return Err(Stop::Budget);
@@ -416,15 +420,19 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     }
                     None => until,
                 };
-                self.host.arm_timer(Some(until));
                 let slept = self.host.counter();
-                self.sleep();
+                if !self.poll_for_wake(slept, until) {
+                    self.host.arm_timer(Some(until));
+                    armed = true;
+                    self.sleep();
+                    let blocked = self.host.counter().wrapping_sub(slept);
+                    self.tune_idle_poll(blocked);
+                }
                 self.statistics.sleep_ticks += self.host.counter().wrapping_sub(slept);
             }
             self.waited = self
                 .waited
                 .saturating_add(self.host.counter().saturating_sub(pass));
-            waited = true;
         }
     }
 

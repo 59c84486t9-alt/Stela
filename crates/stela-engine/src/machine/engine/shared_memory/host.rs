@@ -362,6 +362,9 @@ impl<H: Host, T: ServiceTransport> Host for ServiceHost<H, T> {
     fn speculation_barrier(&self) {
         self.local.speculation_barrier();
     }
+    fn pan_in_flags(&self) -> bool {
+        self.local.pan_in_flags()
+    }
     fn code_invalidated(&mut self, page: Option<u64>) {
         if self.source_service() {
             self.effect(HostEffect::CodeInvalidated(page));
@@ -408,6 +411,13 @@ impl<H: Host, T: ServiceTransport> Host for ServiceHost<H, T> {
                 .fail_stopped("waiting inside stopped native source service");
         }
         self.local.wait_for_interrupt();
+    }
+    fn poll_interrupt(&mut self) -> bool {
+        if self.source_service() {
+            self.transport
+                .fail_stopped("waiting inside stopped native source service");
+        }
+        self.local.poll_interrupt()
     }
     fn report(&mut self, event: &crate::machine::Event) {
         self.local.report(event);

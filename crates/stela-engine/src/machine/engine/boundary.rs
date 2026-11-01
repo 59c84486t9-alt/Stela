@@ -268,6 +268,11 @@ pub trait Host {
     fn arm_timer(&mut self, deadline: Option<u64>);
     /// Block until a host interrupt arrives.
     fn wait_for_interrupt(&mut self);
+    /// Take a pending host interrupt without blocking; whether one came
+    /// since the last look.
+    fn poll_interrupt(&mut self) -> bool {
+        false
+    }
     /// Progress events for the diagnostic log.
     fn report(&mut self, _event: &Event) {}
     /// The persistent translation store blocks are taken from and offered

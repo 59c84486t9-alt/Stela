@@ -831,6 +831,9 @@ pub struct Machine<H: Host, D: Devices> {
     slice_end: u64,
     /// The system counter value at which it ends, whichever comes first.
     slice_deadline: u64,
+    /// The host counts a waiting PE looks for a wake before it halts
+    /// ([`Self::poll_for_wake`]).
+    idle_poll: u64,
     /// The system counter the PEs observe (`clock`), where native count
     /// reads find it.
     clock: alloc::boxed::Box<clock::Clock>,
@@ -1022,6 +1025,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             unmodeled: Vec::new(),
             slice_end: processors::QUANTUM,
             slice_deadline: u64::MAX,
+            idle_poll: 0,
             clock: alloc::boxed::Box::default(),
             idle_skip: false,
             wait_limit: None,

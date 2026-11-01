@@ -567,6 +567,19 @@ impl Host for BareHost<'_> {
         unsafe { crate::native_idle::wait(budget) };
     }
 
+    fn poll_interrupt(&mut self) -> bool {
+        crate::native_mmio::shootdown::service();
+        crate::output::send_queued();
+        // SAFETY: as in the wait above: only the NOP's boundary takes a
+        // pending interrupt.
+        unsafe { asm!("sti", "nop", "cli", options(nomem, nostack)) };
+        let interrupted = local::interrupted();
+        if interrupted {
+            local::clear_interrupt();
+        }
+        interrupted
+    }
+
     fn report(&mut self, event: &stela_engine::machine::Event) {
         super::super::report(event);
     }

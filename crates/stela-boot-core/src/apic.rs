@@ -176,6 +176,12 @@ impl Apic {
 
     fn send(&self, destination: u32, command: u32, tsc_hz: u64) -> Result<(), StartupError> {
         self.wait_delivery(tsc_hz)?;
+        self.command(destination, command)?;
+        self.wait_delivery(tsc_hz)
+    }
+
+    /// Write the ICR, which the last command left idle.
+    fn command(&self, destination: u32, command: u32) -> Result<(), StartupError> {
         if self.x2 {
             // SAFETY: the local x2APIC ICR, with a physical destination and
             // an explicitly constructed command. A WRMSR to an x2APIC
@@ -194,7 +200,7 @@ impl Apic {
             self.write(ICR_HIGH, u32::from(destination) << 24);
             self.write(ICR_LOW, command);
         }
-        self.wait_delivery(tsc_hz)
+        Ok(())
     }
 
     pub fn validate_init(&self, destination: u32, tsc_hz: u64) -> Result<(), StartupError> {
@@ -264,8 +270,10 @@ impl Apic {
         self.send(destination, ICR_STARTUP | u32::from(vector), tsc_hz)
     }
 
-    /// Send one fixed physical doorbell. This acknowledges ICR delivery only,
-    /// never a returned native frame, stopped generation or controller effect.
+    /// Send one fixed physical doorbell, without waiting to see it delivered:
+    /// each ICR access traps to a VMM, and the next command's wait finds an
+    /// undelivered one. This acknowledges ICR acceptance only, never a
+    /// returned native frame, stopped generation or controller effect.
     ///
     /// # Safety
     /// The destination owns this reserved vector and a live private IDT/IST.
@@ -279,7 +287,8 @@ impl Apic {
         if vector < 32 || vector == u8::MAX {
             return Err(StartupError::InvalidVector);
         }
-        self.send(destination, u32::from(vector), tsc_hz)
+        self.wait_delivery(tsc_hz)?;
+        self.command(destination, u32::from(vector))
     }
 
     /// Mask the legacy PICs, enable the APIC with `spurious` as its
