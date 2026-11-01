@@ -54,6 +54,11 @@ fn directory() -> PathBuf {
     tools::root().join(".tools/gpu")
 }
 
+/// The generators' Python.
+pub fn python() -> String {
+    super::support::slashed(&directory().join("generators").join(VENV_PYTHON))
+}
+
 /// Meson's pkg-config. The wheel's launcher loses its output to whoever
 /// captures it, so Meson runs the program it wraps, which needs no system one.
 pub fn pkg_config() -> Result<String> {

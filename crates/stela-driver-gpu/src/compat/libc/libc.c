@@ -29,6 +29,7 @@
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
 #include <sys/syscall.h>
+#include <sys/sysinfo.h>
 #include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
@@ -730,6 +731,8 @@ long sysconf(int name)
 		return 4096;
 	case _SC_NPROCESSORS_ONLN:
 		return 1;
+	case _SC_PHYS_PAGES:
+		return (long)(stela_libc_memory_bytes() / 4096);
 	default:
 		errno = EINVAL;
 		return -1;
@@ -824,6 +827,8 @@ int open(const char *path, int flags, ...)
 
 int close(int fd)
 {
+	if (fd >= STELA_LIBC_FILE_BASE)
+		return checked(stela_libc_file_close(fd));
 	return checked(stela_libc_drm_close(fd));
 }
 
@@ -855,17 +860,8 @@ int ioctl(int fd, unsigned long request, ...)
 	return checked(stela_libc_drm_ioctl(fd, request, argument));
 }
 
-void *mmap(void *address, size_t size, int protection, int flags, int fd, off_t offset)
+static void *mapped_or_failed(void *mapped)
 {
-	(void)address;
-	(void)protection;
-	if (flags & MAP_ANONYMOUS) {
-		void *pointer = aligned_alloc(4096, size);
-		if (pointer)
-			memset(pointer, 0, size);
-		return pointer ? pointer : MAP_FAILED;
-	}
-	void *mapped = stela_libc_drm_mmap(fd, (uint64_t)offset, size);
 	if ((uintptr_t)mapped >= (uintptr_t)-4095) {
 		errno = -(int)(intptr_t)mapped;
 		return MAP_FAILED;
@@ -873,8 +869,37 @@ void *mmap(void *address, size_t size, int protection, int flags, int fd, off_t 
 	return mapped;
 }
 
+int memfd_create(const char *name, unsigned int flags)
+{
+	(void)name;
+	(void)flags;
+	return checked(stela_libc_file_create());
+}
+
+void *mmap(void *address, size_t size, int protection, int flags, int fd, off_t offset)
+{
+	if (protection & PROT_EXEC) {
+		errno = ENOTSUP;
+		return MAP_FAILED;
+	}
+	int anonymous = flags & MAP_ANONYMOUS;
+	if (flags & MAP_FIXED || (anonymous && flags & MAP_SHARED) || fd >= STELA_LIBC_FILE_BASE)
+		return mapped_or_failed(stela_libc_file_mmap(anonymous ? -1 : fd, (uint64_t)offset, size,
+							     flags & MAP_FIXED ? address : NULL));
+	if (anonymous) {
+		void *pointer = aligned_alloc(4096, size);
+		if (pointer)
+			memset(pointer, 0, size);
+		return pointer ? pointer : MAP_FAILED;
+	}
+	return mapped_or_failed(stela_libc_drm_mmap(fd, (uint64_t)offset, size));
+}
+
 int munmap(void *address, size_t size)
 {
+	int file = stela_libc_file_munmap(address, size);
+	if (file)
+		return file < 0 ? checked(file) : 0;
 	int mapped = stela_libc_drm_munmap(address, size);
 	if (mapped < 0)
 		return checked(mapped);
@@ -958,8 +983,8 @@ int mkstemps(char *path, int suffix)
 
 int ftruncate(int fd, off_t size)
 {
-	(void)fd;
-	(void)size;
+	if (fd >= STELA_LIBC_FILE_BASE)
+		return checked(stela_libc_file_resize(fd, (uint64_t)size));
 	return fail(EINVAL);
 }
 
@@ -1009,6 +1034,28 @@ int poll(struct pollfd *fds, nfds_t count, int timeout)
 	(void)timeout;
 	errno = ENOSYS;
 	return -1;
+}
+
+int ppoll(struct pollfd *fds, nfds_t count, const struct timespec *timeout, const sigset_t *mask)
+{
+	(void)fds;
+	(void)count;
+	(void)timeout;
+	(void)mask;
+	errno = ENOSYS;
+	return -1;
+}
+
+int sysinfo(struct sysinfo *info)
+{
+	memset(info, 0, sizeof(*info));
+	info->totalram = stela_libc_memory_bytes();
+	info->mem_unit = 1;
+	return 0;
+}
+
+void sync(void)
+{
 }
 
 int regcomp(regex_t *regex, const char *pattern, int flags)

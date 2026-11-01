@@ -99,7 +99,12 @@ impl Sysroot {
     }
 
     /// Meson's description of the machine, with `.pc` files in `packages`.
-    pub fn machine_file(&self, toolchain: &Toolchain, packages: &Path) -> Result<String> {
+    pub fn machine_file(
+        &self,
+        toolchain: &Toolchain,
+        packages: &Path,
+        llvm_config: &Path,
+    ) -> Result<String> {
         let list = |flags: &[String]| {
             flags
                 .iter()
@@ -125,6 +130,7 @@ impl Sysroot {
              rust = ['rustc', '--target', '{RUST_TARGET}', '-C', 'link-arg={TARGET}', \
              '-C', 'link-arg=--ld-path={linker}']\n\
              pkg-config = '{pkg_config}'\n\
+             llvm-config = ['{python}', '{llvm_config}']\n\
              [built-in options]\n\
              c_args = [{compile}]\n\
              cpp_args = [{compile_cxx}]\n\
@@ -148,6 +154,8 @@ impl Sysroot {
             ),
             linker = slashed(&toolchain.linker),
             pkg_config = super::toolchain::pkg_config()?,
+            python = super::toolchain::python(),
+            llvm_config = slashed(llvm_config),
             compile = list(&self.compile),
             compile_cxx = list(&self.compile_cxx),
             link = list(&link),

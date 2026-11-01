@@ -25,7 +25,7 @@ use super::{
     command_buffer::Segment,
     error::{Error, Result, ensure},
     vulkan::{
-        SampleCounts,
+        PhysicalDeviceType, SampleCounts,
         backend::{Backend, BufferAllocation, Descriptor, Object, Requirements, requirements},
         command::BufferImageCopy,
         object::{
@@ -77,9 +77,11 @@ pub struct InternalKernels {
 }
 
 /// A host mapping of a `VkDeviceMemory`.
-/// Memory the platform holds, as a dma-buf for the driver to import.
+/// Memory the platform holds, for the driver to import.
 pub trait MemoryExporter: Send {
-    /// A dma-buf of `ranges`, and a mapping of them for the host.
+    /// How the driver takes what [`Self::export`] makes.
+    fn import(&self) -> Import;
+    /// `ranges` for the driver, and a mapping of them for the host.
     fn export(&self, ranges: &[MemoryRange]) -> Result<ExportedMemory>;
     /// Undoes an export the driver did not import, which leaves it the
     /// descriptor.
@@ -89,8 +91,35 @@ pub trait MemoryExporter: Send {
     fn unmap(&self, exported: ExportedMemory);
 }
 
+/// How a driver takes memory a CPU reaches.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Import {
+    /// As a dma-buf: a GPU's driver maps it through its kernel driver.
+    DmaBuf,
+    /// As a host pointer: the driver runs on the host's processor.
+    HostPointer,
+}
+
+impl Import {
+    fn handle_type(self) -> vk::ExternalMemoryHandleTypeFlags {
+        match self {
+            Self::DmaBuf => vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT,
+            Self::HostPointer => vk::ExternalMemoryHandleTypeFlags::HOST_ALLOCATION_EXT,
+        }
+    }
+}
+
+/// Which Vulkan device a backend drives.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Target {
+    /// The GPU at this PCI address.
+    Pci(PciBusInfo),
+    /// The host's own processor.
+    Processor,
+}
+
 /// An export: `fd` is a dma-buf of `bytes`, which the host reaches at
-/// `pointer`.
+/// `pointer`. A host pointer needs no descriptor, and has `fd` -1.
 #[derive(Clone, Copy, Debug)]
 pub struct ExportedMemory {
     pub fd: i32,
@@ -133,6 +162,7 @@ struct ExtensionFns {
     mesh: Option<ext::mesh_shader::Device>,
     calibrated: Option<khr::calibrated_timestamps::Device>,
     external_memory_fd: Option<khr::external_memory_fd::Device>,
+    external_memory_host: Option<ext::external_memory_host::Device>,
     conditional: ext::conditional_rendering::Device,
     /// With the snapshot's `generated_commands` limits.
     generated: Option<generated::Fns>,
@@ -201,7 +231,7 @@ fn failure(result: vk::Result) -> Error {
 unsafe impl Send for NativeBackend {}
 
 impl NativeBackend {
-    /// Creates the instance and device for the GPU at `pci`.
+    /// Creates the instance and device for `target`.
     ///
     /// # Safety
     ///
@@ -210,7 +240,7 @@ impl NativeBackend {
     /// is given.
     pub unsafe fn new(
         loader: Loader,
-        pci: PciBusInfo,
+        target: Target,
         exporter: Box<dyn MemoryExporter>,
         kernels: impl FnOnce(vk::PhysicalDevice) -> Result<InternalKernels>,
     ) -> Result<Self> {
@@ -229,10 +259,10 @@ impl NativeBackend {
         // SAFETY: the instance was just created and nothing else uses it.
         let destroy_instance =
             |instance: &ash::Instance| unsafe { instance.destroy_instance(None) };
-        let selected = Self::select(&instance, pci);
+        let selected = Self::select(&instance, target);
         let Some((physical, extensions, snapshot, family)) = selected else {
             destroy_instance(&instance);
-            return Err(Error::Unsupported("Vulkan device at the GPU's PCI address"));
+            return Err(Error::Unsupported("Vulkan device for the target"));
         };
         if let Some(missing) = requirements(&snapshot.features)
             .iter()
@@ -241,9 +271,16 @@ impl NativeBackend {
             destroy_instance(&instance);
             return Err(Error::Unsupported(missing.name));
         }
-        if !snapshot.limits.dma_buf_import {
-            destroy_instance(&instance);
-            return Err(Error::Unsupported("VK_EXT_external_memory_dma_buf"));
+        match exporter.import() {
+            Import::DmaBuf if !snapshot.limits.dma_buf_import => {
+                destroy_instance(&instance);
+                return Err(Error::Unsupported("VK_EXT_external_memory_dma_buf"));
+            }
+            Import::HostPointer if !snapshot.limits.host_pointer_import => {
+                destroy_instance(&instance);
+                return Err(Error::Unsupported("VK_EXT_external_memory_host"));
+            }
+            _ => {}
         }
 
         let mut features = FeatureChain::new(&extensions, false);
@@ -284,6 +321,8 @@ impl NativeBackend {
                 .then(|| khr::calibrated_timestamps::Device::new(&instance, &device)),
             external_memory_fd: has(khr::external_memory_fd::NAME)
                 .then(|| khr::external_memory_fd::Device::new(&instance, &device)),
+            external_memory_host: has(ext::external_memory_host::NAME)
+                .then(|| ext::external_memory_host::Device::new(&instance, &device)),
             // A requirement: the device was refused without it.
             conditional: ext::conditional_rendering::Device::new(&instance, &device),
             generated: features
@@ -344,11 +383,11 @@ impl NativeBackend {
         Ok(backend)
     }
 
-    /// The device at `pci` with a universal queue family, its supported
+    /// The device of `target` with a universal queue family, its supported
     /// extensions, its snapshot and the family.
     fn select(
         instance: &ash::Instance,
-        pci: PciBusInfo,
+        target: Target,
     ) -> Option<(vk::PhysicalDevice, Extensions, PhysicalDevice, u32)> {
         // SAFETY: the instance is valid.
         let devices = unsafe { instance.enumerate_physical_devices() }.ok()?;
@@ -358,7 +397,11 @@ impl NativeBackend {
                 unsafe { instance.enumerate_device_extension_properties(physical) }.ok()?;
             let extensions = Extensions::of(&available);
             let snapshot = physical::probe(instance, physical, &extensions)?;
-            if snapshot.identity.pci_bus != Some(pci) {
+            let wanted = match target {
+                Target::Pci(pci) => snapshot.identity.pci_bus == Some(pci),
+                Target::Processor => snapshot.identity.device_type == PhysicalDeviceType::Cpu,
+            };
+            if !wanted {
                 return None;
             }
             // SAFETY: as above.
@@ -762,29 +805,57 @@ impl Backend for NativeBackend {
     }
 
     fn import_memory(&mut self, ranges: &[MemoryRange], token: NonZeroU64) -> Result<Memory> {
-        let fns = self
-            .fns
-            .external_memory_fd
-            .as_ref()
-            .ok_or(Error::Unsupported("memory import"))?;
-        let handle_type = vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT;
+        let import = self.exporter.import();
+        let handle_type = import.handle_type();
         let exported = self.exporter.export(ranges)?;
-        let mut properties = vk::MemoryFdPropertiesKHR::default();
-        // SAFETY: the descriptor is the dma-buf just exported.
-        let queried =
-            unsafe { fns.get_memory_fd_properties(handle_type, exported.fd, &mut properties) };
+        let bits = match import {
+            Import::DmaBuf => self
+                .fns
+                .external_memory_fd
+                .as_ref()
+                .ok_or(Error::Unsupported("memory import"))
+                .and_then(|fns| {
+                    let mut properties = vk::MemoryFdPropertiesKHR::default();
+                    // SAFETY: the descriptor is the dma-buf just exported.
+                    unsafe {
+                        fns.get_memory_fd_properties(handle_type, exported.fd, &mut properties)
+                    }
+                    .map_err(failure)?;
+                    Ok(properties.memory_type_bits)
+                }),
+            Import::HostPointer => self
+                .fns
+                .external_memory_host
+                .as_ref()
+                .ok_or(Error::Unsupported("memory import"))
+                .and_then(|fns| {
+                    let mut properties = vk::MemoryHostPointerPropertiesEXT::default();
+                    // SAFETY: the mapping was just exported and lasts until
+                    // its memory is freed.
+                    unsafe {
+                        (fns.fp().get_memory_host_pointer_properties_ext)(
+                            fns.device(),
+                            handle_type,
+                            exported.pointer.as_ptr().cast(),
+                            &mut properties,
+                        )
+                    }
+                    .result()
+                    .map_err(failure)?;
+                    Ok(properties.memory_type_bits)
+                }),
+        };
         let request = MemoryRequest {
             required: super::vulkan::MemoryProperties::EMPTY,
             preferred: super::vulkan::MemoryProperties::HOST_COHERENT,
             mapped: false,
         };
-        let index =
-            objects::memory_candidates(&self.snapshot.memory, properties.memory_type_bits, request)
+        let imported = bits.and_then(|bits| {
+            objects::memory_candidates(&self.snapshot.memory, bits, request)
                 .first()
-                .copied();
-        let imported = queried
-            .map_err(failure)
-            .and_then(|()| index.ok_or(Error::Unsupported("a memory type of imported memory")));
+                .copied()
+                .ok_or(Error::Unsupported("a memory type of imported memory"))
+        });
         let index = match imported {
             Ok(index) => index,
             Err(error) => {
@@ -792,16 +863,22 @@ impl Backend for NativeBackend {
                 return Err(error);
             }
         };
-        let mut import = vk::ImportMemoryFdInfoKHR::default()
+        let mut from_fd = vk::ImportMemoryFdInfoKHR::default()
             .handle_type(handle_type)
             .fd(exported.fd);
+        let mut from_host = vk::ImportMemoryHostPointerInfoEXT::default()
+            .handle_type(handle_type)
+            .host_pointer(exported.pointer.as_ptr().cast());
         let mut flags =
             vk::MemoryAllocateFlagsInfo::default().flags(vk::MemoryAllocateFlags::DEVICE_ADDRESS);
         let allocate = vk::MemoryAllocateInfo::default()
             .allocation_size(exported.bytes)
             .memory_type_index(index)
-            .push_next(&mut import)
             .push_next(&mut flags);
+        let allocate = match import {
+            Import::DmaBuf => allocate.push_next(&mut from_fd),
+            Import::HostPointer => allocate.push_next(&mut from_host),
+        };
         // SAFETY: the allocate info and its chain outlive the call.
         let memory = match unsafe { self.device.allocate_memory(&allocate, None) } {
             Ok(memory) => memory,
@@ -843,7 +920,7 @@ impl Backend for NativeBackend {
             unsafe { self.device.create_buffer(create, None) }.map_err(failure)
         };
         let buffer = if self.imports.contains_key(&memory.0) {
-            objects::imported_buffer(info, create)
+            objects::imported_buffer(info, self.exporter.import().handle_type(), create)
         } else {
             objects::buffer(info, create)
         }?;

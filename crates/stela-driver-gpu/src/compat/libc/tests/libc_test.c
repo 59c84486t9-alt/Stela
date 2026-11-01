@@ -209,6 +209,28 @@ static void test_unmap_refusal(void)
 	CHECK(!munmap(mapping, 4096) && live_blocks == before);
 }
 
+static void test_anonymous_files(void)
+{
+	extern int file_mapped_fd;
+	extern void *file_mapped_address;
+	extern uint64_t file_bytes;
+	void *place = (void *)0x2000;
+	int file = memfd_create("test", MFD_CLOEXEC);
+	CHECK(file >= STELA_LIBC_FILE_BASE);
+	CHECK(!ftruncate(file, 8192) && file_bytes == 8192);
+	void *mapping = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, file, 0);
+	CHECK(mapping == (void *)0x1000 && file_mapped_fd == file && !file_mapped_address);
+	CHECK(!munmap(mapping, 4096));
+	/* Addresses that are bound later are the file layer's, not the heap's. */
+	CHECK(mmap(NULL, 4096, PROT_READ, MAP_SHARED | MAP_ANONYMOUS, -1, 0) == (void *)0x1000);
+	CHECK(file_mapped_fd == -1);
+	CHECK(mmap(place, 4096, PROT_READ, MAP_SHARED | MAP_FIXED, file, 0) == place);
+	CHECK(file_mapped_fd == file && file_mapped_address == place);
+	CHECK(mmap(place, 4096, PROT_READ, MAP_SHARED | MAP_FIXED | MAP_ANONYMOUS, -1, 0) == place);
+	CHECK(file_mapped_fd == -1 && file_mapped_address == place);
+	CHECK(!close(file));
+}
+
 static void test_refusals(void)
 {
 	struct pollfd file = { .fd = 0, .events = POLLIN };
@@ -612,6 +634,7 @@ int main(void)
 	test_strings();
 	test_allocation();
 	test_unmap_refusal();
+	test_anonymous_files();
 	test_refusals();
 	test_division();
 	test_system();

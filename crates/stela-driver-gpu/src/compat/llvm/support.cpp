@@ -99,12 +99,14 @@ Error irsymtab::build(ArrayRef<Module *>, SmallVector<char, 0> &, StringTableBui
 	return createStringError(errc::not_supported, "the image writes no symbol tables");
 }
 
+#ifdef STELA_LLVM_AIR_ONLY
 /* The writer asks this only of a module with assembly. */
 const Target *TargetRegistry::lookupTarget(const Triple &, std::string &error)
 {
-	error = "the image has no targets";
+	error = "the program has no targets";
 	return nullptr;
 }
+#endif
 
 Expected<std::unique_ptr<InstrProfReader>>
 InstrProfReader::create(const Twine &, vfs::FileSystem &, const InstrProfCorrelator *,

@@ -60,6 +60,12 @@ pub fn leaf(physical: u64, cache: Cache) -> u64 {
     physical | PRESENT | WRITABLE | NO_EXECUTE | ACCESSED_DIRTY | attribute
 }
 
+/// The leaf that maps `physical` write-back, writable and executable: generated
+/// code, which its generator writes in place.
+pub fn code_leaf(physical: u64) -> u64 {
+    leaf(physical, Cache::WriteBack) & !NO_EXECUTE
+}
+
 /// The cache attribute of a page Linux's page protection `prot` asks for, in
 /// the PWT and PCD bits its `pgprot_writecombine` and `pgprot_noncached` set.
 pub fn cache_of(prot: u64) -> Cache {
@@ -166,6 +172,13 @@ mod tests {
             value & (PRESENT | WRITABLE | NO_EXECUTE),
             PRESENT | WRITABLE | NO_EXECUTE
         );
+    }
+
+    #[test]
+    fn only_code_leaves_run() {
+        let code = code_leaf(0x7000);
+        assert_eq!(code & NO_EXECUTE, 0);
+        assert_eq!(code | NO_EXECUTE, leaf(0x7000, Cache::WriteBack));
     }
 
     #[test]

@@ -5,7 +5,15 @@
 #define LLVM_DEFAULT_TARGET_TRIPLE "arm64-apple-macosx"
 #define LLVM_ENABLE_THREADS 0
 #define LLVM_HAS_ATOMICS 1
-#define LLVM_HOST_TRIPLE "x86_64-unknown-uefi"
+/* The image's C calling convention, in the object format MCJIT loads. */
+#define LLVM_HOST_TRIPLE "x86_64-pc-win32-elf"
+#define LLVM_NATIVE_ARCH X86
+#define LLVM_NATIVE_ASMPRINTER LLVMInitializeX86AsmPrinter
+#define LLVM_NATIVE_DISASSEMBLER LLVMInitializeX86Disassembler
+#define LLVM_NATIVE_TARGET LLVMInitializeX86Target
+#define LLVM_NATIVE_TARGETINFO LLVMInitializeX86TargetInfo
+#define LLVM_NATIVE_TARGETMC LLVMInitializeX86TargetMC
+#define LLVM_HAS_X86_TARGET 1
 #ifndef _WIN32
 #define LLVM_ON_UNIX 1
 #define HAVE_SYSEXITS_H 1

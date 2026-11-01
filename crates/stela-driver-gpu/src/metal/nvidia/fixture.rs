@@ -217,6 +217,7 @@ fn limits() -> Limits {
             pipeline_stages: ShaderStages::KNOWN.difference(ShaderStages::GEOMETRY),
         }),
         dma_buf_import: true,
+        host_pointer_import: false,
         sparse: SparseLimits {
             residency_standard_2d_block_shape: true,
             residency_standard_2d_multisample_block_shape: true,

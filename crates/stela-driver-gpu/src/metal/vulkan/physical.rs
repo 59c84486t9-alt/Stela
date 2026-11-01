@@ -139,6 +139,9 @@ pub struct Limits {
     /// `VK_EXT_external_memory_dma_buf`, by which what a CPU reaches enters
     /// the device.
     pub dma_buf_import: bool,
+    /// `VK_EXT_external_memory_host`, by which a driver that runs on the
+    /// host's processor takes the same memory.
+    pub host_pointer_import: bool,
     /// `VkPhysicalDeviceSparseProperties`.
     pub sparse: SparseLimits,
 }

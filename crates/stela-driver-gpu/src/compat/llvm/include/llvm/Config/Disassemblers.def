@@ -1,3 +1,4 @@
 /* SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception */
-/* No targets: Stela reads and legalizes IR, and emits nothing with LLVM. */
+/* The JIT's target, as llvmpipe draws on this machine. */
+LLVM_DISASSEMBLER(X86)
 #undef LLVM_DISASSEMBLER

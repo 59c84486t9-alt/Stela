@@ -1,6 +1,7 @@
-# Shared NIR and the AMD, Intel and NVIDIA shader compilers with their command,
-# surface and sampler support. Other vendors' drivers, window systems and CI
-# are left out; directories Mesa's Meson build names unconditionally stay.
+# Shared NIR, the AMD, Intel and NVIDIA shader compilers with their command,
+# surface and sampler support, and lavapipe with llvmpipe. Other vendors' drivers,
+# window systems and CI are left out; directories Mesa's Meson build names
+# unconditionally stay.
 /*
 !/.gitlab-ci/
 !/.github/
@@ -20,6 +21,7 @@
 !/src/egl/
 !/src/gbm/
 !/src/glx/
+/src/glx/libgl-symbols.txt
 !/src/drm-shim/
 !/src/imgui/
 !/src/gallium/drivers/vc4/
@@ -31,7 +33,6 @@
 !/src/gallium/drivers/tegra/
 !/src/gallium/drivers/svga/
 !/src/gallium/drivers/d3d12/
-!/src/gallium/drivers/zink/
 !/src/gallium/drivers/panfrost/
 !/src/gallium/drivers/ethosu/
 !/src/gallium/drivers/rocket/
@@ -39,7 +40,6 @@
 !/src/gallium/drivers/softpipe/
 !/src/gallium/winsys/vc4/
 !/src/gallium/winsys/lima/
-!/src/gallium/winsys/sw/
 !/src/gallium/winsys/etnaviv/
 !/src/gallium/winsys/virgl/
 !/src/gallium/winsys/freedreno/
@@ -55,8 +55,7 @@
 !/src/gallium/winsys/v3d/
 !/src/gallium/winsys/radeon/
 !/src/gallium/targets/
-!/src/gallium/auxiliary/pipe-loader/
-!/src/gallium/auxiliary/target-helpers/
+/src/gallium/targets/lavapipe/
 !/src/amd/ci/
 !/src/intel/ci/
 !/src/nouveau/ci/

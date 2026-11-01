@@ -507,6 +507,21 @@ FILE *fdopen(int fd, const char *mode)
 	return NULL;
 }
 
+FILE *popen(const char *command, const char *mode)
+{
+	(void)command;
+	(void)mode;
+	errno = ENOSYS;
+	return NULL;
+}
+
+int pclose(FILE *file)
+{
+	(void)file;
+	errno = EBADF;
+	return -1;
+}
+
 size_t fread(void *buffer, size_t size, size_t count, FILE *file)
 {
 	(void)buffer;

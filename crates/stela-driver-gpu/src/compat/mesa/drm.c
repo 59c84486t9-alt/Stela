@@ -159,6 +159,12 @@ static drmDevicePtr device_at(unsigned int index)
 	return &block->device;
 }
 
+char *drmGetDeviceNameFromFd2(int fd)
+{
+	(void)fd;
+	return NULL;
+}
+
 int drmGetDevices2(uint32_t flags, drmDevicePtr devices[], int max)
 {
 	(void)flags;

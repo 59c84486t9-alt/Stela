@@ -214,6 +214,7 @@ raw_enum! {
     pub enum DriverId: u32 {
         MesaRadv = 3,
         IntelOpenSourceMesa = 6,
+        MesaLlvmpipe = 13,
         MesaVenus = 22,
         MesaNvk = 24,
     }

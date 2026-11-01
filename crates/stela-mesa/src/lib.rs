@@ -1,8 +1,9 @@
-//! NVK, NIR and NAK, linked into `stela.efi` (`docs/design/metal-device.md`).
+//! NVK, lavapipe, NIR and NAK, linked into `stela.efi`
+//! (`docs/design/metal-device.md`).
 //!
 //! The C is the archive `cargo xtask gpu nvk` builds; the Rust is NAK and NIL
-//! as dependencies of this crate. Nothing but the driver's loader entry and the
-//! start of the C is called from here: Mesa reaches its host through
+//! as dependencies of this crate. Nothing but the drivers' loader entries and
+//! the start of the C is called from here: Mesa reaches its host through
 //! `compat/libc`, and the Metal compiler is `metal::compiler`'s.
 #![no_std]
 
@@ -14,6 +15,11 @@ use core::ffi::{c_char, c_void};
 unsafe extern "system" {
     /// The Vulkan loader-ICD entry of NVK.
     pub fn vk_icdGetInstanceProcAddr(instance: *mut c_void, name: *const c_char) -> *const c_void;
+    /// The Vulkan loader-ICD entry of lavapipe, renamed by `xtask gpu nvk`.
+    pub fn lvp_vk_icdGetInstanceProcAddr(
+        instance: *mut c_void,
+        name: *const c_char,
+    ) -> *const c_void;
 }
 
 unsafe extern "C" {

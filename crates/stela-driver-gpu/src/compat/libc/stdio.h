@@ -39,6 +39,8 @@ int fputc(int c, FILE *file);
 /* There are no files: these fail as a missing file does. */
 FILE *fopen(const char *path, const char *mode);
 FILE *fdopen(int fd, const char *mode);
+FILE *popen(const char *command, const char *mode);
+int pclose(FILE *file);
 FILE *open_memstream(char **buffer, size_t *size);
 int fclose(FILE *file);
 size_t fread(void *buffer, size_t size, size_t count, FILE *file);

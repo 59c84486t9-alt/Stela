@@ -156,6 +156,17 @@ impl Window {
         true
     }
 
+    /// Map `physical` at the reserved, empty `address`, to run from.
+    pub(crate) fn install_code(&self, address: u64, physical: u64) -> bool {
+        let mut guard = self.lock();
+        let Some(leaf) = self.leaf(guard.state(), address) else {
+            return false;
+        };
+        // SAFETY: a leaf this window owns, under its lock.
+        unsafe { leaf.write_volatile(page_window::code_leaf(physical)) };
+        true
+    }
+
     /// Unmap `count` reserved pages at `address`, whether installed or not.
     /// False when a processor may still translate through them, which leaves
     /// the caller holding their reservation for good.

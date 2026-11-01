@@ -1110,6 +1110,14 @@ fn open_gpus(
         return false;
     };
     let Some(mmio) = mmio else { return false };
+    #[cfg(feature = "nvk")]
+    let heap_bytes = heap.end - heap.start;
+    // A PC with an NVIDIA GPU uses it or says why not; only one with none draws
+    // in software.
+    let software = cfg!(feature = "nvk")
+        && !adapters
+            .iter()
+            .any(|adapter| adapter.vendor == stela_drivers::gpu::Vendor::Nvidia);
     crate::status::begin("Starting the GPU");
     let claimed = work.call_owned(60_000_000, move || {
         let services = services::Services::new(mmio, remappers, None, heap, tsc_hz, Vec::new());
@@ -1121,7 +1129,7 @@ fn open_gpus(
         (gpu::claim_all(&services, &adapters), random)
     });
     let (claimed, random) = match claimed {
-        Ok((claimed, Some(random))) if !claimed.is_empty() => (claimed, random),
+        Ok((claimed, Some(random))) if software || !claimed.is_empty() => (claimed, random),
         Ok(_) => {
             crate::status::warn("no GPU to start");
             return false;
@@ -1137,6 +1145,8 @@ fn open_gpus(
         firmware: firmware.clone(),
         random,
         tsc_hz,
+        #[cfg(feature = "nvk")]
+        heap_bytes,
     };
     match gpu::open(machine, claimed) {
         Ok(()) => {
@@ -1836,9 +1846,9 @@ fn install_host(handoff: &'static Handoff, options: &Options, ram: &[RamRange]) 
     }
     #[cfg(feature = "diagnostics")]
     if options.native_mmio_check {
-        // SAFETY: this explicit UP entry owns its separately reserved mixed32
-        // diagnostic pool. It retires every view before the MMIO phases and
-        // never activates a second permission or publishes a service.
+        // SAFETY: this explicit UP entry owns the task pool for the boot it
+        // stops. It retires every view before the MMIO phases and never
+        // activates a second permission or publishes a service.
         unsafe { kernel_work::check_mixed(handoff, &mut host_owner) }.unwrap_or_else(|error| {
             output::arguments(format_args!("CHECK native-mixed32 FAIL {error}\n"));
             output::fatal("mixed32 native stack qualification failed")
@@ -1923,7 +1933,7 @@ fn start_platform(handoff: &'static Handoff, host_owner: &mut host::HostOwner) -
         Ok(work) => {
             #[cfg(feature = "diagnostics")]
             output::arguments(format_args!(
-                "NATIVE WORK owned stacks=16 foreground=verified services=unpublished\n"
+                "NATIVE WORK owned stacks=32 foreground=verified services=unpublished\n"
             ));
             Some(&*alloc::boxed::Box::leak(alloc::boxed::Box::new(work)))
         }

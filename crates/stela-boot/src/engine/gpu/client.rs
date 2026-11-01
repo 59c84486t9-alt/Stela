@@ -28,7 +28,7 @@ use core::{
     hint,
     ptr::{self, NonNull},
     slice, str,
-    sync::atomic::{AtomicBool, AtomicI64, AtomicPtr, AtomicUsize, Ordering, fence},
+    sync::atomic::{AtomicBool, AtomicI64, AtomicPtr, Ordering, fence},
 };
 use stela_boot_core::page_window::Cache;
 use stela_drivers::{
@@ -118,8 +118,14 @@ pub(super) struct Running {
     task: u64,
 }
 
-/// Threads asleep in `stela_libc_wait`.
-static SLEEPING: AtomicUsize = AtomicUsize::new(0);
+/// `STELA_LIBC_PROCESSORS` and `STELA_LIBC_THREADS`: a thread's core is past
+/// the processors'.
+const PROCESSORS: usize = 256;
+const THREADS: usize = 16;
+/// The word each thread is asleep on in `stela_libc_wait`. Every unlock wakes
+/// its word, so one nobody sleeps on must cost no call into Linux.
+static SLEEPING: [AtomicPtr<c_uint>; THREADS] =
+    [const { AtomicPtr::new(ptr::null_mut()) }; THREADS];
 
 unsafe extern "C" fn run_thread(context: *mut c_void) {
     // SAFETY: `perform` gave this task the box.
@@ -173,6 +179,18 @@ fn post(request: &Request) {
 
 /// A dma-buf of `runs` and the host's mapping of them, for the GPU's service.
 pub(super) fn export(runs: &[client::Run]) -> Option<(c_int, NonNull<u8>)> {
+    let address = map_runs(runs)?;
+    let fd = submit(Operation::Export(runs.as_ptr(), runs.len()));
+    let Ok(fd) = c_int::try_from(fd).and_then(|fd| u32::try_from(fd).map(|_| fd)) else {
+        let bytes = runs.iter().map(|run| run.bytes).sum();
+        unmap_export(address.as_ptr() as u64, bytes);
+        return None;
+    };
+    Some((fd, address))
+}
+
+/// The host's mapping of `runs`, in one piece.
+pub(super) fn map_runs(runs: &[client::Run]) -> Option<NonNull<u8>> {
     let gpu = installed()?;
     let pages: u64 = runs.iter().map(|run| run.bytes / PAGE).sum();
     let address = gpu.window.reserve(pages as usize)?;
@@ -189,12 +207,7 @@ pub(super) fn export(runs: &[client::Run]) -> Option<(c_int, NonNull<u8>)> {
             next += PAGE;
         }
     }
-    let fd = submit(Operation::Export(runs.as_ptr(), runs.len()));
-    let Ok(fd) = c_int::try_from(fd).and_then(|fd| u32::try_from(fd).map(|_| fd)) else {
-        unmap_export(address, pages * PAGE);
-        return None;
-    };
-    NonNull::new(address as *mut u8).map(|pointer| (fd, pointer))
+    NonNull::new(address as *mut u8)
 }
 
 /// Ends the host's mapping of an export.
@@ -513,6 +526,11 @@ unsafe extern "C" fn stela_libc_fatal(message: *const c_char) -> ! {
 }
 
 #[unsafe(no_mangle)]
+extern "C" fn stela_libc_memory_bytes() -> u64 {
+    installed().map_or(0, |gpu| gpu.heap_bytes)
+}
+
+#[unsafe(no_mangle)]
 extern "C" fn stela_libc_now_ns() -> u64 {
     installed().map_or(0, |gpu| nanoseconds(host::rdtsc(), gpu.tsc_hz))
 }
@@ -550,7 +568,8 @@ unsafe extern "C" fn stela_libc_wait(word: *const c_uint, value: c_uint, deadlin
         }
         return hint::spin_loop();
     };
-    SLEEPING.fetch_add(1, Ordering::SeqCst);
+    let sleeping = &SLEEPING[thread.core as usize - PROCESSORS];
+    sleeping.store(word.cast_mut(), Ordering::SeqCst);
     let left = match deadline {
         u64::MAX => u64::MAX,
         _ => deadline.saturating_sub(nanoseconds(host::rdtsc(), gpu.tsc_hz)),
@@ -563,14 +582,15 @@ unsafe extern "C" fn stela_libc_wait(word: *const c_uint, value: c_uint, deadlin
     };
     // SAFETY: the task runs nothing else below its thread's frame.
     unsafe { stack::on_stack(thread.task, &mut sleep) };
-    SLEEPING.fetch_sub(1, Ordering::SeqCst);
+    sleeping.store(ptr::null_mut(), Ordering::SeqCst);
 }
 
 #[unsafe(no_mangle)]
-extern "C" fn stela_libc_wake(_word: *const c_uint) {
-    // Against a sleeper's count before it reads the word.
+extern "C" fn stela_libc_wake(word: *const c_uint) {
+    // Against a sleeper's mark before it reads the word.
     fence(Ordering::SeqCst);
-    if SLEEPING.load(Ordering::SeqCst) != 0 {
+    let asleep = |slot: &AtomicPtr<c_uint>| slot.load(Ordering::SeqCst).cast_const() == word;
+    if SLEEPING.iter().any(asleep) {
         submit(Operation::Wake);
     }
 }

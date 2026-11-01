@@ -1,7 +1,8 @@
-# LLVM as the AIR compiler links it in stela.efi, its build and libc++.
+# LLVM as the AIR compiler and llvmpipe link it in stela.efi, its build and libc++.
 /llvm/include/
 /llvm/lib/
 !/llvm/lib/Target/*/
+/llvm/lib/Target/X86/
 /llvm/utils/TableGen/
 /llvm/cmake/
 /llvm/CMakeLists.txt

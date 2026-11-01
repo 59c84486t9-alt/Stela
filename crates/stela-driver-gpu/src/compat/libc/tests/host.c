@@ -99,6 +99,11 @@ _Noreturn void stela_libc_fatal(const char *message)
 	__builtin_unreachable();
 }
 
+uint64_t stela_libc_memory_bytes(void)
+{
+	return 1ull << 32;
+}
+
 uint64_t stela_libc_now_ns(void)
 {
 	struct {
@@ -185,6 +190,42 @@ void *stela_libc_drm_mmap(int fd, uint64_t offset, size_t size)
 	(void)offset;
 	(void)size;
 	return (void *)-ENODEV;
+}
+
+/* One anonymous file, whose calls a test reads back. */
+int file_mapped_fd;
+void *file_mapped_address;
+uint64_t file_bytes;
+
+int stela_libc_file_create(void)
+{
+	return STELA_LIBC_FILE_BASE;
+}
+
+int stela_libc_file_close(int fd)
+{
+	return fd == STELA_LIBC_FILE_BASE ? 0 : -EBADF;
+}
+
+int stela_libc_file_resize(int fd, uint64_t size)
+{
+	file_bytes = size;
+	return fd == STELA_LIBC_FILE_BASE ? 0 : -EBADF;
+}
+
+void *stela_libc_file_mmap(int fd, uint64_t offset, size_t size, void *address)
+{
+	(void)offset;
+	(void)size;
+	file_mapped_fd = fd;
+	file_mapped_address = address;
+	return address ? address : (void *)0x1000;
+}
+
+int stela_libc_file_munmap(void *address, size_t size)
+{
+	(void)size;
+	return address == (void *)0x1000;
 }
 
 /* Inject the real host ABI's recognized-mapping result without freeing the

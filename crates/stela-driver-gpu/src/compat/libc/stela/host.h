@@ -15,6 +15,8 @@ void stela_libc_log(const char *text, size_t size);
 _Noreturn void stela_libc_fatal(const char *message);
 /* Monotonic nanoseconds. */
 uint64_t stela_libc_now_ns(void);
+/* The bytes this image can allocate. */
+uint64_t stela_libc_memory_bytes(void);
 /* This host processor or Mesa thread, below STELA_LIBC_CORES. */
 unsigned int stela_libc_core(void);
 #define STELA_LIBC_PROCESSORS 256
@@ -46,6 +48,18 @@ void *stela_libc_drm_mmap(int fd, uint64_t offset, size_t size);
 /* 0: not a DRM mapping; +1: DRM unmap completed; negative errno: recognized
  * DRM mapping remains owned/mapped because cleanup failed. */
 int stela_libc_drm_munmap(void *address, size_t size);
+/* Anonymous files, on descriptors from STELA_LIBC_FILE_BASE. These return a
+ * negative errno on failure, and the mappings share the file's pages. */
+#define STELA_LIBC_FILE_BASE (1 << 24)
+int stela_libc_file_create(void);
+int stela_libc_file_close(int fd);
+int stela_libc_file_resize(int fd, uint64_t size);
+/* A pointer, or a negative errno. With no `address`, new addresses for the
+ * file's pages, or for fresh zeroed ones when `fd` is negative. With one, those
+ * pages replace what is at `address`, which lies inside such a mapping. */
+void *stela_libc_file_mmap(int fd, uint64_t offset, size_t size, void *address);
+/* As stela_libc_drm_munmap, for these mappings. */
+int stela_libc_file_munmap(void *address, size_t size);
 /* The render nodes' count, and one's PCI location and IDs. */
 unsigned int stela_libc_drm_devices(void);
 struct stela_libc_drm_device {

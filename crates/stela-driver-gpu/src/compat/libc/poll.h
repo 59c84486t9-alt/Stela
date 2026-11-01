@@ -3,6 +3,8 @@
 #define STELA_LIBC_POLL_H
 #include <sys/cdefs.h>
 __BEGIN_DECLS
+#include <signal.h>
+#include <time.h>
 struct pollfd {
 	int fd;
 	short events;
@@ -15,5 +17,6 @@ typedef unsigned long nfds_t;
 #define POLLHUP 16
 #define POLLNVAL 32
 int poll(struct pollfd *fds, nfds_t count, int timeout);
+int ppoll(struct pollfd *fds, nfds_t count, const struct timespec *timeout, const sigset_t *mask);
 __END_DECLS
 #endif

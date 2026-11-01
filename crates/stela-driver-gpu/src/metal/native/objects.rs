@@ -188,14 +188,13 @@ pub(super) fn buffer<T>(
     build(&create)
 }
 
-/// A buffer whose memory is imported host memory.
-/// A buffer of memory imported as a dma-buf.
+/// A buffer of memory imported as `handle_type`.
 pub(super) fn imported_buffer<T>(
     info: &BufferInfo,
+    handle_type: vk::ExternalMemoryHandleTypeFlags,
     build: impl FnOnce(&vk::BufferCreateInfo<'_>) -> Result<T>,
 ) -> Result<T> {
-    let mut external = vk::ExternalMemoryBufferCreateInfo::default()
-        .handle_types(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT);
+    let mut external = vk::ExternalMemoryBufferCreateInfo::default().handle_types(handle_type);
     buffer(info, |create| build(&create.push_next(&mut external)))
 }
 

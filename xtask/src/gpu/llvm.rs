@@ -1,12 +1,14 @@
 //! LLVM for `stela.efi`: the AIR compiler's bitcode reader and writer,
-//! verifier, linker and passes, unpatched, over libc++ and `compat/libc`.
+//! verifier, linker and passes, and the x86 code generator and JIT llvmpipe
+//! draws with, unpatched, over libc++ and `compat/libc`.
 //!
 //! LLVM's CMake only states what these steps state here, and the build host
 //! need not have it. `llvm-min-tblgen` builds natively and generates what
-//! `include/llvm` lacks and each library compiles for the boot image's C
-//! target. The image's linker resolves every archive member it pulls before it
-//! discards any, so [`SKIPPED`] cuts what would reach past the AIR compiler's
-//! needs at its root, and `compat/llvm` answers what is left of those units.
+//! `include/llvm` lacks, `llvm-tblgen` generates the x86 target's tables from
+//! that, and each library compiles for the boot image's C target. The image's
+//! linker resolves every archive member it pulls before it discards any, so
+//! [`SKIPPED`] cuts what would reach past those needs at its root, and
+//! `compat/llvm` answers what is left of those units.
 use super::{
     nvidia::Toolchain,
     nvk::{
@@ -32,10 +34,20 @@ const TOOL_SOURCES: [&str; 5] = [
 ];
 /// Of `utils/TableGen`, only the small tool's own unit.
 const TOOL_MAIN: &str = "llvm-min-tblgen.cpp";
+/// What `llvm-tblgen` adds to the small tool's libraries, under `llvm/`, with
+/// every unit of `utils/TableGen` but the small tool's own.
+const FULL_TOOL_SOURCES: [&str; 4] = [
+    "lib/CodeGenTypes",
+    "utils/TableGen/Common",
+    "utils/TableGen/Common/GlobalISel",
+    "utils/TableGen/Common/GlobalISel/MatchTable",
+];
 /// The `include/llvm` directories whose `CMakeLists.txt` names generated files.
 const GENERATED: [&str; 4] = ["IR", "Analysis", "CodeGen", "TargetParser"];
+/// The JIT's target, under `llvm/lib/Target`.
+const TARGET: &str = "X86";
 /// Every source file of these libraries, under `llvm/lib`.
-const LIBRARIES: [&str; 12] = [
+const AIR_LIBRARIES: [&str; 12] = [
     "Support",
     "Demangle",
     "BinaryFormat",
@@ -48,6 +60,42 @@ const LIBRARIES: [&str; 12] = [
     "Analysis",
     "Transforms/Utils",
     "ProfileData",
+];
+/// What the JIT and its code generator add to [`AIR_LIBRARIES`].
+const JIT_LIBRARIES: [&str; 33] = [
+    "CGData",
+    "CodeGen",
+    "CodeGen/AsmPrinter",
+    "CodeGen/GlobalISel",
+    "CodeGen/LiveDebugValues",
+    "CodeGen/SelectionDAG",
+    "CodeGenTypes",
+    "DebugInfo/CodeView",
+    "DebugInfo/DWARF",
+    "DebugInfo/DWARF/LowLevel",
+    "ExecutionEngine",
+    "ExecutionEngine/MCJIT",
+    "ExecutionEngine/RuntimeDyld",
+    "IRPrinter",
+    "MC",
+    "MC/MCDisassembler",
+    "MC/MCParser",
+    "Object",
+    "Target",
+    "Target/X86",
+    "Target/X86/Disassembler",
+    "Target/X86/GISel",
+    "Target/X86/MCTargetDesc",
+    "Target/X86/TargetInfo",
+    "TextAPI",
+    "Transforms/AggressiveInstCombine",
+    "Transforms/CFGuard",
+    "Transforms/Coroutines",
+    "Transforms/InstCombine",
+    "Transforms/Instrumentation",
+    "Transforms/ObjCARC",
+    "Transforms/Scalar",
+    "Transforms/Vectorize",
 ];
 /// The passes the AIR compiler runs, by source, with the C API's data layouts
 /// and the bitcode writer's string table.
@@ -93,8 +141,15 @@ const LIBCXX: [&str; 23] = [
 /// Units of [`LIBRARIES`] that bring what the image lacks: processes, signals
 /// and sockets, or object files through a profile's reader and the legacy
 /// passes through `Analysis.cpp`. `compat/llvm` has what nothing reaches of them.
-const SKIPPED: [&str; 13] = [
+const SKIPPED: [&str; 22] = [
     "Analysis/Analysis.cpp",
+    "CodeGen/AssignmentTrackingAnalysis.cpp",
+    "ExecutionEngine/GDBRegistrationListener.cpp",
+    "Object/IRObjectFile.cpp",
+    "Object/IRSymtab.cpp",
+    "Object/ModuleSymbolTable.cpp",
+    "Object/OffloadBinary.cpp",
+    "Object/RecordStreamer.cpp",
     "ProfileData/InstrProfCorrelator.cpp",
     "ProfileData/InstrProfReader.cpp",
     "Support/CachePruning.cpp",
@@ -102,14 +157,31 @@ const SKIPPED: [&str; 13] = [
     "Support/DynamicLibrary.cpp",
     "Support/ExponentialBackoff.cpp",
     "Support/LockFileManager.cpp",
+    "Support/Memory.cpp",
     "Support/Mustache.cpp",
     "Support/Program.cpp",
     "Support/Signals.cpp",
     "Support/raw_os_ostream.cpp",
     "Support/raw_socket_stream.cpp",
+    "Transforms/Instrumentation/AddressSanitizer.cpp",
+];
+/// llvmpipe's and the code generator's of the libraries [`AIR_LIBRARIES`] and
+/// [`JIT_LIBRARIES`] cut short.
+const JIT_UNITS: [&str; 7] = [
+    "ExecutionEngine/RuntimeDyld/Targets/RuntimeDyldELFMips.cpp",
+    "TargetParser/Host.cpp",
+    "TargetParser/SubtargetFeature.cpp",
+    "TargetParser/TargetDataLayout.cpp",
+    "TargetParser/TargetParser.cpp",
+    "TargetParser/X86TargetParser.cpp",
+    "Transforms/IPO/GlobalDCE.cpp",
 ];
 /// Stela's own, under `compat/llvm`.
 const STELA: [&str; 3] = ["passes", "runtime", "support"];
+/// Stela's own that the JIT adds.
+const JIT_STELA: [&str; 1] = ["jit"];
+/// What keeps a hosted test's units to the AIR compiler's libraries.
+const AIR_ONLY: &str = "-DSTELA_LLVM_AIR_ONLY";
 const CXX_FLAGS: [&str; 8] = [
     "-std=c++17",
     "-O2",
@@ -193,58 +265,87 @@ fn unit(source: &Path, objects: &Path, root: &Path, flags: &[String]) -> Result<
     })
 }
 
-/// LLVM's generated files, from the `tablegen()` calls of its own `CMakeLists`.
-fn tablegen(tool: &Path, llvm: &Path, generated: &Path) -> Result<()> {
-    for directory in GENERATED {
-        let source = llvm.join("include/llvm").join(directory);
-        let output = generated.join("llvm").join(directory);
-        fs::create_dir_all(&output)?;
-        let plan = fs::read_to_string(source.join("CMakeLists.txt"))?;
-        let mut definitions = None;
-        for line in plan.lines().map(str::trim) {
-            if let Some(rest) = line.strip_prefix("set(LLVM_TARGET_DEFINITIONS ") {
-                definitions = rest.strip_suffix(')').map(str::to_owned);
-            }
-            let Some(call) = line
-                .strip_prefix("tablegen(LLVM ")
-                .and_then(|call| call.strip_suffix(')'))
-            else {
-                continue;
-            };
-            let mut words = call.split_whitespace();
-            let target = output.join(words.next().context("a tablegen output")?);
-            let definitions = definitions.as_deref().context("tablegen without input")?;
-            // A definition outside the checkout belongs to a target Stela omits.
-            let input = match definitions.strip_prefix("${PROJECT_SOURCE_DIR}/") {
-                Some(path) => llvm.join(path),
-                None => source.join(definitions),
-            };
-            if !input.is_file() {
-                continue;
-            }
-            if target.is_file()
-                && fs::metadata(&target)?.modified()? > fs::metadata(tool)?.modified()?
-            {
-                continue;
-            }
-            exec(
-                Command::new(tool)
-                    .args(words)
-                    .arg("-I")
-                    .arg(llvm.join("include"))
-                    .arg("-I")
-                    .arg(&source)
-                    .arg("-o")
-                    .arg(&target)
-                    .arg(&input),
-            )?;
+/// The statements of a `CMakeLists.txt` that matter here, each on one line.
+fn statements(plan: &str) -> Vec<String> {
+    let mut statements = Vec::new();
+    let mut open = String::new();
+    for line in plan.lines().map(str::trim) {
+        open.push_str(line);
+        if open.starts_with("tablegen(") && !open.ends_with(')') {
+            open.push(' ');
+        } else {
+            statements.push(std::mem::take(&mut open));
         }
+    }
+    statements
+}
+
+/// Runs the `tablegen()` calls of `source`'s `CMakeLists.txt` into `output`.
+fn tablegen_directory(tool: &Path, llvm: &Path, source: &Path, output: &Path) -> Result<()> {
+    fs::create_dir_all(output)?;
+    let plan = fs::read_to_string(source.join("CMakeLists.txt"))?;
+    let mut definitions = None;
+    for line in statements(&plan) {
+        if let Some(rest) = line.strip_prefix("set(LLVM_TARGET_DEFINITIONS ") {
+            definitions = rest.strip_suffix(')').map(str::to_owned);
+        }
+        let Some(call) = line
+            .strip_prefix("tablegen(LLVM ")
+            .and_then(|call| call.strip_suffix(')'))
+        else {
+            continue;
+        };
+        let mut words = call.split_whitespace();
+        let target = output.join(words.next().context("a tablegen output")?);
+        let definitions = definitions.as_deref().context("tablegen without input")?;
+        // A definition outside the checkout belongs to a target Stela omits.
+        let input = match definitions.strip_prefix("${PROJECT_SOURCE_DIR}/") {
+            Some(path) => llvm.join(path),
+            None => source.join(definitions),
+        };
+        if !input.is_file() {
+            continue;
+        }
+        if target.is_file()
+            && fs::metadata(&target)?.modified()? > fs::metadata(tool)?.modified()?
+        {
+            continue;
+        }
+        exec(
+            Command::new(tool)
+                .args(words.map(|word| word.replace('"', "")))
+                .arg("-I")
+                .arg(llvm.join("include"))
+                .arg("-I")
+                .arg(source)
+                .arg("-I")
+                .arg(llvm.join("lib/Target"))
+                .arg("-o")
+                .arg(&target)
+                .arg(&input),
+        )?;
     }
     Ok(())
 }
 
-/// Builds `llvm-min-tblgen` for this machine.
-fn build_tool(toolchain: &Toolchain, llvm: &Path, directory: &Path, jobs: u16) -> Result<PathBuf> {
+/// LLVM's generated headers, from the `tablegen()` calls of its own `CMakeLists`.
+fn tablegen(tool: &Path, llvm: &Path, generated: &Path) -> Result<()> {
+    for directory in GENERATED {
+        let source = llvm.join("include/llvm").join(directory);
+        tablegen_directory(tool, llvm, &source, &generated.join("llvm").join(directory))?;
+    }
+    Ok(())
+}
+
+/// Builds `llvm-min-tblgen` for this machine, or `llvm-tblgen` over what the
+/// former `generated`.
+fn build_tool(
+    toolchain: &Toolchain,
+    llvm: &Path,
+    directory: &Path,
+    jobs: u16,
+    generated: Option<&Path>,
+) -> Result<PathBuf> {
     let objects = directory.join("tool");
     fs::create_dir_all(&objects)?;
     let mut flags: Vec<String> = CXX_FLAGS.map(str::to_owned).to_vec();
@@ -260,11 +361,19 @@ fn build_tool(toolchain: &Toolchain, llvm: &Path, directory: &Path, jobs: u16) -
         let source = llvm.join(source);
         sources(&source, &["cpp", "c"], &mut files)?;
     }
+    if let Some(generated) = generated {
+        flags.push(format!("-I{}", generated.display()));
+        for source in FULL_TOOL_SOURCES {
+            sources(&llvm.join(source), &["cpp"], &mut files)?;
+        }
+    }
     sources(&llvm.join("lib/Support/BLAKE3"), &["c"], &mut files)?;
     files.retain(|file| {
         let name = file.file_name().unwrap_or_default().to_string_lossy();
         let parent = file.parent().and_then(Path::file_name).unwrap_or_default();
-        (parent != "TableGen" || !file.starts_with(llvm.join("utils")) || name == TOOL_MAIN)
+        (parent != "TableGen"
+            || !file.starts_with(llvm.join("utils"))
+            || (name == TOOL_MAIN) != generated.is_some())
             && (parent != "BLAKE3"
                 || !name.contains("avx") && !name.contains("sse") && !name.contains("neon"))
     });
@@ -288,7 +397,12 @@ fn build_tool(toolchain: &Toolchain, llvm: &Path, directory: &Path, jobs: u16) -
         })
         .collect::<Result<Vec<_>>>()?;
     compile(&toolchain.clang, directory, &units, jobs)?;
-    let tool = directory.join(format!("llvm-min-tblgen{}", std::env::consts::EXE_SUFFIX));
+    let name = if generated.is_some() {
+        "llvm-tblgen"
+    } else {
+        "llvm-min-tblgen"
+    };
+    let tool = directory.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
     let newest = units
         .iter()
         .map(|unit| fs::metadata(&unit.output)?.modified())
@@ -331,6 +445,24 @@ fn target_flags(toolchain: &Toolchain, checkout: &Path, target: &[&str]) -> Resu
     Ok(flags)
 }
 
+/// What a C++ unit of Mesa's compiles with for the image: libc++ ahead of the C
+/// library in `common`, and LLVM's headers from its own configuration.
+pub(super) fn cxx_flags(common: &[String]) -> Vec<String> {
+    let compat = gpu().join("compat");
+    let mut flags = Vec::new();
+    for include in [
+        compat.join("llvm/libcxx"),
+        compat.join("llvm/include"),
+        third_party("llvm").join("libcxx/include"),
+    ] {
+        flags.extend(["-isystem".to_owned(), include.display().to_string()]);
+    }
+    flags.extend_from_slice(common);
+    flags.extend(CXX_FLAGS.map(str::to_owned));
+    flags.extend(TARGET_CXX_FLAGS.map(str::to_owned));
+    flags
+}
+
 /// The units of libc++, with `flags`, in `objects`.
 fn out_of_line_units(checkout: &Path, objects: &Path, flags: &[String]) -> Result<Vec<Unit>> {
     let libcxx = checkout.join("libcxx/src");
@@ -361,7 +493,8 @@ pub(super) fn libcxx_units(
 }
 
 /// Every unit of the libraries, libc++ and `compat/llvm` for `target`, in
-/// `objects`.
+/// `objects`: the AIR compiler's, with the JIT's unless `target` says
+/// [`AIR_ONLY`].
 fn library_units(
     toolchain: &Toolchain,
     checkout: &Path,
@@ -373,15 +506,27 @@ fn library_units(
     let llvm = checkout.join("llvm");
     let compat = gpu().join("compat");
     let mut flags = target_flags(toolchain, checkout, target)?;
-    for include in [generated.to_owned(), llvm.join("include")] {
+    for include in [
+        generated.to_owned(),
+        generated.join(TARGET),
+        llvm.join("include"),
+        llvm.join("lib/Target").join(TARGET),
+    ] {
         flags.push(format!("-I{}", include.display()));
     }
 
+    let jit = !target.contains(&AIR_ONLY);
     let mut units = Vec::new();
     let library = llvm.join("lib");
     let mut files = Vec::new();
-    for name in LIBRARIES {
+    for name in AIR_LIBRARIES {
         sources(&library.join(name), &["cpp", "c"], &mut files)?;
+    }
+    if jit {
+        for name in JIT_LIBRARIES {
+            sources(&library.join(name), &["cpp"], &mut files)?;
+        }
+        files.extend(JIT_UNITS.map(|name| library.join(name)));
     }
     sources(&library.join("Support/BLAKE3"), &["c"], &mut files)?;
     files.retain(|file| {
@@ -391,6 +536,8 @@ fn library_units(
     });
     files.retain(|file| !SKIPPED.iter().any(|name| file.ends_with(name)));
     files.extend(UNITS.map(|name| library.join(name)));
+    files.sort();
+    files.dedup();
     for file in &files {
         let mut flags = flags.clone();
         flags.push(format!("-I{}", library.join("Support").display()));
@@ -406,7 +553,8 @@ fn library_units(
         units.push(unit(file, objects, checkout, &flags)?);
     }
     units.extend(out_of_line_units(checkout, objects, &flags)?);
-    for name in STELA {
+    let stela = STELA.iter().chain(JIT_STELA.iter().filter(|_| jit));
+    for name in stela {
         let file = compat.join(format!("llvm/{name}.cpp"));
         units.push(unit(&file, objects, &compat, &flags)?);
     }
@@ -426,8 +574,15 @@ pub(super) fn build(toolchain: &Toolchain, jobs: u16, test: bool) -> Result<()> 
         llvm.display()
     );
     let generated = directory.join("generated");
-    let tool = build_tool(toolchain, &llvm, &directory, jobs)?;
-    tablegen(&tool, &llvm, &generated)?;
+    let small = build_tool(toolchain, &llvm, &directory, jobs, None)?;
+    tablegen(&small, &llvm, &generated)?;
+    let tool = build_tool(toolchain, &llvm, &directory, jobs, Some(&generated))?;
+    tablegen_directory(
+        &tool,
+        &llvm,
+        &llvm.join("lib/Target").join(TARGET),
+        &generated.join(TARGET),
+    )?;
 
     let target = format!("--target={NATIVE_TARGET}");
     let objects = directory.join("objects");
@@ -468,7 +623,7 @@ fn test_hosted(
         checkout,
         generated,
         &output.join("objects"),
-        &["--target=x86_64-unknown-linux-gnu", "-fno-pic"],
+        &["--target=x86_64-unknown-linux-gnu", "-fno-pic", AIR_ONLY],
     )?;
     println!("compiling {} units for the test", units.len());
     compile(&toolchain.clang, directory, &units, jobs)?;

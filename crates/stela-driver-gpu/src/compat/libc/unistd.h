@@ -36,6 +36,8 @@ int symlink(const char *from, const char *to);
 int fchown(int fd, uid_t user, gid_t group);
 unsigned int alarm(unsigned int seconds);
 pid_t getpid(void);
+long syscall(long number, ...);
+void sync(void);
 pid_t gettid(void);
 uid_t getuid(void);
 uid_t geteuid(void);
