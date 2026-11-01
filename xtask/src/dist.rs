@@ -2,7 +2,7 @@
 //! embedded. The boot image builds first, from the pinned sources `gpu
 //! fetch` checks out; `stela-cli`'s build script then embeds the file
 //! `STELA_EFI` names. The embedded image carries no debug sections: setup
-//! keeps several versions on the USB's 200 MiB EFI partition.
+//! writes it beside the old one on the USB's 200 MiB EFI partition.
 use crate::tools::{cargo, exec, root};
 use anyhow::Result;
 use std::process::Command;
