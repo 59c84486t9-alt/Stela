@@ -247,6 +247,7 @@ fn setup(directory: &Path, build: &Path, path: &Path) -> Result<()> {
         fs::write(&stub, "#!/bin/sh\nexit 1\n")?;
         exec(Command::new("chmod").arg("+x").arg(&stub))?;
     }
+    crate::tools::which("pkg-config").context("install pkg-config, which finds the .pc files")?;
     let packages = directory.join("pkgconfig");
     fs::create_dir_all(&packages)?;
     let libdrm = third_party("libdrm");
