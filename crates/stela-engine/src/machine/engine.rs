@@ -810,6 +810,14 @@ pub struct Machine<H: Host, D: Devices> {
     /// The latest serial of the maintenance this PE posted to each other PE
     /// and has not yet seen applied, which its next DSB waits for.
     posted: Vec<(usize, u64)>,
+    /// The last page and context of each hash that
+    /// [`Self::remember_target_page`] filled lookup entries for.
+    visited_pages: Box<[(u64, u64)]>,
+    /// The blocks of a page being visited, kept for its capacity.
+    page_blocks: Vec<usize>,
+    /// Maintenance for the other PEs that this PE's next DSB sends
+    /// ([`Self::send_outgoing`]).
+    outgoing: Vec<parallel::Maintenance>,
     lines_epoch: u64,
     pending_device_read: Option<device_read::Pending>,
     pending_device_write: Option<device_write::Pending>,
@@ -1016,6 +1024,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
             forwarded_power: Vec::new(),
             deferred_code: Vec::new(),
             posted: Vec::new(),
+            visited_pages: vec![(1, 0); VISITED_PAGES].into_boxed_slice(),
+            page_blocks: Vec::new(),
+            outgoing: Vec::new(),
             lines_epoch: 0,
             pending_device_read: None,
             pending_device_write: None,

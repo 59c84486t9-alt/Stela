@@ -69,6 +69,10 @@ pub trait Kick: Send + Sync {
 /// A PE that may use any context's translations ([`Inbox::translating`]).
 const ANY_CONTEXT: u32 = u32::MAX;
 
+/// The maintenance a PE keeps for the others ([`Machine::post`]) before it
+/// sends it, DSB or not.
+const OUTGOING: usize = 64;
+
 /// [`Inbox::translating`] of a regime's ASID.
 fn context_word(regime: mmu::Regime, asid: u16) -> u32 {
     (regime as u32) << 16 | u32::from(asid)
@@ -523,15 +527,11 @@ impl Hub {
     /// invalidation the PE has yet to read already covers the same page
     /// again, as IC IVAU of each line of a page posts it.
     ///
-    /// A PE that translates another context than a TLBI's is neither
+    /// A PE that translates another context than these TLBIs' is neither
     /// interrupted nor waited for: nothing it can use is stale, and the
     /// mail left first is read before it uses that context, which it
     /// publishes first ([`Machine::publish_translating`]).
-    pub(super) fn broadcast(&self, from: usize, maintenance: Maintenance) -> Vec<(usize, u64)> {
-        let private = match maintenance {
-            Maintenance::Tlb(scope) => scope.private(),
-            _ => None,
-        };
+    pub(super) fn broadcast(&self, from: usize, maintenance: &[Maintenance]) -> Vec<(usize, u64)> {
         let mut posted = Vec::new();
         for pe in self.others(from) {
             let inbox = &self.inboxes[pe];
@@ -539,18 +539,26 @@ impl Hub {
             self.leave(pe, |mail| {
                 mail.serial += 1;
                 serial = mail.serial;
-                let covered = match maintenance {
-                    Maintenance::Code(page) => mail.maintenance.iter().any(|posted| {
-                        matches!(posted, Maintenance::Code(held) if held.is_none() || *held == page)
-                    }),
-                    _ => false,
-                };
-                if !covered {
-                    mail.maintenance.push(maintenance);
+                for &maintenance in maintenance {
+                    let covered = match maintenance {
+                        Maintenance::Code(page) => mail.maintenance.iter().any(|posted| {
+                            matches!(posted, Maintenance::Code(held) if held.is_none() || *held == page)
+                        }),
+                        _ => false,
+                    };
+                    if !covered {
+                        mail.maintenance.push(maintenance);
+                    }
                 }
             });
             inbox.posted.store(serial, Ordering::Release);
-            if private.is_none_or(|private| inbox.may_use(private)) {
+            let reaches = maintenance.iter().any(|maintenance| match maintenance {
+                Maintenance::Tlb(scope) => {
+                    scope.private().is_none_or(|private| inbox.may_use(private))
+                }
+                _ => true,
+            });
+            if reaches {
                 self.interrupt(pe);
                 posted.push((pe, serial));
             }
@@ -1249,29 +1257,47 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
     }
 
-    /// Post `maintenance` to every other running PE, which applies it at
-    /// its next return to the engine, brought there by the post. A TLBI or
-    /// IC IVAU completes for the other PEs at this PE's next DSB, which
-    /// waits for them ([`Self::complete_maintenance`]): a run of
-    /// maintenance waits once.
+    /// Keep `maintenance` for every other running PE. A TLBI or IC IVAU
+    /// completes for them at this PE's next DSB, which sends what this PE
+    /// kept in one piece of mail and waits for them
+    /// ([`Self::complete_maintenance`]): a run of maintenance takes them
+    /// from their code once.
     pub(super) fn post(&mut self, maintenance: Maintenance) {
+        if self.parallel.is_none() {
+            return;
+        }
+        self.mirrors.close(super::mirrors::DATA_BARRIER);
+        self.outgoing.push(maintenance);
+        if self.outgoing.len() == OUTGOING {
+            self.send_outgoing();
+        }
+    }
+
+    /// Send the maintenance this PE kept, which each PE applies at its next
+    /// return to the engine, brought there by this.
+    pub(super) fn send_outgoing(&mut self) {
         let Some(hub) = self.parallel.clone() else {
             return;
         };
-        self.mirrors.close(super::mirrors::DATA_BARRIER);
+        if self.outgoing.is_empty() {
+            return;
+        }
         let profile = self.observation_inbox(&hub).map(|inbox| &inbox.broadcasts);
         let started = profile.map(|_| self.host.counter());
-        let posted = hub.broadcast(self.current, maintenance);
-        let kind = match maintenance {
-            Maintenance::Tlb(_) => BroadcastKind::Tlb,
-            Maintenance::Code(_) => BroadcastKind::Code,
-            Maintenance::Power(_) => BroadcastKind::Power,
-        };
-        if let (Some(slot), Some(started)) = (profile, started)
-            && let Some(active) = slot.begin(kind, started, posted.len())
-        {
-            slot.finish(active, 0, 0);
+        let posted = hub.broadcast(self.current, &self.outgoing);
+        if let (Some(slot), Some(started)) = (profile, started) {
+            for maintenance in &self.outgoing {
+                let kind = match maintenance {
+                    Maintenance::Tlb(_) => BroadcastKind::Tlb,
+                    Maintenance::Code(_) => BroadcastKind::Code,
+                    Maintenance::Power(_) => BroadcastKind::Power,
+                };
+                if let Some(active) = slot.begin(kind, started, posted.len()) {
+                    slot.finish(active, 0, 0);
+                }
+            }
         }
+        self.outgoing.clear();
         for (pe, serial) in posted {
             match self.posted.iter_mut().find(|(held, _)| *held == pe) {
                 Some((_, held)) => *held = serial,
@@ -1286,6 +1312,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     pub(super) fn complete_maintenance(&mut self) -> Step {
         self.code_posted = None;
         self.mirrors.close_code_page();
+        self.send_outgoing();
         if self.posted.is_empty() {
             return Ok(());
         }

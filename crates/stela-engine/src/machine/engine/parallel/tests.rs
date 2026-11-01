@@ -43,30 +43,30 @@ fn a_tlbi_passes_by_a_pe_translating_another_context() {
     let inbox = &hub.inboxes[1];
     let word = context_word(mmu::Regime::El10, 7);
     let epoch = || inbox.chain.interrupt_epoch().load(Ordering::Relaxed);
-    assert_eq!(hub.broadcast(0, tlbi(ASID, ASID_5)).len(), 1, "unpublished");
+    assert_eq!(hub.broadcast(0, &[tlbi(ASID, ASID_5)]).len(), 1, "unpublished");
     inbox.translating.store(word, Ordering::Relaxed);
     let interrupts = epoch();
     let passes = [ASID_5, ASID_5 | 0x1234];
     for (kind, operand) in [ASID, VA].into_iter().zip(passes) {
-        assert!(hub.broadcast(0, tlbi(kind, operand)).is_empty());
+        assert!(hub.broadcast(0, &[tlbi(kind, operand)]).is_empty());
     }
     assert_eq!(epoch(), interrupts);
     assert!(hub.pending(1));
     assert_eq!(hub.take(1).unwrap().maintenance.len(), 3);
     assert_eq!(
-        hub.broadcast(0, tlbi(ASID, 7 << 48)).len(),
+        hub.broadcast(0, &[tlbi(ASID, 7 << 48)]).len(),
         1,
         "its context"
     );
-    assert_eq!(hub.broadcast(0, tlbi(VAA, 0x1234)).len(), 1, "every ASID");
+    assert_eq!(hub.broadcast(0, &[tlbi(VAA, 0x1234)]).len(), 1, "every ASID");
     assert!(inbox.lower_globals.widen(0x123_0000, 0x123_ffff));
     assert!(!inbox.lower_globals.widen(0x123_4000, 0x123_7fff));
     assert_eq!(
-        hub.broadcast(0, tlbi(VA, ASID_5 | 0x1234)).len(),
+        hub.broadcast(0, &[tlbi(VA, ASID_5 | 0x1234)]).len(),
         1,
         "its global page"
     );
-    assert!(hub.broadcast(0, tlbi(VA, ASID_5 | 0x4321)).is_empty());
+    assert!(hub.broadcast(0, &[tlbi(VA, ASID_5 | 0x4321)]).is_empty());
 }
 
 /// What a PE translates is published before its next mail read.
@@ -415,6 +415,7 @@ fn source_observation_uses_only_the_attached_owner_and_remains_stale() {
     // on each wait-loop spin. A PE that stops reading mail needs not
     // acknowledge what was posted to it.
     home.post(Maintenance::Code(None));
+    home.send_outgoing();
     hub.set_live(1, false);
     home.complete_maintenance().unwrap();
     let broadcast = hub.source_observation(0).unwrap();
@@ -454,6 +455,7 @@ fn broadcast_profile_counts_posts_and_completion_waits_for_the_attached_owner() 
     let reads = machine.host.counter_reads;
     machine.post(Maintenance::Code(None));
     assert_eq!(machine.host.counter_reads, reads);
+    machine.send_outgoing();
     hub.set_live(1, false);
     machine.complete_maintenance().unwrap();
     assert_eq!(machine.host.counter_reads - reads, 2);
@@ -464,11 +466,12 @@ fn broadcast_profile_counts_posts_and_completion_waits_for_the_attached_owner() 
     let reads = machine.host.counter_reads;
     machine.post(Maintenance::Code(Some(0x4000)));
     machine.post(Maintenance::Code(Some(0x4000)));
+    machine.send_outgoing();
     hub.set_live(1, false);
     machine.complete_maintenance().unwrap();
-    // A clock for each post, and the completion's two and its two source
+    // A clock for the posts, and the completion's two and its two source
     // observations; accounting adds no native notification.
-    assert_eq!(machine.host.counter_reads - reads, 6);
+    assert_eq!(machine.host.counter_reads - reads, 5);
     let observed = hub.broadcast_profile(0).unwrap();
     let code = observed.kinds[BroadcastKind::Code.index()];
     assert_eq!(
@@ -497,10 +500,37 @@ fn broadcast_profile_counts_posts_and_completion_waits_for_the_attached_owner() 
     hub.set_live(1, true);
     let attached = machine.attached.take().unwrap();
     machine.post(Maintenance::Code(None));
+    machine.send_outgoing();
     hub.set_live(1, false);
     machine.complete_maintenance().unwrap();
     assert_eq!(hub.broadcast_profile(0), Some(observed));
     machine.attached = Some(attached);
+}
+
+#[test]
+fn maintenance_waits_for_the_dsb_and_reaches_a_pe_in_one_piece_of_mail() {
+    let (hub, _) = hub(2);
+    let mut machine = first_of_two(&[], &hub);
+    machine.post(Maintenance::Code(Some(0x4000)));
+    machine.post(Maintenance::Code(Some(0x8000)));
+    assert!(hub.take(1).is_none());
+
+    machine.send_outgoing();
+    hub.set_live(1, false);
+    machine.complete_maintenance().unwrap();
+    let mail = hub.take(1).unwrap();
+    assert_eq!(mail.maintenance.len(), 2);
+    assert_eq!(mail.serial, 1);
+}
+
+#[test]
+fn a_full_list_of_maintenance_goes_out_without_a_dsb() {
+    let (hub, _) = hub(2);
+    let mut machine = first_of_two(&[], &hub);
+    for page in 0..OUTGOING as u64 {
+        machine.post(Maintenance::Code(Some(page << 14)));
+    }
+    assert_eq!(hub.take(1).unwrap().maintenance.len(), OUTGOING);
 }
 
 #[test]
@@ -512,6 +542,7 @@ fn a_page_invalidation_the_pe_has_yet_to_read_covers_the_same_page_again() {
     machine.post(Maintenance::Code(Some(0x8000)));
     machine.post(Maintenance::Code(None));
     machine.post(Maintenance::Code(Some(0xc000)));
+    machine.send_outgoing();
     let mail = hub.take(1).unwrap();
     let pages: Vec<_> = mail
         .maintenance
@@ -522,9 +553,8 @@ fn a_page_invalidation_the_pe_has_yet_to_read_covers_the_same_page_again() {
         })
         .collect();
     assert_eq!(pages, [Some(0x4000), Some(0x8000), None]);
-    // Every post counts: the PE's acknowledgment of the last one is the
-    // one waited for.
-    assert_eq!((mail.serial, machine.posted.as_slice()), (5, &[(1, 5)][..]));
+    // The PE's acknowledgment of this mail is the one waited for.
+    assert_eq!((mail.serial, machine.posted.as_slice()), (1, &[(1, 1)][..]));
 }
 
 #[test]
@@ -534,18 +564,19 @@ fn an_ic_ivau_reaches_other_pes_only_for_compiled_pages_once_per_dsb() {
     let mut machine = first_of_two(&[], &hub);
     // No PE compiled from it: the IC IVAU of each line stops here.
     machine.post_code_page(PAGE);
-    assert!(machine.posted.is_empty());
+    assert!(machine.outgoing.is_empty());
     // The next lines of a page add nothing to its first one.
     hub.compiling(PAGE + 0x100);
     machine.post_code_page(PAGE + 0x40);
     machine.post_code_page(PAGE + 0x80);
-    assert_eq!(machine.posted, [(1, 1)]);
+    assert_eq!(machine.outgoing.len(), 1);
     // A DSB ends the run: what follows may have been written since.
+    machine.send_outgoing();
     let mail = hub.take(1).unwrap();
     hub.acknowledge(1, mail.serial);
     machine.complete_maintenance().unwrap();
     machine.post_code_page(PAGE + 0x40);
-    assert_eq!(machine.posted, [(1, 2)]);
+    assert_eq!(machine.outgoing.len(), 1);
 }
 
 #[test]
@@ -554,6 +585,7 @@ fn maintenance_posted_to_another_pe_completes_at_the_next_dsb() {
     // DSB ISH.
     let mut machine = first_of_two(&[0xd503_3b9f], &hub);
     machine.post(Maintenance::Code(Some(0x4000)));
+    machine.send_outgoing();
     assert_eq!(machine.posted, [(1, 1)]);
     // PE 1 reads its mail at its next return to the engine.
     let mail = hub.take(1).unwrap();
@@ -646,7 +678,7 @@ fn a_broadcast_is_applied_once_every_running_pe_acknowledged_it() {
     let (hub, kicks) = hub(3);
     let (attached, control) = Attached::new(&hub, 1, false).unwrap();
     control.budget().store(4096, Ordering::Relaxed);
-    let mut posted = hub.broadcast(0, Maintenance::Code(None));
+    let mut posted = hub.broadcast(0, &[Maintenance::Code(None)]);
     assert_eq!(posted, [(1, 1), (2, 1)]);
     assert!(!hub.applied(&mut posted));
     // The running PE leaves native code at its next chained transfer.
@@ -670,12 +702,12 @@ fn a_broadcast_is_applied_once_every_running_pe_acknowledged_it() {
     hub.inboxes[2].sleeping.store(false, Ordering::SeqCst);
     assert!(hub.take(2).is_some_and(|mail| mail.serial == 1));
     // A PE that no longer reads mail holds no broadcast up.
-    let mut posted = hub.broadcast(0, Maintenance::Code(None));
+    let mut posted = hub.broadcast(0, &[Maintenance::Code(None)]);
     hub.set_live(2, false);
     hub.acknowledge(1, 2);
     assert!(hub.applied(&mut posted));
     // Serials keep counting after a take.
-    assert_eq!(hub.broadcast(0, Maintenance::Code(None)), [(1, 3)]);
+    assert_eq!(hub.broadcast(0, &[Maintenance::Code(None)]), [(1, 3)]);
 }
 
 #[test]
