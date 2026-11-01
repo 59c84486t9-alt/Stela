@@ -1356,6 +1356,7 @@ dependencies = [
  "rustls",
  "rustls-webpki",
  "sha2",
+ "stela-c-build",
  "webpki-roots",
  "zeroize",
 ]
