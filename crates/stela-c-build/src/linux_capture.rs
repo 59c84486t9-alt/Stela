@@ -371,16 +371,11 @@ pub fn source(captured: &[Captured], projection: Projection<'_>) -> PathBuf {
     );
     let roots = roots(captured);
     let mut snapshot = Snapshot::new(&roots);
-    let cohort = out_dir().join(format!("{symbol}-units.txt"));
     let listing = captured
         .iter()
         .map(|unit| format!("{} {}\n", unit.unit.module, unit.unit.source))
         .collect::<String>();
-    // The cohort is a watched integrity input. Preserve its timestamp when
-    // unchanged, or Cargo would invalidate this build as soon as it finishes.
-    if fs::read(&cohort).ok().as_deref() != Some(listing.as_bytes()) {
-        fs::write(&cohort, listing).expect("write the initcall units");
-    }
+    let cohort = write_cohort(&out_dir(), symbol, &listing);
     let mut groups: Vec<Group> = Vec::new();
     for unit in captured {
         let name = token(&unit.unit.module);
@@ -489,6 +484,20 @@ pub fn source(captured: &[Captured], projection: Projection<'_>) -> PathBuf {
     fs::write(receipt, receipt_text).expect("write the initcall receipt");
     rerun_on(&cohort);
     source
+}
+
+// Only the caller-owned output directory is resolved, never an imported file.
+// Snapshot still opens the generated leaf through its no-follow input boundary.
+fn write_cohort(directory: &Path, symbol: &str, listing: &str) -> PathBuf {
+    let cohort = fs::canonicalize(directory)
+        .expect("Cargo output directory")
+        .join(format!("{symbol}-units.txt"));
+    // The cohort is a watched integrity input. Preserve its timestamp when
+    // unchanged, or Cargo would invalidate this build as soon as it finishes.
+    if fs::read(&cohort).ok().as_deref() != Some(listing.as_bytes()) {
+        fs::write(&cohort, listing).expect("write the initcall units");
+    }
+    cohort
 }
 
 /// Export a captured cohort for a dependent Cargo build. Paths are absolute;
@@ -1022,5 +1031,44 @@ mod tests {
         fs::write(&external, encode(&fixture.captured)).unwrap();
         std::os::unix::fs::symlink(&external, &path).unwrap();
         assert!(matches!(read(selected()), Err(ImportError::Input(_))));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn owned_cohort_resolves_output_alias_without_admitting_foreign_inputs() {
+        let fixture = fixture();
+        let output = &fixture.boundary.output;
+        let alias = fixture._temporary.path().join("output-alias");
+        std::os::unix::fs::symlink(output, &alias).unwrap();
+        let listing = "rtmutex kernel/locking/rtmutex_api\n";
+        let path = write_cohort(&alias, "fixture", listing);
+        assert_eq!(path, output.join("fixture-units.txt"));
+        let past = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_234_567_890);
+        fs::File::open(&path).unwrap().set_modified(past).unwrap();
+        let modified = fs::metadata(&path).unwrap().modified().unwrap();
+        assert_eq!(write_cohort(&alias, "fixture", listing), path);
+        assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), modified);
+        let mut snapshot = Snapshot::new(std::slice::from_ref(output));
+        let input = snapshot.input(&path, None, 64 << 10);
+        assert_eq!(input.relative, Path::new("fixture-units.txt"));
+        snapshot.finish();
+        let mut foreign = Snapshot::new(&fixture.boundary.roots[..1]);
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                foreign.input(&path, None, 64 << 10);
+            }))
+            .is_err()
+        );
+        let external = fixture._temporary.path().join("foreign-units.txt");
+        fs::write(&external, listing).unwrap();
+        fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(&external, &path).unwrap();
+        let mut snapshot = Snapshot::new(std::slice::from_ref(output));
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                snapshot.input(&path, None, 64 << 10);
+            }))
+            .is_err()
+        );
     }
 }
