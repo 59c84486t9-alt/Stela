@@ -350,7 +350,12 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
             cpu.registers.set(register, index, value);
             if matches!(
                 register,
-                Register::ELR_EL1 | Register::ELR_EL2 | Register::SPSR_EL1 | Register::SPSR_EL2
+                Register::ELR_EL1
+                    | Register::ELR_EL2
+                    | Register::SPSR_EL1
+                    | Register::SPSR_EL2
+                    | Register::TPIDR_EL0
+                    | Register::TPIDRRO_EL0
             ) {
                 self.plain.set(Some((register, index)));
             }

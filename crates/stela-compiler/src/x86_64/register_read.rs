@@ -22,6 +22,9 @@
 //! [`frame_write_thunk`] writes a field of the frame. It also clobbers RCX
 //! and RDX.
 //!
+//! A [`pan_read_thunk`] completes MRS PAN from the frame, where a
+//! [`pan_thunk`] leaves it.
+//!
 //! A [`checked_write_thunk`] completes MSR of a register that takes any value
 //! without the bits it refuses, which the engine decides.
 //!
@@ -165,6 +168,20 @@ pub fn frame_thunk(pc: GuestAddress, rt: u8, cell: Place, offset: usize) -> Thun
     let mut asm = Asm::new(&mut code);
     let field = Mem::base_disp32(Gpr::Rdi, offset as i32);
     asm.mov_load(Size::Dword, Gpr::Rax, field);
+    asm.mov_store(Size::Qword, register(rt), Gpr::Rax);
+    finish(code, miss, pc)
+}
+
+/// The thunk completing `MRS Xt, PAN` at `pc` while the cell at `cell` is
+/// open, else exiting at `pc`.
+pub fn pan_read_thunk(pc: GuestAddress, rt: u8, cell: Place) -> Thunk {
+    /// PAN's bit of the register.
+    const PAN_SHIFT: u8 = 22;
+    let (mut code, miss) = open(cell);
+    let mut asm = Asm::new(&mut code);
+    let field = frame_field(core::mem::offset_of!(GuestState, pan));
+    asm.mov_load(Size::Qword, Gpr::Rax, field);
+    asm.shift_imm(ShiftOp::Shl, Size::Qword, Gpr::Rax, PAN_SHIFT);
     asm.mov_store(Size::Qword, register(rt), Gpr::Rax);
     finish(code, miss, pc)
 }

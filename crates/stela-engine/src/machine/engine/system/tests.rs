@@ -1564,7 +1564,7 @@ fn mirrored_cells_open_exactly_on_the_plain_reads() {
         }
     });
     // MRS TPIDR_EL1 is UNDEFINED at EL0; at EL1 HFGRTR_EL2.TPIDR_EL1 traps
-    // with FEAT_FGT. EL0 reads TPIDRRO_EL0 everywhere.
+    // with FEAT_FGT.
     let machine = machine(&[]);
     let fine_grained = Feature::FEAT_FGT.on(machine.cpu.registers.chip());
     let index = |encoding| {
@@ -1577,7 +1577,6 @@ fn mirrored_cells_open_exactly_on_the_plain_reads() {
         reads[index(Encoding::new(3, 0, 13, 0, 4))],
         if fine_grained { 16 + 64 } else { 32 + 64 }
     );
-    assert_eq!(reads[index(Encoding::new(3, 3, 13, 0, 3))], 5 * 32);
 }
 
 #[test]

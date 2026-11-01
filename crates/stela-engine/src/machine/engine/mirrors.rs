@@ -11,19 +11,17 @@ use super::*;
 /// registers a guarded level saves and restores ([`GUARDED_MIRRORS`]),
 /// SPRR_PERM_EL0 ([`SPRR_PERM_MIRROR`]) and DAIF; and the virtual count and
 /// Apple's alias of it, whose cells hold the offset they subtract from the
-/// clock's count ([`COUNT_MIRRORS`]); CurrentEL, which each state's cell
-/// answers for good; and the cycle and instruction counters a kernel reads
-/// around each exception to charge threads, which a transition brings up to
-/// date ([`COUNTER_MIRRORS`]).
-pub(super) const MIRRORED: [Encoding; 16] = {
+/// clock's count ([`COUNT_MIRRORS`]); CurrentEL and MPIDR_EL1, which each
+/// state's cell answers for good; and the cycle and instruction counters a
+/// kernel reads around each exception to charge threads, which a transition
+/// brings up to date ([`COUNTER_MIRRORS`]).
+pub(super) const MIRRORED: [Encoding; 15] = {
     use registers::encodings::{
-        ASPSR_GL1, CNTVCT_ALIAS_EL0, CURRENT_EL, DAIF, ELR_GL1, GXF_STATUS_EL1, SPRR_PERM_EL0,
-        SPSR_GL1, TPIDR_EL0, TPIDR_EL1, TPIDR_EL2, TPIDR_GL2, TPIDRRO_EL0,
+        ASPSR_GL1, CNTVCT_ALIAS_EL0, CURRENT_EL, DAIF, ELR_GL1, GXF_STATUS_EL1, MPIDR_EL1,
+        SPRR_PERM_EL0, SPSR_GL1, TPIDR_EL1, TPIDR_EL2, TPIDR_GL2,
     };
     use stela_compiler::aarch64::system::registers::CNTVCT_EL0;
     [
-        TPIDR_EL0,
-        TPIDRRO_EL0,
         TPIDR_EL1,
         TPIDR_EL2,
         TPIDR_GL2,
@@ -34,6 +32,7 @@ pub(super) const MIRRORED: [Encoding; 16] = {
         CURRENT_EL,
         super::super::pmu::PMC[0],
         super::super::pmu::PMC[1],
+        MPIDR_EL1,
         SPRR_PERM_EL0,
         CNTVCT_EL0,
         CNTVCT_ALIAS_EL0,
@@ -130,11 +129,13 @@ pub(super) const MASK_WRITES: usize = MIRRORED.len() + STORED_CELLS;
 /// around each exception and whose writes change nothing else: a cell each,
 /// after [`MASK_WRITES`], that a plain write opens on the storage it reached
 /// (FPSR's lives in the frame, so names none). They stay open as reads do.
-pub(super) const WRITTEN: [(Encoding, SystemRegister); 4] = [
+pub(super) const WRITTEN: [(Encoding, SystemRegister); 6] = [
     (Encoding::new(3, 0, 4, 0, 1), SystemRegister::ELR_EL1),
     (Encoding::new(3, 0, 4, 0, 0), SystemRegister::SPSR_EL1),
     (STACK_ZERO, SystemRegister::SP_EL0),
     (Encoding::new(3, 3, 4, 4, 1), SystemRegister::FPSR),
+    (registers::encodings::TPIDR_EL0, SystemRegister::TPIDR_EL0),
+    (registers::encodings::TPIDRRO_EL0, SystemRegister::TPIDRRO_EL0),
 ];
 
 /// SP_EL0, plain only with SP_ELx selected.
@@ -352,7 +353,7 @@ const _: () = assert!(matches!(
 /// cells open only in a guarded level, where they are plain, on the bank's
 /// storage: reads and writes both go there, as GENTER and an exception
 /// taken to the level do ([`registers::guarded_storage`]).
-pub(super) const GUARDED_MIRRORS: [usize; 3] = [6, 7, 8];
+pub(super) const GUARDED_MIRRORS: [usize; 3] = [4, 5, 6];
 const _: () = assert!(matches!(
     [
         MIRRORED[GUARDED_MIRRORS[0]],
@@ -370,8 +371,8 @@ const _: () = assert!(matches!(
 /// move at every instruction but no read depends on it: between transitions
 /// they read the count of the last one, as exceptions are what a kernel
 /// charges to threads, and later reads never go back.
-pub(super) const COUNTER_MIRRORS: [usize; 2] = [10, 11];
-const _: () = assert!(COUNTER_MIRRORS[0] == 10);
+pub(super) const COUNTER_MIRRORS: [usize; 2] = [8, 9];
+const _: () = assert!(COUNTER_MIRRORS[0] == 8);
 
 /// MRS X0 of `encoding`.
 pub(super) fn read_word(encoding: Encoding) -> u32 {

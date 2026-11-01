@@ -16,8 +16,6 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
         use registers::encodings as e;
         let encoding = match register {
-            SystemRegister::TPIDR_EL0 => e::TPIDR_EL0,
-            SystemRegister::TPIDRRO_EL0 => e::TPIDRRO_EL0,
             SystemRegister::TPIDR_EL1 => e::TPIDR_EL1,
             SystemRegister::TPIDR_EL2 => e::TPIDR_EL2,
             _ => return,

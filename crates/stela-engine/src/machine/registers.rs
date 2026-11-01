@@ -63,6 +63,7 @@ pub mod encodings {
     registers! {
         ACTLR_EL12 = 3, 5, 1, 0, 1;
         CURRENT_EL = 3, 0, 4, 2, 2;
+        PAN = 3, 0, 4, 2, 3;
         MIDR_EL1 = 3, 0, 0, 0, 0;
         MPIDR_EL1 = 3, 0, 0, 0, 5;
         REVIDR_EL1 = 3, 0, 0, 0, 6;
@@ -923,6 +924,37 @@ impl Cpu {
     /// The `machine::impdef` entry of `encoding` on this chip.
     pub fn impdef(&self, encoding: Encoding) -> Option<&'static impdef::Entry> {
         impdef::lookup(encoding, self.registers.chip())
+    }
+
+    /// The address of Apple's register `encoding`, if a read that completes
+    /// here returns what it holds.
+    pub fn apple_read_storage(&self, encoding: Encoding) -> Option<u64> {
+        if let Some(entry) = self.impdef(encoding) {
+            return entry
+                .reads_storage()
+                .then(|| self.apple.impdef.storage(entry));
+        }
+        match self.apple(encoding)?.ok()? {
+            Apple::SprrPerm(index) => Some(&self.apple.sprr_perm[index] as *const u64 as u64),
+            Apple::SprrFields(which) => Some(&self.apple.sprr_fields[which] as *const u64 as u64),
+            _ => None,
+        }
+    }
+
+    /// The address of Apple's register `encoding` and the bits of a value
+    /// that take a write more than a store there, if one without them takes
+    /// no more here.
+    pub fn apple_write_storage(&self, encoding: Encoding) -> Option<(u64, u64)> {
+        if let Some(entry) = self.impdef(encoding) {
+            let refused = entry.stored_write()?;
+            return Some((self.apple.impdef.storage(entry), refused));
+        }
+        match self.apple(encoding)?.ok()? {
+            Apple::SprrFields(which) => {
+                Some((&self.apple.sprr_fields[which] as *const u64 as u64, 0))
+            }
+            _ => None,
+        }
     }
 
     /// A read or write of a `machine::impdef` entry; `physical` is the

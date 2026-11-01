@@ -728,10 +728,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let known = self.stored_reads.iter().position(|&read| read == encoding);
         let cell = known.or_else(|| {
             let storable = storable(encoding)
-                || self
-                    .cpu
-                    .impdef(encoding)
-                    .is_some_and(|entry| entry.reads_storage())
+                || self.cpu.apple_read_storage(encoding).is_some()
                 || self
                     .devices
                     .register_storage(self.current, encoding)
@@ -747,7 +744,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// The index of `encoding` in [`Self::stored_writes`], made if there is
     /// room, and the bits of a value its writes leave to the engine.
     fn stored_write_cell(&mut self, encoding: Encoding) -> Option<(usize, u64)> {
-        let refused = self.cpu.impdef(encoding)?.stored_write()?;
+        let (_, refused) = self.cpu.apple_write_storage(encoding)?;
         let known = self.stored_writes.iter().position(|&write| write == encoding);
         let index = known.or_else(|| {
             (self.stored_writes.len() < STORED_WRITES).then(|| {
@@ -764,7 +761,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         pc: u64,
         access: RegisterAccess,
     ) -> Option<x86_64_pointer::Thunk> {
-        use registers::encodings::{FPCR, FPSR};
+        use registers::encodings::{FPCR, FPSR, PAN};
         let encoding = access.encoding();
         let index = self.stored_cell(encoding)?;
         let cell = cell_place(index);
@@ -780,6 +777,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             FPSR => {
                 register_read::frame_thunk(pc, rt, cell, core::mem::offset_of!(GuestState, fpsr))
             }
+            PAN => register_read::pan_read_thunk(pc, rt, cell),
             _ => register_read::stored_thunk(pc, rt, cell),
         })
     }

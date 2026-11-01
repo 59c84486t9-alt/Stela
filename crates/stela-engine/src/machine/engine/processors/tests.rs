@@ -1613,13 +1613,13 @@ fn a_pe_takes_its_open_mirrored_reads_back_when_it_runs_again() {
     let other = current ^ 1;
     machine.cpu.registers.set(Register::TPIDR_EL1, 0, 0x7000);
     machine.system_instruction(MRS_X8_TPIDR_EL1).unwrap();
-    let open = machine.mirrors[2];
+    let open = machine.mirrors[0];
     assert_eq!((open.readable, open.value), (1, 0x7000));
     // The other PE's cells are its own, closed until it reads.
     machine.switch_to(other);
-    assert_eq!(machine.mirrors[2].readable, 0);
+    assert_eq!(machine.mirrors[0].readable, 0);
     machine.switch_to(current);
-    assert_eq!(machine.mirrors[2], open);
+    assert_eq!(machine.mirrors[0], open);
     // A change to a parked PE closes the cells it left.
     machine.switch_to(other);
     if let Peer::Parked(parked) = &mut machine.peers[current] {
@@ -1629,7 +1629,7 @@ fn a_pe_takes_its_open_mirrored_reads_back_when_it_runs_again() {
             .set(Register::TPIDR_EL1, 0, 0x8000);
     }
     machine.switch_to(current);
-    assert_eq!(machine.mirrors[2].readable, 0);
+    assert_eq!(machine.mirrors[0].readable, 0);
 }
 
 /// Switch to the next PE that can run, which must be `pe`.

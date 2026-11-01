@@ -150,7 +150,7 @@ pub(super) mod tests {
         const MRS_TPIDR_EL1: u32 = 0xd538_d088; // mrs x8, tpidr_el1
         const MRS_GXF_STATUS: u32 = 0xd53e_f808; // mrs x8, gxf_status_el1
         const MSR_TPIDR_EL1: u32 = 0xd518_d089; // msr tpidr_el1, x9
-        let (thread, status) = (2, 5);
+        let (thread, status) = (0, 3);
         let mut machine = gxf(Chip::AppleM2);
         machine
             .cpu

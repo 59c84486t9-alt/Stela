@@ -368,7 +368,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// that completes plainly opens it on the register's live storage. A
     /// read of FPCR or FPSR completes from the frame ([`Self::stored_cell`]).
     fn stored_read(&mut self, word: u32, access: RegisterAccess) -> Step {
-        use registers::encodings::{FPCR, FPSR};
+        use registers::encodings::{FPCR, FPSR, PAN};
         let encoding = access.encoding();
         let cell = (access.direction() == Direction::Read && access.rt() != ZERO_REGISTER)
             .then(|| self.stored_reads.iter().position(|&read| read == encoding))
@@ -379,7 +379,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let before = self.completion_point();
         self.plain_read = None;
         let step = self.register_access(word, access);
-        let value = if matches!(encoding, FPCR | FPSR) {
+        let value = if matches!(encoding, FPCR | FPSR | PAN) {
             Some(0)
         } else {
             self.plain_read
@@ -389,12 +389,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 })
                 .and_then(|(register, index)| self.cpu.registers.address(register, index))
                 .or_else(|| self.devices.register_storage(self.current, encoding))
-                .or_else(|| {
-                    self.cpu
-                        .impdef(encoding)
-                        .filter(|entry| entry.reads_storage())
-                        .map(|entry| self.cpu.apple.impdef.storage(entry))
-                })
+                .or_else(|| self.cpu.apple_read_storage(encoding))
         };
         if let (Ok(()), true, Some(value)) = (&step, self.position() == before, value) {
             self.mirrors[MIRRORED.len() + cell] = register_read::Cell { readable: 1, value };
@@ -412,9 +407,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
         };
         let before = self.completion_point();
         let step = self.register_access(word, access);
-        let entry = self.cpu.impdef(encoding);
-        if let (Ok(()), true, Some(entry)) = (&step, self.position() == before, entry) {
-            let value = self.cpu.apple.impdef.storage(entry);
+        let storage = self.cpu.apple_write_storage(encoding);
+        if let (Ok(()), true, Some((value, _))) = (&step, self.position() == before, storage) {
             self.mirrors[stored_write_cell(cell)] = register_read::Cell { readable: 1, value };
         }
         step
