@@ -103,7 +103,7 @@ pub(super) fn add(environment: &Environment<'_>, command: &Request) -> Result<St
     let record = read_record(environment, &command.usb)?;
     check_installed_efi(environment, &record)?;
     check_bundle_revision(environment, &record)?;
-    super::update::ready(&record, |_| false)?;
+    super::update::ready(&record)?;
     if let Some(model) = &command.model {
         ensure!(
             *model == record.model,
@@ -279,7 +279,7 @@ pub(super) fn add(environment: &Environment<'_>, command: &Request) -> Result<St
 pub(super) fn configure(environment: &Environment<'_>, command: &Request) -> Result<String> {
     let mut record = read_record(environment, &command.usb)?;
     check_installed_efi(environment, &record)?;
-    super::update::ready(&record, |_| false)?;
+    super::update::ready(&record)?;
     let mut text = format!("Stela setup on {}:\n", record.esp.display());
     let mut removed_bundles = Vec::new();
     if let Some(name) = &command.remove_install {

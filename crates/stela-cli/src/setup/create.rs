@@ -477,10 +477,6 @@ pub(super) fn plan(
         complete: false,
         installed: None,
         stela_version: Some(update::version_id(&efi_image)),
-        stela_versions: vec![update::version_id(&efi_image)],
-        builds: vec![build],
-        pending: None,
-        history: Vec::new(),
         installs: vec![install],
         default_install: None,
         bundle_schema: environment.interface.bundle_schema,
@@ -879,14 +875,10 @@ pub(super) fn apply(environment: &Environment<'_>, plan: Plan) -> Result<()> {
     if let Some(nor) = &checked.nor_image {
         installed::initialize_nor(environment.host, &checked.disk, nor)?;
     }
-    // The version is kept first, so `rollback` of a later update finds it.
-    let version = update::store_version(&esp, &plan.efi_image)?;
-    debug_assert_eq!(Some(&version), record.stela_version.as_ref());
-    let kept = update::version_path(&esp, &version);
     if let Some(passphrase) = &plan.wifi_passphrase {
         wifi::write_key(&esp, passphrase)?;
     }
-    efi::add_mount(&esp, &kept, None, Some(&record.options))?;
+    efi::add_mount(&esp, &plan.efi_image, None, Some(&record.options))?;
     publish(&mut record)?;
     record.complete = true;
     write_record(&esp, &record)

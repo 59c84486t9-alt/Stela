@@ -656,7 +656,13 @@ fn older_setups_are_still_read_and_undone() {
     // Schema 1, with a payload and a target.
     let f = fixture(64 * GIB, false);
     let before = snapshot(&f.esp);
-    efi::add_mount(&f.esp, &f.efi, None, Some("--install-mode verify\n")).unwrap();
+    efi::add_mount(
+        &f.esp,
+        &fs::read(&f.efi).unwrap(),
+        None,
+        Some("--install-mode verify\n"),
+    )
+    .unwrap();
     let payload = f.esp.join("EFI/stela/images/26A434");
     let bundles = f.esp.join("EFI/stela/boot/26A434");
     for directory in [&payload, &bundles] {
@@ -688,7 +694,7 @@ fn older_setups_are_still_read_and_undone() {
     // reads it, and uninstalls it.
     let f = fixture(64 * GIB, false);
     let before = snapshot(&f.esp);
-    efi::add_mount(&f.esp, &f.efi, None, Some("--system\n")).unwrap();
+    efi::add_mount(&f.esp, &fs::read(&f.efi).unwrap(), None, Some("--system\n")).unwrap();
     let build = f.esp.join("EFI/stela/boot/STELA1");
     let recovery = build.join("recovery-0000000000000001");
     let restore = build.join("restore-0000000000000001");
@@ -750,7 +756,7 @@ fn older_setups_are_still_read_and_undone() {
     add_stela(&mut f);
     let volume = stela_volume(&f);
     let before = (snapshot(&f.esp), snapshot(&volume));
-    efi::add_mount(&f.esp, &f.efi, None, Some("--system\n")).unwrap();
+    efi::add_mount(&f.esp, &fs::read(&f.efi).unwrap(), None, Some("--system\n")).unwrap();
     let old = volume.join("EFI/stela");
     let build = old.join("boot/STELA1");
     bundle::tests::write(
@@ -1826,38 +1832,16 @@ fn cache_spare_failure_blocks_activation_until_retry() {
     assert!(update().unwrap_err().to_string().contains("cannot create"));
     assert_eq!(fs::read(&active).unwrap(), old_efi);
     assert_eq!(fs::read(f.esp.join(efi::OPTIONS)).unwrap(), config);
-    assert!(record(&f).pending.is_some());
     assert_eq!(fs::read(&pack).unwrap(), pack_bytes);
     fs::remove_dir(&spare).unwrap();
     update().unwrap();
     assert_eq!(fs::read(&active).unwrap(), new_efi);
-    assert!(record(&f).pending.is_none() && store.spare_ready());
-    assert_eq!(fs::read(&pack).unwrap(), pack_bytes);
-    // A rollback also prepares its cold-cache destination before activation.
-    fs::remove_file(&spare).unwrap();
-    fs::create_dir(&spare).unwrap();
-    let before_rollback = fs::read(f.esp.join(RECORD)).unwrap();
-    assert!(
-        rerun(&f, |c| {
-            c.action = Action::Rollback;
-            c.dry_run = true;
-        })
-        .unwrap()
-        .contains("Dry run")
-    );
-    assert_eq!(fs::read(f.esp.join(RECORD)).unwrap(), before_rollback);
-    assert!(rerun(&f, |c| c.action = Action::Rollback).is_err());
-    assert_eq!(fs::read(&active).unwrap(), new_efi);
-    assert_eq!(fs::read(f.esp.join(RECORD)).unwrap(), before_rollback);
-    fs::remove_dir(&spare).unwrap();
-    rerun(&f, |c| c.action = Action::Rollback).unwrap();
-    assert_eq!(fs::read(&active).unwrap(), old_efi);
     assert!(store.spare_ready());
     assert_eq!(fs::read(&pack).unwrap(), pack_bytes);
 }
 
 #[test]
-fn stela_update_and_rollback_with_disabled_cache_create_no_store() {
+fn stela_update_with_disabled_cache_creates_no_store() {
     let mut f = fixture(64 * GIB, false);
     add_stela(&mut f);
     let mut first = command(&f, &f.esp);
@@ -1871,17 +1855,16 @@ fn stela_update_and_rollback_with_disabled_cache_create_no_store() {
         c.efi = Some(new.clone());
     })
     .unwrap();
-    rerun(&f, |c| c.action = Action::Rollback).unwrap();
     assert!(!f.esp.join(translations::DIRECTORY).exists());
     assert!(record(&f).translations.is_none());
     assert_eq!(
         fs::read(f.esp.join(efi::LOADER)).unwrap(),
-        fs::read(&f.efi).unwrap()
+        efi_image(b"stela-2")
     );
 }
 
 #[test]
-fn stela_updates_keep_the_old_version_and_roll_back() {
+fn stela_update_replaces_the_loader_and_keeps_the_newest_pack() {
     let mut f = fixture(64 * GIB, false);
     add_stela(&mut f);
     let before = snapshot(&f.esp);
@@ -1900,7 +1883,7 @@ fn stela_updates_keep_the_old_version_and_roll_back() {
     assert!(update(true).unwrap().contains("Dry run"));
     assert_eq!(fs::read(&tool).unwrap(), efi_image(b"stela"));
     // Packs of four translators and a damaged one: the update keeps the
-    // three newest intact ones.
+    // newest intact one.
     let packs = record(&f).translations.unwrap().directory();
     assert!(packs.join(translations::CONFIG).is_file());
     let written: Vec<PathBuf> = (0..4u8)
@@ -1928,28 +1911,17 @@ fn stela_updates_keep_the_old_version_and_roll_back() {
         report.contains(&written[0].display().to_string()),
         "{report}"
     );
-    assert!(!written[0].exists() && written[1..].iter().all(|path| path.exists()));
+    assert!(written[..3].iter().all(|path| !path.exists()) && written[3].exists());
     assert_eq!(
         fs::read_dir(&packs).unwrap().count(),
-        5,
-        "store.cfg, three packs and the spare"
+        3,
+        "store.cfg, one pack and the spare"
     );
     assert!(packs.join(translations::SPARE).exists());
     assert_eq!(fs::read(&tool).unwrap(), efi_image(b"stela-2"));
     // Only the loader changed: stela.cfg stays.
     assert_eq!(fs::read(f.esp.join(efi::OPTIONS)).unwrap(), config);
     assert!(update(false).unwrap().contains("already installed"));
-    let record1 = record(&f);
-    assert_eq!(record1.stela_versions.len(), 2);
-    assert_eq!(record1.history.len(), 1);
-    rerun(&f, |c| c.action = Action::Rollback).unwrap();
-    assert_eq!(fs::read(&tool).unwrap(), efi_image(b"stela"));
-    assert!(
-        rerun(&f, |c| c.action = Action::Rollback)
-            .unwrap_err()
-            .to_string()
-            .contains("no update")
-    );
     // A stela.efi of another interface is refused.
     fs::write(&new, b"MZ old build").unwrap();
     assert!(
@@ -1958,24 +1930,20 @@ fn stela_updates_keep_the_old_version_and_roll_back() {
             .to_string()
             .contains("not the stela.efi")
     );
-    fs::write(&new, efi_image(b"stela-2")).unwrap();
-    update(false).unwrap();
     uninstall(&environment(&f.host), &f.esp, false).unwrap();
     assert_eq!(snapshot(&f.esp), before);
 }
 
 #[test]
-fn schema_update_rebuilds_bundles_and_rolls_back() {
+fn schema_update_rebuilds_bundles() {
     let mut f = fixture(64 * GIB, false);
     add_stela(&mut f);
     setup(&environment(&f.host), command(&f, &f.esp)).unwrap();
-    let old_schema = record(&f).bundle_schema;
-    let next_schema = old_schema.checked_add(1).unwrap();
+    let next_schema = record(&f).bundle_schema.checked_add(1).unwrap();
     let ecid = record(&f).installs[0].ecid;
     let old = bundle_of(&f, ecid);
     // The Install macOS choice names the restore bundle.
     let options = || fs::read_to_string(f.esp.join(CHOICES_PATH)).unwrap();
-    let first = options();
     // A later stela and stela.efi read the next schema.
     let newer = mount_interface::Interface {
         bundle_schema: next_schema,
@@ -2029,16 +1997,11 @@ fn schema_update_rebuilds_bundles_and_rolls_back() {
         "{}",
         options()
     );
-    // The old bundle stays for the rollback, which boots it again.
-    assert!(old.join("bundle.json").is_file());
-    rerun(&f, |c| c.action = Action::Rollback).unwrap();
-    assert_eq!(options(), first);
-    assert!(!migrated.exists());
-    assert_eq!(record(&f).bundle_schema, old_schema);
+    assert!(!old.exists());
 }
 
 #[test]
-fn revision_update_rebuilds_bundles_and_rolls_back() {
+fn revision_update_rebuilds_bundles() {
     // A setup with an install, made before setups recorded revisions.
     let mut f = fixture(64 * GIB, false);
     add_installed_disk(&mut f, &[], &[]);
@@ -2055,9 +2018,7 @@ fn revision_update_rebuilds_bundles_and_rolls_back() {
     let first = record(&f);
     assert_eq!(first.bundle_revision, 0);
     let ecid = first.installs[0].ecid;
-    let options = || fs::read_to_string(f.esp.join(efi::OPTIONS)).unwrap();
     let choices = || fs::read_to_string(f.esp.join(CHOICES_PATH)).unwrap();
-    let (first_options, first_choices) = (options(), choices());
     let directories = |revision: u32| -> Vec<PathBuf> {
         let generation = bundle::Generation {
             revision,
@@ -2126,8 +2087,7 @@ fn revision_update_rebuilds_bundles_and_rolls_back() {
     assert_eq!(updated.stela_version, first.stela_version);
     for (old, new) in directories(0).iter().zip(directories(1)) {
         assert_eq!(bundle::generation(&new).unwrap().revision, 1);
-        // The revision 0 bundles stay for the rollback.
-        assert_eq!(bundle::generation(old).unwrap().revision, 0);
+        assert!(!old.exists());
     }
     let [restore] = &directories(1)[..] else {
         unreachable!()
@@ -2142,55 +2102,18 @@ fn revision_update_rebuilds_bundles_and_rolls_back() {
     // Bundles of the current revision are left alone: a new stela.efi
     // needs no restore image, and the same one is no update.
     assert!(update(false, false).unwrap().contains("already installed"));
-    // Going back to the earlier stela boots its kept bundles, and undoing
-    // that keeps them for the first update's rollback.
-    let mut back = command(&f, &f.esp);
-    (back.ipsw, back.model, back.action) = (None, None, Action::UpdateStela);
-    back.dispatch(&old).unwrap();
-    assert_eq!(record(&f).bundle_revision, 0);
-    run(&|c| c.action = Action::Rollback).unwrap();
-    assert_eq!(record(&f).bundles, updated.bundles);
     let new_efi = f._dir.path().join("new.efi");
     fs::write(&new_efi, efi_image(b"stela-2")).unwrap();
-    let report = run(&|c| {
+    run(&|c| {
         c.action = Action::UpdateStela;
         c.efi = Some(new_efi.clone());
     })
     .unwrap();
-    assert!(!report.contains("stay for rollback"), "{report}");
     assert_eq!(record(&f).bundles, updated.bundles);
-    // Each rollback undoes one update: the second boots the revision 0
-    // bundles again and removes the revision 1 ones.
-    run(&|c| c.action = Action::Rollback).unwrap();
-    assert_eq!(record(&f).bundles, updated.bundles);
-    run(&|c| c.action = Action::Rollback).unwrap();
-    let rolled = record(&f);
-    assert_eq!(rolled.bundle_revision, 0);
-    assert_eq!(rolled.stela_version, first.stela_version);
-    assert!(
-        rolled
-            .stela_versions
-            .contains(first.stela_version.as_ref().unwrap())
-    );
-    assert_eq!((options(), choices()), (first_options, first_choices));
-    assert!(directories(1).iter().all(|d| !d.exists()));
-    assert!(
-        directories(0)
-            .iter()
-            .all(|d| d.join(bundle::MANIFEST).is_file())
-    );
-    let mut status = command(&f, &f.esp);
-    (status.ipsw, status.model, status.action) = (None, None, Action::Status);
-    assert!(
-        status
-            .dispatch(&old)
-            .is_ok_and(|text| text.contains("No problems found.")),
-        "the earlier stela finds its setup as it left it"
-    );
 }
 
 #[test]
-fn stela_updates_remove_bundles_no_kept_version_boots() {
+fn stela_updates_remove_the_previous_bundles() {
     let mut f = fixture(64 * GIB, false);
     add_stela(&mut f);
     let preparers: Vec<_> = (0..4).map(preparers).collect();
@@ -2226,19 +2149,15 @@ fn stela_updates_remove_bundles_no_kept_version_boots() {
         let environment = environment_at(&f.host, &preparers[revision as usize], revision);
         command.dispatch(&environment).unwrap();
     }
-    // Four versions: the first is no longer kept, nor are its bundles.
-    let record = record(&f);
-    assert_eq!(record.stela_versions.len(), update::KEEP);
-    assert_eq!(record.history.len(), update::KEEP - 1);
-    assert!(!directory(0).exists());
-    for revision in 1..4 {
-        assert!(directory(revision).join(bundle::MANIFEST).is_file());
+    for revision in 0..3 {
+        assert!(!directory(revision).exists());
     }
-    assert_eq!(record.bundles.len(), 3);
+    assert!(directory(3).join(bundle::MANIFEST).is_file());
+    assert_eq!(record(&f).bundles.len(), 1);
 }
 
 #[test]
-fn interrupted_os_update_resumes_or_rolls_back() {
+fn interrupted_os_update_finishes_when_run_again() {
     let mut f = fixture(64 * GIB, false);
     add_stela(&mut f);
     let before = snapshot(&f.esp);
@@ -2258,17 +2177,20 @@ fn interrupted_os_update_resumes_or_rolls_back() {
     let first = options();
     assert!(update(true).unwrap().contains("Dry run"));
     assert_eq!(options(), first);
+    let leaf = bundle::leaf_of(Kind::Restore, ecid, current());
+    let partial = stela_volume(&f).join(format!("stela/boot/STELA2/{leaf}.partial"));
+    fs::create_dir_all(&partial).unwrap();
+    fs::write(partial.join("partial"), b"x").unwrap();
     let report = update(false).unwrap();
+    assert!(!partial.exists());
     assert!(report.contains("choose Install macOS"), "{report}");
     assert!(report.contains("Update volume"), "{report}");
     assert!(options().contains("\\boot\\STELA2\\restore-"));
-    let leaf = bundle::leaf_of(Kind::Restore, ecid, current());
     assert!(
         stela_volume(&f)
             .join(format!("stela/boot/STELA2/{leaf}/bundle.json"))
             .is_file()
     );
-    // The old build stays for rollback.
     let old = bundle::directory_of(
         &stela_volume(&f),
         bundle::Identity {
@@ -2278,36 +2200,7 @@ fn interrupted_os_update_resumes_or_rolls_back() {
             generation: current(),
         },
     );
-    assert!(old.join("bundle.json").is_file());
-    rerun(&f, |c| c.action = Action::Rollback).unwrap();
-    assert_eq!(options(), first);
-    assert!(!stela_volume(&f).join("stela/boot/STELA2").exists());
-
-    // An update interrupted after it was recorded refuses other updates,
-    // finishes when run again, and rolls back otherwise.
-    let mut record1 = record(&f);
-    record1.pending = Some(update::Change::Os {
-        from: restore::payload::SYNTHETIC_BUILD.into(),
-        to: "STELA2".into(),
-    });
-    write_record(&f.esp, &record1).unwrap();
-    let partial = stela_volume(&f).join(format!("stela/boot/STELA2/{leaf}.partial"));
-    fs::create_dir_all(&partial).unwrap();
-    fs::write(partial.join("partial"), b"x").unwrap();
-    let other = rerun(&f, |c| {
-        c.action = Action::UpdateStela;
-        c.efi = Some(f.efi.clone());
-    });
-    assert!(other.unwrap_err().to_string().contains("interrupted"));
-    update(false).unwrap();
-    assert!(options().contains("STELA2"));
-    assert!(!partial.exists());
-    record1 = record(&f);
-    record1.pending = record1.history.last().cloned();
-    write_record(&f.esp, &record1).unwrap();
-    let undo = rerun(&f, |c| c.action = Action::Rollback).unwrap();
-    assert!(undo.contains("interrupted macOS update"), "{undo}");
-    assert_eq!(options(), first);
+    assert!(!old.exists());
     uninstall(&environment(&f.host), &f.esp, false).unwrap();
     assert_eq!(snapshot(&f.esp), before);
 }
@@ -2342,13 +2235,13 @@ fn installed_os_update_preserves_user_data() {
     let before = snapshot(&f.esp);
     let plan = update_to(&newer, true).unwrap();
     assert!(plan.contains("install medium"), "{plan}");
-    assert!(plan.contains("keeps"), "{plan}");
+    assert!(plan.contains("remove"), "{plan}");
     assert_eq!(snapshot(&f.esp), before);
     update_to(&newer, false).unwrap();
     let record1 = record(&f);
     assert_eq!(record1.build, "STELA2");
     let media: Vec<&str> = record1.media.iter().map(|m| m.build.as_str()).collect();
-    assert_eq!(media, [first, "STELA2"], "the old medium is kept");
+    assert_eq!(media, ["STELA2"], "the old medium is removed");
     assert!(record1.active_medium().unwrap().problems().is_empty());
     assert!(record1.restore_bundle(Kind::Restore, Some(ecid)).is_some());
     for entry in &choices().entries[1..2] {
@@ -2359,42 +2252,22 @@ fn installed_os_update_preserves_user_data() {
             entry.options
         );
     }
-    let status = rerun(&f, |c| c.action = Action::Status).unwrap();
-    assert!(status.contains("kept medium"), "{status}");
     // The update writes no disk of the PC.
     assert_eq!(
         (partition_bytes(&f, REGION), partition_bytes(&f, NOR)),
         disks
     );
-    // A rollback drops the new medium and restores the old choices.
-    rerun(&f, |c| c.action = Action::Rollback).unwrap();
-    let record2 = record(&f);
-    assert_eq!(record2.build, first);
-    let media: Vec<&str> = record2.media.iter().map(|m| m.build.as_str()).collect();
-    assert_eq!(media, [first]);
-    assert!(!medium::directory(&stela_volume(&f), "STELA2").exists());
-    assert!(
-        choices().entries[1]
-            .options
-            .contains(&format!("\\boot\\{first}\\"))
-    );
-    // Two updates on, only the newest two media are kept.
-    update_to(&newer, false).unwrap();
     let newest = f._dir.path().join("Newest.ipsw");
     restore::payload::synthetic_ipsw_of(&newest, "STELA3").unwrap();
     update_to(&newest, false).unwrap();
     let media: Vec<String> = record(&f).media.into_iter().map(|m| m.build).collect();
-    assert_eq!(media, ["STELA2", "STELA3"]);
+    assert_eq!(media, ["STELA3"]);
     assert!(!medium::directory(&stela_volume(&f), first).exists());
     assert!(
         rerun(&f, |c| c.action = Action::Status)
             .unwrap()
             .contains("No problems found.")
     );
-    // Rolling back past the pruned medium says how to write it again.
-    rerun(&f, |c| c.action = Action::Rollback).unwrap();
-    let undo = rerun(&f, |c| c.action = Action::Rollback).unwrap();
-    assert!(undo.contains("no longer kept"), "{undo}");
     uninstall(&environment(&f.host), &f.esp, false).unwrap();
     assert!(!f.esp.join("EFI/stela").exists());
     assert!(!stela_volume(&f).join("stela/install").exists());
@@ -2419,7 +2292,7 @@ fn repair_restores_recorded_state() {
     status().unwrap();
     assert_eq!(snapshot(&f.esp), before);
 
-    // A damaged bundle, tool and stela.cfg are found ...
+    // A damaged bundle, loader and stela.cfg are found ...
     let ecid = record(&f).installs[0].ecid;
     let ramdisk = bundle_of(&f, ecid).join("ramdisk.img");
     fs::write(&ramdisk, [0u8; 10]).unwrap();
@@ -2430,6 +2303,13 @@ fn repair_restores_recorded_state() {
     assert!(error.contains("ramdisk.img"), "{error}");
     assert!(error.contains("not the version setup installed"), "{error}");
     assert!(error.contains("stela.cfg differs"), "{error}");
+    // ... an update puts the loader back ...
+    rerun(&f, |c| {
+        c.action = Action::UpdateStela;
+        c.efi = Some(f.efi.clone());
+    })
+    .unwrap();
+    fs::write(f.esp.join("EFI/stela/stela.cfg"), b"--system\n").unwrap();
     // ... and the bundle needs the restore image to be repaired.
     let error = rerun(&f, |c| c.action = Action::Repair)
         .unwrap_err()
@@ -2520,21 +2400,19 @@ fn maintenance_writes_only_machine_state() {
     let newer = f._dir.path().join("Newer.ipsw");
     restore::payload::synthetic_ipsw_of(&newer, "STELA2").unwrap();
     type Step<'a> = (&'a str, &'a dyn Fn(&mut Request));
-    let steps: [Step<'_>; 7] = [
+    let steps: [Step<'_>; 5] = [
         ("status", &|c| c.action = Action::Status),
         ("update-stela", &|c| {
             c.action = Action::UpdateStela;
             c.efi = Some(new.clone());
         }),
-        ("rollback", &|c| c.action = Action::Rollback),
         ("update-os", &|c| {
             c.action = Action::UpdateOs;
             c.ipsw = Some(newer.clone());
         }),
-        ("rollback", &|c| c.action = Action::Rollback),
         ("repair", &|c| {
             c.action = Action::Repair;
-            c.ipsw = Some(f.ipsw.clone());
+            c.ipsw = Some(newer.clone());
         }),
         ("status", &|c| c.action = Action::Status),
     ];
@@ -3373,14 +3251,6 @@ fn legacy_operations_reject_oversized_firmware() {
     assert!(loaded.check_mount(&fs::read(&current).unwrap()).is_ok());
     assert!(loaded.check_mount(&fs::read(&legacy).unwrap()).is_err());
     let before = snapshot(&f.esp);
-    let error = rerun(&f, |c| c.action = Action::Rollback).unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("cannot load installed host firmware"),
-        "{error:#}"
-    );
-    assert_eq!(snapshot(&f.esp), before);
     let error = rerun(&f, |c| {
         c.action = Action::UpdateStela;
         c.efi = Some(legacy.clone());
@@ -3494,7 +3364,6 @@ fn host_firmware_publication_preserves_guest_bundles() {
         snapshot(&f.esp.join(stela_loader::host_firmware::DIRECTORY)),
         firmware_before
     );
-    rerun(&f, |c| c.action = Action::Rollback).unwrap();
     let new_os = f._dir.path().join("firmware-test-update.ipsw");
     restore::payload::synthetic_ipsw_of(&new_os, "STELA2").unwrap();
     rerun(&f, |c| {
@@ -3506,7 +3375,6 @@ fn host_firmware_publication_preserves_guest_bundles() {
         snapshot(&f.esp.join(stela_loader::host_firmware::DIRECTORY)),
         firmware_before
     );
-    rerun(&f, |c| c.action = Action::Rollback).unwrap();
     rerun(&f, |c| c.action = Action::Repair).unwrap();
     assert_eq!(
         snapshot(&f.esp.join(stela_loader::host_firmware::DIRECTORY)),
@@ -3521,13 +3389,6 @@ fn host_firmware_publication_preserves_guest_bundles() {
         .unwrap_err()
         .to_string()
         .contains("cannot load installed host firmware")
-    );
-    assert_eq!(snapshot(&f.esp), before_downgrade);
-    assert!(
-        rerun(&f, |c| c.action = Action::Rollback)
-            .unwrap_err()
-            .to_string()
-            .contains("cannot load installed host firmware")
     );
     assert_eq!(snapshot(&f.esp), before_downgrade);
     fs::write(source.join("data.bin"), b"abd").unwrap();

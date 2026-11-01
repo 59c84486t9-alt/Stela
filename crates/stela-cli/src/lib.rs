@@ -198,7 +198,6 @@ mod tests {
             &["repair", "--ipsw", "a.ipsw", "--erase-target"],
             &["update", "stela", "--efi", "stela.efi"],
             &["update", "os", "--fetch", "--install-image", "online"],
-            &["rollback", "--dry-run"],
             &["uninstall"],
             &["nvram", "next-boot", "recovery", "--install", "macOS"],
             &["nvram", "reset", "--nor", "sdc3"],
@@ -222,7 +221,7 @@ mod tests {
         // Each action takes neither creation's flags nor another action's.
         for words in [
             &["status", "--target", "sdc2"][..],
-            &["rollback", "--ipsw", "a.ipsw"],
+            &["uninstall", "--ipsw", "a.ipsw"],
             &["configure", "--tss", "--no-tss"],
             &["state", "backup", "state.bin", "--chooser-timeout", "0"],
             &["--target", "sdc2", "status"],

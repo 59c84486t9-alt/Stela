@@ -167,12 +167,9 @@ pub fn install(command: &Install) -> Result<serde_json::Value> {
         )?),
         None => None,
     };
-    let mut report = add_mount(
-        esp,
-        &command.image,
-        source.as_deref(),
-        command.options.as_deref(),
-    )?;
+    let image = fs::read(&command.image)
+        .with_context(|| format!("cannot read {}", command.image.display()))?;
+    let mut report = add_mount(esp, &image, source.as_deref(), command.options.as_deref())?;
     report["payload"] = json!(payload);
     Ok(report)
 }
@@ -182,21 +179,14 @@ pub fn install(command: &Install) -> Result<serde_json::Value> {
 /// without a source: install mode runs none.
 pub(crate) fn add_mount(
     esp: &Path,
-    image_path: &Path,
+    image: &[u8],
     source: Option<&[u8]>,
     options: Option<&str>,
 ) -> Result<serde_json::Value> {
-    let image =
-        fs::read(image_path).with_context(|| format!("cannot read {}", image_path.display()))?;
+    ensure!(image.starts_with(b"MZ"), "the image is not a PE image");
     ensure!(
-        image.starts_with(b"MZ"),
-        "{} is not a PE image",
-        image_path.display()
-    );
-    ensure!(
-        mount_interface::find(&image).is_some(),
-        "{} is not a stela.efi: it carries no mount interface marker",
-        image_path.display()
+        mount_interface::find(image).is_some(),
+        "the image is not a stela.efi: it carries no mount interface marker"
     );
     fs::create_dir_all(esp.join(MOUNT))?;
     fs::create_dir_all(esp.join(LOADER_DIRECTORY))?;
@@ -216,7 +206,7 @@ pub(crate) fn add_mount(
         )?;
     }
     // The loader goes in last, so the USB never boots it without its files.
-    write_atomic(&esp.join(LOADER), &image, false)?;
+    write_atomic(&esp.join(LOADER), image, false)?;
     Ok(json!({
         "loader": esp.join(LOADER),
         "source": esp.join(SOURCE).is_file().then(|| esp.join(SOURCE)),

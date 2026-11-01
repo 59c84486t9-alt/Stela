@@ -1,8 +1,8 @@
 //! `status` (also `doctor`) and `repair`.
 //!
 //! Status reads everything a setup consists of and changes nothing: the
-//! record and any pending update, the installed `stela.efi` against its
-//! kept version and this `stela`'s mount interface, the USB's boot loader,
+//! record, the installed `stela.efi` against the recorded version and this
+//! `stela`'s mount interface, the USB's boot loader,
 //! `stela.cfg` and the startup choices against the record, every restore
 //! bundle file against its `bundle.json` and the active ones'
 //! revision against the one this `stela` prepares, the install medium's
@@ -24,7 +24,6 @@ use super::{
     check_bundle_revision, describe_install, ecid::Ecid, host::Host, installed, machines,
     plan_install, publish, read_record, revision_mismatch, state, update, write_record,
 };
-use crate::efi;
 use anyhow::{Result, bail};
 use std::{fmt::Write as _, fs, path::Path};
 use stela_loader::{boot_selection, mount_interface, recovery};
@@ -175,7 +174,7 @@ fn efi_status(environment: &Environment<'_>, record: &Record, report: &mut Repor
             );
             if record.stela_version.as_deref() != Some(id.as_str()) {
                 report.problem(format!(
-                    "{} is not the version setup installed ({}): `stela setup repair`",
+                    "{} is not the version setup installed ({}): `stela setup update stela`",
                     tool.display(),
                     record.stela_version.as_deref().unwrap_or("unknown")
                 ));
@@ -188,21 +187,10 @@ fn efi_status(environment: &Environment<'_>, record: &Record, report: &mut Repor
             }
         }
         Err(_) => report.problem(format!(
-            "{} is missing: `stela setup repair`",
+            "{} is missing: `stela setup update stela`",
             tool.display()
         )),
     }
-    for id in &record.stela_versions {
-        let kept = update::version_path(&record.esp, id);
-        let intact = fs::read(&kept).is_ok_and(|image| update::version_id(&image) == *id);
-        if !intact {
-            report.problem(format!(
-                "kept stela.efi {id} at {} is missing or damaged; rollback to it is not possible",
-                kept.display()
-            ));
-        }
-    }
-    report.line("kept versions", record.stela_versions.join(", "));
     let options = fs::read_to_string(record.esp.join("EFI/stela/stela.cfg")).unwrap_or_default();
     match record.options_text() {
         Ok(expected) if options != expected => {
@@ -231,7 +219,7 @@ fn bundle_status(environment: &Environment<'_>, record: &Record, report: &mut Re
         let role = if kept.build == record.build && kept.generation() == record.generation() {
             "active"
         } else {
-            "kept for rollback"
+            "left by an interrupted update"
         };
         let problems = bundle::verify(&directory, &kept.manifest_sha256);
         report.line(
@@ -474,17 +462,11 @@ pub(super) fn status(environment: &Environment<'_>, usb: &Path) -> Result<String
             "the setup was interrupted: `stela setup uninstall`, then set up again".into(),
         );
     }
-    if let Some(pending) = &record.pending {
-        report.problem(format!(
-            "an update was interrupted ({pending:?}): run it again, or `stela setup rollback`"
-        ));
-    }
     report.line("model", &record.model);
     report.line(
         "macOS build",
         format!("{} (Install macOS restores it)", record.build),
     );
-    report.line("kept builds", record.builds.join(", "));
     report.line(
         "TSS",
         if record.tss {
@@ -514,41 +496,24 @@ pub(super) fn status(environment: &Environment<'_>, usb: &Path) -> Result<String
 /// `repair`.
 pub(super) fn repair(environment: &Environment<'_>, command: &Request) -> Result<String> {
     let mut record = read_record(environment, &command.usb)?;
-    update::ready(&record, |_| false)?;
+    update::ready(&record)?;
     let esp = record.esp.clone();
     let mut text = format!("Stela repair on {}:\n", esp.display());
-    // The active stela.efi from its kept copy.
-    let id = record
-        .stela_version
-        .clone()
-        .ok_or_else(|| anyhow::anyhow!("the setup record names no stela.efi version"))?;
-    let kept = update::version_path(&esp, &id);
-    let kept_image = fs::read(&kept)
-        .ok()
-        .filter(|image| update::version_id(image) == id);
-    let tool = fs::read(esp.join(LOADER_PATH)).ok();
-    let restore_tool = tool
-        .as_ref()
-        .is_none_or(|image| update::version_id(image) != id);
-    let Some(kept_image) = kept_image else {
+    let Ok(tool) = fs::read(esp.join(LOADER_PATH)) else {
         bail!(
-            "the kept stela.efi {id} at {} is missing or damaged; install one with `stela setup \
-             update stela`",
-            kept.display()
+            "{} has no stela.efi: `stela setup update stela`",
+            esp.display()
         );
     };
     if let Some(reason) =
-        mount_interface::mismatch(environment.interface, mount_interface::find(&kept_image))
+        mount_interface::mismatch(environment.interface, mount_interface::find(&tool))
     {
         bail!(
             "the setup's stela.efi does not read what this stela writes ({reason}); `stela \
              setup update stela` first"
         );
     }
-    update::check_firmware_support(&esp, &kept_image)?;
-    if restore_tool {
-        writeln!(text, "  stela.efi      put back version {id}")?;
-    }
+    update::check_firmware_support(&esp, &tool)?;
     // Machines without an ECID get one; their bundles are prepared again.
     let ipsw = command.optional_image()?;
     if ipsw.is_some() {
@@ -706,9 +671,6 @@ pub(super) fn repair(environment: &Environment<'_>, command: &Request) -> Result
     }
     if let (Some(plan), Some(ipsw)) = (install, &ipsw) {
         apply_install(environment, &mut record, ipsw, plan)?;
-    }
-    if restore_tool {
-        efi::add_mount(&esp, &kept, None, None)?;
     }
     publish(&mut record)?;
     write_record(&esp, &record)?;

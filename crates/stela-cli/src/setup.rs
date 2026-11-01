@@ -45,9 +45,8 @@
 //! An existing setup is updated in place (`setup::update`): `update stela`
 //! installs a new `stela.efi` and prepares the boot bundles again when it
 //! reads another schema or this `stela` prepares another bundle revision
-//! than theirs, `update os` a new macOS build's install medium and
-//! restore bundles, and `rollback` undoes the last update or finishes
-//! undoing an interrupted one. Every path takes `--dry-run`. A `stela.efi`
+//! than theirs, and `update os` a new macOS build's install medium and
+//! restore bundles. Every path takes `--dry-run`. A `stela.efi`
 //! whose mount interface (`stela_loader::mount_interface`) differs from this
 //! `stela`'s is refused.
 mod addresses;
@@ -93,7 +92,7 @@ use prepare::{
     Prepared, check_space, copy_bundles, fetch, prepare_kind, prepare_restore, prepare_update,
     supported,
 };
-use record::{Record, first_schema, publish, read_record, remove_bundles, write_record};
+use record::{Record, publish, read_record, remove_bundles, write_record};
 use serde::{Deserialize, Serialize};
 use std::{
     fmt::Write as _,
@@ -123,9 +122,6 @@ const UPDATE_CHOICE: &str = "Update macOS";
 /// The commands `--install-image` goes with.
 const INSTALL_IMAGE_ACTIONS: &str = "--install-image goes with a new setup or --target; \
     `stela setup update os` and `stela setup repair` take it with the image they write";
-/// Install media kept: the active build's and the one before it, for
-/// rollback.
-pub(super) const MEDIA_KEPT: usize = 2;
 
 /// The startup choice that restores with a bundle of `kind` on a setup
 /// with one install.
@@ -174,7 +170,6 @@ enum Action {
     Repair,
     UpdateStela,
     UpdateOs,
-    Rollback,
     Uninstall,
     NextBoot(NextBoot),
     ResetNvram,
@@ -400,7 +395,7 @@ fn check_installed_efi(environment: &Environment<'_>, record: &Record) -> Result
 
 /// Refuse to prepare bundles for `record` when its active ones are of
 /// another revision than this `stela` prepares: `update stela` prepares
-/// them all at this one, keeping the old ones for its rollback.
+/// them all at this one.
 fn check_bundle_revision(environment: &Environment<'_>, record: &Record) -> Result<()> {
     match revision_mismatch(environment, record) {
         Some(reason) => bail!("{reason}"),
@@ -535,7 +530,6 @@ impl Request {
                 let ipsw = self.image()?;
                 update::update_os(environment, record, &ipsw, self.dry_run)
             }
-            Action::Rollback => update::rollback(record, self.dry_run),
             Action::NextBoot(next) => self.next_boot(environment, &record, next),
             Action::Configure => {
                 self.read_wifi_passphrase()?;

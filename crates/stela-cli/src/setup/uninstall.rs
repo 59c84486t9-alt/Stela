@@ -2,7 +2,7 @@
 use super::{
     CHOICES_PATH, Environment, RECORD, bundle, locate_esp,
     record::{Record, read_any_record},
-    translations, update, wifi,
+    translations, wifi,
 };
 use crate::efi;
 use anyhow::{Context, Result, ensure};
@@ -51,10 +51,6 @@ pub(super) fn uninstall(
             if directory.exists() {
                 removals.push(directory);
             }
-        }
-        let versions = esp.join(update::VERSIONS);
-        if versions.is_dir() {
-            removals.push(versions);
         }
         if let Some(store) = &record.translations {
             let directory = translations::checked_directory(store)?;

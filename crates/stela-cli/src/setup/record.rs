@@ -5,7 +5,7 @@ use super::{
     bundle::{self, Kind},
     ecid::Ecid,
     image_is_remote, installed, locate_esp, machines, medium, restore_choice_name, translations,
-    update, wifi,
+    wifi,
 };
 use crate::efi;
 use anyhow::{Context, Result, ensure};
@@ -45,22 +45,9 @@ pub(super) struct Record {
     /// Schema 3: the PC's own disk; read into `installs`.
     #[serde(default, skip_serializing)]
     pub(super) installed: Option<installed::InstalledDisk>,
-    /// Schema 3: the active `stela.efi` version and those kept, oldest
-    /// first.
+    /// Schema 3: the installed `stela.efi`'s version.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) stela_version: Option<String>,
-    #[serde(default)]
-    pub(super) stela_versions: Vec<String>,
-    /// Schema 3: the macOS builds kept for rollback, oldest first; `build`
-    /// is the active one.
-    #[serde(default, alias = "recovery_builds")]
-    pub(super) builds: Vec<String>,
-    /// Schema 3: an update that started and has not finished.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(super) pending: Option<update::Change>,
-    /// Schema 3: finished updates, for `rollback`.
-    #[serde(default)]
-    pub(super) history: Vec<update::Change>,
     /// Schema 4: the PC disks macOS installs onto, each its own machine.
     #[serde(default)]
     pub(super) installs: Vec<machines::Install>,
@@ -85,8 +72,8 @@ pub(super) struct Record {
     #[serde(default, skip_serializing)]
     pub(super) medium: Option<medium::Medium>,
     /// Schema 6: the install media, each a full IPSW on the USB's FAT32
-    /// data partition: the active build's and, for rollback, the one
-    /// before it.
+    /// data partition: the active build's, and the next one's while
+    /// `update os` writes it.
     #[serde(default)]
     pub(super) media: Vec<medium::Medium>,
     /// Schema 5: the Install choice checks the IPSW as it reads it
@@ -397,10 +384,9 @@ impl Record {
         stale
     }
 
-    /// Every build directory a bundle or the history names.
+    /// Every build directory the record or a bundle names.
     pub(super) fn build_directories(&self) -> Vec<PathBuf> {
-        let mut builds: Vec<&String> = self.builds.iter().collect();
-        builds.push(&self.build);
+        let mut builds = vec![&self.build];
         builds.extend(self.bundles.iter().map(|b| &b.build));
         let mut directories = Vec::new();
         for build in builds {
@@ -429,7 +415,7 @@ pub(super) fn publish(record: &mut Record) -> Result<()> {
     record.options = record.options_text()?;
     let choices = record.choices_text()?;
     let tool = record.esp.join(LOADER_PATH);
-    efi::add_mount(&record.esp, &tool, None, Some(&record.options))?;
+    efi::add_mount(&record.esp, &fs::read(&tool)?, None, Some(&record.options))?;
     let path = record.esp.join(CHOICES_PATH);
     match choices {
         Some(text) => efi::write_atomic(&path, text.as_bytes(), false)?,
@@ -519,7 +505,7 @@ pub(super) fn read_any_record(path: &Path) -> Result<Record> {
 
 /// Replace the record through a synced sibling file, so a stop at any point
 /// leaves the previous record or this one whole: the record is the journal
-/// every interrupted setup, update and rollback is resumed or undone from.
+/// every interrupted setup and update is resumed from.
 pub(super) fn write_record(esp: &Path, record: &Record) -> Result<()> {
     let path = esp.join(RECORD);
     fs::create_dir_all(path.parent().unwrap())?;

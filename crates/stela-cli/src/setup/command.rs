@@ -37,16 +37,13 @@ enum Command {
     /// fails when something needs fixing.
     #[command(visible_alias = "doctor")]
     Status(Usb),
-    /// Put back what the setup record says (stela.efi, the entry,
-    /// stela.cfg, the startup choices); with `--ipsw` or `--fetch`, prepare
+    /// Put back what the setup record says (the entry, stela.cfg, the
+    /// startup choices); with `--ipsw` or `--fetch`, prepare
     /// the active build's restore bundles again.
     Repair(Repair),
-    /// Update an existing setup in place, keeping what it replaces for
-    /// `rollback`.
+    /// Update an existing setup in place.
     #[command(subcommand)]
     Update(Update),
-    /// Undo the last update, or an interrupted one.
-    Rollback(Plain),
     /// Remove everything a previous setup wrote to this USB.
     Uninstall(Plain),
     /// Change an install's NVRAM on its machine-state partition.
@@ -71,7 +68,6 @@ impl Command {
             Self::Status(usb) => usb.request(Action::Status),
             Self::Repair(command) => command.request(),
             Self::Update(command) => command.request(),
-            Self::Rollback(command) => command.request(Action::Rollback),
             Self::Uninstall(command) => command.request(Action::Uninstall),
             Self::Nvram(command) => command.request(),
             Self::State(command) => command.request(),
@@ -424,10 +420,9 @@ impl Repair {
 
 #[derive(Subcommand)]
 enum Update {
-    /// Replace `stela.efi` (`--efi`, or the one built into `stela`), keeping
-    /// the old one for `rollback`; `--ipsw` or `--fetch` lets it prepare the
-    /// boot bundles again when it reads a new bundle schema or this `stela`
-    /// prepares a new bundle revision.
+    /// Replace `stela.efi` (`--efi`, or the one built into `stela`); `--ipsw`
+    /// or `--fetch` lets it prepare the boot bundles again when it reads a
+    /// new bundle schema or this `stela` prepares a new bundle revision.
     Stela(UpdateStela),
     /// Add a new macOS build's install medium and restore bundles (`--ipsw`
     /// or `--fetch`) for Install macOS.

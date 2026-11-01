@@ -23,10 +23,9 @@
 //!
 //! The home is the USB's FAT32 data partition, which also holds the install
 //! medium and the boot bundles, as the firmware writes it. `stela.efi`
-//! writes only its own translator id's pack, never past the bound. Setup keeps the packs of the
-//! [`PACKS_KEPT`] most recently written translator ids, one for each Stela
-//! version it keeps, so a rollback boots warm, and removes the others when
-//! Stela is updated or repaired. A damaged pack is harmless (the engine
+//! writes only its own translator id's pack, never past the bound. Setup
+//! keeps the most recently written pack and removes the others when Stela is
+//! updated or repaired. A damaged pack is harmless (the engine
 //! discards it); `status` names it and `repair` removes it.
 use super::{MARGIN, host::FileSystem, host::Host};
 use crate::efi;
@@ -60,9 +59,8 @@ pub(super) const DEFAULT_PACK_BYTES: u64 = 2 * 1024 * MIB;
 pub(super) const MIN_PACK_BYTES: u64 = 64 * MIB;
 /// FAT32's largest file, on a 1 MiB boundary.
 pub(super) const MAX_PACK_BYTES: u64 = 4 * 1024 * MIB - MIB;
-/// Translator ids whose packs are kept: as many as Stela versions
-/// (`update::KEEP`).
-pub(super) const PACKS_KEPT: usize = super::update::KEEP;
+/// Translator ids whose packs are kept: the running `stela.efi`'s.
+pub(super) const PACKS_KEPT: usize = 1;
 
 /// The store a setup keeps.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -180,7 +178,7 @@ impl Store {
     /// The store, for plans and `status`.
     pub(super) fn describe(&self) -> String {
         format!(
-            "{}: packs of up to {:.1} GB, the {PACKS_KEPT} newest kept",
+            "{}: one pack of up to {:.1} GB, the newest",
             self.directory().display(),
             self.pack_bytes as f64 / 1e9
         )
@@ -474,12 +472,12 @@ pub(super) mod tests {
         assert!(problems.iter().any(|p| p.contains("not its file name")));
         assert!(problems.iter().any(|p| p.contains("shorter")));
         assert!(problems.iter().any(|p| p.contains("more than the bound")));
-        // The three newest intact packs stay.
+        // The newest intact pack stays.
         let removed = store.prune().unwrap();
-        assert_eq!(removed.len(), 5);
+        assert_eq!(removed.len(), 7);
         let kept: Vec<PathBuf> = store.packs().into_iter().map(|p| p.path).collect();
-        assert_eq!(kept, [paths[4].clone(), paths[3].clone(), paths[2].clone()]);
-        assert_eq!(store.used_bytes(), 300);
+        assert_eq!(kept, [paths[4].clone()]);
+        assert_eq!(store.used_bytes(), 100);
         fs::remove_dir_all(checked_directory(&store).unwrap()).unwrap();
         assert!(!store.directory().exists());
     }

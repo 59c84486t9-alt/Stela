@@ -11,8 +11,8 @@
 //!   (Stela) choice booted; setup prepares none now;
 //! - any of these with `-s<schema>` for another schema and `-r<revision>`
 //!   for another revision, so a Stela update that reads a new schema or
-//!   prepares a new revision adds its bundles beside the old ones and its
-//!   rollback finds them.
+//!   prepares a new revision writes its bundles beside the old ones before
+//!   it removes them.
 //!
 //! A bundle is copied to a `.partial` sibling and renamed into place, so an
 //! interrupted copy is never taken for a bundle; the bundle it replaces is
