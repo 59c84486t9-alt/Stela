@@ -251,7 +251,7 @@ impl Constraint {
                 "--install needs --tss: required boot firmware is not covered by the IPSW's global ticket"
             }
             Self::PrebootSelection => {
-                "--boot-volume, --boot-command, --safe-boot, --upgrade, --paired-recovery and --system-recovery \
+                "--boot-volume, --boot-command, --safe-boot, --maintenance-write, --upgrade, --paired-recovery and --system-recovery \
                  choose a --preboot boot"
             }
             Self::UpgradeSelection => "--upgrade is neither a safe-mode boot nor a recoveryOS",

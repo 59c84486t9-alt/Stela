@@ -36,6 +36,7 @@ impl ParseState<'_> {
             "--parallel" => options.parallel = true,
             "--serialized" => options.parallel = false,
             "--profile" => options.profile = true,
+            MAINTENANCE_WRITE => options.maintenance_write = true,
             "--monitor-trace" => options.monitor_trace = true,
             "--native-shared-check" => flag(
                 &mut options.native_shared_check,
