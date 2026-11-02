@@ -22,14 +22,26 @@ enum Owner {
     /// with it bus mastering.
     Binding(RequesterBinding),
     #[cfg(test)]
-    Model(#[expect(dead_code, reason = "dropped with the claim, counting its release")] ModelOwner),
+    Model(ModelOwner),
 }
 #[cfg(test)]
-struct ModelOwner(alloc::sync::Arc<core::sync::atomic::AtomicU64>);
+struct ModelOwner {
+    released: alloc::sync::Arc<core::sync::atomic::AtomicU64>,
+    check: Option<alloc::boxed::Box<dyn FnMut()>>,
+}
+#[cfg(test)]
+impl ModelOwner {
+    fn check(&mut self) {
+        if let Some(check) = self.check.as_mut() {
+            check();
+        }
+    }
+}
 #[cfg(test)]
 impl Drop for ModelOwner {
     fn drop(&mut self) {
-        self.0.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        self.released
+            .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     }
 }
 impl RequesterClaim {
@@ -48,6 +60,10 @@ impl RequesterClaim {
     /// uses its permanently host-check root. Native production attach
     /// needs the canonical owned MMIO/root-epoch adapter, not this contract
     /// inferred from an ECAM address. No operation/final release runs in IRQ.
+    #[expect(
+        clippy::result_large_err,
+        reason = "refusal returns the complete original function without failure-path allocation"
+    )]
     pub unsafe fn from_stopped_pci(
         function: Function<OwnedConfig>,
     ) -> Result<Self, (VtdError, Function<OwnedConfig>)> {
@@ -58,13 +74,19 @@ impl RequesterClaim {
         if function.address.device >= 32 || function.address.function >= 8 {
             return Err((VtdError::Unsupported, function));
         }
-        let mut original = core::mem::ManuallyDrop::new(function);
+        let function = core::mem::ManuallyDrop::new(function);
+        let mut original = core::mem::ManuallyDrop::new(alloc::boxed::Box::new(function));
         if let Err(error) = Self::validate_stopped(&mut original) {
-            return Err((error, core::mem::ManuallyDrop::into_inner(original)));
+            return Err((
+                error,
+                core::mem::ManuallyDrop::into_inner(*core::mem::ManuallyDrop::into_inner(original)),
+            ));
         }
         Ok(Self {
             rid,
-            owner: Owner::Pci(core::mem::ManuallyDrop::into_inner(original)),
+            owner: Owner::Pci(core::mem::ManuallyDrop::into_inner(
+                *core::mem::ManuallyDrop::into_inner(original),
+            )),
         })
     }
     /// Keep a driver's binding of its stopped function.
@@ -78,16 +100,18 @@ impl RequesterClaim {
     pub unsafe fn from_binding(
         binding: RequesterBinding,
     ) -> Result<Self, (VtdError, RequesterBinding)> {
-        let original = core::mem::ManuallyDrop::new(binding);
+        let binding = core::mem::ManuallyDrop::new(binding);
+        let original = core::mem::ManuallyDrop::new(alloc::boxed::Box::new(binding));
         if let Err(error) = original.check_live() {
             return Err((
                 VtdError::Config(stela_drivers::bus::pci::ConfigError::before_effect(
                     stela_drivers::bus::pci::ConfigFailure::Mapping(error),
                 )),
-                core::mem::ManuallyDrop::into_inner(original),
+                core::mem::ManuallyDrop::into_inner(*core::mem::ManuallyDrop::into_inner(original)),
             ));
         }
-        let binding = core::mem::ManuallyDrop::into_inner(original);
+        let binding =
+            core::mem::ManuallyDrop::into_inner(*core::mem::ManuallyDrop::into_inner(original));
         Ok(Self {
             rid: binding.requester(),
             owner: Owner::Binding(binding),
@@ -107,7 +131,10 @@ impl RequesterClaim {
                 });
             }
             #[cfg(test)]
-            Owner::Model(_) => return Ok(()),
+            Owner::Model(model) => {
+                model.check();
+                return Ok(());
+            }
         };
         Self::validate_stopped(function)
     }
@@ -185,10 +212,17 @@ impl RequesterClaim {
             Owner::Pci(function) => function,
             Owner::Binding(_) => return Err(VtdError::Unsupported),
             #[cfg(test)]
-            Owner::Model(_) => return Ok(()),
+            Owner::Model(model) => {
+                model.check();
+                return Ok(());
+            }
         };
         function.set_bus_master(enabled).map_err(VtdError::Config)
     }
+    #[expect(
+        clippy::result_large_err,
+        reason = "wrong-kind extraction preserves the original affine claim without allocating"
+    )]
     pub fn into_function(self) -> Result<Function<OwnedConfig>, (VtdError, Self)> {
         match self.owner {
             Owner::Pci(function) => Ok(function),
@@ -208,7 +242,24 @@ impl RequesterClaim {
     ) -> Self {
         Self {
             rid,
-            owner: Owner::Model(ModelOwner(released)),
+            owner: Owner::Model(ModelOwner {
+                released,
+                check: None,
+            }),
+        }
+    }
+    #[cfg(test)]
+    pub(super) fn model_with_check(
+        rid: u16,
+        released: alloc::sync::Arc<core::sync::atomic::AtomicU64>,
+        check: alloc::boxed::Box<dyn FnMut()>,
+    ) -> Self {
+        Self {
+            rid,
+            owner: Owner::Model(ModelOwner {
+                released,
+                check: Some(check),
+            }),
         }
     }
 }

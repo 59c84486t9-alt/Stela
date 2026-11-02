@@ -919,7 +919,7 @@ fn hardware_did_capacity_quarantine_and_software_epochs_never_wrap_or_reuse_earl
     drop(abandoned);
     {
         let mut g = unit.lock();
-        assert!(g.state().domains[&3].quarantined);
+        assert!(!g.state().domains[&3].lifetime.is_live());
     }
     let retired = domains.remove(3);
     let reusable = retired.domain_id();
@@ -1592,3 +1592,5 @@ fn dynamic_bus_root_publication_preserves_reserved_halves_and_other_buses() {
     // SAFETY: no requester is attached; initial window peers are also stopped.
     unsafe { unit.shut_down() }.unwrap();
 }
+
+mod requester_owner;

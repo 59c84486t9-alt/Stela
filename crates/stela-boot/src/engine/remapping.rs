@@ -18,7 +18,7 @@ use crate::{
     native_dma::{
         dmar,
         requester::RequesterClaim,
-        vtd::{MmioRegisters, Unit, VtdError},
+        vtd::{BoundRequester, MmioRegisters, Unit, VtdError},
     },
     native_mmio, output,
 };
@@ -52,6 +52,7 @@ struct Taken {
 /// The units the mount translates for.
 pub(super) struct Remappers {
     taken: Vec<Taken>,
+    requesters: core::cell::RefCell<Vec<BoundRequester<MmioRegisters>>>,
     amd: Vec<amd::Taken>,
     roles: core::cell::RefCell<roles::Inventory>,
     topology: core::cell::RefCell<Vec<(u16, Vec<Present>)>>,
@@ -90,6 +91,7 @@ impl Remappers {
     pub(super) const fn none() -> Self {
         Self {
             taken: Vec::new(),
+            requesters: core::cell::RefCell::new(Vec::new()),
             amd: Vec::new(),
             roles: core::cell::RefCell::new(roles::Inventory::empty()),
             topology: core::cell::RefCell::new(Vec::new()),
@@ -527,12 +529,25 @@ impl Remappers {
         };
         // SAFETY: the driver's binding of its stopped function, whose bus
         // mastering it enables after mapping through this domain.
-        Ok(
-            unsafe { RequesterClaim::from_binding(binding) }.and_then(|claim| {
-                // SAFETY: as above; the claim is that function's.
-                let domain = unsafe { taken.unit.attach_requester(claim) }?;
-                Ok(domain as Arc<dyn DmaDomain>)
-            }),
-        )
+        let claim = match unsafe { RequesterClaim::from_binding(binding) } {
+            Ok(claim) => claim,
+            Err((error, binding)) => {
+                // A failed epoch check returns the SAME retained binding.
+                // Refusal cannot authorize releasing its original graph.
+                let _kept = core::mem::ManuallyDrop::new(alloc::boxed::Box::new(
+                    core::mem::ManuallyDrop::new(binding),
+                ));
+                return Ok(Err(error));
+            }
+        };
+        let owner = match unsafe { taken.unit.attach_requester(claim) } {
+            Ok(owner) => owner,
+            Err(failure) => return Ok(Err(failure.error)),
+        };
+        let domain = owner.domain();
+        // The serialized service keeps affine config custody. The returned
+        // DMA projection contains no command/configuration callback.
+        self.requesters.borrow_mut().push(owner);
+        Ok(Ok(domain as Arc<dyn DmaDomain>))
     }
 }

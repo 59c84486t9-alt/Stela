@@ -41,13 +41,14 @@ unsafe impl Root for VtdRoot {
 
 struct VtdAttachment {
     address: Address,
-    domain: Arc<crate::native_dma::vtd::RequesterDomain<MmioRegisters>>,
+    domain: crate::native_dma::vtd::BoundRequester<MmioRegisters>,
 }
 // SAFETY: this unique control owns the same actual domain and immutable
 // RID/DID/generation as the consumed original binding. Backend detach blocks
 // the context and completes invalidation before returning its retained claim.
 // Old Arc references check that generation and cannot reach a replacement.
-// An unacknowledged domain Drop quarantines its claim, tables and unit.
+// The local owner closes admission and retains the whole claim on Drop;
+// the shared projection has no configuration callback or local actor edge.
 unsafe impl stela_drivers::bus::pci::requester::preparation::AttachmentBackend for VtdAttachment {
     fn irq_owner(
         &mut self,
@@ -61,7 +62,7 @@ unsafe impl stela_drivers::bus::pci::requester::preparation::AttachmentBackend f
     }
 
     fn domain(&self) -> Arc<dyn DmaDomain> {
-        self.domain.clone()
+        self.domain.domain()
     }
     unsafe fn detach(
         &mut self,
